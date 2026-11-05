@@ -1,0 +1,1790 @@
+/*
+ * Window manager + shell policy. See wm.h for the contract.
+ */
+#include "wm.h"
+
+#include <linux/input-event-codes.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "backend.h"
+#include "keymap.h"
+#include "log.h"
+#include "output.h"
+#include "render.h"
+#include "seat.h"
+#include "surface.h"
+#include "xdg.h"
+
+#define RESIZE_CORNER 14
+#define DOUBLE_CLICK_MS 400
+#define PANEL_BTN_W 72
+#define PANEL_WS_W 24
+#define PANEL_CLOCK_W 60
+#define PANEL_EXIT_W 52
+#define PANEL_RUN_W 44
+#define MENU_W 200
+#define MENU_ITEM_H 26
+#define PANEL_TASK_MAX_W 160
+#define PANEL_TASK_GAP 2
+
+struct wm_win {
+    struct lm_window pub;       /* must be first */
+    int id;
+    bool placed;
+    /* geometry to return to when leaving maximized/fullscreen */
+    int32_t rx, ry, rw, rh;
+    bool have_restore;
+    uint32_t tiled;             /* LM_EDGE_LEFT / LM_EDGE_RIGHT half-screen tile, 0 = none */
+};
+
+struct wm_popup {
+    struct lm_popup pub;        /* must be first */
+};
+
+enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE };
+
+struct lm_wm {
+    struct lm_server *srv;
+    struct lm_list windows;     /* stacking order, bottom first; lm_window.link */
+    struct lm_list popups;
+    struct lm_window *focused;
+    int workspace;
+    int next_id;
+    int cascade;
+    struct lm_timer *clock_timer;
+    char clock_text[16];
+
+    /* hover / pressed state */
+    struct lm_window *hover_win;
+    uint32_t hover_bits;
+    int hover_panel_ws;         /* -1 none */
+    bool hover_launcher;
+    bool hover_exit, hover_run;
+    bool menu_open;
+    struct lm_rect menu_rect;   /* valid while menu_open */
+    int hover_menu;             /* -1 none */
+    bool exit_armed;            /* exit button clicked once; a second click quits */
+    struct lm_window *hover_task;
+    struct lm_window *press_win;
+    uint32_t press_bits;
+    int press_panel_kind;       /* enum lm_pick_kind of a pressed panel button, 0 none */
+    int press_panel_ws;
+    uint32_t last_click_time;
+    struct lm_window *last_click_win;
+
+    /* interactive grab */
+    enum grab_kind grab_kind;
+    struct lm_pointer_grab grab;
+    struct lm_window *grab_win;
+    double grab_px, grab_py;
+    int32_t grab_x, grab_y, grab_w, grab_h;
+    uint32_t grab_edges;
+};
+
+static inline struct wm_win *WIN(struct lm_window *w) { return (struct wm_win *)w; }
+
+/* ---- geometry helpers ------------------------------------------------------------ */
+
+static struct lm_rect frame_outer(const struct lm_window *w)
+{
+    if (w->states & LM_WINDOW_FULLSCREEN)
+        return lm_rect_make(w->x, w->y, w->width, w->height);
+    return lm_rect_make(w->x - LM_BORDER_WIDTH, w->y - LM_TITLEBAR_HEIGHT,
+                        w->width + 2 * LM_BORDER_WIDTH,
+                        w->height + LM_TITLEBAR_HEIGHT + LM_BORDER_WIDTH);
+}
+
+static bool win_visible(const struct lm_wm *wm, const struct lm_window *w)
+{
+    return w->mapped && !w->minimized && w->workspace == wm->workspace;
+}
+
+static void win_origin(const struct lm_window *w, int32_t *ox, int32_t *oy)
+{
+    *ox = w->x - w->geometry.x;
+    *oy = w->y - w->geometry.y;
+}
+
+static void popup_origin(const struct lm_popup *p, int32_t *ox, int32_t *oy)
+{
+    *ox = p->x - p->geometry.x;
+    *oy = p->y - p->geometry.y;
+}
+
+static void frame_info(const struct lm_wm *wm, const struct lm_window *w, struct lm_frame_info *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->outer = frame_outer(w);
+    f->titlebar = lm_rect_make(f->outer.x, f->outer.y, f->outer.w, LM_TITLEBAR_HEIGHT);
+    int by = f->outer.y + (LM_TITLEBAR_HEIGHT - LM_FRAME_BUTTON_SIZE) / 2;
+    int right = f->outer.x + f->outer.w - LM_FRAME_BUTTON_GAP;
+    f->btn_close = lm_rect_make(right - LM_FRAME_BUTTON_SIZE, by, LM_FRAME_BUTTON_SIZE, LM_FRAME_BUTTON_SIZE);
+    f->btn_max = lm_rect_make(f->btn_close.x - LM_FRAME_BUTTON_GAP - LM_FRAME_BUTTON_SIZE, by,
+                              LM_FRAME_BUTTON_SIZE, LM_FRAME_BUTTON_SIZE);
+    f->btn_min = lm_rect_make(f->btn_max.x - LM_FRAME_BUTTON_GAP - LM_FRAME_BUTTON_SIZE, by,
+                              LM_FRAME_BUTTON_SIZE, LM_FRAME_BUTTON_SIZE);
+    int tx = f->outer.x + LM_BORDER_WIDTH;
+    f->title_text = lm_rect_make(tx, f->outer.y, f->btn_min.x - LM_FRAME_BUTTON_GAP - tx, LM_TITLEBAR_HEIGHT);
+    f->title = w->title;
+    f->active = wm->focused == w;
+    f->maximized = (w->states & LM_WINDOW_MAXIMIZED) != 0;
+    if (wm->hover_win == w)
+        f->hover = wm->hover_bits;
+    if (wm->press_win == w)
+        f->pressed = wm->press_bits;
+}
+
+static struct lm_rect output_panel_rect(const struct lm_output *o)
+{
+    return lm_rect_make(o->x, o->y, o->width, LM_PANEL_HEIGHT);
+}
+
+static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_info *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->output = o;
+    p->bar = output_panel_rect(o);
+    int y = p->bar.y + 2, h = p->bar.h - 4;
+    p->launcher = lm_rect_make(p->bar.x + 4, y, PANEL_BTN_W, h);
+    int x = p->launcher.x + p->launcher.w + 10;
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
+        p->workspace[i] = lm_rect_make(x, y, PANEL_WS_W, h);
+        x += PANEL_WS_W + 2;
+    }
+    p->clock = lm_rect_make(p->bar.x + p->bar.w - PANEL_CLOCK_W - 4, y, PANEL_CLOCK_W, h);
+    p->exit = lm_rect_make(p->clock.x - 8 - PANEL_EXIT_W, y, PANEL_EXIT_W, h);
+    p->run = lm_rect_make(p->exit.x - 4 - PANEL_RUN_W, y, PANEL_RUN_W, h);
+    int tx = x + 12;
+    p->title_area = lm_rect_make(tx, y, p->run.x - 12 - tx, h);
+    p->current_workspace = wm->workspace;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->mapped)
+            p->workspace_occupied |= 1u << w->workspace;
+    p->hover_workspace = wm->hover_panel_ws;
+    p->hover_launcher = wm->hover_launcher;
+    p->hover_exit = wm->hover_exit;
+    p->hover_run = wm->hover_run;
+    p->exit_armed = wm->exit_armed;
+    p->active_title = wm->focused ? wm->focused->title : "";
+
+    /* taskbar: windows of this workspace in creation (id) order, so raising does not reshuffle it */
+    struct lm_window *tw[LM_PANEL_MAX_TASKS];
+    int n = 0;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (!w->mapped || w->workspace != wm->workspace || n >= LM_PANEL_MAX_TASKS)
+            continue;
+        int i = n++;
+        for (; i > 0 && WIN(tw[i - 1])->id > WIN(w)->id; i--)
+            tw[i] = tw[i - 1];
+        tw[i] = w;
+    }
+    p->ntasks = n;
+    if (n > 0) {
+        int bw = (p->title_area.w - (n - 1) * PANEL_TASK_GAP) / n;
+        bw = LM_MIN(bw, PANEL_TASK_MAX_W);
+        if (bw <= 0)
+            p->ntasks = 0;
+        for (int i = 0; i < p->ntasks; i++) {
+            p->task[i].rect = lm_rect_make(p->title_area.x + i * (bw + PANEL_TASK_GAP), y, bw, h);
+            p->task[i].title = tw[i]->title;
+            p->task[i].active = wm->focused == tw[i];
+            p->task[i].minimized = tw[i]->minimized;
+            p->task[i].hover = wm->hover_task == tw[i];
+            p->task_win[i] = tw[i];
+        }
+    }
+    snprintf(p->clock_text, sizeof(p->clock_text), "%s", wm->clock_text);
+}
+
+static bool fullscreen_covers(const struct lm_wm *wm, const struct lm_output *o)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (!win_visible(wm, w) || !(w->states & LM_WINDOW_FULLSCREEN))
+            continue;
+        struct lm_rect r = lm_rect_make(w->x, w->y, w->width, w->height);
+        struct lm_rect orect = lm_output_rect(o);
+        if (lm_rect_overlaps(&r, &orect))
+            return true;
+    }
+    return false;
+}
+
+/* ---- damage ---------------------------------------------------------------------------- */
+
+static void damage_rect(struct lm_wm *wm, const struct lm_rect *r)
+{
+    if (wm->srv->render && !lm_rect_is_empty(r))
+        lm_render_damage(wm->srv->render, r);
+}
+
+static void damage_frame(struct lm_wm *wm, const struct lm_window *w)
+{
+    struct lm_rect r = frame_outer(w);
+    damage_rect(wm, &r);
+}
+
+static void damage_all(struct lm_wm *wm)
+{
+    if (wm->srv->render)
+        lm_render_damage_all(wm->srv->render);
+}
+
+static void menu_set(struct lm_wm *wm, bool open, const struct lm_rect *launcher)
+{
+    if (open == wm->menu_open)
+        return;
+    if (open) {
+        int n = wm->srv->config.napps;
+        if (n <= 0 || !launcher)
+            return;
+        wm->menu_rect = lm_rect_make(launcher->x, launcher->y + launcher->h + 2, MENU_W, n * MENU_ITEM_H + 4);
+        wm->menu_open = true;
+        damage_rect(wm, &wm->menu_rect);
+    } else {
+        wm->menu_open = false;
+        wm->hover_menu = -1;
+        damage_rect(wm, &wm->menu_rect);
+    }
+}
+
+static void damage_panels(struct lm_wm *wm)
+{
+    if (!wm->srv->backend)
+        return;
+    struct lm_output *o;
+    lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+        struct lm_rect r = output_panel_rect(o);
+        damage_rect(wm, &r);
+    }
+}
+
+/* ---- surface output membership --------------------------------------------------------- */
+
+static void update_outputs(struct lm_wm *wm, struct lm_window *w)
+{
+    struct lm_output *outs[16];
+    size_t n = 0;
+    if (win_visible(wm, w) && wm->srv->backend) {
+        struct lm_rect fr = frame_outer(w);
+        struct lm_output *o;
+        lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+            struct lm_rect orect = lm_output_rect(o);
+            if (n < LM_ARRAY_LEN(outs) && lm_rect_overlaps(&fr, &orect))
+                outs[n++] = o;
+        }
+    }
+    lm_surface_set_outputs(w->surface, outs, n);
+}
+
+/* ---- usable area ------------------------------------------------------------------------- */
+
+void lm_wm_usable_area(struct lm_wm *wm, int32_t gx, int32_t gy, struct lm_rect *out)
+{
+    struct lm_output *o = lm_output_nearest(wm->srv, gx, gy);
+    if (!o) {
+        *out = lm_rect_make(0, 0, 1280, 720);
+        return;
+    }
+    struct lm_rect r = lm_output_rect(o);
+    r.y += LM_PANEL_HEIGHT;
+    r.h -= LM_PANEL_HEIGHT;
+    *out = r;
+}
+
+/* ---- configure ---------------------------------------------------------------------------- */
+
+static void send_configure(struct lm_wm *wm, struct lm_window *w, int32_t cw, int32_t ch)
+{
+    uint32_t st = w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN | LM_WINDOW_RESIZING);
+    if (wm->focused == w)
+        st |= LM_WINDOW_ACTIVATED;
+    w->states = st;
+    if (w->ops && w->ops->configure)
+        w->ops->configure(w, cw, ch, st);
+}
+
+static void clamp_size(const struct lm_window *w, int32_t *cw, int32_t *ch)
+{
+    int32_t minw = LM_MAX(w->min_w, LM_MIN_WINDOW_WIDTH), minh = LM_MAX(w->min_h, LM_MIN_WINDOW_HEIGHT);
+    if (*cw < minw) *cw = minw;
+    if (*ch < minh) *ch = minh;
+    if (w->max_w > 0 && *cw > w->max_w) *cw = w->max_w;
+    if (w->max_h > 0 && *ch > w->max_h) *ch = w->max_h;
+}
+
+static struct lm_output *window_output(struct lm_wm *wm, const struct lm_window *w)
+{
+    return lm_output_nearest(wm->srv, w->x + w->width / 2.0, w->y + w->height / 2.0);
+}
+
+/* Compute x/y/size for the current maximized/fullscreen/normal state and configure. */
+static void apply_state(struct lm_wm *wm, struct lm_window *w)
+{
+    struct wm_win *ww = WIN(w);
+    struct lm_rect before = frame_outer(w);
+    int32_t tw = 0, th = 0;
+
+    ww->tiled = 0;
+    if (w->states & LM_WINDOW_FULLSCREEN) {
+        struct lm_output *o = window_output(wm, w);
+        if (o) {
+            w->x = o->x;
+            w->y = o->y;
+            tw = o->width;
+            th = o->height;
+        }
+    } else if (w->states & LM_WINDOW_MAXIMIZED) {
+        struct lm_rect ua;
+        lm_wm_usable_area(wm, w->x + w->width / 2, w->y + w->height / 2, &ua);
+        w->x = ua.x + LM_BORDER_WIDTH;
+        w->y = ua.y + LM_TITLEBAR_HEIGHT;
+        tw = ua.w - 2 * LM_BORDER_WIDTH;
+        th = ua.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH;
+    } else if (ww->have_restore) {
+        w->x = ww->rx;
+        w->y = ww->ry;
+        tw = ww->rw;
+        th = ww->rh;
+        ww->have_restore = false;
+    }
+    /* Keep the old extents until the client commits the new size. */
+    send_configure(wm, w, tw, th);
+    damage_rect(wm, &before);
+    damage_frame(wm, w);
+    update_outputs(wm, w);
+}
+
+static void save_restore(struct wm_win *ww)
+{
+    struct lm_window *w = &ww->pub;
+    if (ww->have_restore || (w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN)))
+        return;
+    ww->rx = w->x;
+    ww->ry = w->y;
+    ww->rw = w->width;
+    ww->rh = w->height;
+    ww->have_restore = true;
+}
+
+/* ---- focus -------------------------------------------------------------------------------- */
+
+static void refresh_pointer(struct lm_wm *wm)
+{
+    if (!wm->srv->seat || lm_seat_pointer_has_grab(wm->srv->seat))
+        return;
+    double x, y;
+    lm_seat_pointer_position(wm->srv->seat, &x, &y);
+    lm_seat_pointer_warp(wm->srv->seat, x, y);
+}
+
+static void set_focus(struct lm_wm *wm, struct lm_window *w)
+{
+    struct lm_window *old = wm->focused;
+    if (old == w)
+        return;
+    wm->focused = w;
+    if (old) {
+        lm_xdg_dismiss_popups(old->surface);
+        send_configure(wm, old, old->width, old->height);
+        damage_frame(wm, old);
+    }
+    if (w) {
+        send_configure(wm, w, w->width, w->height);
+        damage_frame(wm, w);
+    }
+    if (wm->srv->seat)
+        lm_seat_set_keyboard_focus(wm->srv->seat, w ? w->surface : NULL);
+    damage_panels(wm);
+}
+
+/* Topmost visible window on the current workspace (excluding `skip`). */
+static struct lm_window *top_visible(struct lm_wm *wm, const struct lm_window *skip)
+{
+    struct lm_window *w;
+    lm_list_for_each_reverse(w, &wm->windows, link)
+        if (w != skip && win_visible(wm, w))
+            return w;
+    return NULL;
+}
+
+static void raise_window(struct lm_wm *wm, struct lm_window *w)
+{
+    if (wm->windows.prev == &w->link)
+        return;
+    lm_list_remove(&w->link);
+    lm_list_append(&wm->windows, &w->link);
+    damage_frame(wm, w);
+}
+
+void lm_wm_switch_workspace(struct lm_wm *wm, int ws)
+{
+    if (ws < 0 || ws >= LM_NUM_WORKSPACES || ws == wm->workspace)
+        return;
+    if (wm->focused)
+        lm_xdg_dismiss_popups(wm->focused->surface);
+    wm->workspace = ws;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        update_outputs(wm, w);
+    set_focus(wm, NULL);
+    set_focus(wm, top_visible(wm, NULL));
+    damage_all(wm);
+    refresh_pointer(wm);
+}
+
+void lm_wm_focus_window(struct lm_wm *wm, struct lm_window *w)
+{
+    if (!w) {
+        set_focus(wm, NULL);
+        return;
+    }
+    if (w->workspace != wm->workspace)
+        lm_wm_switch_workspace(wm, w->workspace);
+    if (w->minimized) {
+        w->minimized = false;
+        update_outputs(wm, w);
+        damage_frame(wm, w);
+    }
+    raise_window(wm, w);
+    set_focus(wm, w);
+}
+
+struct lm_window *lm_wm_focused_window(const struct lm_wm *wm) { return wm->focused; }
+int lm_wm_current_workspace(const struct lm_wm *wm) { return wm->workspace; }
+
+/* ---- lifecycle ------------------------------------------------------------------------------ */
+
+static void update_clock(struct lm_wm *wm, bool force)
+{
+    char buf[16];
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(buf, sizeof(buf), "%H:%M", &tm);
+    if (!force && !strcmp(buf, wm->clock_text))
+        return;
+    snprintf(wm->clock_text, sizeof(wm->clock_text), "%s", buf);
+    if (!force)
+        damage_panels(wm);
+}
+
+static void clock_tick(void *data)
+{
+    update_clock(data, false);
+}
+
+struct lm_wm *lm_wm_create(struct lm_server *srv)
+{
+    struct lm_wm *wm = calloc(1, sizeof(*wm));
+    if (!wm)
+        return NULL;
+    wm->srv = srv;
+    lm_list_init(&wm->windows);
+    lm_list_init(&wm->popups);
+    wm->hover_panel_ws = -1;
+    wm->hover_menu = -1;
+    update_clock(wm, true);
+    wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
+    if (wm->clock_timer)
+        lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
+    return wm;
+}
+
+void lm_wm_destroy(struct lm_wm *wm)
+{
+    if (!wm)
+        return;
+    if (wm->grab_kind != GRAB_NONE && wm->srv->seat)
+        lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
+    if (wm->clock_timer)
+        lm_timer_destroy(wm->clock_timer);
+    free(wm);
+}
+
+void lm_wm_output_added(struct lm_wm *wm, struct lm_output *out)
+{
+    (void)out;
+    damage_all(wm);
+}
+
+void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
+{
+    (void)out;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN))
+            apply_state(wm, w);
+    damage_all(wm);
+}
+
+void lm_wm_output_removed(struct lm_wm *wm, struct lm_output *out)
+{
+    (void)out;
+    /* The output is still in the list while we are called: re-clamp after it is gone. */
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        update_outputs(wm, w);
+    damage_all(wm);
+}
+
+/* ---- windows --------------------------------------------------------------------------------- */
+
+struct lm_window *lm_wm_window_create(struct lm_wm *wm, struct lm_surface *surface,
+                                      const struct lm_window_ops *ops, void *shell_data)
+{
+    struct wm_win *ww = calloc(1, sizeof(*ww));
+    if (!ww)
+        return NULL;
+    struct lm_window *w = &ww->pub;
+    w->wm = wm;
+    w->surface = surface;
+    w->ops = ops;
+    w->shell_data = shell_data;
+    w->title = strdup("");
+    w->app_id = strdup("");
+    if (!w->title || !w->app_id) {
+        free(w->title);
+        free(w->app_id);
+        free(ww);
+        return NULL;
+    }
+    w->workspace = wm->workspace;
+    ww->id = ++wm->next_id;
+    lm_list_append(&wm->windows, &w->link);
+    return w;
+}
+
+void lm_wm_window_destroy(struct lm_window *w)
+{
+    struct lm_wm *wm = w->wm;
+    if (wm->grab_win == w && wm->grab_kind != GRAB_NONE) {
+        wm->grab_kind = GRAB_NONE;
+        wm->grab_win = NULL;
+        if (wm->srv->seat)
+            lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
+    }
+    if (wm->hover_win == w) { wm->hover_win = NULL; wm->hover_bits = 0; }
+    if (wm->hover_task == w) wm->hover_task = NULL;
+    if (wm->press_win == w) { wm->press_win = NULL; wm->press_bits = 0; }
+    if (wm->last_click_win == w) wm->last_click_win = NULL;
+    struct lm_window *c;
+    lm_list_for_each(c, &wm->windows, link)
+        if (c->parent == w)
+            c->parent = NULL;
+    if (w->mapped)
+        lm_wm_window_unmap(w);
+    if (wm->focused == w)
+        set_focus(wm, top_visible(wm, w));
+    lm_list_remove(&w->link);
+    free(w->title);
+    free(w->app_id);
+    free(w);
+    refresh_pointer(wm);
+}
+
+void lm_wm_window_initial_configure(struct lm_window *w)
+{
+    struct lm_wm *wm = w->wm;
+    int32_t cw = 0, ch = 0;
+    if (w->states & LM_WINDOW_FULLSCREEN) {
+        struct lm_output *o = window_output(wm, w);
+        if (o) { cw = o->width; ch = o->height; }
+    } else if (w->states & LM_WINDOW_MAXIMIZED) {
+        struct lm_rect ua;
+        lm_wm_usable_area(wm, 0, 0, &ua);
+        cw = ua.w - 2 * LM_BORDER_WIDTH;
+        ch = ua.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH;
+    }
+    send_configure(wm, w, cw, ch);
+}
+
+static void replace_str(char **dst, const char *src)
+{
+    char *n = strdup(src ? src : "");
+    if (n) {
+        free(*dst);
+        *dst = n;
+    }
+}
+
+void lm_wm_window_set_title(struct lm_window *w, const char *title)
+{
+    replace_str(&w->title, title);
+    if (w->mapped) {
+        damage_frame(w->wm, w);
+        if (w->wm->focused == w)
+            damage_panels(w->wm);
+    }
+}
+
+void lm_wm_window_set_app_id(struct lm_window *w, const char *app_id)
+{
+    replace_str(&w->app_id, app_id);
+}
+
+void lm_wm_window_set_parent(struct lm_window *w, struct lm_window *parent)
+{
+    for (struct lm_window *p = parent; p; p = p->parent)
+        if (p == w)
+            return; /* cycle */
+    w->parent = parent;
+}
+
+void lm_wm_window_set_min_size(struct lm_window *w, int32_t width, int32_t height)
+{
+    w->min_w = LM_MAX(width, 0);
+    w->min_h = LM_MAX(height, 0);
+}
+
+void lm_wm_window_set_max_size(struct lm_window *w, int32_t width, int32_t height)
+{
+    w->max_w = LM_MAX(width, 0);
+    w->max_h = LM_MAX(height, 0);
+}
+
+void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g)
+{
+    struct lm_wm *wm = w->wm;
+    struct lm_rect before = frame_outer(w);
+    struct lm_rect ng = *g;
+    if (ng.w < 1 || ng.h < 1)
+        return;
+    w->geometry = ng;
+    w->width = ng.w;
+    w->height = ng.h;
+    if (wm->grab_kind == GRAB_RESIZE && wm->grab_win == w) {
+        if (wm->grab_edges & LM_EDGE_LEFT)
+            w->x = wm->grab_x + wm->grab_w - w->width;
+        if (wm->grab_edges & LM_EDGE_TOP)
+            w->y = wm->grab_y + wm->grab_h - w->height;
+    }
+    if (w->mapped) {
+        damage_rect(wm, &before);
+        damage_frame(wm, w);
+        update_outputs(wm, w);
+    }
+}
+
+void lm_wm_window_map(struct lm_window *w)
+{
+    struct lm_wm *wm = w->wm;
+    struct wm_win *ww = WIN(w);
+    int32_t fit_w = 0, fit_h = 0;
+    if (w->mapped)
+        return;
+    if (!ww->placed) {
+        ww->placed = true;
+        struct lm_rect ua;
+        double px = 0, py = 0;
+        if (wm->srv->seat)
+            lm_seat_pointer_position(wm->srv->seat, &px, &py);
+        lm_wm_usable_area(wm, (int32_t)px, (int32_t)py, &ua);
+        if (w->states & LM_WINDOW_FULLSCREEN) {
+            struct lm_output *o = lm_output_nearest(wm->srv, px, py);
+            if (o) { w->x = o->x; w->y = o->y; }
+        } else if (w->states & LM_WINDOW_MAXIMIZED) {
+            w->x = ua.x + LM_BORDER_WIDTH;
+            w->y = ua.y + LM_TITLEBAR_HEIGHT;
+        } else if (w->parent && w->parent->mapped) {
+            w->x = w->parent->x + (w->parent->width - w->width) / 2;
+            w->y = w->parent->y + (w->parent->height - w->height) / 2;
+        } else {
+            int step = (wm->cascade++ % 10) * 28;
+            w->x = ua.x + LM_BORDER_WIDTH + 40 + step;
+            w->y = ua.y + LM_TITLEBAR_HEIGHT + 24 + step;
+        }
+        /* keep the whole frame on the output where possible */
+        if (!(w->states & (LM_WINDOW_FULLSCREEN | LM_WINDOW_MAXIMIZED))) {
+            /* a client that opened bigger than the usable area is asked to shrink to fit */
+            int32_t fw = LM_MIN(w->width, ua.w - 2 * LM_BORDER_WIDTH);
+            int32_t fh = LM_MIN(w->height, ua.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH);
+            if (fw != w->width || fh != w->height) {
+                clamp_size(w, &fw, &fh);
+                fit_w = fw; /* sent after set_focus(), whose configure would otherwise override it */
+                fit_h = fh;
+            }
+            if (w->x + fw + LM_BORDER_WIDTH > ua.x + ua.w)
+                w->x = ua.x + ua.w - fw - LM_BORDER_WIDTH;
+            if (w->y + fh + LM_BORDER_WIDTH > ua.y + ua.h)
+                w->y = ua.y + ua.h - fh - LM_BORDER_WIDTH;
+            if (w->x < ua.x + LM_BORDER_WIDTH) w->x = ua.x + LM_BORDER_WIDTH;
+            if (w->y < ua.y + LM_TITLEBAR_HEIGHT) w->y = ua.y + LM_TITLEBAR_HEIGHT;
+        }
+    }
+    w->mapped = true;
+    w->workspace = wm->workspace;
+    w->minimized = false;
+    raise_window(wm, w);
+    update_outputs(wm, w);
+    damage_frame(wm, w);
+    set_focus(wm, w);
+    if (fit_w > 0)
+        send_configure(wm, w, fit_w, fit_h);
+    damage_panels(wm);
+    refresh_pointer(wm);
+}
+
+void lm_wm_window_unmap(struct lm_window *w)
+{
+    struct lm_wm *wm = w->wm;
+    if (!w->mapped)
+        return;
+    struct lm_rect r = frame_outer(w);
+    lm_xdg_dismiss_popups(w->surface);
+    w->mapped = false;
+    lm_surface_set_outputs(w->surface, NULL, 0);
+    if (wm->focused == w)
+        set_focus(wm, top_visible(wm, w));
+    damage_rect(wm, &r);
+    damage_panels(wm);
+    refresh_pointer(wm);
+}
+
+void lm_wm_window_request_maximize(struct lm_window *w, bool maximize)
+{
+    struct lm_wm *wm = w->wm;
+    struct wm_win *ww = WIN(w);
+    bool is = (w->states & LM_WINDOW_MAXIMIZED) != 0;
+    if (is == maximize)
+        return;
+    if (maximize) {
+        save_restore(ww);
+        w->states |= LM_WINDOW_MAXIMIZED;
+    } else {
+        w->states &= ~LM_WINDOW_MAXIMIZED;
+    }
+    if (!w->mapped) {
+        return; /* applied on map / initial configure */
+    }
+    if (w->states & LM_WINDOW_FULLSCREEN)
+        return;
+    apply_state(wm, w);
+}
+
+void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
+{
+    struct lm_wm *wm = w->wm;
+    struct wm_win *ww = WIN(w);
+    if (edge != LM_EDGE_LEFT && edge != LM_EDGE_RIGHT && edge != LM_EDGE_NONE)
+        return;
+    if (!w->mapped || (w->states & LM_WINDOW_FULLSCREEN) || ww->tiled == edge)
+        return;
+    if (edge == LM_EDGE_NONE) {
+        if (!ww->tiled)
+            return;
+        apply_state(wm, w); /* clears ww->tiled and restores the saved geometry */
+        return;
+    }
+
+    struct lm_rect before = frame_outer(w);
+    save_restore(ww);
+    w->states &= ~LM_WINDOW_MAXIMIZED;
+
+    struct lm_rect ua;
+    lm_wm_usable_area(wm, w->x + w->width / 2, w->y + w->height / 2, &ua);
+    int32_t half = ua.w / 2;
+    struct lm_rect outer = edge == LM_EDGE_LEFT ? lm_rect_make(ua.x, ua.y, half, ua.h)
+                                                : lm_rect_make(ua.x + half, ua.y, ua.w - half, ua.h);
+    int32_t tw = outer.w - 2 * LM_BORDER_WIDTH;
+    int32_t th = outer.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH;
+    clamp_size(w, &tw, &th);
+    w->x = outer.x + LM_BORDER_WIDTH;
+    w->y = outer.y + LM_TITLEBAR_HEIGHT;
+    ww->tiled = edge;
+    send_configure(wm, w, tw, th);
+    damage_rect(wm, &before);
+    damage_frame(wm, w);
+    update_outputs(wm, w);
+}
+
+void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen, struct lm_output *output)
+{
+    struct lm_wm *wm = w->wm;
+    struct wm_win *ww = WIN(w);
+    (void)output;
+    bool is = (w->states & LM_WINDOW_FULLSCREEN) != 0;
+    if (is == fullscreen)
+        return;
+    if (fullscreen) {
+        save_restore(ww);
+        w->states |= LM_WINDOW_FULLSCREEN;
+    } else {
+        w->states &= ~LM_WINDOW_FULLSCREEN;
+    }
+    if (!w->mapped)
+        return;
+    apply_state(wm, w);
+    damage_panels(wm);
+}
+
+void lm_wm_window_request_minimize(struct lm_window *w)
+{
+    struct lm_wm *wm = w->wm;
+    if (!w->mapped || w->minimized)
+        return;
+    struct lm_rect r = frame_outer(w);
+    lm_xdg_dismiss_popups(w->surface);
+    w->minimized = true;
+    lm_surface_set_outputs(w->surface, NULL, 0);
+    if (wm->focused == w)
+        set_focus(wm, top_visible(wm, w));
+    damage_rect(wm, &r);
+    damage_panels(wm);
+    refresh_pointer(wm);
+}
+
+void lm_wm_window_close(struct lm_window *w)
+{
+    if (w->ops && w->ops->close)
+        w->ops->close(w);
+}
+
+/* ---- popups ------------------------------------------------------------------------------------ */
+
+struct lm_popup *lm_wm_popup_create(struct lm_wm *wm, struct lm_surface *surface, struct lm_surface *parent)
+{
+    struct wm_popup *wp = calloc(1, sizeof(*wp));
+    if (!wp)
+        return NULL;
+    wp->pub.wm = wm;
+    wp->pub.surface = surface;
+    wp->pub.parent = parent;
+    lm_list_append(&wm->popups, &wp->pub.link);
+    return &wp->pub;
+}
+
+static struct lm_rect popup_bounds(const struct lm_popup *p)
+{
+    int32_t ox, oy;
+    struct lm_rect ext;
+    popup_origin(p, &ox, &oy);
+    if (lm_surface_tree_extents(p->surface, &ext))
+        return lm_rect_make(ox + ext.x, oy + ext.y, ext.w, ext.h);
+    return lm_rect_make(p->x, p->y, p->geometry.w, p->geometry.h);
+}
+
+void lm_wm_popup_destroy(struct lm_popup *p)
+{
+    struct lm_wm *wm = p->wm;
+    if (p->mapped) {
+        struct lm_rect r = popup_bounds(p);
+        damage_rect(wm, &r);
+    }
+    lm_list_remove(&p->link);
+    free(p);
+    refresh_pointer(wm);
+}
+
+void lm_wm_popup_set_position(struct lm_popup *p, int32_t gx, int32_t gy)
+{
+    struct lm_rect before = popup_bounds(p);
+    p->x = gx;
+    p->y = gy;
+    if (p->mapped) {
+        damage_rect(p->wm, &before);
+        struct lm_rect after = popup_bounds(p);
+        damage_rect(p->wm, &after);
+    }
+}
+
+void lm_wm_popup_set_geometry(struct lm_popup *p, const struct lm_rect *g)
+{
+    struct lm_rect before = popup_bounds(p);
+    p->geometry = *g;
+    if (p->mapped) {
+        damage_rect(p->wm, &before);
+        struct lm_rect after = popup_bounds(p);
+        damage_rect(p->wm, &after);
+    }
+}
+
+void lm_wm_popup_map(struct lm_popup *p)
+{
+    p->mapped = true;
+    struct lm_rect r = popup_bounds(p);
+    damage_rect(p->wm, &r);
+    refresh_pointer(p->wm);
+}
+
+void lm_wm_popup_unmap(struct lm_popup *p)
+{
+    if (!p->mapped)
+        return;
+    struct lm_rect r = popup_bounds(p);
+    p->mapped = false;
+    damage_rect(p->wm, &r);
+    refresh_pointer(p->wm);
+}
+
+static bool popup_visible(const struct lm_wm *wm, const struct lm_popup *p, int depth)
+{
+    if (!p->mapped)
+        return false;
+    if (depth > 8)
+        return false;
+    struct lm_surface *root = p->parent ? lm_surface_root(p->parent) : NULL;
+    if (!root)
+        return true;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->surface == root)
+            return win_visible(wm, w);
+    struct lm_popup *q;
+    lm_list_for_each(q, &wm->popups, link)
+        if (q != p && q->surface == root)
+            return popup_visible(wm, q, depth + 1);
+    return true;
+}
+
+/* ---- queries ------------------------------------------------------------------------------------ */
+
+bool lm_wm_surface_origin(struct lm_wm *wm, struct lm_surface *s, int32_t *x, int32_t *y)
+{
+    struct lm_surface *root = lm_surface_root(s);
+    int32_t dx = 0, dy = 0;
+    if (root != s)
+        lm_surface_offset_in_root(s, &dx, &dy);
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->surface == root && w->mapped) {
+            win_origin(w, x, y);
+            *x += dx;
+            *y += dy;
+            return true;
+        }
+    struct lm_popup *p;
+    lm_list_for_each(p, &wm->popups, link)
+        if (p->surface == root && p->mapped) {
+            popup_origin(p, x, y);
+            *x += dx;
+            *y += dy;
+            return true;
+        }
+    return false;
+}
+
+void lm_wm_surface_damage(struct lm_wm *wm, struct lm_surface *root, const struct lm_rect *rect)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->surface == root) {
+            if (!win_visible(wm, w))
+                return;
+            int32_t ox, oy;
+            win_origin(w, &ox, &oy);
+            struct lm_rect r = lm_rect_make(ox + rect->x, oy + rect->y, rect->w, rect->h);
+            damage_rect(wm, &r);
+            return;
+        }
+    struct lm_popup *p;
+    lm_list_for_each(p, &wm->popups, link)
+        if (p->surface == root) {
+            if (!p->mapped)
+                return;
+            int32_t ox, oy;
+            popup_origin(p, &ox, &oy);
+            struct lm_rect r = lm_rect_make(ox + rect->x, oy + rect->y, rect->w, rect->h);
+            damage_rect(wm, &r);
+            return;
+        }
+}
+
+void lm_wm_send_frame_done(struct lm_wm *wm, uint32_t time_ms)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (!win_visible(wm, w))
+            continue;
+        update_outputs(wm, w);
+        lm_surface_send_frame_done(w->surface, time_ms);
+    }
+    struct lm_popup *p;
+    lm_list_for_each(p, &wm->popups, link)
+        if (popup_visible(wm, p, 0))
+            lm_surface_send_frame_done(p->surface, time_ms);
+}
+
+/* ---- scene ---------------------------------------------------------------------------------------- */
+
+void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene_fn fn, void *data)
+{
+    struct lm_scene_item it;
+    struct lm_output *o;
+
+    if (wm->srv->backend) {
+        lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+            struct lm_rect orect = lm_output_rect(o);
+            if (clip && !lm_rect_overlaps(&orect, clip))
+                continue;
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_WALLPAPER;
+            it.bounds = orect;
+            it.output = o;
+            if (!fn(&it, data))
+                return;
+        }
+    }
+
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (!win_visible(wm, w))
+            continue;
+        struct lm_rect outer = frame_outer(w);
+        int32_t ox, oy;
+        win_origin(w, &ox, &oy);
+        struct lm_rect sb = outer, ext;
+        if (lm_surface_tree_extents(w->surface, &ext)) {
+            struct lm_rect eb = lm_rect_make(ox + ext.x, oy + ext.y, ext.w, ext.h);
+            sb = lm_rect_union(&outer, &eb);
+        }
+        if (clip && !lm_rect_overlaps(&sb, clip))
+            continue;
+        if (!(w->states & LM_WINDOW_FULLSCREEN) && (!clip || lm_rect_overlaps(&outer, clip))) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_FRAME;
+            it.bounds = outer;
+            frame_info(wm, w, &it.u.frame);
+            if (!fn(&it, data))
+                return;
+        }
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_SURFACE;
+        it.bounds = sb;
+        it.u.surface.root = w->surface;
+        it.u.surface.x = ox;
+        it.u.surface.y = oy;
+        if (!fn(&it, data))
+            return;
+    }
+
+    if (wm->srv->backend) {
+        lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+            struct lm_rect pr = output_panel_rect(o);
+            if ((clip && !lm_rect_overlaps(&pr, clip)) || fullscreen_covers(wm, o))
+                continue;
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_PANEL;
+            it.bounds = pr;
+            it.output = o;
+            panel_info(wm, o, &it.u.panel);
+            if (!fn(&it, data))
+                return;
+        }
+    }
+
+    if (wm->menu_open && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_MENU;
+        it.bounds = wm->menu_rect;
+        it.u.menu.rect = wm->menu_rect;
+        it.u.menu.n = wm->srv->config.napps;
+        it.u.menu.item_h = MENU_ITEM_H;
+        it.u.menu.hover = wm->hover_menu;
+        for (int i = 0; i < it.u.menu.n; i++)
+            it.u.menu.label[i] = wm->srv->config.apps[i].name;
+        if (!fn(&it, data))
+            return;
+    }
+
+    struct lm_popup *p;
+    lm_list_for_each(p, &wm->popups, link) {
+        if (!popup_visible(wm, p, 0))
+            continue;
+        struct lm_rect pb = popup_bounds(p);
+        if (clip && !lm_rect_overlaps(&pb, clip))
+            continue;
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_SURFACE;
+        it.bounds = pb;
+        it.u.surface.root = p->surface;
+        popup_origin(p, &it.u.surface.x, &it.u.surface.y);
+        it.u.surface.is_popup = true;
+        if (!fn(&it, data))
+            return;
+    }
+}
+
+static void append(char *buf, size_t size, size_t *n, const char *fmt, ...) LM_PRINTF(4, 5);
+static void append(char *buf, size_t size, size_t *n, const char *fmt, ...)
+{
+    if (*n + 1 >= size)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(buf + *n, size - *n, fmt, ap);
+    va_end(ap);
+    if (k > 0)
+        *n += (size_t)k < size - *n ? (size_t)k : size - *n - 1;
+}
+
+size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    if (size == 0)
+        return 0;
+    size_t n = 0;
+    double px = 0, py = 0;
+    if (wm->srv->seat)
+        lm_seat_pointer_position(wm->srv->seat, &px, &py);
+#define APPEND(...) append(buf, size, &n, __VA_ARGS__)
+    APPEND("workspace %d\n", wm->workspace);
+    APPEND("pointer %d %d\n", (int)px, (int)py);
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        char title[96], app[64];
+        snprintf(title, sizeof(title), "%s", w->title);
+        snprintf(app, sizeof(app), "%s", w->app_id);
+        for (char *c = title; *c; c++) if (*c == '"' || *c == '\n') *c = '\'';
+        for (char *c = app; *c; c++) if (*c == '"' || *c == '\n') *c = '\'';
+        char flags[96] = "";
+        if (w->mapped) strcat(flags, "mapped,");
+        if (wm->focused == w) strcat(flags, "focused,");
+        if (w->states & LM_WINDOW_MAXIMIZED) strcat(flags, "maximized,");
+        if (w->states & LM_WINDOW_FULLSCREEN) strcat(flags, "fullscreen,");
+        if (WIN(w)->tiled) strcat(flags, WIN(w)->tiled == LM_EDGE_LEFT ? "tiled-left," : "tiled-right,");
+        if (w->minimized) strcat(flags, "minimized,");
+        size_t fl = strlen(flags);
+        if (fl) flags[fl - 1] = 0; else strcpy(flags, "-");
+        APPEND("window %d \"%s\" \"%s\" x=%d y=%d w=%d h=%d ws=%d flags=%s\n", WIN(w)->id,
+               title, app, w->x, w->y, w->width, w->height, w->workspace, flags);
+    }
+#undef APPEND
+    if (n >= size)
+        n = size - 1;
+    buf[n] = 0;
+    return n;
+}
+
+/* ---- picking ----------------------------------------------------------------------------------------- */
+
+static uint32_t edges_at(const struct lm_window *w, const struct lm_rect *o, double x, double y)
+{
+    if (w->states & LM_WINDOW_MAXIMIZED)
+        return LM_EDGE_NONE;
+    uint32_t e = 0;
+    double lx = x - o->x, ly = y - o->y;
+    if (lx < LM_BORDER_WIDTH) e |= LM_EDGE_LEFT;
+    if (lx >= o->w - LM_BORDER_WIDTH) e |= LM_EDGE_RIGHT;
+    if (ly >= o->h - LM_BORDER_WIDTH) e |= LM_EDGE_BOTTOM;
+    if (ly < LM_BORDER_WIDTH) e |= LM_EDGE_TOP;
+    if (e) {
+        /* widen into corners */
+        if ((e & (LM_EDGE_LEFT | LM_EDGE_RIGHT)) && !(e & (LM_EDGE_TOP | LM_EDGE_BOTTOM))) {
+            if (ly < RESIZE_CORNER) e |= LM_EDGE_TOP;
+            else if (ly >= o->h - RESIZE_CORNER) e |= LM_EDGE_BOTTOM;
+        } else if ((e & (LM_EDGE_TOP | LM_EDGE_BOTTOM)) && !(e & (LM_EDGE_LEFT | LM_EDGE_RIGHT))) {
+            if (lx < RESIZE_CORNER) e |= LM_EDGE_LEFT;
+            else if (lx >= o->w - RESIZE_CORNER) e |= LM_EDGE_RIGHT;
+        }
+    }
+    return e;
+}
+
+void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->kind = LM_PICK_NONE;
+    int32_t ix = (int32_t)x, iy = (int32_t)y;
+
+    if (wm->menu_open && lm_rect_contains(&wm->menu_rect, ix, iy)) {
+        int i = (iy - wm->menu_rect.y - 2) / MENU_ITEM_H;
+        out->kind = LM_PICK_MENU_ITEM;
+        out->index = LM_CLAMP(i, 0, wm->srv->config.napps - 1);
+        return;
+    }
+
+    struct lm_popup *p;
+    lm_list_for_each_reverse(p, &wm->popups, link) {
+        if (!popup_visible(wm, p, 0))
+            continue;
+        int32_t ox, oy;
+        double sx, sy;
+        popup_origin(p, &ox, &oy);
+        struct lm_surface *hit = lm_surface_tree_pick(p->surface, ox, oy, x, y, &sx, &sy);
+        if (hit) {
+            out->kind = LM_PICK_SURFACE;
+            out->surface = hit;
+            out->sx = sx;
+            out->sy = sy;
+            return;
+        }
+    }
+
+    struct lm_window *w;
+    lm_list_for_each_reverse(w, &wm->windows, link) {
+        if (!win_visible(wm, w))
+            continue;
+        int32_t ox, oy;
+        double sx, sy;
+        win_origin(w, &ox, &oy);
+        struct lm_surface *hit = lm_surface_tree_pick(w->surface, ox, oy, x, y, &sx, &sy);
+        if (hit) {
+            out->kind = LM_PICK_SURFACE;
+            out->window = w;
+            out->surface = hit;
+            out->sx = sx;
+            out->sy = sy;
+            return;
+        }
+        if (w->states & LM_WINDOW_FULLSCREEN)
+            continue;
+        struct lm_frame_info f;
+        frame_info(wm, w, &f);
+        if (!lm_rect_contains(&f.outer, ix, iy))
+            continue;
+        out->window = w;
+        if (lm_rect_contains(&f.btn_close, ix, iy)) { out->kind = LM_PICK_CLOSE; return; }
+        if (lm_rect_contains(&f.btn_max, ix, iy)) { out->kind = LM_PICK_MAXIMIZE; return; }
+        if (lm_rect_contains(&f.btn_min, ix, iy)) { out->kind = LM_PICK_MINIMIZE; return; }
+        uint32_t e = edges_at(w, &f.outer, x, y);
+        if (e) {
+            out->kind = LM_PICK_BORDER;
+            out->edges = e;
+            return;
+        }
+        if (lm_rect_contains(&f.titlebar, ix, iy)) {
+            out->kind = LM_PICK_TITLEBAR;
+            return;
+        }
+        /* inside the content area but the surface does not take input here: fall through */
+        out->window = NULL;
+    }
+
+    if (wm->srv->backend) {
+        struct lm_output *o;
+        lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+            struct lm_rect pr = output_panel_rect(o);
+            if (!lm_rect_contains(&pr, ix, iy) || fullscreen_covers(wm, o))
+                continue;
+            struct lm_panel_info pi;
+            panel_info(wm, o, &pi);
+            out->kind = LM_PICK_PANEL;
+            if (lm_rect_contains(&pi.launcher, ix, iy)) {
+                out->kind = LM_PICK_PANEL_LAUNCHER;
+                out->rect = pi.launcher;
+            }
+            if (lm_rect_contains(&pi.run, ix, iy))
+                out->kind = LM_PICK_PANEL_RUN;
+            if (lm_rect_contains(&pi.exit, ix, iy))
+                out->kind = LM_PICK_PANEL_EXIT;
+            for (int i = 0; i < LM_NUM_WORKSPACES; i++)
+                if (lm_rect_contains(&pi.workspace[i], ix, iy)) {
+                    out->kind = LM_PICK_PANEL_WORKSPACE;
+                    out->index = i;
+                }
+            for (int i = 0; i < pi.ntasks; i++)
+                if (lm_rect_contains(&pi.task[i].rect, ix, iy)) {
+                    out->kind = LM_PICK_PANEL_TASK;
+                    out->window = pi.task_win[i];
+                }
+            return;
+        }
+    }
+}
+
+/* ---- pointer motion / hover ---------------------------------------------------------------------------- */
+
+static enum lm_cursor_shape cursor_for_edges(uint32_t e)
+{
+    switch (e) {
+    case LM_EDGE_TOP: return LM_CURSOR_RESIZE_N;
+    case LM_EDGE_BOTTOM: return LM_CURSOR_RESIZE_S;
+    case LM_EDGE_LEFT: return LM_CURSOR_RESIZE_W;
+    case LM_EDGE_RIGHT: return LM_CURSOR_RESIZE_E;
+    case LM_EDGE_TOP | LM_EDGE_LEFT: return LM_CURSOR_RESIZE_NW;
+    case LM_EDGE_TOP | LM_EDGE_RIGHT: return LM_CURSOR_RESIZE_NE;
+    case LM_EDGE_BOTTOM | LM_EDGE_LEFT: return LM_CURSOR_RESIZE_SW;
+    case LM_EDGE_BOTTOM | LM_EDGE_RIGHT: return LM_CURSOR_RESIZE_SE;
+    }
+    return LM_CURSOR_NONE;
+}
+
+void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick, double x, double y)
+{
+    (void)x;
+    (void)y;
+    struct lm_window *hw = NULL;
+    uint32_t bits = 0;
+    int pws = -1;
+    bool launcher = false, exit_btn = false, run_btn = false;
+    int menu_item = -1;
+    struct lm_window *task = NULL;
+    enum lm_cursor_shape shape = LM_CURSOR_NONE;
+
+    switch (pick->kind) {
+    case LM_PICK_CLOSE: hw = pick->window; bits = LM_FRAME_HOVER_CLOSE; break;
+    case LM_PICK_MAXIMIZE: hw = pick->window; bits = LM_FRAME_HOVER_MAXIMIZE; break;
+    case LM_PICK_MINIMIZE: hw = pick->window; bits = LM_FRAME_HOVER_MINIMIZE; break;
+    case LM_PICK_BORDER: shape = cursor_for_edges(pick->edges); break;
+    case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_MENU_ITEM: menu_item = pick->index; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_EXIT: exit_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_TASK: task = pick->window; shape = LM_CURSOR_POINTER; break;
+    default: break;
+    }
+    if (bits)
+        shape = LM_CURSOR_POINTER;
+
+    if (hw != wm->hover_win || bits != wm->hover_bits) {
+        if (wm->hover_win)
+            damage_frame(wm, wm->hover_win);
+        wm->hover_win = hw;
+        wm->hover_bits = bits;
+        if (hw)
+            damage_frame(wm, hw);
+    }
+    if (menu_item != wm->hover_menu) {
+        wm->hover_menu = menu_item;
+        if (wm->menu_open)
+            damage_rect(wm, &wm->menu_rect);
+    }
+    if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || exit_btn != wm->hover_exit ||
+        run_btn != wm->hover_run || task != wm->hover_task) {
+        wm->hover_run = run_btn;
+        wm->hover_exit = exit_btn;
+        if (!exit_btn)
+            wm->exit_armed = false;     /* moving away cancels the confirmation */
+        wm->hover_task = task;
+        wm->hover_panel_ws = pws;
+        wm->hover_launcher = launcher;
+        damage_panels(wm);
+    }
+    if (wm->srv->seat && wm->grab_kind == GRAB_NONE)
+        lm_seat_set_cursor_override(wm->srv->seat, shape);
+}
+
+/* ---- interactive move / resize ------------------------------------------------------------------------------ */
+
+static void grab_end(struct lm_wm *wm)
+{
+    struct lm_window *w = wm->grab_win;
+    enum grab_kind kind = wm->grab_kind;
+    wm->grab_kind = GRAB_NONE;
+    wm->grab_win = NULL;
+    if (wm->srv->seat) {
+        lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
+        lm_seat_set_cursor_override(wm->srv->seat, LM_CURSOR_NONE);
+    }
+    if (w && kind == GRAB_RESIZE) {
+        w->states &= ~LM_WINDOW_RESIZING;
+        send_configure(wm, w, w->width, w->height);
+    }
+}
+
+static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, double y)
+{
+    (void)time_ms;
+    struct lm_wm *wm = g->data;
+    struct lm_window *w = wm->grab_win;
+    if (!w)
+        return;
+    double dx = x - wm->grab_px, dy = y - wm->grab_py;
+    if (wm->grab_kind == GRAB_MOVE) {
+        struct lm_rect before = frame_outer(w);
+        w->x = wm->grab_x + (int32_t)dx;
+        w->y = wm->grab_y + (int32_t)dy;
+        struct lm_rect ua;
+        lm_wm_usable_area(wm, (int32_t)x, (int32_t)y, &ua);
+        if (w->y < ua.y + LM_TITLEBAR_HEIGHT && !(w->states & LM_WINDOW_FULLSCREEN))
+            w->y = ua.y + LM_TITLEBAR_HEIGHT;
+        damage_rect(wm, &before);
+        damage_frame(wm, w);
+        update_outputs(wm, w);
+    } else if (wm->grab_kind == GRAB_RESIZE) {
+        int32_t nw = wm->grab_w, nh = wm->grab_h;
+        if (wm->grab_edges & LM_EDGE_RIGHT) nw = wm->grab_w + (int32_t)dx;
+        if (wm->grab_edges & LM_EDGE_LEFT) nw = wm->grab_w - (int32_t)dx;
+        if (wm->grab_edges & LM_EDGE_BOTTOM) nh = wm->grab_h + (int32_t)dy;
+        if (wm->grab_edges & LM_EDGE_TOP) nh = wm->grab_h - (int32_t)dy;
+        clamp_size(w, &nw, &nh);
+        w->states |= LM_WINDOW_RESIZING;
+        send_configure(wm, w, nw, nh);
+    }
+}
+
+static void grab_button(struct lm_pointer_grab *g, uint32_t time_ms, uint32_t button, bool pressed)
+{
+    (void)time_ms;
+    struct lm_wm *wm = g->data;
+    if (!pressed && button == BTN_LEFT)
+        grab_end(wm);
+}
+
+static void grab_cancel(struct lm_pointer_grab *g)
+{
+    struct lm_wm *wm = g->data;
+    struct lm_window *w = wm->grab_win;
+    enum grab_kind kind = wm->grab_kind;
+    wm->grab_kind = GRAB_NONE;
+    wm->grab_win = NULL;
+    if (w && kind == GRAB_RESIZE) {
+        w->states &= ~LM_WINDOW_RESIZING;
+        send_configure(wm, w, w->width, w->height);
+    }
+}
+
+static const struct lm_pointer_grab_ops grab_ops = {
+    .motion = grab_motion,
+    .button = grab_button,
+    .cancel = grab_cancel,
+};
+
+static void grab_begin(struct lm_wm *wm, struct lm_window *w, enum grab_kind kind, uint32_t edges)
+{
+    if (!wm->srv->seat || wm->grab_kind != GRAB_NONE || (w->states & LM_WINDOW_FULLSCREEN))
+        return;
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+
+    if (kind == GRAB_RESIZE)
+        WIN(w)->tiled = 0;
+    if (kind == GRAB_MOVE && ((w->states & LM_WINDOW_MAXIMIZED) || WIN(w)->tiled)) {
+        /* dragging a maximized or tiled window restores it under the pointer */
+        struct wm_win *ww = WIN(w);
+        double ratio = w->width > 0 ? (px - w->x) / w->width : 0.5;
+        w->states &= ~LM_WINDOW_MAXIMIZED;
+        ww->tiled = 0;
+        int32_t rw = ww->have_restore ? ww->rw : w->width * 3 / 4;
+        int32_t rh = ww->have_restore ? ww->rh : w->height * 3 / 4;
+        ww->have_restore = false;
+        struct lm_rect before = frame_outer(w);
+        w->x = (int32_t)(px - rw * ratio);
+        w->y = (int32_t)py + LM_TITLEBAR_HEIGHT / 2;
+        send_configure(wm, w, rw, rh);
+        damage_rect(wm, &before);
+    }
+
+    wm->grab_kind = kind;
+    wm->grab_win = w;
+    wm->grab_px = px;
+    wm->grab_py = py;
+    wm->grab_x = w->x;
+    wm->grab_y = w->y;
+    wm->grab_w = w->width;
+    wm->grab_h = w->height;
+    wm->grab_edges = edges;
+    wm->grab.ops = &grab_ops;
+    wm->grab.data = wm;
+    if (lm_seat_pointer_grab(wm->srv->seat, &wm->grab) < 0) {
+        wm->grab_kind = GRAB_NONE;
+        wm->grab_win = NULL;
+        return;
+    }
+    lm_seat_set_cursor_override(wm->srv->seat, kind == GRAB_MOVE ? LM_CURSOR_MOVE : cursor_for_edges(edges));
+}
+
+void lm_wm_window_request_move(struct lm_window *w)
+{
+    grab_begin(w->wm, w, GRAB_MOVE, 0);
+}
+
+void lm_wm_window_request_resize(struct lm_window *w, uint32_t edges)
+{
+    if (!edges || (w->states & LM_WINDOW_MAXIMIZED))
+        return;
+    grab_begin(w->wm, w, GRAB_RESIZE, edges);
+}
+
+/* ---- buttons ---------------------------------------------------------------------------------------------------- */
+
+static uint32_t bit_for_kind(enum lm_pick_kind k)
+{
+    switch (k) {
+    case LM_PICK_CLOSE: return LM_FRAME_HOVER_CLOSE;
+    case LM_PICK_MAXIMIZE: return LM_FRAME_HOVER_MAXIMIZE;
+    case LM_PICK_MINIMIZE: return LM_FRAME_HOVER_MINIMIZE;
+    default: return 0;
+    }
+}
+
+static void launch_run(struct lm_wm *wm)
+{
+    const char *cmd = wm->srv->config.run_cmd ? wm->srv->config.run_cmd : "lumen-run";
+    lm_server_spawn(wm->srv, cmd);
+}
+
+static void launch_terminal(struct lm_wm *wm)
+{
+    const char *cmd = wm->srv->config.terminal_cmd ? wm->srv->config.terminal_cmd : "lumen-term";
+    lm_server_spawn(wm->srv, cmd);
+}
+
+bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
+                          uint32_t button, bool pressed)
+{
+    /* Any press outside the menu (and not on the launcher, which toggles it) closes it; the click goes on. */
+    if (pressed && wm->menu_open && pick->kind != LM_PICK_MENU_ITEM && pick->kind != LM_PICK_PANEL_LAUNCHER)
+        menu_set(wm, false, NULL);
+
+    /* Releases of decoration/panel presses we consumed. */
+    if (!pressed && (wm->press_bits || wm->press_panel_kind)) {
+        struct lm_window *pw = wm->press_win;
+        uint32_t pb = wm->press_bits;
+        int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
+        wm->press_win = NULL;
+        wm->press_bits = 0;
+        wm->press_panel_kind = 0;
+        if (pw)
+            damage_frame(wm, pw);
+        if (pb && pick->window == pw && bit_for_kind(pick->kind) == pb && pw) {
+            switch (pb) {
+            case LM_FRAME_HOVER_CLOSE: lm_wm_window_close(pw); break;
+            case LM_FRAME_HOVER_MAXIMIZE:
+                lm_wm_window_request_maximize(pw, !(pw->states & LM_WINDOW_MAXIMIZED));
+                break;
+            case LM_FRAME_HOVER_MINIMIZE: lm_wm_window_request_minimize(pw); break;
+            }
+        }
+        if (pk == LM_PICK_PANEL_LAUNCHER && pick->kind == LM_PICK_PANEL_LAUNCHER) {
+            if (wm->srv->config.napps > 0)
+                menu_set(wm, !wm->menu_open, &pick->rect);
+            else
+                launch_terminal(wm);
+        }
+        if (pk == LM_PICK_MENU_ITEM && pick->kind == LM_PICK_MENU_ITEM && pick->index == pi) {
+            const struct lm_app_entry *app = &wm->srv->config.apps[pi];
+            menu_set(wm, false, NULL);
+            lm_server_spawn(wm->srv, app->cmd);
+        }
+        if (pk == LM_PICK_PANEL_RUN && pick->kind == LM_PICK_PANEL_RUN)
+            launch_run(wm);
+        if (pk == LM_PICK_PANEL_EXIT && pick->kind == LM_PICK_PANEL_EXIT) {
+            if (wm->exit_armed) {
+                lm_info("exit button confirmed, quitting");
+                lm_server_quit(wm->srv);
+            } else {
+                wm->exit_armed = true;
+                damage_panels(wm);
+            }
+        }
+        (void)pi;
+        return true;
+    }
+    if (!pressed)
+        return false;
+
+    switch (pick->kind) {
+    case LM_PICK_SURFACE:
+        if (pick->window && wm->focused != pick->window)
+            lm_wm_focus_window(wm, pick->window);
+        else if (pick->window)
+            raise_window(wm, pick->window);
+        return false;
+    case LM_PICK_CLOSE:
+    case LM_PICK_MAXIMIZE:
+    case LM_PICK_MINIMIZE:
+        if (button != BTN_LEFT)
+            return true;
+        lm_wm_focus_window(wm, pick->window);
+        wm->press_win = pick->window;
+        wm->press_bits = bit_for_kind(pick->kind);
+        damage_frame(wm, pick->window);
+        return true;
+    case LM_PICK_TITLEBAR: {
+        if (!pick->window)
+            return true;
+        lm_wm_focus_window(wm, pick->window);
+        if (button != BTN_LEFT)
+            return true;
+        if (wm->last_click_win == pick->window && time_ms - wm->last_click_time < DOUBLE_CLICK_MS) {
+            wm->last_click_win = NULL;
+            lm_wm_window_request_maximize(pick->window, !(pick->window->states & LM_WINDOW_MAXIMIZED));
+            return true;
+        }
+        wm->last_click_win = pick->window;
+        wm->last_click_time = time_ms;
+        grab_begin(wm, pick->window, GRAB_MOVE, 0);
+        return true;
+    }
+    case LM_PICK_BORDER:
+        if (!pick->window)
+            return true;
+        lm_wm_focus_window(wm, pick->window);
+        if (button == BTN_LEFT)
+            grab_begin(wm, pick->window, GRAB_RESIZE, pick->edges);
+        return true;
+    case LM_PICK_MENU_ITEM:
+        if (button == BTN_LEFT) {
+            wm->press_panel_kind = LM_PICK_MENU_ITEM;
+            wm->press_panel_ws = pick->index;
+            wm->press_win = NULL;
+            wm->press_bits = 0;
+        }
+        return true;
+    case LM_PICK_PANEL_LAUNCHER:
+        if (button == BTN_LEFT) {
+            wm->press_panel_kind = LM_PICK_PANEL_LAUNCHER;
+            wm->press_win = NULL;
+            wm->press_bits = 0;
+        }
+        return true;
+    case LM_PICK_PANEL_RUN:
+    case LM_PICK_PANEL_EXIT:
+        if (button == BTN_LEFT) {
+            wm->press_panel_kind = pick->kind;
+            wm->press_win = NULL;
+            wm->press_bits = 0;
+        }
+        return true;
+    case LM_PICK_PANEL_WORKSPACE:
+        if (button == BTN_LEFT)
+            lm_wm_switch_workspace(wm, pick->index);
+        return true;
+    case LM_PICK_PANEL_TASK:
+        if (button == BTN_LEFT && pick->window) {
+            if (pick->window == wm->focused && !pick->window->minimized)
+                lm_wm_window_request_minimize(pick->window);
+            else
+                lm_wm_focus_window(wm, pick->window);
+        } else if (button == BTN_MIDDLE && pick->window) {
+            lm_wm_window_close(pick->window);
+        }
+        return true;
+    case LM_PICK_PANEL:
+        return true;
+    case LM_PICK_NONE:
+    default:
+        return false;
+    }
+}
+
+/* ---- keyboard shortcuts ---------------------------------------------------------------------------------------------- */
+
+static void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws)
+{
+    if (ws < 0 || ws >= LM_NUM_WORKSPACES || w->workspace == ws)
+        return;
+    struct lm_rect r = frame_outer(w);
+    lm_xdg_dismiss_popups(w->surface);
+    w->workspace = ws;
+    update_outputs(wm, w);
+    damage_rect(wm, &r);
+    if (wm->focused == w)
+        set_focus(wm, top_visible(wm, w));
+    damage_panels(wm);
+    refresh_pointer(wm);
+}
+
+static void cycle_focus(struct lm_wm *wm, bool backwards)
+{
+    struct lm_window *w, *pick = NULL;
+    if (backwards) {
+        /* second from the top: swap back to the previous window */
+        int seen = 0;
+        lm_list_for_each_reverse(w, &wm->windows, link)
+            if (w->mapped && w->workspace == wm->workspace && !w->minimized && ++seen == 2) {
+                pick = w;
+                break;
+            }
+    } else {
+        /* the lowest window of the workspace (minimized ones included) comes to the front */
+        lm_list_for_each(w, &wm->windows, link)
+            if (w->mapped && w->workspace == wm->workspace && w != wm->focused) {
+                pick = w;
+                break;
+            }
+    }
+    if (pick)
+        lm_wm_focus_window(wm, pick);
+}
+
+bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed, bool repeat, uint32_t mods)
+{
+    (void)time_ms;
+    mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
+    bool super = (mods & LM_MOD_SUPER) != 0;
+    bool shift = (mods & LM_MOD_SHIFT) != 0;
+    bool ctrl = (mods & LM_MOD_CTRL) != 0;
+    bool alt = (mods & LM_MOD_ALT) != 0;
+
+    if (code == KEY_ESC && wm->menu_open) {
+        if (pressed && !repeat)
+            menu_set(wm, false, NULL);
+        return true;
+    }
+
+    /* Ctrl+Alt+F1..F12 */
+    if (ctrl && alt && !super) {
+        int vt = 0;
+        if (code >= KEY_F1 && code <= KEY_F10)
+            vt = (int)(code - KEY_F1) + 1;
+        else if (code == KEY_F11)
+            vt = 11;
+        else if (code == KEY_F12)
+            vt = 12;
+        if (vt) {
+            if (pressed && !repeat && wm->srv->backend)
+                lm_backend_switch_vt(wm->srv->backend, vt);
+            return true;
+        }
+    }
+    if (!super || ctrl || alt)
+        return false;
+
+    bool handled = true;
+    switch (code) {
+    case KEY_ENTER:
+        if (pressed && !repeat) launch_terminal(wm);
+        break;
+    case KEY_R:
+        if (pressed && !repeat) launch_run(wm);
+        break;
+    case KEY_Q:
+        if (pressed && !repeat && wm->focused) lm_wm_window_close(wm->focused);
+        break;
+    case KEY_1: case KEY_2: case KEY_3: case KEY_4:
+        if (pressed && !repeat) {
+            int ws = (int)(code - KEY_1);
+            if (shift) {
+                if (wm->focused) move_to_workspace(wm, wm->focused, ws);
+            } else {
+                lm_wm_switch_workspace(wm, ws);
+            }
+        }
+        break;
+    case KEY_TAB:
+        if (pressed) cycle_focus(wm, shift);
+        break;
+    case KEY_F:
+        if (pressed && !repeat && wm->focused)
+            lm_wm_window_request_fullscreen(wm->focused, !(wm->focused->states & LM_WINDOW_FULLSCREEN), NULL);
+        break;
+    case KEY_M:
+        if (pressed && !repeat && wm->focused)
+            lm_wm_window_request_maximize(wm->focused, !(wm->focused->states & LM_WINDOW_MAXIMIZED));
+        break;
+    case KEY_LEFT: case KEY_RIGHT:
+        if (pressed && !repeat && wm->focused)
+            lm_wm_window_request_tile(wm->focused, code == KEY_LEFT ? LM_EDGE_LEFT : LM_EDGE_RIGHT);
+        break;
+    case KEY_UP:
+        if (pressed && !repeat && wm->focused)
+            lm_wm_window_request_maximize(wm->focused, true);
+        break;
+    case KEY_DOWN:
+        if (pressed && !repeat && wm->focused) {
+            if (wm->focused->states & LM_WINDOW_MAXIMIZED)
+                lm_wm_window_request_maximize(wm->focused, false);
+            else
+                lm_wm_window_request_tile(wm->focused, LM_EDGE_NONE);
+        }
+        break;
+    case KEY_E:
+        if (shift) {
+            if (pressed && !repeat) lm_server_quit(wm->srv);
+        } else {
+            handled = false;
+        }
+        break;
+    default:
+        handled = false;
+    }
+    return handled;
+}

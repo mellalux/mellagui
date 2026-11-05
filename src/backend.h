@@ -1,0 +1,164 @@
+#ifndef LUMEN_BACKEND_H
+#define LUMEN_BACKEND_H
+
+/*
+ * Display backend abstraction. Implemented by backend_drm.c (DRM/KMS on a
+ * real VT) and backend_headless.c (offscreen, used by automated tests).
+ *
+ * A backend owns outputs (struct lm_output) and their framebuffers, tells
+ * the compositor when to draw, and presents finished frames. It registers
+ * its own fds (DRM events, VT signals, timers, control socket) with
+ * server->loop during ops->init.
+ *
+ * ---- Frame protocol (per output) --------------------------------------------
+ *   output_ready(out, t)  backend -> compositor: "you may draw now"; sent
+ *                         once after output_added and again after each
+ *                         presented frame became visible (DRM: page-flip
+ *                         event; headless: 60 Hz timer). `t` is msec32.
+ *   get_framebuffer(out)  compositor draws into the returned buffer. NULL
+ *                         means "cannot draw now" (flip pending, session
+ *                         inactive); wait for the next output_ready.
+ *   present(out, damage)  queue the frame. After this get_framebuffer returns
+ *                         NULL until the backend sends output_ready again.
+ * Software renderer + double buffering: fb->age tells the renderer which
+ * previous frame the buffer contains, so it knows how much to redraw
+ * (0 = undefined contents, redraw everything; 1 = the frame drawn right
+ * before the last present; 2 = the one before that, ...).
+ *
+ * ---- Headless control socket (backend_headless.c) -----------------------------
+ * If config.control_path is set the headless backend listens on that AF_UNIX
+ * SOCK_STREAM socket. Line-based; every command is answered with exactly
+ * one line "ok[ ...]" or "err <message>" (multi-line output of `windows` is
+ * terminated by a line "ok"):
+ *   dump <path>        render pending damage now (lm_render_flush), write
+ *                      output 0 as binary PPM (P6) to <path>
+ *   sync               lm_render_flush, then reply ok (a barrier for tests)
+ *   key <code> <0|1>   inject an evdev key (e.g. 28 = KEY_ENTER), 1 = press
+ *   motion <dx> <dy>   inject relative pointer motion (already-accelerated px)
+ *   abs <x> <y>        warp the pointer to absolute global pixel position
+ *   button <code> <0|1>  e.g. 272 = BTN_LEFT
+ *   axis <v|h> <value> <discrete>   scroll (value in px-like units, discrete steps)
+ *   windows            dump lm_wm_describe() output
+ *   quit               lm_server_quit()
+ * SIGUSR1 (or `dump`) with config.dump_path set writes that file too.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include "list.h"
+#include "server.h"
+#include "util.h"
+
+struct lm_backend;
+struct lm_output;
+
+/* All backends draw XRGB8888 (0x00RRGGBB native endian = bytes B,G,R,X). */
+struct lm_framebuffer {
+    uint32_t *pixels;
+    int32_t width, height;
+    int32_t stride;     /* bytes */
+    int age;            /* see "Frame protocol" */
+};
+
+struct lm_output {
+    struct lm_list link;            /* in backend->outputs */
+    struct lm_backend *backend;
+    char name[32];                  /* "HDMI-A-1", "headless-0" */
+    char make[32];
+    char model[32];
+    int32_t x, y;                   /* position in global compositor space; set by output.c */
+    int32_t width, height;          /* current mode in pixels */
+    int32_t refresh_mhz;            /* e.g. 60000 */
+    int32_t phys_width_mm, phys_height_mm;
+    int32_t scale;                  /* always 1 for now */
+    uint32_t transform;             /* LM_TRANSFORM_NORMAL */
+
+    void *backend_data;             /* backend private */
+    void *render_data;              /* renderer private (damage, history) */
+    void *wm_data;                  /* wm private (panel, workspace ...) */
+    void *output_data;              /* output.c private (bound wl_output resources) */
+};
+
+/* Callbacks installed by main.c before ops->init(). `data` is passed back. */
+struct lm_backend_listener {
+    void *data;
+    /* A new output exists (called from init() for the initial ones and on hotplug). */
+    void (*output_added)(void *data, struct lm_output *out);
+    /* Mode/size changed (hotplug re-probe): width/height/refresh were updated. */
+    void (*output_changed)(void *data, struct lm_output *out);
+    /* Called before the output is unlinked and freed. */
+    void (*output_removed)(void *data, struct lm_output *out);
+    /* See "Frame protocol". */
+    void (*output_ready)(void *data, struct lm_output *out, uint32_t time_ms);
+    /*
+     * VT/session switched away (false) or back (true). While inactive the
+     * backend does not present and get_framebuffer returns NULL. On
+     * re-activation everything must be redrawn (main.c calls
+     * lm_render_damage_all) and input devices resumed (lm_input_set_active).
+     */
+    void (*session_active)(void *data, bool active);
+};
+
+struct lm_backend_ops {
+    const char *name;
+    /*
+     * Open devices, probe outputs, register fds with b->server->loop and
+     * emit output_added for each output. Returns 0 or -1 with a diagnostic
+     * logged (e.g. how to get access to /dev/dri/card*).
+     */
+    int (*init)(struct lm_backend *b);
+    /*
+     * Restore the display (DRM: previous CRTC config, KD_TEXT, VT mode,
+     * drop master) and free everything. Emits output_removed first.
+     */
+    void (*destroy)(struct lm_backend *b);
+    struct lm_framebuffer *(*get_framebuffer)(struct lm_output *out);
+    /*
+     * Queue `out`'s current framebuffer for display. `damage` (global
+     * coordinates translated to output-local) may be NULL = whole output.
+     * Returns 0 or -1 (then the backend still sends output_ready later).
+     */
+    int (*present)(struct lm_output *out, const struct lm_rect *damage, int n_damage);
+    /* Switch to virtual terminal `vt` (1..12). NULL if unsupported (headless). */
+    int (*switch_vt)(struct lm_backend *b, int vt);
+};
+
+struct lm_backend {
+    const struct lm_backend_ops *ops;
+    struct lm_server *server;
+    struct lm_backend_listener listener;
+    struct lm_list outputs;         /* struct lm_output.link */
+    bool session_active;
+    void *priv;
+};
+
+/*
+ * DRM/KMS backend. `device` NULL = scan /dev/dri/card*. Opens devices through
+ * server->seatdev when available (logind TakeDevice) and falls back to
+ * open(2). Manages VT (KD_GRAPHICS, VT_PROCESS switching) and restores
+ * everything on exit, fatal signals and crashes.
+ */
+struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *device);
+
+/* Offscreen backend with one w x h output named "headless-0". */
+struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h);
+/* Write output 0's last drawn frame to `path` as P6 PPM. Returns 0 or -1. */
+int lm_backend_headless_dump(struct lm_backend *b, const char *path);
+
+/* Thin wrappers around the vtable. */
+static inline int lm_backend_init(struct lm_backend *b) { return b->ops->init(b); }
+static inline void lm_backend_destroy(struct lm_backend *b) { b->ops->destroy(b); }
+static inline struct lm_framebuffer *lm_output_get_framebuffer(struct lm_output *o)
+{
+    return o->backend->ops->get_framebuffer(o);
+}
+static inline int lm_output_present(struct lm_output *o, const struct lm_rect *d, int n)
+{
+    return o->backend->ops->present(o, d, n);
+}
+static inline int lm_backend_switch_vt(struct lm_backend *b, int vt)
+{
+    return b->ops->switch_vt ? b->ops->switch_vt(b, vt) : -1;
+}
+
+#endif

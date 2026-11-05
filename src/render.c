@@ -1,0 +1,834 @@
+/*
+ * Software compositor. See render.h for the contract.
+ *
+ * Per output we keep the damage accumulated since the last presented frame
+ * plus the damage of the last HIST frames; together with the framebuffer age
+ * reported by the backend that tells us exactly what to redraw.
+ */
+#include "render.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "font.h"
+#include "log.h"
+#include "output.h"
+#include "seat.h"
+#include "surface.h"
+#include "wm.h"
+
+#define HIST 3
+#define MAX_REDRAW_RECTS 12
+
+/* ---- colour scheme (XRGB8888) --------------------------------------------------- */
+
+#define COL_WALL_TOP     0x1b2a49u
+#define COL_WALL_BOTTOM  0x3a6b72u
+#define COL_FRAME_ACTIVE 0x3b4a6bu
+#define COL_FRAME_IDLE   0x2a2f3au
+#define COL_CONTENT_BG   0x101216u
+#define COL_TEXT_ACTIVE  0xffffffu
+#define COL_TEXT_IDLE    0x9aa0aeu
+#define COL_BTN_HOVER    0x5a6c96u
+#define COL_BTN_PRESSED  0x2c3856u
+#define COL_BTN_CLOSE    0xc0392bu
+#define COL_PANEL        0x14171fu
+#define COL_PANEL_BTN    0x2d3a5au
+#define COL_PANEL_HOVER  0x41527eu
+#define COL_PANEL_ACCENT 0x6fa8ffu
+#define COL_PANEL_TEXT   0xe6e9efu
+#define COL_PANEL_DANGER 0xc0392bu
+#define COL_PANEL_DIM    0x7b8294u
+
+struct out_state {
+    struct lm_output *out;
+    struct lm_region pending;           /* global coordinates */
+    struct lm_region hist[HIST];        /* damage of the last HIST presented frames */
+    bool ready;                         /* backend allows drawing */
+    bool presented;                     /* a frame was presented, frame-done not yet sent */
+    bool full;                          /* next frame must repaint everything */
+};
+
+struct lm_renderer {
+    struct lm_server *srv;
+    struct lm_idle *idle;
+    struct lm_timer *frame_timer;
+    struct lm_rect cursor_rect;         /* last damaged cursor rectangle (global) */
+    uint32_t last_time_ms;
+    bool in_flush;
+};
+
+struct paint_ctx {
+    struct lm_renderer *r;
+    struct lm_output *out;
+    struct lm_framebuffer *fb;
+    struct lm_rect clip;                /* global, already clipped to the output */
+};
+
+/* ---- cursor sprites --------------------------------------------------------------- */
+
+#define SPR_W 17
+#define SPR_H 19
+
+struct sprite {
+    uint32_t px[SPR_W * SPR_H];         /* ARGB premultiplied; 0 = transparent */
+    int hot_x, hot_y;
+    bool built;
+};
+
+static struct sprite sprites[LM_CURSOR_POINTER + 1];
+
+static const char *arrow_art[] = {
+    "X           ",
+    "XX          ",
+    "X.X         ",
+    "X..X        ",
+    "X...X       ",
+    "X....X      ",
+    "X.....X     ",
+    "X......X    ",
+    "X.......X   ",
+    "X........X  ",
+    "X.........X ",
+    "X......XXXXX",
+    "X...X..X    ",
+    "X..X X..X   ",
+    "X.X  X..X   ",
+    "XX    X..X  ",
+    "X     X..X  ",
+    "       X..X ",
+    "       XXX  ",
+};
+
+static void spr_outline(struct sprite *s)
+{
+    /* White pixels are 1, outline is derived: any empty neighbour of a white pixel turns black. */
+    uint32_t tmp[SPR_W * SPR_H];
+    memcpy(tmp, s->px, sizeof(tmp));
+    for (int y = 0; y < SPR_H; y++)
+        for (int x = 0; x < SPR_W; x++) {
+            if (tmp[y * SPR_W + x] != 0xffffffffu)
+                continue;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= SPR_W || ny >= SPR_H)
+                        continue;
+                    if (s->px[ny * SPR_W + nx] == 0)
+                        s->px[ny * SPR_W + nx] = 0xff000000u;
+                }
+        }
+}
+
+static void spr_put(struct sprite *s, int x, int y)
+{
+    if (x >= 0 && y >= 0 && x < SPR_W && y < SPR_H)
+        s->px[y * SPR_W + x] = 0xffffffffu;
+}
+
+static void spr_double_arrow(struct sprite *s, int dx, int dy)
+{
+    int cx = SPR_W / 2, cy = SPR_H / 2;
+    int px = -dy, py = dx; /* perpendicular */
+    for (int t = -6; t <= 6; t++) {
+        spr_put(s, cx + dx * t, cy + dy * t);
+        if (dx == 0 || dy == 0) {
+            /* axis aligned lines are one pixel wide, make them 2 wide for visibility */
+        }
+    }
+    for (int end = -1; end <= 1; end += 2)
+        for (int k = 0; k <= 3; k++)
+            for (int w = -k; w <= k; w++)
+                spr_put(s, cx + dx * (end * (6 - k)) + px * w, cy + dy * (end * (6 - k)) + py * w);
+}
+
+static void sprite_build(enum lm_cursor_shape shape)
+{
+    struct sprite *s = &sprites[shape];
+    if (s->built)
+        return;
+    memset(s->px, 0, sizeof(s->px));
+    s->hot_x = s->hot_y = 0;
+    switch (shape) {
+    case LM_CURSOR_RESIZE_N: case LM_CURSOR_RESIZE_S:
+        spr_double_arrow(s, 0, 1); s->hot_x = SPR_W / 2; s->hot_y = SPR_H / 2; break;
+    case LM_CURSOR_RESIZE_W: case LM_CURSOR_RESIZE_E:
+        spr_double_arrow(s, 1, 0); s->hot_x = SPR_W / 2; s->hot_y = SPR_H / 2; break;
+    case LM_CURSOR_RESIZE_NW: case LM_CURSOR_RESIZE_SE:
+        spr_double_arrow(s, 1, 1); s->hot_x = SPR_W / 2; s->hot_y = SPR_H / 2; break;
+    case LM_CURSOR_RESIZE_NE: case LM_CURSOR_RESIZE_SW:
+        spr_double_arrow(s, 1, -1); s->hot_x = SPR_W / 2; s->hot_y = SPR_H / 2; break;
+    case LM_CURSOR_MOVE:
+        spr_double_arrow(s, 0, 1);
+        spr_double_arrow(s, 1, 0);
+        s->hot_x = SPR_W / 2; s->hot_y = SPR_H / 2; break;
+    default:
+        for (size_t y = 0; y < LM_ARRAY_LEN(arrow_art); y++)
+            for (size_t x = 0; arrow_art[y][x]; x++) {
+                char c = arrow_art[y][x];
+                if (c == 'X')
+                    s->px[y * SPR_W + x] = 0xff000000u;
+                else if (c == '.')
+                    s->px[y * SPR_W + x] = 0xffffffffu;
+            }
+        s->built = true;
+        return;
+    }
+    spr_outline(s);
+    s->built = true;
+}
+
+/* ---- pixel helpers --------------------------------------------------------------------- */
+
+static inline uint32_t div255(uint32_t x)
+{
+    return ((x + 128) * 257) >> 16;
+}
+
+static inline uint32_t blend_px(uint32_t src, uint32_t dst)
+{
+    uint32_t a = src >> 24;
+    if (a == 255)
+        return src & 0x00ffffffu;
+    if (a == 0)
+        return dst;
+    uint32_t da = 255 - a;
+    uint32_t r = ((src >> 16) & 255) + div255(((dst >> 16) & 255) * da);
+    uint32_t g = ((src >> 8) & 255) + div255(((dst >> 8) & 255) * da);
+    uint32_t b = (src & 255) + div255((dst & 255) * da);
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return (r << 16) | (g << 8) | b;
+}
+
+static inline uint32_t *fb_row(const struct paint_ctx *c, int gy)
+{
+    return (uint32_t *)((uint8_t *)c->fb->pixels +
+                        (size_t)(gy - c->out->y) * (size_t)c->fb->stride) - c->out->x;
+}
+
+static void fill_rect(const struct paint_ctx *c, const struct lm_rect *rect, uint32_t color)
+{
+    struct lm_rect r;
+    if (!lm_rect_intersect(rect, &c->clip, &r))
+        return;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++)
+            row[x] = color;
+    }
+}
+
+static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t color)
+{
+    if (x < c->clip.x || y < c->clip.y || x >= c->clip.x + c->clip.w || y >= c->clip.y + c->clip.h)
+        return;
+    fb_row(c, y)[x] = color;
+}
+
+static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
+                      const char *text, uint32_t color)
+{
+    struct lm_rect lim;
+    if (!lm_rect_intersect(area, &c->clip, &lim))
+        return;
+    size_t len = strlen(text);
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        if (x + LM_FONT_W > lim.x && x < lim.x + lim.w) {
+            const uint8_t *g = lm_font_glyph(cp);
+            for (int row = 0; row < LM_FONT_H; row++) {
+                int py = y + row;
+                if (py < lim.y || py >= lim.y + lim.h)
+                    continue;
+                uint32_t *dst = fb_row(c, py);
+                for (int col = 0; col < LM_FONT_W; col++) {
+                    int px = x + col;
+                    if (px < lim.x || px >= lim.x + lim.w)
+                        continue;
+                    if (g[row] & (0x80 >> col))
+                        dst[px] = color;
+                }
+            }
+        }
+        x += LM_FONT_W;
+        if (x >= lim.x + lim.w)
+            break;
+    }
+}
+
+static void draw_text_centered(const struct paint_ctx *c, const struct lm_rect *area,
+                               const char *text, uint32_t color)
+{
+    int w = lm_font_text_width(text);
+    int x = area->x + (area->w - w) / 2;
+    if (x < area->x)
+        x = area->x;
+    int y = area->y + (area->h - LM_FONT_H) / 2;
+    draw_text(c, area, x, y, text, color);
+}
+
+/* ---- scene items -------------------------------------------------------------------------- */
+
+static uint32_t lerp_color(uint32_t a, uint32_t b, int num, int den)
+{
+    if (den <= 0)
+        return a;
+    uint32_t r = 0;
+    for (int sh = 16; sh >= 0; sh -= 8) {
+        int ca = (a >> sh) & 255, cb = (b >> sh) & 255;
+        r |= (uint32_t)(ca + (cb - ca) * num / den) << sh;
+    }
+    return r;
+}
+
+static void paint_wallpaper(const struct paint_ctx *c)
+{
+    struct lm_rect r = c->clip;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t col = lerp_color(COL_WALL_TOP, COL_WALL_BOTTOM, y - c->out->y, c->out->height);
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++)
+            row[x] = col;
+    }
+}
+
+static void draw_line(const struct paint_ctx *c, int x0, int y0, int x1, int y1, uint32_t color)
+{
+    int dx = abs(x1 - x0), dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        put_px(c, x0, y0, color);
+        if (x0 == x1 && y0 == y1)
+            break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void draw_frame_button(const struct paint_ctx *c, const struct lm_frame_info *f,
+                              const struct lm_rect *b, uint32_t which, uint32_t fg)
+{
+    uint32_t bg = 0;
+    bool filled = false;
+    if (f->pressed & which) {
+        bg = (which == LM_FRAME_HOVER_CLOSE) ? 0x8e2a20u : COL_BTN_PRESSED;
+        filled = true;
+    } else if (f->hover & which) {
+        bg = (which == LM_FRAME_HOVER_CLOSE) ? COL_BTN_CLOSE : COL_BTN_HOVER;
+        filled = true;
+    }
+    if (filled)
+        fill_rect(c, b, bg);
+    int cx = b->x + b->w / 2, cy = b->y + b->h / 2;
+    switch (which) {
+    case LM_FRAME_HOVER_CLOSE:
+        draw_line(c, cx - 4, cy - 4, cx + 4, cy + 4, fg);
+        draw_line(c, cx - 4, cy - 3, cx + 3, cy + 4, fg);
+        draw_line(c, cx - 3, cy - 4, cx + 4, cy + 3, fg);
+        draw_line(c, cx - 4, cy + 4, cx + 4, cy - 4, fg);
+        draw_line(c, cx - 4, cy + 3, cx + 3, cy - 4, fg);
+        draw_line(c, cx - 3, cy + 4, cx + 4, cy - 3, fg);
+        break;
+    case LM_FRAME_HOVER_MAXIMIZE:
+        if (f->maximized) {
+            draw_line(c, cx - 4, cy - 1, cx + 2, cy - 1, fg);
+            draw_line(c, cx - 4, cy + 4, cx + 2, cy + 4, fg);
+            draw_line(c, cx - 4, cy - 1, cx - 4, cy + 4, fg);
+            draw_line(c, cx + 2, cy - 1, cx + 2, cy + 4, fg);
+            draw_line(c, cx - 2, cy - 4, cx + 4, cy - 4, fg);
+            draw_line(c, cx + 4, cy - 4, cx + 4, cy + 1, fg);
+            draw_line(c, cx - 2, cy - 4, cx - 2, cy - 2, fg);
+        } else {
+            draw_line(c, cx - 4, cy - 4, cx + 4, cy - 4, fg);
+            draw_line(c, cx - 4, cy + 4, cx + 4, cy + 4, fg);
+            draw_line(c, cx - 4, cy - 4, cx - 4, cy + 4, fg);
+            draw_line(c, cx + 4, cy - 4, cx + 4, cy + 4, fg);
+            draw_line(c, cx - 4, cy - 3, cx + 4, cy - 3, fg);
+        }
+        break;
+    case LM_FRAME_HOVER_MINIMIZE:
+        draw_line(c, cx - 4, cy + 4, cx + 4, cy + 4, fg);
+        draw_line(c, cx - 4, cy + 3, cx + 4, cy + 3, fg);
+        break;
+    }
+}
+
+static void paint_frame(const struct paint_ctx *c, const struct lm_frame_info *f)
+{
+    uint32_t col = f->active ? COL_FRAME_ACTIVE : COL_FRAME_IDLE;
+    uint32_t fg = f->active ? COL_TEXT_ACTIVE : COL_TEXT_IDLE;
+    const struct lm_rect *o = &f->outer;
+    int bw = LM_BORDER_WIDTH;
+
+    fill_rect(c, &f->titlebar, col);
+    if (o->h > f->titlebar.h) {
+        struct lm_rect left = lm_rect_make(o->x, o->y + f->titlebar.h, bw, o->h - f->titlebar.h);
+        struct lm_rect right = lm_rect_make(o->x + o->w - bw, left.y, bw, left.h);
+        struct lm_rect bottom = lm_rect_make(o->x + bw, o->y + o->h - bw, o->w - 2 * bw, bw);
+        struct lm_rect body = lm_rect_make(o->x + bw, left.y, o->w - 2 * bw, left.h - bw);
+        fill_rect(c, &left, col);
+        fill_rect(c, &right, col);
+        fill_rect(c, &bottom, col);
+        fill_rect(c, &body, COL_CONTENT_BG);
+    }
+    draw_frame_button(c, f, &f->btn_min, LM_FRAME_HOVER_MINIMIZE, fg);
+    draw_frame_button(c, f, &f->btn_max, LM_FRAME_HOVER_MAXIMIZE, fg);
+    draw_frame_button(c, f, &f->btn_close, LM_FRAME_HOVER_CLOSE, fg);
+    if (f->title && f->title[0]) {
+        int ty = f->title_text.y + (f->title_text.h - LM_FONT_H) / 2;
+        draw_text(c, &f->title_text, f->title_text.x + 4, ty, f->title, fg);
+    }
+}
+
+static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *m)
+{
+    fill_rect(c, &m->rect, COL_PANEL_ACCENT);                           /* 1 px border */
+    struct lm_rect in = lm_rect_make(m->rect.x + 1, m->rect.y + 1, m->rect.w - 2, m->rect.h - 2);
+    fill_rect(c, &in, COL_PANEL);
+    for (int i = 0; i < m->n; i++) {
+        struct lm_rect r = lm_rect_make(m->rect.x + 2, m->rect.y + 2 + i * m->item_h, m->rect.w - 4, m->item_h);
+        if (i == m->hover)
+            fill_rect(c, &r, COL_PANEL_HOVER);
+        int ty = r.y + (r.h - LM_FONT_H) / 2;
+        draw_text(c, &r, r.x + 10, ty, m->label[i], COL_PANEL_TEXT);
+    }
+}
+
+static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
+{
+    fill_rect(c, &p->bar, COL_PANEL);
+    /* thin accent line at the bottom edge */
+    struct lm_rect line = lm_rect_make(p->bar.x, p->bar.y + p->bar.h - 1, p->bar.w, 1);
+    fill_rect(c, &line, 0x262c3bu);
+
+    fill_rect(c, &p->launcher, p->hover_launcher ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    draw_text_centered(c, &p->launcher, "Lumen", COL_PANEL_TEXT);
+
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
+        const struct lm_rect *w = &p->workspace[i];
+        bool cur = i == p->current_workspace;
+        uint32_t bg = cur ? COL_PANEL_ACCENT : (i == p->hover_workspace ? COL_PANEL_HOVER : COL_PANEL_BTN);
+        fill_rect(c, w, bg);
+        char n[2] = { (char)('1' + i), 0 };
+        draw_text_centered(c, w, n, cur ? COL_PANEL : ((p->workspace_occupied >> i) & 1 ? COL_PANEL_TEXT : COL_PANEL_DIM));
+        if (!cur && ((p->workspace_occupied >> i) & 1)) {
+            struct lm_rect dot = lm_rect_make(w->x + w->w / 2 - 2, w->y + w->h - 5, 4, 2);
+            fill_rect(c, &dot, COL_PANEL_ACCENT);
+        }
+    }
+    for (int i = 0; i < p->ntasks; i++) {
+        const struct lm_rect *r = &p->task[i].rect;
+        uint32_t bg = p->task[i].active ? COL_PANEL_ACCENT : (p->task[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN);
+        uint32_t fg = p->task[i].active ? COL_PANEL : (p->task[i].minimized ? COL_PANEL_DIM : COL_PANEL_TEXT);
+        fill_rect(c, r, bg);
+        struct lm_rect label = lm_rect_make(r->x + 4, r->y, r->w - 8, r->h);
+        draw_text_centered(c, &label, p->task[i].title[0] ? p->task[i].title : "-", fg);
+    }
+    if (!p->ntasks && p->active_title && p->active_title[0])
+        draw_text_centered(c, &p->title_area, p->active_title, COL_PANEL_TEXT);
+    fill_rect(c, &p->run, p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
+    uint32_t ebg = p->exit_armed ? COL_PANEL_DANGER : (p->hover_exit ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    fill_rect(c, &p->exit, ebg);
+    draw_text_centered(c, &p->exit, p->exit_armed ? "Sure?" : "Exit", COL_PANEL_TEXT);
+    draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
+}
+
+/* ---- surface blitting ------------------------------------------------------------------------ */
+
+static void blit_surface(const struct paint_ctx *c, struct lm_surface *s, int32_t ox, int32_t oy)
+{
+    if (!s->has_content || !s->tex.pixels)
+        return;
+    struct lm_rect dst = lm_rect_make(ox, oy, s->width, s->height), r;
+    if (!lm_rect_intersect(&dst, &c->clip, &r))
+        return;
+    const struct lm_texture *t = &s->tex;
+    int scale = s->scale > 0 ? s->scale : 1;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *drow = fb_row(c, y);
+        int sy = (y - oy) * scale;
+        if (sy >= t->height)
+            break;
+        const uint32_t *srow = t->pixels + (size_t)sy * (size_t)(t->stride / 4);
+        if (scale == 1 && t->opaque) {
+            memcpy(drow + r.x, srow + (r.x - ox), (size_t)r.w * 4);
+            continue;
+        }
+        for (int x = r.x; x < r.x + r.w; x++) {
+            int sx = (x - ox) * scale;
+            if (sx >= t->width)
+                break;
+            uint32_t p = srow[sx];
+            uint32_t a = p >> 24;
+            if (a == 255 || t->opaque)
+                drow[x] = p & 0x00ffffffu;
+            else if (a)
+                drow[x] = blend_px(p, drow[x]);
+        }
+    }
+}
+
+static bool visit_blit(struct lm_surface *s, int32_t x, int32_t y, void *data)
+{
+    blit_surface(data, s, x, y);
+    return true;
+}
+
+/* ---- cursor ----------------------------------------------------------------------------------- */
+
+struct cursor_view {
+    bool visible;
+    struct lm_rect rect;                /* global */
+    const struct sprite *sprite;        /* built-in */
+    struct lm_surface *surface;         /* client cursor */
+    int32_t origin_x, origin_y;         /* surface origin, global */
+};
+
+static void cursor_view(struct lm_renderer *r, struct cursor_view *v)
+{
+    memset(v, 0, sizeof(*v));
+    if (!r->srv->seat)
+        return;
+    struct lm_cursor cur;
+    double px, py;
+    lm_seat_get_cursor(r->srv->seat, &cur);
+    lm_seat_pointer_position(r->srv->seat, &px, &py);
+    if (cur.shape == LM_CURSOR_HIDDEN || cur.shape == LM_CURSOR_NONE)
+        return;
+    int32_t ix = (int32_t)px, iy = (int32_t)py;
+    if (cur.shape == LM_CURSOR_SURFACE && cur.surface) {
+        struct lm_rect ext;
+        if (!lm_surface_tree_extents(cur.surface, &ext))
+            return;
+        v->surface = cur.surface;
+        v->origin_x = ix - cur.hot_x;
+        v->origin_y = iy - cur.hot_y;
+        v->rect = lm_rect_make(v->origin_x + ext.x, v->origin_y + ext.y, ext.w, ext.h);
+        v->visible = true;
+        return;
+    }
+    enum lm_cursor_shape shape = cur.shape;
+    if (shape < LM_CURSOR_DEFAULT || shape > LM_CURSOR_POINTER || shape == LM_CURSOR_SURFACE)
+        shape = LM_CURSOR_DEFAULT;
+    sprite_build(shape);
+    v->sprite = &sprites[shape];
+    v->rect = lm_rect_make(ix - v->sprite->hot_x, iy - v->sprite->hot_y, SPR_W, SPR_H);
+    v->visible = true;
+}
+
+static void paint_cursor(const struct paint_ctx *c)
+{
+    struct cursor_view v;
+    cursor_view(c->r, &v);
+    if (!v.visible || !lm_rect_overlaps(&v.rect, &c->clip))
+        return;
+    if (v.surface) {
+        lm_surface_tree_visit(v.surface, v.origin_x, v.origin_y, visit_blit, (void *)c);
+        return;
+    }
+    for (int y = 0; y < SPR_H; y++) {
+        int gy = v.rect.y + y;
+        if (gy < c->clip.y || gy >= c->clip.y + c->clip.h)
+            continue;
+        uint32_t *row = fb_row(c, gy);
+        for (int x = 0; x < SPR_W; x++) {
+            int gx = v.rect.x + x;
+            if (gx < c->clip.x || gx >= c->clip.x + c->clip.w)
+                continue;
+            uint32_t p = v.sprite->px[y * SPR_W + x];
+            if (p)
+                row[gx] = blend_px(p, row[gx]);
+        }
+    }
+}
+
+/* ---- painting a rectangle of an output ------------------------------------------------------- */
+
+static bool scene_cb(const struct lm_scene_item *item, void *data)
+{
+    struct paint_ctx *c = data;
+    switch (item->kind) {
+    case LM_SCENE_WALLPAPER:
+        if (item->output == c->out)
+            paint_wallpaper(c);
+        break;
+    case LM_SCENE_FRAME:
+        paint_frame(c, &item->u.frame);
+        break;
+    case LM_SCENE_SURFACE:
+        lm_surface_tree_visit(item->u.surface.root, item->u.surface.x, item->u.surface.y,
+                              visit_blit, c);
+        break;
+    case LM_SCENE_PANEL:
+        if (item->output == c->out)
+            paint_panel(c, &item->u.panel);
+        break;
+    case LM_SCENE_MENU:
+        paint_menu(c, &item->u.menu);
+        break;
+    }
+    return true;
+}
+
+static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_framebuffer *fb,
+                       const struct lm_rect *rect)
+{
+    struct paint_ctx c = { .r = r, .out = st->out, .fb = fb };
+    struct lm_rect orect = lm_output_rect(st->out);
+    if (!lm_rect_intersect(rect, &orect, &c.clip))
+        return;
+    if (r->srv->wm)
+        lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
+    else
+        paint_wallpaper(&c);
+    paint_cursor(&c);
+}
+
+/* ---- damage & scheduling -------------------------------------------------------------------- */
+
+static struct out_state *state_of(struct lm_output *out)
+{
+    return out->render_data;
+}
+
+static void send_frame_done(struct lm_renderer *r, uint32_t t)
+{
+    r->last_time_ms = t;
+    if (r->srv->wm)
+        lm_wm_send_frame_done(r->srv->wm, t);
+    if (r->srv->seat)
+        lm_seat_send_frame_done(r->srv->seat, t);
+}
+
+/* Returns true if a frame was presented. */
+static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
+{
+    struct lm_output *out = st->out;
+    if (!force && !st->ready)
+        return false;
+    bool has_damage = !lm_region_is_empty(&st->pending) || st->full;
+    if (!has_damage)
+        return false;
+    struct lm_framebuffer *fb = lm_output_get_framebuffer(out);
+    if (!fb || !fb->pixels)
+        return false;
+
+    struct lm_rect orect = lm_output_rect(out);
+    struct lm_region redraw;
+    lm_region_init(&redraw);
+    bool full = st->full || fb->age <= 0 || fb->age > HIST + 1;
+    if (full) {
+        lm_region_add_rect(&redraw, &orect);
+    } else {
+        lm_region_add_region(&redraw, &st->pending);
+        for (int i = 0; i < fb->age - 1 && i < HIST; i++)
+            lm_region_add_region(&redraw, &st->hist[i]);
+    }
+    if (redraw.n > MAX_REDRAW_RECTS) {
+        struct lm_rect e;
+        lm_region_extents(&redraw, &e);
+        lm_region_clear(&redraw);
+        lm_region_add_rect(&redraw, &e);
+    }
+    lm_region_intersect_rect(&redraw, &orect);
+
+    for (int i = 0; i < redraw.n; i++)
+        paint_rect(r, st, fb, &redraw.rects[i]);
+
+    /* Present with output-local damage. */
+    struct lm_rect *local = malloc(sizeof(*local) * (size_t)(redraw.n ? redraw.n : 1));
+    int nlocal = 0;
+    if (local && !full) {
+        for (int i = 0; i < redraw.n; i++) {
+            local[nlocal] = redraw.rects[i];
+            local[nlocal].x -= out->x;
+            local[nlocal].y -= out->y;
+            nlocal++;
+        }
+    }
+    lm_output_present(out, (local && nlocal) ? local : NULL, nlocal);
+    free(local);
+
+    /* Rotate history; the frame's own change set becomes hist[0]. */
+    lm_region_fini(&st->hist[HIST - 1]);
+    for (int i = HIST - 1; i > 0; i--)
+        st->hist[i] = st->hist[i - 1];
+    lm_region_init(&st->hist[0]);
+    lm_region_copy(&st->hist[0], &st->pending);
+    lm_region_clear(&st->pending);
+    lm_region_fini(&redraw);
+    st->full = false;
+    st->ready = false;
+    st->presented = true;
+    return true;
+}
+
+static void idle_draw(void *data)
+{
+    struct lm_renderer *r = data;
+    struct lm_backend *b = r->srv->backend;
+    if (!b)
+        return;
+    struct lm_output *o;
+    lm_list_for_each(o, &b->outputs, link) {
+        struct out_state *st = state_of(o);
+        if (st)
+            draw_output(r, st, false);
+    }
+}
+
+static void frame_timer_fn(void *data)
+{
+    struct lm_renderer *r = data;
+    send_frame_done(r, lm_now_msec32());
+}
+
+struct lm_renderer *lm_render_create(struct lm_server *srv)
+{
+    struct lm_renderer *r = calloc(1, sizeof(*r));
+    if (!r)
+        return NULL;
+    r->srv = srv;
+    r->idle = lm_loop_add_idle(srv->loop, idle_draw, r);
+    r->frame_timer = lm_loop_add_timer(srv->loop, frame_timer_fn, r);
+    return r;
+}
+
+void lm_render_destroy(struct lm_renderer *r)
+{
+    if (!r)
+        return;
+    if (r->srv->backend) {
+        struct lm_output *o;
+        lm_list_for_each(o, &r->srv->backend->outputs, link)
+            lm_render_output_removed(r, o);
+    }
+    if (r->idle)
+        lm_idle_destroy(r->idle);
+    if (r->frame_timer)
+        lm_timer_destroy(r->frame_timer);
+    free(r);
+}
+
+void lm_render_output_added(struct lm_renderer *r, struct lm_output *out)
+{
+    struct out_state *st = calloc(1, sizeof(*st));
+    if (!st)
+        return;
+    st->out = out;
+    lm_region_init(&st->pending);
+    for (int i = 0; i < HIST; i++)
+        lm_region_init(&st->hist[i]);
+    st->full = true;
+    out->render_data = st;
+    lm_idle_schedule(r->idle);
+}
+
+void lm_render_output_changed(struct lm_renderer *r, struct lm_output *out)
+{
+    struct out_state *st = state_of(out);
+    if (!st)
+        return;
+    st->full = true;
+    for (int i = 0; i < HIST; i++)
+        lm_region_clear(&st->hist[i]);
+    lm_idle_schedule(r->idle);
+}
+
+void lm_render_output_removed(struct lm_renderer *r, struct lm_output *out)
+{
+    (void)r;
+    struct out_state *st = state_of(out);
+    if (!st)
+        return;
+    lm_region_fini(&st->pending);
+    for (int i = 0; i < HIST; i++)
+        lm_region_fini(&st->hist[i]);
+    free(st);
+    out->render_data = NULL;
+}
+
+void lm_render_damage(struct lm_renderer *r, const struct lm_rect *rect)
+{
+    struct lm_backend *b = r->srv->backend;
+    if (!b || lm_rect_is_empty(rect))
+        return;
+    struct lm_rect in = *rect;
+    if (!lm_rect_sanitize(&in))
+        return;
+    struct lm_output *o;
+    lm_list_for_each(o, &b->outputs, link) {
+        struct out_state *st = state_of(o);
+        struct lm_rect orect = lm_output_rect(o), x;
+        if (st && lm_rect_intersect(&in, &orect, &x))
+            lm_region_add_rect(&st->pending, &x);
+    }
+    lm_idle_schedule(r->idle);
+}
+
+void lm_render_damage_all(struct lm_renderer *r)
+{
+    struct lm_backend *b = r->srv->backend;
+    if (!b)
+        return;
+    struct lm_output *o;
+    lm_list_for_each(o, &b->outputs, link) {
+        struct out_state *st = state_of(o);
+        if (st)
+            st->full = true;
+    }
+    lm_idle_schedule(r->idle);
+}
+
+void lm_render_cursor_changed(struct lm_renderer *r)
+{
+    struct cursor_view v;
+    cursor_view(r, &v);
+    struct lm_rect old = r->cursor_rect;
+    r->cursor_rect = v.visible ? v.rect : lm_rect_make(0, 0, 0, 0);
+    if (!lm_rect_is_empty(&old))
+        lm_render_damage(r, &old);
+    if (!lm_rect_is_empty(&r->cursor_rect))
+        lm_render_damage(r, &r->cursor_rect);
+}
+
+void lm_render_request_frame(struct lm_renderer *r)
+{
+    if (r->frame_timer && !lm_timer_is_armed(r->frame_timer))
+        lm_timer_arm_ms(r->frame_timer, 16, 0);
+}
+
+void lm_render_output_ready(struct lm_renderer *r, struct lm_output *out, uint32_t time_ms)
+{
+    struct out_state *st = state_of(out);
+    if (!st)
+        return;
+    st->ready = true;
+    if (st->presented) {
+        st->presented = false;
+        send_frame_done(r, time_ms);
+    }
+    draw_output(r, st, false);
+}
+
+void lm_render_flush(struct lm_renderer *r)
+{
+    struct lm_backend *b = r->srv->backend;
+    if (!b)
+        return;
+    r->in_flush = true;
+    struct lm_output *o;
+    lm_list_for_each(o, &b->outputs, link) {
+        struct out_state *st = state_of(o);
+        if (st)
+            draw_output(r, st, true);
+    }
+    r->in_flush = false;
+}

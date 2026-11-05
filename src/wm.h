@@ -1,0 +1,386 @@
+#ifndef LUMEN_WM_H
+#define LUMEN_WM_H
+
+/*
+ * Window manager + shell: floating windows with server-side decorations,
+ * stacking, focus (click-to-focus), interactive move/resize, maximize,
+ * fullscreen, minimize, 4 workspaces, keyboard shortcuts, top panel
+ * (launcher, workspace indicators, taskbar, clock) and wallpaper.
+ * Owner: wm.c.
+ *
+ * ---- Responsibilities split ---------------------------------------------------
+ *  wm.c    all layout/geometry decisions, hit testing, focus, stacking order,
+ *          hover/pressed state of decorations and panel, the clock timer.
+ *          It computes every rectangle (frame, buttons, panel cells) itself.
+ *  render  only paints what lm_wm_scene_for_each() reports (it never
+ *          recomputes layout) and draws the cursor.
+ *  xdg.c   protocol adapter; talks to the wm through struct lm_window /
+ *          struct lm_popup and struct lm_window_ops.
+ *  seat.c  pointer/keyboard routing; asks the wm: lm_wm_key, lm_wm_pick,
+ *          lm_wm_pointer_motion, lm_wm_pointer_button. The wm calls back into
+ *          seat for focus (lm_seat_set_keyboard_focus), pointer grabs
+ *          (interactive move/resize) and cursor shape overrides.
+ *
+ * ---- Window geometry convention -----------------------------------------------
+ * For a window, (x, y, width, height) is the *window geometry* in global
+ * compositor coordinates: the client content area, as set by
+ * xdg_surface.set_window_geometry (or the surface bounds if never set). The
+ * decorated frame surrounds it:
+ *     outer = { x - LM_BORDER_WIDTH, y - LM_TITLEBAR_HEIGHT,
+ *               width + 2*LM_BORDER_WIDTH, height + LM_TITLEBAR_HEIGHT + LM_BORDER_WIDTH }
+ *     titlebar = { outer.x, outer.y, outer.w, LM_TITLEBAR_HEIGHT }
+ * Fullscreen windows have no frame and cover their output (panel hidden
+ * while a fullscreen window is focused on that output). The wl_surface origin
+ * is (x - geometry.x, y - geometry.y).
+ * Maximized windows fill the output's usable area (output minus panel) with
+ * the frame inside it.
+ *
+ * ---- Configure flow (wm <-> xdg) ----------------------------------------------
+ * The wm decides sizes/states and calls window->ops->configure(); xdg.c turns
+ * it into xdg_toplevel.configure + xdg_surface.configure(serial), tracks
+ * ack_configure and, once the client commits the acked state, calls
+ * lm_wm_window_set_geometry(). Width/height passed to configure are
+ * *window geometry* sizes; 0 means "client decides".
+ *
+ * ---- Shortcuts (lm_wm_key) -------------------------------------------------------
+ *   Super+Enter        spawn config.terminal_cmd
+ *   Escape             closes the open app menu (the "Lumen" panel button toggles it)
+ *   Super+R            spawn config.run_cmd (run dialog; also the panel's "Run" button)
+ *   Super+Q            close focused window (ops->close)
+ *   Super+1..4         switch workspace;  Super+Shift+1..4 move focused window there
+ *   Super+Tab          focus next window (cycle, raises it); Super+Shift+Tab previous
+ *   Super+F / Super+M  toggle fullscreen / maximize on focused window
+ *   Super+Left/Right   tile the focused window to the left/right half of the usable area
+ *   Super+Up / Down    maximize / restore (un-maximize, or un-tile back to the pre-tile geometry)
+ *   Super+Shift+E      lm_server_quit
+ *   Ctrl+Alt+F1..F12   lm_backend_switch_vt (works even with a grab)
+ * Key codes are evdev (KEY_*), modifiers are LM_MOD_* bits.
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include "list.h"
+#include "server.h"
+#include "util.h"
+
+struct lm_surface;
+struct lm_output;
+struct lm_window;
+struct lm_popup;
+
+#define LM_NUM_WORKSPACES   4
+#define LM_BORDER_WIDTH     4
+#define LM_TITLEBAR_HEIGHT  28
+#define LM_PANEL_HEIGHT     28
+#define LM_FRAME_BUTTON_SIZE 20   /* close/max/min square buttons inside the titlebar */
+#define LM_FRAME_BUTTON_GAP  4
+#define LM_PANEL_MAX_TASKS   16
+#define LM_MIN_WINDOW_WIDTH  160
+#define LM_MIN_WINDOW_HEIGHT 80
+
+/* Window state bits (wm -> xdg configure). */
+enum {
+    LM_WINDOW_MAXIMIZED  = 1u << 0,
+    LM_WINDOW_FULLSCREEN = 1u << 1,
+    LM_WINDOW_RESIZING   = 1u << 2,
+    LM_WINDOW_ACTIVATED  = 1u << 3,
+};
+
+/* Resize edges; same numeric values as xdg_toplevel.resize_edge (bitmask). */
+enum {
+    LM_EDGE_NONE = 0,
+    LM_EDGE_TOP = 1,
+    LM_EDGE_BOTTOM = 2,
+    LM_EDGE_LEFT = 4,
+    LM_EDGE_RIGHT = 8,
+};
+
+/* wm -> shell adapter (implemented by xdg.c). */
+struct lm_window_ops {
+    /*
+     * Ask the client for a new geometry size (0 = client's choice) and
+     * state set (LM_WINDOW_* bits). xdg.c sends configure events with a fresh
+     * serial. May be called many times (e.g. continuously while resizing).
+     */
+    void (*configure)(struct lm_window *w, int32_t width, int32_t height,
+                      uint32_t states);
+    /* Politely ask the client to close (xdg_toplevel.close). */
+    void (*close)(struct lm_window *w);
+};
+
+struct lm_window {
+    struct lm_wm *wm;
+    struct lm_list link;            /* in the wm stacking list (private use) */
+    struct lm_surface *surface;     /* root wl_surface; valid until lm_wm_window_destroy */
+    const struct lm_window_ops *ops;
+    void *shell_data;               /* xdg.c's toplevel state */
+
+    /* READ-ONLY outside wm.c */
+    char *title;                    /* never NULL, UTF-8, may be empty */
+    char *app_id;                   /* never NULL */
+    struct lm_window *parent;       /* transient parent or NULL */
+    int32_t min_w, min_h, max_w, max_h; /* 0 = unconstrained */
+    struct lm_rect geometry;        /* committed window geometry inside the surface */
+    int32_t x, y, width, height;    /* window geometry in global coordinates */
+    uint32_t states;                /* LM_WINDOW_* currently applied */
+    bool mapped;
+    bool minimized;
+    int workspace;                  /* 0..LM_NUM_WORKSPACES-1 */
+
+    void *priv;
+};
+
+struct lm_popup {
+    struct lm_wm *wm;
+    struct lm_list link;
+    struct lm_surface *surface;     /* popup root wl_surface */
+    struct lm_surface *parent;      /* parent xdg_surface's wl_surface */
+    int32_t x, y;                   /* global position of the popup's window geometry origin */
+    struct lm_rect geometry;        /* window geometry inside the surface */
+    bool mapped;
+    void *priv;
+};
+
+/* ---- lifecycle -------------------------------------------------------------------- */
+
+struct lm_wm *lm_wm_create(struct lm_server *srv);
+void lm_wm_destroy(struct lm_wm *wm);
+void lm_wm_output_added(struct lm_wm *wm, struct lm_output *out);
+void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out);
+/* Windows on a removed output are moved to the first remaining one. */
+void lm_wm_output_removed(struct lm_wm *wm, struct lm_output *out);
+
+/* ---- windows: calls from xdg.c ------------------------------------------------------ */
+
+/* Creates an unmapped window for an xdg_toplevel. Never fails except OOM (NULL). */
+struct lm_window *lm_wm_window_create(struct lm_wm *wm, struct lm_surface *surface,
+                                      const struct lm_window_ops *ops, void *shell_data);
+/* Unmaps if needed, drops focus, frees. May be called while mapped. */
+void lm_wm_window_destroy(struct lm_window *w);
+/*
+ * The client's first (buffer-less) commit arrived: the wm answers with
+ * ops->configure(w, width, height, states) for the window's initial state.
+ */
+void lm_wm_window_initial_configure(struct lm_window *w);
+void lm_wm_window_set_title(struct lm_window *w, const char *title);
+void lm_wm_window_set_app_id(struct lm_window *w, const char *app_id);
+void lm_wm_window_set_parent(struct lm_window *w, struct lm_window *parent);
+void lm_wm_window_set_min_size(struct lm_window *w, int32_t width, int32_t height);
+void lm_wm_window_set_max_size(struct lm_window *w, int32_t width, int32_t height);
+/*
+ * Geometry committed by the client (after the ack): `g` is the window geometry
+ * inside the surface. Called on every commit where it may have changed. The wm
+ * re-anchors when resizing from the top/left edges and damages as needed.
+ */
+void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g);
+/* First buffer committed after configure ack: show the window (placed/cascaded and focused). */
+void lm_wm_window_map(struct lm_window *w);
+void lm_wm_window_unmap(struct lm_window *w);
+
+/* Client requests (xdg_toplevel set_maximized & co). The wm may refuse silently. */
+void lm_wm_window_request_maximize(struct lm_window *w, bool maximize);
+void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen,
+                                     struct lm_output *output /* may be NULL */);
+void lm_wm_window_request_minimize(struct lm_window *w);
+/*
+ * wm-initiated: tile to LM_EDGE_LEFT / LM_EDGE_RIGHT half of the usable area, or
+ * LM_EDGE_NONE to undo a tile. Tiling leaves the maximized state, remembers the
+ * pre-tile geometry, and is dropped by maximize/fullscreen, resize and move grabs.
+ * Reported as "tiled-left"/"tiled-right" in lm_wm_describe flags.
+ */
+void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge);
+/* Start an interactive move/resize with the seat pointer (xdg already validated the serial). */
+void lm_wm_window_request_move(struct lm_window *w);
+void lm_wm_window_request_resize(struct lm_window *w, uint32_t edges);
+/* wm-initiated close (title bar button, Super+Q): calls ops->close. */
+void lm_wm_window_close(struct lm_window *w);
+
+/* ---- popups: calls from xdg.c ----------------------------------------------------------- */
+
+struct lm_popup *lm_wm_popup_create(struct lm_wm *wm, struct lm_surface *surface,
+                                    struct lm_surface *parent);
+void lm_wm_popup_destroy(struct lm_popup *p);
+/* Global position of the popup's window-geometry origin. */
+void lm_wm_popup_set_position(struct lm_popup *p, int32_t gx, int32_t gy);
+void lm_wm_popup_set_geometry(struct lm_popup *p, const struct lm_rect *g);
+void lm_wm_popup_map(struct lm_popup *p);
+void lm_wm_popup_unmap(struct lm_popup *p);
+
+/* ---- queries -------------------------------------------------------------------------------- */
+
+/*
+ * Global position of the origin of the (root) surface `s` as currently
+ * displayed (window or popup). Returns false if it is not displayed.
+ */
+bool lm_wm_surface_origin(struct lm_wm *wm, struct lm_surface *s, int32_t *x, int32_t *y);
+/* Output area minus the panel for the output containing/nearest (gx, gy). */
+void lm_wm_usable_area(struct lm_wm *wm, int32_t gx, int32_t gy, struct lm_rect *out);
+struct lm_window *lm_wm_focused_window(const struct lm_wm *wm);
+int lm_wm_current_workspace(const struct lm_wm *wm);
+void lm_wm_switch_workspace(struct lm_wm *wm, int ws);
+void lm_wm_focus_window(struct lm_wm *wm, struct lm_window *w); /* raises, switches workspace if needed */
+
+/*
+ * Called through the xdg roles' damage hook: `rect` (root-local) of root
+ * surface `root` changed; the wm maps it to global coordinates, clips to
+ * visibility and calls lm_render_damage().
+ */
+void lm_wm_surface_damage(struct lm_wm *wm, struct lm_surface *root,
+                          const struct lm_rect *rect);
+/*
+ * A frame was presented at `time_ms`: send frame done to every visible
+ * (mapped, non-minimized, current workspace) window/popup surface tree and
+ * update wl_surface.enter/leave output membership.
+ */
+void lm_wm_send_frame_done(struct lm_wm *wm, uint32_t time_ms);
+
+/* ---- input hooks (called by seat.c) ------------------------------------------------------------ */
+
+enum lm_pick_kind {
+    LM_PICK_NONE = 0,       /* wallpaper / nothing */
+    LM_PICK_SURFACE,        /* a client surface (window content, subsurface, popup) */
+    LM_PICK_TITLEBAR,
+    LM_PICK_CLOSE,
+    LM_PICK_MAXIMIZE,
+    LM_PICK_MINIMIZE,
+    LM_PICK_BORDER,         /* resize border/corner: `edges` says which */
+    LM_PICK_PANEL,          /* panel background / clock / title */
+    LM_PICK_PANEL_LAUNCHER, /* `rect` = the launcher button */
+    LM_PICK_MENU_ITEM,      /* app menu entry, `index` = config.apps[] index */
+    LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
+    LM_PICK_PANEL_EXIT,     /* quit button (needs a second click to confirm) */
+    LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
+    LM_PICK_PANEL_TASK      /* taskbar button of `window` */
+};
+
+struct lm_pick {
+    enum lm_pick_kind kind;
+    struct lm_window *window;   /* owning window for SURFACE (NULL for popups of unknown owner) and frame parts */
+    struct lm_surface *surface; /* LM_PICK_SURFACE: the exact (sub)surface hit */
+    double sx, sy;              /* LM_PICK_SURFACE: surface-local hit position */
+    uint32_t edges;             /* LM_PICK_BORDER: LM_EDGE_* */
+    int index;                  /* LM_PICK_PANEL_WORKSPACE, LM_PICK_MENU_ITEM */
+    struct lm_rect rect;        /* LM_PICK_PANEL_LAUNCHER */
+};
+
+/* Topmost thing at the global point: popups, then windows (stacking), then panel. */
+void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out);
+/* Pointer moved (also called for every motion): hover highlight, resize cursors via lm_seat_set_cursor_override. */
+void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick, double x, double y);
+/*
+ * Button event. For LM_PICK_SURFACE presses the wm focuses/raises the window
+ * (and dismisses popups on outside clicks) and returns false so the client
+ * still receives the click. For decoration/panel hits it acts (close,
+ * maximize, minimize, start move/resize, launch, workspace switch) and
+ * returns true (consumed).
+ */
+bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick,
+                          uint32_t time_ms, uint32_t button, bool pressed);
+/* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
+bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed,
+               bool repeat, uint32_t mods);
+
+/* ---- scene description for the renderer ----------------------------------------------------------- */
+
+#define LM_FRAME_HOVER_CLOSE    (1u << 0)
+#define LM_FRAME_HOVER_MAXIMIZE (1u << 1)
+#define LM_FRAME_HOVER_MINIMIZE (1u << 2)
+
+struct lm_frame_info {
+    struct lm_rect outer;           /* whole decorated frame (global coords) */
+    struct lm_rect titlebar;
+    struct lm_rect btn_close, btn_max, btn_min;
+    struct lm_rect title_text;      /* area where the title may be drawn (between the left edge and the buttons) */
+    const char *title;              /* valid only during the callback */
+    bool active;                    /* focused window */
+    bool maximized;
+    uint32_t hover;                 /* LM_FRAME_HOVER_* */
+    uint32_t pressed;               /* LM_FRAME_HOVER_* bit currently held down, else 0 */
+};
+
+struct lm_panel_info {
+    struct lm_output *output;
+    struct lm_rect bar;             /* whole panel */
+    struct lm_rect launcher;        /* launcher button */
+    struct lm_rect workspace[LM_NUM_WORKSPACES];
+    int current_workspace;
+    uint32_t workspace_occupied;    /* bit n set = workspace n has windows */
+    int hover_workspace;            /* -1 = none */
+    bool hover_launcher;
+    struct lm_rect run;             /* run-dialog button, left of the quit button */
+    bool hover_run;
+    struct lm_rect exit;            /* quit button, left of the clock */
+    bool hover_exit;
+    bool exit_armed;                /* first click done: button shows "Sure?", the next click quits */
+    struct lm_rect title_area;      /* where the taskbar (or the focused title if it is empty) goes */
+    const char *active_title;       /* "" if none; valid only during the callback */
+    int ntasks;                     /* taskbar: mapped windows of the current workspace, in creation order */
+    struct {
+        struct lm_rect rect;
+        const char *title;          /* valid only during the callback */
+        bool active, minimized, hover;
+    } task[LM_PANEL_MAX_TASKS];
+    struct lm_window *task_win[LM_PANEL_MAX_TASKS]; /* the window behind task[i] (for picking) */
+    struct lm_rect clock;
+    char clock_text[16];            /* "HH:MM" local time */
+};
+
+struct lm_menu_info {
+    struct lm_rect rect;            /* whole menu */
+    int n;                          /* entries */
+    int item_h;                     /* height of one entry; entries start 2 px inside `rect` */
+    int hover;                      /* -1 none */
+    const char *label[LM_MAX_APPS]; /* valid only during the callback */
+};
+
+enum lm_scene_kind {
+    LM_SCENE_WALLPAPER,             /* one per output */
+    LM_SCENE_FRAME,                 /* decoration of one window */
+    LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
+    LM_SCENE_PANEL,                 /* one per output */
+    LM_SCENE_MENU,                  /* the open app menu (above the panel, below popups) */
+};
+
+struct lm_scene_item {
+    enum lm_scene_kind kind;
+    struct lm_rect bounds;          /* bounding box, global coordinates (for clipping) */
+    struct lm_output *output;       /* WALLPAPER and PANEL */
+    union {
+        struct lm_frame_info frame; /* LM_SCENE_FRAME */
+        struct {
+            struct lm_surface *root;
+            int32_t x, y;           /* global origin of the root surface (for lm_surface_tree_visit) */
+            bool is_popup;
+        } surface;                  /* LM_SCENE_SURFACE */
+        struct lm_panel_info panel; /* LM_SCENE_PANEL */
+        struct lm_menu_info menu;   /* LM_SCENE_MENU */
+    } u;
+};
+
+/* Return false to stop the iteration. */
+typedef bool (*lm_scene_fn)(const struct lm_scene_item *item, void *data);
+
+/*
+ * Report scene items intersecting `clip` (global coordinates; NULL = all) in
+ * painting order, bottom to top: wallpaper(s), then for each visible window
+ * in stacking order its FRAME then its SURFACE, then the panel(s), then all
+ * popups (SURFACE with is_popup). Minimized windows and windows on other
+ * workspaces are skipped. A fullscreen focused window hides the panel of its
+ * output and covers it. The cursor is NOT part of the scene.
+ */
+void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip,
+                          lm_scene_fn fn, void *data);
+
+/*
+ * Text snapshot for tests (control socket `windows`): writes at most `size`
+ * bytes (NUL-terminated) into buf and returns the length. Format, one line each:
+ *   workspace <n>
+ *   pointer <x> <y>
+ *   window <id> "<title>" "<app_id>" x=<x> y=<y> w=<w> h=<h> ws=<n> flags=<comma list of
+ *       mapped,focused,maximized,fullscreen,minimized or "-">
+ * (<id> is a stable small integer per window, in stacking order bottom to top.)
+ */
+size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size);
+
+#endif

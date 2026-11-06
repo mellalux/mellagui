@@ -2040,6 +2040,10 @@ static enum completion exec(js *J, struct node *n, struct scope *sc)
     }
     case N_TRY: return exec_try(J, n, sc);
     case N_SWITCH: return exec_switch(J, n, sc);
+    case N_IMPORT:
+    case N_EXPORT:
+        js_throw_error(J, "SyntaxError", "Cannot use import / export outside a module");
+        return C_NORMAL;
     case N_LABEL: return exec_labeled(J, n, sc);
     case N_WITH: {
         jsval o = eval(J, n->a, sc);
@@ -2160,4 +2164,225 @@ bool js_eval_value(js *J, const char *src, size_t len, jsval *out, char *err, si
     }
     *out = v;
     return true;
+}
+
+/* ---- ES modules ---------------------------------------------------------------------------------------------------- */
+
+struct jsmodule { char *url; jsobj *ns; struct jsmodule *next; };
+struct expget { struct scope *sc; jsstr *name; jsobj *dep; };
+
+static jsval expget_scope(js *J, jsval thisv, int argc, jsval *argv, jsobj *callee)
+{
+    (void)thisv; (void)argc; (void)argv;
+    struct expget *g = js_fn_data(callee);
+    bool found;
+    jsval v = lookup(J, g->name, g->sc, &found);
+    return found ? v : JS_UNDEFINED;
+}
+
+static jsval expget_dep(js *J, jsval thisv, int argc, jsval *argv, jsobj *callee)
+{
+    (void)thisv; (void)argc; (void)argv;
+    struct expget *g = js_fn_data(callee);
+    return get_prop(J, js_objv(g->dep), g->name);
+}
+
+static void ns_getter(js *J, jsobj *ns, jsstr *exported, struct scope *sc, jsstr *local, jsobj *dep)
+{
+    struct expget *g = js_alloc(J, sizeof(*g));
+    g->sc = sc;
+    g->name = js_intern_str(J, local);
+    g->dep = dep;
+    exported = js_intern_str(J, exported);
+    struct prop *p = obj_find_own(ns, exported);
+    if (!p)
+        p = obj_add_prop(J, ns, exported, JS_UNDEFINED, PF_ACCESSOR | PF_ENUM);
+    p->flags = PF_ACCESSOR | PF_ENUM;
+    p->get = make_native(J, exported, dep ? expget_dep : expget_scope, 0, g);
+}
+
+static jsobj *import_module(js *J, const char *spec, const char *referrer);
+
+static jsobj *eval_module(js *J, struct node *prog, const char *url)
+{
+    jsobj *ns = obj_new(J, JC_OBJECT, NULL);
+    struct jsmodule *m = js_alloc(J, sizeof(*m));
+    m->url = strdup(url);
+    m->ns = ns;
+    m->next = J->modules;
+    J->modules = m;
+    jsobj *impobj = obj_new(J, JC_OBJECT, NULL);               /* import bindings: live getters, resolved like a `with` scope */
+    struct scope *imps = scope_new(J, J->gscope);
+    imps->captured = 1;
+    scope_mark_captured(J->gscope);
+    imps->obj = impobj;
+    imps->is_with = 1;
+    struct scope *ms = scope_new(J, imps);
+    ms->captured = 1;
+    scope_mark_captured(imps);
+    ms->has_this = 1;
+    ms->thisv = JS_UNDEFINED;
+    scope_declare(J, ms, js_intern(J, "__url", 5), js_cstr(J, url), false);
+    jsobj *meta = js_object_new(J);
+    set_prop(J, js_objv(meta), js_intern(J, "url", 3), js_cstr(J, url));
+    scope_declare(J, ms, js_intern(J, "__meta", 6), js_objv(meta), false);
+    struct fninfo *fi = prog->fi;
+    for (int i = 0; i < fi->nvars; i++)
+        scope_declare(J, ms, fi->vars[i], JS_UNDEFINED, false);
+    for (int i = 0; i < fi->nfuncs; i++)
+        scope_declare(J, ms, fi->funcs[i]->s, make_closure(J, fi->funcs[i], ms, NULL), false);
+    jsstr *k_default = js_intern(J, "default", 7);
+    /* the export names are known statically: install live getters first (cyclic imports see hoisted functions) */
+    for (int i = 0; i < prog->n; i++) {
+        struct node *st = prog->list[i];
+        if (st->t != N_EXPORT)
+            continue;
+        if (st->kind == 0)
+            for (int k = 0; k < st->n; k++)
+                ns_getter(J, ns, st->list[k]->s, ms, st->list[k]->s, NULL);
+        else if (st->kind == 1) {
+            if (st->s)
+                ns_getter(J, ns, k_default, ms, st->s, NULL);
+            else
+                obj_add_prop(J, ns, k_default, JS_UNDEFINED, PF_ENUM | PF_WRITE);
+        } else if (st->kind == 2)
+            for (int k = 0; k < st->n; k++)
+                ns_getter(J, ns, st->list[k]->b->s, ms, st->list[k]->a->s, NULL);
+    }
+    /* imports and re-exports, in order */
+    for (int i = 0; i < prog->n && !J->thrown; i++) {
+        struct node *st = prog->list[i];
+        bool imp = st->t == N_IMPORT, reexp = st->t == N_EXPORT && st->kind >= 3;
+        if (!imp && !reexp)
+            continue;
+        jsobj *dep = import_module(J, st->s->s, url);
+        if (!dep)
+            break;
+        if (imp) {
+            for (int k = 0; k < st->n; k++) {
+                jsstr *imported = st->list[k]->a->s, *local = st->list[k]->b->s;
+                if (!strcmp(imported->s, "*"))
+                    obj_add_prop(J, impobj, js_intern_str(J, local), js_objv(dep), PF_ENUM);
+                else
+                    ns_getter(J, impobj, local, NULL, imported, dep);
+            }
+        } else if (st->kind == 3) {
+            for (int k = 0; k < st->n; k++)
+                ns_getter(J, ns, st->list[k]->b->s, NULL, st->list[k]->a->s, dep);
+        } else if (st->kind == 4) {
+            jsobj *keys = js_array_new(J);
+            own_keys(J, dep, keys, true);
+            for (uint32_t k = 0; k < keys->len; k++)
+                if (strcmp(keys->items[k].u.s->s, "default"))
+                    ns_getter(J, ns, keys->items[k].u.s, NULL, keys->items[k].u.s, dep);
+        } else {
+            obj_add_prop(J, ns, js_intern_str(J, st->list[0]->b->s), js_objv(dep), PF_ENUM | PF_WRITE);
+        }
+    }
+    /* body */
+    for (int i = 0; i < prog->n && !J->thrown; i++) {
+        struct node *st = prog->list[i];
+        if (st->t == N_IMPORT)
+            continue;
+        if (st->t == N_EXPORT) {
+            if (st->kind == 0) {
+                exec(J, st->a, ms);
+            } else if (st->kind == 1 && st->a) {
+                jsval v = eval(J, st->a, ms);
+                if (J->thrown)
+                    break;
+                if (st->s)
+                    scope_declare(J, ms, st->s, v, false);
+                else {
+                    struct prop *p = obj_find_own(ns, k_default);
+                    if (p)
+                        p->v = v;
+                }
+            }
+            continue;
+        }
+        enum completion c = exec(J, st, ms);
+        if (c == C_RETURN)
+            break;
+    }
+    return J->thrown ? NULL : ns;
+}
+
+static jsobj *import_module(js *J, const char *spec, const char *referrer)
+{
+    if (!J->mod_load) {
+        js_throw_error(J, "Error", "module loading is not available");
+        return NULL;
+    }
+    char *url = NULL, *src = NULL, err[300] = "";
+    if (!J->mod_load(J->mod_data, spec, referrer, &url, &src, err, sizeof(err))) {
+        js_throw_error(J, "TypeError", "Failed to load module '%s': %s", spec, err[0] ? err : "not found");
+        return NULL;
+    }
+    for (struct jsmodule *m = J->modules; m; m = m->next)
+        if (!strcmp(m->url, url)) {
+            jsobj *ns = m->ns;
+            free(url);
+            free(src);
+            return ns;
+        }
+    struct node *prog = js_parse_module(J, src, strlen(src), err, sizeof(err));
+    free(src);
+    if (!prog) {
+        js_throw_error(J, "SyntaxError", "%s: %s", url, err);
+        free(url);
+        return NULL;
+    }
+    jsobj *ns = eval_module(J, prog, url);
+    free(url);
+    return ns;
+}
+
+void js_set_module_loader(js *J, js_module_loader fn, void *data)
+{
+    J->mod_load = fn;
+    J->mod_data = data;
+}
+
+bool js_run_module(js *J, const char *src, size_t len, const char *url, char *err, size_t errn)
+{
+    struct node *prog = js_parse_module(J, src, len, err, errn);
+    if (!prog)
+        return false;
+    J->thrown = false;
+    J->entries++;
+    eval_module(J, prog, url);
+    J->entries--;
+    if (J->thrown) {
+        jsval ex = js_exception(J);
+        js_describe_exception(J, ex, err, errn);
+        return false;
+    }
+    js_run_microtasks(J);
+    return true;
+}
+
+/* import(specifier): a promise of the namespace object (the module is loaded synchronously) */
+jsval dynamic_import(js *J, jsval thisv, int argc, jsval *argv, jsobj *callee)
+{
+    (void)thisv; (void)callee;
+    jsval P = js_get(J, js_objv(J->global), "Promise");
+    jsstr *spec = argc > 0 ? to_jsstr(J, argv[0]) : J->k_empty;
+    if (!spec)
+        return JS_UNDEFINED;
+    jsstr *ref = argc > 1 && argv[1].t == JS_STR ? argv[1].u.s : J->k_empty;
+    jsobj *ns = import_module(J, spec->s, ref->s);
+    if (!ns) {
+        jsval ex = js_exception(J);
+        return js_call(J, js_get(J, P, "reject"), P, 1, &ex, NULL);
+    }
+    jsval v = js_objv(ns);
+    return js_call(J, js_get(J, P, "resolve"), P, 1, &v, NULL);
+}
+
+void js_free_modules(js *J)
+{
+    for (struct jsmodule *m = J->modules; m; m = m->next)
+        free(m->url);
+    J->modules = NULL;
 }

@@ -1178,6 +1178,8 @@ static struct node *parse_array_literal(struct parser *P)
     return n;
 }
 
+static void parse_args(struct parser *P, struct node *call);
+
 static struct node *parse_primary(struct parser *P)
 {
     struct tok *t = &P->t;
@@ -1247,6 +1249,29 @@ static struct node *parse_primary(struct parser *P)
             lex(P);
             return n;
         }
+        if (!strcmp(s, "import")) {                          /* import(x) and import.meta */
+            lex(P);
+            if (eat_p(P, ".")) {
+                if (!eat_id(P, "meta"))
+                    perr(P, "expected import.meta");
+                struct node *n = nnew(P, N_IDENT);
+                n->s = js_intern(P->J, "__meta", 6);
+                return n;
+            }
+            struct node *call = nnew(P, N_CALL);
+            struct node *callee = nnew(P, N_IDENT);
+            callee->s = js_intern(P->J, "__import", 8);
+            call->a = callee;
+            parse_args(P, call);
+            struct node *u = nnew(P, N_IDENT);
+            u->s = js_intern(P->J, "__url", 5);
+            struct node **nl2 = js_alloc(P->J, sizeof(*nl2) * (size_t)(call->n + 1));
+            if (call->n)
+                memcpy(nl2, call->list, sizeof(*nl2) * (size_t)call->n);
+            nl2[call->n++] = u;
+            call->list = nl2;
+            return call;
+        }
         perr(P, "unexpected keyword '%s'", s);
     }
     case TK_P:
@@ -1303,6 +1328,8 @@ static void parse_args(struct parser *P, struct node *call)
     lex(P);
     finish_list(call, &l);
 }
+
+static void parse_args(struct parser *P, struct node *call);
 
 static struct node *parse_member_name(struct parser *P)
 {
@@ -1725,6 +1752,9 @@ static struct node *parse_for(struct parser *P)
     return n;
 }
 
+static struct node *parse_import(struct parser *P);
+static struct node *parse_export(struct parser *P);
+
 static struct node *parse_stmt(struct parser *P)
 {
     struct tok *t = &P->t;
@@ -1907,8 +1937,17 @@ static struct node *parse_stmt(struct parser *P)
             consume_semi(P);
             return nnew(P, N_EMPTY);
         }
-        if (!strcmp(s, "import") || !strcmp(s, "export"))
-            perr(P, "modules are not supported");
+        if (!strcmp(s, "import")) {
+            struct lexstate ls;
+            save(P, &ls);
+            lex(P);
+            bool expr = is_p(P, "(") || is_p(P, ".");
+            restore(P, &ls);
+            if (!expr)
+                return parse_import(P);
+        } else if (!strcmp(s, "export")) {
+            return parse_export(P);
+        }
         if (!strcmp(s, "with")) {
             struct node *n = nnew(P, N_WITH);
             lex(P);
@@ -1939,7 +1978,208 @@ static struct node *parse_stmt(struct parser *P)
     return n;
 }
 
-struct node *js_parse_program(js *J, const char *src, size_t len, char *err, size_t errn)
+/* ---- modules ------------------------------------------------------------------------------------------------- */
+
+static jsstr *module_spec(struct parser *P)
+{
+    if (P->t.t != TK_STR)
+        perr(P, "expected a module specifier string");
+    jsstr *s = P->t.s;
+    lex(P);
+    return s;
+}
+
+static struct node *decl_pair(struct parser *P, jsstr *a, jsstr *b)
+{
+    struct node *d = nnew(P, N_DECL);
+    d->a = nnew(P, N_STR);
+    d->a->s = a;
+    d->b = nnew(P, N_IDENT);
+    d->b->s = b;
+    return d;
+}
+
+static jsstr *name_token(struct parser *P)
+{
+    if (P->t.t != TK_ID && P->t.t != TK_STR)
+        perr(P, "expected a name");
+    jsstr *s = P->t.s;
+    lex(P);
+    return s;
+}
+
+static struct node *parse_import(struct parser *P)
+{
+    struct node *n = nnew(P, N_IMPORT);
+    struct nlist l = { 0 };
+    lex(P);                                                  /* import */
+    if (P->t.t == TK_STR) {
+        n->s = module_spec(P);
+        consume_semi(P);
+        return n;
+    }
+    for (;;) {
+        if (P->t.t == TK_ID && !is_p(P, "{")) {
+            jsstr *local = P->t.s;
+            lex(P);
+            nl_add(P, &l, decl_pair(P, js_intern(P->J, "default", 7), local));
+        } else if (is_p(P, "*")) {
+            lex(P);
+            if (!eat_id(P, "as"))
+                perr(P, "expected 'as'");
+            jsstr *local = P->t.s;
+            lex(P);
+            nl_add(P, &l, decl_pair(P, js_intern(P->J, "*", 1), local));
+        } else if (is_p(P, "{")) {
+            lex(P);
+            while (!is_p(P, "}")) {
+                jsstr *imp = name_token(P), *local = imp;
+                if (eat_id(P, "as"))
+                    local = name_token(P);
+                nl_add(P, &l, decl_pair(P, imp, local));
+                if (!is_p(P, "}"))
+                    expect_p(P, ",");
+            }
+            lex(P);
+        } else {
+            perr(P, "bad import");
+        }
+        if (!eat_p(P, ","))
+            break;
+    }
+    if (!eat_id(P, "from"))
+        perr(P, "expected 'from'");
+    n->s = module_spec(P);
+    finish_list(n, &l);
+    consume_semi(P);
+    return n;
+}
+
+static void export_names(struct parser *P, struct nlist *l, struct node *pat)
+{
+    if (!pat)
+        return;
+    switch (pat->t) {
+    case N_IDENT: { struct node *s = nnew(P, N_STR); s->s = pat->s; nl_add(P, l, s); break; }
+    case N_ASSIGN: case N_SPREAD: export_names(P, l, pat->a); break;
+    case N_ARRAY: for (int i = 0; i < pat->n; i++) export_names(P, l, pat->list[i]); break;
+    case N_OBJECT: for (int i = 0; i < pat->n; i++) export_names(P, l, pat->list[i]->b); break;
+    default: break;
+    }
+}
+
+/* kind: 0 declaration (a = statement, list = exported names), 1 default (a = expression, s = local name or NULL),
+ * 2 `export { a as b }` (list of pairs: a = local, b = exported), 3 the same `from` another module (s = specifier),
+ * 4 `export * from` (s), 5 `export * as ns from` (s, list = one pair) */
+static struct node *parse_export(struct parser *P)
+{
+    struct node *n = nnew(P, N_EXPORT);
+    struct nlist l = { 0 };
+    lex(P);                                                  /* export */
+    if (eat_id(P, "default")) {
+        n->kind = 1;
+        if (is_id(P, "function") || (is_id(P, "class"))) {
+            bool fn = is_id(P, "function");
+            n->a = fn ? parse_function(P, false, true, false, PK_METHOD) : parse_class(P, false);
+            n->s = fn ? n->a->fi->name : n->a->s;
+            if (fn && n->s) {                                 /* a named default function is also a declaration (hoisted) */
+                struct fninfo *cur = P->ctx->fi;
+                struct node **nf = js_alloc(P->J, sizeof(*nf) * (size_t)(cur->nfuncs + 1));
+                if (cur->nfuncs)
+                    memcpy(nf, cur->funcs, sizeof(*nf) * (size_t)cur->nfuncs);
+                nf[cur->nfuncs++] = n->a;
+                cur->funcs = nf;
+                n->a = NULL;
+            }
+        } else {
+            n->a = parse_assign(P);
+            consume_semi(P);
+        }
+        return n;
+    }
+    if (is_p(P, "*")) {
+        lex(P);
+        n->kind = 4;
+        if (eat_id(P, "as")) {
+            n->kind = 5;
+            nl_add(P, &l, decl_pair(P, js_intern(P->J, "*", 1), name_token(P)));
+        }
+        if (!eat_id(P, "from"))
+            perr(P, "expected 'from'");
+        n->s = module_spec(P);
+        finish_list(n, &l);
+        consume_semi(P);
+        return n;
+    }
+    if (is_p(P, "{")) {
+        lex(P);
+        n->kind = 2;
+        while (!is_p(P, "}")) {
+            jsstr *local = name_token(P), *exported = local;
+            if (eat_id(P, "as"))
+                exported = name_token(P);
+            nl_add(P, &l, decl_pair(P, local, exported));
+            if (!is_p(P, "}"))
+                expect_p(P, ",");
+        }
+        lex(P);
+        if (eat_id(P, "from")) {
+            n->kind = 3;
+            n->s = module_spec(P);
+        }
+        finish_list(n, &l);
+        consume_semi(P);
+        return n;
+    }
+    n->kind = 0;
+    if (is_id(P, "function")) {
+        struct node *f = parse_function(P, true, false, false, PK_METHOD);
+        struct fninfo *cur = P->ctx->fi;
+        struct node **nf = js_alloc(P->J, sizeof(*nf) * (size_t)(cur->nfuncs + 1));
+        if (cur->nfuncs)
+            memcpy(nf, cur->funcs, sizeof(*nf) * (size_t)cur->nfuncs);
+        nf[cur->nfuncs++] = f;
+        cur->funcs = nf;
+        struct node *s = nnew(P, N_STR);
+        s->s = f->s;
+        nl_add(P, &l, s);
+        n->a = nnew(P, N_EMPTY);
+    } else {
+        if (is_id(P, "async")) {
+            struct lexstate ls;
+            save(P, &ls);
+            lex(P);
+            bool afn = is_id(P, "function");
+            restore(P, &ls);
+            if (afn) {
+                lex(P);
+                P->next_async = true;
+                struct node *f = parse_function(P, true, false, false, PK_METHOD);
+                struct fninfo *cur = P->ctx->fi;
+                struct node **nf = js_alloc(P->J, sizeof(*nf) * (size_t)(cur->nfuncs + 1));
+                if (cur->nfuncs)
+                    memcpy(nf, cur->funcs, sizeof(*nf) * (size_t)cur->nfuncs);
+                nf[cur->nfuncs++] = f;
+                cur->funcs = nf;
+                struct node *s = nnew(P, N_STR);
+                s->s = f->s;
+                nl_add(P, &l, s);
+                n->a = nnew(P, N_EMPTY);
+                finish_list(n, &l);
+                return n;
+            }
+        }
+        struct node *st = parse_stmt(P);
+        n->a = st;
+        if (st->t == N_VAR)
+            for (int i = 0; i < st->n; i++)
+                export_names(P, &l, st->list[i]->a);
+    }
+    finish_list(n, &l);
+    return n;
+}
+
+static struct node *parse_program_ex(js *J, const char *src, size_t len, char *err, size_t errn, bool module)
 {
     struct parser P = { .J = J, .line = 1 };
     char *copy = js_alloc(J, len + 1);                  /* function sources point into this copy */
@@ -1950,6 +2190,7 @@ struct node *js_parse_program(js *J, const char *src, size_t len, char *err, siz
         while (P.p < P.end && *P.p != '\n')
             P.p++;
     struct fninfo *fi = new_fninfo(&P);
+    fi->is_async = module;                              /* top-level await in modules */
     struct pctx ctx = { .fi = fi };
     P.ctx = &ctx;
     if (setjmp(P.jb)) {
@@ -1964,4 +2205,14 @@ struct node *js_parse_program(js *J, const char *src, size_t len, char *err, siz
     finish_list(prog, &l);
     prog->fi = fi;
     return prog;
+}
+
+struct node *js_parse_program(js *J, const char *src, size_t len, char *err, size_t errn)
+{
+    return parse_program_ex(J, src, len, err, errn, false);
+}
+
+struct node *js_parse_module(js *J, const char *src, size_t len, char *err, size_t errn)
+{
+    return parse_program_ex(J, src, len, err, errn, true);
 }

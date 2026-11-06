@@ -2622,14 +2622,8 @@ static void host_prefetch(void *data, const char *const *srcs, int n)
     free(jobs);
 }
 
-static bool host_fetch_script(void *data, const char *src, char **body, size_t *len, char *err, size_t errn)
+static bool fetch_abs(const char *abs, char **body, size_t *len, char *err, size_t errn)
 {
-    struct web_host *h = data;
-    char abs[2048];
-    if (!url_resolve(h->base, src, abs, sizeof(abs))) {
-        snprintf(err, errn, "bad address");
-        return false;
-    }
     const struct pf_entry *pe = pf_find(abs);
     if (pe) {
         if (!pe->ok || !pe->body) {
@@ -2652,6 +2646,30 @@ static bool host_fetch_script(void *data, const char *src, char **body, size_t *
     *body = sp.body;
     *len = sp.len;
     return true;
+}
+
+static bool host_fetch_script(void *data, const char *src, char **body, size_t *len, char *err, size_t errn)
+{
+    struct web_host *h = data;
+    char abs[2048];
+    if (!url_resolve(h->base, src, abs, sizeof(abs))) {
+        snprintf(err, errn, "bad address");
+        return false;
+    }
+    return fetch_abs(abs, body, len, err, errn);
+}
+
+static bool host_fetch_module(void *data, const char *spec, const char *referrer, char **url, char **body, size_t *len, char *err,
+                              size_t errn)
+{
+    struct web_host *h = data;
+    char abs[2048];
+    if (!url_resolve(referrer && *referrer ? referrer : h->base, spec, abs, sizeof(abs))) {
+        snprintf(err, errn, "bad address");
+        return false;
+    }
+    *url = strdup(abs);
+    return fetch_abs(abs, body, len, err, errn);
 }
 
 static bool host_fetch(void *data, const char *url, const char *method, const char *body, size_t bodylen,
@@ -2744,7 +2762,7 @@ static void load_document(struct page *p, struct web_host *wh, struct doc *out, 
     pf_clear();
     snprintf(wh->base, sizeof(wh->base), "%s", p->url);
     if (p->html && !p->failed && p->body && has_script(p->body, p->len)) {
-        struct dom_host host = { .data = wh, .fetch_script = host_fetch_script, .prefetch = host_prefetch, .fetch = host_fetch, .form_submit = host_form_submit, .navigate = host_navigate,
+        struct dom_host host = { .data = wh, .fetch_script = host_fetch_script, .fetch_module = host_fetch_module, .prefetch = host_prefetch, .fetch = host_fetch, .form_submit = host_form_submit, .navigate = host_navigate,
                                  .message = host_message, .alert = host_alert };
         struct dom *d = dom_create(p->url, &host);
         if (d) {

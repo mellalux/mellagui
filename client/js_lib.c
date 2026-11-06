@@ -2097,6 +2097,7 @@ void js_init_builtins(js *J)
     lib_def(J, J->global, "structuredClone", global_structuredClone, 1);
     lib_def(J, J->global, "queueMicrotask", global_queueMicrotask, 1);
     lib_ctor(J, "Proxy", Proxy_ctor, 2, NULL);
+    lib_def(J, J->global, "__import", dynamic_import, 2);
 
     /* Math */
     jsobj *M = js_object_new(J);

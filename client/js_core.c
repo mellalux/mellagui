@@ -1171,6 +1171,7 @@ void js_free(js *J)
 {
     if (!J)
         return;
+    js_free_modules(J);                                     /* (the registry lives in the arena: before it goes) */
     for (jsobj *o = J->all_objs; o; o = o->all_next) {
         js_regex_free_host(o);
         free(o->props);

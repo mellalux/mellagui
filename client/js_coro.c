@@ -160,7 +160,36 @@ static jsval co_suspend(js *J, jsval v, bool awaiting)
 }
 
 jsval co_yield(js *J, jsval v) { return co_suspend(J, v, false); }
-jsval co_await(js *J, jsval v) { return co_suspend(J, v, true); }
+struct tla { bool done, ok; jsval val; };
+NATIVE(tla_ok) { struct tla *t = js_fn_data(callee); t->done = t->ok = true; t->val = ARG(0); return JS_UNDEFINED; }
+NATIVE(tla_err) { struct tla *t = js_fn_data(callee); t->done = true; t->ok = false; t->val = ARG(0); return JS_UNDEFINED; }
+
+/* await. Inside a coroutine it suspends; at the top level of a module (no coroutine) it runs the microtask queue until the
+ * promise settles (the page's own fetch/XHR are synchronous, so this covers the usual `await fetch(...)`) */
+jsval co_await(js *J, jsval v)
+{
+    if (J->cur_co)
+        return co_suspend(J, v, true);
+    jsval P = js_get(J, js_objv(J->global), "Promise");
+    jsval p = js_call(J, js_get(J, P, "resolve"), P, 1, &v, NULL);
+    THROW_IF(J);
+    struct tla *t = js_alloc(J, sizeof(*t));
+    jsval cbs[2] = { js_objv(js_native_new(J, "", tla_ok, 1, t)), js_objv(js_native_new(J, "", tla_err, 1, t)) };
+    js_call(J, js_get(J, p, "then"), p, 2, cbs, NULL);
+    THROW_IF(J);
+    int saved = J->entries;                                    /* we are inside js_run_module: allow draining here */
+    J->entries = 0;
+    js_run_microtasks(J);
+    J->entries = saved;
+    if (!t->done)
+        return js_throw_error(J, "Error", "top-level await: the promise did not settle");
+    if (!t->ok) {
+        J->thrown = true;
+        J->exc = t->val;
+        return JS_UNDEFINED;
+    }
+    return t->val;
+}
 
 /* ---- generators ------------------------------------------------------------------------------------------------- */
 

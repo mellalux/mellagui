@@ -69,7 +69,7 @@ struct jsobj {
 enum nodetype {
     N_NUM, N_STR, N_TEMPLATE, N_IDENT, N_THIS, N_LIT /* undefined/null/true/false in num */, N_ARRAY, N_OBJECT, N_FUNC,
     N_CLASS, N_UNARY, N_UPDATE, N_BINARY, N_LOGICAL, N_ASSIGN, N_COND, N_CALL, N_NEW, N_MEMBER, N_SEQ, N_SPREAD,
-    N_SUPER, N_HOLE, N_REGEX, N_AWAIT, N_YIELD, N_TAGGED,
+    N_SUPER, N_HOLE, N_REGEX, N_AWAIT, N_YIELD, N_TAGGED, N_IMPORT, N_EXPORT,
     /* statements */
     N_VAR, N_DECL, N_EXPR, N_BLOCK, N_IF, N_FOR, N_FORIN, N_FOROF, N_WHILE, N_DOWHILE, N_RETURN, N_BREAK,
     N_CONTINUE, N_THROW, N_TRY, N_WITH, N_SWITCH, N_CASE, N_EMPTY, N_LABEL, N_PROP, N_PROGRAM
@@ -159,6 +159,9 @@ struct js {
     bool draining;
     bool gen_unwind;                /* generator.return(): unwinding with `exc` as the return value (catch clauses ignore it) */
     jsobj *gen_proto, *agen_proto;
+    struct jsmodule *modules;       /* module registry (js_module.c) */
+    js_module_loader mod_load;
+    void *mod_data;
     jsval *mq;                      /* queueMicrotask() queue */
     size_t mq_n, mq_cap, mq_head;
     jsval newtarget;                // set while a native runs: the constructor when called with `new`
@@ -219,9 +222,13 @@ double str_to_number(const char *s, size_t len);
 
 /* parser (js_parse.c) */
 struct node *js_parse_program(js *J, const char *src, size_t len, char *err, size_t errn);
+struct node *js_parse_module(js *J, const char *src, size_t len, char *err, size_t errn);
 
 /* evaluator (js_eval.c) */
 jsval run_program(js *J, struct node *prog);
+struct scope *scope_new_pub(js *J, struct scope *parent);
+void js_free_modules(js *J);
+jsval dynamic_import(js *J, jsval thisv, int argc, jsval *argv, jsobj *callee);
 struct scope *eval_global_scope(js *J);
 jsval call_function(js *J, jsobj *f, jsval thisv, int argc, jsval *argv, jsval newtarget);
 jsval construct(js *J, jsval fnv, int argc, jsval *argv);

@@ -9,8 +9,9 @@
  * Date/Map/Set/Error/RegExp builtins (regexes: js_regex.c), and, written in JavaScript (js_poly.c), Promise, a Symbol-lite,
  * WeakMap/WeakSet, typed array constructors, Reflect, a little Intl, URL, URLSearchParams.
  * Also: async generators and for await over async iterators, tagged templates, Proxy (get/set/has/deleteProperty/ownKeys/apply/construct).
- * Not supported: real Symbols, modules, labels on blocks, \p{...} in regexes.
- * Strings are UTF-8 byte strings (length and indexes count bytes). Generators and async functions run their body as a
+ * ES modules: import/export (live bindings), export * / re-exports, import(), import.meta.url, top-level await (a blocking microtask
+ * drain). Not supported: real Symbols, labels on blocks, \p{...} in regexes.
+ * Strings are UTF-8 inside and behave as UTF-16: length and indexes count UTF-16 code units (js_core.c: str_len16/str_off). Generators and async functions run their body as a
  * coroutine on its own C stack (js_coro.c).
  *
  * Memory is arena allocated and released all at once by js_free() (there is no garbage collector); a memory cap and an
@@ -78,6 +79,13 @@ void js_set_console(js *J, void (*fn)(void *data, const char *level, const char 
 
 /* Run a script at global level. False + "Name: message (line N)" in err on a syntax error or an uncaught exception. */
 bool js_run(js *J, const char *src, size_t len, const char *name, char *err, size_t errn);
+/* ES modules: the loader resolves `specifier` against `referrer` (a url) and returns the module's absolute url and source
+ * (both malloc'ed). Modules are evaluated once per url; exports are live (getters on the namespace object). */
+typedef bool (*js_module_loader)(void *data, const char *specifier, const char *referrer, char **url, char **source, char *err,
+                                  size_t errn);
+void js_set_module_loader(js *J, js_module_loader fn, void *data);
+bool js_run_module(js *J, const char *src, size_t len, const char *url, char *err, size_t errn);
+
 /* Run a script and return the value of its last expression statement (e.g. "(function(event){...})"). */
 bool js_eval_value(js *J, const char *src, size_t len, jsval *out, char *err, size_t errn);
 /* Evaluate an expression/script and return its value as a string (selftests). NULL on error (message in err). */

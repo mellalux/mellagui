@@ -1486,7 +1486,7 @@ class TestClients(Base):
         path = os.path.join(ROOT, 'build', 'js-test')
         if not os.path.exists(path):
             self.skipTest('js-test not built')
-        scripts = sorted(f for f in os.listdir(os.path.join(ROOT, 'tests', 'js')) if f.endswith('.js'))
+        scripts = sorted(f for f in os.listdir(os.path.join(ROOT, 'tests', 'js')) if f.endswith('.js') or f == 'mod_main.mjs')
         self.assertTrue(scripts)
         for f in scripts:
             r = subprocess.run([path, '--check', os.path.join(ROOT, 'tests', 'js', f)], capture_output=True, text=True, timeout=60)
@@ -1507,6 +1507,19 @@ class TestClients(Base):
         with open(path, 'w') as f:
             f.write(body)
         return path
+
+    def test_js_modules_in_pages(self):
+        self.write_page('lib.mjs', "export const greeting = 'hello from module';\nexport function shout(s) { return s.toUpperCase() + '!'; }\n")
+        page = self.write_page('mod.html', """<html><body><p id="out">waiting</p>
+<script type="module">
+import { greeting, shout } from './lib.mjs';
+document.getElementById('out').textContent = shout(greeting);
+const m = await import('./lib.mjs');
+document.body.appendChild(document.createTextNode(' dyn:' + (m.greeting === greeting)));
+</script></body></html>""")
+        out, err = self.web_dump(page, 100)
+        self.assertIn('HELLO FROM MODULE!', out)
+        self.assertIn('dyn:true', out)
 
     def test_js_changes_the_rendered_page(self):
         page = self.write_page('js1.html', '''<html><head><title>T</title></head><body><h1 id="h">Before</h1><ul id="l"></ul>

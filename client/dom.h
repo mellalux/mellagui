@@ -43,6 +43,10 @@ struct dom_host {
                   struct dom_fetch_result *res);
     /* load a script: `src` as written in the page; false + message on failure */
     bool (*fetch_script)(void *data, const char *src, char **body, size_t *len, char *err, size_t errn);
+    /* load an ES module: `spec` is resolved against `referrer` (an absolute address, "" = this page); returns the absolute
+     * address and the source (malloc'ed) */
+    bool (*fetch_module)(void *data, const char *spec, const char *referrer, char **url, char **body, size_t *len, char *err,
+                         size_t errn);
     /* script asked to go to another page (location.href = ..., location.assign/replace, history.back/forward) */
     void (*navigate)(void *data, const char *url, int history_delta);
     void (*message)(void *data, const char *level, const char *text);   /* console output and script errors */

@@ -2488,10 +2488,27 @@ DNATIVE(form_requestSubmit)
 
 /* ---- scripts ------------------------------------------------------------------------------------------------------ */
 
+static bool dom_module_loader(void *data, const char *spec, const char *referrer, char **url, char **source, char *err, size_t errn)
+{
+    struct dom *d = data;
+    size_t len;
+    if (!d->host.fetch_module)
+        return false;
+    return d->host.fetch_module(d->host.data, spec, referrer, url, source, &len, err, errn);
+}
+
+static bool script_is_module(const struct dnode *s)
+{
+    const char *t = dattr_get(s, "type");
+    return t && !strcasecmp(t, "module");
+}
+
 static bool script_type_ok(const struct dnode *s)
 {
     const char *t = dattr_get(s, "type");
     if (!t || !*t)
+        return true;
+    if (!strcasecmp(t, "module"))
         return true;
     return !strcasecmp(t, "text/javascript") || !strcasecmp(t, "application/javascript") ||
            !strcasecmp(t, "text/ecmascript") || !strcasecmp(t, "application/x-javascript") || !strcasecmp(t, "text/jscript");
@@ -2520,7 +2537,18 @@ static void run_script_node(struct dom *d, struct dnode *s)
     char *code = NULL;
     size_t len = 0;
     char name[300];
-    if (src && *src) {
+    bool module = script_is_module(s);
+    char *modurl = NULL;
+    if (module && src && *src) {
+        char err[300] = "";
+        if (!d->host.fetch_module || !d->host.fetch_module(d->host.data, src, "", &modurl, &code, &len, err, sizeof(err))) {
+            char m[700];
+            snprintf(m, sizeof(m), "cannot load module %.200s: %.300s", src, err[0] ? err : "no loader");
+            report(d, "error", m);
+            return;
+        }
+        snprintf(name, sizeof(name), "%s", src);
+    } else if (src && *src) {
         char err[300] = "";
         if (!d->host.fetch_script || !d->host.fetch_script(d->host.data, src, &code, &len, err, sizeof(err))) {
             char m[700];
@@ -2549,7 +2577,10 @@ static void run_script_node(struct dom *d, struct dnode *s)
         return;
     }
     char err[500];
-    if (!js_run(d->J, code, len, name, err, sizeof(err))) {
+    bool ran = module ? js_run_module(d->J, code, len, modurl ? modurl : d->url, err, sizeof(err))
+                      : js_run(d->J, code, len, name, err, sizeof(err));
+    free(modurl);
+    if (!ran) {
         char m[900];
         snprintf(m, sizeof(m), "%.300s: %.500s", name, err);
         report(d, "error", m);
@@ -2879,6 +2910,7 @@ struct dom *dom_create(const char *url, const struct dom_host *host)
     snprintf(d->url, sizeof(d->url), "%s", url ? url : "about:blank");
     d->J = js_new();
     js_set_console(d->J, console_sink, d);
+    js_set_module_loader(d->J, dom_module_loader, d);
     d->doc = dnode_new(d, DN_DOCUMENT, NULL);
     setup_globals(d);
     return d;

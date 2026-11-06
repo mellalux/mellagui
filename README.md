@@ -199,8 +199,11 @@ Layout also honours `max-width`/`width` (px) with `margin: 0 auto` (a centred co
   word when the window is narrow, cells wrap and may hold anything (nested tables, lists, images, forms); `border="1"` draws cell boxes.
   `colspan` is supported, `rowspan` is ignored.
 
-Not there: the rest of the box model (floats, positioning, heights, border boxes, rounded corners, background images), other typefaces than those three, WebP/SVG, real Symbols, modules, `\p{...}` in regexes, `<label>`
-clicks, file inputs, form reset. Strings are UTF-8 inside but behave as UTF-16 (`length`, indexes, `charCodeAt`, `slice`, regex `index` count UTF-16 code units; a character outside the BMP is a surrogate pair). Each script, timer or event handler gets
+ES modules work (`<script type="module">`, `import`/`export` with live bindings, re-exports, `import()`, `import.meta.url`, top-level `await`
+that drains the microtask queue; imports are fetched relative to the importing module).
+
+Not there: the rest of the box model (floats, positioning, heights, border boxes, rounded corners, background images), other typefaces than those three, WebP/SVG, real Symbols, `\p{...}` in regexes, file inputs,
+`rowspan`. Strings are UTF-8 inside but behave as UTF-16 (`length`, indexes, `charCodeAt`, `slice`, regex `index` count UTF-16 code units; a character outside the BMP is a surrogate pair). Each script, timer or event handler gets
 25 million interpreter steps and a page 150 million in total (and 9 seconds of script time while it loads); there is no garbage collector
 (memory is released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.
 `lumen-web --dump URL [ms]` loads a page, lets its timers run for `ms` virtual milliseconds and prints the rendered text (title,

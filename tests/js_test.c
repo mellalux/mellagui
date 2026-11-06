@@ -74,8 +74,31 @@ static const char *PRELUDE =
     "function throws(fn, text, label) { __n++; try { fn(); __fails++; console.log('FAIL ' + label + ': no exception'); }\n"
     "  catch (e) { if (text && String(e.message).indexOf(text) < 0) { __fails++; console.log('FAIL ' + label + ': message ' + e.message); } } }\n";
 
+/* module loader for the tests: specifiers are paths relative to the importing file */
+static bool file_loader(void *data, const char *spec, const char *referrer, char **url, char **source, char *err, size_t errn)
+{
+    (void)data;
+    char path[1024];
+    if (spec[0] == '/' || !referrer || !referrer[0]) {
+        snprintf(path, sizeof(path), "%s", spec);
+    } else {
+        const char *slash = strrchr(referrer, '/');
+        while (!strncmp(spec, "./", 2))
+            spec += 2;
+        snprintf(path, sizeof(path), "%.*s%s", slash ? (int)(slash - referrer + 1) : 0, referrer, spec);
+    }
+    char *src = read_file(path);
+    if (!src) {
+        snprintf(err, errn, "cannot read %s", path);
+        return false;
+    }
+    *url = strdup(path);
+    *source = src;
+    return true;
+}
+
 /* --check FILE: run a test script with eq()/throws() helpers; exit 1 if any check failed */
-static int check_file(const char *path)
+static int check_file(const char *path, bool module)
 {
     char *src = read_file(path);
     if (!src) {
@@ -85,12 +108,13 @@ static int check_file(const char *path)
     js *J = js_new();
     js_set_console(J, console_plain, NULL);
     js_set_budget(J, 300000000);
+    js_set_module_loader(J, file_loader, NULL);
     char err[400] = "";
     if (!js_run(J, PRELUDE, strlen(PRELUDE), "prelude", err, sizeof(err))) {
         fprintf(stderr, "prelude: %s\n", err);
         return 2;
     }
-    bool ok = js_run(J, src, strlen(src), path, err, sizeof(err));
+    bool ok = module ? js_run_module(J, src, strlen(src), path, err, sizeof(err)) : js_run(J, src, strlen(src), path, err, sizeof(err));
     if (!ok)
         printf("FAIL %s: uncaught %s\n", path, err);
     char *r = js_eval_string(J, "__n + ' checks, ' + __fails + ' failures'", err, sizeof(err));
@@ -105,7 +129,7 @@ static int check_file(const char *path)
 int main(int argc, char **argv)
 {
     if (argc > 2 && !strcmp(argv[1], "--check"))
-        return check_file(argv[2]);
+        return check_file(argv[2], strstr(argv[2], ".mjs") != NULL);
     if (argc > 1 && !strcmp(argv[1], "--selftest")) {
         selftest();
         printf("js selftest: %d cases, %d failures\n", total, failures);

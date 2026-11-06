@@ -81,7 +81,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Shift+E               | quit Lumen                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *Lumen* (app menu: Terminal, Calculator and, if `~/VSCode/code` exists, Code; Esc or an outside click closes it;
+Panel: *Lumen* (app menu: Terminal, Calculator and, if found (`~/VSCode/code` or the snap's binary), Code; Esc or an outside click closes it;
 add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right *Run* (run dialog) and *Exit*
 (first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels).
 

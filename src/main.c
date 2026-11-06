@@ -256,17 +256,24 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("lumen-run", run_buf, sizeof(run_buf));
     static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128];
     if (cfg.napps == 0) {
-        /* default menu: Terminal, Calculator, and VS Code when it is unpacked in ~/VSCode */
+        /* default menu: Terminal, Calculator and VS Code (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
             "Calculator", default_sibling("lumen-calc", calc_buf, sizeof(calc_buf)) };
+        /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
+         * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
         const char *home = getenv("HOME");
-        char code[PATH_MAX];
-        if (home && snprintf(code, sizeof(code), "%s/VSCode/code", home) < (int)sizeof(code) &&
-            access(code, X_OK) == 0 && !strchr(code, '\'')) {
+        char tarball[PATH_MAX];
+        const char *cands[2] = { NULL, "/snap/code/current/usr/share/code/code" };
+        if (home && snprintf(tarball, sizeof(tarball), "%s/VSCode/code", home) < (int)sizeof(tarball))
+            cands[0] = tarball;
+        for (int i = 0; i < 2; i++) {
+            if (!cands[i] || access(cands[i], X_OK) != 0 || strchr(cands[i], '\''))
+                continue;
             snprintf(code_buf, sizeof(code_buf),
-                     "'%s' --ozone-platform=wayland --disable-gpu --no-sandbox --password-store=basic", code);
+                     "'%s' --ozone-platform=wayland --disable-gpu --no-sandbox --password-store=basic", cands[i]);
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
+            break;
         }
     }
     lm_log_set_level((enum lm_log_level)cfg.log_level);

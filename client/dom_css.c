@@ -206,7 +206,7 @@ static bool prop_supported(const char *p)
     static const char *const list[] = { "color", "background-color", "display", "font-weight", "font-style", "font-size",
         "text-decoration", "text-align", "text-transform", "white-space", "visibility", "opacity", "margin-top",
         "margin-bottom", "margin-left", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content",
-        "flex-direction", NULL };
+        "flex-direction", "font-family", NULL };
     if (p[0] == '-' && p[1] == '-')
         return true;
     for (int i = 0; list[i]; i++)
@@ -744,11 +744,11 @@ static void load_sheets(struct dom *d, struct css_state *cs)
 /* ---- the cascade ------------------------------------------------------------------------------------------------ */
 
 enum { P_COLOR, P_BG, P_DISPLAY, P_WEIGHT, P_STYLE, P_SIZE, P_DECO, P_ALIGN, P_TRANSFORM, P_WS, P_VIS, P_OPACITY, P_MT, P_MB,
-       P_ML, P_PT, P_PB, P_PL, P_LIST, P_CONTENT, P_FLEXDIR, P_COUNT };
+       P_ML, P_PT, P_PB, P_PL, P_LIST, P_CONTENT, P_FLEXDIR, P_FAMILY, P_COUNT };
 
 static const char *const PROP_NAME[P_COUNT] = { "color", "background-color", "display", "font-weight", "font-style", "font-size",
     "text-decoration", "text-align", "text-transform", "white-space", "visibility", "opacity", "margin-top", "margin-bottom",
-    "margin-left", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content", "flex-direction" };
+    "margin-left", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content", "flex-direction", "font-family" };
 
 static int prop_index(const char *p)
 {
@@ -814,7 +814,6 @@ static char *var_subst(const char *v, const struct varmap *vars, int depth)
     return sb.p ? sb.p : dstrdup("");
 }
 
-static int font_scale_px(int px) { return px < 22 ? 1 : px < 34 ? 2 : 3; }
 
 static const struct { const char *tag; double mult; } TAG_FONT[] = {
     { "h1", 2.0 }, { "h2", 1.5 }, { "h3", 1.17 }, { "h4", 1.0 }, { "h5", 0.83 }, { "h6", 0.67 }, { "small", 0.83 }, { "big", 1.2 },
@@ -911,6 +910,24 @@ static void eval_value(struct estyle *st, int prop, const char *v, int parent_px
     case P_FLEXDIR:
         st->column = !strncasecmp(v, "column", 6);
         break;
+    case P_FAMILY: {
+        /* the first family of the list that we can map onto one of the three faces */
+        char *low = dstrdup(v);
+        for (char *c = low; *c; c++) *c = (char)tolower((unsigned char)*c);
+        char *save = NULL;
+        for (char *item = strtok_r(low, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
+            int fam = -1;
+            if (strstr(item, "mono") || strstr(item, "courier") || strstr(item, "consolas") || strstr(item, "menlo") || strstr(item, "monaco") || strstr(item, "typewriter")) fam = 2;
+            else if (strstr(item, "sans") || strstr(item, "arial") || strstr(item, "helvetica") || strstr(item, "verdana") || strstr(item, "tahoma") ||
+                     strstr(item, "segoe") || strstr(item, "roboto") || strstr(item, "inter") || strstr(item, "system-ui") || strstr(item, "-apple-system") ||
+                     strstr(item, "calibri") || strstr(item, "trebuchet") || strstr(item, "ubuntu") || strstr(item, "noto")) fam = 0;
+            else if (strstr(item, "serif") || strstr(item, "georgia") || strstr(item, "times") || strstr(item, "palatino") || strstr(item, "garamond") ||
+                     strstr(item, "cambria") || strstr(item, "book") || strstr(item, "charter")) fam = 1;
+            if (fam >= 0) { st->family = (int8_t)fam; break; }
+        }
+        free(low);
+        break;
+    }
     default:
         break;
     }
@@ -922,6 +939,7 @@ static struct estyle *estyle_new(void)
     if (!st)
         exit(1);
     st->fg = st->bg = -1;
+    st->family = -1;
     st->display = -1;
     st->bold = st->italic = st->underline = st->strike = st->pre = st->align = st->transform = st->listnone = st->hidden = -1;
     st->mt = st->mb = st->pl = st->pt = st->pb = -1;
@@ -932,7 +950,7 @@ static bool estyle_empty(const struct estyle *st)
 {
     return st->fg == -1 && st->bg == -1 && st->display == -1 && st->bold == -1 && st->italic == -1 && st->underline == -1 &&
            st->strike == -1 && st->pre == -1 && st->align == -1 && st->transform == -1 && st->listnone == -1 && st->hidden == -1 &&
-           st->font_px == 0 && st->mt == -1 && st->mb == -1 && st->pl == -1 && st->pt == -1 && st->pb == -1 && !st->flex_item;
+           st->font_px == 0 && st->family == -1 && st->mt == -1 && st->mb == -1 && st->pl == -1 && st->pt == -1 && st->pb == -1 && !st->flex_item;
 }
 
 static void free_styles(struct dom *d)
@@ -1248,7 +1266,7 @@ bool css_open_inner(struct sbuf *sb, const struct estyle *st, bool is_link)
     if (!st)
         return false;
     bool any = st->fg >= 0 || st->bold >= 0 || st->italic >= 0 || st->underline >= 0 || st->strike >= 0 || st->font_px > 0 ||
-               st->pre >= 0 || st->transform >= 0;
+               st->pre >= 0 || st->transform >= 0 || st->family >= 0;
     if (!any)
         return false;
     char b[8], num[24];
@@ -1258,7 +1276,8 @@ bool css_open_inner(struct sbuf *sb, const struct estyle *st, bool is_link)
     if (st->italic >= 0) sbuf_addz(sb, st->italic ? " i=1" : " i=0");
     if (st->underline >= 0) sbuf_addz(sb, st->underline ? " u=1" : " u=0");
     if (st->strike >= 0) sbuf_addz(sb, st->strike ? " s=1" : " s=0");
-    if (st->font_px > 0) { snprintf(num, sizeof(num), " sz=%d", font_scale_px(st->font_px)); sbuf_addz(sb, num); }
+    if (st->font_px > 0) { snprintf(num, sizeof(num), " sz=%d", st->font_px); sbuf_addz(sb, num); }
+    if (st->family >= 0) sbuf_addz(sb, st->family == 2 ? " ff=m" : st->family == 1 ? " ff=r" : " ff=s");
     if (st->pre >= 0) sbuf_addz(sb, st->pre ? " ws=p" : " ws=n");
     if (st->transform >= 0) { snprintf(num, sizeof(num), " tt=%d", st->transform); sbuf_addz(sb, num); }
     sbuf_putc(sb, '>');

@@ -38,6 +38,7 @@
 #include "dom.h"
 #include "font.h"
 #include "image.h"
+#include "ttf.h"
 #include "keymap.h"
 #include "tls.h"
 #include "util.h"
@@ -370,7 +371,7 @@ enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET, T_IMAGE, T_PA
 struct tok {
     enum tok_kind kind;
     char *text;                     /* T_WORD / numbered T_BULLET; NULL otherwise */
-    uint8_t bold, ital, scale, pre;
+    uint8_t bold, ital, px, fam, pre;           /* px: font size in pixels (0 = 16); fam: FF_* */
     int link;                       /* index into doc.links or -1 */
     int indent;
     int margin;                     /* T_BLOCK: blank lines (0/1) */
@@ -438,7 +439,7 @@ static void doc_free(struct doc *d)
 
 struct pstate {
     struct doc *d;
-    int bold, ital, pre, scale, link, indent, heading, code, cell;
+    int bold, ital, pre, px, fam, link, indent, heading, code, cell;
     bool in_title, pre_first, last_space;
     int ordered[16], count[16], nlist;
     int pre_col;
@@ -453,7 +454,7 @@ struct pstate {
 struct pframe {                     /* what an <x-o> / <x-i> element changed (restored when it ends) */
     uint32_t fg, lc, bg, blockbg;
     bool has_fg, has_lc, has_bg, has_blockbg;
-    int ul, strike, align, padx, noblock, nobullet, transform, bold, ital, pre, scale;
+    int ul, strike, align, padx, noblock, nobullet, transform, bold, ital, pre, px, fam;
     int after_block_px;             /* block margin to add when the element closes */
     bool block_after, space_after;
 };
@@ -469,7 +470,8 @@ static struct tok *add_tok(struct pstate *ps, enum tok_kind kind, char *text)
     }
     struct tok *t = &d->t[d->n++];
     *t = (struct tok){ .kind = kind, .text = text, .bold = ps->bold > 0, .ital = ps->ital > 0,
-                       .scale = (uint8_t)ps->scale, .pre = ps->pre > 0, .link = ps->link, .indent = ps->indent };
+                       .px = (uint8_t)ps->px, .fam = (uint8_t)((ps->code || ps->pre > 0) ? 2 : ps->fam), .pre = ps->pre > 0, .link = ps->link,
+                       .indent = ps->indent };
     t->color = ps->link >= 0 ? (ps->has_lc ? ps->lc : COL_LINK) : ps->has_fg ? ps->fg : ps->code ? COL_CODE : ps->heading ? COL_HEAD : COL_TEXT;
     t->hasbg = ps->has_bg;
     t->bg = ps->bg;
@@ -753,7 +755,8 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
         ps->has_fg = f.has_fg; ps->has_lc = f.has_lc; ps->has_bg = f.has_bg; ps->has_blockbg = f.has_blockbg;
         ps->ul = f.ul; ps->strike = f.strike; ps->align = f.align; ps->padx = f.padx; ps->noblock = f.noblock;
         ps->nobullet = f.nobullet; ps->transform = f.transform; ps->bold = f.bold; ps->ital = f.ital; ps->pre = f.pre;
-        ps->scale = f.scale;
+        ps->px = f.px;
+        ps->fam = f.fam;
         if (f.space_after) {
             add_tok(ps, T_SPACE, NULL);
             ps->last_space = true;
@@ -771,7 +774,7 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
                           .has_lc = ps->has_lc, .has_bg = ps->has_bg, .has_blockbg = ps->has_blockbg, .ul = ps->ul,
                           .strike = ps->strike, .align = ps->align, .padx = ps->padx, .noblock = ps->noblock,
                           .nobullet = ps->nobullet, .transform = ps->transform, .bold = ps->bold, .ital = ps->ital,
-                          .pre = ps->pre, .scale = ps->scale };
+                          .pre = ps->pre, .px = ps->px, .fam = ps->fam };
     char v[64];
     uint32_t c;
     if (!outer) {
@@ -781,7 +784,8 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
         if (attr_get(attrs, alen, "i", v, sizeof(v))) ps->ital = v[0] == '1' ? 1 : 0;
         if (attr_get(attrs, alen, "u", v, sizeof(v))) ps->ul = v[0] == '1' ? 1 : 2;
         if (attr_get(attrs, alen, "s", v, sizeof(v))) ps->strike = v[0] == '1';
-        if (attr_get(attrs, alen, "sz", v, sizeof(v))) ps->scale = LM_CLAMP(atoi(v), 1, 3);
+        if (attr_get(attrs, alen, "sz", v, sizeof(v))) ps->px = LM_CLAMP(atoi(v), 8, 96);
+        if (attr_get(attrs, alen, "ff", v, sizeof(v))) ps->fam = v[0] == 'r' ? 1 : v[0] == 'm' ? 2 : 0;
         if (attr_get(attrs, alen, "ws", v, sizeof(v))) ps->pre = v[0] == 'p' ? 1 : 0;
         if (attr_get(attrs, alen, "tt", v, sizeof(v))) ps->transform = atoi(v);
         return;
@@ -877,11 +881,11 @@ static void handle_tag(struct pstate *ps, const char *name, bool close, const ch
         if (!close) {
             ps->heading++;
             ps->bold++;
-            ps->scale = name[1] == '1' ? 2 : 1;
+            ps->px = name[1] == '1' ? 32 : name[1] == '2' ? 24 : name[1] == '3' ? 19 : 16;
         } else {
             ps->heading = LM_MAX(ps->heading - 1, 0);
             ps->bold = LM_MAX(ps->bold - 1, 0);
-            ps->scale = 1;
+            ps->px = 16;
         }
     } else if (!strcmp(name, "p") || !strcmp(name, "table") || !strcmp(name, "address") || !strcmp(name, "figure")) {
         add_block(ps, 1);
@@ -1016,7 +1020,7 @@ static const char *find_close_tag(const char *s, const char *end, const char *na
 static void doc_parse(struct doc *d, const char *src, size_t len, bool plain)
 {
     memset(d, 0, sizeof(*d));
-    struct pstate ps = { .d = d, .scale = 1, .link = -1 };
+    struct pstate ps = { .d = d, .px = 16, .link = -1 };
     const char *s = src, *end = src + len;
     if (plain) {
         ps.pre = 1;
@@ -1096,6 +1100,72 @@ static void doc_parse(struct doc *d, const char *src, size_t len, bool plain)
 }
 
 /* ---- layout ---------------------------------------------------------------------------------- */
+
+/* ---- fonts ------------------------------------------------------------------------------------------------- */
+
+/* Page text is drawn with TrueType fonts from the system (DejaVu / Liberation / Noto); the 8x16 bitmap font is the fallback
+ * when none can be loaded. Italic is a shear of the upright glyphs. */
+enum { FF_SANS, FF_SERIF, FF_MONO };
+
+static struct ttf *font_for(int fam, bool bold)
+{
+    static struct ttf *fonts[3][2];
+    static bool tried[3][2];
+    if (fam < 0 || fam > 2)
+        fam = 0;
+    int b = bold ? 1 : 0;
+    if (!tried[fam][b]) {
+        tried[fam][b] = true;
+        static const char *const cand[3][2][5] = {
+            { { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", NULL },
+              { "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", NULL } },
+            { { "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+                "/usr/share/fonts/TTF/DejaVuSerif.ttf", NULL, NULL },
+              { "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSerif-Bold.ttf", NULL, NULL } },
+            { { "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/TTF/DejaVuSansMono.ttf", NULL, NULL },
+              { "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf", NULL, NULL } },
+        };
+        for (int i = 0; i < 5 && cand[fam][b][i] && !fonts[fam][b]; i++)
+            fonts[fam][b] = ttf_load(cand[fam][b][i]);
+        if (!fonts[fam][b] && b)                         /* no bold face: the regular one is thickened when drawn */
+            fonts[fam][b] = font_for(fam, false);
+    }
+    return fonts[fam][b];
+}
+
+static int tok_px(const struct tok *t) { return t->px ? t->px : 16; }
+
+/* Pixel width of `n` bytes of UTF-8 text in the font of token t. */
+static int text_w(const struct tok *t, const char *s, size_t n)
+{
+    struct ttf *f = font_for(t->fam, t->bold);
+    int px = tok_px(t), w = 0;
+    for (size_t i = 0; i < n;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(s + i, (int)(n - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        w += f ? ttf_advance(f, cp, px) : LM_FONT_W * (px >= 24 ? 2 : 1);
+    }
+    return w;
+}
+
+static int space_w(const struct tok *t) { return text_w(t, " ", 1); }
+static int line_for(const struct tok *t) { return (tok_px(t) * 9 + 7) / 8; }
+static int ascent_for(const struct tok *t)
+{
+    struct ttf *f = font_for(t->fam, t->bold);
+    return f ? ttf_ascent(f, tok_px(t)) : LM_FONT_H;
+}
+static int text_h(const struct tok *t)
+{
+    struct ttf *f = font_for(t->fam, t->bold);
+    return f ? ttf_ascent(f, tok_px(t)) + ttf_descent(f, tok_px(t)) : LM_FONT_H;
+}
 
 enum run_kind { R_TEXT, R_HR, R_BULLET, R_IMAGE, R_BG, R_WIDGET };
 
@@ -1192,7 +1262,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             if (ls.open) {
                 ls_finish(&ls);
             } else {
-                ls.y += ls.gap + 18 * t->scale;
+                ls.y += ls.gap + line_for(t);
                 ls.gap = 0;
             }
             break;
@@ -1284,14 +1354,13 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             /* not loaded: show the alt text like a word */
             /* fall through */
         case T_WORD: {
-            int scale = t->scale ? t->scale : 1;
             const char *text = t->text;
             int total = (int)strlen(text);
             int pos = 0;
             ls_start(&ls, t->indent, t->padx);
             while (pos < total) {
-                int w = lm_font_text_width(text + pos) * scale;
-                int sp = ls.space && ls.x > ls.left ? LM_FONT_W * scale : 0;
+                int w = text_w(t, text + pos, (size_t)(total - pos));
+                int sp = ls.space && ls.x > ls.left ? space_w(t) : 0;
                 int avail = right - ls.x - sp;
                 if (!t->pre && w > avail && ls.x > ls.left) {
                     ls_finish(&ls);
@@ -1299,25 +1368,27 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
                     continue;
                 }
                 int take = total - pos;
-                if (!t->pre && w > right - ls.left) {          /* longer than a whole line: cut at char boundary */
-                    int fit = LM_MAX((right - ls.x - sp) / (LM_FONT_W * scale), 1), used_b = 0, cnt = 0;
-                    while (used_b < total - pos && cnt < fit) {
+                if (!t->pre && w > right - ls.left) {          /* longer than a whole line: cut at a character boundary */
+                    int room = right - ls.x - sp, used_b = 0;
+                    w = 0;
+                    while (used_b < total - pos) {
                         int u;
                         lm_utf8_decode(text + pos + used_b, total - pos - used_b, &u);
-                        used_b += LM_MAX(u, 1);
-                        cnt++;
+                        u = LM_MAX(u, 1);
+                        int cw = text_w(t, text + pos + used_b, (size_t)u);
+                        if (w + cw > room && used_b > 0)
+                            break;
+                        w += cw;
+                        used_b += u;
                     }
                     take = used_b;
-                    char *tmp = strndup(text + pos, (size_t)take);
-                    w = lm_font_text_width(tmp) * scale;
-                    free(tmp);
                 }
                 struct run *r = add_run(L);
-                *r = (struct run){ .x = ls.x + sp, .w = w, .h = LM_FONT_H * scale, .kind = R_TEXT, .text = text + pos,
+                *r = (struct run){ .x = ls.x + sp, .w = w, .h = text_h(t), .kind = R_TEXT, .text = text + pos,
                                    .len = take, .t = t };
                 ls.x += sp + w;
                 ls.space = false;
-                ls.line_h = LM_MAX(ls.line_h, 18 * scale);
+                ls.line_h = LM_MAX(ls.line_h, line_for(t));
                 pos += take;
                 if (pos < total) {
                     ls_finish(&ls);
@@ -2644,6 +2715,7 @@ static void draw_text(struct app *a, struct rect clip, int x, int y, const char 
 }
 
 static void paint_widget(struct app *a, struct rect view, const struct run *r, int sy);
+static void draw_page_text(struct app *a, struct rect clip, int x, int y, const char *s, size_t len, const struct tok *t, uint32_t color);
 
 static void fill_clip(struct app *a, struct rect clip, struct rect r, uint32_t color)
 {
@@ -2784,6 +2856,51 @@ static void blit_image(struct app *a, struct rect clip, int x, int y, const stru
     }
 }
 
+/* Page text: anti-aliased TrueType glyphs (y is the top of the text run); falls back to the bitmap font. */
+static void draw_page_text(struct app *a, struct rect clip, int x, int y, const char *s, size_t len, const struct tok *t, uint32_t color)
+{
+    struct ttf *f = font_for(t->fam, t->bold);
+    int px = tok_px(t);
+    if (!f) {
+        draw_text(a, clip, x, y, s, len, px >= 24 ? 2 : 1, color, t->bold, t->ital);
+        return;
+    }
+    bool thicken = t->bold && f == font_for(t->fam, false);
+    int base = y + ttf_ascent(f, px);
+    uint32_t cr = (color >> 16) & 255, cg = (color >> 8) & 255, cb = color & 255;
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        const struct ttf_glyph *g = ttf_glyph(f, cp, px);
+        if (g->cov && x + g->left + g->w > clip.x && x + g->left < clip.x + clip.w) {
+            for (int row = 0; row < g->h; row++) {
+                int py = base - g->top + row;
+                if (py < clip.y || py >= clip.y + clip.h || py < 0 || py >= a->bh)
+                    continue;
+                int shear = t->ital ? (int)((float)(g->top - row) * 0.2f + 0.5f) : 0;
+                for (int col = 0; col < g->w; col++) {
+                    int cv = g->cov[(size_t)row * (size_t)g->w + (size_t)col];
+                    if (!cv)
+                        continue;
+                    for (int pass = 0; pass < (thicken ? 2 : 1); pass++) {
+                        int pxx = x + g->left + col + shear + pass;
+                        if (pxx < clip.x || pxx >= clip.x + clip.w || pxx < 0 || pxx >= a->bw)
+                            continue;
+                        uint32_t *dst = &a->pixels[(size_t)py * (size_t)a->bw + (size_t)pxx];
+                        uint32_t d = *dst;
+                        uint32_t rr = (cr * (uint32_t)cv + ((d >> 16) & 255) * (uint32_t)(255 - cv)) / 255;
+                        uint32_t gg = (cg * (uint32_t)cv + ((d >> 8) & 255) * (uint32_t)(255 - cv)) / 255;
+                        uint32_t bb = (cb * (uint32_t)cv + (d & 255) * (uint32_t)(255 - cv)) / 255;
+                        *dst = rr << 16 | gg << 8 | bb;
+                    }
+                }
+            }
+        }
+        x += g->advance;
+    }
+}
+
 static void draw_label(struct app *a, struct rect r, const char *s, uint32_t color)
 {
     int tw = lm_font_text_width(s);
@@ -2886,13 +3003,14 @@ static void paint(struct app *a)
             if (t->link >= 0 && t->link == a->hover_link)
                 col = 0x1f7bff;
             if (t->hasbg)
-                fill_clip(a, view, (struct rect){ r->x - 1, sy, r->w + LM_FONT_W * (t->scale ? t->scale : 1) + 1, r->h }, t->bg);
-            draw_text(a, view, r->x, sy, r->text, (size_t)r->len, t->scale ? t->scale : 1, col, t->bold, t->ital);
+                fill_clip(a, view, (struct rect){ r->x - 1, sy, r->w + space_w(t) + 1, r->h }, t->bg);
+            draw_page_text(a, view, r->x, sy, r->text, (size_t)r->len, t, col);
             bool under = t->ul == 1 || (t->link >= 0 && t->ul != 2);
+            int base = sy + ascent_for(t);
             if (under)
-                fill_clip(a, view, (struct rect){ r->x, sy + r->h - 2, r->w, 1 }, col);
+                fill_clip(a, view, (struct rect){ r->x, base + 2, r->w, 1 }, col);
             if (t->strike)
-                fill_clip(a, view, (struct rect){ r->x, sy + r->h / 2, r->w, 1 }, col);
+                fill_clip(a, view, (struct rect){ r->x, base - tok_px(t) / 4, r->w, 1 }, col);
         }
     }
     int ms = max_scroll(a);

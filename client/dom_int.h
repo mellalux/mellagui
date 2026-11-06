@@ -28,6 +28,7 @@ struct estyle {
     int8_t display;                 /* -1, DS_* */
     int8_t bold, italic, underline, strike, pre, align, transform, listnone, hidden;
     int16_t font_px;                /* computed font size when specified, else 0 */
+    int8_t family;                  /* -1 unspecified, 0 sans, 1 serif, 2 monospace */
     int16_t mt, mb, pl, pt, pb;     /* px or -1 */
     int8_t flex_item;               /* a child of a flex row: laid out inline */
     int8_t column;                  /* flex-direction: column / row-reverse ... */

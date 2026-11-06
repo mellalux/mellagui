@@ -1702,7 +1702,7 @@ fetch('missing.json').then(function (r) { document.getElementById('e').textConte
             self.skipTest('lumen-web not built')
         self.write_page('formres.html', '<html><head><title>x</title></head><body><script>document.title = "q" + location.search;</script></body></html>')
         page = self.write_page('form1.html', '''<html><head><title>Form</title></head><body>
-<form action="formres.html" method="get"><p>Name: <input type="text" name="q" value="ab" size="16">
+<form action="formres.html" method="get"><p><input type="text" name="q" value="ab" size="16">
 <input type="checkbox" name="c" value="yes"> <select name="s"><option value="a">A</option><option value="b">B</option></select>
 <input type="submit" value="Go"></p></form></body></html>''')
         p = subprocess.Popen([path, page], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -1714,14 +1714,14 @@ fetch('missing.json').then(function (r) { document.getElementById('e').textConte
         def title():
             return wait_for_window('lumen.web')['title']
 
-        # first line of the page: "Name: " is 48 px wide, so the field spans x = 64..204; its middle is 37 px below the toolbar
+        # first line of the page: the field spans x = 16..156 (16 columns of 8 px + 12), its middle is 37 px below the toolbar
         fy = win['y'] + 34 + 37
-        ctl.click(win['x'] + 64 + 60, fy)                 # focus the text field (caret at the end)
+        ctl.click(win['x'] + 16 + 60, fy)                 # focus the text field (caret at the end)
         for ch in 'cd':
             ctl.tap(KEYCODES[ch])
         ctl.tap(14)                                       # KEY_BACKSPACE: removes the 'd'
         ctl.tap(KEYCODES['x'])
-        ctl.click(win['x'] + 219, fy)                     # the checkbox right of the field: toggles it
+        ctl.click(win['x'] + 168, fy)                     # the checkbox right of the field (after a 5 px space): toggles it
         ctl.tap(KEY_TAB)
         ctl.tap(KEY_ENTER)                                # Enter in a field submits the form
         for _ in range(60):
@@ -1730,6 +1730,19 @@ fetch('missing.json').then(function (r) { document.getElementById('e').textConte
             time.sleep(0.05)
         self.assertEqual(title(), 'q?q=abcx&c=yes&s=a - Lumen Web')
         ctl.abs(900, 500)
+
+    def test_page_text_uses_antialiased_truetype_fonts(self):
+        if not os.path.exists('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'):
+            self.skipTest('DejaVu fonts not installed')
+        page = self.write_page('fonts1.html', '<html><body style="background:#ffffff"><p style="font-family:serif;font-size:28px;color:#000000">Wiiii &#245;&#228;&#246;&#252; MMMM</p></body></html>')
+        img, win = self.web_frame(page)
+        levels = set()
+        for y in range(win['y'] + 34, win['y'] + 34 + 70):
+            for x in range(win['x'] + 10, win['x'] + 400):
+                levels.add(img.px(x, y)[0])
+        self.assertGreater(len(levels), 20, 'text is not anti-aliased (only %d grey levels)' % len(levels))   # the bitmap font has two
+        out, err = self.web_dump(page, 0)
+        self.assertIn('\u00f5\u00e4\u00f6\u00fc', out)
 
     def test_images_are_decoded_and_painted(self):
         red, green, blue = (255, 0, 0), (0, 255, 0), (0, 0, 255)

@@ -101,7 +101,7 @@ $(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 JS_OBJS := $(patsubst %,$(BUILD)/client/%.o,js_core js_parse js_eval js_lib js_lib2 js_regex js_coro js_poly)
-WEB_OBJS := $(BUILD)/client/tls.o $(BUILD)/client/image.o $(BUILD)/client/dom_css.o $(BUILD)/client/dom.o $(BUILD)/client/dom_js.o $(JS_OBJS)
+WEB_OBJS := $(BUILD)/client/tls.o $(BUILD)/client/image.o $(BUILD)/client/dom_css.o $(BUILD)/client/ttf.o $(BUILD)/client/dom.o $(BUILD)/client/dom_js.o $(JS_OBJS)
 $(BUILD)/lumen-web: $(BUILD)/client/lumen-web.o $(BUILD)/client/wlc.o $(WEB_OBJS) $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

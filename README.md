@@ -187,8 +187,12 @@ Also in the page layer:
   type, arrows/Home/End/Delete, Tab/Shift+Tab, Enter submits (GET navigates to `action?query`, POST sends the body). Values live in the DOM, so
   scripts see them and `input`/`change`/`submit` events fire.
 
-Not there: box model details (floats, positioning, borders, widths/heights, background images), `font-family` (there is one bitmap font,
-Terminus 8x16, scaled 1-3x), WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
+* **Fonts:** page text is drawn with TrueType fonts from the system (DejaVu Sans / Serif / Sans Mono, regular and bold; Liberation or Noto if
+  DejaVu is missing; `client/ttf.c` rasterizes them with exact-area anti-aliasing, composite glyphs and kerning-free proportional advances).
+  `font-family` picks sans, serif or monospace, `font-size` is real pixels, italic is a shear. The window chrome and form controls keep the
+  8x16 bitmap font, which is also the fallback when no TrueType font can be found.
+
+Not there: box model details (floats, positioning, borders, widths/heights, background images), other typefaces than those three, WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
 clicks, file inputs, form reset. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script, timer or event handler gets
 25 million interpreter steps and a page 150 million in total (and 9 seconds of script time while it loads); there is no garbage collector
 (memory is released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.

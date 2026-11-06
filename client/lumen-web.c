@@ -977,13 +977,20 @@ static void handle_tag(struct pstate *ps, const char *name, bool close, const ch
         ps->code = LM_MAX(ps->code + (close ? -1 : 1), 0);
     } else if (name_is(name, "b strong th")) {
         ps->bold = LM_MAX(ps->bold + (close ? -1 : 1), 0);
-        if (!strcmp(name, "th") && !close)
-            add_tok(ps, T_CELL, NULL)->img = 1;
+        if (!strcmp(name, "th") && !close) {
+            struct tok *ct = add_tok(ps, T_CELL, NULL);
+            char v[16];
+            ct->img = 1;
+            ct->margin = attr_get(attrs, alen, "colspan", v, sizeof(v)) ? LM_CLAMP(atoi(v), 1, 32) : 1;
+        }
     } else if (name_is(name, "i em cite var dfn")) {
         ps->ital = LM_MAX(ps->ital + (close ? -1 : 1), 0);
     } else if (!strcmp(name, "td")) {
-        if (!close)
-            add_tok(ps, T_CELL, NULL);
+        if (!close) {
+            struct tok *ct = add_tok(ps, T_CELL, NULL);
+            char v[16];
+            ct->margin = attr_get(attrs, alen, "colspan", v, sizeof(v)) ? LM_CLAMP(atoi(v), 1, 32) : 1;
+        }
     } else if (!strcmp(name, "a")) {
         if (close) {
             ps->link = -1;
@@ -1487,7 +1494,7 @@ static void layout_tokens(const struct doc *d, size_t from, size_t to, struct ls
 #undef ls
 }
 
-struct cellrange { size_t from, to; bool th; };
+struct cellrange { size_t from, to; bool th; int span; };
 
 /* Tables: columns are as wide as their widest cell (down to the longest word when the window is narrow); every cell is laid
  * out on its own, a row is as high as its tallest cell. Returns the index of the matching T_TEND. */
@@ -1525,7 +1532,7 @@ static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls)
                     row_first[nrows++] = ncells;
                 if (ncells > 0 && cells[ncells - 1].to == limit)
                     cells[ncells - 1].to = j;
-                cells[ncells++] = (struct cellrange){ j + 1, limit, d->t[j].img == 1 };
+                cells[ncells++] = (struct cellrange){ j + 1, limit, d->t[j].img == 1, d->t[j].margin > 0 ? d->t[j].margin : 1 };
             }
             if (k == T_ROW && ncells > 0 && cells[ncells - 1].to == limit)
                 cells[ncells - 1].to = j;
@@ -1533,9 +1540,11 @@ static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls)
     }
     int ncols = 0;
     for (int r = 0; r < nrows; r++) {
-        int cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - row_first[r];
-        if (cnt > ncols)
-            ncols = cnt;
+        int cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - row_first[r], cols = 0;
+        for (int c = 0; c < cnt; c++)
+            cols += cells[row_first[r] + c].span;
+        if (cols > ncols)
+            ncols = cols;
     }
     ls_finish(ls);
     if (body > open + 1)                                          /* <caption> and other text before the first row */
@@ -1551,7 +1560,12 @@ static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls)
     int *nat = calloc((size_t)ncols, sizeof(int)), *mn = calloc((size_t)ncols, sizeof(int)), *colw = calloc((size_t)ncols, sizeof(int));
     for (int r = 0; r < nrows; r++) {
         int first = row_first[r], cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - first;
+        int col = 0;
         for (int c = 0; c < cnt; c++) {
+            int span = cells[first + c].span, at = col;
+            col += span;
+            if (span > 1)
+                continue;                                         /* spanning cells do not decide column widths (below) */
             struct layout tmp = { 0 };
             struct lstate m = { .L = &tmp, .width = 100000, .xmin = 0, .xmax = 100000, .base_indent = to->indent, .right = 100000, .in_cell = true };
             layout_tokens(d, cells[first + c].from, cells[first + c].to, &m);
@@ -1564,8 +1578,30 @@ static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls)
                 longest = LM_MAX(longest, tmp.r[k].w);
             }
             free(tmp.r);
-            nat[c] = LM_MAX(nat[c], w);
-            mn[c] = LM_MAX(mn[c], longest);
+            nat[at] = LM_MAX(nat[at], w);
+            mn[at] = LM_MAX(mn[at], longest);
+        }
+    }
+    for (int r = 0; r < nrows; r++) {                                  /* spanning cells widen their last column if needed */
+        int first = row_first[r], cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - first, col = 0;
+        for (int c = 0; c < cnt; c++) {
+            int span = cells[first + c].span, at = col;
+            col += span;
+            if (span <= 1 || at + span > ncols)
+                continue;
+            struct layout tmp = { 0 };
+            struct lstate m = { .L = &tmp, .width = 100000, .xmin = 0, .xmax = 100000, .base_indent = to->indent, .right = 100000, .in_cell = true };
+            layout_tokens(d, cells[first + c].from, cells[first + c].to, &m);
+            ls_finish(&m);
+            int w = m.maxx, have = (span - 1) * pad;
+            for (size_t k = 0; k < tmp.n; k++)
+                if (tmp.r[k].kind != R_BG && tmp.r[k].kind != R_BULLET)
+                    w = LM_MAX(w, tmp.r[k].x + tmp.r[k].w);
+            free(tmp.r);
+            for (int k = at; k < at + span; k++)
+                have += nat[k];
+            if (w > have)
+                nat[at + span - 1] += w - have;
         }
     }
     int total_nat = 0, total_min = 0;
@@ -1590,16 +1626,20 @@ static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls)
         int first = row_first[r], cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - first;
         int x = tl, rowh = 20;
         size_t run_start = ls->L->n;
-        int cell_x[64], cell_w[64];
+        int cell_x[64], cell_w[64], col = 0;
         for (int c = 0; c < cnt; c++) {
-            struct lstate cs = { .L = ls->L, .width = ls->width, .xmin = x + pad / 2, .xmax = x + colw[c] - pad / 2,
+            int span = cells[first + c].span, cw = 0;
+            for (int k = col; k < col + span && k < ncols; k++)
+                cw += colw[k];
+            col += span;
+            struct lstate cs = { .L = ls->L, .width = ls->width, .xmin = x + pad / 2, .xmax = x + cw - pad / 2,
                                  .base_indent = to->indent, .y = y + 3, .in_cell = true };
             cs.right = cs.xmax;
             layout_tokens(d, cells[first + c].from, cells[first + c].to, &cs);
             ls_finish(&cs);
             rowh = LM_MAX(rowh, cs.y - y + 3);
-            if (c < 64) { cell_x[c] = x; cell_w[c] = colw[c]; }
-            x += colw[c];
+            if (c < 64) { cell_x[c] = x; cell_w[c] = cw; }
+            x += cw;
         }
         (void)run_start;
         if (to->img) {                                                  /* border="1": a box around every cell */

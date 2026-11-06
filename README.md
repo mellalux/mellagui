@@ -197,7 +197,7 @@ Layout also honours `max-width`/`width` (px) with `margin: 0 auto` (a centred co
 
 * **Tables:** real column/row layout (`<table>`, `<tr>`, `<td>`/`<th>`): columns as wide as their widest cell, shrinking down to the longest
   word when the window is narrow, cells wrap and may hold anything (nested tables, lists, images, forms); `border="1"` draws cell boxes.
-  `colspan`/`rowspan` are ignored.
+  `colspan` is supported, `rowspan` is ignored.
 
 Not there: the rest of the box model (floats, positioning, heights, border boxes, rounded corners, background images), other typefaces than those three, WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
 clicks, file inputs, form reset. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script, timer or event handler gets

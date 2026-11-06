@@ -158,7 +158,7 @@ struct js {
     int entries;                    /* nesting of host entry points (js_run / js_call): microtasks run when it returns to 0 */
     bool draining;
     bool gen_unwind;                /* generator.return(): unwinding with `exc` as the return value (catch clauses ignore it) */
-    jsobj *gen_proto;
+    jsobj *gen_proto, *agen_proto;
     jsval *mq;                      /* queueMicrotask() queue */
     size_t mq_n, mq_cap, mq_head;
     jsval newtarget;                // set while a native runs: the constructor when called with `new`
@@ -239,6 +239,9 @@ void js_coro_free_all(js *J);
 jsval run_closure_body(js *J, jsobj *f, jsval thisv, int argc, jsval *argv, jsval newtarget);
 bool gen_collect(js *J, jsval it, jsval **out, int *outn, int max);   /* iterate an iterator-protocol object; false on exception */
 bool js_has_iterator(js *J, jsval v);
+bool js_has_async_iterator(js *J, jsval v);
+jsval make_async_generator(js *J, jsobj *f, jsval thisv, int argc, jsval *argv);
+jsval co_await(js *J, jsval v);                      /* await inside a coroutine (an async generator tells it from yield) */
 
 /* builtins (js_lib.c) */
 void js_init_builtins(js *J);

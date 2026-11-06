@@ -38,3 +38,24 @@ function checkLater(n) {
   eq(order.indexOf('a1 got 5') < order.indexOf('a1 got 6'), true, 'await order');
 }
 checkLater(40);
+// ---- async generators and for await over async iterators
+var aorder = [];
+async function* agen() { aorder.push('start'); var x = await Promise.resolve(1); yield x; yield 2; try { yield 3; } finally { aorder.push('cleanup'); } return 'end'; }
+(async function () {
+  var seen = [];
+  for await (var v of agen()) seen.push(v);
+  aorder.push('forawait ' + seen.join());
+  var g = agen(); var r1 = await g.next(); var r2 = await g.next(); var r3 = await g.next(); var r4 = await g.return('early');
+  aorder.push('manual ' + [r1.value, r2.value, r3.value, r4.value, r4.done].join());
+  var parallel = agen(); var ps = [parallel.next(), parallel.next(), parallel.next(), parallel.next()]; var rs = await Promise.all(ps);
+  aorder.push('queued ' + rs.map(function (r) { return r.value + ':' + r.done; }).join());
+  var custom = { [Symbol.asyncIterator]() { var i = 0; return { next() { return Promise.resolve(i < 3 ? { value: i++, done: false } : { done: true }); } }; } };
+  var got = []; for await (var c of custom) got.push(c); aorder.push('custom ' + got.join());
+  var thrower = (async function* () { yield 1; throw new Error('agen boom'); })(); await thrower.next(); try { await thrower.next(); } catch (e) { aorder.push('caught ' + e.message); }
+  class Src { async *items() { yield 'a'; yield 'b'; } } var items = []; for await (var it of new Src().items()) items.push(it); aorder.push('class ' + items.join(''));
+})();
+function checkAgen(n) {
+  if (n > 0) return Promise.resolve().then(function () { checkAgen(n - 1); });
+  ['start', 'forawait 1,2,3', 'cleanup', 'manual 1,2,3,early,true', 'queued 1:false,2:false,3:false,end:true', 'custom 0,1,2', 'caught agen boom', 'class ab'].forEach(function (x) { eq(aorder.indexOf(x) >= 0, true, 'async generator: ' + x); });
+}
+checkAgen(80);

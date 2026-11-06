@@ -26,6 +26,7 @@ struct coro {
     jsval result;
     int depth;
     jsval resolve, reject;          /* async: the result promise */
+    bool awaiting;                  /* suspended on `await` (as opposed to `yield`) */
     struct coro *next_all;
 };
 
@@ -131,11 +132,12 @@ static void resume(js *J, struct coro *co, int mode, jsval v)
 }
 
 /* Called inside a coroutine: hand `v` to the resumer and wait to be resumed. */
-jsval co_yield(js *J, jsval v)
+static jsval co_suspend(js *J, jsval v, bool awaiting)
 {
     struct coro *co = J->cur_co;
     if (!co)
         return js_throw_error(J, "SyntaxError", "yield/await outside a generator or async function");
+    co->awaiting = awaiting;
     co->transfer = v;
     co->state = 1;
     co->depth = J->depth;
@@ -156,6 +158,9 @@ jsval co_yield(js *J, jsval v)
     }
     return co->transfer;
 }
+
+jsval co_yield(js *J, jsval v) { return co_suspend(J, v, false); }
+jsval co_await(js *J, jsval v) { return co_suspend(J, v, true); }
 
 /* ---- generators ------------------------------------------------------------------------------------------------- */
 
@@ -330,8 +335,166 @@ jsval start_async(js *J, jsobj *f, jsval thisv, int argc, jsval *argv)
     return promise;
 }
 
+/* ---- async generators ---------------------------------------------------------------------------------------- */
+
+struct agreq { int mode; jsval value, resolve, reject; };
+
+struct agen {
+    struct coro *co;
+    struct agreq *q;
+    int qn, qcap;
+    bool running;
+};
+
+static const struct js_hostclass agen_class = { "AsyncGenerator", NULL, NULL, NULL };
+
+struct pcap { jsval res, rej; };
+
+NATIVE(pcap_executor)
+{
+    struct pcap *c = js_fn_data(callee);
+    c->res = ARG(0);
+    c->rej = ARG(1);
+    return JS_UNDEFINED;
+}
+
+static jsval new_promise(js *J, jsval *res, jsval *rej)
+{
+    struct pcap *c = js_alloc(J, sizeof(*c));
+    jsval P = js_get(J, js_objv(J->global), "Promise");
+    jsval ex = js_objv(js_native_new(J, "", pcap_executor, 2, c));
+    jsval p = construct(J, P, 1, &ex);
+    *res = c->res;
+    *rej = c->rej;
+    return p;
+}
+
+static void agen_drive(js *J, struct agen *ag);
+
+static void agen_settle(js *J, struct agen *ag, bool ok, jsval v, bool done)
+{
+    struct agreq req = ag->q[0];
+    memmove(ag->q, ag->q + 1, sizeof(*ag->q) * (size_t)(--ag->qn));
+    if (ok) {
+        jsval r = iter_result(J, v, done);
+        call_function(J, req.resolve.u.o, JS_UNDEFINED, 1, &r, JS_UNDEFINED);
+    } else {
+        call_function(J, req.reject.u.o, JS_UNDEFINED, 1, &v, JS_UNDEFINED);
+    }
+}
+
+static void agen_step(js *J, struct agen *ag, int mode, jsval v);
+
+NATIVE(agen_on_ok) { agen_step(J, js_fn_data(callee), 0, ARG(0)); return JS_UNDEFINED; }
+NATIVE(agen_on_err) { agen_step(J, js_fn_data(callee), 1, ARG(0)); return JS_UNDEFINED; }
+
+static void agen_step(js *J, struct agen *ag, int mode, jsval v)
+{
+    struct coro *co = ag->co;
+    resume(J, co, mode, v);
+    if (J->aborted)
+        return;
+    if (co->state == 3 || (J->thrown && co->state != 3)) {
+        if (co->threw || J->thrown) {
+            jsval ex = js_exception(J);
+            ag->running = false;
+            agen_settle(J, ag, false, ex, true);
+        } else {
+            ag->running = false;
+            agen_settle(J, ag, true, co->result, true);
+        }
+        agen_drive(J, ag);
+        return;
+    }
+    if (co->awaiting) {                                         /* continue when the awaited value settles */
+        jsval P = js_get(J, js_objv(J->global), "Promise");
+        jsval p = js_call(J, js_get(J, P, "resolve"), P, 1, &co->transfer, NULL);
+        if (J->thrown)
+            return;
+        jsval cbs[2] = { js_objv(js_native_new(J, "", agen_on_ok, 1, ag)), js_objv(js_native_new(J, "", agen_on_err, 1, ag)) };
+        js_call(J, js_get(J, p, "then"), p, 2, cbs, NULL);
+        return;
+    }
+    ag->running = false;                                        /* a yield: answer the pending next() */
+    agen_settle(J, ag, true, co->transfer, false);
+    agen_drive(J, ag);
+}
+
+static void agen_drive(js *J, struct agen *ag)
+{
+    while (!ag->running && ag->qn > 0 && !J->aborted) {
+        struct agreq *req = &ag->q[0];
+        struct coro *co = ag->co;
+        if (co->state == 0 && req->mode != 0)
+            co->state = 3;
+        if (co->state == 3) {
+            if (req->mode == 1) agen_settle(J, ag, false, req->value, true);
+            else agen_settle(J, ag, true, req->mode == 2 ? req->value : JS_UNDEFINED, true);
+            continue;
+        }
+        ag->running = true;
+        agen_step(J, ag, req->mode, req->value);
+    }
+}
+
+static jsval agen_request(js *J, jsval thisv, int mode, jsval v)
+{
+    struct agen *ag = js_host_ptr(thisv, &agen_class);
+    jsval res, rej;
+    jsval p = new_promise(J, &res, &rej);
+    THROW_IF(J);
+    if (!ag) {
+        jsval e = make_error(J, ERR_TYPE, "next method called on an incompatible receiver");
+        call_function(J, rej.u.o, JS_UNDEFINED, 1, &e, JS_UNDEFINED);
+        return p;
+    }
+    if (ag->qn == ag->qcap) {                                   /* (arena memory: freed with the interpreter) */
+        int ncap = ag->qcap ? ag->qcap * 2 : 4;
+        struct agreq *nq = js_alloc(J, sizeof(*nq) * (size_t)ncap);
+        if (ag->qn)
+            memcpy(nq, ag->q, sizeof(*nq) * (size_t)ag->qn);
+        ag->q = nq;
+        ag->qcap = ncap;
+    }
+    ag->q[ag->qn++] = (struct agreq){ mode, v, res, rej };
+    agen_drive(J, ag);
+    return p;
+}
+
+NATIVE(AGen_next) { return agen_request(J, thisv, 0, ARG(0)); }
+NATIVE(AGen_throw) { return agen_request(J, thisv, 1, ARG(0)); }
+NATIVE(AGen_return) { return agen_request(J, thisv, 2, ARG(0)); }
+
+jsval make_async_generator(js *J, jsobj *f, jsval thisv, int argc, jsval *argv)
+{
+    jsval pv = get_prop(J, js_objv(f), J->k_prototype);
+    THROW_IF(J);
+    jsobj *g = js_host_new(J, &agen_class, NULL, pv.t == JS_OBJ ? pv.u.o : J->agen_proto);
+    struct agen *ag = js_alloc(J, sizeof(*ag));
+    ag->co = coro_new(J, f, thisv, argc, argv, 0);
+    g->host = ag;
+    return js_objv(g);
+}
+
+bool js_has_async_iterator(js *J, jsval v)
+{
+    if (v.t != JS_OBJ)
+        return false;
+    jsval f = get_prop(J, v, js_intern(J, "@@asyncIterator", 15));
+    if (J->thrown) {
+        js_exception(J);
+        return false;
+    }
+    return js_is_function(f);
+}
+
 void js_init_coro(js *J)
 {
+    J->agen_proto = obj_new(J, JC_OBJECT, J->object_proto);
+    lib_def(J, J->agen_proto, "next", AGen_next, 1);
+    lib_def(J, J->agen_proto, "throw", AGen_throw, 1);
+    lib_def(J, J->agen_proto, "return", AGen_return, 1);
+    lib_def(J, J->agen_proto, "@@asyncIterator", Gen_iterator, 0);
     J->gen_proto = obj_new(J, JC_OBJECT, J->object_proto);
     lib_def(J, J->gen_proto, "next", Gen_next, 1);
     lib_def(J, J->gen_proto, "throw", Gen_throw, 1);

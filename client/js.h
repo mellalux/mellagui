@@ -8,7 +8,8 @@
  * object literals, the Function constructor and (indirect) eval, Object/Function/Array/String/Number/Boolean/Math/JSON/
  * Date/Map/Set/Error/RegExp builtins (regexes: js_regex.c), and, written in JavaScript (js_poly.c), Promise, a Symbol-lite,
  * WeakMap/WeakSet, typed array constructors, Reflect, a little Intl, URL, URLSearchParams.
- * Not supported: async generators, real Symbols, Proxy, modules, tagged templates, labels on blocks, \p{...} in regexes.
+ * Also: async generators and for await over async iterators, tagged templates, Proxy (get/set/has/deleteProperty/ownKeys/apply/construct).
+ * Not supported: real Symbols, modules, labels on blocks, \p{...} in regexes.
  * Strings are UTF-8 byte strings (length and indexes count bytes). Generators and async functions run their body as a
  * coroutine on its own C stack (js_coro.c).
  *

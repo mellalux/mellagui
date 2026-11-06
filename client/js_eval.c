@@ -359,7 +359,7 @@ static jsval make_closure(js *J, struct node *fn, struct scope *sc, jsobj *home)
     obj_add_prop(J, f, J->k_length, js_num(fi->nformal), 0);
     obj_add_prop(J, f, J->k_name, js_strv(fi->name ? fi->name : J->k_empty), 0);
     if (fi->is_gen) {
-        jsobj *proto = obj_new(J, JC_OBJECT, J->gen_proto);
+        jsobj *proto = obj_new(J, JC_OBJECT, fi->is_async ? J->agen_proto : J->gen_proto);
         obj_add_prop(J, f, J->k_prototype, js_objv(proto), PF_WRITE);
     } else if (!fi->is_arrow && !fi->is_method && !fi->is_async) {
         jsobj *proto = js_object_new(J);
@@ -452,6 +452,8 @@ jsval call_function(js *J, jsobj *f, jsval thisv, int argc, jsval *argv, jsval n
     struct fninfo *fi = fn->fi;
     if (fn->is_class && newtarget.t == JS_UNDEF)
         return throw_type(J, "Class constructor %s cannot be invoked without 'new'", fn->name ? fn->name->s : "");
+    if (fi->is_gen && fi->is_async)
+        return make_async_generator(J, f, thisv, argc, argv);
     if (fi->is_gen)
         return make_generator(J, f, thisv, argc, argv);
     if (fi->is_async)
@@ -1423,7 +1425,7 @@ static jsval eval(js *J, struct node *n, struct scope *sc)
     case N_AWAIT: {
         jsval v = eval(J, n->a, sc);
         THROW_IF(J);
-        return co_yield(J, v);
+        return co_await(J, v);
     }
     case N_YIELD: {
         if (n->flag) {                                         /* yield* iterable */
@@ -1681,9 +1683,9 @@ done:
 
 /* for-of over an object that follows the iterator protocol (generators, custom iterables): one value at a time, so that
  * `break` stops infinite generators; the iterator is closed on an early exit. */
-static enum completion exec_forof_iter(js *J, struct node *n, struct scope *sc, jsstr *label, jsval coll)
+static enum completion exec_forof_iter(js *J, struct node *n, struct scope *sc, jsstr *label, jsval coll, bool async_it)
 {
-    jsval itf = get_prop(J, coll, js_intern(J, "@@iterator", 10));
+    jsval itf = get_prop(J, coll, async_it ? js_intern(J, "@@asyncIterator", 15) : js_intern(J, "@@iterator", 10));
     if (J->thrown)
         return C_NORMAL;
     jsval it = call_function(J, itf.u.o, coll, 0, NULL, JS_UNDEFINED);
@@ -1703,6 +1705,11 @@ static enum completion exec_forof_iter(js *J, struct node *n, struct scope *sc, 
         jsval r = call_function(J, next.u.o, it, 0, NULL, JS_UNDEFINED);
         if (J->thrown)
             return C_NORMAL;
+        if (async_it) {
+            r = co_await(J, r);                                  /* next() of an async iterator returns a promise */
+            if (J->thrown)
+                return C_NORMAL;
+        }
         if (r.t != JS_OBJ) {
             throw_type(J, "iterator result is not an object");
             return C_NORMAL;
@@ -1715,7 +1722,7 @@ static enum completion exec_forof_iter(js *J, struct node *n, struct scope *sc, 
         jsval val = get_prop(J, r, J->k_value);
         if (J->thrown)
             return C_NORMAL;
-        if (n->kind == 1) {                                      /* for await: await each value */
+        if (n->kind == 1 && !async_it) {                         /* for await over a sync iterator: await each value */
             val = co_yield(J, val);
             if (J->thrown)
                 return C_NORMAL;
@@ -1770,9 +1777,11 @@ static enum completion exec_forin_of(js *J, struct node *n, struct scope *sc, js
     jsval coll = eval(J, n->b, sc);
     if (J->thrown)
         return C_NORMAL;
+    if (is_of && n->kind == 1 && coll.t == JS_OBJ && js_has_async_iterator(J, coll))
+        return exec_forof_iter(J, n, sc, label, coll, true);
     if (is_of && coll.t == JS_OBJ && coll.u.o->cls != JC_ARRAY && coll.u.o->cls != JC_SET && coll.u.o->cls != JC_MAP &&
         js_has_iterator(J, coll))
-        return exec_forof_iter(J, n, sc, label, coll);
+        return exec_forof_iter(J, n, sc, label, coll, false);
     jsval *items = NULL;
     int cnt = 0;
     if (is_of) {

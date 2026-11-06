@@ -11,7 +11,9 @@
 #include "cvt.h"
 #include "edid.h"
 #include "keymap.h"
+#include "audio.h"
 #include "mixer.h"
+#include "sysinfo.h"
 
 static int fails;
 
@@ -184,6 +186,22 @@ int main(void)
     other[54] = other[55] = 0;
     CHECK(!lm_edid_native(other, sizeof(other), &nat), "a monitor descriptor is not a timing");
 
+    /* wpctl status (PipeWire without pactl): the sinks of the Audio section, the default one marked with * */
+    {
+        static const char *wp =
+            "PipeWire 'pipewire-0' [1.0.5, mella@host, cookie:123]\n \xe2\x94\x94\xe2\x94\x80 Clients:\n        33. WirePlumber                         [1.0.5, mella@host, pid:1]\n\n"
+            "Audio\n \xe2\x94\x9c\xe2\x94\x80 Devices:\n \xe2\x94\x82      49. Built-in Audio                      [alsa]\n \xe2\x94\x82  \n"
+            " \xe2\x94\x9c\xe2\x94\x80 Sinks:\n \xe2\x94\x82  *   53. Built-in Audio Analog Stereo        [vol: 0.40]\n \xe2\x94\x82      54. Built-in Audio Digital Stereo (HDMI) [vol: 1.00 MUTED]\n"
+            " \xe2\x94\x82  \n \xe2\x94\x9c\xe2\x94\x80 Sources:\n \xe2\x94\x82  *   55. Built-in Audio Analog Stereo        [vol: 1.00]\n"
+            " \xe2\x94\x94\xe2\x94\x80 Streams:\n\nVideo\n \xe2\x94\x9c\xe2\x94\x80 Sinks:\n \xe2\x94\x82      99. Not audio\n";
+        char list[512], cur[16];
+        int n = lm_audio_parse_wpctl_sinks(wp, list, sizeof(list), cur, sizeof(cur));
+        CHECK(n == 2, "wpctl sinks: %d (%s)", n, list);
+        CHECK(!strcmp(cur, "53"), "wpctl default sink %s", cur);
+        CHECK(!strcmp(list, "53|Built-in Audio Analog Stereo;54|Built-in Audio Digital Stereo (HDMI)"), "wpctl list: %s", list);
+        CHECK(lm_audio_parse_wpctl_sinks("", list, sizeof(list), cur, sizeof(cur)) == 0 && !list[0] && !cur[0], "empty wpctl output");
+    }
+
     /* mixer: parsers of pactl / amixer output, layout and hit testing */
     static const char *sinks_text =
         "Sink #47\n\tState: SUSPENDED\n\tName: alsa_output.pci-0000_00_1b.0.analog-stereo\n\tDescription: Built-in Audio Analog Stereo\n"
@@ -237,6 +255,46 @@ int main(void)
         CHECK(l.nstreams < 4 && l.nstreams >= 0, "a small card shows fewer rows (%d)", l.nstreams);
         lm_mixer_layout(&card, 32, 0, false, &l);
         CHECK(l.output.w == 0 && l.nstreams == 0, "no output row without pulse");
+    }
+
+    /* system monitor: /proc parsers and the temperature sensor search */
+    {
+        struct lm_cpu_times t1, t2, c1[4], c2[4];
+        int n1 = lm_sysinfo_parse_stat("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 60 0 20 400 20 0 0 0 0 0\ncpu1 40 0 30 400 30 0 0 0 0 0\nintr 5\n", &t1, c1, 4);
+        CHECK(n1 == 2 && t1.total == 1000 && t1.busy == 150, "stat: %d cores total %llu busy %llu", n1, t1.total, t1.busy);
+        lm_sysinfo_parse_stat("cpu  300 0 150 1400 150 0 0 0 0 0\ncpu0 160 0 70 700 70 0 0 0 0 0\ncpu1 140 0 80 700 80 0 0 0 0 0\n", &t2, c2, 4);
+        CHECK(lm_sysinfo_cpu_percent(&t1, &t2) == 30, "cpu percent %d (busy +300 of +1000)", lm_sysinfo_cpu_percent(&t1, &t2));
+        CHECK(lm_sysinfo_cpu_percent(&t2, &t2) == 0 && lm_sysinfo_cpu_percent(&t2, &t1) == 0, "no time passed / went backwards: 0");
+        struct lm_cpu_times idle_a = { 10, 1000 }, idle_b = { 10, 2000 }, full_a = { 0, 0 }, full_b = { 500, 500 };
+        CHECK(lm_sysinfo_cpu_percent(&idle_a, &idle_b) == 0 && lm_sysinfo_cpu_percent(&full_a, &full_b) == 100, "0 and 100 percent");
+        long tot, av, st, sf;
+        CHECK(lm_sysinfo_parse_meminfo("MemTotal:       16281472 kB\nMemFree:         1309544 kB\nMemAvailable:   13637628 kB\nSwapTotal: 2097148 kB\nSwapFree: 2097100 kB\n",
+                                       &tot, &av, &st, &sf) && tot == 16281472 && av == 13637628 && st == 2097148 && sf == 2097100, "meminfo");
+        CHECK(lm_sysinfo_parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 250 kB\n", &tot, &av, &st, &sf) && av == 400 && st == 0,
+              "meminfo without MemAvailable: %ld", av);
+        CHECK(!lm_sysinfo_parse_meminfo("nothing\n", &tot, &av, &st, &sf), "meminfo without MemTotal");
+        char dir[] = "/tmp/lumen-sys-XXXXXX";
+        CHECK(mkdtemp(dir) != NULL, "mkdtemp");
+        char cmd[512], label[48];
+        int deg = 0;
+        snprintf(cmd, sizeof(cmd), "mkdir -p %s/sys/class/hwmon/hwmon0 %s/sys/class/hwmon/hwmon1 %s/sys/class/thermal/thermal_zone0", dir, dir, dir);
+        CHECK(system(cmd) == 0, "mkdir tree");
+        CHECK(!lm_sysinfo_read_temp(dir, &deg, label, sizeof(label)), "no sensors at all");
+        snprintf(cmd, sizeof(cmd), "cd %s/sys/class && echo 'hidpp_battery_55' > hwmon/hwmon1/name && echo 99000 > hwmon/hwmon1/temp1_input && "
+                 "echo x86_pkg_temp > thermal/thermal_zone0/type && echo 61500 > thermal/thermal_zone0/temp", dir);
+        CHECK(system(cmd) == 0, "write thermal zone");
+        CHECK(lm_sysinfo_read_temp(dir, &deg, label, sizeof(label)) && deg == 62 && !strcmp(label, "x86_pkg_temp"),
+              "thermal zone of a CPU type (a battery hwmon is not a CPU): %d %s", deg, label);
+        snprintf(cmd, sizeof(cmd), "cd %s/sys/class/hwmon/hwmon0 && echo coretemp > name && echo 72000 > temp2_input && echo 'Core 0' > temp2_label && "
+                 "echo 81000 > temp1_input && echo 'Package id 0' > temp1_label && echo 75000 > temp3_input && echo 'Core 1' > temp3_label", dir);
+        CHECK(system(cmd) == 0, "write coretemp");
+        CHECK(lm_sysinfo_read_temp(dir, &deg, label, sizeof(label)) && deg == 81 && strstr(label, "coretemp") && strstr(label, "Package"),
+              "coretemp package sensor wins: %d %s", deg, label);
+        snprintf(cmd, sizeof(cmd), "rm -f %s/sys/class/hwmon/hwmon0/temp1_label && echo 70000 > %s/sys/class/hwmon/hwmon0/temp1_input", dir, dir);
+        CHECK(system(cmd) == 0, "unlabel");
+        CHECK(lm_sysinfo_read_temp(dir, &deg, label, sizeof(label)) && deg == 75, "no package label: the hottest input (%d)", deg);
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+        CHECK(system(cmd) == 0, "cleanup");
     }
 
     if (!fails)

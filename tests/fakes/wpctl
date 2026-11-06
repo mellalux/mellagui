@@ -6,10 +6,20 @@ path = os.environ.get('LUMEN_FAKE_WPCTL', '/tmp/lumen-fake-wpctl.json')
 try:
     st = json.load(open(path))
 except Exception:
-    st = {'vol': 55, 'mute': False, 'log': []}
+    st = {'vol': 55, 'mute': False, 'default': 53, 'log': []}
 a = sys.argv[1:]
 st['log'].append(' '.join(a))
-if a[:1] == ['get-volume']:
+SINKS = [(53, 'Built-in Audio Analog Stereo', 40), (54, 'Built-in Audio Digital Stereo (HDMI)', 100)]
+if a[:1] == ['status']:
+    out = "PipeWire 'pipewire-0' [1.0.5, user@host, cookie:1]\n \u2514\u2500 Clients:\n        33. WirePlumber                         [1.0.5, user@host, pid:1]\n\nAudio\n \u251c\u2500 Devices:\n \u2502      49. Built-in Audio                      [alsa]\n \u2502  \n \u251c\u2500 Sinks:\n"
+    for i, d, v in SINKS:
+        out += ' \u2502  %s %3d. %-38s [vol: %.2f]\n' % ('*' if i == st['default'] else ' ', i, d, v / 100.0)
+    out += ' \u2502  \n \u251c\u2500 Sources:\n \u2502  *   55. Built-in Audio Analog Stereo        [vol: 1.00]\n \u2514\u2500 Streams:\n\nVideo\n \u251c\u2500 Devices:\n'
+    sys.stdout.write(out)
+elif a[:1] == ['set-default'] and len(a) == 2:
+    if a[1] in [str(i) for i, d, v in SINKS]:
+        st['default'] = int(a[1])
+elif a[:1] == ['get-volume']:
     sys.stdout.write('Volume: %.2f%s\n' % (st['vol'] / 100.0, ' [MUTED]' if st['mute'] else ''))
 elif a[:1] == ['set-volume'] and len(a) == 3 and a[2].endswith('%'):
     st['vol'] = int(a[2][:-1])

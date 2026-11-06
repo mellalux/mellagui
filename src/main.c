@@ -26,6 +26,7 @@
 #include "surface.h"
 #include "wm.h"
 #include "mixer.h"
+#include "sysinfo.h"
 #include "xdg.h"
 
 static const char *usage_text =
@@ -51,7 +52,8 @@ static const char *usage_text =
     "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
     "  --no-gadget              start with the desktop gadget (clipboard history) hidden; Super+G toggles it\n"
-    "  --mixer                  start with the volume mixer gadget shown (Super+V toggles it; needs pactl or amixer)\n"
+    "  --mixer                  start with the volume mixer gadget shown (Super+V toggles it; needs pactl, wpctl or amixer)\n"
+    "  --sysinfo                start with the system monitor gadget (CPU, memory, temperature) shown; Super+S toggles it\n"
     "  --no-sound               no beeps for sticky keys (latch, lock, unlock, on/off; needs aplay otherwise)\n"
     "  --no-grab                do not EVIOCGRAB keyboards\n"
     "  --timeout SECONDS        quit automatically after SECONDS (safe first run on a real VT)\n"
@@ -90,6 +92,13 @@ static void on_mixer_changed(void *data)
     struct lm_server *srv = data;
     if (srv->wm)
         lm_wm_mixer_changed(srv->wm);
+}
+
+static void on_sysinfo_changed(void *data)
+{
+    struct lm_server *srv = data;
+    if (srv->wm)
+        lm_wm_sysinfo_changed(srv->wm);
 }
 
 static void on_output_removed(void *data, struct lm_output *out)
@@ -192,7 +201,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -214,6 +223,7 @@ int main(int argc, char **argv)
         { "sticky", no_argument, 0, OPT_STICKY },
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
         { "mixer", no_argument, 0, OPT_MIXER },
+        { "sysinfo", no_argument, 0, OPT_SYSINFO },
         { "no-sound", no_argument, 0, OPT_NO_SOUND },
         { "no-grab", no_argument, 0, OPT_NO_GRAB },
         { "timeout", required_argument, 0, OPT_TIMEOUT },
@@ -315,6 +325,7 @@ int main(int argc, char **argv)
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;
         case OPT_MIXER: cfg.mixer = true; break;
+        case OPT_SYSINFO: cfg.sysinfo = true; break;
         case OPT_NO_SOUND: cfg.sound = false; break;
         case OPT_NO_GRAB: cfg.grab_input = false; break;
         case OPT_TIMEOUT:
@@ -447,6 +458,9 @@ int main(int argc, char **argv)
     srv->mixer = lm_mixer_create(loop, on_mixer_changed, srv);
     if (srv->mixer)
         lm_mixer_set_active(srv->mixer, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER));
+    srv->sysinfo = lm_sysinfo_create(loop, on_sysinfo_changed, srv);
+    if (srv->sysinfo)
+        lm_sysinfo_set_active(srv->sysinfo, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM));
     if (!headless && lm_input_count_keyboards(srv->input) == 0) {
         /* Without a keyboard the user could not even switch VT: refuse to take over the screen. */
         lm_error("no keyboard could be opened, refusing to start (the screen would be unusable). "
@@ -479,6 +493,8 @@ out:
     /* Reverse creation order. */
     if (srv->mixer) lm_mixer_destroy(srv->mixer);
     srv->mixer = NULL;
+    if (srv->sysinfo) lm_sysinfo_destroy(srv->sysinfo);
+    srv->sysinfo = NULL;
     if (srv->settings) lm_settings_destroy(srv->settings);
     srv->settings = NULL;
     if (srv->input) lm_input_destroy(srv->input);

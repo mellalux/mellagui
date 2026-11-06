@@ -15,6 +15,7 @@
 #include "keymap.h"
 #include "log.h"
 #include "mixer.h"
+#include "sysinfo.h"
 #include "output.h"
 #include "render.h"
 #include "seat.h"
@@ -42,6 +43,10 @@
 #define GADGET_ENTRY_H 44
 #define GADGET_PAD 10
 #define GADGET_MARGIN 12
+#define SYS_W 300
+#define SYS_H 262                   /* title, CPU, graph, cores, memory, swap, temperature */
+#define SYS_MIN_W 240
+#define SYS_MIN_H 156
 #define MIXER_W 300
 #define MIXER_H 232                 /* title, master, output, two application rows, hint */
 #define MIXER_MIN_W 240
@@ -326,6 +331,7 @@ static struct lm_output *gadget_output(const struct lm_wm *wm)
 static const struct { int w, h, min_w, min_h, max_w, max_h; } gadget_def[LM_GADGET_COUNT] = {
     [LM_GADGET_CLIPBOARD] = { GADGET_W, GADGET_H, GADGET_MIN_W, GADGET_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
     [LM_GADGET_MIXER] = { MIXER_W, MIXER_H, MIXER_MIN_W, MIXER_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+    [LM_GADGET_SYSTEM] = { SYS_W, SYS_H, SYS_MIN_W, SYS_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
 };
 
 /* Largest size gadget `id` may have on `o` (it stays inside the output, below the panel). */
@@ -354,16 +360,22 @@ bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out)
     } else {
         x = o->x + o->width - w - GADGET_MARGIN;
         y = o->y + LM_PANEL_HEIGHT + GADGET_MARGIN;
-        if (id == LM_GADGET_MIXER && wm->gad[LM_GADGET_CLIPBOARD].visible && !wm->gad[LM_GADGET_CLIPBOARD].placed) {
-            struct lm_rect cb;
-            if (lm_wm_gadget_rect_id(wm, LM_GADGET_CLIPBOARD, &cb)) {
-                if (cb.y + cb.h + GADGET_MARGIN + h <= o->y + o->height - GADGET_MARGIN) {
-                    y = cb.y + cb.h + GADGET_MARGIN;                    /* below the clipboard card */
-                } else if (cb.x - GADGET_MARGIN - w >= o->x) {
-                    x = cb.x - GADGET_MARGIN - w;                       /* a small screen: beside it */
-                    y = cb.y;
-                }
+        /* docked gadgets stack downwards from the top right in id order; when the next one does not fit below the
+         * previous one, it starts a new column to its left */
+        for (int j = id - 1; j >= 0; j--) {
+            struct lm_rect pr;
+            if (wm->gad[j].placed || !lm_wm_gadget_rect_id(wm, j, &pr))
+                continue;
+            if (pr.y + pr.h + GADGET_MARGIN + h <= o->y + o->height - GADGET_MARGIN) {
+                y = pr.y + pr.h + GADGET_MARGIN;                        /* below the previous card */
+            } else if (pr.x - GADGET_MARGIN - w >= o->x) {
+                x = pr.x - GADGET_MARGIN - w;                           /* a small screen: beside it, at the top */
+                y = o->y + LM_PANEL_HEIGHT + GADGET_MARGIN;
+            } else {                                                    /* no room at all: cascade, titles stay visible */
+                x = LM_MAX(o->x, pr.x - 28);
+                y = LM_MIN(pr.y + 28, o->y + o->height - h);
             }
+            break;
         }
     }
     *out = lm_rect_make(x, y, w, h);
@@ -417,6 +429,11 @@ void lm_wm_mixer_changed(struct lm_wm *wm)
     damage_gadget(wm, LM_GADGET_MIXER);
 }
 
+void lm_wm_sysinfo_changed(struct lm_wm *wm)
+{
+    damage_gadget(wm, LM_GADGET_SYSTEM);
+}
+
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id)
 {
     return id >= 0 && id < LM_GADGET_COUNT && wm->gad[id].visible;
@@ -436,6 +453,8 @@ void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible)
     damage_gadgets(wm);
     if (id == LM_GADGET_MIXER && wm->srv->mixer)
         lm_mixer_set_active(wm->srv->mixer, visible);
+    if (id == LM_GADGET_SYSTEM && wm->srv->sysinfo)
+        lm_sysinfo_set_active(wm->srv->sysinfo, visible);
     lm_settings_changed(wm->srv->settings);     /* the panel's checkbox follows Super+G / Super+V */
 }
 
@@ -682,6 +701,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->hover_menu = -1;
     wm->gad[LM_GADGET_CLIPBOARD].visible = srv->config.gadget;
     wm->gad[LM_GADGET_MIXER].visible = srv->config.mixer;
+    wm->gad[LM_GADGET_SYSTEM].visible = srv->config.sysinfo;
     for (int i = 0; i < LM_GADGET_COUNT; i++) {
         wm->gad[i].w = gadget_def[i].w;
         wm->gad[i].h = gadget_def[i].h;
@@ -1245,6 +1265,9 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         if (gid == LM_GADGET_MIXER) {
             if (wm->srv->mixer)
                 it.u.gadget.mixer = lm_mixer_state(wm->srv->mixer);
+        } else if (gid == LM_GADGET_SYSTEM) {
+            if (wm->srv->sysinfo)
+                it.u.gadget.sys = lm_sysinfo_state(wm->srv->sysinfo);
         } else {
             gadget_slots(gr.h, &it.u.gadget.slots, &it.u.gadget.entry_h);
             int total = lm_seat_clip_count(wm->srv->seat);
@@ -2197,6 +2220,9 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed, 
         break;
     case KEY_V:
         if (pressed && !repeat) lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible);
+        break;
+    case KEY_S:
+        if (pressed && !repeat) lm_wm_set_gadget_id(wm, LM_GADGET_SYSTEM, !wm->gad[LM_GADGET_SYSTEM].visible);
         break;
     case KEY_Q:
         if (pressed && !repeat && wm->focused) lm_wm_window_close(wm->focused);

@@ -41,7 +41,8 @@
  *   kbd                reply "ok layout=<id> slot=<n> sticky=<0|1> latched=<mods> slocked=<mods> sound=<name> sounds=<n>"  (last sticky-key beep, see sound.h)
  *   clip [clear]       (`clear` forgets the history first) one "clip <i> <text>" line per clipboard-history entry (newest first, \\n escaped), then "ok n=<count> gadget=<0|1>"
  *   gadget <0|1>       show / hide the desktop gadget
- *   gadget-rect [mixer]  reply "ok <x> <y> <w> <h>" (the clipboard / mixer gadget card, without shadow) or "ok hidden"
+ *   gadget-rect [mixer|system]  reply "ok <x> <y> <w> <h>" (the clipboard / mixer gadget card, without shadow) or "ok hidden"
+ *   sysinfo [0|1]      show / hide the system monitor gadget; reply "ok visible=<0|1> ready=<0|1> cpu=<%> cores=<n> mem=<%> mem_total_kb=<n> swap=<%> temp=<C or -1> load=<x.xx> hist=<n>"
  *   mixer [0|1]        show / hide the volume mixer gadget; reply "ok visible=<0|1> backend=<none|pulse|wpctl|alsa> ready=<0|1> volume=<n> mute=<0|1> streams=<n> output=<text, to the end of the line>"
  *   layout <slot|next|prev>   switch the keyboard layout
  *   sticky <0|1>       sticky keys on/off

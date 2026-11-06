@@ -21,12 +21,18 @@ void lm_audio_list_alsa(char *out, size_t n);
 bool lm_audio_name_ok(const char *name);
 
 /*
- * PulseAudio/PipeWire output sinks via `pactl` (waits at most ~1 s, never longer): list as above, current default sink
- * name in `current`. Both empty when there is no sound server. Returns the number of sinks.
+ * Sound server outputs (waits at most ~1 s per program, never longer): list as above, current default in `current`. Both
+ * empty when there is no sound server. Returns the number of sinks. `pactl` is tried first (names are sink names); without
+ * it PipeWire's `wpctl status` (the "names" are numeric object ids, set with `wpctl set-default`).
  */
 int lm_audio_list_sinks(char *list, size_t n, char *current, size_t cn);
-/* `pactl set-default-sink name` (and moves running streams there). True when the default now is `name`. */
+/* Makes `name` (as listed) the default output. True when the default now is `name`. */
 bool lm_audio_set_sink(const char *name);
+/* Why the last lm_audio_list_sinks() found nothing: "ok" (it found some), "missing-tools" (neither pactl nor wpctl in PATH),
+ * "no-server" (a tool exists but no sound server answers), "" before the first call. */
+const char *lm_audio_sink_status(void);
+/* `wpctl status` -> list/current (exposed for the unit tests). Returns the number of sinks. */
+int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *current, size_t cn);
 
 /*
  * Asynchronous child process for the mixer gadget: argv[0] is searched in PATH, LC_ALL=C, stdin/stderr are /dev/null. The

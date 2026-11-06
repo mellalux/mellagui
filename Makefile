@@ -84,7 +84,7 @@ $(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(CLIENT
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD)/src/font.o $(BUILD)/src/cvt.o $(BUILD)/src/edid.o $(BUILD)/src/mixer.o $(BUILD)/src/audio.o $(BUILD)/src/loop.o $(BUILD)/src/log.o
+$(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD)/src/font.o $(BUILD)/src/cvt.o $(BUILD)/src/edid.o $(BUILD)/src/mixer.o $(BUILD)/src/sysinfo.o $(BUILD)/src/audio.o $(BUILD)/src/loop.o $(BUILD)/src/log.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

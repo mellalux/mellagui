@@ -26,17 +26,17 @@
 /* Keys before K_FILE are saved to the settings file, the ones after it are read-only or live state only. */
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
-    K_GADGET, K_MIXER, K_RESOLUTION, K_AUDIO_OUT, K_FILE,
-    K_RESOLUTIONS, K_RESOLUTION_NOW, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_AUDIO_RESCAN, K_COUNT
+    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_FILE,
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_RESCAN, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
-    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_FILE] = "file",
+    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
-    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_AUDIO_RESCAN] = "audio-rescan",
+    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_RESCAN] = "audio-rescan",
 };
 
 static int key_find(const char *key)
@@ -193,6 +193,10 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if (!parse_bool(val, &b)) return -1;
         cfg->mixer = b;
         break;
+    case K_SYSINFO:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->sysinfo = b;
+        break;
     case K_RESOLUTION: {
         int w, h, hz;
         if (!parse_resolution(val, &w, &h, &hz)) return -1;
@@ -294,6 +298,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SOUND: snprintf(out, n, "%d", c->sound ? 1 : 0); break;
     case K_GADGET: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0); break;
     case K_MIXER: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER) ? 1 : 0); break;
+    case K_SYSINFO: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0); break;
     case K_RESOLUTION: resolution_text(c->drm_mode_w, c->drm_mode_h, c->drm_mode_hz, out, n); break;
     case K_AUDIO_OUT: snprintf(out, n, "%s", c->audio_device); break;
     case K_FILE: snprintf(out, n, "%s", c->settings_path ? c->settings_path : ""); break;
@@ -321,6 +326,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_AUDIO_OUTS: lm_audio_list_alsa(out, n); break;
     case K_SINKS: snprintf(out, n, "%s", s->sinks); break;
     case K_SINK: snprintf(out, n, "%s", s->sink); break;
+    case K_SINKS_STATUS: snprintf(out, n, "%s", lm_audio_sink_status()); break;
     case K_AUDIO_RESCAN: snprintf(out, n, "0"); break;
     }
 }
@@ -597,6 +603,11 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         if (!srv->wm || !parse_bool(val, &b)) return false;
         lm_wm_set_gadget_id(srv->wm, LM_GADGET_MIXER, b);
         cfg->mixer = b;
+        return true;
+    case K_SYSINFO:
+        if (!srv->wm || !parse_bool(val, &b)) return false;
+        lm_wm_set_gadget_id(srv->wm, LM_GADGET_SYSTEM, b);
+        cfg->sysinfo = b;
         return true;
     case K_RESOLUTION:
         return set_resolution(s, val);

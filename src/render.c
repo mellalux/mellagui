@@ -7,6 +7,7 @@
  */
 #include "render.h"
 #include "mixer.h"
+#include "sysinfo.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -502,11 +503,16 @@ static void paint_grip(const struct paint_ctx *c, const struct lm_rect *card)
 }
 
 static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *g);
+static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info *g);
 
 static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info *g)
 {
     if (g->id == LM_GADGET_MIXER) {
         paint_mixer(c, g);
+        return;
+    }
+    if (g->id == LM_GADGET_SYSTEM) {
+        paint_system(c, g);
         return;
     }
     const struct lm_rect card = g->rect;
@@ -667,11 +673,135 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
         paint_slider(c, &l.stream[i].slider, s->volume, s->mute, true);
     }
     if (l.hint.w > 0 && l.nstreams == st->nstreams) {
-        const char *hint = st->backend == LM_MIXER_ALSA ? "ALSA Master. A sound server gives per-app volume." :
-                           st->backend == LM_MIXER_WPCTL ? "Install pulseaudio-utils for outputs and apps." :
+        const char *hint = st->backend == LM_MIXER_ALSA ? "ALSA Master (no per-app volume)" :
+                           st->backend == LM_MIXER_WPCTL ? "Install pulseaudio-utils for apps" :
                            st->nstreams ? "" : "Applications that play sound show up here.";
         if (*hint)
             draw_text(c, &l.hint, l.hint.x, l.hint.y + 2, hint, COL_PANEL_DIM);
+    }
+}
+
+/* Colour of a load / temperature bar: calm blue, amber when high, red when critical. */
+static uint32_t level_color(int pct, int warn, int crit)
+{
+    return pct >= crit ? 0xffe05a5au : pct >= warn ? 0xffe0a040u : 0xff6fa8ffu;
+}
+
+/* A labelled horizontal bar: `label` left, `value` text right, a track with a fill below. */
+static void paint_meter(const struct paint_ctx *c, int x, int y, int w, const char *label, const char *value, int pct,
+                        uint32_t col)
+{
+    struct lm_rect row = lm_rect_make(x, y, w, 16);
+    draw_text(c, &row, x, y, label, COL_PANEL_DIM);
+    int vw = lm_font_text_width(value);
+    draw_text(c, &row, x + w - vw, y, value, COL_PANEL_TEXT);
+    struct lm_rect track = lm_rect_make(x, y + 19, w, 7);
+    fill_round(c, &track, 3, 0xff2d3a5au);
+    int fw = w * LM_CLAMP(pct, 0, 100) / 100;
+    if (fw >= 2) {
+        struct lm_rect fillr = lm_rect_make(x, y + 19, fw, 7);
+        fill_round(c, &fillr, 3, col);
+    }
+}
+
+static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info *g)
+{
+    const struct lm_rect card = g->rect;
+    const struct lm_sysinfo_state *st = g->sys;
+    paint_card_base(c, g);
+
+    /* header: a chip glyph, title, the load in a pill */
+    struct lm_rect chip = lm_rect_make(card.x + 14, card.y + (g->title_h - 12) / 2, 12, 12);
+    fill_round(c, &chip, 2, 0xff6fa8ffu);
+    struct lm_rect die = lm_rect_make(chip.x + 3, chip.y + 3, 6, 6);
+    fill_round(c, &die, 1, 0xff161a24u);
+    for (int i = 0; i < 3; i++) {                                       /* pins */
+        struct lm_rect t = lm_rect_make(chip.x + 2 + i * 4, chip.y - 3, 1, 3), b = lm_rect_make(chip.x + 2 + i * 4, chip.y + 12, 1, 3);
+        struct lm_rect l = lm_rect_make(chip.x - 3, chip.y + 2 + i * 4, 3, 1), r = lm_rect_make(chip.x + 12, chip.y + 2 + i * 4, 3, 1);
+        fill_round(c, &t, 0, 0xffa0a6b4u);
+        fill_round(c, &b, 0, 0xffa0a6b4u);
+        fill_round(c, &l, 0, 0xffa0a6b4u);
+        fill_round(c, &r, 0, 0xffa0a6b4u);
+    }
+    int hy = card.y + (g->title_h - LM_FONT_H) / 2;
+    struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
+    draw_text(c, &head, card.x + 38, hy, "System", COL_PANEL_TEXT);
+    char badge[16];
+    snprintf(badge, sizeof(badge), "%d%%", st ? st->cpu : 0);
+    int bw = lm_font_text_width(badge) + 14;
+    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 18) / 2, bw, 18);
+    fill_round(c, &pill, 9, 0xff2d3a5au);
+    draw_text_centered(c, &pill, badge, st ? level_color(st->cpu, 70, 90) & 0x00ffffffu : COL_PANEL_ACCENT);
+    struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
+    fill_round(c, &sep, 0, 0x30ffffffu);
+    paint_grip(c, &card);
+
+    if (!st || !st->ready) {
+        struct lm_rect r = lm_rect_make(card.x + 12, card.y + g->title_h, card.w - 24, card.h - g->title_h - 12);
+        draw_text_centered(c, &r, "Reading...", COL_PANEL_DIM);
+        return;
+    }
+    int x = card.x + 14, w = card.w - 28, y = card.y + g->title_h + 8, bottom = card.y + card.h - 10;
+    /* What fits, in order of importance: CPU, memory, temperature are always drawn (the minimum card height holds them),
+     * then the CPU graph, the per-core bars and swap as room allows. */
+    int fixed = 32 + 36 + 36;
+    int room = bottom - y - fixed;
+    bool graph = room >= 42, cores;
+    if (graph) room -= 42;
+    cores = room >= 30 && st->ncores > 1;
+    if (cores) room -= 30;
+    bool swap = room >= 36 && st->swap_total_kb > 0;
+
+    char val[64];
+    snprintf(val, sizeof(val), "%d%%   load %.2f", st->cpu, st->load1);
+    paint_meter(c, x, y, w, st->ncores > 1 ? "CPU" : "CPU", val, st->cpu, level_color(st->cpu, 70, 90));
+    y += 32;
+    if (graph) {                                                        /* the last minute, one bar per second */
+        struct lm_rect area = lm_rect_make(x, y, w, 34);
+        fill_round(c, &area, 5, 0x12ffffffu);
+        int n = st->nhist;
+        int bwid = LM_MAX(1, (w - 4) / LM_SYS_HISTORY);
+        for (int i = 0; i < n; i++) {
+            int v = st->hist[i];
+            int hh = LM_MAX(1, (area.h - 6) * v / 100);
+            struct lm_rect bar = lm_rect_make(area.x + area.w - 2 - (n - i) * bwid, area.y + area.h - 3 - hh, LM_MAX(1, bwid - 1), hh);
+            if (bar.x >= area.x + 1)
+                fill_round(c, &bar, 0, (level_color(v, 70, 90) & 0x00ffffffu) | 0xd0000000u);
+        }
+        y += 42;
+    }
+    if (cores) {                                                        /* one small bar per logical CPU */
+        int n = st->ncores, gap = 3;
+        int bwid = LM_MAX(3, (w - gap * (n - 1)) / n);
+        for (int i = 0; i < n; i++) {
+            struct lm_rect slot = lm_rect_make(x + i * (bwid + gap), y, bwid, 22);
+            if (slot.x + slot.w > x + w)
+                break;
+            fill_round(c, &slot, 2, 0xff2d3a5au);
+            int hh = 22 * st->core[i] / 100;
+            if (hh > 0) {
+                struct lm_rect f = lm_rect_make(slot.x, slot.y + 22 - hh, slot.w, hh);
+                fill_round(c, &f, 2, level_color(st->core[i], 70, 90));
+            }
+        }
+        y += 30;
+    }
+    snprintf(val, sizeof(val), "%.1f / %.1f GiB   %d%%", (double)(st->mem_total_kb - st->mem_avail_kb) / 1048576.0,
+             (double)st->mem_total_kb / 1048576.0, st->mem_pct);
+    paint_meter(c, x, y, w, "Memory", val, st->mem_pct, level_color(st->mem_pct, 80, 92));
+    y += 36;
+    if (swap) {
+        snprintf(val, sizeof(val), "%.1f / %.1f GiB   %d%%", (double)(st->swap_total_kb - st->swap_free_kb) / 1048576.0,
+                 (double)st->swap_total_kb / 1048576.0, st->swap_pct);
+        paint_meter(c, x, y, w, "Swap", val, st->swap_pct, level_color(st->swap_pct, 30, 70));
+        y += 36;
+    }
+    if (st->temp_c >= 0) {
+        snprintf(val, sizeof(val), "%d \xc2\xb0""C", st->temp_c);
+        int pct = LM_CLAMP((st->temp_c - 20) * 100 / 80, 0, 100);       /* the bar spans 20..100 degrees */
+        paint_meter(c, x, y, w, "Temperature", val, pct, st->temp_c >= 85 ? 0xffe05a5au : st->temp_c >= 70 ? 0xffe0a040u : 0xff5ac88cu);
+    } else {
+        paint_meter(c, x, y, w, "Temperature", "no sensor", 0, 0xff6fa8ffu);
     }
 }
 

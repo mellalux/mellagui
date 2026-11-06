@@ -28,6 +28,7 @@ KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN = 103, 105, 106, 108
 KEY_SPACE, KEY_RIGHTALT = 57, 100
 KEY_G = 34
 KEY_V = 47
+KEY_S = 31
 BTN_LEFT, BTN_RIGHT = 272, 273
 
 proc = None
@@ -1572,7 +1573,7 @@ class TestClients(Base):
 
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',
-                    'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1', 'mixer': '0'}
+                    'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1', 'mixer': '0', 'sysinfo': '0'}
 
 
 def settings():
@@ -1583,7 +1584,7 @@ def settings():
 
 def settings_restore():
     for k in ('layouts', 'layout', 'sticky', 'repeat-delay', 'repeat-rate', 'pointer-speed', 'natural-scroll',
-              'sound', 'gadget', 'mixer'):
+              'sound', 'gadget', 'mixer', 'sysinfo'):
         ctl.cmd('settings %s %s' % (k, DEFAULT_SETTINGS[k]))
 
 
@@ -1888,6 +1889,49 @@ esac
         p2, c2, stop2 = self.private_compositor('lumen-aud2', '--settings', path, env=env)
         self.assertEqual(self.get_setting(c2, 'audio-out'), 'plughw:CARD=PCH,DEV=3')     # remembered
 
+    def test_sound_outputs_through_wpctl_when_pactl_is_missing(self):
+        d = os.path.join(tmp, 'audio-wp')
+        stubs = os.path.join(d, 'bin')
+        os.makedirs(stubs, exist_ok=True)
+        with open(os.path.join(stubs, 'pactl'), 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')                                      # pulseaudio-utils without a server
+        os.chmod(os.path.join(stubs, 'pactl'), 0o755)
+        wj = os.path.join(d, 'wpctl.json')
+        if os.path.exists(wj):
+            os.unlink(wj)
+        p, c, stop = self.private_compositor('lumen-aud5', env={'LUMEN_FAKE_WPCTL': wj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']})
+        g = lambda k: self.get_setting(c, k)
+        self.assertEqual(g('sinks-status'), '')
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual(g('sinks-status'), 'ok')
+        self.assertEqual(g('sinks'), '53|Built-in Audio Analog Stereo;54|Built-in Audio Digital Stereo (HDMI)')
+        self.assertEqual(g('sink'), '53')
+        c.cmd('settings sink 54')
+        self.assertEqual(g('sink'), '54')
+        with open(wj) as f:
+            self.assertEqual(json.load(f)['default'], 54)
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings sink 99')                                            # no such object: wpctl leaves the default alone
+        self.assertEqual(g('sink'), '54')
+
+    def test_sound_status_says_why_there_are_no_outputs(self):
+        # nothing installed
+        p, c, stop = self.private_compositor('lumen-aud6', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual(self.get_setting(c, 'sinks-status'), 'missing-tools')
+        stop()
+        # the tools are there but no server answers (PipeWire is not running)
+        d = os.path.join(tmp, 'audio-noserver')
+        os.makedirs(d, exist_ok=True)
+        for prog in ('pactl', 'wpctl'):
+            with open(os.path.join(d, prog), 'w') as f:
+                f.write('#!/bin/sh\nexit 1\n')
+            os.chmod(os.path.join(d, prog), 0o755)
+        p, c, stop = self.private_compositor('lumen-aud7', env={'PATH': d + ':' + os.environ['PATH']})
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual(self.get_setting(c, 'sinks-status'), 'no-server')
+        self.assertEqual(self.get_setting(c, 'sinks'), '')
+
     def test_sound_list_is_empty_without_a_sound_server(self):
         p, c, stop = self.private_compositor('lumen-aud3', env={'LUMEN_ASOUND_DIR': os.path.join(tmp, 'nonexistent'),
                                                                 'PATH': os.path.join(tmp, 'nonexistent-bin')})
@@ -2086,10 +2130,10 @@ esac
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # sound box (second row, below the gadget box)
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
-        # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer box, wraps over the five
-        # page tabs (the heading is skipped) and reaches the gadget checkbox with the 7th press; Space toggles it
+        # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
+        # wraps over the five page tabs (the heading is skipped) and reaches the gadget checkbox with the 8th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(7):
+        for _ in range(8):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -2108,6 +2152,14 @@ esac
         ctl.click(x0 + 168, y0 + 42 + 2 * 28 + 14)
         time.sleep(0.3)
         self.assertEqual(settings()['mixer'], '0')
+        ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)              # fourth row: System monitor gadget
+        time.sleep(0.3)
+        self.assertEqual(settings()['sysinfo'], '1')
+        ctl.cmd('gadget-rect system')
+        self.assertNotIn('hidden', ctl.last)
+        ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)
+        time.sleep(0.3)
+        self.assertEqual(settings()['sysinfo'], '0')
 
     def test_panel_follows_changes_made_elsewhere(self):
         p, win = self.open_panel()
@@ -2374,6 +2426,163 @@ class TestMixer(Base):
         x, y, w, h = self.card(c)                                               # the card is there and says so, no crash
         c.click(x + w // 2, y + 80)
         self.assertEqual(self.mixer_info(c)['backend'], 'none')
+
+
+
+class TestSysinfo(Base):
+    """The system monitor gadget: CPU / memory / temperature from /proc and /sys (a fake tree through LUMEN_SYS_ROOT)."""
+
+    STAT_A = 'cpu  1000 0 500 8000 500 0 0 0 0 0\ncpu0 500 0 250 4000 250 0 0 0 0 0\ncpu1 500 0 250 4000 250 0 0 0 0 0\n'
+    STAT_B = 'cpu  1100 0 550 8050 500 0 0 0 0 0\ncpu0 600 0 250 4000 250 0 0 0 0 0\ncpu1 500 0 300 4050 250 0 0 0 0 0\n'   # +150 busy of +200
+
+    def tree(self, tag, with_sensor=True):
+        root = os.path.join(tmp, 'sys-' + tag)
+        shutil.rmtree(root, ignore_errors=True)
+        os.makedirs(os.path.join(root, 'proc'))
+        self.write(root, 'proc/stat', self.STAT_A)
+        self.write(root, 'proc/meminfo', 'MemTotal:        1000000 kB\nMemFree: 100000 kB\nMemAvailable:    250000 kB\nSwapTotal: 2000000 kB\nSwapFree: 1500000 kB\n')
+        self.write(root, 'proc/loadavg', '1.25 0.50 0.30 2/300 1234\n')
+        if with_sensor:
+            self.write(root, 'sys/class/hwmon/hwmon0/name', 'coretemp\n')
+            self.write(root, 'sys/class/hwmon/hwmon0/temp1_input', '66000\n')
+            self.write(root, 'sys/class/hwmon/hwmon0/temp1_label', 'Package id 0\n')
+            self.write(root, 'sys/class/hwmon/hwmon0/temp2_input', '71000\n')
+            self.write(root, 'sys/class/hwmon/hwmon0/temp2_label', 'Core 0\n')
+        return root
+
+    @staticmethod
+    def write(root, rel, text):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + '.tmp', 'w') as f:
+            f.write(text)
+        os.replace(path + '.tmp', path)                        # atomic: the reader never sees half a file
+
+    @staticmethod
+    def info(c):
+        c.cmd('sysinfo')
+        return dict(kv.split('=', 1) for kv in c.last.split()[1:])
+
+    def start(self, name, root, *args):
+        p, c, stop = self.private_compositor(name, '--sysinfo', *args, env={'LUMEN_SYS_ROOT': root})
+        for _ in range(100):
+            if self.info(c)['ready'] == '1':
+                break
+            time.sleep(0.05)
+        return c
+
+    def test_values_come_from_proc_and_sys(self):
+        root = self.tree('values')
+        c = self.start('lumen-sys1', root)
+        i = self.info(c)
+        self.assertEqual((i['visible'], i['cores'], i['mem'], i['mem_total_kb'], i['swap'], i['temp'], i['load']),
+                         ('1', '2', '75', '1000000', '25', '66', '1.25'))         # the package sensor, not the hotter core
+        # the load needs two samples: new counters show up as a percentage within a couple of seconds
+        self.write(root, 'proc/stat', self.STAT_B)
+        seen = False
+        end = time.time() + 3.5
+        while time.time() < end and not seen:
+            seen = self.info(c)['cpu'] == '75'                                    # (150 busy of 200 total jiffies)
+            time.sleep(0.05)
+        self.assertTrue(seen, 'cpu load was not computed from the counters')
+        self.assertGreaterEqual(int(self.info(c)['hist']), 1)
+        # memory and temperature follow, too
+        self.write(root, 'proc/meminfo', 'MemTotal: 1000000 kB\nMemAvailable: 500000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n')
+        self.write(root, 'sys/class/hwmon/hwmon0/temp1_input', '88000\n')
+        end = time.time() + 3.5
+        while time.time() < end and (self.info(c)['mem'] != '50' or self.info(c)['temp'] != '88'):
+            time.sleep(0.05)
+        i = self.info(c)
+        self.assertEqual((i['mem'], i['swap'], i['temp']), ('50', '0', '88'))
+
+    def test_no_sensor_and_no_proc_do_not_break_anything(self):
+        root = self.tree('nosensor', with_sensor=False)
+        c = self.start('lumen-sys2', root)
+        self.assertEqual(self.info(c)['temp'], '-1')
+        shutil.rmtree(os.path.join(root, 'proc'))                                # even /proc vanishing is survived
+        time.sleep(1.3)
+        i = self.info(c)
+        self.assertEqual(i['ready'], '1')
+        x, y, w, h = map(int, (lambda: (c.cmd('gadget-rect system'), c.last.split()[1:5])[1])())
+        self.assertGreater(w, 200)
+
+    def test_toggle_setting_super_s_and_stacking_with_the_other_gadgets(self):
+        root = self.tree('stack')
+        p, c, stop = self.private_compositor('lumen-sys3', '--size', '1280x1000', '--mixer',
+                                             env={'LUMEN_SYS_ROOT': root, 'PATH': FAKES + ':' + os.environ['PATH'],
+                                                  'LUMEN_FAKE_STATE': os.path.join(tmp, 'sys3-pactl.json')})
+        c.cmd('gadget-rect system')
+        self.assertIn('hidden', c.last)                                          # hidden by default
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_S)
+        c.key(KEY_LEFTMETA, False)
+        for _ in range(60):
+            c.cmd('gadget-rect system')
+            if 'hidden' not in c.last:
+                break
+            time.sleep(0.05)
+        self.assertNotIn('hidden', c.last)
+        rects = []
+        for name in ('', 'mixer', 'system'):                                     # clipboard, mixer, system: one column, top to bottom
+            c.cmd('gadget-rect ' + name)
+            rects.append(tuple(map(int, c.last.split()[1:5])))
+        for upper, lower in zip(rects, rects[1:]):
+            self.assertEqual(upper[0] + upper[2], lower[0] + lower[2])           # same right edge
+            self.assertGreaterEqual(lower[1], upper[1] + upper[3])               # no overlap
+        c.cmd('settings')
+        self.assertIn('sysinfo=1', c.last)
+        c.cmd('settings sysinfo 0')
+        c.cmd('gadget-rect system')
+        self.assertIn('hidden', c.last)
+        # on a small screen the cards go into a second column instead of overlapping
+        p2, c2, stop2 = self.private_compositor('lumen-sys4', '--size', '1000x500', '--mixer', '--sysinfo', env={'LUMEN_SYS_ROOT': root,
+                                                'PATH': FAKES + ':' + os.environ['PATH'], 'LUMEN_FAKE_STATE': os.path.join(tmp, 'sys4-pactl.json')})
+        boxes = []
+        for name in ('', 'mixer', 'system'):
+            c2.cmd('gadget-rect ' + name)
+            boxes.append(tuple(map(int, c2.last.split()[1:5])))
+        for i in range(3):
+            for j in range(i + 1, 3):
+                a, b = boxes[i], boxes[j]
+                overlap = a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+                self.assertFalse(overlap, 'gadgets %d and %d overlap on a small screen: %r %r' % (i, j, a, b))
+            self.assertGreaterEqual(boxes[i][0], 0)
+
+    def test_gadgets_cascade_when_the_screen_is_too_small_for_columns(self):
+        root = self.tree('cascade')
+        p, c, stop = self.private_compositor('lumen-sys6', '--mixer', '--sysinfo', env={'LUMEN_SYS_ROOT': root,      # 800x500
+                                             'PATH': FAKES + ':' + os.environ['PATH'], 'LUMEN_FAKE_STATE': os.path.join(tmp, 'sys6-pactl.json')})
+        tops = []
+        for name in ('', 'mixer', 'system'):
+            c.cmd('gadget-rect ' + name)
+            x, y, w, h = map(int, c.last.split()[1:5])
+            self.assertTrue(0 <= x and x + w <= 800 and 28 <= y and y + h <= 500, (name, x, y, w, h))
+            tops.append((x, y))
+        self.assertEqual(len(set(tops)), 3, 'two gadgets sit exactly on top of each other: %r' % tops)
+
+    def test_the_card_can_be_moved_and_shows_no_error_when_tiny(self):
+        root = self.tree('move')
+        c = self.start('lumen-sys5', root, '--size', '1024x768')
+        c.cmd('gadget-rect system')
+        x, y, w, h = map(int, c.last.split()[1:5])
+        c.abs(x + 80, y + 10)
+        c.button(272, True)
+        c.abs(x - 60, y + 130)
+        c.button(272, False)
+        c.cmd('gadget-rect system')
+        self.assertEqual(tuple(map(int, c.last.split()[1:5])), (x - 140, y + 120, w, h))
+        # resized to the smallest size the card has: still drawn (no crash), the rows that fit are chosen
+        c.cmd('gadget-rect system')
+        x, y, w, h = map(int, c.last.split()[1:5])
+        c.abs(x + w - 3, y + h - 3)
+        c.button(272, True)
+        c.abs(x - 500, y - 500)
+        c.button(272, False)
+        c.cmd('gadget-rect system')
+        w2, h2 = map(int, c.last.split()[3:5])
+        self.assertEqual((w2, h2), (240, 156))
+        c.dump(os.path.join(tmp, 'sys5.ppm'))
+        self.assertEqual(self.info(c)['ready'], '1')
 
 
 

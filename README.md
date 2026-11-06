@@ -102,8 +102,9 @@ natural scrolling. *Desktop*: the clipboard gadget and the sound feedback. *Disp
 mode, or one of its modes - the list includes a mode in the panel's own shape when the GPU does not offer the native one); it is applied at
 once and goes back after 15 s unless you press *Keep* (a wrong mode can leave the screen black, and a black screen cannot confirm anything);
 only a kept resolution is saved. *Sound*: the ALSA device for Lumen's own beeps (HDMI/DisplayPort outputs are listed and marked) and, when a
-PulseAudio/PipeWire server runs, the default output for applications such as Firefox (`pactl`; nothing is listed without a sound server -
-`sudo apt install pipewire-pulse wireplumber`). Changes apply immediately and are saved (about 0.3 s later) to
+PulseAudio/PipeWire server runs, the default output for applications such as Firefox (`pactl`, else PipeWire's `wpctl`). When nothing is
+listed the page says why: neither tool installed (`sudo apt install pulseaudio-utils`), or no sound server answering (start it with
+`systemctl --user enable --now pipewire pipewire-pulse wireplumber`; it can take a few seconds until the devices appear). Changes apply immediately and are saved (about 0.3 s later) to
 `$XDG_CONFIG_HOME/lumen/settings.conf` (`~/.config/lumen/settings.conf`; `--settings FILE` chooses another file, `--settings none` saves
 nothing; headless runs save nothing unless `--settings` is given). The file is plain `key=value` and is read at start; options such as
 `--layouts` or `--sticky` on the command line win over it. From a script: `lumen-settings --set layouts=ee,us repeat-rate=30`,
@@ -124,6 +125,13 @@ volume slider with a mute button, and - with a PulseAudio/PipeWire pulse server 
 PipeWire's `wpctl` (master volume and mute of the default output), and without that ALSA's `Master` control through `amixer`. The state is
 read every 3 s while the card is visible and after each change; the programs run as short child processes started by the event loop, so a
 slow one never stalls the compositor, and slider drags are coalesced (one command at a time).
+
+System monitor gadget: a third card (Super+S, `--sysinfo`, or *Desktop* → *System monitor gadget*; hidden by default) with the CPU load (a
+bar, a one-minute graph and one small bar per logical CPU), memory and swap use, and the CPU temperature (the package sensor of
+`coretemp`/`k10temp`, else a CPU thermal zone; bar green / amber from 70 / red from 85 degrees) - plain reads of `/proc/stat`,
+`/proc/meminfo`, `/sys/class/hwmon` and `/sys/class/thermal` once a second while it is visible. Rows that do not fit the card's height
+are left out (CPU, memory and temperature always stay). The three cards dock under each other at the top right, in a column to the left
+when the screen is too low, and cascade when even that does not fit.
 
 Mouse: drag the title bar to move, drag the border/corners to resize, double-click the title bar to maximize,
 buttons for minimize/maximize/close, click the panel's workspace cells or the *Lumen* launcher.

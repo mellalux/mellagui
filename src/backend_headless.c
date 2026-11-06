@@ -19,6 +19,7 @@
 #include "input.h"
 #include "log.h"
 #include "mixer.h"
+#include "sysinfo.h"
 #include "render.h"
 #include "seat.h"
 #include "settings.h"
@@ -276,9 +277,20 @@ static void ctl_command(struct ctl_client *c, char *line)
                   lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER) ? 1 : 0,
                   ms->backend == LM_MIXER_PULSE ? "pulse" : ms->backend == LM_MIXER_WPCTL ? "wpctl" : ms->backend == LM_MIXER_ALSA ? "alsa" : "none", ms->ready ? 1 : 0,
                   ms->volume, ms->mute ? 1 : 0, ms->nstreams, ms->output[0] ? ms->output : "-");
+    } else if (!strcmp(cmd, "sysinfo")) {
+        /* sysinfo [0|1]  show / hide the system monitor gadget; always replies the sampled values:
+         * "ok visible=<0|1> ready=<0|1> cpu=<%> cores=<n> mem=<%> mem_total_kb=<n> swap=<%> temp=<C or -1> load=<x.xx> hist=<n>" */
+        if (!srv->wm || !srv->sysinfo) { ctl_reply(c, "err no sysinfo\n"); return; }
+        if (a1)
+            lm_wm_set_gadget_id(srv->wm, LM_GADGET_SYSTEM, a1[0] == '1');
+        const struct lm_sysinfo_state *ss = lm_sysinfo_state(srv->sysinfo);
+        ctl_reply(c, "ok visible=%d ready=%d cpu=%d cores=%d mem=%d mem_total_kb=%ld swap=%d temp=%d load=%.2f hist=%d\n",
+                  lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0, ss->ready ? 1 : 0, ss->cpu, ss->ncores, ss->mem_pct,
+                  ss->mem_total_kb, ss->swap_pct, ss->temp_c, ss->load1, ss->nhist);
     } else if (!strcmp(cmd, "gadget-rect")) {
         struct lm_rect r;
-        if (srv->wm && lm_wm_gadget_rect_id(srv->wm, a1 && !strcmp(a1, "mixer") ? LM_GADGET_MIXER : LM_GADGET_CLIPBOARD, &r))
+        if (srv->wm && lm_wm_gadget_rect_id(srv->wm, a1 && !strcmp(a1, "mixer") ? LM_GADGET_MIXER :
+                                            a1 && !strcmp(a1, "system") ? LM_GADGET_SYSTEM : LM_GADGET_CLIPBOARD, &r))
             ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
         else
             ctl_reply(c, "ok hidden\n");

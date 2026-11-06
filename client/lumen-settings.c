@@ -428,6 +428,8 @@ static void build_desktop(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Sound feedback for sticky keys", "sound", kv_int(a, "sound", 1) != 0);
     y += ROW_H;
     add_check(a, x, y, w, "Volume mixer gadget (Super+V)", "mixer", kv_int(a, "mixer", 0) != 0);
+    y += ROW_H;
+    add_check(a, x, y, w, "System monitor gadget (Super+S)", "sysinfo", kv_int(a, "sysinfo", 0) != 0);
 }
 
 static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on)
@@ -497,9 +499,19 @@ static void build_sound(struct app *a, int x, int y, int w)
         add_radio(a, x, y, w, *ents[i].desc ? ents[i].desc : ents[i].name, "sink", ents[i].name, !strcmp(cur, ents[i].name));
         y += ROW_H;
     }
-    if (!shown)
-        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H * 2 },
-            "No sound server found. Install pipewire-pulse and wireplumber.");
+    if (!shown) {
+        const char *why = kv_get(a, "sinks-status");
+        if (!strcmp(why, "missing-tools")) {
+            add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Neither pactl nor wpctl is installed.");
+            add(a, W_LABEL, (struct rect){ x, y + ROW_H, w, ROW_H }, "sudo apt install pulseaudio-utils");
+        } else if (!strcmp(why, "no-server")) {
+            add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "The tools are there but no sound server answers.");
+            add(a, W_LABEL, (struct rect){ x, y + ROW_H, w, ROW_H }, "systemctl --user enable --now pipewire");
+            add(a, W_LABEL, (struct rect){ x, y + 2 * ROW_H, w, ROW_H }, "pipewire-pulse wireplumber");
+        } else {
+            add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Looking for a sound server...");
+        }
+    }
 }
 
 static void build(struct app *a)

@@ -49,6 +49,7 @@
  *   Super+I            spawn config.settings_cmd (settings panel, also in the Lumen menu)
  *   Super+G            show / hide the clipboard gadget (history; drag its title bar to move, its edges to resize)
  *   Super+V            show / hide the volume mixer gadget (same dragging; sliders and buttons work inside)
+ *   Super+S            show / hide the system monitor gadget (CPU, memory, temperature)
  *   Super+Q            close focused window (ops->close)
  *   Super+1..4         switch workspace;  Super+Shift+1..4 move focused window there
  *   Super+Tab          focus next window (cycle, raises it); Super+Shift+Tab previous
@@ -289,12 +290,13 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick,
 void lm_wm_keyboard_state_changed(struct lm_wm *wm);
 /* The clipboard history changed (seat.c): repaint the gadget. */
 void lm_wm_clipboard_changed(struct lm_wm *wm);
-/* The volume mixer's state changed (mixer.c): repaint its gadget. */
+/* The volume mixer's / the system monitor's state changed: repaint that gadget. */
 void lm_wm_mixer_changed(struct lm_wm *wm);
+void lm_wm_sysinfo_changed(struct lm_wm *wm);
 
 /* Desktop gadgets: the clipboard viewer and the volume mixer. */
-enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_COUNT };
-/* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer; control socket `gadget`, `mixer`). */
+enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_SYSTEM, LM_GADGET_COUNT };
+/* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer, Super+S = system monitor; control socket `gadget`, `mixer`, `sysinfo`). */
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id);
 void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible);
 /* The gadget card (without shadow) in global coordinates; false when hidden or it does not fit. */
@@ -375,8 +377,10 @@ struct lm_menu_info {
  * moved by its title bar and resized by its edges; the renderer wraps/truncates the entries to the width.
  */
 struct lm_mixer_state;
+struct lm_sysinfo_state;
 struct lm_gadget_info {
     int id;                         /* enum lm_gadget_id */
+    const struct lm_sysinfo_state *sys; /* LM_GADGET_SYSTEM: what to draw (valid only during the callback) */
     const struct lm_mixer_state *mixer; /* LM_GADGET_MIXER: what to draw (valid only during the callback) */
     struct lm_rect rect;            /* the card; the shadow lies outside */
     int n;                          /* entries drawn (<= slots) */

@@ -15,7 +15,7 @@ Included programs:
 | `build/lumen-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound; `--get` / `--set KEY=VALUE` for scripts |
 | `build/lumen-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
-| `build/lumen-web` | small browser: file://, http:// and https://, HTML subset, links, history, JavaScript (own interpreter + DOM; no CSS/images/forms/fetch; `--selftest`, `--dump URL [ms]`) |
+| `build/lumen-web` | small browser: file://, http:// and https://, HTML subset, links, history, JavaScript (own interpreter + DOM, CSS subset, images, forms; `--selftest`, `--dump URL [ms]`) |
 | `build/js-test` | test driver of the JavaScript interpreter (`--selftest`, `--check FILE`, `-e EXPR`, `FILE`) |
 | `build/lumen-demo`| small animated demo client                                        |
 
@@ -172,11 +172,27 @@ mustache, handlebars and underscore load and work; big sites (a news site, GitHu
 crashing. After a script, a timer or a click changed the page, it is rendered again. Elements with click handlers are drawn like
 links; a click runs the handlers.
 
-Not there: CSS (so `style.display = 'none'` is the only style that has an effect), images, forms, layout sizes (all geometry is 0),
-`fetch`/`XMLHttpRequest`, async generators, real Symbols (`Symbol()` makes a unique string that is hidden from key lists), Proxy,
-modules, tagged templates, `\p{...}` in regexes. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script,
-timer or event handler gets 25 million interpreter steps and a page 150 million in total; there is no garbage collector (memory is
-released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.
+Also in the page layer:
+* **fetch / XMLHttpRequest** (with Headers, Request, Response, FormData): one synchronous request behind both (the window waits for the
+  answer), promise reactions and XHR events are still delivered asynchronously. No cross-origin checks, no cookies.
+* **Images:** PNG (all colour types, 16 bit, interlaced), JPEG (baseline and progressive), GIF (first frame), BMP, `data:` URIs.
+  Decoders are in `client/image.c`; images are fetched and decoded on worker threads after the page is shown and are scaled to the
+  window width. WebP and SVG show the alt text.
+* **CSS:** `<style>`, `<link rel=stylesheet>`, `@import`, `@media` (900x600 viewport), specificity/order/`!important`, inline style, `var()`.
+  What a bitmap-font layout can show is used: colours and background colours (also of blocks), bold/italic, underline and strike-through,
+  size in three steps, `text-align`, margins/padding (in pixels, vertical as gaps, left as indent), `display` none/block/inline/inline-block/
+  flex rows (items laid out inline), `list-style: none`, `text-transform`, `white-space: pre`, `visibility`/`opacity: 0`, and
+  `::before`/`::after` text content. The page background and body colour fill the window. Script changes re-run the cascade.
+* **Forms:** text/password/search/... fields, checkboxes, radio buttons, selects, textareas and buttons are drawn as widgets. Click to focus,
+  type, arrows/Home/End/Delete, Tab/Shift+Tab, Enter submits (GET navigates to `action?query`, POST sends the body). Values live in the DOM, so
+  scripts see them and `input`/`change`/`submit` events fire.
+
+Not there: box model details (floats, positioning, borders, widths/heights, background images), `font-family` (there is one bitmap font,
+Terminus 8x16, scaled 1-3x), WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
+clicks, file inputs, form reset. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script, timer or event handler gets
+25 million interpreter steps and a page 150 million in total (and 9 seconds of script time while it loads); there is no garbage collector
+(memory is released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.
 `lumen-web --dump URL [ms]` loads a page, lets its timers run for `ms` virtual milliseconds and prints the rendered text (title,
-text, links); script errors and `console` output go to stderr (`LUMEN_JS_STATS=1` also prints the cost of every script).
+text, links); script errors and `console` output go to stderr (`LUMEN_JS_STATS=1` prints the cost of every script, `LUMEN_WEB_TIMING=1` the
+time spent in scripts, style, parsing and images).
 `build/js-test` runs the interpreter alone (`-e EXPR`, `FILE`, `--check FILE` for the `tests/js/*.js` suites).

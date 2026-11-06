@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>DOM tests</title>
+<style>.x { color: red }</style></head>
+<body class="page main" data-mode="test">
+<div id="root"><p id="p1" class="a b" title="tt">First <b>bold</b> para</p><p id="p2">Second</p>
+<ul id="ul"><li>one<li>two<li class="last">three</ul>
+<a id="lnk" href="next.html">link</a><input id="inp" type="text" value="v0"><img id="im" src="x.png" alt="pic">
+<table id="tb"><tr><td>c1<td>c2<tr><td>c3<td>c4</table>
+</div>
+<div id="out"></div>
+<script>
+var results = { n: 0, fails: [] };
+function eq(a, b, label) { results.n++; var sa = JSON.stringify(a), sb = JSON.stringify(b); if (sa !== sb) results.fails.push(label + ': got ' + sa + ' want ' + sb); }
+var $ = function (id) { return document.getElementById(id); };
+
+// structure
+eq(document.title, 'DOM tests', 'title'); eq(document.documentElement.tagName, 'HTML', 'documentElement'); eq(document.body.tagName, 'BODY', 'body');
+eq(document.head.children.length > 0, true, 'head children'); eq(document.readyState, 'loading', 'readyState during scripts');
+eq($('p1').textContent, 'First bold para', 'textContent'); eq($('p1').innerHTML, 'First <b>bold</b> para', 'innerHTML');
+eq($('p1').id, 'p1', 'id'); eq($('p1').className, 'a b', 'className'); eq($('p1').getAttribute('title'), 'tt', 'getAttribute'); eq($('p1').title, 'tt', 'title prop');
+eq($('p1').getAttribute('nope'), null, 'missing attr'); eq($('p1').hasAttribute('title'), true, 'hasAttribute');
+eq($('ul').children.length, 3, 'implied li end tags'); eq($('ul').children[2].className, 'last', 'li class'); eq($('tb').querySelectorAll('td').length, 4, 'table cells'); eq($('tb').querySelectorAll('tr').length, 2, 'table rows');
+eq(document.querySelector('#root > p.a').id, 'p1', 'child selector'); eq(document.querySelectorAll('li').length, 3, 'qsa tag'); eq(document.querySelector('li.last').textContent, 'three', 'qs class');
+eq(document.querySelector('[title="tt"]').id, 'p1', 'attr selector'); eq(document.querySelectorAll('p, li').length, 5, 'selector list'); eq(document.querySelector('p + p').id, 'p2', 'adjacent');
+eq(document.querySelector('li:first-child').textContent, 'one', 'first-child'); eq(document.querySelectorAll('li:not(.last)').length, 2, ':not'); eq(document.querySelector('li:nth-child(2)').textContent, 'two', 'nth-child');
+eq(document.querySelector('a[href^="next"]').id, 'lnk', 'attr ^='); eq(document.querySelector('nothing'), null, 'qs null'); eq(document.getElementById('zzz'), null, 'gebi null');
+eq(document.getElementsByTagName('p').length, 2, 'getElementsByTagName'); eq(document.getElementsByClassName('a b').length, 1, 'getElementsByClassName');
+eq($('lnk').href, 'next.html', 'href'); eq($('inp').value, 'v0', 'input value'); eq($('im').alt, 'pic', 'img alt'); eq($('im').getAttribute('src'), 'x.png', 'img src');
+eq(document.body.dataset.mode, 'test', 'dataset'); document.body.dataset.fooBar = '1'; eq(document.body.getAttribute('data-foo-bar'), '1', 'dataset set');
+eq(document.body.classList.contains('main'), true, 'classList.contains'); document.body.classList.add('extra'); document.body.classList.remove('page'); eq(document.body.className, 'main extra', 'classList add/remove');
+eq(document.body.classList.toggle('t'), true, 'toggle on'); eq(document.body.classList.toggle('t'), false, 'toggle off'); eq(document.body.classList.length, 2, 'classList.length');
+// navigation
+var p1 = $('p1');
+eq(p1.parentNode.id, 'root', 'parentNode'); eq(p1.nextElementSibling.id, 'p2', 'nextElementSibling'); eq($('p2').previousElementSibling.id, 'p1', 'previousElementSibling'); eq(p1.firstChild.nodeType, 3, 'firstChild text');
+eq(p1.firstElementChild.tagName, 'B', 'firstElementChild'); eq(p1.childNodes.length, 3, 'childNodes'); eq($('root').lastElementChild.id, 'tb', 'lastElementChild'); eq(p1.closest('#root').id, 'root', 'closest');
+eq(p1.matches('p.a'), true, 'matches'); eq(p1.matches('div'), false, 'matches false'); eq($('root').contains(p1), true, 'contains'); eq(p1.contains($('root')), false, 'contains reverse'); eq(document.contains(p1), true, 'document.contains');
+// mutation
+var out = $('out'), el = document.createElement('div'); el.id = 'new'; el.textContent = 'created'; out.appendChild(el);
+eq($('new').parentNode === out, true, 'appendChild'); eq(document.getElementById('new').textContent, 'created', 'found created');
+var t = document.createTextNode('txt'); out.insertBefore(t, el); eq(out.firstChild === t, true, 'insertBefore'); eq(out.childNodes.length, 2, 'two children');
+out.removeChild(t); eq(out.childNodes.length, 1, 'removeChild'); var rep = document.createElement('span'); out.replaceChild(rep, el); eq(out.firstChild === rep, true, 'replaceChild'); eq($('new'), null, 'replaced is gone');
+out.innerHTML = '<b id="in1">bold</b> <i>it</i><script>window.ran_inner_script = 1<\/script>'; eq(out.children.length, 3, 'innerHTML set'); eq($('in1').textContent, 'bold', 'innerHTML parsed'); eq(window.ran_inner_script, undefined, 'innerHTML scripts do not run');
+out.textContent = 'plain <b>'; eq(out.innerHTML, 'plain &lt;b&gt;', 'textContent escapes'); eq(out.children.length, 0, 'textContent clears');
+var c = $('p1').cloneNode(true); c.id = 'clone'; eq(c.innerHTML, 'First <b>bold</b> para', 'cloneNode deep'); eq(c.parentNode, null, 'clone detached'); eq($('p1').cloneNode(false).childNodes.length, 0, 'shallow clone');
+$('p2').remove(); eq($('p2'), null, 'remove'); $('p1').after(document.createTextNode('!')); eq($('p1').nextSibling.nodeValue, '!', 'after'); $('p1').before('B'); eq($('p1').previousSibling.textContent, 'B', 'before (string)');
+$('p1').setAttribute('data-x', '5'); eq($('p1').dataset.x, '5', 'setAttribute'); $('p1').removeAttribute('data-x'); eq($('p1').hasAttribute('data-x'), false, 'removeAttribute');
+var frag = document.createDocumentFragment(); frag.appendChild(document.createElement('i')); frag.appendChild(document.createElement('u')); out.appendChild(frag); eq(out.children.length, 2, 'fragment children moved'); eq(frag.childNodes.length, 0, 'fragment emptied');
+out.insertAdjacentHTML('beforeend', '<em>E</em>'); eq(out.lastChild.tagName, 'EM', 'insertAdjacentHTML'); out.append('text', document.createElement('s')); eq(out.lastElementChild.tagName, 'S', 'append');
+try { out.appendChild(out.parentNode); eq('no error', 'error', 'cycle'); } catch (e) { eq(true, true, 'cycle rejected'); }
+eq($('root').outerHTML.indexOf('<div id="root">'), 0, 'outerHTML');
+// style, hidden
+var st = $('p1').style; st.color = 'red'; st.fontSize = '12px'; eq($('p1').getAttribute('style'), 'color: red; font-size: 12px;', 'style attr'); eq(st.color, 'red', 'style get'); eq(st.fontSize, '12px', 'style camel');
+st.color = ''; eq($('p1').getAttribute('style'), 'font-size: 12px;', 'style remove'); eq(st.getPropertyValue('font-size'), '12px', 'getPropertyValue'); st.setProperty('margin-top', '3px'); eq(st.marginTop, '3px', 'setProperty');
+$('im').style.display = 'none'; eq($('im').style.display, 'none', 'display none');
+// events
+var log = [];
+$('root').addEventListener('click', function (e) { log.push('root:' + e.target.id + ':' + e.currentTarget.id); });
+$('p1').addEventListener('click', function (e) { log.push('p1'); });
+$('lnk').addEventListener('click', function (e) { log.push('lnk'); e.preventDefault(); });
+$('p1').click(); eq(log, ['p1', 'root:p1:root'], 'bubbling'); log.length = 0;
+$('p1').addEventListener('click', function (e) { log.push('stop'); e.stopPropagation(); }); $('p1').click(); eq(log, ['p1', 'stop'], 'stopPropagation'); log.length = 0;
+var once = function () { log.push('once'); }; $('p1').addEventListener('click', once); $('p1').addEventListener('click', once); $('p1').click(); eq(log.filter(function (x) { return x == 'once'; }).length, 1, 'duplicate listener ignored'); $('p1').removeEventListener('click', once); log.length = 0; $('p1').click(); eq(log.indexOf('once'), -1, 'removeEventListener');
+var ce = new CustomEvent('hello', { detail: { n: 7 }, bubbles: true, cancelable: true }); var got = null; document.addEventListener('hello', function (e) { got = e.detail.n; e.preventDefault(); }); eq($('p1').dispatchEvent(ce), false, 'dispatchEvent returns false when prevented'); eq(got, 7, 'CustomEvent detail');
+var fired = 0; $('inp').onclick = function () { fired++; }; $('inp').click(); eq(fired, 1, 'onclick property'); $('inp').onclick = null; $('inp').click(); eq(fired, 1, 'onclick cleared');
+window.addEventListener('custom', function (e) { fired = 'win'; }); window.dispatchEvent(new Event('custom')); eq(fired, 'win', 'window events');
+var ev = new Event('x', { bubbles: true }); eq([ev.type, ev.bubbles, ev.defaultPrevented, ev.cancelable], ['x', true, false, false], 'Event props');
+// location, misc
+eq(location.protocol, 'file:', 'location.protocol'); eq(typeof location.href, 'string', 'location.href'); eq(typeof navigator.userAgent, 'string', 'navigator'); eq(window.window === window, true, 'window.window');
+eq(typeof localStorage.getItem, 'function', 'localStorage'); localStorage.setItem('k', 'v'); eq(localStorage.getItem('k'), 'v', 'storage get'); eq(localStorage.getItem('zz'), null, 'storage miss');
+eq(btoa('hello'), 'aGVsbG8=', 'btoa'); eq(atob('aGVsbG8='), 'hello', 'atob'); eq(typeof getComputedStyle($('p1')).getPropertyValue, 'function', 'getComputedStyle');
+eq(document.createElement('div') instanceof HTMLElement, true, 'instanceof HTMLElement'); eq(document.createElement('div') instanceof Node, true, 'instanceof Node'); eq(document.nodeType, 9, 'document nodeType');
+eq(typeof fetch, 'undefined', 'no fetch'); eq(typeof Promise, 'function', 'Promise exists'); eq(typeof queueMicrotask, 'function', 'queueMicrotask');
+var pOrder = []; Promise.resolve().then(function () { pOrder.push('micro'); }); setTimeout(function () { pOrder.push('timer'); }, 0); pOrder.push('sync');
+setTimeout(function () { results.n++; if (pOrder.join() !== 'sync,micro,timer') results.fails.push('microtask order: ' + pOrder.join()); }, 20);
+// timers (checked from the timer callbacks below)
+var order = [];
+setTimeout(function () { order.push('t50'); }, 50); setTimeout(function () { order.push('t0'); }, 0); setTimeout(function (a, b) { order.push('args' + a + b); }, 10, 1, 2);
+var cancelled = setTimeout(function () { order.push('never'); }, 5); clearTimeout(cancelled);
+var ticks = 0; var iv = setInterval(function () { ticks++; if (ticks == 3) { clearInterval(iv); order.push('iv3'); } }, 20);
+document.addEventListener('DOMContentLoaded', function () { results.n++; if (document.readyState !== 'interactive') results.fails.push('readyState in DOMContentLoaded: ' + document.readyState); order.push('dcl'); });
+window.addEventListener('load', function () { results.n++; if (document.readyState !== 'complete') results.fails.push('readyState in load: ' + document.readyState); order.push('load'); });
+(async function () { await new Promise(function (r) { setTimeout(r, 30); }); document.body.setAttribute('data-async', 'ok'); })();
+setTimeout(function () {
+  eq(document.body.getAttribute('data-async'), 'ok', 'async function with await and a timer');
+  eq(order, ['dcl', 'load', 't0', 'args12', 't50', 'iv3'], 'timer order');
+  var r = document.createElement('p'); r.id = 'result'; r.textContent = 'RESULT ' + results.n + ' checks, ' + results.fails.length + ' failures'; document.body.appendChild(r);
+  results.fails.forEach(function (f) { var q = document.createElement('p'); q.textContent = 'FAIL ' + f; document.body.appendChild(q); });
+}, 100);
+</script>
+</body></html>

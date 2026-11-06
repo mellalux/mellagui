@@ -15,7 +15,8 @@ Included programs:
 | `build/lumen-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound; `--get` / `--set KEY=VALUE` for scripts |
 | `build/lumen-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
-| `build/lumen-web` | tiny browser: file:// and http://, HTML subset, links, history (no https/CSS/JS; `--selftest`) |
+| `build/lumen-web` | small browser: file://, http:// and https://, HTML subset, links, history, JavaScript (own interpreter + DOM; no CSS/images/forms/fetch; `--selftest`, `--dump URL [ms]`) |
+| `build/js-test` | test driver of the JavaScript interpreter (`--selftest`, `--check FILE`, `-e EXPR`, `FILE`) |
 | `build/lumen-demo`| small animated demo client                                        |
 
 ## Status (read this)
@@ -152,3 +153,30 @@ The control socket takes one line per command (`dump <file.ppm>`, `windows`, `ke
 * Graphics-accelerated apps show nothing – they need a software renderer; see Status.
 
 Architecture notes for developers: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [CLAUDE.md](CLAUDE.md).
+
+## lumen-web: https and JavaScript
+
+`https://` pages work through the system OpenSSL (`libssl.so.3`, loaded at run time with `dlopen`; nothing is needed to *build*
+lumen-web). The certificate chain and the host name are always verified against the system CA store (`$SSL_CERT_FILE` /
+`$SSL_CERT_DIR` choose another one); a page with a bad certificate shows an error page, there is no click-through. Without libssl
+only `http://` and `file://` work.
+
+Pages that contain `<script>` run their scripts (inline and `src=`, in document order) in a JavaScript engine written for
+lumen (`client/js*.c`): ES5 plus the common newer syntax (let/const, arrow functions, classes, destructuring, template
+literals, spread/rest, default parameters, generators, `async`/`await`, for-of, optional chaining, `??`, `with`), the usual
+builtins (Object, Array, String, Number, Math, JSON, Date, Map, Set, Error types, RegExp with lookaround and named groups, Promise,
+URL, URLSearchParams) and a DOM (`document.getElementById/querySelector(All)`, `createElement`, `appendChild`, `innerHTML`,
+`textContent`, attributes, `classList`, `dataset`, `style`, events with bubbling, `setTimeout/setInterval`, `location`,
+`history`, `localStorage` for the page's lifetime, `document.write`, `console`). jQuery, lodash, moment, dayjs, marked,
+mustache, handlebars and underscore load and work; big sites (a news site, GitHub, Wikipedia) run their scripts without
+crashing. After a script, a timer or a click changed the page, it is rendered again. Elements with click handlers are drawn like
+links; a click runs the handlers.
+
+Not there: CSS (so `style.display = 'none'` is the only style that has an effect), images, forms, layout sizes (all geometry is 0),
+`fetch`/`XMLHttpRequest`, async generators, real Symbols (`Symbol()` makes a unique string that is hidden from key lists), Proxy,
+modules, tagged templates, `\p{...}` in regexes. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script,
+timer or event handler gets 25 million interpreter steps and a page 150 million in total; there is no garbage collector (memory is
+released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.
+`lumen-web --dump URL [ms]` loads a page, lets its timers run for `ms` virtual milliseconds and prints the rendered text (title,
+text, links); script errors and `console` output go to stderr (`LUMEN_JS_STATS=1` also prints the cost of every script).
+`build/js-test` runs the interpreter alone (`-e EXPR`, `FILE`, `--check FILE` for the `tests/js/*.js` suites).

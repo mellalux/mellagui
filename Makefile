@@ -8,6 +8,7 @@
 #   make lumen-web  build/lumen-web    (client/lumen-web.c, the browser, only if it exists)
 #   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog, only if it exists)
 #   make lumen-settings build/lumen-settings (client/lumen-settings.c, the settings panel, only if it exists)
+#                   (also builds build/js-test, the JavaScript interpreter test driver: tests/js/*.js)
 #   make run        build, then start the compositor on a free VT (see RUN_ARGS)
 #   make asan       build/lumen-asan   (compositor with ASan + UBSan)
 #   make test       build, then run tests/run.sh
@@ -44,6 +45,9 @@ TARGETS += $(BUILD)/lumen-term
 endif
 ifneq ($(wildcard client/lumen-calc.c),)
 TARGETS += $(BUILD)/lumen-calc
+endif
+ifneq ($(wildcard tests/js_test.c),)
+TARGETS += $(BUILD)/js-test
 endif
 ifneq ($(wildcard tests/keymap_test.c),)
 TARGETS += $(BUILD)/keymap-test
@@ -93,7 +97,13 @@ $(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-web: $(BUILD)/client/lumen-web.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
+JS_OBJS := $(patsubst %,$(BUILD)/client/%.o,js_core js_parse js_eval js_lib js_lib2 js_regex js_coro js_poly)
+WEB_OBJS := $(BUILD)/client/tls.o $(BUILD)/client/dom.o $(BUILD)/client/dom_js.o $(JS_OBJS)
+$(BUILD)/lumen-web: $(BUILD)/client/lumen-web.o $(BUILD)/client/wlc.o $(WEB_OBJS) $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/js-test: $(BUILD)/tests/js_test.o $(JS_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

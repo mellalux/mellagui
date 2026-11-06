@@ -1471,6 +1471,173 @@ class TestClients(Base):
         self.assertEqual(title(), 'A page - Lumen Web')
         ctl.abs(900, 500)
 
+    # ---- lumen-web: JavaScript, DOM, https -------------------------------------------------------------------------
+
+    def web_dump(self, target, wait_ms=100, env=None):
+        path = os.path.join(ROOT, 'build', 'lumen-web')
+        if not os.path.exists(path):
+            self.skipTest('lumen-web not built')
+        e = dict(os.environ, **(env or {}))
+        r = subprocess.run([path, '--dump', target, str(wait_ms)], capture_output=True, text=True, timeout=30, env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout, r.stderr
+
+    def test_js_engine_checks(self):
+        path = os.path.join(ROOT, 'build', 'js-test')
+        if not os.path.exists(path):
+            self.skipTest('js-test not built')
+        scripts = sorted(f for f in os.listdir(os.path.join(ROOT, 'tests', 'js')) if f.endswith('.js'))
+        self.assertTrue(scripts)
+        for f in scripts:
+            r = subprocess.run([path, '--check', os.path.join(ROOT, 'tests', 'js', f)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, f + ': ' + r.stdout + r.stderr)
+            self.assertIn(' 0 failures', r.stdout)
+
+    def test_js_dom_page(self):
+        out, err = self.web_dump(os.path.join(ROOT, 'tests', 'web', 'dom.html'))
+        results = [l for l in out.splitlines() if l.startswith('RESULT')]
+        self.assertEqual(len(results), 1, out)
+        self.assertIn(' 0 failures', results[0], out)
+        self.assertFalse([l for l in out.splitlines() if l.startswith('FAIL')], out)
+
+    def write_page(self, name, body):
+        site = os.path.join(tmp, 'site')
+        os.makedirs(site, exist_ok=True)
+        path = os.path.join(site, name)
+        with open(path, 'w') as f:
+            f.write(body)
+        return path
+
+    def test_js_changes_the_rendered_page(self):
+        page = self.write_page('js1.html', '''<html><head><title>T</title></head><body><h1 id="h">Before</h1><ul id="l"></ul>
+<script>
+document.getElementById('h').textContent = 'After';
+['a', 'b'].forEach(function (x) { var li = document.createElement('li'); li.textContent = x.toUpperCase(); document.getElementById('l').appendChild(li); });
+document.title = 'New title';
+document.write('<p>written</p>');
+setTimeout(function () { document.body.appendChild(document.createTextNode('later')); }, 500);
+</script><noscript>no script here</noscript></body></html>''')
+        out, err = self.web_dump(page, 1000)
+        self.assertIn('title: New title', out)
+        self.assertIn('After', out)
+        self.assertNotIn('Before', out)
+        self.assertIn('* A', out)
+        self.assertIn('* B', out)
+        self.assertIn('written', out)
+        self.assertIn('later', out)
+        self.assertNotIn('no script here', out)
+
+    def test_js_errors_are_reported_and_do_not_stop_the_page(self):
+        page = self.write_page('js2.html', '''<html><body><p id="p">start</p>
+<script>undefined_function();</script>
+<script>document.getElementById('p').textContent = 'second script ran'; console.log('hello', 1 + 1);</script>
+<script>for (;;) {}</script>
+<script>document.getElementById('p').textContent += ' and the third';</script>
+</body></html>''')
+        out, err = self.web_dump(page, 0)
+        self.assertIn('second script ran and the third', out)
+        self.assertIn('[js error]', err)
+        self.assertIn('undefined_function is not defined', err)
+        self.assertIn('[js log] hello 2', err)
+        self.assertIn('ran too long', err)                    # the runaway loop is stopped by the instruction budget
+
+    def test_js_external_script_and_click_links(self):
+        self.write_page('lib.js', "var answer = 6 * 7; function hello(n) { return 'hello ' + n; }")
+        page = self.write_page('js3.html', '''<html><body><script src="lib.js"></script><p id="p"></p><a id="a" href="x.html">go</a><div id="d">box</div>
+<script>
+document.getElementById('p').textContent = hello(answer);
+document.getElementById('d').addEventListener('click', function () { this.textContent = 'clicked'; });
+document.getElementById('a').addEventListener('click', function (e) { e.preventDefault(); });
+location.href = 'other.html';
+</script></body></html>''')
+        out, err = self.web_dump(page, 0)
+        self.assertIn('hello 42', out)
+        self.assertIn('navigate: file://', out)
+        self.assertIn('other.html', out)
+        links = [l for l in out.splitlines() if l.startswith('link: ')]
+        self.assertEqual(len([l for l in links if l.startswith('link: js:')]), 2, links)   # both clickable elements are js: links
+
+    def test_js_click_and_timer_in_the_browser_window(self):
+        path = os.path.join(ROOT, 'build', 'lumen-web')
+        if not os.path.exists(path):
+            self.skipTest('lumen-web not built')
+        page = self.write_page('js4.html', '''<html><head><title>start</title></head><body><button id="b">Press</button>
+<script>
+document.getElementById('b').addEventListener('click', function () { document.title = 'clicked'; setTimeout(function () { document.title = 'timer fired'; }, 300); });
+</script></body></html>''')
+        p = subprocess.Popen([path, page], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('lumen.web')
+        self.assertIsNotNone(win, 'browser window did not appear')
+
+        def title():
+            return wait_for_window('lumen.web')['title']
+
+        def wait_title(want):
+            for _ in range(60):
+                if title() == want:
+                    return True
+                time.sleep(0.05)
+            return False
+
+        self.assertTrue(wait_title('start - Lumen Web'), title())
+        ctl.click(win['x'] + 24, win['y'] + 34 + 16 + 8)        # the button (rendered as a link) on the first line
+        self.assertTrue(wait_title('clicked - Lumen Web'), title())
+        self.assertTrue(wait_title('timer fired - Lumen Web'), title())      # the timer runs in the main loop without input
+        ctl.abs(900, 500)
+
+    def make_cert(self):
+        if not shutil.which('openssl'):
+            self.skipTest('openssl command not available')
+        d = os.path.join(tmp, 'tls')
+        os.makedirs(d, exist_ok=True)
+        key, crt = os.path.join(d, 'key.pem'), os.path.join(d, 'cert.pem')
+        if not os.path.exists(crt):
+            r = subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', crt, '-days', '2',
+                                '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'], capture_output=True)
+            if r.returncode != 0:
+                self.skipTest('cannot create a test certificate')
+        return key, crt
+
+    def start_https_server(self, key, crt):
+        site = os.path.join(tmp, 'site')
+        os.makedirs(site, exist_ok=True)
+        with open(os.path.join(site, 'secure.html'), 'w') as f:
+            f.write('<html><head><title>Secure page</title></head><body><h1>Hello TLS</h1><p id="p">plain</p>'
+                    '<script>document.getElementById("p").textContent = "script over https";</script></body></html>')
+        code = ('import http.server, ssl, sys, os\n'
+                'os.chdir(sys.argv[1])\n'
+                'h = http.server.ThreadingHTTPServer(("0.0.0.0", 0), http.server.SimpleHTTPRequestHandler)\n'
+                'c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain(sys.argv[2], sys.argv[3])\n'
+                'h.socket = c.wrap_socket(h.socket, server_side=True)\n'
+                'print(h.server_address[1], flush=True)\n'
+                'h.serve_forever()\n')
+        srv = subprocess.Popen([sys.executable, '-I', '-c', code, site, crt, key], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: (srv.kill(), srv.wait(), srv.stdout.close()))
+        port = int(srv.stdout.readline())
+        return port
+
+    def test_https_with_trusted_certificate(self):
+        key, crt = self.make_cert()
+        port = self.start_https_server(key, crt)
+        out, err = self.web_dump('https://localhost:%d/secure.html' % port, 0, env={'SSL_CERT_FILE': crt})
+        self.assertIn('title: Secure page', out)
+        self.assertIn('Hello TLS', out)
+        self.assertIn('script over https', out)               # scripts run on https pages too
+
+    def test_https_rejects_untrusted_and_mismatched_certificates(self):
+        key, crt = self.make_cert()
+        port = self.start_https_server(key, crt)
+        out, err = self.web_dump('https://localhost:%d/secure.html' % port, 0, env={'SSL_CERT_FILE': os.devnull})
+        self.assertIn('Cannot load page', out)
+        self.assertIn('certificate not trusted', out)
+        self.assertNotIn('Hello TLS', out)
+        out, err = self.web_dump('https://127.0.0.2:%d/secure.html' % port, 0, env={'SSL_CERT_FILE': crt})
+        self.assertIn('Cannot load page', out)                # trusted certificate, but it is not valid for this name
+        self.assertNotIn('Hello TLS', out)
+        out, err = self.web_dump('http://localhost:%d/secure.html' % port, 0)
+        self.assertIn('Cannot load page', out)                # plain http against a TLS port is an error, not garbage
+
     def test_app_menu_starts_browser(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'lumen-web')):
             self.skipTest('lumen-web not built')

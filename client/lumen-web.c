@@ -4,8 +4,9 @@
  *   lumen-web [URL|PATH]     default: about:home
  *   lumen-web --selftest     parser / layout / URL checks without a display
  *
- * Supported: file:// (paths, directory listings), http:// (HTTP/1.0, redirects, chunked), about:home.
- * Not supported: https (no TLS library), CSS, JavaScript, images (shown as [alt]), forms.
+ * Supported: file:// (paths, directory listings), http:// and https:// (HTTP/1.0, redirects, chunked; TLS through a
+ * run-time loaded libssl, see tls.h), about:home, JavaScript (dom.h / js.h: scripts, timers, click events, DOM changes).
+ * Not supported: CSS, images (shown as [alt]), forms, fetch/XMLHttpRequest, Promises, regular expressions.
  * HTML subset: headings, paragraphs, lists, links, pre/code, bold/italic, blockquote, hr, br, simple tables.
  * Fetching is synchronous (the window does not repaint while a page is loading, 10 s at most).
  *
@@ -33,8 +34,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "dom.h"
 #include "font.h"
 #include "keymap.h"
+#include "tls.h"
 #include "util.h"
 #include "wlc.h"
 
@@ -970,6 +973,7 @@ struct page {
     char *body;
     size_t len;
     bool html;
+    bool failed;                    /* an error page (could not load / HTTP error) */
     char url[2048];                 /* final url (after redirects) */
 };
 
@@ -993,6 +997,7 @@ static void page_error(struct page *p, const char *title, const char *fmt, ...)
     p->body = s.p;
     p->len = s.n;
     p->html = true;
+    p->failed = true;
 }
 
 static void page_home(struct page *p)
@@ -1003,7 +1008,8 @@ static void page_home(struct page *p)
            "<html><head><title>Lumen Web</title></head><body>"
            "<h1>Lumen Web</h1>"
            "<p>A tiny browser that runs on the <b>lumen</b> Wayland compositor. It speaks <code>file://</code> and "
-           "plain <code>http://</code>, understands a subset of HTML and has no JavaScript, CSS or TLS.</p>"
+           "<code>http://</code> and <code>https://</code>, understands a subset of HTML and runs JavaScript. It has no CSS, "
+           "images, forms, <code>fetch</code> or Promises.</p>"
            "<h2>Try</h2><ul>");
     if (getcwd(cwd, sizeof(cwd))) {
         sb_str(&s, "<li><a href=\"file://");
@@ -1014,7 +1020,8 @@ static void page_home(struct page *p)
     }
     sb_str(&s,
            "<li><a href=\"file:///\">The file system root</a></li>"
-           "<li>Type an address in the bar above: a path, <code>file:///...</code> or <code>http://host/</code>.</li>"
+           "<li>Type an address in the bar above: a path, <code>file:///...</code>, <code>http://host/</code> or "
+           "<code>https://host/</code>.</li>"
            "</ul><h2>Keys</h2><pre>"
            "Ctrl+L / F6      address bar        Enter  go            Esc  leave the bar\n"
            "Alt+Left, Bksp   back               Alt+Right  forward   F5 / Ctrl+R  reload\n"
@@ -1186,8 +1193,11 @@ static size_t dechunk(char *b, size_t len)
 static int http_get(const char *url, struct page *p, char *location, size_t locn, char *err, size_t errn)
 {
     size_t ol = url_origin_len(url);
+    bool secure = !strncasecmp(url, "https:", 6);
     char host[256], port[8] = "80";
-    const char *auth = url + 7, *authend = url + ol;
+    if (secure)
+        snprintf(port, sizeof(port), "443");
+    const char *auth = url + (secure ? 8 : 7), *authend = url + ol;
     size_t al = (size_t)(authend - auth);
     snprintf(host, sizeof(host), "%.*s", (int)LM_MIN(al, sizeof(host) - 1), auth);
     char *colon = strrchr(host, ':');
@@ -1196,6 +1206,9 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
         *colon = 0;
     }
     const char *path = url + ol;
+    char pathbuf[2048];
+    snprintf(pathbuf, sizeof(pathbuf), "%.*s", (int)strcspn(path, "#"), path);      /* never send the fragment */
+    path = pathbuf;
     char req[4096];
     snprintf(req, sizeof(req),
              "GET %s HTTP/1.0\r\nHost: %.*s\r\nUser-Agent: lumen-web/1.0\r\nAccept: text/html, text/plain;q=0.9\r\n"
@@ -1207,39 +1220,49 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
         snprintf(err, errn, "cannot connect to %s:%s", host, port);
         return 0;
     }
+    struct tls *tls = NULL;
+    if (secure) {
+        tls = tls_open(fd, host, (int)LM_MAX(deadline - now_ms(), 1000LL), err, errn);
+        if (!tls) {
+            close(fd);
+            return 0;
+        }
+    }
     size_t sent = 0, rl = strlen(req);
     while (sent < rl) {
-        struct pollfd pf = { .fd = fd, .events = POLLOUT };
+        ssize_t w;
+        if (tls) {
+            w = tls_write(tls, req + sent, rl - sent);
+        } else {
+            w = send(fd, req + sent, rl - sent, MSG_NOSIGNAL);
+            if (w < 0 && (errno == EAGAIN || errno == EINTR))
+                w = TLS_AGAIN_WRITE;
+            else if (w < 0)
+                w = TLS_ERROR;
+        }
+        if (w > 0) {
+            sent += (size_t)w;
+            continue;
+        }
+        if (w == TLS_ERROR) {
+            snprintf(err, errn, "cannot send the request");
+            tls_close(tls);
+            close(fd);
+            return 0;
+        }
+        struct pollfd pf = { .fd = fd, .events = w == TLS_AGAIN_READ ? POLLIN : POLLOUT };
         if (poll(&pf, 1, (int)LM_MAX(deadline - now_ms(), 0LL)) <= 0) {
             snprintf(err, errn, "timeout sending the request");
+            tls_close(tls);
             close(fd);
             return 0;
         }
-        ssize_t w = send(fd, req + sent, rl - sent, MSG_NOSIGNAL);
-        if (w < 0 && errno != EAGAIN && errno != EINTR) {
-            snprintf(err, errn, "send: %s", strerror(errno));
-            close(fd);
-            return 0;
-        }
-        if (w > 0)
-            sent += (size_t)w;
     }
     size_t cap = 65536, len = 0;
     char *buf = malloc(cap + 1);
     if (!buf)
         exit(1);
     for (;;) {
-        long long left = deadline - now_ms();
-        struct pollfd pf = { .fd = fd, .events = POLLIN };
-        if (left <= 0 || poll(&pf, 1, (int)left) <= 0) {
-            if (len == 0) {
-                snprintf(err, errn, "timeout waiting for %s", host);
-                free(buf);
-                close(fd);
-                return 0;
-            }
-            break;
-        }
         if (len == cap) {
             if (cap >= MAX_BODY)
                 break;
@@ -1248,13 +1271,36 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
             if (!buf)
                 exit(1);
         }
-        ssize_t r = recv(fd, buf + len, cap - len, 0);
-        if (r < 0 && (errno == EAGAIN || errno == EINTR))
+        ssize_t r;
+        if (tls) {
+            r = tls_read(tls, buf + len, cap - len);          /* (decrypted data may already be buffered: no poll) */
+        } else {
+            r = recv(fd, buf + len, cap - len, 0);
+            if (r < 0)
+                r = errno == EAGAIN || errno == EINTR ? TLS_AGAIN_READ : TLS_ERROR;
+        }
+        if (r > 0) {
+            len += (size_t)r;
             continue;
-        if (r <= 0)
-            break;
-        len += (size_t)r;
+        }
+        if (r == TLS_AGAIN_READ || r == TLS_AGAIN_WRITE) {
+            long long left = deadline - now_ms();
+            struct pollfd pf = { .fd = fd, .events = r == TLS_AGAIN_READ ? POLLIN : POLLOUT };
+            if (left <= 0 || poll(&pf, 1, (int)left) <= 0) {
+                if (len == 0) {
+                    snprintf(err, errn, "timeout waiting for %s", host);
+                    free(buf);
+                    tls_close(tls);
+                    close(fd);
+                    return 0;
+                }
+                break;
+            }
+            continue;
+        }
+        break;                                                  /* 0 = closed, TLS_ERROR: use what we have */
     }
+    tls_close(tls);
     close(fd);
     buf[len] = 0;
     char *hend = strstr(buf, "\r\n\r\n");
@@ -1314,10 +1360,7 @@ static void page_load(struct page *p, const char *url)
         snprintf(p->url, sizeof(p->url), "about:home");
     } else if (!strncasecmp(url, "file:", 5)) {
         load_file(p, url);
-    } else if (!strncasecmp(url, "https:", 6)) {
-        page_error(p, "https is not supported", "This browser has no TLS library, so it cannot open %s. "
-                                                "Plain http:// and file:// pages work.", url);
-    } else if (!strncasecmp(url, "http:", 5)) {
+    } else if (!strncasecmp(url, "http:", 5) || !strncasecmp(url, "https:", 6)) {
         char cur[2048], loc[2048], err[256] = "";
         snprintf(cur, sizeof(cur), "%s", url);
         for (int hop = 0; hop < 6; hop++) {
@@ -1333,10 +1376,6 @@ static void page_load(struct page *p, const char *url)
                     page_error(p, "Bad redirect", "Location: %s", loc);
                     break;
                 }
-                if (!strncasecmp(next, "https:", 6)) {
-                    page_error(p, "https is not supported", "The server redirected to %s, which needs TLS.", next);
-                    break;
-                }
                 snprintf(cur, sizeof(cur), "%s", next);
                 continue;
             }
@@ -1348,6 +1387,97 @@ static void page_load(struct page *p, const char *url)
     } else {
         page_error(p, "Unknown address", "Cannot open %s", url);
     }
+}
+
+/* ---- JavaScript pages -------------------------------------------------------------------------------- */
+
+/* Everything the DOM needs from the browser: where relative script addresses start, and a mailbox for navigation requests
+ * made by scripts (carried out by the main loop once the script has returned). */
+struct web_host {
+    char base[2048];
+    char pending[2048];
+    int delta;                      /* history steps, when `pending` is empty */
+    bool has_pending;
+    char status[300];               /* last alert / script error, for the status bar */
+};
+
+static bool has_script(const char *body, size_t len)
+{
+    for (size_t i = 0; i + 7 <= len; i++)
+        if (body[i] == '<' && !strncasecmp(body + i, "<script", 7))
+            return true;
+    return false;
+}
+
+static bool host_fetch_script(void *data, const char *src, char **body, size_t *len, char *err, size_t errn)
+{
+    struct web_host *h = data;
+    char abs[2048];
+    if (!url_resolve(h->base, src, abs, sizeof(abs))) {
+        snprintf(err, errn, "bad address");
+        return false;
+    }
+    struct page sp;
+    page_load(&sp, abs);
+    if (sp.failed || !sp.body) {
+        snprintf(err, errn, "could not load %s", abs);
+        free(sp.body);
+        return false;
+    }
+    *body = sp.body;
+    *len = sp.len;
+    return true;
+}
+
+static void host_navigate(void *data, const char *url, int delta)
+{
+    struct web_host *h = data;
+    h->has_pending = true;
+    h->delta = delta;
+    h->pending[0] = 0;
+    if (url) {
+        if (url_resolve(h->base, url, h->pending, sizeof(h->pending)))
+            h->delta = 0;
+        else if (url[0] == '#')
+            h->has_pending = false;
+    }
+}
+
+static void host_message(void *data, const char *level, const char *text)
+{
+    struct web_host *h = data;
+    fprintf(stderr, "[js %s] %s\n", level, text);
+    if (!strcmp(level, "error") || !strcmp(level, "alert"))
+        snprintf(h->status, sizeof(h->status), "%s%s", !strcmp(level, "error") ? "Script error: " : "", text);
+}
+
+static void host_alert(void *data, const char *text)
+{
+    host_message(data, "alert", text);
+}
+
+/* Build the document of a loaded page: pages with scripts go through the DOM (scripts run, then the result is
+ * serialized and parsed by the HTML renderer); others are parsed directly. *domp receives the live DOM or NULL. */
+static void load_document(struct page *p, struct web_host *wh, struct doc *out, struct dom **domp)
+{
+    *domp = NULL;
+    snprintf(wh->base, sizeof(wh->base), "%s", p->url);
+    if (p->html && !p->failed && p->body && has_script(p->body, p->len)) {
+        struct dom_host host = { .data = wh, .fetch_script = host_fetch_script, .navigate = host_navigate,
+                                 .message = host_message, .alert = host_alert };
+        struct dom *d = dom_create(p->url, &host);
+        if (d) {
+            dom_load(d, p->body, p->len);
+            size_t l;
+            char *html = dom_serialize(d, &l);
+            dom_take_dirty(d);
+            doc_parse(out, html, l, false);
+            free(html);
+            *domp = d;
+            return;
+        }
+    }
+    doc_parse(out, p->body ? p->body : "", p->body ? p->len : 0, !p->html);
 }
 
 /* ---- selftest -------------------------------------------------------------------------------- */
@@ -1492,6 +1622,8 @@ struct app {
     bool has_pointer;
 
     struct doc doc;
+    struct dom *dom;                /* live DOM of the current page (scripts), or NULL */
+    struct web_host wh;
     struct layout layout;
     int layout_w;
     int scroll;
@@ -1697,6 +1829,30 @@ static void relayout(struct app *a)
     a->scroll = LM_CLAMP(a->scroll, 0, max_scroll(a));
 }
 
+/* The scripts changed the page: serialize the DOM again, keep the scroll position. */
+static void rebuild_from_dom(struct app *a, bool force)
+{
+    if (!a->dom)
+        return;
+    bool dirty = dom_take_dirty(a->dom) || force;
+    if (a->wh.status[0] && strcmp(a->status, a->wh.status)) {
+        snprintf(a->status, sizeof(a->status), "%s", a->wh.status);
+        a->redraw = true;
+    }
+    if (!dirty)
+        return;
+    size_t l;
+    char *html = dom_serialize(a->dom, &l);
+    doc_free(&a->doc);
+    doc_parse(&a->doc, html, l, false);
+    free(html);
+    a->hover_link = -1;
+    a->layout_w = 0;
+    relayout(a);
+    set_window_title(a);
+    a->redraw = true;
+}
+
 enum nav { NAV_PUSH, NAV_RELOAD, NAV_HISTORY };
 
 static void navigate(struct app *a, const char *url, enum nav mode, int restore_scroll)
@@ -1706,14 +1862,18 @@ static void navigate(struct app *a, const char *url, enum nav mode, int restore_
     struct page p;
     page_load(&p, url);
     doc_free(&a->doc);
-    doc_parse(&a->doc, p.body ? p.body : "", p.body ? p.len : 0, !p.html);
-    free(p.body);
+    dom_free(a->dom);
+    a->dom = NULL;
+    a->wh.has_pending = false;
+    a->wh.status[0] = 0;
     snprintf(a->cur_url, sizeof(a->cur_url), "%s", p.url);
+    load_document(&p, &a->wh, &a->doc, &a->dom);
+    free(p.body);
     snprintf(a->addr, sizeof(a->addr), "%s", strcmp(p.url, "about:home") ? p.url : "about:home");
     a->cursor = (int)strlen(a->addr);
     a->addr_focus = false;
     a->hover_link = -1;
-    a->status[0] = 0;
+    snprintf(a->status, sizeof(a->status), "%s", a->wh.status);
     a->scroll = 0;
     a->layout_w = 0;
     if (mode == NAV_PUSH) {
@@ -1765,6 +1925,15 @@ static void follow_link(struct app *a, int link)
         return;
     char href[1024];
     snprintf(href, sizeof(href), "%s", a->doc.links[link]);
+    if (!strncmp(href, "js:", 3)) {                     /* a page element with a click handler */
+        char target[1024] = "";
+        if (a->dom && dom_click(a->dom, atoi(href + 3), target, sizeof(target)) && target[0])
+            snprintf(href, sizeof(href), "%s", target);
+        else {
+            rebuild_from_dom(a, false);
+            return;
+        }
+    }
     if (href[0] == '#') {
         a->scroll = 0;
         a->redraw = true;
@@ -2118,10 +2287,78 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         a->seat = wlc_bind(c, a->registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, a);
 }
 
+/* --dump URL: load the page like the browser does and print its text (title first); for scripts and tests. */
+static void print_doc(const struct doc *d)
+{
+    printf("title: %s\n", d->title);
+    bool line_open = false;
+    for (size_t i = 0; i < d->n; i++) {
+        const struct tok *t = &d->t[i];
+        switch (t->kind) {
+        case T_WORD:
+            printf("%s%s", line_open ? " " : "", t->text);
+            line_open = true;
+            break;
+        case T_BULLET:
+            printf("%s* ", line_open ? "\n" : "");
+            line_open = false;
+            break;
+        case T_BLOCK:
+        case T_BREAK:
+        case T_HR:
+            if (line_open)
+                putchar('\n');
+            line_open = false;
+            break;
+        default:
+            break;
+        }
+    }
+    if (line_open)
+        putchar('\n');
+    for (int i = 0; i < d->nlinks; i++)
+        printf("link: %s\n", d->links[i]);
+}
+
+static int dump_page(const char *input, long long wait_ms)
+{
+    char url[2048];
+    if (!url_from_input(input, url, sizeof(url))) {
+        fprintf(stderr, "lumen-web: bad address %s\n", input);
+        return 1;
+    }
+    struct page p;
+    page_load(&p, url);
+    struct web_host wh;
+    memset(&wh, 0, sizeof(wh));
+    struct doc d;
+    struct dom *dom;
+    load_document(&p, &wh, &d, &dom);
+    if (dom && wait_ms > 0) {                           /* let timers run (virtual time: no real waiting) */
+        dom_run_timers_virtual(dom, wait_ms);
+        if (dom_take_dirty(dom)) {
+            size_t l;
+            char *html = dom_serialize(dom, &l);
+            doc_free(&d);
+            doc_parse(&d, html, l, false);
+            free(html);
+        }
+    }
+    print_doc(&d);
+    if (wh.has_pending)
+        printf("navigate: %s\n", wh.pending[0] ? wh.pending : "(history)");
+    doc_free(&d);
+    dom_free(dom);
+    free(p.body);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    if (argc > 2 && !strcmp(argv[1], "--dump"))
+        return dump_page(argv[2], argc > 3 ? atoll(argv[3]) : 5000);
 
     static struct app a;
     a.w = DEFAULT_W;
@@ -2153,11 +2390,29 @@ int main(int argc, char **argv)
     WLC_SEND0(a.c, a.surface, LM_WL_SURFACE_REQ_COMMIT);
 
     while (a.running && !wlc_dead(a.c)) {
+        if (a.wh.has_pending) {                         /* a script asked for another page (location.href, history.back) */
+            a.wh.has_pending = false;
+            if (a.wh.pending[0]) {
+                char u[2048];
+                snprintf(u, sizeof(u), "%s", a.wh.pending);
+                navigate(&a, u, NAV_PUSH, 0);
+            } else if (a.wh.delta) {
+                go_history(&a, a.wh.delta);
+            }
+            continue;
+        }
         if (a.redraw && a.configured && !a.buffer_busy)
             draw(&a);
-        if (wlc_dispatch(a.c, -1) < 0)
+        long long next = a.dom ? dom_next_timer_ms(a.dom) : -1;
+        int timeout = next < 0 ? -1 : (int)(next > 60000 ? 60000 : next);
+        if (wlc_dispatch(a.c, timeout) < 0)
             break;
+        if (a.dom && dom_next_timer_ms(a.dom) == 0) {
+            bool changed = dom_run_timers(a.dom);
+            rebuild_from_dom(&a, changed);
+        }
     }
+    dom_free(a.dom);
     doc_free(&a.doc);
     free(a.layout.r);
     wlc_destroy(a.c);

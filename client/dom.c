@@ -153,11 +153,13 @@ struct dnode *dnode_new(struct dom *d, int type, const char *tag)
     n->all_next = d->all_nodes;
     d->all_nodes = n;
     n->id = ++d->next_id;
+    n->defstate = -1;
     return n;
 }
 
 static void dnode_free(struct dnode *n)
 {
+    free(n->defval);
     free(n->st);
     free(n->st_before);
     free(n->st_after);
@@ -968,6 +970,24 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
     if (is_void)
         goto after;
     bool css_i = css_open_inner(sb, st, href != NULL || (wrap && !href));
+    int label_target = 0;
+    if (!strcmp(t, "label")) {                              /* clicking the label text acts on its control */
+        const char *forid = dattr_get(n, "for");
+        const struct dnode *c = forid ? dom_by_id(n->dom, forid) : NULL;
+        for (const struct dnode *q = n->first; !c && q;) {
+            if (q->type == DN_ELEMENT && widget_kind(q) != WK_NONE) c = q;
+            if (q->first) { q = q->first; continue; }
+            while (q && q != n && !q->next) q = q->parent;
+            if (!q || q == n) break;
+            q = q->next;
+        }
+        if (c && widget_kind(c) != WK_NONE) {
+            char b[40];
+            snprintf(b, sizeof(b), "<x-l id=\"%d\">", c->id);
+            sbuf_addz(sb, b);
+            label_target = c->id;
+        }
+    }
     if (n->before_txt) {
         bool b = css_open_inner(sb, n->st_before, false);
         escape_text(sb, n->before_txt);
@@ -980,6 +1000,8 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
         escape_text(sb, n->after_txt);
         if (b) sbuf_addz(sb, "</x-i>");
     }
+    if (label_target)
+        sbuf_addz(sb, "</x-l>");
     if (css_i)
         sbuf_addz(sb, "</x-i>");
     sbuf_addz(sb, "</");

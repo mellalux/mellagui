@@ -702,7 +702,17 @@ static bool node_get(js *J, jsobj *o, jsstr *key, jsval *out)
         break;
     case 'v':
         if (!strcmp(k, "value") && n->type == DN_ELEMENT) {
-            if (!strcmp(n->tag, "textarea")) {
+            if (!strcmp(n->tag, "select")) {
+                struct sbuf sv = { 0 };
+                select_value(n, &sv);
+                *out = jstr(J, sv.p);
+                free(sv.p);
+            } else if (!strcmp(n->tag, "option") && !dattr_get(n, "value")) {
+                struct sbuf ov = { 0 };
+                dom_text_content(&ov, n);
+                *out = jstr(J, ov.p);
+                free(ov.p);
+            } else if (!strcmp(n->tag, "textarea")) {
                 struct sbuf sb = { 0 };
                 dom_text_content(&sb, n);
                 *out = jstr(J, sb.p);
@@ -2115,6 +2125,52 @@ static void submit_form(struct dom *d, struct dnode *form, struct dnode *submitt
     free(q.p);
 }
 
+/* remember what the page started with, for form.reset() */
+static void record_defaults(struct dom *d)
+{
+    for (struct dnode *n = d->all_nodes; n; n = n->all_next) {
+        int k = n->type == DN_ELEMENT ? widget_kind(n) : WK_NONE;
+        if (k == WK_NONE || n->defstate != -1)
+            continue;
+        if (k == WK_TEXT || k == WK_PASSWORD || k == WK_TEXTAREA) {
+            struct sbuf v = { 0 };
+            get_value(n, &v);
+            n->defval = v.p ? v.p : dstrdup("");
+            n->defstate = 0;
+        } else if (k == WK_CHECKBOX || k == WK_RADIO) {
+            n->defstate = dattr_get(n, "checked") ? 1 : 0;
+        } else if (k == WK_SELECT) {
+            int i = 0, sel = 0;
+            for (const struct dnode *o = dom_option_next(n, NULL); o; o = dom_option_next(n, o), i++)
+                if (dattr_get(o, "selected")) sel = i;
+            n->defstate = sel;
+        }
+    }
+}
+
+static void reset_form(struct dom *d, struct dnode *form)
+{
+    const struct dnode *c = form->first;
+    while (c) {
+        struct dnode *n = (struct dnode *)c;
+        int k = c->type == DN_ELEMENT ? widget_kind(c) : WK_NONE;
+        if (k != WK_NONE && n->defstate != -1) {
+            if (k == WK_TEXT || k == WK_PASSWORD || k == WK_TEXTAREA) { set_value(d, n, n->defval ? n->defval : ""); n->caret = 0; }
+            else if (k == WK_CHECKBOX || k == WK_RADIO) { if (n->defstate) dattr_set(n, "checked", ""); else dattr_remove(n, "checked"); }
+            else if (k == WK_SELECT) {
+                int i = 0;
+                for (struct dnode *o = (struct dnode *)dom_option_next(n, NULL); o; o = (struct dnode *)dom_option_next(n, o), i++)
+                    if (i == n->defstate) dattr_set(o, "selected", ""); else dattr_remove(o, "selected");
+            }
+        }
+        if (c->first) { c = c->first; continue; }
+        while (c && c != form && !c->next) c = c->parent;
+        if (!c || c == form) break;
+        c = c->next;
+    }
+    d->dirty = true;
+}
+
 static void press_widget(struct dom *d, struct dnode *n, int k)
 {
     struct dnode *form = dom_form_of(n);
@@ -2122,7 +2178,8 @@ static void press_widget(struct dom *d, struct dnode *n, int k)
         if (form)
             submit_form(d, form, n, true);
     } else if (k == WK_RESET && form) {
-        fire_simple(d, form, "reset", true, true);
+        if (fire_simple(d, form, "reset", true, true))
+            reset_form(d, form);
     }
 }
 
@@ -2414,6 +2471,13 @@ DNATIVE(form_submit_native)
         submit_form(n->dom, n, NULL, false);
     return JS_UNDEFINED;
 }
+DNATIVE(form_reset_native)
+{
+    struct dnode *n = this_node(J, thisv);
+    if (n && !strcmp(n->tag, "form") && fire_simple(n->dom, n, "reset", true, true))
+        reset_form(n->dom, n);
+    return JS_UNDEFINED;
+}
 DNATIVE(form_requestSubmit)
 {
     struct dnode *n = this_node(J, thisv);
@@ -2679,7 +2743,7 @@ static void setup_globals(struct dom *d)
     M("getElementsByTagName", el_getElementsByTagName, 1); M("getElementsByClassName", el_getElementsByClassName, 1);
     M("getElementsByName", el_getElementsByName, 1); M("insertAdjacentHTML", el_insertAdjacentHTML, 2);
     M("click", el_click, 0); M("focus", el_focus, 0); M("blur", el_blur, 0); M("scrollIntoView", el_noop, 0);
-    M("submit", form_submit_native, 0); M("requestSubmit", form_requestSubmit, 0); M("reset", el_noop, 0);
+    M("submit", form_submit_native, 0); M("requestSubmit", form_requestSubmit, 0); M("reset", form_reset_native, 0);
     M("getBoundingClientRect", el_getBoundingClientRect, 0); M("getClientRects", el_noop, 0);
     M("createElement", doc_createElement, 1); M("createElementNS", doc_createElement, 2);
     M("createTextNode", doc_createTextNode, 1); M("createComment", doc_createComment, 1);
@@ -2870,6 +2934,7 @@ void dom_load(struct dom *d, const char *html, size_t len)
         if (nu > 1)
             d->host.prefetch(d->host.data, urls, nu);
     }
+    record_defaults(d);
     d->ready = 0;
     d->load_deadline = dom_now(d) + 9000;                    /* wall-clock limit for running the page's scripts */
     flush_scripts(d);

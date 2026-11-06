@@ -38,6 +38,8 @@ enum { DS_NONE, DS_BLOCK, DS_INLINE, DS_INLINE_BLOCK, DS_FLEX, DS_LIST_ITEM, DS_
 struct dnode {
     int type;
     int caret;                      /* focused text control: caret as a byte offset into the value */
+    char *defval;                   /* form reset: the value / checked state / selected option the page started with */
+    int defstate;                   /* checked (0/1), selected option index; -1 = not recorded */
     struct estyle *st, *st_before, *st_after;
     char *before_txt, *after_txt;
     char *tag;                      /* lowercase, elements only */

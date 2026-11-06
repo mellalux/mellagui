@@ -7,6 +7,7 @@
 <a id="lnk" href="next.html">link</a><input id="inp" type="text" value="v0"><img id="im" src="x.png" alt="pic">
 <table id="tb"><tr><td>c1<td>c2<tr><td>c3<td>c4</table>
 </div>
+<form id="rf"><input id="rt" name="t" value="start"><input id="rc" type="checkbox" name="c" checked><select id="rs" name="s"><option value="1">one</option><option value="2" selected>two</option></select></form>
 <div id="out"></div>
 <script>
 var results = { n: 0, fails: [] };
@@ -52,6 +53,11 @@ eq($('root').outerHTML.indexOf('<div id="root">'), 0, 'outerHTML');
 var st = $('p1').style; st.color = 'red'; st.fontSize = '12px'; eq($('p1').getAttribute('style'), 'color: red; font-size: 12px;', 'style attr'); eq(st.color, 'red', 'style get'); eq(st.fontSize, '12px', 'style camel');
 st.color = ''; eq($('p1').getAttribute('style'), 'font-size: 12px;', 'style remove'); eq(st.getPropertyValue('font-size'), '12px', 'getPropertyValue'); st.setProperty('margin-top', '3px'); eq(st.marginTop, '3px', 'setProperty');
 $('im').style.display = 'none'; eq($('im').style.display, 'none', 'display none');
+// forms
+var rf = $('rf'); eq([$('rt').value, $('rc').checked, $('rs').value], ['start', true, '2'], 'form defaults');
+$('rt').value = 'changed'; $('rc').checked = false; $('rs').value = '1'; eq([$('rt').value, $('rc').checked, $('rs').value, $('rs').selectedIndex], ['changed', false, '1', 0], 'form edited');
+rf.reset(); eq([$('rt').value, $('rc').checked, $('rs').value], ['start', true, '2'], 'form.reset restores the defaults'); eq(rf.elements.length, 3, 'form.elements');
+var sub = 0; rf.addEventListener('submit', function (e) { sub++; e.preventDefault(); }); rf.requestSubmit(); eq(sub, 1, 'submit event, preventDefault stops it');
 // events
 var log = [];
 $('root').addEventListener('click', function (e) { log.push('root:' + e.target.id + ':' + e.currentTarget.id); });

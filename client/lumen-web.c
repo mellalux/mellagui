@@ -380,6 +380,7 @@ struct tok {
     uint32_t bg, blockbg;           /* inline background / background of the enclosing block (valid if the flags are set) */
     uint8_t hasbg, hasblockbg, ul, strike, align;   /* ul: 0 default (links only), 1 on, 2 off; align 0 left, 1 centre, 2 right */
     int padx;                       /* extra left indent in pixels (padding / margin-left) */
+    int lbl;                        /* inside a <label>: DOM id of the control a click acts on (0 = none) */
 };
 
 /* An <img> of the document. The decoded bitmap belongs to the global image cache; `scaled` is the copy painted at the
@@ -446,7 +447,7 @@ struct pstate {
     /* author style (x-o / x-i tags written by dom_serialize) */
     uint32_t fg, lc, bg, blockbg;
     bool has_fg, has_lc, has_bg, has_blockbg;
-    int ul, strike, align, padx, noblock, nobullet, transform;
+    int ul, strike, align, padx, noblock, nobullet, transform, lbl;
     struct pframe *frames;
     int nframes, capframes;
 };
@@ -481,6 +482,7 @@ static struct tok *add_tok(struct pstate *ps, enum tok_kind kind, char *text)
     t->strike = (uint8_t)ps->strike;
     t->align = (uint8_t)ps->align;
     t->padx = ps->padx;
+    t->lbl = ps->lbl;
     return t;
 }
 
@@ -830,7 +832,10 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
 static void handle_tag(struct pstate *ps, const char *name, bool close, const char *attrs, size_t alen)
 {
     if (name[0] == 'x' && name[1] == '-') {
-        if (!strcmp(name, "x-o")) style_tag(ps, true, close, attrs, alen);
+        if (!strcmp(name, "x-l")) {
+            char v[32];
+            ps->lbl = !close && attr_get(attrs, alen, "id", v, sizeof(v)) ? atoi(v) : 0;
+        } else if (!strcmp(name, "x-o")) style_tag(ps, true, close, attrs, alen);
         else if (!strcmp(name, "x-i")) style_tag(ps, false, close, attrs, alen);
         else if (!strcmp(name, "x-w") && !close) {
             char v[64];
@@ -2950,6 +2955,11 @@ static int widget_at(const struct app *a, double x, double y, const struct run *
             if (run)
                 *run = r;
             return a->doc.widgets[r->t->img].id;
+        }
+        if ((r->kind == R_TEXT || r->kind == R_IMAGE) && r->t->lbl && x >= r->x && x < r->x + r->w && py >= r->y && py < r->y + r->h) {
+            if (run)
+                *run = r;
+            return r->t->lbl;                              /* text of a <label>: acts on its control */
         }
     }
     return 0;

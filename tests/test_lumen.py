@@ -1744,6 +1744,28 @@ fetch('missing.json').then(function (r) { document.getElementById('e').textConte
         out, err = self.web_dump(page, 0)
         self.assertIn('\u00f5\u00e4\u00f6\u00fc', out)
 
+    def test_tables_are_laid_out_in_columns(self):
+        page = self.write_page('table1.html', '''<html><body style="background:#ffffff"><table>
+<tr><td style="background:#ff0000">red cell</td><td style="background:#0000ff;color:#ffffff">blue cell</td></tr>
+<tr><td style="background:#00ff00">green</td><td style="background:#ffff00">yellow cell here</td></tr></table></body></html>''')
+        img, win = self.web_frame(page)
+        def first_x(color, y0):
+            for y in range(y0, y0 + 24):
+                for x in range(win['x'], win['x'] + 500):
+                    if img.px(x, y) == color:
+                        return x, y
+            return None
+        base = win['y'] + 34 + 10
+        red, blue = first_x((255, 0, 0), base), first_x((0, 0, 255), base)
+        self.assertIsNotNone(red); self.assertIsNotNone(blue)
+        self.assertLess(red[0] + 40, blue[0])                    # the second cell starts to the right of the first
+        self.assertEqual(red[1], blue[1])                        # on the same row
+        green, yellow = first_x((0, 255, 0), red[1] + 8), first_x((255, 255, 0), red[1] + 8)
+        self.assertIsNotNone(green); self.assertIsNotNone(yellow)
+        self.assertEqual(green[0], red[0])                       # columns line up between rows
+        self.assertEqual(yellow[0], blue[0])
+        self.assertGreater(green[1], red[1])                     # the second row is below the first
+
     def test_images_are_decoded_and_painted(self):
         red, green, blue = (255, 0, 0), (0, 255, 0), (0, 0, 255)
         png = self.png_bytes(2, 2, [[red, green], [blue, (255, 255, 0)]])

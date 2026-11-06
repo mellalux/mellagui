@@ -366,7 +366,7 @@ static bool url_from_input(const char *typed, char *out, size_t n)
 
 /* ---- document model ---------------------------------------------------------------------------- */
 
-enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET, T_IMAGE, T_PAD, T_WIDGET, T_RULE };
+enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET, T_IMAGE, T_PAD, T_WIDGET, T_RULE, T_TOPEN, T_TEND, T_ROW, T_CELL };
 
 struct tok {
     enum tok_kind kind;
@@ -921,13 +921,19 @@ static void handle_tag(struct pstate *ps, const char *name, bool close, const ch
             ps->bold = LM_MAX(ps->bold - 1, 0);
             ps->px = 16;
         }
-    } else if (!strcmp(name, "p") || !strcmp(name, "table") || !strcmp(name, "address") || !strcmp(name, "figure")) {
+    } else if (!strcmp(name, "table")) {
+        add_block(ps, 1);
+        char v[16];
+        struct tok *tt = add_tok(ps, close ? T_TEND : T_TOPEN, NULL);
+        tt->img = !close && attr_get(attrs, alen, "border", v, sizeof(v)) && atoi(v) > 0;
+        add_block(ps, 1);
+    } else if (!strcmp(name, "tr") && !close) {
+        add_tok(ps, T_ROW, NULL);
+    } else if (!strcmp(name, "p") || !strcmp(name, "address") || !strcmp(name, "figure")) {
         add_block(ps, 1);
     } else if (name_is(name, "div section article header footer nav main aside form figcaption details summary "
-                              "fieldset center tr caption body html dl dt")) {
+                              "fieldset center caption body html dl dt")) {
         add_block(ps, 0);
-        if (!strcmp(name, "tr"))
-            ps->cell = 0;
     } else if (!strcmp(name, "ul") || !strcmp(name, "ol")) {
         if (!close) {
             add_block(ps, ps->nlist == 0);
@@ -971,15 +977,13 @@ static void handle_tag(struct pstate *ps, const char *name, bool close, const ch
         ps->code = LM_MAX(ps->code + (close ? -1 : 1), 0);
     } else if (name_is(name, "b strong th")) {
         ps->bold = LM_MAX(ps->bold + (close ? -1 : 1), 0);
-        if (!strcmp(name, "th") && !close) {
-            if (ps->cell++ > 0)
-                add_tok(ps, T_WORD, strdup("|"))->color = COL_GRAY;
-        }
+        if (!strcmp(name, "th") && !close)
+            add_tok(ps, T_CELL, NULL)->img = 1;
     } else if (name_is(name, "i em cite var dfn")) {
         ps->ital = LM_MAX(ps->ital + (close ? -1 : 1), 0);
     } else if (!strcmp(name, "td")) {
-        if (!close && ps->cell++ > 0)
-            add_tok(ps, T_WORD, strdup("|"))->color = COL_GRAY;
+        if (!close)
+            add_tok(ps, T_CELL, NULL);
     } else if (!strcmp(name, "a")) {
         if (close) {
             ps->link = -1;
@@ -1201,12 +1205,13 @@ static int text_h(const struct tok *t)
     return f ? ttf_ascent(f, tok_px(t)) + ttf_descent(f, tok_px(t)) : LM_FONT_H;
 }
 
-enum run_kind { R_TEXT, R_HR, R_BULLET, R_IMAGE, R_BG, R_WIDGET };
+enum run_kind { R_TEXT, R_HR, R_BULLET, R_IMAGE, R_BG, R_WIDGET, R_BOX };
 
 struct run {
     int x, y, w, h;
     int ly, lh;                     /* the line box the run sits in (for block backgrounds) */
     int bx, bwid;                   /* left edge and width of the block (left border bar, backgrounds of centred blocks) */
+    bool incell;
     enum run_kind kind;
     const char *text;
     int len;
@@ -1222,8 +1227,10 @@ struct layout {
 struct lstate {
     struct layout *L;
     int width, right, y, x, left, line_h, gap;
+    int xmin, xmax, base_indent;    /* the area blocks are laid out in (the page, or a table cell) */
+    int maxx;                       /* right edge reached by tables (for measuring cells) */
     size_t line_start;
-    bool open, space;
+    bool open, space, in_cell;
 };
 
 static struct run *add_run(struct layout *L)
@@ -1250,6 +1257,7 @@ static void ls_finish(struct lstate *ls)
         r->lh = lh;
         r->bx = ls->left;
         r->bwid = ls->right - ls->left;
+        r->incell = ls->in_cell;
         if (r->kind != R_BULLET && r->t->kind != T_BULLET) {
             minx = LM_MIN(minx, r->x);
             maxx = LM_MAX(maxx, r->x + r->w);
@@ -1272,7 +1280,7 @@ static void ls_finish(struct lstate *ls)
 /* Left and right edge of the block a token belongs to (indent, padding, max-width, centring). */
 static void block_extents(const struct lstate *ls, const struct tok *t, int *l, int *r)
 {
-    int left = PAGE_PAD + t->indent * INDENT_PX + t->padx, right = ls->width - PAGE_PAD;
+    int left = ls->xmin + (t->indent - ls->base_indent) * INDENT_PX + t->padx, right = ls->xmax;
     if (t->maxw > 0 && right - left > 0) {
         int avail = right - left, w = LM_MIN(t->maxw, avail);
         if (t->center)
@@ -1297,14 +1305,26 @@ static void ls_start(struct lstate *ls, const struct tok *t)
     ls->space = false;
 }
 
-static void doc_layout(const struct doc *d, int width, struct layout *L)
+static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls);
+
+/* Lay out tokens [from, to) into ls (the area, the current line and y are in ls). */
+static void layout_tokens(const struct doc *d, size_t from, size_t to, struct lstate *lsp)
 {
-    L->n = 0;
-    struct lstate ls = { .L = L, .width = width, .right = width - PAGE_PAD, .y = 10 };
+#define ls (*lsp)
+    struct layout *L = ls.L;
 #define right ls.right
-    for (size_t i = 0; i < d->n; i++) {
+    for (size_t i = from; i < to; i++) {
         const struct tok *t = &d->t[i];
         switch (t->kind) {
+        case T_TOPEN:
+            i = layout_table(d, i, lsp);
+            break;
+        case T_TEND:
+        case T_ROW:
+            break;
+        case T_CELL:
+            ls.space = ls.open && ls.x > ls.left;
+            break;
         case T_BLOCK:
             ls_finish(&ls);
             ls.gap = LM_MAX(ls.gap, t->margin);
@@ -1323,7 +1343,8 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
         case T_PAD: {                                  /* padding of a block with a background */
             ls_finish(&ls);
             struct run *r = add_run(L);
-            *r = (struct run){ .x = 0, .y = ls.y + ls.gap, .w = width, .h = t->margin, .kind = R_BG, .t = t };
+            *r = (struct run){ .x = ls.in_cell ? ls.xmin - 4 : 0, .y = ls.y + ls.gap, .w = ls.in_cell ? ls.xmax - ls.xmin + 8 : ls.width,
+                               .h = t->margin, .kind = R_BG, .t = t, .incell = ls.in_cell };
             ls.y += ls.gap + t->margin;
             ls.gap = 0;
             break;
@@ -1344,7 +1365,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             ls.y += ls.gap + 6;
             ls.gap = 0;
             struct run *r = add_run(L);
-            *r = (struct run){ .x = PAGE_PAD, .y = ls.y, .w = LM_MAX(width - 2 * PAGE_PAD, 0), .h = 1, .kind = R_HR, .t = t };
+            *r = (struct run){ .x = ls.xmin, .y = ls.y, .w = LM_MAX(ls.xmax - ls.xmin, 0), .h = 1, .kind = R_HR, .t = t };
             ls.y += 8;
             break;
         }
@@ -1462,8 +1483,157 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
         }
     }
     ls_finish(&ls);
-    L->height = ls.y + PAGE_PAD;
 #undef right
+#undef ls
+}
+
+struct cellrange { size_t from, to; bool th; };
+
+/* Tables: columns are as wide as their widest cell (down to the longest word when the window is narrow); every cell is laid
+ * out on its own, a row is as high as its tallest cell. Returns the index of the matching T_TEND. */
+static size_t layout_table(const struct doc *d, size_t open, struct lstate *ls)
+{
+    size_t end = open + 1;
+    int depth = 1;
+    for (; end < d->n; end++) {
+        if (d->t[end].kind == T_TOPEN)
+            depth++;
+        else if (d->t[end].kind == T_TEND && --depth == 0)
+            break;
+    }
+    size_t limit = end < d->n ? end : d->n;
+    const struct tok *to = &d->t[open];
+    /* split into rows and cells (markers of nested tables are skipped) */
+    struct cellrange *cells = malloc(sizeof(*cells) * (limit - open + 2));
+    int *row_first = malloc(sizeof(int) * (limit - open + 2));
+    int ncells = 0, nrows = 0;
+    size_t body = limit;
+    depth = 0;
+    for (size_t j = open + 1; j < limit; j++) {
+        enum tok_kind k = d->t[j].kind;
+        if (k == T_TOPEN) { depth++; continue; }
+        if (k == T_TEND) { depth--; continue; }
+        if (depth)
+            continue;
+        if (k == T_ROW || k == T_CELL) {
+            if (body == limit)
+                body = j;
+            if (k == T_ROW) {
+                row_first[nrows++] = ncells;
+            } else {
+                if (nrows == 0)
+                    row_first[nrows++] = ncells;
+                if (ncells > 0 && cells[ncells - 1].to == limit)
+                    cells[ncells - 1].to = j;
+                cells[ncells++] = (struct cellrange){ j + 1, limit, d->t[j].img == 1 };
+            }
+            if (k == T_ROW && ncells > 0 && cells[ncells - 1].to == limit)
+                cells[ncells - 1].to = j;
+        }
+    }
+    int ncols = 0;
+    for (int r = 0; r < nrows; r++) {
+        int cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - row_first[r];
+        if (cnt > ncols)
+            ncols = cnt;
+    }
+    ls_finish(ls);
+    if (body > open + 1)                                          /* <caption> and other text before the first row */
+        layout_tokens(d, open + 1, body, ls);
+    if (!ncols || nrows == 0) {
+        free(cells);
+        free(row_first);
+        return end < d->n ? end : d->n - 1;
+    }
+    int tl, tr;
+    block_extents(ls, to, &tl, &tr);
+    int avail = tr - tl, pad = 8;
+    int *nat = calloc((size_t)ncols, sizeof(int)), *mn = calloc((size_t)ncols, sizeof(int)), *colw = calloc((size_t)ncols, sizeof(int));
+    for (int r = 0; r < nrows; r++) {
+        int first = row_first[r], cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - first;
+        for (int c = 0; c < cnt; c++) {
+            struct layout tmp = { 0 };
+            struct lstate m = { .L = &tmp, .width = 100000, .xmin = 0, .xmax = 100000, .base_indent = to->indent, .right = 100000, .in_cell = true };
+            layout_tokens(d, cells[first + c].from, cells[first + c].to, &m);
+            ls_finish(&m);
+            int w = m.maxx, longest = 0;
+            for (size_t k = 0; k < tmp.n; k++) {
+                if (tmp.r[k].kind == R_BG || tmp.r[k].kind == R_BULLET)
+                    continue;
+                w = LM_MAX(w, tmp.r[k].x + tmp.r[k].w);
+                longest = LM_MAX(longest, tmp.r[k].w);
+            }
+            free(tmp.r);
+            nat[c] = LM_MAX(nat[c], w);
+            mn[c] = LM_MAX(mn[c], longest);
+        }
+    }
+    int total_nat = 0, total_min = 0;
+    for (int c = 0; c < ncols; c++) {
+        total_nat += nat[c] + pad;
+        total_min += mn[c] + pad;
+    }
+    if (total_nat <= avail) {
+        for (int c = 0; c < ncols; c++)
+            colw[c] = nat[c] + pad;
+    } else {
+        int free_px = avail - total_min, extra = total_nat - total_min;
+        for (int c = 0; c < ncols; c++) {
+            colw[c] = mn[c] + pad;
+            if (free_px > 0 && extra > 0)
+                colw[c] += (int)((long long)(nat[c] - mn[c]) * free_px / extra);
+        }
+    }
+    int y = ls->y + ls->gap;
+    ls->gap = 0;
+    for (int r = 0; r < nrows; r++) {
+        int first = row_first[r], cnt = (r + 1 < nrows ? row_first[r + 1] : ncells) - first;
+        int x = tl, rowh = 20;
+        size_t run_start = ls->L->n;
+        int cell_x[64], cell_w[64];
+        for (int c = 0; c < cnt; c++) {
+            struct lstate cs = { .L = ls->L, .width = ls->width, .xmin = x + pad / 2, .xmax = x + colw[c] - pad / 2,
+                                 .base_indent = to->indent, .y = y + 3, .in_cell = true };
+            cs.right = cs.xmax;
+            layout_tokens(d, cells[first + c].from, cells[first + c].to, &cs);
+            ls_finish(&cs);
+            rowh = LM_MAX(rowh, cs.y - y + 3);
+            if (c < 64) { cell_x[c] = x; cell_w[c] = colw[c]; }
+            x += colw[c];
+        }
+        (void)run_start;
+        if (to->img) {                                                  /* border="1": a box around every cell */
+            for (int c = 0; c < cnt && c < 64; c++) {
+                struct run *b = add_run(ls->L);
+                *b = (struct run){ .x = cell_x[c], .y = y, .w = cell_w[c], .h = rowh, .kind = R_BOX, .t = to };
+            }
+        }
+        y += rowh;
+    }
+    ls->y = y;
+    ls->gap = 0;
+    ls->open = false;
+    {
+        int tw = 0;
+        for (int c = 0; c < ncols; c++)
+            tw += colw[c];
+        ls->maxx = LM_MAX(ls->maxx, tl + tw);
+    }
+    free(nat);
+    free(mn);
+    free(colw);
+    free(cells);
+    free(row_first);
+    return end < d->n ? end : d->n - 1;
+}
+
+static void doc_layout(const struct doc *d, int width, struct layout *L)
+{
+    L->n = 0;
+    struct lstate ls = { .L = L, .width = width, .right = width - PAGE_PAD, .y = 10, .xmin = PAGE_PAD, .xmax = width - PAGE_PAD };
+    layout_tokens(d, 0, d->n, &ls);
+    ls_finish(&ls);
+    L->height = ls.y + PAGE_PAD;
 }
 
 /* ---- loading -------------------------------------------------------------------------------- */
@@ -3033,14 +3203,16 @@ static void paint(struct app *a)
     for (size_t i = 0; i < a->layout.n; i++) {                         /* backgrounds of blocks first (below all text) */
         const struct run *r = &a->layout.r[i];
         if (r->kind == R_BG && r->t->hasblockbg)
-            fill_clip(a, view, (struct rect){ 0, view.y + r->y - a->scroll, a->bw, r->h }, r->t->blockbg);
-        else if (r->kind != R_BG && r->kind != R_HR && r->t->hasblockbg) {                    /* the line of a block with a background */
-            if (r->t->maxw > 0)
+            fill_clip(a, view, (struct rect){ r->incell ? r->x : 0, view.y + r->y - a->scroll, r->incell ? r->w : a->bw, r->h }, r->t->blockbg);
+        else if (r->kind != R_BG && r->kind != R_HR && r->kind != R_BOX && r->t->hasblockbg) {                    /* the line of a block with a background */
+            if (r->incell)
+                fill_clip(a, view, (struct rect){ r->bx - 4, view.y + r->ly - a->scroll, r->bwid + 8, r->lh }, r->t->blockbg);
+            else if (r->t->maxw > 0)
                 fill_clip(a, view, (struct rect){ r->bx - 6, view.y + r->ly - a->scroll, r->bwid + 12, r->lh }, r->t->blockbg);
             else
                 fill_clip(a, view, (struct rect){ 0, view.y + r->ly - a->scroll, a->bw, r->lh }, r->t->blockbg);
         }
-        if (r->kind != R_BG && r->kind != R_HR && r->kind != R_BULLET && r->t->lbar)             /* border-left */
+        if (r->kind != R_BG && r->kind != R_HR && r->kind != R_BOX && r->kind != R_BULLET && r->t->lbar)             /* border-left */
             fill_clip(a, view, (struct rect){ r->bx - 8, view.y + r->ly - a->scroll, 3, r->lh }, r->t->bcol);
     }
     for (size_t i = 0; i < a->layout.n; i++) {
@@ -3050,6 +3222,13 @@ static void paint(struct app *a)
             continue;
         if (r->kind == R_BG)
             continue;
+        if (r->kind == R_BOX) {
+            fill_clip(a, view, (struct rect){ r->x, sy, r->w, 1 }, 0xb8b8b0);
+            fill_clip(a, view, (struct rect){ r->x, sy + r->h - 1, r->w, 1 }, 0xb8b8b0);
+            fill_clip(a, view, (struct rect){ r->x, sy, 1, r->h }, 0xb8b8b0);
+            fill_clip(a, view, (struct rect){ r->x + r->w - 1, sy, 1, r->h }, 0xb8b8b0);
+            continue;
+        }
         if (r->kind == R_HR) {
             fill_clip(a, view, (struct rect){ r->x, sy, r->w, 1 }, r->t->kind == T_RULE ? r->t->color : COL_RULE);
         } else if (r->kind == R_IMAGE) {

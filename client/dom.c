@@ -956,6 +956,11 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
     }
     sbuf_putc(sb, '<');
     sbuf_addz(sb, t);
+    if (!strcmp(t, "table") && dattr_get(n, "border")) {
+        sbuf_addz(sb, " border=\"");
+        escape_attr(sb, dattr_get(n, "border"));
+        sbuf_putc(sb, '"');
+    }
     if (href) {
         sbuf_addz(sb, " href=\"");
         if (clickable) {                                    /* the click goes through the script first */

@@ -195,6 +195,10 @@ Also in the page layer:
 Layout also honours `max-width`/`width` (px) with `margin: 0 auto` (a centred column; its background covers just the column), and
 `border-top`/`border-bottom` (a line) and `border-left` (a bar); other borders are ignored.
 
+* **Tables:** real column/row layout (`<table>`, `<tr>`, `<td>`/`<th>`): columns as wide as their widest cell, shrinking down to the longest
+  word when the window is narrow, cells wrap and may hold anything (nested tables, lists, images, forms); `border="1"` draws cell boxes.
+  `colspan`/`rowspan` are ignored.
+
 Not there: the rest of the box model (floats, positioning, heights, border boxes, rounded corners, background images), other typefaces than those three, WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
 clicks, file inputs, form reset. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script, timer or event handler gets
 25 million interpreter steps and a page 150 million in total (and 9 seconds of script time while it loads); there is no garbage collector

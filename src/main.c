@@ -314,9 +314,9 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("lumen-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
     cfg.settings_cmd = default_sibling("lumen-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128];
+    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
     if (cfg.napps == 0) {
-        /* default menu: Terminal, Calculator and VS Code (when found) */
+        /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
             "Calculator", default_sibling("lumen-calc", calc_buf, sizeof(calc_buf)) };
@@ -333,6 +333,17 @@ int main(int argc, char **argv)
             snprintf(code_buf, sizeof(code_buf),
                      "'%s' --ozone-platform=wayland --disable-gpu --no-sandbox --password-store=basic", cands[i]);
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
+            break;
+        }
+        /* Firefox: the snap's launcher or a distro binary. Software rendering (no GPU path in Lumen), native Wayland.
+         * (The snap is confined: it may only connect to sockets named wayland-N, which is what Lumen picks by default.) */
+        const char *ffs[2] = { "/snap/bin/firefox", "/usr/bin/firefox" };
+        for (int i = 0; i < 2; i++) {
+            if (access(ffs[i], X_OK) != 0)
+                continue;
+            snprintf(ff_buf, sizeof(ff_buf),
+                     "env MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_WEBRENDER=0 LIBGL_ALWAYS_SOFTWARE=1 %s", ffs[i]);
+            cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Firefox", ff_buf };
             break;
         }
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Settings", cfg.settings_cmd };   /* last: keeps the others' places */

@@ -205,8 +205,8 @@ static bool prop_supported(const char *p)
 {
     static const char *const list[] = { "color", "background-color", "display", "font-weight", "font-style", "font-size",
         "text-decoration", "text-align", "text-transform", "white-space", "visibility", "opacity", "margin-top",
-        "margin-bottom", "margin-left", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content",
-        "flex-direction", "font-family", NULL };
+        "margin-bottom", "margin-left", "margin-right", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content",
+        "flex-direction", "font-family", "max-width", "width", "border-top", "border-bottom", "border-left", NULL };
     if (p[0] == '-' && p[1] == '-')
         return true;
     for (int i = 0; list[i]; i++)
@@ -274,6 +274,12 @@ static void add_shorthand(struct css_decl **arr, int *n, const char *prop, const
         snprintf(name, sizeof(name), "%s-top", prop); decls_add(arr, n, name, top, imp);
         snprintf(name, sizeof(name), "%s-bottom", prop); decls_add(arr, n, name, bottom, imp);
         snprintf(name, sizeof(name), "%s-left", prop); decls_add(arr, n, name, left, imp);
+        if (!strcmp(prop, "margin")) { snprintf(name, sizeof(name), "%s-right", prop); decls_add(arr, n, name, right, imp); }
+    } else if (!strcmp(prop, "border")) {
+        decls_add(arr, n, "border-top", value, imp);
+        decls_add(arr, n, "border-bottom", value, imp);
+        decls_add(arr, n, "border-left", value, imp);
+        decls_add(arr, n, "border-right", value, imp);
     } else if (!strcmp(prop, "background")) {
         /* the colour among the words, or the first colour of a gradient; `none` clears */
         const char *p = value;
@@ -744,11 +750,12 @@ static void load_sheets(struct dom *d, struct css_state *cs)
 /* ---- the cascade ------------------------------------------------------------------------------------------------ */
 
 enum { P_COLOR, P_BG, P_DISPLAY, P_WEIGHT, P_STYLE, P_SIZE, P_DECO, P_ALIGN, P_TRANSFORM, P_WS, P_VIS, P_OPACITY, P_MT, P_MB,
-       P_ML, P_PT, P_PB, P_PL, P_LIST, P_CONTENT, P_FLEXDIR, P_FAMILY, P_COUNT };
+       P_ML, P_PT, P_PB, P_PL, P_LIST, P_CONTENT, P_FLEXDIR, P_FAMILY, P_MR, P_MAXW, P_WIDTH, P_BT, P_BB, P_BL, P_COUNT };
 
 static const char *const PROP_NAME[P_COUNT] = { "color", "background-color", "display", "font-weight", "font-style", "font-size",
     "text-decoration", "text-align", "text-transform", "white-space", "visibility", "opacity", "margin-top", "margin-bottom",
-    "margin-left", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content", "flex-direction", "font-family" };
+    "margin-left", "padding-top", "padding-bottom", "padding-left", "list-style-type", "content", "flex-direction", "font-family", "margin-right", "max-width", "width", "border-top",
+    "border-bottom", "border-left" };
 
 static int prop_index(const char *p)
 {
@@ -907,6 +914,34 @@ static void eval_value(struct estyle *st, int prop, const char *v, int parent_px
     case P_LIST:
         st->listnone = !strncasecmp(v, "none", 4);
         break;
+    case P_MR:
+        if (!strncasecmp(v, "auto", 4) && st->center == 0) st->center = 1;
+        break;
+    case P_MAXW: case P_WIDTH: {
+        double px;
+        if (css_length(v, parent_px, &px) && px > 0 && px < VIEW_W + 1 && !strchr(v, '%'))
+            st->maxw = (int16_t)(st->maxw > 0 && st->maxw < px ? st->maxw : px);
+        break;
+    }
+    case P_BT: case P_BB: case P_BL: {
+        char tok[6][96];
+        int c = css_tokens(v, tok, 6);
+        bool off = false, have_w = false;
+        double w = 3;                                                  /* a bare "solid" is medium: visible */
+        uint32_t rgb2 = 0;
+        bool col = false;
+        for (int i = 0; i < c; i++) {
+            if (!strncasecmp(tok[i], "none", 4) || !strncasecmp(tok[i], "hidden", 6)) off = true;
+            else if (css_length(tok[i], parent_px, &w)) have_w = true;
+            else { bool t2; if (css_color_at(tok[i], &rgb2, &t2) > 0 && !t2) col = true; }
+        }
+        (void)have_w;
+        if (off || w <= 0)
+            break;
+        st->bcol = col ? (int32_t)rgb2 : 0x808080;
+        st->bsides |= prop == P_BT ? 1 : prop == P_BB ? 2 : 4;
+        break;
+    }
     case P_FLEXDIR:
         st->column = !strncasecmp(v, "column", 6);
         break;
@@ -940,6 +975,7 @@ static struct estyle *estyle_new(void)
         exit(1);
     st->fg = st->bg = -1;
     st->family = -1;
+    st->bcol = -1;
     st->display = -1;
     st->bold = st->italic = st->underline = st->strike = st->pre = st->align = st->transform = st->listnone = st->hidden = -1;
     st->mt = st->mb = st->pl = st->pt = st->pb = -1;
@@ -950,7 +986,7 @@ static bool estyle_empty(const struct estyle *st)
 {
     return st->fg == -1 && st->bg == -1 && st->display == -1 && st->bold == -1 && st->italic == -1 && st->underline == -1 &&
            st->strike == -1 && st->pre == -1 && st->align == -1 && st->transform == -1 && st->listnone == -1 && st->hidden == -1 &&
-           st->font_px == 0 && st->family == -1 && st->mt == -1 && st->mb == -1 && st->pl == -1 && st->pt == -1 && st->pb == -1 && !st->flex_item;
+           st->font_px == 0 && st->family == -1 && st->maxw == 0 && st->center == 0 && st->bsides == 0 && st->mt == -1 && st->mb == -1 && st->pl == -1 && st->pt == -1 && st->pb == -1 && !st->flex_item;
 }
 
 static void free_styles(struct dom *d)
@@ -1241,7 +1277,7 @@ bool css_open_outer(struct sbuf *sb, const struct estyle *st)
     bool force_block = st->display == DS_BLOCK || st->display == DS_LIST_ITEM || st->display == DS_TABLE;
     bool inl = st->display == DS_INLINE || st->display == DS_INLINE_BLOCK || st->flex_item;
     bool any = force_block || inl || st->display == DS_FLEX || st->bg >= 0 || st->align >= 0 || st->mt > 0 || st->mb > 0 ||
-               st->pl > 0 || st->pt > 0 || st->pb > 0 || st->listnone == 1;
+               st->pl > 0 || st->pt > 0 || st->pb > 0 || st->listnone == 1 || st->maxw > 0 || st->center || st->bsides;
     if (!any)
         return false;
     char b[8], num[24];
@@ -1257,6 +1293,9 @@ bool css_open_outer(struct sbuf *sb, const struct estyle *st)
     if (st->pb > 0) { snprintf(num, sizeof(num), " pb=%d", st->pb); sbuf_addz(sb, num); }
     if (st->pl > 0) { snprintf(num, sizeof(num), " pl=%d", st->pl); sbuf_addz(sb, num); }
     if (st->listnone == 1) sbuf_addz(sb, " nb=1");
+    if (st->maxw > 0) { snprintf(num, sizeof(num), " mw=%d", st->maxw); sbuf_addz(sb, num); }
+    if (st->center) sbuf_addz(sb, " ce=1");
+    if (st->bsides) { snprintf(num, sizeof(num), " bs=%d bc=%06x", st->bsides, (unsigned)st->bcol & 0xffffff); sbuf_addz(sb, num); }
     sbuf_putc(sb, '>');
     return true;
 }

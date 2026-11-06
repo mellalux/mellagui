@@ -192,7 +192,10 @@ Also in the page layer:
   `font-family` picks sans, serif or monospace, `font-size` is real pixels, italic is a shear. The window chrome and form controls keep the
   8x16 bitmap font, which is also the fallback when no TrueType font can be found.
 
-Not there: box model details (floats, positioning, borders, widths/heights, background images), other typefaces than those three, WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
+Layout also honours `max-width`/`width` (px) with `margin: 0 auto` (a centred column; its background covers just the column), and
+`border-top`/`border-bottom` (a line) and `border-left` (a bar); other borders are ignored.
+
+Not there: the rest of the box model (floats, positioning, heights, border boxes, rounded corners, background images), other typefaces than those three, WebP/SVG, real Symbols, Proxy, modules, tagged templates, async generators, `\p{...}` in regexes, `<label>`
 clicks, file inputs, form reset. Strings are UTF-8 byte strings (`length` and indexes count bytes). Each script, timer or event handler gets
 25 million interpreter steps and a page 150 million in total (and 9 seconds of script time while it loads); there is no garbage collector
 (memory is released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.

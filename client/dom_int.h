@@ -30,6 +30,10 @@ struct estyle {
     int16_t font_px;                /* computed font size when specified, else 0 */
     int8_t family;                  /* -1 unspecified, 0 sans, 1 serif, 2 monospace */
     int16_t mt, mb, pl, pt, pb;     /* px or -1 */
+    int16_t maxw;                   /* width / max-width in px (0 = none) */
+    int8_t center;                  /* margin-left/right: auto */
+    int32_t bcol;                   /* border colour (-1 none) */
+    int8_t bsides;                  /* bit 1 top, 2 bottom, 4 left */
     int8_t flex_item;               /* a child of a flex row: laid out inline */
     int8_t column;                  /* flex-direction: column / row-reverse ... */
 };

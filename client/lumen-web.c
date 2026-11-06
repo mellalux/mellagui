@@ -366,7 +366,7 @@ static bool url_from_input(const char *typed, char *out, size_t n)
 
 /* ---- document model ---------------------------------------------------------------------------- */
 
-enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET, T_IMAGE, T_PAD, T_WIDGET };
+enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET, T_IMAGE, T_PAD, T_WIDGET, T_RULE };
 
 struct tok {
     enum tok_kind kind;
@@ -381,6 +381,9 @@ struct tok {
     uint8_t hasbg, hasblockbg, ul, strike, align;   /* ul: 0 default (links only), 1 on, 2 off; align 0 left, 1 centre, 2 right */
     int padx;                       /* extra left indent in pixels (padding / margin-left) */
     int lbl;                        /* inside a <label>: DOM id of the control a click acts on (0 = none) */
+    int maxw;                       /* block width limit in px (0 = none) and whether the block is centred */
+    uint8_t center, lbar;           /* lbar: draw a vertical bar (colour bcol) at the left of the block's lines */
+    uint32_t bcol;
 };
 
 /* An <img> of the document. The decoded bitmap belongs to the global image cache; `scaled` is the copy painted at the
@@ -447,7 +450,8 @@ struct pstate {
     /* author style (x-o / x-i tags written by dom_serialize) */
     uint32_t fg, lc, bg, blockbg;
     bool has_fg, has_lc, has_bg, has_blockbg;
-    int ul, strike, align, padx, noblock, nobullet, transform, lbl;
+    int ul, strike, align, padx, noblock, nobullet, transform, lbl, maxw, center, lbar;
+    uint32_t bcol;
     struct pframe *frames;
     int nframes, capframes;
 };
@@ -455,9 +459,11 @@ struct pstate {
 struct pframe {                     /* what an <x-o> / <x-i> element changed (restored when it ends) */
     uint32_t fg, lc, bg, blockbg;
     bool has_fg, has_lc, has_bg, has_blockbg;
-    int ul, strike, align, padx, noblock, nobullet, transform, bold, ital, pre, px, fam;
+    int ul, strike, align, padx, noblock, nobullet, transform, bold, ital, pre, px, fam, maxw, center, lbar;
+    uint32_t bcol;
     int after_block_px;             /* block margin to add when the element closes */
-    bool block_after, space_after;
+    bool block_after, space_after, rule_after;
+    uint32_t rule_col;
 };
 
 static struct tok *add_tok(struct pstate *ps, enum tok_kind kind, char *text)
@@ -483,6 +489,10 @@ static struct tok *add_tok(struct pstate *ps, enum tok_kind kind, char *text)
     t->align = (uint8_t)ps->align;
     t->padx = ps->padx;
     t->lbl = ps->lbl;
+    t->maxw = ps->maxw;
+    t->center = (uint8_t)ps->center;
+    t->lbar = (uint8_t)ps->lbar;
+    t->bcol = ps->bcol;
     return t;
 }
 
@@ -751,6 +761,10 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
         if (ps->nframes <= 0)
             return;
         struct pframe f = ps->frames[--ps->nframes];
+        if (f.rule_after) {
+            struct tok *rt = add_tok(ps, T_RULE, NULL);
+            rt->color = f.rule_col;
+        }
         if (f.block_after)
             add_block_px(ps, f.after_block_px);
         ps->fg = f.fg; ps->lc = f.lc; ps->bg = f.bg; ps->blockbg = f.blockbg;
@@ -759,6 +773,7 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
         ps->nobullet = f.nobullet; ps->transform = f.transform; ps->bold = f.bold; ps->ital = f.ital; ps->pre = f.pre;
         ps->px = f.px;
         ps->fam = f.fam;
+        ps->maxw = f.maxw; ps->center = f.center; ps->lbar = f.lbar; ps->bcol = f.bcol;
         if (f.space_after) {
             add_tok(ps, T_SPACE, NULL);
             ps->last_space = true;
@@ -776,7 +791,8 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
                           .has_lc = ps->has_lc, .has_bg = ps->has_bg, .has_blockbg = ps->has_blockbg, .ul = ps->ul,
                           .strike = ps->strike, .align = ps->align, .padx = ps->padx, .noblock = ps->noblock,
                           .nobullet = ps->nobullet, .transform = ps->transform, .bold = ps->bold, .ital = ps->ital,
-                          .pre = ps->pre, .px = ps->px, .fam = ps->fam };
+                          .pre = ps->pre, .px = ps->px, .fam = ps->fam, .maxw = ps->maxw, .center = ps->center, .lbar = ps->lbar,
+                          .bcol = ps->bcol };
     char v[64];
     uint32_t c;
     if (!outer) {
@@ -827,6 +843,19 @@ static void style_tag(struct pstate *ps, bool outer, bool close, const char *att
     if (attr_get(attrs, alen, "al", v, sizeof(v))) ps->align = v[0] == 'c' ? 1 : v[0] == 'r' ? 2 : 0;
     if (attr_get(attrs, alen, "pl", v, sizeof(v))) ps->padx += LM_CLAMP(atoi(v), 0, 600);
     if (attr_get(attrs, alen, "nb", v, sizeof(v))) ps->nobullet++;
+    if (attr_get(attrs, alen, "mw", v, sizeof(v))) ps->maxw = atoi(v);
+    if (attr_get(attrs, alen, "ce", v, sizeof(v))) ps->center = 1;
+    if (attr_get(attrs, alen, "bs", v, sizeof(v))) {
+        int sides = atoi(v);
+        uint32_t bc = 0x808080;
+        if (attr_get(attrs, alen, "bc", v, sizeof(v))) hex_color(v, &bc);
+        if (sides & 1) {
+            struct tok *rt = add_tok(ps, T_RULE, NULL);
+            rt->color = bc;
+        }
+        if (sides & 2) { f->rule_after = true; f->rule_col = bc; }
+        if (sides & 4) { ps->lbar = 1; ps->bcol = bc; }
+    }
 }
 
 static void handle_tag(struct pstate *ps, const char *name, bool close, const char *attrs, size_t alen)
@@ -1177,6 +1206,7 @@ enum run_kind { R_TEXT, R_HR, R_BULLET, R_IMAGE, R_BG, R_WIDGET };
 struct run {
     int x, y, w, h;
     int ly, lh;                     /* the line box the run sits in (for block backgrounds) */
+    int bx, bwid;                   /* left edge and width of the block (left border bar, backgrounds of centred blocks) */
     enum run_kind kind;
     const char *text;
     int len;
@@ -1218,6 +1248,8 @@ static void ls_finish(struct lstate *ls)
         r->y = ls->y + lh - r->h;
         r->ly = ls->y;
         r->lh = lh;
+        r->bx = ls->left;
+        r->bwid = ls->right - ls->left;
         if (r->kind != R_BULLET && r->t->kind != T_BULLET) {
             minx = LM_MIN(minx, r->x);
             maxx = LM_MAX(maxx, r->x + r->w);
@@ -1237,13 +1269,27 @@ static void ls_finish(struct lstate *ls)
     ls->space = false;
 }
 
-static void ls_start(struct lstate *ls, int indent, int padx)
+/* Left and right edge of the block a token belongs to (indent, padding, max-width, centring). */
+static void block_extents(const struct lstate *ls, const struct tok *t, int *l, int *r)
+{
+    int left = PAGE_PAD + t->indent * INDENT_PX + t->padx, right = ls->width - PAGE_PAD;
+    if (t->maxw > 0 && right - left > 0) {
+        int avail = right - left, w = LM_MIN(t->maxw, avail);
+        if (t->center)
+            left += (avail - w) / 2;
+        right = left + w;
+    }
+    *l = left;
+    *r = right;
+}
+
+static void ls_start(struct lstate *ls, const struct tok *t)
 {
     if (ls->open)
         return;
     ls->y += ls->gap;
     ls->gap = 0;
-    ls->left = PAGE_PAD + indent * INDENT_PX + padx;
+    block_extents(ls, t, &ls->left, &ls->right);
     ls->x = ls->left;
     ls->line_h = 0;
     ls->line_start = ls->L->n;
@@ -1255,7 +1301,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
 {
     L->n = 0;
     struct lstate ls = { .L = L, .width = width, .right = width - PAGE_PAD, .y = 10 };
-    int right = width - PAGE_PAD;
+#define right ls.right
     for (size_t i = 0; i < d->n; i++) {
         const struct tok *t = &d->t[i];
         switch (t->kind) {
@@ -1282,6 +1328,17 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             ls.gap = 0;
             break;
         }
+        case T_RULE: {
+            ls_finish(&ls);
+            int rl, rr;
+            block_extents(&ls, t, &rl, &rr);
+            ls.y += ls.gap + 2;
+            ls.gap = 0;
+            struct run *r = add_run(L);
+            *r = (struct run){ .x = rl, .y = ls.y, .w = LM_MAX(rr - rl, 0), .h = 1, .kind = R_HR, .t = t };
+            ls.y += 3;
+            break;
+        }
         case T_HR: {
             ls_finish(&ls);
             ls.y += ls.gap + 6;
@@ -1292,7 +1349,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             break;
         }
         case T_BULLET: {
-            ls_start(&ls, t->indent, t->padx);
+            ls_start(&ls, t);
             struct run *r = add_run(L);
             if (t->text) {
                 int w = lm_font_text_width(t->text);
@@ -1317,11 +1374,11 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             }
             int maxw = LM_MAX(right - PAGE_PAD - t->indent * INDENT_PX, 40);
             if (ww > maxw) ww = maxw;
-            ls_start(&ls, t->indent, t->padx);
+            ls_start(&ls, t);
             int sp = ls.space && ls.x > ls.left ? LM_FONT_W : 0;
             if (ls.x > ls.left && ls.x + sp + ww > right) {
                 ls_finish(&ls);
-                ls_start(&ls, t->indent, t->padx);
+                ls_start(&ls, t);
                 sp = 0;
             }
             struct run *r = add_run(L);
@@ -1342,11 +1399,11 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
                 if (nw > maxw) { nh = (int)((long long)nh * maxw / nw); nw = maxw; }
                 nw = LM_MAX(nw, 1);
                 nh = LM_MAX(nh, 1);
-                ls_start(&ls, t->indent, t->padx);
+                ls_start(&ls, t);
                 int sp = ls.space && ls.x > ls.left ? LM_FONT_W : 0;
                 if (ls.x > ls.left && ls.x + sp + nw > right) {
                     ls_finish(&ls);
-                    ls_start(&ls, t->indent, t->padx);
+                    ls_start(&ls, t);
                     sp = 0;
                 }
                 struct run *r = add_run(L);
@@ -1362,14 +1419,14 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             const char *text = t->text;
             int total = (int)strlen(text);
             int pos = 0;
-            ls_start(&ls, t->indent, t->padx);
+            ls_start(&ls, t);
             while (pos < total) {
                 int w = text_w(t, text + pos, (size_t)(total - pos));
                 int sp = ls.space && ls.x > ls.left ? space_w(t) : 0;
                 int avail = right - ls.x - sp;
                 if (!t->pre && w > avail && ls.x > ls.left) {
                     ls_finish(&ls);
-                    ls_start(&ls, t->indent, t->padx);
+                    ls_start(&ls, t);
                     continue;
                 }
                 int take = total - pos;
@@ -1397,7 +1454,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
                 pos += take;
                 if (pos < total) {
                     ls_finish(&ls);
-                    ls_start(&ls, t->indent, t->padx);
+                    ls_start(&ls, t);
                 }
             }
             break;
@@ -1406,6 +1463,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
     }
     ls_finish(&ls);
     L->height = ls.y + PAGE_PAD;
+#undef right
 }
 
 /* ---- loading -------------------------------------------------------------------------------- */
@@ -2976,8 +3034,14 @@ static void paint(struct app *a)
         const struct run *r = &a->layout.r[i];
         if (r->kind == R_BG && r->t->hasblockbg)
             fill_clip(a, view, (struct rect){ 0, view.y + r->y - a->scroll, a->bw, r->h }, r->t->blockbg);
-        else if (r->kind != R_BG && r->kind != R_HR && r->t->hasblockbg)
-            fill_clip(a, view, (struct rect){ 0, view.y + r->ly - a->scroll, a->bw, r->lh }, r->t->blockbg);
+        else if (r->kind != R_BG && r->kind != R_HR && r->t->hasblockbg) {                    /* the line of a block with a background */
+            if (r->t->maxw > 0)
+                fill_clip(a, view, (struct rect){ r->bx - 6, view.y + r->ly - a->scroll, r->bwid + 12, r->lh }, r->t->blockbg);
+            else
+                fill_clip(a, view, (struct rect){ 0, view.y + r->ly - a->scroll, a->bw, r->lh }, r->t->blockbg);
+        }
+        if (r->kind != R_BG && r->kind != R_HR && r->kind != R_BULLET && r->t->lbar)             /* border-left */
+            fill_clip(a, view, (struct rect){ r->bx - 8, view.y + r->ly - a->scroll, 3, r->lh }, r->t->bcol);
     }
     for (size_t i = 0; i < a->layout.n; i++) {
         const struct run *r = &a->layout.r[i];
@@ -2987,7 +3051,7 @@ static void paint(struct app *a)
         if (r->kind == R_BG)
             continue;
         if (r->kind == R_HR) {
-            fill(a, (struct rect){ r->x, sy, r->w, 1 }, COL_RULE);
+            fill_clip(a, view, (struct rect){ r->x, sy, r->w, 1 }, r->t->kind == T_RULE ? r->t->color : COL_RULE);
         } else if (r->kind == R_IMAGE) {
             struct dimg *im = &a->doc.images[r->t->img];
             if (!im->scaled || im->sw != r->w || im->sh != r->h) {

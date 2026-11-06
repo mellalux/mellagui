@@ -77,6 +77,7 @@ struct lm_input {
     bool active;
     bool headless;
     bool warned_eacces;
+    bool hotplug_scan;          /* scanning because /dev/input changed: a fresh node may not have its ACL yet (udev) */
     uint16_t key_count[KEY_MAX + 1];
     uint32_t locked;       /* LM_MOD_CAPS / LM_MOD_NUM */
     /* keyboard layouts */
@@ -587,7 +588,9 @@ static void device_open(struct lm_input *in, const char *path)
     if (fd == -EACCES || fd == -EPERM || fd == -EROFS)
         fd = lm_seatdev_open(in->srv->seatdev, path, O_RDONLY | O_NONBLOCK, NULL);
     if (fd < 0) {
-        if (fd == -EACCES && !in->warned_eacces) {
+        if (fd == -EACCES && in->hotplug_scan) {
+            lm_debug("input: %s is not accessible yet (udev still setting permissions); waiting for its attribute change", path);
+        } else if (fd == -EACCES && !in->warned_eacces) {
             in->warned_eacces = true;
             lm_error("input: no permission to open %s. Add yourself to group 'input' "
                      "(sudo usermod -aG input $USER, then log out and in again) "
@@ -704,8 +707,11 @@ static void inotify_cb(int fd, uint32_t events, void *data)
     (void)events;
     while (read(fd, buf, sizeof(buf)) > 0)
         ;
-    if (in->active)
+    if (in->active) {
+        in->hotplug_scan = true;
         scan_devices(in);
+        in->hotplug_scan = false;
+    }
 }
 
 /* ---- public API ------------------------------------------------------------------------ */

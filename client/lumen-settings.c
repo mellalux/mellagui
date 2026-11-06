@@ -104,6 +104,59 @@ static int slider_value(int lo, int hi, int step, double frac)
     return LM_MAX(lo, LM_MIN(hi, v));
 }
 
+/* Entry of a "name|description;name|description" list; false at the end. */
+static bool next_entry(const char **p, char *name, size_t nn, char *desc, size_t dn)
+{
+    if (!**p)
+        return false;
+    const char *end = strchr(*p, ';');
+    size_t len = end ? (size_t)(end - *p) : strlen(*p);
+    const char *bar = memchr(*p, '|', len);
+    size_t nlen = bar ? (size_t)(bar - *p) : len;
+    snprintf(name, nn, "%.*s", (int)nlen, *p);
+    snprintf(desc, dn, "%.*s", bar ? (int)(len - nlen - 1) : 0, bar ? bar + 1 : "");
+    *p = end ? end + 1 : *p + len;
+    return true;
+}
+
+struct entry { char name[64], desc[96]; };
+
+/*
+ * The entries of a device list that fit `cap` rows, in list order. The first entry (the default) and the HDMI/DisplayPort
+ * outputs are shown before the others, so that a long list of cards never hides the one the user is looking for.
+ */
+static int pick_entries(const char *list, int cap, struct entry *out)
+{
+    struct entry all[24];
+    int n = 0;
+    const char *p = list;
+    while (n < 24 && next_entry(&p, all[n].name, sizeof(all[n].name), all[n].desc, sizeof(all[n].desc)))
+        n++;
+    bool show[24] = { false };
+    int used = 0;
+    for (int pass = 0; pass < 3; pass++)
+        for (int i = 0; i < n && used < cap; i++) {
+            bool hdmi = strstr(all[i].desc, "HDMI") || strstr(all[i].desc, "DisplayPort");
+            if (!show[i] && (pass == 0 ? i == 0 : pass == 1 ? hdmi : true)) {
+                show[i] = true;
+                used++;
+            }
+        }
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (show[i])
+            out[m++] = all[i];
+    return m;
+}
+
+/* "1920x1080@60" + "preferred" -> "1920 x 1080   60 Hz   (preferred)" */
+static void mode_label(const char *mode, const char *note, char *out, size_t n)
+{
+    int w = 0, h = 0, hz = 0;
+    sscanf(mode, "%dx%d@%d", &w, &h, &hz);
+    snprintf(out, n, "%d x %d   %d Hz%s%s%s", w, h, hz, *note ? "   (" : "", note, *note ? ")" : "");
+}
+
 static int selftest_fail;
 
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "selftest: %s:%d: %s\n", __FILE__, __LINE__, #cond); selftest_fail++; } } while (0)
@@ -137,6 +190,32 @@ static int selftest(void)
     CHECK(slider_value(100, 1000, 50, -3) == 100);
     CHECK(slider_value(100, 1000, 50, 7) == 1000);
     CHECK(slider_value(1, 60, 1, 0.5) == 31);
+    {
+        const char *p = "default|System default;plughw:CARD=PCH,DEV=3|HDA Intel PCH - HDMI 0 (HDMI);x|";
+        char name[64], desc[96];
+        CHECK(next_entry(&p, name, sizeof(name), desc, sizeof(desc)) && !strcmp(name, "default") && !strcmp(desc, "System default"));
+        CHECK(next_entry(&p, name, sizeof(name), desc, sizeof(desc)) && !strcmp(name, "plughw:CARD=PCH,DEV=3") && strstr(desc, "HDMI"));
+        CHECK(next_entry(&p, name, sizeof(name), desc, sizeof(desc)) && !strcmp(name, "x") && !*desc);
+        CHECK(!next_entry(&p, name, sizeof(name), desc, sizeof(desc)));
+        const char *e = "";
+        CHECK(!next_entry(&e, name, sizeof(name), desc, sizeof(desc)));
+    }
+    {
+        struct entry e[8];
+        const char *many = "default|System default;a|USB Audio;b|PCH - HDMI 0 (HDMI);c|PCH - Analog;d|PCH - HDMI 1 (HDMI);e|Other";
+        int n = pick_entries(many, 4, e);
+        CHECK(n == 4 && !strcmp(e[0].name, "default") && !strcmp(e[1].name, "a") && !strcmp(e[2].name, "b") && !strcmp(e[3].name, "d"));      /* list order, HDMI kept */
+        n = pick_entries(many, 3, e);
+        CHECK(n == 3 && !strcmp(e[0].name, "default") && !strcmp(e[1].name, "b") && !strcmp(e[2].name, "d"));       /* HDMI before the rest */
+        CHECK(pick_entries("", 4, e) == 0);
+    }
+    {
+        char label[96];
+        mode_label("1920x1080@60", "preferred", label, sizeof(label));
+        CHECK(!strcmp(label, "1920 x 1080   60 Hz   (preferred)"));
+        mode_label("2048x858@60", "", label, sizeof(label));
+        CHECK(!strcmp(label, "2048 x 858   60 Hz"));
+    }
     if (selftest_fail)
         return 1;
     puts("lumen-settings selftest ok");
@@ -158,11 +237,12 @@ static int selftest(void)
 #define DEFAULT_W 620
 #define DEFAULT_H 440
 #define SIDE_W 140
-#define MAX_WIDGETS 48
-#define MAX_KV 16
+#define MAX_WIDGETS 80
+#define MAX_KV 32
+#define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT };
 
@@ -173,13 +253,13 @@ struct widget {
     struct rect r;
     char text[64];
     char key[24];               /* setting key, or "layout-enable" / "layout-up" / "page" */
-    char arg[16];               /* layout id / page number */
+    char arg[64];               /* layout id / page number / mode / device name */
     bool on;                    /* check / radio state, selected tab */
     int lo, hi, step, val;      /* slider */
     const char *unit;           /* slider value suffix */
 };
 
-struct kv { char k[24], v[96]; };
+struct kv { char k[24], v[VALUE_MAX]; };
 
 struct app {
     struct wlc *c;
@@ -348,6 +428,78 @@ static void build_desktop(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Sound feedback for sticky keys", "sound", kv_int(a, "sound", 1) != 0);
 }
 
+static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on)
+{
+    struct widget *r = add(a, W_RADIO, (struct rect){ x, y, w, ROW_H }, text);
+    snprintf(r->key, sizeof(r->key), "%s", key);
+    snprintf(r->arg, sizeof(r->arg), "%s", arg);
+    r->on = on;
+    return r;
+}
+
+static void build_display(struct app *a, int x, int y, int w)
+{
+    const char *pending = kv_get(a, "resolution-confirm");
+    if (*pending) {                                     /* a change waits to be kept; it is undone otherwise */
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Keep this resolution? It goes back in %s s.", pending);
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, msg);
+        y += ROW_H;
+        struct widget *k = add(a, W_BUTTON, (struct rect){ x, y, 90, ROW_H - 4 }, "Keep");
+        snprintf(k->key, sizeof(k->key), "resolution-confirm");
+        snprintf(k->arg, sizeof(k->arg), "1");
+        struct widget *u = add(a, W_BUTTON, (struct rect){ x + 100, y, 90, ROW_H - 4 }, "Go back");
+        snprintf(u->key, sizeof(u->key), "resolution-confirm");
+        snprintf(u->arg, sizeof(u->arg), "0");
+        y += ROW_H + 8;
+    }
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Resolution");
+    y += ROW_H;
+    const char *cur = kv_get(a, "resolution");
+    add_radio(a, x, y, w, "Automatic (the panel's own shape)", "resolution", "auto", !strcmp(cur, "auto"));
+    y += ROW_H;
+    add_radio(a, x, y, w, "The monitor's preferred mode", "resolution", "preferred", !strcmp(cur, "preferred"));
+    y += ROW_H;
+    const char *list = kv_get(a, "resolutions");
+    char name[64], note[96], label[96];
+    int shown = 0;
+    while (shown < 8 && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
+        mode_label(name, note, label, sizeof(label));
+        add_radio(a, x, y, w, label, "resolution", name, !strcmp(cur, name));
+        y += ROW_H;
+        shown++;
+    }
+    char now[96], cur_label[80];
+    mode_label(kv_get(a, "resolution-now"), "", cur_label, sizeof(cur_label));
+    snprintf(now, sizeof(now), "Now: %s", cur_label);
+    add(a, W_LABEL, (struct rect){ x, y + 4, w, ROW_H }, now);
+}
+
+static void build_sound(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Lumen's own beeps (ALSA)");
+    y += ROW_H;
+    const char *cur = kv_get(a, "audio-out");
+    struct entry ents[8];
+    int shown = pick_entries(kv_get(a, "audio-outs"), 6, ents);
+    for (int i = 0; i < shown; i++) {
+        add_radio(a, x, y, w, ents[i].desc, "audio-out", ents[i].name, !strcmp(cur, ents[i].name));
+        y += ROW_H;
+    }
+    y += 6;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Applications (PulseAudio / PipeWire)");
+    y += ROW_H;
+    cur = kv_get(a, "sink");
+    shown = pick_entries(kv_get(a, "sinks"), 5, ents);
+    for (int i = 0; i < shown; i++) {
+        add_radio(a, x, y, w, *ents[i].desc ? ents[i].desc : ents[i].name, "sink", ents[i].name, !strcmp(cur, ents[i].name));
+        y += ROW_H;
+    }
+    if (!shown)
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H * 2 },
+            "No sound server found. Install pipewire-pulse and wireplumber.");
+}
+
 static void build(struct app *a)
 {
     a->nw = 0;
@@ -363,6 +515,8 @@ static void build(struct app *a)
     switch (a->page) {
     case PAGE_KEYBOARD: build_keyboard(a, x, y, w); break;
     case PAGE_POINTER: build_pointer(a, x, y, w); break;
+    case PAGE_DISPLAY: build_display(a, x, y, w); break;
+    case PAGE_SOUND: build_sound(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -412,6 +566,8 @@ static void activate(struct app *a, int idx)
         a->page = (enum page)atoi(w->arg);
         a->focus = idx;
         a->redraw = true;
+        if (a->page == PAGE_SOUND)
+            send_set(a, "audio-rescan", "1");           /* ask `pactl` again: devices come and go */
         break;
     case W_CHECK:
         if (!strcmp(w->key, "layout-enable")) {
@@ -428,7 +584,9 @@ static void activate(struct app *a, int idx)
         send_set(a, w->key, w->arg);
         break;
     case W_BUTTON:
-        if (!strcmp(w->key, "layout-up")) {
+        if (!strcmp(w->key, "resolution-confirm")) {
+            send_set(a, w->key, w->arg);
+        } else if (!strcmp(w->key, "layout-up")) {
             idlist_parse(&l, kv_get(a, "layouts"));
             if (idlist_move_up(&l, w->arg)) {
                 idlist_format(&l, buf, sizeof(buf));

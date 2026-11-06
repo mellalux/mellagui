@@ -37,6 +37,10 @@ static const char *usage_text =
     "  --app NAME=CMD           add an entry to the Lumen menu (repeatable; replaces the default Terminal/Calculator/Code)\n"
     "  --run CMD                command for Super+R and the panel's Run button (default lumen-run)\n"
     "  --drm-device PATH        DRM device (default: auto-detect /dev/dri/card*)\n"
+    "  --mode WxH[@Hz]|preferred  drm: video mode. Default: the monitor's preferred one, except when its shape differs from the\n"
+    "                           panel's (e.g. 21:9 panel, 16:9 modes only): then a mode of the panel's shape is generated\n"
+    "                           (CVT reduced blanking). WxH forces a size (generated if the monitor does not list it),\n"
+    "                           'preferred' turns the correction off\n"
     "  --control PATH           headless control socket (testing)\n"
     "  --log-level LEVEL        error|warn|info|debug|trace\n"
     "  --log-file PATH          additionally append the log to PATH\n"
@@ -179,7 +183,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -192,6 +196,7 @@ int main(int argc, char **argv)
         { "run", required_argument, 0, OPT_RUN },
         { "app", required_argument, 0, OPT_APP },
         { "drm-device", required_argument, 0, 'd' },
+        { "mode", required_argument, 0, OPT_MODE },
         { "control", required_argument, 0, 'c' },
         { "log-level", required_argument, 0, 'l' },
         { "log-file", required_argument, 0, 'f' },
@@ -269,6 +274,21 @@ int main(int argc, char **argv)
         }
         case OPT_RUN: cfg.run_cmd = optarg; run_set = true; break;
         case 'd': cfg.drm_device = optarg; break;
+        case OPT_MODE: {
+            int w, h, hz = 60;
+            if (!strcmp(optarg, "preferred")) {
+                cfg.drm_mode_w = -1;
+                break;
+            }
+            if (sscanf(optarg, "%dx%d@%d", &w, &h, &hz) < 2 || w < 320 || h < 200 || w > 8192 || h > 4320 || hz < 24 || hz > 240) {
+                fprintf(stderr, "lumen: bad --mode '%s' (expected WxH or WxH@Hz)\n", optarg);
+                return 2;
+            }
+            cfg.drm_mode_w = w;
+            cfg.drm_mode_h = h;
+            cfg.drm_mode_hz = hz;
+            break;
+        }
         case 'c': cfg.control_path = optarg; break;
         case 'l': {
             int l = lm_log_level_from_string(optarg);

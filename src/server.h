@@ -150,6 +150,8 @@ struct lm_config {
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "Lumen" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
+    char audio_device[64];      /* ALSA device for Lumen's own beeps (settings: audio-out) */
+    int drm_mode_w, drm_mode_h, drm_mode_hz;   /* --mode WxH[@Hz]: 0 = automatic (preferred, corrected to the panel's shape), -1 = --mode preferred */
     const char *control_path;   /* headless control socket path (--control), NULL = none */
     const char *dump_path;      /* env LUMEN_DUMP: headless dump target for SIGUSR1 */
     const char *log_file;
@@ -184,6 +186,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .pointer_speed = 1.0,
         .grab_input = true,
         .sound = true,
+        .audio_device = "default",
         .gadget = true,
         .log_to_stderr = true,
     };

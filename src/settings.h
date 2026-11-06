@@ -15,7 +15,20 @@
  *   natural-scroll  0 | 1                      reversed wheel / touchpad scrolling
  *   sound           0 | 1                      beeps for sticky keys
  *   gadget          0 | 1                      clipboard gadget on the desktop (Super+G)
+ *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)
+ *                                              it is undone after 15 s (env LUMEN_REVERT_MS), a black screen cannot confirm
+ *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the
+ *                                              monitor's native shape (edid.h), preferred = the monitor's own preferred mode
+ *   audio-out       ALSA device name           where Lumen's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
  *   file            (read only)                path the settings are saved to, "" = not saved
+ *   -- live state, never saved: --
+ *   resolutions     "WxH@Hz|note;..."          modes the first output can show (read only)
+ *   resolution-now  WxH@Hz                     the mode the first output shows now (read only)
+ *   resolution-confirm  ""|seconds             non-empty while a resolution change waits to be kept; set 1 = keep, 0 = go back
+ *   audio-outs      "name|description;..."     ALSA playback devices from /proc/asound, HDMI/DisplayPort ones marked (read only)
+ *   sinks, sink     list / name                PulseAudio/PipeWire outputs and the default one (pactl; `sink` is settable);
+ *                                              empty until audio-rescan was set and when there is no sound server
+ *   audio-rescan    (write only)               any value: ask pactl again (the panel does when its Sound page opens)
  *
  * Protocol: the client sends `set(key, value)`; the compositor validates it, applies it, and answers every bound
  * client with one `value` event per key (the effective values, so a rejected change shows up as the old value)

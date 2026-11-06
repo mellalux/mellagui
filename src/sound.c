@@ -6,9 +6,11 @@
 #include <math.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "audio.h"
 #include "log.h"
 
 #define RATE 44100
@@ -64,6 +66,19 @@ static size_t synth(const struct note *n, int16_t *buf, size_t cap)
     return pos;
 }
 
+static char g_device[64] = "default";
+
+void lm_sound_set_device(const char *name)
+{
+    if (lm_audio_name_ok(name))
+        snprintf(g_device, sizeof(g_device), "%s", name);
+}
+
+const char *lm_sound_device(void)
+{
+    return g_device;
+}
+
 void lm_sound_play(enum lm_sound s)
 {
     if ((unsigned)s >= LM_SOUND_COUNT)
@@ -94,7 +109,10 @@ void lm_sound_play(enum lm_sound s)
             dup2(null, 2);
         }
         dup2(fds[0], 0);                            /* dup2 clears O_CLOEXEC on the new fd */
-        execlp("aplay", "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "1", "-", (char *)NULL);
+        if (strcmp(g_device, "default"))
+            execlp("aplay", "aplay", "-q", "-D", g_device, "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "1", "-", (char *)NULL);
+        else
+            execlp("aplay", "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "1", "-", (char *)NULL);
         _exit(127);
     }
     close(fds[0]);

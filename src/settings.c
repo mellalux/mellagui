@@ -9,7 +9,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "audio.h"
+#include "backend.h"
 #include "input.h"
+#include "sound.h"
+#include "output.h"
 #include "keymap.h"
 #include "log.h"
 #include "seat.h"
@@ -19,15 +23,20 @@
 
 #define SAVE_DELAY_MS 300
 
+/* Keys before K_FILE are saved to the settings file, the ones after it are read-only or live state only. */
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
-    K_GADGET, K_FILE, K_COUNT
+    K_GADGET, K_RESOLUTION, K_AUDIO_OUT, K_FILE,
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_AUDIO_RESCAN, K_COUNT
 };
+#define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
-    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_FILE] = "file",
+    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_FILE] = "file",
+    [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
+    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_AUDIO_RESCAN] = "audio-rescan",
 };
 
 static int key_find(const char *key)
@@ -51,7 +60,15 @@ struct lm_settings {
     struct lm_timer *save_timer;
     bool dirty;
     bool applying;          /* inside a `set`: suppress the nested announcements */
+    /* resolution change waiting for "keep"; otherwise it is undone after revert_ms (a black screen cannot be confirmed) */
+    bool res_pending;
+    int prev_w, prev_h, prev_hz;
+    struct lm_timer *revert_timer;
+    bool no_save;           /* the current `set` must not schedule a save (resolution: only once it is kept) */
+    char sinks[VALUE_MAX], sink[128];       /* cached `pactl` answers, refreshed by audio-rescan */
 };
+
+#define DEFAULT_REVERT_MS 15000
 
 /* ---- parsing ---------------------------------------------------------------------------------------------- */
 
@@ -77,6 +94,37 @@ static bool parse_int(const char *v, int lo, int hi, int *out)
         return false;
     *out = (int)n;
     return true;
+}
+
+/* resolution text: "auto" (0), "preferred" (-1), "WxH" or "WxH@Hz" */
+static bool parse_resolution(const char *v, int *w, int *h, int *hz)
+{
+    if (!strcmp(v, "auto")) {
+        *w = *h = *hz = 0;
+        return true;
+    }
+    if (!strcmp(v, "preferred")) {
+        *w = -1;
+        *h = *hz = 0;
+        return true;
+    }
+    int rate = 60;
+    char junk;
+    int n = sscanf(v, "%dx%d@%d%c", w, h, &rate, &junk);
+    if (n < 2 || n > 3 || *w < 320 || *h < 200 || *w > 8192 || *h > 4320 || rate < 24 || rate > 240)
+        return false;
+    *hz = rate;
+    return true;
+}
+
+static void resolution_text(int w, int h, int hz, char *out, size_t n)
+{
+    if (w == 0)
+        snprintf(out, n, "auto");
+    else if (w < 0)
+        snprintf(out, n, "preferred");
+    else
+        snprintf(out, n, "%dx%d@%d", w, h, hz);
 }
 
 /* "us, ee" -> indices; canonical text "us,ee" in canon. */
@@ -141,6 +189,18 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if (!parse_bool(val, &b)) return -1;
         cfg->gadget = b;
         break;
+    case K_RESOLUTION: {
+        int w, h, hz;
+        if (!parse_resolution(val, &w, &h, &hz)) return -1;
+        cfg->drm_mode_w = w;
+        cfg->drm_mode_h = h;
+        cfg->drm_mode_hz = hz;
+        break;
+    }
+    case K_AUDIO_OUT:
+        if (!lm_audio_name_ok(val)) return -1;
+        snprintf(cfg->audio_device, sizeof(cfg->audio_device), "%s", val);
+        break;
     default:
         return -1;
     }
@@ -188,6 +248,22 @@ int lm_settings_load(struct lm_config *cfg, const char *path, char *layouts_out,
 
 /* ---- current values ------------------------------------------------------------------------------------- */
 
+static int revert_ms(void)
+{
+    const char *e = getenv("LUMEN_REVERT_MS");
+    int v = e ? atoi(e) : 0;
+    return v > 0 ? v : DEFAULT_REVERT_MS;
+}
+
+static struct lm_output *first_output(struct lm_server *srv)
+{
+    struct lm_output *lo;
+    if (srv->backend)
+        lm_list_for_each(lo, &srv->backend->outputs, link)
+            return lo;
+    return NULL;
+}
+
 static void get_value(struct lm_settings *s, int k, char *out, size_t n)
 {
     struct lm_server *srv = s->srv;
@@ -213,7 +289,34 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_NATURAL_SCROLL: snprintf(out, n, "%d", c->natural_scroll ? 1 : 0); break;
     case K_SOUND: snprintf(out, n, "%d", c->sound ? 1 : 0); break;
     case K_GADGET: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0); break;
+    case K_RESOLUTION: resolution_text(c->drm_mode_w, c->drm_mode_h, c->drm_mode_hz, out, n); break;
+    case K_AUDIO_OUT: snprintf(out, n, "%s", c->audio_device); break;
     case K_FILE: snprintf(out, n, "%s", c->settings_path ? c->settings_path : ""); break;
+    case K_RESOLUTIONS: {
+        struct lm_output *lo = first_output(srv);
+        struct lm_mode_info modes[LM_MAX_MODES];
+        int count = lo ? lm_output_list_modes(lo, modes, LM_MAX_MODES) : 0;
+        for (int i = 0; i < count; i++) {
+            size_t len = strlen(out);
+            snprintf(out + len, n - len, "%s%dx%d@%d|%s", i ? ";" : "", modes[i].w, modes[i].h, modes[i].hz,
+                     modes[i].generated ? "panel shape" : modes[i].preferred ? "preferred" : "");
+        }
+        break;
+    }
+    case K_RESOLUTION_NOW: {
+        struct lm_output *lo = first_output(srv);
+        if (lo)
+            snprintf(out, n, "%dx%d@%d", lo->width, lo->height, (lo->refresh_mhz + 500) / 1000);
+        break;
+    }
+    case K_RESOLUTION_CONFIRM:
+        if (s->res_pending)
+            snprintf(out, n, "%d", revert_ms() / 1000 > 0 ? revert_ms() / 1000 : 1);
+        break;
+    case K_AUDIO_OUTS: lm_audio_list_alsa(out, n); break;
+    case K_SINKS: snprintf(out, n, "%s", s->sinks); break;
+    case K_SINK: snprintf(out, n, "%s", s->sink); break;
+    case K_AUDIO_RESCAN: snprintf(out, n, "0"); break;
     }
 }
 
@@ -230,11 +333,13 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 {
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
-        char v[96];
+        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS)
+            continue;                                   /* lists contain spaces and are long: ask for them one by one */
+        char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
         size_t len = strlen(out);
         if (len + 1 < n)
-            snprintf(out + len, n - len, "%s%s=%s", k ? " " : "", key_names[k], v[0] ? v : "-");
+            snprintf(out + len, n - len, "%s%s=%s", len ? " " : "", key_names[k], v[0] ? v : "-");
     }
 }
 
@@ -243,7 +348,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 static void send_burst(struct lm_settings *s, struct lm_resource *res)
 {
     for (int k = 0; k < K_COUNT; k++) {
-        char v[96];
+        char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
         lm_resource_post(res, LM_LUMEN_SETTINGS_V1_EVT_VALUE, key_names[k], v);
     }
@@ -301,8 +406,11 @@ static void save_now(struct lm_settings *s)
     }
     fputs("# Lumen settings (written by the settings panel; edit while lumen is not running)\n", f);
     for (int k = 0; k < K_FILE; k++) {
-        char v[96];
-        get_value(s, k, v, sizeof(v));
+        char v[VALUE_MAX];
+        if (k == K_RESOLUTION && s->res_pending)
+            resolution_text(s->prev_w, s->prev_h, s->prev_hz, v, sizeof(v));   /* never save what was not kept */
+        else
+            get_value(s, k, v, sizeof(v));
         fprintf(f, "%s=%s\n", key_names[k], v);
     }
     bool ok = !ferror(f);
@@ -326,6 +434,99 @@ static void save_later(struct lm_settings *s)
     s->dirty = true;
     if (s->save_timer)
         lm_timer_arm_ms(s->save_timer, SAVE_DELAY_MS, 0);
+}
+
+/* ---- resolution: change, keep or revert --------------------------------------------------------------- */
+
+static bool apply_modes(struct lm_server *srv)
+{
+    bool ok = true;
+    struct lm_output *lo;
+    if (!srv->backend)
+        return false;
+    lm_list_for_each(lo, &srv->backend->outputs, link)
+        if (lm_output_apply_mode(lo) < 0)
+            ok = false;
+    return ok;
+}
+
+static void revert_resolution(struct lm_settings *s)
+{
+    struct lm_config *cfg = &s->srv->config;
+    if (!s->res_pending)
+        return;
+    s->res_pending = false;
+    if (s->revert_timer)
+        lm_timer_arm_ms(s->revert_timer, 0, 0);
+    cfg->drm_mode_w = s->prev_w;
+    cfg->drm_mode_h = s->prev_h;
+    cfg->drm_mode_hz = s->prev_hz;
+    if (!apply_modes(s->srv))
+        lm_warn("settings: could not go back to the previous resolution");
+    lm_info("settings: resolution change was not kept, back to the previous one");
+}
+
+static void revert_cb(void *data)
+{
+    struct lm_settings *s = data;
+    revert_resolution(s);
+    broadcast(s);
+}
+
+static bool set_resolution(struct lm_settings *s, const char *val)
+{
+    struct lm_server *srv = s->srv;
+    struct lm_config *cfg = &srv->config;
+    int w, h, hz;
+    if (!parse_resolution(val, &w, &h, &hz))
+        return false;
+    int ow = cfg->drm_mode_w, oh = cfg->drm_mode_h, ohz = cfg->drm_mode_hz;
+    struct lm_output *lo = first_output(srv);
+    int before_w = lo ? lo->width : 0, before_h = lo ? lo->height : 0, before_r = lo ? lo->refresh_mhz : 0;
+    cfg->drm_mode_w = w;
+    cfg->drm_mode_h = h;
+    cfg->drm_mode_hz = hz;
+    if (!apply_modes(srv)) {                                    /* refused: nothing changed on the screen */
+        cfg->drm_mode_w = ow;
+        cfg->drm_mode_h = oh;
+        cfg->drm_mode_hz = ohz;
+        apply_modes(srv);
+        return false;
+    }
+    bool changed = lo && (lo->width != before_w || lo->height != before_h || lo->refresh_mhz != before_r);
+    if (!changed) {                                             /* the screen is the same: just remember the choice */
+        if (s->res_pending)
+            s->no_save = true;                                  /* ... unless an earlier change still waits to be kept */
+        return true;
+    }
+    if (!s->res_pending) {                                      /* the baseline is the one before the first change */
+        s->res_pending = true;
+        s->prev_w = ow;
+        s->prev_h = oh;
+        s->prev_hz = ohz;
+    }
+    s->no_save = true;
+    if (s->revert_timer)
+        lm_timer_arm_ms(s->revert_timer, revert_ms(), 0);
+    return true;
+}
+
+static bool confirm_resolution(struct lm_settings *s, const char *val)
+{
+    bool b;
+    if (!parse_bool(val, &b))
+        return false;
+    if (!s->res_pending)
+        return true;
+    if (b) {
+        s->res_pending = false;
+        if (s->revert_timer)
+            lm_timer_arm_ms(s->revert_timer, 0, 0);
+        return true;                                            /* kept: lm_settings_set saves it */
+    }
+    revert_resolution(s);
+    s->no_save = true;
+    return true;
 }
 
 /* ---- applying a change ---------------------------------------------------------------------------- */
@@ -387,6 +588,25 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         if (!srv->wm || !parse_bool(val, &b)) return false;
         lm_wm_set_gadget(srv->wm, b);
         return true;
+    case K_RESOLUTION:
+        return set_resolution(s, val);
+    case K_RESOLUTION_CONFIRM:
+        return confirm_resolution(s, val);
+    case K_AUDIO_OUT:
+        if (!lm_audio_name_ok(val)) return false;
+        snprintf(cfg->audio_device, sizeof(cfg->audio_device), "%s", val);
+        lm_sound_set_device(val);
+        return true;
+    case K_SINK:
+        if (!lm_audio_set_sink(val)) return false;
+        snprintf(s->sink, sizeof(s->sink), "%s", val);
+        return true;
+    case K_AUDIO_RESCAN: {
+        char list[VALUE_MAX];
+        lm_audio_list_sinks(list, sizeof(list), s->sink, sizeof(s->sink));
+        snprintf(s->sinks, sizeof(s->sinks), "%s", list);
+        return true;
+    }
     default:
         return false;       /* unknown or read-only ("file") */
     }
@@ -395,9 +615,12 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
 bool lm_settings_set(struct lm_settings *s, const char *key, const char *value)
 {
     s->applying = true;
+    s->no_save = false;
     bool ok = apply(s, key, value);
     s->applying = false;
-    if (ok)
+    int kid = key_find(key);
+    bool persistent = kid >= 0 && (kid < K_FILE || kid == K_RESOLUTION_CONFIRM);     /* the others are live state only */
+    if (ok && persistent && !s->no_save)
         save_later(s);
     else
         lm_debug("settings: rejected %s=%s", key, value);
@@ -461,6 +684,8 @@ struct lm_settings *lm_settings_create(struct lm_server *srv)
     s->srv = srv;
     lm_list_init(&s->bindings);
     s->save_timer = lm_loop_add_timer(srv->loop, save_timer_cb, s);
+    s->revert_timer = lm_loop_add_timer(srv->loop, revert_cb, s);
+    lm_sound_set_device(srv->config.audio_device);
     s->global = lm_global_create(srv, &lm_lumen_settings_v1_interface, LM_LUMEN_SETTINGS_V1_VERSION,
                                  settings_bind, s);
     if (!s->global) {
@@ -485,5 +710,7 @@ void lm_settings_destroy(struct lm_settings *s)
         lm_global_destroy(s->global);
     if (s->save_timer)
         lm_timer_destroy(s->save_timer);
+    if (s->revert_timer)
+        lm_timer_destroy(s->revert_timer);
     free(s);
 }

@@ -13,7 +13,7 @@ Included programs:
 | `build/lumen`     | the compositor / shell                                            |
 | `build/lumen-term`| terminal emulator (xterm-compatible subset, 256/true colour, scrollback, mouse selection + clipboard) |
 | `build/lumen-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
-| `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound; `--get` / `--set KEY=VALUE` for scripts |
+| `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound, resolution, sound outputs; `--get` / `--set KEY=VALUE` for scripts |
 | `build/lumen-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
 | `build/lumen-demo`| small animated demo client                                        |
 
@@ -98,7 +98,12 @@ synthesised and piped to `aplay`, so it needs alsa-utils and a sound card; `--no
 Settings panel: Super+I or *Lumen* → *Settings* opens `lumen-settings` (Tab / Shift+Tab, Enter or Space, Left/Right on sliders, Esc).
 *Keyboard* enables and orders the layouts (the checkbox, the `^` button; *active* picks the current one - the clients get a new keymap at
 once, nothing has to be restarted), sticky keys, key repeat delay and rate, and has a field for trying the layout. *Pointer*: speed and
-natural scrolling. *Desktop*: the clipboard gadget and the sound feedback. Changes apply immediately and are saved (about 0.3 s later) to
+natural scrolling. *Desktop*: the clipboard gadget and the sound feedback. *Display*: the resolution (automatic, the monitor's preferred
+mode, or one of its modes - the list includes a mode in the panel's own shape when the GPU does not offer the native one); it is applied at
+once and goes back after 15 s unless you press *Keep* (a wrong mode can leave the screen black, and a black screen cannot confirm anything);
+only a kept resolution is saved. *Sound*: the ALSA device for Lumen's own beeps (HDMI/DisplayPort outputs are listed and marked) and, when a
+PulseAudio/PipeWire server runs, the default output for applications such as Firefox (`pactl`; nothing is listed without a sound server -
+`sudo apt install pipewire-pulse wireplumber`). Changes apply immediately and are saved (about 0.3 s later) to
 `$XDG_CONFIG_HOME/lumen/settings.conf` (`~/.config/lumen/settings.conf`; `--settings FILE` chooses another file, `--settings none` saves
 nothing; headless runs save nothing unless `--settings` is given). The file is plain `key=value` and is read at start; options such as
 `--layouts` or `--sticky` on the command line win over it. From a script: `lumen-settings --set layouts=ee,us repeat-rate=30`,
@@ -130,7 +135,7 @@ Ctrl+Shift+C copy, Shift+PageUp/PageDown scrollback, mouse wheel scrolls.
 
     build/lumen --help
 
-Notable: `--backend drm|headless`, `--exec CMD`, `--terminal CMD`, `--run CMD`, `--app NAME=CMD`, `--socket NAME`, `--drm-device /dev/dri/cardN`,
+Notable: `--backend drm|headless`, `--exec CMD`, `--terminal CMD`, `--run CMD`, `--app NAME=CMD`, `--socket NAME`, `--drm-device /dev/dri/cardN`, `--mode WxH[@Hz]`,
 `--log-level debug`, `--log-file PATH`, `--no-grab`, `--timeout SECONDS`.
 Clients find the compositor through `WAYLAND_DISPLAY` (set automatically for `--exec` and the launcher).
 
@@ -148,6 +153,13 @@ The control socket takes one line per command (`dump <file.ppm>`, `windows`, `ke
 * `cannot become DRM master` – another display server owns the GPU on this VT (or you are on the wrong VT).
 * `/dev/tty is not a Linux virtual console` – start Lumen from a text console (Ctrl+Alt+F3), not from ssh or a terminal emulator.
 * Black screen – read the log file (`--log-file`), try `--drm-device /dev/dri/card0`.
+* Picture stretched (circles look like ovals) – the monitor's panel has another shape than the video mode (e.g. a 21:9 panel driven
+  with 16:9 2048x1152: the GPU's HDMI pixel clock limit cut the panel's own mode away). Lumen corrects this by itself: when the
+  preferred mode's shape differs from the monitor's native timing (the first detailed timing in its EDID) by more than 8 %, and the
+  physical size in the EDID does not contradict that (broken EDIDs of projectors and TVs are left alone), it generates a mode of the
+  same width and the native shape (CVT reduced blanking, e.g. 2048x864) and logs it; if the kernel refuses it, the preferred mode is
+  used. `--mode WxH[@Hz]` forces a size, `--mode preferred` turns the correction off; the Display page of the settings panel changes it
+  while running.
 * Graphics-accelerated apps show nothing – they need a software renderer; see Status.
 
 Architecture notes for developers: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [CLAUDE.md](CLAUDE.md).

@@ -45,6 +45,7 @@ struct headless {
     struct ctl_client *clients[CTL_MAX_CLIENTS];
     bool output_live;
     int w, h;
+    int init_w, init_h;         /* the size asked for on the command line = the "preferred" and "automatic" mode */
 };
 
 static struct headless *HL(struct lm_backend *b) { return (struct headless *)b; }
@@ -104,7 +105,7 @@ int lm_backend_headless_dump(struct lm_backend *b, const char *path)
 static void ctl_reply(struct ctl_client *c, const char *fmt, ...) LM_PRINTF(2, 3);
 static void ctl_reply(struct ctl_client *c, const char *fmt, ...)
 {
-    char buf[512];
+    char buf[2560];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -248,9 +249,17 @@ static void ctl_command(struct ctl_client *c, char *line)
         bool ok = true;
         if (a1 && a2)
             ok = lm_settings_set(srv->settings, a1, a2);
-        char buf[512];
+        char buf[1536];
         lm_settings_dump(srv->settings, buf, sizeof(buf));
         ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);
+    } else if (!strcmp(cmd, "setting")) {
+        /* setting <key>           -> "ok <value>" (also the long list values, which `settings` leaves out) */
+        char buf[2048];
+        if (!srv->settings || !a1 || !lm_settings_get(srv->settings, a1, buf, sizeof(buf))) {
+            ctl_reply(c, "err unknown setting\n");
+            return;
+        }
+        ctl_reply(c, "ok %s\n", buf);
     } else if (!strcmp(cmd, "gadget")) {
         if (!a1 || !srv->wm) { ctl_reply(c, "err usage: gadget <0|1>\n"); return; }
         lm_wm_set_gadget(srv->wm, a1[0] == '1');
@@ -376,6 +385,10 @@ static int hl_init(struct lm_backend *b)
 {
     struct headless *h = HL(b);
     struct lm_server *srv = b->server;
+    if (srv->config.drm_mode_w > 0) {                        /* the saved resolution setting wins over --size */
+        h->w = srv->config.drm_mode_w;
+        h->h = srv->config.drm_mode_h;
+    }
     h->fb.width = h->w;
     h->fb.height = h->h;
     h->fb.stride = h->w * 4;
@@ -430,6 +443,51 @@ static void hl_destroy(struct lm_backend *b)
     free(h);
 }
 
+/* A few sizes to pick from in tests (the settings panel's resolution list). */
+static int hl_list_modes(struct lm_output *out, struct lm_mode_info *modes, int max)
+{
+    struct headless *h = HL(out->backend);
+    static const int sizes[][2] = { { 1920, 1080 }, { 1280, 720 }, { 1024, 768 }, { 800, 600 }, { 2048, 858 } };
+    int n = 0;
+    if (n < max)
+        modes[n++] = (struct lm_mode_info){ h->init_w, h->init_h, 60, true, false };
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]) && n < max; i++)
+        if (sizes[i][0] != h->init_w || sizes[i][1] != h->init_h)
+            modes[n++] = (struct lm_mode_info){ sizes[i][0], sizes[i][1], 60, false, i == 4 };
+    return n;
+}
+
+/* Resize the (single) output: new framebuffer, then the same notifications a DRM mode change sends. */
+static int hl_apply_mode(struct lm_output *out)
+{
+    struct headless *h = HL(out->backend);
+    const struct lm_config *cfg = &out->backend->server->config;
+    int w = cfg->drm_mode_w > 0 ? cfg->drm_mode_w : h->init_w, hh = cfg->drm_mode_w > 0 ? cfg->drm_mode_h : h->init_h;
+    if (w == h->w && hh == h->h)
+        return 0;
+    if (w < 64 || hh < 64 || w > 16384 || hh > 16384)
+        return -1;
+    uint32_t *px = calloc((size_t)w * (size_t)hh, 4);
+    if (!px)
+        return -1;
+    free(h->fb.pixels);
+    h->w = w;
+    h->h = hh;
+    h->fb.pixels = px;
+    h->fb.width = w;
+    h->fb.height = hh;
+    h->fb.stride = w * 4;
+    h->frames = 0;                                  /* buffer age 0: everything is redrawn */
+    out->width = w;
+    out->height = hh;
+    out->phys_width_mm = w * 254 / 960;
+    out->phys_height_mm = hh * 254 / 960;
+    if (out->backend->listener.output_changed)
+        out->backend->listener.output_changed(out->backend->listener.data, out);
+    lm_timer_arm_ms(h->ready_timer, 1, 0);
+    return 0;
+}
+
 static const struct lm_backend_ops headless_ops = {
     .name = "headless",
     .init = hl_init,
@@ -437,6 +495,8 @@ static const struct lm_backend_ops headless_ops = {
     .get_framebuffer = hl_get_framebuffer,
     .present = hl_present,
     .switch_vt = NULL,
+    .list_modes = hl_list_modes,
+    .apply_mode = hl_apply_mode,
 };
 
 struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h)
@@ -449,6 +509,8 @@ struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int 
     lm_list_init(&hl->base.outputs);
     hl->w = w > 0 ? w : 1280;
     hl->h = h > 0 ? h : 720;
+    hl->init_w = hl->w;
+    hl->init_h = hl->h;
     hl->ctl_fd = -1;
     return &hl->base;
 }

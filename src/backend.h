@@ -44,6 +44,7 @@
  *   gadget-rect        reply "ok <x> <y> <w> <h>" (the gadget card, without shadow) or "ok hidden"
  *   layout <slot|next|prev>   switch the keyboard layout
  *   sticky <0|1>       sticky keys on/off
+ *   setting <key>      reply "ok <value>" for one setting (the long lists too)
  *   windows            dump lm_wm_describe() output
  *   quit               lm_server_quit()
  * SIGUSR1 (or `dump`) with config.dump_path set writes that file too.
@@ -105,6 +106,14 @@ struct lm_backend_listener {
     void (*session_active)(void *data, bool active);
 };
 
+/* One selectable video mode of an output (settings panel). hz is the rounded refresh rate. */
+struct lm_mode_info {
+    int w, h, hz;
+    bool preferred;                 /* the monitor's own preferred mode */
+    bool generated;                 /* not offered by the monitor: CVT timings made up for the panel's shape */
+};
+#define LM_MAX_MODES 24
+
 struct lm_backend_ops {
     const char *name;
     /*
@@ -127,6 +136,17 @@ struct lm_backend_ops {
     int (*present)(struct lm_output *out, const struct lm_rect *damage, int n_damage);
     /* Switch to virtual terminal `vt` (1..12). NULL if unsupported (headless). */
     int (*switch_vt)(struct lm_backend *b, int vt);
+    /*
+     * Settings panel: the modes `out` can show (best first, one entry per size, at most `max`), returns the count.
+     * NULL = unsupported.
+     */
+    int (*list_modes)(struct lm_output *out, struct lm_mode_info *modes, int max);
+    /*
+     * Re-pick `out`'s mode from server->config.drm_mode_w/h/hz (0 = automatic, -1 = the preferred one) and switch to it
+     * when it differs from the current one; on success width/height/refresh are updated and listener.output_changed
+     * has been called. -1 = refused/impossible (the old mode stays). NULL = unsupported.
+     */
+    int (*apply_mode)(struct lm_output *out);
 };
 
 struct lm_backend {
@@ -165,6 +185,14 @@ static inline int lm_output_present(struct lm_output *o, const struct lm_rect *d
 static inline int lm_backend_switch_vt(struct lm_backend *b, int vt)
 {
     return b->ops->switch_vt ? b->ops->switch_vt(b, vt) : -1;
+}
+static inline int lm_output_list_modes(struct lm_output *o, struct lm_mode_info *m, int max)
+{
+    return o->backend->ops->list_modes ? o->backend->ops->list_modes(o, m, max) : 0;
+}
+static inline int lm_output_apply_mode(struct lm_output *o)
+{
+    return o->backend->ops->apply_mode ? o->backend->ops->apply_mode(o) : -1;
 }
 
 #endif

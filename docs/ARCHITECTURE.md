@@ -101,16 +101,18 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/seat.[ch]`, `src/keymap.[ch]` | **input** | wl_seat, data device, cursor, pointer grabs, static US keymap |
 | (gadget) | **desktop gadget** | `seat.c` keeps the clipboard history (it reads each new text selection through a pipe it hands to the source); `wm.c` places the card (`LM_SCENE_GADGET`, right after the wallpapers; docked top right until dragged), picks its title bar (`LM_PICK_GADGET_TITLE`: move grab, double click resets) and edges (`LM_PICK_GADGET_BORDER`: resize grab, 200x86..640x560), `render.c` paints it (rounded corners, stacked-alpha shadow, wraps the entries). Super+G toggles |
 | `src/sound.h`, `src/sound.c` | **sound** | sticky-key beeps: synthesised S16 buffer piped to a detached `aplay` child (no audio library) |
+| `src/audio.[ch]` | **sound** | sound outputs for the settings panel: ALSA playback devices from `/proc/asound` (HDMI marked), PulseAudio/PipeWire sinks and the default sink via `pactl` (1 s timeout); the chosen ALSA device is where `sound.c` plays (`aplay -D`) |
 | `src/settings.[ch]` | **settings** | `lumen_settings_v1` global (`set(key, value)` -> a burst of `value` events + `done` to every bound client), validation and application of each key (layouts: `lm_seat_set_layouts` + `lm_input_set_layouts`; repeat: `lm_seat_send_repeat_info`; sticky/gadget through input/wm), the `key=value` settings file (loaded in main.c before argv, saved debounced + atomically) |
 | `src/input.h`, `src/input_evdev.c` | **input** | evdev reading, repeat, acceleration, hotplug, injection, layout + sticky keys state |
 | `src/seatdev.[ch]` | **input** | device open (direct / logind TakeDevice via dlopen) |
 | `src/output.[ch]` | **backend** | wl_output globals, output layout queries |
 | `src/backend.h`, `src/backend_drm.c`, `src/backend_headless.c` | **backend** | DRM/KMS + VT; headless + control socket |
+| `src/cvt.[ch]`, `src/edid.[ch]` | **backend** | video-mode helpers without DRM types (unit-tested in `keymap-test`): CVT reduced-blanking timings; the EDID's native timing and the rule for when the offered mode has the wrong shape (a 21:9 panel with only 16:9 modes gets a generated mode of its own shape instead of being stretched by the monitor) |
 | `src/render.[ch]`, `src/font.[ch]` | **render** | software compositor, cursor, decorations, 8x16 font |
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
 | `client/lumen-demo.c` | **clients** | demo client using `wire.c` + `protocol.c` in client mode |
 | `client/lumen-term.c` (later) | **clients** | terminal emulator |
-| `client/lumen-settings.c` | **clients** | settings panel: tabs, checkboxes, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
+| `client/lumen-settings.c` | **clients** | settings panel (Keyboard, Pointer, Desktop, Display, Sound): tabs, checkboxes, radio lists, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
 | `client/lumen-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
 | `tests/wlclient.py`, `tests/test_*.py`, `tests/run.sh` | **tests** | end-to-end tests against `lumen --backend headless` |
 | `Makefile`, `docs/`, `README.md` | architect | build, docs |
@@ -231,3 +233,13 @@ Binaries: `build/lumen`, `build/lumen-demo`, `build/lumen-term`, `build/lumen-ca
 `tests/test_*.py`. `tests/wlclient.py` is a raw-socket Wayland client (struct
 packing, `socket.sendmsg` with SCM_RIGHTS, `os.memfd_create` + `mmap` for shm
 buffers). Tests assert on protocol events, on `windows` output and on PPM dumps.
+
+## Changing the resolution while running
+
+`lumen_settings_v1` key `resolution` -> `settings.c` stores `drm_mode_w/h/hz` in the config and calls `ops->apply_mode(out)` of every
+output (`lm_output_apply_mode`). `backend_drm.c` re-picks the mode with the same `pick_mode()` it uses at start (listed mode, generated
+CVT mode, preferred mode, or the native-shape correction), creates two new dumb buffers of the new size, `drmModeSetCrtc`s with them
+(on failure the old buffers and mode are put back) and then reports `output_changed`, which makes `output.c` re-announce `wl_output`,
+`render.c` redraw everything and `wm.c` re-apply the maximized/fullscreen geometry. The change stays *pending*: `settings.c` arms a timer
+(15 s, `LUMEN_REVERT_MS`) that restores the previous mode unless `resolution-confirm=1` arrives; only a kept value is saved. The headless
+backend implements the same two ops (a reallocated framebuffer) so all of this is tested end to end.

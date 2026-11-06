@@ -16,6 +16,9 @@ enum lm_sound {
 };
 
 const char *lm_sound_name(enum lm_sound s);     /* "latch", "lock", ... */
+/* ALSA device the beeps go to (aplay -D): "default" or a name accepted by lm_audio_name_ok(). */
+void lm_sound_set_device(const char *name);
+const char *lm_sound_device(void);
 /* Plays `s` asynchronously. Never blocks, never fails loudly. */
 void lm_sound_play(enum lm_sound s);
 

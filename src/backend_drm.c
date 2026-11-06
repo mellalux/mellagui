@@ -15,6 +15,8 @@
 #include <fcntl.h>
 #include <linux/kd.h>
 #include <linux/vt.h>
+#include <math.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +32,8 @@
 #include <xf86drmMode.h>
 
 #include "backend.h"
+#include "cvt.h"
+#include "edid.h"
 #include "log.h"
 #include "seatdev.h"
 
@@ -57,6 +61,7 @@ struct drm_out {
     struct drm_buf buf[2];
     int back;                   /* buffer the next frame is drawn into */
     bool flip_pending;
+    bool busy;                  /* inside a mode change: no output_ready meanwhile */
     bool live;
     uint64_t seq;               /* frames presented */
     struct lm_framebuffer fb;
@@ -183,7 +188,7 @@ static const char *connector_type_name(uint32_t type)
 static void out_ready_notify(struct drm_out *o, uint32_t time_ms)
 {
     struct lm_backend *b = &o->d->base;
-    if (o->live && b->listener.output_ready)
+    if (o->live && !o->busy && b->listener.output_ready)
         b->listener.output_ready(b->listener.data, &o->base, time_ms);
 }
 
@@ -265,6 +270,135 @@ static void out_destroy(struct drm_out *o, bool restore)
     free(o);
 }
 
+static drmModeModeInfo preferred_mode(const drmModeConnector *conn)
+{
+    drmModeModeInfo m = conn->modes[0];
+    for (int i = 0; i < conn->count_modes; i++)
+        if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
+            m = conn->modes[i];
+            break;
+        }
+    return m;
+}
+
+/* A generated CVT reduced-blanking mode; false for sizes cvt.c refuses. */
+static bool cvt_mode(int w, int h, int hz, drmModeModeInfo *m)
+{
+    struct lm_cvt c;
+    if (!lm_cvt_rb(w, h, hz, &c))
+        return false;
+    memset(m, 0, sizeof(*m));
+    m->clock = c.clock_khz;
+    m->hdisplay = c.hdisplay; m->hsync_start = c.hsync_start; m->hsync_end = c.hsync_end; m->htotal = c.htotal;
+    m->vdisplay = c.vdisplay; m->vsync_start = c.vsync_start; m->vsync_end = c.vsync_end; m->vtotal = c.vtotal;
+    m->vrefresh = c.refresh;
+    m->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC;
+    m->type = DRM_MODE_TYPE_USERDEF;
+    snprintf(m->name, sizeof(m->name), "%dx%d", c.hdisplay, c.vdisplay);
+    return true;
+}
+
+/* Mode for a connector.
+ *  --mode WxH[@Hz]   a listed mode of that size, else a generated CVT-RB one;
+ *  --mode preferred  the monitor's preferred mode, untouched;
+ *  default           the preferred mode, unless its shape differs from the panel's physical shape (mm size from the EDID,
+ *                    e.g. a 21:9 panel whose GPU only offers 16:9 modes): then a mode of the same width and the panel's
+ *                    shape is generated, so the monitor's scaler does not stretch the picture. If the kernel refuses it,
+ *                    out_create falls back to the preferred mode. */
+/* The monitor's native timing from the connector's EDID blob; false when it cannot be read. */
+static bool conn_native(int fd, const drmModeConnector *conn, struct lm_edid_native *out)
+{
+    for (int i = 0; i < conn->count_props; i++) {
+        drmModePropertyPtr prop = drmModeGetProperty(fd, conn->props[i]);
+        if (!prop)
+            continue;
+        bool is_edid = !strcmp(prop->name, "EDID");
+        drmModeFreeProperty(prop);
+        if (!is_edid)
+            continue;
+        drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(fd, (uint32_t)conn->prop_values[i]);
+        if (!blob)
+            return false;
+        bool ok = lm_edid_native(blob->data, blob->length, out);
+        drmModeFreePropertyBlob(blob);
+        return ok;
+    }
+    return false;
+}
+
+static drmModeModeInfo pick_mode(const struct lm_config *cfg, const drmModeConnector *conn, const drmModeModeInfo *preferred,
+                                 const struct lm_edid_native *nat, bool log)
+{
+    drmModeModeInfo m = *preferred;
+    if (cfg->drm_mode_w > 0) {
+        bool found = false;
+        for (int i = 0; i < conn->count_modes && !found; i++)
+            if (conn->modes[i].hdisplay == cfg->drm_mode_w && conn->modes[i].vdisplay == cfg->drm_mode_h &&
+                (int)conn->modes[i].vrefresh == cfg->drm_mode_hz) {
+                m = conn->modes[i];
+                found = true;
+            }
+        for (int i = 0; i < conn->count_modes && !found; i++)             /* same size, other refresh rate */
+            if (conn->modes[i].hdisplay == cfg->drm_mode_w && conn->modes[i].vdisplay == cfg->drm_mode_h) {
+                m = conn->modes[i];
+                found = true;
+            }
+        if (!found) {
+            if (cvt_mode(cfg->drm_mode_w, cfg->drm_mode_h, cfg->drm_mode_hz ? cfg->drm_mode_hz : 60, &m)) {
+                if (log)
+                    lm_info("drm: --mode %dx%d is not offered by the monitor: using generated CVT-RB timings (%u kHz)",
+                            cfg->drm_mode_w, cfg->drm_mode_h, m.clock);
+            } else {
+                if (log)
+                    lm_warn("drm: cannot use --mode %dx%d, using the preferred mode", cfg->drm_mode_w, cfg->drm_mode_h);
+                m = *preferred;
+            }
+        }
+        return m;
+    }
+    if (cfg->drm_mode_w < 0 || m.vdisplay == 0)
+        return m;                                                     /* --mode preferred */
+    int w = m.hdisplay & ~7, hz = m.vrefresh ? (int)m.vrefresh : 60;
+    if (nat) {
+        for (int i = 0; i < conn->count_modes; i++)                   /* the kernel offers the native mode itself: leave it */
+            if (conn->modes[i].hdisplay == nat->w && conn->modes[i].vdisplay == nat->h)
+                return m;
+        int h = lm_edid_fix_height(m.hdisplay, m.vdisplay, nat, (int)conn->mmWidth, (int)conn->mmHeight);
+        drmModeModeInfo g;
+        /* never ask for a faster pixel clock than the monitor already takes (the largest clock among its listed modes is a
+         * safe upper bound for the link) */
+        uint32_t max_clock = 0;
+        for (int i = 0; i < conn->count_modes; i++)
+            if (conn->modes[i].clock > max_clock)
+                max_clock = conn->modes[i].clock;
+        if (h > 0 && cvt_mode(w, h, hz, &g) && g.clock <= max_clock) {
+            if (log) {
+                lm_info("drm: the monitor's native mode is %dx%d (%.2f:1) but only %ux%u (%.2f:1) is offered and would be "
+                        "stretched; using generated %dx%d (CVT-RB, %u kHz). Use --mode preferred to turn this off",
+                        nat->w, nat->h, (double)nat->w / nat->h, m.hdisplay, m.vdisplay, (double)m.hdisplay / m.vdisplay,
+                        g.hdisplay, g.vdisplay, g.clock);
+            }
+            return g;
+        }
+        if (h > 0 && log)
+            lm_warn("drm: the monitor's native shape is %dx%d but mode %ux%u would be stretched, and %dx%d needs a faster "
+                    "pixel clock than the link takes; set the monitor's aspect-ratio option to keep proportions",
+                    nat->w, nat->h, m.hdisplay, m.vdisplay, w, h);
+        return m;
+    }
+    /* No EDID timing to go by: only warn when the physical size says the picture will be stretched. */
+    if (conn->mmWidth > 0 && conn->mmHeight > 0 && log) {
+        double panel = (double)conn->mmWidth / conn->mmHeight, mode = (double)m.hdisplay / m.vdisplay;
+        if (fabs(panel / mode - 1.0) > 0.08) {
+            lm_warn("drm: the panel is %ux%u mm (%.2f:1) but mode %ux%u is %.2f:1; the monitor may stretch the picture. "
+                    "Try --mode %dx%d (or set the monitor's aspect-ratio option to keep proportions)",
+                    conn->mmWidth, conn->mmHeight, panel, m.hdisplay, m.vdisplay, mode, w,
+                    (int)lround(w / panel / 2.0) * 2);
+        }
+    }
+    return m;
+}
+
 static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnector *conn)
 {
     if (conn->count_modes <= 0)
@@ -280,20 +414,26 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
     o->d = d;
     o->conn_id = conn->connector_id;
     o->crtc_id = crtc;
-    o->mode = conn->modes[0];
-    for (int i = 0; i < conn->count_modes; i++)
-        if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
-            o->mode = conn->modes[i];
-            break;
-        }
+    drmModeModeInfo preferred = preferred_mode(conn);
+    struct lm_edid_native nat;
+    bool have_nat = conn_native(d->fd, conn, &nat);
+    o->mode = pick_mode(&d->base.server->config, conn, &preferred, have_nat ? &nat : NULL, true);
     o->saved = drmModeGetCrtc(d->fd, crtc);
 
-    uint32_t w = o->mode.hdisplay, h = o->mode.vdisplay;
-    if (buf_create(d, &o->buf[0], w, h) < 0 || buf_create(d, &o->buf[1], w, h) < 0)
-        goto fail;
-    o->back = 0;
-    if (out_modeset(o) < 0)
-        goto fail;
+    uint32_t w, h;
+    for (int attempt = 0;; attempt++) {
+        w = o->mode.hdisplay;
+        h = o->mode.vdisplay;
+        o->back = 0;
+        if (buf_create(d, &o->buf[0], w, h) == 0 && buf_create(d, &o->buf[1], w, h) == 0 && out_modeset(o) == 0)
+            break;
+        buf_destroy(d, &o->buf[0]);
+        buf_destroy(d, &o->buf[1]);
+        if (attempt > 0 || !memcmp(&o->mode, &preferred, sizeof(preferred)))
+            goto fail;
+        lm_warn("drm: mode %s was refused, falling back to the preferred %s", o->mode.name, preferred.name);
+        o->mode = preferred;
+    }
 
     struct lm_output *lo = &o->base;
     lo->backend = &d->base;
@@ -714,6 +854,139 @@ static void drm_destroy(struct lm_backend *b)
     free(d);
 }
 
+/* ---- mode list and live mode change (settings panel) ---------------------------------------------- */
+
+static bool same_timing(const drmModeModeInfo *a, const drmModeModeInfo *b)
+{
+    return a->hdisplay == b->hdisplay && a->vdisplay == b->vdisplay && a->clock == b->clock && a->htotal == b->htotal &&
+           a->vtotal == b->vtotal;
+}
+
+static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int max)
+{
+    struct drm_out *o = out->backend_data;
+    drmModeConnector *conn = drmModeGetConnector(o->d->fd, o->conn_id);
+    if (!conn || conn->count_modes <= 0) {
+        if (conn)
+            drmModeFreeConnector(conn);
+        return 0;
+    }
+    drmModeModeInfo pref = preferred_mode(conn);
+    int n = 0;
+    for (int i = 0; i < conn->count_modes && n < max; i++) {            /* one entry per size: the fastest refresh rate */
+        const drmModeModeInfo *m = &conn->modes[i];
+        int at = -1;
+        for (int j = 0; j < n; j++)
+            if (modes[j].w == m->hdisplay && modes[j].h == m->vdisplay)
+                at = j;
+        int hz = (int)m->vrefresh;
+        if (at >= 0) {
+            if (hz > modes[at].hz)
+                modes[at].hz = hz;
+            if (same_timing(m, &pref))
+                modes[at].preferred = true;
+            continue;
+        }
+        modes[n++] = (struct lm_mode_info){ m->hdisplay, m->vdisplay, hz, same_timing(m, &pref), false };
+    }
+    struct lm_config none = { 0 };                                      /* what "automatic" would generate */
+    struct lm_edid_native nat;
+    bool have_nat = conn_native(o->d->fd, conn, &nat);
+    drmModeModeInfo au = pick_mode(&none, conn, &pref, have_nat ? &nat : NULL, false);
+    if (au.type & DRM_MODE_TYPE_USERDEF) {
+        bool known = false;
+        for (int j = 0; j < n; j++)
+            known = known || (modes[j].w == au.hdisplay && modes[j].h == au.vdisplay);
+        if (!known && n < max)
+            modes[n++] = (struct lm_mode_info){ au.hdisplay, au.vdisplay, (int)au.vrefresh, false, true };
+    }
+    drmModeFreeConnector(conn);
+    for (int i = 1; i < n; i++) {                                       /* biggest area first */
+        struct lm_mode_info t = modes[i];
+        int j = i;
+        while (j > 0 && modes[j - 1].w * modes[j - 1].h < t.w * t.h) {
+            modes[j] = modes[j - 1];
+            j--;
+        }
+        modes[j] = t;
+    }
+    return n;
+}
+
+static void drm_wait_flip(struct drm_out *o)
+{
+    for (int i = 0; i < 20 && o->flip_pending; i++) {
+        struct pollfd p = { .fd = o->d->fd, .events = POLLIN };
+        if (poll(&p, 1, 50) > 0)
+            drm_event_cb(o->d->fd, 0, o->d);
+    }
+}
+
+static int drm_apply_mode(struct lm_output *out)
+{
+    struct drm_out *o = out->backend_data;
+    struct drm *d = o->d;
+    if (!d->active || !o->live)
+        return -1;
+    drmModeConnector *conn = drmModeGetConnector(d->fd, o->conn_id);
+    if (!conn || conn->connection != DRM_MODE_CONNECTED || conn->count_modes <= 0) {
+        if (conn)
+            drmModeFreeConnector(conn);
+        return -1;
+    }
+    drmModeModeInfo pref = preferred_mode(conn);
+    struct lm_edid_native nat;
+    bool have_nat = conn_native(d->fd, conn, &nat);
+    drmModeModeInfo m = pick_mode(&d->base.server->config, conn, &pref, have_nat ? &nat : NULL, false);
+    uint32_t mm_w = conn->mmWidth, mm_h = conn->mmHeight;
+    drmModeFreeConnector(conn);
+    if (same_timing(&m, &o->mode))
+        return 0;
+
+    o->busy = true;
+    drm_wait_flip(o);
+    struct drm_buf nb[2] = { { 0 }, { 0 } };
+    if (buf_create(d, &nb[0], m.hdisplay, m.vdisplay) < 0 || buf_create(d, &nb[1], m.hdisplay, m.vdisplay) < 0) {
+        buf_destroy(d, &nb[0]);
+        buf_destroy(d, &nb[1]);
+        o->busy = false;
+        return -1;
+    }
+    struct drm_buf old[2] = { o->buf[0], o->buf[1] };
+    drmModeModeInfo old_mode = o->mode;
+    int old_back = o->back;
+    o->buf[0] = nb[0];
+    o->buf[1] = nb[1];
+    o->mode = m;
+    o->back = 0;
+    if (out_modeset(o) < 0) {                                           /* refused: put everything back */
+        o->buf[0] = old[0];
+        o->buf[1] = old[1];
+        o->mode = old_mode;
+        o->back = old_back;
+        buf_destroy(d, &nb[0]);
+        buf_destroy(d, &nb[1]);
+        o->busy = false;
+        return -1;
+    }
+    buf_destroy(d, &old[0]);
+    buf_destroy(d, &old[1]);
+    o->seq = 0;
+    out->width = (int32_t)m.hdisplay;
+    out->height = (int32_t)m.vdisplay;
+    snprintf(out->model, sizeof(out->model), "%ux%u", m.hdisplay, m.vdisplay);
+    if (m.htotal && m.vtotal && m.clock)
+        out->refresh_mhz = (int32_t)(((uint64_t)m.clock * 1000000ull) / ((uint64_t)m.htotal * m.vtotal));
+    out->phys_width_mm = (int32_t)mm_w;
+    out->phys_height_mm = (int32_t)mm_h;
+    lm_info("drm: %s now %ux%u@%.2f", out->name, m.hdisplay, m.vdisplay, out->refresh_mhz / 1000.0);
+    o->busy = false;
+    if (d->base.listener.output_changed)
+        d->base.listener.output_changed(d->base.listener.data, out);
+    lm_timer_arm_ms(d->ready_timer, 1, 0);
+    return 0;
+}
+
 static const struct lm_backend_ops drm_ops = {
     .name = "drm",
     .init = drm_init,
@@ -721,6 +994,8 @@ static const struct lm_backend_ops drm_ops = {
     .get_framebuffer = drm_get_framebuffer,
     .present = drm_present,
     .switch_vt = drm_switch_vt,
+    .list_modes = drm_list_modes,
+    .apply_mode = drm_apply_mode,
 };
 
 struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *device)

@@ -8,6 +8,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "cvt.h"
+#include "edid.h"
 #include "keymap.h"
 
 static int fails;
@@ -140,6 +142,46 @@ int main(void)
     CHECK(lm_keysym_to_utf8(0x01000161, u) == 2 && !strcmp(u, "\xc5\xa1"), "utf8 of s-caron");
     CHECK(lm_keysym_to_utf8(0xf5, u) == 2 && !strcmp(u, "\xc3\xb5"), "utf8 of o-tilde");
     CHECK(lm_keysym_to_utf8(0x010020ac, u) == 3, "utf8 of euro");
+
+    /* CVT reduced blanking: reference values from the VESA CVT 1.2 spec / well-known modelines */
+    struct lm_cvt c;
+    CHECK(lm_cvt_rb(1920, 1080, 60, &c) && c.clock_khz == 138500 && c.htotal == 2080 && c.vtotal == 1111 && c.vsync_end - c.vsync_start == 5,
+          "cvt-rb 1920x1080: %u kHz %ux%u", c.clock_khz, c.htotal, c.vtotal);
+    CHECK(lm_cvt_rb(2560, 1440, 60, &c) && c.clock_khz == 241500 && c.vtotal == 1481, "cvt-rb 2560x1440: %u kHz vtotal %u", c.clock_khz, c.vtotal);
+    CHECK(lm_cvt_rb(1920, 1200, 60, &c) && c.clock_khz == 154000 && c.vtotal == 1235, "cvt-rb 1920x1200: %u kHz vtotal %u", c.clock_khz, c.vtotal);
+    CHECK(lm_cvt_rb(1920, 810, 60, &c) && c.clock_khz > 100000 && c.clock_khz < 120000 && c.hsync_end - c.hsync_start == 32 &&
+          c.vsync_end - c.vsync_start == 10, "cvt-rb 1920x810 (21:9): %u kHz", c.clock_khz);
+    CHECK(lm_cvt_rb(1921, 1080, 60, &c) && c.hdisplay == 1920, "width rounded down to a multiple of 8");
+    CHECK(!lm_cvt_rb(100, 100, 60, &c) && !lm_cvt_rb(1920, 1080, 5, &c), "absurd sizes/rates are refused");
+
+    /* EDID: native shape vs the mode the kernel offers (first 128 bytes of a real 21:9 monitor, serial number removed) */
+    static const uint8_t edid_21x9[128] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x10, 0xac, 0x18, 0x43, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x23, 0x01, 0x03, 0x80, 0x5d, 0x27, 0x78, 0x2a, 0xd9, 0xa5, 0xb0, 0x4f, 0x3d, 0xb1, 0x24, 0x0e, 0x50, 0x54, 0xa5, 0x4b, 0x00, 0x71, 0x4f, 0x81, 0x00, 0x81, 0x80, 0xa9, 0x40, 0xb3, 0x00, 0xd1, 0xc0, 0xd1, 0x00, 0xe1, 0xc0, 0xd4, 0x46, 0x00, 0xa0, 0xa0, 0x38, 0x1f, 0x40, 0x30, 0x20, 0x3a, 0x00, 0xa1, 0x88, 0x31, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0xff, 0x00, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x44, 0x45, 0x4c, 0x4c, 0x20, 0x55, 0x34, 0x30, 0x32, 0x35, 0x51, 0x57, 0x0a, 0x00, 0x00, 0x00, 0xfd, 0x00, 0x30, 0x78, 0x19, 0xff, 0x96, 0x00, 0x0a, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x01, 0x5b };
+    struct lm_edid_native nat;
+    CHECK(lm_edid_native(edid_21x9, sizeof(edid_21x9), &nat) && nat.w == 2560 && nat.h == 1080 && nat.mm_w == 929 && nat.mm_h == 392,
+          "edid native: %dx%d %dx%d mm", nat.w, nat.h, nat.mm_w, nat.mm_h);
+    CHECK(lm_edid_fix_height(2048, 1152, &nat, 930, 390) == 864, "21:9 panel offered 16:9 2048x1152 -> 2048x864 (%d)",
+          lm_edid_fix_height(2048, 1152, &nat, 930, 390));
+    CHECK(lm_edid_fix_height(1920, 1080, &nat, 0, 0) == 810, "same without physical size -> 1920x810");
+    CHECK(lm_edid_fix_height(2560, 1080, &nat, 930, 390) == 0, "the native mode itself: untouched");
+    CHECK(lm_edid_fix_height(2560, 1100, &nat, 930, 390) == 0, "within 8 percent of the native shape: untouched");
+    struct lm_edid_native bare = { 2560, 1080, 0, 0 };
+    CHECK(lm_edid_fix_height(2048, 1152, &bare, 930, 390) == 864, "native timing without its own size: the connector's size agrees");
+    CHECK(lm_edid_fix_height(2048, 1152, &bare, 160, 90) == 0, "physical size contradicts the native timing (a broken EDID): untouched");
+    CHECK(lm_edid_fix_height(2048, 1152, NULL, 930, 390) == 0, "no native timing: untouched");
+    uint8_t other[128];
+    memcpy(other, edid_21x9, sizeof(other));
+    other[54 + 2] = 0x80; other[54 + 4] = 0x70;               /* 1920 wide ... */
+    other[54 + 5] = 0x38; other[54 + 7] = 0x40;               /* ... 1080 high: a plain 16:9 monitor */
+    other[54 + 12] = 0x56; other[54 + 13] = 0x50; other[54 + 14] = 0x21;    /* 598 x 336 mm */
+    CHECK(lm_edid_native(other, sizeof(other), &nat) && nat.w == 1920 && nat.h == 1080 && nat.mm_w == 598 && nat.mm_h == 336, "edid native (patched): %dx%d mm %dx%d", nat.w, nat.h, nat.mm_w, nat.mm_h);
+    CHECK(lm_edid_fix_height(1920, 1080, &nat, 0, 0) == 0, "16:9 monitor with 16:9 mode: untouched");
+    CHECK(lm_edid_fix_height(1600, 1200, &nat, 0, 0) == 900, "16:9 monitor offered only 4:3 -> 1600x900 (%d)",
+          lm_edid_fix_height(1600, 1200, &nat, 0, 0));
+    memset(other, 0, 8);
+    CHECK(!lm_edid_native(other, sizeof(other), &nat), "bad header is refused");
+    memcpy(other, edid_21x9, sizeof(other));
+    other[54] = other[55] = 0;
+    CHECK(!lm_edid_native(other, sizeof(other), &nat), "a monitor descriptor is not a timing");
 
     if (!fails)
         puts("keymap-test ok");

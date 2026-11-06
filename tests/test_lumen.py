@@ -1182,6 +1182,12 @@ class TestKeyboard(Base):
         r = subprocess.run([path], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_bad_mode_option_is_refused(self):
+        for bad in ('foo', '10x10', '1920x810@5', '1920', 'prefered'):
+            r = subprocess.run([BIN, '--backend', 'headless', '--mode', bad], capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertIn('bad --mode', r.stderr)
+
     def test_keymap_has_all_layouts(self):
         c = self.client()
         seat = c.wl.bind('wl_seat', 5)
@@ -1695,9 +1701,9 @@ class TestSettings(Base):
 
     # ---- the file ---------------------------------------------------------------------------------------------------
 
-    def private_compositor(self, name, *args):
+    def private_compositor(self, name, *args, env=None):
         sock = os.path.join(tmp, name + '.ctl')
-        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77')
+        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77', **(env or {}))
         p = subprocess.Popen([BIN, '--backend', 'headless', '--size', '800x500', '--socket', name, '--control', sock,
                               '--terminal', 'true'] + list(args), env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)
@@ -1720,6 +1726,218 @@ class TestSettings(Base):
                 p.kill()
         self.addCleanup(stop)
         return p, c, stop
+
+    # ---- resolution and sound outputs -----------------------------------------------------------------------------
+
+    @staticmethod
+    def get_setting(c, key):
+        c.cmd('setting ' + key)
+        return c.last[3:]
+
+    def test_resolution_changes_reverts_and_persists(self):
+        path = os.path.join(tmp, 'res', 'settings.conf')
+        p, c, stop = self.private_compositor('lumen-res1', '--settings', path, env={'LUMEN_REVERT_MS': '800'})
+        g = lambda k: self.get_setting(c, k)
+        self.assertEqual((g('resolution'), g('resolution-now'), g('resolution-confirm')), ('auto', '800x500@60', ''))
+        self.assertIn('1280x720@60|', g('resolutions'))
+        self.assertIn('800x500@60|preferred', g('resolutions'))
+        # a change goes through at once ...
+        c.cmd('settings resolution 1280x720@60')
+        self.assertEqual(g('resolution-now'), '1280x720@60')
+        self.assertNotEqual(g('resolution-confirm'), '')
+        ppm = c.dump(os.path.join(tmp, 'res1.ppm'))
+        self.assertEqual((ppm.w, ppm.h), (1280, 720))
+        # ... and is undone when it is not kept (the screen could be black)
+        time.sleep(1.6)
+        self.assertEqual((g('resolution'), g('resolution-now'), g('resolution-confirm')), ('auto', '800x500@60', ''))
+        self.assertFalse(os.path.exists(path) and 'resolution=1280' in open(path).read())
+        # kept: stays after the revert time and is saved
+        c.cmd('settings resolution 1024x768@60')
+        c.cmd('settings resolution-confirm 1')
+        time.sleep(1.3)
+        self.assertEqual((g('resolution-now'), g('resolution-confirm')), ('1024x768@60', ''))
+        for _ in range(40):
+            if os.path.exists(path) and 'resolution=1024x768@60' in open(path).read():
+                break
+            time.sleep(0.05)
+        self.assertIn('resolution=1024x768@60', open(path).read())
+        # nonsense is refused, the screen stays as it is
+        for bad in ('10x10', 'foo', '1920x1080@5', '0x0'):
+            with self.assertRaises(RuntimeError):
+                c.cmd('settings resolution ' + bad)
+        self.assertEqual(g('resolution-now'), '1024x768@60')
+        # "Go back" by hand
+        c.cmd('settings resolution 800x600@60')
+        self.assertEqual(g('resolution-now'), '800x600@60')
+        c.cmd('settings resolution-confirm 0')
+        self.assertEqual((g('resolution'), g('resolution-now')), ('1024x768@60', '1024x768@60'))
+        stop()
+        # the saved resolution is used at the next start
+        p2, c2, stop2 = self.private_compositor('lumen-res2', '--settings', path)
+        self.assertEqual(self.get_setting(c2, 'resolution-now'), '1024x768@60')
+        self.assertEqual(self.get_setting(c2, 'resolution'), '1024x768@60')
+
+    def wait_window(self, c, app_id, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            for w in c.windows()['windows']:
+                if w['app_id'] == app_id:
+                    return w
+            time.sleep(0.05)
+        self.fail('no window ' + app_id)
+
+    def test_maximized_window_follows_a_resolution_change(self):
+        exe = self.exe()
+        p, c, stop = self.private_compositor('lumen-res3', env={'LUMEN_REVERT_MS': '60000'})
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-res3'), stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
+        self.wait_window(c, 'lumen.settings')
+        c.abs(400, 300)
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_M)
+        c.key(KEY_LEFTMETA, False)
+        for _ in range(60):
+            w = c.windows()['windows'][0]
+            if 'maximized' in w['flags'] and (w['w'], w['h']) == (800 - 8, 500 - 60):
+                break
+            time.sleep(0.05)
+        self.assertEqual((w['w'], w['h']), (800 - 8, 500 - 60))
+        c.cmd('settings resolution 1280x720@60')
+        for _ in range(60):
+            w = c.windows()['windows'][0]
+            if (w['w'], w['h']) == (1280 - 8, 720 - 60):
+                break
+            time.sleep(0.05)
+        self.assertEqual((w['w'], w['h']), (1280 - 8, 720 - 60))
+        c.cmd('settings resolution-confirm 0')
+        for _ in range(60):
+            w = c.windows()['windows'][0]
+            if (w['w'], w['h']) == (800 - 8, 500 - 60):
+                break
+            time.sleep(0.05)
+        self.assertEqual((w['w'], w['h']), (800 - 8, 500 - 60))
+
+    def audio_env(self):
+        """A fake /proc/asound (a card with analog, digital and three HDMI outputs) and a fake `pactl` with two sinks."""
+        d = os.path.join(tmp, 'audio')
+        os.makedirs(os.path.join(d, 'asound'), exist_ok=True)
+        os.makedirs(os.path.join(d, 'bin'), exist_ok=True)
+        with open(os.path.join(d, 'asound', 'cards'), 'w') as f:
+            f.write(' 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n                      HDA Intel PCH at 0xa0710000 irq 53\n'
+                    ' 1 [U0x46d0x825    ]: USB-Audio - USB Device 0x46d:0x825\n                      USB Device at usb-0000:00:14.0-1.4.1.1\n')
+        with open(os.path.join(d, 'asound', 'pcm'), 'w') as f:
+            f.write('00-00: CS4206 Analog : CS4206 Analog : playback 1 : capture 1\n00-01: CS4206 Digital : CS4206 Digital : playback 1 : capture 1\n'
+                    '00-03: HDMI 0 : HDMI 0 : playback 1\n00-07: HDMI 1 : HDMI 1 : playback 1\n00-08: HDMI 2 : HDMI 2 : playback 1\n'
+                    '01-00: USB Audio : USB Audio : capture 1\n')
+        state = os.path.join(d, 'sink-state')
+        if os.path.exists(state):
+            os.unlink(state)
+        pactl = os.path.join(d, 'bin', 'pactl')
+        with open(pactl, 'w') as f:
+            f.write("""#!/bin/sh
+state="%s"
+case "$1" in
+  list) printf 'Sink #1\\n\\tState: RUNNING\\n\\tName: alsa_output.analog-stereo\\n\\tDescription: Built-in Audio Analog Stereo\\nSink #2\\n\\tName: alsa_output.hdmi-stereo\\n\\tDescription: Built-in Audio Digital Stereo (HDMI)\\n' ;;
+  get-default-sink) if [ -f "$state" ]; then cat "$state"; else echo alsa_output.analog-stereo; fi ;;
+  set-default-sink) case "$2" in alsa_output.analog-stereo|alsa_output.hdmi-stereo) echo "$2" > "$state" ;; esac ;;
+esac
+""" % state)
+        os.chmod(pactl, 0o755)
+        return state, {'LUMEN_ASOUND_DIR': os.path.join(d, 'asound'), 'PATH': os.path.join(d, 'bin') + ':' + os.environ['PATH']}
+
+    def test_sound_outputs_list_hdmi_and_can_be_chosen(self):
+        state, env = self.audio_env()
+        path = os.path.join(tmp, 'audio', 'settings.conf')
+        p, c, stop = self.private_compositor('lumen-aud1', '--settings', path, env=env)
+        g = lambda k: self.get_setting(c, k)
+        outs = g('audio-outs')
+        self.assertTrue(outs.startswith('default|System default;'), outs)
+        self.assertIn('plughw:CARD=PCH,DEV=3|HDA Intel PCH - HDMI 0 (HDMI)', outs)
+        self.assertIn('plughw:CARD=PCH,DEV=8|HDA Intel PCH - HDMI 2 (HDMI)', outs)
+        self.assertNotIn('USB Audio', outs)                                   # capture-only
+        self.assertEqual(g('audio-out'), 'default')
+        c.cmd('settings audio-out plughw:CARD=PCH,DEV=3')
+        self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
+        for bad in ('a;b', 'x|y', 'a' * 64, 'quo"te', '../etc', 'a$b'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('settings audio-out ' + bad)
+        self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
+        for _ in range(40):
+            if os.path.exists(path) and 'audio-out=plughw:CARD=PCH,DEV=3' in open(path).read():
+                break
+            time.sleep(0.05)
+        self.assertIn('audio-out=plughw:CARD=PCH,DEV=3', open(path).read())
+        # system output (PulseAudio / PipeWire) through pactl
+        self.assertEqual((g('sinks'), g('sink')), ('', ''))                   # nothing asked yet
+        c.cmd('settings audio-rescan 1')
+        self.assertIn('alsa_output.hdmi-stereo|Built-in Audio Digital Stereo (HDMI)', g('sinks'))
+        self.assertEqual(g('sink'), 'alsa_output.analog-stereo')
+        c.cmd('settings sink alsa_output.hdmi-stereo')
+        self.assertEqual(g('sink'), 'alsa_output.hdmi-stereo')
+        self.assertEqual(open(state).read().strip(), 'alsa_output.hdmi-stereo')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings sink alsa_output.nosuch')                           # pactl refuses it: not accepted
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings sink bad;sink')                                     # not even a valid name
+        stop()
+        p2, c2, stop2 = self.private_compositor('lumen-aud2', '--settings', path, env=env)
+        self.assertEqual(self.get_setting(c2, 'audio-out'), 'plughw:CARD=PCH,DEV=3')     # remembered
+
+    def test_sound_list_is_empty_without_a_sound_server(self):
+        p, c, stop = self.private_compositor('lumen-aud3', env={'LUMEN_ASOUND_DIR': os.path.join(tmp, 'nonexistent'),
+                                                                'PATH': os.path.join(tmp, 'nonexistent-bin')})
+        self.assertEqual(self.get_setting(c, 'audio-outs'), 'default|System default')
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual((self.get_setting(c, 'sinks'), self.get_setting(c, 'sink')), ('', ''))
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings sink alsa_output.hdmi-stereo')
+
+    def test_panel_display_and_sound_pages(self):
+        exe = self.exe()
+        state, env = self.audio_env()
+        env['LUMEN_REVERT_MS'] = '60000'
+        path = os.path.join(tmp, 'audio', 'panel.conf')
+        if os.path.exists(path):
+            os.unlink(path)
+        p, c, stop = self.private_compositor('lumen-aud4', '--settings', path, env=env)
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-aud4'), stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
+        win = self.wait_window(c, 'lumen.settings')
+        x0, y0 = win['x'], win['y']
+        time.sleep(0.3)
+        g = lambda k: self.get_setting(c, k)
+        # Sound page: tabs are 36 px apart from y=12; rows start at y=42; the 4th row (index 3) is "HDMI 0"
+        c.click(x0 + 70, y0 + 12 + 4 * 36 + 16)
+        time.sleep(0.5)
+        c.click(x0 + 200, y0 + 42 + 3 * 28 + 14)
+        time.sleep(0.2)
+        self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
+        # the second system output (after 6 beep rows and the next heading): "Digital Stereo (HDMI)"
+        c.click(x0 + 200, y0 + 42 + 6 * 28 + 6 + 28 + 28 + 14)
+        time.sleep(0.2)
+        self.assertEqual(g('sink'), 'alsa_output.hdmi-stereo')
+        # Display page: rows are Automatic, Preferred, then the modes (800x500 preferred, 1920x1080, 1280x720, ...)
+        c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)
+        time.sleep(0.3)
+        c.click(x0 + 200, y0 + 42 + 4 * 28 + 14)                              # third mode = 1280x720
+        time.sleep(0.4)
+        self.assertEqual(g('resolution'), '1280x720@60')
+        self.assertEqual(g('resolution-now'), '1280x720@60')
+        self.assertNotEqual(g('resolution-confirm'), '')
+        # the panel is now larger relative to the screen; find it again and press "Keep" (first button below the message)
+        win = self.wait_window(c, 'lumen.settings')
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 160 + 45, y0 + 42 + 12)
+        time.sleep(0.3)
+        self.assertEqual(g('resolution-confirm'), '')
+        self.assertEqual(g('resolution-now'), '1280x720@60')
+        for _ in range(40):
+            if os.path.exists(path) and 'resolution=1280x720@60' in open(path).read():
+                break
+            time.sleep(0.05)
+        self.assertIn('resolution=1280x720@60', open(path).read())
 
     def test_settings_survive_a_restart(self):
         path = os.path.join(tmp, 'persist', 'deeper', 'settings.conf')       # directories are created
@@ -1864,9 +2082,9 @@ class TestSettings(Base):
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # sound box (second row, below the gadget box)
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
-        # keyboard only: Tab x3 reaches the first widget of the page (the gadget checkbox), Space toggles it
+        # keyboard only: Tab x5 (the five page tabs) + 1 reaches the first widget of the page (the gadget checkbox), Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(4):
+        for _ in range(6):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)

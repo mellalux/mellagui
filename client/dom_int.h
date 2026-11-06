@@ -21,8 +21,24 @@ struct listener {
     struct listener *next;
 };
 
+/* Author-specified style of one element (-1 = not specified), see dom_css.c */
+struct estyle {
+    int32_t fg;                     /* 0xRRGGBB or -1 */
+    int32_t bg;                     /* 0xRRGGBB, -1 unspecified, -2 transparent */
+    int8_t display;                 /* -1, DS_* */
+    int8_t bold, italic, underline, strike, pre, align, transform, listnone, hidden;
+    int16_t font_px;                /* computed font size when specified, else 0 */
+    int16_t mt, mb, pl, pt, pb;     /* px or -1 */
+    int8_t flex_item;               /* a child of a flex row: laid out inline */
+    int8_t column;                  /* flex-direction: column / row-reverse ... */
+};
+enum { DS_NONE, DS_BLOCK, DS_INLINE, DS_INLINE_BLOCK, DS_FLEX, DS_LIST_ITEM, DS_TABLE, DS_CONTENTS };
+
 struct dnode {
     int type;
+    int caret;                      /* focused text control: caret as a byte offset into the value */
+    struct estyle *st, *st_before, *st_after;
+    char *before_txt, *after_txt;
     char *tag;                      /* lowercase, elements only */
     char *text;                     /* text / comment data */
     struct dattr *attrs;
@@ -57,6 +73,7 @@ struct dom {
     char *title_cache;
     struct timer *timers;
     int next_timer;
+    long long load_deadline;        /* dom clock ms while the page loads (0 afterwards) */
     unsigned long long steps_total;
     bool budget_reported;
     long long clock_offset;         /* virtual time added to the monotonic clock (dom_run_timers_virtual) */
@@ -68,6 +85,9 @@ struct dom {
     jsobj *local_storage, *session_storage;
     jsobj *location_obj, *history_obj, *document_obj;
     struct dnode *running_click;
+    struct css_state *css;
+    struct dnode *focus;            /* focused form control */
+    char *focus_orig;               /* its value when it got the focus (for the change event) */
 };
 
 struct sbuf { char *p; size_t n, cap; };
@@ -82,6 +102,13 @@ char *dom_decode(const char *s, size_t n);
 struct dnode *dnode_new(struct dom *d, int type, const char *tag);
 struct dnode *dtext_new(struct dom *d, const char *text);
 void dom_free_nodes(struct dom *d);
+
+/* CSS (dom_css.c) */
+void dom_css_apply(struct dom *d);                  /* (re)load stylesheets if they changed and cascade them onto the tree */
+void dom_css_free(struct dom *d);
+bool css_open_outer(struct sbuf *sb, const struct estyle *st);      /* <x-o ...>: display, margins, background, alignment */
+bool css_open_inner(struct sbuf *sb, const struct estyle *st, bool is_link);   /* <x-i ...>: colour, weight, size ... */
+bool css_page_bg(struct dom *d, uint32_t *rgb, uint32_t *fg);
 const char *dattr_get(const struct dnode *n, const char *name);
 void dattr_set(struct dnode *n, const char *name, const char *value);
 bool dattr_remove(struct dnode *n, const char *name);
@@ -93,6 +120,12 @@ void dom_parse_into(struct dom *d, struct dnode *root, const char *src, size_t l
 void dom_normalize(struct dom *d);
 struct dnode *dom_find_tag(struct dnode *root, const char *tag);
 struct dnode *dom_by_id(struct dom *d, const char *id);
+/* form controls (dom.c): what kind of widget an element is */
+enum { WK_NONE, WK_TEXT, WK_PASSWORD, WK_CHECKBOX, WK_RADIO, WK_BUTTON, WK_SUBMIT, WK_RESET, WK_SELECT, WK_TEXTAREA };
+int widget_kind(const struct dnode *n);
+struct dnode *dom_form_of(const struct dnode *n);
+void widget_text(const struct dnode *n, struct sbuf *out);
+const struct dnode *dom_option_next(const struct dnode *sel, const struct dnode *cur);          /* current value / label */
 struct dnode *dom_node_by_numeric_id(struct dom *d, int id);
 void ser_full(struct sbuf *sb, const struct dnode *n, bool inner_only);
 void dom_text_content(struct sbuf *sb, const struct dnode *n);
@@ -101,5 +134,34 @@ void style_set(struct dnode *n, const char *prop, const char *value);
 bool node_clickable(const struct dnode *n);
 bool dom_matches(const struct dnode *n, const char *selector, bool *valid);
 bool dom_query(const struct dnode *root, const char *selector, bool first_only, struct dnode ***out, int *n);
+
+enum { SC_NONE, SC_DESC, SC_CHILD, SC_ADJ, SC_SIB };
+
+struct sel_attr { char *name, *val; int op; };       /* op: 0 exists, '=', '^', '$', '*', '~', '|' */
+
+struct sel_simple {
+    char *tag;                                       /* NULL or "*" = any */
+    char *id;
+    char **classes;
+    int nclasses;
+    struct sel_attr *attrs;
+    int nattrs;
+    int pseudo;                                      /* bit flags: 1 first-child, 2 last-child, 4 only-child, 8 empty, 16 root, 32 checked, 64 disabled */
+    int nth;                                         /* :nth-child(n) (1-based, 0 = none), -1 odd, -2 even */
+    struct sel_simple *not_;                         /* :not(simple) */
+    int combinator;                                  /* relation to the previous (left) compound */
+    int pseudo_elem;                                 /* 1 ::before, 2 ::after (only on the last compound) */
+};
+
+struct selector { struct sel_simple *parts; int n; };
+struct selector_list { struct selector *sels; int n; };
+
+
+void sel_free_simple(struct sel_simple *s);
+void sel_list_free(struct selector_list *l);
+bool sel_parse(const char *text, struct selector_list *out);
+bool list_matches(const struct selector_list *l, const struct dnode *n);
+bool sel_match_one(const struct selector *sel, const struct dnode *n);   /* one selector of a list */
+int sel_specificity(const struct selector *sel);
 
 #endif

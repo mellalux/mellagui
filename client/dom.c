@@ -158,6 +158,11 @@ struct dnode *dnode_new(struct dom *d, int type, const char *tag)
 
 static void dnode_free(struct dnode *n)
 {
+    free(n->st);
+    free(n->st_before);
+    free(n->st_after);
+    free(n->before_txt);
+    free(n->after_txt);
     free(n->tag);
     free(n->text);
     for (int i = 0; i < n->nattr; i++) {
@@ -717,6 +722,152 @@ bool node_clickable(const struct dnode *n)
     return false;
 }
 
+/* ---- form controls ------------------------------------------------------------------------------------------- */
+
+int widget_kind(const struct dnode *n)
+{
+    if (n->type != DN_ELEMENT)
+        return WK_NONE;
+    if (!strcmp(n->tag, "input")) {
+        const char *t = dattr_get(n, "type");
+        if (!t || !*t) return WK_TEXT;
+        if (!strcasecmp(t, "hidden")) return WK_NONE;
+        if (!strcasecmp(t, "password")) return WK_PASSWORD;
+        if (!strcasecmp(t, "checkbox")) return WK_CHECKBOX;
+        if (!strcasecmp(t, "radio")) return WK_RADIO;
+        if (!strcasecmp(t, "submit") || !strcasecmp(t, "image")) return WK_SUBMIT;
+        if (!strcasecmp(t, "reset")) return WK_RESET;
+        if (!strcasecmp(t, "button") || !strcasecmp(t, "file") || !strcasecmp(t, "color") || !strcasecmp(t, "range")) return WK_BUTTON;
+        return WK_TEXT;                                         /* text, search, email, url, tel, number, date ... */
+    }
+    if (!strcmp(n->tag, "textarea")) return WK_TEXTAREA;
+    if (!strcmp(n->tag, "select")) return WK_SELECT;
+    if (!strcmp(n->tag, "button")) {
+        const char *t = dattr_get(n, "type");
+        return t && !strcasecmp(t, "reset") ? WK_RESET : t && !strcasecmp(t, "button") ? WK_BUTTON : WK_SUBMIT;
+    }
+    return WK_NONE;
+}
+
+struct dnode *dom_form_of(const struct dnode *n)
+{
+    for (struct dnode *p = n->parent; p; p = p->parent)
+        if (p->type == DN_ELEMENT && !strcmp(p->tag, "form"))
+            return p;
+    return NULL;
+}
+
+/* The <option>s of a <select> in document order (also inside <optgroup>): the one after `cur`, or the first. */
+const struct dnode *dom_option_next(const struct dnode *sel, const struct dnode *cur)
+{
+    const struct dnode *c = cur ? cur : sel;
+    for (;;) {
+        if (c->first && !(cur && c == cur))
+            c = c->first;
+        else {
+            while (c != sel && !c->next)
+                c = c->parent;
+            if (c == sel)
+                return NULL;
+            c = c->next;
+        }
+        if (c->type == DN_ELEMENT && !strcmp(c->tag, "option"))
+            return c;
+        cur = NULL;
+    }
+}
+
+/* the text a widget shows: value of an input / textarea text, selected option label, button label */
+void widget_text(const struct dnode *n, struct sbuf *out)
+{
+    int k = widget_kind(n);
+    if (k == WK_TEXTAREA || k == WK_BUTTON || (k == WK_SUBMIT && !strcmp(n->tag, "button")) || (k == WK_RESET && !strcmp(n->tag, "button"))) {
+        if (!strcmp(n->tag, "input")) {
+            const char *v = dattr_get(n, "value");
+            sbuf_addz(out, v && *v ? v : (n->type == DN_ELEMENT && dattr_get(n, "type") && !strcasecmp(dattr_get(n, "type"), "file") ? "Choose file" : "Button"));
+        } else {
+            dom_text_content(out, n);
+        }
+        return;
+    }
+    if (k == WK_SELECT) {
+        const struct dnode *first = NULL, *sel = NULL;
+        for (const struct dnode *o = dom_option_next(n, NULL); o; o = dom_option_next(n, o)) {
+            if (!first) first = o;
+            if (dattr_get(o, "selected")) sel = o;
+        }
+        const struct dnode *o = sel ? sel : first;
+        if (o) {
+            const char *lab = dattr_get(o, "label");
+            if (lab) sbuf_addz(out, lab); else dom_text_content(out, o);
+        }
+        return;
+    }
+    if (k == WK_SUBMIT || k == WK_RESET) {
+        const char *v = dattr_get(n, "value");
+        sbuf_addz(out, v && *v ? v : k == WK_RESET ? "Reset" : "Submit");
+        return;
+    }
+    const char *v = dattr_get(n, "value");
+    if (v) sbuf_addz(out, v);
+}
+
+static void emit_widget(struct sbuf *sb, const struct dnode *n, int k)
+{
+    struct sbuf txt = { 0 };
+    widget_text(n, &txt);
+    /* labels collapse whitespace; textarea keeps its lines */
+    char num[32];
+    const char *types[] = { "", "text", "password", "checkbox", "radio", "button", "submit", "reset", "select", "textarea" };
+    sbuf_addz(sb, "<x-w t=\"");
+    sbuf_addz(sb, types[k]);
+    snprintf(num, sizeof(num), "\" id=\"%d\"", n->id);
+    sbuf_addz(sb, num);
+    const char *size = dattr_get(n, "size"), *cols = dattr_get(n, "cols"), *rows = dattr_get(n, "rows");
+    int w = k == WK_TEXTAREA ? (cols ? atoi(cols) : 20) : (size ? atoi(size) : 20);
+    if (w < 4 || w > 120) w = 20;
+    if (k == WK_SELECT) {
+        w = 6;
+        for (const struct dnode *o = dom_option_next(n, NULL); o; o = dom_option_next(n, o)) {
+            struct sbuf t = { 0 };
+            dom_text_content(&t, o);
+            int l = t.p ? (int)strlen(t.p) : 0;
+            if (l > w) w = l > 60 ? 60 : l;
+            free(t.p);
+        }
+    }
+    snprintf(num, sizeof(num), " w=\"%d\"", w);
+    sbuf_addz(sb, num);
+    if (k == WK_TEXTAREA) {
+        snprintf(num, sizeof(num), " r=\"%d\"", rows && atoi(rows) > 0 ? (atoi(rows) > 20 ? 20 : atoi(rows)) : 3);
+        sbuf_addz(sb, num);
+    }
+    if ((k == WK_CHECKBOX || k == WK_RADIO) && dattr_get(n, "checked"))
+        sbuf_addz(sb, " c=\"1\"");
+    if (dattr_get(n, "disabled"))
+        sbuf_addz(sb, " d=\"1\"");
+    const char *ph = dattr_get(n, "placeholder");
+    if (ph && (k == WK_TEXT || k == WK_PASSWORD || k == WK_TEXTAREA)) {
+        sbuf_addz(sb, " p=\"");
+        escape_attr(sb, ph);
+        sbuf_putc(sb, '"');
+    }
+    if (n->dom->focus == n && (k == WK_TEXT || k == WK_PASSWORD || k == WK_TEXTAREA)) {
+        int chars = 0;
+        const char *v = txt.p ? txt.p : "";
+        for (int i = 0; i < n->caret && v[i]; i++)
+            chars += ((unsigned char)v[i] & 0xc0) != 0x80;
+        snprintf(num, sizeof(num), " ca=\"%d\"", chars);
+        sbuf_addz(sb, num);
+    }
+    if (n->dom->focus == n)
+        sbuf_addz(sb, " f=\"1\"");
+    sbuf_addz(sb, " v=\"");
+    escape_attr(sb, txt.p ? txt.p : "");
+    sbuf_addz(sb, "\"></x-w>");
+    free(txt.p);
+}
+
 /* Renderer markup: no scripts/styles, hidden elements omitted, clickable elements wrapped in js: links. */
 static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
 {
@@ -736,6 +887,9 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
     const char *t = n->tag;
     if (in_list(t, "script style template meta link base noscript") || is_hidden(n))
         return;
+    const struct estyle *st = n->st;
+    if (st && (st->display == DS_NONE || st->hidden == 1))
+        return;
     if (!strcmp(t, "head")) {
         for (const struct dnode *c = n->first; c; c = c->next)
             if (c->type == DN_ELEMENT && !strcmp(c->tag, "title")) {
@@ -750,6 +904,14 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
     }
     if (!strcmp(t, "title"))
         return;
+    int wk = widget_kind(n);
+    if (wk != WK_NONE) {
+        bool o = css_open_outer(sb, st);
+        emit_widget(sb, n, wk);
+        if (o)
+            sbuf_addz(sb, "</x-o>");
+        return;
+    }
     bool clickable = node_clickable(n);
     const char *href = !strcmp(t, "a") ? dattr_get(n, "href") : NULL;
     bool is_input_button = !strcmp(t, "input") && dattr_get(n, "type") && in_list(dattr_get(n, "type"), "button submit reset");
@@ -765,14 +927,25 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
         return;
     }
     if (!strcmp(t, "img")) {
-        const char *alt = dattr_get(n, "alt");
-        sbuf_addz(sb, "<img alt=\"");
-        escape_attr(sb, alt ? alt : "");
-        sbuf_addz(sb, "\">");
+        static const char *const keep[] = { "src", "srcset", "data-src", "alt", "width", "height" };
+        sbuf_addz(sb, "<img");
+        for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++) {
+            const char *v = dattr_get(n, keep[i]);
+            if (v) {
+                sbuf_putc(sb, ' ');
+                sbuf_addz(sb, keep[i]);
+                sbuf_addz(sb, "=\"");
+                escape_attr(sb, v);
+                sbuf_putc(sb, '"');
+            }
+        }
+        sbuf_putc(sb, '>');
         return;
     }
     bool wrap = clickable && !in_link;
     char link[40];
+    bool is_void = tag_is_void(t);
+    bool css_o = !is_void && css_open_outer(sb, st);
     if (wrap && !href) {
         snprintf(link, sizeof(link), "js:%d", n->id);
         sbuf_addz(sb, "<a href=\"");
@@ -792,22 +965,52 @@ static void ser_render(struct sbuf *sb, const struct dnode *n, bool in_link)
         sbuf_putc(sb, '"');
     }
     sbuf_putc(sb, '>');
-    if (tag_is_void(t))
+    if (is_void)
         goto after;
+    bool css_i = css_open_inner(sb, st, href != NULL || (wrap && !href));
+    if (n->before_txt) {
+        bool b = css_open_inner(sb, n->st_before, false);
+        escape_text(sb, n->before_txt);
+        if (b) sbuf_addz(sb, "</x-i>");
+    }
     for (const struct dnode *c = n->first; c; c = c->next)
         ser_render(sb, c, in_link || href != NULL || (wrap && !href));
+    if (n->after_txt) {
+        bool b = css_open_inner(sb, n->st_after, false);
+        escape_text(sb, n->after_txt);
+        if (b) sbuf_addz(sb, "</x-i>");
+    }
+    if (css_i)
+        sbuf_addz(sb, "</x-i>");
     sbuf_addz(sb, "</");
     sbuf_addz(sb, t);
     sbuf_putc(sb, '>');
 after:
     if (wrap && !href)
         sbuf_addz(sb, "</a>");
+    if (css_o)
+        sbuf_addz(sb, "</x-o>");
 }
 
 char *dom_serialize(struct dom *d, size_t *len)
 {
     struct sbuf sb = { 0 };
+    dom_css_apply(d);
     sbuf_addz(&sb, "<html>");
+    {   /* the page background / default colour belong to the whole window, not to the <body> block */
+        uint32_t bg, fg;
+        bool have = css_page_bg(d, &bg, &fg);
+        if (have || fg != 0xffffffffu) {
+            char b[64];
+            snprintf(b, sizeof(b), "<x-pg%s%s", have ? " bg=" : "", "");
+            sbuf_addz(&sb, b);
+            if (have) { snprintf(b, sizeof(b), "%06x", bg & 0xffffff); sbuf_addz(&sb, b); }
+            if (fg != 0xffffffffu) { snprintf(b, sizeof(b), " fg=%06x", fg & 0xffffff); sbuf_addz(&sb, b); }
+            sbuf_addz(&sb, ">");
+            if (d->html && d->html->st) d->html->st->bg = -1;
+            if (d->body && d->body->st) d->body->st->bg = -1;
+        }
+    }
     ser_render(&sb, d->head, false);
     ser_render(&sb, d->body, false);
     sbuf_addz(&sb, "</html>");
@@ -847,27 +1050,7 @@ const char *dom_title(struct dom *d)
 
 /* ---- selectors ----------------------------------------------------------------------------------------------------- */
 
-enum { SC_NONE, SC_DESC, SC_CHILD, SC_ADJ, SC_SIB };
-
-struct sel_attr { char *name, *val; int op; };       /* op: 0 exists, '=', '^', '$', '*', '~', '|' */
-
-struct sel_simple {
-    char *tag;                                       /* NULL or "*" = any */
-    char *id;
-    char **classes;
-    int nclasses;
-    struct sel_attr *attrs;
-    int nattrs;
-    int pseudo;                                      /* bit flags: 1 first-child, 2 last-child, 4 only-child, 8 empty, 16 root, 32 checked, 64 disabled */
-    int nth;                                         /* :nth-child(n) (1-based, 0 = none), -1 odd, -2 even */
-    struct sel_simple *not_;                         /* :not(simple) */
-    int combinator;                                  /* relation to the previous (left) compound */
-};
-
-struct selector { struct sel_simple *parts; int n; };
-struct selector_list { struct selector *sels; int n; };
-
-static void sel_free_simple(struct sel_simple *s)
+void sel_free_simple(struct sel_simple *s)
 {
     free(s->tag);
     free(s->id);
@@ -878,7 +1061,7 @@ static void sel_free_simple(struct sel_simple *s)
     if (s->not_) { sel_free_simple(s->not_); free(s->not_); }
 }
 
-static void sel_list_free(struct selector_list *l)
+void sel_list_free(struct selector_list *l)
 {
     for (int i = 0; i < l->n; i++) {
         for (int k = 0; k < l->sels[i].n; k++)
@@ -953,10 +1136,14 @@ static bool parse_compound(const char **pp, struct sel_simple *out)
             any = true;
         } else if (*p == ':') {
             p++;
-            if (*p == ':') return false;                       /* pseudo-elements never match */
+            bool dbl = *p == ':';
+            if (dbl) p++;
             char *name = ident(&p);
             bool ok = true;
-            if (!strcmp(name, "first-child")) out->pseudo |= 1;
+            if (!strcmp(name, "before")) out->pseudo_elem = 1;
+            else if (!strcmp(name, "after")) out->pseudo_elem = 2;
+            else if (dbl) ok = false;                           /* other pseudo-elements (::placeholder ...) never match */
+            else if (!strcmp(name, "first-child")) out->pseudo |= 1;
             else if (!strcmp(name, "last-child")) out->pseudo |= 2;
             else if (!strcmp(name, "only-child")) out->pseudo |= 4;
             else if (!strcmp(name, "empty")) out->pseudo |= 8;
@@ -997,7 +1184,7 @@ static bool parse_compound(const char **pp, struct sel_simple *out)
     return any;
 }
 
-static bool sel_parse(const char *text, struct selector_list *out)
+bool sel_parse(const char *text, struct selector_list *out)
 {
     memset(out, 0, sizeof(*out));
     const char *p = text;
@@ -1149,7 +1336,7 @@ static bool sel_match_from(const struct selector *sel, int k, const struct dnode
     }
 }
 
-static bool list_matches(const struct selector_list *l, const struct dnode *n)
+bool list_matches(const struct selector_list *l, const struct dnode *n)
 {
     for (int i = 0; i < l->n; i++)
         if (sel_match_from(&l->sels[i], l->sels[i].n - 1, n))
@@ -1222,4 +1409,25 @@ struct dnode *dom_node_by_numeric_id(struct dom *d, int id)
         if (n->id == id)
             return n;
     return NULL;
+}
+
+bool sel_match_one(const struct selector *sel, const struct dnode *n)
+{
+    return sel_match_from(sel, sel->n - 1, n);
+}
+
+int sel_specificity(const struct selector *sel)
+{
+    int ids = 0, cls = 0, tags = 0;
+    for (int i = 0; i < sel->n; i++) {
+        const struct sel_simple *s = &sel->parts[i];
+        if (s->id) ids++;
+        cls += s->nclasses + s->nattrs + (s->pseudo ? 1 : 0) + (s->nth ? 1 : 0);
+        if (s->tag && strcmp(s->tag, "*")) tags++;
+        if (s->not_) {
+            if (s->not_->id) ids++;
+            cls += s->not_->nclasses + s->not_->nattrs;
+        }
+    }
+    return ids * 10000 + cls * 100 + tags;
 }

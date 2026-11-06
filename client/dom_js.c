@@ -15,7 +15,9 @@
 
 static jsval wrap(struct dom *d, struct dnode *n);
 static void flush_scripts(struct dom *d);
+static void select_value(const struct dnode *sel, struct sbuf *out);
 static bool run_allowed(struct dom *d);
+static long long dom_now(struct dom *d);
 
 /* ---- host classes --------------------------------------------------------------------------------------------- */
 
@@ -114,6 +116,14 @@ static void camel(const char *kebab_, char *out, size_t n)
 /* Give the next script / handler its own budget; false once the page has used up its total or its memory. */
 static bool run_allowed(struct dom *d)
 {
+    if (d->load_deadline && dom_now(d) > d->load_deadline) {      /* loading the page took too long: the rest is skipped */
+        if (!d->budget_reported) {
+            d->budget_reported = true;
+            if (d->host.message)
+                d->host.message(d->host.data, "error", "page scripts stopped: loading took too long");
+        }
+        return false;
+    }
     d->steps_total += js_steps_used(d->J);
     if (js_memory_exhausted(d->J) || d->steps_total > PAGE_BUDGET) {
         if (!d->budget_reported) {
@@ -520,7 +530,7 @@ static bool node_get(js *J, jsobj *o, jsstr *key, jsval *out)
             *out = js_objv(arr);
             return true;
         }
-        if (!strcmp(k, "activeElement")) { *out = wrap(d, d->body); return true; }
+        if (!strcmp(k, "activeElement")) { *out = wrap(d, d->focus ? d->focus : d->body); return true; }
         break;
     case 'b':
         if (!strcmp(k, "body") && n->type == DN_DOCUMENT) { *out = wrap(d, doc_part(n, "body")); return true; }
@@ -708,6 +718,37 @@ static bool node_get(js *J, jsobj *o, jsstr *key, jsval *out)
         break;
     }
     if (n->type == DN_ELEMENT) {
+        int wk = widget_kind(n);
+        if (wk == WK_SELECT && !strcmp(k, "value")) { struct sbuf v = { 0 }; select_value(n, &v); *out = jstr(J, v.p); free(v.p); return true; }
+        if (wk == WK_SELECT && (!strcmp(k, "selectedIndex") || !strcmp(k, "options") || !strcmp(k, "length"))) {
+            jsobj *arr = js_array_new(J);
+            int idx = -1, i = 0;
+            for (const struct dnode *o = dom_option_next(n, NULL); o; o = dom_option_next(n, o), i++) {
+                if (dattr_get(o, "selected")) idx = i;
+                js_array_push(J, arr, wrap(d, (struct dnode *)o));
+            }
+            if (!strcmp(k, "selectedIndex")) *out = js_num(idx < 0 && i ? 0 : idx);
+            else if (!strcmp(k, "length")) *out = js_num(i);
+            else *out = js_objv(arr);
+            return true;
+        }
+        if (!strcmp(n->tag, "option") && !strcmp(k, "text")) { struct sbuf t = { 0 }; dom_text_content(&t, n); *out = jstr(J, t.p); free(t.p); return true; }
+        if (!strcmp(n->tag, "option") && !strcmp(k, "value") && !dattr_get(n, "value")) { struct sbuf t = { 0 }; dom_text_content(&t, n); *out = jstr(J, t.p); free(t.p); return true; }
+        if (!strcmp(k, "form") && wk != WK_NONE) { struct dnode *f = dom_form_of(n); *out = f ? wrap(d, f) : JS_NULLV; return true; }
+        if (!strcmp(n->tag, "form") && !strcmp(k, "elements")) {
+            jsobj *arr = js_array_new(J);
+            const struct dnode *c = n->first;
+            while (c) {
+                if (c->type == DN_ELEMENT && (widget_kind(c) != WK_NONE || !strcmp(c->tag, "input"))) js_array_push(J, arr, wrap(d, (struct dnode *)c));
+                if (c->first) { c = c->first; continue; }
+                while (c && c != n && !c->next) c = c->parent;
+                if (!c || c == n) break;
+                c = c->next;
+            }
+            *out = js_objv(arr);
+            return true;
+        }
+        if (!strcmp(n->tag, "form") && (!strcmp(k, "action") || !strcmp(k, "method"))) { const char *v = dattr_get(n, k); *out = jstr(J, v ? v : (k[0] == 'm' ? "get" : "")); return true; }
         if (!strcmp(k, "disabled") || !strcmp(k, "readOnly") || !strcmp(k, "required") || !strcmp(k, "multiple") ||
             !strcmp(k, "autofocus") || !strcmp(k, "async") || !strcmp(k, "defer")) {
             char lower[32];
@@ -777,6 +818,27 @@ static bool node_set(js *J, jsobj *o, jsstr *key, jsval v)
     if (!strcmp(k, "className")) { dattr_set(n, "class", sarg(J, v)); return true; }
     if (!strcmp(k, "htmlFor")) { dattr_set(n, "for", sarg(J, v)); return true; }
     if (!strcmp(k, "style")) { dattr_set(n, "style", sarg(J, v)); return true; }
+    if (!strcmp(k, "value") && !strcmp(n->tag, "select")) {
+        const char *want = sarg(J, v);
+        bool found = false;
+        for (struct dnode *o = (struct dnode *)dom_option_next(n, NULL); o; o = (struct dnode *)dom_option_next(n, o)) {
+            struct sbuf t = { 0 };
+            const char *ov = dattr_get(o, "value");
+            if (!ov) { dom_text_content(&t, o); ov = t.p ? t.p : ""; }
+            bool match = !found && !strcmp(ov, want);
+            if (match) { dattr_set(o, "selected", ""); found = true; }
+            else dattr_remove(o, "selected");
+            free(t.p);
+        }
+        return true;
+    }
+    if (!strcmp(k, "selectedIndex") && !strcmp(n->tag, "select")) {
+        int want = (int)js_tonum(J, v), i = 0;
+        for (struct dnode *o = (struct dnode *)dom_option_next(n, NULL); o; o = (struct dnode *)dom_option_next(n, o), i++) {
+            if (i == want) dattr_set(o, "selected", ""); else dattr_remove(o, "selected");
+        }
+        return true;
+    }
     if (!strcmp(k, "value")) {
         if (!strcmp(n->tag, "textarea")) set_text_content(d, n, sarg(J, v));
         else dattr_set(n, "value", sarg(J, v));
@@ -1705,6 +1767,33 @@ DNATIVE(win_atob)
     return r;
 }
 
+/* __fetchRaw(url, method, body, headers): the one synchronous request behind fetch() and XMLHttpRequest (see POLYFILL_WEB) */
+DNATIVE(win_fetchRaw)
+{
+    struct dom *d = js_fn_data(callee);
+    jsobj *r = js_object_new(J);
+    jsval rv = js_objv(r);
+    struct dom_fetch_result res;
+    if (!d->host.fetch) {
+        js_set(J, rv, "error", js_cstr(J, "networking is not available"));
+        return rv;
+    }
+    size_t bl = 0;
+    const char *body = ARG(2).t == JS_UNDEF || ARG(2).t == JS_NULL ? NULL : js_tostr(J, ARG(2), &bl);
+    const char *url = sarg(J, ARG(0)), *method = sarg(J, ARG(1)), *hdrs = sarg(J, ARG(3));
+    if (!d->host.fetch(d->host.data, url, method[0] ? method : "GET", body, bl, hdrs, &res)) {
+        js_set(J, rv, "error", js_cstr(J, res.error[0] ? res.error : "request failed"));
+        return rv;
+    }
+    js_set(J, rv, "status", js_num(res.status));
+    js_set(J, rv, "url", js_cstr(J, res.url));
+    js_set(J, rv, "headers", js_cstr(J, res.headers ? res.headers : ""));
+    js_set(J, rv, "body", js_strn(J, res.body ? res.body : "", res.body ? res.len : 0));
+    free(res.body);
+    free(res.headers);
+    return rv;
+}
+
 /* observers and other APIs that pages feature-test: harmless stubs */
 DNATIVE(Observer_ctor)
 {
@@ -1846,6 +1935,493 @@ bool dom_click(struct dom *d, int id, char *href, size_t hrefn)
     return false;
 }
 
+/* ---- form controls --------------------------------------------------------------------------------------------- */
+
+static bool widget_rendered(const struct dnode *n)
+{
+    for (const struct dnode *p = n; p; p = p->parent) {
+        if (p->type != DN_ELEMENT)
+            continue;
+        if (dattr_get(p, "hidden") || (p->st && (p->st->display == DS_NONE || p->st->hidden == 1)))
+            return false;
+        if (!strcmp(p->tag, "template") || !strcmp(p->tag, "noscript"))
+            return false;
+    }
+    return true;
+}
+
+static bool is_text_widget(int k) { return k == WK_TEXT || k == WK_PASSWORD || k == WK_TEXTAREA; }
+
+static void get_value(const struct dnode *n, struct sbuf *out)
+{
+    if (widget_kind(n) == WK_TEXTAREA) {
+        dom_text_content(out, n);
+        return;
+    }
+    const char *v = dattr_get(n, "value");
+    if (v)
+        sbuf_addz(out, v);
+}
+
+static void set_value(struct dom *d, struct dnode *n, const char *v)
+{
+    if (widget_kind(n) == WK_TEXTAREA)
+        set_text_content(d, n, v);
+    else
+        dattr_set(n, "value", v);
+}
+
+static bool fire_simple(struct dom *d, struct dnode *n, const char *type, bool bubbles, bool cancelable)
+{
+    js_set_budget(d->J, SCRIPT_BUDGET);
+    jsval ev = make_event(d, type, bubbles, cancelable, JS_UNDEFINED);
+    bool ok = dispatch_node_event(d, n, ev);
+    flush_scripts(d);
+    return ok;
+}
+
+static void set_focus(struct dom *d, struct dnode *n)
+{
+    if (d->focus == n)
+        return;
+    struct dnode *old = d->focus;
+    if (old) {
+        struct sbuf cur = { 0 };
+        get_value(old, &cur);
+        bool changed = is_text_widget(widget_kind(old)) && strcmp(cur.p ? cur.p : "", d->focus_orig ? d->focus_orig : "");
+        free(cur.p);
+        free(d->focus_orig);
+        d->focus_orig = NULL;
+        d->focus = NULL;
+        if (changed)
+            fire_simple(d, old, "change", true, false);
+        fire_simple(d, old, "blur", false, false);
+    }
+    d->focus = n;
+    if (n) {
+        struct sbuf cur = { 0 };
+        get_value(n, &cur);
+        d->focus_orig = dstrdup(cur.p ? cur.p : "");
+        n->caret = (int)strlen(d->focus_orig);
+        free(cur.p);
+        fire_simple(d, n, "focus", false, false);
+    }
+    d->dirty = true;
+}
+
+int dom_focus_id(struct dom *d) { return d->focus ? d->focus->id : 0; }
+
+void dom_blur(struct dom *d) { set_focus(d, NULL); }
+
+static void url_encode(struct sbuf *sb, const char *s)
+{
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '*') sbuf_putc(sb, (char)c);
+        else if (c == ' ') sbuf_putc(sb, '+');
+        else if (c == '\n') sbuf_addz(sb, "%0D%0A");
+        else if (c == '\r') continue;
+        else { char b[4]; snprintf(b, sizeof(b), "%%%02X", c); sbuf_addz(sb, b); }
+    }
+}
+
+static void query_field(struct sbuf *q, const char *name, const char *value)
+{
+    if (q->n)
+        sbuf_putc(q, '&');
+    url_encode(q, name);
+    sbuf_putc(q, '=');
+    url_encode(q, value ? value : "");
+}
+
+static void select_value(const struct dnode *sel, struct sbuf *out)
+{
+    const struct dnode *first = NULL, *pick = NULL;
+    for (const struct dnode *o = dom_option_next(sel, NULL); o; o = dom_option_next(sel, o)) {
+        if (!first) first = o;
+        if (dattr_get(o, "selected")) pick = o;
+    }
+    const struct dnode *o = pick ? pick : first;
+    if (!o)
+        return;
+    const char *v = dattr_get(o, "value");
+    if (v) sbuf_addz(out, v); else dom_text_content(out, o);
+}
+
+/* the form's fields as urlencoded text; `submitter` (a submit button) contributes its own name/value */
+static void build_query(struct dnode *form, struct dnode *submitter, struct sbuf *q)
+{
+    const struct dnode *c = form->first;
+    while (c) {
+        if (c->type == DN_ELEMENT) {
+            int k = widget_kind(c);
+            const char *name = dattr_get(c, "name");
+            if (k != WK_NONE || (!strcmp(c->tag, "input") && dattr_get(c, "type") && !strcasecmp(dattr_get(c, "type"), "hidden"))) {
+                if (name && *name && !dattr_get(c, "disabled")) {
+                    struct sbuf v = { 0 };
+                    switch (k) {
+                    case WK_CHECKBOX: case WK_RADIO:
+                        if (dattr_get(c, "checked")) query_field(q, name, dattr_get(c, "value") ? dattr_get(c, "value") : "on");
+                        break;
+                    case WK_SUBMIT: case WK_BUTTON:
+                        if (c == submitter) { widget_text(c, &v); query_field(q, name, v.p); }
+                        break;
+                    case WK_RESET:
+                        break;
+                    case WK_SELECT:
+                        select_value(c, &v);
+                        query_field(q, name, v.p);
+                        break;
+                    default:                                                  /* text, textarea, hidden, ... */
+                        get_value(c, &v);
+                        query_field(q, name, v.p);
+                    }
+                    free(v.p);
+                }
+            }
+        }
+        if (c->first) { c = c->first; continue; }
+        while (c && c != form && !c->next) c = c->parent;
+        if (!c || c == form) break;
+        c = c->next;
+    }
+}
+
+static struct dnode *default_submitter(struct dnode *form)
+{
+    const struct dnode *c = form->first;
+    while (c) {
+        if (c->type == DN_ELEMENT && widget_kind(c) == WK_SUBMIT)
+            return (struct dnode *)c;
+        if (c->first) { c = c->first; continue; }
+        while (c && c != form && !c->next) c = c->parent;
+        if (!c || c == form) break;
+        c = c->next;
+    }
+    return NULL;
+}
+
+static void submit_form(struct dom *d, struct dnode *form, struct dnode *submitter, bool with_event)
+{
+    if (with_event && !fire_simple(d, form, "submit", true, true))
+        return;                                                      /* a handler called preventDefault */
+    struct sbuf q = { 0 };
+    build_query(form, submitter, &q);
+    const char *action = dattr_get(form, "action"), *method = dattr_get(form, "method");
+    if (submitter && dattr_get(submitter, "formaction")) action = dattr_get(submitter, "formaction");
+    bool post = method && !strcasecmp(method, "post");
+    if (d->host.form_submit)
+        d->host.form_submit(d->host.data, action ? action : "", q.p ? q.p : "", post);
+    free(q.p);
+}
+
+static void press_widget(struct dom *d, struct dnode *n, int k)
+{
+    struct dnode *form = dom_form_of(n);
+    if (k == WK_SUBMIT) {
+        if (form)
+            submit_form(d, form, n, true);
+    } else if (k == WK_RESET && form) {
+        fire_simple(d, form, "reset", true, true);
+    }
+}
+
+static void set_radio(struct dom *d, struct dnode *n)
+{
+    const char *name = dattr_get(n, "name");
+    struct dnode *form = dom_form_of(n);
+    if (name && *name) {
+        for (struct dnode *o = d->all_nodes; o; o = o->all_next)
+            if (o != n && o->type == DN_ELEMENT && widget_kind(o) == WK_RADIO && dom_form_of(o) == form) {
+                const char *on = dattr_get(o, "name");
+                if (on && !strcmp(on, name))
+                    dattr_remove(o, "checked");
+            }
+    }
+    dattr_set(n, "checked", "");
+}
+
+static void select_step(struct dom *d, struct dnode *sel, int delta, bool wrap)
+{
+    int cnt = 0, cur = -1, i = 0;
+    for (const struct dnode *o = dom_option_next(sel, NULL); o; o = dom_option_next(sel, o), i++) {
+        if (dattr_get(o, "selected")) cur = i;
+        cnt++;
+    }
+    if (!cnt)
+        return;
+    int nx = cur < 0 ? 0 : cur + delta;
+    if (nx < 0) nx = wrap ? cnt - 1 : 0;
+    if (nx >= cnt) nx = wrap ? 0 : cnt - 1;
+    if (nx == cur)
+        return;
+    i = 0;
+    for (struct dnode *o = (struct dnode *)dom_option_next(sel, NULL); o; o = (struct dnode *)dom_option_next(sel, o), i++) {
+        if (i == nx) dattr_set(o, "selected", "");
+        else dattr_remove(o, "selected");
+    }
+    fire_simple(d, sel, "input", true, false);
+    fire_simple(d, sel, "change", true, false);
+}
+
+void dom_widget_click(struct dom *d, int id, int cols)
+{
+    struct dnode *n = dom_node_by_numeric_id(d, id);
+    if (!n || widget_kind(n) == WK_NONE)
+        return;
+    int k = widget_kind(n);
+    if (dattr_get(n, "disabled"))
+        return;
+    js_set_budget(d->J, SCRIPT_BUDGET);
+    bool was_focus = d->focus == n;
+    if (is_text_widget(k) || k == WK_SELECT)
+        set_focus(d, n);
+    else if (d->focus)
+        set_focus(d, NULL);
+    if (!fire_simple(d, n, "click", true, true))
+        return;
+    if (is_text_widget(k)) {
+        if (was_focus && k != WK_TEXTAREA) {                          /* place the caret where it was clicked */
+            struct sbuf v = { 0 };
+            get_value(n, &v);
+            const char *s = v.p ? v.p : "";
+            int caret_chars = 0;
+            for (int i = 0; i < n->caret && s[i]; i++) caret_chars += ((unsigned char)s[i] & 0xc0) != 0x80;
+            int cwidth = dattr_get(n, "size") ? atoi(dattr_get(n, "size")) : 20;
+            if (cwidth < 4 || cwidth > 120) cwidth = 20;
+            int start = caret_chars - cwidth + 1 > 0 ? caret_chars - cwidth + 1 : 0;
+            int target = start + (cols < 0 ? 0 : cols), idx = 0, ch = 0;
+            while (s[idx] && ch < target) {
+                idx++;
+                while (((unsigned char)s[idx] & 0xc0) == 0x80) idx++;
+                ch++;
+            }
+            n->caret = idx;
+            free(v.p);
+        }
+    } else if (k == WK_CHECKBOX) {
+        if (dattr_get(n, "checked")) dattr_remove(n, "checked"); else dattr_set(n, "checked", "");
+        fire_simple(d, n, "input", true, false);
+        fire_simple(d, n, "change", true, false);
+    } else if (k == WK_RADIO) {
+        if (!dattr_get(n, "checked")) {
+            set_radio(d, n);
+            fire_simple(d, n, "input", true, false);
+            fire_simple(d, n, "change", true, false);
+        }
+    } else if (k == WK_SELECT) {
+        select_step(d, n, 1, true);
+    } else {
+        press_widget(d, n, k);
+    }
+    d->dirty = true;
+}
+
+static int utf8_prev(const char *s, int i)
+{
+    if (i <= 0) return 0;
+    i--;
+    while (i > 0 && ((unsigned char)s[i] & 0xc0) == 0x80) i--;
+    return i;
+}
+
+static int utf8_next(const char *s, int i)
+{
+    if (!s[i]) return i;
+    i++;
+    while (s[i] && ((unsigned char)s[i] & 0xc0) == 0x80) i++;
+    return i;
+}
+
+bool dom_widget_key(struct dom *d, int key, const char *text)
+{
+    struct dnode *n = d->focus;
+    if (!n)
+        return false;
+    int k = widget_kind(n);
+    js_set_budget(d->J, SCRIPT_BUDGET);
+    if (k == WK_SELECT) {
+        if (key == DOM_KEY_UP) select_step(d, n, -1, false);
+        else if (key == DOM_KEY_DOWN) select_step(d, n, 1, false);
+        else if (key == DOM_KEY_ENTER || (key == DOM_KEY_CHAR && text[0] == ' ')) select_step(d, n, 1, true);
+        else return false;
+        return true;
+    }
+    if (!is_text_widget(k)) {
+        if (key == DOM_KEY_ENTER || (key == DOM_KEY_CHAR && text && text[0] == ' '))
+            dom_widget_click(d, n->id, 0);
+        else
+            return false;
+        return true;
+    }
+    struct sbuf v = { 0 };
+    get_value(n, &v);
+    const char *s = v.p ? v.p : "";
+    int len = (int)strlen(s);
+    if (n->caret > len) n->caret = len;
+    bool edited = false;
+    switch (key) {
+    case DOM_KEY_CHAR: {
+        const char *ml = dattr_get(n, "maxlength");
+        if (ml && atoi(ml) > 0) {
+            int chars = 0;
+            for (int i = 0; i < len; i++) chars += ((unsigned char)s[i] & 0xc0) != 0x80;
+            if (chars >= atoi(ml)) break;
+        }
+        struct sbuf nv = { 0 };
+        sbuf_add(&nv, s, (size_t)n->caret);
+        sbuf_addz(&nv, text);
+        sbuf_add(&nv, s + n->caret, (size_t)(len - n->caret));
+        n->caret += (int)strlen(text);
+        set_value(d, n, nv.p);
+        free(nv.p);
+        edited = true;
+        break;
+    }
+    case DOM_KEY_ENTER:
+        if (k == WK_TEXTAREA) {
+            struct sbuf nv = { 0 };
+            sbuf_add(&nv, s, (size_t)n->caret);
+            sbuf_putc(&nv, '\n');
+            sbuf_add(&nv, s + n->caret, (size_t)(len - n->caret));
+            n->caret++;
+            set_value(d, n, nv.p);
+            free(nv.p);
+            edited = true;
+        } else {
+            free(d->focus_orig);
+            bool changed = strcmp(s, "") != 0;
+            (void)changed;
+            d->focus_orig = dstrdup(s);
+            fire_simple(d, n, "change", true, false);
+            struct dnode *form = dom_form_of(n);
+            if (form)
+                submit_form(d, form, default_submitter(form), true);
+        }
+        break;
+    case DOM_KEY_BACKSPACE:
+        if (n->caret > 0) {
+            int p = utf8_prev(s, n->caret);
+            struct sbuf nv = { 0 };
+            sbuf_add(&nv, s, (size_t)p);
+            sbuf_add(&nv, s + n->caret, (size_t)(len - n->caret));
+            n->caret = p;
+            set_value(d, n, nv.p);
+            free(nv.p);
+            edited = true;
+        }
+        break;
+    case DOM_KEY_DELETE:
+        if (n->caret < len) {
+            int p = utf8_next(s, n->caret);
+            struct sbuf nv = { 0 };
+            sbuf_add(&nv, s, (size_t)n->caret);
+            sbuf_add(&nv, s + p, (size_t)(len - p));
+            set_value(d, n, nv.p);
+            free(nv.p);
+            edited = true;
+        }
+        break;
+    case DOM_KEY_LEFT: n->caret = utf8_prev(s, n->caret); d->dirty = true; break;
+    case DOM_KEY_RIGHT: n->caret = utf8_next(s, n->caret); d->dirty = true; break;
+    case DOM_KEY_HOME:
+        n->caret = 0;
+        if (k == WK_TEXTAREA) { int i = (int)n->caret; (void)i; }
+        d->dirty = true;
+        break;
+    case DOM_KEY_END: n->caret = len; d->dirty = true; break;
+    case DOM_KEY_UP:
+    case DOM_KEY_DOWN:
+        if (k == WK_TEXTAREA) {                                       /* move by lines, keeping the column */
+            int ls = n->caret;
+            while (ls > 0 && s[ls - 1] != '\n') ls--;
+            int col = n->caret - ls;
+            if (key == DOM_KEY_UP) {
+                if (ls == 0) { n->caret = 0; }
+                else {
+                    int pe = ls - 1, ps = pe;
+                    while (ps > 0 && s[ps - 1] != '\n') ps--;
+                    n->caret = ps + (col < pe - ps ? col : pe - ps);
+                }
+            } else {
+                int le = n->caret;
+                while (s[le] && s[le] != '\n') le++;
+                if (!s[le]) n->caret = len;
+                else {
+                    int ns = le + 1, ne = ns;
+                    while (s[ne] && s[ne] != '\n') ne++;
+                    n->caret = ns + (col < ne - ns ? col : ne - ns);
+                }
+            }
+            d->dirty = true;
+        } else {
+            free(v.p);
+            return false;
+        }
+        break;
+    default:
+        free(v.p);
+        return false;
+    }
+    free(v.p);
+    if (edited)
+        fire_simple(d, n, "input", true, false);
+    d->dirty = true;
+    return true;
+}
+
+void dom_focus_next(struct dom *d, bool backwards)
+{
+    struct dnode *list[256];
+    int cnt = 0, cur = -1;
+    const struct dnode *c = d->doc->first;
+    while (c && cnt < 256) {
+        if (c->type == DN_ELEMENT && widget_kind(c) != WK_NONE && !dattr_get(c, "disabled") && widget_rendered(c)) {
+            if (c == d->focus) cur = cnt;
+            list[cnt++] = (struct dnode *)c;
+        }
+        if (c->first) { c = c->first; continue; }
+        while (c && c != d->doc && !c->next) c = c->parent;
+        if (!c || c == d->doc) break;
+        c = c->next;
+    }
+    if (!cnt)
+        return;
+    int nx = cur < 0 ? (backwards ? cnt - 1 : 0) : (cur + (backwards ? -1 : 1) + cnt) % cnt;
+    struct dnode *n = list[nx];
+    int k = widget_kind(n);
+    set_focus(d, is_text_widget(k) || k == WK_SELECT ? n : NULL);
+}
+
+DNATIVE(el_focus)
+{
+    struct dnode *n = this_node(J, thisv);
+    if (n && widget_kind(n) != WK_NONE && is_text_widget(widget_kind(n)))
+        set_focus(n->dom, n);
+    return JS_UNDEFINED;
+}
+DNATIVE(el_blur)
+{
+    struct dnode *n = this_node(J, thisv);
+    if (n && n->dom->focus == n)
+        set_focus(n->dom, NULL);
+    return JS_UNDEFINED;
+}
+DNATIVE(form_submit_native)
+{
+    struct dnode *n = this_node(J, thisv);
+    if (n && !strcmp(n->tag, "form"))
+        submit_form(n->dom, n, NULL, false);
+    return JS_UNDEFINED;
+}
+DNATIVE(form_requestSubmit)
+{
+    struct dnode *n = this_node(J, thisv);
+    if (n && !strcmp(n->tag, "form"))
+        submit_form(n->dom, n, default_submitter(n), true);
+    return JS_UNDEFINED;
+}
+
 /* ---- scripts ------------------------------------------------------------------------------------------------------ */
 
 static bool script_type_ok(const struct dnode *s)
@@ -1955,6 +2531,133 @@ static jsobj *def_ctor(struct dom *d, const char *name, js_native fn, jsobj *pro
     return c;
 }
 
+/* fetch, Headers, Request, Response, XMLHttpRequest, FormData: JavaScript over __fetchRaw. Responses arrive in the same call
+ * (the window waits), but promise reactions and XHR events are still delivered asynchronously. */
+static const char POLYFILL_WEB[] =
+"(function (g) {\n"
+"  var raw = g.__fetchRaw;\n"
+"  Object.defineProperty(g, '__fetchRaw', { value: undefined, writable: true, configurable: true, enumerable: false });\n"
+"  function def(n, v) { Object.defineProperty(g, n, { value: v, writable: true, configurable: true, enumerable: false }); }\n"
+"  function method(p, n, f) { Object.defineProperty(p, n, { value: f, writable: true, configurable: true, enumerable: false }); }\n"
+"  function Headers(init) {\n"
+"    Object.defineProperty(this, '_m', { value: {} });\n"
+"    if (init instanceof Headers) init.forEach(function (v, k) { this.append(k, v); }, this);\n"
+"    else if (Array.isArray(init)) init.forEach(function (p) { this.append(p[0], p[1]); }, this);\n"
+"    else if (init && typeof init === 'object') Object.keys(init).forEach(function (k) { this.append(k, init[k]); }, this);\n"
+"  }\n"
+"  var HP = Headers.prototype;\n"
+"  method(HP, 'append', function (k, v) { k = String(k).toLowerCase(); this._m[k] = this._m[k] === undefined ? String(v) : this._m[k] + ', ' + v; });\n"
+"  method(HP, 'set', function (k, v) { this._m[String(k).toLowerCase()] = String(v); });\n"
+"  method(HP, 'get', function (k) { var v = this._m[String(k).toLowerCase()]; return v === undefined ? null : v; });\n"
+"  method(HP, 'has', function (k) { return this._m[String(k).toLowerCase()] !== undefined; });\n"
+"  method(HP, 'delete', function (k) { delete this._m[String(k).toLowerCase()]; });\n"
+"  method(HP, 'forEach', function (f, t) { Object.keys(this._m).forEach(function (k) { f.call(t, this._m[k], k, this); }, this); });\n"
+"  method(HP, 'keys', function () { return Object.keys(this._m); });\n"
+"  method(HP, 'values', function () { return Object.keys(this._m).map(function (k) { return this._m[k]; }, this); });\n"
+"  method(HP, 'entries', function () { return Object.keys(this._m).map(function (k) { return [k, this._m[k]]; }, this); });\n"
+"  function parseHeaders(raw) {\n"
+"    var h = new Headers(), lines = String(raw).split(/\\r?\\n/);\n"
+"    for (var i = 1; i < lines.length; i++) { var j = lines[i].indexOf(':'); if (j > 0) h.append(lines[i].slice(0, j).trim(), lines[i].slice(j + 1).trim()); }\n"
+"    return h;\n"
+"  }\n"
+"  function headerBlock(h) { var s = ''; h.forEach(function (v, k) { s += k + ': ' + v + '\\r\\n'; }); return s; }\n"
+"  function bodyText(b, h) {\n"
+"    if (b === undefined || b === null) return null;\n"
+"    if (typeof b === 'string') return b;\n"
+"    if (b instanceof URLSearchParams) { if (!h.has('content-type')) h.set('content-type', 'application/x-www-form-urlencoded;charset=UTF-8'); return b.toString(); }\n"
+"    if (b instanceof FormData) { if (!h.has('content-type')) h.set('content-type', 'application/x-www-form-urlencoded;charset=UTF-8'); return b.toString(); }\n"
+"    if (typeof b === 'object' && !(b instanceof Array)) return JSON.stringify(b);\n"
+"    return String(b);\n"
+"  }\n"
+"  function FormData(form) { Object.defineProperty(this, '_l', { value: [] }); }\n"
+"  method(FormData.prototype, 'append', function (k, v) { this._l.push([String(k), String(v)]); });\n"
+"  method(FormData.prototype, 'set', function (k, v) { this.delete(k); this.append(k, v); });\n"
+"  method(FormData.prototype, 'delete', function (k) { this._l = this._l.filter(function (p) { return p[0] !== k; }); });\n"
+"  method(FormData.prototype, 'get', function (k) { for (var i = 0; i < this._l.length; i++) if (this._l[i][0] === k) return this._l[i][1]; return null; });\n"
+"  method(FormData.prototype, 'getAll', function (k) { return this._l.filter(function (p) { return p[0] === k; }).map(function (p) { return p[1]; }); });\n"
+"  method(FormData.prototype, 'has', function (k) { return this.get(k) !== null; });\n"
+"  method(FormData.prototype, 'entries', function () { return this._l.slice(); });\n"
+"  method(FormData.prototype, 'toString', function () { return new URLSearchParams(this._l).toString(); });\n"
+"  def('FormData', FormData);\n"
+"  function Response(body, init) {\n"
+"    init = init || {};\n"
+"    Object.defineProperty(this, '_body', { value: body === undefined || body === null ? '' : String(body), writable: true });\n"
+"    this.status = init.status === undefined ? 200 : init.status; this.ok = this.status >= 200 && this.status < 300;\n"
+"    this.statusText = init.statusText === undefined ? '' : init.statusText; this.headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers);\n"
+"    this.url = init.url || ''; this.type = 'basic'; this.redirected = false; this.bodyUsed = false;\n"
+"  }\n"
+"  var RP = Response.prototype;\n"
+"  method(RP, 'text', function () { var s = this; return new Promise(function (res) { s.bodyUsed = true; res(s._body); }); });\n"
+"  method(RP, 'json', function () { var s = this; return new Promise(function (res) { s.bodyUsed = true; res(JSON.parse(s._body)); }); });\n"
+"  method(RP, 'clone', function () { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); });\n"
+"  method(RP, 'arrayBuffer', function () { return Promise.reject(new TypeError('binary response bodies are not supported')); });\n"
+"  method(RP, 'blob', function () { return Promise.reject(new TypeError('binary response bodies are not supported')); });\n"
+"  method(Response, 'json', function (d, init) { return new Response(JSON.stringify(d), init); });\n"
+"  method(Response, 'error', function () { var r = new Response('', { status: 0 }); r.type = 'error'; return r; });\n"
+"  def('Response', Response); def('Headers', Headers);\n"
+"  function Request(input, init) {\n"
+"    init = init || {};\n"
+"    var src = input instanceof Request ? input : null;\n"
+"    this.url = src ? src.url : String(input); this.method = String(init.method || (src && src.method) || 'GET').toUpperCase();\n"
+"    this.headers = new Headers(init.headers || (src && src.headers)); this.body = init.body !== undefined ? init.body : (src ? src.body : null);\n"
+"    this.credentials = init.credentials || 'same-origin'; this.mode = init.mode || 'cors'; this.signal = init.signal || null;\n"
+"  }\n"
+"  def('Request', Request);\n"
+"  def('fetch', function fetch(input, init) {\n"
+"    return new Promise(function (resolve, reject) {\n"
+"      var req = new Request(input, init);\n"
+"      if (req.signal && req.signal.aborted) return reject(new Error('The operation was aborted.'));\n"
+"      var body = bodyText(req.body, req.headers);\n"
+"      if (req.method === 'GET' || req.method === 'HEAD') body = null;\n"
+"      var r = raw(req.url, req.method, body, headerBlock(req.headers));\n"
+"      if (r.error) return reject(new TypeError('Failed to fetch: ' + r.error));\n"
+"      var status = /^HTTP\\/[\\d.]+ (\\d+) ?(.*)/.exec(r.headers), resp = new Response(req.method === 'HEAD' ? '' : r.body, { status: r.status, statusText: status ? status[2].trim() : '', headers: parseHeaders(r.headers), url: r.url });\n"
+"      resp.redirected = r.url !== new URL(req.url, g.location.href).href;\n"
+"      resolve(resp);\n"
+"    });\n"
+"  });\n"
+"  // ---- XMLHttpRequest\n"
+"  function XMLHttpRequest() {\n"
+"    this.readyState = 0; this.status = 0; this.statusText = ''; this.responseText = ''; this.response = ''; this.responseType = ''; this.responseURL = ''; this.timeout = 0; this.withCredentials = false;\n"
+"    this.onreadystatechange = null; this.onload = null; this.onerror = null; this.onloadend = null; this.onabort = null; this.ontimeout = null; this.onprogress = null; this.onloadstart = null;\n"
+"    Object.defineProperty(this, '_h', { value: new Headers() }); Object.defineProperty(this, '_rh', { value: new Headers(), writable: true }); Object.defineProperty(this, '_ls', { value: {} });\n"
+"  }\n"
+"  var XP = XMLHttpRequest.prototype;\n"
+"  ['UNSENT', 'OPENED', 'HEADERS_RECEIVED', 'LOADING', 'DONE'].forEach(function (n, i) { XMLHttpRequest[n] = i; XP[n] = i; });\n"
+"  function xfire(x, type) {\n"
+"    var ev = { type: type, target: x, currentTarget: x, lengthComputable: false, loaded: 0, total: 0 };\n"
+"    var h = x['on' + type]; if (typeof h === 'function') { try { h.call(x, ev); } catch (e) { console.error(e && e.message ? e.message : e); } }\n"
+"    (x._ls[type] || []).slice().forEach(function (f) { try { f.call(x, ev); } catch (e) { console.error(e && e.message ? e.message : e); } });\n"
+"  }\n"
+"  method(XP, 'addEventListener', function (t, f) { (this._ls[t] = this._ls[t] || []).push(f); });\n"
+"  method(XP, 'removeEventListener', function (t, f) { this._ls[t] = (this._ls[t] || []).filter(function (x) { return x !== f; }); });\n"
+"  method(XP, 'open', function (m, url, async) { this._m = String(m).toUpperCase(); this._u = String(url); this._async = async !== false; this.readyState = 1; xfire(this, 'readystatechange'); });\n"
+"  method(XP, 'setRequestHeader', function (k, v) { this._h.append(k, v); });\n"
+"  method(XP, 'overrideMimeType', function () {});\n"
+"  method(XP, 'getResponseHeader', function (k) { return this._rh.get(k); });\n"
+"  method(XP, 'getAllResponseHeaders', function () { return headerBlock(this._rh); });\n"
+"  method(XP, 'abort', function () { this._aborted = true; this.readyState = 0; xfire(this, 'abort'); });\n"
+"  method(XP, 'send', function (body) {\n"
+"    var x = this, h = this._h, b = bodyText(body, h);\n"
+"    if (this._m === 'GET' || this._m === 'HEAD') b = null;\n"
+"    function run() {\n"
+"      if (x._aborted) return;\n"
+"      xfire(x, 'loadstart');\n"
+"      var r = raw(x._u, x._m, b, headerBlock(h));\n"
+"      if (r.error) { x.readyState = 4; x.status = 0; xfire(x, 'readystatechange'); xfire(x, 'error'); xfire(x, 'loadend'); return; }\n"
+"      x.status = r.status; x.responseURL = r.url; x._rh = parseHeaders(r.headers);\n"
+"      var st = /^HTTP\\/[\\d.]+ \\d+ ?(.*)/.exec(r.headers); x.statusText = st ? st[1].trim() : '';\n"
+"      x.readyState = 2; xfire(x, 'readystatechange'); x.readyState = 3; xfire(x, 'readystatechange');\n"
+"      x.responseText = r.body;\n"
+"      if (x.responseType === 'json') { try { x.response = JSON.parse(r.body); } catch (e) { x.response = null; } }\n"
+"      else x.response = r.body;\n"
+"      x.readyState = 4; xfire(x, 'readystatechange'); xfire(x, 'load'); xfire(x, 'loadend');\n"
+"    }\n"
+"    if (this._async) setTimeout(run, 0); else run();\n"
+"  });\n"
+"  def('XMLHttpRequest', XMLHttpRequest);\n"
+"})(this);\n";
+
 static void setup_globals(struct dom *d)
 {
     js *J = d->J;
@@ -1975,7 +2678,8 @@ static void setup_globals(struct dom *d)
     M("querySelector", el_querySelector, 1); M("querySelectorAll", el_querySelectorAll, 1);
     M("getElementsByTagName", el_getElementsByTagName, 1); M("getElementsByClassName", el_getElementsByClassName, 1);
     M("getElementsByName", el_getElementsByName, 1); M("insertAdjacentHTML", el_insertAdjacentHTML, 2);
-    M("click", el_click, 0); M("focus", el_noop, 0); M("blur", el_noop, 0); M("scrollIntoView", el_noop, 0);
+    M("click", el_click, 0); M("focus", el_focus, 0); M("blur", el_blur, 0); M("scrollIntoView", el_noop, 0);
+    M("submit", form_submit_native, 0); M("requestSubmit", form_requestSubmit, 0); M("reset", el_noop, 0);
     M("getBoundingClientRect", el_getBoundingClientRect, 0); M("getClientRects", el_noop, 0);
     M("createElement", doc_createElement, 1); M("createElementNS", doc_createElement, 2);
     M("createTextNode", doc_createTextNode, 1); M("createComment", doc_createComment, 1);
@@ -2095,6 +2799,10 @@ static void setup_globals(struct dom *d)
         js_def_native(J, st, "clear", st_clear, 0);
         js_def_value(J, g, i ? "sessionStorage" : "localStorage", js_objv(st));
     }
+    def_fn(d, g, "__fetchRaw", win_fetchRaw, 4);
+    char err[300];
+    if (!js_run(J, POLYFILL_WEB, sizeof(POLYFILL_WEB) - 1, "web polyfill", err, sizeof(err)))
+        fprintf(stderr, "lumen-web: internal web polyfill failed: %s\n", err);
 }
 
 struct dom *dom_create(const char *url, const struct dom_host *host)
@@ -2129,6 +2837,8 @@ void dom_free(struct dom *d)
         l = nx;
     }
     js_free(d->J);
+    free(d->focus_orig);
+    dom_css_free(d);
     dom_free_nodes(d);
     free(d->title_cache);
     free(d);
@@ -2138,8 +2848,32 @@ void dom_load(struct dom *d, const char *html, size_t len)
 {
     dom_parse_into(d, d->doc, html, len);
     dom_normalize(d);
+    if (d->host.prefetch) {                                  /* external scripts and style sheets, all at once */
+        const char *urls[128];
+        int nu = 0;
+        const struct dnode *c = d->doc->first;
+        while (c && nu < 128) {
+            if (c->type == DN_ELEMENT) {
+                const char *u = NULL;
+                if (!strcmp(c->tag, "script") && !c->script_done) u = dattr_get(c, "src");
+                else if (!strcmp(c->tag, "link")) {
+                    const char *rel = dattr_get(c, "rel");
+                    if (rel && strcasestr(rel, "stylesheet")) u = dattr_get(c, "href");
+                }
+                if (u && *u) urls[nu++] = u;
+            }
+            if (c->first) { c = c->first; continue; }
+            while (c && c != d->doc && !c->next) c = c->parent;
+            if (!c || c == d->doc) break;
+            c = c->next;
+        }
+        if (nu > 1)
+            d->host.prefetch(d->host.data, urls, nu);
+    }
     d->ready = 0;
+    d->load_deadline = dom_now(d) + 9000;                    /* wall-clock limit for running the page's scripts */
     flush_scripts(d);
+    d->load_deadline = 0;
     d->ready = 1;
     run_allowed(d);
     jsval ev = make_event(d, "DOMContentLoaded", true, false, JS_UNDEFINED);

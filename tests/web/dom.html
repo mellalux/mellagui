@@ -69,7 +69,7 @@ eq(location.protocol, 'file:', 'location.protocol'); eq(typeof location.href, 's
 eq(typeof localStorage.getItem, 'function', 'localStorage'); localStorage.setItem('k', 'v'); eq(localStorage.getItem('k'), 'v', 'storage get'); eq(localStorage.getItem('zz'), null, 'storage miss');
 eq(btoa('hello'), 'aGVsbG8=', 'btoa'); eq(atob('aGVsbG8='), 'hello', 'atob'); eq(typeof getComputedStyle($('p1')).getPropertyValue, 'function', 'getComputedStyle');
 eq(document.createElement('div') instanceof HTMLElement, true, 'instanceof HTMLElement'); eq(document.createElement('div') instanceof Node, true, 'instanceof Node'); eq(document.nodeType, 9, 'document nodeType');
-eq(typeof fetch, 'undefined', 'no fetch'); eq(typeof Promise, 'function', 'Promise exists'); eq(typeof queueMicrotask, 'function', 'queueMicrotask');
+eq(typeof fetch, 'function', 'fetch exists'); eq(typeof XMLHttpRequest, 'function', 'XMLHttpRequest exists'); eq(typeof Promise, 'function', 'Promise exists'); eq(typeof queueMicrotask, 'function', 'queueMicrotask');
 var pOrder = []; Promise.resolve().then(function () { pOrder.push('micro'); }); setTimeout(function () { pOrder.push('timer'); }, 0); pOrder.push('sync');
 setTimeout(function () { results.n++; if (pOrder.join() !== 'sync,micro,timer') results.fails.push('microtask order: ' + pOrder.join()); }, 20);
 // timers (checked from the timer callbacks below)

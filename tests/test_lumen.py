@@ -1586,6 +1586,183 @@ document.getElementById('b').addEventListener('click', function () { document.ti
         self.assertTrue(wait_title('timer fired - Lumen Web'), title())      # the timer runs in the main loop without input
         ctl.abs(900, 500)
 
+    def start_http_server(self):
+        """A tiny http server: GET files from tmp/site, POST /echo answers with the request body and method."""
+        site = os.path.join(tmp, 'site')
+        os.makedirs(site, exist_ok=True)
+        code = ('import http.server, sys, os\n'
+                'os.chdir(sys.argv[1])\n'
+                'class H(http.server.SimpleHTTPRequestHandler):\n'
+                '    def do_POST(self):\n'
+                '        n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n)\n'
+                '        out = ("POST:" + self.headers.get("Content-Type", "") + ":" + body.decode()).encode()\n'
+                '        self.send_response(200); self.send_header("Content-Type", "text/plain"); self.send_header("X-Test", "yes")\n'
+                '        self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)\n'
+                '    def log_message(self, *a): pass\n'
+                'h = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)\n'
+                'print(h.server_address[1], flush=True)\n'
+                'h.serve_forever()\n')
+        srv = subprocess.Popen([sys.executable, '-I', '-c', code, site], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: (srv.kill(), srv.wait(), srv.stdout.close()))
+        return int(srv.stdout.readline())
+
+    def test_js_fetch_and_xmlhttprequest(self):
+        port = self.start_http_server()
+        self.write_page('data.json', '{"hello": "json", "list": [1, 2, 3]}')
+        page = self.write_page('net.html', '''<html><body><p id="a">a</p><p id="b">b</p><p id="c">c</p><p id="d">d</p><p id="e">e</p>
+<script>
+fetch('data.json').then(function (r) { return r.json(); }).then(function (j) { document.getElementById('a').textContent = 'fetch ' + j.hello + j.list.length; });
+(async function () { var r = await fetch('data.json'); document.getElementById('b').textContent = 'await ' + r.status + ' ' + r.ok + ' ' + r.headers.get('content-type'); })();
+var x = new XMLHttpRequest(); x.open('GET', 'data.json'); x.responseType = 'json';
+x.onload = function () { document.getElementById('c').textContent = 'xhr ' + x.status + ' ' + x.response.list.join('+'); }; x.send();
+fetch('/echo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ k: 1 }) })
+  .then(function (r) { return r.text().then(function (t) { document.getElementById('d').textContent = r.status + ' ' + r.headers.get('x-test') + ' ' + t; }); });
+fetch('missing.json').then(function (r) { document.getElementById('e').textContent = 'missing ' + r.status + ' ' + r.ok; });
+</script></body></html>''')
+        out, err = self.web_dump('http://127.0.0.1:%d/net.html' % port, 500)
+        self.assertIn('fetch json3', out)
+        self.assertIn('await 200 true', out)
+        self.assertIn('xhr 200 1+2+3', out)
+        self.assertIn('200 yes POST:application/json:{"k":1}', out)
+        self.assertIn('missing 404 false', out)
+
+    @staticmethod
+    def png_bytes(w, h, pixels):
+        import zlib
+        raw = b''.join(b'\x00' + b''.join(bytes(pixels[y][x]) for x in range(w)) for y in range(h))
+        def chunk(t, d):
+            return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+        return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+
+    def web_frame(self, page, wait=1.0):
+        """Run lumen-web on `page`, wait, return (Ppm of the screen, window dict); the browser is stopped afterwards."""
+        path = os.path.join(ROOT, 'build', 'lumen-web')
+        if not os.path.exists(path):
+            self.skipTest('lumen-web not built')
+        p = subprocess.Popen([path, page], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('lumen.web')
+        self.assertIsNotNone(win, 'browser window did not appear')
+        time.sleep(wait)
+        ctl.abs(1000, 580)
+        time.sleep(0.1)
+        img = ctl.dump(os.path.join(tmp, 'web-%d.ppm' % p.pid))
+        return img, wait_for_window('lumen.web')
+
+    def test_image_decoders_match_pil(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest('PIL not available')
+        tool = os.path.join(ROOT, 'build', 'image-test')
+        if not os.path.exists(tool):
+            self.skipTest('image-test not built')
+        im = Image.new('RGB', (203, 117))
+        for y in range(117):
+            for x in range(203):
+                im.putpixel((x, y), (int(255 * x / 203), int(255 * y / 117), int(255 * (x + y) / 320)))
+        ImageDraw.Draw(im).ellipse((40, 20, 140, 90), fill=(250, 40, 40))
+        alpha = im.convert('RGBA')
+        mask = Image.new('L', im.size, 0)
+        ImageDraw.Draw(mask).ellipse((5, 5, 190, 100), fill=255)
+        alpha.putalpha(mask)
+        cases = []
+        d = os.path.join(tmp, 'imgs')
+        os.makedirs(d, exist_ok=True)
+
+        def save(name, img, **kw):
+            path = os.path.join(d, name)
+            img.save(path, **kw)
+            cases.append((name, 0 if name.endswith(('.png', '.gif', '.bmp')) else 4))
+
+        save('a.png', im); save('b.png', alpha); save('c.png', im.convert('L')); save('d.png', im.convert('P'))
+        save('e.gif', im.convert('P')); save('f.bmp', im)
+        save('g.jpg', im, quality=90, subsampling=0); save('h.jpg', im, quality=90, subsampling=2)
+        save('i.jpg', im, quality=90, progressive=True, subsampling=0); save('j.jpg', im.convert('L'), quality=90)
+        save('k.jpg', im, quality=80, progressive=True, subsampling=2)
+        for name, tolerance in cases:
+            out = os.path.join(d, name + '.ppm')
+            r = subprocess.run([tool, os.path.join(d, name), out], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, name + ': ' + r.stdout)
+            mine = Image.open(out).convert('RGB')
+            ref = Image.open(os.path.join(d, name))
+            if ref.mode in ('RGBA', 'LA', 'P'):
+                ref = ref.convert('RGBA')
+                bg = Image.new('RGBA', ref.size, (255, 255, 255, 255))
+                bg.alpha_composite(ref)
+                ref = bg
+            ref = ref.convert('RGB')
+            self.assertEqual(mine.size, ref.size, name)
+            worst = max(max(abs(a - b) for a, b in zip(p, q)) for p, q in zip(mine.getdata(), ref.getdata()))
+            self.assertLessEqual(worst, tolerance + (60 if name == 'h.jpg' or name == 'k.jpg' else 0), '%s: worst difference %d' % (name, worst))
+
+    def test_forms_edit_and_submit(self):
+        path = os.path.join(ROOT, 'build', 'lumen-web')
+        if not os.path.exists(path):
+            self.skipTest('lumen-web not built')
+        self.write_page('formres.html', '<html><head><title>x</title></head><body><script>document.title = "q" + location.search;</script></body></html>')
+        page = self.write_page('form1.html', '''<html><head><title>Form</title></head><body>
+<form action="formres.html" method="get"><p>Name: <input type="text" name="q" value="ab" size="16">
+<input type="checkbox" name="c" value="yes"> <select name="s"><option value="a">A</option><option value="b">B</option></select>
+<input type="submit" value="Go"></p></form></body></html>''')
+        p = subprocess.Popen([path, page], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('lumen.web')
+        self.assertIsNotNone(win, 'browser window did not appear')
+        time.sleep(0.4)
+
+        def title():
+            return wait_for_window('lumen.web')['title']
+
+        # first line of the page: "Name: " is 48 px wide, so the field spans x = 64..204; its middle is 37 px below the toolbar
+        fy = win['y'] + 34 + 37
+        ctl.click(win['x'] + 64 + 60, fy)                 # focus the text field (caret at the end)
+        for ch in 'cd':
+            ctl.tap(KEYCODES[ch])
+        ctl.tap(14)                                       # KEY_BACKSPACE: removes the 'd'
+        ctl.tap(KEYCODES['x'])
+        ctl.click(win['x'] + 219, fy)                     # the checkbox right of the field: toggles it
+        ctl.tap(KEY_TAB)
+        ctl.tap(KEY_ENTER)                                # Enter in a field submits the form
+        for _ in range(60):
+            if title().startswith('q?'):
+                break
+            time.sleep(0.05)
+        self.assertEqual(title(), 'q?q=abcx&c=yes&s=a - Lumen Web')
+        ctl.abs(900, 500)
+
+    def test_images_are_decoded_and_painted(self):
+        red, green, blue = (255, 0, 0), (0, 255, 0), (0, 0, 255)
+        png = self.png_bytes(2, 2, [[red, green], [blue, (255, 255, 0)]])
+        import base64
+        uri = 'data:image/png;base64,' + base64.b64encode(png).decode()
+        page = self.write_page('img.html', '<html><body><img src="%s" width="40" height="40"></body></html>' % uri)
+        img, win = self.web_frame(page)
+        # the image is the first thing on the page: 16 px padding, 10 px top margin, below the 34 px toolbar
+        x0, y0 = win['x'] + 16, win['y'] + 34 + 10
+        self.assertEqual(img.px(x0 + 5, y0 + 5), red)
+        self.assertEqual(img.px(x0 + 35, y0 + 5), green)
+        self.assertEqual(img.px(x0 + 5, y0 + 35), blue)
+        self.assertEqual(img.px(x0 + 35, y0 + 35), (255, 255, 0))
+
+    def test_css_colours_and_backgrounds_are_painted(self):
+        page = self.write_page('css1.html', '''<html><head><title>css</title><style>
+body { background: #102030; color: #ffffff }
+.bar { background: #c0392b; color: #ffffff; text-align: center }
+.none { display: none }
+p::before { content: "> " }
+</style></head><body><div class="bar">bar</div><p class="none">hidden text</p><p>shown</p></body></html>''')
+        img, win = self.web_frame(page)
+        self.assertEqual(img.px(win['x'] + 600, win['y'] + 34 + 300), (0x10, 0x20, 0x30))      # page background
+        found = False
+        for y in range(win['y'] + 34, win['y'] + 34 + 80):                                       # a full-width red bar line
+            if img.px(win['x'] + 5, y) == (0xc0, 0x39, 0x2b) and img.px(win['x'] + 800, y) == (0xc0, 0x39, 0x2b):
+                found = True
+        self.assertTrue(found, 'no red banner line found')
+        out, err = self.web_dump(page, 0)
+        self.assertNotIn('hidden text', out)
+        self.assertIn('> shown', out)                                                            # ::before content
+
     def make_cert(self):
         if not shutil.which('openssl'):
             self.skipTest('openssl command not available')

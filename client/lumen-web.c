@@ -23,6 +23,7 @@
 #include <limits.h>
 #include <netdb.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@
 
 #include "dom.h"
 #include "font.h"
+#include "image.h"
 #include "keymap.h"
 #include "tls.h"
 #include "util.h"
@@ -65,6 +67,27 @@
 #define COL_GRAY    0x777777u
 #define COL_RULE    0xb8b8b0u
 
+static size_t utf8_len(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++)
+        n += ((unsigned char)*s & 0xc0) != 0x80;
+    return n;
+}
+
+/* byte offset of character index `ci` in s */
+static size_t utf8_off(const char *s, size_t ci)
+{
+    size_t i = 0;
+    while (s[i] && ci > 0) {
+        i++;
+        while (((unsigned char)s[i] & 0xc0) == 0x80)
+            i++;
+        ci--;
+    }
+    return i;
+}
+
 /* ---- small string builder ------------------------------------------------------------------ */
 
 struct sb { char *p; size_t n, cap; };
@@ -86,6 +109,7 @@ static void sb_add(struct sb *s, const char *d, size_t n)
 }
 
 static void sb_str(struct sb *s, const char *z) { sb_add(s, z, strlen(z)); }
+static void sb_cleanup(struct sb *s) { free(s->p); }
 
 static void sb_printf(struct sb *s, const char *fmt, ...) LM_PRINTF(2, 3);
 static void sb_printf(struct sb *s, const char *fmt, ...)
@@ -341,7 +365,7 @@ static bool url_from_input(const char *typed, char *out, size_t n)
 
 /* ---- document model ---------------------------------------------------------------------------- */
 
-enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET };
+enum tok_kind { T_WORD, T_SPACE, T_BREAK, T_BLOCK, T_HR, T_BULLET, T_IMAGE, T_PAD, T_WIDGET };
 
 struct tok {
     enum tok_kind kind;
@@ -351,6 +375,30 @@ struct tok {
     int indent;
     int margin;                     /* T_BLOCK: blank lines (0/1) */
     uint32_t color;
+    int img;                        /* T_IMAGE: index into doc.images (text = the "[alt]" fallback) */
+    uint32_t bg, blockbg;           /* inline background / background of the enclosing block (valid if the flags are set) */
+    uint8_t hasbg, hasblockbg, ul, strike, align;   /* ul: 0 default (links only), 1 on, 2 off; align 0 left, 1 centre, 2 right */
+    int padx;                       /* extra left indent in pixels (padding / margin-left) */
+};
+
+/* An <img> of the document. The decoded bitmap belongs to the global image cache; `scaled` is the copy painted at the
+ * size chosen by the layout. */
+/* A form control, drawn by the browser; the state lives in the DOM (see dom.h) */
+enum { W_TEXT = 1, W_PASSWORD, W_CHECKBOX, W_RADIO, W_BUTTON, W_SUBMIT, W_RESET, W_SELECT, W_TEXTAREA };
+
+struct dwidget {
+    int type, id;                   /* W_*, node id in the DOM */
+    char *text, *ph;                /* value / label, placeholder */
+    int cols, rows, caret;          /* size in characters, caret as a character index */
+    bool checked, disabled, focus;
+};
+
+struct dimg {
+    char *src;                      /* as written (absolute after dimg_load) */
+    int aw, ah;                     /* width / height attributes (0 = none) */
+    const struct image *im;         /* NULL until loaded / when it could not be */
+    struct image *scaled;
+    int sw, sh;
 };
 
 struct doc {
@@ -358,6 +406,12 @@ struct doc {
     size_t n, cap;
     char **links;
     int nlinks;
+    struct dimg *images;
+    int nimages;
+    struct dwidget *widgets;
+    int nwidgets;
+    bool has_page_bg;
+    uint32_t page_bg;
     char title[256];
 };
 
@@ -367,6 +421,16 @@ static void doc_free(struct doc *d)
         free(d->t[i].text);
     for (int i = 0; i < d->nlinks; i++)
         free(d->links[i]);
+    for (int i = 0; i < d->nimages; i++) {
+        free(d->images[i].src);
+        image_free(d->images[i].scaled);
+    }
+    free(d->images);
+    for (int i = 0; i < d->nwidgets; i++) {
+        free(d->widgets[i].text);
+        free(d->widgets[i].ph);
+    }
+    free(d->widgets);
     free(d->t);
     free(d->links);
     memset(d, 0, sizeof(*d));
@@ -378,6 +442,20 @@ struct pstate {
     bool in_title, pre_first, last_space;
     int ordered[16], count[16], nlist;
     int pre_col;
+    /* author style (x-o / x-i tags written by dom_serialize) */
+    uint32_t fg, lc, bg, blockbg;
+    bool has_fg, has_lc, has_bg, has_blockbg;
+    int ul, strike, align, padx, noblock, nobullet, transform;
+    struct pframe *frames;
+    int nframes, capframes;
+};
+
+struct pframe {                     /* what an <x-o> / <x-i> element changed (restored when it ends) */
+    uint32_t fg, lc, bg, blockbg;
+    bool has_fg, has_lc, has_bg, has_blockbg;
+    int ul, strike, align, padx, noblock, nobullet, transform, bold, ital, pre, scale;
+    int after_block_px;             /* block margin to add when the element closes */
+    bool block_after, space_after;
 };
 
 static struct tok *add_tok(struct pstate *ps, enum tok_kind kind, char *text)
@@ -392,14 +470,29 @@ static struct tok *add_tok(struct pstate *ps, enum tok_kind kind, char *text)
     struct tok *t = &d->t[d->n++];
     *t = (struct tok){ .kind = kind, .text = text, .bold = ps->bold > 0, .ital = ps->ital > 0,
                        .scale = (uint8_t)ps->scale, .pre = ps->pre > 0, .link = ps->link, .indent = ps->indent };
-    t->color = ps->link >= 0 ? COL_LINK : ps->code ? COL_CODE : ps->heading ? COL_HEAD : COL_TEXT;
+    t->color = ps->link >= 0 ? (ps->has_lc ? ps->lc : COL_LINK) : ps->has_fg ? ps->fg : ps->code ? COL_CODE : ps->heading ? COL_HEAD : COL_TEXT;
+    t->hasbg = ps->has_bg;
+    t->bg = ps->bg;
+    t->hasblockbg = ps->has_blockbg;
+    t->blockbg = ps->blockbg;
+    t->ul = (uint8_t)ps->ul;
+    t->strike = (uint8_t)ps->strike;
+    t->align = (uint8_t)ps->align;
+    t->padx = ps->padx;
     return t;
+}
+
+static void add_block_px(struct pstate *ps, int px)
+{
+    if (ps->noblock > 0)
+        return;
+    add_tok(ps, T_BLOCK, NULL)->margin = px;
+    ps->last_space = false;
 }
 
 static void add_block(struct pstate *ps, int margin)
 {
-    add_tok(ps, T_BLOCK, NULL)->margin = margin;
-    ps->last_space = false;
+    add_block_px(ps, margin * 12);
 }
 
 static const struct { const char *name; uint32_t cp; } ENTITIES[] = {
@@ -480,6 +573,29 @@ static void title_add(struct pstate *ps, const char *s, size_t n)
     t[l] = 0;
 }
 
+/* text-transform on one word (ASCII and the Latin-1 letters are mapped; the rest stays as it is) */
+static void word_transform(const struct pstate *ps, char *w)
+{
+    if (!ps->transform)
+        return;
+    bool first = true;
+    for (unsigned char *p = (unsigned char *)w; *p; p++) {
+        bool up = ps->transform == 1 || (ps->transform == 3 && first);
+        bool low = ps->transform == 2;
+        if (*p < 0x80) {
+            if (up) *p = (unsigned char)toupper(*p);
+            else if (low) *p = (unsigned char)tolower(*p);
+            first = false;
+        } else if (*p == 0xc3 && p[1]) {                  /* U+00C0..U+00FF */
+            unsigned char d = p[1];
+            if (up && d >= 0xa0 && d <= 0xbe && d != 0xb7) p[1] = (unsigned char)(d - 0x20);
+            else if (low && d >= 0x80 && d <= 0x9e && d != 0x97) p[1] = (unsigned char)(d + 0x20);
+            p++;
+            first = false;
+        }
+    }
+}
+
 static void parse_text(struct pstate *ps, const char *s, size_t n)
 {
     if (ps->in_title) {
@@ -488,7 +604,7 @@ static void parse_text(struct pstate *ps, const char *s, size_t n)
     }
     char word[1024];
     size_t wl = 0;
-#define FLUSH() do { if (wl) { word[wl] = 0; add_tok(ps, T_WORD, strdup(word)); wl = 0; ps->last_space = false; } } while (0)
+#define FLUSH() do { if (wl) { word[wl] = 0; word_transform(ps, word); add_tok(ps, T_WORD, strdup(word)); wl = 0; ps->last_space = false; } } while (0)
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (wl > sizeof(word) - 16 && (c & 0xc0) != 0x80)
@@ -557,7 +673,7 @@ static bool attr_get(const char *attrs, size_t alen, const char *name, char *out
         size_t nlen = i - ns;
         while (i < alen && isspace((unsigned char)attrs[i]))
             i++;
-        char val[1024];
+        static char val[131072];                        /* (data: URIs of images can be long; single threaded) */
         size_t vl = 0;
         if (i < alen && attrs[i] == '=') {
             i++;
@@ -614,8 +730,148 @@ static bool name_is(const char *n, const char *list)
     return false;
 }
 
+static bool hex_color(const char *z, uint32_t *c)
+{
+    char *e;
+    unsigned long v = strtoul(z, &e, 16);
+    if (e == z)
+        return false;
+    *c = (uint32_t)v & 0xffffff;
+    return true;
+}
+
+/* <x-o ...> / <x-i ...>: author style from dom_serialize (see dom_css.c) */
+static void style_tag(struct pstate *ps, bool outer, bool close, const char *attrs, size_t alen)
+{
+    if (close) {
+        if (ps->nframes <= 0)
+            return;
+        struct pframe f = ps->frames[--ps->nframes];
+        if (f.block_after)
+            add_block_px(ps, f.after_block_px);
+        ps->fg = f.fg; ps->lc = f.lc; ps->bg = f.bg; ps->blockbg = f.blockbg;
+        ps->has_fg = f.has_fg; ps->has_lc = f.has_lc; ps->has_bg = f.has_bg; ps->has_blockbg = f.has_blockbg;
+        ps->ul = f.ul; ps->strike = f.strike; ps->align = f.align; ps->padx = f.padx; ps->noblock = f.noblock;
+        ps->nobullet = f.nobullet; ps->transform = f.transform; ps->bold = f.bold; ps->ital = f.ital; ps->pre = f.pre;
+        ps->scale = f.scale;
+        if (f.space_after) {
+            add_tok(ps, T_SPACE, NULL);
+            ps->last_space = true;
+        }
+        return;
+    }
+    if (ps->nframes == ps->capframes) {
+        ps->capframes = ps->capframes ? ps->capframes * 2 : 32;
+        ps->frames = realloc(ps->frames, (size_t)ps->capframes * sizeof(*ps->frames));
+        if (!ps->frames)
+            exit(1);
+    }
+    struct pframe *f = &ps->frames[ps->nframes++];
+    *f = (struct pframe){ .fg = ps->fg, .lc = ps->lc, .bg = ps->bg, .blockbg = ps->blockbg, .has_fg = ps->has_fg,
+                          .has_lc = ps->has_lc, .has_bg = ps->has_bg, .has_blockbg = ps->has_blockbg, .ul = ps->ul,
+                          .strike = ps->strike, .align = ps->align, .padx = ps->padx, .noblock = ps->noblock,
+                          .nobullet = ps->nobullet, .transform = ps->transform, .bold = ps->bold, .ital = ps->ital,
+                          .pre = ps->pre, .scale = ps->scale };
+    char v[64];
+    uint32_t c;
+    if (!outer) {
+        if (attr_get(attrs, alen, "fg", v, sizeof(v)) && hex_color(v, &c)) { ps->fg = c; ps->has_fg = true; }
+        if (attr_get(attrs, alen, "lc", v, sizeof(v)) && hex_color(v, &c)) { ps->lc = c; ps->has_lc = true; }
+        if (attr_get(attrs, alen, "b", v, sizeof(v))) ps->bold = v[0] == '1' ? 1 : 0;
+        if (attr_get(attrs, alen, "i", v, sizeof(v))) ps->ital = v[0] == '1' ? 1 : 0;
+        if (attr_get(attrs, alen, "u", v, sizeof(v))) ps->ul = v[0] == '1' ? 1 : 2;
+        if (attr_get(attrs, alen, "s", v, sizeof(v))) ps->strike = v[0] == '1';
+        if (attr_get(attrs, alen, "sz", v, sizeof(v))) ps->scale = LM_CLAMP(atoi(v), 1, 3);
+        if (attr_get(attrs, alen, "ws", v, sizeof(v))) ps->pre = v[0] == 'p' ? 1 : 0;
+        if (attr_get(attrs, alen, "tt", v, sizeof(v))) ps->transform = atoi(v);
+        return;
+    }
+    bool inl = false;
+    if (attr_get(attrs, alen, "d", v, sizeof(v))) {
+        if (v[0] == 'i' || v[0] == 's') {
+            inl = true;
+            ps->noblock++;
+            add_tok(ps, T_SPACE, NULL);
+            ps->last_space = true;
+            f->space_after = true;
+        } else {                                      /* block (b) or flex container (f) */
+            add_block_px(ps, 0);
+            f->block_after = true;
+        }
+    }
+    int mt = attr_get(attrs, alen, "mt", v, sizeof(v)) ? atoi(v) : 0;
+    int mb = attr_get(attrs, alen, "mb", v, sizeof(v)) ? atoi(v) : 0;
+    if (mt > 0)
+        add_block_px(ps, mt);
+    if (mb > 0) {
+        f->block_after = true;
+        f->after_block_px = mb;
+    }
+    if (attr_get(attrs, alen, "bg", v, sizeof(v)) && hex_color(v, &c)) {
+        if (inl) { ps->bg = c; ps->has_bg = true; }
+        else { ps->blockbg = c; ps->has_blockbg = true; }
+    }
+    int pt = attr_get(attrs, alen, "pt", v, sizeof(v)) ? atoi(v) : 0;
+    if (pt > 0 && ps->has_blockbg && ps->noblock == 0) {
+        struct tok *t = add_tok(ps, T_PAD, NULL);
+        t->margin = pt;
+    }
+    int pb = attr_get(attrs, alen, "pb", v, sizeof(v)) ? atoi(v) : 0;
+    (void)pb;
+    if (attr_get(attrs, alen, "al", v, sizeof(v))) ps->align = v[0] == 'c' ? 1 : v[0] == 'r' ? 2 : 0;
+    if (attr_get(attrs, alen, "pl", v, sizeof(v))) ps->padx += LM_CLAMP(atoi(v), 0, 600);
+    if (attr_get(attrs, alen, "nb", v, sizeof(v))) ps->nobullet++;
+}
+
 static void handle_tag(struct pstate *ps, const char *name, bool close, const char *attrs, size_t alen)
 {
+    if (name[0] == 'x' && name[1] == '-') {
+        if (!strcmp(name, "x-o")) style_tag(ps, true, close, attrs, alen);
+        else if (!strcmp(name, "x-i")) style_tag(ps, false, close, attrs, alen);
+        else if (!strcmp(name, "x-w") && !close) {
+            char v[64];
+            static char val[131072];
+            struct doc *d = ps->d;
+            d->widgets = realloc(d->widgets, (size_t)(d->nwidgets + 1) * sizeof(*d->widgets));
+            if (!d->widgets)
+                exit(1);
+            struct dwidget *w = &d->widgets[d->nwidgets];
+            memset(w, 0, sizeof(*w));
+            static const char *const names[] = { "", "text", "password", "checkbox", "radio", "button", "submit", "reset", "select", "textarea" };
+            if (attr_get(attrs, alen, "t", v, sizeof(v)))
+                for (int i = 1; i < 10; i++)
+                    if (!strcmp(v, names[i])) w->type = i;
+            if (attr_get(attrs, alen, "id", v, sizeof(v))) w->id = atoi(v);
+            w->cols = attr_get(attrs, alen, "w", v, sizeof(v)) ? atoi(v) : 20;
+            w->rows = attr_get(attrs, alen, "r", v, sizeof(v)) ? atoi(v) : 1;
+            w->checked = attr_get(attrs, alen, "c", v, sizeof(v));
+            w->disabled = attr_get(attrs, alen, "d", v, sizeof(v));
+            w->focus = attr_get(attrs, alen, "f", v, sizeof(v));
+            w->caret = attr_get(attrs, alen, "ca", v, sizeof(v)) ? atoi(v) : 0;
+            w->text = strdup(attr_get(attrs, alen, "v", val, sizeof(val)) ? val : "");
+            w->ph = attr_get(attrs, alen, "p", val, sizeof(val)) ? strdup(val) : NULL;
+            if (w->type) {
+                struct tok *tk = add_tok(ps, T_WIDGET, NULL);
+                tk->img = d->nwidgets++;
+                ps->last_space = false;
+            } else {
+                free(w->text);
+                free(w->ph);
+            }
+        } else if (!strcmp(name, "x-pg") && !close) {
+            char v[32];
+            uint32_t c;
+            if (attr_get(attrs, alen, "bg", v, sizeof(v)) && hex_color(v, &c)) {
+                ps->d->has_page_bg = true;
+                ps->d->page_bg = c;
+            }
+            if (attr_get(attrs, alen, "fg", v, sizeof(v)) && hex_color(v, &c)) {
+                ps->fg = c;
+                ps->has_fg = true;
+            }
+        }
+        return;
+    }
     if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && !name[2]) {
         add_block(ps, 1);
         if (!close) {
@@ -658,7 +914,10 @@ static void handle_tag(struct pstate *ps, const char *name, bool close, const ch
                 snprintf(b, sizeof(b), "%d.", ++ps->count[ps->nlist - 1]);
                 num = strdup(b);
             }
-            add_tok(ps, T_BULLET, num);
+            if (ps->nobullet > 0 || ps->noblock > 0)
+                free(num);
+            else
+                add_tok(ps, T_BULLET, num);
         }
     } else if (!strcmp(name, "dd") || !strcmp(name, "blockquote")) {
         add_block(ps, name[0] == 'b');
@@ -707,11 +966,35 @@ static void handle_tag(struct pstate *ps, const char *name, bool close, const ch
         add_tok(ps, T_HR, NULL);
         add_block(ps, 0);
     } else if (!strcmp(name, "img")) {
-        char alt[256], label[300];
+        char alt[256], label[300], num[32];
+        static char src[131072];
         if (!attr_get(attrs, alen, "alt", alt, sizeof(alt)) || !alt[0])
             snprintf(alt, sizeof(alt), "image");
         snprintf(label, sizeof(label), "[%s]", alt);
-        add_tok(ps, T_WORD, strdup(label))->color = ps->link >= 0 ? COL_LINK : COL_GRAY;
+        bool have_src = attr_get(attrs, alen, "src", src, sizeof(src)) && src[0];
+        if (!have_src && attr_get(attrs, alen, "srcset", src, sizeof(src)) && src[0]) {      /* first candidate */
+            src[strcspn(src, " ,")] = 0;
+            have_src = src[0] != 0;
+        }
+        if (!have_src && attr_get(attrs, alen, "data-src", src, sizeof(src)) && src[0])
+            have_src = true;
+        struct tok *tk = add_tok(ps, have_src ? T_IMAGE : T_WORD, strdup(label));
+        tk->color = ps->link >= 0 ? COL_LINK : COL_GRAY;
+        tk->img = -1;
+        if (have_src) {
+            struct doc *d = ps->d;
+            d->images = realloc(d->images, (size_t)(d->nimages + 1) * sizeof(*d->images));
+            if (!d->images)
+                exit(1);
+            struct dimg *im = &d->images[d->nimages];
+            memset(im, 0, sizeof(*im));
+            im->src = strdup(src);
+            if (attr_get(attrs, alen, "width", num, sizeof(num)))
+                im->aw = atoi(num);
+            if (attr_get(attrs, alen, "height", num, sizeof(num)))
+                im->ah = atoi(num);
+            tk->img = d->nimages++;
+        }
         ps->last_space = false;
     } else if (!strcmp(name, "title")) {
         ps->in_title = !close;
@@ -752,6 +1035,7 @@ static void doc_parse(struct doc *d, const char *src, size_t len, bool plain)
             }
         }
         free(z);
+        free(ps.frames);
         return;
     }
     while (s < end) {
@@ -808,14 +1092,16 @@ static void doc_parse(struct doc *d, const char *src, size_t len, bool plain)
         }
         handle_tag(&ps, name, close, attrs, alen);
     }
+    free(ps.frames);
 }
 
 /* ---- layout ---------------------------------------------------------------------------------- */
 
-enum run_kind { R_TEXT, R_HR, R_BULLET };
+enum run_kind { R_TEXT, R_HR, R_BULLET, R_IMAGE, R_BG, R_WIDGET };
 
 struct run {
     int x, y, w, h;
+    int ly, lh;                     /* the line box the run sits in (for block backgrounds) */
     enum run_kind kind;
     const char *text;
     int len;
@@ -830,7 +1116,7 @@ struct layout {
 
 struct lstate {
     struct layout *L;
-    int width, y, x, left, line_h, gap;
+    int width, right, y, x, left, line_h, gap;
     size_t line_start;
     bool open, space;
 };
@@ -851,20 +1137,38 @@ static void ls_finish(struct lstate *ls)
     if (!ls->open)
         return;
     int lh = ls->line_h > 0 ? ls->line_h : 18;
-    for (size_t i = ls->line_start; i < ls->L->n; i++)
-        ls->L->r[i].y = ls->y + lh - ls->L->r[i].h;
+    int minx = 1 << 30, maxx = 0, align = 0;
+    for (size_t i = ls->line_start; i < ls->L->n; i++) {
+        struct run *r = &ls->L->r[i];
+        r->y = ls->y + lh - r->h;
+        r->ly = ls->y;
+        r->lh = lh;
+        if (r->kind != R_BULLET && r->t->kind != T_BULLET) {
+            minx = LM_MIN(minx, r->x);
+            maxx = LM_MAX(maxx, r->x + r->w);
+            if (!align)
+                align = r->t->align;
+        }
+    }
+    if (align && maxx > minx) {                                 /* text-align: centre / right */
+        int room = ls->right - ls->left - (maxx - minx);
+        int shift = room > 0 ? (align == 1 ? room / 2 : room) : 0;
+        for (size_t i = ls->line_start; i < ls->L->n; i++)
+            if (ls->L->r[i].kind != R_BULLET && ls->L->r[i].t->kind != T_BULLET)
+                ls->L->r[i].x += shift;
+    }
     ls->y += lh;
     ls->open = false;
     ls->space = false;
 }
 
-static void ls_start(struct lstate *ls, int indent)
+static void ls_start(struct lstate *ls, int indent, int padx)
 {
     if (ls->open)
         return;
     ls->y += ls->gap;
     ls->gap = 0;
-    ls->left = PAGE_PAD + indent * INDENT_PX;
+    ls->left = PAGE_PAD + indent * INDENT_PX + padx;
     ls->x = ls->left;
     ls->line_h = 0;
     ls->line_start = ls->L->n;
@@ -875,14 +1179,14 @@ static void ls_start(struct lstate *ls, int indent)
 static void doc_layout(const struct doc *d, int width, struct layout *L)
 {
     L->n = 0;
-    struct lstate ls = { .L = L, .width = width, .y = 10 };
+    struct lstate ls = { .L = L, .width = width, .right = width - PAGE_PAD, .y = 10 };
     int right = width - PAGE_PAD;
     for (size_t i = 0; i < d->n; i++) {
         const struct tok *t = &d->t[i];
         switch (t->kind) {
         case T_BLOCK:
             ls_finish(&ls);
-            ls.gap = LM_MAX(ls.gap, t->margin * 12);
+            ls.gap = LM_MAX(ls.gap, t->margin);
             break;
         case T_BREAK:
             if (ls.open) {
@@ -895,6 +1199,14 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
         case T_SPACE:
             ls.space = ls.open && ls.x > ls.left;
             break;
+        case T_PAD: {                                  /* padding of a block with a background */
+            ls_finish(&ls);
+            struct run *r = add_run(L);
+            *r = (struct run){ .x = 0, .y = ls.y + ls.gap, .w = width, .h = t->margin, .kind = R_BG, .t = t };
+            ls.y += ls.gap + t->margin;
+            ls.gap = 0;
+            break;
+        }
         case T_HR: {
             ls_finish(&ls);
             ls.y += ls.gap + 6;
@@ -905,7 +1217,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             break;
         }
         case T_BULLET: {
-            ls_start(&ls, t->indent);
+            ls_start(&ls, t->indent, t->padx);
             struct run *r = add_run(L);
             if (t->text) {
                 int w = lm_font_text_width(t->text);
@@ -918,19 +1230,72 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
             ls.line_h = LM_MAX(ls.line_h, 18);
             break;
         }
+        case T_WIDGET: {
+            const struct dwidget *w = &d->widgets[t->img];
+            int ww, wh;
+            switch (w->type) {
+            case W_CHECKBOX: case W_RADIO: ww = wh = 14; break;
+            case W_BUTTON: case W_SUBMIT: case W_RESET: ww = (int)utf8_len(w->text) * LM_FONT_W + 20; wh = 22; break;
+            case W_SELECT: ww = w->cols * LM_FONT_W + 30; wh = 22; break;
+            case W_TEXTAREA: ww = w->cols * LM_FONT_W + 12; wh = w->rows * LM_FONT_H + 8; break;
+            default: ww = w->cols * LM_FONT_W + 12; wh = 22;
+            }
+            int maxw = LM_MAX(right - PAGE_PAD - t->indent * INDENT_PX, 40);
+            if (ww > maxw) ww = maxw;
+            ls_start(&ls, t->indent, t->padx);
+            int sp = ls.space && ls.x > ls.left ? LM_FONT_W : 0;
+            if (ls.x > ls.left && ls.x + sp + ww > right) {
+                ls_finish(&ls);
+                ls_start(&ls, t->indent, t->padx);
+                sp = 0;
+            }
+            struct run *r = add_run(L);
+            *r = (struct run){ .x = ls.x + sp, .w = ww, .h = wh, .kind = R_WIDGET, .t = t };
+            ls.x += sp + ww;
+            ls.space = false;
+            ls.line_h = LM_MAX(ls.line_h, wh + 4);
+            break;
+        }
+        case T_IMAGE:
+            if (t->img >= 0 && d->images[t->img].im) {
+                const struct dimg *im = &d->images[t->img];
+                int nw = im->im->w, nh = im->im->h;
+                if (im->aw > 0 && im->ah > 0) { nw = im->aw; nh = im->ah; }
+                else if (im->aw > 0) { nh = (int)((long long)nh * im->aw / nw); nw = im->aw; }
+                else if (im->ah > 0) { nw = (int)((long long)nw * im->ah / nh); nh = im->ah; }
+                int maxw = LM_MAX(right - PAGE_PAD - t->indent * INDENT_PX, 16);
+                if (nw > maxw) { nh = (int)((long long)nh * maxw / nw); nw = maxw; }
+                nw = LM_MAX(nw, 1);
+                nh = LM_MAX(nh, 1);
+                ls_start(&ls, t->indent, t->padx);
+                int sp = ls.space && ls.x > ls.left ? LM_FONT_W : 0;
+                if (ls.x > ls.left && ls.x + sp + nw > right) {
+                    ls_finish(&ls);
+                    ls_start(&ls, t->indent, t->padx);
+                    sp = 0;
+                }
+                struct run *r = add_run(L);
+                *r = (struct run){ .x = ls.x + sp, .w = nw, .h = nh, .kind = R_IMAGE, .t = t };
+                ls.x += sp + nw;
+                ls.space = false;
+                ls.line_h = LM_MAX(ls.line_h, nh + 2);
+                break;
+            }
+            /* not loaded: show the alt text like a word */
+            /* fall through */
         case T_WORD: {
             int scale = t->scale ? t->scale : 1;
             const char *text = t->text;
             int total = (int)strlen(text);
             int pos = 0;
-            ls_start(&ls, t->indent);
+            ls_start(&ls, t->indent, t->padx);
             while (pos < total) {
                 int w = lm_font_text_width(text + pos) * scale;
                 int sp = ls.space && ls.x > ls.left ? LM_FONT_W * scale : 0;
                 int avail = right - ls.x - sp;
                 if (!t->pre && w > avail && ls.x > ls.left) {
                     ls_finish(&ls);
-                    ls_start(&ls, t->indent);
+                    ls_start(&ls, t->indent, t->padx);
                     continue;
                 }
                 int take = total - pos;
@@ -956,7 +1321,7 @@ static void doc_layout(const struct doc *d, int width, struct layout *L)
                 pos += take;
                 if (pos < total) {
                     ls_finish(&ls);
-                    ls_start(&ls, t->indent);
+                    ls_start(&ls, t->indent, t->padx);
                 }
             }
             break;
@@ -974,6 +1339,8 @@ struct page {
     size_t len;
     bool html;
     bool failed;                    /* an error page (could not load / HTTP error) */
+    int status;                     /* HTTP status of the last response (0 for files) */
+    char *headers;                  /* raw response header block of the last response (fetch / XMLHttpRequest) */
     char url[2048];                 /* final url (after redirects) */
 };
 
@@ -1189,8 +1556,17 @@ static size_t dechunk(char *b, size_t len)
     return out;
 }
 
-/* One HTTP GET. Returns the status (>0), or 0 with err filled in. */
-static int http_get(const char *url, struct page *p, char *location, size_t locn, char *err, size_t errn)
+/* Extra request data for script requests (fetch / XMLHttpRequest); NULL means a plain page GET. */
+struct http_req {
+    const char *method;
+    const char *body;
+    size_t bodylen;
+    const char *headers;            /* "Name: value\r\n" lines */
+};
+
+/* One HTTP request. Returns the status (>0), or 0 with err filled in. */
+static int http_get(const char *url, struct page *p, char *location, size_t locn, char *err, size_t errn,
+                    const struct http_req *rq)
 {
     size_t ol = url_origin_len(url);
     bool secure = !strncasecmp(url, "https:", 6);
@@ -1209,11 +1585,19 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
     char pathbuf[2048];
     snprintf(pathbuf, sizeof(pathbuf), "%.*s", (int)strcspn(path, "#"), path);      /* never send the fragment */
     path = pathbuf;
-    char req[4096];
-    snprintf(req, sizeof(req),
-             "GET %s HTTP/1.0\r\nHost: %.*s\r\nUser-Agent: lumen-web/1.0\r\nAccept: text/html, text/plain;q=0.9\r\n"
-             "Accept-Encoding: identity\r\nConnection: close\r\n\r\n",
-             *path ? path : "/", (int)al, auth);
+    struct sb reqb __attribute__((cleanup(sb_cleanup))) = { 0 };
+    sb_printf(&reqb, "%s %s HTTP/1.0\r\nHost: %.*s\r\nUser-Agent: lumen-web/1.0\r\n",
+              rq && rq->method ? rq->method : "GET", *path ? path : "/", (int)al, auth);
+    if (!rq || !rq->headers || !strcasestr(rq->headers, "accept:"))
+        sb_str(&reqb, rq ? "Accept: */*\r\n" : "Accept: text/html, text/plain;q=0.9\r\n");
+    if (rq && rq->headers)
+        sb_str(&reqb, rq->headers);
+    if (rq && rq->body && rq->bodylen)
+        sb_printf(&reqb, "Content-Length: %zu\r\n", rq->bodylen);
+    sb_str(&reqb, "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    if (rq && rq->body && rq->bodylen)
+        sb_add(&reqb, rq->body, rq->bodylen);
+    const char *req = reqb.p;
     long long deadline = now_ms() + FETCH_TIMEOUT_MS;
     int fd = tcp_connect(host, port, 5000);
     if (fd < 0) {
@@ -1228,7 +1612,7 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
             return 0;
         }
     }
-    size_t sent = 0, rl = strlen(req);
+    size_t sent = 0, rl = reqb.n;
     while (sent < rl) {
         ssize_t w;
         if (tls) {
@@ -1332,7 +1716,7 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
         else if (strcasestr(type, "text/") || strcasestr(type, "json") || strcasestr(type, "xml") ||
                  strcasestr(type, "javascript"))
             html = false;
-        else {
+        else if (!rq) {
             snprintf(err, errn, "cannot display content of type%.*s", (int)strlen(type), type);
             free(buf);
             return 0;
@@ -1347,14 +1731,31 @@ static int http_get(const char *url, struct page *p, char *location, size_t locn
     p->body = buf;
     p->len = bl;
     p->html = html;
+    p->status = status;
+    free(p->headers);
+    p->headers = strdup(headers);
     return status;
 }
 
 /* Fetch `url` (absolute). Always yields a page (errors become pages). */
+static const char *g_post_body;                             /* set while a form is being POSTed (see navigate) */
+static bool fetch_resource(const char *url, const struct http_req *rq, struct page *p, char *err, size_t errn);
+
 static void page_load(struct page *p, const char *url)
 {
     memset(p, 0, sizeof(*p));
     snprintf(p->url, sizeof(p->url), "%s", url);
+    if (g_post_body && (!strncasecmp(url, "http:", 5) || !strncasecmp(url, "https:", 6))) {
+        struct http_req rq = { "POST", g_post_body, strlen(g_post_body), "Content-Type: application/x-www-form-urlencoded\r\n" };
+        char err[256] = "";
+        if (!fetch_resource(url, &rq, p, err, sizeof(err))) {
+            page_error(p, "Cannot load page", "%s: %s", url, err);
+        } else if (p->status >= 400) {
+            int st = p->status;
+            page_error(p, "HTTP error", "%s answered with status %d.", url, st);
+        }
+        return;
+    }
     if (!strncasecmp(url, "about:", 6)) {
         page_home(p);
         snprintf(p->url, sizeof(p->url), "about:home");
@@ -1364,7 +1765,7 @@ static void page_load(struct page *p, const char *url)
         char cur[2048], loc[2048], err[256] = "";
         snprintf(cur, sizeof(cur), "%s", url);
         for (int hop = 0; hop < 6; hop++) {
-            int st = http_get(cur, p, loc, sizeof(loc), err, sizeof(err));
+            int st = http_get(cur, p, loc, sizeof(loc), err, sizeof(err), NULL);
             if (st == 0) {
                 page_error(p, "Cannot load page", "%s: %s", cur, err);
                 break;
@@ -1389,6 +1790,433 @@ static void page_load(struct page *p, const char *url)
     }
 }
 
+/* A resource for a script (fetch / XMLHttpRequest): any content type, any method, errors reported to the caller. */
+static bool fetch_resource(const char *url, const struct http_req *rq, struct page *p, char *err, size_t errn)
+{
+    memset(p, 0, sizeof(*p));
+    snprintf(p->url, sizeof(p->url), "%s", url);
+    if (!strncasecmp(url, "file:", 5)) {
+        load_file(p, url);
+        if (p->failed) {                                    /* a missing file is a 404, not a network error */
+            free(p->body);
+            p->body = strdup("");
+            p->len = 0;
+            p->status = 404;
+            p->headers = strdup("HTTP/1.0 404 Not Found\r\n");
+            return true;
+        }
+        p->status = 200;
+        p->headers = strdup("HTTP/1.0 200 OK\r\n");
+        return true;
+    }
+    if (strncasecmp(url, "http:", 5) && strncasecmp(url, "https:", 6)) {
+        snprintf(err, errn, "unsupported address %s", url);
+        return false;
+    }
+    char cur[2048], loc[2048];
+    struct http_req local = rq ? *rq : (struct http_req){ 0 };
+    snprintf(cur, sizeof(cur), "%s", url);
+    for (int hop = 0; hop < 6; hop++) {
+        int st = http_get(cur, p, loc, sizeof(loc), err, errn, &local);
+        if (st == 0)
+            return false;
+        snprintf(p->url, sizeof(p->url), "%s", cur);
+        if ((st == 301 || st == 302 || st == 303 || st == 307 || st == 308) && loc[0]) {
+            char next[2048];
+            if (!url_resolve(cur, loc, next, sizeof(next))) {
+                snprintf(err, errn, "bad redirect");
+                return false;
+            }
+            if (st == 303 || ((st == 301 || st == 302) && local.method && strcmp(local.method, "GET"))) {
+                local.method = "GET";                       /* browsers turn these into GETs without a body */
+                local.body = NULL;
+                local.bodylen = 0;
+            }
+            snprintf(cur, sizeof(cur), "%s", next);
+            continue;
+        }
+        return true;
+    }
+    snprintf(err, errn, "too many redirects");
+    return false;
+}
+
+/* ---- parallel loading -------------------------------------------------------------------------------- */
+
+/* Run fn(i, ctx) for i in [0, n) on up to `threads` threads (the fetch functions only use their own data). */
+struct par_ctx { int n, next; void (*fn)(int, void *); void *ctx; };
+
+static void *par_worker(void *arg)
+{
+    struct par_ctx *c = arg;
+    for (;;) {
+        int i = __atomic_fetch_add(&c->next, 1, __ATOMIC_SEQ_CST);
+        if (i >= c->n)
+            break;
+        c->fn(i, c->ctx);
+    }
+    return NULL;
+}
+
+static void par_run(int n, void (*fn)(int, void *), void *ctx, int threads)
+{
+    if (n <= 0)
+        return;
+    tls_available();                                        /* load libssl once, before the threads race to do it */
+    struct par_ctx c = { .n = n, .fn = fn, .ctx = ctx };
+    if (threads > n)
+        threads = n;
+    pthread_t th[16];
+    int started = 0;
+    for (int i = 1; i < threads && i < 16; i++)
+        if (pthread_create(&th[started], NULL, par_worker, &c) == 0)
+            started++;
+    par_worker(&c);
+    for (int i = 0; i < started; i++)
+        pthread_join(th[i], NULL);
+}
+
+/* Bodies fetched ahead of time (scripts and style sheets of the page being loaded), by absolute address. */
+#define PREFETCH_MAX 160
+static struct pf_entry { char url[1024]; char *body; size_t len; bool ok; } pf_cache[PREFETCH_MAX];
+static int pf_n;
+
+static void pf_clear(void)
+{
+    for (int i = 0; i < pf_n; i++)
+        free(pf_cache[i].body);
+    pf_n = 0;
+}
+
+static const struct pf_entry *pf_find(const char *abs)
+{
+    for (int i = 0; i < pf_n; i++)
+        if (!strcmp(pf_cache[i].url, abs))
+            return &pf_cache[i];
+    return NULL;
+}
+
+struct pf_job { char url[1024]; char *body; size_t len; bool ok; };
+
+static void pf_fetch_one(int i, void *ctx)
+{
+    struct pf_job *j = (struct pf_job *)ctx + i;
+    struct page p;
+    char err[200];
+    j->ok = fetch_resource(j->url, NULL, &p, err, sizeof(err)) && p.status < 400 && p.body;
+    if (j->ok) {
+        j->body = p.body;
+        j->len = p.len;
+    } else {
+        free(p.body);
+    }
+    free(p.headers);
+}
+
+/* ---- images ------------------------------------------------------------------------------------------ */
+
+#define IMG_CACHE 192
+#define IMG_MAX_BYTES (6u << 20)
+#define IMG_TIME_MS 12000
+
+static struct { char url[1024]; struct image *im; } img_cache[IMG_CACHE];
+static int img_cache_n;
+
+static int b64v(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+}
+
+/* data:[mime][;base64],payload -> malloc'ed bytes */
+static uint8_t *data_uri_bytes(const char *uri, size_t *n)
+{
+    const char *comma = strchr(uri, ',');
+    if (!comma)
+        return NULL;
+    bool b64 = false;
+    for (const char *p = uri + 5; p < comma; p++)
+        if (!strncasecmp(p, ";base64", 7))
+            b64 = true;
+    size_t len = strlen(comma + 1);
+    uint8_t *out = malloc(len + 1);
+    if (!out)
+        return NULL;
+    size_t o = 0;
+    if (b64) {
+        uint32_t acc = 0;
+        int bits = 0;
+        for (const char *p = comma + 1; *p; p++) {
+            int v = b64v((unsigned char)*p);
+            if (v < 0)
+                continue;
+            acc = acc << 6 | (uint32_t)v;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out[o++] = (uint8_t)(acc >> bits);
+            }
+        }
+    } else {
+        for (const char *p = comma + 1; *p; p++) {
+            if (p[0] == '%' && hexval((unsigned char)p[1]) >= 0 && hexval((unsigned char)p[2]) >= 0) {
+                out[o++] = (uint8_t)(hexval((unsigned char)p[1]) * 16 + hexval((unsigned char)p[2]));
+                p += 2;
+            } else {
+                out[o++] = (uint8_t)*p;
+            }
+        }
+    }
+    *n = o;
+    return out;
+}
+
+/* The decoded image for an absolute address (or data: URI), from the cache or loaded now; NULL if it cannot be shown. */
+static const struct image *image_for(const char *abs, long long deadline, int *fetches)
+{
+    char key[1024];
+    snprintf(key, sizeof(key), "%.*s", (int)sizeof(key) - 1, abs);
+    for (int i = 0; i < img_cache_n; i++)
+        if (!strcmp(img_cache[i].url, key))
+            return img_cache[i].im;
+    if (now_ms() > deadline || *fetches >= 80)
+        return NULL;                                        /* (not cached: a later page may load it) */
+    struct image *im = NULL;
+    char err[200] = "";
+    if (!strncasecmp(abs, "data:", 5)) {
+        size_t n = 0;
+        uint8_t *bytes = data_uri_bytes(abs, &n);
+        if (bytes) {
+            im = image_decode(bytes, n, err, sizeof(err));
+            free(bytes);
+        }
+    } else {
+        (*fetches)++;
+        struct page p;
+        char ferr[200] = "";
+        if (fetch_resource(abs, NULL, &p, ferr, sizeof(ferr)) && p.status < 400 && p.body && p.len <= IMG_MAX_BYTES)
+            im = image_decode((const uint8_t *)p.body, p.len, err, sizeof(err));
+        free(p.body);
+        free(p.headers);
+    }
+    if (img_cache_n == IMG_CACHE) {                         /* full: drop the oldest half */
+        for (int i = 0; i < IMG_CACHE / 2; i++)
+            image_free(img_cache[i].im);
+        memmove(img_cache, img_cache + IMG_CACHE / 2, sizeof(img_cache[0]) * (IMG_CACHE / 2));
+        img_cache_n = IMG_CACHE / 2;
+    }
+    snprintf(img_cache[img_cache_n].url, sizeof(img_cache[0].url), "%s", key);
+    img_cache[img_cache_n].im = im;
+    img_cache_n++;
+    return im;
+}
+
+struct img_job { char url[1024]; struct image *im; };
+
+static void img_fetch_one(int i, void *ctx)
+{
+    struct img_job *j = (struct img_job *)ctx + i;
+    struct page p;
+    char err[200] = "", ferr[200];
+    if (fetch_resource(j->url, NULL, &p, ferr, sizeof(ferr)) && p.status < 400 && p.body && p.len <= IMG_MAX_BYTES)
+        j->im = image_decode((const uint8_t *)p.body, p.len, err, sizeof(err));
+    free(p.body);
+    free(p.headers);
+}
+
+static void img_cache_put(const char *url, struct image *im)
+{
+    if (img_cache_n == IMG_CACHE) {                         /* full: drop the oldest half */
+        for (int i = 0; i < IMG_CACHE / 2; i++)
+            image_free(img_cache[i].im);
+        memmove(img_cache, img_cache + IMG_CACHE / 2, sizeof(img_cache[0]) * (IMG_CACHE / 2));
+        img_cache_n = IMG_CACHE / 2;
+    }
+    snprintf(img_cache[img_cache_n].url, sizeof(img_cache[0].url), "%s", url);
+    img_cache[img_cache_n].im = im;
+    img_cache_n++;
+}
+
+/* Load the bitmaps of all <img>s of a document (addresses relative to `base`); failures leave the alt text. The missing
+ * ones are fetched and decoded on several threads at once. */
+static void doc_load_images(struct doc *d, const char *base)
+{
+    long long deadline = now_ms() + IMG_TIME_MS;
+    int fetches = 0;
+    struct img_job *jobs = calloc((size_t)d->nimages + 1, sizeof(*jobs));
+    int nj = 0;
+    for (int i = 0; i < d->nimages && jobs; i++) {
+        char abs[2048];
+        if (!strncasecmp(d->images[i].src, "data:", 5))
+            continue;
+        if (!url_resolve(base, d->images[i].src, abs, sizeof(abs)) || strlen(abs) >= sizeof(jobs[0].url) || nj >= 80)
+            continue;
+        bool known = false;
+        for (int k = 0; k < img_cache_n && !known; k++)
+            known = !strcmp(img_cache[k].url, abs);
+        for (int k = 0; k < nj && !known; k++)
+            known = !strcmp(jobs[k].url, abs);
+        if (!known)
+            snprintf(jobs[nj++].url, sizeof(jobs[0].url), "%s", abs);
+    }
+    par_run(nj, img_fetch_one, jobs, 8);
+    for (int k = 0; k < nj; k++)
+        img_cache_put(jobs[k].url, jobs[k].im);
+    free(jobs);
+    for (int i = 0; i < d->nimages; i++) {
+        struct dimg *im = &d->images[i];
+        char abs[2048];
+        if (!strncasecmp(im->src, "data:", 5))
+            snprintf(abs, sizeof(abs), "%s", im->src);
+        else if (!url_resolve(base, im->src, abs, sizeof(abs)))
+            continue;
+        im->im = image_for(abs, deadline, &fetches);
+    }
+}
+
+/* ---- background image loading (the window itself) ------------------------------------------------------------- */
+
+/* Images of the page being shown are fetched and decoded on worker threads while the window stays usable; the main loop
+ * polls the batch and lays the page out again when more bitmaps have arrived. A batch that is no longer wanted is
+ * detached: its threads finish (their results are dropped) and the last one frees it. */
+struct bjob { char url[1024]; struct image *im; bool done, taken; };
+
+struct img_batch {
+    pthread_mutex_t mu;
+    struct bjob *jobs;
+    int nj, next, workers, done;
+    bool detached;
+};
+
+static void *batch_worker(void *arg)
+{
+    struct img_batch *b = arg;
+    for (;;) {
+        pthread_mutex_lock(&b->mu);
+        int i = b->detached ? b->nj : b->next++;
+        pthread_mutex_unlock(&b->mu);
+        if (i >= b->nj)
+            break;
+        struct img_job j;
+        memset(&j, 0, sizeof(j));
+        snprintf(j.url, sizeof(j.url), "%s", b->jobs[i].url);
+        img_fetch_one(0, &j);
+        pthread_mutex_lock(&b->mu);
+        b->jobs[i].im = j.im;
+        b->jobs[i].done = true;
+        b->done++;
+        pthread_mutex_unlock(&b->mu);
+    }
+    pthread_mutex_lock(&b->mu);
+    bool last = --b->workers == 0, free_it = last && b->detached;
+    pthread_mutex_unlock(&b->mu);
+    if (free_it) {
+        for (int i = 0; i < b->nj; i++)
+            if (!b->jobs[i].taken)
+                image_free(b->jobs[i].im);
+        free(b->jobs);
+        free(b);
+    }
+    return NULL;
+}
+
+/* Bitmaps already in the cache go straight into the document (nothing is fetched). */
+static void doc_assign_images(struct doc *d, const char *base)
+{
+    long long deadline = now_ms();
+    int fetches = 0;                                        /* (the deadline in the past keeps network fetches out) */
+    for (int i = 0; i < d->nimages; i++) {
+        struct dimg *im = &d->images[i];
+        char abs[2048];
+        if (!strncasecmp(im->src, "data:", 5))
+            snprintf(abs, sizeof(abs), "%s", im->src);
+        else if (!url_resolve(base, im->src, abs, sizeof(abs)))
+            continue;
+        if (!im->im)
+            im->im = image_for(abs, strncasecmp(abs, "data:", 5) ? deadline - 1 : deadline + 1000, &fetches);
+    }
+}
+
+/* Start fetching the images of `d` that are not cached yet; NULL when there is nothing to do. */
+static struct img_batch *batch_start(const struct doc *d, const char *base)
+{
+    struct bjob *jobs = calloc((size_t)d->nimages + 1, sizeof(*jobs));
+    int nj = 0;
+    for (int i = 0; i < d->nimages && jobs; i++) {
+        char abs[2048];
+        if (!strncasecmp(d->images[i].src, "data:", 5) || !url_resolve(base, d->images[i].src, abs, sizeof(abs)) ||
+            strlen(abs) >= sizeof(jobs[0].url) || nj >= 100)
+            continue;
+        bool known = false;
+        for (int k = 0; k < img_cache_n && !known; k++)
+            known = !strcmp(img_cache[k].url, abs);
+        for (int k = 0; k < nj && !known; k++)
+            known = !strcmp(jobs[k].url, abs);
+        if (!known)
+            snprintf(jobs[nj++].url, sizeof(jobs[0].url), "%s", abs);
+    }
+    if (!nj) {
+        free(jobs);
+        return NULL;
+    }
+    struct img_batch *b = calloc(1, sizeof(*b));
+    pthread_mutex_init(&b->mu, NULL);
+    b->jobs = jobs;
+    b->nj = nj;
+    tls_available();
+    int want = nj < 10 ? nj : 10;
+    for (int i = 0; i < want; i++) {
+        pthread_t th;
+        b->workers++;
+        if (pthread_create(&th, NULL, batch_worker, b) == 0)
+            pthread_detach(th);
+        else
+            b->workers--;
+    }
+    if (b->workers == 0) {
+        free(jobs);
+        free(b);
+        return NULL;
+    }
+    return b;
+}
+
+/* Move finished bitmaps into the cache. Returns how many arrived; *all is set when the batch is complete. */
+static int batch_collect(struct img_batch *b, bool *all)
+{
+    int got = 0;
+    pthread_mutex_lock(&b->mu);
+    for (int i = 0; i < b->nj; i++)
+        if (b->jobs[i].done && !b->jobs[i].taken) {
+            b->jobs[i].taken = true;
+            img_cache_put(b->jobs[i].url, b->jobs[i].im);
+            got++;
+        }
+    *all = b->done == b->nj;
+    pthread_mutex_unlock(&b->mu);
+    return got;
+}
+
+/* The page no longer needs the batch (finished or abandoned). */
+static void batch_release(struct img_batch *b)
+{
+    pthread_mutex_lock(&b->mu);
+    b->detached = true;
+    bool last = b->workers == 0;
+    pthread_mutex_unlock(&b->mu);
+    if (last) {
+        for (int i = 0; i < b->nj; i++)
+            if (!b->jobs[i].taken)
+                image_free(b->jobs[i].im);
+        free(b->jobs);
+        free(b);
+    }
+}
+
 /* ---- JavaScript pages -------------------------------------------------------------------------------- */
 
 /* Everything the DOM needs from the browser: where relative script addresses start, and a mailbox for navigation requests
@@ -1398,15 +2226,56 @@ struct web_host {
     char pending[2048];
     int delta;                      /* history steps, when `pending` is empty */
     bool has_pending;
+    char *pending_post;             /* urlencoded body of a POST navigation (form submit), or NULL */
     char status[300];               /* last alert / script error, for the status bar */
 };
 
+/* Does the page need the DOM: scripts, style sheets or style attributes? (plain markup is parsed directly) */
 static bool has_script(const char *body, size_t len)
 {
-    for (size_t i = 0; i + 7 <= len; i++)
-        if (body[i] == '<' && !strncasecmp(body + i, "<script", 7))
+    for (size_t i = 0; i + 6 <= len; i++) {
+        if (body[i] == '<' && (!strncasecmp(body + i, "<script", 7) || !strncasecmp(body + i, "<style", 6) ||
+                               !strncasecmp(body + i, "<form", 5) || !strncasecmp(body + i, "<input", 6) ||
+                               !strncasecmp(body + i, "<textarea", 9) || !strncasecmp(body + i, "<select", 7) ||
+                               !strncasecmp(body + i, "<button", 7) ||
+                               (!strncasecmp(body + i, "<link", 5) && i + 200 < len + 200)))
             return true;
+        if ((body[i] == 's' || body[i] == 'S') && !strncasecmp(body + i, "style=", 6))
+            return true;
+    }
     return false;
+}
+
+static void host_prefetch(void *data, const char *const *srcs, int n)
+{
+    struct web_host *h = data;
+    struct pf_job *jobs = calloc((size_t)n + 1, sizeof(*jobs));
+    int nj = 0;
+    for (int i = 0; i < n && jobs; i++) {
+        char abs[2048];
+        if (!url_resolve(h->base, srcs[i], abs, sizeof(abs)) || strlen(abs) >= sizeof(jobs[0].url))
+            continue;
+        if (strncasecmp(abs, "http", 4) || pf_find(abs))
+            continue;
+        bool dup = false;
+        for (int k = 0; k < nj; k++)
+            dup |= !strcmp(jobs[k].url, abs);
+        if (!dup && nj < 48)
+            snprintf(jobs[nj++].url, sizeof(jobs[0].url), "%s", abs);
+    }
+    par_run(nj, pf_fetch_one, jobs, 8);
+    for (int k = 0; k < nj; k++) {
+        if (pf_n < PREFETCH_MAX) {
+            snprintf(pf_cache[pf_n].url, sizeof(pf_cache[0].url), "%s", jobs[k].url);
+            pf_cache[pf_n].body = jobs[k].body;
+            pf_cache[pf_n].len = jobs[k].len;
+            pf_cache[pf_n].ok = jobs[k].ok;
+            pf_n++;
+        } else {
+            free(jobs[k].body);
+        }
+    }
+    free(jobs);
 }
 
 static bool host_fetch_script(void *data, const char *src, char **body, size_t *len, char *err, size_t errn)
@@ -1417,6 +2286,18 @@ static bool host_fetch_script(void *data, const char *src, char **body, size_t *
         snprintf(err, errn, "bad address");
         return false;
     }
+    const struct pf_entry *pe = pf_find(abs);
+    if (pe) {
+        if (!pe->ok || !pe->body) {
+            snprintf(err, errn, "could not load %s", abs);
+            return false;
+        }
+        *body = malloc(pe->len + 1);
+        memcpy(*body, pe->body, pe->len);
+        (*body)[pe->len] = 0;
+        *len = pe->len;
+        return true;
+    }
     struct page sp;
     page_load(&sp, abs);
     if (sp.failed || !sp.body) {
@@ -1426,6 +2307,31 @@ static bool host_fetch_script(void *data, const char *src, char **body, size_t *
     }
     *body = sp.body;
     *len = sp.len;
+    return true;
+}
+
+static bool host_fetch(void *data, const char *url, const char *method, const char *body, size_t bodylen,
+                       const char *headers, struct dom_fetch_result *res)
+{
+    struct web_host *h = data;
+    char abs[2048];
+    memset(res, 0, sizeof(*res));
+    if (!url_resolve(h->base, url, abs, sizeof(abs))) {
+        snprintf(res->error, sizeof(res->error), "bad address %s", url);
+        return false;
+    }
+    struct http_req rq = { method, body, bodylen, headers };
+    struct page p;
+    if (!fetch_resource(abs, &rq, &p, res->error, sizeof(res->error))) {
+        free(p.body);
+        free(p.headers);
+        return false;
+    }
+    res->status = p.status;
+    res->body = p.body;
+    res->len = p.len;
+    res->headers = p.headers;
+    snprintf(res->url, sizeof(res->url), "%s", p.url);
     return true;
 }
 
@@ -1440,6 +2346,34 @@ static void host_navigate(void *data, const char *url, int delta)
             h->delta = 0;
         else if (url[0] == '#')
             h->has_pending = false;
+    }
+}
+
+/* A form was submitted: GET goes to action?query, POST sends the query as the body. */
+static void host_form_submit(void *data, const char *action, const char *query, bool post)
+{
+    struct web_host *h = data;
+    char target[2048];
+    if (action && *action) {
+        if (!url_resolve(h->base, action, target, sizeof(target)))
+            return;
+    } else {
+        snprintf(target, sizeof(target), "%s", h->base);
+    }
+    target[strcspn(target, "#")] = 0;
+    h->has_pending = true;
+    h->delta = 0;
+    free(h->pending_post);
+    h->pending_post = NULL;
+    if (post) {
+        snprintf(h->pending, sizeof(h->pending), "%s", target);
+        h->pending_post = strdup(query ? query : "");
+    } else {
+        target[strcspn(target, "?")] = 0;
+        if (query && *query)
+            snprintf(h->pending, sizeof(h->pending), "%s?%s", target, query);
+        else
+            snprintf(h->pending, sizeof(h->pending), "%s", target);
     }
 }
 
@@ -1458,26 +2392,41 @@ static void host_alert(void *data, const char *text)
 
 /* Build the document of a loaded page: pages with scripts go through the DOM (scripts run, then the result is
  * serialized and parsed by the HTML renderer); others are parsed directly. *domp receives the live DOM or NULL. */
+static bool g_images_blocking = true;                        /* false in the window: images arrive in the background */
+
 static void load_document(struct page *p, struct web_host *wh, struct doc *out, struct dom **domp)
 {
     *domp = NULL;
+    pf_clear();
     snprintf(wh->base, sizeof(wh->base), "%s", p->url);
     if (p->html && !p->failed && p->body && has_script(p->body, p->len)) {
-        struct dom_host host = { .data = wh, .fetch_script = host_fetch_script, .navigate = host_navigate,
+        struct dom_host host = { .data = wh, .fetch_script = host_fetch_script, .prefetch = host_prefetch, .fetch = host_fetch, .form_submit = host_form_submit, .navigate = host_navigate,
                                  .message = host_message, .alert = host_alert };
         struct dom *d = dom_create(p->url, &host);
         if (d) {
+            bool timing = getenv("LUMEN_WEB_TIMING") != NULL;
+            long long t0 = now_ms();
             dom_load(d, p->body, p->len);
+            long long t1 = now_ms();
             size_t l;
             char *html = dom_serialize(d, &l);
+            long long t2 = now_ms();
             dom_take_dirty(d);
             doc_parse(out, html, l, false);
             free(html);
+            long long t3 = now_ms();
+            if (g_images_blocking)
+                doc_load_images(out, p->url);
+            if (timing)
+                fprintf(stderr, "[timing] scripts %lld ms, style+serialize %lld ms, parse %lld ms, images %lld ms (%d)\n", t1 - t0,
+                        t2 - t1, t3 - t2, now_ms() - t3, out->nimages);
             *domp = d;
             return;
         }
     }
     doc_parse(out, p->body ? p->body : "", p->body ? p->len : 0, !p->html);
+    if (g_images_blocking)
+        doc_load_images(out, p->url);
 }
 
 /* ---- selftest -------------------------------------------------------------------------------- */
@@ -1623,6 +2572,7 @@ struct app {
 
     struct doc doc;
     struct dom *dom;                /* live DOM of the current page (scripts), or NULL */
+    struct img_batch *batch;        /* images being loaded in the background */
     struct web_host wh;
     struct layout layout;
     int layout_w;
@@ -1631,6 +2581,7 @@ struct app {
     char status[300];
     int hover_link;
     int press_link;
+    int press_widget;
     int press_btn;                  /* toolbar button pressed: 0 back, 1 forward, 2 reload, 3 address, -1 none */
 
     struct hist hist[100];
@@ -1692,6 +2643,147 @@ static void draw_text(struct app *a, struct rect clip, int x, int y, const char 
     }
 }
 
+static void paint_widget(struct app *a, struct rect view, const struct run *r, int sy);
+
+static void fill_clip(struct app *a, struct rect clip, struct rect r, uint32_t color)
+{
+    int x0 = LM_MAX(r.x, clip.x), y0 = LM_MAX(r.y, clip.y);
+    int x1 = LM_MIN(r.x + r.w, clip.x + clip.w), y1 = LM_MIN(r.y + r.h, clip.y + clip.h);
+    if (x1 > x0 && y1 > y0)
+        fill(a, (struct rect){ x0, y0, x1 - x0, y1 - y0 }, color);
+}
+
+/* A text field's visible part: `cols` characters ending at the caret when focused, else from the start. */
+static void paint_widget(struct app *a, struct rect view, const struct run *r, int sy)
+{
+    const struct dwidget *w = &a->doc.widgets[r->t->img];
+    uint32_t border = w->focus ? COL_ACCENT : 0x7b8294, bg = w->disabled ? 0xe9eaee : 0xffffff, fg = w->disabled ? 0x8a8f9c : 0x1b1b1b;
+    struct rect box = { r->x, sy, r->w, r->h };
+    switch (w->type) {
+    case W_CHECKBOX: case W_RADIO: {
+        fill_clip(a, view, box, border);
+        fill_clip(a, view, (struct rect){ box.x + 1, box.y + 1, box.w - 2, box.h - 2 }, bg);
+        if (w->type == W_RADIO) {                                  /* round: cut the corners */
+            for (int k = 0; k < 3; k++) {
+                fill_clip(a, view, (struct rect){ box.x, box.y + k, 3 - k, 1 }, bg == 0xffffff ? COL_PAGE : bg);
+            }
+        }
+        if (w->checked) {
+            if (w->type == W_RADIO) fill_clip(a, view, (struct rect){ box.x + 4, box.y + 4, 6, 6 }, fg);
+            else {
+                for (int k = 0; k < 3; k++) fill_clip(a, view, (struct rect){ box.x + 3 + k, box.y + 7 + k, 2, 2 }, fg);
+                for (int k = 0; k < 5; k++) fill_clip(a, view, (struct rect){ box.x + 5 + k, box.y + 9 - k, 2, 2 }, fg);
+            }
+        }
+        return;
+    }
+    case W_BUTTON: case W_SUBMIT: case W_RESET: {
+        fill_clip(a, view, box, border);
+        fill_clip(a, view, (struct rect){ box.x + 1, box.y + 1, box.w - 2, box.h - 2 }, w->disabled ? 0xe9eaee : 0xe1e4ea);
+        fill_clip(a, view, (struct rect){ box.x + 1, box.y + box.h - 3, box.w - 2, 2 }, 0xc3c7d1);
+        int tw = (int)utf8_len(w->text) * LM_FONT_W;
+        draw_text(a, view, box.x + (box.w - tw) / 2, box.y + (box.h - LM_FONT_H) / 2, w->text, strlen(w->text), 1, fg, false, false);
+        return;
+    }
+    default:
+        break;
+    }
+    fill_clip(a, view, box, border);
+    if (w->focus)
+        fill_clip(a, view, (struct rect){ box.x + 1, box.y + 1, box.w - 2, box.h - 2 }, border);
+    fill_clip(a, view, (struct rect){ box.x + (w->focus ? 2 : 1), box.y + (w->focus ? 2 : 1), box.w - (w->focus ? 4 : 2), box.h - (w->focus ? 4 : 2) }, bg);
+    int cols = w->type == W_SELECT ? w->cols : w->cols;
+    int tx = box.x + 6;
+    if (w->type == W_SELECT) {
+        draw_text(a, view, tx, box.y + (box.h - LM_FONT_H) / 2, w->text, utf8_off(w->text, (size_t)cols), 1, fg, false, false);
+        int ax = box.x + box.w - 16, ay = box.y + box.h / 2 - 2;
+        for (int k = 0; k < 4; k++)
+            fill_clip(a, view, (struct rect){ ax + k, ay + k, 9 - 2 * k, 1 }, fg);
+        return;
+    }
+    if (w->type == W_TEXTAREA) {
+        /* wrap by lines of `cols` characters; keep the caret's line visible */
+        char **lines = NULL;
+        int nl = 0, caret_line = 0, caret_col = 0;
+        const char *p = w->text;
+        size_t ci = 0;
+        for (;;) {
+            size_t take = 0, chars = 0;
+            while (p[take] && p[take] != '\n' && chars < (size_t)cols) {
+                take++;
+                while (((unsigned char)p[take] & 0xc0) == 0x80) take++;
+                chars++;
+            }
+            lines = realloc(lines, sizeof(*lines) * (size_t)(nl + 1));
+            lines[nl] = strndup(p, take);
+            if (w->focus && (size_t)w->caret >= ci && ((size_t)w->caret <= ci + chars)) { caret_line = nl; caret_col = (int)((size_t)w->caret - ci); }
+            nl++;
+            ci += chars;
+            p += take;
+            if (*p == '\n') { p++; ci++; }
+            else if (!*p) break;
+        }
+        int first = LM_MAX(caret_line - w->rows + 1, 0);
+        for (int i = 0; i < w->rows && first + i < nl; i++)
+            draw_text(a, view, tx, box.y + 4 + i * LM_FONT_H, lines[first + i], strlen(lines[first + i]), 1, fg, false, false);
+        if (!w->text[0] && w->ph)
+            draw_text(a, view, tx, box.y + 4, w->ph, utf8_off(w->ph, (size_t)cols), 1, 0x9aa0ae, false, false);
+        if (w->focus)
+            fill_clip(a, view, (struct rect){ tx + caret_col * LM_FONT_W, box.y + 4 + (caret_line - first) * LM_FONT_H, 1, LM_FONT_H }, fg);
+        for (int i = 0; i < nl; i++)
+            free(lines[i]);
+        free(lines);
+        return;
+    }
+    /* single line */
+    size_t total = utf8_len(w->text);
+    size_t start = w->focus && (size_t)w->caret + 1 > (size_t)cols ? (size_t)w->caret + 1 - (size_t)cols : 0;
+    size_t b0 = utf8_off(w->text, start), b1 = utf8_off(w->text, start + (size_t)cols);
+    int ty = box.y + (box.h - LM_FONT_H) / 2;
+    if (!total && w->ph && !w->focus) {
+        draw_text(a, view, tx, ty, w->ph, utf8_off(w->ph, (size_t)cols), 1, 0x9aa0ae, false, false);
+    } else if (w->type == W_PASSWORD) {
+        char stars[256];
+        size_t n = total - start < sizeof(stars) - 1 ? total - start : sizeof(stars) - 1;
+        if (n > (size_t)cols) n = (size_t)cols;
+        memset(stars, '*', n);
+        draw_text(a, view, tx, ty, stars, n, 1, fg, false, false);
+    } else {
+        draw_text(a, view, tx, ty, w->text + b0, b1 - b0, 1, fg, false, false);
+    }
+    if (w->focus)
+        fill_clip(a, view, (struct rect){ tx + ((int)w->caret - (int)start) * LM_FONT_W, ty, 1, LM_FONT_H }, fg);
+}
+
+/* Draw a bitmap with alpha at (x, y), clipped to `clip`. */
+static void blit_image(struct app *a, struct rect clip, int x, int y, const struct image *im)
+{
+    for (int row = 0; row < im->h; row++) {
+        int py = y + row;
+        if (py < clip.y || py >= clip.y + clip.h || py < 0 || py >= a->bh)
+            continue;
+        for (int col = 0; col < im->w; col++) {
+            int px = x + col;
+            if (px < clip.x || px >= clip.x + clip.w || px < 0 || px >= a->bw)
+                continue;
+            uint32_t c = im->px[(size_t)row * (size_t)im->w + (size_t)col];
+            uint32_t al = c >> 24;
+            if (!al)
+                continue;
+            uint32_t *dst = &a->pixels[(size_t)py * (size_t)a->bw + (size_t)px];
+            if (al == 255) {
+                *dst = c & 0xffffff;
+            } else {
+                uint32_t d = *dst;
+                uint32_t r = (((c >> 16) & 255) * al + ((d >> 16) & 255) * (255 - al)) / 255;
+                uint32_t g = (((c >> 8) & 255) * al + ((d >> 8) & 255) * (255 - al)) / 255;
+                uint32_t b = ((c & 255) * al + (d & 255) * (255 - al)) / 255;
+                *dst = r << 16 | g << 8 | b;
+            }
+        }
+    }
+}
+
 static void draw_label(struct app *a, struct rect r, const char *s, uint32_t color)
 {
     int tw = lm_font_text_width(s);
@@ -1721,10 +2813,29 @@ static int link_at(const struct app *a, double x, double y)
     int py = (int)y - TOOLBAR_H + a->scroll;
     for (size_t i = 0; i < a->layout.n; i++) {
         const struct run *r = &a->layout.r[i];
-        if (r->kind == R_TEXT && r->t->link >= 0 && x >= r->x && x < r->x + r->w && py >= r->y && py < r->y + r->h)
+        if ((r->kind == R_TEXT || r->kind == R_IMAGE) && r->t->link >= 0 && x >= r->x && x < r->x + r->w && py >= r->y && py < r->y + r->h)
             return r->t->link;
     }
     return -1;
+}
+
+/* The form control at a window position: its DOM id (0 = none) and the run it was drawn as. */
+static bool doc_has_widgets(const struct doc *d) { return d->nwidgets > 0; }
+
+static int widget_at(const struct app *a, double x, double y, const struct run **run)
+{
+    if (y < TOOLBAR_H || y >= a->bh - STATUS_H)
+        return 0;
+    int py = (int)y - TOOLBAR_H + a->scroll;
+    for (size_t i = 0; i < a->layout.n; i++) {
+        const struct run *r = &a->layout.r[i];
+        if (r->kind == R_WIDGET && x >= r->x && x < r->x + r->w && py >= r->y && py < r->y + r->h) {
+            if (run)
+                *run = r;
+            return a->doc.widgets[r->t->img].id;
+        }
+    }
+    return 0;
 }
 
 static void paint(struct app *a)
@@ -1733,14 +2844,39 @@ static void paint(struct app *a)
 
     /* page */
     struct rect view = { 0, TOOLBAR_H, a->bw, view_h(a) };
-    fill(a, view, COL_PAGE);
+    fill(a, view, a->doc.has_page_bg ? a->doc.page_bg : COL_PAGE);
+    for (size_t i = 0; i < a->layout.n; i++) {                         /* backgrounds of blocks first (below all text) */
+        const struct run *r = &a->layout.r[i];
+        if (r->kind == R_BG && r->t->hasblockbg)
+            fill_clip(a, view, (struct rect){ 0, view.y + r->y - a->scroll, a->bw, r->h }, r->t->blockbg);
+        else if (r->kind != R_BG && r->kind != R_HR && r->t->hasblockbg)
+            fill_clip(a, view, (struct rect){ 0, view.y + r->ly - a->scroll, a->bw, r->lh }, r->t->blockbg);
+    }
     for (size_t i = 0; i < a->layout.n; i++) {
         const struct run *r = &a->layout.r[i];
         int sy = view.y + r->y - a->scroll;
         if (sy + r->h < view.y || sy > view.y + view.h)
             continue;
+        if (r->kind == R_BG)
+            continue;
         if (r->kind == R_HR) {
             fill(a, (struct rect){ r->x, sy, r->w, 1 }, COL_RULE);
+        } else if (r->kind == R_IMAGE) {
+            struct dimg *im = &a->doc.images[r->t->img];
+            if (!im->scaled || im->sw != r->w || im->sh != r->h) {
+                image_free(im->scaled);
+                im->scaled = image_scale(im->im, r->w, r->h);
+                im->sw = r->w;
+                im->sh = r->h;
+            }
+            if (im->scaled)
+                blit_image(a, view, r->x, sy, im->scaled);
+            if (r->t->link >= 0 && r->t->link == a->hover_link) {      /* hover outline for linked images */
+                fill(a, (struct rect){ r->x, sy, r->w, 2 }, 0x1f7bff);
+                fill(a, (struct rect){ r->x, sy + r->h - 2, r->w, 2 }, 0x1f7bff);
+            }
+        } else if (r->kind == R_WIDGET) {
+            paint_widget(a, view, r, sy);
         } else if (r->kind == R_BULLET) {
             struct rect sq = { r->x, sy + 6, 6, 6 };
             fill(a, (struct rect){ sq.x, LM_MAX(sq.y, view.y), sq.w, LM_MIN(sq.h, view.y + view.h - sq.y) }, COL_TEXT);
@@ -1749,9 +2885,14 @@ static void paint(struct app *a)
             uint32_t col = t->color;
             if (t->link >= 0 && t->link == a->hover_link)
                 col = 0x1f7bff;
+            if (t->hasbg)
+                fill_clip(a, view, (struct rect){ r->x - 1, sy, r->w + LM_FONT_W * (t->scale ? t->scale : 1) + 1, r->h }, t->bg);
             draw_text(a, view, r->x, sy, r->text, (size_t)r->len, t->scale ? t->scale : 1, col, t->bold, t->ital);
-            if (t->link >= 0 && sy + r->h - 2 >= view.y && sy + r->h - 2 < view.y + view.h)
-                fill(a, (struct rect){ r->x, sy + r->h - 2, r->w, 1 }, col);
+            bool under = t->ul == 1 || (t->link >= 0 && t->ul != 2);
+            if (under)
+                fill_clip(a, view, (struct rect){ r->x, sy + r->h - 2, r->w, 1 }, col);
+            if (t->strike)
+                fill_clip(a, view, (struct rect){ r->x, sy + r->h / 2, r->w, 1 }, col);
         }
     }
     int ms = max_scroll(a);
@@ -1829,6 +2970,17 @@ static void relayout(struct app *a)
     a->scroll = LM_CLAMP(a->scroll, 0, max_scroll(a));
 }
 
+/* Show the cached bitmaps now and fetch the rest in the background. */
+static void app_images(struct app *a)
+{
+    if (a->batch) {
+        batch_release(a->batch);
+        a->batch = NULL;
+    }
+    doc_assign_images(&a->doc, a->cur_url);
+    a->batch = batch_start(&a->doc, a->cur_url);
+}
+
 /* The scripts changed the page: serialize the DOM again, keep the scroll position. */
 static void rebuild_from_dom(struct app *a, bool force)
 {
@@ -1846,6 +2998,7 @@ static void rebuild_from_dom(struct app *a, bool force)
     doc_free(&a->doc);
     doc_parse(&a->doc, html, l, false);
     free(html);
+    app_images(a);
     a->hover_link = -1;
     a->layout_w = 0;
     relayout(a);
@@ -1855,8 +3008,15 @@ static void rebuild_from_dom(struct app *a, bool force)
 
 enum nav { NAV_PUSH, NAV_RELOAD, NAV_HISTORY };
 
+static void draw(struct app *a);
+
 static void navigate(struct app *a, const char *url, enum nav mode, int restore_scroll)
 {
+    if (a->configured && !a->buffer_busy) {                 /* the load blocks: say what is going on first */
+        snprintf(a->status, sizeof(a->status), "Loading %s ...", url);
+        draw(a);
+        wlc_flush(a->c);
+    }
     if (a->nhist > 0)
         a->hist[a->hpos].scroll = a->scroll;
     struct page p;
@@ -1869,6 +3029,7 @@ static void navigate(struct app *a, const char *url, enum nav mode, int restore_
     snprintf(a->cur_url, sizeof(a->cur_url), "%s", p.url);
     load_document(&p, &a->wh, &a->doc, &a->dom);
     free(p.body);
+    app_images(a);
     snprintf(a->addr, sizeof(a->addr), "%s", strcmp(p.url, "about:home") ? p.url : "about:home");
     a->cursor = (int)strlen(a->addr);
     a->addr_focus = false;
@@ -2069,6 +3230,7 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
             break;
         if (args[3].u == 1) {
             a->press_link = link_at(a, a->px, a->py);
+            a->press_widget = widget_at(a, a->px, a->py, NULL);
             a->press_btn = -1;
             for (int i = 0; i < 3; i++)
                 if (in_rect(btn_rect(i), a->px, a->py) && btn_enabled(a, i))
@@ -2096,9 +3258,19 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
                     snprintf(u, sizeof(u), "%s", a->cur_url);
                     navigate(a, u, NAV_RELOAD, a->scroll);
                 }
+            } else if (a->press_widget && a->dom) {
+                const struct run *wr = NULL;
+                if (widget_at(a, a->px, a->py, &wr) == a->press_widget && wr) {
+                    dom_widget_click(a->dom, a->press_widget, ((int)a->px - wr->x - 6) / LM_FONT_W);
+                    rebuild_from_dom(a, true);
+                }
             } else if (a->press_link >= 0 && link_at(a, a->px, a->py) == a->press_link) {
                 follow_link(a, a->press_link);
+            } else if (a->dom && dom_focus_id(a->dom) && a->py >= TOOLBAR_H && a->py < a->bh - STATUS_H) {
+                dom_blur(a->dom);                       /* a click on empty page leaves the field */
+                rebuild_from_dom(a, true);
             }
+            a->press_widget = 0;
             a->press_link = -1;
             a->press_btn = -1;
         }
@@ -2226,6 +3398,42 @@ static void page_key(struct app *a, uint32_t ks, const char *txt, int tl)
     }
 }
 
+/* Keys for the focused form control (or Tab to reach one). True if the key was used. */
+static bool widget_key(struct app *a, uint32_t ks, const char *txt, int tl)
+{
+    if (!a->dom)
+        return false;
+    bool ctrl = a->mods & LM_MOD_CTRL, alt = a->mods & LM_MOD_ALT, shift = a->mods & LM_MOD_SHIFT;
+    bool used = false;
+    if (ks == LM_KS_Tab || ks == 0xfe20 /* ISO_Left_Tab */) {
+        if (ctrl || alt || (!dom_focus_id(a->dom) && !doc_has_widgets(&a->doc)))
+            return false;
+        dom_focus_next(a->dom, shift || ks == 0xfe20);
+        used = true;
+    } else if (dom_focus_id(a->dom) && !ctrl && !alt) {
+        if (ks == LM_KS_Escape) { dom_blur(a->dom); used = true; }
+        else if (ks == LM_KS_BackSpace) used = dom_widget_key(a->dom, DOM_KEY_BACKSPACE, "");
+        else if (ks == LM_KS_Delete) used = dom_widget_key(a->dom, DOM_KEY_DELETE, "");
+        else if (ks == LM_KS_Left) used = dom_widget_key(a->dom, DOM_KEY_LEFT, "");
+        else if (ks == LM_KS_Right) used = dom_widget_key(a->dom, DOM_KEY_RIGHT, "");
+        else if (ks == LM_KS_Up) used = dom_widget_key(a->dom, DOM_KEY_UP, "");
+        else if (ks == LM_KS_Down) used = dom_widget_key(a->dom, DOM_KEY_DOWN, "");
+        else if (ks == LM_KS_Home) used = dom_widget_key(a->dom, DOM_KEY_HOME, "");
+        else if (ks == LM_KS_End) used = dom_widget_key(a->dom, DOM_KEY_END, "");
+        else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) used = dom_widget_key(a->dom, DOM_KEY_ENTER, "");
+        else if (tl > 0 && (unsigned char)txt[0] >= 0x20 && txt[0] != 0x7f) used = dom_widget_key(a->dom, DOM_KEY_CHAR, txt);
+        else if (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down) used = false;
+        /* a focused field swallows plain keys even if it did not use them (so Backspace never goes "back") */
+        if (!used && (ks == LM_KS_BackSpace || (tl > 0 && (unsigned char)txt[0] >= 0x20)))
+            used = true;
+    }
+    if (used) {
+        rebuild_from_dom(a, true);
+        a->redraw = true;
+    }
+    return used;
+}
+
 static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)c; (void)id;
@@ -2247,7 +3455,7 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         txt[tl > 0 ? tl : 0] = 0;
         if (a->addr_focus)
             addr_key(a, ks, txt, tl);
-        else
+        else if (!widget_key(a, ks, txt, tl))
             page_key(a, ks, txt, tl);
         break;
     }
@@ -2360,6 +3568,7 @@ int main(int argc, char **argv)
     if (argc > 2 && !strcmp(argv[1], "--dump"))
         return dump_page(argv[2], argc > 3 ? atoll(argv[3]) : 5000);
 
+    g_images_blocking = false;
     static struct app a;
     a.w = DEFAULT_W;
     a.h = DEFAULT_H;
@@ -2383,6 +3592,10 @@ int main(int argc, char **argv)
     WLC_SEND(a.c, a.toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = "lumen.web" });
 
     char start[2048];
+    WLC_SEND0(a.c, a.surface, LM_WL_SURFACE_REQ_COMMIT);
+    for (int i = 0; i < 50 && !a.configured && !wlc_dead(a.c); i++)       /* get the window on screen before the page loads */
+        if (wlc_dispatch(a.c, 100) < 0)
+            break;
     if (argc > 1 && url_from_input(argv[1], start, sizeof(start)))
         navigate(&a, start, NAV_PUSH, 0);
     else
@@ -2395,7 +3608,12 @@ int main(int argc, char **argv)
             if (a.wh.pending[0]) {
                 char u[2048];
                 snprintf(u, sizeof(u), "%s", a.wh.pending);
+                char *post = a.wh.pending_post;
+                a.wh.pending_post = NULL;
+                g_post_body = post;
                 navigate(&a, u, NAV_PUSH, 0);
+                g_post_body = NULL;
+                free(post);
             } else if (a.wh.delta) {
                 go_history(&a, a.wh.delta);
             }
@@ -2405,13 +3623,30 @@ int main(int argc, char **argv)
             draw(&a);
         long long next = a.dom ? dom_next_timer_ms(a.dom) : -1;
         int timeout = next < 0 ? -1 : (int)(next > 60000 ? 60000 : next);
+        if (a.batch && (timeout < 0 || timeout > 100))
+            timeout = 100;                               /* poll the background image loader */
         if (wlc_dispatch(a.c, timeout) < 0)
             break;
+        if (a.batch) {
+            bool all;
+            if (batch_collect(a.batch, &all) > 0) {
+                doc_assign_images(&a.doc, a.cur_url);
+                relayout(&a);
+                a.redraw = true;
+            }
+            if (all) {
+                batch_release(a.batch);
+                a.batch = NULL;
+            }
+        }
         if (a.dom && dom_next_timer_ms(a.dom) == 0) {
             bool changed = dom_run_timers(a.dom);
             rebuild_from_dom(&a, changed);
         }
     }
+    if (a.batch)
+        batch_release(a.batch);
+    free(a.wh.pending_post);
     dom_free(a.dom);
     doc_free(&a.doc);
     free(a.layout.r);

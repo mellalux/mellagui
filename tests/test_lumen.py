@@ -4,6 +4,7 @@ through the raw wire client in wlclient.py.
 Environment:
     LUMEN_BIN   compositor binary (default build/lumen; use build/lumen-asan for sanitizers)
 """
+import json
 import os
 import shutil
 import signal
@@ -26,6 +27,7 @@ KEY_LEFTMETA, KEY_LEFTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT = 125, 42, 29, 56
 KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN = 103, 105, 106, 108
 KEY_SPACE, KEY_RIGHTALT = 57, 100
 KEY_G = 34
+KEY_V = 47
 BTN_LEFT, BTN_RIGHT = 272, 273
 
 proc = None
@@ -115,6 +117,34 @@ class Base(unittest.TestCase):
                 break
             time.sleep(0.02)
         return ctl.windows()
+
+
+
+    def private_compositor(self, name, *args, env=None):
+        sock = os.path.join(tmp, name + '.ctl')
+        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77', **(env or {}))
+        p = subprocess.Popen([BIN, '--backend', 'headless', '--size', '800x500', '--socket', name, '--control', sock,
+                              '--terminal', 'true'] + list(args), env=env, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        for _ in range(100):
+            if os.path.exists(sock) and os.path.exists(os.path.join(tmp, name)):
+                break
+            if p.poll() is not None:
+                self.fail('compositor exited early: %s' % p.stdout.read().decode())
+            time.sleep(0.05)
+        c = Ctl(sock)
+
+        def stop():
+            try:
+                c.cmd('quit')
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self.addCleanup(stop)
+        return p, c, stop
 
 
 class TestRegistry(Base):
@@ -1542,7 +1572,7 @@ class TestClients(Base):
 
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',
-                    'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1'}
+                    'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1', 'mixer': '0'}
 
 
 def settings():
@@ -1553,7 +1583,7 @@ def settings():
 
 def settings_restore():
     for k in ('layouts', 'layout', 'sticky', 'repeat-delay', 'repeat-rate', 'pointer-speed', 'natural-scroll',
-              'sound', 'gadget'):
+              'sound', 'gadget', 'mixer'):
         ctl.cmd('settings %s %s' % (k, DEFAULT_SETTINGS[k]))
 
 
@@ -1700,32 +1730,6 @@ class TestSettings(Base):
         self.assertIn('gadget=1', ctl.last)
 
     # ---- the file ---------------------------------------------------------------------------------------------------
-
-    def private_compositor(self, name, *args, env=None):
-        sock = os.path.join(tmp, name + '.ctl')
-        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77', **(env or {}))
-        p = subprocess.Popen([BIN, '--backend', 'headless', '--size', '800x500', '--socket', name, '--control', sock,
-                              '--terminal', 'true'] + list(args), env=env, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-        for _ in range(100):
-            if os.path.exists(sock) and os.path.exists(os.path.join(tmp, name)):
-                break
-            if p.poll() is not None:
-                self.fail('compositor exited early: %s' % p.stdout.read().decode())
-            time.sleep(0.05)
-        c = Ctl(sock)
-
-        def stop():
-            try:
-                c.cmd('quit')
-            except Exception:
-                pass
-            try:
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                p.kill()
-        self.addCleanup(stop)
-        return p, c, stop
 
     # ---- resolution and sound outputs -----------------------------------------------------------------------------
 
@@ -2082,13 +2086,28 @@ esac
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # sound box (second row, below the gadget box)
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
-        # keyboard only: Tab x5 (the five page tabs) + 1 reaches the first widget of the page (the gadget checkbox), Space toggles it
+        # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer box, wraps over the five
+        # page tabs (the heading is skipped) and reaches the gadget checkbox with the 7th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(6):
+        for _ in range(7):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
         self.assertEqual(settings()['gadget'], '0')
+
+    def test_panel_desktop_page_has_the_mixer_checkbox(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        time.sleep(0.2)
+        ctl.click(x0 + 168, y0 + 42 + 2 * 28 + 14)              # third row: Volume mixer gadget
+        time.sleep(0.3)
+        self.assertEqual(settings()['mixer'], '1')
+        ctl.cmd('gadget-rect mixer')
+        self.assertNotIn('hidden', ctl.last)
+        ctl.click(x0 + 168, y0 + 42 + 2 * 28 + 14)
+        time.sleep(0.3)
+        self.assertEqual(settings()['mixer'], '0')
 
     def test_panel_follows_changes_made_elsewhere(self):
         p, win = self.open_panel()
@@ -2125,6 +2144,237 @@ esac
         ee_text = field()
         self.assertNotEqual(ee_text, empty)
         self.assertNotEqual(ee_text, us_text)
+
+
+FAKES = os.path.join(ROOT, 'tests', 'fakes')
+
+
+class TestMixer(Base):
+    """The volume mixer gadget: state from pactl / amixer, sliders and buttons, docking, the setting and Super+V."""
+
+    # Card layout (src/mixer.c, src/wm.c): title 32 px, pad 14, master row 40, output row 30, stream rows 40.
+    TITLE, PAD = 32, 14
+
+    def mixer_env(self, tag, extra=None):
+        d = os.path.join(tmp, 'mixer-' + tag)
+        os.makedirs(d, exist_ok=True)
+        env = {'LUMEN_FAKE_STATE': os.path.join(d, 'pactl.json'), 'LUMEN_FAKE_AMIXER': os.path.join(d, 'amixer.json'),
+               'PATH': FAKES + ':' + os.environ['PATH']}
+        env.update(extra or {})
+        for f in ('pactl.json', 'amixer.json'):
+            if os.path.exists(os.path.join(d, f)):
+                os.unlink(os.path.join(d, f))
+        return env, d
+
+    @staticmethod
+    def state(path):
+        with open(path) as f:
+            return json.load(f)
+
+    def start(self, name, env, *args):
+        p, c, stop = self.private_compositor(name, '--mixer', *args, env=env)
+        for _ in range(100):
+            c.cmd('mixer')
+            if ' ready=1' in c.last:
+                break
+            time.sleep(0.05)
+        return c
+
+    @staticmethod
+    def mixer_info(c):
+        c.cmd('mixer')
+        head, _, output = c.last[3:].partition(' output=')                     # the output name has spaces: it comes last
+        info = dict(kv.split('=', 1) for kv in head.split())
+        info['output'] = output
+        return info
+
+    @staticmethod
+    def card(c):
+        c.cmd('gadget-rect mixer')
+        parts = c.last.split()
+        return None if parts[1] == 'hidden' else tuple(map(int, parts[1:5]))
+
+    def geometry(self, c):
+        x, y, w, h = self.card(c)
+        row = y + self.TITLE + 6
+        g = {'card': (x, y, w, h)}
+        sw = w - 2 * self.PAD - 26 - 12 - 46
+        g['mute'] = (x + self.PAD + 13, row + 20)                                  # centre of the master mute button
+        g['slider'] = (x + self.PAD + 26 + 12, row + 20, sw)                       # left, y, width
+        g['output'] = (x + w // 2, row + 40 + 12)
+        srow = row + 40 + 30 + 6
+        g['streams'] = [((x + self.PAD + 22 + 10, srow + 40 * i + 28, w - 2 * self.PAD - 32 - 46),
+                         (x + self.PAD + 11, srow + 40 * i + 28)) for i in range(2)]   # (slider left/y/width, mute centre)
+        return g
+
+    def wait_for(self, pred, what, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def test_mixer_shows_pulse_state_and_follows_the_controls(self):
+        env, d = self.mixer_env('pulse')
+        c = self.start('lumen-mix1', env)
+        info = self.mixer_info(c)
+        self.assertEqual((info['backend'], info['volume'], info['mute'], info['streams']), ('pulse', '64', '0', '2'))
+        self.assertIn('Analog', info['output'])
+        g = self.geometry(c)
+        pj = os.path.join(d, 'pactl.json')
+        sx, sy, sw = g['slider']
+        # click on the slider at 25 %
+        c.click(sx + sw // 4, sy)
+        self.wait_for(lambda: self.state(pj)['sinks'][0]['vol'] == 25, 'sink volume 25')
+        self.assertEqual(self.mixer_info(c)['volume'], '25')
+        # drag from 10 % to 90 %: few commands (coalesced), the last value wins
+        c.abs(sx + sw // 10, sy)
+        c.button(272, True)
+        for k in range(1, 41):
+            c.abs(sx + sw // 10 + (sw * 8 // 10) * k // 40, sy)
+        c.button(272, False)
+        self.wait_for(lambda: 88 <= self.state(pj)['sinks'][0]['vol'] <= 92, 'sink volume about 90 after the drag')
+        sets = [l for l in self.state(pj)['log'] if l.startswith('set-sink-volume')]
+        self.assertLess(len(sets), 41, 'slider drag commands were not coalesced: %d' % len(sets))
+        # mute button
+        c.click(*g['mute'])
+        self.wait_for(lambda: self.state(pj)['sinks'][0]['mute'] is True, 'muted')
+        self.assertEqual(self.mixer_info(c)['mute'], '1')
+        c.click(*g['mute'])
+        self.wait_for(lambda: self.state(pj)['sinks'][0]['mute'] is False, 'unmuted')
+        # an application's slider and mute
+        (ax, ay, aw), (mx, my) = g['streams'][1]
+        c.click(ax + aw * 3 // 4, ay)
+        self.wait_for(lambda: self.state(pj)['inputs'][1]['vol'] == 75, 'stream volume 75')
+        c.click(mx, my)
+        self.wait_for(lambda: self.state(pj)['inputs'][1]['mute'] is True, 'stream muted')
+        self.assertFalse(self.state(pj)['inputs'][0]['mute'])
+        # the output button makes the next sink (HDMI) the default one
+        c.click(*g['output'])
+        self.wait_for(lambda: self.state(pj)['default'] == 'alsa_output.hdmi-stereo', 'default sink changed')
+        self.wait_for(lambda: 'HDMI' in self.mixer_info(c)['output'], 'output text shows HDMI')
+        self.assertEqual(self.mixer_info(c)['volume'], '100')                  # the HDMI sink's own level
+        # changes made elsewhere show up (polling): the other sink is quieter now
+        st = self.state(pj)
+        st['sinks'][1]['vol'] = 33
+        json.dump(st, open(pj, 'w'))
+        self.wait_for(lambda: self.mixer_info(c)['volume'] == '33', 'polled volume', timeout=5.0)
+
+    def test_mixer_screen_has_the_card_docked_below_the_clipboard(self):
+        env, d = self.mixer_env('dock')
+        c = self.start('lumen-mix2', env, '--size', '1024x800')
+        c.cmd('gadget-rect')
+        cb = tuple(map(int, c.last.split()[1:5]))
+        x, y, w, h = self.card(c)
+        self.assertEqual(x + w, cb[0] + cb[2])                                  # same right edge
+        self.assertGreater(y, cb[1] + cb[3])                                    # below the clipboard card
+        # dragging the mixer's title bar moves only the mixer
+        c.abs(x + 60, y + 10)
+        c.button(272, True)
+        c.abs(x - 140, y + 90)
+        c.button(272, False)
+        x2, y2, w2, h2 = self.card(c)
+        self.assertEqual((x2, y2), (x - 200, y + 80))
+        c.cmd('gadget-rect')
+        self.assertEqual(tuple(map(int, c.last.split()[1:5])), cb)
+        # the volume controls still work after moving
+        g = self.geometry(c)
+        sx, sy, sw = g['slider']
+        c.click(sx + sw // 2, sy)
+        self.wait_for(lambda: self.state(os.path.join(d, 'pactl.json'))['sinks'][0]['vol'] == 50, 'volume 50 at the new place')
+
+    def test_mixer_docks_beside_the_clipboard_on_a_small_screen(self):
+        env, d = self.mixer_env('small')
+        c = self.start('lumen-mix6', env)                                       # 800x500: no room below the clipboard card
+        c.cmd('gadget-rect')
+        cb = tuple(map(int, c.last.split()[1:5]))
+        x, y, w, h = self.card(c)
+        self.assertEqual((x + w + 12, y), (cb[0], cb[1]))                       # left of it, same top
+        self.assertGreaterEqual(x, 0)
+
+    def test_mixer_toggles_with_super_v_the_setting_and_the_panel(self):
+        env, d = self.mixer_env('toggle')
+        p, c, stop = self.private_compositor('lumen-mix3', env=env)
+        self.assertIsNone(self.card(c))                                         # hidden by default
+        c.cmd('settings')
+        self.assertIn('mixer=0', c.last)
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_V)
+        c.key(KEY_LEFTMETA, False)
+        self.wait_for(lambda: self.card(c) is not None, 'Super+V shows the mixer')
+        c.cmd('settings')
+        self.assertIn('mixer=1', c.last)
+        c.cmd('settings mixer 0')
+        self.assertIsNone(self.card(c))
+        c.cmd('settings mixer 1')
+        self.assertIsNotNone(self.card(c))
+        self.wait_for(lambda: self.mixer_info(c)['ready'] == '1', 'the mixer read its state')
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_V)
+        c.key(KEY_LEFTMETA, False)
+        self.wait_for(lambda: self.card(c) is None, 'Super+V hides it again')
+
+    def test_mixer_uses_wpctl_when_there_is_no_pactl(self):
+        d = os.path.join(tmp, 'mixer-wpctl')
+        stubs = os.path.join(d, 'bin')
+        os.makedirs(stubs, exist_ok=True)
+        with open(os.path.join(stubs, 'pactl'), 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')                                      # pulseaudio-utils is not installed
+        os.chmod(os.path.join(stubs, 'pactl'), 0o755)
+        wj = os.path.join(d, 'wpctl.json')
+        if os.path.exists(wj):
+            os.unlink(wj)
+        env = {'LUMEN_FAKE_WPCTL': wj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']}
+        c = self.start('lumen-mix7', env)
+        info = self.mixer_info(c)
+        self.assertEqual((info['backend'], info['volume'], info['mute'], info['output']), ('wpctl', '55', '0', 'PipeWire'))
+        g = self.geometry(c)
+        sx, sy, sw = g['slider']
+        c.click(sx + sw // 5, sy)
+        self.wait_for(lambda: self.state(wj)['vol'] == 20, 'wpctl volume 20')
+        c.click(*g['mute'])
+        self.wait_for(lambda: self.state(wj)['mute'] is True, 'wpctl muted')
+        self.wait_for(lambda: self.mixer_info(c)['mute'] == '1', 'state follows')
+
+    def test_mixer_falls_back_to_alsa_master(self):
+        d = os.path.join(tmp, 'mixer-alsa')
+        os.makedirs(d, exist_ok=True)
+        stubs = os.path.join(d, 'bin')
+        os.makedirs(stubs, exist_ok=True)
+        for prog in ('pactl', 'wpctl'):                                         # no PulseAudio / PipeWire here
+            with open(os.path.join(stubs, prog), 'w') as f:
+                f.write('#!/bin/sh\nexit 1\n')
+            os.chmod(os.path.join(stubs, prog), 0o755)
+        aj = os.path.join(d, 'amixer.json')
+        if os.path.exists(aj):
+            os.unlink(aj)
+        env = {'LUMEN_FAKE_AMIXER': aj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']}
+        c = self.start('lumen-mix4', env)
+        info = self.mixer_info(c)
+        self.assertEqual((info['backend'], info['volume'], info['mute'], info['streams']), ('alsa', '40', '0', '0'))
+        g = self.geometry(c)
+        sx, sy, sw = g['slider']
+        c.click(sx + sw * 7 // 10, sy)
+        self.wait_for(lambda: self.state(aj)['vol'] == 70, 'ALSA volume 70')
+        c.click(*g['mute'])
+        self.wait_for(lambda: self.state(aj)['mute'] is True, 'ALSA muted')
+
+    def test_mixer_without_any_mixer_program(self):
+        d = os.path.join(tmp, 'mixer-none')
+        stubs = os.path.join(d, 'bin')
+        os.makedirs(stubs, exist_ok=True)
+        for prog in ('pactl', 'wpctl', 'amixer'):
+            with open(os.path.join(stubs, prog), 'w') as f:
+                f.write('#!/bin/sh\nexit 1\n')
+            os.chmod(os.path.join(stubs, prog), 0o755)
+        c = self.start('lumen-mix5', {'PATH': stubs + ':' + os.environ['PATH']})
+        info = self.mixer_info(c)
+        self.assertEqual((info['backend'], info['ready']), ('none', '1'))
+        x, y, w, h = self.card(c)                                               # the card is there and says so, no crash
+        c.click(x + w // 2, y + 80)
+        self.assertEqual(self.mixer_info(c)['backend'], 'none')
+
 
 
 if __name__ == '__main__':

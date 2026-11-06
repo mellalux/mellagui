@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""A fake `wpctl` (PipeWire's control tool): the default output's volume and mute in $LUMEN_FAKE_WPCTL (json)."""
+import json, os, sys
+
+path = os.environ.get('LUMEN_FAKE_WPCTL', '/tmp/lumen-fake-wpctl.json')
+try:
+    st = json.load(open(path))
+except Exception:
+    st = {'vol': 55, 'mute': False, 'log': []}
+a = sys.argv[1:]
+st['log'].append(' '.join(a))
+if a[:1] == ['get-volume']:
+    sys.stdout.write('Volume: %.2f%s\n' % (st['vol'] / 100.0, ' [MUTED]' if st['mute'] else ''))
+elif a[:1] == ['set-volume'] and len(a) == 3 and a[2].endswith('%'):
+    st['vol'] = int(a[2][:-1])
+elif a[:1] == ['set-mute'] and len(a) == 3:
+    st['mute'] = (not st['mute']) if a[2] == 'toggle' else a[2] in ('1', 'true')
+json.dump(st, open(path, 'w'))

@@ -117,6 +117,14 @@ resize it, 200x86 up to 640x560: a narrower card wraps the texts, a lower one sh
 lines. Double-click the title bar to get the default size and place back (position and size are not saved). Super+G shows/hides it,
 `--no-gadget` starts it hidden.
 
+Volume mixer gadget: a second card of the same kind (Super+V, `--mixer`, or *Desktop* → *Volume mixer gadget* in the settings panel; hidden
+by default). It docks below the clipboard card (beside it on a small screen) and is moved/resized the same way. Inside: the master
+volume slider with a mute button, and - with a PulseAudio/PipeWire pulse server and `pactl` (package `pulseaudio-utils`) - the output
+(click it to switch to the next one, e.g. HDMI) and one slider with a mute button per playing application. Without `pactl` it uses
+PipeWire's `wpctl` (master volume and mute of the default output), and without that ALSA's `Master` control through `amixer`. The state is
+read every 3 s while the card is visible and after each change; the programs run as short child processes started by the event loop, so a
+slow one never stalls the compositor, and slider drags are coalesced (one command at a time).
+
 Mouse: drag the title bar to move, drag the border/corners to resize, double-click the title bar to maximize,
 buttons for minimize/maximize/close, click the panel's workspace cells or the *Lumen* launcher.
 The panel's taskbar lists the windows of the current workspace: click a button to focus it (or restore it if minimized),

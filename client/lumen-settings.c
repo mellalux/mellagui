@@ -426,6 +426,8 @@ static void build_desktop(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Clipboard gadget (Super+G)", "gadget", kv_int(a, "gadget", 1) != 0);
     y += ROW_H;
     add_check(a, x, y, w, "Sound feedback for sticky keys", "sound", kv_int(a, "sound", 1) != 0);
+    y += ROW_H;
+    add_check(a, x, y, w, "Volume mixer gadget (Super+V)", "mixer", kv_int(a, "mixer", 0) != 0);
 }
 
 static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on)

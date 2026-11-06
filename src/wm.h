@@ -47,7 +47,8 @@
  *   Escape             closes the open app menu (the "Lumen" panel button toggles it)
  *   Super+R            spawn config.run_cmd (run dialog; also the panel's "Run" button)
  *   Super+I            spawn config.settings_cmd (settings panel, also in the Lumen menu)
- *   Super+G            show / hide the desktop gadget (clipboard history; drag its title bar to move, its edges to resize)
+ *   Super+G            show / hide the clipboard gadget (history; drag its title bar to move, its edges to resize)
+ *   Super+V            show / hide the volume mixer gadget (same dragging; sliders and buttons work inside)
  *   Super+Q            close focused window (ops->close)
  *   Super+1..4         switch workspace;  Super+Shift+1..4 move focused window there
  *   Super+Tab          focus next window (cycle, raises it); Super+Shift+Tab previous
@@ -256,8 +257,9 @@ enum lm_pick_kind {
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
     LM_PICK_PANEL_TASK,     /* taskbar button of `window` */
-    LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets */
-    LM_PICK_GADGET_BORDER   /* desktop gadget edge/corner: drag to resize, `edges` says which */
+    LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets (`index` = gadget id) */
+    LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
+    LM_PICK_GADGET_BODY     /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
 };
 
 struct lm_pick {
@@ -266,8 +268,8 @@ struct lm_pick {
     struct lm_surface *surface; /* LM_PICK_SURFACE: the exact (sub)surface hit */
     double sx, sy;              /* LM_PICK_SURFACE: surface-local hit position */
     uint32_t edges;             /* LM_PICK_BORDER: LM_EDGE_* */
-    int index;                  /* LM_PICK_PANEL_WORKSPACE, LM_PICK_MENU_ITEM */
-    struct lm_rect rect;        /* LM_PICK_PANEL_LAUNCHER */
+    int index;                  /* LM_PICK_PANEL_WORKSPACE, LM_PICK_MENU_ITEM, LM_PICK_GADGET_* */
+    struct lm_rect rect;        /* LM_PICK_PANEL_LAUNCHER, LM_PICK_GADGET_BODY */
 };
 
 /* Topmost thing at the global point: popups, then windows (stacking), then panel. */
@@ -287,10 +289,19 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick,
 void lm_wm_keyboard_state_changed(struct lm_wm *wm);
 /* The clipboard history changed (seat.c): repaint the gadget. */
 void lm_wm_clipboard_changed(struct lm_wm *wm);
-/* Desktop gadget visibility (Super+G, control socket `gadget`). */
+/* The volume mixer's state changed (mixer.c): repaint its gadget. */
+void lm_wm_mixer_changed(struct lm_wm *wm);
+
+/* Desktop gadgets: the clipboard viewer and the volume mixer. */
+enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_COUNT };
+/* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer; control socket `gadget`, `mixer`). */
+bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id);
+void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible);
+/* The gadget card (without shadow) in global coordinates; false when hidden or it does not fit. */
+bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out);
+/* The same for the clipboard gadget (the original single-gadget API). */
 bool lm_wm_gadget_visible(const struct lm_wm *wm);
 void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
-/* The gadget card (without shadow) in global coordinates; false when hidden or it does not fit. */
 bool lm_wm_gadget_rect(const struct lm_wm *wm, struct lm_rect *out);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
 bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed,
@@ -363,7 +374,10 @@ struct lm_menu_info {
  * drags it; above the wallpaper and below every window) that lists the clipboard history, newest first. It can be
  * moved by its title bar and resized by its edges; the renderer wraps/truncates the entries to the width.
  */
+struct lm_mixer_state;
 struct lm_gadget_info {
+    int id;                         /* enum lm_gadget_id */
+    const struct lm_mixer_state *mixer; /* LM_GADGET_MIXER: what to draw (valid only during the callback) */
     struct lm_rect rect;            /* the card; the shadow lies outside */
     int n;                          /* entries drawn (<= slots) */
     int total;                      /* entries in the history (the title badge) */

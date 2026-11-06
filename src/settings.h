@@ -15,6 +15,7 @@
  *   natural-scroll  0 | 1                      reversed wheel / touchpad scrolling
  *   sound           0 | 1                      beeps for sticky keys
  *   gadget          0 | 1                      clipboard gadget on the desktop (Super+G)
+ *   mixer           0 | 1                      volume mixer gadget on the desktop (Super+V)
  *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)
  *                                              it is undone after 15 s (env LUMEN_REVERT_MS), a black screen cannot confirm
  *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the

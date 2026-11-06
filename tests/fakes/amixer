@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""A fake `amixer` (ALSA fallback of the mixer): Master volume and switch in $LUMEN_FAKE_AMIXER (json)."""
+import json, os, sys
+
+path = os.environ.get('LUMEN_FAKE_AMIXER', '/tmp/lumen-fake-amixer.json')
+try:
+    st = json.load(open(path))
+except Exception:
+    st = {'vol': 40, 'mute': False, 'log': []}
+a = [x for x in sys.argv[1:] if x != '-q']
+st['log'].append(' '.join(a))
+if a[:3] == ['sget', 'Master'] or a[:1] == ['sget']:
+    line = '  Front Left: Playback %d [%d%%] [%s]\n' % (st['vol'], st['vol'], 'off' if st['mute'] else 'on')
+    sys.stdout.write("Simple mixer control 'Master',0\n  Capabilities: pvolume pswitch\n" + line + line.replace('Left', 'Right'))
+elif a[:2] == ['sset', 'Master'] and len(a) == 3:
+    v = a[2]
+    if v.endswith('%'):
+        st['vol'] = int(v[:-1])
+    elif v == 'mute':
+        st['mute'] = True
+    elif v == 'unmute':
+        st['mute'] = False
+    elif v == 'toggle':
+        st['mute'] = not st['mute']
+json.dump(st, open(path, 'w'))

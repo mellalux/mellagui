@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct lm_loop;
+
 /* Playback devices: "default|System default;plughw:CARD=PCH,DEV=3|HDA Intel PCH - HDMI 0 (HDMI);...". */
 void lm_audio_list_alsa(char *out, size_t n);
 
@@ -25,5 +27,17 @@ bool lm_audio_name_ok(const char *name);
 int lm_audio_list_sinks(char *list, size_t n, char *current, size_t cn);
 /* `pactl set-default-sink name` (and moves running streams there). True when the default now is `name`. */
 bool lm_audio_set_sink(const char *name);
+
+/*
+ * Asynchronous child process for the mixer gadget: argv[0] is searched in PATH, LC_ALL=C, stdin/stderr are /dev/null. The
+ * loop collects stdout; `fn(data, output)` is called once, when the program closes its output (output = everything it
+ * printed, up to 16 KiB) or after `timeout_ms` (the child is killed; output is then ""). `fn` may be NULL (fire and
+ * forget; the server's SIGCHLD watch reaps the child). The returned handle is only valid until `fn` ran.
+ */
+struct lm_proc;
+typedef void (*lm_proc_fn)(void *data, const char *output);
+struct lm_proc *lm_proc_run(struct lm_loop *loop, char *const argv[], int timeout_ms, lm_proc_fn fn, void *data);
+/* Forget a running process without calling its callback (the child is killed). */
+void lm_proc_cancel(struct lm_proc *p);
 
 #endif

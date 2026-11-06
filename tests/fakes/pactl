@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""A fake `pactl` for the tests: a small PulseAudio, state in $LUMEN_FAKE_STATE (json). Prints what pactl prints (LC_ALL=C)."""
+import json, os, sys
+
+path = os.environ.get('LUMEN_FAKE_STATE', '/tmp/lumen-fake-pactl.json')
+DEFAULT = {
+    'default': 'alsa_output.analog-stereo',
+    'sinks': [
+        {'name': 'alsa_output.analog-stereo', 'desc': 'Built-in Audio Analog Stereo', 'vol': 64, 'mute': False},
+        {'name': 'alsa_output.hdmi-stereo', 'desc': 'Built-in Audio Digital Stereo (HDMI)', 'vol': 100, 'mute': False},
+    ],
+    'inputs': [
+        {'id': 61, 'app': 'Firefox', 'vol': 100, 'mute': False},
+        {'id': 62, 'app': 'Music Player', 'vol': 30, 'mute': False},
+    ],
+    'log': [],
+}
+try:
+    st = json.load(open(path))
+except Exception:
+    st = json.loads(json.dumps(DEFAULT))
+a = sys.argv[1:]
+st['log'].append(' '.join(a))
+
+
+def pct(v):
+    return int(v.rstrip('%'))
+
+
+def flag(v, old):
+    return (not old) if v == 'toggle' else v in ('1', 'yes', 'true')
+
+
+out = ''
+if a[:2] == ['list', 'sinks']:
+    for i, s in enumerate(st['sinks']):
+        v = round(s['vol'] * 65536 / 100)
+        out += ('Sink #%d\n\tState: RUNNING\n\tName: %s\n\tDescription: %s\n\tMute: %s\n'
+                '\tVolume: front-left: %d / %3d%% / -1.00 dB,   front-right: %d / %3d%% / -1.00 dB\n\t        balance 0.00\n'
+                '\tBase Volume: 65536 / 100%% / 0.00 dB\n' % (i + 47, s['name'], s['desc'], 'yes' if s['mute'] else 'no', v, s['vol'], v, s['vol']))
+elif a[:2] == ['list', 'sink-inputs']:
+    for i in st['inputs']:
+        v = round(i['vol'] * 65536 / 100)
+        out += ('Sink Input #%d\n\tDriver: PipeWire\n\tMute: %s\n\tVolume: front-left: %d / %3d%% / -1.00 dB\n\tProperties:\n'
+                '\t\tmedia.name = "AudioStream"\n\t\tapplication.name = "%s"\n' % (i['id'], 'yes' if i['mute'] else 'no', v, i['vol'], i['app']))
+elif a[:1] == ['get-default-sink']:
+    out = st['default'] + '\n'
+elif a[:1] == ['set-default-sink'] and len(a) == 2:
+    if any(s['name'] == a[1] for s in st['sinks']):
+        st['default'] = a[1]
+elif a[:1] == ['set-sink-volume'] and len(a) == 3:
+    for s in st['sinks']:
+        if s['name'] == a[1]:
+            s['vol'] = pct(a[2])
+elif a[:1] == ['set-sink-mute'] and len(a) == 3:
+    for s in st['sinks']:
+        if s['name'] == a[1]:
+            s['mute'] = flag(a[2], s['mute'])
+elif a[:1] == ['set-sink-input-volume'] and len(a) == 3:
+    for i in st['inputs']:
+        if str(i['id']) == a[1]:
+            i['vol'] = pct(a[2])
+elif a[:1] == ['set-sink-input-mute'] and len(a) == 3:
+    for i in st['inputs']:
+        if str(i['id']) == a[1]:
+            i['mute'] = flag(a[2], i['mute'])
+json.dump(st, open(path + '.tmp', 'w'))
+os.replace(path + '.tmp', path)
+sys.stdout.write(out)

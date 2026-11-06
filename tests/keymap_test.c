@@ -11,6 +11,7 @@
 #include "cvt.h"
 #include "edid.h"
 #include "keymap.h"
+#include "mixer.h"
 
 static int fails;
 
@@ -182,6 +183,61 @@ int main(void)
     memcpy(other, edid_21x9, sizeof(other));
     other[54] = other[55] = 0;
     CHECK(!lm_edid_native(other, sizeof(other), &nat), "a monitor descriptor is not a timing");
+
+    /* mixer: parsers of pactl / amixer output, layout and hit testing */
+    static const char *sinks_text =
+        "Sink #47\n\tState: SUSPENDED\n\tName: alsa_output.pci-0000_00_1b.0.analog-stereo\n\tDescription: Built-in Audio Analog Stereo\n"
+        "\tMute: no\n\tVolume: front-left: 41943 /  64% / -11.14 dB,   front-right: 41943 /  64% / -11.14 dB\n\t        balance 0.00\n"
+        "\tBase Volume: 65536 / 100% / 0.00 dB\nSink #48\n\tName: alsa_output.hdmi-stereo\n\tDescription: Built-in Audio Digital Stereo (HDMI)\n"
+        "\tMute: yes\n\tVolume: front-left: 65536 / 100% / 0.00 dB\n\tBase Volume: 1 / 7% / 0 dB\nSink #49\n\tState: x\n";
+    struct lm_mixer_sink sk[4];
+    int ns = lm_mixer_parse_sinks(sinks_text, sk, 4);
+    CHECK(ns == 2, "sinks: %d (a sink without a name is dropped)", ns);
+    CHECK(!strcmp(sk[0].name, "alsa_output.pci-0000_00_1b.0.analog-stereo") && !strcmp(sk[0].desc, "Built-in Audio Analog Stereo") &&
+          sk[0].volume == 64 && !sk[0].mute, "sink 0: %s %d", sk[0].desc, sk[0].volume);
+    CHECK(sk[1].volume == 100 && sk[1].mute && strstr(sk[1].desc, "HDMI"), "sink 1: base volume ignored, muted");
+    static const char *inputs_text =
+        "Sink Input #61\n\tDriver: PipeWire\n\tSink: 47\n\tMute: no\n\tVolume: front-left: 65536 / 100% / 0.00 dB,   front-right: 65536 / 100% / 0.00 dB\n"
+        "\tProperties:\n\t\tmedia.name = \"AudioStream\"\n\t\tapplication.name = \"Firefox\"\n"
+        "Sink Input #62\n\tMute: yes\n\tVolume: front-left: 19660 /  30% / -31 dB\n\tProperties:\n\t\tmedia.name = \"Music\"\n";
+    struct lm_mixer_stream st[4];
+    int nst = lm_mixer_parse_streams(inputs_text, st, 4);
+    CHECK(nst == 2 && st[0].id == 61 && !strcmp(st[0].name, "Firefox") && st[0].volume == 100 && !st[0].mute, "stream 0: %s", st[0].name);
+    CHECK(st[1].id == 62 && !strcmp(st[1].name, "Music") && st[1].volume == 30 && st[1].mute, "stream 1 falls back to media.name: %s", st[1].name);
+    CHECK(lm_mixer_parse_streams("", st, 4) == 0 && lm_mixer_parse_sinks("", sk, 4) == 0, "empty output");
+    int av = -1;
+    bool am = true;
+    CHECK(lm_mixer_parse_wpctl("Volume: 0.64\n", &av, &am) && av == 64 && !am, "wpctl: %d", av);
+    CHECK(lm_mixer_parse_wpctl("Volume: 0.30 [MUTED]\n", &av, &am) && av == 30 && am, "wpctl muted");
+    CHECK(lm_mixer_parse_wpctl("Volume: 1.00\n", &av, &am) && av == 100 && !am, "wpctl 100");
+    CHECK(!lm_mixer_parse_wpctl("Could not connect to PipeWire\n", &av, &am), "wpctl without PipeWire");
+    av = -1;
+    am = true;
+    CHECK(lm_mixer_parse_amixer("Simple mixer control 'Master',0\n  Front Left: Playback 40 [75%] [-18.00dB] [on]\n  Front Right: Playback 40 [75%] [-18.00dB] [on]\n",
+                                &av, &am) && av == 75 && !am, "amixer on: %d", av);
+    CHECK(lm_mixer_parse_amixer("  Mono: Playback 0 [0%] [off]\n", &av, &am) && av == 0 && am, "amixer off");
+    CHECK(!lm_mixer_parse_amixer("amixer: Unable to find simple control 'Master',0\n", &av, &am), "amixer without Master");
+    CHECK(lm_mixer_slider_value(100, 200, 100) == 0 && lm_mixer_slider_value(100, 200, 300) == 100 &&
+          lm_mixer_slider_value(100, 200, 200) == 50 && lm_mixer_slider_value(100, 200, 40) == 0 && lm_mixer_slider_value(100, 200, 999) == 100,
+          "slider value");
+    {
+        struct lm_rect card = lm_rect_make(50, 50, 300, 300);
+        struct lm_mixer_layout l;
+        lm_mixer_layout(&card, 32, 4, true, &l);
+        CHECK(l.nstreams == 4 && l.output.w > 0 && l.master_slider.w > 100, "layout: %d stream rows", l.nstreams);
+        int x = l.master_slider.x + 10, y = l.master_slider.y + 5, idx;
+        CHECK(lm_mixer_hit(&l, x, y, &idx) == LM_MIXER_MASTER_SLIDER, "hit master slider");
+        CHECK(lm_mixer_hit(&l, l.master_mute.x + 3, l.master_mute.y + 3, &idx) == LM_MIXER_MASTER_MUTE, "hit master mute");
+        CHECK(lm_mixer_hit(&l, l.output.x + 5, l.output.y + 5, &idx) == LM_MIXER_OUTPUT, "hit output");
+        CHECK(lm_mixer_hit(&l, l.stream[2].slider.x + 4, l.stream[2].slider.y + 4, &idx) == LM_MIXER_STREAM_SLIDER && idx == 2, "hit stream 2 slider");
+        CHECK(lm_mixer_hit(&l, l.stream[1].mute.x + 2, l.stream[1].mute.y + 2, &idx) == LM_MIXER_STREAM_MUTE && idx == 1, "hit stream 1 mute");
+        CHECK(lm_mixer_hit(&l, 60, card.y + 5, &idx) == LM_MIXER_NOTHING, "title bar is not a control");
+        struct lm_rect small = lm_rect_make(0, 0, 300, 140);
+        lm_mixer_layout(&small, 32, 4, true, &l);
+        CHECK(l.nstreams < 4 && l.nstreams >= 0, "a small card shows fewer rows (%d)", l.nstreams);
+        lm_mixer_layout(&card, 32, 0, false, &l);
+        CHECK(l.output.w == 0 && l.nstreams == 0, "no output row without pulse");
+    }
 
     if (!fails)
         puts("keymap-test ok");

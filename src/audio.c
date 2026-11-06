@@ -8,11 +8,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "log.h"
+#include "loop.h"
 
 bool lm_audio_name_ok(const char *name)
 {
@@ -253,4 +255,124 @@ bool lm_audio_set_sink(const char *name)
         return false;
     trim(sink_buf);
     return !strcmp(sink_buf, name);
+}
+
+/* ---- asynchronous processes (mixer) ---------------------------------------------------------------------------- */
+
+#define PROC_OUT_MAX 16384
+
+struct lm_proc {
+    pid_t pid;
+    int fd;
+    struct lm_source *source;
+    struct lm_timer *timer;
+    char *buf;
+    size_t len;
+    lm_proc_fn fn;
+    void *data;
+};
+
+static void proc_finish(struct lm_proc *p, bool ok)
+{
+    if (p->source)
+        lm_source_remove(p->source);
+    if (p->timer)
+        lm_timer_destroy(p->timer);
+    if (p->fd >= 0)
+        close(p->fd);
+    if (!ok)
+        kill(p->pid, SIGKILL);                          /* timed out: it is our child, the SIGCHLD watch reaps it */
+    if (p->fn)
+        p->fn(p->data, ok ? p->buf : "");
+    free(p->buf);
+    free(p);
+}
+
+static void proc_fd_cb(int fd, uint32_t events, void *data)
+{
+    struct lm_proc *p = data;
+    (void)events;
+    for (;;) {
+        char tmp[2048];
+        ssize_t k = read(fd, tmp, sizeof(tmp));
+        if (k > 0) {
+            if (p->len + (size_t)k < PROC_OUT_MAX) {
+                memcpy(p->buf + p->len, tmp, (size_t)k);
+                p->len += (size_t)k;
+                p->buf[p->len] = 0;
+            }
+            continue;
+        }
+        if (k < 0 && (errno == EAGAIN || errno == EINTR))
+            return;
+        proc_finish(p, true);                           /* EOF (or an error): the program is done */
+        return;
+    }
+}
+
+static void proc_timer_cb(void *data)
+{
+    proc_finish(data, false);
+}
+
+struct lm_proc *lm_proc_run(struct lm_loop *loop, char *const argv[], int timeout_ms, lm_proc_fn fn, void *data)
+{
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) < 0)
+        return NULL;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return NULL;
+    }
+    if (pid == 0) {
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);          /* the loop blocks signals for signalfd */
+        signal(SIGPIPE, SIG_DFL);
+        setsid();
+        int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, 0);
+            dup2(null, 2);
+        }
+        dup2(fds[1], 1);                                /* (clears O_CLOEXEC / O_NONBLOCK on the copy) */
+        setenv("LC_ALL", "C", 1);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fds[1]);
+    struct lm_proc *p = calloc(1, sizeof(*p));
+    char *buf = malloc(PROC_OUT_MAX);
+    if (!p || !buf) {
+        free(p);
+        free(buf);
+        close(fds[0]);
+        kill(pid, SIGKILL);
+        return NULL;
+    }
+    buf[0] = 0;
+    p->pid = pid;
+    p->fd = fds[0];
+    p->buf = buf;
+    p->fn = fn;
+    p->data = data;
+    p->source = lm_loop_add_fd(loop, p->fd, EPOLLIN, proc_fd_cb, p);
+    p->timer = lm_loop_add_timer(loop, proc_timer_cb, p);
+    if (!p->source || !p->timer) {
+        p->fn = NULL;
+        proc_finish(p, false);
+        return NULL;
+    }
+    lm_timer_arm_ms(p->timer, (uint32_t)(timeout_ms > 0 ? timeout_ms : 2000), 0);
+    return p;
+}
+
+void lm_proc_cancel(struct lm_proc *p)
+{
+    if (!p)
+        return;
+    p->fn = NULL;
+    proc_finish(p, false);
 }

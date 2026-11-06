@@ -6,6 +6,7 @@
  * reported by the backend that tells us exactly what to redraw.
  */
 #include "render.h"
+#include "mixer.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -476,10 +477,10 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
     }
 }
 
-static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info *g)
+/* Shadow, hairline ring and body of a gadget card (shared by all gadgets). */
+static void paint_card_base(const struct paint_ctx *c, const struct lm_gadget_info *g)
 {
     const struct lm_rect card = g->rect;
-
     /* soft drop shadow: stacked translucent rounded rectangles, the outermost faintest, a little lower than the card */
     for (int k = LM_GADGET_SHADOW - 4; k >= 1; k--) {              /* (the shadow sits 4 px lower: stay inside the scene bounds) */
         struct lm_rect sr = lm_rect_make(card.x - k, card.y - k + 4, card.w + 2 * k, card.h + 2 * k);
@@ -488,6 +489,28 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     fill_round(c, &card, 12, g->dragging ? 0xaa6fa8ffu : 0x2effffffu);  /* hairline: the 1 px ring around the body */
     struct lm_rect in = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, card.h - 2);
     fill_round(c, &in, 11, 0xf2161a24u);
+}
+
+/* Resize grip: a small triangle of dots in the bottom right corner. */
+static void paint_grip(const struct paint_ctx *c, const struct lm_rect *card)
+{
+    for (int r = 0; r < 3; r++)
+        for (int k = 0; k < 3 - r; k++) {
+            struct lm_rect dot = lm_rect_make(card->x + card->w - 11 - k * 4, card->y + card->h - 11 - r * 4, 2, 2);
+            fill_round(c, &dot, 0, 0x70ffffffu);
+        }
+}
+
+static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *g);
+
+static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info *g)
+{
+    if (g->id == LM_GADGET_MIXER) {
+        paint_mixer(c, g);
+        return;
+    }
+    const struct lm_rect card = g->rect;
+    paint_card_base(c, g);
 
     /* header: clipboard glyph, title, count badge */
     int hy = card.y + (g->title_h - LM_FONT_H) / 2;
@@ -508,12 +531,7 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
 
-    /* resize grip: a small triangle of dots in the bottom right corner */
-    for (int r = 0; r < 3; r++)
-        for (int k = 0; k < 3 - r; k++) {
-            struct lm_rect dot = lm_rect_make(card.x + card.w - 11 - k * 4, card.y + card.h - 11 - r * 4, 2, 2);
-            fill_round(c, &dot, 0, 0x70ffffffu);
-        }
+    paint_grip(c, &card);
 
     int cols = (card.w - 2 * 12 - 2 * 10 - 4) / LM_FONT_W;     /* chip inset 12, text inset 10 (+ accent bar) */
     int lines = LM_MAX(1, (g->entry_h - 12) / LM_FONT_H);
@@ -547,6 +565,113 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
             if (!more && l < lines - 1)
                 break;
         }
+    }
+}
+
+/* Speaker glyph in `r` (a square): cone and, unless muted, two sound waves; a red slash when muted. */
+static void paint_speaker(const struct paint_ctx *c, const struct lm_rect *r, bool muted, uint32_t col)
+{
+    int cx = r->x + r->w / 2 - 3, cy = r->y + r->h / 2;
+    struct lm_rect box = lm_rect_make(cx - 5, cy - 3, 4, 6);
+    fill_round(c, &box, 1, col);
+    for (int i = 0; i < 6; i++) {                                  /* the cone widens to the right */
+        struct lm_rect strip = lm_rect_make(cx - 1 + i, cy - 3 - i, 1, 6 + 2 * i);
+        fill_round(c, &strip, 0, col);
+    }
+    if (!muted) {
+        for (int w = 1; w <= 2; w++)
+            for (int k = -w - 1; k <= w + 1; k++) {
+                struct lm_rect dot = lm_rect_make(cx + 7 + w * 3 - (k * k) / (w + 2), cy + k * 2, 1, 2);
+                fill_round(c, &dot, 0, (col & 0x00ffffffu) | 0xb0000000u);
+            }
+    } else {
+        for (int k = -7; k <= 7; k++) {
+            struct lm_rect dot = lm_rect_make(r->x + r->w / 2 + k, r->y + r->h / 2 + k, 2, 2);
+            fill_round(c, &dot, 0, 0xffe05a5au);
+        }
+    }
+}
+
+/* A horizontal slider: track, filled part, knob; `value` 0..100; the percentage is written to its right. */
+static void paint_slider(const struct paint_ctx *c, const struct lm_rect *s, int value, bool muted, bool pct_text)
+{
+    int ty = s->y + s->h / 2 - 3;
+    struct lm_rect track = lm_rect_make(s->x, ty, s->w, 6);
+    fill_round(c, &track, 3, 0xff2d3a5au);
+    int fw = s->w * LM_CLAMP(value, 0, 100) / 100;
+    if (fw > 0) {
+        struct lm_rect fillr = lm_rect_make(s->x, ty, fw, 6);
+        fill_round(c, &fillr, 3, muted ? 0xff7b8294u : 0xff6fa8ffu);
+    }
+    struct lm_rect knob = lm_rect_make(s->x + fw - 6, s->y + s->h / 2 - 7, 14, 14);
+    fill_round(c, &knob, 7, muted ? 0xffa0a6b4u : 0xffe6e9efu);
+    if (pct_text) {
+        char t[12];
+        snprintf(t, sizeof(t), "%d%%", value);
+        struct lm_rect tr = lm_rect_make(s->x + s->w + 8, s->y - 4, 46, s->h + 8);
+        draw_text(c, &tr, tr.x, tr.y + (tr.h - LM_FONT_H) / 2, t, muted ? COL_PANEL_DIM : COL_PANEL_TEXT);
+    }
+}
+
+static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *g)
+{
+    const struct lm_rect card = g->rect;
+    const struct lm_mixer_state *st = g->mixer;
+    paint_card_base(c, g);
+
+    /* header: speaker glyph, title, badge with the level */
+    struct lm_rect icon = lm_rect_make(card.x + 10, card.y + (g->title_h - 22) / 2, 22, 22);
+    paint_speaker(c, &icon, st && st->mute, 0xff6fa8ffu);
+    int hy = card.y + (g->title_h - LM_FONT_H) / 2;
+    struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
+    draw_text(c, &head, card.x + 38, hy, "Volume", COL_PANEL_TEXT);
+    char badge[16];
+    if (!st || st->backend == LM_MIXER_NONE)
+        snprintf(badge, sizeof(badge), "--");
+    else if (st->mute)
+        snprintf(badge, sizeof(badge), "muted");
+    else
+        snprintf(badge, sizeof(badge), "%d%%", st->volume);
+    int bw = lm_font_text_width(badge) + 14;
+    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 18) / 2, bw, 18);
+    fill_round(c, &pill, 9, 0xff2d3a5au);
+    draw_text_centered(c, &pill, badge, st && st->mute ? 0xe05a5au : COL_PANEL_ACCENT);
+    struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
+    fill_round(c, &sep, 0, 0x30ffffffu);
+    paint_grip(c, &card);
+
+    if (!st || st->backend == LM_MIXER_NONE) {
+        struct lm_rect r = lm_rect_make(card.x + 12, card.y + g->title_h, card.w - 24, card.h - g->title_h - 12);
+        draw_text_centered(c, &r, st && st->ready ? "No mixer found (pactl or amixer)" : "Looking for a mixer...", COL_PANEL_DIM);
+        return;
+    }
+    bool pulse = st->backend == LM_MIXER_PULSE;
+    struct lm_mixer_layout l;
+    lm_mixer_layout(&card, g->title_h, st->nstreams, pulse, &l);
+
+    fill_round(c, &l.master_mute, 6, st->mute ? 0x40e05a5au : 0x26ffffffu);
+    paint_speaker(c, &l.master_mute, st->mute, st->mute ? 0xffe05a5au : 0xffe6e9efu);
+    paint_slider(c, &l.master_slider, st->volume, st->mute, true);
+    if (pulse) {
+        fill_round(c, &l.output, 7, 0x1affffffu);
+        char label[96];
+        snprintf(label, sizeof(label), "%s%s", st->output, st->nsinks > 1 ? "   >" : "");
+        draw_text(c, &l.output, l.output.x + 10, l.output.y + (l.output.h - LM_FONT_H) / 2, label, COL_PANEL_TEXT);
+    }
+    for (int i = 0; i < l.nstreams; i++) {
+        const struct lm_mixer_stream *s = &st->streams[i];
+        draw_text(c, &l.stream[i].label, l.stream[i].label.x, l.stream[i].label.y, s->name, s->mute ? COL_PANEL_DIM : COL_PANEL_TEXT);
+        fill_round(c, &l.stream[i].mute, 5, s->mute ? 0x40e05a5au : 0x26ffffffu);
+        struct lm_rect gl = lm_rect_make(l.stream[i].mute.x + 2, l.stream[i].mute.y, 18, 20);
+        paint_speaker(c, &gl, s->mute, s->mute ? 0xffe05a5au : 0xffe6e9efu);
+        paint_slider(c, &l.stream[i].slider, s->volume, s->mute, true);
+    }
+    if (l.hint.w > 0 && l.nstreams == st->nstreams) {
+        const char *hint = st->backend == LM_MIXER_ALSA ? "ALSA Master. A sound server gives per-app volume." :
+                           st->backend == LM_MIXER_WPCTL ? "Install pulseaudio-utils for outputs and apps." :
+                           st->nstreams ? "" : "Applications that play sound show up here.";
+        if (*hint)
+            draw_text(c, &l.hint, l.hint.x, l.hint.y + 2, hint, COL_PANEL_DIM);
     }
 }
 

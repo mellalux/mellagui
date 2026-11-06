@@ -18,6 +18,7 @@
 #include "backend.h"
 #include "input.h"
 #include "log.h"
+#include "mixer.h"
 #include "render.h"
 #include "seat.h"
 #include "settings.h"
@@ -264,9 +265,20 @@ static void ctl_command(struct ctl_client *c, char *line)
         if (!a1 || !srv->wm) { ctl_reply(c, "err usage: gadget <0|1>\n"); return; }
         lm_wm_set_gadget(srv->wm, a1[0] == '1');
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "mixer")) {
+        /* mixer <0|1>  show / hide the volume mixer gadget; always replies the mixer's state:
+         * "ok visible=<0|1> backend=<none|pulse|alsa> ready=<0|1> volume=<n> mute=<0|1> output=<text> streams=<n>" */
+        if (!srv->wm || !srv->mixer) { ctl_reply(c, "err no mixer\n"); return; }
+        if (a1)
+            lm_wm_set_gadget_id(srv->wm, LM_GADGET_MIXER, a1[0] == '1');
+        const struct lm_mixer_state *ms = lm_mixer_state(srv->mixer);
+        ctl_reply(c, "ok visible=%d backend=%s ready=%d volume=%d mute=%d streams=%d output=%s\n",
+                  lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER) ? 1 : 0,
+                  ms->backend == LM_MIXER_PULSE ? "pulse" : ms->backend == LM_MIXER_WPCTL ? "wpctl" : ms->backend == LM_MIXER_ALSA ? "alsa" : "none", ms->ready ? 1 : 0,
+                  ms->volume, ms->mute ? 1 : 0, ms->nstreams, ms->output[0] ? ms->output : "-");
     } else if (!strcmp(cmd, "gadget-rect")) {
         struct lm_rect r;
-        if (srv->wm && lm_wm_gadget_rect(srv->wm, &r))
+        if (srv->wm && lm_wm_gadget_rect_id(srv->wm, a1 && !strcmp(a1, "mixer") ? LM_GADGET_MIXER : LM_GADGET_CLIPBOARD, &r))
             ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
         else
             ctl_reply(c, "ok hidden\n");

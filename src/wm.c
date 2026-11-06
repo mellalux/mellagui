@@ -14,6 +14,7 @@
 #include "input.h"
 #include "keymap.h"
 #include "log.h"
+#include "mixer.h"
 #include "output.h"
 #include "render.h"
 #include "seat.h"
@@ -41,6 +42,10 @@
 #define GADGET_ENTRY_H 44
 #define GADGET_PAD 10
 #define GADGET_MARGIN 12
+#define MIXER_W 300
+#define MIXER_H 232                 /* title, master, output, two application rows, hint */
+#define MIXER_MIN_W 240
+#define MIXER_MIN_H 140
 #define GADGET_EDGE 6               /* resize zone along the left/right/bottom edge (top: 3 px) */
 #define MENU_ITEM_H 26
 #define PANEL_TASK_MAX_W 160
@@ -60,7 +65,7 @@ struct wm_popup {
     struct lm_popup pub;        /* must be first */
 };
 
-enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_GADGET_MOVE, GRAB_GADGET_RESIZE };
+enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_GADGET_MOVE, GRAB_GADGET_RESIZE, GRAB_MIXER };
 
 struct lm_wm {
     struct lm_server *srv;
@@ -80,10 +85,15 @@ struct lm_wm {
     bool hover_launcher;
     bool hover_exit, hover_run, hover_layout, hover_sticky;
     bool menu_open;
-    bool gadget_visible;
-    bool gadget_placed;         /* false: docked top right (default); true: gadget_x/y chosen by dragging */
-    int32_t gadget_x, gadget_y, gadget_w, gadget_h;
-    uint32_t gadget_click_time;
+    struct {                    /* the desktop gadgets, indexed by enum lm_gadget_id */
+        bool visible;
+        bool placed;            /* false: docked top right (default); true: x/y chosen by dragging */
+        int32_t x, y, w, h;
+        uint32_t click_time;
+    } gad[LM_GADGET_COUNT];
+    int grab_gadget;            /* the gadget being moved / resized / operated */
+    enum lm_mixer_part mix_part;/* GRAB_MIXER: the slider being dragged ... */
+    int mix_index;              /* ... and its stream row */
     struct lm_rect menu_rect;   /* valid while menu_open */
     int hover_menu;             /* -1 none */
     bool exit_armed;            /* exit button clicked once; a second click quits */
@@ -105,6 +115,8 @@ struct lm_wm {
 };
 
 static inline struct wm_win *WIN(struct lm_window *w) { return (struct wm_win *)w; }
+
+static void mixer_slide(struct lm_wm *wm, enum lm_mixer_part part, int idx, double x);
 
 /* ---- geometry helpers ------------------------------------------------------------ */
 
@@ -310,35 +322,57 @@ static struct lm_output *gadget_output(const struct lm_wm *wm)
     return o;
 }
 
-/* Largest size the gadget may have on `o` (it stays inside the output, below the panel). */
-static void gadget_max_size(const struct lm_output *o, int *mw, int *mh)
+/* Default / minimum / maximum card size per gadget. */
+static const struct { int w, h, min_w, min_h, max_w, max_h; } gadget_def[LM_GADGET_COUNT] = {
+    [LM_GADGET_CLIPBOARD] = { GADGET_W, GADGET_H, GADGET_MIN_W, GADGET_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+    [LM_GADGET_MIXER] = { MIXER_W, MIXER_H, MIXER_MIN_W, MIXER_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+};
+
+/* Largest size gadget `id` may have on `o` (it stays inside the output, below the panel). */
+static void gadget_max_size(int id, const struct lm_output *o, int *mw, int *mh)
 {
-    *mw = LM_MIN(GADGET_MAX_W, o->width - 2 * GADGET_MARGIN);
-    *mh = LM_MIN(GADGET_MAX_H, o->height - LM_PANEL_HEIGHT - 2 * GADGET_MARGIN);
+    *mw = LM_MIN(gadget_def[id].max_w, o->width - 2 * GADGET_MARGIN);
+    *mh = LM_MIN(gadget_def[id].max_h, o->height - LM_PANEL_HEIGHT - 2 * GADGET_MARGIN);
 }
 
-/* Where the gadget sits: the first output, docked top right below the panel until it is dragged. False when hidden
- * or it does not fit. */
-bool lm_wm_gadget_rect(const struct lm_wm *wm, struct lm_rect *out)
+/* Where gadget `id` sits: the first output, docked top right below the panel until it is dragged (the mixer docks below
+ * the clipboard card while that one is docked too). False when hidden or it does not fit. */
+bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out)
 {
     struct lm_output *o = gadget_output(wm);
-    if (!wm->gadget_visible || !o)
+    if (id < 0 || id >= LM_GADGET_COUNT || !wm->gad[id].visible || !o)
         return false;
     int mw, mh;
-    gadget_max_size(o, &mw, &mh);
-    if (mw < GADGET_MIN_W || mh < GADGET_MIN_H || fullscreen_covers(wm, o))
+    gadget_max_size(id, o, &mw, &mh);
+    if (mw < gadget_def[id].min_w || mh < gadget_def[id].min_h || fullscreen_covers(wm, o))
         return false;
-    int w = LM_CLAMP(wm->gadget_w, GADGET_MIN_W, mw), h = LM_CLAMP(wm->gadget_h, GADGET_MIN_H, mh);
+    int w = LM_CLAMP(wm->gad[id].w, gadget_def[id].min_w, mw), h = LM_CLAMP(wm->gad[id].h, gadget_def[id].min_h, mh);
     int x, y;
-    if (wm->gadget_placed) {
-        x = LM_CLAMP(wm->gadget_x, o->x, o->x + o->width - w);
-        y = LM_CLAMP(wm->gadget_y, o->y + LM_PANEL_HEIGHT, o->y + o->height - h);
+    if (wm->gad[id].placed) {
+        x = LM_CLAMP(wm->gad[id].x, o->x, o->x + o->width - w);
+        y = LM_CLAMP(wm->gad[id].y, o->y + LM_PANEL_HEIGHT, o->y + o->height - h);
     } else {
         x = o->x + o->width - w - GADGET_MARGIN;
         y = o->y + LM_PANEL_HEIGHT + GADGET_MARGIN;
+        if (id == LM_GADGET_MIXER && wm->gad[LM_GADGET_CLIPBOARD].visible && !wm->gad[LM_GADGET_CLIPBOARD].placed) {
+            struct lm_rect cb;
+            if (lm_wm_gadget_rect_id(wm, LM_GADGET_CLIPBOARD, &cb)) {
+                if (cb.y + cb.h + GADGET_MARGIN + h <= o->y + o->height - GADGET_MARGIN) {
+                    y = cb.y + cb.h + GADGET_MARGIN;                    /* below the clipboard card */
+                } else if (cb.x - GADGET_MARGIN - w >= o->x) {
+                    x = cb.x - GADGET_MARGIN - w;                       /* a small screen: beside it */
+                    y = cb.y;
+                }
+            }
+        }
     }
     *out = lm_rect_make(x, y, w, h);
     return true;
+}
+
+bool lm_wm_gadget_rect(const struct lm_wm *wm, struct lm_rect *out)
+{
+    return lm_wm_gadget_rect_id(wm, LM_GADGET_CLIPBOARD, out);
 }
 
 /* The card plus its drop shadow (what has to be repainted). */
@@ -357,33 +391,57 @@ static void gadget_slots(int h, int *slots, int *entry_h)
     *entry_h = n == LM_GADGET_ENTRIES ? body / LM_GADGET_ENTRIES : GADGET_ENTRY_H;
 }
 
-static void damage_gadget(struct lm_wm *wm)
+static void damage_gadget(struct lm_wm *wm, int id)
 {
     struct lm_rect r;
-    if (lm_wm_gadget_rect(wm, &r)) {
+    if (lm_wm_gadget_rect_id(wm, id, &r)) {
         struct lm_rect b = gadget_bounds(&r);
         damage_rect(wm, &b);
     }
 }
 
+/* A docked mixer sits below the clipboard card: when that one appears, disappears or changes size, repaint both. */
+static void damage_gadgets(struct lm_wm *wm)
+{
+    for (int i = 0; i < LM_GADGET_COUNT; i++)
+        damage_gadget(wm, i);
+}
+
 void lm_wm_clipboard_changed(struct lm_wm *wm)
 {
-    damage_gadget(wm);
+    damage_gadget(wm, LM_GADGET_CLIPBOARD);
+}
+
+void lm_wm_mixer_changed(struct lm_wm *wm)
+{
+    damage_gadget(wm, LM_GADGET_MIXER);
+}
+
+bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id)
+{
+    return id >= 0 && id < LM_GADGET_COUNT && wm->gad[id].visible;
 }
 
 bool lm_wm_gadget_visible(const struct lm_wm *wm)
 {
-    return wm->gadget_visible;
+    return lm_wm_gadget_visible_id(wm, LM_GADGET_CLIPBOARD);
+}
+
+void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible)
+{
+    if (id < 0 || id >= LM_GADGET_COUNT || wm->gad[id].visible == visible)
+        return;
+    damage_gadgets(wm);                 /* (still shown, if it was) */
+    wm->gad[id].visible = visible;
+    damage_gadgets(wm);
+    if (id == LM_GADGET_MIXER && wm->srv->mixer)
+        lm_mixer_set_active(wm->srv->mixer, visible);
+    lm_settings_changed(wm->srv->settings);     /* the panel's checkbox follows Super+G / Super+V */
 }
 
 void lm_wm_set_gadget(struct lm_wm *wm, bool visible)
 {
-    if (wm->gadget_visible == visible)
-        return;
-    damage_gadget(wm);                  /* (still shown, if it was) */
-    wm->gadget_visible = visible;
-    damage_gadget(wm);
-    lm_settings_changed(wm->srv->settings);     /* the panel's checkbox follows Super+G */
+    lm_wm_set_gadget_id(wm, LM_GADGET_CLIPBOARD, visible);
 }
 
 static void damage_panels(struct lm_wm *wm)
@@ -622,9 +680,12 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     lm_list_init(&wm->popups);
     wm->hover_panel_ws = -1;
     wm->hover_menu = -1;
-    wm->gadget_visible = srv->config.gadget;
-    wm->gadget_w = GADGET_W;
-    wm->gadget_h = GADGET_H;
+    wm->gad[LM_GADGET_CLIPBOARD].visible = srv->config.gadget;
+    wm->gad[LM_GADGET_MIXER].visible = srv->config.mixer;
+    for (int i = 0; i < LM_GADGET_COUNT; i++) {
+        wm->gad[i].w = gadget_def[i].w;
+        wm->gad[i].h = gadget_def[i].h;
+    }
     update_clock(wm, true);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     if (wm->clock_timer)
@@ -1167,15 +1228,24 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
-    struct lm_rect gr;
-    if (lm_wm_gadget_rect(wm, &gr)) {
+    for (int gid = 0; gid < LM_GADGET_COUNT; gid++) {            /* bottom to top: the mixer is above the clipboard */
+        struct lm_rect gr;
+        if (!lm_wm_gadget_rect_id(wm, gid, &gr))
+            continue;
         struct lm_rect gb = gadget_bounds(&gr);
-        if (!clip || lm_rect_overlaps(&gb, clip)) {
-            memset(&it, 0, sizeof(it));
-            it.kind = LM_SCENE_GADGET;
-            it.bounds = gb;
-            it.u.gadget.rect = gr;
-            it.u.gadget.title_h = GADGET_TITLE_H;
+        if (clip && !lm_rect_overlaps(&gb, clip))
+            continue;
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_GADGET;
+        it.bounds = gb;
+        it.u.gadget.id = gid;
+        it.u.gadget.rect = gr;
+        it.u.gadget.title_h = GADGET_TITLE_H;
+        it.u.gadget.dragging = (wm->grab_kind == GRAB_GADGET_MOVE || wm->grab_kind == GRAB_GADGET_RESIZE) && wm->grab_gadget == gid;
+        if (gid == LM_GADGET_MIXER) {
+            if (wm->srv->mixer)
+                it.u.gadget.mixer = lm_mixer_state(wm->srv->mixer);
+        } else {
             gadget_slots(gr.h, &it.u.gadget.slots, &it.u.gadget.entry_h);
             int total = lm_seat_clip_count(wm->srv->seat);
             if (total > LM_GADGET_ENTRIES)
@@ -1183,12 +1253,11 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             it.u.gadget.total = total;
             int n = LM_MIN(total, it.u.gadget.slots);
             it.u.gadget.n = n;
-            it.u.gadget.dragging = wm->grab_kind == GRAB_GADGET_MOVE || wm->grab_kind == GRAB_GADGET_RESIZE;
             for (int i = 0; i < n; i++)
                 it.u.gadget.text[i] = lm_seat_clip_get(wm->srv->seat, i);
-            if (!fn(&it, data))
-                return;
         }
+        if (!fn(&it, data))
+            return;
     }
 
     struct lm_window *w;
@@ -1415,8 +1484,10 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
         out->window = NULL;
     }
 
-    struct lm_rect gr;
-    if (lm_wm_gadget_rect(wm, &gr) && lm_rect_contains(&gr, ix, iy)) {
+    for (int gid = LM_GADGET_COUNT - 1; gid >= 0; gid--) {       /* topmost gadget first */
+        struct lm_rect gr;
+        if (!lm_wm_gadget_rect_id(wm, gid, &gr) || !lm_rect_contains(&gr, ix, iy))
+            continue;
         uint32_t e = 0;
         if (iy < gr.y + 3) e |= LM_EDGE_TOP;
         if (iy >= gr.y + gr.h - GADGET_EDGE) e |= LM_EDGE_BOTTOM;
@@ -1427,9 +1498,16 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             out->edges = e;
         } else if (iy < gr.y + GADGET_TITLE_H) {
             out->kind = LM_PICK_GADGET_TITLE;
+        } else if (gid == LM_GADGET_MIXER) {
+            out->kind = LM_PICK_GADGET_BODY;                      /* sliders and buttons */
         }
+        out->index = gid;
+        out->rect = gr;
         if (out->kind != LM_PICK_NONE)
             return;
+        out->index = 0;
+        out->rect = (struct lm_rect){ 0 };
+        break;                                                    /* (the clipboard body lets the click through) */
     }
 
     if (wm->srv->backend) {
@@ -1556,7 +1634,7 @@ static void grab_end(struct lm_wm *wm)
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
     if (kind == GRAB_GADGET_MOVE || kind == GRAB_GADGET_RESIZE)
-        damage_gadget(wm);
+        damage_gadget(wm, wm->grab_gadget);
     if (wm->srv->seat) {
         lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
         lm_seat_set_cursor_override(wm->srv->seat, LM_CURSOR_NONE);
@@ -1572,10 +1650,11 @@ static void gadget_grab_motion(struct lm_wm *wm, double dx, double dy)
 {
     struct lm_output *o = gadget_output(wm);
     struct lm_rect old;
-    if (!o || !lm_wm_gadget_rect(wm, &old))
+    int id = wm->grab_gadget;
+    if (!o || !lm_wm_gadget_rect_id(wm, id, &old))
         return;
     int mw, mh;
-    gadget_max_size(o, &mw, &mh);
+    gadget_max_size(id, o, &mw, &mh);
     int32_t x = wm->grab_x, y = wm->grab_y, w = wm->grab_w, h = wm->grab_h;
     int32_t right = x + w, bottom = y + h;
     if (wm->grab_kind == GRAB_GADGET_MOVE) {
@@ -1583,22 +1662,24 @@ static void gadget_grab_motion(struct lm_wm *wm, double dx, double dy)
         y += (int32_t)dy;
     } else {
         uint32_t e = wm->grab_edges;
-        if (e & LM_EDGE_RIGHT) w = LM_CLAMP(w + (int32_t)dx, GADGET_MIN_W, LM_MIN(mw, o->x + o->width - x));
-        if (e & LM_EDGE_LEFT) { w = LM_CLAMP(w - (int32_t)dx, GADGET_MIN_W, LM_MIN(mw, right - o->x)); x = right - w; }
-        if (e & LM_EDGE_BOTTOM) h = LM_CLAMP(h + (int32_t)dy, GADGET_MIN_H, LM_MIN(mh, o->y + o->height - y));
-        if (e & LM_EDGE_TOP) { h = LM_CLAMP(h - (int32_t)dy, GADGET_MIN_H, LM_MIN(mh, bottom - o->y - LM_PANEL_HEIGHT)); y = bottom - h; }
+        if (e & LM_EDGE_RIGHT) w = LM_CLAMP(w + (int32_t)dx, gadget_def[id].min_w, LM_MIN(mw, o->x + o->width - x));
+        if (e & LM_EDGE_LEFT) { w = LM_CLAMP(w - (int32_t)dx, gadget_def[id].min_w, LM_MIN(mw, right - o->x)); x = right - w; }
+        if (e & LM_EDGE_BOTTOM) h = LM_CLAMP(h + (int32_t)dy, gadget_def[id].min_h, LM_MIN(mh, o->y + o->height - y));
+        if (e & LM_EDGE_TOP) { h = LM_CLAMP(h - (int32_t)dy, gadget_def[id].min_h, LM_MIN(mh, bottom - o->y - LM_PANEL_HEIGHT)); y = bottom - h; }
     }
-    wm->gadget_x = x;
-    wm->gadget_y = y;
-    wm->gadget_w = w;
-    wm->gadget_h = h;
-    wm->gadget_click_time = 0;          /* it was dragged: the next press is not the second click of a double click */
+    wm->gad[id].x = x;
+    wm->gad[id].y = y;
+    wm->gad[id].w = w;
+    wm->gad[id].h = h;
+    wm->gad[id].click_time = 0;         /* it was dragged: the next press is not the second click of a double click */
     struct lm_rect now;
-    if (!lm_wm_gadget_rect(wm, &now) || lm_rect_equal(&now, &old))
+    if (!lm_wm_gadget_rect_id(wm, id, &now) || lm_rect_equal(&now, &old))
         return;
     struct lm_rect ob = gadget_bounds(&old), nb = gadget_bounds(&now);
     damage_rect(wm, &ob);
     damage_rect(wm, &nb);
+    if (id == LM_GADGET_CLIPBOARD)                                  /* a docked mixer follows the clipboard card */
+        damage_gadget(wm, LM_GADGET_MIXER);
 }
 
 static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, double y)
@@ -1608,6 +1689,10 @@ static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, d
     struct lm_window *w = wm->grab_win;
     if (wm->grab_kind == GRAB_GADGET_MOVE || wm->grab_kind == GRAB_GADGET_RESIZE) {
         gadget_grab_motion(wm, x - wm->grab_px, y - wm->grab_py);
+        return;
+    }
+    if (wm->grab_kind == GRAB_MIXER) {
+        mixer_slide(wm, wm->mix_part, wm->mix_index, x);
         return;
     }
     if (!w)
@@ -1652,7 +1737,7 @@ static void grab_cancel(struct lm_pointer_grab *g)
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
     if (kind == GRAB_GADGET_MOVE || kind == GRAB_GADGET_RESIZE)
-        damage_gadget(wm);
+        damage_gadget(wm, wm->grab_gadget);
     if (w && kind == GRAB_RESIZE) {
         w->states &= ~LM_WINDOW_RESIZING;
         send_configure(wm, w, w->width, w->height);
@@ -1709,18 +1794,19 @@ static void grab_begin(struct lm_wm *wm, struct lm_window *w, enum grab_kind kin
     lm_seat_set_cursor_override(wm->srv->seat, kind == GRAB_MOVE ? LM_CURSOR_MOVE : cursor_for_edges(edges));
 }
 
-static void gadget_grab_begin(struct lm_wm *wm, enum grab_kind kind, uint32_t edges)
+static void gadget_grab_begin(struct lm_wm *wm, int id, enum grab_kind kind, uint32_t edges)
 {
     struct lm_rect r;
-    if (!wm->srv->seat || wm->grab_kind != GRAB_NONE || !lm_wm_gadget_rect(wm, &r))
+    if (!wm->srv->seat || wm->grab_kind != GRAB_NONE || !lm_wm_gadget_rect_id(wm, id, &r))
         return;
     double px, py;
     lm_seat_pointer_position(wm->srv->seat, &px, &py);
-    wm->gadget_placed = true;           /* from now on it stays where the user puts it */
-    wm->gadget_x = wm->grab_x = r.x;
-    wm->gadget_y = wm->grab_y = r.y;
-    wm->gadget_w = wm->grab_w = r.w;
-    wm->gadget_h = wm->grab_h = r.h;
+    wm->grab_gadget = id;
+    wm->gad[id].placed = true;          /* from now on it stays where the user puts it */
+    wm->gad[id].x = wm->grab_x = r.x;
+    wm->gad[id].y = wm->grab_y = r.y;
+    wm->gad[id].w = wm->grab_w = r.w;
+    wm->gad[id].h = wm->grab_h = r.h;
     wm->grab_px = px;
     wm->grab_py = py;
     wm->grab_edges = edges;
@@ -1733,17 +1819,69 @@ static void gadget_grab_begin(struct lm_wm *wm, enum grab_kind kind, uint32_t ed
         return;
     }
     lm_seat_set_cursor_override(wm->srv->seat, kind == GRAB_GADGET_MOVE ? LM_CURSOR_MOVE : cursor_for_edges(edges));
-    damage_gadget(wm);                  /* repaint with the "being dragged" look */
+    damage_gadget(wm, id);              /* repaint with the "being dragged" look */
+}
+
+/* Slider value from the pointer for the mixer part being dragged. */
+static void mixer_slide(struct lm_wm *wm, enum lm_mixer_part part, int idx, double x)
+{
+    struct lm_rect card;
+    if (!wm->srv->mixer || !lm_wm_gadget_rect_id(wm, LM_GADGET_MIXER, &card))
+        return;
+    const struct lm_mixer_state *st = lm_mixer_state(wm->srv->mixer);
+    struct lm_mixer_layout l;
+    lm_mixer_layout(&card, GADGET_TITLE_H, st->nstreams, st->backend == LM_MIXER_PULSE, &l);
+    if (part == LM_MIXER_MASTER_SLIDER)
+        lm_mixer_set_master(wm->srv->mixer, lm_mixer_slider_value(l.master_slider.x, l.master_slider.w, x));
+    else if (part == LM_MIXER_STREAM_SLIDER && idx >= 0 && idx < l.nstreams)
+        lm_mixer_set_stream(wm->srv->mixer, idx, lm_mixer_slider_value(l.stream[idx].slider.x, l.stream[idx].slider.w, x));
+}
+
+/* Left press inside the mixer card: buttons act at once, a slider takes the value and follows the pointer until release. */
+static void mixer_press(struct lm_wm *wm)
+{
+    struct lm_rect card;
+    if (!wm->srv->mixer || !wm->srv->seat || !lm_wm_gadget_rect_id(wm, LM_GADGET_MIXER, &card))
+        return;
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    const struct lm_mixer_state *st = lm_mixer_state(wm->srv->mixer);
+    struct lm_mixer_layout l;
+    lm_mixer_layout(&card, GADGET_TITLE_H, st->nstreams, st->backend == LM_MIXER_PULSE, &l);
+    int idx;
+    enum lm_mixer_part part = lm_mixer_hit(&l, (int)px, (int)py, &idx);
+    switch (part) {
+    case LM_MIXER_MASTER_MUTE: lm_mixer_toggle_master_mute(wm->srv->mixer); break;
+    case LM_MIXER_OUTPUT: lm_mixer_next_output(wm->srv->mixer); break;
+    case LM_MIXER_STREAM_MUTE: lm_mixer_toggle_stream_mute(wm->srv->mixer, idx); break;
+    case LM_MIXER_MASTER_SLIDER:
+    case LM_MIXER_STREAM_SLIDER:
+        mixer_slide(wm, part, idx, px);
+        if (wm->grab_kind != GRAB_NONE)
+            break;
+        wm->grab_kind = GRAB_MIXER;
+        wm->grab_gadget = LM_GADGET_MIXER;
+        wm->grab_win = NULL;
+        wm->mix_part = part;
+        wm->mix_index = idx;
+        wm->grab.ops = &grab_ops;
+        wm->grab.data = wm;
+        if (lm_seat_pointer_grab(wm->srv->seat, &wm->grab) < 0)
+            wm->grab_kind = GRAB_NONE;
+        break;
+    default:
+        break;
+    }
 }
 
 /* Double click on the title bar: back to the default size, docked top right. */
-static void gadget_reset(struct lm_wm *wm)
+static void gadget_reset(struct lm_wm *wm, int id)
 {
-    damage_gadget(wm);
-    wm->gadget_placed = false;
-    wm->gadget_w = GADGET_W;
-    wm->gadget_h = GADGET_H;
-    damage_gadget(wm);
+    damage_gadgets(wm);
+    wm->gad[id].placed = false;
+    wm->gad[id].w = gadget_def[id].w;
+    wm->gad[id].h = gadget_def[id].h;
+    damage_gadgets(wm);
 }
 
 void lm_wm_window_request_move(struct lm_window *w)
@@ -1886,20 +2024,26 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (button == BTN_LEFT)
             grab_begin(wm, pick->window, GRAB_RESIZE, pick->edges);
         return true;
-    case LM_PICK_GADGET_TITLE:
-        if (button != BTN_LEFT)
+    case LM_PICK_GADGET_TITLE: {
+        int id = pick->index;
+        if (button != BTN_LEFT || id < 0 || id >= LM_GADGET_COUNT)
             return true;
-        if (time_ms - wm->gadget_click_time < DOUBLE_CLICK_MS) {
-            wm->gadget_click_time = 0;
-            gadget_reset(wm);
+        if (time_ms - wm->gad[id].click_time < DOUBLE_CLICK_MS) {
+            wm->gad[id].click_time = 0;
+            gadget_reset(wm, id);
             return true;
         }
-        wm->gadget_click_time = time_ms;
-        gadget_grab_begin(wm, GRAB_GADGET_MOVE, 0);
+        wm->gad[id].click_time = time_ms;
+        gadget_grab_begin(wm, id, GRAB_GADGET_MOVE, 0);
         return true;
+    }
     case LM_PICK_GADGET_BORDER:
+        if (button == BTN_LEFT && pick->index >= 0 && pick->index < LM_GADGET_COUNT)
+            gadget_grab_begin(wm, pick->index, GRAB_GADGET_RESIZE, pick->edges);
+        return true;
+    case LM_PICK_GADGET_BODY:
         if (button == BTN_LEFT)
-            gadget_grab_begin(wm, GRAB_GADGET_RESIZE, pick->edges);
+            mixer_press(wm);
         return true;
     case LM_PICK_MENU_ITEM:
         if (button == BTN_LEFT) {
@@ -2049,7 +2193,10 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed, 
             lm_input_cycle_layout(wm->srv->input, shift ? -1 : 1);
         break;
     case KEY_G:
-        if (pressed && !repeat) lm_wm_set_gadget(wm, !wm->gadget_visible);
+        if (pressed && !repeat) lm_wm_set_gadget(wm, !wm->gad[LM_GADGET_CLIPBOARD].visible);
+        break;
+    case KEY_V:
+        if (pressed && !repeat) lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible);
         break;
     case KEY_Q:
         if (pressed && !repeat && wm->focused) lm_wm_window_close(wm->focused);

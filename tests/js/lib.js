@@ -69,3 +69,8 @@ eq(new TypeError('t') instanceof Error, true, 'TypeError instanceof Error'); eq(
 throws(function () { new Array(-1); }, 'Invalid array length', 'RangeError'); throws(function () { null.x; }, 'null', 'null prop'); throws(function () { undefined.x = 1; }, 'undefined', 'set undefined prop');
 throws(function () { (1).toFixed(200); }, 'between', 'toFixed range'); throws(function () { ({}).x.y; }, 'undefined', 'chained undefined');
 eq((function () { try { throw 'str'; } catch (x) { return typeof x; } })(), 'string', 'throw string'); eq(Object.prototype.toString.call(null), '[object Null]', 'toString null');
+// ---- UTF-16 semantics of strings (UTF-8 inside)
+var est = 'õäöü'; eq([est.length, est[0], est.charAt(2), est.charCodeAt(1), est.slice(1, 3), est.substring(2), est.indexOf('ö'), est.lastIndexOf('ü')], [4, 'õ', 'ö', 228, 'äö', 'öü', 2, 3], 'BMP non-ASCII');
+var emo = 'a\u{1F600}b'; eq([emo.length, emo.charCodeAt(1), emo.charCodeAt(2), emo.codePointAt(1), emo.indexOf('b'), emo.slice(0, 1) + emo.slice(1, 3) + emo.slice(3)], [4, 55357, 56832, 128512, 3, emo], 'surrogate pairs');
+eq([...emo].length, 3, 'spread iterates code points'); eq(emo.split('').length, 3, 'split by code point'); eq('é'.padStart(3, '-'), '--é', 'padStart counts units'); eq('añb'.at(-1), 'b', 'at');
+eq('abäcd'.match(/c/).index, 3, 'regex index in UTF-16 units'); eq('ä1'.replace(/\d/, function (m, off) { return off; }), 'ä1'.replace('1', '1'), 'replace offset'); var big = ''; for (var bi = 0; bi < 3000; bi++) big += 'ä'; var cnt = 0; for (var bj = 0; bj < big.length; bj++) if (big[bj] === 'ä') cnt++; eq(cnt, 3000, 'sequential indexing of a long non-ASCII string');

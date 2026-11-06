@@ -993,7 +993,7 @@ static jsval build_match(js *J, const struct regex *re, jsstr *s, const long *ca
         else
             js_array_push(J, a, js_strn(J, s->s + caps[i * 2], (size_t)(caps[i * 2 + 1] - caps[i * 2])));
     }
-    obj_add_prop(J, a, js_intern(J, "index", 5), js_num((double)caps[0]), PF_ENUM | PF_WRITE);
+    obj_add_prop(J, a, js_intern(J, "index", 5), js_num((double)str_unit(s, (uint32_t)caps[0])), PF_ENUM | PF_WRITE);
     obj_add_prop(J, a, js_intern(J, "input", 5), js_strv(s), PF_ENUM | PF_WRITE);
     jsval groups = JS_UNDEFINED;
     bool any = false;
@@ -1025,12 +1025,12 @@ static jsval exec_impl(js *J, jsval rxv, jsstr *s)
         if (!(li >= 0))
             li = 0;
     }
-    if (li > s->len) {
+    if (li > str_len16(s)) {
         set_prop(J, rxv, lik, js_num(0));
         return JS_NULLV;
     }
     long *caps = malloc(sizeof(long) * (size_t)re->ncaps * 2);
-    int r = regex_search(re, s->s, s->len, (long)li, re->flags & RF_STICKY, caps);
+    int r = regex_search(re, s->s, s->len, (long)str_off(s, (uint32_t)li), re->flags & RF_STICKY, caps);
     if (r < 0) {
         free(caps);
         return too_complex(J);
@@ -1042,7 +1042,7 @@ static jsval exec_impl(js *J, jsval rxv, jsstr *s)
         return JS_NULLV;
     }
     if (use_last)
-        set_prop(J, rxv, lik, js_num((double)caps[1]));
+        set_prop(J, rxv, lik, js_num((double)str_unit(s, (uint32_t)caps[1])));
     jsval m = build_match(J, re, s, caps);
     free(caps);
     return m;
@@ -1154,7 +1154,7 @@ jsval js_regex_search(js *J, jsstr *s, jsval pat)
     struct regex *re = rx_of(rxv);
     long *caps = malloc(sizeof(long) * (size_t)re->ncaps * 2);
     int r = regex_search(re, s->s, s->len, 0, re->flags & RF_STICKY, caps);
-    double idx = r > 0 ? (double)caps[0] : -1;
+    double idx = r > 0 ? (double)str_unit(s, (uint32_t)caps[0]) : -1;
     free(caps);
     if (r < 0)
         return too_complex(J);
@@ -1237,7 +1237,7 @@ jsval js_regex_replace(js *J, jsstr *s, jsval rxv, jsval repl, bool all)
             jsval m = build_match(J, re, s, caps);
             for (int g = 0; g < re->ncaps; g++)
                 args[g] = m.u.o->items[g];
-            args[re->ncaps] = js_num((double)caps[0]);
+            args[re->ncaps] = js_num((double)str_unit(s, (uint32_t)caps[0]));
             args[re->ncaps + 1] = js_strv(s);
             if (named)
                 args[na++] = js_get(J, m, "groups");

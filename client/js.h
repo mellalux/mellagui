@@ -30,6 +30,8 @@ struct jsstr {
     uint32_t len;
     uint32_t hash;
     uint8_t interned;
+    uint8_t kind;                   /* 0 not scanned yet, 1 ASCII only, 2 has non-ASCII */
+    uint32_t len16, c16, cbyte;     /* UTF-16 length, and a cached (UTF-16 index, byte offset) pair for sequential access */
     char s[];                       /* NUL terminated */
 };
 

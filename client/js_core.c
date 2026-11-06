@@ -162,6 +162,119 @@ jsstr *str_concat(js *J, jsstr *a, jsstr *b)
     return r;
 }
 
+/* ---- UTF-16 view ------------------------------------------------------------------------------------------------ */
+
+static void str_scan(jsstr *s)
+{
+    if (s->kind)
+        return;
+    bool ascii = true;
+    uint32_t units = 0;
+    for (uint32_t i = 0; i < s->len;) {
+        uint8_t c = (uint8_t)s->s[i];
+        if (c < 0x80) { i++; units++; continue; }
+        ascii = false;
+        uint32_t l = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+        if (i + l > s->len) l = s->len - i;
+        units += l == 4 ? 2 : 1;
+        i += l;
+    }
+    s->kind = ascii ? 1 : 2;
+    s->len16 = units;
+}
+
+uint32_t str_len16(jsstr *s)
+{
+    str_scan(s);
+    return s->kind == 1 ? s->len : s->len16;
+}
+
+static uint32_t seq_len(const jsstr *s, uint32_t i)
+{
+    uint8_t c = (uint8_t)s->s[i];
+    uint32_t l = c < 0x80 ? 1 : c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+    return i + l > s->len ? s->len - i : l;
+}
+
+uint32_t str_off(jsstr *s, uint32_t unit)
+{
+    str_scan(s);
+    if (s->kind == 1)
+        return unit < s->len ? unit : s->len;
+    uint32_t u = 0, b = 0;
+    if (s->c16 <= unit && s->cbyte <= s->len) { u = s->c16; b = s->cbyte; }
+    while (b < s->len && u < unit) {
+        uint32_t l = seq_len(s, b);
+        uint32_t w = l == 4 ? 2 : 1;
+        if (u + w > unit)                                      /* inside a surrogate pair: the character's start */
+            break;
+        u += w;
+        b += l;
+    }
+    s->c16 = u;
+    s->cbyte = b;
+    return b;
+}
+
+uint32_t str_unit(jsstr *s, uint32_t byte)
+{
+    str_scan(s);
+    if (s->kind == 1)
+        return byte < s->len ? byte : s->len;
+    uint32_t u = 0, b = 0;
+    if (s->cbyte <= byte && s->cbyte <= s->len) { u = s->c16; b = s->cbyte; }
+    while (b < s->len && b < byte) {
+        uint32_t l = seq_len(s, b);
+        u += l == 4 ? 2 : 1;
+        b += l;
+    }
+    s->c16 = u;
+    s->cbyte = b;
+    return u;
+}
+
+static uint32_t cp_at(const jsstr *s, uint32_t b, uint32_t *l)
+{
+    uint8_t c = (uint8_t)s->s[b];
+    *l = seq_len(s, b);
+    if (*l == 1) return c;
+    uint32_t cp = c & (0xffu >> (*l + 1));
+    for (uint32_t k = 1; k < *l; k++)
+        cp = (cp << 6) | ((uint8_t)s->s[b + k] & 63);
+    return cp;
+}
+
+int32_t str_code_unit(jsstr *s, uint32_t unit)
+{
+    str_scan(s);
+    if (s->kind == 1)
+        return unit < s->len ? (uint8_t)s->s[unit] : -1;
+    if (unit >= s->len16)
+        return -1;
+    uint32_t b = str_off(s, unit), l;
+    uint32_t cp = cp_at(s, b, &l);
+    if (cp >= 0x10000) {
+        uint32_t start_unit = str_unit(s, b);                   /* (resets the cache position: fine) */
+        cp -= 0x10000;
+        return start_unit == unit ? (int32_t)(0xd800 + (cp >> 10)) : (int32_t)(0xdc00 + (cp & 0x3ff));
+    }
+    return (int32_t)cp;
+}
+
+jsval str_char_at(js *J, jsstr *s, uint32_t unit)
+{
+    str_scan(s);
+    if (s->kind == 1)
+        return unit < s->len ? js_strn(J, s->s + unit, 1) : JS_UNDEFINED;
+    if (unit >= s->len16)
+        return JS_UNDEFINED;
+    uint32_t b = str_off(s, unit), l;
+    cp_at(s, b, &l);
+    if (l == 4 && str_unit(s, b) != unit)
+        return js_strn(J, "", 0);                               /* low half of a pair: the character was returned for the high half */
+    return js_strn(J, s->s + b, l);
+}
+
 /* ---- objects ------------------------------------------------------------------------------------------------- */
 
 jsobj *obj_new(js *J, uint8_t cls, jsobj *proto)
@@ -737,9 +850,9 @@ jsval get_prop(js *J, jsval base, jsstr *key)
     case JS_STR: {
         uint32_t idx;
         if (key == J->k_length)
-            return js_num((double)base.u.s->len);
+            return js_num((double)str_len16(base.u.s));
         if (is_index_key(key, &idx))
-            return idx < base.u.s->len ? js_strn(J, base.u.s->s + idx, 1) : JS_UNDEFINED;
+            return str_char_at(J, base.u.s, idx);
         return obj_get(J, J->string_proto, key, base);
     }
     case JS_NUM: return obj_get(J, J->number_proto, key, base);
@@ -759,7 +872,7 @@ bool has_prop(js *J, jsobj *o, jsstr *key)
         }
         if (c->cls == JC_ARRAY && (key == J->k_length || (is_index_key(key, &idx) && idx < c->len)))
             return true;
-        if (c->cls == JC_STRING && c->prim.t == JS_STR && (key == J->k_length || (is_index_key(key, &idx) && idx < c->prim.u.s->len)))
+        if (c->cls == JC_STRING && c->prim.t == JS_STR && (key == J->k_length || (is_index_key(key, &idx) && idx < str_len16(c->prim.u.s))))
             return true;
         if (find_own_js(J, c, key))
             return true;

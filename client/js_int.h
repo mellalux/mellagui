@@ -193,6 +193,12 @@ bool set_prop(js *J, jsval base, jsstr *key, jsval v);
 bool has_prop(js *J, jsobj *o, jsstr *key);
 bool is_index_key(jsstr *k, uint32_t *idx);
 jsstr *key_of(js *J, jsval v);                      /* ToPropertyKey (interned); NULL if toString threw */
+/* UTF-16 view of a UTF-8 string: `length` and indexes count UTF-16 code units (a 4-byte character is two) */
+uint32_t str_len16(jsstr *s);
+uint32_t str_off(jsstr *s, uint32_t unit);              /* byte offset of a UTF-16 index (clamped to the end) */
+uint32_t str_unit(jsstr *s, uint32_t byte);             /* UTF-16 index of a byte offset */
+jsval str_char_at(js *J, jsstr *s, uint32_t unit);      /* s[unit] as a string ("" for the low half of a surrogate pair) */
+int32_t str_code_unit(jsstr *s, uint32_t unit);         /* charCodeAt (-1 out of range) */
 jsstr *num_to_str(js *J, double d);
 jsstr *str_concat(js *J, jsstr *a, jsstr *b);
 jsstr *to_jsstr(js *J, jsval v);                    /* ToString; NULL if it threw */

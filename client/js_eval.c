@@ -299,7 +299,7 @@ static jsval get_member(js *J, jsval base, jsstr *key, jsval numkey)
             if (base.t == JS_OBJ && base.u.o->cls == JC_ARRAY)
                 return i < base.u.o->len ? base.u.o->items[i] : JS_UNDEFINED;
             if (base.t == JS_STR)
-                return i < base.u.s->len ? js_strn(J, base.u.s->s + i, 1) : JS_UNDEFINED;
+                return str_char_at(J, base.u.s, i);
         }
         key = num_to_str(J, d);
         key = js_intern_str(J, key);

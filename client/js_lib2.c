@@ -59,34 +59,41 @@ NATIVE(String_toString)
     if (thisv.t == JS_OBJ && thisv.u.o->cls == JC_STRING) return thisv.u.o->prim;
     return throw_type(J, "String.prototype.toString requires a string");
 }
+/* substring by UTF-16 indexes [a, b) */
+static jsval sub16(js *J, jsstr *s, double a, double b)
+{
+    uint32_t o1 = str_off(s, (uint32_t)a), o2 = str_off(s, (uint32_t)b);
+    return o2 > o1 ? js_strn(J, s->s + o1, o2 - o1) : js_cstr(J, "");
+}
+
 NATIVE(String_charAt)
 {
     THIS_STR();
     double i = arg_int(J, ARG(0), 0);
-    if (i < 0 || i >= s->len) return js_cstr(J, "");
-    return js_strn(J, s->s + (uint32_t)i, 1);
+    if (i < 0 || i >= str_len16(s)) return js_cstr(J, "");
+    jsval r = str_char_at(J, s, (uint32_t)i);
+    return r.t == JS_UNDEF ? js_cstr(J, "") : r;
 }
 NATIVE(String_charCodeAt)
 {
     THIS_STR();
     double i = arg_int(J, ARG(0), 0);
-    if (i < 0 || i >= s->len) return js_num(NAN);
-    return js_num((double)(uint8_t)s->s[(uint32_t)i]);
+    if (i < 0 || i >= str_len16(s)) return js_num(NAN);
+    return js_num((double)str_code_unit(s, (uint32_t)i));
 }
 NATIVE(String_codePointAt)
 {
     THIS_STR();
     double i = arg_int(J, ARG(0), 0);
-    if (i < 0 || i >= s->len) return JS_UNDEFINED;
-    const uint8_t *p = (const uint8_t *)s->s + (uint32_t)i;
-    uint32_t cp = p[0];
-    int l = cp < 0x80 ? 1 : cp < 0xe0 ? 2 : cp < 0xf0 ? 3 : 4;
-    if (l > 1 && (uint32_t)i + (uint32_t)l <= s->len) {
-        cp &= (0xffu >> (l + 1));
-        for (int k = 1; k < l; k++)
-            cp = (cp << 6) | (p[k] & 63);
+    if (i < 0 || i >= str_len16(s)) return JS_UNDEFINED;
+    int32_t u = str_code_unit(s, (uint32_t)i);
+    if (u >= 0xd800 && u < 0xdc00) {                              /* high half: the whole code point */
+        uint32_t b = str_off(s, (uint32_t)i);
+        const uint8_t *p = (const uint8_t *)s->s + b;
+        if (b + 4 <= s->len)
+            return js_num((double)(((uint32_t)(p[0] & 7) << 18) | ((uint32_t)(p[1] & 63) << 12) | ((uint32_t)(p[2] & 63) << 6) | (p[3] & 63)));
     }
-    return js_num(cp);
+    return js_num((double)u);
 }
 static const char *find_bytes(const char *h, size_t hl, const char *n, size_t nl, size_t from)
 {
@@ -104,9 +111,9 @@ NATIVE(String_indexOf)
     THIS_STR();
     jsstr *n = to_jsstr(J, ARG(0));
     THROW_IF(J);
-    double from = fmin(fmax(arg_int(J, ARG(1), 0), 0), s->len);
-    const char *p = find_bytes(s->s, s->len, n->s, n->len, (size_t)from);
-    return js_num(p ? (double)(p - s->s) : -1);
+    double from = fmin(fmax(arg_int(J, ARG(1), 0), 0), str_len16(s));
+    const char *p = find_bytes(s->s, s->len, n->s, n->len, str_off(s, (uint32_t)from));
+    return js_num(p ? (double)str_unit(s, (uint32_t)(p - s->s)) : -1);
 }
 NATIVE(String_lastIndexOf)
 {
@@ -116,7 +123,7 @@ NATIVE(String_lastIndexOf)
     if (n->len > s->len) return js_num(-1);
     for (size_t i = s->len - n->len + 1; i-- > 0;)
         if (!memcmp(s->s + i, n->s, n->len))
-            return js_num((double)i);
+            return js_num((double)str_unit(s, (uint32_t)i));
     return js_num(-1);
 }
 NATIVE(String_includes)
@@ -124,24 +131,26 @@ NATIVE(String_includes)
     THIS_STR();
     jsstr *n = to_jsstr(J, ARG(0));
     THROW_IF(J);
-    double from = fmin(fmax(arg_int(J, ARG(1), 0), 0), s->len);
-    return js_bool(find_bytes(s->s, s->len, n->s, n->len, (size_t)from) != NULL);
+    double from = fmin(fmax(arg_int(J, ARG(1), 0), 0), str_len16(s));
+    return js_bool(find_bytes(s->s, s->len, n->s, n->len, str_off(s, (uint32_t)from)) != NULL);
 }
 NATIVE(String_startsWith)
 {
     THIS_STR();
     jsstr *n = to_jsstr(J, ARG(0));
     THROW_IF(J);
-    double from = fmin(fmax(arg_int(J, ARG(1), 0), 0), s->len);
-    return js_bool((size_t)from + n->len <= s->len && !memcmp(s->s + (size_t)from, n->s, n->len));
+    double from = fmin(fmax(arg_int(J, ARG(1), 0), 0), str_len16(s));
+    size_t o = str_off(s, (uint32_t)from);
+    return js_bool(o + n->len <= s->len && !memcmp(s->s + o, n->s, n->len));
 }
 NATIVE(String_endsWith)
 {
     THIS_STR();
     jsstr *n = to_jsstr(J, ARG(0));
     THROW_IF(J);
-    double end = fmin(fmax(arg_int(J, ARG(1), s->len), 0), s->len);
-    return js_bool(n->len <= end && !memcmp(s->s + (size_t)end - n->len, n->s, n->len));
+    double end = fmin(fmax(arg_int(J, ARG(1), str_len16(s)), 0), str_len16(s));
+    size_t o = str_off(s, (uint32_t)end);
+    return js_bool(n->len <= o && !memcmp(s->s + o - n->len, n->s, n->len));
 }
 static double rel(js *J, jsval v, double len, double dflt)
 {
@@ -152,31 +161,31 @@ static double rel(js *J, jsval v, double len, double dflt)
 NATIVE(String_slice)
 {
     THIS_STR();
-    double a = rel(J, ARG(0), s->len, 0), b = rel(J, ARG(1), s->len, s->len);
+    double L = str_len16(s), a = rel(J, ARG(0), L, 0), b = rel(J, ARG(1), L, L);
     if (a >= b) return js_cstr(J, "");
-    return js_strn(J, s->s + (size_t)a, (size_t)(b - a));
+    return sub16(J, s, a, b);
 }
 NATIVE(String_substring)
 {
     THIS_STR();
-    double a = fmin(fmax(arg_int(J, ARG(0), 0), 0), s->len), b = fmin(fmax(arg_int(J, ARG(1), s->len), 0), s->len);
+    double L = str_len16(s), a = fmin(fmax(arg_int(J, ARG(0), 0), 0), L), b = fmin(fmax(arg_int(J, ARG(1), L), 0), L);
     if (a > b) { double t = a; a = b; b = t; }
-    return js_strn(J, s->s + (size_t)a, (size_t)(b - a));
+    return sub16(J, s, a, b);
 }
 NATIVE(String_substr)
 {
     THIS_STR();
-    double a = rel(J, ARG(0), s->len, 0);
-    double l = fmin(fmax(arg_int(J, ARG(1), s->len - a), 0), s->len - a);
-    return js_strn(J, s->s + (size_t)a, (size_t)l);
+    double L = str_len16(s), a = rel(J, ARG(0), L, 0);
+    double l = fmin(fmax(arg_int(J, ARG(1), L - a), 0), L - a);
+    return sub16(J, s, a, a + l);
 }
 NATIVE(String_at)
 {
     THIS_STR();
-    double i = arg_int(J, ARG(0), 0);
-    if (i < 0) i += s->len;
-    if (i < 0 || i >= s->len) return JS_UNDEFINED;
-    return js_strn(J, s->s + (size_t)i, 1);
+    double i = arg_int(J, ARG(0), 0), L = str_len16(s);
+    if (i < 0) i += L;
+    if (i < 0 || i >= L) return JS_UNDEFINED;
+    return str_char_at(J, s, (uint32_t)i);
 }
 static jsval case_map(js *J, jsstr *s, bool up)
 {
@@ -235,9 +244,10 @@ static jsval pad_impl(js *J, jsval thisv, int argc, jsval *argv, bool start)
     double target = arg_int(J, ARG(0), 0);
     jsstr *fill = argc > 1 && argv[1].t != JS_UNDEF ? to_jsstr(J, argv[1]) : js_intern(J, " ", 1);
     THROW_IF(J);
-    if (target <= s->len || !fill->len || target > 100e6)
+    double cur = str_len16(s);
+    if (target <= cur || !fill->len || target > 100e6)
         return js_strv(s);
-    size_t need = (size_t)target - s->len;
+    size_t need = (size_t)(target - cur);
     struct sbuf pad = { 0 };
     while (pad.n < need)
         sb_add(&pad, fill->s, fill->len);

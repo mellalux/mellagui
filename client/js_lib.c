@@ -1927,6 +1927,18 @@ NATIVE(console_assert)
     return JS_UNDEFINED;
 }
 
+NATIVE(Proxy_ctor)
+{
+    if (J->newtarget.t == JS_UNDEF)
+        return throw_type(J, "Constructor Proxy requires 'new'");
+    if (ARG(0).t != JS_OBJ || ARG(1).t != JS_OBJ)
+        return throw_type(J, "Cannot create proxy with a non-object as target or handler");
+    jsobj *p = obj_new(J, JC_PROXY, ARG(0).u.o->proto);
+    p->prim = ARG(0);
+    p->host = ARG(1).u.o;
+    return js_objv(p);
+}
+
 NATIVE(global_queueMicrotask)
 {
     if (!js_is_function(ARG(0)))
@@ -2084,6 +2096,7 @@ void js_init_builtins(js *J)
     lib_def(J, J->global, "isNaN", global_isNaN, 1); lib_def(J, J->global, "isFinite", global_isFinite, 1);
     lib_def(J, J->global, "structuredClone", global_structuredClone, 1);
     lib_def(J, J->global, "queueMicrotask", global_queueMicrotask, 1);
+    lib_ctor(J, "Proxy", Proxy_ctor, 2, NULL);
 
     /* Math */
     jsobj *M = js_object_new(J);

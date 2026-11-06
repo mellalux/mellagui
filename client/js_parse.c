@@ -1384,7 +1384,13 @@ static struct node *parse_postfix_chain(struct parser *P, bool allow_call)
             parse_args(P, c);
             e = c;
         } else if (P->t.t == TK_TPL && allow_call) {
-            perr(P, "tagged templates are not supported");
+            struct tpl *tp = P->t.tpl;
+            int line = P->t.line;
+            lex(P);
+            struct node *tg = nnew(P, N_TAGGED);
+            tg->a = e;
+            tg->b = parse_template(P, tp, line);
+            e = tg;
         } else {
             break;
         }

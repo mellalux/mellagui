@@ -416,6 +416,25 @@ static void run_field_inits(js *J, jsobj *ctor, jsval thisv);
 
 jsval call_function(js *J, jsobj *f, jsval thisv, int argc, jsval *argv, jsval newtarget)
 {
+    if (f->cls == JC_PROXY) {                                   /* callable proxy: apply / construct traps */
+        bool is_new = newtarget.t != JS_UNDEF;
+        jsval trap = get_prop(J, js_objv((jsobj *)f->host), js_intern(J, is_new ? "construct" : "apply", is_new ? 9 : 5));
+        THROW_IF(J);
+        jsobj *arr = js_array_new(J);
+        for (int i = 0; i < argc; i++)
+            js_array_push(J, arr, argv[i]);
+        if (js_is_function(trap)) {
+            jsval args[3] = { f->prim, is_new ? js_objv(arr) : thisv, is_new ? js_objv(arr) : js_objv(arr) };
+            if (is_new) {
+                args[1] = js_objv(arr);
+                return call_function(J, trap.u.o, js_objv((jsobj *)f->host), 2, args, JS_UNDEFINED);
+            }
+            return call_function(J, trap.u.o, js_objv((jsobj *)f->host), 3, args, JS_UNDEFINED);
+        }
+        if (is_new)
+            return construct(J, f->prim, argc, argv);
+        return call_function(J, f->prim.u.o, thisv, argc, argv, JS_UNDEFINED);
+    }
     struct func *fn = f->fn;
     if (!fn)
         return throw_type(J, "not a function");
@@ -511,6 +530,8 @@ jsval construct(js *J, jsval fnv, int argc, jsval *argv)
     if (!js_is_function(fnv))
         return throw_type(J, "not a constructor");
     jsobj *f = fnv.u.o;
+    if (f->cls == JC_PROXY)
+        return call_function(J, f, JS_UNDEFINED, argc, argv, fnv);
     if (f->fn->fi && (f->fn->fi->is_arrow || f->fn->fi->is_method || f->fn->fi->is_gen || f->fn->fi->is_async) && !f->fn->is_class)
         return throw_type(J, "%s is not a constructor", f->fn->name ? f->fn->name->s : "function");
     jsval protov = get_prop(J, fnv, J->k_prototype);
@@ -1323,6 +1344,16 @@ static jsval eval_unary(js *J, struct node *n, struct scope *sc)
             return js_bool(true);
         jsobj *o = base.u.o;
         uint32_t idx;
+        if (o->cls == JC_PROXY) {
+            jsval trap = get_prop(J, js_objv((jsobj *)o->host), js_intern(J, "deleteProperty", 14));
+            THROW_IF(J);
+            if (js_is_function(trap)) {
+                jsval args[2] = { o->prim, js_strv(k) };
+                jsval r = call_function(J, trap.u.o, js_objv((jsobj *)o->host), 2, args, JS_UNDEFINED);
+                return js_bool(!J->thrown && js_truthy(r));
+            }
+            o = o->prim.t == JS_OBJ ? o->prim.u.o : o;
+        }
         if (o->flags & OF_FROZEN)
             return js_bool(false);
         if (o->cls == JC_ARRAY && is_index_key(k, &idx)) {
@@ -1354,6 +1385,41 @@ static jsval eval(js *J, struct node *n, struct scope *sc)
     case N_STR: return js_strv(n->s);
     case N_TEMPLATE: return eval_template(J, n, sc);
     case N_REGEX: return js_regexp_literal(J, n->s, n->a->s);
+    case N_TAGGED: {
+        struct node *c = n->a;
+        jsval thisv = JS_UNDEFINED, fnv;
+        if (c->t == N_MEMBER && c->a->t != N_SUPER) {
+            jsval base = eval(J, c->a, sc);
+            THROW_IF(J);
+            jsval nk;
+            jsstr *k = member_key(J, c, sc, &nk);
+            THROW_IF(J);
+            fnv = get_member(J, base, k, nk);
+            thisv = base;
+        } else {
+            fnv = eval(J, c, sc);
+        }
+        THROW_IF(J);
+        if (!js_is_function(fnv))
+            return throw_type(J, "tag is not a function");
+        struct node *tp = n->b;
+        int nvals = tp->n / 2;
+        jsobj *strs = js_array_new(J), *raws = js_array_new(J);
+        for (int i = 0; i < tp->n; i += 2) {
+            js_array_push(J, strs, js_strv(tp->list[i]->s));
+            js_array_push(J, raws, js_strv(tp->list[i]->s));
+        }
+        obj_add_prop(J, strs, js_intern(J, "raw", 3), js_objv(raws), 0);
+        jsval *args = malloc(sizeof(jsval) * (size_t)(nvals + 1));
+        args[0] = js_objv(strs);
+        for (int i = 0; i < nvals; i++) {
+            args[i + 1] = eval(J, tp->list[2 * i + 1], sc);
+            if (J->thrown) { free(args); return JS_UNDEFINED; }
+        }
+        jsval r = call_function(J, fnv.u.o, thisv, nvals + 1, args, JS_UNDEFINED);
+        free(args);
+        return r;
+    }
     case N_AWAIT: {
         jsval v = eval(J, n->a, sc);
         THROW_IF(J);

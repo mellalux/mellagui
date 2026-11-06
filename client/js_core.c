@@ -451,7 +451,14 @@ void js_array_push(js *J, jsobj *arr, jsval v)
 uint32_t js_array_len(const jsobj *arr) { return arr->len; }
 jsval js_array_get(const jsobj *arr, uint32_t i) { return i < arr->len ? arr->items[i] : JS_UNDEFINED; }
 bool js_is_array(jsval v) { return v.t == JS_OBJ && v.u.o->cls == JC_ARRAY; }
-bool js_is_function(jsval v) { return v.t == JS_OBJ && v.u.o->cls == JC_FUNCTION; }
+bool js_is_function(jsval v)
+{
+    if (v.t != JS_OBJ)
+        return false;
+    if (v.u.o->cls == JC_PROXY)
+        return js_is_function(v.u.o->prim);
+    return v.u.o->cls == JC_FUNCTION;
+}
 
 /* ---- number formatting / parsing --------------------------------------------------------------------------- */
 
@@ -673,7 +680,7 @@ const char *type_of(jsval v)
     case JS_BOOL: return "boolean";
     case JS_NUM: return "number";
     case JS_STR: return "string";
-    default: return v.u.o->cls == JC_FUNCTION ? "function" : "object";
+    default: return js_is_function(v) ? "function" : "object";
     }
 }
 
@@ -806,10 +813,28 @@ bool loose_equals(js *J, jsval a, jsval b)
 
 /* ---- property access -------------------------------------------------------------------------------------------- */
 
+/* Proxy: the handler's trap function, or undefined */
+static jsval proxy_trap(js *J, jsobj *p, const char *name)
+{
+    jsval h = js_objv((jsobj *)p->host);
+    jsval t = get_prop(J, h, js_intern(J, name, strlen(name)));
+    return t;
+}
+
 static jsval obj_get(js *J, jsobj *o, jsstr *key, jsval recv)
 {
     uint32_t idx;
     for (jsobj *c = o; c; c = c->proto) {
+        if (c->cls == JC_PROXY) {
+            jsval trap = proxy_trap(J, c, "get");
+            if (J->thrown)
+                return JS_UNDEFINED;
+            if (js_is_function(trap)) {
+                jsval args[3] = { c->prim, js_strv(key), recv };
+                return call_function(J, trap.u.o, js_objv((jsobj *)c->host), 3, args, JS_UNDEFINED);
+            }
+            return get_prop(J, c->prim, key);
+        }
         if (c->cls == JC_HOST && c->hclass && c->hclass->get) {
             jsval out;
             if (c->hclass->get(J, c, key, &out))
@@ -865,6 +890,14 @@ bool has_prop(js *J, jsobj *o, jsstr *key)
 {
     uint32_t idx;
     for (jsobj *c = o; c; c = c->proto) {
+        if (c->cls == JC_PROXY) {
+            jsval trap = proxy_trap(J, c, "has");
+            if (!J->thrown && js_is_function(trap)) {
+                jsval args[2] = { c->prim, js_strv(key) };
+                return js_truthy(call_function(J, trap.u.o, js_objv((jsobj *)c->host), 2, args, JS_UNDEFINED));
+            }
+            return c->prim.t == JS_OBJ && has_prop(J, c->prim.u.o, key);
+        }
         if (c->cls == JC_HOST && c->hclass && c->hclass->get) {
             jsval out;
             if (c->hclass->get(J, c, key, &out))
@@ -889,6 +922,17 @@ bool set_prop(js *J, jsval base, jsstr *key, jsval v)
     if (base.t != JS_OBJ)
         return false;
     jsobj *o = base.u.o;
+    if (o->cls == JC_PROXY) {
+        jsval trap = proxy_trap(J, o, "set");
+        if (J->thrown)
+            return false;
+        if (js_is_function(trap)) {
+            jsval args[4] = { o->prim, js_strv(key), v, base };
+            jsval r = call_function(J, trap.u.o, js_objv((jsobj *)o->host), 4, args, JS_UNDEFINED);
+            return !J->thrown && js_truthy(r);
+        }
+        return set_prop(J, o->prim, key, v);
+    }
     if (o->cls == JC_HOST && o->hclass && o->hclass->set) {
         if (o->hclass->set(J, o, key, v))
             return true;
@@ -975,6 +1019,19 @@ void js_def_value(js *J, jsobj *o, const char *name, jsval v)
 
 void own_keys(js *J, jsobj *o, jsobj *out, bool only_enum)
 {
+    if (o->cls == JC_PROXY) {
+        jsval trap = proxy_trap(J, o, "ownKeys");
+        if (!J->thrown && js_is_function(trap)) {
+            jsval args[1] = { o->prim };
+            jsval r = call_function(J, trap.u.o, js_objv((jsobj *)o->host), 1, args, JS_UNDEFINED);
+            if (!J->thrown && js_is_array(r))
+                for (uint32_t i = 0; i < r.u.o->len; i++)
+                    js_array_push(J, out, r.u.o->items[i]);
+        } else if (o->prim.t == JS_OBJ) {
+            own_keys(J, o->prim.u.o, out, only_enum);
+        }
+        return;
+    }
     if (o->cls == JC_ARRAY)
         for (uint32_t i = 0; i < o->len; i++)
             js_array_push(J, out, js_strv(num_to_str(J, (double)i)));

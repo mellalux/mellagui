@@ -12,7 +12,7 @@
 
 /* ---- objects -------------------------------------------------------------------------------------------------- */
 
-enum jscls { JC_OBJECT, JC_ARRAY, JC_FUNCTION, JC_ERROR, JC_BOOLEAN, JC_NUMBER, JC_STRING, JC_DATE, JC_MAP, JC_SET, JC_HOST, JC_REGEXP };
+enum jscls { JC_OBJECT, JC_ARRAY, JC_FUNCTION, JC_ERROR, JC_BOOLEAN, JC_NUMBER, JC_STRING, JC_DATE, JC_MAP, JC_SET, JC_HOST, JC_REGEXP, JC_PROXY };   /* proxy: prim = target, host = handler (jsobj *) */
 
 #define PF_ENUM 1
 #define PF_WRITE 2
@@ -69,7 +69,7 @@ struct jsobj {
 enum nodetype {
     N_NUM, N_STR, N_TEMPLATE, N_IDENT, N_THIS, N_LIT /* undefined/null/true/false in num */, N_ARRAY, N_OBJECT, N_FUNC,
     N_CLASS, N_UNARY, N_UPDATE, N_BINARY, N_LOGICAL, N_ASSIGN, N_COND, N_CALL, N_NEW, N_MEMBER, N_SEQ, N_SPREAD,
-    N_SUPER, N_HOLE, N_REGEX, N_AWAIT, N_YIELD,
+    N_SUPER, N_HOLE, N_REGEX, N_AWAIT, N_YIELD, N_TAGGED,
     /* statements */
     N_VAR, N_DECL, N_EXPR, N_BLOCK, N_IF, N_FOR, N_FORIN, N_FOROF, N_WHILE, N_DOWHILE, N_RETURN, N_BREAK,
     N_CONTINUE, N_THROW, N_TRY, N_WITH, N_SWITCH, N_CASE, N_EMPTY, N_LABEL, N_PROP, N_PROGRAM

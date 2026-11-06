@@ -93,6 +93,7 @@ extern const struct lm_interface lm_xdg_toplevel_interface;
 extern const struct lm_interface lm_xdg_popup_interface;
 extern const struct lm_interface lm_zxdg_decoration_manager_v1_interface;
 extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
+extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen private: settings.c */
 
 /*
  * ---- COPY-PASTE LIST OF ADVERTISED GLOBALS (interface, version) -------------
@@ -104,6 +105,7 @@ extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
  *   wl_data_device_manager        3    seat.c
  *   xdg_wm_base                   3    xdg.c
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
+ *   lumen_settings_v1             1    settings.c (Lumen private: read/change the user settings)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
 #define LM_WL_SUBCOMPOSITOR_VERSION         1
@@ -113,6 +115,7 @@ extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
 #define LM_WL_DATA_DEVICE_MANAGER_VERSION   3
 #define LM_XDG_WM_BASE_VERSION              3
 #define LM_ZXDG_DECORATION_MANAGER_V1_VERSION 1
+#define LM_LUMEN_SETTINGS_V1_VERSION        1
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
 enum {
@@ -495,6 +498,14 @@ enum {
     LM_ZXDG_DECORATION_ERR_UNCONFIGURED_BUFFER = 0,
     LM_ZXDG_DECORATION_ERR_ALREADY_CONSTRUCTED = 1,
     LM_ZXDG_DECORATION_ERR_ORPHANED = 2,
+};
+
+/* ---- lumen_settings_v1 (Lumen's own protocol, see settings.h for the keys) ----------------------------------- */
+enum {
+    LM_LUMEN_SETTINGS_V1_REQ_DESTROY = 0,   /* "" */
+    LM_LUMEN_SETTINGS_V1_REQ_SET = 1,       /* "ss" key, value: change one setting (the answer is a value burst + done) */
+    LM_LUMEN_SETTINGS_V1_EVT_VALUE = 0,     /* "ss" key, value: current value of one setting */
+    LM_LUMEN_SETTINGS_V1_EVT_DONE = 1,      /* "" end of a burst of value events */
 };
 
 /* Convenience: look an interface up by wire name ("wl_surface"); NULL if unknown. */

@@ -46,6 +46,8 @@
  *   Super+Enter        spawn config.terminal_cmd
  *   Escape             closes the open app menu (the "Lumen" panel button toggles it)
  *   Super+R            spawn config.run_cmd (run dialog; also the panel's "Run" button)
+ *   Super+I            spawn config.settings_cmd (settings panel, also in the Lumen menu)
+ *   Super+G            show / hide the desktop gadget (clipboard history; drag its title bar to move, its edges to resize)
  *   Super+Q            close focused window (ops->close)
  *   Super+1..4         switch workspace;  Super+Shift+1..4 move focused window there
  *   Super+Tab          focus next window (cycle, raises it); Super+Shift+Tab previous
@@ -250,8 +252,12 @@ enum lm_pick_kind {
     LM_PICK_MENU_ITEM,      /* app menu entry, `index` = config.apps[] index */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
     LM_PICK_PANEL_EXIT,     /* quit button (needs a second click to confirm) */
+    LM_PICK_PANEL_LAYOUT,   /* keyboard layout indicator: left click = next layout, right click = previous */
+    LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
-    LM_PICK_PANEL_TASK      /* taskbar button of `window` */
+    LM_PICK_PANEL_TASK,     /* taskbar button of `window` */
+    LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets */
+    LM_PICK_GADGET_BORDER   /* desktop gadget edge/corner: drag to resize, `edges` says which */
 };
 
 struct lm_pick {
@@ -277,6 +283,15 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick, double x
  */
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick,
                           uint32_t time_ms, uint32_t button, bool pressed);
+/* The keyboard layout / sticky key state changed: repaint the indicators. */
+void lm_wm_keyboard_state_changed(struct lm_wm *wm);
+/* The clipboard history changed (seat.c): repaint the gadget. */
+void lm_wm_clipboard_changed(struct lm_wm *wm);
+/* Desktop gadget visibility (Super+G, control socket `gadget`). */
+bool lm_wm_gadget_visible(const struct lm_wm *wm);
+void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
+/* The gadget card (without shadow) in global coordinates; false when hidden or it does not fit. */
+bool lm_wm_gadget_rect(const struct lm_wm *wm, struct lm_rect *out);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
 bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed,
                bool repeat, uint32_t mods);
@@ -308,6 +323,13 @@ struct lm_panel_info {
     uint32_t workspace_occupied;    /* bit n set = workspace n has windows */
     int hover_workspace;            /* -1 = none */
     bool hover_launcher;
+    struct lm_rect layout;          /* keyboard layout indicator */
+    bool hover_layout;
+    char layout_text[8];            /* "US", "EE" ... */
+    struct lm_rect sticky;          /* sticky keys toggle */
+    bool hover_sticky;
+    bool sticky_on;
+    char sticky_text[24];           /* "Sticky", or the latched (Sh) / locked (SH) modifiers */
     struct lm_rect run;             /* run-dialog button, left of the quit button */
     bool hover_run;
     struct lm_rect exit;            /* quit button, left of the clock */
@@ -334,8 +356,27 @@ struct lm_menu_info {
     const char *label[LM_MAX_APPS]; /* valid only during the callback */
 };
 
+#define LM_GADGET_ENTRIES 5         /* == LM_CLIP_HISTORY */
+#define LM_GADGET_SHADOW 14         /* the drop shadow reaches this far beyond `rect` (scene bounds include it) */
+/*
+ * The desktop gadget: a rounded, shadowed card on the first output (docked top right below the panel until the user
+ * drags it; above the wallpaper and below every window) that lists the clipboard history, newest first. It can be
+ * moved by its title bar and resized by its edges; the renderer wraps/truncates the entries to the width.
+ */
+struct lm_gadget_info {
+    struct lm_rect rect;            /* the card; the shadow lies outside */
+    int n;                          /* entries drawn (<= slots) */
+    int total;                      /* entries in the history (the title badge) */
+    int slots;                      /* entry slots that fit (1..LM_GADGET_ENTRIES) */
+    int entry_h;                    /* height of one entry slot; the title bar is `title_h` high */
+    int title_h;
+    bool dragging;                  /* being moved / resized */
+    const char *text[LM_GADGET_ENTRIES]; /* newest first; valid only during the callback */
+};
+
 enum lm_scene_kind {
     LM_SCENE_WALLPAPER,             /* one per output */
+    LM_SCENE_GADGET,                /* the desktop gadget (right after the wallpapers, below all windows) */
     LM_SCENE_FRAME,                 /* decoration of one window */
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
     LM_SCENE_PANEL,                 /* one per output */
@@ -355,6 +396,7 @@ struct lm_scene_item {
         } surface;                  /* LM_SCENE_SURFACE */
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
         struct lm_menu_info menu;   /* LM_SCENE_MENU */
+        struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
     } u;
 };
 

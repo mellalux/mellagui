@@ -7,6 +7,7 @@
  */
 #include "render.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,6 +17,7 @@
 #include "seat.h"
 #include "surface.h"
 #include "wm.h"
+#include <stdio.h>
 
 #define HIST 3
 #define MAX_REDRAW_RECTS 12
@@ -400,6 +402,154 @@ static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *m)
     }
 }
 
+/* Next line of at most `cols` code points from text[*pos]: whitespace runs become one space, leading blanks are
+ * dropped. Returns true if text remains after the line. */
+static bool wrap_line(const char *text, size_t *pos, int cols, char *out, size_t outsz)
+{
+    size_t len = strlen(text), i = *pos, o = 0;
+    int n = 0;
+    bool pending_space = false;
+    while (i < len && n < cols) {
+        int used;
+        uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
+        if (used < 1)
+            used = 1;
+        if (cp == ' ' || cp == '\n' || cp == '\t' || cp == '\r') {
+            pending_space = o > 0;
+            i += (size_t)used;
+            continue;
+        }
+        if (pending_space) {
+            if (n + 1 >= cols)
+                break;
+            out[o++] = ' ';
+            n++;
+            pending_space = false;
+        }
+        if (o + (size_t)used + 1 >= outsz)
+            break;
+        memcpy(out + o, text + i, (size_t)used);
+        o += (size_t)used;
+        i += (size_t)used;
+        n++;
+    }
+    out[o] = 0;
+    while (i < len && (text[i] == ' ' || text[i] == '\n' || text[i] == '\t' || text[i] == '\r'))
+        i++;
+    *pos = i;
+    return i < len;
+}
+
+/* Rounded rectangle with anti-aliased corners, blended with `argb` (alpha in the top byte) over what is there. */
+static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
+{
+    struct lm_rect r;
+    if (!lm_rect_intersect(rect, &c->clip, &r))
+        return;
+    int rad = LM_MIN(radius, LM_MIN(rect->w, rect->h) / 2);
+    uint32_t a = argb >> 24;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *row = fb_row(c, y);
+        int dy = 0;                                     /* distance of the row into the corner zone (0 = outside) */
+        if (y < rect->y + rad) dy = rect->y + rad - y;
+        else if (y >= rect->y + rect->h - rad) dy = y - (rect->y + rect->h - rad) + 1;
+        for (int x = r.x; x < r.x + r.w; x++) {
+            uint32_t pa = a;
+            int dx = 0;
+            if (x < rect->x + rad) dx = rect->x + rad - x;
+            else if (x >= rect->x + rect->w - rad) dx = x - (rect->x + rect->w - rad) + 1;
+            if (dx && dy) {                             /* corner pixel: coverage from the distance to the arc */
+                float d = sqrtf((float)((dx - 1) * (dx - 1) + (dy - 1) * (dy - 1))) + 0.5f;
+                float cov = (float)rad - d + 0.5f;
+                if (cov <= 0.0f)
+                    continue;
+                if (cov < 1.0f)
+                    pa = (uint32_t)((float)a * cov);
+            }
+            if (pa == 0)
+                continue;
+            uint32_t src = argb & 0x00ffffffu;                  /* premultiply for blend_px */
+            uint32_t pr = div255(((src >> 16) & 255) * pa), pg = div255(((src >> 8) & 255) * pa),
+                     pb = div255((src & 255) * pa);
+            row[x] = blend_px((pa << 24) | (pr << 16) | (pg << 8) | pb, row[x]);
+        }
+    }
+}
+
+static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info *g)
+{
+    const struct lm_rect card = g->rect;
+
+    /* soft drop shadow: stacked translucent rounded rectangles, the outermost faintest, a little lower than the card */
+    for (int k = LM_GADGET_SHADOW - 4; k >= 1; k--) {              /* (the shadow sits 4 px lower: stay inside the scene bounds) */
+        struct lm_rect sr = lm_rect_make(card.x - k, card.y - k + 4, card.w + 2 * k, card.h + 2 * k);
+        fill_round(c, &sr, 12 + k, 0x06000000u);
+    }
+    fill_round(c, &card, 12, g->dragging ? 0xaa6fa8ffu : 0x2effffffu);  /* hairline: the 1 px ring around the body */
+    struct lm_rect in = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, card.h - 2);
+    fill_round(c, &in, 11, 0xf2161a24u);
+
+    /* header: clipboard glyph, title, count badge */
+    int hy = card.y + (g->title_h - LM_FONT_H) / 2;
+    struct lm_rect icon = lm_rect_make(card.x + 14, card.y + (g->title_h - 14) / 2, 11, 14);
+    fill_round(c, &icon, 2, 0xff6fa8ffu);
+    struct lm_rect clip = lm_rect_make(icon.x + 3, icon.y - 2, 5, 4);
+    fill_round(c, &clip, 1, 0xffe6e9efu);
+    struct lm_rect hole = lm_rect_make(icon.x + 2, icon.y + 4, 7, 8);
+    fill_round(c, &hole, 1, 0xff161a24u);
+    struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
+    draw_text(c, &head, card.x + 32, hy, "Clipboard", COL_PANEL_TEXT);
+    char badge[8];
+    snprintf(badge, sizeof(badge), "%d", g->total);
+    int bw = lm_font_text_width(badge) + 14;
+    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 18) / 2, bw, 18);
+    fill_round(c, &pill, 9, 0xff2d3a5au);
+    draw_text_centered(c, &pill, badge, COL_PANEL_ACCENT);
+    struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
+    fill_round(c, &sep, 0, 0x30ffffffu);
+
+    /* resize grip: a small triangle of dots in the bottom right corner */
+    for (int r = 0; r < 3; r++)
+        for (int k = 0; k < 3 - r; k++) {
+            struct lm_rect dot = lm_rect_make(card.x + card.w - 11 - k * 4, card.y + card.h - 11 - r * 4, 2, 2);
+            fill_round(c, &dot, 0, 0x70ffffffu);
+        }
+
+    int cols = (card.w - 2 * 12 - 2 * 10 - 4) / LM_FONT_W;     /* chip inset 12, text inset 10 (+ accent bar) */
+    int lines = LM_MAX(1, (g->entry_h - 12) / LM_FONT_H);
+    if (!g->n) {
+        struct lm_rect r = lm_rect_make(card.x + 1, card.y + g->title_h, card.w - 2, g->entry_h);
+        draw_text_centered(c, &r, "Nothing copied yet", COL_PANEL_DIM);
+        return;
+    }
+    for (int i = 0; i < g->n; i++) {
+        struct lm_rect slot = lm_rect_make(card.x + 12, card.y + g->title_h + 4 + i * g->entry_h, card.w - 24,
+                                           g->entry_h - 4);
+        fill_round(c, &slot, 7, i == 0 ? 0x26ffffffu : 0x12ffffffu);
+        if (i == 0) {                                                    /* newest: accent bar on the left */
+            struct lm_rect bar = lm_rect_make(slot.x + 4, slot.y + 6, 3, slot.h - 12);
+            fill_round(c, &bar, 1, 0xff6fa8ffu);
+        }
+        uint32_t col = i == 0 ? COL_PANEL_TEXT : COL_PANEL_DIM;
+        int tx = slot.x + 14;
+        int ty = slot.y + (slot.h - lines * LM_FONT_H) / 2;
+        size_t pos = 0;
+        char line[256];
+        for (int l = 0; l < lines; l++) {
+            size_t start = pos;
+            bool more = wrap_line(g->text[i], &pos, cols, line, sizeof(line));
+            if (l == lines - 1 && more) {                                /* cut: the last line ends in "..." */
+                pos = start;
+                wrap_line(g->text[i], &pos, cols - 3, line, sizeof(line) - 4);
+                strcat(line, "...");
+            }
+            draw_text(c, &slot, tx, ty + l * LM_FONT_H, line, col);
+            if (!more && l < lines - 1)
+                break;
+        }
+    }
+}
+
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
 {
     fill_rect(c, &p->bar, COL_PANEL);
@@ -432,6 +582,13 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     }
     if (!p->ntasks && p->active_title && p->active_title[0])
         draw_text_centered(c, &p->title_area, p->active_title, COL_PANEL_TEXT);
+    fill_rect(c, &p->layout, p->hover_layout ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    draw_text_centered(c, &p->layout, p->layout_text, COL_PANEL_TEXT);
+    uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : (p->hover_sticky ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    if (p->sticky_on && p->hover_sticky)
+        sbg = 0x8fbcffu;
+    fill_rect(c, &p->sticky, sbg);
+    draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? COL_PANEL : COL_PANEL_DIM);
     fill_rect(c, &p->run, p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN);
     draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
     uint32_t ebg = p->exit_armed ? COL_PANEL_DANGER : (p->hover_exit ? COL_PANEL_HOVER : COL_PANEL_BTN);
@@ -558,6 +715,9 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_WALLPAPER:
         if (item->output == c->out)
             paint_wallpaper(c);
+        break;
+    case LM_SCENE_GADGET:
+        paint_gadget(c, &item->u.gadget);
         break;
     case LM_SCENE_FRAME:
         paint_frame(c, &item->u.frame);

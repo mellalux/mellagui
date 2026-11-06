@@ -20,6 +20,7 @@
 #include "log.h"
 #include "render.h"
 #include "seat.h"
+#include "settings.h"
 #include "wm.h"
 
 #define CTL_MAX_CLIENTS 8
@@ -209,6 +210,67 @@ static void ctl_command(struct ctl_client *c, char *line)
             off += (size_t)k;
         }
         free(text);
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "kbd")) {
+        if (!srv->input) { ctl_reply(c, "err no input\n"); return; }
+        ctl_reply(c, "ok layout=%s slot=%d sticky=%d latched=%u slocked=%u sound=%s sounds=%u\n",
+                  lm_input_layout_id(srv->input, lm_input_layout(srv->input)), lm_input_layout(srv->input),
+                  lm_input_sticky(srv->input) ? 1 : 0, lm_input_latched(srv->input),
+                  lm_input_sticky_locked(srv->input), lm_input_last_sound(srv->input),
+                  lm_input_sound_count(srv->input));
+    } else if (!strcmp(cmd, "clip")) {
+        if (a1 && !strcmp(a1, "clear"))
+            lm_seat_clip_clear(srv->seat);
+        /* one "clip <i> <text>" line per history entry (\ and newline escaped), then "ok n=<count> gadget=<0|1>" */
+        int n = lm_seat_clip_count(srv->seat);
+        for (int i = 0; i < n; i++) {
+            const char *t = lm_seat_clip_get(srv->seat, i);
+            char line[480];
+            size_t o = (size_t)snprintf(line, sizeof(line), "clip %d ", i);
+            for (; *t && o + 3 < sizeof(line); t++) {
+                if (*t == '\n' || *t == '\\') {
+                    line[o++] = '\\';
+                    line[o++] = *t == '\n' ? 'n' : '\\';
+                } else if (*t == '\r') {
+                    line[o++] = ' ';
+                } else {
+                    line[o++] = *t;
+                }
+            }
+            line[o++] = '\n';
+            ctl_reply(c, "%.*s", (int)o, line);
+        }
+        ctl_reply(c, "ok n=%d gadget=%d\n", n, srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0);
+    } else if (!strcmp(cmd, "settings")) {
+        /* settings                -> ok key=value ...
+         * settings <key> <value>  -> same, after the change ("err rejected" if it was refused) */
+        if (!srv->settings) { ctl_reply(c, "err no settings\n"); return; }
+        bool ok = true;
+        if (a1 && a2)
+            ok = lm_settings_set(srv->settings, a1, a2);
+        char buf[512];
+        lm_settings_dump(srv->settings, buf, sizeof(buf));
+        ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);
+    } else if (!strcmp(cmd, "gadget")) {
+        if (!a1 || !srv->wm) { ctl_reply(c, "err usage: gadget <0|1>\n"); return; }
+        lm_wm_set_gadget(srv->wm, a1[0] == '1');
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "gadget-rect")) {
+        struct lm_rect r;
+        if (srv->wm && lm_wm_gadget_rect(srv->wm, &r))
+            ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
+        else
+            ctl_reply(c, "ok hidden\n");
+    } else if (!strcmp(cmd, "layout")) {
+        if (!a1 || !srv->input) { ctl_reply(c, "err usage: layout <slot|next|prev>\n"); return; }
+        if (!strcmp(a1, "next") || !strcmp(a1, "prev"))
+            lm_input_cycle_layout(srv->input, a1[0] == 'n' ? 1 : -1);
+        else
+            lm_input_set_layout(srv->input, atoi(a1));
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "sticky")) {
+        if (!a1 || !srv->input) { ctl_reply(c, "err usage: sticky <0|1>\n"); return; }
+        lm_input_set_sticky(srv->input, atoi(a1) != 0);
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "quit")) {
         ctl_reply(c, "ok\n");

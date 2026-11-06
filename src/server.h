@@ -78,6 +78,7 @@ struct lm_seat;
 struct lm_xdg;
 struct lm_wm;
 struct lm_input;
+struct lm_settings;
 
 typedef void (*lm_request_fn)(struct lm_resource *res, const union lm_arg *args);
 typedef void (*lm_resource_destroy_fn)(struct lm_resource *res);
@@ -144,6 +145,8 @@ struct lm_config {
     const char *exec_cmd;       /* --exec, shell command spawned after start */
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "lumen-run") */
     const char *terminal_cmd;   /* command for Super+Enter (default "lumen-term") */
+    const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "lumen-settings") */
+    const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "Lumen" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
@@ -155,6 +158,12 @@ struct lm_config {
     int repeat_rate;            /* keys/second, default 25 */
     double pointer_speed;       /* multiplier, default 1.0 */
     bool natural_scroll;
+    int kbd_layouts[4];         /* --layouts: indices for lm_layout_*() (keymap.h), the order is the XKB group order */
+    int kbd_nlayouts;           /* 0 = just "us" */
+    int kbd_active;             /* layout (lm_layout_*() index) active at start, -1 = the first of kbd_layouts */
+    bool sticky_keys;           /* --sticky: start with sticky keys enabled */
+    bool gadget;                /* desktop gadget (clipboard viewer) visible at start (default true; --no-gadget; Super+G) */
+    bool sound;                 /* feedback beeps for sticky keys (default true; --no-sound; never on headless) */
     bool grab_input;            /* EVIOCGRAB the evdev devices (default true on drm) */
     bool log_to_stderr;
 };
@@ -167,11 +176,15 @@ static inline void lm_config_defaults(struct lm_config *c)
         .headless_height = 720,
         .run_cmd = "lumen-run",
         .terminal_cmd = "lumen-term",
+        .settings_cmd = "lumen-settings",
+        .kbd_active = -1,
         .log_level = 2, /* LM_LOG_INFO */
         .repeat_delay_ms = 400,
         .repeat_rate = 25,
         .pointer_speed = 1.0,
         .grab_input = true,
+        .sound = true,
+        .gadget = true,
         .log_to_stderr = true,
     };
 }
@@ -208,6 +221,7 @@ struct lm_server {
     struct lm_xdg *xdg;                 /* xdg_wm_base, decoration manager */
     struct lm_wm *wm;
     struct lm_input *input;             /* evdev (or inject-only for headless) */
+    struct lm_settings *settings;       /* lumen_settings_v1 + settings file */
 
     void *priv;
 };

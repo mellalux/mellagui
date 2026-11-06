@@ -1206,11 +1206,11 @@ static void key_to_pty(uint32_t code, bool repeat)
         return;
     }
 
-    uint32_t ks = lm_keymap_us_keysym(code, A.mods);
+    uint32_t ks = lm_keymap_keysym(code, A.mods);
     if (!ks)
         return;
     if (ctrl) {
-        uint32_t base = lm_keymap_us_keysym(code, 0);
+        uint32_t base = lm_keymap_keysym(code, 0);
         char ch = 0;
         if (base >= 'a' && base <= 'z') ch = (char)(base - 'a' + 1);
         else if (base == '[' ) ch = 0x1b;
@@ -1262,7 +1262,7 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     (void)c; (void)id; (void)data;
     switch (op) {
     case LM_WL_KEYBOARD_EVT_KEYMAP:
-        close(args[1].h);
+        lm_keymap_client_load(args[1].h, args[2].u);
         break;
     case LM_WL_KEYBOARD_EVT_ENTER:
         A.focused = true;
@@ -1288,7 +1288,8 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         }
         break;
     case LM_WL_KEYBOARD_EVT_MODIFIERS:
-        A.mods = args[1].u | args[3].u;
+        A.mods = args[1].u | args[2].u | args[3].u;
+        lm_keymap_client_group(args[4].u);
         break;
     case LM_WL_KEYBOARD_EVT_REPEAT_INFO:
         A.repeat_rate = args[0].i;

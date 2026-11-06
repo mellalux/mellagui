@@ -202,14 +202,15 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     struct app *a = data;
     switch (op) {
     case LM_WL_KEYBOARD_EVT_KEYMAP:
-        close(args[1].h);
+        lm_keymap_client_load(args[1].h, args[2].u);
         break;
     case LM_WL_KEYBOARD_EVT_MODIFIERS:
-        a->mods = args[1].u | args[3].u;
+        a->mods = args[1].u | args[2].u | args[3].u;
+        lm_keymap_client_group(args[4].u);
         break;
     case LM_WL_KEYBOARD_EVT_KEY:
         if (args[3].u == 1) {
-            uint32_t ks = lm_keymap_us_keysym(args[2].u, a->mods);
+            uint32_t ks = lm_keymap_keysym(args[2].u, a->mods);
             char txt[8];
             if (lm_keysym_to_utf8(ks, txt))
                 snprintf(a->last_key, sizeof(a->last_key), "last key: '%s' (code %u)", txt, args[2].u);

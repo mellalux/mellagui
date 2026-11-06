@@ -43,6 +43,7 @@ enum lm_input_type {
     LM_INPUT_TOUCH_UP,
     LM_INPUT_TOUCH_CANCEL,         /* cancel all touch points */
     LM_INPUT_TOUCH_FRAME,
+    LM_INPUT_MODS,                 /* modifier / layout state changed without a key (sticky keys, layout switch) */
 };
 
 struct lm_input_event {
@@ -60,7 +61,15 @@ struct lm_input_event {
              */
             uint32_t mods_depressed;
             uint32_t mods_locked;
+            /*
+             * Sticky keys: latched modifiers (consumed by the next key press) and sticky-locked ones (part of
+             * mods_locked together with Caps/Num). A key's own event still shows the latch it consumes; a
+             * separate LM_INPUT_MODS event follows once the latch is cleared.
+             */
+            uint32_t mods_latched;
+            uint32_t group;        /* active keyboard layout (XKB group) */
         } key;
+        struct { uint32_t depressed, latched, locked, group; } mods;
         struct { double dx, dy; } motion;         /* pixels */
         struct { double x, y; } motion_abs;       /* 0..1 */
         struct { uint32_t code; bool pressed; } button;   /* evdev BTN_* */
@@ -97,6 +106,31 @@ void lm_input_set_active(struct lm_input *in, bool active);
  * means "now".
  */
 void lm_input_inject(struct lm_input *in, const struct lm_input_event *ev);
+
+/*
+ * Keyboard layouts and sticky keys. The state lives here (config.kbd_layouts / config.sticky_keys give the start
+ * values); every change reaches the seat as an LM_INPUT_MODS event so clients get a wl_keyboard.modifiers.
+ *  - layout `slot` indexes the configured list (= XKB group of the generated keymap)
+ *  - sticky keys: tapping Shift/Ctrl/Alt/AltGr/Super latches it for the next key press, tapping it twice locks it,
+ *    a third tap unlocks; pressing Shift five times in a row toggles the feature.
+ */
+int lm_input_layout_count(const struct lm_input *in);
+int lm_input_layout(const struct lm_input *in);
+const char *lm_input_layout_id(const struct lm_input *in, int slot);     /* "ee" */
+const char *lm_input_layout_name(const struct lm_input *in, int slot);   /* "Estonian" */
+void lm_input_set_layout(struct lm_input *in, int slot);
+/* Settings: replace the configured list (lm_layout_*() indices, 1..LM_KBD_MAX_LAYOUTS). `active` is the layout (not
+ * slot) to stay on, -1 = keep the current one if it is still in the list, else the first. The caller has already
+ * given the seat the matching keymap (lm_seat_set_layouts). */
+void lm_input_set_layouts(struct lm_input *in, const int *layouts, int n, int active);
+void lm_input_cycle_layout(struct lm_input *in, int delta);              /* +1 next, -1 previous */
+bool lm_input_sticky(const struct lm_input *in);
+void lm_input_set_sticky(struct lm_input *in, bool on);
+uint32_t lm_input_latched(const struct lm_input *in);                    /* LM_MOD_* */
+uint32_t lm_input_sticky_locked(const struct lm_input *in);              /* LM_MOD_* */
+/* Sticky-key feedback beeps (sound.h): played on drm, only recorded on headless (the `kbd` oracle shows them). */
+const char *lm_input_last_sound(const struct lm_input *in);              /* "none" until the first one */
+unsigned lm_input_sound_count(const struct lm_input *in);
 
 /* Diagnostics: number of open devices per class. */
 int lm_input_count_keyboards(const struct lm_input *in);

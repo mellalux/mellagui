@@ -38,6 +38,12 @@
  *   abs <x> <y>        warp the pointer to absolute global pixel position
  *   button <code> <0|1>  e.g. 272 = BTN_LEFT
  *   axis <v|h> <value> <discrete>   scroll (value in px-like units, discrete steps)
+ *   kbd                reply "ok layout=<id> slot=<n> sticky=<0|1> latched=<mods> slocked=<mods> sound=<name> sounds=<n>"  (last sticky-key beep, see sound.h)
+ *   clip [clear]       (`clear` forgets the history first) one "clip <i> <text>" line per clipboard-history entry (newest first, \\n escaped), then "ok n=<count> gadget=<0|1>"
+ *   gadget <0|1>       show / hide the desktop gadget
+ *   gadget-rect        reply "ok <x> <y> <w> <h>" (the gadget card, without shadow) or "ok hidden"
+ *   layout <slot|next|prev>   switch the keyboard layout
+ *   sticky <0|1>       sticky keys on/off
  *   windows            dump lm_wm_describe() output
  *   quit               lm_server_quit()
  * SIGUSR1 (or `dump`) with config.dump_path set writes that file too.

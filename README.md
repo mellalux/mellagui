@@ -13,7 +13,9 @@ Included programs:
 | `build/lumen`     | the compositor / shell                                            |
 | `build/lumen-term`| terminal emulator (xterm-compatible subset, 256/true colour, scrollback, mouse selection + clipboard) |
 | `build/lumen-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
+| `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound; `--get` / `--set KEY=VALUE` for scripts |
 | `build/lumen-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
+| `build/lumen-web` | tiny browser: file:// and http://, HTML subset, links, history (no https/CSS/JS; `--selftest`) |
 | `build/lumen-demo`| small animated demo client                                        |
 
 ## Status (read this)
@@ -78,12 +80,38 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+M / Super+F           | maximize / fullscreen toggle            |
 | Super+Left / Super+Right    | tile window to the left / right half    |
 | Super+Up / Super+Down       | maximize / restore (un-maximize or un-tile) |
+| Super+Space (+Shift)        | next / previous keyboard layout         |
 | Super+Shift+E               | quit Lumen                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *Lumen* (app menu: Terminal, Calculator and, if found (`~/VSCode/code` or the snap's binary), Code; Esc or an outside click closes it;
-add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right *Run* (run dialog) and *Exit*
+Panel: *Lumen* (app menu: Terminal, Calculator, Browser, if found (`~/VSCode/code` or the snap's binary) Code, and Settings; Esc or an outside click closes it;
+add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
 (first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels).
+
+Keyboard layouts and sticky keys: `--layouts us,ee,de,fi` (the default; up to four, the first is active at start; also `us,ee`
+etc.) selects what you can switch between with Super+Space, or with the panel indicator (left click next, right click previous).
+Layouts: `us`, `ee` (Estonian: ü õ ö ä, AltGr+f = š, AltGr+z = ž), `de`, `fi`; no dead keys. With anything but a lone `us`
+the right Alt key is AltGr (third/fourth level, `AltGr+e` = €). `--sticky` (or the panel's *Sticky* button, or pressing Shift five
+times in a row) turns on sticky keys: tapping Shift/Ctrl/Alt/AltGr/Super applies it to the next key press only, tapping it twice
+locks it, a third tap unlocks. The button shows the latched (`Sh`) or locked (`SH`) modifiers. Each change beeps (latch, lock, unlock, sticky on/off; the tones are
+synthesised and piped to `aplay`, so it needs alsa-utils and a sound card; `--no-sound` silences it).
+
+Settings panel: Super+I or *Lumen* → *Settings* opens `lumen-settings` (Tab / Shift+Tab, Enter or Space, Left/Right on sliders, Esc).
+*Keyboard* enables and orders the layouts (the checkbox, the `^` button; *active* picks the current one - the clients get a new keymap at
+once, nothing has to be restarted), sticky keys, key repeat delay and rate, and has a field for trying the layout. *Pointer*: speed and
+natural scrolling. *Desktop*: the clipboard gadget and the sound feedback. Changes apply immediately and are saved (about 0.3 s later) to
+`$XDG_CONFIG_HOME/lumen/settings.conf` (`~/.config/lumen/settings.conf`; `--settings FILE` chooses another file, `--settings none` saves
+nothing; headless runs save nothing unless `--settings` is given). The file is plain `key=value` and is read at start; options such as
+`--layouts` or `--sticky` on the command line win over it. From a script: `lumen-settings --set layouts=ee,us repeat-rate=30`,
+`lumen-settings --get`. Anyone on the user's Wayland socket can change the settings (the `lumen_settings_v1` protocol has no authentication).
+
+Desktop gadget: a rounded, shadowed card on the first output (above the wallpaper, below all windows), docked at the top right until
+you move it, with the clipboard viewer: the last five distinct texts that applications copied, newest first (up to 2 KiB read per
+copy; images and files are ignored). The compositor reads them itself, so it also sees what was copied while no window had focus.
+Drag the title bar to move it (it stays on the output, below the panel); drag an edge or corner (the dotted grip bottom right) to
+resize it, 200x86 up to 640x560: a narrower card wraps the texts, a lower one shows fewer entries, a taller one gives each entry more
+lines. Double-click the title bar to get the default size and place back (position and size are not saved). Super+G shows/hides it,
+`--no-gadget` starts it hidden.
 
 Mouse: drag the title bar to move, drag the border/corners to resize, double-click the title bar to maximize,
 buttons for minimize/maximize/close, click the panel's workspace cells or the *Lumen* launcher.

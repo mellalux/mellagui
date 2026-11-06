@@ -35,6 +35,7 @@ EVENTS = {
     'wl_data_device': {0: ('data_offer', 'n'), 1: ('enter', 'uoffo'), 2: ('leave', ''),
                        3: ('motion', 'uff'), 4: ('drop', ''), 5: ('selection', 'o')},
     'wl_data_offer': {0: ('offer', 's'), 1: ('source_actions', 'u'), 2: ('action', 'u')},
+    'lumen_settings_v1': {0: ('value', 'ss'), 1: ('done', '')},
     'wl_data_source': {0: ('target', 's'), 1: ('send', 'sh'), 2: ('cancelled', ''),
                        3: ('dnd_drop_performed', ''), 4: ('dnd_finished', ''), 5: ('action', 'u')},
 }
@@ -73,6 +74,7 @@ REQ = {
     'wl_data_device': {'start_drag': 0, 'set_selection': 1, 'release': 2},
     'wl_data_source': {'offer': 0, 'destroy': 1},
     'wl_data_offer': {'accept': 0, 'receive': 1, 'destroy': 2},
+    'lumen_settings_v1': {'destroy': 0, 'set': 1},
 }
 
 XDG_STATE_MAXIMIZED, XDG_STATE_FULLSCREEN, XDG_STATE_RESIZING, XDG_STATE_ACTIVATED = 1, 2, 3, 4
@@ -466,10 +468,16 @@ class Ctl:
                 raise EOFError('control socket closed')
             l = l.rstrip('\n')
             if l == 'ok' or l.startswith('ok ') or l.startswith('err '):
+                self.last = l
                 if l.startswith('err '):
                     raise RuntimeError(l)
                 return lines
             lines.append(l)
+
+    def kbd(self):
+        """{'layout': 'ee', 'slot': 1, 'sticky': 0, 'latched': 0, 'slocked': 0, 'sound': 'none', 'sounds': 0} (LM_MOD_* masks)."""
+        self.cmd('kbd')
+        return {k: (v if k in ('layout', 'sound') else int(v)) for k, v in (kv.split('=') for kv in self.last.split()[1:])}
 
     def windows(self):
         res = {'windows': []}

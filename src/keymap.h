@@ -2,7 +2,7 @@
 #define LUMEN_KEYMAP_H
 
 /*
- * Static US keyboard layout, shared by the compositor (wl_keyboard.keymap
+ * Keyboard layouts, shared by the compositor (wl_keyboard.keymap generation
  * and modifier handling) and by clients (lumen-term / lumen-demo translate
  * evdev key codes to characters without libxkbcommon).
  * Owner: seat.c's owner (keymap.c). No dependencies on server code.
@@ -16,6 +16,7 @@
  * depend on files existing on the machine).
  */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -29,16 +30,46 @@ enum {
     LM_MOD_ALT   = 1u << 3,   /* Mod1 */
     LM_MOD_NUM   = 1u << 4,   /* Mod2 (NumLock) */
     LM_MOD_SUPER = 1u << 6,   /* Mod4 */
+    LM_MOD_ALTGR = 1u << 7,   /* Mod5, "LevelThree" (AltGr = right Alt when a layout with a third level is configured) */
 };
 
-/* Keymap text, NUL-terminated. wl_keyboard.keymap size = strlen() + 1. */
-const char *lm_keymap_us_text(void);
+/* ---- layouts ---------------------------------------------------------------------------------- */
 
 /*
- * Level-resolved keysym for an evdev code under the given LM_MOD_* mask
- * (uses Shift, Caps Lock for letters, NumLock for keypad). 0 = no symbol.
+ * Built-in layouts (tables in keymap.c): us, ee (Estonian), de (German), fi (Finnish). The compositor
+ * configures up to LM_KBD_MAX_LAYOUTS of them; each one becomes an XKB group ("Group1".."Group4") of the
+ * keymap handed to clients, and the active one is the `group` of wl_keyboard.modifiers.
  */
-uint32_t lm_keymap_us_keysym(uint32_t evdev_code, uint32_t mods);
+#define LM_KBD_MAX_LAYOUTS 4
+
+int lm_layout_count(void);
+const char *lm_layout_id(int layout);       /* "us" */
+const char *lm_layout_name(int layout);     /* "English (US)" */
+int lm_layout_find(const char *id);         /* -1 = unknown */
+/* Parse "us,ee,de" into layout indices (duplicates dropped). Returns the count (>= 1); on an unknown id returns
+ * 0 and writes a message to err. A NULL/empty list means "us". */
+int lm_layout_parse(const char *list, int out[LM_KBD_MAX_LAYOUTS], char *err, size_t errn);
+/* True when right Alt must act as AltGr (anything but a lone "us"): it then sets LM_MOD_ALTGR instead of LM_MOD_ALT. */
+bool lm_layout_needs_altgr(const int *layouts, int n);
+
+/*
+ * Complete xkb_keymap text (malloc'd, NUL-terminated; wl_keyboard.keymap size = strlen() + 1) with one group per
+ * layout. Self-contained (no `include`). Free with free().
+ */
+char *lm_keymap_build(const int *layouts, int n);
+
+/* ---- client side (no libxkbcommon needed) ------------------------------------------------------------- */
+
+/* Handle wl_keyboard.keymap: parses the group names out of the keymap fd (and closes it). */
+void lm_keymap_client_load(int fd, uint32_t size);
+/* Handle the `group` argument of wl_keyboard.modifiers. */
+void lm_keymap_client_group(uint32_t group);
+/*
+ * Level-resolved keysym for an evdev code under the given LM_MOD_* mask and the current group (Shift, Caps Lock
+ * for letters, AltGr for the third/fourth level, NumLock for the keypad). 0 = no symbol. Before a keymap has been
+ * loaded the layout is "us".
+ */
+uint32_t lm_keymap_keysym(uint32_t evdev_code, uint32_t mods);
 
 /*
  * UTF-8 text produced by a keysym: Latin-1 and Unicode keysyms

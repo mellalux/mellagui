@@ -422,7 +422,7 @@ static void run_line(struct app *a)
 
 static void handle_key(struct app *a, uint32_t code)
 {
-    uint32_t ks = lm_keymap_us_keysym(code, a->mods);
+    uint32_t ks = lm_keymap_keysym(code, a->mods);
     char txt[8];
     bool ctrl = (a->mods & LM_MOD_CTRL) != 0;
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
@@ -535,13 +535,14 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     struct app *a = data;
     switch (op) {
     case LM_WL_KEYBOARD_EVT_KEYMAP:
-        close(args[1].h);
+        lm_keymap_client_load(args[1].h, args[2].u);
         break;
     case LM_WL_KEYBOARD_EVT_LEAVE:
         repeat_stop(a);
         break;
     case LM_WL_KEYBOARD_EVT_MODIFIERS:
-        a->mods = args[1].u | args[3].u;
+        a->mods = args[1].u | args[2].u | args[3].u;
+        lm_keymap_client_group(args[4].u);
         break;
     case LM_WL_KEYBOARD_EVT_REPEAT_INFO:
         a->repeat_rate = args[0].i;
@@ -555,7 +556,7 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         }
         handle_key(a, args[2].u);
         if (a->running) {
-            uint32_t ks = lm_keymap_us_keysym(args[2].u, a->mods);
+            uint32_t ks = lm_keymap_keysym(args[2].u, a->mods);
             if (ks != LM_KS_Return && ks != LM_KS_Escape)
                 repeat_arm(a, args[2].u);
         }

@@ -22,6 +22,9 @@
 #include "log.h"
 #include "loop.h"
 #include "seatdev.h"
+#include "settings.h"
+#include "sound.h"
+#include "wm.h"
 
 #define MAX_SLOTS 10
 #define BITS_PER_LONG (sizeof(unsigned long) * 8)
@@ -76,6 +79,19 @@ struct lm_input {
     bool warned_eacces;
     uint16_t key_count[KEY_MAX + 1];
     uint32_t locked;       /* LM_MOD_CAPS / LM_MOD_NUM */
+    /* keyboard layouts */
+    int layouts[LM_KBD_MAX_LAYOUTS];
+    int nlayouts;
+    int slot;              /* active layout = XKB group */
+    bool altgr;            /* right Alt is AltGr (LM_MOD_ALTGR) */
+    /* sticky keys */
+    bool sticky;
+    uint32_t latched;      /* applies to the next key press only */
+    uint32_t slocked;      /* locked by tapping a latched modifier again */
+    bool tap_ok;           /* the modifier key that is down was pressed with no other key down */
+    int shift_taps;        /* consecutive Shift presses (5 in a row toggle sticky keys) */
+    const char *last_sound;
+    unsigned sound_count;
     int32_t repeat_code;   /* -1 = none */
     int n_keyboards, n_pointers;
 };
@@ -89,12 +105,26 @@ static inline bool bit_test(const unsigned long *a, int bit)
 
 /* ---- modifiers & key handling -------------------------------------------- */
 
+/* LM_MOD_* bit of a (non-lock) modifier key, 0 for every other key. */
+static uint32_t key_mod_bit(const struct lm_input *in, uint32_t code)
+{
+    switch (code) {
+    case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: return LM_MOD_SHIFT;
+    case KEY_LEFTCTRL: case KEY_RIGHTCTRL: return LM_MOD_CTRL;
+    case KEY_LEFTALT: return LM_MOD_ALT;
+    case KEY_RIGHTALT: return in->altgr ? LM_MOD_ALTGR : LM_MOD_ALT;
+    case KEY_LEFTMETA: case KEY_RIGHTMETA: return LM_MOD_SUPER;
+    }
+    return 0;
+}
+
 static uint32_t mods_depressed(const struct lm_input *in)
 {
     uint32_t m = 0;
     if (in->key_count[KEY_LEFTSHIFT] || in->key_count[KEY_RIGHTSHIFT]) m |= LM_MOD_SHIFT;
     if (in->key_count[KEY_LEFTCTRL] || in->key_count[KEY_RIGHTCTRL]) m |= LM_MOD_CTRL;
-    if (in->key_count[KEY_LEFTALT] || in->key_count[KEY_RIGHTALT]) m |= LM_MOD_ALT;
+    if (in->key_count[KEY_LEFTALT]) m |= LM_MOD_ALT;
+    if (in->key_count[KEY_RIGHTALT]) m |= in->altgr ? LM_MOD_ALTGR : LM_MOD_ALT;
     if (in->key_count[KEY_LEFTMETA] || in->key_count[KEY_RIGHTMETA]) m |= LM_MOD_SUPER;
     return m;
 }
@@ -132,14 +162,102 @@ static void emit_key(struct lm_input *in, uint32_t code, bool pressed, bool repe
     ev.u.key.pressed = pressed;
     ev.u.key.repeat = repeat;
     ev.u.key.mods_depressed = mods_depressed(in);
-    ev.u.key.mods_locked = in->locked;
+    ev.u.key.mods_latched = in->latched;
+    ev.u.key.mods_locked = in->locked | in->slocked;
+    ev.u.key.group = (uint32_t)in->slot;
     emit(in, &ev);
+}
+
+/* Modifier / layout state changed without a key event. */
+static void emit_mods(struct lm_input *in)
+{
+    struct lm_input_event ev = { .type = LM_INPUT_MODS };
+    ev.u.mods.depressed = mods_depressed(in);
+    ev.u.mods.latched = in->latched;
+    ev.u.mods.locked = in->locked | in->slocked;
+    ev.u.mods.group = (uint32_t)in->slot;
+    emit(in, &ev);
+}
+
+/* Feedback for a sticky-keys state change. */
+static void sticky_sound(struct lm_input *in, enum lm_sound s)
+{
+    in->last_sound = lm_sound_name(s);
+    in->sound_count++;
+    if (!in->headless && in->srv->config.sound)
+        lm_sound_play(s);
+}
+
+/* The feature itself was switched: the panel button must repaint even when no modifier bit changed. */
+static void sticky_switched(struct lm_input *in)
+{
+    sticky_sound(in, in->sticky ? LM_SOUND_STICKY_ON : LM_SOUND_STICKY_OFF);
+    if (in->srv->wm)
+        lm_wm_keyboard_state_changed(in->srv->wm);
+    lm_settings_changed(in->srv->settings);
+}
+
+static void sticky_clear(struct lm_input *in)
+{
+    in->latched = 0;
+    in->slocked = 0;
+    in->tap_ok = false;
+}
+
+/* A modifier key went down (first physical press). Returns true when the sticky state changed. */
+static bool sticky_modifier_press(struct lm_input *in, uint32_t bit)
+{
+    bool changed = false;
+    if (bit == LM_MOD_SHIFT) {
+        if (++in->shift_taps >= 5) {                /* Shift x5: toggle sticky keys (like XKB's StickyKeys) */
+            in->shift_taps = 0;
+            in->sticky = !in->sticky;
+            sticky_clear(in);
+            sticky_switched(in);
+            return true;
+        }
+    } else {
+        in->shift_taps = 0;
+    }
+    if (!in->sticky)
+        return false;
+    bool others_down = false;
+    for (uint32_t c = 1; c <= KEY_MAX && !others_down; c++)
+        others_down = in->key_count[c] > 0 && key_mod_bit(in, c) != bit;
+    /* (this key's own count is already 1; a second keyboard's copy of the same modifier does not matter) */
+    in->tap_ok = !others_down;
+    if (in->slocked & bit) {                        /* locked: a further tap unlocks */
+        in->slocked &= ~bit;
+        in->latched &= ~bit;
+        in->tap_ok = false;
+        changed = true;
+        sticky_sound(in, LM_SOUND_UNLOCK);
+    } else if (in->latched & bit) {                 /* latched: a second tap locks */
+        in->latched &= ~bit;
+        in->slocked |= bit;
+        in->tap_ok = false;
+        changed = true;
+        sticky_sound(in, LM_SOUND_LOCK);
+    }
+    return changed;
+}
+
+/* A modifier key was released (last physical copy). A clean tap latches it. */
+static void sticky_modifier_release(struct lm_input *in, uint32_t bit)
+{
+    if (in->sticky && in->tap_ok && !(in->slocked & bit)) {
+        in->latched |= bit;
+        sticky_sound(in, LM_SOUND_LATCH);
+    }
+    in->tap_ok = false;
 }
 
 static void handle_key(struct lm_input *in, uint32_t code, bool pressed, uint32_t time_ms)
 {
     if (code > KEY_MAX)
         return;
+    uint32_t bit = key_mod_bit(in, code);
+    bool sticky_changed = false;
     if (pressed) {
         if (in->key_count[code]++ > 0)
             return; /* already down on another keyboard */
@@ -147,13 +265,27 @@ static void handle_key(struct lm_input *in, uint32_t code, bool pressed, uint32_
             in->locked ^= LM_MOD_CAPS;
         else if (code == KEY_NUMLOCK)
             in->locked ^= LM_MOD_NUM;
+        if (bit)
+            sticky_changed = sticky_modifier_press(in, bit);
+        else
+            in->shift_taps = 0;
+        if (!bit && in->sticky)
+            in->tap_ok = false;                     /* a modifier that is still down is now part of a chord */
     } else {
         if (in->key_count[code] == 0)
             return;
         if (--in->key_count[code] > 0)
             return;
+        if (bit)
+            sticky_modifier_release(in, bit);
     }
     emit_key(in, code, pressed, false, time_ms);
+    if (pressed && !bit && in->latched) {           /* the latch is used up by this key press */
+        in->latched = 0;
+        sticky_changed = true;
+    }
+    if (sticky_changed)
+        emit_mods(in);
     if (pressed) {
         if (!is_modifier_key(code) && in->srv->config.repeat_rate > 0) {
             in->repeat_code = (int32_t)code;
@@ -589,6 +721,14 @@ struct lm_input *lm_input_create(struct lm_server *srv)
     in->repeat_code = -1;
     lm_list_init(&in->devices);
     in->headless = srv->config.backend && !strcmp(srv->config.backend, "headless");
+    in->nlayouts = srv->config.kbd_nlayouts > 0 ? srv->config.kbd_nlayouts : 1;
+    for (int i = 0; i < in->nlayouts; i++)
+        in->layouts[i] = srv->config.kbd_nlayouts > 0 ? srv->config.kbd_layouts[i] : 0;
+    in->altgr = lm_layout_needs_altgr(in->layouts, in->nlayouts);
+    for (int s = 0; s < in->nlayouts && srv->config.kbd_active >= 0; s++)
+        if (in->layouts[s] == srv->config.kbd_active)
+            in->slot = s;
+    in->sticky = srv->config.sticky_keys;
     in->repeat_timer = lm_loop_add_timer(srv->loop, repeat_timer_fn, in);
     if (!in->headless) {
         scan_devices(in);
@@ -643,6 +783,10 @@ void lm_input_set_active(struct lm_input *in, bool active)
                 emit_key(in, c, false, false, 0);
             }
         }
+        if (in->latched || in->slocked) {
+            sticky_clear(in);
+            emit_mods(in);
+        }
         close_all_devices(in);
     } else if (!in->headless) {
         scan_devices(in);
@@ -658,6 +802,71 @@ void lm_input_inject(struct lm_input *in, const struct lm_input_event *ev)
     }
     emit(in, &e);
 }
+
+int lm_input_layout_count(const struct lm_input *in) { return in->nlayouts; }
+int lm_input_layout(const struct lm_input *in) { return in->slot; }
+const char *lm_input_layout_id(const struct lm_input *in, int slot)
+{
+    return lm_layout_id(slot >= 0 && slot < in->nlayouts ? in->layouts[slot] : 0);
+}
+const char *lm_input_layout_name(const struct lm_input *in, int slot)
+{
+    return lm_layout_name(slot >= 0 && slot < in->nlayouts ? in->layouts[slot] : 0);
+}
+
+void lm_input_set_layout(struct lm_input *in, int slot)
+{
+    if (slot < 0 || slot >= in->nlayouts || slot == in->slot)
+        return;
+    in->slot = slot;
+    emit_mods(in);
+    lm_settings_changed(in->srv->settings);
+}
+
+void lm_input_set_layouts(struct lm_input *in, const int *layouts, int n, int active)
+{
+    if (n < 1 || n > LM_KBD_MAX_LAYOUTS)
+        return;
+    int old = in->nlayouts > 0 ? in->layouts[in->slot] : 0;
+    if (active < 0)
+        active = old;
+    memcpy(in->layouts, layouts, sizeof(int) * (size_t)n);
+    in->nlayouts = n;
+    in->slot = 0;
+    for (int s = 0; s < n; s++)
+        if (layouts[s] == active)
+            in->slot = s;
+    in->altgr = lm_layout_needs_altgr(in->layouts, n);
+    sticky_clear(in);
+    emit_mods(in);
+    if (in->srv->wm)
+        lm_wm_keyboard_state_changed(in->srv->wm);
+    lm_settings_changed(in->srv->settings);
+}
+
+void lm_input_cycle_layout(struct lm_input *in, int delta)
+{
+    if (in->nlayouts > 1)
+        lm_input_set_layout(in, ((in->slot + delta) % in->nlayouts + in->nlayouts) % in->nlayouts);
+}
+
+bool lm_input_sticky(const struct lm_input *in) { return in->sticky; }
+uint32_t lm_input_latched(const struct lm_input *in) { return in->latched; }
+uint32_t lm_input_sticky_locked(const struct lm_input *in) { return in->slocked; }
+
+void lm_input_set_sticky(struct lm_input *in, bool on)
+{
+    if (in->sticky == on)
+        return;
+    in->sticky = on;
+    in->shift_taps = 0;
+    sticky_clear(in);
+    sticky_switched(in);
+    emit_mods(in);
+}
+
+const char *lm_input_last_sound(const struct lm_input *in) { return in->last_sound ? in->last_sound : "none"; }
+unsigned lm_input_sound_count(const struct lm_input *in) { return in->sound_count; }
 
 int lm_input_count_keyboards(const struct lm_input *in) { return in->n_keyboards; }
 int lm_input_count_pointers(const struct lm_input *in) { return in->n_pointers; }

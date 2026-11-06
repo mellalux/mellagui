@@ -24,6 +24,8 @@ BIN = os.environ.get('LUMEN_BIN', os.path.join(ROOT, 'build', 'lumen'))
 KEY_ESC, KEY_1, KEY_2, KEY_Q, KEY_A, KEY_M, KEY_ENTER, KEY_F, KEY_TAB = 1, 2, 3, 16, 30, 50, 28, 33, 15
 KEY_LEFTMETA, KEY_LEFTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT = 125, 42, 29, 56
 KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN = 103, 105, 106, 108
+KEY_SPACE, KEY_RIGHTALT = 57, 100
+KEY_G = 34
 BTN_LEFT, BTN_RIGHT = 272, 273
 
 proc = None
@@ -940,6 +942,200 @@ class TestClipboard(Base):
         self.assertIsNotNone(sel, 'no selection event for the focused client')
 
 
+class TestGadget(Base):
+    """The desktop gadget: clipboard history read by the compositor itself."""
+    def rect(self):
+        """The gadget card (x, y, w, h) or None when hidden."""
+        ctl.cmd('gadget-rect')
+        p = ctl.last.split()
+        return None if p[1] == 'hidden' else tuple(int(v) for v in p[1:5])
+
+    def is_card(self, rgb):
+        """The card is slightly translucent: its dark blue shows the wallpaper a little."""
+        return all(abs(a - b) <= 10 for a, b in zip(rgb, (0x16, 0x1a, 0x24)))
+
+    def drag(self, x, y, dx, dy):
+        ctl.abs(x, y)
+        ctl.button(272, True)
+        ctl.cmd('motion %d %d' % (dx, dy))
+        ctl.button(272, False)
+
+    def reset_gadget(self):
+        x, y, w, h = self.rect()
+        ctl.click(x + w // 2, y + 10)
+        ctl.click(x + w // 2, y + 10)       # double click on the title bar: default size and place
+        ctl.abs(5, 300)
+
+    def setUp(self):
+        super().setUp()
+        ctl.cmd('gadget 1')
+        self.reset_gadget()
+        ctl.cmd('clip clear')
+        self.addCleanup(lambda: ctl.cmd('gadget 1'))
+        self.c = self.client()
+        self.seat = self.c.wl.bind('wl_seat', 5)
+        self.mgr = self.c.wl.bind('wl_data_device_manager', 3)
+        self.dev = self.c.wl.new_id('wl_data_device')
+        self.c.wl.request(self.mgr, 'get_data_device', self.dev, self.seat)
+        self.win = Window(self.c, 200, 150, title='copier')
+        self.c.wl.roundtrip()
+
+    def copy(self, text, mime='text/plain;charset=utf-8', answer=True):
+        c = self.c
+        src = c.wl.new_id('wl_data_source')
+        c.wl.request(self.mgr, 'create_data_source', src)
+        c.wl.request(src, 'offer', mime)
+        c.wl.request(self.dev, 'set_selection', src, self.win.configures[-1][3])
+        c.wl.roundtrip()
+        if not answer:
+            return src
+        ev = c.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 2.0)
+        self.assertIsNotNone(ev, 'the compositor did not ask for the clipboard text')
+        os.write(ev.fds[0], text.encode())
+        os.close(ev.fds[0])
+        return src
+
+    def clips(self):
+        return [l.split(' ', 2)[2] for l in ctl.cmd('clip')]
+
+    def wait_clips(self, n):
+        for _ in range(100):
+            got = self.clips()
+            if len(got) == n:
+                return got
+            time.sleep(0.02)
+        return self.clips()
+
+    def test_history_newest_first_without_duplicates(self):
+        self.copy('first')
+        self.assertEqual(self.wait_clips(1), ['first'])
+        self.copy('second')
+        self.assertEqual(self.wait_clips(2), ['second', 'first'])
+        self.copy('first')                               # copied again: moves to the top
+        for _ in range(100):
+            if self.clips()[:1] == ['first']:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.clips(), ['first', 'second'])
+
+    def test_history_is_limited_and_multiline_text_is_kept(self):
+        for i in range(7):
+            self.copy('item %d' % i)
+            self.wait_clips(min(i + 1, 5))
+        got = self.wait_clips(5)
+        self.assertEqual(got[0], 'item 6')
+        self.assertEqual(got[-1], 'item 2')
+        self.copy('two\nlines')
+        for _ in range(100):
+            if self.clips()[:1] == ['two\\nlines']:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.clips()[0], 'two\\nlines')
+
+    def test_non_text_selection_is_ignored(self):
+        self.copy('', mime='image/png', answer=False)
+        time.sleep(0.2)
+        self.assertEqual(self.clips(), [])
+
+    def test_silent_source_times_out(self):
+        self.copy('', answer=False)                      # never answers: no entry, no hang
+        time.sleep(1.3)
+        self.assertEqual(self.clips(), [])
+        self.copy('later')
+        self.assertEqual(self.wait_clips(1), ['later'])
+
+    def test_gadget_is_painted_and_toggles(self):
+        ctl.sync()
+        x, y, w, h = self.rect()
+        probe = (x + w // 2, y + h - 20)                 # an empty spot of the card body
+        shown = ctl.dump(os.path.join(tmp, 'gadget1.ppm')).px(*probe)
+        self.assertTrue(self.is_card(shown), shown)
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_G)
+        ctl.key(KEY_LEFTMETA, False)
+        self.assertTrue(ctl.last.startswith('ok'))
+        ctl.cmd('clip')
+        self.assertTrue(ctl.last.endswith('gadget=0'))
+        ctl.sync()
+        hidden = ctl.dump(os.path.join(tmp, 'gadget0.ppm')).px(*probe)
+        self.assertNotEqual(hidden, shown)
+        self.assertIsNone(self.rect())
+
+    def test_gadget_shows_text(self):
+        self.copy('hello gadget')
+        self.wait_clips(1)
+        ctl.sync()
+        full = ctl.dump(os.path.join(tmp, 'gfull.ppm'))
+        # the first entry slot (below the 32 px title bar) now contains bright text pixels
+        x, y, w, h = self.rect()
+        box = (x, y + 32, x + w, y + 32 + 44)
+        self.assertGreater(full.count((0xe6, 0xe9, 0xef), *box), 20)
+
+    def test_default_place_is_top_right_below_the_panel(self):
+        x, y, w, h = self.rect()
+        self.assertEqual((x + w, y), (1024 - 12, 28 + 12))
+        self.assertEqual((w, h), (300, 262))
+
+    def test_title_bar_drags_the_gadget(self):
+        x, y, w, h = self.rect()
+        self.drag(x + 60, y + 10, -200, 150)
+        self.assertEqual(self.rect(), (x - 200, y + 150, w, h))
+        ctl.sync()
+        full = ctl.dump(os.path.join(tmp, 'gmoved.ppm'))
+        nx, ny = x - 200, y + 150
+        self.assertTrue(self.is_card(full.px(nx + w // 2, ny + h - 20)))            # card is at the new place
+        self.assertFalse(self.is_card(full.px(x + w // 2, y + h - 20)))             # and gone from the old one
+
+    def test_drag_keeps_the_gadget_on_the_output_below_the_panel(self):
+        x, y, w, h = self.rect()
+        self.drag(x + 60, y + 10, -2000, -2000)
+        self.assertEqual(self.rect(), (0, 28, w, h))
+        self.drag(60, 38, 3000, 3000)
+        self.assertEqual(self.rect(), (1024 - w, 600 - h, w, h))
+
+    def test_edges_resize_the_gadget(self):
+        x, y, w, h = self.rect()
+        self.drag(x + w - 2, y + h - 2, 100, 150)                # bottom right corner
+        nx, ny, nw, nh = self.rect()
+        self.assertEqual((nx, ny), (x - 0, y))
+        self.assertEqual((nw, nh), (min(w + 100, 640, 1024 - x), min(h + 150, 560, 600 - y)))
+        x, y, w, h = self.rect()
+        self.drag(x + 2, y + h // 2, -50, 0)                     # left edge keeps the right edge in place
+        self.assertEqual(self.rect(), (x - 50, y, w + 50, h))
+
+    def test_resize_has_limits(self):
+        x, y, w, h = self.rect()
+        self.drag(x + w - 2, y + h - 2, -3000, -3000)
+        self.assertEqual(self.rect(), (x, y, 200, 86))           # minimum: title + one entry
+        x, y, w, h = self.rect()
+        self.drag(x + 2, y + h - 2, -3000, 3000)                 # grows left/down, bounded by the output and 640 wide
+        nx, ny, nw, nh = self.rect()
+        self.assertEqual((nw, nx + nw), (640, x + w))
+        self.assertLessEqual(ny + nh, 600)
+
+    def test_small_gadget_shows_fewer_entries(self):
+        for i in range(3):
+            self.copy('entry %d' % i)
+            self.wait_clips(i + 1)
+        x, y, w, h = self.rect()
+        self.drag(x + w - 2, y + h - 2, 0, -(h - 86))            # one slot left
+        ctl.sync()
+        _, _, _, nh = self.rect()
+        self.assertEqual(nh, 86)
+        full = ctl.dump(os.path.join(tmp, 'gsmall.ppm'))
+        bright = (0xe6, 0xe9, 0xef)
+        self.assertGreater(full.count(bright, x, y + 32, x + w, y + nh), 20)      # the newest entry is shown
+        self.assertEqual(full.count(bright, x, y + nh + 20, x + w, y + nh + 80), 0)
+
+    def test_double_click_on_the_title_resets(self):
+        x, y, w, h = self.rect()
+        self.drag(x + 60, y + 10, -300, 100)
+        self.drag(self.rect()[0] + self.rect()[2] - 2, self.rect()[1] + self.rect()[3] - 2, -50, 20)
+        self.assertNotEqual(self.rect(), (x, y, w, h))
+        self.reset_gadget()
+        self.assertEqual(self.rect(), (x, y, w, h))
+
+
 KEYCODES = {c: k for k, c in enumerate('1234567890', 2)}
 KEYCODES.update({c: k for k, c in enumerate('qwertyuiop', 16)})
 KEYCODES.update({c: k for k, c in enumerate('asdfghjkl', 30)})
@@ -952,6 +1148,212 @@ def type_text(text):
         ctl.tap(KEYCODES[ch])
         time.sleep(0.01)
     ctl.tap(KEY_ENTER)
+
+
+class TestKeyboard(Base):
+    """Keyboard layouts (XKB groups) and sticky keys."""
+    LAYOUT_BTN = (738, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (802, 14)
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(lambda: (ctl.cmd('sticky 0'), ctl.cmd('layout 0')))
+        self.c = self.client()
+        self.seat = self.c.wl.bind('wl_seat', 5)
+        self.kb = self.c.wl.new_id('wl_keyboard')
+        self.c.wl.request(self.seat, 'get_keyboard', self.kb)
+        self.w = Window(self.c, 300, 200)
+        self.c.wl.roundtrip()
+        self.c.wl.events(0.1)
+        self.c.wl.queue.clear()
+
+    def mods(self, **want):
+        """Wait for a modifiers event whose (dep, lat, lock, group) match the given fields."""
+        idx = dict(dep=1, lat=2, lock=3, group=4)
+
+        def pred(e):
+            return e.obj == self.kb and e.name == 'modifiers' and all(e.args[idx[k]] == v for k, v in want.items())
+        return self.c.wl.wait_for(pred, 2.0)
+
+    def test_keymap_tables_selftest(self):
+        path = os.path.join(ROOT, 'build', 'keymap-test')
+        if not os.path.exists(path):
+            self.skipTest('keymap-test not built')
+        r = subprocess.run([path], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_keymap_has_all_layouts(self):
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        kb = c.wl.new_id('wl_keyboard')
+        c.wl.request(seat, 'get_keyboard', kb)
+        Window(c, 200, 100)
+        c.wl.roundtrip()
+        ev = c.wl.wait_for(lambda e: e.obj == kb and e.name == 'keymap', 2.0)
+        self.assertIsNotNone(ev)
+        data = os.pread(ev.fds[0], ev.args[1], 0).decode()
+        for n, name in enumerate(['English (US)', 'Estonian', 'German', 'Finnish']):
+            self.assertIn('name[Group%d] = "%s";' % (n + 1, name), data)
+        self.assertIn('ISO_Level3_Shift', data)          # AltGr exists with more than one layout
+        self.assertIn('U00F5', data)                     # o-tilde (Estonian)
+        self.assertIn('U0161', data)                     # s-caron
+        self.assertEqual(data.count('{'), data.count('}'))
+
+    def test_layout_switch_reaches_client(self):
+        self.assertEqual(ctl.kbd()['layout'], 'us')
+        ctl.cmd('layout next')
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+        self.assertIsNotNone(self.mods(group=1), 'client was not told about the new group')
+        ctl.cmd('layout prev')
+        self.assertIsNotNone(self.mods(group=0))
+        ctl.cmd('layout prev')                           # wraps around
+        self.assertEqual(ctl.kbd()['layout'], 'fi')
+        self.assertIsNotNone(self.mods(group=3))
+
+    def test_super_space_switches_layout_and_is_not_forwarded(self):
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_SPACE)
+        ctl.key(KEY_LEFTMETA, False)
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(KEY_SPACE)                               # Super+Shift+Space = previous
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.key(KEY_LEFTMETA, False)
+        self.assertEqual(ctl.kbd()['layout'], 'us')
+        ctl.sync()
+        self.c.wl.roundtrip()
+        self.assertEqual([e for e in self.c.wl.queue if e.obj == self.kb and e.name == 'key'
+                          and e.args[2] == KEY_SPACE], [])
+
+    def test_panel_indicator_cycles_layouts(self):
+        ctl.click(*self.LAYOUT_BTN)
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+        ctl.click(*self.LAYOUT_BTN)
+        self.assertEqual(ctl.kbd()['layout'], 'de')
+        ctl.click(*self.LAYOUT_BTN, code=273)            # right click: previous
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+        ctl.abs(900, 500)
+
+    def test_altgr_is_right_alt_with_layouts(self):
+        ctl.key(KEY_RIGHTALT, True)
+        self.assertIsNotNone(self.mods(dep=1 << 7), 'right Alt should be AltGr (Mod5)')
+        ctl.key(KEY_RIGHTALT, False)
+        self.assertIsNotNone(self.mods(dep=0))
+
+    def test_sticky_latch_is_used_once(self):
+        ctl.cmd('sticky 1')
+        ctl.tap(KEY_LEFTSHIFT)
+        self.assertEqual(ctl.kbd()['latched'], 1)
+        ctl.tap(KEY_A)
+        self.assertEqual(ctl.kbd()['latched'], 0)
+        ctl.sync()
+        self.c.wl.roundtrip()
+        # (kind, latched mask or key state): the latch must still be visible while the key is pressed, and be
+        # cleared by a modifiers event right after it
+        seq = []
+        for e in self.c.wl.queue:
+            if e.obj == self.kb and e.name == 'modifiers':
+                seq.append(('mods', e.args[2]))
+            elif e.obj == self.kb and e.name == 'key' and e.args[2] == KEY_A:
+                seq.append(('key', e.args[3]))
+        down = seq.index(('key', 1))
+        self.assertIn(('mods', 1), seq[:down], 'latched Shift not sent before the key press')
+        self.assertEqual(seq[down - 1], ('mods', 1))
+        self.assertEqual(seq[down + 1], ('mods', 0), 'latch was not released right after the key press')
+
+    def test_sticky_beeps(self):
+        s0 = ctl.kbd()['sounds']
+        ctl.cmd('sticky 1')
+        self.assertEqual((ctl.kbd()['sound'], ctl.kbd()['sounds']), ('sticky-on', s0 + 1))
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual(ctl.kbd()['sound'], 'latch')
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual(ctl.kbd()['sound'], 'lock')
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual(ctl.kbd()['sound'], 'unlock')
+        n = ctl.kbd()['sounds']
+        ctl.tap(KEY_A)                                   # a plain key makes no sound
+        self.assertEqual(ctl.kbd()['sounds'], n)
+        ctl.cmd('sticky 0')
+        self.assertEqual(ctl.kbd()['sound'], 'sticky-off')
+
+    def test_sticky_double_tap_locks_third_unlocks(self):
+        ctl.cmd('sticky 1')
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual((ctl.kbd()['latched'], ctl.kbd()['slocked']), (4, 0))
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual((ctl.kbd()['latched'], ctl.kbd()['slocked']), (0, 4))
+        self.assertIsNotNone(self.mods(lock=4))
+        ctl.tap(KEY_A)                                   # a locked modifier survives key presses
+        self.assertEqual(ctl.kbd()['slocked'], 4)
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual((ctl.kbd()['latched'], ctl.kbd()['slocked']), (0, 0))
+        self.assertIsNotNone(self.mods(lock=0))
+
+    def test_sticky_chord_does_not_latch(self):
+        ctl.cmd('sticky 1')
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(KEY_A)
+        ctl.key(KEY_LEFTSHIFT, False)
+        self.assertEqual(ctl.kbd()['latched'], 0)
+
+    def test_sticky_off_does_not_latch(self):
+        ctl.tap(KEY_LEFTSHIFT)
+        self.assertEqual(ctl.kbd()['latched'], 0)
+
+    def test_sticky_modifiers_combine(self):
+        ctl.cmd('sticky 1')
+        ctl.tap(KEY_LEFTCTRL)
+        ctl.tap(KEY_LEFTSHIFT)
+        self.assertEqual(ctl.kbd()['latched'], 5)
+        ctl.tap(KEY_A)
+        self.assertEqual(ctl.kbd()['latched'], 0)
+
+    def test_five_shifts_toggle_sticky(self):
+        self.assertEqual(ctl.kbd()['sticky'], 0)
+        for _ in range(5):
+            ctl.tap(KEY_LEFTSHIFT)
+        self.assertEqual(ctl.kbd()['sticky'], 1)
+        self.assertEqual(ctl.kbd()['latched'], 0)
+        for _ in range(5):
+            ctl.tap(KEY_LEFTSHIFT)
+        self.assertEqual(ctl.kbd()['sticky'], 0)
+        for _ in range(3):                               # another key in between restarts the count
+            ctl.tap(KEY_LEFTSHIFT)
+        ctl.tap(KEY_A)
+        for _ in range(3):
+            ctl.tap(KEY_LEFTSHIFT)
+        self.assertEqual(ctl.kbd()['sticky'], 0)
+
+    def test_latched_super_works_for_shortcuts(self):
+        ctl.cmd('sticky 1')
+        ctl.tap(KEY_LEFTMETA)
+        ctl.tap(KEY_SPACE)                               # Super (latched) + Space
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+        self.assertEqual(ctl.kbd()['latched'], 0)
+
+    def test_panel_sticky_button_toggles(self):
+        ctl.click(*self.STICKY_BTN)
+        self.assertEqual(ctl.kbd()['sticky'], 1)
+        ctl.click(*self.STICKY_BTN)
+        self.assertEqual(ctl.kbd()['sticky'], 0)
+        ctl.abs(900, 500)
+
+    def test_panel_shows_layout_and_sticky(self):
+        ctl.abs(900, 500)
+        ctl.sync()
+        before = ctl.dump(os.path.join(tmp, 'kbd0.ppm'))
+        ctl.cmd('layout next')
+        ctl.cmd('sticky 1')
+        ctl.sync()
+        after = ctl.dump(os.path.join(tmp, 'kbd1.ppm'))
+        sticky_before = [before.px(x, 14) for x in range(765, 840, 3)]
+        sticky_after = [after.px(x, 14) for x in range(765, 840, 3)]
+        self.assertNotEqual(sticky_before, sticky_after, 'sticky button looks the same when enabled')
+        layout_before = [before.px(x, 14) for x in range(722, 754, 2)]
+        layout_after = [after.px(x, 14) for x in range(722, 754, 2)]
+        self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
 def wait_for_window(app_id, timeout=5.0):
@@ -1026,6 +1428,65 @@ class TestClients(Base):
         ctl.tap(KEY_Q)
         ctl.key(KEY_LEFTMETA, False)
         self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_web_selftest(self):
+        path = os.path.join(ROOT, 'build', 'lumen-web')
+        if not os.path.exists(path):
+            self.skipTest('lumen-web not built')
+        r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_web_links_and_history(self):
+        path = os.path.join(ROOT, 'build', 'lumen-web')
+        if not os.path.exists(path):
+            self.skipTest('lumen-web not built')
+        site = os.path.join(tmp, 'site')
+        os.makedirs(site, exist_ok=True)
+        with open(os.path.join(site, 'a.html'), 'w') as f:
+            f.write('<html><head><title>A page</title></head><body><p><a href="b.html">go</a></p></body></html>')
+        with open(os.path.join(site, 'b.html'), 'w') as f:
+            f.write('<html><head><title>B page</title></head><body><h1>Second</h1></body></html>')
+        p = subprocess.Popen([path, os.path.join(site, 'a.html')], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('lumen.web')
+        self.assertIsNotNone(win, 'browser window did not appear')
+        time.sleep(0.3)
+
+        def title():
+            return wait_for_window('lumen.web')['title']
+
+        self.assertEqual(title(), 'A page - Lumen Web')
+        # layout: 34px toolbar, 16px padding, first line below a 12px paragraph gap; "go" is 16px wide
+        ctl.click(win['x'] + 24, win['y'] + 34 + 32)
+        for _ in range(40):
+            if title() == 'B page - Lumen Web':
+                break
+            time.sleep(0.05)
+        self.assertEqual(title(), 'B page - Lumen Web')
+        ctl.click(win['x'] + 19, win['y'] + 17)         # back button
+        for _ in range(40):
+            if title() == 'A page - Lumen Web':
+                break
+            time.sleep(0.05)
+        self.assertEqual(title(), 'A page - Lumen Web')
+        ctl.abs(900, 500)
+
+    def test_app_menu_starts_browser(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'lumen-web')):
+            self.skipTest('lumen-web not built')
+        ctl.click(40, 14)
+        ctl.click(60, 95)                       # third entry: Browser
+        win = wait_for_window('lumen.web')
+        self.assertIsNotNone(win, 'menu entry did not start the browser')
+        ctl.abs(900, 500)
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_Q)
+        ctl.key(KEY_LEFTMETA, False)
+        for _ in range(100):
+            if not ctl.windows()['windows']:
+                break
+            time.sleep(0.05)
+        self.assertFalse(ctl.windows()['windows'])
 
     LETTERS = dict(zip('qwertyuiop', range(16, 26)), **dict(zip('asdfghjkl', range(30, 39))),
                    **dict(zip('zxcvbnm', range(44, 51))))
@@ -1131,6 +1592,380 @@ class TestClients(Base):
         os.chmod(script, 0o755)
         p = self.spawn('lumen-term', SHELL=script)
         self.assertEqual(p.wait(timeout=5), 0)
+
+
+DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',
+                    'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1'}
+
+
+def settings():
+    """Current settings from the control socket as a dict (the `file` entry is "-" when nothing is saved)."""
+    ctl.cmd('settings')
+    return dict(kv.split('=', 1) for kv in ctl.last.split()[1:])
+
+
+def settings_restore():
+    for k in ('layouts', 'layout', 'sticky', 'repeat-delay', 'repeat-rate', 'pointer-speed', 'natural-scroll',
+              'sound', 'gadget'):
+        ctl.cmd('settings %s %s' % (k, DEFAULT_SETTINGS[k]))
+
+
+class TestSettings(Base):
+    """lumen_settings_v1, the settings file and the lumen-settings panel."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(settings_restore)
+
+    def bound(self):
+        """A raw client bound to lumen_settings_v1 with the first value burst already read."""
+        c = self.client()
+        obj = c.wl.bind('lumen_settings_v1')
+        c.wl.roundtrip()
+        return c, obj
+
+    @staticmethod
+    def burst(c, obj, timeout=2.0):
+        """Wait for one value burst (up to `done`); returns {key: value}."""
+        vals = {}
+        end = time.time() + timeout
+        while time.time() < end:
+            c.wl.pump(0.05)
+            for e in list(c.wl.queue):
+                if e.obj != obj:
+                    continue
+                c.wl.queue.remove(e)
+                if e.name == 'value':
+                    vals[e.args[0]] = e.args[1]
+                elif e.name == 'done':
+                    return vals
+        return None
+
+    def test_control_socket_reads_and_changes(self):
+        s = settings()
+        for k, v in DEFAULT_SETTINGS.items():
+            self.assertEqual(s[k], v, k)
+        ctl.cmd('settings repeat-rate 40')
+        self.assertEqual(settings()['repeat-rate'], '40')
+        ctl.cmd('settings pointer-speed 150')
+        self.assertEqual(settings()['pointer-speed'], '150')
+
+    def test_bad_values_are_refused(self):
+        for k, v in [('repeat-rate', 'fast'), ('repeat-rate', '1000'), ('repeat-delay', '5'), ('sticky', '2'),
+                     ('layouts', 'us,xx'), ('layout', 'xx'), ('pointer-speed', '0'), ('nonsense', '1'),
+                     ('file', '/etc/passwd')]:
+            with self.assertRaises(RuntimeError, msg='%s=%s' % (k, v)):
+                ctl.cmd('settings %s %s' % (k, v))
+        self.assertEqual(settings()['repeat-rate'], '25')
+        # the active layout has to be one of the enabled ones
+        ctl.cmd('settings layouts us,ee')
+        with self.assertRaises(RuntimeError):
+            ctl.cmd('settings layout de')
+        self.assertEqual(settings()['layout'], 'us')
+
+    def test_protocol_burst_on_bind_and_after_set(self):
+        c = self.client()
+        obj = c.wl.bind('lumen_settings_v1')
+        first = self.burst(c, obj)
+        self.assertIsNotNone(first, 'no value burst after binding')
+        self.assertEqual(first['layouts'], 'us,ee,de,fi')
+        self.assertIn('file', first)
+        c.wl.request(obj, 'set', 'repeat-delay', '700')
+        got = self.burst(c, obj)
+        self.assertEqual(got['repeat-delay'], '700')
+        self.assertEqual(settings()['repeat-delay'], '700')
+        # a refused change answers with the unchanged value
+        c.wl.request(obj, 'set', 'repeat-delay', 'soon')
+        self.assertEqual(self.burst(c, obj)['repeat-delay'], '700')
+
+    def test_changes_from_elsewhere_are_announced(self):
+        c, obj = self.bound()
+        self.burst(c, obj, 0.2)
+        c.wl.queue.clear()
+        ctl.cmd('sticky 1')
+        self.assertEqual(self.burst(c, obj)['sticky'], '1')
+        ctl.cmd('layout next')
+        self.assertEqual(self.burst(c, obj)['layout'], 'ee')
+        ctl.cmd('gadget 0')
+        self.assertEqual(self.burst(c, obj)['gadget'], '0')
+        ctl.cmd('gadget 1')
+
+    def test_settings_reach_every_client(self):
+        a, oa = self.bound()
+        b, ob = self.bound()
+        self.burst(a, oa, 0.2)
+        self.burst(b, ob, 0.2)
+        a.wl.request(oa, 'set', 'sound', '0')
+        self.assertEqual(self.burst(b, ob)['sound'], '0')
+
+    def test_new_layout_set_sends_a_new_keymap_and_group(self):
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        kb = c.wl.new_id('wl_keyboard')
+        c.wl.request(seat, 'get_keyboard', kb)
+        Window(c, 200, 100)
+        c.wl.roundtrip()
+        c.wl.events(0.1)
+        c.wl.queue.clear()
+        ctl.cmd('settings layouts de,ee')
+        ev = c.wl.wait_for(lambda e: e.obj == kb and e.name == 'keymap', 2.0)
+        self.assertIsNotNone(ev, 'clients are not sent the new keymap')
+        data = os.pread(ev.fds[0], ev.args[1], 0).decode()
+        self.assertIn('name[Group1] = "German";', data)
+        self.assertIn('name[Group2] = "Estonian";', data)
+        self.assertNotIn('Group3', data)
+        self.assertNotIn('English (US)', data)
+        self.assertIsNotNone(c.wl.wait_for(lambda e: e.obj == kb and e.name == 'modifiers' and e.args[4] == 0, 2.0))
+        self.assertEqual(ctl.kbd()['layout'], 'de')
+        ctl.cmd('settings layout ee')
+        self.assertIsNotNone(c.wl.wait_for(lambda e: e.obj == kb and e.name == 'modifiers' and e.args[4] == 1, 2.0))
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+
+    def test_removing_the_active_layout_falls_back_to_the_first(self):
+        ctl.cmd('settings layout ee')
+        ctl.cmd('settings layouts us,de')
+        self.assertEqual(ctl.kbd()['layout'], 'us')
+        ctl.cmd('layout next')
+        self.assertEqual(ctl.kbd()['layout'], 'de')
+        ctl.cmd('settings layouts de,us,fi')               # reorder: the active layout stays the active one
+        self.assertEqual(ctl.kbd()['layout'], 'de')
+        self.assertEqual(ctl.kbd()['slot'], 0)
+
+    def test_repeat_info_reaches_keyboards(self):
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        kb = c.wl.new_id('wl_keyboard')
+        c.wl.request(seat, 'get_keyboard', kb)
+        c.wl.roundtrip()
+        c.wl.events(0.1)
+        c.wl.queue.clear()
+        ctl.cmd('settings repeat-rate 11')
+        ctl.cmd('settings repeat-delay 650')
+        ev = c.wl.wait_for(lambda e: e.obj == kb and e.name == 'repeat_info' and e.args == [11, 650], 2.0)
+        self.assertIsNotNone(ev, 'repeat_info with the new values was not sent')
+
+    def test_gadget_setting_toggles_the_gadget(self):
+        ctl.cmd('settings gadget 0')
+        ctl.cmd('clip')
+        self.assertIn('gadget=0', ctl.last)
+        ctl.cmd('settings gadget 1')
+        ctl.cmd('clip')
+        self.assertIn('gadget=1', ctl.last)
+
+    # ---- the file ---------------------------------------------------------------------------------------------------
+
+    def private_compositor(self, name, *args):
+        sock = os.path.join(tmp, name + '.ctl')
+        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77')
+        p = subprocess.Popen([BIN, '--backend', 'headless', '--size', '800x500', '--socket', name, '--control', sock,
+                              '--terminal', 'true'] + list(args), env=env, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        for _ in range(100):
+            if os.path.exists(sock) and os.path.exists(os.path.join(tmp, name)):
+                break
+            if p.poll() is not None:
+                self.fail('compositor exited early: %s' % p.stdout.read().decode())
+            time.sleep(0.05)
+        c = Ctl(sock)
+
+        def stop():
+            try:
+                c.cmd('quit')
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self.addCleanup(stop)
+        return p, c, stop
+
+    def test_settings_survive_a_restart(self):
+        path = os.path.join(tmp, 'persist', 'deeper', 'settings.conf')       # directories are created
+        p, c, stop = self.private_compositor('lumen-set1', '--settings', path)
+        c.cmd('settings layouts ee,fi')
+        c.cmd('settings layout fi')
+        c.cmd('settings repeat-rate 33')
+        c.cmd('settings pointer-speed 175')
+        c.cmd('settings natural-scroll 1')
+        c.cmd('settings gadget 0')
+        stop()                                                              # quitting flushes the pending save
+        text = open(path).read()
+        for line in ('layouts=ee,fi', 'layout=fi', 'repeat-rate=33', 'pointer-speed=175', 'natural-scroll=1',
+                     'gadget=0'):
+            self.assertIn(line, text.split('\n'))
+        self.assertEqual(p.returncode, 0)
+        p2, c2, stop2 = self.private_compositor('lumen-set2', '--settings', path)
+        c2.cmd('settings')
+        s = dict(kv.split('=', 1) for kv in c2.last.split()[1:])
+        self.assertEqual((s['layouts'], s['layout'], s['repeat-rate'], s['pointer-speed'], s['natural-scroll'],
+                          s['gadget']), ('ee,fi', 'fi', '33', '175', '1', '0'))
+        self.assertEqual(s['file'], path)
+        c2.cmd('kbd')
+        self.assertIn('layout=fi slot=1', c2.last)
+
+    def test_command_line_beats_the_file_and_junk_is_ignored(self):
+        path = os.path.join(tmp, 'cli.conf')
+        with open(path, 'w') as f:
+            f.write('# comment\nlayouts = de, ee\nrepeat-rate=oops\nunknown=1\nno equals sign\nsound=0\n')
+        p, c, stop = self.private_compositor('lumen-set3', '--settings', path, '--layouts', 'fi,us')
+        c.cmd('settings')
+        s = dict(kv.split('=', 1) for kv in c.last.split()[1:])
+        self.assertEqual(s['layouts'], 'fi,us')              # --layouts wins
+        self.assertEqual(s['sound'], '0')                    # from the file
+        self.assertEqual(s['repeat-rate'], '25')             # bad value ignored
+
+    def test_no_file_without_settings_option_on_headless(self):
+        self.assertEqual(settings()['file'], '-')
+
+    # ---- the client ---------------------------------------------------------------------------------------------------
+
+    def exe(self, name='lumen-settings'):
+        path = os.path.join(ROOT, 'build', name)
+        if not os.path.exists(path):
+            self.skipTest('%s not built' % name)
+        return path
+
+    def test_client_selftest(self):
+        r = subprocess.run([self.exe(), '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_client_cli(self):
+        exe = self.exe()
+        r = subprocess.run([exe, '--get', 'repeat-rate'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.stdout.strip(), 'repeat-rate=25')
+        r = subprocess.run([exe, '--set', 'repeat-rate=30', 'layouts=ee,us'], capture_output=True, text=True,
+                           timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(), ['repeat-rate=30', 'layouts=ee,us'])
+        self.assertEqual(settings()['layouts'], 'ee,us')
+        r = subprocess.run([exe, '--set', 'sticky=9'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 1)
+        r = subprocess.run([exe, '--get'], capture_output=True, text=True, timeout=10)
+        self.assertIn('layouts=ee,us', r.stdout.split())
+
+    # Window geometry of the panel: 620x440, content column starts at x=160, rows are 28 px high.
+    def open_panel(self):
+        p = subprocess.Popen([self.exe()], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('lumen.settings')
+        self.assertIsNotNone(win, 'settings window did not appear')
+        self.assertEqual((win['w'], win['h']), (620, 440))
+        time.sleep(0.3)
+        return p, win
+
+    def test_panel_opens_from_menu_and_super_i(self):
+        self.exe()
+        n = len(ctl.windows()['windows'])
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(23)                                             # KEY_I
+        ctl.key(KEY_LEFTMETA, False)
+        # headless tests start lumen with --terminal true, but the settings command is the sibling binary
+        win = wait_for_window('lumen.settings')
+        self.assertIsNotNone(win, 'Super+I did not open the settings panel')
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        ctl.tap(KEY_ESC)                                        # Esc closes it
+        for _ in range(100):
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.settings']:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(ctl.windows()['windows']), n)
+
+    def test_panel_clicks_change_settings(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        # layout rows start at y=42: us, ee, de, fi. Radio "active" at x = 160 + 440 - 140.
+        ctl.click(x0 + 480, y0 + 42 + 28 + 14)                  # Estonian -> active
+        time.sleep(0.15)
+        self.assertEqual(settings()['layout'], 'ee')
+        ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)              # untick Finnish
+        time.sleep(0.15)
+        self.assertEqual(settings()['layouts'], 'us,ee,de')
+        ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)              # Finnish is now the 4th row again: tick it
+        time.sleep(0.15)
+        self.assertEqual(settings()['layouts'], 'us,ee,de,fi')
+        # move German one up: the ^ button of the third row (x = 160 + 440 - 40)
+        ctl.click(x0 + 580, y0 + 42 + 2 * 28 + 14)
+        time.sleep(0.15)
+        self.assertEqual(settings()['layouts'], 'us,de,ee,fi')
+        ctl.click(x0 + 168, y0 + 232)                           # sticky keys box
+        time.sleep(0.15)
+        self.assertEqual(settings()['sticky'], '1')
+        self.assertEqual(ctl.kbd()['sticky'], 1)
+        # the delay slider: track x = 310..530; clicking the right end gives the maximum
+        ctl.click(x0 + 531, y0 + 284)
+        time.sleep(0.15)
+        self.assertEqual(settings()['repeat-delay'], '1000')
+        ctl.click(x0 + 310, y0 + 284)
+        time.sleep(0.15)
+        self.assertEqual(settings()['repeat-delay'], '150')
+
+    def test_panel_slider_drag(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.abs(x0 + 310 + 110, y0 + 312)                       # repeat rate slider (1..60), mid track
+        ctl.button(272, True)
+        ctl.abs(x0 + 310 + 220, y0 + 312)                       # drag to the right end
+        ctl.button(272, False)
+        time.sleep(0.15)
+        self.assertEqual(settings()['repeat-rate'], '60')
+
+    def test_panel_pages_and_keyboard_navigation(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 36 + 16)                   # "Pointer" tab
+        time.sleep(0.15)
+        ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # natural scrolling box (second row, below the speed slider)
+        time.sleep(0.15)
+        self.assertEqual(settings()['natural-scroll'], '1')
+        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        time.sleep(0.15)
+        ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # sound box (second row, below the gadget box)
+        time.sleep(0.15)
+        self.assertEqual(settings()['sound'], '0')
+        # keyboard only: Tab x3 reaches the first widget of the page (the gadget checkbox), Space toggles it
+        ctl.abs(x0 + 400, y0 + 300)
+        for _ in range(4):
+            ctl.tap(KEY_TAB)
+        ctl.tap(KEY_SPACE)
+        time.sleep(0.15)
+        self.assertEqual(settings()['gadget'], '0')
+
+    def test_panel_follows_changes_made_elsewhere(self):
+        p, win = self.open_panel()
+        ctl.abs(900, 500)
+        before = ctl.dump(os.path.join(tmp, 'set0.ppm'))
+        ctl.cmd('settings repeat-delay 1000')
+        time.sleep(0.2)
+        after = ctl.dump(os.path.join(tmp, 'set1.ppm'))
+        x0, y0 = win['x'], win['y']
+        row = [(before.px(x0 + x, y0 + 284), after.px(x0 + x, y0 + 284)) for x in range(300, 560, 2)]
+        self.assertTrue(any(a != b for a, b in row), 'the slider did not move')
+
+    def test_try_field_follows_the_layout(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 200, y0 + 366)                           # the "Try it" field
+        time.sleep(0.15)
+
+        def field():
+            ctl.abs(900, 500)
+            time.sleep(0.15)
+            ppm = ctl.dump(os.path.join(tmp, 'try.ppm'))
+            ctl.abs(x0 + 200, y0 + 366)
+            return [ppm.px(x0 + x, y0 + y) for y in range(356, 376) for x in range(166, 190)]
+        empty = field()
+        ctl.tap(39)                                             # KEY_SEMICOLON: ';' on us, o-umlaut on ee
+        us_text = field()
+        self.assertNotEqual(us_text, empty)
+        ctl.tap(14)                                             # Backspace
+        self.assertEqual(field(), empty)
+        ctl.cmd('settings layout ee')
+        time.sleep(0.15)
+        ctl.tap(39)
+        ee_text = field()
+        self.assertNotEqual(ee_text, empty)
+        self.assertNotEqual(ee_text, us_text)
 
 
 if __name__ == '__main__':

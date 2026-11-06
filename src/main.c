@@ -13,12 +13,14 @@
 
 #include "backend.h"
 #include "input.h"
+#include "keymap.h"
 #include "log.h"
 #include "loop.h"
 #include "output.h"
 #include "render.h"
 #include "seat.h"
 #include "seatdev.h"
+#include "settings.h"
 #include "server.h"
 #include "shm.h"
 #include "surface.h"
@@ -38,6 +40,13 @@ static const char *usage_text =
     "  --control PATH           headless control socket (testing)\n"
     "  --log-level LEVEL        error|warn|info|debug|trace\n"
     "  --log-file PATH          additionally append the log to PATH\n"
+    "  --settings FILE          where the settings panel saves (and the start reads) the user settings; \"none\" = nowhere\n"
+    "                           (default drm: $XDG_CONFIG_HOME/lumen/settings.conf, headless: none); options below win\n"
+    "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
+    "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
+    "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
+    "  --no-gadget              start with the desktop gadget (clipboard history) hidden; Super+G toggles it\n"
+    "  --no-sound               no beeps for sticky keys (latch, lock, unlock, on/off; needs aplay otherwise)\n"
     "  --no-grab                do not EVIOCGRAB keyboards\n"
     "  --timeout SECONDS        quit automatically after SECONDS (safe first run on a real VT)\n"
     "  -h, --help               this text\n"
@@ -170,7 +179,8 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_TIMEOUT, OPT_RUN, OPT_APP };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET };
+    const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
     static const struct option opts[] = {
@@ -185,11 +195,45 @@ int main(int argc, char **argv)
         { "control", required_argument, 0, 'c' },
         { "log-level", required_argument, 0, 'l' },
         { "log-file", required_argument, 0, 'f' },
+        { "settings", required_argument, 0, OPT_SETTINGS },
+        { "layouts", required_argument, 0, OPT_LAYOUTS },
+        { "sticky", no_argument, 0, OPT_STICKY },
+        { "no-gadget", no_argument, 0, OPT_NO_GADGET },
+        { "no-sound", no_argument, 0, OPT_NO_SOUND },
         { "no-grab", no_argument, 0, OPT_NO_GRAB },
         { "timeout", required_argument, 0, OPT_TIMEOUT },
         { "help", no_argument, 0, 'h' },
         { 0, 0, 0, 0 },
     };
+    /* The settings file is read first so that the command line can override it: peek at --backend / --settings. */
+    const char *settings_arg = NULL;
+    bool headless_arg = false;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--settings") && i + 1 < argc)
+            settings_arg = argv[i + 1];
+        else if (!strncmp(argv[i], "--settings=", 11))
+            settings_arg = argv[i] + 11;
+        else if (!strcmp(argv[i], "--backend") && i + 1 < argc)
+            headless_arg = !strcmp(argv[i + 1], "headless");
+        else if (!strncmp(argv[i], "--backend=", 10))
+            headless_arg = !strcmp(argv[i] + 10, "headless");
+    }
+    static char settings_buf[PATH_MAX], layouts_buf[64];
+    if (!settings_arg && !headless_arg) {
+        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg)
+            snprintf(settings_buf, sizeof(settings_buf), "%s/lumen/settings.conf", xdg);
+        else if (home && *home)
+            snprintf(settings_buf, sizeof(settings_buf), "%s/.config/lumen/settings.conf", home);
+        if (settings_buf[0])
+            settings_arg = settings_buf;
+    }
+    if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
+        cfg.settings_path = settings_arg;
+        if (lm_settings_load(&cfg, settings_arg, layouts_buf, sizeof(layouts_buf)) > 0 && layouts_buf[0])
+            layouts_arg = layouts_buf;
+    }
+
     int c;
     while ((c = getopt_long(argc, argv, "h", opts, NULL)) != -1) {
         switch (c) {
@@ -236,6 +280,11 @@ int main(int argc, char **argv)
             break;
         }
         case 'f': cfg.log_file = optarg; break;
+        case OPT_SETTINGS: break;           /* handled above */
+        case OPT_LAYOUTS: layouts_arg = optarg; break;
+        case OPT_STICKY: cfg.sticky_keys = true; break;
+        case OPT_NO_GADGET: cfg.gadget = false; break;
+        case OPT_NO_SOUND: cfg.sound = false; break;
         case OPT_NO_GRAB: cfg.grab_input = false; break;
         case OPT_TIMEOUT:
             timeout_s = atoi(optarg);
@@ -249,17 +298,30 @@ int main(int argc, char **argv)
         }
     }
 
+    {
+        char err[160];
+        cfg.kbd_nlayouts = lm_layout_parse(layouts_arg, cfg.kbd_layouts, err, sizeof(err));
+        if (cfg.kbd_nlayouts == 0) {
+            fprintf(stderr, "lumen: --layouts: %s\n", err);
+            return 2;
+        }
+    }
+
     static char term_buf[PATH_MAX + 4], run_buf[PATH_MAX + 4];
     if (!terminal_set)
         cfg.terminal_cmd = default_sibling("lumen-term", term_buf, sizeof(term_buf));
     if (!run_set)
         cfg.run_cmd = default_sibling("lumen-run", run_buf, sizeof(run_buf));
-    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128];
+    static char settings_cmd_buf[PATH_MAX + 4];
+    cfg.settings_cmd = default_sibling("lumen-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
+    static char calc_buf[PATH_MAX + 4], web_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128];
     if (cfg.napps == 0) {
-        /* default menu: Terminal, Calculator and VS Code (when found) */
+        /* default menu: Terminal, Calculator, Browser and VS Code (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
             "Calculator", default_sibling("lumen-calc", calc_buf, sizeof(calc_buf)) };
+        cfg.apps[cfg.napps++] = (struct lm_app_entry){
+            "Browser", default_sibling("lumen-web", web_buf, sizeof(web_buf)) };
         /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
          * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
         const char *home = getenv("HOME");
@@ -275,6 +337,7 @@ int main(int argc, char **argv)
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
             break;
         }
+        cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Settings", cfg.settings_cmd };   /* last: keeps the others' places */
     }
     lm_log_set_level((enum lm_log_level)cfg.log_level);
     if (cfg.log_file && lm_log_set_file(cfg.log_file) < 0)
@@ -335,7 +398,8 @@ int main(int argc, char **argv)
         !(srv->seat = lm_seat_create(srv)) ||
         !(srv->xdg = lm_xdg_create(srv)) ||
         !(srv->wm = lm_wm_create(srv)) ||
-        !(srv->input = lm_input_create(srv))) {
+        !(srv->input = lm_input_create(srv)) ||
+        !(srv->settings = lm_settings_create(srv))) {
         lm_error("module initialisation failed");
         goto out;
     }
@@ -370,6 +434,8 @@ int main(int argc, char **argv)
 
 out:
     /* Reverse creation order. */
+    if (srv->settings) lm_settings_destroy(srv->settings);
+    srv->settings = NULL;
     if (srv->input) lm_input_destroy(srv->input);
     srv->input = NULL;
     if (srv->wm) lm_wm_destroy(srv->wm);

@@ -375,6 +375,18 @@ static const struct lm_message zxdg_toplevel_decoration_events[] = {
 DEFINE_IFACE(lm_zxdg_toplevel_decoration_v1_interface, "zxdg_toplevel_decoration_v1", 1,
              zxdg_toplevel_decoration_requests, zxdg_toplevel_decoration_events);
 
+/* ---- lumen_settings_v1 ------------------------------------------------------------ */
+static const struct lm_message lumen_settings_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("set", "ss", 1, NULL),
+};
+static const struct lm_message lumen_settings_events[] = {
+    MSG("value", "ss", 1, NULL),
+    MSG("done", "", 1, NULL),
+};
+DEFINE_IFACE(lm_lumen_settings_v1_interface, "lumen_settings_v1", 1,
+             lumen_settings_requests, lumen_settings_events);
+
 /* ---- lookup --------------------------------------------------------------------- */
 
 static const struct lm_interface *const all_interfaces[] = {
@@ -405,6 +417,7 @@ static const struct lm_interface *const all_interfaces[] = {
     &lm_xdg_popup_interface,
     &lm_zxdg_decoration_manager_v1_interface,
     &lm_zxdg_toplevel_decoration_v1_interface,
+    &lm_lumen_settings_v1_interface,
 };
 
 const struct lm_interface *lm_protocol_find_interface(const char *name)

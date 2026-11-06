@@ -99,7 +99,10 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/xdg.[ch]` | **shell** | xdg_wm_base/surface/toplevel/popup/positioner, decoration manager |
 | `src/wm.[ch]` | **shell** | window manager, panel, shortcuts, workspaces, scene for the renderer |
 | `src/seat.[ch]`, `src/keymap.[ch]` | **input** | wl_seat, data device, cursor, pointer grabs, static US keymap |
-| `src/input.h`, `src/input_evdev.c` | **input** | evdev reading, repeat, acceleration, hotplug, injection |
+| (gadget) | **desktop gadget** | `seat.c` keeps the clipboard history (it reads each new text selection through a pipe it hands to the source); `wm.c` places the card (`LM_SCENE_GADGET`, right after the wallpapers; docked top right until dragged), picks its title bar (`LM_PICK_GADGET_TITLE`: move grab, double click resets) and edges (`LM_PICK_GADGET_BORDER`: resize grab, 200x86..640x560), `render.c` paints it (rounded corners, stacked-alpha shadow, wraps the entries). Super+G toggles |
+| `src/sound.h`, `src/sound.c` | **sound** | sticky-key beeps: synthesised S16 buffer piped to a detached `aplay` child (no audio library) |
+| `src/settings.[ch]` | **settings** | `lumen_settings_v1` global (`set(key, value)` -> a burst of `value` events + `done` to every bound client), validation and application of each key (layouts: `lm_seat_set_layouts` + `lm_input_set_layouts`; repeat: `lm_seat_send_repeat_info`; sticky/gadget through input/wm), the `key=value` settings file (loaded in main.c before argv, saved debounced + atomically) |
+| `src/input.h`, `src/input_evdev.c` | **input** | evdev reading, repeat, acceleration, hotplug, injection, layout + sticky keys state |
 | `src/seatdev.[ch]` | **input** | device open (direct / logind TakeDevice via dlopen) |
 | `src/output.[ch]` | **backend** | wl_output globals, output layout queries |
 | `src/backend.h`, `src/backend_drm.c`, `src/backend_headless.c` | **backend** | DRM/KMS + VT; headless + control socket |
@@ -107,6 +110,8 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
 | `client/lumen-demo.c` | **clients** | demo client using `wire.c` + `protocol.c` in client mode |
 | `client/lumen-term.c` (later) | **clients** | terminal emulator |
+| `client/lumen-web.c` | **clients** | tiny browser (URL/HTTP loader, HTML-subset parser, line layout, UI; synchronous fetch; `--selftest`) |
+| `client/lumen-settings.c` | **clients** | settings panel: tabs, checkboxes, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
 | `client/lumen-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
 | `tests/wlclient.py`, `tests/test_*.py`, `tests/run.sh` | **tests** | end-to-end tests against `lumen --backend headless` |
 | `Makefile`, `docs/`, `README.md` | architect | build, docs |
@@ -148,6 +153,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `wl_data_device_manager` | 3 | seat.c |
 | `xdg_wm_base` | 3 | xdg.c |
 | `zxdg_decoration_manager_v1` | 1 (always `server_side`) | xdg.c |
+| `lumen_settings_v1` | 1 (Lumen private) | settings.c |
 
 ## Design decisions worth knowing
 
@@ -162,16 +168,33 @@ header/API change requests go to the architect (`header_requests`). Headers in
   repeat themselves. `input_evdev` also generates repeats (flagged
   `repeat = true`) for compositor shortcuts only; the seat does not forward them.
 * **Modifiers** are tracked once, in the input module, and carried in each key
-  event (`LM_MOD_*` = XKB real-modifier bit layout matching the embedded keymap).
-* **Keymap.** `keymap.c` embeds an XKB text keymap (US) delivered over a memfd
-  (`xkb_v1`) and offers evdev -> keysym -> UTF-8 helpers that clients link
-  instead of xkbcommon.
+  event (`LM_MOD_*` = XKB real-modifier bit layout matching the generated keymap): depressed,
+  latched (sticky keys), locked (Caps/Num and sticky locks) and the active layout `group`.
+  State changes without a key (layout switch, latch consumed, sticky toggled) are `LM_INPUT_MODS`
+  events; the seat turns both into `wl_keyboard.modifiers`.
+* **Layouts / sticky keys.** `input_evdev.c` owns them (`lm_input_*layout*`, `lm_input_*sticky*`): one
+  XKB group per configured layout (`--layouts`), Super+Space and the panel indicator switch,
+  right Alt is AltGr (Mod5 / LevelThree) unless the only layout is `us`. Sticky keys: a clean tap
+  latches a modifier until the next key press, a second tap locks, a third unlocks, Shift x5 toggles.
+  The wm sees depressed|latched|locked modifiers in `lm_wm_key`, so latched Super works for shortcuts.
+* **Keymap.** `keymap.c` holds the layout tables (typewriter block as UTF-8 strings per level, `us` plus
+  overrides) and generates the XKB text (`keymap_xkb.h` has the layout independent part, dumped from
+  the stock evdev keymap) delivered over a memfd (`xkb_v1`); it also offers the client side
+  evdev -> keysym -> UTF-8 helpers (`lm_keymap_client_load` parses the group names from the keymap,
+  `lm_keymap_client_group` follows `wl_keyboard.modifiers`) that clients link instead of xkbcommon.
+  The XKB text could not be compiled with libxkbcommon on the dev machine (not installed): the
+  layout part follows the syntax of the stock keymaps, but test it with a real xkbcommon client.
+* **Settings.** One source of truth per value: layouts/active layout/sticky live in `input_evdev.c`, the gadget in `wm.c`, the
+  rest in `server->config`. `settings.c` reads them back from there, so a change made with Super+Space, five Shifts or Super+G is
+  announced to the panel the same way (`lm_settings_changed`). Changing the layout *set* builds a new keymap memfd and re-sends
+  `wl_keyboard.keymap` to every keyboard object (the seat forgets its last group so the modifiers event that follows is not
+  deduplicated: a new keymap resets the clients' xkb state).
 * **Decorations** are server-side only. The wm computes all frame/panel
   rectangles; the renderer only paints them.
 * **Pointer grabs** (`lm_pointer_grab`) are used for interactive move/resize and
   xdg_popup grabs. Starting a grab clears pointer focus.
 * **Headless backend** has a line-based control socket (`dump`, `sync`, `key`,
-  `motion`, `abs`, `button`, `axis`, `windows`, `quit`) documented in
+  `motion`, `abs`, `button`, `axis`, `windows`, `kbd`, `layout`, `sticky`, `settings [key value]`, `quit`) documented in
   `backend.h`; the Python tests use it for synthetic input and screenshots.
 
 ## Error handling policy
@@ -200,7 +223,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 C11 (`-std=gnu11`), 4-space indent, snake_case, public symbols prefixed `lm_`,
 header guards `LUMEN_<NAME>_H`, comments only where non-obvious, English
 identifiers and comments. Build: `make`, `make asan`, `make test`.
-Binaries: `build/lumen`, `build/lumen-demo`, `build/lumen-term`, `build/lumen-calc`.
+Binaries: `build/lumen`, `build/lumen-demo`, `build/lumen-term`, `build/lumen-calc`, `build/lumen-web`.
 
 ## Testing
 

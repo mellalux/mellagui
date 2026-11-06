@@ -39,702 +39,6 @@
 #define MAX_MIME_LEN    255
 #define SEAT_NAME       "seat0"
 
-/* ---- embedded XKB keymap (US layout) ------------------------------------------------ */
-
-/*
- * A complete xkb_keymap in text form: evdev keycodes (xkb code = evdev + 8),
- * the types, compat rules and symbols of the "pc105 + us" layout, with the
- * usual real-modifier mapping (Shift=0 Lock=1 Control=2 Mod1/Alt=3
- * Mod2/NumLock=4 Mod4/Super=6). Self-contained: no `include` statements.
- * Verified to compile with libxkbcommon and to produce the same keysyms as
- * the stock evdev/us keymap for all keys at Shift, Caps, NumLock, Ctrl, Alt
- * and Super states.
- */
-static const char lumen_keymap_text[] =
-    "xkb_keymap {\n"
-    "xkb_keycodes \"lumen\" {\n"
-    "  minimum = 8;\n"
-    "  maximum = 255;\n"
-    "  <ESC> = 9;\n"
-    "  <AE01> = 10;\n"
-    "  <AE02> = 11;\n"
-    "  <AE03> = 12;\n"
-    "  <AE04> = 13;\n"
-    "  <AE05> = 14;\n"
-    "  <AE06> = 15;\n"
-    "  <AE07> = 16;\n"
-    "  <AE08> = 17;\n"
-    "  <AE09> = 18;\n"
-    "  <AE10> = 19;\n"
-    "  <AE11> = 20;\n"
-    "  <AE12> = 21;\n"
-    "  <BKSP> = 22;\n"
-    "  <TAB> = 23;\n"
-    "  <AD01> = 24;\n"
-    "  <AD02> = 25;\n"
-    "  <AD03> = 26;\n"
-    "  <AD04> = 27;\n"
-    "  <AD05> = 28;\n"
-    "  <AD06> = 29;\n"
-    "  <AD07> = 30;\n"
-    "  <AD08> = 31;\n"
-    "  <AD09> = 32;\n"
-    "  <AD10> = 33;\n"
-    "  <AD11> = 34;\n"
-    "  <AD12> = 35;\n"
-    "  <RTRN> = 36;\n"
-    "  <LCTL> = 37;\n"
-    "  <AC01> = 38;\n"
-    "  <AC02> = 39;\n"
-    "  <AC03> = 40;\n"
-    "  <AC04> = 41;\n"
-    "  <AC05> = 42;\n"
-    "  <AC06> = 43;\n"
-    "  <AC07> = 44;\n"
-    "  <AC08> = 45;\n"
-    "  <AC09> = 46;\n"
-    "  <AC10> = 47;\n"
-    "  <AC11> = 48;\n"
-    "  <TLDE> = 49;\n"
-    "  <LFSH> = 50;\n"
-    "  <BKSL> = 51;\n"
-    "  <AB01> = 52;\n"
-    "  <AB02> = 53;\n"
-    "  <AB03> = 54;\n"
-    "  <AB04> = 55;\n"
-    "  <AB05> = 56;\n"
-    "  <AB06> = 57;\n"
-    "  <AB07> = 58;\n"
-    "  <AB08> = 59;\n"
-    "  <AB09> = 60;\n"
-    "  <AB10> = 61;\n"
-    "  <RTSH> = 62;\n"
-    "  <KPMU> = 63;\n"
-    "  <LALT> = 64;\n"
-    "  <SPCE> = 65;\n"
-    "  <CAPS> = 66;\n"
-    "  <FK01> = 67;\n"
-    "  <FK02> = 68;\n"
-    "  <FK03> = 69;\n"
-    "  <FK04> = 70;\n"
-    "  <FK05> = 71;\n"
-    "  <FK06> = 72;\n"
-    "  <FK07> = 73;\n"
-    "  <FK08> = 74;\n"
-    "  <FK09> = 75;\n"
-    "  <FK10> = 76;\n"
-    "  <NMLK> = 77;\n"
-    "  <SCLK> = 78;\n"
-    "  <KP7> = 79;\n"
-    "  <KP8> = 80;\n"
-    "  <KP9> = 81;\n"
-    "  <KPSU> = 82;\n"
-    "  <KP4> = 83;\n"
-    "  <KP5> = 84;\n"
-    "  <KP6> = 85;\n"
-    "  <KPAD> = 86;\n"
-    "  <KP1> = 87;\n"
-    "  <KP2> = 88;\n"
-    "  <KP3> = 89;\n"
-    "  <KP0> = 90;\n"
-    "  <KPDL> = 91;\n"
-    "  <LVL3> = 92;\n"
-    "  <LSGT> = 94;\n"
-    "  <FK11> = 95;\n"
-    "  <FK12> = 96;\n"
-    "  <AB11> = 97;\n"
-    "  <KATA> = 98;\n"
-    "  <HIRA> = 99;\n"
-    "  <HENK> = 100;\n"
-    "  <HKTG> = 101;\n"
-    "  <MUHE> = 102;\n"
-    "  <JPCM> = 103;\n"
-    "  <KPEN> = 104;\n"
-    "  <RCTL> = 105;\n"
-    "  <KPDV> = 106;\n"
-    "  <PRSC> = 107;\n"
-    "  <RALT> = 108;\n"
-    "  <LNFD> = 109;\n"
-    "  <HOME> = 110;\n"
-    "  <UP> = 111;\n"
-    "  <PGUP> = 112;\n"
-    "  <LEFT> = 113;\n"
-    "  <RGHT> = 114;\n"
-    "  <END> = 115;\n"
-    "  <DOWN> = 116;\n"
-    "  <PGDN> = 117;\n"
-    "  <INS> = 118;\n"
-    "  <DELE> = 119;\n"
-    "  <I120> = 120;\n"
-    "  <MUTE> = 121;\n"
-    "  <VOL-> = 122;\n"
-    "  <VOL+> = 123;\n"
-    "  <POWR> = 124;\n"
-    "  <KPEQ> = 125;\n"
-    "  <I126> = 126;\n"
-    "  <PAUS> = 127;\n"
-    "  <I128> = 128;\n"
-    "  <I129> = 129;\n"
-    "  <HNGL> = 130;\n"
-    "  <HJCV> = 131;\n"
-    "  <AE13> = 132;\n"
-    "  <LWIN> = 133;\n"
-    "  <RWIN> = 134;\n"
-    "  <COMP> = 135;\n"
-    "  <STOP> = 136;\n"
-    "  <AGAI> = 137;\n"
-    "  <PROP> = 138;\n"
-    "  <UNDO> = 139;\n"
-    "  <FRNT> = 140;\n"
-    "  <COPY> = 141;\n"
-    "  <OPEN> = 142;\n"
-    "  <PAST> = 143;\n"
-    "  <FIND> = 144;\n"
-    "  <CUT> = 145;\n"
-    "  <HELP> = 146;\n"
-    "  <I147> = 147;\n"
-    "  <I148> = 148;\n"
-    "  <I149> = 149;\n"
-    "  <I150> = 150;\n"
-    "  <I151> = 151;\n"
-    "  <I152> = 152;\n"
-    "  <I153> = 153;\n"
-    "  <I154> = 154;\n"
-    "  <I155> = 155;\n"
-    "  <I156> = 156;\n"
-    "  <I157> = 157;\n"
-    "  <I158> = 158;\n"
-    "  <I159> = 159;\n"
-    "  <I160> = 160;\n"
-    "  <I161> = 161;\n"
-    "  <I162> = 162;\n"
-    "  <I163> = 163;\n"
-    "  <I164> = 164;\n"
-    "  <I165> = 165;\n"
-    "  <I166> = 166;\n"
-    "  <I167> = 167;\n"
-    "  <I168> = 168;\n"
-    "  <I169> = 169;\n"
-    "  <I170> = 170;\n"
-    "  <I171> = 171;\n"
-    "  <I172> = 172;\n"
-    "  <I173> = 173;\n"
-    "  <I174> = 174;\n"
-    "  <I175> = 175;\n"
-    "  <I176> = 176;\n"
-    "  <I177> = 177;\n"
-    "  <I178> = 178;\n"
-    "  <I179> = 179;\n"
-    "  <I180> = 180;\n"
-    "  <I181> = 181;\n"
-    "  <I182> = 182;\n"
-    "  <I183> = 183;\n"
-    "  <I184> = 184;\n"
-    "  <I185> = 185;\n"
-    "  <I186> = 186;\n"
-    "  <I187> = 187;\n"
-    "  <I188> = 188;\n"
-    "  <I189> = 189;\n"
-    "  <I190> = 190;\n"
-    "  <FK13> = 191;\n"
-    "  <FK14> = 192;\n"
-    "  <FK15> = 193;\n"
-    "  <FK16> = 194;\n"
-    "  <FK17> = 195;\n"
-    "  <FK18> = 196;\n"
-    "  <FK19> = 197;\n"
-    "  <FK20> = 198;\n"
-    "  <FK21> = 199;\n"
-    "  <FK22> = 200;\n"
-    "  <FK23> = 201;\n"
-    "  <FK24> = 202;\n"
-    "  <LVL5> = 203;\n"
-    "  <ALT> = 204;\n"
-    "  <META> = 205;\n"
-    "  <SUPR> = 206;\n"
-    "  <HYPR> = 207;\n"
-    "  <I208> = 208;\n"
-    "  <I209> = 209;\n"
-    "  <I210> = 210;\n"
-    "  <I211> = 211;\n"
-    "  <I212> = 212;\n"
-    "  <I213> = 213;\n"
-    "  <I214> = 214;\n"
-    "  <I215> = 215;\n"
-    "  <I216> = 216;\n"
-    "  <I217> = 217;\n"
-    "  <I218> = 218;\n"
-    "  <I219> = 219;\n"
-    "  <I220> = 220;\n"
-    "  <I221> = 221;\n"
-    "  <I222> = 222;\n"
-    "  <I223> = 223;\n"
-    "  <I224> = 224;\n"
-    "  <I225> = 225;\n"
-    "  <I226> = 226;\n"
-    "  <I227> = 227;\n"
-    "  <I228> = 228;\n"
-    "  <I229> = 229;\n"
-    "  <I230> = 230;\n"
-    "  <I231> = 231;\n"
-    "  <I232> = 232;\n"
-    "  <I233> = 233;\n"
-    "  <I234> = 234;\n"
-    "  <I235> = 235;\n"
-    "  <I236> = 236;\n"
-    "  <I237> = 237;\n"
-    "  <I238> = 238;\n"
-    "  <I239> = 239;\n"
-    "  <I240> = 240;\n"
-    "  <I241> = 241;\n"
-    "  <I242> = 242;\n"
-    "  <I243> = 243;\n"
-    "  <I244> = 244;\n"
-    "  <I245> = 245;\n"
-    "  <I246> = 246;\n"
-    "  <I247> = 247;\n"
-    "  <I248> = 248;\n"
-    "  <I249> = 249;\n"
-    "  <I250> = 250;\n"
-    "  <I251> = 251;\n"
-    "  <I252> = 252;\n"
-    "  <I253> = 253;\n"
-    "  <I254> = 254;\n"
-    "  <I255> = 255;\n"
-    "  indicator 1 = \"Caps Lock\";\n"
-    "  indicator 2 = \"Num Lock\";\n"
-    "  indicator 3 = \"Scroll Lock\";\n"
-    "  alias <AC12> = <BKSL>;\n"
-    "  alias <ALGR> = <RALT>;\n"
-    "  alias <MENU> = <COMP>;\n"
-    "  alias <HZTG> = <TLDE>;\n"
-    "  alias <LMTA> = <LWIN>;\n"
-    "  alias <RMTA> = <RWIN>;\n"
-    "  alias <OUTP> = <I235>;\n"
-    "  alias <KITG> = <I236>;\n"
-    "  alias <KIDN> = <I237>;\n"
-    "  alias <KIUP> = <I238>;\n"
-    "  alias <I121> = <MUTE>;\n"
-    "  alias <I122> = <VOL->;\n"
-    "  alias <I123> = <VOL+>;\n"
-    "  alias <I124> = <POWR>;\n"
-    "  alias <I125> = <KPEQ>;\n"
-    "  alias <I127> = <PAUS>;\n"
-    "  alias <I130> = <HNGL>;\n"
-    "  alias <I131> = <HJCV>;\n"
-    "  alias <I132> = <AE13>;\n"
-    "  alias <I133> = <LWIN>;\n"
-    "  alias <I134> = <RWIN>;\n"
-    "  alias <I135> = <COMP>;\n"
-    "  alias <I136> = <STOP>;\n"
-    "  alias <I137> = <AGAI>;\n"
-    "  alias <I138> = <PROP>;\n"
-    "  alias <I139> = <UNDO>;\n"
-    "  alias <I140> = <FRNT>;\n"
-    "  alias <I141> = <COPY>;\n"
-    "  alias <I142> = <OPEN>;\n"
-    "  alias <I143> = <PAST>;\n"
-    "  alias <I144> = <FIND>;\n"
-    "  alias <I145> = <CUT>;\n"
-    "  alias <I146> = <HELP>;\n"
-    "  alias <I191> = <FK13>;\n"
-    "  alias <I192> = <FK14>;\n"
-    "  alias <I193> = <FK15>;\n"
-    "  alias <I194> = <FK16>;\n"
-    "  alias <I195> = <FK17>;\n"
-    "  alias <I196> = <FK18>;\n"
-    "  alias <I197> = <FK19>;\n"
-    "  alias <I198> = <FK20>;\n"
-    "  alias <I199> = <FK21>;\n"
-    "  alias <I200> = <FK22>;\n"
-    "  alias <I201> = <FK23>;\n"
-    "  alias <I202> = <FK24>;\n"
-    "  alias <MDSW> = <LVL5>;\n"
-    "  alias <KPPT> = <I129>;\n"
-    "  alias <LatQ> = <AD01>;\n"
-    "  alias <LatW> = <AD02>;\n"
-    "  alias <LatE> = <AD03>;\n"
-    "  alias <LatR> = <AD04>;\n"
-    "  alias <LatT> = <AD05>;\n"
-    "  alias <LatY> = <AD06>;\n"
-    "  alias <LatU> = <AD07>;\n"
-    "  alias <LatI> = <AD08>;\n"
-    "  alias <LatO> = <AD09>;\n"
-    "  alias <LatP> = <AD10>;\n"
-    "  alias <LatA> = <AC01>;\n"
-    "  alias <LatS> = <AC02>;\n"
-    "  alias <LatD> = <AC03>;\n"
-    "  alias <LatF> = <AC04>;\n"
-    "  alias <LatG> = <AC05>;\n"
-    "  alias <LatH> = <AC06>;\n"
-    "  alias <LatJ> = <AC07>;\n"
-    "  alias <LatK> = <AC08>;\n"
-    "  alias <LatL> = <AC09>;\n"
-    "  alias <LatZ> = <AB01>;\n"
-    "  alias <LatX> = <AB02>;\n"
-    "  alias <LatC> = <AB03>;\n"
-    "  alias <LatV> = <AB04>;\n"
-    "  alias <LatB> = <AB05>;\n"
-    "  alias <LatN> = <AB06>;\n"
-    "  alias <LatM> = <AB07>;\n"
-    "};\n"
-    "xkb_types \"lumen\" {\n"
-    "  virtual_modifiers NumLock,Alt,LevelThree,LevelFive,Meta,Super,Hyper,ScrollLock;\n"
-    "  type \"ONE_LEVEL\" {\n"
-    "    modifiers = none;\n"
-    "    level_name[1] = \"Any\";\n"
-    "  };\n"
-    "  type \"TWO_LEVEL\" {\n"
-    "    modifiers = Shift;\n"
-    "    map[Shift] = 2;\n"
-    "    level_name[1] = \"Base\";\n"
-    "    level_name[2] = \"Shift\";\n"
-    "  };\n"
-    "  type \"ALPHABETIC\" {\n"
-    "    modifiers = Shift+Lock;\n"
-    "    map[Shift] = 2;\n"
-    "    map[Lock] = 2;\n"
-    "    level_name[1] = \"Base\";\n"
-    "    level_name[2] = \"Caps\";\n"
-    "  };\n"
-    "  type \"KEYPAD\" {\n"
-    "    modifiers = Shift+NumLock;\n"
-    "    map[NumLock] = 2;\n"
-    "    level_name[1] = \"Base\";\n"
-    "    level_name[2] = \"Number\";\n"
-    "  };\n"
-    "  type \"PC_ALT_LEVEL2\" {\n"
-    "    modifiers = Alt;\n"
-    "    map[Alt] = 2;\n"
-    "    level_name[1] = \"Base\";\n"
-    "    level_name[2] = \"Alt\";\n"
-    "  };\n"
-    "  type \"PC_CONTROL_LEVEL2\" {\n"
-    "    modifiers = Control;\n"
-    "    map[Control] = 2;\n"
-    "    level_name[1] = \"Base\";\n"
-    "    level_name[2] = \"Control\";\n"
-    "  };\n"
-    "};\n"
-    "xkb_compatibility \"lumen\" {\n"
-    "  virtual_modifiers NumLock,Alt,LevelThree,LevelFive,Meta,Super,Hyper,ScrollLock;\n"
-    "  interpret.useModMapMods = AnyLevel;\n"
-    "  interpret.repeat = False;\n"
-    "  interpret Num_Lock+AnyOf(all) {\n"
-    "    virtualModifier = NumLock;\n"
-    "    action = LockMods(modifiers=NumLock);\n"
-    "  };\n"
-    "  interpret Scroll_Lock+AnyOf(all) {\n"
-    "    virtualModifier = ScrollLock;\n"
-    "    action = LockMods(modifiers=modMapMods);\n"
-    "  };\n"
-    "  interpret Alt_L+AnyOf(all) {\n"
-    "    virtualModifier = Alt;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Alt_R+AnyOf(all) {\n"
-    "    virtualModifier = Alt;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Meta_L+AnyOf(all) {\n"
-    "    virtualModifier = Meta;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Meta_R+AnyOf(all) {\n"
-    "    virtualModifier = Meta;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Super_L+AnyOf(all) {\n"
-    "    virtualModifier = Super;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Super_R+AnyOf(all) {\n"
-    "    virtualModifier = Super;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Hyper_L+AnyOf(all) {\n"
-    "    virtualModifier = Hyper;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Hyper_R+AnyOf(all) {\n"
-    "    virtualModifier = Hyper;\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  interpret Caps_Lock+AnyOfOrNone(all) {\n"
-    "    action = LockMods(modifiers=Lock);\n"
-    "  };\n"
-    "  interpret Any+Exactly(Lock) {\n"
-    "    action = LockMods(modifiers=Lock);\n"
-    "  };\n"
-    "  interpret Any+AnyOf(all) {\n"
-    "    action = SetMods(modifiers=modMapMods,clearLocks);\n"
-    "  };\n"
-    "  indicator \"Caps Lock\" {\n"
-    "    whichModState = locked;\n"
-    "    modifiers = Lock;\n"
-    "  };\n"
-    "  indicator \"Num Lock\" {\n"
-    "    whichModState = locked;\n"
-    "    modifiers = NumLock;\n"
-    "  };\n"
-    "  indicator \"Scroll Lock\" {\n"
-    "    whichModState = locked;\n"
-    "    modifiers = ScrollLock;\n"
-    "  };\n"
-    "};\n"
-    "xkb_symbols \"lumen\" {\n"
-    "  name[Group1] = \"English (US)\";\n"
-    "  key <ESC> { [ Escape ] };\n"
-    "  key <AE01> { [ 1, exclam ] };\n"
-    "  key <AE02> { [ 2, at ] };\n"
-    "  key <AE03> { [ 3, numbersign ] };\n"
-    "  key <AE04> { [ 4, dollar ] };\n"
-    "  key <AE05> { [ 5, percent ] };\n"
-    "  key <AE06> { [ 6, asciicircum ] };\n"
-    "  key <AE07> { [ 7, ampersand ] };\n"
-    "  key <AE08> { [ 8, asterisk ] };\n"
-    "  key <AE09> { [ 9, parenleft ] };\n"
-    "  key <AE10> { [ 0, parenright ] };\n"
-    "  key <AE11> { [ minus, underscore ] };\n"
-    "  key <AE12> { [ equal, plus ] };\n"
-    "  key <BKSP> { [ BackSpace, BackSpace ] };\n"
-    "  key <TAB> { [ Tab, ISO_Left_Tab ] };\n"
-    "  key <AD01> { [ q, Q ] };\n"
-    "  key <AD02> { [ w, W ] };\n"
-    "  key <AD03> { [ e, E ] };\n"
-    "  key <AD04> { [ r, R ] };\n"
-    "  key <AD05> { [ t, T ] };\n"
-    "  key <AD06> { [ y, Y ] };\n"
-    "  key <AD07> { [ u, U ] };\n"
-    "  key <AD08> { [ i, I ] };\n"
-    "  key <AD09> { [ o, O ] };\n"
-    "  key <AD10> { [ p, P ] };\n"
-    "  key <AD11> { [ bracketleft, braceleft ] };\n"
-    "  key <AD12> { [ bracketright, braceright ] };\n"
-    "  key <RTRN> { [ Return ] };\n"
-    "  key <LCTL> { [ Control_L ] };\n"
-    "  key <AC01> { [ a, A ] };\n"
-    "  key <AC02> { [ s, S ] };\n"
-    "  key <AC03> { [ d, D ] };\n"
-    "  key <AC04> { [ f, F ] };\n"
-    "  key <AC05> { [ g, G ] };\n"
-    "  key <AC06> { [ h, H ] };\n"
-    "  key <AC07> { [ j, J ] };\n"
-    "  key <AC08> { [ k, K ] };\n"
-    "  key <AC09> { [ l, L ] };\n"
-    "  key <AC10> { [ semicolon, colon ] };\n"
-    "  key <AC11> { [ apostrophe, quotedbl ] };\n"
-    "  key <TLDE> { [ grave, asciitilde ] };\n"
-    "  key <LFSH> { [ Shift_L ] };\n"
-    "  key <BKSL> { [ backslash, bar ] };\n"
-    "  key <AB01> { [ z, Z ] };\n"
-    "  key <AB02> { [ x, X ] };\n"
-    "  key <AB03> { [ c, C ] };\n"
-    "  key <AB04> { [ v, V ] };\n"
-    "  key <AB05> { [ b, B ] };\n"
-    "  key <AB06> { [ n, N ] };\n"
-    "  key <AB07> { [ m, M ] };\n"
-    "  key <AB08> { [ comma, less ] };\n"
-    "  key <AB09> { [ period, greater ] };\n"
-    "  key <AB10> { [ slash, question ] };\n"
-    "  key <RTSH> { [ Shift_R ] };\n"
-    "  key <KPMU> { [ KP_Multiply ] };\n"
-    "  key <LALT> { [ Alt_L, Meta_L ] };\n"
-    "  key <SPCE> { [ space ] };\n"
-    "  key <CAPS> { [ Caps_Lock ] };\n"
-    "  key <FK01> { [ F1 ] };\n"
-    "  key <FK02> { [ F2 ] };\n"
-    "  key <FK03> { [ F3 ] };\n"
-    "  key <FK04> { [ F4 ] };\n"
-    "  key <FK05> { [ F5 ] };\n"
-    "  key <FK06> { [ F6 ] };\n"
-    "  key <FK07> { [ F7 ] };\n"
-    "  key <FK08> { [ F8 ] };\n"
-    "  key <FK09> { [ F9 ] };\n"
-    "  key <FK10> { [ F10 ] };\n"
-    "  key <NMLK> { [ Num_Lock ] };\n"
-    "  key <SCLK> { [ Scroll_Lock ] };\n"
-    "  key <KP7> { [ KP_Home, KP_7 ] };\n"
-    "  key <KP8> { [ KP_Up, KP_8 ] };\n"
-    "  key <KP9> { [ KP_Prior, KP_9 ] };\n"
-    "  key <KPSU> { [ KP_Subtract ] };\n"
-    "  key <KP4> { [ KP_Left, KP_4 ] };\n"
-    "  key <KP5> { [ KP_Begin, KP_5 ] };\n"
-    "  key <KP6> { [ KP_Right, KP_6 ] };\n"
-    "  key <KPAD> { [ KP_Add ] };\n"
-    "  key <KP1> { [ KP_End, KP_1 ] };\n"
-    "  key <KP2> { [ KP_Down, KP_2 ] };\n"
-    "  key <KP3> { [ KP_Next, KP_3 ] };\n"
-    "  key <KP0> { [ KP_Insert, KP_0 ] };\n"
-    "  key <KPDL> { [ KP_Delete, KP_Decimal ] };\n"
-    "  key <LVL3> { [ ISO_Level3_Shift ] };\n"
-    "  key <LSGT> { [ less, greater ] };\n"
-    "  key <FK11> { [ F11 ] };\n"
-    "  key <FK12> { [ F12 ] };\n"
-    "  key <KATA> { [ Katakana ] };\n"
-    "  key <HIRA> { [ Hiragana ] };\n"
-    "  key <HENK> { [ Henkan_Mode ] };\n"
-    "  key <HKTG> { [ Hiragana_Katakana ] };\n"
-    "  key <MUHE> { [ Muhenkan ] };\n"
-    "  key <KPEN> { [ KP_Enter ] };\n"
-    "  key <RCTL> { [ Control_R ] };\n"
-    "  key <KPDV> { [ KP_Divide ] };\n"
-    "  key <PRSC> {\n"
-    "    type = \"PC_ALT_LEVEL2\",\n"
-    "    symbols[Group1] = [ Print, Sys_Req ]\n"
-    "  };\n"
-    "  key <RALT> { [ Alt_R, Meta_R ] };\n"
-    "  key <LNFD> { [ Linefeed ] };\n"
-    "  key <HOME> { [ Home ] };\n"
-    "  key <UP> { [ Up ] };\n"
-    "  key <PGUP> { [ Prior ] };\n"
-    "  key <LEFT> { [ Left ] };\n"
-    "  key <RGHT> { [ Right ] };\n"
-    "  key <END> { [ End ] };\n"
-    "  key <DOWN> { [ Down ] };\n"
-    "  key <PGDN> { [ Next ] };\n"
-    "  key <INS> { [ Insert ] };\n"
-    "  key <DELE> { [ Delete ] };\n"
-    "  key <MUTE> { [ XF86AudioMute ] };\n"
-    "  key <VOL-> { [ XF86AudioLowerVolume ] };\n"
-    "  key <VOL+> { [ XF86AudioRaiseVolume ] };\n"
-    "  key <POWR> { [ XF86PowerOff ] };\n"
-    "  key <KPEQ> { [ KP_Equal ] };\n"
-    "  key <I126> { [ plusminus ] };\n"
-    "  key <PAUS> {\n"
-    "    type = \"PC_CONTROL_LEVEL2\",\n"
-    "    symbols[Group1] = [ Pause, Break ]\n"
-    "  };\n"
-    "  key <I128> { [ XF86LaunchA ] };\n"
-    "  key <I129> { [ KP_Decimal, KP_Decimal ] };\n"
-    "  key <HNGL> { [ Hangul ] };\n"
-    "  key <HJCV> { [ Hangul_Hanja ] };\n"
-    "  key <LWIN> { [ Super_L ] };\n"
-    "  key <RWIN> { [ Super_R ] };\n"
-    "  key <COMP> { [ Menu ] };\n"
-    "  key <STOP> { [ Cancel ] };\n"
-    "  key <AGAI> { [ Redo ] };\n"
-    "  key <PROP> { [ SunProps ] };\n"
-    "  key <UNDO> { [ Undo ] };\n"
-    "  key <FRNT> { [ SunFront ] };\n"
-    "  key <COPY> { [ XF86Copy ] };\n"
-    "  key <OPEN> { [ XF86Open ] };\n"
-    "  key <PAST> { [ XF86Paste ] };\n"
-    "  key <FIND> { [ Find ] };\n"
-    "  key <CUT> { [ XF86Cut ] };\n"
-    "  key <HELP> { [ Help ] };\n"
-    "  key <I147> { [ XF86MenuKB ] };\n"
-    "  key <I148> { [ XF86Calculator ] };\n"
-    "  key <I150> { [ XF86Sleep ] };\n"
-    "  key <I151> { [ XF86WakeUp ] };\n"
-    "  key <I152> { [ XF86Explorer ] };\n"
-    "  key <I153> { [ XF86Send ] };\n"
-    "  key <I155> { [ XF86Xfer ] };\n"
-    "  key <I156> { [ XF86Launch1 ] };\n"
-    "  key <I157> { [ XF86Launch2 ] };\n"
-    "  key <I158> { [ XF86WWW ] };\n"
-    "  key <I159> { [ XF86DOS ] };\n"
-    "  key <I160> { [ XF86ScreenSaver ] };\n"
-    "  key <I161> { [ XF86RotateWindows ] };\n"
-    "  key <I162> { [ XF86TaskPane ] };\n"
-    "  key <I163> { [ XF86Mail ] };\n"
-    "  key <I164> { [ XF86Favorites ] };\n"
-    "  key <I165> { [ XF86MyComputer ] };\n"
-    "  key <I166> { [ XF86Back ] };\n"
-    "  key <I167> { [ XF86Forward ] };\n"
-    "  key <I169> { [ XF86Eject ] };\n"
-    "  key <I170> { [ XF86Eject ] };\n"
-    "  key <I171> { [ XF86AudioNext ] };\n"
-    "  key <I172> { [ XF86AudioPlay, XF86AudioPause ] };\n"
-    "  key <I173> { [ XF86AudioPrev ] };\n"
-    "  key <I174> { [ XF86AudioStop, XF86Eject ] };\n"
-    "  key <I175> { [ XF86AudioRecord ] };\n"
-    "  key <I176> { [ XF86AudioRewind ] };\n"
-    "  key <I177> { [ XF86Phone ] };\n"
-    "  key <I179> { [ XF86Tools ] };\n"
-    "  key <I180> { [ XF86HomePage ] };\n"
-    "  key <I181> { [ XF86Reload ] };\n"
-    "  key <I182> { [ XF86Close ] };\n"
-    "  key <I185> { [ XF86ScrollUp ] };\n"
-    "  key <I186> { [ XF86ScrollDown ] };\n"
-    "  key <I187> { [ parenleft ] };\n"
-    "  key <I188> { [ parenright ] };\n"
-    "  key <I189> { [ XF86New ] };\n"
-    "  key <I190> { [ Redo ] };\n"
-    "  key <FK13> { [ XF86Tools ] };\n"
-    "  key <FK14> { [ XF86Launch5 ] };\n"
-    "  key <FK15> { [ XF86Launch6 ] };\n"
-    "  key <FK16> { [ XF86Launch7 ] };\n"
-    "  key <FK17> { [ XF86Launch8 ] };\n"
-    "  key <FK18> { [ XF86Launch9 ] };\n"
-    "  key <FK20> { [ XF86AudioMicMute ] };\n"
-    "  key <FK21> { [ XF86TouchpadToggle ] };\n"
-    "  key <FK22> { [ XF86TouchpadOn ] };\n"
-    "  key <FK23> { [ XF86TouchpadOff ] };\n"
-    "  key <LVL5> { [ ISO_Level5_Shift ] };\n"
-    "  key <ALT> { [ NoSymbol, Alt_L ] };\n"
-    "  key <META> { [ NoSymbol, Meta_L ] };\n"
-    "  key <SUPR> { [ NoSymbol, Super_L ] };\n"
-    "  key <HYPR> { [ NoSymbol, Hyper_L ] };\n"
-    "  key <I208> { [ XF86AudioPlay ] };\n"
-    "  key <I209> { [ XF86AudioPause ] };\n"
-    "  key <I210> { [ XF86Launch3 ] };\n"
-    "  key <I211> { [ XF86Launch4 ] };\n"
-    "  key <I212> { [ XF86LaunchB ] };\n"
-    "  key <I213> { [ XF86Suspend ] };\n"
-    "  key <I214> { [ XF86Close ] };\n"
-    "  key <I215> { [ XF86AudioPlay ] };\n"
-    "  key <I216> { [ XF86AudioForward ] };\n"
-    "  key <I218> { [ Print ] };\n"
-    "  key <I220> { [ XF86WebCam ] };\n"
-    "  key <I221> { [ XF86AudioPreset ] };\n"
-    "  key <I223> { [ XF86Mail ] };\n"
-    "  key <I224> { [ XF86Messenger ] };\n"
-    "  key <I225> { [ XF86Search ] };\n"
-    "  key <I226> { [ XF86Go ] };\n"
-    "  key <I227> { [ XF86Finance ] };\n"
-    "  key <I228> { [ XF86Game ] };\n"
-    "  key <I229> { [ XF86Shop ] };\n"
-    "  key <I231> { [ Cancel ] };\n"
-    "  key <I232> { [ XF86MonBrightnessDown ] };\n"
-    "  key <I233> { [ XF86MonBrightnessUp ] };\n"
-    "  key <I234> { [ XF86AudioMedia ] };\n"
-    "  key <I235> { [ XF86Display ] };\n"
-    "  key <I236> { [ XF86KbdLightOnOff ] };\n"
-    "  key <I237> { [ XF86KbdBrightnessDown ] };\n"
-    "  key <I238> { [ XF86KbdBrightnessUp ] };\n"
-    "  key <I239> { [ XF86Send ] };\n"
-    "  key <I240> { [ XF86Reply ] };\n"
-    "  key <I241> { [ XF86MailForward ] };\n"
-    "  key <I242> { [ XF86Save ] };\n"
-    "  key <I243> { [ XF86Documents ] };\n"
-    "  key <I244> { [ XF86Battery ] };\n"
-    "  key <I245> { [ XF86Bluetooth ] };\n"
-    "  key <I246> { [ XF86WLAN ] };\n"
-    "  key <I247> { [ XF86UWB ] };\n"
-    "  key <I249> { [ XF86Next_VMode ] };\n"
-    "  key <I250> { [ XF86Prev_VMode ] };\n"
-    "  key <I251> { [ XF86MonBrightnessCycle ] };\n"
-    "  key <I252> { [ XF86BrightnessAuto ] };\n"
-    "  key <I253> { [ XF86DisplayOff ] };\n"
-    "  key <I254> { [ XF86WWAN ] };\n"
-    "  key <I255> { [ XF86RFKill ] };\n"
-    "  modifier_map Shift { <LFSH>, <RTSH> };\n"
-    "  modifier_map Lock { <CAPS> };\n"
-    "  modifier_map Control { <LCTL>, <RCTL> };\n"
-    "  modifier_map Mod1 { <LALT>, <RALT> };\n"
-    "  modifier_map Mod2 { <NMLK> };\n"
-    "  modifier_map Mod4 { <LWIN>, <RWIN> };\n"
-    "};\n"
-    "};\n"
-    ;
-
-/* Weak so that a dedicated keymap.c (shared with clients) may take over. */
-__attribute__((weak)) const char *lm_keymap_us_text(void)
-{
-    return lumen_keymap_text;
-}
-
 /* ---- state ---------------------------------------------------------------------------- */
 
 struct seat_binding {                   /* a bound wl_seat */
@@ -849,7 +153,7 @@ struct lm_seat {
     int n_keys;
     uint32_t swallowed[MAX_KEYS];       /* codes whose press the wm consumed */
     int n_swallowed;
-    uint32_t mods_dep, mods_lock;
+    uint32_t mods_dep, mods_lat, mods_lock, group;
     int keymap_fd;
     uint32_t keymap_size;
 
@@ -863,6 +167,17 @@ struct lm_seat {
 
     /* clipboard */
     struct data_source *selection;
+
+    /* clipboard history for the gadget: the compositor itself reads the text of every new selection */
+    char *clip_hist[LM_CLIP_HISTORY];   /* newest first */
+    int clip_n;
+    struct {
+        int fd;                         /* read end of the pipe handed to the source, -1 = idle */
+        struct lm_source *src;
+        struct lm_timer *timer;         /* gives up on a source that never answers */
+        char *buf;
+        size_t len;
+    } cap;
 };
 
 /* ---- small helpers -------------------------------------------------------------------- */
@@ -1410,8 +725,8 @@ static void keyboard_send_enter(struct lm_seat *seat, struct seat_keyboard *k, u
 {
     struct lm_array keys = { (uint32_t)seat->n_keys * (uint32_t)sizeof(uint32_t), seat->keys_down };
     lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_ENTER, serial, seat->kfocus->resource, &keys);
-    lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_MODIFIERS, serial, seat->mods_dep, 0u,
-                     seat->mods_lock, 0u);
+    lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_MODIFIERS, serial, seat->mods_dep, seat->mods_lat,
+                     seat->mods_lock, seat->group);
 }
 
 struct lm_surface *lm_seat_keyboard_focus(const struct lm_seat *seat)
@@ -1461,8 +776,22 @@ static void keyboard_send_modifiers(struct lm_seat *seat)
     uint32_t serial = next_serial(seat);
     struct seat_keyboard *k;
     FOR_CLIENT_OBJECTS(k, &seat->keyboards, cl)
-        lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_MODIFIERS, serial, seat->mods_dep, 0u,
-                         seat->mods_lock, 0u);
+        lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_MODIFIERS, serial, seat->mods_dep, seat->mods_lat,
+                         seat->mods_lock, seat->group);
+}
+
+/* New modifier / layout state from the input module: remember it, tell the focused client and the panel. */
+static void keyboard_set_state(struct lm_seat *seat, uint32_t dep, uint32_t lat, uint32_t lock, uint32_t group)
+{
+    if (dep == seat->mods_dep && lat == seat->mods_lat && lock == seat->mods_lock && group == seat->group)
+        return;
+    seat->mods_dep = dep;
+    seat->mods_lat = lat;
+    seat->mods_lock = lock;
+    seat->group = group;
+    keyboard_send_modifiers(seat);
+    if (seat->srv->wm)
+        lm_wm_keyboard_state_changed(seat->srv->wm);
 }
 
 static void handle_key(struct lm_seat *seat, const struct lm_input_event *ev)
@@ -1470,12 +799,14 @@ static void handle_key(struct lm_seat *seat, const struct lm_input_event *ev)
     uint32_t code = ev->u.key.code;
     bool pressed = ev->u.key.pressed;
     uint32_t dep = ev->u.key.mods_depressed;
+    uint32_t lat = ev->u.key.mods_latched;
     uint32_t lock = ev->u.key.mods_locked;
     uint32_t time_ms = ev->time_ms;
 
-    /* Shortcuts only look at depressed modifiers (a locked NumLock must not break them). */
+    /* Shortcuts look at depressed, latched and sticky-locked modifiers (a locked NumLock/Caps must not break them). */
+    uint32_t effective = dep | lat | (lock & ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM));
     bool consumed = seat->srv->wm
-        ? lm_wm_key(seat->srv->wm, time_ms, code, pressed, ev->u.key.repeat, dep)
+        ? lm_wm_key(seat->srv->wm, time_ms, code, pressed, ev->u.key.repeat, effective)
         : false;
 
     if (ev->u.key.repeat) {
@@ -1511,17 +842,17 @@ static void handle_key(struct lm_seat *seat, const struct lm_input_event *ev)
         }
     }
 
-    if (dep != seat->mods_dep || lock != seat->mods_lock) {
-        seat->mods_dep = dep;
-        seat->mods_lock = lock;
-        keyboard_send_modifiers(seat);
-    }
+    keyboard_set_state(seat, dep, lat, lock, ev->u.key.group);
 }
 
 /* wl_keyboard keymap file: a sealed memfd holding the keymap text. */
-static int keymap_make_fd(uint32_t *size_out)
+static int keymap_make_fd(const int *layouts, int nlayouts, uint32_t *size_out)
 {
-    const char *text = lumen_keymap_text;
+    static const int us_only[1] = { 0 };
+    char *built = nlayouts > 0 ? lm_keymap_build(layouts, nlayouts) : lm_keymap_build(us_only, 1);
+    if (!built)
+        return -1;
+    const char *text = built;
     size_t len = strlen(text) + 1;
     int fd = memfd_create("lumen-xkb-keymap", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     bool sealable = fd >= 0;
@@ -1531,10 +862,12 @@ static int keymap_make_fd(uint32_t *size_out)
             dir = "/tmp";
         char path[512];
         if (snprintf(path, sizeof(path), "%s/lumen-keymap-XXXXXX", dir) >= (int)sizeof(path))
-            return -1;
+            { free(built); return -1; }
         fd = mkostemp(path, O_CLOEXEC);
-        if (fd < 0)
+        if (fd < 0) {
+            free(built);
             return -1;
+        }
         unlink(path);
     }
     size_t off = 0;
@@ -1544,6 +877,7 @@ static int keymap_make_fd(uint32_t *size_out)
             if (errno == EINTR)
                 continue;
             close(fd);
+            free(built);
             return -1;
         }
         off += (size_t)n;
@@ -1551,6 +885,7 @@ static int keymap_make_fd(uint32_t *size_out)
     if (sealable)
         fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
     *size_out = (uint32_t)len;
+    free(built);
     return fd;
 }
 
@@ -1713,6 +1048,39 @@ static void seat_get_keyboard(struct lm_resource *res, const union lm_arg *args)
                      delay < 0 ? 0 : delay);
     if (seat->kfocus && surface_client(seat->kfocus) == res->client)
         keyboard_send_enter(seat, k, next_serial(seat));
+}
+
+/* Settings: a different set of layouts. Every keyboard object gets the new keymap (the group number follows with the
+ * LM_INPUT_MODS event the input module emits right after). */
+void lm_seat_set_layouts(struct lm_seat *seat, const int *layouts, int n)
+{
+    uint32_t size = 0;
+    int fd = keymap_make_fd(layouts, n, &size);
+    if (fd < 0) {
+        lm_warn("could not create the new keymap file: %s; clients keep the old one", strerror(errno));
+        return;
+    }
+    if (seat->keymap_fd >= 0)
+        close(seat->keymap_fd);
+    seat->keymap_fd = fd;
+    seat->keymap_size = size;
+    struct seat_keyboard *k;
+    lm_list_for_each(k, &seat->keyboards, link)
+        lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_KEYMAP, (uint32_t)LM_KEYBOARD_KEYMAP_XKB_V1, fd, size);
+    /* A new keymap resets the clients' xkb state: whatever modifiers/group event follows must be sent even if it
+     * equals what the seat last sent (keyboard_set_state would drop it). */
+    seat->group = UINT32_MAX;
+}
+
+/* Settings: key repeat rate / delay changed (wl_keyboard.repeat_info exists since version 4). */
+void lm_seat_send_repeat_info(struct lm_seat *seat)
+{
+    int32_t rate = seat->srv->config.repeat_rate;
+    int32_t delay = seat->srv->config.repeat_delay_ms;
+    struct seat_keyboard *k;
+    lm_list_for_each(k, &seat->keyboards, link)
+        if (k->res->version >= 4)
+            lm_resource_post(k->res, LM_WL_KEYBOARD_EVT_REPEAT_INFO, rate < 0 ? 0 : rate, delay < 0 ? 0 : delay);
 }
 
 static void seat_get_touch(struct lm_resource *res, const union lm_arg *args)
@@ -2063,12 +1431,168 @@ static void selection_update_focus(struct lm_seat *seat)
         device_send_selection(seat, d);
 }
 
+/* ---- clipboard history (gadget) ---------------------------------------------------------------------------------- */
+
+#define CLIP_MAX 2048                   /* bytes kept of one entry */
+#define CLIP_TIMEOUT_MS 1000
+
+static const char *const clip_mimes[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
+
+static void clip_push(struct lm_seat *seat, char *text)   /* takes ownership */
+{
+    for (int i = 0; i < seat->clip_n; i++) {
+        if (strcmp(seat->clip_hist[i], text) == 0) {      /* copied again: move to the top */
+            free(text);
+            text = seat->clip_hist[i];
+            memmove(&seat->clip_hist[1], &seat->clip_hist[0], (size_t)i * sizeof(char *));
+            seat->clip_hist[0] = text;
+            goto changed;
+        }
+    }
+    if (seat->clip_n == LM_CLIP_HISTORY)
+        free(seat->clip_hist[--seat->clip_n]);
+    memmove(&seat->clip_hist[1], &seat->clip_hist[0], (size_t)seat->clip_n * sizeof(char *));
+    seat->clip_hist[0] = text;
+    seat->clip_n++;
+changed:
+    if (!seat->dying && seat->srv->wm)
+        lm_wm_clipboard_changed(seat->srv->wm);
+}
+
+static void clip_capture_stop(struct lm_seat *seat)
+{
+    if (seat->cap.src)
+        lm_source_remove(seat->cap.src);
+    seat->cap.src = NULL;
+    if (seat->cap.timer)
+        lm_timer_arm_ms(seat->cap.timer, 0, 0);
+    if (seat->cap.fd >= 0)
+        close(seat->cap.fd);
+    seat->cap.fd = -1;
+}
+
+static void clip_capture_finish(struct lm_seat *seat)
+{
+    char *text = seat->cap.buf;
+    size_t len = seat->cap.len;
+    seat->cap.buf = NULL;
+    seat->cap.len = 0;
+    clip_capture_stop(seat);
+    bool blank = true;
+    for (size_t i = 0; i < len && blank; i++)
+        blank = text[i] == ' ' || text[i] == '\n' || text[i] == '\t' || text[i] == '\r' || !text[i];
+    if (!text || blank) {
+        free(text);
+        return;
+    }
+    text[len] = 0;
+    clip_push(seat, text);
+}
+
+static void clip_fd_cb(int fd, uint32_t events, void *data)
+{
+    struct lm_seat *seat = data;
+    (void)events;
+    for (;;) {
+        size_t room = CLIP_MAX - seat->cap.len;
+        if (!room) {                    /* enough: the rest is cut off */
+            clip_capture_finish(seat);
+            return;
+        }
+        ssize_t k = read(fd, seat->cap.buf + seat->cap.len, room);
+        if (k > 0) {
+            seat->cap.len += (size_t)k;
+            continue;
+        }
+        if (k < 0 && errno == EINTR)
+            continue;
+        if (k < 0 && errno == EAGAIN)
+            return;                     /* more may come */
+        clip_capture_finish(seat);      /* EOF or error */
+        return;
+    }
+}
+
+static void clip_timeout_cb(void *data)
+{
+    struct lm_seat *seat = data;
+    if (seat->cap.fd >= 0)
+        clip_capture_finish(seat);
+}
+
+static void clip_capture_abort(struct lm_seat *seat)
+{
+    free(seat->cap.buf);
+    seat->cap.buf = NULL;
+    seat->cap.len = 0;
+    clip_capture_stop(seat);
+}
+
+/* Ask the owner of a new selection for its text (asynchronously: the pipe is read from the loop). */
+static void clip_capture_start(struct lm_seat *seat, struct data_source *src)
+{
+    clip_capture_abort(seat);
+    if (!seat->srv->loop || seat->dying)
+        return;
+    const char *mime = NULL;
+    for (size_t m = 0; m < sizeof(clip_mimes) / sizeof(clip_mimes[0]) && !mime; m++)
+        for (int i = 0; i < src->n_mimes; i++)
+            if (strcmp(src->mimes[i], clip_mimes[m]) == 0) {
+                mime = src->mimes[i];
+                break;
+            }
+    if (!mime)
+        return;                         /* images, files ...: nothing to show */
+    int p[2];
+    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) < 0)
+        return;
+    seat->cap.buf = malloc(CLIP_MAX + 1);
+    if (!seat->cap.buf) {
+        close(p[0]);
+        close(p[1]);
+        return;
+    }
+    seat->cap.fd = p[0];
+    seat->cap.src = lm_loop_add_fd(seat->srv->loop, p[0], 1 /* EPOLLIN */, clip_fd_cb, seat);
+    if (!seat->cap.timer)
+        seat->cap.timer = lm_loop_add_timer(seat->srv->loop, clip_timeout_cb, seat);
+    if (!seat->cap.src || !seat->cap.timer) {
+        clip_capture_abort(seat);
+        close(p[1]);
+        return;
+    }
+    lm_timer_arm_ms(seat->cap.timer, CLIP_TIMEOUT_MS, 0);
+    lm_resource_post(src->res, LM_WL_DATA_SOURCE_EVT_SEND, mime, p[1]);   /* the wire layer dup()s the fd */
+    close(p[1]);
+}
+
+int lm_seat_clip_count(const struct lm_seat *seat) { return seat ? seat->clip_n : 0; }
+
+const char *lm_seat_clip_get(const struct lm_seat *seat, int i)
+{
+    return seat && i >= 0 && i < seat->clip_n ? seat->clip_hist[i] : NULL;
+}
+
+void lm_seat_clip_clear(struct lm_seat *seat)
+{
+    if (!seat)
+        return;
+    clip_capture_abort(seat);
+    for (int i = 0; i < seat->clip_n; i++)
+        free(seat->clip_hist[i]);
+    seat->clip_n = 0;
+    if (!seat->dying && seat->srv->wm)
+        lm_wm_clipboard_changed(seat->srv->wm);
+}
+
 static void seat_set_selection(struct lm_seat *seat, struct data_source *src)
 {
     if (seat->selection == src)
         return;
     struct data_source *old = seat->selection;
     seat->selection = src;
+    if (src)
+        clip_capture_start(seat, src);
     if (old)
         lm_resource_post(old->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
     selection_update_focus(seat);
@@ -2230,6 +1754,9 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
     case LM_INPUT_KEY:
         handle_key(seat, ev);
         break;
+    case LM_INPUT_MODS:
+        keyboard_set_state(seat, ev->u.mods.depressed, ev->u.mods.latched, ev->u.mods.locked, ev->u.mods.group);
+        break;
     case LM_INPUT_POINTER_MOTION:
         if (!seat->pos_valid)
             break;
@@ -2288,6 +1815,7 @@ struct lm_seat *lm_seat_create(struct lm_server *srv)
         return NULL;
     seat->srv = srv;
     seat->keymap_fd = -1;
+    seat->cap.fd = -1;
     lm_list_init(&seat->bindings);
     lm_list_init(&seat->pointers);
     lm_list_init(&seat->keyboards);
@@ -2302,7 +1830,7 @@ struct lm_seat *lm_seat_create(struct lm_server *srv)
     for (int i = 0; i < MAX_TOUCH; i++)
         lm_list_init(&seat->points[i].destroy.link);
 
-    seat->keymap_fd = keymap_make_fd(&seat->keymap_size);
+    seat->keymap_fd = keymap_make_fd(srv->config.kbd_layouts, srv->config.kbd_nlayouts, &seat->keymap_size);
     if (seat->keymap_fd < 0)
         lm_warn("could not create the keymap file: %s; clients get no keymap", strerror(errno));
 
@@ -2339,6 +1867,14 @@ void lm_seat_destroy(struct lm_seat *seat)
         lm_global_destroy(seat->ddm_global);
     if (seat->refocus_idle)
         lm_idle_destroy(seat->refocus_idle);
+
+    clip_capture_abort(seat);
+    if (seat->cap.timer)
+        lm_timer_destroy(seat->cap.timer);
+    seat->cap.timer = NULL;
+    for (int i = 0; i < seat->clip_n; i++)
+        free(seat->clip_hist[i]);
+    seat->clip_n = 0;
 
     /* Clients may outlive the seat: release every resource that points into it. */
     seat->selection = NULL;

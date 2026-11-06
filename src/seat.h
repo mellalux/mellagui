@@ -124,6 +124,21 @@ bool lm_seat_pointer_has_grab(const struct lm_seat *seat);
 void lm_seat_set_keyboard_focus(struct lm_seat *seat, struct lm_surface *s);
 struct lm_surface *lm_seat_keyboard_focus(const struct lm_seat *seat);
 
+/* ---- clipboard history -----------------------------------------------------------------------------------
+ * Whenever a client sets a text selection the seat reads that text itself (asynchronously, through a pipe handed to
+ * the data source, at most 2 KiB, 1 s) and remembers the last LM_CLIP_HISTORY distinct texts for the wm's clipboard
+ * gadget. Clearing the selection keeps the history. Entry 0 is the newest; the pointer is valid until the next
+ * clipboard change. A change is announced with lm_wm_clipboard_changed().
+ */
+#define LM_CLIP_HISTORY 5
+/* Settings panel: new set of keyboard layouts (XKB groups) / new key repeat values (from server->config). */
+void lm_seat_set_layouts(struct lm_seat *seat, const int *layouts, int n);
+void lm_seat_send_repeat_info(struct lm_seat *seat);
+
+int lm_seat_clip_count(const struct lm_seat *seat);
+const char *lm_seat_clip_get(const struct lm_seat *seat, int i);
+void lm_seat_clip_clear(struct lm_seat *seat);      /* forget the history (control socket `clip clear`) */
+
 /* ---- serials -------------------------------------------------------------------------------- */
 
 bool lm_seat_serial_valid(const struct lm_seat *seat, struct lm_client *client,

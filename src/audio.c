@@ -382,6 +382,256 @@ bool lm_audio_set_sink(const char *name)
     return !strcmp(buf, name);
 }
 
+/* ---- PipeWire card profiles (pw-cli) ------------------------------------------------------------------------------- */
+
+static const char *after_prefix(const char *l, const char *prefix)
+{
+    while (*l == ' ' || *l == '\t')
+        l++;
+    size_t n = strlen(prefix);
+    return strncmp(l, prefix, n) ? NULL : l + n;
+}
+
+/* The quoted string of a line like `      String "Built-in Audio"` / `device.description = "Built-in Audio"`. */
+static bool quoted(const char *l, char *out, size_t n)
+{
+    const char *a = strchr(l, '"');
+    const char *b = a ? strrchr(a + 1, '"') : NULL;
+    if (!a || !b)
+        return false;
+    snprintf(out, n, "%.*s", (int)(b - a - 1), a + 1);
+    return true;
+}
+
+int lm_audio_parse_cards(const char *text, struct lm_audio_card *out, int max)
+{
+    int n = 0, id = -1;
+    char desc[64] = "";
+    bool audio = false;
+    const char *p = text;
+    while (1) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        char line[256];
+        snprintf(line, sizeof(line), "%.*s", (int)len, p);
+        const char *v;
+        bool end = !eol;
+        p = eol ? eol + 1 : p + len;
+        if ((v = after_prefix(line, "id ")) || end) {                   /* a new object (or the end): flush the previous one */
+            if (id >= 0 && audio && n < max) {
+                out[n].id = id;
+                snprintf(out[n].desc, sizeof(out[n].desc), "%s", desc[0] ? desc : "Sound card");
+                n++;
+            }
+            id = -1;
+            audio = false;
+            desc[0] = 0;
+            if (v)
+                id = atoi(v);
+        } else if (strstr(line, "media.class") && strstr(line, "Audio/Device")) {
+            audio = true;
+        } else if (strstr(line, "device.description")) {
+            quoted(line, desc, sizeof(desc));
+        }
+        if (end)
+            break;
+    }
+    return n;
+}
+
+int lm_audio_parse_profiles(const char *text, struct lm_audio_profile *out, int max)
+{
+    int n = 0;
+    struct lm_audio_profile cur;
+    bool have = false;
+    enum { NONE, INDEX, NAME, DESC, AVAIL } want = NONE;
+    const char *p = text;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        char line[256];
+        snprintf(line, sizeof(line), "%.*s", (int)len, p);
+        p = eol ? eol + 1 : p + len;
+        const char *v;
+        if ((v = after_prefix(line, "Object:"))) {
+            if (have && n < max)
+                out[n++] = cur;
+            memset(&cur, 0, sizeof(cur));
+            cur.index = -1;
+            have = true;
+            want = NONE;
+        } else if (strstr(line, "Prop: key") && strstr(line, "Profile:index")) {
+            want = INDEX;
+        } else if (strstr(line, "Prop: key") && strstr(line, "Profile:name")) {
+            want = NAME;
+        } else if (strstr(line, "Prop: key") && strstr(line, "Profile:description")) {
+            want = DESC;
+        } else if (strstr(line, "Prop: key") && strstr(line, "Profile:available")) {
+            want = AVAIL;
+        } else if (strstr(line, "Prop: key")) {
+            want = NONE;
+        } else if (have && want == INDEX && (v = after_prefix(line, "Int "))) {
+            cur.index = atoi(v);
+            want = NONE;
+        } else if (have && want == NAME && strstr(line, "String")) {
+            quoted(line, cur.name, sizeof(cur.name));
+            want = NONE;
+        } else if (have && want == DESC && strstr(line, "String")) {
+            quoted(line, cur.desc, sizeof(cur.desc));
+            want = NONE;
+        } else if (have && want == AVAIL && (v = after_prefix(line, "Id "))) {
+            cur.available = !strstr(line, "ParamAvailability:no");        /* yes and unknown both count */
+            want = NONE;
+        }
+    }
+    if (have && n < max)
+        out[n++] = cur;
+    int m = 0;
+    for (int i = 0; i < n; i++)                                           /* only complete ones */
+        if (out[i].index >= 0 && out[i].name[0]) {
+            if (m != i)
+                out[m] = out[i];
+            m++;
+        }
+    return m;
+}
+
+int lm_audio_parse_current_profile(const char *text)
+{
+    bool want = false;
+    const char *p = text;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        char line[256];
+        snprintf(line, sizeof(line), "%.*s", (int)len, p);
+        p = eol ? eol + 1 : p + len;
+        const char *v;
+        if (strstr(line, "Prop: key"))
+            want = strstr(line, "Profile:index") != NULL;
+        else if (want && (v = after_prefix(line, "Int ")))
+            return atoi(v);
+    }
+    return -1;
+}
+
+/* "output:hdmi-stereo+input:iec958-stereo" -> "hdmi-stereo" (empty when there is no output part). */
+static void output_type(const char *name, char *out, size_t n)
+{
+    out[0] = 0;
+    const char *o = strstr(name, "output:");
+    if (!o)
+        return;
+    o += 7;
+    snprintf(out, n, "%.*s", (int)strcspn(o, "+"), o);
+}
+
+int lm_audio_pick_profiles(const struct lm_audio_profile *in, int n, int current_index, int *picked, int max, int *current_pick)
+{
+    int m = 0;
+    char cur_type[48] = "";
+    for (int i = 0; i < n; i++)
+        if (in[i].index == current_index)
+            output_type(in[i].name, cur_type, sizeof(cur_type));
+    if (current_pick)
+        *current_pick = -1;
+    char seen[16][48];
+    int nseen = 0;
+    for (int i = 0; i < n && m < max; i++) {
+        char type[48];
+        output_type(in[i].name, type, sizeof(type));
+        if (!type[0] || strstr(type, "surround"))
+            continue;
+        bool done = false;
+        for (int k = 0; k < nseen; k++)
+            done = done || !strcmp(seen[k], type);
+        if (done || nseen >= 16)
+            continue;
+        /* the best profile for this output type: the one with nothing else in it, else the first available one */
+        int best = -1;
+        char pure[64];
+        snprintf(pure, sizeof(pure), "output:%s", type);
+        for (int j = 0; j < n; j++) {
+            char t2[48];
+            output_type(in[j].name, t2, sizeof(t2));
+            if (strcmp(t2, type) || !in[j].available)
+                continue;
+            if (!strcmp(in[j].name, pure)) {
+                best = j;
+                break;
+            }
+            if (best < 0)
+                best = j;
+        }
+        snprintf(seen[nseen++], 48, "%s", type);
+        if (best < 0)
+            continue;                                                   /* nothing of this type is available (unplugged) */
+        if (!strcmp(type, cur_type) && current_pick)
+            *current_pick = m;
+        picked[m++] = best;
+    }
+    return m;
+}
+
+static char g_profile_buf[65536];                                       /* pw-cli prints ~700 bytes per profile */
+
+int lm_audio_list_profiles(char *list, size_t n, char *current, size_t cn)
+{
+    if (n)
+        list[0] = 0;
+    if (cn)
+        current[0] = 0;
+    if (!in_path("pw-cli"))
+        return 0;
+    char *const ls_cmd[] = { "pw-cli", "ls", "Device", NULL };
+    if (!run_capture(ls_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+        return 0;
+    struct lm_audio_card cards[8];
+    int nc = lm_audio_parse_cards(g_profile_buf, cards, 8), total = 0;
+    for (int c = 0; c < nc; c++) {
+        char id[16];
+        snprintf(id, sizeof(id), "%d", cards[c].id);
+        char *const enum_cmd[] = { "pw-cli", "enum-params", id, "EnumProfile", NULL };
+        if (!run_capture(enum_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+            continue;
+        static struct lm_audio_profile profs[64];
+        int np = lm_audio_parse_profiles(g_profile_buf, profs, 64);
+        char *const cur_cmd[] = { "pw-cli", "enum-params", id, "Profile", NULL };
+        int cur_index = -1;
+        if (run_capture(cur_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+            cur_index = lm_audio_parse_current_profile(g_profile_buf);
+        int picked[8], cur_pick;
+        int m = lm_audio_pick_profiles(profs, np, cur_index, picked, 8, &cur_pick);
+        for (int i = 0; i < m; i++) {
+            char name[24], desc[160];
+            snprintf(name, sizeof(name), "%d:%d", cards[c].id, profs[picked[i]].index);
+            snprintf(desc, sizeof(desc), "%s - %s", cards[c].desc, profs[picked[i]].desc);
+            add_entry(list, n, name, desc);
+            if (i == cur_pick && cn)
+                snprintf(current, cn, "%s", name);
+            total++;
+        }
+    }
+    return total;
+}
+
+bool lm_audio_set_profile(const char *entry)
+{
+    int card, index;
+    char junk;
+    if (!entry || sscanf(entry, "%d:%d%c", &card, &index, &junk) != 2 || card < 0 || index < 0 || !in_path("pw-cli"))
+        return false;
+    char id[16], param[48];
+    snprintf(id, sizeof(id), "%d", card);
+    snprintf(param, sizeof(param), "{ index: %d }", index);
+    char *const set_cmd[] = { "pw-cli", "set-param", id, "Profile", param, NULL };
+    run_capture(set_cmd, g_profile_buf, sizeof(g_profile_buf), 2000);
+    char *const cur_cmd[] = { "pw-cli", "enum-params", id, "Profile", NULL };
+    if (!run_capture(cur_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+        return false;
+    return lm_audio_parse_current_profile(g_profile_buf) == index;
+}
+
 /* ---- asynchronous processes (mixer) ---------------------------------------------------------------------------- */
 
 #define PROC_OUT_MAX 16384

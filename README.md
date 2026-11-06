@@ -101,8 +101,9 @@ once, nothing has to be restarted), sticky keys, key repeat delay and rate, and 
 natural scrolling. *Desktop*: the clipboard gadget and the sound feedback. *Display*: the resolution (automatic, the monitor's preferred
 mode, or one of its modes - the list includes a mode in the panel's own shape when the GPU does not offer the native one); it is applied at
 once and goes back after 15 s unless you press *Keep* (a wrong mode can leave the screen black, and a black screen cannot confirm anything);
-only a kept resolution is saved. *Sound*: the ALSA device for Lumen's own beeps (HDMI/DisplayPort outputs are listed and marked) and, when a
-PulseAudio/PipeWire server runs, the default output for applications such as Firefox (`pactl`, else PipeWire's `wpctl`). When nothing is
+only a kept resolution is saved. *Sound*: the sound card's **output device** (analog, HDMI, S/PDIF: with PipeWire this is the card profile, switched with `pw-cli`; this is
+how HDMI audio is chosen, the new output becomes the default one within a second or two), the default output for applications such as
+Firefox when a PulseAudio/PipeWire server runs, and the ALSA device for Lumen's own beeps (HDMI/DisplayPort outputs are listed and marked) (`pactl`, else PipeWire's `wpctl`). When nothing is
 listed the page says why: neither tool installed (`sudo apt install pulseaudio-utils`), or no sound server answering (start it with
 `systemctl --user enable --now pipewire pipewire-pulse wireplumber`; it can take a few seconds until the devices appear). Changes apply immediately and are saved (about 0.3 s later) to
 `$XDG_CONFIG_HOME/lumen/settings.conf` (`~/.config/lumen/settings.conf`; `--settings FILE` chooses another file, `--settings none` saves

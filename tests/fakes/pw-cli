@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""A fake `pw-cli` for the tests: two ALSA cards (a webcam and an Intel HDA card) with PipeWire card profiles, state in
+$LUMEN_FAKE_PW (json). Prints what the real pw-cli prints for `ls Device`, `enum-params <id> EnumProfile|Profile` and accepts
+`set-param <id> Profile '{ index: N }'`."""
+import json, os, re, sys
+
+path = os.environ.get('LUMEN_FAKE_PW', '/tmp/lumen-fake-pw.json')
+# (index, name, description, available)
+PROFILES = [
+    (0, 'off', 'Off', 'yes'),
+    (1, 'output:analog-stereo+input:analog-stereo', 'Analog Stereo Duplex', 'no'),
+    (2, 'output:analog-stereo+input:iec958-stereo', 'Analog Stereo Output + Digital Stereo (IEC958) Input', 'yes'),
+    (3, 'output:analog-stereo', 'Analog Stereo Output', 'yes'),
+    (4, 'output:hdmi-stereo+input:analog-stereo', 'Digital Stereo (HDMI) Output + Analog Stereo Input', 'no'),
+    (5, 'output:hdmi-stereo+input:iec958-stereo', 'Digital Stereo (HDMI) Output + Digital Stereo (IEC958) Input', 'yes'),
+    (6, 'output:hdmi-stereo', 'Digital Stereo (HDMI) Output', 'yes'),
+    (11, 'output:hdmi-stereo-extra1', 'Digital Stereo (HDMI 2) Output', 'no'),
+    (15, 'output:iec958-stereo', 'Digital Stereo (IEC958) Output', 'yes'),
+    (16, 'output:hdmi-surround-extra1', 'Digital Surround 5.1 (HDMI 2) Output', 'no'),
+    (29, 'input:iec958-stereo', 'Digital Stereo (IEC958) Input', 'yes'),
+    (30, 'pro-audio', 'Pro Audio', 'unknown'),
+]
+WEBCAM = [(0, 'off', 'Off', 'yes'), (1, 'input:analog-stereo', 'Mono Input', 'yes')]
+try:
+    st = json.load(open(path))
+except Exception:
+    st = {'cur': {'42': 1, '43': 2}, 'log': []}
+a = sys.argv[1:]
+st['log'].append(' '.join(a))
+out = ''
+if a[:2] == ['ls', 'Device']:
+    out += '\tid 40, type PipeWire:Interface:Device/3\n \t\tdevice.description = "0825"\n \t\tmedia.class = "Video/Device"\n'
+    out += '\tid 42, type PipeWire:Interface:Device/3\n \t\tdevice.description = "Webcam C270"\n \t\tdevice.nick = "USB Device 0x46d:0x825"\n \t\tmedia.class = "Audio/Device"\n'
+    out += '\tid 43, type PipeWire:Interface:Device/3\n \t\tdevice.description = "Built-in Audio"\n \t\tdevice.nick = "HDA Intel PCH"\n \t\tmedia.class = "Audio/Device"\n'
+elif a[:1] == ['enum-params'] and len(a) == 3 and a[1] in ('42', '43'):
+    profiles = WEBCAM if a[1] == '42' else PROFILES
+    if a[2] == 'EnumProfile':
+        for i, n, d, av in profiles:
+            out += ('  Object: size 424, type Spa:Pod:Object:Param:Profile (262151), id Spa:Enum:ParamId:EnumProfile (8)\n'
+                    '    Prop: key Spa:Pod:Object:Param:Profile:index (1), flags 00000000\n      Int %d\n'
+                    '    Prop: key Spa:Pod:Object:Param:Profile:name (2), flags 00000000\n      String "%s"\n'
+                    '    Prop: key Spa:Pod:Object:Param:Profile:description (3), flags 00000000\n      String "%s"\n'
+                    '    Prop: key Spa:Pod:Object:Param:Profile:priority (4), flags 00000000\n      Int 6565\n'
+                    '    Prop: key Spa:Pod:Object:Param:Profile:available (5), flags 00000000\n      Id %d        (Spa:Enum:ParamAvailability:%s)\n'
+                    '    Prop: key Spa:Pod:Object:Param:Profile:classes (7), flags 00000000\n      Struct: size 16\n        Int 0\n'
+                    % (i, n, d, {'no': 1, 'yes': 2, 'unknown': 0}[av], av))
+    elif a[2] == 'Profile':
+        idx = st['cur'][a[1]]
+        name = [n for i, n, d, av in profiles if i == idx][0]
+        out += ('  Object: size 480, type Spa:Pod:Object:Param:Profile (262151), id Spa:Enum:ParamId:Profile (9)\n'
+                '    Prop: key Spa:Pod:Object:Param:Profile:index (1), flags 00000000\n      Int %d\n'
+                '    Prop: key Spa:Pod:Object:Param:Profile:name (2), flags 00000000\n      String "%s"\n' % (idx, name))
+elif a[:1] == ['set-param'] and len(a) == 4 and a[2] == 'Profile' and a[1] in ('42', '43'):
+    m = re.match(r'\{\s*index:\s*(\d+)\s*\}$', a[3])
+    profiles = WEBCAM if a[1] == '42' else PROFILES
+    if m and int(m.group(1)) in [i for i, n, d, av in profiles]:
+        st['cur'][a[1]] = int(m.group(1))
+json.dump(st, open(path, 'w'))
+sys.stdout.write(out)

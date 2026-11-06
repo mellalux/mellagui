@@ -35,6 +35,29 @@ const char *lm_audio_sink_status(void);
 int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *current, size_t cn);
 
 /*
+ * PipeWire card profiles (through `pw-cli`): a sound card exposes one output at a time (analog, HDMI, S/PDIF ...) and
+ * switching the profile is how HDMI audio is chosen. The list has one entry per output type of each card, as
+ * "cardid:profileindex|Card name - Profile description;..." (e.g. "43:6|Built-in Audio - Digital Stereo (HDMI) Output");
+ * `current` is the entry whose output type is active now. Outputs that are not available (an unplugged HDMI) and
+ * surround variants are left out. Empty without pw-cli or a running PipeWire. Returns the number of entries.
+ */
+int lm_audio_list_profiles(char *list, size_t n, char *current, size_t cn);
+/* Switches the card to the profile of an entry of that list ("43:6"). True when PipeWire reports it active afterwards. */
+bool lm_audio_set_profile(const char *entry);
+
+struct lm_audio_card { int id; char desc[64]; };
+struct lm_audio_profile { int index; char name[64]; char desc[96]; bool available; };
+/* `pw-cli ls Device`: the Audio/Device objects (id, device.description). */
+int lm_audio_parse_cards(const char *text, struct lm_audio_card *out, int max);
+/* `pw-cli enum-params <id> EnumProfile`: every profile. */
+int lm_audio_parse_profiles(const char *text, struct lm_audio_profile *out, int max);
+/* `pw-cli enum-params <id> Profile`: index of the active profile, -1 when unknown. */
+int lm_audio_parse_current_profile(const char *text);
+/* The profiles worth showing: indexes into `in` (one per output type, see above); `*current_pick` = position in `picked` of the
+ * active output type (-1 none). Returns the count. */
+int lm_audio_pick_profiles(const struct lm_audio_profile *in, int n, int current_index, int *picked, int max, int *current_pick);
+
+/*
  * Asynchronous child process for the mixer gadget: argv[0] is searched in PATH, LC_ALL=C, stdin/stderr are /dev/null. The
  * loop collects stdout; `fn(data, output)` is called once, when the program closes its output (output = everything it
  * printed, up to 16 KiB) or after `timeout_ms` (the child is killed; output is then ""). `fn` may be NULL (fire and

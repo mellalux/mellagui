@@ -481,20 +481,26 @@ static void build_display(struct app *a, int x, int y, int w)
 
 static void build_sound(struct app *a, int x, int y, int w)
 {
-    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Lumen's own beeps (ALSA)");
-    y += ROW_H;
-    const char *cur = kv_get(a, "audio-out");
     struct entry ents[8];
-    int shown = pick_entries(kv_get(a, "audio-outs"), 6, ents);
-    for (int i = 0; i < shown; i++) {
-        add_radio(a, x, y, w, ents[i].desc, "audio-out", ents[i].name, !strcmp(cur, ents[i].name));
+    int shown;
+    const char *cur;
+    /* 1. the sound card's output (PipeWire card profile): analog, HDMI, S/PDIF - this is how HDMI audio is chosen */
+    shown = pick_entries(kv_get(a, "audio-profiles"), 3, ents);
+    if (shown) {
+        add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Output device (HDMI, analog ...)");
         y += ROW_H;
+        cur = kv_get(a, "audio-profile");
+        for (int i = 0; i < shown; i++) {
+            add_radio(a, x, y, w, ents[i].desc, "audio-profile", ents[i].name, !strcmp(cur, ents[i].name));
+            y += ROW_H;
+        }
+        y += 6;
     }
-    y += 6;
+    /* 2. the sound server's default output for applications */
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Applications (PulseAudio / PipeWire)");
     y += ROW_H;
     cur = kv_get(a, "sink");
-    shown = pick_entries(kv_get(a, "sinks"), 5, ents);
+    shown = pick_entries(kv_get(a, "sinks"), 2, ents);
     for (int i = 0; i < shown; i++) {
         add_radio(a, x, y, w, *ents[i].desc ? ents[i].desc : ents[i].name, "sink", ents[i].name, !strcmp(cur, ents[i].name));
         y += ROW_H;
@@ -504,13 +510,26 @@ static void build_sound(struct app *a, int x, int y, int w)
         if (!strcmp(why, "missing-tools")) {
             add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Neither pactl nor wpctl is installed.");
             add(a, W_LABEL, (struct rect){ x, y + ROW_H, w, ROW_H }, "sudo apt install pulseaudio-utils");
+            y += 2 * ROW_H;
         } else if (!strcmp(why, "no-server")) {
-            add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "The tools are there but no sound server answers.");
+            add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "No sound server answers. Start it with:");
             add(a, W_LABEL, (struct rect){ x, y + ROW_H, w, ROW_H }, "systemctl --user enable --now pipewire");
             add(a, W_LABEL, (struct rect){ x, y + 2 * ROW_H, w, ROW_H }, "pipewire-pulse wireplumber");
+            y += 3 * ROW_H;
         } else {
             add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Looking for a sound server...");
+            y += ROW_H;
         }
+    }
+    y += 6;
+    /* 3. Lumen's own beeps (ALSA device) */
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Lumen's own beeps (ALSA)");
+    y += ROW_H;
+    cur = kv_get(a, "audio-out");
+    shown = pick_entries(kv_get(a, "audio-outs"), 4, ents);
+    for (int i = 0; i < shown; i++) {
+        add_radio(a, x, y, w, ents[i].desc, "audio-out", ents[i].name, !strcmp(cur, ents[i].name));
+        y += ROW_H;
     }
 }
 

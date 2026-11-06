@@ -27,7 +27,7 @@
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_FILE,
-    K_RESOLUTIONS, K_RESOLUTION_NOW, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_RESCAN, K_COUNT
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -36,7 +36,8 @@ static const char *const key_names[K_COUNT] = {
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
     [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
-    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_RESCAN] = "audio-rescan",
+    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
+    [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan",
 };
 
 static int key_find(const char *key)
@@ -66,6 +67,9 @@ struct lm_settings {
     struct lm_timer *revert_timer;
     bool no_save;           /* the current `set` must not schedule a save (resolution: only once it is kept) */
     char sinks[VALUE_MAX], sink[128];       /* cached `pactl` answers, refreshed by audio-rescan */
+    char profiles[VALUE_MAX], profile[24];  /* cached PipeWire card profiles (pw-cli), the same */
+    struct lm_timer *rescan_timer;          /* after a profile change PipeWire needs a moment to make the new sink */
+    int rescan_left;
 };
 
 #define DEFAULT_REVERT_MS 15000
@@ -327,6 +331,8 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SINKS: snprintf(out, n, "%s", s->sinks); break;
     case K_SINK: snprintf(out, n, "%s", s->sink); break;
     case K_SINKS_STATUS: snprintf(out, n, "%s", lm_audio_sink_status()); break;
+    case K_AUDIO_PROFILES: snprintf(out, n, "%s", s->profiles); break;
+    case K_AUDIO_PROFILE: snprintf(out, n, "%s", s->profile); break;
     case K_AUDIO_RESCAN: snprintf(out, n, "0"); break;
     }
 }
@@ -445,6 +451,25 @@ static void save_later(struct lm_settings *s)
     s->dirty = true;
     if (s->save_timer)
         lm_timer_arm_ms(s->save_timer, SAVE_DELAY_MS, 0);
+}
+
+/* Asks the sound server again (pactl / wpctl / pw-cli): sinks, their default and the card profiles. */
+static void audio_rescan(struct lm_settings *s)
+{
+    char list[VALUE_MAX];
+    lm_audio_list_sinks(list, sizeof(list), s->sink, sizeof(s->sink));
+    snprintf(s->sinks, sizeof(s->sinks), "%s", list);
+    lm_audio_list_profiles(list, sizeof(list), s->profile, sizeof(s->profile));
+    snprintf(s->profiles, sizeof(s->profiles), "%s", list);
+}
+
+static void rescan_cb(void *data)
+{
+    struct lm_settings *s = data;
+    audio_rescan(s);
+    broadcast(s);
+    if (--s->rescan_left > 0 && s->rescan_timer)
+        lm_timer_arm_ms(s->rescan_timer, 1500, 0);
 }
 
 /* ---- resolution: change, keep or revert --------------------------------------------------------------- */
@@ -622,12 +647,17 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         if (!lm_audio_set_sink(val)) return false;
         snprintf(s->sink, sizeof(s->sink), "%s", val);
         return true;
-    case K_AUDIO_RESCAN: {
-        char list[VALUE_MAX];
-        lm_audio_list_sinks(list, sizeof(list), s->sink, sizeof(s->sink));
-        snprintf(s->sinks, sizeof(s->sinks), "%s", list);
+    case K_AUDIO_PROFILE:
+        if (!lm_audio_set_profile(val))
+            return false;
+        audio_rescan(s);
+        s->rescan_left = 2;                                         /* the new sink shows up within a second or two */
+        if (s->rescan_timer)
+            lm_timer_arm_ms(s->rescan_timer, 800, 0);
         return true;
-    }
+    case K_AUDIO_RESCAN:
+        audio_rescan(s);
+        return true;
     default:
         return false;       /* unknown or read-only ("file") */
     }
@@ -706,6 +736,7 @@ struct lm_settings *lm_settings_create(struct lm_server *srv)
     lm_list_init(&s->bindings);
     s->save_timer = lm_loop_add_timer(srv->loop, save_timer_cb, s);
     s->revert_timer = lm_loop_add_timer(srv->loop, revert_cb, s);
+    s->rescan_timer = lm_loop_add_timer(srv->loop, rescan_cb, s);
     lm_sound_set_device(srv->config.audio_device);
     s->global = lm_global_create(srv, &lm_lumen_settings_v1_interface, LM_LUMEN_SETTINGS_V1_VERSION,
                                  settings_bind, s);
@@ -733,5 +764,7 @@ void lm_settings_destroy(struct lm_settings *s)
         lm_timer_destroy(s->save_timer);
     if (s->revert_timer)
         lm_timer_destroy(s->revert_timer);
+    if (s->rescan_timer)
+        lm_timer_destroy(s->rescan_timer);
     free(s);
 }

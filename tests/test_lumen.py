@@ -1849,6 +1849,10 @@ case "$1" in
 esac
 """ % state)
         os.chmod(pactl, 0o755)
+        pwcli = os.path.join(d, 'bin', 'pw-cli')                                # no PipeWire here: never ask the real one
+        with open(pwcli, 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')
+        os.chmod(pwcli, 0o755)
         return state, {'LUMEN_ASOUND_DIR': os.path.join(d, 'asound'), 'PATH': os.path.join(d, 'bin') + ':' + os.environ['PATH']}
 
     def test_sound_outputs_list_hdmi_and_can_be_chosen(self):
@@ -1932,6 +1936,62 @@ esac
         self.assertEqual(self.get_setting(c, 'sinks-status'), 'no-server')
         self.assertEqual(self.get_setting(c, 'sinks'), '')
 
+    def pw_env(self, tag):
+        d = os.path.join(tmp, 'pw-' + tag)
+        os.makedirs(d, exist_ok=True)
+        pj = os.path.join(d, 'pw.json')
+        if os.path.exists(pj):
+            os.unlink(pj)
+        return pj, {'LUMEN_FAKE_PW': pj, 'LUMEN_FAKE_WPCTL': os.path.join(d, 'wpctl.json'), 'PATH': FAKES + ':' + os.environ['PATH']}
+
+    def test_hdmi_is_chosen_by_switching_the_card_profile(self):
+        pj, env = self.pw_env('switch')
+        p, c, stop = self.private_compositor('lumen-pw1', env=env)
+        g = lambda k: self.get_setting(c, k)
+        self.assertEqual((g('audio-profiles'), g('audio-profile')), ('', ''))              # nothing asked yet
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual(g('audio-profiles'), '43:3|Built-in Audio - Analog Stereo Output;43:6|Built-in Audio - Digital Stereo (HDMI) Output;'
+                                              '43:15|Built-in Audio - Digital Stereo (IEC958) Output')
+        self.assertEqual(g('audio-profile'), '43:3')                      # the active profile is analog + an IEC958 input
+        c.cmd('settings audio-profile 43:6')                              # HDMI
+        with open(pj) as f:
+            self.assertEqual(json.load(f)['cur']['43'], 6)
+        self.assertEqual(g('audio-profile'), '43:6')
+        time.sleep(1.2)                                                   # the follow-up rescan refreshes the sink list by itself
+        c.cmd('settings audio-profile 43:3')
+        self.assertEqual(g('audio-profile'), '43:3')
+        for bad in ('43:99', '99:1', 'foo', '43:', '43:6x', '-1:2'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('settings audio-profile ' + bad)
+        with open(pj) as f:
+            self.assertEqual(json.load(f)['cur']['43'], 3)                # refused: nothing changed
+
+    def test_card_profiles_are_empty_without_pw_cli(self):
+        p, c, stop = self.private_compositor('lumen-pw2', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual((self.get_setting(c, 'audio-profiles'), self.get_setting(c, 'audio-profile')), ('', ''))
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings audio-profile 43:6')
+
+    def test_panel_sound_page_switches_to_hdmi(self):
+        exe = self.exe()
+        pj, env = self.pw_env('panel')
+        path = os.path.join(tmp, 'pw-panel', 'settings.conf')
+        p, c, stop = self.private_compositor('lumen-pw3', '--settings', path, env=env)
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-pw3'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
+        win = self.wait_window(c, 'lumen.settings')
+        x0, y0 = win['x'], win['y']
+        time.sleep(0.3)
+        c.click(x0 + 70, y0 + 12 + 4 * 36 + 16)                           # Sound tab: asks the sound server again
+        time.sleep(0.8)
+        # "Output device" heading at y=14, then Analog (42), HDMI (70), IEC958 (98)
+        c.click(x0 + 200, y0 + 70 + 14)
+        time.sleep(0.4)
+        self.assertEqual(self.get_setting(c, 'audio-profile'), '43:6')
+        with open(pj) as f:
+            self.assertEqual(json.load(f)['cur']['43'], 6)
+
     def test_sound_list_is_empty_without_a_sound_server(self):
         p, c, stop = self.private_compositor('lumen-aud3', env={'LUMEN_ASOUND_DIR': os.path.join(tmp, 'nonexistent'),
                                                                 'PATH': os.path.join(tmp, 'nonexistent-bin')})
@@ -1956,16 +2016,16 @@ esac
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
         g = lambda k: self.get_setting(c, k)
-        # Sound page: tabs are 36 px apart from y=12; rows start at y=42; the 4th row (index 3) is "HDMI 0"
+        # Sound page (no card profiles here): "Applications" heading at y=14, its two rows at 42 and 70, then the beeps heading at 104
+        # and its rows from 132: default, HDMI 0, HDMI 1, HDMI 2 (the HDMI outputs are shown before the analog ones)
         c.click(x0 + 70, y0 + 12 + 4 * 36 + 16)
         time.sleep(0.5)
-        c.click(x0 + 200, y0 + 42 + 3 * 28 + 14)
-        time.sleep(0.2)
-        self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
-        # the second system output (after 6 beep rows and the next heading): "Digital Stereo (HDMI)"
-        c.click(x0 + 200, y0 + 42 + 6 * 28 + 6 + 28 + 28 + 14)
+        c.click(x0 + 200, y0 + 70 + 14)                                       # second system output: "Digital Stereo (HDMI)"
         time.sleep(0.2)
         self.assertEqual(g('sink'), 'alsa_output.hdmi-stereo')
+        c.click(x0 + 200, y0 + 132 + 28 + 14)                                 # beeps: HDMI 0
+        time.sleep(0.2)
+        self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
         # Display page: rows are Automatic, Preferred, then the modes (800x500 preferred, 1920x1080, 1280x720, ...)
         c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)
         time.sleep(0.3)

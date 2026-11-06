@@ -30,6 +30,9 @@
  *   audio-outs      "name|description;..."     ALSA playback devices from /proc/asound, HDMI/DisplayPort ones marked (read only)
  *   sinks, sink     list / name                PulseAudio/PipeWire outputs and the default one (pactl, else wpctl; `sink` is
  *                                              settable); empty until audio-rescan was set and when there is no sound server
+ *   audio-profiles  "cardid:index|Card - Profile;..."  PipeWire card outputs (analog / HDMI / S/PDIF; pw-cli), read only
+ *   audio-profile   cardid:index               the active entry of audio-profiles; setting one switches the card to that output
+ *                                              (this is how HDMI audio is chosen); the sink list is refreshed 1-3 s later
  *   sinks-status    ""|ok|missing-tools|no-server  why `sinks` is empty: no pactl/wpctl installed, or no server answers (read only)
  *   audio-rescan    (write only)               any value: ask pactl again (the panel does when its Sound page opens)
  *

@@ -314,14 +314,12 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("lumen-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
     cfg.settings_cmd = default_sibling("lumen-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char calc_buf[PATH_MAX + 4], web_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128];
+    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128];
     if (cfg.napps == 0) {
-        /* default menu: Terminal, Calculator, Browser and VS Code (when found) */
+        /* default menu: Terminal, Calculator and VS Code (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
             "Calculator", default_sibling("lumen-calc", calc_buf, sizeof(calc_buf)) };
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Browser", default_sibling("lumen-web", web_buf, sizeof(web_buf)) };
         /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
          * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
         const char *home = getenv("HOME");

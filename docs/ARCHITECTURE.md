@@ -110,13 +110,6 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
 | `client/lumen-demo.c` | **clients** | demo client using `wire.c` + `protocol.c` in client mode |
 | `client/lumen-term.c` (later) | **clients** | terminal emulator |
-| `client/lumen-web.c` | **clients** | small browser (URL/HTTP(S) loader, HTML-subset parser, line layout, UI; synchronous fetch; `--selftest`, `--dump`) |
-| `client/tls.[ch]` | **clients** | TLS client for lumen-web: `dlopen("libssl.so.3")` + a dozen hand-declared functions, verification against the system CA store, non-blocking read/write (`TLS_AGAIN_*`) |
-| `client/js_*.c`, `js.h`, `js_int.h` | **clients** | JavaScript interpreter: `js_parse.c` lexer + parser (AST of `js_int.h`; regex-vs-divide decided in the lexer), `js_eval.c` tree-walking evaluator (scopes, closures, classes, destructuring, exceptions as `J->thrown`), `js_core.c` (arena, interned strings, objects with a lazily built hash index, property access, conversions), `js_lib*.c` builtins, `js_regex.c` backtracking regex VM, `js_coro.c` generators and async functions as `ucontext` coroutines (yield/await switch stacks), `js_poly.c` builtins written in JS (Promise over `queueMicrotask`, URL ...). No GC: arena + instruction budget + memory cap |
-| `client/image.[ch]` | **clients** | inflate + PNG/JPEG (baseline, progressive)/GIF/BMP decoders to 0xAARRGGBB, box/bilinear scaling |
-| `client/ttf.[ch]` | **clients** | TrueType loader (glyf simple + composite, cmap 4/12, hmtx) and anti-aliased rasterizer with a (codepoint, px) glyph cache; lumen-web's page text and layout metrics |
-| `client/dom_css.c` | **clients** | style sheets (`<style>`, `<link>`, `@import`, `@media`), rule index by rightmost compound, cascade with specificity/order/`!important`/`var()`, `::before/::after` text; result `struct estyle` per element, emitted as `<x-o>`/`<x-i>`/`<x-pg>` |
-| `client/dom*.c`, `dom.h` | **clients** | DOM for lumen-web: `dom.c` tree, HTML parser, serializers (faithful and renderer markup with `js:<id>` links), selectors; `dom_js.c` JavaScript bindings (host objects), events, timers, script execution, page lifecycle |
 | `client/lumen-settings.c` | **clients** | settings panel: tabs, checkboxes, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
 | `client/lumen-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
 | `tests/wlclient.py`, `tests/test_*.py`, `tests/run.sh` | **tests** | end-to-end tests against `lumen --backend headless` |
@@ -229,7 +222,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 C11 (`-std=gnu11`), 4-space indent, snake_case, public symbols prefixed `lm_`,
 header guards `LUMEN_<NAME>_H`, comments only where non-obvious, English
 identifiers and comments. Build: `make`, `make asan`, `make test`.
-Binaries: `build/lumen`, `build/lumen-demo`, `build/lumen-term`, `build/lumen-calc`, `build/lumen-web`.
+Binaries: `build/lumen`, `build/lumen-demo`, `build/lumen-term`, `build/lumen-calc`.
 
 ## Testing
 

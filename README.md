@@ -15,8 +15,6 @@ Included programs:
 | `build/lumen-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound; `--get` / `--set KEY=VALUE` for scripts |
 | `build/lumen-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
-| `build/lumen-web` | small browser: file://, http:// and https://, HTML subset, links, history, JavaScript (own interpreter + DOM, CSS subset, images, forms; `--selftest`, `--dump URL [ms]`) |
-| `build/js-test` | test driver of the JavaScript interpreter (`--selftest`, `--check FILE`, `-e EXPR`, `FILE`) |
 | `build/lumen-demo`| small animated demo client                                        |
 
 ## Status (read this)
@@ -85,7 +83,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Shift+E               | quit Lumen                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *Lumen* (app menu: Terminal, Calculator, Browser, if found (`~/VSCode/code` or the snap's binary) Code, and Settings; Esc or an outside click closes it;
+Panel: *Lumen* (app menu: Terminal, Calculator, if found (`~/VSCode/code` or the snap's binary) Code, and Settings; Esc or an outside click closes it;
 add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
 (first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels).
 
@@ -153,60 +151,3 @@ The control socket takes one line per command (`dump <file.ppm>`, `windows`, `ke
 * Graphics-accelerated apps show nothing – they need a software renderer; see Status.
 
 Architecture notes for developers: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [CLAUDE.md](CLAUDE.md).
-
-## lumen-web: https and JavaScript
-
-`https://` pages work through the system OpenSSL (`libssl.so.3`, loaded at run time with `dlopen`; nothing is needed to *build*
-lumen-web). The certificate chain and the host name are always verified against the system CA store (`$SSL_CERT_FILE` /
-`$SSL_CERT_DIR` choose another one); a page with a bad certificate shows an error page, there is no click-through. Without libssl
-only `http://` and `file://` work.
-
-Pages that contain `<script>` run their scripts (inline and `src=`, in document order) in a JavaScript engine written for
-lumen (`client/js*.c`): ES5 plus the common newer syntax (let/const, arrow functions, classes, destructuring, template
-literals, spread/rest, default parameters, generators, `async`/`await`, for-of, optional chaining, `??`, `with`), the usual
-builtins (Object, Array, String, Number, Math, JSON, Date, Map, Set, Error types, RegExp with lookaround and named groups, Promise,
-URL, URLSearchParams) and a DOM (`document.getElementById/querySelector(All)`, `createElement`, `appendChild`, `innerHTML`,
-`textContent`, attributes, `classList`, `dataset`, `style`, events with bubbling, `setTimeout/setInterval`, `location`,
-`history`, `localStorage` for the page's lifetime, `document.write`, `console`). jQuery, lodash, moment, dayjs, marked,
-mustache, handlebars and underscore load and work; big sites (a news site, GitHub, Wikipedia) run their scripts without
-crashing. After a script, a timer or a click changed the page, it is rendered again. Elements with click handlers are drawn like
-links; a click runs the handlers.
-
-Also in the page layer:
-* **fetch / XMLHttpRequest** (with Headers, Request, Response, FormData): one synchronous request behind both (the window waits for the
-  answer), promise reactions and XHR events are still delivered asynchronously. No cross-origin checks, no cookies.
-* **Images:** PNG (all colour types, 16 bit, interlaced), JPEG (baseline and progressive), GIF (first frame), BMP, `data:` URIs.
-  Decoders are in `client/image.c`; images are fetched and decoded on worker threads after the page is shown and are scaled to the
-  window width. WebP and SVG show the alt text.
-* **CSS:** `<style>`, `<link rel=stylesheet>`, `@import`, `@media` (900x600 viewport), specificity/order/`!important`, inline style, `var()`.
-  What a bitmap-font layout can show is used: colours and background colours (also of blocks), bold/italic, underline and strike-through,
-  size in three steps, `text-align`, margins/padding (in pixels, vertical as gaps, left as indent), `display` none/block/inline/inline-block/
-  flex rows (items laid out inline), `list-style: none`, `text-transform`, `white-space: pre`, `visibility`/`opacity: 0`, and
-  `::before`/`::after` text content. The page background and body colour fill the window. Script changes re-run the cascade.
-* **Forms:** text/password/search/... fields, checkboxes, radio buttons, selects, textareas and buttons are drawn as widgets. Click to focus,
-  type, arrows/Home/End/Delete, Tab/Shift+Tab, Enter submits (GET navigates to `action?query`, POST sends the body). Values live in the DOM, so
-  scripts see them and `input`/`change`/`submit` events fire.
-
-* **Fonts:** page text is drawn with TrueType fonts from the system (DejaVu Sans / Serif / Sans Mono, regular and bold; Liberation or Noto if
-  DejaVu is missing; `client/ttf.c` rasterizes them with exact-area anti-aliasing, composite glyphs and kerning-free proportional advances).
-  `font-family` picks sans, serif or monospace, `font-size` is real pixels, italic is a shear. The window chrome and form controls keep the
-  8x16 bitmap font, which is also the fallback when no TrueType font can be found.
-
-Layout also honours `max-width`/`width` (px) with `margin: 0 auto` (a centred column; its background covers just the column), and
-`border-top`/`border-bottom` (a line) and `border-left` (a bar); other borders are ignored.
-
-* **Tables:** real column/row layout (`<table>`, `<tr>`, `<td>`/`<th>`): columns as wide as their widest cell, shrinking down to the longest
-  word when the window is narrow, cells wrap and may hold anything (nested tables, lists, images, forms); `border="1"` draws cell boxes.
-  `colspan` is supported, `rowspan` is ignored.
-
-ES modules work (`<script type="module">`, `import`/`export` with live bindings, re-exports, `import()`, `import.meta.url`, top-level `await`
-that drains the microtask queue; imports are fetched relative to the importing module).
-
-Not there: the rest of the box model (floats, positioning, heights, border boxes, rounded corners, background images), other typefaces than those three, WebP/SVG, real Symbols, `\p{...}` in regexes, file inputs,
-`rowspan`. Strings are UTF-8 inside but behave as UTF-16 (`length`, indexes, `charCodeAt`, `slice`, regex `index` count UTF-16 code units; a character outside the BMP is a surrogate pair). Each script, timer or event handler gets
-25 million interpreter steps and a page 150 million in total (and 9 seconds of script time while it loads); there is no garbage collector
-(memory is released when the page is left, a page is stopped at about 384 MB), so very long-running pages grow.
-`lumen-web --dump URL [ms]` loads a page, lets its timers run for `ms` virtual milliseconds and prints the rendered text (title,
-text, links); script errors and `console` output go to stderr (`LUMEN_JS_STATS=1` prints the cost of every script, `LUMEN_WEB_TIMING=1` the
-time spent in scripts, style, parsing and images).
-`build/js-test` runs the interpreter alone (`-e EXPR`, `FILE`, `--check FILE` for the `tests/js/*.js` suites).

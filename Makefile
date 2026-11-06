@@ -5,10 +5,8 @@
 #   make lumen-demo build/lumen-demo   (client/lumen-demo.c)
 #   make lumen-term build/lumen-term   (client/lumen-term.c, only if it exists)
 #   make lumen-calc build/lumen-calc   (client/lumen-calc.c, only if it exists)
-#   make lumen-web  build/lumen-web    (client/lumen-web.c, the browser, only if it exists)
 #   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog, only if it exists)
 #   make lumen-settings build/lumen-settings (client/lumen-settings.c, the settings panel, only if it exists)
-#                   (also builds build/js-test, the JavaScript interpreter test driver: tests/js/*.js)
 #   make run        build, then start the compositor on a free VT (see RUN_ARGS)
 #   make asan       build/lumen-asan   (compositor with ASan + UBSan)
 #   make test       build, then run tests/run.sh
@@ -21,7 +19,7 @@ OPT     := -O2 -g
 CFLAGS  ?= $(OPT)
 override CFLAGS := $(CSTD) $(WARN) $(CFLAGS)
 CPPFLAGS += -D_GNU_SOURCE -Isrc -Iclient $(shell pkg-config --cflags libdrm 2>/dev/null || echo -I/usr/include/libdrm) -MMD -MP
-LDLIBS  := -ldrm -lm -lpthread -ldl
+LDLIBS  := -ldrm -lm
 
 ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined
 
@@ -46,17 +44,8 @@ endif
 ifneq ($(wildcard client/lumen-calc.c),)
 TARGETS += $(BUILD)/lumen-calc
 endif
-ifneq ($(wildcard tests/js_test.c),)
-TARGETS += $(BUILD)/js-test
-endif
-ifneq ($(wildcard tests/image_test.c),)
-TARGETS += $(BUILD)/image-test
-endif
 ifneq ($(wildcard tests/keymap_test.c),)
 TARGETS += $(BUILD)/keymap-test
-endif
-ifneq ($(wildcard client/lumen-web.c),)
-TARGETS += $(BUILD)/lumen-web
 endif
 ifneq ($(wildcard client/lumen-run.c),)
 TARGETS += $(BUILD)/lumen-run
@@ -65,7 +54,7 @@ ifneq ($(wildcard client/lumen-settings.c),)
 TARGETS += $(BUILD)/lumen-settings
 endif
 
-.PHONY: all lumen lumen-demo lumen-term lumen-calc lumen-web lumen-run lumen-settings asan test run clean
+.PHONY: all lumen lumen-demo lumen-term lumen-calc lumen-run lumen-settings asan test run clean
 all: $(TARGETS)
 
 lumen: $(BUILD)/lumen
@@ -73,7 +62,6 @@ lumen-demo: $(BUILD)/lumen-demo
 lumen-calc: $(BUILD)/lumen-calc
 lumen-run: $(BUILD)/lumen-run
 lumen-settings: $(BUILD)/lumen-settings
-lumen-web: $(BUILD)/lumen-web
 lumen-term:
 	@if [ -f client/lumen-term.c ]; then $(MAKE) --no-print-directory $(BUILD)/lumen-term; \
 	else echo "client/lumen-term.c does not exist yet - skipping lumen-term"; fi
@@ -97,20 +85,6 @@ $(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(CLIENT
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD)/src/font.o
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-JS_OBJS := $(patsubst %,$(BUILD)/client/%.o,js_core js_parse js_eval js_lib js_lib2 js_regex js_coro js_poly)
-WEB_OBJS := $(BUILD)/client/tls.o $(BUILD)/client/image.o $(BUILD)/client/dom_css.o $(BUILD)/client/ttf.o $(BUILD)/client/dom.o $(BUILD)/client/dom_js.o $(JS_OBJS)
-$(BUILD)/lumen-web: $(BUILD)/client/lumen-web.o $(BUILD)/client/wlc.o $(WEB_OBJS) $(CLIENT_COMMON_OBJS)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-$(BUILD)/js-test: $(BUILD)/tests/js_test.o $(JS_OBJS)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-$(BUILD)/image-test: $(BUILD)/tests/image_test.o $(BUILD)/client/image.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

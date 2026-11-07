@@ -112,6 +112,13 @@ static void hist_add(struct hist *h, const char *s)
     h->items[h->n++] = strdup(s);
 }
 
+static void hist_free(struct hist *h)
+{
+    for (int i = 0; i < h->n; i++)
+        free(h->items[i]);
+    h->n = 0;
+}
+
 static char *hist_path(void)
 {
     const char *x = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
@@ -257,8 +264,7 @@ static int selftest(void)
         hist_add(&h, b);
     }
     CHECK(h.n == HIST_MAX);
-    for (int i = 0; i < h.n; i++)
-        free(h.items[i]);
+    hist_free(&h);
     return bad ? 1 : 0;
 }
 
@@ -448,17 +454,22 @@ int main(int argc, char **argv)
 
     static const struct wlwin_ops ops = { .paint = paint, .keyboard = keyboard_event };
     struct app a = { .repeat_rate = 25, .repeat_delay = 400 };
+    int rc = 1;
     hist_load(&a.hist);
     if (wlwin_connect(&a.win, "lumen-run", &ops, &a) < 0)
-        return 1;
+        goto out;
     if (!a.win.seat) {
         fprintf(stderr, "lumen-run: compositor lacks wl_seat\n");
-        return 1;
+        goto out;
     }
     if (wlwin_open(&a.win, "Run", "lumen.run", DEFAULT_W, DEFAULT_H, 160, 40) < 0)
-        return 1;
+        goto out;
     while (wlwin_step(&a.win, repeat_timeout(&a)))
         repeat_fire(&a);
-    wlwin_destroy(&a.win);
-    return 0;
+    rc = 0;
+out:
+    if (a.win.c)
+        wlwin_destroy(&a.win);
+    hist_free(&a.hist);
+    return rc;
 }

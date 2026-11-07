@@ -26,7 +26,7 @@ closes the ways *around* the lock.
 `contrib/mellagui.service` runs MellaGUI as the unprivileged user `mellagui` on tty1 and takes tty1 away from getty. The header of the
 file has the install commands. In short:
 
-1. create the user (groups `video`, `input`, ...), install the binaries to `/usr/local/bin`, install the unit,
+1. create the user (groups `video`, `input`, ... - the service has no logind session, so MellaGUI logs `logind not used: ...` and opens the device files; `--logind off` silences that), install the binaries to `/usr/local/bin`, install the unit,
 2. `systemctl mask getty@tty1.service` and `systemctl enable --now mellagui.service`,
 3. **set the lock immediately** (Settings → Security). Until `lock.conf` exists the machine is open to anyone at the keyboard.
 

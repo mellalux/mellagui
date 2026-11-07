@@ -26,8 +26,12 @@ Included programs:
   Use `--timeout` for the first run (see below).
 * **logind device access is not implemented.** An ordinary user needs to be in the groups `video` and `input`.
 * Not tested against third-party Wayland clients (GTK, Qt, foot ...): none were available where it was built.
-  Only `wl_shm` buffers are supported, so GPU-accelerated clients must use their software renderers
-  (`GSK_RENDERER=cairo`, `QT_QUICK_BACKEND=software`, `WLR_RENDERER=pixman`-like settings).
+  Buffers are `wl_shm` or `zwp_linux_dmabuf_v1` (linear ARGB8888/XRGB8888 only). GPU-rendering clients (Mesa EGL, Firefox's
+  WebRender) hand Lumen dmabufs; Lumen still composites in software and only *reads* them (mmap + `DMA_BUF_IOCTL_SYNC`, SSE4.1
+  streaming loads), so the GPU does the clients' drawing and the CPU only copies the finished frames. Measured on an Intel HD 4000
+  with Firefox and an animation-heavy page at 2048x864: Firefox 140 % -> 70 % of a core and ~3x the frame rate; Lumen's own
+  compositing 21 % -> 18 % at that three times higher frame rate (SSE2 blits, occlusion: what an opaque window covers is not painted).
+  Clients without a render node (`--no-dmabuf`) use `GSK_RENDERER=cairo`, `QT_QUICK_BACKEND=software`-like settings.
 * Keyboard layout is US only. No XWayland, layer-shell, viewporter, xdg-output, IME or screen locker.
 
 ## Build
@@ -83,7 +87,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Shift+E               | quit Lumen                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *Lumen* (app menu: Terminal, Calculator, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and software rendering) Firefox, and Settings; Esc or an outside click closes it;
+Panel: *Lumen* (app menu: Terminal, Calculator, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
 add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
 (first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels).
 
@@ -177,6 +181,6 @@ The control socket takes one line per command (`dump <file.ppm>`, `windows`, `ke
   same width and the native shape (CVT reduced blanking, e.g. 2048x864) and logs it; if the kernel refuses it, the preferred mode is
   used. `--mode WxH[@Hz]` forces a size, `--mode preferred` turns the correction off; the Display page of the settings panel changes it
   while running.
-* Graphics-accelerated apps show nothing – they need a software renderer; see Status.
+* Graphics-accelerated apps show nothing – they need `linux-dmabuf` (offered when a render node `/dev/dri/renderD*` exists; `--no-dmabuf` turns it off) or a software renderer; see Status.
 
 Architecture notes for developers: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [CLAUDE.md](CLAUDE.md).

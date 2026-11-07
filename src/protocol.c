@@ -387,6 +387,47 @@ static const struct lm_message lumen_settings_events[] = {
 DEFINE_IFACE(lm_lumen_settings_v1_interface, "lumen_settings_v1", 1,
              lumen_settings_requests, lumen_settings_events);
 
+/* ---- zwp_linux_dmabuf_v1 -------------------------------------------------------------------- */
+static const struct lm_message dmabuf_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("create_params", "n", 1, TY(&lm_zwp_linux_buffer_params_v1_interface)),
+    MSG("get_default_feedback", "n", 4, TY(&lm_zwp_linux_dmabuf_feedback_v1_interface)),
+    MSG("get_surface_feedback", "no", 4, TY(&lm_zwp_linux_dmabuf_feedback_v1_interface, &lm_wl_surface_interface)),
+};
+static const struct lm_message dmabuf_events[] = {
+    MSG("format", "u", 1, NULL),
+    MSG("modifier", "uuu", 3, NULL),
+};
+DEFINE_IFACE(lm_zwp_linux_dmabuf_v1_interface, "zwp_linux_dmabuf_v1", 4, dmabuf_requests, dmabuf_events);
+
+static const struct lm_message dmabuf_params_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("add", "huuuuu", 1, NULL),
+    MSG("create", "iiuu", 1, NULL),
+    MSG("create_immed", "niiuu", 2, TY(&lm_wl_buffer_interface, NULL, NULL, NULL, NULL)),
+};
+static const struct lm_message dmabuf_params_events[] = {
+    MSG("created", "n", 1, TY(&lm_wl_buffer_interface)),
+    MSG("failed", "", 1, NULL),
+};
+DEFINE_IFACE(lm_zwp_linux_buffer_params_v1_interface, "zwp_linux_buffer_params_v1", 4,
+             dmabuf_params_requests, dmabuf_params_events);
+
+static const struct lm_message dmabuf_feedback_requests[] = {
+    MSG("destroy", "", 1, NULL),
+};
+static const struct lm_message dmabuf_feedback_events[] = {
+    MSG("done", "", 1, NULL),
+    MSG("format_table", "hu", 1, NULL),
+    MSG("main_device", "a", 1, NULL),
+    MSG("tranche_done", "", 1, NULL),
+    MSG("tranche_target_device", "a", 1, NULL),
+    MSG("tranche_formats", "a", 1, NULL),
+    MSG("tranche_flags", "u", 1, NULL),
+};
+DEFINE_IFACE(lm_zwp_linux_dmabuf_feedback_v1_interface, "zwp_linux_dmabuf_feedback_v1", 4,
+             dmabuf_feedback_requests, dmabuf_feedback_events);
+
 /* ---- lookup --------------------------------------------------------------------- */
 
 static const struct lm_interface *const all_interfaces[] = {
@@ -417,6 +458,9 @@ static const struct lm_interface *const all_interfaces[] = {
     &lm_xdg_popup_interface,
     &lm_zxdg_decoration_manager_v1_interface,
     &lm_zxdg_toplevel_decoration_v1_interface,
+    &lm_zwp_linux_dmabuf_v1_interface,
+    &lm_zwp_linux_buffer_params_v1_interface,
+    &lm_zwp_linux_dmabuf_feedback_v1_interface,
     &lm_lumen_settings_v1_interface,
 };
 

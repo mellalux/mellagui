@@ -25,6 +25,7 @@
 #include "shm.h"
 #include "surface.h"
 #include "wm.h"
+#include "dmabuf.h"
 #include "mixer.h"
 #include "sysinfo.h"
 #include "xdg.h"
@@ -53,6 +54,7 @@ static const char *usage_text =
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
     "  --no-gadget              start with the desktop gadget (clipboard history) hidden; Super+G toggles it\n"
     "  --mixer                  start with the volume mixer gadget shown (Super+V toggles it; needs pactl, wpctl or amixer)\n"
+    "  --no-dmabuf              do not offer zwp_linux_dmabuf_v1 (GPU-rendered client buffers); clients then use wl_shm\n"
     "  --sysinfo                start with the system monitor gadget (CPU, memory, temperature) shown; Super+S toggles it\n"
     "  --no-sound               no beeps for sticky keys (latch, lock, unlock, on/off; needs aplay otherwise)\n"
     "  --no-grab                do not EVIOCGRAB keyboards\n"
@@ -201,7 +203,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -224,6 +226,7 @@ int main(int argc, char **argv)
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
         { "mixer", no_argument, 0, OPT_MIXER },
         { "sysinfo", no_argument, 0, OPT_SYSINFO },
+        { "no-dmabuf", no_argument, 0, OPT_NO_DMABUF },
         { "no-sound", no_argument, 0, OPT_NO_SOUND },
         { "no-grab", no_argument, 0, OPT_NO_GRAB },
         { "timeout", required_argument, 0, OPT_TIMEOUT },
@@ -326,6 +329,7 @@ int main(int argc, char **argv)
         case OPT_NO_GADGET: cfg.gadget = false; break;
         case OPT_MIXER: cfg.mixer = true; break;
         case OPT_SYSINFO: cfg.sysinfo = true; break;
+        case OPT_NO_DMABUF: cfg.dmabuf = false; break;
         case OPT_NO_SOUND: cfg.sound = false; break;
         case OPT_NO_GRAB: cfg.grab_input = false; break;
         case OPT_TIMEOUT:
@@ -377,14 +381,14 @@ int main(int argc, char **argv)
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
             break;
         }
-        /* Firefox: the snap's launcher or a distro binary. Software rendering (no GPU path in Lumen), native Wayland.
+        /* Firefox: the snap's launcher or a distro binary. Native Wayland, WebRender on the GPU (Lumen offers zwp_linux_dmabuf_v1; without it Firefox falls back by itself).
          * (The snap is confined: it may only connect to sockets named wayland-N, which is what Lumen picks by default.) */
         const char *ffs[2] = { "/snap/bin/firefox", "/usr/bin/firefox" };
         for (int i = 0; i < 2; i++) {
             if (access(ffs[i], X_OK) != 0)
                 continue;
             snprintf(ff_buf, sizeof(ff_buf),
-                     "env MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_WEBRENDER=0 LIBGL_ALWAYS_SOFTWARE=1 %s", ffs[i]);
+                     "env MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_WEBRENDER=1 %s", ffs[i]);
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Firefox", ff_buf };
             break;
         }
@@ -455,6 +459,7 @@ int main(int argc, char **argv)
         goto out;
     }
     lm_input_set_handler(srv->input, lm_seat_handle_input_cb, srv->seat);
+    srv->dmabuf = lm_dmabuf_create(srv, cfg.dmabuf);
     srv->mixer = lm_mixer_create(loop, on_mixer_changed, srv);
     if (srv->mixer)
         lm_mixer_set_active(srv->mixer, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER));
@@ -491,6 +496,8 @@ int main(int argc, char **argv)
 
 out:
     /* Reverse creation order. */
+    if (srv->dmabuf) lm_dmabuf_destroy(srv->dmabuf);
+    srv->dmabuf = NULL;
     if (srv->mixer) lm_mixer_destroy(srv->mixer);
     srv->mixer = NULL;
     if (srv->sysinfo) lm_sysinfo_destroy(srv->sysinfo);

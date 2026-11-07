@@ -93,6 +93,9 @@ extern const struct lm_interface lm_xdg_toplevel_interface;
 extern const struct lm_interface lm_xdg_popup_interface;
 extern const struct lm_interface lm_zxdg_decoration_manager_v1_interface;
 extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
+extern const struct lm_interface lm_zwp_linux_dmabuf_v1_interface;     /* dmabuf.c */
+extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
+extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
 extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen private: settings.c */
 
 /*
@@ -105,6 +108,7 @@ extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen pr
  *   wl_data_device_manager        3    seat.c
  *   xdg_wm_base                   3    xdg.c
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
+ *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
  *   lumen_settings_v1             1    settings.c (Lumen private: read/change the user settings)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
@@ -115,6 +119,7 @@ extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen pr
 #define LM_WL_DATA_DEVICE_MANAGER_VERSION   3
 #define LM_XDG_WM_BASE_VERSION              3
 #define LM_ZXDG_DECORATION_MANAGER_V1_VERSION 1
+#define LM_ZWP_LINUX_DMABUF_V1_VERSION      4
 #define LM_LUMEN_SETTINGS_V1_VERSION        1
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
@@ -499,6 +504,49 @@ enum {
     LM_ZXDG_DECORATION_ERR_ALREADY_CONSTRUCTED = 1,
     LM_ZXDG_DECORATION_ERR_ORPHANED = 2,
 };
+
+/* ---- zwp_linux_dmabuf_v1 (linux-dmabuf-unstable-v1, version 4) ---------------------------------------------- */
+enum {
+    LM_ZWP_LINUX_DMABUF_V1_REQ_DESTROY = 0,             /* "" */
+    LM_ZWP_LINUX_DMABUF_V1_REQ_CREATE_PARAMS = 1,       /* "n" params(zwp_linux_buffer_params_v1) */
+    LM_ZWP_LINUX_DMABUF_V1_REQ_GET_DEFAULT_FEEDBACK = 2,/* "n" feedback (since 4) */
+    LM_ZWP_LINUX_DMABUF_V1_REQ_GET_SURFACE_FEEDBACK = 3,/* "no" feedback, surface (since 4) */
+    LM_ZWP_LINUX_DMABUF_V1_EVT_FORMAT = 0,              /* "u" fourcc (versions 1..3; deprecated) */
+    LM_ZWP_LINUX_DMABUF_V1_EVT_MODIFIER = 1,            /* "uuu" fourcc, modifier hi, lo (since 3; versions 3 only) */
+};
+enum {
+    LM_ZWP_LINUX_BUFFER_PARAMS_V1_REQ_DESTROY = 0,      /* "" */
+    LM_ZWP_LINUX_BUFFER_PARAMS_V1_REQ_ADD = 1,          /* "huuuuu" fd, plane, offset, stride, modifier hi, lo */
+    LM_ZWP_LINUX_BUFFER_PARAMS_V1_REQ_CREATE = 2,       /* "iiuu" width, height, format, flags (answer: created / failed) */
+    LM_ZWP_LINUX_BUFFER_PARAMS_V1_REQ_CREATE_IMMED = 3, /* "niiuu" buffer(wl_buffer), width, height, format, flags (since 2) */
+    LM_ZWP_LINUX_BUFFER_PARAMS_V1_EVT_CREATED = 0,      /* "n" buffer */
+    LM_ZWP_LINUX_BUFFER_PARAMS_V1_EVT_FAILED = 1,       /* "" */
+};
+enum {
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_ALREADY_USED = 0,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_PLANE_IDX = 1,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_PLANE_SET = 2,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_INCOMPLETE = 3,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_INVALID_FORMAT = 4,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_INVALID_DIMENSIONS = 5,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_OUT_OF_BOUNDS = 6,
+    LM_ZWP_LINUX_BUFFER_PARAMS_ERR_INVALID_WL_BUFFER = 7,
+};
+enum {
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_REQ_DESTROY = 0,    /* "" */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_DONE = 0,       /* "" */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_FORMAT_TABLE = 1,   /* "hu" fd, size: array of { u32 fourcc, u32 pad, u64 modifier } */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_MAIN_DEVICE = 2,    /* "a" dev_t */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_TRANCHE_DONE = 3,   /* "" */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_TRANCHE_TARGET_DEVICE = 4,  /* "a" dev_t */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_TRANCHE_FORMATS = 5,        /* "a" array of u16 indices into the format table */
+    LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_TRANCHE_FLAGS = 6,          /* "u" */
+};
+/* DRM fourcc codes (drm_fourcc.h) */
+#define LM_DRM_FORMAT_ARGB8888 0x34325241u      /* 'A' 'R' '2' '4' */
+#define LM_DRM_FORMAT_XRGB8888 0x34325258u      /* 'X' 'R' '2' '4' */
+#define LM_DRM_FORMAT_MOD_LINEAR 0ull
+#define LM_DRM_FORMAT_MOD_INVALID 0x00ffffffffffffffull
 
 /* ---- lumen_settings_v1 (Lumen's own protocol, see settings.h for the keys) ----------------------------------- */
 enum {

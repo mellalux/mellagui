@@ -1,7 +1,7 @@
 /*
  * wl_shm, wl_shm_pool, wl_buffer and the private pixel textures surfaces keep.
  *
- * Client memory is never mmap()ed. A pool keeps a private dup of the client's
+ * (Client shm memory is never mmap()ed; dmabufs - GPU memory - are, see below.) A pool keeps a private dup of the client's
  * fd and every access is a pread(2) into the surface texture, so a client that
  * truncates its pool file (the classic SIGBUS attack on compositors) simply
  * produces a short read, which lm_buffer_copy() reports as -2. No signal
@@ -14,13 +14,22 @@
 #define _GNU_SOURCE
 #endif
 
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <linux/dma-buf.h>
 
 #include "log.h"
 #include "protocol.h"
@@ -83,6 +92,13 @@ void lm_buffer_unref(struct lm_buffer *b)
     if (!b || --b->refs > 0)
         return;
     pool_unref(b->pool);
+    if (b->dmabuf) {
+        if (b->dmabuf->map)
+            munmap((void *)b->dmabuf->map, b->dmabuf->size);
+        if (b->dmabuf->fd >= 0)
+            close(b->dmabuf->fd);
+        free(b->dmabuf);
+    }
     free(b);
 }
 
@@ -168,37 +184,168 @@ static int read_full(int fd, void *buf, size_t len, off_t off)
     return 0;
 }
 
+/* ---- dmabuf reads ------------------------------------------------------------------------------------------------ */
+
+/*
+ * GPU memory is mapped (never pread) and read after DMA_BUF_IOCTL_SYNC, which also waits for the GPU to finish drawing into
+ * it. Reading write-combined memory with plain loads is slow, so on x86 the copy uses SSE4.1 streaming loads (movntdqa) when
+ * the CPU has them. A dmabuf can in principle vanish under us (SIGBUS): the reads run under a small guard that turns the
+ * signal into an error (-2) instead of a crash; for any other SIGBUS the previous handler gets it.
+ */
+static sigjmp_buf g_bus_jmp;
+static volatile sig_atomic_t g_bus_armed;
+static struct sigaction g_bus_old;
+static bool g_bus_installed;
+
+static void bus_handler(int sig, siginfo_t *si, void *ctx)
+{
+    if (g_bus_armed) {
+        g_bus_armed = 0;
+        siglongjmp(g_bus_jmp, 1);
+    }
+    sigaction(SIGBUS, &g_bus_old, NULL);                   /* not ours: hand it back (crash handlers, default action) */
+    (void)si;
+    (void)ctx;
+    raise(sig);
+}
+
+static void bus_guard_install(void)
+{
+    if (g_bus_installed)
+        return;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = bus_handler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGBUS, &sa, &g_bus_old) == 0)
+        g_bus_installed = true;
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+__attribute__((target("sse4.1")))
+static void stream_copy_sse41(uint8_t *dst, const uint8_t *src, size_t n)
+{
+    while (n && ((uintptr_t)src & 15)) {                   /* head up to a 16-byte boundary of the source */
+        *dst++ = *src++;
+        n--;
+    }
+    while (n >= 64) {
+        __m128i a = _mm_stream_load_si128((__m128i *)(void *)src);
+        __m128i b = _mm_stream_load_si128((__m128i *)(void *)(src + 16));
+        __m128i c = _mm_stream_load_si128((__m128i *)(void *)(src + 32));
+        __m128i d = _mm_stream_load_si128((__m128i *)(void *)(src + 48));
+        _mm_storeu_si128((__m128i *)(void *)dst, a);
+        _mm_storeu_si128((__m128i *)(void *)(dst + 16), b);
+        _mm_storeu_si128((__m128i *)(void *)(dst + 32), c);
+        _mm_storeu_si128((__m128i *)(void *)(dst + 48), d);
+        dst += 64;
+        src += 64;
+        n -= 64;
+    }
+    while (n) {
+        *dst++ = *src++;
+        n--;
+    }
+}
+#endif
+
+static void gpu_copy(void *dst, const void *src, size_t n)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    static int sse41 = -1;
+    if (sse41 < 0)
+        sse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
+    if (sse41 && n >= 64) {
+        stream_copy_sse41(dst, src, n);
+        return;
+    }
+#endif
+    memcpy(dst, src, n);
+}
+
+static void dmabuf_sync(const struct lm_dmabuf_fd *d, bool start)
+{
+    struct dma_buf_sync sync = { .flags = (start ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END) | DMA_BUF_SYNC_READ };
+    int r;
+    do
+        r = ioctl(d->fd, DMA_BUF_IOCTL_SYNC, &sync);
+    while (r < 0 && errno == EINTR);
+}
+
+/* Reads `len` bytes at `off` of the buffer: pread() from an shm pool, a streaming copy from a mapped dmabuf. */
+static int buf_read(const struct lm_buffer *b, void *dst, size_t len, off_t off)
+{
+    if (b->dmabuf) {
+        const struct lm_dmabuf_fd *d = b->dmabuf;
+        if (!d->map || off < 0 || (size_t)off > d->size || len > d->size - (size_t)off)
+            return -1;
+        gpu_copy(dst, d->map + off, len);
+        return 0;
+    }
+    return read_full(b->pool->fd, dst, len, off);
+}
+
 /*
  * Make pixels valid premultiplied ARGB. XRGB: force alpha. ARGB: clamp the
  * colour channels to alpha so a hostile client can never make the renderer's
  * blend arithmetic overflow.
  */
-static void fix_pixels(uint32_t *px, size_t n, bool opaque)
+/* One translucent pixel made valid: premultiplied, colour channels never above alpha. */
+static inline uint32_t fix_one(uint32_t p)
 {
-    if (opaque) {
-        for (size_t i = 0; i < n; i++)
-            px[i] |= 0xff000000u;
-        return;
-    }
-    for (size_t i = 0; i < n; i++) {
-        uint32_t p = px[i];
-        uint32_t a = p >> 24;
-        if (a == 0xff)
-            continue;
-        if (a == 0) {
-            px[i] = 0;
-            continue;
-        }
-        uint32_t r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, bl = p & 0xff;
-        if (r > a)
-            r = a;
-        if (g > a)
-            g = a;
-        if (bl > a)
-            bl = a;
-        px[i] = (a << 24) | (r << 16) | (g << 8) | bl;
-    }
+    uint32_t a = p >> 24;
+    if (a == 0xff)
+        return p;
+    if (a == 0)
+        return 0;
+    uint32_t r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, bl = p & 0xff;
+    if (r > a)
+        r = a;
+    if (g > a)
+        g = a;
+    if (bl > a)
+        bl = a;
+    return (a << 24) | (r << 16) | (g << 8) | bl;
 }
+
+/* Returns true when the buffer had pixels with alpha != 0xff (always false for an opaque format). */
+static bool fix_pixels(uint32_t *px, size_t n, bool opaque)
+{
+    size_t i = 0;
+    bool translucent = false;
+#ifdef __SSE2__
+    const __m128i amask = _mm_set1_epi32((int)0xff000000u);
+    if (opaque) {
+        for (; i + 4 <= n; i += 4) {
+            __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(px + i));
+            _mm_storeu_si128((__m128i *)(void *)(px + i), _mm_or_si128(v, amask));
+        }
+    } else {                                                            /* alpha 0xff everywhere is by far the usual case */
+        for (; i + 4 <= n; i += 4) {
+            __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(px + i));
+            if (_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(v, amask), amask))) == 0xf)
+                continue;
+            translucent = true;
+            for (size_t k = i; k < i + 4; k++)
+                px[k] = fix_one(px[k]);
+        }
+    }
+#endif
+    if (opaque) {
+        for (; i < n; i++)
+            px[i] |= 0xff000000u;
+        return false;
+    }
+    for (; i < n; i++) {
+        if ((px[i] >> 24) != 0xff)
+            translucent = true;
+        px[i] = fix_one(px[i]);
+    }
+    return translucent;
+}
+
 
 /*
  * Copy the rect (x, y, w, h), already clipped to the buffer, from the pool
@@ -206,9 +353,8 @@ static void fix_pixels(uint32_t *px, size_t n, bool opaque)
  * `dst` points at the top-left pixel of the rect in the texture.
  */
 static int copy_rect(const struct lm_buffer *b, int x, int y, int w, int h,
-                     uint32_t *dst, size_t dst_stride_px, bool opaque)
+                     uint32_t *dst, size_t dst_stride_px, bool opaque, bool *translucent)
 {
-    int fd = b->pool->fd;
     off_t base = (off_t)b->offset + (off_t)y * b->stride + (off_t)x * 4;
     size_t row_bytes = (size_t)w * 4;
 
@@ -220,17 +366,17 @@ static int copy_rect(const struct lm_buffer *b, int x, int y, int w, int h,
         for (int r = 0; r < h; r += (int)rows_per) {
             size_t n = (size_t)(h - r) < rows_per ? (size_t)(h - r) : rows_per;
             uint32_t *d = dst + (size_t)r * w;
-            if (read_full(fd, d, n * row_bytes, base + (off_t)r * b->stride) < 0)
+            if (buf_read(b, d, n * row_bytes, base + (off_t)r * b->stride) < 0)
                 return -2;
-            fix_pixels(d, n * (size_t)w, opaque);
+            *translucent |= fix_pixels(d, n * (size_t)w, opaque);
         }
         return 0;
     }
     for (int r = 0; r < h; r++) {
         uint32_t *d = dst + (size_t)r * dst_stride_px;
-        if (read_full(fd, d, row_bytes, base + (off_t)r * b->stride) < 0)
+        if (buf_read(b, d, row_bytes, base + (off_t)r * b->stride) < 0)
             return -2;
-        fix_pixels(d, (size_t)w, opaque);
+        *translucent |= fix_pixels(d, (size_t)w, opaque);
     }
     return 0;
 }
@@ -281,7 +427,7 @@ static void transform_row_map(uint32_t transform, int32_t tw, int32_t th, int32_
 }
 
 static int copy_transformed(const struct lm_buffer *b, struct lm_texture *tex,
-                            uint32_t transform, bool opaque)
+                            uint32_t transform, bool opaque, bool *translucent)
 {
     size_t row_bytes = (size_t)b->width * 4;
     uint32_t *row = malloc(row_bytes);
@@ -290,11 +436,11 @@ static int copy_transformed(const struct lm_buffer *b, struct lm_texture *tex,
     int rc = 0;
     for (int32_t by = 0; by < b->height; by++) {
         off_t off = (off_t)b->offset + (off_t)by * b->stride;
-        if (read_full(b->pool->fd, row, row_bytes, off) < 0) {
+        if (buf_read(b, row, row_bytes, off) < 0) {
             rc = -2;
             break;
         }
-        fix_pixels(row, (size_t)b->width, opaque);
+        *translucent |= fix_pixels(row, (size_t)b->width, opaque);
         int64_t base, step;
         transform_row_map(transform, tex->width, tex->height, by, &base, &step);
         for (int32_t bx = 0; bx < b->width; bx++)
@@ -304,11 +450,40 @@ static int copy_transformed(const struct lm_buffer *b, struct lm_texture *tex,
     return rc;
 }
 
+static int buffer_copy_inner(struct lm_buffer *b, struct lm_texture *tex, uint32_t transform, const struct lm_region *damage);
+
 int lm_buffer_copy(struct lm_buffer *b, struct lm_texture *tex, uint32_t transform,
                    const struct lm_region *damage)
 {
-    if (!b || !b->pool || !tex || b->width <= 0 || b->height <= 0)
+    if (!b || (!b->pool && !b->dmabuf) || !tex || b->width <= 0 || b->height <= 0)
         return -1;
+    if (!b->dmabuf)
+        return buffer_copy_inner(b, tex, transform, damage);
+    struct lm_dmabuf_fd *d = b->dmabuf;
+    if (!d->map) {                                                  /* first use: map it (kept until the buffer goes) */
+        void *m = mmap(NULL, d->size, PROT_READ, MAP_SHARED, d->fd, 0);
+        if (m == MAP_FAILED)
+            return -2;
+        d->map = m;
+    }
+    bus_guard_install();
+    int rc;
+    dmabuf_sync(d, true);                                           /* waits for the GPU's pending writes */
+    if (sigsetjmp(g_bus_jmp, 1) == 0) {
+        g_bus_armed = 1;
+        rc = buffer_copy_inner(b, tex, transform, damage);
+        g_bus_armed = 0;
+    } else {
+        rc = -2;                                                    /* SIGBUS: the memory went away */
+        if (tex->pixels && tex->width > 0 && tex->height > 0)
+            memset(tex->pixels, 0, (size_t)tex->width * (size_t)tex->height * sizeof(uint32_t));
+    }
+    dmabuf_sync(d, false);
+    return rc;
+}
+
+static int buffer_copy_inner(struct lm_buffer *b, struct lm_texture *tex, uint32_t transform, const struct lm_region *damage)
+{
     if (transform > LM_TRANSFORM_FLIPPED_270)
         transform = LM_TRANSFORM_NORMAL;
 
@@ -326,11 +501,14 @@ int lm_buffer_copy(struct lm_buffer *b, struct lm_texture *tex, uint32_t transfo
             struct lm_rect r;
             if (!lm_rect_intersect(&damage->rects[i], &whole, &r))
                 continue;
+            bool tr = false;
             int rc = copy_rect(b, r.x, r.y, r.w, r.h,
                                tex->pixels + (size_t)r.y * (size_t)bw + (size_t)r.x,
-                               (size_t)bw, opaque);
+                               (size_t)bw, opaque, &tr);
             if (rc < 0)
                 return rc;
+            if (tr)
+                tex->solid = false;                              /* sticky until the next full copy */
         }
         return 0;
     }
@@ -340,13 +518,50 @@ int lm_buffer_copy(struct lm_buffer *b, struct lm_texture *tex, uint32_t transfo
     tex->opaque = opaque;
 
     int rc;
+    bool tr = false;
     if (transform == LM_TRANSFORM_NORMAL)
-        rc = copy_rect(b, 0, 0, bw, bh, tex->pixels, (size_t)bw, opaque);
+        rc = copy_rect(b, 0, 0, bw, bh, tex->pixels, (size_t)bw, opaque, &tr);
     else
-        rc = copy_transformed(b, tex, transform, opaque);
+        rc = copy_transformed(b, tex, transform, opaque, &tr);
+    tex->solid = rc == 0 && !tr;
     if (rc == -2) /* never expose stale heap contents */
         memset(tex->pixels, 0, (size_t)tw * (size_t)th * sizeof(uint32_t));
     return rc;
+}
+
+/* ---- dmabuf buffers (created by dmabuf.c) -------------------------------------------------------------------------- */
+
+struct lm_buffer *lm_buffer_create_dmabuf(struct lm_client *client, uint32_t id, uint32_t version, int fd, size_t size,
+                                          int32_t width, int32_t height, int32_t stride, int32_t offset, bool opaque)
+{
+    struct lm_buffer *b = calloc(1, sizeof(*b));
+    struct lm_dmabuf_fd *d = calloc(1, sizeof(*d));
+    if (!b || !d) {
+        free(b);
+        free(d);
+        close(fd);
+        lm_client_post_no_memory(client);
+        return NULL;
+    }
+    d->fd = fd;
+    d->size = size;
+    b->dmabuf = d;
+    b->width = width;
+    b->height = height;
+    b->stride = stride;
+    b->offset = offset;
+    b->format = opaque ? LM_WL_SHM_FORMAT_XRGB8888 : LM_WL_SHM_FORMAT_ARGB8888;
+    b->refs = 1;                                                    /* held by the wl_buffer resource */
+    struct lm_resource *br = id ? lm_resource_create(client, id, &lm_wl_buffer_interface, version, buffer_handlers, b,
+                                                     buffer_resource_destroy)
+                                : lm_resource_create_server(client, &lm_wl_buffer_interface, version, buffer_handlers, b,
+                                                            buffer_resource_destroy);
+    if (!br) {
+        lm_buffer_unref(b);                                         /* closes the fd */
+        return NULL;
+    }
+    b->resource = br;
+    return b;
 }
 
 /* ---- wl_shm_pool ---------------------------------------------------------------- */

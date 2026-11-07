@@ -36,6 +36,10 @@ EVENTS = {
                        3: ('motion', 'uff'), 4: ('drop', ''), 5: ('selection', 'o')},
     'wl_data_offer': {0: ('offer', 's'), 1: ('source_actions', 'u'), 2: ('action', 'u')},
     'lumen_settings_v1': {0: ('value', 'ss'), 1: ('done', '')},
+    'zwp_linux_dmabuf_v1': {0: ('format', 'u'), 1: ('modifier', 'uuu')},
+    'zwp_linux_buffer_params_v1': {0: ('created', 'n'), 1: ('failed', '')},
+    'zwp_linux_dmabuf_feedback_v1': {0: ('done', ''), 1: ('format_table', 'hu'), 2: ('main_device', 'a'), 3: ('tranche_done', ''),
+                                     4: ('tranche_target_device', 'a'), 5: ('tranche_formats', 'a'), 6: ('tranche_flags', 'u')},
     'wl_data_source': {0: ('target', 's'), 1: ('send', 'sh'), 2: ('cancelled', ''),
                        3: ('dnd_drop_performed', ''), 4: ('dnd_finished', ''), 5: ('action', 'u')},
 }
@@ -75,6 +79,9 @@ REQ = {
     'wl_data_source': {'offer': 0, 'destroy': 1},
     'wl_data_offer': {'accept': 0, 'receive': 1, 'destroy': 2},
     'lumen_settings_v1': {'destroy': 0, 'set': 1},
+    'zwp_linux_dmabuf_v1': {'destroy': 0, 'create_params': 1, 'get_default_feedback': 2, 'get_surface_feedback': 3},
+    'zwp_linux_buffer_params_v1': {'destroy': 0, 'add': 1, 'create': 2, 'create_immed': 3},
+    'zwp_linux_dmabuf_feedback_v1': {'destroy': 0},
 }
 
 XDG_STATE_MAXIMIZED, XDG_STATE_FULLSCREEN, XDG_STATE_RESIZING, XDG_STATE_ACTIVATED = 1, 2, 3, 4

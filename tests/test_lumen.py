@@ -2646,5 +2646,352 @@ class TestSysinfo(Base):
 
 
 
+class Gbm:
+    """GPU memory from libgbm through ctypes (a linear buffer object on the render node), or None when it cannot be had."""
+
+    GBM_BO_USE_RENDERING, GBM_BO_USE_LINEAR, GBM_BO_TRANSFER_WRITE = 1 << 2, 1 << 4, 1 << 1
+    ARGB8888, XRGB8888 = 0x34325241, 0x34325258
+
+    @classmethod
+    def open(cls):
+        import ctypes, ctypes.util, glob
+        nodes = [n for n in sorted(glob.glob('/dev/dri/renderD*')) if os.access(n, os.R_OK | os.W_OK)]
+        lib = ctypes.util.find_library('gbm')
+        if not nodes or not lib:
+            return None
+        try:
+            g = cls()
+            g.ct = ctypes
+            g.lib = ctypes.CDLL(lib)
+            g.lib.gbm_create_device.restype = ctypes.c_void_p
+            g.lib.gbm_bo_create.restype = ctypes.c_void_p
+            g.lib.gbm_bo_create.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+            g.lib.gbm_bo_get_stride.argtypes = [ctypes.c_void_p]
+            g.lib.gbm_bo_get_stride.restype = ctypes.c_uint32
+            g.lib.gbm_bo_get_fd.argtypes = [ctypes.c_void_p]
+            g.lib.gbm_bo_map.restype = ctypes.c_void_p
+            g.lib.gbm_bo_map.argtypes = [ctypes.c_void_p] + [ctypes.c_uint32] * 4 + [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p]
+            g.lib.gbm_bo_unmap.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            g.node = nodes[0]
+            g.fd = os.open(nodes[0], os.O_RDWR)
+            g.dev = g.lib.gbm_create_device(g.fd)
+            return g if g.dev else None
+        except Exception:
+            return None
+
+    def bo(self, w, h, fmt=None):
+        bo = self.lib.gbm_bo_create(self.dev, w, h, fmt or self.XRGB8888, self.GBM_BO_USE_LINEAR | self.GBM_BO_USE_RENDERING)
+        return bo if bo else None
+
+    def stride(self, bo):
+        return self.lib.gbm_bo_get_stride(bo)
+
+    def fd_of(self, bo):
+        return self.lib.gbm_bo_get_fd(bo)
+
+    def fill(self, bo, w, h, pixel_of):
+        """Write pixel_of(x, y) (a 32-bit value) for every pixel through a CPU mapping."""
+        ct = self.ct
+        stride, data = ct.c_uint32(), ct.c_void_p()
+        m = self.lib.gbm_bo_map(bo, 0, 0, w, h, self.GBM_BO_TRANSFER_WRITE, ct.byref(stride), ct.byref(data))
+        if not m:
+            raise RuntimeError('gbm_bo_map failed')
+        for y in range(h):
+            row = b''.join(struct.pack('<I', pixel_of(x, y)) for x in range(w))
+            ct.memmove(m + y * stride.value, row, len(row))
+        self.lib.gbm_bo_unmap(bo, data)
+
+
+class TestDmabuf(Base):
+    """zwp_linux_dmabuf_v1: clients that render with the GPU hand Lumen dmabufs, which are read like shm buffers."""
+
+    DMABUF_ARGB, DMABUF_XRGB = 0x34325241, 0x34325258
+
+    def gbm(self):
+        g = Gbm.open()
+        if g is None:
+            self.skipTest('no render node or libgbm')
+        return g
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client()
+        if 'zwp_linux_dmabuf_v1' not in self.c.wl.globals:
+            self.skipTest('compositor has no dmabuf global (no render node)')
+
+    def dmabuf(self):
+        return self.c.wl.bind('zwp_linux_dmabuf_v1', 4)
+
+    def import_bo(self, g, bo, w, h, fmt, immed=True, plane=0, modifier=(0, 0), flags=0, offset=0):
+        wl = self.c.wl
+        dm = self.dmabuf()
+        params = wl.new_id('zwp_linux_buffer_params_v1')
+        wl.request(dm, 'create_params', params)
+        fd = g.fd_of(bo)
+        wl.request(params, 'add', plane, offset, g.stride(bo), modifier[0], modifier[1], fds=[fd], **{}) if False else None
+        wl.request(params, 'add', plane, offset, g.stride(bo), modifier[0], modifier[1], fds=[fd])
+        os.close(fd)
+        if immed:
+            buf = wl.new_id('wl_buffer')
+            wl.request(params, 'create_immed', buf, I(w), I(h), fmt, flags)
+            return params, buf
+        wl.request(params, 'create', I(w), I(h), fmt, flags)
+        return params, None
+
+    def window_with(self, w, h):
+        win = Window(self.c, w, h)
+        return win
+
+    def show(self, win, buf, w, h):
+        wl = self.c.wl
+        wl.request(win.surface, 'attach', buf, I(0), I(0))
+        wl.request(win.surface, 'damage_buffer', I(0), I(0), I(w), I(h))
+        wl.request(win.surface, 'commit')
+        wl.roundtrip()
+
+    def window_origin(self):
+        r = ctl.windows()['windows'][0]
+        return r['x'], r['y']
+
+    def test_global_is_version_4_and_feedback_names_the_render_node(self):
+        wl = self.c.wl
+        self.assertEqual(wl.globals['zwp_linux_dmabuf_v1'][1], 4)
+        dm = self.dmabuf()
+        fb = wl.new_id('zwp_linux_dmabuf_feedback_v1')
+        wl.request(dm, 'get_default_feedback', fb)
+        wl.roundtrip()
+        evs = [e for e in wl.queue if e.obj == fb]
+        wl.queue = [e for e in wl.queue if e.obj != fb]
+        self.assertEqual([e.name for e in evs], ['format_table', 'main_device', 'tranche_target_device', 'tranche_formats',
+                                                  'tranche_flags', 'tranche_done', 'done'])
+        table_fd, size = evs[0].fds[0], evs[0].args[0]
+        self.assertEqual(size, 32)
+        data = os.pread(table_fd, 32, 0)
+        os.close(table_fd)
+        (f0, _, m0), (f1, _, m1) = struct.unpack('<IIQ', data[:16]), struct.unpack('<IIQ', data[16:])
+        self.assertEqual((f0, m0, f1, m1), (self.DMABUF_ARGB, 0, self.DMABUF_XRGB, 0))      # linear ARGB8888 / XRGB8888 only
+        dev = struct.unpack('<Q', evs[1].args[0])[0]
+        self.assertEqual(evs[1].args[0], evs[2].args[0])
+        self.assertEqual(struct.unpack('<2H', evs[3].args[0]), (0, 1))
+        st = os.stat(Gbm.open().node) if Gbm.open() else None
+        if st is not None:
+            self.assertEqual(os.major(dev), os.major(st.st_rdev))                              # a DRM render node (major 226)
+            self.assertEqual(os.major(dev), 226)
+
+    def test_older_versions_get_the_formats_as_events(self):
+        wl = self.c.wl
+        dm = wl.bind('zwp_linux_dmabuf_v1', 3)
+        wl.roundtrip()
+        mods = [e.args for e in wl.queue if e.obj == dm and e.name == 'modifier']
+        wl.queue = [e for e in wl.queue if e.obj != dm]
+        self.assertEqual(mods, [[self.DMABUF_ARGB, 0, 0], [self.DMABUF_XRGB, 0, 0]])
+
+    def test_a_gpu_buffer_is_shown_and_follows_updates(self):
+        g = self.gbm()
+        w, h = 200, 120
+        bo = g.bo(w, h)
+        self.assertIsNotNone(bo, 'gbm could not make a linear buffer')
+        g.fill(bo, w, h, lambda x, y: 0xff000000 | (0xc02020 if x < 100 else 0x2040c0))
+        win = self.window_with(w, h)
+        params, buf = self.import_bo(g, bo, w, h, self.DMABUF_XRGB)
+        self.show(win, buf, w, h)
+        self.c.wl.roundtrip()
+        x0, y0 = self.window_origin()
+        ppm = ctl.dump(os.path.join(tmp, 'dmabuf1.ppm'))
+        self.assertEqual(ppm.px(x0 + 20, y0 + 20), (0xc0, 0x20, 0x20))
+        self.assertEqual(ppm.px(x0 + 150, y0 + 100), (0x20, 0x40, 0xc0))
+        # the same buffer object repainted by the producer: a new commit shows the new pixels (sync + the kept mapping)
+        g.fill(bo, w, h, lambda x, y: 0xff208040)
+        self.show(win, buf, w, h)
+        self.c.wl.roundtrip()
+        ppm = ctl.dump(os.path.join(tmp, 'dmabuf2.ppm'))
+        self.assertEqual(ppm.px(x0 + 20, y0 + 20), (0x20, 0x80, 0x40))
+        self.assertEqual(ppm.px(x0 + 150, y0 + 100), (0x20, 0x80, 0x40))
+        # the compositor released the buffer once it had copied it
+        self.assertTrue(any(e.obj == buf and e.name == 'release' for e in self.c.wl.queue))
+
+    def test_argb_buffers_blend_with_what_is_behind(self):
+        g = self.gbm()
+        w, h = 64, 64
+        bo = g.bo(w, h, Gbm.ARGB8888)
+        g.fill(bo, w, h, lambda x, y: 0xff102030 if x < 32 else 0x00000000)         # opaque left half, transparent right half
+        win = self.window_with(w, h)
+        params, buf = self.import_bo(g, bo, w, h, self.DMABUF_ARGB)
+        self.show(win, buf, w, h)
+        x0, y0 = self.window_origin()
+        ppm = ctl.dump(os.path.join(tmp, 'dmabuf3.ppm'))
+        self.assertEqual(ppm.px(x0 + 5, y0 + 5), (0x10, 0x20, 0x30))
+        self.assertNotEqual(ppm.px(x0 + 50, y0 + 5), (0, 0, 0))                          # transparent: the window background shows
+
+    def test_create_without_immed_answers_created_and_failed(self):
+        g = self.gbm()
+        w, h = 32, 32
+        bo = g.bo(w, h)
+        g.fill(bo, w, h, lambda x, y: 0xff808080)
+        wl = self.c.wl
+        params, _ = self.import_bo(g, bo, w, h, self.DMABUF_XRGB, immed=False)
+        ev = wl.wait_for(lambda e: e.obj == params and e.name in ('created', 'failed'), 2.0)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.name, 'created')
+        self.assertGreaterEqual(ev.args[0], 0xff000000)                                   # a server-allocated wl_buffer id
+        # a memfd is not a dmabuf: the import is refused with `failed`, not a crash
+        fd = os.memfd_create('not-a-dmabuf')
+        os.ftruncate(fd, 4096 * 4)
+        p2 = wl.new_id('zwp_linux_buffer_params_v1')
+        wl.request(self.dmabuf(), 'create_params', p2)
+        wl.request(p2, 'add', 0, 0, 128, 0, 0, fds=[fd])
+        os.close(fd)
+        wl.request(p2, 'create', I(32), I(32), self.DMABUF_XRGB, 0)
+        ev = wl.wait_for(lambda e: e.obj == p2 and e.name in ('created', 'failed'), 2.0)
+        self.assertEqual(ev.name, 'failed')
+
+    def expect_error(self, code, build):
+        """Run `build(wl)` on a fresh connection and expect a protocol error with `code` on the params object."""
+        c2 = self.client()
+        wl = c2.wl
+        dm = wl.bind('zwp_linux_dmabuf_v1', 4)
+        params = wl.new_id('zwp_linux_buffer_params_v1')
+        wl.request(dm, 'create_params', params)
+        build(wl, params)
+        try:
+            wl.roundtrip()
+        except Exception:
+            pass
+        end = time.time() + 2
+        while wl.error is None and time.time() < end:
+            wl.pump(0.05)
+        self.assertIsNotNone(wl.error, 'no protocol error')
+        self.assertEqual(wl.error.code, code, wl.error)
+
+    def test_bad_requests_are_protocol_errors(self):
+        g = self.gbm()
+        bo = g.bo(32, 32)
+        stride = g.stride(bo)
+
+        def add(wl, params, plane=0, offset=0):
+            fd = g.fd_of(bo)
+            wl.request(params, 'add', plane, offset, stride, 0, 0, fds=[fd])
+            os.close(fd)
+        self.expect_error(1, lambda wl, p: add(wl, p, plane=1))                                # plane_idx
+        self.expect_error(2, lambda wl, p: (add(wl, p), add(wl, p)))                           # plane_set
+        self.expect_error(3, lambda wl, p: wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 0))  # incomplete
+        self.expect_error(4, lambda wl, p: (add(wl, p), wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), 0x34324241, 0)))   # format
+        self.expect_error(5, lambda wl, p: (add(wl, p), wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(0), I(32), self.DMABUF_XRGB, 0)))  # dimensions
+        self.expect_error(6, lambda wl, p: (add(wl, p), wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(4000), self.DMABUF_XRGB, 0)))  # out of bounds
+        self.expect_error(7, lambda wl, p: (add(wl, p), wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 1)))  # flags
+        self.expect_error(0, lambda wl, p: (add(wl, p), wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 0),
+                                            wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 0)))      # already_used
+        # a regular file or memfd with create_immed: refused (invalid_wl_buffer), never mapped
+        def memfd(wl, p):
+            fd = os.memfd_create('x')
+            os.ftruncate(fd, 64 * 1024)
+            wl.request(p, 'add', 0, 0, 128, 0, 0, fds=[fd])
+            os.close(fd)
+            wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 0)
+        self.expect_error(7, memfd)
+        # a tiled (non-linear) modifier is not offered
+        self.expect_error(7, lambda wl, p: (wl.request(p, 'add', 0, 0, stride, 0, 1, fds=[g.fd_of(bo)]),
+                                             wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 0)))
+
+    def test_no_dmabuf_option_hides_the_global(self):
+        p, c, stop = self.private_compositor('lumen-dmabuf-off', '--no-dmabuf')
+        cl = Client(name='lumen-dmabuf-off')
+        cl.wl.get_registry()
+        cl.wl.roundtrip()
+        self.assertNotIn('zwp_linux_dmabuf_v1', cl.wl.globals)
+
+
+class TestOcclusion(Base):
+    """The renderer skips what an opaque surface covers; translucent windows must still blend with what is below."""
+
+    def two_windows(self):
+        low = Window(self.client(), 300, 220, title='low', color=0xff00ff00)
+        c = self.client()
+        top = Window(c, 200, 140, title='top', color=0xffff0000)
+        ws = {w['title']: w for w in ctl.windows()['windows']}
+        a, b = ws['low'], ws['top']
+        if not (b['x'] + 60 < a['x'] + a['w'] and a['x'] + 60 < b['x'] + b['w'] and b['y'] + 60 < a['y'] + a['h'] and a['y'] + 60 < b['y'] + b['h']):
+            # (the cascade position depends on how many windows the shared compositor placed before) move `top` over `low`
+            dx, dy = a['x'] + 30 - b['x'], a['y'] + 30 - b['y']
+            ctl.abs(b['x'] + 50, b['y'] - 14)
+            ctl.button(272, True)
+            ctl.abs(b['x'] + 50 + dx, b['y'] - 14 + dy)
+            ctl.button(272, False)
+            ctl.sync()
+            ws = {w['title']: w for w in ctl.windows()['windows']}
+            a, b = ws['low'], ws['top']
+        x0, y0 = max(a['x'], b['x']), max(a['y'], b['y'])
+        x1, y1 = min(a['x'] + a['w'], b['x'] + b['w']), min(a['y'] + a['h'], b['y'] + b['h'])
+        self.assertTrue(x1 - x0 > 20 and y1 - y0 > 20, 'the windows do not overlap: %r %r' % (a, b))
+        return low, top, (x0 + 10, y0 + 10), (a, b)
+
+    def commit_argb(self, win, argb):
+        w, h = win.size
+        buf = win.shm.buffer(w, h, argb, fmt=0)                               # ARGB8888
+        wl = win.c.wl
+        wl.request(win.surface, 'attach', buf, I(0), I(0))
+        wl.request(win.surface, 'damage_buffer', I(0), I(0), I(w), I(h))
+        wl.request(win.surface, 'commit')
+        wl.roundtrip()
+
+    def test_an_opaque_argb_window_hides_what_is_below(self):
+        low, top, pt, _ = self.two_windows()
+        self.commit_argb(top, 0xffff0000)
+        ppm = ctl.dump(os.path.join(tmp, 'occ1.ppm'))
+        self.assertEqual(ppm.px(*pt), (255, 0, 0))
+
+    def test_a_window_that_becomes_translucent_blends_with_its_frame_background(self):
+        low, top, pt, _ = self.two_windows()
+        self.commit_argb(top, 0xffff0000)                                     # opaque first: the renderer treats it as solid
+        self.assertEqual(ctl.dump(os.path.join(tmp, 'occ2a.ppm')).px(*pt), (255, 0, 0))
+        self.commit_argb(top, 0x80800000)                                     # premultiplied: half transparent red
+        # A translucent client shows the frame's own background (0x101216), not the window below: 0x80 + 0x10 * 127 / 255 ...
+        r, g, b = ctl.dump(os.path.join(tmp, 'occ2b.ppm')).px(*pt)
+        self.assertTrue(abs(r - 136) <= 1 and abs(g - 9) <= 1 and abs(b - 11) <= 1, (r, g, b))
+        self.commit_argb(top, 0xff0000ff)                                     # and opaque blue again
+        self.assertEqual(ctl.dump(os.path.join(tmp, 'occ2c.ppm')).px(*pt), (0, 0, 255))
+
+    def test_transparent_corners_with_an_opaque_region_paint_exactly_right(self):
+        low, top, pt, (a, b) = self.two_windows()
+        c = top.c
+        wl = c.wl
+        w, h = top.size
+        # an ARGB buffer: opaque blue, except a 12x12 transparent box in each corner (like a rounded GTK window)
+        buf = top.shm.buffer(w, h, 0xff0000ff, fmt=0)
+        for (cx, cy) in ((0, 0), (w - 12, 0), (0, h - 12), (w - 12, h - 12)):
+            for y in range(cy, cy + 12):
+                top.shm.map[(y * w + cx) * 4:(y * w + cx + 12) * 4] = b'\0' * 48
+        region = wl.new_id('wl_region')
+        wl.request(c.compositor, 'create_region', region)
+        wl.request(region, 'add', I(0), I(12), I(w), I(h - 24))                  # the opaque region: two overlapping bands
+        wl.request(region, 'add', I(12), I(0), I(w - 24), I(h))
+        wl.request(top.surface, 'set_opaque_region', region)
+        wl.request(top.surface, 'attach', buf, I(0), I(0))
+        wl.request(top.surface, 'damage_buffer', I(0), I(0), I(w), I(h))
+        wl.request(top.surface, 'commit')
+        wl.roundtrip()
+        ppm = ctl.dump(os.path.join(tmp, 'occ4.ppm'))
+        x, y = b['x'], b['y']
+        self.assertEqual(ppm.px(x + w // 2, y + h // 2), (0, 0, 255))              # inside the cover
+        self.assertEqual(ppm.px(x + 3, y + 50), (0, 0, 255))                       # the left band of the opaque region
+        self.assertEqual(ppm.px(x + w // 2, y + 3), (0, 0, 255))                   # the top band
+        self.assertEqual(ppm.px(x + 5, y + 5), (0x10, 0x12, 0x16))                 # a transparent corner: the frame's background
+        self.assertEqual(ppm.px(x + w - 6, y + h - 6), (0x10, 0x12, 0x16))
+        # and the window below is intact right next to the top window
+        self.assertEqual(ppm.px(a['x'] + 5, a['y'] + 5), (0, 255, 0))
+
+    def test_a_window_moved_away_uncovers_what_was_below_it(self):
+        low, top, pt, (a, b) = self.two_windows()
+        before = ctl.dump(os.path.join(tmp, 'occ3a.ppm')).px(*pt)
+        self.assertEqual(before, (255, 0, 0))
+        ctl.abs(b['x'] + 50, b['y'] - 14)                                      # drag the top window's title bar to the right
+        ctl.button(272, True)
+        ctl.abs(b['x'] + 50 + 420, b['y'] - 14)
+        ctl.button(272, False)
+        ctl.sync()
+        after = ctl.dump(os.path.join(tmp, 'occ3b.ppm')).px(*pt)
+        self.assertEqual(after, (0, 255, 0))                                   # the window that was below shows again
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

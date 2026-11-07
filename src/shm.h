@@ -27,9 +27,17 @@
 
 struct lm_shm_pool; /* private to shm.c, refcounted */
 
+/* A client's dmabuf (linux-dmabuf): GPU-rendered pixels read through mmap + DMA_BUF_IOCTL_SYNC (see dmabuf.c). */
+struct lm_dmabuf_fd {
+    int fd;                         /* private dup, closed with the buffer */
+    size_t size;                    /* bytes of the object (lseek SEEK_END) */
+    const uint8_t *map;             /* mapped on first use, read-only */
+};
+
 struct lm_buffer {
     struct lm_resource *resource;   /* the wl_buffer; NULL once the client destroyed it */
-    struct lm_shm_pool *pool;
+    struct lm_shm_pool *pool;       /* wl_shm buffers */
+    struct lm_dmabuf_fd *dmabuf;    /* linux-dmabuf buffers (pool is NULL then) */
     int32_t width, height;
     int32_t stride;                 /* bytes */
     int32_t offset;                 /* bytes into the pool */
@@ -44,11 +52,21 @@ struct lm_texture {
     int32_t width, height;
     int32_t stride;                 /* bytes (== width * 4) */
     bool opaque;                    /* source format had no alpha (alpha forced to 0xff) */
+    bool solid;                     /* every pixel has alpha 0xff: opaque format, or an alpha format (Firefox, GTK) that never used it
+                                     * since the last full copy (sticky: one translucent pixel keeps it false until then) */
 };
 
 /* Creates and advertises the wl_shm global (v1). */
 struct lm_shm *lm_shm_create(struct lm_server *srv);
 void lm_shm_destroy(struct lm_shm *shm);
+
+/*
+ * A wl_buffer for a dmabuf (dmabuf.c has validated everything): `id` 0 = create it with a server-allocated id (the `created`
+ * event of zwp_linux_buffer_params_v1), else the client's id (create_immed). Takes ownership of `fd` on success AND on failure.
+ * XRGB8888 when `opaque`, else ARGB8888. NULL on failure (the client has been told when it was its fault).
+ */
+struct lm_buffer *lm_buffer_create_dmabuf(struct lm_client *client, uint32_t id, uint32_t version, int fd, size_t size,
+                                          int32_t width, int32_t height, int32_t stride, int32_t offset, bool opaque);
 
 /* The lm_buffer behind a wl_buffer resource (resource->data), or NULL. */
 struct lm_buffer *lm_buffer_from_resource(struct lm_resource *res);

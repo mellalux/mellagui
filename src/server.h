@@ -81,6 +81,7 @@ struct lm_input;
 struct lm_settings;
 struct lm_mixer;
 struct lm_sysinfo;
+struct lm_dmabuf;
 
 typedef void (*lm_request_fn)(struct lm_resource *res, const union lm_arg *args);
 typedef void (*lm_resource_destroy_fn)(struct lm_resource *res);
@@ -168,6 +169,7 @@ struct lm_config {
     bool sticky_keys;           /* --sticky: start with sticky keys enabled */
     bool gadget;                /* desktop gadget (clipboard viewer) visible at start (default true; --no-gadget; Super+G) */
     bool mixer;                 /* volume mixer gadget visible at start (default false; --mixer; Super+V; setting `mixer`) */
+    bool dmabuf;                /* offer zwp_linux_dmabuf_v1 so clients can render with the GPU (default true; --no-dmabuf) */
     bool sysinfo;               /* system monitor gadget visible at start (default false; --sysinfo; Super+S; setting `sysinfo`) */
     bool sound;                 /* feedback beeps for sticky keys (default true; --no-sound; never on headless) */
     bool grab_input;            /* EVIOCGRAB the evdev devices (default true on drm) */
@@ -191,6 +193,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .grab_input = true,
         .sound = true,
         .audio_device = "default",
+        .dmabuf = true,
         .gadget = true,
         .log_to_stderr = true,
     };
@@ -231,6 +234,7 @@ struct lm_server {
     struct lm_settings *settings;       /* lumen_settings_v1 + settings file */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
     struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */
+    struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */
 
     void *priv;
 };

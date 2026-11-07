@@ -5,6 +5,9 @@
  * plus the damage of the last HIST frames; together with the framebuffer age
  * reported by the backend that tells us exactly what to redraw.
  */
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
 #include "render.h"
 #include "mixer.h"
 #include "sysinfo.h"
@@ -67,6 +70,10 @@ struct paint_ctx {
     struct lm_output *out;
     struct lm_framebuffer *fb;
     struct lm_rect clip;                /* global, already clipped to the output */
+    int idx, skip_before;               /* scene items seen so far / items below the opaque cover (not painted) */
+    int cov_idx;                        /* occlusion search: the scene item that covers `cov_rect` opaquely, -1 none */
+    struct lm_rect cov_rect;
+    int64_t cov_area;
 };
 
 /* ---- cursor sprites --------------------------------------------------------------- */
@@ -212,16 +219,30 @@ static inline uint32_t *fb_row(const struct paint_ctx *c, int gy)
                         (size_t)(gy - c->out->y) * (size_t)c->fb->stride) - c->out->x;
 }
 
+/* Fill n pixels with one value (SSE2 stores when available). */
+static inline void fill32(uint32_t *p, uint32_t v, size_t n)
+{
+    size_t i = 0;
+#ifdef __SSE2__
+    __m128i vv = _mm_set1_epi32((int)v);
+    for (; i + 8 <= n; i += 8) {
+        _mm_storeu_si128((__m128i *)(void *)(p + i), vv);
+        _mm_storeu_si128((__m128i *)(void *)(p + i + 4), vv);
+    }
+    for (; i + 4 <= n; i += 4)
+        _mm_storeu_si128((__m128i *)(void *)(p + i), vv);
+#endif
+    for (; i < n; i++)
+        p[i] = v;
+}
+
 static void fill_rect(const struct paint_ctx *c, const struct lm_rect *rect, uint32_t color)
 {
     struct lm_rect r;
     if (!lm_rect_intersect(rect, &c->clip, &r))
         return;
-    for (int y = r.y; y < r.y + r.h; y++) {
-        uint32_t *row = fb_row(c, y);
-        for (int x = r.x; x < r.x + r.w; x++)
-            row[x] = color;
-    }
+    for (int y = r.y; y < r.y + r.h; y++)
+        fill32(fb_row(c, y) + r.x, color, (size_t)r.w);
 }
 
 static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t color)
@@ -294,9 +315,7 @@ static void paint_wallpaper(const struct paint_ctx *c)
     struct lm_rect r = c->clip;
     for (int y = r.y; y < r.y + r.h; y++) {
         uint32_t col = lerp_color(COL_WALL_TOP, COL_WALL_BOTTOM, y - c->out->y, c->out->height);
-        uint32_t *row = fb_row(c, y);
-        for (int x = r.x; x < r.x + r.w; x++)
-            row[x] = col;
+        fill32(fb_row(c, y) + r.x, col, (size_t)r.w);
     }
 }
 
@@ -854,6 +873,45 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
 
 /* ---- surface blitting ------------------------------------------------------------------------ */
 
+/*
+ * One row of a translucent (premultiplied ARGB) texture over the framebuffer. Windows are almost always fully opaque
+ * even when their buffer format has an alpha channel (Firefox, GTK), so groups of 4 pixels whose alpha is all 0xff are copied
+ * with one store, all-transparent groups are skipped, and only the mixed ones go through the scalar blend.
+ */
+static void blit_row_argb(uint32_t *d, const uint32_t *s, int n)
+{
+    int x = 0;
+#ifdef __SSE2__
+    const __m128i amask = _mm_set1_epi32((int)0xff000000u), rgb = _mm_set1_epi32(0x00ffffff), zero = _mm_setzero_si128();
+    for (; x + 4 <= n; x += 4) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(s + x));
+        __m128i a = _mm_and_si128(v, amask);
+        if (_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(a, amask))) == 0xf) {
+            _mm_storeu_si128((__m128i *)(void *)(d + x), _mm_and_si128(v, rgb));
+            continue;
+        }
+        if (_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(a, zero))) == 0xf)
+            continue;
+        for (int k = 0; k < 4; k++) {
+            uint32_t p = s[x + k], al = p >> 24;
+            if (al == 255)
+                d[x + k] = p & 0x00ffffffu;
+            else if (al)
+                d[x + k] = blend_px(p, d[x + k]);
+        }
+    }
+#endif
+    for (; x < n; x++) {
+        uint32_t p = s[x], al = p >> 24;
+        if (al == 255)
+            d[x] = p & 0x00ffffffu;
+        else if (al)
+            d[x] = blend_px(p, d[x]);
+    }
+}
+
+static bool region_covers(const struct lm_region *rg, const struct lm_rect *r);
+
 static void blit_surface(const struct paint_ctx *c, struct lm_surface *s, int32_t ox, int32_t oy)
 {
     if (!s->has_content || !s->tex.pixels)
@@ -863,14 +921,20 @@ static void blit_surface(const struct paint_ctx *c, struct lm_surface *s, int32_
         return;
     const struct lm_texture *t = &s->tex;
     int scale = s->scale > 0 ? s->scale : 1;
+    struct lm_rect local = lm_rect_make(r.x - ox, r.y - oy, r.w, r.h);
+    bool force_solid = scale == 1 && region_covers(&s->opaque, &local);      /* the client promised these pixels are opaque */
     for (int y = r.y; y < r.y + r.h; y++) {
         uint32_t *drow = fb_row(c, y);
         int sy = (y - oy) * scale;
         if (sy >= t->height)
             break;
         const uint32_t *srow = t->pixels + (size_t)sy * (size_t)(t->stride / 4);
-        if (scale == 1 && t->opaque) {
+        if (scale == 1 && (t->opaque || t->solid || force_solid)) {
             memcpy(drow + r.x, srow + (r.x - ox), (size_t)r.w * 4);
+            continue;
+        }
+        if (scale == 1) {                                       /* translucent texture, 1:1: 4 pixels at a time */
+            blit_row_argb(drow + r.x, srow + (r.x - ox), r.w);
             continue;
         }
         for (int x = r.x; x < r.x + r.w; x++) {
@@ -963,9 +1027,76 @@ static void paint_cursor(const struct paint_ctx *c)
 
 /* ---- painting a rectangle of an output ------------------------------------------------------- */
 
+/*
+ * Occlusion: when an opaque surface covers the whole rectangle being repainted, nothing underneath it can show, so the
+ * wallpaper, the gadgets, the frames and the windows below it are not painted at all (the first pass finds the topmost
+ * such surface, the second pass paints from there). Without this every frame of a full-screen video or Firefox window
+ * first painted the wallpaper and the window's background and then overwrote them.
+ */
+/* True when one rectangle of `rg` (surface-local) contains `r`. */
+static bool region_covers(const struct lm_region *rg, const struct lm_rect *r)
+{
+    for (int i = 0; i < rg->n; i++) {
+        const struct lm_rect *q = &rg->rects[i];
+        if (q->x <= r->x && q->y <= r->y && q->x + q->w >= r->x + r->w && q->y + q->h >= r->y + r->h)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * The largest rectangle of `clip` that surface `s` (at ox, oy) paints opaquely: the whole surface when its texture has no
+ * alpha (or never used it), else the biggest rectangle of the opaque region the client declared
+ * (wl_surface.set_opaque_region: GTK/Firefox windows have transparent corners and say so). Area 0 = none.
+ */
+static int64_t surface_opaque_rect(const struct lm_surface *s, int32_t ox, int32_t oy, const struct lm_rect *clip,
+                                   struct lm_rect *out)
+{
+    *out = (struct lm_rect){ 0 };
+    if (!s || !s->has_content || !s->tex.pixels)
+        return 0;
+    int64_t best = 0;
+    if (s->tex.opaque || s->tex.solid) {
+        struct lm_rect whole = lm_rect_make(ox, oy, s->width, s->height), r;
+        if (lm_rect_intersect(&whole, clip, &r) && (int64_t)r.w * r.h > best) {
+            best = (int64_t)r.w * r.h;
+            *out = r;
+        }
+        return best;
+    }
+    for (int i = 0; i < s->opaque.n; i++) {
+        struct lm_rect q = lm_rect_make(s->opaque.rects[i].x + ox, s->opaque.rects[i].y + oy, s->opaque.rects[i].w,
+                                        s->opaque.rects[i].h), r;
+        if (lm_rect_intersect(&q, clip, &r) && (int64_t)r.w * r.h > best) {
+            best = (int64_t)r.w * r.h;
+            *out = r;
+        }
+    }
+    return best;
+}
+
+/* First pass: the topmost scene item with an opaque rectangle worth the trouble (at least half of the area being repainted). */
+static bool cover_cb(const struct lm_scene_item *item, void *data)
+{
+    struct paint_ctx *c = data;
+    if (item->kind == LM_SCENE_SURFACE) {
+        struct lm_rect r;
+        int64_t area = surface_opaque_rect(item->u.surface.root, item->u.surface.x, item->u.surface.y, &c->clip, &r);
+        if (area > 0 && area * 2 >= (int64_t)c->clip.w * c->clip.h && area >= c->cov_area) {
+            c->cov_idx = c->idx;
+            c->cov_rect = r;
+            c->cov_area = area;
+        }
+    }
+    c->idx++;
+    return true;
+}
+
 static bool scene_cb(const struct lm_scene_item *item, void *data)
 {
     struct paint_ctx *c = data;
+    if (c->idx++ < c->skip_before)
+        return true;
     switch (item->kind) {
     case LM_SCENE_WALLPAPER:
         if (item->output == c->out)
@@ -995,14 +1126,46 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
 static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_framebuffer *fb,
                        const struct lm_rect *rect)
 {
-    struct paint_ctx c = { .r = r, .out = st->out, .fb = fb };
+    struct paint_ctx c = { .r = r, .out = st->out, .fb = fb, .cov_idx = -1 };
     struct lm_rect orect = lm_output_rect(st->out);
     if (!lm_rect_intersect(rect, &orect, &c.clip))
         return;
-    if (r->srv->wm)
-        lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
-    else
+    if (!r->srv->wm) {
         paint_wallpaper(&c);
+        paint_cursor(&c);
+        return;
+    }
+    struct lm_rect full = c.clip;
+    lm_wm_scene_for_each(r->srv->wm, &full, cover_cb, &c);
+    if (c.cov_idx < 0) {                                                /* nothing covers: paint everything */
+        c.idx = 0;
+        c.skip_before = 0;
+        lm_wm_scene_for_each(r->srv->wm, &full, scene_cb, &c);
+    } else {
+        /* An opaque rectangle `cov` hides everything below its surface: inside it only the items from the cover upwards
+         * are painted; the strips around it get the full stack (those are the transparent corners and edges). */
+        struct lm_rect cov = c.cov_rect;
+        int cov_idx = c.cov_idx;
+        struct lm_rect strips[4] = {
+            lm_rect_make(full.x, full.y, full.w, cov.y - full.y),                                  /* above */
+            lm_rect_make(full.x, cov.y + cov.h, full.w, full.y + full.h - (cov.y + cov.h)),        /* below */
+            lm_rect_make(full.x, cov.y, cov.x - full.x, cov.h),                                    /* left */
+            lm_rect_make(cov.x + cov.w, cov.y, full.x + full.w - (cov.x + cov.w), cov.h),          /* right */
+        };
+        for (int i = 0; i < 4; i++) {
+            if (strips[i].w <= 0 || strips[i].h <= 0)
+                continue;
+            c.clip = strips[i];
+            c.idx = 0;
+            c.skip_before = 0;
+            lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
+        }
+        c.clip = cov;
+        c.idx = 0;
+        c.skip_before = cov_idx;
+        lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
+    }
+    c.clip = full;
     paint_cursor(&c);
 }
 

@@ -109,6 +109,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/seatdev.[ch]` | **input** | device open (direct / logind TakeDevice via dlopen) |
 | `src/output.[ch]` | **backend** | wl_output globals, output layout queries |
 | `src/backend.h`, `src/backend_drm.c`, `src/backend_headless.c` | **backend** | DRM/KMS + VT; headless + control socket |
+| `src/dmabuf.[ch]` | **protocol** | `zwp_linux_dmabuf_v1` v4: default/surface feedback (the display GPU's render node as main device, a memfd format table), params -> `lm_buffer_create_dmabuf()` (shm.c); only linear ARGB8888/XRGB8888, one plane, no flags; the fd must be a real dmabuf (the sync ioctl is the test), bounds checked against its size |
 | `src/cvt.[ch]`, `src/edid.[ch]` | **backend** | video-mode helpers without DRM types (unit-tested in `keymap-test`): CVT reduced-blanking timings; the EDID's native timing and the rule for when the offered mode has the wrong shape (a 21:9 panel with only 16:9 modes gets a generated mode of its own shape instead of being stretched by the monitor) |
 | `src/render.[ch]`, `src/font.[ch]` | **render** | software compositor, cursor, decorations, 8x16 font |
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
@@ -245,3 +246,14 @@ CVT mode, preferred mode, or the native-shape correction), creates two new dumb 
 `render.c` redraw everything and `wm.c` re-apply the maximized/fullscreen geometry. The change stays *pending*: `settings.c` arms a timer
 (15 s, `LUMEN_REVERT_MS`) that restores the previous mode unless `resolution-confirm=1` arrives; only a kept value is saved. The headless
 backend implements the same two ops (a reallocated framebuffer) so all of this is tested end to end.
+
+## GPU clients (dmabuf) and the painting fast paths
+
+A GPU-rendering client (Mesa EGL, Firefox WebRender) allocates a linear buffer object on the render node named by the dmabuf
+feedback and attaches it as a `wl_buffer`. On commit `shm.c` copies it into the surface's texture like any shm buffer; for a dmabuf
+the source is the mmap of its fd, read after `DMA_BUF_IOCTL_SYNC` (which also waits for the GPU) with SSE4.1 streaming loads, under
+a SIGBUS guard (`sigsetjmp`; any other SIGBUS goes to the previous handler). `lm_texture.solid` records that every pixel had alpha
+0xff (sticky until the next full copy), so windows whose buffer format has alpha but which are in fact opaque blit with memcpy.
+`render.c` `paint_rect()` first looks for the biggest opaque rectangle of any surface in the repainted area (the whole surface when
+solid, else a rectangle of the client's opaque region) and paints only the items from that surface upwards inside it; the strips
+around it (transparent corners) get the full stack. 4-pixel SSE2 groups handle fill, blit and `fix_pixels`.

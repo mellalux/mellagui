@@ -14,6 +14,7 @@ Included programs:
 | `build/mellagui-term`| terminal emulator (xterm-compatible subset, 256/true colour, scrollback, mouse selection + clipboard) |
 | `build/mellagui-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/mellagui-settings` | settings panel (Super+I or *MellaGUI* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound, resolution, sound outputs; `--get` / `--set KEY=VALUE` for scripts |
+| `build/mellagui-view`| image viewer (PNG, PPM; MellaGUI menu → Images, or `mellagui-view [FILE|DIR]`): defaults to the newest screenshot in `~/Pictures`; Left/Right browse, +/- and the wheel zoom, drag pans, F fits, 0 is 100 %, R rescans, Esc quits; has its own inflate, `--decode FILE OUT.ppm` for tests |
 | `build/mellagui-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
 
 ## Status (read this)
@@ -84,10 +85,12 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Up / Super+Down       | maximize / restore (un-maximize or un-tile) |
 | Super+Space (+Shift)        | next / previous keyboard layout         |
 | Super+L                     | lock the screen (needs a password / PIN, see below) |
+| Print / Alt+Print           | screenshot of the screen under the pointer / of the focused window (with its frame), no cursor: PNG in `~/Pictures` (`--screenshot-dir`) **and** on the clipboard as `image/png` |
+| Ctrl+Print                  | the same screenshot of the screen, clipboard only (feedback for all three: a short white flash and, for 3 s, a thumbnail card with the file name in the bottom right corner; never part of a screenshot) |
 | Super+Shift+E               | quit MellaGUI                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *MellaGUI* (app menu: Terminal, Calculator, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
+Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
 add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
 (first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels), the clock and, at the far right, the small *Lock* button.
 

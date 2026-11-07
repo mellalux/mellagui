@@ -55,7 +55,26 @@ struct out_state {
     bool full;                          /* next frame must repaint everything */
 };
 
+/* Screenshot feedback: a white flash over the captured area (150 ms) and a card with a thumbnail and a label in the
+ * bottom right corner of the output (MELLAGUI_TOAST_MS, default 3 s). Painted above the scene, below the cursor. */
+#define SHOT_THUMB_W 240
+#define SHOT_THUMB_H 150
+#define SHOT_FLASH_TICKS 3
+#define SHOT_TICK_MS 50
+struct shot_fx {
+    bool active;
+    struct lm_output *out;
+    struct lm_rect area;                /* what was captured (flashed), global */
+    uint32_t *thumb;
+    int tw, th;
+    char label[96];
+    int ticks;
+    int hold_ms;
+    struct lm_timer *timer;
+};
+
 struct lm_renderer {
+    struct shot_fx shot;
     struct lm_server *srv;
     struct lm_idle *idle;
     struct lm_timer *frame_timer;
@@ -1239,8 +1258,138 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     return true;
 }
 
+static struct out_state *state_of(struct lm_output *out);
+
+/* ---- screenshot feedback ------------------------------------------------------------------------ */
+
+static struct lm_rect shot_card_rect(const struct shot_fx *fx)
+{
+    int w = fx->tw + 16, h = fx->th + 16 + LM_FONT_H + 8;
+    struct lm_rect o = lm_output_rect(fx->out);
+    return lm_rect_make(o.x + o.w - w - 16, o.y + o.h - h - 16, w, h);
+}
+
+static int shot_flash_alpha(const struct shot_fx *fx)
+{
+    return fx->ticks < SHOT_FLASH_TICKS ? (SHOT_FLASH_TICKS - fx->ticks) * 55 : 0;
+}
+
+static void paint_shot(const struct paint_ctx *c)
+{
+    const struct shot_fx *fx = &c->r->shot;
+    if (!fx->active || fx->out != c->out)
+        return;
+    int a = shot_flash_alpha(fx);
+    if (a > 0)
+        fill_round(c, &fx->area, 0, ((uint32_t)a << 24) | 0x00ffffffu);
+    struct lm_rect card = shot_card_rect(fx);
+    struct lm_rect hit;
+    if (!lm_rect_intersect(&card, &c->clip, &hit))
+        return;
+    fill_round(c, &card, 8, 0xf2161a24u);
+    struct lm_rect th = lm_rect_make(card.x + 8, card.y + 8, fx->tw, fx->th);
+    struct lm_rect ring = lm_rect_make(th.x - 1, th.y - 1, th.w + 2, th.h + 2);
+    fill_rect(c, &ring, 0x003a4256u);
+    struct lm_rect vis;
+    if (lm_rect_intersect(&th, &c->clip, &vis)) {
+        for (int y = vis.y; y < vis.y + vis.h; y++)
+            memcpy(fb_row(c, y) + vis.x, fx->thumb + (size_t)(y - th.y) * (size_t)fx->tw + (size_t)(vis.x - th.x),
+                   (size_t)vis.w * 4);
+    }
+    struct lm_rect text = lm_rect_make(card.x + 8, card.y + 8 + fx->th + 6, fx->tw, LM_FONT_H);
+    draw_text(c, &text, text.x, text.y, fx->label, 0x00d8dde8u);
+}
+
+static void shot_end(struct lm_renderer *r)
+{
+    struct shot_fx *fx = &r->shot;
+    if (!fx->active)
+        return;
+    struct lm_rect card = shot_card_rect(fx), area = fx->area;
+    fx->active = false;
+    if (fx->timer)
+        lm_timer_arm_ms(fx->timer, 0, 0);
+    free(fx->thumb);
+    fx->thumb = NULL;
+    lm_render_damage(r, &card);
+    lm_render_damage(r, &area);
+}
+
+static void shot_tick(void *data)
+{
+    struct lm_renderer *r = data;
+    struct shot_fx *fx = &r->shot;
+    if (!fx->active)
+        return;
+    bool was_flash = shot_flash_alpha(fx) > 0;
+    fx->ticks++;
+    if (was_flash)
+        lm_render_damage(r, &fx->area);                 /* the flash got weaker (or is gone) */
+    if (fx->ticks == SHOT_FLASH_TICKS)
+        lm_timer_arm_ms(fx->timer, fx->hold_ms > 0 ? fx->hold_ms : 1, 0);  /* the card stays for the rest of the time */
+    else if (fx->ticks > SHOT_FLASH_TICKS)
+        shot_end(r);
+}
+
+void lm_render_shot_feedback(struct lm_renderer *r, const struct lm_rect *where, const uint32_t *px, int w, int h,
+                             const char *label)
+{
+    if (!r->srv->backend || w <= 0 || h <= 0)
+        return;
+    struct lm_output *out = lm_output_nearest(r->srv, where->x + where->w / 2.0, where->y + where->h / 2.0);
+    if (!out || !state_of(out))
+        return;
+    if (!r->shot.timer)
+        r->shot.timer = lm_loop_add_timer(r->srv->loop, shot_tick, r);
+    if (!r->shot.timer)
+        return;
+    shot_end(r);
+    int tw = LM_MIN(SHOT_THUMB_W, w), th = (int)((int64_t)h * tw / w);
+    if (th > SHOT_THUMB_H) {
+        th = SHOT_THUMB_H;
+        tw = (int)((int64_t)w * th / h);
+    }
+    tw = LM_MAX(tw, 1);
+    th = LM_MAX(th, 1);
+    uint32_t *thumb = malloc((size_t)tw * (size_t)th * 4);
+    if (!thumb)
+        return;
+    for (int y = 0; y < th; y++) {                      /* box filter */
+        int y0 = (int)((int64_t)y * h / th), y1 = LM_MAX((int)((int64_t)(y + 1) * h / th), y0 + 1);
+        for (int x = 0; x < tw; x++) {
+            int x0 = (int)((int64_t)x * w / tw), x1 = LM_MAX((int)((int64_t)(x + 1) * w / tw), x0 + 1);
+            uint32_t sr = 0, sg = 0, sb = 0, n = 0;
+            for (int yy = y0; yy < y1; yy++)
+                for (int xx = x0; xx < x1; xx++) {
+                    uint32_t v = px[(size_t)yy * (size_t)w + (size_t)xx];
+                    sr += (v >> 16) & 255;
+                    sg += (v >> 8) & 255;
+                    sb += v & 255;
+                    n++;
+                }
+            thumb[(size_t)y * (size_t)tw + (size_t)x] = ((sr / n) << 16) | ((sg / n) << 8) | (sb / n);
+        }
+    }
+    struct shot_fx *fx = &r->shot;
+    fx->thumb = thumb;
+    fx->tw = tw;
+    fx->th = th;
+    fx->out = out;
+    fx->area = *where;
+    snprintf(fx->label, sizeof(fx->label), "%s", label ? label : "");
+    fx->ticks = 0;
+    const char *ms = getenv("MELLAGUI_TOAST_MS");
+    int hold = ms ? atoi(ms) : 3000;
+    fx->hold_ms = LM_MAX(hold - SHOT_FLASH_TICKS * SHOT_TICK_MS, 0);
+    fx->active = true;
+    lm_timer_arm_ms(fx->timer, SHOT_TICK_MS, SHOT_TICK_MS);
+    struct lm_rect card = shot_card_rect(fx);
+    lm_render_damage(r, &card);
+    lm_render_damage(r, &fx->area);
+}
+
 static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_framebuffer *fb,
-                       const struct lm_rect *rect)
+                       const struct lm_rect *rect, bool with_overlays)
 {
     struct paint_ctx c = { .r = r, .out = st->out, .fb = fb, .cov_idx = -1 };
     struct lm_rect orect = lm_output_rect(st->out);
@@ -1248,7 +1397,8 @@ static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_fr
         return;
     if (!r->srv->wm) {
         paint_wallpaper(&c);
-        paint_cursor(&c);
+        if (with_overlays)
+            paint_cursor(&c);
         return;
     }
     struct lm_rect full = c.clip;
@@ -1282,7 +1432,10 @@ static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_fr
         lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
     }
     c.clip = full;
-    paint_cursor(&c);
+    if (with_overlays) {
+        paint_shot(&c);
+        paint_cursor(&c);
+    }
 }
 
 /* ---- damage & scheduling -------------------------------------------------------------------- */
@@ -1333,7 +1486,13 @@ static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
     lm_region_intersect_rect(&redraw, &orect);
 
     for (int i = 0; i < redraw.n; i++)
-        paint_rect(r, st, fb, &redraw.rects[i]);
+        paint_rect(r, st, fb, &redraw.rects[i], true);
+    if (lm_rect_is_empty(&r->cursor_rect)) {            /* the first frame drew the cursor: remember where, so that it is erased later */
+        struct cursor_view v;
+        cursor_view(r, &v);
+        if (v.visible)
+            r->cursor_rect = v.rect;
+    }
 
     /* Present with output-local damage. */
     struct lm_rect *local = malloc(sizeof(*local) * (size_t)(redraw.n ? redraw.n : 1));
@@ -1361,6 +1520,38 @@ static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
     st->ready = false;
     st->presented = true;
     return true;
+}
+
+uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h)
+{
+    if (!r->srv->backend || rect->w <= 0 || rect->h <= 0)
+        return NULL;
+    struct lm_output *out = lm_output_nearest(r->srv, rect->x + rect->w / 2.0, rect->y + rect->h / 2.0);
+    struct out_state *st = out ? state_of(out) : NULL;
+    struct lm_rect orect, clip;
+    if (!st)
+        return NULL;
+    orect = lm_output_rect(out);
+    if (!lm_rect_intersect(rect, &orect, &clip))
+        return NULL;
+    size_t stride = (size_t)out->width * 4;
+    uint32_t *whole = calloc((size_t)out->height, stride);
+    uint32_t *res = malloc((size_t)clip.w * (size_t)clip.h * 4);
+    if (!whole || !res) {
+        free(whole);
+        free(res);
+        return NULL;
+    }
+    struct lm_framebuffer fb = { .pixels = whole, .width = out->width, .height = out->height, .stride = (int32_t)stride };
+    paint_rect(r, st, &fb, &clip, false);
+    for (int y = 0; y < clip.h; y++)
+        memcpy(res + (size_t)y * (size_t)clip.w,
+               (const uint8_t *)whole + (size_t)(clip.y - out->y + y) * stride + (size_t)(clip.x - out->x) * 4,
+               (size_t)clip.w * 4);
+    free(whole);
+    *w = clip.w;
+    *h = clip.h;
+    return res;
 }
 
 static void idle_draw(void *data)
@@ -1407,6 +1598,9 @@ void lm_render_destroy(struct lm_renderer *r)
         lm_idle_destroy(r->idle);
     if (r->frame_timer)
         lm_timer_destroy(r->frame_timer);
+    if (r->shot.timer)
+        lm_timer_destroy(r->shot.timer);
+    free(r->shot.thumb);
     free(r);
 }
 
@@ -1437,7 +1631,13 @@ void lm_render_output_changed(struct lm_renderer *r, struct lm_output *out)
 
 void lm_render_output_removed(struct lm_renderer *r, struct lm_output *out)
 {
-    (void)r;
+    if (r->shot.active && r->shot.out == out) {         /* no damage: the output is going away */
+        r->shot.active = false;
+        free(r->shot.thumb);
+        r->shot.thumb = NULL;
+        if (r->shot.timer)
+            lm_timer_arm_ms(r->shot.timer, 0, 0);
+    }
     struct out_state *st = state_of(out);
     if (!st)
         return;

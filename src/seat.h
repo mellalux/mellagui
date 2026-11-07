@@ -139,6 +139,9 @@ int lm_seat_clip_count(const struct lm_seat *seat);
 const char *lm_seat_clip_get(const struct lm_seat *seat, int i);
 /* Make history entry `i` the current selection (the compositor serves its text itself) and move it to the top. */
 void lm_seat_clip_use(struct lm_seat *seat, int i);
+/* The compositor becomes the selection owner and serves `data` (malloc'd, taken over even on failure) as `mime`
+ * (screenshots: "image/png"). The history is not touched. */
+bool lm_seat_set_selection_data(struct lm_seat *seat, const char *mime, uint8_t *data, size_t len);
 void lm_seat_clip_clear(struct lm_seat *seat);      /* forget the history (control socket `clip clear`) */
 
 /*

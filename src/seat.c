@@ -13,11 +13,13 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "backend.h"
@@ -72,6 +74,8 @@ struct data_source {
     struct lm_seat *seat;
     struct lm_resource *res;            /* NULL for the compositor's own source (clipboard history entry) */
     char *text;                         /* own source: the text it serves */
+    uint8_t *data;                      /* own source: binary data it serves instead (a screenshot) */
+    size_t data_len;
     char *mimes[MAX_MIMES];
     int n_mimes;
     struct lm_list offers;              /* struct data_offer.src_link */
@@ -1353,6 +1357,33 @@ static void offer_accept(struct lm_resource *res, const union lm_arg *args)
     (void)o; /* drag-and-drop is not performed: nothing to negotiate */
 }
 
+/* Our own big data (a screenshot, MBs) must not block the single-threaded loop on a slow reader: a short-lived child
+ * (it owns a copy of the memory) writes it, reaped by the server's SIGCHLD watch. */
+static void serve_data_async(int fd, const uint8_t *p, size_t n)
+{
+    if (fork() != 0)
+        return;
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, NULL);          /* the loop blocks signals for signalfd */
+    signal(SIGPIPE, SIG_DFL);
+    setsid();
+    alarm(15);
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0)
+        fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    while (n > 0) {
+        ssize_t k = write(fd, p, n);
+        if (k < 0 && errno == EINTR)
+            continue;
+        if (k <= 0)
+            break;
+        p += k;
+        n -= (size_t)k;
+    }
+    _exit(0);
+}
+
 static void offer_receive(struct lm_resource *res, const union lm_arg *args)
 {
     struct data_offer *o = res->data;
@@ -1361,6 +1392,10 @@ static void offer_receive(struct lm_resource *res, const union lm_arg *args)
         return;
     for (int i = 0; i < o->source->n_mimes; i++) {
         if (strcmp(o->source->mimes[i], mime) == 0) {
+            if (!o->source->res && o->source->data) {
+                serve_data_async(args[1].h, o->source->data, o->source->data_len);
+                return;
+            }
             if (!o->source->res) {              /* our own text: write it (a few KiB fit into the pipe) */
                 const char *p = o->source->text;
                 size_t left = p ? strlen(p) : 0;
@@ -1747,6 +1782,34 @@ void lm_seat_clip_use(struct lm_seat *seat, int i)
     seat->own = src;
     clip_push(seat, strdup(copy));                      /* moves the entry to the top (same text) */
     selection_update_focus(seat);
+}
+
+/* The compositor itself becomes the selection owner and serves `data` (taken over, malloc'd) as `mime`. */
+bool lm_seat_set_selection_data(struct lm_seat *seat, const char *mime, uint8_t *data, size_t len)
+{
+    struct data_source *src = seat && !seat->dying ? calloc(1, sizeof(*src)) : NULL;
+    char *m = src ? strdup(mime) : NULL;
+    if (!m) {
+        free(src);
+        free(data);
+        return false;
+    }
+    src->seat = seat;
+    src->data = data;
+    src->data_len = len;
+    lm_list_init(&src->offers);
+    lm_list_init(&src->link);
+    src->mimes[src->n_mimes++] = m;
+    struct data_source *old = seat->selection;
+    seat->selection = src;
+    clip_capture_abort(seat);
+    if (old && old->res)
+        lm_resource_post(old->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+    if (old && old == seat->own)
+        own_source_free(seat);
+    seat->own = src;
+    selection_update_focus(seat);
+    return true;
 }
 
 static void source_res_destroy(struct lm_resource *res)

@@ -12,6 +12,7 @@ enum lm_sound {
     LM_SOUND_LATCH,         /* modifier latched for the next key: one short beep */
     LM_SOUND_LOCK,          /* modifier locked: two higher beeps */
     LM_SOUND_UNLOCK,        /* modifier unlocked: one low beep */
+    LM_SOUND_SHOT,          /* screenshot taken: a short falling pair */
     LM_SOUND_COUNT
 };
 

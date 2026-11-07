@@ -61,4 +61,19 @@ void lm_render_output_ready(struct lm_renderer *r, struct lm_output *out, uint32
  */
 void lm_render_flush(struct lm_renderer *r);
 
+/*
+ * Paints the scene (no cursor) into a private buffer and returns the part of it inside `rect` (global
+ * coordinates, clipped to the output it mostly lies on) as a malloc'd XRGB8888 array of *w x *h pixels
+ * (stride w * 4), or NULL. For screenshots.
+ */
+uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h);
+
+/*
+ * Feedback for a screenshot of `where` (global): a short white flash over it and, for MELLAGUI_TOAST_MS (default 3 s), a
+ * card with a thumbnail of the pixels `px` (w x h XRGB8888, stride w * 4) and `label` in the bottom right corner of
+ * the output. A new one replaces the old. Never part of a screenshot.
+ */
+void lm_render_shot_feedback(struct lm_renderer *r, const struct lm_rect *where, const uint32_t *px, int w, int h,
+                             const char *label);
+
 #endif

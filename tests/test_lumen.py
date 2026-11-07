@@ -2714,6 +2714,69 @@ class TestMixer(Base):
         gx, gy, gw, gh = self.card(c)
         self.assertEqual(drag(6 - gx, 0)[0], 0)
 
+    def test_resizing_a_gadget_sticks_the_edge_to_neighbours_and_the_screen(self):
+        env, d = self.mixer_env('snap-resize')
+        c = self.start('lumen-snap2', env, '--size', '1280x900')
+        c.cmd('gadget-rect')
+        cb = tuple(map(int, c.last.split()[1:5]))
+        x, y, w, h = self.card(c)                                               # docked 12 px below the clipboard
+
+        def pull(px, py, dx, dy):
+            c.abs(px, py)
+            c.button(272, True)
+            c.abs(px + dx, py + dy)
+            c.button(272, False)
+            return self.card(c)
+        # the top edge pulled up 9 px (3 px short of the clipboard): flush against the clipboard's bottom edge
+        self.assertEqual(pull(x + w // 2, y + 1, 0, -9), (x, cb[1] + cb[3], w, h + 12))
+        # 40 px: far from it, the edge goes exactly where the pointer goes
+        x, y, w, h = self.card(c)
+        self.assertEqual(pull(x + w // 2, y + 1, 0, 40), (x, y + 40, w, h - 40))
+        # the right edge 7 px short of the screen edge: sticks to the screen
+        x, y, w, h = self.card(c)
+        got = pull(x + w - 2, y + h // 2, 1280 - 5 - (x + w), 0)                # 5 px short of the screen's right edge
+        self.assertEqual(got[0] + got[2], 1280)
+
+    def test_gadget_places_and_sizes_are_saved(self):
+        env, d = self.mixer_env('saved')
+        path = os.path.join(tmp, 'gadgets-saved.conf')
+        if os.path.exists(path):
+            os.unlink(path)
+        c = self.start('lumen-gsave1', env, '--size', '1280x900', '--gadgets-file', path)
+        x, y, w, h = self.card(c)
+        c.cmd('gadget-rect')
+        cb = tuple(map(int, c.last.split()[1:5]))
+
+        def grab(px, py, dx, dy):
+            c.abs(px, py)
+            c.button(272, True)
+            c.abs(px + dx, py + dy)
+            c.button(272, False)
+        # a plain click on a title bar saves nothing; moving the mixer and stretching it do
+        c.click(x + 60, y + 10)
+        self.assertFalse(os.path.exists(path))
+        time.sleep(0.6)                                                         # (not a double click)
+        grab(x + 60, y + 10, -300, 100)
+        grab(x - 300 + 100, y + 100 + h - 2, 0, 50)                                   # (its bottom edge, at the new place)
+        mx, my, mw, mh = self.card(c)
+        self.assertEqual((mx, my, mw), (x - 300, y + 100, w))
+        self.assertGreater(mh, h)
+        self.assertEqual(open(path).read().split('\n')[:-1], ['mixer %d %d %d %d' % (mx, my, mw, mh)])      # only the moved one
+        # a new run puts it back where it was, the clipboard stays docked
+        c2 = self.start('lumen-gsave2', env, '--size', '1280x900', '--gadgets-file', path)
+        self.assertEqual(self.card(c2), (mx, my, mw, mh))
+        c2.cmd('gadget-rect')
+        self.assertEqual(tuple(map(int, c2.last.split()[1:5])), cb)
+        # a double click on the title bar puts it back to its default; the file forgets it
+        c2.click(mx + 60, my + 10)
+        c2.click(mx + 60, my + 10)
+        for _ in range(40):
+            if self.card(c2) == (x, y, w, h) or self.card(c2)[:2] == (cb[0], cb[1] + cb[3] + 12):
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.card(c2)[2:], (w, h))
+        self.assertEqual(open(path).read(), '')
+
     def test_mixer_docks_beside_the_clipboard_on_a_small_screen(self):
         env, d = self.mixer_env('small')
         c = self.start('lumen-mix6', env, '--size', '800x400')                  # 800x400: no room below the clipboard card

@@ -50,6 +50,8 @@ static const char *usage_text =
     "                           (default drm: $XDG_CONFIG_HOME/lumen/settings.conf, headless: none); options below win\n"
     "  --clipboard-file FILE    where the clipboard history is kept between runs (private file, newest entry first); \"none\" = nowhere\n"
     "                           (default drm: $XDG_CONFIG_HOME/lumen/clipboard-history, headless: none)\n"
+    "  --gadgets-file FILE      where the places and sizes of the desktop gadgets are kept between runs; \"none\" = nowhere\n"
+    "                           (default drm: $XDG_CONFIG_HOME/lumen/gadgets.conf, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
     "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
@@ -204,7 +206,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -223,6 +225,7 @@ int main(int argc, char **argv)
         { "log-file", required_argument, 0, 'f' },
         { "settings", required_argument, 0, OPT_SETTINGS },
         { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
+        { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
@@ -248,7 +251,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--backend=", 10))
             headless_arg = !strcmp(argv[i] + 10, "headless");
     }
-    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX];
+    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX];
     if (!settings_arg && !headless_arg) {
         const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
         if (xdg && *xdg)
@@ -266,6 +269,12 @@ int main(int argc, char **argv)
             snprintf(clip_buf, sizeof(clip_buf), "%s/.config/lumen/clipboard-history", home);
         if (clip_buf[0])
             cfg.clip_path = clip_buf;
+        if (xdg && *xdg)
+            snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/lumen/gadgets.conf", xdg);
+        else if (home && *home)
+            snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/.config/lumen/gadgets.conf", home);
+        if (gadgets_buf[0])
+            cfg.gadgets_path = gadgets_buf;
     }
     if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
         cfg.settings_path = settings_arg;
@@ -336,6 +345,7 @@ int main(int argc, char **argv)
         case 'f': cfg.log_file = optarg; break;
         case OPT_SETTINGS: break;           /* handled above */
         case OPT_CLIPBOARD_FILE: cfg.clip_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_GADGETS_FILE: cfg.gadgets_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;

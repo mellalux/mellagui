@@ -3,12 +3,16 @@
  */
 #include "wm.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "backend.h"
 #include "input.h"
@@ -338,6 +342,72 @@ static const struct { int w, h, min_w, min_h, max_w, max_h; } gadget_def[LM_GADG
 };
 
 /* Largest size gadget `id` may have on `o` (it stays inside the output, below the panel). */
+/* ---- the gadgets' places and sizes, kept between runs ------------------------------------------------------------------ */
+
+static const char *const gadget_names[LM_GADGET_COUNT] = { "clipboard", "mixer", "system" };
+
+/* One line per gadget that was moved or resized: "name x y w h". A gadget at its default place is not listed. */
+static void gadgets_save(struct lm_wm *wm)
+{
+    const char *path = wm->srv->config.gadgets_path;
+    if (!path || !*path)
+        return;
+    char dir[512], tmp[560];
+    if (snprintf(dir, sizeof(dir), "%s", path) >= (int)sizeof(dir) ||
+        snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid()) >= (int)sizeof(tmp))
+        return;
+    for (char *p = dir + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = 0;
+        if (mkdir(dir, 0755) < 0 && errno != EEXIST)
+            return;
+        *p = '/';
+    }
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        lm_warn("gadgets: cannot write %s: %s", tmp, strerror(errno));
+        return;
+    }
+    for (int i = 0; i < LM_GADGET_COUNT; i++)
+        if (wm->gad[i].placed)
+            fprintf(f, "%s %d %d %d %d\n", gadget_names[i], wm->gad[i].x, wm->gad[i].y, wm->gad[i].w, wm->gad[i].h);
+    bool ok = !ferror(f);
+    if (fclose(f) != 0)
+        ok = false;
+    if (!ok || rename(tmp, path) < 0) {
+        lm_warn("gadgets: cannot save %s: %s", path, strerror(errno));
+        unlink(tmp);
+    }
+}
+
+static void gadgets_load(struct lm_wm *wm)
+{
+    const char *path = wm->srv->config.gadgets_path;
+    FILE *f = path && *path ? fopen(path, "r") : NULL;
+    if (!f)
+        return;
+    char line[160], name[24];
+    while (fgets(line, sizeof(line), f)) {
+        int x, y, w, h;
+        if (sscanf(line, "%23s %d %d %d %d", name, &x, &y, &w, &h) != 5)
+            continue;
+        for (int i = 0; i < LM_GADGET_COUNT; i++) {
+            if (strcmp(name, gadget_names[i]))
+                continue;
+            if (abs(x) > 20000 || abs(y) > 20000)
+                break;
+            wm->gad[i].x = x;                                       /* (the places are clamped to the output when drawn) */
+            wm->gad[i].y = y;
+            wm->gad[i].w = LM_CLAMP(w, gadget_def[i].min_w, gadget_def[i].max_w);
+            wm->gad[i].h = LM_CLAMP(h, gadget_def[i].min_h, gadget_def[i].max_h);
+            wm->gad[i].placed = true;
+            break;
+        }
+    }
+    fclose(f);
+}
+
 static void gadget_max_size(int id, const struct lm_output *o, int *mw, int *mh)
 {
     *mw = LM_MIN(gadget_def[id].max_w, o->width - 2 * GADGET_MARGIN);
@@ -730,6 +800,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
         wm->gad[i].w = gadget_def[i].w;
         wm->gad[i].h = gadget_def[i].h;
     }
+    gadgets_load(wm);
     update_clock(wm, true);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     if (wm->clock_timer)
@@ -1682,8 +1753,12 @@ static void grab_end(struct lm_wm *wm)
     enum grab_kind kind = wm->grab_kind;
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
-    if (kind == GRAB_GADGET_MOVE || kind == GRAB_GADGET_RESIZE)
+    if (kind == GRAB_GADGET_MOVE || kind == GRAB_GADGET_RESIZE) {
         damage_gadget(wm, wm->grab_gadget);
+        int gi = wm->grab_gadget;
+        if (wm->gad[gi].x != wm->grab_x || wm->gad[gi].y != wm->grab_y || wm->gad[gi].w != wm->grab_w || wm->gad[gi].h != wm->grab_h)
+            gadgets_save(wm);                                       /* it moved or changed size (a plain click does not count) */
+    }
     if (wm->srv->seat) {
         lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
         lm_seat_set_cursor_override(wm->srv->seat, LM_CURSOR_NONE);
@@ -1740,6 +1815,39 @@ static void gadget_snap(struct lm_wm *wm, int id, const struct lm_output *o, int
     *py = ny;
 }
 
+/*
+ * A line (an edge of the card being resized) sticks to the edges that line up with it: the screen's and those of the other cards
+ * that it faces. `vertical` = the line is a left/right edge at x = v (the card spans [lo, hi] in y), else a top/bottom edge at y = v
+ * (the card spans [lo, hi] in x). Returns v, or the position of the nearest such edge within GADGET_SNAP.
+ */
+static int32_t gadget_snap_line(struct lm_wm *wm, int id, const struct lm_output *o, bool vertical, int32_t v, int32_t lo, int32_t hi)
+{
+    int32_t best = v;
+    int bestd = GADGET_SNAP + 1;
+#define TRY_LINE(c) do { int32_t cand_ = (c); int d_ = abs(cand_ - v); if (d_ < bestd) { bestd = d_; best = cand_; } } while (0)
+    if (vertical) {
+        TRY_LINE(o->x);
+        TRY_LINE(o->x + o->width);
+    } else {
+        TRY_LINE(o->y + LM_PANEL_HEIGHT);
+        TRY_LINE(o->y + o->height);
+    }
+    for (int j = 0; j < LM_GADGET_COUNT; j++) {
+        struct lm_rect pr;
+        if (j == id || !lm_wm_gadget_rect_id(wm, j, &pr))
+            continue;
+        if (vertical && lo < pr.y + pr.h + GADGET_SNAP && hi > pr.y - GADGET_SNAP) {
+            TRY_LINE(pr.x);
+            TRY_LINE(pr.x + pr.w);
+        } else if (!vertical && lo < pr.x + pr.w + GADGET_SNAP && hi > pr.x - GADGET_SNAP) {
+            TRY_LINE(pr.y);
+            TRY_LINE(pr.y + pr.h);
+        }
+    }
+#undef TRY_LINE
+    return best;
+}
+
 /* Gadget move / resize: the pointer moved by (dx, dy) since the grab began (grab_x/y/w/h = the card back then). */
 static void gadget_grab_motion(struct lm_wm *wm, double dx, double dy)
 {
@@ -1758,10 +1866,25 @@ static void gadget_grab_motion(struct lm_wm *wm, double dx, double dy)
         gadget_snap(wm, id, o, &x, &y, w, h);
     } else {
         uint32_t e = wm->grab_edges;
-        if (e & LM_EDGE_RIGHT) w = LM_CLAMP(w + (int32_t)dx, gadget_def[id].min_w, LM_MIN(mw, o->x + o->width - x));
-        if (e & LM_EDGE_LEFT) { w = LM_CLAMP(w - (int32_t)dx, gadget_def[id].min_w, LM_MIN(mw, right - o->x)); x = right - w; }
-        if (e & LM_EDGE_BOTTOM) h = LM_CLAMP(h + (int32_t)dy, gadget_def[id].min_h, LM_MIN(mh, o->y + o->height - y));
-        if (e & LM_EDGE_TOP) { h = LM_CLAMP(h - (int32_t)dy, gadget_def[id].min_h, LM_MIN(mh, bottom - o->y - LM_PANEL_HEIGHT)); y = bottom - h; }
+        /* the edge that moves sticks to the edges it lines up with; the vertical range of the card is the one it had */
+        if (e & LM_EDGE_RIGHT) {
+            int32_t edge = gadget_snap_line(wm, id, o, true, x + w + (int32_t)dx, y, y + h);
+            w = LM_CLAMP(edge - x, gadget_def[id].min_w, LM_MIN(mw, o->x + o->width - x));
+        }
+        if (e & LM_EDGE_LEFT) {
+            int32_t edge = gadget_snap_line(wm, id, o, true, x + (int32_t)dx, y, y + h);
+            w = LM_CLAMP(right - edge, gadget_def[id].min_w, LM_MIN(mw, right - o->x));
+            x = right - w;
+        }
+        if (e & LM_EDGE_BOTTOM) {
+            int32_t edge = gadget_snap_line(wm, id, o, false, y + h + (int32_t)dy, x, x + w);
+            h = LM_CLAMP(edge - y, gadget_def[id].min_h, LM_MIN(mh, o->y + o->height - y));
+        }
+        if (e & LM_EDGE_TOP) {
+            int32_t edge = gadget_snap_line(wm, id, o, false, y + (int32_t)dy, x, x + w);
+            h = LM_CLAMP(bottom - edge, gadget_def[id].min_h, LM_MIN(mh, bottom - o->y - LM_PANEL_HEIGHT));
+            y = bottom - h;
+        }
     }
     wm->gad[id].x = x;
     wm->gad[id].y = y;
@@ -1978,6 +2101,7 @@ static void gadget_reset(struct lm_wm *wm, int id)
     wm->gad[id].w = gadget_def[id].w;
     wm->gad[id].h = gadget_def[id].h;
     damage_gadgets(wm);
+    gadgets_save(wm);
 }
 
 void lm_wm_window_request_move(struct lm_window *w)

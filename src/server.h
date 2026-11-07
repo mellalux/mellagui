@@ -150,6 +150,7 @@ struct lm_config {
     const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "lumen-settings") */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
+    const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "Lumen" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */

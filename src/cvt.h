@@ -17,5 +17,8 @@ struct lm_cvt {
 
 /* width is rounded down to a multiple of 8. False for sizes/rates outside 320..8192 x 200..4320 and 24..240 Hz. */
 int lm_cvt_rb(int width, int height, int refresh, struct lm_cvt *out);
+/* The highest of the usual refresh rates (60, 59, 50, 48, 30, 25, 24; at most max_hz) at which the mode's pixel clock stays
+ * within max_clock_khz; false when none fits. */
+int lm_cvt_rb_fit(int width, int height, int max_hz, uint32_t max_clock_khz, struct lm_cvt *out);
 
 #endif

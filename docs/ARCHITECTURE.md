@@ -110,7 +110,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/output.[ch]` | **backend** | wl_output globals, output layout queries |
 | `src/backend.h`, `src/backend_drm.c`, `src/backend_headless.c` | **backend** | DRM/KMS + VT; headless + control socket |
 | `src/dmabuf.[ch]` | **protocol** | `zwp_linux_dmabuf_v1` v4: default/surface feedback (the display GPU's render node as main device, a memfd format table), params -> `lm_buffer_create_dmabuf()` (shm.c); only linear ARGB8888/XRGB8888, one plane, no flags; the fd must be a real dmabuf (the sync ioctl is the test), bounds checked against its size |
-| `src/cvt.[ch]`, `src/edid.[ch]` | **backend** | video-mode helpers without DRM types (unit-tested in `keymap-test`): CVT reduced-blanking timings; the EDID's native timing and the rule for when the offered mode has the wrong shape (a 21:9 panel with only 16:9 modes gets a generated mode of its own shape instead of being stretched by the monitor) |
+| `src/cvt.[ch]`, `src/edid.[ch]` | **backend** | video-mode helpers without DRM types (unit-tested in `keymap-test`): CVT reduced-blanking timings (`lm_cvt_rb_fit`: the highest usual refresh rate that fits a pixel clock limit; `drm_list_modes` offers the panel's native size that way when the kernel pruned it); the EDID's native timing and the rule for when the offered mode has the wrong shape (a 21:9 panel with only 16:9 modes gets a generated mode of its own shape instead of being stretched by the monitor) |
 | `src/render.[ch]`, `src/font.[ch]` | **render** | software compositor, cursor, decorations, 8x16 font |
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
 | `client/mellagui-term.c` (later) | **clients** | terminal emulator |

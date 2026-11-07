@@ -129,7 +129,7 @@ Settings panel: Super+I or *MellaGUI* → *Settings* opens `mellagui-settings` (
 *Keyboard* enables and orders the layouts (the checkbox, the `^` button; *active* picks the current one - the clients get a new keymap at
 once, nothing has to be restarted), sticky keys, key repeat delay and rate, and has a field for trying the layout. *Pointer*: speed and
 natural scrolling. *Desktop*: the clipboard gadget and the sound feedback. *Display*: the resolution (automatic, the monitor's preferred
-mode, or one of its modes - the list includes a mode in the panel's own shape when the GPU does not offer the native one); it is applied at
+mode, or one of its modes - the list includes a mode in the panel's own shape when the GPU does not offer the native one, and the panel's native size at the highest usual refresh rate (60, 59, 50, 48 ... Hz) whose pixel clock the link already takes, e.g. 2560x1080 at 50 Hz where 60 Hz needs a faster clock than the GPU's HDMI output allows); it is applied at
 once and goes back after 15 s unless you press *Keep* (a wrong mode can leave the screen black, and a black screen cannot confirm anything);
 only a kept resolution is saved. *Sound*: the sound card's **output device** (analog, HDMI, S/PDIF: with PipeWire this is the card profile, switched with `pw-cli`; this is
 how HDMI audio is chosen, the new output becomes the default one within a second or two), the default output for applications such as

@@ -375,17 +375,17 @@ static const struct lm_message zxdg_toplevel_decoration_events[] = {
 DEFINE_IFACE(lm_zxdg_toplevel_decoration_v1_interface, "zxdg_toplevel_decoration_v1", 1,
              zxdg_toplevel_decoration_requests, zxdg_toplevel_decoration_events);
 
-/* ---- lumen_settings_v1 ------------------------------------------------------------ */
-static const struct lm_message lumen_settings_requests[] = {
+/* ---- mellagui_settings_v1 ------------------------------------------------------------ */
+static const struct lm_message mellagui_settings_requests[] = {
     MSG("destroy", "", 1, NULL),
     MSG("set", "ss", 1, NULL),
 };
-static const struct lm_message lumen_settings_events[] = {
+static const struct lm_message mellagui_settings_events[] = {
     MSG("value", "ss", 1, NULL),
     MSG("done", "", 1, NULL),
 };
-DEFINE_IFACE(lm_lumen_settings_v1_interface, "lumen_settings_v1", 1,
-             lumen_settings_requests, lumen_settings_events);
+DEFINE_IFACE(lm_mellagui_settings_v1_interface, "mellagui_settings_v1", 1,
+             mellagui_settings_requests, mellagui_settings_events);
 
 /* ---- zwp_linux_dmabuf_v1 -------------------------------------------------------------------- */
 static const struct lm_message dmabuf_requests[] = {

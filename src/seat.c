@@ -856,14 +856,14 @@ static int keymap_make_fd(const int *layouts, int nlayouts, uint32_t *size_out)
         return -1;
     const char *text = built;
     size_t len = strlen(text) + 1;
-    int fd = memfd_create("lumen-xkb-keymap", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int fd = memfd_create("mellagui-xkb-keymap", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     bool sealable = fd >= 0;
     if (fd < 0) {
         const char *dir = getenv("XDG_RUNTIME_DIR");
         if (!dir || !*dir)
             dir = "/tmp";
         char path[512];
-        if (snprintf(path, sizeof(path), "%s/lumen-keymap-XXXXXX", dir) >= (int)sizeof(path))
+        if (snprintf(path, sizeof(path), "%s/mellagui-keymap-XXXXXX", dir) >= (int)sizeof(path))
             { free(built); return -1; }
         fd = mkostemp(path, O_CLOEXEC);
         if (fd < 0) {

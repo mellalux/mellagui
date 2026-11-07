@@ -3,8 +3,8 @@
  * S16_LE mono buffer and piped to `aplay` (alsa-utils) in a detached child; when aplay is missing or
  * there is no sound card, nothing happens. The child is reaped by the server's SIGCHLD watch.
  */
-#ifndef LUMEN_SOUND_H
-#define LUMEN_SOUND_H
+#ifndef MELLAGUI_SOUND_H
+#define MELLAGUI_SOUND_H
 
 enum lm_sound {
     LM_SOUND_STICKY_ON,     /* sticky keys switched on: rising three-note run */

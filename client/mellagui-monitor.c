@@ -1,14 +1,14 @@
 /*
- * lumen-monitor: the settings of the monitors themselves - brightness, contrast, speaker volume and mute, input source,
+ * mellagui-monitor: the settings of the monitors themselves - brightness, contrast, speaker volume and mute, input source,
  * colour preset and standby - sent to the monitor over DDC/CI (src/ddc.c, /dev/i2c-N) and, for a laptop's own panel, through
  * /sys/class/backlight. One tab per connected monitor; a control the monitor does not implement is not shown.
  *
- *   lumen-monitor                         the panel
- *   lumen-monitor --list                  print the monitors and their values (no display needed)
- *   lumen-monitor --set NAME CODE VALUE   e.g. HDMI-A-1 10 40 (CODE is the hexadecimal VCP code, 10 = brightness)
+ *   mellagui-monitor                         the panel
+ *   mellagui-monitor --list                  print the monitors and their values (no display needed)
+ *   mellagui-monitor --set NAME CODE VALUE   e.g. HDMI-A-1 10 40 (CODE is the hexadecimal VCP code, 10 = brightness)
  *
  * Access: /dev/i2c-N must be readable and writable (kernel module i2c-dev, group "i2c" or a logind ACL); the backlight needs a
- * udev rule or the video group. Env LUMEN_MONITOR_FAKE=FILE replaces the hardware by a text file (tests, see load_fake()).
+ * udev rule or the video group. Env MELLAGUI_MONITOR_FAKE=FILE replaces the hardware by a text file (tests, see load_fake()).
  */
 #include <dirent.h>
 #include <errno.h>
@@ -401,15 +401,15 @@ static int cli_set(const char *name, const char *code, const char *value)
         for (int i = 0; i < NCTL; i++)
             if (CTL[i].code == c) {
                 if (!set_control(&mons[k], i, atoi(value))) {
-                    fprintf(stderr, "lumen-monitor: %s\n", mons[k].err[0] ? mons[k].err : "write failed");
+                    fprintf(stderr, "mellagui-monitor: %s\n", mons[k].err[0] ? mons[k].err : "write failed");
                     return 1;
                 }
                 return 0;
             }
-        fprintf(stderr, "lumen-monitor: unknown code %s\n", code);
+        fprintf(stderr, "mellagui-monitor: unknown code %s\n", code);
         return 2;
     }
-    fprintf(stderr, "lumen-monitor: no monitor %s\n", name);
+    fprintf(stderr, "mellagui-monitor: no monitor %s\n", name);
     return 2;
 }
 
@@ -880,7 +880,7 @@ static bool probe_step(struct app *a)
 
 int main(int argc, char **argv)
 {
-    fake_file = getenv("LUMEN_MONITOR_FAKE");
+    fake_file = getenv("MELLAGUI_MONITOR_FAKE");
     if (fake_file && !*fake_file)
         fake_file = NULL;
     discover();
@@ -891,15 +891,15 @@ int main(int argc, char **argv)
         return cli_set(argv[2], argv[3], argv[4]);
     }
     if (argc > 1) {
-        fprintf(stderr, "usage: lumen-monitor [--list | --set NAME HEXCODE VALUE]\n");
+        fprintf(stderr, "usage: mellagui-monitor [--list | --set NAME HEXCODE VALUE]\n");
         return 2;
     }
 
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
     struct app a = { .drag = -1, .focus = -1 };
-    if (wlwin_connect(&a.win, "lumen-monitor", &ops, &a) < 0)
+    if (wlwin_connect(&a.win, "mellagui-monitor", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, "Monitor", "lumen.monitor", 560, 520, 420, 360) < 0)
+    if (wlwin_open(&a.win, "Monitor", "mellagui.monitor", 560, 520, 420, 360) < 0)
         return 1;
     bool probing = true;
     while (wlwin_step(&a.win, probing ? 0 : (a.dirty ? SEND_GAP_MS : -1))) {

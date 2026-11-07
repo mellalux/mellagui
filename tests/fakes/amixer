@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""A fake `amixer` (ALSA fallback of the mixer): Master volume and switch in $LUMEN_FAKE_AMIXER (json)."""
+"""A fake `amixer` (ALSA fallback of the mixer): Master volume and switch in $MELLAGUI_FAKE_AMIXER (json)."""
 import json, os, sys
 
-path = os.environ.get('LUMEN_FAKE_AMIXER', '/tmp/lumen-fake-amixer.json')
+path = os.environ.get('MELLAGUI_FAKE_AMIXER', '/tmp/mellagui-fake-amixer.json')
 try:
     st = json.load(open(path))
 except Exception:

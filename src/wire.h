@@ -1,12 +1,12 @@
-#ifndef LUMEN_WIRE_H
-#define LUMEN_WIRE_H
+#ifndef MELLAGUI_WIRE_H
+#define MELLAGUI_WIRE_H
 
 /*
  * Wayland wire protocol: connection buffers, framing, argument
  * marshalling and SCM_RIGHTS fd passing. Owner: wire.c.
  *
  * Usable by the compositor (server side) AND by clients
- * (lumen-term etc.): it knows nothing about interfaces or objects, only about
+ * (mellagui-term etc.): it knows nothing about interfaces or objects, only about
  * "signature strings".
  *
  * Wire format (host endianness): word0 = object id, word1 = (size << 16) |

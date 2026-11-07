@@ -1,5 +1,5 @@
-#ifndef LUMEN_XDG_H
-#define LUMEN_XDG_H
+#ifndef MELLAGUI_XDG_H
+#define MELLAGUI_XDG_H
 
 /*
  * xdg_wm_base (v3), xdg_surface, xdg_toplevel, xdg_popup, xdg_positioner and

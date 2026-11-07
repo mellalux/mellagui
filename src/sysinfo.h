@@ -1,7 +1,7 @@
 /*
  * sysinfo.h - CPU load, memory and temperature for the system-monitor gadget. Plain file reads (/proc/stat,
  * /proc/meminfo, /sys/class/hwmon, /sys/class/thermal): small and fast, so they are done in the event loop without child
- * processes. Env LUMEN_SYS_ROOT prefixes every path (a fake /proc and /sys tree for the tests).
+ * processes. Env MELLAGUI_SYS_ROOT prefixes every path (a fake /proc and /sys tree for the tests).
  */
 #ifndef LM_SYSINFO_H
 #define LM_SYSINFO_H

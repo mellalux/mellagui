@@ -2,7 +2,7 @@
 through the raw wire client in wlclient.py.
 
 Environment:
-    LUMEN_BIN   compositor binary (default build/lumen; use build/lumen-asan for sanitizers)
+    MELLAGUI_BIN   compositor binary (default build/mellagui; use build/mellagui-asan for sanitizers)
 """
 import json
 import os
@@ -19,7 +19,7 @@ sys.path.insert(0, HERE)
 from wlclient import *  # noqa: E402
 
 ROOT = os.path.dirname(HERE)
-BIN = os.environ.get('LUMEN_BIN', os.path.join(ROOT, 'build', 'lumen'))
+BIN = os.environ.get('MELLAGUI_BIN', os.path.join(ROOT, 'build', 'mellagui'))
 
 KEY_ESC, KEY_1, KEY_2, KEY_Q, KEY_A, KEY_M, KEY_ENTER, KEY_F, KEY_TAB = 1, 2, 3, 16, 30, 50, 28, 33, 15
 KEY_LEFTMETA, KEY_LEFTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT = 125, 42, 29, 56
@@ -39,20 +39,20 @@ LOG = None
 
 def setUpModule():
     global proc, tmp, ctl, LOG
-    tmp = tempfile.mkdtemp(prefix='lumen-test-')
+    tmp = tempfile.mkdtemp(prefix='mellagui-test-')
     os.chmod(tmp, 0o700)
     os.environ['XDG_RUNTIME_DIR'] = tmp
-    os.environ['WAYLAND_DISPLAY'] = 'lumen-test'
-    os.environ['XDG_CACHE_HOME'] = tmp        # lumen-run keeps its history here
-    LOG = os.path.join(tmp, 'lumen.log')
+    os.environ['WAYLAND_DISPLAY'] = 'mellagui-test'
+    os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
+    LOG = os.path.join(tmp, 'mellagui.log')
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77',
                UBSAN_OPTIONS='print_stacktrace=1')
-    proc = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'lumen-test',
+    proc = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'mellagui-test',
                              '--control', os.path.join(tmp, 'ctl'), '--log-file', LOG, '--log-level', 'debug',
                              '--terminal', 'true'],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     for _ in range(100):
-        if os.path.exists(os.path.join(tmp, 'ctl')) and os.path.exists(os.path.join(tmp, 'lumen-test')):
+        if os.path.exists(os.path.join(tmp, 'ctl')) and os.path.exists(os.path.join(tmp, 'mellagui-test')):
             break
         if proc.poll() is not None:
             raise RuntimeError('compositor exited early: %s' % proc.stdout.read().decode())
@@ -457,9 +457,9 @@ class TestWindows(Base):
 
     def test_panel_exit_second_click_quits(self):
         # separate instance: the shared compositor must keep running
-        d = tempfile.mkdtemp(prefix='lumen-exit-')
+        d = tempfile.mkdtemp(prefix='mellagui-exit-')
         os.chmod(d, 0o700)
-        p2 = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'lumen-exit',
+        p2 = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'mellagui-exit',
                                '--control', os.path.join(d, 'ctl'), '--terminal', 'true'],
                               env=dict(os.environ, XDG_RUNTIME_DIR=d),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -484,7 +484,7 @@ class TestWindows(Base):
         ctl.abs(900, 500)
         ctl.sync()
         before = ctl.dump(os.path.join(tmp, 'menu0.ppm'))
-        ctl.click(40, 14)                       # "Lumen" launcher button opens the menu
+        ctl.click(40, 14)                       # "Mellagui" launcher button opens the menu
         ctl.abs(300, 300)
         ctl.sync()
         opened = ctl.dump(os.path.join(tmp, 'menu1.ppm'))
@@ -507,11 +507,11 @@ class TestWindows(Base):
         self.assertEqual(closed.px(150, 40), before.px(150, 40))
 
     def test_app_menu_starts_calculator(self):
-        if not os.path.exists(os.path.join(ROOT, 'build', 'lumen-calc')):
-            self.skipTest('lumen-calc not built')
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-calc')):
+            self.skipTest('mellagui-calc not built')
         ctl.click(40, 14)
         ctl.click(60, 69)                       # second entry: Calculator
-        win = wait_for_window('lumen.calc')
+        win = wait_for_window('mellagui.calc')
         self.assertIsNotNone(win, 'menu entry did not start the calculator')
         ctl.sync()
         ctl.abs(900, 500)
@@ -1142,8 +1142,8 @@ class TestGadget(Base):
         for suffix in ('', '.1'):
             if os.path.exists(path + suffix):
                 os.unlink(path + suffix)
-        p, c, stop = self.private_compositor('lumen-clip1', '--clipboard-file', path)
-        cl = Client('lumen-clip1')
+        p, c, stop = self.private_compositor('mellagui-clip1', '--clipboard-file', path)
+        cl = Client('mellagui-clip1')
         seat = cl.wl.bind('wl_seat', 5)
         mgr = cl.wl.bind('wl_data_device_manager', 3)
         dev = cl.wl.new_id('wl_data_device')
@@ -1169,7 +1169,7 @@ class TestGadget(Base):
         self.assertEqual(len(before), 3)
         stop()
         # a new run starts with the same history
-        p2, c2, stop2 = self.private_compositor('lumen-clip2', '--clipboard-file', path)
+        p2, c2, stop2 = self.private_compositor('mellagui-clip2', '--clipboard-file', path)
         self.assertEqual([l.split(' ', 2)[2] for l in c2.cmd('clip')], before)
         c2.cmd('clip clear')
         self.assertEqual(os.path.getsize(path), 0)                                 # clearing is saved, too
@@ -1549,15 +1549,15 @@ class TestClients(Base):
         return p
 
     def test_calc_engine_selftest(self):
-        path = os.path.join(ROOT, 'build', 'lumen-calc')
+        path = os.path.join(ROOT, 'build', 'mellagui-calc')
         if not os.path.exists(path):
-            self.skipTest('lumen-calc not built')
+            self.skipTest('mellagui-calc not built')
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_calc_clicks_and_keys(self):
-        p = self.spawn('lumen-calc')
-        win = wait_for_window('lumen.calc')
+        p = self.spawn('mellagui-calc')
+        win = wait_for_window('mellagui.calc')
         self.assertIsNotNone(win, 'calculator window did not appear')
         self.assertEqual((win['w'], win['h']), (264, 360))
         time.sleep(0.3)
@@ -1615,26 +1615,26 @@ class TestClients(Base):
         if os.path.exists(path):
             os.unlink(path)
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
-        if not os.path.exists(os.path.join(ROOT, 'build', 'lumen-run')):
-            self.skipTest('lumen-run not built')
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
+            self.skipTest('mellagui-run not built')
         open_it()
-        win = wait_for_window('lumen.run')
+        win = wait_for_window('mellagui.run')
         self.assertIsNotNone(win, 'run dialog did not appear')
         time.sleep(0.3)
         self.type_text('touch ' + flag)
         ctl.tap(KEY_ENTER)
         for _ in range(100):
-            if os.path.exists(path) and not [w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.run']:
+            if os.path.exists(path) and not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.run']:
                 break
             time.sleep(0.05)
         self.assertTrue(os.path.exists(path), 'command was not run')
-        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.run'],
+        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.run'],
                          'dialog stays open after running')
 
     def test_run_dialog_selftest(self):
-        path = os.path.join(ROOT, 'build', 'lumen-run')
+        path = os.path.join(ROOT, 'build', 'mellagui-run')
         if not os.path.exists(path):
-            self.skipTest('lumen-run not built')
+            self.skipTest('mellagui-run not built')
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -1649,17 +1649,17 @@ class TestClients(Base):
         self.run_dialog_runs(open_it)
 
     def test_run_dialog_escape_closes_without_running(self):
-        if not os.path.exists(os.path.join(ROOT, 'build', 'lumen-run')):
-            self.skipTest('lumen-run not built')
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
+            self.skipTest('mellagui-run not built')
         ctl.click(870, 14)
-        self.assertIsNotNone(wait_for_window('lumen.run'))
+        self.assertIsNotNone(wait_for_window('mellagui.run'))
         time.sleep(0.3)
         ctl.tap(KEY_ESC)
         for _ in range(100):
-            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.run']:
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.run']:
                 break
             time.sleep(0.05)
-        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.run'])
+        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.run'])
 
     def test_terminal_runs_shell_and_gets_keys(self):
         out = os.path.join(tmp, 'term-out.txt')
@@ -1667,16 +1667,16 @@ class TestClients(Base):
         with open(script, 'w') as f:
             f.write('#!/bin/sh\nread line\necho "got:$line" > "%s"\nread line2\n' % out)
         os.chmod(script, 0o755)
-        p = self.spawn('lumen-term', SHELL=script)
-        win = wait_for_window('lumen.term')
+        p = self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
         self.assertIsNotNone(win, 'terminal window did not appear')
         time.sleep(0.4)
-        type_text('lumen')
+        type_text('mellagui')
         for _ in range(50):
             if os.path.exists(out) and open(out).read().strip():
                 break
             time.sleep(0.05)
-        self.assertEqual(open(out).read().strip(), 'got:lumen')
+        self.assertEqual(open(out).read().strip(), 'got:mellagui')
         # the terminal drew text: more than 2 colours in its client area
         ppm = ctl.dump(os.path.join(tmp, 'term.ppm'))
         cols = {ppm.px(win['x'] + x, win['y'] + 5) for x in range(0, 300)}
@@ -1692,7 +1692,7 @@ class TestClients(Base):
         with open(script, 'w') as f:
             f.write('#!/bin/sh\nexit 0\n')
         os.chmod(script, 0o755)
-        p = self.spawn('lumen-term', SHELL=script)
+        p = self.spawn('mellagui-term', SHELL=script)
         self.assertEqual(p.wait(timeout=5), 0)
 
     FAKE_MONITOR = ('monitor HDMI-A-1 Test Monitor\n10 100 20\n12 100 50\n62 100 30\n8d 2 2\n60 18 17\n14 12 5\nd6 5 1\n'
@@ -1716,11 +1716,11 @@ class TestClients(Base):
         return out
 
     def test_monitor_cli_lists_and_sets(self):
-        exe = os.path.join(ROOT, 'build', 'lumen-monitor')
+        exe = os.path.join(ROOT, 'build', 'mellagui-monitor')
         if not os.path.exists(exe):
-            self.skipTest('lumen-monitor not built')
+            self.skipTest('mellagui-monitor not built')
         path = self.fake_monitor('cli')
-        env = dict(os.environ, LUMEN_MONITOR_FAKE=path)
+        env = dict(os.environ, MELLAGUI_MONITOR_FAKE=path)
         out = subprocess.run([exe, '--list'], env=env, capture_output=True, text=True, timeout=10).stdout.splitlines()
         self.assertEqual(out[0], 'HDMI-A-1|Test Monitor|fake|10=20/100|12=50/100|62=30/100|8d=2/2|60=17/18|14=5/12|d6=1/5')
         self.assertEqual(out[1], 'DP-1|Second One|fake|10=70/100|62=40/100')
@@ -1734,8 +1734,8 @@ class TestClients(Base):
 
     def test_monitor_panel_sliders_chips_and_tabs(self):
         path = self.fake_monitor('ui')
-        self.spawn('lumen-monitor', LUMEN_MONITOR_FAKE=path)
-        win = wait_for_window('lumen.monitor')
+        self.spawn('mellagui-monitor', MELLAGUI_MONITOR_FAKE=path)
+        win = wait_for_window('mellagui.monitor')
         self.assertIsNotNone(win, 'monitor panel did not appear')
         time.sleep(0.5)
         x0, y0 = win['x'], win['y']
@@ -1811,8 +1811,8 @@ class TestClients(Base):
             c.wl.request(src, 'offer', mime)       # more than 4 types: the text one comes last
         c.wl.request(dev, 'set_selection', src, w.configures[-1][3])
         c.wl.roundtrip()
-        self.spawn('lumen-term', SHELL=script)
-        win = wait_for_window('lumen.term')
+        self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
         self.assertIsNotNone(win, 'terminal window did not appear')
         time.sleep(0.4)
         ctl.click(win['x'] + 20, win['y'] + 8)     # the "Paste" button of the bar
@@ -1836,8 +1836,8 @@ class TestClients(Base):
         os.chmod(script, 0o755)
         if os.path.exists(out):
             os.unlink(out)
-        self.spawn('lumen-term', SHELL=script)
-        win = wait_for_window('lumen.term')
+        self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
         self.assertIsNotNone(win, 'terminal window did not appear')
         time.sleep(0.4)
         ctl.click(win['x'] + 100, win['y'] + 8)    # "A+" (the bar buttons: Paste, A-, A+)
@@ -1869,16 +1869,16 @@ def settings_restore():
 
 
 class TestSettings(Base):
-    """lumen_settings_v1, the settings file and the lumen-settings panel."""
+    """mellagui_settings_v1, the settings file and the mellagui-settings panel."""
 
     def setUp(self):
         super().setUp()
         self.addCleanup(settings_restore)
 
     def bound(self):
-        """A raw client bound to lumen_settings_v1 with the first value burst already read."""
+        """A raw client bound to mellagui_settings_v1 with the first value burst already read."""
         c = self.client()
-        obj = c.wl.bind('lumen_settings_v1')
+        obj = c.wl.bind('mellagui_settings_v1')
         c.wl.roundtrip()
         return c, obj
 
@@ -1923,7 +1923,7 @@ class TestSettings(Base):
 
     def test_protocol_burst_on_bind_and_after_set(self):
         c = self.client()
-        obj = c.wl.bind('lumen_settings_v1')
+        obj = c.wl.bind('mellagui_settings_v1')
         first = self.burst(c, obj)
         self.assertIsNotNone(first, 'no value burst after binding')
         self.assertEqual(first['layouts'], 'us,ee,de,fi')
@@ -2021,7 +2021,7 @@ class TestSettings(Base):
 
     def test_resolution_changes_reverts_and_persists(self):
         path = os.path.join(tmp, 'res', 'settings.conf')
-        p, c, stop = self.private_compositor('lumen-res1', '--settings', path, env={'LUMEN_REVERT_MS': '800'})
+        p, c, stop = self.private_compositor('mellagui-res1', '--settings', path, env={'MELLAGUI_REVERT_MS': '800'})
         g = lambda k: self.get_setting(c, k)
         self.assertEqual((g('resolution'), g('resolution-now'), g('resolution-confirm')), ('auto', '800x500@60', ''))
         self.assertIn('1280x720@60|', g('resolutions'))
@@ -2058,7 +2058,7 @@ class TestSettings(Base):
         self.assertEqual((g('resolution'), g('resolution-now')), ('1024x768@60', '1024x768@60'))
         stop()
         # the saved resolution is used at the next start
-        p2, c2, stop2 = self.private_compositor('lumen-res2', '--settings', path)
+        p2, c2, stop2 = self.private_compositor('mellagui-res2', '--settings', path)
         self.assertEqual(self.get_setting(c2, 'resolution-now'), '1024x768@60')
         self.assertEqual(self.get_setting(c2, 'resolution'), '1024x768@60')
 
@@ -2073,11 +2073,11 @@ class TestSettings(Base):
 
     def test_maximized_window_follows_a_resolution_change(self):
         exe = self.exe()
-        p, c, stop = self.private_compositor('lumen-res3', env={'LUMEN_REVERT_MS': '60000'})
-        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-res3'), stdout=subprocess.PIPE,
+        p, c, stop = self.private_compositor('mellagui-res3', env={'MELLAGUI_REVERT_MS': '60000'})
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-res3'), stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
-        self.wait_window(c, 'lumen.settings')
+        self.wait_window(c, 'mellagui.settings')
         c.abs(400, 300)
         c.key(KEY_LEFTMETA, True)
         c.tap(KEY_M)
@@ -2133,12 +2133,12 @@ esac
         with open(pwcli, 'w') as f:
             f.write('#!/bin/sh\nexit 1\n')
         os.chmod(pwcli, 0o755)
-        return state, {'LUMEN_ASOUND_DIR': os.path.join(d, 'asound'), 'PATH': os.path.join(d, 'bin') + ':' + os.environ['PATH']}
+        return state, {'MELLAGUI_ASOUND_DIR': os.path.join(d, 'asound'), 'PATH': os.path.join(d, 'bin') + ':' + os.environ['PATH']}
 
     def test_sound_outputs_list_hdmi_and_can_be_chosen(self):
         state, env = self.audio_env()
         path = os.path.join(tmp, 'audio', 'settings.conf')
-        p, c, stop = self.private_compositor('lumen-aud1', '--settings', path, env=env)
+        p, c, stop = self.private_compositor('mellagui-aud1', '--settings', path, env=env)
         g = lambda k: self.get_setting(c, k)
         outs = g('audio-outs')
         self.assertTrue(outs.startswith('default|System default;'), outs)
@@ -2170,7 +2170,7 @@ esac
         with self.assertRaises(RuntimeError):
             c.cmd('settings sink bad;sink')                                     # not even a valid name
         stop()
-        p2, c2, stop2 = self.private_compositor('lumen-aud2', '--settings', path, env=env)
+        p2, c2, stop2 = self.private_compositor('mellagui-aud2', '--settings', path, env=env)
         self.assertEqual(self.get_setting(c2, 'audio-out'), 'plughw:CARD=PCH,DEV=3')     # remembered
 
     def test_sound_outputs_through_wpctl_when_pactl_is_missing(self):
@@ -2183,7 +2183,7 @@ esac
         wj = os.path.join(d, 'wpctl.json')
         if os.path.exists(wj):
             os.unlink(wj)
-        p, c, stop = self.private_compositor('lumen-aud5', env={'LUMEN_FAKE_WPCTL': wj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']})
+        p, c, stop = self.private_compositor('mellagui-aud5', env={'MELLAGUI_FAKE_WPCTL': wj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']})
         g = lambda k: self.get_setting(c, k)
         self.assertEqual(g('sinks-status'), '')
         c.cmd('settings audio-rescan 1')
@@ -2200,7 +2200,7 @@ esac
 
     def test_sound_status_says_why_there_are_no_outputs(self):
         # nothing installed
-        p, c, stop = self.private_compositor('lumen-aud6', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
+        p, c, stop = self.private_compositor('mellagui-aud6', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
         c.cmd('settings audio-rescan 1')
         self.assertEqual(self.get_setting(c, 'sinks-status'), 'missing-tools')
         stop()
@@ -2211,7 +2211,7 @@ esac
             with open(os.path.join(d, prog), 'w') as f:
                 f.write('#!/bin/sh\nexit 1\n')
             os.chmod(os.path.join(d, prog), 0o755)
-        p, c, stop = self.private_compositor('lumen-aud7', env={'PATH': d + ':' + os.environ['PATH']})
+        p, c, stop = self.private_compositor('mellagui-aud7', env={'PATH': d + ':' + os.environ['PATH']})
         c.cmd('settings audio-rescan 1')
         self.assertEqual(self.get_setting(c, 'sinks-status'), 'no-server')
         self.assertEqual(self.get_setting(c, 'sinks'), '')
@@ -2222,11 +2222,11 @@ esac
         pj = os.path.join(d, 'pw.json')
         if os.path.exists(pj):
             os.unlink(pj)
-        return pj, {'LUMEN_FAKE_PW': pj, 'LUMEN_FAKE_WPCTL': os.path.join(d, 'wpctl.json'), 'PATH': FAKES + ':' + os.environ['PATH']}
+        return pj, {'MELLAGUI_FAKE_PW': pj, 'MELLAGUI_FAKE_WPCTL': os.path.join(d, 'wpctl.json'), 'PATH': FAKES + ':' + os.environ['PATH']}
 
     def test_hdmi_is_chosen_by_switching_the_card_profile(self):
         pj, env = self.pw_env('switch')
-        p, c, stop = self.private_compositor('lumen-pw1', env=env)
+        p, c, stop = self.private_compositor('mellagui-pw1', env=env)
         g = lambda k: self.get_setting(c, k)
         self.assertEqual((g('audio-profiles'), g('audio-profile')), ('', ''))              # nothing asked yet
         c.cmd('settings audio-rescan 1')
@@ -2247,7 +2247,7 @@ esac
             self.assertEqual(json.load(f)['cur']['43'], 3)                # refused: nothing changed
 
     def test_card_profiles_are_empty_without_pw_cli(self):
-        p, c, stop = self.private_compositor('lumen-pw2', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
+        p, c, stop = self.private_compositor('mellagui-pw2', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
         c.cmd('settings audio-rescan 1')
         self.assertEqual((self.get_setting(c, 'audio-profiles'), self.get_setting(c, 'audio-profile')), ('', ''))
         with self.assertRaises(RuntimeError):
@@ -2257,10 +2257,10 @@ esac
         exe = self.exe()
         pj, env = self.pw_env('panel')
         path = os.path.join(tmp, 'pw-panel', 'settings.conf')
-        p, c, stop = self.private_compositor('lumen-pw3', '--settings', path, env=env)
-        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-pw3'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p, c, stop = self.private_compositor('mellagui-pw3', '--settings', path, env=env)
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-pw3'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
-        win = self.wait_window(c, 'lumen.settings')
+        win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
         c.click(x0 + 70, y0 + 12 + 4 * 36 + 16)                           # Sound tab: asks the sound server again
@@ -2273,7 +2273,7 @@ esac
             self.assertEqual(json.load(f)['cur']['43'], 6)
 
     def test_sound_list_is_empty_without_a_sound_server(self):
-        p, c, stop = self.private_compositor('lumen-aud3', env={'LUMEN_ASOUND_DIR': os.path.join(tmp, 'nonexistent'),
+        p, c, stop = self.private_compositor('mellagui-aud3', env={'MELLAGUI_ASOUND_DIR': os.path.join(tmp, 'nonexistent'),
                                                                 'PATH': os.path.join(tmp, 'nonexistent-bin')})
         self.assertEqual(self.get_setting(c, 'audio-outs'), 'default|System default')
         c.cmd('settings audio-rescan 1')
@@ -2286,11 +2286,11 @@ esac
         fake = os.path.join(tmp, 'fake-monitor-button')
         with open(fake, 'w') as f:
             f.write('monitor HDMI-A-1 Test Monitor\n10 100 20\n')
-        p, c, stop = self.private_compositor('lumen-mon1')
-        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-mon1', LUMEN_MONITOR_FAKE=fake),
+        p, c, stop = self.private_compositor('mellagui-mon1')
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-mon1', MELLAGUI_MONITOR_FAKE=fake),
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
-        win = self.wait_window(c, 'lumen.settings')
+        win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
         c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)                               # Display page
@@ -2298,21 +2298,21 @@ esac
         modes = min(7, len(self.get_setting(c, 'resolutions').split(';')))
         # rows: monitor heading + line (14, 42), resolution heading (76), Automatic (104), Preferred, then the modes; the button follows by 10 px
         c.click(x0 + 300, y0 + 104 + (2 + modes) * 28 + 10 + 12)
-        mon = self.wait_window(c, 'lumen.monitor')
+        mon = self.wait_window(c, 'mellagui.monitor')
         self.assertIsNotNone(mon, 'the "Monitor settings..." button did not open the monitor panel')
 
     def test_panel_display_and_sound_pages(self):
         exe = self.exe()
         state, env = self.audio_env()
-        env['LUMEN_REVERT_MS'] = '60000'
+        env['MELLAGUI_REVERT_MS'] = '60000'
         path = os.path.join(tmp, 'audio', 'panel.conf')
         if os.path.exists(path):
             os.unlink(path)
-        p, c, stop = self.private_compositor('lumen-aud4', '--settings', path, env=env)
-        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-aud4'), stdout=subprocess.PIPE,
+        p, c, stop = self.private_compositor('mellagui-aud4', '--settings', path, env=env)
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-aud4'), stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
-        win = self.wait_window(c, 'lumen.settings')
+        win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
         g = lambda k: self.get_setting(c, k)
@@ -2334,9 +2334,9 @@ esac
         self.assertEqual(g('resolution'), '1280x720@60')
         self.assertEqual(g('resolution-now'), '1280x720@60')
         self.assertNotEqual(g('resolution-confirm'), '')
-        self.assertRegex(g('monitor'), r'^Lumen\|headless\|headless-0\|\d+\|\d+$')    # make|model|connector|mm
+        self.assertRegex(g('monitor'), r'^Mellagui\|headless\|headless-0\|\d+\|\d+$')    # make|model|connector|mm
         # the panel is now larger relative to the screen; find it again and press "Keep" (first button below the message)
-        win = self.wait_window(c, 'lumen.settings')
+        win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         c.click(x0 + 160 + 45, y0 + 42 + 12)
         time.sleep(0.3)
@@ -2350,7 +2350,7 @@ esac
 
     def test_settings_survive_a_restart(self):
         path = os.path.join(tmp, 'persist', 'deeper', 'settings.conf')       # directories are created
-        p, c, stop = self.private_compositor('lumen-set1', '--settings', path)
+        p, c, stop = self.private_compositor('mellagui-set1', '--settings', path)
         c.cmd('settings layouts ee,fi')
         c.cmd('settings layout fi')
         c.cmd('settings repeat-rate 33')
@@ -2363,7 +2363,7 @@ esac
                      'gadget=0'):
             self.assertIn(line, text.split('\n'))
         self.assertEqual(p.returncode, 0)
-        p2, c2, stop2 = self.private_compositor('lumen-set2', '--settings', path)
+        p2, c2, stop2 = self.private_compositor('mellagui-set2', '--settings', path)
         c2.cmd('settings')
         s = dict(kv.split('=', 1) for kv in c2.last.split()[1:])
         self.assertEqual((s['layouts'], s['layout'], s['repeat-rate'], s['pointer-speed'], s['natural-scroll'],
@@ -2376,7 +2376,7 @@ esac
         path = os.path.join(tmp, 'cli.conf')
         with open(path, 'w') as f:
             f.write('# comment\nlayouts = de, ee\nrepeat-rate=oops\nunknown=1\nno equals sign\nsound=0\n')
-        p, c, stop = self.private_compositor('lumen-set3', '--settings', path, '--layouts', 'fi,us')
+        p, c, stop = self.private_compositor('mellagui-set3', '--settings', path, '--layouts', 'fi,us')
         c.cmd('settings')
         s = dict(kv.split('=', 1) for kv in c.last.split()[1:])
         self.assertEqual(s['layouts'], 'fi,us')              # --layouts wins
@@ -2388,7 +2388,7 @@ esac
 
     # ---- the client ---------------------------------------------------------------------------------------------------
 
-    def exe(self, name='lumen-settings'):
+    def exe(self, name='mellagui-settings'):
         path = os.path.join(ROOT, 'build', name)
         if not os.path.exists(path):
             self.skipTest('%s not built' % name)
@@ -2416,7 +2416,7 @@ esac
     def open_panel(self):
         p = subprocess.Popen([self.exe()], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
-        win = wait_for_window('lumen.settings')
+        win = wait_for_window('mellagui.settings')
         self.assertIsNotNone(win, 'settings window did not appear')
         self.assertEqual((win['w'], win['h']), (620, 440))
         time.sleep(0.3)
@@ -2428,13 +2428,13 @@ esac
         ctl.key(KEY_LEFTMETA, True)
         ctl.tap(23)                                             # KEY_I
         ctl.key(KEY_LEFTMETA, False)
-        # headless tests start lumen with --terminal true, but the settings command is the sibling binary
-        win = wait_for_window('lumen.settings')
+        # headless tests start mellagui with --terminal true, but the settings command is the sibling binary
+        win = wait_for_window('mellagui.settings')
         self.assertIsNotNone(win, 'Super+I did not open the settings panel')
         ctl.abs(win['x'] + 100, win['y'] + 100)
         ctl.tap(KEY_ESC)                                        # Esc closes it
         for _ in range(100):
-            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.settings']:
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.settings']:
                 break
             time.sleep(0.05)
         self.assertEqual(len(ctl.windows()['windows']), n)
@@ -2571,7 +2571,7 @@ class TestMixer(Base):
     def mixer_env(self, tag, extra=None):
         d = os.path.join(tmp, 'mixer-' + tag)
         os.makedirs(d, exist_ok=True)
-        env = {'LUMEN_FAKE_STATE': os.path.join(d, 'pactl.json'), 'LUMEN_FAKE_AMIXER': os.path.join(d, 'amixer.json'),
+        env = {'MELLAGUI_FAKE_STATE': os.path.join(d, 'pactl.json'), 'MELLAGUI_FAKE_AMIXER': os.path.join(d, 'amixer.json'),
                'PATH': FAKES + ':' + os.environ['PATH']}
         env.update(extra or {})
         for f in ('pactl.json', 'amixer.json'):
@@ -2630,7 +2630,7 @@ class TestMixer(Base):
 
     def test_mixer_shows_pulse_state_and_follows_the_controls(self):
         env, d = self.mixer_env('pulse')
-        c = self.start('lumen-mix1', env)
+        c = self.start('mellagui-mix1', env)
         info = self.mixer_info(c)
         self.assertEqual((info['backend'], info['volume'], info['mute'], info['streams']), ('pulse', '64', '0', '2'))
         self.assertIn('Analog', info['output'])
@@ -2676,7 +2676,7 @@ class TestMixer(Base):
 
     def test_mixer_screen_has_the_card_docked_below_the_clipboard(self):
         env, d = self.mixer_env('dock')
-        c = self.start('lumen-mix2', env, '--size', '1024x800')
+        c = self.start('mellagui-mix2', env, '--size', '1024x800')
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
         x, y, w, h = self.card(c)
@@ -2699,7 +2699,7 @@ class TestMixer(Base):
 
     def test_gadgets_stick_to_each_other_and_to_the_screen_edge(self):
         env, d = self.mixer_env('snap')
-        c = self.start('lumen-snap1', env, '--size', '1280x900')
+        c = self.start('mellagui-snap1', env, '--size', '1280x900')
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
         x, y, w, h = self.card(c)                                               # docked below the clipboard with a 12 px gap
@@ -2726,7 +2726,7 @@ class TestMixer(Base):
 
     def test_resizing_a_gadget_sticks_the_edge_to_neighbours_and_the_screen(self):
         env, d = self.mixer_env('snap-resize')
-        c = self.start('lumen-snap2', env, '--size', '1280x900')
+        c = self.start('mellagui-snap2', env, '--size', '1280x900')
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
         x, y, w, h = self.card(c)                                               # docked 12 px below the clipboard
@@ -2752,7 +2752,7 @@ class TestMixer(Base):
         path = os.path.join(tmp, 'gadgets-saved.conf')
         if os.path.exists(path):
             os.unlink(path)
-        c = self.start('lumen-gsave1', env, '--size', '1280x900', '--gadgets-file', path)
+        c = self.start('mellagui-gsave1', env, '--size', '1280x900', '--gadgets-file', path)
         x, y, w, h = self.card(c)
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
@@ -2773,7 +2773,7 @@ class TestMixer(Base):
         self.assertGreater(mh, h)
         self.assertEqual(open(path).read().split('\n')[:-1], ['mixer %d %d %d %d' % (mx, my, mw, mh)])      # only the moved one
         # a new run puts it back where it was, the clipboard stays docked
-        c2 = self.start('lumen-gsave2', env, '--size', '1280x900', '--gadgets-file', path)
+        c2 = self.start('mellagui-gsave2', env, '--size', '1280x900', '--gadgets-file', path)
         self.assertEqual(self.card(c2), (mx, my, mw, mh))
         c2.cmd('gadget-rect')
         self.assertEqual(tuple(map(int, c2.last.split()[1:5])), cb)
@@ -2789,7 +2789,7 @@ class TestMixer(Base):
 
     def test_mixer_docks_beside_the_clipboard_on_a_small_screen(self):
         env, d = self.mixer_env('small')
-        c = self.start('lumen-mix6', env, '--size', '800x400')                  # 800x400: no room below the clipboard card
+        c = self.start('mellagui-mix6', env, '--size', '800x400')                  # 800x400: no room below the clipboard card
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
         x, y, w, h = self.card(c)
@@ -2798,7 +2798,7 @@ class TestMixer(Base):
 
     def test_mixer_toggles_with_super_v_the_setting_and_the_panel(self):
         env, d = self.mixer_env('toggle')
-        p, c, stop = self.private_compositor('lumen-mix3', env=env)
+        p, c, stop = self.private_compositor('mellagui-mix3', env=env)
         self.assertIsNone(self.card(c))                                         # hidden by default
         c.cmd('settings')
         self.assertIn('mixer=0', c.last)
@@ -2828,8 +2828,8 @@ class TestMixer(Base):
         wj = os.path.join(d, 'wpctl.json')
         if os.path.exists(wj):
             os.unlink(wj)
-        env = {'LUMEN_FAKE_WPCTL': wj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']}
-        c = self.start('lumen-mix7', env)
+        env = {'MELLAGUI_FAKE_WPCTL': wj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']}
+        c = self.start('mellagui-mix7', env)
         info = self.mixer_info(c)
         self.assertEqual((info['backend'], info['volume'], info['mute'], info['output']), ('wpctl', '55', '0', 'PipeWire'))
         g = self.geometry(c)
@@ -2852,8 +2852,8 @@ class TestMixer(Base):
         aj = os.path.join(d, 'amixer.json')
         if os.path.exists(aj):
             os.unlink(aj)
-        env = {'LUMEN_FAKE_AMIXER': aj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']}
-        c = self.start('lumen-mix4', env)
+        env = {'MELLAGUI_FAKE_AMIXER': aj, 'PATH': stubs + ':' + FAKES + ':' + os.environ['PATH']}
+        c = self.start('mellagui-mix4', env)
         info = self.mixer_info(c)
         self.assertEqual((info['backend'], info['volume'], info['mute'], info['streams']), ('alsa', '40', '0', '0'))
         g = self.geometry(c)
@@ -2871,7 +2871,7 @@ class TestMixer(Base):
             with open(os.path.join(stubs, prog), 'w') as f:
                 f.write('#!/bin/sh\nexit 1\n')
             os.chmod(os.path.join(stubs, prog), 0o755)
-        c = self.start('lumen-mix5', {'PATH': stubs + ':' + os.environ['PATH']})
+        c = self.start('mellagui-mix5', {'PATH': stubs + ':' + os.environ['PATH']})
         info = self.mixer_info(c)
         self.assertEqual((info['backend'], info['ready']), ('none', '1'))
         x, y, w, h = self.card(c)                                               # the card is there and says so, no crash
@@ -2881,7 +2881,7 @@ class TestMixer(Base):
 
 
 class TestSysinfo(Base):
-    """The system monitor gadget: CPU / memory / temperature from /proc and /sys (a fake tree through LUMEN_SYS_ROOT)."""
+    """The system monitor gadget: CPU / memory / temperature from /proc and /sys (a fake tree through MELLAGUI_SYS_ROOT)."""
 
     STAT_A = 'cpu  1000 0 500 8000 500 0 0 0 0 0\ncpu0 500 0 250 4000 250 0 0 0 0 0\ncpu1 500 0 250 4000 250 0 0 0 0 0\n'
     STAT_B = 'cpu  1100 0 550 8050 500 0 0 0 0 0\ncpu0 600 0 250 4000 250 0 0 0 0 0\ncpu1 500 0 300 4050 250 0 0 0 0 0\n'   # +150 busy of +200
@@ -2896,7 +2896,7 @@ class TestSysinfo(Base):
         self.write(root, 'proc/cpuinfo', 'processor\t: 0\nmodel name\t: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz\n')
         self.write(root, 'proc/uptime', '93784.55 200000.00\n')                      # 1 day 2 hours
         self.write(root, 'proc/sys/kernel/osrelease', '6.8.0-test\n')
-        self.write(root, 'proc/sys/kernel/hostname', 'lumenbox\n')
+        self.write(root, 'proc/sys/kernel/hostname', 'mellaguibox\n')
         self.write(root, 'etc/os-release', 'NAME="Testix"\nPRETTY_NAME="Testix 1.0 LTS"\n')
         self.write(root, 'sys/class/dmi/id/sys_vendor', 'LENOVO\n')
         self.write(root, 'sys/class/dmi/id/product_name', '20L5CTO1WW\n')
@@ -2923,7 +2923,7 @@ class TestSysinfo(Base):
         return dict(kv.split('=', 1) for kv in c.last.split()[1:])
 
     def start(self, name, root, *args):
-        p, c, stop = self.private_compositor(name, '--sysinfo', *args, env={'LUMEN_SYS_ROOT': root})
+        p, c, stop = self.private_compositor(name, '--sysinfo', *args, env={'MELLAGUI_SYS_ROOT': root})
         for _ in range(100):
             if self.info(c)['ready'] == '1':
                 break
@@ -2932,7 +2932,7 @@ class TestSysinfo(Base):
 
     def test_values_come_from_proc_and_sys(self):
         root = self.tree('values')
-        c = self.start('lumen-sys1', root)
+        c = self.start('mellagui-sys1', root)
         i = self.info(c)
         self.assertEqual((i['visible'], i['cores'], i['mem'], i['mem_total_kb'], i['swap'], i['temp'], i['load']),
                          ('1', '2', '75', '1000000', '25', '66', '1.25'))         # the package sensor, not the hotter core
@@ -2956,20 +2956,20 @@ class TestSysinfo(Base):
 
     def test_device_info_comes_from_dmi_cpuinfo_and_os_release(self):
         root = self.tree('device')
-        c = self.start('lumen-sys7', root)
+        c = self.start('mellagui-sys7', root)
         c.cmd('sysdev')
         got = dict(kv.split('=', 1) for kv in c.last[3:].split('|'))
         self.assertEqual(got['maker'], 'LENOVO')
         self.assertEqual(got['model'], 'ThinkPad T480')                          # product_version: the product name is a type number
         self.assertEqual(got['cpu'], 'Intel Core i5-8250U @ 1.60GHz')
-        self.assertEqual((got['os'], got['kernel'], got['host'], got['uptime']), ('Testix 1.0 LTS', '6.8.0-test', 'lumenbox', '93784'))
+        self.assertEqual((got['os'], got['kernel'], got['host'], got['uptime']), ('Testix 1.0 LTS', '6.8.0-test', 'mellaguibox', '93784'))
         # placeholders of cheap boards are not shown; the board's own name takes over
         self.write(root, 'sys/class/dmi/id/sys_vendor', 'To Be Filled By O.E.M.\n')
         self.write(root, 'sys/class/dmi/id/product_name', 'To Be Filled By O.E.M.\n')
         self.write(root, 'sys/class/dmi/id/product_version', 'Default string\n')
         self.write(root, 'sys/class/dmi/id/board_vendor', 'ASRock\n')
         self.write(root, 'sys/class/dmi/id/board_name', 'B450M Pro4\n')
-        c2 = self.start('lumen-sys8', root)
+        c2 = self.start('mellagui-sys8', root)
         c2.cmd('sysdev')
         got = dict(kv.split('=', 1) for kv in c2.last[3:].split('|'))
         self.assertEqual((got['maker'], got['model']), ('ASRock', 'B450M Pro4'))
@@ -2979,7 +2979,7 @@ class TestSysinfo(Base):
 
     def test_no_sensor_and_no_proc_do_not_break_anything(self):
         root = self.tree('nosensor', with_sensor=False)
-        c = self.start('lumen-sys2', root)
+        c = self.start('mellagui-sys2', root)
         self.assertEqual(self.info(c)['temp'], '-1')
         shutil.rmtree(os.path.join(root, 'proc'))                                # even /proc vanishing is survived
         time.sleep(1.3)
@@ -2990,9 +2990,9 @@ class TestSysinfo(Base):
 
     def test_toggle_setting_super_s_and_stacking_with_the_other_gadgets(self):
         root = self.tree('stack')
-        p, c, stop = self.private_compositor('lumen-sys3', '--size', '1280x1000', '--mixer',
-                                             env={'LUMEN_SYS_ROOT': root, 'PATH': FAKES + ':' + os.environ['PATH'],
-                                                  'LUMEN_FAKE_STATE': os.path.join(tmp, 'sys3-pactl.json')})
+        p, c, stop = self.private_compositor('mellagui-sys3', '--size', '1280x1000', '--mixer',
+                                             env={'MELLAGUI_SYS_ROOT': root, 'PATH': FAKES + ':' + os.environ['PATH'],
+                                                  'MELLAGUI_FAKE_STATE': os.path.join(tmp, 'sys3-pactl.json')})
         c.cmd('gadget-rect system')
         self.assertIn('hidden', c.last)                                          # hidden by default
         c.key(KEY_LEFTMETA, True)
@@ -3017,8 +3017,8 @@ class TestSysinfo(Base):
         c.cmd('gadget-rect system')
         self.assertIn('hidden', c.last)
         # on a small screen the cards go into a second column instead of overlapping
-        p2, c2, stop2 = self.private_compositor('lumen-sys4', '--size', '1000x500', '--mixer', '--sysinfo', env={'LUMEN_SYS_ROOT': root,
-                                                'PATH': FAKES + ':' + os.environ['PATH'], 'LUMEN_FAKE_STATE': os.path.join(tmp, 'sys4-pactl.json')})
+        p2, c2, stop2 = self.private_compositor('mellagui-sys4', '--size', '1000x500', '--mixer', '--sysinfo', env={'MELLAGUI_SYS_ROOT': root,
+                                                'PATH': FAKES + ':' + os.environ['PATH'], 'MELLAGUI_FAKE_STATE': os.path.join(tmp, 'sys4-pactl.json')})
         boxes = []
         for name in ('', 'mixer', 'system'):
             c2.cmd('gadget-rect ' + name)
@@ -3032,8 +3032,8 @@ class TestSysinfo(Base):
 
     def test_gadgets_cascade_when_the_screen_is_too_small_for_columns(self):
         root = self.tree('cascade')
-        p, c, stop = self.private_compositor('lumen-sys6', '--mixer', '--sysinfo', env={'LUMEN_SYS_ROOT': root,      # 800x500
-                                             'PATH': FAKES + ':' + os.environ['PATH'], 'LUMEN_FAKE_STATE': os.path.join(tmp, 'sys6-pactl.json')})
+        p, c, stop = self.private_compositor('mellagui-sys6', '--mixer', '--sysinfo', env={'MELLAGUI_SYS_ROOT': root,      # 800x500
+                                             'PATH': FAKES + ':' + os.environ['PATH'], 'MELLAGUI_FAKE_STATE': os.path.join(tmp, 'sys6-pactl.json')})
         tops = []
         for name in ('', 'mixer', 'system'):
             c.cmd('gadget-rect ' + name)
@@ -3044,7 +3044,7 @@ class TestSysinfo(Base):
 
     def test_the_card_can_be_moved_and_shows_no_error_when_tiny(self):
         root = self.tree('move')
-        c = self.start('lumen-sys5', root, '--size', '1024x960')
+        c = self.start('mellagui-sys5', root, '--size', '1024x960')
         c.cmd('gadget-rect system')
         x, y, w, h = map(int, c.last.split()[1:5])
         c.abs(x + 80, y + 10)
@@ -3125,7 +3125,7 @@ class Gbm:
 
 
 class TestDmabuf(Base):
-    """zwp_linux_dmabuf_v1: clients that render with the GPU hand Lumen dmabufs, which are read like shm buffers."""
+    """zwp_linux_dmabuf_v1: clients that render with the GPU hand Mellagui dmabufs, which are read like shm buffers."""
 
     DMABUF_ARGB, DMABUF_XRGB = 0x34325241, 0x34325258
 
@@ -3344,8 +3344,8 @@ class TestDmabuf(Base):
                                              wl.request(p, 'create_immed', wl.new_id('wl_buffer'), I(32), I(32), self.DMABUF_XRGB, 0)))
 
     def test_no_dmabuf_option_hides_the_global(self):
-        p, c, stop = self.private_compositor('lumen-dmabuf-off', '--no-dmabuf')
-        cl = Client(name='lumen-dmabuf-off')
+        p, c, stop = self.private_compositor('mellagui-dmabuf-off', '--no-dmabuf')
+        cl = Client(name='mellagui-dmabuf-off')
         cl.wl.get_registry()
         cl.wl.roundtrip()
         self.assertNotIn('zwp_linux_dmabuf_v1', cl.wl.globals)

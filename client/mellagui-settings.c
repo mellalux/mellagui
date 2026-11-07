@@ -1,5 +1,5 @@
 /*
- * lumen-settings: the settings panel (wl_shm + xdg-shell + the private lumen_settings_v1, bitmap font).
+ * mellagui-settings: the settings panel (wl_shm + xdg-shell + the private mellagui_settings_v1, bitmap font).
  *
  *   Keyboard   layouts (enable, order, active), sticky keys, key repeat delay / rate, a field to try the keyboard
  *   Pointer    pointer speed, natural scrolling
@@ -10,10 +10,10 @@
  * which applies it, saves it (see src/settings.h) and answers with the effective values - the window only ever
  * shows what the compositor reports.
  *
- *   lumen-settings                  the panel
- *   lumen-settings --get [KEY]      print KEY=VALUE for every setting (or just one)
- *   lumen-settings --set K=V ...    change settings; prints the resulting values, exit status 1 if one was refused
- *   lumen-settings --selftest       checks the list / slider helpers without a display
+ *   mellagui-settings                  the panel
+ *   mellagui-settings --get [KEY]      print KEY=VALUE for every setting (or just one)
+ *   mellagui-settings --set K=V ...    change settings; prints the resulting values, exit status 1 if one was refused
+ *   mellagui-settings --selftest       checks the list / slider helpers without a display
  */
 #include <errno.h>
 #include <math.h>
@@ -219,7 +219,7 @@ static int selftest(void)
     }
     if (selftest_fail)
         return 1;
-    puts("lumen-settings selftest ok");
+    puts("mellagui-settings selftest ok");
     return 0;
 }
 
@@ -307,7 +307,7 @@ static void kv_set(struct app *a, const char *k, const char *v)
 static void send_set(struct app *a, const char *key, const char *value)
 {
     if (a->settings)
-        WLC_SEND(a->win.c, a->settings, LM_LUMEN_SETTINGS_V1_REQ_SET, { .s = key }, { .s = value });
+        WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = key }, { .s = value });
 }
 
 static void send_set_int(struct app *a, const char *key, int v)
@@ -458,7 +458,7 @@ static void build_display(struct app *a, int x, int y, int w)
         const char *v = kv_get(a, "monitor");
         if (*v && sscanf(v, "%39[^|]|%39[^|]|%39[^|]|%d|%d", mk, mo, con, &mmw, &mmh) >= 3) {
             char line[112];
-            if (!strcmp(mk, "DRM") || !strcmp(mk, "Lumen"))
+            if (!strcmp(mk, "DRM") || !strcmp(mk, "Mellagui"))
                 snprintf(line, sizeof(line), "Monitor: %s", mo);                 /* no manufacturer known */
             else
                 snprintf(line, sizeof(line), "Monitor: %s %s", mk, mo);
@@ -502,7 +502,7 @@ static void build_display(struct app *a, int x, int y, int w)
     /* below the resolutions: the monitor's own settings (brightness, volume, input ...) are a program of their own */
     struct widget *mb = add(a, W_BUTTON, (struct rect){ x, y + 10, 260, ROW_H - 4 }, "Monitor settings...");
     snprintf(mb->key, sizeof(mb->key), "launch");
-    snprintf(mb->arg, sizeof(mb->arg), "lumen-monitor");
+    snprintf(mb->arg, sizeof(mb->arg), "mellagui-monitor");
 }
 
 static void build_sound(struct app *a, int x, int y, int w)
@@ -548,8 +548,8 @@ static void build_sound(struct app *a, int x, int y, int w)
         }
     }
     y += 6;
-    /* 3. Lumen's own beeps (ALSA device) */
-    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Lumen's own beeps (ALSA)");
+    /* 3. Mellagui's own beeps (ALSA device) */
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Mellagui's own beeps (ALSA)");
     y += ROW_H;
     cur = kv_get(a, "audio-out");
     shown = pick_entries(kv_get(a, "audio-outs"), 4, ents);
@@ -615,7 +615,7 @@ static void slider_drag_to(struct app *a, int idx, double x)
         send_set_int(a, w->key, v);
 }
 
-/* Starts another Lumen program next to this one (the monitor panel); it is not waited for. */
+/* Starts another Mellagui program next to this one (the monitor panel); it is not waited for. */
 static void launch_sibling(const char *name)
 {
     pid_t pid = fork();
@@ -822,9 +822,9 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
 {
     (void)c; (void)id;
     struct app *a = data;
-    if (op == LM_LUMEN_SETTINGS_V1_EVT_VALUE) {
+    if (op == LM_MELLAGUI_SETTINGS_V1_EVT_VALUE) {
         kv_set(a, args[0].s, args[1].s);
-    } else if (op == LM_LUMEN_SETTINGS_V1_EVT_DONE) {
+    } else if (op == LM_MELLAGUI_SETTINGS_V1_EVT_DONE) {
         a->win.redraw = true;
     }
 }
@@ -924,8 +924,8 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 {
     (void)ver;
     struct app *a = w->data;
-    if (!strcmp(iface, "lumen_settings_v1"))
-        a->settings = wlc_bind(w->c, w->registry, name, &lm_lumen_settings_v1_interface, 1, settings_event, a);
+    if (!strcmp(iface, "mellagui_settings_v1"))
+        a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }
 
 /* ---- command line ----------------------------------------------------------------------------------------- */
@@ -933,7 +933,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 static int cli(struct app *a, int argc, char **argv)
 {
     if (!a->settings) {
-        fprintf(stderr, "lumen-settings: the compositor has no lumen_settings_v1\n");
+        fprintf(stderr, "mellagui-settings: the compositor has no mellagui_settings_v1\n");
         return 1;
     }
     int bad = 0;
@@ -941,7 +941,7 @@ static int cli(struct app *a, int argc, char **argv)
         for (int i = 2; i < argc; i++) {
             char *eq = strchr(argv[i], '=');
             if (!eq) {
-                fprintf(stderr, "lumen-settings: expected KEY=VALUE, got '%s'\n", argv[i]);
+                fprintf(stderr, "mellagui-settings: expected KEY=VALUE, got '%s'\n", argv[i]);
                 return 2;
             }
             *eq = 0;
@@ -950,7 +950,7 @@ static int cli(struct app *a, int argc, char **argv)
                 return 1;
             printf("%s=%s\n", argv[i], kv_get(a, argv[i]));
             if (strcmp(kv_get(a, argv[i]), eq + 1)) {
-                fprintf(stderr, "lumen-settings: '%s=%s' was not accepted as given\n", argv[i], eq + 1);
+                fprintf(stderr, "mellagui-settings: '%s=%s' was not accepted as given\n", argv[i], eq + 1);
                 bad = 1;
             }
         }
@@ -959,7 +959,7 @@ static int cli(struct app *a, int argc, char **argv)
     /* --get [KEY] */
     if (argc > 2) {
         if (!*kv_get(a, argv[2]) && strcmp(argv[2], "file")) {
-            fprintf(stderr, "lumen-settings: unknown setting '%s'\n", argv[2]);
+            fprintf(stderr, "mellagui-settings: unknown setting '%s'\n", argv[2]);
             return 1;
         }
         printf("%s=%s\n", argv[2], kv_get(a, argv[2]));
@@ -976,7 +976,7 @@ int main(int argc, char **argv)
         return selftest();
     bool cli_mode = argc > 1 && (!strcmp(argv[1], "--get") || !strcmp(argv[1], "--set"));
     if (argc > 1 && !cli_mode) {
-        fprintf(stderr, "usage: lumen-settings [--get [KEY] | --set KEY=VALUE... | --selftest]\n");
+        fprintf(stderr, "usage: mellagui-settings [--get [KEY] | --set KEY=VALUE... | --selftest]\n");
         return 2;
     }
 
@@ -984,7 +984,7 @@ int main(int argc, char **argv)
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event };
     struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1 };
-    if (wlwin_connect(&a.win, "lumen-settings", &ops, &a) < 0)
+    if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */
         return 1;
@@ -993,7 +993,7 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return rc;
     }
-    if (wlwin_open(&a.win, "Settings", "lumen.settings", DEFAULT_W, DEFAULT_H, 520, 380) < 0)
+    if (wlwin_open(&a.win, "Settings", "mellagui.settings", DEFAULT_W, DEFAULT_H, 520, 380) < 0)
         return 1;
     while (wlwin_step(&a.win, -1))
         ;

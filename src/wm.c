@@ -2141,19 +2141,19 @@ static uint32_t bit_for_kind(enum lm_pick_kind k)
 
 static void launch_run(struct lm_wm *wm)
 {
-    const char *cmd = wm->srv->config.run_cmd ? wm->srv->config.run_cmd : "lumen-run";
+    const char *cmd = wm->srv->config.run_cmd ? wm->srv->config.run_cmd : "mellagui-run";
     lm_server_spawn(wm->srv, cmd);
 }
 
 static void launch_settings(struct lm_wm *wm)
 {
-    const char *cmd = wm->srv->config.settings_cmd ? wm->srv->config.settings_cmd : "lumen-settings";
+    const char *cmd = wm->srv->config.settings_cmd ? wm->srv->config.settings_cmd : "mellagui-settings";
     lm_server_spawn(wm->srv, cmd);
 }
 
 static void launch_terminal(struct lm_wm *wm)
 {
-    const char *cmd = wm->srv->config.terminal_cmd ? wm->srv->config.terminal_cmd : "lumen-term";
+    const char *cmd = wm->srv->config.terminal_cmd ? wm->srv->config.terminal_cmd : "mellagui-term";
     lm_server_spawn(wm->srv, cmd);
 }
 

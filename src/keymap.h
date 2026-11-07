@@ -1,9 +1,9 @@
-#ifndef LUMEN_KEYMAP_H
-#define LUMEN_KEYMAP_H
+#ifndef MELLAGUI_KEYMAP_H
+#define MELLAGUI_KEYMAP_H
 
 /*
  * Keyboard layouts, shared by the compositor (wl_keyboard.keymap generation
- * and modifier handling) and by clients (lumen-term etc. translate
+ * and modifier handling) and by clients (mellagui-term etc. translate
  * evdev key codes to characters without libxkbcommon).
  * Owner: seat.c's owner (keymap.c). No dependencies on server code.
  *

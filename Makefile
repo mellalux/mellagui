@@ -1,14 +1,14 @@
-# Lumen - a Wayland compositor + shell for Linux without X11.
+# Mellagui - a Wayland compositor + shell for Linux without X11.
 #
 #   make            build everything that has sources
-#   make lumen      build/lumen        (compositor, src/*.c)
-#   make lumen-term build/lumen-term   (client/lumen-term.c)
-#   make lumen-calc build/lumen-calc   (client/lumen-calc.c)
-#   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog)
-#   make lumen-settings build/lumen-settings (client/lumen-settings.c, the settings panel)
-#   make lumen-monitor build/lumen-monitor (client/lumen-monitor.c, the monitor's own settings over DDC/CI)
+#   make mellagui      build/mellagui        (compositor, src/*.c)
+#   make mellagui-term build/mellagui-term   (client/mellagui-term.c)
+#   make mellagui-calc build/mellagui-calc   (client/mellagui-calc.c)
+#   make mellagui-run  build/mellagui-run    (client/mellagui-run.c, the Run dialog)
+#   make mellagui-settings build/mellagui-settings (client/mellagui-settings.c, the settings panel)
+#   make mellagui-monitor build/mellagui-monitor (client/mellagui-monitor.c, the monitor's own settings over DDC/CI)
 #   make run        build, then start the compositor on a free VT (see RUN_ARGS)
-#   make asan       build/lumen-asan   (compositor with ASan + UBSan)
+#   make asan       build/mellagui-asan   (compositor with ASan + UBSan)
 #   make test       build, then run tests/run.sh
 #   make clean
 
@@ -34,30 +34,30 @@ ASAN_OBJS := $(patsubst src/%.c,$(BUILD)/asan/%.o,$(COMP_SRCS))
 CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c src/keymap.c
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
-TARGETS := $(BUILD)/lumen $(BUILD)/lumen-term $(BUILD)/lumen-calc $(BUILD)/keymap-test \
-           $(BUILD)/lumen-run $(BUILD)/lumen-settings $(BUILD)/lumen-monitor
+TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test \
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor
 
-.PHONY: all lumen lumen-term lumen-calc lumen-run lumen-settings lumen-monitor asan test run clean
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor asan test run clean
 all: $(TARGETS)
 
-lumen: $(BUILD)/lumen
-lumen-calc: $(BUILD)/lumen-calc
-lumen-run: $(BUILD)/lumen-run
-lumen-settings: $(BUILD)/lumen-settings
-lumen-monitor: $(BUILD)/lumen-monitor
-lumen-term: $(BUILD)/lumen-term
-asan: $(BUILD)/lumen-asan
+mellagui: $(BUILD)/mellagui
+mellagui-calc: $(BUILD)/mellagui-calc
+mellagui-run: $(BUILD)/mellagui-run
+mellagui-settings: $(BUILD)/mellagui-settings
+mellagui-monitor: $(BUILD)/mellagui-monitor
+mellagui-term: $(BUILD)/mellagui-term
+asan: $(BUILD)/mellagui-asan
 
 # ---- link rules ----------------------------------------------------------------
-$(BUILD)/lumen: $(COMP_OBJS)
+$(BUILD)/mellagui: $(COMP_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-asan: $(ASAN_OBJS)
+$(BUILD)/mellagui-asan: $(ASAN_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-calc: $(BUILD)/client/mellagui-calc.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -65,19 +65,19 @@ $(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-run: $(BUILD)/client/lumen-run.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-run: $(BUILD)/client/mellagui-run.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-settings: $(BUILD)/client/lumen-settings.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-monitor: $(BUILD)/client/lumen-monitor.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/src/ddc.o $(BUILD)/src/edid.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-monitor: $(BUILD)/client/mellagui-monitor.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/src/ddc.o $(BUILD)/src/edid.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-term: $(BUILD)/client/lumen-term.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-term: $(BUILD)/client/mellagui-term.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -103,15 +103,15 @@ test: all
 	tests/run.sh
 
 # make run                      real console (VT) session with the terminal; Ctrl+Alt+F3 first, see README
-# make run EXEC=build/lumen-calc  start another program instead of the terminal
+# make run EXEC=build/mellagui-calc  start another program instead of the terminal
 # make run TIMEOUT=60            quit automatically after 60 s (safe first run)
-# make run HEADLESS=1            headless backend instead (no display; control socket /tmp/lumen.ctl)
-EXEC ?= $(BUILD)/lumen-term
-RUN_LOG ?= $(HOME)/lumen.log
-RUN_ARGS = --exec '$(EXEC)' --terminal $(BUILD)/lumen-term --run $(BUILD)/lumen-run --log-file $(RUN_LOG) \
+# make run HEADLESS=1            headless backend instead (no display; control socket /tmp/mellagui.ctl)
+EXEC ?= $(BUILD)/mellagui-term
+RUN_LOG ?= $(HOME)/mellagui.log
+RUN_ARGS = --exec '$(EXEC)' --terminal $(BUILD)/mellagui-term --run $(BUILD)/mellagui-run --log-file $(RUN_LOG) \
            $(if $(TIMEOUT),--timeout $(TIMEOUT))
 run: all
-	$(if $(HEADLESS),$(BUILD)/lumen --backend headless --size 1280x720 --control /tmp/lumen.ctl $(RUN_ARGS),$(BUILD)/lumen $(RUN_ARGS))
+	$(if $(HEADLESS),$(BUILD)/mellagui --backend headless --size 1280x720 --control /tmp/mellagui.ctl $(RUN_ARGS),$(BUILD)/mellagui $(RUN_ARGS))
 
 clean:
 	rm -rf $(BUILD)

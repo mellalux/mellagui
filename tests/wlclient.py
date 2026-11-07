@@ -1,4 +1,4 @@
-"""Minimal raw-socket Wayland client library used by the Lumen test-suite.
+"""Minimal raw-socket Wayland client library used by the Mellagui test-suite.
 
 No libwayland: the wire format is implemented here, independently of the
 compositor's own wire.c, so protocol bugs on either side show up as test failures.
@@ -35,7 +35,7 @@ EVENTS = {
     'wl_data_device': {0: ('data_offer', 'n'), 1: ('enter', 'uoffo'), 2: ('leave', ''),
                        3: ('motion', 'uff'), 4: ('drop', ''), 5: ('selection', 'o')},
     'wl_data_offer': {0: ('offer', 's'), 1: ('source_actions', 'u'), 2: ('action', 'u')},
-    'lumen_settings_v1': {0: ('value', 'ss'), 1: ('done', '')},
+    'mellagui_settings_v1': {0: ('value', 'ss'), 1: ('done', '')},
     'zwp_linux_dmabuf_v1': {0: ('format', 'u'), 1: ('modifier', 'uuu')},
     'zwp_linux_buffer_params_v1': {0: ('created', 'n'), 1: ('failed', '')},
     'zwp_linux_dmabuf_feedback_v1': {0: ('done', ''), 1: ('format_table', 'hu'), 2: ('main_device', 'a'), 3: ('tranche_done', ''),
@@ -78,7 +78,7 @@ REQ = {
     'wl_data_device': {'start_drag': 0, 'set_selection': 1, 'release': 2},
     'wl_data_source': {'offer': 0, 'destroy': 1},
     'wl_data_offer': {'accept': 0, 'receive': 1, 'destroy': 2},
-    'lumen_settings_v1': {'destroy': 0, 'set': 1},
+    'mellagui_settings_v1': {'destroy': 0, 'set': 1},
     'zwp_linux_dmabuf_v1': {'destroy': 0, 'create_params': 1, 'get_default_feedback': 2, 'get_surface_feedback': 3},
     'zwp_linux_buffer_params_v1': {'destroy': 0, 'add': 1, 'create': 2, 'create_immed': 3},
     'zwp_linux_dmabuf_feedback_v1': {'destroy': 0},
@@ -317,7 +317,7 @@ class Shm:
 
     def __init__(self, wl, size):
         self.wl = wl
-        self.fd = os.memfd_create('lumen-test')
+        self.fd = os.memfd_create('mellagui-test')
         os.ftruncate(self.fd, size)
         self.map = mmap.mmap(self.fd, size)
         self.size = size
@@ -350,7 +350,7 @@ class Client:
 class Window:
     """xdg_toplevel with an shm buffer, following the standard configure dance."""
 
-    def __init__(self, client, w=300, h=200, title='test', app_id='lumen.test', color=0xff336699,
+    def __init__(self, client, w=300, h=200, title='test', app_id='mellagui.test', color=0xff336699,
                  decoration=False, show=True):
         self.c = client
         wl = client.wl

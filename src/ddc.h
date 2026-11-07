@@ -4,7 +4,7 @@
  * layer on /dev/i2c-N (slave address 0x37). No dependencies, linkable into clients.
  *
  * Needs the kernel module i2c-dev and read/write access to /dev/i2c-N (group "i2c", or a logind ACL). The bus of a connected
- * monitor is the target of /sys/class/drm/cardN-<connector>/ddc (see lumen-monitor.c).
+ * monitor is the target of /sys/class/drm/cardN-<connector>/ddc (see mellagui-monitor.c).
  */
 #ifndef LM_DDC_H
 #define LM_DDC_H

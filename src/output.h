@@ -1,5 +1,5 @@
-#ifndef LUMEN_OUTPUT_H
-#define LUMEN_OUTPUT_H
+#ifndef MELLAGUI_OUTPUT_H
+#define MELLAGUI_OUTPUT_H
 
 /*
  * wl_output globals (one per struct lm_output) and the output layout.

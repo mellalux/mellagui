@@ -1,5 +1,5 @@
-#ifndef LUMEN_LOG_H
-#define LUMEN_LOG_H
+#ifndef MELLAGUI_LOG_H
+#define MELLAGUI_LOG_H
 
 /*
  * Leveled logging to stderr and, optionally, to a file.

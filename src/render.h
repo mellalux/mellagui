@@ -1,5 +1,5 @@
-#ifndef LUMEN_RENDER_H
-#define LUMEN_RENDER_H
+#ifndef MELLAGUI_RENDER_H
+#define MELLAGUI_RENDER_H
 
 /*
  * Software compositor: walks the wm scene, composites into the backend

@@ -1,12 +1,12 @@
 /*
- * lumen-run: "Run command" dialog (wl_shm + xdg-shell, bitmap font).
+ * mellagui-run: "Run command" dialog (wl_shm + xdg-shell, bitmap font).
  * Type a shell command and press Enter: it is started detached (own session, stdio on /dev/null)
  * and the dialog closes. Esc closes without running.
  *
  *   Left/Right/Home/End, Backspace/Delete  edit        Ctrl+U  clear the line   Ctrl+A / Ctrl+E  home / end
- *   Up/Down                                 history (kept in $XDG_CACHE_HOME/lumen-run-history or ~/.cache/...)
+ *   Up/Down                                 history (kept in $XDG_CACHE_HOME/mellagui-run-history or ~/.cache/...)
  *
- * `lumen-run --selftest` checks the line editor without a display.
+ * `mellagui-run --selftest` checks the line editor without a display.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -124,9 +124,9 @@ static char *hist_path(void)
     const char *x = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
     static char path[1024];
     if (x && *x)
-        snprintf(path, sizeof(path), "%s/lumen-run-history", x);
+        snprintf(path, sizeof(path), "%s/mellagui-run-history", x);
     else if (home && *home)
-        snprintf(path, sizeof(path), "%s/.cache/lumen-run-history", home);
+        snprintf(path, sizeof(path), "%s/.cache/mellagui-run-history", home);
     else
         return NULL;
     return path;
@@ -336,7 +336,7 @@ static void run_line(struct app *a)
     hist_add(&a->hist, a->line.text);
     hist_save(&a->hist);
     if (spawn_detached(a->line.text, wlc_fd(a->win.c)) < 0)
-        fprintf(stderr, "lumen-run: cannot start '%s': %s\n", a->line.text, strerror(errno));
+        fprintf(stderr, "mellagui-run: cannot start '%s': %s\n", a->line.text, strerror(errno));
     a->win.running = false;
 }
 
@@ -456,13 +456,13 @@ int main(int argc, char **argv)
     struct app a = { .repeat_rate = 25, .repeat_delay = 400 };
     int rc = 1;
     hist_load(&a.hist);
-    if (wlwin_connect(&a.win, "lumen-run", &ops, &a) < 0)
+    if (wlwin_connect(&a.win, "mellagui-run", &ops, &a) < 0)
         goto out;
     if (!a.win.seat) {
-        fprintf(stderr, "lumen-run: compositor lacks wl_seat\n");
+        fprintf(stderr, "mellagui-run: compositor lacks wl_seat\n");
         goto out;
     }
-    if (wlwin_open(&a.win, "Run", "lumen.run", DEFAULT_W, DEFAULT_H, 160, 40) < 0)
+    if (wlwin_open(&a.win, "Run", "mellagui.run", DEFAULT_W, DEFAULT_H, 160, 40) < 0)
         goto out;
     while (wlwin_step(&a.win, repeat_timeout(&a)))
         repeat_fire(&a);

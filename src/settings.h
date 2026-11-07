@@ -1,9 +1,9 @@
-#ifndef LUMEN_SETTINGS_H
-#define LUMEN_SETTINGS_H
+#ifndef MELLAGUI_SETTINGS_H
+#define MELLAGUI_SETTINGS_H
 
 /*
- * User settings: the settings panel (client/lumen-settings.c) talks to the compositor through the private
- * `lumen_settings_v1` global, and the values survive restarts in a plain `key=value` file.
+ * User settings: the settings panel (client/mellagui-settings.c) talks to the compositor through the private
+ * `mellagui_settings_v1` global, and the values survive restarts in a plain `key=value` file.
  *
  *   key             value                      effect
  *   layouts         "us,ee,de" (1..4 ids)      keyboard layouts to switch between; a new keymap goes to every client
@@ -18,10 +18,10 @@
  *   mixer           0 | 1                      volume mixer gadget on the desktop (Super+V)
  *   sysinfo         0 | 1                      system monitor gadget: CPU, memory, temperature (Super+S)
  *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)
- *                                              it is undone after 15 s (env LUMEN_REVERT_MS), a black screen cannot confirm
+ *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm
  *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the
  *                                              monitor's native shape (edid.h), preferred = the monitor's own preferred mode
- *   audio-out       ALSA device name           where Lumen's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
+ *   audio-out       ALSA device name           where Mellagui's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
  *   file            (read only)                path the settings are saved to, "" = not saved
  *   -- live state, never saved: --
  *   resolutions     "WxH@Hz|note;..."          modes the first output can show (read only)

@@ -1,5 +1,5 @@
-#ifndef LUMEN_SHM_H
-#define LUMEN_SHM_H
+#ifndef MELLAGUI_SHM_H
+#define MELLAGUI_SHM_H
 
 /*
  * wl_shm, wl_shm_pool, wl_buffer and the pixel "texture" a surface keeps.

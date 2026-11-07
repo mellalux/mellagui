@@ -1,9 +1,9 @@
-#ifndef LUMEN_WLWIN_H
-#define LUMEN_WLWIN_H
+#ifndef MELLAGUI_WLWIN_H
+#define MELLAGUI_WLWIN_H
 
 /*
  * One software-drawn xdg-toplevel window on top of wlc, shared by the small
- * single-window clients (lumen-calc, lumen-run, lumen-settings): registry
+ * single-window clients (mellagui-calc, mellagui-run, mellagui-settings): registry
  * binding, xdg-shell boilerplate, a single wl_shm buffer that is redrawn on
  * request, keymap/modifier tracking and a few pixel-drawing helpers.
  *
@@ -12,7 +12,7 @@
  * wlwin_step(). Ask for a repaint by setting `redraw`; ops->paint draws into
  * `pixels` (bw x bh, XRGB8888) with the helpers below.
  *
- * lumen-term does not use this: it double-buffers and has its own protocol needs.
+ * mellagui-term does not use this: it double-buffers and has its own protocol needs.
  */
 
 #include <stdbool.h>
@@ -47,7 +47,7 @@ struct wlwin {
     bool configured, running, buffer_busy, redraw;
     uint32_t mods;                  /* LM_MOD_* bits, from wl_keyboard.modifiers */
     int def_w, def_h, min_w, min_h;
-    const char *name;               /* program name for messages, e.g. "lumen-calc" */
+    const char *name;               /* program name for messages, e.g. "mellagui-calc" */
 };
 
 /*

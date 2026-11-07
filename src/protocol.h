@@ -1,5 +1,5 @@
-#ifndef LUMEN_PROTOCOL_H
-#define LUMEN_PROTOCOL_H
+#ifndef MELLAGUI_PROTOCOL_H
+#define MELLAGUI_PROTOCOL_H
 
 /*
  * Hand-written interface descriptors for every supported Wayland interface,
@@ -96,7 +96,7 @@ extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_v1_interface;     /* dmabuf.c */
 extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
-extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen private: settings.c */
+extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* Mellagui private: settings.c */
 
 /*
  * ---- COPY-PASTE LIST OF ADVERTISED GLOBALS (interface, version) -------------
@@ -109,7 +109,7 @@ extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen pr
  *   xdg_wm_base                   3    xdg.c
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
  *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
- *   lumen_settings_v1             1    settings.c (Lumen private: read/change the user settings)
+ *   mellagui_settings_v1             1    settings.c (Mellagui private: read/change the user settings)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
 #define LM_WL_SUBCOMPOSITOR_VERSION         1
@@ -120,7 +120,7 @@ extern const struct lm_interface lm_lumen_settings_v1_interface;     /* Lumen pr
 #define LM_XDG_WM_BASE_VERSION              3
 #define LM_ZXDG_DECORATION_MANAGER_V1_VERSION 1
 #define LM_ZWP_LINUX_DMABUF_V1_VERSION      4
-#define LM_LUMEN_SETTINGS_V1_VERSION        1
+#define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
 enum {
@@ -547,12 +547,12 @@ enum {
 #define LM_DRM_FORMAT_XRGB8888 0x34325258u      /* 'X' 'R' '2' '4' */
 #define LM_DRM_FORMAT_MOD_LINEAR 0ull
 
-/* ---- lumen_settings_v1 (Lumen's own protocol, see settings.h for the keys) ----------------------------------- */
+/* ---- mellagui_settings_v1 (Mellagui's own protocol, see settings.h for the keys) ----------------------------------- */
 enum {
-    LM_LUMEN_SETTINGS_V1_REQ_DESTROY = 0,   /* "" */
-    LM_LUMEN_SETTINGS_V1_REQ_SET = 1,       /* "ss" key, value: change one setting (the answer is a value burst + done) */
-    LM_LUMEN_SETTINGS_V1_EVT_VALUE = 0,     /* "ss" key, value: current value of one setting */
-    LM_LUMEN_SETTINGS_V1_EVT_DONE = 1,      /* "" end of a burst of value events */
+    LM_MELLAGUI_SETTINGS_V1_REQ_DESTROY = 0,   /* "" */
+    LM_MELLAGUI_SETTINGS_V1_REQ_SET = 1,       /* "ss" key, value: change one setting (the answer is a value burst + done) */
+    LM_MELLAGUI_SETTINGS_V1_EVT_VALUE = 0,     /* "ss" key, value: current value of one setting */
+    LM_MELLAGUI_SETTINGS_V1_EVT_DONE = 1,      /* "" end of a burst of value events */
 };
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * User settings: lumen_settings_v1 global + the settings file. See settings.h for the contract.
+ * User settings: mellagui_settings_v1 global + the settings file. See settings.h for the contract.
  */
 #include <errno.h>
 #include <math.h>
@@ -262,7 +262,7 @@ int lm_settings_load(struct lm_config *cfg, const char *path, char *layouts_out,
 
 static int revert_ms(void)
 {
-    const char *e = getenv("LUMEN_REVERT_MS");
+    const char *e = getenv("MELLAGUI_REVERT_MS");
     int v = e ? atoi(e) : 0;
     return v > 0 ? v : DEFAULT_REVERT_MS;
 }
@@ -373,9 +373,9 @@ static void send_burst(struct lm_settings *s, struct lm_resource *res)
     for (int k = 0; k < K_COUNT; k++) {
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
-        lm_resource_post(res, LM_LUMEN_SETTINGS_V1_EVT_VALUE, key_names[k], v);
+        lm_resource_post(res, LM_MELLAGUI_SETTINGS_V1_EVT_VALUE, key_names[k], v);
     }
-    lm_resource_post(res, LM_LUMEN_SETTINGS_V1_EVT_DONE);
+    lm_resource_post(res, LM_MELLAGUI_SETTINGS_V1_EVT_DONE);
 }
 
 static void broadcast(struct lm_settings *s)
@@ -427,7 +427,7 @@ static void save_now(struct lm_settings *s)
         lm_warn("settings: cannot write %s: %s", tmp, strerror(errno));
         return;
     }
-    fputs("# Lumen settings (written by the settings panel; edit while lumen is not running)\n", f);
+    fputs("# Mellagui settings (written by the settings panel; edit while mellagui is not running)\n", f);
     for (int k = 0; k < K_FILE; k++) {
         char v[VALUE_MAX];
         if (k == K_RESOLUTION && s->res_pending)
@@ -701,8 +701,8 @@ static void req_set(struct lm_resource *res, const union lm_arg *args)
 }
 
 static const lm_request_fn handlers[] = {
-    [LM_LUMEN_SETTINGS_V1_REQ_DESTROY] = req_destroy,
-    [LM_LUMEN_SETTINGS_V1_REQ_SET] = req_set,
+    [LM_MELLAGUI_SETTINGS_V1_REQ_DESTROY] = req_destroy,
+    [LM_MELLAGUI_SETTINGS_V1_REQ_SET] = req_set,
 };
 
 static void binding_destroy(struct lm_resource *res)
@@ -724,7 +724,7 @@ static void settings_bind(struct lm_client *client, void *data, uint32_t version
         return;
     }
     b->s = s;
-    b->res = lm_resource_create(client, id, &lm_lumen_settings_v1_interface, version, handlers, b, binding_destroy);
+    b->res = lm_resource_create(client, id, &lm_mellagui_settings_v1_interface, version, handlers, b, binding_destroy);
     if (!b->res) {
         free(b);
         return;
@@ -744,7 +744,7 @@ struct lm_settings *lm_settings_create(struct lm_server *srv)
     s->revert_timer = lm_loop_add_timer(srv->loop, revert_cb, s);
     s->rescan_timer = lm_loop_add_timer(srv->loop, rescan_cb, s);
     lm_sound_set_device(srv->config.audio_device);
-    s->global = lm_global_create(srv, &lm_lumen_settings_v1_interface, LM_LUMEN_SETTINGS_V1_VERSION,
+    s->global = lm_global_create(srv, &lm_mellagui_settings_v1_interface, LM_MELLAGUI_SETTINGS_V1_VERSION,
                                  settings_bind, s);
     if (!s->global) {
         lm_settings_destroy(s);

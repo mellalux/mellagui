@@ -1,10 +1,10 @@
-#ifndef LUMEN_LOOP_H
-#define LUMEN_LOOP_H
+#ifndef MELLAGUI_LOOP_H
+#define MELLAGUI_LOOP_H
 
 /*
  * Single-threaded epoll event loop. Owner: loop.c.
  *
- * Everything in Lumen runs on one thread inside lm_loop_run(). Callbacks may
+ * Everything in Mellagui runs on one thread inside lm_loop_run(). Callbacks may
  * freely add/remove sources, timers and idle callbacks (including themselves);
  * removal is deferred until the current dispatch round finishes, so a source
  * pointer stays valid until its callback returns.

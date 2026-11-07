@@ -1,4 +1,4 @@
-# Lumen architecture
+# Mellagui architecture
 
 > **Implementation status.** All modules described here exist. Differences from the original design:
 > logind `TakeDevice` is *not* implemented (devices are opened directly, so the user needs the
@@ -7,7 +7,7 @@
 > `backend_drm.c` has not been exercised on real hardware.
 
 
-Lumen is a from-scratch Wayland compositor and built-in shell in C11 that runs
+Mellagui is a from-scratch Wayland compositor and built-in shell in C11 that runs
 directly on a Linux VT (DRM/KMS + evdev). No X11, no Xwayland, no libwayland,
 wlroots, libinput, xkbcommon, udev, gbm or EGL: the Wayland wire protocol, the
 protocol objects, the keymap and the software renderer are all implemented in
@@ -97,13 +97,13 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/xdg.[ch]` | **shell** | xdg_wm_base/surface/toplevel/popup/positioner, decoration manager |
 | `src/wm.[ch]` | **shell** | window manager, panel, shortcuts, workspaces, scene for the renderer |
 | `src/seat.[ch]`, `src/keymap.[ch]` | **input** | wl_seat, data device, cursor, pointer grabs, static US keymap |
-| (gadget) | **desktop gadget** | `seat.c` keeps the clipboard history (it reads each new text selection through a pipe it hands to the source); `wm.c` places the card (`LM_SCENE_GADGET`, right after the wallpapers; docked top right until dragged), picks its title bar (`LM_PICK_GADGET_TITLE`: move grab, double click resets) and edges (`LM_PICK_GADGET_BORDER`: resize grab, 200x86..640x560), `render.c` paints it (rounded corners, stacked-alpha shadow, wraps the entries). Super+G toggles; a moved or resized card is remembered in `~/.config/lumen/gadgets.conf` (`--gadgets-file`, one `name x y w h` line each) |
+| (gadget) | **desktop gadget** | `seat.c` keeps the clipboard history (it reads each new text selection through a pipe it hands to the source); `wm.c` places the card (`LM_SCENE_GADGET`, right after the wallpapers; docked top right until dragged), picks its title bar (`LM_PICK_GADGET_TITLE`: move grab, double click resets) and edges (`LM_PICK_GADGET_BORDER`: resize grab, 200x86..640x560), `render.c` paints it (rounded corners, stacked-alpha shadow, wraps the entries). Super+G toggles; a moved or resized card is remembered in `~/.config/mellagui/gadgets.conf` (`--gadgets-file`, one `name x y w h` line each) |
 | `src/sound.h`, `src/sound.c` | **sound** | sticky-key beeps: synthesised S16 buffer piped to a detached `aplay` child (no audio library) |
-| `src/ddc.[ch]` | **sound** | DDC/CI (VESA MCCS) packets for `client/lumen-monitor.c`: get/set VCP feature requests, reply parser with checksum (unit-tested), blocking I2C I/O on `/dev/i2c-N` (slave 0x37) |
-| `src/sysinfo.[ch]` | **sound** | CPU / memory / temperature and the device (maker, model, CPU, OS, kernel, host, uptime: DMI, `/proc/cpuinfo`, `/etc/os-release`) for the system monitor gadget: parsers of `/proc/stat`, `/proc/meminfo`, the hwmon / thermal sensor search (env `LUMEN_SYS_ROOT` prefixes the paths for tests) and a 1 s sampler with a 60-sample history; unit-tested |
+| `src/ddc.[ch]` | **sound** | DDC/CI (VESA MCCS) packets for `client/mellagui-monitor.c`: get/set VCP feature requests, reply parser with checksum (unit-tested), blocking I2C I/O on `/dev/i2c-N` (slave 0x37) |
+| `src/sysinfo.[ch]` | **sound** | CPU / memory / temperature and the device (maker, model, CPU, OS, kernel, host, uptime: DMI, `/proc/cpuinfo`, `/etc/os-release`) for the system monitor gadget: parsers of `/proc/stat`, `/proc/meminfo`, the hwmon / thermal sensor search (env `MELLAGUI_SYS_ROOT` prefixes the paths for tests) and a 1 s sampler with a 60-sample history; unit-tested |
 | `src/mixer.[ch]` | **sound** | the volume mixer behind the second desktop gadget: `pactl` (default sink, outputs, one slider per application) / `wpctl` (master) / `amixer Master` as backends, polled while shown, commands queued and coalesced, all through `lm_proc_run()` children so the loop never blocks; the text parsers and the card layout / hit-test (`lm_mixer_layout`, `lm_mixer_hit`, shared by `render.c` and `wm.c`) are pure and unit-tested |
 | `src/audio.[ch]` | **sound** | sound outputs for the settings panel: ALSA playback devices from `/proc/asound` (HDMI marked), PulseAudio/PipeWire sinks and the default sink via `pactl` (else `wpctl status`; `lm_audio_sink_status()` says why the list is empty), 1 s timeout; PipeWire card profiles via `pw-cli` (`lm_audio_list_profiles` / `lm_audio_set_profile`: one entry per output type of each card, e.g. analog / HDMI / S/PDIF, the pure `output:X` profile preferred; this is how HDMI audio is chosen; `settings.c` re-scans the sinks 0.8 s and 2.3 s after a switch); the chosen ALSA device is where `sound.c` plays (`aplay -D`) |
-| `src/settings.[ch]` | **settings** | `lumen_settings_v1` global (`set(key, value)` -> a burst of `value` events + `done` to every bound client), validation and application of each key (layouts: `lm_seat_set_layouts` + `lm_input_set_layouts`; repeat: `lm_seat_send_repeat_info`; sticky/gadget through input/wm), the `key=value` settings file (loaded in main.c before argv, saved debounced + atomically) |
+| `src/settings.[ch]` | **settings** | `mellagui_settings_v1` global (`set(key, value)` -> a burst of `value` events + `done` to every bound client), validation and application of each key (layouts: `lm_seat_set_layouts` + `lm_input_set_layouts`; repeat: `lm_seat_send_repeat_info`; sticky/gadget through input/wm), the `key=value` settings file (loaded in main.c before argv, saved debounced + atomically) |
 | `src/input.h`, `src/input_evdev.c` | **input** | evdev reading, repeat, acceleration, hotplug, injection, layout + sticky keys state |
 | `src/output.[ch]` | **backend** | wl_output globals, output layout queries |
 | `src/backend.h`, `src/backend_drm.c`, `src/backend_headless.c` | **backend** | DRM/KMS + VT; headless + control socket |
@@ -111,11 +111,11 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/cvt.[ch]`, `src/edid.[ch]` | **backend** | video-mode helpers without DRM types (unit-tested in `keymap-test`): CVT reduced-blanking timings; the EDID's native timing and the rule for when the offered mode has the wrong shape (a 21:9 panel with only 16:9 modes gets a generated mode of its own shape instead of being stretched by the monitor) |
 | `src/render.[ch]`, `src/font.[ch]` | **render** | software compositor, cursor, decorations, 8x16 font |
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
-| `client/lumen-term.c` (later) | **clients** | terminal emulator |
-| `client/lumen-settings.c` | **clients** | settings panel (Keyboard, Pointer, Desktop, Display, Sound): tabs, checkboxes, radio lists, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
+| `client/mellagui-term.c` (later) | **clients** | terminal emulator |
+| `client/mellagui-settings.c` | **clients** | settings panel (Keyboard, Pointer, Desktop, Display, Sound): tabs, checkboxes, radio lists, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
 | `client/wlwin.[ch]` | **clients** | one software-drawn xdg-toplevel on top of `wlc`: registry binding, a single shm buffer, keymap/modifiers, fill/text helpers; used by calc, run and settings (not by the terminal) |
-| `client/lumen-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
-| `tests/wlclient.py`, `tests/test_*.py`, `tests/run.sh` | **tests** | end-to-end tests against `lumen --backend headless` |
+| `client/mellagui-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
+| `tests/wlclient.py`, `tests/test_*.py`, `tests/run.sh` | **tests** | end-to-end tests against `mellagui --backend headless` |
 | `Makefile`, `docs/`, `README.md` | architect | build, docs |
 
 (The role names are suggestions for grouping; the invariant is one owner per file.)
@@ -155,7 +155,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `wl_data_device_manager` | 3 | seat.c |
 | `xdg_wm_base` | 3 | xdg.c |
 | `zxdg_decoration_manager_v1` | 1 (always `server_side`) | xdg.c |
-| `lumen_settings_v1` | 1 (Lumen private) | settings.c |
+| `mellagui_settings_v1` | 1 (Mellagui private) | settings.c |
 
 ## Design decisions worth knowing
 
@@ -228,13 +228,13 @@ header/API change requests go to the architect (`header_requests`). Headers in
 ## Conventions
 
 C11 (`-std=gnu11`), 4-space indent, snake_case, public symbols prefixed `lm_`,
-header guards `LUMEN_<NAME>_H`, comments only where non-obvious, English
+header guards `MELLAGUI_<NAME>_H`, comments only where non-obvious, English
 identifiers and comments. Build: `make`, `make asan`, `make test`.
-Binaries: `build/lumen`, `build/lumen-term`, `build/lumen-calc`.
+Binaries: `build/mellagui`, `build/mellagui-term`, `build/mellagui-calc`.
 
 ## Testing
 
-`tests/run.sh` starts `build/lumen --backend headless --size 1024x768 --socket
+`tests/run.sh` starts `build/mellagui --backend headless --size 1024x768 --socket
 <unique> --control <path>` with a private `XDG_RUNTIME_DIR`, then runs
 `tests/test_*.py`. `tests/wlclient.py` is a raw-socket Wayland client (struct
 packing, `socket.sendmsg` with SCM_RIGHTS, `os.memfd_create` + `mmap` for shm
@@ -242,12 +242,12 @@ buffers). Tests assert on protocol events, on `windows` output and on PPM dumps.
 
 ## Changing the resolution while running
 
-`lumen_settings_v1` key `resolution` -> `settings.c` stores `drm_mode_w/h/hz` in the config and calls `ops->apply_mode(out)` of every
+`mellagui_settings_v1` key `resolution` -> `settings.c` stores `drm_mode_w/h/hz` in the config and calls `ops->apply_mode(out)` of every
 output (`lm_output_apply_mode`). `backend_drm.c` re-picks the mode with the same `pick_mode()` it uses at start (listed mode, generated
 CVT mode, preferred mode, or the native-shape correction), creates two new dumb buffers of the new size, `drmModeSetCrtc`s with them
 (on failure the old buffers and mode are put back) and then reports `output_changed`, which makes `output.c` re-announce `wl_output`,
 `render.c` redraw everything and `wm.c` re-apply the maximized/fullscreen geometry. The change stays *pending*: `settings.c` arms a timer
-(15 s, `LUMEN_REVERT_MS`) that restores the previous mode unless `resolution-confirm=1` arrives; only a kept value is saved. The headless
+(15 s, `MELLAGUI_REVERT_MS`) that restores the previous mode unless `resolution-confirm=1` arrives; only a kept value is saved. The headless
 backend implements the same two ops (a reallocated framebuffer) so all of this is tested end to end.
 
 ## GPU clients (dmabuf) and the painting fast paths

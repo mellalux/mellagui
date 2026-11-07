@@ -13,7 +13,7 @@
 
 static const char *root_prefix(void)
 {
-    const char *r = getenv("LUMEN_SYS_ROOT");
+    const char *r = getenv("MELLAGUI_SYS_ROOT");
     return r ? r : "";
 }
 

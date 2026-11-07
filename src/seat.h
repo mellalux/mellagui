@@ -1,5 +1,5 @@
-#ifndef LUMEN_SEAT_H
-#define LUMEN_SEAT_H
+#ifndef MELLAGUI_SEAT_H
+#define MELLAGUI_SEAT_H
 
 /*
  * wl_seat (v5: pointer, keyboard, touch), wl_data_device_manager (text

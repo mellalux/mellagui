@@ -1,5 +1,5 @@
-#ifndef LUMEN_INPUT_H
-#define LUMEN_INPUT_H
+#ifndef MELLAGUI_INPUT_H
+#define MELLAGUI_INPUT_H
 
 /*
  * evdev input. Implemented by input_evdev.c. Produces struct lm_input_event

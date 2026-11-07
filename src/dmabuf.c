@@ -57,7 +57,7 @@ static bool same_gpu(const char *a, const char *b)
  * first usable one. False when there is none. */
 static bool find_render_node(const struct lm_server *srv, dev_t *out)
 {
-    const char *want = getenv("LUMEN_DMABUF_DEVICE");                  /* tests / odd setups: a path like /dev/dri/renderD129 */
+    const char *want = getenv("MELLAGUI_DMABUF_DEVICE");                  /* tests / odd setups: a path like /dev/dri/renderD129 */
     struct stat st;
     if (want && *want) {
         if (stat(want, &st) == 0 && S_ISCHR(st.st_mode)) {
@@ -101,7 +101,7 @@ static bool find_render_node(const struct lm_server *srv, dev_t *out)
 
 static int make_table(uint32_t *size)
 {
-    int fd = memfd_create("lumen-dmabuf-formats", MFD_CLOEXEC);
+    int fd = memfd_create("mellagui-dmabuf-formats", MFD_CLOEXEC);
     if (fd < 0)
         return -1;
     uint8_t buf[16 * 8];

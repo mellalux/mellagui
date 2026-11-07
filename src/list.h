@@ -1,5 +1,5 @@
-#ifndef LUMEN_LIST_H
-#define LUMEN_LIST_H
+#ifndef MELLAGUI_LIST_H
+#define MELLAGUI_LIST_H
 
 /*
  * Header-only intrusive doubly linked list and signal/listener helpers.

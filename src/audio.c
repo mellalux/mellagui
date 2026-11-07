@@ -63,7 +63,7 @@ void lm_audio_list_alsa(char *out, size_t n)
         return;
     out[0] = 0;
     add_entry(out, n, "default", "System default");
-    const char *root = getenv("LUMEN_ASOUND_DIR");
+    const char *root = getenv("MELLAGUI_ASOUND_DIR");
     if (!root || !*root)
         root = "/proc/asound";
     char path[512];

@@ -1,5 +1,5 @@
-#ifndef LUMEN_UTIL_H
-#define LUMEN_UTIL_H
+#ifndef MELLAGUI_UTIL_H
+#define MELLAGUI_UTIL_H
 
 /*
  * Small shared helpers: macros, rectangles and rectangle-list regions.

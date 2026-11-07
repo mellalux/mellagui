@@ -1,5 +1,5 @@
-#ifndef LUMEN_SURFACE_H
-#define LUMEN_SURFACE_H
+#ifndef MELLAGUI_SURFACE_H
+#define MELLAGUI_SURFACE_H
 
 /*
  * wl_compositor, wl_surface, wl_region, wl_subcompositor, wl_subsurface.

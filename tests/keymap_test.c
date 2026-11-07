@@ -1,6 +1,6 @@
 /*
  * keymap_test: layout tables, XKB text generator and the client side keysym lookup (src/keymap.c).
- * Built as build/keymap-test (make), run by tests/test_lumen.py and by hand. No display needed.
+ * Built as build/keymap-test (make), run by tests/test_mellagui.py and by hand. No display needed.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -713,7 +713,7 @@ int main(void)
         CHECK(!strcmp(devbuf, "5h 12m"), "uptime hours: '%s'", devbuf);
         lm_sysinfo_format_uptime(7 * 60 + 9, devbuf, sizeof(devbuf));
         CHECK(!strcmp(devbuf, "7m"), "uptime minutes: '%s'", devbuf);
-        char dir[] = "/tmp/lumen-sys-XXXXXX";
+        char dir[] = "/tmp/mellagui-sys-XXXXXX";
         CHECK(mkdtemp(dir) != NULL, "mkdtemp");
         char cmd[512], label[48];
         int deg = 0;

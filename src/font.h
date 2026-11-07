@@ -1,5 +1,5 @@
-#ifndef LUMEN_FONT_H
-#define LUMEN_FONT_H
+#ifndef MELLAGUI_FONT_H
+#define MELLAGUI_FONT_H
 
 /*
  * Built-in 8x16 monochrome bitmap font, shared by the renderer (title bars,

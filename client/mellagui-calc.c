@@ -1,8 +1,8 @@
 /*
- * lumen-calc: small desktop calculator (wl_shm + xdg-shell, bitmap font).
+ * mellagui-calc: small desktop calculator (wl_shm + xdg-shell, bitmap font).
  * Mouse buttons or keyboard: digits . + - * / % Enter/= Backspace, Esc/c clear.
  * Operators are evaluated left to right, like a pocket calculator.
- * `lumen-calc --selftest` runs the arithmetic engine checks without a display.
+ * `mellagui-calc --selftest` runs the arithmetic engine checks without a display.
  */
 #include <math.h>
 #include <stdio.h>
@@ -219,7 +219,7 @@ static int selftest(void)
     expect("1234567890123456789", "123456789012345");
     if (selftest_fail)
         return 1;
-    puts("lumen-calc selftest ok");
+    puts("mellagui-calc selftest ok");
     return 0;
 }
 
@@ -418,9 +418,9 @@ int main(int argc, char **argv)
 
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
     struct app a = { .press = -1 };
-    if (wlwin_connect(&a.win, "lumen-calc", &ops, &a) < 0)
+    if (wlwin_connect(&a.win, "mellagui-calc", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, "Calculator", "lumen.calc", DEFAULT_W, DEFAULT_H, 160, 200) < 0)
+    if (wlwin_open(&a.win, "Calculator", "mellagui.calc", DEFAULT_W, DEFAULT_H, 160, 200) < 0)
         return 1;
     while (wlwin_step(&a.win, -1))
         ;

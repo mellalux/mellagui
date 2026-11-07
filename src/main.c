@@ -1,5 +1,5 @@
 /*
- * Lumen compositor entry point: argument parsing, module wiring, shutdown.
+ * Mellagui compositor entry point: argument parsing, module wiring, shutdown.
  */
 #include <errno.h>
 #include <getopt.h>
@@ -30,14 +30,14 @@
 #include "xdg.h"
 
 static const char *usage_text =
-    "Usage: lumen [options]\n"
+    "Usage: mellagui [options]\n"
     "  --backend drm|headless   display backend (default: drm)\n"
     "  --size WxH               headless output size (default 1280x720)\n"
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
-    "  --terminal CMD           command for Super+Enter and the panel launcher (default lumen-term)\n"
-    "  --app NAME=CMD           add an entry to the Lumen menu (repeatable; replaces the default Terminal/Calculator/Code)\n"
-    "  --run CMD                command for Super+R and the panel's Run button (default lumen-run)\n"
+    "  --terminal CMD           command for Super+Enter and the panel launcher (default mellagui-term)\n"
+    "  --app NAME=CMD           add an entry to the Mellagui menu (repeatable; replaces the default Terminal/Calculator/Code)\n"
+    "  --run CMD                command for Super+R and the panel's Run button (default mellagui-run)\n"
     "  --drm-device PATH        DRM device (default: auto-detect /dev/dri/card*)\n"
     "  --mode WxH[@Hz]|preferred  drm: video mode. Default: the monitor's preferred one, except when its shape differs from the\n"
     "                           panel's (e.g. 21:9 panel, 16:9 modes only): then a mode of the panel's shape is generated\n"
@@ -47,11 +47,11 @@ static const char *usage_text =
     "  --log-level LEVEL        error|warn|info|debug|trace\n"
     "  --log-file PATH          additionally append the log to PATH\n"
     "  --settings FILE          where the settings panel saves (and the start reads) the user settings; \"none\" = nowhere\n"
-    "                           (default drm: $XDG_CONFIG_HOME/lumen/settings.conf, headless: none); options below win\n"
+    "                           (default drm: $XDG_CONFIG_HOME/mellagui/settings.conf, headless: none); options below win\n"
     "  --clipboard-file FILE    where the clipboard history is kept between runs (private file, newest entry first); \"none\" = nowhere\n"
-    "                           (default drm: $XDG_CONFIG_HOME/lumen/clipboard-history, headless: none)\n"
+    "                           (default drm: $XDG_CONFIG_HOME/mellagui/clipboard-history, headless: none)\n"
     "  --gadgets-file FILE      where the places and sizes of the desktop gadgets are kept between runs; \"none\" = nowhere\n"
-    "                           (default drm: $XDG_CONFIG_HOME/lumen/gadgets.conf, headless: none)\n"
+    "                           (default drm: $XDG_CONFIG_HOME/mellagui/gadgets.conf, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
     "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
@@ -63,10 +63,31 @@ static const char *usage_text =
     "  --no-grab                do not EVIOCGRAB keyboards\n"
     "  --timeout SECONDS        quit automatically after SECONDS (safe first run on a real VT)\n"
     "  -h, --help               this text\n"
-    "Environment: LUMEN_DUMP=path  (headless) frame dump target for SIGUSR1\n";
+    "Environment: MELLAGUI_DUMP=path  (headless) frame dump target for SIGUSR1\n";
 
 static struct lm_server *g_srv;
 static struct lm_backend *g_backend;
+
+/* The program used to be called "lumen": move its config directory (settings, clipboard history, gadgets) to the new
+ * name once, so nobody loses their settings. Does nothing if the new directory exists or the old one does not. */
+static void migrate_old_config_dir(void)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    char base[PATH_MAX], from[PATH_MAX], to[PATH_MAX];
+    struct stat st;
+    if (xdg && *xdg)
+        snprintf(base, sizeof(base), "%s", xdg);
+    else if (home && *home)
+        snprintf(base, sizeof(base), "%s/.config", home);
+    else
+        return;
+    snprintf(from, sizeof(from), "%s/lumen", base);
+    snprintf(to, sizeof(to), "%s/mellagui", base);
+    if (stat(from, &st) != 0 || !S_ISDIR(st.st_mode) || lstat(to, &st) == 0)
+        return;
+    if (rename(from, to) == 0)
+        lm_info("config: moved %s to %s", from, to);
+}
 
 static void on_output_added(void *data, struct lm_output *out)
 {
@@ -199,8 +220,8 @@ int main(int argc, char **argv)
 {
     struct lm_config cfg;
     lm_config_defaults(&cfg);
-    cfg.dump_path = getenv("LUMEN_DUMP");
-    const char *lvl = getenv("LUMEN_LOG");
+    cfg.dump_path = getenv("MELLAGUI_DUMP");
+    const char *lvl = getenv("MELLAGUI_LOG");
     if (lvl) {
         int l = lm_log_level_from_string(lvl);
         if (l >= 0) cfg.log_level = l;
@@ -252,27 +273,29 @@ int main(int argc, char **argv)
             headless_arg = !strcmp(argv[i] + 10, "headless");
     }
     static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX];
+    if (!headless_arg)
+        migrate_old_config_dir();
     if (!settings_arg && !headless_arg) {
         const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
         if (xdg && *xdg)
-            snprintf(settings_buf, sizeof(settings_buf), "%s/lumen/settings.conf", xdg);
+            snprintf(settings_buf, sizeof(settings_buf), "%s/mellagui/settings.conf", xdg);
         else if (home && *home)
-            snprintf(settings_buf, sizeof(settings_buf), "%s/.config/lumen/settings.conf", home);
+            snprintf(settings_buf, sizeof(settings_buf), "%s/.config/mellagui/settings.conf", home);
         if (settings_buf[0])
             settings_arg = settings_buf;
     }
     if (!headless_arg) {                                  /* the history lives beside the settings (--clipboard-file wins) */
         const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
         if (xdg && *xdg)
-            snprintf(clip_buf, sizeof(clip_buf), "%s/lumen/clipboard-history", xdg);
+            snprintf(clip_buf, sizeof(clip_buf), "%s/mellagui/clipboard-history", xdg);
         else if (home && *home)
-            snprintf(clip_buf, sizeof(clip_buf), "%s/.config/lumen/clipboard-history", home);
+            snprintf(clip_buf, sizeof(clip_buf), "%s/.config/mellagui/clipboard-history", home);
         if (clip_buf[0])
             cfg.clip_path = clip_buf;
         if (xdg && *xdg)
-            snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/lumen/gadgets.conf", xdg);
+            snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/mellagui/gadgets.conf", xdg);
         else if (home && *home)
-            snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/.config/lumen/gadgets.conf", home);
+            snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/.config/mellagui/gadgets.conf", home);
         if (gadgets_buf[0])
             cfg.gadgets_path = gadgets_buf;
     }
@@ -287,7 +310,7 @@ int main(int argc, char **argv)
         switch (c) {
         case 'b':
             if (strcmp(optarg, "drm") && strcmp(optarg, "headless")) {
-                fprintf(stderr, "lumen: unknown backend '%s'\n", optarg);
+                fprintf(stderr, "mellagui: unknown backend '%s'\n", optarg);
                 return 2;
             }
             cfg.backend = optarg;
@@ -295,7 +318,7 @@ int main(int argc, char **argv)
         case 's': {
             int w, h;
             if (sscanf(optarg, "%dx%d", &w, &h) != 2 || w < 64 || h < 64 || w > 16384 || h > 16384) {
-                fprintf(stderr, "lumen: bad --size '%s' (expected WxH)\n", optarg);
+                fprintf(stderr, "mellagui: bad --size '%s' (expected WxH)\n", optarg);
                 return 2;
             }
             cfg.headless_width = w;
@@ -308,7 +331,7 @@ int main(int argc, char **argv)
         case OPT_APP: {
             char *eq = strchr(optarg, '=');
             if (!eq || eq == optarg || !eq[1] || cfg.napps >= LM_MAX_APPS) {
-                fprintf(stderr, "lumen: bad --app '%s' (expected NAME=CMD, at most %d)\n", optarg, LM_MAX_APPS);
+                fprintf(stderr, "mellagui: bad --app '%s' (expected NAME=CMD, at most %d)\n", optarg, LM_MAX_APPS);
                 return 2;
             }
             *eq = 0;
@@ -324,7 +347,7 @@ int main(int argc, char **argv)
                 break;
             }
             if (sscanf(optarg, "%dx%d@%d", &w, &h, &hz) < 2 || w < 320 || h < 200 || w > 8192 || h > 4320 || hz < 24 || hz > 240) {
-                fprintf(stderr, "lumen: bad --mode '%s' (expected WxH or WxH@Hz)\n", optarg);
+                fprintf(stderr, "mellagui: bad --mode '%s' (expected WxH or WxH@Hz)\n", optarg);
                 return 2;
             }
             cfg.drm_mode_w = w;
@@ -336,7 +359,7 @@ int main(int argc, char **argv)
         case 'l': {
             int l = lm_log_level_from_string(optarg);
             if (l < 0) {
-                fprintf(stderr, "lumen: bad --log-level '%s'\n", optarg);
+                fprintf(stderr, "mellagui: bad --log-level '%s'\n", optarg);
                 return 2;
             }
             cfg.log_level = l;
@@ -357,7 +380,7 @@ int main(int argc, char **argv)
         case OPT_TIMEOUT:
             timeout_s = atoi(optarg);
             if (timeout_s <= 0) {
-                fprintf(stderr, "lumen: bad --timeout '%s'\n", optarg);
+                fprintf(stderr, "mellagui: bad --timeout '%s'\n", optarg);
                 return 2;
             }
             break;
@@ -370,24 +393,24 @@ int main(int argc, char **argv)
         char err[160];
         cfg.kbd_nlayouts = lm_layout_parse(layouts_arg, cfg.kbd_layouts, err, sizeof(err));
         if (cfg.kbd_nlayouts == 0) {
-            fprintf(stderr, "lumen: --layouts: %s\n", err);
+            fprintf(stderr, "mellagui: --layouts: %s\n", err);
             return 2;
         }
     }
 
     static char term_buf[PATH_MAX + 4], run_buf[PATH_MAX + 4];
     if (!terminal_set)
-        cfg.terminal_cmd = default_sibling("lumen-term", term_buf, sizeof(term_buf));
+        cfg.terminal_cmd = default_sibling("mellagui-term", term_buf, sizeof(term_buf));
     if (!run_set)
-        cfg.run_cmd = default_sibling("lumen-run", run_buf, sizeof(run_buf));
+        cfg.run_cmd = default_sibling("mellagui-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
-    cfg.settings_cmd = default_sibling("lumen-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
+    cfg.settings_cmd = default_sibling("mellagui-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
     static char monitor_buf[PATH_MAX + 4], calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
     if (cfg.napps == 0) {
         /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Calculator", default_sibling("lumen-calc", calc_buf, sizeof(calc_buf)) };
+            "Calculator", default_sibling("mellagui-calc", calc_buf, sizeof(calc_buf)) };
         /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
          * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
         const char *home = getenv("HOME");
@@ -403,8 +426,8 @@ int main(int argc, char **argv)
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
             break;
         }
-        /* Firefox: the snap's launcher or a distro binary. Native Wayland, WebRender on the GPU (Lumen offers zwp_linux_dmabuf_v1; without it Firefox falls back by itself).
-         * (The snap is confined: it may only connect to sockets named wayland-N, which is what Lumen picks by default.) */
+        /* Firefox: the snap's launcher or a distro binary. Native Wayland, WebRender on the GPU (Mellagui offers zwp_linux_dmabuf_v1; without it Firefox falls back by itself).
+         * (The snap is confined: it may only connect to sockets named wayland-N, which is what Mellagui picks by default.) */
         const char *ffs[2] = { "/snap/bin/firefox", "/usr/bin/firefox" };
         for (int i = 0; i < 2; i++) {
             if (access(ffs[i], X_OK) != 0)
@@ -416,14 +439,14 @@ int main(int argc, char **argv)
         }
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Settings", cfg.settings_cmd };   /* last: keeps the others' places */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Monitor", default_sibling("lumen-monitor", monitor_buf, sizeof(monitor_buf)) };
+            "Monitor", default_sibling("mellagui-monitor", monitor_buf, sizeof(monitor_buf)) };
     }
     lm_log_set_level((enum lm_log_level)cfg.log_level);
     if (cfg.log_file && lm_log_set_file(cfg.log_file) < 0)
-        fprintf(stderr, "lumen: cannot open log file %s: %s\n", cfg.log_file, strerror(errno));
+        fprintf(stderr, "mellagui: cannot open log file %s: %s\n", cfg.log_file, strerror(errno));
 
     if (!ensure_runtime_dir()) {
-        fprintf(stderr, "lumen: XDG_RUNTIME_DIR is not set and /run/user/%u does not exist.\n"
+        fprintf(stderr, "mellagui: XDG_RUNTIME_DIR is not set and /run/user/%u does not exist.\n"
                         "Log in through a normal login session (logind) or set XDG_RUNTIME_DIR to a private directory (mode 0700).\n",
                 (unsigned)getuid());
         return 1;
@@ -490,7 +513,7 @@ int main(int argc, char **argv)
         /* Without a keyboard the user could not even switch VT: refuse to take over the screen. */
         lm_error("no keyboard could be opened, refusing to start (the screen would be unusable). "
                  "Fix the permissions on /dev/input/event*: sudo usermod -aG input $USER, then log in again.");
-        fprintf(stderr, "lumen: no keyboard available. Add yourself to group 'input' "
+        fprintf(stderr, "mellagui: no keyboard available. Add yourself to group 'input' "
                         "(sudo usermod -aG input $USER) and log in again.\n");
         goto out;
     }
@@ -508,7 +531,7 @@ int main(int argc, char **argv)
             lm_info("will quit automatically after %d s", timeout_s);
         }
     }
-    lm_info("Lumen ready on WAYLAND_DISPLAY=%s (backend %s)", lm_server_socket_name(srv), cfg.backend);
+    lm_info("Mellagui ready on WAYLAND_DISPLAY=%s (backend %s)", lm_server_socket_name(srv), cfg.backend);
     if (cfg.exec_cmd)
         lm_server_spawn(srv, cfg.exec_cmd);
 

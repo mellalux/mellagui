@@ -1,5 +1,5 @@
 /*
- * lumen-term: terminal emulator Wayland client for Lumen.
+ * mellagui-term: terminal emulator Wayland client for Mellagui.
  *
  * pty + xterm-compatible VT parser (cursor movement, erase, SGR with 16/256/
  * truecolor, scroll regions, alternate screen, bracketed paste, DSR/DA
@@ -732,7 +732,7 @@ static int spawn_shell(void)
 {
     int m = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (m < 0 || grantpt(m) < 0 || unlockpt(m) < 0) {
-        perror("lumen-term: pty");
+        perror("mellagui-term: pty");
         return -1;
     }
     char name[128];
@@ -906,7 +906,7 @@ static void render(void)
         A.bh = need_h;
         size_t one = (size_t)need_w * (size_t)need_h * 4;
         A.map_size = one * 2;
-        int fd = memfd_create("lumen-term", MFD_CLOEXEC);
+        int fd = memfd_create("mellagui-term", MFD_CLOEXEC);
         if (fd < 0 || ftruncate(fd, (off_t)A.map_size) < 0) {
             perror("memfd");
             A.running = false;
@@ -1568,7 +1568,7 @@ int main(int argc, char **argv)
     A.repeat_fd = -1;
     A.repeat_rate = 25;
     A.repeat_delay = 400;
-    snprintf(A.title, sizeof(A.title), "lumen-term");
+    snprintf(A.title, sizeof(A.title), "mellagui-term");
     term_init(&A.t, DEFAULT_COLS, DEFAULT_ROWS);
 
     A.c = wlc_connect(NULL);
@@ -1576,7 +1576,7 @@ int main(int argc, char **argv)
         return 1;
     A.registry = wlc_get_registry(A.c, registry_event, NULL);
     if (wlc_roundtrip(A.c) < 0 || !A.compositor || !A.shm || !A.wm_base) {
-        fprintf(stderr, "lumen-term: compositor lacks wl_compositor / wl_shm / xdg_wm_base\n");
+        fprintf(stderr, "mellagui-term: compositor lacks wl_compositor / wl_shm / xdg_wm_base\n");
         return 1;
     }
     A.pty = spawn_shell();
@@ -1592,7 +1592,7 @@ int main(int argc, char **argv)
     A.toplevel = wlc_alloc(A.c, &lm_xdg_toplevel_interface, toplevel_event, NULL);
     WLC_SEND(A.c, A.xsurface, LM_XDG_SURFACE_REQ_GET_TOPLEVEL, { .n = A.toplevel });
     WLC_SEND(A.c, A.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = A.title });
-    WLC_SEND(A.c, A.toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = "lumen.term" });
+    WLC_SEND(A.c, A.toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = "mellagui.term" });
     if (A.decoration_mgr) {
         A.deco = wlc_alloc(A.c, &lm_zxdg_toplevel_decoration_v1_interface, NULL, NULL);
         WLC_SEND(A.c, A.decoration_mgr, LM_ZXDG_DECORATION_MANAGER_V1_REQ_GET_TOPLEVEL_DECORATION,

@@ -1,7 +1,7 @@
 /* Generated from the stock evdev keymap dump; layout-specific keys are produced by keymap.c. */
 static const char xkb_head[] =
     "xkb_keymap {\n"
-    "xkb_keycodes \"lumen\" {\n"
+    "xkb_keycodes \"mellagui\" {\n"
     "  minimum = 8;\n"
     "  maximum = 255;\n"
     "  <ESC> = 9;\n"
@@ -327,7 +327,7 @@ static const char xkb_head[] =
     "  alias <LatN> = <AB06>;\n"
     "  alias <LatM> = <AB07>;\n"
     "};\n"
-    "xkb_types \"lumen\" {\n"
+    "xkb_types \"mellagui\" {\n"
     "  virtual_modifiers NumLock,Alt,LevelThree,LevelFive,Meta,Super,Hyper,ScrollLock;\n"
     "  type \"ONE_LEVEL\" {\n"
     "    modifiers = none;\n"
@@ -388,7 +388,7 @@ static const char xkb_head[] =
     "    level_name[4] = \"Shift Alt\";\n"
     "  };\n"
     "};\n"
-    "xkb_compatibility \"lumen\" {\n"
+    "xkb_compatibility \"mellagui\" {\n"
     "  virtual_modifiers NumLock,Alt,LevelThree,LevelFive,Meta,Super,Hyper,ScrollLock;\n"
     "  interpret.useModMapMods = AnyLevel;\n"
     "  interpret.repeat = False;\n"
@@ -454,7 +454,7 @@ static const char xkb_head[] =
     "    modifiers = ScrollLock;\n"
     "  };\n"
     "};\n"
-    "xkb_symbols \"lumen\" {\n"
+    "xkb_symbols \"mellagui\" {\n"
     ;
 
 /* layout independent keys (function, navigation, keypad, modifiers ...) */

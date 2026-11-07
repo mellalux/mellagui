@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """A fake `pw-cli` for the tests: two ALSA cards (a webcam and an Intel HDA card) with PipeWire card profiles, state in
-$LUMEN_FAKE_PW (json). Prints what the real pw-cli prints for `ls Device`, `enum-params <id> EnumProfile|Profile` and accepts
+$MELLAGUI_FAKE_PW (json). Prints what the real pw-cli prints for `ls Device`, `enum-params <id> EnumProfile|Profile` and accepts
 `set-param <id> Profile '{ index: N }'`."""
 import json, os, re, sys
 
-path = os.environ.get('LUMEN_FAKE_PW', '/tmp/lumen-fake-pw.json')
+path = os.environ.get('MELLAGUI_FAKE_PW', '/tmp/mellagui-fake-pw.json')
 # (index, name, description, available)
 PROFILES = [
     (0, 'off', 'Off', 'yes'),

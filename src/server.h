@@ -1,5 +1,5 @@
-#ifndef LUMEN_SERVER_H
-#define LUMEN_SERVER_H
+#ifndef MELLAGUI_SERVER_H
+#define MELLAGUI_SERVER_H
 
 /*
  * Wayland display server core: socket, clients, per-client object table,
@@ -145,19 +145,19 @@ struct lm_config {
     int headless_height;
     const char *socket_name;    /* --socket, NULL = first free wayland-N */
     const char *exec_cmd;       /* --exec, shell command spawned after start */
-    const char *run_cmd;        /* command for Super+R / the panel's Run button (default "lumen-run") */
-    const char *terminal_cmd;   /* command for Super+Enter (default "lumen-term") */
-    const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "lumen-settings") */
+    const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
+    const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
+    const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "mellagui-settings") */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
     const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
-    struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "Lumen" menu (--app NAME=CMD; defaults filled by main.c) */
+    struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "Mellagui" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
-    char audio_device[64];      /* ALSA device for Lumen's own beeps (settings: audio-out) */
+    char audio_device[64];      /* ALSA device for Mellagui's own beeps (settings: audio-out) */
     int drm_mode_w, drm_mode_h, drm_mode_hz;   /* --mode WxH[@Hz]: 0 = automatic (preferred, corrected to the panel's shape), -1 = --mode preferred */
     const char *control_path;   /* headless control socket path (--control), NULL = none */
-    const char *dump_path;      /* env LUMEN_DUMP: headless dump target for SIGUSR1 */
+    const char *dump_path;      /* env MELLAGUI_DUMP: headless dump target for SIGUSR1 */
     const char *log_file;
     int log_level;              /* enum lm_log_level */
     int repeat_delay_ms;        /* default 400 */
@@ -182,9 +182,9 @@ static inline void lm_config_defaults(struct lm_config *c)
         .backend = "drm",
         .headless_width = 1280,
         .headless_height = 720,
-        .run_cmd = "lumen-run",
-        .terminal_cmd = "lumen-term",
-        .settings_cmd = "lumen-settings",
+        .run_cmd = "mellagui-run",
+        .terminal_cmd = "mellagui-term",
+        .settings_cmd = "mellagui-settings",
         .kbd_active = -1,
         .log_level = 2, /* LM_LOG_INFO */
         .repeat_delay_ms = 400,
@@ -229,7 +229,7 @@ struct lm_server {
     struct lm_xdg *xdg;                 /* xdg_wm_base, decoration manager */
     struct lm_wm *wm;
     struct lm_input *input;             /* evdev (or inject-only for headless) */
-    struct lm_settings *settings;       /* lumen_settings_v1 + settings file */
+    struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
     struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */
     struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */

@@ -1,5 +1,5 @@
-#ifndef LUMEN_BACKEND_H
-#define LUMEN_BACKEND_H
+#ifndef MELLAGUI_BACKEND_H
+#define MELLAGUI_BACKEND_H
 
 /*
  * Display backend abstraction. Implemented by backend_drm.c (DRM/KMS on a

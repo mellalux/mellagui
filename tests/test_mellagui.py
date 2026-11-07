@@ -3885,5 +3885,488 @@ class TestFuzz(Base):
         self.assertIn('no sanitizer report', r.stdout)
 
 
+def png_chunk(typ, body):
+    import zlib
+    return struct.pack('>I', len(body)) + typ + body + struct.pack('>I', zlib.crc32(typ + body))
+
+
+def make_png(w, h, ctype, depth, pix, palette=None, trns=None, strategy='dynamic', interlace=0):
+    """PNG bytes. pix[y][x] = tuple of samples (grey / grey,alpha / r,g,b / r,g,b,a / palette index) in 0..2^depth-1.
+    Row filters rotate through all five types; `strategy` picks dynamic / fixed Huffman or stored zlib blocks."""
+    import zlib
+    chans = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
+    bpp = max(1, chans * depth // 8)
+    rows = []
+    for row in pix:
+        if depth == 16:
+            b = b''.join(struct.pack('>H', v) for px in row for v in px)
+        elif depth == 8:
+            b = bytes(v for px in row for v in px)
+        else:
+            bitstr = ''.join(format(px[0], '0%db' % depth) for px in row)
+            bitstr += '0' * (-len(bitstr) % 8)
+            b = bytes(int(bitstr[i:i + 8], 2) for i in range(0, len(bitstr), 8))
+        rows.append(b)
+    out = bytearray()
+    prev = bytes(len(rows[0]))
+    for y, cur in enumerate(rows):
+        ft = y % 5
+        out.append(ft)
+        for i, v in enumerate(cur):
+            a = cur[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if ft == 0:
+                pred = 0
+            elif ft == 1:
+                pred = a
+            elif ft == 2:
+                pred = b
+            elif ft == 3:
+                pred = (a + b) // 2
+            else:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+            out.append((v - pred) & 255)
+        prev = cur
+    if strategy == 'stored':
+        co = zlib.compressobj(0)
+    elif strategy == 'fixed':
+        co = zlib.compressobj(9, zlib.DEFLATED, 15, 9, zlib.Z_FIXED)
+    else:
+        co = zlib.compressobj(9)
+    z = co.compress(bytes(out)) + co.flush()
+    d = b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, depth, ctype, 0, 0, interlace))
+    if palette:
+        d += png_chunk(b'PLTE', bytes(v for c in palette for v in c))
+    if trns:
+        d += png_chunk(b'tRNS', bytes(trns))
+    return d + png_chunk(b'IDAT', z) + png_chunk(b'IEND', b'')
+
+
+def expected_rgb(ctype, depth, px, x, y, palette=None, trns=None):
+    """What mellagui-view's decoder must produce (alpha over its grey checkerboard)."""
+    mask = (1 << depth) - 1
+    hi = (lambda v: v >> 8) if depth == 16 else (lambda v: v)
+    a = 255
+    if ctype == 0:
+        g = hi(px[0]) if depth >= 8 else px[0] * 255 // mask
+        r = gg = b = g
+    elif ctype == 2:
+        r, gg, b = hi(px[0]), hi(px[1]), hi(px[2])
+    elif ctype == 3:
+        r, gg, b = palette[px[0]]
+        a = trns[px[0]] if trns and px[0] < len(trns) else 255
+    elif ctype == 4:
+        r = gg = b = hi(px[0])
+        a = hi(px[1])
+    else:
+        r, gg, b, a = hi(px[0]), hi(px[1]), hi(px[2]), hi(px[3])
+    if a < 255:
+        bg = 0x66 if ((x >> 3) ^ (y >> 3)) & 1 else 0x44
+        r, gg, b = [(v * a + bg * (255 - a)) // 255 for v in (r, gg, b)]
+    return (r, gg, b)
+
+
+class TestImages(unittest.TestCase):
+    """mellagui-view's PNG decoder (own inflate) against zlib's output, and the viewer window itself."""
+    VIEW = os.environ.get('MELLAGUI_VIEW_BIN', os.path.join(ROOT, 'build', 'mellagui-view'))
+
+    def setUp(self):
+        if not os.path.exists(self.VIEW):
+            self.skipTest('mellagui-view not built')
+
+    def decode(self, data, name='img.png'):
+        d = tempfile.mkdtemp(prefix='mellagui-img-')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        src, dst = os.path.join(d, name), os.path.join(d, 'out.ppm')
+        with open(src, 'wb') as f:
+            f.write(data)
+        r = subprocess.run([self.VIEW, '--decode', src, dst], capture_output=True, text=True, timeout=20)
+        return r, dst
+
+    def test_selftest(self):
+        r = subprocess.run([self.VIEW, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_every_colour_type_depth_and_compression(self):
+        import random
+        rnd = random.Random(7)
+        w, h = 37, 23
+        pal = [(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(16)]
+        trns = [rnd.randrange(256) for _ in range(5)]
+        cases = [(0, 1), (0, 2), (0, 4), (0, 8), (0, 16), (2, 8), (2, 16), (3, 1), (3, 2), (3, 4), (3, 8), (4, 8), (4, 16), (6, 8), (6, 16)]
+        for ctype, depth in cases:
+            chans = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
+            top = 1 << depth if ctype != 3 else min(1 << depth, len(pal))
+            pix = [[tuple(rnd.randrange(top) for _ in range(chans)) for _ in range(w)] for _ in range(h)]
+            palette = pal if ctype == 3 else None
+            tr = trns if ctype == 3 else None
+            for strategy in ('dynamic', 'fixed', 'stored'):
+                with self.subTest(ctype=ctype, depth=depth, strategy=strategy):
+                    data = make_png(w, h, ctype, depth, pix, palette, tr, strategy)
+                    r, dst = self.decode(data)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    ppm = Ppm(dst)
+                    self.assertEqual((ppm.w, ppm.h), (w, h))
+                    for y in range(h):
+                        for x in range(w):
+                            self.assertEqual(ppm.px(x, y), expected_rgb(ctype, depth, pix[y][x], x, y, palette, tr), (x, y))
+
+    def test_large_repetitive_image_uses_long_matches(self):
+        w, h = 300, 200
+        pix = [[((x // 20) * 10 % 256, (y // 10) * 12 % 256, 99) for x in range(w)] for y in range(h)]
+        r, dst = self.decode(make_png(w, h, 2, 8, pix))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ppm = Ppm(dst)
+        self.assertEqual([ppm.px(x, y) for y in (0, 77, 199) for x in (0, 150, 299)],
+                         [pix[y][x] for y in (0, 77, 199) for x in (0, 150, 299)])
+
+    def test_bad_files_are_refused_not_crashed(self):
+        good = make_png(8, 8, 2, 8, [[(1, 2, 3)] * 8 for _ in range(8)])
+        for name, data in (('interlaced', make_png(8, 8, 2, 8, [[(1, 2, 3)] * 8 for _ in range(8)], interlace=1)),
+                           ('truncated', good[:len(good) // 2]),
+                           ('flipped', good[:60] + bytes(b ^ 0xff for b in good[60:70]) + good[70:]),
+                           ('junk', b'hello world, not an image'),
+                           ('empty-idat', good.replace(b'IDAT', b'JUNK'))):
+            with self.subTest(name):
+                r, _ = self.decode(data)
+                self.assertEqual(r.returncode, 1, name)
+                self.assertNotIn('Sanitizer', r.stderr)
+                self.assertTrue(r.stderr.strip(), 'no message')
+
+    def test_ppm(self):
+        data = b'P6\n# comment\n3 2\n255\n' + bytes(range(18))
+        r, dst = self.decode(data, 'x.ppm')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ppm = Ppm(dst)
+        self.assertEqual((ppm.w, ppm.h, ppm.px(2, 1)), (3, 2, (15, 16, 17)))
+
+
+class TestViewer(Base):
+    """mellagui-view in a window: browsing, zoom, title."""
+    VIEW = os.environ.get('MELLAGUI_VIEW_BIN', os.path.join(ROOT, 'build', 'mellagui-view'))
+
+    def solid(self, rgb, w=60, h=40):
+        return make_png(w, h, 2, 8, [[rgb] * w for _ in range(h)])
+
+    def start(self, directory, *args):
+        if not os.path.exists(self.VIEW):
+            self.skipTest('mellagui-view not built')
+        p = subprocess.Popen([self.VIEW] + list(args or [directory]), env=dict(os.environ, HOME=directory),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.view')
+        self.assertIsNotNone(win, 'the viewer window did not appear')
+        time.sleep(0.3)
+        return p, win
+
+    def centre(self, name):
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view'][0]
+        ctl.abs(900, 590)
+        time.sleep(0.1)
+        ppm = ctl.dump(os.path.join(tmp, name))
+        return ppm, win
+
+    def title(self):
+        return [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view'][0]['title']
+
+    def wait_title(self, text):
+        for _ in range(100):
+            if self.title() == text:
+                return True
+            time.sleep(0.03)
+        return False
+
+    def test_browse_zoom_and_quit(self):
+        d = tempfile.mkdtemp(prefix='mellagui-viewer-')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        colours = {'20261107-100000.png': (255, 0, 0), '20261107-100001.png': (0, 255, 0), '20261107-100002.png': (0, 0, 255)}
+        for n, rgb in colours.items():
+            with open(os.path.join(d, n), 'wb') as f:
+                f.write(self.solid(rgb))
+        with open(os.path.join(d, 'notes.txt'), 'w') as f:
+            f.write('not an image')
+        p, win = self.start(d)
+        self.assertTrue(self.wait_title('20261107-100002.png - Images'))          # a directory opens at the newest image
+        ppm, win = self.centre('view1.ppm')
+        cx, cy = win['x'] + win['w'] // 2, win['y'] + (win['h'] - 24) // 2
+        self.assertEqual(ppm.px(cx, cy), (0, 0, 255))
+        small = ppm.count((0, 0, 255), win['x'], win['y'], win['x'] + win['w'], win['y'] + win['h'])
+        self.assertEqual(small, 60 * 40)                                          # small images are shown at 100 %, not stretched
+        ctl.tap(105)                                                              # Left
+        self.assertTrue(self.wait_title('20261107-100001.png - Images'))
+        ppm, win = self.centre('view2.ppm')
+        self.assertEqual(ppm.px(cx, cy), (0, 255, 0))
+        ctl.tap(102)                                                              # Home
+        self.assertTrue(self.wait_title('20261107-100000.png - Images'))
+        ctl.tap(107)                                                              # End
+        self.assertTrue(self.wait_title('20261107-100002.png - Images'))
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(13)                                                               # Shift+= is "+": zoom in
+        ctl.key(KEY_LEFTSHIFT, False)
+        time.sleep(0.2)
+        ppm, win = self.centre('view3.ppm')
+        big = ppm.count((0, 0, 255), win['x'], win['y'], win['x'] + win['w'], win['y'] + win['h'])
+        self.assertAlmostEqual(big / small, 1.25 * 1.25, delta=0.25)
+        ctl.tap(11)                                                               # 0: back to 100 %
+        time.sleep(0.2)
+        ppm, win = self.centre('view4.ppm')
+        self.assertEqual(ppm.count((0, 0, 255), win['x'], win['y'], win['x'] + win['w'], win['y'] + win['h']), small)
+        ctl.tap(KEY_ESC)
+        for _ in range(100):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(p.poll(), 0)
+
+    def test_a_file_argument_starts_at_that_file_and_a_broken_one_says_so(self):
+        d = tempfile.mkdtemp(prefix='mellagui-viewer-')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.png'), 'wb') as f:
+            f.write(self.solid((255, 0, 0)))
+        with open(os.path.join(d, 'b.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\nbroken')
+        p, win = self.start(d, os.path.join(d, 'a.png'))
+        self.assertTrue(self.wait_title('a.png - Images'))
+        ctl.tap(106)                                                              # Right: the broken one
+        self.assertTrue(self.wait_title('b.png - Images'))
+        time.sleep(0.2)
+        self.assertTrue(alive())
+        ctl.tap(105)
+        self.assertTrue(self.wait_title('a.png - Images'))
+
+    def test_an_empty_directory_is_not_an_error(self):
+        d = tempfile.mkdtemp(prefix='mellagui-viewer-')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p, win = self.start(d)
+        self.assertTrue(self.wait_title('no image - Images'))
+        ctl.tap(106)
+        ctl.tap(107)
+        time.sleep(0.2)
+        self.assertIsNone(p.poll())
+
+
+class TestScreenshot(Base):
+    """Print / Ctrl+Print / Alt+Print: PNG file (own encoder, no zlib in the compositor) and image/png on the clipboard."""
+    KEY_PRINT = 99
+
+    @staticmethod
+    def decode_png(data):
+        """(w, h, [rows of RGB bytes]) of an 8-bit RGB PNG with filter 0 rows; checks the CRCs and the Adler-32."""
+        import zlib
+        assert data[:8] == b'\x89PNG\r\n\x1a\n'
+        off, idat, hdr = 8, b'', None
+        while off < len(data):
+            n, typ = struct.unpack_from('>I4s', data, off)
+            body = data[off + 8:off + 8 + n]
+            crc = struct.unpack_from('>I', data, off + 8 + n)[0]
+            assert crc == zlib.crc32(typ + body), 'bad CRC in ' + repr(typ)
+            if typ == b'IHDR':
+                hdr = struct.unpack('>IIBBBBB', body)
+            elif typ == b'IDAT':
+                idat += body
+            off += 12 + n
+        w, h, depth, ctype = hdr[:4]
+        assert (depth, ctype) == (8, 2)
+        raw = zlib.decompress(idat)                  # raises on a wrong Adler-32 or stored-block header
+        stride = 1 + w * 3
+        assert len(raw) == stride * h
+        rows = []
+        for y in range(h):
+            assert raw[y * stride] == 0
+            rows.append(raw[y * stride + 1:(y + 1) * stride])
+        return w, h, rows
+
+    def start(self, name, *extra):
+        self.shots = os.path.join(tmp, name + '-shots')
+        p, c, stop = self.private_compositor(name, '--screenshot-dir', self.shots, *extra)
+        return c, name
+
+    def files(self):
+        return sorted(os.listdir(self.shots)) if os.path.isdir(self.shots) else []
+
+    def wait_files(self, n):
+        for _ in range(100):
+            if len(self.files()) >= n:
+                break
+            time.sleep(0.02)
+        return self.files()
+
+    def clipboard_client(self, sock):
+        c = Client(sock)
+        self.clients.append(c)
+        seat = c.wl.bind('wl_seat', 5)
+        mgr = c.wl.bind('wl_data_device_manager', 3)
+        dev = c.wl.new_id('wl_data_device')
+        c.wl.request(mgr, 'get_data_device', dev, seat)
+        kb = c.wl.new_id('wl_keyboard')
+        c.wl.request(seat, 'get_keyboard', kb)
+        Window(c, 200, 150, title='paster')
+        c.wl.roundtrip()
+        return c, dev
+
+    def paste_png(self, c, dev):
+        """The image/png bytes of the current selection, or None when it is not offered."""
+        offered = []
+        sel = None
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            c.wl.pump(0.05)
+            for e in list(c.wl.queue):
+                if e.obj != dev:
+                    if e.name == 'offer':
+                        offered.append(e.args[0].decode() if isinstance(e.args[0], bytes) else e.args[0])
+                    continue
+                if e.name == 'selection':
+                    sel = e
+            if sel is not None:
+                break
+        if sel is None or not sel.args[0]:
+            return None
+        if 'image/png' not in [m.strip(b'\0').decode() if isinstance(m, bytes) else m for m in offered]:
+            return None
+        r, w = os.pipe()
+        c.wl.request(sel.args[0], 'receive', 'image/png', fds=(w,))
+        os.close(w)
+        chunks = []
+        while True:
+            b = os.read(r, 65536)
+            if not b:
+                break
+            chunks.append(b)
+        os.close(r)
+        return b''.join(chunks)
+
+    def test_print_saves_a_png_equal_to_the_frame(self):
+        c, name = self.start('mellagui-shot1')
+        c.cmd('abs 780 480')                                       # pointer in a corner: the shot has no cursor anyway
+        c.sync()
+        time.sleep(0.15)                                           # a fresh compositor draws its first frame on the vblank timer
+        c.sync()
+        ppm = c.dump(os.path.join(tmp, 'shot1.ppm'))
+        c.tap(self.KEY_PRINT)
+        c.sync()
+        files = self.wait_files(1)
+        self.assertEqual(len(files), 1)
+        self.assertRegex(files[0], r'^mellagui-\d{8}-\d{6}\.png$')
+        path = os.path.join(self.shots, files[0])
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), '0o600')
+        with open(path, 'rb') as f:
+            w, h, rows = self.decode_png(f.read())
+        self.assertEqual((w, h), (800, 500))
+        for y in range(h):
+            for x in range(0, w, 7):
+                if abs(x - 780) < 30 and abs(y - 480) < 30:        # cursor sprite is in the dump only
+                    continue
+                self.assertEqual(tuple(rows[y][x * 3:x * 3 + 3]), ppm.px(x, y), (x, y))
+
+    def test_print_puts_the_png_on_the_clipboard(self):
+        c, name = self.start('mellagui-shot2')
+        cl, dev = self.clipboard_client(name)
+        c.tap(self.KEY_PRINT)
+        got = self.paste_png(cl, dev)
+        self.assertIsNotNone(got, 'image/png was not offered')
+        files = self.wait_files(1)
+        with open(os.path.join(self.shots, files[0]), 'rb') as f:
+            self.assertEqual(got, f.read())
+        self.assertEqual(self.decode_png(got)[:2], (800, 500))
+
+    def test_ctrl_print_is_clipboard_only(self):
+        c, name = self.start('mellagui-shot3')
+        cl, dev = self.clipboard_client(name)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_PRINT)
+        c.key(KEY_LEFTCTRL, False)
+        got = self.paste_png(cl, dev)
+        self.assertIsNotNone(got)
+        self.assertEqual(self.files(), [])
+
+    def test_alt_print_is_the_focused_window_with_its_frame(self):
+        c, name = self.start('mellagui-shot4')
+        cl = Client(name)
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, title='target')
+        cl.wl.roundtrip()
+        c.sync()
+        c.key(KEY_LEFTALT, True)
+        c.tap(self.KEY_PRINT)
+        c.key(KEY_LEFTALT, False)
+        files = self.wait_files(1)
+        self.assertEqual(len(files), 1)
+        with open(os.path.join(self.shots, files[0]), 'rb') as f:
+            w, h, rows = self.decode_png(f.read())
+        win_info = c.windows()['windows'][0]
+        self.assertEqual((w, h), (win_info['w'] + 2 * 4, win_info['h'] + 28 + 4))   # LM_BORDER_WIDTH / LM_TITLEBAR_HEIGHT
+
+    def test_the_keys_are_not_forwarded_to_clients(self):
+        c, name = self.start('mellagui-shot5')
+        cl = Client(name)
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        kb = cl.wl.new_id('wl_keyboard')
+        cl.wl.request(seat, 'get_keyboard', kb)
+        Window(cl, 200, 150, title='k')
+        cl.wl.roundtrip()
+        cl.wl.queue.clear()
+        c.tap(self.KEY_PRINT)
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual([e for e in cl.wl.queue if e.obj == kb and e.name == 'key'], [])
+
+    def test_feedback_flash_and_thumbnail_card_come_and_go(self):
+        self.shots = os.path.join(tmp, 'mellagui-shot7-shots')
+        p, c, stop = self.private_compositor('mellagui-shot7', '--screenshot-dir', self.shots,
+                                             env={'MELLAGUI_TOAST_MS': '700'})
+        c.cmd('abs 20 20')
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        before = c.dump(os.path.join(tmp, 'fx0.ppm'))
+        wall = before.px(50, 300)
+        card_px = (532, 400)                                       # 800x500: the card is at 528,294 256x190, 16 px from the corner
+        wall_card = before.px(*card_px)
+        c.tap(self.KEY_PRINT)
+        c.sync()
+        during = c.dump(os.path.join(tmp, 'fx1.ppm'))              # the white flash is at full strength
+        self.assertTrue(all(a > b + 80 for a, b in zip(during.px(50, 300), wall)), (during.px(50, 300), wall))
+        time.sleep(0.4)
+        c.sync()
+        card = c.dump(os.path.join(tmp, 'fx2.ppm'))                # the flash is over, the card stays
+        self.assertEqual(card.px(50, 300), wall)
+        self.assertTrue(all(abs(a - b) <= 14 for a, b in zip(card.px(*card_px), (0x16, 0x1a, 0x24))), card.px(*card_px))
+        self.assertGreater(card.count((0xd8, 0xdd, 0xe8), 536, 456, 776, 472), 20)       # the file name under the thumbnail
+        self.wait_files(1)
+        c.tap(self.KEY_PRINT)                                      # a second shot while the card is up: the card is not in it
+        files = self.wait_files(2)
+        self.assertEqual(len(files), 2)
+        with open(os.path.join(self.shots, files[-1]), 'rb') as f:
+            w, h, rows = self.decode_png(f.read())
+        self.assertEqual(tuple(rows[card_px[1]][card_px[0] * 3:card_px[0] * 3 + 3]), wall_card)
+        time.sleep(1.2)
+        c.sync()
+        gone = c.dump(os.path.join(tmp, 'fx3.ppm'))
+        self.assertEqual(gone.px(*card_px), wall_card)
+        self.assertEqual(gone.px(50, 300), wall)
+
+    def test_the_first_cursor_move_leaves_no_ghost_behind(self):
+        p, c, stop = self.private_compositor('mellagui-ghost')
+        c.cmd('abs 700 300')
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        ppm = c.dump(os.path.join(tmp, 'ghost.ppm'))
+        self.assertEqual(ppm.count((0, 0, 0), 380, 230, 440, 290), 0, 'the cursor of the first frame was never erased')
+        self.assertGreater(ppm.count((0, 0, 0), 695, 295, 725, 325), 10)       # the real one
+
+    def test_without_a_directory_only_the_clipboard(self):
+        name = 'mellagui-shot6'
+        p, c, stop = self.private_compositor(name)
+        cl, dev = self.clipboard_client(name)
+        c.tap(self.KEY_PRINT)
+        self.assertIsNotNone(self.paste_png(cl, dev))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

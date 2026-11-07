@@ -22,6 +22,7 @@
 #include "sysinfo.h"
 #include "output.h"
 #include "render.h"
+#include "screenshot.h"
 #include "seat.h"
 #include "settings.h"
 #include "surface.h"
@@ -2436,6 +2437,25 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
     damage_all(wm);
 }
 
+/* Print: the output under the pointer, Alt+Print: the focused window with its frame (the whole output when there is
+ * none), Ctrl+Print: like Print but only to the clipboard. */
+static void take_screenshot(struct lm_wm *wm, bool window, bool to_file)
+{
+    struct lm_rect r;
+    if (window && wm->focused && win_visible(wm, wm->focused)) {
+        r = frame_outer(wm->focused);
+    } else {
+        double x = 0, y = 0;
+        if (wm->srv->seat)
+            lm_seat_pointer_position(wm->srv->seat, &x, &y);
+        struct lm_output *o = lm_output_nearest(wm->srv, x, y);
+        if (!o)
+            return;
+        r = lm_output_rect(o);
+    }
+    lm_screenshot_take(wm->srv, &r, to_file);
+}
+
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods)
 {
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
@@ -2494,6 +2514,11 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
                 damage_gadget(wm, LM_GADGET_CLIPBOARD);
             }
         }
+        return true;
+    }
+    if ((code == KEY_SYSRQ || code == KEY_PRINT) && !super) {
+        if (pressed && !repeat)
+            take_screenshot(wm, alt, !ctrl);
         return true;
     }
     if (!super || ctrl || alt)

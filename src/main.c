@@ -58,6 +58,8 @@ static const char *usage_text =
     "                           of the session (default: own on drm, any on headless, which the tests need)\n"
     "  --lock-file FILE         where the screen lock keeps its salted password / PIN hash (mode 0600); \"none\" = in memory only\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/lock.conf, headless: none)\n"
+    "  --screenshot-dir DIR     where Print (screen) and Alt+Print (window) save PNGs; Ctrl+Print only copies; every shot also goes to the\n"
+    "                           clipboard as image/png; \"none\" = clipboard only (default drm: ~/Pictures, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
     "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
@@ -233,7 +235,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -254,6 +256,7 @@ int main(int argc, char **argv)
         { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
         { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
         { "lock-file", required_argument, 0, OPT_LOCK_FILE },
+        { "screenshot-dir", required_argument, 0, OPT_SCREENSHOT_DIR },
         { "settings-access", required_argument, 0, OPT_SETTINGS_ACCESS },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
@@ -280,7 +283,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--backend=", 10))
             headless_arg = !strcmp(argv[i] + 10, "headless");
     }
-    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX], lock_buf[PATH_MAX];
+    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX], lock_buf[PATH_MAX], shot_buf[PATH_MAX];
     if (!headless_arg)
         migrate_old_config_dir();
     if (!settings_arg && !headless_arg) {
@@ -312,6 +315,10 @@ int main(int argc, char **argv)
             snprintf(lock_buf, sizeof(lock_buf), "%s/.config/mellagui/lock.conf", home);
         if (lock_buf[0])
             cfg.lock_path = lock_buf;
+        if (home && *home) {                          /* --screenshot-dir (parsed below) wins */
+            snprintf(shot_buf, sizeof(shot_buf), "%s/Pictures", home);
+            cfg.screenshot_dir = shot_buf;
+        }
     }
     if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
         cfg.settings_path = settings_arg;
@@ -389,6 +396,7 @@ int main(int argc, char **argv)
             else { fprintf(stderr, "mellagui: --settings-access wants any or own, not '%s'\n", optarg); return 2; }
             break;
         case OPT_LOCK_FILE: cfg.lock_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_SCREENSHOT_DIR: cfg.screenshot_dir = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;
@@ -425,12 +433,14 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("mellagui-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
     cfg.settings_cmd = default_sibling("mellagui-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
+    static char calc_buf[PATH_MAX + 4], view_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
     if (cfg.napps == 0) {
         /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
             "Calculator", default_sibling("mellagui-calc", calc_buf, sizeof(calc_buf)) };
+        cfg.apps[cfg.napps++] = (struct lm_app_entry){
+            "Images", default_sibling("mellagui-view", view_buf, sizeof(view_buf)) };
         /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
          * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
         const char *home = getenv("HOME");

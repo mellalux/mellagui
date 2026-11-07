@@ -21,6 +21,7 @@
 #include "seat.h"
 #include "settings.h"
 #include "lock.h"
+#include "logind.h"
 #include "server.h"
 #include "shm.h"
 #include "surface.h"
@@ -58,6 +59,8 @@ static const char *usage_text =
     "                           of the session (default: own on drm, any on headless, which the tests need)\n"
     "  --lock-file FILE         where the screen lock keeps its salted password / PIN hash (mode 0600); \"none\" = in memory only\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/lock.conf, headless: none)\n"
+    "  --logind off|auto|on     get the GPU and input devices from systemd-logind (no `video` / `input` group needed, VT switching\n"
+    "                           done by the session manager); auto (default) falls back to opening the device files, on = required\n"
     "  --screenshot-dir DIR     where Print (screen) and Alt+Print (window) save PNGs; Ctrl+Print only copies; every shot also goes to the\n"
     "                           clipboard as image/png; \"none\" = clipboard only (default drm: ~/Pictures, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
@@ -235,7 +238,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -257,6 +260,7 @@ int main(int argc, char **argv)
         { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
         { "lock-file", required_argument, 0, OPT_LOCK_FILE },
         { "screenshot-dir", required_argument, 0, OPT_SCREENSHOT_DIR },
+        { "logind", required_argument, 0, OPT_LOGIND },
         { "settings-access", required_argument, 0, OPT_SETTINGS_ACCESS },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
@@ -396,6 +400,12 @@ int main(int argc, char **argv)
             else { fprintf(stderr, "mellagui: --settings-access wants any or own, not '%s'\n", optarg); return 2; }
             break;
         case OPT_LOCK_FILE: cfg.lock_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_LOGIND:
+            if (!strcmp(optarg, "off")) cfg.logind = 0;
+            else if (!strcmp(optarg, "auto")) cfg.logind = 1;
+            else if (!strcmp(optarg, "on")) cfg.logind = 2;
+            else { fprintf(stderr, "mellagui: --logind wants off, auto or on, not '%s'\n", optarg); return 2; }
+            break;
         case OPT_SCREENSHOT_DIR: cfg.screenshot_dir = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;
@@ -501,6 +511,17 @@ int main(int argc, char **argv)
     lm_loop_add_signal(loop, SIGUSR1, sig_dump, srv);
 
     bool headless = !strcmp(cfg.backend, "headless");
+    if (!headless && cfg.logind > 0) {
+        char why[200];
+        srv->logind = lm_logind_open(loop, why, sizeof(why));
+        if (!srv->logind) {
+            if (cfg.logind == 2) {
+                lm_error("logind is required (--logind on) but not usable: %s", why);
+                goto out;
+            }
+            lm_info("logind not used: %s; opening the device files directly (needs groups video and input)", why);
+        }
+    }
     srv->backend = headless ? lm_backend_headless_create(srv, cfg.headless_width, cfg.headless_height)
                             : lm_backend_drm_create(srv);
     if (!srv->backend) {
@@ -596,6 +617,8 @@ out:
     srv->render = NULL;
     if (srv->backend) lm_backend_destroy(srv->backend);
     srv->backend = NULL;
+    lm_logind_close(srv->logind);               /* after everything that holds devices: hands them back */
+    srv->logind = NULL;
     g_backend = NULL;
     lm_server_destroy(srv);
     lm_loop_destroy(loop);

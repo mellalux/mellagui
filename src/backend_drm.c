@@ -26,6 +26,8 @@
 #include <linux/netlink.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include <drm.h>
@@ -37,6 +39,7 @@
 #include "cvt.h"
 #include "edid.h"
 #include "log.h"
+#include "logind.h"
 
 #define HOTPLUG_POLL_MS 2000
 #define SIG_VT_RELEASE SIGUSR2
@@ -95,8 +98,10 @@ struct drm {
     struct lm_timer *ready_timer;   /* "ready" after (re)activation */
     int tty_fd;
     struct lm_source *sig_release, *sig_acquire;
-    bool is_master;
+    bool is_master;                 /* with logind: we hold master through the session manager */
     bool active;
+    struct lm_logind *logind;       /* NULL = plain open(2) + VT_PROCESS */
+    dev_t dev;                      /* of the card, for logind's PauseDevice / ResumeDevice */
 };
 
 /* ---- console restore (also called from fatal signal handlers) ---------------------- */
@@ -788,36 +793,24 @@ static void drm_event_cb(int fd, uint32_t events, void *data)
 
 /* ---- VT handling ----------------------------------------------------------------------------------- */
 
-static void vt_release(int signo, void *data)
+/* The session goes away (VT switched away): stop drawing, tell the seat. Returns false when already inactive. */
+static bool session_pause(struct drm *d, bool drop_master)
 {
-    struct drm *d = data;
-    (void)signo;
-    if (!d->active) {
-        ioctl(d->tty_fd, VT_RELDISP, 1);
-        return;
-    }
-    lm_info("VT: switching away");
+    if (!d->active)
+        return false;
     d->active = false;
     d->base.session_active = false;
     if (d->base.listener.session_active)
         d->base.listener.session_active(d->base.listener.data, false);
-    if (d->is_master) {
+    if (d->is_master && drop_master)
         drmDropMaster(d->fd);
-        d->is_master = false;
-    }
-    ioctl(d->tty_fd, VT_RELDISP, 1);
+    d->is_master = false;
+    return true;
 }
 
-static void vt_acquire(int signo, void *data)
+/* The session is back and we are master again: redo every output. */
+static void session_resume(struct drm *d)
 {
-    struct drm *d = data;
-    (void)signo;
-    lm_info("VT: switching back");
-    ioctl(d->tty_fd, VT_RELDISP, VT_ACKACQ);
-    if (drmSetMaster(d->fd) < 0)
-        lm_warn("drm: drmSetMaster after VT switch failed: %s", strerror(errno));
-    else
-        d->is_master = true;
     d->active = true;
     d->base.session_active = true;
     d->base.blanked = false;                /* the modeset below lights the monitors up again */
@@ -832,6 +825,53 @@ static void vt_acquire(int signo, void *data)
     if (d->base.listener.session_active)
         d->base.listener.session_active(d->base.listener.data, true);
     lm_timer_arm_ms(d->ready_timer, 1, 0);
+}
+
+static void vt_release(int signo, void *data)
+{
+    struct drm *d = data;
+    (void)signo;
+    if (!d->active) {
+        ioctl(d->tty_fd, VT_RELDISP, 1);
+        return;
+    }
+    lm_info("VT: switching away");
+    session_pause(d, true);
+    ioctl(d->tty_fd, VT_RELDISP, 1);
+}
+
+static void vt_acquire(int signo, void *data)
+{
+    struct drm *d = data;
+    (void)signo;
+    lm_info("VT: switching back");
+    ioctl(d->tty_fd, VT_RELDISP, VT_ACKACQ);
+    if (drmSetMaster(d->fd) < 0)
+        lm_warn("drm: drmSetMaster after VT switch failed: %s", strerror(errno));
+    else
+        d->is_master = true;
+    session_resume(d);
+}
+
+/* logind: PauseDevice for the card = the VT is being switched away; logind waits for our ack, then drops master itself. */
+static void logind_pause(void *data, const char *type)
+{
+    struct drm *d = data;
+    lm_info("logind: the session is paused (%s)", type);
+    session_pause(d, false);
+    if (!strcmp(type, "pause"))
+        lm_logind_pause_done(d->logind, d->dev);
+}
+
+/* ResumeDevice: logind made us master again; the descriptor it passes is the very same open file as ours. */
+static void logind_resume(void *data, int fd)
+{
+    struct drm *d = data;
+    if (fd >= 0)
+        close(fd);
+    lm_info("logind: the session is active again");
+    d->is_master = true;
+    session_resume(d);
 }
 
 static int vt_setup(struct drm *d)
@@ -884,6 +924,8 @@ static int vt_setup(struct drm *d)
 static int drm_switch_vt(struct lm_backend *b, int vt)
 {
     struct drm *d = DRM(b);
+    if (d->logind)
+        return d->active ? lm_logind_switch_vt(d->logind, vt) : -1;
     if (d->tty_fd < 0 || vt < 1 || vt > 12 || !d->active)
         return -1;
     if (ioctl(d->tty_fd, VT_ACTIVATE, vt) < 0) {
@@ -895,12 +937,18 @@ static int drm_switch_vt(struct lm_backend *b, int vt)
 
 /* ---- device selection ---------------------------------------------------------------------------------- */
 
-static int open_card(const char *path)
+static int open_card(struct drm *d, const char *path)
 {
-    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    bool inactive = false;
+    int fd = lm_dev_open(d->logind, path, O_RDWR | O_NONBLOCK, &inactive);
+    if (fd >= 0 && inactive) {
+        lm_error("drm: this session is not the active one (logind): switch to its virtual terminal and start MellaGUI there.");
+        lm_dev_close(d->logind, fd);
+        return -EAGAIN;
+    }
     if (fd < 0) {
-        int err = errno;
-        if (err == EACCES)
+        int err = -fd;
+        if (err == EACCES && !d->logind)
             lm_error("drm: no permission to open %s. Add yourself to group 'video' "
                      "(sudo usermod -aG video $USER, then log in again) or run from a "
                      "logged-in console session.", path);
@@ -911,13 +959,13 @@ static int open_card(const char *path)
     uint64_t dumb = 0;
     if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &dumb) < 0 || !dumb) {
         lm_debug("drm: %s has no dumb buffer support", path);
-        close(fd);
+        lm_dev_close(d->logind, fd);
         return -ENOTSUP;
     }
     drmModeRes *res = drmModeGetResources(fd);
     if (!res) {
         lm_debug("drm: %s has no KMS resources", path);
-        close(fd);
+        lm_dev_close(d->logind, fd);
         return -ENODEV;
     }
     bool connected = false;
@@ -931,7 +979,7 @@ static int open_card(const char *path)
     drmModeFreeResources(res);
     if (!connected) {
         lm_debug("drm: %s has no connected display", path);
-        close(fd);
+        lm_dev_close(d->logind, fd);
         return -ENOLINK;
     }
     return fd;
@@ -941,7 +989,7 @@ static int select_device(struct drm *d, const char *forced)
 {
     if (forced) {
         snprintf(d->path, sizeof(d->path), "%s", forced);
-        d->fd = open_card(d->path);
+        d->fd = open_card(d, d->path);
         return d->fd >= 0 ? 0 : -1;
     }
     char names[16][300];
@@ -965,7 +1013,7 @@ static int select_device(struct drm *d, const char *forced)
                 memcpy(names[j], t, 300);
             }
     for (int i = 0; i < n; i++) {
-        d->fd = open_card(names[i]);
+        d->fd = open_card(d, names[i]);
         if (d->fd >= 0) {
             snprintf(d->path, sizeof(d->path), "%.*s", (int)sizeof(d->path) - 1, names[i]);
             return 0;
@@ -987,13 +1035,19 @@ static int drm_init(struct lm_backend *b)
     d->reprobe = lm_loop_add_timer(srv->loop, reprobe_fire, d);
     d->uevent_fd = -1;
 
-    if (vt_setup(d) < 0)
+    d->logind = srv->logind;
+    if (!d->logind && vt_setup(d) < 0)          /* with logind the session manager owns the VT and the console mode */
         return -1;
     if (select_device(d, srv->config.drm_device) < 0)
         return -1;
-    lm_info("drm: using %s", d->path);
+    lm_info("drm: using %s%s", d->path, d->logind ? " (through logind)" : "");
 
-    if (drmSetMaster(d->fd) < 0) {
+    if (d->logind) {
+        struct stat st;
+        if (fstat(d->fd, &st) == 0)
+            d->dev = st.st_rdev;
+        lm_logind_watch(d->logind, d->dev, logind_pause, logind_resume, d);       /* logind made the fd DRM master */
+    } else if (drmSetMaster(d->fd) < 0) {
         lm_error("drm: cannot become DRM master on %s: %s. Another display server "
                  "(X, Wayland compositor) probably owns the GPU on this VT.", d->path, strerror(errno));
         return -1;
@@ -1033,9 +1087,9 @@ static void drm_destroy(struct lm_backend *b)
     lm_list_for_each_safe(lo, tmp, &b->outputs, link)
         out_destroy((struct drm_out *)lo, true);
     if (d->fd >= 0) {
-        if (d->is_master)
+        if (d->is_master && !d->logind)
             drmDropMaster(d->fd);
-        close(d->fd);
+        lm_dev_close(d->logind, d->fd);
     }
     if (d->tty_fd >= 0) {
         console_restore();

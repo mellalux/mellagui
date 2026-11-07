@@ -178,6 +178,7 @@ struct lm_config {
     bool dmabuf;                /* offer zwp_linux_dmabuf_v1 so clients can render with the GPU (default true; --no-dmabuf) */
     bool sysinfo;               /* system monitor gadget visible at start (default false; --sysinfo; Super+S; setting `sysinfo`) */
     bool sound;                 /* feedback beeps for sticky keys (default true; --no-sound; never on headless) */
+    int logind;                 /* --logind off|auto|on: 0 = never, 1 = when the session allows it (default), 2 = required */
     bool grab_input;            /* EVIOCGRAB the evdev devices (default true on drm) */
 };
 
@@ -197,6 +198,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .repeat_rate = 25,
         .pointer_speed = 1.0,
         .grab_input = true,
+        .logind = 1,
         .sound = true,
         .audio_device = "default",
         .dmabuf = true,
@@ -237,6 +239,7 @@ struct lm_server {
     struct lm_input *input;             /* evdev (or inject-only for headless) */
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
     struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
+    struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
     struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */
     struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */

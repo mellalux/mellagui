@@ -51,4 +51,4 @@ Gotchas:
 * The headless backend's `windows`/`dump`/`sync` commands are the test oracle; add a test in `tests/test_mellagui.py`
   (helpers: `Window`, `Ctl`, `Ppm` in `tests/wlclient.py`) when changing behaviour.
 * The XKB keymap text is generated (`lm_keymap_build`) and cannot be compiled here (no libxkbcommon): real xkbcommon clients (VS Code) are the only way to verify it.
-* Devices are opened with plain `open(2)`; logind is not implemented, so real-hardware runs need groups `video`+`input`.
+* Devices: with a usable logind session (`--logind auto`, default) `src/logind.c` (a from-scratch D-Bus client, `docs/ARCHITECTURE.md`) hands out the DRM and evdev fds and does VT switching (`PauseDevice` → ack, `ResumeDevice`, `Seat.SwitchTo`); otherwise plain `open(2)` + VT_PROCESS, which needs groups `video`+`input`. Backends call `lm_dev_open` / `lm_dev_close` so both paths share the code. Tested only against `tests/fake_logind.py` (`TestLogind`, `build/logind-test`) and by hand up to `TakeControl` on the real logind.

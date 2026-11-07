@@ -35,27 +35,29 @@ proc = None
 tmp = None
 ctl = None
 LOG = None
+OUT = None
 
 
 def setUpModule():
-    global proc, tmp, ctl, LOG
+    global proc, tmp, ctl, LOG, OUT
     tmp = tempfile.mkdtemp(prefix='mellagui-test-')
     os.chmod(tmp, 0o700)
     os.environ['XDG_RUNTIME_DIR'] = tmp
     os.environ['WAYLAND_DISPLAY'] = 'mellagui-test'
     os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
     LOG = os.path.join(tmp, 'mellagui.log')
+    OUT = os.path.join(tmp, 'mellagui.out')        # a file, not a pipe: nobody reads a pipe while the tests run and 64 KB of log would block the compositor
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77',
                UBSAN_OPTIONS='print_stacktrace=1')
     proc = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'mellagui-test',
                              '--control', os.path.join(tmp, 'ctl'), '--log-file', LOG, '--log-level', 'debug',
                              '--terminal', 'true'],
-                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                            env=env, stdout=open(OUT, 'wb'), stderr=subprocess.STDOUT)
     for _ in range(100):
         if os.path.exists(os.path.join(tmp, 'ctl')) and os.path.exists(os.path.join(tmp, 'mellagui-test')):
             break
         if proc.poll() is not None:
-            raise RuntimeError('compositor exited early: %s' % proc.stdout.read().decode())
+            raise RuntimeError('compositor exited early: %s' % open(OUT, errors='replace').read())
         time.sleep(0.05)
     ctl = Ctl(os.path.join(tmp, 'ctl'))
 
@@ -71,7 +73,8 @@ def tearDownModule():
     except subprocess.TimeoutExpired:
         proc.kill()
         code = 'timeout'
-    out = proc.stdout.read().decode(errors='replace')
+    with open(OUT, errors='replace') as f:
+        out = f.read()
     shutil.rmtree(tmp, ignore_errors=True)
     if code != 0:
         raise AssertionError('compositor exit status %r\n%s' % (code, out))
@@ -4146,6 +4149,91 @@ class TestViewer(Base):
         ctl.tap(107)
         time.sleep(0.2)
         self.assertIsNone(p.poll())
+
+
+class TestLogind(unittest.TestCase):
+    """src/logind.c (a D-Bus client of its own) against tests/fake_logind.py; the DRM / evdev wiring cannot run headless."""
+    TOOL = os.environ.get('MELLAGUI_LOGIND_TEST', os.path.join(ROOT, 'build', 'logind-test'))
+
+    def setUp(self):
+        if not os.path.exists(self.TOOL):
+            self.skipTest('logind-test not built')
+        from fake_logind import FakeLogind
+        self.Fake = FakeLogind
+
+    def run_tool(self, fake, *args):
+        env = dict(os.environ, DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + fake.path, XDG_SESSION_ID='7')
+        p = subprocess.Popen([self.TOOL] + list(args), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        return p
+
+    def lines_until(self, p, word, timeout=8.0):
+        out = []
+        end = time.time() + timeout
+        while time.time() < end:
+            line = p.stdout.readline()
+            if not line:
+                break
+            if line[:2].isdigit() and line[2] == ':':           # a log line of the tool
+                continue
+            out.append(line.strip())
+            if line.startswith(word):
+                break
+        return out
+
+    def test_session_take_device_pause_resume_and_switch(self):
+        fake = self.Fake().start()
+        self.addCleanup(fake.stop)
+        p = self.run_tool(fake, 'session', '/dev/null')                       # /dev/null is the character device 1:3
+        out = self.lines_until(p, 'READY')
+        self.assertEqual(out, ['take fd=ok inactive=0', 'wrote 5', 'READY'])
+        self.assertIn(('GetSession', '7'), fake.events)                       # XDG_SESSION_ID is used
+        self.assertIn(('TakeControl', 0), fake.events)
+        self.assertIn(('TakeDevice', 1, 3), fake.events)
+        with open(fake.devfiles[(1, 3)], 'rb') as f:
+            self.assertEqual(f.read(), b'hello')                              # the fd really is the one logind passed
+        fake.emit_pause(4, 5, 'pause')                                        # another device: acknowledged by logind.c itself
+        self.assertTrue(fake.wait(('PauseDeviceComplete', 4, 5)))
+        fake.emit_pause(1, 3, 'pause')                                        # the watched one: the owner decides, then acks
+        self.assertTrue(fake.wait(('PauseDeviceComplete', 1, 3)))
+        fake.emit_pause(1, 3, 'force')                                        # "force": no ack is owed
+        fake.emit_resume(1, 3)
+        out = self.lines_until(p, 'DONE')
+        self.assertEqual(out, ['pause pause', 'pause force', 'resume fd=ok data=resumed', 'switch 0', 'DONE pauses=2 resumes=1'], out)
+        self.assertEqual(p.wait(timeout=5), 0)
+        self.assertEqual([e for e in fake.events if e[0] == 'PauseDeviceComplete'], [('PauseDeviceComplete', 4, 5), ('PauseDeviceComplete', 1, 3)])
+        self.assertIn(('Get', 'org.freedesktop.login1.Session', 'Seat'), fake.events)
+        self.assertIn(('SwitchTo', 2), fake.events)         # on the seat object the session names, not on a made-up path
+        self.assertIn(('ReleaseDevice', 1, 3), fake.events)
+        self.assertIn(('ReleaseControl',), fake.events)
+
+    def test_an_inactive_session_is_reported(self):
+        fake = self.Fake(inactive=True).start()
+        self.addCleanup(fake.stop)
+        p = self.run_tool(fake, 'session', '/dev/null')
+        self.assertEqual(self.lines_until(p, 'take')[0], 'take fd=ok inactive=1')
+
+    def test_without_a_session_or_bus_open_fails_with_a_reason(self):
+        fake = self.Fake(get_session_error=True).start()
+        self.addCleanup(fake.stop)
+        out = self.lines_until(self.run_tool(fake, 'fail'), 'open failed')
+        self.assertTrue(out[0].startswith('open failed: this process is not in a logind session'), out)
+        fake2 = self.Fake(take_control_error=True).start()
+        self.addCleanup(fake2.stop)
+        out = self.lines_until(self.run_tool(fake2, 'fail'), 'open failed')
+        self.assertIn('cannot take control', out[0])
+        self.assertIn('AccessDenied', out[0])
+        gone = self.Fake()
+        path = gone.path
+        gone.stop()
+        env = dict(os.environ, DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + path)
+        r = subprocess.run([self.TOOL, 'fail'], env=env, capture_output=True, text=True, timeout=10)
+        self.assertIn('cannot connect to the system bus', r.stdout)
+
+    def test_without_logind_a_device_is_a_plain_open(self):
+        r = subprocess.run([self.TOOL, 'plain', '/dev/null'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.stdout.strip(), 'plain fd=ok')
+
 
 
 class TestScreenshot(Base):

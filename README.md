@@ -24,7 +24,11 @@ Included programs:
 * The **DRM/KMS + VT backend (`src/backend_drm.c`) has not been run on real hardware** by its author:
   it was written carefully against the kernel APIs and compiles warning-free, but expect to debug it on first use.
   Use `--timeout` for the first run (see below).
-* **logind device access is not implemented.** An ordinary user needs to be in the groups `video` and `input`.
+* **logind** (`--logind off|auto|on`, default `auto`): started from a text console login, MellaGUI asks systemd-logind for the GPU and the input
+  devices (`TakeControl` / `TakeDevice`, its own small D-Bus client, no libsystemd), so no group is needed and logind does the VT switching and the
+  console mode. Where there is no usable session (ssh, `su`, a service) or the system bus is missing it falls back to opening the device files, which
+  needs the groups `video` and `input`. The DRM / evdev wiring is untested on real hardware (the D-Bus client is tested against a fake logind and was
+  checked against the real one up to `TakeControl`); `--logind off` gives the old behaviour.
 * Not tested against third-party Wayland clients (GTK, Qt, foot ...): none were available where it was built.
   Buffers are `wl_shm` or `zwp_linux_dmabuf_v1` (linear ARGB8888/XRGB8888 only). GPU-rendering clients (Mesa EGL, Firefox's
   WebRender) hand MellaGUI dmabufs; MellaGUI still composites in software and only *reads* them (mmap + `DMA_BUF_IOCTL_SYNC`, SSE4.1
@@ -196,7 +200,8 @@ The control socket takes one line per command (`dump <file.ppm>`, `windows`, `ke
 
 ## Troubleshooting
 
-* `no permission to open /dev/dri/card*` / `/dev/input/event*` – join the groups `video` / `input` and log in again.
+* `no permission to open /dev/dri/card*` / `/dev/input/event*` – logind was not used (the log says why: `logind not used: ...`); join the groups `video` / `input` and log in again, or start MellaGUI from a console login that logind knows (`loginctl` shows the session with a seat).
+* `logind is required ... (--logind on)` – no usable session; see the reason after it. `--logind off` skips logind.
 * `cannot become DRM master` – another display server owns the GPU on this VT (or you are on the wrong VT).
 * `/dev/tty is not a Linux virtual console` – start MellaGUI from a text console (Ctrl+Alt+F3), not from ssh or a terminal emulator.
 * Black screen – read the log file (`--log-file`), try `--drm-device /dev/dri/card0`.

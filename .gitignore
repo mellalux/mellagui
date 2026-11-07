@@ -1,2 +1,4 @@
 build/
 *.ppm
+__pycache__/
+*.pyc

@@ -30,8 +30,8 @@
 /* Keys before K_FILE are saved to the settings file, the ones after it are read-only or live state only. */
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
-    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_FILE,
-    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS,
+    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_FILE,
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
@@ -39,10 +39,10 @@ enum key_id {
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
-    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_FILE] = "file",
+    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
-    [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status",
+    [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
 };
@@ -167,6 +167,17 @@ static bool wallpaper_path_ok(const char *v)
     return true;
 }
 
+/* Connector names, comma separated: letters, digits, - and _ (at most 200 bytes), may be empty. */
+static bool output_order_ok(const char *v)
+{
+    if (strlen(v) > 199)
+        return false;
+    for (; *v; v++)
+        if (!((*v >= '0' && *v <= '9') || (*v >= 'a' && *v <= 'z') || (*v >= 'A' && *v <= 'Z') || *v == '-' || *v == '_' || *v == ','))
+            return false;
+    return true;
+}
+
 static const char *const wall_modes[] = { "fill", "fit", "stretch", "center" };
 static int wallpaper_mode_parse(const char *v)
 {
@@ -248,6 +259,10 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
     case K_WALLPAPER_MODE:
         if ((n = wallpaper_mode_parse(val)) < 0) return -1;
         cfg->wallpaper_mode = n;
+        break;
+    case K_OUTPUT_ORDER:
+        if (!output_order_ok(val)) return -1;
+        snprintf(cfg->output_order, sizeof(cfg->output_order), "%s", val);
         break;
     default:
         return -1;
@@ -344,6 +359,25 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_WALLPAPER: snprintf(out, n, "%s", c->wallpaper); break;
     case K_WALLPAPER_MODE: snprintf(out, n, "%s", wallpaper_mode_name(c->wallpaper_mode)); break;
     case K_WALLPAPER_STATUS: snprintf(out, n, "%s", srv->render ? lm_render_wallpaper_status(srv->render) : ""); break;
+    case K_OUTPUT_ORDER: snprintf(out, n, "%s", c->output_order); break;
+    case K_OUTPUTS: {                                   /* "name|WxH|x,y;..." in the order they lie, left to right */
+        size_t o = 0;
+        out[0] = 0;
+        struct lm_output *prev = NULL;
+        for (int round = 0; srv->backend && round < 16; round++) {
+            struct lm_output *best = NULL, *p;
+            lm_list_for_each(p, &srv->backend->outputs, link)
+                if ((!prev || p->x > prev->x || (p->x == prev->x && p->y > prev->y)) && (!best || p->x < best->x))
+                    best = p;
+            if (!best)
+                break;
+            o += (size_t)snprintf(out + o, n - o, "%s%s|%dx%d|%d,%d", o ? ";" : "", best->name, best->width, best->height, best->x, best->y);
+            prev = best;
+            if (o + 64 >= n)
+                break;
+        }
+        break;
+    }
     case K_FILE: snprintf(out, n, "%s", c->settings_path ? c->settings_path : ""); break;
     case K_RESOLUTIONS: {
         struct lm_output *lo = first_output(srv);
@@ -702,6 +736,12 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
             return false;
         if (srv->render)
             lm_render_set_wallpaper(srv->render, cfg->wallpaper, cfg->wallpaper_mode);
+        return true;
+    case K_OUTPUT_ORDER:
+        if (cfg_set(cfg, key, val, NULL, 0) < 0)
+            return false;
+        if (srv->wm)
+            lm_wm_relayout_outputs(srv->wm);                    /* the monitors move, the windows with them */
         return true;
     case K_SINK:
         if (!lm_audio_set_sink(val)) return false;

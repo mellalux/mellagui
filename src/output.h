@@ -23,6 +23,10 @@ void lm_output_mgr_destroy(struct lm_output_mgr *mgr);
  * advertises a wl_output (v3) global with out as bind data.
  */
 void lm_output_mgr_add(struct lm_output_mgr *mgr, struct lm_output *out);
+/* The outputs' places changed (settings output-order): packs them again, announcing the ones that moved. */
+void lm_output_mgr_relayout(struct lm_output_mgr *mgr);
+/* The leftmost output (the one the gadgets and notifications live on); NULL without outputs. */
+struct lm_output *lm_output_primary(struct lm_server *srv);
 /* Mode/geometry changed: re-send geometry/mode/scale/done to bound resources. */
 void lm_output_mgr_changed(struct lm_output_mgr *mgr, struct lm_output *out);
 /* Output going away: destroys the global, sets bound resources' data to NULL, re-packs the layout. */

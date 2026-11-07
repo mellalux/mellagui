@@ -582,12 +582,7 @@ static void menu_set(struct lm_wm *wm, bool open, const struct lm_rect *launcher
 
 static struct lm_output *gadget_output(const struct lm_wm *wm)
 {
-    if (!wm->srv->backend || lm_list_empty(&wm->srv->backend->outputs))
-        return NULL;
-    struct lm_output *o = NULL;
-    lm_list_for_each(o, &wm->srv->backend->outputs, link)
-        break;
-    return o;
+    return lm_output_primary(wm->srv);
 }
 
 /* Default / minimum / maximum card size per gadget. */
@@ -1084,6 +1079,32 @@ void lm_wm_output_added(struct lm_wm *wm, struct lm_output *out)
 {
     (void)out;
     damage_all(wm);
+}
+
+void lm_wm_relayout_outputs(struct lm_wm *wm)
+{
+    struct { struct lm_window *w; struct lm_output *o; int32_t dx, dy; } rec[64];
+    int n = 0;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        struct lm_output *o = n < 64 ? window_output(wm, w) : NULL;
+        if (o)
+            rec[n++] = (typeof(rec[0])){ w, o, w->x - o->x, w->y - o->y };
+    }
+    if (wm->srv->outputs)
+        lm_output_mgr_relayout(wm->srv->outputs);
+    for (int i = 0; i < n; i++) {
+        int32_t nx = rec[i].o->x + rec[i].dx, ny = rec[i].o->y + rec[i].dy;
+        WIN(rec[i].w)->rx += nx - rec[i].w->x;                  /* the position to restore to moves along, too */
+        WIN(rec[i].w)->ry += ny - rec[i].w->y;
+        rec[i].w->x = nx;
+        rec[i].w->y = ny;
+    }
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN))
+            apply_state(wm, w);
+    damage_all(wm);
+    refresh_pointer(wm);
 }
 
 void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)

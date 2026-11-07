@@ -37,10 +37,17 @@ struct ctl_client {
     struct headless *h;
 };
 
+struct hl_extra {                       /* --output WxH: a fixed-size output besides the first one */
+    struct lm_output out;
+    struct lm_framebuffer fb;
+};
+
 struct headless {
     struct lm_backend base;
     struct lm_output out;
     struct lm_framebuffer fb;
+    struct hl_extra extra[3];
+    int nextra;
     uint64_t frames;
     struct lm_timer *ready_timer;
     int ctl_fd;
@@ -58,14 +65,21 @@ static struct headless *HL(struct lm_backend *b) { return (struct headless *)b; 
 static void ready_fire(void *data)
 {
     struct headless *h = data;
-    h->base.listener.output_ready(h->base.listener.data, &h->out, lm_now_msec32());
+    uint32_t t = lm_now_msec32();
+    h->base.listener.output_ready(h->base.listener.data, &h->out, t);
+    for (int i = 0; i < h->nextra; i++)
+        h->base.listener.output_ready(h->base.listener.data, &h->extra[i].out, t);
 }
 
 static struct lm_framebuffer *hl_get_framebuffer(struct lm_output *out)
 {
     struct headless *h = HL(out->backend);
-    h->fb.age = h->frames ? 1 : 0;
-    return &h->fb;
+    struct lm_framebuffer *fb = &h->fb;
+    for (int i = 0; i < h->nextra; i++)
+        if (out == &h->extra[i].out)
+            fb = &h->extra[i].fb;
+    fb->age = h->frames ? 1 : 0;
+    return fb;
 }
 
 static int hl_present(struct lm_output *out, const struct lm_rect *damage, int n)
@@ -78,31 +92,39 @@ static int hl_present(struct lm_output *out, const struct lm_rect *damage, int n
     return 0;
 }
 
-int lm_backend_headless_dump(struct lm_backend *b, const char *path)
+int lm_backend_headless_dump_output(struct lm_backend *b, const char *path, int index)
 {
     struct headless *h = HL(b);
     if (b->server && b->server->render)
         lm_render_readback(b->server->render);
+    const struct lm_framebuffer *fb = index == 0 ? &h->fb : index >= 1 && index <= h->nextra ? &h->extra[index - 1].fb : NULL;
+    if (!fb)
+        return -1;
     FILE *f = fopen(path, "wb");
     if (!f)
         return -1;
-    fprintf(f, "P6\n%d %d\n255\n", h->fb.width, h->fb.height);
-    uint8_t *row = malloc((size_t)h->fb.width * 3);
+    fprintf(f, "P6\n%d %d\n255\n", fb->width, fb->height);
+    uint8_t *row = malloc((size_t)fb->width * 3);
     if (!row) {
         fclose(f);
         return -1;
     }
-    for (int y = 0; y < h->fb.height; y++) {
-        const uint32_t *src = (const uint32_t *)((const uint8_t *)h->fb.pixels + (size_t)y * (size_t)h->fb.stride);
-        for (int x = 0; x < h->fb.width; x++) {
+    for (int y = 0; y < fb->height; y++) {
+        const uint32_t *src = (const uint32_t *)((const uint8_t *)fb->pixels + (size_t)y * (size_t)fb->stride);
+        for (int x = 0; x < fb->width; x++) {
             row[x * 3] = (uint8_t)(src[x] >> 16);
             row[x * 3 + 1] = (uint8_t)(src[x] >> 8);
             row[x * 3 + 2] = (uint8_t)src[x];
         }
-        fwrite(row, 3, (size_t)h->fb.width, f);
+        fwrite(row, 3, (size_t)fb->width, f);
     }
     free(row);
     return fclose(f) == 0 ? 0 : -1;
+}
+
+int lm_backend_headless_dump(struct lm_backend *b, const char *path)
+{
+    return lm_backend_headless_dump_output(b, path, 0);
 }
 
 /* ---- control socket ------------------------------------------------------------------- */
@@ -153,9 +175,9 @@ static void ctl_command(struct ctl_client *c, char *line)
     char *a3 = strtok_r(NULL, " \t", &save);
 
     if (!strcmp(cmd, "dump")) {
-        if (!a1) { ctl_reply(c, "err usage: dump <path>\n"); return; }
+        if (!a1) { ctl_reply(c, "err usage: dump <path> [output]\n"); return; }
         ctl_flush(h);
-        if (lm_backend_headless_dump(&h->base, a1) < 0)
+        if (lm_backend_headless_dump_output(&h->base, a1, a2 ? atoi(a2) : 0) < 0)
             ctl_reply(c, "err cannot write %s: %s\n", a1, strerror(errno));
         else
             ctl_reply(c, "ok\n");
@@ -259,6 +281,12 @@ static void ctl_command(struct ctl_client *c, char *line)
         char buf[1536];
         lm_settings_dump(srv->settings, buf, sizeof(buf));
         ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);
+    } else if (!strcmp(cmd, "outputs")) {
+        /* outputs -> one "output <name> x=<x> y=<y> w=<w> h=<h>" line each (in the order of the list), then "ok" */
+        struct lm_output *o;
+        lm_list_for_each(o, &h->base.outputs, link)
+            ctl_reply(c, "output %s x=%d y=%d w=%d h=%d\n", o->name, o->x, o->y, o->width, o->height);
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "notify")) {
         /* notify <ms> <title> [body words...] */
         if (!srv->settings || !a1 || !a2) { ctl_reply(c, "err usage: notify <ms> <title> [body]\n"); return; }
@@ -488,6 +516,27 @@ static int hl_init(struct lm_backend *b)
     b->session_active = true;
     if (b->listener.output_added)
         b->listener.output_added(b->listener.data, &h->out);
+    for (int i = 0; i < srv->config.headless_nextra && i < 3; i++) {             /* --output WxH */
+        struct hl_extra *x = &h->extra[i];
+        int w = srv->config.headless_extra[i][0], hh = srv->config.headless_extra[i][1];
+        x->fb = (struct lm_framebuffer){ .width = w, .height = hh, .stride = w * 4, .pixels = calloc((size_t)w * (size_t)hh, 4) };
+        if (!x->fb.pixels)
+            return -1;
+        x->out.backend = b;
+        snprintf(x->out.name, sizeof(x->out.name), "headless-%d", i + 1);
+        snprintf(x->out.make, sizeof(x->out.make), "MellaGUI");
+        snprintf(x->out.model, sizeof(x->out.model), "headless");
+        x->out.width = w;
+        x->out.height = hh;
+        x->out.refresh_mhz = 60000;
+        x->out.phys_width_mm = w * 254 / 960;
+        x->out.phys_height_mm = hh * 254 / 960;
+        x->out.scale = 1;
+        lm_list_append(&b->outputs, &x->out.link);
+        h->nextra = i + 1;
+        if (b->listener.output_added)
+            b->listener.output_added(b->listener.data, &x->out);
+    }
     lm_timer_arm_ms(h->ready_timer, 1, 0);
     return 0;
 }
@@ -498,6 +547,12 @@ static void hl_destroy(struct lm_backend *b)
     for (int i = 0; i < CTL_MAX_CLIENTS; i++)
         if (h->clients[i])
             ctl_close(h->clients[i]);
+    for (int i = h->nextra - 1; i >= 0; i--) {
+        if (b->listener.output_removed)
+            b->listener.output_removed(b->listener.data, &h->extra[i].out);
+        lm_list_remove(&h->extra[i].out.link);
+        free(h->extra[i].fb.pixels);
+    }
     if (h->output_live) {
         if (b->listener.output_removed)
             b->listener.output_removed(b->listener.data, &h->out);

@@ -187,6 +187,8 @@ struct lm_backend *lm_backend_drm_create(struct lm_server *srv);
 struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h);
 /* Write output 0's last drawn frame to `path` as P6 PPM. Returns 0 or -1. */
 int lm_backend_headless_dump(struct lm_backend *b, const char *path);
+/* The same for output `index` (0 = the first, 1.. the --output ones). -1 when there is no such output. */
+int lm_backend_headless_dump_output(struct lm_backend *b, const char *path, int index);
 
 /* Thin wrappers around the vtable. */
 static inline int lm_backend_init(struct lm_backend *b) { return b->ops->init(b); }

@@ -45,6 +45,7 @@ static const char *usage_text =
     "                           panel's (e.g. 21:9 panel, 16:9 modes only): then a mode of the panel's shape is generated\n"
     "                           (CVT reduced blanking). WxH forces a size (generated if the monitor does not list it),\n"
     "                           'preferred' turns the correction off\n"
+    "  --output WxH             headless: one more output (repeatable, up to 3), to the right of the first one (testing)\n"
     "  --control PATH           headless control socket (testing)\n"
     "  --log-level LEVEL        error|warn|info|debug|trace\n"
     "  --log-file PATH          additionally append the log to PATH\n"
@@ -242,7 +243,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -266,6 +267,7 @@ int main(int argc, char **argv)
         { "screenshot-dir", required_argument, 0, OPT_SCREENSHOT_DIR },
         { "logind", required_argument, 0, OPT_LOGIND },
         { "renderer", required_argument, 0, OPT_RENDERER },
+        { "output", required_argument, 0, OPT_OUTPUT },
         { "settings-access", required_argument, 0, OPT_SETTINGS_ACCESS },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
@@ -405,6 +407,16 @@ int main(int argc, char **argv)
             else { fprintf(stderr, "mellagui: --settings-access wants any or own, not '%s'\n", optarg); return 2; }
             break;
         case OPT_LOCK_FILE: cfg.lock_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_OUTPUT: {
+            int w, h;
+            if (sscanf(optarg, "%dx%d", &w, &h) != 2 || w < 64 || h < 64 || w > 16384 || h > 16384 || cfg.headless_nextra >= 3) {
+                fprintf(stderr, "mellagui: bad --output '%s' (expected WxH, at most 3)\n", optarg);
+                return 2;
+            }
+            cfg.headless_extra[cfg.headless_nextra][0] = w;
+            cfg.headless_extra[cfg.headless_nextra++][1] = h;
+            break;
+        }
         case OPT_RENDERER:
             if (!strcmp(optarg, "software")) cfg.renderer = 0;
             else if (!strcmp(optarg, "auto")) cfg.renderer = 1;

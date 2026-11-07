@@ -1,4 +1,4 @@
-"""Minimal raw-socket Wayland client library used by the Mellagui test-suite.
+"""Minimal raw-socket Wayland client library used by the MellaGUI test-suite.
 
 No libwayland: the wire format is implemented here, independently of the
 compositor's own wire.c, so protocol bugs on either side show up as test failures.

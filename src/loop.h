@@ -4,7 +4,7 @@
 /*
  * Single-threaded epoll event loop. Owner: loop.c.
  *
- * Everything in Mellagui runs on one thread inside lm_loop_run(). Callbacks may
+ * Everything in MellaGUI runs on one thread inside lm_loop_run(). Callbacks may
  * freely add/remove sources, timers and idle callbacks (including themselves);
  * removal is deferred until the current dispatch round finishes, so a source
  * pointer stays valid until its callback returns.

@@ -433,7 +433,7 @@ static int hl_init(struct lm_backend *b)
     memset(&h->out, 0, sizeof(h->out));
     h->out.backend = b;
     snprintf(h->out.name, sizeof(h->out.name), "headless-0");
-    snprintf(h->out.make, sizeof(h->out.make), "Mellagui");
+    snprintf(h->out.make, sizeof(h->out.make), "MellaGUI");
     snprintf(h->out.model, sizeof(h->out.model), "headless");
     h->out.width = h->w;
     h->out.height = h->h;

@@ -2,8 +2,8 @@
 #define MELLAGUI_DMABUF_H
 
 /*
- * zwp_linux_dmabuf_v1 (version 4): lets clients render with the GPU (Mesa's EGL, Firefox's WebRender) and hand Mellagui the
- * finished frames as dmabufs. Mellagui composites in software, so it only needs to READ them: the pixels are mapped and copied
+ * zwp_linux_dmabuf_v1 (version 4): lets clients render with the GPU (Mesa's EGL, Firefox's WebRender) and hand MellaGUI the
+ * finished frames as dmabufs. MellaGUI composites in software, so it only needs to READ them: the pixels are mapped and copied
  * into the surface's texture on commit (shm.c: mmap + DMA_BUF_IOCTL_SYNC + streaming loads), exactly like an shm buffer.
  *
  * What is offered: ARGB8888 and XRGB8888 with the LINEAR modifier only (linear memory can be read by the CPU without

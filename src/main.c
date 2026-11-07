@@ -1,5 +1,5 @@
 /*
- * Mellagui compositor entry point: argument parsing, module wiring, shutdown.
+ * MellaGUI compositor entry point: argument parsing, module wiring, shutdown.
  */
 #include <errno.h>
 #include <getopt.h>
@@ -36,7 +36,7 @@ static const char *usage_text =
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
     "  --terminal CMD           command for Super+Enter and the panel launcher (default mellagui-term)\n"
-    "  --app NAME=CMD           add an entry to the Mellagui menu (repeatable; replaces the default Terminal/Calculator/Code)\n"
+    "  --app NAME=CMD           add an entry to the MellaGUI menu (repeatable; replaces the default Terminal/Calculator/Code)\n"
     "  --run CMD                command for Super+R and the panel's Run button (default mellagui-run)\n"
     "  --drm-device PATH        DRM device (default: auto-detect /dev/dri/card*)\n"
     "  --mode WxH[@Hz]|preferred  drm: video mode. Default: the monitor's preferred one, except when its shape differs from the\n"
@@ -73,7 +73,7 @@ static struct lm_backend *g_backend;
 static void migrate_old_config_dir(void)
 {
     const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-    char base[PATH_MAX], from[PATH_MAX], to[PATH_MAX];
+    char base[PATH_MAX - 16], from[PATH_MAX], to[PATH_MAX];
     struct stat st;
     if (xdg && *xdg)
         snprintf(base, sizeof(base), "%s", xdg);
@@ -426,8 +426,8 @@ int main(int argc, char **argv)
             cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
             break;
         }
-        /* Firefox: the snap's launcher or a distro binary. Native Wayland, WebRender on the GPU (Mellagui offers zwp_linux_dmabuf_v1; without it Firefox falls back by itself).
-         * (The snap is confined: it may only connect to sockets named wayland-N, which is what Mellagui picks by default.) */
+        /* Firefox: the snap's launcher or a distro binary. Native Wayland, WebRender on the GPU (MellaGUI offers zwp_linux_dmabuf_v1; without it Firefox falls back by itself).
+         * (The snap is confined: it may only connect to sockets named wayland-N, which is what MellaGUI picks by default.) */
         const char *ffs[2] = { "/snap/bin/firefox", "/usr/bin/firefox" };
         for (int i = 0; i < 2; i++) {
             if (access(ffs[i], X_OK) != 0)
@@ -531,7 +531,7 @@ int main(int argc, char **argv)
             lm_info("will quit automatically after %d s", timeout_s);
         }
     }
-    lm_info("Mellagui ready on WAYLAND_DISPLAY=%s (backend %s)", lm_server_socket_name(srv), cfg.backend);
+    lm_info("MellaGUI ready on WAYLAND_DISPLAY=%s (backend %s)", lm_server_socket_name(srv), cfg.backend);
     if (cfg.exec_cmd)
         lm_server_spawn(srv, cfg.exec_cmd);
 

@@ -1,4 +1,4 @@
-# Mellagui architecture
+# MellaGUI architecture
 
 > **Implementation status.** All modules described here exist. Differences from the original design:
 > logind `TakeDevice` is *not* implemented (devices are opened directly, so the user needs the
@@ -7,7 +7,7 @@
 > `backend_drm.c` has not been exercised on real hardware.
 
 
-Mellagui is a from-scratch Wayland compositor and built-in shell in C11 that runs
+MellaGUI is a from-scratch Wayland compositor and built-in shell in C11 that runs
 directly on a Linux VT (DRM/KMS + evdev). No X11, no Xwayland, no libwayland,
 wlroots, libinput, xkbcommon, udev, gbm or EGL: the Wayland wire protocol, the
 protocol objects, the keymap and the software renderer are all implemented in
@@ -155,7 +155,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `wl_data_device_manager` | 3 | seat.c |
 | `xdg_wm_base` | 3 | xdg.c |
 | `zxdg_decoration_manager_v1` | 1 (always `server_side`) | xdg.c |
-| `mellagui_settings_v1` | 1 (Mellagui private) | settings.c |
+| `mellagui_settings_v1` | 1 (MellaGUI private) | settings.c |
 
 ## Design decisions worth knowing
 

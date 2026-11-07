@@ -44,9 +44,9 @@
  *
  * ---- Shortcuts (lm_wm_key) -------------------------------------------------------
  *   Super+Enter        spawn config.terminal_cmd
- *   Escape             closes the open app menu (the "Mellagui" panel button toggles it)
+ *   Escape             closes the open app menu (the "MellaGUI" panel button toggles it)
  *   Super+R            spawn config.run_cmd (run dialog; also the panel's "Run" button)
- *   Super+I            spawn config.settings_cmd (settings panel, also in the Mellagui menu)
+ *   Super+I            spawn config.settings_cmd (settings panel, also in the MellaGUI menu)
  *   Super+G            show / hide the clipboard gadget (history; drag its title bar to move, its edges to resize)
  *   Super+V            show / hide the volume mixer gadget (same dragging; sliders and buttons work inside)
  *   Super+S            show / hide the system monitor gadget (CPU, memory, temperature)

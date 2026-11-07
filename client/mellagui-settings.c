@@ -458,7 +458,7 @@ static void build_display(struct app *a, int x, int y, int w)
         const char *v = kv_get(a, "monitor");
         if (*v && sscanf(v, "%39[^|]|%39[^|]|%39[^|]|%d|%d", mk, mo, con, &mmw, &mmh) >= 3) {
             char line[112];
-            if (!strcmp(mk, "DRM") || !strcmp(mk, "Mellagui"))
+            if (!strcmp(mk, "DRM") || !strcmp(mk, "MellaGUI"))
                 snprintf(line, sizeof(line), "Monitor: %s", mo);                 /* no manufacturer known */
             else
                 snprintf(line, sizeof(line), "Monitor: %s %s", mk, mo);
@@ -548,8 +548,8 @@ static void build_sound(struct app *a, int x, int y, int w)
         }
     }
     y += 6;
-    /* 3. Mellagui's own beeps (ALSA device) */
-    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Mellagui's own beeps (ALSA)");
+    /* 3. MellaGUI's own beeps (ALSA device) */
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "MellaGUI's own beeps (ALSA)");
     y += ROW_H;
     cur = kv_get(a, "audio-out");
     shown = pick_entries(kv_get(a, "audio-outs"), 4, ents);
@@ -615,7 +615,7 @@ static void slider_drag_to(struct app *a, int idx, double x)
         send_set_int(a, w->key, v);
 }
 
-/* Starts another Mellagui program next to this one (the monitor panel); it is not waited for. */
+/* Starts another MellaGUI program next to this one (the monitor panel); it is not waited for. */
 static void launch_sibling(const char *name)
 {
     pid_t pid = fork();

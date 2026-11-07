@@ -21,7 +21,7 @@
  *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm
  *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the
  *                                              monitor's native shape (edid.h), preferred = the monitor's own preferred mode
- *   audio-out       ALSA device name           where Mellagui's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
+ *   audio-out       ALSA device name           where MellaGUI's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
  *   file            (read only)                path the settings are saved to, "" = not saved
  *   -- live state, never saved: --
  *   resolutions     "WxH@Hz|note;..."          modes the first output can show (read only)

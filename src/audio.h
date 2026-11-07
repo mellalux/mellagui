@@ -1,6 +1,6 @@
 /*
- * audio.h - sound outputs for the settings panel. Mellagui has no audio server of its own:
- *   * ALSA devices come from /proc/asound (env MELLAGUI_ASOUND_DIR overrides, for tests); the chosen one is where Mellagui's own
+ * audio.h - sound outputs for the settings panel. MellaGUI has no audio server of its own:
+ *   * ALSA devices come from /proc/asound (env MELLAGUI_ASOUND_DIR overrides, for tests); the chosen one is where MellaGUI's own
  *     feedback beeps (sound.h) are played, HDMI/DisplayPort outputs are labelled as such;
  *   * the system output (PulseAudio / PipeWire's pulse server) is listed and changed with `pactl` (nothing is listed when
  *     pactl is missing or no server runs): the default sink decides where applications like Firefox play.

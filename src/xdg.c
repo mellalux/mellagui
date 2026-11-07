@@ -1499,7 +1499,7 @@ static void toplevel_req_set_app_id(struct lm_resource *res, const union lm_arg 
 static void toplevel_req_show_window_menu(struct lm_resource *res, const union lm_arg *args)
 {
     (void)res;
-    (void)args; /* no window menu in Mellagui: the title bar buttons cover it */
+    (void)args; /* no window menu in MellaGUI: the title bar buttons cover it */
 }
 
 static void toplevel_req_move(struct lm_resource *res, const union lm_arg *args)

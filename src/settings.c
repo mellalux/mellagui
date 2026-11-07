@@ -427,7 +427,7 @@ static void save_now(struct lm_settings *s)
         lm_warn("settings: cannot write %s: %s", tmp, strerror(errno));
         return;
     }
-    fputs("# Mellagui settings (written by the settings panel; edit while mellagui is not running)\n", f);
+    fputs("# MellaGUI settings (written by the settings panel; edit while mellagui is not running)\n", f);
     for (int k = 0; k < K_FILE; k++) {
         char v[VALUE_MAX];
         if (k == K_RESOLUTION && s->res_pending)

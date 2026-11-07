@@ -1,4 +1,4 @@
-# Mellagui - a Wayland compositor + shell for Linux without X11.
+# MellaGUI - a Wayland compositor + shell for Linux without X11.
 #
 #   make            build everything that has sources
 #   make mellagui      build/mellagui        (compositor, src/*.c)

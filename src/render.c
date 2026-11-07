@@ -872,7 +872,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     fill_rect(c, &line, 0x262c3bu);
 
     fill_rect(c, &p->launcher, p->hover_launcher ? COL_PANEL_HOVER : COL_PANEL_BTN);
-    draw_text_centered(c, &p->launcher, "Mellagui", COL_PANEL_TEXT);
+    draw_text_centered(c, &p->launcher, "MellaGUI", COL_PANEL_TEXT);
 
     for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
         const struct lm_rect *w = &p->workspace[i];

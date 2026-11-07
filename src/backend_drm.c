@@ -830,14 +830,14 @@ static int vt_setup(struct drm *d)
 {
     d->tty_fd = open("/dev/tty", O_RDWR | O_CLOEXEC | O_NOCTTY);
     if (d->tty_fd < 0) {
-        lm_error("drm: cannot open /dev/tty (%s). Start Mellagui from a Linux virtual console "
+        lm_error("drm: cannot open /dev/tty (%s). Start MellaGUI from a Linux virtual console "
                  "(switch with Ctrl+Alt+F3 and log in), not from a terminal emulator or ssh.",
                  strerror(errno));
         return -1;
     }
     struct vt_stat st;
     if (ioctl(d->tty_fd, VT_GETSTATE, &st) < 0) {
-        lm_error("drm: %s is not a Linux virtual console. Start Mellagui from a text VT "
+        lm_error("drm: %s is not a Linux virtual console. Start MellaGUI from a text VT "
                  "(Ctrl+Alt+F3), not from a terminal emulator or ssh.", "/dev/tty");
         close(d->tty_fd);
         d->tty_fd = -1;

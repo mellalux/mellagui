@@ -96,7 +96,7 @@ extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_v1_interface;     /* dmabuf.c */
 extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
-extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* Mellagui private: settings.c */
+extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* MellaGUI private: settings.c */
 
 /*
  * ---- COPY-PASTE LIST OF ADVERTISED GLOBALS (interface, version) -------------
@@ -109,7 +109,7 @@ extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* Mella
  *   xdg_wm_base                   3    xdg.c
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
  *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
- *   mellagui_settings_v1             1    settings.c (Mellagui private: read/change the user settings)
+ *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
 #define LM_WL_SUBCOMPOSITOR_VERSION         1
@@ -547,7 +547,7 @@ enum {
 #define LM_DRM_FORMAT_XRGB8888 0x34325258u      /* 'X' 'R' '2' '4' */
 #define LM_DRM_FORMAT_MOD_LINEAR 0ull
 
-/* ---- mellagui_settings_v1 (Mellagui's own protocol, see settings.h for the keys) ----------------------------------- */
+/* ---- mellagui_settings_v1 (MellaGUI's own protocol, see settings.h for the keys) ----------------------------------- */
 enum {
     LM_MELLAGUI_SETTINGS_V1_REQ_DESTROY = 0,   /* "" */
     LM_MELLAGUI_SETTINGS_V1_REQ_SET = 1,       /* "ss" key, value: change one setting (the answer is a value burst + done) */

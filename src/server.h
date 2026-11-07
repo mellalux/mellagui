@@ -151,10 +151,10 @@ struct lm_config {
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
     const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
-    struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "Mellagui" menu (--app NAME=CMD; defaults filled by main.c) */
+    struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "MellaGUI" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
-    char audio_device[64];      /* ALSA device for Mellagui's own beeps (settings: audio-out) */
+    char audio_device[64];      /* ALSA device for MellaGUI's own beeps (settings: audio-out) */
     int drm_mode_w, drm_mode_h, drm_mode_hz;   /* --mode WxH[@Hz]: 0 = automatic (preferred, corrected to the panel's shape), -1 = --mode preferred */
     const char *control_path;   /* headless control socket path (--control), NULL = none */
     const char *dump_path;      /* env MELLAGUI_DUMP: headless dump target for SIGUSR1 */

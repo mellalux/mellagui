@@ -1,5 +1,5 @@
 /*
- * mellagui-term: terminal emulator Wayland client for Mellagui.
+ * mellagui-term: terminal emulator Wayland client for MellaGUI.
  *
  * pty + xterm-compatible VT parser (cursor movement, erase, SGR with 16/256/
  * truecolor, scroll regions, alternate screen, bracketed paste, DSR/DA

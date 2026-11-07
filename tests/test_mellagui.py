@@ -484,7 +484,7 @@ class TestWindows(Base):
         ctl.abs(900, 500)
         ctl.sync()
         before = ctl.dump(os.path.join(tmp, 'menu0.ppm'))
-        ctl.click(40, 14)                       # "Mellagui" launcher button opens the menu
+        ctl.click(40, 14)                       # "MellaGUI" launcher button opens the menu
         ctl.abs(300, 300)
         ctl.sync()
         opened = ctl.dump(os.path.join(tmp, 'menu1.ppm'))
@@ -2334,7 +2334,7 @@ esac
         self.assertEqual(g('resolution'), '1280x720@60')
         self.assertEqual(g('resolution-now'), '1280x720@60')
         self.assertNotEqual(g('resolution-confirm'), '')
-        self.assertRegex(g('monitor'), r'^Mellagui\|headless\|headless-0\|\d+\|\d+$')    # make|model|connector|mm
+        self.assertRegex(g('monitor'), r'^MellaGUI\|headless\|headless-0\|\d+\|\d+$')    # make|model|connector|mm
         # the panel is now larger relative to the screen; find it again and press "Keep" (first button below the message)
         win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
@@ -3125,7 +3125,7 @@ class Gbm:
 
 
 class TestDmabuf(Base):
-    """zwp_linux_dmabuf_v1: clients that render with the GPU hand Mellagui dmabufs, which are read like shm buffers."""
+    """zwp_linux_dmabuf_v1: clients that render with the GPU hand MellaGUI dmabufs, which are read like shm buffers."""
 
     DMABUF_ARGB, DMABUF_XRGB = 0x34325241, 0x34325258
 

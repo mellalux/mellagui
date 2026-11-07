@@ -21,7 +21,6 @@
 #include "list.h"
 #include "log.h"
 #include "loop.h"
-#include "seatdev.h"
 #include "settings.h"
 #include "sound.h"
 #include "wm.h"
@@ -566,7 +565,7 @@ static void device_close(struct device *d)
         lm_source_remove(d->source);
     if (d->grabbed)
         ioctl(d->fd, EVIOCGRAB, 0);
-    lm_seatdev_close(in->srv->seatdev, d->fd);
+    close(d->fd);
     lm_list_remove(&d->link);
     free(d);
 }
@@ -580,19 +579,25 @@ static bool device_known(const struct lm_input *in, const char *path)
     return false;
 }
 
+/* open(2) with O_CLOEXEC; returns the fd or -errno. */
+static int open_node(const char *path, int flags)
+{
+    int fd = open(path, flags | O_CLOEXEC);
+    return fd < 0 ? -errno : fd;
+}
+
 static void device_open(struct lm_input *in, const char *path)
 {
-    int fd = lm_seatdev_open(in->srv->seatdev, path, O_RDWR | O_NONBLOCK);
+    int fd = open_node(path, O_RDWR | O_NONBLOCK);
     if (fd == -EACCES || fd == -EPERM || fd == -EROFS)
-        fd = lm_seatdev_open(in->srv->seatdev, path, O_RDONLY | O_NONBLOCK);
+        fd = open_node(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         if (fd == -EACCES && in->hotplug_scan) {
             lm_debug("input: %s is not accessible yet (udev still setting permissions); waiting for its attribute change", path);
         } else if (fd == -EACCES && !in->warned_eacces) {
             in->warned_eacces = true;
             lm_error("input: no permission to open %s. Add yourself to group 'input' "
-                     "(sudo usermod -aG input $USER, then log out and in again) "
-                     "or start Lumen from a logind seat session.", path);
+                     "(sudo usermod -aG input $USER, then log out and in again).", path);
         } else if (fd != -EACCES) {
             lm_debug("input: cannot open %s: %s", path, strerror(-fd));
         }
@@ -632,13 +637,13 @@ static void device_open(struct lm_input *in, const char *path)
         }
     }
     if (!classes) {
-        lm_seatdev_close(in->srv->seatdev, fd);
+        close(fd);
         return;
     }
 
     struct device *d = calloc(1, sizeof(*d));
     if (!d) {
-        lm_seatdev_close(in->srv->seatdev, fd);
+        close(fd);
         return;
     }
     d->in = in;
@@ -661,7 +666,7 @@ static void device_open(struct lm_input *in, const char *path)
     if (!d->source) {
         if (d->grabbed)
             ioctl(fd, EVIOCGRAB, 0);
-        lm_seatdev_close(in->srv->seatdev, fd);
+        close(fd);
         free(d);
         return;
     }

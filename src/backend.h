@@ -160,9 +160,8 @@ struct lm_backend {
 };
 
 /*
- * DRM/KMS backend. `device` NULL = scan /dev/dri/card*. Opens devices through
- * server->seatdev when available (logind TakeDevice) and falls back to
- * open(2). Manages VT (KD_GRAPHICS, VT_PROCESS switching) and restores
+ * DRM/KMS backend. `device` NULL = scan /dev/dri/card*. Opens devices with
+ * open(2) (no logind). Manages VT (KD_GRAPHICS, VT_PROCESS switching) and restores
  * everything on exit, fatal signals and crashes.
  */
 struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *device);

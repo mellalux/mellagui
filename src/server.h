@@ -68,7 +68,6 @@ struct lm_resource;
 struct lm_global;
 
 /* Opaque module states, each defined privately in its own .c and created by main.c. */
-struct lm_seatdev;
 struct lm_backend;
 struct lm_renderer;
 struct lm_compositor;
@@ -219,7 +218,6 @@ struct lm_server {
      * any pointer may be NULL while the system is starting up or shutting
      * down, so modules must tolerate a NULL peer at those times.
      */
-    struct lm_seatdev *seatdev;
     struct lm_backend *backend;
     struct lm_renderer *render;
     struct lm_compositor *compositor;   /* wl_compositor, wl_subcompositor, surfaces */

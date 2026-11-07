@@ -1,7 +1,7 @@
 # Lumen architecture
 
 > **Implementation status.** All modules described here exist. Differences from the original design:
-> logind `TakeDevice` is *not* implemented (`seatdev.c` opens devices directly, so the user needs the
+> logind `TakeDevice` is *not* implemented (devices are opened directly, so the user needs the
 > `video` and `input` groups); `client/wlc.[ch]` is a small client library shared by the
 > clients; `src/font.c` is generated from a Terminus PSF font by `tools/gen_font.py`;
 > `backend_drm.c` has not been exercised on real hardware.
@@ -12,8 +12,7 @@ directly on a Linux VT (DRM/KMS + evdev). No X11, no Xwayland, no libwayland,
 wlroots, libinput, xkbcommon, udev, gbm or EGL: the Wayland wire protocol, the
 protocol objects, the keymap and the software renderer are all implemented in
 this tree. Only libdrm (headers), libc, `linux/input.h`, `linux/kd.h` and
-`linux/vt.h` are used; `libsystemd.so.0` is optionally `dlopen()`ed for
-logind device access.
+`linux/vt.h` are used.
 
 ## Process model
 
@@ -56,17 +55,16 @@ remove sources/timers/idles (removal is deferred until the dispatch round ends).
 
 1. parse argv / env into `struct lm_config`; `lm_log_*`
 2. `lm_loop_create`, `lm_server_create`, install SIGINT/SIGTERM -> `lm_server_quit`
-3. `lm_seatdev_create` -> `srv->seatdev`
-4. backend (`lm_backend_drm_create` or `lm_backend_headless_create`) ->
+3. backend (`lm_backend_drm_create` or `lm_backend_headless_create`) ->
    `srv->backend`, listener installed (see below), **not yet initialised**
-5. `lm_render_create`, `lm_compositor_create`, `lm_shm_create`,
+4. `lm_render_create`, `lm_compositor_create`, `lm_shm_create`,
    `lm_output_mgr_create`, `lm_seat_create`, `lm_xdg_create`, `lm_wm_create`,
    `lm_input_create` (+ `lm_input_set_handler(lm_seat_handle_input_cb, seat)`)
-6. `lm_backend_init()` -> emits `output_added` for every output
-7. `lm_server_listen()`; export `WAYLAND_DISPLAY`; `--exec` command via
+5. `lm_backend_init()` -> emits `output_added` for every output
+6. `lm_server_listen()`; export `WAYLAND_DISPLAY`; `--exec` command via
    `lm_server_spawn`; `lm_loop_run`
-8. teardown: input, wm, xdg, seat, outputs, shm, compositor, render, backend
-   (restores the VT), seatdev, `lm_server_destroy`, loop
+7. teardown: input, wm, xdg, seat, outputs, shm, compositor, render, backend
+   (restores the VT), `lm_server_destroy`, loop
 
 The backend listener installed in main.c fans events out:
 
@@ -106,7 +104,6 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/audio.[ch]` | **sound** | sound outputs for the settings panel: ALSA playback devices from `/proc/asound` (HDMI marked), PulseAudio/PipeWire sinks and the default sink via `pactl` (else `wpctl status`; `lm_audio_sink_status()` says why the list is empty), 1 s timeout; PipeWire card profiles via `pw-cli` (`lm_audio_list_profiles` / `lm_audio_set_profile`: one entry per output type of each card, e.g. analog / HDMI / S/PDIF, the pure `output:X` profile preferred; this is how HDMI audio is chosen; `settings.c` re-scans the sinks 0.8 s and 2.3 s after a switch); the chosen ALSA device is where `sound.c` plays (`aplay -D`) |
 | `src/settings.[ch]` | **settings** | `lumen_settings_v1` global (`set(key, value)` -> a burst of `value` events + `done` to every bound client), validation and application of each key (layouts: `lm_seat_set_layouts` + `lm_input_set_layouts`; repeat: `lm_seat_send_repeat_info`; sticky/gadget through input/wm), the `key=value` settings file (loaded in main.c before argv, saved debounced + atomically) |
 | `src/input.h`, `src/input_evdev.c` | **input** | evdev reading, repeat, acceleration, hotplug, injection, layout + sticky keys state |
-| `src/seatdev.[ch]` | **input** | device open (direct open(2); logind not implemented) |
 | `src/output.[ch]` | **backend** | wl_output globals, output layout queries |
 | `src/backend.h`, `src/backend_drm.c`, `src/backend_headless.c` | **backend** | DRM/KMS + VT; headless + control socket |
 | `src/dmabuf.[ch]` | **protocol** | `zwp_linux_dmabuf_v1` v4: default/surface feedback (the display GPU's render node as main device, a memfd format table), params -> `lm_buffer_create_dmabuf()` (shm.c); only linear ARGB8888/XRGB8888, one plane, no flags; the fd must be a real dmabuf (the sync ioctl is the test), bounds checked against its size |

@@ -37,7 +37,6 @@
 #include "cvt.h"
 #include "edid.h"
 #include "log.h"
-#include "seatdev.h"
 
 #define HOTPLUG_POLL_MS 2000
 #define SIG_VT_RELEASE SIGUSR2
@@ -861,28 +860,29 @@ static int drm_switch_vt(struct lm_backend *b, int vt)
 
 /* ---- device selection ---------------------------------------------------------------------------------- */
 
-static int open_card(struct drm *d, const char *path)
+static int open_card(const char *path)
 {
-    int fd = lm_seatdev_open(d->base.server->seatdev, path, O_RDWR | O_NONBLOCK);
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
-        if (fd == -EACCES)
+        int err = errno;
+        if (err == EACCES)
             lm_error("drm: no permission to open %s. Add yourself to group 'video' "
                      "(sudo usermod -aG video $USER, then log in again) or run from a "
                      "logged-in console session.", path);
         else
-            lm_debug("drm: cannot open %s: %s", path, strerror(-fd));
-        return fd;
+            lm_debug("drm: cannot open %s: %s", path, strerror(err));
+        return -err;
     }
     uint64_t dumb = 0;
     if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &dumb) < 0 || !dumb) {
         lm_debug("drm: %s has no dumb buffer support", path);
-        lm_seatdev_close(d->base.server->seatdev, fd);
+        close(fd);
         return -ENOTSUP;
     }
     drmModeRes *res = drmModeGetResources(fd);
     if (!res) {
         lm_debug("drm: %s has no KMS resources", path);
-        lm_seatdev_close(d->base.server->seatdev, fd);
+        close(fd);
         return -ENODEV;
     }
     bool connected = false;
@@ -896,7 +896,7 @@ static int open_card(struct drm *d, const char *path)
     drmModeFreeResources(res);
     if (!connected) {
         lm_debug("drm: %s has no connected display", path);
-        lm_seatdev_close(d->base.server->seatdev, fd);
+        close(fd);
         return -ENOLINK;
     }
     return fd;
@@ -906,7 +906,7 @@ static int select_device(struct drm *d, const char *forced)
 {
     if (forced) {
         snprintf(d->path, sizeof(d->path), "%s", forced);
-        d->fd = open_card(d, d->path);
+        d->fd = open_card(d->path);
         return d->fd >= 0 ? 0 : -1;
     }
     char names[16][300];
@@ -930,7 +930,7 @@ static int select_device(struct drm *d, const char *forced)
                 memcpy(names[j], t, 300);
             }
     for (int i = 0; i < n; i++) {
-        d->fd = open_card(d, names[i]);
+        d->fd = open_card(names[i]);
         if (d->fd >= 0) {
             snprintf(d->path, sizeof(d->path), "%.*s", (int)sizeof(d->path) - 1, names[i]);
             return 0;
@@ -1000,7 +1000,7 @@ static void drm_destroy(struct lm_backend *b)
     if (d->fd >= 0) {
         if (d->is_master)
             drmDropMaster(d->fd);
-        lm_seatdev_close(b->server->seatdev, d->fd);
+        close(d->fd);
     }
     if (d->tty_fd >= 0) {
         console_restore();

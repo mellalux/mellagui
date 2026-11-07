@@ -19,7 +19,6 @@
 #include "output.h"
 #include "render.h"
 #include "seat.h"
-#include "seatdev.h"
 #include "settings.h"
 #include "server.h"
 #include "shm.h"
@@ -425,10 +424,6 @@ int main(int argc, char **argv)
     lm_loop_add_signal(loop, SIGHUP, sig_quit, srv);
     lm_loop_add_signal(loop, SIGUSR1, sig_dump, srv);
 
-    srv->seatdev = lm_seatdev_create();
-    if (!srv->seatdev)
-        goto out;
-
     bool headless = !strcmp(cfg.backend, "headless");
     srv->backend = headless ? lm_backend_headless_create(srv, cfg.headless_width, cfg.headless_height)
                             : lm_backend_drm_create(srv, cfg.drm_device);
@@ -523,8 +518,6 @@ out:
     if (srv->backend) lm_backend_destroy(srv->backend);
     srv->backend = NULL;
     g_backend = NULL;
-    if (srv->seatdev) lm_seatdev_destroy(srv->seatdev);
-    srv->seatdev = NULL;
     lm_server_destroy(srv);
     lm_loop_destroy(loop);
     lm_log_close();

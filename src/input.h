@@ -7,7 +7,7 @@
  * test backend.
  *
  * Responsibilities of input_evdev.c:
- *  - open /dev/input/event* through server->seatdev (lm_seatdev_open) and
+ *  - open /dev/input/event* directly (no logind) and
  *    hot-plug via inotify on /dev/input; classify with EVIOCGBIT into
  *    keyboard / pointer / touch(pad/screen)
  *  - EACCES: log ONE clear error telling the user to add themself to group

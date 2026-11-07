@@ -2,8 +2,8 @@
 
 > **Implementation status.** All modules described here exist. Differences from the original design:
 > logind `TakeDevice` is *not* implemented (`seatdev.c` opens devices directly, so the user needs the
-> `video` and `input` groups); `client/wlc.[ch]` is a small client library shared by `lumen-demo` and
-> `lumen-term`; `src/font.c` is generated from a Terminus PSF font by `tools/gen_font.py`;
+> `video` and `input` groups); `client/wlc.[ch]` is a small client library shared by the
+> clients; `src/font.c` is generated from a Terminus PSF font by `tools/gen_font.py`;
 > `backend_drm.c` has not been exercised on real hardware.
 
 
@@ -113,7 +113,6 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/cvt.[ch]`, `src/edid.[ch]` | **backend** | video-mode helpers without DRM types (unit-tested in `keymap-test`): CVT reduced-blanking timings; the EDID's native timing and the rule for when the offered mode has the wrong shape (a 21:9 panel with only 16:9 modes gets a generated mode of its own shape instead of being stretched by the monitor) |
 | `src/render.[ch]`, `src/font.[ch]` | **render** | software compositor, cursor, decorations, 8x16 font |
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
-| `client/lumen-demo.c` | **clients** | demo client using `wire.c` + `protocol.c` in client mode |
 | `client/lumen-term.c` (later) | **clients** | terminal emulator |
 | `client/lumen-settings.c` | **clients** | settings panel (Keyboard, Pointer, Desktop, Display, Sound): tabs, checkboxes, radio lists, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
 | `client/lumen-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
@@ -232,7 +231,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 C11 (`-std=gnu11`), 4-space indent, snake_case, public symbols prefixed `lm_`,
 header guards `LUMEN_<NAME>_H`, comments only where non-obvious, English
 identifiers and comments. Build: `make`, `make asan`, `make test`.
-Binaries: `build/lumen`, `build/lumen-demo`, `build/lumen-term`, `build/lumen-calc`.
+Binaries: `build/lumen`, `build/lumen-term`, `build/lumen-calc`.
 
 ## Testing
 

@@ -2,7 +2,6 @@
 #
 #   make            build everything that has sources
 #   make lumen      build/lumen        (compositor, src/*.c)
-#   make lumen-demo build/lumen-demo   (client/lumen-demo.c)
 #   make lumen-term build/lumen-term   (client/lumen-term.c)
 #   make lumen-calc build/lumen-calc   (client/lumen-calc.c)
 #   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog)
@@ -34,14 +33,13 @@ ASAN_OBJS := $(patsubst src/%.c,$(BUILD)/asan/%.o,$(COMP_SRCS))
 CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c src/keymap.c
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
-TARGETS := $(BUILD)/lumen $(BUILD)/lumen-demo $(BUILD)/lumen-term $(BUILD)/lumen-calc $(BUILD)/keymap-test \
+TARGETS := $(BUILD)/lumen $(BUILD)/lumen-term $(BUILD)/lumen-calc $(BUILD)/keymap-test \
            $(BUILD)/lumen-run $(BUILD)/lumen-settings
 
-.PHONY: all lumen lumen-demo lumen-term lumen-calc lumen-run lumen-settings asan test run clean
+.PHONY: all lumen lumen-term lumen-calc lumen-run lumen-settings asan test run clean
 all: $(TARGETS)
 
 lumen: $(BUILD)/lumen
-lumen-demo: $(BUILD)/lumen-demo
 lumen-calc: $(BUILD)/lumen-calc
 lumen-run: $(BUILD)/lumen-run
 lumen-settings: $(BUILD)/lumen-settings
@@ -56,10 +54,6 @@ $(BUILD)/lumen: $(COMP_OBJS)
 $(BUILD)/lumen-asan: $(ASAN_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) -o $@ $^ $(LDLIBS)
-
-$(BUILD)/lumen-demo: $(BUILD)/client/lumen-demo.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)

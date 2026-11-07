@@ -3,7 +3,7 @@
 
 /*
  * Built-in 8x16 monochrome bitmap font, shared by the renderer (title bars,
- * panel), lumen-demo and lumen-term. Owner: render.c's owner (font.c).
+ * panel) and the clients. Owner: render.c's owner (font.c).
  * No dependencies; linkable into clients.
  *
  * Required coverage: ASCII 0x20..0x7e, Latin-1 supplement 0xa0..0xff, the

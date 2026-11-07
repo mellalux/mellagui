@@ -15,12 +15,11 @@ Included programs:
 | `build/lumen-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/lumen-settings` | settings panel (Super+I or *Lumen* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound, resolution, sound outputs; `--get` / `--set KEY=VALUE` for scripts |
 | `build/lumen-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
-| `build/lumen-demo`| small animated demo client                                        |
 
 ## Status (read this)
 
 * Developed and **tested headless** (60+ end-to-end tests with a from-scratch Python wire client, ASan/UBSan clean).
-  Rendering, the window manager, xdg-shell, input routing, clipboard, terminal and the demo are exercised there.
+  Rendering, the window manager, xdg-shell, input routing, clipboard, terminal and the other clients are exercised there.
 * The **DRM/KMS + VT backend (`src/backend_drm.c`) has not been run on real hardware** by its author:
   it was written carefully against the kernel APIs and compiles warning-free, but expect to debug it on first use.
   Use `--timeout` for the first run (see below).
@@ -38,7 +37,7 @@ Included programs:
 
 Requires gcc, make, pkg-config and the libdrm headers (`libdrm-dev`).
 
-    make            # build/lumen, build/lumen-demo, build/lumen-term, build/lumen-calc
+    make            # build/lumen, build/lumen-term, build/lumen-calc
     make asan       # build/lumen-asan with AddressSanitizer + UBSan
     make run        # build and start Lumen (real VT; see below). EXEC=<prog>, TIMEOUT=<s>, HEADLESS=1 are optional
     make test       # end-to-end tests (headless backend, Python 3)

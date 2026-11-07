@@ -1525,17 +1525,6 @@ class TestClients(Base):
             time.sleep(0.05)
         self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'lumen.run'])
 
-    def test_demo_renders_and_quits_on_escape(self):
-        p = self.spawn('lumen-demo')
-        win = wait_for_window('lumen.demo')
-        self.assertIsNotNone(win, 'demo window did not appear')
-        time.sleep(0.3)
-        ppm = ctl.dump(os.path.join(tmp, 'demo.ppm'))
-        colours = {ppm.px(win['x'] + x, win['y'] + 150) for x in range(0, 400, 20)}
-        self.assertGreater(len(colours), 5, 'gradient not rendered')
-        ctl.tap(KEY_ESC)
-        self.assertEqual(p.wait(timeout=5), 0)
-
     def test_terminal_runs_shell_and_gets_keys(self):
         out = os.path.join(tmp, 'term-out.txt')
         script = os.path.join(tmp, 'shell.sh')

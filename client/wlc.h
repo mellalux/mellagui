@@ -2,7 +2,7 @@
 #define LUMEN_WLC_H
 
 /*
- * Tiny Wayland client library for lumen-demo and lumen-term: connection,
+ * Tiny Wayland client library for the lumen clients: connection,
  * object table with per-object event handlers, and request marshalling. It
  * reuses src/wire.c and the interface tables of src/protocol.c, so no
  * libwayland is needed.

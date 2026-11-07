@@ -5,8 +5,8 @@
  * Wayland wire protocol: connection buffers, framing, argument
  * marshalling and SCM_RIGHTS fd passing. Owner: wire.c.
  *
- * Usable by the compositor (server side) AND by clients (lumen-demo,
- * lumen-term): it knows nothing about interfaces or objects, only about
+ * Usable by the compositor (server side) AND by clients
+ * (lumen-term etc.): it knows nothing about interfaces or objects, only about
  * "signature strings".
  *
  * Wire format (host endianness): word0 = object id, word1 = (size << 16) |

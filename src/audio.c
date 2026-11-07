@@ -13,7 +13,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "log.h"
 #include "loop.h"
 
 bool lm_audio_name_ok(const char *name)

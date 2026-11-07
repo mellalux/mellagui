@@ -67,9 +67,6 @@ struct positioner {
     uint32_t gravity;
     uint32_t constraint;
     int32_t off_x, off_y;
-    bool reactive;                      /* stored; we never reposition on our own */
-    int32_t parent_w, parent_h;
-    uint32_t parent_configure;
 };
 
 struct xdg_surface {
@@ -498,29 +495,25 @@ static void positioner_req_set_offset(struct lm_resource *res, const union lm_ar
     p->off_y = clamp_i32(args[1].i, -(LM_COORD_LIMIT / 2), LM_COORD_LIMIT / 2);
 }
 
+/* reactive and parent_configure are accepted and ignored: we never reposition popups on our own. */
 static void positioner_req_set_reactive(struct lm_resource *res, const union lm_arg *args)
 {
-    struct positioner *p = res->data;
+    (void)res;
     (void)args;
-    p->reactive = true;
 }
 
 static void positioner_req_set_parent_size(struct lm_resource *res, const union lm_arg *args)
 {
-    struct positioner *p = res->data;
     if (args[0].i < 0 || args[1].i < 0) {
         lm_resource_post_error(res, LM_XDG_POSITIONER_ERR_INVALID_INPUT,
                                "xdg_positioner parent size must not be negative");
-        return;
     }
-    p->parent_w = args[0].i;
-    p->parent_h = args[1].i;
 }
 
 static void positioner_req_set_parent_configure(struct lm_resource *res, const union lm_arg *args)
 {
-    struct positioner *p = res->data;
-    p->parent_configure = args[0].u;
+    (void)res;
+    (void)args;
 }
 
 static void positioner_destroy_hook(struct lm_resource *res)

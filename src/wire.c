@@ -550,7 +550,6 @@ int lm_wire_send(struct lm_wire *w, uint32_t id, uint32_t opcode,
             /* Try to drain before declaring the peer too slow. */
             lm_wire_flush(w);
             if (r->len + pos > w->max_out || w->n_out_fds + nfds > LM_WIRE_MAX_FDS) {
-                w->overflowed = true;
                 err = LM_WIRE_E_OVERFLOW;
             }
         }

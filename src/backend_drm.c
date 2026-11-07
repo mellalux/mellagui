@@ -95,7 +95,6 @@ struct drm {
     struct lm_timer *ready_timer;   /* "ready" after (re)activation */
     int tty_fd;
     struct lm_source *sig_release, *sig_acquire;
-    bool vt_setup;
     bool is_master;
     bool active;
 };
@@ -842,7 +841,6 @@ static int vt_setup(struct drm *d)
         lm_error("drm: VT_SETMODE failed: %s", strerror(errno));
         return -1;
     }
-    d->vt_setup = true;
     return 0;
 }
 

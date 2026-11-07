@@ -274,7 +274,6 @@ struct app {
     bool has_pointer;
     struct kv kvs[MAX_KV];
     int nkv;
-    bool got_done;
     enum page page;
     struct widget wd[MAX_WIDGETS];
     int nw;
@@ -846,7 +845,6 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op == LM_LUMEN_SETTINGS_V1_EVT_VALUE) {
         kv_set(a, args[0].s, args[1].s);
     } else if (op == LM_LUMEN_SETTINGS_V1_EVT_DONE) {
-        a->got_done = true;
         a->redraw = true;
     }
 }
@@ -1034,7 +1032,6 @@ static int cli(struct app *a, int argc, char **argv)
                 return 2;
             }
             *eq = 0;
-            a->got_done = false;
             send_set(a, argv[i], eq + 1);
             if (wlc_roundtrip(a->c) < 0)
                 return 1;

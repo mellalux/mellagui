@@ -108,7 +108,6 @@ struct lm_wire {
     int out_fds[LM_WIRE_MAX_FDS];    /* dup'd, queued for the next sendmsg */
     int n_out_fds;
     size_t max_out;                  /* output queue byte limit (backpressure) */
-    bool overflowed;                 /* set when lm_wire_send hit max_out */
     uint8_t msg[LM_WIRE_MAX_MSG];    /* contiguous copy of the message being decoded */
     void *priv;
 };
@@ -180,8 +179,8 @@ void lm_wire_discard(struct lm_wire *w, const struct lm_msg_hdr *hdr);
 
 /*
  * Append one message to the output queue. Returns 0 or a negative
- * lm_wire_error (LM_WIRE_E_OVERFLOW sets w->overflowed; the connection should
- * then be dropped). Does not write to the socket; call lm_wire_flush().
+ * lm_wire_error (on LM_WIRE_E_OVERFLOW the connection should
+ * be dropped). Does not write to the socket; call lm_wire_flush().
  * Messages larger than LM_WIRE_MAX_MSG are rejected with LM_WIRE_E_SIZE.
  */
 int lm_wire_send(struct lm_wire *w, uint32_t id, uint32_t opcode,

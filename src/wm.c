@@ -1235,7 +1235,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 continue;
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_WALLPAPER;
-            it.bounds = orect;
             it.output = o;
             if (!fn(&it, data))
                 return;
@@ -1251,7 +1250,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             continue;
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_GADGET;
-        it.bounds = gb;
         it.u.gadget.id = gid;
         it.u.gadget.rect = gr;
         it.u.gadget.title_h = GADGET_TITLE_H;
@@ -1294,14 +1292,12 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         if (!(w->states & LM_WINDOW_FULLSCREEN) && (!clip || lm_rect_overlaps(&outer, clip))) {
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_FRAME;
-            it.bounds = outer;
             frame_info(wm, w, &it.u.frame);
             if (!fn(&it, data))
                 return;
         }
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_SURFACE;
-        it.bounds = sb;
         it.u.surface.root = w->surface;
         it.u.surface.x = ox;
         it.u.surface.y = oy;
@@ -1316,7 +1312,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 continue;
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_PANEL;
-            it.bounds = pr;
             it.output = o;
             panel_info(wm, o, &it.u.panel);
             if (!fn(&it, data))
@@ -1327,7 +1322,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
     if (wm->menu_open && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_MENU;
-        it.bounds = wm->menu_rect;
         it.u.menu.rect = wm->menu_rect;
         it.u.menu.n = wm->srv->config.napps;
         it.u.menu.item_h = MENU_ITEM_H;
@@ -1347,7 +1341,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             continue;
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_SURFACE;
-        it.bounds = pb;
         it.u.surface.root = p->surface;
         popup_origin(p, &it.u.surface.x, &it.u.surface.y);
         it.u.surface.is_popup = true;

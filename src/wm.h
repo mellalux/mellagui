@@ -401,7 +401,6 @@ enum lm_scene_kind {
 
 struct lm_scene_item {
     enum lm_scene_kind kind;
-    struct lm_rect bounds;          /* bounding box, global coordinates (for clipping) */
     struct lm_output *output;       /* WALLPAPER and PANEL */
     union {
         struct lm_frame_info frame; /* LM_SCENE_FRAME */

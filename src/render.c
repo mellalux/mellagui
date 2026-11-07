@@ -17,7 +17,6 @@
 #include <string.h>
 
 #include "font.h"
-#include "log.h"
 #include "output.h"
 #include "seat.h"
 #include "surface.h"
@@ -61,8 +60,6 @@ struct lm_renderer {
     struct lm_idle *idle;
     struct lm_timer *frame_timer;
     struct lm_rect cursor_rect;         /* last damaged cursor rectangle (global) */
-    uint32_t last_time_ms;
-    bool in_flush;
 };
 
 struct paint_ctx {
@@ -1178,7 +1175,6 @@ static struct out_state *state_of(struct lm_output *out)
 
 static void send_frame_done(struct lm_renderer *r, uint32_t t)
 {
-    r->last_time_ms = t;
     if (r->srv->wm)
         lm_wm_send_frame_done(r->srv->wm, t);
     if (r->srv->seat)
@@ -1401,12 +1397,10 @@ void lm_render_flush(struct lm_renderer *r)
     struct lm_backend *b = r->srv->backend;
     if (!b)
         return;
-    r->in_flush = true;
     struct lm_output *o;
     lm_list_for_each(o, &b->outputs, link) {
         struct out_state *st = state_of(o);
         if (st)
             draw_output(r, st, true);
     }
-    r->in_flush = false;
 }

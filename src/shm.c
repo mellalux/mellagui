@@ -31,7 +31,6 @@
 
 #include <linux/dma-buf.h>
 
-#include "log.h"
 #include "protocol.h"
 #include "server.h"
 #include "shm.h"

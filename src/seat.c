@@ -71,7 +71,6 @@ struct data_source {
     struct lm_resource *res;
     char *mimes[MAX_MIMES];
     int n_mimes;
-    uint32_t dnd_actions;
     struct lm_list offers;              /* struct data_offer.src_link */
 };
 
@@ -1634,15 +1633,14 @@ static void source_offer(struct lm_resource *res, const union lm_arg *args)
     src->mimes[src->n_mimes++] = copy;
 }
 
+/* Drag-and-drop is not supported: the mask is only validated. */
 static void source_set_actions(struct lm_resource *res, const union lm_arg *args)
 {
-    struct data_source *src = res->data;
     if (args[0].u & ~7u) {
         lm_resource_post_error(res, LM_WL_DATA_SOURCE_ERR_INVALID_ACTION_MASK,
                                "invalid action mask %u", args[0].u);
         return;
     }
-    src->dnd_actions = args[0].u;
 }
 
 static const lm_request_fn source_handlers[] = {

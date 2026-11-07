@@ -22,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "log.h"
 #include "output.h"
 #include "protocol.h"
 #include "render.h"

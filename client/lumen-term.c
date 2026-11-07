@@ -77,7 +77,6 @@ struct term {
     enum pstate ps;
     int params[32];
     int nparams;
-    bool param_seen;
     char priv_marker;
     char inter;
     char osc[512];
@@ -108,7 +107,6 @@ struct app {
     int repeat_fd;
     int repeat_rate, repeat_delay;
     uint32_t repeat_code;
-    uint32_t pointer_serial;
     double px, py;
     char *clip_out;             /* text we offer */
     bool have_offer;
@@ -576,7 +574,6 @@ static void term_feed(struct term *t, const unsigned char *buf, size_t n)
             if (b == '[') {
                 t->ps = P_CSI;
                 t->nparams = 0;
-                t->param_seen = false;
                 t->priv_marker = 0;
                 memset(t->params, 0, sizeof(t->params));
             } else if (b == ']') {
@@ -600,7 +597,6 @@ static void term_feed(struct term *t, const unsigned char *buf, size_t n)
                     if (*p < 100000)
                         *p = *p * 10 + (b - '0');
                 }
-                t->param_seen = true;
             } else if (b == ';') {
                 if (t->nparams == 0)
                     t->nparams = 1;
@@ -1309,7 +1305,6 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
     struct term *t = &A.t;
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
-        A.pointer_serial = args[0].u;
         A.px = lm_fixed_to_double(args[2].f);
         A.py = lm_fixed_to_double(args[3].f);
         break;

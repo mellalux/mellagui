@@ -24,7 +24,6 @@ struct lm_output_mgr {
 /* Per-output state, hung off lm_output.output_data. */
 struct out_global {
     struct lm_list link;                /* in mgr->globals */
-    struct lm_output_mgr *mgr;
     struct lm_output *out;
     struct lm_global *global;
     struct lm_list bound;               /* struct out_bound.link */
@@ -206,7 +205,6 @@ void lm_output_mgr_add(struct lm_output_mgr *mgr, struct lm_output *out)
         lm_error("out of memory advertising output %s", out->name);
         return;
     }
-    og->mgr = mgr;
     og->out = out;
     lm_list_init(&og->bound);
     lm_list_append(&mgr->globals, &og->link);

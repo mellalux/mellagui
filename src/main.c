@@ -561,6 +561,7 @@ int main(int argc, char **argv)
         lm_error("module initialisation failed");
         goto out;
     }
+    lm_render_set_wallpaper(srv->render, cfg.wallpaper, cfg.wallpaper_mode);            /* from the settings file */
     lm_input_set_handler(srv->input, lm_seat_handle_input_cb, srv->seat);
     srv->lock = lm_lock_create(srv);            /* with start=1 in lock.conf the screen is locked from the first frame */
     srv->mixer = lm_mixer_create(loop, on_mixer_changed, srv);

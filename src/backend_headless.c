@@ -255,7 +255,7 @@ static void ctl_command(struct ctl_client *c, char *line)
         if (!srv->settings) { ctl_reply(c, "err no settings\n"); return; }
         bool ok = true;
         if (a1 && a2)
-            ok = lm_settings_set(srv->settings, a1, a2);
+            ok = lm_settings_set(srv->settings, a1, !strcmp(a2, "\"\"") ? "" : a2);        /* "" = the empty value */
         char buf[1536];
         lm_settings_dump(srv->settings, buf, sizeof(buf));
         ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);

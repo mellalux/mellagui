@@ -68,6 +68,11 @@ bool lm_render_dmabuf_import(struct lm_renderer *r, struct lm_surface *s, struct
 /* The surface leaves the zero-copy path (new shm content, unmapped): drops the image and the texture. */
 void lm_render_dmabuf_drop(struct lm_renderer *r, struct lm_surface *s);
 
+/* The desktop background picture (settings: wallpaper, wallpaper-mode 0 fill 1 fit 2 stretch 3 center): loads it (PNG / PPM through
+ * img.c) and repaints. An empty path or a file that cannot be read gives the gradient. */
+void lm_render_set_wallpaper(struct lm_renderer *r, const char *path, int mode);
+const char *lm_render_wallpaper_status(const struct lm_renderer *r);          /* "", "ok" or "error: ..." */
+
 /* The surface is being freed: its GL texture (when the GL renderer made one) goes. */
 struct lm_surface;
 void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s);

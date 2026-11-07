@@ -18,6 +18,7 @@
 
 #include "font.h"
 #include "gl.h"
+#include "img.h"
 #include "log.h"
 #include "lock.h"
 #include "output.h"
@@ -57,6 +58,17 @@ struct out_state {
     bool presented;                     /* a frame was presented, frame-done not yet sent */
     bool full;                          /* next frame must repaint everything */
     void *gl;                           /* struct gl_out: the GL renderer's per-output state (render_gl.inc) */
+    uint32_t *wall_px;                  /* the wallpaper scaled for this output (wall_rect of it), built on demand */
+    struct lm_rect wall_rect;           /* output-local */
+    uint32_t wall_gen;
+    int wall_w, wall_h;
+};
+
+struct wallpaper {
+    struct lm_image img;
+    int mode;                           /* 0 fill, 1 fit, 2 stretch, 3 center */
+    uint32_t gen;                       /* bumped on every change: the per-output copies are rebuilt */
+    char status[160];                   /* "", "ok", "error: ..." */
 };
 
 /* Screenshot feedback: a white flash over the captured area (150 ms) and a card with a thumbnail and a label in the
@@ -81,6 +93,7 @@ struct shot_fx {
 
 struct lm_renderer {
     struct shot_fx shot;
+    struct wallpaper wall;
     struct lm_gl *gl;                   /* the GL renderer; NULL = software (render_gl.inc) */
     bool gl_owned;                      /* we made it (headless); the DRM backend owns its own */
     unsigned sprite_tex[LM_CURSOR_POINTER + 1];
@@ -335,6 +348,99 @@ static uint32_t lerp_color(uint32_t a, uint32_t b, int num, int den)
     return r;
 }
 
+static struct out_state *state_of(struct lm_output *out);
+
+/* img (iw x ih) region (sx0, sy0, sw x sh) onto dw x dh pixels: a box average when it shrinks, bilinear when it grows. */
+static void wall_scale(const struct lm_image *img, double sx0, double sy0, double sw, double sh, uint32_t *dst, int dw, int dh)
+{
+    double fx = sw / dw, fy = sh / dh;
+    int iw = img->w, ih = img->h;
+    for (int y = 0; y < dh; y++) {
+        for (int x = 0; x < dw; x++) {
+            uint32_t out;
+            if (fx > 1.0 || fy > 1.0) {
+                int x0 = LM_CLAMP((int)floor(sx0 + x * fx), 0, iw - 1), x1 = LM_CLAMP((int)ceil(sx0 + (x + 1) * fx), x0 + 1, iw);
+                int y0 = LM_CLAMP((int)floor(sy0 + y * fy), 0, ih - 1), y1 = LM_CLAMP((int)ceil(sy0 + (y + 1) * fy), y0 + 1, ih);
+                uint32_t rr = 0, gg = 0, bb = 0, n = 0;
+                for (int yy = y0; yy < y1; yy++)
+                    for (int xx = x0; xx < x1; xx++) {
+                        uint32_t v = img->px[(size_t)yy * (size_t)iw + (size_t)xx];
+                        rr += (v >> 16) & 255;
+                        gg += (v >> 8) & 255;
+                        bb += v & 255;
+                        n++;
+                    }
+                out = ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
+            } else {
+                double u = LM_CLAMP(sx0 + (x + 0.5) * fx - 0.5, 0.0, iw - 1.0), v = LM_CLAMP(sy0 + (y + 0.5) * fy - 0.5, 0.0, ih - 1.0);
+                int ux = (int)u, vy = (int)v, ux1 = LM_MIN(ux + 1, iw - 1), vy1 = LM_MIN(vy + 1, ih - 1);
+                double tx = u - ux, ty = v - vy;
+                uint32_t p[4] = { img->px[(size_t)vy * (size_t)iw + (size_t)ux], img->px[(size_t)vy * (size_t)iw + (size_t)ux1],
+                                  img->px[(size_t)vy1 * (size_t)iw + (size_t)ux], img->px[(size_t)vy1 * (size_t)iw + (size_t)ux1] };
+                double wgt[4] = { (1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty };
+                double acc[3] = { 0, 0, 0 };
+                for (int k = 0; k < 4; k++) {
+                    acc[0] += wgt[k] * (double)((p[k] >> 16) & 255);
+                    acc[1] += wgt[k] * (double)((p[k] >> 8) & 255);
+                    acc[2] += wgt[k] * (double)(p[k] & 255);
+                }
+                out = ((uint32_t)LM_MIN(acc[0] + 0.5, 255.0) << 16) | ((uint32_t)LM_MIN(acc[1] + 0.5, 255.0) << 8) |
+                      (uint32_t)LM_MIN(acc[2] + 0.5, 255.0);
+            }
+            dst[(size_t)y * (size_t)dw + (size_t)x] = out;
+        }
+    }
+}
+
+/* The wallpaper for an output of w x h pixels: the destination rectangle (output-local) and its pixels. */
+static void wall_build(struct lm_renderer *r, struct out_state *st)
+{
+    const struct lm_image *img = &r->wall.img;
+    int W = st->out->width, H = st->out->height;
+    free(st->wall_px);
+    st->wall_px = NULL;
+    st->wall_gen = r->wall.gen;
+    st->wall_w = W;
+    st->wall_h = H;
+    if (!img->px || W <= 0 || H <= 0)
+        return;
+    double iw = img->w, ih = img->h;
+    struct lm_rect dest = lm_rect_make(0, 0, W, H);
+    double sx0 = 0, sy0 = 0, sw = iw, sh = ih;
+    switch (r->wall.mode) {
+    case 0: {                                           /* fill: cover the output, crop the overflow */
+        double sc = LM_MAX((double)W / iw, (double)H / ih);
+        sw = W / sc;
+        sh = H / sc;
+        sx0 = (iw - sw) / 2;
+        sy0 = (ih - sh) / 2;
+        break;
+    }
+    case 1: {                                           /* fit: the whole picture, bars around it */
+        double sc = LM_MIN((double)W / iw, (double)H / ih);
+        int dw = LM_MAX((int)(iw * sc + 0.5), 1), dh = LM_MAX((int)(ih * sc + 0.5), 1);
+        dest = lm_rect_make((W - dw) / 2, (H - dh) / 2, dw, dh);
+        break;
+    }
+    case 3: {                                           /* center: 1:1 */
+        int dw = LM_MIN(img->w, W), dh = LM_MIN(img->h, H);
+        dest = lm_rect_make((W - dw) / 2, (H - dh) / 2, dw, dh);
+        sx0 = (iw - dw) / 2;
+        sy0 = (ih - dh) / 2;
+        sw = dw;
+        sh = dh;
+        break;
+    }
+    default:                                            /* stretch */
+        break;
+    }
+    st->wall_px = malloc((size_t)dest.w * (size_t)dest.h * 4);
+    if (!st->wall_px)
+        return;
+    st->wall_rect = dest;
+    wall_scale(img, sx0, sy0, sw, sh, st->wall_px, dest.w, dest.h);
+}
+
 static void paint_wallpaper(const struct paint_ctx *c)
 {
     struct lm_rect r = c->clip;
@@ -342,6 +448,18 @@ static void paint_wallpaper(const struct paint_ctx *c)
         uint32_t col = lerp_color(COL_WALL_TOP, COL_WALL_BOTTOM, y - c->out->y, c->out->height);
         fill32(fb_row(c, y) + r.x, col, (size_t)r.w);
     }
+    struct out_state *st = c->r->wall.img.px ? state_of(c->out) : NULL;
+    if (!st)
+        return;
+    if (!st->wall_px || st->wall_gen != c->r->wall.gen || st->wall_w != c->out->width || st->wall_h != c->out->height)
+        wall_build(c->r, st);
+    if (!st->wall_px)
+        return;
+    struct lm_rect img = lm_rect_make(c->out->x + st->wall_rect.x, c->out->y + st->wall_rect.y, st->wall_rect.w, st->wall_rect.h), v;
+    if (!lm_rect_intersect(&img, &r, &v))
+        return;
+    for (int y = v.y; y < v.y + v.h; y++)
+        memcpy(fb_row(c, y) + v.x, st->wall_px + (size_t)(y - img.y) * (size_t)img.w + (size_t)(v.x - img.x), (size_t)v.w * 4);
 }
 
 static void draw_line(const struct paint_ctx *c, int x0, int y0, int x1, int y1, uint32_t color)
@@ -1710,6 +1828,7 @@ void lm_render_destroy(struct lm_renderer *r)
     if (r->shot.timer)
         lm_timer_destroy(r->shot.timer);
     free(r->shot.thumb);
+    lm_img_free(&r->wall.img);
     if (r->gl) {
         lm_gl_make_current(r->gl);
         for (int i = 0; i <= LM_CURSOR_POINTER; i++)
@@ -1765,6 +1884,7 @@ void lm_render_output_removed(struct lm_renderer *r, struct lm_output *out)
         return;
     if (r->gl)
         gl_out_free(r, st);
+    free(st->wall_px);
     lm_region_fini(&st->pending);
     for (int i = 0; i < HIST; i++)
         lm_region_fini(&st->hist[i]);
@@ -1864,4 +1984,34 @@ void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s)
 struct lm_gl *lm_render_gl(struct lm_renderer *r)
 {
     return r ? r->gl : NULL;
+}
+
+void lm_render_set_wallpaper(struct lm_renderer *r, const char *path, int mode)
+{
+    lm_img_free(&r->wall.img);
+    r->wall.status[0] = 0;
+    r->wall.mode = mode;
+    if (path && *path) {
+        char full[512];
+        const char *home = getenv("HOME");
+        if (path[0] == '~' && path[1] == '/' && home && *home)
+            snprintf(full, sizeof(full), "%s%s", home, path + 1);
+        else
+            snprintf(full, sizeof(full), "%s", path);
+        char err[120];
+        if (lm_img_load(full, &r->wall.img, err, sizeof(err)) == 0) {
+            snprintf(r->wall.status, sizeof(r->wall.status), "ok");
+            lm_info("wallpaper: %s (%dx%d)", full, r->wall.img.w, r->wall.img.h);
+        } else {
+            snprintf(r->wall.status, sizeof(r->wall.status), "error: %s", err);
+            lm_warn("wallpaper: %s", err);
+        }
+    }
+    r->wall.gen++;
+    lm_render_damage_all(r);
+}
+
+const char *lm_render_wallpaper_status(const struct lm_renderer *r)
+{
+    return r->wall.status;
 }

@@ -320,7 +320,7 @@ static int selftest(void)
 enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, N_PAGES };
 static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security" };
 
-enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS };
+enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD };
 
 struct rect { int x, y, w, h; };
 
@@ -349,6 +349,8 @@ struct app {
     int nw;
     int hover, press, drag, focus;      /* widget indexes, -1 none */
     char test[64];                      /* text typed into the "try it" field */
+    char wall[220];                     /* the wallpaper file field while it is being edited */
+    bool wall_edited;                   /* (else the field shows the compositor's value) */
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
@@ -572,6 +574,25 @@ static void build_desktop(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Volume mixer gadget (Super+V)", "mixer", kv_int(a, "mixer", 0) != 0);
     y += ROW_H;
     add_check(a, x, y, w, "System monitor gadget (Super+S)", "sysinfo", kv_int(a, "sysinfo", 0) != 0);
+    y += ROW_H + 8;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Wallpaper");
+    y += ROW_H;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "PNG or PPM file (~/ is your home). Enter applies.");
+    y += ROW_H;
+    struct widget *f = add(a, W_FIELD, (struct rect){ x, y, w, 28 }, "wallpaper");
+    snprintf(f->key, sizeof(f->key), "wallpaper");
+    y += 34;
+    static const char *const modes[4] = { "fill", "fit", "stretch", "center" };
+    static const char *const names[4] = { "Fill", "Fit", "Stretch", "Center" };
+    for (int i = 0; i < 4; i++)
+        add_radio(a, x + i * (w / 4), y, w / 4, names[i], "wallpaper-mode", modes[i], !strcmp(kv_get(a, "wallpaper-mode"), modes[i]));
+    y += ROW_H;
+    add_button(a, x, y, 90, "Apply", "wall-apply");
+    add_button(a, x + 100, y, 130, "No picture", "wall-clear");
+    y += ROW_H;
+    const char *st = kv_get(a, "wallpaper-status");
+    if (*st)
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, !strcmp(st, "ok") ? "Wallpaper loaded." : st);
 }
 
 static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on)
@@ -875,6 +896,12 @@ static void activate(struct app *a, int idx)
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
             launch_sibling(w->arg);
+        } else if (!strcmp(w->key, "wall-apply")) {
+            send_set(a, "wallpaper", a->wall_edited ? a->wall : kv_get(a, "wallpaper"));
+            a->wall_edited = false;
+        } else if (!strcmp(w->key, "wall-clear")) {
+            send_set(a, "wallpaper", "");
+            a->wall_edited = false;
         } else if (!strcmp(w->key, "resolution-confirm")) {
             send_set(a, w->key, w->arg);
         } else if (!strcmp(w->key, "layout-up")) {
@@ -1008,6 +1035,14 @@ static void paint_widget(struct app *a, int idx)
         draw_text(a, f.x + 6, f.y + (f.h - LM_FONT_H) / 2, dots, COL_TEXT, f.w - 12);
         break;
     }
+    case W_FIELD: {
+        fill(a, *r, COL_FIELD);
+        outline(a, *r, focus ? COL_ACCENT : COL_KEY);
+        char shown[240];
+        snprintf(shown, sizeof(shown), "%s%s", a->wall_edited ? a->wall : kv_get(a, "wallpaper"), focus ? "_" : "");
+        draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, COL_TEXT, r->w - 12);
+        break;
+    }
     case W_TEXT: {
         draw_text(a, r->x, r->y + 2, w->text, COL_DIM, r->w);
         struct rect f = { r->x, r->y + 20, r->w, 28 };
@@ -1132,6 +1167,18 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             } else {
                 edit_text(a->pw[atoi(f->arg)], sizeof(a->pw[0]), ks, plain);
                 a->sec_err[0] = 0;
+            }
+            a->win.redraw = true;
+        } else if (f && f->kind == W_FIELD) {
+            if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+                send_set(a, "wallpaper", a->wall_edited ? a->wall : kv_get(a, "wallpaper"));
+                a->wall_edited = false;
+            } else {
+                if (!a->wall_edited) {
+                    snprintf(a->wall, sizeof(a->wall), "%s", kv_get(a, "wallpaper"));
+                    a->wall_edited = true;
+                }
+                edit_text(a->wall, sizeof(a->wall), ks, plain);
             }
             a->win.redraw = true;
         } else if (f && f->kind == W_TEXT) {

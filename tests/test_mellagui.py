@@ -2675,9 +2675,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # wraps over the six page tabs (the heading is skipped) and reaches the gadget checkbox with the 9th press; Space toggles it
+        # the wallpaper field, its four radio buttons and its two buttons, wraps over the six page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 16th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(9):
+        for _ in range(16):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -2742,6 +2743,37 @@ esac
         ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)
         time.sleep(0.3)
         self.assertEqual(settings()['sysinfo'], '0')
+
+    def test_panel_wallpaper_page_field_radios_and_buttons(self):
+        self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        time.sleep(0.2)
+        ctl.click(x0 + 410, y0 + 265)                           # Stretch
+        time.sleep(0.2)
+        self.assertEqual(settings()['wallpaper-mode'], 'stretch')
+        ctl.click(x0 + 190, y0 + 265)                           # Fill
+        time.sleep(0.2)
+        self.assertEqual(settings()['wallpaper-mode'], 'fill')
+        ctl.click(x0 + 300, y0 + 231)                           # the file field: type a name and press Enter
+        type_text('abc')
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok abc')
+        ctl.cmd('setting wallpaper-status')
+        self.assertTrue(ctl.last.startswith('ok error:'), ctl.last)                    # no such file
+        ctl.click(x0 + 320, y0 + 291)                           # "No picture"
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok ')
+        ctl.click(x0 + 300, y0 + 231)                           # type without Enter, then the Apply button
+        for ch in 'xyz':
+            ctl.tap(KEYCODES[ch])
+        ctl.click(x0 + 200, y0 + 291)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok xyz')
 
     def test_panel_follows_changes_made_elsewhere(self):
         p, win = self.open_panel()
@@ -4921,6 +4953,114 @@ class TestAltTab(Base):
         self.alt(False)
         self.assertTrue(alive())
         self.assertIn(self.focused(), ('A', 'C'))
+
+
+class TestWallpaper(Base):
+    """settings wallpaper / wallpaper-mode: a PNG or PPM as the desktop background (fill, fit, stretch, center)."""
+    W, H = 800, 500
+
+    def png(self, name, w=80, h=40, left=(255, 0, 0), right=(0, 0, 255)):
+        pix = [[left if x < w // 2 else right for x in range(w)] for _ in range(h)]
+        path = os.path.join(tmp, name)
+        with open(path, 'wb') as f:
+            f.write(make_png(w, h, 2, 8, pix))
+        return path
+
+    def start(self, name, *extra, env=None):
+        p, c, stop = self.private_compositor(name, *extra, env=env)
+        c.abs(790, 490)
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        return c
+
+    def shot(self, c, tag):
+        c.abs(790, 490)
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        return c.dump(os.path.join(tmp, 'wall-%s.ppm' % tag))
+
+    def get(self, c, key):
+        c.cmd('setting ' + key)
+        return c.last[3:]
+
+    def test_modes_place_the_picture(self):
+        c = self.start('mellagui-wall1')
+        grad = self.shot(c, 'grad')
+        img = self.png('wall-a.png')                                         # 80x40: red left half, blue right half
+        c.cmd('settings wallpaper-mode stretch')
+        c.cmd('settings wallpaper ' + img)
+        self.assertEqual(self.get(c, 'wallpaper-status'), 'ok')
+        st = self.shot(c, 'stretch')
+        self.assertEqual(st.px(10, 250), (255, 0, 0))
+        self.assertEqual(st.px(790, 400), (0, 0, 255))                        # (the clipboard gadget sits top right)
+        self.assertEqual(st.px(10, 40), (255, 0, 0))                          # the whole screen is picture, the panel on top
+        c.cmd('settings wallpaper-mode fill')                                # 2:1 onto 1.6:1: cropped at the sides, centred
+        fl = self.shot(c, 'fill')
+        self.assertEqual(fl.px(5, 250), (255, 0, 0))
+        self.assertEqual(fl.px(795, 400), (0, 0, 255))
+        self.assertEqual(fl.px(380, 250), (255, 0, 0))                        # the picture's red / blue edge is at 400, smoothed
+        self.assertEqual(fl.px(420, 250), (0, 0, 255))
+        mid = fl.px(400, 250)
+        self.assertTrue(0 < mid[0] < 255 and 0 < mid[2] < 255, mid)
+        c.cmd('settings wallpaper-mode fit')                                 # whole picture, bars: 800x400 centred
+        ft = self.shot(c, 'fit')
+        self.assertEqual(ft.px(5, 250), (255, 0, 0))
+        self.assertEqual(ft.px(400, 40), grad.px(400, 40))                    # above the picture (it spans y 50..450): the gradient
+        self.assertEqual(ft.px(400, 470), grad.px(400, 470))                  # below it
+        self.assertNotEqual(ft.px(400, 100), grad.px(400, 100))               # y 50..450 is the picture
+        c.cmd('settings wallpaper-mode center')                              # 80x40 unscaled in the middle
+        ce = self.shot(c, 'center')
+        self.assertEqual(ce.px(380, 250), (255, 0, 0))
+        self.assertEqual(ce.px(420, 250), (0, 0, 255))
+        self.assertEqual(ce.px(100, 250), grad.px(100, 250))
+        self.assertEqual(ce.px(400, 200), grad.px(400, 200))                  # 20 px above the picture's top edge (230)
+
+    def test_clearing_and_bad_files(self):
+        c = self.start('mellagui-wall2')
+        grad = self.shot(c, 'g2')
+        c.cmd('settings wallpaper-mode stretch')
+        c.cmd('settings wallpaper ' + self.png('wall-b.png'))
+        self.assertEqual(self.shot(c, 'w2').px(10, 250), (255, 0, 0))
+        c.cmd('settings wallpaper /nonexistent/picture.png')
+        self.assertTrue(self.get(c, 'wallpaper-status').startswith('error:'), self.get(c, 'wallpaper-status'))
+        self.assertEqual(self.shot(c, 'e2').px(10, 250), grad.px(10, 250))   # no picture: the gradient
+        junk = os.path.join(tmp, 'wall-junk.png')
+        with open(junk, 'wb') as f:
+            f.write(b'not a picture')
+        c.cmd('settings wallpaper ' + junk)
+        self.assertTrue(self.get(c, 'wallpaper-status').startswith('error:'))
+        c.cmd('settings wallpaper ' + self.png('wall-c.png', left=(0, 255, 0)))
+        self.assertEqual(self.shot(c, 'ok2').px(10, 250), (0, 255, 0))
+        c.cmd('settings wallpaper ""')                                        # empty: back to the gradient
+        self.assertEqual((self.get(c, 'wallpaper'), self.get(c, 'wallpaper-status')), ('', ''))
+        self.assertEqual(self.shot(c, 'g3').px(10, 250), grad.px(10, 250))
+
+    def test_refused_values(self):
+        c = self.start('mellagui-wall3')
+        for line in ('settings wallpaper-mode sideways', 'settings wallpaper-status ok', 'settings wallpaper ' + 'x' * 300):
+            with self.assertRaises(RuntimeError, msg=line):
+                c.cmd(line)
+
+    def test_the_picture_survives_a_restart_and_home_is_expanded(self):
+        home = os.path.join(tmp, 'wall-home')
+        os.makedirs(home, exist_ok=True)
+        shutil.copy(self.png('wall-d.png', left=(255, 255, 0)), os.path.join(home, 'bg.png'))
+        conf = os.path.join(tmp, 'wall-conf', 'settings.conf')
+        c = self.start('mellagui-wall4', '--settings', conf, env={'HOME': home})
+        c.cmd('settings wallpaper-mode stretch')
+        c.cmd('settings wallpaper ~/bg.png')
+        self.assertEqual(self.get(c, 'wallpaper-status'), 'ok')
+        self.assertEqual(self.shot(c, 'h1').px(10, 250), (255, 255, 0))
+        c.cmd('quit')
+        time.sleep(0.5)
+        text = open(conf).read().split('\n')
+        self.assertIn('wallpaper=~/bg.png', text)
+        self.assertIn('wallpaper-mode=stretch', text)
+        c2 = self.start('mellagui-wall5', '--settings', conf, env={'HOME': home})
+        self.assertEqual(self.get(c2, 'wallpaper-status'), 'ok')
+        self.assertEqual(self.shot(c2, 'h2').px(10, 250), (255, 255, 0))
 
 
 class TestScreenshot(Base):

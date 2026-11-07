@@ -14,6 +14,7 @@ Included programs:
 | `build/mellagui-term`| terminal emulator (xterm-compatible subset, 256/true colour, scrollback, mouse selection + clipboard); button bar *Paste, A-, zoom list, A+, Reset*: the font zooms 50-500 % in fine steps (the % button opens a list of sizes; Ctrl +/-, Ctrl+wheel, Ctrl+0 = reset); the size is remembered in `~/.config/mellagui/terminal.conf` (`zoom=<percent>`, written by the terminal itself) and the next terminal starts with it |
 | `build/mellagui-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/mellagui-settings` | settings panel (Super+I or *MellaGUI* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound, resolution, sound outputs; `--get` / `--set KEY=VALUE` for scripts |
+| `build/mellagui-edit`| text editor (MellaGUI menu → Editor, or `mellagui-edit [FILE]`): UTF-8 text with line numbers, selection (keys and mouse, double click = word), clipboard (Ctrl+C/X/V), undo/redo (Ctrl+Z/Y; a run of typing is one step), Ctrl+S save / Ctrl+Shift+S save as / Ctrl+O open / Ctrl+N new, Ctrl+F find (Enter / F3 next), Ctrl+G go to line, Ctrl+Q quit (asks once when there are unsaved changes, so does a close request from the compositor); keeps CRLF line ends and a missing final newline, refuses binary / non UTF-8 / >8 MB files; `--selftest` |
 | `build/mellagui-view`| image viewer (PNG, PPM; MellaGUI menu → Images, or `mellagui-view [FILE|DIR]`): defaults to the newest screenshot in `~/Pictures`; Left/Right browse, +/- and the wheel zoom, drag pans, F fits, 0 is 100 %, R rescans, Esc quits; has its own inflate, `--decode FILE OUT.ppm` for tests |
 | `build/mellagui-notify`| `mellagui-notify [-t MS] TITLE [BODY...]` shows a notification card (top right below the panel, newest on top, at most five; a click dismisses it, `-t 0` keeps it, default 6 s); like the settings panel it is served only to MellaGUI's own programs |
 | `build/mellagui-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
@@ -97,7 +98,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Shift+E               | quit MellaGUI                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
+Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, Editor, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
 add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
 (first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels), the clock and, at the far right, the small *Lock* button.
 

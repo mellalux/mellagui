@@ -1642,6 +1642,171 @@ class TestClients(Base):
         self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.run'],
                          'dialog stays open after running')
 
+    # ---- mellagui-edit -----------------------------------------------------------------------------------------------
+
+    def test_edit_selftest(self):
+        path = os.path.join(ROOT, 'build', 'mellagui-edit')
+        if not os.path.exists(path):
+            self.skipTest('mellagui-edit not built')
+        r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def edit_start(self, content=None, name='doc.txt'):
+        exe = os.path.join(ROOT, 'build', 'mellagui-edit')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-edit not built')
+        d = tempfile.mkdtemp(prefix='edit-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, name)
+        if content is not None:
+            with open(path, 'wb') as f:
+                f.write(content)
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.edit', 'an editor from an earlier test is still open')
+        p = subprocess.Popen([exe, path], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.edit')
+        self.assertIsNotNone(win, 'the editor did not appear')
+        time.sleep(0.4)
+        return p, path
+
+    def chord(self, mod, code):
+        ctl.key(mod, True)
+        ctl.tap(code)
+        ctl.key(mod, False)
+        time.sleep(0.05)
+
+    def read_file(self, path):
+        with open(path, 'rb') as f:
+            return f.read()
+
+    CTRL, SHIFT = 29, 42
+    K_S, K_Q, K_Z, K_A, K_C, K_V, K_X, K_Y, K_F = 31, 16, 44, 30, 46, 47, 45, 21, 33
+    K_HOME, K_END, K_BS, K_LEFT, K_UP, K_DOWN = 102, 107, 14, 105, 103, 108
+
+    def test_edit_types_and_saves(self):
+        p, path = self.edit_start(b'hello\nworld\n')
+        ctl.tap(self.K_END)                                    # the cursor starts at the top of the file
+        self.type_text('ab')
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'helloab\nworld\n')
+        ctl.tap(self.K_DOWN); ctl.tap(self.K_HOME)
+        ctl.tap(KEY_ENTER)                                     # a new line above "world"
+        time.sleep(0.2)
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'helloab\n\nworld\n')
+        self.chord(self.CTRL, self.K_Q)                        # saved: leaves at once
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_edit_undo_redo_and_unsaved_quit(self):
+        p, path = self.edit_start(b'one\n')
+        ctl.tap(self.K_END)
+        self.type_text('xyz')
+        self.chord(self.CTRL, self.K_Z)                        # typing run is one undo step
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'one\n')
+        self.chord(self.CTRL, self.K_Y)                        # redo brings it back (and marks it modified)
+        ctl.key(KEY_LEFTMETA, True); ctl.tap(KEY_Q); ctl.key(KEY_LEFTMETA, False)    # a polite close is refused
+        time.sleep(0.3)
+        self.assertIsNone(p.poll(), 'the compositor close request must not drop unsaved changes')
+        self.assertEqual(self.read_file(path), b'one\n')
+        ctl.tap(KEY_ESC)                                       # Esc withdraws the question
+        self.chord(self.CTRL, self.K_Q)                        # modified: Ctrl+Q asks first too...
+        time.sleep(0.3)
+        self.assertIsNone(p.poll(), 'quit with unsaved changes must ask first')
+        self.chord(self.CTRL, self.K_Q)                        # ...and a second one discards
+        self.assertEqual(p.wait(timeout=5), 0)
+        self.assertEqual(self.read_file(path), b'one\n')       # nothing was written
+
+    def test_edit_clipboard_and_selection(self):
+        p, path = self.edit_start(b'abc def\n')
+        self.chord(self.CTRL, self.K_A)
+        self.chord(self.CTRL, self.K_C)
+        ctl.tap(self.K_END)                                    # cursor to the end, selection gone
+        ctl.tap(57)
+        self.chord(self.CTRL, self.K_V)
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'abc def abc def\n')
+        ctl.tap(self.K_HOME)                                   # Shift+Right x3 selects "abc", Ctrl+X cuts it
+        ctl.key(self.SHIFT, True)
+        for _ in range(3):
+            ctl.tap(106)
+        ctl.key(self.SHIFT, False)
+        self.chord(self.CTRL, self.K_X)
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b' def abc def\n')
+
+    def test_edit_find_goto_and_open(self):
+        p, path = self.edit_start(b'alpha\nbeta\ngamma wor\nworld\n')
+        self.chord(self.CTRL, self.K_F)
+        self.type_text('wor')
+        ctl.tap(KEY_ENTER)                                     # selects the first match, "wor" on line 3
+        self.type_text('x')                                    # typing replaces the selection
+        self.chord(self.CTRL, 34)                              # Ctrl+G
+        ctl.tap(3)                                             # "2"
+        ctl.tap(KEY_ENTER)
+        self.type_text('q')                                    # at the start of line 2
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'alpha\nqbeta\ngamma x\nworld\n')
+        other = os.path.join(os.path.dirname(path), 'other.txt')
+        with open(other, 'wb') as f:
+            f.write(b'second\n')
+        self.chord(self.CTRL, 24)                              # Ctrl+O: the open prompt
+        for ch in other:
+            code = {'/': 53, '.': 52, '-': 12, '_': 12}.get(ch)
+            if code is None and ch.isdigit():
+                code = 11 if ch == '0' else 1 + int(ch)
+            if code is None:
+                code = self.LETTERS[ch.lower()]
+            if ch.isupper() or ch == '_':
+                ctl.key(self.SHIFT, True); ctl.tap(code); ctl.key(self.SHIFT, False)
+            else:
+                ctl.tap(code)
+            time.sleep(0.01)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.type_text('z')
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(other), b'zsecond\n')
+        self.assertEqual(self.read_file(path), b'alpha\nqbeta\ngamma x\nworld\n')
+
+    def test_edit_keeps_crlf_and_missing_final_newline(self):
+        p, path = self.edit_start(b'a\r\nb')
+        ctl.tap(self.K_END)
+        self.type_text('x')
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'ax\r\nb')
+
+    def test_edit_new_file_and_refused_binary(self):
+        p, path = self.edit_start(None, 'fresh.txt')            # a name that does not exist yet
+        self.type_text('hi')
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'hi\n')
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
+        d = os.path.dirname(path)
+        bin_path = os.path.join(d, 'blob.bin')
+        with open(bin_path, 'wb') as f:
+            f.write(b'\x00\x01\x02binary')
+        exe = os.path.join(ROOT, 'build', 'mellagui-edit')
+        p2 = subprocess.Popen([exe, bin_path], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p2.poll() is None) and (p2.kill(), p2.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.edit'))
+        time.sleep(0.3)
+        self.type_text('z')                                    # empty document, not the binary file...
+        self.chord(self.CTRL, self.K_S)                        # ...and saving it does overwrite? no: the path was never taken
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(bin_path), b'\x00\x01\x02binary', 'a refused file must not be overwritten')
+
     def test_run_dialog_selftest(self):
         path = os.path.join(ROOT, 'build', 'mellagui-run')
         if not os.path.exists(path):

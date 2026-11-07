@@ -32,6 +32,8 @@ struct wlwin_ops {
      * (the library has already handled wl_keyboard.keymap and .modifiers: see `mods`). */
     void (*pointer)(struct wlwin *w, uint32_t op, const union lm_arg *args);
     void (*keyboard)(struct wlwin *w, uint32_t op, const union lm_arg *args);
+    /* Optional: the compositor asked the window to close. Return false to keep it open (unsaved work); default: close. */
+    bool (*close)(struct wlwin *w);
 };
 
 struct wlwin {

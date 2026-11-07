@@ -93,7 +93,8 @@ static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         w->w = LM_MAX(args[0].i > 0 ? args[0].i : w->def_w, w->min_w);
         w->h = LM_MAX(args[1].i > 0 ? args[1].i : w->def_h, w->min_h);
     } else if (op == LM_XDG_TOPLEVEL_EVT_CLOSE) {
-        w->running = false;
+        if (!w->ops->close || w->ops->close(w))
+            w->running = false;
     }
 }
 

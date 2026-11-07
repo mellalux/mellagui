@@ -1,4 +1,4 @@
-/* Feedback beeps: synthesis + a detached `aplay` child. See sound.h. */
+/* Feedback beeps: synthesis + a detached `paplay`/`aplay` child. See sound.h. */
 #include "sound.h"
 
 #include <errno.h>
@@ -104,10 +104,14 @@ void lm_sound_play(enum lm_sound s)
             dup2(null, 2);
         }
         dup2(fds[0], 0);                            /* dup2 clears O_CLOEXEC on the new fd */
-        if (strcmp(g_device, "default"))
+        if (strcmp(g_device, "default")) {
             execlp("aplay", "aplay", "-q", "-D", g_device, "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "1", "-", (char *)NULL);
-        else
+        } else {
+            /* The sound server wakes a sleeping HDMI/DP sink itself, so a short beep is not lost; a bare ALSA
+             * device swallows the first ~0.3 s. Without paplay (or a server) fall back to aplay. */
+            execlp("paplay", "paplay", "--raw", "--rate=44100", "--format=s16le", "--channels=1", (char *)NULL);
             execlp("aplay", "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "1", "-", (char *)NULL);
+        }
         _exit(127);
     }
     close(fds[0]);

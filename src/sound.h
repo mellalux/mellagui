@@ -1,6 +1,6 @@
 /*
  * sound.h - short feedback beeps (sticky keys). No audio library: the tones are synthesised into a small
- * S16_LE mono buffer and piped to `aplay` (alsa-utils) in a detached child; when aplay is missing or
+ * S16_LE mono buffer and piped to `paplay` (default device, via the sound server) or `aplay -D` (a chosen ALSA device) in a detached child; when both are missing or
  * there is no sound card, nothing happens. The child is reaped by the server's SIGCHLD watch.
  */
 #ifndef MELLAGUI_SOUND_H

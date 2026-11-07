@@ -11,7 +11,7 @@ Included programs:
 | binary            | what it is                                                       |
 |-------------------|------------------------------------------------------------------|
 | `build/mellagui`     | the compositor / shell                                            |
-| `build/mellagui-term`| terminal emulator (xterm-compatible subset, 256/true colour, scrollback, mouse selection + clipboard) |
+| `build/mellagui-term`| terminal emulator (xterm-compatible subset, 256/true colour, scrollback, mouse selection + clipboard); button bar *Paste, A-, zoom list, A+, Reset*: the font zooms 50-500 % in fine steps (the % button opens a list of sizes; Ctrl +/-, Ctrl+wheel, Ctrl+0 = reset); the size is remembered in `~/.config/mellagui/terminal.conf` (`zoom=<percent>`, written by the terminal itself) and the next terminal starts with it |
 | `build/mellagui-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/mellagui-settings` | settings panel (Super+I or *MellaGUI* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound, resolution, sound outputs; `--get` / `--set KEY=VALUE` for scripts |
 | `build/mellagui-view`| image viewer (PNG, PPM; MellaGUI menu → Images, or `mellagui-view [FILE|DIR]`): defaults to the newest screenshot in `~/Pictures`; Left/Right browse, +/- and the wheel zoom, drag pans, F fits, 0 is 100 %, R rescans, Esc quits; has its own inflate, `--decode FILE OUT.ppm` for tests |

@@ -45,6 +45,7 @@ def setUpModule():
     os.environ['XDG_RUNTIME_DIR'] = tmp
     os.environ['WAYLAND_DISPLAY'] = 'mellagui-test'
     os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
+    os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     LOG = os.path.join(tmp, 'mellagui.log')
     OUT = os.path.join(tmp, 'mellagui.out')        # a file, not a pipe: nobody reads a pipe while the tests run and 64 KB of log would block the compositor
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77',
@@ -1546,6 +1547,10 @@ class TestClients(Base):
         path = os.path.join(ROOT, 'build', name)
         if not os.path.exists(path):
             self.skipTest('%s not built' % name)
+        if 'XDG_CONFIG_HOME' not in env:                         # the terminal remembers its zoom: every test starts from a clean slate
+            d = tempfile.mkdtemp(prefix='cfg-', dir=tmp)
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+            env = dict(env, XDG_CONFIG_HOME=d)
         e = dict(os.environ, **env)
         p = subprocess.Popen([path], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -1831,11 +1836,14 @@ class TestClients(Base):
             time.sleep(0.05)
         self.assertEqual(open(out).read().strip(), 'got:hello')
 
-    def test_terminal_zoom_button_shrinks_the_grid(self):
-        out = os.path.join(tmp, 'term-size.txt')
-        script = os.path.join(tmp, 'size.sh')
+    # the bar: Paste 4..60, A- 64..96, zoom 100..160 (a drop-down), A+ 164..196, Reset 200..256; the list opens below it
+    BAR_H = 24
+
+    def term(self, name='term-size.txt'):
+        out = os.path.join(tmp, name)
+        script = os.path.join(tmp, name + '.sh')
         with open(script, 'w') as f:
-            f.write('#!/bin/sh\nread line\nstty size > "%s"\nread line2\n' % out)
+            f.write('#!/bin/sh\nwhile read l; do stty size >> "%s"; done\n' % out)
         os.chmod(script, 0o755)
         if os.path.exists(out):
             os.unlink(out)
@@ -1843,16 +1851,185 @@ class TestClients(Base):
         win = wait_for_window('mellagui.term')
         self.assertIsNotNone(win, 'terminal window did not appear')
         time.sleep(0.4)
-        ctl.click(win['x'] + 100, win['y'] + 8)    # "A+" (the bar buttons: Paste, A-, A+)
-        time.sleep(0.3)
+        return win, out
+
+    def size_now(self, out, n):
+        """The terminal's (rows, cols) after typing a line; n = how many answers the file should hold."""
         type_text('go')
-        for _ in range(50):
-            if os.path.exists(out) and open(out).read().strip():
+        for _ in range(60):
+            if os.path.exists(out) and len(open(out).read().split('\n')) > n:
                 break
             time.sleep(0.05)
-        rows, cols = map(int, open(out).read().split())
-        self.assertLessEqual(cols, 45)
-        self.assertGreaterEqual(cols, 30)
+        rows, cols = map(int, open(out).read().strip().split('\n')[-1].split())
+        return rows, cols
+
+    def test_terminal_zoom_dropdown_picks_a_size(self):
+        win, out = self.term()
+        self.assertEqual(self.size_now(out, 1)[1], 80)
+        ctl.click(win['x'] + 130, win['y'] + 8)                                  # the zoom button opens the list
+        time.sleep(0.3)
+        ppm = ctl.dump(os.path.join(tmp, 'term-menu.ppm'))
+        self.assertGreater(ppm.count((0x88, 0xc0, 0xd0), win['x'], win['y'], win['x'] + 200, win['y'] + 320), 4)   # the dot of the active entry
+        # entries (20 px each): 50 60 75 90 100 110 125 150 175 200 250 300 400 500; "200%" is the 10th
+        ctl.click(win['x'] + 130, win['y'] + self.BAR_H + 2 + 9 * 20 + 10)
+        time.sleep(0.3)
+        rows, cols = self.size_now(out, 2)
+        self.assertEqual(cols, 40)                                                # 16 px cells
+        ctl.click(win['x'] + 130, win['y'] + 8)
+        time.sleep(0.2)
+        ctl.tap(KEY_ESC)                                                          # Esc closes the list without changing anything
+        time.sleep(0.2)
+        self.assertEqual(self.size_now(out, 3)[1], 40)
+
+    def test_terminal_zoom_steps_are_fine_and_reset_goes_back(self):
+        win, out = self.term('term-steps.txt')
+        ctl.click(win['x'] + 180, win['y'] + 8)                                  # A+: 100 -> 110 %, 9 px cells
+        time.sleep(0.3)
+        self.assertEqual(self.size_now(out, 1)[1], 71)
+        ctl.click(win['x'] + 180, win['y'] + 8)                                  # 125 %, 10 px cells
+        time.sleep(0.3)
+        self.assertEqual(self.size_now(out, 2)[1], 64)
+        ctl.click(win['x'] + 80, win['y'] + 8)                                   # A-: back to 110 %
+        time.sleep(0.3)
+        self.assertEqual(self.size_now(out, 3)[1], 71)
+        ctl.click(win['x'] + 220, win['y'] + 8)                                  # Reset
+        time.sleep(0.3)
+        self.assertEqual(self.size_now(out, 4)[1], 80)
+
+    def test_terminal_fractional_zoom_is_smooth_and_keeps_the_text_readable(self):
+        win, out = self.term('term-frac.txt')
+        for _ in range(2):
+            ctl.click(win['x'] + 180, win['y'] + 8)                              # 125 %: 10x20 cells, a real fraction of 8x16
+            time.sleep(0.15)
+        type_text('go')
+        time.sleep(0.5)
+        ppm = ctl.dump(os.path.join(tmp, 'term-frac.ppm'))
+        colours = set()
+        for y in range(win['y'] + self.BAR_H + 3, win['y'] + self.BAR_H + 3 + 40):
+            for x in range(win['x'] + 3, win['x'] + 3 + 120):
+                colours.add(ppm.px(x, y))
+        self.assertGreater(len(colours), 6, 'a fractional size should show intermediate (anti-aliased) shades')
+        ctl.click(win['x'] + 220, win['y'] + 8)                                  # Reset: whole pixels again, only fg and bg
+        time.sleep(0.4)
+        ppm = ctl.dump(os.path.join(tmp, 'term-frac1.ppm'))
+        colours = set()
+        for y in range(win['y'] + self.BAR_H + 3, win['y'] + self.BAR_H + 3 + 40):
+            for x in range(win['x'] + 3, win['x'] + 3 + 120):
+                colours.add(ppm.px(x, y))
+        self.assertLessEqual(len(colours), 4, colours)
+
+    def cell_px(self, out, n):
+        """The terminal's cell width in pixels, from its own answer (columns) and the window it made (w = cols * cell + 6)."""
+        cols = self.size_now(out, n)[1]
+        w = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.term'][0]['w']
+        self.assertEqual((w - 6) % cols, 0, (w, cols))
+        return (w - 6) // cols
+
+    def conf(self, name):
+        d = os.path.join(tmp, name)
+        os.makedirs(d, exist_ok=True)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d, os.path.join(d, 'mellagui', 'terminal.conf')
+
+    def term_in(self, confdir, name):
+        out = os.path.join(tmp, name)
+        script = os.path.join(tmp, name + '.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nwhile read l; do stty size >> "%s"; done\n' % out)
+        os.chmod(script, 0o755)
+        if os.path.exists(out):
+            os.unlink(out)
+        p = self.spawn('mellagui-term', SHELL=script, XDG_CONFIG_HOME=confdir)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win, 'terminal window did not appear')
+        time.sleep(0.4)
+        return p, win, out
+
+    def wait_conf(self, path, text, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if os.path.exists(path) and text in open(path).read():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_terminal_saves_its_zoom_and_the_next_one_starts_with_it(self):
+        confdir, path = self.conf('tconf1')
+        p, win, out = self.term_in(confdir, 'term-save1.txt')
+        self.assertFalse(os.path.exists(path))                                    # nothing is written for nothing
+        self.assertEqual(self.cell_px(out, 1), 8)
+        ctl.click(win['x'] + 180, win['y'] + 8)                                  # A+: 110 %
+        ctl.click(win['x'] + 180, win['y'] + 8)                                  # 125 %
+        self.assertTrue(self.wait_conf(path, 'zoom=125'), 'the zoom was not saved')
+        text = open(path).read()
+        self.assertEqual([l for l in text.split('\n') if l and not l.startswith('#')], ['zoom=125'])
+        p.terminate()
+        p.wait(timeout=5)
+        ctl.sync()
+        for _ in range(60):
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.term']:
+                break
+            time.sleep(0.05)
+        p2, win2, out2 = self.term_in(confdir, 'term-save2.txt')                  # the next terminal
+        self.assertEqual(self.cell_px(out2, 1), 10)                               # starts at 125 %: 10 px cells
+        ctl.click(win2['x'] + 220, win2['y'] + 8)                                # Reset is saved, too
+        self.assertTrue(self.wait_conf(path, 'zoom=100'))
+
+    def test_a_normal_exit_saves_the_size_at_once(self):
+        confdir, path = self.conf('tconf2')
+        script = os.path.join(tmp, 'exit-at-once.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nread l\nexit 0\n')
+        os.chmod(script, 0o755)
+        p = self.spawn('mellagui-term', SHELL=script, XDG_CONFIG_HOME=confdir)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        ctl.click(win['x'] + 130, win['y'] + 8)                                  # the zoom list
+        time.sleep(0.2)
+        ctl.click(win['x'] + 130, win['y'] + self.BAR_H + 2 + 9 * 20 + 10)       # 200 %
+        type_text('x')                                                            # the shell ends: the terminal exits inside the save delay
+        p.wait(timeout=5)
+        self.assertIn('zoom=200', open(path).read())
+
+    def test_a_damaged_or_foreign_file_is_ignored(self):
+        for n, content in enumerate(('zoom=abc\n', 'zoom=9999\n', 'zoom=10\n', 'garbage\x00\xff\n', '')):
+            confdir, path = self.conf('tconf-bad%d' % n)
+            os.makedirs(os.path.dirname(path))
+            with open(path, 'w', errors='ignore') as f:
+                f.write(content)
+            p, win, out = self.term_in(confdir, 'term-bad%d.txt' % n)
+            self.assertEqual(self.cell_px(out, 1), 8, repr(content))              # 100 %
+            p.terminate()
+            p.wait(timeout=5)
+            for _ in range(60):
+                if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.term']:
+                    break
+                time.sleep(0.05)
+
+    def test_a_saved_value_between_the_steps_is_kept(self):
+        confdir, path = self.conf('tconf3')
+        os.makedirs(os.path.dirname(path))
+        with open(path, 'w') as f:
+            f.write('# hand edited\nzoom=135\nfuture-key=1\n')
+        p, win, out = self.term_in(confdir, 'term-save5.txt')
+        self.assertEqual(self.cell_px(out, 1), 11)                                # 135 % of 8 px, rounded
+        ctl.click(win['x'] + 180, win['y'] + 8)                                  # A+ goes to the next level above: 150 %
+        self.assertTrue(self.wait_conf(path, 'zoom=150'))
+
+    def test_terminal_ctrl_keys_and_wheel_zoom_in_steps(self):
+        win, out = self.term('term-keys.txt')
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(13)                                                               # Ctrl+= : 110 %
+        ctl.key(KEY_LEFTCTRL, False)
+        time.sleep(0.3)
+        self.assertEqual(self.size_now(out, 1)[1], 71)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(11)                                                               # Ctrl+0 : reset
+        ctl.key(KEY_LEFTCTRL, False)
+        time.sleep(0.3)
+        self.assertEqual(self.size_now(out, 2)[1], 80)
 
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',

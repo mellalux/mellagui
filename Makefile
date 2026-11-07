@@ -10,6 +10,8 @@
 #   make run        build, then start the compositor on a free VT (see RUN_ARGS)
 #   make asan       build/mellagui-asan   (compositor with ASan + UBSan)
 #   make test       build, then run tests/run.sh
+#   make fuzz       build/fuzz-server     (coverage-guided fuzzer of the whole compositor, tests/fuzz_server.c)
+#   make fuzz-run   build it and fuzz for FUZZ_TIME seconds (default 60); the corpus is kept in build/fuzz/corpus
 #   make clean
 
 CC      := gcc
@@ -37,7 +39,7 @@ CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test \
            $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor asan test run clean
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor asan test run clean fuzz fuzz-run
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -97,6 +99,35 @@ $(BUILD)/client/%.o: client/%.c
 $(BUILD)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+# ---- fuzzer -----------------------------------------------------------------------
+# Everything in src/ except main.c, with the sanitizers and edge coverage (gcc: -fsanitize-coverage=trace-pc), plus the harness.
+FUZZ_DIR := $(BUILD)/fuzz
+FUZZ_OBJS := $(patsubst src/%.c,$(FUZZ_DIR)/obj/%.o,$(filter-out src/main.c,$(COMP_SRCS)))
+FUZZ_FLAGS := $(ASAN_FLAGS) -fsanitize-coverage=trace-pc -O1
+FUZZ_TIME ?= 60
+
+fuzz: $(BUILD)/fuzz-server
+
+$(BUILD)/fuzz-server: $(FUZZ_OBJS) $(FUZZ_DIR)/obj/fuzz_server.o $(FUZZ_DIR)/obj/fuzz_cov.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(ASAN_FLAGS) -o $@ $^ $(LDLIBS)
+
+$(FUZZ_DIR)/obj/fuzz_server.o: tests/fuzz_server.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -Itests $(CFLAGS) $(FUZZ_FLAGS) -c -o $@ $<
+
+$(FUZZ_DIR)/obj/fuzz_cov.o: tests/fuzz_cov.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -Itests $(CFLAGS) -c -o $@ $<
+
+$(FUZZ_DIR)/obj/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(FUZZ_FLAGS) -c -o $@ $<
+
+fuzz-run: fuzz
+	@mkdir -p $(FUZZ_DIR)/corpus
+	$(BUILD)/fuzz-server -t $(FUZZ_TIME) -c $(FUZZ_DIR)/corpus -o $(FUZZ_DIR)/current.bin
 
 # ---- tests ------------------------------------------------------------------------
 test: all

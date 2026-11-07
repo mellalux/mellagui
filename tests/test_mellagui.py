@@ -3814,5 +3814,19 @@ class TestLock(Base):
         self.assertEqual((got['lock-kind'], got['locked']), ('none', '0'))  # and a lock without a secret cannot stay locked
 
 
+class TestFuzz(Base):
+    """The coverage-guided fuzzer of the whole compositor (tests/fuzz_server.c): a short run must end without a sanitizer report."""
+
+    def test_short_fuzz_run(self):
+        path = os.path.join(ROOT, 'build', 'fuzz-server')
+        if not os.path.exists(path):
+            self.skipTest('fuzz-server not built (make fuzz)')
+        crash = os.path.join(tmp, 'fuzz-current.bin')
+        r = subprocess.run([path, '-t', '20', '-s', '1', '-o', crash], capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, XDG_RUNTIME_DIR=tmp))
+        self.assertEqual(r.returncode, 0, 'fuzz-server failed; the input that was running is %s\n%s%s' % (crash, r.stdout[-800:], r.stderr[-3000:]))
+        self.assertIn('no sanitizer report', r.stdout)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

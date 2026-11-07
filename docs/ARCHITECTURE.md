@@ -166,8 +166,13 @@ header/API change requests go to the architect (`header_requests`). Headers in
   `struct lm_texture` and the buffer is released immediately. The renderer
   never touches client shm; the only SIGBUS exposure (client truncating its
   pool) is inside `lm_buffer_copy`.
-* **Rendering is CPU compositing** into backend framebuffers (DRM dumb buffers,
-  double buffered; `lm_framebuffer.age` drives partial redraw). No GL.
+* **Rendering is CPU compositing** into backend framebuffers; `lm_framebuffer.age` drives partial redraw. No GL.
+  The DRM backend composes into a *shadow frame* in ordinary memory (age 1) and `present` copies only the changed
+  rectangles into the back dumb buffer (each dumb buffer keeps a list of what it still lacks): dumb buffers are
+  write-combining, reading them back for alpha blending runs at ~54 MB/s (writes 6.9 GB/s).
+* **DRM hotplug never force-probes on a timer.** `drmModeGetConnector` re-reads every EDID over I2C (230 ms for 7
+  connectors on the dev machine) and stalls the single-threaded loop; the 2 s poll uses `drmModeGetConnectorCurrent`
+  and a forced probe only follows a kernel `drm` `HOTPLUG=1` uevent (netlink group 1) and at start-up.
 * **Key repeat.** The compositor advertises `wl_keyboard.repeat_info`; clients
   repeat themselves. `input_evdev` also generates repeats (flagged
   `repeat = true`) for compositor shortcuts only; the seat does not forward them.

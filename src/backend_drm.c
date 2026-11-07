@@ -23,7 +23,9 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <linux/netlink.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <drm.h>
@@ -43,7 +45,15 @@
 
 struct drm;
 
+/* Parts of a dumb buffer that are older than the shadow frame and must still be copied into it. */
+#define DIRTY_MAX 16
+struct dirty {
+    struct lm_rect r[DIRTY_MAX];
+    int n;
+};
+
 struct drm_buf {
+    struct dirty dirty;
     uint32_t handle;
     uint32_t fb_id;
     uint32_t pitch;
@@ -59,7 +69,13 @@ struct drm_out {
     drmModeModeInfo mode;
     drmModeCrtc *saved;         /* CRTC state to restore on exit */
     struct drm_buf buf[2];
-    int back;                   /* buffer the next frame is drawn into */
+    int back;                   /* buffer the next frame is shown through */
+    /* The scene is composed into ordinary (cached) memory: the dumb buffers are write-combining, reading them back
+     * for alpha blending is ~100x slower than writing (measured 54 MB/s vs 6.9 GB/s on Intel). present() copies only
+     * the changed rectangles into the back buffer. */
+    uint32_t *shadow;
+    size_t shadow_size;
+    bool shadow_valid;          /* holds a complete frame (age 1) */
     bool flip_pending;
     bool busy;                  /* inside a mode change: no output_ready meanwhile */
     bool live;
@@ -73,7 +89,10 @@ struct drm {
     int fd;
     char path[300];
     struct lm_source *drm_source;
-    struct lm_timer *hotplug;
+    struct lm_timer *hotplug;       /* cheap periodic look at the connectors' last known state */
+    struct lm_timer *reprobe;       /* debounced forced probe after a kernel hotplug uevent */
+    int uevent_fd;                  /* NETLINK_KOBJECT_UEVENT, -1 = none */
+    struct lm_source *uevent_source;
     struct lm_timer *ready_timer;   /* "ready" after (re)activation */
     int tty_fd;
     struct lm_source *sig_release, *sig_acquire;
@@ -174,7 +193,62 @@ static int buf_create(struct drm *d, struct drm_buf *b, uint32_t w, uint32_t h)
     }
     b->map = p;
     memset(b->map, 0, b->size);
+    b->dirty.r[0] = lm_rect_make(0, 0, (int32_t)w, (int32_t)h);     /* everything must still be copied */
+    b->dirty.n = 1;
     return 0;
+}
+
+
+/* ---- shadow frame ---------------------------------------------------------------------------- */
+
+static void dirty_add(struct dirty *dt, struct lm_rect r)
+{
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    if (dt->n == DIRTY_MAX) {                   /* too many pieces: keep one bounding rectangle */
+        struct lm_rect e = dt->r[0];
+        for (int i = 1; i < dt->n; i++)
+            e = lm_rect_union(&e, &dt->r[i]);
+        dt->r[0] = e;
+        dt->n = 1;
+    }
+    dt->r[dt->n++] = r;
+}
+
+static void shadow_free(struct drm_out *o)
+{
+    free(o->shadow);
+    o->shadow = NULL;
+    o->shadow_size = 0;
+    o->shadow_valid = false;
+}
+
+static int shadow_alloc(struct drm_out *o, size_t size)
+{
+    void *p = NULL;
+    if (posix_memalign(&p, 64, size) != 0) {
+        lm_error("drm: out of memory for the %zu byte shadow frame", size);
+        return -1;
+    }
+    memset(p, 0, size);
+    o->shadow = p;
+    o->shadow_size = size;
+    o->shadow_valid = false;
+    return 0;
+}
+
+/* Copies `r` (output-local) from the shadow frame into dumb buffer `b`. */
+static void copy_to_buf(const struct drm_out *o, struct drm_buf *b, struct lm_rect r)
+{
+    struct lm_rect full = lm_rect_make(0, 0, o->base.width, o->base.height);
+    struct lm_rect c;
+    if (!lm_rect_intersect(&r, &full, &c))
+        return;
+    size_t bytes = (size_t)c.w * 4;
+    for (int y = c.y; y < c.y + c.h; y++) {
+        size_t off = (size_t)y * b->pitch + (size_t)c.x * 4;
+        memcpy((char *)b->map + off, (const char *)o->shadow + off, bytes);
+    }
 }
 
 /* ---- output management ------------------------------------------------------------------- */
@@ -265,6 +339,7 @@ static void out_destroy(struct drm_out *o, bool restore)
     }
     if (o->saved)
         drmModeFreeCrtc(o->saved);
+    shadow_free(o);
     buf_destroy(d, &o->buf[0]);
     buf_destroy(d, &o->buf[1]);
     free(o);
@@ -425,8 +500,12 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
         w = o->mode.hdisplay;
         h = o->mode.vdisplay;
         o->back = 0;
-        if (buf_create(d, &o->buf[0], w, h) == 0 && buf_create(d, &o->buf[1], w, h) == 0 && out_modeset(o) == 0)
-            break;
+        if (buf_create(d, &o->buf[0], w, h) == 0 && buf_create(d, &o->buf[1], w, h) == 0 &&
+            shadow_alloc(o, o->buf[0].size) == 0) {
+            if (out_modeset(o) == 0)
+                break;
+            shadow_free(o);
+        }
         buf_destroy(d, &o->buf[0]);
         buf_destroy(d, &o->buf[1]);
         if (attempt > 0 || !memcmp(&o->mode, &preferred, sizeof(preferred)))
@@ -463,6 +542,7 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
 fail:
     if (o->saved)
         drmModeFreeCrtc(o->saved);
+    shadow_free(o);
     buf_destroy(d, &o->buf[0]);
     buf_destroy(d, &o->buf[1]);
     free(o);
@@ -478,8 +558,17 @@ static bool conn_has_output(struct drm *d, uint32_t conn_id)
     return false;
 }
 
+/* A forced probe makes the kernel re-read every connector's EDID over I2C: on this class of hardware that is 40-100 ms
+ * per connector (230 ms for 7), during which the single-threaded loop - pointer and picture - stands still. So it is
+ * only done at start-up and after the kernel announced a hotplug; the periodic look uses the last known state, which
+ * the kernel keeps current for ports with hotplug detection. */
+static drmModeConnector *get_conn(struct drm *d, uint32_t id, bool force)
+{
+    return force ? drmModeGetConnector(d->fd, id) : drmModeGetConnectorCurrent(d->fd, id);
+}
+
 /* Returns number of outputs after the scan. */
-static int probe_outputs(struct drm *d)
+static int probe_outputs(struct drm *d, bool force)
 {
     drmModeRes *res = drmModeGetResources(d->fd);
     if (!res) {
@@ -490,7 +579,7 @@ static int probe_outputs(struct drm *d)
     struct lm_output *lo, *tmp;
     lm_list_for_each_safe(lo, tmp, &d->base.outputs, link) {
         struct drm_out *o = (struct drm_out *)lo;
-        drmModeConnector *c = drmModeGetConnector(d->fd, o->conn_id);
+        drmModeConnector *c = get_conn(d, o->conn_id, force);
         bool gone = !c || c->connection != DRM_MODE_CONNECTED;
         if (c)
             drmModeFreeConnector(c);
@@ -503,10 +592,10 @@ static int probe_outputs(struct drm *d)
         uint32_t id = res->connectors[i];
         if (conn_has_output(d, id))
             continue;
-        drmModeConnector *c = drmModeGetConnector(d->fd, id);
+        drmModeConnector *c = get_conn(d, id, force);
         if (!c)
             continue;
-        if (c->connection == DRM_MODE_CONNECTED && d->active) {
+        if (c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 && d->active) {
             struct drm_out *o = out_create(d, res, c);
             if (o) {
                 lm_info("drm: output %s %dx%d connected", o->base.name, o->base.width, o->base.height);
@@ -537,9 +626,57 @@ static void hotplug_fire(void *data)
     struct drm *d = data;
     if (!d->active)
         return;
-    int before = lm_list_length(&d->base.outputs);
-    probe_outputs(d);
-    (void)before;
+    probe_outputs(d, false);
+}
+
+static void reprobe_fire(void *data)
+{
+    struct drm *d = data;
+    if (d->active)
+        probe_outputs(d, true);
+}
+
+/* Kernel uevents: only "change" events of the drm subsystem with HOTPLUG=1 matter. */
+static void uevent_cb(int fd, uint32_t events, void *data)
+{
+    struct drm *d = data;
+    (void)events;
+    char buf[2048];
+    for (;;) {
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+        if (n <= 0)
+            break;
+        buf[n] = 0;
+        bool is_drm = false, hotplug = false;
+        for (ssize_t i = 0; i < n; i += (ssize_t)strlen(buf + i) + 1) {
+            if (!strcmp(buf + i, "SUBSYSTEM=drm"))
+                is_drm = true;
+            else if (!strcmp(buf + i, "HOTPLUG=1"))
+                hotplug = true;
+        }
+        if (is_drm && hotplug)
+            lm_timer_arm_ms(d->reprobe, 300, 0);       /* the monitor needs a moment; several events become one */
+    }
+}
+
+static void uevent_open(struct drm *d)
+{
+    d->uevent_fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+    if (d->uevent_fd < 0) {
+        lm_warn("drm: no uevent socket (%s): monitors plugged in later are noticed only by the slow poll", strerror(errno));
+        return;
+    }
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    sa.nl_groups = 1;                                   /* the kernel's own events, no udev needed */
+    if (bind(d->uevent_fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        lm_warn("drm: cannot listen for hotplug uevents (%s)", strerror(errno));
+        close(d->uevent_fd);
+        d->uevent_fd = -1;
+        return;
+    }
+    d->uevent_source = lm_loop_add_fd(d->base.server->loop, d->uevent_fd, EPOLLIN, uevent_cb, d);
 }
 
 /* ---- frame protocol -------------------------------------------------------------------------- */
@@ -550,14 +687,11 @@ static struct lm_framebuffer *drm_get_framebuffer(struct lm_output *out)
     struct drm *d = o->d;
     if (!d->active || o->flip_pending || !o->live)
         return NULL;
-    struct drm_buf *b = &o->buf[o->back];
-    o->fb.pixels = b->map;
+    o->fb.pixels = o->shadow;
     o->fb.width = out->width;
     o->fb.height = out->height;
-    o->fb.stride = (int32_t)b->pitch;
-    o->fb.age = b->seq ? (int)(o->seq + 1 - b->seq) : 0;
-    if (o->fb.age < 0)
-        o->fb.age = 0;
+    o->fb.stride = (int32_t)o->buf[0].pitch;
+    o->fb.age = o->shadow_valid ? 1 : 0;        /* the shadow always holds the last composed frame */
     return &o->fb;
 }
 
@@ -565,11 +699,26 @@ static int drm_present(struct lm_output *out, const struct lm_rect *damage, int 
 {
     struct drm_out *o = out->backend_data;
     struct drm *d = o->d;
-    (void)damage;
-    (void)n;
     if (!d->active || !o->live)
         return -1;
     struct drm_buf *b = &o->buf[o->back];
+    struct drm_buf *other = &o->buf[o->back ^ 1];
+    /* What changed in this frame is missing from both dumb buffers; the back one gets it now, the other (currently
+     * on screen) is brought up to date by the next present. */
+    struct lm_rect whole = lm_rect_make(0, 0, out->width, out->height);
+    if (!damage || n <= 0) {
+        dirty_add(&b->dirty, whole);
+        dirty_add(&other->dirty, whole);
+    } else {
+        for (int i = 0; i < n; i++) {
+            dirty_add(&b->dirty, damage[i]);
+            dirty_add(&other->dirty, damage[i]);
+        }
+    }
+    for (int i = 0; i < b->dirty.n; i++)
+        copy_to_buf(o, b, b->dirty.r[i]);
+    b->dirty.n = 0;
+    o->shadow_valid = true;
     if (drmModePageFlip(d->fd, o->crtc_id, b->fb_id, DRM_MODE_PAGE_FLIP_EVENT, o) < 0) {
         lm_warn("drm: page flip on %s failed: %s", out->name, strerror(errno));
         lm_timer_arm_ms(o->retry, 16, 0);
@@ -641,7 +790,8 @@ static void vt_acquire(int signo, void *data)
     lm_list_for_each(lo, &d->base.outputs, link) {
         struct drm_out *o = (struct drm_out *)lo;
         o->flip_pending = false;
-        o->buf[0].seq = o->buf[1].seq = 0;   /* contents are unknown now: force full redraws */
+        o->buf[0].seq = o->buf[1].seq = 0;
+        o->shadow_valid = false;            /* contents are unknown now: force full redraws */
         out_modeset(o);
     }
     if (d->base.listener.session_active)
@@ -799,6 +949,8 @@ static int drm_init(struct lm_backend *b)
 
     d->ready_timer = lm_loop_add_timer(srv->loop, ready_all_fire, d);
     d->hotplug = lm_loop_add_timer(srv->loop, hotplug_fire, d);
+    d->reprobe = lm_loop_add_timer(srv->loop, reprobe_fire, d);
+    d->uevent_fd = -1;
 
     if (vt_setup(d) < 0)
         return -1;
@@ -815,11 +967,12 @@ static int drm_init(struct lm_backend *b)
     d->active = true;
     b->session_active = true;
 
-    if (probe_outputs(d) <= 0) {
+    if (probe_outputs(d, true) <= 0) {
         lm_error("drm: no output could be set up on %s", d->path);
         return -1;
     }
     d->drm_source = lm_loop_add_fd(srv->loop, d->fd, EPOLLIN, drm_event_cb, d);
+    uevent_open(d);
     lm_timer_arm_ms(d->ready_timer, 1, 0);
     lm_timer_arm_ms(d->hotplug, HOTPLUG_POLL_MS, HOTPLUG_POLL_MS);
     return 0;
@@ -832,6 +985,12 @@ static void drm_destroy(struct lm_backend *b)
 
     if (d->hotplug)
         lm_timer_destroy(d->hotplug);
+    if (d->reprobe)
+        lm_timer_destroy(d->reprobe);
+    if (d->uevent_source)
+        lm_source_remove(d->uevent_source);
+    if (d->uevent_fd >= 0)
+        close(d->uevent_fd);
     if (d->ready_timer)
         lm_timer_destroy(d->ready_timer);
     if (d->drm_source)
@@ -865,7 +1024,7 @@ static bool same_timing(const drmModeModeInfo *a, const drmModeModeInfo *b)
 static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int max)
 {
     struct drm_out *o = out->backend_data;
-    drmModeConnector *conn = drmModeGetConnector(o->d->fd, o->conn_id);
+    drmModeConnector *conn = drmModeGetConnectorCurrent(o->d->fd, o->conn_id);
     if (!conn || conn->count_modes <= 0) {
         if (conn)
             drmModeFreeConnector(conn);
@@ -928,7 +1087,7 @@ static int drm_apply_mode(struct lm_output *out)
     struct drm *d = o->d;
     if (!d->active || !o->live)
         return -1;
-    drmModeConnector *conn = drmModeGetConnector(d->fd, o->conn_id);
+    drmModeConnector *conn = drmModeGetConnectorCurrent(d->fd, o->conn_id);
     if (!conn || conn->connection != DRM_MODE_CONNECTED || conn->count_modes <= 0) {
         if (conn)
             drmModeFreeConnector(conn);
@@ -945,7 +1104,8 @@ static int drm_apply_mode(struct lm_output *out)
 
     o->busy = true;
     drm_wait_flip(o);
-    struct drm_buf nb[2] = { { 0 }, { 0 } };
+    struct drm_buf nb[2];
+    memset(nb, 0, sizeof(nb));
     if (buf_create(d, &nb[0], m.hdisplay, m.vdisplay) < 0 || buf_create(d, &nb[1], m.hdisplay, m.vdisplay) < 0) {
         buf_destroy(d, &nb[0]);
         buf_destroy(d, &nb[1]);
@@ -955,6 +1115,19 @@ static int drm_apply_mode(struct lm_output *out)
     struct drm_buf old[2] = { o->buf[0], o->buf[1] };
     drmModeModeInfo old_mode = o->mode;
     int old_back = o->back;
+    uint32_t *old_shadow = o->shadow;
+    size_t old_shadow_size = o->shadow_size;
+    bool old_shadow_valid = o->shadow_valid;
+    o->shadow = NULL;
+    if (shadow_alloc(o, nb[0].size) < 0) {
+        o->shadow = old_shadow;
+        o->shadow_size = old_shadow_size;
+        o->shadow_valid = old_shadow_valid;
+        buf_destroy(d, &nb[0]);
+        buf_destroy(d, &nb[1]);
+        o->busy = false;
+        return -1;
+    }
     o->buf[0] = nb[0];
     o->buf[1] = nb[1];
     o->mode = m;
@@ -964,11 +1137,16 @@ static int drm_apply_mode(struct lm_output *out)
         o->buf[1] = old[1];
         o->mode = old_mode;
         o->back = old_back;
+        shadow_free(o);
+        o->shadow = old_shadow;
+        o->shadow_size = old_shadow_size;
+        o->shadow_valid = old_shadow_valid;
         buf_destroy(d, &nb[0]);
         buf_destroy(d, &nb[1]);
         o->busy = false;
         return -1;
     }
+    free(old_shadow);
     buf_destroy(d, &old[0]);
     buf_destroy(d, &old[1]);
     o->seq = 0;
@@ -1008,6 +1186,7 @@ struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *devi
     lm_list_init(&d->base.outputs);
     d->fd = -1;
     d->tty_fd = -1;
+    d->uevent_fd = -1;
     (void)device; /* taken from srv->config.drm_device in init */
     return &d->base;
 }

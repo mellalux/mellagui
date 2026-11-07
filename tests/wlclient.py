@@ -197,6 +197,8 @@ class Wl:
             elif c == 'h':
                 fds.append(self.fdq.pop(0))
         ev = Event(oid, iface, name, args, fds)
+        if iface == 'wl_data_device' and name == 'data_offer':
+            self.objs[args[0]] = 'wl_data_offer'          # server-created offer
         if iface == 'wl_display':
             if name == 'error':
                 self.error = ProtocolError(args[0], args[1], args[2])

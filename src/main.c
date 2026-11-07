@@ -48,6 +48,8 @@ static const char *usage_text =
     "  --log-file PATH          additionally append the log to PATH\n"
     "  --settings FILE          where the settings panel saves (and the start reads) the user settings; \"none\" = nowhere\n"
     "                           (default drm: $XDG_CONFIG_HOME/lumen/settings.conf, headless: none); options below win\n"
+    "  --clipboard-file FILE    where the clipboard history is kept between runs (private file, newest entry first); \"none\" = nowhere\n"
+    "                           (default drm: $XDG_CONFIG_HOME/lumen/clipboard-history, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
     "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
@@ -202,7 +204,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -220,6 +222,7 @@ int main(int argc, char **argv)
         { "log-level", required_argument, 0, 'l' },
         { "log-file", required_argument, 0, 'f' },
         { "settings", required_argument, 0, OPT_SETTINGS },
+        { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
@@ -245,7 +248,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--backend=", 10))
             headless_arg = !strcmp(argv[i] + 10, "headless");
     }
-    static char settings_buf[PATH_MAX], layouts_buf[64];
+    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX];
     if (!settings_arg && !headless_arg) {
         const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
         if (xdg && *xdg)
@@ -254,6 +257,15 @@ int main(int argc, char **argv)
             snprintf(settings_buf, sizeof(settings_buf), "%s/.config/lumen/settings.conf", home);
         if (settings_buf[0])
             settings_arg = settings_buf;
+    }
+    if (!headless_arg) {                                  /* the history lives beside the settings (--clipboard-file wins) */
+        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg)
+            snprintf(clip_buf, sizeof(clip_buf), "%s/lumen/clipboard-history", xdg);
+        else if (home && *home)
+            snprintf(clip_buf, sizeof(clip_buf), "%s/.config/lumen/clipboard-history", home);
+        if (clip_buf[0])
+            cfg.clip_path = clip_buf;
     }
     if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
         cfg.settings_path = settings_arg;
@@ -323,6 +335,7 @@ int main(int argc, char **argv)
         }
         case 'f': cfg.log_file = optarg; break;
         case OPT_SETTINGS: break;           /* handled above */
+        case OPT_CLIPBOARD_FILE: cfg.clip_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;
@@ -359,7 +372,7 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("lumen-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
     cfg.settings_cmd = default_sibling("lumen-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
+    static char monitor_buf[PATH_MAX + 4], calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
     if (cfg.napps == 0) {
         /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
@@ -392,6 +405,8 @@ int main(int argc, char **argv)
             break;
         }
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Settings", cfg.settings_cmd };   /* last: keeps the others' places */
+        cfg.apps[cfg.napps++] = (struct lm_app_entry){
+            "Monitor", default_sibling("lumen-monitor", monitor_buf, sizeof(monitor_buf)) };
     }
     lm_log_set_level((enum lm_log_level)cfg.log_level);
     if (cfg.log_file && lm_log_set_file(cfg.log_file) < 0)

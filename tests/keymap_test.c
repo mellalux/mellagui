@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "cvt.h"
+#include "ddc.h"
 #include "edid.h"
 #include "keymap.h"
 #include "audio.h"
@@ -160,6 +161,31 @@ int main(void)
     /* EDID: native shape vs the mode the kernel offers (first 128 bytes of a real 21:9 monitor, serial number removed) */
     static const uint8_t edid_21x9[128] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x10, 0xac, 0x18, 0x43, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x23, 0x01, 0x03, 0x80, 0x5d, 0x27, 0x78, 0x2a, 0xd9, 0xa5, 0xb0, 0x4f, 0x3d, 0xb1, 0x24, 0x0e, 0x50, 0x54, 0xa5, 0x4b, 0x00, 0x71, 0x4f, 0x81, 0x00, 0x81, 0x80, 0xa9, 0x40, 0xb3, 0x00, 0xd1, 0xc0, 0xd1, 0x00, 0xe1, 0xc0, 0xd4, 0x46, 0x00, 0xa0, 0xa0, 0x38, 0x1f, 0x40, 0x30, 0x20, 0x3a, 0x00, 0xa1, 0x88, 0x31, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0xff, 0x00, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x44, 0x45, 0x4c, 0x4c, 0x20, 0x55, 0x34, 0x30, 0x32, 0x35, 0x51, 0x57, 0x0a, 0x00, 0x00, 0x00, 0xfd, 0x00, 0x30, 0x78, 0x19, 0xff, 0x96, 0x00, 0x0a, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x01, 0x5b };
     struct lm_edid_native nat;
+    /* DDC/CI packets (the bytes a real monitor accepted / sent) */
+    {
+        uint8_t req[7];
+        CHECK(lm_ddc_build_get(LM_VCP_BRIGHTNESS, req) == 5 && req[0] == 0x51 && req[1] == 0x82 && req[2] == 0x01 && req[3] == 0x10 && req[4] == 0xac,
+              "ddc get request: %02x %02x %02x %02x %02x", req[0], req[1], req[2], req[3], req[4]);
+        CHECK(lm_ddc_build_set(LM_VCP_BRIGHTNESS, 50, req) == 7 && req[1] == 0x84 && req[2] == 0x03 && req[4] == 0x00 && req[5] == 0x32 && req[6] == 0x9a,
+              "ddc set request: checksum %02x", req[6]);
+        static const uint8_t ok[11] = { 0x6e, 0x88, 0x02, 0x00, 0x10, 0x00, 0x00, 0x64, 0x00, 0x30, 0xf0 };
+        struct lm_ddc_vcp v;
+        CHECK(lm_ddc_parse_get(ok, sizeof(ok), 0x10, &v) == LM_DDC_OK && v.max == 100 && v.cur == 48, "ddc reply: max %d cur %d", v.max, v.cur);
+        CHECK(lm_ddc_parse_get(ok, sizeof(ok), 0x12, &v) == LM_DDC_BAD, "ddc reply for another code");
+        uint8_t bad[11];
+        memcpy(bad, ok, sizeof(bad));
+        bad[10] ^= 1;
+        CHECK(lm_ddc_parse_get(bad, sizeof(bad), 0x10, &v) == LM_DDC_BAD, "ddc reply with a wrong checksum");
+        CHECK(lm_ddc_parse_get(ok, 5, 0x10, &v) == LM_DDC_BAD, "ddc short reply");
+        static const uint8_t unsup[11] = { 0x6e, 0x88, 0x02, 0x01, 0x99, 0, 0, 0, 0, 0, 0x2c };
+        CHECK(lm_ddc_parse_get(unsup, sizeof(unsup), 0x99, &v) == LM_DDC_UNSUPPORTED, "ddc unsupported feature");
+    }
+    struct lm_edid_info einfo;
+    CHECK(lm_edid_info(edid_21x9, sizeof(edid_21x9), &einfo) && !strcmp(einfo.vendor, "DEL") && !strcmp(einfo.name, "DELL U4025QW") &&
+          einfo.product == 0x4318 && einfo.year == 2025 && einfo.mm_w == 930 && einfo.mm_h == 390,
+          "edid info: '%s' '%s' product %x year %d %dx%d mm", einfo.vendor, einfo.name, einfo.product, einfo.year, einfo.mm_w, einfo.mm_h);
+    CHECK(!strcmp(lm_edid_vendor_name("DEL"), "Dell") && !strcmp(lm_edid_vendor_name("ZZZ"), "ZZZ"), "edid vendor names");
+    CHECK(!lm_edid_info((const uint8_t *)"not an edid block", 18, &einfo), "edid info: not EDID");
     CHECK(lm_edid_native(edid_21x9, sizeof(edid_21x9), &nat) && nat.w == 2560 && nat.h == 1080 && nat.mm_w == 929 && nat.mm_h == 392,
           "edid native: %dx%d %dx%d mm", nat.w, nat.h, nat.mm_w, nat.mm_h);
     CHECK(lm_edid_fix_height(2048, 1152, &nat, 930, 390) == 864, "21:9 panel offered 16:9 2048x1152 -> 2048x864 (%d)",

@@ -137,6 +137,8 @@ void lm_seat_send_repeat_info(struct lm_seat *seat);
 
 int lm_seat_clip_count(const struct lm_seat *seat);
 const char *lm_seat_clip_get(const struct lm_seat *seat, int i);
+/* Make history entry `i` the current selection (the compositor serves its text itself) and move it to the top. */
+void lm_seat_clip_use(struct lm_seat *seat, int i);
 void lm_seat_clip_clear(struct lm_seat *seat);      /* forget the history (control socket `clip clear`) */
 
 /* ---- serials -------------------------------------------------------------------------------- */

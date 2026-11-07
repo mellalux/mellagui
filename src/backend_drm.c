@@ -378,8 +378,8 @@ static bool cvt_mode(int w, int h, int hz, drmModeModeInfo *m)
  *                    e.g. a 21:9 panel whose GPU only offers 16:9 modes): then a mode of the same width and the panel's
  *                    shape is generated, so the monitor's scaler does not stretch the picture. If the kernel refuses it,
  *                    out_create falls back to the preferred mode. */
-/* The monitor's native timing from the connector's EDID blob; false when it cannot be read. */
-static bool conn_native(int fd, const drmModeConnector *conn, struct lm_edid_native *out)
+/* The connector's EDID blob (free with drmModeFreePropertyBlob), NULL when there is none. */
+static drmModePropertyBlobPtr conn_edid_blob(int fd, const drmModeConnector *conn)
 {
     for (int i = 0; i < conn->count_props; i++) {
         drmModePropertyPtr prop = drmModeGetProperty(fd, conn->props[i]);
@@ -387,16 +387,44 @@ static bool conn_native(int fd, const drmModeConnector *conn, struct lm_edid_nat
             continue;
         bool is_edid = !strcmp(prop->name, "EDID");
         drmModeFreeProperty(prop);
-        if (!is_edid)
-            continue;
-        drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(fd, (uint32_t)conn->prop_values[i]);
-        if (!blob)
-            return false;
-        bool ok = lm_edid_native(blob->data, blob->length, out);
-        drmModeFreePropertyBlob(blob);
-        return ok;
+        if (is_edid)
+            return drmModeGetPropertyBlob(fd, (uint32_t)conn->prop_values[i]);
     }
-    return false;
+    return NULL;
+}
+
+/* The monitor's native timing from the connector's EDID blob; false when it cannot be read. */
+static bool conn_native(int fd, const drmModeConnector *conn, struct lm_edid_native *out)
+{
+    drmModePropertyBlobPtr blob = conn_edid_blob(fd, conn);
+    if (!blob)
+        return false;
+    bool ok = lm_edid_native(blob->data, blob->length, out);
+    drmModeFreePropertyBlob(blob);
+    return ok;
+}
+
+/* Who made the monitor and what it is called (wl_output make / model, the settings panel): from the EDID. */
+static void conn_identify(int fd, const drmModeConnector *conn, struct lm_output *lo)
+{
+    snprintf(lo->make, sizeof(lo->make), "DRM");
+    snprintf(lo->model, sizeof(lo->model), "Monitor");
+    drmModePropertyBlobPtr blob = conn_edid_blob(fd, conn);
+    if (!blob)
+        return;
+    struct lm_edid_info info;
+    if (lm_edid_info(blob->data, blob->length, &info)) {
+        snprintf(lo->make, sizeof(lo->make), "%s", lm_edid_vendor_name(info.vendor));
+        if (info.name[0])
+            snprintf(lo->model, sizeof(lo->model), "%s", info.name);
+        else
+            snprintf(lo->model, sizeof(lo->model), "%s %04X", info.vendor, info.product);
+        if (!conn->mmWidth && info.mm_w > 0) {
+            lo->phys_width_mm = info.mm_w;
+            lo->phys_height_mm = info.mm_h;
+        }
+    }
+    drmModeFreePropertyBlob(blob);
 }
 
 static drmModeModeInfo pick_mode(const struct lm_config *cfg, const drmModeConnector *conn, const drmModeModeInfo *preferred,
@@ -516,8 +544,7 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
     lo->backend = &d->base;
     snprintf(lo->name, sizeof(lo->name), "%s-%u", connector_type_name(conn->connector_type),
              conn->connector_type_id);
-    snprintf(lo->make, sizeof(lo->make), "DRM");
-    snprintf(lo->model, sizeof(lo->model), "%ux%u", w, h);
+    conn_identify(d->fd, conn, lo);
     lo->width = (int32_t)w;
     lo->height = (int32_t)h;
     uint32_t vr = o->mode.vrefresh ? o->mode.vrefresh : 60;
@@ -526,8 +553,10 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
                                     ((uint64_t)o->mode.htotal * o->mode.vtotal));
     else
         lo->refresh_mhz = (int32_t)vr * 1000;
-    lo->phys_width_mm = (int32_t)conn->mmWidth;
-    lo->phys_height_mm = (int32_t)conn->mmHeight;
+    if (conn->mmWidth) {
+        lo->phys_width_mm = (int32_t)conn->mmWidth;
+        lo->phys_height_mm = (int32_t)conn->mmHeight;
+    }
     lo->scale = 1;
     lo->backend_data = o;
     o->retry = lm_loop_add_timer(d->base.server->loop, retry_fire, o);
@@ -1150,11 +1179,12 @@ static int drm_apply_mode(struct lm_output *out)
     o->seq = 0;
     out->width = (int32_t)m.hdisplay;
     out->height = (int32_t)m.vdisplay;
-    snprintf(out->model, sizeof(out->model), "%ux%u", m.hdisplay, m.vdisplay);
     if (m.htotal && m.vtotal && m.clock)
         out->refresh_mhz = (int32_t)(((uint64_t)m.clock * 1000000ull) / ((uint64_t)m.htotal * m.vtotal));
-    out->phys_width_mm = (int32_t)mm_w;
-    out->phys_height_mm = (int32_t)mm_h;
+    if (mm_w) {                                                         /* (else keep the size the EDID gave) */
+        out->phys_width_mm = (int32_t)mm_w;
+        out->phys_height_mm = (int32_t)mm_h;
+    }
     lm_info("drm: %s now %ux%u@%.2f", out->name, m.hdisplay, m.vdisplay, out->refresh_mhz / 1000.0);
     o->busy = false;
     if (d->base.listener.output_changed)

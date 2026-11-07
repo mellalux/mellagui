@@ -28,6 +28,7 @@ KEY_SPACE, KEY_RIGHTALT = 57, 100
 KEY_G = 34
 KEY_V = 47
 KEY_S = 31
+KEY_C = 46
 BTN_LEFT, BTN_RIGHT = 272, 273
 
 proc = None
@@ -1048,6 +1049,131 @@ class TestGadget(Base):
             time.sleep(0.02)
         self.assertEqual(self.clips(), ['first', 'second'])
 
+    def test_clicking_an_entry_makes_it_the_current_clipboard(self):
+        self.copy('first')
+        self.wait_clips(1)
+        self.copy('second')
+        self.assertEqual(self.wait_clips(2), ['second', 'first'])
+        self.c.wl.roundtrip()
+        self.c.wl.queue.clear()
+        x, y, w, h = self.rect()
+        ctl.click(x + w // 2, y + 32 + 44 + 22)                   # the second slot: "first"
+        sel = self.c.wl.wait_for(lambda e: e.obj == self.dev and e.name == 'selection' and e.args[0], 2.0)
+        self.assertIsNotNone(sel, 'the focused client was not told about the new selection')
+        r, wfd = os.pipe()
+        self.c.wl.request(sel.args[0], 'receive', 'text/plain;charset=utf-8', fds=(wfd,))
+        os.close(wfd)
+        self.c.wl.roundtrip()
+        import select
+        self.assertTrue(select.select([r], [], [], 2.0)[0], 'the compositor did not serve the text')
+        self.assertEqual(os.read(r, 100), b'first')
+        os.close(r)
+        for _ in range(100):                                      # the picked entry moved to the top
+            if self.clips()[:1] == ['first']:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.clips(), ['first', 'second'])
+
+    def pick_with_keys(self, *keys):
+        """Super+C, then `keys`: the focused client's clipboard text afterwards."""
+        self.c.wl.roundtrip()
+        self.c.wl.queue.clear()
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_C)
+        ctl.key(KEY_LEFTMETA, False)
+        for k in keys:
+            ctl.tap(k)
+        sel = self.c.wl.wait_for(lambda e: e.obj == self.dev and e.name == 'selection' and e.args[0], 2.0)
+        if sel is None:
+            return None
+        r, wfd = os.pipe()
+        self.c.wl.request(sel.args[0], 'receive', 'text/plain;charset=utf-8', fds=(wfd,))
+        os.close(wfd)
+        self.c.wl.roundtrip()
+        import select
+        got = os.read(r, 100) if select.select([r], [], [], 2.0)[0] else None
+        os.close(r)
+        return got
+
+    def test_arrow_keys_pick_a_history_entry(self):
+        for t in ('one', 'two', 'three'):
+            self.copy(t)
+            self.wait_clips(min(len(self.clips()) + 1, 3))
+        self.assertEqual(self.wait_clips(3), ['three', 'two', 'one'])
+        ppm = ctl.dump(os.path.join(tmp, 'clipnav0.ppm'))
+        x, y, w, h = self.rect()
+        # Super+C, Down, Down, Enter: the third entry ("one") becomes the clipboard and moves to the top
+        self.assertEqual(self.pick_with_keys(KEY_DOWN, KEY_DOWN, KEY_ENTER), b'one')
+        for _ in range(100):
+            if self.clips()[:1] == ['one']:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.clips(), ['one', 'three', 'two'])
+        # the mode is over: arrows go to the application again (no key swallowed -> the client sees them)
+        self.c.wl.queue.clear()
+        kb = self.c.wl.new_id('wl_keyboard')
+        self.c.wl.request(self.seat, 'get_keyboard', kb)
+        self.c.wl.roundtrip()
+        self.c.wl.queue.clear()
+        ctl.tap(KEY_DOWN)
+        ev = self.c.wl.wait_for(lambda e: e.obj == kb and e.name == 'key', 2.0)
+        self.assertIsNotNone(ev, 'Down no longer reaches the application after Enter')
+
+    def test_escape_and_other_keys_leave_the_keyboard_mode(self):
+        for t in ('one', 'two'):
+            self.copy(t)
+        self.wait_clips(2)
+        kb = self.c.wl.new_id('wl_keyboard')
+        self.c.wl.request(self.seat, 'get_keyboard', kb)
+        self.c.wl.roundtrip()
+        self.c.wl.queue.clear()
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_C)
+        ctl.key(KEY_LEFTMETA, False)
+        ctl.tap(KEY_DOWN)
+        ctl.tap(KEY_ESC)                                       # Esc ends the mode and is eaten
+        ctl.tap(KEY_DOWN)                                      # now it is the application's
+        ev = self.c.wl.wait_for(lambda e: e.obj == kb and e.name == 'key' and e.args[2] == KEY_DOWN, 1.5)
+        self.assertIsNotNone(ev, 'Down did not reach the application after Esc')
+        self.assertEqual(self.clips(), ['two', 'one'])         # nothing was picked
+
+    def test_history_is_saved_and_restored(self):
+        path = os.path.join(tmp, 'clip-history')
+        for suffix in ('', '.1'):
+            if os.path.exists(path + suffix):
+                os.unlink(path + suffix)
+        p, c, stop = self.private_compositor('lumen-clip1', '--clipboard-file', path)
+        cl = Client('lumen-clip1')
+        seat = cl.wl.bind('wl_seat', 5)
+        mgr = cl.wl.bind('wl_data_device_manager', 3)
+        dev = cl.wl.new_id('wl_data_device')
+        cl.wl.request(mgr, 'get_data_device', dev, seat)
+        win = Window(cl, 200, 150, title='copier')
+        cl.wl.roundtrip()
+        for text in ('first', 'two\\nlines \\\\ back'.replace('\\n', '\n'), 'third'):
+            src = cl.wl.new_id('wl_data_source')
+            cl.wl.request(mgr, 'create_data_source', src)
+            cl.wl.request(src, 'offer', 'text/plain;charset=utf-8')
+            cl.wl.request(dev, 'set_selection', src, win.configures[-1][3])
+            cl.wl.roundtrip()
+            ev = cl.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 2.0)
+            self.assertIsNotNone(ev)
+            os.write(ev.fds[0], text.encode())
+            os.close(ev.fds[0])
+            for _ in range(100):
+                if [l.split(' ', 2)[2] for l in c.cmd('clip')][:1] == [text.replace('\n', '\\n')]:
+                    break
+                time.sleep(0.02)
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), '0o600')            # clipboards hold secrets
+        before = [l.split(' ', 2)[2] for l in c.cmd('clip')]
+        self.assertEqual(len(before), 3)
+        stop()
+        # a new run starts with the same history
+        p2, c2, stop2 = self.private_compositor('lumen-clip2', '--clipboard-file', path)
+        self.assertEqual([l.split(' ', 2)[2] for l in c2.cmd('clip')], before)
+        c2.cmd('clip clear')
+        self.assertEqual(os.path.getsize(path), 0)                                 # clearing is saved, too
+
     def test_history_is_limited_and_multiline_text_is_kept(self):
         for i in range(7):
             self.copy('item %d' % i)
@@ -1559,6 +1685,86 @@ class TestClients(Base):
         p = self.spawn('lumen-term', SHELL=script)
         self.assertEqual(p.wait(timeout=5), 0)
 
+    FAKE_MONITOR = ('monitor HDMI-A-1 Test Monitor\n10 100 20\n12 100 50\n62 100 30\n8d 2 2\n60 18 17\n14 12 5\nd6 5 1\n'
+                    'monitor DP-1 Second One\n10 100 70\n')
+
+    def fake_monitor(self, tag):
+        path = os.path.join(tmp, 'fake-monitor-' + tag)
+        with open(path, 'w') as f:
+            f.write(self.FAKE_MONITOR)
+        return path
+
+    def fake_values(self, path, name):
+        """{code: current} of one monitor in the fake file."""
+        out, cur = {}, None
+        for line in open(path).read().splitlines():
+            if line.startswith('monitor '):
+                cur = line.split()[1]
+            elif cur == name:
+                code, mx, val = line.split()
+                out[code] = int(val)
+        return out
+
+    def test_monitor_cli_lists_and_sets(self):
+        exe = os.path.join(ROOT, 'build', 'lumen-monitor')
+        if not os.path.exists(exe):
+            self.skipTest('lumen-monitor not built')
+        path = self.fake_monitor('cli')
+        env = dict(os.environ, LUMEN_MONITOR_FAKE=path)
+        out = subprocess.run([exe, '--list'], env=env, capture_output=True, text=True, timeout=10).stdout.splitlines()
+        self.assertEqual(out[0], 'HDMI-A-1|Test Monitor|fake|10=20/100|12=50/100|62=30/100|8d=2/2|60=17/18|14=5/12|d6=1/5')
+        self.assertEqual(out[1], 'DP-1|Second One|fake|10=70/100')
+        self.assertEqual(subprocess.run([exe, '--set', 'HDMI-A-1', '10', '65'], env=env, timeout=10).returncode, 0)
+        self.assertEqual(self.fake_values(path, 'HDMI-A-1')['10'], 65)
+        self.assertEqual(self.fake_values(path, 'DP-1')['10'], 70)                 # the other monitor is untouched
+        self.assertEqual(subprocess.run([exe, '--set', 'HDMI-A-1', '10', '500'], env=env, timeout=10).returncode, 0)
+        self.assertEqual(self.fake_values(path, 'HDMI-A-1')['10'], 100)            # clamped to the monitor's maximum
+        self.assertEqual(subprocess.run([exe, '--set', 'NOPE-1', '10', '5'], env=env, capture_output=True, timeout=10).returncode, 2)
+        self.assertEqual(subprocess.run([exe, '--set', 'HDMI-A-1', 'ff', '5'], env=env, capture_output=True, timeout=10).returncode, 2)
+
+    def test_monitor_panel_sliders_chips_and_tabs(self):
+        path = self.fake_monitor('ui')
+        self.spawn('lumen-monitor', LUMEN_MONITOR_FAKE=path)
+        win = wait_for_window('lumen.monitor')
+        self.assertIsNotNone(win, 'monitor panel did not appear')
+        time.sleep(0.5)
+        x0, y0 = win['x'], win['y']
+        # two monitors: tabs on top; brightness slider of the first one (track from x+130, 350 px wide)
+        ctl.click(x0 + 20 + 30, y0 + 16 + 14)                                          # tab "HDMI-A-1"
+        time.sleep(0.2)
+        top = 16 + 40 + 24 + 30                                                        # tabs, heading, connector line
+        ctl.click(x0 + 20 + 110 + 175, y0 + top + 15)                                  # middle of the brightness track
+        for _ in range(40):
+            if self.fake_values(path, 'HDMI-A-1')['10'] == 50:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.fake_values(path, 'HDMI-A-1')['10'], 50)
+        # the "HDMI 2" input chip: below three sliders and the mute row
+        chips_y = top + 3 * 34 + 32 + 6 + 24
+        ctl.click(x0 + 498, y0 + chips_y + 13)
+        for _ in range(40):
+            if self.fake_values(path, 'HDMI-A-1')['60'] == 18:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.fake_values(path, 'HDMI-A-1')['60'], 18)
+        # mute: the check box under the sliders
+        ctl.click(x0 + 20 + 8, y0 + top + 3 * 34 + 13)
+        for _ in range(40):
+            if self.fake_values(path, 'HDMI-A-1')['8d'] == 1:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.fake_values(path, 'HDMI-A-1')['8d'], 1)
+        # the second tab shows the other monitor, which only has brightness: its slider works
+        ctl.click(x0 + 20 + 88 + 6 + 28, y0 + 16 + 14)                                  # tab "DP-1"
+        time.sleep(0.3)
+        ctl.click(x0 + 20 + 110 + 350, y0 + top + 15)                                  # the far right end = maximum
+        for _ in range(40):
+            if self.fake_values(path, 'DP-1')['10'] == 100:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.fake_values(path, 'DP-1')['10'], 100)
+        self.assertEqual(self.fake_values(path, 'HDMI-A-1')['10'], 50)
+
     def test_terminal_paste_button(self):
         out = os.path.join(tmp, 'term-paste.txt')
         script = os.path.join(tmp, 'paste.sh')
@@ -2051,6 +2257,26 @@ esac
         with self.assertRaises(RuntimeError):
             c.cmd('settings sink alsa_output.hdmi-stereo')
 
+    def test_display_page_button_opens_the_monitor_panel(self):
+        exe = self.exe()
+        fake = os.path.join(tmp, 'fake-monitor-button')
+        with open(fake, 'w') as f:
+            f.write('monitor HDMI-A-1 Test Monitor\n10 100 20\n')
+        p, c, stop = self.private_compositor('lumen-mon1')
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='lumen-mon1', LUMEN_MONITOR_FAKE=fake),
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
+        win = self.wait_window(c, 'lumen.settings')
+        x0, y0 = win['x'], win['y']
+        time.sleep(0.3)
+        c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)                               # Display page
+        time.sleep(0.4)
+        modes = min(7, len(self.get_setting(c, 'resolutions').split(';')))
+        # rows: monitor heading + line (14, 42), resolution heading (76), Automatic (104), Preferred, then the modes; the button follows by 10 px
+        c.click(x0 + 300, y0 + 104 + (2 + modes) * 28 + 10 + 12)
+        mon = self.wait_window(c, 'lumen.monitor')
+        self.assertIsNotNone(mon, 'the "Monitor settings..." button did not open the monitor panel')
+
     def test_panel_display_and_sound_pages(self):
         exe = self.exe()
         state, env = self.audio_env()
@@ -2079,11 +2305,12 @@ esac
         # Display page: rows are Automatic, Preferred, then the modes (800x500 preferred, 1920x1080, 1280x720, ...)
         c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)
         time.sleep(0.3)
-        c.click(x0 + 200, y0 + 42 + 4 * 28 + 14)                              # third mode = 1280x720
+        c.click(x0 + 200, y0 + 42 + 2 * 28 + 6 + 4 * 28 + 14)                 # third mode = 1280x720 (below the two monitor lines)
         time.sleep(0.4)
         self.assertEqual(g('resolution'), '1280x720@60')
         self.assertEqual(g('resolution-now'), '1280x720@60')
         self.assertNotEqual(g('resolution-confirm'), '')
+        self.assertRegex(g('monitor'), r'^Lumen\|headless\|headless-0\|\d+\|\d+$')    # make|model|connector|mm
         # the panel is now larger relative to the screen; find it again and press "Keep" (first button below the message)
         win = self.wait_window(c, 'lumen.settings')
         x0, y0 = win['x'], win['y']

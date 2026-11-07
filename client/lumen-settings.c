@@ -16,6 +16,8 @@
  *   lumen-settings --selftest       checks the list / slider helpers without a display
  */
 #include <errno.h>
+#include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -237,7 +239,7 @@ static int selftest(void)
 #define DEFAULT_H 440
 #define SIDE_W 140
 #define MAX_WIDGETS 80
-#define MAX_KV 32
+#define MAX_KV 48
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
 enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, N_PAGES };
@@ -449,7 +451,39 @@ static void build_display(struct app *a, int x, int y, int w)
         snprintf(u->arg, sizeof(u->arg), "0");
         y += ROW_H + 8;
     }
-    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Resolution");
+    /* The monitor: who made it, what it is called, where it is connected and how big it is. */
+    {
+        char mk[40] = "", mo[40] = "", con[40] = "";
+        int mmw = 0, mmh = 0;
+        const char *v = kv_get(a, "monitor");
+        if (*v && sscanf(v, "%39[^|]|%39[^|]|%39[^|]|%d|%d", mk, mo, con, &mmw, &mmh) >= 3) {
+            char line[112];
+            if (!strcmp(mk, "DRM") || !strcmp(mk, "Lumen"))
+                snprintf(line, sizeof(line), "Monitor: %s", mo);                 /* no manufacturer known */
+            else
+                snprintf(line, sizeof(line), "Monitor: %s %s", mk, mo);
+            add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, line);
+            y += ROW_H;
+            char info[112];
+            if (mmw > 0 && mmh > 0)
+                snprintf(info, sizeof(info), "%s   %d x %d mm  (%.1f\")", con, mmw, mmh,
+                         sqrt((double)mmw * mmw + (double)mmh * mmh) / 25.4);
+            else
+                snprintf(info, sizeof(info), "%s", con);
+            add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, info);
+            y += ROW_H + 6;
+        }
+    }
+    /* The heading carries what the screen runs at right now, in numbers, so it is always in view. */
+    char head[112] = "Resolution";
+    int nw = 0, nh = 0, nhz = 0;
+    if (sscanf(kv_get(a, "resolution-now"), "%dx%d@%d", &nw, &nh, &nhz) >= 2 && nw > 0 && nh > 0) {
+        if (nhz > 0)
+            snprintf(head, sizeof(head), "Current resolution: %d x %d @ %d Hz", nw, nh, nhz);
+        else
+            snprintf(head, sizeof(head), "Current resolution: %d x %d", nw, nh);
+    }
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, head);
     y += ROW_H;
     const char *cur = kv_get(a, "resolution");
     add_radio(a, x, y, w, "Automatic (the panel's own shape)", "resolution", "auto", !strcmp(cur, "auto"));
@@ -459,16 +493,16 @@ static void build_display(struct app *a, int x, int y, int w)
     const char *list = kv_get(a, "resolutions");
     char name[64], note[96], label[96];
     int shown = 0;
-    while (shown < 8 && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
+    while (shown < 7 && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
         mode_label(name, note, label, sizeof(label));
         add_radio(a, x, y, w, label, "resolution", name, !strcmp(cur, name));
         y += ROW_H;
         shown++;
     }
-    char now[96], cur_label[80];
-    mode_label(kv_get(a, "resolution-now"), "", cur_label, sizeof(cur_label));
-    snprintf(now, sizeof(now), "Now: %s", cur_label);
-    add(a, W_LABEL, (struct rect){ x, y + 4, w, ROW_H }, now);
+    /* below the resolutions: the monitor's own settings (brightness, volume, input ...) are a program of their own */
+    struct widget *mb = add(a, W_BUTTON, (struct rect){ x, y + 10, 260, ROW_H - 4 }, "Monitor settings...");
+    snprintf(mb->key, sizeof(mb->key), "launch");
+    snprintf(mb->arg, sizeof(mb->arg), "lumen-monitor");
 }
 
 static void build_sound(struct app *a, int x, int y, int w)
@@ -581,6 +615,28 @@ static void slider_drag_to(struct app *a, int idx, double x)
         send_set_int(a, w->key, v);
 }
 
+/* Starts another Lumen program next to this one (the monitor panel); it is not waited for. */
+static void launch_sibling(const char *name)
+{
+    pid_t pid = fork();
+    if (pid != 0)
+        return;                                         /* the parent goes on (children are reaped: SIGCHLD is ignored) */
+    setsid();
+    char self[512], path[560];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n > 0) {
+        self[n] = 0;
+        char *slash = strrchr(self, '/');
+        if (slash) {
+            *slash = 0;
+            snprintf(path, sizeof(path), "%s/%s", self, name);
+            execl(path, name, (char *)NULL);
+        }
+    }
+    execlp(name, name, (char *)NULL);                   /* installed on the PATH */
+    _exit(127);
+}
+
 static void activate(struct app *a, int idx)
 {
     const struct widget *w = &a->wd[idx];
@@ -609,7 +665,9 @@ static void activate(struct app *a, int idx)
         send_set(a, w->key, w->arg);
         break;
     case W_BUTTON:
-        if (!strcmp(w->key, "resolution-confirm")) {
+        if (!strcmp(w->key, "launch")) {
+            launch_sibling(w->arg);
+        } else if (!strcmp(w->key, "resolution-confirm")) {
             send_set(a, w->key, w->arg);
         } else if (!strcmp(w->key, "layout-up")) {
             idlist_parse(&l, kv_get(a, "layouts"));
@@ -922,6 +980,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event };
     struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1 };

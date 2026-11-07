@@ -258,7 +258,8 @@ enum lm_pick_kind {
     LM_PICK_PANEL_TASK,     /* taskbar button of `window` */
     LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets (`index` = gadget id) */
     LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
-    LM_PICK_GADGET_BODY     /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
+    LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
+    LM_PICK_CLIP_ENTRY      /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
 };
 
 struct lm_pick {
@@ -381,6 +382,7 @@ struct lm_gadget_info {
     struct lm_rect rect;            /* the card; the shadow lies outside */
     int n;                          /* entries drawn (<= slots) */
     int total;                      /* entries in the history (the title badge) */
+    int cursor;                     /* highlighted entry (keyboard mode, Super+C), -1 = none */
     int slots;                      /* entry slots that fit (1..LM_GADGET_ENTRIES) */
     int entry_h;                    /* height of one entry slot; the title bar is `title_h` high */
     int title_h;

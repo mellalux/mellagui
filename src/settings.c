@@ -27,7 +27,7 @@
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_FILE,
-    K_RESOLUTIONS, K_RESOLUTION_NOW, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_COUNT
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -35,7 +35,7 @@ static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
     [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_FILE] = "file",
-    [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
+    [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan",
 };
@@ -321,6 +321,12 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
         struct lm_output *lo = first_output(srv);
         if (lo)
             snprintf(out, n, "%dx%d@%d", lo->width, lo->height, (lo->refresh_mhz + 500) / 1000);
+        break;
+    }
+    case K_MONITOR: {
+        struct lm_output *lo = first_output(srv);
+        if (lo)
+            snprintf(out, n, "%s|%s|%s|%d|%d", lo->make, lo->model, lo->name, lo->phys_width_mm, lo->phys_height_mm);
         break;
     }
     case K_RESOLUTION_CONFIRM:

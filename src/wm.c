@@ -90,6 +90,8 @@ struct lm_wm {
     bool hover_launcher;
     bool hover_exit, hover_run, hover_layout, hover_sticky;
     bool menu_open;
+    bool clip_nav;              /* keyboard mode of the clipboard gadget (Super+C): arrows move, Enter uses the entry */
+    int clip_cur;               /* the highlighted entry while clip_nav */
     struct {                    /* the desktop gadgets, indexed by enum lm_gadget_id */
         bool visible;
         bool placed;            /* false: docked top right (default); true: x/y chosen by dragging */
@@ -414,8 +416,35 @@ static void damage_gadgets(struct lm_wm *wm)
         damage_gadget(wm, i);
 }
 
+/* Entries the keyboard can reach: those drawn in the card. */
+static int clip_nav_count(struct lm_wm *wm)
+{
+    struct lm_rect gr;
+    if (!lm_wm_gadget_rect_id(wm, LM_GADGET_CLIPBOARD, &gr))
+        return 0;
+    int slots, entry_h;
+    gadget_slots(gr.h, &slots, &entry_h);
+    return LM_MIN(lm_seat_clip_count(wm->srv->seat), slots);
+}
+
+static void clip_nav_set(struct lm_wm *wm, bool on)
+{
+    if (wm->clip_nav == on)
+        return;
+    wm->clip_nav = on;
+    wm->clip_cur = 0;
+    damage_gadget(wm, LM_GADGET_CLIPBOARD);
+}
+
 void lm_wm_clipboard_changed(struct lm_wm *wm)
 {
+    if (wm->clip_nav) {                                         /* the list moved under the cursor: keep it inside */
+        int n = clip_nav_count(wm);
+        if (n == 0)
+            wm->clip_nav = false;
+        else
+            wm->clip_cur = LM_CLAMP(wm->clip_cur, 0, n - 1);
+    }
     damage_gadget(wm, LM_GADGET_CLIPBOARD);
 }
 
@@ -1267,6 +1296,7 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             it.u.gadget.total = total;
             int n = LM_MIN(total, it.u.gadget.slots);
             it.u.gadget.n = n;
+            it.u.gadget.cursor = wm->clip_nav && n > 0 ? LM_CLAMP(wm->clip_cur, 0, n - 1) : -1;
             for (int i = 0; i < n; i++)
                 it.u.gadget.text[i] = lm_seat_clip_get(wm->srv->seat, i);
         }
@@ -1509,6 +1539,17 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             out->kind = LM_PICK_GADGET_TITLE;
         } else if (gid == LM_GADGET_MIXER) {
             out->kind = LM_PICK_GADGET_BODY;                      /* sliders and buttons */
+        } else if (gid == LM_GADGET_CLIPBOARD) {                  /* an entry slot with text in it */
+            int slots, entry_h;
+            gadget_slots(gr.h, &slots, &entry_h);
+            int n = LM_MIN(lm_seat_clip_count(wm->srv->seat), slots);
+            int k = (iy - gr.y - GADGET_TITLE_H) / entry_h;
+            if (k >= 0 && k < n && ix >= gr.x + 12 && ix < gr.x + gr.w - 12) {
+                out->kind = LM_PICK_CLIP_ENTRY;
+                out->index = k;
+                out->rect = gr;
+                return;
+            }
         }
         out->index = gid;
         out->rect = gr;
@@ -1936,6 +1977,9 @@ static void launch_terminal(struct lm_wm *wm)
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (pressed && wm->clip_nav && pick->kind != LM_PICK_CLIP_ENTRY)
+        clip_nav_set(wm, false);
+
     /* Any press outside the menu (and not on the launcher, which toggles it) closes it; the click goes on. */
     if (pressed && wm->menu_open && pick->kind != LM_PICK_MENU_ITEM && pick->kind != LM_PICK_PANEL_LAUNCHER)
         menu_set(wm, false, NULL);
@@ -2050,6 +2094,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
     case LM_PICK_GADGET_BODY:
         if (button == BTN_LEFT)
             mixer_press(wm);
+        return true;
+    case LM_PICK_CLIP_ENTRY:
+        if (button == BTN_LEFT)
+            lm_seat_clip_use(wm->srv->seat, pick->index);
         return true;
     case LM_PICK_MENU_ITEM:
         if (button == BTN_LEFT) {
@@ -2179,6 +2227,37 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
             return true;
         }
     }
+    if (wm->clip_nav && !super && !ctrl && !alt) {
+        bool arrow = code == KEY_UP || code == KEY_DOWN || code == KEY_HOME || code == KEY_END;
+        bool pick = code == KEY_ENTER || code == KEY_KPENTER;
+        if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT || code == KEY_CAPSLOCK || code == KEY_NUMLOCK ||
+            code == KEY_LEFTMETA || code == KEY_RIGHTMETA || code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL ||
+            code == KEY_LEFTALT || code == KEY_RIGHTALT)
+            return false;                                       /* modifiers do not end the mode (the Super of Super+C is released) */
+        if (!arrow && !pick && code != KEY_ESC) {
+            clip_nav_set(wm, false);                            /* any other key: the application gets it */
+            return false;
+        }
+        if (!pressed)
+            return true;
+        int n = clip_nav_count(wm);
+        if (n == 0 || code == KEY_ESC) {
+            clip_nav_set(wm, false);
+        } else if (pick) {
+            if (!repeat)
+                lm_seat_clip_use(wm->srv->seat, LM_CLAMP(wm->clip_cur, 0, n - 1));
+            clip_nav_set(wm, false);
+        } else {
+            int cur = LM_CLAMP(wm->clip_cur, 0, n - 1);
+            cur = code == KEY_UP ? LM_MAX(cur - 1, 0) : code == KEY_DOWN ? LM_MIN(cur + 1, n - 1) :
+                  code == KEY_HOME ? 0 : n - 1;
+            if (cur != wm->clip_cur) {
+                wm->clip_cur = cur;
+                damage_gadget(wm, LM_GADGET_CLIPBOARD);
+            }
+        }
+        return true;
+    }
     if (!super || ctrl || alt)
         return false;
 
@@ -2199,6 +2278,14 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
         break;
     case KEY_G:
         if (pressed && !repeat) lm_wm_set_gadget(wm, !wm->gad[LM_GADGET_CLIPBOARD].visible);
+        break;
+    case KEY_C:                             /* Super+C: pick from the clipboard history with the arrow keys */
+        if (pressed && !repeat) {
+            if (!wm->gad[LM_GADGET_CLIPBOARD].visible)
+                lm_wm_set_gadget(wm, true);
+            if (clip_nav_count(wm) > 0)
+                clip_nav_set(wm, !wm->clip_nav);
+        }
         break;
     case KEY_V:
         if (pressed && !repeat) lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible);

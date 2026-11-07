@@ -6,6 +6,7 @@
 #   make lumen-calc build/lumen-calc   (client/lumen-calc.c)
 #   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog)
 #   make lumen-settings build/lumen-settings (client/lumen-settings.c, the settings panel)
+#   make lumen-monitor build/lumen-monitor (client/lumen-monitor.c, the monitor's own settings over DDC/CI)
 #   make run        build, then start the compositor on a free VT (see RUN_ARGS)
 #   make asan       build/lumen-asan   (compositor with ASan + UBSan)
 #   make test       build, then run tests/run.sh
@@ -34,15 +35,16 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/lumen $(BUILD)/lumen-term $(BUILD)/lumen-calc $(BUILD)/keymap-test \
-           $(BUILD)/lumen-run $(BUILD)/lumen-settings
+           $(BUILD)/lumen-run $(BUILD)/lumen-settings $(BUILD)/lumen-monitor
 
-.PHONY: all lumen lumen-term lumen-calc lumen-run lumen-settings asan test run clean
+.PHONY: all lumen lumen-term lumen-calc lumen-run lumen-settings lumen-monitor asan test run clean
 all: $(TARGETS)
 
 lumen: $(BUILD)/lumen
 lumen-calc: $(BUILD)/lumen-calc
 lumen-run: $(BUILD)/lumen-run
 lumen-settings: $(BUILD)/lumen-settings
+lumen-monitor: $(BUILD)/lumen-monitor
 lumen-term: $(BUILD)/lumen-term
 asan: $(BUILD)/lumen-asan
 
@@ -59,7 +61,7 @@ $(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD)/src/font.o $(BUILD)/src/cvt.o $(BUILD)/src/edid.o $(BUILD)/src/mixer.o $(BUILD)/src/sysinfo.o $(BUILD)/src/audio.o $(BUILD)/src/loop.o $(BUILD)/src/log.o
+$(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD)/src/font.o $(BUILD)/src/cvt.o $(BUILD)/src/edid.o $(BUILD)/src/ddc.o $(BUILD)/src/mixer.o $(BUILD)/src/sysinfo.o $(BUILD)/src/audio.o $(BUILD)/src/loop.o $(BUILD)/src/log.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -68,6 +70,10 @@ $(BUILD)/lumen-run: $(BUILD)/client/lumen-run.o $(BUILD)/client/wlc.o $(BUILD)/c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/lumen-settings: $(BUILD)/client/lumen-settings.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/lumen-monitor: $(BUILD)/client/lumen-monitor.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/src/ddc.o $(BUILD)/src/edid.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

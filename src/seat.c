@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "backend.h"
@@ -68,7 +69,8 @@ struct seat_touch {
 struct data_source {
     struct lm_list link;                /* in seat->sources */
     struct lm_seat *seat;
-    struct lm_resource *res;
+    struct lm_resource *res;            /* NULL for the compositor's own source (clipboard history entry) */
+    char *text;                         /* own source: the text it serves */
     char *mimes[MAX_MIMES];
     int n_mimes;
     struct lm_list offers;              /* struct data_offer.src_link */
@@ -166,6 +168,7 @@ struct lm_seat {
 
     /* clipboard */
     struct data_source *selection;
+    struct data_source *own;            /* the selection when the compositor itself owns it (history entry picked in the gadget) */
 
     /* clipboard history for the gadget: the compositor itself reads the text of every new selection */
     char *clip_hist[LM_CLIP_HISTORY];   /* newest first */
@@ -1352,6 +1355,18 @@ static void offer_receive(struct lm_resource *res, const union lm_arg *args)
         return;
     for (int i = 0; i < o->source->n_mimes; i++) {
         if (strcmp(o->source->mimes[i], mime) == 0) {
+            if (!o->source->res) {              /* our own text: write it (a few KiB fit into the pipe) */
+                const char *p = o->source->text;
+                size_t left = p ? strlen(p) : 0;
+                while (left > 0) {
+                    ssize_t k = write(args[1].h, p, left);
+                    if (k <= 0)
+                        break;
+                    p += k;
+                    left -= (size_t)k;
+                }
+                return;
+            }
             /* the wire layer dup()s the fd; the server closes ours after this handler */
             lm_resource_post(o->source->res, LM_WL_DATA_SOURCE_EVT_SEND, mime, args[1].h);
             return;
@@ -1437,6 +1452,85 @@ static void selection_update_focus(struct lm_seat *seat)
 
 static const char *const clip_mimes[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
 
+/* ---- the history file: one entry per line, newest first; \\ \n \r escaped. Private (0600) because clipboards hold secrets. ---- */
+
+static void clip_save(struct lm_seat *seat)
+{
+    const char *path = seat->srv->config.clip_path;
+    if (!path || !*path || seat->dying)
+        return;
+    char dir[512], tmp[560];
+    if (snprintf(dir, sizeof(dir), "%s", path) >= (int)sizeof(dir) ||
+        snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid()) >= (int)sizeof(tmp))
+        return;
+    for (char *p = dir + 1; *p; p++) {                  /* parent directories, private */
+        if (*p != '/')
+            continue;
+        *p = 0;
+        if (mkdir(dir, 0700) < 0 && errno != EEXIST)
+            return;
+        *p = '/';
+    }
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
+    if (!f) {
+        if (fd >= 0)
+            close(fd);
+        lm_warn("clipboard: cannot write %s: %s", tmp, strerror(errno));
+        return;
+    }
+    for (int i = 0; i < seat->clip_n; i++) {
+        for (const char *p = seat->clip_hist[i]; *p; p++) {
+            if (*p == '\\') fputs("\\\\", f);
+            else if (*p == '\n') fputs("\\n", f);
+            else if (*p == '\r') fputs("\\r", f);
+            else fputc(*p, f);
+        }
+        fputc('\n', f);
+    }
+    bool ok = !ferror(f);
+    if (fclose(f) != 0)
+        ok = false;
+    if (!ok || rename(tmp, path) < 0) {
+        lm_warn("clipboard: cannot save %s: %s", path, strerror(errno));
+        unlink(tmp);
+    }
+}
+
+static void clip_load(struct lm_seat *seat)
+{
+    const char *path = seat->srv->config.clip_path;
+    FILE *f = path && *path ? fopen(path, "r") : NULL;
+    if (!f)
+        return;
+    char line[CLIP_MAX * 2 + 8];
+    while (seat->clip_n < LM_CLIP_HISTORY && fgets(line, sizeof(line), f)) {
+        size_t n = strcspn(line, "\n");
+        if (line[n] != '\n' && !feof(f))               /* longer than anything we write: skip the rest of the line */
+            while (fgets(line, sizeof(line), f) && !strchr(line, '\n'))
+                ;
+        line[n] = 0;
+        char *text = malloc(n + 1), *w = text;
+        if (!text)
+            break;
+        for (const char *p = line; *p; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                *w++ = *p == 'n' ? '\n' : *p == 'r' ? '\r' : *p;
+            } else {
+                *w++ = *p;
+            }
+        }
+        *w = 0;
+        if (!*text) {
+            free(text);
+            continue;
+        }
+        seat->clip_hist[seat->clip_n++] = text;
+    }
+    fclose(f);
+}
+
 static void clip_push(struct lm_seat *seat, char *text)   /* takes ownership */
 {
     for (int i = 0; i < seat->clip_n; i++) {
@@ -1454,6 +1548,7 @@ static void clip_push(struct lm_seat *seat, char *text)   /* takes ownership */
     seat->clip_hist[0] = text;
     seat->clip_n++;
 changed:
+    clip_save(seat);
     if (!seat->dying && seat->srv->wm)
         lm_wm_clipboard_changed(seat->srv->wm);
 }
@@ -1580,8 +1675,26 @@ void lm_seat_clip_clear(struct lm_seat *seat)
     for (int i = 0; i < seat->clip_n; i++)
         free(seat->clip_hist[i]);
     seat->clip_n = 0;
+    clip_save(seat);
     if (!seat->dying && seat->srv->wm)
         lm_wm_clipboard_changed(seat->srv->wm);
+}
+
+static void own_source_free(struct lm_seat *seat)
+{
+    struct data_source *src = seat->own;
+    if (!src)
+        return;
+    seat->own = NULL;
+    struct data_offer *o, *tmp;
+    lm_list_for_each_safe(o, tmp, &src->offers, src_link) {
+        o->source = NULL;
+        lm_list_remove(&o->src_link);
+    }
+    for (int i = 0; i < src->n_mimes; i++)
+        free(src->mimes[i]);
+    free(src->text);
+    free(src);
 }
 
 static void seat_set_selection(struct lm_seat *seat, struct data_source *src)
@@ -1592,8 +1705,41 @@ static void seat_set_selection(struct lm_seat *seat, struct data_source *src)
     seat->selection = src;
     if (src)
         clip_capture_start(seat, src);
-    if (old)
+    if (old && old->res)
         lm_resource_post(old->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+    if (old && old == seat->own)
+        own_source_free(seat);
+    selection_update_focus(seat);
+}
+
+/* A history entry picked in the gadget becomes the selection, served by the compositor itself. */
+void lm_seat_clip_use(struct lm_seat *seat, int i)
+{
+    if (!seat || seat->dying || i < 0 || i >= seat->clip_n)
+        return;
+    struct data_source *src = calloc(1, sizeof(*src));
+    char *copy = strdup(seat->clip_hist[i]);
+    if (!src || !copy) {
+        free(src);
+        free(copy);
+        return;
+    }
+    static const char *const mimes[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
+    src->seat = seat;
+    src->text = copy;
+    lm_list_init(&src->offers);
+    lm_list_init(&src->link);
+    for (size_t m = 0; m < sizeof(mimes) / sizeof(mimes[0]); m++)
+        src->mimes[src->n_mimes++] = strdup(mimes[m]);
+    struct data_source *old = seat->selection;
+    seat->selection = src;
+    clip_capture_abort(seat);
+    if (old && old->res)
+        lm_resource_post(old->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+    if (old && old == seat->own)
+        own_source_free(seat);
+    seat->own = src;
+    clip_push(seat, strdup(copy));                      /* moves the entry to the top (same text) */
     selection_update_focus(seat);
 }
 
@@ -1832,6 +1978,7 @@ struct lm_seat *lm_seat_create(struct lm_server *srv)
     if (seat->keymap_fd < 0)
         lm_warn("could not create the keymap file: %s; clients get no keymap", strerror(errno));
 
+    clip_load(seat);
     if (srv->loop)
         seat->refocus_idle = lm_loop_add_idle(srv->loop, refocus_idle_cb, seat);
 
@@ -1877,6 +2024,7 @@ void lm_seat_destroy(struct lm_seat *seat)
     /* Clients may outlive the seat: release every resource that points into it. */
     seat->selection = NULL;
     DESTROY_ALL(struct data_offer, &seat->offers);
+    own_source_free(seat);
     DESTROY_ALL(struct data_source, &seat->sources);
     DESTROY_ALL(struct data_device, &seat->devices);
     DESTROY_ALL(struct seat_touch, &seat->touches);

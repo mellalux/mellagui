@@ -570,6 +570,12 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
             struct lm_rect bar = lm_rect_make(slot.x + 4, slot.y + 6, 3, slot.h - 12);
             fill_round(c, &bar, 1, 0xff6fa8ffu);
         }
+        if (i == g->cursor) {                                            /* keyboard cursor: an accent outline */
+            struct lm_rect edge[4] = { lm_rect_make(slot.x, slot.y, slot.w, 2), lm_rect_make(slot.x, slot.y + slot.h - 2, slot.w, 2),
+                                       lm_rect_make(slot.x, slot.y, 2, slot.h), lm_rect_make(slot.x + slot.w - 2, slot.y, 2, slot.h) };
+            for (int e = 0; e < 4; e++)
+                fill_round(c, &edge[e], 0, 0xff6fa8ffu);
+        }
         uint32_t col = i == 0 ? COL_PANEL_TEXT : COL_PANEL_DIM;
         int tx = slot.x + 14;
         int ty = slot.y + (slot.h - lines * LM_FONT_H) / 2;

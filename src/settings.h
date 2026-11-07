@@ -26,6 +26,7 @@
  *   -- live state, never saved: --
  *   resolutions     "WxH@Hz|note;..."          modes the first output can show (read only)
  *   resolution-now  WxH@Hz                     the mode the first output shows now (read only)
+ *   monitor         "make|model|connector|mm_w|mm_h"  the first output's monitor (EDID: manufacturer and name; sizes 0 = unknown) (read only)
  *   resolution-confirm  ""|seconds             non-empty while a resolution change waits to be kept; set 1 = keep, 0 = go back
  *   audio-outs      "name|description;..."     ALSA playback devices from /proc/asound, HDMI/DisplayPort ones marked (read only)
  *   sinks, sink     list / name                PulseAudio/PipeWire outputs and the default one (pactl, else wpctl; `sink` is

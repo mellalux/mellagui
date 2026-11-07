@@ -404,6 +404,20 @@ struct lm_gadget_info {
     const char *text[LM_GADGET_ENTRIES]; /* newest first; valid only during the callback */
 };
 
+#define LM_SW_MAX 10                /* entries shown at once in the Alt+Tab list */
+struct lm_switcher_info {
+    struct lm_rect rect;
+    int n;                          /* entries shown */
+    int sel;                        /* selected entry, 0..n-1 */
+    int item_h;
+    int total;                      /* windows in all (the list scrolls when there are more than LM_SW_MAX) */
+    int current_ws;
+    const char *label[LM_SW_MAX];   /* valid only during the callback */
+    int ws[LM_SW_MAX];              /* workspace of the window, 0-based */
+    bool minimized[LM_SW_MAX];
+    bool focused[LM_SW_MAX];        /* the window that has the focus now */
+};
+
 enum lm_scene_kind {
     LM_SCENE_WALLPAPER,             /* one per output */
     LM_SCENE_GADGET,                /* the desktop gadget (right after the wallpapers, below all windows) */
@@ -411,6 +425,7 @@ enum lm_scene_kind {
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_MENU,                  /* the open app menu (above the panel, below popups) */
+    LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
 
@@ -428,6 +443,7 @@ struct lm_scene_item {
         struct lm_menu_info menu;   /* LM_SCENE_MENU */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
+        struct lm_switcher_info switcher; /* LM_SCENE_SWITCHER */
     } u;
 };
 

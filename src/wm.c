@@ -16,6 +16,7 @@
 
 #include "backend.h"
 #include "input.h"
+#include "font.h"
 #include "keymap.h"
 #include "log.h"
 #include "mixer.h"
@@ -39,6 +40,7 @@
 #define PANEL_LAYOUT_W 36
 #define PANEL_STICKY_W 84
 #define PANEL_CAPS_W 48
+#define SW_MAX_WINDOWS 32
 #define MENU_W 200
 #define GADGET_W 250                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
 #define GADGET_H (GADGET_TITLE_H + LM_GADGET_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
@@ -72,6 +74,7 @@ struct wm_win {
     int32_t rx, ry, rw, rh;
     bool have_restore;
     uint32_t tiled;             /* LM_EDGE_LEFT / LM_EDGE_RIGHT half-screen tile, 0 = none */
+    uint64_t focus_seq;         /* when it last had the focus (Alt+Tab lists the most recent first) */
 };
 
 struct wm_popup {
@@ -87,6 +90,7 @@ struct lm_wm {
     struct lm_window *focused;
     int workspace;
     int next_id;
+    uint64_t focus_counter;
     int cascade;
     struct lm_timer *clock_timer;
     char clock_text[24];
@@ -98,6 +102,10 @@ struct lm_wm {
     bool hover_launcher;
     bool hover_exit, hover_run, hover_layout, hover_sticky, hover_lock;
     bool menu_open;
+    /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
+    bool sw_open;
+    int sw_n, sw_idx;
+    struct lm_window *sw_win[SW_MAX_WINDOWS];
     bool clip_nav;              /* keyboard mode of the clipboard gadget (Super+C): arrows move, Enter uses the entry */
     int clip_cur;               /* the highlighted entry while clip_nav */
     struct {                    /* the desktop gadgets, indexed by enum lm_gadget_id */
@@ -319,6 +327,88 @@ static void damage_all(struct lm_wm *wm)
 {
     if (wm->srv->render)
         lm_render_damage_all(wm->srv->render);
+}
+
+/* ---- Alt+Tab window switcher ------------------------------------------------------------------------------------------ */
+
+#define SW_ITEM_H 24
+
+static int sw_first(const struct lm_wm *wm)            /* index of the first entry shown (the list scrolls to keep the selection) */
+{
+    if (wm->sw_n <= LM_SW_MAX)
+        return 0;
+    return LM_CLAMP(wm->sw_idx - LM_SW_MAX / 2, 0, wm->sw_n - LM_SW_MAX);
+}
+
+static const char *sw_label(const struct lm_window *w)
+{
+    return w->title[0] ? w->title : w->app_id[0] ? w->app_id : "(untitled)";
+}
+
+static struct lm_rect sw_rect(const struct lm_wm *wm)
+{
+    struct lm_output *o = NULL;
+    if (wm->srv->backend && wm->srv->seat) {
+        double x, y;
+        lm_seat_pointer_position(wm->srv->seat, &x, &y);
+        o = lm_output_nearest(wm->srv, x, y);
+    }
+    if (!o)
+        return lm_rect_make(0, 0, 0, 0);
+    int n = LM_MIN(wm->sw_n, LM_SW_MAX), first = sw_first(wm), chars = 12;
+    for (int i = 0; i < n; i++)
+        chars = LM_MAX(chars, LM_MIN((int)strlen(sw_label(wm->sw_win[first + i])), 56));
+    int w = LM_MIN(chars * LM_FONT_W + 24 + 6 * LM_FONT_W, o->width - 16), h = n * SW_ITEM_H + 8;
+    return lm_rect_make(o->x + (o->width - w) / 2, o->y + (o->height - h) / 2, w, h);
+}
+
+static void sw_close(struct lm_wm *wm)
+{
+    if (!wm->sw_open)
+        return;
+    struct lm_rect r = sw_rect(wm);
+    wm->sw_open = false;
+    wm->sw_n = 0;
+    damage_rect(wm, &r);
+}
+
+static void sw_step(struct lm_wm *wm, bool backwards)
+{
+    struct lm_rect before = wm->sw_open ? sw_rect(wm) : lm_rect_make(0, 0, 0, 0);
+    if (!wm->sw_open) {
+        wm->sw_n = 0;
+        struct lm_window *w;
+        lm_list_for_each_reverse(w, &wm->windows, link)           /* top of the stack first, then by when it last had the focus */
+            if (w->mapped && wm->sw_n < SW_MAX_WINDOWS)
+                wm->sw_win[wm->sw_n++] = w;
+        for (int i = 1; i < wm->sw_n; i++) {                      /* stable insertion sort, most recently focused first */
+            struct lm_window *t = wm->sw_win[i];
+            int j = i;
+            while (j > 0 && WIN(wm->sw_win[j - 1])->focus_seq < WIN(t)->focus_seq) {
+                wm->sw_win[j] = wm->sw_win[j - 1];
+                j--;
+            }
+            wm->sw_win[j] = t;
+        }
+        if (wm->sw_n < 2)
+            return;
+        wm->sw_open = true;
+        wm->sw_idx = backwards ? wm->sw_n - 1 : 1;
+    } else {
+        wm->sw_idx = (wm->sw_idx + (backwards ? wm->sw_n - 1 : 1)) % wm->sw_n;
+    }
+    struct lm_rect now = sw_rect(wm);
+    damage_rect(wm, &now);
+    if (before.w > 0)
+        damage_rect(wm, &before);
+}
+
+static void sw_commit(struct lm_wm *wm)
+{
+    struct lm_window *w = wm->sw_open ? wm->sw_win[wm->sw_idx] : NULL;
+    sw_close(wm);
+    if (w)
+        lm_wm_focus_window(wm, w);
 }
 
 static void menu_set(struct lm_wm *wm, bool open, const struct lm_rect *launcher)
@@ -709,6 +799,8 @@ static void set_focus(struct lm_wm *wm, struct lm_window *w)
     if (old == w)
         return;
     wm->focused = w;
+    if (w)
+        WIN(w)->focus_seq = ++wm->focus_counter;
     if (old) {
         lm_xdg_dismiss_popups(old->surface);
         send_configure(wm, old, old->width, old->height);
@@ -900,6 +992,7 @@ void lm_wm_window_destroy(struct lm_window *w)
     if (wm->hover_task == w) wm->hover_task = NULL;
     if (wm->press_win == w) { wm->press_win = NULL; wm->press_bits = 0; }
     if (wm->last_click_win == w) wm->last_click_win = NULL;
+    sw_close(wm);                                               /* the list holds window pointers */
     struct lm_window *c;
     lm_list_for_each(c, &wm->windows, link)
         if (c->parent == w)
@@ -1062,6 +1155,7 @@ void lm_wm_window_unmap(struct lm_window *w)
     struct lm_wm *wm = w->wm;
     if (!w->mapped)
         return;
+    sw_close(wm);
     struct lm_rect r = frame_outer(w);
     lm_xdg_dismiss_popups(w->surface);
     w->mapped = false;
@@ -1479,6 +1573,29 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         it.u.surface.is_popup = true;
         if (!fn(&it, data))
             return;
+    }
+    if (wm->sw_open) {                                           /* the Alt+Tab list, above everything */
+        struct lm_rect r = sw_rect(wm);
+        if (r.w > 0 && (!clip || lm_rect_overlaps(&r, clip))) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_SWITCHER;
+            it.u.switcher.rect = r;
+            it.u.switcher.n = LM_MIN(wm->sw_n, LM_SW_MAX);
+            it.u.switcher.total = wm->sw_n;
+            it.u.switcher.item_h = SW_ITEM_H;
+            it.u.switcher.current_ws = wm->workspace;
+            int first = sw_first(wm);
+            it.u.switcher.sel = wm->sw_idx - first;
+            for (int i = 0; i < it.u.switcher.n; i++) {
+                const struct lm_window *w = wm->sw_win[first + i];
+                it.u.switcher.label[i] = sw_label(w);
+                it.u.switcher.ws[i] = w->workspace;
+                it.u.switcher.minimized[i] = w->minimized;
+                it.u.switcher.focused[i] = w == wm->focused;
+            }
+            if (!fn(&it, data))
+                return;
+        }
     }
 }
 
@@ -2457,6 +2574,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
     if (!wm)
         return;
     if (locked) {
+        sw_close(wm);
         menu_set(wm, false, NULL);
         clip_nav_set(wm, false);
         if (wm->focused)
@@ -2498,6 +2616,21 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     bool ctrl = (mods & LM_MOD_CTRL) != 0;
     bool alt = (mods & LM_MOD_ALT) != 0;
 
+    if (wm->sw_open) {                                          /* Alt+Tab: Alt released = go there, Esc = stay */
+        if (!pressed && (code == KEY_LEFTALT || code == KEY_RIGHTALT)) {
+            sw_commit(wm);
+            return false;                                       /* the application still gets the release it never saw pressed */
+        }
+        if (pressed && code == KEY_ESC) {
+            sw_close(wm);
+            return true;
+        }
+    }
+    if (code == KEY_TAB && alt && !super && !ctrl) {            /* Alt+Tab / Alt+Shift+Tab: the next / previous window in use order */
+        if (pressed)
+            sw_step(wm, shift);
+        return true;
+    }
     if (code == KEY_ESC && wm->menu_open) {
         if (pressed && !repeat)
             menu_set(wm, false, NULL);

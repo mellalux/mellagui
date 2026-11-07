@@ -1579,9 +1579,9 @@ static void toplevel_req_unset_maximized(struct lm_resource *res, const union lm
 static void toplevel_req_set_fullscreen(struct lm_resource *res, const union lm_arg *args)
 {
     struct xdg_toplevel *xt = res->data;
-    struct lm_output *out = args[0].r ? args[0].r->data : NULL;
+    (void)args; /* the requested output is ignored: the window goes fullscreen where it is */
     if (xt->window && xdg_wm(xt->xdg))
-        lm_wm_window_request_fullscreen(xt->window, true, out);
+        lm_wm_window_request_fullscreen(xt->window, true);
 }
 
 static void toplevel_req_unset_fullscreen(struct lm_resource *res, const union lm_arg *args)
@@ -1589,7 +1589,7 @@ static void toplevel_req_unset_fullscreen(struct lm_resource *res, const union l
     struct xdg_toplevel *xt = res->data;
     (void)args;
     if (xt->window && xdg_wm(xt->xdg))
-        lm_wm_window_request_fullscreen(xt->window, false, NULL);
+        lm_wm_window_request_fullscreen(xt->window, false);
 }
 
 static void toplevel_req_set_minimized(struct lm_resource *res, const union lm_arg *args)

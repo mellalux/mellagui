@@ -1174,7 +1174,7 @@ static const struct lm_backend_ops drm_ops = {
     .apply_mode = drm_apply_mode,
 };
 
-struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *device)
+struct lm_backend *lm_backend_drm_create(struct lm_server *srv)
 {
     struct drm *d = calloc(1, sizeof(*d));
     if (!d)
@@ -1185,6 +1185,5 @@ struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *devi
     d->fd = -1;
     d->tty_fd = -1;
     d->uevent_fd = -1;
-    (void)device; /* taken from srv->config.drm_device in init */
     return &d->base;
 }

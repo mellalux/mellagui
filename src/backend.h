@@ -160,11 +160,11 @@ struct lm_backend {
 };
 
 /*
- * DRM/KMS backend. `device` NULL = scan /dev/dri/card*. Opens devices with
+ * DRM/KMS backend. Uses srv->config.drm_device, NULL = scan /dev/dri/card*. Opens devices with
  * open(2) (no logind). Manages VT (KD_GRAPHICS, VT_PROCESS switching) and restores
  * everything on exit, fatal signals and crashes.
  */
-struct lm_backend *lm_backend_drm_create(struct lm_server *srv, const char *device);
+struct lm_backend *lm_backend_drm_create(struct lm_server *srv);
 
 /* Offscreen backend with one w x h output named "headless-0". */
 struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h);

@@ -1014,11 +1014,10 @@ void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
     update_outputs(wm, w);
 }
 
-void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen, struct lm_output *output)
+void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen)
 {
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
-    (void)output;
     bool is = (w->states & LM_WINDOW_FULLSCREEN) != 0;
     if (is == fullscreen)
         return;
@@ -1573,10 +1572,8 @@ static enum lm_cursor_shape cursor_for_edges(uint32_t e)
     return LM_CURSOR_NONE;
 }
 
-void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick, double x, double y)
+void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
 {
-    (void)x;
-    (void)y;
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
@@ -1988,7 +1985,6 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
                 damage_panels(wm);
             }
         }
-        (void)pi;
         return true;
     }
     if (!pressed)
@@ -2154,9 +2150,8 @@ void lm_wm_keyboard_state_changed(struct lm_wm *wm)
     damage_panels(wm);
 }
 
-bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed, bool repeat, uint32_t mods)
+bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods)
 {
-    (void)time_ms;
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
     bool super = (mods & LM_MOD_SUPER) != 0;
     bool shift = (mods & LM_MOD_SHIFT) != 0;
@@ -2229,7 +2224,7 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed, 
         break;
     case KEY_F:
         if (pressed && !repeat && wm->focused)
-            lm_wm_window_request_fullscreen(wm->focused, !(wm->focused->states & LM_WINDOW_FULLSCREEN), NULL);
+            lm_wm_window_request_fullscreen(wm->focused, !(wm->focused->states & LM_WINDOW_FULLSCREEN));
         break;
     case KEY_M:
         if (pressed && !repeat && wm->focused)

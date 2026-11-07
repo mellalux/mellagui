@@ -592,7 +592,7 @@ static void pointer_moved(struct lm_seat *seat, uint32_t time_ms)
     struct lm_pick pick;
     pick_at(seat, &pick);
     if (seat->srv->wm)
-        lm_wm_pointer_motion(seat->srv->wm, &pick, seat->px, seat->py);
+        lm_wm_pointer_motion(seat->srv->wm, &pick);
     if (seat->grab)             /* the wm may have started one */
         return;
 
@@ -805,7 +805,7 @@ static void handle_key(struct lm_seat *seat, const struct lm_input_event *ev)
     /* Shortcuts look at depressed, latched and sticky-locked modifiers (a locked NumLock/Caps must not break them). */
     uint32_t effective = dep | lat | (lock & ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM));
     bool consumed = seat->srv->wm
-        ? lm_wm_key(seat->srv->wm, time_ms, code, pressed, ev->u.key.repeat, effective)
+        ? lm_wm_key(seat->srv->wm, code, pressed, ev->u.key.repeat, effective)
         : false;
 
     if (ev->u.key.repeat) {

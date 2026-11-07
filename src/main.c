@@ -426,7 +426,7 @@ int main(int argc, char **argv)
 
     bool headless = !strcmp(cfg.backend, "headless");
     srv->backend = headless ? lm_backend_headless_create(srv, cfg.headless_width, cfg.headless_height)
-                            : lm_backend_drm_create(srv, cfg.drm_device);
+                            : lm_backend_drm_create(srv);
     if (!srv->backend) {
         lm_error("cannot create %s backend", cfg.backend);
         goto out;

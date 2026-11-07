@@ -184,8 +184,7 @@ void lm_wm_window_unmap(struct lm_window *w);
 
 /* Client requests (xdg_toplevel set_maximized & co). The wm may refuse silently. */
 void lm_wm_window_request_maximize(struct lm_window *w, bool maximize);
-void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen,
-                                     struct lm_output *output /* may be NULL */);
+void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen);
 void lm_wm_window_request_minimize(struct lm_window *w);
 /*
  * wm-initiated: tile to LM_EDGE_LEFT / LM_EDGE_RIGHT half of the usable area, or
@@ -275,7 +274,7 @@ struct lm_pick {
 /* Topmost thing at the global point: popups, then windows (stacking), then panel. */
 void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out);
 /* Pointer moved (also called for every motion): hover highlight, resize cursors via lm_seat_set_cursor_override. */
-void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick, double x, double y);
+void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick);
 /*
  * Button event. For LM_PICK_SURFACE presses the wm focuses/raises the window
  * (and dismisses popups on outside clicks) and returns false so the client
@@ -304,8 +303,7 @@ bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out);
 bool lm_wm_gadget_visible(const struct lm_wm *wm);
 void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
-bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed,
-               bool repeat, uint32_t mods);
+bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods);
 
 /* ---- scene description for the renderer ----------------------------------------------------------- */
 

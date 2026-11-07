@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, menu, lock, card;
+    struct gl_chrome panel, menu, lock, card, switcher;
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
 };
@@ -61,6 +61,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->menu);
     gl_chrome_free(r, &go->lock);
     gl_chrome_free(r, &go->card);
+    gl_chrome_free(r, &go->switcher);
     free(go);
     st->gl = NULL;
 }
@@ -174,6 +175,7 @@ static void gl_do_frame(const struct paint_ctx *c, const void *it) { paint_frame
 static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel(c, it); }
 static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
+static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
 
 static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
 {
@@ -390,6 +392,9 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_MENU:
         gl_chrome_item(p, &p->go->menu, &item->u.menu.rect, gl_do_menu, &item->u.menu);
+        break;
+    case LM_SCENE_SWITCHER:
+        gl_chrome_item(p, &p->go->switcher, &item->u.switcher.rect, gl_do_switcher, &item->u.switcher);
         break;
     case LM_SCENE_LOCK:
         if (item->output == p->st->out) {

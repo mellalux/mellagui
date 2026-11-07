@@ -467,6 +467,27 @@ static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *m)
     }
 }
 
+/* The Alt+Tab list: a bordered box, the selected row highlighted, the workspace of each window on the right. */
+static void paint_switcher(const struct paint_ctx *c, const struct lm_switcher_info *s)
+{
+    fill_rect(c, &s->rect, COL_PANEL_ACCENT);                           /* 1 px border */
+    struct lm_rect in = lm_rect_make(s->rect.x + 1, s->rect.y + 1, s->rect.w - 2, s->rect.h - 2);
+    fill_rect(c, &in, COL_PANEL);
+    for (int i = 0; i < s->n; i++) {
+        struct lm_rect r = lm_rect_make(s->rect.x + 4, s->rect.y + 4 + i * s->item_h, s->rect.w - 8, s->item_h);
+        if (i == s->sel)
+            fill_rect(c, &r, COL_PANEL_HOVER);
+        uint32_t col = s->minimized[i] ? COL_PANEL_DIM : i == s->sel ? COL_PANEL_TEXT : 0x00c4c9d4u;
+        int ty = r.y + (r.h - LM_FONT_H) / 2;
+        struct lm_rect text = lm_rect_make(r.x + 8, r.y, r.w - 16 - 5 * LM_FONT_W, r.h);
+        draw_text(c, &text, text.x, ty, s->label[i], col);
+        char tag[16];
+        snprintf(tag, sizeof(tag), "%s[%d]", s->minimized[i] ? "_ " : "", s->ws[i] + 1);
+        int tw = (int)strlen(tag) * LM_FONT_W;
+        draw_text(c, &r, r.x + r.w - 8 - tw, ty, tag, s->ws[i] == s->current_ws ? COL_PANEL_ACCENT : COL_PANEL_DIM);
+    }
+}
+
 static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb);
 
 /* Text with every font pixel drawn as a scale x scale block (the lock screen's clock). */
@@ -1277,6 +1298,9 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_MENU:
         paint_menu(c, &item->u.menu);
+        break;
+    case LM_SCENE_SWITCHER:
+        paint_switcher(c, &item->u.switcher);
         break;
     case LM_SCENE_LOCK:
         if (item->output == c->out)

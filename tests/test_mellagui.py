@@ -4803,6 +4803,126 @@ class TestGLParity(Base):
         self.assertEqual(problems, [])
 
 
+class TestAltTab(Base):
+    """Alt+Tab: hold Alt, Tab walks the windows in the order they were used, releasing Alt goes there, Esc stays."""
+    ACCENT = (0x6f, 0xa8, 0xff)                           # the list's border
+
+    def setUp(self):
+        super().setUp()
+        self.titles = ['A', 'B', 'C']
+        for t in self.titles:                              # created in this order: C is focused, then B, then A in use order
+            self.window(200, 150, title=t)
+        self.assertEqual(self.focused(), 'C')
+        ctl.abs(900, 590)
+
+    def focused(self):
+        r = ctl.windows()['windows']
+        f = [x['title'] for x in r if 'focused' in x['flags']]
+        return f[0] if f else None
+
+    def alt(self, down):
+        ctl.key(KEY_LEFTALT, down)
+
+    def list_visible(self):
+        ctl.sync()
+        time.sleep(0.1)
+        ppm = ctl.dump(os.path.join(tmp, 'alttab.ppm'))
+        return ppm.count(self.ACCENT, 250, 150, 780, 450) > 100            # the border of a box in the middle of the 1024x600 screen
+
+    def test_one_tab_goes_to_the_window_used_before(self):
+        self.alt(True)
+        ctl.tap(KEY_TAB)
+        self.assertTrue(self.list_visible())
+        self.assertEqual(self.focused(), 'C')                                 # nothing changes while Alt is held
+        self.alt(False)
+        self.assertEqual(self.focused(), 'B')
+        self.assertFalse(self.list_visible())
+
+    def test_more_tabs_walk_the_list_and_wrap(self):
+        self.alt(True)
+        ctl.tap(KEY_TAB)
+        ctl.tap(KEY_TAB)
+        self.alt(False)
+        self.assertEqual(self.focused(), 'A')
+        self.alt(True)                                                         # use order is now A, B, C
+        for _ in range(3):
+            ctl.tap(KEY_TAB)                                                   # B, C, then back to A (wrapped)
+        self.alt(False)
+        self.assertEqual(self.focused(), 'A')
+
+    def test_shift_goes_backwards(self):
+        self.alt(True)
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(KEY_TAB)
+        ctl.key(KEY_LEFTSHIFT, False)
+        self.alt(False)
+        self.assertEqual(self.focused(), 'A')                                 # the least recently used one
+
+    def test_escape_keeps_the_window_and_closes_the_list(self):
+        self.alt(True)
+        ctl.tap(KEY_TAB)
+        self.assertTrue(self.list_visible())
+        ctl.tap(KEY_ESC)
+        self.assertFalse(self.list_visible())
+        self.alt(False)
+        self.assertEqual(self.focused(), 'C')
+
+    def test_a_window_on_another_workspace_brings_its_workspace(self):
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(KEY_2)                                                         # C moves to workspace 2
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.key(KEY_LEFTMETA, False)
+        time.sleep(0.1)
+        self.assertEqual(ctl.windows()['workspace'], 0)
+        self.assertEqual(self.focused(), 'B')
+        self.alt(True)
+        ctl.tap(KEY_TAB)                                                       # list: B, C, A - C (on workspace 2) was used just before B
+        self.alt(False)
+        self.assertEqual(self.focused(), 'C')
+        self.assertEqual(ctl.windows()['workspace'], 1)
+
+    def test_a_single_window_gets_no_list(self):
+        ctl.key(KEY_LEFTALT, False)
+        for c in self.clients[:2]:
+            c.wl.close()
+        for _ in range(100):
+            if len(ctl.windows()['windows']) == 1:
+                break
+            time.sleep(0.03)
+        self.alt(True)
+        ctl.tap(KEY_TAB)
+        self.assertFalse(self.list_visible())
+        self.alt(False)
+        self.assertEqual(self.focused(), 'C')
+
+    def test_tab_is_not_forwarded_to_the_application(self):
+        c, win = self.clients[-1], None
+        seat = c.wl.bind('wl_seat', 5)
+        kb = c.wl.new_id('wl_keyboard')
+        c.wl.request(seat, 'get_keyboard', kb)
+        c.wl.roundtrip()
+        c.wl.queue.clear()
+        self.alt(True)
+        ctl.tap(KEY_TAB)
+        self.alt(False)
+        ctl.sync()
+        c.wl.roundtrip()
+        self.assertEqual([e for e in c.wl.queue if e.obj == kb and e.name == 'key' and e.args[2] == KEY_TAB], [])
+
+    def test_a_window_that_goes_while_the_list_is_open(self):
+        self.alt(True)
+        ctl.tap(KEY_TAB)
+        self.clients[1].wl.close()                                              # B leaves
+        for _ in range(100):
+            if len(ctl.windows()['windows']) == 2:
+                break
+            time.sleep(0.03)
+        self.alt(False)
+        self.assertTrue(alive())
+        self.assertIn(self.focused(), ('A', 'C'))
+
+
 class TestScreenshot(Base):
     """Print / Ctrl+Print / Alt+Print: PNG file (own encoder, no zlib in the compositor) and image/png on the clipboard."""
     KEY_PRINT = 99

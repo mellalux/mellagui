@@ -83,6 +83,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Enter                 | open terminal (`--terminal` command)    |
 | Super+R                     | run dialog (`--run` command)            |
 | Super+Q                     | close focused window                    |
+| Alt+Tab / Alt+Shift+Tab     | window list in use order (all workspaces): hold Alt, Tab steps, releasing Alt goes there, Esc stays |
 | Super+1..4 / +Shift         | switch workspace / move window there    |
 | Super+Tab (+Shift)          | cycle windows (minimized ones included) |
 | Super+M / Super+F           | maximize / fullscreen toggle            |

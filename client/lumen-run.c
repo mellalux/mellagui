@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -23,7 +22,7 @@
 #include "font.h"
 #include "keymap.h"
 #include "util.h"
-#include "wlc.h"
+#include "wlwin.h"
 
 /* ---- line editor ----------------------------------------------------------------------- */
 
@@ -275,14 +274,7 @@ static int selftest(void)
 #define COL_DIM     0x7b8294u
 
 struct app {
-    struct wlc *c;
-    uint32_t registry, compositor, shm, wm_base, seat, keyboard;
-    uint32_t surface, xsurface, toplevel, pool, buffer;
-    int w, h, bw, bh;
-    uint32_t *pixels;
-    size_t map_size;
-    bool configured, running, buffer_busy, redraw;
-    uint32_t mods;
+    struct wlwin win;
     struct line line;
     struct hist hist;
     int repeat_rate, repeat_delay;
@@ -290,43 +282,19 @@ struct app {
     struct timespec repeat_next;
 };
 
-static void fill(struct app *a, int x0, int y0, int w, int h, uint32_t color)
+static void fill(struct app *a, int x, int y, int w, int h, uint32_t color)
 {
-    for (int y = LM_MAX(y0, 0); y < LM_MIN(y0 + h, a->bh); y++)
-        for (int x = LM_MAX(x0, 0); x < LM_MIN(x0 + w, a->bw); x++)
-            a->pixels[(size_t)y * (size_t)a->bw + (size_t)x] = 0xff000000u | color;
+    wlwin_fill(&a->win, x, y, w, h, color);
 }
 
-static void draw_glyph(struct app *a, int x, int y, uint32_t cp, uint32_t color)
+static void paint(struct wlwin *w)
 {
-    const uint8_t *g = lm_font_glyph(cp);
-    for (int r = 0; r < LM_FONT_H; r++)
-        for (int cx = 0; cx < LM_FONT_W; cx++) {
-            int px = x + cx, py = y + r;
-            if ((g[r] & (0x80 >> cx)) && px >= 0 && px < a->bw && py >= 0 && py < a->bh)
-                a->pixels[(size_t)py * (size_t)a->bw + (size_t)px] = 0xff000000u | color;
-        }
-}
-
-static void draw_text(struct app *a, int x, int y, const char *s, uint32_t color)
-{
-    size_t len = strlen(s);
-    for (size_t i = 0; i < len;) {
-        int used;
-        uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
-        i += used > 0 ? (size_t)used : 1;
-        draw_glyph(a, x, y, cp, color);
-        x += LM_FONT_W;
-    }
-}
-
-static void paint(struct app *a)
-{
-    fill(a, 0, 0, a->bw, a->bh, COL_BG);
+    struct app *a = w->data;
+    fill(a, 0, 0, a->win.bw, a->win.bh, COL_BG);
     int label_w = lm_font_text_width("Run:") + 8;
-    int fy = (a->bh - (LM_FONT_H + 12)) / 2;
-    draw_text(a, PAD, fy + 6, "Run:", COL_DIM);
-    int fx = PAD + label_w, fw = a->bw - fx - PAD;
+    int fy = (a->win.bh - (LM_FONT_H + 12)) / 2;
+    wlwin_text(w, PAD, fy + 6, "Run:", 1, COL_DIM, 0);
+    int fx = PAD + label_w, fw = a->win.bw - fx - PAD;
     fill(a, fx, fy, fw, LM_FONT_H + 12, COL_FIELD);
     fill(a, fx, fy + LM_FONT_H + 11, fw, 1, COL_ACCENT);
 
@@ -345,64 +313,10 @@ static void paint(struct app *a)
         uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
         if (col >= first && col - first < cols)
-            draw_glyph(a, fx + 6 + (col - first) * LM_FONT_W, fy + 6, cp, COL_TEXT);
+            wlwin_glyph(w, fx + 6 + (col - first) * LM_FONT_W, fy + 6, cp, 1, COL_TEXT);
         col++;
     }
     fill(a, fx + 6 + (ccol - first) * LM_FONT_W, fy + 5, 2, LM_FONT_H + 2, COL_ACCENT);
-}
-
-static void setup_buffer(struct app *a)
-{
-    if (a->pool) {
-        WLC_SEND0(a->c, a->pool, LM_WL_SHM_POOL_REQ_DESTROY);
-        wlc_forget(a->c, a->pool);
-        a->pool = 0;
-    }
-    if (a->pixels)
-        munmap(a->pixels, a->map_size);
-    a->bw = a->w;
-    a->bh = a->h;
-    a->map_size = (size_t)a->bw * (size_t)a->bh * 4;
-    int fd = memfd_create("lumen-run", MFD_CLOEXEC);
-    if (fd < 0 || ftruncate(fd, (off_t)a->map_size) < 0) {
-        perror("memfd");
-        exit(1);
-    }
-    a->pixels = mmap(NULL, a->map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (a->pixels == MAP_FAILED) {
-        perror("mmap");
-        exit(1);
-    }
-    a->pool = wlc_alloc(a->c, &lm_wl_shm_pool_interface, NULL, NULL);
-    WLC_SEND(a->c, a->shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = a->pool }, { .h = fd }, { .i = (int32_t)a->map_size });
-    close(fd);
-}
-
-static void buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)args;
-    struct app *a = data;
-    if (op != LM_WL_BUFFER_EVT_RELEASE)
-        return;
-    WLC_SEND0(c, id, LM_WL_BUFFER_REQ_DESTROY);
-    wlc_forget(c, id);
-    a->buffer = 0;
-    a->buffer_busy = false;
-}
-
-static void draw(struct app *a)
-{
-    if (a->bw != a->w || a->bh != a->h || !a->pixels)
-        setup_buffer(a);
-    paint(a);
-    a->buffer = wlc_alloc(a->c, &lm_wl_buffer_interface, buffer_event, a);
-    WLC_SEND(a->c, a->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = a->buffer }, { .i = 0 }, { .i = a->bw },
-             { .i = a->bh }, { .i = a->bw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
-    WLC_SEND(a->c, a->surface, LM_WL_SURFACE_REQ_ATTACH, { .o = a->buffer }, { .i = 0 }, { .i = 0 });
-    WLC_SEND(a->c, a->surface, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = a->bw }, { .i = a->bh });
-    WLC_SEND0(a->c, a->surface, LM_WL_SURFACE_REQ_COMMIT);
-    a->buffer_busy = true;
-    a->redraw = false;
 }
 
 /* ---- keyboard ------------------------------------------------------------------------------------ */
@@ -410,25 +324,25 @@ static void draw(struct app *a)
 static void run_line(struct app *a)
 {
     if (!a->line.len) {
-        a->running = false;
+        a->win.running = false;
         return;
     }
     hist_add(&a->hist, a->line.text);
     hist_save(&a->hist);
-    if (spawn_detached(a->line.text, wlc_fd(a->c)) < 0)
+    if (spawn_detached(a->line.text, wlc_fd(a->win.c)) < 0)
         fprintf(stderr, "lumen-run: cannot start '%s': %s\n", a->line.text, strerror(errno));
-    a->running = false;
+    a->win.running = false;
 }
 
 static void handle_key(struct app *a, uint32_t code)
 {
-    uint32_t ks = lm_keymap_keysym(code, a->mods);
+    uint32_t ks = lm_keymap_keysym(code, a->win.mods);
     char txt[8];
-    bool ctrl = (a->mods & LM_MOD_CTRL) != 0;
+    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0;
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         run_line(a);
     } else if (ks == LM_KS_Escape) {
-        a->running = false;
+        a->win.running = false;
     } else if (ks == LM_KS_BackSpace) {
         line_backspace(&a->line);
     } else if (ks == LM_KS_Delete) {
@@ -447,12 +361,12 @@ static void handle_key(struct app *a, uint32_t code)
         hist_move(&a->hist, &a->line, -1);
     } else if (ks == LM_KS_Down) {
         hist_move(&a->hist, &a->line, 1);
-    } else if (!(a->mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {
+    } else if (!(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {
         int n = lm_keysym_to_utf8(ks, txt);
         if (n > 0)
             line_insert(&a->line, txt, (size_t)n);
     }
-    a->redraw = true;
+    a->win.redraw = true;
 }
 
 static void repeat_stop(struct app *a)
@@ -500,49 +414,12 @@ static void repeat_fire(struct app *a)
 
 /* ---- protocol events ------------------------------------------------------------------------------- */
 
-static void wm_base_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
-    (void)data;
-    if (op == LM_XDG_WM_BASE_EVT_PING)
-        WLC_SEND(c, id, LM_XDG_WM_BASE_REQ_PONG, { .u = args[0].u });
-}
-
-static void xsurface_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    struct app *a = data;
-    if (op == LM_XDG_SURFACE_EVT_CONFIGURE) {
-        WLC_SEND(c, id, LM_XDG_SURFACE_REQ_ACK_CONFIGURE, { .u = args[0].u });
-        a->configured = true;
-        a->redraw = true;
-    }
-}
-
-static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)c; (void)id;
-    struct app *a = data;
-    if (op == LM_XDG_TOPLEVEL_EVT_CONFIGURE) {
-        a->w = LM_MAX(args[0].i > 0 ? args[0].i : DEFAULT_W, 160);
-        a->h = LM_MAX(args[1].i > 0 ? args[1].i : DEFAULT_H, 40);
-    } else if (op == LM_XDG_TOPLEVEL_EVT_CLOSE) {
-        a->running = false;
-    }
-}
-
-static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)c; (void)id;
-    struct app *a = data;
+    struct app *a = w->data;
     switch (op) {
-    case LM_WL_KEYBOARD_EVT_KEYMAP:
-        lm_keymap_client_load(args[1].h, args[2].u);
-        break;
     case LM_WL_KEYBOARD_EVT_LEAVE:
         repeat_stop(a);
-        break;
-    case LM_WL_KEYBOARD_EVT_MODIFIERS:
-        a->mods = args[1].u | args[2].u | args[3].u;
-        lm_keymap_client_group(args[4].u);
         break;
     case LM_WL_KEYBOARD_EVT_REPEAT_INFO:
         a->repeat_rate = args[0].i;
@@ -555,8 +432,8 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
             break;
         }
         handle_key(a, args[2].u);
-        if (a->running) {
-            uint32_t ks = lm_keymap_keysym(args[2].u, a->mods);
+        if (a->win.running) {
+            uint32_t ks = lm_keymap_keysym(args[2].u, a->win.mods);
             if (ks != LM_KS_Return && ks != LM_KS_Escape)
                 repeat_arm(a, args[2].u);
         }
@@ -564,65 +441,24 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     }
 }
 
-static void seat_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    struct app *a = data;
-    if (op == LM_WL_SEAT_EVT_CAPABILITIES && (args[0].u & 2) && !a->keyboard) {
-        a->keyboard = wlc_alloc(c, &lm_wl_keyboard_interface, keyboard_event, a);
-        WLC_SEND(c, id, LM_WL_SEAT_REQ_GET_KEYBOARD, { .n = a->keyboard });
-    }
-}
-
-static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)id;
-    struct app *a = data;
-    if (op != LM_WL_REGISTRY_EVT_GLOBAL)
-        return;
-    uint32_t name = args[0].u, ver = args[2].u;
-    const char *iface = args[1].s;
-    if (!strcmp(iface, "wl_compositor"))
-        a->compositor = wlc_bind(c, a->registry, name, &lm_wl_compositor_interface, LM_MIN(ver, 4u), NULL, a);
-    else if (!strcmp(iface, "wl_shm"))
-        a->shm = wlc_bind(c, a->registry, name, &lm_wl_shm_interface, 1, NULL, a);
-    else if (!strcmp(iface, "xdg_wm_base"))
-        a->wm_base = wlc_bind(c, a->registry, name, &lm_xdg_wm_base_interface, LM_MIN(ver, 3u), wm_base_event, a);
-    else if (!strcmp(iface, "wl_seat"))
-        a->seat = wlc_bind(c, a->registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, a);
-}
-
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
 
-    struct app a = { .w = DEFAULT_W, .h = DEFAULT_H, .running = true, .repeat_rate = 25, .repeat_delay = 400 };
+    static const struct wlwin_ops ops = { .paint = paint, .keyboard = keyboard_event };
+    struct app a = { .repeat_rate = 25, .repeat_delay = 400 };
     hist_load(&a.hist);
-    a.c = wlc_connect(NULL);
-    if (!a.c)
+    if (wlwin_connect(&a.win, "lumen-run", &ops, &a) < 0)
         return 1;
-    a.registry = wlc_get_registry(a.c, registry_event, &a);
-    if (wlc_roundtrip(a.c) < 0 || !a.compositor || !a.shm || !a.wm_base || !a.seat) {
-        fprintf(stderr, "lumen-run: compositor lacks wl_compositor/wl_shm/xdg_wm_base/wl_seat\n");
+    if (!a.win.seat) {
+        fprintf(stderr, "lumen-run: compositor lacks wl_seat\n");
         return 1;
     }
-    a.surface = wlc_alloc(a.c, &lm_wl_surface_interface, NULL, NULL);
-    WLC_SEND(a.c, a.compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = a.surface });
-    a.xsurface = wlc_alloc(a.c, &lm_xdg_surface_interface, xsurface_event, &a);
-    WLC_SEND(a.c, a.wm_base, LM_XDG_WM_BASE_REQ_GET_XDG_SURFACE, { .n = a.xsurface }, { .o = a.surface });
-    a.toplevel = wlc_alloc(a.c, &lm_xdg_toplevel_interface, toplevel_event, &a);
-    WLC_SEND(a.c, a.xsurface, LM_XDG_SURFACE_REQ_GET_TOPLEVEL, { .n = a.toplevel });
-    WLC_SEND(a.c, a.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = "Run" });
-    WLC_SEND(a.c, a.toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = "lumen.run" });
-    WLC_SEND0(a.c, a.surface, LM_WL_SURFACE_REQ_COMMIT);
-
-    while (a.running && !wlc_dead(a.c)) {
-        if (a.redraw && a.configured && !a.buffer_busy)
-            draw(&a);
-        if (wlc_dispatch(a.c, repeat_timeout(&a)) < 0)
-            break;
+    if (wlwin_open(&a.win, "Run", "lumen.run", DEFAULT_W, DEFAULT_H, 160, 40) < 0)
+        return 1;
+    while (wlwin_step(&a.win, repeat_timeout(&a)))
         repeat_fire(&a);
-    }
-    wlc_destroy(a.c);
+    wlwin_destroy(&a.win);
     return 0;
 }

@@ -19,13 +19,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include "font.h"
 #include "keymap.h"
 #include "util.h"
-#include "wlc.h"
+#include "wlwin.h"
 
 /* ---- layout list helpers (pure) ---------------------------------------------------------------------------- */
 
@@ -262,14 +261,8 @@ struct widget {
 struct kv { char k[24], v[VALUE_MAX]; };
 
 struct app {
-    struct wlc *c;
-    uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard, settings;
-    uint32_t surface, xsurface, toplevel, pool, buffer;
-    int w, h, bw, bh;
-    uint32_t *pixels;
-    size_t map_size;
-    bool configured, running, buffer_busy, redraw;
-    uint32_t mods;
+    struct wlwin win;
+    uint32_t settings;
     double px, py;
     bool has_pointer;
     struct kv kvs[MAX_KV];
@@ -312,7 +305,7 @@ static void kv_set(struct app *a, const char *k, const char *v)
 static void send_set(struct app *a, const char *key, const char *value)
 {
     if (a->settings)
-        WLC_SEND(a->c, a->settings, LM_LUMEN_SETTINGS_V1_REQ_SET, { .s = key }, { .s = value });
+        WLC_SEND(a->win.c, a->settings, LM_LUMEN_SETTINGS_V1_REQ_SET, { .s = key }, { .s = value });
 }
 
 static void send_set_int(struct app *a, const char *key, int v)
@@ -541,7 +534,7 @@ static void build(struct app *a)
         snprintf(t->arg, sizeof(t->arg), "%d", i);
         t->on = (int)a->page == i;
     }
-    int x = SIDE_W + 20, y = 14, w = a->bw - x - 20;
+    int x = SIDE_W + 20, y = 14, w = a->win.bw - x - 20;
     if (w < 200)
         w = 200;
     switch (a->page) {
@@ -597,7 +590,7 @@ static void activate(struct app *a, int idx)
     case W_TAB:
         a->page = (enum page)atoi(w->arg);
         a->focus = idx;
-        a->redraw = true;
+        a->win.redraw = true;
         if (a->page == PAGE_SOUND)
             send_set(a, "audio-rescan", "1");           /* ask `pactl` again: devices come and go */
         break;
@@ -642,7 +635,7 @@ static void move_focus(struct app *a, int dir)
             i = a->nw - 1;
         if (focusable(&a->wd[i])) {
             a->focus = i;
-            a->redraw = true;
+            a->win.redraw = true;
             return;
         }
     }
@@ -652,9 +645,7 @@ static void move_focus(struct app *a, int dir)
 
 static void fill(struct app *a, struct rect r, uint32_t color)
 {
-    for (int y = LM_MAX(r.y, 0); y < LM_MIN(r.y + r.h, a->bh); y++)
-        for (int x = LM_MAX(r.x, 0); x < LM_MIN(r.x + r.w, a->bw); x++)
-            a->pixels[(size_t)y * (size_t)a->bw + (size_t)x] = 0xff000000u | color;
+    wlwin_fill(&a->win, r.x, r.y, r.w, r.h, color);
 }
 
 static void outline(struct app *a, struct rect r, uint32_t color)
@@ -665,26 +656,10 @@ static void outline(struct app *a, struct rect r, uint32_t color)
     fill(a, (struct rect){ r.x + r.w - 1, r.y, 1, r.h }, color);
 }
 
-/* Draws up to max_w pixels of text (clipped on a character boundary). */
+/* Draws up to max_w pixels of text (clipped on a character boundary), 0 = no limit. */
 static void draw_text(struct app *a, int x, int y, const char *s, uint32_t color, int max_w)
 {
-    size_t len = strlen(s);
-    int x0 = x;
-    for (size_t i = 0; i < len;) {
-        if (max_w > 0 && x + LM_FONT_W > x0 + max_w)
-            break;
-        int used;
-        uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
-        i += used > 0 ? (size_t)used : 1;
-        const uint8_t *g = lm_font_glyph(cp);
-        for (int r = 0; r < LM_FONT_H; r++)
-            for (int cx = 0; cx < LM_FONT_W; cx++) {
-                int px = x + cx, py = y + r;
-                if ((g[r] & (0x80 >> cx)) && px >= 0 && px < a->bw && py >= 0 && py < a->bh)
-                    a->pixels[(size_t)py * (size_t)a->bw + (size_t)px] = 0xff000000u | color;
-            }
-        x += LM_FONT_W;
-    }
+    wlwin_text(&a->win, x, y, s, 1, color, max_w);
 }
 
 static int text_y(const struct rect *r)
@@ -764,10 +739,11 @@ static void paint_widget(struct app *a, int idx)
     }
 }
 
-static void paint(struct app *a)
+static void paint(struct wlwin *w)
 {
-    fill(a, (struct rect){ 0, 0, a->bw, a->bh }, COL_BG);
-    fill(a, (struct rect){ 0, 0, SIDE_W, a->bh }, COL_SIDE);
+    struct app *a = w->data;
+    fill(a, (struct rect){ 0, 0, a->win.bw, a->win.bh }, COL_BG);
+    fill(a, (struct rect){ 0, 0, SIDE_W, a->win.bh }, COL_SIDE);
     build(a);
     for (int i = 0; i < a->nw; i++)
         paint_widget(a, i);
@@ -775,65 +751,11 @@ static void paint(struct app *a)
     const char *l1 = !a->settings ? "The compositor has no settings interface."
                    : *file ? "Changes apply at once and are saved to:"
                            : "Changes apply at once (this session is not saving them).";
-    draw_text(a, SIDE_W + 20, a->bh - (*file ? 44 : 24), l1, COL_DIM, a->bw - SIDE_W - 30);
+    draw_text(a, SIDE_W + 20, a->win.bh - (*file ? 44 : 24), l1, COL_DIM, a->win.bw - SIDE_W - 30);
     if (a->settings && *file) {
-        int room = (a->bw - SIDE_W - 30) / LM_FONT_W, len = (int)strlen(file);
-        draw_text(a, SIDE_W + 20, a->bh - 24, len > room ? file + (len - room) : file, COL_DIM, 0);
+        int room = (a->win.bw - SIDE_W - 30) / LM_FONT_W, len = (int)strlen(file);
+        draw_text(a, SIDE_W + 20, a->win.bh - 24, len > room ? file + (len - room) : file, COL_DIM, 0);
     }
-}
-
-static void setup_buffer(struct app *a)
-{
-    if (a->pool) {
-        WLC_SEND0(a->c, a->pool, LM_WL_SHM_POOL_REQ_DESTROY);
-        wlc_forget(a->c, a->pool);
-        a->pool = 0;
-    }
-    if (a->pixels)
-        munmap(a->pixels, a->map_size);
-    a->bw = a->w;
-    a->bh = a->h;
-    a->map_size = (size_t)a->bw * (size_t)a->bh * 4;
-    int fd = memfd_create("lumen-settings", MFD_CLOEXEC);
-    if (fd < 0 || ftruncate(fd, (off_t)a->map_size) < 0) {
-        perror("memfd");
-        exit(1);
-    }
-    a->pixels = mmap(NULL, a->map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (a->pixels == MAP_FAILED) {
-        perror("mmap");
-        exit(1);
-    }
-    a->pool = wlc_alloc(a->c, &lm_wl_shm_pool_interface, NULL, NULL);
-    WLC_SEND(a->c, a->shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = a->pool }, { .h = fd }, { .i = (int32_t)a->map_size });
-    close(fd);
-}
-
-static void buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)args;
-    struct app *a = data;
-    if (op != LM_WL_BUFFER_EVT_RELEASE)
-        return;
-    WLC_SEND0(c, id, LM_WL_BUFFER_REQ_DESTROY);
-    wlc_forget(c, id);
-    a->buffer = 0;
-    a->buffer_busy = false;
-}
-
-static void draw(struct app *a)
-{
-    if (a->bw != a->w || a->bh != a->h || !a->pixels)
-        setup_buffer(a);
-    paint(a);
-    a->buffer = wlc_alloc(a->c, &lm_wl_buffer_interface, buffer_event, a);
-    WLC_SEND(a->c, a->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = a->buffer }, { .i = 0 }, { .i = a->bw },
-             { .i = a->bh }, { .i = a->bw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
-    WLC_SEND(a->c, a->surface, LM_WL_SURFACE_REQ_ATTACH, { .o = a->buffer }, { .i = 0 }, { .i = 0 });
-    WLC_SEND(a->c, a->surface, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = a->bw }, { .i = a->bh });
-    WLC_SEND0(a->c, a->surface, LM_WL_SURFACE_REQ_COMMIT);
-    a->buffer_busy = true;
-    a->redraw = false;
 }
 
 /* ---- protocol events -------------------------------------------------------------------------------------- */
@@ -845,45 +767,13 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op == LM_LUMEN_SETTINGS_V1_EVT_VALUE) {
         kv_set(a, args[0].s, args[1].s);
     } else if (op == LM_LUMEN_SETTINGS_V1_EVT_DONE) {
-        a->redraw = true;
+        a->win.redraw = true;
     }
 }
 
-static void wm_base_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
-    (void)data;
-    if (op == LM_XDG_WM_BASE_EVT_PING)
-        WLC_SEND(c, id, LM_XDG_WM_BASE_REQ_PONG, { .u = args[0].u });
-}
-
-static void xsurface_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    struct app *a = data;
-    if (op == LM_XDG_SURFACE_EVT_CONFIGURE) {
-        WLC_SEND(c, id, LM_XDG_SURFACE_REQ_ACK_CONFIGURE, { .u = args[0].u });
-        a->configured = true;
-        a->redraw = true;
-    }
-}
-
-static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)c; (void)id;
-    struct app *a = data;
-    if (op == LM_XDG_TOPLEVEL_EVT_CONFIGURE) {
-        a->w = args[0].i > 0 ? args[0].i : DEFAULT_W;
-        a->h = args[1].i > 0 ? args[1].i : DEFAULT_H;
-        a->w = LM_MAX(a->w, 520);
-        a->h = LM_MAX(a->h, 380);
-    } else if (op == LM_XDG_TOPLEVEL_EVT_CLOSE) {
-        a->running = false;
-    }
-}
-
-static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)c; (void)id;
-    struct app *a = data;
+    struct app *a = w->data;
     build(a);
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
@@ -920,39 +810,31 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
                 activate(a, idx);
             a->press = a->drag = -1;
         }
-        a->redraw = true;
+        a->win.redraw = true;
         break;
     }
     int hover = a->has_pointer ? widget_at(a, a->px, a->py) : -1;
     if (hover != a->hover) {
         a->hover = hover;
-        a->redraw = true;
+        a->win.redraw = true;
     }
 }
 
-static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
-    (void)c; (void)id;
-    struct app *a = data;
+    struct app *a = w->data;
     switch (op) {
-    case LM_WL_KEYBOARD_EVT_KEYMAP:
-        lm_keymap_client_load(args[1].h, args[2].u);
-        break;
-    case LM_WL_KEYBOARD_EVT_MODIFIERS:
-        a->mods = args[1].u | args[2].u | args[3].u;
-        lm_keymap_client_group(args[4].u);
-        break;
     case LM_WL_KEYBOARD_EVT_KEY: {
         if (args[3].u == 0)
             break;
         build(a);
-        uint32_t ks = lm_keymap_keysym(args[2].u, a->mods);
+        uint32_t ks = lm_keymap_keysym(args[2].u, a->win.mods);
         struct widget *f = a->focus >= 0 ? &a->wd[a->focus] : NULL;
-        bool plain = !(a->mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER));
+        bool plain = !(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER));
         if (ks == LM_KS_Escape) {
-            a->running = false;
+            a->win.running = false;
         } else if (ks == LM_KS_Tab) {
-            move_focus(a, (a->mods & LM_MOD_SHIFT) ? -1 : 1);
+            move_focus(a, (a->win.mods & LM_MOD_SHIFT) ? -1 : 1);
         } else if (f && f->kind == W_TEXT) {
             size_t len = strlen(a->test);
             char txt[8];
@@ -965,7 +847,7 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
             } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && len + strlen(txt) < sizeof(a->test)) {
                 memcpy(a->test + len, txt, strlen(txt) + 1);
             }
-            a->redraw = true;
+            a->win.redraw = true;
         } else if (f && f->kind == W_SLIDER && (ks == LM_KS_Left || ks == LM_KS_Right)) {
             int v = LM_MAX(f->lo, LM_MIN(f->hi, f->val + (ks == LM_KS_Right ? f->step : -f->step)));
             if (v != f->val)
@@ -980,39 +862,12 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     }
 }
 
-static void seat_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    struct app *a = data;
-    if (op == LM_WL_SEAT_EVT_CAPABILITIES) {
-        if ((args[0].u & 1) && !a->pointer) {
-            a->pointer = wlc_alloc(c, &lm_wl_pointer_interface, pointer_event, a);
-            WLC_SEND(c, id, LM_WL_SEAT_REQ_GET_POINTER, { .n = a->pointer });
-        }
-        if ((args[0].u & 2) && !a->keyboard) {
-            a->keyboard = wlc_alloc(c, &lm_wl_keyboard_interface, keyboard_event, a);
-            WLC_SEND(c, id, LM_WL_SEAT_REQ_GET_KEYBOARD, { .n = a->keyboard });
-        }
-    }
-}
-
-static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)id;
-    struct app *a = data;
-    if (op != LM_WL_REGISTRY_EVT_GLOBAL)
-        return;
-    uint32_t name = args[0].u, ver = args[2].u;
-    const char *iface = args[1].s;
-    if (!strcmp(iface, "wl_compositor"))
-        a->compositor = wlc_bind(c, a->registry, name, &lm_wl_compositor_interface, LM_MIN(ver, 4u), NULL, a);
-    else if (!strcmp(iface, "wl_shm"))
-        a->shm = wlc_bind(c, a->registry, name, &lm_wl_shm_interface, 1, NULL, a);
-    else if (!strcmp(iface, "xdg_wm_base"))
-        a->wm_base = wlc_bind(c, a->registry, name, &lm_xdg_wm_base_interface, LM_MIN(ver, 3u), wm_base_event, a);
-    else if (!strcmp(iface, "wl_seat"))
-        a->seat = wlc_bind(c, a->registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, a);
-    else if (!strcmp(iface, "lumen_settings_v1"))
-        a->settings = wlc_bind(c, a->registry, name, &lm_lumen_settings_v1_interface, 1, settings_event, a);
+    (void)ver;
+    struct app *a = w->data;
+    if (!strcmp(iface, "lumen_settings_v1"))
+        a->settings = wlc_bind(w->c, w->registry, name, &lm_lumen_settings_v1_interface, 1, settings_event, a);
 }
 
 /* ---- command line ----------------------------------------------------------------------------------------- */
@@ -1033,7 +888,7 @@ static int cli(struct app *a, int argc, char **argv)
             }
             *eq = 0;
             send_set(a, argv[i], eq + 1);
-            if (wlc_roundtrip(a->c) < 0)
+            if (wlc_roundtrip(a->win.c) < 0)
                 return 1;
             printf("%s=%s\n", argv[i], kv_get(a, argv[i]));
             if (strcmp(kv_get(a, argv[i]), eq + 1)) {
@@ -1067,41 +922,22 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    struct app a = { .w = DEFAULT_W, .h = DEFAULT_H, .running = true, .press = -1, .drag = -1, .hover = -1,
-                     .focus = -1 };
-    a.c = wlc_connect(NULL);
-    if (!a.c)
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
+                                          .keyboard = keyboard_event };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1 };
+    if (wlwin_connect(&a.win, "lumen-settings", &ops, &a) < 0)
         return 1;
-    a.registry = wlc_get_registry(a.c, registry_event, &a);
-    if (wlc_roundtrip(a.c) < 0)
-        return 1;
-    if (a.settings && wlc_roundtrip(a.c) < 0)       /* the value burst that follows the bind */
+    if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */
         return 1;
     if (cli_mode) {
         int rc = cli(&a, argc, argv);
-        wlc_destroy(a.c);
+        wlwin_destroy(&a.win);
         return rc;
     }
-    if (!a.compositor || !a.shm || !a.wm_base) {
-        fprintf(stderr, "lumen-settings: compositor lacks wl_compositor/wl_shm/xdg_wm_base\n");
+    if (wlwin_open(&a.win, "Settings", "lumen.settings", DEFAULT_W, DEFAULT_H, 520, 380) < 0)
         return 1;
-    }
-    a.surface = wlc_alloc(a.c, &lm_wl_surface_interface, NULL, NULL);
-    WLC_SEND(a.c, a.compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = a.surface });
-    a.xsurface = wlc_alloc(a.c, &lm_xdg_surface_interface, xsurface_event, &a);
-    WLC_SEND(a.c, a.wm_base, LM_XDG_WM_BASE_REQ_GET_XDG_SURFACE, { .n = a.xsurface }, { .o = a.surface });
-    a.toplevel = wlc_alloc(a.c, &lm_xdg_toplevel_interface, toplevel_event, &a);
-    WLC_SEND(a.c, a.xsurface, LM_XDG_SURFACE_REQ_GET_TOPLEVEL, { .n = a.toplevel });
-    WLC_SEND(a.c, a.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = "Settings" });
-    WLC_SEND(a.c, a.toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = "lumen.settings" });
-    WLC_SEND0(a.c, a.surface, LM_WL_SURFACE_REQ_COMMIT);
-
-    while (a.running && !wlc_dead(a.c)) {
-        if (a.redraw && a.configured && !a.buffer_busy)
-            draw(&a);
-        if (wlc_dispatch(a.c, -1) < 0)
-            break;
-    }
-    wlc_destroy(a.c);
+    while (wlwin_step(&a.win, -1))
+        ;
+    wlwin_destroy(&a.win);
     return 0;
 }

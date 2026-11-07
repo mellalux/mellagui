@@ -112,6 +112,7 @@ header/API change requests go to the architect (`header_requests`). Headers in
 | `src/main.c` | **core** | arguments, wiring, signals, clean shutdown |
 | `client/lumen-term.c` (later) | **clients** | terminal emulator |
 | `client/lumen-settings.c` | **clients** | settings panel (Keyboard, Pointer, Desktop, Display, Sound): tabs, checkboxes, radio lists, sliders, layout list and a typing test field drawn immediate-mode from a per-frame widget list; also `--get` / `--set` for scripts; it only shows what the compositor reports back |
+| `client/wlwin.[ch]` | **clients** | one software-drawn xdg-toplevel on top of `wlc`: registry binding, a single shm buffer, keymap/modifiers, fill/text helpers; used by calc, run and settings (not by the terminal) |
 | `client/lumen-calc.c` | **clients** | calculator (engine + UI in one file; `--selftest` runs the engine checks) |
 | `tests/wlclient.py`, `tests/test_*.py`, `tests/run.sh` | **tests** | end-to-end tests against `lumen --backend headless` |
 | `Makefile`, `docs/`, `README.md` | architect | build, docs |

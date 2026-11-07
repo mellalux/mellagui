@@ -55,7 +55,7 @@ $(BUILD)/lumen-asan: $(ASAN_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/lumen-calc: $(BUILD)/client/lumen-calc.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -63,11 +63,11 @@ $(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-run: $(BUILD)/client/lumen-run.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/lumen-run: $(BUILD)/client/lumen-run.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/lumen-settings: $(BUILD)/client/lumen-settings.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/lumen-settings: $(BUILD)/client/lumen-settings.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

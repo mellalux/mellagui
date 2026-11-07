@@ -1,0 +1,78 @@
+#ifndef LUMEN_WLWIN_H
+#define LUMEN_WLWIN_H
+
+/*
+ * One software-drawn xdg-toplevel window on top of wlc, shared by the small
+ * single-window clients (lumen-calc, lumen-run, lumen-settings): registry
+ * binding, xdg-shell boilerplate, a single wl_shm buffer that is redrawn on
+ * request, keymap/modifier tracking and a few pixel-drawing helpers.
+ *
+ * Usage: fill in `ops`, call wlwin_connect(), look at the bound globals
+ * (and any extra ones from ops->global), call wlwin_open(), then loop on
+ * wlwin_step(). Ask for a repaint by setting `redraw`; ops->paint draws into
+ * `pixels` (bw x bh, XRGB8888) with the helpers below.
+ *
+ * lumen-term does not use this: it double-buffers and has its own protocol needs.
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "wlc.h"
+
+struct wlwin;
+
+struct wlwin_ops {
+    /* Required: draw the whole window (pixels, bw, bh are valid). */
+    void (*paint)(struct wlwin *w);
+    /* Optional: a registry global the library does not know (bind it with wlc_bind(w->c, w->registry, ...)). */
+    void (*global)(struct wlwin *w, uint32_t name, const char *iface, uint32_t version);
+    /* Optional: when set, a wl_pointer / wl_keyboard is created and its events forwarded as they are
+     * (the library has already handled wl_keyboard.keymap and .modifiers: see `mods`). */
+    void (*pointer)(struct wlwin *w, uint32_t op, const union lm_arg *args);
+    void (*keyboard)(struct wlwin *w, uint32_t op, const union lm_arg *args);
+};
+
+struct wlwin {
+    struct wlc *c;
+    const struct wlwin_ops *ops;
+    void *data;                     /* for the ops callbacks */
+    uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard;
+    uint32_t surface, xsurface, toplevel, pool, buffer;
+    int w, h;                       /* size the compositor asked for (clamped to the minimum) */
+    int bw, bh;                     /* size of `pixels` */
+    uint32_t *pixels;
+    size_t map_size;
+    bool configured, running, buffer_busy, redraw;
+    uint32_t mods;                  /* LM_MOD_* bits, from wl_keyboard.modifiers */
+    int def_w, def_h, min_w, min_h;
+    const char *name;               /* program name for messages, e.g. "lumen-calc" */
+};
+
+/*
+ * Connect, fetch the registry and bind compositor/shm/xdg_wm_base/wl_seat (plus whatever ops->global binds),
+ * then wait for it with one roundtrip. Returns 0, or -1 (the error is on stderr) when the connection fails.
+ * The caller may roundtrip again (e.g. for a value burst after binding a private global).
+ */
+int wlwin_connect(struct wlwin *w, const char *name, const struct wlwin_ops *ops, void *data);
+
+/* Create the surface and the toplevel (title, app id, default and minimum size). Returns 0, or -1 with a message
+ * when wl_compositor / wl_shm / xdg_wm_base are missing. */
+int wlwin_open(struct wlwin *w, const char *title, const char *app_id, int def_w, int def_h, int min_w, int min_h);
+
+/* One loop iteration: repaint if requested and possible, then wait up to timeout_ms (-1 = block) for events.
+ * Returns false once the window should end (closed, or the connection died). */
+bool wlwin_step(struct wlwin *w, int timeout_ms);
+
+void wlwin_destroy(struct wlwin *w);
+
+/* ---- drawing (all clip to the buffer) ------------------------------------------------------------------------------ */
+
+void wlwin_fill(struct wlwin *w, int x, int y, int width, int height, uint32_t rgb);
+/* One glyph scaled up by `scale` (>= 1). */
+void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb);
+/* UTF-8 text; max_w > 0 stops before the first character that would not fit completely in that many pixels. */
+void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
+
+#endif

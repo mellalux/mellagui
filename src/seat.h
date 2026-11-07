@@ -141,6 +141,13 @@ const char *lm_seat_clip_get(const struct lm_seat *seat, int i);
 void lm_seat_clip_use(struct lm_seat *seat, int i);
 void lm_seat_clip_clear(struct lm_seat *seat);      /* forget the history (control socket `clip clear`) */
 
+/*
+ * Screen lock (lock.c): while locked the seat sends nothing to clients. Keyboard and pointer focus are dropped (and stay
+ * NULL whatever the wm asks for), a pointer grab is cancelled, the cursor is hidden, and input goes to lm_lock_key() only.
+ * Unlocking lets the pointer find its surface again; the wm gives the keyboard focus back (lm_wm_lock_changed).
+ */
+void lm_seat_set_locked(struct lm_seat *seat, bool locked);
+
 /* ---- serials -------------------------------------------------------------------------------- */
 
 bool lm_seat_serial_valid(const struct lm_seat *seat, struct lm_client *client,

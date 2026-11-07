@@ -420,6 +420,72 @@ static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *m)
     }
 }
 
+static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb);
+
+/* Text with every font pixel drawn as a scale x scale block (the lock screen's clock). */
+static void draw_text_scaled(const struct paint_ctx *c, int x, int y, const char *text, int scale, uint32_t color)
+{
+    size_t len = strlen(text);
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        const uint8_t *g = lm_font_glyph(cp);
+        for (int row = 0; row < LM_FONT_H; row++)
+            for (int col = 0; col < LM_FONT_W; col++)
+                if (g[row] & (0x80 >> col)) {
+                    struct lm_rect px = lm_rect_make(x + col * scale, y + row * scale, scale, scale);
+                    fill_rect(c, &px, color);
+                }
+        x += LM_FONT_W * scale;
+    }
+}
+
+/* The lock screen: a dark screen with the time, a box with the dots of what was typed and the last message. */
+static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
+{
+    struct lm_rect o = lm_output_rect(c->out);
+    fill_rect(c, &o, 0x0b0d12u);
+    int cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+
+    int scale = o.w >= 1600 ? 8 : o.w >= 900 ? 6 : 3;
+    int clock_h = LM_FONT_H * scale, top = cy - clock_h - 70;
+    int tw = lm_font_text_width(li->clock) * scale;
+    draw_text_scaled(c, cx - tw / 2, top, li->clock, scale, COL_PANEL_TEXT);
+    struct lm_rect line = lm_rect_make(o.x, top + clock_h + 8, o.w, 20);
+    draw_text_centered(c, &line, li->date, COL_PANEL_DIM);
+
+    int bw = LM_MIN(o.w - 40, 360), bh = 44;
+    struct lm_rect box = lm_rect_make(cx - bw / 2, top + clock_h + 44, bw, bh);
+    fill_round(c, &box, 8, 0xff000000u | (li->blocked ? 0x2a1a1au : 0x1c212bu));
+    struct lm_rect edges[4] = {                                         /* hairline in the accent colour (corners left out) */
+        lm_rect_make(box.x + 8, box.y, box.w - 16, 1), lm_rect_make(box.x + 8, box.y + box.h - 1, box.w - 16, 1),
+        lm_rect_make(box.x, box.y + 8, 1, box.h - 16), lm_rect_make(box.x + box.w - 1, box.y + 8, 1, box.h - 16),
+    };
+    for (int i = 0; i < 4; i++)
+        fill_rect(c, &edges[i], li->blocked ? COL_PANEL_DANGER : COL_PANEL_ACCENT);
+
+    if (li->nchars == 0 && !li->blocked) {
+        draw_text_centered(c, &box, li->pin ? "Enter PIN" : "Enter password", COL_PANEL_DIM);
+    } else {
+        int shown = LM_MIN(li->nchars, (box.w - 40) / 20);
+        int x = box.x + (box.w - shown * 20) / 2 + 4;
+        for (int i = 0; i < shown; i++) {
+            struct lm_rect dot = lm_rect_make(x + i * 20, box.y + box.h / 2 - 5, 10, 10);
+            fill_round(c, &dot, 5, 0xffe6e9efu);
+        }
+    }
+    struct lm_rect msg = lm_rect_make(o.x, box.y + box.h + 14, o.w, 20);
+    if (li->message[0])
+        draw_text_centered(c, &msg, li->message, COL_PANEL_DANGER);
+    else
+        draw_text_centered(c, &msg, "Enter unlocks, Esc clears", COL_PANEL_DIM);
+    struct lm_rect foot = lm_rect_make(o.x, o.y + o.h - 40, o.w, 20);
+    char tail[64];
+    snprintf(tail, sizeof(tail), "MellaGUI is locked%s%s", li->layout[0] ? "   Layout: " : "", li->layout);
+    draw_text_centered(c, &foot, tail, COL_PANEL_DIM);
+}
+
 /* Next line of at most `cols` code points from text[*pos]: whitespace runs become one space, leading blanks are
  * dropped. Returns true if text remains after the line. */
 static bool wrap_line(const char *text, size_t *pos, int cols, char *out, size_t outsz)
@@ -913,6 +979,8 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     fill_rect(c, &p->exit, ebg);
     draw_text_centered(c, &p->exit, p->exit_armed ? "Sure?" : "Exit", COL_PANEL_TEXT);
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
+    fill_rect(c, &p->lock, p->hover_lock ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    draw_text_centered(c, &p->lock, "Lock", COL_PANEL_TEXT);
 }
 
 /* ---- surface blitting ------------------------------------------------------------------------ */
@@ -1162,6 +1230,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_MENU:
         paint_menu(c, &item->u.menu);
+        break;
+    case LM_SCENE_LOCK:
+        if (item->output == c->out)
+            paint_lock(c, &item->u.lock);
         break;
     }
     return true;

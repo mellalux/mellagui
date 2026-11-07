@@ -33,6 +33,7 @@
 #define PANEL_WS_W 24
 #define PANEL_CLOCK_W 136                       /* "DD.MM.YYYY HH:MM" = 16 glyphs */
 #define PANEL_EXIT_W 52
+#define PANEL_LOCK_W 44                         /* "Lock", the rightmost button, right of the clock */
 #define PANEL_RUN_W 44
 #define PANEL_LAYOUT_W 36
 #define PANEL_STICKY_W 84
@@ -94,7 +95,7 @@ struct lm_wm {
     uint32_t hover_bits;
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
-    bool hover_exit, hover_run, hover_layout, hover_sticky;
+    bool hover_exit, hover_run, hover_layout, hover_sticky, hover_lock;
     bool menu_open;
     bool clip_nav;              /* keyboard mode of the clipboard gadget (Super+C): arrows move, Enter uses the entry */
     int clip_cur;               /* the highlighted entry while clip_nav */
@@ -199,7 +200,8 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
         p->workspace[i] = lm_rect_make(x, y, PANEL_WS_W, h);
         x += PANEL_WS_W + 2;
     }
-    p->clock = lm_rect_make(p->bar.x + p->bar.w - PANEL_CLOCK_W - 4, y, PANEL_CLOCK_W, h);
+    p->lock = lm_rect_make(p->bar.x + p->bar.w - PANEL_LOCK_W - 4, y, PANEL_LOCK_W, h);
+    p->clock = lm_rect_make(p->lock.x - 4 - PANEL_CLOCK_W, y, PANEL_CLOCK_W, h);
     p->exit = lm_rect_make(p->clock.x - 8 - PANEL_EXIT_W, y, PANEL_EXIT_W, h);
     p->run = lm_rect_make(p->exit.x - 4 - PANEL_RUN_W, y, PANEL_RUN_W, h);
     p->sticky = lm_rect_make(p->run.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
@@ -250,6 +252,7 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->hover_workspace = wm->hover_panel_ws;
     p->hover_launcher = wm->hover_launcher;
     p->hover_exit = wm->hover_exit;
+    p->hover_lock = wm->hover_lock;
     p->hover_run = wm->hover_run;
     p->exit_armed = wm->exit_armed;
     p->active_title = wm->focused ? wm->focused->title : "";
@@ -1339,6 +1342,23 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
     struct lm_scene_item it;
     struct lm_output *o;
 
+    if (lm_lock_active(wm->srv->lock)) {                         /* locked: nothing of the session may show */
+        if (wm->srv->backend) {
+            lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+                struct lm_rect orect = lm_output_rect(o);
+                if (clip && !lm_rect_overlaps(&orect, clip))
+                    continue;
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_LOCK;
+                it.output = o;
+                lm_lock_info(wm->srv->lock, o, &it.u.lock);
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+        return;
+    }
+
     if (wm->srv->backend) {
         lm_list_for_each(o, &wm->srv->backend->outputs, link) {
             struct lm_rect orect = lm_output_rect(o);
@@ -1660,6 +1680,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                 out->kind = LM_PICK_PANEL_RUN;
             if (lm_rect_contains(&pi.exit, ix, iy))
                 out->kind = LM_PICK_PANEL_EXIT;
+            if (lm_rect_contains(&pi.lock, ix, iy))
+                out->kind = LM_PICK_PANEL_LOCK;
             if (lm_rect_contains(&pi.layout, ix, iy))
                 out->kind = LM_PICK_PANEL_LAYOUT;
             if (lm_rect_contains(&pi.sticky, ix, iy))
@@ -1701,7 +1723,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool launcher = false, exit_btn = false, run_btn = false, layout_btn = false, sticky_btn = false;
+    bool launcher = false, exit_btn = false, run_btn = false, layout_btn = false, sticky_btn = false, lock_btn = false;
     int menu_item = -1;
     struct lm_window *task = NULL;
     enum lm_cursor_shape shape = LM_CURSOR_NONE;
@@ -1716,6 +1738,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_MENU_ITEM: menu_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_EXIT: exit_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_LOCK: lock_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
@@ -1740,7 +1763,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     }
     if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || exit_btn != wm->hover_exit ||
         run_btn != wm->hover_run || task != wm->hover_task || layout_btn != wm->hover_layout ||
-        sticky_btn != wm->hover_sticky) {
+        sticky_btn != wm->hover_sticky || lock_btn != wm->hover_lock) {
+        wm->hover_lock = lock_btn;
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
         wm->hover_run = run_btn;
@@ -2203,6 +2227,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             lm_input_cycle_layout(wm->srv->input, pi);
         if (pk == LM_PICK_PANEL_STICKY && pick->kind == LM_PICK_PANEL_STICKY && wm->srv->input)
             lm_input_set_sticky(wm->srv->input, !lm_input_sticky(wm->srv->input));
+        if (pk == LM_PICK_PANEL_LOCK && pick->kind == LM_PICK_PANEL_LOCK) {
+            if (!lm_lock_now(wm->srv->lock))                    /* no password / PIN yet: open the settings to set one */
+                launch_settings(wm);
+        }
         if (pk == LM_PICK_PANEL_EXIT && pick->kind == LM_PICK_PANEL_EXIT) {
             if (wm->exit_armed) {
                 lm_info("exit button confirmed, quitting");
@@ -2298,6 +2326,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         return true;
     case LM_PICK_PANEL_RUN:
+    case LM_PICK_PANEL_LOCK:
     case LM_PICK_PANEL_EXIT:
         if (button == BTN_LEFT) {
             wm->press_panel_kind = pick->kind;
@@ -2379,6 +2408,25 @@ static void cycle_focus(struct lm_wm *wm, bool backwards)
 void lm_wm_keyboard_state_changed(struct lm_wm *wm)
 {
     damage_panels(wm);
+}
+
+void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
+{
+    if (!wm)
+        return;
+    if (locked) {
+        menu_set(wm, false, NULL);
+        clip_nav_set(wm, false);
+        if (wm->focused)
+            lm_xdg_dismiss_popups(wm->focused->surface);
+    } else if (wm->srv->seat) {
+        struct lm_window *w = wm->focused ? wm->focused : top_visible(wm, NULL);
+        if (w && w != wm->focused)
+            set_focus(wm, w);
+        else if (w)
+            lm_seat_set_keyboard_focus(wm->srv->seat, w->surface);
+    }
+    damage_all(wm);
 }
 
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods)
@@ -2478,6 +2526,10 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
         break;
     case KEY_Q:
         if (pressed && !repeat && wm->focused) lm_wm_window_close(wm->focused);
+        break;
+    case KEY_L:                             /* Super+L: lock the screen (only when a password / PIN is set) */
+        if (pressed && !repeat && !lm_lock_now(wm->srv->lock))
+            lm_info("lock: Super+L ignored, no password or PIN is set (settings: Security)");
         break;
     case KEY_1: case KEY_2: case KEY_3: case KEY_4:
         if (pressed && !repeat) {

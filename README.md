@@ -83,12 +83,29 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Left / Super+Right    | tile window to the left / right half    |
 | Super+Up / Super+Down       | maximize / restore (un-maximize or un-tile) |
 | Super+Space (+Shift)        | next / previous keyboard layout         |
+| Super+L                     | lock the screen (needs a password / PIN, see below) |
 | Super+Shift+E               | quit MellaGUI                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
 Panel: *MellaGUI* (app menu: Terminal, Calculator, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
 add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
-(first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels).
+(first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels), the clock and, at the far right, the small *Lock* button.
+
+### Screen lock
+
+*Settings* → *Security* sets a password (8+ characters) or a PIN (4-12 digits), an idle time after which the screen locks by itself
+(0 = never) and "Lock when MellaGUI starts". **Super+L**, the panel's *Lock* button or the page's *Lock now* lock the screen; with no
+password set yet the button opens the settings instead. Type the secret and press Enter (Esc clears, Backspace deletes; Super+Space
+switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
+
+* The lock is part of the compositor: while it is on nothing of the session is drawn, no key or mouse event reaches any program and
+  no shortcut works (Super+Shift+E included).
+* Only a salted PBKDF2-HMAC-SHA256 hash (200000 rounds) is stored, in `~/.config/mellagui/lock.conf` (mode 0600; `--lock-file`).
+  Changing or removing the lock needs the current secret. Three wrong tries in a row start a delay that doubles from 5 s up to 5 minutes.
+* A forgotten secret cannot be reset from inside the session: log in another way (ssh, another console), delete `lock.conf` and restart MellaGUI.
+* What it does not do: it does not protect against someone who can log in as you on another console or over ssh, and a program running as
+  your user can read `lock.conf` and guess a short PIN offline. It is a screen lock against someone at the keyboard.
+
 
 Keyboard layouts and sticky keys: `--layouts us,ee,de,fi` (the default; up to four, the first is active at start; also `us,ee`
 etc.) selects what you can switch between with Super+Space, or with the panel indicator (left click next, right click previous).

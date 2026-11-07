@@ -23,6 +23,7 @@
 #include "render.h"
 #include "seat.h"
 #include "settings.h"
+#include "lock.h"
 #include "wm.h"
 
 #define CTL_MAX_CLIENTS 8
@@ -262,6 +263,27 @@ static void ctl_command(struct ctl_client *c, char *line)
             return;
         }
         ctl_reply(c, "ok %s\n", buf);
+    } else if (!strcmp(cmd, "lock")) {
+        /* lock                      -> "ok kind=.. locked=.. timeout=.. start=.. typed=.. fails=.. wait=.. status=.. message=.."
+         * lock now                  lock the screen ("err no lock set" when there is no password / PIN)
+         * lock set OLD KIND NEW [MINUTES [START]]   change the lock like the settings key `lock-set` (OLD, NEW without blanks;
+         *                           "-" = empty; KIND password|pin|keep|none) */
+        if (!srv->lock) { ctl_reply(c, "err no lock\n"); return; }
+        bool ok = true;
+        if (a1 && !strcmp(a1, "now")) {
+            ok = lm_lock_now(srv->lock);
+        } else if (a1 && !strcmp(a1, "set")) {
+            char *t[5] = { a2, a3, strtok_r(NULL, " \t", &save), NULL, NULL };
+            t[3] = t[2] ? strtok_r(NULL, " \t", &save) : NULL;
+            t[4] = t[3] ? strtok_r(NULL, " \t", &save) : NULL;
+            for (int i = 0; i < 5; i++)
+                if (t[i] && !strcmp(t[i], "-"))
+                    t[i] = (char *)"";
+            ok = t[0] && t[1] && t[2] && lm_lock_apply(srv->lock, t[0], t[1], t[2], t[3] ? t[3] : "", t[4] ? t[4] : "");
+        }
+        char buf[512];
+        lm_lock_describe(srv->lock, buf, sizeof(buf));
+        ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);
     } else if (!strcmp(cmd, "gadget")) {
         if (!a1 || !srv->wm) { ctl_reply(c, "err usage: gadget <0|1>\n"); return; }
         lm_wm_set_gadget(srv->wm, a1[0] == '1');

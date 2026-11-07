@@ -20,6 +20,7 @@
 #include "render.h"
 #include "seat.h"
 #include "settings.h"
+#include "lock.h"
 #include "server.h"
 #include "shm.h"
 #include "surface.h"
@@ -52,6 +53,8 @@ static const char *usage_text =
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/clipboard-history, headless: none)\n"
     "  --gadgets-file FILE      where the places and sizes of the desktop gadgets are kept between runs; \"none\" = nowhere\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/gadgets.conf, headless: none)\n"
+    "  --lock-file FILE         where the screen lock keeps its salted password / PIN hash (mode 0600); \"none\" = in memory only\n"
+    "                           (default drm: $XDG_CONFIG_HOME/mellagui/lock.conf, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
     "                           Super+Space / the panel indicator switch; with more than \"us\" right Alt is AltGr)\n"
     "  --sticky                 start with sticky keys on (also toggled by pressing Shift five times or the panel button)\n"
@@ -227,7 +230,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -247,6 +250,7 @@ int main(int argc, char **argv)
         { "settings", required_argument, 0, OPT_SETTINGS },
         { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
         { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
+        { "lock-file", required_argument, 0, OPT_LOCK_FILE },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
@@ -272,7 +276,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--backend=", 10))
             headless_arg = !strcmp(argv[i] + 10, "headless");
     }
-    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX];
+    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX], lock_buf[PATH_MAX];
     if (!headless_arg)
         migrate_old_config_dir();
     if (!settings_arg && !headless_arg) {
@@ -298,6 +302,12 @@ int main(int argc, char **argv)
             snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/.config/mellagui/gadgets.conf", home);
         if (gadgets_buf[0])
             cfg.gadgets_path = gadgets_buf;
+        if (xdg && *xdg)
+            snprintf(lock_buf, sizeof(lock_buf), "%s/mellagui/lock.conf", xdg);
+        else if (home && *home)
+            snprintf(lock_buf, sizeof(lock_buf), "%s/.config/mellagui/lock.conf", home);
+        if (lock_buf[0])
+            cfg.lock_path = lock_buf;
     }
     if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
         cfg.settings_path = settings_arg;
@@ -369,6 +379,7 @@ int main(int argc, char **argv)
         case OPT_SETTINGS: break;           /* handled above */
         case OPT_CLIPBOARD_FILE: cfg.clip_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_GADGETS_FILE: cfg.gadgets_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_LOCK_FILE: cfg.lock_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;
@@ -500,6 +511,7 @@ int main(int argc, char **argv)
         goto out;
     }
     lm_input_set_handler(srv->input, lm_seat_handle_input_cb, srv->seat);
+    srv->lock = lm_lock_create(srv);            /* with start=1 in lock.conf the screen is locked from the first frame */
     srv->dmabuf = lm_dmabuf_create(srv, cfg.dmabuf);
     srv->mixer = lm_mixer_create(loop, on_mixer_changed, srv);
     if (srv->mixer)
@@ -543,6 +555,8 @@ out:
     srv->mixer = NULL;
     if (srv->sysinfo) lm_sysinfo_destroy(srv->sysinfo);
     srv->sysinfo = NULL;
+    if (srv->lock) lm_lock_destroy(srv->lock);
+    srv->lock = NULL;
     if (srv->settings) lm_settings_destroy(srv->settings);
     srv->settings = NULL;
     if (srv->input) lm_input_destroy(srv->input);

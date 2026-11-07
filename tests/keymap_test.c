@@ -15,6 +15,7 @@
 #include "audio.h"
 #include "mixer.h"
 #include "sysinfo.h"
+#include "sha256.h"
 
 static int fails;
 
@@ -735,6 +736,44 @@ int main(void)
         CHECK(lm_sysinfo_read_temp(dir, &deg, label, sizeof(label)) && deg == 75, "no package label: the hottest input (%d)", deg);
         snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
         CHECK(system(cmd) == 0, "cleanup");
+    }
+
+    /* SHA-256, HMAC and PBKDF2 (the screen lock keeps the password only as a PBKDF2 hash): published test vectors */
+    {
+        uint8_t d[40];
+        char hex[2 * sizeof(d) + 1];
+        lm_sha256("abc", 3, d);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha256 abc: %s", hex);
+        lm_sha256("", 0, d);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "sha256 empty: %s", hex);
+        const char *two = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";    /* crosses a block boundary */
+        lm_sha256(two, strlen(two), d);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"), "sha256 448 bits: %s", hex);
+        uint8_t key[20];
+        memset(key, 0x0b, sizeof(key));
+        lm_hmac_sha256(key, sizeof(key), "Hi There", 8, d);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"), "hmac rfc4231 #1: %s", hex);
+        lm_pbkdf2_sha256("password", 8, "salt", 4, 1, d, 32);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"), "pbkdf2 1: %s", hex);
+        lm_pbkdf2_sha256("password", 8, "salt", 4, 2, d, 32);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"), "pbkdf2 2: %s", hex);
+        lm_pbkdf2_sha256("password", 8, "salt", 4, 4096, d, 32);
+        lm_hex_encode(d, 32, hex);
+        CHECK(!strcmp(hex, "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"), "pbkdf2 4096: %s", hex);
+        lm_pbkdf2_sha256("passwordPASSWORDpassword", 24, "saltSALTsaltSALTsaltSALTsaltSALTsalt", 36, 4096, d, 40);
+        lm_hex_encode(d, 40, hex);
+        CHECK(!strcmp(hex, "348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c4e2a1fb8dd53e1c635518c7dac47e9"), "pbkdf2 long: %s", hex);
+        uint8_t a[4] = { 1, 2, 3, 4 }, b[4] = { 1, 2, 3, 5 };
+        CHECK(lm_ct_equal(a, a, 4) && !lm_ct_equal(a, b, 4), "ct_equal");
+        uint8_t back[3];
+        CHECK(lm_hex_decode("00ff7A", back, 3) && back[0] == 0 && back[1] == 0xff && back[2] == 0x7a, "hex decode");
+        CHECK(!lm_hex_decode("00ff7", back, 3) && !lm_hex_decode("00ff7g", back, 3), "hex decode rejects bad input");
     }
 
     if (!fails)

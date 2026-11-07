@@ -28,6 +28,7 @@
 #include "protocol.h"
 #include "render.h"
 #include "seat.h"
+#include "lock.h"
 #include "server.h"
 #include "surface.h"
 #include "wm.h"
@@ -117,6 +118,7 @@ struct lm_seat {
     struct lm_global *seat_global;
     struct lm_global *ddm_global;
     bool dying;
+    bool locked;                        /* screen lock active: no input reaches clients (lm_seat_set_locked) */
 
     struct lm_list bindings;            /* struct seat_binding */
     struct lm_list pointers;            /* struct seat_pointer */
@@ -358,6 +360,10 @@ void lm_seat_get_cursor(const struct lm_seat *seat, struct lm_cursor *out)
     out->shape = LM_CURSOR_DEFAULT;
     if (!seat)
         return;
+    if (seat->locked) {
+        out->shape = LM_CURSOR_HIDDEN;
+        return;
+    }
     if (seat->override != LM_CURSOR_NONE) {
         out->shape = seat->override;
         return;
@@ -413,7 +419,7 @@ void lm_seat_pointer_set_focus(struct lm_seat *seat, struct lm_surface *s, doubl
 {
     if (!seat)
         return;
-    if (s && !s->resource)
+    if (s && (!s->resource || seat->locked))
         s = NULL;
     if (s == seat->pfocus) {
         if (s) {
@@ -742,7 +748,7 @@ void lm_seat_set_keyboard_focus(struct lm_seat *seat, struct lm_surface *s)
 {
     if (!seat)
         return;
-    if (s && !s->resource)
+    if (s && (!s->resource || seat->locked))
         s = NULL;
     if (s == seat->kfocus)
         return;
@@ -1888,11 +1894,66 @@ static void ddm_bind(struct lm_client *client, void *data, uint32_t version, uin
 
 /* ---- input entry point ---------------------------------------------------------------------------------------------- */
 
+/*
+ * Screen lock: keys go to the lock screen (and nowhere else, the wm's shortcuts included), everything else is dropped. The
+ * bookkeeping of pressed keys stays right so that a key released after the unlock does not confuse the clients.
+ */
+static void handle_locked_input(struct lm_seat *seat, const struct lm_input_event *ev)
+{
+    if (ev->type == LM_INPUT_MODS) {
+        keyboard_set_state(seat, ev->u.mods.depressed, ev->u.mods.latched, ev->u.mods.locked, ev->u.mods.group);
+        return;
+    }
+    if (ev->type != LM_INPUT_KEY)
+        return;
+    uint32_t code = ev->u.key.code;
+    if (ev->u.key.repeat)
+        return;
+    if (ev->u.key.pressed) {
+        code_add(seat->swallowed, &seat->n_swallowed, MAX_KEYS, code);     /* its release must not reach a client either */
+        uint32_t mods = ev->u.key.mods_depressed | ev->u.key.mods_latched | ev->u.key.mods_locked;
+        if (seat->srv->lock)
+            lm_lock_key(seat->srv->lock, code, mods, ev->u.key.group);
+    } else {
+        code_remove(seat->swallowed, &seat->n_swallowed, code);
+        code_remove(seat->keys_down, &seat->n_keys, code);
+    }
+    keyboard_set_state(seat, ev->u.key.mods_depressed, ev->u.key.mods_latched, ev->u.key.mods_locked, ev->u.key.group);
+}
+
+void lm_seat_set_locked(struct lm_seat *seat, bool locked)
+{
+    if (!seat || seat->locked == locked)
+        return;
+    seat->locked = locked;
+    if (locked) {
+        if (seat->grab) {
+            struct lm_pointer_grab *g = seat->grab;
+            seat->grab = NULL;
+            if (g->ops && g->ops->cancel)
+                g->ops->cancel(g);
+        }
+        seat->n_fwd = 0;                /* buttons held now are released while locked, nobody sees that */
+        lm_seat_pointer_set_focus(seat, NULL, 0, 0);
+        lm_seat_set_keyboard_focus(seat, NULL);
+        touch_cancel_all(seat, lm_now_msec32());
+    }
+    cursor_changed(seat);
+    if (!locked && seat->refocus_idle)
+        lm_idle_schedule(seat->refocus_idle);       /* the pointer finds the surface under it again */
+}
+
 void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
 {
     if (!seat || !ev || seat->dying)
         return;
+    if (seat->srv->lock)
+        lm_lock_activity(seat->srv->lock);
     ensure_pointer_pos(seat);
+    if (seat->locked) {
+        handle_locked_input(seat, ev);
+        return;
+    }
 
     switch (ev->type) {
     case LM_INPUT_KEY:

@@ -151,6 +151,7 @@ struct lm_config {
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
     const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
+    const char *lock_path;      /* file the screen lock's password / PIN hash is kept in (--lock-file); NULL = in memory only */
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "MellaGUI" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
@@ -230,6 +231,7 @@ struct lm_server {
     struct lm_wm *wm;
     struct lm_input *input;             /* evdev (or inject-only for headless) */
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
+    struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
     struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */
     struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */

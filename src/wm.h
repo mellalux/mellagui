@@ -56,6 +56,7 @@
  *   Super+F / Super+M  toggle fullscreen / maximize on focused window
  *   Super+Left/Right   tile the focused window to the left/right half of the usable area
  *   Super+Up / Down    maximize / restore (un-maximize, or un-tile back to the pre-tile geometry)
+ *   Super+L            lock the screen (lock.h; needs a password / PIN set in the settings, else nothing happens)
  *   Super+Shift+E      lm_server_quit
  *   Ctrl+Alt+F1..F12   lm_backend_switch_vt (works even with a grab)
  * Key codes are evdev (KEY_*), modifiers are LM_MOD_* bits.
@@ -65,6 +66,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "list.h"
+#include "lock.h"
 #include "server.h"
 #include "util.h"
 
@@ -252,6 +254,7 @@ enum lm_pick_kind {
     LM_PICK_MENU_ITEM,      /* app menu entry, `index` = config.apps[] index */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
     LM_PICK_PANEL_EXIT,     /* quit button (needs a second click to confirm) */
+    LM_PICK_PANEL_LOCK,     /* lock button right of the clock: locks the screen (opens the settings while no password / PIN is set) */
     LM_PICK_PANEL_LAYOUT,   /* keyboard layout indicator: left click = next layout, right click = previous */
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
@@ -303,6 +306,12 @@ bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out);
 /* The same for the clipboard gadget (the original single-gadget API). */
 bool lm_wm_gadget_visible(const struct lm_wm *wm);
 void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
+/*
+ * The screen lock turned on / off (lock.c). Locking closes the app menu, the clipboard navigation and the popups of the
+ * focused window; unlocking gives the keyboard focus back to the focused window. While locked the scene is only the lock
+ * screen (see lm_wm_scene_for_each).
+ */
+void lm_wm_lock_changed(struct lm_wm *wm, bool locked);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods);
 
@@ -344,6 +353,8 @@ struct lm_panel_info {
     char sticky_text[24];           /* "Sticky", or the latched (Sh) / locked (SH) modifiers */
     struct lm_rect run;             /* run-dialog button, left of the quit button */
     bool hover_run;
+    struct lm_rect lock;            /* lock button, the rightmost one (right of the clock) */
+    bool hover_lock;
     struct lm_rect exit;            /* quit button, left of the clock */
     bool hover_exit;
     bool exit_armed;                /* first click done: button shows "Sure?", the next click quits */
@@ -399,6 +410,7 @@ enum lm_scene_kind {
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_MENU,                  /* the open app menu (above the panel, below popups) */
+    LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
 
 struct lm_scene_item {
@@ -414,6 +426,7 @@ struct lm_scene_item {
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
         struct lm_menu_info menu;   /* LM_SCENE_MENU */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
+        struct lm_lock_info lock;   /* LM_SCENE_LOCK */
     } u;
 };
 
@@ -426,7 +439,8 @@ typedef bool (*lm_scene_fn)(const struct lm_scene_item *item, void *data);
  * in stacking order its FRAME then its SURFACE, then the panel(s), then all
  * popups (SURFACE with is_popup). Minimized windows and windows on other
  * workspaces are skipped. A fullscreen focused window hides the panel of its
- * output and covers it. The cursor is NOT part of the scene.
+ * output and covers it. The cursor is NOT part of the scene. While the screen
+ * is locked the scene is just one LM_SCENE_LOCK item per output.
  */
 void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip,
                           lm_scene_fn fn, void *data);

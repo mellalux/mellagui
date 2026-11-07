@@ -441,16 +441,16 @@ class TestWindows(Base):
     def test_panel_exit_needs_confirmation(self):
         idle = (0x2d, 0x3a, 0x5a)
         danger = (0xc0, 0x39, 0x2b)
-        ctl.click(849, 14)       # first click only arms the button
+        ctl.click(801, 14)       # first click only arms the button
         ctl.sync()
         self.assertTrue(alive())
         ppm = ctl.dump(os.path.join(tmp, 'exit1.ppm'))
-        self.assertEqual(ppm.px(828, 6), danger)
+        self.assertEqual(ppm.px(780, 6), danger)
         ctl.abs(500, 300)        # moving away cancels the confirmation
         ctl.sync()
         ppm = ctl.dump(os.path.join(tmp, 'exit2.ppm'))
-        self.assertEqual(ppm.px(828, 6), idle)
-        ctl.click(849, 14)       # armed again, still running
+        self.assertEqual(ppm.px(780, 6), idle)
+        ctl.click(801, 14)       # armed again, still running
         ctl.abs(500, 300)
         ctl.sync()
         self.assertTrue(alive())
@@ -469,10 +469,10 @@ class TestWindows(Base):
                     break
                 time.sleep(0.05)
             c2 = Ctl(os.path.join(d, 'ctl'))
-            c2.click(849, 14)
+            c2.click(801, 14)
             c2.sync()
             self.assertIsNone(p2.poll())
-            c2.click(849, 14)
+            c2.click(801, 14)
             self.assertEqual(p2.wait(timeout=5), 0)
         finally:
             if p2.poll() is None:
@@ -1308,8 +1308,8 @@ def type_text(text):
 
 class TestKeyboard(Base):
     """Keyboard layouts (XKB groups) and sticky keys."""
-    LAYOUT_BTN = (662, 14)          # panel indicator on the 1024 px wide test output
-    STICKY_BTN = (726, 14)
+    LAYOUT_BTN = (614, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (678, 14)
 
     def setUp(self):
         super().setUp()
@@ -1520,11 +1520,11 @@ class TestKeyboard(Base):
         ctl.cmd('sticky 1')
         ctl.sync()
         after = ctl.dump(os.path.join(tmp, 'kbd1.ppm'))
-        sticky_before = [before.px(x, 14) for x in range(765, 840, 3)]
-        sticky_after = [after.px(x, 14) for x in range(765, 840, 3)]
+        sticky_before = [before.px(x, 14) for x in range(717, 792, 3)]
+        sticky_after = [after.px(x, 14) for x in range(717, 792, 3)]
         self.assertNotEqual(sticky_before, sticky_after, 'sticky button looks the same when enabled')
-        layout_before = [before.px(x, 14) for x in range(722, 754, 2)]
-        layout_after = [after.px(x, 14) for x in range(722, 754, 2)]
+        layout_before = [before.px(x, 14) for x in range(674, 706, 2)]
+        layout_after = [after.px(x, 14) for x in range(674, 706, 2)]
         self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
@@ -1639,7 +1639,7 @@ class TestClients(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_run_dialog_from_panel_button(self):
-        self.run_dialog_runs(lambda: ctl.click(794, 14))
+        self.run_dialog_runs(lambda: ctl.click(746, 14))
 
     def test_run_dialog_from_super_r(self):
         def open_it():
@@ -1651,7 +1651,7 @@ class TestClients(Base):
     def test_run_dialog_escape_closes_without_running(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
             self.skipTest('mellagui-run not built')
-        ctl.click(794, 14)
+        ctl.click(746, 14)
         self.assertIsNotNone(wait_for_window('mellagui.run'))
         time.sleep(0.3)
         ctl.tap(KEY_ESC)
@@ -2492,13 +2492,51 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # wraps over the five page tabs (the heading is skipped) and reaches the gadget checkbox with the 8th press; Space toggles it
+        # wraps over the six page tabs (the heading is skipped) and reaches the gadget checkbox with the 9th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(8):
+        for _ in range(9):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
         self.assertEqual(settings()['gadget'], '0')
+
+    def test_panel_security_page_sets_and_removes_the_lock(self):
+        def lock_kind():
+            ctl.cmd('lock')
+            return ctl.last.split()[1]
+
+        def type_text(text):
+            for ch in text:
+                ctl.tap(TestLock.CODES[ch])
+            ctl.sync()
+            time.sleep(0.1)
+        self.assertEqual(lock_kind(), 'kind=none')
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 5 * 36 + 16)               # "Security" tab
+        time.sleep(0.2)
+        self.assertEqual(settings()['lock-kind'], 'none')
+        ctl.click(x0 + 300, y0 + 111)                           # New
+        type_text('hunter22x')
+        ctl.click(x0 + 300, y0 + 141)                           # Repeat: a different text is caught in the panel
+        type_text('hunter22y')
+        ctl.click(x0 + 204, y0 + 231)                            # Apply
+        time.sleep(0.2)
+        self.assertEqual(lock_kind(), 'kind=none')
+        ctl.click(x0 + 300, y0 + 141)
+        for _ in range(9):
+            ctl.tap(14)                                         # Backspace
+        type_text('hunter22x')
+        ctl.click(x0 + 204, y0 + 231)
+        time.sleep(0.3)
+        self.assertEqual(lock_kind(), 'kind=password')
+        self.assertEqual(settings()['lock-kind'], 'password')
+        # remove it again through the panel: the page now has a "Current password" field on top and a Remove button
+        ctl.click(x0 + 300, y0 + 83)                            # Current password
+        type_text('hunter22x')
+        ctl.click(x0 + 445, y0 + 261)                           # Remove lock
+        time.sleep(0.3)
+        self.assertEqual(lock_kind(), 'kind=none')
 
     def test_panel_desktop_page_has_the_mixer_checkbox(self):
         p, win = self.open_panel()
@@ -3441,6 +3479,235 @@ class TestOcclusion(Base):
         ctl.sync()
         after = ctl.dump(os.path.join(tmp, 'occ3b.ppm')).px(*pt)
         self.assertEqual(after, (0, 255, 0))                                   # the window that was below shows again
+
+
+class TestLock(Base):
+    """Screen lock (src/lock.c): password / PIN, delays, idle lock, panel button, nothing reaches clients while locked."""
+    ENV = {'MELLAGUI_LOCK_ITER': '1000', 'MELLAGUI_LOCK_DELAY_MS': '1500', 'MELLAGUI_LOCK_UNIT_MS': '1000'}
+    CODES = {c: k for k, c in enumerate('1234567890', 2)}
+    CODES.update({c: k for c, k in zip('qwertyuiop', range(16, 26))})
+    CODES.update({c: k for c, k in zip('asdfghjkl', range(30, 39))})
+    CODES.update({c: k for c, k in zip('zxcvbnm', range(44, 51))})
+    LOCK_BTN = (800 - 4 - 22, 14)       # the panel's Lock button on the 800 px wide private compositors
+
+    def start(self, name='lock', *extra, file=None, env=None):
+        args = ['--lock-file', file] if file else []
+        return self.private_compositor(name, *args, *extra, env=dict(self.ENV, **(env or {})))
+
+    @staticmethod
+    def state(c):
+        c.cmd('lock')
+        head, _, msg = c.last.partition(' message=')                      # the message holds blanks
+        st = dict(kv.split('=', 1) for kv in head.split()[1:])
+        st['message'] = msg
+        return st
+
+    def type(self, c, text, enter=True):
+        for ch in text:
+            c.tap(self.CODES[ch])
+        if enter:
+            c.tap(KEY_ENTER)
+        c.sync()
+
+    def keyboard_client(self, name):
+        cl = Client(os.path.join(tmp, name))
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        kb = cl.wl.new_id('wl_keyboard')
+        cl.wl.request(seat, 'get_keyboard', kb)
+        win = Window(cl, 300, 200)
+        cl.wl.roundtrip()
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'enter', 2.0), 'no keyboard enter')
+        cl.wl.queue.clear()
+        return cl, kb, win
+
+    def test_nothing_set_nothing_locks(self):
+        p, c, stop = self.start()
+        self.assertEqual(self.state(c)['kind'], 'none')
+        with self.assertRaises(RuntimeError):
+            c.cmd('lock now')
+        c.key(KEY_LEFTMETA, True)
+        c.tap(38)                                                          # Super+L
+        c.key(KEY_LEFTMETA, False)
+        self.assertEqual(self.state(c)['locked'], '0')
+
+    def test_choosing_a_secret(self):
+        path = os.path.join(tmp, 'lock-choose.conf')
+        p, c, stop = self.start('lock-choose', file=path)
+        for bad in ('- password short', '- password has\x01ctl12345', '- pin 123', '- pin 12a45', '- pin 1234567890123',
+                    '- other whatever1', '- keep - 5'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('lock set ' + bad)
+        self.assertFalse(os.path.exists(path))
+        c.cmd('lock set - password hunter22x')
+        st = self.state(c)
+        self.assertEqual((st['kind'], st['status']), ('password', 'ok'))
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), '0o600')
+        text = open(path).read()
+        self.assertNotIn('hunter22x', text)                                # only a salted hash is kept
+        for k in ('kind=password', 'iter=1000', 'salt=', 'hash='):
+            self.assertIn(k, text)
+        # changing it needs the current secret
+        with self.assertRaises(RuntimeError):
+            c.cmd('lock set wrongsecret pin 4321')
+        self.assertEqual(self.state(c)['status'], 'wrong')
+        self.assertEqual(self.state(c)['kind'], 'password')
+        c.cmd('lock set hunter22x pin 4321')
+        self.assertEqual(self.state(c)['kind'], 'pin')
+        self.assertNotIn('4321', open(path).read())
+        # turning it off needs it too, and removes the file
+        with self.assertRaises(RuntimeError):
+            c.cmd('lock set 0000 none -')
+        c.cmd('lock set 4321 none -')
+        self.assertEqual(self.state(c)['kind'], 'none')
+        self.assertFalse(os.path.exists(path))
+
+    def test_locked_screen_shows_nothing_and_sends_nothing(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - password hunter22x')
+        cl, kb, win = self.keyboard_client('lock')
+        c.cmd('lock now')
+        self.assertEqual(self.state(c)['locked'], '1')
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'leave', 2.0), 'focus not taken away')
+        # the window is not in the picture: the lock screen is
+        c.cmd('dump ' + os.path.join(tmp, 'locked.ppm'))
+        ppm = Ppm(os.path.join(tmp, 'locked.ppm'))
+        self.assertEqual(ppm.px(5, 5), (0x0b, 0x0d, 0x12))
+        self.assertEqual(ppm.px(790, 490), (0x0b, 0x0d, 0x12))
+        # typing, shortcuts, clicks go nowhere
+        cl.wl.queue.clear()
+        c.tap(KEY_A)
+        c.key(KEY_LEFTMETA, True); c.key(KEY_LEFTSHIFT, True); c.tap(18); c.key(KEY_LEFTSHIFT, False); c.key(KEY_LEFTMETA, False)  # Super+Shift+E
+        c.key(KEY_LEFTMETA, True); c.tap(KEY_ENTER); c.key(KEY_LEFTMETA, False)                                              # terminal
+        c.click(100, 100)
+        c.sync()
+        self.assertTrue(p.poll() is None, 'Super+Shift+E quit a locked compositor')
+        cl.wl.roundtrip()
+        self.assertEqual([e.name for e in cl.wl.queue if e.obj == kb and e.name in ('key', 'enter')], [])
+        self.assertEqual(self.state(c)['locked'], '1')
+        # wrong secret, then the right one
+        self.type(c, 'nottherightone')
+        st = self.state(c)
+        self.assertEqual((st['locked'], st['fails']), ('1', '1'))
+        self.assertEqual(st['message'], 'Wrong password.')
+        self.type(c, 'hunter22x')
+        self.assertEqual(self.state(c)['locked'], '0')
+        # the window has the keyboard again and nothing typed while locked arrives
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'enter', 2.0), 'focus not given back')
+        keys = [e for e in cl.wl.queue if e.obj == kb and e.name == 'key']
+        self.assertEqual(keys, [])
+        c.tap(KEY_A)
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'key' and e.args[2] == KEY_A, 2.0))
+
+    def test_a_pin_takes_digits_only_and_the_keypad_works(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 2468')
+        c.cmd('lock now')
+        self.type(c, 'a2b4c6d8')                                           # letters are not typed into a PIN
+        self.assertEqual(self.state(c)['locked'], '0')
+
+    def test_backspace_and_escape(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - password hunter22x')
+        c.cmd('lock now')
+        self.type(c, 'hunter22xy', enter=False)
+        self.assertEqual(self.state(c)['typed'], '10')
+        c.tap(14)                                                           # Backspace
+        self.assertEqual(self.state(c)['typed'], '9')
+        c.tap(KEY_ESC)
+        self.assertEqual(self.state(c)['typed'], '0')
+        self.type(c, 'hunter22xy', enter=False)
+        c.tap(14)
+        c.tap(KEY_ENTER)
+        c.sync()
+        self.assertEqual(self.state(c)['locked'], '0')
+
+    def test_delay_after_three_wrong_attempts(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - password hunter22x')
+        c.cmd('lock now')
+        for _ in range(3):
+            self.type(c, 'wrongwrong')
+        st = self.state(c)
+        self.assertEqual(st['fails'], '3')
+        self.assertGreaterEqual(int(st['wait']), 1)
+        self.type(c, 'hunter22x')                                           # right, but too early
+        self.assertEqual(self.state(c)['locked'], '1')
+        # the settings key is held back by the same delay
+        with self.assertRaises(RuntimeError):
+            c.cmd('lock set hunter22x none -')
+        time.sleep(2.2)
+        self.type(c, 'hunter22x')
+        self.assertEqual(self.state(c)['locked'], '0')
+
+    def test_super_l_and_the_panel_button_lock(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 1357')
+        c.key(KEY_LEFTMETA, True)
+        c.tap(38)
+        c.key(KEY_LEFTMETA, False)
+        c.sync()
+        self.assertEqual(self.state(c)['locked'], '1')
+        self.type(c, '1357')
+        self.assertEqual(self.state(c)['locked'], '0')
+        c.click(*self.LOCK_BTN)
+        c.sync()
+        self.assertEqual(self.state(c)['locked'], '1')
+
+    def test_idle_timeout_and_lock_at_start(self):
+        path = os.path.join(tmp, 'lock-idle.conf')
+        p, c, stop = self.start('lock-idle', file=path)
+        c.cmd('lock set - pin 1357 1 1')                                   # 1 "minute" (1 s here), lock at start
+        self.assertEqual(self.state(c)['timeout'], '1')
+        time.sleep(0.5)
+        c.tap(KEY_A)                                                        # activity restarts the idle time
+        time.sleep(0.7)
+        self.assertEqual(self.state(c)['locked'], '0')
+        deadline = time.time() + 5
+        while time.time() < deadline and self.state(c)['locked'] != '1':
+            time.sleep(0.2)
+        self.assertEqual(self.state(c)['locked'], '1', 'idle timeout did not lock')
+        stop()
+        # a new run with the same file starts locked, and 1357 opens it
+        p2, c2, stop2 = self.start('lock-idle2', file=path)
+        st = self.state(c2)
+        self.assertEqual((st['kind'], st['locked'], st['start'], st['timeout']), ('pin', '1', '1', '1'))
+        self.type(c2, '1357')
+        self.assertEqual(self.state(c2)['locked'], '0')
+
+    def test_settings_protocol_lock_set(self):
+        p, c, stop = self.start()
+        cl = Client(os.path.join(tmp, 'lock'))
+        self.clients.append(cl)
+        obj = cl.wl.bind('mellagui_settings_v1')
+        cl.wl.roundtrip()
+
+        def burst():
+            vals = {}
+            end = time.time() + 2
+            while time.time() < end:
+                cl.wl.pump(0.05)
+                for e in list(cl.wl.queue):
+                    if e.obj != obj:
+                        continue
+                    cl.wl.queue.remove(e)
+                    if e.name == 'value':
+                        vals[e.args[0]] = e.args[1]
+                    elif e.name == 'done':
+                        return vals
+            return None
+        first = burst()
+        self.assertEqual((first['lock-kind'], first['locked'], first['lock-set']), ('none', '0', ''))
+        cl.wl.request(obj, 'set', 'lock-set', '\tpassword\thunter22x\t5\t0')
+        got = burst()
+        self.assertEqual((got['lock-kind'], got['lock-status'], got['lock-timeout'], got['lock-set']), ('password', 'ok', '5', ''))
+        cl.wl.request(obj, 'set', 'lock-set', 'nope\tnone\t\t\t')
+        self.assertEqual(burst()['lock-status'], 'wrong')
+        cl.wl.request(obj, 'set', 'lock-now', '1')
+        self.assertEqual(burst()['locked'], '1')
+        cl.wl.request(obj, 'set', 'lock-set', 'hunter22x\tnone\t\t\t')      # the settings cannot be used to open the lock...
+        got = burst()                                                       # ... but whoever knows the secret may remove the lock,
+        self.assertEqual((got['lock-kind'], got['locked']), ('none', '0'))  # and a lock without a secret cannot stay locked
 
 
 if __name__ == '__main__':

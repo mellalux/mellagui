@@ -36,6 +36,15 @@
  *                                              (this is how HDMI audio is chosen); the sink list is refreshed 1-3 s later
  *   sinks-status    ""|ok|missing-tools|no-server  why `sinks` is empty: no pactl/wpctl installed, or no server answers (read only)
  *   audio-rescan    (write only)               any value: ask pactl again (the panel does when its Sound page opens)
+ *   lock-kind       none | password | pin      screen lock (lock.h); its own file lock.conf, not this one (read only)
+ *   lock-timeout    minutes, 0 = never         lock after this much idle time (read only; change with lock-set)
+ *   lock-start      0 | 1                      lock when MellaGUI starts (read only; change with lock-set)
+ *   lock-status     ""|ok|wrong|wait:N|weak|invalid|error   result of the last lock-set (read only)
+ *   lock-set        (write only)               "current<TAB>kind<TAB>new<TAB>minutes<TAB>start": change the lock; `current` must be
+ *                                              the existing secret (ignored while none is set), kind = password|pin|keep|none,
+ *                                              empty minutes / start = keep. Never echoed, never logged
+ *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
+ *   locked          0 | 1                      the screen is locked now (read only)
  *
  * Protocol: the client sends `set(key, value)`; the compositor validates it, applies it, and answers every bound
  * client with one `value` event per key (the effective values, so a rejected change shows up as the old value)

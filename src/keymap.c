@@ -331,6 +331,22 @@ void lm_keymap_client_group(uint32_t group)
     client_group = group;
 }
 
+void lm_keymap_set_groups(const int *ids, int n)
+{
+    int map[LM_KBD_MAX_LAYOUTS] = { 0 };
+    if (n > LM_KBD_MAX_LAYOUTS)
+        n = LM_KBD_MAX_LAYOUTS;
+    if (!ids || n < 1) {
+        client_ngroups = 1;
+        memcpy(client_group_layout, map, sizeof(map));
+        return;
+    }
+    for (int i = 0; i < n; i++)
+        map[i] = ids[i] >= 0 && ids[i] < N_LAYOUTS ? ids[i] : 0;
+    memcpy(client_group_layout, map, sizeof(map));
+    client_ngroups = n;
+}
+
 uint32_t lm_keymap_keysym(uint32_t code, uint32_t mods)
 {
     if (code >= 59 && code <= 68)

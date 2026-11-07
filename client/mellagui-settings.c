@@ -4,6 +4,7 @@
  *   Keyboard   layouts (enable, order, active), sticky keys, key repeat delay / rate, a field to try the keyboard
  *   Pointer    pointer speed, natural scrolling
  *   Desktop    clipboard gadget, sound feedback
+ *   Security   screen lock: password or PIN, lock after idle minutes, lock at start, "Lock now" (src/lock.h)
  *
  * Mouse: click checkboxes / radio buttons / buttons, drag the sliders. Keyboard: Tab / Shift+Tab move the focus,
  * Enter or Space activates, Left/Right change a slider, Esc closes. Every change is sent to the compositor at once,
@@ -25,6 +26,7 @@
 
 #include "font.h"
 #include "keymap.h"
+#include "lock.h"
 #include "util.h"
 #include "wlwin.h"
 
@@ -158,6 +160,57 @@ static void mode_label(const char *mode, const char *note, char *out, size_t n)
     snprintf(out, n, "%d x %d   %d Hz%s%s%s", w, h, hz, *note ? "   (" : "", note, *note ? ")" : "");
 }
 
+/* What the compositor's `lock-status` means to the user. */
+static const char *lock_status_text(const char *st, char *buf, size_t n)
+{
+    if (!strcmp(st, "ok"))
+        return "Saved.";
+    if (!strcmp(st, "wrong"))
+        return "The current password / PIN is wrong.";
+    if (!strncmp(st, "wait:", 5)) {
+        snprintf(buf, n, "Too many wrong tries. Wait %s s.", st + 5);
+        return buf;
+    }
+    if (!strcmp(st, "weak"))
+        return "Password: 8 or more characters. PIN: 4 to 12 digits.";
+    if (!strcmp(st, "invalid"))
+        return "That combination is not possible.";
+    if (!strcmp(st, "error"))
+        return "Could not save the lock (see the log).";
+    return "";
+}
+
+/* The `lock-set` value: "current<TAB>kind<TAB>new<TAB>minutes<TAB>start". kind is keep when no new secret is typed. */
+static void lock_set_value(char *out, size_t n, const char *cur, const char *kind, const char *fresh, int minutes, bool start)
+{
+    snprintf(out, n, "%s\t%s\t%s\t%d\t%d", cur, kind, fresh, minutes, start ? 1 : 0);
+}
+
+/* Appends one typed character / removes the last one in a UTF-8 buffer of `cap` bytes. */
+static void edit_text(char *buf, size_t cap, uint32_t ks, bool plain)
+{
+    size_t len = strlen(buf);
+    char txt[8];
+    if (ks == LM_KS_BackSpace) {
+        while (len > 0 && (buf[len - 1] & 0xc0) == 0x80)
+            len--;
+        if (len > 0)
+            len--;
+        buf[len] = 0;
+    } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && len + strlen(txt) < cap) {
+        memcpy(buf + len, txt, strlen(txt) + 1);
+    }
+}
+
+static int utf8_count(const char *s)
+{
+    int n = 0;
+    for (; *s; s++)
+        if (((unsigned char)*s & 0xc0) != 0x80)
+            n++;
+    return n;
+}
+
 static int selftest_fail;
 
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "selftest: %s:%d: %s\n", __FILE__, __LINE__, #cond); selftest_fail++; } } while (0)
@@ -217,6 +270,26 @@ static int selftest(void)
         mode_label("2048x858@60", "", label, sizeof(label));
         CHECK(!strcmp(label, "2048 x 858   60 Hz"));
     }
+    {
+        char b[64], v[256], t[16] = "";
+        CHECK(!strcmp(lock_status_text("ok", b, sizeof(b)), "Saved."));
+        CHECK(strstr(lock_status_text("wait:25", b, sizeof(b)), "25 s"));
+        CHECK(*lock_status_text("", b, sizeof(b)) == 0 && *lock_status_text("weird", b, sizeof(b)) == 0);
+        lock_set_value(v, sizeof(v), "old", "password", "new pass", 10, true);
+        CHECK(!strcmp(v, "old\tpassword\tnew pass\t10\t1"));
+        lock_set_value(v, sizeof(v), "", "keep", "", 0, false);
+        CHECK(!strcmp(v, "\tkeep\t\t0\t0"));
+        edit_text(t, sizeof(t), 'a', true);
+        edit_text(t, sizeof(t), 0xf5, true);                 /* o with tilde: two bytes */
+        CHECK(utf8_count(t) == 2 && strlen(t) == 3);
+        edit_text(t, sizeof(t), LM_KS_BackSpace, true);
+        CHECK(!strcmp(t, "a"));
+        edit_text(t, sizeof(t), 'b', false);                 /* not plain (Ctrl held): ignored */
+        CHECK(!strcmp(t, "a"));
+        for (int i = 0; i < 40; i++)
+            edit_text(t, sizeof(t), 'x', true);
+        CHECK(strlen(t) == sizeof(t) - 1);
+    }
     if (selftest_fail)
         return 1;
     puts("mellagui-settings selftest ok");
@@ -242,10 +315,10 @@ static int selftest(void)
 #define MAX_KV 48
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security" };
 
-enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT };
+enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS };
 
 struct rect { int x, y, w, h; };
 
@@ -274,6 +347,12 @@ struct app {
     int nw;
     int hover, press, drag, focus;      /* widget indexes, -1 none */
     char test[64];                      /* text typed into the "try it" field */
+    /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
+    char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
+    bool sec_pin;                       /* the new secret is a PIN (else a password) */
+    int sec_minutes;                    /* idle minutes (0 = never) */
+    bool sec_start;                     /* lock when MellaGUI starts */
+    char sec_err[64];                   /* a mistake found before sending */
 };
 
 static const char *kv_get(const struct app *a, const char *k)
@@ -401,6 +480,66 @@ static void build_keyboard(struct app *a, int x, int y, int w)
     add_slider(a, x, y, w, "Repeat rate", "repeat-rate", 1, 60, 1, "/s");
     y += ROW_H + 8;
     add(a, W_TEXT, (struct rect){ x, y, w, 48 }, "Try it:");
+}
+
+static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on);
+
+/* A password field: label on the left, the masked field on the right; `field` indexes a->pw. */
+static void add_pass(struct app *a, int x, int y, int w, const char *label, int field)
+{
+    struct widget *p = add(a, W_PASS, (struct rect){ x, y, w, ROW_H }, label);
+    snprintf(p->key, sizeof(p->key), "pw");
+    snprintf(p->arg, sizeof(p->arg), "%d", field);
+}
+
+static struct widget *add_button(struct app *a, int x, int y, int w, const char *text, const char *key)
+{
+    struct widget *b = add(a, W_BUTTON, (struct rect){ x, y, w, ROW_H - 4 }, text);
+    snprintf(b->key, sizeof(b->key), "%s", key);
+    return b;
+}
+
+static void build_security(struct app *a, int x, int y, int w)
+{
+    const char *kind = kv_get(a, "lock-kind");
+    bool have = *kind && strcmp(kind, "none");
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Screen lock");
+    y += ROW_H;
+    char line[96];
+    if (kv_int(a, "locked", 0))
+        snprintf(line, sizeof(line), "The screen is locked.");
+    else if (have)
+        snprintf(line, sizeof(line), "Lock is on (%s). Super+L locks the screen.", kind);
+    else
+        snprintf(line, sizeof(line), "No lock yet. Choose a password or PIN below.");
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, line);
+    y += ROW_H;
+    if (have) {
+        add_pass(a, x, y, w, !strcmp(kind, "pin") ? "Current PIN" : "Current password", 0);
+        y += ROW_H + 2;
+    }
+    add_radio(a, x, y, 150, "Password", "sec-kind", "password", !a->sec_pin);
+    add_radio(a, x + 160, y, 150, "PIN", "sec-kind", "pin", a->sec_pin);
+    y += ROW_H;
+    add_pass(a, x, y, w, have ? "New (empty = keep)" : "New", 1);
+    y += ROW_H + 2;
+    add_pass(a, x, y, w, "Repeat", 2);
+    y += ROW_H + 4;
+    add_slider(a, x, y, w, "Lock after idle", "sec-minutes", 0, 120, 1, " min");
+    a->wd[a->nw - 1].val = a->sec_minutes;
+    y += ROW_H;
+    add_check(a, x, y, w, "Lock when MellaGUI starts", "sec-start", a->sec_start);
+    y += ROW_H + 4;
+    add_button(a, x, y, 90, "Apply", "sec-apply");
+    if (have) {
+        add_button(a, x + 100, y, 110, "Lock now", "sec-lock");
+        add_button(a, x + 220, y, 130, "Remove lock", "sec-remove");
+    }
+    y += ROW_H + 2;
+    char buf[80];
+    const char *msg = a->sec_err[0] ? a->sec_err : lock_status_text(kv_get(a, "lock-status"), buf, sizeof(buf));
+    if (*msg)
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, msg);
 }
 
 static void build_pointer(struct app *a, int x, int y, int w)
@@ -576,6 +715,7 @@ static void build(struct app *a)
     case PAGE_POINTER: build_pointer(a, x, y, w); break;
     case PAGE_DISPLAY: build_display(a, x, y, w); break;
     case PAGE_SOUND: build_sound(a, x, y, w); break;
+    case PAGE_SECURITY: build_security(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -606,13 +746,24 @@ static int widget_at(const struct app *a, double x, double y)
 
 /* ---- actions ------------------------------------------------------------------------------------------------ */
 
+/* A slider changed: the Security form keeps its value until "Apply", the others go to the compositor at once. */
+static void slider_set(struct app *a, const struct widget *w, int v)
+{
+    if (!strcmp(w->key, "sec-minutes")) {
+        a->sec_minutes = v;
+        a->win.redraw = true;
+    } else {
+        send_set_int(a, w->key, v);
+    }
+}
+
 static void slider_drag_to(struct app *a, int idx, double x)
 {
     const struct widget *w = &a->wd[idx];
     struct rect t = slider_track(w);
     int v = slider_value(w->lo, w->hi, w->step, (x - t.x) / (double)t.w);
     if (v != w->val)
-        send_set_int(a, w->key, v);
+        slider_set(a, w, v);
 }
 
 /* Starts another MellaGUI program next to this one (the monitor panel); it is not waited for. */
@@ -637,6 +788,32 @@ static void launch_sibling(const char *name)
     _exit(127);
 }
 
+static void sec_wipe(struct app *a)
+{
+    memset(a->pw, 0, sizeof(a->pw));
+    a->sec_err[0] = 0;
+}
+
+/* "Apply" / "Remove lock": send the form in one `lock-set`, then forget the typed secrets. */
+static void sec_send(struct app *a, bool remove)
+{
+    bool have = strcmp(kv_get(a, "lock-kind"), "none") != 0 && *kv_get(a, "lock-kind");
+    char v[3 * LM_LOCK_MAX_SECRET + 64];
+    a->sec_err[0] = 0;
+    if (!remove && strcmp(a->pw[1], a->pw[2])) {
+        snprintf(a->sec_err, sizeof(a->sec_err), "The two new entries differ.");
+    } else if (!remove && !have && !a->pw[1][0]) {
+        snprintf(a->sec_err, sizeof(a->sec_err), "Type the new password / PIN first.");
+    } else {
+        const char *kind = remove ? "none" : a->pw[1][0] ? (a->sec_pin ? "pin" : "password") : "keep";
+        lock_set_value(v, sizeof(v), have ? a->pw[0] : "", kind, remove ? "" : a->pw[1], a->sec_minutes, a->sec_start);
+        send_set(a, "lock-set", v);
+        memset(v, 0, sizeof(v));
+        memset(a->pw, 0, sizeof(a->pw));
+    }
+    a->win.redraw = true;
+}
+
 static void activate(struct app *a, int idx)
 {
     const struct widget *w = &a->wd[idx];
@@ -649,9 +826,16 @@ static void activate(struct app *a, int idx)
         a->win.redraw = true;
         if (a->page == PAGE_SOUND)
             send_set(a, "audio-rescan", "1");           /* ask `pactl` again: devices come and go */
+        if (a->page == PAGE_SECURITY) {
+            sec_wipe(a);
+            a->sec_minutes = kv_int(a, "lock-timeout", 0);
+            a->sec_start = kv_int(a, "lock-start", 0) != 0;
+        }
         break;
     case W_CHECK:
-        if (!strcmp(w->key, "layout-enable")) {
+        if (!strcmp(w->key, "sec-start")) {
+            a->sec_start = !a->sec_start;
+        } else if (!strcmp(w->key, "layout-enable")) {
             idlist_parse(&l, kv_get(a, "layouts"));
             if (idlist_toggle(&l, w->arg)) {
                 idlist_format(&l, buf, sizeof(buf));
@@ -662,10 +846,17 @@ static void activate(struct app *a, int idx)
         }
         break;
     case W_RADIO:
-        send_set(a, w->key, w->arg);
+        if (!strcmp(w->key, "sec-kind"))
+            a->sec_pin = !strcmp(w->arg, "pin");
+        else
+            send_set(a, w->key, w->arg);
         break;
     case W_BUTTON:
-        if (!strcmp(w->key, "launch")) {
+        if (!strcmp(w->key, "sec-apply") || !strcmp(w->key, "sec-remove")) {
+            sec_send(a, !strcmp(w->key, "sec-remove"));
+        } else if (!strcmp(w->key, "sec-lock")) {
+            send_set(a, "lock-now", "1");
+        } else if (!strcmp(w->key, "launch")) {
             launch_sibling(w->arg);
         } else if (!strcmp(w->key, "resolution-confirm")) {
             send_set(a, w->key, w->arg);
@@ -784,6 +975,22 @@ static void paint_widget(struct app *a, int idx)
         draw_text(a, t.x + t.w + 12, text_y(r), v, COL_DIM, 0);
         break;
     }
+    case W_PASS: {
+        draw_text(a, r->x, text_y(r), w->text, COL_TEXT, 170);
+        struct rect f = { r->x + 180, r->y + 2, LM_MAX(r->w - 180, 60), r->h - 4 };
+        fill(a, f, COL_FIELD);
+        outline(a, f, focus ? COL_ACCENT : COL_KEY);
+        char dots[LM_LOCK_MAX_SECRET + 3];
+        int n = LM_MIN(utf8_count(a->pw[atoi(w->arg)]), (int)sizeof(dots) - 3);
+        memset(dots, '*', (size_t)n);
+        dots[n] = 0;
+        if (focus) {
+            dots[n] = '_';
+            dots[n + 1] = 0;
+        }
+        draw_text(a, f.x + 6, f.y + (f.h - LM_FONT_H) / 2, dots, COL_TEXT, f.w - 12);
+        break;
+    }
     case W_TEXT: {
         draw_text(a, r->x, r->y + 2, w->text, COL_DIM, r->w);
         struct rect f = { r->x, r->y + 20, r->w, 28 };
@@ -823,7 +1030,12 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     (void)c; (void)id;
     struct app *a = data;
     if (op == LM_MELLAGUI_SETTINGS_V1_EVT_VALUE) {
+        bool changed = strcmp(kv_get(a, args[0].s), args[1].s) != 0;
         kv_set(a, args[0].s, args[1].s);
+        if (changed && !strcmp(args[0].s, "lock-timeout"))
+            a->sec_minutes = atoi(args[1].s);
+        else if (changed && !strcmp(args[0].s, "lock-start"))
+            a->sec_start = atoi(args[1].s) != 0;
     } else if (op == LM_MELLAGUI_SETTINGS_V1_EVT_DONE) {
         a->win.redraw = true;
     }
@@ -893,6 +1105,14 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             a->win.running = false;
         } else if (ks == LM_KS_Tab) {
             move_focus(a, (a->win.mods & LM_MOD_SHIFT) ? -1 : 1);
+        } else if (f && f->kind == W_PASS) {
+            if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+                sec_send(a, false);
+            } else {
+                edit_text(a->pw[atoi(f->arg)], sizeof(a->pw[0]), ks, plain);
+                a->sec_err[0] = 0;
+            }
+            a->win.redraw = true;
         } else if (f && f->kind == W_TEXT) {
             size_t len = strlen(a->test);
             char txt[8];
@@ -909,7 +1129,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         } else if (f && f->kind == W_SLIDER && (ks == LM_KS_Left || ks == LM_KS_Right)) {
             int v = LM_MAX(f->lo, LM_MIN(f->hi, f->val + (ks == LM_KS_Right ? f->step : -f->step)));
             if (v != f->val)
-                send_set_int(a, f->key, v);
+                slider_set(a, f, v);
         } else if (f && (ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == ' ')) {
             activate(a, a->focus);
         } else if (!f && (ks == LM_KS_Down || ks == LM_KS_Right)) {
@@ -945,6 +1165,10 @@ static int cli(struct app *a, int argc, char **argv)
                 return 2;
             }
             *eq = 0;
+            if (!strcmp(argv[i], "lock-set")) {
+                fprintf(stderr, "mellagui-settings: set the lock in the panel (a secret on a command line shows up in ps)\n");
+                return 2;
+            }
             send_set(a, argv[i], eq + 1);
             if (wlc_roundtrip(a->win.c) < 0)
                 return 1;

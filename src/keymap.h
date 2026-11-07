@@ -64,6 +64,9 @@ char *lm_keymap_build(const int *layouts, int n);
 void lm_keymap_client_load(int fd, uint32_t size);
 /* Handle the `group` argument of wl_keyboard.modifiers. */
 void lm_keymap_client_group(uint32_t group);
+/* The same without a keymap file, for code that knows the configured layouts (the compositor's lock screen): XKB group i
+ * is layouts[i] (lm_layout_*() indices); n < 1 means just "us". */
+void lm_keymap_set_groups(const int *layouts, int n);
 /*
  * Level-resolved keysym for an evdev code under the given LM_MOD_* mask and the current group (Shift, Caps Lock
  * for letters, AltGr for the third/fourth level, NumLock for the keypad). 0 = no symbol. Before a keymap has been

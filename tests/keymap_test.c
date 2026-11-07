@@ -177,6 +177,32 @@ int main(void)
         bad[10] ^= 1;
         CHECK(lm_ddc_parse_get(bad, sizeof(bad), 0x10, &v) == LM_DDC_BAD, "ddc reply with a wrong checksum");
         CHECK(lm_ddc_parse_get(ok, 5, 0x10, &v) == LM_DDC_BAD, "ddc short reply");
+        /* capabilities: the string a Dell U4025QW sent (shortened), and a chunk reply */
+        static const char caps[] = "(prot(monitor)type(LCD)model(U4025QW)cmds(01 02 03 07 0C E3 F3)vcp(02 04 10 12 14(01 04 05 06 08 09 0B 0C) 16 60(19 0F 11 ) 62 66(00F2) AC D6(01 04 05) DC(00 03 05 ))mswhql(1)mccs_ver(2.1))";
+        int vals[16];
+        CHECK(lm_ddc_caps_has(caps, 0x10) && lm_ddc_caps_has(caps, 0x62) && lm_ddc_caps_has(caps, 0xac) && lm_ddc_caps_has(caps, 0xd6),
+              "caps: brightness, volume ... listed");
+        CHECK(!lm_ddc_caps_has(caps, 0x8d) && !lm_ddc_caps_has(caps, 0x11) && !lm_ddc_caps_has(caps, 0x01), "caps: mute is not listed");
+        int n = lm_ddc_caps_values(caps, 0x60, vals, 16);
+        CHECK(n == 3 && vals[0] == 0x19 && vals[1] == 0x0f && vals[2] == 0x11, "caps: input values %d: %x %x %x", n, vals[0], vals[1], vals[2]);
+        n = lm_ddc_caps_values(caps, 0x14, vals, 16);
+        CHECK(n == 8 && vals[0] == 1 && vals[7] == 0x0c, "caps: preset values %d", n);
+        CHECK(lm_ddc_caps_values(caps, 0x10, vals, 16) == 0 && lm_ddc_caps_values(caps, 0x99, vals, 16) == 0, "caps: no value list");
+        CHECK(!lm_ddc_caps_has("", 0x10) && !lm_ddc_caps_has(NULL, 0x10) && !lm_ddc_caps_has("(prot(monitor))", 0x10), "caps: nothing to find");
+        {
+            uint8_t chunk[16] = { 0x6e, 0x80 | 8, 0xe3, 0x00, 0x20, '(', 'p', 'r', 'o', 't' }, req6[6];
+            uint8_t ck = 0x50;
+            for (int i = 0; i < 10; i++)
+                ck ^= chunk[i];
+            chunk[10] = ck;
+            char data[40];
+            CHECK(lm_ddc_parse_caps(chunk, 11, 0x20, data, sizeof(data)) == 5 && !memcmp(data, "(prot", 5), "caps chunk");
+            CHECK(lm_ddc_parse_caps(chunk, 11, 0x40, data, sizeof(data)) == -1, "caps chunk at another offset");
+            chunk[10] ^= 1;
+            CHECK(lm_ddc_parse_caps(chunk, 11, 0x20, data, sizeof(data)) == -1, "caps chunk with a wrong checksum");
+            CHECK(lm_ddc_build_caps(0x20, req6) == 6 && req6[1] == 0x83 && req6[2] == 0xf3 && req6[3] == 0 && req6[4] == 0x20 &&
+                  req6[5] == (uint8_t)(0x6e ^ 0x51 ^ 0x83 ^ 0xf3 ^ 0x20), "caps request");
+        }
         static const uint8_t unsup[11] = { 0x6e, 0x88, 0x02, 0x01, 0x99, 0, 0, 0, 0, 0, 0x2c };
         CHECK(lm_ddc_parse_get(unsup, sizeof(unsup), 0x99, &v) == LM_DDC_UNSUPPORTED, "ddc unsupported feature");
     }

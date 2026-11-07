@@ -50,14 +50,19 @@ static const struct { uint8_t code; const char *name; } CTL[NCTL] = {
     { LM_VCP_MUTE, "Mute" }, { LM_VCP_INPUT, "Input" }, { LM_VCP_PRESET, "Colour" }, { LM_VCP_POWER, "Power" },
 };
 
-static const struct { int value; const char *name; } INPUTS[] = {
+/* Names of the values (MCCS); the first entries are what is offered when the monitor does not list its own values. */
+struct vname { int value; const char *name; };
+static const struct vname INPUTS[] = {
     { 0x01, "VGA" }, { 0x03, "DVI" }, { 0x0f, "DisplayPort 1" }, { 0x10, "DisplayPort 2" }, { 0x11, "HDMI 1" }, { 0x12, "HDMI 2" },
+    { 0x02, "VGA 2" }, { 0x04, "DVI 2" }, { 0x13, "HDMI 3" }, { 0x19, "USB-C" },
 };
-static const struct { int value; const char *name; } PRESETS[] = {
+static const struct vname PRESETS[] = {
     { 0x01, "sRGB" }, { 0x02, "Native" }, { 0x04, "5000 K" }, { 0x05, "6500 K" }, { 0x06, "7500 K" }, { 0x08, "9300 K" }, { 0x0b, "User 1" },
+    { 0x03, "4000 K" }, { 0x07, "8200 K" }, { 0x09, "10000 K" }, { 0x0a, "11500 K" }, { 0x0c, "User 2" }, { 0x0d, "User 3" },
 };
-#define N_INPUTS ((int)(sizeof(INPUTS) / sizeof(INPUTS[0])))
-#define N_PRESETS ((int)(sizeof(PRESETS) / sizeof(PRESETS[0])))
+#define N_INPUTS_DEFAULT 6
+#define N_PRESETS_DEFAULT 7
+#define MAX_VALUES 16
 
 enum backend { B_DDC, B_BACKLIGHT, B_FAKE };
 
@@ -75,6 +80,11 @@ struct mon {
     char err[160];              /* what went wrong (shown in red) */
     struct control c[NCTL];
     int probed;                 /* controls read so far (NCTL = done) */
+    bool caps_done;             /* the capabilities string was asked for (DDC) */
+    char caps[1200];            /* what the monitor says it has ("" = it did not tell: every control is tried) */
+    int in_vals[MAX_VALUES], n_in;      /* inputs / colour presets the monitor lists for itself (0 = not listed) */
+    int pre_vals[MAX_VALUES], n_pre;
+    int saved_volume;           /* volume before a software mute (a monitor without a mute feature is silenced with volume 0) */
 };
 
 static struct mon mons[MAX_MON];
@@ -249,6 +259,21 @@ static void discover(void)
 
 /* ---- reading and writing ------------------------------------------------------------------------------------------ */
 
+/* Asks a DDC monitor what it really has (a second or two). The answers to single reads cannot be trusted: a monitor
+ * without a mute feature still "supports" it with nonsense values. */
+static void probe_caps(struct mon *m)
+{
+    if (m->caps_done)
+        return;
+    m->caps_done = true;
+    if (m->kind != B_DDC || m->fd < 0)
+        return;
+    if (!lm_ddc_capabilities(m->fd, m->caps, sizeof(m->caps)))
+        m->caps[0] = 0;
+    m->n_in = lm_ddc_caps_values(m->caps, LM_VCP_INPUT, m->in_vals, MAX_VALUES);
+    m->n_pre = lm_ddc_caps_values(m->caps, LM_VCP_PRESET, m->pre_vals, MAX_VALUES);
+}
+
 /* Reads control `i` of `m`; sets m->c[i].ok. */
 static void probe_one(struct mon *m, int i)
 {
@@ -266,8 +291,10 @@ static void probe_one(struct mon *m, int i)
     }
     if (m->kind != B_DDC || m->fd < 0)
         return;
+    if (m->caps[0] && !lm_ddc_caps_has(m->caps, CTL[i].code))
+        return;                                                     /* the monitor does not list it: it is not there */
     struct lm_ddc_vcp v;
-    if (lm_ddc_get(m->fd, CTL[i].code, &v) && v.max > 0) {
+    if (lm_ddc_get(m->fd, CTL[i].code, &v) && v.max > 0 && (i != C_MUTE || v.cur == 1 || v.cur == 2)) {
         c->ok = true;
         c->max = v.max;
         c->cur = v.cur;
@@ -310,13 +337,43 @@ static bool set_control(struct mon *m, int i, int value)
     return ok;
 }
 
+/* Mute: the monitor's own feature (1 = muted, 2 = not) or, when it has none, volume 0 with the old volume remembered. */
+static bool mute_available(const struct mon *m)
+{
+    return m->c[C_MUTE].ok || m->c[C_VOLUME].ok;
+}
+
+static bool is_muted(const struct mon *m)
+{
+    return m->c[C_MUTE].ok ? m->c[C_MUTE].cur == 1 : m->c[C_VOLUME].ok && m->c[C_VOLUME].cur == 0;
+}
+
+static void toggle_mute(struct mon *m)
+{
+    bool muted = is_muted(m);
+    if (m->c[C_MUTE].ok) {
+        set_control(m, C_MUTE, muted ? 2 : 1);
+        return;
+    }
+    struct control *v = &m->c[C_VOLUME];
+    if (muted) {
+        int back = m->saved_volume > 0 ? m->saved_volume : v->max / 2;
+        set_control(m, C_VOLUME, back > 0 ? back : 1);
+    } else {
+        m->saved_volume = v->cur;
+        set_control(m, C_VOLUME, 0);
+    }
+}
+
 /* ---- command line ------------------------------------------------------------------------------------------------- */
 
 static void probe_all(void)
 {
-    for (int k = 0; k < nmon; k++)
+    for (int k = 0; k < nmon; k++) {
+        probe_caps(&mons[k]);
         for (; mons[k].probed < NCTL; mons[k].probed++)
             probe_one(&mons[k], mons[k].probed);
+    }
 }
 
 static int cli_list(void)
@@ -408,7 +465,7 @@ static struct widget *add(struct app *a, enum wkind kind, struct rect r, const c
 
 /* Chips of one choice control (input, colour preset) flowing over as many lines as needed. Returns the new y. */
 static int add_chips(struct app *a, int x, int y, int w, int ctl, const struct control *c, const char *title,
-                     const int *values, const char *const *names, int n)
+                     const int *values, char (*names)[16], int n)
 {
     add(a, W_HEADING, (struct rect){ x, y, w, 20 }, title);
     y += 24;
@@ -442,6 +499,31 @@ static int add_chips(struct app *a, int x, int y, int w, int ctl, const struct c
         cx += cw + 8;
     }
     return y + 38;
+}
+
+/* Name of a value ("HDMI 1"); an unknown one is shown as hexadecimal. */
+static void value_name(const struct vname *tab, int n, int value, char out[16])
+{
+    for (int i = 0; i < n; i++)
+        if (tab[i].value == value) {
+            snprintf(out, 16, "%s", tab[i].name);
+            return;
+        }
+    snprintf(out, 16, "0x%02x", value);
+}
+
+/* The values to offer: the ones the monitor lists for itself, else the first `dflt` of the table. */
+static int fill_choices(const struct vname *tab, int ntab, int dflt, const int *listed, int nlisted, int *out)
+{
+    int n = 0;
+    if (nlisted > 0) {
+        for (int i = 0; i < nlisted && n < MAX_VALUES; i++)
+            out[n++] = listed[i] & 0xff;
+        return n;
+    }
+    for (int i = 0; i < dflt && i < ntab; i++)
+        out[n++] = tab[i].value;
+    return n;
 }
 
 static void build(struct app *a)
@@ -489,33 +571,29 @@ static void build(struct app *a)
         y += 34;
         shown++;
     }
-    if (m->c[C_MUTE].ok) {
+    if (mute_available(m)) {
         struct widget *c = add(a, W_CHECK, (struct rect){ x, y, w, 26 }, "Mute the speakers");
         c->ctl = C_MUTE;
-        c->on = m->c[C_MUTE].cur == 1;
+        c->on = is_muted(m);
         y += 32;
         shown++;
     }
     if (m->c[C_INPUT].ok) {
-        int values[N_INPUTS];
-        const char *names[N_INPUTS];
-        for (int i = 0; i < N_INPUTS; i++) {
-            values[i] = INPUTS[i].value;
-            names[i] = INPUTS[i].name;
-        }
-        y = add_chips(a, x, y + 6, w, C_INPUT, &m->c[C_INPUT], "Input", values, names, N_INPUTS);
+        int values[MAX_VALUES], n = fill_choices(INPUTS, (int)(sizeof(INPUTS) / sizeof(INPUTS[0])), N_INPUTS_DEFAULT, m->in_vals, m->n_in, values);
+        char names[MAX_VALUES][16];
+        for (int i = 0; i < n; i++)
+            value_name(INPUTS, (int)(sizeof(INPUTS) / sizeof(INPUTS[0])), values[i], names[i]);
+        y = add_chips(a, x, y + 6, w, C_INPUT, &m->c[C_INPUT], "Input", values, names, n);
         add(a, W_LABEL, (struct rect){ x, y - 8, w, 16 }, "An input without a signal blanks this screen.");
         y += 16;
         shown++;
     }
     if (m->c[C_PRESET].ok) {
-        int values[N_PRESETS];
-        const char *names[N_PRESETS];
-        for (int i = 0; i < N_PRESETS; i++) {
-            values[i] = PRESETS[i].value;
-            names[i] = PRESETS[i].name;
-        }
-        y = add_chips(a, x, y, w, C_PRESET, &m->c[C_PRESET], "Colour", values, names, N_PRESETS);
+        int values[MAX_VALUES], n = fill_choices(PRESETS, (int)(sizeof(PRESETS) / sizeof(PRESETS[0])), N_PRESETS_DEFAULT, m->pre_vals, m->n_pre, values);
+        char names[MAX_VALUES][16];
+        for (int i = 0; i < n; i++)
+            value_name(PRESETS, (int)(sizeof(PRESETS) / sizeof(PRESETS[0])), values[i], names[i]);
+        y = add_chips(a, x, y, w, C_PRESET, &m->c[C_PRESET], "Colour", values, names, n);
         shown++;
     }
     if (m->c[C_POWER].ok) {
@@ -669,7 +747,7 @@ static void activate(struct app *a, int idx)
         a->focus = -1;
         break;
     case W_CHECK:
-        set_control(m, w->ctl, w->on ? 2 : 1);
+        toggle_mute(m);
         break;
     case W_CHIP:
         set_control(m, w->ctl, w->value);
@@ -763,7 +841,7 @@ static void keyboard_event(struct wlwin *win, uint32_t op, const union lm_arg *a
                 pos = i;
         for (int step = 1; step <= 4; step++) {
             int cand = ((pos < 0 ? (dir > 0 ? -1 : 0) : pos) + dir * step + 8) % 4;
-            if (m->c[order[cand]].ok) {
+            if (order[cand] == C_MUTE ? mute_available(m) : m->c[order[cand]].ok) {
                 a->focus = order[cand];
                 break;
             }
@@ -776,8 +854,8 @@ static void keyboard_event(struct wlwin *win, uint32_t op, const union lm_arg *a
         v = ks == LM_KS_Left ? v - step : ks == LM_KS_Right ? v + step : ks == LM_KS_Page_Down ? v - 10 * step :
             ks == LM_KS_Page_Up ? v + 10 * step : ks == LM_KS_Home ? 0 : c->max;
         set_control(m, a->focus, LM_CLAMP(v, 0, c->max));
-    } else if (a->focus == C_MUTE && m->c[C_MUTE].ok && (ks == ' ' || ks == LM_KS_Return)) {
-        set_control(m, C_MUTE, m->c[C_MUTE].cur == 1 ? 2 : 1);
+    } else if (a->focus == C_MUTE && mute_available(m) && (ks == ' ' || ks == LM_KS_Return)) {
+        toggle_mute(m);
     }
     win->redraw = true;
 }
@@ -786,8 +864,13 @@ static void keyboard_event(struct wlwin *win, uint32_t op, const union lm_arg *a
 static bool probe_step(struct app *a)
 {
     for (int k = 0; k < nmon; k++) {
-        if (mons[k].probed >= NCTL)
+        if (mons[k].probed >= NCTL && mons[k].caps_done)
             continue;
+        if (!mons[k].caps_done) {
+            probe_caps(&mons[k]);
+            a->win.redraw = true;
+            return true;
+        }
         probe_one(&mons[k], mons[k].probed++);
         a->win.redraw = true;
         return true;

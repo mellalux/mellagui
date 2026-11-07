@@ -1686,7 +1686,7 @@ class TestClients(Base):
         self.assertEqual(p.wait(timeout=5), 0)
 
     FAKE_MONITOR = ('monitor HDMI-A-1 Test Monitor\n10 100 20\n12 100 50\n62 100 30\n8d 2 2\n60 18 17\n14 12 5\nd6 5 1\n'
-                    'monitor DP-1 Second One\n10 100 70\n')
+                    'monitor DP-1 Second One\n10 100 70\n62 100 40\n')
 
     def fake_monitor(self, tag):
         path = os.path.join(tmp, 'fake-monitor-' + tag)
@@ -1713,7 +1713,7 @@ class TestClients(Base):
         env = dict(os.environ, LUMEN_MONITOR_FAKE=path)
         out = subprocess.run([exe, '--list'], env=env, capture_output=True, text=True, timeout=10).stdout.splitlines()
         self.assertEqual(out[0], 'HDMI-A-1|Test Monitor|fake|10=20/100|12=50/100|62=30/100|8d=2/2|60=17/18|14=5/12|d6=1/5')
-        self.assertEqual(out[1], 'DP-1|Second One|fake|10=70/100')
+        self.assertEqual(out[1], 'DP-1|Second One|fake|10=70/100|62=40/100')
         self.assertEqual(subprocess.run([exe, '--set', 'HDMI-A-1', '10', '65'], env=env, timeout=10).returncode, 0)
         self.assertEqual(self.fake_values(path, 'HDMI-A-1')['10'], 65)
         self.assertEqual(self.fake_values(path, 'DP-1')['10'], 70)                 # the other monitor is untouched
@@ -1764,6 +1764,20 @@ class TestClients(Base):
             time.sleep(0.05)
         self.assertEqual(self.fake_values(path, 'DP-1')['10'], 100)
         self.assertEqual(self.fake_values(path, 'HDMI-A-1')['10'], 50)
+        # DP-1 has no mute feature of its own: "Mute" silences it with volume 0 and gives the volume back
+        mute_y = y0 + top + 2 * 34 + 13                                                # brightness, volume, then the check box
+        ctl.click(x0 + 20 + 8, mute_y)
+        for _ in range(40):
+            if self.fake_values(path, 'DP-1')['62'] == 0:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.fake_values(path, 'DP-1')['62'], 0)
+        ctl.click(x0 + 20 + 8, mute_y)
+        for _ in range(40):
+            if self.fake_values(path, 'DP-1')['62'] == 40:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.fake_values(path, 'DP-1')['62'], 40)
 
     def test_terminal_paste_button(self):
         out = os.path.join(tmp, 'term-paste.txt')

@@ -216,10 +216,10 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "kbd")) {
         if (!srv->input) { ctl_reply(c, "err no input\n"); return; }
-        ctl_reply(c, "ok layout=%s slot=%d sticky=%d latched=%u slocked=%u sound=%s sounds=%u\n",
+        ctl_reply(c, "ok layout=%s slot=%d sticky=%d latched=%u slocked=%u locks=%u sound=%s sounds=%u\n",
                   lm_input_layout_id(srv->input, lm_input_layout(srv->input)), lm_input_layout(srv->input),
                   lm_input_sticky(srv->input) ? 1 : 0, lm_input_latched(srv->input),
-                  lm_input_sticky_locked(srv->input), lm_input_last_sound(srv->input),
+                  lm_input_sticky_locked(srv->input), lm_input_locks(srv->input), lm_input_last_sound(srv->input),
                   lm_input_sound_count(srv->input));
     } else if (!strcmp(cmd, "clip")) {
         if (a1 && !strcmp(a1, "clear"))

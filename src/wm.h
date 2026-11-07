@@ -333,6 +333,8 @@ struct lm_panel_info {
     uint32_t workspace_occupied;    /* bit n set = workspace n has windows */
     int hover_workspace;            /* -1 = none */
     bool hover_launcher;
+    struct lm_rect caps;            /* Caps / Num Lock indicator; zero width while no lock is on */
+    char caps_text[8];              /* "CAPS", "NUM" or "CAPS+N" */
     struct lm_rect layout;          /* keyboard layout indicator */
     bool hover_layout;
     char layout_text[8];            /* "US", "EE" ... */

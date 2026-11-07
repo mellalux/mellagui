@@ -1424,6 +1424,16 @@ class TestKeyboard(Base):
         self.assertEqual(seq[down - 1], ('mods', 1))
         self.assertEqual(seq[down + 1], ('mods', 0), 'latch was not released right after the key press')
 
+    def test_caps_lock_state_is_tracked(self):
+        self.assertEqual(ctl.kbd()['locks'], 0)
+        ctl.tap(58)                                  # KEY_CAPSLOCK
+        self.assertEqual(ctl.kbd()['locks'], 1 << 1)
+        ctl.tap(69)                                  # KEY_NUMLOCK
+        self.assertEqual(ctl.kbd()['locks'], (1 << 1) | (1 << 4))
+        ctl.tap(58)
+        ctl.tap(69)
+        self.assertEqual(ctl.kbd()['locks'], 0)
+
     def test_sticky_beeps(self):
         s0 = ctl.kbd()['sounds']
         ctl.cmd('sticky 1')

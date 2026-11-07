@@ -51,6 +51,7 @@ struct device {
     struct lm_source *source;
     unsigned classes;
     bool grabbed;
+    bool has_leds;          /* EV_LED with LED_CAPSL / LED_NUML: the lock lamps are driven from in->locked */
     /* relative accumulation */
     double rel_x, rel_y;
     int wheel, hwheel;
@@ -97,6 +98,28 @@ struct lm_input {
 };
 
 static void device_close(struct device *d);
+
+/* Light the Caps / Num Lock lamps of every keyboard that has them (the kernel does not do it for a grabbed device,
+ * and with the console in K_OFF the VT layer does not either). Best effort: a read-only node just stays dark. */
+static void leds_sync_device(const struct lm_input *in, const struct device *d)
+{
+    if (!d->has_leds)
+        return;
+    struct input_event ev[3];
+    memset(ev, 0, sizeof(ev));
+    ev[0].type = EV_LED; ev[0].code = LED_CAPSL; ev[0].value = (in->locked & LM_MOD_CAPS) ? 1 : 0;
+    ev[1].type = EV_LED; ev[1].code = LED_NUML;  ev[1].value = (in->locked & LM_MOD_NUM) ? 1 : 0;
+    ev[2].type = EV_SYN; ev[2].code = SYN_REPORT;
+    if (write(d->fd, ev, sizeof(ev)) < 0 && errno != EAGAIN)
+        lm_debug("input: cannot set the lock LEDs of %s: %s", d->path, strerror(errno));
+}
+
+static void leds_sync(const struct lm_input *in)
+{
+    struct device *d;
+    lm_list_for_each(d, &in->devices, link)
+        leds_sync_device(in, d);
+}
 
 static inline bool bit_test(const unsigned long *a, int bit)
 {
@@ -261,10 +284,12 @@ static void handle_key(struct lm_input *in, uint32_t code, bool pressed, uint32_
     if (pressed) {
         if (in->key_count[code]++ > 0)
             return; /* already down on another keyboard */
-        if (code == KEY_CAPSLOCK)
-            in->locked ^= LM_MOD_CAPS;
-        else if (code == KEY_NUMLOCK)
-            in->locked ^= LM_MOD_NUM;
+        if (code == KEY_CAPSLOCK || code == KEY_NUMLOCK) {
+            in->locked ^= code == KEY_CAPSLOCK ? LM_MOD_CAPS : LM_MOD_NUM;
+            leds_sync(in);
+            if (in->srv->wm)
+                lm_wm_keyboard_state_changed(in->srv->wm);
+        }
         if (bit)
             sticky_changed = sticky_modifier_press(in, bit);
         else
@@ -671,8 +696,15 @@ static void device_open(struct lm_input *in, const char *path)
         return;
     }
     lm_list_append(&in->devices, &d->link);
-    if (classes & DEV_KEYBOARD)
+    if (classes & DEV_KEYBOARD) {
         in->n_keyboards++;
+        unsigned long ledbits[NBITS(LED_MAX + 1)] = { 0 };
+        if (bit_test(evbits, EV_LED) && ioctl(fd, EVIOCGBIT(EV_LED, sizeof(ledbits)), ledbits) >= 0 &&
+            (bit_test(ledbits, LED_CAPSL) || bit_test(ledbits, LED_NUML))) {
+            d->has_leds = true;
+            leds_sync_device(in, d);
+        }
+    }
     char name[96] = "?";
     ioctl(fd, EVIOCGNAME(sizeof(name)), name);
     lm_info("input: %s \"%s\" (%s%s%s%s)", path, name,
@@ -856,6 +888,7 @@ void lm_input_cycle_layout(struct lm_input *in, int delta)
 bool lm_input_sticky(const struct lm_input *in) { return in->sticky; }
 uint32_t lm_input_latched(const struct lm_input *in) { return in->latched; }
 uint32_t lm_input_sticky_locked(const struct lm_input *in) { return in->slocked; }
+uint32_t lm_input_locks(const struct lm_input *in) { return in->locked; }
 
 void lm_input_set_sticky(struct lm_input *in, bool on)
 {

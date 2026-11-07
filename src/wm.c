@@ -36,6 +36,7 @@
 #define PANEL_RUN_W 44
 #define PANEL_LAYOUT_W 36
 #define PANEL_STICKY_W 84
+#define PANEL_CAPS_W 48
 #define MENU_W 200
 #define GADGET_W 250                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
 #define GADGET_H (GADGET_TITLE_H + LM_GADGET_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
@@ -203,8 +204,18 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->run = lm_rect_make(p->exit.x - 4 - PANEL_RUN_W, y, PANEL_RUN_W, h);
     p->sticky = lm_rect_make(p->run.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
     p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
+    uint32_t locks = wm->srv->input ? lm_input_locks(wm->srv->input) : 0;
+    p->caps_text[0] = 0;
+    if ((locks & LM_MOD_CAPS) && (locks & LM_MOD_NUM))
+        snprintf(p->caps_text, sizeof(p->caps_text), "CAPS+N");
+    else if (locks & LM_MOD_CAPS)
+        snprintf(p->caps_text, sizeof(p->caps_text), "CAPS");
+    else if (locks & LM_MOD_NUM)
+        snprintf(p->caps_text, sizeof(p->caps_text), "NUM");
+    int caps_w = !p->caps_text[0] ? 0 : (locks & LM_MOD_NUM) && (locks & LM_MOD_CAPS) ? PANEL_CAPS_W + 24 : PANEL_CAPS_W;
+    p->caps = lm_rect_make(p->layout.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
     int tx = x + 12;
-    p->title_area = lm_rect_make(tx, y, p->layout.x - 12 - tx, h);
+    p->title_area = lm_rect_make(tx, y, p->caps.x - 12 - tx, h);
     p->hover_layout = wm->hover_layout;
     p->hover_sticky = wm->hover_sticky;
     snprintf(p->layout_text, sizeof(p->layout_text), "us");

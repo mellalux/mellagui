@@ -126,6 +126,7 @@ void lm_input_cycle_layout(struct lm_input *in, int delta);              /* +1 n
 bool lm_input_sticky(const struct lm_input *in);
 void lm_input_set_sticky(struct lm_input *in, bool on);
 uint32_t lm_input_latched(const struct lm_input *in);                    /* LM_MOD_* */
+uint32_t lm_input_locks(const struct lm_input *in);                      /* LM_MOD_CAPS / LM_MOD_NUM (also lit on the keyboard LEDs) */
 uint32_t lm_input_sticky_locked(const struct lm_input *in);              /* LM_MOD_* */
 /* Sticky-key feedback beeps (sound.h): played on drm, only recorded on headless (the `kbd` oracle shows them). */
 const char *lm_input_last_sound(const struct lm_input *in);              /* "none" until the first one */

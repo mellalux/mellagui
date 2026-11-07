@@ -896,6 +896,10 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     }
     if (!p->ntasks && p->active_title && p->active_title[0])
         draw_text_centered(c, &p->title_area, p->active_title, COL_PANEL_TEXT);
+    if (p->caps.w > 0) {
+        fill_rect(c, &p->caps, COL_PANEL_DANGER);
+        draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);
+    }
     fill_rect(c, &p->layout, p->hover_layout ? COL_PANEL_HOVER : COL_PANEL_BTN);
     draw_text_centered(c, &p->layout, p->layout_text, COL_PANEL_TEXT);
     uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : (p->hover_sticky ? COL_PANEL_HOVER : COL_PANEL_BTN);

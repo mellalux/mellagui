@@ -93,6 +93,9 @@ struct lm_wm {
     uint64_t focus_counter;
     int cascade;
     struct lm_timer *clock_timer;
+    struct note { int id; char title[LM_NOTIFY_COLS * 4 + 1]; char body[200]; int64_t expire; } notes[LM_NOTIFY_MAX];   /* newest first */
+    int nnotes, next_note_id;
+    struct lm_timer *note_timer;
     char clock_text[24];
 
     /* hover / pressed state */
@@ -327,6 +330,154 @@ static void damage_all(struct lm_wm *wm)
 {
     if (wm->srv->render)
         lm_render_damage_all(wm->srv->render);
+}
+
+static struct lm_output *gadget_output(const struct lm_wm *wm);
+
+/* ---- notifications ---------------------------------------------------------------------------------------------------- */
+
+#define NOTE_W 320
+#define NOTE_GAP 6
+
+static int64_t now_ms64(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Wraps `body` into at most LM_NOTIFY_LINES lines of LM_NOTIFY_COLS characters (breaking at blanks, "..." when it is cut). */
+static int note_wrap(const char *body, char line[LM_NOTIFY_LINES][LM_NOTIFY_COLS * 4 + 1])
+{
+    int n = 0;
+    const char *p = body;
+    while (*p == ' ')
+        p++;
+    while (*p && n < LM_NOTIFY_LINES) {
+        const char *q = p;
+        int cols = 0, last_blank = -1;
+        const char *start = p;
+        while (*q && *q != '\n' && cols < LM_NOTIFY_COLS) {
+            if (*q == ' ')
+                last_blank = (int)(q - start);
+            do
+                q++;
+            while ((*q & 0xc0) == 0x80);
+            cols++;
+        }
+        size_t len = (size_t)(q - start);
+        if (*q && *q != '\n' && *q != ' ' && last_blank > 0)
+            len = (size_t)last_blank;                                   /* break at the last blank */
+        if (len >= sizeof(line[0]))
+            len = sizeof(line[0]) - 1;
+        memcpy(line[n], start, len);
+        line[n][len] = 0;
+        n++;
+        p = start + len;
+        while (*p == ' ' || *p == '\n')
+            p++;
+    }
+    if (*p && n > 0) {                                                 /* text left over: mark the cut */
+        size_t l = strlen(line[n - 1]);
+        if (l + 3 < sizeof(line[0]) && l >= 3) {
+            line[n - 1][l - 3] = 0;
+            strcat(line[n - 1], "...");
+        }
+    }
+    return n;
+}
+
+static int note_height(const struct note *nt)
+{
+    char line[LM_NOTIFY_LINES][LM_NOTIFY_COLS * 4 + 1];
+    int n = note_wrap(nt->body, line);
+    return 8 + 20 + n * LM_FONT_H + (n ? 6 : 0) + 6;
+}
+
+/* The card rectangles, newest first, stacked down from the top right of the first output; false without an output. */
+static bool note_rects(const struct lm_wm *wm, struct lm_rect *r)
+{
+    struct lm_output *o = gadget_output(wm);
+    if (!o)
+        return false;
+    int y = o->y + LM_PANEL_HEIGHT + 8;
+    for (int i = 0; i < wm->nnotes; i++) {
+        int h = note_height(&wm->notes[i]);
+        r[i] = lm_rect_make(o->x + o->width - NOTE_W - 12, y, NOTE_W, h);
+        y += h + NOTE_GAP;
+    }
+    return true;
+}
+
+static void note_damage(struct lm_wm *wm)
+{
+    struct lm_rect r[LM_NOTIFY_MAX];
+    if (!note_rects(wm, r))
+        return;
+    for (int i = 0; i < wm->nnotes; i++)
+        damage_rect(wm, &r[i]);
+}
+
+static void note_timer_arm(struct lm_wm *wm)
+{
+    if (!wm->note_timer)
+        return;
+    int64_t soon = 0, now = now_ms64();
+    for (int i = 0; i < wm->nnotes; i++)
+        if (wm->notes[i].expire && (!soon || wm->notes[i].expire < soon))
+            soon = wm->notes[i].expire;
+    if (soon)
+        lm_timer_arm_ms(wm->note_timer, (uint32_t)LM_MAX(soon - now, 1), 0);
+}
+
+static void note_remove(struct lm_wm *wm, int idx)
+{
+    note_damage(wm);                                                   /* the stack closes up: everything below moves */
+    memmove(&wm->notes[idx], &wm->notes[idx + 1], sizeof(wm->notes[0]) * (size_t)(wm->nnotes - idx - 1));
+    wm->nnotes--;
+    note_damage(wm);
+}
+
+static void note_dismiss(struct lm_wm *wm, int id)
+{
+    for (int i = 0; i < wm->nnotes; i++)
+        if (wm->notes[i].id == id) {
+            note_remove(wm, i);
+            note_timer_arm(wm);
+            return;
+        }
+}
+
+static void note_tick(void *data)
+{
+    struct lm_wm *wm = data;
+    int64_t now = now_ms64();
+    for (int i = wm->nnotes - 1; i >= 0; i--)
+        if (wm->notes[i].expire && wm->notes[i].expire <= now)
+            note_remove(wm, i);
+    note_timer_arm(wm);
+}
+
+void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms)
+{
+    if (!wm || !gadget_output(wm))
+        return;
+    note_damage(wm);
+    if (wm->nnotes == LM_NOTIFY_MAX)                                   /* the oldest (last) one makes room */
+        wm->nnotes--;
+    memmove(&wm->notes[1], &wm->notes[0], sizeof(wm->notes[0]) * (size_t)wm->nnotes);
+    struct note *nt = &wm->notes[0];
+    memset(nt, 0, sizeof(*nt));
+    nt->id = ++wm->next_note_id;
+    snprintf(nt->title, sizeof(nt->title), "%.*s", LM_NOTIFY_COLS * 4, title ? title : "");
+    snprintf(nt->body, sizeof(nt->body), "%s", body ? body : "");
+    for (char *c = nt->title; *c; c++)
+        if ((unsigned char)*c < 0x20)
+            *c = ' ';
+    nt->expire = timeout_ms > 0 ? now_ms64() + timeout_ms : 0;
+    wm->nnotes++;
+    note_damage(wm);
+    note_timer_arm(wm);
 }
 
 /* ---- Alt+Tab window switcher ------------------------------------------------------------------------------------------ */
@@ -909,6 +1060,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     }
     gadgets_load(wm);
     update_clock(wm, true);
+    wm->note_timer = lm_loop_add_timer(srv->loop, note_tick, wm);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
@@ -921,6 +1073,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         return;
     if (wm->grab_kind != GRAB_NONE && wm->srv->seat)
         lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
+    if (wm->note_timer)
+        lm_timer_destroy(wm->note_timer);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
     free(wm);
@@ -1574,6 +1728,24 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         if (!fn(&it, data))
             return;
     }
+    if (wm->nnotes > 0) {                                        /* notification cards, above the windows and the panel */
+        struct lm_rect rs[LM_NOTIFY_MAX];
+        if (note_rects(wm, rs)) {
+            for (int i = wm->nnotes - 1; i >= 0; i--) {              /* oldest first: the newest is on top */
+                if (clip && !lm_rect_overlaps(&rs[i], clip))
+                    continue;
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_NOTIFY;
+                it.u.notify.rect = rs[i];
+                it.u.notify.id = wm->notes[i].id;
+                snprintf(it.u.notify.title, sizeof(it.u.notify.title), "%s", wm->notes[i].title);
+                it.u.notify.nlines = note_wrap(wm->notes[i].body, it.u.notify.line);
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+    }
+
     if (wm->sw_open) {                                           /* the Alt+Tab list, above everything */
         struct lm_rect r = sw_rect(wm);
         if (r.w > 0 && (!clip || lm_rect_overlaps(&r, clip))) {
@@ -1680,6 +1852,16 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
     out->kind = LM_PICK_NONE;
     int32_t ix = (int32_t)x, iy = (int32_t)y;
 
+    if (wm->nnotes > 0 && !lm_lock_active(wm->srv->lock)) {
+        struct lm_rect rs[LM_NOTIFY_MAX];
+        if (note_rects(wm, rs))
+            for (int i = 0; i < wm->nnotes; i++)
+                if (lm_rect_contains(&rs[i], ix, iy)) {
+                    out->kind = LM_PICK_NOTIFY;
+                    out->index = wm->notes[i].id;
+                    return;
+                }
+    }
     if (wm->srv->render && lm_render_shot_card_at(wm->srv->render, x, y)) {
         out->kind = LM_PICK_SHOT_CARD;
         return;
@@ -1857,6 +2039,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_BORDER:
     case LM_PICK_GADGET_BORDER: shape = cursor_for_edges(pick->edges); break;
     case LM_PICK_SHOT_CARD: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_NOTIFY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_MENU_ITEM: menu_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
@@ -2336,6 +2519,11 @@ static void open_shot(struct lm_wm *wm)
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (pick->kind == LM_PICK_NOTIFY) {                    /* a click dismisses a notification and goes no further */
+        if (pressed)
+            note_dismiss(wm, pick->index);
+        return true;
+    }
     if (pick->kind == LM_PICK_SHOT_CARD) {                 /* nothing under the card gets the click */
         if (pressed && button == BTN_LEFT)
             open_shot(wm);

@@ -32,7 +32,7 @@ enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS,
-    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_COUNT
+    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -44,7 +44,7 @@ static const char *const key_names[K_COUNT] = {
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status",
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
-    [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked",
+    [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
 };
 
 static int key_find(const char *key)
@@ -385,7 +385,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_LOCK_BLANK: snprintf(out, n, "%d", lm_lock_blank(srv->lock)); break;
     case K_LOCK_VT: snprintf(out, n, "%d", lm_lock_vt(srv->lock) ? 1 : 0); break;
     case K_LOCK_STATUS: snprintf(out, n, "%s", lm_lock_status(srv->lock)); break;
-    case K_LOCK_SET: case K_LOCK_NOW: break;            /* write only: the secrets never come back */
+    case K_LOCK_SET: case K_LOCK_NOW: case K_NOTIFY: break;            /* write only: the secrets never come back */
     case K_LOCKED: snprintf(out, n, "%d", lm_lock_active(srv->lock) ? 1 : 0); break;
     }
 }
@@ -739,6 +739,21 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         bool ok = lm_lock_apply(srv->lock, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
         lm_secure_zero(buf, sizeof(buf));
         return ok;
+    }
+    case K_NOTIFY: {                                    /* "title<TAB>body<TAB>milliseconds" */
+        char tmp[400];
+        snprintf(tmp, sizeof(tmp), "%s", val);
+        char *tab1 = strchr(tmp, '\t'), *tab2 = tab1 ? strchr(tab1 + 1, '\t') : NULL;
+        if (!srv->wm || !tab1)
+            return false;
+        *tab1 = 0;
+        if (tab2)
+            *tab2 = 0;
+        int ms = tab2 ? atoi(tab2 + 1) : 6000;
+        if (ms < 0 || ms > 600000)
+            return false;
+        lm_wm_notify(srv->wm, tmp, tab1 + 1, ms);
+        return true;
     }
     case K_LOCK_NOW:
         return parse_bool(val, &b) && (!b || lm_lock_now(srv->lock));

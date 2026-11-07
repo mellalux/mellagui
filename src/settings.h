@@ -48,6 +48,8 @@
  *   lock-set        (write only)               "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank<TAB>vt": change the lock; `current` must be
  *                                              the existing secret (ignored while none is set), kind = password|pin|keep|none,
  *                                              empty minutes / start / blank / vt = keep. Never echoed, never logged
+ *   notify          (write only)               "title<TAB>body<TAB>milliseconds": a notification card at the top right (0 ms = until clicked,
+ *                                              default 6000; mellagui-notify sends it)
  *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
  *   locked          0 | 1                      the screen is locked now (read only)
  *

@@ -4787,6 +4787,12 @@ class TestGLParity(Base):
         c.sync()
         shots['menu'] = c.dump(os.path.join(tmp, name + '-4.ppm'))
         c.tap(KEY_ESC)
+        c.cmd('notify 0 A notification with a longer body that wraps over several lines of the card')
+        c.abs(40, 480)
+        c.sync()
+        time.sleep(0.2)
+        c.sync()
+        shots['notification'] = c.dump(os.path.join(tmp, name + '-4b.ppm'))
         c.abs(700, 450)
         c.tap(99)                                                            # Print: flash, then the card stays
         time.sleep(0.5)
@@ -4810,6 +4816,8 @@ class TestGLParity(Base):
             where = None
             for y in range(30, a.h):                                         # the top rows hold the clock
                 if step == 'card' and 300 <= y < 314:                         # ... and so does the card's thumbnail (the panel in it)
+                    continue
+                if step == 'lock' and 100 <= y < 230:                         # ... and the lock screen's big clock
                     continue
                 ra = a.data[(y * a.w) * 3:((y + 1) * a.w) * 3]
                 rb = b.data[(y * b.w) * 3:((y + 1) * b.w) * 3]
@@ -5061,6 +5069,121 @@ class TestWallpaper(Base):
         c2 = self.start('mellagui-wall5', '--settings', conf, env={'HOME': home})
         self.assertEqual(self.get(c2, 'wallpaper-status'), 'ok')
         self.assertEqual(self.shot(c2, 'h2').px(10, 250), (255, 255, 0))
+
+
+class TestNotify(Base):
+    """Notification cards: top right below the panel, newest on top, at most five, a click dismisses, a timeout removes."""
+    ACCENT = (0x6f, 0xa8, 0xff)
+    CARD_X = 800 - 320 - 12                       # private compositors are 800x500: the cards start here, 36 px from the top
+
+    def start(self, name='mellagui-note', **kw):
+        p, c, stop = self.private_compositor(name, **kw)
+        c.abs(20, 480)
+        c.sync()
+        return c
+
+    def stripes(self, c, tag):
+        """The accent stripes down the left edge of the cards: [(y0, y1)] top to bottom."""
+        c.abs(20, 480)
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        ppm = c.dump(os.path.join(tmp, 'note-%s.ppm' % tag))
+        runs, start = [], None
+        for y in range(28, 500):
+            hit = ppm.px(self.CARD_X + 2, y) == self.ACCENT
+            if hit and start is None:
+                start = y
+            if not hit and start is not None:
+                if y - start > 15:                                                  # (the lock screen has small accent marks, too)
+                    runs.append((start, y))
+                start = None
+        return runs, ppm
+
+    def test_a_card_shows_with_its_text_and_goes_when_clicked(self):
+        c = self.start()
+        c.cmd('notify 0 Backup finished 3 files copied')
+        runs, ppm = self.stripes(c, 'one')
+        self.assertEqual(len(runs), 1, runs)
+        self.assertEqual(runs[0][0], 37)                                           # 28 panel + 8 gap + the border
+        self.assertGreater(ppm.count((0xe6, 0xe9, 0xef), self.CARD_X, 60, self.CARD_X + 320, 120), 20)       # body text
+        c.click(self.CARD_X + 100, 50)
+        runs, _ = self.stripes(c, 'one-gone')
+        self.assertEqual(runs, [])
+
+    def test_newest_on_top_and_at_most_five(self):
+        c = self.start()
+        for i in range(7):
+            c.cmd('notify 0 Note %d some words' % i)
+        runs, ppm = self.stripes(c, 'many')
+        self.assertEqual(len(runs), 5, runs)
+        h = runs[0][1] - runs[0][0]
+        self.assertTrue(all(abs((b - a) - h) <= 1 for a, b in runs))               # one-line bodies: the same size
+        c.click(self.CARD_X + 100, runs[1][0] + 10)                                 # the second card goes, the others close up
+        runs2, _ = self.stripes(c, 'many2')
+        self.assertEqual(len(runs2), 4)
+        self.assertEqual(runs2[0], runs[0])
+        self.assertEqual(runs2[1][0], runs[2][0] - (runs[2][0] - runs[1][0]) + 0)  # the third one moved up to where the second was
+
+    def test_a_timeout_removes_it(self):
+        c = self.start()
+        c.cmd('notify 400 Short lived')
+        self.assertEqual(len(self.stripes(c, 'tmo')[0]), 1)
+        time.sleep(0.6)
+        self.assertEqual(self.stripes(c, 'tmo2')[0], [])
+
+    def test_long_text_is_wrapped_and_cut(self):
+        c = self.start()
+        c.cmd('notify 0 Long ' + 'word ' * 60)
+        runs, _ = self.stripes(c, 'long')
+        self.assertEqual(len(runs), 1)
+        self.assertLessEqual(runs[0][1] - runs[0][0], 8 + 20 + 4 * 16 + 6 + 6)      # four lines at most
+        self.assertGreaterEqual(runs[0][1] - runs[0][0], 8 + 20 + 3 * 16)
+
+    def test_the_click_does_not_reach_the_window_underneath(self):
+        c = self.start()
+        cl = Client('mellagui-note')
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        ptr = cl.wl.new_id('wl_pointer')
+        cl.wl.request(seat, 'get_pointer', ptr)
+        Window(cl, 780, 440, title='big')
+        cl.wl.roundtrip()
+        c.cmd('notify 0 On top')
+        self.stripes(c, 'under')
+        cl.wl.queue.clear()
+        c.click(self.CARD_X + 100, 50)
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual([e for e in cl.wl.queue if e.obj == ptr and e.name == 'button'], [])
+        self.assertEqual(self.stripes(c, 'under2')[0], [])
+
+    def test_the_command_line_tool(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-notify')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-notify not built')
+        c = self.start('mellagui-note2')
+        env = dict(os.environ, WAYLAND_DISPLAY='mellagui-note2')
+        r = subprocess.run([exe, '-t', '0', 'From a script', 'some', 'words'], env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.stripes(c, 'cli')[0]), 1)
+        self.assertEqual(subprocess.run([exe], env=env, capture_output=True, timeout=10).returncode, 2)       # usage
+        self.assertEqual(subprocess.run([exe, '-t', '-5', 'x'], env=env, capture_output=True, timeout=10).returncode, 2)
+
+    def test_nothing_shows_on_the_lock_screen(self):
+        c = self.start('mellagui-note3', env={'MELLAGUI_LOCK_ITER': '1000'})
+        c.cmd('notify 0 Secret thing')
+        self.assertEqual(len(self.stripes(c, 'pre')[0]), 1)
+        c.cmd('lock set - password hunter22x')
+        c.cmd('lock now')
+        time.sleep(0.2)
+        self.assertEqual(self.stripes(c, 'locked')[0], [])
+
+    def test_bad_values_are_refused(self):
+        c = self.start('mellagui-note4')
+        for line in ('settings notify nothing-with-tabs', 'notify 999999999 Title'):
+            with self.assertRaises(RuntimeError, msg=line):
+                c.cmd(line)
 
 
 class TestScreenshot(Base):

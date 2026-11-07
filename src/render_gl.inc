@@ -33,6 +33,7 @@ struct gl_out {
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
     struct gl_chrome panel, menu, lock, card, switcher;
+    struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
 };
@@ -62,6 +63,8 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->lock);
     gl_chrome_free(r, &go->card);
     gl_chrome_free(r, &go->switcher);
+    for (int i = 0; i < LM_NOTIFY_MAX; i++)
+        gl_chrome_free(r, &go->notify[i]);
     free(go);
     st->gl = NULL;
 }
@@ -166,6 +169,7 @@ struct gl_pass {
     const struct lm_region *dirty;      /* what changed since the last frame (global) */
     bool full;
     int fidx;                           /* frames seen so far in this pass */
+    int nidx;                           /* notification cards seen so far */
     int ox, oy;                         /* the output's origin: global -> target coordinates */
 };
 
@@ -176,6 +180,7 @@ static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel
 static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
+static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
 
 static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
 {
@@ -393,6 +398,25 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_MENU:
         gl_chrome_item(p, &p->go->menu, &item->u.menu.rect, gl_do_menu, &item->u.menu);
         break;
+    case LM_SCENE_NOTIFY: {                             /* a texture per card, kept while its content (hashed) stays the same */
+        const struct lm_notify_info *n = &item->u.notify;
+        uint64_t h = fnv(1469598103934665603ull, &n->rect, sizeof(n->rect));
+        h = fnv(h, n->title, strlen(n->title) + 1);
+        for (int i = 0; i < n->nlines; i++)
+            h = fnv(h, n->line[i], strlen(n->line[i]) + 1);
+        struct gl_chrome own = { 0 };
+        struct gl_chrome *ch = p->nidx < LM_NOTIFY_MAX ? &p->go->notify[p->nidx] : &own;
+        p->nidx++;
+        if (!ch->tex || ch->hash != h || ch->w != n->rect.w || ch->h != n->rect.h) {
+            gl_scratch(p->r, p->st, ch, &n->rect, gl_do_notify, n);
+            ch->hash = h;
+        }
+        if (ch->tex)
+            gl_tex_at(p, ch->tex, &n->rect, true);
+        if (ch == &own)
+            gl_chrome_free(p->r, &own);
+        break;
+    }
     case LM_SCENE_SWITCHER:
         gl_chrome_item(p, &p->go->switcher, &item->u.switcher.rect, gl_do_switcher, &item->u.switcher);
         break;

@@ -405,7 +405,7 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("mellagui-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
     cfg.settings_cmd = default_sibling("mellagui-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char monitor_buf[PATH_MAX + 4], calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
+    static char calc_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
     if (cfg.napps == 0) {
         /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
@@ -438,8 +438,6 @@ int main(int argc, char **argv)
             break;
         }
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Settings", cfg.settings_cmd };   /* last: keeps the others' places */
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Monitor", default_sibling("mellagui-monitor", monitor_buf, sizeof(monitor_buf)) };
     }
     lm_log_set_level((enum lm_log_level)cfg.log_level);
     if (cfg.log_file && lm_log_set_file(cfg.log_file) < 0)

@@ -1,0 +1,1466 @@
+/*
+ * mellagui-edit - a small text editor for MellaGUI (UTF-8 text, line numbers, selection, clipboard, undo, find).
+ *
+ *   mellagui-edit [FILE]          open FILE (a new file when it does not exist), else an empty document
+ *   mellagui-edit --selftest      the editing model without a display
+ *
+ * Keys: arrows, Home / End, PageUp / PageDown, Ctrl+Left / Right (words), Ctrl+Home / End; Shift extends the selection;
+ * Ctrl+A select all, Ctrl+C / X / V clipboard, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+S save, Ctrl+Shift+S save as, Ctrl+O open,
+ * Ctrl+N new, Ctrl+F find (Enter / F3 next), Ctrl+G go to line, Ctrl+Q quit (twice to discard changes), Esc clears the
+ * message / selection. Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
+ * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
+ */
+#include <errno.h>
+#include <stdarg.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "font.h"
+#include "keymap.h"
+#include "protocol.h"
+#include "util.h"
+#include "wlwin.h"
+
+#define MAX_FILE (8u << 20)
+#define TAB_W 4
+#define STATUS_H 20
+#define UNDO_MAX 64
+#define COL_BG 0x14171fu
+#define COL_FG 0xd8dee9u
+#define COL_DIM 0x7b8294u
+#define COL_GUTTER_BG 0x10131au
+#define COL_LINE 0x1a1e27u
+#define COL_SEL 0x41527eu
+#define COL_BAR 0x2b303bu
+#define COL_ACCENT 0x6fa8ffu
+#define COL_WARN 0xe0a458u
+
+/* ---- the document ----------------------------------------------------------------------------------------------------- */
+
+struct line {
+    char *s;
+    size_t len, cap;
+};
+
+struct snap {
+    char *text;
+    size_t len;
+    int cy;
+    size_t cx;
+};
+
+struct app {
+    struct wlwin win;
+    struct line *l;                     /* the lines, without line ends */
+    int n, cap;
+    int cy;                             /* cursor line and byte offset in it */
+    size_t cx;
+    int ay;                             /* selection anchor; equal to the cursor = no selection */
+    size_t ax;
+    int want_col;                       /* display column kept while moving up / down */
+    int top, left;                      /* first visible line / display column */
+    char path[PATH_MAX];
+    bool modified, final_nl, crlf;
+    /* prompt line: open / save as / find / go to */
+    enum { P_NONE, P_OPEN, P_SAVEAS, P_FIND, P_GOTO } prompt;
+    char pbuf[512];
+    char find[256];
+    char msg[200];
+    int64_t msg_until;
+    bool quit_armed;
+    struct snap undo[UNDO_MAX], redo[UNDO_MAX];
+    int nundo, nredo;
+    bool typing_run;                    /* the last change was typing: the next typed character joins its undo step */
+    /* clipboard (wl_data_device) */
+    uint32_t ddm, ddev, dsrc, offer, offer_pending;
+    char offer_mimes[16][64];
+    int n_offer_mimes;
+    char *clip_out;
+    uint32_t last_serial;
+    /* key repeat */
+    uint32_t rep_code;
+    int64_t rep_next;
+    int rep_rate, rep_delay;
+    /* mouse */
+    double px, py;
+    bool dragging;
+    uint32_t last_click_ms;
+    int rows_visible, cols_visible;
+};
+
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void line_reserve(struct line *l, size_t need)
+{
+    if (need + 1 <= l->cap)
+        return;
+    size_t nc = (need + 1) * 2 + 16;
+    char *t = realloc(l->s, nc);
+    if (!t)
+        abort();
+    l->s = t;
+    l->cap = nc;
+}
+
+static void line_set(struct line *l, const char *s, size_t n)
+{
+    line_reserve(l, n);
+    memcpy(l->s, s, n);
+    l->s[n] = 0;
+    l->len = n;
+}
+
+static void doc_reserve(struct app *a, int n)
+{
+    if (n <= a->cap)
+        return;
+    int nc = LM_MAX(n * 2, 16);
+    struct line *t = realloc(a->l, (size_t)nc * sizeof(*a->l));
+    if (!t)
+        abort();
+    memset(t + a->cap, 0, (size_t)(nc - a->cap) * sizeof(*t));
+    a->l = t;
+    a->cap = nc;
+}
+
+static void doc_clear(struct app *a)
+{
+    for (int i = 0; i < a->cap; i++)
+        free(a->l[i].s);
+    free(a->l);
+    a->l = NULL;
+    a->n = a->cap = 0;
+    doc_reserve(a, 1);
+    a->n = 1;
+    line_set(&a->l[0], "", 0);
+    a->cy = a->ay = 0;
+    a->cx = a->ax = 0;
+    a->top = a->left = 0;
+    a->want_col = 0;
+}
+
+/* UTF-8 steps within a line */
+static size_t cp_next(const struct line *l, size_t off)
+{
+    if (off >= l->len)
+        return l->len;
+    off++;
+    while (off < l->len && ((unsigned char)l->s[off] & 0xc0) == 0x80)
+        off++;
+    return off;
+}
+
+static size_t cp_prev(const struct line *l, size_t off)
+{
+    if (off == 0)
+        return 0;
+    off--;
+    while (off > 0 && ((unsigned char)l->s[off] & 0xc0) == 0x80)
+        off--;
+    return off;
+}
+
+/* Display column of byte offset `off` (tabs go to the next multiple of TAB_W) and the other way round. */
+static int col_of(const struct line *l, size_t off)
+{
+    int col = 0;
+    for (size_t i = 0; i < off && i < l->len; i = cp_next(l, i))
+        col = l->s[i] == '\t' ? (col / TAB_W + 1) * TAB_W : col + 1;
+    return col;
+}
+
+static size_t off_at_col(const struct line *l, int col)
+{
+    int c = 0;
+    size_t i = 0;
+    while (i < l->len) {
+        int nc = l->s[i] == '\t' ? (c / TAB_W + 1) * TAB_W : c + 1;
+        if (nc > col && !(l->s[i] == '\t' && col - c >= (nc - c + 1) / 2))   /* a click on the right half of a tab goes after it */
+            break;
+        c = nc;
+        i = cp_next(l, i);
+        if (c >= col)
+            break;
+    }
+    return i;
+}
+
+static bool is_word(unsigned char c)
+{
+    return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+/* ---- selection, text of a range ---------------------------------------------------------------------------------------- */
+
+static bool has_sel(const struct app *a)
+{
+    return a->cy != a->ay || a->cx != a->ax;
+}
+
+static void sel_order(const struct app *a, int *y0, size_t *x0, int *y1, size_t *x1)
+{
+    bool fwd = a->ay < a->cy || (a->ay == a->cy && a->ax <= a->cx);
+    *y0 = fwd ? a->ay : a->cy;
+    *x0 = fwd ? a->ax : a->cx;
+    *y1 = fwd ? a->cy : a->ay;
+    *x1 = fwd ? a->cx : a->ax;
+}
+
+/* The text between two positions with \n between lines (malloc'd, NUL terminated). */
+static char *range_text(const struct app *a, int y0, size_t x0, int y1, size_t x1, size_t *len_out)
+{
+    size_t cap = 64, len = 0;
+    char *out = malloc(cap);
+    if (!out)
+        abort();
+    for (int y = y0; y <= y1; y++) {
+        size_t from = y == y0 ? x0 : 0, to = y == y1 ? x1 : a->l[y].len;
+        size_t need = len + (to - from) + 2;
+        if (need > cap) {
+            cap = need * 2;
+            out = realloc(out, cap);
+            if (!out)
+                abort();
+        }
+        memcpy(out + len, a->l[y].s + from, to - from);
+        len += to - from;
+        if (y < y1)
+            out[len++] = '\n';
+    }
+    out[len] = 0;
+    if (len_out)
+        *len_out = len;
+    return out;
+}
+
+/* ---- undo ------------------------------------------------------------------------------------------------------------- */
+
+static void snap_free(struct snap *s)
+{
+    free(s->text);
+    s->text = NULL;
+}
+
+static void snap_take(const struct app *a, struct snap *s)
+{
+    s->text = range_text(a, 0, 0, a->n - 1, a->l[a->n - 1].len, &s->len);
+    s->cy = a->cy;
+    s->cx = a->cx;
+}
+
+static void doc_set_text(struct app *a, const char *t, size_t n);
+
+static void snap_restore(struct app *a, const struct snap *s)
+{
+    doc_set_text(a, s->text, s->len);
+    a->cy = LM_MIN(s->cy, a->n - 1);
+    a->cx = LM_MIN(s->cx, a->l[a->cy].len);
+    a->ay = a->cy;
+    a->ax = a->cx;
+}
+
+static void stack_push(struct snap *st, int *n, const struct snap *s)
+{
+    if (*n == UNDO_MAX) {
+        snap_free(&st[0]);
+        memmove(st, st + 1, sizeof(st[0]) * (UNDO_MAX - 1));
+        (*n)--;
+    }
+    st[(*n)++] = *s;
+}
+
+/* Call before a change. `typing`: a typed character, which shares the step of the characters typed just before it. */
+static void before_edit(struct app *a, bool typing)
+{
+    if (typing && a->typing_run && a->nundo > 0) {
+        a->typing_run = true;
+    } else {
+        struct snap s;
+        snap_take(a, &s);
+        stack_push(a->undo, &a->nundo, &s);
+        a->typing_run = typing;
+    }
+    for (int i = 0; i < a->nredo; i++)
+        snap_free(&a->redo[i]);
+    a->nredo = 0;
+    a->modified = true;
+    a->quit_armed = false;
+}
+
+static bool undo(struct app *a, bool redo)
+{
+    struct snap *from = redo ? a->redo : a->undo, *to = redo ? a->undo : a->redo;
+    int *nf = redo ? &a->nredo : &a->nundo, *nt = redo ? &a->nundo : &a->nredo;
+    if (*nf == 0)
+        return false;
+    struct snap now;
+    snap_take(a, &now);
+    stack_push(to, nt, &now);
+    struct snap s = from[--*nf];
+    snap_restore(a, &s);
+    snap_free(&s);
+    a->typing_run = false;
+    a->modified = true;
+    return true;
+}
+
+/* ---- editing ------------------------------------------------------------------------------------------------------------ */
+
+/* Inserts text (with \n line ends; \r dropped) at the cursor and leaves the cursor after it. */
+static void insert_at_cursor(struct app *a, const char *t, size_t n)
+{
+    const char *p = t, *end = t + n;
+    while (p <= end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        const char *stop = nl ? nl : end;
+        size_t seg = (size_t)(stop - p);
+        struct line *l = &a->l[a->cy];
+        line_reserve(l, l->len + seg);
+        memmove(l->s + a->cx + seg, l->s + a->cx, l->len - a->cx + 1);
+        memcpy(l->s + a->cx, p, seg);
+        l->len += seg;
+        a->cx += seg;
+        if (!nl)
+            break;
+        doc_reserve(a, a->n + 1);                                /* split the line at the cursor */
+        memmove(&a->l[a->cy + 2], &a->l[a->cy + 1], (size_t)(a->n - a->cy - 1) * sizeof(a->l[0]));
+        memset(&a->l[a->cy + 1], 0, sizeof(a->l[0]));
+        a->n++;
+        struct line *cur = &a->l[a->cy], *nx = &a->l[a->cy + 1];
+        line_set(nx, cur->s + a->cx, cur->len - a->cx);
+        cur->len = a->cx;
+        cur->s[cur->len] = 0;
+        a->cy++;
+        a->cx = 0;
+        p = nl + 1;
+    }
+    a->ay = a->cy;
+    a->ax = a->cx;
+}
+
+static void delete_range(struct app *a, int y0, size_t x0, int y1, size_t x1)
+{
+    struct line *f = &a->l[y0], *t = &a->l[y1];
+    size_t tail = t->len - x1;
+    line_reserve(f, x0 + tail);
+    memmove(f->s + x0, t->s + x1, tail);
+    f->len = x0 + tail;
+    f->s[f->len] = 0;
+    for (int y = y0 + 1; y <= y1; y++)
+        free(a->l[y].s);
+    memmove(&a->l[y0 + 1], &a->l[y1 + 1], (size_t)(a->n - y1 - 1) * sizeof(a->l[0]));
+    memset(&a->l[a->n - (y1 - y0)], 0, (size_t)(y1 - y0) * sizeof(a->l[0]));
+    a->n -= y1 - y0;
+    a->cy = a->ay = y0;
+    a->cx = a->ax = x0;
+}
+
+static void delete_selection(struct app *a)
+{
+    int y0, y1;
+    size_t x0, x1;
+    sel_order(a, &y0, &x0, &y1, &x1);
+    delete_range(a, y0, x0, y1, x1);
+}
+
+/* Replaces the whole document by `t` (the line ends are \n). */
+static void doc_set_text(struct app *a, const char *t, size_t n)
+{
+    doc_clear(a);
+    insert_at_cursor(a, t, n);
+    a->cy = a->ay = 0;
+    a->cx = a->ax = 0;
+}
+
+static void move_to(struct app *a, int y, size_t x, bool extend)
+{
+    a->cy = LM_CLAMP(y, 0, a->n - 1);
+    a->cx = LM_MIN(x, a->l[a->cy].len);
+    if (!extend) {
+        a->ay = a->cy;
+        a->ax = a->cx;
+    }
+    a->typing_run = false;
+}
+
+static void set_want(struct app *a)
+{
+    a->want_col = col_of(&a->l[a->cy], a->cx);
+}
+
+/* ---- files -------------------------------------------------------------------------------------------------------------- */
+
+static void msg(struct app *a, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void msg(struct app *a, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(a->msg, sizeof(a->msg), fmt, ap);
+    va_end(ap);
+    a->msg_until = now_ms() + 6000;
+    a->win.redraw = true;
+}
+
+/* Well formed UTF-8: no truncated or overlong sequences, no surrogates, nothing above U+10FFFF. */
+static bool valid_utf8(const unsigned char *s, size_t n)
+{
+    for (size_t i = 0; i < n;) {
+        unsigned char c = s[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        int k = (c & 0xe0) == 0xc0 ? 1 : (c & 0xf0) == 0xe0 ? 2 : (c & 0xf8) == 0xf0 ? 3 : -1;
+        if (k < 0 || i + (size_t)k >= n)
+            return false;
+        uint32_t cp = c & (0x3f >> k);
+        for (int j = 1; j <= k; j++) {
+            if ((s[i + (size_t)j] & 0xc0) != 0x80)
+                return false;
+            cp = (cp << 6) | (s[i + (size_t)j] & 0x3f);
+        }
+        if ((k == 1 && cp < 0x80) || (k == 2 && cp < 0x800) || (k == 3 && cp < 0x10000) || (cp >= 0xd800 && cp <= 0xdfff) ||
+            cp > 0x10ffff)
+            return false;
+        i += (size_t)k + 1;
+    }
+    return true;
+}
+
+/* Reads `path` into the document. 0, or -1 with a reason in err (the document is untouched then). */
+static int load_file(struct app *a, const char *path, char *err, size_t errsz)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(err, errsz, "cannot open %s: %s", path, strerror(errno));
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+    if (size < 0 || (unsigned long)size > MAX_FILE) {
+        fclose(f);
+        snprintf(err, errsz, "%s is too big (8 MB at most)", path);
+        return -1;
+    }
+    unsigned char *buf = malloc((size_t)size + 1);
+    if (!buf || fread(buf, 1, (size_t)size, f) != (size_t)size) {
+        fclose(f);
+        free(buf);
+        snprintf(err, errsz, "cannot read %s", path);
+        return -1;
+    }
+    fclose(f);
+    if (memchr(buf, 0, (size_t)size)) {
+        free(buf);
+        snprintf(err, errsz, "%s looks like a binary file", path);
+        return -1;
+    }
+    if (!valid_utf8(buf, (size_t)size)) {
+        free(buf);
+        snprintf(err, errsz, "%s is not valid UTF-8 text", path);
+        return -1;
+    }
+    bool crlf = false;
+    size_t n = 0;
+    for (size_t i = 0; i < (size_t)size; i++) {                         /* CRLF -> LF, remembered */
+        if (buf[i] == '\r' && i + 1 < (size_t)size && buf[i + 1] == '\n') {
+            crlf = true;
+            continue;
+        }
+        buf[n++] = buf[i];
+    }
+    bool final_nl = n > 0 && buf[n - 1] == '\n';
+    doc_set_text(a, (const char *)buf, final_nl ? n - 1 : n);
+    free(buf);
+    a->crlf = crlf;
+    a->final_nl = final_nl || n == 0;
+    return 0;
+}
+
+/* Writes the document to `path` (a temporary file next to it, then rename). 0, or -1 with err. */
+static int save_file(struct app *a, const char *path, char *err, size_t errsz)
+{
+    char tmp[PATH_MAX + 32];
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    struct stat st;
+    mode_t mode = stat(path, &st) == 0 ? st.st_mode & 0777 : 0644;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) {
+        snprintf(err, errsz, "cannot write %s: %s", path, strerror(errno));
+        return -1;
+    }
+    bool ok = true;
+    for (int y = 0; y < a->n && ok; y++) {
+        ok = fwrite(a->l[y].s, 1, a->l[y].len, f) == a->l[y].len;
+        if (y < a->n - 1 || a->final_nl)
+            ok = ok && fputs(a->crlf ? "\r\n" : "\n", f) >= 0;
+    }
+    ok = (fclose(f) == 0) && ok;
+    if (!ok || chmod(tmp, mode) < 0 || rename(tmp, path) < 0) {
+        snprintf(err, errsz, "cannot save %s: %s", path, strerror(errno));
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static void set_title(struct app *a)
+{
+    if (!a->win.toplevel)
+        return;
+    const char *base = strrchr(a->path, '/') ? strrchr(a->path, '/') + 1 : a->path;
+    char t[PATH_MAX + 32];
+    snprintf(t, sizeof(t), "%s%s - Editor", a->modified ? "* " : "", a->path[0] ? base : "untitled");
+    WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
+}
+
+static bool do_save(struct app *a, const char *path)
+{
+    char err[200];
+    if (save_file(a, path, err, sizeof(err)) < 0) {
+        msg(a, "%s", err);
+        return false;
+    }
+    if (path != a->path)                                                /* saving to the current name passes a->path itself */
+        snprintf(a->path, sizeof(a->path), "%.*s", (int)sizeof(a->path) - 1, path);
+    a->modified = false;
+    a->quit_armed = false;
+    msg(a, "Saved %s", a->path);
+    return true;
+}
+
+static void do_open(struct app *a, const char *path)
+{
+    char err[200];
+    if (load_file(a, path, err, sizeof(err)) < 0) {
+        if (errno == ENOENT && access(path, F_OK) != 0) {              /* a name that does not exist yet: a new file */
+            doc_clear(a);
+            a->final_nl = true;
+            a->crlf = false;
+            snprintf(a->path, sizeof(a->path), "%s", path);
+            a->modified = false;
+            msg(a, "New file %s", path);
+        } else {
+            msg(a, "%s", err);
+        }
+    } else {
+        snprintf(a->path, sizeof(a->path), "%s", path);
+        a->modified = false;
+        msg(a, "Opened %s", path);
+    }
+    for (int i = 0; i < a->nundo; i++)
+        snap_free(&a->undo[i]);
+    for (int i = 0; i < a->nredo; i++)
+        snap_free(&a->redo[i]);
+    a->nundo = a->nredo = 0;
+    a->typing_run = false;
+    a->quit_armed = false;
+}
+
+/* ---- find ---------------------------------------------------------------------------------------------------------------- */
+
+/* The next occurrence of `needle` starting at or after (y, x), wrapping around the document once. */
+static bool find_from(const struct app *a, const char *needle, int y, size_t x, int *fy, size_t *fx)
+{
+    size_t nl = strlen(needle);
+    if (!nl)
+        return false;
+    for (int k = 0; k <= a->n; k++) {                                    /* k == n: the start of the first line again, up to x */
+        int yy = (y + k) % a->n;
+        const struct line *l = &a->l[yy];
+        for (size_t i = k == 0 ? x : 0; i + nl <= l->len; i++) {
+            if (k == a->n && i >= x)
+                break;
+            if (!memcmp(l->s + i, needle, nl)) {
+                *fy = yy;
+                *fx = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void find_next(struct app *a)
+{
+    if (!a->find[0])
+        return;
+    int y, y0, y1;
+    size_t x, x0, x1;
+    sel_order(a, &y0, &x0, &y1, &x1);
+    y = has_sel(a) ? y1 : a->cy;                                         /* continue after the current match */
+    x = has_sel(a) ? x1 : a->cx;
+    if (find_from(a, a->find, y, x, &y, &x)) {
+        a->ay = y;
+        a->ax = x;
+        a->cy = y;
+        a->cx = x + strlen(a->find);
+        set_want(a);
+        a->win.redraw = true;
+    } else {
+        msg(a, "Not found: %s", a->find);
+    }
+}
+
+/* ---- movement and editing commands ----------------------------------------------------------------------------------------- */
+
+static void word_left(struct app *a, bool extend)
+{
+    int y = a->cy;
+    size_t x = a->cx;
+    const struct line *l = &a->l[y];
+    if (x == 0) {
+        if (y > 0) {                                                     /* the end of the line above */
+            y--;
+            x = a->l[y].len;
+        }
+    } else {
+        while (x > 0 && !is_word((unsigned char)l->s[cp_prev(l, x)]))    /* blanks and punctuation, then the word before them */
+            x = cp_prev(l, x);
+        while (x > 0 && is_word((unsigned char)l->s[cp_prev(l, x)]))
+            x = cp_prev(l, x);
+    }
+    move_to(a, y, x, extend);
+    set_want(a);
+}
+
+static void word_right(struct app *a, bool extend)
+{
+    int y = a->cy;
+    size_t x = a->cx;
+    while (x < a->l[y].len && !is_word((unsigned char)a->l[y].s[x]))
+        x = cp_next(&a->l[y], x);
+    if (x >= a->l[y].len && y < a->n - 1 && a->cx == a->l[y].len) {
+        y++;
+        x = 0;
+    }
+    while (x < a->l[y].len && is_word((unsigned char)a->l[y].s[x]))
+        x = cp_next(&a->l[y], x);
+    move_to(a, y, x, extend);
+    set_want(a);
+}
+
+static void type_text(struct app *a, const char *t, size_t n, bool typing)
+{
+    before_edit(a, typing);
+    if (has_sel(a))
+        delete_selection(a);
+    insert_at_cursor(a, t, n);
+    set_want(a);
+}
+
+static void key_enter(struct app *a)
+{
+    before_edit(a, false);
+    if (has_sel(a))
+        delete_selection(a);
+    const struct line *l = &a->l[a->cy];
+    size_t ind = 0;
+    while (ind < a->cx && (l->s[ind] == ' ' || l->s[ind] == '\t'))     /* keep the indentation of the line */
+        ind++;
+    char buf[258];
+    buf[0] = '\n';
+    memcpy(buf + 1, l->s, LM_MIN(ind, (size_t)256));
+    insert_at_cursor(a, buf, 1 + LM_MIN(ind, (size_t)256));
+    set_want(a);
+}
+
+static void key_backspace(struct app *a, bool word)
+{
+    if (!has_sel(a)) {
+        if (a->cy == 0 && a->cx == 0)
+            return;
+        if (word)
+            word_left(a, true);
+        else if (a->cx == 0)
+            move_to(a, a->cy - 1, a->l[a->cy - 1].len, true);
+        else
+            move_to(a, a->cy, cp_prev(&a->l[a->cy], a->cx), true);
+    }
+    before_edit(a, false);
+    delete_selection(a);
+    set_want(a);
+}
+
+static void key_delete(struct app *a, bool word)
+{
+    if (!has_sel(a)) {
+        if (a->cy == a->n - 1 && a->cx == a->l[a->cy].len)
+            return;
+        int y = a->cy;
+        size_t x = a->cx;
+        if (word)
+            word_right(a, true);
+        else if (a->cx == a->l[a->cy].len)
+            move_to(a, y + 1, 0, true);
+        else
+            move_to(a, y, cp_next(&a->l[y], x), true);
+    }
+    before_edit(a, false);
+    delete_selection(a);
+    set_want(a);
+}
+
+/* ---- clipboard ------------------------------------------------------------------------------------------------------------ */
+
+static void dsrc_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    struct app *a = data;
+    if (op == LM_WL_DATA_SOURCE_EVT_SEND) {
+        if (a->clip_out) {
+            const char *p = a->clip_out;
+            size_t left = strlen(p);
+            while (left) {
+                ssize_t k = write(args[1].h, p, left);
+                if (k <= 0)
+                    break;
+                p += k;
+                left -= (size_t)k;
+            }
+        }
+    } else if (op == LM_WL_DATA_SOURCE_EVT_CANCELLED) {
+        wlc_forget(c, id);
+        if (a->dsrc == id)
+            a->dsrc = 0;
+    }
+}
+
+static void copy_text(struct app *a, const char *t)
+{
+    free(a->clip_out);
+    a->clip_out = strdup(t);
+    if (!a->ddm || !a->ddev)
+        return;
+    if (a->dsrc) {
+        WLC_SEND0(a->win.c, a->dsrc, LM_WL_DATA_SOURCE_REQ_DESTROY);
+        wlc_forget(a->win.c, a->dsrc);
+    }
+    a->dsrc = wlc_alloc(a->win.c, &lm_wl_data_source_interface, dsrc_event, a);
+    WLC_SEND(a->win.c, a->ddm, LM_WL_DATA_DEVICE_MANAGER_REQ_CREATE_DATA_SOURCE, { .n = a->dsrc });
+    WLC_SEND(a->win.c, a->dsrc, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/plain;charset=utf-8" });
+    WLC_SEND(a->win.c, a->dsrc, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/plain" });
+    WLC_SEND(a->win.c, a->ddev, LM_WL_DATA_DEVICE_REQ_SET_SELECTION, { .o = a->dsrc }, { .u = a->last_serial });
+}
+
+static void cmd_copy(struct app *a, bool cut)
+{
+    if (!has_sel(a))
+        return;
+    int y0, y1;
+    size_t x0, x1;
+    sel_order(a, &y0, &x0, &y1, &x1);
+    char *t = range_text(a, y0, x0, y1, x1, NULL);
+    copy_text(a, t);
+    free(t);
+    if (cut) {
+        before_edit(a, false);
+        delete_selection(a);
+        set_want(a);
+    }
+}
+
+static const char *const paste_mimes[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
+
+static void cmd_paste(struct app *a)
+{
+    char *text = NULL;
+    size_t len = 0;
+    if (a->dsrc && a->clip_out) {                                       /* our own copy: no round trip through the compositor */
+        text = strdup(a->clip_out);
+        len = strlen(text);
+    } else if (a->offer) {
+        const char *mime = NULL;
+        for (size_t m = 0; m < sizeof(paste_mimes) / sizeof(paste_mimes[0]) && !mime; m++)
+            for (int i = 0; i < a->n_offer_mimes; i++)
+                if (!strcmp(a->offer_mimes[i], paste_mimes[m])) {
+                    mime = a->offer_mimes[i];
+                    break;
+                }
+        int fds[2];
+        if (!mime || pipe2(fds, O_CLOEXEC) < 0)
+            return;
+        WLC_SEND(a->win.c, a->offer, LM_WL_DATA_OFFER_REQ_RECEIVE, { .s = mime }, { .h = fds[1] });
+        close(fds[1]);
+        wlc_flush(a->win.c);
+        text = malloc((1u << 20) + 1);
+        if (!text) {
+            close(fds[0]);
+            return;
+        }
+        struct pollfd pf = { .fd = fds[0], .events = POLLIN };
+        while (len < (1u << 20)) {
+            if (poll(&pf, 1, 1000) <= 0)
+                break;
+            ssize_t k = read(fds[0], text + len, (1u << 20) - len);
+            if (k <= 0)
+                break;
+            len += (size_t)k;
+        }
+        close(fds[0]);
+        text[len] = 0;
+    }
+    if (!text)
+        return;
+    size_t n = 0;
+    for (size_t i = 0; i < len; i++)                                    /* \r\n and \r become \n; stray NULs go */
+        if (text[i] == '\r')
+            text[n++] = (i + 1 < len && text[i + 1] == '\n') ? (i++, '\n') : '\n';
+        else if (text[i])
+            text[n++] = text[i];
+    if (n && valid_utf8((const unsigned char *)text, n))
+        type_text(a, text, n, false);
+    else if (n)
+        msg(a, "The clipboard is not valid UTF-8 text");
+    free(text);
+}
+
+static void doffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c;
+    struct app *a = data;
+    if (op == LM_WL_DATA_OFFER_EVT_OFFER && id == a->offer_pending && a->n_offer_mimes < 16)
+        snprintf(a->offer_mimes[a->n_offer_mimes++], sizeof(a->offer_mimes[0]), "%s", args[0].s);
+}
+
+static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)id;
+    struct app *a = data;
+    if (op == LM_WL_DATA_DEVICE_EVT_DATA_OFFER) {
+        if (a->offer_pending) {
+            WLC_SEND0(c, a->offer_pending, LM_WL_DATA_OFFER_REQ_DESTROY);
+            wlc_forget(c, a->offer_pending);
+        }
+        a->offer_pending = args[0].n;
+        a->n_offer_mimes = 0;
+        wlc_set_handler(c, a->offer_pending, doffer_event, a);
+    } else if (op == LM_WL_DATA_DEVICE_EVT_SELECTION) {
+        a->offer = args[0].o && args[0].o == a->offer_pending ? args[0].o : 0;      /* the selection offer, or none */
+        if (!a->offer && a->offer_pending) {
+            WLC_SEND0(c, a->offer_pending, LM_WL_DATA_OFFER_REQ_DESTROY);
+            wlc_forget(c, a->offer_pending);
+            a->offer_pending = 0;
+        }
+    }
+}
+
+/* ---- keys ----------------------------------------------------------------------------------------------------------------- */
+
+static void prompt_open(struct app *a, int kind, const char *initial)
+{
+    a->prompt = kind;
+    snprintf(a->pbuf, sizeof(a->pbuf), "%.511s", initial);
+    a->win.redraw = true;
+}
+
+static void prompt_accept(struct app *a)
+{
+    int kind = a->prompt;
+    char text[512];
+    snprintf(text, sizeof(text), "%s", a->pbuf);
+    switch (kind) {
+    case P_OPEN:
+        a->prompt = P_NONE;
+        if (a->modified && !a->quit_armed) {
+            a->quit_armed = true;
+            msg(a, "Unsaved changes: press Enter again to open %s anyway, Esc to stay", text);
+            a->prompt = P_OPEN;
+            return;
+        }
+        if (text[0])
+            do_open(a, text);
+        break;
+    case P_SAVEAS:
+        a->prompt = P_NONE;
+        if (text[0])
+            do_save(a, text);
+        break;
+    case P_FIND:
+        a->prompt = P_NONE;
+        snprintf(a->find, sizeof(a->find), "%.255s", text);
+        find_next(a);
+        break;
+    case P_GOTO: {
+        a->prompt = P_NONE;
+        int line = atoi(text);
+        if (line >= 1) {
+            move_to(a, line - 1, 0, false);
+            set_want(a);
+        }
+        break;
+    }
+    }
+    set_title(a);
+    a->win.redraw = true;
+}
+
+static void edit_prompt(struct app *a, uint32_t ks, bool plain)
+{
+    size_t len = strlen(a->pbuf);
+    char txt[8];
+    if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+        prompt_accept(a);
+    } else if (ks == LM_KS_Escape) {
+        a->prompt = P_NONE;
+        a->quit_armed = false;
+    } else if (ks == LM_KS_BackSpace) {
+        while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
+            len--;
+        if (len > 0)
+            len--;
+        a->pbuf[len] = 0;
+    } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && len + strlen(txt) < sizeof(a->pbuf)) {
+        memcpy(a->pbuf + len, txt, strlen(txt) + 1);
+    }
+    a->win.redraw = true;
+}
+
+static void page_move(struct app *a, int dir, bool extend)
+{
+    int step = LM_MAX(a->rows_visible - 1, 1) * dir;
+    int y = LM_CLAMP(a->cy + step, 0, a->n - 1);
+    move_to(a, y, off_at_col(&a->l[y], a->want_col), extend);
+    a->top = LM_CLAMP(a->top + step, 0, LM_MAX(a->n - 1, 0));
+}
+
+static void handle_key(struct app *a, uint32_t code, uint32_t ks)
+{
+    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0, shift = (a->win.mods & LM_MOD_SHIFT) != 0;
+    bool alt = (a->win.mods & LM_MOD_ALT) != 0, super = (a->win.mods & LM_MOD_SUPER) != 0;
+    bool plain = !ctrl && !alt && !super;
+    (void)code;
+    if (a->prompt != P_NONE) {
+        edit_prompt(a, ks, plain);
+        return;
+    }
+    char txt[8];
+    int tl = lm_keysym_to_utf8(ks, txt);
+    char letter = (tl == 1 && ctrl && !alt && !super) ? (char)((txt[0] >= 'A' && txt[0] <= 'Z') ? txt[0] + 32 : txt[0]) : 0;
+    if (letter) {
+        switch (letter) {
+        case 'q':
+            if (a->modified && !a->quit_armed) {
+                a->quit_armed = true;
+                msg(a, "Unsaved changes: Ctrl+Q again to discard them and quit");
+            } else {
+                a->win.running = false;
+            }
+            return;
+        case 's':
+            if (shift || !a->path[0])
+                prompt_open(a, P_SAVEAS, a->path);
+            else
+                do_save(a, a->path);
+            set_title(a);
+            return;
+        case 'o': prompt_open(a, P_OPEN, ""); return;
+        case 'n':
+            if (a->modified && !a->quit_armed) {
+                a->quit_armed = true;
+                msg(a, "Unsaved changes: Ctrl+N again to start a new document anyway");
+                return;
+            }
+            doc_clear(a);
+            a->path[0] = 0;
+            a->modified = a->quit_armed = false;
+            a->final_nl = true;
+            a->crlf = false;
+            set_title(a);
+            return;
+        case 'f': prompt_open(a, P_FIND, a->find); return;
+        case 'g': prompt_open(a, P_GOTO, ""); return;
+        case 'a':
+            a->ay = 0;
+            a->ax = 0;
+            move_to(a, a->n - 1, a->l[a->n - 1].len, true);
+            return;
+        case 'c': cmd_copy(a, false); return;
+        case 'x': cmd_copy(a, true); set_title(a); return;
+        case 'v': cmd_paste(a); set_title(a); return;
+        case 'z':
+            if (!undo(a, shift))
+                msg(a, "Nothing to %s", shift ? "redo" : "undo");
+            set_title(a);
+            return;
+        case 'y':
+            if (!undo(a, true))
+                msg(a, "Nothing to redo");
+            set_title(a);
+            return;
+        default: break;
+        }
+    }
+    switch (ks) {
+    case LM_KS_Escape:
+        a->msg[0] = 0;
+        a->quit_armed = false;
+        a->ay = a->cy;
+        a->ax = a->cx;
+        return;
+    case LM_KS_Left:
+        if (has_sel(a) && !shift && !ctrl) {
+            int y0, y1;
+            size_t x0, x1;
+            sel_order(a, &y0, &x0, &y1, &x1);
+            move_to(a, y0, x0, false);
+        } else if (ctrl) {
+            word_left(a, shift);
+            return;
+        } else if (a->cx == 0) {
+            if (a->cy > 0)
+                move_to(a, a->cy - 1, a->l[a->cy - 1].len, shift);
+        } else {
+            move_to(a, a->cy, cp_prev(&a->l[a->cy], a->cx), shift);
+        }
+        set_want(a);
+        return;
+    case LM_KS_Right:
+        if (has_sel(a) && !shift && !ctrl) {
+            int y0, y1;
+            size_t x0, x1;
+            sel_order(a, &y0, &x0, &y1, &x1);
+            move_to(a, y1, x1, false);
+        } else if (ctrl) {
+            word_right(a, shift);
+            return;
+        } else if (a->cx >= a->l[a->cy].len) {
+            if (a->cy < a->n - 1)
+                move_to(a, a->cy + 1, 0, shift);
+        } else {
+            move_to(a, a->cy, cp_next(&a->l[a->cy], a->cx), shift);
+        }
+        set_want(a);
+        return;
+    case LM_KS_Up:
+    case LM_KS_Down: {
+        int y = a->cy + (ks == LM_KS_Up ? -1 : 1);
+        if (y < 0)
+            move_to(a, 0, 0, shift);
+        else if (y >= a->n)
+            move_to(a, a->n - 1, a->l[a->n - 1].len, shift);
+        else
+            move_to(a, y, off_at_col(&a->l[y], a->want_col), shift);
+        return;
+    }
+    case LM_KS_Home:
+        if (ctrl)
+            move_to(a, 0, 0, shift);
+        else {
+            size_t ind = 0;                                              /* first press: the first non-blank, then the line start */
+            while (ind < a->l[a->cy].len && (a->l[a->cy].s[ind] == ' ' || a->l[a->cy].s[ind] == '\t'))
+                ind++;
+            move_to(a, a->cy, a->cx == ind || ind == a->l[a->cy].len ? 0 : ind, shift);
+        }
+        set_want(a);
+        return;
+    case LM_KS_End:
+        if (ctrl)
+            move_to(a, a->n - 1, a->l[a->n - 1].len, shift);
+        else
+            move_to(a, a->cy, a->l[a->cy].len, shift);
+        set_want(a);
+        return;
+    case LM_KS_Page_Up: page_move(a, -1, shift); return;
+    case LM_KS_Page_Down: page_move(a, 1, shift); return;
+    case LM_KS_F1 + 2: find_next(a); return;                            /* F3 */
+    case LM_KS_BackSpace: key_backspace(a, ctrl); set_title(a); return;
+    case LM_KS_Delete: key_delete(a, ctrl); set_title(a); return;
+    case LM_KS_Return:
+    case LM_KS_KP_Enter: key_enter(a); set_title(a); return;
+    case LM_KS_Tab: type_text(a, "\t", 1, true); set_title(a); return;
+    default: break;
+    }
+    if (plain && tl > 0 && (unsigned char)txt[0] >= 0x20 && txt[0] != 0x7f) {
+        type_text(a, txt, (size_t)tl, true);
+        set_title(a);
+    }
+}
+
+/* ---- drawing --------------------------------------------------------------------------------------------------------------- */
+
+static int gutter_w(const struct app *a)
+{
+    int digits = 1;
+    for (int n = a->n; n >= 10; n /= 10)
+        digits++;
+    return (LM_MAX(digits, 3) + 2) * LM_FONT_W;
+}
+
+static uint32_t cp_at(const struct line *l, size_t off)
+{
+    int used = 0;
+    uint32_t cp = lm_utf8_decode(l->s + off, (int)(l->len - off), &used);
+    return cp;
+}
+
+static void scroll_to_cursor(struct app *a)
+{
+    int rows = LM_MAX(a->rows_visible, 1), cols = LM_MAX(a->cols_visible, 1);
+    if (a->cy < a->top)
+        a->top = a->cy;
+    if (a->cy >= a->top + rows)
+        a->top = a->cy - rows + 1;
+    int col = col_of(&a->l[a->cy], a->cx);
+    if (col < a->left)
+        a->left = col;
+    if (col >= a->left + cols - 1)
+        a->left = col - cols + 2;
+    a->left = LM_MAX(a->left, 0);
+    a->top = LM_CLAMP(a->top, 0, a->n - 1);
+}
+
+static void paint(struct wlwin *w)
+{
+    struct app *a = w->data;
+    int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
+    int gw = gutter_w(a);
+    a->rows_visible = LM_MAX((w->bh - bars) / LM_FONT_H, 1);
+    a->cols_visible = LM_MAX((w->bw - gw) / LM_FONT_W, 1);
+    scroll_to_cursor(a);
+    wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
+    wlwin_fill(w, 0, 0, gw, w->bh - bars, COL_GUTTER_BG);
+    int y0, y1;
+    size_t x0, x1;
+    sel_order(a, &y0, &x0, &y1, &x1);
+    bool sel = has_sel(a);
+    for (int r = 0; r < a->rows_visible; r++) {
+        int ly = a->top + r;
+        if (ly >= a->n)
+            break;
+        const struct line *l = &a->l[ly];
+        int py = r * LM_FONT_H;
+        if (ly == a->cy)
+            wlwin_fill(w, gw, py, w->bw - gw, LM_FONT_H, COL_LINE);
+        char num[16];
+        snprintf(num, sizeof(num), "%d", ly + 1);
+        wlwin_text(w, gw - (int)(strlen(num) + 1) * LM_FONT_W, py, num, 1, ly == a->cy ? COL_FG : COL_DIM, 0);
+        int col = 0;
+        size_t i = 0;
+        int sel_from = -1, sel_to = -1;                                  /* selected display columns of this line */
+        if (sel && ly >= y0 && ly <= y1) {
+            sel_from = ly == y0 ? col_of(l, x0) : 0;
+            sel_to = ly == y1 ? col_of(l, x1) : col_of(l, l->len) + 1;     /* a selected line end shows one extra cell */
+        }
+        if (sel_from >= 0)
+            for (int c = LM_MAX(sel_from, a->left); c < sel_to && c < a->left + a->cols_visible; c++)
+                wlwin_fill(w, gw + (c - a->left) * LM_FONT_W, py, LM_FONT_W, LM_FONT_H, COL_SEL);
+        while (i < l->len) {
+            int nc = l->s[i] == '\t' ? (col / TAB_W + 1) * TAB_W : col + 1;
+            if (l->s[i] != '\t' && col >= a->left && col < a->left + a->cols_visible)
+                wlwin_glyph(w, gw + (col - a->left) * LM_FONT_W, py, cp_at(l, i), 1, COL_FG);
+            col = nc;
+            i = cp_next(l, i);
+            if (col >= a->left + a->cols_visible)
+                break;
+        }
+        if (ly == a->cy) {                                               /* the cursor: a bar at the left edge of its cell */
+            int cc = col_of(l, a->cx);
+            if (cc >= a->left && cc < a->left + a->cols_visible)
+                wlwin_fill(w, gw + (cc - a->left) * LM_FONT_W, py, 2, LM_FONT_H, COL_ACCENT);
+        }
+    }
+    int sy = w->bh - STATUS_H;
+    wlwin_fill(w, 0, sy, w->bw, STATUS_H, COL_BAR);
+    char left[PATH_MAX + 64], right[64];
+    const char *name = a->path[0] ? a->path : "untitled";
+    snprintf(left, sizeof(left), "%s%s", a->modified ? "* " : "", name);
+    snprintf(right, sizeof(right), "Ln %d, Col %d   %d lines", a->cy + 1, col_of(&a->l[a->cy], a->cx) + 1, a->n);
+    bool showing = a->msg[0] && now_ms() < a->msg_until;
+    wlwin_text(w, 6, sy + 2, showing ? a->msg : left, 1, showing ? COL_WARN : COL_FG, w->bw - 12 - (int)strlen(right) * LM_FONT_W);
+    wlwin_text(w, w->bw - 6 - (int)strlen(right) * LM_FONT_W, sy + 2, right, 1, COL_DIM, 0);
+    if (a->prompt != P_NONE) {
+        static const char *const labels[] = { "", "Open: ", "Save as: ", "Find: ", "Go to line: " };
+        int py = sy - STATUS_H;
+        wlwin_fill(w, 0, py, w->bw, STATUS_H, COL_BAR);
+        wlwin_fill(w, 0, py, w->bw, 1, COL_ACCENT);
+        char line[640];
+        snprintf(line, sizeof(line), "%s%s_", labels[a->prompt], a->pbuf);
+        wlwin_text(w, 6, py + 2, line, 1, COL_FG, w->bw - 12);
+    }
+}
+
+/* ---- mouse ----------------------------------------------------------------------------------------------------------------- */
+
+static void place_from_pointer(struct app *a, bool extend)
+{
+    int gw = gutter_w(a);
+    int row = LM_CLAMP((int)a->py / LM_FONT_H, 0, a->rows_visible - 1);
+    int y = LM_CLAMP(a->top + row, 0, a->n - 1);
+    int col = a->left + (int)((a->px - gw) / LM_FONT_W + (a->px < gw ? -1 : 0));
+    move_to(a, y, off_at_col(&a->l[y], LM_MAX(col, 0)), extend);
+    set_want(a);
+}
+
+static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
+{
+    struct app *a = w->data;
+    switch (op) {
+    case LM_WL_POINTER_EVT_ENTER:
+        a->px = lm_fixed_to_double(args[2].f);
+        a->py = lm_fixed_to_double(args[3].f);
+        break;
+    case LM_WL_POINTER_EVT_MOTION:
+        a->px = lm_fixed_to_double(args[1].f);
+        a->py = lm_fixed_to_double(args[2].f);
+        if (a->dragging) {
+            place_from_pointer(a, true);
+            w->redraw = true;
+        }
+        break;
+    case LM_WL_POINTER_EVT_BUTTON:
+        a->last_serial = args[0].u;
+        if (args[2].u != 272)
+            break;
+        if (args[3].u == 1) {
+            bool dbl = args[1].u - a->last_click_ms < 400;
+            a->last_click_ms = args[1].u;
+            place_from_pointer(a, (w->mods & LM_MOD_SHIFT) != 0);
+            if (dbl) {                                                   /* double click: the word under the pointer */
+                const struct line *l = &a->l[a->cy];
+                size_t s = a->cx, e = a->cx;
+                while (s > 0 && is_word((unsigned char)l->s[cp_prev(l, s)]))
+                    s = cp_prev(l, s);
+                while (e < l->len && is_word((unsigned char)l->s[e]))
+                    e = cp_next(l, e);
+                a->ay = a->cy;
+                a->ax = s;
+                a->cx = e;
+                a->dragging = false;
+            } else {
+                a->dragging = true;
+            }
+        } else {
+            a->dragging = false;
+        }
+        w->redraw = true;
+        break;
+    case LM_WL_POINTER_EVT_AXIS:
+        if (args[1].u == 0) {
+            int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
+            if (lines == 0)
+                lines = args[2].f > 0 ? 1 : -1;
+            a->top = LM_CLAMP(a->top + lines, 0, a->n - 1);
+            w->redraw = true;
+        }
+        break;
+    }
+}
+
+static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
+{
+    struct app *a = w->data;
+    switch (op) {
+    case LM_WL_KEYBOARD_EVT_KEY: {
+        a->last_serial = args[0].u;
+        uint32_t code = args[2].u;
+        if (args[3].u == 0) {
+            if (a->rep_code == code)
+                a->rep_code = 0;
+            break;
+        }
+        uint32_t ks = lm_keymap_keysym(code, w->mods);
+        handle_key(a, code, ks);
+        w->redraw = true;
+        if (ks && !(w->mods & (LM_MOD_CTRL | LM_MOD_ALT)) && a->rep_rate > 0) {
+            a->rep_code = code;
+            a->rep_next = now_ms() + a->rep_delay;
+        } else {
+            a->rep_code = 0;
+        }
+        break;
+    }
+    case LM_WL_KEYBOARD_EVT_REPEAT_INFO:
+        a->rep_rate = args[0].i;
+        a->rep_delay = args[1].i;
+        break;
+    }
+}
+
+static bool close_event(struct wlwin *w)
+{
+    struct app *a = w->data;
+    if (a->modified && !a->quit_armed) {
+        a->quit_armed = true;
+        msg(a, "Unsaved changes: close again to discard them");
+        return false;
+    }
+    return true;
+}
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
+{
+    struct app *a = w->data;
+    if (!strcmp(iface, "wl_data_device_manager"))
+        a->ddm = wlc_bind(w->c, w->registry, name, &lm_wl_data_device_manager_interface, LM_MIN(ver, 3u), NULL, NULL);
+}
+
+/* ---- self test --------------------------------------------------------------------------------------------------------------- */
+
+static int bad;
+#define CHECK(c, ...) do { if (!(c)) { fprintf(stderr, "selftest: line %d: ", __LINE__); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); bad++; } } while (0)
+
+static char *whole(const struct app *a)
+{
+    return range_text(a, 0, 0, a->n - 1, a->l[a->n - 1].len, NULL);
+}
+
+static int selftest(void)
+{
+    static struct app a;
+    doc_clear(&a);
+    type_text(&a, "hello", 5, true);
+    type_text(&a, " world", 6, true);                                  /* typing joins one undo step */
+    CHECK(a.nundo == 1, "undo steps %d", a.nundo);
+    char *t = whole(&a);
+    CHECK(!strcmp(t, "hello world"), "'%s'", t);
+    free(t);
+    CHECK(undo(&a, false) && a.n == 1 && a.l[0].len == 0, "undo of the typing run");
+    CHECK(undo(&a, true), "redo");
+    t = whole(&a);
+    CHECK(!strcmp(t, "hello world"), "after redo '%s'", t);
+    free(t);
+
+    doc_clear(&a);
+    insert_at_cursor(&a, "one\ntwo\nthree", 13);                       /* a paste with line ends */
+    CHECK(a.n == 3 && a.cy == 2 && a.cx == 5, "paste: %d lines, cursor %d:%zu", a.n, a.cy, a.cx);
+    delete_range(&a, 0, 1, 2, 2);                                       /* "o" + "ree" */
+    t = whole(&a);
+    CHECK(!strcmp(t, "oree") && a.n == 1, "delete across lines '%s'", t);
+    free(t);
+
+    doc_clear(&a);
+    insert_at_cursor(&a, "a\tb \xc3\xb5\xe2\x82\xac z", 11);            /* tab, o-tilde (2 bytes), euro (3 bytes) */
+    CHECK(col_of(&a.l[0], 2) == 4, "tab column %d", col_of(&a.l[0], 2));
+    CHECK(col_of(&a.l[0], a.l[0].len) == 10, "columns %d", col_of(&a.l[0], a.l[0].len));
+    size_t o = a.l[0].len;
+    CHECK(cp_prev(&a.l[0], o) == o - 1 && cp_prev(&a.l[0], o - 1) == o - 2, "utf8 steps back over a space and a letter");
+    CHECK(off_at_col(&a.l[0], 4) == 2 && off_at_col(&a.l[0], 0) == 0, "offset at a column");
+
+    doc_clear(&a);
+    insert_at_cursor(&a, "alpha beta  gamma", 17);
+    a.cy = 0;
+    a.cx = 17;
+    word_left(&a, false);
+    CHECK(a.cx == 12, "word left: %zu", a.cx);
+    word_left(&a, false);
+    CHECK(a.cx == 6, "word left again: %zu", a.cx);
+    a.cx = 0;
+    word_right(&a, false);
+    CHECK(a.cx == 5, "word right: %zu", a.cx);
+
+    doc_clear(&a);
+    insert_at_cursor(&a, "foo bar\nbar baz\nfoo", 19);
+    int fy;
+    size_t fx;
+    CHECK(find_from(&a, "bar", 0, 0, &fy, &fx) && fy == 0 && fx == 4, "find first");
+    CHECK(find_from(&a, "bar", 0, 5, &fy, &fx) && fy == 1 && fx == 0, "find next line");
+    CHECK(find_from(&a, "foo", 2, 1, &fy, &fx) && fy == 0 && fx == 0, "after the last match: wraps to the first");
+    CHECK(find_from(&a, "foo", 2, 0, &fy, &fx) && fy == 2 && fx == 0, "a match at the position itself counts");
+    CHECK(find_from(&a, "bar", 1, 1, &fy, &fx) && fy == 0 && fx == 4, "find wraps around");
+    CHECK(!find_from(&a, "nope", 0, 0, &fy, &fx), "no match");
+
+    /* files: CRLF kept, no final newline kept, binary and invalid UTF-8 refused */
+    char path[] = "/tmp/mellagui-edit-selftest-XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0, "mkstemp");
+    if (fd >= 0) {
+        close(fd);
+        FILE *f = fopen(path, "wb");
+        fputs("one\r\ntwo\r\nthree", f);
+        fclose(f);
+        char err[200];
+        CHECK(load_file(&a, path, err, sizeof(err)) == 0 && a.n == 3 && a.crlf && !a.final_nl, "load crlf: %s", err);
+        a.l[1].s[0] = 'T';
+        CHECK(save_file(&a, path, err, sizeof(err)) == 0, "save: %s", err);
+        char buf[64] = "";
+        f = fopen(path, "rb");
+        size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        CHECK(got == 15 && !memcmp(buf, "one\r\nTwo\r\nthree", 15), "round trip: %zu bytes", got);
+        f = fopen(path, "wb");
+        fwrite("a\0b", 1, 3, f);
+        fclose(f);
+        CHECK(load_file(&a, path, err, sizeof(err)) < 0 && strstr(err, "binary"), "binary refused: %s", err);
+        f = fopen(path, "wb");
+        fwrite("ok \xff\xfe", 1, 5, f);
+        fclose(f);
+        CHECK(load_file(&a, path, err, sizeof(err)) < 0 && strstr(err, "UTF-8"), "invalid UTF-8 refused: %s", err);
+        f = fopen(path, "wb");
+        fputs("x\n", f);
+        fclose(f);
+        CHECK(load_file(&a, path, err, sizeof(err)) == 0 && a.n == 1 && a.final_nl, "final newline: %s", err);
+        unlink(path);
+    }
+    CHECK(valid_utf8((const unsigned char *)"\xc3\xb5\xe2\x82\xac\xf0\x9f\x98\x80", 9), "valid sequences");
+    CHECK(!valid_utf8((const unsigned char *)"\xc3", 1) && !valid_utf8((const unsigned char *)"\xe2\x82", 2), "truncated sequences");
+    CHECK(!valid_utf8((const unsigned char *)"\xc0\xaf", 2), "overlong form");
+    puts(bad ? "selftest FAILED" : "selftest ok");
+    return bad ? 1 : 0;
+}
+
+/* ---- main ------------------------------------------------------------------------------------------------------------------- */
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && !strcmp(argv[1], "--selftest"))
+        return selftest();
+    if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
+        fprintf(stderr, "usage: mellagui-edit [FILE | --selftest]\n");
+        return 2;
+    }
+    static struct app a;
+    doc_clear(&a);
+    a.final_nl = true;
+    a.rep_rate = 25;
+    a.rep_delay = 400;
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
+                                          .keyboard = keyboard_event, .close = close_event };
+    if (wlwin_connect(&a.win, "mellagui-edit", &ops, &a) < 0)
+        return 1;
+    if (wlwin_open(&a.win, "Editor", "mellagui.edit", 760, 520, 240, 120) < 0)
+        return 1;
+    if (a.ddm && a.win.seat) {
+        a.ddev = wlc_alloc(a.win.c, &lm_wl_data_device_interface, ddev_event, &a);
+        WLC_SEND(a.win.c, a.ddm, LM_WL_DATA_DEVICE_MANAGER_REQ_GET_DATA_DEVICE, { .n = a.ddev }, { .o = a.win.seat });
+    }
+    if (argc == 2) {
+        char full[PATH_MAX];
+        snprintf(full, sizeof(full), "%s", argv[1]);
+        do_open(&a, full);
+    }
+    set_title(&a);
+    while (a.win.running) {
+        int timeout = 250;
+        if (a.rep_code) {
+            int64_t wait = a.rep_next - now_ms();
+            timeout = (int)LM_CLAMP(wait, 1, 250);
+        }
+        if (!wlwin_step(&a.win, timeout))
+            break;
+        if (a.rep_code && now_ms() >= a.rep_next) {                      /* key repeat */
+            handle_key(&a, a.rep_code, lm_keymap_keysym(a.rep_code, a.win.mods));
+            a.rep_next = now_ms() + (a.rep_rate > 0 ? 1000 / a.rep_rate : 40);
+            a.win.redraw = true;
+        }
+        if (a.msg[0] && now_ms() >= a.msg_until) {
+            a.msg[0] = 0;
+            a.quit_armed = false;                                        /* the question has timed out, too */
+            a.win.redraw = true;
+        }
+    }
+    wlwin_destroy(&a.win);
+    return 0;
+}

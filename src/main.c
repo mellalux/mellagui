@@ -466,7 +466,7 @@ int main(int argc, char **argv)
         cfg.run_cmd = default_sibling("mellagui-run", run_buf, sizeof(run_buf));
     static char settings_cmd_buf[PATH_MAX + 4];
     cfg.settings_cmd = default_sibling("mellagui-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char calc_buf[PATH_MAX + 4], view_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
+    static char calc_buf[PATH_MAX + 4], edit_buf[PATH_MAX + 4], view_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
     cfg.view_cmd = default_sibling("mellagui-view", view_buf, sizeof(view_buf));
     if (cfg.napps == 0) {
         /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
@@ -474,6 +474,8 @@ int main(int argc, char **argv)
         cfg.apps[cfg.napps++] = (struct lm_app_entry){
             "Calculator", default_sibling("mellagui-calc", calc_buf, sizeof(calc_buf)) };
         cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Images", cfg.view_cmd };
+        cfg.apps[cfg.napps++] = (struct lm_app_entry){
+            "Editor", default_sibling("mellagui-edit", edit_buf, sizeof(edit_buf)) };
         /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
          * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
         const char *home = getenv("HOME");

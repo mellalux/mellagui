@@ -33,24 +33,24 @@
 #define PANEL_LAYOUT_W 36
 #define PANEL_STICKY_W 84
 #define MENU_W 200
-#define GADGET_W 300                /* default size (5 entries of 2 lines) */
+#define GADGET_W 250                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
 #define GADGET_H (GADGET_TITLE_H + LM_GADGET_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
-#define GADGET_MIN_W 200
+#define GADGET_MIN_W 180
 #define GADGET_MAX_W 640
 #define GADGET_MIN_H (GADGET_TITLE_H + GADGET_ENTRY_H + GADGET_PAD)
 #define GADGET_MAX_H 560            /* taller than 5 slots: each entry gets more lines */
-#define GADGET_TITLE_H 32
-#define GADGET_ENTRY_H 44
-#define GADGET_PAD 10
+#define GADGET_TITLE_H 26
+#define GADGET_ENTRY_H 36
+#define GADGET_PAD 8
 #define GADGET_MARGIN 12
-#define SYS_W 300
-#define SYS_H 404                   /* title, CPU, graph, cores, memory, swap, temperature, the device rows */
-#define SYS_MIN_W 240
-#define SYS_MIN_H 156
-#define MIXER_W 300
-#define MIXER_H 232                 /* title, master, output, two application rows, hint */
-#define MIXER_MIN_W 240
-#define MIXER_MIN_H 140
+#define SYS_W 250
+#define SYS_H 300                   /* title, CPU, graph, cores, memory, swap, temperature, the device rows that fit */
+#define SYS_MIN_W 210
+#define SYS_MIN_H 130
+#define MIXER_W 250
+#define MIXER_H 196                 /* title, master, output, two application rows, hint */
+#define MIXER_MIN_W 210
+#define MIXER_MIN_H 120
 #define GADGET_EDGE 6               /* resize zone along the left/right/bottom edge (top: 3 px) */
 #define MENU_ITEM_H 26
 #define PANEL_TASK_MAX_W 160

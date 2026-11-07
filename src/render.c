@@ -547,8 +547,8 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     char badge[8];
     snprintf(badge, sizeof(badge), "%d", g->total);
     int bw = lm_font_text_width(badge) + 14;
-    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 18) / 2, bw, 18);
-    fill_round(c, &pill, 9, 0xff2d3a5au);
+    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
+    fill_round(c, &pill, 8, 0xff2d3a5au);
     draw_text_centered(c, &pill, badge, COL_PANEL_ACCENT);
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
@@ -648,11 +648,11 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
     paint_card_base(c, g);
 
     /* header: speaker glyph, title, badge with the level */
-    struct lm_rect icon = lm_rect_make(card.x + 10, card.y + (g->title_h - 22) / 2, 22, 22);
+    struct lm_rect icon = lm_rect_make(card.x + 10, card.y + (g->title_h - 20) / 2, 20, 20);
     paint_speaker(c, &icon, st && st->mute, 0xff6fa8ffu);
     int hy = card.y + (g->title_h - LM_FONT_H) / 2;
     struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
-    draw_text(c, &head, card.x + 38, hy, "Volume", COL_PANEL_TEXT);
+    draw_text(c, &head, card.x + 36, hy, "Volume", COL_PANEL_TEXT);
     char badge[16];
     if (!st || st->backend == LM_MIXER_NONE)
         snprintf(badge, sizeof(badge), "--");
@@ -661,8 +661,8 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
     else
         snprintf(badge, sizeof(badge), "%d%%", st->volume);
     int bw = lm_font_text_width(badge) + 14;
-    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 18) / 2, bw, 18);
-    fill_round(c, &pill, 9, 0xff2d3a5au);
+    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
+    fill_round(c, &pill, 8, 0xff2d3a5au);
     draw_text_centered(c, &pill, badge, st && st->mute ? 0xe05a5au : COL_PANEL_ACCENT);
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
@@ -717,11 +717,11 @@ static void paint_meter(const struct paint_ctx *c, int x, int y, int w, const ch
     draw_text(c, &row, x, y, label, COL_PANEL_DIM);
     int vw = lm_font_text_width(value);
     draw_text(c, &row, x + w - vw, y, value, COL_PANEL_TEXT);
-    struct lm_rect track = lm_rect_make(x, y + 19, w, 7);
+    struct lm_rect track = lm_rect_make(x, y + 17, w, 6);
     fill_round(c, &track, 3, 0xff2d3a5au);
     int fw = w * LM_CLAMP(pct, 0, 100) / 100;
     if (fw >= 2) {
-        struct lm_rect fillr = lm_rect_make(x, y + 19, fw, 7);
+        struct lm_rect fillr = lm_rect_make(x, y + 17, fw, 6);
         fill_round(c, &fillr, 3, col);
     }
 }
@@ -733,7 +733,7 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     paint_card_base(c, g);
 
     /* header: a chip glyph, title, the load in a pill */
-    struct lm_rect chip = lm_rect_make(card.x + 14, card.y + (g->title_h - 12) / 2, 12, 12);
+    struct lm_rect chip = lm_rect_make(card.x + 14, card.y + (g->title_h - 12) / 2, 12, 12);   /* (title_h is 26: 7 px above and below) */
     fill_round(c, &chip, 2, 0xff6fa8ffu);
     struct lm_rect die = lm_rect_make(chip.x + 3, chip.y + 3, 6, 6);
     fill_round(c, &die, 1, 0xff161a24u);
@@ -751,8 +751,8 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     char badge[16];
     snprintf(badge, sizeof(badge), "%d%%", st ? st->cpu : 0);
     int bw = lm_font_text_width(badge) + 14;
-    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 18) / 2, bw, 18);
-    fill_round(c, &pill, 9, 0xff2d3a5au);
+    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
+    fill_round(c, &pill, 8, 0xff2d3a5au);
     draw_text_centered(c, &pill, badge, st ? level_color(st->cpu, 70, 90) & 0x00ffffffu : COL_PANEL_ACCENT);
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
@@ -763,23 +763,23 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
         draw_text_centered(c, &r, "Reading...", COL_PANEL_DIM);
         return;
     }
-    int x = card.x + 14, w = card.w - 28, y = card.y + g->title_h + 8, bottom = card.y + card.h - 10;
+    int x = card.x + 12, w = card.w - 24, y = card.y + g->title_h + 6, bottom = card.y + card.h - 8;
     /* What fits, in order of importance: CPU, memory, temperature are always drawn (the minimum card height holds them),
      * then the CPU graph, the per-core bars and swap as room allows. */
-    int fixed = 32 + 36 + 36;
+    int fixed = 28 + 30 + 30;
     int room = bottom - y - fixed;
-    bool graph = room >= 42, cores;
-    if (graph) room -= 42;
-    cores = room >= 30 && st->ncores > 1;
-    if (cores) room -= 30;
-    bool swap = room >= 36 && st->swap_total_kb > 0;
+    bool graph = room >= 32, cores;
+    if (graph) room -= 32;
+    cores = room >= 22 && st->ncores > 1;
+    if (cores) room -= 22;
+    bool swap = room >= 30 && st->swap_total_kb > 0;
 
     char val[64];
     snprintf(val, sizeof(val), "%d%%   load %.2f", st->cpu, st->load1);
     paint_meter(c, x, y, w, st->ncores > 1 ? "CPU" : "CPU", val, st->cpu, level_color(st->cpu, 70, 90));
-    y += 32;
+    y += 28;
     if (graph) {                                                        /* the last minute, one bar per second */
-        struct lm_rect area = lm_rect_make(x, y, w, 34);
+        struct lm_rect area = lm_rect_make(x, y, w, 26);
         fill_round(c, &area, 5, 0x12ffffffu);
         int n = st->nhist;
         int bwid = LM_MAX(1, (w - 4) / LM_SYS_HISTORY);
@@ -790,33 +790,33 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
             if (bar.x >= area.x + 1)
                 fill_round(c, &bar, 0, (level_color(v, 70, 90) & 0x00ffffffu) | 0xd0000000u);
         }
-        y += 42;
+        y += 32;
     }
     if (cores) {                                                        /* one small bar per logical CPU */
         int n = st->ncores, gap = 3;
         int bwid = LM_MAX(3, (w - gap * (n - 1)) / n);
         for (int i = 0; i < n; i++) {
-            struct lm_rect slot = lm_rect_make(x + i * (bwid + gap), y, bwid, 22);
+            struct lm_rect slot = lm_rect_make(x + i * (bwid + gap), y, bwid, 16);
             if (slot.x + slot.w > x + w)
                 break;
             fill_round(c, &slot, 2, 0xff2d3a5au);
-            int hh = 22 * st->core[i] / 100;
+            int hh = 16 * st->core[i] / 100;
             if (hh > 0) {
-                struct lm_rect f = lm_rect_make(slot.x, slot.y + 22 - hh, slot.w, hh);
+                struct lm_rect f = lm_rect_make(slot.x, slot.y + 16 - hh, slot.w, hh);
                 fill_round(c, &f, 2, level_color(st->core[i], 70, 90));
             }
         }
-        y += 30;
+        y += 22;
     }
     snprintf(val, sizeof(val), "%.1f / %.1f GiB   %d%%", (double)(st->mem_total_kb - st->mem_avail_kb) / 1048576.0,
              (double)st->mem_total_kb / 1048576.0, st->mem_pct);
     paint_meter(c, x, y, w, "Memory", val, st->mem_pct, level_color(st->mem_pct, 80, 92));
-    y += 36;
+    y += 30;
     if (swap) {
         snprintf(val, sizeof(val), "%.1f / %.1f GiB   %d%%", (double)(st->swap_total_kb - st->swap_free_kb) / 1048576.0,
                  (double)st->swap_total_kb / 1048576.0, st->swap_pct);
         paint_meter(c, x, y, w, "Swap", val, st->swap_pct, level_color(st->swap_pct, 30, 70));
-        y += 36;
+        y += 30;
     }
     if (st->temp_c >= 0) {
         snprintf(val, sizeof(val), "%d \xc2\xb0""C", st->temp_c);
@@ -825,7 +825,7 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     } else {
         paint_meter(c, x, y, w, "Temperature", "no sensor", 0, 0xff6fa8ffu);
     }
-    y += 36;
+    y += 30;
 
     /* The device: what room is left, in order of importance. */
     char up[24];
@@ -834,9 +834,9 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
         { "Model", st->model }, { "Maker", st->maker }, { "CPU", st->cpu_model }, { "OS", st->os_name },
         { "Kernel", st->kernel }, { "Host", st->host }, { "Uptime", st->uptime_s >= 0 ? up : "" },
     };
-    int rows = (bottom - y - 6) / 17;
+    int rows = (bottom - y - 4) / 16;
     if (rows > 0) {
-        struct lm_rect sep2 = lm_rect_make(x, y - 8, w, 1);
+        struct lm_rect sep2 = lm_rect_make(x, y - 6, w, 1);
         fill_round(c, &sep2, 0, 0x30ffffffu);
         int vx = x + 56;
         for (size_t i = 0; i < sizeof(info) / sizeof(info[0]) && rows > 0; i++) {
@@ -858,7 +858,7 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
                 strcat(fit, "..");
             }
             draw_text(c, &row, vx, y, fit, COL_PANEL_TEXT);
-            y += 17;
+            y += 16;
             rows--;
         }
     }

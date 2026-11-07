@@ -179,18 +179,18 @@ int lm_mixer_slider_value(int x0, int w, double x)
 
 /* ---- layout ---------------------------------------------------------------------------------------------------- */
 
-#define PAD 14
-#define ROW_MASTER 40
-#define ROW_OUTPUT 30
-#define ROW_STREAM 40
-#define HINT_H 18
+#define PAD 12
+#define ROW_MASTER 34
+#define ROW_OUTPUT 28
+#define ROW_STREAM 36
+#define HINT_H 16
 #define PCT_W 46                       /* room for the percentage text right of a slider */
 
 void lm_mixer_layout(const struct lm_rect *card, int title_h, int want, bool with_output, struct lm_mixer_layout *out)
 {
     memset(out, 0, sizeof(*out));
-    int x = card->x + PAD, w = card->w - 2 * PAD, y = card->y + title_h + 6;
-    const int btn = 26;
+    int x = card->x + PAD, w = card->w - 2 * PAD, y = card->y + title_h + 4;
+    const int btn = 24;
     out->master_mute = lm_rect_make(x, y + (ROW_MASTER - btn) / 2, btn, btn);
     out->master_slider = lm_rect_make(x + btn + 12, y + (ROW_MASTER - 14) / 2, w - btn - 12 - PCT_W, 14);   /* "100%" follows it */
     y += ROW_MASTER;
@@ -200,11 +200,11 @@ void lm_mixer_layout(const struct lm_rect *card, int title_h, int want, bool wit
     }
     int bottom = card->y + card->h - 8;
     int n = 0;
-    y += 6;
+    y += 4;
     while (n < want && n < LM_MIXER_MAX_STREAMS && y + ROW_STREAM <= bottom) {
         out->stream[n].label = lm_rect_make(x, y, w, 16);
-        out->stream[n].mute = lm_rect_make(x, y + 18, 22, 20);
-        out->stream[n].slider = lm_rect_make(x + 22 + 10, y + 22, w - 22 - 10 - PCT_W, 12);
+        out->stream[n].mute = lm_rect_make(x, y + 16, 22, 20);
+        out->stream[n].slider = lm_rect_make(x + 22 + 10, y + 20, w - 22 - 10 - PCT_W, 12);
         y += ROW_STREAM;
         n++;
     }

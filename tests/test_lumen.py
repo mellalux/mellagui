@@ -1057,7 +1057,7 @@ class TestGadget(Base):
         self.c.wl.roundtrip()
         self.c.wl.queue.clear()
         x, y, w, h = self.rect()
-        ctl.click(x + w // 2, y + 32 + 44 + 22)                   # the second slot: "first"
+        ctl.click(x + w // 2, y + 26 + 36 + 18)                   # the second slot: "first"
         sel = self.c.wl.wait_for(lambda e: e.obj == self.dev and e.name == 'selection' and e.args[0], 2.0)
         self.assertIsNotNone(sel, 'the focused client was not told about the new selection')
         r, wfd = os.pipe()
@@ -1222,15 +1222,15 @@ class TestGadget(Base):
         self.wait_clips(1)
         ctl.sync()
         full = ctl.dump(os.path.join(tmp, 'gfull.ppm'))
-        # the first entry slot (below the 32 px title bar) now contains bright text pixels
+        # the first entry slot (below the 26 px title bar) now contains bright text pixels
         x, y, w, h = self.rect()
-        box = (x, y + 32, x + w, y + 32 + 44)
+        box = (x, y + 26, x + w, y + 26 + 36)
         self.assertGreater(full.count((0xe6, 0xe9, 0xef), *box), 20)
 
     def test_default_place_is_top_right_below_the_panel(self):
         x, y, w, h = self.rect()
         self.assertEqual((x + w, y), (1024 - 12, 28 + 12))
-        self.assertEqual((w, h), (300, 262))
+        self.assertEqual((w, h), (250, 214))
 
     def test_title_bar_drags_the_gadget(self):
         x, y, w, h = self.rect()
@@ -1262,7 +1262,7 @@ class TestGadget(Base):
     def test_resize_has_limits(self):
         x, y, w, h = self.rect()
         self.drag(x + w - 2, y + h - 2, -3000, -3000)
-        self.assertEqual(self.rect(), (x, y, 200, 86))           # minimum: title + one entry
+        self.assertEqual(self.rect(), (x, y, 180, 70))           # minimum: title + one entry
         x, y, w, h = self.rect()
         self.drag(x + 2, y + h - 2, -3000, 3000)                 # grows left/down, bounded by the output and 640 wide
         nx, ny, nw, nh = self.rect()
@@ -1280,7 +1280,7 @@ class TestGadget(Base):
         self.assertEqual(nh, 86)
         full = ctl.dump(os.path.join(tmp, 'gsmall.ppm'))
         bright = (0xe6, 0xe9, 0xef)
-        self.assertGreater(full.count(bright, x, y + 32, x + w, y + nh), 20)      # the newest entry is shown
+        self.assertGreater(full.count(bright, x, y + 26, x + w, y + nh), 20)      # the newest entry is shown
         self.assertEqual(full.count(bright, x, y + nh + 20, x + w, y + nh + 80), 0)
 
     def test_double_click_on_the_title_resets(self):
@@ -2556,7 +2556,7 @@ class TestMixer(Base):
     """The volume mixer gadget: state from pactl / amixer, sliders and buttons, docking, the setting and Super+V."""
 
     # Card layout (src/mixer.c, src/wm.c): title 32 px, pad 14, master row 40, output row 30, stream rows 40.
-    TITLE, PAD = 32, 14
+    TITLE, PAD = 26, 12
 
     def mixer_env(self, tag, extra=None):
         d = os.path.join(tmp, 'mixer-' + tag)
@@ -2599,15 +2599,15 @@ class TestMixer(Base):
 
     def geometry(self, c):
         x, y, w, h = self.card(c)
-        row = y + self.TITLE + 6
+        row = y + self.TITLE + 4
         g = {'card': (x, y, w, h)}
-        sw = w - 2 * self.PAD - 26 - 12 - 46
-        g['mute'] = (x + self.PAD + 13, row + 20)                                  # centre of the master mute button
-        g['slider'] = (x + self.PAD + 26 + 12, row + 20, sw)                       # left, y, width
-        g['output'] = (x + w // 2, row + 40 + 12)
-        srow = row + 40 + 30 + 6
-        g['streams'] = [((x + self.PAD + 22 + 10, srow + 40 * i + 28, w - 2 * self.PAD - 32 - 46),
-                         (x + self.PAD + 11, srow + 40 * i + 28)) for i in range(2)]   # (slider left/y/width, mute centre)
+        sw = w - 2 * self.PAD - 24 - 12 - 46
+        g['mute'] = (x + self.PAD + 12, row + 17)                                  # centre of the master mute button
+        g['slider'] = (x + self.PAD + 24 + 12, row + 17, sw)                       # left, y, width
+        g['output'] = (x + w // 2, row + 34 + 12)
+        srow = row + 34 + 28 + 4
+        g['streams'] = [((x + self.PAD + 22 + 10, srow + 36 * i + 26, w - 2 * self.PAD - 32 - 46),
+                         (x + self.PAD + 11, srow + 36 * i + 26)) for i in range(2)]   # (slider left/y/width, mute centre)
         return g
 
     def wait_for(self, pred, what, timeout=3.0):
@@ -2689,7 +2689,7 @@ class TestMixer(Base):
 
     def test_mixer_docks_beside_the_clipboard_on_a_small_screen(self):
         env, d = self.mixer_env('small')
-        c = self.start('lumen-mix6', env)                                       # 800x500: no room below the clipboard card
+        c = self.start('lumen-mix6', env, '--size', '800x400')                  # 800x400: no room below the clipboard card
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
         x, y, w, h = self.card(c)
@@ -2734,7 +2734,7 @@ class TestMixer(Base):
         self.assertEqual((info['backend'], info['volume'], info['mute'], info['output']), ('wpctl', '55', '0', 'PipeWire'))
         g = self.geometry(c)
         sx, sy, sw = g['slider']
-        c.click(sx + sw // 5, sy)
+        c.click(sx + round(sw * 0.2), sy)
         self.wait_for(lambda: self.state(wj)['vol'] == 20, 'wpctl volume 20')
         c.click(*g['mute'])
         self.wait_for(lambda: self.state(wj)['mute'] is True, 'wpctl muted')
@@ -2758,7 +2758,7 @@ class TestMixer(Base):
         self.assertEqual((info['backend'], info['volume'], info['mute'], info['streams']), ('alsa', '40', '0', '0'))
         g = self.geometry(c)
         sx, sy, sw = g['slider']
-        c.click(sx + sw * 7 // 10, sy)
+        c.click(sx + round(sw * 0.7), sy)
         self.wait_for(lambda: self.state(aj)['vol'] == 70, 'ALSA volume 70')
         c.click(*g['mute'])
         self.wait_for(lambda: self.state(aj)['mute'] is True, 'ALSA muted')
@@ -2962,7 +2962,7 @@ class TestSysinfo(Base):
         c.button(272, False)
         c.cmd('gadget-rect system')
         w2, h2 = map(int, c.last.split()[3:5])
-        self.assertEqual((w2, h2), (240, 156))
+        self.assertEqual((w2, h2), (210, 130))
         c.dump(os.path.join(tmp, 'sys5.ppm'))
         self.assertEqual(self.info(c)['ready'], '1')
 

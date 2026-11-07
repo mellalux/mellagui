@@ -159,6 +159,8 @@ struct lm_config {
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "MellaGUI" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
+    char wallpaper[256];        /* image file of the desktop background (settings: wallpaper), "" = the gradient; "~/" is the home directory */
+    int wallpaper_mode;         /* 0 fill (cover, cropped), 1 fit (whole picture, bars), 2 stretch, 3 center */
     char audio_device[64];      /* ALSA device for MellaGUI's own beeps (settings: audio-out) */
     int drm_mode_w, drm_mode_h, drm_mode_hz;   /* --mode WxH[@Hz]: 0 = automatic (preferred, corrected to the panel's shape), -1 = --mode preferred */
     const char *control_path;   /* headless control socket path (--control), NULL = none */

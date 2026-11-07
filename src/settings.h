@@ -21,6 +21,9 @@
  *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm
  *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the
  *                                              monitor's native shape (edid.h), preferred = the monitor's own preferred mode
+ *   wallpaper       "" | file name             desktop background picture (PNG or PPM; "~/" = home; at most 200 bytes); "" = the gradient
+ *   wallpaper-mode  fill | fit | stretch | center   how it is placed: cover and crop, whole picture with bars, stretched, unscaled in the middle
+ *   wallpaper-status (read only)               "" (none set) | ok | error: <why> for the last wallpaper that was set
  *   audio-out       ALSA device name           where MellaGUI's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
  *   file            (read only)                path the settings are saved to, "" = not saved
  *   -- live state, never saved: --

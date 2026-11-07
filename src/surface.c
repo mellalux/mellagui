@@ -610,8 +610,23 @@ bool lm_surface_tree_wants_frame(struct lm_surface *root)
 
 /* ---- applying state --------------------------------------------------------------------- */
 
+/* Leaves the zero-copy state: the held wl_buffer goes back to the client, the image and texture are dropped. */
+static void drop_zero_copy(struct lm_surface *s)
+{
+    if (s->gl_held) {
+        lm_buffer_release(s->gl_held);
+        lm_buffer_unref(s->gl_held);
+        s->gl_held = NULL;
+    }
+    if (s->gl_dmabuf && s->server && s->server->render)
+        lm_render_dmabuf_drop(s->server->render, s);
+    s->gl_dmabuf = false;
+    s->gl_full = true;
+}
+
 static void drop_content(struct lm_surface *s)
 {
+    drop_zero_copy(s);
     s->gl_full = true;
     lm_region_clear(&s->gl_damage);
     lm_texture_free(&s->tex);
@@ -697,6 +712,33 @@ static int attach_buffer(struct lm_surface *s, const struct sstate *st, struct l
         client_tex_bytes(p->comp, s->resource->client, s) + new_bytes > LM_CLIENT_TEX_LIMIT) {
         drop_content(s);
         return -1;
+    }
+
+    /* zero copy: a GPU client's dmabuf is sampled in place by the GL renderer */
+    if (b->dmabuf && tr == LM_TRANSFORM_NORMAL && s->server && s->server->render &&
+        lm_render_dmabuf_import(s->server->render, s, b)) {
+        if (s->gl_held != b) {                                  /* the buffer before this one may go back to its client now */
+            if (s->gl_held) {
+                lm_buffer_release(s->gl_held);
+                lm_buffer_unref(s->gl_held);
+            }
+            lm_buffer_ref(b);
+            s->gl_held = b;
+        }
+        lm_texture_free(&s->tex);
+        s->tex.width = bw;
+        s->tex.height = bh;
+        s->tex.stride = bw * 4;
+        s->tex.opaque = s->tex.solid = b->format == LM_WL_SHM_FORMAT_XRGB8888;
+        s->has_content = true;
+        s->transform = tr;
+        *full = true;
+        return 0;
+    }
+    if (s->gl_dmabuf) {                                         /* back to copying: no CPU pixels exist yet */
+        drop_zero_copy(s);
+        lm_texture_free(&s->tex);
+        s->has_content = false;
     }
 
     struct lm_region bd;
@@ -805,7 +847,7 @@ static void apply_state(struct lm_surface *s)
             else if (s->resource)
                 lm_client_post_error(s->resource->client, 0, LM_WL_SHM_ERR_INVALID_FD,
                                      "failed to read the buffer (pool file truncated?)");
-        } else {
+        } else if (s->gl_held != b) {                               /* (a zero-copy buffer stays with us until replaced) */
             lm_buffer_release(b);
         }
         lm_buffer_unref(b);
@@ -1226,7 +1268,12 @@ static void surface_destroy_hook(struct lm_resource *res)
     res->data = NULL;
 
     lm_signal_emit(&s->destroy_signal, s);
-    if (s->gl_tex && s->server && s->server->render)
+    if (s->gl_held) {
+        lm_buffer_release(s->gl_held);
+        lm_buffer_unref(s->gl_held);
+        s->gl_held = NULL;
+    }
+    if ((s->gl_tex || s->gl_img) && s->server && s->server->render)
         lm_render_surface_gone(s->server->render, s);
 
     /* If this is a mapped subsurface its parent tree must be repainted. */

@@ -1183,7 +1183,7 @@ static int drm_init(struct lm_backend *b)
     int rmode = srv->config.renderer;
     if (rmode < 0) {
         const char *env = getenv("MELLAGUI_RENDERER");
-        rmode = env ? (!strcmp(env, "gl") ? 2 : !strcmp(env, "auto") ? 1 : 0) : 0;      /* software unless asked: GL scanout is new */
+        rmode = env ? (!strcmp(env, "gl") ? 2 : !strcmp(env, "software") ? 0 : 1) : 1;      /* auto: GL when it works */
     }
     if (rmode > 0) {
         char why[200] = "";

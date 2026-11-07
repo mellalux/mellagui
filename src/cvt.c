@@ -37,3 +37,12 @@ int lm_cvt_rb(int width, int height, int refresh, struct lm_cvt *out)
     out->refresh = (uint16_t)refresh;
     return 1;
 }
+
+int lm_cvt_rb_fit(int width, int height, int max_hz, uint32_t max_clock_khz, struct lm_cvt *out)
+{
+    static const int rates[] = { 60, 59, 50, 48, 30, 25, 24 };          /* rates a monitor is likely to accept, not 52 */
+    for (unsigned i = 0; i < sizeof(rates) / sizeof(rates[0]); i++)
+        if (rates[i] <= max_hz && lm_cvt_rb(width, height, rates[i], out) && out->clock_khz <= max_clock_khz)
+            return 1;
+    return 0;
+}

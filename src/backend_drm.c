@@ -1094,6 +1094,18 @@ static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int
         if (!known && n < max)
             modes[n++] = (struct lm_mode_info){ au.hdisplay, au.vdisplay, (int)au.vrefresh, false, true };
     }
+    if (have_nat && n < max) {                                          /* the panel's own size, if the link can carry it at some rate */
+        bool known = false;
+        uint32_t max_clock = 0;
+        for (int j = 0; j < n; j++)
+            known = known || (modes[j].w == nat.w && modes[j].h == nat.h);
+        for (int i = 0; i < conn->count_modes; i++)
+            if (conn->modes[i].clock > max_clock)
+                max_clock = conn->modes[i].clock;
+        struct lm_cvt cv;
+        if (!known && lm_cvt_rb_fit(nat.w, nat.h, 60, max_clock, &cv))
+            modes[n++] = (struct lm_mode_info){ cv.hdisplay, cv.vdisplay, cv.refresh, false, true };
+    }
     drmModeFreeConnector(conn);
     for (int i = 1; i < n; i++) {                                       /* biggest area first */
         struct lm_mode_info t = modes[i];

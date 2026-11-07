@@ -2823,6 +2823,34 @@ class TestDmabuf(Base):
         self.assertEqual(ppm.px(x0 + 5, y0 + 5), (0x10, 0x20, 0x30))
         self.assertNotEqual(ppm.px(x0 + 50, y0 + 5), (0, 0, 0))                          # transparent: the window background shows
 
+    def test_partial_update_with_odd_width_and_hostile_alpha_is_fixed_in_the_copy(self):
+        """The alpha fix runs inside the streaming copy: unaligned rect starts, odd widths, colour above alpha."""
+        g = self.gbm()
+        w, h = 37, 8
+        bo = g.bo(w, h, Gbm.ARGB8888)
+        g.fill(bo, w, h, lambda x, y: 0xff102030)
+        win = self.window_with(w, h)
+        params, buf = self.import_bo(g, bo, w, h, self.DMABUF_ARGB)
+        self.show(win, buf, w, h)
+        x0, y0 = self.window_origin()
+        ppm = ctl.dump(os.path.join(tmp, 'dmabuf4.ppm'))
+        self.assertEqual(ppm.px(x0 + 1, y0 + 1), (0x10, 0x20, 0x30))
+        # alpha 0x80 with red 0xff: not a valid premultiplied pixel; it must be clamped, never overflow the blend
+        g.fill(bo, w, h, lambda x, y: 0x80ff0000)
+        wl = self.c.wl
+        wl.request(win.surface, 'attach', buf, I(0), I(0))
+        wl.request(win.surface, 'damage_buffer', I(3), I(1), I(21), I(3))               # starts 12 bytes into a row
+        wl.request(win.surface, 'commit')
+        wl.roundtrip()
+        ppm = ctl.dump(os.path.join(tmp, 'dmabuf5.ppm'))
+        for (x, y) in ((3, 1), (4, 2), (23, 3), (13, 2)):                                  # inside the damage
+            r, gr, b = ppm.px(x0 + x, y0 + y)
+            self.assertLessEqual(abs(r - 136), 1, (x, y, r))
+            self.assertLessEqual(abs(gr - 9), 1)
+            self.assertLessEqual(abs(b - 11), 1)
+        for (x, y) in ((0, 0), (2, 1), (24, 2), (36, 7), (10, 5)):                         # outside: still the old frame
+            self.assertEqual(ppm.px(x0 + x, y0 + y), (0x10, 0x20, 0x30), (x, y))
+
     def test_create_without_immed_answers_created_and_failed(self):
         g = self.gbm()
         w, h = 32, 32

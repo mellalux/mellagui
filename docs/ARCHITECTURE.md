@@ -256,7 +256,8 @@ backend implements the same two ops (a reallocated framebuffer) so all of this i
 
 A GPU-rendering client (Mesa EGL, Firefox WebRender) allocates a linear buffer object on the render node named by the dmabuf
 feedback and attaches it as a `wl_buffer`. On commit `shm.c` copies it into the surface's texture like any shm buffer; for a dmabuf
-the source is the mmap of its fd, read after `DMA_BUF_IOCTL_SYNC` (which also waits for the GPU) with SSE4.1 streaming loads, under
+the source is the mmap of its fd, read after `DMA_BUF_IOCTL_SYNC` (which also waits for the GPU) with SSE4.1 streaming loads
+(`stream_copy_fix_sse41` does the alpha fix in the same pass, so the pixels are not read back from the texture), under
 a SIGBUS guard (`sigsetjmp`; any other SIGBUS goes to the previous handler). `lm_texture.solid` records that every pixel had alpha
 0xff (sticky until the next full copy), so windows whose buffer format has alpha but which are in fact opaque blit with memcpy.
 `render.c` `paint_rect()` first looks for the biggest opaque rectangle of any surface in the repainted area (the whole surface when

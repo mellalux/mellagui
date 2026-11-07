@@ -346,6 +346,85 @@ static bool fix_pixels(uint32_t *px, size_t n, bool opaque)
     return translucent;
 }
 
+#if defined(__x86_64__) || defined(__i386__)
+/*
+ * Streaming copy from a dmabuf mapping with the alpha fix done on the way: the pixels pass through registers once
+ * instead of being written to the texture and read back by a second fix_pixels() pass (that second pass was 22 % of
+ * the compositor's time with a GPU-rendering Firefox).
+ */
+__attribute__((target("sse4.1")))
+static void stream_copy_fix_sse41(uint32_t *dst, const uint32_t *src, size_t n, bool opaque, bool *translucent)
+{
+    const __m128i amask = _mm_set1_epi32((int)0xff000000u);
+    size_t i = 0;
+    for (; i < n && ((uintptr_t)(src + i) & 15); i++) {                 /* head up to a 16-byte boundary of the source */
+        uint32_t p = src[i];
+        if (opaque) {
+            dst[i] = p | 0xff000000u;
+        } else {
+            if ((p >> 24) != 0xff)
+                *translucent = true;
+            dst[i] = fix_one(p);
+        }
+    }
+    for (; i + 16 <= n; i += 16) {
+        __m128i a = _mm_stream_load_si128((__m128i *)(void *)(src + i));
+        __m128i b = _mm_stream_load_si128((__m128i *)(void *)(src + i + 4));
+        __m128i c = _mm_stream_load_si128((__m128i *)(void *)(src + i + 8));
+        __m128i d = _mm_stream_load_si128((__m128i *)(void *)(src + i + 12));
+        if (opaque) {
+            a = _mm_or_si128(a, amask);
+            b = _mm_or_si128(b, amask);
+            c = _mm_or_si128(c, amask);
+            d = _mm_or_si128(d, amask);
+        }
+        _mm_storeu_si128((__m128i *)(void *)(dst + i), a);
+        _mm_storeu_si128((__m128i *)(void *)(dst + i + 4), b);
+        _mm_storeu_si128((__m128i *)(void *)(dst + i + 8), c);
+        _mm_storeu_si128((__m128i *)(void *)(dst + i + 12), d);
+        if (!opaque) {                                                  /* alpha 0xff everywhere is by far the usual case */
+            __m128i all = _mm_and_si128(_mm_and_si128(a, b), _mm_and_si128(c, d));
+            if (_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(all, amask), amask))) != 0xf) {
+                for (size_t k = i; k < i + 16; k++) {
+                    if ((dst[k] >> 24) != 0xff)
+                        *translucent = true;
+                    dst[k] = fix_one(dst[k]);
+                }
+            }
+        }
+    }
+    for (; i < n; i++) {
+        uint32_t p = src[i];
+        if (opaque) {
+            dst[i] = p | 0xff000000u;
+        } else {
+            if ((p >> 24) != 0xff)
+                *translucent = true;
+            dst[i] = fix_one(p);
+        }
+    }
+}
+#endif
+
+/* buf_read() of `n` pixels plus fix_pixels(); for a mapped dmabuf both happen in one pass. */
+static int buf_read_fix(const struct lm_buffer *b, uint32_t *dst, size_t n, off_t off, bool opaque, bool *translucent)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    if (b->dmabuf && (off & 3) == 0 && __builtin_cpu_supports("sse4.1")) {
+        const struct lm_dmabuf_fd *d = b->dmabuf;
+        size_t len = n * 4;
+        if (!d->map || off < 0 || (size_t)off > d->size || len > d->size - (size_t)off)
+            return -1;
+        stream_copy_fix_sse41(dst, (const uint32_t *)(const void *)(d->map + off), n, opaque, translucent);
+        return 0;
+    }
+#endif
+    if (buf_read(b, dst, n * 4, off) < 0)
+        return -1;
+    *translucent |= fix_pixels(dst, n, opaque);
+    return 0;
+}
+
 
 /*
  * Copy the rect (x, y, w, h), already clipped to the buffer, from the pool
@@ -366,17 +445,15 @@ static int copy_rect(const struct lm_buffer *b, int x, int y, int w, int h,
         for (int r = 0; r < h; r += (int)rows_per) {
             size_t n = (size_t)(h - r) < rows_per ? (size_t)(h - r) : rows_per;
             uint32_t *d = dst + (size_t)r * w;
-            if (buf_read(b, d, n * row_bytes, base + (off_t)r * b->stride) < 0)
+            if (buf_read_fix(b, d, n * (size_t)w, base + (off_t)r * b->stride, opaque, translucent) < 0)
                 return -2;
-            *translucent |= fix_pixels(d, n * (size_t)w, opaque);
         }
         return 0;
     }
     for (int r = 0; r < h; r++) {
         uint32_t *d = dst + (size_t)r * dst_stride_px;
-        if (buf_read(b, d, row_bytes, base + (off_t)r * b->stride) < 0)
+        if (buf_read_fix(b, d, (size_t)w, base + (off_t)r * b->stride, opaque, translucent) < 0)
             return -2;
-        *translucent |= fix_pixels(d, (size_t)w, opaque);
     }
     return 0;
 }
@@ -436,11 +513,10 @@ static int copy_transformed(const struct lm_buffer *b, struct lm_texture *tex,
     int rc = 0;
     for (int32_t by = 0; by < b->height; by++) {
         off_t off = (off_t)b->offset + (off_t)by * b->stride;
-        if (buf_read(b, row, row_bytes, off) < 0) {
+        if (buf_read_fix(b, row, (size_t)b->width, off, opaque, translucent) < 0) {
             rc = -2;
             break;
         }
-        *translucent |= fix_pixels(row, (size_t)b->width, opaque);
         int64_t base, step;
         transform_row_map(transform, tex->width, tex->height, by, &base, &step);
         for (int32_t bx = 0; bx < b->width; bx++)

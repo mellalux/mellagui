@@ -32,6 +32,7 @@ struct lm_dmabuf_fd {
     int fd;                         /* private dup, closed with the buffer */
     size_t size;                    /* bytes of the object (lseek SEEK_END) */
     const uint8_t *map;             /* mapped on first use, read-only */
+    uint64_t modifier;              /* DRM format modifier of the layout; 0 = linear (the only one the CPU can read) */
 };
 
 struct lm_buffer {
@@ -66,7 +67,8 @@ void lm_shm_destroy(struct lm_shm *shm);
  * XRGB8888 when `opaque`, else ARGB8888. NULL on failure (the client has been told when it was its fault).
  */
 struct lm_buffer *lm_buffer_create_dmabuf(struct lm_client *client, uint32_t id, uint32_t version, int fd, size_t size,
-                                          int32_t width, int32_t height, int32_t stride, int32_t offset, bool opaque);
+                                          int32_t width, int32_t height, int32_t stride, int32_t offset, bool opaque,
+                                          uint64_t modifier);
 
 /* The lm_buffer behind a wl_buffer resource (resource->data), or NULL. */
 struct lm_buffer *lm_buffer_from_resource(struct lm_resource *res);

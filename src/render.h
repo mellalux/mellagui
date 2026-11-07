@@ -39,6 +39,7 @@
 
 struct lm_surface;
 struct lm_buffer;
+struct lm_gl;
 
 struct lm_renderer *lm_render_create(struct lm_server *srv);
 void lm_render_destroy(struct lm_renderer *r);
@@ -54,6 +55,9 @@ void lm_render_damage_all(struct lm_renderer *r);
 void lm_render_cursor_changed(struct lm_renderer *r);
 /* A client waits for a frame callback: make sure one frame tick happens. */
 void lm_render_request_frame(struct lm_renderer *r);
+
+/* The GL context the renderer draws with (NULL for software): dmabuf.c asks it which buffer layouts the GPU can sample. */
+struct lm_gl *lm_render_gl(struct lm_renderer *r);
 
 /* Headless: copies what the GL renderer drew into the backend's memory framebuffer (dump, tests). No-op for software. */
 void lm_render_readback(struct lm_renderer *r);

@@ -293,7 +293,7 @@ bool lm_render_dmabuf_import(struct lm_renderer *r, struct lm_surface *s, struct
         return false;
     uint32_t fourcc = b->format == LM_WL_SHM_FORMAT_XRGB8888 ? LM_DRM_FORMAT_XRGB8888 : LM_DRM_FORMAT_ARGB8888;
     lm_gl_make_current(r->gl);
-    void *img = lm_gl_dmabuf_image(r->gl, b->dmabuf->fd, b->width, b->height, b->stride, b->offset, fourcc);
+    void *img = lm_gl_dmabuf_image(r->gl, b->dmabuf->fd, b->width, b->height, b->stride, b->offset, fourcc, b->dmabuf->modifier);
     if (!img)
         return false;
     unsigned tex = (s->gl_tex && s->gl_dmabuf) ? s->gl_tex : lm_gl_tex_alloc(r->gl);

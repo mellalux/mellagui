@@ -287,6 +287,13 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, "ok visible=%d ready=%d cpu=%d cores=%d mem=%d mem_total_kb=%ld swap=%d temp=%d load=%.2f hist=%d\n",
                   lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0, ss->ready ? 1 : 0, ss->cpu, ss->ncores, ss->mem_pct,
                   ss->mem_total_kb, ss->swap_pct, ss->temp_c, ss->load1, ss->nhist);
+        /* the device strings contain blanks, so they have their own command: "sysdev" */
+    } else if (!strcmp(cmd, "sysdev")) {
+        /* sysdev  replies "ok maker=<..>|model=<..>|cpu=<..>|os=<..>|kernel=<..>|host=<..>|uptime=<s>" ('|' separated, values may hold blanks) */
+        if (!srv->sysinfo) { ctl_reply(c, "err no sysinfo\n"); return; }
+        const struct lm_sysinfo_state *ss = lm_sysinfo_state(srv->sysinfo);
+        ctl_reply(c, "ok maker=%s|model=%s|cpu=%s|os=%s|kernel=%s|host=%s|uptime=%ld\n", ss->maker, ss->model, ss->cpu_model,
+                  ss->os_name, ss->kernel, ss->host, ss->uptime_s);
     } else if (!strcmp(cmd, "gadget-rect")) {
         struct lm_rect r;
         if (srv->wm && lm_wm_gadget_rect_id(srv->wm, a1 && !strcmp(a1, "mixer") ? LM_GADGET_MIXER :

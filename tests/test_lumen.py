@@ -1559,6 +1559,68 @@ class TestClients(Base):
         p = self.spawn('lumen-term', SHELL=script)
         self.assertEqual(p.wait(timeout=5), 0)
 
+    def test_terminal_paste_button(self):
+        out = os.path.join(tmp, 'term-paste.txt')
+        script = os.path.join(tmp, 'paste.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nread line\necho "got:$line" > "%s"\nread line2\n' % out)
+        os.chmod(script, 0o755)
+        if os.path.exists(out):
+            os.unlink(out)
+        # another client owns the clipboard while it has the focus; the terminal takes the focus afterwards
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        mgr = c.wl.bind('wl_data_device_manager', 3)
+        dev = c.wl.new_id('wl_data_device')
+        c.wl.request(mgr, 'get_data_device', dev, seat)
+        w = Window(c, 200, 150, title='copier')
+        c.wl.roundtrip()
+        src = c.wl.new_id('wl_data_source')
+        c.wl.request(mgr, 'create_data_source', src)
+        for mime in ('text/html', 'image/png', 'UTF8_STRING', 'STRING', 'text/plain;charset=utf-8'):
+            c.wl.request(src, 'offer', mime)       # more than 4 types: the text one comes last
+        c.wl.request(dev, 'set_selection', src, w.configures[-1][3])
+        c.wl.roundtrip()
+        self.spawn('lumen-term', SHELL=script)
+        win = wait_for_window('lumen.term')
+        self.assertIsNotNone(win, 'terminal window did not appear')
+        time.sleep(0.4)
+        ctl.click(win['x'] + 20, win['y'] + 8)     # the "Paste" button of the bar
+        # two "send" requests arrive: the compositor's own clipboard-history read, then the terminal's
+        for _ in range(2):
+            ev = c.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 3.0)
+            self.assertIsNotNone(ev, 'the terminal did not ask for the clipboard text')
+            os.write(ev.fds[0], b'hello\n')
+            os.close(ev.fds[0])
+        for _ in range(50):
+            if os.path.exists(out) and open(out).read().strip():
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(out).read().strip(), 'got:hello')
+
+    def test_terminal_zoom_button_shrinks_the_grid(self):
+        out = os.path.join(tmp, 'term-size.txt')
+        script = os.path.join(tmp, 'size.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nread line\nstty size > "%s"\nread line2\n' % out)
+        os.chmod(script, 0o755)
+        if os.path.exists(out):
+            os.unlink(out)
+        self.spawn('lumen-term', SHELL=script)
+        win = wait_for_window('lumen.term')
+        self.assertIsNotNone(win, 'terminal window did not appear')
+        time.sleep(0.4)
+        ctl.click(win['x'] + 100, win['y'] + 8)    # "A+" (the bar buttons: Paste, A-, A+)
+        time.sleep(0.3)
+        type_text('go')
+        for _ in range(50):
+            if os.path.exists(out) and open(out).read().strip():
+                break
+            time.sleep(0.05)
+        rows, cols = map(int, open(out).read().split())
+        self.assertLessEqual(cols, 45)
+        self.assertGreaterEqual(cols, 30)
+
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',
                     'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1', 'mixer': '0', 'sysinfo': '0'}
@@ -2490,6 +2552,14 @@ class TestSysinfo(Base):
         self.write(root, 'proc/stat', self.STAT_A)
         self.write(root, 'proc/meminfo', 'MemTotal:        1000000 kB\nMemFree: 100000 kB\nMemAvailable:    250000 kB\nSwapTotal: 2000000 kB\nSwapFree: 1500000 kB\n')
         self.write(root, 'proc/loadavg', '1.25 0.50 0.30 2/300 1234\n')
+        self.write(root, 'proc/cpuinfo', 'processor\t: 0\nmodel name\t: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz\n')
+        self.write(root, 'proc/uptime', '93784.55 200000.00\n')                      # 1 day 2 hours
+        self.write(root, 'proc/sys/kernel/osrelease', '6.8.0-test\n')
+        self.write(root, 'proc/sys/kernel/hostname', 'lumenbox\n')
+        self.write(root, 'etc/os-release', 'NAME="Testix"\nPRETTY_NAME="Testix 1.0 LTS"\n')
+        self.write(root, 'sys/class/dmi/id/sys_vendor', 'LENOVO\n')
+        self.write(root, 'sys/class/dmi/id/product_name', '20L5CTO1WW\n')
+        self.write(root, 'sys/class/dmi/id/product_version', 'ThinkPad T480\n')
         if with_sensor:
             self.write(root, 'sys/class/hwmon/hwmon0/name', 'coretemp\n')
             self.write(root, 'sys/class/hwmon/hwmon0/temp1_input', '66000\n')
@@ -2542,6 +2612,29 @@ class TestSysinfo(Base):
             time.sleep(0.05)
         i = self.info(c)
         self.assertEqual((i['mem'], i['swap'], i['temp']), ('50', '0', '88'))
+
+    def test_device_info_comes_from_dmi_cpuinfo_and_os_release(self):
+        root = self.tree('device')
+        c = self.start('lumen-sys7', root)
+        c.cmd('sysdev')
+        got = dict(kv.split('=', 1) for kv in c.last[3:].split('|'))
+        self.assertEqual(got['maker'], 'LENOVO')
+        self.assertEqual(got['model'], 'ThinkPad T480')                          # product_version: the product name is a type number
+        self.assertEqual(got['cpu'], 'Intel Core i5-8250U @ 1.60GHz')
+        self.assertEqual((got['os'], got['kernel'], got['host'], got['uptime']), ('Testix 1.0 LTS', '6.8.0-test', 'lumenbox', '93784'))
+        # placeholders of cheap boards are not shown; the board's own name takes over
+        self.write(root, 'sys/class/dmi/id/sys_vendor', 'To Be Filled By O.E.M.\n')
+        self.write(root, 'sys/class/dmi/id/product_name', 'To Be Filled By O.E.M.\n')
+        self.write(root, 'sys/class/dmi/id/product_version', 'Default string\n')
+        self.write(root, 'sys/class/dmi/id/board_vendor', 'ASRock\n')
+        self.write(root, 'sys/class/dmi/id/board_name', 'B450M Pro4\n')
+        c2 = self.start('lumen-sys8', root)
+        c2.cmd('sysdev')
+        got = dict(kv.split('=', 1) for kv in c2.last[3:].split('|'))
+        self.assertEqual((got['maker'], got['model']), ('ASRock', 'B450M Pro4'))
+        # the card draws (the rows that fit): no crash, the default size shows them
+        c2.cmd('gadget-rect system')
+        self.assertGreaterEqual(int(c2.last.split()[4]), 300)
 
     def test_no_sensor_and_no_proc_do_not_break_anything(self):
         root = self.tree('nosensor', with_sensor=False)
@@ -2610,7 +2703,7 @@ class TestSysinfo(Base):
 
     def test_the_card_can_be_moved_and_shows_no_error_when_tiny(self):
         root = self.tree('move')
-        c = self.start('lumen-sys5', root, '--size', '1024x768')
+        c = self.start('lumen-sys5', root, '--size', '1024x960')
         c.cmd('gadget-rect system')
         x, y, w, h = map(int, c.last.split()[1:5])
         c.abs(x + 80, y + 10)

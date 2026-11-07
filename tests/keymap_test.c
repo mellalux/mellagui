@@ -645,6 +645,22 @@ int main(void)
         CHECK(lm_sysinfo_parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 250 kB\n", &tot, &av, &st, &sf) && av == 400 && st == 0,
               "meminfo without MemAvailable: %ld", av);
         CHECK(!lm_sysinfo_parse_meminfo("nothing\n", &tot, &av, &st, &sf), "meminfo without MemTotal");
+        char devbuf[64];
+        CHECK(lm_sysinfo_parse_cpu_model("processor\t: 0\nmodel name\t: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz\n", devbuf, sizeof(devbuf)) &&
+              !strcmp(devbuf, "Intel Core i5-8250U @ 1.60GHz"), "cpu model: '%s'", devbuf);
+        CHECK(lm_sysinfo_parse_cpu_model("Hardware\t: BCM2835\nModel\t\t: Raspberry Pi 4\n", devbuf, sizeof(devbuf)) && !strcmp(devbuf, "Raspberry Pi 4"),
+              "arm cpuinfo: '%s'", devbuf);
+        CHECK(!lm_sysinfo_parse_cpu_model("flags : fpu\n", devbuf, sizeof(devbuf)), "cpuinfo without a model");
+        CHECK(lm_sysinfo_parse_os_name("NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\n", devbuf, sizeof(devbuf)) && !strcmp(devbuf, "Ubuntu 24.04.2 LTS"),
+              "os-release: '%s'", devbuf);
+        CHECK(lm_sysinfo_parse_os_name("NAME=Alpine\n", devbuf, sizeof(devbuf)) && !strcmp(devbuf, "Alpine"), "os-release NAME only");
+        CHECK(lm_sysinfo_parse_uptime("12345.67 9999.1\n") == 12345 && lm_sysinfo_parse_uptime("x") == -1, "uptime");
+        lm_sysinfo_format_uptime(3 * 86400 + 4 * 3600 + 5, devbuf, sizeof(devbuf));
+        CHECK(!strcmp(devbuf, "3d 4h"), "uptime days: '%s'", devbuf);
+        lm_sysinfo_format_uptime(5 * 3600 + 12 * 60, devbuf, sizeof(devbuf));
+        CHECK(!strcmp(devbuf, "5h 12m"), "uptime hours: '%s'", devbuf);
+        lm_sysinfo_format_uptime(7 * 60 + 9, devbuf, sizeof(devbuf));
+        CHECK(!strcmp(devbuf, "7m"), "uptime minutes: '%s'", devbuf);
         char dir[] = "/tmp/lumen-sys-XXXXXX";
         CHECK(mkdtemp(dir) != NULL, "mkdtemp");
         char cmd[512], label[48];

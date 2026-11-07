@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "loop.h"
 
@@ -194,6 +195,187 @@ bool lm_sysinfo_read_temp(const char *root, int *celsius, char *label, size_t la
     return false;
 }
 
+
+/* ---- the device ---------------------------------------------------------------------------------------------------- */
+
+static void collapse_blanks(char *s)
+{
+    char *w = s;
+    bool blank = true;                                                  /* also strips the leading blanks */
+    for (char *r = s; *r; r++) {
+        if (*r == ' ' || *r == '\t') {
+            if (!blank)
+                *w++ = ' ';
+            blank = true;
+        } else {
+            *w++ = *r;
+            blank = false;
+        }
+    }
+    if (w > s && w[-1] == ' ')
+        w--;
+    *w = 0;
+}
+
+static void remove_word(char *s, const char *word)
+{
+    size_t wl = strlen(word);
+    for (char *p = strstr(s, word); p; p = strstr(p, word))
+        memmove(p, p + wl, strlen(p + wl) + 1);
+}
+
+bool lm_sysinfo_parse_cpu_model(const char *text, char *out, size_t n)
+{
+    static const char *const keys[] = { "model name", "Model", "Hardware", "cpu model", "Processor" };
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        size_t kl = strlen(keys[k]);
+        for (const char *p = text; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
+            if (strncmp(p, keys[k], kl))
+                continue;
+            const char *q = p + kl;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (*q != ':')
+                continue;
+            q++;
+            char tmp[160];
+            size_t len = strcspn(q, "\n");
+            if (len >= sizeof(tmp))
+                len = sizeof(tmp) - 1;
+            memcpy(tmp, q, len);
+            tmp[len] = 0;
+            remove_word(tmp, "(R)");
+            remove_word(tmp, "(TM)");
+            remove_word(tmp, " CPU");
+            collapse_blanks(tmp);
+            if (!tmp[0])
+                continue;
+            snprintf(out, n, "%s", tmp);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lm_sysinfo_parse_os_name(const char *text, char *out, size_t n)
+{
+    static const char *const keys[] = { "PRETTY_NAME", "NAME" };
+    for (size_t k = 0; k < 2; k++) {
+        size_t kl = strlen(keys[k]);
+        for (const char *p = text; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
+            if (strncmp(p, keys[k], kl) || p[kl] != '=')
+                continue;
+            const char *q = p + kl + 1;
+            if (*q == '"' || *q == '\'')
+                q++;
+            size_t len = strcspn(q, "\n\"'");
+            if (!len)
+                continue;
+            snprintf(out, n, "%.*s", (int)len, q);
+            return true;
+        }
+    }
+    return false;
+}
+
+long lm_sysinfo_parse_uptime(const char *text)
+{
+    char *end;
+    double v = strtod(text, &end);
+    return end == text || v < 0 ? -1 : (long)v;
+}
+
+void lm_sysinfo_format_uptime(long s, char *out, size_t n)
+{
+    if (s < 0)
+        snprintf(out, n, "-");
+    else if (s >= 86400)
+        snprintf(out, n, "%ldd %ldh", s / 86400, s % 86400 / 3600);
+    else if (s >= 3600)
+        snprintf(out, n, "%ldh %ldm", s / 3600, s % 3600 / 60);
+    else
+        snprintf(out, n, "%ldm", s / 60);
+}
+
+static bool generic_name(const char *s)
+{
+    static const char *const bad[] = { "to be filled", "default string", "system manufacturer", "system product name", "system version",
+                                       "not specified", "not applicable", "o.e.m.", "unknown", "none", "n/a", "type1", "0123456789", NULL };
+    if (!s[0])
+        return true;
+    char low[96];
+    size_t i = 0;
+    for (; s[i] && i + 1 < sizeof(low); i++)
+        low[i] = (char)tolower((unsigned char)s[i]);
+    low[i] = 0;
+    for (int b = 0; bad[b]; b++)
+        if (strstr(low, bad[b]))
+            return true;
+    return false;
+}
+
+static void copy_str(char *dst, size_t n, const char *src)
+{
+    size_t len = strlen(src);
+    if (len >= n)
+        len = n - 1;
+    memcpy(dst, src, len);
+    dst[len] = 0;
+}
+
+static bool read_line(const char *root, const char *path, char *out, size_t n)
+{
+    char buf[128];
+    if (!read_file(root, path, buf, sizeof(buf)))
+        return false;
+    buf[strcspn(buf, "\n")] = 0;
+    collapse_blanks(buf);
+    copy_str(out, n, buf);
+    return out[0] != 0;
+}
+
+static void tidy_vendor(char *s)
+{
+    remove_word(s, " Inc.");
+    remove_word(s, " Inc");
+    remove_word(s, " Corporation");
+    remove_word(s, " Co., Ltd.");
+    remove_word(s, " Ltd.");
+    collapse_blanks(s);
+}
+
+void lm_sysinfo_read_device(const char *root, struct lm_sysinfo_state *st)
+{
+    char vendor[64] = "", name[96] = "", ver[96] = "", bvendor[64] = "", bname[96] = "";
+    read_line(root, "/sys/class/dmi/id/sys_vendor", vendor, sizeof(vendor));
+    read_line(root, "/sys/class/dmi/id/product_name", name, sizeof(name));
+    read_line(root, "/sys/class/dmi/id/product_version", ver, sizeof(ver));
+    read_line(root, "/sys/class/dmi/id/board_vendor", bvendor, sizeof(bvendor));
+    read_line(root, "/sys/class/dmi/id/board_name", bname, sizeof(bname));
+    st->maker[0] = st->model[0] = 0;
+    if (generic_name(vendor))
+        snprintf(vendor, sizeof(vendor), "%s", generic_name(bvendor) ? "" : bvendor);
+    if (generic_name(name))
+        snprintf(name, sizeof(name), "%s", generic_name(bname) ? "" : bname);
+    /* Lenovo keeps the readable model ("ThinkPad T480") in product_version, the product name is a type number */
+    if (!generic_name(ver) && strlen(ver) > 3 && (!name[0] || strcasestr(vendor, "lenovo")))
+        snprintf(name, sizeof(name), "%s", ver);
+    if (!vendor[0] && !name[0]) {
+        char dt[96];
+        if (read_file(root, "/proc/device-tree/model", dt, sizeof(dt)) && dt[0]) {   /* "Raspberry Pi 4 Model B Rev 1.4" */
+            collapse_blanks(dt);
+            copy_str(st->model, sizeof(st->model), dt);
+            snprintf(st->maker, sizeof(st->maker), "%.*s", (int)strcspn(dt, " ,"), dt);
+        }
+        return;
+    }
+    tidy_vendor(vendor);
+    copy_str(st->maker, sizeof(st->maker), vendor);
+    if (vendor[0] && !strncasecmp(name, vendor, strlen(vendor)) && name[strlen(vendor)] == ' ')
+        memmove(name, name + strlen(vendor) + 1, strlen(name + strlen(vendor) + 1) + 1);   /* "Dell Latitude" by "Dell" */
+    copy_str(st->model, sizeof(st->model), name);
+}
+
 /* ---- the live sampler -------------------------------------------------------------------------------------------- */
 
 struct lm_sysinfo {
@@ -242,9 +424,25 @@ static void sample(struct lm_sysinfo *s)
         st->temp_c = c;
     if (read_file(root, "/proc/loadavg", buf, sizeof(buf)))
         st->load1 = atof(buf);
+    st->uptime_s = read_file(root, "/proc/uptime", buf, sizeof(buf)) ? lm_sysinfo_parse_uptime(buf) : -1;
     st->ready = true;
     if (s->changed)
         s->changed(s->data);
+}
+
+/* The parts that do not change while the compositor runs. */
+static void read_static(struct lm_sysinfo_state *st)
+{
+    const char *root = root_prefix();
+    char buf[8192];
+    lm_sysinfo_read_device(root, st);
+    st->cpu_model[0] = st->os_name[0] = st->kernel[0] = st->host[0] = 0;
+    if (read_file(root, "/proc/cpuinfo", buf, sizeof(buf)))
+        lm_sysinfo_parse_cpu_model(buf, st->cpu_model, sizeof(st->cpu_model));
+    if (read_file(root, "/etc/os-release", buf, sizeof(buf)))
+        lm_sysinfo_parse_os_name(buf, st->os_name, sizeof(st->os_name));
+    read_line(root, "/proc/sys/kernel/osrelease", st->kernel, sizeof(st->kernel));
+    read_line(root, "/proc/sys/kernel/hostname", st->host, sizeof(st->host));
 }
 
 static void timer_cb(void *data)
@@ -263,6 +461,7 @@ struct lm_sysinfo *lm_sysinfo_create(struct lm_loop *loop, void (*changed)(void 
     s->changed = changed;
     s->data = data;
     s->st.temp_c = -1;
+    s->st.uptime_s = -1;
     s->timer = lm_loop_add_timer(loop, timer_cb, s);
     return s;
 }
@@ -283,6 +482,7 @@ void lm_sysinfo_set_active(struct lm_sysinfo *s, bool active)
     s->active = active;
     if (active) {
         s->have_prev = false;
+        read_static(&s->st);
         sample(s);
         lm_timer_arm_ms(s->timer, 1000, 1000);
     } else {

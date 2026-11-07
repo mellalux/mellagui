@@ -44,7 +44,7 @@
 #define GADGET_PAD 10
 #define GADGET_MARGIN 12
 #define SYS_W 300
-#define SYS_H 262                   /* title, CPU, graph, cores, memory, swap, temperature */
+#define SYS_H 404                   /* title, CPU, graph, cores, memory, swap, temperature, the device rows */
 #define SYS_MIN_W 240
 #define SYS_MIN_H 156
 #define MIXER_W 300

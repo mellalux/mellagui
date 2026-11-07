@@ -819,6 +819,43 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     } else {
         paint_meter(c, x, y, w, "Temperature", "no sensor", 0, 0xff6fa8ffu);
     }
+    y += 36;
+
+    /* The device: what room is left, in order of importance. */
+    char up[24];
+    lm_sysinfo_format_uptime(st->uptime_s, up, sizeof(up));
+    const struct { const char *label, *value; } info[] = {
+        { "Model", st->model }, { "Maker", st->maker }, { "CPU", st->cpu_model }, { "OS", st->os_name },
+        { "Kernel", st->kernel }, { "Host", st->host }, { "Uptime", st->uptime_s >= 0 ? up : "" },
+    };
+    int rows = (bottom - y - 6) / 17;
+    if (rows > 0) {
+        struct lm_rect sep2 = lm_rect_make(x, y - 8, w, 1);
+        fill_round(c, &sep2, 0, 0x30ffffffu);
+        int vx = x + 56;
+        for (size_t i = 0; i < sizeof(info) / sizeof(info[0]) && rows > 0; i++) {
+            if (!info[i].value[0])
+                continue;
+            struct lm_rect row = lm_rect_make(x, y, w, 16);
+            draw_text(c, &row, x, y, info[i].label, COL_PANEL_DIM);
+            char fit[96];
+            snprintf(fit, sizeof(fit), "%s", info[i].value);
+            int maxw = x + w - vx;
+            size_t len = strlen(fit);
+            if (lm_font_text_width(fit) > maxw) {                       /* cut at a character boundary, end with ".." */
+                while (len > 0 && lm_font_text_width(fit) + 2 * LM_FONT_W > maxw) {
+                    len--;
+                    while (len > 0 && ((unsigned char)fit[len] & 0xc0) == 0x80)
+                        len--;
+                    fit[len] = 0;
+                }
+                strcat(fit, "..");
+            }
+            draw_text(c, &row, vx, y, fit, COL_PANEL_TEXT);
+            y += 17;
+            rows--;
+        }
+    }
 }
 
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)

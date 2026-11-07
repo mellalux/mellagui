@@ -3,7 +3,7 @@
  *
  * pty + xterm-compatible VT parser (cursor movement, erase, SGR with 16/256/
  * truecolor, scroll regions, alternate screen, bracketed paste, DSR/DA
- * replies), 8x16 bitmap font, scrollback, mouse selection with clipboard copy
+ * replies), 8x16 bitmap font (zoomable 1x..4x), scrollback, mouse selection with clipboard copy
  * and paste. Keyboard translation uses the built-in US layout from keymap.c.
  */
 #include <errno.h>
@@ -32,6 +32,16 @@
 #define SCROLLBACK 1000
 #define DEFAULT_COLS 80
 #define DEFAULT_ROWS 24
+#define MAX_ZOOM 4
+#define MAX_MIMES 32
+#define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
+#define BAR_BG 0x2b303bu
+#define BAR_BTN 0x434c5eu
+#define BAR_FG 0xeceff4u
+
+/* Cell size in pixels at the current zoom. */
+#define CELL_W (LM_FONT_W * A.zoom)
+#define CELL_H (LM_FONT_H * A.zoom)
 
 #define DEFAULT_FG 0xd8dee9u
 #define DEFAULT_BG 0x14171fu
@@ -111,8 +121,9 @@ struct app {
     char *clip_out;             /* text we offer */
     bool have_offer;
     uint32_t offer_id;
-    char offer_mimes[4][64];
+    char offer_mimes[MAX_MIMES][64];
     int n_offer_mimes;
+    int zoom;                   /* integer font scale, 1..MAX_ZOOM */
     char title[256];
 };
 
@@ -712,8 +723,8 @@ static void pty_write(const void *buf, size_t n)
 static void pty_set_size(void)
 {
     struct winsize ws = { .ws_row = (unsigned short)A.t.rows, .ws_col = (unsigned short)A.t.cols,
-                          .ws_xpixel = (unsigned short)(A.t.cols * LM_FONT_W),
-                          .ws_ypixel = (unsigned short)(A.t.rows * LM_FONT_H) };
+                          .ws_xpixel = (unsigned short)(A.t.cols * CELL_W),
+                          .ws_ypixel = (unsigned short)(A.t.rows * CELL_H) };
     ioctl(A.pty, TIOCSWINSZ, &ws);
 }
 
@@ -824,10 +835,59 @@ static uint32_t brighten(uint32_t c)
     return r << 16 | g << 8 | b;
 }
 
+/* ---- button bar: Paste, A-, A+ ----------------------------------------------------------------------------------- */
+
+enum { BTN_PASTE_ID, BTN_SMALLER_ID, BTN_BIGGER_ID, N_BTNS };
+static const char *const btn_label[N_BTNS] = { "Paste", "A-", "A+" };
+
+static void btn_rect(int i, int *x, int *y, int *w, int *h)
+{
+    int bx = 4;
+    for (int k = 0; k < i; k++)
+        bx += (int)strlen(btn_label[k]) * LM_FONT_W + 16 + 4;
+    *x = bx;
+    *y = 2;
+    *w = (int)strlen(btn_label[i]) * LM_FONT_W + 16;
+    *h = BAR_H - 4;
+}
+
+static int btn_at(double px, double py)
+{
+    for (int i = 0; i < N_BTNS; i++) {
+        int x, y, w, h;
+        btn_rect(i, &x, &y, &w, &h);
+        if (px >= x && px < x + w && py >= y && py < y + h)
+            return i;
+    }
+    return -1;
+}
+
+static void draw_bar(uint32_t *px)
+{
+    for (int y = 0; y < BAR_H; y++)
+        for (int x = 0; x < A.bw; x++)
+            px[(size_t)y * (size_t)A.bw + (size_t)x] = BAR_BG;
+    for (int i = 0; i < N_BTNS; i++) {
+        int bx, by, bw, bh;
+        btn_rect(i, &bx, &by, &bw, &bh);
+        for (int y = by; y < by + bh; y++)
+            for (int x = bx; x < bx + bw && x < A.bw; x++)
+                px[(size_t)y * (size_t)A.bw + (size_t)x] = BAR_BTN;
+        int tx = bx + 8, ty = by + (bh - LM_FONT_H) / 2;
+        for (const char *l = btn_label[i]; *l; l++, tx += LM_FONT_W) {
+            const uint8_t *g = lm_font_glyph((uint8_t)*l);
+            for (int r = 0; r < LM_FONT_H; r++)
+                for (int x = 0; x < LM_FONT_W; x++)
+                    if ((g[r] & (0x80 >> x)) && tx + x < A.bw)
+                        px[(size_t)(ty + r) * (size_t)A.bw + (size_t)(tx + x)] = BAR_FG;
+        }
+    }
+}
+
 static void render(void)
 {
     struct term *t = &A.t;
-    int need_w = t->cols * LM_FONT_W + 2 * PAD, need_h = t->rows * LM_FONT_H + 2 * PAD;
+    int need_w = t->cols * CELL_W + 2 * PAD, need_h = t->rows * CELL_H + 2 * PAD + BAR_H;
     if (!A.pixels || A.bw != need_w || A.bh != need_h) {
         /* (re)create pool and buffers */
         if (A.pixels) {
@@ -890,29 +950,33 @@ static void render(void)
                 fg = bg;
                 bg = tmp;
             }
-            int x0 = PAD + col * LM_FONT_W, y0 = PAD + row * LM_FONT_H;
+            int cw = CELL_W, ch = CELL_H, z = A.zoom;
+            int x0 = PAD + col * cw, y0 = BAR_H + PAD + row * ch;
             const uint8_t *g = lm_font_glyph(c->cp);
-            for (int r = 0; r < LM_FONT_H; r++) {
+            for (int r = 0; r < ch; r++) {
+                int gr = r / z;
                 uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
-                uint8_t bits = g[r];
-                if ((c->attr & ATTR_UNDERLINE) && r == LM_FONT_H - 2)
+                uint8_t bits = g[gr];
+                if ((c->attr & ATTR_UNDERLINE) && gr == LM_FONT_H - 2)
                     bits = 0xff;
-                for (int x = 0; x < LM_FONT_W; x++)
-                    dst[x] = (bits & (0x80 >> x)) ? fg : bg;
+                for (int x = 0; x < cw; x++)
+                    dst[x] = (bits & (0x80 >> (x / z))) ? fg : bg;
             }
             if (cursor && !A.focused) {
                 /* hollow cursor when unfocused */
-                for (int x = 0; x < LM_FONT_W; x++) {
+                for (int x = 0; x < cw; x++) {
                     px[(size_t)y0 * (size_t)A.bw + (size_t)(x0 + x)] = DEFAULT_FG;
-                    px[(size_t)(y0 + LM_FONT_H - 1) * (size_t)A.bw + (size_t)(x0 + x)] = DEFAULT_FG;
+                    px[(size_t)(y0 + ch - 1) * (size_t)A.bw + (size_t)(x0 + x)] = DEFAULT_FG;
                 }
-                for (int r = 0; r < LM_FONT_H; r++) {
+                for (int r = 0; r < ch; r++) {
                     px[(size_t)(y0 + r) * (size_t)A.bw + (size_t)x0] = DEFAULT_FG;
-                    px[(size_t)(y0 + r) * (size_t)A.bw + (size_t)(x0 + LM_FONT_W - 1)] = DEFAULT_FG;
+                    px[(size_t)(y0 + r) * (size_t)A.bw + (size_t)(x0 + cw - 1)] = DEFAULT_FG;
                 }
             }
         }
     }
+
+    draw_bar(px);
 
     if (!A.buffers[idx]) {
         A.buffers[idx] = wlc_alloc(A.c, &lm_wl_buffer_interface, NULL, NULL);
@@ -1045,17 +1109,45 @@ static void copy_selection(void)
     WLC_SEND(A.c, A.ddev, LM_WL_DATA_DEVICE_REQ_SET_SELECTION, { .o = A.dsrc }, { .u = A.last_serial });
 }
 
+/* Send pasted text to the shell: bracketed when the application asked for it, else with \n as \r like xterm. */
+static void paste_text(const char *buf, size_t len)
+{
+    if (!len)
+        return;
+    if (A.t.bracketed) {
+        pty_write("\033[200~", 6);
+        pty_write(buf, len);
+        pty_write("\033[201~", 6);
+        return;
+    }
+    char *tmp = malloc(len);
+    if (!tmp)
+        return;
+    for (size_t i = 0; i < len; i++)
+        tmp[i] = buf[i] == '\n' ? '\r' : buf[i];
+    pty_write(tmp, len);
+    free(tmp);
+}
+
+static const char *const paste_mimes[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
+
 static void paste(void)
 {
+    /* We own the selection ourselves: the compositor's offer would need us to write into the pipe while we block
+     * reading it, so use our own copy. */
+    if (A.dsrc && A.clip_out) {
+        paste_text(A.clip_out, strlen(A.clip_out));
+        return;
+    }
     if (!A.have_offer || !A.offer_id)
         return;
     const char *mime = NULL;
-    for (int i = 0; i < A.n_offer_mimes; i++)
-        if (!strcmp(A.offer_mimes[i], "text/plain;charset=utf-8"))
-            mime = A.offer_mimes[i];
-    for (int i = 0; i < A.n_offer_mimes && !mime; i++)
-        if (!strcmp(A.offer_mimes[i], "text/plain"))
-            mime = A.offer_mimes[i];
+    for (size_t m = 0; m < sizeof(paste_mimes) / sizeof(paste_mimes[0]) && !mime; m++)
+        for (int i = 0; i < A.n_offer_mimes; i++)
+            if (!strcmp(A.offer_mimes[i], paste_mimes[m])) {
+                mime = A.offer_mimes[i];
+                break;
+            }
     if (!mime)
         return;
     int fds[2];
@@ -1066,10 +1158,14 @@ static void paste(void)
     wlc_flush(A.c);
     /* The source writes into the pipe; read until EOF (bounded wait). */
     char *buf = malloc(1 << 20);
+    if (!buf) {
+        close(fds[0]);
+        return;
+    }
     size_t len = 0;
     struct pollfd pf = { .fd = fds[0], .events = POLLIN };
     while (len < (1u << 20)) {
-        if (poll(&pf, 1, 500) <= 0)
+        if (poll(&pf, 1, 1000) <= 0)
             break;
         ssize_t k = read(fds[0], buf + len, (1u << 20) - len);
         if (k <= 0)
@@ -1077,20 +1173,26 @@ static void paste(void)
         len += (size_t)k;
     }
     close(fds[0]);
-    if (len) {
-        if (A.t.bracketed)
-            pty_write("\033[200~", 6);
-        pty_write(buf, len);
-        if (A.t.bracketed)
-            pty_write("\033[201~", 6);
-    }
+    paste_text(buf, len);
     free(buf);
+}
+
+/* Font zoom: delta +1 / -1, 0 = back to 1x. Keeps the window size and recomputes the grid. */
+static void apply_size(int w, int h);
+
+static void set_zoom(int delta)
+{
+    int z = delta == 0 ? 1 : LM_CLAMP(A.zoom + delta, 1, MAX_ZOOM);
+    if (z == A.zoom)
+        return;
+    A.zoom = z;
+    apply_size(A.win_w > 0 ? A.win_w : A.bw, A.win_h > 0 ? A.win_h : A.bh);
 }
 
 static void doffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)c; (void)data;
-    if (op == LM_WL_DATA_OFFER_EVT_OFFER && id == A.offer_id && A.n_offer_mimes < 4)
+    if (op == LM_WL_DATA_OFFER_EVT_OFFER && id == A.offer_id && A.n_offer_mimes < MAX_MIMES)
         snprintf(A.offer_mimes[A.n_offer_mimes++], sizeof(A.offer_mimes[0]), "%s", args[0].s);
 }
 
@@ -1137,6 +1239,11 @@ static void key_to_pty(uint32_t code, bool repeat)
     (void)repeat;
 
     if (shift && ctrl && code == KEY_C) { copy_selection(); return; }
+    if (ctrl && !alt) {
+        if (code == KEY_EQUAL || code == KEY_KPPLUS) { set_zoom(1); return; }
+        if (code == KEY_MINUS || code == KEY_KPMINUS) { set_zoom(-1); return; }
+        if (code == KEY_0 || code == KEY_KP0) { set_zoom(0); return; }
+    }
     if ((shift && ctrl && code == KEY_V) || (shift && code == KEY_INSERT)) { paste(); return; }
     if (shift && (code == KEY_PAGEUP || code == KEY_PAGEDOWN)) {
         int step = t->rows / 2;
@@ -1295,8 +1402,8 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
 
 static void cell_from_pointer(int *col, int *row)
 {
-    *col = LM_CLAMP((int)(A.px - PAD) / LM_FONT_W, 0, A.t.cols - 1);
-    *row = LM_CLAMP((int)(A.py - PAD) / LM_FONT_H, 0, A.t.rows - 1);
+    *col = LM_CLAMP((int)(A.px - PAD) / CELL_W, 0, A.t.cols - 1);
+    *row = LM_CLAMP((int)(A.py - BAR_H - PAD) / CELL_H, 0, A.t.rows - 1);
 }
 
 static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
@@ -1318,7 +1425,15 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         A.last_serial = args[0].u;
-        if (args[2].u == BTN_LEFT) {
+        if (args[2].u == BTN_LEFT && A.py < BAR_H && !t->sel_dragging) {
+            if (args[3].u == 1) {
+                switch (btn_at(A.px, A.py)) {
+                case BTN_PASTE_ID: paste(); break;
+                case BTN_SMALLER_ID: set_zoom(-1); break;
+                case BTN_BIGGER_ID: set_zoom(1); break;
+                }
+            }
+        } else if (args[2].u == BTN_LEFT) {
             if (args[3].u == 1) {
                 cell_from_pointer(&t->sel_x0, &t->sel_y0);
                 t->sel_x1 = t->sel_x0;
@@ -1341,7 +1456,9 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         }
         break;
     case LM_WL_POINTER_EVT_AXIS:
-        if (args[1].u == LM_POINTER_AXIS_VERTICAL && !t->alt_active) {
+        if ((A.mods & LM_MOD_CTRL) && args[1].u == LM_POINTER_AXIS_VERTICAL) {
+            set_zoom(args[2].f > 0 ? -1 : 1);
+        } else if (args[1].u == LM_POINTER_AXIS_VERTICAL && !t->alt_active) {
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
             if (lines == 0)
                 lines = args[2].f > 0 ? 1 : -1;
@@ -1360,7 +1477,7 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
 
 static void apply_size(int w, int h)
 {
-    int cols = (w - 2 * PAD) / LM_FONT_W, rows = (h - 2 * PAD) / LM_FONT_H;
+    int cols = (w - 2 * PAD) / CELL_W, rows = (h - 2 * PAD - BAR_H) / CELL_H;
     cols = LM_CLAMP(cols, 8, 500);
     rows = LM_CLAMP(rows, 2, 200);
     if (cols != A.t.cols || rows != A.t.rows) {
@@ -1447,6 +1564,7 @@ int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
     A.running = true;
+    A.zoom = 1;
     A.repeat_fd = -1;
     A.repeat_rate = 25;
     A.repeat_delay = 400;

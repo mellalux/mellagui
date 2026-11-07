@@ -30,6 +30,14 @@ struct lm_sysinfo_state {
     int temp_c;                         /* CPU package/core temperature in degrees C, -1 = no sensor */
     char temp_label[24];                /* which sensor ("coretemp Package id 0") */
     double load1;                       /* 1-minute load average */
+    /* the device (read once when the sampler starts; uptime on every sample); an empty string = unknown */
+    char maker[48];                     /* manufacturer: DMI sys_vendor / board_vendor, "devicetree" boards: first word of the model */
+    char model[64];                     /* product: DMI product_name / product_version / board_name, else /proc/device-tree/model */
+    char cpu_model[64];                 /* "Intel Core i5-8250U @ 1.60GHz" */
+    char os_name[48];                   /* PRETTY_NAME of /etc/os-release */
+    char kernel[40];                    /* /proc/sys/kernel/osrelease */
+    char host[48];
+    long uptime_s;                      /* -1 = unknown */
 };
 
 /* ---- pure helpers (unit-tested) -------------------------------------------------------------------------------- */
@@ -40,6 +48,19 @@ int lm_sysinfo_parse_stat(const char *text, struct lm_cpu_times *total, struct l
 int lm_sysinfo_cpu_percent(const struct lm_cpu_times *prev, const struct lm_cpu_times *cur);
 /* /proc/meminfo; false when MemTotal / MemAvailable are missing (MemAvailable falls back to Free+Buffers+Cached). */
 bool lm_sysinfo_parse_meminfo(const char *text, long *total, long *avail, long *swap_total, long *swap_free);
+/* /proc/cpuinfo: the CPU model ("model name" / "Model" / "Hardware" / "cpu model"), without (R), (TM), "CPU" and doubled
+ * blanks. False when there is none. */
+bool lm_sysinfo_parse_cpu_model(const char *text, char *out, size_t n);
+/* /etc/os-release: PRETTY_NAME (quotes removed), else NAME. False when there is none. */
+bool lm_sysinfo_parse_os_name(const char *text, char *out, size_t n);
+/* /proc/uptime in whole seconds, -1 when unreadable. */
+long lm_sysinfo_parse_uptime(const char *text);
+/* "3d 4h", "5h 12m", "7m": the two largest units. */
+void lm_sysinfo_format_uptime(long seconds, char *out, size_t n);
+/* Fills maker / model of `st` from the DMI tables (or the device tree) under `root`; generic placeholders such as
+ * "To be filled by O.E.M." are skipped, a vendor name that the model repeats is not shown twice. */
+void lm_sysinfo_read_device(const char *root, struct lm_sysinfo_state *st);
+
 /* Finds the CPU temperature under `root` (""/"/tmp/x"): hwmon coretemp/k10temp/... (the "Package"/"Tctl"/"Tdie" input, else
  * the hottest one), else a thermal zone of a CPU type, else any thermal zone. False when there is none. */
 bool lm_sysinfo_read_temp(const char *root, int *celsius, char *label, size_t label_n);

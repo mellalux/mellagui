@@ -59,6 +59,9 @@ static const char *usage_text =
     "                           of the session (default: own on drm, any on headless, which the tests need)\n"
     "  --lock-file FILE         where the screen lock keeps its salted password / PIN hash (mode 0600); \"none\" = in memory only\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/lock.conf, headless: none)\n"
+    "  --renderer software|auto|gl  how the picture is composed: software (the CPU does everything), gl (OpenGL ES through EGL: the GPU\n"
+    "                           composites the windows; today only on the headless backend, the display is not wired up yet) or auto\n"
+    "                           (default: gl when it works, else software; headless defaults to software; env MELLAGUI_RENDERER)\n"
     "  --logind off|auto|on     get the GPU and input devices from systemd-logind (no `video` / `input` group needed, VT switching\n"
     "                           done by the session manager); auto (default) falls back to opening the device files, on = required\n"
     "  --screenshot-dir DIR     where Print (screen) and Alt+Print (window) save PNGs; Ctrl+Print only copies; every shot also goes to the\n"
@@ -238,7 +241,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -261,6 +264,7 @@ int main(int argc, char **argv)
         { "lock-file", required_argument, 0, OPT_LOCK_FILE },
         { "screenshot-dir", required_argument, 0, OPT_SCREENSHOT_DIR },
         { "logind", required_argument, 0, OPT_LOGIND },
+        { "renderer", required_argument, 0, OPT_RENDERER },
         { "settings-access", required_argument, 0, OPT_SETTINGS_ACCESS },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
@@ -400,6 +404,12 @@ int main(int argc, char **argv)
             else { fprintf(stderr, "mellagui: --settings-access wants any or own, not '%s'\n", optarg); return 2; }
             break;
         case OPT_LOCK_FILE: cfg.lock_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_RENDERER:
+            if (!strcmp(optarg, "software")) cfg.renderer = 0;
+            else if (!strcmp(optarg, "auto")) cfg.renderer = 1;
+            else if (!strcmp(optarg, "gl")) cfg.renderer = 2;
+            else { fprintf(stderr, "mellagui: --renderer wants software, auto or gl, not '%s'\n", optarg); return 2; }
+            break;
         case OPT_LOGIND:
             if (!strcmp(optarg, "off")) cfg.logind = 0;
             else if (!strcmp(optarg, "auto")) cfg.logind = 1;

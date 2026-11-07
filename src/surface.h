@@ -73,6 +73,11 @@ struct lm_surface {
     /* current (committed) state: READ-ONLY outside surface.c */
     struct lm_texture tex;          /* valid iff has_content */
     bool has_content;               /* last commit attached a non-NULL buffer */
+    /* the GL renderer's mirror of `tex` (render_gl.c owns these): the GL texture and what changed in `tex` since the last upload */
+    unsigned gl_tex;
+    int32_t gl_w, gl_h;
+    bool gl_full;                   /* the whole texture must be uploaded (new content, new size) */
+    struct lm_region gl_damage;     /* texture pixels that changed since the last upload (when !gl_full) */
     int32_t width, height;          /* surface-local size (tex size / scale); 0 if !has_content */
     int32_t scale;                  /* buffer_scale, >= 1 */
     uint32_t transform;             /* buffer_transform (already applied inside tex) */

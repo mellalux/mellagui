@@ -52,6 +52,13 @@ void lm_render_cursor_changed(struct lm_renderer *r);
 /* A client waits for a frame callback: make sure one frame tick happens. */
 void lm_render_request_frame(struct lm_renderer *r);
 
+/* Headless: copies what the GL renderer drew into the backend's memory framebuffer (dump, tests). No-op for software. */
+void lm_render_readback(struct lm_renderer *r);
+
+/* The surface is being freed: its GL texture (when the GL renderer made one) goes. */
+struct lm_surface;
+void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s);
+
 /* Backend says `out` can be drawn (see backend.h frame protocol); `time_ms` is msec32. */
 void lm_render_output_ready(struct lm_renderer *r, struct lm_output *out, uint32_t time_ms);
 

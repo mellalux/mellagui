@@ -178,6 +178,7 @@ struct lm_config {
     bool dmabuf;                /* offer zwp_linux_dmabuf_v1 so clients can render with the GPU (default true; --no-dmabuf) */
     bool sysinfo;               /* system monitor gadget visible at start (default false; --sysinfo; Super+S; setting `sysinfo`) */
     bool sound;                 /* feedback beeps for sticky keys (default true; --no-sound; never on headless) */
+    int renderer;               /* --renderer software|auto|gl: 0 = software, 1 = GL when it works, 2 = GL required (default: auto on drm, software headless) */
     int logind;                 /* --logind off|auto|on: 0 = never, 1 = when the session allows it (default), 2 = required */
     bool grab_input;            /* EVIOCGRAB the evdev devices (default true on drm) */
 };
@@ -199,6 +200,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .pointer_speed = 1.0,
         .grab_input = true,
         .logind = 1,
+        .renderer = -1,
         .sound = true,
         .audio_device = "default",
         .dmabuf = true,

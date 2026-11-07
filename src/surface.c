@@ -612,6 +612,8 @@ bool lm_surface_tree_wants_frame(struct lm_surface *root)
 
 static void drop_content(struct lm_surface *s)
 {
+    s->gl_full = true;
+    lm_region_clear(&s->gl_damage);
     lm_texture_free(&s->tex);
     s->has_content = false;
     s->width = 0;
@@ -707,6 +709,12 @@ static int attach_buffer(struct lm_surface *s, const struct sstate *st, struct l
         partial = bd.n > 0; /* no damage at all: be forgiving and take the whole buffer */
     }
     int rc = lm_buffer_copy(b, &s->tex, tr, partial ? &bd : NULL);
+    if (rc == 0) {                                  /* the GL renderer re-uploads what changed */
+        if (partial && !s->gl_full)
+            lm_region_add_region(&s->gl_damage, &bd);
+        else
+            s->gl_full = true;
+    }
     lm_region_fini(&bd);
     if (rc < 0) {
         drop_content(s);
@@ -1218,6 +1226,8 @@ static void surface_destroy_hook(struct lm_resource *res)
     res->data = NULL;
 
     lm_signal_emit(&s->destroy_signal, s);
+    if (s->gl_tex && s->server && s->server->render)
+        lm_render_surface_gone(s->server->render, s);
 
     /* If this is a mapped subsurface its parent tree must be repainted. */
     struct lm_surface *root = lm_surface_root(s);
@@ -1259,6 +1269,7 @@ static void surface_destroy_hook(struct lm_resource *res)
     lm_region_fini(&p->opaque_raw);
     lm_region_fini(&s->opaque);
     lm_region_fini(&s->input);
+    lm_region_fini(&s->gl_damage);
     lm_texture_free(&s->tex);
     lm_list_remove(&s->link);
     free(p);
@@ -1278,6 +1289,8 @@ static struct surf *surface_new(struct lm_compositor *comp, struct lm_server *sr
     lm_list_init(&s->link);
     lm_region_init(&s->opaque);
     lm_region_init(&s->input);
+    lm_region_init(&s->gl_damage);
+    s->gl_full = true;
     lm_signal_init(&s->destroy_signal);
     lm_signal_init(&s->commit_signal);
 

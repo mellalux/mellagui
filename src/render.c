@@ -606,6 +606,24 @@ static void paint_switcher(const struct paint_ctx *c, const struct lm_switcher_i
     }
 }
 
+/* A notification card: bordered box, the title in the accent colour, the wrapped text below, a dim x top right (a click closes it). */
+static void paint_notify(const struct paint_ctx *c, const struct lm_notify_info *n)
+{
+    fill_rect(c, &n->rect, 0x003a4256u);                                /* 1 px border */
+    struct lm_rect in = lm_rect_make(n->rect.x + 1, n->rect.y + 1, n->rect.w - 2, n->rect.h - 2);
+    fill_rect(c, &in, COL_PANEL);
+    struct lm_rect bar = lm_rect_make(n->rect.x + 1, n->rect.y + 1, 3, n->rect.h - 2);
+    fill_rect(c, &bar, COL_PANEL_ACCENT);                               /* the accent stripe on the left */
+    int tx = n->rect.x + 12, ty = n->rect.y + 8;
+    struct lm_rect tr = lm_rect_make(tx, ty, n->rect.w - 12 - 28, LM_FONT_H);
+    draw_text(c, &tr, tx, ty, n->title, COL_PANEL_ACCENT);
+    draw_text(c, &n->rect, n->rect.x + n->rect.w - 8 - LM_FONT_W, ty, "x", COL_PANEL_DIM);
+    for (int i = 0; i < n->nlines; i++) {
+        struct lm_rect lr = lm_rect_make(tx, ty + 22 + i * LM_FONT_H, n->rect.w - 12 - 8, LM_FONT_H);
+        draw_text(c, &lr, tx, lr.y, n->line[i], COL_PANEL_TEXT);
+    }
+}
+
 static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb);
 
 /* Text with every font pixel drawn as a scale x scale block (the lock screen's clock). */
@@ -1416,6 +1434,9 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_MENU:
         paint_menu(c, &item->u.menu);
+        break;
+    case LM_SCENE_NOTIFY:
+        paint_notify(c, &item->u.notify);
         break;
     case LM_SCENE_SWITCHER:
         paint_switcher(c, &item->u.switcher);

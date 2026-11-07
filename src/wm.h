@@ -263,7 +263,8 @@ enum lm_pick_kind {
     LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
     LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
     LM_PICK_CLIP_ENTRY,     /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
-    LM_PICK_SHOT_CARD       /* the screenshot card (above everything): click = open the file in the viewer */
+    LM_PICK_SHOT_CARD,      /* the screenshot card (above everything): click = open the file in the viewer */
+    LM_PICK_NOTIFY          /* a notification card: click = dismiss it (`index` = its id) */
 };
 
 struct lm_pick {
@@ -313,6 +314,11 @@ void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
  * screen (see lm_wm_scene_for_each).
  */
 void lm_wm_lock_changed(struct lm_wm *wm, bool locked);
+/*
+ * Notifications: a card with `title` and `body` (UTF-8, long text is wrapped and cut) at the top right of the first output, newest
+ * on top, at most LM_NOTIFY_MAX. It goes away after `timeout_ms` (0 = it stays until it is clicked). Not shown while locked.
+ */
+void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods);
 
@@ -418,6 +424,17 @@ struct lm_switcher_info {
     bool focused[LM_SW_MAX];        /* the window that has the focus now */
 };
 
+#define LM_NOTIFY_MAX 5             /* cards shown at once; a newer one pushes the oldest out */
+#define LM_NOTIFY_LINES 4
+#define LM_NOTIFY_COLS 36           /* characters per line of a card */
+struct lm_notify_info {
+    struct lm_rect rect;
+    int id;
+    char title[LM_NOTIFY_COLS * 4 + 1];
+    char line[LM_NOTIFY_LINES][LM_NOTIFY_COLS * 4 + 1];
+    int nlines;
+};
+
 enum lm_scene_kind {
     LM_SCENE_WALLPAPER,             /* one per output */
     LM_SCENE_GADGET,                /* the desktop gadget (right after the wallpapers, below all windows) */
@@ -425,6 +442,7 @@ enum lm_scene_kind {
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_MENU,                  /* the open app menu (above the panel, below popups) */
+    LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
@@ -444,6 +462,7 @@ struct lm_scene_item {
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
         struct lm_switcher_info switcher; /* LM_SCENE_SWITCHER */
+        struct lm_notify_info notify;   /* LM_SCENE_NOTIFY */
     } u;
 };
 

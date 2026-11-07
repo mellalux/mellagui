@@ -259,6 +259,12 @@ static void ctl_command(struct ctl_client *c, char *line)
         char buf[1536];
         lm_settings_dump(srv->settings, buf, sizeof(buf));
         ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);
+    } else if (!strcmp(cmd, "notify")) {
+        /* notify <ms> <title> [body words...] */
+        if (!srv->settings || !a1 || !a2) { ctl_reply(c, "err usage: notify <ms> <title> [body]\n"); return; }
+        char msg[400];
+        snprintf(msg, sizeof(msg), "%s\t%s%s%s\t%s", a2, a3 ? a3 : "", (a3 && save) ? " " : "", save ? save : "", a1);
+        ctl_reply(c, lm_settings_set(srv->settings, "notify", msg) ? "ok\n" : "err rejected\n");
     } else if (!strcmp(cmd, "setting")) {
         /* setting <key>           -> "ok <value>" (also the long list values, which `settings` leaves out) */
         char buf[2048];

@@ -15,6 +15,7 @@ Included programs:
 | `build/mellagui-run` | "Run command" dialog (Super+R or the panel's *Run* button; Up/Down history) |
 | `build/mellagui-settings` | settings panel (Super+I or *MellaGUI* → Settings): keyboard layouts, sticky keys, key repeat, pointer speed, natural scrolling, gadget, sound, resolution, sound outputs; `--get` / `--set KEY=VALUE` for scripts |
 | `build/mellagui-view`| image viewer (PNG, PPM; MellaGUI menu → Images, or `mellagui-view [FILE|DIR]`): defaults to the newest screenshot in `~/Pictures`; Left/Right browse, +/- and the wheel zoom, drag pans, F fits, 0 is 100 %, R rescans, Esc quits; has its own inflate, `--decode FILE OUT.ppm` for tests |
+| `build/mellagui-notify`| `mellagui-notify [-t MS] TITLE [BODY...]` shows a notification card (top right below the panel, newest on top, at most five; a click dismisses it, `-t 0` keeps it, default 6 s); like the settings panel it is served only to MellaGUI's own programs |
 | `build/mellagui-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
 
 ## Status (read this)

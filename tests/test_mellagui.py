@@ -1670,6 +1670,20 @@ class TestClients(Base):
         time.sleep(0.4)
         return p, path
 
+    def type_chars(self, text):
+        """Types letters, digits and / . - _ on the US layout (enough for temporary file names)."""
+        for ch in text:
+            code = {'/': 53, '.': 52, '-': 12, '_': 12}.get(ch)
+            if code is None:
+                code = (11 if ch == '0' else 1 + int(ch)) if ch.isdigit() else self.LETTERS[ch.lower()]
+            shifted = ch.isupper() or ch == '_'
+            if shifted:
+                ctl.key(self.SHIFT, True)
+            ctl.tap(code)
+            if shifted:
+                ctl.key(self.SHIFT, False)
+            time.sleep(0.01)
+
     def chord(self, mod, code):
         ctl.key(mod, True)
         ctl.tap(code)
@@ -1758,17 +1772,7 @@ class TestClients(Base):
         with open(other, 'wb') as f:
             f.write(b'second\n')
         self.chord(self.CTRL, 24)                              # Ctrl+O: the open prompt
-        for ch in other:
-            code = {'/': 53, '.': 52, '-': 12, '_': 12}.get(ch)
-            if code is None and ch.isdigit():
-                code = 11 if ch == '0' else 1 + int(ch)
-            if code is None:
-                code = self.LETTERS[ch.lower()]
-            if ch.isupper() or ch == '_':
-                ctl.key(self.SHIFT, True); ctl.tap(code); ctl.key(self.SHIFT, False)
-            else:
-                ctl.tap(code)
-            time.sleep(0.01)
+        self.type_chars(other)
         ctl.tap(KEY_ENTER)
         time.sleep(0.3)
         self.type_text('z')
@@ -1806,6 +1810,147 @@ class TestClients(Base):
         self.chord(self.CTRL, self.K_S)                        # ...and saving it does overwrite? no: the path was never taken
         time.sleep(0.2)
         self.assertEqual(self.read_file(bin_path), b'\x00\x01\x02binary', 'a refused file must not be overwritten')
+
+    # ---- mellagui-files ----------------------------------------------------------------------------------------------
+
+    def test_files_selftest(self):
+        path = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(path):
+            self.skipTest('mellagui-files not built')
+        r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def files_start(self):
+        """A folder with sub/, a.txt, p.ppm (a 1x1 image), .hidden and the browser on it. Returns (process, folder)."""
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        d = tempfile.mkdtemp(prefix='files-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.mkdir(os.path.join(d, 'sub'))
+        with open(os.path.join(d, 'sub', 'inner.txt'), 'wb') as f:
+            f.write(b'inner\n')
+        with open(os.path.join(d, 'a.txt'), 'wb') as f:
+            f.write(b'text a\n')
+        with open(os.path.join(d, 'p.ppm'), 'wb') as f:
+            f.write(b'P6\n1 1\n255\n\x10\x20\x30')
+        with open(os.path.join(d, '.hidden'), 'wb') as f:
+            f.write(b'secret\n')
+        with open(os.path.join(d, 'blob.bin'), 'wb') as f:
+            f.write(b'\x00\x01\x02')
+        for w in ctl.windows()['windows']:
+            self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.edit', 'mellagui.view', 'mellagui.term'),
+                             'a window of an earlier test is still open')
+        p = subprocess.Popen([exe, d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        def cleanup():
+            for pid in os.listdir('/proc'):                       # the programs it started are its children
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open('/proc/%s/stat' % pid) as f:
+                        ppid = int(f.read().rsplit(')', 1)[1].split()[1])
+                    if ppid == p.pid or ppid == 1 and False:
+                        os.kill(int(pid), 9)
+                except (OSError, ValueError, IndexError):
+                    pass
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+            time.sleep(0.2)
+        self.addCleanup(cleanup)
+        self.assertIsNotNone(wait_for_window('mellagui.files'), 'the file browser did not appear')
+        time.sleep(0.4)
+        return p, d
+
+    def window_title(self, app_id, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            for w in ctl.windows()['windows']:
+                if w['app_id'] == app_id:
+                    return w['title']
+            time.sleep(0.05)
+        return None
+
+    def wait_title(self, app_id, title, timeout=5.0):
+        end = time.time() + timeout
+        t = None
+        while time.time() < end:
+            t = self.window_title(app_id, 0.1)
+            if t == title:
+                return
+            time.sleep(0.05)
+        self.fail('title of %s is %r, wanted %r' % (app_id, t, title))
+
+    def test_files_navigates_with_keys(self):
+        p, d = self.files_start()
+        base = os.path.basename(d)
+        self.wait_title('mellagui.files', base + ' - Files')
+        ctl.tap(KEY_ENTER)                                     # the first entry is selected: the folder "sub" (folders come first)
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(self.K_BS)                                     # Backspace: back up, with "sub" selected again
+        self.wait_title('mellagui.files', base + ' - Files')
+        ctl.tap(KEY_ENTER)                                     # so Enter goes into it once more
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(105)                                           # Left goes up too
+        self.wait_title('mellagui.files', base + ' - Files')
+
+    def test_files_opens_text_image_and_refuses_binary(self):
+        p, d = self.files_start()
+        # rows: .. / sub (selected) / a.txt / blob.bin / p.ppm (the hidden file is not shown)
+        ctl.tap(self.K_DOWN)
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.edit', 'a.txt - Editor')
+        ctl.key(KEY_LEFTMETA, True); ctl.tap(KEY_Q); ctl.key(KEY_LEFTMETA, False)
+        for _ in range(50):
+            if self.window_title('mellagui.edit', 0.05) is None:
+                break
+        ctl.tap(self.K_DOWN)                                   # blob.bin
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.5)
+        self.assertIsNone(self.window_title('mellagui.edit', 0.2), 'a binary file must not be opened')
+        ctl.tap(self.K_DOWN)                                   # p.ppm
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.view', 'p.ppm - Images')
+
+    def test_files_hidden_toggle_and_letter_jump(self):
+        p, d = self.files_start()
+        ctl.tap(self.K_END)                                    # last entry: p.ppm; the letter "a" wraps around to a.txt
+        ctl.tap(30)
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.edit', 'a.txt - Editor')
+        ctl.key(KEY_LEFTMETA, True); ctl.tap(KEY_Q); ctl.key(KEY_LEFTMETA, False)
+        for _ in range(50):
+            if self.window_title('mellagui.edit', 0.05) is None:
+                break
+        self.chord(self.CTRL, 35)                              # Ctrl+H: now ".hidden" sorts right after the folder
+        ctl.tap(self.K_HOME); ctl.tap(self.K_DOWN); ctl.tap(self.K_DOWN)    # .. / sub / .hidden
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.edit', '.hidden - Editor')
+
+    def test_files_terminal_starts_in_the_folder(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-term')):
+            self.skipTest('mellagui-term not built')
+        p, d = self.files_start()
+        self.chord(self.CTRL, 20)                              # Ctrl+T
+        self.assertIsNotNone(wait_for_window('mellagui.term'), 'the terminal did not appear')
+        found = None
+        for pid in os.listdir('/proc'):
+            if pid.isdigit():
+                try:
+                    if os.readlink('/proc/%s/exe' % pid).endswith('/mellagui-term') and os.path.realpath('/proc/%s/cwd' % pid) == os.path.realpath(d):
+                        found = pid
+                except OSError:
+                    pass
+        self.assertIsNotNone(found, 'no mellagui-term running in ' + d)
+
+    def test_files_path_prompt(self):
+        p, d = self.files_start()
+        self.chord(self.CTRL, 38)                              # Ctrl+L
+        for _ in range(len(d) + 1):                            # empty the prompt (it starts with the current path)
+            ctl.tap(self.K_BS)
+        self.type_chars(os.path.join(d, 'sub'))
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'sub - Files')
 
     def test_run_dialog_selftest(self):
         path = os.path.join(ROOT, 'build', 'mellagui-run')

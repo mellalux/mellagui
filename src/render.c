@@ -82,6 +82,7 @@ struct shot_fx {
 struct lm_renderer {
     struct shot_fx shot;
     struct lm_gl *gl;                   /* the GL renderer; NULL = software (render_gl.inc) */
+    bool gl_owned;                      /* we made it (headless); the DRM backend owns its own */
     unsigned sprite_tex[LM_CURSOR_POINTER + 1];
     struct lm_server *srv;
     struct lm_idle *idle;
@@ -1647,15 +1648,16 @@ struct lm_renderer *lm_render_create(struct lm_server *srv)
     if (mode > 0) {
         char why[200] = "";
         r->gl = headless ? lm_gl_create(-1, why, sizeof(why)) : NULL;
-        if (!headless)
-            snprintf(why, sizeof(why), "OpenGL on the display is not wired up yet");
-        if (r->gl) {
+        r->gl_owned = r->gl != NULL;
+        if (!headless) {
+            /* the DRM backend makes the context (it needs its device) and the renderer picks it up in output_added */
+        } else if (r->gl) {
             lm_info("renderer: OpenGL ES (%s), the GPU composites the windows", lm_gl_renderer_name(r->gl));
         } else if (mode == 2) {
             lm_error("the GL renderer is required (--renderer gl) but not usable: %s", why);
             free(r);
             return NULL;
-        } else {
+        } else if (headless) {
             lm_info("renderer: software (GL not used: %s)", why);
         }
     }
@@ -1685,13 +1687,19 @@ void lm_render_destroy(struct lm_renderer *r)
         for (int i = 0; i <= LM_CURSOR_POINTER; i++)
             if (r->sprite_tex[i])
                 lm_gl_tex_delete(r->gl, r->sprite_tex[i]);
-        lm_gl_destroy(r->gl);
+        if (r->gl_owned)
+            lm_gl_destroy(r->gl);
     }
     free(r);
 }
 
 void lm_render_output_added(struct lm_renderer *r, struct lm_output *out)
 {
+    if (!r->gl && out->backend && out->backend->gl) {               /* the DRM backend renders with GL: scanout through GBM */
+        r->gl = out->backend->gl;
+        r->gl_owned = false;
+        lm_info("renderer: OpenGL ES, the GPU composites the windows and scans them out");
+    }
     struct out_state *st = calloc(1, sizeof(*st));
     if (!st)
         return;

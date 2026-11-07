@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include <string.h>
 
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+
 #include "gl.h"
 
 static int bad;
@@ -30,7 +33,7 @@ static int gbm_test(void)
         return 77;
     }
     enum { W = 64, H = 48 };
-    struct lm_gl_window *win = lm_gl_window_create(gl, W, H, false);
+    struct lm_gl_window *win = lm_gl_window_create(gl, W, H, getenv("GL_TEST_SCANOUT") != NULL);
     CHECK(win, "window");
     if (!win)
         return 1;
@@ -55,6 +58,13 @@ static int gbm_test(void)
             CHECK(px(out, W, W - 6, H - 1) == 0, "blue stops at its edge");
         } else {
             CHECK(0, "cannot map the buffer");
+        }
+        if (getenv("GL_TEST_ADDFB")) {                              /* the KMS side: a framebuffer on the GBM buffer (no master needed) */
+            uint32_t handles[4] = { bo.handle }, pitches[4] = { bo.stride }, offsets[4] = { 0 }, fb = 0;
+            int rc = drmModeAddFB2(fd, W, H, 0x34325258u, handles, pitches, offsets, &fb, 0);
+            CHECK(rc == 0, "drmModeAddFB2 failed: %m");
+            if (rc == 0)
+                drmModeRmFB(fd, fb);
         }
         lm_gl_window_release(gl, win, &bo);
     }

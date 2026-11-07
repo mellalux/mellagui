@@ -38,6 +38,7 @@
 #include "backend.h"
 #include "cvt.h"
 #include "edid.h"
+#include "gl.h"
 #include "log.h"
 #include "logind.h"
 
@@ -64,8 +65,21 @@ struct drm_buf {
     uint64_t seq;               /* frame number last presented through this buffer, 0 = never */
 };
 
+#define DRM_FORMAT_XRGB8888_ 0x34325258u
+
+/* GL scanout state of one output: the GBM window it renders into, the buffer on screen and the one queued for the next flip,
+ * and the KMS framebuffers made for the buffers the GBM surface cycles through (by GEM handle). */
+struct gl_scan {
+    struct lm_gl_window *win;
+    struct lm_gl_bo bo_scan, bo_next;
+    uint32_t scan_fb, next_fb;
+    struct { uint32_t handle, fb; } fbs[8];
+    int nfbs;
+};
+
 struct drm_out {
     struct lm_output base;      /* must be first */
+    struct gl_scan gs;          /* gs.win != NULL: this output is drawn by the GL renderer */
     struct drm *d;
     uint32_t conn_id, crtc_id;
     drmModeModeInfo mode;
@@ -89,6 +103,7 @@ struct drm_out {
 struct drm {
     struct lm_backend base;     /* must be first */
     int fd;
+    struct lm_gl *gl;           /* OpenGL ES on a GBM device on `fd` (--renderer gl), else NULL: dumb buffers + software */
     char path[300];
     struct lm_source *drm_source;
     struct lm_timer *hotplug;       /* cheap periodic look at the connectors' last known state */
@@ -313,13 +328,74 @@ static uint32_t pick_crtc(struct drm *d, drmModeRes *res, drmModeConnector *conn
 
 static int out_modeset(struct drm_out *o)
 {
-    struct drm_buf *front = &o->buf[o->back ^ 1];
+    uint32_t fb = o->gs.win ? o->gs.scan_fb : o->buf[o->back ^ 1].fb_id;
     uint32_t conn = o->conn_id;
-    if (drmModeSetCrtc(o->d->fd, o->crtc_id, front->fb_id, 0, 0, &conn, 1, &o->mode) < 0) {
+    if (drmModeSetCrtc(o->d->fd, o->crtc_id, fb, 0, 0, &conn, 1, &o->mode) < 0) {
         lm_error("drm: modeset of %s failed: %s", o->base.name, strerror(errno));
         return -1;
     }
     return 0;
+}
+
+/* ---- GL scanout ------------------------------------------------------------------------------------------------------ */
+
+/* The KMS framebuffer for a GBM buffer, made on first use (the surface cycles through a handful of buffers). 0 = failed. */
+static uint32_t gl_fb_for(struct drm *d, struct gl_scan *g, const struct lm_gl_bo *bo)
+{
+    for (int i = 0; i < g->nfbs; i++)
+        if (g->fbs[i].handle == bo->handle)
+            return g->fbs[i].fb;
+    if (g->nfbs >= (int)(sizeof(g->fbs) / sizeof(g->fbs[0]))) {
+        lm_error("drm: the GBM surface uses more buffers than expected");
+        return 0;
+    }
+    uint32_t handles[4] = { bo->handle }, pitches[4] = { bo->stride }, offsets[4] = { 0 }, fb = 0;
+    if (drmModeAddFB2(d->fd, (uint32_t)bo->w, (uint32_t)bo->h, DRM_FORMAT_XRGB8888_, handles, pitches, offsets, &fb, 0) < 0) {
+        lm_error("drm: drmModeAddFB2 for a GBM buffer failed: %s", strerror(errno));
+        return 0;
+    }
+    g->fbs[g->nfbs].handle = bo->handle;
+    g->fbs[g->nfbs].fb = fb;
+    g->nfbs++;
+    return fb;
+}
+
+static void gl_scan_destroy(struct drm *d, struct gl_scan *g)
+{
+    if (!g->win)
+        return;
+    lm_gl_make_current(d->gl);
+    lm_gl_window_release(d->gl, g->win, &g->bo_next);
+    lm_gl_window_release(d->gl, g->win, &g->bo_scan);
+    for (int i = 0; i < g->nfbs; i++)
+        drmModeRmFB(d->fd, g->fbs[i].fb);
+    lm_gl_window_destroy(d->gl, g->win);
+    memset(g, 0, sizeof(*g));
+}
+
+/* Makes o->gs for o->mode: a GBM window, a black first frame and the mode set with it. 0 or -1 (o->gs is then cleaned up). */
+static int gl_scan_open(struct drm_out *o)
+{
+    struct drm *d = o->d;
+    struct gl_scan *g = &o->gs;
+    memset(g, 0, sizeof(*g));
+    g->win = lm_gl_window_create(d->gl, o->mode.hdisplay, o->mode.vdisplay, true);
+    if (!g->win) {
+        lm_error("drm: cannot create a %ux%u GBM window for scanout", o->mode.hdisplay, o->mode.vdisplay);
+        return -1;
+    }
+    if (!lm_gl_window_bind(d->gl, g->win))
+        goto fail;
+    lm_gl_clear(d->gl, 0, 0, 0, 1);
+    if (!lm_gl_window_swap(d->gl, g->win, &g->bo_scan))
+        goto fail;
+    g->scan_fb = gl_fb_for(d, g, &g->bo_scan);
+    if (!g->scan_fb || out_modeset(o) < 0)
+        goto fail;
+    return 0;
+fail:
+    gl_scan_destroy(d, g);
+    return -1;
 }
 
 static void out_destroy(struct drm_out *o, bool restore)
@@ -342,6 +418,7 @@ static void out_destroy(struct drm_out *o, bool restore)
     }
     if (o->saved)
         drmModeFreeCrtc(o->saved);
+    gl_scan_destroy(d, &o->gs);
     shadow_free(o);
     buf_destroy(d, &o->buf[0]);
     buf_destroy(d, &o->buf[1]);
@@ -531,8 +608,11 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
         w = o->mode.hdisplay;
         h = o->mode.vdisplay;
         o->back = 0;
-        if (buf_create(d, &o->buf[0], w, h) == 0 && buf_create(d, &o->buf[1], w, h) == 0 &&
-            shadow_alloc(o, o->buf[0].size) == 0) {
+        if (d->gl) {
+            if (gl_scan_open(o) == 0)
+                break;
+        } else if (buf_create(d, &o->buf[0], w, h) == 0 && buf_create(d, &o->buf[1], w, h) == 0 &&
+                   shadow_alloc(o, o->buf[0].size) == 0) {
             if (out_modeset(o) == 0)
                 break;
             shadow_free(o);
@@ -717,7 +797,7 @@ static struct lm_framebuffer *drm_get_framebuffer(struct lm_output *out)
 {
     struct drm_out *o = out->backend_data;
     struct drm *d = o->d;
-    if (!d->active || o->flip_pending || !o->live)
+    if (!d->active || o->flip_pending || !o->live || o->gs.win)        /* (a GL output has no memory framebuffer) */
         return NULL;
     o->fb.pixels = o->shadow;
     o->fb.width = out->width;
@@ -731,7 +811,7 @@ static int drm_present(struct lm_output *out, const struct lm_rect *damage, int 
 {
     struct drm_out *o = out->backend_data;
     struct drm *d = o->d;
-    if (!d->active || !o->live)
+    if (!d->active || !o->live || o->gs.win)
         return -1;
     struct drm_buf *b = &o->buf[o->back];
     struct drm_buf *other = &o->buf[o->back ^ 1];
@@ -768,13 +848,55 @@ static int drm_present(struct lm_output *out, const struct lm_rect *damage, int 
     return 0;
 }
 
+/* GL: swap the window's buffers and queue the new front buffer for the next vblank. */
+static int drm_gl_present(struct lm_output *out)
+{
+    struct drm_out *o = out->backend_data;
+    struct drm *d = o->d;
+    if (!d->active || !o->live || !o->gs.win)
+        return -1;
+    if (d->base.blanked)                    /* standby: a flip would fail; the picture is redrawn when the monitor is back */
+        return 0;
+    lm_gl_window_release(d->gl, o->gs.win, &o->gs.bo_next);       /* (none is queued unless a flip was lost) */
+    if (!lm_gl_window_swap(d->gl, o->gs.win, &o->gs.bo_next)) {
+        lm_warn("drm: swapping the GL buffers of %s failed", out->name);
+        lm_timer_arm_ms(o->retry, 16, 0);
+        return -1;
+    }
+    uint32_t fb = gl_fb_for(d, &o->gs, &o->gs.bo_next);
+    if (!fb || drmModePageFlip(d->fd, o->crtc_id, fb, DRM_MODE_PAGE_FLIP_EVENT, o) < 0) {
+        if (fb)
+            lm_warn("drm: page flip on %s failed: %s", out->name, strerror(errno));
+        lm_gl_window_release(d->gl, o->gs.win, &o->gs.bo_next);
+        lm_timer_arm_ms(o->retry, 16, 0);
+        return -1;
+    }
+    o->gs.next_fb = fb;
+    o->flip_pending = true;
+    return 0;
+}
+
+static struct lm_gl_window *drm_gl_window(struct lm_output *out)
+{
+    struct drm_out *o = out->backend_data;
+    return o->gs.win;
+}
+
 static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data)
 {
     (void)fd;
     (void)frame;
     struct drm_out *o = data;
     o->flip_pending = false;
-    o->back ^= 1;
+    if (o->gs.win) {                        /* the queued buffer is on screen now; the one it replaced is free again */
+        lm_gl_window_release(o->d->gl, o->gs.win, &o->gs.bo_scan);
+        o->gs.bo_scan = o->gs.bo_next;
+        o->gs.scan_fb = o->gs.next_fb;
+        memset(&o->gs.bo_next, 0, sizeof(o->gs.bo_next));
+        o->gs.next_fb = 0;
+    } else {
+        o->back ^= 1;
+    }
     out_ready_notify(o, (uint32_t)(sec * 1000u + usec / 1000u));
 }
 
@@ -818,6 +940,8 @@ static void session_resume(struct drm *d)
     lm_list_for_each(lo, &d->base.outputs, link) {
         struct drm_out *o = (struct drm_out *)lo;
         o->flip_pending = false;
+        if (o->gs.win)
+            lm_gl_window_release(d->gl, o->gs.win, &o->gs.bo_next);     /* a flip that never completed */
         o->buf[0].seq = o->buf[1].seq = 0;
         o->shadow_valid = false;            /* contents are unknown now: force full redraws */
         out_modeset(o);
@@ -1056,6 +1180,25 @@ static int drm_init(struct lm_backend *b)
     d->active = true;
     b->session_active = true;
 
+    int rmode = srv->config.renderer;
+    if (rmode < 0) {
+        const char *env = getenv("MELLAGUI_RENDERER");
+        rmode = env ? (!strcmp(env, "gl") ? 2 : !strcmp(env, "auto") ? 1 : 0) : 0;      /* software unless asked: GL scanout is new */
+    }
+    if (rmode > 0) {
+        char why[200] = "";
+        d->gl = lm_gl_create(d->fd, why, sizeof(why));
+        if (d->gl) {
+            b->gl = d->gl;
+            lm_info("drm: rendering with OpenGL ES (%s), scanout through GBM", lm_gl_renderer_name(d->gl));
+        } else if (rmode == 2) {
+            lm_error("drm: the GL renderer is required (--renderer gl) but not usable: %s", why);
+            return -1;
+        } else {
+            lm_info("drm: OpenGL not used (%s): software rendering and dumb buffers", why);
+        }
+    }
+
     if (probe_outputs(d, true) <= 0) {
         lm_error("drm: no output could be set up on %s", d->path);
         return -1;
@@ -1086,6 +1229,11 @@ static void drm_destroy(struct lm_backend *b)
         lm_source_remove(d->drm_source);
     lm_list_for_each_safe(lo, tmp, &b->outputs, link)
         out_destroy((struct drm_out *)lo, true);
+    if (d->gl) {                                    /* the GBM device goes before the fd it was made on */
+        lm_gl_destroy(d->gl);
+        d->gl = NULL;
+        b->gl = NULL;
+    }
     if (d->fd >= 0) {
         if (d->is_master && !d->logind)
             drmDropMaster(d->fd);
@@ -1205,6 +1353,19 @@ static int drm_apply_mode(struct lm_output *out)
 
     o->busy = true;
     drm_wait_flip(o);
+    if (d->gl && o->gs.win) {                                           /* GL: a new window for the new size */
+        struct gl_scan old = o->gs;
+        drmModeModeInfo old_mode = o->mode;
+        o->mode = m;
+        if (gl_scan_open(o) < 0) {                                      /* refused: the old picture stays */
+            o->gs = old;
+            o->mode = old_mode;
+            o->busy = false;
+            return -1;
+        }
+        gl_scan_destroy(d, &old);
+        goto mode_done;
+    }
     struct drm_buf nb[2];
     memset(nb, 0, sizeof(nb));
     if (buf_create(d, &nb[0], m.hdisplay, m.vdisplay) < 0 || buf_create(d, &nb[1], m.hdisplay, m.vdisplay) < 0) {
@@ -1250,6 +1411,7 @@ static int drm_apply_mode(struct lm_output *out)
     free(old_shadow);
     buf_destroy(d, &old[0]);
     buf_destroy(d, &old[1]);
+mode_done:
     o->seq = 0;
     out->width = (int32_t)m.hdisplay;
     out->height = (int32_t)m.vdisplay;
@@ -1316,6 +1478,8 @@ static const struct lm_backend_ops drm_ops = {
     .list_modes = drm_list_modes,
     .apply_mode = drm_apply_mode,
     .set_power = drm_set_power,
+    .gl_window = drm_gl_window,
+    .gl_present = drm_gl_present,
 };
 
 struct lm_backend *lm_backend_drm_create(struct lm_server *srv)

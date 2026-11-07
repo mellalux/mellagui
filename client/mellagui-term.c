@@ -3,7 +3,7 @@
  *
  * pty + xterm-compatible VT parser (cursor movement, erase, SGR with 16/256/
  * truecolor, scroll regions, alternate screen, bracketed paste, DSR/DA
- * replies), 8x16 bitmap font (zoomable 1x..4x), scrollback, mouse selection with clipboard copy
+ * replies), 8x16 bitmap font (zoom 50..500 %, any step; fractional sizes are area-averaged), scrollback, mouse selection with clipboard copy
  * and paste. Keyboard translation uses the built-in US layout from keymap.c.
  */
 #include <errno.h>
@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -32,16 +33,22 @@
 #define SCROLLBACK 1000
 #define DEFAULT_COLS 80
 #define DEFAULT_ROWS 24
-#define MAX_ZOOM 4
+/* Font zoom in percent. Whole multiples of 100 draw the bitmap font crisply, anything else is area-averaged. */
+static const int ZOOM_LEVELS[] = { 50, 60, 75, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500 };
+#define N_ZOOM ((int)(sizeof(ZOOM_LEVELS) / sizeof(ZOOM_LEVELS[0])))
+#define ZOOM_DEFAULT 100
 #define MAX_MIMES 32
 #define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
 #define BAR_BG 0x2b303bu
 #define BAR_BTN 0x434c5eu
+#define BAR_BTN_ON 0x5e6a82u
+#define MENU_BORDER 0x4c566au
+#define MENU_CURRENT 0x88c0d0u
 #define BAR_FG 0xeceff4u
 
 /* Cell size in pixels at the current zoom. */
-#define CELL_W (LM_FONT_W * A.zoom)
-#define CELL_H (LM_FONT_H * A.zoom)
+#define CELL_W cell_w()
+#define CELL_H cell_h()
 
 #define DEFAULT_FG 0xd8dee9u
 #define DEFAULT_BG 0x14171fu
@@ -123,11 +130,21 @@ struct app {
     uint32_t offer_id;
     char offer_mimes[MAX_MIMES][64];
     int n_offer_mimes;
-    int zoom;                   /* integer font scale, 1..MAX_ZOOM */
+    int zoom;                   /* font size in percent (one of ZOOM_LEVELS, see set_zoom_pct) */
+    /* weights of the source font pixels under each destination pixel of a cell (fractional zooms), see build_zoom_tables */
+    struct zt { uint8_t c0, n, w[4]; } xt[96], yt[192];
+    bool menu_open;             /* the zoom drop-down list is showing */
+    int menu_hover;             /* its highlighted entry (index into ZOOM_LEVELS) */
+    bool conf_dirty;            /* the zoom changed and is not in the settings file yet */
+    int64_t conf_time;          /* when (ms) it changed: saved a moment later so a wheel burst writes once */
+    bool eat_release;           /* the press that closed the menu: its release must not start / end a selection */
     char title[256];
 };
 
 static struct app A;
+
+static int cell_w(void) { return LM_MAX((A.zoom * LM_FONT_W + 50) / 100, 1); }
+static int cell_h(void) { return LM_MAX((A.zoom * LM_FONT_H + 50) / 100, 1); }
 
 /* ======================================================================== *
  *  Terminal model
@@ -835,19 +852,35 @@ static uint32_t brighten(uint32_t c)
     return r << 16 | g << 8 | b;
 }
 
-/* ---- button bar: Paste, A-, A+ ----------------------------------------------------------------------------------- */
+/* ---- button bar: Paste, A-, zoom drop-down, A+, Reset ------------------------------------------------------------- */
 
-enum { BTN_PASTE_ID, BTN_SMALLER_ID, BTN_BIGGER_ID, N_BTNS };
-static const char *const btn_label[N_BTNS] = { "Paste", "A-", "A+" };
+enum { BTN_PASTE_ID, BTN_SMALLER_ID, BTN_ZOOM_ID, BTN_BIGGER_ID, BTN_RESET_ID, N_BTNS };
+#define ZOOM_BTN_CHARS 4                /* "100%" */
+#define ARROW_W 12                      /* room for the drop-down triangle */
+
+static const char *btn_text(int i, char *buf, size_t n)
+{
+    switch (i) {
+    case BTN_PASTE_ID: return "Paste";
+    case BTN_SMALLER_ID: return "A-";
+    case BTN_BIGGER_ID: return "A+";
+    case BTN_RESET_ID: return "Reset";
+    default: snprintf(buf, n, "%d%%", A.zoom); return buf;
+    }
+}
 
 static void btn_rect(int i, int *x, int *y, int *w, int *h)
 {
+    char tmp[16];
     int bx = 4;
-    for (int k = 0; k < i; k++)
-        bx += (int)strlen(btn_label[k]) * LM_FONT_W + 16 + 4;
+    for (int k = 0; k < i; k++) {
+        int chars = k == BTN_ZOOM_ID ? ZOOM_BTN_CHARS : (int)strlen(btn_text(k, tmp, sizeof(tmp)));
+        bx += chars * LM_FONT_W + 16 + (k == BTN_ZOOM_ID ? ARROW_W : 0) + 4;
+    }
+    int chars = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS : (int)strlen(btn_text(i, tmp, sizeof(tmp)));
     *x = bx;
     *y = 2;
-    *w = (int)strlen(btn_label[i]) * LM_FONT_W + 16;
+    *w = chars * LM_FONT_W + 16 + (i == BTN_ZOOM_ID ? ARROW_W : 0);
     *h = BAR_H - 4;
 }
 
@@ -862,26 +895,119 @@ static int btn_at(double px, double py)
     return -1;
 }
 
+static void put_text(uint32_t *px, int x, int y, const char *text, uint32_t color)
+{
+    for (const char *l = text; *l; l++, x += LM_FONT_W) {
+        const uint8_t *g = lm_font_glyph((uint8_t)*l);
+        for (int r = 0; r < LM_FONT_H; r++)
+            for (int c = 0; c < LM_FONT_W; c++)
+                if ((g[r] & (0x80 >> c)) && x + c >= 0 && x + c < A.bw && y + r >= 0 && y + r < A.bh)
+                    px[(size_t)(y + r) * (size_t)A.bw + (size_t)(x + c)] = color;
+    }
+}
+
+static void fill_box(uint32_t *px, int x, int y, int w, int h, uint32_t color)
+{
+    for (int yy = LM_MAX(y, 0); yy < y + h && yy < A.bh; yy++)
+        for (int xx = LM_MAX(x, 0); xx < x + w && xx < A.bw; xx++)
+            px[(size_t)yy * (size_t)A.bw + (size_t)xx] = color;
+}
+
 static void draw_bar(uint32_t *px)
 {
-    for (int y = 0; y < BAR_H; y++)
-        for (int x = 0; x < A.bw; x++)
-            px[(size_t)y * (size_t)A.bw + (size_t)x] = BAR_BG;
+    fill_box(px, 0, 0, A.bw, BAR_H, BAR_BG);
     for (int i = 0; i < N_BTNS; i++) {
         int bx, by, bw, bh;
+        char tmp[16];
         btn_rect(i, &bx, &by, &bw, &bh);
-        for (int y = by; y < by + bh; y++)
-            for (int x = bx; x < bx + bw && x < A.bw; x++)
-                px[(size_t)y * (size_t)A.bw + (size_t)x] = BAR_BTN;
-        int tx = bx + 8, ty = by + (bh - LM_FONT_H) / 2;
-        for (const char *l = btn_label[i]; *l; l++, tx += LM_FONT_W) {
-            const uint8_t *g = lm_font_glyph((uint8_t)*l);
-            for (int r = 0; r < LM_FONT_H; r++)
-                for (int x = 0; x < LM_FONT_W; x++)
-                    if ((g[r] & (0x80 >> x)) && tx + x < A.bw)
-                        px[(size_t)(ty + r) * (size_t)A.bw + (size_t)(tx + x)] = BAR_FG;
+        fill_box(px, bx, by, bw, bh, A.menu_open && i == BTN_ZOOM_ID ? BAR_BTN_ON : BAR_BTN);
+        const char *t = btn_text(i, tmp, sizeof(tmp));
+        int w = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS * LM_FONT_W : (int)strlen(t) * LM_FONT_W;
+        int tx = bx + 8 + (i == BTN_ZOOM_ID ? w - (int)strlen(t) * LM_FONT_W : 0), ty = by + (bh - LM_FONT_H) / 2;
+        put_text(px, tx, ty, t, BAR_FG);
+        if (i == BTN_ZOOM_ID) {                                 /* the drop-down triangle */
+            int ax = bx + bw - 8 - 7, ay = by + bh / 2 - 2;
+            for (int r = 0; r < 4; r++)
+                fill_box(px, ax + r, ay + r, 7 - 2 * r, 1, BAR_FG);
         }
     }
+}
+
+/* ---- the drop-down list of zoom levels ----------------------------------------------------------------------------- */
+
+#define MENU_ROW_H (LM_FONT_H + 4)
+
+static void menu_rect(int *x, int *y, int *w, int *h)
+{
+    int bx, by, bw, bh;
+    btn_rect(BTN_ZOOM_ID, &bx, &by, &bw, &bh);
+    *x = bx;
+    *y = BAR_H;
+    *w = bw;
+    *h = N_ZOOM * MENU_ROW_H + 4;
+}
+
+static int menu_row_at(double px, double py)                    /* index into ZOOM_LEVELS or -1 */
+{
+    int x, y, w, h;
+    menu_rect(&x, &y, &w, &h);
+    if (px < x || px >= x + w || py < y + 2 || py >= y + h - 2)
+        return -1;
+    return (int)(py - y - 2) / MENU_ROW_H;
+}
+
+static void draw_menu(uint32_t *px)
+{
+    int x, y, w, h;
+    menu_rect(&x, &y, &w, &h);
+    fill_box(px, x - 1, y, w + 2, h + 1, MENU_BORDER);
+    fill_box(px, x, y, w, h, BAR_BG);
+    for (int i = 0; i < N_ZOOM; i++) {
+        int ry = y + 2 + i * MENU_ROW_H;
+        bool cur = ZOOM_LEVELS[i] == A.zoom;
+        if (i == A.menu_hover)
+            fill_box(px, x + 2, ry, w - 4, MENU_ROW_H, BAR_BTN_ON);
+        char t[16];
+        snprintf(t, sizeof(t), "%d%%", ZOOM_LEVELS[i]);
+        int tx = x + 8 + (ZOOM_BTN_CHARS - (int)strlen(t)) * LM_FONT_W;
+        put_text(px, tx, ry + 2, t, cur ? MENU_CURRENT : BAR_FG);
+        if (cur)
+            fill_box(px, x + w - 12, ry + MENU_ROW_H / 2 - 2, 4, 4, MENU_CURRENT);       /* a dot marks the active size */
+    }
+}
+
+static uint32_t lerp_rgb(uint32_t a, uint32_t b, int num, int den)
+{
+    uint32_t r = 0;
+    for (int sh = 16; sh >= 0; sh -= 8) {
+        int ca = (int)((a >> sh) & 255), cb = (int)((b >> sh) & 255);
+        r |= (uint32_t)(ca + (cb - ca) * num / den) << sh;
+    }
+    return r;
+}
+
+/* For a cell of cw x ch pixels: which source columns / rows of the 8x16 glyph each destination pixel covers and how much
+ * (units of 1/cw and 1/ch of a source pixel, so that all weights are integers; the total over x is 8, over y 16). */
+static void build_axis(struct zt *t, int dst, int src)
+{
+    for (int d = 0; d < dst; d++) {
+        int lo = src * d, hi = src * d + src;                  /* the destination pixel in 1/dst source-pixel units */
+        t[d].n = 0;
+        for (int c = lo / dst; c < src && c * dst < hi && t[d].n < 4; c++) {
+            int ov = LM_MIN(hi, (c + 1) * dst) - LM_MAX(lo, c * dst);
+            if (ov <= 0)
+                continue;
+            if (t[d].n == 0)
+                t[d].c0 = (uint8_t)c;
+            t[d].w[t[d].n++] = (uint8_t)ov;
+        }
+    }
+}
+
+static void build_zoom_tables(void)
+{
+    build_axis(A.xt, LM_MIN(cell_w(), (int)(sizeof(A.xt) / sizeof(A.xt[0]))), LM_FONT_W);
+    build_axis(A.yt, LM_MIN(cell_h(), (int)(sizeof(A.yt) / sizeof(A.yt[0]))), LM_FONT_H);
 }
 
 static void render(void)
@@ -950,17 +1076,38 @@ static void render(void)
                 fg = bg;
                 bg = tmp;
             }
-            int cw = CELL_W, ch = CELL_H, z = A.zoom;
+            int cw = CELL_W, ch = CELL_H;
             int x0 = PAD + col * cw, y0 = BAR_H + PAD + row * ch;
             const uint8_t *g = lm_font_glyph(c->cp);
-            for (int r = 0; r < ch; r++) {
-                int gr = r / z;
-                uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
-                uint8_t bits = g[gr];
-                if ((c->attr & ATTR_UNDERLINE) && gr == LM_FONT_H - 2)
-                    bits = 0xff;
-                for (int x = 0; x < cw; x++)
-                    dst[x] = (bits & (0x80 >> (x / z))) ? fg : bg;
+            uint8_t rows16[LM_FONT_H];
+            for (int r = 0; r < LM_FONT_H; r++)
+                rows16[r] = g[r];
+            if (c->attr & ATTR_UNDERLINE)
+                rows16[LM_FONT_H - 2] = 0xff;
+            if (cw % LM_FONT_W == 0 && ch % LM_FONT_H == 0 && cw / LM_FONT_W == ch / LM_FONT_H) {
+                int z = cw / LM_FONT_W;                                 /* whole multiples: crisp pixels */
+                for (int r = 0; r < ch; r++) {
+                    uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
+                    uint8_t bits = rows16[r / z];
+                    for (int x = 0; x < cw; x++)
+                        dst[x] = (bits & (0x80 >> (x / z))) ? fg : bg;
+                }
+            } else {                                                    /* any other size: coverage of each pixel */
+                for (int r = 0; r < ch; r++) {
+                    uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
+                    const struct zt *yt = &A.yt[r];
+                    for (int x = 0; x < cw; x++) {
+                        const struct zt *xt = &A.xt[x];
+                        int cov = 0;
+                        for (int i = 0; i < yt->n; i++) {
+                            uint8_t bits = rows16[yt->c0 + i];
+                            for (int j = 0; j < xt->n; j++)
+                                if (bits & (0x80 >> (xt->c0 + j)))
+                                    cov += yt->w[i] * xt->w[j];
+                        }
+                        dst[x] = cov == 0 ? bg : cov >= LM_FONT_W * LM_FONT_H ? fg : lerp_rgb(bg, fg, cov, LM_FONT_W * LM_FONT_H);
+                    }
+                }
             }
             if (cursor && !A.focused) {
                 /* hollow cursor when unfocused */
@@ -977,6 +1124,8 @@ static void render(void)
     }
 
     draw_bar(px);
+    if (A.menu_open)
+        draw_menu(px);
 
     if (!A.buffers[idx]) {
         A.buffers[idx] = wlc_alloc(A.c, &lm_wl_buffer_interface, NULL, NULL);
@@ -1177,16 +1326,113 @@ static void paste(void)
     free(buf);
 }
 
-/* Font zoom: delta +1 / -1, 0 = back to 1x. Keeps the window size and recomputes the grid. */
+/* ---- the terminal's own settings file -------------------------------------------------------------------------------------
+ * $XDG_CONFIG_HOME/mellagui/terminal.conf (else ~/.config/...): `key=value` lines, today only `zoom=<percent>`. Read at
+ * start, written ~0.4 s after the zoom last changed (and on exit), so the next terminal starts at the same size. */
+
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static bool conf_path(char *out, size_t n)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    int w;
+    if (xdg && *xdg)
+        w = snprintf(out, n, "%s/mellagui/terminal.conf", xdg);
+    else if (home && *home)
+        w = snprintf(out, n, "%s/.config/mellagui/terminal.conf", home);
+    else
+        return false;
+    return w > 0 && (size_t)w < n;
+}
+
+static void conf_load(void)
+{
+    char path[1024], line[128];
+    if (!conf_path(path, sizeof(path)))
+        return;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    while (fgets(line, sizeof(line), f)) {
+        int v;
+        if (sscanf(line, "zoom=%d", &v) == 1 && v >= ZOOM_LEVELS[0] && v <= ZOOM_LEVELS[N_ZOOM - 1])
+            A.zoom = v;                                         /* anything else in the file is ignored */
+    }
+    fclose(f);
+    build_zoom_tables();
+}
+
+static void conf_save(void)
+{
+    char path[1024], tmp[1100];
+    if (!conf_path(path, sizeof(path)))
+        return;
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    for (char *p = path + 1; *p; p++) {                         /* parent directories */
+        if (*p != '/')
+            continue;
+        *p = 0;
+        mkdir(path, 0755);
+        *p = '/';
+    }
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "# mellagui-term: written by the terminal itself\nzoom=%d\n", A.zoom);
+    bool ok = fclose(f) == 0;
+    if (!ok || rename(tmp, path) < 0)
+        unlink(tmp);
+}
+
+/* Font zoom. Keeps the window size and recomputes the grid. */
 static void apply_size(int w, int h);
 
+static void set_zoom_pct(int pct)
+{
+    pct = LM_CLAMP(pct, ZOOM_LEVELS[0], ZOOM_LEVELS[N_ZOOM - 1]);
+    if (pct == A.zoom)
+        return;
+    A.zoom = pct;
+    build_zoom_tables();
+    A.conf_dirty = true;
+    A.conf_time = now_ms();
+    if (!A.pixels && A.win_w <= 0)                              /* no window yet (startup): the first render sizes it */
+        return;
+    apply_size(A.win_w > 0 ? A.win_w : A.bw, A.win_h > 0 ? A.win_h : A.bh);
+}
+
+/* delta +1 / -1: the next level up / down the list; 0: back to 100 %. */
 static void set_zoom(int delta)
 {
-    int z = delta == 0 ? 1 : LM_CLAMP(A.zoom + delta, 1, MAX_ZOOM);
-    if (z == A.zoom)
+    if (delta == 0) {
+        set_zoom_pct(ZOOM_DEFAULT);
         return;
-    A.zoom = z;
-    apply_size(A.win_w > 0 ? A.win_w : A.bw, A.win_h > 0 ? A.win_h : A.bh);
+    }
+    int i = 0;
+    while (i < N_ZOOM - 1 && ZOOM_LEVELS[i] < A.zoom)
+        i++;                                                    /* the first level that is >= the current size */
+    if (delta > 0 && ZOOM_LEVELS[i] <= A.zoom)
+        i++;
+    else if (delta < 0)
+        i--;
+    set_zoom_pct(ZOOM_LEVELS[LM_CLAMP(i, 0, N_ZOOM - 1)]);
+}
+
+static void menu_set(bool open)
+{
+    if (open) {
+        A.menu_hover = 0;
+        for (int i = 0; i < N_ZOOM; i++)
+            if (ZOOM_LEVELS[i] == A.zoom)
+                A.menu_hover = i;
+    }
+    A.menu_open = open;
+    A.dirty = true;
 }
 
 static void doffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
@@ -1238,6 +1484,18 @@ static void key_to_pty(uint32_t code, bool repeat)
     bool shift = A.mods & LM_MOD_SHIFT, ctrl = A.mods & LM_MOD_CTRL, alt = A.mods & LM_MOD_ALT;
     (void)repeat;
 
+    if (A.menu_open) {                                  /* the zoom list: arrows, Enter, Esc */
+        if (code == KEY_ESC) {
+            menu_set(false);
+        } else if (code == KEY_UP || code == KEY_DOWN) {
+            A.menu_hover = LM_CLAMP(A.menu_hover + (code == KEY_UP ? -1 : 1), 0, N_ZOOM - 1);
+            A.dirty = true;
+        } else if (code == KEY_ENTER || code == KEY_KPENTER) {
+            set_zoom_pct(ZOOM_LEVELS[A.menu_hover]);
+            menu_set(false);
+        }
+        return;
+    }
     if (shift && ctrl && code == KEY_C) { copy_selection(); return; }
     if (ctrl && !alt) {
         if (code == KEY_EQUAL || code == KEY_KPPLUS) { set_zoom(1); return; }
@@ -1418,6 +1676,14 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
     case LM_WL_POINTER_EVT_MOTION:
         A.px = lm_fixed_to_double(args[1].f);
         A.py = lm_fixed_to_double(args[2].f);
+        if (A.menu_open) {
+            int row = menu_row_at(A.px, A.py);
+            if (row >= 0 && row != A.menu_hover) {
+                A.menu_hover = row;
+                A.dirty = true;
+            }
+            break;
+        }
         if (t->sel_dragging) {
             cell_from_pointer(&t->sel_x1, &t->sel_y1);
             A.dirty = true;
@@ -1425,12 +1691,26 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         A.last_serial = args[0].u;
+        if (A.eat_release && args[3].u == 0) {          /* the release of the click that closed the zoom list */
+            A.eat_release = false;
+            break;
+        }
+        if (A.menu_open && args[3].u == 1) {            /* any press: pick an entry, or just close the list */
+            int row = menu_row_at(A.px, A.py);
+            if (row >= 0 && args[2].u == BTN_LEFT)
+                set_zoom_pct(ZOOM_LEVELS[row]);
+            A.eat_release = true;
+            menu_set(false);
+            break;
+        }
         if (args[2].u == BTN_LEFT && A.py < BAR_H && !t->sel_dragging) {
             if (args[3].u == 1) {
                 switch (btn_at(A.px, A.py)) {
                 case BTN_PASTE_ID: paste(); break;
                 case BTN_SMALLER_ID: set_zoom(-1); break;
+                case BTN_ZOOM_ID: menu_set(true); break;
                 case BTN_BIGGER_ID: set_zoom(1); break;
+                case BTN_RESET_ID: set_zoom(0); break;
                 }
             }
         } else if (args[2].u == BTN_LEFT) {
@@ -1564,7 +1844,9 @@ int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
     A.running = true;
-    A.zoom = 1;
+    A.zoom = ZOOM_DEFAULT;
+    build_zoom_tables();
+    conf_load();                                                /* the size of last time */
     A.repeat_fd = -1;
     A.repeat_rate = 25;
     A.repeat_delay = 400;
@@ -1613,7 +1895,7 @@ int main(int argc, char **argv)
             { .fd = A.pty, .events = POLLIN },
             { .fd = A.repeat_fd, .events = POLLIN },
         };
-        int r = poll(pf, 3, A.dirty && A.frame_cb ? 50 : 1000);
+        int r = poll(pf, 3, A.dirty && A.frame_cb ? 50 : A.conf_dirty ? 200 : 1000);
         if (r < 0 && errno != EINTR)
             break;
         if (r > 0 && (pf[0].revents & (POLLIN | POLLHUP | POLLERR))) {
@@ -1639,10 +1921,16 @@ int main(int argc, char **argv)
             if (read(A.repeat_fd, &exp, sizeof(exp)) > 0 && A.repeat_code)
                 key_to_pty(A.repeat_code, true);
         }
+        if (A.conf_dirty && now_ms() - A.conf_time >= 400) {
+            conf_save();
+            A.conf_dirty = false;
+        }
         int status;
         if (A.child > 0 && waitpid(A.child, &status, WNOHANG) == A.child)
             A.running = false;
     }
+    if (A.conf_dirty)
+        conf_save();
     if (A.child > 0) {
         kill(A.child, SIGHUP);
         waitpid(A.child, NULL, WNOHANG);

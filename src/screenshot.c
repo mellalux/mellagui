@@ -84,7 +84,8 @@ bool lm_screenshot_take(struct lm_server *srv, const struct lm_rect *rect, bool 
     lm_info("screenshot %dx%d%s%s%s", w, h, saved ? " -> " : "", saved ? path : "", clip ? " (clipboard)" : "");
     if (saved || clip) {
         const char *slash = strrchr(path, '/');
-        lm_render_shot_feedback(srv->render, rect, px, w, h, saved ? (slash ? slash + 1 : path) : "Copied to clipboard");
+        lm_render_shot_feedback(srv->render, rect, px, w, h, saved ? (slash ? slash + 1 : path) : "Copied to clipboard",
+                                saved ? path : NULL);
     }
     free(px);
     if (srv->config.sound && strcmp(srv->config.backend, "headless") != 0)

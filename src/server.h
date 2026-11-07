@@ -147,6 +147,7 @@ struct lm_config {
     const char *exec_cmd;       /* --exec, shell command spawned after start */
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
     const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
+    const char *view_cmd;       /* command for the screenshot card's click: the image viewer (default "mellagui-view") */
     const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "mellagui-settings") */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */

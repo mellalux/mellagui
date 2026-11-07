@@ -86,7 +86,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Super+Space (+Shift)        | next / previous keyboard layout         |
 | Super+L                     | lock the screen (needs a password / PIN, see below) |
 | Print / Alt+Print           | screenshot of the screen under the pointer / of the focused window (with its frame), no cursor: PNG in `~/Pictures` (`--screenshot-dir`) **and** on the clipboard as `image/png` |
-| Ctrl+Print                  | the same screenshot of the screen, clipboard only (feedback for all three: a short white flash and, for 3 s, a thumbnail card with the file name in the bottom right corner; never part of a screenshot) |
+| Ctrl+Print                  | the same screenshot of the screen, clipboard only (feedback for all three: a short white flash and, for 8 s, a thumbnail card with the file name in the bottom right corner; a click on the card opens the file in the viewer; never part of a screenshot) |
 | Super+Shift+E               | quit MellaGUI                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 

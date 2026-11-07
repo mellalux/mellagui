@@ -1563,6 +1563,10 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
     out->kind = LM_PICK_NONE;
     int32_t ix = (int32_t)x, iy = (int32_t)y;
 
+    if (wm->srv->render && lm_render_shot_card_at(wm->srv->render, x, y)) {
+        out->kind = LM_PICK_SHOT_CARD;
+        return;
+    }
     if (wm->menu_open && lm_rect_contains(&wm->menu_rect, ix, iy)) {
         int i = (iy - wm->menu_rect.y - 2) / MENU_ITEM_H;
         out->kind = LM_PICK_MENU_ITEM;
@@ -1735,6 +1739,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_MINIMIZE: hw = pick->window; bits = LM_FRAME_HOVER_MINIMIZE; break;
     case LM_PICK_BORDER:
     case LM_PICK_GADGET_BORDER: shape = cursor_for_edges(pick->edges); break;
+    case LM_PICK_SHOT_CARD: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_MENU_ITEM: menu_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
@@ -2189,9 +2194,38 @@ static void launch_terminal(struct lm_wm *wm)
     lm_server_spawn(wm->srv, cmd);
 }
 
+/* Click on the screenshot card: the card goes away and, when the shot was saved, the viewer opens it. */
+static void open_shot(struct lm_wm *wm)
+{
+    char path[512];
+    if (!lm_render_shot_dismiss(wm->srv->render, path, sizeof(path)))
+        return;
+    const char *view = wm->srv->config.view_cmd ? wm->srv->config.view_cmd : "mellagui-view";
+    char cmd[1200], quoted[1100];
+    size_t o = 0;
+    for (const char *p = path; *p && o + 5 < sizeof(quoted); p++) {          /* single-quote the path for sh */
+        if (*p == '\'') {
+            memcpy(quoted + o, "'\\''", 4);
+            o += 4;
+        } else {
+            quoted[o++] = *p;
+        }
+    }
+    quoted[o] = 0;
+    snprintf(cmd, sizeof(cmd), "%s '%s'", view, quoted);
+    lm_server_spawn(wm->srv, cmd);
+}
+
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (pick->kind == LM_PICK_SHOT_CARD) {                 /* nothing under the card gets the click */
+        if (pressed && button == BTN_LEFT)
+            open_shot(wm);
+        else if (pressed)
+            lm_render_shot_dismiss(wm->srv->render, NULL, 0);
+        return true;
+    }
     if (pressed && wm->clip_nav && pick->kind != LM_PICK_CLIP_ENTRY)
         clip_nav_set(wm, false);
 

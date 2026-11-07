@@ -4343,6 +4343,34 @@ class TestGL(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('gl-test ok', r.stdout)
 
+    def run_gbm(self, device, **env):
+        tool = os.path.join(ROOT, 'build', 'gl-test')
+        if not os.path.exists(tool):
+            self.skipTest('gl-test not built')
+        if not os.access(device, os.R_OK | os.W_OK):
+            self.skipTest('%s is not accessible' % device)
+        r = subprocess.run([tool, 'gbm'], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, GL_TEST_DEVICE=device, **env))
+        if r.returncode == 77:
+            self.skipTest(r.stdout.strip())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('gl-test gbm ok', r.stdout)
+
+    def test_gbm_window_on_a_render_node(self):
+        import glob
+        nodes = sorted(glob.glob('/dev/dri/renderD*'))
+        if not nodes:
+            self.skipTest('no render node')
+        self.run_gbm(nodes[0])
+
+    def test_gbm_scanout_buffers_get_a_kms_framebuffer(self):
+        """What the DRM backend does per output, minus the mode set: a scanout GBM window, swaps, drmModeAddFB2 on its buffers."""
+        import glob
+        cards = sorted(glob.glob('/dev/dri/card*'))
+        if not cards:
+            self.skipTest('no DRM card')
+        self.run_gbm(cards[0], GL_TEST_SCANOUT='1', GL_TEST_ADDFB='1')
+
 
 class TestLogind(unittest.TestCase):
     """src/logind.c (a D-Bus client of its own) against tests/fake_logind.py; the DRM / evdev wiring cannot run headless."""

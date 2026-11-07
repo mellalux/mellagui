@@ -50,7 +50,8 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     if (!go)
         return;
     lm_gl_make_current(r->gl);
-    lm_gl_target_destroy(r->gl, &go->tgt);
+    if (go->tgt.fbo)
+        lm_gl_target_destroy(r->gl, &go->tgt);
     if (go->bg_tex)
         lm_gl_tex_delete(r->gl, go->bg_tex);
     free(go->bg);
@@ -76,7 +77,8 @@ static struct gl_out *gl_out_get(struct lm_renderer *r, struct out_state *st)
         return go;
     lm_gl_make_current(r->gl);
     go = calloc(1, sizeof(*go));
-    if (!go || !lm_gl_target_create(r->gl, out->width, out->height, &go->tgt)) {
+    bool window = lm_output_gl_window(out) != NULL;                 /* DRM: it renders into a GBM window, no offscreen target */
+    if (!go || (!window && !lm_gl_target_create(r->gl, out->width, out->height, &go->tgt))) {
         free(go);
         lm_error("gl: cannot create the %dx%d render target of %s", out->width, out->height, out->name);
         return NULL;
@@ -472,7 +474,15 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     gl_bg_update(r, st, go, &redraw);
     go->bg_ok = true;
 
-    lm_gl_bind_target(r->gl, &go->tgt, go->w, go->h);
+    struct lm_gl_window *win = lm_output_gl_window(out);
+    if (win) {
+        if (!lm_gl_window_bind(r->gl, win)) {
+            lm_region_fini(&redraw);
+            return false;
+        }
+    } else {
+        lm_gl_bind_target(r->gl, &go->tgt, go->w, go->h);
+    }
     lm_gl_scissor(r->gl, false, 0, 0, 0, 0);
     lm_gl_draw_tex(r->gl, go->bg_tex, 0, 0, go->w, go->h, 0, 0, 1, 1, 1.0f, true);
     struct gl_pass p = { .r = r, .st = st, .go = go, .dirty = &redraw, .full = full, .ox = out->x, .oy = out->y };
@@ -481,8 +491,12 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     gl_overlays(&p);
     gl_cursor(&p);
 
-    go->unread = true;                                  /* headless: copied to the memory framebuffer when something reads it */
-    lm_output_present(out, NULL, 0);
+    if (win) {
+        lm_output_gl_present(out);                      /* swap the window's buffers, queue the page flip */
+    } else {
+        go->unread = true;                              /* headless: copied to the memory framebuffer when something reads it */
+        lm_output_present(out, NULL, 0);
+    }
 
     lm_region_clear(&st->pending);
     lm_region_fini(&redraw);

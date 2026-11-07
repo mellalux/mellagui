@@ -60,6 +60,8 @@
 
 struct lm_backend;
 struct lm_output;
+struct lm_gl;
+struct lm_gl_window;
 
 /* All backends draw XRGB8888 (0x00RRGGBB native endian = bytes B,G,R,X). */
 struct lm_framebuffer {
@@ -154,6 +156,13 @@ struct lm_backend_ops {
      * picture and resumes output_ready. Sets b->blanked. NULL = unsupported. Returns 0 or -1.
      */
     int (*set_power)(struct lm_backend *b, bool on);
+    /*
+     * GL scanout (DRM only, when the backend made a GL context: lm_backend.gl): the window `out` renders into, or NULL
+     * when this output is drawn through get_framebuffer. gl_present swaps its buffers and queues the page flip (like
+     * present(): -1 = failed, output_ready follows anyway). NULL = unsupported.
+     */
+    struct lm_gl_window *(*gl_window)(struct lm_output *out);
+    int (*gl_present)(struct lm_output *out);
 };
 
 struct lm_backend {
@@ -163,6 +172,7 @@ struct lm_backend {
     struct lm_list outputs;         /* struct lm_output.link */
     bool session_active;
     bool blanked;                   /* set_power(false) is in effect */
+    struct lm_gl *gl;               /* set by a backend that renders with OpenGL (owned by it); the renderer picks it up */
     void *priv;
 };
 
@@ -188,6 +198,14 @@ static inline struct lm_framebuffer *lm_output_get_framebuffer(struct lm_output 
 static inline int lm_output_present(struct lm_output *o, const struct lm_rect *d, int n)
 {
     return o->backend->ops->present(o, d, n);
+}
+static inline struct lm_gl_window *lm_output_gl_window(struct lm_output *o)
+{
+    return o->backend->ops->gl_window ? o->backend->ops->gl_window(o) : NULL;
+}
+static inline int lm_output_gl_present(struct lm_output *o)
+{
+    return o->backend->ops->gl_present ? o->backend->ops->gl_present(o) : -1;
 }
 static inline int lm_backend_switch_vt(struct lm_backend *b, int vt)
 {

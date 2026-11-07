@@ -5186,6 +5186,151 @@ class TestNotify(Base):
                 c.cmd(line)
 
 
+class TestOutputLayout(Base):
+    """Several monitors: settings output-order puts them left to right, windows move with their monitor, wl_output clients are told."""
+
+    def start(self, name, *extra, env=None):
+        p, c, stop = self.private_compositor(name, '--output', '400x300', *extra, env=env)
+        c.sync()
+        return c
+
+    @staticmethod
+    def places(c):
+        out = {}
+        for l in c.cmd('outputs'):
+            f = l.split()
+            kv = dict(x.split('=') for x in f[2:])
+            out[f[1]] = tuple(int(kv[k]) for k in ('x', 'y', 'w', 'h'))
+        return out
+
+    def test_connection_order_by_default_and_the_setting_reorders(self):
+        c = self.start('mellagui-lay1')
+        self.assertEqual(self.places(c), {'headless-0': (0, 0, 800, 500), 'headless-1': (800, 0, 400, 300)})
+        c.cmd('settings output-order headless-1,headless-0')
+        self.assertEqual(self.places(c), {'headless-1': (0, 0, 400, 300), 'headless-0': (400, 0, 800, 500)})
+        c.cmd('setting outputs')
+        self.assertEqual(c.last, 'ok headless-1|400x300|0,0;headless-0|800x500|400,0')
+        c.cmd('settings output-order nosuch,headless-1')                 # names that do not exist are ignored; unnamed ones follow
+        self.assertEqual(self.places(c)['headless-1'][0], 0)
+        c.cmd('settings output-order ""')
+        self.assertEqual(self.places(c)['headless-0'][0], 0)
+
+    def test_windows_move_with_their_monitor(self):
+        c = self.start('mellagui-lay2')
+        cl = Client('mellagui-lay2')
+        self.clients.append(cl)
+        Window(cl, 200, 120, title='w')
+        cl.wl.roundtrip()
+        before = c.windows()['windows'][0]
+        self.assertLess(before['x'], 400)                                # on the first monitor
+        c.cmd('settings output-order headless-1,headless-0')              # it moves 400 px to the right with headless-0
+        after = c.windows()['windows'][0]
+        self.assertEqual((after['x'] - before['x'], after['y'] - before['y']), (400, 0))
+        c.cmd('settings output-order ""')
+        back = c.windows()['windows'][0]
+        self.assertEqual((back['x'], back['y']), (before['x'], before['y']))
+
+    def test_maximized_windows_follow_the_new_geometry(self):
+        c = self.start('mellagui-lay3')
+        cl = Client('mellagui-lay3')
+        self.clients.append(cl)
+        win = Window(cl, 200, 120, title='w')
+        cl.wl.roundtrip()
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_F)                                                      # maximize
+        c.key(KEY_LEFTMETA, False)
+        time.sleep(0.2)
+        win.handle_configure()
+        cl.wl.roundtrip()
+        w0 = c.windows()['windows'][0]
+        self.assertGreater(w0['w'], 700)
+        c.cmd('settings output-order headless-1,headless-0')
+        win.handle_configure()
+        cl.wl.roundtrip()
+        w1 = c.windows()['windows'][0]
+        self.assertEqual(w1['x'], w0['x'] + 400)
+        self.assertEqual(w1['w'], w0['w'])
+
+    def test_wl_output_clients_hear_about_the_move(self):
+        c = self.start('mellagui-lay4')
+        cl = Client('mellagui-lay4')
+        self.clients.append(cl)
+        outs = [cl.wl.bind('wl_output', 3) for _ in range(1)]
+        cl.wl.roundtrip()
+        names = [n for n, v in cl.wl.globals.items() if n == 'wl_output']
+        cl.wl.queue.clear()
+        c.cmd('settings output-order headless-1,headless-0')
+        cl.wl.roundtrip()
+        geos = [e.args[0] for e in cl.wl.queue if e.name == 'geometry']
+        self.assertTrue(geos, 'no wl_output.geometry after the move')
+
+    def test_both_outputs_are_drawn_and_the_gadget_is_on_the_leftmost(self):
+        c = self.start('mellagui-lay5')
+        c.abs(5, 5)
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        c.cmd('dump %s 1' % os.path.join(tmp, 'lay5-1.ppm'))
+        ppm1 = Ppm(os.path.join(tmp, 'lay5-1.ppm'))
+        self.assertEqual((ppm1.w, ppm1.h), (400, 300))
+        self.assertEqual(ppm1.px(300, 14), ppm1.px(301, 14))                # a panel row (not the wallpaper gradient)
+        self.assertNotEqual(ppm1.px(2, 250), ppm1.px(2, 5))                 # the wallpaper below the panel differs from the panel
+        c.cmd('gadget-rect')
+        gx = int(c.last.split()[1])
+        self.assertGreaterEqual(gx, 0)
+        self.assertLess(gx, 800)                                             # docked on headless-0 (the leftmost by default)
+        c.cmd('settings output-order headless-1,headless-0')
+        c.cmd('gadget-rect')
+        gx = int(c.last.split()[1])
+        self.assertLess(gx, 400)                                             # now the leftmost is headless-1: the gadget moved there
+        c.cmd('notify 0 Hello there')
+        c.sync()
+        time.sleep(0.2)
+        c.cmd('dump %s 1' % os.path.join(tmp, 'lay5-2.ppm'))
+        ppm2 = Ppm(os.path.join(tmp, 'lay5-2.ppm'))
+        self.assertGreater(ppm2.count((0x6f, 0xa8, 0xff), 60, 30, 400, 120), 20)    # the notification card is on that monitor
+
+    def test_the_settings_panel_reorders_the_monitors(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-lay8')
+        p = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-lay8'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)                         # the Display tab
+        time.sleep(0.3)
+        # "Monitors, left to right": headless-0 then headless-1, each row with < and > at the right edge
+        row0 = y0 + 14 + 28 + 14                                        # first monitor row
+        c.click(x0 + 168 + 440 - 16, row0)                              # ">" of the first row: headless-0 moves right
+        time.sleep(0.3)
+        c.cmd('setting output-order')
+        self.assertEqual(c.last, 'ok headless-1,headless-0')
+        self.assertEqual(self.places(c)['headless-1'][0], 0)
+
+    def test_refused_values_and_persistence(self):
+        conf = os.path.join(tmp, 'lay-conf', 'settings.conf')
+        c = self.start('mellagui-lay6', '--settings', conf)
+        for bad in ('settings output-order a/b', 'settings output-order ' + 'x' * 300, 'settings outputs foo'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd(bad)
+        c.cmd('settings output-order headless-1,headless-0')
+        c.cmd('quit')
+        time.sleep(0.5)
+        self.assertIn('output-order=headless-1,headless-0', open(conf).read().split('\n'))
+        c2 = self.start('mellagui-lay7', '--settings', conf)
+        self.assertEqual(self.places(c2)['headless-1'][0], 0)                # the saved order is used from the start
+
+
 class TestScreenshot(Base):
     """Print / Ctrl+Print / Alt+Print: PNG file (own encoder, no zlib in the compositor) and image/png on the clipboard."""
     KEY_PRINT = 99

@@ -604,8 +604,42 @@ static struct widget *add_radio(struct app *a, int x, int y, int w, const char *
     return r;
 }
 
+/* "name|WxH|x,y;..." (the `outputs` setting) -> names left to right; returns how many (at most 8). */
+static int output_names(const struct app *a, char names[8][40])
+{
+    const char *list = kv_get(a, "outputs");
+    char name[64], desc[96];
+    int n = 0;
+    while (n < 8 && next_entry(&list, name, sizeof(name), desc, sizeof(desc)))
+        snprintf(names[n++], 40, "%.39s", name);
+    return n;
+}
+
 static void build_display(struct app *a, int x, int y, int w)
 {
+    char onames[8][40];
+    int nout = output_names(a, onames);
+    if (nout >= 2) {                                    /* several monitors: their order, left to right */
+        add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Monitors, left to right");
+        y += ROW_H;
+        const char *ol = kv_get(a, "outputs");
+        char nm[64], ds[96];
+        for (int i = 0; next_entry(&ol, nm, sizeof(nm), ds, sizeof(ds)) && i < nout; i++) {
+            char size[64] = "";
+            sscanf(ds, "%63[^|]", size);
+            char line[112];
+            snprintf(line, sizeof(line), "%s   %s", nm, size);
+            add(a, W_LABEL, (struct rect){ x, y, w - 76, ROW_H }, line);
+            struct widget *l = add(a, W_BUTTON, (struct rect){ x + w - 68, y + 2, 32, ROW_H - 4 }, "<");
+            snprintf(l->key, sizeof(l->key), "out-left");
+            snprintf(l->arg, sizeof(l->arg), "%s", nm);
+            struct widget *r = add(a, W_BUTTON, (struct rect){ x + w - 32, y + 2, 32, ROW_H - 4 }, ">");
+            snprintf(r->key, sizeof(r->key), "out-right");
+            snprintf(r->arg, sizeof(r->arg), "%s", nm);
+            y += ROW_H;
+        }
+        y += 6;
+    }
     const char *pending = kv_get(a, "resolution-confirm");
     if (*pending) {                                     /* a change waits to be kept; it is undone otherwise */
         char msg[96];
@@ -662,7 +696,7 @@ static void build_display(struct app *a, int x, int y, int w)
     const char *list = kv_get(a, "resolutions");
     char name[64], note[96], label[96];
     int shown = 0;
-    while (shown < 7 && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
+    while (shown < (nout >= 2 ? 3 : 7) && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
         mode_label(name, note, label, sizeof(label));
         add_radio(a, x, y, w, label, "resolution", name, !strcmp(cur, name));
         y += ROW_H;
@@ -896,6 +930,23 @@ static void activate(struct app *a, int idx)
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
             launch_sibling(w->arg);
+        } else if (!strcmp(w->key, "out-left") || !strcmp(w->key, "out-right")) {
+            char names[8][40];
+            int n = output_names(a, names), at = -1;
+            for (int i = 0; i < n; i++)
+                if (!strcmp(names[i], w->arg))
+                    at = i;
+            int to = at + (!strcmp(w->key, "out-left") ? -1 : 1);
+            if (at >= 0 && to >= 0 && to < n) {
+                char t[40];
+                memcpy(t, names[at], sizeof(t));
+                memcpy(names[at], names[to], sizeof(t));
+                memcpy(names[to], t, sizeof(t));
+                char joined[200] = "";
+                for (int i = 0; i < n; i++)
+                    snprintf(joined + strlen(joined), sizeof(joined) - strlen(joined), "%s%.39s", i ? "," : "", names[i]);
+                send_set(a, "output-order", joined);
+            }
         } else if (!strcmp(w->key, "wall-apply")) {
             send_set(a, "wallpaper", a->wall_edited ? a->wall : kv_get(a, "wallpaper"));
             a->wall_edited = false;

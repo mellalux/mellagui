@@ -319,6 +319,11 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked);
  * on top, at most LM_NOTIFY_MAX. It goes away after `timeout_ms` (0 = it stays until it is clicked). Not shown while locked.
  */
 void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
+/*
+ * The outputs are about to be placed again (settings output-order): packs them (output.c) and moves every window along with the output
+ * it is on, so that it keeps its place on that monitor; maximized / fullscreen windows follow their output's new geometry.
+ */
+void lm_wm_relayout_outputs(struct lm_wm *wm);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods);
 

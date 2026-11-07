@@ -143,6 +143,8 @@ struct lm_config {
     const char *backend;        /* "drm" | "headless" */
     int headless_width;         /* --size WxH (default 1280x720) */
     int headless_height;
+    int headless_extra[3][2];   /* --output WxH (repeatable): more headless outputs, to the right of the first one */
+    int headless_nextra;
     const char *socket_name;    /* --socket, NULL = first free wayland-N */
     const char *exec_cmd;       /* --exec, shell command spawned after start */
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
@@ -160,6 +162,7 @@ struct lm_config {
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
     char wallpaper[256];        /* image file of the desktop background (settings: wallpaper), "" = the gradient; "~/" is the home directory */
+    char output_order[200];     /* connector names, leftmost first (settings: output-order); outputs not named follow in connection order */
     int wallpaper_mode;         /* 0 fill (cover, cropped), 1 fit (whole picture, bars), 2 stretch, 3 center */
     char audio_device[64];      /* ALSA device for MellaGUI's own beeps (settings: audio-out) */
     int drm_mode_w, drm_mode_h, drm_mode_hz;   /* --mode WxH[@Hz]: 0 = automatic (preferred, corrected to the panel's shape), -1 = --mode preferred */

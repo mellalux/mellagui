@@ -77,17 +77,49 @@ static void announce(struct lm_output *out)
  * Re-pack all outputs (except `skip`) left to right. Outputs whose position
  * changed, other than `except_announce`, get their new geometry sent.
  */
+/* Position of `name` in the comma separated `order` (0 = leftmost); outputs it does not name rank after all that it does. */
+static int order_rank(const char *order, const char *name)
+{
+    size_t nl = strlen(name);
+    int idx = 0;
+    for (const char *p = order; *p;) {
+        const char *e = strchr(p, ',');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == nl && !strncmp(p, name, n))
+            return idx;
+        idx++;
+        if (!e)
+            break;
+        p = e + 1;
+    }
+    return 1000;
+}
+
 static void layout_pack(struct lm_output_mgr *mgr, const struct lm_output *skip,
                         struct lm_output *except_announce)
 {
     struct lm_backend *be = mgr->srv->backend;
     if (!be)
         return;
-    int64_t cursor = 0;
+    struct lm_output *arr[16];
+    int n = 0;
     struct lm_output *o;
-    lm_list_for_each(o, &be->outputs, link) {
-        if (o == skip)
-            continue;
+    lm_list_for_each(o, &be->outputs, link)
+        if (o != skip && n < 16)
+            arr[n++] = o;
+    const char *order = mgr->srv->config.output_order;
+    for (int i = 1; i < n; i++) {                                      /* stable insertion sort by rank: the order setting, then connection order */
+        struct lm_output *t = arr[i];
+        int j = i;
+        while (j > 0 && order_rank(order, arr[j - 1]->name) > order_rank(order, t->name)) {
+            arr[j] = arr[j - 1];
+            j--;
+        }
+        arr[j] = t;
+    }
+    int64_t cursor = 0;
+    for (int i = 0; i < n; i++) {
+        o = arr[i];
         int32_t nx = (int32_t)LM_CLAMP(cursor, 0, (int64_t)LM_COORD_LIMIT);
         bool moved = o->x != nx || o->y != 0;
         o->x = nx;
@@ -233,6 +265,23 @@ void lm_output_mgr_add(struct lm_output_mgr *mgr, struct lm_output *out)
         lm_error("could not advertise wl_output for %s", out->name);
     lm_info("output %s: %dx%d@%.3f at %d,%d", out->name, out->width, out->height,
             out->refresh_mhz / 1000.0, out->x, out->y);
+}
+
+void lm_output_mgr_relayout(struct lm_output_mgr *mgr)
+{
+    if (mgr)
+        layout_pack(mgr, NULL, NULL);
+}
+
+struct lm_output *lm_output_primary(struct lm_server *srv)
+{
+    struct lm_output *best = NULL, *o;
+    if (!srv->backend)
+        return NULL;
+    lm_list_for_each(o, &srv->backend->outputs, link)
+        if (!best || o->x < best->x || (o->x == best->x && o->y < best->y))
+            best = o;
+    return best;
 }
 
 void lm_output_mgr_changed(struct lm_output_mgr *mgr, struct lm_output *out)

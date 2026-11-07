@@ -24,6 +24,9 @@
  *   wallpaper       "" | file name             desktop background picture (PNG or PPM; "~/" = home; at most 200 bytes); "" = the gradient
  *   wallpaper-mode  fill | fit | stretch | center   how it is placed: cover and crop, whole picture with bars, stretched, unscaled in the middle
  *   wallpaper-status (read only)               "" (none set) | ok | error: <why> for the last wallpaper that was set
+ *   output-order    "HDMI-A-1,DP-2" | ""       connector names, leftmost monitor first; outputs not named follow in connection order (empty = connection
+ *                                              order). Windows move with their monitor
+ *   outputs         (read only)               "name|WxH|x,y;..." the outputs, left to right
  *   audio-out       ALSA device name           where MellaGUI's own beeps are played (aplay -D); "default" or e.g. plughw:CARD=PCH,DEV=3
  *   file            (read only)                path the settings are saved to, "" = not saved
  *   -- live state, never saved: --

@@ -134,6 +134,8 @@ static void ctl_flush(struct headless *h)
         lm_render_flush(h->base.server->render);
 }
 
+static int g_last_vt;                   /* last Ctrl+Alt+Fn request, shown by the `vt` command (the lock's tests) */
+
 static void ctl_command(struct ctl_client *c, char *line)
 {
     struct headless *h = c->h;
@@ -263,27 +265,33 @@ static void ctl_command(struct ctl_client *c, char *line)
             return;
         }
         ctl_reply(c, "ok %s\n", buf);
+    } else if (!strcmp(cmd, "vt")) {
+        /* vt -> "ok <n>": the console Ctrl+Alt+Fn asked for last (0 = none); the headless backend only records it */
+        ctl_reply(c, "ok %d\n", g_last_vt);
     } else if (!strcmp(cmd, "power")) {
         /* power -> "ok on" | "ok standby": whether the monitors are in standby (the lock screen's blank timeout) */
         ctl_reply(c, "ok %s\n", srv->backend && srv->backend->blanked ? "standby" : "on");
     } else if (!strcmp(cmd, "lock")) {
         /* lock                      -> "ok kind=.. locked=.. timeout=.. start=.. typed=.. fails=.. wait=.. status=.. message=.."
          * lock now                  lock the screen ("err no lock set" when there is no password / PIN)
-         * lock set OLD KIND NEW [MINUTES [START [BLANK]]]   change the lock like the settings key `lock-set` (OLD, NEW without blanks;
+         * lock set OLD KIND NEW [MINUTES [START [BLANK [VT]]]]   change the lock like the settings key `lock-set` (OLD, NEW without blanks;
          *                           "-" = empty; KIND password|pin|keep|none) */
         if (!srv->lock) { ctl_reply(c, "err no lock\n"); return; }
         bool ok = true;
         if (a1 && !strcmp(a1, "now")) {
             ok = lm_lock_now(srv->lock);
+        } else if (a1 && !strcmp(a1, "quit")) {            /* what Super+Shift+E does: ask for the secret, then quit */
+            ok = lm_lock_request_quit(srv->lock);
         } else if (a1 && !strcmp(a1, "set")) {
-            char *t[6] = { a2, a3, strtok_r(NULL, " \t", &save), NULL, NULL, NULL };
-            for (int i = 3; i < 6; i++)
+            char *t[7] = { a2, a3, strtok_r(NULL, " \t", &save), NULL, NULL, NULL, NULL };
+            for (int i = 3; i < 7; i++)
                 t[i] = t[i - 1] ? strtok_r(NULL, " \t", &save) : NULL;
-            for (int i = 0; i < 6; i++)
+            for (int i = 0; i < 7; i++)
                 if (t[i] && !strcmp(t[i], "-"))
                     t[i] = (char *)"";
             ok = t[0] && t[1] && t[2] &&
-                 lm_lock_apply(srv->lock, t[0], t[1], t[2], t[3] ? t[3] : "", t[4] ? t[4] : "", t[5] ? t[5] : "");
+                 lm_lock_apply(srv->lock, t[0], t[1], t[2], t[3] ? t[3] : "", t[4] ? t[4] : "", t[5] ? t[5] : "",
+                              t[6] ? t[6] : "");
         }
         char buf[512];
         lm_lock_describe(srv->lock, buf, sizeof(buf));
@@ -545,6 +553,13 @@ static int hl_apply_mode(struct lm_output *out)
     return 0;
 }
 
+static int hl_switch_vt(struct lm_backend *b, int vt)
+{
+    (void)b;
+    g_last_vt = vt;
+    return 0;
+}
+
 static int hl_set_power(struct lm_backend *b, bool on)
 {
     (void)b;
@@ -558,7 +573,7 @@ static const struct lm_backend_ops headless_ops = {
     .destroy = hl_destroy,
     .get_framebuffer = hl_get_framebuffer,
     .present = hl_present,
-    .switch_vt = NULL,
+    .switch_vt = hl_switch_vt,
     .list_modes = hl_list_modes,
     .apply_mode = hl_apply_mode,
     .set_power = hl_set_power,

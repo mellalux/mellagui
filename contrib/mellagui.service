@@ -1,0 +1,76 @@
+# MellaGUI as a system service on tty1: no shell is left behind it.
+#
+# Why: MellaGUI's screen lock protects the screen, but when MellaGUI quits (or crashes) the console it was started from
+# shows whatever shell was there. Run as a service instead and the console is owned by this unit: it restarts MellaGUI, which
+# (with "Lock when MellaGUI starts" on, the default) comes back locked. See docs/SERVER.md. Not tested on real hardware.
+#
+# Install (as root):
+#   useradd --system --create-home --home-dir /var/lib/mellagui --shell /usr/sbin/nologin \
+#           --groups video,input,tty,render,audio mellagui          # drop the groups the machine does not have
+#   install -m 755 build/mellagui build/mellagui-term build/mellagui-run build/mellagui-settings build/mellagui-calc \
+#           build/mellagui-monitor /usr/local/bin/
+#   install -m 644 contrib/mellagui.service /etc/systemd/system/
+#   systemctl disable --now getty@tty1.service && systemctl mask getty@tty1.service
+#   systemctl enable --now mellagui.service
+# Then set the lock at once (Settings -> Security): until it exists the screen is open to anyone at the keyboard.
+[Unit]
+Description=MellaGUI (Wayland compositor and shell) on tty1
+After=systemd-user-sessions.service systemd-udevd.service getty@tty1.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=simple
+User=mellagui
+Group=mellagui
+SupplementaryGroups=video input tty render audio
+
+# The compositor owns tty1: it takes the VT (VT_PROCESS) and reads the keyboards itself (EVIOCGRAB).
+TTYPath=/dev/tty1
+StandardInput=tty-force
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardOutput=journal
+StandardError=journal
+
+# No logind session here, so say where the runtime and config directories are. The lock hash lives in
+# $XDG_CONFIG_HOME/mellagui/lock.conf (mode 0600) and survives restarts.
+Environment=HOME=/var/lib/mellagui
+Environment=XDG_RUNTIME_DIR=/run/mellagui
+Environment=XDG_CONFIG_HOME=/var/lib/mellagui/config
+RuntimeDirectory=mellagui
+RuntimeDirectoryMode=0700
+StateDirectory=mellagui
+StateDirectoryMode=0700
+
+ExecStart=/usr/local/bin/mellagui --terminal /usr/local/bin/mellagui-term --run /usr/local/bin/mellagui-run
+Restart=always
+RestartSec=2
+
+# Hardening that costs nothing:
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+# Stricter, but everything started from MellaGUI's terminal / Run dialog inherits it (no sudo, a read-only system). Enable
+# it when the GUI is only a display and you administer the machine over ssh:
+#NoNewPrivileges=yes
+#ProtectSystem=strict
+#ProtectHome=yes
+#DevicePolicy=closed
+#DeviceAllow=char-drm rw
+#DeviceAllow=char-input rw
+#DeviceAllow=/dev/tty1 rw
+#DeviceAllow=char-tty rw
+#DeviceAllow=char-alsa rw
+#DeviceAllow=char-i2c rw
+
+[Install]
+WantedBy=multi-user.target

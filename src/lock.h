@@ -9,8 +9,8 @@
  *   - the scene is nothing but the lock screen (LM_SCENE_LOCK, one per output): no window, panel, gadget or menu is painted,
  *   - the seat sends nothing to clients: keyboard and pointer focus are NULL, key / pointer / touch input goes only to
  *     lm_lock_key() (seat.c, lm_seat_set_locked); the shortcuts of the wm (Super+Shift+E quits, Super+Enter starts a
- *     terminal ...) are off. The two exceptions: Ctrl+Alt+F1..F12 still switches the virtual terminal (the other VTs are
- *     protected by their own login) and Super+Space still switches the keyboard layout (so the secret can be typed),
+ *     terminal ...) are off. The two exceptions: Ctrl+Alt+F1..F12 still switches the virtual terminal unless `vt=0`
+ *     (the other VTs are protected by their own login) and Super+Space still switches the keyboard layout (so the secret can be typed),
  *   - the secret is checked with PBKDF2-HMAC-SHA256 (sha256.h); three wrong attempts in a row start a delay that doubles
  *     (5 s, 10 s, ... at most 5 min), during which even the right secret is refused.
  *
@@ -19,7 +19,7 @@
  * with mode 0600:
  *
  *     kind=password|pin   iter=<PBKDF2 iterations>   salt=<32 hex>   hash=<64 hex>   timeout=<minutes, 0 = never>   start=0|1
- *     blank=<minutes, 0 = never, default 3>
+ *     blank=<minutes, 0 = never, default 3>   vt=0|1 (console switching on the lock screen, default 1)
  *
  * Standby: while locked and with no input for `blank` minutes the monitors are switched off (DPMS, backend.h set_power).
  * The first input wakes them and is swallowed; unlocking wakes them too.
@@ -49,7 +49,8 @@ struct lm_lock_info {
     struct lm_output *output;
     bool pin;                   /* false = password */
     int nchars;                 /* typed characters so far (shown as dots) */
-    char message[64];           /* "Wrong password.", "Too many attempts. Try again in 25 s." or "" */
+    char message[96];           /* "Wrong password.", "Too many attempts. Try again in 25 s." or "" */
+    bool quit;                  /* locked on purpose: the secret quits MellaGUI (lm_lock_request_quit) */
     bool blocked;               /* inside the delay after wrong attempts: typing does nothing */
     char clock[8];              /* "HH:MM" */
     char date[24];              /* "DD.MM.YYYY" */
@@ -68,11 +69,19 @@ bool lm_lock_configured(const struct lm_lock *l);   /* a password / PIN exists *
 const char *lm_lock_kind(const struct lm_lock *l);  /* "none" | "password" | "pin" */
 int lm_lock_timeout(const struct lm_lock *l);       /* minutes, 0 = never */
 bool lm_lock_start(const struct lm_lock *l);        /* lock when MellaGUI starts */
+bool lm_lock_vt(const struct lm_lock *l);           /* Ctrl+Alt+F1..F12 works on the lock screen */
 int lm_lock_blank(const struct lm_lock *l);         /* minutes of quiet after which the locked screen's monitors go to standby, 0 = never */
 const char *lm_lock_status(const struct lm_lock *l);/* result of the last lm_lock_apply(): "" | ok | wrong | wait:<s> | weak | invalid | error */
 
 /* Locks the screen now; false (and nothing happens) when no secret is set. */
 bool lm_lock_now(struct lm_lock *l);
+/*
+ * Quitting MellaGUI (Super+Shift+E, the panel's Exit button) when a secret is set: locks the screen and quits only once the
+ * secret was typed (Esc on an empty field cancels), so that leaving to the console the compositor was started from needs the
+ * secret too. Returns false when no secret is set: the caller quits at once. (SIGTERM and the control socket `quit` are
+ * not asked: whoever can send signals as the user already owns the session.)
+ */
+bool lm_lock_request_quit(struct lm_lock *l);
 /*
  * Any input event happened (idle timers). Returns true when the event only woke the monitors from standby: the seat then
  * drops it (the first key press or click after a standby is not typing).
@@ -87,10 +96,10 @@ void lm_lock_key(struct lm_lock *l, uint32_t code, uint32_t mods, uint32_t group
 /*
  * Change the lock. `old`: the current secret (ignored while none is set); `kind`: "password", "pin", "keep" (only change
  * timeout / start / blank) or "none" (remove the lock); `secret`: the new one (for password / pin); `minutes`, `start`,
- * `blank`: "" = keep, else the new value (blank: minutes until the standby, 0 = never). Returns true on success. The text result is lm_lock_status().
+ * `blank`, `vt` (1 = Ctrl+Alt+Fn works while locked): "" = keep, else the new value (blank: minutes until the standby, 0 = never). Returns true on success. The text result is lm_lock_status().
  */
 bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const char *secret, const char *minutes,
-                   const char *start, const char *blank);
+                   const char *start, const char *blank, const char *vt);
 
 /* Fill what to paint on `out`. */
 void lm_lock_info(const struct lm_lock *l, struct lm_output *out, struct lm_lock_info *info);

@@ -40,10 +40,11 @@
  *   lock-timeout    minutes, 0 = never         lock after this much idle time (read only; change with lock-set)
  *   lock-start      0 | 1                      lock when MellaGUI starts (read only; change with lock-set)
  *   lock-blank      minutes, 0 = never         monitors go to standby this long after the last input while locked (read only)
+ *   lock-vt         0 | 1                      Ctrl+Alt+F1..F12 switches the console while the screen is locked (read only)
  *   lock-status     ""|ok|wrong|wait:N|weak|invalid|error   result of the last lock-set (read only)
- *   lock-set        (write only)               "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank": change the lock; `current` must be
+ *   lock-set        (write only)               "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank<TAB>vt": change the lock; `current` must be
  *                                              the existing secret (ignored while none is set), kind = password|pin|keep|none,
- *                                              empty minutes / start / blank = keep. Never echoed, never logged
+ *                                              empty minutes / start / blank / vt = keep. Never echoed, never logged
  *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
  *   locked          0 | 1                      the screen is locked now (read only)
  *

@@ -104,6 +104,9 @@ switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
   Changing or removing the lock needs the current secret. Three wrong tries in a row start a delay that doubles from 5 s up to 5 minutes.
 * Standby: with the screen locked and no input for that long, the monitors are switched off (DRM DPMS, they lose the signal and sleep).
   The first key press or mouse move only wakes them; unlocking wakes them too. Not tested on real hardware yet.
+* With a lock set, Super+Shift+E and the panel's *Exit* lock the screen and quit only after the secret was typed (Esc on an empty
+  field cancels). *Lock when MellaGUI starts* is on by default, and "Console switch works while locked" can be turned off.
+  For a server run MellaGUI as a service so there is no shell behind it: see [docs/SERVER.md](docs/SERVER.md) and `contrib/mellagui.service`.
 * A forgotten secret cannot be reset from inside the session: log in another way (ssh, another console), delete `lock.conf` and restart MellaGUI.
 * What it does not do: it does not protect against someone who can log in as you on another console or over ssh, and a program running as
   your user can read `lock.conf` and guess a short PIN offline. It is a screen lock against someone at the keyboard.

@@ -2520,21 +2520,21 @@ esac
         type_text('hunter22x')
         ctl.click(x0 + 300, y0 + 141)                           # Repeat: a different text is caught in the panel
         type_text('hunter22y')
-        ctl.click(x0 + 204, y0 + 259)                            # Apply
+        ctl.click(x0 + 204, y0 + 287)                            # Apply
         time.sleep(0.2)
         self.assertEqual(lock_kind(), 'kind=none')
         ctl.click(x0 + 300, y0 + 141)
         for _ in range(9):
             ctl.tap(14)                                         # Backspace
         type_text('hunter22x')
-        ctl.click(x0 + 204, y0 + 259)
+        ctl.click(x0 + 204, y0 + 287)
         time.sleep(0.3)
         self.assertEqual(lock_kind(), 'kind=password')
         self.assertEqual(settings()['lock-kind'], 'password')
         # remove it again through the panel: the page now has a "Current password" field on top and a Remove button
         ctl.click(x0 + 300, y0 + 83)                            # Current password
         type_text('hunter22x')
-        ctl.click(x0 + 445, y0 + 289)                           # Remove lock
+        ctl.click(x0 + 445, y0 + 317)                           # Remove lock
         time.sleep(0.3)
         self.assertEqual(lock_kind(), 'kind=none')
 
@@ -3717,6 +3717,67 @@ class TestLock(Base):
         time.sleep(3.5)
         self.assertEqual(self.state(c)['blanked'], '0')
         self.assertEqual(self.state(c)['blank'], '0')
+
+    def test_console_switch_can_be_turned_off_while_locked(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 1357')
+        st = self.state(c)
+        self.assertEqual((st['vt'], st['start']), ('1', '1'))              # defaults: console switch on, lock at start on
+
+        def ctrl_alt_f(n):
+            c.key(KEY_LEFTCTRL, True); c.key(KEY_LEFTALT, True)
+            c.tap(58 + n)                                                  # KEY_F1 = 59
+            c.key(KEY_LEFTALT, False); c.key(KEY_LEFTCTRL, False)
+            c.sync()
+        c.cmd('lock now')
+        ctrl_alt_f(2)
+        c.cmd('vt')
+        self.assertEqual(c.last, 'ok 2')
+        c.cmd('lock set 1357 keep - - - - 0')                              # vt = 0
+        self.assertEqual(self.state(c)['vt'], '0')
+        c.cmd('lock now') if self.state(c)['locked'] == '0' else None
+        ctrl_alt_f(5)
+        c.cmd('vt')
+        self.assertEqual(c.last, 'ok 2', 'the console switched although it is turned off on the lock screen')
+
+    def test_quitting_needs_the_secret(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 1357')
+        # Super+Shift+E, the same as the panel's Exit button: locks and asks
+        c.key(KEY_LEFTMETA, True); c.key(KEY_LEFTSHIFT, True); c.tap(18); c.key(KEY_LEFTSHIFT, False); c.key(KEY_LEFTMETA, False)
+        c.sync()
+        st = self.state(c)
+        self.assertEqual((st['locked'], st['quit']), ('1', '1'))
+        self.assertIsNone(p.poll())
+        self.assertIn('quit MellaGUI', st['message'])
+        self.type(c, '9999')                                               # wrong: still running, still locked
+        self.assertIsNone(p.poll())
+        self.assertEqual(self.state(c)['locked'], '1')
+        c.tap(KEY_ESC)                                                     # clears the field ...
+        c.tap(KEY_ESC)                                                     # ... and on an empty one cancels the quit
+        c.sync()
+        st = self.state(c)
+        self.assertEqual((st['locked'], st['quit']), ('1', '0'))
+        self.type(c, '1357')                                               # now it is a plain unlock
+        self.assertEqual(self.state(c)['locked'], '0')
+        self.assertIsNone(p.poll())
+        c.cmd('lock quit')
+        self.assertEqual(self.state(c)['quit'], '1')
+        try:
+            self.type(c, '1357')                                           # right secret: MellaGUI quits
+        except (ConnectionError, EOFError):
+            pass
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_quitting_without_a_lock_is_immediate(self):
+        p, c, stop = self.start()
+        c.key(KEY_LEFTMETA, True)
+        c.key(KEY_LEFTSHIFT, True)
+        try:
+            c.tap(18)                                                      # the compositor quits on this press
+        except (ConnectionError, EOFError):
+            pass
+        self.assertEqual(p.wait(timeout=5), 0)
 
     def test_settings_protocol_lock_set(self):
         p, c, stop = self.start()

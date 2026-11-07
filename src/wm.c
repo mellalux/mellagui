@@ -2169,6 +2169,13 @@ static void launch_run(struct lm_wm *wm)
     lm_server_spawn(wm->srv, cmd);
 }
 
+/* Quit, but with a screen lock set only after the secret was typed (lock.h). */
+static void request_quit(struct lm_wm *wm)
+{
+    if (!lm_lock_request_quit(wm->srv->lock))
+        lm_server_quit(wm->srv);
+}
+
 static void launch_settings(struct lm_wm *wm)
 {
     const char *cmd = wm->srv->config.settings_cmd ? wm->srv->config.settings_cmd : "mellagui-settings";
@@ -2234,7 +2241,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (pk == LM_PICK_PANEL_EXIT && pick->kind == LM_PICK_PANEL_EXIT) {
             if (wm->exit_armed) {
                 lm_info("exit button confirmed, quitting");
-                lm_server_quit(wm->srv);
+                request_quit(wm);
             } else {
                 wm->exit_armed = true;
                 damage_panels(wm);
@@ -2570,7 +2577,7 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
         break;
     case KEY_E:
         if (shift) {
-            if (pressed && !repeat) lm_server_quit(wm->srv);
+            if (pressed && !repeat) request_quit(wm);
         } else {
             handled = false;
         }

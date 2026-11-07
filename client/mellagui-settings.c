@@ -181,11 +181,11 @@ static const char *lock_status_text(const char *st, char *buf, size_t n)
     return "";
 }
 
-/* The `lock-set` value: "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank". kind is keep when no new secret is typed. */
+/* The `lock-set` value: "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank<TAB>vt". kind is keep when no new secret is typed. */
 static void lock_set_value(char *out, size_t n, const char *cur, const char *kind, const char *fresh, int minutes, bool start,
-                           int blank)
+                           int blank, bool vt)
 {
-    snprintf(out, n, "%s\t%s\t%s\t%d\t%d\t%d", cur, kind, fresh, minutes, start ? 1 : 0, blank);
+    snprintf(out, n, "%s\t%s\t%s\t%d\t%d\t%d\t%d", cur, kind, fresh, minutes, start ? 1 : 0, blank, vt ? 1 : 0);
 }
 
 /* Appends one typed character / removes the last one in a UTF-8 buffer of `cap` bytes. */
@@ -277,10 +277,10 @@ static int selftest(void)
         CHECK(!strcmp(lock_status_text("ok", b, sizeof(b)), "Saved."));
         CHECK(strstr(lock_status_text("wait:25", b, sizeof(b)), "25 s"));
         CHECK(*lock_status_text("", b, sizeof(b)) == 0 && *lock_status_text("weird", b, sizeof(b)) == 0);
-        lock_set_value(v, sizeof(v), "old", "password", "new pass", 10, true, 3);
-        CHECK(!strcmp(v, "old\tpassword\tnew pass\t10\t1\t3"));
-        lock_set_value(v, sizeof(v), "", "keep", "", 0, false, 0);
-        CHECK(!strcmp(v, "\tkeep\t\t0\t0\t0"));
+        lock_set_value(v, sizeof(v), "old", "password", "new pass", 10, true, 3, true);
+        CHECK(!strcmp(v, "old\tpassword\tnew pass\t10\t1\t3\t1"));
+        lock_set_value(v, sizeof(v), "", "keep", "", 0, false, 0, false);
+        CHECK(!strcmp(v, "\tkeep\t\t0\t0\t0\t0"));
         edit_text(t, sizeof(t), 'a', true);
         edit_text(t, sizeof(t), 0xf5, true);                 /* o with tilde: two bytes */
         CHECK(utf8_count(t) == 2 && strlen(t) == 3);
@@ -355,6 +355,7 @@ struct app {
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
+    bool sec_vt;                        /* Ctrl+Alt+F1..F12 switches the console on the lock screen */
     char sec_err[64];                   /* a mistake found before sending */
 };
 
@@ -535,6 +536,8 @@ static void build_security(struct app *a, int x, int y, int w)
     a->wd[a->nw - 1].val = a->sec_blank;
     y += ROW_H;
     add_check(a, x, y, w, "Lock when MellaGUI starts", "sec-start", a->sec_start);
+    y += ROW_H;
+    add_check(a, x, y, w, "Console switch (Ctrl+Alt+Fn) works while locked", "sec-vt", a->sec_vt);
     y += ROW_H + 4;
     add_button(a, x, y, 90, "Apply", "sec-apply");
     if (have) {
@@ -816,7 +819,7 @@ static void sec_send(struct app *a, bool remove)
     } else {
         const char *kind = remove ? "none" : a->pw[1][0] ? (a->sec_pin ? "pin" : "password") : "keep";
         lock_set_value(v, sizeof(v), have ? a->pw[0] : "", kind, remove ? "" : a->pw[1], a->sec_minutes, a->sec_start,
-                       a->sec_blank);
+                       a->sec_blank, a->sec_vt);
         send_set(a, "lock-set", v);
         memset(v, 0, sizeof(v));
         memset(a->pw, 0, sizeof(a->pw));
@@ -841,11 +844,14 @@ static void activate(struct app *a, int idx)
             a->sec_minutes = kv_int(a, "lock-timeout", 0);
             a->sec_blank = kv_int(a, "lock-blank", 3);
             a->sec_start = kv_int(a, "lock-start", 0) != 0;
+            a->sec_vt = kv_int(a, "lock-vt", 1) != 0;
         }
         break;
     case W_CHECK:
         if (!strcmp(w->key, "sec-start")) {
             a->sec_start = !a->sec_start;
+        } else if (!strcmp(w->key, "sec-vt")) {
+            a->sec_vt = !a->sec_vt;
         } else if (!strcmp(w->key, "layout-enable")) {
             idlist_parse(&l, kv_get(a, "layouts"));
             if (idlist_toggle(&l, w->arg)) {
@@ -1047,6 +1053,8 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
             a->sec_minutes = atoi(args[1].s);
         else if (changed && !strcmp(args[0].s, "lock-blank"))
             a->sec_blank = atoi(args[1].s);
+        else if (changed && !strcmp(args[0].s, "lock-vt"))
+            a->sec_vt = atoi(args[1].s) != 0;
         else if (changed && !strcmp(args[0].s, "lock-start"))
             a->sec_start = atoi(args[1].s) != 0;
     } else if (op == LM_MELLAGUI_SETTINGS_V1_EVT_DONE) {

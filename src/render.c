@@ -17,6 +17,8 @@
 #include <string.h>
 
 #include "font.h"
+#include "gl.h"
+#include "log.h"
 #include "lock.h"
 #include "output.h"
 #include "seat.h"
@@ -54,6 +56,7 @@ struct out_state {
     bool ready;                         /* backend allows drawing */
     bool presented;                     /* a frame was presented, frame-done not yet sent */
     bool full;                          /* next frame must repaint everything */
+    void *gl;                           /* struct gl_out: the GL renderer's per-output state (render_gl.inc) */
 };
 
 /* Screenshot feedback: a white flash over the captured area (150 ms) and a card with a thumbnail and a label in the
@@ -69,6 +72,7 @@ struct shot_fx {
     uint32_t *thumb;
     int tw, th;
     char label[96];
+    uint32_t gen;                       /* changes with every new card (the GL renderer repaints its texture then) */
     char path[512];                     /* the saved file ("" = clipboard only): a click on the card opens it */
     int ticks;
     int hold_ms;
@@ -77,6 +81,8 @@ struct shot_fx {
 
 struct lm_renderer {
     struct shot_fx shot;
+    struct lm_gl *gl;                   /* the GL renderer; NULL = software (render_gl.inc) */
+    unsigned sprite_tex[LM_CURSOR_POINTER + 1];
     struct lm_server *srv;
     struct lm_idle *idle;
     struct lm_timer *frame_timer;
@@ -400,23 +406,42 @@ static void draw_frame_button(const struct paint_ctx *c, const struct lm_frame_i
     }
 }
 
-static void paint_frame(const struct paint_ctx *c, const struct lm_frame_info *f)
+/* The solid parts of a frame (everything but the title bar, which has the buttons and the title). Shared with the GL renderer. */
+struct frame_parts {
+    struct lm_rect left, right, bottom, body;
+    uint32_t col;                       /* title bar and the three border strips */
+    uint32_t body_col;                  /* behind the client area (shows where the client has not drawn) */
+    bool has_body;
+};
+
+static void frame_parts(const struct lm_frame_info *f, struct frame_parts *p)
 {
-    uint32_t col = f->active ? COL_FRAME_ACTIVE : COL_FRAME_IDLE;
-    uint32_t fg = f->active ? COL_TEXT_ACTIVE : COL_TEXT_IDLE;
     const struct lm_rect *o = &f->outer;
     int bw = LM_BORDER_WIDTH;
-
-    fill_rect(c, &f->titlebar, col);
+    memset(p, 0, sizeof(*p));
+    p->col = f->active ? COL_FRAME_ACTIVE : COL_FRAME_IDLE;
+    p->body_col = COL_CONTENT_BG;
     if (o->h > f->titlebar.h) {
-        struct lm_rect left = lm_rect_make(o->x, o->y + f->titlebar.h, bw, o->h - f->titlebar.h);
-        struct lm_rect right = lm_rect_make(o->x + o->w - bw, left.y, bw, left.h);
-        struct lm_rect bottom = lm_rect_make(o->x + bw, o->y + o->h - bw, o->w - 2 * bw, bw);
-        struct lm_rect body = lm_rect_make(o->x + bw, left.y, o->w - 2 * bw, left.h - bw);
-        fill_rect(c, &left, col);
-        fill_rect(c, &right, col);
-        fill_rect(c, &bottom, col);
-        fill_rect(c, &body, COL_CONTENT_BG);
+        p->has_body = true;
+        p->left = lm_rect_make(o->x, o->y + f->titlebar.h, bw, o->h - f->titlebar.h);
+        p->right = lm_rect_make(o->x + o->w - bw, p->left.y, bw, p->left.h);
+        p->bottom = lm_rect_make(o->x + bw, o->y + o->h - bw, o->w - 2 * bw, bw);
+        p->body = lm_rect_make(o->x + bw, p->left.y, o->w - 2 * bw, p->left.h - bw);
+    }
+}
+
+static void paint_frame(const struct paint_ctx *c, const struct lm_frame_info *f)
+{
+    uint32_t fg = f->active ? COL_TEXT_ACTIVE : COL_TEXT_IDLE;
+    struct frame_parts fp;
+    frame_parts(f, &fp);
+
+    fill_rect(c, &f->titlebar, fp.col);
+    if (fp.has_body) {
+        fill_rect(c, &fp.left, fp.col);
+        fill_rect(c, &fp.right, fp.col);
+        fill_rect(c, &fp.bottom, fp.col);
+        fill_rect(c, &fp.body, fp.body_col);
     }
     draw_frame_button(c, f, &f->btn_min, LM_FRAME_HOVER_MINIMIZE, fg);
     draw_frame_button(c, f, &f->btn_max, LM_FRAME_HOVER_MAXIMIZE, fg);
@@ -1276,14 +1301,9 @@ static int shot_flash_alpha(const struct shot_fx *fx)
     return fx->ticks < SHOT_FLASH_TICKS ? (SHOT_FLASH_TICKS - fx->ticks) * 55 : 0;
 }
 
-static void paint_shot(const struct paint_ctx *c)
+/* The card: translucent body, thumbnail, file name. (The GL renderer paints it over black and over white: matting.) */
+static void paint_shot_card(const struct paint_ctx *c, const struct shot_fx *fx)
 {
-    const struct shot_fx *fx = &c->r->shot;
-    if (!fx->active || fx->out != c->out || (c->r->srv->lock && lm_lock_active(c->r->srv->lock)))
-        return;                                         /* (never over the lock screen) */
-    int a = shot_flash_alpha(fx);
-    if (a > 0)
-        fill_round(c, &fx->area, 0, ((uint32_t)a << 24) | 0x00ffffffu);
     struct lm_rect card = shot_card_rect(fx);
     struct lm_rect hit;
     if (!lm_rect_intersect(&card, &c->clip, &hit))
@@ -1300,6 +1320,17 @@ static void paint_shot(const struct paint_ctx *c)
     }
     struct lm_rect text = lm_rect_make(card.x + 8, card.y + 8 + fx->th + 6, fx->tw, LM_FONT_H);
     draw_text(c, &text, text.x, text.y, fx->label, 0x00d8dde8u);
+}
+
+static void paint_shot(const struct paint_ctx *c)
+{
+    const struct shot_fx *fx = &c->r->shot;
+    if (!fx->active || fx->out != c->out || (c->r->srv->lock && lm_lock_active(c->r->srv->lock)))
+        return;                                         /* (never over the lock screen) */
+    int a = shot_flash_alpha(fx);
+    if (a > 0)
+        fill_round(c, &fx->area, 0, ((uint32_t)a << 24) | 0x00ffffffu);
+    paint_shot_card(c, fx);
 }
 
 static void shot_end(struct lm_renderer *r)
@@ -1402,6 +1433,7 @@ void lm_render_shot_feedback(struct lm_renderer *r, const struct lm_rect *where,
     const char *ms = getenv("MELLAGUI_TOAST_MS");
     int hold = ms ? atoi(ms) : 8000;
     fx->hold_ms = LM_MAX(hold - SHOT_FLASH_TICKS * SHOT_TICK_MS, 0);
+    fx->gen++;
     fx->active = true;
     lm_timer_arm_ms(fx->timer, SHOT_TICK_MS, SHOT_TICK_MS);
     struct lm_rect card = shot_card_rect(fx);
@@ -1474,9 +1506,13 @@ static void send_frame_done(struct lm_renderer *r, uint32_t t)
         lm_seat_send_frame_done(r->srv->seat, t);
 }
 
+#include "render_gl.inc"
+
 /* Returns true if a frame was presented. */
 static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
 {
+    if (r->gl)
+        return draw_output_gl(r, st, force);
     struct lm_output *out = st->out;
     if (!force && !st->ready)
         return false;
@@ -1601,6 +1637,28 @@ struct lm_renderer *lm_render_create(struct lm_server *srv)
     if (!r)
         return NULL;
     r->srv = srv;
+    bool headless = !strcmp(srv->config.backend, "headless");
+    const char *env = getenv("MELLAGUI_RENDERER");                  /* tests: run everything through the GL path */
+    int mode = srv->config.renderer;
+    if (mode < 0 && env)
+        mode = !strcmp(env, "gl") ? 2 : !strcmp(env, "auto") ? 1 : 0;
+    if (mode < 0)
+        mode = headless ? 0 : 1;
+    if (mode > 0) {
+        char why[200] = "";
+        r->gl = headless ? lm_gl_create(-1, why, sizeof(why)) : NULL;
+        if (!headless)
+            snprintf(why, sizeof(why), "OpenGL on the display is not wired up yet");
+        if (r->gl) {
+            lm_info("renderer: OpenGL ES (%s), the GPU composites the windows", lm_gl_renderer_name(r->gl));
+        } else if (mode == 2) {
+            lm_error("the GL renderer is required (--renderer gl) but not usable: %s", why);
+            free(r);
+            return NULL;
+        } else {
+            lm_info("renderer: software (GL not used: %s)", why);
+        }
+    }
     r->idle = lm_loop_add_idle(srv->loop, idle_draw, r);
     r->frame_timer = lm_loop_add_timer(srv->loop, frame_timer_fn, r);
     return r;
@@ -1622,6 +1680,13 @@ void lm_render_destroy(struct lm_renderer *r)
     if (r->shot.timer)
         lm_timer_destroy(r->shot.timer);
     free(r->shot.thumb);
+    if (r->gl) {
+        lm_gl_make_current(r->gl);
+        for (int i = 0; i <= LM_CURSOR_POINTER; i++)
+            if (r->sprite_tex[i])
+                lm_gl_tex_delete(r->gl, r->sprite_tex[i]);
+        lm_gl_destroy(r->gl);
+    }
     free(r);
 }
 
@@ -1662,6 +1727,8 @@ void lm_render_output_removed(struct lm_renderer *r, struct lm_output *out)
     struct out_state *st = state_of(out);
     if (!st)
         return;
+    if (r->gl)
+        gl_out_free(r, st);
     lm_region_fini(&st->pending);
     for (int i = 0; i < HIST; i++)
         lm_region_fini(&st->hist[i]);
@@ -1743,4 +1810,13 @@ void lm_render_flush(struct lm_renderer *r)
         if (st)
             draw_output(r, st, true);
     }
+}
+
+void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s)
+{
+    if (r->gl && s->gl_tex) {
+        lm_gl_make_current(r->gl);
+        lm_gl_tex_delete(r->gl, s->gl_tex);
+    }
+    s->gl_tex = 0;
 }

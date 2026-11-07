@@ -762,7 +762,10 @@ class TestRobustness(Base):
         c.wl.request(c.compositor, 'create_surface', s)
         b = c.wl.new_id('wl_buffer')
         c.wl.request(shm.pool, 'create_buffer', b, 0, I(100000), I(100000), I(400000), 0)
-        c.wl.roundtrip()
+        try:
+            c.wl.roundtrip()
+        except (BrokenPipeError, ConnectionResetError, ProtocolError):
+            pass                                            # the compositor may have disconnected us already: that is the right answer
         self.assertTrue(alive())
         self.other_client_works()
 
@@ -4328,6 +4331,19 @@ class TestViewer(Base):
         self.assertIsNone(p.poll())
 
 
+class TestGL(unittest.TestCase):
+    """src/gl.c: the dlopen()ed EGL / OpenGL ES layer (needs a GPU or Mesa's software driver; skipped without)."""
+    def test_gl_layer(self):
+        tool = os.path.join(ROOT, 'build', 'gl-test')
+        if not os.path.exists(tool):
+            self.skipTest('gl-test not built')
+        r = subprocess.run([tool], capture_output=True, text=True, timeout=60)
+        if r.returncode == 77:
+            self.skipTest(r.stdout.strip())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('gl-test ok', r.stdout)
+
+
 class TestLogind(unittest.TestCase):
     """src/logind.c (a D-Bus client of its own) against tests/fake_logind.py; the DRM / evdev wiring cannot run headless."""
     TOOL = os.environ.get('MELLAGUI_LOGIND_TEST', os.path.join(ROOT, 'build', 'logind-test'))
@@ -4411,6 +4427,114 @@ class TestLogind(unittest.TestCase):
         r = subprocess.run([self.TOOL, 'plain', '/dev/null'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.stdout.strip(), 'plain fd=ok')
 
+
+
+class TestGLParity(Base):
+    """The GL renderer (render_gl.inc) against the software one: the same scene in two private compositors must give the same
+    pixels (translucency may differ by one level: float blending against integer rounding)."""
+    NAME = {'software': 'mellagui-par-sw', 'gl': 'mellagui-par-gl'}
+
+    def setUp(self):
+        super().setUp()
+        tool = os.path.join(ROOT, 'build', 'gl-test')
+        if not os.path.exists(tool):
+            self.skipTest('gl-test not built')
+        r = subprocess.run([tool], capture_output=True, text=True, timeout=60)
+        if r.returncode == 77:
+            self.skipTest(r.stdout.strip())
+
+    def scene(self, renderer):
+        """Runs the scene on a fresh compositor with `renderer`; returns {step: Ppm}."""
+        name = self.NAME[renderer]
+        lock = os.path.join(tmp, name + '.lock')
+        p, c, stop = self.private_compositor(name, '--lock-file', lock,
+                                             env={'MELLAGUI_RENDERER': renderer, 'MELLAGUI_TOAST_MS': '600000',
+                                                  'MELLAGUI_LOCK_ITER': '1000'})
+        shots = {}
+        cl = Client(name)
+        self.clients.append(cl)
+        a = Window(cl, 260, 160, title='A', color=0xff336699)
+        b = Window(cl, 220, 140, title='B', color=0x80402010)               # translucent, premultiplied
+        cl.wl.roundtrip()
+        c.abs(20, 480)
+        c.sync()
+        time.sleep(0.3)
+        c.sync()
+        shots['two windows'] = c.dump(os.path.join(tmp, name + '-1.ppm'))
+        # a window of its own with a pattern, then a change inside it that only damages a rectangle
+        w = Window(cl, 200, 120, title='C', color=0xff202020)
+        cl.wl.roundtrip()
+        stride = 200 * 4
+        for y in range(120):
+            w.shm.map[y * stride:(y + 1) * stride] = b''.join(struct.pack('<I', 0xff000000 | (x * 255 // 200) << 16 | (y * 255 // 120) << 8 | 0x40) for x in range(200))
+        w.commit_buffer(200, 120)
+        cl.wl.roundtrip()
+        for y in range(30, 60):
+            w.shm.map[y * stride + 40 * 4:y * stride + 90 * 4] = struct.pack('<I', 0xffff00ff) * 50
+        cl.wl.request(w.surface, 'attach', w.buffer, I(0), I(0))
+        cl.wl.request(w.surface, 'damage', I(40), I(30), I(50), I(30))
+        cl.wl.request(w.surface, 'commit')
+        cl.wl.roundtrip()
+        c.sync()
+        time.sleep(0.2)
+        c.sync()
+        shots['partial damage'] = c.dump(os.path.join(tmp, name + '-2.ppm'))
+        c.abs(300, 220)                                                      # the cursor over the windows
+        c.sync()
+        time.sleep(0.2)
+        c.sync()
+        shots['cursor'] = c.dump(os.path.join(tmp, name + '-3.ppm'))
+        c.click(30, 14)                                                      # the MellaGUI menu
+        c.abs(40, 60)
+        c.sync()
+        time.sleep(0.2)
+        c.sync()
+        shots['menu'] = c.dump(os.path.join(tmp, name + '-4.ppm'))
+        c.tap(KEY_ESC)
+        c.abs(700, 450)
+        c.tap(99)                                                            # Print: flash, then the card stays
+        time.sleep(0.5)
+        c.sync()
+        shots['card'] = c.dump(os.path.join(tmp, name + '-5.ppm'))
+        c.cmd('lock set - password hunter22x')
+        c.cmd('lock now')
+        time.sleep(0.3)
+        c.sync()
+        shots['lock'] = c.dump(os.path.join(tmp, name + '-6.ppm'))
+        return shots
+
+    def test_scene_gives_the_same_pixels(self):
+        sw = self.scene('software')
+        gl = self.scene('gl')
+        problems = []
+        for step in sw:
+            a, b = sw[step], gl[step]
+            self.assertEqual((a.w, a.h), (b.w, b.h))
+            worst, n = 0, 0
+            where = None
+            for y in range(30, a.h):                                         # the top rows hold the clock
+                ra = a.data[(y * a.w) * 3:((y + 1) * a.w) * 3]
+                rb = b.data[(y * b.w) * 3:((y + 1) * b.w) * 3]
+                if ra == rb:
+                    continue
+                for x in range(a.w):
+                    pa, pb = ra[x * 3:x * 3 + 3], rb[x * 3:x * 3 + 3]
+                    if pa != pb:
+                        d = max(abs(i - j) for i, j in zip(pa, pb))
+                        n += 1
+                        if d > worst:
+                            worst, where = d, (x, y, tuple(pa), tuple(pb))
+            if worst > 1:
+                problems.append('%s: %d pixels differ, worst by %d at %s' % (step, n, worst, where))
+            for y in range(0, 28):                                           # panel: everything left of the clock
+                for x in range(0, 330):
+                    if a.px(x, y) != b.px(x, y):
+                        problems.append('%s: panel pixel %d,%d differs %s %s' % (step, x, y, a.px(x, y), b.px(x, y)))
+                        break
+                else:
+                    continue
+                break
+        self.assertEqual(problems, [])
 
 
 class TestScreenshot(Base):

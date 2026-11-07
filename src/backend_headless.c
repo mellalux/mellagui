@@ -81,6 +81,8 @@ static int hl_present(struct lm_output *out, const struct lm_rect *damage, int n
 int lm_backend_headless_dump(struct lm_backend *b, const char *path)
 {
     struct headless *h = HL(b);
+    if (b->server && b->server->render)
+        lm_render_readback(b->server->render);
     FILE *f = fopen(path, "wb");
     if (!f)
         return -1;

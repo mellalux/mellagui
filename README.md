@@ -94,7 +94,7 @@ add or replace entries with `--app "Name=command"`, repeatable), workspace cells
 ### Screen lock
 
 *Settings* → *Security* sets a password (8+ characters) or a PIN (4-12 digits), an idle time after which the screen locks by itself
-(0 = never) and "Lock when MellaGUI starts". **Super+L**, the panel's *Lock* button or the page's *Lock now* lock the screen; with no
+(0 = never), how long after locking the monitors go to standby ("Screen off after", default 3 minutes, 0 = never) and "Lock when MellaGUI starts". **Super+L**, the panel's *Lock* button or the page's *Lock now* lock the screen; with no
 password set yet the button opens the settings instead. Type the secret and press Enter (Esc clears, Backspace deletes; Super+Space
 switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
 
@@ -102,6 +102,8 @@ switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
   no shortcut works (Super+Shift+E included).
 * Only a salted PBKDF2-HMAC-SHA256 hash (200000 rounds) is stored, in `~/.config/mellagui/lock.conf` (mode 0600; `--lock-file`).
   Changing or removing the lock needs the current secret. Three wrong tries in a row start a delay that doubles from 5 s up to 5 minutes.
+* Standby: with the screen locked and no input for that long, the monitors are switched off (DRM DPMS, they lose the signal and sleep).
+  The first key press or mouse move only wakes them; unlocking wakes them too. Not tested on real hardware yet.
 * A forgotten secret cannot be reset from inside the session: log in another way (ssh, another console), delete `lock.conf` and restart MellaGUI.
 * What it does not do: it does not protect against someone who can log in as you on another console or over ssh, and a program running as
   your user can read `lock.conf` and guess a short PIN offline. It is a screen lock against someone at the keyboard.

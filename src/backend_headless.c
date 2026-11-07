@@ -263,23 +263,27 @@ static void ctl_command(struct ctl_client *c, char *line)
             return;
         }
         ctl_reply(c, "ok %s\n", buf);
+    } else if (!strcmp(cmd, "power")) {
+        /* power -> "ok on" | "ok standby": whether the monitors are in standby (the lock screen's blank timeout) */
+        ctl_reply(c, "ok %s\n", srv->backend && srv->backend->blanked ? "standby" : "on");
     } else if (!strcmp(cmd, "lock")) {
         /* lock                      -> "ok kind=.. locked=.. timeout=.. start=.. typed=.. fails=.. wait=.. status=.. message=.."
          * lock now                  lock the screen ("err no lock set" when there is no password / PIN)
-         * lock set OLD KIND NEW [MINUTES [START]]   change the lock like the settings key `lock-set` (OLD, NEW without blanks;
+         * lock set OLD KIND NEW [MINUTES [START [BLANK]]]   change the lock like the settings key `lock-set` (OLD, NEW without blanks;
          *                           "-" = empty; KIND password|pin|keep|none) */
         if (!srv->lock) { ctl_reply(c, "err no lock\n"); return; }
         bool ok = true;
         if (a1 && !strcmp(a1, "now")) {
             ok = lm_lock_now(srv->lock);
         } else if (a1 && !strcmp(a1, "set")) {
-            char *t[5] = { a2, a3, strtok_r(NULL, " \t", &save), NULL, NULL };
-            t[3] = t[2] ? strtok_r(NULL, " \t", &save) : NULL;
-            t[4] = t[3] ? strtok_r(NULL, " \t", &save) : NULL;
-            for (int i = 0; i < 5; i++)
+            char *t[6] = { a2, a3, strtok_r(NULL, " \t", &save), NULL, NULL, NULL };
+            for (int i = 3; i < 6; i++)
+                t[i] = t[i - 1] ? strtok_r(NULL, " \t", &save) : NULL;
+            for (int i = 0; i < 6; i++)
                 if (t[i] && !strcmp(t[i], "-"))
                     t[i] = (char *)"";
-            ok = t[0] && t[1] && t[2] && lm_lock_apply(srv->lock, t[0], t[1], t[2], t[3] ? t[3] : "", t[4] ? t[4] : "");
+            ok = t[0] && t[1] && t[2] &&
+                 lm_lock_apply(srv->lock, t[0], t[1], t[2], t[3] ? t[3] : "", t[4] ? t[4] : "", t[5] ? t[5] : "");
         }
         char buf[512];
         lm_lock_describe(srv->lock, buf, sizeof(buf));
@@ -541,6 +545,13 @@ static int hl_apply_mode(struct lm_output *out)
     return 0;
 }
 
+static int hl_set_power(struct lm_backend *b, bool on)
+{
+    (void)b;
+    (void)on;                           /* nothing to switch off; lm_backend_set_power() keeps the flag for the `power` command */
+    return 0;
+}
+
 static const struct lm_backend_ops headless_ops = {
     .name = "headless",
     .init = hl_init,
@@ -550,6 +561,7 @@ static const struct lm_backend_ops headless_ops = {
     .switch_vt = NULL,
     .list_modes = hl_list_modes,
     .apply_mode = hl_apply_mode,
+    .set_power = hl_set_power,
 };
 
 struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h)

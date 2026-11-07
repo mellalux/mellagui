@@ -19,6 +19,10 @@
  * with mode 0600:
  *
  *     kind=password|pin   iter=<PBKDF2 iterations>   salt=<32 hex>   hash=<64 hex>   timeout=<minutes, 0 = never>   start=0|1
+ *     blank=<minutes, 0 = never, default 3>
+ *
+ * Standby: while locked and with no input for `blank` minutes the monitors are switched off (DPMS, backend.h set_power).
+ * The first input wakes them and is swallowed; unlocking wakes them too.
  *
  * Locking: Super+L, the "Lock now" button of the settings panel (`lock-now`), the idle `timeout` (no input for that many
  * minutes; env MELLAGUI_LOCK_UNIT_MS shrinks the minute for tests) and, with `start=1`, when MellaGUI starts.
@@ -64,12 +68,16 @@ bool lm_lock_configured(const struct lm_lock *l);   /* a password / PIN exists *
 const char *lm_lock_kind(const struct lm_lock *l);  /* "none" | "password" | "pin" */
 int lm_lock_timeout(const struct lm_lock *l);       /* minutes, 0 = never */
 bool lm_lock_start(const struct lm_lock *l);        /* lock when MellaGUI starts */
+int lm_lock_blank(const struct lm_lock *l);         /* minutes of quiet after which the locked screen's monitors go to standby, 0 = never */
 const char *lm_lock_status(const struct lm_lock *l);/* result of the last lm_lock_apply(): "" | ok | wrong | wait:<s> | weak | invalid | error */
 
 /* Locks the screen now; false (and nothing happens) when no secret is set. */
 bool lm_lock_now(struct lm_lock *l);
-/* Any input event happened (idle timer). */
-void lm_lock_activity(struct lm_lock *l);
+/*
+ * Any input event happened (idle timers). Returns true when the event only woke the monitors from standby: the seat then
+ * drops it (the first key press or click after a standby is not typing).
+ */
+bool lm_lock_activity(struct lm_lock *l);
 /*
  * A key was pressed while locked (seat.c): `mods` = LM_MOD_* (depressed | latched | locked), `group` = active layout.
  * Typing, Backspace, Escape (clears), Enter (tries the secret), Ctrl+Alt+Fn, Super+Space.
@@ -78,11 +86,11 @@ void lm_lock_key(struct lm_lock *l, uint32_t code, uint32_t mods, uint32_t group
 
 /*
  * Change the lock. `old`: the current secret (ignored while none is set); `kind`: "password", "pin", "keep" (only change
- * timeout / start) or "none" (remove the lock); `secret`: the new one (for password / pin); `minutes`, `start`: "" = keep,
- * else the new value. Returns true on success. The text result is lm_lock_status().
+ * timeout / start / blank) or "none" (remove the lock); `secret`: the new one (for password / pin); `minutes`, `start`,
+ * `blank`: "" = keep, else the new value (blank: minutes until the standby, 0 = never). Returns true on success. The text result is lm_lock_status().
  */
 bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const char *secret, const char *minutes,
-                   const char *start);
+                   const char *start, const char *blank);
 
 /* Fill what to paint on `out`. */
 void lm_lock_info(const struct lm_lock *l, struct lm_output *out, struct lm_lock_info *info);

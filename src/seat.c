@@ -1947,8 +1947,8 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
 {
     if (!seat || !ev || seat->dying)
         return;
-    if (seat->srv->lock)
-        lm_lock_activity(seat->srv->lock);
+    if (seat->srv->lock && lm_lock_activity(seat->srv->lock))
+        return;                         /* it only woke the monitors from standby */
     ensure_pointer_pos(seat);
     if (seat->locked) {
         handle_locked_input(seat, ev);

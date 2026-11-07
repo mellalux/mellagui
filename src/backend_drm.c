@@ -730,6 +730,13 @@ static int drm_present(struct lm_output *out, const struct lm_rect *damage, int 
         return -1;
     struct drm_buf *b = &o->buf[o->back];
     struct drm_buf *other = &o->buf[o->back ^ 1];
+    if (d->base.blanked) {                  /* standby: a flip on a CRTC that is off fails; show the picture once it is back */
+        struct lm_rect all = lm_rect_make(0, 0, out->width, out->height);
+        dirty_add(&b->dirty, all);
+        dirty_add(&other->dirty, all);
+        o->shadow_valid = true;
+        return 0;
+    }
     /* What changed in this frame is missing from both dumb buffers; the back one gets it now, the other (currently
      * on screen) is brought up to date by the next present. */
     struct lm_rect whole = lm_rect_make(0, 0, out->width, out->height);
@@ -813,6 +820,7 @@ static void vt_acquire(int signo, void *data)
         d->is_master = true;
     d->active = true;
     d->base.session_active = true;
+    d->base.blanked = false;                /* the modeset below lights the monitors up again */
     struct lm_output *lo;
     lm_list_for_each(lo, &d->base.outputs, link) {
         struct drm_out *o = (struct drm_out *)lo;
@@ -1193,6 +1201,45 @@ static int drm_apply_mode(struct lm_output *out)
     return 0;
 }
 
+/* The connector's DPMS property (0 on, 3 off); 0 when the driver has none. */
+static uint32_t conn_dpms_prop(int fd, uint32_t conn_id)
+{
+    uint32_t found = 0;
+    drmModeObjectProperties *props = drmModeObjectGetProperties(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props)
+        return 0;
+    for (uint32_t i = 0; i < props->count_props && !found; i++) {
+        drmModePropertyPtr p = drmModeGetProperty(fd, props->props[i]);
+        if (p && !strcmp(p->name, "DPMS"))
+            found = p->prop_id;
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+    return found;
+}
+
+static int drm_set_power(struct lm_backend *b, bool on)
+{
+    struct drm *d = (struct drm *)b;
+    if (!d->active || !d->is_master)
+        return -1;                          /* another VT owns the display now; it comes back through vt_acquire */
+    int rc = 0;
+    struct lm_output *lo;
+    lm_list_for_each(lo, &b->outputs, link) {
+        struct drm_out *o = (struct drm_out *)lo;
+        uint32_t prop = conn_dpms_prop(d->fd, o->conn_id);
+        if (!prop || drmModeConnectorSetProperty(d->fd, o->conn_id, prop, on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF) < 0) {
+            lm_warn("drm: cannot switch %s %s: %s", o->base.name, on ? "on" : "off", prop ? strerror(errno) : "no DPMS property");
+            rc = -1;
+        }
+        o->flip_pending = false;
+    }
+    if (on)
+        lm_timer_arm_ms(d->ready_timer, 1, 0);      /* the frame loop stood still while the picture was not shown */
+    lm_info("drm: monitors %s", on ? "on" : "in standby");
+    return rc;
+}
+
 static const struct lm_backend_ops drm_ops = {
     .name = "drm",
     .init = drm_init,
@@ -1202,6 +1249,7 @@ static const struct lm_backend_ops drm_ops = {
     .switch_vt = drm_switch_vt,
     .list_modes = drm_list_modes,
     .apply_mode = drm_apply_mode,
+    .set_power = drm_set_power,
 };
 
 struct lm_backend *lm_backend_drm_create(struct lm_server *srv)

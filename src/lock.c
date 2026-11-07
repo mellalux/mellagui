@@ -35,6 +35,8 @@
 #define BASE_DELAY_MS 5000u
 #define MAX_DELAY_MS 300000u
 #define MAX_TIMEOUT_MIN 1440
+#define MAX_BLANK_MIN 240
+#define DEFAULT_BLANK_MIN 3
 
 enum kind { KIND_NONE, KIND_PASSWORD, KIND_PIN };
 
@@ -46,8 +48,10 @@ struct lm_lock {
     uint8_t salt[SALT_LEN], hash[HASH_LEN];
     int timeout_min;
     bool lock_on_start;
+    int blank_min;                   /* monitors go to standby this long after the last input while locked, 0 = never */
     /* run time */
     bool locked;
+    bool blanked;                    /* we put the monitors in standby */
     char input[LM_LOCK_MAX_SECRET + 1];
     size_t len;                      /* bytes in input */
     int nchars;                      /* code points in input */
@@ -171,7 +175,7 @@ static bool load(struct lm_lock *l)
     uint32_t iter = 0;
     uint8_t salt[SALT_LEN], hash[HASH_LEN];
     bool have_salt = false, have_hash = false;
-    int timeout = 0;
+    int timeout = 0, blank = DEFAULT_BLANK_MIN;
     bool start = false;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -193,6 +197,8 @@ static bool load(struct lm_lock *l)
             timeout = atoi(val);
         else if (!strcmp(line, "start"))
             start = atoi(val) != 0;
+        else if (!strcmp(line, "blank"))
+            blank = atoi(val);
     }
     fclose(f);
     if (kind == KIND_NONE || !have_salt || !have_hash || iter < MIN_ITER || iter > MAX_ITER) {
@@ -205,6 +211,7 @@ static bool load(struct lm_lock *l)
     memcpy(l->hash, hash, HASH_LEN);
     l->timeout_min = timeout < 0 ? 0 : timeout > MAX_TIMEOUT_MIN ? MAX_TIMEOUT_MIN : timeout;
     l->lock_on_start = start;
+    l->blank_min = blank < 0 ? 0 : blank > MAX_BLANK_MIN ? MAX_BLANK_MIN : blank;
     return true;
 }
 
@@ -237,9 +244,9 @@ static bool save(const struct lm_lock *l)
     int n = snprintf(text, sizeof(text),
                      "# MellaGUI screen lock (written by the settings panel). Only a salted PBKDF2-HMAC-SHA256 hash is kept.\n"
                      "# Forgot the secret? Delete this file from another login (ssh / another VT) and restart MellaGUI.\n"
-                     "kind=%s\niter=%u\nsalt=%s\nhash=%s\ntimeout=%d\nstart=%d\n",
+                     "kind=%s\niter=%u\nsalt=%s\nhash=%s\ntimeout=%d\nstart=%d\nblank=%d\n",
                      l->kind == KIND_PIN ? "pin" : "password", (unsigned)l->iter, salt, hash, l->timeout_min,
-                     l->lock_on_start ? 1 : 0);
+                     l->lock_on_start ? 1 : 0, l->blank_min);
     bool ok = n > 0 && n < (int)sizeof(text) && write(fd, text, (size_t)n) == n;
     if (ok && fsync(fd) < 0)
         ok = false;
@@ -255,11 +262,25 @@ static bool save(const struct lm_lock *l)
 
 /* ---- locking / unlocking ---------------------------------------------------------------------------------------- */
 
+/* Monitors on / in standby (DPMS). `blanked` only says that it was us. */
+static void set_blank(struct lm_lock *l, bool blank)
+{
+    if (l->blanked == blank)
+        return;
+    l->blanked = blank;
+    if (l->srv->backend)
+        lm_backend_set_power(l->srv->backend, !blank);
+    if (!blank)
+        repaint(l);
+    lm_info("lock: monitors %s", blank ? "in standby" : "on");
+}
+
 static void lock_enter(struct lm_lock *l)
 {
     if (l->locked)
         return;
     l->locked = true;
+    l->last_activity = lm_now_ms();               /* the standby timeout counts from now */
     wipe_input(l);
     l->message[0] = 0;
     l->shown_clock[0] = 0;
@@ -278,6 +299,7 @@ static void lock_leave(struct lm_lock *l)
     if (!l->locked)
         return;
     l->locked = false;
+    set_blank(l, false);
     wipe_input(l);
     l->message[0] = 0;
     l->fails = 0;
@@ -308,12 +330,19 @@ const char *lm_lock_kind(const struct lm_lock *l)
 }
 int lm_lock_timeout(const struct lm_lock *l) { return l ? l->timeout_min : 0; }
 bool lm_lock_start(const struct lm_lock *l) { return l && l->lock_on_start; }
+int lm_lock_blank(const struct lm_lock *l) { return l ? l->blank_min : 0; }
 const char *lm_lock_status(const struct lm_lock *l) { return l ? l->status : ""; }
 
-void lm_lock_activity(struct lm_lock *l)
+bool lm_lock_activity(struct lm_lock *l)
 {
-    if (l && !l->locked)
-        l->last_activity = lm_now_ms();
+    if (!l)
+        return false;
+    l->last_activity = lm_now_ms();
+    if (l->locked && l->blanked) {                  /* the first input only wakes the monitors */
+        set_blank(l, false);
+        return true;
+    }
+    return false;
 }
 
 /* ---- the lock screen's keyboard ------------------------------------------------------------------------------- */
@@ -455,7 +484,7 @@ static bool valid_pin(const char *s)
 }
 
 bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const char *secret, const char *minutes,
-                   const char *start)
+                   const char *start, const char *blank)
 {
     if (!l)
         return false;
@@ -464,6 +493,7 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
     secret = secret ? secret : "";
     minutes = minutes ? minutes : "";
     start = start ? start : "";
+    blank = blank ? blank : "";
     bool ok = false;
     char st[24];
     struct lm_lock next;
@@ -498,6 +528,7 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
         next.kind = KIND_NONE;
         next.timeout_min = 0;
         next.lock_on_start = false;
+        next.blank_min = DEFAULT_BLANK_MIN;
     } else if (!strcmp(kind, "password") || !strcmp(kind, "pin")) {
         bool pin = !strcmp(kind, "pin");
         if (!(pin ? valid_pin(secret) : valid_password(secret))) {
@@ -532,8 +563,19 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
             }
             next.lock_on_start = start[0] == '1';
         }
+        if (*blank) {
+            char *end;
+            long m = strtol(blank, &end, 10);
+            if (*end || m < 0 || m > MAX_BLANK_MIN) {
+                set_status(l, "invalid");
+                goto done;
+            }
+            next.blank_min = (int)m;
+        }
     }
     if (new_secret) {
+        if (l->kind == KIND_NONE && !*blank)
+            next.blank_min = DEFAULT_BLANK_MIN;                   /* a fresh lock: monitors sleep 3 minutes after it locked */
         next.iter = iterations_for_new();
         if (getrandom(next.salt, SALT_LEN, 0) != SALT_LEN) {
             set_status(l, "error");
@@ -551,12 +593,14 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
     memcpy(l->hash, next.hash, HASH_LEN);
     l->timeout_min = next.timeout_min;
     l->lock_on_start = next.lock_on_start;
+    l->blank_min = next.blank_min;
     l->last_activity = lm_now_ms();
     set_status(l, "ok");
     ok = true;
     if (l->kind == KIND_NONE && l->locked)
         lock_leave(l);                                            /* no secret left: staying locked would be a lock-out */
-    lm_info("lock: now %s, timeout %d, lock at start %d", lm_lock_kind(l), l->timeout_min, l->lock_on_start ? 1 : 0);
+    lm_info("lock: now %s, timeout %d, lock at start %d, standby after %d", lm_lock_kind(l), l->timeout_min,
+            l->lock_on_start ? 1 : 0, l->blank_min);
 done:
     lm_secure_zero(&next, sizeof(next));
     update_timer(l);
@@ -586,6 +630,12 @@ static void tick_cb(void *data)
     if (!l->locked) {
         if (l->timeout_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->timeout_min * unit_ms())
             lock_enter(l);
+        return;
+    }
+    if (l->blanked)
+        return;                                                   /* nobody is looking: no clock, no countdown */
+    if (l->blank_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->blank_min * unit_ms()) {
+        set_blank(l, true);
         return;
     }
     char clock[8], date[24];
@@ -626,8 +676,9 @@ void lm_lock_describe(const struct lm_lock *l, char *out, size_t n)
         snprintf(out, n, "kind=none");
         return;
     }
-    snprintf(out, n, "kind=%s locked=%d timeout=%d start=%d typed=%d fails=%d wait=%d status=%s message=%s",
-             lm_lock_kind(l), l->locked ? 1 : 0, l->timeout_min, l->lock_on_start ? 1 : 0, l->nchars, l->fails,
+    snprintf(out, n, "kind=%s locked=%d timeout=%d start=%d blank=%d blanked=%d typed=%d fails=%d wait=%d status=%s message=%s",
+             lm_lock_kind(l), l->locked ? 1 : 0, l->timeout_min, l->lock_on_start ? 1 : 0, l->blank_min, l->blanked ? 1 : 0,
+             l->nchars, l->fails,
              wait_seconds(l), l->status[0] ? l->status : "-", l->message[0] ? l->message : "-");
 }
 
@@ -641,6 +692,7 @@ struct lm_lock *lm_lock_create(struct lm_server *srv)
     l->srv = srv;
     l->last_activity = lm_now_ms();
     l->shown_wait = -1;
+    l->blank_min = DEFAULT_BLANK_MIN;                             /* what a new lock starts with (the panel shows it) */
     load(l);
     l->tick = lm_loop_add_timer(srv->loop, tick_cb, l);
     update_timer(l);
@@ -655,6 +707,8 @@ void lm_lock_destroy(struct lm_lock *l)
         return;
     if (l->tick)
         lm_timer_destroy(l->tick);
+    if (l->blanked && l->srv->backend)
+        lm_backend_set_power(l->srv->backend, true);
     lm_secure_zero(l, sizeof(*l));
     free(l);
 }

@@ -2520,21 +2520,21 @@ esac
         type_text('hunter22x')
         ctl.click(x0 + 300, y0 + 141)                           # Repeat: a different text is caught in the panel
         type_text('hunter22y')
-        ctl.click(x0 + 204, y0 + 231)                            # Apply
+        ctl.click(x0 + 204, y0 + 259)                            # Apply
         time.sleep(0.2)
         self.assertEqual(lock_kind(), 'kind=none')
         ctl.click(x0 + 300, y0 + 141)
         for _ in range(9):
             ctl.tap(14)                                         # Backspace
         type_text('hunter22x')
-        ctl.click(x0 + 204, y0 + 231)
+        ctl.click(x0 + 204, y0 + 259)
         time.sleep(0.3)
         self.assertEqual(lock_kind(), 'kind=password')
         self.assertEqual(settings()['lock-kind'], 'password')
         # remove it again through the panel: the page now has a "Current password" field on top and a Remove button
         ctl.click(x0 + 300, y0 + 83)                            # Current password
         type_text('hunter22x')
-        ctl.click(x0 + 445, y0 + 261)                           # Remove lock
+        ctl.click(x0 + 445, y0 + 289)                           # Remove lock
         time.sleep(0.3)
         self.assertEqual(lock_kind(), 'kind=none')
 
@@ -3674,6 +3674,49 @@ class TestLock(Base):
         self.assertEqual((st['kind'], st['locked'], st['start'], st['timeout']), ('pin', '1', '1', '1'))
         self.type(c2, '1357')
         self.assertEqual(self.state(c2)['locked'], '0')
+
+    def test_monitors_go_to_standby_while_locked_and_wake_on_input(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 1357 0 0 2')                                 # standby after 2 "minutes" (2 s here)
+        self.assertEqual(self.state(c)['blank'], '2')
+        c.cmd('power')
+        self.assertEqual(c.last, 'ok on')
+        time.sleep(2.5)
+        c.cmd('power')
+        self.assertEqual(c.last, 'ok on', 'monitors went to standby while the screen was not locked')
+        c.cmd('lock now')
+        deadline = time.time() + 6
+        while time.time() < deadline and self.state(c)['blanked'] != '1':
+            time.sleep(0.2)
+        self.assertEqual(self.state(c)['blanked'], '1', 'no standby after the timeout')
+        c.cmd('power')
+        self.assertEqual(c.last, 'ok standby')
+        # the first key only wakes the monitors: it is not typed into the PIN
+        c.tap(self.CODES['1'])
+        c.sync()
+        st = self.state(c)
+        self.assertEqual((st['blanked'], st['typed'], st['locked']), ('0', '0', '1'))
+        c.cmd('power')
+        self.assertEqual(c.last, 'ok on')
+        self.type(c, '1357')
+        self.assertEqual(self.state(c)['locked'], '0')
+        # standby again, and unlocking from standby is not possible without waking first; unlock wakes in any case
+        c.cmd('lock now')
+        deadline = time.time() + 6
+        while time.time() < deadline and self.state(c)['blanked'] != '1':
+            time.sleep(0.2)
+        c.tap(KEY_A)                                                       # wake
+        self.type(c, '1357')
+        st = self.state(c)
+        self.assertEqual((st['locked'], st['blanked']), ('0', '0'))
+
+    def test_standby_can_be_off(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 1357 0 0 0')
+        c.cmd('lock now')
+        time.sleep(3.5)
+        self.assertEqual(self.state(c)['blanked'], '0')
+        self.assertEqual(self.state(c)['blank'], '0')
 
     def test_settings_protocol_lock_set(self):
         p, c, stop = self.start()

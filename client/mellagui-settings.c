@@ -4,7 +4,8 @@
  *   Keyboard   layouts (enable, order, active), sticky keys, key repeat delay / rate, a field to try the keyboard
  *   Pointer    pointer speed, natural scrolling
  *   Desktop    clipboard gadget, sound feedback
- *   Security   screen lock: password or PIN, lock after idle minutes, lock at start, "Lock now" (src/lock.h)
+ *   Security   screen lock: password or PIN, lock after idle minutes, monitor standby while locked, lock at start,
+ *              "Lock now" (src/lock.h)
  *
  * Mouse: click checkboxes / radio buttons / buttons, drag the sliders. Keyboard: Tab / Shift+Tab move the focus,
  * Enter or Space activates, Left/Right change a slider, Esc closes. Every change is sent to the compositor at once,
@@ -180,10 +181,11 @@ static const char *lock_status_text(const char *st, char *buf, size_t n)
     return "";
 }
 
-/* The `lock-set` value: "current<TAB>kind<TAB>new<TAB>minutes<TAB>start". kind is keep when no new secret is typed. */
-static void lock_set_value(char *out, size_t n, const char *cur, const char *kind, const char *fresh, int minutes, bool start)
+/* The `lock-set` value: "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank". kind is keep when no new secret is typed. */
+static void lock_set_value(char *out, size_t n, const char *cur, const char *kind, const char *fresh, int minutes, bool start,
+                           int blank)
 {
-    snprintf(out, n, "%s\t%s\t%s\t%d\t%d", cur, kind, fresh, minutes, start ? 1 : 0);
+    snprintf(out, n, "%s\t%s\t%s\t%d\t%d\t%d", cur, kind, fresh, minutes, start ? 1 : 0, blank);
 }
 
 /* Appends one typed character / removes the last one in a UTF-8 buffer of `cap` bytes. */
@@ -275,10 +277,10 @@ static int selftest(void)
         CHECK(!strcmp(lock_status_text("ok", b, sizeof(b)), "Saved."));
         CHECK(strstr(lock_status_text("wait:25", b, sizeof(b)), "25 s"));
         CHECK(*lock_status_text("", b, sizeof(b)) == 0 && *lock_status_text("weird", b, sizeof(b)) == 0);
-        lock_set_value(v, sizeof(v), "old", "password", "new pass", 10, true);
-        CHECK(!strcmp(v, "old\tpassword\tnew pass\t10\t1"));
-        lock_set_value(v, sizeof(v), "", "keep", "", 0, false);
-        CHECK(!strcmp(v, "\tkeep\t\t0\t0"));
+        lock_set_value(v, sizeof(v), "old", "password", "new pass", 10, true, 3);
+        CHECK(!strcmp(v, "old\tpassword\tnew pass\t10\t1\t3"));
+        lock_set_value(v, sizeof(v), "", "keep", "", 0, false, 0);
+        CHECK(!strcmp(v, "\tkeep\t\t0\t0\t0"));
         edit_text(t, sizeof(t), 'a', true);
         edit_text(t, sizeof(t), 0xf5, true);                 /* o with tilde: two bytes */
         CHECK(utf8_count(t) == 2 && strlen(t) == 3);
@@ -351,6 +353,7 @@ struct app {
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
     int sec_minutes;                    /* idle minutes (0 = never) */
+    int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
     char sec_err[64];                   /* a mistake found before sending */
 };
@@ -527,6 +530,9 @@ static void build_security(struct app *a, int x, int y, int w)
     y += ROW_H + 4;
     add_slider(a, x, y, w, "Lock after idle", "sec-minutes", 0, 120, 1, " min");
     a->wd[a->nw - 1].val = a->sec_minutes;
+    y += ROW_H;
+    add_slider(a, x, y, w, "Screen off after", "sec-blank", 0, 60, 1, " min");
+    a->wd[a->nw - 1].val = a->sec_blank;
     y += ROW_H;
     add_check(a, x, y, w, "Lock when MellaGUI starts", "sec-start", a->sec_start);
     y += ROW_H + 4;
@@ -752,6 +758,9 @@ static void slider_set(struct app *a, const struct widget *w, int v)
     if (!strcmp(w->key, "sec-minutes")) {
         a->sec_minutes = v;
         a->win.redraw = true;
+    } else if (!strcmp(w->key, "sec-blank")) {
+        a->sec_blank = v;
+        a->win.redraw = true;
     } else {
         send_set_int(a, w->key, v);
     }
@@ -806,7 +815,8 @@ static void sec_send(struct app *a, bool remove)
         snprintf(a->sec_err, sizeof(a->sec_err), "Type the new password / PIN first.");
     } else {
         const char *kind = remove ? "none" : a->pw[1][0] ? (a->sec_pin ? "pin" : "password") : "keep";
-        lock_set_value(v, sizeof(v), have ? a->pw[0] : "", kind, remove ? "" : a->pw[1], a->sec_minutes, a->sec_start);
+        lock_set_value(v, sizeof(v), have ? a->pw[0] : "", kind, remove ? "" : a->pw[1], a->sec_minutes, a->sec_start,
+                       a->sec_blank);
         send_set(a, "lock-set", v);
         memset(v, 0, sizeof(v));
         memset(a->pw, 0, sizeof(a->pw));
@@ -829,6 +839,7 @@ static void activate(struct app *a, int idx)
         if (a->page == PAGE_SECURITY) {
             sec_wipe(a);
             a->sec_minutes = kv_int(a, "lock-timeout", 0);
+            a->sec_blank = kv_int(a, "lock-blank", 3);
             a->sec_start = kv_int(a, "lock-start", 0) != 0;
         }
         break;
@@ -1034,6 +1045,8 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         kv_set(a, args[0].s, args[1].s);
         if (changed && !strcmp(args[0].s, "lock-timeout"))
             a->sec_minutes = atoi(args[1].s);
+        else if (changed && !strcmp(args[0].s, "lock-blank"))
+            a->sec_blank = atoi(args[1].s);
         else if (changed && !strcmp(args[0].s, "lock-start"))
             a->sec_start = atoi(args[1].s) != 0;
     } else if (op == LM_MELLAGUI_SETTINGS_V1_EVT_DONE) {

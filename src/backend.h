@@ -148,6 +148,12 @@ struct lm_backend_ops {
      * has been called. -1 = refused/impossible (the old mode stays). NULL = unsupported.
      */
     int (*apply_mode)(struct lm_output *out);
+    /*
+     * Monitors on (true) / in standby (false, DPMS off: the monitor loses its signal and sleeps). While off present() keeps
+     * the picture up to date in memory but shows nothing and sends no output_ready; turning on again shows the current
+     * picture and resumes output_ready. Sets b->blanked. NULL = unsupported. Returns 0 or -1.
+     */
+    int (*set_power)(struct lm_backend *b, bool on);
 };
 
 struct lm_backend {
@@ -156,6 +162,7 @@ struct lm_backend {
     struct lm_backend_listener listener;
     struct lm_list outputs;         /* struct lm_output.link */
     bool session_active;
+    bool blanked;                   /* set_power(false) is in effect */
     void *priv;
 };
 
@@ -185,6 +192,15 @@ static inline int lm_output_present(struct lm_output *o, const struct lm_rect *d
 static inline int lm_backend_switch_vt(struct lm_backend *b, int vt)
 {
     return b->ops->switch_vt ? b->ops->switch_vt(b, vt) : -1;
+}
+static inline int lm_backend_set_power(struct lm_backend *b, bool on)
+{
+    if (!b->ops->set_power)
+        return -1;
+    int rc = b->ops->set_power(b, on);
+    if (rc == 0)
+        b->blanked = !on;
+    return rc;
 }
 static inline int lm_output_list_modes(struct lm_output *o, struct lm_mode_info *m, int max)
 {

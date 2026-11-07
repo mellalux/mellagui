@@ -53,6 +53,9 @@ static const char *usage_text =
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/clipboard-history, headless: none)\n"
     "  --gadgets-file FILE      where the places and sizes of the desktop gadgets are kept between runs; \"none\" = nowhere\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/gadgets.conf, headless: none)\n"
+    "  --settings-access any|own  who may read and change the settings through the private mellagui_settings_v1 interface: \"own\" =\n"
+    "                           only MellaGUI's own programs (mellagui-settings ... next to the compositor binary), \"any\" = every client\n"
+    "                           of the session (default: own on drm, any on headless, which the tests need)\n"
     "  --lock-file FILE         where the screen lock keeps its salted password / PIN hash (mode 0600); \"none\" = in memory only\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/lock.conf, headless: none)\n"
     "  --layouts LIST           keyboard layouts to switch between, e.g. us,ee,de (default: us,ee,de,fi; first is active;\n"
@@ -230,7 +233,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     bool terminal_set = false, run_set = false;
@@ -251,6 +254,7 @@ int main(int argc, char **argv)
         { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
         { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
         { "lock-file", required_argument, 0, OPT_LOCK_FILE },
+        { "settings-access", required_argument, 0, OPT_SETTINGS_ACCESS },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
@@ -379,6 +383,11 @@ int main(int argc, char **argv)
         case OPT_SETTINGS: break;           /* handled above */
         case OPT_CLIPBOARD_FILE: cfg.clip_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_GADGETS_FILE: cfg.gadgets_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_SETTINGS_ACCESS:
+            if (!strcmp(optarg, "any")) cfg.settings_access = 1;
+            else if (!strcmp(optarg, "own")) cfg.settings_access = 0;
+            else { fprintf(stderr, "mellagui: --settings-access wants any or own, not '%s'\n", optarg); return 2; }
+            break;
         case OPT_LOCK_FILE: cfg.lock_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;

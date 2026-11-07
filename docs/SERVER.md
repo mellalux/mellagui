@@ -16,6 +16,9 @@ closes the ways *around* the lock.
 | a reboot starts the session open | same: the service starts MellaGUI, and `lock.conf` makes it start locked |
 | Ctrl+Alt+F1..F12 to another console | another console has its own login, so this is only a way around if one is logged in. *Settings → Security → "Console switch works while locked"* turns it off (`vt=0` in `lock.conf`). Keep an ssh way in: with it off, a forgotten secret can only be fixed over ssh |
 | guessing | PBKDF2-HMAC-SHA256, 200000 rounds; three wrong tries start a delay that doubles from 5 s to 5 min (also for changing the lock in the settings) |
+| another user's program connecting to the compositor | the Wayland socket is created 0600 and the compositor refuses any client whose uid is not its own (or root), on top of the 0700 runtime directory |
+| a browser or editor in the session changing the settings | on the drm backend only MellaGUI's own programs (`mellagui-*` next to the compositor binary) get the settings; others bind an inert object (`--settings-access own`, the default there). This keeps confused programs out; it is not a wall against code that already runs as the same user |
+| a program spamming wrong secrets through the settings to keep the lock screen waiting | changing the lock has its own attempt counter, and is refused altogether while the screen is locked |
 | a monitor that stays lit | *Screen off after* (default 3 minutes locked) puts the monitors in standby; the first key only wakes them |
 
 ## Running as a service

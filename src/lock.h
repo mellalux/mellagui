@@ -27,8 +27,9 @@
  * Locking: Super+L, the "Lock now" button of the settings panel (`lock-now`), the idle `timeout` (no input for that many
  * minutes; env MELLAGUI_LOCK_UNIT_MS shrinks the minute for tests) and, with `start=1`, when MellaGUI starts.
  *
- * Changing the lock (settings key `lock-set`, control socket `lock set`) needs the current secret as soon as one exists,
- * and counts wrong ones like wrong attempts on the lock screen. There is no way to recover a forgotten secret from inside the
+ * Changing the lock (settings key `lock-set`, control socket `lock set`) needs the current secret as soon as one exists and is
+ * refused while the screen is locked (status "locked"). Wrong secrets there start the same doubling delay, but with a counter of
+ * their own: a program that spams the settings must not be able to keep the lock screen's delay running. There is no way to recover a forgotten secret from inside the
  * session: delete lock.conf from another login (ssh, another VT).
  */
 
@@ -71,7 +72,7 @@ int lm_lock_timeout(const struct lm_lock *l);       /* minutes, 0 = never */
 bool lm_lock_start(const struct lm_lock *l);        /* lock when MellaGUI starts */
 bool lm_lock_vt(const struct lm_lock *l);           /* Ctrl+Alt+F1..F12 works on the lock screen */
 int lm_lock_blank(const struct lm_lock *l);         /* minutes of quiet after which the locked screen's monitors go to standby, 0 = never */
-const char *lm_lock_status(const struct lm_lock *l);/* result of the last lm_lock_apply(): "" | ok | wrong | wait:<s> | weak | invalid | error */
+const char *lm_lock_status(const struct lm_lock *l);/* result of the last lm_lock_apply(): "" | ok | wrong | wait:<s> | weak | invalid | locked | error */
 
 /* Locks the screen now; false (and nothing happens) when no secret is set. */
 bool lm_lock_now(struct lm_lock *l);

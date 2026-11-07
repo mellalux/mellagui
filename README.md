@@ -107,6 +107,8 @@ switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
 * With a lock set, Super+Shift+E and the panel's *Exit* lock the screen and quit only after the secret was typed (Esc on an empty
   field cancels). *Lock when MellaGUI starts* is on by default, and "Console switch works while locked" can be turned off.
   For a server run MellaGUI as a service so there is no shell behind it: see [docs/SERVER.md](docs/SERVER.md) and `contrib/mellagui.service`.
+* Who may connect: the Wayland socket is 0600 and the compositor refuses clients of other users. On a real display only MellaGUI's own
+  programs may use the settings interface (`--settings-access any` opens it to every client).
 * A forgotten secret cannot be reset from inside the session: log in another way (ssh, another console), delete `lock.conf` and restart MellaGUI.
 * What it does not do: it does not protect against someone who can log in as you on another console or over ssh, and a program running as
   your user can read `lock.conf` and guess a short PIN offline. It is a screen lock against someone at the keyboard.

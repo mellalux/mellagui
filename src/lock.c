@@ -59,6 +59,10 @@ struct lm_lock {
     int nchars;                      /* code points in input */
     int fails;                       /* consecutive wrong secrets (lock screen and lm_lock_apply together) */
     uint64_t blocked_until;          /* lm_now_ms(): no attempts before this */
+    /* The same for changing the lock through the settings (lm_lock_apply). A separate counter: a program that spams wrong
+     * secrets there must not be able to keep the lock screen's own delay running (a denial of service on unlocking). */
+    int set_fails;
+    uint64_t set_blocked_until;
     char message[64];
     char status[24];
     uint64_t last_activity;
@@ -115,6 +119,20 @@ static bool verify(const struct lm_lock *l, const char *secret, size_t len)
     bool ok = lm_ct_equal(h, l->hash, HASH_LEN);
     lm_secure_zero(h, sizeof(h));
     return ok;
+}
+
+static int set_wait_seconds(const struct lm_lock *l)
+{
+    uint64_t now = lm_now_ms();
+    return l->set_blocked_until > now ? (int)((l->set_blocked_until - now + 999) / 1000) : 0;
+}
+
+static void note_set_failure(struct lm_lock *l)
+{
+    if (l->set_fails < 1000)
+        l->set_fails++;
+    uint32_t d = delay_for(l->set_fails);
+    l->set_blocked_until = d ? lm_now_ms() + d : 0;
 }
 
 static void note_failure(struct lm_lock *l)
@@ -528,26 +546,30 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
     struct lm_lock next;
     memset(&next, 0, sizeof(next));
 
+    if (l->locked) {                                              /* nobody changes the lock behind a locked screen */
+        set_status(l, "locked");
+        goto done;
+    }
     if (l->kind != KIND_NONE) {                                   /* changing an existing lock needs the secret */
-        int wait = wait_seconds(l);
+        int wait = set_wait_seconds(l);
         if (wait > 0) {
             snprintf(st, sizeof(st), "wait:%d", wait);
             set_status(l, st);
             goto done;
         }
         if (!verify(l, old, strlen(old))) {
-            note_failure(l);
-            int w = wait_seconds(l);
+            note_set_failure(l);
+            int w = set_wait_seconds(l);
             if (w > 0)
                 snprintf(st, sizeof(st), "wait:%d", w);
             else
                 snprintf(st, sizeof(st), "wrong");
             set_status(l, st);
-            lm_warn("lock: wrong current secret in a settings change (%d in a row)", l->fails);
+            lm_warn("lock: wrong current secret in a settings change (%d in a row)", l->set_fails);
             goto done;
         }
-        l->fails = 0;
-        l->blocked_until = 0;
+        l->set_fails = 0;
+        l->set_blocked_until = 0;
     }
 
     next = *l;
@@ -635,8 +657,6 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
     l->last_activity = lm_now_ms();
     set_status(l, "ok");
     ok = true;
-    if (l->kind == KIND_NONE && l->locked)
-        lock_leave(l);                                            /* no secret left: staying locked would be a lock-out */
     lm_info("lock: now %s, timeout %d, lock at start %d, standby after %d, console switch %d", lm_lock_kind(l),
             l->timeout_min, l->lock_on_start ? 1 : 0, l->blank_min, l->vt_switch ? 1 : 0);
 done:

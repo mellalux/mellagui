@@ -151,6 +151,8 @@ struct lm_config {
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
     const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
+    int settings_access;        /* who may use mellagui_settings_v1: 1 = any client of the session, 0 = only MellaGUI's own programs
+                                 * (an executable called mellagui-* in the compositor's directory), -1 (default) = 0 on drm, 1 on headless */
     const char *lock_path;      /* file the screen lock's password / PIN hash is kept in (--lock-file); NULL = in memory only */
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "MellaGUI" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
@@ -187,6 +189,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .terminal_cmd = "mellagui-term",
         .settings_cmd = "mellagui-settings",
         .kbd_active = -1,
+        .settings_access = -1,
         .log_level = 2, /* LM_LOG_INFO */
         .repeat_delay_ms = 400,
         .repeat_rate = 25,

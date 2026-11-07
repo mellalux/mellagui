@@ -3733,9 +3733,13 @@ class TestLock(Base):
         ctrl_alt_f(2)
         c.cmd('vt')
         self.assertEqual(c.last, 'ok 2')
+        with self.assertRaises(RuntimeError):                              # the lock cannot be changed behind a locked screen
+            c.cmd('lock set 1357 keep - - - - 0')
+        self.assertEqual(self.state(c)['status'], 'locked')
+        self.type(c, '1357')
         c.cmd('lock set 1357 keep - - - - 0')                              # vt = 0
         self.assertEqual(self.state(c)['vt'], '0')
-        c.cmd('lock now') if self.state(c)['locked'] == '0' else None
+        c.cmd('lock now')
         ctrl_alt_f(5)
         c.cmd('vt')
         self.assertEqual(c.last, 'ok 2', 'the console switched although it is turned off on the lock screen')
@@ -3779,6 +3783,18 @@ class TestLock(Base):
             pass
         self.assertEqual(p.wait(timeout=5), 0)
 
+    def test_spamming_lock_set_does_not_block_the_lock_screen(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 1357')
+        for _ in range(5):                                                 # a program guessing through the settings
+            with self.assertRaises(RuntimeError):
+                c.cmd('lock set 0000 none -')
+        st = self.state(c)
+        self.assertEqual(st['fails'], '0')                                 # the lock screen's own counter is untouched
+        c.cmd('lock now')
+        self.type(c, '1357')
+        self.assertEqual(self.state(c)['locked'], '0', 'settings spam delayed the lock screen')
+
     def test_settings_protocol_lock_set(self):
         p, c, stop = self.start()
         cl = Client(os.path.join(tmp, 'lock'))
@@ -3809,9 +3825,50 @@ class TestLock(Base):
         self.assertEqual(burst()['lock-status'], 'wrong')
         cl.wl.request(obj, 'set', 'lock-now', '1')
         self.assertEqual(burst()['locked'], '1')
-        cl.wl.request(obj, 'set', 'lock-set', 'hunter22x\tnone\t\t\t')      # the settings cannot be used to open the lock...
-        got = burst()                                                       # ... but whoever knows the secret may remove the lock,
-        self.assertEqual((got['lock-kind'], got['locked']), ('none', '0'))  # and a lock without a secret cannot stay locked
+        cl.wl.request(obj, 'set', 'lock-set', 'hunter22x\tnone\t\t\t')      # the settings cannot be used to open the lock,
+        got = burst()                                                       # not even with the right secret: no changes behind a locked screen
+        self.assertEqual((got['lock-kind'], got['locked'], got['lock-status']), ('password', '1', 'locked'))
+
+
+class TestAccess(Base):
+    """Who may talk to the compositor: the socket is 0600, and with --settings-access own only MellaGUI's programs get the settings."""
+
+    def test_socket_is_private(self):
+        mode = os.stat(os.path.join(tmp, 'mellagui-test')).st_mode & 0o777
+        self.assertEqual(oct(mode), '0o600')
+
+    def test_settings_stay_closed_to_other_programs(self):
+        panel = os.path.join(os.path.dirname(BIN), 'mellagui-settings')
+        p, c, stop = self.private_compositor('own', '--settings-access', 'own')
+        # a program that is not one of ours (this raw client) binds the interface and gets nothing
+        cl = Client(os.path.join(tmp, 'own'))
+        self.clients.append(cl)
+        obj = cl.wl.bind('mellagui_settings_v1')
+        cl.wl.roundtrip()
+        cl.wl.pump(0.3)
+        self.assertEqual([e.name for e in cl.wl.queue if e.obj == obj], [], 'the settings answered a foreign program')
+        cl.wl.request(obj, 'set', 'sound', '0')                             # and its requests do nothing
+        cl.wl.roundtrip()
+        c.cmd('settings')
+        self.assertIn('sound=1', c.last)
+        self.assertIsNone(cl.wl.error)
+        # MellaGUI's own panel (an executable called mellagui-* next to the compositor) works
+        if os.path.exists(panel):
+            env = dict(os.environ, WAYLAND_DISPLAY='own')
+            r = subprocess.run([panel, '--get', 'sound'], capture_output=True, text=True, timeout=10, env=env)
+            self.assertEqual(r.stdout.strip(), 'sound=1', r.stderr)
+
+    def test_settings_are_open_by_default_on_headless(self):
+        p, c, stop = self.private_compositor('open')
+        cl = Client(os.path.join(tmp, 'open'))
+        self.clients.append(cl)
+        obj = cl.wl.bind('mellagui_settings_v1')
+        cl.wl.roundtrip()
+        self.assertTrue(cl.wl.wait_for(lambda e: e.obj == obj and e.name == 'done', 2.0))
+
+    def test_bad_settings_access_value(self):
+        r = subprocess.run([BIN, '--backend', 'headless', '--settings-access', 'everyone'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 2)
 
 
 class TestFuzz(Base):

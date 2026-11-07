@@ -54,8 +54,11 @@
  * are announced the same way through lm_settings_changed().
  *
  * File: <--settings path>, written (atomically, ~0.3 s after the last change) after every `set`. It is read
- * before the command line is parsed, so command-line options win for that run. There is no authentication:
- * like everything else on the socket, any client of the user's session may change the settings.
+ * before the command line is parsed, so command-line options win for that run. Access: the socket is 0600 and only the
+ * compositor's own user (and root) may connect; on the drm backend only MellaGUI's own programs (executables called
+ * mellagui-* in the compositor's directory) get the settings, any other client binds an inert object (config.settings_access,
+ * `--settings-access any|own`; the headless backend allows everyone, the tests need it). The lock is the exception to "any
+ * client may change it": `lock-set` needs the current secret.
  */
 
 #include <stdbool.h>

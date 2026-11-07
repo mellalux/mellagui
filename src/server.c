@@ -881,6 +881,12 @@ static struct lm_client *client_create(struct lm_server *srv, int fd)
         c->uid = cred.uid;
         c->gid = cred.gid;
     }
+    /* Only the user the compositor runs as (and root) may be a client: the socket is 0600 and normally lives in a 0700 directory,
+     * this is the second lock. A client whose credentials cannot be read is refused too. */
+    if (c->uid != geteuid() && c->uid != 0) {
+        lm_warn("client refused: pid %d uid %d is not the compositor's user", (int)c->pid, (int)c->uid);
+        goto fail_wire;
+    }
 
     c->source = lm_loop_add_fd(srv->loop, fd, EPOLLIN, client_event, c);
     if (!c->source)
@@ -1043,7 +1049,10 @@ static int try_socket(struct lm_server *srv, const char *path, int *out_lock, in
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strcpy(addr.sun_path, path);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    mode_t old_umask = umask(0177);                   /* the socket is created 0600: only this user may connect */
+    int bound = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    umask(old_umask);
+    if (bound < 0) {
         lm_error("bind %s: %s", path, strerror(errno));
         goto fail_fd;
     }

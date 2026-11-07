@@ -2,6 +2,7 @@
  * User settings: mellagui_settings_v1 global + the settings file. See settings.h for the contract.
  */
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -752,6 +753,38 @@ static void binding_destroy(struct lm_resource *res)
     free(b);
 }
 
+/*
+ * Is this client one of MellaGUI's own programs? Its executable is called mellagui-* and sits in the directory of the
+ * compositor's own executable (readlink on /proc). This keeps a browser or an editor in the session away from the settings;
+ * it is not a boundary against code that already runs as this user (that code can copy a binary, or do worse).
+ */
+static bool client_is_own(const struct lm_client *c)
+{
+    char path[64], exe[PATH_MAX], self[PATH_MAX];
+    if (c->pid <= 0)
+        return false;
+    snprintf(path, sizeof(path), "/proc/%d/exe", (int)c->pid);
+    ssize_t n = readlink(path, exe, sizeof(exe) - 1);
+    ssize_t m = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0 || m <= 0)
+        return false;
+    exe[n] = 0;
+    self[m] = 0;
+    char *eslash = strrchr(exe, '/'), *sslash = strrchr(self, '/');
+    if (!eslash || !sslash)
+        return false;
+    return eslash - exe == sslash - self && !strncmp(exe, self, (size_t)(eslash - exe)) &&
+           !strncmp(eslash + 1, "mellagui-", 9);
+}
+
+static bool access_allowed(const struct lm_settings *s, const struct lm_client *c)
+{
+    int mode = s->srv->config.settings_access;
+    if (mode < 0)
+        mode = !strcmp(s->srv->config.backend, "headless") ? 1 : 0;
+    return mode == 1 || client_is_own(c);
+}
+
 static void settings_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)
 {
     struct lm_settings *s = data;
@@ -764,6 +797,12 @@ static void settings_bind(struct lm_client *client, void *data, uint32_t version
     b->res = lm_resource_create(client, id, &lm_mellagui_settings_v1_interface, version, handlers, b, binding_destroy);
     if (!b->res) {
         free(b);
+        return;
+    }
+    if (!access_allowed(s, client)) {                               /* bound, but inert: no values, requests are ignored */
+        lm_warn("settings: client pid %d is not one of MellaGUI's programs, the settings stay closed to it", (int)client->pid);
+        b->s = NULL;
+        lm_list_init(&b->link);                                     /* binding_destroy() unlinks it */
         return;
     }
     lm_list_append(&s->bindings, &b->link);

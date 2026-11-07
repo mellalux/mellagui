@@ -67,7 +67,6 @@ void lm_timer_destroy(struct lm_timer *t);
  */
 struct lm_idle *lm_loop_add_idle(struct lm_loop *loop, lm_idle_fn fn, void *data);
 void lm_idle_schedule(struct lm_idle *idle);
-void lm_idle_cancel(struct lm_idle *idle);
 void lm_idle_destroy(struct lm_idle *idle);
 
 /* ---- signals (signalfd) ---------------------------------------------------- */

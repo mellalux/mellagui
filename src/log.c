@@ -13,12 +13,8 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Not in log.h (see header_requests): lets main.c honour config.log_to_stderr. */
-void lm_log_set_stderr(bool enable);
-
 static enum lm_log_level g_level = LM_LOG_INFO;
 static int g_file_fd = -1;
-static bool g_stderr = true;
 static int g_color = -1; /* -1 = not probed yet */
 
 int lm_log_level_from_string(const char *s)
@@ -54,11 +50,6 @@ void lm_log_set_level(enum lm_log_level level)
 enum lm_log_level lm_log_get_level(void)
 {
     return g_level;
-}
-
-void lm_log_set_stderr(bool enable)
-{
-    g_stderr = enable;
 }
 
 int lm_log_set_file(const char *path)
@@ -139,20 +130,18 @@ void lm_log_vwrite(enum lm_log_level level, const char *file, int line,
 
     if (g_file_fd >= 0)
         write_all(g_file_fd, out, (size_t)len);
-    if (g_stderr) {
-        if (g_color) {
-            char cbuf[2048 + 32];
-            int clen = snprintf(cbuf, sizeof(cbuf), "%s%.*s\033[0m", colors[level],
-                                len - 1, out);
-            if (clen > 0 && (size_t)clen < sizeof(cbuf) - 1) {
-                cbuf[clen++] = '\n';
-                write_all(STDERR_FILENO, cbuf, (size_t)clen);
-            } else {
-                write_all(STDERR_FILENO, out, (size_t)len);
-            }
+    if (g_color) {
+        char cbuf[2048 + 32];
+        int clen = snprintf(cbuf, sizeof(cbuf), "%s%.*s\033[0m", colors[level],
+                            len - 1, out);
+        if (clen > 0 && (size_t)clen < sizeof(cbuf) - 1) {
+            cbuf[clen++] = '\n';
+            write_all(STDERR_FILENO, cbuf, (size_t)clen);
         } else {
             write_all(STDERR_FILENO, out, (size_t)len);
         }
+    } else {
+        write_all(STDERR_FILENO, out, (size_t)len);
     }
 out:
     errno = saved_errno;

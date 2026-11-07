@@ -221,7 +221,6 @@ bool lm_wm_surface_origin(struct lm_wm *wm, struct lm_surface *s, int32_t *x, in
 /* Output area minus the panel for the output containing/nearest (gx, gy). */
 void lm_wm_usable_area(struct lm_wm *wm, int32_t gx, int32_t gy, struct lm_rect *out);
 struct lm_window *lm_wm_focused_window(const struct lm_wm *wm);
-int lm_wm_current_workspace(const struct lm_wm *wm);
 void lm_wm_switch_workspace(struct lm_wm *wm, int ws);
 void lm_wm_focus_window(struct lm_wm *wm, struct lm_window *w); /* raises, switches workspace if needed */
 
@@ -304,7 +303,6 @@ bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out);
 /* The same for the clipboard gadget (the original single-gadget API). */
 bool lm_wm_gadget_visible(const struct lm_wm *wm);
 void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
-bool lm_wm_gadget_rect(const struct lm_wm *wm, struct lm_rect *out);
 /* Keyboard shortcut filter; true = consumed (see "Shortcuts"). */
 bool lm_wm_key(struct lm_wm *wm, uint32_t time_ms, uint32_t code, bool pressed,
                bool repeat, uint32_t mods);

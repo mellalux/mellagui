@@ -546,7 +546,6 @@ enum {
 #define LM_DRM_FORMAT_ARGB8888 0x34325241u      /* 'A' 'R' '2' '4' */
 #define LM_DRM_FORMAT_XRGB8888 0x34325258u      /* 'X' 'R' '2' '4' */
 #define LM_DRM_FORMAT_MOD_LINEAR 0ull
-#define LM_DRM_FORMAT_MOD_INVALID 0x00ffffffffffffffull
 
 /* ---- lumen_settings_v1 (Lumen's own protocol, see settings.h for the keys) ----------------------------------- */
 enum {
@@ -555,8 +554,5 @@ enum {
     LM_LUMEN_SETTINGS_V1_EVT_VALUE = 0,     /* "ss" key, value: current value of one setting */
     LM_LUMEN_SETTINGS_V1_EVT_DONE = 1,      /* "" end of a burst of value events */
 };
-
-/* Convenience: look an interface up by wire name ("wl_surface"); NULL if unknown. */
-const struct lm_interface *lm_protocol_find_interface(const char *name);
 
 #endif

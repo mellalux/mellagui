@@ -863,7 +863,7 @@ static int drm_switch_vt(struct lm_backend *b, int vt)
 
 static int open_card(struct drm *d, const char *path)
 {
-    int fd = lm_seatdev_open(d->base.server->seatdev, path, O_RDWR | O_NONBLOCK, NULL);
+    int fd = lm_seatdev_open(d->base.server->seatdev, path, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
         if (fd == -EACCES)
             lm_error("drm: no permission to open %s. Add yourself to group 'video' "

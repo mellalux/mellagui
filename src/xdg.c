@@ -37,8 +37,6 @@
 #include "xdg.h"
 
 #define XDG_MAX_PENDING_CONFIGURES 128
-#define XDG_MAX_PINGS              8
-#define XDG_PING_TIMEOUT_MS        5000
 #define XDG_POPUP_MAX_DEPTH        32
 #define XDG_STRING_MAX             255
 #define XDG_SIZE_LIMIT             65536
@@ -59,12 +57,6 @@ struct wm_base {
     struct lm_resource *res;
     struct lm_list link;                /* in xdg->bases */
     int n_surfaces;                     /* live xdg_surfaces created through this object */
-    struct {
-        uint32_t serial;
-        uint64_t sent_ms;
-        bool reported;
-    } pings[XDG_MAX_PINGS];
-    int n_pings;
 };
 
 struct positioner {
@@ -161,7 +153,6 @@ struct lm_xdg {
     struct lm_server *srv;
     struct lm_global *wm_base_global;
     struct lm_global *deco_global;
-    struct lm_timer *ping_timer;
     struct lm_list bases;
     struct lm_list toplevels;
     struct lm_list popups;
@@ -551,71 +542,13 @@ static const lm_request_fn positioner_handlers[] = {
     [LM_XDG_POSITIONER_REQ_SET_PARENT_CONFIGURE] = positioner_req_set_parent_configure,
 };
 
-/* ---- xdg_wm_base: ping / pong -------------------------------------------------------------- */
+/* ---- xdg_wm_base: pong ---------------------------------------------------------------------- */
 
-static void ping_timer_fn(void *data)
-{
-    struct lm_xdg *xdg = data;
-    uint64_t now = lm_now_ms();
-    bool outstanding = false;
-    struct wm_base *b;
-    lm_list_for_each(b, &xdg->bases, link) {
-        for (int i = 0; i < b->n_pings; i++) {
-            if (b->pings[i].reported)
-                continue;
-            if (now - b->pings[i].sent_ms >= XDG_PING_TIMEOUT_MS) {
-                b->pings[i].reported = true;
-                lm_warn("xdg: client pid %d did not answer ping %u for %d ms",
-                        (int)b->res->client->pid, b->pings[i].serial,
-                        XDG_PING_TIMEOUT_MS);
-            } else {
-                outstanding = true;
-            }
-        }
-    }
-    if (outstanding && xdg->ping_timer)
-        lm_timer_arm_ms(xdg->ping_timer, 1000, 0);
-}
-
-static void wm_base_send_ping(struct wm_base *b)
-{
-    struct lm_xdg *xdg = b->xdg;
-    if (b->n_pings == XDG_MAX_PINGS) {
-        if (!b->pings[0].reported)
-            lm_warn("xdg: client pid %d has %d unanswered pings", (int)b->res->client->pid,
-                    XDG_MAX_PINGS);
-        memmove(&b->pings[0], &b->pings[1], sizeof(b->pings[0]) * (XDG_MAX_PINGS - 1));
-        b->n_pings--;
-    }
-    uint32_t serial = lm_server_next_serial(xdg->srv);
-    b->pings[b->n_pings].serial = serial;
-    b->pings[b->n_pings].sent_ms = lm_now_ms();
-    b->pings[b->n_pings].reported = false;
-    b->n_pings++;
-    lm_resource_post(b->res, LM_XDG_WM_BASE_EVT_PING, serial);
-    if (xdg->ping_timer && !lm_timer_is_armed(xdg->ping_timer))
-        lm_timer_arm_ms(xdg->ping_timer, XDG_PING_TIMEOUT_MS, 0);
-}
-
+/* The compositor never sends xdg_wm_base.ping, so a pong carries no information. */
 static void wm_base_req_pong(struct lm_resource *res, const union lm_arg *args)
 {
-    struct wm_base *b = res->data;
-    for (int i = 0; i < b->n_pings; i++) {
-        if (b->pings[i].serial != args[0].u)
-            continue;
-        memmove(&b->pings[i], &b->pings[i + 1],
-                sizeof(b->pings[0]) * (size_t)(b->n_pings - i - 1));
-        b->n_pings--;
-        return;
-    }
-    lm_debug("xdg: pong with unknown serial %u ignored", args[0].u);
-}
-
-void lm_xdg_ping(struct lm_surface *s)
-{
-    struct xdg_surface *xs = xs_from_surface(s);
-    if (xs && xs->base && xs->base->res)
-        wm_base_send_ping(xs->base);
+    (void)res;
+    (void)args;
 }
 
 /* ---- xdg_surface -------------------------------------------------------------------------- */
@@ -1936,7 +1869,6 @@ struct lm_xdg *lm_xdg_create(struct lm_server *srv)
     lm_list_init(&xdg->grab_popups);
     xdg->grab.ops = &popup_grab_ops;
     xdg->grab.data = xdg;
-    xdg->ping_timer = lm_loop_add_timer(srv->loop, ping_timer_fn, xdg);
     xdg->wm_base_global = lm_global_create(srv, &lm_xdg_wm_base_interface,
                                            LM_XDG_WM_BASE_VERSION, wm_base_bind, xdg);
     xdg->deco_global = lm_global_create(srv, &lm_zxdg_decoration_manager_v1_interface,
@@ -1971,10 +1903,6 @@ void lm_xdg_destroy(struct lm_xdg *xdg)
         xp->popup = NULL;
     xdg->dead = true;
 
-    if (xdg->ping_timer) {
-        lm_timer_destroy(xdg->ping_timer);
-        xdg->ping_timer = NULL;
-    }
     if (xdg->wm_base_global) {
         lm_global_destroy(xdg->wm_base_global);
         xdg->wm_base_global = NULL;

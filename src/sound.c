@@ -74,11 +74,6 @@ void lm_sound_set_device(const char *name)
         snprintf(g_device, sizeof(g_device), "%s", name);
 }
 
-const char *lm_sound_device(void)
-{
-    return g_device;
-}
-
 void lm_sound_play(enum lm_sound s)
 {
     if ((unsigned)s >= LM_SOUND_COUNT)

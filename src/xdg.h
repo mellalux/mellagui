@@ -49,7 +49,4 @@ extern const struct lm_surface_role lm_xdg_popup_role;
  */
 void lm_xdg_dismiss_popups(struct lm_surface *s);
 
-/* Ping the client that owns `s` (xdg_wm_base.ping); unresponsive clients are only logged. */
-void lm_xdg_ping(struct lm_surface *s);
-
 #endif

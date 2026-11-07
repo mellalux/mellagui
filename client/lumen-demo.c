@@ -22,7 +22,6 @@ struct app {
     uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard;
     uint32_t surface, xsurface, toplevel, frame_cb;
     uint32_t pool, buffer;
-    uint32_t seat_name, compositor_name;
     int w, h;
     int bw, bh;
     uint32_t *pixels;
@@ -33,7 +32,6 @@ struct app {
     uint32_t mods;
     char last_key[64];
     int frames;
-    int fd_pool;
 };
 
 static uint64_t now_ms(void)

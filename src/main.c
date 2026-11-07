@@ -425,7 +425,7 @@ int main(int argc, char **argv)
     lm_loop_add_signal(loop, SIGHUP, sig_quit, srv);
     lm_loop_add_signal(loop, SIGUSR1, sig_dump, srv);
 
-    srv->seatdev = lm_seatdev_create(loop);
+    srv->seatdev = lm_seatdev_create();
     if (!srv->seatdev)
         goto out;
 

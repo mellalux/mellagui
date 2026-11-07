@@ -158,8 +158,6 @@ class Wl:
                 payload += self.pack_array(a)
             elif isinstance(a, Int):
                 payload += struct.pack('<i', a.v)
-            elif isinstance(a, Fixed):
-                payload += struct.pack('<i', int(round(a.v * 256)))
             else:
                 payload += struct.pack('<I', a)
         self.request_raw(obj, opcode, payload, fds)
@@ -308,16 +306,8 @@ class Int:
     def __init__(self, v): self.v = v
 
 
-class Fixed:
-    def __init__(self, v): self.v = v
-
-
 def I(v):
     return Int(v)
-
-
-def F(v):
-    return Fixed(v)
 
 
 class Shm:
@@ -353,12 +343,6 @@ class Client:
         self.wl.get_registry()
         self.compositor = self.wl.bind('wl_compositor')
         self.wm_base = self.wl.bind('xdg_wm_base')
-
-    def pump_pings(self):
-        for ev in list(self.wl.queue):
-            if ev.iface == 'xdg_wm_base' and ev.name == 'ping':
-                self.wl.request(ev.obj, 'pong', ev.args[0])
-        self.wl.queue = [e for e in self.wl.queue if not (e.iface == 'xdg_wm_base' and e.name == 'ping')]
 
 
 class Window:

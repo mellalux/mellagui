@@ -92,7 +92,7 @@ struct term {
 struct app {
     struct wlc *c;
     uint32_t registry, compositor, shm, wm_base, seat, decoration_mgr, ddm;
-    uint32_t surface, xsurface, toplevel, deco, pointer, keyboard, ddev, dsrc, doffer;
+    uint32_t surface, xsurface, toplevel, deco, pointer, keyboard, ddev, dsrc;
     uint32_t frame_cb, pool, buffers[2];
     bool buf_busy[2];
     int bw, bh;
@@ -111,7 +111,6 @@ struct app {
     uint32_t pointer_serial;
     double px, py;
     char *clip_out;             /* text we offer */
-    char *clip_in_mime;
     bool have_offer;
     uint32_t offer_id;
     char offer_mimes[4][64];

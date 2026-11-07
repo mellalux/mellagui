@@ -84,7 +84,6 @@ struct lm_output {
 
     void *backend_data;             /* backend private */
     void *render_data;              /* renderer private (damage, history) */
-    void *wm_data;                  /* wm private (panel, workspace ...) */
     void *output_data;              /* output.c private (bound wl_output resources) */
 };
 

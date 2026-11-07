@@ -382,11 +382,6 @@ bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out)
     return true;
 }
 
-bool lm_wm_gadget_rect(const struct lm_wm *wm, struct lm_rect *out)
-{
-    return lm_wm_gadget_rect_id(wm, LM_GADGET_CLIPBOARD, out);
-}
-
 /* The card plus its drop shadow (what has to be repainted). */
 static struct lm_rect gadget_bounds(const struct lm_rect *r)
 {
@@ -666,7 +661,6 @@ void lm_wm_focus_window(struct lm_wm *wm, struct lm_window *w)
 }
 
 struct lm_window *lm_wm_focused_window(const struct lm_wm *wm) { return wm->focused; }
-int lm_wm_current_workspace(const struct lm_wm *wm) { return wm->workspace; }
 
 /* ---- lifecycle ------------------------------------------------------------------------------ */
 

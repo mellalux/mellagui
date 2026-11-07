@@ -295,20 +295,6 @@ bool lm_output_layout_bounds(struct lm_server *srv, struct lm_rect *out)
     return any;
 }
 
-struct lm_output *lm_output_at(struct lm_server *srv, int32_t x, int32_t y)
-{
-    struct lm_backend *be = backend_of(srv);
-    if (!be)
-        return NULL;
-    struct lm_output *o;
-    lm_list_for_each(o, &be->outputs, link) {
-        struct lm_rect r = lm_output_rect(o);
-        if (lm_rect_contains(&r, x, y))
-            return o;
-    }
-    return NULL;
-}
-
 static double axis_distance(double v, double lo, double hi)
 {
     if (v < lo)

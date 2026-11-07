@@ -51,8 +51,6 @@ static inline lm_fixed_t lm_fixed_from_double(double d)
     return (lm_fixed_t)(d >= 0 ? d * 256.0 + 0.5 : d * 256.0 - 0.5);
 }
 static inline double lm_fixed_to_double(lm_fixed_t f) { return (double)f / 256.0; }
-static inline lm_fixed_t lm_fixed_from_int(int32_t i) { return (lm_fixed_t)((uint32_t)i << 8); }
-static inline int32_t lm_fixed_to_int(lm_fixed_t f) { return f / 256; }
 
 /* ---- arguments ------------------------------------------------------------ */
 
@@ -188,8 +186,5 @@ void lm_wire_discard(struct lm_wire *w, const struct lm_msg_hdr *hdr);
  */
 int lm_wire_send(struct lm_wire *w, uint32_t id, uint32_t opcode,
                  const char *sig, const union lm_arg *args);
-
-/* Number of arguments described by a signature (letters only). -1 if malformed. */
-int lm_wire_sig_nargs(const char *sig);
 
 #endif

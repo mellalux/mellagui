@@ -290,44 +290,6 @@ static inline bool sig_skip(char c)
     return c >= '0' && c <= '9';
 }
 
-static inline bool sig_letter_valid(char c)
-{
-    switch (c) {
-    case 'i': case 'u': case 'f': case 's': case 'o': case 'n': case 'a': case 'h':
-        return true;
-    default:
-        return false;
-    }
-}
-
-int lm_wire_sig_nargs(const char *sig)
-{
-    int n = 0;
-    bool nullable = false;
-    if (!sig)
-        return -1;
-    for (const char *p = sig; *p; p++) {
-        if (sig_skip(*p))
-            continue;
-        if (*p == '?') {
-            if (nullable)
-                return -1;
-            nullable = true;
-            continue;
-        }
-        if (!sig_letter_valid(*p))
-            return -1;
-        if (nullable && *p != 's' && *p != 'o' && *p != 'n' && *p != 'a')
-            return -1;
-        nullable = false;
-        if (++n > LM_WIRE_MAX_ARGS)
-            return -1;
-    }
-    if (nullable)
-        return -1;
-    return n;
-}
-
 static inline uint32_t pad4(uint32_t v)
 {
     return (v + 3u) & ~3u;

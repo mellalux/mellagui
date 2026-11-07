@@ -39,12 +39,6 @@ static inline void lm_list_append(struct lm_list *head, struct lm_list *elm)
     lm_list_insert(head->prev, elm);
 }
 
-/* Add at the front (after the head). */
-static inline void lm_list_prepend(struct lm_list *head, struct lm_list *elm)
-{
-    lm_list_insert(head, elm);
-}
-
 /* Unlink and re-initialise: calling it twice on the same element is safe. */
 static inline void lm_list_remove(struct lm_list *elm)
 {
@@ -102,13 +96,6 @@ static inline void lm_list_splice(struct lm_list *to, struct lm_list *from)
     for (pos = lm_container_of((head)->prev, __typeof__(*pos), member); \
          &pos->member != (head); \
          pos = lm_container_of(pos->member.prev, __typeof__(*pos), member))
-
-#define lm_list_for_each_reverse_safe(pos, tmp, head, member) \
-    for (pos = lm_container_of((head)->prev, __typeof__(*pos), member), \
-         tmp = lm_container_of(pos->member.prev, __typeof__(*pos), member); \
-         &pos->member != (head); \
-         pos = tmp, \
-         tmp = lm_container_of(pos->member.prev, __typeof__(*pos), member))
 
 /* ---- signals ---------------------------------------------------------- */
 

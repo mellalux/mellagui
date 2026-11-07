@@ -39,8 +39,6 @@ struct lm_resource *lm_output_resource_for_client(struct lm_output *out,
 
 /* Bounding box of all outputs. Returns false if there are none. */
 bool lm_output_layout_bounds(struct lm_server *srv, struct lm_rect *out);
-/* Output containing the global point, or NULL. */
-struct lm_output *lm_output_at(struct lm_server *srv, int32_t x, int32_t y);
 /* Output whose rect is closest to the point (never NULL while any output exists). */
 struct lm_output *lm_output_nearest(struct lm_server *srv, double x, double y);
 /* Output rectangle in global coordinates. */

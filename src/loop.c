@@ -370,12 +370,6 @@ void lm_idle_schedule(struct lm_idle *idle)
     lm_list_append(&idle->loop->pending, &idle->link);
 }
 
-void lm_idle_cancel(struct lm_idle *idle)
-{
-    if (idle)
-        lm_list_remove(&idle->link);
-}
-
 void lm_idle_destroy(struct lm_idle *idle)
 {
     if (!idle)

@@ -173,7 +173,6 @@ struct lm_config {
     bool sysinfo;               /* system monitor gadget visible at start (default false; --sysinfo; Super+S; setting `sysinfo`) */
     bool sound;                 /* feedback beeps for sticky keys (default true; --no-sound; never on headless) */
     bool grab_input;            /* EVIOCGRAB the evdev devices (default true on drm) */
-    bool log_to_stderr;
 };
 
 static inline void lm_config_defaults(struct lm_config *c)
@@ -195,7 +194,6 @@ static inline void lm_config_defaults(struct lm_config *c)
         .audio_device = "default",
         .dmabuf = true,
         .gadget = true,
-        .log_to_stderr = true,
     };
 }
 
@@ -318,8 +316,6 @@ struct lm_resource *lm_resource_create_server(struct lm_client *client,
 /* See "Destruction" above. Safe to call exactly once per resource. */
 void lm_resource_destroy(struct lm_resource *res);
 
-static inline void *lm_resource_data(const struct lm_resource *res) { return res->data; }
-
 /*
  * Send an event. Variadic arguments follow the event's signature
  * (iface->events[opcode].signature) with these C types:
@@ -338,11 +334,5 @@ int lm_resource_post_va(struct lm_resource *res, uint32_t opcode, va_list ap);
 void lm_resource_post_error(struct lm_resource *res, uint32_t code,
                             const char *fmt, ...) LM_PRINTF(3, 4);
 void lm_resource_post_no_memory(struct lm_resource *res);
-
-static inline bool lm_resource_is_a(const struct lm_resource *res,
-                                    const struct lm_interface *iface)
-{
-    return res->iface == iface;
-}
 
 #endif

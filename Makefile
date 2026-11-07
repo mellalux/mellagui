@@ -3,10 +3,10 @@
 #   make            build everything that has sources
 #   make lumen      build/lumen        (compositor, src/*.c)
 #   make lumen-demo build/lumen-demo   (client/lumen-demo.c)
-#   make lumen-term build/lumen-term   (client/lumen-term.c, only if it exists)
-#   make lumen-calc build/lumen-calc   (client/lumen-calc.c, only if it exists)
-#   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog, only if it exists)
-#   make lumen-settings build/lumen-settings (client/lumen-settings.c, the settings panel, only if it exists)
+#   make lumen-term build/lumen-term   (client/lumen-term.c)
+#   make lumen-calc build/lumen-calc   (client/lumen-calc.c)
+#   make lumen-run  build/lumen-run    (client/lumen-run.c, the Run dialog)
+#   make lumen-settings build/lumen-settings (client/lumen-settings.c, the settings panel)
 #   make run        build, then start the compositor on a free VT (see RUN_ARGS)
 #   make asan       build/lumen-asan   (compositor with ASan + UBSan)
 #   make test       build, then run tests/run.sh
@@ -31,28 +31,11 @@ COMP_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(COMP_SRCS))
 ASAN_OBJS := $(patsubst src/%.c,$(BUILD)/asan/%.o,$(COMP_SRCS))
 
 # Modules shared with the clients (no dependency on server code).
-CLIENT_COMMON_SRCS := $(wildcard src/wire.c src/protocol.c src/log.c src/loop.c src/font.c src/keymap.c)
+CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c src/keymap.c
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
-TARGETS := $(BUILD)/lumen
-ifneq ($(wildcard client/lumen-demo.c),)
-TARGETS += $(BUILD)/lumen-demo
-endif
-ifneq ($(wildcard client/lumen-term.c),)
-TARGETS += $(BUILD)/lumen-term
-endif
-ifneq ($(wildcard client/lumen-calc.c),)
-TARGETS += $(BUILD)/lumen-calc
-endif
-ifneq ($(wildcard tests/keymap_test.c),)
-TARGETS += $(BUILD)/keymap-test
-endif
-ifneq ($(wildcard client/lumen-run.c),)
-TARGETS += $(BUILD)/lumen-run
-endif
-ifneq ($(wildcard client/lumen-settings.c),)
-TARGETS += $(BUILD)/lumen-settings
-endif
+TARGETS := $(BUILD)/lumen $(BUILD)/lumen-demo $(BUILD)/lumen-term $(BUILD)/lumen-calc $(BUILD)/keymap-test \
+           $(BUILD)/lumen-run $(BUILD)/lumen-settings
 
 .PHONY: all lumen lumen-demo lumen-term lumen-calc lumen-run lumen-settings asan test run clean
 all: $(TARGETS)
@@ -62,9 +45,7 @@ lumen-demo: $(BUILD)/lumen-demo
 lumen-calc: $(BUILD)/lumen-calc
 lumen-run: $(BUILD)/lumen-run
 lumen-settings: $(BUILD)/lumen-settings
-lumen-term:
-	@if [ -f client/lumen-term.c ]; then $(MAKE) --no-print-directory $(BUILD)/lumen-term; \
-	else echo "client/lumen-term.c does not exist yet - skipping lumen-term"; fi
+lumen-term: $(BUILD)/lumen-term
 asan: $(BUILD)/lumen-asan
 
 # ---- link rules ----------------------------------------------------------------
@@ -119,8 +100,7 @@ $(BUILD)/tests/%.o: tests/%.c
 
 # ---- tests ------------------------------------------------------------------------
 test: all
-	@if [ -x tests/run.sh ]; then tests/run.sh; \
-	else echo "tests/run.sh not found or not executable"; exit 1; fi
+	tests/run.sh
 
 # make run                      real console (VT) session with the terminal; Ctrl+Alt+F3 first, see README
 # make run EXEC=build/lumen-calc  start another program instead of the terminal

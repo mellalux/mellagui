@@ -117,7 +117,6 @@ void lm_input_inject(struct lm_input *in, const struct lm_input_event *ev);
 int lm_input_layout_count(const struct lm_input *in);
 int lm_input_layout(const struct lm_input *in);
 const char *lm_input_layout_id(const struct lm_input *in, int slot);     /* "ee" */
-const char *lm_input_layout_name(const struct lm_input *in, int slot);   /* "Estonian" */
 void lm_input_set_layout(struct lm_input *in, int slot);
 /* Settings: replace the configured list (lm_layout_*() indices, 1..LM_KBD_MAX_LAYOUTS). `active` is the layout (not
  * slot) to stay on, -1 = keep the current one if it is still in the list, else the first. The caller has already
@@ -132,8 +131,7 @@ uint32_t lm_input_sticky_locked(const struct lm_input *in);              /* LM_M
 const char *lm_input_last_sound(const struct lm_input *in);              /* "none" until the first one */
 unsigned lm_input_sound_count(const struct lm_input *in);
 
-/* Diagnostics: number of open devices per class. */
+/* Diagnostics: number of open keyboards. */
 int lm_input_count_keyboards(const struct lm_input *in);
-int lm_input_count_pointers(const struct lm_input *in);
 
 #endif

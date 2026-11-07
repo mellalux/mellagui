@@ -94,7 +94,7 @@ struct lm_input {
     const char *last_sound;
     unsigned sound_count;
     int32_t repeat_code;   /* -1 = none */
-    int n_keyboards, n_pointers;
+    int n_keyboards;
 };
 
 static void device_close(struct device *d);
@@ -562,8 +562,6 @@ static void device_close(struct device *d)
         in->n_keyboards--;
         /* release keys that were down so nothing sticks */
     }
-    if (d->classes & (DEV_POINTER | DEV_TOUCHPAD | DEV_DIRECT_ABS | DEV_TOUCH_MT))
-        in->n_pointers--;
     if (d->source)
         lm_source_remove(d->source);
     if (d->grabbed)
@@ -584,9 +582,9 @@ static bool device_known(const struct lm_input *in, const char *path)
 
 static void device_open(struct lm_input *in, const char *path)
 {
-    int fd = lm_seatdev_open(in->srv->seatdev, path, O_RDWR | O_NONBLOCK, NULL);
+    int fd = lm_seatdev_open(in->srv->seatdev, path, O_RDWR | O_NONBLOCK);
     if (fd == -EACCES || fd == -EPERM || fd == -EROFS)
-        fd = lm_seatdev_open(in->srv->seatdev, path, O_RDONLY | O_NONBLOCK, NULL);
+        fd = lm_seatdev_open(in->srv->seatdev, path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         if (fd == -EACCES && in->hotplug_scan) {
             lm_debug("input: %s is not accessible yet (udev still setting permissions); waiting for its attribute change", path);
@@ -670,8 +668,6 @@ static void device_open(struct lm_input *in, const char *path)
     lm_list_append(&in->devices, &d->link);
     if (classes & DEV_KEYBOARD)
         in->n_keyboards++;
-    if (classes & ~DEV_KEYBOARD)
-        in->n_pointers++;
     char name[96] = "?";
     ioctl(fd, EVIOCGNAME(sizeof(name)), name);
     lm_info("input: %s \"%s\" (%s%s%s%s)", path, name,
@@ -815,10 +811,6 @@ const char *lm_input_layout_id(const struct lm_input *in, int slot)
 {
     return lm_layout_id(slot >= 0 && slot < in->nlayouts ? in->layouts[slot] : 0);
 }
-const char *lm_input_layout_name(const struct lm_input *in, int slot)
-{
-    return lm_layout_name(slot >= 0 && slot < in->nlayouts ? in->layouts[slot] : 0);
-}
 
 void lm_input_set_layout(struct lm_input *in, int slot)
 {
@@ -875,4 +867,3 @@ const char *lm_input_last_sound(const struct lm_input *in) { return in->last_sou
 unsigned lm_input_sound_count(const struct lm_input *in) { return in->sound_count; }
 
 int lm_input_count_keyboards(const struct lm_input *in) { return in->n_keyboards; }
-int lm_input_count_pointers(const struct lm_input *in) { return in->n_pointers; }

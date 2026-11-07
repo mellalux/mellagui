@@ -20,10 +20,8 @@
 #define LM_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define LM_CLAMP(v, lo, hi) LM_MIN(LM_MAX((v), (lo)), (hi))
 #define LM_ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
-#define LM_UNUSED __attribute__((unused))
 #define LM_PRINTF(fmt_idx, arg_idx) \
     __attribute__((format(printf, fmt_idx, arg_idx)))
-#define LM_BIT(n) (1u << (n))
 
 #define LM_COORD_LIMIT (1 << 28)
 
@@ -289,12 +287,5 @@ static inline void lm_region_intersect_rect(struct lm_region *r, const struct lm
     r->n = k;
 }
 
-static inline void lm_region_translate(struct lm_region *r, int32_t dx, int32_t dy)
-{
-    for (int32_t i = 0; i < r->n; i++) {
-        r->rects[i].x += dx; /* values are within +-2^28, dx is caller-sane */
-        r->rects[i].y += dy;
-    }
-}
 
 #endif

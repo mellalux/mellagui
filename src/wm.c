@@ -51,6 +51,7 @@
 #define MIXER_H 196                 /* title, master, output, two application rows, hint */
 #define MIXER_MIN_W 210
 #define MIXER_MIN_H 120
+#define GADGET_SNAP 14              /* a dragged gadget sticks to another gadget's / the screen's edge within this many pixels */
 #define GADGET_EDGE 6               /* resize zone along the left/right/bottom edge (top: 3 px) */
 #define MENU_ITEM_H 26
 #define PANEL_TASK_MAX_W 160
@@ -1693,6 +1694,52 @@ static void grab_end(struct lm_wm *wm)
     }
 }
 
+/*
+ * Gadgets are sticky: a card that is dragged within GADGET_SNAP of another card's edge (or of the screen's) jumps flush
+ * against it. Beside another card it needs to overlap it vertically (within the same reach), above / below it horizontally;
+ * a card that touches another one with a side also lines up with it (same left / right / top / bottom edge).
+ */
+static void gadget_snap(struct lm_wm *wm, int id, const struct lm_output *o, int32_t *px, int32_t *py, int32_t w, int32_t h)
+{
+    int32_t x = *px, y = *py, nx = x, ny = y;
+    int bestx = GADGET_SNAP + 1, besty = GADGET_SNAP + 1;
+#define TRY_X(c) do { int32_t cand_ = (c); int d_ = abs(cand_ - x); if (d_ < bestx) { bestx = d_; nx = cand_; } } while (0)
+#define TRY_Y(c) do { int32_t cand_ = (c); int d_ = abs(cand_ - y); if (d_ < besty) { besty = d_; ny = cand_; } } while (0)
+    TRY_X(o->x);
+    TRY_X(o->x + o->width - w);
+    TRY_Y(o->y + LM_PANEL_HEIGHT);
+    TRY_Y(o->y + o->height - h);
+    for (int j = 0; j < LM_GADGET_COUNT; j++) {
+        struct lm_rect pr;
+        if (j == id || !lm_wm_gadget_rect_id(wm, j, &pr))
+            continue;
+        bool vover = y < pr.y + pr.h + GADGET_SNAP && y + h > pr.y - GADGET_SNAP;
+        bool hover = x < pr.x + pr.w + GADGET_SNAP && x + w > pr.x - GADGET_SNAP;
+        bool side = abs(x - (pr.x + pr.w)) <= GADGET_SNAP || abs(x + w - pr.x) <= GADGET_SNAP;       /* beside it */
+        bool stack = abs(y - (pr.y + pr.h)) <= GADGET_SNAP || abs(y + h - pr.y) <= GADGET_SNAP;      /* above / below it */
+        if (vover) {
+            TRY_X(pr.x + pr.w);
+            TRY_X(pr.x - w);
+        }
+        if (hover) {
+            TRY_Y(pr.y + pr.h);
+            TRY_Y(pr.y - h);
+        }
+        if (stack && hover) {                                       /* stacked: the same left or right edge */
+            TRY_X(pr.x);
+            TRY_X(pr.x + pr.w - w);
+        }
+        if (side && vover) {                                        /* side by side: the same top or bottom edge */
+            TRY_Y(pr.y);
+            TRY_Y(pr.y + pr.h - h);
+        }
+    }
+#undef TRY_X
+#undef TRY_Y
+    *px = nx;
+    *py = ny;
+}
+
 /* Gadget move / resize: the pointer moved by (dx, dy) since the grab began (grab_x/y/w/h = the card back then). */
 static void gadget_grab_motion(struct lm_wm *wm, double dx, double dy)
 {
@@ -1708,6 +1755,7 @@ static void gadget_grab_motion(struct lm_wm *wm, double dx, double dy)
     if (wm->grab_kind == GRAB_GADGET_MOVE) {
         x += (int32_t)dx;
         y += (int32_t)dy;
+        gadget_snap(wm, id, o, &x, &y, w, h);
     } else {
         uint32_t e = wm->grab_edges;
         if (e & LM_EDGE_RIGHT) w = LM_CLAMP(w + (int32_t)dx, gadget_def[id].min_w, LM_MIN(mw, o->x + o->width - x));

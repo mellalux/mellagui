@@ -2687,6 +2687,33 @@ class TestMixer(Base):
         c.click(sx + sw // 2, sy)
         self.wait_for(lambda: self.state(os.path.join(d, 'pactl.json'))['sinks'][0]['vol'] == 50, 'volume 50 at the new place')
 
+    def test_gadgets_stick_to_each_other_and_to_the_screen_edge(self):
+        env, d = self.mixer_env('snap')
+        c = self.start('lumen-snap1', env, '--size', '1280x900')
+        c.cmd('gadget-rect')
+        cb = tuple(map(int, c.last.split()[1:5]))
+        x, y, w, h = self.card(c)                                               # docked below the clipboard with a 12 px gap
+        self.assertEqual(y, cb[1] + cb[3] + 12)
+
+        def drag(dx, dy):
+            gx, gy, gw, gh = self.card(c)
+            c.abs(gx + 60, gy + 10)
+            c.button(272, True)
+            c.abs(gx + 60 + dx, gy + 10 + dy)
+            c.button(272, False)
+            return self.card(c)
+        # a little closer: it jumps flush under the clipboard and lines up with its right edge
+        self.assertEqual(drag(-5, -8), (cb[0] + cb[2] - w, cb[1] + cb[3], w, h))
+        # far away from everything: moves exactly as dragged
+        nx, ny, nw, nh = drag(-300, 200)
+        self.assertEqual((nx, ny), (cb[0] + cb[2] - w - 300, cb[1] + cb[3] + 200))
+        # next to the clipboard (left of it, 9 px away): flush against its left side
+        gx, gy, gw, gh = self.card(c)
+        self.assertEqual(drag(cb[0] - gw - 9 - gx, cb[1] + 100 - gy), (cb[0] - gw, cb[1] + 100, gw, gh))
+        # the screen edge: 6 px short of the left edge snaps to it
+        gx, gy, gw, gh = self.card(c)
+        self.assertEqual(drag(6 - gx, 0)[0], 0)
+
     def test_mixer_docks_beside_the_clipboard_on_a_small_screen(self):
         env, d = self.mixer_env('small')
         c = self.start('lumen-mix6', env, '--size', '800x400')                  # 800x400: no room below the clipboard card

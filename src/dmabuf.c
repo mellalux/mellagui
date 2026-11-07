@@ -21,27 +21,26 @@
 
 #include <linux/dma-buf.h>
 
+#include "gl.h"
 #include "log.h"
 #include "protocol.h"
+#include "render.h"
 #include "server.h"
 #include "shm.h"
 
 #define MAX_DIM 16384
 
+#define MAX_FMTS 32
+
 struct lm_dmabuf {
+    struct { uint32_t fourcc; uint64_t modifier; } fmts[MAX_FMTS];     /* the format table: what clients may choose from */
+    int nfmts;
     struct lm_server *srv;
     struct lm_global *global;
     dev_t main_device;
     int table_fd;                       /* memfd with the format table */
     uint32_t table_size;
 };
-
-/* The format table: what clients may choose from (entries are 16 bytes: fourcc, padding, 64-bit modifier). */
-static const struct { uint32_t fourcc; uint64_t modifier; } k_formats[] = {
-    { LM_DRM_FORMAT_ARGB8888, LM_DRM_FORMAT_MOD_LINEAR },
-    { LM_DRM_FORMAT_XRGB8888, LM_DRM_FORMAT_MOD_LINEAR },
-};
-#define N_FORMATS ((int)(sizeof(k_formats) / sizeof(k_formats[0])))
 
 /* ---- the GPU's render node ------------------------------------------------------------------------------------- */
 
@@ -99,18 +98,48 @@ static bool find_render_node(const struct lm_server *srv, dev_t *out)
     return true;
 }
 
-static int make_table(uint32_t *size)
+/* The formats and layouts to offer: ARGB8888 and XRGB8888, linear always (the CPU can read those), and with the GL renderer every
+ * single-plane layout the GPU can sample from (tiled ones are fast for the GPU that rendered them, and cannot be read by the CPU). */
+static void fill_formats(struct lm_dmabuf *d)
+{
+    static const uint32_t fourccs[] = { LM_DRM_FORMAT_ARGB8888, LM_DRM_FORMAT_XRGB8888 };
+    struct lm_gl *gl = lm_render_gl(d->srv->render);
+    for (size_t i = 0; i < sizeof(fourccs) / sizeof(fourccs[0]); i++) {
+        uint64_t mods[16];
+        int n = gl ? lm_gl_dmabuf_modifiers(gl, fourccs[i], mods, 16) : 0;
+        bool have_linear = false;
+        for (int k = 0; k < n && d->nfmts < MAX_FMTS; k++) {
+            d->fmts[d->nfmts].fourcc = fourccs[i];
+            d->fmts[d->nfmts++].modifier = mods[k];
+            have_linear = have_linear || mods[k] == LM_DRM_FORMAT_MOD_LINEAR;
+        }
+        if (!have_linear && d->nfmts < MAX_FMTS) {
+            d->fmts[d->nfmts].fourcc = fourccs[i];
+            d->fmts[d->nfmts++].modifier = LM_DRM_FORMAT_MOD_LINEAR;
+        }
+    }
+}
+
+static bool format_offered(const struct lm_dmabuf *d, uint32_t fourcc, uint64_t modifier)
+{
+    for (int i = 0; i < d->nfmts; i++)
+        if (d->fmts[i].fourcc == fourcc && d->fmts[i].modifier == modifier)
+            return true;
+    return false;
+}
+
+static int make_table(const struct lm_dmabuf *d, uint32_t *size)
 {
     int fd = memfd_create("mellagui-dmabuf-formats", MFD_CLOEXEC);
     if (fd < 0)
         return -1;
-    uint8_t buf[16 * 8];
+    uint8_t buf[16 * MAX_FMTS];
     memset(buf, 0, sizeof(buf));
-    for (int i = 0; i < N_FORMATS; i++) {
-        memcpy(buf + 16 * i, &k_formats[i].fourcc, 4);
-        memcpy(buf + 16 * i + 8, &k_formats[i].modifier, 8);
+    for (int i = 0; i < d->nfmts; i++) {
+        memcpy(buf + 16 * i, &d->fmts[i].fourcc, 4);
+        memcpy(buf + 16 * i + 8, &d->fmts[i].modifier, 8);
     }
-    *size = (uint32_t)(16 * N_FORMATS);
+    *size = (uint32_t)(16 * d->nfmts);
     if (write(fd, buf, *size) != (ssize_t)*size) {
         close(fd);
         return -1;
@@ -133,10 +162,10 @@ static const lm_request_fn feedback_handlers[] = {
 static void send_feedback(struct lm_dmabuf *d, struct lm_resource *fb)
 {
     struct lm_array dev = { sizeof(d->main_device), &d->main_device };
-    uint16_t idx[N_FORMATS];
-    for (int i = 0; i < N_FORMATS; i++)
+    uint16_t idx[MAX_FMTS];
+    for (int i = 0; i < d->nfmts; i++)
         idx[i] = (uint16_t)i;
-    struct lm_array formats = { sizeof(idx), idx };
+    struct lm_array formats = { sizeof(idx[0]) * (size_t)d->nfmts, idx };
     lm_resource_post(fb, LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_FORMAT_TABLE, d->table_fd, d->table_size);
     lm_resource_post(fb, LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_MAIN_DEVICE, &dev);
     lm_resource_post(fb, LM_ZWP_LINUX_DMABUF_FEEDBACK_V1_EVT_TRANCHE_TARGET_DEVICE, &dev);
@@ -227,8 +256,8 @@ static bool params_make_buffer(struct params *p, struct lm_resource *res, uint32
         *why = "format not offered (ARGB8888 and XRGB8888 only)";
         return false;
     }
-    if (flags != 0 || p->modifier != LM_DRM_FORMAT_MOD_LINEAR) {      /* y-invert/interlaced and tiled layouts are not offered */
-        *why = flags ? "flags are not supported" : "only the linear modifier is supported";
+    if (flags != 0 || !format_offered(p->d, format, p->modifier)) {   /* y-invert/interlaced and layouts that were not offered */
+        *why = flags ? "flags are not supported" : "that layout (modifier) was not offered";
         return false;
     }
     if (p->stride < (uint32_t)width * 4 || (p->stride & 3) || p->offset > INT32_MAX || p->stride > INT32_MAX) {
@@ -262,7 +291,8 @@ static bool params_make_buffer(struct params *p, struct lm_resource *res, uint32
         return false;
     }
     struct lm_buffer *b = lm_buffer_create_dmabuf(res->client, id, res->version, fd, (size_t)size, width, height,
-                                                  (int32_t)p->stride, (int32_t)p->offset, format == LM_DRM_FORMAT_XRGB8888);
+                                                  (int32_t)p->stride, (int32_t)p->offset, format == LM_DRM_FORMAT_XRGB8888,
+                                                  p->modifier);
     if (!b) {
         *code = 0;                                                  /* the client has been told */
         return false;
@@ -374,12 +404,15 @@ static void dmabuf_bind(struct lm_client *client, void *data, uint32_t version, 
     struct lm_resource *res = lm_resource_create(client, id, &lm_zwp_linux_dmabuf_v1_interface, version, dmabuf_handlers, d, NULL);
     if (!res)
         return;
-    for (int i = 0; i < N_FORMATS; i++) {                           /* versions before 4 learn the formats from events */
+    uint32_t last_plain = 0;
+    for (int i = 0; i < d->nfmts; i++) {                            /* versions before 4 learn the formats from events */
         if (version == 3)
-            lm_resource_post(res, LM_ZWP_LINUX_DMABUF_V1_EVT_MODIFIER, k_formats[i].fourcc,
-                             (uint32_t)(k_formats[i].modifier >> 32), (uint32_t)(k_formats[i].modifier & 0xffffffffu));
-        else if (version < 3)
-            lm_resource_post(res, LM_ZWP_LINUX_DMABUF_V1_EVT_FORMAT, k_formats[i].fourcc);
+            lm_resource_post(res, LM_ZWP_LINUX_DMABUF_V1_EVT_MODIFIER, d->fmts[i].fourcc,
+                             (uint32_t)(d->fmts[i].modifier >> 32), (uint32_t)(d->fmts[i].modifier & 0xffffffffu));
+        else if (version < 3 && d->fmts[i].fourcc != last_plain) {
+            lm_resource_post(res, LM_ZWP_LINUX_DMABUF_V1_EVT_FORMAT, d->fmts[i].fourcc);
+            last_plain = d->fmts[i].fourcc;
+        }
     }
 }
 
@@ -397,7 +430,8 @@ struct lm_dmabuf *lm_dmabuf_create(struct lm_server *srv, bool enabled)
         free(d);
         return NULL;
     }
-    d->table_fd = make_table(&d->table_size);
+    fill_formats(d);
+    d->table_fd = make_table(d, &d->table_size);
     if (d->table_fd < 0) {
         free(d);
         return NULL;
@@ -407,7 +441,11 @@ struct lm_dmabuf *lm_dmabuf_create(struct lm_server *srv, bool enabled)
         lm_dmabuf_destroy(d);
         return NULL;
     }
-    lm_info("dmabuf: zwp_linux_dmabuf_v1 on render node %u:%u (ARGB8888/XRGB8888, linear)", major(d->main_device), minor(d->main_device));
+    int tiled = 0;
+    for (int i = 0; i < d->nfmts; i++)
+        tiled += d->fmts[i].modifier != LM_DRM_FORMAT_MOD_LINEAR;
+    lm_info("dmabuf: zwp_linux_dmabuf_v1 on render node %u:%u (ARGB8888/XRGB8888, %d layouts%s)", major(d->main_device),
+            minor(d->main_device), d->nfmts, tiled ? ", tiled ones sampled by the GPU" : ": linear only");
     return d;
 }
 

@@ -38,8 +38,15 @@ void lm_gl_tex_delete(struct lm_gl *gl, unsigned tex);
 /* ---- dmabuf import (EGL_EXT_image_dma_buf_import + GL_OES_EGL_image) ----------------------------------------------------- */
 
 bool lm_gl_has_dmabuf(const struct lm_gl *gl);
-/* An EGLImage of a linear single-plane dmabuf (`fourcc` = DRM_FORMAT_*); EGL keeps its own reference to the memory. NULL on failure. */
-void *lm_gl_dmabuf_image(struct lm_gl *gl, int fd, int w, int h, int stride, int offset, uint32_t fourcc);
+/* The layouts (DRM format modifiers) the GPU can sample for `fourcc` (DRM_FORMAT_*), at most `max` into `mods`; returns the count.
+ * Only single-plane layouts a plain GL_TEXTURE_2D can read, and only ones lm_gl_dmabuf_modifier_ok() allows. 0 = none / unsupported. */
+int lm_gl_dmabuf_modifiers(struct lm_gl *gl, uint32_t fourcc, uint64_t *mods, int max);
+/* Layouts known to be one plane (linear, Intel X / Y / Yf tiled); others (compressed ones with a second plane, vendor layouts)
+ * would make a client add planes this compositor does not take. */
+bool lm_gl_dmabuf_modifier_ok(uint64_t modifier);
+/* An EGLImage of a single-plane dmabuf (`fourcc` = DRM_FORMAT_*, `modifier` its layout, 0 = linear); EGL keeps its own reference
+ * to the memory. NULL on failure. */
+void *lm_gl_dmabuf_image(struct lm_gl *gl, int fd, int w, int h, int stride, int offset, uint32_t fourcc, uint64_t modifier);
 void lm_gl_image_destroy(struct lm_gl *gl, void *image);
 /* A texture name with the sampling parameters set and no storage (for lm_gl_tex_bind_image). 0 on failure. */
 unsigned lm_gl_tex_alloc(struct lm_gl *gl);

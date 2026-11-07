@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "output.h"
+#include "log.h"
 #include "protocol.h"
 #include "render.h"
 #include "server.h"
@@ -734,6 +735,15 @@ static int attach_buffer(struct lm_surface *s, const struct sstate *st, struct l
         s->transform = tr;
         *full = true;
         return 0;
+    }
+    if (b->dmabuf && b->dmabuf->modifier != LM_DRM_FORMAT_MOD_LINEAR) {
+        /* a tiled buffer cannot be read by the CPU: without the GPU path it cannot be shown (the content stays as it was) */
+        static bool warned;
+        if (!warned)
+            lm_warn("dmabuf: cannot show a tiled buffer (modifier %#llx): the GL import failed or the renderer is software",
+                    (unsigned long long)b->dmabuf->modifier);
+        warned = true;
+        return -3;
     }
     if (s->gl_dmabuf) {                                         /* back to copying: no CPU pixels exist yet */
         drop_zero_copy(s);

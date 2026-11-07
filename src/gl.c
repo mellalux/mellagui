@@ -46,6 +46,8 @@ typedef char GLchar;
 #define EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
 #define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
 #define EGL_NO_IMAGE ((void *)0)
+#define EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT 0x3443
+#define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT 0x3444
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 
 #define GL_FALSE 0
@@ -103,6 +105,7 @@ struct egl_fns {
     EGLBoolean (*SwapInterval)(EGLDisplay, EGLint);
     void *(*CreateImageKHR)(EGLDisplay, EGLContext, EGLenum, void *, const EGLint *);
     EGLBoolean (*DestroyImageKHR)(EGLDisplay, void *);
+    EGLBoolean (*QueryDmaBufModifiersEXT)(EGLDisplay, EGLint, EGLint, uint64_t *, EGLBoolean *, EGLint *);
 };
 
 /* libgbm: buffers the GPU can render into and KMS can scan out */
@@ -197,7 +200,7 @@ struct lm_gl {
     GLint u_size, u_ysign, u_tex, u_color, a_pos, a_uv;
     GLuint white;                       /* 1x1 white texture for colour rectangles */
     bool current;                       /* the context is current on this thread */
-    bool has_dmabuf;
+    bool has_dmabuf, has_modifiers;
     void (*ImageTargetTexture2D)(GLenum, void *);     /* glEGLImageTargetTexture2DOES */
     float ysign;                        /* +1 offscreen targets (row 0 at the bottom of GL), -1 window surfaces */
     int tw, th;                         /* size of the bound target */
@@ -373,6 +376,9 @@ struct lm_gl *lm_gl_create(int gbm_fd, char *err, size_t errsz)
         l->ImageTargetTexture2D = (void *)l->egl.GetProcAddress("glEGLImageTargetTexture2DOES");
         l->has_dmabuf = eexts && strstr(eexts, "EGL_EXT_image_dma_buf_import") && l->egl.CreateImageKHR &&
                         l->egl.DestroyImageKHR && l->ImageTargetTexture2D && strstr(exts, "GL_OES_EGL_image");
+        l->egl.QueryDmaBufModifiersEXT = (void *)l->egl.GetProcAddress("eglQueryDmaBufModifiersEXT");
+        l->has_modifiers = l->has_dmabuf && eexts && strstr(eexts, "EGL_EXT_image_dma_buf_import_modifiers") &&
+                           l->egl.QueryDmaBufModifiersEXT;
     }
 
     char serr[300];
@@ -498,13 +504,37 @@ bool lm_gl_has_dmabuf(const struct lm_gl *l)
     return l->has_dmabuf;
 }
 
-void *lm_gl_dmabuf_image(struct lm_gl *l, int fd, int w, int h, int stride, int offset, uint32_t fourcc)
+#define MOD_INTEL(n) (((uint64_t)0x01 << 56) | (n))              /* DRM_FORMAT_MOD_VENDOR_INTEL */
+bool lm_gl_dmabuf_modifier_ok(uint64_t m)
 {
-    if (!l->has_dmabuf)
+    return m == 0 || m == MOD_INTEL(1) || m == MOD_INTEL(2) || m == MOD_INTEL(3);
+}
+
+int lm_gl_dmabuf_modifiers(struct lm_gl *l, uint32_t fourcc, uint64_t *mods, int max)
+{
+    uint64_t all[64];
+    EGLBoolean ext[64];
+    EGLint n = 0;
+    if (!l->has_modifiers || !l->egl.QueryDmaBufModifiersEXT(l->dpy, (EGLint)fourcc, 64, all, ext, &n))
+        return 0;
+    int out = 0;
+    for (int i = 0; i < n && out < max; i++)
+        if (!ext[i] && lm_gl_dmabuf_modifier_ok(all[i]))
+            mods[out++] = all[i];
+    return out;
+}
+
+void *lm_gl_dmabuf_image(struct lm_gl *l, int fd, int w, int h, int stride, int offset, uint32_t fourcc, uint64_t modifier)
+{
+    if (!l->has_dmabuf || (modifier != 0 && !l->has_modifiers))
         return NULL;
     const EGLint attr[] = { EGL_WIDTH, w, EGL_HEIGHT, h, EGL_LINUX_DRM_FOURCC_EXT, (EGLint)fourcc, EGL_DMA_BUF_PLANE0_FD_EXT, fd,
-                            EGL_DMA_BUF_PLANE0_OFFSET_EXT, offset, EGL_DMA_BUF_PLANE0_PITCH_EXT, stride, EGL_NONE };
-    return l->egl.CreateImageKHR(l->dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attr);
+                            EGL_DMA_BUF_PLANE0_OFFSET_EXT, offset, EGL_DMA_BUF_PLANE0_PITCH_EXT, stride,
+                            EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, (EGLint)(uint32_t)(modifier & 0xffffffffu),
+                            EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint)(uint32_t)(modifier >> 32), EGL_NONE };
+    const EGLint plain[] = { EGL_WIDTH, w, EGL_HEIGHT, h, EGL_LINUX_DRM_FOURCC_EXT, (EGLint)fourcc, EGL_DMA_BUF_PLANE0_FD_EXT, fd,
+                             EGL_DMA_BUF_PLANE0_OFFSET_EXT, offset, EGL_DMA_BUF_PLANE0_PITCH_EXT, stride, EGL_NONE };
+    return l->egl.CreateImageKHR(l->dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, modifier ? attr : plain);
 }
 
 void lm_gl_image_destroy(struct lm_gl *l, void *image)

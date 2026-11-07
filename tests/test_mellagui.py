@@ -3326,6 +3326,17 @@ class Gbm:
         bo = self.lib.gbm_bo_create(self.dev, w, h, fmt or self.XRGB8888, self.GBM_BO_USE_LINEAR | self.GBM_BO_USE_RENDERING)
         return bo if bo else None
 
+    def bo_with_modifier(self, w, h, fmt, modifier):
+        """A buffer object in the given layout (tiled ones too), or None when the driver cannot make it."""
+        ct = self.ct
+        if not hasattr(self.lib, 'gbm_bo_create_with_modifiers'):
+            return None
+        self.lib.gbm_bo_create_with_modifiers.restype = ct.c_void_p
+        self.lib.gbm_bo_create_with_modifiers.argtypes = [ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.c_uint32, ct.POINTER(ct.c_uint64), ct.c_uint32]
+        mods = (ct.c_uint64 * 1)(modifier)
+        bo = self.lib.gbm_bo_create_with_modifiers(self.dev, w, h, fmt, mods, 1)
+        return bo if bo else None
+
     def stride(self, bo):
         return self.lib.gbm_bo_get_stride(bo)
 
@@ -3408,14 +3419,19 @@ class TestDmabuf(Base):
         self.assertEqual([e.name for e in evs], ['format_table', 'main_device', 'tranche_target_device', 'tranche_formats',
                                                   'tranche_flags', 'tranche_done', 'done'])
         table_fd, size = evs[0].fds[0], evs[0].args[0]
-        self.assertEqual(size, 32)
-        data = os.pread(table_fd, 32, 0)
+        data = os.pread(table_fd, size, 0)
         os.close(table_fd)
-        (f0, _, m0), (f1, _, m1) = struct.unpack('<IIQ', data[:16]), struct.unpack('<IIQ', data[16:])
-        self.assertEqual((f0, m0, f1, m1), (self.DMABUF_ARGB, 0, self.DMABUF_XRGB, 0))      # linear ARGB8888 / XRGB8888 only
+        entries = [struct.unpack('<IIQ', data[i:i + 16]) for i in range(0, size, 16)]
+        pairs = [(f, m) for f, _, m in entries]
+        if os.environ.get('MELLAGUI_RENDERER') == 'gl':               # + the layouts the GPU can sample (tiled ones)
+            self.assertIn((self.DMABUF_ARGB, 0), pairs)
+            self.assertIn((self.DMABUF_XRGB, 0), pairs)
+            self.assertTrue({f for f, _ in pairs} <= {self.DMABUF_ARGB, self.DMABUF_XRGB})
+        else:
+            self.assertEqual(pairs, [(self.DMABUF_ARGB, 0), (self.DMABUF_XRGB, 0)])           # linear ARGB8888 / XRGB8888 only
         dev = struct.unpack('<Q', evs[1].args[0])[0]
         self.assertEqual(evs[1].args[0], evs[2].args[0])
-        self.assertEqual(struct.unpack('<2H', evs[3].args[0]), (0, 1))
+        self.assertEqual(list(struct.unpack('<%dH' % (len(evs[3].args[0]) // 2), evs[3].args[0])), list(range(size // 16)))
         st = os.stat(Gbm.open().node) if Gbm.open() else None
         if st is not None:
             self.assertEqual(os.major(dev), os.major(st.st_rdev))                              # a DRM render node (major 226)
@@ -3427,7 +3443,11 @@ class TestDmabuf(Base):
         wl.roundtrip()
         mods = [e.args for e in wl.queue if e.obj == dm and e.name == 'modifier']
         wl.queue = [e for e in wl.queue if e.obj != dm]
-        self.assertEqual(mods, [[self.DMABUF_ARGB, 0, 0], [self.DMABUF_XRGB, 0, 0]])
+        if os.environ.get('MELLAGUI_RENDERER') == 'gl':
+            self.assertIn([self.DMABUF_ARGB, 0, 0], mods)
+            self.assertIn([self.DMABUF_XRGB, 0, 0], mods)
+        else:
+            self.assertEqual(mods, [[self.DMABUF_ARGB, 0, 0], [self.DMABUF_XRGB, 0, 0]])
 
     def test_a_gpu_buffer_is_shown_and_follows_updates(self):
         g = self.gbm()
@@ -3704,6 +3724,75 @@ class TestDmabufZeroCopy(Base):
         buf2 = self.wl_buffer(self.bo(w, h, 0xff20c020), w, h, self.XRGB)    # and zero copy once more
         self.show(win, buf2, w, h)
         self.assertEqual(self.settle('z3').px(x0 + 5, y0 + 5), (0x20, 0xc0, 0x20))
+
+    def offered(self):
+        """{(fourcc, modifier)} from the default feedback's format table."""
+        wl = self.cl.wl
+        dm = wl.bind('zwp_linux_dmabuf_v1', 4)
+        fb = wl.new_id('zwp_linux_dmabuf_feedback_v1')
+        wl.request(dm, 'get_default_feedback', fb)
+        wl.roundtrip()
+        evs = [e for e in wl.queue if e.obj == fb]
+        wl.queue = [e for e in wl.queue if e.obj != fb]
+        fd, size = evs[0].fds[0], evs[0].args[0]
+        data = os.pread(fd, size, 0)
+        os.close(fd)
+        return {(struct.unpack_from('<I', data, i)[0], struct.unpack_from('<Q', data, i + 8)[0]) for i in range(0, size, 16)}
+
+    def wl_buffer_mod(self, bo, w, h, fmt, modifier, immed=True):
+        wl = self.cl.wl
+        dm = wl.bind('zwp_linux_dmabuf_v1', 4)
+        params = wl.new_id('zwp_linux_buffer_params_v1')
+        wl.request(dm, 'create_params', params)
+        fd = self.g.fd_of(bo)
+        wl.request(params, 'add', 0, 0, self.g.stride(bo), modifier >> 32, modifier & 0xffffffff, fds=[fd])
+        os.close(fd)
+        if immed:
+            buf = wl.new_id('wl_buffer')
+            wl.request(params, 'create_immed', buf, I(w), I(h), fmt, 0)
+            return params, buf
+        wl.request(params, 'create', I(w), I(h), fmt, 0)
+        return params, None
+
+    def test_the_gpu_layouts_are_offered_and_linear_stays_first(self):
+        offered = self.offered()
+        self.assertIn((self.XRGB, 0), offered)
+        self.assertIn((self.ARGB, 0), offered)
+        for f, m in offered:
+            self.assertIn(f, (self.XRGB, self.ARGB))
+            self.assertIn(m, (0, (1 << 56) | 1, (1 << 56) | 2, (1 << 56) | 3), 'only single plane layouts that are known are offered')
+
+    def test_a_tiled_buffer_is_shown_correctly(self):
+        offered = self.offered()
+        tiled = sorted(m for f, m in offered if f == self.XRGB and m != 0)
+        if not tiled:
+            self.skipTest('the GPU samples linear buffers only')
+        w, h = 150, 90
+        for m in tiled:
+            bo = self.g.bo_with_modifier(w, h, self.XRGB, m)
+            if bo is None:
+                continue
+            self.g.fill(bo, w, h, lambda x, y: 0xff000000 | ((x * 255 // w) << 16) | ((y * 255 // h) << 8) | 0x40)
+            win = Window(self.cl, w, h)
+            params, buf = self.wl_buffer_mod(bo, w, h, self.XRGB, m)
+            self.show(win, buf, w, h)
+            x0, y0 = self.origin()
+            ppm = self.settle('tiled%d' % (m & 0xff))
+            for (x, y) in ((3, 3), (140, 5), (5, 80), (140, 85), (75, 45)):             # a gradient: a wrong detiling would scramble it
+                want = ((x * 255 // w), (y * 255 // h), 0x40)
+                got = ppm.px(x0 + x, y0 + y)
+                self.assertTrue(all(abs(a - b) <= 2 for a, b in zip(got, want)), (m, x, y, got, want))
+            return
+        self.skipTest('gbm could not make a tiled buffer')
+
+    def test_a_layout_that_was_not_offered_is_refused(self):
+        w, h = 64, 64
+        bo = self.bo(w, h, 0xff102030)
+        params, _ = self.wl_buffer_mod(bo, w, h, self.XRGB, (7 << 56) | 99, immed=False)       # some vendor layout we never offered
+        self.cl.wl.roundtrip()
+        evs = [e for e in self.cl.wl.queue if e.obj == params]
+        self.assertEqual([e.name for e in evs], ['failed'])
+        self.cl.wl.queue = [e for e in self.cl.wl.queue if e.obj != params]
 
     def test_a_client_that_leaves_while_its_buffer_is_held(self):
         w, h = 90, 60
@@ -4688,6 +4777,8 @@ class TestGLParity(Base):
             worst, n = 0, 0
             where = None
             for y in range(30, a.h):                                         # the top rows hold the clock
+                if step == 'card' and 300 <= y < 314:                         # ... and so does the card's thumbnail (the panel in it)
+                    continue
                 ra = a.data[(y * a.w) * 3:((y + 1) * a.w) * 3]
                 rb = b.data[(y * b.w) * 3:((y + 1) * b.w) * 3]
                 if ra == rb:

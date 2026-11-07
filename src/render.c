@@ -1836,3 +1836,8 @@ void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s)
     s->gl_tex = 0;
     s->gl_img = NULL;
 }
+
+struct lm_gl *lm_render_gl(struct lm_renderer *r)
+{
+    return r ? r->gl : NULL;
+}

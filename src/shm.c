@@ -607,7 +607,8 @@ static int buffer_copy_inner(struct lm_buffer *b, struct lm_texture *tex, uint32
 /* ---- dmabuf buffers (created by dmabuf.c) -------------------------------------------------------------------------- */
 
 struct lm_buffer *lm_buffer_create_dmabuf(struct lm_client *client, uint32_t id, uint32_t version, int fd, size_t size,
-                                          int32_t width, int32_t height, int32_t stride, int32_t offset, bool opaque)
+                                          int32_t width, int32_t height, int32_t stride, int32_t offset, bool opaque,
+                                          uint64_t modifier)
 {
     struct lm_buffer *b = calloc(1, sizeof(*b));
     struct lm_dmabuf_fd *d = calloc(1, sizeof(*d));
@@ -620,6 +621,7 @@ struct lm_buffer *lm_buffer_create_dmabuf(struct lm_client *client, uint32_t id,
     }
     d->fd = fd;
     d->size = size;
+    d->modifier = modifier;
     b->dmabuf = d;
     b->width = width;
     b->height = height;

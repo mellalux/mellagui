@@ -357,7 +357,7 @@ struct lm_panel_info {
     } task[LM_PANEL_MAX_TASKS];
     struct lm_window *task_win[LM_PANEL_MAX_TASKS]; /* the window behind task[i] (for picking) */
     struct lm_rect clock;
-    char clock_text[16];            /* "HH:MM" local time */
+    char clock_text[24];            /* "DD.MM.YYYY HH:MM" local time */
 };
 
 struct lm_menu_info {

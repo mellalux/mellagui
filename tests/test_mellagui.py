@@ -441,16 +441,16 @@ class TestWindows(Base):
     def test_panel_exit_needs_confirmation(self):
         idle = (0x2d, 0x3a, 0x5a)
         danger = (0xc0, 0x39, 0x2b)
-        ctl.click(925, 14)       # first click only arms the button
+        ctl.click(849, 14)       # first click only arms the button
         ctl.sync()
         self.assertTrue(alive())
         ppm = ctl.dump(os.path.join(tmp, 'exit1.ppm'))
-        self.assertEqual(ppm.px(904, 6), danger)
+        self.assertEqual(ppm.px(828, 6), danger)
         ctl.abs(500, 300)        # moving away cancels the confirmation
         ctl.sync()
         ppm = ctl.dump(os.path.join(tmp, 'exit2.ppm'))
-        self.assertEqual(ppm.px(904, 6), idle)
-        ctl.click(925, 14)       # armed again, still running
+        self.assertEqual(ppm.px(828, 6), idle)
+        ctl.click(849, 14)       # armed again, still running
         ctl.abs(500, 300)
         ctl.sync()
         self.assertTrue(alive())
@@ -469,10 +469,10 @@ class TestWindows(Base):
                     break
                 time.sleep(0.05)
             c2 = Ctl(os.path.join(d, 'ctl'))
-            c2.click(925, 14)
+            c2.click(849, 14)
             c2.sync()
             self.assertIsNone(p2.poll())
-            c2.click(925, 14)
+            c2.click(849, 14)
             self.assertEqual(p2.wait(timeout=5), 0)
         finally:
             if p2.poll() is None:
@@ -1308,8 +1308,8 @@ def type_text(text):
 
 class TestKeyboard(Base):
     """Keyboard layouts (XKB groups) and sticky keys."""
-    LAYOUT_BTN = (738, 14)          # panel indicator on the 1024 px wide test output
-    STICKY_BTN = (802, 14)
+    LAYOUT_BTN = (662, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (726, 14)
 
     def setUp(self):
         super().setUp()
@@ -1639,7 +1639,7 @@ class TestClients(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_run_dialog_from_panel_button(self):
-        self.run_dialog_runs(lambda: ctl.click(870, 14))
+        self.run_dialog_runs(lambda: ctl.click(794, 14))
 
     def test_run_dialog_from_super_r(self):
         def open_it():
@@ -1651,7 +1651,7 @@ class TestClients(Base):
     def test_run_dialog_escape_closes_without_running(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
             self.skipTest('mellagui-run not built')
-        ctl.click(870, 14)
+        ctl.click(794, 14)
         self.assertIsNotNone(wait_for_window('mellagui.run'))
         time.sleep(0.3)
         ctl.tap(KEY_ESC)

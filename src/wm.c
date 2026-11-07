@@ -31,7 +31,7 @@
 #define DOUBLE_CLICK_MS 400
 #define PANEL_BTN_W 72
 #define PANEL_WS_W 24
-#define PANEL_CLOCK_W 60
+#define PANEL_CLOCK_W 136                       /* "DD.MM.YYYY HH:MM" = 16 glyphs */
 #define PANEL_EXIT_W 52
 #define PANEL_RUN_W 44
 #define PANEL_LAYOUT_W 36
@@ -87,7 +87,7 @@ struct lm_wm {
     int next_id;
     int cascade;
     struct lm_timer *clock_timer;
-    char clock_text[16];
+    char clock_text[24];
 
     /* hover / pressed state */
     struct lm_window *hover_win;
@@ -777,11 +777,11 @@ struct lm_window *lm_wm_focused_window(const struct lm_wm *wm) { return wm->focu
 
 static void update_clock(struct lm_wm *wm, bool force)
 {
-    char buf[16];
+    char buf[24];
     time_t t = time(NULL);
     struct tm tm;
     localtime_r(&t, &tm);
-    strftime(buf, sizeof(buf), "%H:%M", &tm);
+    strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M", &tm);
     if (!force && !strcmp(buf, wm->clock_text))
         return;
     snprintf(wm->clock_text, sizeof(wm->clock_text), "%s", buf);

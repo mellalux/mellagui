@@ -77,6 +77,11 @@ struct lm_surface {
     unsigned gl_tex;
     int32_t gl_w, gl_h;
     bool gl_full;                   /* the whole texture must be uploaded (new content, new size) */
+    /* zero copy: a dmabuf the GPU samples directly (the content then has no CPU copy: tex.pixels is NULL and tex only keeps the
+     * size and opacity). The wl_buffer is held, i.e. not released, until the next commit replaces it. */
+    bool gl_dmabuf;
+    void *gl_img;                   /* the EGLImage behind gl_tex */
+    struct lm_buffer *gl_held;
     struct lm_region gl_damage;     /* texture pixels that changed since the last upload (when !gl_full) */
     int32_t width, height;          /* surface-local size (tex size / scale); 0 if !has_content */
     int32_t scale;                  /* buffer_scale, >= 1 */

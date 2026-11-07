@@ -286,9 +286,56 @@ static void gl_chrome_item(struct gl_pass *p, struct gl_chrome *ch, const struct
 
 /* ---- client surfaces ------------------------------------------------------------------------------------------------ */
 
+/* Zero copy: `s` shows the client's dmabuf through an EGLImage bound to its texture. */
+bool lm_render_dmabuf_import(struct lm_renderer *r, struct lm_surface *s, struct lm_buffer *b)
+{
+    if (!r->gl || !lm_gl_has_dmabuf(r->gl) || !b->dmabuf || b->dmabuf->fd < 0)
+        return false;
+    uint32_t fourcc = b->format == LM_WL_SHM_FORMAT_XRGB8888 ? LM_DRM_FORMAT_XRGB8888 : LM_DRM_FORMAT_ARGB8888;
+    lm_gl_make_current(r->gl);
+    void *img = lm_gl_dmabuf_image(r->gl, b->dmabuf->fd, b->width, b->height, b->stride, b->offset, fourcc);
+    if (!img)
+        return false;
+    unsigned tex = (s->gl_tex && s->gl_dmabuf) ? s->gl_tex : lm_gl_tex_alloc(r->gl);
+    if (!tex || !lm_gl_tex_bind_image(r->gl, tex, img)) {
+        lm_gl_image_destroy(r->gl, img);
+        if (tex && tex != s->gl_tex)
+            lm_gl_tex_delete(r->gl, tex);
+        return false;
+    }
+    if (s->gl_tex && s->gl_tex != tex)                              /* it was a copied texture: replaced */
+        lm_gl_tex_delete(r->gl, s->gl_tex);
+    if (s->gl_img)
+        lm_gl_image_destroy(r->gl, s->gl_img);                      /* the previous frame's image */
+    s->gl_tex = tex;
+    s->gl_img = img;
+    s->gl_dmabuf = true;
+    s->gl_w = b->width;
+    s->gl_h = b->height;
+    s->gl_full = false;
+    lm_region_clear(&s->gl_damage);
+    return true;
+}
+
+void lm_render_dmabuf_drop(struct lm_renderer *r, struct lm_surface *s)
+{
+    if (r->gl) {
+        lm_gl_make_current(r->gl);
+        if (s->gl_img)
+            lm_gl_image_destroy(r->gl, s->gl_img);
+        if (s->gl_tex)
+            lm_gl_tex_delete(r->gl, s->gl_tex);
+    }
+    s->gl_img = NULL;
+    s->gl_tex = 0;
+    s->gl_w = s->gl_h = 0;
+}
+
 /* Brings the GL texture of `s` up to date with s->tex (new texture, whole copy, or just the damaged rectangles). */
 static void gl_sync_tex(struct lm_renderer *r, struct lm_surface *s)
 {
+    if (s->gl_dmabuf)                                   /* the GPU reads the client's buffer itself */
+        return;
     int w = s->tex.width, h = s->tex.height;
     if (!s->gl_tex || s->gl_w != w || s->gl_h != h) {
         if (s->gl_tex)
@@ -312,7 +359,7 @@ static void gl_sync_tex(struct lm_renderer *r, struct lm_surface *s)
 static bool gl_visit(struct lm_surface *s, int32_t x, int32_t y, void *data)
 {
     struct gl_pass *p = data;
-    if (!s->has_content || !s->tex.pixels || s->width <= 0 || s->height <= 0)
+    if (!s->has_content || (!s->tex.pixels && !s->gl_dmabuf) || s->width <= 0 || s->height <= 0)
         return true;
     struct lm_rect where = lm_rect_make(x, y, s->width, s->height), orect = lm_output_rect(p->st->out);
     if (!lm_rect_overlaps(&where, &orect))
@@ -448,6 +495,63 @@ static void gl_cursor(struct gl_pass *p)
 
 /* ---- one frame ----------------------------------------------------------------------------------------------------- */
 
+/* Draws the whole output into the bound target: background, scene, and (not for screenshots) flash, card and cursor. */
+static void gl_draw_scene(struct lm_renderer *r, struct out_state *st, struct gl_out *go, const struct lm_region *redraw,
+                          bool full, bool overlays)
+{
+    struct lm_output *out = st->out;
+    struct lm_rect orect = lm_output_rect(out);
+    lm_gl_scissor(r->gl, false, 0, 0, 0, 0);
+    lm_gl_draw_tex(r->gl, go->bg_tex, 0, 0, go->w, go->h, 0, 0, 1, 1, 1.0f, true);
+    struct gl_pass p = { .r = r, .st = st, .go = go, .dirty = redraw, .full = full, .ox = out->x, .oy = out->y };
+    if (r->srv->wm)
+        lm_wm_scene_for_each(r->srv->wm, &orect, gl_scene_cb, &p);
+    if (overlays) {
+        gl_overlays(&p);
+        gl_cursor(&p);
+    }
+}
+
+/* A screenshot: the scene (no cursor, flash or card) rendered offscreen and read back; the part inside `clip` (global). */
+static uint32_t *gl_capture(struct lm_renderer *r, struct out_state *st, const struct lm_rect *clip, int *w, int *h)
+{
+    struct lm_output *out = st->out;
+    struct gl_out *go = gl_out_get(r, st);
+    if (!go)
+        return NULL;
+    lm_gl_make_current(r->gl);
+    struct lm_gl_target tgt;
+    if (!lm_gl_target_create(r->gl, go->w, go->h, &tgt))
+        return NULL;
+    struct lm_rect orect = lm_output_rect(out);
+    struct lm_region all;
+    lm_region_init(&all);
+    lm_region_add_rect(&all, &orect);
+    gl_bg_update(r, st, go, &all);
+    go->bg_ok = true;
+    lm_gl_bind_target(r->gl, &tgt, go->w, go->h);
+    gl_draw_scene(r, st, go, &all, true, false);
+    lm_region_fini(&all);
+    size_t stride = (size_t)go->w * 4;
+    uint32_t *whole = malloc((size_t)go->h * stride), *res = malloc((size_t)clip->w * (size_t)clip->h * 4);
+    bool ok = whole && res && lm_gl_readback(r->gl, &tgt, whole, stride);
+    lm_gl_target_destroy(r->gl, &tgt);
+    if (ok) {
+        for (int y = 0; y < clip->h; y++)
+            memcpy(res + (size_t)y * (size_t)clip->w,
+                   (const uint8_t *)whole + (size_t)(clip->y - out->y + y) * stride + (size_t)(clip->x - out->x) * 4,
+                   (size_t)clip->w * 4);
+        *w = clip->w;
+        *h = clip->h;
+    }
+    free(whole);
+    if (!ok) {
+        free(res);
+        return NULL;
+    }
+    return res;
+}
+
 static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool force)
 {
     struct lm_output *out = st->out;
@@ -483,13 +587,7 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     } else {
         lm_gl_bind_target(r->gl, &go->tgt, go->w, go->h);
     }
-    lm_gl_scissor(r->gl, false, 0, 0, 0, 0);
-    lm_gl_draw_tex(r->gl, go->bg_tex, 0, 0, go->w, go->h, 0, 0, 1, 1, 1.0f, true);
-    struct gl_pass p = { .r = r, .st = st, .go = go, .dirty = &redraw, .full = full, .ox = out->x, .oy = out->y };
-    if (r->srv->wm)
-        lm_wm_scene_for_each(r->srv->wm, &orect, gl_scene_cb, &p);
-    gl_overlays(&p);
-    gl_cursor(&p);
+    gl_draw_scene(r, st, go, &redraw, full, true);
 
     if (win) {
         lm_output_gl_present(out);                      /* swap the window's buffers, queue the page flip */

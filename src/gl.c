@@ -38,6 +38,14 @@ typedef char GLchar;
 #define EGL_GREEN_SIZE 0x3023
 #define EGL_BLUE_SIZE 0x3024
 #define EGL_ALPHA_SIZE 0x3021
+#define EGL_WIDTH 0x3057
+#define EGL_HEIGHT 0x3056
+#define EGL_LINUX_DMA_BUF_EXT 0x3270
+#define EGL_LINUX_DRM_FOURCC_EXT 0x3271
+#define EGL_DMA_BUF_PLANE0_FD_EXT 0x3272
+#define EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
+#define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
+#define EGL_NO_IMAGE ((void *)0)
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 
 #define GL_FALSE 0
@@ -93,6 +101,8 @@ struct egl_fns {
     EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
     EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
     EGLBoolean (*SwapInterval)(EGLDisplay, EGLint);
+    void *(*CreateImageKHR)(EGLDisplay, EGLContext, EGLenum, void *, const EGLint *);
+    EGLBoolean (*DestroyImageKHR)(EGLDisplay, void *);
 };
 
 /* libgbm: buffers the GPU can render into and KMS can scan out */
@@ -187,6 +197,8 @@ struct lm_gl {
     GLint u_size, u_ysign, u_tex, u_color, a_pos, a_uv;
     GLuint white;                       /* 1x1 white texture for colour rectangles */
     bool current;                       /* the context is current on this thread */
+    bool has_dmabuf;
+    void (*ImageTargetTexture2D)(GLenum, void *);     /* glEGLImageTargetTexture2DOES */
     float ysign;                        /* +1 offscreen targets (row 0 at the bottom of GL), -1 window surfaces */
     int tw, th;                         /* size of the bound target */
     char renderer[96];
@@ -354,6 +366,14 @@ struct lm_gl *lm_gl_create(int gbm_fd, char *err, size_t errsz)
         goto fail;
     }
     snprintf(l->renderer, sizeof(l->renderer), "%s", (const char *)l->gl.GetString(GL_RENDERER));
+    {
+        const char *eexts = l->egl.QueryString(l->dpy, EGL_EXTENSIONS);
+        l->egl.CreateImageKHR = (void *)l->egl.GetProcAddress("eglCreateImageKHR");
+        l->egl.DestroyImageKHR = (void *)l->egl.GetProcAddress("eglDestroyImageKHR");
+        l->ImageTargetTexture2D = (void *)l->egl.GetProcAddress("glEGLImageTargetTexture2DOES");
+        l->has_dmabuf = eexts && strstr(eexts, "EGL_EXT_image_dma_buf_import") && l->egl.CreateImageKHR &&
+                        l->egl.DestroyImageKHR && l->ImageTargetTexture2D && strstr(exts, "GL_OES_EGL_image");
+    }
 
     char serr[300];
     GLuint vs = compile(l, GL_VERTEX_SHADER, VS, serr, sizeof(serr));
@@ -469,6 +489,49 @@ void lm_gl_tex_delete(struct lm_gl *l, unsigned tex)
     GLuint t = tex;
     if (t)
         l->gl.DeleteTextures(1, &t);
+}
+
+/* ---- dmabuf import ----------------------------------------------------------------------------------------------------- */
+
+bool lm_gl_has_dmabuf(const struct lm_gl *l)
+{
+    return l->has_dmabuf;
+}
+
+void *lm_gl_dmabuf_image(struct lm_gl *l, int fd, int w, int h, int stride, int offset, uint32_t fourcc)
+{
+    if (!l->has_dmabuf)
+        return NULL;
+    const EGLint attr[] = { EGL_WIDTH, w, EGL_HEIGHT, h, EGL_LINUX_DRM_FOURCC_EXT, (EGLint)fourcc, EGL_DMA_BUF_PLANE0_FD_EXT, fd,
+                            EGL_DMA_BUF_PLANE0_OFFSET_EXT, offset, EGL_DMA_BUF_PLANE0_PITCH_EXT, stride, EGL_NONE };
+    return l->egl.CreateImageKHR(l->dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attr);
+}
+
+void lm_gl_image_destroy(struct lm_gl *l, void *image)
+{
+    if (image)
+        l->egl.DestroyImageKHR(l->dpy, image);
+}
+
+unsigned lm_gl_tex_alloc(struct lm_gl *l)
+{
+    GLuint t = 0;
+    l->gl.GenTextures(1, &t);
+    if (!t)
+        return 0;
+    l->gl.BindTexture(GL_TEXTURE_2D, t);
+    l->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    l->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    l->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    l->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return t;
+}
+
+bool lm_gl_tex_bind_image(struct lm_gl *l, unsigned tex, void *image)
+{
+    l->gl.BindTexture(GL_TEXTURE_2D, tex);
+    l->ImageTargetTexture2D(GL_TEXTURE_2D, image);
+    return l->gl.GetError() == GL_NO_ERROR;
 }
 
 /* ---- offscreen target ----------------------------------------------------------------------------------------------- */

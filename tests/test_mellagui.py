@@ -3450,8 +3450,11 @@ class TestDmabuf(Base):
         ppm = ctl.dump(os.path.join(tmp, 'dmabuf2.ppm'))
         self.assertEqual(ppm.px(x0 + 20, y0 + 20), (0x20, 0x80, 0x40))
         self.assertEqual(ppm.px(x0 + 150, y0 + 100), (0x20, 0x80, 0x40))
-        # the compositor released the buffer once it had copied it
-        self.assertTrue(any(e.obj == buf and e.name == 'release' for e in self.c.wl.queue))
+        released = any(e.obj == buf and e.name == 'release' for e in self.c.wl.queue)
+        if os.environ.get('MELLAGUI_RENDERER') == 'gl':
+            self.assertFalse(released)          # zero copy: the GPU samples the client's buffer, which stays with us until replaced
+        else:
+            self.assertTrue(released)           # the compositor released the buffer once it had copied it
 
     def test_argb_buffers_blend_with_what_is_behind(self):
         g = self.gbm()
@@ -3468,6 +3471,8 @@ class TestDmabuf(Base):
 
     def test_partial_update_with_odd_width_and_hostile_alpha_is_fixed_in_the_copy(self):
         """The alpha fix runs inside the streaming copy: unaligned rect starts, odd widths, colour above alpha."""
+        if os.environ.get('MELLAGUI_RENDERER') == 'gl':
+            self.skipTest('zero copy: the GPU samples the buffer as it is, nothing repairs invalid premultiplied colours')
         g = self.gbm()
         w, h = 37, 8
         bo = g.bo(w, h, Gbm.ARGB8888)
@@ -3570,6 +3575,148 @@ class TestDmabuf(Base):
         cl.wl.get_registry()
         cl.wl.roundtrip()
         self.assertNotIn('zwp_linux_dmabuf_v1', cl.wl.globals)
+
+
+class TestDmabufZeroCopy(Base):
+    """With the GL renderer a client's dmabuf is sampled in place by the GPU (an EGLImage): no CPU copy, the wl_buffer is held until
+    the next commit replaces it."""
+    NAME = 'mellagui-zc'
+    ARGB, XRGB = 0x34325241, 0x34325258
+
+    def setUp(self):
+        super().setUp()
+        self.g = Gbm.open()
+        if self.g is None:
+            self.skipTest('no render node or libgbm')
+        tool = os.path.join(ROOT, 'build', 'gl-test')
+        if not os.path.exists(tool) or subprocess.run([tool], capture_output=True, timeout=60).returncode == 77:
+            self.skipTest('no OpenGL ES here')
+        self.shots = os.path.join(tmp, self.NAME + '-shots')
+        p, self.c, stop = self.private_compositor(self.NAME, '--screenshot-dir', self.shots,
+                                                  env={'MELLAGUI_RENDERER': 'gl'})
+        self.cl = Client(self.NAME)
+        self.clients.append(self.cl)
+        if 'zwp_linux_dmabuf_v1' not in self.cl.wl.globals:
+            self.skipTest('no dmabuf global')
+
+    def bo(self, w, h, color, fmt=None):
+        bo = self.g.bo(w, h) if fmt is None else self.g.bo(w, h, fmt)
+        self.assertIsNotNone(bo)
+        self.g.fill(bo, w, h, color if callable(color) else (lambda x, y: color))
+        return bo
+
+    def wl_buffer(self, bo, w, h, fmt):
+        wl = self.cl.wl
+        dm = wl.bind('zwp_linux_dmabuf_v1', 4)
+        params = wl.new_id('zwp_linux_buffer_params_v1')
+        wl.request(dm, 'create_params', params)
+        fd = self.g.fd_of(bo)
+        wl.request(params, 'add', 0, 0, self.g.stride(bo), 0, 0, fds=[fd])
+        os.close(fd)
+        buf = wl.new_id('wl_buffer')
+        wl.request(params, 'create_immed', buf, I(w), I(h), fmt, 0)
+        return buf
+
+    def show(self, win, buf, w, h):
+        wl = self.cl.wl
+        wl.request(win.surface, 'attach', buf, I(0), I(0))
+        wl.request(win.surface, 'damage_buffer', I(0), I(0), I(w), I(h))
+        wl.request(win.surface, 'commit')
+        wl.roundtrip()
+
+    def released(self, buf):
+        self.cl.wl.pump(0.05)
+        return any(e.obj == buf and e.name == 'release' for e in self.cl.wl.queue)
+
+    def origin(self):
+        r = self.c.windows()['windows'][0]
+        return r['x'], r['y']
+
+    def settle(self, name):
+        self.c.abs(790, 490)
+        self.c.sync()
+        time.sleep(0.15)
+        self.c.sync()
+        return self.c.dump(os.path.join(tmp, '%s-%s.ppm' % (self.NAME, name)))
+
+    def test_shown_in_place_and_held_until_replaced(self):
+        w, h = 120, 80
+        win = Window(self.cl, w, h)
+        a, b = self.bo(w, h, 0xff2040c0), self.bo(w, h, 0xffc08020)
+        ba, bb = self.wl_buffer(a, w, h, self.XRGB), self.wl_buffer(b, w, h, self.XRGB)
+        self.show(win, ba, w, h)
+        x0, y0 = self.origin()
+        self.assertEqual(self.settle('a').px(x0 + 10, y0 + 10), (0x20, 0x40, 0xc0))
+        self.assertFalse(self.released(ba), 'the buffer is still being sampled: it must not be released')
+        self.show(win, bb, w, h)
+        self.assertEqual(self.settle('b').px(x0 + 10, y0 + 10), (0xc0, 0x80, 0x20))
+        self.assertTrue(self.released(ba), 'the replaced buffer goes back to the client')
+        self.assertFalse(self.released(bb))
+
+    def test_the_producer_can_repaint_the_same_buffer(self):
+        w, h = 100, 60
+        win = Window(self.cl, w, h)
+        bo = self.bo(w, h, 0xff102030)
+        buf = self.wl_buffer(bo, w, h, self.XRGB)
+        self.show(win, buf, w, h)
+        x0, y0 = self.origin()
+        self.assertEqual(self.settle('r1').px(x0 + 5, y0 + 5), (0x10, 0x20, 0x30))
+        self.g.fill(bo, w, h, lambda x, y: 0xff80a0c0)
+        self.show(win, buf, w, h)
+        self.assertEqual(self.settle('r2').px(x0 + 5, y0 + 5), (0x80, 0xa0, 0xc0))
+
+    def test_argb_blends_with_what_is_behind(self):
+        w, h = 64, 64
+        win = Window(self.cl, w, h)
+        bo = self.bo(w, h, lambda x, y: 0xff102030 if x < 32 else 0x00000000, Gbm.ARGB8888)
+        self.show(win, self.wl_buffer(bo, w, h, self.ARGB), w, h)
+        x0, y0 = self.origin()
+        ppm = self.settle('argb')
+        self.assertEqual(ppm.px(x0 + 5, y0 + 5), (0x10, 0x20, 0x30))
+        self.assertNotEqual(ppm.px(x0 + 50, y0 + 5), (0, 0, 0))              # transparent half: the window's background shows
+
+    def test_a_screenshot_of_a_zero_copy_window_has_its_pixels(self):
+        w, h = 160, 100
+        win = Window(self.cl, w, h)
+        self.show(win, self.wl_buffer(self.bo(w, h, 0xff20c060), w, h, self.XRGB), w, h)
+        x0, y0 = self.origin()
+        self.settle('shot')
+        self.c.tap(99)
+        for _ in range(100):
+            if os.path.isdir(self.shots) and os.listdir(self.shots):
+                break
+            time.sleep(0.03)
+        with open(os.path.join(self.shots, sorted(os.listdir(self.shots))[0]), 'rb') as f:
+            pw, ph, rows = TestScreenshot.decode_png(f.read())
+        self.assertEqual(tuple(rows[y0 + 10][(x0 + 10) * 3:(x0 + 10) * 3 + 3]), (0x20, 0xc0, 0x60))
+
+    def test_back_to_shm_content_on_the_same_surface(self):
+        w, h = 100, 70
+        win = Window(self.cl, w, h, color=0xff303030)
+        buf = self.wl_buffer(self.bo(w, h, 0xffc02020), w, h, self.XRGB)
+        self.show(win, buf, w, h)
+        x0, y0 = self.origin()
+        self.assertEqual(self.settle('z1').px(x0 + 5, y0 + 5), (0xc0, 0x20, 0x20))
+        win.commit_buffer(w, h, color=0xff2020c0)                           # an shm buffer again
+        self.cl.wl.roundtrip()
+        self.assertEqual(self.settle('z2').px(x0 + 5, y0 + 5), (0x20, 0x20, 0xc0))
+        self.assertTrue(self.released(buf))
+        buf2 = self.wl_buffer(self.bo(w, h, 0xff20c020), w, h, self.XRGB)    # and zero copy once more
+        self.show(win, buf2, w, h)
+        self.assertEqual(self.settle('z3').px(x0 + 5, y0 + 5), (0x20, 0xc0, 0x20))
+
+    def test_a_client_that_leaves_while_its_buffer_is_held(self):
+        w, h = 90, 60
+        win = Window(self.cl, w, h)
+        self.show(win, self.wl_buffer(self.bo(w, h, 0xff808080), w, h, self.XRGB), w, h)
+        self.cl.wl.close()
+        for _ in range(100):
+            if not self.c.windows()['windows']:
+                break
+            time.sleep(0.03)
+        self.assertEqual(self.c.windows()['windows'], [])
+        self.settle('gone')
+        self.c.cmd('windows')                                                # the compositor still answers
 
 
 class TestOcclusion(Base):

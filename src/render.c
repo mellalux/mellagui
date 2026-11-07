@@ -1212,7 +1212,7 @@ static int64_t surface_opaque_rect(const struct lm_surface *s, int32_t ox, int32
                                    struct lm_rect *out)
 {
     *out = (struct lm_rect){ 0 };
-    if (!s || !s->has_content || !s->tex.pixels)
+    if (!s || !s->has_content || (!s->tex.pixels && !s->gl_dmabuf))
         return 0;
     int64_t best = 0;
     if (s->tex.opaque || s->tex.solid) {
@@ -1580,6 +1580,8 @@ static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
     return true;
 }
 
+static uint32_t *gl_capture(struct lm_renderer *r, struct out_state *st, const struct lm_rect *clip, int *w, int *h);
+
 uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h)
 {
     if (!r->srv->backend || rect->w <= 0 || rect->h <= 0)
@@ -1592,6 +1594,8 @@ uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, i
     orect = lm_output_rect(out);
     if (!lm_rect_intersect(rect, &orect, &clip))
         return NULL;
+    if (r->gl)                                          /* zero-copy surfaces have no CPU pixels: the GPU renders the shot */
+        return gl_capture(r, st, &clip, w, h);
     size_t stride = (size_t)out->width * 4;
     uint32_t *whole = calloc((size_t)out->height, stride);
     uint32_t *res = malloc((size_t)clip.w * (size_t)clip.h * 4);
@@ -1822,9 +1826,13 @@ void lm_render_flush(struct lm_renderer *r)
 
 void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s)
 {
-    if (r->gl && s->gl_tex) {
+    if (r->gl && (s->gl_tex || s->gl_img)) {
         lm_gl_make_current(r->gl);
-        lm_gl_tex_delete(r->gl, s->gl_tex);
+        if (s->gl_img)
+            lm_gl_image_destroy(r->gl, s->gl_img);
+        if (s->gl_tex)
+            lm_gl_tex_delete(r->gl, s->gl_tex);
     }
     s->gl_tex = 0;
+    s->gl_img = NULL;
 }

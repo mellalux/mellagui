@@ -37,6 +37,9 @@
 #include "server.h"
 #include "util.h"
 
+struct lm_surface;
+struct lm_buffer;
+
 struct lm_renderer *lm_render_create(struct lm_server *srv);
 void lm_render_destroy(struct lm_renderer *r);
 
@@ -54,6 +57,12 @@ void lm_render_request_frame(struct lm_renderer *r);
 
 /* Headless: copies what the GL renderer drew into the backend's memory framebuffer (dump, tests). No-op for software. */
 void lm_render_readback(struct lm_renderer *r);
+
+/* Zero copy: makes `s`'s GL texture show the dmabuf `b` (an EGLImage; no CPU read). false = not possible here (software renderer,
+ * no GL dmabuf import, the driver refused): the caller falls back to copying the pixels. */
+bool lm_render_dmabuf_import(struct lm_renderer *r, struct lm_surface *s, struct lm_buffer *b);
+/* The surface leaves the zero-copy path (new shm content, unmapped): drops the image and the texture. */
+void lm_render_dmabuf_drop(struct lm_renderer *r, struct lm_surface *s);
 
 /* The surface is being freed: its GL texture (when the GL renderer made one) goes. */
 struct lm_surface;

@@ -262,7 +262,8 @@ enum lm_pick_kind {
     LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets (`index` = gadget id) */
     LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
     LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
-    LM_PICK_CLIP_ENTRY      /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
+    LM_PICK_CLIP_ENTRY,     /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
+    LM_PICK_SHOT_CARD       /* the screenshot card (above everything): click = open the file in the viewer */
 };
 
 struct lm_pick {

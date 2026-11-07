@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "font.h"
+#include "lock.h"
 #include "output.h"
 #include "seat.h"
 #include "surface.h"
@@ -56,7 +57,7 @@ struct out_state {
 };
 
 /* Screenshot feedback: a white flash over the captured area (150 ms) and a card with a thumbnail and a label in the
- * bottom right corner of the output (MELLAGUI_TOAST_MS, default 3 s). Painted above the scene, below the cursor. */
+ * bottom right corner of the output (MELLAGUI_TOAST_MS, default 8 s). Painted above the scene, below the cursor. */
 #define SHOT_THUMB_W 240
 #define SHOT_THUMB_H 150
 #define SHOT_FLASH_TICKS 3
@@ -68,6 +69,7 @@ struct shot_fx {
     uint32_t *thumb;
     int tw, th;
     char label[96];
+    char path[512];                     /* the saved file ("" = clipboard only): a click on the card opens it */
     int ticks;
     int hold_ms;
     struct lm_timer *timer;
@@ -1277,8 +1279,8 @@ static int shot_flash_alpha(const struct shot_fx *fx)
 static void paint_shot(const struct paint_ctx *c)
 {
     const struct shot_fx *fx = &c->r->shot;
-    if (!fx->active || fx->out != c->out)
-        return;
+    if (!fx->active || fx->out != c->out || (c->r->srv->lock && lm_lock_active(c->r->srv->lock)))
+        return;                                         /* (never over the lock screen) */
     int a = shot_flash_alpha(fx);
     if (a > 0)
         fill_round(c, &fx->area, 0, ((uint32_t)a << 24) | 0x00ffffffu);
@@ -1331,8 +1333,26 @@ static void shot_tick(void *data)
         shot_end(r);
 }
 
+bool lm_render_shot_card_at(struct lm_renderer *r, double x, double y)
+{
+    const struct shot_fx *fx = &r->shot;
+    if (!fx->active || (r->srv->lock && lm_lock_active(r->srv->lock)))
+        return false;
+    struct lm_rect card = shot_card_rect(fx);
+    return lm_rect_contains(&card, (int32_t)x, (int32_t)y);
+}
+
+bool lm_render_shot_dismiss(struct lm_renderer *r, char *path, size_t n)
+{
+    bool had = r->shot.active && r->shot.path[0];
+    if (path && n)
+        snprintf(path, n, "%s", had ? r->shot.path : "");
+    shot_end(r);
+    return had;
+}
+
 void lm_render_shot_feedback(struct lm_renderer *r, const struct lm_rect *where, const uint32_t *px, int w, int h,
-                             const char *label)
+                             const char *label, const char *path)
 {
     if (!r->srv->backend || w <= 0 || h <= 0)
         return;
@@ -1377,9 +1397,10 @@ void lm_render_shot_feedback(struct lm_renderer *r, const struct lm_rect *where,
     fx->out = out;
     fx->area = *where;
     snprintf(fx->label, sizeof(fx->label), "%s", label ? label : "");
+    snprintf(fx->path, sizeof(fx->path), "%s", path ? path : "");
     fx->ticks = 0;
     const char *ms = getenv("MELLAGUI_TOAST_MS");
-    int hold = ms ? atoi(ms) : 3000;
+    int hold = ms ? atoi(ms) : 8000;
     fx->hold_ms = LM_MAX(hold - SHOT_FLASH_TICKS * SHOT_TICK_MS, 0);
     fx->active = true;
     lm_timer_arm_ms(fx->timer, SHOT_TICK_MS, SHOT_TICK_MS);

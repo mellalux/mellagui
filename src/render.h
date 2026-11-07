@@ -69,11 +69,16 @@ void lm_render_flush(struct lm_renderer *r);
 uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h);
 
 /*
- * Feedback for a screenshot of `where` (global): a short white flash over it and, for MELLAGUI_TOAST_MS (default 3 s), a
+ * Feedback for a screenshot of `where` (global): a short white flash over it and, for MELLAGUI_TOAST_MS (default 8 s), a
  * card with a thumbnail of the pixels `px` (w x h XRGB8888, stride w * 4) and `label` in the bottom right corner of
- * the output. A new one replaces the old. Never part of a screenshot.
+ * the output; `path` (or NULL) is the saved file. A new one replaces the old. Never part of a screenshot.
  */
 void lm_render_shot_feedback(struct lm_renderer *r, const struct lm_rect *where, const uint32_t *px, int w, int h,
-                             const char *label);
+                             const char *label, const char *path);
+/* The card is showing and the global point is on it (not while the screen is locked). */
+bool lm_render_shot_card_at(struct lm_renderer *r, double x, double y);
+/* Removes the card; copies the saved file's path to `path` ("" when only the clipboard got the shot). Returns true when
+ * there is a path. `path` may be NULL. */
+bool lm_render_shot_dismiss(struct lm_renderer *r, char *path, size_t n);
 
 #endif

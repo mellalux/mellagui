@@ -4350,6 +4350,94 @@ class TestScreenshot(Base):
         self.assertEqual(gone.px(*card_px), wall_card)
         self.assertEqual(gone.px(50, 300), wall)
 
+    def card_click_setup(self, name, *extra, env=None):
+        self.shots = os.path.join(tmp, name + '-shots')
+        p, c, stop = self.private_compositor(name, '--screenshot-dir', self.shots, *extra, env=dict(env or {}, MELLAGUI_TOAST_MS='6000'))
+        c.cmd('abs 20 20')
+        c.sync()
+        time.sleep(0.15)
+        c.sync()
+        return c
+
+    CARD_PX = (600, 380)                                       # inside the card of an 800x500 output (528,294 256x190)
+
+    def test_clicking_the_card_opens_the_saved_file_in_the_viewer(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-view')):
+            self.skipTest('mellagui-view not built')
+        c = self.card_click_setup('mellagui-shot8')
+        before = c.dump(os.path.join(tmp, 'cc0.ppm')).px(*self.CARD_PX)
+        c.tap(self.KEY_PRINT)
+        c.sync()
+        files = self.wait_files(1)
+        time.sleep(0.4)
+        c.sync()
+        self.assertNotEqual(c.dump(os.path.join(tmp, 'cc1.ppm')).px(*self.CARD_PX), before)     # the card is up
+        c.click(*self.CARD_PX)
+        end = time.time() + 6
+        win = None
+        while time.time() < end and not win:
+            win = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.view']
+            time.sleep(0.05)
+        self.assertTrue(win, 'the viewer did not open')
+        self.assertEqual(win[0]['title'], files[0] + ' - Images')
+        c.abs(20, 20)
+        c.sync()
+        self.assertEqual(c.windows()['windows'][0]['app_id'], 'mellagui.view')   # nothing else opened
+
+    def test_clicking_a_clipboard_only_card_just_closes_it(self):
+        c = self.card_click_setup('mellagui-shot9')
+        before = c.dump(os.path.join(tmp, 'cd0.ppm')).px(*self.CARD_PX)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_PRINT)
+        c.key(KEY_LEFTCTRL, False)
+        time.sleep(0.4)
+        c.sync()
+        self.assertNotEqual(c.dump(os.path.join(tmp, 'cd1.ppm')).px(*self.CARD_PX), before)
+        c.click(*self.CARD_PX)
+        c.abs(20, 20)                                          # the cursor sprite is black
+        time.sleep(0.4)
+        c.sync()
+        self.assertEqual(c.dump(os.path.join(tmp, 'cd2.ppm')).px(*self.CARD_PX), before)       # gone
+        self.assertEqual([w for w in c.windows()['windows']], [])
+
+    def test_the_click_does_not_reach_the_window_under_the_card(self):
+        c = self.card_click_setup('mellagui-shot10')
+        cl = Client('mellagui-shot10')
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        ptr = cl.wl.new_id('wl_pointer')
+        cl.wl.request(seat, 'get_pointer', ptr)
+        win = Window(cl, 780, 440, title='big')
+        cl.wl.roundtrip()
+        ctl_win = c.windows()['windows'][0]
+        cx, cy = self.CARD_PX
+        self.assertTrue(ctl_win['x'] < cx < ctl_win['x'] + ctl_win['w'] and ctl_win['y'] < cy < ctl_win['y'] + ctl_win['h'])
+        c.tap(self.KEY_PRINT)
+        time.sleep(0.4)
+        c.sync()
+        cl.wl.queue.clear()
+        c.click(cx, cy)
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual([e for e in cl.wl.queue if e.obj == ptr and e.name == 'button'], [])
+
+    def test_the_card_is_not_shown_over_the_lock_screen_and_not_clickable(self):
+        c = self.card_click_setup('mellagui-shot11', '--lock-file', os.path.join(tmp, 'shot11.lock'),
+                                  env={'MELLAGUI_LOCK_ITER': '1000'})
+        c.cmd('lock set - password hunter22x')
+        c.tap(self.KEY_PRINT)
+        time.sleep(0.4)
+        c.sync()
+        c.cmd('lock now')
+        time.sleep(0.2)
+        c.sync()
+        locked = c.dump(os.path.join(tmp, 'ce1.ppm'))
+        # the card's thumbnail ring colour (0x3a4256) must not be anywhere in the lock screen
+        self.assertEqual(locked.count((0x3a, 0x42, 0x56), 520, 290, 790, 490), 0)
+        c.click(*self.CARD_PX)
+        time.sleep(0.3)
+        self.assertEqual([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.view'], [])
+
     def test_the_first_cursor_move_leaves_no_ghost_behind(self):
         p, c, stop = self.private_compositor('mellagui-ghost')
         c.cmd('abs 700 300')

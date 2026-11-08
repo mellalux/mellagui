@@ -318,10 +318,10 @@ static int selftest(void)
 #define MAX_KV 96
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_MENU, PAGE_KEYS, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Menu", "Keys" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_MENU, PAGE_KEYS, PAGE_COLOURS, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Menu", "Keys", "Colours" };
 
-enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT };
+enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH };
 
 struct rect { int x, y, w, h; };
 
@@ -353,7 +353,7 @@ struct app {
     char wall[220];                     /* the wallpaper file field while it is being edited */
     bool wall_edited;                   /* (else the field shows the compositor's value) */
     /* Menu page: the two fields below the entry list ([0] name, [1] command) and the entry they edit (-1 = a new one) */
-    char input[3][1024];                /* [2] = the action of the Keys page */
+    char input[4][1024];                /* [2] = the action of the Keys page, [3] = the colour (#rrggbb) of the Colours page */
     int menu_sel;
     char menu_err[80];
     /* Keys page: the shortcut being edited (kcombo from "Record", input[2] its action), the row it came from, and the capture state */
@@ -361,6 +361,11 @@ struct app {
     char ksel[64];
     bool recording;
     char keys_err[80];
+    /* Colours page: which colour of the palette is being edited and its value (0..255 each) */
+    int cpage, csel;
+    char cname[32];
+    int cr, cg, cb;
+    char col_err[80];
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
@@ -804,7 +809,7 @@ static void build_menu(struct app *a, int x, int y, int w)
     y += 32;
     add_button(a, x, y, 150, "Restore defaults", "menu-reset")->r.h = 22;
     const char *hint = a->menu_err[0] ? a->menu_err : n >= 12 ? "The menu is full (12 entries)." :
-                       "Click a name to edit it. @terminal, a || b and ~/ work.";
+                       "Click a name to edit it.";
     add(a, W_LABEL, (struct rect){ x + 160, y - 1, w - 160, 24 }, hint);
 }
 
@@ -893,7 +898,7 @@ static void build_keys(struct app *a, int x, int y, int w)
     add_button(a, x + w - 64, py, 64, a->ksel[0] ? "Update" : "Add", "keys-put")->r.h = 26;
     py += 32;
     add(a, W_LABEL, (struct rect){ x, py, w, 24 },
-        a->keys_err[0] ? a->keys_err : "Click a shortcut to change it; < > pick an action. exec CMD runs a command.");
+        a->keys_err[0] ? a->keys_err : "Click a shortcut to change it; < > pick an action.");
 }
 
 /* The action names the keys-actions setting lists, as a cyclic walk from the word the field starts with. */
@@ -929,6 +934,19 @@ static void keys_cycle_action(struct app *a, int dir)
     a->keys_err[0] = 0;
 }
 
+static void colour_apply(struct app *a)
+{
+    uint32_t c;
+    if (a->csel < 0 || !lm_theme_parse_color(a->input[3], &c)) {
+        snprintf(a->col_err, sizeof(a->col_err), "Type a colour like #6fa8ff.");
+        return;
+    }
+    char v[64];
+    snprintf(v, sizeof(v), "%s\x1f#%06x", a->cname, (unsigned)c);
+    send_set(a, "theme-set", v);
+    a->col_err[0] = 0;
+}
+
 static void keys_put(struct app *a)
 {
     a->keys_err[0] = 0;
@@ -960,6 +978,90 @@ static void keys_put(struct app *a)
     snprintf(v, sizeof(v), "%s\x1f%s", a->kcombo, a->input[2]);
     send_set(a, "keys-set", v);
     a->kcombo[0] = a->ksel[0] = a->input[2][0] = 0;
+}
+
+/* ---- Colours page: the palette ([theme] of mellagui.conf), changed through the theme-* settings ------------------------------- */
+
+#define COLS_ROWS 8
+#define MAX_COLOURS 48
+
+struct colour { char name[32]; unsigned value; bool changed; };
+
+static int colour_list(const struct app *a, struct colour *out, int max)
+{
+    char text[VALUE_MAX];
+    snprintf(text, sizeof(text), "%s", kv_get(a, "theme-colors"));
+    int n = 0;
+    for (char *t = strtok(text, " "); t && n < max; t = strtok(NULL, " ")) {
+        char *eq = strchr(t, '=');
+        if (!eq || eq[1] != '#')
+            continue;
+        *eq = 0;
+        snprintf(out[n].name, sizeof(out[n].name), "%s", t);
+        out[n].value = (unsigned)strtoul(eq + 2, NULL, 16);
+        out[n].changed = strchr(eq, '*') != NULL;
+        n++;
+    }
+    return n;
+}
+
+static void colour_set_hex(struct app *a)
+{
+    snprintf(a->input[3], sizeof(a->input[3]), "#%02x%02x%02x", a->cr, a->cg, a->cb);
+}
+
+static void build_colours(struct app *a, int x, int y, int w)
+{
+    if (!*kv_get(a, "config-file")) {
+        add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Colours");
+        add(a, W_LABEL, (struct rect){ x, y + ROW_H, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    struct colour cols[MAX_COLOURS];
+    int n = colour_list(a, cols, MAX_COLOURS), pages = LM_MAX(1, (n + COLS_ROWS - 1) / COLS_ROWS);
+    a->cpage = LM_CLAMP(a->cpage, 0, pages - 1);
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Colours");
+    y += ROW_H;
+    for (int i = a->cpage * COLS_ROWS; i < LM_MIN(n, (a->cpage + 1) * COLS_ROWS); i++) {
+        struct widget *sw = add(a, W_SWATCH, (struct rect){ x, y + 2, 22, MENU_ROW_H - 4 }, "");
+        sw->val = (int)cols[i].value;
+        struct widget *e = menu_button(a, x + 30, y, 170, cols[i].name, "col-edit", i);
+        e->on = a->csel == i;
+        char hex[16];
+        snprintf(hex, sizeof(hex), "#%06x%s", cols[i].value, cols[i].changed ? " *" : "");
+        add(a, W_LABEL, (struct rect){ x + 208, y, 100, MENU_ROW_H }, hex);
+        y += MENU_ROW_H;
+    }
+    y = 14 + ROW_H + COLS_ROWS * MENU_ROW_H + 4;
+    menu_button(a, x, y, 24, "<", "col-prev", 0);
+    char lbl[32];
+    snprintf(lbl, sizeof(lbl), "%d / %d", a->cpage + 1, pages);
+    add(a, W_LABEL, (struct rect){ x + 32, y, 80, MENU_ROW_H }, lbl);
+    menu_button(a, x + 100, y, 24, ">", "col-next", 0);
+    add_button(a, x + w - 150, y, 150, "Restore defaults", "col-reset")->r.h = MENU_ROW_H - 2;
+    y += MENU_ROW_H + 6;
+    if (a->csel < 0 || a->csel >= n) {
+        add(a, W_LABEL, (struct rect){ x, y, w, 24 }, "Click a colour to change it.");
+        return;
+    }
+    struct widget *pv = add(a, W_SWATCH, (struct rect){ x, y, 26, 26 }, "");
+    pv->val = (a->cr << 16) | (a->cg << 8) | a->cb;
+    struct widget *hx = add(a, W_INPUT, (struct rect){ x + 34, y, 100, 26 }, "#rrggbb");
+    snprintf(hx->arg, sizeof(hx->arg), "3");
+    add_button(a, x + 142, y, 64, "Apply", "col-apply")->r.h = 26;
+    add_button(a, x + 212, y, 120, "Built-in", "col-default")->r.h = 26;
+    add(a, W_LABEL, (struct rect){ x + 340, y + 2, w - 340, 24 }, a->cname);
+    y += 30;
+    static const char *const chan[3] = { "Red", "Green", "Blue" }, *const ckey[3] = { "col-r", "col-g", "col-b" };
+    const int *val[3] = { &a->cr, &a->cg, &a->cb };
+    for (int i = 0; i < 3; i++) {
+        add_slider(a, x, y, w, chan[i], ckey[i], 0, 255, 1, "");
+        a->wd[a->nw - 1].val = *val[i];
+        a->wd[a->nw - 1].r.h = 22;
+        y += 22;
+    }
+    if (a->col_err[0])
+        add(a, W_LABEL, (struct rect){ x, y, w, 22 }, a->col_err);
 }
 
 static void build_sound(struct app *a, int x, int y, int w)
@@ -1037,6 +1139,7 @@ static void build(struct app *a)
     case PAGE_CONFIG: build_config(a, x, y, w); break;
     case PAGE_MENU: build_menu(a, x, y, w); break;
     case PAGE_KEYS: build_keys(a, x, y, w); break;
+    case PAGE_COLOURS: build_colours(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -1075,6 +1178,11 @@ static void slider_set(struct app *a, const struct widget *w, int v)
         a->win.redraw = true;
     } else if (!strcmp(w->key, "sec-blank")) {
         a->sec_blank = v;
+        a->win.redraw = true;
+    } else if (!strncmp(w->key, "col-", 4) && w->key[4] && !w->key[5]) {      /* col-r / col-g / col-b: only the working colour */
+        *(w->key[4] == 'r' ? &a->cr : w->key[4] == 'g' ? &a->cg : &a->cb) = v;
+        colour_set_hex(a);
+        a->col_err[0] = 0;
         a->win.redraw = true;
     } else {
         send_set_int(a, w->key, v);
@@ -1187,6 +1295,28 @@ static void activate(struct app *a, int idx)
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
             launch_sibling(w->arg, NULL);
+        } else if (!strcmp(w->key, "col-edit")) {
+            struct colour cols[MAX_COLOURS];
+            int n = colour_list(a, cols, MAX_COLOURS), i = atoi(w->arg);
+            if (i >= 0 && i < n) {
+                a->csel = i;
+                snprintf(a->cname, sizeof(a->cname), "%s", cols[i].name);
+                a->cr = (int)(cols[i].value >> 16) & 255;
+                a->cg = (int)(cols[i].value >> 8) & 255;
+                a->cb = (int)cols[i].value & 255;
+                colour_set_hex(a);
+                a->col_err[0] = 0;
+            }
+        } else if (!strcmp(w->key, "col-prev") || !strcmp(w->key, "col-next")) {
+            a->cpage = LM_MAX(0, a->cpage + (!strcmp(w->key, "col-next") ? 1 : -1));
+        } else if (!strcmp(w->key, "col-apply")) {
+            colour_apply(a);
+        } else if (!strcmp(w->key, "col-default") && a->csel >= 0) {
+            send_set(a, "theme-del", a->cname);
+            a->csel = -1;
+        } else if (!strcmp(w->key, "col-reset")) {
+            send_set(a, "theme-reset", "1");
+            a->csel = -1;
         } else if (!strcmp(w->key, "keys-edit")) {
             char key[16];
             snprintf(key, sizeof(key), "keys-row-%d", atoi(w->arg));
@@ -1410,6 +1540,10 @@ static void paint_widget(struct app *a, int idx)
         draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, COL_TEXT, r->w - 12);
         break;
     }
+    case W_SWATCH:
+        fill(a, *r, (uint32_t)w->val & 0xffffff);
+        outline(a, *r, COL_DIM);
+        break;
     case W_INPUT: {
         const char *buf = a->input[atoi(w->arg)];
         fill(a, *r, COL_FIELD);
@@ -1460,6 +1594,15 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op == LM_MELLAGUI_SETTINGS_V1_EVT_VALUE) {
         bool changed = strcmp(kv_get(a, args[0].s), args[1].s) != 0;
         kv_set(a, args[0].s, args[1].s);
+        if (changed && !strcmp(args[0].s, "theme-colors")) {                 /* the panel wears the palette it edits */
+            struct colour cols[MAX_COLOURS];
+            char hex[16];
+            int n = colour_list(a, cols, MAX_COLOURS);
+            for (int i = 0; i < n; i++) {
+                snprintf(hex, sizeof(hex), "#%06x", cols[i].value);
+                lm_theme_set(cols[i].name, hex);
+            }
+        }
         if (changed && !strcmp(args[0].s, "lock-timeout"))
             a->sec_minutes = atoi(args[1].s);
         else if (changed && !strcmp(args[0].s, "lock-blank"))
@@ -1554,14 +1697,22 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             a->win.redraw = true;
         } else if (f && f->kind == W_INPUT) {
             if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
-                if (atoi(f->arg) == 2)
+                if (atoi(f->arg) == 3)
+                    colour_apply(a);
+                else if (atoi(f->arg) == 2)
                     keys_put(a);
                 else
                     menu_put(a);
             } else {
                 int which = atoi(f->arg);
-                edit_text(a->input[which], which == 0 ? 64 : which == 2 ? 250 : sizeof(a->input[1]), ks, plain);
-                a->menu_err[0] = a->keys_err[0] = 0;
+                edit_text(a->input[which], which == 0 ? 64 : which == 2 ? 250 : which == 3 ? 12 : sizeof(a->input[1]), ks, plain);
+                a->menu_err[0] = a->keys_err[0] = a->col_err[0] = 0;
+                uint32_t c;
+                if (which == 3 && lm_theme_parse_color(a->input[3], &c)) {         /* the sliders and the preview follow the text */
+                    a->cr = (int)(c >> 16) & 255;
+                    a->cg = (int)(c >> 8) & 255;
+                    a->cb = (int)c & 255;
+                }
             }
             a->win.redraw = true;
         } else if (f && f->kind == W_FIELD) {
@@ -1671,7 +1822,7 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event };
-    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .menu_sel = -1 };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .menu_sel = -1, .csel = -1 };
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */

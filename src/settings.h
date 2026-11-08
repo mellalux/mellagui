@@ -77,6 +77,12 @@
  *   keys-del        (write only)               "combo": switch a built-in shortcut off ("combo = none") or drop an own one
  *   keys-reset      (write only)               1 = remove [keys] from the file, the built-in shortcuts return
  *                                              The three rewrite only the [keys] lines concerned (confedit.c), read the file again and need a file.
+ *   theme-colors    (read only)                "name=#rrggbb name=#rrggbb* ...": every colour of the palette (theme.h), * = differs from the built-in one
+ *   theme-set       (write only)               "name<US>#rrggbb": set a colour in [theme] of the file (the line is dropped when it equals the built-in one)
+ *   theme-del       (write only)               "name": back to the built-in colour (drops its line)
+ *   theme-reset     (write only)               1 = remove [theme] from the file
+ *                                              All three rewrite only the [theme] lines concerned, read the file again (the compositor repaints at once;
+ *                                              programs already running keep their colours, the panel follows theme-colors itself) and need a file.
  *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
  *   locked          0 | 1                      the screen is locked now (read only)
  *

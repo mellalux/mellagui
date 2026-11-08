@@ -34,6 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "metrics.h"
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
@@ -85,6 +86,8 @@ struct app {
     char msg[256];
     int64_t msg_until;
     int rows_visible;
+    bool sb_drag;                       /* the scroll bar's thumb is being dragged ... */
+    int sb_grab;                        /* ... held this many pixels below its top */
     double px, py;
     uint32_t last_click_ms;
     int last_click_row;
@@ -667,16 +670,39 @@ static void handle_key(struct app *a, uint32_t ks)
 
 /* ---- drawing ------------------------------------------------------------------------------------------------------------- */
 
+/* The scroll bar's track runs from the top of the list to the status bar; the thumb is as long as the visible part of the list. */
+static int sb_track_h(const struct app *a)
+{
+    return a->win.bh - (TOOL_H + HEAD_H) - (a->prompt ? STATUS_H * 2 : STATUS_H);
+}
+
+static void scrollbar_thumb(const struct app *a, int *ty, int *th)
+{
+    int total = LM_MAX(rows(a), 1), track = LM_MAX(sb_track_h(a), 1);
+    *th = LM_CLAMP(track * a->rows_visible / total, LM_MIN(28, track), track);
+    *ty = TOOL_H + HEAD_H + (track - *th) * a->top / LM_MAX(total - a->rows_visible, 1);
+}
+
+/* The thumb follows the pointer (grabbed `sb_grab` pixels below its top). */
+static void scrollbar_drag(struct app *a, double py)
+{
+    int ty, th, track = sb_track_h(a), span = LM_MAX(track - 0, 1);
+    scrollbar_thumb(a, &ty, &th);
+    int room = LM_MAX(span - th, 1), total = rows(a);
+    int pos = LM_CLAMP((int)py - a->sb_grab - (TOOL_H + HEAD_H), 0, room);
+    a->top = LM_CLAMP(pos * LM_MAX(total - a->rows_visible, 0) / room, 0, LM_MAX(total - a->rows_visible, 0));
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     int list_y = TOOL_H + HEAD_H;
     int bars = a->prompt ? STATUS_H * 2 : STATUS_H;
     a->rows_visible = LM_MAX((w->bh - list_y - bars) / ROW_H, 1);
-    if (a->sel >= a->top + a->rows_visible)
-        a->top = a->sel - a->rows_visible + 1;
-    if (a->sel < a->top)
-        a->top = a->sel;
+    int total = rows(a), sbw = lm_metrics.scrollbar_width;
+    a->top = LM_CLAMP(a->top, 0, LM_MAX(total - a->rows_visible, 0));        /* (the wheel and the scroll bar may leave the selection off screen) */
+    bool bar = total > a->rows_visible;
+    int right = w->bw - (bar ? sbw : 0);                                      /* the list ends where the scroll bar begins */
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
 
     wlwin_fill(w, 0, 0, w->bw, TOOL_H, COL_BAR);
@@ -690,14 +716,13 @@ static void paint(struct wlwin *w)
     int px = b[N_BUTTONS - 1].x + b[N_BUTTONS - 1].w + 16;
     wlwin_text(w, px, 6, a->cwd, 1, COL_DIM, w->bw - px - 6);
 
-    int size_x = LM_MAX(w->bw - 250, 200), time_x = LM_MAX(w->bw - 140, 330);
+    int size_x = LM_MAX(right - 250, 200), time_x = LM_MAX(right - 140, 330);
     wlwin_fill(w, 0, TOOL_H, w->bw, HEAD_H, COL_BG);
     wlwin_text(w, 10, TOOL_H + 2, "Name", 1, COL_DIM, 0);
     wlwin_text(w, size_x, TOOL_H + 2, "Size", 1, COL_DIM, 0);
     wlwin_text(w, time_x, TOOL_H + 2, "Modified", 1, COL_DIM, 0);
     wlwin_fill(w, 0, list_y - 1, w->bw, 1, COL_BAR);
 
-    int total = rows(a);
     for (int r = 0; r < a->rows_visible; r++) {
         int row = a->top + r;
         if (row >= total)
@@ -705,7 +730,7 @@ static void paint(struct wlwin *w)
         const struct entry *e = row_entry(a, row);
         int y = list_y + r * ROW_H;
         if (row == a->sel)
-            wlwin_fill(w, 0, y, w->bw - 8, ROW_H, COL_SEL);
+            wlwin_fill(w, 0, y, right, ROW_H, COL_SEL);
         bool dir = !e || e->dir;
         uint32_t col = !e || e->dir ? COL_DIR : e->broken ? COL_DIM : COL_FG;
         char name[NAME_MAX + 4];
@@ -724,11 +749,12 @@ static void paint(struct wlwin *w)
             wlwin_text(w, time_x, y + 1, tm, 1, COL_DIM, 0);
         }
     }
-    if (total > a->rows_visible) {                                      /* a thin scroll bar */
-        int track = a->rows_visible * ROW_H;
-        int th = LM_MAX(track * a->rows_visible / total, 16);
-        int ty = list_y + (track - th) * a->top / LM_MAX(total - a->rows_visible, 1);
-        wlwin_fill(w, w->bw - 6, ty, 4, th, COL_BTN);
+    if (bar) {
+        int ty, th;
+        scrollbar_thumb(a, &ty, &th);
+        bool hot = a->sb_drag || (a->px >= right && a->py >= ty && a->py < ty + th);
+        wlwin_fill(w, right, list_y, sbw, w->bh - list_y - bars, COL_BAR);
+        wlwin_fill(w, right + 2, ty + 1, sbw - 4, th - 2, hot ? COL_BTN_ON : COL_BTN);
     }
 
     int sy = w->bh - STATUS_H;
@@ -763,6 +789,18 @@ static void click(struct app *a, uint32_t time_ms)
     int list_y = TOOL_H + HEAD_H;
     if (y < list_y)
         return;
+    if (rows(a) > a->rows_visible && x >= a->win.bw - lm_metrics.scrollbar_width) {       /* the scroll bar */
+        int ty, th;
+        scrollbar_thumb(a, &ty, &th);
+        int page = LM_MAX(a->rows_visible - 1, 1), maxtop = LM_MAX(rows(a) - a->rows_visible, 0);
+        if (y >= ty && y < ty + th) {
+            a->sb_drag = true;
+            a->sb_grab = y - ty;
+        } else {
+            a->top = LM_CLAMP(a->top + (y < ty ? -page : page), 0, maxtop);
+        }
+        return;
+    }
     int row = a->top + (y - list_y) / ROW_H;
     if (row >= rows(a) || (y - list_y) / ROW_H >= a->rows_visible)
         return;
@@ -787,10 +825,15 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
+        if (a->sb_drag)
+            scrollbar_drag(a, a->py);
+        w->redraw = true;                                               /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         if (args[2].u == 272 && args[3].u == 1)
             click(a, args[1].u);
+        else if (args[2].u == 272)
+            a->sb_drag = false;
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:

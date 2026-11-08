@@ -13,6 +13,7 @@
 
 #include "backend.h"
 #include "conf.h"
+#include "dock.h"
 #include "confdefault.h"
 #include "keys.h"
 #include "launchers.h"
@@ -43,9 +44,8 @@ static const char *usage_text =
     "  --size WxH               headless output size (default 1280x720)\n"
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
-    "  --terminal CMD           command for Super+Enter and the panel launcher (default mellagui-term)\n"
-    "  --app NAME=CMD           add an entry to the MellaGUI menu (repeatable; replaces the default menu, see mellagui.conf [menu])\n"
-    "  --config FILE|none       hand-written configuration: menu, commands ... (default drm: $XDG_CONFIG_HOME/mellagui/mellagui.conf,\n"
+    "  --terminal CMD           command for Super+Enter (default mellagui-term)\n"
+    "  --config FILE|none       hand-written configuration: dock, commands ... (default drm: $XDG_CONFIG_HOME/mellagui/mellagui.conf,\n"
     "                           headless: none); options win. --print-config shows the built-in defaults as such a file\n"
     "  --print-config           print the built-in mellagui.conf and exit\n"
     "  --run CMD                command for Super+R and the panel's Run button (default mellagui-run)\n"
@@ -224,8 +224,12 @@ static bool ensure_runtime_dir(void)
 /* mellagui.conf: every section belongs to one module, this only hands the lines over. */
 static bool conf_line(void *ud, const char *section, const char *key, const char *value)
 {
-    if (!strcmp(section, "menu") || !strcmp(section, "commands"))
+    if (!strcmp(section, "commands"))
         return lm_launch_conf(ud, section, key, value);
+    if (!strcmp(section, "menu"))
+        return true;                            /* the MellaGUI menu is gone (the dock replaced it): old files keep working, the section is ignored */
+    if (lm_dock_section(section))
+        return lm_dock_conf(ud, section, key, value);
     if (!strcmp(section, "theme"))
         return lm_theme_conf(ud, section, key, value);
     if (lm_metrics_section(section))
@@ -237,7 +241,7 @@ static bool conf_line(void *ud, const char *section, const char *key, const char
 
 static char g_conf_path[PATH_MAX];      /* the mellagui.conf that was read at start ("" = none) */
 
-/* Read mellagui.conf again: theme, sizes, shortcuts, menu and commands start from the built-in values and the file is applied on top,
+/* Read mellagui.conf again: theme, sizes, shortcuts, dock and commands start from the built-in values and the file is applied on top,
  * the command line (--terminal, --run, --app) stays. Programs that are already running keep the colours they started with.
  * Returns the number of rejected lines, -1 when there is no (readable) file; nothing changes then. */
 static int reload_config(struct lm_server *srv, bool quiet)
@@ -253,9 +257,11 @@ static int reload_config(struct lm_server *srv, bool quiet)
     lm_metrics_reset();
     lm_keys_defaults(&srv->config.keys);
     lm_launch_reset();
+    lm_dock_reset();
     int bad = lm_conf_load(g_conf_path, conf_line, &srv->config);
     lm_metrics_fixup();
     lm_launch_resolve(&srv->config);
+    lm_dock_resolve();
     lm_info("reload: %s read again, %d line(s) ignored", g_conf_path, bad < 0 ? 0 : bad);
     srv->reload_result = bad < 0 ? 0 : bad;
     srv->reloaded = true;
@@ -291,7 +297,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     static const struct option opts[] = {
@@ -301,7 +307,6 @@ int main(int argc, char **argv)
         { "exec", required_argument, 0, 'e' },
         { "terminal", required_argument, 0, 't' },
         { "run", required_argument, 0, OPT_RUN },
-        { "app", required_argument, 0, OPT_APP },
         { "drm-device", required_argument, 0, 'd' },
         { "mode", required_argument, 0, OPT_MODE },
         { "control", required_argument, 0, 'c' },
@@ -397,7 +402,7 @@ int main(int argc, char **argv)
     /* the programs we start read [theme] from the same file; "none" (headless) keeps them off the user's file too */
     setenv("MELLAGUI_CONFIG", config_arg && *config_arg ? config_arg : "none", 1);
     if (config_arg && *config_arg && strcmp(config_arg, "none")) {
-        /* mellagui.conf: the hand-written configuration (menu, commands ...); the command line still wins */
+        /* mellagui.conf: the hand-written configuration (dock, commands ...); the command line still wins */
         snprintf(g_conf_path, sizeof(g_conf_path), "%s", config_arg);
         cfg.conf_path = g_conf_path;
         int bad = lm_conf_load(config_arg, conf_line, &cfg);
@@ -436,19 +441,6 @@ int main(int argc, char **argv)
         case 'S': cfg.socket_name = optarg; break;
         case 'e': cfg.exec_cmd = optarg; break;
         case 't': lm_launch_set_command("terminal", optarg); break;
-        case OPT_APP: {
-            char *eq = strchr(optarg, '=');
-            if (!eq || eq == optarg || !eq[1]) {
-                fprintf(stderr, "mellagui: bad --app '%s' (expected NAME=CMD)\n", optarg);
-                return 2;
-            }
-            *eq = 0;
-            if (!lm_launch_add(&cfg, optarg, eq + 1)) {
-                fprintf(stderr, "mellagui: --app '%s': the menu is full (at most %d entries) or the text is too long\n", optarg, LM_MAX_APPS);
-                return 2;
-            }
-            break;
-        }
         case OPT_CONFIG: break;                     /* handled before the loop (read first, so these options win) */
         case OPT_PRINT_CONFIG: fputs(lm_config_default_text(), stdout); return 0;
         case OPT_RUN: lm_launch_set_command("run", optarg); break;
@@ -540,7 +532,8 @@ int main(int argc, char **argv)
         }
     }
 
-    lm_launch_resolve(&cfg);                  /* terminal / run / settings / view commands and the app menu */
+    lm_launch_resolve(&cfg);                  /* terminal / run / settings / view commands */
+    lm_dock_resolve();                        /* the dock's buttons (after the commands are known: @terminal ...) */
     lm_log_set_level((enum lm_log_level)cfg.log_level);
     if (cfg.log_file && lm_log_set_file(cfg.log_file) < 0)
         fprintf(stderr, "mellagui: cannot open log file %s: %s\n", cfg.log_file, strerror(errno));

@@ -42,10 +42,14 @@
  * lm_wm_window_set_geometry(). Width/height passed to configure are
  * *window geometry* sizes; 0 means "client decides".
  *
+ * ---- The dock ----------------------------------------------------------------------
+ * Round icon buttons along the bottom of the primary output (dock.h): LM_SCENE_DOCK above the panel, LM_PICK_DOCK_ITEM / LM_PICK_DOCK
+ * above the windows. Hovered icons grow, a dot marks the ones with a window, a click starts or focuses the program.
+ *
  * ---- Shortcuts (lm_wm_key) -------------------------------------------------------
  * The table is src/keys.h (built-in defaults, changed by [keys] in mellagui.conf); these are the defaults:
  *   Super+Enter        spawn config.terminal_cmd
- *   Escape             closes the open app menu (the "MellaGUI" panel button toggles it)
+ *   Escape             closes the open About dialog (the round logo button top left opens it)
  *   Super+R            spawn config.run_cmd (run dialog; also the panel's "Run" button)
  *   Super+I            spawn config.settings_cmd (settings panel, also in the MellaGUI menu)
  *   Super+G            show / hide the clipboard gadget (history; drag its title bar to move, its edges to resize)
@@ -63,6 +67,8 @@
  * Key codes are evdev (KEY_*), modifiers are LM_MOD_* bits.
  */
 
+#include "about.h"
+#include "dock.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -252,8 +258,10 @@ enum lm_pick_kind {
     LM_PICK_MINIMIZE,
     LM_PICK_BORDER,         /* resize border/corner: `edges` says which */
     LM_PICK_PANEL,          /* panel background / clock / title */
-    LM_PICK_PANEL_LAUNCHER, /* `rect` = the launcher button */
-    LM_PICK_MENU_ITEM,      /* app menu entry, `index` = config.apps[] index */
+    LM_PICK_PANEL_LAUNCHER, /* the round logo button top left (`rect` = its square): opens the About dialog */
+    LM_PICK_ABOUT_BUTTON,   /* the About dialog's Close button */
+    LM_PICK_ABOUT_CARD,     /* the About dialog's card (everything but its button) */
+    LM_PICK_ABOUT_BACKDROP, /* anything else while the About dialog is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
     LM_PICK_PANEL_POWER,    /* the round power button in the top right corner: opens / closes the session dialog */
     LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
@@ -267,6 +275,8 @@ enum lm_pick_kind {
     LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
     LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
     LM_PICK_CLIP_ENTRY,     /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
+    LM_PICK_DOCK_ITEM,      /* a button of the dock (`index` = lm_dock_item index) */
+    LM_PICK_DOCK,           /* the dock between its buttons, or (autohide) the bottom edge of the screen that shows it: swallows the click */
     LM_PICK_SHOT_CARD,      /* the screenshot card (above everything): click = open the file in the viewer */
     LM_PICK_NOTIFY          /* a notification card: click = dismiss it (`index` = its id) */
 };
@@ -369,6 +379,7 @@ struct lm_panel_info {
     uint32_t workspace_occupied;    /* bit n set = workspace n has windows */
     int hover_workspace;            /* -1 = none */
     bool hover_launcher;
+    bool about_open;                /* the About dialog is open: the logo button shows it */
     struct lm_rect caps;            /* Caps / Num Lock indicator; zero width while no lock is on */
     char caps_text[8];              /* "CAPS", "NUM" or "CAPS+N" */
     struct lm_rect layout;          /* keyboard layout indicator */
@@ -405,12 +416,38 @@ struct lm_power_info {
     int sel;                        /* highlighted button (pointer or keyboard), -1 none */
 };
 
-struct lm_menu_info {
-    struct lm_rect rect;            /* whole menu */
-    int n;                          /* entries */
-    int item_h;                     /* height of one entry; entries start 2 px inside `rect` */
-    int hover;                      /* -1 none */
-    const char *label[LM_MAX_APPS]; /* valid only during the callback */
+/*
+ * The About dialog: the output dimmed, a card with the logo, the name and the system information (about.h), and a Close button.
+ * Modal like the session dialog (lm_wm_pick gives it every point, lm_wm_key every key).
+ */
+struct lm_about_info {
+    struct lm_rect rect;            /* the whole output (dimmed) */
+    struct lm_rect card;
+    struct lm_rect logo;            /* the square the round logo is drawn in */
+    struct lm_rect close;           /* the Close button */
+    bool hover_close;               /* the pointer is on it (or the keyboard focus: it is the only button) */
+    int n;                          /* system information rows */
+    const struct lm_about_row *row; /* valid only during the callback */
+};
+
+/*
+ * The dock (dock.h): round icons along the bottom of the primary output. `box` is where each icon is painted now (the icon under the
+ * pointer and its neighbours are bigger), `rect` everything the dock may ever paint on this output (full zoom, shadow, label), which is
+ * also its scene bound.
+ */
+struct lm_dock_info {
+    struct lm_output *output;
+    struct lm_rect rect;
+    int n;
+    int hover;                      /* the icon under the pointer, -1 none */
+    int dot_y;                      /* where the "running" dots are centred */
+    struct {
+        struct lm_rect box;
+        bool running;
+        const struct lm_dock_item *item;
+    } icon[LM_DOCK_MAX];
+    struct lm_rect label;           /* the name of the hovered icon (empty = none) */
+    const char *label_text;         /* valid only during the callback */
 };
 
 #define LM_GADGET_ENTRIES 5         /* == LM_CLIP_HISTORY */
@@ -468,9 +505,10 @@ enum lm_scene_kind {
     LM_SCENE_FRAME,                 /* decoration of one window */
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
     LM_SCENE_PANEL,                 /* one per output */
-    LM_SCENE_MENU,                  /* the open app menu (above the panel, below popups) */
+    LM_SCENE_DOCK,                  /* the dock (above the panel, below the menu) */
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
     LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
+    LM_SCENE_ABOUT,                 /* the About dialog (same place as the session dialog; the two are never open together) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
@@ -486,7 +524,8 @@ struct lm_scene_item {
             bool is_popup;
         } surface;                  /* LM_SCENE_SURFACE */
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
-        struct lm_menu_info menu;   /* LM_SCENE_MENU */
+        struct lm_about_info about; /* LM_SCENE_ABOUT */
+        struct lm_dock_info dock;   /* LM_SCENE_DOCK */
         struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
@@ -520,5 +559,14 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip,
  * (<id> is a stable small integer per window, in stacking order bottom to top.)
  */
 size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size);
+
+/* The About dialog (the panel's logo button; control socket `about`): open it on the primary output, close it, ask whether it is open. */
+void lm_wm_about_set(struct lm_wm *wm, bool open);
+bool lm_wm_about_is_open(const struct lm_wm *wm);
+size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* the lines of the control socket `about` while it is open */
+
+/* Text snapshot of the dock for tests (control socket `dock`): "dock shown=<0|1> hover=<i> n=<buttons>" then one line per button
+ * "icon <i> "<name>" x= y= w= h= running=<0|1> cmd=<command>". Returns the length. */
+size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size);
 
 #endif

@@ -120,8 +120,6 @@ static void setup(void)
     cfg.headless_height = 400;
     cfg.socket_name = "fuzz";
     cfg.terminal_cmd = cfg.run_cmd = cfg.settings_cmd = ":";
-    cfg.napps = 1;
-    cfg.apps[0] = (struct lm_app_entry){ "App", ":" };
     cfg.kbd_nlayouts = 2;
     cfg.kbd_layouts[0] = 0;
     cfg.kbd_layouts[1] = 1;

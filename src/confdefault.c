@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "confdefault.h"
+#include "dock.h"
 #include "keys.h"
 #include "launchers.h"
 #include "metrics.h"
@@ -13,7 +14,7 @@ const char *lm_config_default_text(void)
 {
     static char text[32768];
     if (!text[0])
-        snprintf(text, sizeof(text), "%s\n%s\n%s\n%s", lm_launch_default_conf(), lm_keys_default_conf(), lm_theme_default_conf(),
+        snprintf(text, sizeof(text), "%s\n%s\n%s\n%s\n%s", lm_launch_default_conf(), lm_dock_default_conf(), lm_keys_default_conf(), lm_theme_default_conf(),
                  lm_metrics_default_conf());
     return text;
 }

@@ -1,5 +1,6 @@
 #include "img.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -256,8 +257,12 @@ static void fail(char *err, size_t n, const char *msg)
     snprintf(err, n, "%s", msg);
 }
 
+static int g_keep_alpha;                                /* lm_img_load_alpha: PNG pixels keep their alpha (ARGB, not premultiplied) */
+
 static uint32_t over_checker(int x, int y, int r, int g, int b, int a)
 {
+    if (g_keep_alpha)
+        return (uint32_t)a << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
     int bg = (((x >> 3) ^ (y >> 3)) & 1) ? 0x66 : 0x44;
     if (a >= 255)
         return (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
@@ -522,6 +527,25 @@ int lm_img_load(const char *path, struct lm_image *img, char *err, size_t errsz)
     fclose(f);
     int rc = lm_img_decode(buf, (size_t)n, img, err, errsz);
     free(buf);
+    return rc;
+}
+
+int lm_img_load_alpha(const char *path, struct lm_image *img, char *err, size_t errsz)
+{
+    g_keep_alpha = 1;
+    int rc = lm_img_load(path, img, err, errsz);
+    g_keep_alpha = 0;
+    if (rc == 0 && img->px) {                           /* JPEG and PPM have no alpha: make them opaque */
+        size_t n = (size_t)img->w * (size_t)img->h;
+        if (!(img->px[0] >> 24) && !(img->px[n - 1] >> 24)) {
+            bool any = false;
+            for (size_t i = 0; i < n && !any; i++)
+                any = (img->px[i] >> 24) != 0;
+            if (!any)
+                for (size_t i = 0; i < n; i++)
+                    img->px[i] |= 0xff000000u;
+        }
+    }
     return rc;
 }
 

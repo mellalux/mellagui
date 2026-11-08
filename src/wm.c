@@ -6,9 +6,11 @@
 #include "launchers.h"
 #include "wm.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "about.h"
 #include "backend.h"
 #include "input.h"
 #include "font.h"
@@ -34,19 +37,19 @@
 
 #define RESIZE_CORNER (lm_metrics.resize_corner)
 #define DOUBLE_CLICK_MS (lm_metrics.double_click_ms)
-#define PANEL_BTN_W (lm_metrics.panel_button_width)
 #define PANEL_WS_W (lm_metrics.panel_ws_width)
 #define PANEL_CLOCK_W 136                       /* "DD.MM.YYYY HH:MM" = 16 glyphs */
 #define PANEL_POWER_D (LM_PANEL_HEIGHT - 4)     /* the round power button's diameter: as tall as the other buttons */
 #define POWER_CARD_W 264                        /* the session dialog */
 #define POWER_CARD_H 172
 #define POWER_BTN_D 64                          /* its round buttons */
+#define ABOUT_CARD_W 520                        /* the About dialog */
+#define ABOUT_ROW_H 18
 #define PANEL_RUN_W (lm_metrics.panel_run_width)
 #define PANEL_LAYOUT_W (lm_metrics.panel_layout_width)
 #define PANEL_STICKY_W (lm_metrics.panel_sticky_width)
 #define PANEL_CAPS_W (lm_metrics.panel_caps_width)
 #define SW_MAX_WINDOWS 32
-#define MENU_W (lm_metrics.menu_width)
 #define GADGET_W (lm_metrics.gadget_width)                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
 #define GADGET_H (GADGET_TITLE_H + LM_GADGET_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
 #define GADGET_MIN_W 180
@@ -67,7 +70,6 @@
 #define MIXER_MIN_H 120
 #define GADGET_SNAP (lm_metrics.gadget_snap)              /* a dragged gadget sticks to another gadget's / the screen's edge within this many pixels */
 #define GADGET_EDGE 6               /* resize zone along the left/right/bottom edge (top: 3 px) */
-#define MENU_ITEM_H (lm_metrics.menu_item_height)
 #define PANEL_TASK_MAX_W (lm_metrics.panel_task_max_width)
 #define PANEL_TASK_GAP (lm_metrics.panel_task_gap)
 
@@ -115,7 +117,16 @@ struct lm_wm {
     bool key_capture;           /* the next key combination is recorded, not handled (lm_wm_key_capture) */
     char key_captured[64];      /* ... and the result ("" = cancelled / none yet) */
     uint32_t capture_release;   /* its key: the release is swallowed, too (0 = none) */
-    bool menu_open;
+    bool about_open;            /* the About dialog is showing on the output called about_out */
+    char about_out[32];
+    bool about_hover_close;
+    struct lm_about_row about_rows[LM_ABOUT_ROWS];
+    int about_n;
+    /* the dock: dock_active = the pointer is in it (so it is magnifying), hover_dock = the icon under the pointer, dock_shown = autohide has
+     * revealed it, dock_timer hides it again a moment after the pointer left */
+    bool dock_active, dock_shown;
+    int hover_dock, dock_px;
+    struct lm_timer *dock_timer;
     /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
     bool sw_open;
     int sw_n, sw_idx;
@@ -131,8 +142,6 @@ struct lm_wm {
     int grab_gadget;            /* the gadget being moved / resized / operated */
     enum lm_mixer_part mix_part;/* GRAB_MIXER: the slider being dragged ... */
     int mix_index;              /* ... and its stream row */
-    struct lm_rect menu_rect;   /* valid while menu_open */
-    int hover_menu;             /* -1 none */
     struct lm_window *hover_task;
     struct lm_window *press_win;
     uint32_t press_bits;
@@ -216,7 +225,7 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->output = o;
     p->bar = output_panel_rect(o);
     int y = p->bar.y + 2, h = p->bar.h - 4;
-    p->launcher = lm_rect_make(p->bar.x + 4, y, PANEL_BTN_W, h);
+    p->launcher = lm_rect_make(p->bar.x + 4, y, h, h);              /* the round logo button */
     int x = p->launcher.x + p->launcher.w + 10;
     for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
         p->workspace[i] = lm_rect_make(x, y, PANEL_WS_W, h);
@@ -272,6 +281,7 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
             p->workspace_occupied |= 1u << w->workspace;
     p->hover_workspace = wm->hover_panel_ws;
     p->hover_launcher = wm->hover_launcher;
+    p->about_open = wm->about_open;
     p->hover_power = wm->hover_power;
     p->power_open = wm->power_open;
     p->hover_run = wm->hover_run;
@@ -570,24 +580,6 @@ static void sw_commit(struct lm_wm *wm)
         lm_wm_focus_window(wm, w);
 }
 
-static void menu_set(struct lm_wm *wm, bool open, const struct lm_rect *launcher)
-{
-    if (open == wm->menu_open)
-        return;
-    if (open) {
-        int n = wm->srv->config.napps;
-        if (n <= 0 || !launcher)
-            return;
-        wm->menu_rect = lm_rect_make(launcher->x, launcher->y + launcher->h + 2, MENU_W, n * MENU_ITEM_H + 4);
-        wm->menu_open = true;
-        damage_rect(wm, &wm->menu_rect);
-    } else {
-        wm->menu_open = false;
-        wm->hover_menu = -1;
-        damage_rect(wm, &wm->menu_rect);
-    }
-}
-
 static struct lm_output *gadget_output(const struct lm_wm *wm)
 {
     return lm_output_primary(wm->srv);
@@ -828,6 +820,11 @@ void lm_wm_set_gadget(struct lm_wm *wm, bool visible)
     lm_wm_set_gadget_id(wm, LM_GADGET_CLIPBOARD, visible);
 }
 
+static void dock_damage(struct lm_wm *wm);
+static void about_set(struct lm_wm *wm, bool open, struct lm_output *o);
+static void about_damage(struct lm_wm *wm);
+static void dock_hide_tick(void *data);
+
 static void damage_panels(struct lm_wm *wm)
 {
     if (!wm->srv->backend)
@@ -837,6 +834,7 @@ static void damage_panels(struct lm_wm *wm)
         struct lm_rect r = output_panel_rect(o);
         damage_rect(wm, &r);
     }
+    dock_damage(wm);                                    /* (windows come and go here: the dock's "running" dots) */
 }
 
 /* ---- surface output membership --------------------------------------------------------- */
@@ -1065,7 +1063,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     lm_list_init(&wm->windows);
     lm_list_init(&wm->popups);
     wm->hover_panel_ws = -1;
-    wm->hover_menu = -1;
+    wm->hover_dock = -1;
     wm->gad[LM_GADGET_CLIPBOARD].visible = srv->config.gadget;
     wm->gad[LM_GADGET_MIXER].visible = srv->config.mixer;
     wm->gad[LM_GADGET_SYSTEM].visible = srv->config.sysinfo;
@@ -1076,6 +1074,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     gadgets_load(wm);
     update_clock(wm, true);
     wm->note_timer = lm_loop_add_timer(srv->loop, note_tick, wm);
+    wm->dock_timer = lm_loop_add_timer(srv->loop, dock_hide_tick, wm);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
@@ -1090,6 +1089,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_seat_pointer_ungrab(wm->srv->seat, &wm->grab);
     if (wm->note_timer)
         lm_timer_destroy(wm->note_timer);
+    if (wm->dock_timer)
+        lm_timer_destroy(wm->dock_timer);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
     free(wm);
@@ -1130,8 +1131,8 @@ void lm_wm_relayout_outputs(struct lm_wm *wm)
 void lm_wm_config_changed(struct lm_wm *wm)
 {
     gadget_def_init();
-    if (wm->menu_open)
-        menu_set(wm, false, NULL);
+    wm->dock_active = wm->dock_shown = false;
+    wm->hover_dock = -1;
     lm_wm_output_changed(wm, NULL);
 }
 
@@ -1684,7 +1685,7 @@ static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
             o = lm_output_primary(wm->srv);
         if (!o)
             return;
-        menu_set(wm, false, NULL);
+        about_set(wm, false, NULL);
         sw_close(wm);
         clip_nav_set(wm, false);
         snprintf(wm->power_out, sizeof(wm->power_out), "%s", o->name);
@@ -1697,6 +1698,317 @@ static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
         wm->hover_power = false;
         damage_panels(wm);
     }
+}
+
+
+/* ---- the About dialog ----------------------------------------------------------------------------------------------------- */
+
+static struct lm_output *about_output(const struct lm_wm *wm)
+{
+    if (!wm->about_open || !wm->srv->backend)
+        return NULL;
+    struct lm_output *o;
+    lm_list_for_each(o, &wm->srv->backend->outputs, link)
+        if (!strcmp(o->name, wm->about_out))
+            return o;
+    return NULL;
+}
+
+static void about_info(const struct lm_wm *wm, struct lm_output *o, struct lm_about_info *ai)
+{
+    memset(ai, 0, sizeof(*ai));
+    ai->rect = lm_output_rect(o);
+    int h = 20 + 96 + 12 + LM_FONT_H + 6 + LM_FONT_H + 16 + wm->about_n * ABOUT_ROW_H + 18 + 26 + 18;
+    h = LM_MIN(h, ai->rect.h - 8);
+    ai->card = lm_rect_make(ai->rect.x + (ai->rect.w - ABOUT_CARD_W) / 2, ai->rect.y + (ai->rect.h - h) / 2, ABOUT_CARD_W, h);
+    ai->logo = lm_rect_make(ai->card.x + (ABOUT_CARD_W - 96) / 2, ai->card.y + 20, 96, 96);
+    ai->close = lm_rect_make(ai->card.x + (ABOUT_CARD_W - 90) / 2, ai->card.y + ai->card.h - 18 - 26, 90, 26);
+    ai->hover_close = wm->about_hover_close;
+    ai->n = wm->about_n;
+    ai->row = wm->about_rows;
+}
+
+static void about_damage(struct lm_wm *wm)
+{
+    struct lm_output *o = about_output(wm);
+    if (o) {
+        struct lm_rect r = lm_output_rect(o);
+        damage_rect(wm, &r);
+    }
+    damage_panels(wm);
+}
+
+/* Opens the dialog on `o` (the output whose logo button was used; NULL = the primary one) or closes it. */
+static void about_set(struct lm_wm *wm, bool open, struct lm_output *o)
+{
+    if (open == wm->about_open)
+        return;
+    if (open) {
+        if (!o)
+            o = lm_output_primary(wm->srv);
+        if (!o)
+            return;
+        power_set(wm, false, NULL);
+        sw_close(wm);
+        clip_nav_set(wm, false);
+        wm->about_n = lm_about_collect(wm->srv, wm->about_rows, LM_ABOUT_ROWS);
+        snprintf(wm->about_out, sizeof(wm->about_out), "%s", o->name);
+        wm->about_open = true;
+        wm->about_hover_close = false;
+        about_damage(wm);
+    } else {
+        about_damage(wm);                                       /* (while the output is still found) */
+        wm->about_open = false;
+        wm->about_hover_close = false;
+        damage_panels(wm);
+    }
+}
+
+void lm_wm_about_set(struct lm_wm *wm, bool open)
+{
+    about_set(wm, open, NULL);
+}
+
+bool lm_wm_about_is_open(const struct lm_wm *wm)
+{
+    return wm->about_open;
+}
+
+size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    struct lm_output *o = about_output(wm);
+    size_t n = 0;
+    buf[0] = 0;
+    if (!o)
+        return 0;
+    struct lm_about_info ai;
+    about_info(wm, o, &ai);
+    n += (size_t)snprintf(buf + n, size - n, "card x=%d y=%d w=%d h=%d\nclose x=%d y=%d w=%d h=%d\n", ai.card.x, ai.card.y, ai.card.w, ai.card.h,
+                          ai.close.x, ai.close.y, ai.close.w, ai.close.h);
+    for (int i = 0; i < ai.n && n < size; i++)
+        n += (size_t)snprintf(buf + n, size - n, "row %s|%s\n", ai.row[i].label, ai.row[i].value);
+    return n < size ? n : size - 1;
+}
+
+
+/* ---- the dock ------------------------------------------------------------------------------------------------------------ */
+
+#define DOCK_DOT 8                  /* room under the icons for the "running" dots */
+#define DOCK_PAD 12                 /* the strip reaches this far beyond the first / last icon */
+#define DOCK_LABEL_H 22
+#define DOCK_HIDE_MS 600            /* autohide: the dock goes away this long after the pointer left it */
+
+struct dock_geo {
+    int n, size, zsize, gap, x0, icon_bottom;
+    struct lm_rect strip, tall, bounds;
+};
+
+/* The dock lives on the primary output; NULL when there is none or it is off / empty / hidden by a fullscreen window. */
+static struct lm_output *dock_output(const struct lm_wm *wm)
+{
+    if (!wm->srv->backend || !lm_dock.enabled || lm_dock_count() == 0)
+        return NULL;
+    struct lm_output *o = lm_output_primary(wm->srv);
+    return o && !fullscreen_covers(wm, o) ? o : NULL;
+}
+
+static bool dock_shown(const struct lm_wm *wm)
+{
+    return !lm_dock.autohide || wm->dock_shown;
+}
+
+static void dock_geometry(const struct lm_output *o, struct dock_geo *g)
+{
+    g->n = lm_dock_count();
+    g->size = lm_dock.icon_size;
+    g->zsize = g->size * lm_dock.zoom / 100;
+    g->gap = lm_dock.gap;
+    int total = g->n * g->size + (g->n - 1) * g->gap;
+    g->x0 = o->x + (o->width - total) / 2;
+    int out_bottom = o->y + o->height;
+    g->icon_bottom = out_bottom - lm_dock.margin - DOCK_DOT;
+    int top = g->icon_bottom - g->size - 8, ttop = g->icon_bottom - g->zsize - 8;
+    g->strip = lm_rect_make(g->x0 - DOCK_PAD, top, total + 2 * DOCK_PAD, out_bottom - top);
+    g->tall = lm_rect_make(g->x0 - DOCK_PAD, ttop, total + 2 * DOCK_PAD, out_bottom - ttop);
+    int pad = (g->zsize - g->size) * 3 + DOCK_PAD + 4;          /* the neighbours of the magnified icon move out of the way */
+    int btop = ttop - DOCK_LABEL_H - 10;
+    struct lm_rect b = lm_rect_make(g->x0 - pad, btop, total + 2 * pad, out_bottom - btop), orect = lm_output_rect(o);
+    if (!lm_rect_intersect(&b, &orect, &g->bounds))
+        g->bounds = (struct lm_rect){ 0 };
+}
+
+static bool dock_app_matches(const char *match, const char *app_id)
+{
+    if (!*match)
+        return false;
+    size_t i = 0;
+    for (; match[i] && app_id[i]; i++) {
+        char c = app_id[i] == '.' ? '-' : (char)tolower((unsigned char)app_id[i]);
+        if (c != match[i])
+            return false;
+    }
+    return !match[i] && !app_id[i];
+}
+
+static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_dock_info *d)
+{
+    struct dock_geo g;
+    dock_geometry(o, &g);
+    memset(d, 0, sizeof(*d));
+    d->output = o;
+    d->rect = g.bounds;
+    d->n = g.n;
+    d->hover = wm->dock_active ? wm->hover_dock : -1;
+    d->dot_y = g.icon_bottom + DOCK_DOT / 2 + 1;
+
+    /* The icons near the pointer grow with a bell curve; the ones beyond them are pushed aside so that nothing overlaps. Hit testing uses
+     * the unmagnified places (dock_pick), so what the pointer measures against does not move under it. */
+    double px = 0, py = 0;
+    bool zoom = wm->dock_active && lm_dock.zoom > 100 && wm->srv->seat;
+    if (zoom)
+        lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    float scale[LM_DOCK_MAX], extra[LM_DOCK_MAX], total_extra = 0.0f;
+    float sigma = 2.3f * (float)(g.size + g.gap);
+    for (int i = 0; i < g.n; i++) {
+        float cx = (float)(g.x0 + i * (g.size + g.gap)) + (float)g.size / 2.0f, f = 0.0f;
+        if (zoom) {
+            float dd = fabsf((float)px - cx);
+            f = dd < sigma ? 0.5f * (1.0f + cosf(3.14159265f * dd / sigma)) : 0.0f;
+        }
+        scale[i] = 1.0f + ((float)lm_dock.zoom / 100.0f - 1.0f) * f;
+        extra[i] = (float)g.size * (scale[i] - 1.0f);
+        total_extra += extra[i];
+    }
+    float left = 0.0f;
+    for (int i = 0; i < g.n; i++) {
+        float cx = (float)(g.x0 + i * (g.size + g.gap)) + (float)g.size / 2.0f;
+        float cxp = cx + left + extra[i] / 2.0f - total_extra / 2.0f, w = (float)g.size * scale[i];
+        left += extra[i];
+        d->icon[i].box = lm_rect_make((int)lroundf(cxp - w / 2.0f), (int)lroundf((float)g.icon_bottom - w), (int)lroundf(w), (int)lroundf(w));
+        d->icon[i].item = lm_dock_item(i);
+        struct lm_window *wn;
+        lm_list_for_each(wn, &((struct lm_wm *)wm)->windows, link)
+            if (wn->mapped && dock_app_matches(d->icon[i].item->match, wn->app_id)) {
+                d->icon[i].running = true;
+                break;
+            }
+    }
+    if (d->hover >= 0 && d->hover < g.n) {
+        d->label_text = d->icon[d->hover].item->name;
+        int w = lm_font_text_width(d->label_text) + 20;
+        const struct lm_rect *b = &d->icon[d->hover].box;
+        int x = b->x + b->w / 2 - w / 2, y = b->y - 8 - DOCK_LABEL_H;
+        struct lm_rect orect = lm_output_rect(o);
+        x = LM_CLAMP(x, orect.x + 4, orect.x + orect.w - w - 4);
+        d->label = lm_rect_make(x, y, w, DOCK_LABEL_H);
+    }
+}
+
+static void dock_damage(struct lm_wm *wm)
+{
+    struct lm_output *o = dock_output(wm);
+    if (!o)
+        return;
+    struct dock_geo g;
+    dock_geometry(o, &g);
+    damage_rect(wm, &g.bounds);
+}
+
+/* What the pointer at (ix, iy) touches of the dock. The magnified shape is only "solid" while the pointer is inside the dock already. */
+static bool dock_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
+{
+    struct lm_output *o = dock_output(wm);
+    if (!o || lm_lock_active(wm->srv->lock))
+        return false;
+    struct dock_geo g;
+    dock_geometry(o, &g);
+    if (dock_shown(wm)) {
+        const struct lm_rect *r = wm->dock_active ? &g.tall : &g.strip;
+        if (lm_rect_contains(r, ix, iy)) {
+            out->kind = LM_PICK_DOCK;
+            out->rect = *r;
+            int rel = ix - g.x0 + g.gap / 2, pitch = g.size + g.gap;
+            if (rel >= 0 && rel < g.n * pitch) {
+                out->kind = LM_PICK_DOCK_ITEM;
+                out->index = rel / pitch;
+            }
+            return true;
+        }
+    }
+    if (lm_dock.autohide && !dock_shown(wm) && iy >= o->y + o->height - 2 && ix >= o->x && ix < o->x + o->width) {
+        out->kind = LM_PICK_DOCK;                               /* the bottom edge of the screen reveals it */
+        return true;
+    }
+    return false;
+}
+
+static void dock_hide_tick(void *data)
+{
+    struct lm_wm *wm = data;
+    if (wm->dock_shown && !wm->dock_active) {
+        dock_damage(wm);
+        wm->dock_shown = false;
+    }
+}
+
+/* The pointer moved: `in` = it is on the dock, `item` = the icon it is on (-1 none). */
+static void dock_motion(struct lm_wm *wm, bool in, int item)
+{
+    double px = 0, py = 0;
+    if (wm->srv->seat)
+        lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    bool changed = in != wm->dock_active || item != wm->hover_dock;
+    if (in && (int)px != wm->dock_px)
+        changed = true;
+    wm->dock_px = (int)px;
+    if (in && lm_dock.autohide) {
+        if (wm->dock_timer)
+            lm_timer_arm_ms(wm->dock_timer, 0, 0);
+        if (!wm->dock_shown) {
+            wm->dock_shown = true;
+            changed = true;
+        }
+    } else if (!in && wm->dock_shown && lm_dock.autohide && wm->dock_timer && !lm_timer_is_armed(wm->dock_timer)) {
+        lm_timer_arm_ms(wm->dock_timer, DOCK_HIDE_MS, 0);
+    }
+    wm->dock_active = in;
+    wm->hover_dock = item;
+    if (changed)
+        dock_damage(wm);
+}
+
+/* A click on icon `i`: bring the program's window forward when it has one that is not in front already (`reuse`), else start it. */
+static void dock_activate(struct lm_wm *wm, int i, bool reuse)
+{
+    const struct lm_dock_item *it = lm_dock_item(i);
+    if (!it)
+        return;
+    struct lm_window *w, *best = NULL;
+    if (reuse)
+        lm_list_for_each(w, &wm->windows, link)
+            if (w->mapped && dock_app_matches(it->match, w->app_id) && (!best || WIN(w)->focus_seq > WIN(best)->focus_seq))
+                best = w;
+    /* A window that is not in front yet comes forward; when the most recent one already has the focus the click is for another
+     * instance (two terminals): the program is started again. */
+    if (best && !(best == wm->focused && !best->minimized && best->workspace == wm->workspace))
+        lm_wm_focus_window(wm, best);
+    else
+        lm_server_spawn(wm->srv, it->cmd);
+}
+
+size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    size_t o = 0;
+    struct lm_output *out = dock_output(wm);
+    struct lm_dock_info d;
+    bool shown = out && dock_shown(wm);
+    if (out)
+        dock_info(wm, out, &d);
+    o += (size_t)snprintf(buf + o, size - o, "dock shown=%d hover=%d n=%d\n", shown, shown ? d.hover : -1, out ? d.n : 0);
+    for (int i = 0; out && i < d.n && o < size; i++)
+        o += (size_t)snprintf(buf + o, size - o, "icon %d \"%s\" x=%d y=%d w=%d h=%d running=%d cmd=%s\n", i, d.icon[i].item->name,
+                              d.icon[i].box.x, d.icon[i].box.y, d.icon[i].box.w, d.icon[i].box.h, d.icon[i].running, d.icon[i].item->cmd);
+    return o < size ? o : size - 1;
 }
 
 void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene_fn fn, void *data)
@@ -1813,17 +2125,18 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
-    if (wm->menu_open && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {
-        memset(&it, 0, sizeof(it));
-        it.kind = LM_SCENE_MENU;
-        it.u.menu.rect = wm->menu_rect;
-        it.u.menu.n = wm->srv->config.napps;
-        it.u.menu.item_h = MENU_ITEM_H;
-        it.u.menu.hover = wm->hover_menu;
-        for (int i = 0; i < it.u.menu.n; i++)
-            it.u.menu.label[i] = wm->srv->config.apps[i].name;
-        if (!fn(&it, data))
-            return;
+    struct lm_output *dock_out = dock_output(wm);
+    if (dock_out && dock_shown(wm)) {
+        struct dock_geo g;
+        dock_geometry(dock_out, &g);
+        if (!lm_rect_is_empty(&g.bounds) && (!clip || lm_rect_overlaps(&g.bounds, clip))) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_DOCK;
+            it.output = dock_out;
+            dock_info(wm, dock_out, &it.u.dock);
+            if (!fn(&it, data))
+                return;
+        }
     }
 
     struct lm_popup *p;
@@ -1868,6 +2181,21 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 it.kind = LM_SCENE_POWER;
                 it.output = po;
                 power_info(wm, po, &it.u.power);
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+    }
+
+    if (wm->about_open) {                                        /* the About dialog */
+        struct lm_output *ao = about_output(wm);
+        if (ao) {
+            struct lm_rect r = lm_output_rect(ao);
+            if (!clip || lm_rect_overlaps(&r, clip)) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_ABOUT;
+                it.output = ao;
+                about_info(wm, ao, &it.u.about);
                 if (!fn(&it, data))
                     return;
             }
@@ -1980,6 +2308,16 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
     out->kind = LM_PICK_NONE;
     int32_t ix = (int32_t)x, iy = (int32_t)y;
 
+    struct lm_output *ao = about_output(wm);
+    if (ao && !lm_lock_active(wm->srv->lock)) {                  /* the About dialog is modal, too */
+        struct lm_about_info ai;
+        about_info(wm, ao, &ai);
+        out->kind = lm_rect_contains(&ai.card, ix, iy) ? LM_PICK_ABOUT_CARD : LM_PICK_ABOUT_BACKDROP;
+        if (lm_rect_contains(&ai.close, ix, iy))
+            out->kind = LM_PICK_ABOUT_BUTTON;
+        out->rect = ai.card;
+        return;
+    }
     struct lm_output *po = power_output(wm);
     if (po && !lm_lock_active(wm->srv->lock)) {                  /* the session dialog is modal: it gets every pick */
         struct lm_power_info pi;
@@ -2008,13 +2346,6 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
         out->kind = LM_PICK_SHOT_CARD;
         return;
     }
-    if (wm->menu_open && lm_rect_contains(&wm->menu_rect, ix, iy)) {
-        int i = (iy - wm->menu_rect.y - 2) / MENU_ITEM_H;
-        out->kind = LM_PICK_MENU_ITEM;
-        out->index = LM_CLAMP(i, 0, wm->srv->config.napps - 1);
-        return;
-    }
-
     struct lm_popup *p;
     lm_list_for_each_reverse(p, &wm->popups, link) {
         if (!popup_visible(wm, p, 0))
@@ -2031,6 +2362,9 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             return;
         }
     }
+
+    if (dock_pick(wm, ix, iy, out))                              /* the dock floats above the windows */
+        return;
 
     struct lm_window *w;
     lm_list_for_each_reverse(w, &wm->windows, link) {
@@ -2118,7 +2452,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             struct lm_panel_info pi;
             panel_info(wm, o, &pi);
             out->kind = LM_PICK_PANEL;
-            if (lm_rect_contains(&pi.launcher, ix, iy)) {
+            int lcx = pi.launcher.x + pi.launcher.w / 2, lcy = pi.launcher.y + pi.launcher.h / 2, lr = pi.launcher.w / 2 + 1;
+            if ((ix - lcx) * (ix - lcx) + (iy - lcy) * (iy - lcy) <= lr * lr) {           /* the circle, not its square */
                 out->kind = LM_PICK_PANEL_LAUNCHER;
                 out->rect = pi.launcher;
             }
@@ -2168,8 +2503,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false;
-    int menu_item = -1, power_item = -1;
+    bool about_btn = false, launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false;
+    int power_item = -1;
     struct lm_window *task = NULL;
     enum lm_cursor_shape shape = LM_CURSOR_NONE;
 
@@ -2182,7 +2517,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_SHOT_CARD: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_NOTIFY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
-    case LM_PICK_MENU_ITEM: menu_item = pick->index; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_ABOUT_BUTTON: about_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_DOCK_ITEM: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
@@ -2194,6 +2530,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     }
     if (bits)
         shape = LM_CURSOR_POINTER;
+    dock_motion(wm, pick->kind == LM_PICK_DOCK_ITEM || pick->kind == LM_PICK_DOCK, pick->kind == LM_PICK_DOCK_ITEM ? pick->index : -1);
 
     if (hw != wm->hover_win || bits != wm->hover_bits) {
         if (wm->hover_win)
@@ -2203,10 +2540,9 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         if (hw)
             damage_frame(wm, hw);
     }
-    if (menu_item != wm->hover_menu) {
-        wm->hover_menu = menu_item;
-        if (wm->menu_open)
-            damage_rect(wm, &wm->menu_rect);
+    if (wm->about_open && about_btn != wm->about_hover_close) {
+        wm->about_hover_close = about_btn;
+        about_damage(wm);
     }
     if (wm->power_open && power_item >= 0 && power_item != wm->power_sel) {     /* the pointer moves the dialog's highlight */
         wm->power_sel = power_item;
@@ -2692,6 +3028,23 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         return true;
     }
+    if (pick->kind == LM_PICK_ABOUT_BUTTON || pick->kind == LM_PICK_ABOUT_CARD || pick->kind == LM_PICK_ABOUT_BACKDROP) {
+        int pk = wm->press_panel_kind;
+        if (pressed) {
+            if (pick->kind == LM_PICK_ABOUT_BACKDROP)           /* a click outside the card closes it, nothing below gets it */
+                about_set(wm, false, NULL);
+            else if (pick->kind == LM_PICK_ABOUT_BUTTON && button == BTN_LEFT) {
+                wm->press_panel_kind = LM_PICK_ABOUT_BUTTON;
+                wm->press_win = NULL;
+                wm->press_bits = 0;
+            }
+        } else {
+            wm->press_panel_kind = 0;
+            if (pk == LM_PICK_ABOUT_BUTTON && pick->kind == LM_PICK_ABOUT_BUTTON && button == BTN_LEFT)
+                about_set(wm, false, NULL);
+        }
+        return true;
+    }
     if (pick->kind == LM_PICK_NOTIFY) {                    /* a click dismisses a notification and goes no further */
         if (pressed)
             note_dismiss(wm, pick->index);
@@ -2706,10 +3059,6 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
     }
     if (pressed && wm->clip_nav && pick->kind != LM_PICK_CLIP_ENTRY)
         clip_nav_set(wm, false);
-
-    /* Any press outside the menu (and not on the launcher, which toggles it) closes it; the click goes on. */
-    if (pressed && wm->menu_open && pick->kind != LM_PICK_MENU_ITEM && pick->kind != LM_PICK_PANEL_LAUNCHER)
-        menu_set(wm, false, NULL);
 
     /* Releases of decoration/panel presses we consumed. */
     if (!pressed && (wm->press_bits || wm->press_panel_kind)) {
@@ -2730,17 +3079,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             case LM_FRAME_HOVER_MINIMIZE: lm_wm_window_request_minimize(pw); break;
             }
         }
-        if (pk == LM_PICK_PANEL_LAUNCHER && pick->kind == LM_PICK_PANEL_LAUNCHER) {
-            if (wm->srv->config.napps > 0)
-                menu_set(wm, !wm->menu_open, &pick->rect);
-            else
-                launch_terminal(wm);
-        }
-        if (pk == LM_PICK_MENU_ITEM && pick->kind == LM_PICK_MENU_ITEM && pick->index == pi) {
-            const struct lm_app_entry *app = &wm->srv->config.apps[pi];
-            menu_set(wm, false, NULL);
-            lm_server_spawn(wm->srv, app->cmd);
-        }
+        if (pk == LM_PICK_PANEL_LAUNCHER && pick->kind == LM_PICK_PANEL_LAUNCHER)
+            about_set(wm, true, lm_output_nearest(wm->srv, pick->rect.x, pick->rect.y));
+        if (pk == LM_PICK_DOCK_ITEM && pick->kind == LM_PICK_DOCK_ITEM && pick->index == pi)
+            dock_activate(wm, pi, button != BTN_MIDDLE);        /* the middle button always starts another instance */
         if (pk == LM_PICK_PANEL_RUN && pick->kind == LM_PICK_PANEL_RUN)
             launch_run(wm);
         if (pk == LM_PICK_PANEL_LAYOUT && pick->kind == LM_PICK_PANEL_LAYOUT && wm->srv->input)
@@ -2823,13 +3165,15 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (button == BTN_LEFT)
             lm_seat_clip_use(wm->srv->seat, pick->index);
         return true;
-    case LM_PICK_MENU_ITEM:
-        if (button == BTN_LEFT) {
-            wm->press_panel_kind = LM_PICK_MENU_ITEM;
+    case LM_PICK_DOCK_ITEM:
+        if (button == BTN_LEFT || button == BTN_MIDDLE) {
+            wm->press_panel_kind = LM_PICK_DOCK_ITEM;
             wm->press_panel_ws = pick->index;
             wm->press_win = NULL;
             wm->press_bits = 0;
         }
+        return true;
+    case LM_PICK_DOCK:
         return true;
     case LM_PICK_PANEL_LAUNCHER:
         if (button == BTN_LEFT) {
@@ -2929,7 +3273,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
     if (locked) {
         sw_close(wm);
         power_set(wm, false, NULL);
-        menu_set(wm, false, NULL);
+        about_set(wm, false, NULL);
         clip_nav_set(wm, false);
         if (wm->focused)
             lm_xdg_dismiss_popups(wm->focused->surface);
@@ -3080,6 +3424,11 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     bool ctrl = (mods & LM_MOD_CTRL) != 0;
     bool alt = (mods & LM_MOD_ALT) != 0;
 
+    if (wm->about_open && !(ctrl && alt)) {                     /* the About dialog is modal, too: Esc, Enter and Space close it */
+        if (pressed && !repeat && (code == KEY_ESC || code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE))
+            about_set(wm, false, NULL);
+        return true;
+    }
     if (wm->power_open && !(ctrl && alt)) {                     /* the session dialog is modal: it takes every key */
         if (pressed && !repeat) {
             if (code == KEY_ESC)
@@ -3109,11 +3458,6 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     if (code == KEY_TAB && alt && !super && !ctrl) {            /* Alt+Tab / Alt+Shift+Tab: the next / previous window in use order */
         if (pressed)
             sw_step(wm, shift);
-        return true;
-    }
-    if (code == KEY_ESC && wm->menu_open) {
-        if (pressed && !repeat)
-            menu_set(wm, false, NULL);
         return true;
     }
 

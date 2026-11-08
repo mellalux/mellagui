@@ -1,5 +1,5 @@
 /*
- * Launchers: the app menu and the Super+... program commands. See launchers.h for the contract.
+ * Launchers: the commands behind Super+Enter / Super+R / Super+I and the screenshot card, and the command expansion the dock and [keys] use. See launchers.h for the contract.
  */
 #include <ctype.h>
 #include <limits.h>
@@ -13,26 +13,7 @@
 #include "log.h"
 #include "server.h"
 
-#define NAME_MAX_LEN 64
 #define CMD_MAX 1024
-
-/* The default menu is a mellagui.conf text like any other. VS Code: ~/VSCode/code (tarball), else the Electron binary
- * inside the snap; /snap/bin/code is deliberately not used: its launcher appends --ozone-platform=x11 after our flags
- * and there is no X11. Firefox: native Wayland, WebRender on the GPU (MellaGUI offers zwp_linux_dmabuf_v1; without it
- * Firefox falls back by itself); the snap is confined: it may only connect to sockets named wayland-N, which is what
- * MellaGUI picks by default. */
-#define CODE_FLAGS "--ozone-platform=wayland --disable-gpu --no-sandbox --password-store=basic"
-#define FF_ENV "env MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_WEBRENDER=1"
-#define DEFAULT_MENU \
-    "[menu]\n" \
-    "Terminal   = @terminal\n" \
-    "Calculator = mellagui-calc\n" \
-    "Images     = @view\n" \
-    "Editor     = mellagui-edit\n" \
-    "Files      = mellagui-files\n" \
-    "Code       = ~/VSCode/code " CODE_FLAGS " || /snap/code/current/usr/share/code/code " CODE_FLAGS "\n" \
-    "Firefox    = " FF_ENV " /snap/bin/firefox || " FF_ENV " /usr/bin/firefox\n" \
-    "Settings   = @settings\n"
 
 static const char default_conf[] =
     "# mellagui.conf - what MellaGUI does when this file is missing. Copy what you want to change.\n"
@@ -40,9 +21,7 @@ static const char default_conf[] =
     "terminal = mellagui-term\n"
     "run      = mellagui-run\n"
     "settings = mellagui-settings\n"
-    "view     = mellagui-view\n"
-    "\n"
-    DEFAULT_MENU;
+    "view     = mellagui-view\n";
 
 const char *lm_launch_default_conf(void) { return default_conf; }
 
@@ -56,48 +35,11 @@ static char cmd_res[C_COUNT][CMD_MAX];
 static const char *const cmd_defaults[C_COUNT] = { "mellagui-term", "mellagui-run", "mellagui-settings", "mellagui-view" };
 static bool cmd_cli[C_COUNT];                   /* set on the command line: the file may not change it, also on a reload */
 
-/* Menu entries come in two layers, so a reload can throw the file's away and keep the command line's:
- * conf_* = [menu] of mellagui.conf, cli_* = --app. menu_* is the merged, resolved list that config.apps points into. */
-struct menu_layer { char name[LM_MAX_APPS][NAME_MAX_LEN]; char cmd[LM_MAX_APPS][CMD_MAX]; int n; };
-static struct menu_layer conf_menu, cli_menu;
-static char menu_name[LM_MAX_APPS][NAME_MAX_LEN];
-static char menu_raw[LM_MAX_APPS][CMD_MAX];
-static char menu_res[LM_MAX_APPS][CMD_MAX];
-static int menu_n;
-
-static bool layer_add(struct menu_layer *l, const char *name, const char *cmd)
-{
-    if (l->n >= LM_MAX_APPS || !*name || !*cmd || strlen(name) >= NAME_MAX_LEN || strlen(cmd) >= CMD_MAX)
-        return false;
-    strcpy(l->name[l->n], name);
-    strcpy(l->cmd[l->n], cmd);
-    l->n++;
-    return true;
-}
-
-bool lm_launch_add(struct lm_config *cfg, const char *name, const char *cmd)
-{
-    (void)cfg;
-    return layer_add(&cli_menu, name, cmd);
-}
-
-int lm_launch_menu_count(void) { return conf_menu.n; }
-
-bool lm_launch_menu_entry(int i, const char **name, const char **cmd)
-{
-    if (i < 0 || i >= conf_menu.n)
-        return false;
-    *name = conf_menu.name[i];
-    *cmd = conf_menu.cmd[i];
-    return true;
-}
-
 void lm_launch_reset(void)
 {
     for (int i = 0; i < C_COUNT; i++)
         if (!cmd_cli[i])
             strcpy(cmd_raw[i], cmd_defaults[i]);
-    conf_menu.n = 0;
 }
 
 bool lm_launch_set_command(const char *which, const char *cmd)
@@ -114,6 +56,7 @@ bool lm_launch_set_command(const char *which, const char *cmd)
 
 bool lm_launch_conf(void *ud, const char *section, const char *key, const char *value)
 {
+    (void)ud;
     if (!strcmp(section, "commands")) {
         for (int i = 0; i < C_COUNT; i++) {
             if (!strcmp(key, cmd_names[i])) {
@@ -125,12 +68,6 @@ bool lm_launch_conf(void *ud, const char *section, const char *key, const char *
             }
         }
         return false;
-    }
-    if (!strcmp(section, "menu")) {
-        (void)ud;
-        if (conf_menu.n >= LM_MAX_APPS)
-            lm_warn("menu: at most %d entries, '%s' ignored", LM_MAX_APPS, key);
-        return layer_add(&conf_menu, key, value) || conf_menu.n >= LM_MAX_APPS;
     }
     return false;
 }
@@ -317,31 +254,13 @@ void lm_launch_resolve(struct lm_config *cfg)
     cfg->run_cmd = cmd_res[C_RUN];
     cfg->settings_cmd = cmd_res[C_SETTINGS];
     cfg->view_cmd = cmd_res[C_VIEW];
+}
 
-    if (conf_menu.n == 0 && cli_menu.n == 0)
-        lm_conf_parse(DEFAULT_MENU, "<built-in menu>", lm_launch_conf, cfg);
-    menu_n = 0;                                 /* the file's entries first, then --app */
-    for (int i = 0; i < conf_menu.n; i++, menu_n++) {
-        strcpy(menu_name[menu_n], conf_menu.name[i]);
-        strcpy(menu_raw[menu_n], conf_menu.cmd[i]);
-    }
-    for (int i = 0; i < cli_menu.n && menu_n < LM_MAX_APPS; i++, menu_n++) {
-        strcpy(menu_name[menu_n], cli_menu.name[i]);
-        strcpy(menu_raw[menu_n], cli_menu.cmd[i]);
-    }
-
-    cfg->napps = 0;
-    for (int i = 0; i < menu_n; i++) {
-        if (!resolve_spec(menu_raw[i], true, menu_res[cfg->napps], sizeof(menu_res[0]), &own) && !own) {
-            lm_info("menu: '%s' left out, its program was not found", menu_name[i]);
-            continue;
-        }
-        if (cfg->napps != i) {
-            memcpy(menu_name[cfg->napps], menu_name[i], sizeof(menu_name[0]));
-            memcpy(menu_raw[cfg->napps], menu_raw[i], sizeof(menu_raw[0]));
-        }
-        cfg->apps[cfg->napps] = (struct lm_app_entry){ menu_name[cfg->napps], menu_res[cfg->napps] };
-        cfg->napps++;
-    }
-    menu_n = cfg->napps;
+bool lm_launch_exists(const char *spec, char *out, size_t n)
+{
+    bool own;
+    bool found = resolve_spec(spec, true, out, n, &own);
+    if (!found && !own)
+        snprintf(out, n, "%s", spec);
+    return found || own;
 }

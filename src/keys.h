@@ -8,7 +8,7 @@
  *   [keys]
  *   Super+Return        = terminal
  *   Super+Shift+1       = move-to-workspace 1
- *   Super+T             = exec @terminal -e htop        # any shell command; @terminal @run @settings @view as in [menu]
+ *   Super+T             = exec @terminal -e htop        # any shell command; @terminal @run @settings @view as in [dock-apps]
  *   Alt+F4              = close
  *   Super+Q             = none                          # removes a default
  *
@@ -27,9 +27,9 @@
  *   layout-next layout-prev          keyboard layout                   lock                 lock the screen
  *   gadget-clipboard gadget-mixer gadget-system   show / hide a gadget   clipboard-pick     choose from the history with the arrows
  *   quit                             leave MellaGUI (asks for the lock secret first)       none  remove the binding
- *   reload-config                    read mellagui.conf again (theme, sizes, shortcuts, menu; see config.reload)
+ *   reload-config                    read mellagui.conf again (theme, sizes, shortcuts, dock; see config.reload)
  *
- * Not configurable (modal or hardware-level): Ctrl+Alt+F1..F12, Alt+Tab, Print / Alt+Print / Ctrl+Print, Esc in dialogs and menus.
+ * Not configurable (modal or hardware-level): Ctrl+Alt+F1..F12, Alt+Tab, Print / Alt+Print / Ctrl+Print, Esc in dialogs.
  */
 
 #include <stdbool.h>

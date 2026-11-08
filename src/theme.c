@@ -8,6 +8,7 @@
 
 #include "conf.h"
 #include "log.h"
+#include "metrics.h"
 #include "theme.h"
 
 struct lm_theme lm_theme = {
@@ -83,9 +84,13 @@ bool lm_theme_conf(void *ud, const char *section, const char *key, const char *v
     return !strcmp(section, "theme") && lm_theme_set(key, value);
 }
 
-/* Programs only care about [theme]; the other sections are the compositor's business and must not be reported. */
+/* Programs only care about [theme] and [windows] (scrollbar-width); the other sections are the compositor's business and must not be reported. */
 static bool client_line(void *ud, const char *section, const char *key, const char *value)
 {
+    if (!strcmp(section, "windows")) {
+        lm_metrics_conf(ud, section, key, value);                   /* (a bad value is the compositor's warning, not ours) */
+        return true;
+    }
     return strcmp(section, "theme") ? true : lm_theme_conf(ud, section, key, value);
 }
 

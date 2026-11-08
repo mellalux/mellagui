@@ -30,7 +30,7 @@
     X("title-button-hover",   title_button_hover,   0x5a6c96) \
     X("title-button-pressed", title_button_pressed, 0x2c3856) \
     X("title-button-close",   title_button_close,   0xc0392b) \
-    X("background",           background,        0x14171f) /* panel, menu and the window background of the bundled programs */ \
+    X("background",           background,        0x14171f) /* panel, About dialog and the window background of the bundled programs */ \
     X("field",                field,             0x0d0f14) /* input fields, displays, side bars */ \
     X("card",                 card,              0x161a24) /* gadget / notification cards */ \
     X("border",               border,            0x3a4256) \

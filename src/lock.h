@@ -6,7 +6,7 @@
  * of it) can unlock the screen.
  *
  * While the screen is locked
- *   - the scene is nothing but the lock screen (LM_SCENE_LOCK, one per output): no window, panel, gadget or menu is painted,
+ *   - the scene is nothing but the lock screen (LM_SCENE_LOCK, one per output): no window, panel, gadget or dock is painted,
  *   - the seat sends nothing to clients: keyboard and pointer focus are NULL, key / pointer / touch input goes only to
  *     lm_lock_key() (seat.c, lm_seat_set_locked); the shortcuts of the wm (Super+Shift+E quits, Super+Enter starts a
  *     terminal ...) are off. The two exceptions: Ctrl+Alt+F1..F12 still switches the virtual terminal unless `vt=0`

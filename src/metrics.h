@@ -6,13 +6,14 @@
  * The defaults are the built-in look; mellagui.conf can change any of them (a value outside its range is rejected with a
  * warning and the default stays):
  *
- *   [windows]        titlebar-height = 28    border-width = 4     button-size = 20   ...
- *   [panel]          height = 28             menu-width = 200     task-max-width = 160   ...
+ *   [windows]        titlebar-height = 28    border-width = 4     button-size = 20   scrollbar-width = 14   ...
+ *   [panel]          height = 32             task-max-width = 160   ...
  *   [gadgets]        width = 250             margin = 12          ...
  *   [notifications]  width = 320             gap = 6
  *
  * `mellagui --print-config` lists every key with its range. The values are read once at start (wm.c and render.c use them
- * through `lm_metrics`, so `#define PANEL_H (lm_metrics.panel_height)` replaces what used to be a constant).
+ * through `lm_metrics`; `#define PANEL_H (lm_metrics.panel_height)` replaces what used to be a constant). MellaGUI's own programs read [windows] too (lm_theme_load_env),
+ * so scrollbar-width reaches them when they start.
  */
 
 #include <stdbool.h>
@@ -27,8 +28,8 @@
     X("windows", "double-click-ms", double_click_ms, 400, 100, 1000, "double click time (title bar maximizes, gadget title resets)") \
     X("windows", "min-width", min_width, 160, 50, 1000, "smallest window width a user can resize to") \
     X("windows", "min-height", min_height, 80, 40, 1000, "smallest window height") \
-    X("panel", "height", panel_height, 28, 20, 64, "height of the top panel") \
-    X("panel", "button-width", panel_button_width, 72, 40, 200, "the MellaGUI menu button") \
+    X("windows", "scrollbar-width", scrollbar_width, 14, 4, 40, "width of the scroll bars of MellaGUI's own programs (the file browser)") \
+    X("panel", "height", panel_height, 32, 20, 64, "height of the top panel") \
     X("panel", "workspace-width", panel_ws_width, 24, 16, 80, "one workspace cell") \
     X("panel", "run-width", panel_run_width, 44, 30, 120, "the Run button") \
     X("panel", "layout-width", panel_layout_width, 36, 24, 100, "the keyboard layout indicator") \
@@ -36,8 +37,6 @@
     X("panel", "caps-width", panel_caps_width, 48, 30, 120, "the Caps indicator") \
     X("panel", "task-max-width", panel_task_max_width, 160, 60, 400, "widest taskbar entry") \
     X("panel", "task-gap", panel_task_gap, 2, 0, 16, "space between taskbar entries") \
-    X("panel", "menu-width", menu_width, 200, 120, 600, "width of the MellaGUI app menu") \
-    X("panel", "menu-item-height", menu_item_height, 26, 18, 64, "height of one menu entry") \
     X("gadgets", "width", gadget_width, 250, 180, 640, "clipboard gadget, starting width") \
     X("gadgets", "mixer-width", mixer_width, 250, 210, 640, "volume mixer gadget, starting width") \
     X("gadgets", "mixer-height", mixer_height, 196, 120, 560, "... starting height") \

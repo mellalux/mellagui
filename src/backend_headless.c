@@ -288,13 +288,29 @@ static void ctl_command(struct ctl_client *c, char *line)
         lm_list_for_each(o, &h->base.outputs, link)
             ctl_reply(c, "output %s x=%d y=%d w=%d h=%d\n", o->name, o->x, o->y, o->width, o->height);
         ctl_reply(c, "ok\n");
-    } else if (!strcmp(cmd, "apps")) {
-        /* apps -> one "app <name>|<command>" line per entry of the MellaGUI menu, then "ok" (tests of mellagui.conf) */
-        for (int i = 0; i < srv->config.napps; i++)
-            ctl_reply(c, "app %s|%s\n", srv->config.apps[i].name, srv->config.apps[i].cmd);
+    } else if (!strcmp(cmd, "about")) {
+        /* about [open|close] -> "about open=<0|1>" (after the optional change), while open "card x= y= w= h=", "close x= y= w= h=" and one "row <label>|<value>" line each, then "ok" (the About dialog of the logo button) */
+        if (srv->wm && a1 && !strcmp(a1, "open"))
+            lm_wm_about_set(srv->wm, true);
+        else if (srv->wm && a1 && !strcmp(a1, "close"))
+            lm_wm_about_set(srv->wm, false);
+        ctl_reply(c, "about open=%d\n", srv->wm && lm_wm_about_is_open(srv->wm));
+        if (srv->wm && lm_wm_about_is_open(srv->wm)) {
+            static char text[4096];
+            lm_wm_about_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "dock")) {
+        /* dock -> "dock shown=.. hover=.. n=.." and one "icon ..." line per button, then "ok" (see lm_wm_dock_describe) */
+        static char text[8192];
+        if (srv->wm) {
+            lm_wm_dock_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "setraw")) {
-        /* setraw <key> <value...> -> set a setting whose value has spaces or control characters (the menu-* ones); single spaces only */
+        /* setraw <key> <value...> -> set a setting whose value has spaces or control characters (the dock-* ones); single spaces only */
         if (!srv->settings || !a1 || !a2) { ctl_reply(c, "err usage: setraw <key> <value>\n"); return; }
         char val[1400];
         snprintf(val, sizeof(val), "%s%s%s%s%s", a2, a3 ? " " : "", a3 ? a3 : "", save && *save ? " " : "", save && *save ? save : "");

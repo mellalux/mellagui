@@ -133,13 +133,6 @@ struct lm_global {
 
 /* ---- configuration (filled by main.c from argv/env) ------------------------- */
 
-#define LM_MAX_APPS 12
-
-struct lm_app_entry {
-    const char *name;           /* menu label */
-    const char *cmd;            /* shell command */
-};
-
 struct lm_config {
     const char *backend;        /* "drm" | "headless" */
     int headless_width;         /* --size WxH (default 1280x720) */
@@ -151,7 +144,7 @@ struct lm_config {
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
     const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
     const char *view_cmd;       /* command for the screenshot card's click: the image viewer (default "mellagui-view") */
-    const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "mellagui-settings") */
+    const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
     const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
@@ -161,8 +154,6 @@ struct lm_config {
     const char *screenshot_dir; /* where Print / Alt+Print save PNGs (--screenshot-dir); NULL = the clipboard only */
     const char *lock_path;      /* file the screen lock's password / PIN hash is kept in (--lock-file); NULL = in memory only */
     struct lm_keybinds keys;     /* keyboard shortcuts (keys.h; mellagui.conf [keys]) */
-    struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "MellaGUI" menu (--app NAME=CMD; defaults filled by main.c) */
-    int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
     char wallpaper[256];        /* image file of the desktop background (settings: wallpaper), "" = the gradient; "~/" is the home directory */
     char output_order[200];     /* connector names, leftmost first (settings: output-order); outputs not named follow in connection order */

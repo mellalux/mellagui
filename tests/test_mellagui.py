@@ -7,6 +7,7 @@ Environment:
 import base64
 import io
 import random
+import re
 import json
 import os
 import signal
@@ -304,7 +305,7 @@ class TestWindows(Base):
         c.wl.roundtrip()
         r = ctl.windows()['windows'][0]
         self.assertIn('maximized', r['flags'])
-        self.assertEqual((r['w'], r['h']), (1024 - 8, 600 - 28 - 28 - 4))
+        self.assertEqual((r['w'], r['h']), (1024 - 8, 600 - 32 - 28 - 4))
         # and back
         ctl.key(KEY_LEFTMETA, True)
         ctl.tap(KEY_M)
@@ -323,12 +324,12 @@ class TestWindows(Base):
         r0 = ctl.windows()['windows'][0]
         self.super_key(KEY_LEFT)
         cfg = w.handle_configure()
-        self.assertEqual((cfg[0], cfg[1]), (512 - 8, 600 - 28 - 28 - 4))
+        self.assertEqual((cfg[0], cfg[1]), (512 - 8, 600 - 32 - 28 - 4))
         self.assertNotIn(XDG_STATE_MAXIMIZED, cfg[2])
         c.wl.roundtrip()
         r = ctl.windows()['windows'][0]
         self.assertIn('tiled-left', r['flags'])
-        self.assertEqual((r['x'], r['y'], r['w'], r['h']), (4, 56, 504, 540))
+        self.assertEqual((r['x'], r['y'], r['w'], r['h']), (4, 60, 504, 536))
         self.super_key(KEY_RIGHT)
         cfg = w.handle_configure()
         c.wl.roundtrip()
@@ -439,10 +440,10 @@ class TestWindows(Base):
         self.assertEqual(ppm.px(r['x'] + 20, r['y'] + 20), (255, 0, 0))
 
     def test_panel_workspace_click(self):
-        ctl.click(124, 14)   # second workspace cell
+        ctl.click(76, 14)    # second workspace cell
         ctl.sync()
         self.assertEqual(ctl.windows()['workspace'], 1)
-        ctl.click(98, 14)
+        ctl.click(50, 14)    # the first
         ctl.sync()
         self.assertEqual(ctl.windows()['workspace'], 0)
 
@@ -547,52 +548,65 @@ class TestWindows(Base):
         c2.sync()
         self.assertIsNone(p2.poll())
 
-    def test_app_menu_opens_and_closes(self):
+    @staticmethod
+    def about(c):
+        """(open, {'card': (x, y, w, h), 'close': (x, y, w, h)}, [(label, value)]) of the control socket's `about`."""
+        info, rows = {}, []
+        lines = c.cmd('about')
+        is_open = lines[0].endswith('=1')
+        for l in lines[1:]:
+            m = re.match(r'(card|close) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                info[m[1]] = tuple(int(m[i]) for i in range(2, 6))
+            elif l.startswith('row '):
+                rows.append(tuple(l[4:].split('|', 1)))
+        return is_open, info, rows
+
+    def test_the_logo_button_opens_the_about_dialog(self):
         ctl.abs(900, 500)
         ctl.sync()
-        before = ctl.dump(os.path.join(tmp, 'menu0.ppm'))
-        ctl.click(40, 14)                       # "MellaGUI" launcher button opens the menu
-        ctl.abs(300, 300)
+        before = ctl.dump(os.path.join(tmp, 'about0.ppm'))
+        self.assertFalse(self.about(ctl)[0])
+        ctl.click(16, 14)                       # the round logo button top left
+        ctl.abs(10, 300)
         ctl.sync()
-        opened = ctl.dump(os.path.join(tmp, 'menu1.ppm'))
-        self.assertEqual(opened.px(150, 40), (0x14, 0x17, 0x1f))       # menu background
-        self.assertNotEqual(before.px(150, 40), (0x14, 0x17, 0x1f))
+        is_open, info, rows = self.about(ctl)
+        self.assertTrue(is_open)
+        opened = ctl.dump(os.path.join(tmp, 'about1.ppm'))
+        self.assertNotEqual(opened.px(40, 300), before.px(40, 300))        # the output is dimmed behind the card
+        cx, cy, cw, ch = info['card']
+        self.assertEqual(opened.px(cx + 8, cy + ch // 2), (0x14, 0x17, 0x1f))       # the card's own background
+        labels = [l for l, _ in rows]
+        for want in ('Computer', 'System', 'Memory', 'Display', 'Graphics'):
+            self.assertIn(want, labels)
+        self.assertEqual(dict(rows)['Display'].split()[0], 'headless-0')
         ctl.tap(KEY_ESC)                        # Escape closes it
         ctl.sync()
-        closed = ctl.dump(os.path.join(tmp, 'menu2.ppm'))
-        self.assertEqual(closed.px(150, 40), before.px(150, 40))
-        ctl.click(40, 14)                       # open again, then an outside click closes it
-        ctl.click(600, 400)
-        ctl.sync()
-        closed = ctl.dump(os.path.join(tmp, 'menu3.ppm'))
-        self.assertEqual(closed.px(150, 40), before.px(150, 40))
-        ctl.click(40, 14)                       # the launcher button toggles
-        ctl.click(40, 14)
-        ctl.abs(900, 500)
-        ctl.sync()
-        closed = ctl.dump(os.path.join(tmp, 'menu4.ppm'))
-        self.assertEqual(closed.px(150, 40), before.px(150, 40))
+        self.assertFalse(self.about(ctl)[0])
+        closed = ctl.dump(os.path.join(tmp, 'about2.ppm'))
+        self.assertEqual(closed.px(40, 300), before.px(40, 300))
+        ctl.click(16, 14)                       # open again: a click outside the card closes it and nothing below gets it
+        self.assertTrue(self.about(ctl)[0])
+        ctl.click(20, 300)
+        self.assertFalse(self.about(ctl)[0])
+        ctl.click(16, 14)                       # a click inside the card keeps it open, the Close button ends it
+        x, y, w, h = self.about(ctl)[1]['card']
+        ctl.click(x + 30, y + 30)
+        self.assertTrue(self.about(ctl)[0])
+        x, y, w, h = self.about(ctl)[1]['close']
+        ctl.click(x + w // 2, y + h // 2)
+        self.assertFalse(self.about(ctl)[0])
+        ctl.click(16, 14)
+        ctl.tap(KEY_ENTER)                      # Enter closes it, too
+        self.assertFalse(self.about(ctl)[0])
 
-    def test_app_menu_starts_calculator(self):
-        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-calc')):
-            self.skipTest('mellagui-calc not built')
-        ctl.click(40, 14)
-        ctl.click(60, 69)                       # second entry: Calculator
-        win = wait_for_window('mellagui.calc')
-        self.assertIsNotNone(win, 'menu entry did not start the calculator')
-        ctl.sync()
+    def test_the_logo_is_painted_in_the_round_button(self):
         ctl.abs(900, 500)
         ctl.sync()
-        ppm = ctl.dump(os.path.join(tmp, 'menu5.ppm'))
-        self.assertNotEqual(ppm.px(150, 40), (0x14, 0x17, 0x1f), 'menu stays open after launching')
-        ctl.key(KEY_LEFTMETA, True)             # Super+Q closes the calculator again
-        ctl.tap(KEY_Q)
-        ctl.key(KEY_LEFTMETA, False)
-        for _ in range(100):
-            if not ctl.windows()['windows']:
-                break
-            time.sleep(0.05)
-        self.assertFalse(ctl.windows()['windows'])
+        ppm = ctl.dump(os.path.join(tmp, 'logo0.ppm'))
+        self.assertEqual(ppm.px(5, 3), ppm.px(2, 14))                       # the corner of the button's square is the panel
+        self.assertNotEqual(ppm.px(16, 14), ppm.px(2, 14))                  # the middle is the picture
+        self.assertTrue(len({ppm.px(x, y) for x in range(8, 25) for y in range(6, 23)}) > 8)   # a picture, not a flat disc
 
     def test_taskbar_click_minimize_and_restore(self):
         c1, w1 = self.window(300, 200)
@@ -634,10 +648,10 @@ class TestWindows(Base):
         c, w = self.window(2000, 1000)
         cfg = w.handle_configure()
         self.assertIsNotNone(cfg, 'no configure for an oversized window')
-        self.assertEqual((cfg[0], cfg[1]), (1024 - 8, 600 - 28 - 28 - 4))
+        self.assertEqual((cfg[0], cfg[1]), (1024 - 8, 600 - 32 - 28 - 4))
         c.wl.roundtrip()
         r = ctl.windows()['windows'][0]
-        self.assertEqual((r['x'], r['y'], r['w'], r['h']), (4, 56, 1016, 540))
+        self.assertEqual((r['x'], r['y'], r['w'], r['h']), (4, 60, 1016, 536))
 
     def test_frame_callback(self):
         c, w = self.window()
@@ -1299,7 +1313,7 @@ class TestGadget(Base):
 
     def test_default_place_is_top_right_below_the_panel(self):
         x, y, w, h = self.rect()
-        self.assertEqual((x + w, y), (1024 - 12, 28 + 12))
+        self.assertEqual((x + w, y), (1024 - 12, 32 + 12))
         self.assertEqual((w, h), (250, 214))
 
     def test_title_bar_drags_the_gadget(self):
@@ -1315,7 +1329,7 @@ class TestGadget(Base):
     def test_drag_keeps_the_gadget_on_the_output_below_the_panel(self):
         x, y, w, h = self.rect()
         self.drag(x + 60, y + 10, -2000, -2000)
-        self.assertEqual(self.rect(), (0, 28, w, h))
+        self.assertEqual(self.rect(), (0, 32, w, h))
         self.drag(60, 38, 3000, 3000)
         self.assertEqual(self.rect(), (1024 - w, 600 - h, w, h))
 
@@ -1590,11 +1604,11 @@ class TestKeyboard(Base):
         ctl.cmd('sticky 1')
         ctl.sync()
         after = ctl.dump(os.path.join(tmp, 'kbd1.ppm'))
-        sticky_before = [before.px(x, 14) for x in range(793, 868, 3)]
-        sticky_after = [after.px(x, 14) for x in range(793, 868, 3)]
+        sticky_before = [before.px(x, 16) for x in range(789, 864, 3)]
+        sticky_after = [after.px(x, 16) for x in range(789, 864, 3)]
         self.assertNotEqual(sticky_before, sticky_after, 'sticky button looks the same when enabled')
-        layout_before = [before.px(x, 14) for x in range(750, 782, 2)]
-        layout_after = [after.px(x, 14) for x in range(750, 782, 2)]
+        layout_before = [before.px(x, 16) for x in range(746, 778, 2)]
+        layout_after = [after.px(x, 16) for x in range(746, 778, 2)]
         self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
@@ -1883,7 +1897,7 @@ class TestClients(Base):
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def files_start(self, *args, app_id='mellagui.files'):
+    def files_start(self, *args, app_id='mellagui.files', extra_files=0, env=None):
         """A folder with sub/, a.txt, p.ppm (a 1x1 image), .hidden and the browser on it. Returns (process, folder)."""
         exe = os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
@@ -1901,10 +1915,12 @@ class TestClients(Base):
             f.write(b'secret\n')
         with open(os.path.join(d, 'blob.bin'), 'wb') as f:
             f.write(b'\x00\x01\x02')
+        for i in range(extra_files):
+            open(os.path.join(d, 'f%03d.txt' % i), 'wb').close()
         for w in ctl.windows()['windows']:
             self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.files.choose', 'mellagui.edit', 'mellagui.view', 'mellagui.term'),
                              'a window of an earlier test is still open')
-        p = subprocess.Popen([exe] + list(args) + [d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen([exe] + list(args) + [d], env=dict(os.environ, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         def cleanup():
             for pid in os.listdir('/proc'):                       # the programs it started are its children
                 if not pid.isdigit():
@@ -1956,6 +1972,52 @@ class TestClients(Base):
         self.wait_title('mellagui.files', 'sub - Files')
         ctl.tap(105)                                           # Left goes up too
         self.wait_title('mellagui.files', base + ' - Files')
+
+    def thumb(self, win, name):
+        """(top, height, width) of the scroll bar's thumb in the file browser's right edge, from a screenshot."""
+        ppm = ctl.dump(os.path.join(tmp, name))
+        thumb = (0x35, 0x3b, 0x49)
+        x = win['x'] + win['w'] - 5
+        ys = [y for y in range(win['y'], win['y'] + win['h']) if ppm.px(x, y) == thumb]
+        if not ys:
+            return None
+        mid = (ys[0] + ys[-1]) // 2
+        width = sum(1 for xx in range(win['x'] + win['w'] - 60, win['x'] + win['w']) if ppm.px(xx, mid) == thumb)
+        return ys[0], ys[-1] - ys[0] + 1, width
+
+    def test_files_scrollbar_is_wide_and_can_be_clicked_and_dragged(self):
+        p, d = self.files_start(extra_files=150)
+        win = wait_for_window('mellagui.files')
+        t0 = self.thumb(win, 'sb0.ppm')
+        self.assertIsNotNone(t0)
+        self.assertEqual(t0[2], 14 - 4)                                  # 14 px bar, the thumb 2 px in from each side
+        self.assertGreater(t0[1], 20)
+        right = win['x'] + win['w'] - 6
+        ctl.click(right, win['y'] + win['h'] - 40)                       # the track below the thumb: one page down
+        time.sleep(0.3)
+        t1 = self.thumb(win, 'sb1.ppm')
+        self.assertGreater(t1[0], t0[0])
+        ctl.abs(right, t1[0] + 5)                                        # drag the thumb to the bottom
+        ctl.button(272, True)
+        ctl.abs(right, win['y'] + win['h'] - 20)
+        ctl.button(272, False)
+        time.sleep(0.3)
+        t2 = self.thumb(win, 'sb2.ppm')
+        self.assertGreater(t2[0], t1[0] + 50)
+        self.assertGreater(t2[0] + t2[1], win['y'] + win['h'] - 40)      # it ends at the bottom of the track
+        ctl.click(right, win['y'] + 60)                                  # the track above it: one page up
+        time.sleep(0.3)
+        self.assertLess(self.thumb(win, 'sb3.ppm')[0], t2[0])
+
+    def test_files_scrollbar_width_comes_from_the_config(self):
+        conf = os.path.join(tmp, 'sbw.conf')
+        with open(conf, 'w') as f:
+            f.write('[windows]\nscrollbar-width = 30\n')
+        p, d = self.files_start(extra_files=150, env={'MELLAGUI_CONFIG': conf})
+        win = wait_for_window('mellagui.files')
+        ppm = ctl.dump(os.path.join(tmp, 'sbw.ppm'))
+        t = self.thumb(win, 'sbw.ppm')
+        self.assertEqual(t[2], 30 - 4)
 
     def test_files_opens_text_image_and_refuses_binary(self):
         p, d = self.files_start()
@@ -2697,24 +2759,24 @@ class TestSettings(Base):
         c.key(KEY_LEFTMETA, False)
         for _ in range(60):
             w = c.windows()['windows'][0]
-            if 'maximized' in w['flags'] and (w['w'], w['h']) == (800 - 8, 500 - 60):
+            if 'maximized' in w['flags'] and (w['w'], w['h']) == (800 - 8, 500 - 64):
                 break
             time.sleep(0.05)
-        self.assertEqual((w['w'], w['h']), (800 - 8, 500 - 60))
+        self.assertEqual((w['w'], w['h']), (800 - 8, 500 - 64))
         c.cmd('settings resolution 1280x720@60')
         for _ in range(60):
             w = c.windows()['windows'][0]
-            if (w['w'], w['h']) == (1280 - 8, 720 - 60):
+            if (w['w'], w['h']) == (1280 - 8, 720 - 64):
                 break
             time.sleep(0.05)
-        self.assertEqual((w['w'], w['h']), (1280 - 8, 720 - 60))
+        self.assertEqual((w['w'], w['h']), (1280 - 8, 720 - 64))
         c.cmd('settings resolution-confirm 0')
         for _ in range(60):
             w = c.windows()['windows'][0]
-            if (w['w'], w['h']) == (800 - 8, 500 - 60):
+            if (w['w'], w['h']) == (800 - 8, 500 - 64):
                 break
             time.sleep(0.05)
-        self.assertEqual((w['w'], w['h']), (800 - 8, 500 - 60))
+        self.assertEqual((w['w'], w['h']), (800 - 8, 500 - 64))
 
     def audio_env(self):
         """A fake /proc/asound (a card with analog, digital and three HDMI outputs) and a fake `pactl` with two sinks."""
@@ -3035,7 +3097,7 @@ esac
         time.sleep(0.3)
         return p, win
 
-    def test_panel_opens_from_menu_and_super_i(self):
+    def test_panel_opens_from_super_i(self):
         self.exe()
         n = len(ctl.windows()['windows'])
         ctl.key(KEY_LEFTMETA, True)
@@ -3286,7 +3348,10 @@ class TestMixer(Base):
             return json.load(f)
 
     def start(self, name, env, *args):
-        p, c, stop = self.private_compositor(name, '--mixer', *args, env=env)
+        nodock = os.path.join(tmp, 'nodock.conf')                         # the dock floats over the lower part of the small screen: not wanted here
+        with open(nodock, 'w') as f:
+            f.write('[dock]\nenabled = no\n')
+        p, c, stop = self.private_compositor(name, '--mixer', '--config', nodock, *args, env=env)
         for _ in range(100):
             c.cmd('mixer')
             if ' ready=1' in c.last:
@@ -3739,7 +3804,7 @@ class TestSysinfo(Base):
         for name in ('', 'mixer', 'system'):
             c.cmd('gadget-rect ' + name)
             x, y, w, h = map(int, c.last.split()[1:5])
-            self.assertTrue(0 <= x and x + w <= 800 and 28 <= y and y + h <= 500, (name, x, y, w, h))
+            self.assertTrue(0 <= x and x + w <= 800 and 32 <= y and y + h <= 500, (name, x, y, w, h))
             tops.append((x, y))
         self.assertEqual(len(set(tops)), 3, 'two gadgets sit exactly on top of each other: %r' % tops)
 
@@ -5281,7 +5346,7 @@ class TestGLParity(Base):
         name = self.NAME[renderer]
         lock = os.path.join(tmp, name + '.lock')
         p, c, stop = self.private_compositor(name, '--lock-file', lock,
-                                             env={'MELLAGUI_RENDERER': renderer, 'MELLAGUI_TOAST_MS': '600000',
+                                             env={'MELLAGUI_RENDERER': renderer, 'MELLAGUI_TOAST_MS': '600000', 'MELLAGUI_ABOUT_STATIC': '1',
                                                   'MELLAGUI_LOCK_ITER': '1000'})
         shots = {}
         cl = Client(name)
@@ -5317,12 +5382,12 @@ class TestGLParity(Base):
         time.sleep(0.2)
         c.sync()
         shots['cursor'] = c.dump(os.path.join(tmp, name + '-3.ppm'))
-        c.click(30, 14)                                                      # the MellaGUI menu
+        c.click(16, 14)                                                      # the About dialog (round logo button)
         c.abs(40, 60)
         c.sync()
         time.sleep(0.2)
         c.sync()
-        shots['menu'] = c.dump(os.path.join(tmp, name + '-4.ppm'))
+        shots['about dialog'] = c.dump(os.path.join(tmp, name + '-4.ppm'))
         c.tap(KEY_ESC)
         c.click(784, 14)                                                     # the session dialog (round power button)
         c.abs(480, 270)                                                      # highlights Lock
@@ -5376,7 +5441,7 @@ class TestGLParity(Base):
                             worst, where = d, (x, y, tuple(pa), tuple(pb))
             if worst > 1:
                 problems.append('%s: %d pixels differ, worst by %d at %s' % (step, n, worst, where))
-            for y in range(0, 28):                                           # panel: everything left of the clock
+            for y in range(0, 32):                                           # panel: everything left of the clock
                 for x in range(0, 330):
                     if a.px(x, y) != b.px(x, y):
                         problems.append('%s: panel pixel %d,%d differs %s %s' % (step, x, y, a.px(x, y), b.px(x, y)))
@@ -5662,7 +5727,7 @@ class TestNotify(Base):
         c.cmd('notify 0 Backup finished 3 files copied')
         runs, ppm = self.stripes(c, 'one')
         self.assertEqual(len(runs), 1, runs)
-        self.assertEqual(runs[0][0], 37)                                           # 28 panel + 8 gap + the border
+        self.assertEqual(runs[0][0], 41)                                           # 32 panel + 8 gap + the border
         self.assertGreater(ppm.count((0xe6, 0xe9, 0xef), self.CARD_X, 60, self.CARD_X + 320, 120), 20)       # body text
         c.click(self.CARD_X + 100, 50)
         runs, _ = self.stripes(c, 'one-gone')
@@ -5830,7 +5895,7 @@ class TestOutputLayout(Base):
         c.cmd('dump %s 1' % os.path.join(tmp, 'lay5-1.ppm'))
         ppm1 = Ppm(os.path.join(tmp, 'lay5-1.ppm'))
         self.assertEqual((ppm1.w, ppm1.h), (400, 300))
-        self.assertEqual(ppm1.px(300, 14), ppm1.px(301, 14))                # a panel row (not the wallpaper gradient)
+        self.assertEqual(ppm1.px(170, 14), ppm1.px(171, 14))                # a panel row (not the wallpaper gradient)
         self.assertNotEqual(ppm1.px(2, 250), ppm1.px(2, 5))                 # the wallpaper below the panel differs from the panel
         c.cmd('gadget-rect')
         gx = int(c.last.split()[1])
@@ -5889,7 +5954,7 @@ class TestOutputLayout(Base):
 
 
 class TestConfig(Base):
-    """mellagui.conf: the app menu and the program commands come from a hand-written file, the command line wins."""
+    """mellagui.conf: the dock's buttons and the program commands come from a hand-written file, the command line wins."""
 
     def start(self, name, text, *extra, env=None):
         path = os.path.join(tmp, name + '.conf')
@@ -5900,70 +5965,71 @@ class TestConfig(Base):
         return p, c
 
     @staticmethod
-    def apps(c):
-        return [l[4:].split('|', 1) for l in c.cmd('apps')]
+    def buttons(c):
+        out = []
+        for l in c.cmd('dock'):
+            m = re.match(r'icon \d+ "(.*)" x=-?\d+ y=-?\d+ w=\d+ h=\d+ running=\d cmd=(.*)', l)
+            if m:
+                out.append([m[1], m[2]])
+        return out
 
-    def test_default_menu_when_there_is_no_file(self):
+    def test_default_dock_when_there_is_no_file(self):
         p, c, stop = self.private_compositor('mellagui-cfg0', '--config', 'none')
-        names = [n for n, _ in self.apps(c)]
-        self.assertEqual(names[:5], ['Terminal', 'Calculator', 'Images', 'Editor', 'Files'])
+        names = [n for n, _ in self.buttons(c)]
+        self.assertEqual(names[:5], ['Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
         self.assertEqual(names[-1], 'Settings')
 
-    def test_menu_section_replaces_the_default_menu(self):
-        p, c = self.start('mellagui-cfg1', '# my menu\n[Menu]\nHello = echo hi\nText Editor = sh -c "a=1; echo $a"\n')
-        self.assertEqual(self.apps(c), [['Hello', 'echo hi'], ['Text Editor', 'sh -c "a=1; echo $a"']])
+    def test_dock_apps_section_replaces_the_default_dock(self):
+        p, c = self.start('mellagui-cfg1', '# my dock\n[Dock-Apps]\nHello = echo hi\nText Editor = sh -c "a=1; echo $a"\n')
+        self.assertEqual(self.buttons(c), [['Hello', 'echo hi'], ['Text Editor', 'sh -c "a=1; echo $a"']])
 
     def test_missing_programs_are_left_out_and_alternatives_pick_the_first_that_exists(self):
         p, c = self.start('mellagui-cfg2',
-                          '[menu]\nGone = /no/such/prog --x\nAlt = /no/such/prog -a || echo second || echo third\n'
+                          '[dock-apps]\nGone = /no/such/prog --x\nAlt = /no/such/prog -a || echo second || echo third\n'
                           'Env = env A=1 /no/such/prog\nQuoted = sh -c \'x || y\'\n')
-        self.assertEqual(self.apps(c), [['Alt', 'echo second'], ['Quoted', "sh -c 'x || y'"]])
+        self.assertEqual(self.buttons(c), [['Alt', 'echo second'], ['Quoted', "sh -c 'x || y'"]])
 
     def test_tokens_and_own_programs(self):
-        p, c = self.start('mellagui-cfg3', '[commands]\nrun = echo run-cmd\n[menu]\nR = @run --flag\nMine = mellagui-nosuchprogram\n',
+        p, c = self.start('mellagui-cfg3', '[commands]\nrun = echo run-cmd\n[dock-apps]\nR = @run --flag\nMine = mellagui-nosuchprogram\n',
                           '--terminal', 'echo term')
-        a = dict((n, cmd) for n, cmd in self.apps(c))
+        a = dict((n, cmd) for n, cmd in self.buttons(c))
         self.assertEqual(a['R'], 'echo run-cmd --flag')
         self.assertEqual(a['Mine'], 'mellagui-nosuchprogram')        # own programs always stay
-        c.cmd('commands')
         out = dict(l.split('=', 1) for l in c.cmd('commands'))
         self.assertEqual(out['run'], 'echo run-cmd')
         self.assertEqual(out['terminal'], 'echo term')               # the command line wins over the file
 
     def test_sibling_lookup_for_mellagui_programs(self):
-        p, c = self.start('mellagui-cfg4', '[menu]\nCalc = mellagui-calc --x\n')
-        (name, cmd), = self.apps(c)
+        p, c = self.start('mellagui-cfg4', '[dock-apps]\nCalc = mellagui-calc --x\n')
+        (name, cmd), = self.buttons(c)
         if os.path.exists(os.path.join(ROOT, 'build', 'mellagui-calc')):
             self.assertRegex(cmd, r"^'.*/mellagui-calc' --x$")
         self.assertIn('mellagui-calc', cmd)
 
     def test_bad_lines_are_reported_and_ignored(self):
-        p, c = self.start('mellagui-cfg5', '[nonsense]\nx = 1\n[menu]\nno equals sign\nOk = echo ok\n[bad\nAlso = echo no\n')
-        self.assertEqual(self.apps(c), [['Ok', 'echo ok']])
+        p, c = self.start('mellagui-cfg5', '[nonsense]\nx = 1\n[dock-apps]\nno equals sign\nOk = echo ok\n[bad\nAlso = echo no\n')
+        self.assertEqual(self.buttons(c), [['Ok', 'echo ok']])
         self.assertTrue(alive_p(p))
 
-    def test_app_option_adds_to_the_file_menu(self):
-        p, c = self.start('mellagui-cfg6', '[menu]\nOne = echo 1\n', '--app', 'Two=echo 2')
-        self.assertEqual(self.apps(c), [['One', 'echo 1'], ['Two', 'echo 2']])
-
-    def test_the_menu_entry_starts_the_configured_command(self):
-        mark = os.path.join(tmp, 'cfg-started')
-        if os.path.exists(mark):
-            os.unlink(mark)
-        p, c = self.start('mellagui-cfg7', '[menu]\nTouch = touch %s\n' % mark)
-        cl = Client('mellagui-cfg7')
-        self.clients.append(cl)
-        c.click(40, 14)                         # the MellaGUI launcher button
-        c.click(60, 43)                         # first entry
-        for _ in range(100):
-            if os.path.exists(mark):
-                break
-            time.sleep(0.05)
-        self.assertTrue(os.path.exists(mark))
+    def test_an_old_menu_section_is_ignored_quietly(self):
+        p, c = self.start('mellagui-cfg6', '[menu]\nOne = echo 1\n[dock-apps]\nTwo = echo 2\n')
+        self.assertEqual(self.buttons(c), [['Two', 'echo 2']])
+        c.cmd('reload')
+        self.assertEqual(c.last, 'ok 0')                              # no rejected line: the section is simply not used any more
 
 
 def alive_p(p):
     return p.poll() is None
+
+
+def dock_apps(c):
+    """['name|command', ...] of the dock's buttons (control socket `dock`)."""
+    out = []
+    for l in c.cmd('dock'):
+        m = re.match(r'icon \d+ "(.*)" x=-?\d+ y=-?\d+ w=\d+ h=\d+ running=\d cmd=(.*)', l)
+        if m:
+            out.append('%s|%s' % (m[1], m[2]))
+    return out
 
 
 class TestTheme(Base):
@@ -5977,35 +6043,34 @@ class TestTheme(Base):
         c.sync()
         return p, c
 
-    def test_panel_menu_colour_comes_from_the_file(self):
+    def test_panel_dialog_colour_comes_from_the_file(self):
         p, c = self.start('mellagui-th1', '[theme]\nbackground = #102030\naccent = 0xff0000\n')
-        c.click(40, 14)
-        c.abs(300, 300)
+        c.click(16, 14)                                                      # the About dialog's card is painted in the panel colour
+        c.abs(10, 10)
         c.sync()
         ppm = c.dump(os.path.join(tmp, 'th1.ppm'))
-        self.assertEqual(ppm.px(150, 40), (0x10, 0x20, 0x30))
+        self.assertEqual(ppm.px(150, 250), (0x10, 0x20, 0x30))
 
     def test_defaults_without_a_theme(self):
         p, c, stop = self.private_compositor('mellagui-th2', '--config', 'none')
-        c.click(40, 14)
-        c.abs(300, 300)
+        c.click(16, 14)
+        c.abs(10, 10)
         c.sync()
-        self.assertEqual(c.dump(os.path.join(tmp, 'th2.ppm')).px(150, 40), (0x14, 0x17, 0x1f))
+        self.assertEqual(c.dump(os.path.join(tmp, 'th2.ppm')).px(150, 250), (0x14, 0x17, 0x1f))
 
     def test_short_colours_and_bad_values(self):
         p, c = self.start('mellagui-th3', '[theme]\nbackground = #abc\naccent = nothex\nnosuchcolour = #000000\n')
-        c.click(40, 14)
-        c.abs(300, 300)
+        c.click(16, 14)
+        c.abs(10, 10)
         c.sync()
-        self.assertEqual(c.dump(os.path.join(tmp, 'th3.ppm')).px(150, 40), (0xaa, 0xbb, 0xcc))
+        self.assertEqual(c.dump(os.path.join(tmp, 'th3.ppm')).px(150, 250), (0xaa, 0xbb, 0xcc))
         self.assertTrue(alive_p(p))
 
     def test_programs_started_by_the_compositor_use_the_same_theme(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-calc')):
             self.skipTest('mellagui-calc not built')
-        p, c = self.start('mellagui-th4', '[theme]\nbackground = #102030\n[menu]\nCalc = mellagui-calc\n')
-        c.click(40, 14)
-        c.click(60, 43)
+        p, c = self.start('mellagui-th4', '[theme]\nbackground = #102030\n[dock-apps]\nCalc = mellagui-calc\n')
+        c.click(400, 460)                                                    # its dock button
         for _ in range(100):
             wins = c.windows()['windows']
             if wins:
@@ -6024,7 +6089,7 @@ class TestTheme(Base):
         r = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10)
         self.assertIn('[theme]', r.stdout)
         self.assertRegex(r.stdout, r'accent\s+= #6fa8ff')
-        self.assertIn('[menu]', r.stdout)
+        self.assertIn('[dock-apps]', r.stdout)
 
 
 class TestKeys(Base):
@@ -6147,38 +6212,31 @@ class TestMetrics(Base):
     def test_defaults_without_a_file(self):
         p, c, stop = self.private_compositor('mellagui-met0', '--config', 'none')
         r = self.maximized(c, 'mellagui-met0')
-        self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 28 - 28 - 4))
+        self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 32 - 28 - 4))
 
     def test_panel_and_frame_sizes_change_the_maximized_window(self):
         p, c = self.start('mellagui-met1', '[panel]\nheight = 40\n[windows]\ntitlebar-height = 32\nborder-width = 6\n')
         r = self.maximized(c, 'mellagui-met1')
         self.assertEqual((r['w'], r['h']), (800 - 12, 500 - 40 - 32 - 6))
 
-    def test_menu_width(self):
-        p, c = self.start('mellagui-met2', '[panel]\nmenu-width = 320\n')
-        c.click(40, 14)
-        c.abs(600, 400)
-        c.sync()
-        ppm = c.dump(os.path.join(tmp, 'met2.ppm'))
-        self.assertEqual(ppm.px(300, 40), (0x14, 0x17, 0x1f))        # inside a 320 px wide menu, outside the default 200
-
     def test_out_of_range_and_bad_values_keep_the_default(self):
-        p, c = self.start('mellagui-met3', '[panel]\nheight = 5\nmenu-width = wide\n[windows]\nnosuch = 3\n[gadgets]\nwidth = 99999\n')
+        p, c = self.start('mellagui-met3', '[panel]\nheight = 5\nrun-width = wide\n[windows]\nnosuch = 3\n[gadgets]\nwidth = 99999\n')
         r = self.maximized(c, 'mellagui-met3')
-        self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 28 - 28 - 4))
+        self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 32 - 28 - 4))
         self.assertTrue(alive_p(p))
 
     def test_buttons_stay_inside_a_low_title_bar(self):
         p, c = self.start('mellagui-met4', '[windows]\ntitlebar-height = 22\nbutton-size = 40\n')
         r = self.maximized(c, 'mellagui-met4')
-        self.assertEqual(r['h'], 500 - 28 - 22 - 4)
+        self.assertEqual(r['h'], 500 - 32 - 22 - 4)
         self.assertTrue(alive_p(p))
 
     def test_print_config_has_every_section(self):
         out = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10).stdout
-        for sec in ('[windows]', '[panel]', '[gadgets]', '[notifications]', '[keys]', '[theme]', '[menu]'):
+        for sec in ('[windows]', '[panel]', '[gadgets]', '[notifications]', '[keys]', '[theme]', '[dock]', '[dock-apps]'):
             self.assertIn(sec, out)
-        self.assertRegex(out, r'menu-width = 200')
+        self.assertRegex(out, r'run-width = 44')
+        self.assertRegex(out, r'scrollbar-width = 14')
 
 
 class TestReload(Base):
@@ -6198,21 +6256,21 @@ class TestReload(Base):
             f.write(text)
 
     @staticmethod
-    def menu_px(c, name):
-        c.click(40, 14)
-        c.abs(600, 400)
+    def menu_px(c, name):                                                    # the panel colour, seen in the About dialog's card
+        c.click(16, 14)
+        c.abs(10, 10)
         c.sync()
-        px = c.dump(os.path.join(tmp, name + '.ppm')).px(150, 40)
+        px = c.dump(os.path.join(tmp, name + '.ppm')).px(150, 250)
         c.tap(KEY_ESC)
         c.sync()
         return px
 
-    def test_theme_menu_keys_and_sizes_change_without_a_restart(self):
+    def test_theme_dock_keys_and_sizes_change_without_a_restart(self):
         p, c = self.start('mellagui-rl1', '[theme]\nbackground = #102030\n[keys]\nSuper+T = workspace 2\n'
-                          '[menu]\nOne = echo 1\n')
+                          '[dock-apps]\nOne = echo 1\n')
         self.assertEqual(self.menu_px(c, 'rl1a'), (0x10, 0x20, 0x30))
-        self.write('[theme]\nbackground = #304050\n[keys]\nSuper+U = workspace 3\n[menu]\nTwo = echo 2\nThree = echo 3\n'
-                   '[panel]\nmenu-width = 320\n')
+        self.write('[theme]\nbackground = #304050\n[keys]\nSuper+U = workspace 3\n[dock-apps]\nTwo = echo 2\nThree = echo 3\n'
+                   '[dock]\nicon-size = 64\n')
         c.cmd('reload')
         self.assertEqual(c.last, 'ok 0')
         self.assertEqual(self.menu_px(c, 'rl1b'), (0x30, 0x40, 0x50))
@@ -6220,7 +6278,7 @@ class TestReload(Base):
         self.assertIn('Super+U = workspace 3', keys)
         self.assertNotIn('Super+T = workspace 2', keys)
         self.assertIn('Super+Q = close', keys)                               # defaults are back under the file
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Two|echo 2', 'Three|echo 3'])
+        self.assertEqual(dock_apps(c), ['Two|echo 2', 'Three|echo 3'])
 
     def test_maximized_windows_follow_the_new_panel_height(self):
         p, c = self.start('mellagui-rl2', '')
@@ -6233,7 +6291,7 @@ class TestReload(Base):
         c.key(KEY_LEFTMETA, False)
         w.handle_configure()
         cl.wl.roundtrip()
-        self.assertEqual(c.windows()['windows'][0]['h'], 500 - 28 - 28 - 4)
+        self.assertEqual(c.windows()['windows'][0]['h'], 500 - 32 - 28 - 4)
         self.write('[panel]\nheight = 40\n')
         c.cmd('reload')
         cfg = w.handle_configure()
@@ -6242,11 +6300,12 @@ class TestReload(Base):
         self.assertEqual(c.windows()['windows'][0]['h'], 500 - 40 - 28 - 4)
 
     def test_command_line_stays_and_a_removed_section_returns_to_the_defaults(self):
-        p, c = self.start('mellagui-rl3', '[menu]\nFile = echo f\n[theme]\nbackground = #102030\n', '--app', 'Cli=echo c')
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['File|echo f', 'Cli|echo c'])
+        p, c = self.start('mellagui-rl3', '[dock-apps]\nFile = echo f\n[theme]\nbackground = #102030\n', '--terminal', 'echo t')
+        self.assertEqual(dock_apps(c), ['File|echo f'])
         self.write('# nothing\n')
         c.cmd('reload')
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Cli|echo c'])
+        self.assertEqual(dock_apps(c)[0].split('|')[0], 'Terminal')                # the built-in dock is back
+        self.assertEqual(dict(l.split('=', 1) for l in c.cmd('commands'))['terminal'], 'echo t')      # what the command line set stays
         self.assertEqual(self.menu_px(c, 'rl3'), (0x14, 0x17, 0x1f))
 
     def test_bad_lines_are_counted_and_no_file_is_an_error(self):
@@ -6260,22 +6319,22 @@ class TestReload(Base):
         self.assertTrue(alive_p(p2))
 
     def test_sigusr2_and_the_shortcut_reload(self):
-        p, c = self.start('mellagui-rl6', '[menu]\nA = echo a\n')
-        self.write('[menu]\nB = echo b\n')
+        p, c = self.start('mellagui-rl6', '[dock-apps]\nA = echo a\n')
+        self.write('[dock-apps]\nB = echo b\n')
         p.send_signal(signal.SIGUSR2)
         for _ in range(100):
-            if [l[4:] for l in c.cmd('apps')] == ['B|echo b']:
+            if dock_apps(c) == ['B|echo b']:
                 break
             time.sleep(0.05)
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['B|echo b'])
-        self.write('[menu]\nC = echo c\n')
+        self.assertEqual(dock_apps(c), ['B|echo b'])
+        self.write('[dock-apps]\nC = echo c\n')
         c.key(KEY_LEFTMETA, True)
         c.key(KEY_LEFTSHIFT, True)
         c.tap(self.KEY_R)
         c.key(KEY_LEFTSHIFT, False)
         c.key(KEY_LEFTMETA, False)
         c.sync()
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['C|echo c'])
+        self.assertEqual(dock_apps(c), ['C|echo c'])
 
 
 class TestConfigSettings(Base):
@@ -6302,7 +6361,7 @@ class TestConfigSettings(Base):
         c.cmd('settings config-create 1')
         self.assertEqual(self.get(c, 'config-status'), 'ok')
         text = open(path).read()
-        for want in ('[menu]', '[keys]', '[theme]', '[windows]'):
+        for want in ('[dock-apps]', '[keys]', '[theme]', '[windows]'):
             self.assertIn(want, text)
         self.assertRegex(text, r'Super\+Shift\+R\s+= reload-config')
         with self.assertRaises(RuntimeError):                                  # never over an existing file
@@ -6320,10 +6379,10 @@ class TestConfigSettings(Base):
         path = os.path.join(tmp, 'cs3.conf')
         p, c, stop = self.private_compositor('mellagui-cs3', '--config', path)
         c.cmd('settings config-create 1')
-        before = [l for l in c.cmd('keys')] + [l for l in c.cmd('apps')]
+        before = [l for l in c.cmd('keys')] + dock_apps(c)
         c.cmd('reload')
         self.assertEqual(c.last, 'ok 0')
-        self.assertEqual(sorted(before), sorted([l for l in c.cmd('keys')] + [l for l in c.cmd('apps')]))
+        self.assertEqual(sorted(before), sorted([l for l in c.cmd('keys')] + dock_apps(c)))
 
     def test_the_settings_panel_config_page_creates_and_reloads(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-settings')
@@ -6355,17 +6414,205 @@ class TestConfigSettings(Base):
         self.assertTrue(os.path.exists(path))
         time.sleep(0.3)
         with open(path, 'w') as f:
-            f.write('[menu]\nOnly = echo only\n')
+            f.write('[dock-apps]\nOnly = echo only\n')
         c.click(x0 + 160 + 100, y0 + 14 + 3 * 28 + 6 + 28 + 4 + 12)     # "Reload" (the Edit button is above it now)
         for _ in range(60):
-            if [l[4:] for l in c.cmd('apps')] == ['Only|echo only']:
+            if dock_apps(c) == ['Only|echo only']:
                 break
             time.sleep(0.05)
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Only|echo only'])
+        self.assertEqual(dock_apps(c), ['Only|echo only'])
 
 
-class TestMenuEdit(Base):
-    """The settings panel's Menu page: menu-0.. / menu-put / menu-del / menu-move / menu-reset rewrite [menu] of mellagui.conf only."""
+class TestDock(Base):
+    """The dock: round icons along the bottom of the screen ([dock] and [dock-apps] of mellagui.conf)."""
+
+    BTN_MIDDLE = 274
+
+    def start(self, name, text, *extra):
+        self.path = os.path.join(tmp, name + '.conf')
+        with open(self.path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path, *extra)
+        c.sync()
+        return c
+
+    @staticmethod
+    def dock(c):
+        info, icons = None, []
+        for l in c.cmd('dock'):
+            m = re.match(r'dock shown=(\d) hover=(-?\d+) n=(\d+)', l)
+            if m:
+                info = dict(shown=int(m[1]), hover=int(m[2]), n=int(m[3]))
+            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) running=(\d)', l)
+            if m:
+                icons.append(dict(i=int(m[1]), name=m[2], x=int(m[3]), y=int(m[4]), w=int(m[5]), h=int(m[6]), running=int(m[7])))
+        return info, icons
+
+    def test_the_default_dock_has_the_own_programs(self):
+        p, c, stop = self.private_compositor('mellagui-dk1', '--config', 'none')
+        info, icons = self.dock(c)
+        self.assertEqual(info['shown'], 1)
+        names = [i['name'] for i in icons]
+        self.assertEqual(names[:5], ['Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
+        self.assertEqual(names[-1], 'Settings')
+
+    def test_entries_geometry_and_options(self):
+        c = self.start('mellagui-dk2', '[dock]\nicon-size = 40\ngap = 10\nmargin = 8\n[dock-apps]\nA = [terminal] true\nB = [images] true\n'
+                                       'Gone = /no/such/program\nC = true\n')
+        info, icons = self.dock(c)
+        self.assertEqual([i['name'] for i in icons], ['A', 'B', 'C'])               # the one without a program is left out
+        # 800x500, three 40 px icons 10 px apart, 8 px from the bottom and 8 px for the dots below the icons
+        self.assertEqual([(i['x'], i['y'], i['w'], i['h']) for i in icons],
+                        [(330, 444, 40, 40), (380, 444, 40, 40), (430, 444, 40, 40)])
+
+    def test_the_dock_can_be_switched_off_and_bad_values_are_ignored(self):
+        c = self.start('mellagui-dk3', '[dock]\nenabled = no\n')
+        info, icons = self.dock(c)
+        self.assertEqual((info['shown'], info['n'], icons), (0, 0, []))
+        c = self.start('mellagui-dk4', '[dock]\nicon-size = 5\nzoom = 999\ngap = x\nnonsense = 1\nautohide = maybe\n')
+        info, icons = self.dock(c)
+        self.assertEqual((info['shown'], icons[0]['w']), (1, 48))                    # every value rejected: the built-ins stay
+
+    def test_the_icon_under_the_pointer_grows_and_goes_back(self):
+        c = self.start('mellagui-dk5', '[dock]\nicon-size = 40\n[dock-apps]\nA = true\nB = true\nC = true\n')
+        c.abs(350, 464)                                                              # the middle of the first icon
+        info, icons = self.dock(c)
+        self.assertEqual(info['hover'], 0)
+        self.assertEqual(icons[0]['w'], 64)                                          # 160 %
+        self.assertGreater(icons[1]['w'], 40)                                        # its neighbour grows less
+        self.assertLess(icons[1]['w'], icons[0]['w'])
+        self.assertEqual(icons[0]['y'] + icons[0]['h'], 484)                         # they grow upwards from the same line
+        c.abs(400, 100)
+        info, icons = self.dock(c)
+        self.assertEqual((info['hover'], [i['w'] for i in icons]), (-1, [40, 40, 40]))
+
+    def test_no_zoom_when_it_is_100_percent(self):
+        c = self.start('mellagui-dk6', '[dock]\nzoom = 100\n[dock-apps]\nA = true\n')
+        c.abs(400, 460)
+        info, icons = self.dock(c)
+        self.assertEqual((info['hover'], icons[0]['w']), (0, 48))
+
+    def test_a_click_starts_the_program(self):
+        mark = os.path.join(tmp, 'dock-started')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        c = self.start('mellagui-dk7', '[dock]\nicon-size = 40\n[dock-apps]\nTouch = touch %s\n' % mark)
+        c.click(400, 464)
+        for _ in range(100):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(mark))
+
+    def test_a_running_program_gets_a_dot_and_a_click_focuses_its_window_or_starts_another(self):
+        mark = os.path.join(tmp, 'dock-started2')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        c = self.start('mellagui-dk8', '[dock]\nicon-size = 40\n[dock-apps]\nTouch = touch %s\n' % mark)
+        cl = Client('mellagui-dk8')
+        self.clients.append(cl)
+        win = Window(cl, 200, 100, app_id='touch', title='mine')
+        cl.wl.roundtrip()
+        other = Window(cl, 200, 100, app_id='other', title='other')        # the newer window has the focus
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.dock(c)[1][0]['running'], 1)
+        focused = lambda: [w['title'] for w in c.windows()['windows'] if 'focused' in w['flags']]
+        self.assertEqual(focused(), ['other'])
+        c.click(400, 464)                                                            # its window is brought forward ...
+        time.sleep(0.4)
+        self.assertFalse(os.path.exists(mark))                                       # ... nothing is started
+        self.assertEqual(focused(), ['mine'])
+        c.click(400, 464)                                                            # it is in front already: another instance
+        for _ in range(100):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(mark))
+        os.unlink(mark)
+        c.click(400, 464, self.BTN_MIDDLE)                                           # the middle button always starts another one
+        for _ in range(100):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(mark))
+        cl.wl.close()
+        self.clients.remove(cl)
+        for _ in range(50):
+            if self.dock(c)[1][0]['running'] == 0:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.dock(c)[1][0]['running'], 0)
+
+    def test_the_dock_is_above_the_windows_and_takes_the_click(self):
+        c = self.start('mellagui-dk9', '[dock]\nicon-size = 40\n[dock-apps]\nA = true\n')
+        cl = Client('mellagui-dk9')
+        self.clients.append(cl)
+        win = Window(cl, 780, 480, app_id='big')
+        cl.wl.roundtrip()
+        c.sync()
+        c.windows()
+        c.click(400, 464)                                                            # over the window's bottom part
+        c.sync()
+        self.assertEqual(c.windows()['windows'][0]['flags'] & {'focused'}, {'focused'})   # the window was not clicked through
+        info, icons = self.dock(c)
+        self.assertEqual(info['hover'], 0)
+
+    def test_autohide_shows_the_dock_at_the_bottom_edge_only(self):
+        c = self.start('mellagui-dk10', '[dock]\nautohide = yes\n[dock-apps]\nA = true\n')
+        self.assertEqual(self.dock(c)[0]['shown'], 0)
+        c.abs(400, 300)
+        self.assertEqual(self.dock(c)[0]['shown'], 0)
+        c.abs(400, 499)                                                              # the pointer touches the bottom edge
+        self.assertEqual(self.dock(c)[0]['shown'], 1)
+        c.abs(400, 300)
+        time.sleep(1.0)
+        self.assertEqual(self.dock(c)[0]['shown'], 0)
+
+    def test_the_icons_are_painted_round_without_a_background(self):
+        c = self.start('mellagui-dk11', '[dock]\nicon-size = 40\nzoom = 100\n[dock-apps]\nCalculator = [calculator] true\n')
+        c.abs(10, 10)
+        ppm = c.dump(os.path.join(tmp, 'dock11.ppm'))
+        top = ppm.px(400, 464 - 16)                                                  # the orange disc, above the glyph
+        self.assertTrue(top[0] > 220 and 120 < top[1] < 175 and top[2] < 60, top)
+        corner = ppm.px(400 - 19, 444 + 1)                                           # the corner of the icon's square: only wallpaper
+        self.assertFalse(corner[0] > 200 and corner[2] < 80, corner)
+        left = [ppm.px(x, 464) for x in (330, 350, 370)]                             # the wallpaper left of the icon: no bar behind it
+        self.assertTrue(all(abs(l[0] - left[0][0]) < 6 and abs(l[1] - left[0][1]) < 6 for l in left), left)
+
+    def test_a_picture_icon_is_cut_to_a_circle(self):
+        import zlib, struct
+        png = os.path.join(tmp, 'dock-icon.png')
+        raw = b''.join(b'\x00' + bytes([0, 200, 0, 255]) * 16 for _ in range(16))
+        def chunk(t, d):
+            return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+        with open(png, 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 16, 16, 8, 6, 0, 0, 0)) +
+                    chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+        c = self.start('mellagui-dk12', '[dock]\nicon-size = 40\nzoom = 100\n[dock-apps]\nPic = [%s] true\n' % png)
+        c.abs(10, 10)
+        ppm = c.dump(os.path.join(tmp, 'dock12.ppm'))
+        mid = ppm.px(400, 464)
+        self.assertTrue(abs(mid[0]) < 3 and abs(mid[1] - 200) < 3 and abs(mid[2]) < 3, mid)
+        self.assertNotEqual(ppm.px(381, 445), mid)                                   # the corner of the square stays unpainted
+
+    def test_a_missing_picture_falls_back_to_a_built_in_icon(self):
+        c = self.start('mellagui-dk13', '[dock-apps]\nEditor = [/no/such/file.png] true\nQ = [nosuchicon] true\n')
+        info, icons = self.dock(c)
+        self.assertEqual([i['name'] for i in icons], ['Editor', 'Q'])
+
+    def test_reload_changes_the_dock(self):
+        c = self.start('mellagui-dk14', '[dock-apps]\nA = true\n')
+        self.assertEqual([i['name'] for i in self.dock(c)[1]], ['A'])
+        with open(self.path, 'w') as f:
+            f.write('[dock]\nicon-size = 64\n[dock-apps]\nB = true\nC = true\n')
+        c.cmd('reload')
+        info, icons = self.dock(c)
+        self.assertEqual(([i['name'] for i in icons], icons[0]['w']), (['B', 'C'], 64))
+
+
+class TestDockEdit(Base):
+    """The dock-N / dock-put / dock-del / dock-move / dock-set / dock-reset settings rewrite [dock] and [dock-apps] of mellagui.conf only."""
 
     US = '\x1f'
 
@@ -6381,74 +6628,71 @@ class TestMenuEdit(Base):
         c.sync()
         return c
 
-    def put(self, c, idx, name, cmd):
-        c.cmd('setraw menu-put %d%s%s%s%s' % (idx, self.US, name, self.US, cmd))
+    def put(self, c, idx, name, icon, cmd):
+        c.cmd('setraw dock-put %d%s%s%s%s%s%s' % (idx, self.US, name, self.US, icon, self.US, cmd))
 
     def entries(self, c):
         out = []
-        for i in range(12):
-            c.cmd('setting menu-%d' % i)
+        for i in range(16):
+            c.cmd('setting dock-%d' % i)
             v = c.last[3:]
             if not v:
                 break
-            out.append(tuple(v.split(self.US, 1)))
+            out.append(tuple(v.split(self.US)))
         return out
 
     def test_edits_keep_comments_and_other_sections(self):
-        c = self.start('mellagui-me1', '# top\n[theme]\naccent = #ff0000\n\n[menu]\n# my menu\nOld = echo old\nOther = echo other\n\n[keys]\nSuper+T = run\n')
-        self.assertEqual(self.entries(c), [('Old', 'echo old'), ('Other', 'echo other')])
-        self.put(c, -1, 'New', 'echo new')
+        c = self.start('mellagui-de1', '# top\n[theme]\naccent = #ff0000\n\n[dock-apps]\n# mine\nOld = [files] echo old\nOther = echo other\n\n[keys]\nSuper+T = run\n')
+        self.assertEqual(self.entries(c), [('Old', 'files', 'echo old'), ('Other', '', 'echo other')])
+        self.put(c, -1, 'New', 'web', 'echo new')
         self.assertEqual(open(self.path).read(),
-                         '# top\n[theme]\naccent = #ff0000\n\n[menu]\n# my menu\nOld = echo old\nOther = echo other\nNew = echo new\n\n[keys]\nSuper+T = run\n')
-        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Old|echo old', 'Other|echo other', 'New|echo new'])
-        c.cmd('setraw menu-move 2%s-1' % self.US)
-        c.cmd('setraw menu-del 0')
-        self.assertEqual(self.entries(c), [('New', 'echo new'), ('Other', 'echo other')])
-        self.put(c, 1, 'Renamed', 'echo r || echo s')
-        self.assertEqual(self.entries(c)[1], ('Renamed', 'echo r || echo s'))
-        c.cmd('setraw menu-reset 1')
+                         '# top\n[theme]\naccent = #ff0000\n\n[dock-apps]\n# mine\nOld = [files] echo old\nOther = echo other\nNew = [web] echo new\n\n[keys]\nSuper+T = run\n')
+        c.cmd('setraw dock-move 2%s-1' % self.US)
+        c.cmd('setraw dock-del 0')
+        self.assertEqual(self.entries(c), [('New', 'web', 'echo new'), ('Other', '', 'echo other')])
+        self.put(c, 1, 'Renamed', '', 'echo r || echo s')
+        self.assertEqual(self.entries(c)[1], ('Renamed', '', 'echo r || echo s'))
+        c.cmd('setraw dock-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[theme]\naccent = #ff0000\n\n[keys]\nSuper+T = run\n')
         self.assertEqual(self.entries(c)[0][0], 'Terminal')                          # the defaults are back
 
-    def test_the_default_menu_is_editable_and_the_file_is_created(self):
-        c = self.start('mellagui-me2')
-        self.assertFalse(os.path.exists(self.path))
-        first = self.entries(c)
-        self.assertEqual(first[0], ('Terminal', '@terminal'))
-        c.cmd('setraw menu-del 0')
-        text = open(self.path).read()
-        self.assertTrue(text.startswith('[menu]\n'))
-        self.assertNotIn('Terminal', text)
-        self.assertEqual(self.entries(c), first[1:])
+    def test_options_are_written_as_single_lines(self):
+        c = self.start('mellagui-de2', '[dock]\n# look\nzoom = 200\n')
+        c.cmd('setraw dock-set icon-size%s64' % self.US)
+        c.cmd('setraw dock-set autohide%syes' % self.US)
+        self.assertEqual(open(self.path).read(), '[dock]\n# look\nzoom = 200\nicon-size = 64\nautohide = yes\n')
+        c.cmd('setting dock-opts')
+        self.assertEqual(c.last[3:], 'enabled=1 autohide=1 icon-size=64 zoom=200 gap=10 margin=8')
+        c.cmd('setraw dock-set zoom%s160' % self.US)                                  # the built-in value needs no line
+        self.assertNotIn('zoom', open(self.path).read())
+        for bad in ('icon-size%s5', 'icon-size%sx', 'nonsense%s1', 'zoom%s300', 'enabled%smaybe'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('setraw dock-set ' + bad % self.US)
 
     def test_bad_values_are_refused(self):
-        c = self.start('mellagui-me3', '[menu]\nA = echo a\n')
-        for idx, name, cmd in ((-1, '', 'x'), (-1, 'x', ''), (-1, 'a=b', 'x'), (-1, '#c', 'x'), (-1, '[s', 'x'), (-1, ' pad', 'x'),
-                               (-1, 'ok', ' lead'), (-1, 'a', 'dup of A'), (5, 'x', 'y'), (-2, 'x', 'y'), (-1, 'n' * 64, 'x')):
-            with self.assertRaises(RuntimeError, msg=(idx, name, cmd)):
-                self.put(c, idx, name, cmd)
-        for bad in ('menu-del 3', 'menu-del x', 'menu-move 0%s1' % self.US, 'menu-move 0%s2' % self.US, 'menu-reset 0'):
+        c = self.start('mellagui-de3', '[dock-apps]\nA = echo a\n')
+        for idx, name, icon, cmd in ((-1, '', '', 'x'), (-1, 'x', '', ''), (-1, 'a=b', '', 'x'), (-1, '#c', '', 'x'), (-1, ' pad', '', 'x'),
+                                     (-1, 'ok', '', ' lead'), (-1, 'a', '', 'dup of A'), (5, 'x', '', 'y'), (-2, 'x', '', 'y'),
+                                     (-1, 'ok', 'a]b', 'x'), (-1, 'ok', '[x', 'x'), (-1, 'ok', ' x', 'x')):
+            with self.assertRaises(RuntimeError, msg=(idx, name, icon, cmd)):
+                self.put(c, idx, name, icon, cmd)
+        for bad in ('dock-del 3', 'dock-del x', 'dock-move 0%s1' % self.US, 'dock-reset 0'):
             with self.assertRaises(RuntimeError, msg=bad):
                 c.cmd('setraw ' + bad)
-        self.assertEqual(open(self.path).read(), '[menu]\nA = echo a\n')
+        self.assertEqual(open(self.path).read(), '[dock-apps]\nA = echo a\n')
 
-    def test_the_menu_is_limited_to_twelve_entries(self):
-        c = self.start('mellagui-me4', '[menu]\n' + ''.join('E%d = echo %d\n' % (i, i) for i in range(12)))
-        self.assertEqual(len(self.entries(c)), 12)
+    def test_the_dock_is_limited_to_sixteen_buttons(self):
+        c = self.start('mellagui-de4', '[dock-apps]\n' + ''.join('E%d = echo %d\n' % (i, i) for i in range(16)))
+        self.assertEqual(len(self.entries(c)), 16)
         with self.assertRaises(RuntimeError):
-            self.put(c, -1, 'Extra', 'echo x')
+            self.put(c, -1, 'Extra', '', 'echo x')
 
-    def test_no_file_no_edit(self):
-        p, c, stop = self.private_compositor('mellagui-me5', '--config', 'none')
-        with self.assertRaises(RuntimeError):
-            self.put(c, -1, 'x', 'y')
-
-    def test_the_panel_menu_page_deletes_and_adds(self):
+    def test_the_panel_dock_page_removes_a_button_and_toggles_the_dock(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-settings')
         if not os.path.exists(exe):
             self.skipTest('mellagui-settings not built')
-        c = self.start('mellagui-me6')
-        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-me6'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        c = self.start('mellagui-de5', '[dock-apps]\nA = true\nB = true\nC = true\n')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-de5'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
         win = None
         for _ in range(100):
@@ -6460,35 +6704,24 @@ class TestMenuEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        n = len(self.entries(c))
-        c.click(x0 + 70, y0 + 12 + 7 * 36 + 16)                          # the Menu tab (8th)
+        c.click(x0 + 70, y0 + 12 + 10 * 36 + 16)                         # the Dock tab (11th)
         time.sleep(0.3)
-        c.click(x0 + 160 + 440 - 78 + 52 + 12, y0 + 14 + 28 + 11)        # "x" of the first row
+        c.click(x0 + 160 + 440 - 78 + 52 + 12, y0 + 14 + 28 + 22 + 8 + 11)   # "x" of the first row
         for _ in range(60):
-            if os.path.exists(self.path):
+            if 'A = true' not in open(self.path).read():
                 break
             time.sleep(0.05)
+        self.assertEqual(open(self.path).read(), '[dock-apps]\nB = true\nC = true\n')
+        c.click(x0 + 160 + 96 + 45, y0 + 14 + 28 + 11)                   # the "Look" part
         time.sleep(0.3)
-        text = open(self.path).read()
-        self.assertNotIn('Terminal', text)
-        self.assertIn('Calculator', text)
-        self.assertEqual(len(self.entries(c)), n - 1)
-        # add one: name field, command field, Add button (below the n-1 rows)
-        fy = y0 + 14 + 28 + (n - 1) * 22 + 6 + 13
-        c.click(x0 + 160 + 50, fy)
-        for ch in 'zz':
-            c.tap(KEYCODES[ch])
-        c.click(x0 + 160 + 118 + 60, fy)
-        for ch in 'true':
-            c.tap(KEYCODES[ch])
-        c.click(x0 + 160 + 440 - 35, fy)
+        c.click(x0 + 160 + 10, y0 + 14 + 28 + 22 + 8 + 14)               # "Show the dock"
         for _ in range(60):
-            if ('zz', 'true') in self.entries(c):
+            if 'enabled' in open(self.path).read():
                 break
             time.sleep(0.05)
-        self.assertIn(('zz', 'true'), self.entries(c))
-        self.assertIn('zz = true', open(self.path).read())
-
+        self.assertIn('[dock]\nenabled = no\n', open(self.path).read())
+        c.cmd('dock')
+        self.assertTrue(c.cmd('dock')[0].startswith('dock shown=0'))
 
 class TestKeysEdit(Base):
     """The settings panel's Keys page: keys-row-N / keys-set / keys-del / keys-reset / keys-capture rewrite [keys] of mellagui.conf only."""
@@ -6615,7 +6848,7 @@ class TestKeysEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 8 * 36 + 16)                          # the Keys tab (9th)
+        c.click(x0 + 70, y0 + 12 + 7 * 36 + 16)                          # the Keys tab (8th)
         time.sleep(0.3)
         # the first row is Super+Enter = terminal: its "x" switches the built-in shortcut off
         c.click(x0 + 160 + 440 - 12, y0 + 14 + 28 + 11)
@@ -6669,11 +6902,11 @@ class TestThemeEdit(Base):
         return dict(t.split('=', 1) for t in c.last[3:].split())
 
     @staticmethod
-    def menu_px(c, name):
-        c.click(40, 14)
-        c.abs(600, 400)
+    def menu_px(c, name):                                                    # the panel colour, seen in the About dialog's card
+        c.click(16, 14)
+        c.abs(10, 10)
         c.sync()
-        px = c.dump(os.path.join(tmp, name + '.ppm')).px(150, 40)
+        px = c.dump(os.path.join(tmp, name + '.ppm')).px(150, 250)
         c.tap(KEY_ESC)
         c.sync()
         return px
@@ -6735,7 +6968,7 @@ class TestThemeEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 9 * 36 + 16)                          # the Colours tab (10th)
+        c.click(x0 + 70, y0 + 12 + 8 * 36 + 16)                          # the Colours tab (9th)
         time.sleep(0.3)
         # row 11 of the palette is "background": page 2 (8 per page), third row
         c.click(x0 + 160 + 24, y0 + 14 + 28 + 11)                         # first row: wallpaper-top, to be sure a click selects
@@ -6780,8 +7013,9 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 28)
-        self.assertEqual(m['panel.height'], (36, 20, 64, 28))
+        self.assertEqual(len(m), 26)
+        self.assertEqual(m['panel.height'], (36, 20, 64, 32))
+        self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))
 
     def test_set_and_reset_keep_the_rest_of_the_file(self):
@@ -6791,7 +7025,7 @@ class TestMetricsEdit(Base):
         c.cmd('setraw metrics-set windows.border-width%s6' % self.US)                      # a new section is added at the end
         self.assertTrue(open(self.path).read().endswith('Super+T = run\n\n[windows]\nborder-width = 6\n'))
         self.assertEqual(self.metrics(c)['windows.border-width'][0], 6)
-        c.cmd('setraw metrics-set panel.height%s28' % self.US)                              # the built-in size: the line goes
+        c.cmd('setraw metrics-set panel.height%s32' % self.US)                              # the built-in size: the line goes
         self.assertNotIn('height = ', open(self.path).read())
         c.cmd('setraw metrics-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[theme]\naccent = #ff0000\n\n[panel]\n# bar\n\n[keys]\nSuper+T = run\n'
@@ -6832,7 +7066,7 @@ class TestMetricsEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 10 * 36 + 16)                          # the Sizes tab (11th)
+        c.click(x0 + 70, y0 + 12 + 9 * 36 + 16)                          # the Sizes tab (10th)
         time.sleep(0.3)
         y = y0 + 14 + 28 + 13                                              # the first slider: windows.titlebar-height (20..64)
         c.abs(x0 + 160 + 200 + 10, y)                                      # drag from near the left end to the right end

@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, menu, lock, card, switcher, power;
+    struct gl_chrome panel, lock, card, switcher, power, about, dock;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
@@ -59,11 +59,12 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     for (int i = 0; i < GL_MAX_FRAMES; i++)
         gl_chrome_free(r, &go->frame[i]);
     gl_chrome_free(r, &go->panel);
-    gl_chrome_free(r, &go->menu);
+    gl_chrome_free(r, &go->about);
     gl_chrome_free(r, &go->lock);
     gl_chrome_free(r, &go->card);
     gl_chrome_free(r, &go->switcher);
     gl_chrome_free(r, &go->power);
+    gl_chrome_free(r, &go->dock);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
@@ -178,10 +179,11 @@ typedef void (*gl_paint_fn)(const struct paint_ctx *c, const void *item);
 
 static void gl_do_frame(const struct paint_ctx *c, const void *it) { paint_frame(c, it); }
 static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel(c, it); }
-static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c, it); }
+static void gl_do_about(const struct paint_ctx *c, const void *it) { paint_about(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
 static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power(c, it); }
+static void gl_do_dock(const struct paint_ctx *c, const void *it) { paint_dock(c, it); }
 static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
 
 static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
@@ -446,8 +448,44 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
         if (item->output == p->st->out)
             gl_chrome_item(p, &p->go->panel, &item->u.panel.bar, gl_do_panel, &item->u.panel);
         break;
-    case LM_SCENE_MENU:
-        gl_chrome_item(p, &p->go->menu, &item->u.menu.rect, gl_do_menu, &item->u.menu);
+    case LM_SCENE_DOCK:
+        if (item->output == p->st->out) {               /* translucent: redrawn only when something it shows changed */
+            const struct lm_dock_info *d = &item->u.dock;
+            struct gl_chrome *ch = &p->go->dock;
+            uint64_t h = fnv(1469598103934665603ull, &d->rect, sizeof(d->rect));
+            h = fnv(h, &d->hover, sizeof(d->hover));
+            h = fnv(h, &d->label, sizeof(d->label));
+            for (int i = 0; i < d->n; i++) {
+                h = fnv(h, &d->icon[i].box, sizeof(d->icon[i].box));
+                h = fnv(h, &d->icon[i].running, sizeof(d->icon[i].running));
+                h = fnv(h, &d->icon[i].item, sizeof(d->icon[i].item));
+                h = fnv(h, &d->icon[i].item->kind, sizeof(d->icon[i].item->kind));
+            }
+            if (!ch->tex || ch->hash != h || ch->w != d->rect.w || ch->h != d->rect.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &d->rect, gl_do_dock, d);
+                ch->hash = h;
+            }
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &d->rect, false);
+        }
+        break;
+    case LM_SCENE_ABOUT:
+        if (item->output == p->st->out) {               /* translucent, like the session dialog: redrawn only when it changes */
+            const struct lm_about_info *ai = &item->u.about;
+            struct gl_chrome *ch = &p->go->about;
+            uint64_t h = fnv(1469598103934665603ull, &ai->card, sizeof(ai->card));
+            h = fnv(h, &ai->hover_close, sizeof(ai->hover_close));
+            for (int i = 0; i < ai->n; i++) {
+                h = fnv(h, ai->row[i].label, strlen(ai->row[i].label) + 1);
+                h = fnv(h, ai->row[i].value, strlen(ai->row[i].value) + 1);
+            }
+            if (!ch->tex || ch->hash != h || ch->w != ai->rect.w || ch->h != ai->rect.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &ai->rect, gl_do_about, ai);
+                ch->hash = h;
+            }
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &ai->rect, false);
+        }
         break;
     case LM_SCENE_NOTIFY: {                             /* a texture per card, kept while its content (hashed) stays the same */
         const struct lm_notify_info *n = &item->u.notify;

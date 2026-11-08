@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dockicon.h"
 #include "font.h"
 #include "gl.h"
 #include "img.h"
@@ -478,6 +479,8 @@ static void draw_line(const struct paint_ctx *c, int x0, int y0, int x1, int y1,
     }
 }
 
+static uint32_t mix_rgb(uint32_t a, uint32_t b, int t);
+
 static void draw_frame_button(const struct paint_ctx *c, const struct lm_frame_info *f,
                               const struct lm_rect *b, uint32_t which, uint32_t fg)
 {
@@ -569,20 +572,6 @@ static void paint_frame(const struct paint_ctx *c, const struct lm_frame_info *f
     if (f->title && f->title[0]) {
         int ty = f->title_text.y + (f->title_text.h - LM_FONT_H) / 2;
         draw_text(c, &f->title_text, f->title_text.x + 4, ty, f->title, fg);
-    }
-}
-
-static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *m)
-{
-    fill_rect(c, &m->rect, COL_PANEL_ACCENT);                           /* 1 px border */
-    struct lm_rect in = lm_rect_make(m->rect.x + 1, m->rect.y + 1, m->rect.w - 2, m->rect.h - 2);
-    fill_rect(c, &in, COL_PANEL);
-    for (int i = 0; i < m->n; i++) {
-        struct lm_rect r = lm_rect_make(m->rect.x + 2, m->rect.y + 2 + i * m->item_h, m->rect.w - 4, m->item_h);
-        if (i == m->hover)
-            fill_rect(c, &r, COL_PANEL_HOVER);
-        int ty = r.y + (r.h - LM_FONT_H) / 2;
-        draw_text(c, &r, r.x + 10, ty, m->label[i], COL_PANEL_TEXT);
     }
 }
 
@@ -846,6 +835,31 @@ static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, 
     }
 }
 
+/* ---- the logo: the round brand picture of the panel button and the About dialog -------------------------------------------- */
+
+#include "logo_data.h"
+
+static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *box, int x, int y);
+
+/* Paints the logo (premultiplied ARGB, already a circle) into `box`, from the 32 px picture when that is enough, else from the 96 px one. */
+static void paint_logo(const struct paint_ctx *c, const struct lm_rect *box)
+{
+    static const struct lm_image small = { LOGO_SMALL, LOGO_SMALL, (uint32_t *)logo_small },
+                                 big = { LOGO_BIG, LOGO_BIG, (uint32_t *)logo_big };
+    const struct lm_image *img = box->w <= 48 ? &small : &big;
+    struct lm_rect r;
+    if (!lm_rect_intersect(box, &c->clip, &r))
+        return;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++) {
+            uint32_t px = dock_image_px(img, box, x, y);
+            if (px >> 24)
+                row[x] = blend_px(px, row[x]);
+        }
+    }
+}
+
 /* The session dialog: the output dimmed, a rounded card with a title and two round buttons with their icons and names. */
 static void paint_power(const struct paint_ctx *c, const struct lm_power_info *pw)
 {
@@ -869,6 +883,94 @@ static void paint_power(const struct paint_ctx *c, const struct lm_power_info *p
         paint_shape(c, cx, cy, R * 0.52f, i == 0 ? SHAPE_LOCK : SHAPE_POWER, sel && i == 0 ? COL_PANEL : COL_PANEL_TEXT, 255);
         struct lm_rect label = lm_rect_make(pw->hit[i].x, b->y + b->h + 8, pw->hit[i].w, LM_FONT_H);
         draw_text_centered(c, &label, names[i], sel ? COL_PANEL_TEXT : COL_PANEL_DIM);
+    }
+}
+
+/* The About dialog: the output dimmed, a card with the logo, the name, the system information and a Close button. */
+static void paint_about(const struct paint_ctx *c, const struct lm_about_info *ai)
+{
+    fill_round(c, &ai->rect, 0, 0xb0000000u);
+    fill_round(c, &ai->card, 14, (0xff000000u | lm_theme.border));
+    struct lm_rect in = lm_rect_make(ai->card.x + 1, ai->card.y + 1, ai->card.w - 2, ai->card.h - 2);
+    fill_round(c, &in, 13, 0xff000000u | COL_PANEL);
+    float lcx = (float)ai->logo.x + (float)ai->logo.w / 2.0f, lcy = (float)ai->logo.y + (float)ai->logo.h / 2.0f;
+    paint_shape(c, lcx, lcy, (float)ai->logo.w / 2.0f + 5.0f, SHAPE_DISC, COL_PANEL_ACCENT, 0x40);         /* a soft halo */
+    paint_logo(c, &ai->logo);
+    int y = ai->logo.y + ai->logo.h + 12;
+    struct lm_rect title = lm_rect_make(ai->card.x, y, ai->card.w, LM_FONT_H);
+    draw_text_centered(c, &title, "MellaGUI", COL_PANEL_TEXT);
+    struct lm_rect sub = lm_rect_make(ai->card.x, y + LM_FONT_H + 6, ai->card.w, LM_FONT_H);
+    draw_text_centered(c, &sub, "A Wayland compositor and shell, written from scratch", COL_PANEL_DIM);
+    y += 2 * LM_FONT_H + 6 + 16;
+    struct lm_rect rule = lm_rect_make(ai->card.x + 24, y - 8, ai->card.w - 48, 1);
+    fill_rect(c, &rule, lm_theme.border);
+    struct lm_rect text = lm_rect_make(ai->card.x + 24, y, ai->card.w - 48, ai->close.y - y);
+    for (int i = 0; i < ai->n; i++) {
+        int ry = y + i * 18;
+        if (ry + LM_FONT_H > ai->close.y - 6)
+            break;
+        draw_text(c, &text, text.x, ry, ai->row[i].label, COL_PANEL_DIM);
+        draw_text(c, &text, text.x + 96, ry, ai->row[i].value, COL_PANEL_TEXT);
+    }
+    fill_round(c, &ai->close, 6, 0xff000000u | (ai->hover_close ? COL_PANEL_ACCENT : COL_PANEL_BTN));
+    draw_text_centered(c, &ai->close, "Close", ai->hover_close ? COL_PANEL : COL_PANEL_TEXT);
+}
+
+/* ---- the dock ------------------------------------------------------------------------------------------------------------ */
+
+/* Premultiplied pixel of a picture icon at (px, py) inside `box`: the picture is fitted into the square and sampled bilinearly. */
+static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *box, int x, int y)
+{
+    float s = (float)box->w / (float)(img->w > img->h ? img->w : img->h);
+    float iw = (float)img->w * s, ih = (float)img->h * s;
+    float fx = ((float)(x - box->x) + 0.5f - ((float)box->w - iw) / 2.0f) / s - 0.5f;
+    float fy = ((float)(y - box->y) + 0.5f - ((float)box->h - ih) / 2.0f) / s - 0.5f;
+    if (fx < -0.5f || fy < -0.5f || fx > (float)img->w - 0.5f || fy > (float)img->h - 0.5f)
+        return 0;
+    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+    float tx = fx - (float)x0, ty = fy - (float)y0;
+    float acc[4] = { 0, 0, 0, 0 };
+    for (int k = 0; k < 4; k++) {
+        int xx = LM_CLAMP(x0 + (k & 1), 0, img->w - 1), yy = LM_CLAMP(y0 + (k >> 1), 0, img->h - 1);
+        float wgt = ((k & 1) ? tx : 1.0f - tx) * ((k >> 1) ? ty : 1.0f - ty);
+        uint32_t p = img->px[(size_t)yy * (size_t)img->w + (size_t)xx];
+        acc[0] += wgt * (float)(p >> 24);
+        acc[1] += wgt * (float)((p >> 16) & 255);
+        acc[2] += wgt * (float)((p >> 8) & 255);
+        acc[3] += wgt * (float)(p & 255);
+    }
+    return ((uint32_t)(acc[0] + 0.5f) << 24) | ((uint32_t)(acc[1] + 0.5f) << 16) | ((uint32_t)(acc[2] + 0.5f) << 8) | (uint32_t)(acc[3] + 0.5f);
+}
+
+/* The dock: round icons without any background, a dot under the ones that have a window, the name of the hovered one above it. */
+static void paint_dock(const struct paint_ctx *c, const struct lm_dock_info *d)
+{
+    for (int i = 0; i < d->n; i++) {
+        const struct lm_rect *b = &d->icon[i].box;
+        const struct lm_dock_item *it = d->icon[i].item;
+        float R = (float)b->w / 2.0f, cx = (float)b->x + R, cy = (float)b->y + (float)b->h / 2.0f;
+        int m = it->img ? 1 : (int)(R * 0.45f) + 2;                      /* built-in icons have a shadow beyond the box */
+        struct lm_rect box = lm_rect_make(b->x - m, b->y - m, b->w + 2 * m, b->h + 2 * m + (it->img ? 0 : 2)), r;
+        if (!lm_rect_intersect(&box, &c->clip, &r))
+            continue;
+        float lift = i == d->hover ? 1.0f : 0.0f;
+        for (int y = r.y; y < r.y + r.h; y++) {
+            uint32_t *row = fb_row(c, y);
+            for (int x = r.x; x < r.x + r.w; x++) {
+                uint32_t px = it->img ? dock_image_px(it->img, b, x, y)
+                                      : lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+                if (px >> 24)
+                    row[x] = blend_px(px, row[x]);
+            }
+        }
+        if (d->icon[i].running)
+            paint_shape(c, (float)(b->x + b->w / 2), (float)d->dot_y, 2.6f, SHAPE_DISC, COL_PANEL_TEXT, 0xdd);
+    }
+    if (d->label_text) {
+        fill_round(c, &d->label, 7, 0xff000000u | lm_theme.border);
+        struct lm_rect in = lm_rect_make(d->label.x + 1, d->label.y + 1, d->label.w - 2, d->label.h - 2);
+        fill_round(c, &in, 6, 0xf0000000u | COL_PANEL);
+        draw_text_centered(c, &d->label, d->label_text, COL_PANEL_TEXT);
     }
 }
 
@@ -1242,6 +1344,20 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     }
 }
 
+/* Bright, evenly spaced colours of the round panel buttons (workspaces and keyboard layouts). */
+static const uint32_t panel_palette[8] = {
+    0x4c8dff, 0x3fb950, 0xf0861c, 0xa371f7, 0x2cb5a0, 0xe5534b, 0xe0b020, 0xd16bb8,
+};
+
+/* a * (255 - t) + b * t, per channel, t = 0..255 */
+static uint32_t mix_rgb(uint32_t a, uint32_t b, int t)
+{
+    uint32_t out = 0;
+    for (int sh = 16; sh >= 0; sh -= 8)
+        out |= (uint32_t)((((a >> sh) & 255) * (uint32_t)(255 - t) + ((b >> sh) & 255) * (uint32_t)t + 127) / 255) << sh;
+    return out;
+}
+
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
 {
     fill_rect(c, &p->bar, COL_PANEL);
@@ -1249,26 +1365,31 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     struct lm_rect line = lm_rect_make(p->bar.x, p->bar.y + p->bar.h - 1, p->bar.w, 1);
     fill_rect(c, &line, 0x262c3bu);
 
-    fill_rect(c, &p->launcher, p->hover_launcher ? COL_PANEL_HOVER : COL_PANEL_BTN);
-    draw_text_centered(c, &p->launcher, "MellaGUI", COL_PANEL_TEXT);
+    if (p->hover_launcher || p->about_open)                                  /* the round logo button; a ring shows it is live */
+        paint_shape(c, (float)p->launcher.x + (float)p->launcher.w / 2.0f, (float)p->launcher.y + (float)p->launcher.h / 2.0f,
+                    (float)p->launcher.w / 2.0f + 1.5f, SHAPE_DISC, COL_PANEL_ACCENT, p->about_open ? 0xff : 0xa0);
+    paint_logo(c, &p->launcher);
 
-    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {          /* round, each workspace in its own colour: bright = the current one, tinted = the others */
         const struct lm_rect *w = &p->workspace[i];
-        bool cur = i == p->current_workspace;
-        uint32_t bg = cur ? COL_PANEL_ACCENT : (i == p->hover_workspace ? COL_PANEL_HOVER : COL_PANEL_BTN);
-        fill_rect(c, w, bg);
+        bool cur = i == p->current_workspace, occupied = (p->workspace_occupied >> i) & 1;
+        uint32_t col = panel_palette[i % 8];
+        uint32_t bg = cur ? (i == p->hover_workspace ? mix_rgb(col, 0xffffffu, 40) : col)
+                          : mix_rgb(COL_PANEL, col, i == p->hover_workspace ? 215 : 165);
+        float cx = (float)w->x + (float)w->w / 2.0f, cy = (float)w->y + (float)w->h / 2.0f, R = (float)LM_MIN(w->w, w->h) / 2.0f;
+        if (cur)                                            /* the current one: a white ring and dark digit, the others a duller disc and a white digit */
+            paint_shape(c, cx, cy, R, SHAPE_DISC, 0xffffffu, 255);
+        paint_shape(c, cx, cy, cur ? R - 2.0f : R, SHAPE_DISC, bg, 255);
         char n[2] = { (char)('1' + i), 0 };
-        draw_text_centered(c, w, n, cur ? COL_PANEL : ((p->workspace_occupied >> i) & 1 ? COL_PANEL_TEXT : COL_PANEL_DIM));
-        if (!cur && ((p->workspace_occupied >> i) & 1)) {
-            struct lm_rect dot = lm_rect_make(w->x + w->w / 2 - 2, w->y + w->h - 5, 4, 2);
-            fill_rect(c, &dot, COL_PANEL_ACCENT);
-        }
+        draw_text_centered(c, w, n, cur ? 0x0b0d12u : 0xffffffu);
+        if (!cur && occupied)                               /* a window lives there: a small white dot under the digit */
+            paint_shape(c, cx, cy + R * 0.66f, 1.7f, SHAPE_DISC, 0xffffffu, 255);
     }
     for (int i = 0; i < p->ntasks; i++) {
         const struct lm_rect *r = &p->task[i].rect;
         uint32_t bg = p->task[i].active ? COL_PANEL_ACCENT : (p->task[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN);
         uint32_t fg = p->task[i].active ? COL_PANEL : (p->task[i].minimized ? COL_PANEL_DIM : COL_PANEL_TEXT);
-        fill_rect(c, r, bg);
+        fill_round(c, r, 8, 0xff000000u | bg);
         struct lm_rect label = lm_rect_make(r->x + 4, r->y, r->w - 8, r->h);
         draw_text_centered(c, &label, p->task[i].title[0] ? p->task[i].title : "-", fg);
     }
@@ -1278,22 +1399,31 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         fill_rect(c, &p->caps, COL_PANEL_DANGER);
         draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);
     }
-    fill_rect(c, &p->layout, p->hover_layout ? COL_PANEL_HOVER : COL_PANEL_BTN);
-    draw_text_centered(c, &p->layout, p->layout_text, COL_PANEL_TEXT);
-    uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : (p->hover_sticky ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    {                                                   /* the keyboard layout: a round badge, every layout in its own colour */
+        unsigned h = 0;
+        for (const char *q = p->layout_text; *q; q++)
+            h = h * 31 + (unsigned char)*q;
+        uint32_t col = panel_palette[(h + 3) % 8];
+        if (p->hover_layout)
+            col = mix_rgb(col, 0xffffffu, 55);
+        float cx = (float)p->layout.x + (float)p->layout.w / 2.0f, cy = (float)p->layout.y + (float)p->layout.h / 2.0f;
+        paint_shape(c, cx, cy, (float)LM_MIN(p->layout.w, p->layout.h) / 2.0f, SHAPE_DISC, col, 255);
+        draw_text_centered(c, &p->layout, p->layout_text, 0x0b0d12u);
+    }
+    uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_sticky ? 30 : 18);
     if (p->sticky_on && p->hover_sticky)
         sbg = 0x8fbcffu;
-    fill_rect(c, &p->sticky, sbg);
-    draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? COL_PANEL : COL_PANEL_DIM);
-    fill_rect(c, &p->run, p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN);
+    fill_round(c, &p->sticky, 8, 0xff000000u | sbg);
+    draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? 0x0b0d12u : COL_PANEL_TEXT);
+    fill_round(c, &p->run, 8, 0xff000000u | (p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN));
     draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
     {                                                   /* the round power button: a disc with the power symbol */
         float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;
         float R = (float)p->power.w / 2.0f;
-        uint32_t bg = p->power_open ? COL_PANEL_ACCENT : p->hover_power ? COL_PANEL_HOVER : COL_PANEL_BTN;
-        paint_shape(c, cx, cy, R, SHAPE_DISC, bg, 255);
-        paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, p->power_open ? COL_PANEL : COL_PANEL_TEXT, 255);
+        uint32_t bg = p->power_open ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 45) : p->hover_power ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 25) : COL_PANEL_DANGER;
+        paint_shape(c, cx, cy, R, SHAPE_DISC, bg, 255);                                   /* red: it ends the session */
+        paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, 0xffffffu, 255);
     }
 }
 
@@ -1542,8 +1672,13 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
         if (item->output == c->out)
             paint_panel(c, &item->u.panel);
         break;
-    case LM_SCENE_MENU:
-        paint_menu(c, &item->u.menu);
+    case LM_SCENE_DOCK:
+        if (item->output == c->out)
+            paint_dock(c, &item->u.dock);
+        break;
+    case LM_SCENE_ABOUT:
+        if (item->output == c->out)
+            paint_about(c, &item->u.about);
         break;
     case LM_SCENE_NOTIFY:
         paint_notify(c, &item->u.notify);

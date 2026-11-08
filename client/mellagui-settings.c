@@ -315,11 +315,11 @@ static int selftest(void)
 #define DEFAULT_H 440
 #define SIDE_W 140
 #define MAX_WIDGETS 120
-#define MAX_KV 96
+#define MAX_KV 160
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_MENU, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Menu", "Keys", "Colours", "Sizes" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH };
 
@@ -354,9 +354,8 @@ struct app {
     char wall[220];                     /* the wallpaper file field while it is being edited */
     bool wall_edited;                   /* (else the field shows the compositor's value) */
     /* Menu page: the two fields below the entry list ([0] name, [1] command) and the entry they edit (-1 = a new one) */
-    char input[4][1024];                /* [2] = the action of the Keys page, [3] = the colour (#rrggbb) of the Colours page */
-    int menu_sel;
-    char menu_err[80];
+    char input[7][1024];                /* [2] = the action of the Keys page, [3] = the colour (#rrggbb) of the Colours page,
+                                         * [4] [5] [6] = name, icon and command of a Dock button */
     /* Keys page: the shortcut being edited (kcombo from "Record", input[2] its action), the row it came from, and the capture state */
     char kcombo[64];
     char ksel[64];
@@ -367,6 +366,12 @@ struct app {
     char cname[32];
     int cr, cg, cb;
     char col_err[80];
+    /* Dock page: the part shown (0 buttons, 1 look), the first button listed, the button the form edits (-1 = a new one), a slider that is
+     * being dragged (sent when it is let go) */
+    int dsub, dpage, dock_sel;
+    char dock_err[80];
+    char dpend[16];
+    int dpend_val;
     /* Sizes page: the page shown and the value of a slider that is being dragged (sent when it is let go) */
     int mpage, mpend, mpend_val;
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
@@ -727,7 +732,7 @@ static void build_display(struct app *a, int x, int y, int w)
     snprintf(mb->arg, sizeof(mb->arg), "mellagui-monitor");
 }
 
-/* The hand-written mellagui.conf: menu, shortcuts, colours, sizes. The panel does not edit them, it opens the file. */
+/* The hand-written mellagui.conf: dock, shortcuts, colours, sizes. The panel does not edit them, it opens the file. */
 static void build_config(struct app *a, int x, int y, int w)
 {
     const char *file = kv_get(a, "config-file"), *status = kv_get(a, "config-status");
@@ -745,7 +750,7 @@ static void build_config(struct app *a, int x, int y, int w)
     else if (!strncmp(status, "ignored:", 8))
         snprintf(line, sizeof(line), "Read, but %s line(s) were ignored (see the log).", status + 8);
     else
-        snprintf(line, sizeof(line), "Menu, shortcuts, colours and sizes are set here.");
+        snprintf(line, sizeof(line), "The dock, shortcuts, colours and sizes are set here.");
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, line);
     y += ROW_H + 6;
     if (!strcmp(status, "missing")) {
@@ -760,7 +765,7 @@ static void build_config(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Running programs keep their colours until restarted.");
 }
 
-/* ---- Menu page: the entries of the MellaGUI menu ([menu] of mellagui.conf), changed through the menu-* settings ---------------- */
+/* ---- shared helpers of the list pages (Dock, Keys, Colours, Sizes) ---------------------------------------------------------------- */
 
 #define MENU_US "\x1f"
 #define MENU_ROW_H 22
@@ -773,85 +778,159 @@ static struct widget *menu_button(struct app *a, int x, int y, int w, const char
     return b;
 }
 
-static void build_menu(struct app *a, int x, int y, int w)
+/* ---- Dock page: the round buttons along the bottom ([dock] and [dock-apps] of mellagui.conf), changed through the dock-* settings ---- */
+
+#define DOCK_ROWS 8
+#define DOCK_MAX 16
+
+struct dock_opt { const char *key, *label; int lo, hi, step; const char *unit; };
+static const struct dock_opt dock_opts[] = {
+    { "icon-size", "Icon size", 24, 128, 2, " px" }, { "zoom", "Zoom under the pointer", 100, 250, 5, " %" },
+    { "gap", "Space between icons", 0, 40, 1, " px" }, { "margin", "Distance from the edge", 0, 100, 1, " px" },
+};
+
+/* The value of an option of the "dock-opts" setting ("enabled=1 autohide=0 icon-size=48 ..."). */
+static int dock_opt(const struct app *a, const char *key, int def)
 {
-    const char *file = kv_get(a, "config-file");
-    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Menu entries");
+    const char *p = kv_get(a, "dock-opts");
+    size_t kl = strlen(key);
+    for (; *p; p++)
+        if ((p == kv_get(a, "dock-opts") || p[-1] == ' ') && !strncmp(p, key, kl) && p[kl] == '=')
+            return atoi(p + kl + 1);
+    return def;
+}
+
+static void dock_flush(struct app *a)
+{
+    if (!a->dpend[0])
+        return;
+    char v[48];
+    snprintf(v, sizeof(v), "%s\x1f%d", a->dpend, a->dpend_val);
+    send_set(a, "dock-set", v);
+    a->dpend[0] = 0;
+}
+
+static void build_dock(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Dock");
     y += ROW_H;
-    if (!*file) {
+    if (!*kv_get(a, "config-file")) {
         add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    struct widget *t0 = menu_button(a, x, y, 90, "Buttons", "dock-sub", 0), *t1 = menu_button(a, x + 96, y, 90, "Look", "dock-sub", 1);
+    t0->on = a->dsub == 0;
+    t1->on = a->dsub == 1;
+    y += MENU_ROW_H + 8;
+    if (a->dsub == 1) {
+        add_check(a, x, y, w, "Show the dock", "dock-enabled", dock_opt(a, "enabled", 1));
+        y += ROW_H;
+        add_check(a, x, y, w, "Hide it until the pointer touches the bottom edge", "dock-autohide", dock_opt(a, "autohide", 0));
+        y += ROW_H + 6;
+        for (size_t i = 0; i < sizeof(dock_opts) / sizeof(dock_opts[0]); i++) {
+            const struct dock_opt *o = &dock_opts[i];
+            struct widget *sl = add(a, W_SLIDER, (struct rect){ x, y, w, 26 }, o->label);
+            snprintf(sl->key, sizeof(sl->key), "dk-%s", o->key);
+            sl->lo = o->lo;
+            sl->hi = o->hi;
+            sl->step = o->step;
+            sl->label_w = 200;
+            sl->val = !strcmp(a->dpend, o->key) ? a->dpend_val : LM_CLAMP(dock_opt(a, o->key, o->lo), o->lo, o->hi);
+            sl->unit = o->unit;
+            y += 26;
+        }
+        y += 8;
+        add_button(a, x, y, 220, "Restore the built-in dock", "dock-reset")->r.h = MENU_ROW_H - 2;
+        add(a, W_LABEL, (struct rect){ x, y + MENU_ROW_H + 4, w, 24 }, "Applied when you let go of a slider.");
         return;
     }
     char key[16];
     int n = 0;
-    for (; n < 12; n++) {
-        snprintf(key, sizeof(key), "menu-%d", n);
-        const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
-        if (!us)
+    for (; n < DOCK_MAX; n++) {
+        snprintf(key, sizeof(key), "dock-%d", n);
+        if (!strchr(kv_get(a, key), 0x1f))
             break;
-        char name[64];
-        snprintf(name, sizeof(name), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(name) - 1), v);
-        struct widget *e = menu_button(a, x, y, 110, name, "menu-edit", n);
-        e->on = a->menu_sel == n;
+    }
+    int pages = LM_MAX(1, (n + DOCK_ROWS - 1) / DOCK_ROWS);
+    a->dpage = LM_CLAMP(a->dpage, 0, pages - 1);
+    for (int i = a->dpage * DOCK_ROWS; i < LM_MIN(n, (a->dpage + 1) * DOCK_ROWS); i++) {
+        snprintf(key, sizeof(key), "dock-%d", i);
+        const char *v = kv_get(a, key), *us1 = strchr(v, 0x1f), *us2 = strchr(us1 + 1, 0x1f);
+        char name[64], line[200];
+        snprintf(name, sizeof(name), "%.*s", (int)LM_MIN((size_t)(us1 - v), sizeof(name) - 1), v);
+        if (us2 && us2 > us1 + 1)
+            snprintf(line, sizeof(line), "[%.*s] %s", (int)(us2 - us1 - 1), us1 + 1, us2 + 1);
+        else
+            snprintf(line, sizeof(line), "%s", us2 ? us2 + 1 : us1 + 1);
+        struct widget *e = menu_button(a, x, y, 110, name, "dock-edit", i);
+        e->on = a->dock_sel == i;
         int bx = x + w - 3 * 26;
-        struct widget *c = add(a, W_LABEL, (struct rect){ x + 118, y, bx - x - 122, MENU_ROW_H }, us + 1);
-        (void)c;
-        menu_button(a, bx, y, 24, "^", "menu-up", n);
-        menu_button(a, bx + 26, y, 24, "v", "menu-down", n);
-        menu_button(a, bx + 52, y, 24, "x", "menu-del", n);
+        add(a, W_LABEL, (struct rect){ x + 118, y, bx - x - 122, MENU_ROW_H }, line);
+        menu_button(a, bx, y, 24, "^", "dock-up", i);
+        menu_button(a, bx + 26, y, 24, "v", "dock-down", i);
+        menu_button(a, bx + 52, y, 24, "x", "dock-del", i);
         y += MENU_ROW_H;
     }
-    if (a->menu_sel >= n)
-        a->menu_sel = -1;
-    y += 6;
-    struct widget *fn = add(a, W_INPUT, (struct rect){ x, y, 110, 26 }, "name");
-    snprintf(fn->arg, sizeof(fn->arg), "0");
-    struct widget *fc = add(a, W_INPUT, (struct rect){ x + 118, y, w - 118 - 78, 26 }, "command");
-    snprintf(fc->arg, sizeof(fc->arg), "1");
-    struct widget *ok = add_button(a, x + w - 70, y, 70, a->menu_sel >= 0 ? "Update" : "Add", "menu-put");
-    ok->r.h = 26;
+    y = 14 + ROW_H + MENU_ROW_H + 8 + DOCK_ROWS * MENU_ROW_H + 2;
+    if (pages > 1) {
+        menu_button(a, x, y, 24, "<", "dock-prev", 0);
+        char lbl[32];
+        snprintf(lbl, sizeof(lbl), "%d / %d", a->dpage + 1, pages);
+        add(a, W_LABEL, (struct rect){ x + 32, y, 80, MENU_ROW_H }, lbl);
+        menu_button(a, x + 100, y, 24, ">", "dock-next", 0);
+    }
+    y += MENU_ROW_H + 4;
+    if (a->dock_sel >= n)
+        a->dock_sel = -1;
+    struct widget *fn = add(a, W_INPUT, (struct rect){ x, y, 120, 26 }, "name");
+    snprintf(fn->arg, sizeof(fn->arg), "4");
+    struct widget *fi = add(a, W_INPUT, (struct rect){ x + 128, y, w - 128, 26 }, "icon: terminal, files ... or a picture file");
+    snprintf(fi->arg, sizeof(fi->arg), "5");
+    y += 30;
+    struct widget *fc = add(a, W_INPUT, (struct rect){ x, y, w - 78, 26 }, "command");
+    snprintf(fc->arg, sizeof(fc->arg), "6");
+    add_button(a, x + w - 70, y, 70, a->dock_sel >= 0 ? "Update" : "Add", "dock-put")->r.h = 26;
     y += 32;
-    add_button(a, x, y, 150, "Restore defaults", "menu-reset")->r.h = 22;
-    const char *hint = a->menu_err[0] ? a->menu_err : n >= 12 ? "The menu is full (12 entries)." :
-                       "Click a name to edit it.";
-    add(a, W_LABEL, (struct rect){ x + 160, y - 1, w - 160, 24 }, hint);
+    const char *hint = a->dock_err[0] ? a->dock_err : n >= DOCK_MAX ? "The dock is full (16 buttons)." : "Click a name to edit it. An empty icon is guessed.";
+    add(a, W_LABEL, (struct rect){ x, y - 1, w, 24 }, hint);
 }
 
-static void menu_clear_form(struct app *a)
+static void dock_clear_form(struct app *a)
 {
-    a->input[0][0] = a->input[1][0] = 0;
-    a->menu_sel = -1;
+    a->input[4][0] = a->input[5][0] = a->input[6][0] = 0;
+    a->dock_sel = -1;
 }
 
-static void menu_put(struct app *a)
+static void dock_put(struct app *a)
 {
-    a->menu_err[0] = 0;
-    const char *name = a->input[0], *cmd = a->input[1];
+    a->dock_err[0] = 0;
+    const char *name = a->input[4], *icon = a->input[5], *cmd = a->input[6];
     size_t nl = strlen(name);
-    if (!nl || strlen(cmd) == 0) {
-        snprintf(a->menu_err, sizeof(a->menu_err), "Type a name and a command.");
+    if (!nl || !*cmd) {
+        snprintf(a->dock_err, sizeof(a->dock_err), "Type a name and a command.");
         return;
     }
     if (nl >= 64 || strchr(name, '=') || name[0] == '#' || name[0] == ';' || name[0] == '[' || name[0] == ' ' || name[nl - 1] == ' ' ||
-        cmd[0] == ' ' || cmd[strlen(cmd) - 1] == ' ') {
-        snprintf(a->menu_err, sizeof(a->menu_err), "Not allowed: '=', leading '#;[' or spaces at the ends.");
+        cmd[0] == ' ' || cmd[strlen(cmd) - 1] == ' ' || icon[0] == ' ' || (*icon && icon[strlen(icon) - 1] == ' ') || strchr(icon, ']') ||
+        icon[0] == '[') {
+        snprintf(a->dock_err, sizeof(a->dock_err), "Not allowed: '=', leading '#;[' or spaces at the ends.");
         return;
     }
     char key[16];
-    for (int i = 0; i < 12; i++) {
-        snprintf(key, sizeof(key), "menu-%d", i);
+    for (int i = 0; i < DOCK_MAX; i++) {
+        snprintf(key, sizeof(key), "dock-%d", i);
         const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
         if (!us)
             break;
-        if (i != a->menu_sel && strlen(name) == (size_t)(us - v) && !strncasecmp(name, v, nl)) {
-            snprintf(a->menu_err, sizeof(a->menu_err), "There is already an entry with that name.");
+        if (i != a->dock_sel && strlen(name) == (size_t)(us - v) && !strncasecmp(name, v, nl)) {
+            snprintf(a->dock_err, sizeof(a->dock_err), "There is already a button with that name.");
             return;
         }
     }
-    char v[1200];
-    snprintf(v, sizeof(v), "%d" MENU_US "%s" MENU_US "%s", a->menu_sel, name, cmd);
-    send_set(a, "menu-put", v);
-    menu_clear_form(a);
+    char v[1700];
+    snprintf(v, sizeof(v), "%d" MENU_US "%s" MENU_US "%s" MENU_US "%s", a->dock_sel, name, icon, cmd);
+    send_set(a, "dock-put", v);
+    dock_clear_form(a);
 }
 
 /* ---- Keys page: the keyboard shortcuts ([keys] of mellagui.conf), changed through the keys-* settings -------------------------- */
@@ -1092,8 +1171,11 @@ static int metric_list(const struct app *a, struct metric *out, int max)
     return n;
 }
 
+static void dock_flush(struct app *a);
+
 static void metric_flush(struct app *a)
 {
+    dock_flush(a);
     if (a->mpend < 0)
         return;
     struct metric m[MAX_METRICS];
@@ -1197,8 +1279,9 @@ static void build_sound(struct app *a, int x, int y, int w)
 static void build(struct app *a)
 {
     a->nw = 0;
+    int pitch = LM_MIN(36, (a->win.bh - 16) / N_PAGES);                 /* all tabs have to fit under each other */
     for (int i = 0; i < N_PAGES; i++) {
-        struct widget *t = add(a, W_TAB, (struct rect){ 8, 12 + i * 36, SIDE_W - 16, 32 }, PAGE_NAMES[i]);
+        struct widget *t = add(a, W_TAB, (struct rect){ 8, 12 + i * pitch, SIDE_W - 16, pitch - 4 }, PAGE_NAMES[i]);
         snprintf(t->key, sizeof(t->key), "page");
         snprintf(t->arg, sizeof(t->arg), "%d", i);
         t->on = (int)a->page == i;
@@ -1213,10 +1296,10 @@ static void build(struct app *a)
     case PAGE_SOUND: build_sound(a, x, y, w); break;
     case PAGE_SECURITY: build_security(a, x, y, w); break;
     case PAGE_CONFIG: build_config(a, x, y, w); break;
-    case PAGE_MENU: build_menu(a, x, y, w); break;
     case PAGE_KEYS: build_keys(a, x, y, w); break;
     case PAGE_COLOURS: build_colours(a, x, y, w); break;
     case PAGE_SIZES: build_sizes(a, x, y, w); break;
+    case PAGE_DOCK: build_dock(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -1259,6 +1342,10 @@ static void slider_set(struct app *a, const struct widget *w, int v)
     } else if (!strncmp(w->key, "met-", 4) && w->key[4] >= '0' && w->key[4] <= '9') {      /* a size: sent when the slider is let go */
         a->mpend = atoi(w->key + 4);
         a->mpend_val = v;
+        a->win.redraw = true;
+    } else if (!strncmp(w->key, "dk-", 3)) {                                  /* a dock option: sent when the slider is let go */
+        snprintf(a->dpend, sizeof(a->dpend), "%s", w->key + 3);
+        a->dpend_val = v;
         a->win.redraw = true;
     } else if (!strncmp(w->key, "col-", 4) && w->key[4] && !w->key[5]) {      /* col-r / col-g / col-b: only the working colour */
         *(w->key[4] == 'r' ? &a->cr : w->key[4] == 'g' ? &a->cg : &a->cb) = v;
@@ -1353,6 +1440,10 @@ static void activate(struct app *a, int idx)
             a->sec_start = !a->sec_start;
         } else if (!strcmp(w->key, "sec-vt")) {
             a->sec_vt = !a->sec_vt;
+        } else if (!strcmp(w->key, "dock-enabled") || !strcmp(w->key, "dock-autohide")) {
+            char v[32];
+            snprintf(v, sizeof(v), "%s\x1f%s", w->key + 5, w->on ? "no" : "yes");
+            send_set(a, "dock-set", v);
         } else if (!strcmp(w->key, "layout-enable")) {
             idlist_parse(&l, kv_get(a, "layouts"));
             if (idlist_toggle(&l, w->arg)) {
@@ -1435,29 +1526,35 @@ static void activate(struct app *a, int idx)
         } else if (!strcmp(w->key, "keys-reset")) {
             send_set(a, "keys-reset", "1");
             a->kcombo[0] = a->ksel[0] = a->input[2][0] = 0;
-        } else if (!strcmp(w->key, "menu-edit")) {
+        } else if (!strcmp(w->key, "dock-sub")) {
+            a->dsub = atoi(w->arg);
+        } else if (!strcmp(w->key, "dock-prev") || !strcmp(w->key, "dock-next")) {
+            a->dpage = LM_MAX(0, a->dpage + (!strcmp(w->key, "dock-next") ? 1 : -1));
+        } else if (!strcmp(w->key, "dock-edit")) {
             char key[16];
-            snprintf(key, sizeof(key), "menu-%d", atoi(w->arg));
-            const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
-            if (us) {
-                snprintf(a->input[0], sizeof(a->input[0]), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(a->input[0]) - 1), v);
-                snprintf(a->input[1], sizeof(a->input[1]), "%s", us + 1);
-                a->menu_sel = atoi(w->arg);
-                a->menu_err[0] = 0;
+            snprintf(key, sizeof(key), "dock-%d", atoi(w->arg));
+            const char *v = kv_get(a, key), *us1 = strchr(v, 0x1f), *us2 = us1 ? strchr(us1 + 1, 0x1f) : NULL;
+            if (us2) {
+                snprintf(a->input[4], sizeof(a->input[4]), "%.*s", (int)LM_MIN((size_t)(us1 - v), sizeof(a->input[4]) - 1), v);
+                snprintf(a->input[5], sizeof(a->input[5]), "%.*s", (int)LM_MIN((size_t)(us2 - us1 - 1), sizeof(a->input[5]) - 1), us1 + 1);
+                snprintf(a->input[6], sizeof(a->input[6]), "%s", us2 + 1);
+                a->dock_sel = atoi(w->arg);
+                a->dock_err[0] = 0;
             }
-        } else if (!strcmp(w->key, "menu-up") || !strcmp(w->key, "menu-down")) {
+        } else if (!strcmp(w->key, "dock-up") || !strcmp(w->key, "dock-down")) {
             char v[24];
-            snprintf(v, sizeof(v), "%d" MENU_US "%d", atoi(w->arg), !strcmp(w->key, "menu-up") ? -1 : 1);
-            send_set(a, "menu-move", v);
-            menu_clear_form(a);
-        } else if (!strcmp(w->key, "menu-del")) {
-            send_set(a, "menu-del", w->arg);
-            menu_clear_form(a);
-        } else if (!strcmp(w->key, "menu-reset")) {
-            send_set(a, "menu-reset", "1");
-            menu_clear_form(a);
-        } else if (!strcmp(w->key, "menu-put")) {
-            menu_put(a);
+            snprintf(v, sizeof(v), "%d" MENU_US "%d", atoi(w->arg), !strcmp(w->key, "dock-up") ? -1 : 1);
+            send_set(a, "dock-move", v);
+            dock_clear_form(a);
+        } else if (!strcmp(w->key, "dock-del")) {
+            send_set(a, "dock-del", w->arg);
+            dock_clear_form(a);
+        } else if (!strcmp(w->key, "dock-reset")) {
+            send_set(a, "dock-reset", "1");
+            dock_clear_form(a);
+            a->dpend[0] = 0;
+        } else if (!strcmp(w->key, "dock-put")) {
+            dock_put(a);
         } else if (!strcmp(w->key, "config-edit")) {
             launch_sibling("mellagui-edit", w->arg, NULL);
         } else if (!strcmp(w->key, "wall-browse")) {
@@ -1792,11 +1889,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
                 else if (atoi(f->arg) == 2)
                     keys_put(a);
                 else
-                    menu_put(a);
+                    dock_put(a);
             } else {
                 int which = atoi(f->arg);
-                edit_text(a->input[which], which == 0 ? 64 : which == 2 ? 250 : which == 3 ? 12 : sizeof(a->input[1]), ks, plain);
-                a->menu_err[0] = a->keys_err[0] = a->col_err[0] = 0;
+                edit_text(a->input[which], which == 4 ? 64 : which == 2 || which == 5 ? 250 : which == 3 ? 12 : sizeof(a->input[1]), ks, plain);
+                a->keys_err[0] = a->col_err[0] = a->dock_err[0] = 0;
                 uint32_t c;
                 if (which == 3 && lm_theme_parse_color(a->input[3], &c)) {         /* the sliders and the preview follow the text */
                     a->cr = (int)(c >> 16) & 255;
@@ -1914,7 +2011,7 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event };
-    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .menu_sel = -1, .csel = -1, .mpend = -1 };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .csel = -1, .mpend = -1, .dock_sel = -1 };
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */

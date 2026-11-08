@@ -19,6 +19,9 @@ struct lm_image {
 int lm_jpeg_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz);   /* jpeg.c */
 int lm_img_load(const char *path, struct lm_image *img, char *err, size_t errsz);
 int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz);   /* PNG, JPEG or P6 by content */
+/* Like lm_img_load, but pixels are ARGB (alpha in the top byte, colour not premultiplied): a PNG keeps its transparency, a JPEG / PPM is
+ * opaque. For the dock's icons. */
+int lm_img_load_alpha(const char *path, struct lm_image *img, char *err, size_t errsz);
 void lm_img_free(struct lm_image *img);
 
 #endif

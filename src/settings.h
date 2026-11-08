@@ -53,18 +53,20 @@
  *                                              empty minutes / start / blank / vt = keep. Never echoed, never logged
  *   notify          (write only)               "title<TAB>body<TAB>milliseconds": a notification card at the top right (0 ms = until clicked,
  *                                              default 6000; mellagui-notify sends it)
- *   config-file     (read only)                the mellagui.conf that is read ("" = none; menu, shortcuts, colours, sizes: conf.h)
+ *   config-file     (read only)                the mellagui.conf that is read ("" = none; dock, shortcuts, colours, sizes: conf.h)
  *   config-status  (read only)                 ok | missing (set but not readable) | none | ignored:N (N lines rejected by the last reload)
  *   config-reload   (write only)               1 = read mellagui.conf again (same as Super+Shift+R / SIGUSR2)
  *   config-create   (write only)               1 = write the built-in defaults to config-file when it does not exist yet
- *   menu-0 .. menu-11 (read only)              "name<US>command" of the entries of [menu] in mellagui.conf (<US> = 0x1f; raw text, before @tokens
- *                                              are expanded; the built-in default menu while the file has none), "" past the end
- *   menu-put        (write only)               "index<US>name<US>command": replace entry `index` or, with -1, add one (at most 12; a name is
- *                                              unique, no '=' and no leading '#;[' or spaces at the ends)
- *   menu-del        (write only)               "index": remove an entry
- *   menu-move       (write only)               "index<US>-1|1": swap an entry with its neighbour
- *   menu-reset      (write only)               1 = remove [menu] from the file, the default menu returns
- *                                              The four rewrite only the [menu] section of the file (confedit.c: comments, other sections
+ *   dock-0 .. dock-15 (read only)              "name<US>icon<US>command" of the buttons of [dock-apps] in mellagui.conf (<US> = 0x1f; raw text, before
+ *                                              @tokens are expanded; the built-in default dock while the file has none), "" past the end
+ *   dock-opts       (read only)                "enabled=1 autohide=0 icon-size=48 zoom=160 gap=10 margin=8": the [dock] options
+ *   dock-put        (write only)               "index<US>name<US>icon<US>command": replace button `index` or, with -1, add one (at most 16; a name is
+ *                                              unique, no '=' and no leading '#;[' or spaces at the ends; icon may be empty, has no brackets)
+ *   dock-del        (write only)               "index": remove a button
+ *   dock-move       (write only)               "index<US>-1|1": swap a button with its neighbour
+ *   dock-set        (write only)               "option<US>value": one line of [dock] (the built-in value removes the line)
+ *   dock-reset      (write only)               1 = remove [dock] and [dock-apps] from the file, the built-in dock returns
+ *                                              These rewrite only those sections of the file (confedit.c: comments, other sections
  *                                              and order stay), create the file when missing, and read it again at once. Refused without a file.
  *   keys-count      (read only)                number of shortcuts in the table (keys.h)
  *   keys-page       0..                        which ten of them keys-row-N shows (clamped to the last page)

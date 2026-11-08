@@ -3045,10 +3045,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its two buttons, wraps over the seven page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 17th press; Space toggles it
+        # the wallpaper field, its four radio buttons and its two buttons, wraps over the nine page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 19th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(17):
+        for _ in range(19):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -6184,6 +6184,290 @@ class TestConfigSettings(Base):
                 break
             time.sleep(0.05)
         self.assertEqual([l[4:] for l in c.cmd('apps')], ['Only|echo only'])
+
+
+class TestMenuEdit(Base):
+    """The settings panel's Menu page: menu-0.. / menu-put / menu-del / menu-move / menu-reset rewrite [menu] of mellagui.conf only."""
+
+    US = '\x1f'
+
+    def start(self, name, text=None):
+        self.path = os.path.join(tmp, name + '.conf')
+        if text is None:
+            if os.path.exists(self.path):
+                os.unlink(self.path)
+        else:
+            with open(self.path, 'w') as f:
+                f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path)
+        c.sync()
+        return c
+
+    def put(self, c, idx, name, cmd):
+        c.cmd('setraw menu-put %d%s%s%s%s' % (idx, self.US, name, self.US, cmd))
+
+    def entries(self, c):
+        out = []
+        for i in range(12):
+            c.cmd('setting menu-%d' % i)
+            v = c.last[3:]
+            if not v:
+                break
+            out.append(tuple(v.split(self.US, 1)))
+        return out
+
+    def test_edits_keep_comments_and_other_sections(self):
+        c = self.start('mellagui-me1', '# top\n[theme]\naccent = #ff0000\n\n[menu]\n# my menu\nOld = echo old\nOther = echo other\n\n[keys]\nSuper+T = run\n')
+        self.assertEqual(self.entries(c), [('Old', 'echo old'), ('Other', 'echo other')])
+        self.put(c, -1, 'New', 'echo new')
+        self.assertEqual(open(self.path).read(),
+                         '# top\n[theme]\naccent = #ff0000\n\n[menu]\n# my menu\nOld = echo old\nOther = echo other\nNew = echo new\n\n[keys]\nSuper+T = run\n')
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Old|echo old', 'Other|echo other', 'New|echo new'])
+        c.cmd('setraw menu-move 2%s-1' % self.US)
+        c.cmd('setraw menu-del 0')
+        self.assertEqual(self.entries(c), [('New', 'echo new'), ('Other', 'echo other')])
+        self.put(c, 1, 'Renamed', 'echo r || echo s')
+        self.assertEqual(self.entries(c)[1], ('Renamed', 'echo r || echo s'))
+        c.cmd('setraw menu-reset 1')
+        self.assertEqual(open(self.path).read(), '# top\n[theme]\naccent = #ff0000\n\n[keys]\nSuper+T = run\n')
+        self.assertEqual(self.entries(c)[0][0], 'Terminal')                          # the defaults are back
+
+    def test_the_default_menu_is_editable_and_the_file_is_created(self):
+        c = self.start('mellagui-me2')
+        self.assertFalse(os.path.exists(self.path))
+        first = self.entries(c)
+        self.assertEqual(first[0], ('Terminal', '@terminal'))
+        c.cmd('setraw menu-del 0')
+        text = open(self.path).read()
+        self.assertTrue(text.startswith('[menu]\n'))
+        self.assertNotIn('Terminal', text)
+        self.assertEqual(self.entries(c), first[1:])
+
+    def test_bad_values_are_refused(self):
+        c = self.start('mellagui-me3', '[menu]\nA = echo a\n')
+        for idx, name, cmd in ((-1, '', 'x'), (-1, 'x', ''), (-1, 'a=b', 'x'), (-1, '#c', 'x'), (-1, '[s', 'x'), (-1, ' pad', 'x'),
+                               (-1, 'ok', ' lead'), (-1, 'a', 'dup of A'), (5, 'x', 'y'), (-2, 'x', 'y'), (-1, 'n' * 64, 'x')):
+            with self.assertRaises(RuntimeError, msg=(idx, name, cmd)):
+                self.put(c, idx, name, cmd)
+        for bad in ('menu-del 3', 'menu-del x', 'menu-move 0%s1' % self.US, 'menu-move 0%s2' % self.US, 'menu-reset 0'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('setraw ' + bad)
+        self.assertEqual(open(self.path).read(), '[menu]\nA = echo a\n')
+
+    def test_the_menu_is_limited_to_twelve_entries(self):
+        c = self.start('mellagui-me4', '[menu]\n' + ''.join('E%d = echo %d\n' % (i, i) for i in range(12)))
+        self.assertEqual(len(self.entries(c)), 12)
+        with self.assertRaises(RuntimeError):
+            self.put(c, -1, 'Extra', 'echo x')
+
+    def test_no_file_no_edit(self):
+        p, c, stop = self.private_compositor('mellagui-me5', '--config', 'none')
+        with self.assertRaises(RuntimeError):
+            self.put(c, -1, 'x', 'y')
+
+    def test_the_panel_menu_page_deletes_and_adds(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-me6')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-me6'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        n = len(self.entries(c))
+        c.click(x0 + 70, y0 + 12 + 7 * 36 + 16)                          # the Menu tab (8th)
+        time.sleep(0.3)
+        c.click(x0 + 160 + 440 - 78 + 52 + 12, y0 + 14 + 28 + 11)        # "x" of the first row
+        for _ in range(60):
+            if os.path.exists(self.path):
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)
+        text = open(self.path).read()
+        self.assertNotIn('Terminal', text)
+        self.assertIn('Calculator', text)
+        self.assertEqual(len(self.entries(c)), n - 1)
+        # add one: name field, command field, Add button (below the n-1 rows)
+        fy = y0 + 14 + 28 + (n - 1) * 22 + 6 + 13
+        c.click(x0 + 160 + 50, fy)
+        for ch in 'zz':
+            c.tap(KEYCODES[ch])
+        c.click(x0 + 160 + 118 + 60, fy)
+        for ch in 'true':
+            c.tap(KEYCODES[ch])
+        c.click(x0 + 160 + 440 - 35, fy)
+        for _ in range(60):
+            if ('zz', 'true') in self.entries(c):
+                break
+            time.sleep(0.05)
+        self.assertIn(('zz', 'true'), self.entries(c))
+        self.assertIn('zz = true', open(self.path).read())
+
+
+class TestKeysEdit(Base):
+    """The settings panel's Keys page: keys-row-N / keys-set / keys-del / keys-reset / keys-capture rewrite [keys] of mellagui.conf only."""
+
+    US = '\x1f'
+    KEY_Z = 44
+
+    def start(self, name, text=None):
+        self.path = os.path.join(tmp, name + '.conf')
+        if text is None:
+            if os.path.exists(self.path):
+                os.unlink(self.path)
+        else:
+            with open(self.path, 'w') as f:
+                f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path)
+        c.sync()
+        return c
+
+    def get(self, c, key):
+        c.cmd('setting ' + key)
+        return c.last[3:]
+
+    def rows(self, c, page=0):
+        c.cmd('settings keys-page %d' % page)
+        out = []
+        for i in range(10):
+            v = self.get(c, 'keys-row-%d' % i)
+            if not v:
+                break
+            out.append(tuple(v.split(self.US, 1)))
+        return out
+
+    def test_pages_list_the_table_in_order(self):
+        c = self.start('mellagui-ke1')
+        self.assertEqual(self.get(c, 'keys-count'), '29')
+        first = self.rows(c, 0)
+        self.assertEqual(len(first), 10)
+        self.assertEqual(first[0], ('Super+Enter', 'terminal'))
+        self.assertEqual(len(self.rows(c, 2)), 9)
+        self.assertEqual(self.rows(c, 99), self.rows(c, 2))                   # a page past the end is the last one
+        self.assertIn('close', self.get(c, 'keys-actions').split())
+        self.assertNotIn('none', self.get(c, 'keys-actions').split())
+
+    def test_set_del_reset_keep_comments_and_other_sections(self):
+        c = self.start('mellagui-ke2', '# top\n[menu]\nA = echo a\n\n[keys]\n# mine\nSuper+T = run\n\n[theme]\naccent = #ff0000\n')
+        c.cmd('setraw keys-set alt+f4%sclose' % self.US)
+        self.assertEqual(open(self.path).read(),
+                         '# top\n[menu]\nA = echo a\n\n[keys]\n# mine\nSuper+T = run\nAlt+F4 = close\n\n[theme]\naccent = #ff0000\n')
+        self.assertIn('key Alt+F4 = close', c.cmd('keys'))
+        c.cmd('setraw keys-set super+t%sexec echo hi there' % self.US)           # same combination: the line is rewritten in place
+        self.assertIn('Super+T = exec echo hi there\n', open(self.path).read())
+        self.assertEqual(open(self.path).read().count('Super+T'), 1)
+        c.cmd('setraw keys-del Super+Q')                                         # a built-in one is switched off
+        self.assertIn('Super+Q = none\n', open(self.path).read())
+        self.assertNotIn('key Super+Q = close', c.cmd('keys'))
+        c.cmd('setraw keys-set Super+Q%sclose' % self.US)                        # back to the built-in: our line goes away
+        self.assertNotIn('Super+Q', open(self.path).read())
+        self.assertIn('key Super+Q = close', c.cmd('keys'))
+        c.cmd('setraw keys-del Alt+F4')                                          # an own one is dropped
+        self.assertNotIn('Alt+F4', open(self.path).read())
+        c.cmd('setraw keys-reset 1')
+        self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
+        self.assertEqual(self.get(c, 'keys-count'), '29')
+
+    def test_the_file_and_section_are_created(self):
+        c = self.start('mellagui-ke3')
+        c.cmd('setraw keys-set Super+X%sexec true' % self.US)
+        self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
+        self.assertEqual(self.get(c, 'keys-count'), '30')
+
+    def test_refused(self):
+        c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
+        for bad in ('keys-set Super+Foo%sclose' % self.US, 'keys-set Super+X%snosuch' % self.US, 'keys-set Super+X%sworkspace 9' % self.US,
+                    'keys-set Super+X%snone' % self.US, 'keys-set Super+X%sexec' % self.US, 'keys-set Super+X', 'keys-set Super+%sclose' % self.US,
+                    'keys-del Super+X', 'keys-del Super+Foo', 'keys-reset 0', 'keys-set Super+X%sclose now' % self.US):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('setraw ' + bad)
+        self.assertEqual(open(self.path).read(), '[keys]\nSuper+T = run\n')
+        p, c2, stop = self.private_compositor('mellagui-ke5', '--config', 'none')
+        with self.assertRaises(RuntimeError):
+            c2.cmd('setraw keys-set Super+X%sclose' % self.US)
+
+    def test_capture_records_the_next_combination_and_swallows_it(self):
+        c = self.start('mellagui-ke6')
+        cl = Client('mellagui-ke6')
+        self.clients.append(cl)
+        w = Window(cl, 200, 120, title='w')
+        cl.wl.roundtrip()
+        self.assertEqual(self.get(c, 'keys-capture'), '0')
+        c.cmd('settings keys-capture 1')
+        self.assertEqual(self.get(c, 'keys-capture'), '1')
+        for m in (KEY_LEFTMETA, KEY_LEFTSHIFT):
+            c.key(m, True)
+        c.tap(KEY_Q)                                                            # would close the window; it is only recorded
+        for m in (KEY_LEFTSHIFT, KEY_LEFTMETA):
+            c.key(m, False)
+        c.sync()
+        self.assertEqual(self.get(c, 'keys-capture'), '0')
+        self.assertEqual(self.get(c, 'keys-captured'), 'Super+Shift+Q')
+        self.assertIsNone(cl.wl.wait_for(lambda e: e.obj == w.toplevel and e.name == 'close', 0.4))
+        c.key(KEY_LEFTMETA, True)                                               # capture is over: Super+Q closes again
+        c.tap(KEY_Q)
+        c.key(KEY_LEFTMETA, False)
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == w.toplevel and e.name == 'close', 2.0))
+        c.cmd('settings keys-capture 1')                                        # Escape alone cancels
+        c.tap(KEY_ESC)
+        self.assertEqual((self.get(c, 'keys-capture'), self.get(c, 'keys-captured')), ('0', ''))
+
+    def test_the_panel_keys_page_removes_and_records(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-ke7')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-ke7'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 8 * 36 + 16)                          # the Keys tab (9th)
+        time.sleep(0.3)
+        # the first row is Super+Enter = terminal: its "x" switches the built-in shortcut off
+        c.click(x0 + 160 + 440 - 12, y0 + 14 + 28 + 11)
+        for _ in range(60):
+            if os.path.exists(self.path):
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)
+        self.assertIn('Super+Enter = none', open(self.path).read())
+        self.assertNotIn('key Super+Enter = terminal', c.cmd('keys'))
+        # record a key: the button below the ten rows, then a combination that would otherwise be a shortcut
+        py = y0 + 14 + 28 + 10 * 22 + 4 + 22 + 6
+        c.click(x0 + 160 + 60, py + 13)                                  # "Record a key..."
+        time.sleep(0.2)
+        self.assertEqual(self.get(c, 'keys-capture'), '1')
+        c.key(KEY_LEFTMETA, True)
+        c.tap(self.KEY_Z)
+        c.key(KEY_LEFTMETA, False)
+        time.sleep(0.3)
+        self.assertEqual(self.get(c, 'keys-captured'), 'Super+Z')
+        c.click(x0 + 160 + 158 + 40, py + 13)                            # the action field
+        for ch in 'close':
+            c.tap(KEYCODES[ch])
+        c.click(x0 + 160 + 440 - 32, py + 13)                            # Add
+        for _ in range(60):
+            if 'key Super+Z = close' in c.cmd('keys'):
+                break
+            time.sleep(0.05)
+        self.assertIn('key Super+Z = close', c.cmd('keys'))
+        self.assertIn('Super+Z = close', open(self.path).read())
 
 
 class TestScreenshot(Base):

@@ -81,6 +81,17 @@ bool lm_launch_add(struct lm_config *cfg, const char *name, const char *cmd)
     return layer_add(&cli_menu, name, cmd);
 }
 
+int lm_launch_menu_count(void) { return conf_menu.n; }
+
+bool lm_launch_menu_entry(int i, const char **name, const char **cmd)
+{
+    if (i < 0 || i >= conf_menu.n)
+        return false;
+    *name = conf_menu.name[i];
+    *cmd = conf_menu.cmd[i];
+    return true;
+}
+
 void lm_launch_reset(void)
 {
     for (int i = 0; i < C_COUNT; i++)

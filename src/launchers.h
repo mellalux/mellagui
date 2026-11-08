@@ -42,6 +42,12 @@ bool lm_launch_set_command(const char *which, const char *cmd);
  * For a reload: call it, read the file again, then lm_launch_resolve. */
 void lm_launch_reset(void);
 
+/* The [menu] entries as the file (or, without one, the built-in default) defines them: raw text, before @tokens and alternatives
+ * are expanded, and including entries that are left out because their program is missing. --app entries are not in it. For the
+ * settings panel's Menu page. Valid after lm_launch_resolve. */
+int lm_launch_menu_count(void);
+bool lm_launch_menu_entry(int i, const char **name, const char **cmd);
+
 /* One more menu entry (--app NAME=CMD). Returns false when the menu is full or a string is too long. */
 bool lm_launch_add(struct lm_config *cfg, const char *name, const char *cmd);
 

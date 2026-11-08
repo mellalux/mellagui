@@ -251,7 +251,7 @@ struct lm_server {
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
     bool reloaded;                      /* a reload happened; reload_result = rejected lines of the last one, -1 = no readable file */
     int reload_result;
-    int (*reload_config)(struct lm_server *); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file */
+    int (*reload_config)(struct lm_server *, bool quiet); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file; `quiet` = no "read again" card on the screen */
     struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */

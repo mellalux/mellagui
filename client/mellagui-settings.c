@@ -21,6 +21,7 @@
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -313,14 +314,14 @@ static int selftest(void)
 #define DEFAULT_W 620
 #define DEFAULT_H 440
 #define SIDE_W 140
-#define MAX_WIDGETS 80
-#define MAX_KV 48
+#define MAX_WIDGETS 120
+#define MAX_KV 96
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_MENU, PAGE_KEYS, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Menu", "Keys" };
 
-enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD };
+enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT };
 
 struct rect { int x, y, w, h; };
 
@@ -351,6 +352,15 @@ struct app {
     char test[64];                      /* text typed into the "try it" field */
     char wall[220];                     /* the wallpaper file field while it is being edited */
     bool wall_edited;                   /* (else the field shows the compositor's value) */
+    /* Menu page: the two fields below the entry list ([0] name, [1] command) and the entry they edit (-1 = a new one) */
+    char input[3][1024];                /* [2] = the action of the Keys page */
+    int menu_sel;
+    char menu_err[80];
+    /* Keys page: the shortcut being edited (kcombo from "Record", input[2] its action), the row it came from, and the capture state */
+    char kcombo[64];
+    char ksel[64];
+    bool recording;
+    char keys_err[80];
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
@@ -741,6 +751,217 @@ static void build_config(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Running programs keep their colours until restarted.");
 }
 
+/* ---- Menu page: the entries of the MellaGUI menu ([menu] of mellagui.conf), changed through the menu-* settings ---------------- */
+
+#define MENU_US "\x1f"
+#define MENU_ROW_H 22
+
+static struct widget *menu_button(struct app *a, int x, int y, int w, const char *text, const char *key, int idx)
+{
+    struct widget *b = add(a, W_BUTTON, (struct rect){ x, y, w, MENU_ROW_H - 2 }, text);
+    snprintf(b->key, sizeof(b->key), "%s", key);
+    snprintf(b->arg, sizeof(b->arg), "%d", idx);
+    return b;
+}
+
+static void build_menu(struct app *a, int x, int y, int w)
+{
+    const char *file = kv_get(a, "config-file");
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Menu entries");
+    y += ROW_H;
+    if (!*file) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    char key[16];
+    int n = 0;
+    for (; n < 12; n++) {
+        snprintf(key, sizeof(key), "menu-%d", n);
+        const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
+        if (!us)
+            break;
+        char name[64];
+        snprintf(name, sizeof(name), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(name) - 1), v);
+        struct widget *e = menu_button(a, x, y, 110, name, "menu-edit", n);
+        e->on = a->menu_sel == n;
+        int bx = x + w - 3 * 26;
+        struct widget *c = add(a, W_LABEL, (struct rect){ x + 118, y, bx - x - 122, MENU_ROW_H }, us + 1);
+        (void)c;
+        menu_button(a, bx, y, 24, "^", "menu-up", n);
+        menu_button(a, bx + 26, y, 24, "v", "menu-down", n);
+        menu_button(a, bx + 52, y, 24, "x", "menu-del", n);
+        y += MENU_ROW_H;
+    }
+    if (a->menu_sel >= n)
+        a->menu_sel = -1;
+    y += 6;
+    struct widget *fn = add(a, W_INPUT, (struct rect){ x, y, 110, 26 }, "name");
+    snprintf(fn->arg, sizeof(fn->arg), "0");
+    struct widget *fc = add(a, W_INPUT, (struct rect){ x + 118, y, w - 118 - 78, 26 }, "command");
+    snprintf(fc->arg, sizeof(fc->arg), "1");
+    struct widget *ok = add_button(a, x + w - 70, y, 70, a->menu_sel >= 0 ? "Update" : "Add", "menu-put");
+    ok->r.h = 26;
+    y += 32;
+    add_button(a, x, y, 150, "Restore defaults", "menu-reset")->r.h = 22;
+    const char *hint = a->menu_err[0] ? a->menu_err : n >= 12 ? "The menu is full (12 entries)." :
+                       "Click a name to edit it. @terminal, a || b and ~/ work.";
+    add(a, W_LABEL, (struct rect){ x + 160, y - 1, w - 160, 24 }, hint);
+}
+
+static void menu_clear_form(struct app *a)
+{
+    a->input[0][0] = a->input[1][0] = 0;
+    a->menu_sel = -1;
+}
+
+static void menu_put(struct app *a)
+{
+    a->menu_err[0] = 0;
+    const char *name = a->input[0], *cmd = a->input[1];
+    size_t nl = strlen(name);
+    if (!nl || strlen(cmd) == 0) {
+        snprintf(a->menu_err, sizeof(a->menu_err), "Type a name and a command.");
+        return;
+    }
+    if (nl >= 64 || strchr(name, '=') || name[0] == '#' || name[0] == ';' || name[0] == '[' || name[0] == ' ' || name[nl - 1] == ' ' ||
+        cmd[0] == ' ' || cmd[strlen(cmd) - 1] == ' ') {
+        snprintf(a->menu_err, sizeof(a->menu_err), "Not allowed: '=', leading '#;[' or spaces at the ends.");
+        return;
+    }
+    char key[16];
+    for (int i = 0; i < 12; i++) {
+        snprintf(key, sizeof(key), "menu-%d", i);
+        const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
+        if (!us)
+            break;
+        if (i != a->menu_sel && strlen(name) == (size_t)(us - v) && !strncasecmp(name, v, nl)) {
+            snprintf(a->menu_err, sizeof(a->menu_err), "There is already an entry with that name.");
+            return;
+        }
+    }
+    char v[1200];
+    snprintf(v, sizeof(v), "%d" MENU_US "%s" MENU_US "%s", a->menu_sel, name, cmd);
+    send_set(a, "menu-put", v);
+    menu_clear_form(a);
+}
+
+/* ---- Keys page: the keyboard shortcuts ([keys] of mellagui.conf), changed through the keys-* settings -------------------------- */
+
+#define KEYS_ROWS 10
+
+static void build_keys(struct app *a, int x, int y, int w)
+{
+    if (!*kv_get(a, "config-file")) {
+        add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Keyboard shortcuts");
+        add(a, W_LABEL, (struct rect){ x, y + ROW_H, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    int count = kv_int(a, "keys-count", 0), page = kv_int(a, "keys-page", 0);
+    int pages = LM_MAX(1, (count + KEYS_ROWS - 1) / KEYS_ROWS);
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Keyboard shortcuts");
+    y += ROW_H;
+    char key[16];
+    for (int i = 0; i < KEYS_ROWS; i++) {
+        snprintf(key, sizeof(key), "keys-row-%d", i);
+        const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
+        if (!us)
+            break;
+        char combo[64];
+        snprintf(combo, sizeof(combo), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(combo) - 1), v);
+        struct widget *e = menu_button(a, x, y, 150, combo, "keys-edit", i);
+        e->on = !strcmp(a->ksel, combo);
+        add(a, W_LABEL, (struct rect){ x + 158, y, w - 158 - 28, MENU_ROW_H }, us + 1);
+        menu_button(a, x + w - 24, y, 24, "x", "keys-del", i);
+        y += MENU_ROW_H;
+    }
+    int py = 14 + ROW_H + KEYS_ROWS * MENU_ROW_H + 4;      /* the pager sits below all ten rows, the list may be shorter */
+    menu_button(a, x, py, 24, "<", "keys-prev", 0);
+    char lbl[32];
+    snprintf(lbl, sizeof(lbl), "%d / %d", page + 1, pages);
+    add(a, W_LABEL, (struct rect){ x + 32, py, 80, MENU_ROW_H }, lbl);
+    menu_button(a, x + 100, py, 24, ">", "keys-next", 0);
+    add_button(a, x + w - 150, py, 150, "Restore defaults", "keys-reset")->r.h = MENU_ROW_H - 2;
+    py += MENU_ROW_H + 6;
+    const char *rec = a->recording ? "Press the keys..." : a->kcombo[0] ? a->kcombo : "Record a key...";
+    struct widget *r = add(a, W_BUTTON, (struct rect){ x, py, 150, 26 }, rec);
+    snprintf(r->key, sizeof(r->key), "keys-record");
+    r->on = a->recording;
+    struct widget *f = add(a, W_INPUT, (struct rect){ x + 158, py, w - 158 - 124, 26 }, "action, e.g. close");
+    snprintf(f->arg, sizeof(f->arg), "2");
+    menu_button(a, x + w - 118, py, 24, "<", "keys-act-prev", 0)->r.h = 26;
+    menu_button(a, x + w - 92, py, 24, ">", "keys-act-next", 0)->r.h = 26;
+    add_button(a, x + w - 64, py, 64, a->ksel[0] ? "Update" : "Add", "keys-put")->r.h = 26;
+    py += 32;
+    add(a, W_LABEL, (struct rect){ x, py, w, 24 },
+        a->keys_err[0] ? a->keys_err : "Click a shortcut to change it; < > pick an action. exec CMD runs a command.");
+}
+
+/* The action names the keys-actions setting lists, as a cyclic walk from the word the field starts with. */
+static void keys_cycle_action(struct app *a, int dir)
+{
+    char names[512];
+    snprintf(names, sizeof(names), "%s", kv_get(a, "keys-actions"));
+    char *list[40];
+    int n = 0;
+    for (char *t = strtok(names, " "); t && n < 40; t = strtok(NULL, " "))
+        list[n++] = t;
+    if (!n)
+        return;
+    char cur[64];
+    snprintf(cur, sizeof(cur), "%.*s", (int)strcspn(a->input[2], " "), a->input[2]);
+    int at = -1;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(list[i], cur))
+            at = i;
+    int to = at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n;
+    bool ws = !strcmp(list[to], "workspace") || !strcmp(list[to], "move-to-workspace");
+    const char *rest = a->input[2] + strcspn(a->input[2], " ");
+    while (*rest == ' ')
+        rest++;
+    char out[300];
+    if (ws)
+        snprintf(out, sizeof(out), "%s %s", list[to], *rest && atoi(rest) >= 1 && atoi(rest) <= 4 ? rest : "1");
+    else if (!strcmp(list[to], "exec"))
+        snprintf(out, sizeof(out), "%s%s%s", list[to], *rest ? " " : "", at >= 0 && !strcmp(cur, "exec") ? rest : "");
+    else
+        snprintf(out, sizeof(out), "%s", list[to]);
+    snprintf(a->input[2], sizeof(a->input[2]), "%s", out);
+    a->keys_err[0] = 0;
+}
+
+static void keys_put(struct app *a)
+{
+    a->keys_err[0] = 0;
+    if (!a->kcombo[0] || !a->input[2][0]) {
+        snprintf(a->keys_err, sizeof(a->keys_err), "Record a key and choose an action first.");
+        return;
+    }
+    char word[48];
+    snprintf(word, sizeof(word), "%.*s", (int)LM_MIN(strcspn(a->input[2], " "), sizeof(word) - 1), a->input[2]);
+    char names[512];
+    snprintf(names, sizeof(names), " %s ", kv_get(a, "keys-actions"));
+    char pat[52];
+    snprintf(pat, sizeof(pat), " %s ", word);
+    if (!strstr(names, pat)) {
+        snprintf(a->keys_err, sizeof(a->keys_err), "Unknown action '%s'. Use < > to pick one.", word);
+        return;
+    }
+    const char *arg = a->input[2] + strlen(word);
+    while (*arg == ' ')
+        arg++;
+    bool ws = !strcmp(word, "workspace") || !strcmp(word, "move-to-workspace"), ex = !strcmp(word, "exec");
+    if ((ws && !(atoi(arg) >= 1 && atoi(arg) <= 4)) || (ex && !*arg) || (!ws && !ex && *arg) || strlen(a->input[2]) > 250) {
+        snprintf(a->keys_err, sizeof(a->keys_err), ws ? "workspace needs a number 1..4." : ex ? "exec needs a command." : "That action takes no argument.");
+        return;
+    }
+    if (a->ksel[0] && strcmp(a->ksel, a->kcombo))                    /* moved to another key: the old one goes */
+        send_set(a, "keys-del", a->ksel);
+    char v[400];
+    snprintf(v, sizeof(v), "%s\x1f%s", a->kcombo, a->input[2]);
+    send_set(a, "keys-set", v);
+    a->kcombo[0] = a->ksel[0] = a->input[2][0] = 0;
+}
+
 static void build_sound(struct app *a, int x, int y, int w)
 {
     struct entry ents[8];
@@ -814,6 +1035,8 @@ static void build(struct app *a)
     case PAGE_SOUND: build_sound(a, x, y, w); break;
     case PAGE_SECURITY: build_security(a, x, y, w); break;
     case PAGE_CONFIG: build_config(a, x, y, w); break;
+    case PAGE_MENU: build_menu(a, x, y, w); break;
+    case PAGE_KEYS: build_keys(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -964,6 +1187,61 @@ static void activate(struct app *a, int idx)
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
             launch_sibling(w->arg, NULL);
+        } else if (!strcmp(w->key, "keys-edit")) {
+            char key[16];
+            snprintf(key, sizeof(key), "keys-row-%d", atoi(w->arg));
+            const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
+            if (us) {
+                snprintf(a->kcombo, sizeof(a->kcombo), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(a->kcombo) - 1), v);
+                snprintf(a->ksel, sizeof(a->ksel), "%s", a->kcombo);
+                snprintf(a->input[2], sizeof(a->input[2]), "%s", us + 1);
+                a->keys_err[0] = 0;
+            }
+        } else if (!strcmp(w->key, "keys-del")) {
+            char key[16];
+            snprintf(key, sizeof(key), "keys-row-%d", atoi(w->arg));
+            const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
+            if (us) {
+                char combo[64];
+                snprintf(combo, sizeof(combo), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(combo) - 1), v);
+                send_set(a, "keys-del", combo);
+            }
+            a->kcombo[0] = a->ksel[0] = a->input[2][0] = 0;
+        } else if (!strcmp(w->key, "keys-prev") || !strcmp(w->key, "keys-next")) {
+            send_set_int(a, "keys-page", LM_MAX(0, kv_int(a, "keys-page", 0) + (!strcmp(w->key, "keys-next") ? 1 : -1)));
+        } else if (!strcmp(w->key, "keys-record")) {
+            a->recording = true;
+            send_set(a, "keys-capture", "1");
+        } else if (!strcmp(w->key, "keys-act-prev") || !strcmp(w->key, "keys-act-next")) {
+            keys_cycle_action(a, !strcmp(w->key, "keys-act-next") ? 1 : -1);
+        } else if (!strcmp(w->key, "keys-put")) {
+            keys_put(a);
+        } else if (!strcmp(w->key, "keys-reset")) {
+            send_set(a, "keys-reset", "1");
+            a->kcombo[0] = a->ksel[0] = a->input[2][0] = 0;
+        } else if (!strcmp(w->key, "menu-edit")) {
+            char key[16];
+            snprintf(key, sizeof(key), "menu-%d", atoi(w->arg));
+            const char *v = kv_get(a, key), *us = strchr(v, 0x1f);
+            if (us) {
+                snprintf(a->input[0], sizeof(a->input[0]), "%.*s", (int)LM_MIN((size_t)(us - v), sizeof(a->input[0]) - 1), v);
+                snprintf(a->input[1], sizeof(a->input[1]), "%s", us + 1);
+                a->menu_sel = atoi(w->arg);
+                a->menu_err[0] = 0;
+            }
+        } else if (!strcmp(w->key, "menu-up") || !strcmp(w->key, "menu-down")) {
+            char v[24];
+            snprintf(v, sizeof(v), "%d" MENU_US "%d", atoi(w->arg), !strcmp(w->key, "menu-up") ? -1 : 1);
+            send_set(a, "menu-move", v);
+            menu_clear_form(a);
+        } else if (!strcmp(w->key, "menu-del")) {
+            send_set(a, "menu-del", w->arg);
+            menu_clear_form(a);
+        } else if (!strcmp(w->key, "menu-reset")) {
+            send_set(a, "menu-reset", "1");
+            menu_clear_form(a);
+        } else if (!strcmp(w->key, "menu-put")) {
+            menu_put(a);
         } else if (!strcmp(w->key, "config-edit")) {
             launch_sibling("mellagui-edit", w->arg);
         } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create")) {
@@ -1132,6 +1410,15 @@ static void paint_widget(struct app *a, int idx)
         draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, COL_TEXT, r->w - 12);
         break;
     }
+    case W_INPUT: {
+        const char *buf = a->input[atoi(w->arg)];
+        fill(a, *r, COL_FIELD);
+        outline(a, *r, focus ? COL_ACCENT : COL_KEY);
+        char shown[1100];
+        snprintf(shown, sizeof(shown), "%s%s", *buf ? buf : (focus ? "" : w->text), focus ? "_" : "");
+        draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, *buf ? COL_TEXT : COL_DIM, r->w - 12);
+        break;
+    }
     case W_TEXT: {
         draw_text(a, r->x, r->y + 2, w->text, COL_DIM, r->w);
         struct rect f = { r->x, r->y + 20, r->w, 28 };
@@ -1182,6 +1469,13 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         else if (changed && !strcmp(args[0].s, "lock-start"))
             a->sec_start = atoi(args[1].s) != 0;
     } else if (op == LM_MELLAGUI_SETTINGS_V1_EVT_DONE) {
+        if (a->recording && !strcmp(kv_get(a, "keys-capture"), "0")) {      /* the compositor has recorded a combination (or Escape cancelled) */
+            a->recording = false;
+            if (*kv_get(a, "keys-captured")) {
+                snprintf(a->kcombo, sizeof(a->kcombo), "%s", kv_get(a, "keys-captured"));
+                a->keys_err[0] = 0;
+            }
+        }
         a->win.redraw = true;
     }
 }
@@ -1256,6 +1550,18 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             } else {
                 edit_text(a->pw[atoi(f->arg)], sizeof(a->pw[0]), ks, plain);
                 a->sec_err[0] = 0;
+            }
+            a->win.redraw = true;
+        } else if (f && f->kind == W_INPUT) {
+            if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+                if (atoi(f->arg) == 2)
+                    keys_put(a);
+                else
+                    menu_put(a);
+            } else {
+                int which = atoi(f->arg);
+                edit_text(a->input[which], which == 0 ? 64 : which == 2 ? 250 : sizeof(a->input[1]), ks, plain);
+                a->menu_err[0] = a->keys_err[0] = 0;
             }
             a->win.redraw = true;
         } else if (f && f->kind == W_FIELD) {
@@ -1365,7 +1671,7 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event };
-    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1 };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .menu_sel = -1 };
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */

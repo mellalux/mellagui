@@ -112,6 +112,9 @@ struct lm_wm {
     bool power_open;            /* the session dialog (Lock / Exit) is showing on the output called power_out */
     char power_out[32];
     int power_sel;              /* its highlighted button: 0 Lock, 1 Exit, -1 none yet */
+    bool key_capture;           /* the next key combination is recorded, not handled (lm_wm_key_capture) */
+    char key_captured[64];      /* ... and the result ("" = cancelled / none yet) */
+    uint32_t capture_release;   /* its key: the release is swallowed, too (0 = none) */
     bool menu_open;
     /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
     bool sw_open;
@@ -3028,16 +3031,50 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_QUIT: request_quit(wm); break;
     case LM_ACT_RELOAD_CONFIG:
         if (wm->srv->reload_config)
-            wm->srv->reload_config(wm->srv);
+            wm->srv->reload_config(wm->srv, false);
         break;
     case LM_ACT_NONE: break;
     }
     return true;
 }
 
+void lm_wm_key_capture(struct lm_wm *wm, bool on)
+{
+    wm->key_capture = on;
+    if (on)
+        wm->key_captured[0] = 0;
+}
+
+bool lm_wm_key_capturing(const struct lm_wm *wm) { return wm->key_capture; }
+const char *lm_wm_key_captured(const struct lm_wm *wm) { return wm->key_captured; }
+
+static bool is_modifier_key(uint32_t code)
+{
+    return code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT || code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL ||
+           code == KEY_LEFTALT || code == KEY_RIGHTALT || code == KEY_LEFTMETA || code == KEY_RIGHTMETA ||
+           code == KEY_CAPSLOCK || code == KEY_NUMLOCK || code == KEY_SCROLLLOCK;
+}
+
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods)
 {
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
+    if (wm->capture_release && code == wm->capture_release && !pressed) {
+        wm->capture_release = 0;                                /* the release of the key that was just recorded */
+        return true;
+    }
+    if (wm->key_capture && !is_modifier_key(code)) {
+        if (pressed && !repeat) {
+            char text[64];
+            bool cancel = code == KEY_ESC && !(mods & LM_KEY_MODS_MASK);
+            if (cancel || lm_keys_combo_text(mods & LM_KEY_MODS_MASK, code, text, sizeof(text))) {
+                snprintf(wm->key_captured, sizeof(wm->key_captured), "%s", cancel ? "" : text);
+                wm->key_capture = false;
+                wm->capture_release = code;
+                lm_settings_changed(wm->srv->settings);
+            }
+        }
+        return true;
+    }
     bool super = (mods & LM_MOD_SUPER) != 0;
     bool shift = (mods & LM_MOD_SHIFT) != 0;
     bool ctrl = (mods & LM_MOD_CTRL) != 0;

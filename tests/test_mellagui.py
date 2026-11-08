@@ -442,47 +442,106 @@ class TestWindows(Base):
         ctl.sync()
         self.assertEqual(ctl.windows()['workspace'], 0)
 
-    def test_panel_exit_needs_confirmation(self):
-        idle = (0x2d, 0x3a, 0x5a)
-        danger = (0xc0, 0x39, 0x2b)
-        ctl.click(801, 14)       # first click only arms the button
+    # The round power button (top right) opens the session dialog: a card with round Lock and Exit buttons.
+    # Geometry on the shared 1024x600 output: power button centre (1008, 14); card 264x172 at (380, 214); the Lock disc has its
+    # centre at (460, 292), the Exit disc at (564, 292); (460, 316) / (564, 316) are plain disc pixels below the icons.
+    POWER_BTN = (1008, 14)
+    LOCK_DISC, EXIT_DISC = (460, 316), (564, 316)
+    DISC_IDLE, DISC_LOCK_SEL, DISC_EXIT_SEL = (0x2d, 0x3a, 0x5a), (0x6f, 0xa8, 0xff), (0xc0, 0x39, 0x2b)
+
+    def disc(self, name, pos):
         ctl.sync()
-        self.assertTrue(alive())
-        ppm = ctl.dump(os.path.join(tmp, 'exit1.ppm'))
-        self.assertEqual(ppm.px(780, 6), danger)
-        ctl.abs(500, 300)        # moving away cancels the confirmation
-        ctl.sync()
-        ppm = ctl.dump(os.path.join(tmp, 'exit2.ppm'))
-        self.assertEqual(ppm.px(780, 6), idle)
-        ctl.click(801, 14)       # armed again, still running
-        ctl.abs(500, 300)
-        ctl.sync()
+        return ctl.dump(os.path.join(tmp, name + '.ppm')).px(*pos)
+
+    def test_power_button_opens_the_session_dialog_and_esc_closes_it(self):
+        self.assertNotEqual(self.disc('pw0', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.click(*self.POWER_BTN)
+        self.assertEqual(self.disc('pw1', self.LOCK_DISC), self.DISC_IDLE)           # the dialog is there
+        self.assertEqual(self.disc('pw2', self.EXIT_DISC), self.DISC_IDLE)
+        ctl.tap(KEY_ESC)
+        self.assertNotEqual(self.disc('pw3', self.LOCK_DISC), self.DISC_IDLE)
         self.assertTrue(alive())
 
-    def test_panel_exit_second_click_quits(self):
-        # separate instance: the shared compositor must keep running
+    def test_session_dialog_highlights_with_pointer_and_keys(self):
+        ctl.click(*self.POWER_BTN)
+        ctl.abs(480, 270)                                                             # the pointer highlights the button under it (its arrow
+                                                                                      # is drawn away from the pixels looked at)
+        self.assertEqual(self.disc('pw4', self.LOCK_DISC), self.DISC_LOCK_SEL)
+        ctl.abs(584, 270)
+        self.assertEqual(self.disc('pw5', self.EXIT_DISC), self.DISC_EXIT_SEL)
+        self.assertEqual(self.disc('pw6', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.tap(105)                                                                  # Left: the other button
+        self.assertEqual(self.disc('pw7', self.LOCK_DISC), self.DISC_LOCK_SEL)
+        ctl.tap(106)                                                                  # Right
+        self.assertEqual(self.disc('pw8', self.EXIT_DISC), self.DISC_EXIT_SEL)
+        ctl.tap(KEY_ESC)
+
+    def test_session_dialog_is_modal(self):
+        ctl.click(*self.POWER_BTN)
+        ctl.click(100, 500)                                                           # outside the card: closes, goes no further
+        self.assertNotEqual(self.disc('pw9', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.click(*self.POWER_BTN)
+        ctl.click(512, 230)                                                           # on the card (the title): stays open
+        self.assertEqual(self.disc('pw10', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.tap(KEY_ENTER)                                                            # nothing highlighted yet: Enter does nothing
+        ctl.tap(57)
+        self.assertEqual(self.disc('pw11', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.tap(KEY_ESC)
+        self.assertTrue(alive())
+
+    def start_exit_instance(self):
         d = tempfile.mkdtemp(prefix='mellagui-exit-')
         os.chmod(d, 0o700)
         p2 = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'mellagui-exit',
                                '--control', os.path.join(d, 'ctl'), '--terminal', 'true'],
                               env=dict(os.environ, XDG_RUNTIME_DIR=d),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        try:
-            for _ in range(100):
-                if os.path.exists(os.path.join(d, 'ctl')):
-                    break
-                time.sleep(0.05)
-            c2 = Ctl(os.path.join(d, 'ctl'))
-            c2.click(801, 14)
-            c2.sync()
-            self.assertIsNone(p2.poll())
-            c2.click(801, 14)
-            self.assertEqual(p2.wait(timeout=5), 0)
-        finally:
+        def cleanup():
             if p2.poll() is None:
                 p2.kill()
+            p2.wait()
             p2.stdout.close()
             shutil.rmtree(d, ignore_errors=True)
+        self.addCleanup(cleanup)
+        for _ in range(100):
+            if os.path.exists(os.path.join(d, 'ctl')):
+                break
+            time.sleep(0.05)
+        return p2, Ctl(os.path.join(d, 'ctl'))
+
+    def test_session_dialog_exit_button_quits(self):
+        # separate instance: the shared compositor must keep running
+        p2, c2 = self.start_exit_instance()
+        c2.click(*self.POWER_BTN)
+        c2.sync()
+        self.assertIsNone(p2.poll())                                                  # opening the dialog quits nothing
+        c2.click(*self.EXIT_DISC)
+        self.assertEqual(p2.wait(timeout=5), 0)
+
+    def test_session_dialog_keys_quit_and_cancel(self):
+        p2, c2 = self.start_exit_instance()
+        c2.click(*self.POWER_BTN)
+        c2.tap(KEY_ESC)
+        c2.sync()
+        self.assertIsNone(p2.poll())
+        c2.click(*self.POWER_BTN)
+        c2.tap(106)                                                                   # Right -> Lock, Right -> Exit
+        c2.tap(106)
+        try:
+            c2.tap(KEY_ENTER)                                                         # quits: the control connection goes away
+        except OSError:
+            pass
+        self.assertEqual(p2.wait(timeout=5), 0)
+
+    def test_session_dialog_release_off_the_button_does_nothing(self):
+        p2, c2 = self.start_exit_instance()
+        c2.click(*self.POWER_BTN)
+        c2.abs(*self.EXIT_DISC)
+        c2.button(272, True)
+        c2.abs(100, 500)
+        c2.button(272, False)
+        c2.sync()
+        self.assertIsNone(p2.poll())
 
     def test_app_menu_opens_and_closes(self):
         ctl.abs(900, 500)
@@ -1315,8 +1374,8 @@ def type_text(text):
 
 class TestKeyboard(Base):
     """Keyboard layouts (XKB groups) and sticky keys."""
-    LAYOUT_BTN = (614, 14)          # panel indicator on the 1024 px wide test output
-    STICKY_BTN = (678, 14)
+    LAYOUT_BTN = (690, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (754, 14)
 
     def setUp(self):
         super().setUp()
@@ -1527,11 +1586,11 @@ class TestKeyboard(Base):
         ctl.cmd('sticky 1')
         ctl.sync()
         after = ctl.dump(os.path.join(tmp, 'kbd1.ppm'))
-        sticky_before = [before.px(x, 14) for x in range(717, 792, 3)]
-        sticky_after = [after.px(x, 14) for x in range(717, 792, 3)]
+        sticky_before = [before.px(x, 14) for x in range(793, 868, 3)]
+        sticky_after = [after.px(x, 14) for x in range(793, 868, 3)]
         self.assertNotEqual(sticky_before, sticky_after, 'sticky button looks the same when enabled')
-        layout_before = [before.px(x, 14) for x in range(674, 706, 2)]
-        layout_after = [after.px(x, 14) for x in range(674, 706, 2)]
+        layout_before = [before.px(x, 14) for x in range(750, 782, 2)]
+        layout_after = [after.px(x, 14) for x in range(750, 782, 2)]
         self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
@@ -1960,7 +2019,7 @@ class TestClients(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_run_dialog_from_panel_button(self):
-        self.run_dialog_runs(lambda: ctl.click(746, 14))
+        self.run_dialog_runs(lambda: ctl.click(826, 14))
 
     def test_run_dialog_from_super_r(self):
         def open_it():
@@ -1972,7 +2031,7 @@ class TestClients(Base):
     def test_run_dialog_escape_closes_without_running(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
             self.skipTest('mellagui-run not built')
-        ctl.click(746, 14)
+        ctl.click(826, 14)
         self.assertIsNotNone(wait_for_window('mellagui.run'))
         time.sleep(0.3)
         ctl.tap(KEY_ESC)
@@ -4249,7 +4308,8 @@ class TestLock(Base):
     CODES.update({c: k for c, k in zip('qwertyuiop', range(16, 26))})
     CODES.update({c: k for c, k in zip('asdfghjkl', range(30, 39))})
     CODES.update({c: k for c, k in zip('zxcvbnm', range(44, 51))})
-    LOCK_BTN = (800 - 4 - 22, 14)       # the panel's Lock button on the 800 px wide private compositors
+    POWER_BTN = (800 - 4 - 12, 14)      # the panel's round power button on the 800 px wide private compositors
+    LOCK_DISC = (348, 242)              # the session dialog's Lock button there (card 264x172 centred on 800x500)
 
     def start(self, name='lock', *extra, file=None, env=None):
         args = ['--lock-file', file] if file else []
@@ -4411,7 +4471,8 @@ class TestLock(Base):
         self.assertEqual(self.state(c)['locked'], '1')
         self.type(c, '1357')
         self.assertEqual(self.state(c)['locked'], '0')
-        c.click(*self.LOCK_BTN)
+        c.click(*self.POWER_BTN)
+        c.click(*self.LOCK_DISC)
         c.sync()
         self.assertEqual(self.state(c)['locked'], '1')
 
@@ -4508,7 +4569,7 @@ class TestLock(Base):
     def test_quitting_needs_the_secret(self):
         p, c, stop = self.start()
         c.cmd('lock set - pin 1357')
-        # Super+Shift+E, the same as the panel's Exit button: locks and asks
+        # Super+Shift+E, the same as Exit in the session dialog: locks and asks
         c.key(KEY_LEFTMETA, True); c.key(KEY_LEFTSHIFT, True); c.tap(18); c.key(KEY_LEFTSHIFT, False); c.key(KEY_LEFTMETA, False)
         c.sync()
         st = self.state(c)
@@ -5096,6 +5157,13 @@ class TestGLParity(Base):
         time.sleep(0.2)
         c.sync()
         shots['menu'] = c.dump(os.path.join(tmp, name + '-4.ppm'))
+        c.tap(KEY_ESC)
+        c.click(784, 14)                                                     # the session dialog (round power button)
+        c.abs(480, 270)                                                      # highlights Lock
+        c.sync()
+        time.sleep(0.2)
+        c.sync()
+        shots['session dialog'] = c.dump(os.path.join(tmp, name + '-4a.ppm'))
         c.tap(KEY_ESC)
         c.cmd('notify 0 A notification with a longer body that wraps over several lines of the card')
         c.abs(40, 480)

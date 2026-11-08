@@ -764,6 +764,113 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
     }
 }
 
+/* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
+
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK };
+
+static float cov01(float v)
+{
+    return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+}
+
+/* Distance from (px, py) to the segment a-b. */
+static float seg_dist(float px, float py, float ax, float ay, float bx, float by)
+{
+    float vx = bx - ax, vy = by - ay, wx = px - ax, wy = py - ay;
+    float len2 = vx * vx + vy * vy;
+    float t = len2 > 0.0f ? cov01((wx * vx + wy * vy) / len2) : 0.0f;
+    float dx = px - (ax + t * vx), dy = py - (ay + t * vy);
+    return sqrtf(dx * dx + dy * dy);
+}
+
+/* Coverage (0..1, one pixel wide anti-aliased edge) of `shape` at (dx, dy) from its centre; R is its half size. */
+static float shape_cov(enum shape s, float dx, float dy, float R)
+{
+    float d = sqrtf(dx * dx + dy * dy);
+    switch (s) {
+    case SHAPE_DISC:
+        return cov01(R - d + 0.5f);
+    case SHAPE_POWER: {                                 /* a ring open at the top with a bar through the gap */
+        float t = R * 0.24f < 1.3f ? 1.3f : R * 0.24f;
+        float ring = cov01(R - d + 0.5f);
+        float inner = cov01(d - (R - t) + 0.5f);
+        ring = ring < inner ? ring : inner;
+        if (dy < 0.0f) {                                /* the gap */
+            float g = cov01(fabsf(dx) - t * 0.95f + 0.5f);
+            ring *= g;
+        }
+        float bar = cov01(t * 0.5f - seg_dist(dx, dy, 0.0f, -R + t * 0.5f, 0.0f, -R * 0.1f) + 0.5f);
+        return ring > bar ? ring : bar;
+    }
+    case SHAPE_LOCK: {                                  /* a padlock: body with a keyhole, shackle above */
+        dy += R * 0.08f;                                /* (optical centring) */
+        float bw = R * 0.64f, bh = R * 0.46f, bcy = R * 0.30f, cr = R * 0.16f;
+        float qx = fabsf(dx) - (bw - cr), qy = fabsf(dy - bcy) - (bh - cr);
+        float ox = qx > 0.0f ? qx : 0.0f, oy = qy > 0.0f ? qy : 0.0f;
+        float inside = qx > qy ? qx : qy;
+        float sd = sqrtf(ox * ox + oy * oy) + (inside < 0.0f ? inside : 0.0f) - cr;
+        float body = cov01(0.5f - sd);
+        float hole = cov01(R * 0.11f - sqrtf(dx * dx + (dy - bcy) * (dy - bcy)) + 0.5f);
+        body *= 1.0f - hole;
+        float cys = -R * 0.16f, sr = R * 0.44f, t = R * 0.17f < 1.2f ? 1.2f : R * 0.17f;
+        float sdist = sqrtf(dx * dx + (dy - cys) * (dy - cys));
+        float ring = cov01(sr - sdist + 0.5f);
+        float inner = cov01(sdist - (sr - t) + 0.5f);
+        ring = (ring < inner ? ring : inner) * cov01(0.5f - (dy - cys));
+        float xl = sr - t * 0.5f;
+        float leg = cov01(t * 0.5f - seg_dist(fabsf(dx), dy, xl, cys, xl, cys + R * 0.12f) + 0.5f);
+        float sh = ring > leg ? ring : leg;
+        return body > sh ? body : sh;
+    }
+    }
+    return 0.0f;
+}
+
+/* Paints `s` centred on (cx, cy) (pixel units, may be fractional) with half size R in colour rgb at `alpha` (0..255). */
+static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha)
+{
+    struct lm_rect box = lm_rect_make((int)floorf(cx - R) - 1, (int)floorf(cy - R) - 1, (int)(2.0f * R) + 4, (int)(2.0f * R) + 4), r;
+    if (!lm_rect_intersect(&box, &c->clip, &r))
+        return;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++) {
+            float cov = shape_cov(s, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R);
+            uint32_t pa = (uint32_t)(cov * (float)alpha + 0.5f);
+            if (pa == 0)
+                continue;
+            uint32_t pr = div255(((rgb >> 16) & 255) * pa), pg = div255(((rgb >> 8) & 255) * pa), pb = div255((rgb & 255) * pa);
+            row[x] = blend_px((pa << 24) | (pr << 16) | (pg << 8) | pb, row[x]);
+        }
+    }
+}
+
+/* The session dialog: the output dimmed, a rounded card with a title and two round buttons with their icons and names. */
+static void paint_power(const struct paint_ctx *c, const struct lm_power_info *pw)
+{
+    fill_round(c, &pw->rect, 0, 0xb0000000u);
+    fill_round(c, &pw->card, 14, 0xff3a4256u);
+    struct lm_rect in = lm_rect_make(pw->card.x + 1, pw->card.y + 1, pw->card.w - 2, pw->card.h - 2);
+    fill_round(c, &in, 13, 0xff000000u | COL_PANEL);
+    struct lm_rect title = lm_rect_make(pw->card.x, pw->card.y + 14, pw->card.w, LM_FONT_H);
+    draw_text_centered(c, &title, "Session", COL_PANEL_TEXT);
+    struct lm_rect hint = lm_rect_make(pw->card.x, pw->card.y + pw->card.h - LM_FONT_H - 10, pw->card.w, LM_FONT_H);
+    draw_text_centered(c, &hint, "Esc cancels", COL_PANEL_DIM);
+    static const char *const names[2] = { "Lock", "Exit" };
+    for (int i = 0; i < 2; i++) {
+        const struct lm_rect *b = &pw->button[i];
+        float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f;
+        bool sel = pw->sel == i;
+        uint32_t base = sel ? (i == 1 ? COL_PANEL_DANGER : COL_PANEL_ACCENT) : COL_PANEL_BTN;
+        if (sel)
+            paint_shape(c, cx, cy, R + 4.0f, SHAPE_DISC, base, 0x50);             /* a soft halo */
+        paint_shape(c, cx, cy, R, SHAPE_DISC, base, 255);
+        paint_shape(c, cx, cy, R * 0.52f, i == 0 ? SHAPE_LOCK : SHAPE_POWER, sel && i == 0 ? COL_PANEL : COL_PANEL_TEXT, 255);
+        struct lm_rect label = lm_rect_make(pw->hit[i].x, b->y + b->h + 8, pw->hit[i].w, LM_FONT_H);
+        draw_text_centered(c, &label, names[i], sel ? COL_PANEL_TEXT : COL_PANEL_DIM);
+    }
+}
+
 /* Shadow, hairline ring and body of a gadget card (shared by all gadgets). */
 static void paint_card_base(const struct paint_ctx *c, const struct lm_gadget_info *g)
 {
@@ -1179,12 +1286,14 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? COL_PANEL : COL_PANEL_DIM);
     fill_rect(c, &p->run, p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN);
     draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
-    uint32_t ebg = p->exit_armed ? COL_PANEL_DANGER : (p->hover_exit ? COL_PANEL_HOVER : COL_PANEL_BTN);
-    fill_rect(c, &p->exit, ebg);
-    draw_text_centered(c, &p->exit, p->exit_armed ? "Sure?" : "Exit", COL_PANEL_TEXT);
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
-    fill_rect(c, &p->lock, p->hover_lock ? COL_PANEL_HOVER : COL_PANEL_BTN);
-    draw_text_centered(c, &p->lock, "Lock", COL_PANEL_TEXT);
+    {                                                   /* the round power button: a disc with the power symbol */
+        float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;
+        float R = (float)p->power.w / 2.0f;
+        uint32_t bg = p->power_open ? COL_PANEL_ACCENT : p->hover_power ? COL_PANEL_HOVER : COL_PANEL_BTN;
+        paint_shape(c, cx, cy, R, SHAPE_DISC, bg, 255);
+        paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, p->power_open ? COL_PANEL : COL_PANEL_TEXT, 255);
+    }
 }
 
 /* ---- surface blitting ------------------------------------------------------------------------ */
@@ -1437,6 +1546,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_NOTIFY:
         paint_notify(c, &item->u.notify);
+        break;
+    case LM_SCENE_POWER:
+        if (item->output == c->out)
+            paint_power(c, &item->u.power);
         break;
     case LM_SCENE_SWITCHER:
         paint_switcher(c, &item->u.switcher);

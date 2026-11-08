@@ -56,6 +56,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "keys.h"
 #include "list.h"
 #include "loop.h"
 #include "protocol.h"
@@ -151,6 +152,7 @@ struct lm_config {
     const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
     const char *view_cmd;       /* command for the screenshot card's click: the image viewer (default "mellagui-view") */
     const char *settings_cmd;   /* command for Super+I and the "Settings" menu entry (default "mellagui-settings") */
+    const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
     const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
@@ -158,6 +160,7 @@ struct lm_config {
                                  * (an executable called mellagui-* in the compositor's directory), -1 (default) = 0 on drm, 1 on headless */
     const char *screenshot_dir; /* where Print / Alt+Print save PNGs (--screenshot-dir); NULL = the clipboard only */
     const char *lock_path;      /* file the screen lock's password / PIN hash is kept in (--lock-file); NULL = in memory only */
+    struct lm_keybinds keys;     /* keyboard shortcuts (keys.h; mellagui.conf [keys]) */
     struct lm_app_entry apps[LM_MAX_APPS]; /* entries of the "MellaGUI" menu (--app NAME=CMD; defaults filled by main.c) */
     int napps;
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */
@@ -211,6 +214,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .dmabuf = true,
         .gadget = true,
     };
+    lm_keys_defaults(&c->keys);
 }
 
 /* ---- aggregate server state ------------------------------------------------- */
@@ -245,6 +249,9 @@ struct lm_server {
     struct lm_wm *wm;
     struct lm_input *input;             /* evdev (or inject-only for headless) */
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
+    bool reloaded;                      /* a reload happened; reload_result = rejected lines of the last one, -1 = no readable file */
+    int reload_result;
+    int (*reload_config)(struct lm_server *); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file */
     struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */

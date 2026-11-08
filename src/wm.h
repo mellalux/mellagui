@@ -43,6 +43,7 @@
  * *window geometry* sizes; 0 means "client decides".
  *
  * ---- Shortcuts (lm_wm_key) -------------------------------------------------------
+ * The table is src/keys.h (built-in defaults, changed by [keys] in mellagui.conf); these are the defaults:
  *   Super+Enter        spawn config.terminal_cmd
  *   Escape             closes the open app menu (the "MellaGUI" panel button toggles it)
  *   Super+R            spawn config.run_cmd (run dialog; also the panel's "Run" button)
@@ -66,6 +67,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "list.h"
+#include "metrics.h"
 #include "lock.h"
 #include "server.h"
 #include "util.h"
@@ -76,14 +78,14 @@ struct lm_window;
 struct lm_popup;
 
 #define LM_NUM_WORKSPACES   4
-#define LM_BORDER_WIDTH     4
-#define LM_TITLEBAR_HEIGHT  28
-#define LM_PANEL_HEIGHT     28
-#define LM_FRAME_BUTTON_SIZE 20   /* close/max/min square buttons inside the titlebar */
-#define LM_FRAME_BUTTON_GAP  4
+#define LM_BORDER_WIDTH     (lm_metrics.border_width)
+#define LM_TITLEBAR_HEIGHT  (lm_metrics.titlebar_height)
+#define LM_PANEL_HEIGHT     (lm_metrics.panel_height)
+#define LM_FRAME_BUTTON_SIZE (lm_metrics.button_size)   /* close/max/min square buttons inside the titlebar */
+#define LM_FRAME_BUTTON_GAP  (lm_metrics.button_gap)
 #define LM_PANEL_MAX_TASKS   16
-#define LM_MIN_WINDOW_WIDTH  160
-#define LM_MIN_WINDOW_HEIGHT 80
+#define LM_MIN_WINDOW_WIDTH  (lm_metrics.min_width)
+#define LM_MIN_WINDOW_HEIGHT (lm_metrics.min_height)
 
 /* Window state bits (wm -> xdg configure). */
 enum {
@@ -320,6 +322,9 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked);
  * Notifications: a card with `title` and `body` (UTF-8, long text is wrapped and cut) at the top right of the first output, newest
  * on top, at most LM_NOTIFY_MAX. It goes away after `timeout_ms` (0 = it stays until it is clicked). Not shown while locked.
  */
+/* The theme, sizes, shortcuts or menu were reloaded (mellagui.conf): close the menu, refit maximized windows to the new panel / frame
+ * sizes and repaint everything. */
+void lm_wm_config_changed(struct lm_wm *wm);
 void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
 /*
  * The outputs are about to be placed again (settings output-order): packs them (output.c) and moves every window along with the output

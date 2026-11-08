@@ -6,6 +6,7 @@ Environment:
 """
 import json
 import os
+import signal
 import shutil
 import struct
 import subprocess
@@ -3044,10 +3045,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its two buttons, wraps over the six page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 16th press; Space toggles it
+        # the wallpaper field, its four radio buttons and its two buttons, wraps over the seven page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 17th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(16):
+        for _ in range(17):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -5707,6 +5708,482 @@ class TestOutputLayout(Base):
         self.assertIn('output-order=headless-1,headless-0', open(conf).read().split('\n'))
         c2 = self.start('mellagui-lay7', '--settings', conf)
         self.assertEqual(self.places(c2)['headless-1'][0], 0)                # the saved order is used from the start
+
+
+class TestConfig(Base):
+    """mellagui.conf: the app menu and the program commands come from a hand-written file, the command line wins."""
+
+    def start(self, name, text, *extra, env=None):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', path, *extra, env=env)
+        c.sync()
+        return p, c
+
+    @staticmethod
+    def apps(c):
+        return [l[4:].split('|', 1) for l in c.cmd('apps')]
+
+    def test_default_menu_when_there_is_no_file(self):
+        p, c, stop = self.private_compositor('mellagui-cfg0', '--config', 'none')
+        names = [n for n, _ in self.apps(c)]
+        self.assertEqual(names[:5], ['Terminal', 'Calculator', 'Images', 'Editor', 'Files'])
+        self.assertEqual(names[-1], 'Settings')
+
+    def test_menu_section_replaces_the_default_menu(self):
+        p, c = self.start('mellagui-cfg1', '# my menu\n[Menu]\nHello = echo hi\nText Editor = sh -c "a=1; echo $a"\n')
+        self.assertEqual(self.apps(c), [['Hello', 'echo hi'], ['Text Editor', 'sh -c "a=1; echo $a"']])
+
+    def test_missing_programs_are_left_out_and_alternatives_pick_the_first_that_exists(self):
+        p, c = self.start('mellagui-cfg2',
+                          '[menu]\nGone = /no/such/prog --x\nAlt = /no/such/prog -a || echo second || echo third\n'
+                          'Env = env A=1 /no/such/prog\nQuoted = sh -c \'x || y\'\n')
+        self.assertEqual(self.apps(c), [['Alt', 'echo second'], ['Quoted', "sh -c 'x || y'"]])
+
+    def test_tokens_and_own_programs(self):
+        p, c = self.start('mellagui-cfg3', '[commands]\nrun = echo run-cmd\n[menu]\nR = @run --flag\nMine = mellagui-nosuchprogram\n',
+                          '--terminal', 'echo term')
+        a = dict((n, cmd) for n, cmd in self.apps(c))
+        self.assertEqual(a['R'], 'echo run-cmd --flag')
+        self.assertEqual(a['Mine'], 'mellagui-nosuchprogram')        # own programs always stay
+        c.cmd('commands')
+        out = dict(l.split('=', 1) for l in c.cmd('commands'))
+        self.assertEqual(out['run'], 'echo run-cmd')
+        self.assertEqual(out['terminal'], 'echo term')               # the command line wins over the file
+
+    def test_sibling_lookup_for_mellagui_programs(self):
+        p, c = self.start('mellagui-cfg4', '[menu]\nCalc = mellagui-calc --x\n')
+        (name, cmd), = self.apps(c)
+        if os.path.exists(os.path.join(ROOT, 'build', 'mellagui-calc')):
+            self.assertRegex(cmd, r"^'.*/mellagui-calc' --x$")
+        self.assertIn('mellagui-calc', cmd)
+
+    def test_bad_lines_are_reported_and_ignored(self):
+        p, c = self.start('mellagui-cfg5', '[nonsense]\nx = 1\n[menu]\nno equals sign\nOk = echo ok\n[bad\nAlso = echo no\n')
+        self.assertEqual(self.apps(c), [['Ok', 'echo ok']])
+        self.assertTrue(alive_p(p))
+
+    def test_app_option_adds_to_the_file_menu(self):
+        p, c = self.start('mellagui-cfg6', '[menu]\nOne = echo 1\n', '--app', 'Two=echo 2')
+        self.assertEqual(self.apps(c), [['One', 'echo 1'], ['Two', 'echo 2']])
+
+    def test_the_menu_entry_starts_the_configured_command(self):
+        mark = os.path.join(tmp, 'cfg-started')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        p, c = self.start('mellagui-cfg7', '[menu]\nTouch = touch %s\n' % mark)
+        cl = Client('mellagui-cfg7')
+        self.clients.append(cl)
+        c.click(40, 14)                         # the MellaGUI launcher button
+        c.click(60, 43)                         # first entry
+        for _ in range(100):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(mark))
+
+
+def alive_p(p):
+    return p.poll() is None
+
+
+class TestTheme(Base):
+    """[theme] in mellagui.conf: the compositor's and the programs' colours."""
+
+    def start(self, name, text, *extra):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', path, *extra)
+        c.sync()
+        return p, c
+
+    def test_panel_menu_colour_comes_from_the_file(self):
+        p, c = self.start('mellagui-th1', '[theme]\nbackground = #102030\naccent = 0xff0000\n')
+        c.click(40, 14)
+        c.abs(300, 300)
+        c.sync()
+        ppm = c.dump(os.path.join(tmp, 'th1.ppm'))
+        self.assertEqual(ppm.px(150, 40), (0x10, 0x20, 0x30))
+
+    def test_defaults_without_a_theme(self):
+        p, c, stop = self.private_compositor('mellagui-th2', '--config', 'none')
+        c.click(40, 14)
+        c.abs(300, 300)
+        c.sync()
+        self.assertEqual(c.dump(os.path.join(tmp, 'th2.ppm')).px(150, 40), (0x14, 0x17, 0x1f))
+
+    def test_short_colours_and_bad_values(self):
+        p, c = self.start('mellagui-th3', '[theme]\nbackground = #abc\naccent = nothex\nnosuchcolour = #000000\n')
+        c.click(40, 14)
+        c.abs(300, 300)
+        c.sync()
+        self.assertEqual(c.dump(os.path.join(tmp, 'th3.ppm')).px(150, 40), (0xaa, 0xbb, 0xcc))
+        self.assertTrue(alive_p(p))
+
+    def test_programs_started_by_the_compositor_use_the_same_theme(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-calc')):
+            self.skipTest('mellagui-calc not built')
+        p, c = self.start('mellagui-th4', '[theme]\nbackground = #102030\n[menu]\nCalc = mellagui-calc\n')
+        c.click(40, 14)
+        c.click(60, 43)
+        for _ in range(100):
+            wins = c.windows()['windows']
+            if wins:
+                break
+            time.sleep(0.05)
+        w = wins[0]
+        c.abs(900, 500)
+        c.sync()
+        time.sleep(0.3)
+        ppm = c.dump(os.path.join(tmp, 'th4.ppm'))
+        # the calculator's window background shows in the margin of its client area
+        seen = {ppm.px(w['x'] + 2, w['y'] + 2), ppm.px(w['x'] + w['w'] - 3, w['y'] + w['h'] - 3)}
+        self.assertIn((0x10, 0x20, 0x30), seen)
+
+    def test_print_config_lists_every_colour(self):
+        r = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10)
+        self.assertIn('[theme]', r.stdout)
+        self.assertRegex(r.stdout, r'accent\s+= #6fa8ff')
+        self.assertIn('[menu]', r.stdout)
+
+
+class TestKeys(Base):
+    """[keys] in mellagui.conf: the window manager's shortcut table."""
+
+    KEY_T, KEY_X, KEY_F4 = 20, 45, 62
+
+    def start(self, name, text, *extra):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', path, *extra)
+        c.sync()
+        return p, c
+
+    @staticmethod
+    def table(c):
+        return sorted(l[4:] for l in c.cmd('keys'))
+
+    @staticmethod
+    def combo(c, mods, code):
+        for m in mods:
+            c.key(m, True)
+        c.tap(code)
+        for m in reversed(mods):
+            c.key(m, False)
+        c.sync()
+
+    def open_window(self, sock):
+        cl = Client(sock)
+        self.clients.append(cl)
+        w = Window(cl, 200, 120, title='w')
+        cl.wl.roundtrip()
+        return cl, w
+
+    @staticmethod
+    def closed(cl, w, timeout=1.0):
+        return cl.wl.wait_for(lambda e: e.obj == w.toplevel and e.name == 'close', timeout) is not None
+
+    def test_defaults_are_the_old_shortcuts(self):
+        p, c, stop = self.private_compositor('mellagui-key0', '--config', 'none')
+        t = self.table(c)
+        for want in ('Super+Enter = terminal', 'Super+R = run', 'Super+Q = close', 'Super+Shift+E = quit',
+                     'Super+Shift+3 = move-to-workspace 3', 'Super+4 = workspace 4', 'Super+Shift+Tab = focus-prev',
+                     'Super+Down = restore', 'Super+Shift+Space = layout-prev'):
+            self.assertIn(want, t)
+        self.assertIn('Super+Shift+R = reload-config', t)
+        self.assertEqual(len(t), 29)
+
+    def test_exec_binding_runs_a_command(self):
+        mark = os.path.join(tmp, 'key-exec-mark')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        p, c = self.start('mellagui-key1', '[keys]\nSuper+T = exec touch %s\n' % mark)
+        self.combo(c, [KEY_LEFTMETA], self.KEY_T)
+        for _ in range(100):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(mark))
+
+    def test_rebinding_and_removing(self):
+        p, c = self.start('mellagui-key2', '[keys]\nalt+f4 = close\nSuper+Q = none\nsuper+x = close\n')
+        t = self.table(c)
+        self.assertIn('Alt+F4 = close', t)
+        self.assertIn('Super+X = close', t)
+        self.assertNotIn('Super+Q = close', t)
+        cl, w = self.open_window('mellagui-key2')
+        self.combo(c, [KEY_LEFTMETA], KEY_Q)                    # removed: the key goes to the client, no close request
+        self.assertFalse(self.closed(cl, w, 0.5))
+        self.combo(c, [KEY_LEFTALT], self.KEY_F4)               # new binding without Super
+        self.assertTrue(self.closed(cl, w, 2.0))
+
+    def test_modifiers_must_match_exactly(self):
+        p, c = self.start('mellagui-key3', '[keys]\nSuper+Shift+X = close\n')
+        cl, w = self.open_window('mellagui-key3')
+        self.combo(c, [KEY_LEFTMETA], self.KEY_X)               # Super+X alone is not bound
+        self.assertFalse(self.closed(cl, w, 0.5))
+        self.combo(c, [KEY_LEFTMETA, KEY_LEFTSHIFT], self.KEY_X)
+        self.assertTrue(self.closed(cl, w, 2.0))
+
+    def test_workspace_binding_with_a_number(self):
+        p, c = self.start('mellagui-key4', '[keys]\nAlt+2 = workspace 3\n')
+        self.combo(c, [KEY_LEFTALT], KEY_2)
+        self.assertEqual(c.windows()['workspace'], 2)
+
+    def test_bad_lines_are_ignored(self):
+        p, c = self.start('mellagui-key5', '[keys]\nSuper+ = close\nSuper+Q = nosuchaction\nSuper+Q = workspace 9\n'
+                          'Super+Foo = close\nSuper+Y = close now\nSuper+Z\nCtrl+Alt+T = terminal\n')
+        t = self.table(c)
+        self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
+        self.assertIn('Ctrl+Alt+T = terminal', t)
+        self.assertEqual(len(t), 30)
+        self.assertTrue(alive_p(p))
+
+
+class TestMetrics(Base):
+    """[windows] / [panel] / [gadgets] / [notifications] in mellagui.conf: the sizes of the shell."""
+
+    def start(self, name, text):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', path)
+        c.sync()
+        return p, c
+
+    def maximized(self, c, sock):
+        cl = Client(sock)
+        self.clients.append(cl)
+        w = Window(cl, 300, 200, title='m')
+        cl.wl.roundtrip()
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_M)
+        c.key(KEY_LEFTMETA, False)
+        w.handle_configure()
+        cl.wl.roundtrip()
+        return c.windows()['windows'][0]
+
+    def test_defaults_without_a_file(self):
+        p, c, stop = self.private_compositor('mellagui-met0', '--config', 'none')
+        r = self.maximized(c, 'mellagui-met0')
+        self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 28 - 28 - 4))
+
+    def test_panel_and_frame_sizes_change_the_maximized_window(self):
+        p, c = self.start('mellagui-met1', '[panel]\nheight = 40\n[windows]\ntitlebar-height = 32\nborder-width = 6\n')
+        r = self.maximized(c, 'mellagui-met1')
+        self.assertEqual((r['w'], r['h']), (800 - 12, 500 - 40 - 32 - 6))
+
+    def test_menu_width(self):
+        p, c = self.start('mellagui-met2', '[panel]\nmenu-width = 320\n')
+        c.click(40, 14)
+        c.abs(600, 400)
+        c.sync()
+        ppm = c.dump(os.path.join(tmp, 'met2.ppm'))
+        self.assertEqual(ppm.px(300, 40), (0x14, 0x17, 0x1f))        # inside a 320 px wide menu, outside the default 200
+
+    def test_out_of_range_and_bad_values_keep_the_default(self):
+        p, c = self.start('mellagui-met3', '[panel]\nheight = 5\nmenu-width = wide\n[windows]\nnosuch = 3\n[gadgets]\nwidth = 99999\n')
+        r = self.maximized(c, 'mellagui-met3')
+        self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 28 - 28 - 4))
+        self.assertTrue(alive_p(p))
+
+    def test_buttons_stay_inside_a_low_title_bar(self):
+        p, c = self.start('mellagui-met4', '[windows]\ntitlebar-height = 22\nbutton-size = 40\n')
+        r = self.maximized(c, 'mellagui-met4')
+        self.assertEqual(r['h'], 500 - 28 - 22 - 4)
+        self.assertTrue(alive_p(p))
+
+    def test_print_config_has_every_section(self):
+        out = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10).stdout
+        for sec in ('[windows]', '[panel]', '[gadgets]', '[notifications]', '[keys]', '[theme]', '[menu]'):
+            self.assertIn(sec, out)
+        self.assertRegex(out, r'menu-width = 200')
+
+
+class TestReload(Base):
+    """Reading mellagui.conf again while MellaGUI runs: control `reload`, SIGUSR2 and the reload-config shortcut."""
+
+    KEY_R = 19
+
+    def start(self, name, text, *extra):
+        self.path = os.path.join(tmp, name + '.conf')
+        self.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path, *extra)
+        c.sync()
+        return p, c
+
+    def write(self, text):
+        with open(self.path, 'w') as f:
+            f.write(text)
+
+    @staticmethod
+    def menu_px(c, name):
+        c.click(40, 14)
+        c.abs(600, 400)
+        c.sync()
+        px = c.dump(os.path.join(tmp, name + '.ppm')).px(150, 40)
+        c.tap(KEY_ESC)
+        c.sync()
+        return px
+
+    def test_theme_menu_keys_and_sizes_change_without_a_restart(self):
+        p, c = self.start('mellagui-rl1', '[theme]\nbackground = #102030\n[keys]\nSuper+T = workspace 2\n'
+                          '[menu]\nOne = echo 1\n')
+        self.assertEqual(self.menu_px(c, 'rl1a'), (0x10, 0x20, 0x30))
+        self.write('[theme]\nbackground = #304050\n[keys]\nSuper+U = workspace 3\n[menu]\nTwo = echo 2\nThree = echo 3\n'
+                   '[panel]\nmenu-width = 320\n')
+        c.cmd('reload')
+        self.assertEqual(c.last, 'ok 0')
+        self.assertEqual(self.menu_px(c, 'rl1b'), (0x30, 0x40, 0x50))
+        keys = [l[4:] for l in c.cmd('keys')]
+        self.assertIn('Super+U = workspace 3', keys)
+        self.assertNotIn('Super+T = workspace 2', keys)
+        self.assertIn('Super+Q = close', keys)                               # defaults are back under the file
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Two|echo 2', 'Three|echo 3'])
+
+    def test_maximized_windows_follow_the_new_panel_height(self):
+        p, c = self.start('mellagui-rl2', '')
+        cl = Client('mellagui-rl2')
+        self.clients.append(cl)
+        w = Window(cl, 300, 200, title='m')
+        cl.wl.roundtrip()
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_M)
+        c.key(KEY_LEFTMETA, False)
+        w.handle_configure()
+        cl.wl.roundtrip()
+        self.assertEqual(c.windows()['windows'][0]['h'], 500 - 28 - 28 - 4)
+        self.write('[panel]\nheight = 40\n')
+        c.cmd('reload')
+        cfg = w.handle_configure()
+        self.assertIsNotNone(cfg)
+        cl.wl.roundtrip()
+        self.assertEqual(c.windows()['windows'][0]['h'], 500 - 40 - 28 - 4)
+
+    def test_command_line_stays_and_a_removed_section_returns_to_the_defaults(self):
+        p, c = self.start('mellagui-rl3', '[menu]\nFile = echo f\n[theme]\nbackground = #102030\n', '--app', 'Cli=echo c')
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['File|echo f', 'Cli|echo c'])
+        self.write('# nothing\n')
+        c.cmd('reload')
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Cli|echo c'])
+        self.assertEqual(self.menu_px(c, 'rl3'), (0x14, 0x17, 0x1f))
+
+    def test_bad_lines_are_counted_and_no_file_is_an_error(self):
+        p, c = self.start('mellagui-rl4', '')
+        self.write('[theme]\nnosuch = 1\naccent = zzz\n')
+        c.cmd('reload')
+        self.assertEqual(c.last, 'ok 2')
+        p2, c2, stop = self.private_compositor('mellagui-rl5', '--config', 'none')
+        with self.assertRaises(RuntimeError):
+            c2.cmd('reload')
+        self.assertTrue(alive_p(p2))
+
+    def test_sigusr2_and_the_shortcut_reload(self):
+        p, c = self.start('mellagui-rl6', '[menu]\nA = echo a\n')
+        self.write('[menu]\nB = echo b\n')
+        p.send_signal(signal.SIGUSR2)
+        for _ in range(100):
+            if [l[4:] for l in c.cmd('apps')] == ['B|echo b']:
+                break
+            time.sleep(0.05)
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['B|echo b'])
+        self.write('[menu]\nC = echo c\n')
+        c.key(KEY_LEFTMETA, True)
+        c.key(KEY_LEFTSHIFT, True)
+        c.tap(self.KEY_R)
+        c.key(KEY_LEFTSHIFT, False)
+        c.key(KEY_LEFTMETA, False)
+        c.sync()
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['C|echo c'])
+
+
+class TestConfigSettings(Base):
+    """The settings keys behind the panel's Config page: config-file, config-status, config-reload, config-create."""
+
+    def get(self, c, key):
+        c.cmd('setting ' + key)
+        return c.last[3:]
+
+    def test_no_file(self):
+        p, c, stop = self.private_compositor('mellagui-cs1', '--config', 'none')
+        self.assertEqual(self.get(c, 'config-file'), '')
+        self.assertEqual(self.get(c, 'config-status'), 'none')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings config-create 1')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings config-reload 1')
+
+    def test_create_the_default_file_then_reload_it(self):
+        path = os.path.join(tmp, 'cs-new', 'dir', 'mellagui.conf')
+        p, c, stop = self.private_compositor('mellagui-cs2', '--config', path)
+        self.assertEqual(self.get(c, 'config-file'), path)
+        self.assertEqual(self.get(c, 'config-status'), 'missing')
+        c.cmd('settings config-create 1')
+        self.assertEqual(self.get(c, 'config-status'), 'ok')
+        text = open(path).read()
+        for want in ('[menu]', '[keys]', '[theme]', '[windows]'):
+            self.assertIn(want, text)
+        self.assertRegex(text, r'Super\+Shift\+R\s+= reload-config')
+        with self.assertRaises(RuntimeError):                                  # never over an existing file
+            c.cmd('settings config-create 1')
+        with open(path, 'a') as f:
+            f.write('\n[theme]\nbogus = 1\n')
+        c.cmd('settings config-reload 1')
+        self.assertEqual(self.get(c, 'config-status'), 'ignored:1')
+        with open(path, 'w') as f:
+            f.write('')
+        c.cmd('settings config-reload 1')
+        self.assertEqual(self.get(c, 'config-status'), 'ok')
+
+    def test_the_created_file_is_the_default_configuration(self):
+        path = os.path.join(tmp, 'cs3.conf')
+        p, c, stop = self.private_compositor('mellagui-cs3', '--config', path)
+        c.cmd('settings config-create 1')
+        before = [l for l in c.cmd('keys')] + [l for l in c.cmd('apps')]
+        c.cmd('reload')
+        self.assertEqual(c.last, 'ok 0')
+        self.assertEqual(sorted(before), sorted([l for l in c.cmd('keys')] + [l for l in c.cmd('apps')]))
+
+    def test_the_settings_panel_config_page_creates_and_reloads(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        path = os.path.join(tmp, 'cs4.conf')
+        p, c, stop = self.private_compositor('mellagui-cs4', '--config', path)
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-cs4'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 6 * 36 + 16)                         # the Config tab (7th)
+        time.sleep(0.3)
+        button = (x0 + 160 + 100, y0 + 14 + 3 * 28 + 6 + 12)            # first button below the three lines
+        self.assertFalse(os.path.exists(path))
+        c.click(*button)                                                # "Create it with the defaults"
+        for _ in range(60):
+            if os.path.exists(path):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(path))
+        time.sleep(0.3)
+        with open(path, 'w') as f:
+            f.write('[menu]\nOnly = echo only\n')
+        c.click(x0 + 160 + 100, y0 + 14 + 3 * 28 + 6 + 28 + 4 + 12)     # "Reload" (the Edit button is above it now)
+        for _ in range(60):
+            if [l[4:] for l in c.cmd('apps')] == ['Only|echo only']:
+                break
+            time.sleep(0.05)
+        self.assertEqual([l[4:] for l in c.cmd('apps')], ['Only|echo only'])
 
 
 class TestScreenshot(Base):

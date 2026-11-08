@@ -81,6 +81,9 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 
 ## Keys and mouse
 
+The Super+... shortcuts below are the defaults. Change them in the `[keys]` section of `~/.config/mellagui/mellagui.conf`, e.g.
+`Super+T = exec @terminal -e htop`, `Alt+F4 = close`, `Super+Q = none`; `mellagui --print-config` lists every action and binding.
+
 | key                         | action                                  |
 |-----------------------------|-----------------------------------------|
 | Super+Enter                 | open terminal (`--terminal` command)    |
@@ -100,7 +103,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
 Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, Editor, Files, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
-add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, and *Run* (run dialog), the clock and, in the top right corner, the round
+change it in `~/.config/mellagui/mellagui.conf` (`[menu]`, `Name = command`; `mellagui --print-config` shows the defaults) or add entries with `--app "Name=command"`, repeatable; colours: `[theme]`, shortcuts: `[keys]`, sizes of panel / frames / menu / gadgets: `[panel]`, `[windows]`, `[gadgets]` in the same file; **Super+Shift+R**, `kill -USR2` or the control socket's `reload` read it again without a restart; the settings panel's *Config* page creates, opens and reloads the file), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, and *Run* (run dialog), the clock and, in the top right corner, the round
 *power button*: it opens the session dialog (the screen is dimmed, a card with two round buttons, *Lock* and *Exit*; click a button, or Left / Right / Tab then Enter, or press L / E; Esc, a click outside the card or the
 power button again closes it; the dialog is modal, nothing below it gets keys or clicks).
 

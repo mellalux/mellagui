@@ -20,6 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "theme.h"
 #include "ddc.h"
 #include "edid.h"
 #include "font.h"
@@ -27,15 +28,14 @@
 #include "util.h"
 #include "wlwin.h"
 
-#define COL_BG      0x14171fu
-#define COL_KEY     0x2d3a5au
-#define COL_HOVER   0x41527eu
-#define COL_DOWN    0x56699cu
-#define COL_ACCENT  0x6fa8ffu
-#define COL_TEXT    0xe6e9efu
-#define COL_DIM     0x7b8294u
-#define COL_ERR     0xff7070u
-
+#define COL_BG      (lm_theme.background)
+#define COL_KEY     (lm_theme.button)
+#define COL_HOVER   (lm_theme.button_hover)
+#define COL_DOWN    (lm_theme.button_down)
+#define COL_ACCENT  (lm_theme.accent)
+#define COL_TEXT    (lm_theme.text)
+#define COL_DIM     (lm_theme.text_dim)
+#define COL_ERR     (lm_theme.error)
 #define MAX_MON 8
 #define MAX_WIDGETS 64
 #define PAD 20
@@ -880,6 +880,7 @@ static bool probe_step(struct app *a)
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     fake_file = getenv("MELLAGUI_MONITOR_FAKE");
     if (fake_file && !*fake_file)
         fake_file = NULL;

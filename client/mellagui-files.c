@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "protocol.h"
@@ -41,17 +42,16 @@
 #define TOOL_H 28
 #define HEAD_H 20
 #define STATUS_H 20
-#define COL_BG 0x14171fu
-#define COL_FG 0xd8dee9u
-#define COL_DIM 0x7b8294u
-#define COL_DIR 0x6fa8ffu
-#define COL_SEL 0x41527eu
-#define COL_SEL_IDLE 0x2b303bu
-#define COL_BAR 0x2b303bu
+#define COL_BG (lm_theme.background)
+#define COL_FG (lm_theme.text_soft)
+#define COL_DIM (lm_theme.text_dim)
+#define COL_DIR (lm_theme.accent)
+#define COL_SEL (lm_theme.button_hover)
+#define COL_SEL_IDLE (lm_theme.bar)
+#define COL_BAR (lm_theme.bar)
 #define COL_BTN 0x353b49u
-#define COL_BTN_ON 0x41527eu
-#define COL_WARN 0xe0a458u
-
+#define COL_BTN_ON (lm_theme.button_hover)
+#define COL_WARN (lm_theme.caution)
 struct entry {
     char *name;
     bool dir;
@@ -880,6 +880,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {

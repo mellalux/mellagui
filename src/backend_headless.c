@@ -15,6 +15,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "keys.h"
 #include "backend.h"
 #include "input.h"
 #include "log.h"
@@ -287,6 +288,30 @@ static void ctl_command(struct ctl_client *c, char *line)
         lm_list_for_each(o, &h->base.outputs, link)
             ctl_reply(c, "output %s x=%d y=%d w=%d h=%d\n", o->name, o->x, o->y, o->width, o->height);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "apps")) {
+        /* apps -> one "app <name>|<command>" line per entry of the MellaGUI menu, then "ok" (tests of mellagui.conf) */
+        for (int i = 0; i < srv->config.napps; i++)
+            ctl_reply(c, "app %s|%s\n", srv->config.apps[i].name, srv->config.apps[i].cmd);
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "reload")) {
+        /* reload -> read mellagui.conf again (what SIGUSR2 and the reload-config shortcut do); "ok <rejected lines>" */
+        int bad = srv->reload_config ? srv->reload_config(srv) : -1;
+        if (bad < 0)
+            ctl_reply(c, "err no configuration file\n");
+        else
+            ctl_reply(c, "ok %d\n", bad);
+    } else if (!strcmp(cmd, "keys")) {
+        /* keys -> one "key <Mods+Key = action [arg]>" line per shortcut (unordered), then "ok" */
+        for (int i = 0; i < srv->config.keys.n; i++) {
+            char line[400];
+            lm_keys_describe(&srv->config.keys.b[i], line, sizeof(line));
+            ctl_reply(c, "key %s\n", line);
+        }
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "commands")) {
+        /* commands -> "terminal=... run=... settings=... view=..." one per line, then "ok" */
+        ctl_reply(c, "terminal=%s\nrun=%s\nsettings=%s\nview=%s\nok\n", srv->config.terminal_cmd, srv->config.run_cmd,
+                  srv->config.settings_cmd, srv->config.view_cmd);
     } else if (!strcmp(cmd, "notify")) {
         /* notify <ms> <title> [body words...] */
         if (!srv->settings || !a1 || !a2) { ctl_reply(c, "err usage: notify <ms> <title> [body]\n"); return; }

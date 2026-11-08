@@ -253,8 +253,10 @@ enum lm_pick_kind {
     LM_PICK_PANEL_LAUNCHER, /* `rect` = the launcher button */
     LM_PICK_MENU_ITEM,      /* app menu entry, `index` = config.apps[] index */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
-    LM_PICK_PANEL_EXIT,     /* quit button (needs a second click to confirm) */
-    LM_PICK_PANEL_LOCK,     /* lock button right of the clock: locks the screen (opens the settings while no password / PIN is set) */
+    LM_PICK_PANEL_POWER,    /* the round power button in the top right corner: opens / closes the session dialog */
+    LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
+    LM_PICK_POWER_CARD,     /* the session dialog's card (between its buttons) */
+    LM_PICK_POWER_BACKDROP, /* anything else while the session dialog is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_LAYOUT,   /* keyboard layout indicator: left click = next layout, right click = previous */
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
@@ -365,11 +367,9 @@ struct lm_panel_info {
     char sticky_text[24];           /* "Sticky", or the latched (Sh) / locked (SH) modifiers */
     struct lm_rect run;             /* run-dialog button, left of the quit button */
     bool hover_run;
-    struct lm_rect lock;            /* lock button, the rightmost one (right of the clock) */
-    bool hover_lock;
-    struct lm_rect exit;            /* quit button, left of the clock */
-    bool hover_exit;
-    bool exit_armed;                /* first click done: button shows "Sure?", the next click quits */
+    struct lm_rect power;           /* the round power button, the rightmost one (right of the clock); a circle in this square */
+    bool hover_power;
+    bool power_open;                /* the session dialog is open: the button shows it */
     struct lm_rect title_area;      /* where the taskbar (or the focused title if it is empty) goes */
     const char *active_title;       /* "" if none; valid only during the callback */
     int ntasks;                     /* taskbar: mapped windows of the current workspace, in creation order */
@@ -381,6 +381,15 @@ struct lm_panel_info {
     struct lm_window *task_win[LM_PANEL_MAX_TASKS]; /* the window behind task[i] (for picking) */
     struct lm_rect clock;
     char clock_text[24];            /* "DD.MM.YYYY HH:MM" local time */
+};
+
+/* The session dialog: the output is dimmed, a card with two round buttons (Lock, Exit) is in the middle. */
+struct lm_power_info {
+    struct lm_rect rect;            /* the whole output (dimmed) */
+    struct lm_rect card;
+    struct lm_rect button[2];       /* the squares the round buttons are drawn in: [0] Lock, [1] Exit */
+    struct lm_rect hit[2];          /* what a click counts for: the button and its label below */
+    int sel;                        /* highlighted button (pointer or keyboard), -1 none */
 };
 
 struct lm_menu_info {
@@ -448,6 +457,7 @@ enum lm_scene_kind {
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_MENU,                  /* the open app menu (above the panel, below popups) */
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
+    LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
@@ -464,6 +474,7 @@ struct lm_scene_item {
         } surface;                  /* LM_SCENE_SURFACE */
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
         struct lm_menu_info menu;   /* LM_SCENE_MENU */
+        struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
         struct lm_switcher_info switcher; /* LM_SCENE_SWITCHER */

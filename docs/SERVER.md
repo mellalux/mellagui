@@ -11,7 +11,7 @@ closes the ways *around* the lock.
 
 | way around | what closes it |
 |---|---|
-| quit MellaGUI (Super+Shift+E, the panel's *Exit* button) and use the shell it was started from | with a lock set these ask for the secret first (the screen locks, the secret quits). Better: run MellaGUI as a service so there is **no shell behind it** (below) |
+| quit MellaGUI (Super+Shift+E, *Exit* in the panel's session dialog) and use the shell it was started from | with a lock set these ask for the secret first (the screen locks, the secret quits). Better: run MellaGUI as a service so there is **no shell behind it** (below) |
 | MellaGUI crashes or is killed and leaves the console | the service restarts it (`Restart=always`); it comes back locked (*Lock when MellaGUI starts*, on by default) |
 | a reboot starts the session open | same: the service starts MellaGUI, and `lock.conf` makes it start locked |
 | Ctrl+Alt+F1..F12 to another console | another console has its own login, so this is only a way around if one is logged in. *Settings → Security → "Console switch works while locked"* turns it off (`vt=0` in `lock.conf`). Keep an ssh way in: with it off, a forgotten secret can only be fixed over ssh |

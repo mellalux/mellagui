@@ -34,8 +34,10 @@
 #define PANEL_BTN_W 72
 #define PANEL_WS_W 24
 #define PANEL_CLOCK_W 136                       /* "DD.MM.YYYY HH:MM" = 16 glyphs */
-#define PANEL_EXIT_W 52
-#define PANEL_LOCK_W 44                         /* "Lock", the rightmost button, right of the clock */
+#define PANEL_POWER_D (LM_PANEL_HEIGHT - 4)     /* the round power button's diameter: as tall as the other buttons */
+#define POWER_CARD_W 264                        /* the session dialog */
+#define POWER_CARD_H 172
+#define POWER_BTN_D 64                          /* its round buttons */
 #define PANEL_RUN_W 44
 #define PANEL_LAYOUT_W 36
 #define PANEL_STICKY_W 84
@@ -103,7 +105,10 @@ struct lm_wm {
     uint32_t hover_bits;
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
-    bool hover_exit, hover_run, hover_layout, hover_sticky, hover_lock;
+    bool hover_power, hover_run, hover_layout, hover_sticky;
+    bool power_open;            /* the session dialog (Lock / Exit) is showing on the output called power_out */
+    char power_out[32];
+    int power_sel;              /* its highlighted button: 0 Lock, 1 Exit, -1 none yet */
     bool menu_open;
     /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
     bool sw_open;
@@ -122,7 +127,6 @@ struct lm_wm {
     int mix_index;              /* ... and its stream row */
     struct lm_rect menu_rect;   /* valid while menu_open */
     int hover_menu;             /* -1 none */
-    bool exit_armed;            /* exit button clicked once; a second click quits */
     struct lm_window *hover_task;
     struct lm_window *press_win;
     uint32_t press_bits;
@@ -212,10 +216,9 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
         p->workspace[i] = lm_rect_make(x, y, PANEL_WS_W, h);
         x += PANEL_WS_W + 2;
     }
-    p->lock = lm_rect_make(p->bar.x + p->bar.w - PANEL_LOCK_W - 4, y, PANEL_LOCK_W, h);
-    p->clock = lm_rect_make(p->lock.x - 4 - PANEL_CLOCK_W, y, PANEL_CLOCK_W, h);
-    p->exit = lm_rect_make(p->clock.x - 8 - PANEL_EXIT_W, y, PANEL_EXIT_W, h);
-    p->run = lm_rect_make(p->exit.x - 4 - PANEL_RUN_W, y, PANEL_RUN_W, h);
+    p->power = lm_rect_make(p->bar.x + p->bar.w - PANEL_POWER_D - 4, y, PANEL_POWER_D, PANEL_POWER_D);
+    p->clock = lm_rect_make(p->power.x - 4 - PANEL_CLOCK_W, y, PANEL_CLOCK_W, h);
+    p->run = lm_rect_make(p->clock.x - 8 - PANEL_RUN_W, y, PANEL_RUN_W, h);
     p->sticky = lm_rect_make(p->run.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
     p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
     uint32_t locks = wm->srv->input ? lm_input_locks(wm->srv->input) : 0;
@@ -263,10 +266,9 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
             p->workspace_occupied |= 1u << w->workspace;
     p->hover_workspace = wm->hover_panel_ws;
     p->hover_launcher = wm->hover_launcher;
-    p->hover_exit = wm->hover_exit;
-    p->hover_lock = wm->hover_lock;
+    p->hover_power = wm->hover_power;
+    p->power_open = wm->power_open;
     p->hover_run = wm->hover_run;
-    p->exit_armed = wm->exit_armed;
     p->active_title = wm->focused ? wm->focused->title : "";
 
     /* taskbar: windows of this workspace in creation (id) order, so raising does not reshuffle it */
@@ -1607,6 +1609,70 @@ void lm_wm_send_frame_done(struct lm_wm *wm, uint32_t time_ms)
 
 /* ---- scene ---------------------------------------------------------------------------------------- */
 
+/* ---- the session dialog: a round power button in the panel opens a card with round Lock and Exit buttons ---------------- */
+
+/* The output the dialog is on (looked up by name, so an unplugged one just ends the dialog). */
+static struct lm_output *power_output(const struct lm_wm *wm)
+{
+    if (!wm->power_open || !wm->srv->backend)
+        return NULL;
+    struct lm_output *o;
+    lm_list_for_each(o, &wm->srv->backend->outputs, link)
+        if (!strcmp(o->name, wm->power_out))
+            return o;
+    return NULL;
+}
+
+static void power_info(const struct lm_wm *wm, struct lm_output *o, struct lm_power_info *pi)
+{
+    memset(pi, 0, sizeof(*pi));
+    pi->rect = lm_output_rect(o);
+    pi->card = lm_rect_make(pi->rect.x + (pi->rect.w - POWER_CARD_W) / 2, pi->rect.y + (pi->rect.h - POWER_CARD_H) / 2,
+                            POWER_CARD_W, POWER_CARD_H);
+    int gap = 40, total = 2 * POWER_BTN_D + gap;
+    int x = pi->card.x + (POWER_CARD_W - total) / 2, y = pi->card.y + 46;
+    for (int i = 0; i < 2; i++) {
+        pi->button[i] = lm_rect_make(x + i * (POWER_BTN_D + gap), y, POWER_BTN_D, POWER_BTN_D);
+        pi->hit[i] = lm_rect_make(pi->button[i].x - 8, y, POWER_BTN_D + 16, POWER_BTN_D + 8 + LM_FONT_H + 4);
+    }
+    pi->sel = wm->power_sel;
+}
+
+static void power_damage(struct lm_wm *wm)
+{
+    struct lm_output *o = power_output(wm);
+    if (o) {
+        struct lm_rect r = lm_output_rect(o);
+        damage_rect(wm, &r);
+    }
+    damage_panels(wm);
+}
+
+/* Opens the dialog on `o` (the output whose panel button was used; NULL = the primary one) or closes it. */
+static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
+{
+    if (open == wm->power_open)
+        return;
+    if (open) {
+        if (!o)
+            o = lm_output_primary(wm->srv);
+        if (!o)
+            return;
+        menu_set(wm, false, NULL);
+        sw_close(wm);
+        clip_nav_set(wm, false);
+        snprintf(wm->power_out, sizeof(wm->power_out), "%s", o->name);
+        wm->power_open = true;
+        wm->power_sel = -1;
+        power_damage(wm);
+    } else {
+        power_damage(wm);                                       /* (while the output is still found) */
+        wm->power_open = false;
+        wm->hover_power = false;
+        damage_panels(wm);
+    }
+}
+
 void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene_fn fn, void *data)
 {
     struct lm_scene_item it;
@@ -1767,6 +1833,21 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
+    if (wm->power_open) {                                        /* the session dialog */
+        struct lm_output *po = power_output(wm);
+        if (po) {
+            struct lm_rect r = lm_output_rect(po);
+            if (!clip || lm_rect_overlaps(&r, clip)) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_POWER;
+                it.output = po;
+                power_info(wm, po, &it.u.power);
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+    }
+
     if (wm->sw_open) {                                           /* the Alt+Tab list, above everything */
         struct lm_rect r = sw_rect(wm);
         if (r.w > 0 && (!clip || lm_rect_overlaps(&r, clip))) {
@@ -1872,6 +1953,20 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
     memset(out, 0, sizeof(*out));
     out->kind = LM_PICK_NONE;
     int32_t ix = (int32_t)x, iy = (int32_t)y;
+
+    struct lm_output *po = power_output(wm);
+    if (po && !lm_lock_active(wm->srv->lock)) {                  /* the session dialog is modal: it gets every pick */
+        struct lm_power_info pi;
+        power_info(wm, po, &pi);
+        out->kind = lm_rect_contains(&pi.card, ix, iy) ? LM_PICK_POWER_CARD : LM_PICK_POWER_BACKDROP;
+        for (int i = 0; i < 2; i++)
+            if (lm_rect_contains(&pi.hit[i], ix, iy)) {
+                out->kind = LM_PICK_POWER_BUTTON;
+                out->index = i;
+            }
+        out->rect = pi.card;
+        return;
+    }
 
     if (wm->nnotes > 0 && !lm_lock_active(wm->srv->lock)) {
         struct lm_rect rs[LM_NOTIFY_MAX];
@@ -2003,10 +2098,9 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             }
             if (lm_rect_contains(&pi.run, ix, iy))
                 out->kind = LM_PICK_PANEL_RUN;
-            if (lm_rect_contains(&pi.exit, ix, iy))
-                out->kind = LM_PICK_PANEL_EXIT;
-            if (lm_rect_contains(&pi.lock, ix, iy))
-                out->kind = LM_PICK_PANEL_LOCK;
+            int pcx = pi.power.x + pi.power.w / 2, pcy = pi.power.y + pi.power.h / 2, pr2 = pi.power.w / 2 + 1;
+            if ((ix - pcx) * (ix - pcx) + (iy - pcy) * (iy - pcy) <= pr2 * pr2)   /* the circle, not its square */
+                out->kind = LM_PICK_PANEL_POWER;
             if (lm_rect_contains(&pi.layout, ix, iy))
                 out->kind = LM_PICK_PANEL_LAYOUT;
             if (lm_rect_contains(&pi.sticky, ix, iy))
@@ -2048,8 +2142,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool launcher = false, exit_btn = false, run_btn = false, layout_btn = false, sticky_btn = false, lock_btn = false;
-    int menu_item = -1;
+    bool launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false;
+    int menu_item = -1, power_item = -1;
     struct lm_window *task = NULL;
     enum lm_cursor_shape shape = LM_CURSOR_NONE;
 
@@ -2064,8 +2158,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_MENU_ITEM: menu_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
-    case LM_PICK_PANEL_EXIT: exit_btn = true; shape = LM_CURSOR_POINTER; break;
-    case LM_PICK_PANEL_LOCK: lock_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
@@ -2088,16 +2182,17 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         if (wm->menu_open)
             damage_rect(wm, &wm->menu_rect);
     }
-    if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || exit_btn != wm->hover_exit ||
+    if (wm->power_open && power_item >= 0 && power_item != wm->power_sel) {     /* the pointer moves the dialog's highlight */
+        wm->power_sel = power_item;
+        power_damage(wm);
+    }
+    if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || power_btn != wm->hover_power ||
         run_btn != wm->hover_run || task != wm->hover_task || layout_btn != wm->hover_layout ||
-        sticky_btn != wm->hover_sticky || lock_btn != wm->hover_lock) {
-        wm->hover_lock = lock_btn;
+        sticky_btn != wm->hover_sticky) {
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
         wm->hover_run = run_btn;
-        wm->hover_exit = exit_btn;
-        if (!exit_btn)
-            wm->exit_armed = false;     /* moving away cancels the confirmation */
+        wm->hover_power = power_btn;
         wm->hover_task = task;
         wm->hover_panel_ws = pws;
         wm->hover_launcher = launcher;
@@ -2537,9 +2632,40 @@ static void open_shot(struct lm_wm *wm)
     lm_server_spawn(wm->srv, cmd);
 }
 
+/* Lock (0) or Exit (1) was chosen in the session dialog. */
+static void power_activate(struct lm_wm *wm, int which)
+{
+    power_set(wm, false, NULL);
+    if (which == 0) {
+        if (!lm_lock_now(wm->srv->lock))                        /* no password / PIN yet: open the settings to set one */
+            launch_settings(wm);
+    } else {
+        lm_info("session dialog: exit chosen, quitting");
+        request_quit(wm);
+    }
+}
+
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (pick->kind == LM_PICK_POWER_BUTTON || pick->kind == LM_PICK_POWER_CARD || pick->kind == LM_PICK_POWER_BACKDROP) {
+        int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
+        if (pressed) {
+            if (pick->kind == LM_PICK_POWER_BACKDROP)           /* a click outside the card closes the dialog, nothing below gets it */
+                power_set(wm, false, NULL);
+            else if (pick->kind == LM_PICK_POWER_BUTTON && button == BTN_LEFT) {
+                wm->press_panel_kind = LM_PICK_POWER_BUTTON;
+                wm->press_panel_ws = pick->index;
+                wm->press_win = NULL;
+                wm->press_bits = 0;
+            }
+        } else {
+            wm->press_panel_kind = 0;
+            if (pk == LM_PICK_POWER_BUTTON && pick->kind == LM_PICK_POWER_BUTTON && pick->index == pi && button == BTN_LEFT)
+                power_activate(wm, pi);                         /* released on the button it was pressed on */
+        }
+        return true;
+    }
     if (pick->kind == LM_PICK_NOTIFY) {                    /* a click dismisses a notification and goes no further */
         if (pressed)
             note_dismiss(wm, pick->index);
@@ -2595,18 +2721,11 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             lm_input_cycle_layout(wm->srv->input, pi);
         if (pk == LM_PICK_PANEL_STICKY && pick->kind == LM_PICK_PANEL_STICKY && wm->srv->input)
             lm_input_set_sticky(wm->srv->input, !lm_input_sticky(wm->srv->input));
-        if (pk == LM_PICK_PANEL_LOCK && pick->kind == LM_PICK_PANEL_LOCK) {
-            if (!lm_lock_now(wm->srv->lock))                    /* no password / PIN yet: open the settings to set one */
-                launch_settings(wm);
-        }
-        if (pk == LM_PICK_PANEL_EXIT && pick->kind == LM_PICK_PANEL_EXIT) {
-            if (wm->exit_armed) {
-                lm_info("exit button confirmed, quitting");
-                request_quit(wm);
-            } else {
-                wm->exit_armed = true;
-                damage_panels(wm);
-            }
+        if (pk == LM_PICK_PANEL_POWER && pick->kind == LM_PICK_PANEL_POWER) {
+            double px = 0, py = 0;
+            if (wm->srv->seat)
+                lm_seat_pointer_position(wm->srv->seat, &px, &py);
+            power_set(wm, true, lm_output_nearest(wm->srv, px, py));        /* on the output whose panel was clicked */
         }
         return true;
     }
@@ -2694,8 +2813,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         return true;
     case LM_PICK_PANEL_RUN:
-    case LM_PICK_PANEL_LOCK:
-    case LM_PICK_PANEL_EXIT:
+    case LM_PICK_PANEL_POWER:
         if (button == BTN_LEFT) {
             wm->press_panel_kind = pick->kind;
             wm->press_win = NULL;
@@ -2784,6 +2902,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
         return;
     if (locked) {
         sw_close(wm);
+        power_set(wm, false, NULL);
         menu_set(wm, false, NULL);
         clip_nav_set(wm, false);
         if (wm->focused)
@@ -2825,6 +2944,22 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     bool ctrl = (mods & LM_MOD_CTRL) != 0;
     bool alt = (mods & LM_MOD_ALT) != 0;
 
+    if (wm->power_open && !(ctrl && alt)) {                     /* the session dialog is modal: it takes every key */
+        if (pressed && !repeat) {
+            if (code == KEY_ESC)
+                power_set(wm, false, NULL);
+            else if (code == KEY_LEFT || code == KEY_RIGHT || code == KEY_TAB) {
+                wm->power_sel = wm->power_sel < 0 ? (code == KEY_LEFT ? 1 : 0) : 1 - wm->power_sel;
+                power_damage(wm);
+            } else if ((code == KEY_ENTER || code == KEY_KPENTER) && wm->power_sel >= 0)
+                power_activate(wm, wm->power_sel);
+            else if (code == KEY_L)
+                power_activate(wm, 0);
+            else if (code == KEY_E)
+                power_activate(wm, 1);
+        }
+        return true;
+    }
     if (wm->sw_open) {                                          /* Alt+Tab: Alt released = go there, Esc = stay */
         if (!pressed && (code == KEY_LEFTALT || code == KEY_RIGHTALT)) {
             sw_commit(wm);

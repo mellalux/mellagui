@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, menu, lock, card, switcher;
+    struct gl_chrome panel, menu, lock, card, switcher, power;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
@@ -63,6 +63,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->lock);
     gl_chrome_free(r, &go->card);
     gl_chrome_free(r, &go->switcher);
+    gl_chrome_free(r, &go->power);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
@@ -180,6 +181,7 @@ static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel
 static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
+static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power(c, it); }
 static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
 
 static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
@@ -222,6 +224,55 @@ static unsigned gl_scratch(struct lm_renderer *r, struct out_state *st, struct g
     ch->h = h;
     free(pix);
     return ch->tex;
+}
+
+/* Like gl_scratch for painters that blend (the software painters assume an opaque target): the item is painted twice, over black and
+ * over white, and the alpha follows from the difference (white - black = 255 * (1 - alpha)); the texture is premultiplied. */
+static void gl_scratch_alpha(struct lm_renderer *r, struct out_state *st, struct gl_chrome *ch, const struct lm_rect *rect,
+                             gl_paint_fn fn, const void *item)
+{
+    int w = rect->w, h = rect->h;
+    size_t n = (size_t)w * (size_t)h;
+    if (w <= 0 || h <= 0)
+        return;
+    uint32_t *black = malloc(n * 4), *white = malloc(n * 4);
+    if (black && white) {
+        for (size_t i = 0; i < n; i++) {
+            black[i] = 0x000000u;
+            white[i] = 0xffffffu;
+        }
+        uint32_t *bufs[2] = { black, white };
+        for (int k = 0; k < 2; k++) {
+            struct lm_output fake = *st->out;
+            fake.x = rect->x;
+            fake.y = rect->y;
+            fake.width = w;
+            fake.height = h;
+            struct lm_framebuffer fb = { .pixels = bufs[k], .width = w, .height = h, .stride = w * 4 };
+            struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = *rect, .cov_idx = -1 };
+            fn(&c, item);
+        }
+        for (size_t i = 0; i < n; i++) {
+            uint32_t b = black[i], wh = white[i];
+            int d = (int)((((wh >> 16) & 255) - ((b >> 16) & 255)) + (((wh >> 8) & 255) - ((b >> 8) & 255)) +
+                          ((wh & 255) - (b & 255))) / 3;
+            int a = LM_CLAMP(255 - d, 0, 255);
+            uint32_t rr = LM_MIN((b >> 16) & 255, (uint32_t)a), gg = LM_MIN((b >> 8) & 255, (uint32_t)a), bb = LM_MIN(b & 255, (uint32_t)a);
+            black[i] = ((uint32_t)a << 24) | (rr << 16) | (gg << 8) | bb;
+        }
+        if (ch->tex && (ch->w != w || ch->h != h)) {
+            lm_gl_tex_delete(r->gl, ch->tex);
+            ch->tex = 0;
+        }
+        if (!ch->tex)
+            ch->tex = lm_gl_tex_create(r->gl, w, h, black);
+        else
+            lm_gl_tex_update(r->gl, ch->tex, 0, 0, w, h, black, w);
+        ch->w = w;
+        ch->h = h;
+    }
+    free(black);
+    free(white);
 }
 
 static void gl_tex_at(struct gl_pass *p, unsigned tex, const struct lm_rect *rect, bool opaque)
@@ -417,6 +468,20 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             gl_chrome_free(p->r, &own);
         break;
     }
+    case LM_SCENE_POWER:
+        if (item->output == p->st->out) {               /* translucent and independent of what is below: redrawn only when it changes */
+            const struct lm_power_info *pw = &item->u.power;
+            struct gl_chrome *ch = &p->go->power;
+            uint64_t h = fnv(1469598103934665603ull, &pw->card, sizeof(pw->card));
+            h = fnv(h, &pw->sel, sizeof(pw->sel));
+            if (!ch->tex || ch->hash != h || ch->w != pw->rect.w || ch->h != pw->rect.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &pw->rect, gl_do_power, pw);
+                ch->hash = h;
+            }
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &pw->rect, false);
+        }
+        break;
     case LM_SCENE_SWITCHER:
         gl_chrome_item(p, &p->go->switcher, &item->u.switcher.rect, gl_do_switcher, &item->u.switcher);
         break;
@@ -432,50 +497,13 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
 
 /* ---- overlays: screenshot flash and card, the cursor ------------------------------------------------------------------ */
 
+static void gl_do_card(const struct paint_ctx *c, const void *it) { paint_shot_card(c, it); }
+
 static void gl_card_paint(struct lm_renderer *r, struct out_state *st, struct gl_chrome *ch)
 {
     const struct shot_fx *fx = &r->shot;
     struct lm_rect cr = shot_card_rect(fx);
-    int w = cr.w, h = cr.h;
-    size_t n = (size_t)w * (size_t)h;
-    uint32_t *black = malloc(n * 4), *white = malloc(n * 4);
-    if (black && white) {
-        for (size_t i = 0; i < n; i++) {
-            black[i] = 0x000000u;
-            white[i] = 0xffffffu;
-        }
-        uint32_t *bufs[2] = { black, white };
-        for (int k = 0; k < 2; k++) {                   /* the same painter over two known backgrounds */
-            struct lm_output fake = *st->out;
-            fake.x = cr.x;
-            fake.y = cr.y;
-            fake.width = w;
-            fake.height = h;
-            struct lm_framebuffer fb = { .pixels = bufs[k], .width = w, .height = h, .stride = w * 4 };
-            struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = cr, .cov_idx = -1 };
-            paint_shot_card(&c, fx);
-        }
-        for (size_t i = 0; i < n; i++) {                /* over black: premultiplied colour; white - black = 255 * (1 - alpha) */
-            uint32_t b = black[i], wh = white[i];
-            int d = (int)((((wh >> 16) & 255) - ((b >> 16) & 255)) + (((wh >> 8) & 255) - ((b >> 8) & 255)) +
-                          ((wh & 255) - (b & 255))) / 3;
-            int a = LM_CLAMP(255 - d, 0, 255);
-            uint32_t rr = LM_MIN((b >> 16) & 255, (uint32_t)a), gg = LM_MIN((b >> 8) & 255, (uint32_t)a), bb = LM_MIN(b & 255, (uint32_t)a);
-            black[i] = ((uint32_t)a << 24) | (rr << 16) | (gg << 8) | bb;
-        }
-        if (ch->tex && (ch->w != w || ch->h != h)) {
-            lm_gl_tex_delete(r->gl, ch->tex);
-            ch->tex = 0;
-        }
-        if (!ch->tex)
-            ch->tex = lm_gl_tex_create(r->gl, w, h, black);
-        else
-            lm_gl_tex_update(r->gl, ch->tex, 0, 0, w, h, black, w);
-        ch->w = w;
-        ch->h = h;
-    }
-    free(black);
-    free(white);
+    gl_scratch_alpha(r, st, ch, &cr, gl_do_card, fx);
 }
 
 static void gl_overlays(struct gl_pass *p)

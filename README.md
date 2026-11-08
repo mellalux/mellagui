@@ -100,13 +100,14 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
 Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, Editor, Files, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
-add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, *Run* (run dialog) and *Exit*
-(first click turns it red and shows "Sure?", the second click quits; moving the pointer away cancels), the clock and, at the far right, the small *Lock* button.
+add or replace entries with `--app "Name=command"`, repeatable), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, and *Run* (run dialog), the clock and, in the top right corner, the round
+*power button*: it opens the session dialog (the screen is dimmed, a card with two round buttons, *Lock* and *Exit*; click a button, or Left / Right / Tab then Enter, or press L / E; Esc, a click outside the card or the
+power button again closes it; the dialog is modal, nothing below it gets keys or clicks).
 
 ### Screen lock
 
 *Settings* → *Security* sets a password (8+ characters) or a PIN (4-12 digits), an idle time after which the screen locks by itself
-(0 = never), how long after locking the monitors go to standby ("Screen off after", default 3 minutes, 0 = never) and "Lock when MellaGUI starts". **Super+L**, the panel's *Lock* button or the page's *Lock now* lock the screen; with no
+(0 = never), how long after locking the monitors go to standby ("Screen off after", default 3 minutes, 0 = never) and "Lock when MellaGUI starts". **Super+L**, *Lock* in the panel's session dialog or the page's *Lock now* lock the screen; with no
 password set yet the button opens the settings instead. Type the secret and press Enter (Esc clears, Backspace deletes; Super+Space
 switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
 
@@ -116,7 +117,7 @@ switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
   Changing or removing the lock needs the current secret. Three wrong tries in a row start a delay that doubles from 5 s up to 5 minutes.
 * Standby: with the screen locked and no input for that long, the monitors are switched off (DRM DPMS, they lose the signal and sleep).
   The first key press or mouse move only wakes them; unlocking wakes them too. Not tested on real hardware yet.
-* With a lock set, Super+Shift+E and the panel's *Exit* lock the screen and quit only after the secret was typed (Esc on an empty
+* With a lock set, Super+Shift+E and *Exit* in the session dialog lock the screen and quit only after the secret was typed (Esc on an empty
   field cancels). *Lock when MellaGUI starts* is on by default, and "Console switch works while locked" can be turned off.
   For a server run MellaGUI as a service so there is no shell behind it: see [docs/SERVER.md](docs/SERVER.md) and `contrib/mellagui.service`.
 * Who may connect: the Wayland socket is 0600 and the compositor refuses clients of other users. On a real display only MellaGUI's own

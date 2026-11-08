@@ -4,6 +4,9 @@ through the raw wire client in wlclient.py.
 Environment:
     MELLAGUI_BIN   compositor binary (default build/mellagui; use build/mellagui-asan for sanitizers)
 """
+import base64
+import io
+import random
 import json
 import os
 import signal
@@ -1880,7 +1883,7 @@ class TestClients(Base):
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def files_start(self):
+    def files_start(self, *args, app_id='mellagui.files'):
         """A folder with sub/, a.txt, p.ppm (a 1x1 image), .hidden and the browser on it. Returns (process, folder)."""
         exe = os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
@@ -1899,9 +1902,9 @@ class TestClients(Base):
         with open(os.path.join(d, 'blob.bin'), 'wb') as f:
             f.write(b'\x00\x01\x02')
         for w in ctl.windows()['windows']:
-            self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.edit', 'mellagui.view', 'mellagui.term'),
+            self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.files.choose', 'mellagui.edit', 'mellagui.view', 'mellagui.term'),
                              'a window of an earlier test is still open')
-        p = subprocess.Popen([exe, d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen([exe] + list(args) + [d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         def cleanup():
             for pid in os.listdir('/proc'):                       # the programs it started are its children
                 if not pid.isdigit():
@@ -1918,7 +1921,7 @@ class TestClients(Base):
                 p.wait()
             time.sleep(0.2)
         self.addCleanup(cleanup)
-        self.assertIsNotNone(wait_for_window('mellagui.files'), 'the file browser did not appear')
+        self.assertIsNotNone(wait_for_window(app_id), 'the file browser did not appear')
         time.sleep(0.4)
         return p, d
 
@@ -1971,6 +1974,63 @@ class TestClients(Base):
         ctl.tap(self.K_DOWN)                                   # p.ppm
         ctl.tap(KEY_ENTER)
         self.wait_title('mellagui.view', 'p.ppm - Images')
+
+    def test_files_choose_sets_the_wallpaper(self):
+        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
+        ctl.cmd('settings wallpaper ""')
+        p, d = self.files_start('--choose', 'wallpaper', app_id='mellagui.files.choose')
+        self.assertEqual(self.window_title('mellagui.files.choose'), os.path.basename(d) + ' - Choose a picture')
+        ctl.tap(self.K_DOWN)                                   # a.txt (sub is selected first): not a picture, nothing happens
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok ')
+        self.assertIsNone(p.poll())
+        ctl.tap(self.K_DOWN)                                   # blob.bin
+        ctl.tap(self.K_DOWN)                                   # p.ppm
+        ctl.tap(KEY_ENTER)
+        for _ in range(100):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(p.poll(), 0, 'the chooser should end after the choice')
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok ' + os.path.join(d, 'p.ppm'))
+
+    def test_files_choose_accepts_a_jpeg(self):
+        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
+        ctl.cmd('settings wallpaper ""')
+        p, d = self.files_start('--choose', 'wallpaper', app_id='mellagui.files.choose')
+        with open(os.path.join(d, 'z.JPG'), 'wb') as f:                   # sorts last; the extension is matched without case
+            f.write(JPEG_RED_BLUE)
+        ctl.tap(63)                                                       # F5: read the folder again
+        time.sleep(0.3)
+        ctl.tap(self.K_END)
+        ctl.tap(KEY_ENTER)
+        for _ in range(100):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(p.poll(), 0)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok ' + os.path.join(d, 'z.JPG'))
+        ctl.cmd('setting wallpaper-status')
+        self.assertEqual(ctl.last, 'ok ok')
+
+    def test_files_choose_escape_cancels_and_only_wallpaper_is_allowed(self):
+        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
+        ctl.cmd('settings wallpaper ""')
+        p, d = self.files_start('--choose', 'wallpaper', app_id='mellagui.files.choose')
+        ctl.tap(KEY_ESC)
+        for _ in range(100):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(p.poll(), 0)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok ')
+        r = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-files'), '--choose', 'lock-now'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 2)
 
     def test_files_hidden_toggle_and_letter_jump(self):
         p, d = self.files_start()
@@ -3045,10 +3105,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its two buttons, wraps over the eleven page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 21st press; Space toggles it
+        # the wallpaper field, its four radio buttons and its three buttons, wraps over the eleven page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 22nd press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(21):
+        for _ in range(22):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -3113,6 +3173,24 @@ esac
         ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)
         time.sleep(0.3)
         self.assertEqual(settings()['sysinfo'], '0')
+
+    def test_panel_wallpaper_browse_button_opens_the_picture_chooser(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-files')):
+            self.skipTest('mellagui-files not built')
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        time.sleep(0.2)
+        ctl.click(x0 + 460, y0 + 291)                           # "Browse..."
+        chooser = wait_for_window('mellagui.files.choose')
+        self.assertIsNotNone(chooser, 'the picture chooser did not open')
+        self.assertIn('Choose a picture', chooser['title'])
+        time.sleep(0.3)
+        ctl.tap(KEY_ESC)                                        # Esc cancels it
+        for _ in range(100):
+            if wait_for_window('mellagui.files.choose', 0.05) is None:
+                break
+        self.assertIsNone(wait_for_window('mellagui.files.choose', 0.3))
 
     def test_panel_wallpaper_page_field_radios_and_buttons(self):
         self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
@@ -4792,6 +4870,11 @@ def expected_rgb(ctype, depth, px, x, y, palette=None, trns=None):
     return (r, gg, b)
 
 
+# A 16x16 baseline JPEG (4:4:4, quality 95): red (230,30,30) left half, blue (30,30,230) right half.
+JPEG_RED_BLUE = base64.b64decode(
+    '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAAQABADAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5nr+dz/ZA+a6/6GD/AAvPpSv+ec/3QPmuv+hg/wALz//Z')
+
+
 class TestImages(unittest.TestCase):
     """mellagui-view's PNG decoder (own inflate) against zlib's output, and the viewer window itself."""
     VIEW = os.environ.get('MELLAGUI_VIEW_BIN', os.path.join(ROOT, 'build', 'mellagui-view'))
@@ -4858,6 +4941,88 @@ class TestImages(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, name)
                 self.assertNotIn('Sanitizer', r.stderr)
                 self.assertTrue(r.stderr.strip(), 'no message')
+
+    def test_jpeg_baseline(self):
+        r, dst = self.decode(JPEG_RED_BLUE, 'x.jpg')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ppm = Ppm(dst)
+        self.assertEqual((ppm.w, ppm.h), (16, 16))
+        for (x, y), want in (((1, 1), (230, 30, 30)), ((14, 14), (30, 30, 230)), ((3, 12), (230, 30, 30))):
+            got = ppm.px(x, y)
+            self.assertTrue(all(abs(a - b) <= 6 for a, b in zip(got, want)), (x, y, got, want))
+
+    def test_jpeg_against_pillow(self):
+        """Baseline, progressive, subsampled, grey, with restart markers and EXIF orientation: the same pixels as Pillow gives."""
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            self.skipTest('Pillow not installed')
+        import math
+        im = Image.new('RGB', (75, 41))
+        for x in range(75):
+            for y in range(41):
+                im.putpixel((x, y), (int(127 + 120 * math.sin(x / 9.0 + y / 17.0)), int(127 + 120 * math.sin(y / 7.0)),
+                                     int(127 + 120 * math.cos((x + y) / 13.0))))
+        cases = (('444', dict(subsampling=0, quality=92), 0.7, 5), ('420', dict(subsampling=2, quality=85), 3.0, 60),
+                 ('422', dict(subsampling=1, quality=85), 3.0, 60), ('prog420', dict(subsampling=2, quality=85, progressive=True), 3.0, 60),
+                 ('prog444', dict(subsampling=0, quality=92, progressive=True), 0.7, 5), ('restart', dict(subsampling=2, quality=80, restart_marker_blocks=3), 3.0, 60),
+                 ('optimized', dict(subsampling=0, quality=75, optimize=True), 0.7, 5))
+        for name, kw, mean_limit, max_limit in cases:
+            with self.subTest(name):
+                buf = io.BytesIO()
+                im.save(buf, 'JPEG', **kw)
+                r, dst = self.decode(buf.getvalue(), name + '.jpg')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                ppm = Ppm(dst)
+                ref = Image.open(io.BytesIO(buf.getvalue())).convert('RGB')
+                self.assertEqual((ppm.w, ppm.h), ref.size)
+                diffs = [abs(a - b) for a, b in zip(open(dst, 'rb').read().split(b'\n', 3)[3], ref.tobytes())]
+                self.assertLessEqual(sum(diffs) / len(diffs), mean_limit)
+                self.assertLessEqual(max(diffs), max_limit)
+        grey = im.convert('L')
+        for kw in (dict(quality=88), dict(quality=88, progressive=True)):
+            buf = io.BytesIO()
+            grey.save(buf, 'JPEG', **kw)
+            r, dst = self.decode(buf.getvalue(), 'grey.jpg')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ref = Image.open(io.BytesIO(buf.getvalue())).convert('RGB')
+            diffs = [abs(a - b) for a, b in zip(open(dst, 'rb').read().split(b'\n', 3)[3], ref.tobytes())]
+            self.assertLessEqual(max(diffs), 3)
+        small = Image.new('RGB', (40, 20))
+        for x in range(40):
+            for y in range(20):
+                small.putpixel((x, y), (x * 6, y * 12, 128))
+        for o in range(1, 9):
+            with self.subTest(orientation=o):
+                ex = Image.Exif()
+                ex[0x0112] = o
+                buf = io.BytesIO()
+                small.save(buf, 'JPEG', quality=95, subsampling=0, exif=ex)
+                r, dst = self.decode(buf.getvalue(), 'o%d.jpg' % o)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                ref = ImageOps.exif_transpose(Image.open(io.BytesIO(buf.getvalue()))).convert('RGB')
+                ppm = Ppm(dst)
+                self.assertEqual((ppm.w, ppm.h), ref.size)
+                diffs = [abs(a - b) for a, b in zip(open(dst, 'rb').read().split(b'\n', 3)[3], ref.tobytes())]
+                self.assertLessEqual(max(diffs), 6)
+
+    def test_damaged_jpegs_are_refused_not_crashed(self):
+        good = JPEG_RED_BLUE
+        rnd = random.Random(3)
+        cases = [('junk-after-soi', b'\xff\xd8\xff\xe0\x00\x02'), ('truncated-half', good[:len(good) // 2]), ('truncated-header', good[:30]),
+                 ('no-scan', good[:good.index(b'\xff\xda')]), ('cmyk-like', good.replace(b'\x03\x01\x11\x00', b'\x04\x01\x11\x00', 1))]
+        for i in range(40):
+            d = bytearray(good)
+            for _ in range(rnd.randrange(1, 5)):
+                d[rnd.randrange(len(d))] = rnd.randrange(256)
+            cases.append(('flipped%d' % i, bytes(d)))
+        for name, data in cases:
+            with self.subTest(name):
+                r, _ = self.decode(data, 'bad.jpg')
+                self.assertIn(r.returncode, (0, 1), name)                 # an error or (for harmless flips) a picture, never a crash
+                self.assertNotIn('Sanitizer', r.stderr)
+                if r.returncode:
+                    self.assertTrue(r.stderr.strip(), 'no message')
 
     def test_ppm(self):
         data = b'P6\n# comment\n3 2\n255\n' + bytes(range(18))
@@ -5371,6 +5536,19 @@ class TestWallpaper(Base):
     def get(self, c, key):
         c.cmd('setting ' + key)
         return c.last[3:]
+
+    def test_a_jpeg_works_as_the_wallpaper(self):
+        c = self.start('mellagui-wall9')
+        path = os.path.join(tmp, 'wall-j.jpg')
+        with open(path, 'wb') as f:
+            f.write(JPEG_RED_BLUE)
+        c.cmd('settings wallpaper-mode stretch')
+        c.cmd('settings wallpaper ' + path)
+        self.assertEqual(self.get(c, 'wallpaper-status'), 'ok')
+        st = self.shot(c, 'jpeg')
+        left, right = st.px(10, 250), st.px(790, 400)
+        self.assertTrue(all(abs(a - b) <= 8 for a, b in zip(left, (230, 30, 30))), left)
+        self.assertTrue(all(abs(a - b) <= 8 for a, b in zip(right, (30, 30, 230))), right)
 
     def test_modes_place_the_picture(self):
         c = self.start('mellagui-wall1')

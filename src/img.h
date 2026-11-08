@@ -1,6 +1,6 @@
 /*
- * img.h - image decoders for mellagui-view: PNG (own inflate, all colour types and bit depths, no interlacing) and
- * binary PPM (P6). Transparent pixels are composited over a grey checkerboard, the result is opaque XRGB8888.
+ * img.h - image decoders for mellagui-view and the wallpaper: PNG (own inflate, all colour types and bit depths, no interlacing),
+ * JPEG (jpeg.c: baseline and progressive, EXIF orientation) and binary PPM (P6). Transparent pixels are composited over a grey checkerboard, the result is opaque XRGB8888.
  */
 #ifndef MELLAGUI_IMG_H
 #define MELLAGUI_IMG_H
@@ -16,8 +16,9 @@ struct lm_image {
 };
 
 /* Both return 0, or -1 with a short message in err. */
+int lm_jpeg_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz);   /* jpeg.c */
 int lm_img_load(const char *path, struct lm_image *img, char *err, size_t errsz);
-int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz);   /* PNG or P6 by content */
+int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz);   /* PNG, JPEG or P6 by content */
 void lm_img_free(struct lm_image *img);
 
 #endif

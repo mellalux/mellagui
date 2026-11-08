@@ -59,7 +59,8 @@ struct app {
 static bool is_image_name(const char *n)
 {
     size_t l = strlen(n);
-    return n[0] != '.' && l > 4 && (!strcasecmp(n + l - 4, ".png") || !strcasecmp(n + l - 4, ".ppm"));
+    return n[0] != '.' && l > 4 && (!strcasecmp(n + l - 4, ".png") || !strcasecmp(n + l - 4, ".ppm") || !strcasecmp(n + l - 4, ".jpg") ||
+                                    (l > 5 && !strcasecmp(n + l - 5, ".jpeg")));
 }
 
 static int cmp_names(const void *a, const void *b)

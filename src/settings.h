@@ -21,7 +21,7 @@
  *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm
  *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the
  *                                              monitor's native shape (edid.h), preferred = the monitor's own preferred mode
- *   wallpaper       "" | file name             desktop background picture (PNG or PPM; "~/" = home; at most 200 bytes); "" = the gradient
+ *   wallpaper       "" | file name             desktop background picture (PNG, JPEG or PPM; "~/" = home; at most 200 bytes); "" = the gradient
  *   wallpaper-mode  fill | fit | stretch | center   how it is placed: cover and crop, whole picture with bars, stretched, unscaled in the middle
  *   wallpaper-status (read only)               "" (none set) | ok | error: <why> for the last wallpaper that was set
  *   output-order    "HDMI-A-1,DP-2" | ""       connector names, leftmost monitor first; outputs not named follow in connection order (empty = connection

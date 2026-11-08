@@ -64,6 +64,21 @@ struct lm_keybinds {
     int n;
 };
 
+/* "Super+Shift+1" for a combination (canonical spelling); false when the key has no name in the table above. */
+bool lm_keys_combo_text(uint32_t mods, uint32_t code, char *out, size_t n);
+/* "move-to-workspace 1" / "exec firefox": the action part of a binding. */
+void lm_keys_action_text(const struct lm_keybind *b, char *out, size_t n);
+/* Parse "Super+Shift+1" (case does not matter). */
+bool lm_keys_parse_combo(const char *text, uint32_t *mods, uint32_t *code);
+/* Would the line `combo = value` of [keys] be accepted (and is it not "none")? For the settings panel. */
+bool lm_keys_valid(const char *combo, const char *value);
+/* True when two spellings name the same combination ("alt+f4", "Alt+F4"). */
+bool lm_keys_same_combo(const char *a, const char *b);
+/* The built-in binding of a combination, or NULL. */
+const struct lm_keybind *lm_keys_builtin(uint32_t code, uint32_t mods);
+/* All action names, space separated ("terminal run settings exec ..."). */
+const char *lm_keys_action_names(void);
+
 /* Fill with the built-in bindings (the same text lm_keys_default_conf() returns). */
 void lm_keys_defaults(struct lm_keybinds *k);
 

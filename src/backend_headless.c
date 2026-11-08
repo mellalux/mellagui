@@ -293,9 +293,15 @@ static void ctl_command(struct ctl_client *c, char *line)
         for (int i = 0; i < srv->config.napps; i++)
             ctl_reply(c, "app %s|%s\n", srv->config.apps[i].name, srv->config.apps[i].cmd);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "setraw")) {
+        /* setraw <key> <value...> -> set a setting whose value has spaces or control characters (the menu-* ones); single spaces only */
+        if (!srv->settings || !a1 || !a2) { ctl_reply(c, "err usage: setraw <key> <value>\n"); return; }
+        char val[1400];
+        snprintf(val, sizeof(val), "%s%s%s%s%s", a2, a3 ? " " : "", a3 ? a3 : "", save && *save ? " " : "", save && *save ? save : "");
+        ctl_reply(c, lm_settings_set(srv->settings, a1, val) ? "ok\n" : "err rejected\n");
     } else if (!strcmp(cmd, "reload")) {
         /* reload -> read mellagui.conf again (what SIGUSR2 and the reload-config shortcut do); "ok <rejected lines>" */
-        int bad = srv->reload_config ? srv->reload_config(srv) : -1;
+        int bad = srv->reload_config ? srv->reload_config(srv, false) : -1;
         if (bad < 0)
             ctl_reply(c, "err no configuration file\n");
         else

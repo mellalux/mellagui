@@ -157,12 +157,9 @@ static int find_index(const struct lm_keybinds *k, uint32_t mods, uint32_t code)
     return -1;
 }
 
-/* Install or (action none) remove a binding. */
-static bool set_binding(struct lm_keybinds *k, const char *combo, const char *value)
+/* "close" / "workspace 3" / "exec CMD" -> the action fields of nb. */
+static bool parse_action(const char *value, struct lm_keybind *nb)
 {
-    uint32_t mods, code;
-    if (!parse_combo(combo, &mods, &code))
-        return false;
     char name[40];
     const char *arg = value;
     size_t nl = strcspn(value, " \t");
@@ -181,7 +178,9 @@ static bool set_binding(struct lm_keybinds *k, const char *combo, const char *va
     if (!def)
         return false;
 
-    struct lm_keybind nb = { .mods = mods, .code = code, .action = def->act };
+    nb->action = def->act;
+    nb->num = 0;
+    nb->arg[0] = 0;
     if (def->arg == ARG_NONE && *arg)
         return false;
     if (def->arg == ARG_WORKSPACE) {
@@ -189,18 +188,32 @@ static bool set_binding(struct lm_keybinds *k, const char *combo, const char *va
         long n = strtol(arg, &end, 10);
         if (end == arg || *end || n < 1 || n > 4)      /* LM_NUM_WORKSPACES */
             return false;
-        nb.num = (int)n - 1;
+        nb->num = (int)n - 1;
     }
     if (def->arg == ARG_COMMAND) {
         if (!*arg || strlen(arg) >= LM_KEYBIND_ARG)
             return false;
-        strcpy(nb.arg, arg);
+        strcpy(nb->arg, arg);
     }
+    return true;
+}
+
+/* Install or (action none) remove a binding. The order of the others is kept (the panel lists them in table order). */
+static bool set_binding(struct lm_keybinds *k, const char *combo, const char *value)
+{
+    uint32_t mods, code;
+    if (!parse_combo(combo, &mods, &code))
+        return false;
+    struct lm_keybind nb = { .mods = mods, .code = code };
+    if (!parse_action(value, &nb))
+        return false;
 
     int i = find_index(k, mods, code);
-    if (def->act == LM_ACT_NONE) {
-        if (i >= 0)
-            k->b[i] = k->b[--k->n];            /* order does not matter, the combinations are unique */
+    if (nb.action == LM_ACT_NONE) {
+        if (i >= 0) {
+            memmove(&k->b[i], &k->b[i + 1], (size_t)(k->n - i - 1) * sizeof(k->b[0]));
+            k->n--;
+        }
         return true;
     }
     if (i < 0) {
@@ -212,6 +225,40 @@ static bool set_binding(struct lm_keybinds *k, const char *combo, const char *va
     }
     k->b[i] = nb;
     return true;
+}
+
+bool lm_keys_parse_combo(const char *text, uint32_t *mods, uint32_t *code) { return parse_combo(text, mods, code); }
+
+bool lm_keys_valid(const char *combo, const char *value)
+{
+    uint32_t mods, code;
+    struct lm_keybind nb;
+    return parse_combo(combo, &mods, &code) && parse_action(value, &nb) && nb.action != LM_ACT_NONE;
+}
+
+bool lm_keys_same_combo(const char *a, const char *b)
+{
+    uint32_t ma, ca, mb, cb;
+    return parse_combo(a, &ma, &ca) && parse_combo(b, &mb, &cb) && ma == mb && ca == cb;
+}
+
+const char *lm_keys_action_names(void)
+{
+    static char text[512];
+    if (!text[0]) {
+        size_t o = 0;
+        for (size_t i = 1; i < sizeof(actions) / sizeof(actions[0]); i++)          /* [0] is "none" */
+            o += (size_t)snprintf(text + o, sizeof(text) - o, "%s%s", i > 1 ? " " : "", actions[i].name);
+    }
+    return text;
+}
+
+const struct lm_keybind *lm_keys_builtin(uint32_t code, uint32_t mods)
+{
+    static struct lm_keybinds defaults;
+    if (!defaults.n)
+        lm_keys_defaults(&defaults);
+    return lm_keys_find(&defaults, code, mods);
 }
 
 bool lm_keys_conf(void *ud, const char *section, const char *key, const char *value)
@@ -231,28 +278,44 @@ const struct lm_keybind *lm_keys_find(const struct lm_keybinds *k, uint32_t code
     return i < 0 ? NULL : &k->b[i];
 }
 
-void lm_keys_describe(const struct lm_keybind *b, char *out, size_t n)
+bool lm_keys_combo_text(uint32_t mods, uint32_t code, char *out, size_t n)
 {
-    size_t o = 0;
     static const struct { uint32_t bit; const char *name; } order[] = {
         { LM_MOD_SUPER, "Super" }, { LM_MOD_CTRL, "Ctrl" }, { LM_MOD_ALT, "Alt" }, { LM_MOD_SHIFT, "Shift" } };
+    size_t o = 0;
+    out[0] = 0;
     for (size_t i = 0; i < 4 && o < n; i++)
-        if (b->mods & order[i].bit)
+        if (mods & order[i].bit)
             o += (size_t)snprintf(out + o, n - o, "%s+", order[i].name);
-    const char *key = "?";
-    for (size_t i = 0; i < sizeof(key_names) / sizeof(key_names[0]); i++)
-        if (key_names[i].code == b->code) {
-            key = key_names[i].name;
-            break;
+    for (size_t i = 0; i < sizeof(key_names) / sizeof(key_names[0]); i++) {
+        if (key_names[i].code == code) {
+            if (o < n)
+                snprintf(out + o, n - o, "%s", key_names[i].name);
+            return true;
         }
+    }
+    return false;
+}
+
+void lm_keys_action_text(const struct lm_keybind *b, char *out, size_t n)
+{
     const char *act = "?";
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++)
         if (actions[i].act == b->action)
             act = actions[i].name;
-    if (o < n)
-        o += (size_t)snprintf(out + o, n - o, "%s = %s", key, act);
-    if (o < n && (b->action == LM_ACT_WORKSPACE || b->action == LM_ACT_MOVE_TO_WORKSPACE))
-        snprintf(out + o, n - o, " %d", b->num + 1);
-    else if (o < n && b->action == LM_ACT_EXEC)
-        snprintf(out + o, n - o, " %s", b->arg);
+    if (b->action == LM_ACT_WORKSPACE || b->action == LM_ACT_MOVE_TO_WORKSPACE)
+        snprintf(out, n, "%s %d", act, b->num + 1);
+    else if (b->action == LM_ACT_EXEC)
+        snprintf(out, n, "%s %s", act, b->arg);
+    else
+        snprintf(out, n, "%s", act);
+}
+
+void lm_keys_describe(const struct lm_keybind *b, char *out, size_t n)
+{
+    char combo[64], act[LM_KEYBIND_ARG + 40];
+    if (!lm_keys_combo_text(b->mods, b->code, combo, sizeof(combo)))
+        snprintf(combo, sizeof(combo), "?");
+    lm_keys_action_text(b, act, sizeof(act));
+    snprintf(out, n, "%s = %s", combo, act);
 }

@@ -240,7 +240,7 @@ static char g_conf_path[PATH_MAX];      /* the mellagui.conf that was read at st
 /* Read mellagui.conf again: theme, sizes, shortcuts, menu and commands start from the built-in values and the file is applied on top,
  * the command line (--terminal, --run, --app) stays. Programs that are already running keep the colours they started with.
  * Returns the number of rejected lines, -1 when there is no (readable) file; nothing changes then. */
-static int reload_config(struct lm_server *srv)
+static int reload_config(struct lm_server *srv, bool quiet)
 {
     if (!g_conf_path[0] || access(g_conf_path, R_OK) != 0) {
         lm_warn("reload: no readable configuration file");
@@ -262,6 +262,8 @@ static int reload_config(struct lm_server *srv)
     lm_settings_changed(srv->settings);
     if (srv->wm) {
         lm_wm_config_changed(srv->wm);
+        if (quiet && bad <= 0)
+            return bad < 0 ? 0 : bad;
         char body[96];
         if (bad > 0)
             snprintf(body, sizeof(body), "%d line(s) ignored, see the log", bad);
@@ -275,7 +277,7 @@ static int reload_config(struct lm_server *srv)
 static void sig_reload(int signo, void *data)
 {
     (void)signo;
-    reload_config(data);
+    reload_config(data, false);
 }
 
 int main(int argc, char **argv)

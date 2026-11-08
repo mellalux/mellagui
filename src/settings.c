@@ -12,6 +12,10 @@
 
 #include "audio.h"
 #include "confdefault.h"
+#include "confedit.h"
+#include "keys.h"
+#include "launchers.h"
+#include <strings.h>
 #include "backend.h"
 #include "input.h"
 #include "sound.h"
@@ -29,11 +33,16 @@
 #define SAVE_DELAY_MS 300
 
 /* Keys before K_FILE are saved to the settings file, the ones after it are read-only or live state only. */
+#define KEYS_PAGE_ROWS 10
+
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
-    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_COUNT
+    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE,
+    K_MENU_0, K_MENU_LAST = K_MENU_0 + LM_MAX_APPS - 1, K_MENU_PUT, K_MENU_DEL, K_MENU_MOVE, K_MENU_RESET,
+    K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
+    K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -47,7 +56,18 @@ static const char *const key_names[K_COUNT] = {
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
     [K_CONFIG_FILE] = "config-file", [K_CONFIG_STATUS] = "config-status", [K_CONFIG_RELOAD] = "config-reload", [K_CONFIG_CREATE] = "config-create",
+    [K_MENU_PUT] = "menu-put", [K_MENU_DEL] = "menu-del", [K_MENU_MOVE] = "menu-move", [K_MENU_RESET] = "menu-reset",
+#define MN(i) [K_MENU_0 + (i)] = "menu-" #i
+    MN(0), MN(1), MN(2), MN(3), MN(4), MN(5), MN(6), MN(7), MN(8), MN(9), MN(10), MN(11),
+#undef MN
+    [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
+    [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
+#define KR(i) [K_KEYS_ROW_0 + (i)] = "keys-row-" #i
+    KR(0), KR(1), KR(2), KR(3), KR(4), KR(5), KR(6), KR(7), KR(8), KR(9),
+#undef KR
 };
+_Static_assert(KEYS_PAGE_ROWS == 10, "key_names lists keys-row-0 .. keys-row-9");
+_Static_assert(LM_MAX_APPS == 12, "key_names lists menu-0 .. menu-11");
 
 static int key_find(const char *key)
 {
@@ -79,6 +99,8 @@ struct lm_settings {
     char profiles[VALUE_MAX], profile[24];  /* cached PipeWire card profiles (pw-cli), the same */
     struct lm_timer *rescan_timer;          /* after a profile change PipeWire needs a moment to make the new sink */
     int rescan_left;
+    struct lm_timer *capture_timer;         /* gives up a key capture nobody finished (the panel was closed meanwhile) */
+    int keys_page;          /* which ten shortcuts keys-row-0..9 show (the Keys page of the panel) */
 };
 
 #define DEFAULT_REVERT_MS 15000
@@ -329,6 +351,12 @@ static struct lm_output *first_output(struct lm_server *srv)
     return NULL;
 }
 
+static int keys_page_clamped(const struct lm_settings *s)
+{
+    int last = s->srv->config.keys.n > 0 ? (s->srv->config.keys.n - 1) / KEYS_PAGE_ROWS : 0;
+    return LM_CLAMP(s->keys_page, 0, last);
+}
+
 static void get_value(struct lm_settings *s, int k, char *out, size_t n)
 {
     struct lm_server *srv = s->srv;
@@ -439,6 +467,30 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
             snprintf(out, n, "ok");
         break;
     case K_CONFIG_RELOAD: case K_CONFIG_CREATE: break;                   /* write only */
+    case K_MENU_PUT: case K_MENU_DEL: case K_MENU_MOVE: case K_MENU_RESET: break;
+    case K_KEYS_COUNT: snprintf(out, n, "%d", c->keys.n); break;
+    case K_KEYS_PAGE: snprintf(out, n, "%d", keys_page_clamped(s)); break;
+    case K_KEYS_ACTIONS: snprintf(out, n, "%s", lm_keys_action_names()); break;
+    case K_KEYS_CAPTURE: snprintf(out, n, "%d", srv->wm && lm_wm_key_capturing(srv->wm) ? 1 : 0); break;
+    case K_KEYS_CAPTURED: snprintf(out, n, "%s", srv->wm ? lm_wm_key_captured(srv->wm) : ""); break;
+    case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET: break;
+    case K_KEYS_ROW_0 ... K_KEYS_ROW_LAST: {    /* "Super+Q<US>close" of the shortcut at keys-page * 10 + row, "" past the end */
+        int i = keys_page_clamped(s) * KEYS_PAGE_ROWS + (k - K_KEYS_ROW_0);
+        if (i < c->keys.n) {
+            char combo[64], act[LM_KEYBIND_ARG + 40];
+            if (!lm_keys_combo_text(c->keys.b[i].mods, c->keys.b[i].code, combo, sizeof(combo)))
+                snprintf(combo, sizeof(combo), "?");
+            lm_keys_action_text(&c->keys.b[i], act, sizeof(act));
+            snprintf(out, n, "%s\x1f%s", combo, act);
+        }
+        break;
+    }
+    case K_MENU_0 ... K_MENU_LAST: {            /* "name<US>command" of entry i of [menu] (raw text), "" past the end */
+        const char *nm, *cm;
+        if (lm_launch_menu_entry(k - K_MENU_0, &nm, &cm))
+            snprintf(out, n, "%s\x1f%s", nm, cm);
+        break;
+    }
     }
 }
 
@@ -455,7 +507,8 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 {
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
-        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS)
+        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_MENU_0 && k <= K_MENU_LAST) ||
+            k == K_KEYS_ACTIONS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
@@ -568,6 +621,15 @@ static void audio_rescan(struct lm_settings *s)
     snprintf(s->profiles, sizeof(s->profiles), "%s", list);
 }
 
+static void capture_cb(void *data)
+{
+    struct lm_settings *s = data;
+    if (s->srv->wm && lm_wm_key_capturing(s->srv->wm)) {
+        lm_wm_key_capture(s->srv->wm, false);
+        broadcast(s);
+    }
+}
+
 static void rescan_cb(void *data)
 {
     struct lm_settings *s = data;
@@ -671,6 +733,188 @@ static bool confirm_resolution(struct lm_settings *s, const char *val)
 }
 
 /* ---- applying a change ---------------------------------------------------------------------------- */
+
+/* ---- the [menu] section, edited from the panel's Menu page ----------------------------------------------------------------- */
+
+#define MENU_US '\x1f'                      /* separates the fields of a menu value */
+
+struct menu_list {
+    char name[LM_MAX_APPS][64];
+    char cmd[LM_MAX_APPS][1024];
+    int n;
+};
+
+static bool menu_name_ok(const char *s)
+{
+    size_t n = strlen(s);
+    if (!n || n >= 64 || s[0] == ' ' || s[n - 1] == ' ' || s[0] == '#' || s[0] == ';' || s[0] == '[')
+        return false;
+    for (const char *p = s; *p; p++)
+        if (*p == '=' || (unsigned char)*p < 0x20)
+            return false;
+    return true;
+}
+
+static bool menu_cmd_ok(const char *s)
+{
+    size_t n = strlen(s);
+    if (!n || n >= 1024 || s[0] == ' ' || s[n - 1] == ' ')
+        return false;
+    for (const char *p = s; *p; p++)
+        if ((unsigned char)*p < 0x20 && *p != '\t')
+            return false;
+    return true;
+}
+
+/* Write the list as the file's [menu] section and read the file again. */
+static bool menu_commit(struct lm_server *srv, const struct menu_list *l)
+{
+    const char *path = srv->config.conf_path;
+    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
+        return false;
+    char *body = malloc((size_t)LM_MAX_APPS * (64 + 1024 + 8) + 1);
+    if (!body)
+        return false;
+    size_t o = 0;
+    for (int i = 0; i < l->n; i++)
+        o += (size_t)snprintf(body + o, (size_t)LM_MAX_APPS * (64 + 1024 + 8) + 1 - o, "%s = %s\n", l->name[i], l->cmd[i]);
+    body[o] = 0;
+    bool ok = lm_confedit_set_section(path, "menu", body);
+    free(body);
+    if (ok)
+        srv->reload_config(srv, true);
+    return ok;
+}
+
+static void menu_load(struct menu_list *l)
+{
+    const char *nm, *cm;
+    l->n = 0;
+    while (l->n < LM_MAX_APPS && lm_launch_menu_entry(l->n, &nm, &cm)) {
+        snprintf(l->name[l->n], sizeof(l->name[0]), "%s", nm);
+        snprintf(l->cmd[l->n], sizeof(l->cmd[0]), "%s", cm);
+        l->n++;
+    }
+}
+
+static bool menu_op(struct lm_server *srv, int kid, const char *val)
+{
+    static struct menu_list l;                  /* 13 KB: not on the stack */
+    if (kid == K_MENU_RESET) {
+        const char *path = srv->config.conf_path;
+        if (strcmp(val, "1") || !path || !*path || !strcmp(path, "none") || !srv->reload_config)
+            return false;
+        bool ok = lm_confedit_set_section(path, "menu", NULL);
+        if (ok)
+            srv->reload_config(srv, true);
+        return ok;
+    }
+    menu_load(&l);
+    char buf[1200];
+    if (strlen(val) >= sizeof(buf))
+        return false;
+    strcpy(buf, val);
+    char *f1 = strchr(buf, MENU_US);
+    if (f1)
+        *f1++ = 0;
+    char *idx_end;
+    long idx = strtol(buf, &idx_end, 10);
+    if (*idx_end)
+        return false;
+    if (kid == K_MENU_DEL) {
+        if (f1 || idx < 0 || idx >= l.n)
+            return false;
+        for (int i = (int)idx; i + 1 < l.n; i++) {
+            memcpy(l.name[i], l.name[i + 1], sizeof(l.name[0]));
+            memcpy(l.cmd[i], l.cmd[i + 1], sizeof(l.cmd[0]));
+        }
+        l.n--;
+    } else if (kid == K_MENU_MOVE) {
+        char *e;
+        long d = f1 ? strtol(f1, &e, 10) : 0;
+        if (!f1 || *e || (d != -1 && d != 1) || idx < 0 || idx >= l.n || idx + d < 0 || idx + d >= l.n)
+            return false;
+        char tn[64], tc[1024];
+        memcpy(tn, l.name[idx], sizeof(tn));
+        memcpy(tc, l.cmd[idx], sizeof(tc));
+        memcpy(l.name[idx], l.name[idx + d], sizeof(tn));
+        memcpy(l.cmd[idx], l.cmd[idx + d], sizeof(tc));
+        memcpy(l.name[idx + d], tn, sizeof(tn));
+        memcpy(l.cmd[idx + d], tc, sizeof(tc));
+    } else {                                    /* K_MENU_PUT: "index<US>name<US>command", index -1 = a new entry */
+        char *cmd = f1 ? strchr(f1, MENU_US) : NULL;
+        if (!cmd)
+            return false;
+        *cmd++ = 0;
+        if (!menu_name_ok(f1) || !menu_cmd_ok(cmd) || idx < -1 || idx >= l.n || (idx < 0 && l.n >= LM_MAX_APPS))
+            return false;
+        for (int i = 0; i < l.n; i++)
+            if (i != idx && !strcasecmp(l.name[i], f1))
+                return false;                   /* two entries with one name would not be told apart */
+        if (idx < 0)
+            idx = l.n++;
+        snprintf(l.name[idx], sizeof(l.name[0]), "%s", f1);
+        snprintf(l.cmd[idx], sizeof(l.cmd[0]), "%s", cmd);
+    }
+    return menu_commit(srv, &l);
+}
+
+/* ---- the [keys] section, edited from the panel's Keys page ----------------------------------------------------------------- */
+
+static bool keys_same(const char *existing, void *ud) { return lm_keys_same_combo(existing, ud); }
+
+/* Write one line of [keys] (value NULL = drop the line) and read the file again. */
+static bool keys_write(struct lm_server *srv, const char *combo, const char *value)
+{
+    const char *path = srv->config.conf_path;
+    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
+        return false;
+    if (!lm_confedit_set_key(path, "keys", keys_same, (void *)combo, combo, value))
+        return false;
+    srv->reload_config(srv, true);
+    return true;
+}
+
+static bool keys_op(struct lm_settings *s, int kid, const char *val)
+{
+    struct lm_server *srv = s->srv;
+    const char *path = srv->config.conf_path;
+    uint32_t mods, code;
+    char canon[64];
+    if (kid == K_KEYS_RESET) {
+        if (strcmp(val, "1") || !path || !*path || !strcmp(path, "none") || !srv->reload_config)
+            return false;
+        bool ok = lm_confedit_set_section(path, "keys", NULL);
+        if (ok)
+            srv->reload_config(srv, true);
+        return ok;
+    }
+    char buf[LM_KEYBIND_ARG + 200];
+    if (strlen(val) >= sizeof(buf))
+        return false;
+    strcpy(buf, val);
+    char *act = strchr(buf, '\x1f');
+    if (act)
+        *act++ = 0;
+    if (!lm_keys_parse_combo(buf, &mods, &code) || !lm_keys_combo_text(mods, code, canon, sizeof(canon)))
+        return false;
+    const struct lm_keybind *builtin = lm_keys_builtin(code, mods);
+    if (kid == K_KEYS_DEL) {
+        if (act || !lm_keys_find(&srv->config.keys, code, mods))
+            return false;
+        return keys_write(srv, canon, builtin ? "none" : NULL);          /* a built-in one is switched off, an own one dropped */
+    }
+    /* K_KEYS_SET: "combo<US>action [arg]" */
+    if (!act || !lm_keys_valid(canon, act))
+        return false;
+    if (builtin) {                                                       /* the same as the built-in one: just drop our line */
+        char bt[LM_KEYBIND_ARG + 40];
+        lm_keys_action_text(builtin, bt, sizeof(bt));
+        if (!strcmp(bt, act))
+            return keys_write(srv, canon, NULL) && true;
+    }
+    return keys_write(srv, canon, act);
+}
 
 static bool apply(struct lm_settings *s, const char *key, const char *val)
 {
@@ -815,8 +1059,24 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     }
     case K_LOCK_NOW:
         return parse_bool(val, &b) && (!b || lm_lock_now(srv->lock));
+    case K_MENU_PUT: case K_MENU_DEL: case K_MENU_MOVE: case K_MENU_RESET:
+        return menu_op(srv, k, val);
+    case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET:
+        return keys_op(s, k, val);
+    case K_KEYS_PAGE:
+        if (!parse_int(val, 0, 1000, &n))
+            return false;
+        s->keys_page = n;
+        return true;
+    case K_KEYS_CAPTURE:
+        if (!srv->wm || !parse_bool(val, &b))
+            return false;
+        lm_wm_key_capture(srv->wm, b);
+        if (s->capture_timer)
+            lm_timer_arm_ms(s->capture_timer, b ? 15000 : 0, 0);
+        return true;
     case K_CONFIG_RELOAD:
-        return parse_bool(val, &b) && (!b || (srv->reload_config && srv->reload_config(srv) >= 0));
+        return parse_bool(val, &b) && (!b || (srv->reload_config && srv->reload_config(srv, false) >= 0));
     case K_CONFIG_CREATE: {                             /* write the built-in configuration as the user's file, never over an existing one */
         const char *path = srv->config.conf_path;
         if (!parse_bool(val, &b) || !b || !path || !*path || !strcmp(path, "none") || access(path, F_OK) == 0)
@@ -954,6 +1214,7 @@ struct lm_settings *lm_settings_create(struct lm_server *srv)
     s->save_timer = lm_loop_add_timer(srv->loop, save_timer_cb, s);
     s->revert_timer = lm_loop_add_timer(srv->loop, revert_cb, s);
     s->rescan_timer = lm_loop_add_timer(srv->loop, rescan_cb, s);
+    s->capture_timer = lm_loop_add_timer(srv->loop, capture_cb, s);
     lm_sound_set_device(srv->config.audio_device);
     s->global = lm_global_create(srv, &lm_mellagui_settings_v1_interface, LM_MELLAGUI_SETTINGS_V1_VERSION,
                                  settings_bind, s);
@@ -983,5 +1244,7 @@ void lm_settings_destroy(struct lm_settings *s)
         lm_timer_destroy(s->revert_timer);
     if (s->rescan_timer)
         lm_timer_destroy(s->rescan_timer);
+    if (s->capture_timer)
+        lm_timer_destroy(s->capture_timer);
     free(s);
 }

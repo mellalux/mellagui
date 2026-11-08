@@ -325,6 +325,14 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked);
 /* The theme, sizes, shortcuts or menu were reloaded (mellagui.conf): close the menu, refit maximized windows to the new panel / frame
  * sizes and repaint everything. */
 void lm_wm_config_changed(struct lm_wm *wm);
+/*
+ * Key capture (the settings panel's "Record" button): while on, the next key press with its modifiers is not handled by anything
+ * (neither a shortcut nor a client) but remembered as text like "Super+Shift+Q" (lm_keys_combo_text); Escape alone cancels (empty text).
+ * Capture then ends and the settings are announced. A key without a name in keys.h is ignored and capture goes on.
+ */
+void lm_wm_key_capture(struct lm_wm *wm, bool on);
+bool lm_wm_key_capturing(const struct lm_wm *wm);
+const char *lm_wm_key_captured(const struct lm_wm *wm);
 void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
 /*
  * The outputs are about to be placed again (settings output-order): packs them (output.c) and moves every window along with the output

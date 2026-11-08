@@ -57,6 +57,26 @@
  *   config-status  (read only)                 ok | missing (set but not readable) | none | ignored:N (N lines rejected by the last reload)
  *   config-reload   (write only)               1 = read mellagui.conf again (same as Super+Shift+R / SIGUSR2)
  *   config-create   (write only)               1 = write the built-in defaults to config-file when it does not exist yet
+ *   menu-0 .. menu-11 (read only)              "name<US>command" of the entries of [menu] in mellagui.conf (<US> = 0x1f; raw text, before @tokens
+ *                                              are expanded; the built-in default menu while the file has none), "" past the end
+ *   menu-put        (write only)               "index<US>name<US>command": replace entry `index` or, with -1, add one (at most 12; a name is
+ *                                              unique, no '=' and no leading '#;[' or spaces at the ends)
+ *   menu-del        (write only)               "index": remove an entry
+ *   menu-move       (write only)               "index<US>-1|1": swap an entry with its neighbour
+ *   menu-reset      (write only)               1 = remove [menu] from the file, the default menu returns
+ *                                              The four rewrite only the [menu] section of the file (confedit.c: comments, other sections
+ *                                              and order stay), create the file when missing, and read it again at once. Refused without a file.
+ *   keys-count      (read only)                number of shortcuts in the table (keys.h)
+ *   keys-page       0..                        which ten of them keys-row-N shows (clamped to the last page)
+ *   keys-row-0 .. keys-row-9 (read only)       "Super+Q<US>close" the shortcut at keys-page * 10 + N, "" past the end
+ *   keys-actions    (read only)                the action names, space separated
+ *   keys-capture    0 | 1                      1 = the next key combination is only recorded (wm.h lm_wm_key_capture); back to 0 when it was
+ *   keys-captured   (read only)                the recorded combination ("" = cancelled with Escape or none yet)
+ *   keys-set        (write only)               "combo<US>action [arg]": bind (written to [keys] of the file; dropped from it when it equals
+ *                                              the built-in binding); refused for an unknown key or action
+ *   keys-del        (write only)               "combo": switch a built-in shortcut off ("combo = none") or drop an own one
+ *   keys-reset      (write only)               1 = remove [keys] from the file, the built-in shortcuts return
+ *                                              The three rewrite only the [keys] lines concerned (confedit.c), read the file again and need a file.
  *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
  *   locked          0 | 1                      the screen is locked now (read only)
  *

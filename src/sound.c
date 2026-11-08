@@ -8,13 +8,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "audio.h"
 #include "log.h"
 
 #define RATE 44100
-#define MAX_SAMPLES (RATE / 2)              /* 0.5 s at most: fits the 64 KiB pipe buffer, so write() never blocks */
+#define MAX_SAMPLES (RATE * 7 / 10)         /* 0.7 s at most: fits the 64 KiB pipe buffer, so write() never blocks */
+#define WAKE_MS 400                         /* silence in front of a beep on a bare ALSA device that may be asleep */
+#define IDLE_MS 800                         /* HDA codecs power down after ~1 s (snd_hda_intel power_save=1) */
 
 struct note {
     int hz;                                 /* 0 = silence */
@@ -69,6 +72,7 @@ static size_t synth(const struct note *n, int16_t *buf, size_t cap)
 }
 
 static char g_device[64] = "default";
+static long long g_last_ms;                 /* CLOCK_MONOTONIC ms of the last beep on a bare ALSA device */
 
 void lm_sound_set_device(const char *name)
 {
@@ -81,9 +85,23 @@ void lm_sound_play(enum lm_sound s)
     if ((unsigned)s >= LM_SOUND_COUNT)
         return;
     static int16_t buf[MAX_SAMPLES];
-    size_t n = synth(k_sounds[s].notes, buf, MAX_SAMPLES);
+    /* A bare ALSA device (HDMI above all) is powered down when idle and swallows the first ~0.3 s while it wakes
+     * up, which eats a 60 ms beep whole. So when it has been quiet for a while, play silence first. The sound
+     * server (paplay) keeps the device awake itself. */
+    size_t pad = 0;
+    if (strcmp(g_device, "default")) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (!g_last_ms || now - g_last_ms >= IDLE_MS)
+            pad = (size_t)RATE * WAKE_MS / 1000;
+        g_last_ms = now;
+    }
+    memset(buf, 0, pad * sizeof(int16_t));
+    size_t n = synth(k_sounds[s].notes, buf + pad, MAX_SAMPLES - pad);
     if (!n)
         return;
+    n += pad;
 
     int fds[2];
     if (pipe2(fds, O_CLOEXEC) < 0)

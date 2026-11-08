@@ -489,9 +489,11 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
     img->px = NULL;
     if (len >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8))
         return decode_png(data, len, img, err, errsz);
+    if (len >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff)
+        return lm_jpeg_decode(data, len, img, err, errsz);
     if (len >= 2 && data[0] == 'P' && data[1] == '6')
         return decode_ppm(data, len, img, err, errsz);
-    fail(err, errsz, "not a PNG or PPM image");
+    fail(err, errsz, "not a PNG, JPEG or PPM image");
     return -1;
 }
 

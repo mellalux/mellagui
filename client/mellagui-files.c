@@ -2,10 +2,14 @@
  * mellagui-files - a small file browser for MellaGUI.
  *
  *   mellagui-files [DIR]          browse DIR (default: the home directory)
+ *   mellagui-files --choose KEY [DIR]
+ *                                 pick a picture instead of opening files: Enter or a double click on a png / jpg / ppm sets the compositor
+ *                                 setting KEY (only "wallpaper") to its full path and the program ends; Esc ends it without a choice.
+ *                                 The settings panel's Desktop page starts it from its "Browse..." button.
  *   mellagui-files --selftest     the listing / sorting / classification without a display
  *
  * Folders come first, then files, each sorted by name without regard to case; ".." goes up. Hidden files (names with a leading
- * dot) are shown with Ctrl+H. Opening a file starts a sibling program: images (png, ppm) in mellagui-view, anything that looks
+ * dot) are shown with Ctrl+H. Opening a file starts a sibling program: images (png, jpg, ppm) in mellagui-view, anything that looks
  * like text in mellagui-edit; binary files are not opened. Ctrl+T starts mellagui-term in the folder being shown.
  *
  * Keys: Up / Down / PageUp / PageDown / Home / End, Enter or Right opens, Backspace / Left / Alt+Up goes to the parent folder,
@@ -34,6 +38,7 @@
 #include "font.h"
 #include "keymap.h"
 #include "protocol.h"
+#include "wlc.h"
 #include "util.h"
 #include "wlwin.h"
 
@@ -68,6 +73,8 @@ struct button {
 
 struct app {
     struct wlwin win;
+    const char *choose_key;             /* --choose: the setting a picked picture is written to (NULL = a normal browser) */
+    uint32_t settings;                  /* mellagui_settings_v1 (only bound with --choose) */
     char cwd[PATH_MAX];
     struct entry *e;
     int n, cap;
@@ -246,7 +253,7 @@ static bool ext_is(const char *name, const char *ext)
 /* Images by extension; everything else by looking at the first 4 KB: a NUL byte means binary. */
 static enum kind classify(const char *path)
 {
-    if (ext_is(path, "png") || ext_is(path, "ppm"))
+    if (ext_is(path, "png") || ext_is(path, "ppm") || ext_is(path, "jpg") || ext_is(path, "jpeg"))
         return K_IMAGE;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
@@ -355,8 +362,8 @@ static void set_title(struct app *a)
     if (!a->win.toplevel)
         return;
     const char *base = strrchr(a->cwd, '/') ? strrchr(a->cwd, '/') + 1 : a->cwd;
-    char t[PATH_MAX + 16];
-    snprintf(t, sizeof(t), "%s - Files", *base ? base : "/");
+    char t[PATH_MAX + 32];
+    snprintf(t, sizeof(t), "%s - %s", *base ? base : "/", a->choose_key ? "Choose a picture" : "Files");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
 
@@ -406,6 +413,31 @@ static void go_up(struct app *a)
     go_to(a, parent, from);
 }
 
+static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id; (void)op; (void)args; (void)data;            /* the value bursts are of no interest here */
+}
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
+{
+    (void)ver;
+    struct app *a = w->data;
+    if (a->choose_key && !strcmp(iface, "mellagui_settings_v1"))
+        a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
+}
+
+/* --choose: hand the picture to the compositor and end. */
+static void choose_path(struct app *a, const char *path)
+{
+    if (!a->settings) {
+        msg(a, "The compositor does not serve settings to this program");
+        return;
+    }
+    WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = a->choose_key }, { .s = path });
+    wlc_roundtrip(a->win.c);
+    a->win.running = false;
+}
+
 static void open_path(struct app *a, const char *path)
 {
     struct stat st;
@@ -418,6 +450,13 @@ static void open_path(struct app *a, const char *path)
         return;
     }
     char err[PATH_MAX + 80];
+    if (a->choose_key) {
+        if (classify(path) == K_IMAGE)
+            choose_path(a, path);
+        else
+            msg(a, "Choose a picture (png, jpg or ppm)");
+        return;
+    }
     switch (classify(path)) {
     case K_IMAGE:
         if (!launch("mellagui-view", path, a->cwd, err, sizeof(err)))
@@ -612,7 +651,14 @@ static void handle_key(struct app *a, uint32_t ks)
     case LM_KS_BackSpace:
     case LM_KS_Left: go_up(a); return;
     case LM_KS_F1 + 4: reread(a); return;                              /* F5 */
-    case LM_KS_Escape: a->msg[0] = 0; a->win.redraw = true; return;
+    case LM_KS_Escape:
+        if (a->choose_key) {
+            a->win.running = false;
+            return;
+        }
+        a->msg[0] = 0;
+        a->win.redraw = true;
+        return;
     default: break;
     }
     if (!ctrl && !alt && !super && tl == 1 && isalnum((unsigned char)txt[0]))
@@ -883,8 +929,18 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    const char *choose = NULL;
+    if (argc >= 3 && !strcmp(argv[1], "--choose")) {
+        if (strcmp(argv[2], "wallpaper")) {                             /* the only setting a file may be chosen for */
+            fprintf(stderr, "mellagui-files: --choose knows only 'wallpaper'\n");
+            return 2;
+        }
+        choose = argv[2];
+        argv += 2;
+        argc -= 2;
+    }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-files [DIR | --selftest]\n");
+        fprintf(stderr, "usage: mellagui-files [DIR | --selftest | --choose wallpaper [DIR]]\n");
         return 2;
     }
     signal(SIGCHLD, SIG_IGN);                                           /* the programs we start are nobody's business afterwards */
@@ -892,10 +948,11 @@ int main(int argc, char **argv)
     a.rep_rate = 25;
     a.rep_delay = 400;
     a.last_click_row = -1;
-    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event };
+    a.choose_key = choose;
     if (wlwin_connect(&a.win, "mellagui-files", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, "Files", "mellagui.files", 640, 460, 360, 160) < 0)
+    if (wlwin_open(&a.win, choose ? "Choose a picture" : "Files", choose ? "mellagui.files.choose" : "mellagui.files", 640, 460, 360, 160) < 0)
         return 1;
     char start[PATH_MAX], cwd[PATH_MAX];
     const char *home = getenv("HOME");
@@ -903,6 +960,11 @@ int main(int argc, char **argv)
         if (!getcwd(cwd, sizeof(cwd)))
             snprintf(cwd, sizeof(cwd), "/");
         join_path(cwd, argv[1], start, sizeof(start));
+    } else if (choose && home && *home) {                               /* pictures usually live in ~/Pictures */
+        char pics[PATH_MAX];
+        snprintf(pics, sizeof(pics), "%s/Pictures", home);
+        struct stat st;
+        normalize(stat(pics, &st) == 0 && S_ISDIR(st.st_mode) ? pics : home, start, sizeof(start));
     } else {
         normalize(home && *home ? home : "/", start, sizeof(start));
     }
@@ -912,6 +974,8 @@ int main(int argc, char **argv)
     }
     if (strcmp(a.cwd, start) != 0)
         msg(&a, "Could not open %s", start);
+    else if (choose)
+        msg(&a, "Choose a picture: Enter or double click (Esc cancels)");
     while (a.win.running) {
         int timeout = 250;
         if (a.rep_code) {

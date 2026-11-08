@@ -595,7 +595,7 @@ static void build_desktop(struct app *a, int x, int y, int w)
     y += ROW_H + 8;
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Wallpaper");
     y += ROW_H;
-    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "PNG or PPM file (~/ is your home). Enter applies.");
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "PNG, JPEG or PPM file (~/ is your home). Enter applies.");
     y += ROW_H;
     struct widget *f = add(a, W_FIELD, (struct rect){ x, y, w, 28 }, "wallpaper");
     snprintf(f->key, sizeof(f->key), "wallpaper");
@@ -607,6 +607,7 @@ static void build_desktop(struct app *a, int x, int y, int w)
     y += ROW_H;
     add_button(a, x, y, 90, "Apply", "wall-apply");
     add_button(a, x + 100, y, 130, "No picture", "wall-clear");
+    add_button(a, x + 240, y, 130, "Browse...", "wall-browse");
     y += ROW_H;
     const char *st = kv_get(a, "wallpaper-status");
     if (*st)
@@ -1279,7 +1280,7 @@ static void slider_drag_to(struct app *a, int idx, double x)
 }
 
 /* Starts another MellaGUI program next to this one (the monitor panel); it is not waited for. */
-static void launch_sibling(const char *name, const char *arg)
+static void launch_sibling(const char *name, const char *arg, const char *arg2)
 {
     pid_t pid = fork();
     if (pid != 0)
@@ -1293,10 +1294,10 @@ static void launch_sibling(const char *name, const char *arg)
         if (slash) {
             *slash = 0;
             snprintf(path, sizeof(path), "%s/%s", self, name);
-            execl(path, name, arg, (char *)NULL);
+            execl(path, name, arg, arg2, (char *)NULL);
         }
     }
-    execlp(name, name, arg, (char *)NULL);                   /* installed on the PATH */
+    execlp(name, name, arg, arg2, (char *)NULL);                   /* installed on the PATH */
     _exit(127);
 }
 
@@ -1374,7 +1375,7 @@ static void activate(struct app *a, int idx)
         } else if (!strcmp(w->key, "sec-lock")) {
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
-            launch_sibling(w->arg, NULL);
+            launch_sibling(w->arg, NULL, NULL);
         } else if (!strcmp(w->key, "met-prev") || !strcmp(w->key, "met-next")) {
             a->mpage = LM_MAX(0, a->mpage + (!strcmp(w->key, "met-next") ? 1 : -1));
         } else if (!strcmp(w->key, "met-reset")) {
@@ -1458,7 +1459,9 @@ static void activate(struct app *a, int idx)
         } else if (!strcmp(w->key, "menu-put")) {
             menu_put(a);
         } else if (!strcmp(w->key, "config-edit")) {
-            launch_sibling("mellagui-edit", w->arg);
+            launch_sibling("mellagui-edit", w->arg, NULL);
+        } else if (!strcmp(w->key, "wall-browse")) {
+            launch_sibling("mellagui-files", "--choose", "wallpaper");
         } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create")) {
             send_set(a, w->key, "1");
         } else if (!strcmp(w->key, "out-left") || !strcmp(w->key, "out-right")) {

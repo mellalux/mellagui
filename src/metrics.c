@@ -24,6 +24,39 @@ void lm_metrics_reset(void)
     lm_metrics = defaults;
 }
 
+int lm_metrics_count(void)
+{
+    int n = 0;
+#define X(sec, name, field, def, lo, hi, what) n++;
+    LM_METRICS(X)
+#undef X
+    return n;
+}
+
+bool lm_metrics_entry(int i, const char **section, const char **name, int *value, int *builtin, int *lo_, int *hi_)
+{
+    int k = 0;
+#define X(sec, nm, field, def, lo, hi, what) \
+    if (k++ == i) { *section = sec; *name = nm; *value = lm_metrics.field; *builtin = def; *lo_ = lo; *hi_ = hi; return true; }
+    LM_METRICS(X)
+#undef X
+    return false;
+}
+
+bool lm_metrics_set(const char *section, const char *name, int value)
+{
+#define X(sec, nm, field, def, lo, hi, what) \
+    if (!strcmp(section, sec) && !strcmp(name, nm)) { \
+        if (value < (lo) || value > (hi)) \
+            return false; \
+        lm_metrics.field = value; \
+        return true; \
+    }
+    LM_METRICS(X)
+#undef X
+    return false;
+}
+
 bool lm_metrics_section(const char *s)
 {
     return !strcmp(s, "windows") || !strcmp(s, "panel") || !strcmp(s, "gadgets") || !strcmp(s, "notifications");

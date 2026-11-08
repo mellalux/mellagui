@@ -156,6 +156,14 @@ bool lm_confedit_set_section(const char *path, const char *section, const char *
             if (*p)
                 out[o++] = '\n';                     /* a blank line before the next section */
         }
+        if (!body) {                                /* a removed section must not leave two blank lines (or one at the very end) behind */
+            const char *q = p;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            bool next_blank = !*q || *q == '\n';
+            while (o >= 2 && out[o - 1] == '\n' && out[o - 2] == '\n' && next_blank)
+                o--;
+        }
     }
 #undef EMIT_LINE
     if (!seen && body) {

@@ -83,6 +83,10 @@
  *   theme-reset     (write only)               1 = remove [theme] from the file
  *                                              All three rewrite only the [theme] lines concerned, read the file again (the compositor repaints at once;
  *                                              programs already running keep their colours, the panel follows theme-colors itself) and need a file.
+ *   metrics         (read only)                "section.name=value:min:max:builtin ...": every size of metrics.h ([windows], [panel], [gadgets], [notifications])
+ *   metrics-set     (write only)               "section.name<US>value": set a size in its section of the file (no line when it equals the built-in one)
+ *   metrics-reset   (write only)               1 = remove the four size sections from the file
+ *                                              Both rewrite only the lines concerned, read the file again (the wm refits windows at once), need a file.
  *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
  *   locked          0 | 1                      the screen is locked now (read only)
  *

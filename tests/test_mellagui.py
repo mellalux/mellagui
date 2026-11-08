@@ -3045,10 +3045,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its two buttons, wraps over the ten page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 20th press; Space toggles it
+        # the wallpaper field, its four radio buttons and its two buttons, wraps over the eleven page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 21st press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(20):
+        for _ in range(21):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -6577,6 +6577,100 @@ class TestThemeEdit(Base):
             time.sleep(0.05)
         self.assertIn('wallpaper-top = #102030', open(self.path).read())
         self.assertEqual(self.colours(c)['wallpaper-top'], '#102030*')
+
+class TestMetricsEdit(Base):
+    """The settings panel's Sizes page: metrics / metrics-set / metrics-reset rewrite the size sections of mellagui.conf only."""
+
+    US = '\x1f'
+
+    def start(self, name, text=None):
+        self.path = os.path.join(tmp, name + '.conf')
+        if text is None:
+            if os.path.exists(self.path):
+                os.unlink(self.path)
+        else:
+            with open(self.path, 'w') as f:
+                f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path)
+        c.sync()
+        return c
+
+    def metrics(self, c):
+        c.cmd('setting metrics')
+        return {k: tuple(int(x) for x in v.split(':')) for k, v in (t.split('=') for t in c.last[3:].split())}
+
+    def test_lists_every_size_with_its_range(self):
+        c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
+        m = self.metrics(c)
+        self.assertEqual(len(m), 28)
+        self.assertEqual(m['panel.height'], (36, 20, 64, 28))
+        self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))
+
+    def test_set_and_reset_keep_the_rest_of_the_file(self):
+        c = self.start('mellagui-me12', '# top\n[theme]\naccent = #ff0000\n\n[panel]\n# bar\nheight = 30\n\n[keys]\nSuper+T = run\n')
+        c.cmd('setraw metrics-set panel.height%s40' % self.US)
+        self.assertEqual(open(self.path).read(), '# top\n[theme]\naccent = #ff0000\n\n[panel]\n# bar\nheight = 40\n\n[keys]\nSuper+T = run\n')
+        c.cmd('setraw metrics-set windows.border-width%s6' % self.US)                      # a new section is added at the end
+        self.assertTrue(open(self.path).read().endswith('Super+T = run\n\n[windows]\nborder-width = 6\n'))
+        self.assertEqual(self.metrics(c)['windows.border-width'][0], 6)
+        c.cmd('setraw metrics-set panel.height%s28' % self.US)                              # the built-in size: the line goes
+        self.assertNotIn('height = ', open(self.path).read())
+        c.cmd('setraw metrics-reset 1')
+        self.assertEqual(open(self.path).read(), '# top\n[theme]\naccent = #ff0000\n\n[panel]\n# bar\n\n[keys]\nSuper+T = run\n'
+                         .replace('[panel]\n# bar\n\n', ''))
+        self.assertEqual(self.metrics(c)['windows.border-width'][0], 4)
+
+    def test_the_file_is_created(self):
+        c = self.start('mellagui-me13')
+        c.cmd('setraw metrics-set gadgets.margin%s20' % self.US)
+        self.assertEqual(open(self.path).read(), '[gadgets]\nmargin = 20\n')
+
+    def test_refused(self):
+        c = self.start('mellagui-me14', '[panel]\nheight = 30\n')
+        for bad in ('metrics-set panel.height%s5' % self.US, 'metrics-set panel.height%s65' % self.US, 'metrics-set panel.height%sx' % self.US,
+                    'metrics-set panel.nosuch%s30' % self.US, 'metrics-set nosuch.height%s30' % self.US, 'metrics-set panel%s30' % self.US,
+                    'metrics-set panel.height', 'metrics-reset 0'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('setraw ' + bad)
+        self.assertEqual(open(self.path).read(), '[panel]\nheight = 30\n')
+        p, c2, stop = self.private_compositor('mellagui-me15', '--config', 'none')
+        with self.assertRaises(RuntimeError):
+            c2.cmd('setraw metrics-set panel.height%s30' % self.US)
+
+    def test_the_panel_sizes_page_applies_a_slider_when_it_is_let_go(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-me16')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-me16'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 10 * 36 + 16)                          # the Sizes tab (11th)
+        time.sleep(0.3)
+        y = y0 + 14 + 28 + 13                                              # the first slider: windows.titlebar-height (20..64)
+        c.abs(x0 + 160 + 200 + 10, y)                                      # drag from near the left end to the right end
+        c.button(272, True)
+        c.abs(x0 + 160 + 200 + 80, y)
+        time.sleep(0.2)
+        self.assertFalse(os.path.exists(self.path))                        # nothing is written while the slider is held
+        c.abs(x0 + 160 + 200 + 170, y)
+        c.button(272, False)
+        for _ in range(60):
+            if os.path.exists(self.path):
+                break
+            time.sleep(0.05)
+        time.sleep(0.2)
+        self.assertIn('titlebar-height = 64', open(self.path).read())
+        self.assertEqual(self.metrics(c)['windows.titlebar-height'][0], 64)
 
 
 class TestScreenshot(Base):

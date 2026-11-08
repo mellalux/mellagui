@@ -14,6 +14,7 @@
 #include "confdefault.h"
 #include "confedit.h"
 #include "keys.h"
+#include "metrics.h"
 #include "theme.h"
 #include "launchers.h"
 #include <strings.h>
@@ -44,7 +45,8 @@ enum key_id {
     K_MENU_0, K_MENU_LAST = K_MENU_0 + LM_MAX_APPS - 1, K_MENU_PUT, K_MENU_DEL, K_MENU_MOVE, K_MENU_RESET,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
     K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
-    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_COUNT
+    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET,
+    K_METRICS, K_METRICS_SET, K_METRICS_RESET, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -65,6 +67,7 @@ static const char *const key_names[K_COUNT] = {
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
+    [K_METRICS] = "metrics", [K_METRICS_SET] = "metrics-set", [K_METRICS_RESET] = "metrics-reset",
 #define KR(i) [K_KEYS_ROW_0 + (i)] = "keys-row-" #i
     KR(0), KR(1), KR(2), KR(3), KR(4), KR(5), KR(6), KR(7), KR(8), KR(9),
 #undef KR
@@ -478,6 +481,15 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_KEYS_CAPTURED: snprintf(out, n, "%s", srv->wm ? lm_wm_key_captured(srv->wm) : ""); break;
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET: break;
     case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: break;
+    case K_METRICS_SET: case K_METRICS_RESET: break;
+    case K_METRICS: {                           /* "section.name=value:min:max:builtin ..." every size of metrics.h */
+        const char *sec, *nm;
+        int v, d, lo, hi;
+        size_t o = 0;
+        for (int i = 0; lm_metrics_entry(i, &sec, &nm, &v, &d, &lo, &hi) && o + 80 < n; i++)
+            o += (size_t)snprintf(out + o, n - o, "%s%s.%s=%d:%d:%d:%d", i ? " " : "", sec, nm, v, lo, hi, d);
+        break;
+    }
     case K_THEME_COLORS: {                      /* "name=#rrggbb name=#rrggbb* ...": a * marks a colour that differs from the built-in one */
         const char *nm;
         uint32_t v, d;
@@ -520,7 +532,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
         if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_MENU_0 && k <= K_MENU_LAST) ||
-            k == K_KEYS_ACTIONS || k == K_THEME_COLORS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST))
+            k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
@@ -978,6 +990,55 @@ static bool theme_op(struct lm_server *srv, int kid, const char *val)
     return ok;
 }
 
+/* ---- the size sections, edited from the panel's Sizes page ------------------------------------------------------------------- */
+
+static bool metrics_same(const char *existing, void *ud) { return !strcmp(existing, ud); }
+
+static bool metrics_op(struct lm_server *srv, int kid, const char *val)
+{
+    const char *path = srv->config.conf_path;
+    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
+        return false;
+    bool ok = true;
+    if (kid == K_METRICS_RESET) {
+        if (strcmp(val, "1"))
+            return false;
+        static const char *const sections[4] = { "windows", "panel", "gadgets", "notifications" };
+        for (int i = 0; i < 4; i++)
+            ok = lm_confedit_set_section(path, sections[i], NULL) && ok;
+    } else {                                    /* K_METRICS_SET: "section.name<US>value" */
+        char buf[96];
+        if (strlen(val) >= sizeof(buf))
+            return false;
+        strcpy(buf, val);
+        char *num = strchr(buf, '\x1f'), *dot = strchr(buf, '.');
+        if (!num || !dot || dot > num)
+            return false;
+        *num++ = 0;
+        *dot++ = 0;
+        char *end;
+        long v = strtol(num, &end, 10);
+        if (!*num || *end)
+            return false;
+        const char *sec, *nm;
+        int cur, def = 0, lo, hi;
+        bool known = false;
+        for (int i = 0; lm_metrics_entry(i, &sec, &nm, &cur, &def, &lo, &hi); i++)
+            if (!strcmp(sec, buf) && !strcmp(nm, dot)) {
+                known = v >= lo && v <= hi;
+                break;
+            }
+        if (!known)
+            return false;
+        char text[16];
+        snprintf(text, sizeof(text), "%ld", v);
+        ok = lm_confedit_set_key(path, buf, metrics_same, dot, dot, v == def ? NULL : text);    /* the built-in size needs no line */
+    }
+    if (ok)
+        srv->reload_config(srv, true);
+    return ok;
+}
+
 static bool apply(struct lm_settings *s, const char *key, const char *val)
 {
     struct lm_server *srv = s->srv;
@@ -1127,6 +1188,8 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return keys_op(s, k, val);
     case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET:
         return theme_op(srv, k, val);
+    case K_METRICS_SET: case K_METRICS_RESET:
+        return metrics_op(srv, k, val);
     case K_KEYS_PAGE:
         if (!parse_int(val, 0, 1000, &n))
             return false;

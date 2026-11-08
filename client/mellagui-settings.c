@@ -318,8 +318,8 @@ static int selftest(void)
 #define MAX_KV 96
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_MENU, PAGE_KEYS, PAGE_COLOURS, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Menu", "Keys", "Colours" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_MENU, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Menu", "Keys", "Colours", "Sizes" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH };
 
@@ -334,6 +334,7 @@ struct widget {
     bool on;                    /* check / radio state, selected tab */
     int lo, hi, step, val;      /* slider */
     const char *unit;           /* slider value suffix */
+    int label_w;                /* slider: width of the label (0 = 150) */
 };
 
 struct kv { char k[24], v[VALUE_MAX]; };
@@ -366,6 +367,8 @@ struct app {
     char cname[32];
     int cr, cg, cb;
     char col_err[80];
+    /* Sizes page: the page shown and the value of a slider that is being dragged (sent when it is let go) */
+    int mpage, mpend, mpend_val;
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
@@ -1064,6 +1067,78 @@ static void build_colours(struct app *a, int x, int y, int w)
         add(a, W_LABEL, (struct rect){ x, y, w, 22 }, a->col_err);
 }
 
+/* ---- Sizes page: window frames, panel, menu, gadgets ([windows] [panel] [gadgets] [notifications]), through the metrics-* settings ---- */
+
+#define METRIC_ROWS 8
+#define MAX_METRICS 40
+
+struct metric { char name[48]; int value, lo, hi, def; };
+
+static int metric_list(const struct app *a, struct metric *out, int max)
+{
+    char text[VALUE_MAX];
+    snprintf(text, sizeof(text), "%s", kv_get(a, "metrics"));
+    int n = 0;
+    for (char *t = strtok(text, " "); t && n < max; t = strtok(NULL, " ")) {
+        char *eq = strchr(t, '=');
+        if (!eq)
+            continue;
+        *eq = 0;
+        snprintf(out[n].name, sizeof(out[n].name), "%s", t);
+        if (sscanf(eq + 1, "%d:%d:%d:%d", &out[n].value, &out[n].lo, &out[n].hi, &out[n].def) == 4)
+            n++;
+    }
+    return n;
+}
+
+static void metric_flush(struct app *a)
+{
+    if (a->mpend < 0)
+        return;
+    struct metric m[MAX_METRICS];
+    int n = metric_list(a, m, MAX_METRICS);
+    if (a->mpend < n) {
+        char v[96];
+        snprintf(v, sizeof(v), "%s\x1f%d", m[a->mpend].name, a->mpend_val);
+        send_set(a, "metrics-set", v);
+    }
+    a->mpend = -1;
+}
+
+static void build_sizes(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Sizes in pixels");
+    y += ROW_H;
+    if (!*kv_get(a, "config-file")) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    struct metric m[MAX_METRICS];
+    int n = metric_list(a, m, MAX_METRICS), pages = LM_MAX(1, (n + METRIC_ROWS - 1) / METRIC_ROWS);
+    a->mpage = LM_CLAMP(a->mpage, 0, pages - 1);
+    for (int i = a->mpage * METRIC_ROWS; i < LM_MIN(n, (a->mpage + 1) * METRIC_ROWS); i++) {
+        struct widget *sl = add(a, W_SLIDER, (struct rect){ x, y, w, 26 }, m[i].name);
+        snprintf(sl->key, sizeof(sl->key), "met-%d", i);
+        sl->lo = m[i].lo;
+        sl->hi = m[i].hi;
+        sl->step = 1;
+        sl->label_w = 200;
+        int v = a->mpend == i ? a->mpend_val : m[i].value;
+        sl->val = v;
+        sl->unit = v != m[i].def ? " *" : "";
+        y += 26;
+    }
+    y = 14 + ROW_H + METRIC_ROWS * 26 + 4;
+    menu_button(a, x, y, 24, "<", "met-prev", 0);
+    char lbl[32];
+    snprintf(lbl, sizeof(lbl), "%d / %d", a->mpage + 1, pages);
+    add(a, W_LABEL, (struct rect){ x + 32, y, 80, MENU_ROW_H }, lbl);
+    menu_button(a, x + 100, y, 24, ">", "met-next", 0);
+    add_button(a, x + w - 150, y, 150, "Restore defaults", "met-reset")->r.h = MENU_ROW_H - 2;
+    y += MENU_ROW_H + 6;
+    add(a, W_LABEL, (struct rect){ x, y, w, 24 }, "Applied when you let go. * = not the built-in size.");
+}
+
 static void build_sound(struct app *a, int x, int y, int w)
 {
     struct entry ents[8];
@@ -1140,6 +1215,7 @@ static void build(struct app *a)
     case PAGE_MENU: build_menu(a, x, y, w); break;
     case PAGE_KEYS: build_keys(a, x, y, w); break;
     case PAGE_COLOURS: build_colours(a, x, y, w); break;
+    case PAGE_SIZES: build_sizes(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -1154,7 +1230,7 @@ static bool focusable(const struct widget *w)
 /* The track of a slider: label on the left, value text on the right. */
 static struct rect slider_track(const struct widget *w)
 {
-    int label_w = 150, value_w = 70;
+    int label_w = w->label_w ? w->label_w : 150, value_w = 70;
     return (struct rect){ w->r.x + label_w, w->r.y + w->r.h / 2 - 3, LM_MAX(w->r.w - label_w - value_w, 40), 6 };
 }
 
@@ -1178,6 +1254,10 @@ static void slider_set(struct app *a, const struct widget *w, int v)
         a->win.redraw = true;
     } else if (!strcmp(w->key, "sec-blank")) {
         a->sec_blank = v;
+        a->win.redraw = true;
+    } else if (!strncmp(w->key, "met-", 4) && w->key[4] >= '0' && w->key[4] <= '9') {      /* a size: sent when the slider is let go */
+        a->mpend = atoi(w->key + 4);
+        a->mpend_val = v;
         a->win.redraw = true;
     } else if (!strncmp(w->key, "col-", 4) && w->key[4] && !w->key[5]) {      /* col-r / col-g / col-b: only the working colour */
         *(w->key[4] == 'r' ? &a->cr : w->key[4] == 'g' ? &a->cg : &a->cb) = v;
@@ -1295,6 +1375,11 @@ static void activate(struct app *a, int idx)
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
             launch_sibling(w->arg, NULL);
+        } else if (!strcmp(w->key, "met-prev") || !strcmp(w->key, "met-next")) {
+            a->mpage = LM_MAX(0, a->mpage + (!strcmp(w->key, "met-next") ? 1 : -1));
+        } else if (!strcmp(w->key, "met-reset")) {
+            send_set(a, "metrics-reset", "1");
+            a->mpend = -1;
         } else if (!strcmp(w->key, "col-edit")) {
             struct colour cols[MAX_COLOURS];
             int n = colour_list(a, cols, MAX_COLOURS), i = atoi(w->arg);
@@ -1503,7 +1588,7 @@ static void paint_widget(struct app *a, int idx)
         break;
     case W_SLIDER: {
         struct rect t = slider_track(w);
-        draw_text(a, r->x, text_y(r), w->text, COL_TEXT, 148);
+        draw_text(a, r->x, text_y(r), w->text, COL_TEXT, (w->label_w ? w->label_w : 150) - 2);
         fill(a, t, COL_KEY);
         int kx = t.x + (int)((double)(w->val - w->lo) / (double)(w->hi - w->lo) * t.w);
         fill(a, (struct rect){ t.x, t.y, kx - t.x, t.h }, COL_ACCENT);
@@ -1634,6 +1719,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->py = lm_fixed_to_double(args[3].f);
         break;
     case LM_WL_POINTER_EVT_LEAVE:
+        metric_flush(a);
         a->has_pointer = false;
         a->press = a->drag = -1;
         break;
@@ -1660,6 +1746,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int idx = widget_at(a, a->px, a->py);
             if (idx >= 0 && idx == a->press && a->drag < 0)
                 activate(a, idx);
+            metric_flush(a);
             a->press = a->drag = -1;
         }
         a->win.redraw = true;
@@ -1742,8 +1829,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             a->win.redraw = true;
         } else if (f && f->kind == W_SLIDER && (ks == LM_KS_Left || ks == LM_KS_Right)) {
             int v = LM_MAX(f->lo, LM_MIN(f->hi, f->val + (ks == LM_KS_Right ? f->step : -f->step)));
-            if (v != f->val)
+            if (v != f->val) {
                 slider_set(a, f, v);
+                metric_flush(a);
+            }
         } else if (f && (ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == ' ')) {
             activate(a, a->focus);
         } else if (!f && (ks == LM_KS_Down || ks == LM_KS_Right)) {
@@ -1822,7 +1911,7 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event };
-    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .menu_sel = -1, .csel = -1 };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .menu_sel = -1, .csel = -1, .mpend = -1 };
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */
@@ -1832,7 +1921,7 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return rc;
     }
-    if (wlwin_open(&a.win, "Settings", "mellagui.settings", DEFAULT_W, DEFAULT_H, 520, 380) < 0)
+    if (wlwin_open(&a.win, "Settings", "mellagui.settings", DEFAULT_W, DEFAULT_H, 520, 420) < 0)
         return 1;
     while (wlwin_step(&a.win, -1))
         ;

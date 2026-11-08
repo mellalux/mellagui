@@ -60,6 +60,12 @@ extern struct lm_metrics lm_metrics;      /* starts as the built-in defaults */
  * or a value that is not a whole number inside the key's range. */
 bool lm_metrics_conf(void *ud, const char *section, const char *key, const char *value);
 
+/* Walk the table: entry i (0..lm_metrics_count()-1) with its current, built-in, smallest and largest value. */
+int lm_metrics_count(void);
+bool lm_metrics_entry(int i, const char **section, const char **name, int *value, int *builtin, int *lo, int *hi);
+/* Set one value by section and name; false when unknown or out of range. */
+bool lm_metrics_set(const char *section, const char *name, int value);
+
 /* Back to the built-in sizes. */
 void lm_metrics_reset(void);
 

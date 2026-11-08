@@ -17,6 +17,7 @@
 
 #include "keys.h"
 #include "backend.h"
+#include "saver.h"
 #include "input.h"
 #include "log.h"
 #include "mixer.h"
@@ -288,6 +289,15 @@ static void ctl_command(struct ctl_client *c, char *line)
         lm_list_for_each(o, &h->base.outputs, link)
             ctl_reply(c, "output %s x=%d y=%d w=%d h=%d\n", o->name, o->x, o->y, o->width, o->height);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "saver")) {
+        /* saver [start|stop] -> "saver running=<0|1> enabled=<0|1> minutes=<n>" after the optional change, then "ok" (the screensaver) */
+        if (srv->saver && a1 && !strcmp(a1, "start"))
+            lm_saver_start(srv->saver);
+        else if (srv->saver && a1 && !strcmp(a1, "stop"))
+            lm_saver_stop(srv->saver);
+        ctl_reply(c, "saver running=%d enabled=%d minutes=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
+                  srv->config.saver_min);
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "about")) {
         /* about [open|close] -> "about open=<0|1>" (after the optional change), while open "card x= y= w= h=", "close x= y= w= h=" and one "row <label>|<value>" line each, then "ok" (the About dialog of the logo button) */
         if (srv->wm && a1 && !strcmp(a1, "open"))
@@ -331,9 +341,9 @@ static void ctl_command(struct ctl_client *c, char *line)
         }
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "commands")) {
-        /* commands -> "terminal=... run=... settings=... view=..." one per line, then "ok" */
-        ctl_reply(c, "terminal=%s\nrun=%s\nsettings=%s\nview=%s\nok\n", srv->config.terminal_cmd, srv->config.run_cmd,
-                  srv->config.settings_cmd, srv->config.view_cmd);
+        /* commands -> "terminal=... run=... settings=... view=... saver=..." one per line, then "ok" */
+        ctl_reply(c, "terminal=%s\nrun=%s\nsettings=%s\nview=%s\nsaver=%s\nok\n", srv->config.terminal_cmd, srv->config.run_cmd,
+                  srv->config.settings_cmd, srv->config.view_cmd, srv->config.saver_cmd ? srv->config.saver_cmd : "");
     } else if (!strcmp(cmd, "notify")) {
         /* notify <ms> <title> [body words...] */
         if (!srv->settings || !a1 || !a2) { ctl_reply(c, "err usage: notify <ms> <title> [body]\n"); return; }

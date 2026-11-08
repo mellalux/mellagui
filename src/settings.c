@@ -28,6 +28,7 @@
 #include "log.h"
 #include "render.h"
 #include "sha256.h"
+#include "saver.h"
 #include "seat.h"
 #include "server.h"
 #include "settings.h"
@@ -40,9 +41,9 @@
 
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
-    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_FILE,
+    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
-    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE,
+    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
     K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
     K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET,
@@ -54,13 +55,13 @@ enum key_id {
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
-    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_FILE] = "file",
+    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
-    [K_CONFIG_FILE] = "config-file", [K_CONFIG_STATUS] = "config-status", [K_CONFIG_RELOAD] = "config-reload", [K_CONFIG_CREATE] = "config-create",
+    [K_CONFIG_FILE] = "config-file", [K_CONFIG_STATUS] = "config-status", [K_CONFIG_RELOAD] = "config-reload", [K_CONFIG_CREATE] = "config-create", [K_SAVER_NOW] = "saver-now",
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
@@ -292,6 +293,14 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if ((n = wallpaper_mode_parse(val)) < 0) return -1;
         cfg->wallpaper_mode = n;
         break;
+    case K_SAVER:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->saver = b;
+        break;
+    case K_SAVER_MINUTES:
+        if (!parse_int(val, 0, 240, &n)) return -1;
+        cfg->saver_min = n;
+        break;
     case K_OUTPUT_ORDER:
         if (!output_order_ok(val)) return -1;
         snprintf(cfg->output_order, sizeof(cfg->output_order), "%s", val);
@@ -389,6 +398,9 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_POINTER_SPEED: snprintf(out, n, "%ld", lround(c->pointer_speed * 100.0)); break;
     case K_NATURAL_SCROLL: snprintf(out, n, "%d", c->natural_scroll ? 1 : 0); break;
     case K_SOUND: snprintf(out, n, "%d", c->sound ? 1 : 0); break;
+    case K_SAVER: snprintf(out, n, "%d", c->saver ? 1 : 0); break;
+    case K_SAVER_MINUTES: snprintf(out, n, "%d", c->saver_min); break;
+    case K_SAVER_NOW: break;                                            /* write only */
     case K_GADGET: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0); break;
     case K_MIXER: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER) ? 1 : 0); break;
     case K_SYSINFO: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0); break;
@@ -1132,7 +1144,15 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_POINTER_SPEED:
     case K_NATURAL_SCROLL:
     case K_SOUND:
+    case K_SAVER:
+    case K_SAVER_MINUTES:
         return cfg_set(cfg, key, val, NULL, 0) >= 0;
+    case K_SAVER_NOW:                                   /* "1": start the screensaver now (a preview), "0": end it */
+        if (!srv->saver || !parse_bool(val, &b)) return false;
+        if (b)
+            return lm_saver_start(srv->saver);
+        lm_saver_stop(srv->saver);
+        return true;
     case K_GADGET:
         if (!srv->wm || !parse_bool(val, &b)) return false;
         lm_wm_set_gadget(srv->wm, b);

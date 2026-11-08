@@ -49,6 +49,7 @@ struct wlwin {
     bool configured, running, buffer_busy, redraw;
     uint32_t mods;                  /* LM_MOD_* bits, from wl_keyboard.modifiers */
     int def_w, def_h, min_w, min_h;
+    bool want_fullscreen;           /* set before wlwin_open: the toplevel asks for full screen before its first commit */
     const char *name;               /* program name for messages, e.g. "mellagui-calc" */
 };
 

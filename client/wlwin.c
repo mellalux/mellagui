@@ -187,6 +187,8 @@ int wlwin_open(struct wlwin *w, const char *title, const char *app_id, int def_w
     WLC_SEND(w->c, w->xsurface, LM_XDG_SURFACE_REQ_GET_TOPLEVEL, { .n = w->toplevel });
     WLC_SEND(w->c, w->toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = title });
     WLC_SEND(w->c, w->toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = app_id });
+    if (w->want_fullscreen)
+        WLC_SEND(w->c, w->toplevel, LM_XDG_TOPLEVEL_REQ_SET_FULLSCREEN, { .o = 0 });
     WLC_SEND0(w->c, w->surface, LM_WL_SURFACE_REQ_COMMIT);
     return 0;
 }

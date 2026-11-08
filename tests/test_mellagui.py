@@ -3167,10 +3167,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its three buttons, wraps over the eleven page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 22nd press; Space toggles it
+        # the wallpaper field, its four radio buttons and its three buttons, wraps over the twelve page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 23rd press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(22):
+        for _ in range(23):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -6421,6 +6421,208 @@ class TestConfigSettings(Base):
                 break
             time.sleep(0.05)
         self.assertEqual(dock_apps(c), ['Only|echo only'])
+
+
+class TestSaver(Base):
+    """The screensaver: after idle time the compositor starts mellagui-matrix (a full screen client); the first input ends it."""
+
+    UNIT = {'MELLAGUI_LOCK_UNIT_MS': '250'}                  # a "minute" is a quarter of a second
+
+    def start(self, name, *args, env=None):
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-matrix not built')
+        p, c, stop = self.private_compositor(name, *args, env=dict(self.UNIT, **(env or {})))
+        c.sync()
+        return p, c
+
+    @staticmethod
+    def saver(c):
+        return dict(kv.split('=') for kv in c.cmd('saver')[0].split()[1:])
+
+    def wait(self, pred, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def matrix_windows(self, c):
+        return [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.matrix']
+
+    def test_defaults(self):
+        p, c = self.start('mellagui-sv1', '--config', 'none')
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10'})
+
+    def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
+        p, c = self.start('mellagui-sv2', '--config', 'none')
+        c.cmd('settings saver-minutes 2')                       # 2 * 250 ms of silence
+        self.wait(lambda: self.saver(c)['running'] == '1', 'the screensaver starts')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        w = self.matrix_windows(c)[0]
+        self.assertIn('fullscreen', w['flags'])
+        self.assertEqual((w['x'], w['y'], w['w'], w['h']), (0, 0, 800, 500))
+        time.sleep(0.5)
+        a = c.dump(os.path.join(tmp, 'sv2a.ppm'))
+        time.sleep(0.5)
+        b = c.dump(os.path.join(tmp, 'sv2b.ppm'))
+        greens = [(x, y) for x in range(0, 800, 3) for y in range(60, 440, 3) if a.px(x, y)[1] > a.px(x, y)[0] + 30]
+        self.assertGreater(len(greens), 40, 'no green code on the screen')
+        self.assertNotEqual(a.data, b.data, 'the rain does not move')
+        self.assertEqual(a.px(2, 2), (0, 0, 0))                  # no panel, no dock over it
+        c.tap(KEY_A)                                             # any key
+        self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
+
+    def test_the_first_input_is_not_passed_on(self):
+        p, c = self.start('mellagui-sv3', '--config', 'none')
+        cl = Client('mellagui-sv3')
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        kb = cl.wl.new_id('wl_keyboard')
+        cl.wl.request(seat, 'get_keyboard', kb)
+        win = Window(cl, 200, 100, app_id='below')
+        cl.wl.roundtrip()
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'enter', 2.0), 'no keyboard focus before')
+        c.sync()
+        c.cmd('saver start')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        cl.wl.queue.clear()
+        c.tap(KEY_A)                                             # ends the screensaver ...
+        self.wait(lambda: not self.matrix_windows(c), 'it ends')
+        cl.wl.roundtrip()
+        self.assertEqual([e for e in cl.wl.queue if e.obj == kb and e.name == 'key'], [], 'the key that ended it reached the window below')
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'enter', 2.0), 'the window below gets the focus back')
+        cl.wl.queue.clear()
+        c.tap(KEY_A)                                             # ... the next one is typed as usual
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'key' and e.args[3] == 1, 2.0))
+
+    def test_a_pointer_movement_and_a_click_end_it_too(self):
+        p, c = self.start('mellagui-sv4', '--config', 'none')
+        for how in ('abs', 'click'):
+            c.cmd('saver start')
+            self.wait(lambda: self.matrix_windows(c), 'its window')
+            time.sleep(0.3)
+            if how == 'abs':
+                c.abs(100, 100)
+                c.abs(300, 200)
+            else:
+                c.cmd('button 272 1')
+                c.cmd('button 272 0')
+            self.wait(lambda: self.saver(c)['running'] == '0', 'it ends after %s' % how)
+
+    def test_switched_off_it_never_starts_and_zero_minutes_is_never(self):
+        p, c = self.start('mellagui-sv5', '--config', 'none')
+        c.cmd('settings saver 0')
+        c.cmd('settings saver-minutes 1')
+        time.sleep(2.2)
+        self.assertEqual(self.saver(c)['running'], '0')
+        c.cmd('settings saver 1')
+        c.cmd('settings saver-minutes 0')
+        time.sleep(2.2)
+        self.assertEqual(self.saver(c)['running'], '0')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings saver-minutes 1000')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings saver maybe')
+
+    def test_a_fullscreen_window_keeps_it_away(self):
+        p, c = self.start('mellagui-sv6', '--config', 'none')
+        cl = Client('mellagui-sv6')
+        self.clients.append(cl)
+        win = Window(cl, 200, 100, app_id='film')
+        cl.wl.roundtrip()
+        c.key(KEY_LEFTMETA, True)
+        c.tap(KEY_F)                                             # Super+F: fullscreen
+        c.key(KEY_LEFTMETA, False)
+        self.wait(lambda: 'fullscreen' in c.windows()['windows'][0]['flags'], 'fullscreen')
+        c.cmd('settings saver-minutes 1')
+        time.sleep(2.5)
+        self.assertEqual(self.saver(c)['running'], '0')
+
+    def test_the_command_can_be_changed(self):
+        mark = os.path.join(tmp, 'saver-ran')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        path = os.path.join(tmp, 'sv7.conf')
+        with open(path, 'w') as f:
+            f.write('[commands]\nsaver = touch %s\n' % mark)
+        p, c = self.start('mellagui-sv7', '--config', path)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(mark), 'the configured command ran')
+        self.wait(lambda: self.saver(c)['running'] == '0', 'a program that ends by itself is noticed')
+
+    def test_settings_survive_a_restart(self):
+        conf = os.path.join(tmp, 'sv8.settings')
+        if os.path.exists(conf):
+            os.unlink(conf)
+        p, c = self.start('mellagui-sv8', '--config', 'none', '--settings', conf)
+        c.cmd('settings saver-minutes 25')
+        c.cmd('settings saver 0')
+        time.sleep(0.6)                                          # (saved 0.3 s after a change)
+        c.cmd('quit')
+        p.wait(timeout=5)
+        p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25'})
+
+    def test_the_program_checks_itself(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-matrix not built')
+        r = subprocess.run([exe, '--selftest'], capture_output=True, text=True, timeout=20)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, 'mellagui-matrix selftest ok'), r.stderr)
+        r = subprocess.run([exe, '--bogus'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 2)
+
+    def test_started_by_hand_in_a_window_it_runs_until_escape(self):
+        p, c = self.start('mellagui-sv10', '--config', 'none')
+        pr = subprocess.Popen([os.path.join(ROOT, 'build', 'mellagui-matrix'), '--windowed', '--speed', '200', '--seed', '5'],
+                              env=dict(os.environ, WAYLAND_DISPLAY='mellagui-sv10'))
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        w = self.matrix_windows(c)[0]
+        self.assertNotIn('fullscreen', w['flags'])
+        time.sleep(0.6)
+        a = c.dump(os.path.join(tmp, 'sv10a.ppm'))
+        time.sleep(0.4)
+        b = c.dump(os.path.join(tmp, 'sv10b.ppm'))
+        self.assertNotEqual(a.data, b.data)
+        c.abs(w['x'] + 50, w['y'] + 50)                          # a window in a window does not end on pointer movement or letters
+        c.abs(w['x'] + 300, w['y'] + 200)
+        c.tap(KEY_A)
+        time.sleep(0.3)
+        self.assertIsNone(pr.poll())
+        c.tap(KEY_ESC)
+        self.wait(lambda: pr.poll() is not None, 'Escape ends it')
+
+    def test_the_settings_panel_page_switches_it_and_shows_it(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        p, c = self.start('mellagui-sv9', '--config', 'none')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-sv9'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 11 * 35 + 16)                         # the Saver tab (12th; twelve tabs share the height)
+        time.sleep(0.3)
+        c.click(x0 + 168, y0 + 14 + 28 + 14)                             # the check box
+        self.wait(lambda: self.saver(c)['enabled'] == '0', 'the box switches it off')
+        c.click(x0 + 168, y0 + 14 + 28 + 14)
+        self.wait(lambda: self.saver(c)['enabled'] == '1', 'and on again')
+        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 8 + 12)              # "Show it now"
+        self.wait(lambda: self.saver(c)['running'] == '1', 'the button shows it')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        c.tap(KEY_A)
+        self.wait(lambda: self.saver(c)['running'] == '0', 'a key ends it')
 
 
 class TestDock(Base):

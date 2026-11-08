@@ -10,9 +10,10 @@
  *   terminal / run / settings / view  run      = mellagui-run       Super+R and the panel's Run button
  *                                     settings = mellagui-settings  Super+I
  *                                     view     = mellagui-view      the screenshot card's click
+ *                                     saver    = mellagui-matrix    the screensaver (a full screen client; saver.h)
  *
  * A command is a shell command line. Before it is used:
- *   @terminal @run @settings @view   stand for the commands above ("Files = @terminal -e mc")
+ *   @terminal @run @settings @view @saver   stand for the commands above ("Files = @terminal -e mc")
  *   mellagui-calc ...                a bare mellagui-* program is looked up next to the compositor binary first, then in PATH
  *   ~/prog                           ~ is the home directory
  *   a || b                           alternatives, the first whose program exists wins (quote-aware, outside '...' / "...");
@@ -37,14 +38,14 @@ struct lm_config;
 /* Config-file callback (lm_conf_fn) for the section [commands]; `ud` is the struct lm_config. */
 bool lm_launch_conf(void *ud, const char *section, const char *key, const char *value);
 
-/* Set one of the [commands] (--terminal, --run): `which` = terminal | run | settings | view. */
+/* Set one of the [commands] (--terminal, --run): `which` = terminal | run | settings | view | saver. */
 bool lm_launch_set_command(const char *which, const char *cmd);
 
 /* Forget everything the config file said; what the command line set (--terminal, --run) stays.
  * For a reload: call it, read the file again, then lm_launch_resolve. */
 void lm_launch_reset(void);
 
-/* Final step: expand the commands and fill terminal_cmd, run_cmd, settings_cmd and view_cmd. */
+/* Final step: expand the commands and fill terminal_cmd, run_cmd, settings_cmd, view_cmd and saver_cmd. */
 void lm_launch_resolve(struct lm_config *cfg);
 
 /* Run-time expansion of a command line for the [keys] action `exec` (the rules above: @tokens, ~, mellagui-*, a || b).

@@ -28,6 +28,7 @@
 #include "seat.h"
 #include "settings.h"
 #include "lock.h"
+#include "saver.h"
 #include "logind.h"
 #include "server.h"
 #include "shm.h"
@@ -610,6 +611,7 @@ int main(int argc, char **argv)
     lm_render_set_wallpaper(srv->render, cfg.wallpaper, cfg.wallpaper_mode);            /* from the settings file */
     lm_input_set_handler(srv->input, lm_seat_handle_input_cb, srv->seat);
     srv->lock = lm_lock_create(srv);            /* with start=1 in lock.conf the screen is locked from the first frame */
+    srv->saver = lm_saver_create(srv);
     srv->mixer = lm_mixer_create(loop, on_mixer_changed, srv);
     if (srv->mixer)
         lm_mixer_set_active(srv->mixer, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER));
@@ -653,6 +655,8 @@ out:
     srv->mixer = NULL;
     if (srv->sysinfo) lm_sysinfo_destroy(srv->sysinfo);
     srv->sysinfo = NULL;
+    if (srv->saver) lm_saver_destroy(srv->saver);
+    srv->saver = NULL;
     if (srv->lock) lm_lock_destroy(srv->lock);
     srv->lock = NULL;
     if (srv->settings) lm_settings_destroy(srv->settings);

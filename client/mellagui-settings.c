@@ -318,8 +318,8 @@ static int selftest(void)
 #define MAX_KV 160
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH };
 
@@ -895,6 +895,24 @@ static void build_dock(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y - 1, w, 24 }, hint);
 }
 
+/* ---- Saver page: the screensaver (mellagui-matrix, started by the compositor when nothing has been touched for a while) ---------- */
+
+static void build_saver(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Screensaver");
+    y += ROW_H;
+    add_check(a, x, y, w, "Start the screensaver when nobody uses the computer", "saver", kv_int(a, "saver", 1) != 0);
+    y += ROW_H;
+    add_slider(a, x, y, w, "After", "saver-minutes", 1, 120, 1, " min");
+    y += ROW_H + 8;
+    add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
+    y += ROW_H + 10;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Falling green code, full screen. A key, a mouse button or a");
+    add(a, W_LABEL, (struct rect){ x, y + ROW_H - 6, w, ROW_H }, "movement of the pointer ends it; that first touch is not passed on.");
+    add(a, W_LABEL, (struct rect){ x, y + 2 * ROW_H - 12, w, ROW_H }, "It does not start over a full screen window (a film), nor on the lock screen.");
+    add(a, W_LABEL, (struct rect){ x, y + 3 * ROW_H - 18, w, ROW_H }, "Another program: [commands] saver = ... in mellagui.conf.");
+}
+
 static void dock_clear_form(struct app *a)
 {
     a->input[4][0] = a->input[5][0] = a->input[6][0] = 0;
@@ -1300,6 +1318,7 @@ static void build(struct app *a)
     case PAGE_COLOURS: build_colours(a, x, y, w); break;
     case PAGE_SIZES: build_sizes(a, x, y, w); break;
     case PAGE_DOCK: build_dock(a, x, y, w); break;
+    case PAGE_SAVER: build_saver(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -1559,7 +1578,7 @@ static void activate(struct app *a, int idx)
             launch_sibling("mellagui-edit", w->arg, NULL);
         } else if (!strcmp(w->key, "wall-browse")) {
             launch_sibling("mellagui-files", "--choose", "wallpaper");
-        } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create")) {
+        } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create") || !strcmp(w->key, "saver-now")) {
             send_set(a, w->key, "1");
         } else if (!strcmp(w->key, "out-left") || !strcmp(w->key, "out-right")) {
             char names[8][40];

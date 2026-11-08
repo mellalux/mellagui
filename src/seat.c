@@ -29,6 +29,7 @@
 #include "output.h"
 #include "protocol.h"
 #include "render.h"
+#include "saver.h"
 #include "seat.h"
 #include "lock.h"
 #include "server.h"
@@ -2012,6 +2013,8 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
         return;
     if (seat->srv->lock && lm_lock_activity(seat->srv->lock))
         return;                         /* it only woke the monitors from standby */
+    if (seat->srv->saver && lm_saver_activity(seat->srv->saver))
+        return;                         /* it only ended the screensaver */
     ensure_pointer_pos(seat);
     if (seat->locked) {
         handle_locked_input(seat, ev);

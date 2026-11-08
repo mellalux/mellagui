@@ -565,6 +565,9 @@ void lm_wm_about_set(struct lm_wm *wm, bool open);
 bool lm_wm_about_is_open(const struct lm_wm *wm);
 size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* the lines of the control socket `about` while it is open */
 
+/* Some visible window is fullscreen (the screensaver does not start over a film or a game). */
+bool lm_wm_has_fullscreen(const struct lm_wm *wm);
+
 /* Text snapshot of the dock for tests (control socket `dock`): "dock shown=<0|1> hover=<i> n=<buttons>" then one line per button
  * "icon <i> "<name>" x= y= w= h= running=<0|1> cmd=<command>". Returns the length. */
 size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size);

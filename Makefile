@@ -4,6 +4,7 @@
 #   make mellagui      build/mellagui        (compositor, src/*.c)
 #   make mellagui-term build/mellagui-term   (client/mellagui-term.c)
 #   make mellagui-calc build/mellagui-calc   (client/mellagui-calc.c)
+#   make mellagui-matrix build/mellagui-matrix (client/mellagui-matrix.c, the screensaver)
 #   make mellagui-run  build/mellagui-run    (client/mellagui-run.c, the Run dialog)
 #   make mellagui-settings build/mellagui-settings (client/mellagui-settings.c, the settings panel)
 #   make mellagui-monitor build/mellagui-monitor (client/mellagui-monitor.c, the monitor's own settings over DDC/CI)
@@ -37,9 +38,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files asan test run clean fuzz fuzz-run
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix asan test run clean fuzz fuzz-run
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -73,6 +74,10 @@ $(BUILD)/gl-test: $(BUILD)/tests/gl_test.o $(BUILD)/src/gl.o $(BUILD)/src/log.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -ldl
 
 $(BUILD)/logind-test: $(BUILD)/tests/logind_test.o $(BUILD)/src/logind.o $(BUILD)/src/loop.o $(BUILD)/src/log.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/mellagui-matrix: $(BUILD)/client/mellagui-matrix.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

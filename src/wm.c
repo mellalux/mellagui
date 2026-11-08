@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "about.h"
+#include "saver.h"
 #include "backend.h"
 #include "input.h"
 #include "font.h"
@@ -1996,6 +1997,15 @@ static void dock_activate(struct lm_wm *wm, int i, bool reuse)
         lm_server_spawn(wm->srv, it->cmd);
 }
 
+bool lm_wm_has_fullscreen(const struct lm_wm *wm)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &((struct lm_wm *)wm)->windows, link)
+        if (win_visible(wm, w) && (w->states & LM_WINDOW_FULLSCREEN))
+            return true;
+    return false;
+}
+
 size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
 {
     size_t o = 0;
@@ -3275,6 +3285,8 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
         power_set(wm, false, NULL);
         about_set(wm, false, NULL);
         clip_nav_set(wm, false);
+        if (wm->srv->saver)
+            lm_saver_locked(wm->srv->saver, true);
         if (wm->focused)
             lm_xdg_dismiss_popups(wm->focused->surface);
     } else if (wm->srv->seat) {

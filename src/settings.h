@@ -17,6 +17,10 @@
  *   gadget          0 | 1                      clipboard gadget on the desktop (Super+G)
  *   mixer           0 | 1                      volume mixer gadget on the desktop (Super+V)
  *   sysinfo         0 | 1                      system monitor gadget: CPU, memory, temperature (Super+S)
+
+ *   saver           0 | 1                      start the screensaver (mellagui-matrix, [commands] saver) when nothing was touched for saver-minutes
+ *   saver-minutes   0 .. 240                   that many minutes of idle time, 0 = never (default 10; saved)
+ *   saver-now       (write only)               1 = start it now (a preview), 0 = end it (saver.h)
  *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)
  *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm
  *                                              anything. Only a kept value is saved. auto = the preferred mode corrected to the

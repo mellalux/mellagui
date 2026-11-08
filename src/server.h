@@ -144,6 +144,9 @@ struct lm_config {
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
     const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
     const char *view_cmd;       /* command for the screenshot card's click: the image viewer (default "mellagui-view") */
+    const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
+    bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
+    int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
     const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
     const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
@@ -204,6 +207,8 @@ static inline void lm_config_defaults(struct lm_config *c)
         .audio_device = "default",
         .dmabuf = true,
         .gadget = true,
+        .saver = true,
+        .saver_min = 10,
     };
     lm_keys_defaults(&c->keys);
 }
@@ -244,6 +249,7 @@ struct lm_server {
     int reload_result;
     int (*reload_config)(struct lm_server *, bool quiet); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file; `quiet` = no "read again" card on the screen */
     struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
+    struct lm_saver *saver;             /* the screensaver (starts a program when idle), see saver.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
     struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */

@@ -46,6 +46,26 @@ static bool parse_color(const char *v, uint32_t *out)
     return true;
 }
 
+bool lm_theme_parse_color(const char *text, uint32_t *out) { return parse_color(text, out); }
+
+int lm_theme_count(void)
+{
+    int n = 0;
+#define X(name, field, def) n++;
+    LM_THEME_COLORS(X)
+#undef X
+    return n;
+}
+
+bool lm_theme_entry(int i, const char **name, uint32_t *value, uint32_t *builtin)
+{
+    int k = 0;
+#define X(n, field, def) if (k++ == i) { *name = n; *value = lm_theme.field; *builtin = def; return true; }
+    LM_THEME_COLORS(X)
+#undef X
+    return false;
+}
+
 bool lm_theme_set(const char *name, const char *value)
 {
     uint32_t c;

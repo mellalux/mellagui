@@ -14,6 +14,7 @@
 #include "confdefault.h"
 #include "confedit.h"
 #include "keys.h"
+#include "theme.h"
 #include "launchers.h"
 #include <strings.h>
 #include "backend.h"
@@ -42,7 +43,8 @@ enum key_id {
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE,
     K_MENU_0, K_MENU_LAST = K_MENU_0 + LM_MAX_APPS - 1, K_MENU_PUT, K_MENU_DEL, K_MENU_MOVE, K_MENU_RESET,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
-    K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET, K_COUNT
+    K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
+    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -62,6 +64,7 @@ static const char *const key_names[K_COUNT] = {
 #undef MN
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
+    [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
 #define KR(i) [K_KEYS_ROW_0 + (i)] = "keys-row-" #i
     KR(0), KR(1), KR(2), KR(3), KR(4), KR(5), KR(6), KR(7), KR(8), KR(9),
 #undef KR
@@ -474,6 +477,15 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_KEYS_CAPTURE: snprintf(out, n, "%d", srv->wm && lm_wm_key_capturing(srv->wm) ? 1 : 0); break;
     case K_KEYS_CAPTURED: snprintf(out, n, "%s", srv->wm ? lm_wm_key_captured(srv->wm) : ""); break;
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET: break;
+    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: break;
+    case K_THEME_COLORS: {                      /* "name=#rrggbb name=#rrggbb* ...": a * marks a colour that differs from the built-in one */
+        const char *nm;
+        uint32_t v, d;
+        size_t o = 0;
+        for (int i = 0; lm_theme_entry(i, &nm, &v, &d) && o + 48 < n; i++)
+            o += (size_t)snprintf(out + o, n - o, "%s%s=#%06x%s", i ? " " : "", nm, (unsigned)v, v != d ? "*" : "");
+        break;
+    }
     case K_KEYS_ROW_0 ... K_KEYS_ROW_LAST: {    /* "Super+Q<US>close" of the shortcut at keys-page * 10 + row, "" past the end */
         int i = keys_page_clamped(s) * KEYS_PAGE_ROWS + (k - K_KEYS_ROW_0);
         if (i < c->keys.n) {
@@ -508,7 +520,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
         if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_MENU_0 && k <= K_MENU_LAST) ||
-            k == K_KEYS_ACTIONS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST))
+            k == K_KEYS_ACTIONS || k == K_THEME_COLORS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
@@ -916,6 +928,56 @@ static bool keys_op(struct lm_settings *s, int kid, const char *val)
     return keys_write(srv, canon, act);
 }
 
+/* ---- the [theme] section, edited from the panel's Colours page -------------------------------------------------------------- */
+
+static bool theme_same(const char *existing, void *ud) { return !strcmp(existing, ud); }   /* [theme] names are exact */
+
+static bool theme_op(struct lm_server *srv, int kid, const char *val)
+{
+    const char *path = srv->config.conf_path;
+    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
+        return false;
+    bool ok;
+    if (kid == K_THEME_RESET) {
+        if (strcmp(val, "1"))
+            return false;
+        ok = lm_confedit_set_section(path, "theme", NULL);
+    } else {
+        char buf[96];
+        if (strlen(val) >= sizeof(buf))
+            return false;
+        strcpy(buf, val);
+        char *hex = strchr(buf, '\x1f');
+        if (hex)
+            *hex++ = 0;
+        const char *nm;
+        uint32_t cur, def = 0;
+        bool known = false;
+        for (int i = 0; lm_theme_entry(i, &nm, &cur, &def); i++)
+            if (!strcmp(nm, buf)) {
+                known = true;
+                break;
+            }
+        if (!known)
+            return false;
+        if (kid == K_THEME_DEL) {
+            if (hex)
+                return false;
+            ok = lm_confedit_set_key(path, "theme", theme_same, buf, buf, NULL);
+        } else {
+            uint32_t c;
+            if (!hex || !lm_theme_parse_color(hex, &c))
+                return false;
+            char text[16];
+            snprintf(text, sizeof(text), "#%06x", (unsigned)c);
+            ok = lm_confedit_set_key(path, "theme", theme_same, buf, buf, c == def ? NULL : text);   /* the built-in colour needs no line */
+        }
+    }
+    if (ok)
+        srv->reload_config(srv, true);
+    return ok;
+}
+
 static bool apply(struct lm_settings *s, const char *key, const char *val)
 {
     struct lm_server *srv = s->srv;
@@ -1063,6 +1125,8 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return menu_op(srv, k, val);
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET:
         return keys_op(s, k, val);
+    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET:
+        return theme_op(srv, k, val);
     case K_KEYS_PAGE:
         if (!parse_int(val, 0, 1000, &n))
             return false;

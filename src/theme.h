@@ -62,6 +62,12 @@ extern struct lm_theme lm_theme;      /* starts as the built-in defaults */
 /* Back to the built-in colours (a reload reads the file again on top of them). */
 void lm_theme_reset(void);
 
+/* Walk the palette: entry i (0..lm_theme_count()-1) with its current and built-in value (0xRRGGBB). */
+int lm_theme_count(void);
+bool lm_theme_entry(int i, const char **name, uint32_t *value, uint32_t *builtin);
+/* "#rrggbb", "rrggbb", "0xrrggbb" or "#rgb" -> 0xRRGGBB. */
+bool lm_theme_parse_color(const char *text, uint32_t *out);
+
 /* Set one colour from its config name and text. False when the name or the text is unknown / malformed. */
 bool lm_theme_set(const char *name, const char *value);
 

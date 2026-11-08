@@ -3045,10 +3045,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its two buttons, wraps over the nine page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 19th press; Space toggles it
+        # the wallpaper field, its four radio buttons and its two buttons, wraps over the ten page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 20th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(19):
+        for _ in range(20):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -6468,6 +6468,115 @@ class TestKeysEdit(Base):
             time.sleep(0.05)
         self.assertIn('key Super+Z = close', c.cmd('keys'))
         self.assertIn('Super+Z = close', open(self.path).read())
+
+class TestThemeEdit(Base):
+    """The settings panel's Colours page: theme-colors / theme-set / theme-del / theme-reset rewrite [theme] of mellagui.conf only."""
+
+    US = '\x1f'
+
+    def start(self, name, text=None):
+        self.path = os.path.join(tmp, name + '.conf')
+        if text is None:
+            if os.path.exists(self.path):
+                os.unlink(self.path)
+        else:
+            with open(self.path, 'w') as f:
+                f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path)
+        c.sync()
+        return c
+
+    def colours(self, c):
+        c.cmd('setting theme-colors')
+        return dict(t.split('=', 1) for t in c.last[3:].split())
+
+    @staticmethod
+    def menu_px(c, name):
+        c.click(40, 14)
+        c.abs(600, 400)
+        c.sync()
+        px = c.dump(os.path.join(tmp, name + '.ppm')).px(150, 40)
+        c.tap(KEY_ESC)
+        c.sync()
+        return px
+
+    def test_lists_every_colour_and_marks_the_changed_ones(self):
+        c = self.start('mellagui-te1', '[theme]\naccent = #ff0000\n')
+        cols = self.colours(c)
+        self.assertEqual(len(cols), 30)
+        self.assertEqual(cols['accent'], '#ff0000*')
+        self.assertEqual(cols['background'], '#14171f')
+
+    def test_set_del_reset_keep_the_rest_of_the_file(self):
+        c = self.start('mellagui-te2', '# top\n[keys]\nSuper+T = run\n\n[theme]\n# mine\naccent = #ff0000\n\n[panel]\nheight = 30\n')
+        c.cmd('setraw theme-set background%s#102030' % self.US)
+        text = open(self.path).read()
+        self.assertEqual(text, '# top\n[keys]\nSuper+T = run\n\n[theme]\n# mine\naccent = #ff0000\nbackground = #102030\n\n[panel]\nheight = 30\n')
+        self.assertEqual(self.menu_px(c, 'te2a'), (0x10, 0x20, 0x30))                    # the compositor repainted at once
+        self.assertEqual(self.colours(c)['background'], '#102030*')
+        c.cmd('setraw theme-set accent%s#6fa8ff' % self.US)                              # the built-in value: no line is needed
+        self.assertNotIn('accent', open(self.path).read())
+        c.cmd('setraw theme-set text%s#abc' % self.US)                                   # the short form is written in full
+        self.assertIn('text = #aabbcc\n', open(self.path).read())
+        c.cmd('setraw theme-del background')
+        self.assertNotIn('background', open(self.path).read())
+        self.assertEqual(self.menu_px(c, 'te2b'), (0x14, 0x17, 0x1f))
+        c.cmd('setraw theme-reset 1')
+        self.assertEqual(open(self.path).read(), '# top\n[keys]\nSuper+T = run\n\n[panel]\nheight = 30\n')
+
+    def test_the_file_and_section_are_created(self):
+        c = self.start('mellagui-te3')
+        c.cmd('setraw theme-set frame%s#112233' % self.US)
+        self.assertEqual(open(self.path).read(), '[theme]\nframe = #112233\n')
+
+    def test_refused(self):
+        c = self.start('mellagui-te4', '[theme]\naccent = #ff0000\n')
+        for bad in ('theme-set nosuch%s#000000' % self.US, 'theme-set accent%szzz' % self.US, 'theme-set accent%s#12345' % self.US,
+                    'theme-set accent', 'theme-del nosuch', 'theme-del accent%s1' % self.US, 'theme-reset 0'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('setraw ' + bad)
+        self.assertEqual(open(self.path).read(), '[theme]\naccent = #ff0000\n')
+        p, c2, stop = self.private_compositor('mellagui-te5', '--config', 'none')
+        with self.assertRaises(RuntimeError):
+            c2.cmd('setraw theme-set accent%s#000000' % self.US)
+
+    def test_the_panel_colours_page_changes_a_colour(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-te6')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-te6'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 9 * 36 + 16)                          # the Colours tab (10th)
+        time.sleep(0.3)
+        # row 11 of the palette is "background": page 2 (8 per page), third row
+        c.click(x0 + 160 + 24, y0 + 14 + 28 + 11)                         # first row: wallpaper-top, to be sure a click selects
+        time.sleep(0.2)
+        c.click(x0 + 160 + 32 + 30, y0 + 14 + 28 + 11)                    # its name button
+        time.sleep(0.2)
+        form_y = y0 + 14 + 28 + 8 * 22 + 4 + 22 + 6
+        c.click(x0 + 160 + 34 + 50, form_y + 13)                          # the hex field
+        for _ in range(8):
+            c.tap(14)                                                      # Backspace x8
+        for ch in '102030':
+            c.tap(KEYCODES[ch])
+        c.click(x0 + 160 + 142 + 32, form_y + 13)                         # Apply
+        for _ in range(60):
+            if 'wallpaper-top' in open(self.path).read() if os.path.exists(self.path) else False:
+                break
+            time.sleep(0.05)
+        self.assertIn('wallpaper-top = #102030', open(self.path).read())
+        self.assertEqual(self.colours(c)['wallpaper-top'], '#102030*')
 
 
 class TestScreenshot(Base):

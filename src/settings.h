@@ -53,6 +53,10 @@
  *                                              empty minutes / start / blank / vt = keep. Never echoed, never logged
  *   notify          (write only)               "title<TAB>body<TAB>milliseconds": a notification card at the top right (0 ms = until clicked,
  *                                              default 6000; mellagui-notify sends it)
+ *   config-file     (read only)                the mellagui.conf that is read ("" = none; menu, shortcuts, colours, sizes: conf.h)
+ *   config-status  (read only)                 ok | missing (set but not readable) | none | ignored:N (N lines rejected by the last reload)
+ *   config-reload   (write only)               1 = read mellagui.conf again (same as Super+Shift+R / SIGUSR2)
+ *   config-create   (write only)               1 = write the built-in defaults to config-file when it does not exist yet
  *   lock-now        (write only)               1 = lock the screen now (refused when no secret is set)
  *   locked          0 | 1                      the screen is locked now (read only)
  *

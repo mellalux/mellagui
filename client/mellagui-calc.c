@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "util.h"
@@ -246,16 +247,15 @@ static const char *const LABELS[ROWS][COLS] = {
     { "+/-", "0", ".", "=" },
 };
 
-#define COL_BG      0x14171fu
-#define COL_DISPLAY 0x0d0f14u
-#define COL_KEY     0x2d3a5au
-#define COL_OP      0x3a4a72u
-#define COL_HOVER   0x41527eu
-#define COL_DOWN    0x56699cu
-#define COL_ACCENT  0x6fa8ffu
-#define COL_TEXT    0xe6e9efu
-#define COL_DIM     0x7b8294u
-
+#define COL_BG      (lm_theme.background)
+#define COL_DISPLAY (lm_theme.field)
+#define COL_KEY     (lm_theme.button)
+#define COL_OP      (lm_theme.button_alt)
+#define COL_HOVER   (lm_theme.button_hover)
+#define COL_DOWN    (lm_theme.button_down)
+#define COL_ACCENT  (lm_theme.accent)
+#define COL_TEXT    (lm_theme.text)
+#define COL_DIM     (lm_theme.text_dim)
 struct app {
     struct wlwin win;
     double px, py;
@@ -413,6 +413,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
 

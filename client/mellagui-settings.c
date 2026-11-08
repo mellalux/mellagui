@@ -25,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "lock.h"
@@ -300,16 +301,15 @@ static int selftest(void)
 
 /* ---- state -------------------------------------------------------------------------------------------------- */
 
-#define COL_BG      0x14171fu
-#define COL_SIDE    0x0d0f14u
-#define COL_FIELD   0x0d0f14u
-#define COL_KEY     0x2d3a5au
-#define COL_HOVER   0x41527eu
-#define COL_DOWN    0x56699cu
-#define COL_ACCENT  0x6fa8ffu
-#define COL_TEXT    0xe6e9efu
-#define COL_DIM     0x7b8294u
-
+#define COL_BG      (lm_theme.background)
+#define COL_SIDE    (lm_theme.field)
+#define COL_FIELD   (lm_theme.field)
+#define COL_KEY     (lm_theme.button)
+#define COL_HOVER   (lm_theme.button_hover)
+#define COL_DOWN    (lm_theme.button_down)
+#define COL_ACCENT  (lm_theme.accent)
+#define COL_TEXT    (lm_theme.text)
+#define COL_DIM     (lm_theme.text_dim)
 #define DEFAULT_W 620
 #define DEFAULT_H 440
 #define SIDE_W 140
@@ -317,8 +317,8 @@ static int selftest(void)
 #define MAX_KV 48
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD };
 
@@ -708,6 +708,39 @@ static void build_display(struct app *a, int x, int y, int w)
     snprintf(mb->arg, sizeof(mb->arg), "mellagui-monitor");
 }
 
+/* The hand-written mellagui.conf: menu, shortcuts, colours, sizes. The panel does not edit them, it opens the file. */
+static void build_config(struct app *a, int x, int y, int w)
+{
+    const char *file = kv_get(a, "config-file"), *status = kv_get(a, "config-status");
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Configuration file");
+    y += ROW_H;
+    if (!*file) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, file);
+    y += ROW_H;
+    char line[96];
+    if (!strcmp(status, "missing"))
+        snprintf(line, sizeof(line), "The file does not exist yet.");
+    else if (!strncmp(status, "ignored:", 8))
+        snprintf(line, sizeof(line), "Read, but %s line(s) were ignored (see the log).", status + 8);
+    else
+        snprintf(line, sizeof(line), "Menu, shortcuts, colours and sizes are set here.");
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, line);
+    y += ROW_H + 6;
+    if (!strcmp(status, "missing")) {
+        add_button(a, x, y, 260, "Create it with the defaults", "config-create");
+    } else {
+        struct widget *e = add_button(a, x, y, 260, "Edit the file...", "config-edit");
+        snprintf(e->arg, sizeof(e->arg), "%s", file);
+        y += ROW_H + 4;
+        add_button(a, x, y, 260, "Reload (Super+Shift+R)", "config-reload");
+    }
+    y += ROW_H + 10;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Running programs keep their colours until restarted.");
+}
+
 static void build_sound(struct app *a, int x, int y, int w)
 {
     struct entry ents[8];
@@ -780,6 +813,7 @@ static void build(struct app *a)
     case PAGE_DISPLAY: build_display(a, x, y, w); break;
     case PAGE_SOUND: build_sound(a, x, y, w); break;
     case PAGE_SECURITY: build_security(a, x, y, w); break;
+    case PAGE_CONFIG: build_config(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)
@@ -834,7 +868,7 @@ static void slider_drag_to(struct app *a, int idx, double x)
 }
 
 /* Starts another MellaGUI program next to this one (the monitor panel); it is not waited for. */
-static void launch_sibling(const char *name)
+static void launch_sibling(const char *name, const char *arg)
 {
     pid_t pid = fork();
     if (pid != 0)
@@ -848,10 +882,10 @@ static void launch_sibling(const char *name)
         if (slash) {
             *slash = 0;
             snprintf(path, sizeof(path), "%s/%s", self, name);
-            execl(path, name, (char *)NULL);
+            execl(path, name, arg, (char *)NULL);
         }
     }
-    execlp(name, name, (char *)NULL);                   /* installed on the PATH */
+    execlp(name, name, arg, (char *)NULL);                   /* installed on the PATH */
     _exit(127);
 }
 
@@ -929,7 +963,11 @@ static void activate(struct app *a, int idx)
         } else if (!strcmp(w->key, "sec-lock")) {
             send_set(a, "lock-now", "1");
         } else if (!strcmp(w->key, "launch")) {
-            launch_sibling(w->arg);
+            launch_sibling(w->arg, NULL);
+        } else if (!strcmp(w->key, "config-edit")) {
+            launch_sibling("mellagui-edit", w->arg);
+        } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create")) {
+            send_set(a, w->key, "1");
         } else if (!strcmp(w->key, "out-left") || !strcmp(w->key, "out-right")) {
             char names[8][40];
             int n = output_names(a, names), at = -1;
@@ -1315,6 +1353,7 @@ static int cli(struct app *a, int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     bool cli_mode = argc > 1 && (!strcmp(argv[1], "--get") || !strcmp(argv[1], "--set"));

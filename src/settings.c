@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "audio.h"
+#include "confdefault.h"
 #include "backend.h"
 #include "input.h"
 #include "sound.h"
@@ -32,7 +33,7 @@ enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
-    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_COUNT
+    K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_COUNT
 };
 #define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
 
@@ -45,6 +46,7 @@ static const char *const key_names[K_COUNT] = {
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
+    [K_CONFIG_FILE] = "config-file", [K_CONFIG_STATUS] = "config-status", [K_CONFIG_RELOAD] = "config-reload", [K_CONFIG_CREATE] = "config-create",
 };
 
 static int key_find(const char *key)
@@ -421,6 +423,22 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_LOCK_STATUS: snprintf(out, n, "%s", lm_lock_status(srv->lock)); break;
     case K_LOCK_SET: case K_LOCK_NOW: case K_NOTIFY: break;            /* write only: the secrets never come back */
     case K_LOCKED: snprintf(out, n, "%d", lm_lock_active(srv->lock) ? 1 : 0); break;
+    case K_CONFIG_FILE: snprintf(out, n, "%s", c->conf_path && strcmp(c->conf_path, "none") ? c->conf_path : ""); break;
+    case K_CONFIG_STATUS:
+        if (!c->conf_path || !strcmp(c->conf_path, "none"))
+            snprintf(out, n, "none");
+        else if (access(c->conf_path, R_OK) != 0)
+            snprintf(out, n, "missing");
+        else if (!srv->reloaded)
+            snprintf(out, n, "ok");
+        else if (srv->reload_result < 0)
+            snprintf(out, n, "missing");
+        else if (srv->reload_result > 0)
+            snprintf(out, n, "ignored:%d", srv->reload_result);
+        else
+            snprintf(out, n, "ok");
+        break;
+    case K_CONFIG_RELOAD: case K_CONFIG_CREATE: break;                   /* write only */
     }
 }
 
@@ -797,6 +815,28 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     }
     case K_LOCK_NOW:
         return parse_bool(val, &b) && (!b || lm_lock_now(srv->lock));
+    case K_CONFIG_RELOAD:
+        return parse_bool(val, &b) && (!b || (srv->reload_config && srv->reload_config(srv) >= 0));
+    case K_CONFIG_CREATE: {                             /* write the built-in configuration as the user's file, never over an existing one */
+        const char *path = srv->config.conf_path;
+        if (!parse_bool(val, &b) || !b || !path || !*path || !strcmp(path, "none") || access(path, F_OK) == 0)
+            return false;
+        char dir[512];
+        if (snprintf(dir, sizeof(dir), "%s", path) >= (int)sizeof(dir))
+            return false;
+        mkdir_parents(dir);
+        FILE *f = fopen(path, "wx");
+        if (!f) {
+            lm_warn("settings: cannot create %s: %s", path, strerror(errno));
+            return false;
+        }
+        fputs("# MellaGUI configuration. Everything here is the built-in default: delete what you do not change.\n"
+              "# Super+Shift+R (or Settings -> Config -> Reload) reads this file again.\n\n", f);
+        fputs(lm_config_default_text(), f);
+        bool ok = fclose(f) == 0;
+        lm_info("settings: wrote the default configuration to %s", path);
+        return ok;
+    }
     default:
         return false;       /* unknown or read-only ("file") */
     }

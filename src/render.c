@@ -9,6 +9,7 @@
 #include <emmintrin.h>
 #endif
 #include "render.h"
+#include "theme.h"
 #include "mixer.h"
 #include "sysinfo.h"
 
@@ -32,23 +33,23 @@
 
 /* ---- colour scheme (XRGB8888) --------------------------------------------------- */
 
-#define COL_WALL_TOP     0x1b2a49u
-#define COL_WALL_BOTTOM  0x3a6b72u
-#define COL_FRAME_ACTIVE 0x3b4a6bu
-#define COL_FRAME_IDLE   0x2a2f3au
-#define COL_CONTENT_BG   0x101216u
-#define COL_TEXT_ACTIVE  0xffffffu
-#define COL_TEXT_IDLE    0x9aa0aeu
-#define COL_BTN_HOVER    0x5a6c96u
-#define COL_BTN_PRESSED  0x2c3856u
-#define COL_BTN_CLOSE    0xc0392bu
-#define COL_PANEL        0x14171fu
-#define COL_PANEL_BTN    0x2d3a5au
-#define COL_PANEL_HOVER  0x41527eu
-#define COL_PANEL_ACCENT 0x6fa8ffu
-#define COL_PANEL_TEXT   0xe6e9efu
-#define COL_PANEL_DANGER 0xc0392bu
-#define COL_PANEL_DIM    0x7b8294u
+#define COL_WALL_TOP (lm_theme.wallpaper_top)
+#define COL_WALL_BOTTOM (lm_theme.wallpaper_bottom)
+#define COL_FRAME_ACTIVE (lm_theme.frame)
+#define COL_FRAME_IDLE (lm_theme.frame_idle)
+#define COL_CONTENT_BG (lm_theme.content)
+#define COL_TEXT_ACTIVE (lm_theme.title_text)
+#define COL_TEXT_IDLE (lm_theme.title_text_idle)
+#define COL_BTN_HOVER (lm_theme.title_button_hover)
+#define COL_BTN_PRESSED (lm_theme.title_button_pressed)
+#define COL_BTN_CLOSE (lm_theme.title_button_close)
+#define COL_PANEL (lm_theme.background)
+#define COL_PANEL_BTN (lm_theme.button)
+#define COL_PANEL_HOVER (lm_theme.button_hover)
+#define COL_PANEL_ACCENT (lm_theme.accent)
+#define COL_PANEL_TEXT (lm_theme.text)
+#define COL_PANEL_DANGER (lm_theme.danger)
+#define COL_PANEL_DIM (lm_theme.text_dim)
 
 struct out_state {
     struct lm_output *out;
@@ -609,7 +610,7 @@ static void paint_switcher(const struct paint_ctx *c, const struct lm_switcher_i
 /* A notification card: bordered box, the title in the accent colour, the wrapped text below, a dim x top right (a click closes it). */
 static void paint_notify(const struct paint_ctx *c, const struct lm_notify_info *n)
 {
-    fill_rect(c, &n->rect, 0x003a4256u);                                /* 1 px border */
+    fill_rect(c, &n->rect, (0x00000000u | lm_theme.border));                                /* 1 px border */
     struct lm_rect in = lm_rect_make(n->rect.x + 1, n->rect.y + 1, n->rect.w - 2, n->rect.h - 2);
     fill_rect(c, &in, COL_PANEL);
     struct lm_rect bar = lm_rect_make(n->rect.x + 1, n->rect.y + 1, 3, n->rect.h - 2);
@@ -676,7 +677,7 @@ static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
         int x = box.x + (box.w - shown * 20) / 2 + 4;
         for (int i = 0; i < shown; i++) {
             struct lm_rect dot = lm_rect_make(x + i * 20, box.y + box.h / 2 - 5, 10, 10);
-            fill_round(c, &dot, 5, 0xffe6e9efu);
+            fill_round(c, &dot, 5, (0xff000000u | lm_theme.text));
         }
     }
     struct lm_rect msg = lm_rect_make(o.x, box.y + box.h + 14, o.w, 20);
@@ -849,7 +850,7 @@ static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, 
 static void paint_power(const struct paint_ctx *c, const struct lm_power_info *pw)
 {
     fill_round(c, &pw->rect, 0, 0xb0000000u);
-    fill_round(c, &pw->card, 14, 0xff3a4256u);
+    fill_round(c, &pw->card, 14, (0xff000000u | lm_theme.border));
     struct lm_rect in = lm_rect_make(pw->card.x + 1, pw->card.y + 1, pw->card.w - 2, pw->card.h - 2);
     fill_round(c, &in, 13, 0xff000000u | COL_PANEL);
     struct lm_rect title = lm_rect_make(pw->card.x, pw->card.y + 14, pw->card.w, LM_FONT_H);
@@ -880,9 +881,9 @@ static void paint_card_base(const struct paint_ctx *c, const struct lm_gadget_in
         struct lm_rect sr = lm_rect_make(card.x - k, card.y - k + 4, card.w + 2 * k, card.h + 2 * k);
         fill_round(c, &sr, 12 + k, 0x06000000u);
     }
-    fill_round(c, &card, 12, g->dragging ? 0xaa6fa8ffu : 0x2effffffu);  /* hairline: the 1 px ring around the body */
+    fill_round(c, &card, 12, g->dragging ? (0xaa000000u | lm_theme.accent) : 0x2effffffu);  /* hairline: the 1 px ring around the body */
     struct lm_rect in = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, card.h - 2);
-    fill_round(c, &in, 11, 0xf2161a24u);
+    fill_round(c, &in, 11, (0xf2000000u | lm_theme.card));
 }
 
 /* Resize grip: a small triangle of dots in the bottom right corner. */
@@ -914,18 +915,18 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     /* header: clipboard glyph, title, count badge */
     int hy = card.y + (g->title_h - LM_FONT_H) / 2;
     struct lm_rect icon = lm_rect_make(card.x + 14, card.y + (g->title_h - 14) / 2, 11, 14);
-    fill_round(c, &icon, 2, 0xff6fa8ffu);
+    fill_round(c, &icon, 2, (0xff000000u | lm_theme.accent));
     struct lm_rect clip = lm_rect_make(icon.x + 3, icon.y - 2, 5, 4);
-    fill_round(c, &clip, 1, 0xffe6e9efu);
+    fill_round(c, &clip, 1, (0xff000000u | lm_theme.text));
     struct lm_rect hole = lm_rect_make(icon.x + 2, icon.y + 4, 7, 8);
-    fill_round(c, &hole, 1, 0xff161a24u);
+    fill_round(c, &hole, 1, (0xff000000u | lm_theme.card));
     struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
     draw_text(c, &head, card.x + 32, hy, "Clipboard", COL_PANEL_TEXT);
     char badge[8];
     snprintf(badge, sizeof(badge), "%d", g->total);
     int bw = lm_font_text_width(badge) + 14;
     struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
-    fill_round(c, &pill, 8, 0xff2d3a5au);
+    fill_round(c, &pill, 8, (0xff000000u | lm_theme.button));
     draw_text_centered(c, &pill, badge, COL_PANEL_ACCENT);
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
@@ -945,13 +946,13 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
         fill_round(c, &slot, 7, i == 0 ? 0x26ffffffu : 0x12ffffffu);
         if (i == 0) {                                                    /* newest: accent bar on the left */
             struct lm_rect bar = lm_rect_make(slot.x + 4, slot.y + 6, 3, slot.h - 12);
-            fill_round(c, &bar, 1, 0xff6fa8ffu);
+            fill_round(c, &bar, 1, (0xff000000u | lm_theme.accent));
         }
         if (i == g->cursor) {                                            /* keyboard cursor: an accent outline */
             struct lm_rect edge[4] = { lm_rect_make(slot.x, slot.y, slot.w, 2), lm_rect_make(slot.x, slot.y + slot.h - 2, slot.w, 2),
                                        lm_rect_make(slot.x, slot.y, 2, slot.h), lm_rect_make(slot.x + slot.w - 2, slot.y, 2, slot.h) };
             for (int e = 0; e < 4; e++)
-                fill_round(c, &edge[e], 0, 0xff6fa8ffu);
+                fill_round(c, &edge[e], 0, (0xff000000u | lm_theme.accent));
         }
         uint32_t col = i == 0 ? COL_PANEL_TEXT : COL_PANEL_DIM;
         int tx = slot.x + 14;
@@ -992,7 +993,7 @@ static void paint_speaker(const struct paint_ctx *c, const struct lm_rect *r, bo
     } else {
         for (int k = -7; k <= 7; k++) {
             struct lm_rect dot = lm_rect_make(r->x + r->w / 2 + k, r->y + r->h / 2 + k, 2, 2);
-            fill_round(c, &dot, 0, 0xffe05a5au);
+            fill_round(c, &dot, 0, (0xff000000u | lm_theme.alert));
         }
     }
 }
@@ -1002,14 +1003,14 @@ static void paint_slider(const struct paint_ctx *c, const struct lm_rect *s, int
 {
     int ty = s->y + s->h / 2 - 3;
     struct lm_rect track = lm_rect_make(s->x, ty, s->w, 6);
-    fill_round(c, &track, 3, 0xff2d3a5au);
+    fill_round(c, &track, 3, (0xff000000u | lm_theme.button));
     int fw = s->w * LM_CLAMP(value, 0, 100) / 100;
     if (fw > 0) {
         struct lm_rect fillr = lm_rect_make(s->x, ty, fw, 6);
-        fill_round(c, &fillr, 3, muted ? 0xff7b8294u : 0xff6fa8ffu);
+        fill_round(c, &fillr, 3, muted ? (0xff000000u | lm_theme.text_dim) : (0xff000000u | lm_theme.accent));
     }
     struct lm_rect knob = lm_rect_make(s->x + fw - 6, s->y + s->h / 2 - 7, 14, 14);
-    fill_round(c, &knob, 7, muted ? 0xffa0a6b4u : 0xffe6e9efu);
+    fill_round(c, &knob, 7, muted ? (0xff000000u | lm_theme.muted) : (0xff000000u | lm_theme.text));
     if (pct_text) {
         char t[12];
         snprintf(t, sizeof(t), "%d%%", value);
@@ -1026,7 +1027,7 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
 
     /* header: speaker glyph, title, badge with the level */
     struct lm_rect icon = lm_rect_make(card.x + 10, card.y + (g->title_h - 20) / 2, 20, 20);
-    paint_speaker(c, &icon, st && st->mute, 0xff6fa8ffu);
+    paint_speaker(c, &icon, st && st->mute, (0xff000000u | lm_theme.accent));
     int hy = card.y + (g->title_h - LM_FONT_H) / 2;
     struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
     draw_text(c, &head, card.x + 36, hy, "Volume", COL_PANEL_TEXT);
@@ -1039,8 +1040,8 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
         snprintf(badge, sizeof(badge), "%d%%", st->volume);
     int bw = lm_font_text_width(badge) + 14;
     struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
-    fill_round(c, &pill, 8, 0xff2d3a5au);
-    draw_text_centered(c, &pill, badge, st && st->mute ? 0xe05a5au : COL_PANEL_ACCENT);
+    fill_round(c, &pill, 8, (0xff000000u | lm_theme.button));
+    draw_text_centered(c, &pill, badge, st && st->mute ? lm_theme.alert : COL_PANEL_ACCENT);
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
     paint_grip(c, &card);
@@ -1054,8 +1055,8 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
     struct lm_mixer_layout l;
     lm_mixer_layout(&card, g->title_h, st->nstreams, pulse, &l);
 
-    fill_round(c, &l.master_mute, 6, st->mute ? 0x40e05a5au : 0x26ffffffu);
-    paint_speaker(c, &l.master_mute, st->mute, st->mute ? 0xffe05a5au : 0xffe6e9efu);
+    fill_round(c, &l.master_mute, 6, st->mute ? (0x40000000u | lm_theme.alert) : 0x26ffffffu);
+    paint_speaker(c, &l.master_mute, st->mute, st->mute ? (0xff000000u | lm_theme.alert) : (0xff000000u | lm_theme.text));
     paint_slider(c, &l.master_slider, st->volume, st->mute, true);
     if (pulse) {
         fill_round(c, &l.output, 7, 0x1affffffu);
@@ -1066,9 +1067,9 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
     for (int i = 0; i < l.nstreams; i++) {
         const struct lm_mixer_stream *s = &st->streams[i];
         draw_text(c, &l.stream[i].label, l.stream[i].label.x, l.stream[i].label.y, s->name, s->mute ? COL_PANEL_DIM : COL_PANEL_TEXT);
-        fill_round(c, &l.stream[i].mute, 5, s->mute ? 0x40e05a5au : 0x26ffffffu);
+        fill_round(c, &l.stream[i].mute, 5, s->mute ? (0x40000000u | lm_theme.alert) : 0x26ffffffu);
         struct lm_rect gl = lm_rect_make(l.stream[i].mute.x + 2, l.stream[i].mute.y, 18, 20);
-        paint_speaker(c, &gl, s->mute, s->mute ? 0xffe05a5au : 0xffe6e9efu);
+        paint_speaker(c, &gl, s->mute, s->mute ? (0xff000000u | lm_theme.alert) : (0xff000000u | lm_theme.text));
         paint_slider(c, &l.stream[i].slider, s->volume, s->mute, true);
     }
     if (l.hint.w > 0 && l.nstreams == st->nstreams) {
@@ -1083,7 +1084,7 @@ static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *
 /* Colour of a load / temperature bar: calm blue, amber when high, red when critical. */
 static uint32_t level_color(int pct, int warn, int crit)
 {
-    return pct >= crit ? 0xffe05a5au : pct >= warn ? 0xffe0a040u : 0xff6fa8ffu;
+    return pct >= crit ? (0xff000000u | lm_theme.alert) : pct >= warn ? (0xff000000u | lm_theme.warn) : (0xff000000u | lm_theme.accent);
 }
 
 /* A labelled horizontal bar: `label` left, `value` text right, a track with a fill below. */
@@ -1095,7 +1096,7 @@ static void paint_meter(const struct paint_ctx *c, int x, int y, int w, const ch
     int vw = lm_font_text_width(value);
     draw_text(c, &row, x + w - vw, y, value, COL_PANEL_TEXT);
     struct lm_rect track = lm_rect_make(x, y + 17, w, 6);
-    fill_round(c, &track, 3, 0xff2d3a5au);
+    fill_round(c, &track, 3, (0xff000000u | lm_theme.button));
     int fw = w * LM_CLAMP(pct, 0, 100) / 100;
     if (fw >= 2) {
         struct lm_rect fillr = lm_rect_make(x, y + 17, fw, 6);
@@ -1111,16 +1112,16 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
 
     /* header: a chip glyph, title, the load in a pill */
     struct lm_rect chip = lm_rect_make(card.x + 14, card.y + (g->title_h - 12) / 2, 12, 12);   /* (title_h is 26: 7 px above and below) */
-    fill_round(c, &chip, 2, 0xff6fa8ffu);
+    fill_round(c, &chip, 2, (0xff000000u | lm_theme.accent));
     struct lm_rect die = lm_rect_make(chip.x + 3, chip.y + 3, 6, 6);
-    fill_round(c, &die, 1, 0xff161a24u);
+    fill_round(c, &die, 1, (0xff000000u | lm_theme.card));
     for (int i = 0; i < 3; i++) {                                       /* pins */
         struct lm_rect t = lm_rect_make(chip.x + 2 + i * 4, chip.y - 3, 1, 3), b = lm_rect_make(chip.x + 2 + i * 4, chip.y + 12, 1, 3);
         struct lm_rect l = lm_rect_make(chip.x - 3, chip.y + 2 + i * 4, 3, 1), r = lm_rect_make(chip.x + 12, chip.y + 2 + i * 4, 3, 1);
-        fill_round(c, &t, 0, 0xffa0a6b4u);
-        fill_round(c, &b, 0, 0xffa0a6b4u);
-        fill_round(c, &l, 0, 0xffa0a6b4u);
-        fill_round(c, &r, 0, 0xffa0a6b4u);
+        fill_round(c, &t, 0, (0xff000000u | lm_theme.muted));
+        fill_round(c, &b, 0, (0xff000000u | lm_theme.muted));
+        fill_round(c, &l, 0, (0xff000000u | lm_theme.muted));
+        fill_round(c, &r, 0, (0xff000000u | lm_theme.muted));
     }
     int hy = card.y + (g->title_h - LM_FONT_H) / 2;
     struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
@@ -1129,7 +1130,7 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     snprintf(badge, sizeof(badge), "%d%%", st ? st->cpu : 0);
     int bw = lm_font_text_width(badge) + 14;
     struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
-    fill_round(c, &pill, 8, 0xff2d3a5au);
+    fill_round(c, &pill, 8, (0xff000000u | lm_theme.button));
     draw_text_centered(c, &pill, badge, st ? level_color(st->cpu, 70, 90) & 0x00ffffffu : COL_PANEL_ACCENT);
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
@@ -1176,7 +1177,7 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
             struct lm_rect slot = lm_rect_make(x + i * (bwid + gap), y, bwid, 16);
             if (slot.x + slot.w > x + w)
                 break;
-            fill_round(c, &slot, 2, 0xff2d3a5au);
+            fill_round(c, &slot, 2, (0xff000000u | lm_theme.button));
             int hh = 16 * st->core[i] / 100;
             if (hh > 0) {
                 struct lm_rect f = lm_rect_make(slot.x, slot.y + 16 - hh, slot.w, hh);
@@ -1198,9 +1199,9 @@ static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info 
     if (st->temp_c >= 0) {
         snprintf(val, sizeof(val), "%d \xc2\xb0""C", st->temp_c);
         int pct = LM_CLAMP((st->temp_c - 20) * 100 / 80, 0, 100);       /* the bar spans 20..100 degrees */
-        paint_meter(c, x, y, w, "Temperature", val, pct, st->temp_c >= 85 ? 0xffe05a5au : st->temp_c >= 70 ? 0xffe0a040u : 0xff5ac88cu);
+        paint_meter(c, x, y, w, "Temperature", val, pct, st->temp_c >= 85 ? (0xff000000u | lm_theme.alert) : st->temp_c >= 70 ? (0xff000000u | lm_theme.warn) : (0xff000000u | lm_theme.ok));
     } else {
-        paint_meter(c, x, y, w, "Temperature", "no sensor", 0, 0xff6fa8ffu);
+        paint_meter(c, x, y, w, "Temperature", "no sensor", 0, (0xff000000u | lm_theme.accent));
     }
     y += 30;
 
@@ -1585,10 +1586,10 @@ static void paint_shot_card(const struct paint_ctx *c, const struct shot_fx *fx)
     struct lm_rect hit;
     if (!lm_rect_intersect(&card, &c->clip, &hit))
         return;
-    fill_round(c, &card, 8, 0xf2161a24u);
+    fill_round(c, &card, 8, (0xf2000000u | lm_theme.card));
     struct lm_rect th = lm_rect_make(card.x + 8, card.y + 8, fx->tw, fx->th);
     struct lm_rect ring = lm_rect_make(th.x - 1, th.y - 1, th.w + 2, th.h + 2);
-    fill_rect(c, &ring, 0x003a4256u);
+    fill_rect(c, &ring, (0x00000000u | lm_theme.border));
     struct lm_rect vis;
     if (lm_rect_intersect(&th, &c->clip, &vis)) {
         for (int y = vis.y; y < vis.y + vis.h; y++)

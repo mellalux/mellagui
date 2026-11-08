@@ -12,6 +12,12 @@
 #include <unistd.h>
 
 #include "backend.h"
+#include "conf.h"
+#include "confdefault.h"
+#include "keys.h"
+#include "launchers.h"
+#include "metrics.h"
+#include "theme.h"
 #include "input.h"
 #include "keymap.h"
 #include "log.h"
@@ -38,7 +44,10 @@ static const char *usage_text =
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
     "  --terminal CMD           command for Super+Enter and the panel launcher (default mellagui-term)\n"
-    "  --app NAME=CMD           add an entry to the MellaGUI menu (repeatable; replaces the default Terminal/Calculator/Code)\n"
+    "  --app NAME=CMD           add an entry to the MellaGUI menu (repeatable; replaces the default menu, see mellagui.conf [menu])\n"
+    "  --config FILE|none       hand-written configuration: menu, commands ... (default drm: $XDG_CONFIG_HOME/mellagui/mellagui.conf,\n"
+    "                           headless: none); options win. --print-config shows the built-in defaults as such a file\n"
+    "  --print-config           print the built-in mellagui.conf and exit\n"
     "  --run CMD                command for Super+R and the panel's Run button (default mellagui-run)\n"
     "  --drm-device PATH        DRM device (default: auto-detect /dev/dri/card*)\n"
     "  --mode WxH[@Hz]|preferred  drm: video mode. Default: the monitor's preferred one, except when its shape differs from the\n"
@@ -190,26 +199,6 @@ static void sig_dump(int signo, void *data)
     }
 }
 
-/* Default for a bundled program: `name` next to this binary when it exists, else whatever is in PATH.
- * Each call site passes its own buffer. */
-static const char *default_sibling(const char *name, char *cmd, size_t cmdsz)
-{
-    char exe[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (n > 0) {
-        exe[n] = 0;
-        char *slash = strrchr(exe, '/');
-        if (slash) {
-            snprintf(slash + 1, sizeof(exe) - (size_t)(slash + 1 - exe), "%s", name);
-            if (access(exe, X_OK) == 0 && !strchr(exe, '\'')) {
-                snprintf(cmd, cmdsz, "'%s'", exe);
-                return cmd;
-            }
-        }
-    }
-    return name;
-}
-
 static void quit_timer(void *data)
 {
     lm_info("--timeout reached, shutting down");
@@ -232,6 +221,63 @@ static bool ensure_runtime_dir(void)
     return false;
 }
 
+/* mellagui.conf: every section belongs to one module, this only hands the lines over. */
+static bool conf_line(void *ud, const char *section, const char *key, const char *value)
+{
+    if (!strcmp(section, "menu") || !strcmp(section, "commands"))
+        return lm_launch_conf(ud, section, key, value);
+    if (!strcmp(section, "theme"))
+        return lm_theme_conf(ud, section, key, value);
+    if (lm_metrics_section(section))
+        return lm_metrics_conf(ud, section, key, value);
+    if (!strcmp(section, "keys"))
+        return lm_keys_conf(&((struct lm_config *)ud)->keys, section, key, value);
+    return false;
+}
+
+static char g_conf_path[PATH_MAX];      /* the mellagui.conf that was read at start ("" = none) */
+
+/* Read mellagui.conf again: theme, sizes, shortcuts, menu and commands start from the built-in values and the file is applied on top,
+ * the command line (--terminal, --run, --app) stays. Programs that are already running keep the colours they started with.
+ * Returns the number of rejected lines, -1 when there is no (readable) file; nothing changes then. */
+static int reload_config(struct lm_server *srv)
+{
+    if (!g_conf_path[0] || access(g_conf_path, R_OK) != 0) {
+        lm_warn("reload: no readable configuration file");
+        srv->reload_result = -1;
+        srv->reloaded = true;
+        lm_settings_changed(srv->settings);
+        return -1;
+    }
+    lm_theme_reset();
+    lm_metrics_reset();
+    lm_keys_defaults(&srv->config.keys);
+    lm_launch_reset();
+    int bad = lm_conf_load(g_conf_path, conf_line, &srv->config);
+    lm_metrics_fixup();
+    lm_launch_resolve(&srv->config);
+    lm_info("reload: %s read again, %d line(s) ignored", g_conf_path, bad < 0 ? 0 : bad);
+    srv->reload_result = bad < 0 ? 0 : bad;
+    srv->reloaded = true;
+    lm_settings_changed(srv->settings);
+    if (srv->wm) {
+        lm_wm_config_changed(srv->wm);
+        char body[96];
+        if (bad > 0)
+            snprintf(body, sizeof(body), "%d line(s) ignored, see the log", bad);
+        else
+            snprintf(body, sizeof(body), "mellagui.conf read again");
+        lm_wm_notify(srv->wm, "Configuration", body, 3000);
+    }
+    return bad < 0 ? 0 : bad;
+}
+
+static void sig_reload(int signo, void *data)
+{
+    (void)signo;
+    reload_config(data);
+}
+
 int main(int argc, char **argv)
 {
     struct lm_config cfg;
@@ -243,10 +289,9 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_APP, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
-    bool terminal_set = false, run_set = false;
     static const struct option opts[] = {
         { "backend", required_argument, 0, 'b' },
         { "size", required_argument, 0, 's' },
@@ -261,6 +306,8 @@ int main(int argc, char **argv)
         { "log-level", required_argument, 0, 'l' },
         { "log-file", required_argument, 0, 'f' },
         { "settings", required_argument, 0, OPT_SETTINGS },
+        { "config", required_argument, 0, OPT_CONFIG },
+        { "print-config", no_argument, 0, OPT_PRINT_CONFIG },
         { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
         { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
         { "lock-file", required_argument, 0, OPT_LOCK_FILE },
@@ -282,10 +329,14 @@ int main(int argc, char **argv)
         { 0, 0, 0, 0 },
     };
     /* The settings file is read first so that the command line can override it: peek at --backend / --settings. */
-    const char *settings_arg = NULL;
+    const char *settings_arg = NULL, *config_arg = NULL;
     bool headless_arg = false;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--settings") && i + 1 < argc)
+        if (!strcmp(argv[i], "--config") && i + 1 < argc)
+            config_arg = argv[i + 1];
+        else if (!strncmp(argv[i], "--config=", 9))
+            config_arg = argv[i] + 9;
+        else if (!strcmp(argv[i], "--settings") && i + 1 < argc)
             settings_arg = argv[i + 1];
         else if (!strncmp(argv[i], "--settings=", 11))
             settings_arg = argv[i] + 11;
@@ -331,6 +382,29 @@ int main(int argc, char **argv)
             cfg.screenshot_dir = shot_buf;
         }
     }
+    static char conf_buf[PATH_MAX];
+    if (!config_arg && !headless_arg) {
+        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg)
+            snprintf(conf_buf, sizeof(conf_buf), "%s/mellagui/mellagui.conf", xdg);
+        else if (home && *home)
+            snprintf(conf_buf, sizeof(conf_buf), "%s/.config/mellagui/mellagui.conf", home);
+        if (conf_buf[0])
+            config_arg = conf_buf;
+    }
+    /* the programs we start read [theme] from the same file; "none" (headless) keeps them off the user's file too */
+    setenv("MELLAGUI_CONFIG", config_arg && *config_arg ? config_arg : "none", 1);
+    if (config_arg && *config_arg && strcmp(config_arg, "none")) {
+        /* mellagui.conf: the hand-written configuration (menu, commands ...); the command line still wins */
+        snprintf(g_conf_path, sizeof(g_conf_path), "%s", config_arg);
+        cfg.conf_path = g_conf_path;
+        int bad = lm_conf_load(config_arg, conf_line, &cfg);
+        if (bad < 0 && config_arg != conf_buf)
+            fprintf(stderr, "mellagui: cannot read --config %s: %s\n", config_arg, strerror(errno));
+        else if (bad > 0)
+            fprintf(stderr, "mellagui: %s: %d line(s) ignored\n", config_arg, bad);
+        lm_metrics_fixup();
+    }
     if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
         cfg.settings_path = settings_arg;
         if (lm_settings_load(&cfg, settings_arg, layouts_buf, sizeof(layouts_buf)) > 0 && layouts_buf[0])
@@ -359,18 +433,23 @@ int main(int argc, char **argv)
         }
         case 'S': cfg.socket_name = optarg; break;
         case 'e': cfg.exec_cmd = optarg; break;
-        case 't': cfg.terminal_cmd = optarg; terminal_set = true; break;
+        case 't': lm_launch_set_command("terminal", optarg); break;
         case OPT_APP: {
             char *eq = strchr(optarg, '=');
-            if (!eq || eq == optarg || !eq[1] || cfg.napps >= LM_MAX_APPS) {
-                fprintf(stderr, "mellagui: bad --app '%s' (expected NAME=CMD, at most %d)\n", optarg, LM_MAX_APPS);
+            if (!eq || eq == optarg || !eq[1]) {
+                fprintf(stderr, "mellagui: bad --app '%s' (expected NAME=CMD)\n", optarg);
                 return 2;
             }
             *eq = 0;
-            cfg.apps[cfg.napps++] = (struct lm_app_entry){ optarg, eq + 1 };
+            if (!lm_launch_add(&cfg, optarg, eq + 1)) {
+                fprintf(stderr, "mellagui: --app '%s': the menu is full (at most %d entries) or the text is too long\n", optarg, LM_MAX_APPS);
+                return 2;
+            }
             break;
         }
-        case OPT_RUN: cfg.run_cmd = optarg; run_set = true; break;
+        case OPT_CONFIG: break;                     /* handled before the loop (read first, so these options win) */
+        case OPT_PRINT_CONFIG: fputs(lm_config_default_text(), stdout); return 0;
+        case OPT_RUN: lm_launch_set_command("run", optarg); break;
         case 'd': cfg.drm_device = optarg; break;
         case OPT_MODE: {
             int w, h, hz = 60;
@@ -459,53 +538,7 @@ int main(int argc, char **argv)
         }
     }
 
-    static char term_buf[PATH_MAX + 4], run_buf[PATH_MAX + 4];
-    if (!terminal_set)
-        cfg.terminal_cmd = default_sibling("mellagui-term", term_buf, sizeof(term_buf));
-    if (!run_set)
-        cfg.run_cmd = default_sibling("mellagui-run", run_buf, sizeof(run_buf));
-    static char settings_cmd_buf[PATH_MAX + 4];
-    cfg.settings_cmd = default_sibling("mellagui-settings", settings_cmd_buf, sizeof(settings_cmd_buf));
-    static char calc_buf[PATH_MAX + 4], edit_buf[PATH_MAX + 4], files_buf[PATH_MAX + 4], view_buf[PATH_MAX + 4], code_buf[PATH_MAX + 128], ff_buf[PATH_MAX + 160];
-    cfg.view_cmd = default_sibling("mellagui-view", view_buf, sizeof(view_buf));
-    if (cfg.napps == 0) {
-        /* default menu: Terminal, Calculator, VS Code and Firefox (when found) */
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Terminal", cfg.terminal_cmd };
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Calculator", default_sibling("mellagui-calc", calc_buf, sizeof(calc_buf)) };
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Images", cfg.view_cmd };
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Editor", default_sibling("mellagui-edit", edit_buf, sizeof(edit_buf)) };
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){
-            "Files", default_sibling("mellagui-files", files_buf, sizeof(files_buf)) };
-        /* VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap. /snap/bin/code is
-         * deliberately not used: its launcher appends --ozone-platform=x11 after our flags, and there is no X11. */
-        const char *home = getenv("HOME");
-        char tarball[PATH_MAX];
-        const char *cands[2] = { NULL, "/snap/code/current/usr/share/code/code" };
-        if (home && snprintf(tarball, sizeof(tarball), "%s/VSCode/code", home) < (int)sizeof(tarball))
-            cands[0] = tarball;
-        for (int i = 0; i < 2; i++) {
-            if (!cands[i] || access(cands[i], X_OK) != 0 || strchr(cands[i], '\''))
-                continue;
-            snprintf(code_buf, sizeof(code_buf),
-                     "'%s' --ozone-platform=wayland --disable-gpu --no-sandbox --password-store=basic", cands[i]);
-            cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Code", code_buf };
-            break;
-        }
-        /* Firefox: the snap's launcher or a distro binary. Native Wayland, WebRender on the GPU (MellaGUI offers zwp_linux_dmabuf_v1; without it Firefox falls back by itself).
-         * (The snap is confined: it may only connect to sockets named wayland-N, which is what MellaGUI picks by default.) */
-        const char *ffs[2] = { "/snap/bin/firefox", "/usr/bin/firefox" };
-        for (int i = 0; i < 2; i++) {
-            if (access(ffs[i], X_OK) != 0)
-                continue;
-            snprintf(ff_buf, sizeof(ff_buf),
-                     "env MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_WEBRENDER=1 %s", ffs[i]);
-            cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Firefox", ff_buf };
-            break;
-        }
-        cfg.apps[cfg.napps++] = (struct lm_app_entry){ "Settings", cfg.settings_cmd };   /* last: keeps the others' places */
-    }
+    lm_launch_resolve(&cfg);                  /* terminal / run / settings / view commands and the app menu */
     lm_log_set_level((enum lm_log_level)cfg.log_level);
     if (cfg.log_file && lm_log_set_file(cfg.log_file) < 0)
         fprintf(stderr, "mellagui: cannot open log file %s: %s\n", cfg.log_file, strerror(errno));
@@ -536,6 +569,8 @@ int main(int argc, char **argv)
     lm_loop_add_signal(loop, SIGTERM, sig_quit, srv);
     lm_loop_add_signal(loop, SIGHUP, sig_quit, srv);
     lm_loop_add_signal(loop, SIGUSR1, sig_dump, srv);
+    lm_loop_add_signal(loop, SIGUSR2, sig_reload, srv);
+    srv->reload_config = reload_config;
 
     bool headless = !strcmp(cfg.backend, "headless");
     if (!headless && cfg.logind > 0) {

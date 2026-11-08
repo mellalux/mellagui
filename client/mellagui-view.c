@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "theme.h"
 #include "font.h"
 #include "img.h"
 #include "keymap.h"
@@ -28,7 +29,7 @@
 #include "wlwin.h"
 
 #define BAR_H 24
-#define BG 0x161a24u
+#define BG (lm_theme.card)
 #define BAR_BG 0x0e1118u
 #define BAR_FG 0xd8dde8u
 #define ZMIN 0.05
@@ -412,6 +413,7 @@ static int decode_cmd(const char *in, const char *out)
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     if (argc > 3 && !strcmp(argv[1], "--decode"))

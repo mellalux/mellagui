@@ -22,6 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "protocol.h"
@@ -32,16 +33,15 @@
 #define TAB_W 4
 #define STATUS_H 20
 #define UNDO_MAX 64
-#define COL_BG 0x14171fu
-#define COL_FG 0xd8dee9u
-#define COL_DIM 0x7b8294u
+#define COL_BG (lm_theme.background)
+#define COL_FG (lm_theme.text_soft)
+#define COL_DIM (lm_theme.text_dim)
 #define COL_GUTTER_BG 0x10131au
 #define COL_LINE 0x1a1e27u
-#define COL_SEL 0x41527eu
-#define COL_BAR 0x2b303bu
-#define COL_ACCENT 0x6fa8ffu
-#define COL_WARN 0xe0a458u
-
+#define COL_SEL (lm_theme.button_hover)
+#define COL_BAR (lm_theme.bar)
+#define COL_ACCENT (lm_theme.accent)
+#define COL_WARN (lm_theme.caution)
 /* ---- the document ----------------------------------------------------------------------------------------------------- */
 
 struct line {
@@ -1415,6 +1415,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {

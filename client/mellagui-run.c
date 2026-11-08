@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "util.h"
@@ -273,12 +274,11 @@ static int selftest(void)
 #define DEFAULT_W 520
 #define DEFAULT_H 64
 #define PAD 10
-#define COL_BG      0x14171fu
-#define COL_FIELD   0x0d0f14u
-#define COL_ACCENT  0x6fa8ffu
-#define COL_TEXT    0xe6e9efu
-#define COL_DIM     0x7b8294u
-
+#define COL_BG      (lm_theme.background)
+#define COL_FIELD   (lm_theme.field)
+#define COL_ACCENT  (lm_theme.accent)
+#define COL_TEXT    (lm_theme.text)
+#define COL_DIM     (lm_theme.text_dim)
 struct app {
     struct wlwin win;
     struct line line;
@@ -449,6 +449,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
 

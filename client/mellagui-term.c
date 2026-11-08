@@ -24,6 +24,7 @@
 
 #include <linux/input-event-codes.h>
 
+#include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "util.h"
@@ -39,20 +40,18 @@ static const int ZOOM_LEVELS[] = { 50, 60, 75, 90, 100, 110, 125, 150, 175, 200,
 #define ZOOM_DEFAULT 100
 #define MAX_MIMES 32
 #define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
-#define BAR_BG 0x2b303bu
+#define BAR_BG (lm_theme.bar)
 #define BAR_BTN 0x434c5eu
 #define BAR_BTN_ON 0x5e6a82u
 #define MENU_BORDER 0x4c566au
 #define MENU_CURRENT 0x88c0d0u
 #define BAR_FG 0xeceff4u
-
 /* Cell size in pixels at the current zoom. */
 #define CELL_W cell_w()
 #define CELL_H cell_h()
 
-#define DEFAULT_FG 0xd8dee9u
-#define DEFAULT_BG 0x14171fu
-
+#define DEFAULT_FG (lm_theme.text_soft)
+#define DEFAULT_BG (lm_theme.background)
 enum {
     ATTR_BOLD = 1, ATTR_UNDERLINE = 2, ATTR_REVERSE = 4, ATTR_DIM = 8, ATTR_ITALIC = 16,
 };
@@ -1842,6 +1841,7 @@ static void sigchld(int s)
 
 int main(int argc, char **argv)
 {
+    lm_theme_load_env();
     (void)argc; (void)argv;
     A.running = true;
     A.zoom = ZOOM_DEFAULT;

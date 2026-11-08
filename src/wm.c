@@ -1,6 +1,9 @@
 /*
  * Window manager + shell policy. See wm.h for the contract.
  */
+#include "metrics.h"
+#include "keys.h"
+#include "launchers.h"
 #include "wm.h"
 
 #include <errno.h>
@@ -29,22 +32,22 @@
 #include "surface.h"
 #include "xdg.h"
 
-#define RESIZE_CORNER 14
-#define DOUBLE_CLICK_MS 400
-#define PANEL_BTN_W 72
-#define PANEL_WS_W 24
+#define RESIZE_CORNER (lm_metrics.resize_corner)
+#define DOUBLE_CLICK_MS (lm_metrics.double_click_ms)
+#define PANEL_BTN_W (lm_metrics.panel_button_width)
+#define PANEL_WS_W (lm_metrics.panel_ws_width)
 #define PANEL_CLOCK_W 136                       /* "DD.MM.YYYY HH:MM" = 16 glyphs */
 #define PANEL_POWER_D (LM_PANEL_HEIGHT - 4)     /* the round power button's diameter: as tall as the other buttons */
 #define POWER_CARD_W 264                        /* the session dialog */
 #define POWER_CARD_H 172
 #define POWER_BTN_D 64                          /* its round buttons */
-#define PANEL_RUN_W 44
-#define PANEL_LAYOUT_W 36
-#define PANEL_STICKY_W 84
-#define PANEL_CAPS_W 48
+#define PANEL_RUN_W (lm_metrics.panel_run_width)
+#define PANEL_LAYOUT_W (lm_metrics.panel_layout_width)
+#define PANEL_STICKY_W (lm_metrics.panel_sticky_width)
+#define PANEL_CAPS_W (lm_metrics.panel_caps_width)
 #define SW_MAX_WINDOWS 32
-#define MENU_W 200
-#define GADGET_W 250                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
+#define MENU_W (lm_metrics.menu_width)
+#define GADGET_W (lm_metrics.gadget_width)                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
 #define GADGET_H (GADGET_TITLE_H + LM_GADGET_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
 #define GADGET_MIN_W 180
 #define GADGET_MAX_W 640
@@ -53,20 +56,20 @@
 #define GADGET_TITLE_H 26
 #define GADGET_ENTRY_H 36
 #define GADGET_PAD 8
-#define GADGET_MARGIN 12
-#define SYS_W 250
-#define SYS_H 300                   /* title, CPU, graph, cores, memory, swap, temperature, the device rows that fit */
+#define GADGET_MARGIN (lm_metrics.gadget_margin)
+#define SYS_W (lm_metrics.sys_width)
+#define SYS_H (lm_metrics.sys_height)                   /* title, CPU, graph, cores, memory, swap, temperature, the device rows that fit */
 #define SYS_MIN_W 210
 #define SYS_MIN_H 130
-#define MIXER_W 250
-#define MIXER_H 196                 /* title, master, output, two application rows, hint */
+#define MIXER_W (lm_metrics.mixer_width)
+#define MIXER_H (lm_metrics.mixer_height)                 /* title, master, output, two application rows, hint */
 #define MIXER_MIN_W 210
 #define MIXER_MIN_H 120
-#define GADGET_SNAP 14              /* a dragged gadget sticks to another gadget's / the screen's edge within this many pixels */
+#define GADGET_SNAP (lm_metrics.gadget_snap)              /* a dragged gadget sticks to another gadget's / the screen's edge within this many pixels */
 #define GADGET_EDGE 6               /* resize zone along the left/right/bottom edge (top: 3 px) */
-#define MENU_ITEM_H 26
-#define PANEL_TASK_MAX_W 160
-#define PANEL_TASK_GAP 2
+#define MENU_ITEM_H (lm_metrics.menu_item_height)
+#define PANEL_TASK_MAX_W (lm_metrics.panel_task_max_width)
+#define PANEL_TASK_GAP (lm_metrics.panel_task_gap)
 
 struct wm_win {
     struct lm_window pub;       /* must be first */
@@ -338,8 +341,8 @@ static struct lm_output *gadget_output(const struct lm_wm *wm);
 
 /* ---- notifications ---------------------------------------------------------------------------------------------------- */
 
-#define NOTE_W 320
-#define NOTE_GAP 6
+#define NOTE_W (lm_metrics.note_width)
+#define NOTE_GAP (lm_metrics.note_gap)
 
 static int64_t now_ms64(void)
 {
@@ -588,11 +591,22 @@ static struct lm_output *gadget_output(const struct lm_wm *wm)
 }
 
 /* Default / minimum / maximum card size per gadget. */
-static const struct { int w, h, min_w, min_h, max_w, max_h; } gadget_def[LM_GADGET_COUNT] = {
-    [LM_GADGET_CLIPBOARD] = { GADGET_W, GADGET_H, GADGET_MIN_W, GADGET_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
-    [LM_GADGET_MIXER] = { MIXER_W, MIXER_H, MIXER_MIN_W, MIXER_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
-    [LM_GADGET_SYSTEM] = { SYS_W, SYS_H, SYS_MIN_W, SYS_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+static struct { int w, h, min_w, min_h, max_w, max_h; } gadget_def[LM_GADGET_COUNT] = {
+    [LM_GADGET_CLIPBOARD] = { 0, 0, GADGET_MIN_W, GADGET_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+    [LM_GADGET_MIXER] = { 0, 0, MIXER_MIN_W, MIXER_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+    [LM_GADGET_SYSTEM] = { 0, 0, SYS_MIN_W, SYS_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
 };
+
+/* The starting sizes come from [gadgets] in mellagui.conf (metrics.h), so they are filled in when the wm is created. */
+static void gadget_def_init(void)
+{
+    gadget_def[LM_GADGET_CLIPBOARD].w = GADGET_W;
+    gadget_def[LM_GADGET_CLIPBOARD].h = GADGET_H;
+    gadget_def[LM_GADGET_MIXER].w = LM_MAX(MIXER_W, MIXER_MIN_W);
+    gadget_def[LM_GADGET_MIXER].h = MIXER_H;
+    gadget_def[LM_GADGET_SYSTEM].w = SYS_W;
+    gadget_def[LM_GADGET_SYSTEM].h = SYS_H;
+}
 
 /* Largest size gadget `id` may have on `o` (it stays inside the output, below the panel). */
 /* ---- the gadgets' places and sizes, kept between runs ------------------------------------------------------------------ */
@@ -1040,6 +1054,7 @@ static void clock_tick(void *data)
 
 struct lm_wm *lm_wm_create(struct lm_server *srv)
 {
+    gadget_def_init();
     struct lm_wm *wm = calloc(1, sizeof(*wm));
     if (!wm)
         return NULL;
@@ -1107,6 +1122,14 @@ void lm_wm_relayout_outputs(struct lm_wm *wm)
             apply_state(wm, w);
     damage_all(wm);
     refresh_pointer(wm);
+}
+
+void lm_wm_config_changed(struct lm_wm *wm)
+{
+    gadget_def_init();
+    if (wm->menu_open)
+        menu_set(wm, false, NULL);
+    lm_wm_output_changed(wm, NULL);
 }
 
 void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
@@ -2755,7 +2778,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         lm_wm_focus_window(wm, pick->window);
         if (button != BTN_LEFT)
             return true;
-        if (wm->last_click_win == pick->window && time_ms - wm->last_click_time < DOUBLE_CLICK_MS) {
+        if (wm->last_click_win == pick->window && time_ms - wm->last_click_time < (uint32_t)DOUBLE_CLICK_MS) {
             wm->last_click_win = NULL;
             lm_wm_window_request_maximize(pick->window, !(pick->window->states & LM_WINDOW_MAXIMIZED));
             return true;
@@ -2776,7 +2799,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         int id = pick->index;
         if (button != BTN_LEFT || id < 0 || id >= LM_GADGET_COUNT)
             return true;
-        if (time_ms - wm->gad[id].click_time < DOUBLE_CLICK_MS) {
+        if (time_ms - wm->gad[id].click_time < (uint32_t)DOUBLE_CLICK_MS) {
             wm->gad[id].click_time = 0;
             gadget_reset(wm, id);
             return true;
@@ -2936,6 +2959,82 @@ static void take_screenshot(struct lm_wm *wm, bool window, bool to_file)
     lm_screenshot_take(wm->srv, &r, to_file);
 }
 
+/* One shortcut of the [keys] table (keys.h). Returns true when the key is swallowed (every bound key is, press and release). */
+static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pressed, bool repeat)
+{
+    struct lm_window *f = wm->focused;
+    if (!pressed)
+        return true;
+    if (repeat && kb->action != LM_ACT_FOCUS_NEXT && kb->action != LM_ACT_FOCUS_PREV)
+        return true;
+    switch (kb->action) {
+    case LM_ACT_TERMINAL: launch_terminal(wm); break;
+    case LM_ACT_RUN: launch_run(wm); break;
+    case LM_ACT_SETTINGS: launch_settings(wm); break;
+    case LM_ACT_EXEC: {
+        char cmd[2048];
+        lm_launch_expand(kb->arg, cmd, sizeof(cmd));
+        lm_server_spawn(wm->srv, cmd);
+        break;
+    }
+    case LM_ACT_LAYOUT_NEXT: case LM_ACT_LAYOUT_PREV:
+        if (wm->srv->input)
+            lm_input_cycle_layout(wm->srv->input, kb->action == LM_ACT_LAYOUT_PREV ? -1 : 1);
+        break;
+    case LM_ACT_GADGET_CLIPBOARD:
+        lm_wm_set_gadget(wm, !wm->gad[LM_GADGET_CLIPBOARD].visible);
+        break;
+    case LM_ACT_CLIPBOARD_PICK:                 /* pick from the clipboard history with the arrow keys */
+        if (!wm->gad[LM_GADGET_CLIPBOARD].visible)
+            lm_wm_set_gadget(wm, true);
+        if (clip_nav_count(wm) > 0)
+            clip_nav_set(wm, !wm->clip_nav);
+        break;
+    case LM_ACT_GADGET_MIXER: lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible); break;
+    case LM_ACT_GADGET_SYSTEM: lm_wm_set_gadget_id(wm, LM_GADGET_SYSTEM, !wm->gad[LM_GADGET_SYSTEM].visible); break;
+    case LM_ACT_CLOSE:
+        if (f) lm_wm_window_close(f);
+        break;
+    case LM_ACT_LOCK:                           /* only when a password / PIN is set */
+        if (!lm_lock_now(wm->srv->lock))
+            lm_info("lock: the lock shortcut is ignored, no password or PIN is set (settings: Security)");
+        break;
+    case LM_ACT_WORKSPACE: lm_wm_switch_workspace(wm, kb->num); break;
+    case LM_ACT_MOVE_TO_WORKSPACE:
+        if (f) move_to_workspace(wm, f, kb->num);
+        break;
+    case LM_ACT_FOCUS_NEXT: cycle_focus(wm, false); break;
+    case LM_ACT_FOCUS_PREV: cycle_focus(wm, true); break;
+    case LM_ACT_FULLSCREEN:
+        if (f) lm_wm_window_request_fullscreen(f, !(f->states & LM_WINDOW_FULLSCREEN));
+        break;
+    case LM_ACT_MAXIMIZE_TOGGLE:
+        if (f) lm_wm_window_request_maximize(f, !(f->states & LM_WINDOW_MAXIMIZED));
+        break;
+    case LM_ACT_MAXIMIZE:
+        if (f) lm_wm_window_request_maximize(f, true);
+        break;
+    case LM_ACT_RESTORE:                        /* un-maximize, or un-tile back to the pre-tile geometry */
+        if (f) {
+            if (f->states & LM_WINDOW_MAXIMIZED)
+                lm_wm_window_request_maximize(f, false);
+            else
+                lm_wm_window_request_tile(f, LM_EDGE_NONE);
+        }
+        break;
+    case LM_ACT_TILE_LEFT: case LM_ACT_TILE_RIGHT:
+        if (f) lm_wm_window_request_tile(f, kb->action == LM_ACT_TILE_LEFT ? LM_EDGE_LEFT : LM_EDGE_RIGHT);
+        break;
+    case LM_ACT_QUIT: request_quit(wm); break;
+    case LM_ACT_RELOAD_CONFIG:
+        if (wm->srv->reload_config)
+            wm->srv->reload_config(wm->srv);
+        break;
+    case LM_ACT_NONE: break;
+    }
+    return true;
+}
+
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods)
 {
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
@@ -3032,94 +3131,6 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
             take_screenshot(wm, alt, !ctrl);
         return true;
     }
-    if (!super || ctrl || alt)
-        return false;
-
-    bool handled = true;
-    switch (code) {
-    case KEY_ENTER:
-        if (pressed && !repeat) launch_terminal(wm);
-        break;
-    case KEY_R:
-        if (pressed && !repeat) launch_run(wm);
-        break;
-    case KEY_I:
-        if (pressed && !repeat) launch_settings(wm);
-        break;
-    case KEY_SPACE:                         /* Super+Space / Super+Shift+Space: next / previous keyboard layout */
-        if (pressed && !repeat && wm->srv->input)
-            lm_input_cycle_layout(wm->srv->input, shift ? -1 : 1);
-        break;
-    case KEY_G:
-        if (pressed && !repeat) lm_wm_set_gadget(wm, !wm->gad[LM_GADGET_CLIPBOARD].visible);
-        break;
-    case KEY_C:                             /* Super+C: pick from the clipboard history with the arrow keys */
-        if (pressed && !repeat) {
-            if (!wm->gad[LM_GADGET_CLIPBOARD].visible)
-                lm_wm_set_gadget(wm, true);
-            if (clip_nav_count(wm) > 0)
-                clip_nav_set(wm, !wm->clip_nav);
-        }
-        break;
-    case KEY_V:
-        if (pressed && !repeat) lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible);
-        break;
-    case KEY_S:
-        if (pressed && !repeat) lm_wm_set_gadget_id(wm, LM_GADGET_SYSTEM, !wm->gad[LM_GADGET_SYSTEM].visible);
-        break;
-    case KEY_Q:
-        if (pressed && !repeat && wm->focused) lm_wm_window_close(wm->focused);
-        break;
-    case KEY_L:                             /* Super+L: lock the screen (only when a password / PIN is set) */
-        if (pressed && !repeat && !lm_lock_now(wm->srv->lock))
-            lm_info("lock: Super+L ignored, no password or PIN is set (settings: Security)");
-        break;
-    case KEY_1: case KEY_2: case KEY_3: case KEY_4:
-        if (pressed && !repeat) {
-            int ws = (int)(code - KEY_1);
-            if (shift) {
-                if (wm->focused) move_to_workspace(wm, wm->focused, ws);
-            } else {
-                lm_wm_switch_workspace(wm, ws);
-            }
-        }
-        break;
-    case KEY_TAB:
-        if (pressed) cycle_focus(wm, shift);
-        break;
-    case KEY_F:
-        if (pressed && !repeat && wm->focused)
-            lm_wm_window_request_fullscreen(wm->focused, !(wm->focused->states & LM_WINDOW_FULLSCREEN));
-        break;
-    case KEY_M:
-        if (pressed && !repeat && wm->focused)
-            lm_wm_window_request_maximize(wm->focused, !(wm->focused->states & LM_WINDOW_MAXIMIZED));
-        break;
-    case KEY_LEFT: case KEY_RIGHT:
-        if (pressed && !repeat && wm->focused)
-            lm_wm_window_request_tile(wm->focused, code == KEY_LEFT ? LM_EDGE_LEFT : LM_EDGE_RIGHT);
-        break;
-    case KEY_UP:
-        if (pressed && !repeat && wm->focused)
-            lm_wm_window_request_maximize(wm->focused, true);
-        break;
-    case KEY_DOWN:
-        if (pressed && !repeat && wm->focused) {
-            if (wm->focused->states & LM_WINDOW_MAXIMIZED)
-                lm_wm_window_request_maximize(wm->focused, false);
-            else
-                lm_wm_window_request_tile(wm->focused, LM_EDGE_NONE);
-        }
-        break;
-    case KEY_E:
-        if (shift) {
-            if (pressed && !repeat) request_quit(wm);
-        } else {
-            handled = false;
-        }
-        break;
-    default:
-        handled = false;
-    }
-    return handled;
+    const struct lm_keybind *kb = lm_keys_find(&wm->srv->config.keys, code, mods);
+    return kb && run_keybind(wm, kb, pressed, repeat);
 }

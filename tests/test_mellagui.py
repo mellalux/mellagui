@@ -2244,7 +2244,7 @@ class TestClients(Base):
         self.assertEqual(t0[2], 14 - 4)                                  # 14 px bar, the thumb 2 px in from each side
         self.assertGreater(t0[1], 20)
         right = win['x'] + win['w'] - 6
-        ctl.click(right, win['y'] + win['h'] - 40)                       # the track below the thumb: one page down
+        ctl.click(right, win['y'] + win['h'] - 70)                       # the track below the thumb (the status line and the key bar take 50 px): one page down
         time.sleep(0.3)
         t1 = self.thumb(win, 'sb1.ppm')
         self.assertGreater(t1[0], t0[0])
@@ -2255,7 +2255,7 @@ class TestClients(Base):
         time.sleep(0.3)
         t2 = self.thumb(win, 'sb2.ppm')
         self.assertGreater(t2[0], t1[0] + 50)
-        self.assertGreater(t2[0] + t2[1], win['y'] + win['h'] - 40)      # it ends at the bottom of the track
+        self.assertGreater(t2[0] + t2[1], win['y'] + win['h'] - 60)      # it ends at the bottom of the track
         ctl.click(right, win['y'] + 60)                                  # the track above it: one page up
         time.sleep(0.3)
         self.assertLess(self.thumb(win, 'sb3.ppm')[0], t2[0])
@@ -2287,6 +2287,124 @@ class TestClients(Base):
         ctl.tap(self.K_DOWN)                                   # p.ppm
         ctl.tap(KEY_ENTER)
         self.wait_title('mellagui.view', 'p.ppm - Images')
+
+    FKEYS = {3: 61, 5: 63, 6: 64, 7: 65, 8: 66, 10: 68}
+    K_TAB, K_INS = 15, 110
+
+    def test_files_two_panes_have_their_own_folders(self):
+        p, d = self.files_start()
+        base = os.path.basename(d)
+        self.wait_title('mellagui.files', base + ' - Files')
+        ctl.tap(KEY_ENTER)                                     # the left pane goes into sub
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(self.K_TAB)                                    # the right pane was left alone
+        self.wait_title('mellagui.files', base + ' - Files')
+        ctl.tap(self.K_TAB)
+        self.wait_title('mellagui.files', 'sub - Files')
+
+    def test_files_preview_shows_a_picture_in_the_other_pane(self):
+        p, d = self.files_start()
+        win = wait_for_window('mellagui.files')
+        for _ in range(3):                                     # a.txt, blob.bin, p.ppm (a 1x1 picture of 10 20 30)
+            ctl.tap(self.K_DOWN)
+        ctl.tap(self.FKEYS[3])
+        time.sleep(0.6)
+        ppm = ctl.dump(os.path.join(tmp, 'files-pv.ppm'))
+        def has_colour(x0, x1):
+            return any(ppm.px(x, y) == (0x10, 0x20, 0x30) for y in range(win['y'] + 60, win['y'] + win['h'] - 60, 1)
+                       for x in range(win['x'] + x0, win['x'] + x1))
+        self.assertTrue(has_colour(win['w'] // 2, win['w'] - 4), 'the picture should be in the right (inactive) pane')
+        self.assertFalse(has_colour(0, win['w'] // 2 - 4))
+        ctl.tap(self.FKEYS[3])                                   # off again
+        time.sleep(0.3)
+        ppm = ctl.dump(os.path.join(tmp, 'files-pv2.ppm'))
+        self.assertFalse(has_colour(win['w'] // 2, win['w'] - 4))
+
+    def test_files_preview_shows_text_and_hex(self):
+        p, d = self.files_start()
+        win = wait_for_window('mellagui.files')
+        ctl.tap(self.K_DOWN)                                   # a.txt
+        self.chord(self.CTRL, self.K_Q)                        # Ctrl+Q: preview
+        time.sleep(0.4)
+        ppm = ctl.dump(os.path.join(tmp, 'files-pt.ppm'))
+        text_pixels = sum(1 for y in range(win['y'] + 56, win['y'] + 120) for x in range(win['x'] + win['w'] // 2 + 6, win['x'] + win['w'] // 2 + 120)
+                          if ppm.px(x, y) == (0xd8, 0xde, 0xe9))
+        self.assertGreater(text_pixels, 20, 'the text of a.txt should be drawn in the right pane')
+        ctl.tap(self.K_DOWN)                                   # blob.bin: a hex dump (dim colour 7b 82 94)
+        time.sleep(0.4)
+        ppm = ctl.dump(os.path.join(tmp, 'files-ph.ppm'))
+        dim = sum(1 for y in range(win['y'] + 56, win['y'] + 120) for x in range(win['x'] + win['w'] // 2 + 6, win['x'] + win['w'] // 2 + 200)
+                  if ppm.px(x, y) == (0x7b, 0x82, 0x94))
+        self.assertGreater(dim, 20)
+
+    def test_files_copy_move_mkdir_and_delete(self):
+        p, d = self.files_start()
+        sub = os.path.join(d, 'sub')
+        ctl.tap(self.K_TAB)                                    # the right pane goes into sub, that is where things will land
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(self.K_TAB)
+        self.wait_title('mellagui.files', os.path.basename(d) + ' - Files')
+        ctl.tap(self.K_DOWN)                                   # a.txt
+        ctl.tap(self.FKEYS[5])                                   # copy: the question starts with the other pane's folder
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), b'text a\n')
+        self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'a copy leaves the original')
+        ctl.tap(self.K_DOWN)                                   # blob.bin
+        ctl.tap(self.FKEYS[6])                                   # move
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertTrue(os.path.exists(os.path.join(sub, 'blob.bin')))
+        self.assertFalse(os.path.exists(os.path.join(d, 'blob.bin')))
+        ctl.tap(self.FKEYS[7])                                   # new folder
+        self.type_chars('made')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertTrue(os.path.isdir(os.path.join(d, 'made')))
+        ctl.tap(30)                                            # the letter "a" jumps to a.txt
+        ctl.tap(self.FKEYS[8])                                   # delete asks first ...
+        ctl.tap(KEY_ESC)
+        time.sleep(0.3)
+        self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'Esc must keep the file')
+        ctl.tap(self.FKEYS[8])
+        ctl.tap(KEY_ENTER)                                     # ... and Enter deletes
+        time.sleep(0.4)
+        self.assertFalse(os.path.exists(os.path.join(d, 'a.txt')))
+        self.assertTrue(os.path.exists(os.path.join(sub, 'a.txt')), 'only the one in this folder is deleted')
+
+    def test_files_marked_files_move_together_and_nothing_is_replaced(self):
+        p, d = self.files_start()
+        sub = os.path.join(d, 'sub')
+        with open(os.path.join(sub, 'a.txt'), 'wb') as f:
+            f.write(b'already here\n')
+        ctl.tap(self.K_TAB)
+        ctl.tap(KEY_ENTER)                                     # right pane: sub
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(self.K_TAB)
+        ctl.tap(self.K_DOWN)                                   # a.txt
+        ctl.tap(self.K_INS)                                    # mark a.txt and move down
+        ctl.tap(self.K_DOWN)                                   # skip blob.bin
+        ctl.tap(57)                                            # Space marks p.ppm, too
+        ctl.tap(self.FKEYS[6])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.5)
+        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), b'already here\n', 'an existing file is never replaced')
+        self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'the one that could not be moved stays')
+        self.assertTrue(os.path.exists(os.path.join(sub, 'p.ppm')))
+        self.assertFalse(os.path.exists(os.path.join(d, 'p.ppm')))
+
+    def test_files_rename(self):
+        p, d = self.files_start()
+        ctl.tap(self.K_DOWN)                                   # a.txt
+        ctl.tap(60)                                            # F2: the name comes up to be edited
+        for _ in range(5):
+            ctl.tap(self.K_BS)                                 # "a.txt" -> ""
+        self.type_chars('b.txt')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertTrue(os.path.exists(os.path.join(d, 'b.txt')))
+        self.assertFalse(os.path.exists(os.path.join(d, 'a.txt')))
 
     def test_files_choose_sets_the_wallpaper(self):
         self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))

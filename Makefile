@@ -89,7 +89,7 @@ $(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

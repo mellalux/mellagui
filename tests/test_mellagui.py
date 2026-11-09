@@ -6991,6 +6991,53 @@ class TestViewer(Base):
         time.sleep(0.4)
         self.assertIsNone(p.poll())
 
+    def test_the_buttons_in_the_bar(self):
+        """Back 5 s, play / pause, stop, on 5 s: the buttons at the left of the bar of a video."""
+        d = self.video_dir()
+        self.make_video(d)
+        p, win = self.start(d, os.path.join(d, 'clip.mp4'))
+        self.assertTrue(self.wait_title('clip.mp4 - Images'))
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view'][0]
+        by = win['y'] + win['h'] - 24 + 14
+
+        def press(i):
+            ctl.click(win['x'] + 6 + i * 28 + 13, by)
+            ctl.abs(900, 590)
+            time.sleep(0.4)
+
+        def frame_is(n):
+            out = os.path.join(d, 'f%d.ppm' % n)
+            subprocess.run([self.VIEW, '--decode', os.path.join(d, 'clip.mp4'), out, str(n)], check=True, timeout=10)
+            ref = Ppm(out)
+            w2, ppm, _ = self.window_pixels('btn-%d.ppm' % n)
+            ox, oy = w2['x'] + (w2['w'] - 320) // 2, w2['y'] + (w2['h'] - 24 - 240) // 2
+            xs, ys = range(0, 320, 5), range(0, 240, 7)
+            return sum(1 for y in ys for x in xs if ppm.px(ox + x, oy + y) == ref.px(x, y)) == len(xs) * len(ys)
+
+        ctl.abs(900, 590)
+        time.sleep(0.5)
+        _, _, a = self.window_pixels('btn-a.ppm')
+        time.sleep(0.5)
+        _, _, b = self.window_pixels('btn-b.ppm')
+        self.assertNotEqual(a, b, 'it is not playing')
+        press(1)                                                                  # pause
+        _, _, c = self.window_pixels('btn-c.ppm')
+        time.sleep(0.6)
+        _, _, e = self.window_pixels('btn-d.ppm')
+        self.assertEqual(c, e, 'the pause button did not pause')
+        press(1)                                                                  # play again
+        time.sleep(0.4)
+        _, _, f = self.window_pixels('btn-e.ppm')
+        self.assertNotEqual(e, f, 'the play button did not play')
+        press(2)                                                                  # stop: the first picture, paused
+        self.assertTrue(frame_is(0), 'stop did not show the first picture')
+        time.sleep(0.5)
+        self.assertTrue(frame_is(0), 'stop did not keep it paused')
+        press(3)                                                                  # on 5 s: past the end of this 3 s video: the last picture
+        self.assertTrue(frame_is(29), 'the forward button did not go to the end')
+        press(0)                                                                  # back 5 s: the start
+        self.assertTrue(frame_is(0), 'the back button did not go to the start')
+
     def test_a_video_that_cannot_be_shown_does_not_hurt(self):
         d = self.video_dir()
         self.make_video(d, 'm.mp4', seconds=1, codec='mpeg4')
@@ -7663,6 +7710,153 @@ class TestMonitorComesBack(Base):
         w3 = c.windows()['windows'][0]
         self.assertEqual((w3['x'], w3['y'], w3['w'], w3['h']), (0, 0, 700, 400))
         self.assertIsNone(cl.wl.error)
+
+
+class TestDoubleClickTime(Base):
+    """[windows] double-click-ms: how fast the second click must follow the first (compositor, file manager ...)."""
+
+    def conf(self, name, ms):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write('' if ms is None else '[windows]\ndouble-click-ms = %d\n' % ms)
+        return path
+
+    def title_double_click(self, name, ms, gap):
+        """A window, a double click with `gap` seconds between the clicks: is it maximized afterwards?"""
+        p, c, stop = self.private_compositor(name, '--config', self.conf(name, ms))
+        cl = Client(os.path.join(tmp, name))
+        self.clients.append(cl)
+        win = Window(cl, 300, 200)
+        cl.wl.roundtrip()
+        c.sync()
+        w = c.windows()['windows'][0]
+        tx, ty = w['x'] + 60, w['y'] - 12                       # the title bar
+        c.abs(tx, ty)
+        c.button(BTN_LEFT, True)
+        c.button(BTN_LEFT, False)
+        time.sleep(gap)
+        c.button(BTN_LEFT, True)
+        c.button(BTN_LEFT, False)
+        time.sleep(0.2)
+        c.sync()
+        return 'maximized' in c.windows()['windows'][0]['flags'] or any(
+            st == XDG_STATE_MAXIMIZED for cfg in [win.wait_configure(0.5)] if cfg for st in cfg[2])
+
+    def test_the_title_bar_follows_the_time(self):
+        self.assertTrue(self.title_double_click('mellagui-dc1', None, 0.25), 'the default time (400 ms) did not take 250 ms as a double click')
+        self.assertFalse(self.title_double_click('mellagui-dc2', 150, 0.30), 'a double click time of 150 ms took 300 ms')
+        self.assertTrue(self.title_double_click('mellagui-dc3', 1000, 0.70), 'a double click time of 1000 ms did not take 700 ms')
+
+    def files_double_click(self, ms, gap):
+        """The file manager started with that time; a.txt double clicked with `gap` seconds between the clicks: did the editor open?"""
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe) or not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-edit')):
+            self.skipTest('mellagui-files / mellagui-edit not built')
+        d = tempfile.mkdtemp(prefix='files-dc-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.txt'), 'w') as f:
+            f.write('hello\n')
+        for w in ctl.windows()['windows']:
+            self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.edit'), 'a window of an earlier test is still open')
+        conf = self.conf('dc-files-%d' % ms if ms else 'dc-files-default', ms)
+        p = subprocess.Popen([exe, d], env=dict(os.environ, MELLAGUI_CONFIG=conf), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.files')
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        x, y = win['x'] + 100, win['y'] + 30 + 22 + 18 * 1 + 9        # tool bar + header, the row of a.txt (after "..")
+        ctl.abs(x, y)
+        ctl.button(BTN_LEFT, True)
+        ctl.button(BTN_LEFT, False)
+        time.sleep(gap)
+        ctl.button(BTN_LEFT, True)
+        ctl.button(BTN_LEFT, False)
+        time.sleep(0.8)
+        opened = any(w['app_id'] == 'mellagui.edit' for w in ctl.windows()['windows'])
+        for pid in os.listdir('/proc'):                                       # the editor is a child of the file manager: both go
+            if not pid.isdigit():
+                continue
+            try:
+                with open('/proc/%s/stat' % pid) as f:
+                    ppid = int(f.read().rsplit(')', 1)[1].split()[1])
+                if ppid == p.pid:
+                    os.kill(int(pid), 9)
+            except (OSError, ValueError, IndexError):
+                pass
+        p.kill()
+        p.wait()
+        for _ in range(100):
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] in ('mellagui.files', 'mellagui.edit')]:
+                break
+            time.sleep(0.05)
+        return opened
+
+    def test_the_file_manager_follows_the_time(self):
+        self.assertTrue(self.files_double_click(None, 0.25), 'the default time did not take 250 ms as a double click')
+        self.assertFalse(self.files_double_click(150, 0.40), 'a double click time of 150 ms took 400 ms')
+
+
+    def test_the_pointer_page_sets_it_and_lets_you_try_it(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        path = os.path.join(tmp, 'dc-panel.conf')
+        with open(path, 'w') as f:
+            f.write('[dock]\nenabled = no\n')                                 # the dock would float over the tabs of the small screen
+        p, c, stop = self.private_compositor('mellagui-dc4', '--config', path)
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-dc4'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.5)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 35 + 16)                                    # the Pointer tab
+        time.sleep(0.3)
+
+        def current():
+            c.cmd('setting metrics')
+            return int(re.search(r'windows\.double-click-ms=(\d+):', c.last)[1])
+
+        def box_is_green():
+            ppm = c.dump(os.path.join(tmp, 'dc-panel.ppm'))
+            self.last_px = ppm.px(x0 + 200, y0 + 200)             # (away from the text and the pointer)
+            return self.last_px == (0x5a, 0xc8, 0x8c)
+
+        def two_clicks(gap):
+            c.abs(x0 + 330, y0 + 190)
+            c.button(BTN_LEFT, True)
+            c.button(BTN_LEFT, False)
+            time.sleep(gap)
+            c.button(BTN_LEFT, True)
+            c.button(BTN_LEFT, False)
+            time.sleep(0.3)
+
+        self.assertEqual(current(), 400)
+        c.click(x0 + 528, y0 + 149)                                            # the far right end of the slider
+        for _ in range(60):
+            if current() >= 900:
+                break
+            time.sleep(0.05)
+        self.assertGreaterEqual(current(), 900)
+        self.assertIn('double-click-ms', open(path).read())
+        two_clicks(0.2)
+        self.assertTrue(box_is_green(), 'two clicks 200 ms apart are not a double click at 1000 ms (pixel %r, ms %d)' % (self.last_px, current()))
+        c.click(x0 + 312, y0 + 149)                                            # the far left end
+        for _ in range(60):
+            if current() <= 150:
+                break
+            time.sleep(0.05)
+        self.assertLessEqual(current(), 150)
+        time.sleep(0.5)
+        two_clicks(0.35)
+        self.assertFalse(box_is_green(), 'two clicks 350 ms apart are a double click at 100 ms')
 
 
 class TestOutputLayout(Base):

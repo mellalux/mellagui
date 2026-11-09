@@ -25,7 +25,7 @@
     X("windows", "button-size", button_size, 20, 12, 40, "close / maximize / minimize squares (kept 2 px smaller than the title bar)") \
     X("windows", "button-gap", button_gap, 4, 0, 16, "space between those buttons") \
     X("windows", "resize-corner", resize_corner, 14, 6, 40, "size of the corner zone that resizes diagonally") \
-    X("windows", "double-click-ms", double_click_ms, 400, 100, 1000, "double click time (title bar maximizes, gadget title resets)") \
+    X("windows", "double-click-ms", double_click_ms, 400, 100, 1000, "double click time in ms (title bar, gadget title, on-screen keyboard margin, files, viewer, editor; running programs keep theirs)") \
     X("windows", "min-width", min_width, 160, 50, 1000, "smallest window width a user can resize to") \
     X("windows", "min-height", min_height, 80, 40, 1000, "smallest window height") \
     X("windows", "scrollbar-width", scrollbar_width, 14, 4, 40, "width of the scroll bars of MellaGUI's own programs (the file browser)") \

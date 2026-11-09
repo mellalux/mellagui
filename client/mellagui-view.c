@@ -9,7 +9,7 @@
  *
  * Videos (.mp4 / .m4v with Motion JPEG pictures: what mellagui-record writes, or `ffmpeg -c:v mjpeg`; no sound; H.264 and the rest
  * are recognised but cannot be shown) play at once: Space plays / pauses, Left / Right go 5 s back / on, `,` and `.` step a picture,
- * Home starts again, a click or drag on the bottom bar seeks, PgUp / PgDn / Backspace / N / P choose the previous / next file; the picture
+ * Home starts again, the buttons in the bottom bar (back 5 s, play / pause, stop = back to the first picture, on 5 s) do the same, a click or drag on the bar seeks, PgUp / PgDn / Backspace / N / P choose the previous / next file; the picture
  * zooms and pans like an image. `--video-info FILE` and `--decode FILE.mp4 OUT.ppm [N]` (picture N) are for tests.
  *
  * Keys (images): Left/Right (PgUp/PgDn, Backspace/Space) previous / next, Home/End first / last, + - zoom, 0 or 1 = 100 %,
@@ -33,6 +33,7 @@
 #include "img.h"
 #include "keymap.h"
 #include "loop.h"
+#include "metrics.h"
 #include "mp4read.h"
 #include "png.h"
 #include "protocol.h"
@@ -43,6 +44,10 @@
 #define BG (lm_theme.card)
 #define BAR_BG 0x0e1118u
 #define BAR_FG 0xd8dde8u
+#define VBTN_W 26                       /* the video buttons in the bar: back 5 s, play / pause, stop, on 5 s */
+#define VBTN_H 18
+#define VBTN_GAP 2
+#define N_VBTN 4
 #define FF_FPS 30                       /* ffmpeg plays at a constant 30 pictures a second */
 #define ZMIN 0.05
 #define ZMAX 32.0
@@ -79,6 +84,7 @@ struct app {
     bool fready, fwant;                 /* a whole picture waits in fbuf; show the next one even when paused (after a seek) */
     uint32_t vframe;                    /* the picture shown */
     bool playing, seeking;
+    int vhover, vpress;                 /* the video button under the pointer / pressed: 0 none, else index + 1 */
     uint64_t pos_ms;                    /* where the video is (paused), or where it was when playing (re)started */
     uint64_t play_t0;                   /* lm_now_ms() when it (re)started */
 };
@@ -380,6 +386,76 @@ static int video_timeout(const struct app *a)
     return t;
 }
 
+/* Stop: pause and go back to the first picture. */
+static void video_stop(struct app *a)
+{
+    if (!a->vmode)
+        return;
+    if (a->playing) {
+        a->pos_ms = video_pos(a);
+        a->playing = false;
+    }
+    video_seek(a, 0);
+    a->win.redraw = true;
+}
+
+static int vbtn_x(int i) { return 6 + i * (VBTN_W + VBTN_GAP); }
+
+/* The video button at the point of the window (0..3), or -1. */
+static int vbtn_at(const struct app *a, double x, double y)
+{
+    int top = view_h(a) + 5;
+    if (!a->vmode || y < top || y >= top + VBTN_H)
+        return -1;
+    for (int i = 0; i < N_VBTN; i++)
+        if (x >= vbtn_x(i) && x < vbtn_x(i) + VBTN_W)
+            return i;
+    return -1;
+}
+
+static void vbtn_do(struct app *a, int i)
+{
+    switch (i) {
+    case 0: video_seek(a, (int64_t)video_pos(a) - 5000); break;
+    case 1: video_toggle(a); break;
+    case 2: video_stop(a); break;
+    case 3: video_seek(a, (int64_t)video_pos(a) + 5000); break;
+    }
+}
+
+/* A triangle of `h` rows pointing right (dir 1) or left (-1), tip at the far side, `len` wide, its middle at (cx, cy). */
+static void vtri(struct wlwin *w, int cx, int cy, int h, int len, int dir, uint32_t col)
+{
+    for (int t = 0; t < h; t++) {
+        double half = (h - 1) / 2.0, frac = 1.0 - (t > half ? t - half : half - t) / (half + 0.5);
+        int n = LM_MAX((int)(frac * len + 0.5), 1);
+        wlwin_fill(w, dir > 0 ? cx - len / 2 : cx + len / 2 - n, cy - h / 2 + t, n, 1, col);
+    }
+}
+
+static void paint_vbuttons(struct app *a, struct wlwin *w, int vh)
+{
+    for (int i = 0; i < N_VBTN; i++) {
+        int x = vbtn_x(i), y = vh + 5, cx = x + VBTN_W / 2, cy = y + VBTN_H / 2;
+        uint32_t bg = a->vpress == i + 1 && a->vhover == i + 1 ? 0x3d4a6a : a->vhover == i + 1 ? 0x2d3a56 : 0x1d2433;
+        uint32_t fg = i == 1 && !a->playing ? lm_theme.accent : BAR_FG;
+        wlwin_fill(w, x, y, VBTN_W, VBTN_H, bg);
+        switch (i) {
+        case 0: vtri(w, cx - 4, cy, 9, 5, -1, fg); vtri(w, cx + 3, cy, 9, 5, -1, fg); break;
+        case 1:
+            if (a->playing) {
+                wlwin_fill(w, cx - 4, cy - 5, 3, 10, fg);
+                wlwin_fill(w, cx + 1, cy - 5, 3, 10, fg);
+            } else {
+                vtri(w, cx, cy, 11, 8, 1, fg);
+            }
+            break;
+        case 2: wlwin_fill(w, cx - 4, cy - 4, 9, 9, fg); break;
+        case 3: vtri(w, cx - 3, cy, 9, 5, 1, fg); vtri(w, cx + 4, cy, 9, 5, 1, fg); break;
+        }
+    }
+}
+
 static void fmt_time(char *out, size_t n, uint64_t ms)
 {
     unsigned s = (unsigned)(ms / 1000);
@@ -602,7 +678,12 @@ static void paint(struct wlwin *w)
         wlwin_fill(w, 0, vh, w->bw, 4, 0x2a3040u);
         wlwin_fill(w, 0, vh, (int)((uint64_t)w->bw * video_pos(a) / video_len(a)), 4, lm_theme.accent);
     }
-    wlwin_text(w, 8, vh + (BAR_H - LM_FONT_H) / 2 + 2, status, 1, BAR_FG, w->bw - 16);
+    int tx = 8;
+    if (a->vmode) {
+        paint_vbuttons(a, w, vh);
+        tx = vbtn_x(N_VBTN) + 4;
+    }
+    wlwin_text(w, tx, vh + (BAR_H - LM_FONT_H) / 2 + 2, status, 1, BAR_FG, w->bw - tx - 8);
 }
 
 /* ---- input ---------------------------------------------------------------------------------------------------------- */
@@ -619,10 +700,19 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_LEAVE:
         a->has_pointer = false;
         a->seeking = false;
+        a->vhover = a->vpress = 0;
+        w->redraw = true;
         a->dragging = false;
         break;
     case LM_WL_POINTER_EVT_MOTION: {
         double x = lm_fixed_to_double(args[1].f), y = lm_fixed_to_double(args[2].f);
+        if (a->vmode) {
+            int hb = vbtn_at(a, x, y) + 1;
+            if (hb != a->vhover) {
+                a->vhover = hb;
+                w->redraw = true;
+            }
+        }
         if (a->seeking && a->vmode)
             video_seek(a, (int64_t)(LM_CLAMP(x / (double)w->bw, 0.0, 1.0) * (double)video_len(a)));
         if (a->dragging && a->img.px) {
@@ -647,6 +737,19 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         if (args[2].u != 272)                           /* BTN_LEFT */
             break;
+        if (args[3].u == 1 && a->vmode && vbtn_at(a, a->px, a->py) >= 0) {    /* a button of the bar: done when it is let go on it */
+            a->vpress = vbtn_at(a, a->px, a->py) + 1;
+            w->redraw = true;
+            break;
+        }
+        if (args[3].u != 1 && a->vpress) {
+            int i = vbtn_at(a, a->px, a->py);
+            if (i >= 0 && i + 1 == a->vpress)
+                vbtn_do(a, i);
+            a->vpress = 0;
+            w->redraw = true;
+            break;
+        }
         if (args[3].u == 1 && a->vmode && a->py >= view_h(a)) {  /* a click on the bar of a video seeks */
             a->seeking = true;
             video_seek(a, (int64_t)(LM_CLAMP(a->px / (double)w->bw, 0.0, 1.0) * (double)video_len(a)));
@@ -656,7 +759,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->seeking = false;
         if (args[3].u == 1) {
             uint32_t t = args[1].u;
-            if (t - a->last_click_ms < 400 && abs((int)(a->px - a->last_click_x)) < 6 && abs((int)(a->py - a->last_click_y)) < 6) {
+            if (t - a->last_click_ms < (uint32_t)lm_metrics.double_click_ms && abs((int)(a->px - a->last_click_x)) < 6 && abs((int)(a->py - a->last_click_y)) < 6) {
                 if (a->fit)
                     zoom_to(a, 1.0, a->px, a->py);
                 else {

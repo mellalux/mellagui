@@ -351,6 +351,8 @@ struct app {
     int nw;
     int hover, press, drag, focus;      /* widget indexes, -1 none */
     char test[64];                      /* text typed into the "try it" field */
+    uint32_t dbl_last_ms;               /* Pointer page, the double click test: when the box was last pressed (0: not before) */
+    int dbl_state;                      /* 0 not tried yet, 1 a single click, 2 a double click */
     char wall[220];                     /* the wallpaper file field while it is being edited */
     bool wall_edited;                   /* (else the field shows the compositor's value) */
     /* Menu page: the two fields below the entry list ([0] name, [1] command) and the entry they edit (-1 = a new one) */
@@ -578,6 +580,8 @@ static void build_security(struct app *a, int x, int y, int w)
         add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, msg);
 }
 
+static int dblclick_metric(const struct app *a, int *value, int *lo, int *hi);
+
 static void build_pointer(struct app *a, int x, int y, int w)
 {
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Mouse and touchpad");
@@ -586,6 +590,30 @@ static void build_pointer(struct app *a, int x, int y, int w)
     y += ROW_H;
     add_check(a, x, y, w, "Natural scrolling (content follows the fingers)", "natural-scroll",
               kv_int(a, "natural-scroll", 0) != 0);
+    y += ROW_H + 10;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Double click");
+    y += ROW_H;
+    int v, lo, hi;
+    if (*kv_get(a, "config-file") && dblclick_metric(a, &v, &lo, &hi) >= 0) {
+        struct widget *sl = add(a, W_SLIDER, (struct rect){ x, y, w, ROW_H }, "Double-click time");
+        snprintf(sl->key, sizeof(sl->key), "dblclick");
+        sl->lo = lo;
+        sl->hi = hi;
+        sl->step = 25;
+        sl->unit = " ms";
+        sl->val = v;
+        y += ROW_H + 4;
+        const char *label = a->dbl_state == 2 ? "Double click!" : a->dbl_state == 1 ? "Single click: click again, faster" : "Try a double click here";
+        struct widget *t = add(a, W_BUTTON, (struct rect){ x, y, LM_MIN(w, 340), 44 }, label);
+        snprintf(t->key, sizeof(t->key), "dbl-try");
+        t->on = a->dbl_state == 2;
+        y += 52;
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Open programs keep their time until restarted.");
+    } else {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "The double-click time lives in the configuration file:");
+        y += ROW_H;
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Config page, \"Create it with the defaults\".");
+    }
 }
 
 static void build_desktop(struct app *a, int x, int y, int w)
@@ -1191,6 +1219,21 @@ static int metric_list(const struct app *a, struct metric *out, int max)
     return n;
 }
 
+/* The [windows] double-click-ms size: its index in the `metrics` setting (or -1) and its value (the pending one while the slider is held). */
+static int dblclick_metric(const struct app *a, int *value, int *lo, int *hi)
+{
+    struct metric m[MAX_METRICS];
+    int n = metric_list(a, m, MAX_METRICS);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(m[i].name, "windows.double-click-ms")) {
+            *value = a->mpend == i ? a->mpend_val : m[i].value;
+            *lo = m[i].lo;
+            *hi = m[i].hi;
+            return i;
+        }
+    return -1;
+}
+
 static void dock_flush(struct app *a);
 
 static void metric_flush(struct app *a)
@@ -1364,6 +1407,13 @@ static void slider_set(struct app *a, const struct widget *w, int v)
         a->mpend = atoi(w->key + 4);
         a->mpend_val = v;
         a->win.redraw = true;
+    } else if (!strcmp(w->key, "dblclick")) {                                 /* the double-click time: a size, sent when the slider is let go */
+        int cur, lo, hi, i = dblclick_metric(a, &cur, &lo, &hi);
+        if (i >= 0) {
+            a->mpend = i;
+            a->mpend_val = v;
+            a->win.redraw = true;
+        }
     } else if (!strncmp(w->key, "dk-", 3)) {                                  /* a dock option: sent when the slider is let go */
         snprintf(a->dpend, sizeof(a->dpend), "%s", w->key + 3);
         a->dpend_val = v;
@@ -1702,7 +1752,7 @@ static void paint_widget(struct app *a, int idx)
         break;
     }
     case W_BUTTON:
-        fill(a, *r, a->press == idx && hot ? COL_DOWN : (hot ? COL_HOVER : COL_KEY));
+        fill(a, *r, w->on && !strcmp(w->key, "dbl-try") ? lm_theme.ok : a->press == idx && hot ? COL_DOWN : (hot ? COL_HOVER : COL_KEY));
         draw_text(a, r->x + (r->w - lm_font_text_width(w->text)) / 2, text_y(r), w->text, COL_TEXT, 0);
         if (focus)
             outline(a, *r, COL_ACCENT);
@@ -1856,6 +1906,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (args[3].u == 1) {
             int idx = widget_at(a, a->px, a->py);
             a->press = idx;
+            if (idx >= 0 && a->wd[idx].kind == W_BUTTON && !strcmp(a->wd[idx].key, "dbl-try")) {      /* the double-click test: two presses within the time */
+                int cur = 400, lo, hi;
+                dblclick_metric(a, &cur, &lo, &hi);
+                uint32_t t = args[1].u;
+                bool dbl = a->dbl_last_ms && t - a->dbl_last_ms < (uint32_t)cur;
+                a->dbl_state = dbl ? 2 : 1;
+                a->dbl_last_ms = dbl ? 0 : t;                      /* (a third click starts again) */
+            }
             if (idx >= 0) {
                 a->focus = idx;
                 if (a->wd[idx].kind == W_SLIDER) {

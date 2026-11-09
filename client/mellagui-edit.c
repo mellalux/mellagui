@@ -1402,10 +1402,13 @@ static void paint(struct wlwin *w)
         btn_rect(a, i, &bx, &bwid);
         if (bwid == 0)
             continue;
-        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, a->hover == i ? 0x5e6a82u : 0x434c5eu);
+        static const uint32_t base[N_BTNS] = { 0x3f9a5e, 0x3d6fb4, 0xb8803a, 0x2f8f9a, 0x8a6fb8, 0x5a6a8a, 0x6b6f7a, 0x5a6a8a, 0xb84a6a };
+        static const uint32_t lite[N_BTNS] = { 0x56b878, 0x5588d0, 0xd49a50, 0x45aab5, 0xa088d0, 0x7488ad, 0x868b98, 0x7488ad, 0xd6638a };
+        bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
+        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
-        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, i == B_SAVE && a->modified ? COL_WARN : COL_FG, 0);
+        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, 0xffffffu, 0);
     }
     wlwin_fill(w, 0, TOP_H, gw, w->bh - bars - TOP_H, COL_GUTTER_BG);
     int y0, y1;

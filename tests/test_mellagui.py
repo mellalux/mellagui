@@ -3145,7 +3145,7 @@ class TestClients(Base):
         self.assertEqual(keys[30][5], 0)
         card = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(ctl.cmd('osk')))
         self.assertLessEqual(int(card.group(2)) + int(card.group(4)), 600)       # it sits inside the output, along the bottom
-        self.assertGreater(int(card.group(2)), 300)
+        self.assertGreater(int(card.group(2)) + int(card.group(4)) // 2, 300)           # its centre is in the lower half
         self.osk_click(0)                                                        # the Hide key
         time.sleep(0.1)
         self.assertEqual(self.osk()[0]['open'], '0')

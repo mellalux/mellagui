@@ -21,7 +21,7 @@ Included programs:
 | `build/mellagui-view`| image viewer (PNG, JPEG, PPM; MellaGUI menu → Images, or `mellagui-view [FILE|DIR]`): defaults to the newest screenshot in `~/Pictures`; Left/Right browse, +/- and the wheel zoom, drag pans, F fits, 0 is 100 %, R rescans, Esc quits; has its own inflate and JPEG decoder (baseline and progressive, EXIF orientation), `--decode FILE OUT.ppm` for tests |
 | `build/mellagui-matrix`| the screensaver: falling green code in the manner of the film. The compositor starts it full screen after 10 minutes without input (settings panel → *Saver*: on / off, the minutes, *Show it now*; `[commands] saver = ...` names another program), any key, mouse button or pointer movement ends it and is not passed on; it does not start over a full screen window. `mellagui-matrix --windowed` runs it in an ordinary window (Esc quits), `--speed PERCENT`; `--selftest` |
 | `build/mellagui-notify`| `mellagui-notify [-t MS] TITLE [BODY...]` shows a notification card (top right below the panel, newest on top, at most five; a click dismisses it, `-t 0` keeps it, default 6 s); like the settings panel it is served only to MellaGUI's own programs |
-| `build/mellagui-calc`| calculator (mouse or keyboard; `--selftest` checks the arithmetic engine) |
+| `build/mellagui-calc`| calculator with round colourful keys (mouse or keyboard): left-to-right arithmetic with the sum so far shown above the result, `%`, +/-, square root / square / 1/x, memory (MC MR M+ M-, an "M" shows while something is stored), Ctrl+C copies the number on the display and Ctrl+V pastes the first number of the clipboard; `--selftest` checks the arithmetic engine, the sum line and the paste parser |
 
 ## Status (read this)
 
@@ -188,7 +188,7 @@ click the focused one to minimize it, middle-click to close. Dragging a tiled wi
 In `mellagui-run`: type a shell command, Enter starts it detached (no window of its own is left behind), Esc cancels,
 Up/Down browse the history (`~/.cache/mellagui-run-history`), Ctrl+U clears the line.
 
-In `mellagui-calc`: digits, `.`, `+ - * /`, `%`, Enter or `=` to evaluate, Backspace to erase, Esc or `c` to clear
+In `mellagui-calc`: digits, `.`, `+ - * /`, `%`, Enter or `=` to evaluate, Backspace to erase, Esc or `c` to clear; `r` square root, `q` square, `i` 1/x, `n` +/-; memory `p` M+, `o` M-, `m` MR, `z` MC; Ctrl+C / Ctrl+V copy and paste a number
 (operators are applied left to right).
 
 In `mellagui-term`: select with the mouse (auto-copies), middle-click or Ctrl+Shift+V / Shift+Insert paste,

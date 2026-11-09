@@ -61,7 +61,7 @@ $(BUILD)/mellagui-asan: $(ASAN_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-calc: $(BUILD)/client/mellagui-calc.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-calc: $(BUILD)/client/mellagui-calc.o $(BUILD)/client/wlclip.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -93,7 +93,7 @@ $(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/src/img.o $(B
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-edit: $(BUILD)/client/mellagui-edit.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-edit: $(BUILD)/client/mellagui-edit.o $(BUILD)/client/wlclip.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

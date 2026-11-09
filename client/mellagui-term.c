@@ -27,6 +27,7 @@
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
+#include "metrics.h"
 #include "uikit.h"
 #include "util.h"
 #include "wlc.h"
@@ -139,6 +140,9 @@ struct app {
     int menu_hover;             /* its highlighted entry (index into ZOOM_LEVELS) */
     bool conf_dirty;            /* the zoom changed and is not in the settings file yet */
     int64_t conf_time;          /* when (ms) it changed: saved a moment later so a wheel burst writes once */
+    bool sb_hot;                /* the pointer is over the scroll bar */
+    bool sb_drag;               /* the scroll bar thumb is being dragged */
+    int sb_grab;                /* pixels between the top of the thumb and the pointer */
     bool eat_release;           /* the press that closed the menu: its release must not start / end a selection */
     char title[256];
 };
@@ -147,6 +151,7 @@ static struct app A;
 
 static int cell_w(void) { return LM_MAX((A.zoom * LM_FONT_W + 50) / 100, 1); }
 static int cell_h(void) { return LM_MAX((A.zoom * LM_FONT_H + 50) / 100, 1); }
+static int sb_w(void) { return lm_metrics.scrollbar_width; }      /* [windows] scrollbar-width: the strip at the right edge */
 
 /* ======================================================================== *
  *  Terminal model
@@ -1016,10 +1021,54 @@ static void build_zoom_tables(void)
     lm_zoom_axis(A.yt, LM_MIN(cell_h(), (int)(sizeof(A.yt) / sizeof(A.yt[0]))), LM_FONT_H);
 }
 
+/* ---- scroll bar -----------------------------------------------------------------------------------------------------------
+ * A strip at the right edge, below the button bar. The thumb stands for the visible rows among scrollback + screen; its top is
+ * the oldest line shown (sb_count - view_off). Nothing to scroll back to (or the alternate screen): only the empty track. */
+
+static bool sb_active(void) { return A.t.sb_count > 0 && !A.t.alt_active; }
+
+static void sb_thumb(int *ty, int *th)
+{
+    const struct term *t = &A.t;
+    int track = LM_MAX(A.bh - BAR_H, 1), total = LM_MAX(t->sb_count + t->rows, 1);
+    *th = LM_CLAMP(track * t->rows / total, LM_MIN(28, track), track);
+    *ty = BAR_H + (track - *th) * (t->sb_count - t->view_off) / LM_MAX(t->sb_count, 1);
+}
+
+static void draw_scrollbar(uint32_t *px)
+{
+    int w = sb_w(), x0 = A.bw - w;
+    if (x0 < 0 || A.bh <= BAR_H)
+        return;
+    for (int y = BAR_H; y < A.bh; y++)
+        for (int x = x0; x < A.bw; x++)
+            px[(size_t)y * (size_t)A.bw + (size_t)x] = lm_theme.bar;
+    if (!sb_active())
+        return;
+    int ty, th;
+    sb_thumb(&ty, &th);
+    bool hot = A.sb_drag || (A.px >= x0 && A.py >= ty && A.py < ty + th);
+    uint32_t col = hot ? lm_theme.button_hover : 0x353b49u;
+    for (int y = ty + 1; y < ty + th - 1; y++)
+        for (int x = x0 + 2; x < A.bw - 2; x++)
+            px[(size_t)y * (size_t)A.bw + (size_t)x] = col;
+}
+
+static void sb_drag_to(double py)
+{
+    struct term *t = &A.t;
+    int ty, th;
+    sb_thumb(&ty, &th);
+    int room = LM_MAX(A.bh - BAR_H - th, 1);
+    int pos = LM_CLAMP((int)py - A.sb_grab - BAR_H, 0, room);
+    t->view_off = LM_CLAMP(t->sb_count - pos * t->sb_count / room, 0, t->sb_count);
+    A.dirty = true;
+}
+
 static void render(void)
 {
     struct term *t = &A.t;
-    int need_w = t->cols * CELL_W + 2 * PAD, need_h = t->rows * CELL_H + 2 * PAD + BAR_H;
+    int need_w = t->cols * CELL_W + 2 * PAD + sb_w(), need_h = t->rows * CELL_H + 2 * PAD + BAR_H;
     if (!A.pixels || A.bw != need_w || A.bh != need_h) {
         /* (re)create pool and buffers */
         if (A.pixels) {
@@ -1129,6 +1178,7 @@ static void render(void)
         }
     }
 
+    draw_scrollbar(px);
     draw_bar(px);
     if (A.menu_open)
         draw_menu(px);
@@ -1681,6 +1731,10 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         A.py = lm_fixed_to_double(args[3].f);
         break;
     case LM_WL_POINTER_EVT_LEAVE:
+        if (A.sb_hot) {
+            A.sb_hot = false;
+            A.dirty = true;
+        }
         if (A.hover >= 0) {
             A.hover = -1;
             A.dirty = true;
@@ -1701,6 +1755,15 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
             }
             break;
         }
+        if (A.sb_drag) {
+            sb_drag_to(A.py);
+            break;
+        }
+        bool over_sb = sb_active() && A.px >= A.bw - sb_w();
+        if (over_sb != A.sb_hot) {                      /* (the thumb lights up under the pointer) */
+            A.sb_hot = over_sb;
+            A.dirty = true;
+        }
         if (t->sel_dragging) {
             cell_from_pointer(&t->sel_x1, &t->sel_y1);
             A.dirty = true;
@@ -1718,6 +1781,26 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
                 set_zoom_pct(ZOOM_LEVELS[row]);
             A.eat_release = true;
             menu_set(false);
+            break;
+        }
+        if (args[2].u == BTN_LEFT && args[3].u == 0 && A.sb_drag) {
+            A.sb_drag = false;
+            A.dirty = true;
+            break;
+        }
+        if (args[2].u == BTN_LEFT && args[3].u == 1 && A.py >= BAR_H && A.px >= A.bw - sb_w() && !t->sel_dragging) {
+            if (sb_active()) {                          /* the scroll bar: drag the thumb, or a click beside it pages */
+                int ty, th;
+                sb_thumb(&ty, &th);
+                if (A.py >= ty && A.py < ty + th) {
+                    A.sb_drag = true;
+                    A.sb_grab = (int)A.py - ty;
+                } else {
+                    int page = LM_MAX(t->rows - 1, 1);
+                    t->view_off = LM_CLAMP(t->view_off + (A.py < ty ? page : -page), 0, t->sb_count);
+                    A.dirty = true;
+                }
+            }
             break;
         }
         if (args[2].u == BTN_LEFT && A.py < BAR_H && !t->sel_dragging) {
@@ -1774,7 +1857,7 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
 
 static void apply_size(int w, int h)
 {
-    int cols = (w - 2 * PAD) / CELL_W, rows = (h - 2 * PAD - BAR_H) / CELL_H;
+    int cols = (w - 2 * PAD - sb_w()) / CELL_W, rows = (h - 2 * PAD - BAR_H) / CELL_H;
     cols = LM_CLAMP(cols, 8, 500);
     rows = LM_CLAMP(rows, 2, 200);
     if (cols != A.t.cols || rows != A.t.rows) {

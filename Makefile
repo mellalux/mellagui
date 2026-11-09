@@ -6,6 +6,7 @@
 #   make mellagui-calc build/mellagui-calc   (client/mellagui-calc.c)
 #   make mellagui-matrix build/mellagui-matrix (client/mellagui-matrix.c, the screensaver)
 #   make mellagui-cam  build/mellagui-cam    (client/mellagui-cam.c, the webcam viewer, V4L2)
+#   make mellagui-record build/mellagui-record (client/mellagui-record.c, the screen recorder: MP4 of JPEG pictures)
 #   make mellagui-run  build/mellagui-run    (client/mellagui-run.c, the Run dialog)
 #   make mellagui-settings build/mellagui-settings (client/mellagui-settings.c, the settings panel)
 #   make mellagui-monitor build/mellagui-monitor (client/mellagui-monitor.c, the monitor's own settings over DDC/CI)
@@ -39,9 +40,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam asan test run clean fuzz fuzz-run
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record asan test run clean fuzz fuzz-run
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -109,6 +110,10 @@ $(BUILD)/mellagui-view: $(BUILD)/client/mellagui-view.o $(BUILD)/src/img.o $(BUI
 $(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/mellagui-record: $(BUILD)/client/mellagui-record.o $(BUILD)/src/jpegenc.o $(BUILD)/src/mp4.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
 $(BUILD)/mellagui-monitor: $(BUILD)/client/mellagui-monitor.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/src/ddc.o $(BUILD)/src/edid.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)

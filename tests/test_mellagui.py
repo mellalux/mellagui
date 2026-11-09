@@ -6113,6 +6113,263 @@ class TestCamera(Base):
         self.assertEqual(names[:7], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images', 'Camera'])
 
 
+class TestRecord(Base):
+    """The screen recorder: mellagui_capture_v1 (src/capture.c) and mellagui-record (client/mellagui-record.c, src/jpegenc.c, src/mp4.c)."""
+    REC = os.path.join(os.path.dirname(BIN), 'mellagui-record')
+    LOCK_ENV = {'MELLAGUI_LOCK_ITER': '1000', 'MELLAGUI_LOCK_DELAY_MS': '1500', 'MELLAGUI_LOCK_UNIT_MS': '1000'}
+
+    def setUp(self):
+        if not os.path.exists(self.REC):
+            self.skipTest('mellagui-record not built')
+        super().setUp()
+
+    def outdir(self):
+        d = tempfile.mkdtemp(prefix='mellagui-rec-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def run_rec(self, *args, display=None, timeout=30):
+        env = dict(os.environ)
+        if display:
+            env['WAYLAND_DISPLAY'] = display
+        return subprocess.run([self.REC] + list(args), env=env, capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def parse_mp4(path):
+        """The top level boxes and the sample table of the file: {'w', 'h', 'duration_ms', 'samples': [bytes, ...]}."""
+        with open(path, 'rb') as f:
+            d = f.read()
+        at, boxes = 0, {}
+        while at + 8 <= len(d):
+            size = int.from_bytes(d[at:at + 4], 'big')
+            hdr = 8
+            if size == 1:
+                size, hdr = int.from_bytes(d[at + 8:at + 16], 'big'), 16
+            assert size >= hdr and at + size <= len(d), 'bad box at %d' % at
+            boxes[d[at + 4:at + 8]] = (at + hdr, at + size)
+            at += size
+        assert at == len(d), 'junk after the last box'
+        assert set(boxes) == {b'ftyp', b'mdat', b'moov'}, boxes.keys()
+        a, b = boxes[b'moov']
+        moov = d[a:b]
+
+        def find(tag, start=0):
+            i = moov.index(tag, start)
+            return i + 4
+        i = find(b'mvhd')
+        timescale, dur = int.from_bytes(moov[i + 12:i + 16], 'big'), int.from_bytes(moov[i + 16:i + 20], 'big')
+        assert timescale == 1000
+        i = find(b'stsz')
+        count = int.from_bytes(moov[i + 8:i + 12], 'big')
+        sizes = [int.from_bytes(moov[i + 12 + 4 * k:i + 16 + 4 * k], 'big') for k in range(count)]
+        i = find(b'stco')
+        off = int.from_bytes(moov[i + 8:i + 12], 'big')
+        i = find(b'tkhd')
+        w, h = int.from_bytes(moov[i + 76:i + 80], 'big') >> 16, int.from_bytes(moov[i + 80:i + 84], 'big') >> 16
+        samples = []
+        for sz in sizes:
+            samples.append(d[off:off + sz])
+            off += sz
+        assert off <= boxes[b'mdat'][1], 'samples run out of the mdat box'
+        return dict(w=w, h=h, duration_ms=dur, samples=samples)
+
+    def test_selftest(self):
+        r = self.run_rec('--selftest')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('ok', r.stdout)
+
+    def test_list_and_bad_arguments(self):
+        r = self.run_rec('--list')
+        self.assertEqual(r.stdout.strip(), '0 headless-0 1024x600+0+0', r.stderr)
+        self.assertEqual(self.run_rec('--bogus').returncode, 2)
+        r = self.run_rec('--start', '--output', '5', '--dir', self.outdir())
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no such output", r.stderr)
+
+    def test_the_protocol(self):
+        cl = Client()
+        self.clients.append(cl)
+        wl = cl.wl
+        cap = wl.bind('mellagui_capture_v1')
+        wl.request(cap, 'list')
+        wl.roundtrip()
+        outs = [e.args for e in wl.queue if e.obj == cap and e.name == 'output']
+        self.assertEqual(outs, [[0, 'headless-0', 0, 0, 1024, 600]])
+        wl.queue.clear()
+        win_client, win = self.window(300, 200, color=0xffff00ff)           # something unmistakable on the screen
+        ctl.sync()
+        shm = Shm(wl, 1024 * 600 * 4)
+        buf = shm.buffer(1024, 600, argb=0xff010203)
+        wl.request(cap, 'grab', I(0), buf)
+        ev = wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 5.0)
+        self.assertIsNotNone(ev)
+        self.assertEqual((ev.name, ev.args), ('ready', [0, 1024, 600]))
+        # the buffer holds what dump shows (away from the pointer, which a capture leaves out)
+        ppm = ctl.dump(os.path.join(tmp, 'rec-protocol.ppm'))
+        same = total = magenta = 0
+        for y in range(0, 600, 13):
+            for x in range(0, 1024, 11):
+                if abs(x - 900) < 20 and abs(y - 500) < 30:
+                    continue
+                v = struct.unpack_from('<I', shm.map, (y * 1024 + x) * 4)[0]
+                total += 1
+                same += ((v >> 16) & 255, (v >> 8) & 255, v & 255) == ppm.px(x, y)
+                magenta += v == 0xffff00ff
+        self.assertGreater(same, total * 0.97, '%d of %d samples equal' % (same, total))
+        self.assertGreater(magenta, 0, 'the magenta window is not in the picture')
+        # mistakes are answered, not punished
+        small = shm.buffer(100, 100)
+        for args, why in (((I(0), small), 'size'), ((I(3), buf), 'no-output'), ((I(-1), buf), 'no-output')):
+            wl.request(cap, 'grab', *args)
+            ev = wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 5.0)
+            self.assertEqual((ev.name, ev.args[1]), ('failed', why))
+        self.assertIsNone(wl.error)
+        self.assertTrue(alive())
+
+    def test_a_recording(self):
+        d = self.outdir()
+        win_client = self.client()
+        r = subprocess.Popen([self.REC, '--start', '--duration', '2.5', '--dir', d, '--fps', '15'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
+        time.sleep(0.9)
+        win = Window(win_client, 300, 200, color=0xffff00ff)                # appears while recording
+        win_client.wl.roundtrip()
+        out, err = r.communicate(timeout=20)
+        self.assertEqual(r.returncode, 0, err)
+        files = [f for f in os.listdir(d) if f.endswith('.mp4')]
+        self.assertEqual(len(files), 1, files)
+        path = os.path.join(d, files[0])
+        self.assertEqual(out.strip(), path)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        mp4 = self.parse_mp4(path)
+        self.assertEqual((mp4['w'], mp4['h']), (1024, 600))
+        self.assertTrue(2300 <= mp4['duration_ms'] <= 3500, mp4['duration_ms'])
+        self.assertGreaterEqual(len(mp4['samples']), 2)
+        self.assertLess(len(mp4['samples']), 30, 'identical pictures are not dropped')
+        for s in mp4['samples']:
+            self.assertEqual((s[:2], s[-2:]), (b'\xff\xd8', b'\xff\xd9'))
+        self.assertIn('unchanged skipped', err)
+        try:
+            from PIL import Image
+        except ImportError:
+            return
+        first = Image.open(io.BytesIO(mp4['samples'][0])).convert('RGB')
+        last = Image.open(io.BytesIO(mp4['samples'][-1])).convert('RGB')
+        self.assertEqual(first.size, (1024, 600))
+        w = [x for x in ctl.windows()['windows'] if x['title'] == 'test'][0]
+        cx, cy = w['x'] + w['w'] // 2, w['y'] + w['h'] // 2
+
+        def magenta(im):
+            p = im.getpixel((cx, cy))
+            return p[0] > 220 and p[1] < 40 and p[2] > 220
+        self.assertFalse(magenta(first), 'the window is in the first picture')
+        self.assertTrue(magenta(last), 'the window is not in the last picture: %r' % (last.getpixel((cx, cy)),))
+        ffprobe = shutil.which('ffprobe')
+        if ffprobe:
+            r2 = subprocess.run([ffprobe, '-v', 'error', '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0', path],
+                                capture_output=True, text=True, timeout=20)
+            self.assertEqual(r2.stdout.strip(), 'mjpeg,1024,600', r2.stderr)
+
+    def test_sigterm_finishes_the_file(self):
+        d = self.outdir()
+        r = subprocess.Popen([self.REC, '--start', '--dir', d], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
+        for _ in range(100):
+            if any(f.endswith('.mp4') for f in os.listdir(d)):
+                break
+            time.sleep(0.05)
+        time.sleep(0.7)
+        r.send_signal(signal.SIGTERM)
+        out, err = r.communicate(timeout=20)
+        self.assertEqual(r.returncode, 0, err)
+        mp4 = self.parse_mp4(out.strip())
+        self.assertGreaterEqual(len(mp4['samples']), 1)
+
+    def test_names_are_never_reused(self):
+        d = self.outdir()
+        args = ('--start', '--duration', '0.4', '--dir', d, '--name', 'one.mp4')
+        self.assertEqual(self.run_rec(*args).returncode, 0)
+        before = os.stat(os.path.join(d, 'one.mp4')).st_size
+        r = self.run_rec(*args)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('cannot write', r.stderr)
+        self.assertEqual(os.stat(os.path.join(d, 'one.mp4')).st_size, before)
+        r = self.run_rec('--start', '--duration', '0.2', '--dir', os.path.join(d, 'no', 'such'), '--name', 'x.mp4')
+        self.assertEqual(r.returncode, 1)                                    # only the last directory is created
+        self.assertIn('cannot create', r.stderr)
+
+    def test_the_window(self):
+        d = self.outdir()
+        p = subprocess.Popen([self.REC, '--dir', d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.record')
+        self.assertIsNotNone(win, 'the recorder window did not appear')
+        for _ in range(100):
+            win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.record'][0]
+            if win['w'] > 0:
+                break
+            time.sleep(0.03)
+        ctl.abs(win['x'] + 100, win['y'] + 100)                              # the pointer inside: the keyboard goes here
+        time.sleep(0.3)
+        ctl.tap(KEY_SPACE)                                                   # record
+        for _ in range(100):
+            if any(f.endswith('.mp4') for f in os.listdir(d)):
+                break
+            time.sleep(0.05)
+        self.assertTrue(any(f.endswith('.mp4') for f in os.listdir(d)), 'Space did not start a recording')
+        time.sleep(0.8)
+        ctl.tap(KEY_SPACE)                                                   # stop
+        files = [f for f in os.listdir(d) if f.endswith('.mp4')]
+        self.assertEqual(len(files), 1)
+        for _ in range(100):                                                 # the file is complete once the index is written
+            try:
+                self.parse_mp4(os.path.join(d, files[0]))
+                break
+            except (AssertionError, ValueError):
+                time.sleep(0.05)
+        self.assertGreaterEqual(len(self.parse_mp4(os.path.join(d, files[0]))['samples']), 1)
+        ctl.tap(KEY_ESC)                                                     # Esc closes the program
+        self.assertEqual(p.wait(timeout=10), 0)
+
+    def test_closed_to_other_programs(self):
+        p, c, stop = self.private_compositor('rec-own', '--settings-access', 'own')
+        cl = Client(os.path.join(tmp, 'rec-own'))
+        self.clients.append(cl)
+        cap = cl.wl.bind('mellagui_capture_v1')
+        cl.wl.request(cap, 'list')
+        cl.wl.roundtrip()
+        self.assertEqual([e.name for e in cl.wl.queue if e.obj == cap], ['done'], 'a foreign program was told about the outputs')
+        cl.wl.queue.clear()
+        shm = Shm(cl.wl, 800 * 500 * 4)
+        buf = shm.buffer(800, 500, argb=0xff010203)
+        cl.wl.request(cap, 'grab', I(0), buf)
+        ev = cl.wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 3.0)
+        self.assertEqual((ev.name, ev.args[1]), ('failed', 'no-output'))
+        self.assertEqual(struct.unpack_from('<I', shm.map, 0)[0], 0xff010203, 'a foreign program got the screen')
+        # MellaGUI's own recorder (an executable called mellagui-* next to the compositor) is served
+        r = self.run_rec('--list', display='rec-own')
+        self.assertEqual(r.stdout.strip(), '0 headless-0 800x500+0+0', r.stderr)
+
+    def test_a_locked_screen_is_not_captured(self):
+        path = os.path.join(tmp, 'rec-lock.conf')
+        p, c, stop = self.private_compositor('rec-lock', '--lock-file', path, env=self.LOCK_ENV)
+        c.cmd('lock set - password hunter22x')
+        cl = Client(os.path.join(tmp, 'rec-lock'))
+        self.clients.append(cl)
+        cap = cl.wl.bind('mellagui_capture_v1')
+        shm = Shm(cl.wl, 800 * 500 * 4)
+        buf = shm.buffer(800, 500, argb=0xff010203)
+        cl.wl.request(cap, 'grab', I(0), buf)
+        ev = cl.wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 3.0)
+        self.assertEqual(ev.name, 'ready')
+        c.cmd('lock now')
+        shm.map[0:4] = struct.pack('<I', 0xff010203)
+        cl.wl.request(cap, 'grab', I(0), buf)
+        ev = cl.wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 3.0)
+        self.assertEqual((ev.name, ev.args[1]), ('failed', 'locked'))
+        self.assertEqual(struct.unpack_from('<I', shm.map, 0)[0], 0xff010203)
+
+
 class TestViewer(Base):
     """mellagui-view in a window: browsing, zoom, title."""
     VIEW = os.environ.get('MELLAGUI_VIEW_BIN', os.path.join(ROOT, 'build', 'mellagui-view'))
@@ -9004,12 +9261,12 @@ class TestLauncher(Base):
         c.sync()
         self.super_a(c)
         d = self.info(c)
-        self.assertEqual((d['open'], d['n']), (1, 9))                                      # the built-in dock (with the Camera button), without its Launcher button
+        self.assertEqual((d['open'], d['n']), (1, 10))                                    # the built-in dock (with the Camera and Record buttons), without its Launcher button
         c.tap(self.KEY_E)
         c.sync()
         c.click(*self.centre(self.info(c)['icons'][0]['remove']))
         c.sync()
-        self.assertEqual(self.info(c)['n'], 9)
+        self.assertEqual(self.info(c)['n'], 10)
 
     def test_the_dialog_is_painted_translucent(self):
         c = self.start('mellagui-lc9')

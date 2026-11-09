@@ -387,6 +387,21 @@ static const struct lm_message mellagui_settings_events[] = {
 DEFINE_IFACE(lm_mellagui_settings_v1_interface, "mellagui_settings_v1", 1,
              mellagui_settings_requests, mellagui_settings_events);
 
+/* ---- mellagui_capture_v1 ------------------------------------------------------------ */
+static const struct lm_message mellagui_capture_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("list", "", 1, NULL),
+    MSG("grab", "io", 1, TY(NULL, &lm_wl_buffer_interface)),
+};
+static const struct lm_message mellagui_capture_events[] = {
+    MSG("output", "isiiii", 1, NULL),
+    MSG("done", "", 1, NULL),
+    MSG("ready", "iii", 1, NULL),
+    MSG("failed", "is", 1, NULL),
+};
+DEFINE_IFACE(lm_mellagui_capture_v1_interface, "mellagui_capture_v1", 1,
+             mellagui_capture_requests, mellagui_capture_events);
+
 /* ---- zwp_linux_dmabuf_v1 -------------------------------------------------------------------- */
 static const struct lm_message dmabuf_requests[] = {
     MSG("destroy", "", 1, NULL),

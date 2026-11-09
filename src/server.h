@@ -79,6 +79,7 @@ struct lm_xdg;
 struct lm_wm;
 struct lm_input;
 struct lm_settings;
+struct lm_capture;
 struct lm_mixer;
 struct lm_sysinfo;
 struct lm_dmabuf;
@@ -247,6 +248,7 @@ struct lm_server {
     struct lm_wm *wm;
     struct lm_input *input;             /* evdev (or inject-only for headless) */
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
+    struct lm_capture *capture;         /* mellagui_capture_v1: the screen for mellagui-record (capture.h) */
     bool reloaded;                      /* a reload happened; reload_result = rejected lines of the last one, -1 = no readable file */
     int reload_result;
     int (*reload_config)(struct lm_server *, bool quiet); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file; `quiet` = no "read again" card on the screen */

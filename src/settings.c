@@ -1504,6 +1504,14 @@ static bool access_allowed(const struct lm_settings *s, const struct lm_client *
     return mode == 1 || client_is_own(c);
 }
 
+bool lm_settings_client_allowed(struct lm_server *srv, const struct lm_client *c)
+{
+    int mode = srv->config.settings_access;
+    if (mode < 0)
+        mode = !strcmp(srv->config.backend, "headless") ? 1 : 0;
+    return mode == 1 || client_is_own(c);
+}
+
 static void settings_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)
 {
     struct lm_settings *s = data;

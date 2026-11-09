@@ -27,6 +27,7 @@
 #include "render.h"
 #include "seat.h"
 #include "settings.h"
+#include "capture.h"
 #include "lock.h"
 #include "saver.h"
 #include "logind.h"
@@ -604,7 +605,8 @@ int main(int argc, char **argv)
         !(srv->xdg = lm_xdg_create(srv)) ||
         !(srv->wm = lm_wm_create(srv)) ||
         !(srv->input = lm_input_create(srv)) ||
-        !(srv->settings = lm_settings_create(srv))) {
+        !(srv->settings = lm_settings_create(srv)) ||
+        !(srv->capture = lm_capture_create(srv))) {
         lm_error("module initialisation failed");
         goto out;
     }
@@ -659,6 +661,8 @@ out:
     srv->saver = NULL;
     if (srv->lock) lm_lock_destroy(srv->lock);
     srv->lock = NULL;
+    if (srv->capture) lm_capture_destroy(srv->capture);
+    srv->capture = NULL;
     if (srv->settings) lm_settings_destroy(srv->settings);
     srv->settings = NULL;
     if (srv->input) lm_input_destroy(srv->input);

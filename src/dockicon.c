@@ -22,6 +22,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_WEB] = { "web", 0xe8590c },
     [LM_DOCKICON_RUN] = { "run", 0x238636 },
     [LM_DOCKICON_LAUNCHER] = { "launcher", 0x5b5fc7 },
+    [LM_DOCKICON_CAMERA] = { "camera", 0xd6336c },
 };
 
 const char *lm_dockicon_name(int kind)
@@ -40,6 +41,7 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
+        { "cam", LM_DOCKICON_CAMERA },                  /* before "web": a Webcam is a camera */
         { "term", LM_DOCKICON_TERMINAL }, { "console", LM_DOCKICON_TERMINAL }, { "shell", LM_DOCKICON_TERMINAL },
         { "calc", LM_DOCKICON_CALCULATOR }, { "file", LM_DOCKICON_FILES }, { "folder", LM_DOCKICON_FILES },
         { "edit", LM_DOCKICON_EDITOR }, { "text", LM_DOCKICON_EDITOR }, { "note", LM_DOCKICON_EDITOR },
@@ -165,6 +167,12 @@ static float glyph(int kind, float u, float v)
             for (int c = 0; c < 3; c++)
                 d = fminf2(d, sd_box(u, v, -0.28f + 0.28f * (float)c, -0.28f + 0.28f * (float)r, 0.095f, 0.095f, 0.03f));
         return d;
+    }
+    case LM_DOCKICON_CAMERA: {
+        float d = sd_box(u, v, 0, 0.05f, 0.44f, 0.27f, 0.07f);
+        d = fminf2(d, sd_box(u, v, -0.22f, -0.22f, 0.13f, 0.07f, 0.03f));
+        d = sd_sub(d, sd_circle(u, v, 0.0f, 0.05f, 0.18f));
+        return fminf2(d, sd_circle(u, v, 0.0f, 0.05f, 0.095f));
     }
     case LM_DOCKICON_RUN:
         return sd_tri(u, v, -0.15f, -0.27f, -0.15f, 0.27f, 0.29f, 0.0f) - 0.05f;

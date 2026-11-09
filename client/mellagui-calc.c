@@ -1,7 +1,7 @@
 /*
  * mellagui-calc: small desktop calculator (wl_shm + xdg-shell, bitmap font).
  * Mouse buttons or keyboard: digits . + - * / % Enter/= Backspace, Esc/c clear.
- * Operators are evaluated left to right, like a pocket calculator; the line above the result shows the sum so far.
+ * Operators are evaluated left to right, like a pocket calculator (5 + = gives 10); the line above the result shows the sum so far.
  * Round colourful keys like the other MellaGUI programs. Besides the four operations and %:
  *   r  square root      q  square      i  1/x      n  +/-
  *   memory: p = M+, o = M-, m = MR (recall), z = MC (clear); the display shows "M" while something is stored
@@ -183,13 +183,15 @@ static void calc_equals(struct calc *c)
             expr_add(c, " =");
             c->done = true;
         }
-    } else if (c->op) {                                                 /* "5 + =": the operator is dropped, the number stays */
+    } else if (c->op) {                                                 /* "5 + =": the number on the display is used twice, like a pocket calculator: 10 */
         char num[ENTRY_MAX + 4];
-        c->expr[0] = 0;
         calc_fmt(c->acc, num, sizeof(num));
-        expr_add(c, num);
-        expr_add(c, " =");
-        c->done = true;
+        calc_apply(c, c->acc);
+        if (!c->error) {
+            expr_add(c, num);
+            expr_add(c, " =");
+            c->done = true;
+        }
     }
     c->op = 0;
 }
@@ -438,6 +440,11 @@ static int selftest(void)
     expect("2*3=+4=", "10");            /* continue from the result */
     expect("2*3=7", "7");               /* a new number after = starts fresh */
     expect("2+*3=", "6");               /* a second operator replaces the first */
+    expect("5+=", "10");                /* "=" right after an operator uses the displayed number twice */
+    expect("6*=", "36");
+    expect("5-=", "0");
+    expect("5/=", "1");
+    expect("0/=", "Error");
     expect("12C", "0");
     expect("1234567890123456789", "123456789012345");
 
@@ -467,7 +474,7 @@ static int selftest(void)
     expect_expr("2+3*", "2 + 3 x ");
     expect_expr("2+*3=", "2 x 3 =");
     expect_expr("5=", "5 =");
-    expect_expr("5+=", "5 =");
+    expect_expr("5+=", "5 + 5 =");
     expect_expr("2*3=+4=", "6 + 4 =");
     expect_expr("2*3=7", "");           /* a new number: a new sum */
     expect_expr("9r", "sqrt(9) =");

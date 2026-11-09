@@ -27,6 +27,7 @@
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
+#include "uikit.h"
 #include "util.h"
 #include "wlc.h"
 
@@ -35,9 +36,9 @@
 #define DEFAULT_COLS 80
 #define DEFAULT_ROWS 24
 /* Font zoom in percent. Whole multiples of 100 draw the bitmap font crisply, anything else is area-averaged. */
-static const int ZOOM_LEVELS[] = { 50, 60, 75, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500 };
-#define N_ZOOM ((int)(sizeof(ZOOM_LEVELS) / sizeof(ZOOM_LEVELS[0])))
-#define ZOOM_DEFAULT 100
+#define ZOOM_LEVELS LM_ZOOM_LEVELS
+#define N_ZOOM LM_N_ZOOM
+#define ZOOM_DEFAULT LM_ZOOM_DEFAULT
 #define MAX_MIMES 32
 #define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
 #define BAR_BG (lm_theme.bar)
@@ -131,7 +132,10 @@ struct app {
     int n_offer_mimes;
     int zoom;                   /* font size in percent (one of ZOOM_LEVELS, see set_zoom_pct) */
     /* weights of the source font pixels under each destination pixel of a cell (fractional zooms), see build_zoom_tables */
-    struct zt { uint8_t c0, n, w[4]; } xt[96], yt[192];
+    struct lm_zt xt[96], yt[192];
+    bool fixed_size;            /* maximized / fullscreen: the compositor decides the size, zooming only changes the grid */
+    bool grown;                 /* the window was made bigger by a zoom and the new buffer is not committed yet */
+    int hover;                  /* button under the pointer (-1 = none) */
     bool menu_open;             /* the zoom drop-down list is showing */
     int menu_hover;             /* its highlighted entry (index into ZOOM_LEVELS) */
     bool conf_dirty;            /* the zoom changed and is not in the settings file yet */
@@ -868,6 +872,8 @@ static const char *btn_text(int i, char *buf, size_t n)
     }
 }
 
+/* A button that does not fit in the window width is left out (from the right: Reset first), so a narrow window shows
+ * Paste, A-, the zoom list ... and never draws over the edge. Its rectangle then has no width. */
 static void btn_rect(int i, int *x, int *y, int *w, int *h)
 {
     char tmp[16];
@@ -881,6 +887,8 @@ static void btn_rect(int i, int *x, int *y, int *w, int *h)
     *y = 2;
     *w = chars * LM_FONT_W + 16 + (i == BTN_ZOOM_ID ? ARROW_W : 0);
     *h = BAR_H - 4;
+    if (A.bw > 0 && bx + *w + 4 > A.bw)
+        *w = 0;
 }
 
 static int btn_at(double px, double py)
@@ -888,7 +896,7 @@ static int btn_at(double px, double py)
     for (int i = 0; i < N_BTNS; i++) {
         int x, y, w, h;
         btn_rect(i, &x, &y, &w, &h);
-        if (px >= x && px < x + w && py >= y && py < y + h)
+        if (w > 0 && px >= x && px < x + w && py >= y && py < y + h)
             return i;
     }
     return -1;
@@ -912,6 +920,11 @@ static void fill_box(uint32_t *px, int x, int y, int w, int h, uint32_t color)
             px[(size_t)yy * (size_t)A.bw + (size_t)xx] = color;
 }
 
+static void round_box(uint32_t *px, int x, int y, int w, int h, int r, uint32_t color)
+{
+    lm_round_fill(px, A.bw, A.bw, A.bh, x, y, w, h, r, color);
+}
+
 static void draw_bar(uint32_t *px)
 {
     fill_box(px, 0, 0, A.bw, BAR_H, BAR_BG);
@@ -919,7 +932,9 @@ static void draw_bar(uint32_t *px)
         int bx, by, bw, bh;
         char tmp[16];
         btn_rect(i, &bx, &by, &bw, &bh);
-        fill_box(px, bx, by, bw, bh, A.menu_open && i == BTN_ZOOM_ID ? BAR_BTN_ON : BAR_BTN);
+        if (bw == 0)
+            continue;
+        round_box(px, bx, by, bw, bh, bh / 2, (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? BAR_BTN_ON : BAR_BTN);
         const char *t = btn_text(i, tmp, sizeof(tmp));
         int w = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS * LM_FONT_W : (int)strlen(t) * LM_FONT_W;
         int tx = bx + 8 + (i == BTN_ZOOM_ID ? w - (int)strlen(t) * LM_FONT_W : 0), ty = by + (bh - LM_FONT_H) / 2;
@@ -959,13 +974,13 @@ static void draw_menu(uint32_t *px)
 {
     int x, y, w, h;
     menu_rect(&x, &y, &w, &h);
-    fill_box(px, x - 1, y, w + 2, h + 1, MENU_BORDER);
-    fill_box(px, x, y, w, h, BAR_BG);
+    round_box(px, x - 1, y - 1, w + 2, h + 2, 9, MENU_BORDER);
+    round_box(px, x, y, w, h, 8, BAR_BG);
     for (int i = 0; i < N_ZOOM; i++) {
         int ry = y + 2 + i * MENU_ROW_H;
         bool cur = ZOOM_LEVELS[i] == A.zoom;
         if (i == A.menu_hover)
-            fill_box(px, x + 2, ry, w - 4, MENU_ROW_H, BAR_BTN_ON);
+            round_box(px, x + 3, ry, w - 6, MENU_ROW_H, MENU_ROW_H / 2, BAR_BTN_ON);
         char t[16];
         snprintf(t, sizeof(t), "%d%%", ZOOM_LEVELS[i]);
         int tx = x + 8 + (ZOOM_BTN_CHARS - (int)strlen(t)) * LM_FONT_W;
@@ -985,28 +1000,10 @@ static uint32_t lerp_rgb(uint32_t a, uint32_t b, int num, int den)
     return r;
 }
 
-/* For a cell of cw x ch pixels: which source columns / rows of the 8x16 glyph each destination pixel covers and how much
- * (units of 1/cw and 1/ch of a source pixel, so that all weights are integers; the total over x is 8, over y 16). */
-static void build_axis(struct zt *t, int dst, int src)
-{
-    for (int d = 0; d < dst; d++) {
-        int lo = src * d, hi = src * d + src;                  /* the destination pixel in 1/dst source-pixel units */
-        t[d].n = 0;
-        for (int c = lo / dst; c < src && c * dst < hi && t[d].n < 4; c++) {
-            int ov = LM_MIN(hi, (c + 1) * dst) - LM_MAX(lo, c * dst);
-            if (ov <= 0)
-                continue;
-            if (t[d].n == 0)
-                t[d].c0 = (uint8_t)c;
-            t[d].w[t[d].n++] = (uint8_t)ov;
-        }
-    }
-}
-
 static void build_zoom_tables(void)
 {
-    build_axis(A.xt, LM_MIN(cell_w(), (int)(sizeof(A.xt) / sizeof(A.xt[0]))), LM_FONT_W);
-    build_axis(A.yt, LM_MIN(cell_h(), (int)(sizeof(A.yt) / sizeof(A.yt[0]))), LM_FONT_H);
+    lm_zoom_axis(A.xt, LM_MIN(cell_w(), (int)(sizeof(A.xt) / sizeof(A.xt[0]))), LM_FONT_W);
+    lm_zoom_axis(A.yt, LM_MIN(cell_h(), (int)(sizeof(A.yt) / sizeof(A.yt[0]))), LM_FONT_H);
 }
 
 static void render(void)
@@ -1094,9 +1091,9 @@ static void render(void)
             } else {                                                    /* any other size: coverage of each pixel */
                 for (int r = 0; r < ch; r++) {
                     uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
-                    const struct zt *yt = &A.yt[r];
+                    const struct lm_zt *yt = &A.yt[r];
                     for (int x = 0; x < cw; x++) {
-                        const struct zt *xt = &A.xt[x];
+                        const struct lm_zt *xt = &A.xt[x];
                         int cov = 0;
                         for (int i = 0; i < yt->n; i++) {
                             uint8_t bits = rows16[yt->c0 + i];
@@ -1139,6 +1136,11 @@ static void render(void)
     WLC_SEND(A.c, A.xsurface, LM_XDG_SURFACE_REQ_SET_WINDOW_GEOMETRY, { .i = 0 }, { .i = 0 }, { .i = A.bw }, { .i = A.bh });
     WLC_SEND0(A.c, A.surface, LM_WL_SURFACE_REQ_COMMIT);
     A.dirty = false;
+    if (A.grown) {                                              /* the window now has the size of its grid at this zoom */
+        A.win_w = A.bw;
+        A.win_h = A.bh;
+        A.grown = false;
+    }
 }
 
 static void frame_done(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
@@ -1388,7 +1390,9 @@ static void conf_save(void)
         unlink(tmp);
 }
 
-/* Font zoom. Keeps the window size and recomputes the grid. */
+/* Font zoom. A floating window keeps its grid (columns x rows) and grows or shrinks with the font; a maximized or
+ * fullscreen one keeps its size and gets a new grid. (A window that would not fit the screen is asked to shrink by the
+ * compositor: that arrives as a normal configure.) */
 static void apply_size(int w, int h);
 
 static void set_zoom_pct(int pct)
@@ -1402,24 +1406,18 @@ static void set_zoom_pct(int pct)
     A.conf_time = now_ms();
     if (!A.pixels && A.win_w <= 0)                              /* no window yet (startup): the first render sizes it */
         return;
-    apply_size(A.win_w > 0 ? A.win_w : A.bw, A.win_h > 0 ? A.win_h : A.bh);
+    if (A.fixed_size) {
+        apply_size(A.win_w > 0 ? A.win_w : A.bw, A.win_h > 0 ? A.win_h : A.bh);
+    } else {
+        A.grown = true;                                         /* render() makes the buffer for the same grid at the new size */
+        A.dirty = true;
+    }
 }
 
 /* delta +1 / -1: the next level up / down the list; 0: back to 100 %. */
 static void set_zoom(int delta)
 {
-    if (delta == 0) {
-        set_zoom_pct(ZOOM_DEFAULT);
-        return;
-    }
-    int i = 0;
-    while (i < N_ZOOM - 1 && ZOOM_LEVELS[i] < A.zoom)
-        i++;                                                    /* the first level that is >= the current size */
-    if (delta > 0 && ZOOM_LEVELS[i] <= A.zoom)
-        i++;
-    else if (delta < 0)
-        i--;
-    set_zoom_pct(ZOOM_LEVELS[LM_CLAMP(i, 0, N_ZOOM - 1)]);
+    set_zoom_pct(lm_zoom_step(A.zoom, delta));
 }
 
 static void menu_set(bool open)
@@ -1672,9 +1670,19 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         A.px = lm_fixed_to_double(args[2].f);
         A.py = lm_fixed_to_double(args[3].f);
         break;
+    case LM_WL_POINTER_EVT_LEAVE:
+        if (A.hover >= 0) {
+            A.hover = -1;
+            A.dirty = true;
+        }
+        break;
     case LM_WL_POINTER_EVT_MOTION:
         A.px = lm_fixed_to_double(args[1].f);
         A.py = lm_fixed_to_double(args[2].f);
+        if (btn_at(A.px, A.py) != A.hover) {
+            A.hover = btn_at(A.px, A.py);
+            A.dirty = true;
+        }
         if (A.menu_open) {
             int row = menu_row_at(A.px, A.py);
             if (row >= 0 && row != A.menu_hover) {
@@ -1778,7 +1786,7 @@ static void xsurface_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     (void)data;
     if (op == LM_XDG_SURFACE_EVT_CONFIGURE) {
         WLC_SEND(c, id, LM_XDG_SURFACE_REQ_ACK_CONFIGURE, { .u = args[0].u });
-        if (A.win_w > 0 && A.win_h > 0)
+        if (A.win_w > 0 && A.win_h > 0 && !A.grown)             /* an old size must not undo a zoom that is about to be committed */
             apply_size(A.win_w, A.win_h);
         A.configured = true;
         A.dirty = true;
@@ -1793,6 +1801,11 @@ static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union 
             A.win_w = args[0].i;
             A.win_h = args[1].i;
         }
+        A.fixed_size = false;
+        const uint32_t *st = args[2].a.data;
+        for (uint32_t i = 0; st && i < args[2].a.size / 4; i++)
+            if (st[i] == LM_XDG_TOPLEVEL_STATE_MAXIMIZED || st[i] == LM_XDG_TOPLEVEL_STATE_FULLSCREEN)
+                A.fixed_size = true;
     } else if (op == LM_XDG_TOPLEVEL_EVT_CLOSE) {
         A.running = false;
     }
@@ -1844,6 +1857,7 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     (void)argc; (void)argv;
     A.running = true;
+    A.hover = -1;
     A.zoom = ZOOM_DEFAULT;
     build_zoom_tables();
     conf_load();                                                /* the size of last time */

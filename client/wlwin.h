@@ -49,6 +49,7 @@ struct wlwin {
     bool configured, running, buffer_busy, redraw;
     uint32_t mods;                  /* LM_MOD_* bits, from wl_keyboard.modifiers */
     int def_w, def_h, min_w, min_h;
+    bool fixed_size;                /* maximized or fullscreen: the compositor decides the size, a program must not grow the window */
     bool want_fullscreen;           /* set before wlwin_open: the toplevel asks for full screen before its first commit */
     const char *name;               /* program name for messages, e.g. "mellagui-calc" */
 };
@@ -69,6 +70,10 @@ int wlwin_open(struct wlwin *w, const char *title, const char *app_id, int def_w
 bool wlwin_step(struct wlwin *w, int timeout_ms);
 
 void wlwin_destroy(struct wlwin *w);
+
+/* Make the window this big (a program zooming its text): the next repaint uses a buffer of that size and the compositor
+ * follows it. Ignored while `fixed_size`. Returns true when the size was changed. */
+bool wlwin_request_size(struct wlwin *w, int width, int height);
 
 /* ---- drawing (all clip to the buffer) ------------------------------------------------------------------------------ */
 

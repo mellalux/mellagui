@@ -1872,7 +1872,7 @@ class TestClients(Base):
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def edit_start(self, content=None, name='doc.txt'):
+    def edit_start(self, content=None, name='doc.txt', env=None):
         exe = os.path.join(ROOT, 'build', 'mellagui-edit')
         if not os.path.exists(exe):
             self.skipTest('mellagui-edit not built')
@@ -1884,7 +1884,7 @@ class TestClients(Base):
                 f.write(content)
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.edit', 'an editor from an earlier test is still open')
-        p = subprocess.Popen([exe, path], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen([exe, path], env=dict(os.environ, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.edit')
         self.assertIsNotNone(win, 'the editor did not appear')
@@ -2031,6 +2031,113 @@ class TestClients(Base):
         self.chord(self.CTRL, self.K_S)                        # ...and saving it does overwrite? no: the path was never taken
         time.sleep(0.2)
         self.assertEqual(self.read_file(bin_path), b'\x00\x01\x02binary', 'a refused file must not be overwritten')
+
+    def test_edit_prompt_completes_names_and_resolves_relative_ones(self):
+        p, path = self.edit_start(b'one\n')
+        d = os.path.dirname(path)
+        for name in ('alpha.txt', 'alpine.txt'):
+            with open(os.path.join(d, name), 'wb') as f:
+                f.write(b'old ' + name.encode() + b'\n')
+        self.type_text('hi')
+        ctl.key(self.CTRL, True); ctl.key(self.SHIFT, True); ctl.tap(self.K_S); ctl.key(self.SHIFT, False); ctl.key(self.CTRL, False)
+        self.type_chars('new.txt')                             # typing over the suggested name; relative to the file's folder
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(os.path.join(d, 'new.txt')), b'hione\n')
+        self.assertEqual(self.read_file(path), b'one\n')
+        self.chord(self.CTRL, 24)                              # Ctrl+O starts in the folder: only a name is needed
+        self.type_chars('alph')
+        ctl.tap(KEY_TAB)                                       # alph -> alpha.txt
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.type_text('z')
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(os.path.join(d, 'alpha.txt')), b'zold alpha.txt\n')
+        # Save as onto another existing file asks first
+        ctl.key(self.CTRL, True); ctl.key(self.SHIFT, True); ctl.tap(self.K_S); ctl.key(self.SHIFT, False); ctl.key(self.CTRL, False)
+        self.type_chars('alpine.txt')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(os.path.join(d, 'alpine.txt')), b'old alpine.txt\n', 'must not be replaced at once')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(os.path.join(d, 'alpine.txt')), b'zold alpha.txt\n')
+
+    def edit_window(self):
+        return [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit'][0]
+
+    def test_edit_zoom_grows_the_window_and_is_remembered(self):
+        confdir = os.path.join(tmp, 'econf')
+        os.makedirs(confdir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, confdir, ignore_errors=True)
+        conf = os.path.join(confdir, 'mellagui', 'editor.conf')
+        p, path = self.edit_start(b'one\n', env={'XDG_CONFIG_HOME': confdir})
+        w0 = self.edit_window()
+        self.assertEqual(w0['w'], 760)
+        def bar(x):                                              # A- 282, zoom 318, A+ 370 (each 32..48 wide), the bar is 24 px high
+            win = self.edit_window()
+            ctl.click(win['x'] + x + 10, win['y'] + 12)
+            time.sleep(0.3)
+        bar(370)                                                 # A+: 110 %, 9 px cells; the same 90 columns stay visible
+        w1 = self.edit_window()
+        self.assertEqual(w1['w'], 45 + 90 * 9)
+        self.assertGreater(w1['h'], w0['h'])
+        bar(370)                                                 # 125 %: not a whole multiple, anti-aliased text
+        time.sleep(0.3)
+        win = self.edit_window()
+        ppm = ctl.dump(os.path.join(tmp, 'edit-zoom.ppm'))
+        colours = set()
+        for y in range(win['y'] + 24, win['y'] + 24 + 30):
+            for x in range(win['x'] + 50, win['x'] + 50 + 60):
+                colours.add(ppm.px(x, y))
+        self.assertGreater(len(colours), 6, 'a fractional size should show intermediate shades')
+        end = time.time() + 3
+        while time.time() < end and not (os.path.exists(conf) and 'zoom=125' in open(conf).read()):
+            time.sleep(0.05)
+        self.assertIn('zoom=125', open(conf).read())
+        ctl.abs(win['x'] + 200, win['y'] + 200)
+        self.chord(self.CTRL, 11)                                # Ctrl+0: back to 100 %
+        time.sleep(0.3)
+        w2 = self.edit_window()
+        self.assertEqual(w2['w'], 760)
+        ctl.tap(self.K_END)
+        self.type_text('x')                                      # typing and saving still work
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'onex\n')
+        self.chord(self.CTRL, 13)                                # Ctrl+= : 110 %
+        time.sleep(0.5)
+        self.assertEqual(self.edit_window()['w'], 45 + 90 * 9)
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
+        self.assertIn('zoom=110', open(conf).read())
+        p2, path2 = self.edit_start(b'two\n', 'second.txt', env={'XDG_CONFIG_HOME': confdir})   # the next editor starts with it
+        self.assertGreater(self.edit_window()['w'], 760)
+
+    def test_edit_buttons_and_help(self):
+        p, path = self.edit_start(b'one\n')
+        d = os.path.dirname(path)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit'][0]
+        def button(x):                                          # New 6, Open 50, Save 102, Save as 154; the bar is 24 px high
+            ctl.click(win['x'] + x + 10, win['y'] + 12)
+            time.sleep(0.2)
+        ctl.tap(59)                                            # F1: the key list; the next key only closes it
+        ctl.tap(self.K_X)
+        self.type_text('y')                                    # so this is the first typed letter
+        button(102)                                            # the Save button
+        time.sleep(0.2)
+        self.assertEqual(self.read_file(path), b'yone\n')
+        other = os.path.join(d, 'other.txt')
+        with open(other, 'wb') as f:
+            f.write(b'second\n')
+        button(50)                                             # the Open button
+        self.type_chars(other)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.type_text('q')
+        button(102)
+        self.assertEqual(self.read_file(other), b'qsecond\n')
 
     # ---- mellagui-files ----------------------------------------------------------------------------------------------
 
@@ -2502,9 +2609,19 @@ class TestClients(Base):
         rows, cols = map(int, open(out).read().strip().split('\n')[-1].split())
         return rows, cols
 
+    def bar_click(self, x):
+        """Clicks the terminal's button bar at x (a zoom moves the window, so its position is read every time)."""
+        win = self.term_window()
+        ctl.click(win['x'] + x, win['y'] + 8)
+
+    def term_window(self):
+        """The terminal's window as it is now (a zoom moves and resizes it)."""
+        return [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.term'][0]
+
     def test_terminal_zoom_dropdown_picks_a_size(self):
         win, out = self.term()
         self.assertEqual(self.size_now(out, 1)[1], 80)
+        w100 = win['w']
         ctl.click(win['x'] + 130, win['y'] + 8)                                  # the zoom button opens the list
         time.sleep(0.3)
         ppm = ctl.dump(os.path.join(tmp, 'term-menu.ppm'))
@@ -2513,43 +2630,52 @@ class TestClients(Base):
         ctl.click(win['x'] + 130, win['y'] + self.BAR_H + 2 + 9 * 20 + 10)
         time.sleep(0.3)
         rows, cols = self.size_now(out, 2)
-        self.assertEqual(cols, 40)                                                # 16 px cells
+        w200 = self.term_window()
+        self.assertGreater(w200['w'], w100, 'the window grows with the font')
+        self.assertLessEqual(w200['x'] + w200['w'], 1024, 'and stays on the screen')
+        self.assertGreater(cols, 40)                                              # 80 columns of 16 px do not fit: the window is as wide as the screen allows
+        self.assertEqual((w200['w'] - 6) % 16, 0)
         ctl.click(win['x'] + 130, win['y'] + 8)
         time.sleep(0.2)
         ctl.tap(KEY_ESC)                                                          # Esc closes the list without changing anything
         time.sleep(0.2)
-        self.assertEqual(self.size_now(out, 3)[1], 40)
+        self.assertEqual(self.size_now(out, 3)[1], cols)
 
     def test_terminal_zoom_steps_are_fine_and_reset_goes_back(self):
         win, out = self.term('term-steps.txt')
-        ctl.click(win['x'] + 180, win['y'] + 8)                                  # A+: 100 -> 110 %, 9 px cells
+        self.bar_click(180)                                  # A+: 100 -> 110 %, 9 px cells
         time.sleep(0.3)
-        self.assertEqual(self.size_now(out, 1)[1], 71)
-        ctl.click(win['x'] + 180, win['y'] + 8)                                  # 125 %, 10 px cells
+        self.assertEqual(self.size_now(out, 1)[1], 80)                           # the grid stays, the window grows
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6)
+        self.bar_click(180)                                  # 125 %, 10 px cells
         time.sleep(0.3)
-        self.assertEqual(self.size_now(out, 2)[1], 64)
-        ctl.click(win['x'] + 80, win['y'] + 8)                                   # A-: back to 110 %
+        self.assertEqual(self.size_now(out, 2)[1], 80)
+        self.assertEqual(self.term_window()['w'], 80 * 10 + 6)
+        self.bar_click(80)                                   # A-: back to 110 %
         time.sleep(0.3)
-        self.assertEqual(self.size_now(out, 3)[1], 71)
-        ctl.click(win['x'] + 220, win['y'] + 8)                                  # Reset
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6)
+        self.bar_click(220)                                  # Reset
         time.sleep(0.3)
-        self.assertEqual(self.size_now(out, 4)[1], 80)
+        self.assertEqual(self.size_now(out, 3)[1], 80)
+        self.assertEqual(self.term_window()['w'], 80 * 8 + 6)
 
     def test_terminal_fractional_zoom_is_smooth_and_keeps_the_text_readable(self):
         win, out = self.term('term-frac.txt')
         for _ in range(2):
-            ctl.click(win['x'] + 180, win['y'] + 8)                              # 125 %: 10x20 cells, a real fraction of 8x16
+            self.bar_click(180)                              # 125 %: 10x20 cells, a real fraction of 8x16
             time.sleep(0.15)
         type_text('go')
         time.sleep(0.5)
+        win = self.term_window()                                                 # it grew, so it moved
         ppm = ctl.dump(os.path.join(tmp, 'term-frac.ppm'))
         colours = set()
         for y in range(win['y'] + self.BAR_H + 3, win['y'] + self.BAR_H + 3 + 40):
             for x in range(win['x'] + 3, win['x'] + 3 + 120):
                 colours.add(ppm.px(x, y))
         self.assertGreater(len(colours), 6, 'a fractional size should show intermediate (anti-aliased) shades')
-        ctl.click(win['x'] + 220, win['y'] + 8)                                  # Reset: whole pixels again, only fg and bg
+        self.bar_click(220)                                  # Reset: whole pixels again, only fg and bg
         time.sleep(0.4)
+        win = self.term_window()
         ppm = ctl.dump(os.path.join(tmp, 'term-frac1.ppm'))
         colours = set()
         for y in range(win['y'] + self.BAR_H + 3, win['y'] + self.BAR_H + 3 + 40):
@@ -2663,12 +2789,14 @@ class TestClients(Base):
         ctl.tap(13)                                                               # Ctrl+= : 110 %
         ctl.key(KEY_LEFTCTRL, False)
         time.sleep(0.3)
-        self.assertEqual(self.size_now(out, 1)[1], 71)
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6)                     # the window grew, still 80 columns
+        self.assertEqual(self.size_now(out, 1)[1], 80)
         ctl.key(KEY_LEFTCTRL, True)
         ctl.tap(11)                                                               # Ctrl+0 : reset
         ctl.key(KEY_LEFTCTRL, False)
         time.sleep(0.3)
         self.assertEqual(self.size_now(out, 2)[1], 80)
+        self.assertEqual(self.term_window()['w'], 80 * 8 + 6)
 
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',

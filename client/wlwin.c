@@ -92,6 +92,11 @@ static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op == LM_XDG_TOPLEVEL_EVT_CONFIGURE) {
         w->w = LM_MAX(args[0].i > 0 ? args[0].i : w->def_w, w->min_w);
         w->h = LM_MAX(args[1].i > 0 ? args[1].i : w->def_h, w->min_h);
+        w->fixed_size = false;
+        const uint32_t *st = args[2].a.data;
+        for (uint32_t i = 0; st && i < args[2].a.size / 4; i++)
+            if (st[i] == LM_XDG_TOPLEVEL_STATE_MAXIMIZED || st[i] == LM_XDG_TOPLEVEL_STATE_FULLSCREEN)
+                w->fixed_size = true;
     } else if (op == LM_XDG_TOPLEVEL_EVT_CLOSE) {
         if (!w->ops->close || w->ops->close(w))
             w->running = false;
@@ -200,6 +205,18 @@ bool wlwin_step(struct wlwin *w, int timeout_ms)
     if (w->redraw && w->configured && !w->buffer_busy)
         draw(w);
     return wlc_dispatch(w->c, timeout_ms) >= 0;
+}
+
+bool wlwin_request_size(struct wlwin *w, int width, int height)
+{
+    width = LM_MAX(width, w->min_w);
+    height = LM_MAX(height, w->min_h);
+    if (w->fixed_size || (width == w->w && height == w->h))
+        return false;
+    w->w = width;
+    w->h = height;
+    w->redraw = true;
+    return true;
 }
 
 void wlwin_destroy(struct wlwin *w)

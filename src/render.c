@@ -110,8 +110,11 @@ struct paint_ctx {
     struct lm_output *out;
     struct lm_framebuffer *fb;
     struct lm_rect clip;                /* global, already clipped to the output */
-    int idx, skip_before;               /* scene items seen so far / items below the opaque cover (not painted) */
+    int idx;                            /* scene items seen so far */
+    const struct lm_surface *skip_until; /* the items below this opaque cover are not painted (NULL: paint all) */
     int cov_idx;                        /* occlusion search: the scene item that covers `cov_rect` opaquely, -1 none */
+    const struct lm_surface *cov_root;  /* ... and its surface: the second pass finds it by identity, because it walks a smaller clip
+                                         * and so sees fewer items than the first pass (an index would point at the wrong one) */
     struct lm_rect cov_rect;
     int64_t cov_area;
 };
@@ -1709,6 +1712,7 @@ static bool cover_cb(const struct lm_scene_item *item, void *data)
         int64_t area = surface_opaque_rect(item->u.surface.root, item->u.surface.x, item->u.surface.y, &c->clip, &r);
         if (area > 0 && area * 2 >= (int64_t)c->clip.w * c->clip.h && area >= c->cov_area) {
             c->cov_idx = c->idx;
+            c->cov_root = item->u.surface.root;
             c->cov_rect = r;
             c->cov_area = area;
         }
@@ -1720,8 +1724,11 @@ static bool cover_cb(const struct lm_scene_item *item, void *data)
 static bool scene_cb(const struct lm_scene_item *item, void *data)
 {
     struct paint_ctx *c = data;
-    if (c->idx++ < c->skip_before)
-        return true;
+    if (c->skip_until) {
+        if (item->kind != LM_SCENE_SURFACE || item->u.surface.root != c->skip_until)
+            return true;
+        c->skip_until = NULL;
+    }
     switch (item->kind) {
     case LM_SCENE_WALLPAPER:
         if (item->output == c->out)
@@ -1944,13 +1951,13 @@ static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_fr
     lm_wm_scene_for_each(r->srv->wm, &full, cover_cb, &c);
     if (c.cov_idx < 0) {                                                /* nothing covers: paint everything */
         c.idx = 0;
-        c.skip_before = 0;
+        c.skip_until = NULL;
         lm_wm_scene_for_each(r->srv->wm, &full, scene_cb, &c);
     } else {
         /* An opaque rectangle `cov` hides everything below its surface: inside it only the items from the cover upwards
          * are painted; the strips around it get the full stack (those are the transparent corners and edges). */
         struct lm_rect cov = c.cov_rect;
-        int cov_idx = c.cov_idx;
+        const struct lm_surface *cov_root = c.cov_root;
         struct lm_rect strips[4] = {
             lm_rect_make(full.x, full.y, full.w, cov.y - full.y),                                  /* above */
             lm_rect_make(full.x, cov.y + cov.h, full.w, full.y + full.h - (cov.y + cov.h)),        /* below */
@@ -1962,12 +1969,12 @@ static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_fr
                 continue;
             c.clip = strips[i];
             c.idx = 0;
-            c.skip_before = 0;
+            c.skip_until = NULL;
             lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
         }
         c.clip = cov;
         c.idx = 0;
-        c.skip_before = cov_idx;
+        c.skip_until = cov_root;
         lm_wm_scene_for_each(r->srv->wm, &c.clip, scene_cb, &c);
     }
     c.clip = full;

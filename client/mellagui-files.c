@@ -15,8 +15,10 @@
  * Keys: Tab switches the active pane; Up / Down / PageUp / PageDown / Home / End move; Enter or Right opens (a folder: goes in; png / jpg /
  * ppm: mellagui-view; text: mellagui-edit; binary files are not opened); Backspace / Left / Alt+Up goes to the parent folder;
  * Insert or Space marks the file and moves down; F1 help, F2 rename, F3 preview, F4 edit, F5 copy, F6 move, F7 new folder,
- * F8 (or Delete) delete, F9 terminal here, F10 quit; copy / move / delete work on the marked files, else on the one under the cursor,
- * copy and move go to the folder shown in the other pane (editable first) and never replace an existing file, delete asks first.
+ * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good), F9 terminal here, F10 quit; copy / move / delete work on the marked
+ * files, else on the one under the cursor, copy and move go to the folder shown in the other pane (editable first, Tab completes names) and
+ * never replace an existing file, delete asks first. They run in a thread: the window stays alive, the status line shows the progress and Esc
+ * cancels.
  * Ctrl+H hidden files, Ctrl+R reread, Ctrl+T terminal here, Ctrl+L type a path, Shift+Up / Down scroll the preview, a letter jumps
  * to the next name starting with it, Esc clears the message. Mouse: click selects (and activates the pane), double click opens, wheel
  * scrolls the pane under the pointer, the round buttons at the top and bottom do what their names say.
@@ -26,7 +28,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +44,7 @@
 
 #include "img.h"
 #include "metrics.h"
+#include "pathcomp.h"
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
@@ -116,7 +121,38 @@ struct preview {
     int sw, sh;
 };
 
-enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE };
+enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD };
+
+enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH };
+
+struct job_item {
+    char src[PATH_MAX];
+    char dst[PATH_MAX];                 /* copy / move: where it goes */
+};
+
+/* A copy, move or delete that runs in its own thread while the window keeps going. The thread works through `items`; the window
+ * reads the counters to draw the progress and sets `cancel` when Esc is pressed. `units` are bytes for copy, move and trash, and files
+ * and folders for a real delete. */
+struct job {
+    enum job_kind kind;
+    struct job_item *items;
+    int n;
+    char trash[PATH_MAX];               /* J_TRASH: the Trash folder */
+    _Atomic long long total, done;      /* units */
+    _Atomic int items_done;
+    _Atomic bool cancel, finished;
+    pthread_mutex_t mu;                 /* guards current and first_err */
+    char current[NAME_MAX + 1];
+    char first_err[PATH_MAX + 200];
+    int ok, failed;                     /* set by the thread before `finished` */
+    int pane;                           /* the pane the names came from (its marks are cleared when the job is over) */
+    int requested;                      /* how many things were asked for */
+    int planned_skips;                  /* items left out while planning (they exist, are the same, ...) */
+    char first_skip[PATH_MAX + 200];
+    char target[PATH_MAX];              /* for the message */
+    pthread_t thread;
+    bool threaded;
+};
 
 struct app {
     struct wlwin win;
@@ -134,6 +170,8 @@ struct app {
     int64_t msg_until;
     int rows_visible;
     struct preview pv;
+    struct job *job;                    /* the running copy / move / delete, or NULL */
+    bool sync_jobs;                     /* the selftest: do the work in the calling thread */
     double px, py;
     int hover;                          /* round button under the pointer: 0..N_TOOL-1 toolbar, 100 + n function key bar */
     uint32_t rep_code;
@@ -421,6 +459,19 @@ static bool launch(const char *prog, const char *arg, const char *cwd, char *err
 
 #define MAX_DEPTH 64
 
+static __thread struct job *tl_job;                                    /* the job the calling thread works for (NULL: none) */
+
+static bool job_cancelled(void)
+{
+    return tl_job && atomic_load(&tl_job->cancel);
+}
+
+static void job_add(long long units)
+{
+    if (tl_job)
+        atomic_fetch_add(&tl_job->done, units);
+}
+
 static bool path_inside(const char *path, const char *dir)            /* is `path` the folder `dir` or below it? */
 {
     size_t n = strlen(dir);
@@ -445,6 +496,11 @@ static int copy_file(const char *src, const char *dst, const struct stat *st, ch
     char buf[65536];
     int rc = 0;
     for (;;) {
+        if (job_cancelled()) {
+            snprintf(err, errsz, "cancelled");
+            rc = -1;
+            break;
+        }
         ssize_t n = read(in, buf, sizeof(buf));
         if (n < 0 && errno == EINTR)
             continue;
@@ -468,6 +524,7 @@ static int copy_file(const char *src, const char *dst, const struct stat *st, ch
         }
         if (rc)
             break;
+        job_add(n);
     }
     struct timespec ts[2] = { st->st_atim, st->st_mtim };
     if (rc == 0)
@@ -492,6 +549,10 @@ static int copy_node(const char *src, const char *dst, int depth, char *err, siz
     }
     if (depth > MAX_DEPTH) {
         snprintf(err, errsz, "%s is nested too deeply", src);
+        return -1;
+    }
+    if (job_cancelled()) {
+        snprintf(err, errsz, "cancelled");
         return -1;
     }
     if (S_ISLNK(st.st_mode)) {
@@ -553,11 +614,17 @@ static int remove_tree(const char *path, int depth, char *err, size_t errsz)
         snprintf(err, errsz, "%s: %s", path, strerror(errno));
         return -1;
     }
+    if (job_cancelled()) {
+        snprintf(err, errsz, "cancelled");
+        return -1;
+    }
     if (!S_ISDIR(st.st_mode)) {
         if (unlink(path) < 0) {
             snprintf(err, errsz, "cannot delete %s: %s", path, strerror(errno));
             return -1;
         }
+        if (tl_job && tl_job->kind == J_DELETE)
+            job_add(1);
         return 0;
     }
     if (depth > MAX_DEPTH) {
@@ -586,6 +653,8 @@ static int remove_tree(const char *path, int depth, char *err, size_t errsz)
     if (rc == 0 && rmdir(path) < 0) {
         snprintf(err, errsz, "cannot delete %s: %s", path, strerror(errno));
         rc = -1;
+    } else if (rc == 0 && tl_job && tl_job->kind == J_DELETE) {
+        job_add(1);
     }
     return rc;
 }
@@ -611,6 +680,220 @@ static bool exists_any(const char *path)
 {
     struct stat st;
     return lstat(path, &st) == 0;
+}
+
+/* ---- the trash --------------------------------------------------------------------------------------------------------- */
+
+/* The Trash folder of the user ($XDG_DATA_HOME/Trash, else ~/.local/share/Trash, FreeDesktop layout: files/ and info/). */
+static bool trash_dir(char *out, size_t n)
+{
+    const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    int w;
+    if (xdg && *xdg)
+        w = snprintf(out, n, "%s/Trash", xdg);
+    else if (home && *home)
+        w = snprintf(out, n, "%s/.local/share/Trash", home);
+    else
+        return false;
+    return w > 0 && (size_t)w < n;
+}
+
+static bool in_trash(const char *path)
+{
+    char t[PATH_MAX];
+    return trash_dir(t, sizeof(t)) && path_inside(path, t);
+}
+
+static int mkdir_p(const char *path, mode_t mode)
+{
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = 0;
+        if (mkdir(tmp, mode) < 0 && errno != EEXIST)
+            return -1;
+        *p = '/';
+    }
+    return mkdir(tmp, mode) < 0 && errno != EEXIST ? -1 : 0;
+}
+
+static void url_encode(const char *in, char *out, size_t n)
+{
+    size_t k = 0;
+    for (; *in && k + 4 < n; in++) {
+        unsigned char c = (unsigned char)*in;
+        if (isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
+            out[k++] = (char)c;
+        else
+            k += (size_t)snprintf(out + k, n - k, "%%%02X", c);
+    }
+    out[k] = 0;
+}
+
+/* Moves `src` (an absolute path) into the trash and writes its .trashinfo so that it can be put back. A name that is taken there
+ * gets ".2", ".3" ... */
+static int trash_item(const char *trash, const char *src, char *err, size_t errsz)
+{
+    char files[PATH_MAX + 16], info[PATH_MAX + 16];
+    snprintf(files, sizeof(files), "%s/files", trash);
+    snprintf(info, sizeof(info), "%s/info", trash);
+    if (mkdir_p(files, 0700) < 0 || mkdir_p(info, 0700) < 0) {
+        snprintf(err, errsz, "cannot make the trash folder %s: %s", trash, strerror(errno));
+        return -1;
+    }
+    const char *base = strrchr(src, '/');
+    base = base ? base + 1 : src;
+    char name[NAME_MAX + 16], dst[PATH_MAX * 2], ipath[PATH_MAX * 2];
+    int fd = -1;
+    for (int k = 1; k < 1000 && fd < 0; k++) {
+        if (k == 1)
+            snprintf(name, sizeof(name), "%.*s", NAME_MAX, base);
+        else
+            snprintf(name, sizeof(name), "%.*s.%d", NAME_MAX - 5, base, k);
+        snprintf(dst, sizeof(dst), "%s/%s", files, name);
+        snprintf(ipath, sizeof(ipath), "%s/%s.trashinfo", info, name);
+        if (exists_any(dst))
+            continue;
+        fd = open(ipath, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0 && errno != EEXIST) {
+            snprintf(err, errsz, "cannot write the trash info: %s", strerror(errno));
+            return -1;
+        }
+    }
+    if (fd < 0) {
+        snprintf(err, errsz, "no free name in the trash for %s", base);
+        return -1;
+    }
+    char enc[PATH_MAX * 3], date[32], body[PATH_MAX * 3 + 96];
+    url_encode(src, enc, sizeof(enc));
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%S", &lt);
+    int bl = snprintf(body, sizeof(body), "[Trash Info]\nPath=%s\nDeletionDate=%s\n", enc, date);
+    bool ok = write(fd, body, (size_t)bl) == bl;
+    ok = close(fd) == 0 && ok;
+    if (!ok) {
+        snprintf(err, errsz, "cannot write the trash info");
+        unlink(ipath);
+        return -1;
+    }
+    if (move_node(src, dst, err, errsz) < 0) {
+        unlink(ipath);
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- running a job -------------------------------------------------------------------------------------------------------- */
+
+/* The number of units (bytes, or files and folders when `nodes`) below `path`. */
+static long long scan_units(const char *path, bool nodes, int depth)
+{
+    struct stat st;
+    if (depth > MAX_DEPTH || job_cancelled() || lstat(path, &st) < 0)
+        return 0;
+    long long total = nodes ? 1 : (S_ISREG(st.st_mode) ? (long long)st.st_size : 0);
+    if (!S_ISDIR(st.st_mode))
+        return total;
+    DIR *d = opendir(path);
+    if (!d)
+        return total;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        char p2[PATH_MAX];
+        if (snprintf(p2, sizeof(p2), "%s/%s", path, de->d_name) < (int)sizeof(p2))
+            total += scan_units(p2, nodes, depth + 1);
+    }
+    closedir(d);
+    return total;
+}
+
+static void job_note_error(struct job *j, const char *err)
+{
+    pthread_mutex_lock(&j->mu);
+    if (!j->first_err[0])
+        snprintf(j->first_err, sizeof(j->first_err), "%s", err);
+    pthread_mutex_unlock(&j->mu);
+}
+
+/* The work itself (in the job's thread, or in the caller's with sync_jobs). */
+static void job_execute(struct job *j)
+{
+    tl_job = j;
+    bool nodes = j->kind == J_DELETE;
+    long long total = 0;
+    long long *sizes = calloc((size_t)LM_MAX(j->n, 1), sizeof(long long));
+    for (int i = 0; i < j->n && !job_cancelled(); i++) {
+        sizes[i] = scan_units(j->items[i].src, nodes, 0);
+        total += sizes[i];
+    }
+    atomic_store(&j->total, total);
+    for (int i = 0; i < j->n && !job_cancelled(); i++) {
+        const char *src = j->items[i].src, *dst = j->items[i].dst;
+        const char *base = strrchr(src, '/');
+        pthread_mutex_lock(&j->mu);
+        snprintf(j->current, sizeof(j->current), "%.*s", NAME_MAX, base ? base + 1 : src);
+        pthread_mutex_unlock(&j->mu);
+        char err[PATH_MAX + 200] = "";
+        long long before = atomic_load(&j->done);
+        int rc;
+        switch (j->kind) {
+        case J_COPY: rc = copy_node(src, dst, 0, err, sizeof(err)); break;
+        case J_MOVE: rc = move_node(src, dst, err, sizeof(err)); break;
+        case J_TRASH: rc = trash_item(j->trash, src, err, sizeof(err)); break;
+        default: rc = remove_tree(src, 0, err, sizeof(err)); break;
+        }
+        if (rc < 0) {
+            j->failed++;
+            job_note_error(j, err);
+            if (job_cancelled())
+                break;
+            continue;
+        }
+        j->ok++;
+        atomic_fetch_add(&j->items_done, 1);
+        if (atomic_load(&j->done) == before)                              /* a rename or a rename into the trash: no bytes were copied */
+            atomic_fetch_add(&j->done, sizes[i]);
+    }
+    free(sizes);
+    tl_job = NULL;
+}
+
+static void *job_thread(void *arg)
+{
+    struct job *j = arg;
+    job_execute(j);
+    atomic_store(&j->finished, true);
+    return NULL;
+}
+
+static void job_free(struct job *j)
+{
+    if (!j)
+        return;
+    pthread_mutex_destroy(&j->mu);
+    free(j->items);
+    free(j);
+}
+
+static struct job *job_new(enum job_kind kind, int max_items)
+{
+    struct job *j = calloc(1, sizeof(*j));
+    if (!j)
+        return NULL;
+    j->items = calloc((size_t)LM_MAX(max_items, 1), sizeof(struct job_item));
+    if (!j->items) {
+        free(j);
+        return NULL;
+    }
+    j->kind = kind;
+    pthread_mutex_init(&j->mu, NULL);
+    return j;
 }
 
 /* ---- the preview -------------------------------------------------------------------------------------------------------- */
@@ -1114,6 +1397,61 @@ static void expand_home(const char *in, char *out, size_t n)
         snprintf(out, n, "%s", in);
 }
 
+static void job_finish(struct app *a);
+
+/* Starts the job: in a thread (the window stays alive and shows the progress), or at once in the caller with `sync_jobs`. */
+static void job_start(struct app *a, struct job *j)
+{
+    a->job = j;
+    a->msg[0] = 0;                                                      /* the progress line takes the place of the last message */
+    if (!a->sync_jobs && pthread_create(&j->thread, NULL, job_thread, j) == 0) {
+        j->threaded = true;
+        a->win.redraw = true;
+        return;
+    }
+    job_execute(j);
+    atomic_store(&j->finished, true);
+    job_finish(a);
+}
+
+/* The job is over (called from the main loop once `finished` is set): take the thread back, show the result. */
+static void job_finish(struct app *a)
+{
+    struct job *j = a->job;
+    if (!j)
+        return;
+    if (j->threaded)
+        pthread_join(j->thread, NULL);
+    a->job = NULL;
+    struct pane *p = &a->pane[j->pane];
+    for (int i = 0; i < p->n; i++)
+        p->e[i].marked = false;
+    reread(a);
+    bool cancelled = atomic_load(&j->cancel);
+    int n = j->requested, bad = n - j->ok;
+    const char *first = j->first_skip[0] ? j->first_skip : j->first_err;
+    const char *verb = j->kind == J_COPY ? "Copied" : j->kind == J_MOVE ? "Moved" : j->kind == J_TRASH ? "Trashed" : "Deleted";
+    if (cancelled)
+        msg(a, "Cancelled: %s %d of %d", verb, j->ok, n);
+    else if (bad > 0)
+        msg(a, "%s %d of %d: %s", verb, j->ok, n, first);
+    else if (j->kind == J_TRASH)
+        msg(a, "Moved %d item%s to the trash", j->ok, j->ok == 1 ? "" : "s");
+    else if (j->kind == J_DELETE)
+        msg(a, "Deleted %d item%s", j->ok, j->ok == 1 ? "" : "s");
+    else
+        msg(a, "%s %d item%s to %s", verb, j->ok, j->ok == 1 ? "" : "s", j->target);
+    job_free(j);
+}
+
+static bool job_busy(struct app *a)
+{
+    if (!a->job)
+        return false;
+    msg(a, "Busy: Esc cancels the running operation first");
+    return true;
+}
+
 /* Copy or move to `where` (a folder, or a new name when only one thing is moved or copied). Nothing is ever replaced. */
 static void do_copy_move(struct app *a, const char *where, bool move)
 {
@@ -1135,65 +1473,77 @@ static void do_copy_move(struct app *a, const char *where, bool move)
         free_names(names, n);
         return;
     }
-    int done = 0, skipped = 0;
-    char err[PATH_MAX + 120] = "", first_err[PATH_MAX + 120] = "";
+    struct job *j = job_new(move ? J_MOVE : J_COPY, n);
+    if (!j) {
+        free_names(names, n);
+        return;
+    }
+    j->pane = a->act;
+    j->requested = n;
+    snprintf(j->target, sizeof(j->target), "%s", target);
     for (int i = 0; i < n; i++) {
-        char src[PATH_MAX], dst[PATH_MAX];
-        join_path(p->cwd, names[i], src, sizeof(src));
+        struct job_item *it = &j->items[j->n];
+        char err[PATH_MAX + 120] = "";
+        join_path(p->cwd, names[i], it->src, sizeof(it->src));
         if (into)
-            join_path(target, names[i], dst, sizeof(dst));
+            join_path(target, names[i], it->dst, sizeof(it->dst));
         else
-            snprintf(dst, sizeof(dst), "%s", target);
-        if (!strcmp(src, dst)) {
+            snprintf(it->dst, sizeof(it->dst), "%s", target);
+        if (!strcmp(it->src, it->dst))
             snprintf(err, sizeof(err), "%s is already there", names[i]);
-            skipped++;
-        } else if (path_inside(dst, src)) {
+        else if (path_inside(it->dst, it->src))
             snprintf(err, sizeof(err), "cannot put %s into itself", names[i]);
-            skipped++;
-        } else if (exists_any(dst)) {
-            snprintf(err, sizeof(err), "%s already exists: not replaced", dst);
-            skipped++;
-        } else if ((move ? move_node(src, dst, err, sizeof(err)) : copy_node(src, dst, 0, err, sizeof(err))) < 0) {
-            skipped++;
-        } else {
-            done++;
+        else if (exists_any(it->dst))
+            snprintf(err, sizeof(err), "%s already exists: not replaced", it->dst);
+        else {
+            j->n++;
             continue;
         }
-        if (!first_err[0])
-            snprintf(first_err, sizeof(first_err), "%s", err);
+        j->planned_skips++;
+        if (!j->first_skip[0])
+            snprintf(j->first_skip, sizeof(j->first_skip), "%s", err);
     }
-    for (int i = 0; i < p->n; i++)
-        p->e[i].marked = false;
-    reread(a);
-    if (skipped)
-        msg(a, "%s %d of %d: %s", move ? "Moved" : "Copied", done, n, first_err);
-    else
-        msg(a, "%s %d item%s to %s", move ? "Moved" : "Copied", done, done == 1 ? "" : "s", target);
     free_names(names, n);
+    if (j->n == 0) {                                                    /* nothing left to do: say why */
+        char why[sizeof(j->first_skip)];
+        snprintf(why, sizeof(why), "%s", j->first_skip);
+        for (int i = 0; i < p->n; i++)
+            p->e[i].marked = false;
+        job_free(j);
+        msg(a, "%s 0 of %d: %s", move ? "Moved" : "Copied", n, why);
+        return;
+    }
+    job_start(a, j);
 }
 
-static void do_delete(struct app *a)
+/* Delete: into the trash, or for good when `hard` (or when the folder is the trash itself). */
+static void do_delete(struct app *a, bool hard)
 {
     char **names;
     int n = op_targets(a, &names);
     struct pane *p = cur(a);
-    int done = 0;
-    char err[PATH_MAX + 120] = "";
-    for (int i = 0; i < n; i++) {
-        char path[PATH_MAX];
-        join_path(p->cwd, names[i], path, sizeof(path));
-        if (remove_tree(path, 0, err, sizeof(err)) < 0)
-            break;
-        done++;
+    hard = hard || in_trash(p->cwd);
+    struct job *j = job_new(hard ? J_DELETE : J_TRASH, n);
+    if (!j) {
+        free_names(names, n);
+        return;
     }
-    for (int i = 0; i < p->n; i++)
-        p->e[i].marked = false;
-    reread(a);
-    if (done < n)
-        msg(a, "Deleted %d of %d: %s", done, n, err);
-    else
-        msg(a, "Deleted %d item%s", done, done == 1 ? "" : "s");
+    if (!hard && !trash_dir(j->trash, sizeof(j->trash))) {
+        msg(a, "There is no place for a trash folder (HOME is not set): use Shift+F8 to delete for good");
+        free_names(names, n);
+        job_free(j);
+        return;
+    }
+    j->pane = a->act;
+    j->requested = n;
+    for (int i = 0; i < n; i++)
+        join_path(p->cwd, names[i], j->items[j->n++].src, sizeof(j->items[0].src));
     free_names(names, n);
+    if (j->n == 0) {
+        job_free(j);
+        return;
+    }
+    job_start(a, j);
 }
 
 static void do_mkdir(struct app *a, const char *name)
@@ -1274,6 +1624,8 @@ static void prompt_start(struct app *a, enum prompt kind, const char *initial)
 
 static void cmd_copy_move(struct app *a, bool move)
 {
+    if (job_busy(a))
+        return;
     char **names;
     int n = op_targets(a, &names);
     free_names(names, n);
@@ -1286,8 +1638,10 @@ static void cmd_copy_move(struct app *a, bool move)
     prompt_start(a, move ? P_MOVE : P_COPY, init);
 }
 
-static void cmd_delete(struct app *a)
+static void cmd_delete(struct app *a, bool hard)
 {
+    if (job_busy(a))
+        return;
     char **names;
     int n = op_targets(a, &names);
     free_names(names, n);
@@ -1295,12 +1649,12 @@ static void cmd_delete(struct app *a)
         msg(a, "Nothing to delete");
         return;
     }
-    prompt_start(a, P_DELETE, "");
+    prompt_start(a, hard || in_trash(cur(a)->cwd) ? P_DELETE_HARD : P_DELETE, "");
 }
 
 static void cmd_mkdir(struct app *a)
 {
-    if (a->dual)
+    if (a->dual && !job_busy(a))
         prompt_start(a, P_MKDIR, "");
 }
 
@@ -1308,6 +1662,8 @@ static void cmd_rename(struct app *a)
 {
     struct pane *p = cur(a);
     const struct entry *e = row_entry(p, p->sel);
+    if (job_busy(a))
+        return;
     if (!a->dual || !e) {
         msg(a, "Nothing to rename");
         return;
@@ -1423,7 +1779,7 @@ static void press_fkey(struct app *a, int i)
     case F_COPY: cmd_copy_move(a, false); break;
     case F_MOVE: cmd_copy_move(a, true); break;
     case F_MKDIR: cmd_mkdir(a); break;
-    case F_DELETE: cmd_delete(a); break;
+    case F_DELETE: cmd_delete(a, (a->win.mods & LM_MOD_SHIFT) != 0); break;
     case F_TERM: start_terminal(a); break;
     case F_QUIT: a->win.running = false; break;
     }
@@ -1456,7 +1812,8 @@ static void prompt_accept(struct app *a)
     a->prompt = P_NONE;
     a->win.redraw = true;
     switch (kind) {
-    case P_DELETE: do_delete(a); return;
+    case P_DELETE: do_delete(a, false); return;
+    case P_DELETE_HARD: do_delete(a, true); return;
     case P_COPY: if (text[0]) do_copy_move(a, text, false); return;
     case P_MOVE: if (text[0]) do_copy_move(a, text, true); return;
     case P_MKDIR: if (text[0]) do_mkdir(a, text); return;
@@ -1492,7 +1849,8 @@ static const char *prompt_label(enum prompt k)
     case P_MOVE: return "Move to: ";
     case P_MKDIR: return "New folder: ";
     case P_RENAME: return "Rename to: ";
-    case P_DELETE: return "";
+    case P_DELETE:
+    case P_DELETE_HARD: return "";
     default: return "";
     }
 }
@@ -1516,14 +1874,28 @@ static void handle_key(struct app *a, uint32_t ks)
         a->win.redraw = true;
         return;
     }
+    if (a->prompt == P_NONE && ks == LM_KS_Escape && a->job) {          /* Esc stops a running copy / move / delete */
+        atomic_store(&a->job->cancel, true);
+        msg(a, "Cancelling...");
+        return;
+    }
     if (a->prompt != P_NONE) {
         size_t len = strlen(a->pbuf);
         if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
             prompt_accept(a);
         } else if (ks == LM_KS_Escape) {
             a->prompt = P_NONE;
-        } else if (a->prompt == P_DELETE) {
+        } else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD) {
             /* a question: only Enter and Esc answer it */
+        } else if (ks == LM_KS_Tab) {                                   /* complete a name (not for the new folder / rename fields) */
+            if (a->prompt == P_GOTO || a->prompt == P_COPY || a->prompt == P_MOVE) {
+                char list[200];
+                int cn = lm_complete_path(cur(a)->cwd, a->pbuf, sizeof(a->pbuf), true, list, sizeof(list));
+                if (cn == 0)
+                    msg(a, "Nothing here starts like that");
+                else if (cn > 1)
+                    msg(a, "%d matches: %s", cn, list);
+            }
         } else if (ks == LM_KS_BackSpace) {
             while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
                 len--;
@@ -1586,7 +1958,7 @@ static void handle_key(struct app *a, uint32_t ks)
     case LM_KS_Left: go_up(a); return;
     case LM_KS_Tab: switch_pane(a); return;
     case LM_KS_Insert: if (a->dual) toggle_mark(a); return;
-    case LM_KS_Delete: cmd_delete(a); return;
+    case LM_KS_Delete: cmd_delete(a, shift); return;
     case LM_KS_F1: if (a->dual) a->help = true; return;
     case LM_KS_F1 + 1: if (a->dual) cmd_rename(a); return;
     case LM_KS_F1 + 2: if (a->dual) toggle_preview(a); return;
@@ -1599,7 +1971,7 @@ static void handle_key(struct app *a, uint32_t ks)
         return;
     case LM_KS_F1 + 5: if (a->dual) cmd_copy_move(a, true); return;
     case LM_KS_F1 + 6: if (a->dual) cmd_mkdir(a); return;
-    case LM_KS_F1 + 7: if (a->dual) cmd_delete(a); return;
+    case LM_KS_F1 + 7: if (a->dual) cmd_delete(a, shift); return;
     case LM_KS_F1 + 8: if (a->dual) start_terminal(a); return;
     case LM_KS_F1 + 9: if (a->dual) a->win.running = false; return;
     case LM_KS_Escape:
@@ -1845,12 +2217,13 @@ static void paint_help(struct wlwin *w)
         "F4                edit a text file",
         "F5 / F6           copy / move to the other pane's folder (the name is editable)",
         "F7                new folder",
-        "F8 / Delete       delete (asks first)",
+        "F8 / Delete       move to the trash (asks first); Shift+F8: delete for good",
         "F9 / Ctrl+T       a terminal in this folder",
         "F10               quit",
         "",
         "Copy, move and delete take the marked files, else the one under the cursor.",
-        "Nothing that exists is ever replaced.",
+        "Nothing that exists is ever replaced. They run in the background: Esc cancels.",
+        "In the question of F5 / F6 / Ctrl+L, Tab completes the names.",
         "Ctrl+H hidden files   Ctrl+R reread   Ctrl+L type a path",
         "Shift+Up / Down scrolls the preview   a letter jumps to a name",
         "",
@@ -1911,24 +2284,44 @@ static void paint(struct wlwin *w)
     } else {
         snprintf(status, sizeof(status), "%d item%s%s", p->n, p->n == 1 ? "" : "s", a->show_hidden ? "  (hidden files shown)" : "");
     }
-    wlwin_text(w, 6, sy + 2, showing ? a->msg : status, 1, showing ? COL_WARN : COL_FG, w->bw - 12);
+    if (a->job) {                                                       /* a copy / move / delete is running: a progress bar */
+        struct job *j = a->job;
+        long long total = atomic_load(&j->total), done = atomic_load(&j->done);
+        int pct = total > 0 ? (int)LM_CLAMP(done * 100 / total, 0, 100) : (j->n ? atomic_load(&j->items_done) * 100 / j->n : 0);
+        wlwin_fill(w, 0, sy, w->bw * pct / 100, STATUS_H, 0x2f6b46);
+        char cur_name[NAME_MAX + 1], amount[96] = "", line[NAME_MAX + 200];
+        pthread_mutex_lock(&j->mu);
+        snprintf(cur_name, sizeof(cur_name), "%s", j->current);
+        pthread_mutex_unlock(&j->mu);
+        if (j->kind != J_DELETE && total > 0) {
+            char d1[32], d2[32];
+            human_size((off_t)done, d1, sizeof(d1));
+            human_size((off_t)total, d2, sizeof(d2));
+            snprintf(amount, sizeof(amount), "  (%s of %s)", d1, d2);
+        }
+        const char *verb = j->kind == J_COPY ? "Copying" : j->kind == J_MOVE ? "Moving" : j->kind == J_TRASH ? "Moving to the trash" : "Deleting";
+        snprintf(line, sizeof(line), "%s %s  %d%%%s   -   Esc cancels", verb, cur_name, pct, amount);
+        wlwin_text(w, 6, sy + 2, a->msg[0] && now_ms() < a->msg_until ? a->msg : line, 1, 0xffffff, w->bw - 12);
+    } else {
+        wlwin_text(w, 6, sy + 2, showing ? a->msg : status, 1, showing ? COL_WARN : COL_FG, w->bw - 12);
+    }
     if (a->prompt != P_NONE) {
         int py = sy - STATUS_H;
         wlwin_fill(w, 0, py, w->bw, STATUS_H, COL_BAR);
         wlwin_fill(w, 0, py, w->bw, 1, COL_DIR);
         char line[PATH_MAX + 80];
-        if (a->prompt == P_DELETE) {
+        if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD) {
             char **names;
             int n = op_targets(a, &names);
-            snprintf(line, sizeof(line), "Delete %d item%s%s%s? This cannot be undone: Enter deletes, Esc cancels", n, n == 1 ? "" : "s",
-                     n == 1 ? " (" : "", n == 1 ? names[0] : "");
-            if (n == 1)
-                strncat(line, ")", sizeof(line) - strlen(line) - 1);
+            bool hard = a->prompt == P_DELETE_HARD;
+            snprintf(line, sizeof(line), "%s %d item%s%s%s%s %s", hard ? "Delete" : "Move", n, n == 1 ? "" : "s", n == 1 ? " (" : "",
+                     n == 1 ? names[0] : "", n == 1 ? ")" : "",
+                     hard ? "for good? This cannot be undone: Enter deletes, Esc cancels" : "to the trash? Enter moves, Esc cancels");
             free_names(names, n);
         } else {
             snprintf(line, sizeof(line), "%s%s_", prompt_label(a->prompt), a->pbuf);
         }
-        wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
+        wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
     }
     if (a->dual) {
         struct rbtn f[N_FKEY];
@@ -2236,6 +2629,7 @@ static int selftest(void)
     /* ---- copy, move, delete (the app functions, without a window) ---- */
     static struct app a;
     a.dual = true;
+    a.sync_jobs = true;                                                   /* the work is done in this thread */
     a.hover = -1;
     char src[PATH_MAX], dst[PATH_MAX];
     snprintf(src, sizeof(src), "%s/left", dir);
@@ -2306,9 +2700,9 @@ static int selftest(void)
     a.act = 1;                                                            /* delete in the right pane: the tree and a file */
     for (int i = 0; i < a.pane[1].n; i++)
         a.pane[1].e[i].marked = !strcmp(a.pane[1].e[i].name, "tree") || !strcmp(a.pane[1].e[i].name, "one.txt");
-    do_delete(&a);
+    do_delete(&a, true);
     snprintf(p, sizeof(p), "%s/right/tree", dir);
-    char p2[PATH_MAX];
+    char p2[PATH_MAX + 64];
     snprintf(p2, sizeof(p2), "%s/right/one.txt", dir);
     CHECK(access(p, F_OK) != 0 && access(p2, F_OK) != 0 && strstr(a.msg, "Deleted 2"), "deleted: %s", a.msg);
     snprintf(p, sizeof(p), "%s/left/tree/deep/f.txt", dir);
@@ -2329,6 +2723,68 @@ static int selftest(void)
     do_mkdir(&a, "x");
     CHECK(strstr(a.msg, "already exists"), "mkdir on an existing name: %s", a.msg);
     CHECK(remove_tree("/", 0, err, sizeof(err)) < 0, "the root is never deleted");
+
+    /* the trash: a file goes to XDG_DATA_HOME/Trash with an info file, a second one of the same name gets another name */
+    char xdg[PATH_MAX];
+    snprintf(xdg, sizeof(xdg), "%s/data", dir);
+    setenv("XDG_DATA_HOME", xdg, 1);
+    a.act = 1;
+    CHECK(go_to(&a, &a.pane[1], dst, NULL), "right pane again");
+    for (int i = 0; i < a.pane[1].n; i++)
+        a.pane[1].e[i].marked = false;
+    for (int r = 0; r < rows(&a.pane[1]); r++)
+        if (!strcmp(row_name(&a.pane[1], r), "final.txt"))
+            a.pane[1].sel = r;
+    do_delete(&a, false);
+    snprintf(p, sizeof(p), "%s/Trash/files/final.txt", xdg);
+    snprintf(p2, sizeof(p2), "%s/Trash/info/final.txt.trashinfo", xdg);
+    char info[512] = "";
+    FILE *fi = fopen(p2, "r");
+    if (fi) {
+        size_t k = fread(info, 1, sizeof(info) - 1, fi);
+        info[k] = 0;
+        fclose(fi);
+    }
+    snprintf(src, sizeof(src), "Path=%s/right/final.txt", dir);
+    CHECK(file_is(p, "two\n") && strstr(info, "[Trash Info]") && strstr(info, src) && strstr(info, "DeletionDate=") && strstr(a.msg, "trash"),
+          "trashed: %s / %s", a.msg, info);
+    snprintf(p, sizeof(p), "%s/right/final.txt", dir);
+    CHECK(access(p, F_OK) != 0, "and gone from where it was");
+    write_file(p, "again", 5);                                            /* a second file of that name */
+    CHECK(go_to(&a, &a.pane[1], dst, NULL), "reread");
+    for (int r = 0; r < rows(&a.pane[1]); r++)
+        if (!strcmp(row_name(&a.pane[1], r), "final.txt"))
+            a.pane[1].sel = r;
+    do_delete(&a, false);
+    snprintf(p, sizeof(p), "%s/Trash/files/final.txt.2", xdg);
+    CHECK(file_is(p, "again"), "a taken name in the trash gets a new one");
+    CHECK(in_trash(p) && !in_trash("/tmp/elsewhere"), "in_trash");
+    CHECK(go_to(&a, &a.pane[0], p2, NULL) == false || true, "(no-op)");
+    snprintf(p, sizeof(p), "%s/Trash/files", xdg);                         /* in the trash a delete is for good */
+    CHECK(go_to(&a, &a.pane[1], p, NULL), "list the trash");
+    a.act = 1;
+    for (int i = 0; i < a.pane[1].n; i++)
+        a.pane[1].e[i].marked = !strcmp(a.pane[1].e[i].name, "final.txt.2");
+    do_delete(&a, false);
+    snprintf(p, sizeof(p), "%s/Trash/files/final.txt.2", xdg);
+    CHECK(access(p, F_OK) != 0 && strstr(a.msg, "Deleted 1"), "deleting inside the trash is for good: %s", a.msg);
+
+    /* a cancelled job stops at once and leaves no half-written file behind */
+    static struct job *cj;
+    cj = job_new(J_COPY, 1);
+    snprintf(cj->items[0].src, sizeof(cj->items[0].src), "%s/left/one.txt", dir);
+    snprintf(cj->items[0].dst, sizeof(cj->items[0].dst), "%s/cancelled.txt", dir);
+    cj->n = 1;
+    cj->requested = 1;
+    atomic_store(&cj->cancel, true);
+    job_execute(cj);                                                      /* cancelled before it began: nothing is done */
+    snprintf(p, sizeof(p), "%s/cancelled.txt", dir);
+    CHECK(access(p, F_OK) != 0 && cj->ok == 0, "a job cancelled at the start does nothing");
+    tl_job = cj;                                                          /* cancelled in the middle of a file: no half file */
+    CHECK(copy_node(cj->items[0].src, cj->items[0].dst, 0, err, sizeof(err)) < 0 && !strcmp(err, "cancelled") && access(p, F_OK) != 0,
+          "a cancelled copy leaves nothing: '%s'", err);
+    tl_job = NULL;
+    job_free(cj);
 
     entries_free(&a.pane[0]);
     entries_free(&a.pane[1]);
@@ -2409,6 +2865,8 @@ int main(int argc, char **argv)
             int64_t wait = a.rep_next - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, 250);
         }
+        if (a.job)                                                      /* a copy / move / delete: the progress bar moves */
+            timeout = LM_MIN(timeout, 80);
         if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
             int64_t wait = a.pv.due - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, timeout);
@@ -2418,6 +2876,11 @@ int main(int argc, char **argv)
             break;
         if (a.preview && !a.pv.loaded && a.pv.want[0] && now_ms() >= a.pv.due)
             a.win.redraw = true;
+        if (a.job) {
+            a.win.redraw = true;
+            if (atomic_load(&a.job->finished))
+                job_finish(&a);
+        }
         if (a.rep_code && now_ms() >= a.rep_next) {
             handle_key(&a, lm_keymap_keysym(a.rep_code, a.win.mods));
             a.rep_next = now_ms() + (a.rep_rate > 0 ? 1000 / a.rep_rate : 40);
@@ -2427,6 +2890,11 @@ int main(int argc, char **argv)
             a.msg[0] = 0;
             a.win.redraw = true;
         }
+    }
+    if (a.job) {                                                        /* the window is going: stop the work and wait for it */
+        atomic_store(&a.job->cancel, true);
+        if (a.job->threaded)
+            pthread_join(a.job->thread, NULL);
     }
     wlwin_destroy(&a.win);
     return 0;

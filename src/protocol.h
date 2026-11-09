@@ -97,6 +97,7 @@ extern const struct lm_interface lm_zwp_linux_dmabuf_v1_interface;     /* dmabuf
 extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
 extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* MellaGUI private: settings.c */
+extern const struct lm_interface lm_mellagui_capture_v1_interface;      /* MellaGUI private: capture.c */
 
 /*
  * ---- COPY-PASTE LIST OF ADVERTISED GLOBALS (interface, version) -------------
@@ -110,6 +111,7 @@ extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* Mella
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
  *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
  *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
+ *   mellagui_capture_v1              1    capture.c  (MellaGUI private: the screen into a wl_shm buffer, for mellagui-record)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
 #define LM_WL_SUBCOMPOSITOR_VERSION         1
@@ -121,6 +123,7 @@ extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* Mella
 #define LM_ZXDG_DECORATION_MANAGER_V1_VERSION 1
 #define LM_ZWP_LINUX_DMABUF_V1_VERSION      4
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
+#define LM_MELLAGUI_CAPTURE_V1_VERSION         1
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
 enum {
@@ -553,6 +556,17 @@ enum {
     LM_MELLAGUI_SETTINGS_V1_REQ_SET = 1,       /* "ss" key, value: change one setting (the answer is a value burst + done) */
     LM_MELLAGUI_SETTINGS_V1_EVT_VALUE = 0,     /* "ss" key, value: current value of one setting */
     LM_MELLAGUI_SETTINGS_V1_EVT_DONE = 1,      /* "" end of a burst of value events */
+};
+
+/* ---- mellagui_capture_v1 (see capture.h) --------------------------------------------------------------------------- */
+enum {
+    LM_MELLAGUI_CAPTURE_V1_REQ_DESTROY = 0,    /* "" */
+    LM_MELLAGUI_CAPTURE_V1_REQ_LIST = 1,       /* "" the answer is one `output` event per output, then `done` */
+    LM_MELLAGUI_CAPTURE_V1_REQ_GRAB = 2,       /* "io" output index, wl_shm buffer of exactly the output's size: paint the output into it */
+    LM_MELLAGUI_CAPTURE_V1_EVT_OUTPUT = 0,     /* "isiiii" index, name, x, y, width, height */
+    LM_MELLAGUI_CAPTURE_V1_EVT_DONE = 1,       /* "" */
+    LM_MELLAGUI_CAPTURE_V1_EVT_READY = 2,      /* "iii" output index, width, height: the buffer holds the picture (XRGB8888 content) */
+    LM_MELLAGUI_CAPTURE_V1_EVT_FAILED = 3,     /* "is" output index, reason: "no-output" "buffer" "size" "locked" "capture" */
 };
 
 #endif

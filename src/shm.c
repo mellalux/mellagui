@@ -604,6 +604,43 @@ static int buffer_copy_inner(struct lm_buffer *b, struct lm_texture *tex, uint32
     return rc;
 }
 
+int lm_buffer_write(const struct lm_buffer *b, const uint32_t *px, int32_t w, int32_t h)
+{
+    if (!b || !b->pool || b->pool->fd < 0 || !px || w <= 0 || h <= 0 || w > b->width || h > b->height)
+        return -1;
+    if (b->format != LM_WL_SHM_FORMAT_XRGB8888 && b->format != LM_WL_SHM_FORMAT_ARGB8888)
+        return -1;
+    uint32_t *row = malloc((size_t)w * 4);
+    if (!row)
+        return -1;
+    int rc = 0;
+    for (int32_t y = 0; y < h && rc == 0; y++) {
+        for (int32_t x = 0; x < w; x++)
+            row[x] = px[(size_t)y * (size_t)w + (size_t)x] | 0xff000000u;
+        off_t off = (off_t)b->offset + (off_t)y * b->stride;
+        if ((uint64_t)off + (uint64_t)w * 4 > b->pool->size) {
+            rc = -1;
+            break;
+        }
+        const uint8_t *p = (const uint8_t *)row;
+        size_t left = (size_t)w * 4;
+        while (left > 0) {
+            ssize_t k = pwrite(b->pool->fd, p, left, off);
+            if (k < 0 && errno == EINTR)
+                continue;
+            if (k <= 0) {
+                rc = -1;
+                break;
+            }
+            p += k;
+            off += k;
+            left -= (size_t)k;
+        }
+    }
+    free(row);
+    return rc;
+}
+
 /* ---- dmabuf buffers (created by dmabuf.c) -------------------------------------------------------------------------- */
 
 struct lm_buffer *lm_buffer_create_dmabuf(struct lm_client *client, uint32_t id, uint32_t version, int fd, size_t size,

@@ -115,7 +115,11 @@
 
 struct lm_config;
 struct lm_server;
+struct lm_client;
 struct lm_settings;
+
+/* May this client use MellaGUI's private globals (settings, capture)? The rule of `--settings-access` above. */
+bool lm_settings_client_allowed(struct lm_server *srv, const struct lm_client *c);
 
 /*
  * Early (before the server exists): read `path` into cfg. The layouts list is returned as text in layouts_out

@@ -91,6 +91,13 @@ void lm_buffer_release(struct lm_buffer *b);
 int lm_buffer_copy(struct lm_buffer *b, struct lm_texture *tex, uint32_t transform,
                    const struct lm_region *damage);
 
+/*
+ * Writes `px` (w x h, XRGB8888, tightly packed) into the top left corner of a wl_shm buffer of the client (pwrite on the
+ * pool's fd: a client that truncated its pool gets an error, not a crash). Opaque pixels, so XRGB8888 and ARGB8888 buffers both
+ * hold them as they are (alpha forced to 0xff). The buffer must be at least w x h. Used by capture.c. Returns 0 or -1.
+ */
+int lm_buffer_write(const struct lm_buffer *b, const uint32_t *px, int32_t w, int32_t h);
+
 /* Resize tex storage to w*h (contents unspecified). Overflow-checked. 0 or -1. */
 int lm_texture_resize(struct lm_texture *tex, int32_t w, int32_t h);
 void lm_texture_free(struct lm_texture *tex);

@@ -21,6 +21,7 @@ enum lm_dockicon {
     LM_DOCKICON_RUN,
     LM_DOCKICON_LAUNCHER,       /* a grid of nine dots: opens the launcher dialog */
     LM_DOCKICON_CAMERA,         /* the webcam viewer */
+    LM_DOCKICON_RECORD,         /* the screen recorder: a record symbol (ring with a dot) */
     LM_DOCKICON_COUNT
 };
 

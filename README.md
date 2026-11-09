@@ -2,7 +2,7 @@
 
 ![MellaGUI: the panel with the round logo button, coloured workspaces, keyboard layout and power button, the clipboard, volume and system gadgets on the right, and the dock at the bottom, on the Mella wallpaper](docs/screenshot.jpg)
 
-A graphical environment for Linux that runs **without X11**: a from-scratch
+**MellaGUI** (*Mella's Graphical User Interface*) is a graphical environment for Linux that runs **without X11**: a from-scratch
 Wayland compositor with a built-in shell (panel, four workspaces, window
 frames, wallpaper), written in C11 with no dependencies besides libc and the
 libdrm headers. It runs directly on a Linux virtual terminal using DRM/KMS and

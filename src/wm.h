@@ -370,6 +370,8 @@ struct lm_frame_info {
     uint32_t pressed;               /* LM_FRAME_HOVER_* bit currently held down, else 0 */
 };
 
+#define LM_PANEL_SHADOW 14          /* how far the panel's shadow reaches below it */
+
 struct lm_panel_info {
     struct lm_output *output;
     struct lm_rect bar;             /* whole panel */
@@ -444,6 +446,7 @@ struct lm_dock_info {
     struct {
         struct lm_rect box;
         bool running;
+        bool launching;             /* its program was just started and has no window yet: the icon hops */
         const struct lm_dock_item *item;
     } icon[LM_DOCK_MAX];
     struct lm_rect label;           /* the name of the hovered icon (empty = none) */
@@ -504,6 +507,7 @@ enum lm_scene_kind {
     LM_SCENE_GADGET,                /* the desktop gadget (right after the wallpapers, below all windows) */
     LM_SCENE_FRAME,                 /* decoration of one window */
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
+    LM_SCENE_PANEL_SHADOW,          /* the soft shadow the top panel throws on what is below it (one per output, painted before the panel) */
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_DOCK,                  /* the dock (above the panel, below the menu) */
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
@@ -524,6 +528,7 @@ struct lm_scene_item {
             bool is_popup;
         } surface;                  /* LM_SCENE_SURFACE */
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
+        struct lm_rect shadow;      /* LM_SCENE_PANEL_SHADOW: the strip under the panel */
         struct lm_about_info about; /* LM_SCENE_ABOUT */
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
         struct lm_power_info power; /* LM_SCENE_POWER */
@@ -569,7 +574,7 @@ size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* t
 bool lm_wm_has_fullscreen(const struct lm_wm *wm);
 
 /* Text snapshot of the dock for tests (control socket `dock`): "dock shown=<0|1> hover=<i> n=<buttons>" then one line per button
- * "icon <i> "<name>" x= y= w= h= running=<0|1> cmd=<command>". Returns the length. */
+ * "icon <i> "<name>" x= y= w= h= running=<0|1> launching=<0|1> cmd=<command>". Returns the length. */
 size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size);
 
 #endif

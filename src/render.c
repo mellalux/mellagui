@@ -898,9 +898,9 @@ static void paint_about(const struct paint_ctx *c, const struct lm_about_info *a
     paint_logo(c, &ai->logo);
     int y = ai->logo.y + ai->logo.h + 12;
     struct lm_rect title = lm_rect_make(ai->card.x, y, ai->card.w, LM_FONT_H);
-    draw_text_centered(c, &title, "MellaGUI", COL_PANEL_TEXT);
+    draw_text_centered(c, &title, "Mella's Graphical User Interface", COL_PANEL_TEXT);
     struct lm_rect sub = lm_rect_make(ai->card.x, y + LM_FONT_H + 6, ai->card.w, LM_FONT_H);
-    draw_text_centered(c, &sub, "A Wayland compositor and shell, written from scratch", COL_PANEL_DIM);
+    draw_text_centered(c, &sub, "MellaGUI: a Wayland compositor and shell", COL_PANEL_DIM);
     y += 2 * LM_FONT_H + 6 + 16;
     struct lm_rect rule = lm_rect_make(ai->card.x + 24, y - 8, ai->card.w - 48, 1);
     fill_rect(c, &rule, lm_theme.border);
@@ -1358,6 +1358,23 @@ static uint32_t mix_rgb(uint32_t a, uint32_t b, int t)
     return out;
 }
 
+/* The shadow under the top panel: black, strongest right under the bar and fading out smoothly (quadratically) over its height. */
+static void paint_panel_shadow(const struct paint_ctx *c, const struct lm_rect *rect)
+{
+    struct lm_rect r;
+    if (!lm_rect_intersect(rect, &c->clip, &r))
+        return;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        float t = 1.0f - ((float)(y - rect->y) + 0.5f) / (float)rect->h;           /* 1 at the bar, 0 at the end of the shadow */
+        uint32_t a = (uint32_t)(t * t * 125.0f + 0.5f);
+        if (!a)
+            continue;
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++)
+            row[x] = blend_px(a << 24, row[x]);
+    }
+}
+
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
 {
     fill_rect(c, &p->bar, COL_PANEL);
@@ -1667,6 +1684,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_SURFACE:
         lm_surface_tree_visit(item->u.surface.root, item->u.surface.x, item->u.surface.y,
                               visit_blit, c);
+        break;
+    case LM_SCENE_PANEL_SHADOW:
+        if (item->output == c->out)
+            paint_panel_shadow(c, &item->u.shadow);
         break;
     case LM_SCENE_PANEL:
         if (item->output == c->out)

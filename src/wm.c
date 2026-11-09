@@ -128,6 +128,10 @@ struct lm_wm {
     bool dock_active, dock_shown;
     int hover_dock, dock_px;
     struct lm_timer *dock_timer;
+    /* programs the dock has started and that have not shown a window yet: their icon bounces (start time, windows it had then) */
+    int64_t dock_launch_ms[LM_DOCK_MAX];
+    int dock_launch_base[LM_DOCK_MAX];
+    struct lm_timer *dock_anim;
     /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
     bool sw_open;
     int sw_n, sw_idx;
@@ -825,6 +829,7 @@ static void dock_damage(struct lm_wm *wm);
 static void about_set(struct lm_wm *wm, bool open, struct lm_output *o);
 static void about_damage(struct lm_wm *wm);
 static void dock_hide_tick(void *data);
+static void dock_anim_tick(void *data);
 
 static void damage_panels(struct lm_wm *wm)
 {
@@ -833,6 +838,7 @@ static void damage_panels(struct lm_wm *wm)
     struct lm_output *o;
     lm_list_for_each(o, &wm->srv->backend->outputs, link) {
         struct lm_rect r = output_panel_rect(o);
+        r.h += LM_PANEL_SHADOW;                         /* (the shadow below it) */
         damage_rect(wm, &r);
     }
     dock_damage(wm);                                    /* (windows come and go here: the dock's "running" dots) */
@@ -1076,6 +1082,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     update_clock(wm, true);
     wm->note_timer = lm_loop_add_timer(srv->loop, note_tick, wm);
     wm->dock_timer = lm_loop_add_timer(srv->loop, dock_hide_tick, wm);
+    wm->dock_anim = lm_loop_add_timer(srv->loop, dock_anim_tick, wm);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
@@ -1092,6 +1099,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_timer_destroy(wm->note_timer);
     if (wm->dock_timer)
         lm_timer_destroy(wm->dock_timer);
+    if (wm->dock_anim)
+        lm_timer_destroy(wm->dock_anim);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
     free(wm);
@@ -1134,6 +1143,7 @@ void lm_wm_config_changed(struct lm_wm *wm)
     gadget_def_init();
     wm->dock_active = wm->dock_shown = false;
     wm->hover_dock = -1;
+    memset(wm->dock_launch_ms, 0, sizeof(wm->dock_launch_ms));         /* (the buttons may be others now) */
     lm_wm_output_changed(wm, NULL);
 }
 
@@ -1798,6 +1808,8 @@ size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size)
 #define DOCK_PAD 12                 /* the strip reaches this far beyond the first / last icon */
 #define DOCK_LABEL_H 22
 #define DOCK_HIDE_MS 600            /* autohide: the dock goes away this long after the pointer left it */
+#define DOCK_BOUNCE_PERIOD_MS 640   /* one hop of an icon whose program is starting */
+#define DOCK_ANIM_MS 33             /* ... redrawn this often while any of them hops */
 
 struct dock_geo {
     int n, size, zsize, gap, x0, icon_bottom;
@@ -1832,7 +1844,7 @@ static void dock_geometry(const struct lm_output *o, struct dock_geo *g)
     g->strip = lm_rect_make(g->x0 - DOCK_PAD, top, total + 2 * DOCK_PAD, out_bottom - top);
     g->tall = lm_rect_make(g->x0 - DOCK_PAD, ttop, total + 2 * DOCK_PAD, out_bottom - ttop);
     int pad = (g->zsize - g->size) * 3 + DOCK_PAD + 4;          /* the neighbours of the magnified icon move out of the way */
-    int btop = ttop - DOCK_LABEL_H - 10;
+    int btop = ttop - DOCK_LABEL_H - 10 - g->size / 2;          /* (and an icon that hops goes up to half its size higher) */
     struct lm_rect b = lm_rect_make(g->x0 - pad, btop, total + 2 * pad, out_bottom - btop), orect = lm_output_rect(o);
     if (!lm_rect_intersect(&b, &orect, &g->bounds))
         g->bounds = (struct lm_rect){ 0 };
@@ -1849,6 +1861,17 @@ static bool dock_app_matches(const char *match, const char *app_id)
             return false;
     }
     return !match[i] && !app_id[i];
+}
+
+/* How many mapped windows belong to the button. */
+static int dock_window_count(const struct lm_wm *wm, const struct lm_dock_item *it)
+{
+    int n = 0;
+    struct lm_window *w;
+    lm_list_for_each(w, &((struct lm_wm *)wm)->windows, link)
+        if (w->mapped && dock_app_matches(it->match, w->app_id))
+            n++;
+    return n;
 }
 
 static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_dock_info *d)
@@ -1887,12 +1910,13 @@ static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_doc
         left += extra[i];
         d->icon[i].box = lm_rect_make((int)lroundf(cxp - w / 2.0f), (int)lroundf((float)g.icon_bottom - w), (int)lroundf(w), (int)lroundf(w));
         d->icon[i].item = lm_dock_item(i);
-        struct lm_window *wn;
-        lm_list_for_each(wn, &((struct lm_wm *)wm)->windows, link)
-            if (wn->mapped && dock_app_matches(d->icon[i].item->match, wn->app_id)) {
-                d->icon[i].running = true;
-                break;
-            }
+        d->icon[i].running = dock_window_count(wm, d->icon[i].item) > 0;
+        if (wm->dock_launch_ms[i]) {                                  /* starting: hops up and down until its window is there */
+            float ph = (float)((lm_now_ms() - (uint64_t)wm->dock_launch_ms[i]) % DOCK_BOUNCE_PERIOD_MS) / (float)DOCK_BOUNCE_PERIOD_MS;
+            float up = 4.0f * ph * (1.0f - ph);                       /* a parabola: slow at the top, quick at the ground */
+            d->icon[i].box.y -= (int)lroundf(up * (float)g.size * 0.5f);
+            d->icon[i].launching = true;
+        }
     }
     if (d->hover >= 0 && d->hover < g.n) {
         d->label_text = d->icon[d->hover].item->name;
@@ -1991,10 +2015,36 @@ static void dock_activate(struct lm_wm *wm, int i, bool reuse)
                 best = w;
     /* A window that is not in front yet comes forward; when the most recent one already has the focus the click is for another
      * instance (two terminals): the program is started again. */
-    if (best && !(best == wm->focused && !best->minimized && best->workspace == wm->workspace))
+    if (best && !(best == wm->focused && !best->minimized && best->workspace == wm->workspace)) {
         lm_wm_focus_window(wm, best);
-    else
-        lm_server_spawn(wm->srv, it->cmd);
+    } else if (lm_server_spawn(wm->srv, it->cmd) > 0 && i < LM_DOCK_MAX) {
+        wm->dock_launch_ms[i] = (int64_t)lm_now_ms();                 /* the icon hops until a window of the program shows up */
+        wm->dock_launch_base[i] = dock_window_count(wm, it);
+        if (wm->dock_anim)
+            lm_timer_arm_ms(wm->dock_anim, DOCK_ANIM_MS, DOCK_ANIM_MS);
+        dock_damage(wm);
+    }
+}
+
+/* Every 33 ms while some icon hops: ends the hopping of the ones whose window came (or that never made one) and repaints. */
+static void dock_anim_tick(void *data)
+{
+    struct lm_wm *wm = data;
+    const char *e = getenv("MELLAGUI_DOCK_BOUNCE_MS");               /* how long to hop at most; tests make it short */
+    int64_t limit = e && atol(e) > 0 ? atol(e) : 12000;
+    bool any = false;
+    for (int i = 0; i < LM_DOCK_MAX; i++) {
+        if (!wm->dock_launch_ms[i])
+            continue;
+        const struct lm_dock_item *it = lm_dock_item(i);
+        if (!it || dock_window_count(wm, it) > wm->dock_launch_base[i] || (int64_t)lm_now_ms() - wm->dock_launch_ms[i] > limit)
+            wm->dock_launch_ms[i] = 0;
+        else
+            any = true;
+    }
+    dock_damage(wm);
+    if (!any && wm->dock_anim)
+        lm_timer_arm_ms(wm->dock_anim, 0, 0);
 }
 
 bool lm_wm_has_fullscreen(const struct lm_wm *wm)
@@ -2016,8 +2066,8 @@ size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
         dock_info(wm, out, &d);
     o += (size_t)snprintf(buf + o, size - o, "dock shown=%d hover=%d n=%d\n", shown, shown ? d.hover : -1, out ? d.n : 0);
     for (int i = 0; out && i < d.n && o < size; i++)
-        o += (size_t)snprintf(buf + o, size - o, "icon %d \"%s\" x=%d y=%d w=%d h=%d running=%d cmd=%s\n", i, d.icon[i].item->name,
-                              d.icon[i].box.x, d.icon[i].box.y, d.icon[i].box.w, d.icon[i].box.h, d.icon[i].running, d.icon[i].item->cmd);
+        o += (size_t)snprintf(buf + o, size - o, "icon %d \"%s\" x=%d y=%d w=%d h=%d running=%d launching=%d cmd=%s\n", i, d.icon[i].item->name,
+                              d.icon[i].box.x, d.icon[i].box.y, d.icon[i].box.w, d.icon[i].box.h, d.icon[i].running, d.icon[i].launching, d.icon[i].item->cmd);
     return o < size ? o : size - 1;
 }
 
@@ -2124,7 +2174,18 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
     if (wm->srv->backend) {
         lm_list_for_each(o, &wm->srv->backend->outputs, link) {
             struct lm_rect pr = output_panel_rect(o);
-            if ((clip && !lm_rect_overlaps(&pr, clip)) || fullscreen_covers(wm, o))
+            if (fullscreen_covers(wm, o))
+                continue;
+            struct lm_rect sr = lm_rect_make(o->x, o->y + LM_PANEL_HEIGHT, o->width, LM_PANEL_SHADOW);
+            if (!clip || lm_rect_overlaps(&sr, clip)) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_PANEL_SHADOW;
+                it.output = o;
+                it.u.shadow = sr;
+                if (!fn(&it, data))
+                    return;
+            }
+            if (clip && !lm_rect_overlaps(&pr, clip))
                 continue;
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_PANEL;

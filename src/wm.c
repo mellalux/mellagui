@@ -118,6 +118,7 @@ struct lm_wm {
     uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
     int osk_hover, osk_down;    /* the key under the pointer / held by it (index into the geometry), -1 = none */
     struct lm_osk_place osk_pl;  /* where the user put it and how big (w == 0: the default) */
+    uint32_t osk_phys[24];      /* bit set = this evdev key is held down on a keyboard (the on-screen keys light up with them) */
     uint32_t osk_click_ms;      /* when the margin was last pressed (a double click resets the place) */
     int osk_drag;               /* 0 = none, 1 = moving, 2 = resizing the keyboard with the pointer */
     uint32_t osk_drag_edges;    /* LM_EDGE_RIGHT / LM_EDGE_BOTTOM while resizing */
@@ -1821,6 +1822,22 @@ static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
 
 /* ---- the on-screen keyboard ------------------------------------------------------------------------------------------------- */
 
+static bool osk_phys_down(const struct lm_wm *wm, uint32_t code)
+{
+    return code < 24 * 32 && ((wm->osk_phys[code / 32] >> (code % 32)) & 1u);
+}
+
+/* Is the on-screen key `k` lit by a key held on the real keyboard? A modifier key lights for either of its two keys. */
+static bool osk_key_held(const struct lm_wm *wm, const struct lm_osk_key *k)
+{
+    switch (k->kind) {
+    case LM_OSK_SHIFT: return osk_phys_down(wm, KEY_LEFTSHIFT) || osk_phys_down(wm, KEY_RIGHTSHIFT);
+    case LM_OSK_CTRL: return osk_phys_down(wm, KEY_LEFTCTRL) || osk_phys_down(wm, KEY_RIGHTCTRL);
+    case LM_OSK_HIDE: return false;
+    default: return k->code && osk_phys_down(wm, k->code);
+    }
+}
+
 /* Gives the keymap lookups (lm_keymap_keysym) the configured layouts and the active group, for labels and the launcher form. */
 static void keymap_sync(const struct lm_wm *wm)
 {
@@ -1861,16 +1878,21 @@ static void osk_info(const struct lm_wm *wm, const struct lm_osk_geo *g, struct 
     oi->n = g->n;
     keymap_sync(wm);
     uint32_t locks = wm->srv->input ? lm_input_locks(wm->srv->input) : 0;
+    uint32_t label_mods = wm->osk_latched;                      /* the labels show what the next key would give: also with a real Shift / AltGr held */
+    if (osk_phys_down(wm, KEY_LEFTSHIFT) || osk_phys_down(wm, KEY_RIGHTSHIFT))
+        label_mods |= LM_MOD_SHIFT;
+    if (osk_phys_down(wm, KEY_RIGHTALT) && wm->srv->config.kbd_nlayouts > 1)
+        label_mods |= LM_MOD_ALTGR;
     for (int i = 0; i < g->n; i++) {
         const struct lm_osk_key *k = &g->key[i];
         oi->key[i].rect = k->rect;
         oi->key[i].kind = (int)k->kind;
         oi->key[i].row = k->row;
-        lm_osk_label(k, wm->osk_latched, locks, oi->key[i].label);
+        lm_osk_label(k, label_mods, locks, oi->key[i].label);
         uint32_t st = 0;
         if (i == wm->osk_hover)
             st |= LM_OSK_KEY_HOVER;
-        if (i == wm->osk_down)
+        if (i == wm->osk_down || osk_key_held(wm, k))
             st |= LM_OSK_KEY_DOWN;
         if ((lm_osk_kind_mod(k->kind) & wm->osk_latched) || (k->kind == LM_OSK_CAPS && (locks & LM_MOD_CAPS)))
             st |= LM_OSK_KEY_ON;
@@ -2052,9 +2074,9 @@ size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size)
     osk_info(wm, &g, &oi);
     n += (size_t)snprintf(buf + n, size - n, "card x=%d y=%d w=%d h=%d\n", g.card.x, g.card.y, g.card.w, g.card.h);
     for (int i = 0; i < g.n && n < size; i++)
-        n += (size_t)snprintf(buf + n, size - n, "key %d code=%u kind=%d x=%d y=%d w=%d h=%d on=%d label=%s\n", i, g.key[i].code,
+        n += (size_t)snprintf(buf + n, size - n, "key %d code=%u kind=%d x=%d y=%d w=%d h=%d on=%d held=%d label=%s\n", i, g.key[i].code,
                               (int)g.key[i].kind, g.key[i].rect.x, g.key[i].rect.y, g.key[i].rect.w, g.key[i].rect.h,
-                              (oi.key[i].state & LM_OSK_KEY_ON) != 0, oi.key[i].label);
+                              (oi.key[i].state & LM_OSK_KEY_ON) != 0, (oi.key[i].state & LM_OSK_KEY_DOWN) != 0, oi.key[i].label);
     return n;
 }
 
@@ -4672,6 +4694,11 @@ static bool is_modifier_key(uint32_t code)
 
 bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint32_t mods)
 {
+    if (!repeat && code < 24 * 32 && (((wm->osk_phys[code / 32] >> (code % 32)) & 1u) != 0) != pressed) {
+        wm->osk_phys[code / 32] ^= 1u << (code % 32);           /* the on-screen keyboard shows what is held on the real one */
+        if (wm->osk_open)
+            osk_damage(wm);
+    }
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
     if (wm->capture_release && code == wm->capture_release && !pressed) {
         wm->capture_release = 0;                                /* the release of the key that was just recorded */

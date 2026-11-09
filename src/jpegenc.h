@@ -12,8 +12,10 @@
 /*
  * Encodes XRGB8888 pixels (0x00RRGGBB, `stride` in bytes) as a JPEG file image. `quality` 1..100 (the libjpeg scale; 80 is a
  * good screen quality). Returns a malloc'd buffer (*len bytes) or NULL (bad size / out of memory). Width and height 1..65535.
- * One thread at a time (the tables are built on the first call).
+ * Threads may encode at the same time once lm_jpeg_encode_init() has been called (the first call of the encoder does it otherwise, which
+ * is then not thread safe).
  */
+void lm_jpeg_encode_init(void);
 uint8_t *lm_jpeg_encode_xrgb(const uint32_t *px, int w, int h, size_t stride, int quality, size_t *len);
 
 #endif

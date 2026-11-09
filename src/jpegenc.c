@@ -137,14 +137,12 @@ static void put_bits(struct out *o, unsigned code, int len)
 /* ---- DCT ------------------------------------------------------------------------------------------------------------- */
 
 static float dct_cos[8][8];                      /* cos((2x+1) u pi / 16) * c(u) / 2, built once */
-static int dct_ready;
 
 static void dct_init(void)
 {
     for (int u = 0; u < 8; u++)
         for (int x = 0; x < 8; x++)
             dct_cos[u][x] = (float)(cos((2 * x + 1) * u * M_PI / 16.0) * (u == 0 ? sqrt(0.125) : 0.5));
-    dct_ready = 1;
 }
 
 /* One 8 point DCT of in[0], in[stride] ... (even / odd split: the cosines are (anti)symmetric, 32 products instead of 64). */
@@ -248,12 +246,26 @@ static void put_dht(struct out *o, int tc_th, const uint8_t *n, const uint8_t *v
         put_byte(o, vals[i]);
 }
 
+static struct huff dcl, dcc, acl, acc;
+static int tables_ready;
+
+void lm_jpeg_encode_init(void)
+{
+    if (tables_ready)
+        return;
+    dct_init();
+    huff_build(&dcl, dc_lum_n, dc_vals);
+    huff_build(&dcc, dc_chr_n, dc_vals);
+    huff_build(&acl, ac_lum_n, ac_lum_v);
+    huff_build(&acc, ac_chr_n, ac_chr_v);
+    tables_ready = 1;
+}
+
 uint8_t *lm_jpeg_encode_xrgb(const uint32_t *px, int w, int h, size_t stride, int quality, size_t *len)
 {
     if (!px || w < 1 || h < 1 || w > 65535 || h > 65535 || stride < (size_t)w * 4)
         return NULL;
-    if (!dct_ready)
-        dct_init();                              /* benign race: every thread computes the same values */
+    lm_jpeg_encode_init();
     if (quality < 1)
         quality = 1;
     if (quality > 100)
@@ -267,15 +279,6 @@ uint8_t *lm_jpeg_encode_xrgb(const uint32_t *px, int w, int h, size_t stride, in
         qc[i] = (uint8_t)(b < 1 ? 1 : b > 255 ? 255 : b);
         qli[i] = 1.0f / ql[i];
         qci[i] = 1.0f / qc[i];
-    }
-    static struct huff dcl, dcc, acl, acc;
-    static int huff_ready;
-    if (!huff_ready) {
-        huff_build(&dcl, dc_lum_n, dc_vals);
-        huff_build(&dcc, dc_chr_n, dc_vals);
-        huff_build(&acl, ac_lum_n, ac_lum_v);
-        huff_build(&acc, ac_chr_n, ac_chr_v);
-        huff_ready = 1;
     }
 
     struct out o = { 0 };

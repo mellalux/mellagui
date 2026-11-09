@@ -15,7 +15,7 @@
  * Keys: Tab switches the active pane; Up / Down / PageUp / PageDown / Home / End move; Enter or Right opens (a folder: goes in; png / jpg /
  * ppm: mellagui-view; text: mellagui-edit; binary files are not opened); Backspace / Left / Alt+Up goes to the parent folder;
  * Insert or Space marks the file and moves down; F1 help, F2 rename, F3 preview, F4 edit, F5 copy, F6 move, F7 new folder,
- * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good), F9 terminal here, F10 quit; copy / move / delete work on the marked
+ * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good; Ctrl+B opens the trash, Ctrl+Z puts the marked files in it back), F9 terminal here, F10 quit; copy / move / delete work on the marked
  * files, else on the one under the cursor, copy and move go to the folder shown in the other pane (editable first, Tab completes names) and
  * never replace an existing file, delete asks first. They run in a thread: the window stays alive, the status line shows the progress and Esc
  * cancels.
@@ -123,7 +123,7 @@ struct preview {
 
 enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD };
 
-enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH };
+enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH, J_RESTORE };
 
 struct job_item {
     char src[PATH_MAX];
@@ -787,6 +787,85 @@ static int trash_item(const char *trash, const char *src, char *err, size_t errs
     return 0;
 }
 
+static bool trash_files_dir(char *out, size_t n)
+{
+    char t[PATH_MAX];
+    return trash_dir(t, sizeof(t)) && snprintf(out, n, "%s/files", t) < (int)n;
+}
+
+/* Is `path` the folder of the trashed files or inside it? (Only there a restore makes sense.) */
+static bool in_trash_files(const char *path)
+{
+    char t[PATH_MAX];
+    return trash_files_dir(t, sizeof(t)) && path_inside(path, t);
+}
+
+static void url_decode(const char *in, char *out, size_t n)
+{
+    size_t k = 0;
+    for (; *in && k + 1 < n; in++) {
+        if (*in == '%' && isxdigit((unsigned char)in[1]) && isxdigit((unsigned char)in[2])) {
+            char h[3] = { in[1], in[2], 0 };
+            out[k++] = (char)strtol(h, NULL, 16);
+            in += 2;
+        } else {
+            out[k++] = *in;
+        }
+    }
+    out[k] = 0;
+}
+
+/* Where the trashed file `name` came from, read from its .trashinfo (and when it was deleted). false when there is no usable info. */
+static bool trash_origin(const char *name, char *path, size_t pn, char *date, size_t dn)
+{
+    char t[PATH_MAX], ipath[PATH_MAX * 2 + 32], buf[8192];
+    path[0] = date[0] = 0;
+    if (!trash_dir(t, sizeof(t)))
+        return false;
+    snprintf(ipath, sizeof(ipath), "%.*s/info/%.*s.trashinfo", PATH_MAX - 16, t, NAME_MAX, name);
+    FILE *f = fopen(ipath, "r");
+    if (!f)
+        return false;
+    size_t k = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[k] = 0;
+    for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
+        if (!strncmp(line, "Path=", 5))
+            url_decode(line + 5, path, pn);
+        else if (!strncmp(line, "DeletionDate=", 13))
+            snprintf(date, dn, "%s", line + 13);
+    }
+    return path[0] == '/';
+}
+
+/* Puts `src` (a file in the trash) back at `dst`, makes the folders on the way, never replaces, removes the .trashinfo. */
+static int restore_item(const char *src, const char *dst, char *err, size_t errsz)
+{
+    char parent[PATH_MAX];
+    snprintf(parent, sizeof(parent), "%s", dst);
+    char *slash = strrchr(parent, '/');
+    if (slash && slash != parent) {
+        *slash = 0;
+        if (mkdir_p(parent, 0755) < 0) {
+            snprintf(err, errsz, "cannot make the folder %s: %s", parent, strerror(errno));
+            return -1;
+        }
+    }
+    if (exists_any(dst)) {
+        snprintf(err, errsz, "%s already exists: not replaced", dst);
+        return -1;
+    }
+    if (move_node(src, dst, err, errsz) < 0)
+        return -1;
+    char t[PATH_MAX], ipath[PATH_MAX * 2 + 32];
+    const char *base = strrchr(src, '/');
+    if (trash_dir(t, sizeof(t))) {
+        snprintf(ipath, sizeof(ipath), "%.*s/info/%.*s.trashinfo", PATH_MAX - 16, t, NAME_MAX, base ? base + 1 : src);
+        unlink(ipath);
+    }
+    return 0;
+}
+
 /* ---- running a job -------------------------------------------------------------------------------------------------------- */
 
 /* The number of units (bytes, or files and folders when `nodes`) below `path`. */
@@ -846,6 +925,7 @@ static void job_execute(struct job *j)
         case J_COPY: rc = copy_node(src, dst, 0, err, sizeof(err)); break;
         case J_MOVE: rc = move_node(src, dst, err, sizeof(err)); break;
         case J_TRASH: rc = trash_item(j->trash, src, err, sizeof(err)); break;
+        case J_RESTORE: rc = restore_item(src, dst, err, sizeof(err)); break;
         default: rc = remove_tree(src, 0, err, sizeof(err)); break;
         }
         if (rc < 0) {
@@ -1430,13 +1510,15 @@ static void job_finish(struct app *a)
     bool cancelled = atomic_load(&j->cancel);
     int n = j->requested, bad = n - j->ok;
     const char *first = j->first_skip[0] ? j->first_skip : j->first_err;
-    const char *verb = j->kind == J_COPY ? "Copied" : j->kind == J_MOVE ? "Moved" : j->kind == J_TRASH ? "Trashed" : "Deleted";
+    const char *verb = j->kind == J_COPY ? "Copied" : j->kind == J_MOVE ? "Moved" : j->kind == J_TRASH ? "Trashed" : j->kind == J_RESTORE ? "Restored" : "Deleted";
     if (cancelled)
         msg(a, "Cancelled: %s %d of %d", verb, j->ok, n);
     else if (bad > 0)
         msg(a, "%s %d of %d: %s", verb, j->ok, n, first);
     else if (j->kind == J_TRASH)
         msg(a, "Moved %d item%s to the trash", j->ok, j->ok == 1 ? "" : "s");
+    else if (j->kind == J_RESTORE)
+        msg(a, "Put back %d item%s where %s from", j->ok, j->ok == 1 ? "" : "s", j->ok == 1 ? "it came" : "they came");
     else if (j->kind == J_DELETE)
         msg(a, "Deleted %d item%s", j->ok, j->ok == 1 ? "" : "s");
     else
@@ -1544,6 +1626,68 @@ static void do_delete(struct app *a, bool hard)
         return;
     }
     job_start(a, j);
+}
+
+/* Puts the marked (or the one under the cursor) trashed files back where they were deleted from. */
+static void do_restore(struct app *a)
+{
+    struct pane *p = cur(a);
+    if (job_busy(a))
+        return;
+    if (!in_trash_files(p->cwd)) {
+        msg(a, "Open the trash first (the Trash button or Ctrl+B), then pick what to put back");
+        return;
+    }
+    char **names;
+    int n = op_targets(a, &names);
+    struct job *j = job_new(J_RESTORE, n);
+    if (!j) {
+        free_names(names, n);
+        return;
+    }
+    j->pane = a->act;
+    j->requested = n;
+    for (int i = 0; i < n; i++) {
+        struct job_item *it = &j->items[j->n];
+        char date[40], err[PATH_MAX + 160] = "";
+        join_path(p->cwd, names[i], it->src, sizeof(it->src));
+        if (!trash_origin(names[i], it->dst, sizeof(it->dst), date, sizeof(date)))
+            snprintf(err, sizeof(err), "%s: no record of where it came from (use F6 to move it)", names[i]);
+        else if (exists_any(it->dst))
+            snprintf(err, sizeof(err), "%s already exists: not replaced", it->dst);
+        else {
+            j->n++;
+            continue;
+        }
+        j->planned_skips++;
+        if (!j->first_skip[0])
+            snprintf(j->first_skip, sizeof(j->first_skip), "%s", err);
+    }
+    free_names(names, n);
+    if (j->n == 0) {
+        char why[sizeof(j->first_skip)];
+        snprintf(why, sizeof(why), "%s", j->first_skip);
+        job_free(j);
+        msg(a, "Restored 0 of %d: %s", n, why);
+        return;
+    }
+    job_start(a, j);
+}
+
+static void go_trash(struct app *a)
+{
+    char t[PATH_MAX];
+    if (!trash_files_dir(t, sizeof(t))) {
+        msg(a, "There is no trash folder (HOME is not set)");
+        return;
+    }
+    mkdir_p(t, 0700);
+    char info[PATH_MAX + 8];
+    snprintf(info, sizeof(info), "%.*s/../info", PATH_MAX - 8, t);
+    char norm[PATH_MAX];
+    normalize(info, norm, sizeof(norm));
+    mkdir_p(norm, 0700);
+    go_to(a, cur(a), t, NULL);
 }
 
 static void do_mkdir(struct app *a, const char *name)
@@ -1697,23 +1841,34 @@ struct rbtn {
     int x, w;
 };
 
-enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, N_TOOL };
+enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, N_TOOL };
+
+/* The buttons that belong to the two-pane manager (the picture chooser has neither). */
+static bool tool_visible(const struct app *a, int i)
+{
+    return a->dual || (i != B_PREVIEW && i != B_TRASH && i != B_RESTORE);
+}
 enum { F_HELP, F_RENAME, F_VIEW, F_EDIT, F_COPY, F_MOVE, F_MKDIR, F_DELETE, F_TERM, F_QUIT, N_FKEY };
 
 static void toolbar(const struct app *a, struct rbtn *b)
 {
-    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview" };
-    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a };
-    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50 };
+    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview", "Trash", "Restore" };
+    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f };
+    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50, 0xd65f5f, 0x98b84a };
     int x = 8;
     for (int i = 0; i < N_TOOL; i++) {
         b[i].label = labels[i];
         b[i].base = base[i];
         b[i].hover = hover[i];
-        bool on = (i == B_HIDDEN && a->show_hidden) || (i == B_PREVIEW && a->preview);
+        bool on = (i == B_HIDDEN && a->show_hidden) || (i == B_PREVIEW && a->preview) ||
+                  (i == B_TRASH && a->dual && in_trash(a->pane[a->act].cwd));
         if (on) {                                                       /* a switch that is on is lighter */
             b[i].base = hover[i];
             b[i].hover = lm_mix_rgb(hover[i], 0xffffff, 0.25);
+        }
+        if (i == B_RESTORE && !(a->dual && in_trash_files(a->pane[a->act].cwd))) {      /* only useful inside the trash: dim elsewhere */
+            b[i].base = lm_mix_rgb(base[i], COL_BAR, 0.65);
+            b[i].hover = lm_mix_rgb(hover[i], COL_BAR, 0.5);
         }
         b[i].w = (int)strlen(labels[i]) * LM_FONT_W + 20;
         b[i].x = x;
@@ -1766,6 +1921,8 @@ static void press_tool(struct app *a, int i)
     case B_HIDDEN: toggle_hidden(a); break;
     case B_TERM: start_terminal(a); break;
     case B_PREVIEW: toggle_preview(a); break;
+    case B_TRASH: go_trash(a); break;
+    case B_RESTORE: do_restore(a); break;
     }
 }
 
@@ -1914,6 +2071,8 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'r': reread(a); return;
         case 't': start_terminal(a); return;
         case 'q': toggle_preview(a); return;
+        case 'b': if (a->dual) go_trash(a); return;
+        case 'z': if (a->dual) do_restore(a); return;
         case 'l':
             prompt_start(a, P_GOTO, "");
             snprintf(a->pbuf, sizeof(a->pbuf), "%.*s%s", (int)sizeof(a->pbuf) - 2, cur(a)->cwd, strcmp(cur(a)->cwd, "/") ? "/" : "");
@@ -2218,6 +2377,7 @@ static void paint_help(struct wlwin *w)
         "F5 / F6           copy / move to the other pane's folder (the name is editable)",
         "F7                new folder",
         "F8 / Delete       move to the trash (asks first); Shift+F8: delete for good",
+        "Ctrl+B            open the trash; in it, Ctrl+Z / Restore puts files back",
         "F9 / Ctrl+T       a terminal in this folder",
         "F10               quit",
         "",
@@ -2251,7 +2411,7 @@ static void paint(struct wlwin *w)
     struct rbtn b[N_FKEY];
     toolbar(a, b);
     for (int i = 0; i < N_TOOL; i++) {
-        if (!a->dual && i == B_PREVIEW)
+        if (!tool_visible(a, i))
             continue;
         draw_rbtn(w, &b[i], 4, TOOL_H - 8, a->hover == i, 0);
     }
@@ -2274,7 +2434,13 @@ static void paint(struct wlwin *w)
     bool showing = a->msg[0] && now_ms() < a->msg_until;
     char status[PATH_MAX + 128];
     const struct entry *e = row_entry(p, p->sel);
-    if (e && a->dual) {
+    char origin[PATH_MAX], odate[40];
+    if (e && a->dual && in_trash_files(p->cwd) && trash_origin(e->name, origin, sizeof(origin), odate, sizeof(odate))) {
+        for (char *t = odate; *t; t++)
+            if (*t == 'T')
+                *t = ' ';
+        snprintf(status, sizeof(status), "%s  was in %s  (deleted %s)", e->name, origin, odate);
+    } else if (e && a->dual) {
         char sz[32], tm[32];
         struct tm lt;
         human_size(e->size, sz, sizeof(sz));
@@ -2299,7 +2465,7 @@ static void paint(struct wlwin *w)
             human_size((off_t)total, d2, sizeof(d2));
             snprintf(amount, sizeof(amount), "  (%s of %s)", d1, d2);
         }
-        const char *verb = j->kind == J_COPY ? "Copying" : j->kind == J_MOVE ? "Moving" : j->kind == J_TRASH ? "Moving to the trash" : "Deleting";
+        const char *verb = j->kind == J_COPY ? "Copying" : j->kind == J_MOVE ? "Moving" : j->kind == J_TRASH ? "Moving to the trash" : j->kind == J_RESTORE ? "Restoring" : "Deleting";
         snprintf(line, sizeof(line), "%s %s  %d%%%s   -   Esc cancels", verb, cur_name, pct, amount);
         wlwin_text(w, 6, sy + 2, a->msg[0] && now_ms() < a->msg_until ? a->msg : line, 1, 0xffffff, w->bw - 12);
     } else {
@@ -2342,7 +2508,7 @@ static int hover_at(const struct app *a, double px, double py)
     if (y >= 4 && y < TOOL_H - 4) {
         toolbar(a, b);
         for (int i = 0; i < N_TOOL; i++)
-            if ((a->dual || i != B_PREVIEW) && x >= b[i].x && x < b[i].x + b[i].w)
+            if (tool_visible(a, i) && x >= b[i].x && x < b[i].x + b[i].w)
                 return i;
     }
     if (a->dual && y >= a->win.bh - FKEY_H + 3 && y < a->win.bh - 3) {
@@ -2768,6 +2934,50 @@ static int selftest(void)
     do_delete(&a, false);
     snprintf(p, sizeof(p), "%s/Trash/files/final.txt.2", xdg);
     CHECK(access(p, F_OK) != 0 && strstr(a.msg, "Deleted 1"), "deleting inside the trash is for good: %s", a.msg);
+
+    /* restoring: back to where it was deleted from, the info file goes, nothing is replaced */
+    snprintf(p, sizeof(p), "%s/Trash/files", xdg);
+    CHECK(go_to(&a, &a.pane[1], p, NULL), "list the trash again");
+    a.act = 1;
+    for (int i = 0; i < a.pane[1].n; i++)
+        a.pane[1].e[i].marked = false;
+    CHECK(a.pane[1].n == 1 && !strcmp(a.pane[1].e[0].name, "final.txt"), "the trash holds final.txt (%d entries)", a.pane[1].n);
+    char origin[PATH_MAX], odate[40];
+    CHECK(trash_origin("final.txt", origin, sizeof(origin), odate, sizeof(odate)) && strstr(origin, "/right/final.txt") && strlen(odate) == 19,
+          "origin '%s' date '%s'", origin, odate);
+    CHECK(in_trash_files(p) && !in_trash_files(dir), "in_trash_files");
+    a.pane[1].sel = 1;                                                    /* (row 0 is "..") */
+    do_restore(&a);
+    snprintf(p, sizeof(p), "%s/right/final.txt", dir);
+    snprintf(p2, sizeof(p2), "%s/Trash/info/final.txt.trashinfo", xdg);
+    CHECK(file_is(p, "two\n") && access(p2, F_OK) != 0 && strstr(a.msg, "Put back 1"), "restored: %s", a.msg);
+    snprintf(p, sizeof(p), "%s/Trash/files/final.txt", xdg);
+    CHECK(access(p, F_OK) != 0, "and gone from the trash");
+    snprintf(p, sizeof(p), "%s/right/clash.txt", dir);                     /* the old place is taken again: not replaced */
+    write_file(p, "one", 3);
+    CHECK(go_to(&a, &a.pane[1], dst, NULL), "right pane");
+    for (int r = 0; r < rows(&a.pane[1]); r++)
+        if (!strcmp(row_name(&a.pane[1], r), "clash.txt"))
+            a.pane[1].sel = r;
+    do_delete(&a, false);
+    write_file(p, "two", 3);
+    snprintf(p, sizeof(p), "%s/Trash/files", xdg);
+    CHECK(go_to(&a, &a.pane[1], p, NULL), "trash");
+    a.pane[1].sel = 1;
+    do_restore(&a);
+    snprintf(p, sizeof(p), "%s/right/clash.txt", dir);
+    snprintf(p2, sizeof(p2), "%s/Trash/files/clash.txt", xdg);
+    CHECK(file_is(p, "two") && access(p2, F_OK) == 0 && strstr(a.msg, "not replaced"), "an existing file stays: %s", a.msg);
+    snprintf(p, sizeof(p), "%s/Trash/info/clash.txt.trashinfo", xdg);       /* no record: a clear message, nothing happens */
+    unlink(p);
+    CHECK(go_to(&a, &a.pane[1], xdg, NULL), "elsewhere");
+    do_restore(&a);
+    CHECK(strstr(a.msg, "Open the trash first"), "outside the trash: %s", a.msg);
+    snprintf(p, sizeof(p), "%s/Trash/files", xdg);
+    CHECK(go_to(&a, &a.pane[1], p, NULL), "trash once more");
+    a.pane[1].sel = 1;
+    do_restore(&a);
+    CHECK(strstr(a.msg, "no record") && access(p2, F_OK) == 0, "no info file: %s", a.msg);
 
     /* a cancelled job stops at once and leaves no half-written file behind */
     static struct job *cj;

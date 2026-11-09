@@ -1,12 +1,18 @@
 /*
- * mellagui-view - image viewer (PNG, PPM) for MellaGUI, mostly for the screenshots (Print) in ~/Pictures.
+ * mellagui-view - image viewer (PNG, JPEG, PPM) and player of Motion JPEG videos (.mp4) for MellaGUI, mostly for the screenshots (Print)
+ * in ~/Pictures and the recordings of mellagui-record.
  *
  *   mellagui-view [FILE | DIR]     FILE: the images of its directory, starting at FILE; DIR (default ~/Pictures): the
  *                                  newest image (the last name: screenshots are named by date)
  *   mellagui-view --decode FILE OUT.ppm   decode FILE and write it as a PPM (tests)
  *   mellagui-view --selftest
  *
- * Keys: Left/Right (PgUp/PgDn, Backspace/Space) previous / next, Home/End first / last, + - zoom, 0 or 1 = 100 %,
+ * Videos (.mp4 / .m4v with Motion JPEG pictures: what mellagui-record writes, or `ffmpeg -c:v mjpeg`; no sound; H.264 and the rest
+ * are recognised but cannot be shown) play at once: Space plays / pauses, Left / Right go 5 s back / on, `,` and `.` step a picture,
+ * Home starts again, a click or drag on the bottom bar seeks, PgUp / PgDn / Backspace / N / P choose the previous / next file; the picture
+ * zooms and pans like an image. `--video-info FILE` and `--decode FILE.mp4 OUT.ppm [N]` (picture N) are for tests.
+ *
+ * Keys (images): Left/Right (PgUp/PgDn, Backspace/Space) previous / next, Home/End first / last, + - zoom, 0 or 1 = 100 %,
  * F = fit, R = rescan the directory, Esc or Q = quit. Mouse: wheel zooms around the pointer, drag pans, double click
  * toggles fit / 100 %.
  */
@@ -23,6 +29,8 @@
 #include "font.h"
 #include "img.h"
 #include "keymap.h"
+#include "loop.h"
+#include "mp4read.h"
 #include "png.h"
 #include "protocol.h"
 #include "util.h"
@@ -52,15 +60,26 @@ struct app {
     double px, py, drag_x, drag_y;
     uint32_t last_click_ms;
     double last_click_x, last_click_y;
+    struct lm_mp4r *vid;                /* the video being played (NULL: an image) */
+    uint32_t vframe;                    /* the picture shown */
+    bool playing, seeking;
+    uint64_t pos_ms;                    /* where the video is (paused), or where it was when playing (re)started */
+    uint64_t play_t0;                   /* lm_now_ms() when it (re)started */
 };
 
 /* ---- directory ---------------------------------------------------------------------------------------------------- */
+
+static bool is_video_name(const char *n)
+{
+    size_t l = strlen(n);
+    return l > 4 && (!strcasecmp(n + l - 4, ".mp4") || !strcasecmp(n + l - 4, ".m4v"));
+}
 
 static bool is_image_name(const char *n)
 {
     size_t l = strlen(n);
     return n[0] != '.' && l > 4 && (!strcasecmp(n + l - 4, ".png") || !strcasecmp(n + l - 4, ".ppm") || !strcasecmp(n + l - 4, ".jpg") ||
-                                    (l > 5 && !strcasecmp(n + l - 5, ".jpeg")));
+                                    (l > 5 && !strcasecmp(n + l - 5, ".jpeg")) || is_video_name(n));
 }
 
 static int cmp_names(const void *a, const void *b)
@@ -123,17 +142,138 @@ static void set_title(struct app *a)
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
 
+/* ---- video ------------------------------------------------------------------------------------------------------------- */
+
+static uint64_t video_pos(const struct app *a)
+{
+    if (!a->vid)
+        return 0;
+    uint64_t p = a->playing ? a->pos_ms + (lm_now_ms() - a->play_t0) : a->pos_ms;
+    return p > a->vid->duration_ms ? a->vid->duration_ms : p;
+}
+
+static void show_frame(struct app *a, uint32_t f)
+{
+    size_t len = 0;
+    uint8_t *jpg = lm_mp4r_sample(a->vid, f, &len);
+    struct lm_image img = { 0 };
+    char err[160] = "cannot read the picture";
+    if (jpg && lm_jpeg_decode(jpg, len, &img, err, sizeof(err)) == 0) {
+        lm_img_free(&a->img);
+        a->img = img;
+        free(a->scaled);
+        a->scaled = NULL;
+        a->vframe = f;
+        a->err[0] = 0;
+    } else {
+        snprintf(a->err, sizeof(a->err), "picture %u: %s", (unsigned)f + 1, err);
+        a->playing = false;
+    }
+    free(jpg);
+    a->win.redraw = true;
+}
+
+static void video_seek(struct app *a, int64_t ms)
+{
+    if (!a->vid)
+        return;
+    if (ms < 0)
+        ms = 0;
+    if ((uint64_t)ms > a->vid->duration_ms)
+        ms = (int64_t)a->vid->duration_ms;
+    a->pos_ms = (uint64_t)ms;
+    a->play_t0 = lm_now_ms();
+    uint32_t f = lm_mp4r_frame_at(a->vid, a->pos_ms);
+    if (f != a->vframe || !a->img.px)
+        show_frame(a, f);
+    a->win.redraw = true;
+}
+
+static void video_toggle(struct app *a)
+{
+    if (!a->vid)
+        return;
+    if (a->playing) {
+        a->pos_ms = video_pos(a);
+        a->playing = false;
+    } else {
+        if (a->pos_ms >= a->vid->duration_ms)           /* at the end: again from the start */
+            video_seek(a, 0);
+        a->play_t0 = lm_now_ms();
+        a->playing = true;
+    }
+    a->win.redraw = true;
+}
+
+/* Called after every loop turn: shows the picture that belongs to now; ends the playback at the end. */
+static void video_tick(struct app *a)
+{
+    if (!a->vid || !a->playing)
+        return;
+    uint64_t pos = video_pos(a);
+    uint32_t f = lm_mp4r_frame_at(a->vid, pos);
+    if (f != a->vframe)
+        show_frame(a, f);
+    if (pos >= a->vid->duration_ms) {
+        a->pos_ms = a->vid->duration_ms;
+        a->playing = false;
+        a->win.redraw = true;
+    }
+}
+
+/* How long the loop may sleep: until the next picture (at most 250 ms: the clock in the bar). */
+static int video_timeout(const struct app *a)
+{
+    if (!a->vid || !a->playing)
+        return -1;
+    uint64_t pos = video_pos(a);
+    int t = 250;
+    if (a->vframe + 1 < a->vid->n) {
+        uint64_t next = a->vid->pts_ms[a->vframe + 1];
+        t = next > pos ? (int)LM_MIN(next - pos, 250) : 1;
+    }
+    return t;
+}
+
+static void fmt_time(char *out, size_t n, uint64_t ms)
+{
+    unsigned s = (unsigned)(ms / 1000);
+    if (s >= 3600)
+        snprintf(out, n, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
+    else
+        snprintf(out, n, "%02u:%02u", s / 60, s % 60);
+}
+
 static void load_current(struct app *a)
 {
     lm_img_free(&a->img);
     free(a->scaled);
     a->scaled = NULL;
     a->err[0] = 0;
+    lm_mp4r_close(a->vid);
+    a->vid = NULL;
+    a->playing = false;
+    a->vframe = 0;
+    a->pos_ms = 0;
     if (a->n) {
         char path[PATH_MAX + 300];
         snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[a->cur]);
-        if (lm_img_load(path, &a->img, a->err, sizeof(a->err)) < 0)
+        if (is_video_name(a->names[a->cur])) {
+            a->vid = lm_mp4r_open(path, a->err, sizeof(a->err));
+            if (a->vid && !a->vid->mjpeg) {
+                snprintf(a->err, sizeof(a->err), "This video is %s (%dx%d): only Motion JPEG can be shown, what mellagui-record writes", a->vid->codec,
+                         a->vid->w, a->vid->h);
+                lm_mp4r_close(a->vid);
+                a->vid = NULL;
+            }
+            if (a->vid) {
+                show_frame(a, 0);
+                a->play_t0 = lm_now_ms();
+                a->playing = a->img.px != NULL;
+            }
+        } else if (lm_img_load(path, &a->img, a->err, sizeof(a->err)) < 0) {
             a->img.px = NULL;
+        }
     }
     a->fit = true;
     a->zoom = fit_zoom(a);
@@ -238,17 +378,29 @@ static void paint(struct wlwin *w)
                 memcpy(dst + ox + x0, src + (size_t)y * (size_t)stride + (size_t)x0, (size_t)(x1 - x0) * 4);
             }
         }
-        snprintf(status, sizeof(status), "%s   %dx%d   %d%%%s   %d/%d", a->names[a->cur], a->img.w, a->img.h,
-                 (int)(z * 100 + 0.5), a->fit ? " (fit)" : "", a->cur + 1, a->n);
+        if (a->vid) {
+            char t1[16], t2[16];
+            fmt_time(t1, sizeof(t1), video_pos(a));
+            fmt_time(t2, sizeof(t2), a->vid->duration_ms);
+            snprintf(status, sizeof(status), "%s   %dx%d   %s / %s   %s   %d%%   %d/%d", a->names[a->cur], a->img.w, a->img.h, t1, t2,
+                     a->playing ? "playing" : "paused", (int)(z * 100 + 0.5), a->cur + 1, a->n);
+        } else {
+            snprintf(status, sizeof(status), "%s   %dx%d   %d%%%s   %d/%d", a->names[a->cur], a->img.w, a->img.h,
+                     (int)(z * 100 + 0.5), a->fit ? " (fit)" : "", a->cur + 1, a->n);
+        }
     } else if (a->n) {
         snprintf(status, sizeof(status), "%s: %s   %d/%d", a->names[a->cur], a->err, a->cur + 1, a->n);
         wlwin_text(w, 16, 16, a->err, 1, 0xff8080u, vw - 32);
     } else {
         snprintf(status, sizeof(status), "no images in %.300s", a->dir);
-        wlwin_text(w, 16, 16, "No images (PNG / PPM) here. Press Print to take a screenshot, R to look again.", 1, BAR_FG, vw - 32);
+        wlwin_text(w, 16, 16, "No images or videos here. Press Print to take a screenshot, R to look again.", 1, BAR_FG, vw - 32);
     }
     wlwin_fill(w, 0, vh, w->bw, w->bh - vh, BAR_BG);
-    wlwin_text(w, 8, vh + (BAR_H - LM_FONT_H) / 2, status, 1, BAR_FG, w->bw - 16);
+    if (a->vid && a->vid->duration_ms) {                         /* the progress: a strip along the top of the bar */
+        wlwin_fill(w, 0, vh, w->bw, 4, 0x2a3040u);
+        wlwin_fill(w, 0, vh, (int)((uint64_t)w->bw * video_pos(a) / a->vid->duration_ms), 4, lm_theme.accent);
+    }
+    wlwin_text(w, 8, vh + (BAR_H - LM_FONT_H) / 2 + 2, status, 1, BAR_FG, w->bw - 16);
 }
 
 /* ---- input ---------------------------------------------------------------------------------------------------------- */
@@ -264,10 +416,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->has_pointer = false;
+        a->seeking = false;
         a->dragging = false;
         break;
     case LM_WL_POINTER_EVT_MOTION: {
         double x = lm_fixed_to_double(args[1].f), y = lm_fixed_to_double(args[2].f);
+        if (a->seeking && a->vid)
+            video_seek(a, (int64_t)(LM_CLAMP(x / (double)w->bw, 0.0, 1.0) * (double)a->vid->duration_ms));
         if (a->dragging && a->img.px) {
             double z = cur_zoom(a);
             if (a->fit) {                               /* dragging starts from the centred position */
@@ -290,6 +445,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         if (args[2].u != 272)                           /* BTN_LEFT */
             break;
+        if (args[3].u == 1 && a->vid && a->py >= view_h(a)) {   /* a click on the bar of a video seeks */
+            a->seeking = true;
+            video_seek(a, (int64_t)(LM_CLAMP(a->px / (double)w->bw, 0.0, 1.0) * (double)a->vid->duration_ms));
+            break;
+        }
+        if (args[3].u != 1)
+            a->seeking = false;
         if (args[3].u == 1) {
             uint32_t t = args[1].u;
             if (t - a->last_click_ms < 400 && abs((int)(a->px - a->last_click_x)) < 6 && abs((int)(a->py - a->last_click_y)) < 6) {
@@ -338,9 +500,25 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     }
     if (ks == LM_KS_Escape || c == 'q' || c == 'Q') {
         w->running = false;
-    } else if (ks == LM_KS_Right || ks == LM_KS_Page_Down || c == ' ') {
+    } else if (a->vid && c == ' ') {
+        video_toggle(a);
+    } else if (a->vid && ks == LM_KS_Right) {
+        video_seek(a, (int64_t)video_pos(a) + 5000);
+    } else if (a->vid && ks == LM_KS_Left) {
+        video_seek(a, (int64_t)video_pos(a) - 5000);
+    } else if (a->vid && (c == ',' || c == '.')) {                 /* one picture back / on, paused */
+        uint32_t f = lm_mp4r_frame_at(a->vid, video_pos(a));
+        if (a->playing)
+            video_toggle(a);
+        f = c == '.' ? LM_MIN(f + 1, a->vid->n - 1) : (f ? f - 1 : 0);
+        video_seek(a, (int64_t)a->vid->pts_ms[f]);
+    } else if (a->vid && ks == LM_KS_Home) {
+        video_seek(a, 0);
+    } else if (a->vid && ks == LM_KS_End) {
+        video_seek(a, (int64_t)a->vid->duration_ms);
+    } else if (ks == LM_KS_Right || ks == LM_KS_Page_Down || c == ' ' || c == 'n' || c == 'N') {
         go(a, a->cur + 1);
-    } else if (ks == LM_KS_Left || ks == LM_KS_Page_Up || ks == LM_KS_BackSpace) {
+    } else if (ks == LM_KS_Left || ks == LM_KS_Page_Up || ks == LM_KS_BackSpace || c == 'p' || c == 'P') {
         go(a, a->cur - 1);
     } else if (ks == LM_KS_Home) {
         go(a, 0);
@@ -391,11 +569,37 @@ static int selftest(void)
     return bad ? 1 : 0;
 }
 
-static int decode_cmd(const char *in, const char *out)
+/* `--video-info FILE`: "WxH codec=.. mjpeg=0|1 pictures=N duration_ms=N" */
+static int video_info_cmd(const char *in)
+{
+    char err[160];
+    struct lm_mp4r *r = lm_mp4r_open(in, err, sizeof(err));
+    if (!r) {
+        fprintf(stderr, "mellagui-view: %s\n", err);
+        return 1;
+    }
+    printf("%dx%d codec=%s mjpeg=%d pictures=%u duration_ms=%llu\n", r->w, r->h, r->codec, r->mjpeg, (unsigned)r->n,
+           (unsigned long long)r->duration_ms);
+    lm_mp4r_close(r);
+    return 0;
+}
+
+static int decode_cmd(const char *in, const char *out, int frame)
 {
     struct lm_image img = { 0 };
     char err[160];
-    if (lm_img_load(in, &img, err, sizeof(err)) < 0) {
+    if (is_video_name(in)) {
+        struct lm_mp4r *r = lm_mp4r_open(in, err, sizeof(err));
+        size_t len = 0;
+        uint8_t *jpg = r && r->mjpeg && frame >= 0 && (uint32_t)frame < r->n ? lm_mp4r_sample(r, (uint32_t)frame, &len) : NULL;
+        int rc = !r ? -1 : !jpg ? (snprintf(err, sizeof(err), "no such picture, or not Motion JPEG"), -1) : lm_jpeg_decode(jpg, len, &img, err, sizeof(err));
+        free(jpg);
+        lm_mp4r_close(r);
+        if (rc < 0) {
+            fprintf(stderr, "mellagui-view: %s\n", err);
+            return 1;
+        }
+    } else if (lm_img_load(in, &img, err, sizeof(err)) < 0) {
         fprintf(stderr, "mellagui-view: %s\n", err);
         return 1;
     }
@@ -418,7 +622,9 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     if (argc > 3 && !strcmp(argv[1], "--decode"))
-        return decode_cmd(argv[2], argv[3]);
+        return decode_cmd(argv[2], argv[3], argc > 4 ? atoi(argv[4]) : 0);
+    if (argc > 2 && !strcmp(argv[1], "--video-info"))
+        return video_info_cmd(argv[2]);
 
     struct app a = { 0 };
     const char *arg = argc > 1 ? argv[1] : NULL, *keep = NULL;
@@ -448,9 +654,10 @@ int main(int argc, char **argv)
     if (wlwin_open(&a.win, "Images", "mellagui.view", 860, 520, 240, 160) < 0)
         return 1;
     load_current(&a);
-    while (wlwin_step(&a.win, -1))
-        ;
+    while (wlwin_step(&a.win, video_timeout(&a)))
+        video_tick(&a);
     wlwin_destroy(&a.win);
+    lm_mp4r_close(a.vid);
     lm_img_free(&a.img);
     free(a.scaled);
     free_names(&a);

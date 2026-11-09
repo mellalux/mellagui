@@ -2329,6 +2329,39 @@ class TestClients(Base):
         ctl.tap(KEY_ENTER)
         self.wait_title('mellagui.view', 'p.ppm - Images')
 
+    def test_files_opens_videos_in_the_viewer(self):
+        rec = os.path.join(ROOT, 'build', 'mellagui-record')
+        if not os.path.exists(rec):
+            self.skipTest('mellagui-record not built')
+        p, d = self.files_start()
+        r = subprocess.run([rec, '--start', '--duration', '0.5', '--dir', d, '--name', 'clip.mp4'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ctl.key(KEY_LEFTCTRL, True); ctl.tap(19); ctl.key(KEY_LEFTCTRL, False)            # Ctrl+R: read the folder again
+        time.sleep(0.3)
+        ctl.tap(KEY_C)                                                                    # c: the first name that starts with it
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.view', 'clip.mp4 - Images')
+
+    def test_files_starts_programs(self):
+        calc = os.path.join(ROOT, 'build', 'mellagui-calc')
+        if not os.path.exists(calc):
+            self.skipTest('mellagui-calc not built')
+        p, d = self.files_start()
+        prog = os.path.join(d, 'zcalc')
+        shutil.copy(calc, prog)                                                            # an ELF program that may be executed
+        plain = os.path.join(d, 'ycalc')
+        shutil.copy(calc, plain)
+        os.chmod(plain, 0o644)                                                             # ... and one that may not
+        ctl.key(KEY_LEFTCTRL, True); ctl.tap(19); ctl.key(KEY_LEFTCTRL, False)
+        time.sleep(0.3)
+        ctl.tap(21)                                                                        # y: the program that cannot run
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.6)
+        self.assertIsNone(self.window_title('mellagui.calc', 0.2), 'a file without the execute permission was started')
+        ctl.tap(44)                                                                        # z
+        ctl.tap(KEY_ENTER)
+        self.assertIsNotNone(wait_for_window('mellagui.calc'), 'Enter on a program did not start it')
+
     FKEYS = {3: 61, 5: 63, 6: 64, 7: 65, 8: 66, 10: 68}
     K_TAB, K_INS = 15, 110
 
@@ -6232,10 +6265,12 @@ class TestRecord(Base):
         r = subprocess.Popen([self.REC, '--start', '--duration', '2.5', '--dir', d, '--fps', '15'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
         time.sleep(0.9)
+        self.assertEqual(ctl.cmd('tray')[0], 'tray n=1', 'the bar has no item while recording')
         win = Window(win_client, 300, 200, color=0xffff00ff)                # appears while recording
         win_client.wl.roundtrip()
         out, err = r.communicate(timeout=20)
         self.assertEqual(r.returncode, 0, err)
+        self.assertEqual(ctl.cmd('tray')[0], 'tray n=0', 'the item is still in the bar after the recording')
         files = [f for f in os.listdir(d) if f.endswith('.mp4')]
         self.assertEqual(len(files), 1, files)
         path = os.path.join(d, files[0])
@@ -6299,6 +6334,7 @@ class TestRecord(Base):
         self.assertIn('cannot create', r.stderr)
 
     def test_the_window(self):
+        """Space starts, the window goes out of the way and the bar's item shows the recording; a click on the item ends it."""
         d = self.outdir()
         p = subprocess.Popen([self.REC, '--dir', d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -6311,25 +6347,32 @@ class TestRecord(Base):
             time.sleep(0.03)
         ctl.abs(win['x'] + 100, win['y'] + 100)                              # the pointer inside: the keyboard goes here
         time.sleep(0.3)
+        self.assertEqual(ctl.cmd('tray')[0], 'tray n=0')
         ctl.tap(KEY_SPACE)                                                   # record
+        item = None
         for _ in range(100):
-            if any(f.endswith('.mp4') for f in os.listdir(d)):
+            lines = ctl.cmd('tray')
+            if lines[0] == 'tray n=1':
+                item = lines[1]
                 break
             time.sleep(0.05)
-        self.assertTrue(any(f.endswith('.mp4') for f in os.listdir(d)), 'Space did not start a recording')
+        self.assertIsNotNone(item, 'Space did not start a recording')
+        for _ in range(100):
+            win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.record'][0]
+            if 'minimized' in win['flags']:
+                break
+            time.sleep(0.05)
+        self.assertIn('minimized', win['flags'], 'the window stays in the way of the recording')
         time.sleep(0.8)
-        ctl.tap(KEY_SPACE)                                                   # stop
+        m = re.match(r'item (\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) icon=(\d+)x(\d+) text=(\d\d:\d\d)$', ctl.cmd('tray')[1])
+        self.assertIsNotNone(m, ctl.cmd('tray'))
+        x, y, w, h = (int(m[i]) for i in (2, 3, 4, 5))
+        ctl.click(x + w // 2, y + h // 2)                                    # the item stops it, and with it the program (nobody sees the window)
+        self.assertEqual(p.wait(timeout=15), 0)
         files = [f for f in os.listdir(d) if f.endswith('.mp4')]
         self.assertEqual(len(files), 1)
-        for _ in range(100):                                                 # the file is complete once the index is written
-            try:
-                self.parse_mp4(os.path.join(d, files[0]))
-                break
-            except (AssertionError, ValueError):
-                time.sleep(0.05)
         self.assertGreaterEqual(len(self.parse_mp4(os.path.join(d, files[0]))['samples']), 1)
-        ctl.tap(KEY_ESC)                                                     # Esc closes the program
-        self.assertEqual(p.wait(timeout=10), 0)
+        self.assertEqual(ctl.cmd('tray')[0], 'tray n=0')
 
     def test_closed_to_other_programs(self):
         p, c, stop = self.private_compositor('rec-own', '--settings-access', 'own')
@@ -6368,6 +6411,141 @@ class TestRecord(Base):
         ev = cl.wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 3.0)
         self.assertEqual((ev.name, ev.args[1]), ('failed', 'locked'))
         self.assertEqual(struct.unpack_from('<I', shm.map, 0)[0], 0xff010203)
+
+
+class TestTray(Base):
+    """The panel's tray (src/tray.c): programs put icons / labels into the top bar through mellagui_tray_v1."""
+
+    def item(self, cl, tray=None):
+        wl = cl.wl
+        tray = tray or wl.bind('mellagui_tray_v1')
+        it = wl.new_id('mellagui_tray_item_v1')
+        wl.request(tray, 'create_item', it)
+        wl.roundtrip()
+        return tray, it
+
+    @staticmethod
+    def items():
+        lines = ctl.cmd('tray')
+        n = int(re.match(r'tray n=(\d+)', lines[0])[1])
+        out = []
+        for l in lines[1:]:
+            m = re.match(r'item (\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) icon=(\S+) text=(.*)$', l)
+            out.append(dict(id=int(m[1]), x=int(m[2]), y=int(m[3]), w=int(m[4]), h=int(m[5]), icon=m[6], text=m[7]))
+        assert n == len(out)
+        return out
+
+    def test_an_item_shows_icon_and_text(self):
+        cl = self.client()
+        wl = cl.wl
+        self.assertEqual(self.items(), [])
+        tray, it = self.item(cl)
+        ev = wl.wait_for(lambda e: e.obj == it and e.name == 'size', 2.0)
+        self.assertIsNotNone(ev, 'no icon size was announced')
+        size = ev.args[0]
+        self.assertTrue(8 <= size <= 64, size)
+        shm = Shm(wl, 64 * 64 * 4)
+        buf = shm.buffer(size, size, argb=0xffff00ff)
+        wl.request(it, 'set_icon', buf)
+        wl.request(it, 'set_text', 'rec 01:02')
+        wl.roundtrip()
+        ctl.sync()
+        (item,) = self.items()
+        self.assertEqual((item['icon'], item['text']), ('%dx%d' % (size, size), 'rec 01:02'))
+        ppm = ctl.dump(os.path.join(tmp, 'tray1.ppm'))
+        ix, iy = item['x'] + 6 + size // 2, item['y'] + item['h'] // 2
+        self.assertEqual(ppm.px(ix, iy), (255, 0, 255), 'the icon is not in the bar')
+        # the label changes, the icon goes
+        wl.request(it, 'set_text', 'x')
+        wl.request(it, 'set_icon', 0)
+        wl.roundtrip()
+        (item,) = self.items()
+        self.assertEqual((item['icon'], item['text']), ('-', 'x'))
+        # the buffer was released after the copy: it can be drawn into again
+        self.assertIsNone(wl.error)
+
+    def test_clicks(self):
+        cl = self.client()
+        wl = cl.wl
+        tray, it = self.item(cl)
+        wl.request(it, 'set_text', 'hello')
+        wl.roundtrip()
+        ctl.sync()
+        (item,) = self.items()
+        cx, cy = item['x'] + item['w'] // 2, item['y'] + item['h'] // 2
+        wl.queue.clear()
+        ctl.click(cx, cy)
+        ev = wl.wait_for(lambda e: e.obj == it and e.name == 'clicked', 2.0)
+        self.assertEqual(ev.args, [BTN_LEFT])
+        ctl.click(cx, cy, BTN_RIGHT)
+        ev = wl.wait_for(lambda e: e.obj == it and e.name == 'clicked', 2.0)
+        self.assertEqual(ev.args, [BTN_RIGHT])
+        ctl.abs(cx, cy)                                                       # pressed on it, let go elsewhere: no click
+        ctl.button(BTN_LEFT, True)
+        ctl.abs(cx - item['w'] - 40, cy)
+        ctl.button(BTN_LEFT, False)
+        wl.pump(0.3)
+        self.assertEqual([e for e in wl.queue if e.obj == it and e.name == 'clicked'], [])
+
+    def test_items_go_with_their_client(self):
+        cl = self.client()
+        tray, it = self.item(cl)
+        cl2 = self.client()
+        self.item(cl2)
+        self.assertEqual(len(self.items()), 2)
+        cl.wl.request(it, 'destroy')
+        cl.wl.roundtrip()
+        ctl.sync()
+        self.assertEqual(len(self.items()), 1)
+        cl2.wl.close()
+        for _ in range(50):
+            ctl.sync()
+            if not self.items():
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.items(), [])
+
+    def test_the_first_item_is_the_rightmost_and_they_do_not_overlap(self):
+        cl = self.client()
+        tray, a = self.item(cl)
+        _, b = self.item(cl, tray)
+        cl.wl.request(a, 'set_text', 'one')
+        cl.wl.request(b, 'set_text', 'two two')
+        cl.wl.roundtrip()
+        ctl.sync()
+        ia, ib = self.items()
+        self.assertLess(ib['x'] + ib['w'], ia['x'])
+        self.assertEqual((ia['y'], ia['h']), (ib['y'], ib['h']))
+
+    def test_limits_and_bad_icons(self):
+        cl = self.client()
+        wl = cl.wl
+        tray = wl.bind('mellagui_tray_v1')
+        its = [self.item(cl, tray)[1] for _ in range(6)]
+        self.assertEqual(len(self.items()), 4, 'more than 4 items of one client are shown')
+        shm = Shm(wl, 200 * 200 * 4)
+        big = shm.buffer(100, 100, argb=0xffff00ff)                           # too big: ignored, the program is not punished
+        wl.request(its[0], 'set_icon', big)
+        wl.roundtrip()
+        self.assertEqual(self.items()[0]['icon'], '-')
+        self.assertIsNone(wl.error)
+        wl.request(its[0], 'set_text', 'a' * 100 + '\x01\x02')                 # cut to 31 bytes, control characters are blanks
+        wl.roundtrip()
+        ctl.sync()
+        text = self.items()[0]['text']
+        self.assertEqual(len(text), 31)
+        self.assertNotIn('\x01', text)
+
+    def test_closed_to_other_programs(self):
+        p, c, stop = self.private_compositor('tray-own', '--settings-access', 'own')
+        cl = Client(os.path.join(tmp, 'tray-own'))
+        self.clients.append(cl)
+        tray, it = self.item(cl)
+        self.assertEqual([e.name for e in cl.wl.queue if e.obj == it], [], 'a foreign program was answered')
+        cl.wl.request(it, 'set_text', 'spoof')
+        cl.wl.roundtrip()
+        self.assertEqual(c.cmd('tray')[0], 'tray n=0')
+        self.assertIsNone(cl.wl.error)
 
 
 class TestViewer(Base):
@@ -6471,6 +6649,131 @@ class TestViewer(Base):
         ctl.tap(106)
         ctl.tap(107)
         time.sleep(0.2)
+        self.assertIsNone(p.poll())
+
+    # ---- videos -----------------------------------------------------------------------------------------------------------
+
+    def make_video(self, d, name='clip.mp4', seconds=3, rate=10, codec='mjpeg'):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        path = os.path.join(d, name)
+        args = [ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=%d:size=320x240:rate=%d' % (seconds, rate), '-c:v', codec]
+        if codec == 'mjpeg':
+            args += ['-pix_fmt', 'yuvj420p']
+        subprocess.run(args + [path], check=True, timeout=60)
+        return path
+
+    def video_dir(self):
+        d = tempfile.mkdtemp(prefix='mellagui-viewer-')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def info(self, path):
+        return subprocess.run([self.VIEW, '--video-info', path], capture_output=True, text=True, timeout=10)
+
+    def window_pixels(self, name):
+        """The viewer's window and the bytes of its picture area (without the bar) in a dump."""
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view'][0]
+        ppm = ctl.dump(os.path.join(tmp, name))
+        rows = []
+        for y in range(win['y'], win['y'] + win['h'] - 28):
+            o = (y * ppm.w + win['x']) * 3
+            rows.append(ppm.data[o:o + win['w'] * 3])
+        return win, ppm, b''.join(rows)
+
+    def test_video_info_and_decode(self):
+        if not os.path.exists(self.VIEW):
+            self.skipTest('mellagui-view not built')
+        d = self.video_dir()
+        path = self.make_video(d)
+        r = self.info(path)
+        self.assertEqual(r.stdout.strip(), '320x240 codec=mp4v mjpeg=1 pictures=30 duration_ms=3000', r.stderr)
+        out = os.path.join(d, 'f.ppm')
+        self.assertEqual(subprocess.run([self.VIEW, '--decode', path, out, '12'], capture_output=True, timeout=10).returncode, 0)
+        ppm = Ppm(out)
+        self.assertEqual((ppm.w, ppm.h), (320, 240))
+        self.assertEqual(subprocess.run([self.VIEW, '--decode', path, out, '99'], capture_output=True, timeout=10).returncode, 1)
+        # a video that is not Motion JPEG is recognised, not shown
+        mp4 = self.make_video(d, 'm.mp4', seconds=1, codec='mpeg4')
+        self.assertIn('mjpeg=0', self.info(mp4).stdout)
+        self.assertEqual(subprocess.run([self.VIEW, '--decode', mp4, out], capture_output=True, timeout=10).returncode, 1)
+        # damaged: cut off (no index), junk, empty, missing
+        with open(path, 'rb') as f:
+            data = f.read()
+        for name, blob in (('cut.mp4', data[:len(data) // 2]), ('junk.mp4', os.urandom(300)), ('empty.mp4', b'')):
+            with open(os.path.join(d, name), 'wb') as f:
+                f.write(blob)
+            r = self.info(os.path.join(d, name))
+            self.assertEqual(r.returncode, 1, name)
+            self.assertNotIn('Sanitizer', r.stderr)
+        self.assertEqual(self.info(os.path.join(d, 'nothing.mp4')).returncode, 1)
+
+    def test_a_recording_of_ours_can_be_read(self):
+        rec = os.path.join(os.path.dirname(BIN), 'mellagui-record')
+        if not os.path.exists(rec) or not os.path.exists(self.VIEW):
+            self.skipTest('mellagui-record / mellagui-view not built')
+        d = self.video_dir()
+        r = subprocess.run([rec, '--start', '--duration', '1.2', '--dir', d, '--name', 'ours.mp4'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        info = self.info(os.path.join(d, 'ours.mp4')).stdout
+        self.assertRegex(info, r'^1024x600 codec=mp4v mjpeg=1 pictures=\d+ duration_ms=1[2-3]\d\d$')
+        out = os.path.join(d, 'f.ppm')
+        self.assertEqual(subprocess.run([self.VIEW, '--decode', os.path.join(d, 'ours.mp4'), out], capture_output=True, timeout=10).returncode, 0)
+        ppm = Ppm(out)
+        self.assertEqual((ppm.w, ppm.h), (1024, 600))
+        near = sum(1 for x in range(300, 400) for y in range(0, 30)
+                   if all(abs(a - b) <= 8 for a, b in zip(ppm.px(x, y), (0x14, 0x17, 0x1f))))
+        self.assertGreater(near, 500, 'the panel of the recorded screen is not in the picture')
+
+    def test_a_video_plays_pauses_and_seeks(self):
+        d = self.video_dir()
+        self.make_video(d)
+        p, win = self.start(d, os.path.join(d, 'clip.mp4'))
+        self.assertTrue(self.wait_title('clip.mp4 - Images'))
+        ctl.abs(900, 590)
+        time.sleep(0.2)
+        _, _, a = self.window_pixels('vid1.ppm')
+        time.sleep(0.6)
+        _, _, b = self.window_pixels('vid2.ppm')
+        self.assertNotEqual(a, b, 'the picture does not change: the video is not playing')
+        ctl.tap(KEY_SPACE)                                                        # pause
+        time.sleep(0.3)
+        _, _, c = self.window_pixels('vid3.ppm')
+        time.sleep(0.6)
+        _, _, e = self.window_pixels('vid4.ppm')
+        self.assertEqual(c, e, 'the video moves while it is paused')
+        ctl.tap(KEY_SPACE)                                                        # on again
+        time.sleep(0.6)
+        _, _, f = self.window_pixels('vid5.ppm')
+        self.assertNotEqual(e, f)
+        ctl.tap(107)                                                              # End: the last picture, shown as it was decoded
+        time.sleep(0.5)
+        win, ppm, g = self.window_pixels('vid6.ppm')
+        out = os.path.join(d, 'last.ppm')
+        subprocess.run([self.VIEW, '--decode', os.path.join(d, 'clip.mp4'), out, '29'], check=True, timeout=10)
+        last = Ppm(out)
+        ox, oy = win['x'] + (win['w'] - 320) // 2, win['y'] + (win['h'] - 24 - 240) // 2
+        xs, ys = range(0, 320, 5), range(0, 240, 7)
+        same = sum(1 for y in ys for x in xs if ppm.px(ox + x, oy + y) == last.px(x, y))
+        self.assertEqual(same, len(xs) * len(ys), 'the last picture is not on the screen')
+        time.sleep(0.5)
+        _, _, h = self.window_pixels('vid7.ppm')
+        self.assertEqual(g, h, 'the video does not stop at its end')
+        ctl.tap(KEY_SPACE)                                                        # at the end: plays again from the start
+        time.sleep(0.5)
+        _, _, i = self.window_pixels('vid8.ppm')
+        self.assertNotEqual(h, i)
+
+    def test_a_video_that_cannot_be_shown_does_not_hurt(self):
+        d = self.video_dir()
+        self.make_video(d, 'm.mp4', seconds=1, codec='mpeg4')
+        with open(os.path.join(d, 'z-junk.mp4'), 'wb') as f:
+            f.write(os.urandom(500))
+        p, win = self.start(d, os.path.join(d, 'm.mp4'))
+        self.assertTrue(self.wait_title('m.mp4 - Images'))
+        ctl.tap(106)                                                              # Right: the junk file after it
+        self.assertTrue(self.wait_title('z-junk.mp4 - Images'))
         self.assertIsNone(p.poll())
 
 

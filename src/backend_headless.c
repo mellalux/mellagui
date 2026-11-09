@@ -342,6 +342,19 @@ static void ctl_command(struct ctl_client *c, char *line)
             }
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "tray")) {
+        /* tray -> the lines of lm_wm_tray_describe ("tray n=..", one "item .." line each), then "ok" */
+        static char text[4096];
+        if (srv->wm) {
+            lm_wm_tray_describe(srv->wm, text, sizeof(text));
+            for (const char *l = text; *l;) {
+                const char *e = strchr(l, '\n');
+                int len = e ? (int)(e - l) + 1 : (int)strlen(l);
+                ctl_reply(c, "%.*s", len, l);
+                l += len;
+            }
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "launcher")) {
         /* launcher [open|close] -> the lines of lm_wm_launcher_describe ("launcher open=.. edit=.. form=.. n=.. sel=..", card, icons, buttons ...), then "ok" */
         static char text[8192];

@@ -98,6 +98,8 @@ extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
 extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* MellaGUI private: settings.c */
 extern const struct lm_interface lm_mellagui_capture_v1_interface;      /* MellaGUI private: capture.c */
+extern const struct lm_interface lm_mellagui_tray_v1_interface;         /* MellaGUI private: tray.c */
+extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 
 /*
  * ---- COPY-PASTE LIST OF ADVERTISED GLOBALS (interface, version) -------------
@@ -112,6 +114,7 @@ extern const struct lm_interface lm_mellagui_capture_v1_interface;      /* Mella
  *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
  *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
  *   mellagui_capture_v1              1    capture.c  (MellaGUI private: the screen into a wl_shm buffer, for mellagui-record)
+ *   mellagui_tray_v1                 1    tray.c     (MellaGUI private: icons / buttons of programs in the top bar)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
 #define LM_WL_SUBCOMPOSITOR_VERSION         1
@@ -124,6 +127,7 @@ extern const struct lm_interface lm_mellagui_capture_v1_interface;      /* Mella
 #define LM_ZWP_LINUX_DMABUF_V1_VERSION      4
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
+#define LM_MELLAGUI_TRAY_V1_VERSION            1
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
 enum {
@@ -567,6 +571,17 @@ enum {
     LM_MELLAGUI_CAPTURE_V1_EVT_DONE = 1,       /* "" */
     LM_MELLAGUI_CAPTURE_V1_EVT_READY = 2,      /* "iii" output index, width, height: the buffer holds the picture (XRGB8888 content) */
     LM_MELLAGUI_CAPTURE_V1_EVT_FAILED = 3,     /* "is" output index, reason: "no-output" "buffer" "size" "locked" "capture" */
+};
+
+/* ---- mellagui_tray_v1 / mellagui_tray_item_v1 (see tray.h) -------------------------------------------------------- */
+enum {
+    LM_MELLAGUI_TRAY_V1_REQ_DESTROY = 0,       /* "" (the items stay) */
+    LM_MELLAGUI_TRAY_V1_REQ_CREATE_ITEM = 1,   /* "n" item:new_id(mellagui_tray_item_v1) */
+    LM_MELLAGUI_TRAY_ITEM_V1_REQ_DESTROY = 0,  /* "" the item leaves the bar */
+    LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_ICON = 1, /* "?o" wl_shm buffer (ARGB8888 / XRGB8888, at most 64x64; copied at once, then released); null = no icon */
+    LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT = 2, /* "s" label right of the icon, at most 31 bytes */
+    LM_MELLAGUI_TRAY_ITEM_V1_EVT_SIZE = 0,     /* "i" the icon edge in pixels the bar wants (sent when the item is created) */
+    LM_MELLAGUI_TRAY_ITEM_V1_EVT_CLICKED = 1,  /* "u" evdev button (272 left, 273 right, 274 middle): pressed and let go on the item */
 };
 
 #endif

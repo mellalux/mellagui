@@ -92,6 +92,7 @@ struct lm_popup;
 #define LM_FRAME_BUTTON_SIZE (lm_metrics.button_size)   /* close/max/min square buttons inside the titlebar */
 #define LM_FRAME_BUTTON_GAP  (lm_metrics.button_gap)
 #define LM_PANEL_MAX_TASKS   16
+#define LM_PANEL_MAX_TRAY    16     /* = LM_TRAY_MAX_ITEMS (tray.h) */
 #define LM_MIN_WINDOW_WIDTH  (lm_metrics.min_width)
 #define LM_MIN_WINDOW_HEIGHT (lm_metrics.min_height)
 
@@ -285,6 +286,7 @@ enum lm_pick_kind {
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
     LM_PICK_PANEL_TASK,     /* taskbar button of `window` */
+    LM_PICK_PANEL_TRAY,     /* an icon / button a program put into the bar (tray.h): `index` = the item's id */
     LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets (`index` = gadget id) */
     LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
     LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
@@ -390,6 +392,8 @@ struct lm_frame_info {
 
 #define LM_PANEL_SHADOW 14          /* how far the panel's shadow reaches below it */
 
+struct lm_texture;
+
 struct lm_panel_info {
     struct lm_output *output;
     struct lm_rect bar;             /* whole panel */
@@ -428,6 +432,14 @@ struct lm_panel_info {
     struct lm_window *task_win[LM_PANEL_MAX_TASKS]; /* the window behind task[i] (for picking) */
     struct lm_rect clock;
     char clock_text[24];            /* "DD.MM.YYYY HH:MM" local time */
+    int ntray;                      /* programs' icons (tray.h), the first one created rightmost, left of the Caps / keyboard indicators */
+    struct {
+        struct lm_rect rect;        /* the button */
+        int id;                     /* LM_PICK_PANEL_TRAY index */
+        const struct lm_texture *icon;  /* premultiplied ARGB, NULL = none; valid only during the callback */
+        const char *text;           /* "" = none; valid only during the callback */
+        bool hover;
+    } tray[LM_PANEL_MAX_TRAY];
 };
 
 /* The session dialog: the output is dimmed, a card with two round buttons (Lock, Exit) is in the middle. */
@@ -677,6 +689,11 @@ bool lm_wm_launcher_is_open(const struct lm_wm *wm);
 /* Control socket `launcher`: "launcher open=<0|1> edit=<0|1> form=<0|1> n=<icons> sel=<i>" and, while open, "card x= y= w= h=", one
  * "icon <i> "<name>" x= y= w= h= remove=x,y add=x,y,w,h"-style line each (see the function), then the buttons. */
 size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
+
+/* A program's tray item changed, appeared or went (tray.c): the bar is laid out and painted again. */
+void lm_wm_tray_changed(struct lm_wm *wm);
+/* Control socket `tray`: "tray n=<items>" and one "item <id> x= y= w= h= icon=<w>x<h>|- text=<text>" line each (first output's bar). */
+size_t lm_wm_tray_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The on-screen keyboard (panel button, key action `osk`, control socket `osk`). */
 void lm_wm_osk_set(struct lm_wm *wm, bool open);

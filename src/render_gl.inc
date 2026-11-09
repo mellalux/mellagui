@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, lock, card, switcher, power, about, dock;
+    struct gl_chrome panel, shadow, lock, card, switcher, power, about, dock;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
@@ -59,6 +59,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     for (int i = 0; i < GL_MAX_FRAMES; i++)
         gl_chrome_free(r, &go->frame[i]);
     gl_chrome_free(r, &go->panel);
+    gl_chrome_free(r, &go->shadow);
     gl_chrome_free(r, &go->about);
     gl_chrome_free(r, &go->lock);
     gl_chrome_free(r, &go->card);
@@ -179,6 +180,7 @@ typedef void (*gl_paint_fn)(const struct paint_ctx *c, const void *item);
 
 static void gl_do_frame(const struct paint_ctx *c, const void *it) { paint_frame(c, it); }
 static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel(c, it); }
+static void gl_do_shadow(const struct paint_ctx *c, const void *it) { paint_panel_shadow(c, it); }
 static void gl_do_about(const struct paint_ctx *c, const void *it) { paint_about(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
@@ -443,6 +445,15 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_SURFACE:
         lm_surface_tree_visit(item->u.surface.root, item->u.surface.x, item->u.surface.y, gl_visit, p);
+        break;
+    case LM_SCENE_PANEL_SHADOW:
+        if (item->output == p->st->out) {               /* translucent and always the same for a size: made once */
+            struct gl_chrome *ch = &p->go->shadow;
+            if (!ch->tex || ch->w != item->u.shadow.w || ch->h != item->u.shadow.h)
+                gl_scratch_alpha(p->r, p->st, ch, &item->u.shadow, gl_do_shadow, &item->u.shadow);
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &item->u.shadow, false);
+        }
         break;
     case LM_SCENE_PANEL:
         if (item->output == p->st->out)

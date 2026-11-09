@@ -439,6 +439,37 @@ class TestWindows(Base):
         ppm = ctl.dump(os.path.join(tmp, 'ws.ppm'))
         self.assertEqual(ppm.px(r['x'] + 20, r['y'] + 20), (255, 0, 0))
 
+    def test_the_panel_throws_a_shadow_on_what_is_below_it(self):
+        ctl.abs(900, 500)
+        c, w = self.window(900, 400, color=0xffc0c0c0)             # a light window right under the panel
+        r = ctl.windows()['windows'][0]
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_M)                                             # maximized: its title bar starts under the panel
+        ctl.key(KEY_LEFTMETA, False)
+        c.wl.roundtrip()
+        time.sleep(0.2)
+        ctl.sync()
+        ppm = ctl.dump(os.path.join(tmp, 'pshadow.ppm'))
+        top = sum(ppm.px(500, 32 + 1))                              # just under the 32 px panel
+        low = sum(ppm.px(500, 32 + 20))                             # beyond the shadow (the title bar is 28 px: stay in its colour)
+        self.assertLess(top, low - 15, 'no shadow under the panel (%d vs %d)' % (top, low))
+        self.assertLess(sum(ppm.px(500, 32 + 7)), low)             # it fades out gradually, not in one step
+        self.assertLess(top, sum(ppm.px(500, 32 + 7)))
+
+    def test_no_shadow_on_a_fullscreen_window(self):
+        c, w = self.window(300, 200, color=0xffc0c0c0)
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_F)
+        ctl.key(KEY_LEFTMETA, False)
+        c.wl.roundtrip()
+        w.handle_configure()
+        c.wl.roundtrip()
+        time.sleep(0.2)
+        ctl.sync()
+        ppm = ctl.dump(os.path.join(tmp, 'pshadow2.ppm'))
+        self.assertEqual(ppm.px(500, 2), (0xc0, 0xc0, 0xc0))        # no panel ...
+        self.assertEqual(ppm.px(500, 35), (0xc0, 0xc0, 0xc0))       # ... and no shadow
+
     def test_panel_workspace_click(self):
         ctl.click(76, 14)    # second workspace cell
         ctl.sync()
@@ -5625,7 +5656,7 @@ class TestWallpaper(Base):
         st = self.shot(c, 'stretch')
         self.assertEqual(st.px(10, 250), (255, 0, 0))
         self.assertEqual(st.px(790, 400), (0, 0, 255))                        # (the clipboard gadget sits top right)
-        self.assertEqual(st.px(10, 40), (255, 0, 0))                          # the whole screen is picture, the panel on top
+        self.assertEqual(st.px(10, 60), (255, 0, 0))                          # the whole screen is picture, the panel (and its shadow) on top
         c.cmd('settings wallpaper-mode fill')                                # 2:1 onto 1.6:1: cropped at the sides, centred
         fl = self.shot(c, 'fill')
         self.assertEqual(fl.px(5, 250), (255, 0, 0))
@@ -5968,7 +5999,7 @@ class TestConfig(Base):
     def buttons(c):
         out = []
         for l in c.cmd('dock'):
-            m = re.match(r'icon \d+ "(.*)" x=-?\d+ y=-?\d+ w=\d+ h=\d+ running=\d cmd=(.*)', l)
+            m = re.match(r'icon \d+ "(.*)" x=-?\d+ y=-?\d+ w=\d+ h=\d+ running=\d launching=\d cmd=(.*)', l)
             if m:
                 out.append([m[1], m[2]])
         return out
@@ -6026,7 +6057,7 @@ def dock_apps(c):
     """['name|command', ...] of the dock's buttons (control socket `dock`)."""
     out = []
     for l in c.cmd('dock'):
-        m = re.match(r'icon \d+ "(.*)" x=-?\d+ y=-?\d+ w=\d+ h=\d+ running=\d cmd=(.*)', l)
+        m = re.match(r'icon \d+ "(.*)" x=-?\d+ y=-?\d+ w=\d+ h=\d+ running=\d launching=\d cmd=(.*)', l)
         if m:
             out.append('%s|%s' % (m[1], m[2]))
     return out
@@ -6645,9 +6676,10 @@ class TestDock(Base):
             m = re.match(r'dock shown=(\d) hover=(-?\d+) n=(\d+)', l)
             if m:
                 info = dict(shown=int(m[1]), hover=int(m[2]), n=int(m[3]))
-            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) running=(\d)', l)
+            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) running=(\d) launching=(\d)', l)
             if m:
-                icons.append(dict(i=int(m[1]), name=m[2], x=int(m[3]), y=int(m[4]), w=int(m[5]), h=int(m[6]), running=int(m[7])))
+                icons.append(dict(i=int(m[1]), name=m[2], x=int(m[3]), y=int(m[4]), w=int(m[5]), h=int(m[6]), running=int(m[7]),
+                                  launching=int(m[8])))
         return info, icons
 
     def test_the_default_dock_has_the_own_programs(self):
@@ -6745,6 +6777,66 @@ class TestDock(Base):
                 break
             time.sleep(0.05)
         self.assertEqual(self.dock(c)[1][0]['running'], 0)
+
+    def test_an_icon_hops_while_its_program_starts_and_stops_when_the_window_is_there(self):
+        c = self.start('mellagui-dk15', '[dock]\nicon-size = 40\n[dock-apps]\nSlow = sleep 30\n', )
+        base = self.dock(c)[1][0]['y']
+        self.assertEqual(self.dock(c)[1][0]['launching'], 0)
+        c.click(400, 464)                                              # starts `sleep`, which never opens a window
+        c.abs(400, 100)                                                # (the pointer leaves: no magnifying to confuse the numbers)
+        ys = []
+        for _ in range(40):
+            icon = self.dock(c)[1][0]
+            ys.append(icon['y'])
+            self.assertEqual(icon['launching'], 1)
+            time.sleep(0.03)
+        self.assertEqual(max(ys), base)                                # it never goes below its place ...
+        self.assertLessEqual(min(ys), base - 12)                       # ... and hops up by about a third of its size at least
+        self.assertGreater(len(set(ys)), 5)
+        cl = Client('mellagui-dk15')                                   # a window of the program appears: the hopping ends
+        self.clients.append(cl)
+        win = Window(cl, 200, 100, app_id='sleep')
+        cl.wl.roundtrip()
+        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the hopping ends with the window')
+        self.assertEqual(self.dock(c)[1][0]['y'], base)
+
+    def test_hopping_gives_up_after_a_while(self):
+        p, c, stop = self.private_compositor('mellagui-dk16', '--config', self.write_conf('dk16', '[dock-apps]\nSlow = sleep 30\n'),
+                                             env={'MELLAGUI_DOCK_BOUNCE_MS': '700'})
+        c.sync()
+        icon = self.dock(c)[1][0]
+        c.click(icon['x'] + icon['w'] // 2, icon['y'] + icon['h'] // 2)
+        self.assertEqual(self.dock(c)[1][0]['launching'], 1)
+        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'it gives up', timeout=3.0)
+
+    def test_a_second_instance_hops_until_its_own_window_is_there(self):
+        c = self.start('mellagui-dk17', '[dock]\nicon-size = 40\n[dock-apps]\nSlow = sleep 30\n')
+        cl = Client('mellagui-dk17')
+        self.clients.append(cl)
+        win = Window(cl, 200, 100, app_id='sleep')                     # one window of the program exists already
+        cl.wl.roundtrip()
+        c.sync()
+        c.click(400, 464)                                              # its window is in front: this click starts another one
+        time.sleep(0.3)
+        self.assertEqual(self.dock(c)[1][0]['launching'], 1)
+        win2 = Window(cl, 200, 100, app_id='sleep')
+        cl.wl.roundtrip()
+        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the second window ends the hopping')
+
+    @staticmethod
+    def write_conf(name, text):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        return path
+
+    def wait_for(self, pred, what, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.04)
+        self.fail('timeout: ' + what)
 
     def test_the_dock_is_above_the_windows_and_takes_the_click(self):
         c = self.start('mellagui-dk9', '[dock]\nicon-size = 40\n[dock-apps]\nA = true\n')

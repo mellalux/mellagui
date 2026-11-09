@@ -130,6 +130,22 @@ void lm_settings_destroy(struct lm_settings *s);         /* flushes a pending sa
 /* The live state changed behind the panel's back: tell the bound clients. NULL-safe. */
 void lm_settings_changed(struct lm_settings *s);
 
+/* The dock's and the launcher dialog's button lists in mellagui.conf ([dock-apps] / [launcher-apps]); every call rewrites its section(s) and reads
+ * the file again. Indexes are lm_dock_item.raw. False when there is no config file, the values are not acceptable (name in use, list full) or an
+ * index is wrong.
+ *   dock_put / launcher_put      a new button at the end (icon "" = guessed from the name)
+ *   dock_del / launcher_del      remove one
+ *   dock_reorder                 move button `from` so that it ends up at `to`
+ *   launcher_to_dock             a launcher button joins the dock, before dock raw index `at` (-1 = at the end), and leaves the launcher list
+ *   dock_to_launcher             a dock button leaves the dock and goes to the launcher list */
+bool lm_settings_dock_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd);
+bool lm_settings_dock_del(struct lm_server *srv, int raw_index);
+bool lm_settings_launcher_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd);
+bool lm_settings_launcher_del(struct lm_server *srv, int raw_index);
+bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to);
+bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at);
+bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index);
+
 /* Current value of `key` as text; false for an unknown key. */
 bool lm_settings_get(struct lm_settings *s, const char *key, char *out, size_t n);
 /* Same as a `set` request (validates, applies, saves, announces). */

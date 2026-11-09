@@ -69,6 +69,7 @@
 
 #include "about.h"
 #include "dock.h"
+#include "dockicon.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -262,6 +263,14 @@ enum lm_pick_kind {
     LM_PICK_ABOUT_BUTTON,   /* the About dialog's Close button */
     LM_PICK_ABOUT_CARD,     /* the About dialog's card (everything but its button) */
     LM_PICK_ABOUT_BACKDROP, /* anything else while the About dialog is open: a click closes it, nothing below gets it */
+    LM_PICK_LAUNCHER_ITEM,  /* a big icon of the launcher dialog (`index` = dock item) */
+    LM_PICK_LAUNCHER_REMOVE,/* the red x of an icon while the launcher is in edit mode (`index` = dock item) */
+    LM_PICK_LAUNCHER_ADD,   /* the "+" tile: opens the add form */
+    LM_PICK_LAUNCHER_BUTTON,/* a button of the launcher dialog (`index` 0 = Edit / Add, 1 = Close / Cancel) */
+    LM_PICK_LAUNCHER_FIELD, /* a text field of the add form (`index` 0 = name, 1 = command) */
+    LM_PICK_LAUNCHER_KIND,  /* an icon choice of the add form (`index` = enum lm_dockicon, or -1 = "guess from the name") */
+    LM_PICK_LAUNCHER_CARD,  /* the launcher's card (between its items) */
+    LM_PICK_LAUNCHER_BACKDROP, /* anything else while the launcher is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
     LM_PICK_PANEL_POWER,    /* the round power button in the top right corner: opens / closes the session dialog */
     LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
@@ -437,6 +446,51 @@ struct lm_about_info {
 };
 
 /*
+ * The launcher dialog (Launchpad): a big translucent card over the dimmed output with every dock button as a big round icon with its name,
+ * a "+" tile that opens the add form (name, command, icon) and an Edit button that puts a red x on every icon to remove it. Modal like the
+ * About dialog. Buttons are taken from the dock (dock.h), added and removed in [dock-apps] of mellagui.conf.
+ */
+#define LM_LAUNCHER_CELL_W 124          /* one icon with its name */
+#define LM_LAUNCHER_ICON 64             /* the round icon */
+#define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
+struct lm_launcher_info {
+    struct lm_rect rect;            /* the whole output (dimmed) */
+    struct lm_rect card;
+    struct lm_rect title;
+    bool form;                      /* the add form is showing instead of the icons */
+    bool edit;                      /* edit mode: a red x on every icon */
+    int n;                          /* icons */
+    int cols;                       /* icons per row (the "+" tile counts as one) */
+    int sel;                        /* highlighted: an icon index, n = the "+" tile, -1 none */
+    struct {
+        struct lm_rect box;         /* the round icon */
+        struct lm_rect hit;         /* icon and name below it */
+        struct lm_rect remove;      /* the x (edit mode) */
+        const struct lm_dock_item *item;
+        bool running;
+    } icon[LM_DOCK_MAX];
+    struct lm_rect add;             /* the "+" tile (box == hit), empty when the list is full */
+    int drag;                       /* an icon is being dragged (icon index), -1 none */
+    struct lm_rect drag_box;        /* the icon under the pointer */
+    struct lm_rect drop;            /* while dragging: where it can be dropped (the dock's place), empty when the dock is off */
+    int drop_pos;                   /* ... the pointer is on it: the place the icon would take in the dock, -1 not on it */
+    struct lm_rect marker;          /* ... a bar between the dock icons that shows that place */
+    struct lm_rect button[2];
+    const char *button_text[2];
+    int hover_button;               /* -1 none */
+    const char *hint;
+    const char *message;            /* an error of the form, "" none */
+    /* the form */
+    struct lm_rect field[2];
+    const char *field_label[2];
+    const char *field_text[2];
+    int focus;                      /* 0 name, 1 command, 2 icon row */
+    struct lm_rect kind_box[LM_LAUNCHER_KIND_N];
+    int kind;                       /* chosen icon (-1 = guess), what kind_box[i + 1] stands for */
+    const char *kind_name;          /* its name for the label */
+};
+
+/*
  * The dock (dock.h): round icons along the bottom of the primary output. `box` is where each icon is painted now (the icon under the
  * pointer and its neighbours are bigger), `rect` everything the dock may ever paint on this output (full zoom, shadow, label), which is
  * also its scene bound.
@@ -453,6 +507,9 @@ struct lm_dock_info {
         bool launching;             /* its program was just started and has no window yet: the icon hops */
         const struct lm_dock_item *item;
     } icon[LM_DOCK_MAX];
+    const struct lm_dock_item *drag_item;   /* an icon is being dragged along the dock / out of it: it is painted at drag_box, the row has a gap */
+    struct lm_rect drag_box;
+    bool drag_remove;               /* ... and it is out of the dock: letting go removes it (a red x on the icon) */
     struct lm_rect label;           /* the name of the hovered icon (empty = none) */
     const char *label_text;         /* valid only during the callback */
 };
@@ -524,6 +581,7 @@ enum lm_scene_kind {
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
     LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
     LM_SCENE_ABOUT,                 /* the About dialog (same place as the session dialog; the two are never open together) */
+    LM_SCENE_LAUNCHER,              /* the launcher dialog (same place, never open together with the others) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
@@ -541,6 +599,7 @@ struct lm_scene_item {
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
         struct lm_rect shadow;      /* LM_SCENE_PANEL_SHADOW: the strip under the panel */
         struct lm_about_info about; /* LM_SCENE_ABOUT */
+        struct lm_launcher_info launcher; /* LM_SCENE_LAUNCHER */
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
         struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
@@ -580,6 +639,13 @@ size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size);
 void lm_wm_about_set(struct lm_wm *wm, bool open);
 bool lm_wm_about_is_open(const struct lm_wm *wm);
 size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* the lines of the control socket `about` while it is open */
+
+/* The launcher dialog (Super+A, the dock's Launcher button, control socket `launcher`). */
+void lm_wm_launcher_set(struct lm_wm *wm, bool open);
+bool lm_wm_launcher_is_open(const struct lm_wm *wm);
+/* Control socket `launcher`: "launcher open=<0|1> edit=<0|1> form=<0|1> n=<icons> sel=<i>" and, while open, "card x= y= w= h=", one
+ * "icon <i> "<name>" x= y= w= h= remove=x,y add=x,y,w,h"-style line each (see the function), then the buttons. */
+size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The clipboard card's view: the first history entry it shows and how many entries fit (control socket `clip`). */
 void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);

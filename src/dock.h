@@ -14,11 +14,13 @@
  *                     gap       = 10      space between icons, 0..40
  *                     margin    = 8       distance of the icons from the bottom edge, 0..100
  *   [dock-apps]       Name = [icon] command        one button, in this order (at most LM_DOCK_MAX)
+ *   [launcher-apps]   Name = [icon] command        buttons that are only in the launcher dialog (wm.h); drag one onto the dock to move it there
  *
- * `icon` is optional. It is the name of a built-in icon (terminal calculator files editor images settings code web run generic), or
+ * `icon` is optional. It is the name of a built-in icon (terminal calculator files editor images settings code web run launcher generic), or
  * the path of a PNG / JPEG / PPM picture (~/ is the home directory; a picture without transparency is cut to a circle). Without it the
  * icon is guessed from the entry's name. `command` is a command line like in [menu] (@terminal, mellagui-* next to the compositor,
  * ~/, `a || b`); an entry whose program cannot be found is left out, MellaGUI's own programs always stay.
+ * The command `@launcher` is not a program: the button opens the launcher dialog (wm.h lm_wm_launcher_set) and the dialog does not list it.
  * The built-in default is the same text, parsed by the same code; with no [dock-apps] section in the file the default entries are used.
  */
 
@@ -44,9 +46,11 @@ struct lm_dock_item {
     const char *match;                  /* lower-case program name: a window whose app id (dots -> dashes) is this belongs to the button */
     int kind;                           /* enum lm_dockicon, when there is no picture */
     const struct lm_image *img;         /* premultiplied ARGB, at most the zoomed icon size, or NULL for a built-in icon */
+    int raw;                            /* index of the entry in the file's list (lm_dock_raw_entry / lm_launchapps_raw_entry): entries that were left out leave gaps */
+    bool launcher_only;                 /* from [launcher-apps] (lm_launchapps_item), not in the dock */
 };
 
-/* True for the sections [dock] and [dock-apps]. */
+/* True for the sections [dock], [dock-apps] and [launcher-apps]. */
 bool lm_dock_section(const char *section);
 /* Config-file callback (lm_conf_fn) for them. */
 bool lm_dock_conf(void *ud, const char *section, const char *key, const char *value);
@@ -62,6 +66,13 @@ const struct lm_dock_item *lm_dock_item(int i);          /* NULL out of range */
 /* The entries as the file (or the built-in default) defines them, before anything is expanded or dropped; for the settings panel. */
 int lm_dock_raw_count(void);
 bool lm_dock_raw_entry(int i, const char **name, const char **icon, const char **cmd);
+
+/* The launcher dialog's own buttons, [launcher-apps] (the same "Name = [icon] command" lines, at most LM_DOCK_MAX): what the launcher shows
+ * besides the dock's buttons; one whose name the dock has is not listed again (the dock's wins). Resolved like the dock's. */
+int lm_launchapps_count(void);
+const struct lm_dock_item *lm_launchapps_item(int i);
+int lm_launchapps_raw_count(void);
+bool lm_launchapps_raw_entry(int i, const char **name, const char **icon, const char **cmd);
 
 /* Would `key = value` be accepted in [dock]? *builtin tells whether it is the built-in value (then the file needs no line). For the settings panel. */
 bool lm_dock_check(const char *key, const char *value, bool *builtin);

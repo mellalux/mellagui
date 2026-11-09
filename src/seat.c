@@ -526,6 +526,11 @@ void lm_seat_pointer_send_axis(struct lm_seat *seat, uint32_t time_ms, int orien
     pointer_frame(seat, cl);
 }
 
+uint32_t lm_seat_group(const struct lm_seat *seat)
+{
+    return seat && seat->group != UINT32_MAX ? seat->group : 0;
+}
+
 void lm_seat_pointer_position(const struct lm_seat *seat, double *x, double *y)
 {
     double px = 0, py = 0;

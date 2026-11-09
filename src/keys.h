@@ -27,6 +27,7 @@
  *   layout-next layout-prev          keyboard layout                   lock                 lock the screen
  *   gadget-clipboard gadget-mixer gadget-system   show / hide a gadget   clipboard-pick     choose from the history with the arrows
  *   quit                             leave MellaGUI (asks for the lock secret first)       none  remove the binding
+ *   launcher                         the launcher dialog: big icons of the dock, add / remove (Super+A)
  *   reload-config                    read mellagui.conf again (theme, sizes, shortcuts, dock; see config.reload)
  *
  * Not configurable (modal or hardware-level): Ctrl+Alt+F1..F12, Alt+Tab, Print / Alt+Print / Ctrl+Print, Esc in dialogs.
@@ -44,7 +45,7 @@ enum lm_action {
     LM_ACT_CLOSE, LM_ACT_LOCK, LM_ACT_QUIT,
     LM_ACT_WORKSPACE, LM_ACT_MOVE_TO_WORKSPACE, LM_ACT_FOCUS_NEXT, LM_ACT_FOCUS_PREV,
     LM_ACT_FULLSCREEN, LM_ACT_MAXIMIZE_TOGGLE, LM_ACT_MAXIMIZE, LM_ACT_RESTORE, LM_ACT_TILE_LEFT, LM_ACT_TILE_RIGHT,
-    LM_ACT_RELOAD_CONFIG,
+    LM_ACT_RELOAD_CONFIG, LM_ACT_LAUNCHER,
 };
 
 #define LM_KEYBIND_ARG 256

@@ -123,6 +123,20 @@ struct lm_wm {
     bool about_hover_close;
     struct lm_about_row about_rows[LM_ABOUT_ROWS];
     int about_n;
+    bool launcher_open;         /* the launcher dialog is showing on the output called launcher_out */
+    char launcher_out[32];
+    bool launcher_edit, launcher_form;
+    int launcher_sel, launcher_hover_btn, launcher_focus, launcher_kind;
+    char launcher_name[LM_DOCK_NAME_MAX], launcher_cmd[LM_DOCK_CMD_MAX], launcher_msg[112];
+    /* mouse drags (a press on an icon that moved far enough): a launcher icon onto the dock, a dock icon along the dock (reorder) or out of it
+     * (back to the launcher). drag_x/y = the pointer. */
+    int drag_press_x, drag_press_y;
+    bool dock_press_left;
+    bool launcher_drag, dock_drag;
+    int launcher_drag_g;                // grid index being dragged
+    int launcher_drag_pos;              // where it would join the dock (resolved index, count = at the end), -1 not over the dock
+    int dock_drag_idx, dock_drag_to;    // dock index being dragged, where it would go (-1 = out of the dock: it leaves)
+    double drag_x, drag_y;
     /* the dock: dock_active = the pointer is in it (so it is magnifying), hover_dock = the icon under the pointer, dock_shown = autohide has
      * revealed it, dock_timer hides it again a moment after the pointer left */
     bool dock_active, dock_shown;
@@ -869,6 +883,9 @@ void lm_wm_set_gadget(struct lm_wm *wm, bool visible)
 static void dock_damage(struct lm_wm *wm);
 static void about_set(struct lm_wm *wm, bool open, struct lm_output *o);
 static void about_damage(struct lm_wm *wm);
+static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o);
+static void dock_activate(struct lm_wm *wm, int i, bool reuse);
+static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool reuse);
 static void dock_hide_tick(void *data);
 static void dock_anim_tick(void *data);
 
@@ -1183,6 +1200,7 @@ void lm_wm_config_changed(struct lm_wm *wm)
 {
     gadget_def_init();
     wm->dock_active = wm->dock_shown = false;
+    wm->dock_drag = false;
     wm->hover_dock = -1;
     memset(wm->dock_launch_ms, 0, sizeof(wm->dock_launch_ms));         /* (the buttons may be others now) */
     lm_wm_output_changed(wm, NULL);
@@ -1758,6 +1776,7 @@ static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
         if (!o)
             return;
         about_set(wm, false, NULL);
+        launcher_set(wm, false, NULL);
         sw_close(wm);
         clip_nav_set(wm, false);
         snprintf(wm->power_out, sizeof(wm->power_out), "%s", o->name);
@@ -1821,6 +1840,7 @@ static void about_set(struct lm_wm *wm, bool open, struct lm_output *o)
         if (!o)
             return;
         power_set(wm, false, NULL);
+        launcher_set(wm, false, NULL);
         sw_close(wm);
         clip_nav_set(wm, false);
         wm->about_n = lm_about_collect(wm->srv, wm->about_rows, LM_ABOUT_ROWS);
@@ -1862,6 +1882,514 @@ size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size)
     return n < size ? n : size - 1;
 }
 
+
+static int dock_window_count(const struct lm_wm *wm, const struct lm_dock_item *it);
+
+/* ---- the launcher dialog -------------------------------------------------------------------------------------------------- */
+
+#define LC_CELL_W LM_LAUNCHER_CELL_W
+#define LC_CELL_H 116
+#define LC_ICON LM_LAUNCHER_ICON
+#define LC_PAD 28
+#define LC_HEAD 56
+#define LC_FOOT 84
+#define LC_BTN_W 110
+#define LC_BTN_H 28
+#define LC_KIND 36                  /* the icon choices of the form */
+#define LC_FORM_W 580
+#define LC_FORM_H 370
+
+/* The buttons the launcher shows: the dock's (all but the one that opens the launcher itself) and then the launcher's own ([launcher-apps]). */
+static bool launcher_is_self(const struct lm_dock_item *it)
+{
+    return !strcmp(it->cmd, "@launcher");
+}
+
+static int launcher_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < lm_dock_count(); i++)
+        if (!launcher_is_self(lm_dock_item(i)))
+            n++;
+    for (int i = 0; i < lm_launchapps_count(); i++)
+        if (!launcher_is_self(lm_launchapps_item(i)))
+            n++;
+    return n;
+}
+
+/* The g-th button of the launcher; *dock_index is its index in the dock, -1 for one that is only in the launcher. NULL when there is none. */
+static const struct lm_dock_item *launcher_item(int g, int *dock_index)
+{
+    if (dock_index)
+        *dock_index = -1;
+    for (int i = 0; i < lm_dock_count(); i++)
+        if (!launcher_is_self(lm_dock_item(i)) && g-- == 0) {
+            if (dock_index)
+                *dock_index = i;
+            return lm_dock_item(i);
+        }
+    for (int i = 0; i < lm_launchapps_count(); i++)
+        if (!launcher_is_self(lm_launchapps_item(i)) && g-- == 0)
+            return lm_launchapps_item(i);
+    return NULL;
+}
+
+static bool launcher_name_taken(const char *name)
+{
+    const char *nm, *ic, *cm;
+    for (int i = 0; lm_dock_raw_entry(i, &nm, &ic, &cm); i++)
+        if (!strcasecmp(nm, name))
+            return true;
+    for (int i = 0; lm_launchapps_raw_entry(i, &nm, &ic, &cm); i++)
+        if (!strcasecmp(nm, name))
+            return true;
+    return false;
+}
+
+static bool launcher_can_add(void)
+{
+    return lm_launchapps_raw_count() < LM_DOCK_MAX;
+}
+
+static bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
+
+static struct lm_output *launcher_output(const struct lm_wm *wm)
+{
+    if (!wm->launcher_open || !wm->srv->backend)
+        return NULL;
+    struct lm_output *o;
+    lm_list_for_each(o, &wm->srv->backend->outputs, link)
+        if (!strcmp(o->name, wm->launcher_out))
+            return o;
+    return NULL;
+}
+
+static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launcher_info *li)
+{
+    memset(li, 0, sizeof(*li));
+    li->rect = lm_output_rect(o);
+    li->form = wm->launcher_form;
+    li->edit = wm->launcher_edit && !li->form;
+    li->hover_button = wm->launcher_hover_btn;
+    li->message = wm->launcher_msg;
+    li->focus = wm->launcher_focus;
+    li->kind = wm->launcher_kind;
+    li->kind_name = wm->launcher_kind >= 0 ? lm_dockicon_name(wm->launcher_kind) : "auto";
+    int n = launcher_count(), cells = n + (launcher_can_add() ? 1 : 0);
+    li->n = n;
+    li->sel = LM_CLAMP(wm->launcher_sel, -1, cells - 1);
+    int cw, ch;
+    if (li->form) {
+        cw = LM_MIN(LC_FORM_W, li->rect.w - 20);
+        ch = LC_FORM_H;
+    } else {
+        int maxcols = LM_CLAMP((li->rect.w - 60) / LC_CELL_W, 1, 6);
+        li->cols = LM_MIN(maxcols, LM_MAX(cells, 1));
+        int rows = LM_MAX((cells + li->cols - 1) / li->cols, 1);
+        int cell_h = LC_CELL_H;
+        if (LC_HEAD + rows * cell_h + LC_FOOT > li->rect.h - 20)       /* a low screen: the rows get closer */
+            cell_h = LM_MAX((li->rect.h - 20 - LC_HEAD - LC_FOOT) / rows, LC_ICON + 8 + LM_FONT_H + 6);
+        cw = LM_MAX(li->cols * LC_CELL_W + 2 * LC_PAD, 2 * LC_BTN_W + 56);
+        ch = LC_HEAD + rows * cell_h + LC_FOOT;
+        int x0 = li->rect.x + (li->rect.w - cw) / 2 + (cw - li->cols * LC_CELL_W) / 2;
+        int y0 = li->rect.y + (li->rect.h - ch) / 2 + LC_HEAD;
+        for (int g = 0; g < cells; g++) {
+            struct lm_rect cell = lm_rect_make(x0 + (g % li->cols) * LC_CELL_W, y0 + (g / li->cols) * cell_h, LC_CELL_W, cell_h);
+            struct lm_rect box = lm_rect_make(cell.x + (LC_CELL_W - LC_ICON) / 2, cell.y + 6, LC_ICON, LC_ICON);
+            if (g == n) {
+                li->add = cell;
+                continue;
+            }
+            li->icon[g].box = box;
+            li->icon[g].hit = cell;
+            li->icon[g].remove = lm_rect_make(box.x - 8, box.y - 8, 24, 24);
+            li->icon[g].item = launcher_item(g, NULL);
+            li->icon[g].running = dock_window_count(wm, li->icon[g].item) > 0;
+        }
+    }
+    li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, ch);
+    li->drag = -1;
+    li->drop_pos = -1;
+    if (wm->launcher_drag && !li->form && wm->launcher_drag_g < n) {
+        li->drag = wm->launcher_drag_g;
+        li->drag_box = lm_rect_make((int)wm->drag_x - 28, (int)wm->drag_y - 28, 56, 56);
+        launcher_drop_zone(wm, o, &li->drop, &li->marker, &li->drop_pos);
+    }
+    li->title = lm_rect_make(li->card.x, li->card.y + 18, li->card.w, LM_FONT_H);
+    int by = li->card.y + li->card.h - 16 - LC_BTN_H, bx = li->card.x + li->card.w / 2;
+    li->button[0] = lm_rect_make(bx - LC_BTN_W - 8, by, LC_BTN_W, LC_BTN_H);
+    li->button[1] = lm_rect_make(bx + 8, by, LC_BTN_W, LC_BTN_H);
+    li->button_text[0] = li->form ? "Add" : li->edit ? "Done" : "Edit";
+    li->button_text[1] = li->form ? "Cancel" : "Close";
+    static const char hint_grid[] = "Enter starts   E edit   A add   Esc closes", hint_edit[] = "Click a red x to remove   E or Done ends   Esc closes",
+                      hint_form[] = "Tab next field   Left / Right icon   Enter adds   Esc back";
+    li->hint = li->form ? hint_form : li->edit ? hint_edit : hint_grid;
+    if (li->form) {
+        li->field_label[0] = "Name";
+        li->field_label[1] = "Command   (@terminal, mellagui-*, ~/prog, a || b)";
+        li->field_text[0] = wm->launcher_name;
+        li->field_text[1] = wm->launcher_cmd;
+        int fx = li->card.x + LC_PAD, fw = li->card.w - 2 * LC_PAD;
+        li->field[0] = lm_rect_make(fx, li->card.y + 60 + LM_FONT_H + 4, fw, 30);
+        li->field[1] = lm_rect_make(fx, li->card.y + 126 + LM_FONT_H + 4, fw, 30);
+        int total = LM_LAUNCHER_KIND_N * LC_KIND + (LM_LAUNCHER_KIND_N - 1) * 6;
+        int kx = li->card.x + (li->card.w - total) / 2, ky = li->card.y + 214;
+        for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
+            li->kind_box[i] = lm_rect_make(kx + i * (LC_KIND + 6), ky, LC_KIND, LC_KIND);
+    }
+}
+
+static void launcher_damage(struct lm_wm *wm)
+{
+    struct lm_output *o = launcher_output(wm);
+    if (o) {
+        struct lm_rect r = lm_output_rect(o);
+        damage_rect(wm, &r);
+    }
+}
+
+static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
+{
+    if (open == wm->launcher_open)
+        return;
+    if (open) {
+        if (!o)
+            o = lm_output_primary(wm->srv);
+        if (!o)
+            return;
+        about_set(wm, false, NULL);
+        power_set(wm, false, NULL);
+        sw_close(wm);
+        clip_nav_set(wm, false);
+        snprintf(wm->launcher_out, sizeof(wm->launcher_out), "%s", o->name);
+        wm->launcher_open = true;
+        wm->launcher_edit = wm->launcher_form = false;
+        wm->launcher_sel = -1;
+        wm->launcher_hover_btn = -1;
+        wm->launcher_msg[0] = 0;
+        launcher_damage(wm);
+    } else {
+        launcher_damage(wm);
+        wm->launcher_open = false;
+        wm->launcher_edit = wm->launcher_form = false;
+    }
+}
+
+void lm_wm_launcher_set(struct lm_wm *wm, bool open) { launcher_set(wm, open, NULL); }
+bool lm_wm_launcher_is_open(const struct lm_wm *wm) { return wm->launcher_open; }
+
+size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    struct lm_output *o = launcher_output(wm);
+    size_t n = 0;
+    struct lm_launcher_info li;
+    if (o)
+        launcher_info(wm, o, &li);
+    n += (size_t)snprintf(buf, size, "launcher open=%d edit=%d form=%d n=%d sel=%d drag=%d droppos=%d\n", o != NULL, o ? li.edit : 0,
+                          o ? li.form : 0, o ? li.n : 0, o ? li.sel : -1, o ? li.drag : -1, o ? li.drop_pos : -1);
+    if (!o)
+        return n;
+#define LCR(r) (r).x, (r).y, (r).w, (r).h
+    n += (size_t)snprintf(buf + n, size - n, "card x=%d y=%d w=%d h=%d\n", LCR(li.card));
+    if (li.drag >= 0 && li.drop.w > 0)
+        n += (size_t)snprintf(buf + n, size - n, "drop x=%d y=%d w=%d h=%d\n", LCR(li.drop));
+    if (!li.form) {
+        for (int g = 0; g < li.n && n < size; g++) {
+            n += (size_t)snprintf(buf + n, size - n, "icon %d \"%s\" x=%d y=%d w=%d h=%d", g, li.icon[g].item->name, LCR(li.icon[g].box));
+            if (li.edit)
+                n += (size_t)snprintf(buf + n, size - n, " remove=%d,%d,%d,%d", LCR(li.icon[g].remove));
+            n += (size_t)snprintf(buf + n, size - n, "\n");
+        }
+        if (li.add.w > 0)
+            n += (size_t)snprintf(buf + n, size - n, "add x=%d y=%d w=%d h=%d\n", LCR(li.add));
+    } else {
+        for (int i = 0; i < 2; i++)
+            n += (size_t)snprintf(buf + n, size - n, "field %d x=%d y=%d w=%d h=%d text=\"%s\"\n", i, LCR(li.field[i]), li.field_text[i]);
+        for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
+            n += (size_t)snprintf(buf + n, size - n, "kind %d x=%d y=%d w=%d h=%d\n", i - 1, LCR(li.kind_box[i]));
+        n += (size_t)snprintf(buf + n, size - n, "focus %d kind %d message \"%s\"\n", li.focus, li.kind, li.message);
+    }
+    for (int i = 0; i < 2 && n < size; i++)
+        n += (size_t)snprintf(buf + n, size - n, "button %d x=%d y=%d w=%d h=%d \"%s\"\n", i, LCR(li.button[i]), li.button_text[i]);
+#undef LCR
+    return n < size ? n : size - 1;
+}
+
+/* Where the pointer is in the dialog. */
+static bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
+{
+    struct lm_output *lo = launcher_output(wm);
+    if (!lo || lm_lock_active(wm->srv->lock))
+        return false;
+    struct lm_launcher_info li;
+    launcher_info(wm, lo, &li);
+    out->rect = li.card;
+    out->kind = lm_rect_contains(&li.card, ix, iy) ? LM_PICK_LAUNCHER_CARD : LM_PICK_LAUNCHER_BACKDROP;
+    if (out->kind == LM_PICK_LAUNCHER_BACKDROP)
+        return true;
+    for (int i = 0; i < 2; i++)
+        if (lm_rect_contains(&li.button[i], ix, iy)) {
+            out->kind = LM_PICK_LAUNCHER_BUTTON;
+            out->index = i;
+            return true;
+        }
+    if (li.form) {
+        for (int i = 0; i < 2; i++)
+            if (lm_rect_contains(&li.field[i], ix, iy)) {
+                out->kind = LM_PICK_LAUNCHER_FIELD;
+                out->index = i;
+                return true;
+            }
+        for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
+            if (lm_rect_contains(&li.kind_box[i], ix, iy)) {
+                out->kind = LM_PICK_LAUNCHER_KIND;
+                out->index = i - 1;
+                return true;
+            }
+        return true;
+    }
+    for (int g = 0; g < li.n; g++) {
+        if (li.edit && lm_rect_contains(&li.icon[g].remove, ix, iy)) {
+            out->kind = LM_PICK_LAUNCHER_REMOVE;
+            out->index = g;
+            return true;
+        }
+    }
+    for (int g = 0; g < li.n; g++)
+        if (lm_rect_contains(&li.icon[g].hit, ix, iy)) {
+            out->kind = LM_PICK_LAUNCHER_ITEM;
+            out->index = g;
+            return true;
+        }
+    if (li.add.w > 0 && lm_rect_contains(&li.add, ix, iy))
+        out->kind = LM_PICK_LAUNCHER_ADD;
+    return true;
+}
+
+static void launcher_open_form(struct lm_wm *wm)
+{
+    if (!launcher_can_add())
+        return;
+    wm->launcher_form = true;
+    wm->launcher_name[0] = wm->launcher_cmd[0] = wm->launcher_msg[0] = 0;
+    wm->launcher_kind = -1;
+    wm->launcher_focus = 0;
+    wm->launcher_hover_btn = -1;
+    launcher_damage(wm);
+}
+
+static void launcher_remove(struct lm_wm *wm, int g)
+{
+    const struct lm_dock_item *it = launcher_item(g, NULL);
+    if (!it)
+        return;
+    if (!(it->launcher_only ? lm_settings_launcher_del(wm->srv, it->raw) : lm_settings_dock_del(wm->srv, it->raw)))
+        lm_wm_notify(wm, "Launcher", "Could not remove it: there is no config file to write", 5000);
+    wm->launcher_sel = LM_MIN(wm->launcher_sel, launcher_count() - 1);
+    if (launcher_count() == 0)
+        wm->launcher_edit = false;
+    launcher_damage(wm);
+}
+
+static void launcher_submit(struct lm_wm *wm)
+{
+    char name[LM_DOCK_NAME_MAX], cmd[LM_DOCK_CMD_MAX];
+    snprintf(name, sizeof(name), "%s", wm->launcher_name);
+    snprintf(cmd, sizeof(cmd), "%s", wm->launcher_cmd);
+    for (char *t = name; *t && (*t == ' ');)
+        memmove(t, t + 1, strlen(t));
+    for (size_t l = strlen(name); l > 0 && name[l - 1] == ' '; l--)
+        name[l - 1] = 0;
+    for (char *t = cmd; *t && (*t == ' ');)
+        memmove(t, t + 1, strlen(t));
+    for (size_t l = strlen(cmd); l > 0 && cmd[l - 1] == ' '; l--)
+        cmd[l - 1] = 0;
+    if (!name[0] || !cmd[0]) {
+        snprintf(wm->launcher_msg, sizeof(wm->launcher_msg), "Give it a name and a command.");
+        launcher_damage(wm);
+        return;
+    }
+    const char *icon = wm->launcher_kind >= 0 ? lm_dockicon_name(wm->launcher_kind) : "";
+    int before = launcher_count();
+    if (launcher_name_taken(name) || !lm_settings_launcher_put(wm->srv, name, icon ? icon : "", cmd)) {
+        snprintf(wm->launcher_msg, sizeof(wm->launcher_msg), "Not added: the name is in use or not allowed, the list is full, or there is no config file.");
+        launcher_damage(wm);
+        return;
+    }
+    wm->launcher_form = false;
+    wm->launcher_msg[0] = 0;
+    wm->launcher_sel = LM_MAX(launcher_count() - 1, 0);
+    if (launcher_count() <= before)
+        lm_wm_notify(wm, "Launcher", "Saved, but that program was not found, so it is left out for now", 6000);
+    launcher_damage(wm);
+}
+
+/* A click (press and release on the same thing) or Enter on one of the dialog's targets. */
+static void launcher_activate(struct lm_wm *wm, int kind, int index)
+{
+    switch (kind) {
+    case LM_PICK_LAUNCHER_ITEM: {
+        int di;
+        const struct lm_dock_item *it = launcher_item(index, &di);
+        if (!it || wm->launcher_edit)
+            break;
+        launcher_set(wm, false, NULL);
+        dock_launch(wm, it, di, true);
+        break;
+    }
+    case LM_PICK_LAUNCHER_REMOVE: launcher_remove(wm, index); break;
+    case LM_PICK_LAUNCHER_ADD: launcher_open_form(wm); break;
+    case LM_PICK_LAUNCHER_FIELD:
+        wm->launcher_focus = index;
+        launcher_damage(wm);
+        break;
+    case LM_PICK_LAUNCHER_KIND:
+        wm->launcher_kind = index;
+        wm->launcher_focus = 2;
+        launcher_damage(wm);
+        break;
+    case LM_PICK_LAUNCHER_BUTTON:
+        if (wm->launcher_form) {
+            if (index == 0)
+                launcher_submit(wm);
+            else {
+                wm->launcher_form = false;
+                launcher_damage(wm);
+            }
+        } else if (index == 0) {
+            wm->launcher_edit = !wm->launcher_edit;
+            launcher_damage(wm);
+        } else {
+            launcher_set(wm, false, NULL);
+        }
+        break;
+    }
+}
+
+static void launcher_pop(char *text)
+{
+    size_t l = strlen(text);
+    while (l > 0 && ((unsigned char)text[l - 1] & 0xc0) == 0x80)
+        l--;
+    if (l > 0)
+        l--;
+    text[l] = 0;
+}
+
+static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods)
+{
+    struct lm_output *lo = launcher_output(wm);
+    if (!lo)
+        return;
+    struct lm_launcher_info li;
+    launcher_info(wm, lo, &li);
+    bool shift = (mods & LM_MOD_SHIFT) != 0;
+    if (code == KEY_A && (mods & LM_MOD_SUPER) && !(mods & ~(uint32_t)LM_MOD_SUPER & LM_KEY_MODS_MASK)) {   /* Super+A again closes it */
+        if (!repeat)
+            launcher_set(wm, false, NULL);
+        return;
+    }
+    bool arrow = code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN;
+    if (!wm->launcher_form) {
+        int cells = li.n + (li.add.w > 0 ? 1 : 0);
+        if (repeat && !arrow)
+            return;
+        if (code == KEY_ESC) {
+            launcher_set(wm, false, NULL);
+        } else if (arrow || code == KEY_HOME || code == KEY_END) {
+            if (cells == 0)
+                return;
+            int cur = li.sel < 0 ? (code == KEY_LEFT || code == KEY_UP || code == KEY_END ? cells - 1 : 0) : li.sel;
+            if (li.sel >= 0) {
+                int cols = LM_MAX(li.cols, 1);
+                cur = code == KEY_LEFT ? cur - 1 : code == KEY_RIGHT ? cur + 1 : code == KEY_UP ? cur - cols :
+                      code == KEY_DOWN ? cur + cols : code == KEY_HOME ? 0 : cells - 1;
+                if (code == KEY_DOWN && cur >= cells && li.sel < cells - 1)
+                    cur = cells - 1;                                    /* the last, shorter row */
+            }
+            cur = LM_CLAMP(cur, 0, cells - 1);
+            if (cur != wm->launcher_sel) {
+                wm->launcher_sel = cur;
+                launcher_damage(wm);
+            }
+        } else if (code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE) {
+            if (li.sel >= 0 && li.sel < li.n)
+                launcher_activate(wm, LM_PICK_LAUNCHER_ITEM, li.sel);
+            else if (li.sel == li.n && li.add.w > 0)
+                launcher_open_form(wm);
+        } else if ((code == KEY_DELETE || code == KEY_BACKSPACE) && li.edit && li.sel >= 0 && li.sel < li.n) {
+            launcher_remove(wm, li.sel);
+        } else if (code == KEY_E && li.n > 0) {
+            wm->launcher_edit = !wm->launcher_edit;
+            launcher_damage(wm);
+        } else if (code == KEY_A || code == KEY_N) {
+            launcher_open_form(wm);
+        }
+        return;
+    }
+    /* the add form */
+    if (code == KEY_ESC) {
+        if (!repeat) {
+            wm->launcher_form = false;
+            launcher_damage(wm);
+        }
+        return;
+    }
+    if (code == KEY_TAB || ((code == KEY_UP || code == KEY_DOWN) && !repeat)) {
+        if (repeat)
+            return;
+        bool back = code == KEY_UP || (code == KEY_TAB && shift);
+        wm->launcher_focus = (wm->launcher_focus + (back ? 2 : 1)) % 3;
+        launcher_damage(wm);
+        return;
+    }
+    if (code == KEY_ENTER || code == KEY_KPENTER) {
+        if (repeat)
+            return;
+        if (wm->launcher_focus == 0) {
+            wm->launcher_focus = 1;
+            launcher_damage(wm);
+        } else {
+            launcher_submit(wm);
+        }
+        return;
+    }
+    if (wm->launcher_focus == 2) {
+        if (code == KEY_LEFT || code == KEY_RIGHT) {
+            int k = wm->launcher_kind + (code == KEY_LEFT ? -1 : 1);
+            wm->launcher_kind = LM_CLAMP(k, -1, LM_DOCKICON_COUNT - 1);
+            launcher_damage(wm);
+        }
+        return;
+    }
+    char *text = wm->launcher_focus == 0 ? wm->launcher_name : wm->launcher_cmd;
+    size_t max = wm->launcher_focus == 0 ? sizeof(wm->launcher_name) : sizeof(wm->launcher_cmd);
+    if (code == KEY_BACKSPACE) {
+        launcher_pop(text);
+    } else if (!(mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {
+        int layouts[LM_KBD_MAX_LAYOUTS], n = wm->srv->config.kbd_nlayouts;
+        if (n < 1 || n > LM_KBD_MAX_LAYOUTS)
+            n = 0;
+        for (int i = 0; i < n; i++)
+            layouts[i] = wm->srv->config.kbd_layouts[i];
+        lm_keymap_set_groups(layouts, n);
+        lm_keymap_client_group(lm_seat_group(wm->srv->seat));
+        if (code >= KEY_KP7 && code <= KEY_KPDOT)
+            mods |= LM_MOD_NUM;
+        uint32_t ks = lm_keymap_keysym(code, mods);
+        char txt[8];
+        int k = ks ? lm_keysym_to_utf8(ks, txt) : 0;
+        size_t l = strlen(text);
+        if (k <= 0 || (unsigned char)txt[0] < 0x20 || l + (size_t)k >= max)
+            return;
+        memcpy(text + l, txt, (size_t)k);
+        text[l + (size_t)k] = 0;
+    } else {
+        return;
+    }
+    wm->launcher_msg[0] = 0;
+    launcher_damage(wm);
+}
 
 /* ---- the dock ------------------------------------------------------------------------------------------------------------ */
 
@@ -1911,6 +2439,13 @@ static void dock_geometry(const struct lm_output *o, struct dock_geo *g)
         g->bounds = (struct lm_rect){ 0 };
 }
 
+/* Everything the icon in the hand of a dock drag may touch: a square around the pointer (icon, shadow, the x). */
+static struct lm_rect dock_ghost_rect(const struct lm_wm *wm)
+{
+    int half = lm_dock.icon_size * lm_dock.zoom / 100 * 4 / 5 + 12;
+    return lm_rect_make((int)wm->drag_x - half, (int)wm->drag_y - half, 2 * half, 2 * half);
+}
+
 static bool dock_app_matches(const char *match, const char *app_id)
 {
     if (!*match)
@@ -1943,13 +2478,31 @@ static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_doc
     d->output = o;
     d->rect = g.bounds;
     d->n = g.n;
-    d->hover = wm->dock_active ? wm->hover_dock : -1;
+    bool drag = wm->dock_drag && wm->dock_drag_idx >= 0 && wm->dock_drag_idx < g.n;
+    d->hover = wm->dock_active && !drag ? wm->hover_dock : -1;
     d->dot_y = g.icon_bottom + DOCK_DOT / 2 + 1;
+    int order[LM_DOCK_MAX];                                       /* what each place of the row holds; -1 = the gap of the icon in the hand */
+    for (int i = 0; i < g.n; i++)
+        order[i] = i;
+    if (drag) {
+        int idx = wm->dock_drag_idx, to = wm->dock_drag_to, k = 0;
+        if (to < 0) {
+            order[idx] = -1;                                      /* it is out of the row: the others stay where they are */
+        } else {
+            int rest[LM_DOCK_MAX];
+            for (int i = 0; i < g.n; i++)
+                if (i != idx)
+                    rest[k++] = i;
+            to = LM_CLAMP(to, 0, g.n - 1);
+            for (int i = 0, r = 0; i < g.n; i++)
+                order[i] = i == to ? -1 : rest[r++];
+        }
+    }
 
     /* The icons near the pointer grow with a bell curve; the ones beyond them are pushed aside so that nothing overlaps. Hit testing uses
      * the unmagnified places (dock_pick), so what the pointer measures against does not move under it. */
     double px = 0, py = 0;
-    bool zoom = wm->dock_active && lm_dock.zoom > 100 && wm->srv->seat;
+    bool zoom = wm->dock_active && !drag && lm_dock.zoom > 100 && wm->srv->seat;
     if (zoom)
         lm_seat_pointer_position(wm->srv->seat, &px, &py);
     float scale[LM_DOCK_MAX], extra[LM_DOCK_MAX], total_extra = 0.0f;
@@ -1965,22 +2518,35 @@ static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_doc
         total_extra += extra[i];
     }
     float left = 0.0f;
+    int vis = 0;
     for (int i = 0; i < g.n; i++) {
         float cx = (float)(g.x0 + i * (g.size + g.gap)) + (float)g.size / 2.0f;
         float cxp = cx + left + extra[i] / 2.0f - total_extra / 2.0f, w = (float)g.size * scale[i];
         left += extra[i];
-        d->icon[i].box = lm_rect_make((int)lroundf(cxp - w / 2.0f), (int)lroundf((float)g.icon_bottom - w), (int)lroundf(w), (int)lroundf(w));
-        d->icon[i].item = lm_dock_item(i);
-        d->icon[i].running = dock_window_count(wm, d->icon[i].item) > 0;
-        if (wm->dock_launch_ms[i]) {                                  /* starting: hops up and down until its window is there */
-            float ph = (float)((lm_now_ms() - (uint64_t)wm->dock_launch_ms[i]) % DOCK_BOUNCE_PERIOD_MS) / (float)DOCK_BOUNCE_PERIOD_MS;
+        if (order[i] < 0)
+            continue;
+        int it = order[i];
+        d->icon[vis].box = lm_rect_make((int)lroundf(cxp - w / 2.0f), (int)lroundf((float)g.icon_bottom - w), (int)lroundf(w), (int)lroundf(w));
+        d->icon[vis].item = lm_dock_item(it);
+        d->icon[vis].running = dock_window_count(wm, d->icon[vis].item) > 0;
+        if (wm->dock_launch_ms[it]) {                                 /* starting: hops up and down until its window is there */
+            float ph = (float)((lm_now_ms() - (uint64_t)wm->dock_launch_ms[it]) % DOCK_BOUNCE_PERIOD_MS) / (float)DOCK_BOUNCE_PERIOD_MS;
             float up = 4.0f * ph * (1.0f - ph);                       /* a parabola: slow at the top, quick at the ground */
-            d->icon[i].box.y -= (int)lroundf(up * (float)g.size * 0.5f);
-            d->icon[i].launching = true;
+            d->icon[vis].box.y -= (int)lroundf(up * (float)g.size * 0.5f);
+            d->icon[vis].launching = true;
         }
+        vis++;
+    }
+    d->n = vis;
+    if (drag) {                                                       /* the icon in the hand follows the pointer */
+        d->drag_item = lm_dock_item(wm->dock_drag_idx);
+        d->drag_box = lm_rect_make((int)wm->drag_x - g.zsize / 2, (int)wm->drag_y - g.zsize / 2, g.zsize, g.zsize);
+        d->drag_remove = wm->dock_drag_to < 0 && !launcher_is_self(d->drag_item);
+        struct lm_rect gr = dock_ghost_rect(wm);
+        d->rect = lm_rect_union(&d->rect, &gr);
     }
     if (d->hover >= 0 && d->hover < g.n) {
-        d->label_text = d->icon[d->hover].item->name;
+        d->label_text = lm_dock_item(d->hover)->name;
         int w = lm_font_text_width(d->label_text) + 20;
         const struct lm_rect *b = &d->icon[d->hover].box;
         int x = b->x + b->w / 2 - w / 2, y = b->y - 8 - DOCK_LABEL_H;
@@ -1998,6 +2564,10 @@ static void dock_damage(struct lm_wm *wm)
     struct dock_geo g;
     dock_geometry(o, &g);
     damage_rect(wm, &g.bounds);
+    if (wm->dock_drag) {
+        struct lm_rect gr = dock_ghost_rect(wm);
+        damage_rect(wm, &gr);
+    }
 }
 
 /* What the pointer at (ix, iy) touches of the dock. The magnified shape is only "solid" while the pointer is inside the dock already. */
@@ -2067,8 +2637,18 @@ static void dock_motion(struct lm_wm *wm, bool in, int item)
 static void dock_activate(struct lm_wm *wm, int i, bool reuse)
 {
     const struct lm_dock_item *it = lm_dock_item(i);
-    if (!it)
+    if (it)
+        dock_launch(wm, it, i, reuse);
+}
+
+/* Starts the program of `it` or brings its window forward. `i` is its place in the dock (the icon hops there while it starts), -1 for a
+ * launcher button that is not in the dock. */
+static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool reuse)
+{
+    if (launcher_is_self(it)) {                                       /* the Launcher button: not a program */
+        launcher_set(wm, true, dock_output(wm));
         return;
+    }
     struct lm_window *w, *best = NULL;
     if (reuse)
         lm_list_for_each(w, &wm->windows, link)
@@ -2078,13 +2658,133 @@ static void dock_activate(struct lm_wm *wm, int i, bool reuse)
      * instance (two terminals): the program is started again. */
     if (best && !(best == wm->focused && !best->minimized && best->workspace == wm->workspace)) {
         lm_wm_focus_window(wm, best);
-    } else if (lm_server_spawn(wm->srv, it->cmd) > 0 && i < LM_DOCK_MAX) {
+    } else if (lm_server_spawn(wm->srv, it->cmd) > 0 && i >= 0 && i < LM_DOCK_MAX) {
         wm->dock_launch_ms[i] = (int64_t)lm_now_ms();                 /* the icon hops until a window of the program shows up */
         wm->dock_launch_base[i] = dock_window_count(wm, it);
         if (wm->dock_anim)
             lm_timer_arm_ms(wm->dock_anim, DOCK_ANIM_MS, DOCK_ANIM_MS);
         dock_damage(wm);
     }
+}
+
+/* ---- mouse drags: dock icons (reorder, take out) and launcher icons (onto the dock) ---------------------------------------------- */
+
+#define DRAG_START_PX 8             /* the pointer must move this far with the button down before a press becomes a drag */
+#define DOCK_OUT_PX 60              /* a dock icon dragged this far above the row leaves the dock */
+
+static bool drag_far_enough(const struct lm_wm *wm, double x, double y)
+{
+    double dx = x - wm->drag_press_x, dy = y - wm->drag_press_y;
+    return dx * dx + dy * dy >= (double)(DRAG_START_PX * DRAG_START_PX);
+}
+
+static void dock_drag_notify_failed(struct lm_wm *wm)
+{
+    lm_wm_notify(wm, "Dock", "Could not change the dock: there is no config file to write, or the list is full", 5000);
+}
+
+static void dock_drag_finish(struct lm_wm *wm)
+{
+    int idx = wm->dock_drag_idx, to = wm->dock_drag_to;
+    dock_damage(wm);
+    wm->dock_drag = false;
+    dock_damage(wm);
+    const struct lm_dock_item *it = lm_dock_item(idx);
+    if (!it)
+        return;
+    if (to < 0) {                                                   /* out of the dock: it is gone from there, the launcher keeps it */
+        if (!launcher_is_self(it) && !lm_settings_dock_to_launcher(wm->srv, it->raw))
+            dock_drag_notify_failed(wm);
+    } else if (to != idx) {
+        const struct lm_dock_item *target = lm_dock_item(to);
+        if (target && !lm_settings_dock_reorder(wm->srv, it->raw, target->raw))
+            dock_drag_notify_failed(wm);
+    }
+}
+
+/* The pointer moved while a dock icon is pressed: start the drag once it has moved enough, then follow. */
+static void dock_drag_motion(struct lm_wm *wm)
+{
+    if (wm->press_panel_kind != LM_PICK_DOCK_ITEM || !wm->dock_press_left || !wm->srv->seat)
+        return;
+    double x, y;
+    lm_seat_pointer_position(wm->srv->seat, &x, &y);
+    struct lm_output *o = dock_output(wm);
+    if (!o)
+        return;
+    struct dock_geo g;
+    dock_geometry(o, &g);
+    if (!wm->dock_drag) {
+        if (!drag_far_enough(wm, x, y) || wm->press_panel_ws < 0 || wm->press_panel_ws >= g.n)
+            return;
+        wm->dock_drag = true;
+        wm->dock_drag_idx = wm->press_panel_ws;
+        wm->dock_active = false;
+        wm->hover_dock = -1;
+    }
+    dock_damage(wm);                                                /* (where the icon in the hand was) */
+    wm->drag_x = x;
+    wm->drag_y = y;
+    if (y < g.icon_bottom - g.size - DOCK_OUT_PX)
+        wm->dock_drag_to = -1;
+    else
+        wm->dock_drag_to = LM_CLAMP((int)floor((x - g.x0) / (double)(g.size + g.gap)), 0, g.n - 1);
+    dock_damage(wm);
+}
+
+/* Where a launcher icon can be dropped: the dock's place (the row and a margin around it). *pos = the place it would take, -1 when the
+ * pointer is not on it. False when the dock is off. */
+static bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos)
+{
+    *pos = -1;
+    if (!lm_dock.enabled || lm_dock_count() == 0)
+        return false;
+    struct dock_geo g;
+    dock_geometry(o, &g);
+    struct lm_rect z = lm_rect_make(g.strip.x - 60, g.strip.y - 40, g.strip.w + 120, o->y + o->height - (g.strip.y - 40)), orect = lm_output_rect(o);
+    if (!lm_rect_intersect(&z, &orect, zone))
+        return false;
+    if (lm_rect_contains(zone, (int)wm->drag_x, (int)wm->drag_y)) {
+        int pitch = g.size + g.gap;
+        *pos = LM_CLAMP((int)floor((wm->drag_x - g.x0 + pitch / 2.0) / (double)pitch), 0, g.n);
+        *marker = lm_rect_make(g.x0 + *pos * pitch - g.gap / 2 - 1, g.icon_bottom - g.size, 3, g.size);
+    }
+    return true;
+}
+
+static void launcher_drag_motion(struct lm_wm *wm)
+{
+    if (wm->press_panel_kind != LM_PICK_LAUNCHER_ITEM || !wm->srv->seat || wm->launcher_form || wm->launcher_edit)
+        return;
+    double x, y;
+    lm_seat_pointer_position(wm->srv->seat, &x, &y);
+    if (!wm->launcher_drag) {
+        if (!drag_far_enough(wm, x, y))
+            return;
+        wm->launcher_drag = true;
+        wm->launcher_drag_g = wm->press_panel_ws;
+    }
+    wm->drag_x = x;
+    wm->drag_y = y;
+    launcher_damage(wm);
+}
+
+static void launcher_drag_finish(struct lm_wm *wm)
+{
+    struct lm_output *o = launcher_output(wm);
+    struct lm_rect zone = { 0 }, marker = { 0 };
+    int pos = -1;
+    if (o)
+        launcher_drop_zone(wm, o, &zone, &marker, &pos);
+    int g = wm->launcher_drag_g;
+    wm->launcher_drag = false;
+    launcher_damage(wm);
+    const struct lm_dock_item *it = launcher_item(g, NULL);
+    if (!it || pos < 0 || !it->launcher_only)                       /* (a button that is in the dock already stays where it is) */
+        return;
+    const struct lm_dock_item *before = pos < lm_dock_count() ? lm_dock_item(pos) : NULL;
+    if (!lm_settings_launcher_to_dock(wm->srv, it->raw, before ? before->raw : -1))
+        lm_wm_notify(wm, "Launcher", "Could not add it to the dock: it is full, the name is in use, or there is no config file", 5000);
 }
 
 /* Every 33 ms while some icon hops: ends the hopping of the ones whose window came (or that never made one) and repaints. */
@@ -2131,7 +2831,8 @@ size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
     bool shown = out && dock_shown(wm);
     if (out)
         dock_info(wm, out, &d);
-    o += (size_t)snprintf(buf + o, size - o, "dock shown=%d hover=%d n=%d\n", shown, shown ? d.hover : -1, out ? d.n : 0);
+    o += (size_t)snprintf(buf + o, size - o, "dock shown=%d hover=%d n=%d drag=%d to=%d\n", shown, shown ? d.hover : -1, out ? d.n : 0,
+                          wm->dock_drag ? wm->dock_drag_idx : -1, wm->dock_drag ? wm->dock_drag_to : -1);
     for (int i = 0; out && i < d.n && o < size; i++)
         o += (size_t)snprintf(buf + o, size - o, "icon %d \"%s\" x=%d y=%d w=%d h=%d running=%d launching=%d cmd=%s\n", i, d.icon[i].item->name,
                               d.icon[i].box.x, d.icon[i].box.y, d.icon[i].box.w, d.icon[i].box.h, d.icon[i].running, d.icon[i].launching, d.icon[i].item->cmd);
@@ -2269,12 +2970,12 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
     if (dock_out && dock_shown(wm)) {
         struct dock_geo g;
         dock_geometry(dock_out, &g);
-        if (!lm_rect_is_empty(&g.bounds) && (!clip || lm_rect_overlaps(&g.bounds, clip))) {
+        if (!lm_rect_is_empty(&g.bounds)) {
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_DOCK;
             it.output = dock_out;
             dock_info(wm, dock_out, &it.u.dock);
-            if (!fn(&it, data))
+            if ((!clip || lm_rect_overlaps(&it.u.dock.rect, clip)) && !fn(&it, data))
                 return;
         }
     }
@@ -2336,6 +3037,21 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 it.kind = LM_SCENE_ABOUT;
                 it.output = ao;
                 about_info(wm, ao, &it.u.about);
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+    }
+
+    if (wm->launcher_open) {                                     /* the launcher dialog */
+        struct lm_output *lo = launcher_output(wm);
+        if (lo) {
+            struct lm_rect r = lm_output_rect(lo);
+            if (!clip || lm_rect_overlaps(&r, clip)) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_LAUNCHER;
+                it.output = lo;
+                launcher_info(wm, lo, &it.u.launcher);
                 if (!fn(&it, data))
                     return;
             }
@@ -2448,6 +3164,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
     out->kind = LM_PICK_NONE;
     int32_t ix = (int32_t)x, iy = (int32_t)y;
 
+    if (launcher_pick(wm, ix, iy, out))                          /* the launcher dialog is modal: it gets every pick */
+        return;
     struct lm_output *ao = about_output(wm);
     if (ao && !lm_lock_active(wm->srv->lock)) {                  /* the About dialog is modal, too */
         struct lm_about_info ai;
@@ -2652,6 +3370,8 @@ static enum lm_cursor_shape cursor_for_edges(uint32_t e)
 
 void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
 {
+    dock_drag_motion(wm);
+    launcher_drag_motion(wm);
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
@@ -2671,6 +3391,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_ABOUT_BUTTON: about_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_DOCK_ITEM: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_LAUNCHER_ITEM: case LM_PICK_LAUNCHER_REMOVE: case LM_PICK_LAUNCHER_ADD: case LM_PICK_LAUNCHER_BUTTON:
+    case LM_PICK_LAUNCHER_KIND: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_UP: clip_code = 1; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_DOWN: clip_code = 2; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_CLEAR: clip_code = 3; shape = LM_CURSOR_POINTER; break;
@@ -2700,6 +3422,21 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     if (clip_code != wm->hover_clip) {
         wm->hover_clip = clip_code;
         damage_gadget(wm, LM_GADGET_CLIPBOARD);
+    }
+    if (wm->launcher_open) {                                    /* the pointer moves the launcher's highlight */
+        struct lm_output *lo = launcher_output(wm);
+        int hb = pick->kind == LM_PICK_LAUNCHER_BUTTON ? pick->index : -1, sel = wm->launcher_sel;
+        if (pick->kind == LM_PICK_LAUNCHER_ITEM || pick->kind == LM_PICK_LAUNCHER_REMOVE)
+            sel = pick->index;
+        else if (pick->kind == LM_PICK_LAUNCHER_ADD && lo)
+            sel = launcher_count();
+        else if (pick->kind == LM_PICK_LAUNCHER_BACKDROP || pick->kind == LM_PICK_LAUNCHER_CARD)
+            sel = wm->launcher_form ? sel : -1;
+        if (hb != wm->launcher_hover_btn || sel != wm->launcher_sel) {
+            wm->launcher_hover_btn = hb;
+            wm->launcher_sel = sel;
+            launcher_damage(wm);
+        }
     }
     if (wm->about_open && about_btn != wm->about_hover_close) {
         wm->about_hover_close = about_btn;
@@ -3189,6 +3926,32 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         return true;
     }
+    if (pick->kind >= LM_PICK_LAUNCHER_ITEM && pick->kind <= LM_PICK_LAUNCHER_BACKDROP) {
+        int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
+        if (pressed) {
+            if (pick->kind == LM_PICK_LAUNCHER_BACKDROP) {      /* a click outside the card closes it, nothing below gets it */
+                launcher_set(wm, false, NULL);
+            } else if (pick->kind != LM_PICK_LAUNCHER_CARD && button == BTN_LEFT) {
+                wm->press_panel_kind = pick->kind;
+                wm->press_panel_ws = pick->index;
+                if (wm->srv->seat) {
+                    double px, py;
+                    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+                    wm->drag_press_x = (int)px;
+                    wm->drag_press_y = (int)py;
+                }
+                wm->press_win = NULL;
+                wm->press_bits = 0;
+            }
+        } else {
+            wm->press_panel_kind = 0;
+            if (wm->launcher_drag)
+                launcher_drag_finish(wm);                       /* a drag ends with the button: dropped on the dock or not */
+            else if (pk == (int)pick->kind && pi == pick->index && button == BTN_LEFT)
+                launcher_activate(wm, pk, pi);                  /* released on what it was pressed on */
+        }
+        return true;
+    }
     if (pick->kind == LM_PICK_ABOUT_BUTTON || pick->kind == LM_PICK_ABOUT_CARD || pick->kind == LM_PICK_ABOUT_BACKDROP) {
         int pk = wm->press_panel_kind;
         if (pressed) {
@@ -3242,7 +4005,9 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         if (pk == LM_PICK_PANEL_LAUNCHER && pick->kind == LM_PICK_PANEL_LAUNCHER)
             about_set(wm, true, lm_output_nearest(wm->srv, pick->rect.x, pick->rect.y));
-        if (pk == LM_PICK_DOCK_ITEM && pick->kind == LM_PICK_DOCK_ITEM && pick->index == pi)
+        if (pk == LM_PICK_DOCK_ITEM && wm->dock_drag)
+            dock_drag_finish(wm);                               /* it was dragged: moved or taken out, not clicked */
+        else if (pk == LM_PICK_DOCK_ITEM && pick->kind == LM_PICK_DOCK_ITEM && pick->index == pi)
             dock_activate(wm, pi, button != BTN_MIDDLE);        /* the middle button always starts another instance */
         if (pk == LM_PICK_PANEL_RUN && pick->kind == LM_PICK_PANEL_RUN)
             launch_run(wm);
@@ -3349,6 +4114,13 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (button == BTN_LEFT || button == BTN_MIDDLE) {
             wm->press_panel_kind = LM_PICK_DOCK_ITEM;
             wm->press_panel_ws = pick->index;
+            wm->dock_press_left = button == BTN_LEFT;
+            if (wm->srv->seat) {
+                double px, py;
+                lm_seat_pointer_position(wm->srv->seat, &px, &py);
+                wm->drag_press_x = (int)px;
+                wm->drag_press_y = (int)py;
+            }
             wm->press_win = NULL;
             wm->press_bits = 0;
         }
@@ -3499,6 +4271,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     switch (kb->action) {
     case LM_ACT_TERMINAL: launch_terminal(wm); break;
     case LM_ACT_RUN: launch_run(wm); break;
+    case LM_ACT_LAUNCHER: launcher_set(wm, !wm->launcher_open, NULL); break;
     case LM_ACT_SETTINGS: launch_settings(wm); break;
     case LM_ACT_EXEC: {
         char cmd[2048];
@@ -3606,6 +4379,11 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     bool ctrl = (mods & LM_MOD_CTRL) != 0;
     bool alt = (mods & LM_MOD_ALT) != 0;
 
+    if (wm->launcher_open && !(ctrl && alt)) {                  /* the launcher dialog is modal and takes every key */
+        if (pressed && !is_modifier_key(code))
+            launcher_key(wm, code, repeat, mods);
+        return true;
+    }
     if (wm->about_open && !(ctrl && alt)) {                     /* the About dialog is modal, too: Esc, Enter and Space close it */
         if (pressed && !repeat && (code == KEY_ESC || code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE))
             about_set(wm, false, NULL);

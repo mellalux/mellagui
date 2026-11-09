@@ -821,7 +821,7 @@ static bool dock_text_ok(const char *s, size_t max, bool allow_empty)
     return true;
 }
 
-static bool dock_commit(struct lm_server *srv, const struct dock_list *l)
+static bool dock_commit(struct lm_server *srv, const struct dock_list *l, const char *section)
 {
     const char *path = srv->config.conf_path;
     if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
@@ -838,7 +838,7 @@ static bool dock_commit(struct lm_server *srv, const struct dock_list *l)
             o += (size_t)snprintf(body + o, cap - o, "%s = %s\n", l->name[i], l->cmd[i]);
     }
     body[o] = 0;
-    bool ok = lm_confedit_set_section(path, "dock-apps", body);
+    bool ok = lm_confedit_set_section(path, section, body);
     free(body);
     if (ok)
         srv->reload_config(srv, true);
@@ -933,7 +933,132 @@ static bool dock_op(struct lm_server *srv, int kid, const char *val)
         snprintf(l.icon[idx], sizeof(l.icon[0]), "%s", icon);
         snprintf(l.cmd[idx], sizeof(l.cmd[0]), "%s", cmd);
     }
-    return dock_commit(srv, &l);
+    return dock_commit(srv, &l, "dock-apps");
+}
+
+/* ---- what the launcher dialog and the dock's drag and drop do: [dock-apps] and [launcher-apps], one rewrite per change ------------------ */
+
+static void apps_load(struct dock_list *l, bool launcher)
+{
+    const char *nm, *ic, *cm;
+    l->n = 0;
+    while (l->n < LM_DOCK_MAX && (launcher ? lm_launchapps_raw_entry(l->n, &nm, &ic, &cm) : lm_dock_raw_entry(l->n, &nm, &ic, &cm))) {
+        snprintf(l->name[l->n], sizeof(l->name[0]), "%s", nm);
+        snprintf(l->icon[l->n], sizeof(l->icon[0]), "%s", ic);
+        snprintf(l->cmd[l->n], sizeof(l->cmd[0]), "%s", cm);
+        l->n++;
+    }
+}
+
+static void apps_move_entry(struct dock_list *l, int from, int to)          /* remove entry `from`, insert it so that it ends up at `to` */
+{
+    char n[LM_DOCK_NAME_MAX], i[LM_DOCK_ICON_MAX], c[LM_DOCK_CMD_MAX];
+    memcpy(n, l->name[from], sizeof(n));
+    memcpy(i, l->icon[from], sizeof(i));
+    memcpy(c, l->cmd[from], sizeof(c));
+    for (int k = from; k < l->n - 1; k++) {
+        memcpy(l->name[k], l->name[k + 1], sizeof(l->name[0]));
+        memcpy(l->icon[k], l->icon[k + 1], sizeof(l->icon[0]));
+        memcpy(l->cmd[k], l->cmd[k + 1], sizeof(l->cmd[0]));
+    }
+    for (int k = l->n - 1; k > to; k--) {
+        memcpy(l->name[k], l->name[k - 1], sizeof(l->name[0]));
+        memcpy(l->icon[k], l->icon[k - 1], sizeof(l->icon[0]));
+        memcpy(l->cmd[k], l->cmd[k - 1], sizeof(l->cmd[0]));
+    }
+    memcpy(l->name[to], n, sizeof(n));
+    memcpy(l->icon[to], i, sizeof(i));
+    memcpy(l->cmd[to], c, sizeof(c));
+}
+
+/* Add a button at index `at` (-1 or past the end = last) of [dock-apps] or [launcher-apps]. */
+static bool apps_put(struct lm_server *srv, bool launcher, const char *name, const char *icon, const char *cmd, int at)
+{
+    static struct dock_list l;
+    apps_load(&l, launcher);
+    if (!dock_name_ok(name) || strlen(name) >= LM_DOCK_NAME_MAX || !dock_text_ok(icon, LM_DOCK_ICON_MAX, true) || strchr(icon, ']') ||
+        icon[0] == '[' || !dock_text_ok(cmd, LM_DOCK_CMD_MAX, false) || l.n >= LM_DOCK_MAX)
+        return false;
+    for (int i = 0; i < l.n; i++)
+        if (!strcasecmp(l.name[i], name))
+            return false;
+    int k = l.n++;
+    snprintf(l.name[k], sizeof(l.name[0]), "%s", name);
+    snprintf(l.icon[k], sizeof(l.icon[0]), "%s", icon);
+    snprintf(l.cmd[k], sizeof(l.cmd[0]), "%s", cmd);
+    if (at >= 0 && at < k)
+        apps_move_entry(&l, k, at);
+    return dock_commit(srv, &l, launcher ? "launcher-apps" : "dock-apps");
+}
+
+static bool apps_del(struct lm_server *srv, bool launcher, int raw)
+{
+    static struct dock_list l;
+    apps_load(&l, launcher);
+    if (raw < 0 || raw >= l.n)
+        return false;
+    for (int i = raw; i + 1 < l.n; i++) {
+        memcpy(l.name[i], l.name[i + 1], sizeof(l.name[0]));
+        memcpy(l.icon[i], l.icon[i + 1], sizeof(l.icon[0]));
+        memcpy(l.cmd[i], l.cmd[i + 1], sizeof(l.cmd[0]));
+    }
+    l.n--;
+    return dock_commit(srv, &l, launcher ? "launcher-apps" : "dock-apps");
+}
+
+bool lm_settings_dock_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd)
+{
+    return apps_put(srv, false, name, icon, cmd, -1);
+}
+
+bool lm_settings_dock_del(struct lm_server *srv, int raw_index) { return apps_del(srv, false, raw_index); }
+bool lm_settings_launcher_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd)
+{
+    return apps_put(srv, true, name, icon, cmd, -1);
+}
+bool lm_settings_launcher_del(struct lm_server *srv, int raw_index) { return apps_del(srv, true, raw_index); }
+
+bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to)
+{
+    static struct dock_list l;
+    apps_load(&l, false);
+    if (from < 0 || to < 0 || from >= l.n || to >= l.n)
+        return false;
+    if (from != to)
+        apps_move_entry(&l, from, to);
+    return dock_commit(srv, &l, "dock-apps");
+}
+
+bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at)
+{
+    const char *nm, *ic, *cm;
+    if (!lm_launchapps_raw_entry(raw_index, &nm, &ic, &cm))
+        return false;
+    char name[LM_DOCK_NAME_MAX], icon[LM_DOCK_ICON_MAX], cmd[LM_DOCK_CMD_MAX];
+    snprintf(name, sizeof(name), "%s", nm);
+    snprintf(icon, sizeof(icon), "%s", ic);
+    snprintf(cmd, sizeof(cmd), "%s", cm);
+    if (!apps_put(srv, false, name, icon, cmd, at))
+        return false;
+    return apps_del(srv, true, raw_index);
+}
+
+bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index)
+{
+    const char *nm, *ic, *cm;
+    if (!lm_dock_raw_entry(raw_index, &nm, &ic, &cm))
+        return false;
+    char name[LM_DOCK_NAME_MAX], icon[LM_DOCK_ICON_MAX], cmd[LM_DOCK_CMD_MAX];
+    snprintf(name, sizeof(name), "%s", nm);
+    snprintf(icon, sizeof(icon), "%s", ic);
+    snprintf(cmd, sizeof(cmd), "%s", cm);
+    bool listed = false;                                    /* the launcher's own list may have it already (the dock's copy won in the dialog) */
+    for (int i = 0; lm_launchapps_raw_entry(i, &nm, &ic, &cm); i++)
+        if (!strcasecmp(nm, name))
+            listed = true;
+    if (!listed && !apps_put(srv, true, name, icon, cmd, -1))
+        return false;
+    return apps_del(srv, false, raw_index);
 }
 
 /* ---- the [keys] section, edited from the panel's Keys page ----------------------------------------------------------------- */

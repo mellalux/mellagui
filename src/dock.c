@@ -19,6 +19,7 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
 
 #define DEFAULT_APPS \
     "[dock-apps]\n" \
+    "Launcher   = [launcher] @launcher\n" \
     "Terminal   = [terminal] @terminal\n" \
     "Files      = [files] mellagui-files\n" \
     "Editor     = [editor] mellagui-edit\n" \
@@ -44,12 +45,26 @@ const char *lm_dock_default_conf(void) { return default_text; }
 /* ---- what the file said ------------------------------------------------------------------------------------------- */
 
 struct raw_item { char name[LM_DOCK_NAME_MAX], icon[LM_DOCK_ICON_MAX], cmd[LM_DOCK_CMD_MAX]; };
-static struct raw_item raw[LM_DOCK_MAX];
-static int raw_n;
+struct app_item {
+    struct lm_dock_item pub;
+    char name[LM_DOCK_NAME_MAX], cmd[LM_DOCK_CMD_MAX], match[64];
+    struct lm_image img;
+    bool has_img;
+};
+/* Two lists of buttons: [dock-apps] (the dock) and [launcher-apps] (the launcher dialog's own ones). */
+struct applist {
+    struct raw_item raw[LM_DOCK_MAX];
+    int raw_n;
+    struct app_item items[LM_DOCK_MAX];
+    int item_n;
+};
+static struct applist lists[2];
+#define DOCK_LIST (&lists[0])
+#define LAUNCH_LIST (&lists[1])
 
 bool lm_dock_section(const char *section)
 {
-    return !strcmp(section, "dock") || !strcmp(section, "dock-apps");
+    return !strcmp(section, "dock") || !strcmp(section, "dock-apps") || !strcmp(section, "launcher-apps");
 }
 
 bool lm_dock_split(const char *value, char *icon, size_t icon_n, char *cmd, size_t cmd_n)
@@ -112,16 +127,17 @@ bool lm_dock_conf(void *ud, const char *section, const char *key, const char *va
         if (!strcmp(key, "margin")) return parse_int(value, 0, 100, &lm_dock.margin);
         return false;
     }
-    if (!strcmp(section, "dock-apps")) {
-        if (raw_n >= LM_DOCK_MAX) {
-            lm_warn("dock: at most %d entries, '%s' ignored", LM_DOCK_MAX, key);
+    if (!strcmp(section, "dock-apps") || !strcmp(section, "launcher-apps")) {
+        struct applist *L = strcmp(section, "dock-apps") ? LAUNCH_LIST : DOCK_LIST;
+        if (L->raw_n >= LM_DOCK_MAX) {
+            lm_warn("%s: at most %d entries, '%s' ignored", section, LM_DOCK_MAX, key);
             return true;
         }
-        struct raw_item *r = &raw[raw_n];
+        struct raw_item *r = &L->raw[L->raw_n];
         if (!*key || strlen(key) >= sizeof(r->name) || !lm_dock_split(value, r->icon, sizeof(r->icon), r->cmd, sizeof(r->cmd)))
             return false;
         strcpy(r->name, key);
-        raw_n++;
+        L->raw_n++;
         return true;
     }
     return false;
@@ -132,7 +148,7 @@ bool lm_dock_conf(void *ud, const char *section, const char *key, const char *va
 void lm_dock_reset(void)
 {
     lm_dock = BUILTIN_SETTINGS;
-    raw_n = 0;
+    lists[0].raw_n = lists[1].raw_n = 0;
 }
 
 bool lm_dock_check(const char *key, const char *value, bool *builtin)
@@ -145,41 +161,44 @@ bool lm_dock_check(const char *key, const char *value, bool *builtin)
     return ok;
 }
 
-int lm_dock_raw_count(void) { return raw_n; }
+int lm_dock_raw_count(void) { return DOCK_LIST->raw_n; }
+int lm_launchapps_raw_count(void) { return LAUNCH_LIST->raw_n; }
 
-bool lm_dock_raw_entry(int i, const char **name, const char **icon, const char **cmd)
+static bool raw_entry(const struct applist *L, int i, const char **name, const char **icon, const char **cmd)
 {
-    if (i < 0 || i >= raw_n)
+    if (i < 0 || i >= L->raw_n)
         return false;
-    *name = raw[i].name;
-    *icon = raw[i].icon;
-    *cmd = raw[i].cmd;
+    *name = L->raw[i].name;
+    *icon = L->raw[i].icon;
+    *cmd = L->raw[i].cmd;
     return true;
 }
 
-/* ---- the resolved list -------------------------------------------------------------------------------------------- */
+bool lm_dock_raw_entry(int i, const char **name, const char **icon, const char **cmd) { return raw_entry(DOCK_LIST, i, name, icon, cmd); }
+bool lm_launchapps_raw_entry(int i, const char **name, const char **icon, const char **cmd) { return raw_entry(LAUNCH_LIST, i, name, icon, cmd); }
 
-static struct {
-    struct lm_dock_item pub;
-    char name[LM_DOCK_NAME_MAX], cmd[LM_DOCK_CMD_MAX], match[64];
-    struct lm_image img;
-    bool has_img;
-} items[LM_DOCK_MAX];
-static int item_n;
+/* ---- the resolved lists ------------------------------------------------------------------------------------------- */
 
-static void free_items(void)
+static void free_items(struct applist *L)
 {
-    for (int i = 0; i < item_n; i++)
-        if (items[i].has_img)
-            lm_img_free(&items[i].img);
-    item_n = 0;
+    for (int i = 0; i < L->item_n; i++)
+        if (L->items[i].has_img)
+            lm_img_free(&L->items[i].img);
+    L->item_n = 0;
 }
 
-int lm_dock_count(void) { return item_n; }
+int lm_dock_count(void) { return DOCK_LIST->item_n; }
 
 const struct lm_dock_item *lm_dock_item(int i)
 {
-    return i >= 0 && i < item_n ? &items[i].pub : NULL;
+    return i >= 0 && i < DOCK_LIST->item_n ? &DOCK_LIST->items[i].pub : NULL;
+}
+
+int lm_launchapps_count(void) { return LAUNCH_LIST->item_n; }
+
+const struct lm_dock_item *lm_launchapps_item(int i)
+{
+    return i >= 0 && i < LAUNCH_LIST->item_n ? &LAUNCH_LIST->items[i].pub : NULL;
 }
 
 /* The program of a command line, lower case without its directory and a trailing ".sh"/".exe": what a window's app id is compared with.
@@ -279,22 +298,22 @@ static bool looks_like_path(const char *s)
 }
 
 /* Fills the icon of items[i] from the icon text of the entry. */
-static void load_icon(int i, const char *name, const char *spec)
+static void load_icon(struct app_item *it, const char *name, const char *spec)
 {
-    items[i].pub.kind = LM_DOCKICON_GENERIC;
-    items[i].pub.img = NULL;
+    it->pub.kind = LM_DOCKICON_GENERIC;
+    it->pub.img = NULL;
     if (!*spec) {
-        items[i].pub.kind = lm_dockicon_guess(name);
+        it->pub.kind = lm_dockicon_guess(name);
         return;
     }
     int k = lm_dockicon_by_name(spec);
     if (k >= 0) {
-        items[i].pub.kind = k;
+        it->pub.kind = k;
         return;
     }
     if (!looks_like_path(spec)) {
         lm_warn("dock: '%s': unknown icon '%s'", name, spec);
-        items[i].pub.kind = lm_dockicon_guess(name);
+        it->pub.kind = lm_dockicon_guess(name);
         return;
     }
     char path[PATH_MAX], err[160];
@@ -304,40 +323,53 @@ static void load_icon(int i, const char *name, const char *spec)
     } else {
         snprintf(path, sizeof(path), "%s", spec);
     }
-    if (lm_img_load_alpha(path, &items[i].img, err, sizeof(err)) < 0) {
+    if (lm_img_load_alpha(path, &it->img, err, sizeof(err)) < 0) {
         lm_warn("dock: '%s': icon %s: %s", name, path, err);
-        items[i].pub.kind = lm_dockicon_guess(name);
+        it->pub.kind = lm_dockicon_guess(name);
         return;
     }
     int max = (lm_dock.icon_size * lm_dock.zoom + 99) / 100 + 2;
-    if (!prepare_image(&items[i].img, max)) {
-        lm_img_free(&items[i].img);
-        items[i].pub.kind = lm_dockicon_guess(name);
+    if (!prepare_image(&it->img, max)) {
+        lm_img_free(&it->img);
+        it->pub.kind = lm_dockicon_guess(name);
         return;
     }
-    items[i].has_img = true;
-    items[i].pub.img = &items[i].img;
+    it->has_img = true;
+    it->pub.img = &it->img;
+}
+
+static void resolve_list(struct applist *L, bool launcher_only)
+{
+    free_items(L);
+    for (int i = 0; i < L->raw_n; i++) {
+        struct app_item *it = &L->items[L->item_n];
+        if (launcher_only)                                      /* a name the dock has is the dock's: it shows in the launcher through it */
+            for (int d = 0; d < DOCK_LIST->item_n; d++)
+                if (!strcasecmp(DOCK_LIST->items[d].name, L->raw[i].name))
+                    goto skip;
+        if (!lm_launch_exists(L->raw[i].cmd, it->cmd, sizeof(it->cmd))) {
+            lm_info("%s: '%s' left out, its program was not found", launcher_only ? "launcher" : "dock", L->raw[i].name);
+            continue;
+        }
+        memset(&it->img, 0, sizeof(it->img));
+        it->has_img = false;
+        snprintf(it->name, sizeof(it->name), "%.*s", LM_DOCK_NAME_MAX - 1, L->raw[i].name);
+        program_key(it->cmd, it->match, sizeof(it->match));
+        it->pub.name = it->name;
+        it->pub.cmd = it->cmd;
+        it->pub.match = it->match;
+        it->pub.raw = i;
+        it->pub.launcher_only = launcher_only;
+        load_icon(it, L->raw[i].name, L->raw[i].icon);
+        L->item_n++;
+    skip:;
+    }
 }
 
 void lm_dock_resolve(void)
 {
-    free_items();
-    if (raw_n == 0)
+    if (DOCK_LIST->raw_n == 0)
         lm_conf_parse(DEFAULT_APPS, "<built-in dock>", lm_dock_conf, NULL);
-    for (int i = 0; i < raw_n; i++) {
-        int k = item_n;
-        if (!lm_launch_exists(raw[i].cmd, items[k].cmd, sizeof(items[k].cmd))) {
-            lm_info("dock: '%s' left out, its program was not found", raw[i].name);
-            continue;
-        }
-        memset(&items[k].img, 0, sizeof(items[k].img));
-        items[k].has_img = false;
-        snprintf(items[k].name, sizeof(items[k].name), "%.*s", LM_DOCK_NAME_MAX - 1, raw[i].name);
-        program_key(items[k].cmd, items[k].match, sizeof(items[k].match));
-        items[k].pub.name = items[k].name;
-        items[k].pub.cmd = items[k].cmd;
-        items[k].pub.match = items[k].match;
-        load_icon(k, raw[i].name, raw[i].icon);
-        item_n++;
-    }
+    resolve_list(DOCK_LIST, false);
+    resolve_list(LAUNCH_LIST, true);
 }

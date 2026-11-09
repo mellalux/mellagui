@@ -25,6 +25,7 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Editor     = [editor] mellagui-edit\n" \
     "Calculator = [calculator] mellagui-calc\n" \
     "Images     = [images] @view\n" \
+    "Camera     = [camera] mellagui-cam\n" \
     "Code       = [code] ~/VSCode/code " LM_CODE_FLAGS " || /snap/code/current/usr/share/code/code " LM_CODE_FLAGS "\n" \
     "Firefox    = [web] " LM_FF_ENV " /snap/bin/firefox || " LM_FF_ENV " /usr/bin/firefox\n" \
     "Settings   = [settings] @settings\n"

@@ -5523,6 +5523,60 @@ class TestImages(unittest.TestCase):
             got = ppm.px(x, y)
             self.assertTrue(all(abs(a - b) <= 6 for a, b in zip(got, want)), (x, y, got, want))
 
+    @staticmethod
+    def strip_dht(jpg):
+        """The same JPEG without its DHT segments: how a camera's MJPEG frames come."""
+        out, i = bytearray(jpg[:2]), 2
+        while i < len(jpg):
+            assert jpg[i] == 0xff, i
+            m = jpg[i + 1]
+            n = int.from_bytes(jpg[i + 2:i + 4], 'big')
+            if m == 0xda:                                                   # the scan: everything else is entropy data
+                out += jpg[i:]
+                break
+            if m != 0xc4:
+                out += jpg[i:i + 2 + n]
+            i += 2 + n
+        return bytes(out)
+
+    def test_jpeg_without_huffman_tables_uses_the_standard_ones(self):
+        """UVC cameras leave the DHT segment out (ITU T.81 Annex K tables are meant): colour and grey, 4:4:4 / 4:2:0 / 4:2:2."""
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow not installed')
+        import math
+        im = Image.new('RGB', (64, 48))
+        for x in range(64):
+            for y in range(48):
+                im.putpixel((x, y), (int(127 + 120 * math.sin(x / 9.0 + y / 17.0)), int(127 + 120 * math.sin(y / 7.0)),
+                                     int(127 + 120 * math.cos((x + y) / 13.0))))
+        for name, img, kw in (('444', im, dict(subsampling=0, quality=90)), ('420', im, dict(subsampling=2, quality=85)),
+                              ('422', im, dict(subsampling=1, quality=85)), ('grey', im.convert('L'), dict(quality=88))):
+            with self.subTest(name):
+                buf = io.BytesIO()
+                img.save(buf, 'JPEG', **kw)
+                bare = self.strip_dht(buf.getvalue())
+                self.assertNotIn(b'\xff\xc4', bare[:bare.index(b'\xff\xda')])
+                self.assertLess(len(bare), len(buf.getvalue()))
+                r, dst = self.decode(bare, name + '.jpg')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                ref = Image.open(io.BytesIO(buf.getvalue())).convert('RGB')
+                diffs = [abs(a - b) for a, b in zip(open(dst, 'rb').read().split(b'\n', 3)[3], ref.tobytes())]
+                self.assertLessEqual(sum(diffs) / len(diffs), 3.0)
+                self.assertLessEqual(max(diffs), 60)
+
+    def test_jpeg_without_tables_and_progressive_is_refused(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow not installed')
+        buf = io.BytesIO()
+        Image.new('RGB', (16, 16), (9, 99, 199)).save(buf, 'JPEG', progressive=True)
+        r, _ = self.decode(self.strip_dht(buf.getvalue()), 'p.jpg')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('Huffman', r.stderr)
+
     def test_jpeg_against_pillow(self):
         """Baseline, progressive, subsampled, grey, with restart markers and EXIF orientation: the same pixels as Pillow gives."""
         try:
@@ -5602,6 +5656,141 @@ class TestImages(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         ppm = Ppm(dst)
         self.assertEqual((ppm.w, ppm.h, ppm.px(2, 1)), (3, 2, (15, 16, 17)))
+
+
+class TestCamera(Base):
+    """mellagui-cam: command line and window, with MELLAGUI_CAM_FAKE=1 (a moving test pattern) instead of a real webcam."""
+    CAM = os.environ.get('MELLAGUI_CAM_BIN', os.path.join(ROOT, 'build', 'mellagui-cam'))
+
+    def setUp(self):
+        if not os.path.exists(self.CAM):
+            self.skipTest('mellagui-cam not built')
+        super().setUp()
+
+    def run_cam(self, *args, **env):
+        return subprocess.run([self.CAM] + list(args), env=dict(os.environ, MELLAGUI_CAM_FAKE='1', **env), capture_output=True, text=True, timeout=20)
+
+    @staticmethod
+    def png_size(path):
+        with open(path, 'rb') as f:
+            d = f.read(24)
+        assert d[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
+        return int.from_bytes(d[16:20], 'big'), int.from_bytes(d[20:24], 'big')
+
+    def start(self, **env):
+        d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p = subprocess.Popen([self.CAM, *env.pop('args', [])], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d, **env),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.cam')
+        self.assertIsNotNone(win, 'the camera window did not appear')
+        for _ in range(100):                                        # it is listed before it is mapped (size 0)
+            win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
+            if win['w'] > 0:
+                break
+            time.sleep(0.03)
+        ctl.abs(win['x'] + 100, win['y'] + 100)                     # the pointer inside: the keyboard goes here
+        time.sleep(0.4)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]     # the size is settled now (the first one was a guess)
+        return p, win, d
+
+    def shot(self, name):
+        return ctl.dump(os.path.join(tmp, name))
+
+    def test_selftest(self):
+        r = self.run_cam('--selftest')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_list_and_bad_arguments(self):
+        r = self.run_cam('--list')
+        self.assertEqual(r.stdout.strip(), 'fake|Test pattern|MJPG|320x240,640x480')
+        self.assertEqual(self.run_cam('--size', 'big').returncode, 2)
+        self.assertEqual(self.run_cam('--bogus').returncode, 2)
+
+    def test_snapshot_without_a_window(self):
+        d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        out = os.path.join(d, 'a.png')
+        self.assertEqual(self.run_cam('--snapshot', out, '--size', '320x240').returncode, 0)
+        self.assertEqual(self.png_size(out), (320, 240))
+        self.assertEqual(self.run_cam('--snapshot', out).returncode, 0)                  # default: 640x480 (replaces the file)
+        self.assertEqual(self.png_size(out), (640, 480))
+        r = self.run_cam('--snapshot', os.path.join(d, 'no', 'such', 'dir.png'))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('cannot write', r.stderr)
+
+    def test_window_shows_a_moving_mirrored_picture_and_pauses(self):
+        p, win, d = self.start()
+        x0, y0 = win['x'], win['y']
+        a = self.shot('cam_a.ppm')
+        self.assertEqual(a.px(x0 + 30, y0 + 8), (0, 0, 192))                 # mirrored: the last bar (blue) is on the left
+        box = lambda ppm: ppm.count((255, 255, 255), x0, y0, x0 + 680, y0 + 400)
+        self.assertGreater(box(a), 1000)                                      # the white square
+        time.sleep(0.5)
+        b = self.shot('cam_b.ppm')
+        self.assertNotEqual(a.data, b.data, 'the picture does not move')
+        ctl.tap(50)                                                           # M: no mirror, silver on the left
+        time.sleep(0.4)
+        self.assertEqual(self.shot("cam_c.ppm").px(x0 + 30, y0 + 8), (192, 192, 192))
+        ctl.tap(25)                                                           # P: pause
+        time.sleep(0.4)
+        c1 = self.shot('cam_d.ppm')
+        time.sleep(0.6)
+        c2 = self.shot('cam_e.ppm')
+        self.assertEqual(c1.data, c2.data, 'a paused picture moves')
+        ctl.tap(25)
+        time.sleep(0.6)
+        self.assertNotEqual(self.shot('cam_f.ppm').data, c2.data, 'does not go on after the pause')
+        ctl.tap(16)                                                           # Q
+        for _ in range(60):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(p.poll(), 'Q did not close the camera window')
+        self.assertEqual(p.returncode, 0)
+
+    def test_snapshot_by_key_and_by_button_and_size_change(self):
+        p, win, d = self.start()
+        ctl.tap(57)                                                           # Space
+        time.sleep(0.5)
+        files = sorted(os.listdir(d))
+        self.assertEqual(len(files), 1)
+        self.assertRegex(files[0], r'^camera-\d{8}-\d{6}\.png$')
+        self.assertEqual(self.png_size(os.path.join(d, files[0])), (640, 480))
+        ctl.click(win['x'] + 30, win['y'] + win['h'] - 22)                    # the Snapshot button (left end of the bar)
+        time.sleep(0.5)
+        files = sorted(os.listdir(d))
+        self.assertEqual(len(files), 2, files)                                # the same second: "-1" is added, nothing is overwritten
+        ctl.tap(31)                                                           # S: the next size
+        time.sleep(0.6)
+        ctl.tap(28)                                                           # Enter
+        time.sleep(0.5)
+        sizes = sorted(self.png_size(os.path.join(d, f)) for f in os.listdir(d))
+        self.assertEqual(sizes[0], (320, 240), sizes)                         # 640x480 -> next in the list wraps to 320x240
+        self.assertEqual(len(sizes), 3)
+        self.assertTrue(alive_p(p))
+
+    def test_no_camera_keeps_the_window_open_with_a_message(self):
+        d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        env = {k: v for k, v in os.environ.items() if k != 'MELLAGUI_CAM_FAKE'}
+        p = subprocess.Popen([self.CAM, '--device', '/dev/video-not-here'], env=dict(env, MELLAGUI_CAM_DIR=d),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.cam')
+        self.assertIsNotNone(win)
+        time.sleep(0.5)
+        self.assertTrue(alive_p(p))
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        ctl.tap(57)                                                           # a snapshot without a picture is refused politely
+        time.sleep(0.3)
+        self.assertEqual(os.listdir(d), [])
+        self.assertTrue(alive_p(p))
+
+    def test_dock_has_a_camera_button_after_images(self):
+        names = [l.split('"')[1] for l in ctl.cmd('dock') if l.startswith('icon ')]
+        self.assertEqual(names[:7], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images', 'Camera'])
 
 
 class TestViewer(Base):
@@ -7106,7 +7295,10 @@ class TestSaver(Base):
         exe = os.path.join(ROOT, 'build', 'mellagui-settings')
         if not os.path.exists(exe):
             self.skipTest('mellagui-settings not built')
-        p, c = self.start('mellagui-sv9', '--config', 'none')
+        nodock = os.path.join(tmp, 'sv9-nodock.conf')                    # the dock floats over the lower part of the small screen, where the panel's tabs are
+        with open(nodock, 'w') as f:
+            f.write('[dock]\nenabled = no\n')
+        p, c = self.start('mellagui-sv9', '--config', nodock)
         pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-sv9'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
         win = None
@@ -8491,12 +8683,12 @@ class TestLauncher(Base):
         c.sync()
         self.super_a(c)
         d = self.info(c)
-        self.assertEqual((d['open'], d['n']), (1, 8))                                      # the built-in dock, without its Launcher button
+        self.assertEqual((d['open'], d['n']), (1, 9))                                      # the built-in dock (with the Camera button), without its Launcher button
         c.tap(self.KEY_E)
         c.sync()
         c.click(*self.centre(self.info(c)['icons'][0]['remove']))
         c.sync()
-        self.assertEqual(self.info(c)['n'], 8)
+        self.assertEqual(self.info(c)['n'], 9)
 
     def test_the_dialog_is_painted_translucent(self):
         c = self.start('mellagui-lc9')

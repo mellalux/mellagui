@@ -1,21 +1,25 @@
 /*
- * mellagui-files - a small file browser for MellaGUI.
+ * mellagui-files - a two-pane file manager for MellaGUI, in the spirit of Norton / Midnight Commander.
  *
- *   mellagui-files [DIR]          browse DIR (default: the home directory)
+ *   mellagui-files [DIR]          two panes, both starting in DIR (default: the home directory)
  *   mellagui-files --choose KEY [DIR]
- *                                 pick a picture instead of opening files: Enter or a double click on a png / jpg / ppm sets the compositor
- *                                 setting KEY (only "wallpaper") to its full path and the program ends; Esc ends it without a choice.
- *                                 The settings panel's Desktop page starts it from its "Browse..." button.
- *   mellagui-files --selftest     the listing / sorting / classification without a display
+ *                                 pick a picture instead of opening files: one pane, Enter or a double click on a png / jpg / ppm sets
+ *                                 the compositor setting KEY (only "wallpaper") to its full path and the program ends; Esc ends it
+ *                                 without a choice. The settings panel's Desktop page starts it from its "Browse..." button.
+ *   mellagui-files --selftest     listing, sorting, classification, copy / move / delete and the preview without a display
  *
- * Folders come first, then files, each sorted by name without regard to case; ".." goes up. Hidden files (names with a leading
- * dot) are shown with Ctrl+H. Opening a file starts a sibling program: images (png, jpg, ppm) in mellagui-view, anything that looks
- * like text in mellagui-edit; binary files are not opened. Ctrl+T starts mellagui-term in the folder being shown.
+ * Each pane lists a folder: folders first, then files, sorted by name without regard to case; ".." goes up. The pane with the
+ * highlighted bar is the active one. One of the two panes can show a preview of the file under the cursor of the other (F3, Ctrl+Q or
+ * the Preview button): text, a hex dump of binary files, a picture, or the inside of a folder.
  *
- * Keys: Up / Down / PageUp / PageDown / Home / End, Enter or Right opens, Backspace / Left / Alt+Up goes to the parent folder,
- * Ctrl+H hidden files, F5 / Ctrl+R reread, Ctrl+T terminal here, Ctrl+L type a path (Enter goes / opens it, Esc cancels), a
- * letter jumps to the next name starting with it, Esc clears the message. Mouse: click selects, double click opens, wheel
- * scrolls, the toolbar has Up, Home, Hidden, Terminal. Nothing here changes or deletes files.
+ * Keys: Tab switches the active pane; Up / Down / PageUp / PageDown / Home / End move; Enter or Right opens (a folder: goes in; png / jpg /
+ * ppm: mellagui-view; text: mellagui-edit; binary files are not opened); Backspace / Left / Alt+Up goes to the parent folder;
+ * Insert or Space marks the file and moves down; F1 help, F2 rename, F3 preview, F4 edit, F5 copy, F6 move, F7 new folder,
+ * F8 (or Delete) delete, F9 terminal here, F10 quit; copy / move / delete work on the marked files, else on the one under the cursor,
+ * copy and move go to the folder shown in the other pane (editable first) and never replace an existing file, delete asks first.
+ * Ctrl+H hidden files, Ctrl+R reread, Ctrl+T terminal here, Ctrl+L type a path, Shift+Up / Down scroll the preview, a letter jumps
+ * to the next name starting with it, Esc clears the message. Mouse: click selects (and activates the pane), double click opens, wheel
+ * scrolls the pane under the pointer, the round buttons at the top and bottom do what their names say.
  */
 #include <ctype.h>
 #include <dirent.h>
@@ -34,20 +38,23 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "img.h"
 #include "metrics.h"
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
 #include "protocol.h"
+#include "uikit.h"
 #include "wlc.h"
 #include "util.h"
 #include "wlwin.h"
 
 #define MAX_ENTRIES 100000
 #define ROW_H 18
-#define TOOL_H 28
-#define HEAD_H 20
+#define TOOL_H 30
+#define HEAD_H 22
 #define STATUS_H 20
+#define FKEY_H 30
 #define COL_BG (lm_theme.background)
 #define COL_FG (lm_theme.text_soft)
 #define COL_DIM (lm_theme.text_dim)
@@ -58,39 +65,77 @@
 #define COL_BTN 0x353b49u
 #define COL_BTN_ON (lm_theme.button_hover)
 #define COL_WARN (lm_theme.caution)
+#define COL_MARK (lm_theme.warn)
+#define COL_EXEC (lm_theme.ok)
+#define COL_PIC 0xc792eau
+#define COL_ERR (lm_theme.error)
+
+#define PREVIEW_MAX_BYTES (128 * 1024)
+#define PREVIEW_MAX_LINES 3000
+#define PREVIEW_MAX_IMAGE (40u << 20)
+#define HEX_BYTES 1024
+
 struct entry {
     char *name;
     bool dir;
     bool broken;                        /* a link to nothing */
     bool hidden;
+    bool exec;                          /* a file somebody may run */
+    bool marked;                        /* Insert / Space: the file takes part in copy, move and delete */
     off_t size;
     time_t mtime;
 };
 
-struct button {
-    const char *label;
-    int x, w;
-};
-
-struct app {
-    struct wlwin win;
-    const char *choose_key;             /* --choose: the setting a picked picture is written to (NULL = a normal browser) */
-    uint32_t settings;                  /* mellagui_settings_v1 (only bound with --choose) */
+/* One folder listing with its cursor. */
+struct pane {
     char cwd[PATH_MAX];
     struct entry *e;
     int n, cap;
     int sel, top;
-    bool show_hidden;
-    bool prompt;
-    char pbuf[PATH_MAX];
-    char msg[256];
-    int64_t msg_until;
-    int rows_visible;
     bool sb_drag;                       /* the scroll bar's thumb is being dragged ... */
     int sb_grab;                        /* ... held this many pixels below its top */
-    double px, py;
     uint32_t last_click_ms;
     int last_click_row;
+};
+
+enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR };
+
+/* What the preview pane shows: the file under the cursor of the active pane. */
+struct preview {
+    char want[PATH_MAX];                /* the path asked for ("" = nothing) */
+    bool loaded;                        /* `kind` and the rest belong to `want` */
+    int64_t due;                        /* a picture is decoded only when the cursor has rested for a moment */
+    enum pv_kind kind;
+    char title[NAME_MAX + 1];
+    char info[160];
+    char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
+    int nlines;
+    int top;                            /* first visible line */
+    struct lm_image img;                /* PV_IMAGE: the decoded picture ... */
+    uint32_t *scaled;                   /* ... and a copy that fits the pane (rebuilt when the pane size changes) */
+    int sw, sh;
+};
+
+enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE };
+
+struct app {
+    struct wlwin win;
+    const char *choose_key;             /* --choose: the setting a picked picture is written to (NULL = the two-pane manager) */
+    uint32_t settings;                  /* mellagui_settings_v1 (only bound with --choose) */
+    struct pane pane[2];
+    int act;                            /* the active pane */
+    bool dual;                          /* two panes (always, except for --choose) */
+    bool preview;                       /* the pane that is not active shows a preview */
+    bool show_hidden;
+    bool help;
+    enum prompt prompt;
+    char pbuf[PATH_MAX];
+    char msg[300];
+    int64_t msg_until;
+    int rows_visible;
+    struct preview pv;
+    double px, py;
+    int hover;                          /* round button under the pointer: 0..N_TOOL-1 toolbar, 100 + n function key bar */
     uint32_t rep_code;
     int64_t rep_next;
     int rep_rate, rep_delay;
@@ -103,13 +148,23 @@ static int64_t now_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static struct pane *cur(struct app *a)
+{
+    return &a->pane[a->act];
+}
+
+static struct pane *other(struct app *a)
+{
+    return &a->pane[a->dual ? 1 - a->act : 0];
+}
+
 /* ---- listing ------------------------------------------------------------------------------------------------------------ */
 
-static void entries_free(struct app *a)
+static void entries_free(struct pane *p)
 {
-    for (int i = 0; i < a->n; i++)
-        free(a->e[i].name);
-    a->n = 0;
+    for (int i = 0; i < p->n; i++)
+        free(p->e[i].name);
+    p->n = 0;
 }
 
 static int entry_cmp(const void *pa, const void *pb)
@@ -121,40 +176,39 @@ static int entry_cmp(const void *pa, const void *pb)
     return c ? c : strcmp(x->name, y->name);
 }
 
-static bool add_entry(struct app *a, const char *name, bool dir, bool broken, off_t size, time_t mtime)
+static bool add_entry(struct pane *p, const char *name, bool dir, bool broken, bool exec, off_t size, time_t mtime)
 {
-    if (a->n >= MAX_ENTRIES)
+    if (p->n >= MAX_ENTRIES)
         return false;
-    if (a->n == a->cap) {
-        int nc = a->cap ? a->cap * 2 : 64;
-        struct entry *t = realloc(a->e, (size_t)nc * sizeof(*t));
+    if (p->n == p->cap) {
+        int nc = p->cap ? p->cap * 2 : 64;
+        struct entry *t = realloc(p->e, (size_t)nc * sizeof(*t));
         if (!t)
             return false;
-        a->e = t;
-        a->cap = nc;
+        p->e = t;
+        p->cap = nc;
     }
     char *d = strdup(name);
     if (!d)
         return false;
-    a->e[a->n++] = (struct entry){ d, dir, broken, name[0] == '.', size, mtime };
+    p->e[p->n++] = (struct entry){ .name = d, .dir = dir, .broken = broken, .hidden = name[0] == '.', .exec = exec, .size = size, .mtime = mtime };
     return true;
 }
 
-/* Reads `dir` into the list (hidden files only when show_hidden). 0, or -1 with the reason in err; the old list stays then. */
-static int list_dir(struct app *a, const char *dir, char *err, size_t errsz)
+/* Reads `dir` into the list (hidden files only when `hidden`). 0, or -1 with the reason in err; the old list stays then. */
+static int list_dir(struct pane *p, const char *dir, bool hidden, char *err, size_t errsz)
 {
     DIR *d = opendir(dir);
     if (!d) {
         snprintf(err, errsz, "cannot open %s: %s", dir, strerror(errno));
         return -1;
     }
-    struct app tmp = { 0 };
-    tmp.show_hidden = a->show_hidden;
+    struct pane tmp = { 0 };
     struct dirent *de;
     while ((de = readdir(d))) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
             continue;
-        if (de->d_name[0] == '.' && !a->show_hidden)
+        if (de->d_name[0] == '.' && !hidden)
             continue;
         char path[PATH_MAX + 1];
         if (snprintf(path, sizeof(path), "%s/%s", dir, de->d_name) >= (int)sizeof(path))
@@ -166,39 +220,53 @@ static int list_dir(struct app *a, const char *dir, char *err, size_t errsz)
                 continue;
             broken = true;
         }
-        add_entry(&tmp, de->d_name, !broken && S_ISDIR(st.st_mode), broken, st.st_size, st.st_mtime);
+        bool isdir = !broken && S_ISDIR(st.st_mode);
+        add_entry(&tmp, de->d_name, isdir, broken, !isdir && !broken && (st.st_mode & 0111), st.st_size, st.st_mtime);
     }
     closedir(d);
     qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
-    entries_free(a);
-    free(a->e);
-    a->e = tmp.e;
-    a->n = tmp.n;
-    a->cap = tmp.cap;
+    entries_free(p);
+    free(p->e);
+    p->e = tmp.e;
+    p->n = tmp.n;
+    p->cap = tmp.cap;
     return 0;
 }
 
 /* Row 0 is ".." (except in "/"), the rest are the entries. */
-static bool has_up(const struct app *a)
+static bool has_up(const struct pane *p)
 {
-    return strcmp(a->cwd, "/") != 0;
+    return strcmp(p->cwd, "/") != 0;
 }
 
-static int rows(const struct app *a)
+static int rows(const struct pane *p)
 {
-    return a->n + (has_up(a) ? 1 : 0);
+    return p->n + (has_up(p) ? 1 : 0);
 }
 
-static const struct entry *row_entry(const struct app *a, int row)
+static const struct entry *row_entry(const struct pane *p, int row)
 {
-    int i = row - (has_up(a) ? 1 : 0);
-    return i >= 0 && i < a->n ? &a->e[i] : NULL;
+    int i = row - (has_up(p) ? 1 : 0);
+    return i >= 0 && i < p->n ? &p->e[i] : NULL;
 }
 
-static const char *row_name(const struct app *a, int row)
+static struct entry *row_entry_rw(struct pane *p, int row)
 {
-    const struct entry *e = row_entry(a, row);
+    return (struct entry *)row_entry(p, row);
+}
+
+static const char *row_name(const struct pane *p, int row)
+{
+    const struct entry *e = row_entry(p, row);
     return e ? e->name : "..";
+}
+
+static int count_marked(const struct pane *p)
+{
+    int k = 0;
+    for (int i = 0; i < p->n; i++)
+        k += p->e[i].marked;
+    return k;
 }
 
 /* ---- paths -------------------------------------------------------------------------------------------------------------- */
@@ -347,6 +415,420 @@ static bool launch(const char *prog, const char *arg, const char *cwd, char *err
     return true;
 }
 
+
+
+/* ---- copy, move, delete ------------------------------------------------------------------------------------------------ */
+
+#define MAX_DEPTH 64
+
+static bool path_inside(const char *path, const char *dir)            /* is `path` the folder `dir` or below it? */
+{
+    size_t n = strlen(dir);
+    return strncmp(path, dir, n) == 0 && (path[n] == 0 || path[n] == '/' || (n > 0 && dir[n - 1] == '/'));
+}
+
+static int copy_node(const char *src, const char *dst, int depth, char *err, size_t errsz);
+
+static int copy_file(const char *src, const char *dst, const struct stat *st, char *err, size_t errsz)
+{
+    int in = open(src, O_RDONLY | O_CLOEXEC);
+    if (in < 0) {
+        snprintf(err, errsz, "cannot read %s: %s", src, strerror(errno));
+        return -1;
+    }
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, st->st_mode & 0777);
+    if (out < 0) {
+        snprintf(err, errsz, "cannot create %s: %s", dst, strerror(errno));
+        close(in);
+        return -1;
+    }
+    char buf[65536];
+    int rc = 0;
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            if (n < 0) {
+                snprintf(err, errsz, "cannot read %s: %s", src, strerror(errno));
+                rc = -1;
+            }
+            break;
+        }
+        for (ssize_t off = 0; off < n;) {
+            ssize_t k = write(out, buf + off, (size_t)(n - off));
+            if (k < 0 && errno == EINTR)
+                continue;
+            if (k < 0) {
+                snprintf(err, errsz, "cannot write %s: %s", dst, strerror(errno));
+                rc = -1;
+                break;
+            }
+            off += k;
+        }
+        if (rc)
+            break;
+    }
+    struct timespec ts[2] = { st->st_atim, st->st_mtim };
+    if (rc == 0)
+        futimens(out, ts);
+    if (close(out) < 0 && rc == 0) {
+        snprintf(err, errsz, "cannot write %s: %s", dst, strerror(errno));
+        rc = -1;
+    }
+    close(in);
+    if (rc)
+        unlink(dst);
+    return rc;
+}
+
+/* Copies a file, a link or a whole folder tree to `dst`, which must not exist. Links are copied as links. */
+static int copy_node(const char *src, const char *dst, int depth, char *err, size_t errsz)
+{
+    struct stat st;
+    if (lstat(src, &st) < 0) {
+        snprintf(err, errsz, "%s: %s", src, strerror(errno));
+        return -1;
+    }
+    if (depth > MAX_DEPTH) {
+        snprintf(err, errsz, "%s is nested too deeply", src);
+        return -1;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        char target[PATH_MAX];
+        ssize_t n = readlink(src, target, sizeof(target) - 1);
+        if (n < 0 || (target[n] = 0, symlink(target, dst) < 0)) {
+            snprintf(err, errsz, "cannot copy the link %s: %s", src, strerror(errno));
+            return -1;
+        }
+        return 0;
+    }
+    if (S_ISREG(st.st_mode))
+        return copy_file(src, dst, &st, err, errsz);
+    if (!S_ISDIR(st.st_mode)) {
+        snprintf(err, errsz, "%s is not a plain file or folder: not copied", src);
+        return -1;
+    }
+    if (mkdir(dst, (st.st_mode & 0777) | 0700) < 0) {
+        snprintf(err, errsz, "cannot create %s: %s", dst, strerror(errno));
+        return -1;
+    }
+    DIR *d = opendir(src);
+    if (!d) {
+        snprintf(err, errsz, "cannot open %s: %s", src, strerror(errno));
+        return -1;
+    }
+    int rc = 0;
+    struct dirent *de;
+    while (rc == 0 && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        char s2[PATH_MAX], d2[PATH_MAX];
+        if (snprintf(s2, sizeof(s2), "%s/%s", src, de->d_name) >= (int)sizeof(s2) ||
+            snprintf(d2, sizeof(d2), "%s/%s", dst, de->d_name) >= (int)sizeof(d2)) {
+            snprintf(err, errsz, "a path in %s is too long", src);
+            rc = -1;
+            break;
+        }
+        rc = copy_node(s2, d2, depth + 1, err, errsz);
+    }
+    closedir(d);
+    if (rc == 0) {
+        chmod(dst, st.st_mode & 0777);
+        struct timespec ts[2] = { st.st_atim, st.st_mtim };
+        utimensat(AT_FDCWD, dst, ts, 0);
+    }
+    return rc;
+}
+
+/* Deletes a file, a link or a folder with everything in it (links are not followed). */
+static int remove_tree(const char *path, int depth, char *err, size_t errsz)
+{
+    struct stat st;
+    if (strcmp(path, "/") == 0 || !path[0]) {
+        snprintf(err, errsz, "will not delete the root folder");
+        return -1;
+    }
+    if (lstat(path, &st) < 0) {
+        snprintf(err, errsz, "%s: %s", path, strerror(errno));
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        if (unlink(path) < 0) {
+            snprintf(err, errsz, "cannot delete %s: %s", path, strerror(errno));
+            return -1;
+        }
+        return 0;
+    }
+    if (depth > MAX_DEPTH) {
+        snprintf(err, errsz, "%s is nested too deeply", path);
+        return -1;
+    }
+    DIR *d = opendir(path);
+    if (!d) {
+        snprintf(err, errsz, "cannot open %s: %s", path, strerror(errno));
+        return -1;
+    }
+    int rc = 0;
+    struct dirent *de;
+    while (rc == 0 && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        char p2[PATH_MAX];
+        if (snprintf(p2, sizeof(p2), "%s/%s", path, de->d_name) >= (int)sizeof(p2)) {
+            snprintf(err, errsz, "a path in %s is too long", path);
+            rc = -1;
+            break;
+        }
+        rc = remove_tree(p2, depth + 1, err, errsz);
+    }
+    closedir(d);
+    if (rc == 0 && rmdir(path) < 0) {
+        snprintf(err, errsz, "cannot delete %s: %s", path, strerror(errno));
+        rc = -1;
+    }
+    return rc;
+}
+
+/* Moves `src` to `dst` (which must not exist): a rename, or a copy and delete across file systems. */
+static int move_node(const char *src, const char *dst, char *err, size_t errsz)
+{
+    if (rename(src, dst) == 0)
+        return 0;
+    if (errno != EXDEV) {
+        snprintf(err, errsz, "cannot move %s: %s", src, strerror(errno));
+        return -1;
+    }
+    if (copy_node(src, dst, 0, err, errsz) < 0) {
+        char ignore[64];
+        remove_tree(dst, 0, ignore, sizeof(ignore));                   /* no half a copy is left behind */
+        return -1;
+    }
+    return remove_tree(src, 0, err, errsz);
+}
+
+static bool exists_any(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0;
+}
+
+/* ---- the preview -------------------------------------------------------------------------------------------------------- */
+
+static void preview_clear(struct preview *pv)
+{
+    for (int i = 0; i < pv->nlines; i++)
+        free(pv->lines[i]);
+    free(pv->lines);
+    pv->lines = NULL;
+    pv->nlines = 0;
+    lm_img_free(&pv->img);
+    free(pv->scaled);
+    pv->scaled = NULL;
+    pv->sw = pv->sh = 0;
+    pv->kind = PV_NONE;
+    pv->top = 0;
+    pv->title[0] = pv->info[0] = 0;
+}
+
+static void pv_line(struct preview *pv, int *cap, const char *s, size_t n)
+{
+    if (pv->nlines >= PREVIEW_MAX_LINES)
+        return;
+    if (pv->nlines == *cap) {
+        int nc = *cap ? *cap * 2 : 64;
+        char **t = realloc(pv->lines, (size_t)nc * sizeof(char *));
+        if (!t)
+            return;
+        pv->lines = t;
+        *cap = nc;
+    }
+    char *d = malloc(n + 1);
+    if (!d)
+        return;
+    memcpy(d, s, n);
+    d[n] = 0;
+    pv->lines[pv->nlines++] = d;
+}
+
+static void pv_linef(struct preview *pv, int *cap, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static void pv_linef(struct preview *pv, int *cap, const char *fmt, ...)
+{
+    char b[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    pv_line(pv, cap, b, strlen(b));
+}
+
+/* Text: tabs become spaces, CR is dropped, a line is cut at 500 bytes (or at the end of the 128 KB that are read). */
+static void pv_text(struct preview *pv, const unsigned char *buf, size_t n)
+{
+    int cap = 0;
+    char line[600];
+    size_t len = 0;
+    for (size_t i = 0; i <= n; i++) {
+        unsigned char c = i < n ? buf[i] : '\n';
+        if (c == '\n') {
+            if (i < n || len > 0)
+                pv_line(pv, &cap, line, len);
+            len = 0;
+            continue;
+        }
+        if (c == '\r')
+            continue;
+        if (c == '\t') {
+            do {
+                if (len < 500)
+                    line[len++] = ' ';
+            } while (len % 4);
+            continue;
+        }
+        if (c < 0x20 && c != 0x1b)
+            c = '?';
+        if (len < 500)
+            line[len++] = (char)c;
+    }
+}
+
+static void pv_hex(struct preview *pv, const unsigned char *buf, size_t n)
+{
+    int cap = 0;
+    for (size_t off = 0; off < n; off += 8) {                            /* 8 bytes a line: it fits half a window */
+        char b[96], asc[12];
+        int k = snprintf(b, sizeof(b), "%08zx ", off);
+        for (size_t j = 0; j < 8; j++) {
+            if (off + j < n) {
+                k += snprintf(b + k, sizeof(b) - (size_t)k, " %02x", buf[off + j]);
+                asc[j] = buf[off + j] >= 0x20 && buf[off + j] < 0x7f ? (char)buf[off + j] : '.';
+            } else {
+                k += snprintf(b + k, sizeof(b) - (size_t)k, "   ");
+                asc[j] = ' ';
+            }
+        }
+        asc[8] = 0;
+        snprintf(b + k, sizeof(b) - (size_t)k, "  |%s|", asc);
+        pv_line(pv, &cap, b, strlen(b));
+    }
+}
+
+/* Loads what the preview pane will show for `path` (a file, a folder, or an error text). Always sets some kind. */
+static void preview_load(struct preview *pv, const char *path, bool hidden)
+{
+    preview_clear(pv);
+    const char *base = strrchr(path, '/');
+    snprintf(pv->title, sizeof(pv->title), "%s", base ? base + 1 : path);
+    int cap = 0;
+    struct stat st;
+    if (stat(path, &st) < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "%s", strerror(errno));
+        return;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        struct pane tmp = { 0 };
+        char err[200];
+        pv->kind = PV_DIR;
+        if (list_dir(&tmp, path, hidden, err, sizeof(err)) < 0) {
+            pv->kind = PV_ERROR;
+            pv_linef(pv, &cap, "%s", err);
+            return;
+        }
+        snprintf(pv->info, sizeof(pv->info), "folder, %d item%s", tmp.n, tmp.n == 1 ? "" : "s");
+        for (int i = 0; i < tmp.n; i++)
+            pv_linef(pv, &cap, "%s%s", tmp.e[i].name, tmp.e[i].dir ? "/" : "");
+        entries_free(&tmp);
+        free(tmp.e);
+        return;
+    }
+    char sz[32];
+    human_size(st.st_size, sz, sizeof(sz));
+    snprintf(pv->info, sizeof(pv->info), "%s", sz);
+    if (!S_ISREG(st.st_mode)) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "not a plain file");
+        return;
+    }
+    if (classify(path) == K_IMAGE) {
+        if ((unsigned long long)st.st_size > PREVIEW_MAX_IMAGE) {
+            pv->kind = PV_ERROR;
+            pv_linef(pv, &cap, "the picture is too big to preview (%s)", sz);
+            return;
+        }
+        char err[200];
+        if (lm_img_load(path, &pv->img, err, sizeof(err)) < 0) {
+            pv->kind = PV_ERROR;
+            pv_linef(pv, &cap, "%s", err);
+            return;
+        }
+        pv->kind = PV_IMAGE;
+        snprintf(pv->info, sizeof(pv->info), "%s, %dx%d", sz, pv->img.w, pv->img.h);
+        return;
+    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "cannot read: %s", strerror(errno));
+        return;
+    }
+    unsigned char *buf = malloc(PREVIEW_MAX_BYTES + 1);
+    ssize_t n = buf ? read(fd, buf, PREVIEW_MAX_BYTES) : -1;
+    close(fd);
+    if (n < 0) {
+        free(buf);
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "cannot read: %s", strerror(errno));
+        return;
+    }
+    if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
+        pv->kind = PV_HEX;
+        pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);
+    } else {
+        pv->kind = PV_TEXT;
+        pv_text(pv, buf, (size_t)n);
+        if ((off_t)n < st.st_size)
+            pv_linef(pv, &cap, "...");
+    }
+    free(buf);
+}
+
+/* The picture scaled down to fit w x h (never up beyond 8 times), by averaging the source pixels under each target pixel. */
+static void preview_scale(struct preview *pv, int w, int h)
+{
+    free(pv->scaled);
+    pv->scaled = NULL;
+    pv->sw = pv->sh = 0;
+    if (pv->kind != PV_IMAGE || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
+        return;
+    double s = LM_MIN((double)w / pv->img.w, (double)h / pv->img.h);
+    if (s > 8.0)
+        s = 8.0;
+    int tw = LM_MAX((int)(pv->img.w * s), 1), th = LM_MAX((int)(pv->img.h * s), 1);
+    uint32_t *out = malloc((size_t)tw * (size_t)th * 4);
+    if (!out)
+        return;
+    for (int y = 0; y < th; y++) {
+        int y0 = (int)((int64_t)y * pv->img.h / th), y1 = LM_MAX((int)((int64_t)(y + 1) * pv->img.h / th), y0 + 1);
+        for (int x = 0; x < tw; x++) {
+            int x0 = (int)((int64_t)x * pv->img.w / tw), x1 = LM_MAX((int)((int64_t)(x + 1) * pv->img.w / tw), x0 + 1);
+            uint64_t r = 0, g = 0, b = 0, cnt = 0;
+            for (int yy = y0; yy < y1 && yy < pv->img.h; yy++)
+                for (int xx = x0; xx < x1 && xx < pv->img.w; xx++) {
+                    uint32_t c = pv->img.px[(size_t)yy * (size_t)pv->img.w + (size_t)xx];
+                    r += (c >> 16) & 255;
+                    g += (c >> 8) & 255;
+                    b += c & 255;
+                    cnt++;
+                }
+            out[(size_t)y * (size_t)tw + (size_t)x] = cnt ? (uint32_t)((r / cnt) << 16 | (g / cnt) << 8 | (b / cnt)) : 0;
+        }
+    }
+    pv->scaled = out;
+    pv->sw = tw;
+    pv->sh = th;
+}
+
 /* ---- the window state ---------------------------------------------------------------------------------------------------- */
 
 static void msg(struct app *a, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -364,56 +846,86 @@ static void set_title(struct app *a)
 {
     if (!a->win.toplevel)
         return;
-    const char *base = strrchr(a->cwd, '/') ? strrchr(a->cwd, '/') + 1 : a->cwd;
+    const char *dir = cur(a)->cwd;
+    const char *base = strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir;
     char t[PATH_MAX + 32];
     snprintf(t, sizeof(t), "%s - %s", *base ? base : "/", a->choose_key ? "Choose a picture" : "Files");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
 
-/* Shows `dir` (an absolute, normalized path), selecting the row called `select` when there is one, else the first entry. */
-static bool go_to(struct app *a, const char *dir, const char *select)
+/* Shows `dir` (an absolute, normalized path) in pane p, selecting the row called `select` when there is one, else the first entry. */
+static bool go_to(struct app *a, struct pane *p, const char *dir, const char *select)
 {
     char err[PATH_MAX + 80];
-    if (list_dir(a, dir, err, sizeof(err)) < 0) {
+    if (list_dir(p, dir, a->show_hidden, err, sizeof(err)) < 0) {
         msg(a, "%s", err);
         return false;
     }
-    snprintf(a->cwd, sizeof(a->cwd), "%s", dir);
-    a->sel = rows(a) > (has_up(a) ? 1 : 0) ? (has_up(a) ? 1 : 0) : 0;
-    a->top = 0;
+    snprintf(p->cwd, sizeof(p->cwd), "%s", dir);
+    p->sel = rows(p) > (has_up(p) ? 1 : 0) ? (has_up(p) ? 1 : 0) : 0;
+    p->top = 0;
     if (select)
-        for (int r = 0; r < rows(a); r++)
-            if (!strcmp(row_name(a, r), select)) {
-                a->sel = r;
+        for (int r = 0; r < rows(p); r++)
+            if (!strcmp(row_name(p, r), select)) {
+                p->sel = r;
                 break;
             }
     a->msg[0] = 0;
     set_title(a);
+    a->pv.want[0] = 0;
+    a->pv.loaded = false;
     a->win.redraw = true;
     return true;
 }
 
-static void reread(struct app *a)
+/* Reads the folder again, keeping the cursor, the scroll position and the marks. */
+static void reread_pane(struct app *a, struct pane *p)
 {
     char keep[NAME_MAX + 1];
-    snprintf(keep, sizeof(keep), "%s", row_name(a, a->sel));
-    int top = a->top;
+    snprintf(keep, sizeof(keep), "%s", row_name(p, p->sel));
+    int top = p->top, sel = p->sel;
+    int nm = count_marked(p);
+    char **marked = nm ? calloc((size_t)nm, sizeof(char *)) : NULL;
+    for (int i = 0, k = 0; marked && i < p->n && k < nm; i++)
+        if (p->e[i].marked)
+            marked[k++] = strdup(p->e[i].name);
     char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s", a->cwd);
-    if (go_to(a, dir, keep))
-        a->top = top;
+    snprintf(dir, sizeof(dir), "%s", p->cwd);
+    bool ok = go_to(a, p, dir, keep);
+    if (ok) {
+        p->top = top;
+        if (strcmp(row_name(p, p->sel), keep) != 0)                     /* the file is gone: stay near where it was */
+            p->sel = LM_CLAMP(sel, 0, LM_MAX(rows(p) - 1, 0));
+        for (int k = 0; marked && k < nm; k++)
+            for (int i = 0; i < p->n; i++)
+                if (marked[k] && !strcmp(p->e[i].name, marked[k]))
+                    p->e[i].marked = true;
+    } else if (!go_to(a, p, "/", NULL)) {
+        /* nothing to show */
+    }
+    for (int k = 0; marked && k < nm; k++)
+        free(marked[k]);
+    free(marked);
+}
+
+static void reread(struct app *a)
+{
+    reread_pane(a, cur(a));
+    if (a->dual)
+        reread_pane(a, other(a));
 }
 
 static void go_up(struct app *a)
 {
-    if (!has_up(a))
+    struct pane *p = cur(a);
+    if (!has_up(p))
         return;
     char parent[PATH_MAX];
-    join_path(a->cwd, "..", parent, sizeof(parent));
-    const char *base = strrchr(a->cwd, '/');
+    join_path(p->cwd, "..", parent, sizeof(parent));
+    const char *base = strrchr(p->cwd, '/');
     char from[NAME_MAX + 1];
     snprintf(from, sizeof(from), "%s", base ? base + 1 : "");
-    go_to(a, parent, from);
+    go_to(a, p, parent, from);
 }
 
 static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
@@ -449,7 +961,7 @@ static void open_path(struct app *a, const char *path)
         return;
     }
     if (S_ISDIR(st.st_mode)) {
-        go_to(a, path, NULL);
+        go_to(a, cur(a), path, NULL);
         return;
     }
     char err[PATH_MAX + 80];
@@ -462,29 +974,30 @@ static void open_path(struct app *a, const char *path)
     }
     switch (classify(path)) {
     case K_IMAGE:
-        if (!launch("mellagui-view", path, a->cwd, err, sizeof(err)))
+        if (!launch("mellagui-view", path, cur(a)->cwd, err, sizeof(err)))
             msg(a, "%s", err);
         break;
     case K_TEXT:
-        if (!launch("mellagui-edit", path, a->cwd, err, sizeof(err)))
+        if (!launch("mellagui-edit", path, cur(a)->cwd, err, sizeof(err)))
             msg(a, "%s", err);
         break;
-    case K_BINARY: msg(a, "%s looks like a binary file: not opened", strrchr(path, '/') + 1); break;
+    case K_BINARY: msg(a, "%s looks like a binary file: not opened (F3 shows it)", strrchr(path, '/') + 1); break;
     case K_UNREADABLE: msg(a, "cannot read %s: %s", path, strerror(errno)); break;
     }
 }
 
 static void open_selected(struct app *a)
 {
-    if (a->sel == 0 && has_up(a)) {
+    struct pane *p = cur(a);
+    if (p->sel == 0 && has_up(p)) {
         go_up(a);
         return;
     }
-    const struct entry *e = row_entry(a, a->sel);
+    const struct entry *e = row_entry(p, p->sel);
     if (!e)
         return;
     char path[PATH_MAX];
-    join_path(a->cwd, e->name, path, sizeof(path));
+    join_path(p->cwd, e->name, path, sizeof(path));
     if (e->broken) {
         msg(a, "%s is a link to nothing", e->name);
         return;
@@ -494,19 +1007,20 @@ static void open_selected(struct app *a)
 
 static void select_row(struct app *a, int row)
 {
-    a->sel = LM_CLAMP(row, 0, LM_MAX(rows(a) - 1, 0));
-    if (a->sel < a->top)
-        a->top = a->sel;
-    if (a->sel >= a->top + a->rows_visible)
-        a->top = a->sel - a->rows_visible + 1;
-    a->top = LM_MAX(a->top, 0);
+    struct pane *p = cur(a);
+    p->sel = LM_CLAMP(row, 0, LM_MAX(rows(p) - 1, 0));
+    if (p->sel < p->top)
+        p->top = p->sel;
+    if (p->sel >= p->top + a->rows_visible)
+        p->top = p->sel - a->rows_visible + 1;
+    p->top = LM_MAX(p->top, 0);
     a->win.redraw = true;
 }
 
 static void start_terminal(struct app *a)
 {
     char err[PATH_MAX + 80];
-    if (!launch("mellagui-term", NULL, a->cwd, err, sizeof(err)))
+    if (!launch("mellagui-term", NULL, cur(a)->cwd, err, sizeof(err)))
         msg(a, "%s", err);
 }
 
@@ -522,45 +1036,410 @@ static void go_home(struct app *a)
     const char *home = getenv("HOME");
     char dir[PATH_MAX];
     normalize(home && *home ? home : "/", dir, sizeof(dir));
-    go_to(a, dir, NULL);
+    go_to(a, cur(a), dir, NULL);
 }
 
-/* ---- toolbar ------------------------------------------------------------------------------------------------------------- */
-
-enum { B_UP, B_HOME, B_HIDDEN, B_TERM, N_BUTTONS };
-
-static void toolbar(const struct app *a, struct button *b)
+static void switch_pane(struct app *a)
 {
-    static const char *const labels[N_BUTTONS] = { "Up", "Home", "Hidden", "Terminal" };
-    int x = 6;
-    for (int i = 0; i < N_BUTTONS; i++) {
+    if (!a->dual)
+        return;
+    a->act = 1 - a->act;
+    set_title(a);
+    a->win.redraw = true;
+}
+
+static void toggle_preview(struct app *a)
+{
+    if (!a->dual) {
+        msg(a, "No preview here");
+        return;
+    }
+    a->preview = !a->preview;
+    a->pv.want[0] = 0;
+    a->pv.loaded = false;
+    if (!a->preview)
+        preview_clear(&a->pv);
+    a->win.redraw = true;
+}
+
+/* Insert / Space: mark or unmark the file under the cursor and move down. */
+static void toggle_mark(struct app *a)
+{
+    struct pane *p = cur(a);
+    struct entry *e = row_entry_rw(p, p->sel);
+    if (e)
+        e->marked = !e->marked;
+    select_row(a, p->sel + 1);
+}
+
+/* ---- file operations --------------------------------------------------------------------------------------------------- */
+
+/* The names an operation works on: the marked entries, else the one under the cursor ("..", which is no file, never). Free with
+ * free_names. Returns the count. */
+static int op_targets(struct app *a, char ***out)
+{
+    struct pane *p = cur(a);
+    int nm = count_marked(p), n = 0;
+    char **names = calloc((size_t)LM_MAX(nm, 1), sizeof(char *));
+    if (!names) {
+        *out = NULL;
+        return 0;
+    }
+    if (nm) {
+        for (int i = 0; i < p->n; i++)
+            if (p->e[i].marked)
+                names[n++] = strdup(p->e[i].name);
+    } else {
+        const struct entry *e = row_entry(p, p->sel);
+        if (e)
+            names[n++] = strdup(e->name);
+    }
+    *out = names;
+    return n;
+}
+
+static void free_names(char **names, int n)
+{
+    for (int i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
+}
+
+static void expand_home(const char *in, char *out, size_t n)
+{
+    const char *home = getenv("HOME");
+    if (in[0] == '~' && (in[1] == '/' || !in[1]) && home && *home)
+        snprintf(out, n, "%.*s%s", (int)(n / 2), home, in + 1);
+    else
+        snprintf(out, n, "%s", in);
+}
+
+/* Copy or move to `where` (a folder, or a new name when only one thing is moved or copied). Nothing is ever replaced. */
+static void do_copy_move(struct app *a, const char *where, bool move)
+{
+    char **names;
+    int n = op_targets(a, &names);
+    if (n == 0) {
+        msg(a, "Nothing to %s", move ? "move" : "copy");
+        free_names(names, n);
+        return;
+    }
+    struct pane *p = cur(a);
+    char t0[PATH_MAX], target[PATH_MAX];
+    expand_home(where, t0, sizeof(t0));
+    join_path(p->cwd, t0, target, sizeof(target));
+    struct stat st;
+    bool into = stat(target, &st) == 0 && S_ISDIR(st.st_mode);
+    if (!into && n > 1) {
+        msg(a, "%s is not a folder: several files can only go into a folder", target);
+        free_names(names, n);
+        return;
+    }
+    int done = 0, skipped = 0;
+    char err[PATH_MAX + 120] = "", first_err[PATH_MAX + 120] = "";
+    for (int i = 0; i < n; i++) {
+        char src[PATH_MAX], dst[PATH_MAX];
+        join_path(p->cwd, names[i], src, sizeof(src));
+        if (into)
+            join_path(target, names[i], dst, sizeof(dst));
+        else
+            snprintf(dst, sizeof(dst), "%s", target);
+        if (!strcmp(src, dst)) {
+            snprintf(err, sizeof(err), "%s is already there", names[i]);
+            skipped++;
+        } else if (path_inside(dst, src)) {
+            snprintf(err, sizeof(err), "cannot put %s into itself", names[i]);
+            skipped++;
+        } else if (exists_any(dst)) {
+            snprintf(err, sizeof(err), "%s already exists: not replaced", dst);
+            skipped++;
+        } else if ((move ? move_node(src, dst, err, sizeof(err)) : copy_node(src, dst, 0, err, sizeof(err))) < 0) {
+            skipped++;
+        } else {
+            done++;
+            continue;
+        }
+        if (!first_err[0])
+            snprintf(first_err, sizeof(first_err), "%s", err);
+    }
+    for (int i = 0; i < p->n; i++)
+        p->e[i].marked = false;
+    reread(a);
+    if (skipped)
+        msg(a, "%s %d of %d: %s", move ? "Moved" : "Copied", done, n, first_err);
+    else
+        msg(a, "%s %d item%s to %s", move ? "Moved" : "Copied", done, done == 1 ? "" : "s", target);
+    free_names(names, n);
+}
+
+static void do_delete(struct app *a)
+{
+    char **names;
+    int n = op_targets(a, &names);
+    struct pane *p = cur(a);
+    int done = 0;
+    char err[PATH_MAX + 120] = "";
+    for (int i = 0; i < n; i++) {
+        char path[PATH_MAX];
+        join_path(p->cwd, names[i], path, sizeof(path));
+        if (remove_tree(path, 0, err, sizeof(err)) < 0)
+            break;
+        done++;
+    }
+    for (int i = 0; i < p->n; i++)
+        p->e[i].marked = false;
+    reread(a);
+    if (done < n)
+        msg(a, "Deleted %d of %d: %s", done, n, err);
+    else
+        msg(a, "Deleted %d item%s", done, done == 1 ? "" : "s");
+    free_names(names, n);
+}
+
+static void do_mkdir(struct app *a, const char *name)
+{
+    struct pane *p = cur(a);
+    char full[PATH_MAX], t0[PATH_MAX];
+    expand_home(name, t0, sizeof(t0));
+    join_path(p->cwd, t0, full, sizeof(full));
+    if (exists_any(full)) {
+        msg(a, "%s already exists", full);
+        return;
+    }
+    for (char *s = full + 1; *s; s++) {                                 /* "a/b/c" makes the folders in between, too */
+        if (*s != '/')
+            continue;
+        *s = 0;
+        if (mkdir(full, 0755) < 0 && errno != EEXIST) {
+            msg(a, "cannot create %s: %s", full, strerror(errno));
+            return;
+        }
+        *s = '/';
+    }
+    if (mkdir(full, 0755) < 0) {
+        msg(a, "cannot create %s: %s", full, strerror(errno));
+        return;
+    }
+    char dir[PATH_MAX];
+    join_path(full, "..", dir, sizeof(dir));
+    if (!strcmp(dir, p->cwd)) {
+        reread(a);
+        for (int r = 0; r < rows(p); r++)
+            if (!strcmp(row_name(p, r), strrchr(full, '/') + 1))
+                select_row(a, r);
+    } else {
+        reread(a);
+    }
+    msg(a, "Created %s", full);
+}
+
+static void do_rename(struct app *a, const char *new_name)
+{
+    struct pane *p = cur(a);
+    const struct entry *e = row_entry(p, p->sel);
+    if (!e || !new_name[0])
+        return;
+    if (strchr(new_name, '/')) {
+        msg(a, "A name has no slash: use F6 to move a file somewhere else");
+        return;
+    }
+    char src[PATH_MAX], dst[PATH_MAX];
+    join_path(p->cwd, e->name, src, sizeof(src));
+    join_path(p->cwd, new_name, dst, sizeof(dst));
+    if (!strcmp(src, dst))
+        return;
+    if (exists_any(dst)) {
+        msg(a, "%s already exists: not replaced", new_name);
+        return;
+    }
+    if (rename(src, dst) < 0) {
+        msg(a, "cannot rename %s: %s", e->name, strerror(errno));
+        return;
+    }
+    char keep[NAME_MAX + 1];
+    snprintf(keep, sizeof(keep), "%s", new_name);
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", p->cwd);
+    reread_pane(a, other(a));
+    go_to(a, p, dir, keep);
+    msg(a, "Renamed to %s", new_name);
+}
+
+static void prompt_start(struct app *a, enum prompt kind, const char *initial)
+{
+    a->prompt = kind;
+    snprintf(a->pbuf, sizeof(a->pbuf), "%.*s", (int)sizeof(a->pbuf) - 1, initial);
+    a->win.redraw = true;
+}
+
+static void cmd_copy_move(struct app *a, bool move)
+{
+    char **names;
+    int n = op_targets(a, &names);
+    free_names(names, n);
+    if (!a->dual || n == 0) {
+        msg(a, "Nothing to %s", move ? "move" : "copy");
+        return;
+    }
+    char init[PATH_MAX + 2];
+    snprintf(init, sizeof(init), "%s%s", other(a)->cwd, strcmp(other(a)->cwd, "/") ? "/" : "");
+    prompt_start(a, move ? P_MOVE : P_COPY, init);
+}
+
+static void cmd_delete(struct app *a)
+{
+    char **names;
+    int n = op_targets(a, &names);
+    free_names(names, n);
+    if (!a->dual || n == 0) {
+        msg(a, "Nothing to delete");
+        return;
+    }
+    prompt_start(a, P_DELETE, "");
+}
+
+static void cmd_mkdir(struct app *a)
+{
+    if (a->dual)
+        prompt_start(a, P_MKDIR, "");
+}
+
+static void cmd_rename(struct app *a)
+{
+    struct pane *p = cur(a);
+    const struct entry *e = row_entry(p, p->sel);
+    if (!a->dual || !e) {
+        msg(a, "Nothing to rename");
+        return;
+    }
+    prompt_start(a, P_RENAME, e->name);
+}
+
+static void cmd_edit(struct app *a)
+{
+    struct pane *p = cur(a);
+    const struct entry *e = row_entry(p, p->sel);
+    if (!e || e->dir) {
+        msg(a, "Select a file to edit");
+        return;
+    }
+    char path[PATH_MAX], err[PATH_MAX + 80];
+    join_path(p->cwd, e->name, path, sizeof(path));
+    if (classify(path) != K_TEXT) {
+        msg(a, "%s is not a text file (Enter opens pictures)", e->name);
+        return;
+    }
+    if (!launch("mellagui-edit", path, p->cwd, err, sizeof(err)))
+        msg(a, "%s", err);
+}
+
+/* ---- round buttons ------------------------------------------------------------------------------------------------------- */
+
+struct rbtn {
+    const char *label;
+    uint32_t base, hover;
+    int x, w;
+};
+
+enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, N_TOOL };
+enum { F_HELP, F_RENAME, F_VIEW, F_EDIT, F_COPY, F_MOVE, F_MKDIR, F_DELETE, F_TERM, F_QUIT, N_FKEY };
+
+static void toolbar(const struct app *a, struct rbtn *b)
+{
+    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview" };
+    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a };
+    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50 };
+    int x = 8;
+    for (int i = 0; i < N_TOOL; i++) {
         b[i].label = labels[i];
-        b[i].w = (int)strlen(labels[i]) * LM_FONT_W + 16;
+        b[i].base = base[i];
+        b[i].hover = hover[i];
+        bool on = (i == B_HIDDEN && a->show_hidden) || (i == B_PREVIEW && a->preview);
+        if (on) {                                                       /* a switch that is on is lighter */
+            b[i].base = hover[i];
+            b[i].hover = lm_mix_rgb(hover[i], 0xffffff, 0.25);
+        }
+        b[i].w = (int)strlen(labels[i]) * LM_FONT_W + 20;
         b[i].x = x;
         x += b[i].w + 6;
     }
-    (void)a;
 }
 
-static void press_button(struct app *a, int i)
+/* The function key bar: ten buttons side by side over the whole width. */
+static void fkeybar(const struct app *a, struct rbtn *b)
+{
+    static const char *const labels[N_FKEY] = { "Help", "Rename", "Preview", "Edit", "Copy", "Move", "Mkdir", "Delete", "Term", "Quit" };
+    static const uint32_t base[N_FKEY] = { 0x5a6a8a, 0xb8803a, 0x8a6fb8, 0x2f8f9a, 0x3f9a5e, 0xc0742f, 0x3d6fb4, 0xb84545, 0x2f7f8f, 0x6b6f7a };
+    static const uint32_t hover[N_FKEY] = { 0x7488ad, 0xd49a50, 0xa088d0, 0x45aab5, 0x56b878, 0xdf8f45, 0x5588d0, 0xd65f5f, 0x45a0b2, 0x868b98 };
+    int gap = 4, width = a->win.bw - 12;
+    int bw = (width - gap * (N_FKEY - 1)) / N_FKEY;
+    for (int i = 0; i < N_FKEY; i++) {
+        b[i].label = labels[i];
+        b[i].base = (i == F_VIEW && a->preview) ? hover[i] : base[i];
+        b[i].hover = hover[i];
+        b[i].x = 6 + i * (bw + gap);
+        b[i].w = bw;
+    }
+}
+
+static void draw_rbtn(struct wlwin *w, const struct rbtn *b, int y, int h, bool hot, int num)
+{
+    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, h / 2, hot ? b->hover : b->base);
+    char t[48];
+    if (num > 0)
+        snprintf(t, sizeof(t), "%d%s", num, b->label);
+    else
+        snprintf(t, sizeof(t), "%s", b->label);
+    int tw = (int)strlen(t) * LM_FONT_W;
+    int tx = b->x + LM_MAX((b->w - tw) / 2, 4);
+    if (num > 0) {                                                      /* the key number a little dimmer than the name */
+        char ns[8];
+        int nl = snprintf(ns, sizeof(ns), "%d", num);
+        wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, ns, 1, lm_mix_rgb(0xffffff, b->base, 0.45), 0);
+        wlwin_text(w, tx + nl * LM_FONT_W, y + (h - LM_FONT_H) / 2, b->label, 1, 0xffffff, b->w - 8 - nl * LM_FONT_W);
+    } else {
+        wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, t, 1, 0xffffff, b->w - 8);
+    }
+}
+
+static void press_tool(struct app *a, int i)
 {
     switch (i) {
     case B_UP: go_up(a); break;
     case B_HOME: go_home(a); break;
     case B_HIDDEN: toggle_hidden(a); break;
     case B_TERM: start_terminal(a); break;
+    case B_PREVIEW: toggle_preview(a); break;
     }
+}
+
+static void press_fkey(struct app *a, int i)
+{
+    switch (i) {
+    case F_HELP: a->help = true; break;
+    case F_RENAME: cmd_rename(a); break;
+    case F_VIEW: toggle_preview(a); break;
+    case F_EDIT: cmd_edit(a); break;
+    case F_COPY: cmd_copy_move(a, false); break;
+    case F_MOVE: cmd_copy_move(a, true); break;
+    case F_MKDIR: cmd_mkdir(a); break;
+    case F_DELETE: cmd_delete(a); break;
+    case F_TERM: start_terminal(a); break;
+    case F_QUIT: a->win.running = false; break;
+    }
+    a->win.redraw = true;
 }
 
 /* ---- keys ---------------------------------------------------------------------------------------------------------------- */
 
 static void jump_to_letter(struct app *a, char ch)
 {
-    int n = rows(a);
+    struct pane *p = cur(a);
+    int n = rows(p);
     for (int k = 1; k <= n; k++) {
-        int r = (a->sel + k) % n;
-        const char *nm = row_name(a, r);
-        if (r == 0 && has_up(a))
+        int r = (p->sel + k) % n;
+        const char *nm = row_name(p, r);
+        if (r == 0 && has_up(p))
             continue;
         if (tolower((unsigned char)nm[0]) == tolower((unsigned char)ch)) {
             select_row(a, r);
@@ -571,46 +1450,80 @@ static void jump_to_letter(struct app *a, char ch)
 
 static void prompt_accept(struct app *a)
 {
+    enum prompt kind = a->prompt;
     char text[PATH_MAX], full[PATH_MAX];
     snprintf(text, sizeof(text), "%s", a->pbuf);
-    a->prompt = false;
+    a->prompt = P_NONE;
     a->win.redraw = true;
+    switch (kind) {
+    case P_DELETE: do_delete(a); return;
+    case P_COPY: if (text[0]) do_copy_move(a, text, false); return;
+    case P_MOVE: if (text[0]) do_copy_move(a, text, true); return;
+    case P_MKDIR: if (text[0]) do_mkdir(a, text); return;
+    case P_RENAME: do_rename(a, text); return;
+    default: break;
+    }
     if (!text[0])
         return;
-    if (text[0] == '~' && (text[1] == '/' || !text[1])) {
-        const char *home = getenv("HOME");
-        char t2[PATH_MAX];
-        snprintf(t2, sizeof(t2), "%.*s%s", (int)(sizeof(t2) / 2), home ? home : "", text + 1);
-        snprintf(text, sizeof(text), "%s", t2);
-    }
-    join_path(a->cwd, text, full, sizeof(full));
+    char t2[PATH_MAX];
+    expand_home(text, t2, sizeof(t2));
+    struct pane *p = cur(a);
+    join_path(p->cwd, t2, full, sizeof(full));
     struct stat st;
     if (stat(full, &st) < 0) {
         msg(a, "%s: %s", full, strerror(errno));
         return;
     }
     if (S_ISDIR(st.st_mode)) {
-        go_to(a, full, NULL);
+        go_to(a, p, full, NULL);
     } else {                                                           /* a file: show its folder with it selected, and open it */
         char dir[PATH_MAX];
         join_path(full, "..", dir, sizeof(dir));
-        go_to(a, dir, strrchr(full, '/') + 1);
+        go_to(a, p, dir, strrchr(full, '/') + 1);
         open_path(a, full);
     }
+}
+
+static const char *prompt_label(enum prompt k)
+{
+    switch (k) {
+    case P_GOTO: return "Go to: ";
+    case P_COPY: return "Copy to: ";
+    case P_MOVE: return "Move to: ";
+    case P_MKDIR: return "New folder: ";
+    case P_RENAME: return "Rename to: ";
+    case P_DELETE: return "";
+    default: return "";
+    }
+}
+
+static void scroll_preview(struct app *a, int lines)
+{
+    struct preview *pv = &a->pv;
+    pv->top = LM_CLAMP(pv->top + lines, 0, LM_MAX(pv->nlines - 1, 0));
+    a->win.redraw = true;
 }
 
 static void handle_key(struct app *a, uint32_t ks)
 {
     bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0, alt = (a->win.mods & LM_MOD_ALT) != 0;
-    bool super = (a->win.mods & LM_MOD_SUPER) != 0;
+    bool super = (a->win.mods & LM_MOD_SUPER) != 0, shift = (a->win.mods & LM_MOD_SHIFT) != 0;
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);
-    if (a->prompt) {
+    if (a->help) {                                                      /* any key closes the key list (but not a bare modifier) */
+        if (ks < 0xffe1 || ks > 0xffee)
+            a->help = false;
+        a->win.redraw = true;
+        return;
+    }
+    if (a->prompt != P_NONE) {
         size_t len = strlen(a->pbuf);
         if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
             prompt_accept(a);
         } else if (ks == LM_KS_Escape) {
-            a->prompt = false;
+            a->prompt = P_NONE;
+        } else if (a->prompt == P_DELETE) {
+            /* a question: only Enter and Esc answer it */
         } else if (ks == LM_KS_BackSpace) {
             while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
                 len--;
@@ -628,32 +1541,67 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'h': toggle_hidden(a); return;
         case 'r': reread(a); return;
         case 't': start_terminal(a); return;
+        case 'q': toggle_preview(a); return;
         case 'l':
-            a->prompt = true;
-            snprintf(a->pbuf, sizeof(a->pbuf), "%.*s%s", (int)sizeof(a->pbuf) - 2, a->cwd, strcmp(a->cwd, "/") ? "/" : "");
-            a->win.redraw = true;
+            prompt_start(a, P_GOTO, "");
+            snprintf(a->pbuf, sizeof(a->pbuf), "%.*s%s", (int)sizeof(a->pbuf) - 2, cur(a)->cwd, strcmp(cur(a)->cwd, "/") ? "/" : "");
             return;
         default: return;
         }
     }
+    struct pane *p = cur(a);
     switch (ks) {
     case LM_KS_Up:
         if (alt)
             go_up(a);
+        else if (shift && a->preview)
+            scroll_preview(a, -1);
         else
-            select_row(a, a->sel - 1);
+            select_row(a, p->sel - 1);
         return;
-    case LM_KS_Down: select_row(a, a->sel + 1); return;
-    case LM_KS_Page_Up: select_row(a, a->sel - LM_MAX(a->rows_visible - 1, 1)); return;
-    case LM_KS_Page_Down: select_row(a, a->sel + LM_MAX(a->rows_visible - 1, 1)); return;
+    case LM_KS_Down:
+        if (shift && a->preview)
+            scroll_preview(a, 1);
+        else
+            select_row(a, p->sel + 1);
+        return;
+    case LM_KS_Page_Up:
+        if (shift && a->preview)
+            scroll_preview(a, -LM_MAX(a->rows_visible - 1, 1));
+        else
+            select_row(a, p->sel - LM_MAX(a->rows_visible - 1, 1));
+        return;
+    case LM_KS_Page_Down:
+        if (shift && a->preview)
+            scroll_preview(a, LM_MAX(a->rows_visible - 1, 1));
+        else
+            select_row(a, p->sel + LM_MAX(a->rows_visible - 1, 1));
+        return;
     case LM_KS_Home: select_row(a, 0); return;
-    case LM_KS_End: select_row(a, rows(a) - 1); return;
+    case LM_KS_End: select_row(a, rows(p) - 1); return;
     case LM_KS_Return:
     case LM_KS_KP_Enter:
     case LM_KS_Right: open_selected(a); return;
     case LM_KS_BackSpace:
     case LM_KS_Left: go_up(a); return;
-    case LM_KS_F1 + 4: reread(a); return;                              /* F5 */
+    case LM_KS_Tab: switch_pane(a); return;
+    case LM_KS_Insert: if (a->dual) toggle_mark(a); return;
+    case LM_KS_Delete: cmd_delete(a); return;
+    case LM_KS_F1: if (a->dual) a->help = true; return;
+    case LM_KS_F1 + 1: if (a->dual) cmd_rename(a); return;
+    case LM_KS_F1 + 2: if (a->dual) toggle_preview(a); return;
+    case LM_KS_F1 + 3: if (a->dual) cmd_edit(a); return;
+    case LM_KS_F1 + 4:                                                  /* F5: copy (the chooser has no files to copy: it rereads) */
+        if (a->dual)
+            cmd_copy_move(a, false);
+        else
+            reread(a);
+        return;
+    case LM_KS_F1 + 5: if (a->dual) cmd_copy_move(a, true); return;
+    case LM_KS_F1 + 6: if (a->dual) cmd_mkdir(a); return;
+    case LM_KS_F1 + 7: if (a->dual) cmd_delete(a); return;
+    case LM_KS_F1 + 8: if (a->dual) start_terminal(a); return;
+    case LM_KS_F1 + 9: if (a->dual) a->win.running = false; return;
     case LM_KS_Escape:
         if (a->choose_key) {
             a->win.running = false;
@@ -664,84 +1612,124 @@ static void handle_key(struct app *a, uint32_t ks)
         return;
     default: break;
     }
+    if (!ctrl && !alt && !super && tl == 1 && txt[0] == ' ' && a->dual) {
+        toggle_mark(a);
+        return;
+    }
     if (!ctrl && !alt && !super && tl == 1 && isalnum((unsigned char)txt[0]))
         jump_to_letter(a, txt[0]);
 }
 
-/* ---- drawing ------------------------------------------------------------------------------------------------------------- */
+/* ---- layout -------------------------------------------------------------------------------------------------------------- */
 
-/* The scroll bar's track runs from the top of the list to the status bar; the thumb is as long as the visible part of the list. */
-static int sb_track_h(const struct app *a)
+static int bottom_h(const struct app *a)
 {
-    return a->win.bh - (TOOL_H + HEAD_H) - (a->prompt ? STATUS_H * 2 : STATUS_H);
+    return STATUS_H + (a->dual ? FKEY_H : 0) + (a->prompt != P_NONE ? STATUS_H : 0);
 }
 
-static void scrollbar_thumb(const struct app *a, int *ty, int *th)
+static int list_top(void)
 {
-    int total = LM_MAX(rows(a), 1), track = LM_MAX(sb_track_h(a), 1);
+    return TOOL_H + HEAD_H;
+}
+
+/* A pane's column: x and width. */
+static void pane_rect(const struct app *a, int i, int *x, int *w)
+{
+    if (!a->dual) {
+        *x = 0;
+        *w = a->win.bw;
+        return;
+    }
+    int half = a->win.bw / 2;
+    *x = i == 0 ? 0 : half;
+    *w = i == 0 ? half : a->win.bw - half;
+}
+
+static bool pane_is_preview(const struct app *a, int i)
+{
+    return a->dual && a->preview && i != a->act;
+}
+
+/* The scroll bar's track runs from the top of the list to the bottom bars; the thumb is as long as the visible part of the list. */
+static int sb_track_h(const struct app *a)
+{
+    return a->win.bh - list_top() - bottom_h(a);
+}
+
+static void scrollbar_thumb(const struct app *a, const struct pane *p, int *ty, int *th)
+{
+    int total = LM_MAX(rows(p), 1), track = LM_MAX(sb_track_h(a), 1);
     *th = LM_CLAMP(track * a->rows_visible / total, LM_MIN(28, track), track);
-    *ty = TOOL_H + HEAD_H + (track - *th) * a->top / LM_MAX(total - a->rows_visible, 1);
+    *ty = list_top() + (track - *th) * p->top / LM_MAX(total - a->rows_visible, 1);
 }
 
 /* The thumb follows the pointer (grabbed `sb_grab` pixels below its top). */
-static void scrollbar_drag(struct app *a, double py)
+static void scrollbar_drag(struct app *a, struct pane *p, double py)
 {
-    int ty, th, track = sb_track_h(a), span = LM_MAX(track - 0, 1);
-    scrollbar_thumb(a, &ty, &th);
-    int room = LM_MAX(span - th, 1), total = rows(a);
-    int pos = LM_CLAMP((int)py - a->sb_grab - (TOOL_H + HEAD_H), 0, room);
-    a->top = LM_CLAMP(pos * LM_MAX(total - a->rows_visible, 0) / room, 0, LM_MAX(total - a->rows_visible, 0));
+    int ty, th, track = sb_track_h(a), span = LM_MAX(track, 1);
+    scrollbar_thumb(a, p, &ty, &th);
+    int room = LM_MAX(span - th, 1), total = rows(p);
+    int pos = LM_CLAMP((int)py - p->sb_grab - list_top(), 0, room);
+    p->top = LM_CLAMP(pos * LM_MAX(total - a->rows_visible, 0) / room, 0, LM_MAX(total - a->rows_visible, 0));
 }
 
-static void paint(struct wlwin *w)
+/* ---- drawing ------------------------------------------------------------------------------------------------------------- */
+
+static uint32_t entry_color(const struct entry *e)
 {
-    struct app *a = w->data;
-    int list_y = TOOL_H + HEAD_H;
-    int bars = a->prompt ? STATUS_H * 2 : STATUS_H;
-    a->rows_visible = LM_MAX((w->bh - list_y - bars) / ROW_H, 1);
-    int total = rows(a), sbw = lm_metrics.scrollbar_width;
-    a->top = LM_CLAMP(a->top, 0, LM_MAX(total - a->rows_visible, 0));        /* (the wheel and the scroll bar may leave the selection off screen) */
+    if (!e || e->dir)
+        return COL_DIR;
+    if (e->marked)
+        return COL_MARK;
+    if (e->broken)
+        return COL_DIM;
+    if (ext_is(e->name, "png") || ext_is(e->name, "jpg") || ext_is(e->name, "jpeg") || ext_is(e->name, "ppm"))
+        return COL_PIC;
+    return e->exec ? COL_EXEC : COL_FG;
+}
+
+static void paint_pane(struct wlwin *w, struct app *a, int idx)
+{
+    struct pane *p = &a->pane[idx];
+    int x0, pw;
+    pane_rect(a, idx, &x0, &pw);
+    bool active = idx == a->act;
+    int list_y = list_top(), total = rows(p), sbw = lm_metrics.scrollbar_width;
+    p->top = LM_CLAMP(p->top, 0, LM_MAX(total - a->rows_visible, 0));        /* (the wheel and the scroll bar may leave the selection off screen) */
     bool bar = total > a->rows_visible;
-    int right = w->bw - (bar ? sbw : 0);                                      /* the list ends where the scroll bar begins */
-    wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
+    int right = x0 + pw - (bar ? sbw : 0);                                    /* the list ends where the scroll bar begins */
 
-    wlwin_fill(w, 0, 0, w->bw, TOOL_H, COL_BAR);
-    struct button b[N_BUTTONS];
-    toolbar(a, b);
-    for (int i = 0; i < N_BUTTONS; i++) {
-        bool on = i == B_HIDDEN && a->show_hidden;
-        wlwin_fill(w, b[i].x, 4, b[i].w, TOOL_H - 8, on ? COL_BTN_ON : COL_BTN);
-        wlwin_text(w, b[i].x + 8, 6, b[i].label, 1, COL_FG, 0);
+    int hy = TOOL_H;                                                          /* the header: the path, lit when the pane is active */
+    wlwin_fill(w, x0, hy, pw, HEAD_H, active && a->dual ? COL_SEL : COL_BG);
+    wlwin_text(w, x0 + 8, hy + 3, p->cwd, 1, active && a->dual ? 0xffffff : COL_DIM, pw - 16 - (count_marked(p) ? 80 : 0));
+    int nm = count_marked(p);
+    if (nm) {
+        char mk[32];
+        snprintf(mk, sizeof(mk), "%d marked", nm);
+        wlwin_text(w, x0 + pw - 8 - (int)strlen(mk) * LM_FONT_W, hy + 3, mk, 1, COL_MARK, 0);
     }
-    int px = b[N_BUTTONS - 1].x + b[N_BUTTONS - 1].w + 16;
-    wlwin_text(w, px, 6, a->cwd, 1, COL_DIM, w->bw - px - 6);
+    wlwin_fill(w, x0, list_y - 1, pw, 1, COL_BAR);
 
-    int size_x = LM_MAX(right - 250, 200), time_x = LM_MAX(right - 140, 330);
-    wlwin_fill(w, 0, TOOL_H, w->bw, HEAD_H, COL_BG);
-    wlwin_text(w, 10, TOOL_H + 2, "Name", 1, COL_DIM, 0);
-    wlwin_text(w, size_x, TOOL_H + 2, "Size", 1, COL_DIM, 0);
-    wlwin_text(w, time_x, TOOL_H + 2, "Modified", 1, COL_DIM, 0);
-    wlwin_fill(w, 0, list_y - 1, w->bw, 1, COL_BAR);
-
+    int cols = pw >= 440 ? 3 : pw >= 260 ? 2 : 1;
+    int time_x = right - 140, size_x = cols == 3 ? right - 250 : right - 86;
     for (int r = 0; r < a->rows_visible; r++) {
-        int row = a->top + r;
+        int row = p->top + r;
         if (row >= total)
             break;
-        const struct entry *e = row_entry(a, row);
+        const struct entry *e = row_entry(p, row);
         int y = list_y + r * ROW_H;
-        if (row == a->sel)
-            wlwin_fill(w, 0, y, right, ROW_H, COL_SEL);
+        if (row == p->sel)
+            wlwin_fill(w, x0, y, right - x0, ROW_H, active ? COL_SEL : COL_SEL_IDLE);
         bool dir = !e || e->dir;
-        uint32_t col = !e || e->dir ? COL_DIR : e->broken ? COL_DIM : COL_FG;
         char name[NAME_MAX + 4];
-        snprintf(name, sizeof(name), "%s%s", e ? e->name : "..", dir ? "/" : "");
-        wlwin_text(w, 10, y + 1, name, 1, col, size_x - 20);
-        if (e && !e->dir && !e->broken) {
+        snprintf(name, sizeof(name), "%s%s%s", e && e->marked ? "* " : "", e ? e->name : "..", dir ? "/" : "");
+        wlwin_text(w, x0 + 10, y + 1, name, 1, entry_color(e), (cols > 1 ? size_x : right) - x0 - 20);
+        if (cols > 1 && e && !e->dir && !e->broken) {
             char sz[32];
             human_size(e->size, sz, sizeof(sz));
             wlwin_text(w, size_x, y + 1, sz, 1, COL_DIM, 0);
         }
-        if (e) {
+        if (cols > 2 && e) {
             char tm[32];
             struct tm lt;
             localtime_r(&e->mtime, &lt);
@@ -751,65 +1739,284 @@ static void paint(struct wlwin *w)
     }
     if (bar) {
         int ty, th;
-        scrollbar_thumb(a, &ty, &th);
-        bool hot = a->sb_drag || (a->px >= right && a->py >= ty && a->py < ty + th);
-        wlwin_fill(w, right, list_y, sbw, w->bh - list_y - bars, COL_BAR);
+        scrollbar_thumb(a, p, &ty, &th);
+        bool hot = p->sb_drag || (a->px >= right && a->px < x0 + pw && a->py >= ty && a->py < ty + th);
+        wlwin_fill(w, right, list_y, sbw, w->bh - list_y - bottom_h(a), COL_BAR);
         wlwin_fill(w, right + 2, ty + 1, sbw - 4, th - 2, hot ? COL_BTN_ON : COL_BTN);
     }
+}
 
-    int sy = w->bh - STATUS_H;
+/* The path the preview wants: the file under the cursor of the active pane ("" for "..", or an empty folder). */
+static void preview_target(struct app *a, char *out, size_t n)
+{
+    struct pane *p = cur(a);
+    const struct entry *e = row_entry(p, p->sel);
+    if (!e)
+        out[0] = 0;
+    else
+        join_path(p->cwd, e->name, out, n);
+}
+
+/* Called while painting: notices a new cursor position and loads for it (a picture only once the cursor has rested). */
+static void preview_update(struct app *a)
+{
+    struct preview *pv = &a->pv;
+    char want[PATH_MAX];
+    preview_target(a, want, sizeof(want));
+    if (strcmp(want, pv->want) != 0) {
+        snprintf(pv->want, sizeof(pv->want), "%s", want);
+        pv->loaded = false;
+        bool pic = want[0] && (ext_is(want, "png") || ext_is(want, "jpg") || ext_is(want, "jpeg") || ext_is(want, "ppm"));
+        pv->due = now_ms() + (pic ? 150 : 0);
+    }
+    if (!pv->loaded && now_ms() >= pv->due) {
+        if (want[0])
+            preview_load(pv, want, a->show_hidden);
+        else
+            preview_clear(pv);
+        pv->loaded = true;
+    }
+}
+
+static void paint_preview(struct wlwin *w, struct app *a, int idx)
+{
+    struct preview *pv = &a->pv;
+    int x0, pw;
+    pane_rect(a, idx, &x0, &pw);
+    int list_y = list_top();
+    int body_h = w->bh - list_y - bottom_h(a);
+    wlwin_fill(w, x0, TOOL_H, pw, HEAD_H, COL_BG);
+    char head[NAME_MAX + 200];
+    if (pv->kind != PV_NONE && pv->loaded)
+        snprintf(head, sizeof(head), "%s  -  %s", pv->title, pv->info);
+    else
+        snprintf(head, sizeof(head), "Preview");
+    wlwin_text(w, x0 + 8, TOOL_H + 3, head, 1, COL_DIM, pw - 16);
+    wlwin_fill(w, x0, list_y - 1, pw, 1, COL_BAR);
+    wlwin_fill(w, x0, list_y, pw, body_h, lm_theme.field);
+    if (!pv->loaded) {
+        if (pv->want[0])
+            wlwin_text(w, x0 + 10, list_y + 6, "...", 1, COL_DIM, 0);
+        return;
+    }
+    if (pv->kind == PV_NONE) {
+        wlwin_text(w, x0 + 10, list_y + 6, "Nothing to show", 1, COL_DIM, pw - 20);
+        return;
+    }
+    if (pv->kind == PV_IMAGE) {
+        int aw = pw - 16, ah = body_h - 16;
+        if (!pv->scaled || pv->sw > aw || pv->sh > ah || (pv->sw < aw && pv->sh < ah && pv->sw < pv->img.w * 8))
+            preview_scale(pv, aw, ah);
+        if (pv->scaled) {
+            int ox = x0 + (pw - pv->sw) / 2, oy = list_y + (body_h - pv->sh) / 2;
+            for (int y = 0; y < pv->sh; y++) {
+                if (oy + y < 0 || oy + y >= w->bh)
+                    continue;
+                for (int x = 0; x < pv->sw; x++)
+                    if (ox + x >= x0 && ox + x < x0 + pw && ox + x < w->bw)
+                        w->pixels[(size_t)(oy + y) * (size_t)w->bw + (size_t)(ox + x)] = 0xff000000u | pv->scaled[(size_t)y * (size_t)pv->sw + (size_t)x];
+            }
+        }
+        return;
+    }
+    int rowsv = LM_MAX(body_h / LM_FONT_H, 1);
+    pv->top = LM_CLAMP(pv->top, 0, LM_MAX(pv->nlines - 1, 0));
+    for (int r = 0; r < rowsv && pv->top + r < pv->nlines; r++) {
+        uint32_t col = pv->kind == PV_ERROR ? COL_ERR : pv->kind == PV_DIR ? COL_DIR : pv->kind == PV_HEX ? COL_DIM : COL_FG;
+        const char *s = pv->lines[pv->top + r];
+        if (pv->kind == PV_DIR && s[0] && s[strlen(s) - 1] != '/')
+            col = COL_FG;
+        wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
+    }
+    if (pv->nlines == 0)
+        wlwin_text(w, x0 + 10, list_y + 6, pv->kind == PV_DIR ? "An empty folder" : "An empty file", 1, COL_DIM, pw - 20);
+}
+
+static void paint_help(struct wlwin *w)
+{
+    static const char *const lines[] = {
+        "File manager keys",
+        "",
+        "Tab               the other pane",
+        "Enter / Right     open (a folder: go in); Backspace / Left: up",
+        "Insert / Space    mark a file, then move down",
+        "F2                rename the file under the cursor",
+        "F3 / Ctrl+Q       preview of the file under the cursor in the other pane",
+        "F4                edit a text file",
+        "F5 / F6           copy / move to the other pane's folder (the name is editable)",
+        "F7                new folder",
+        "F8 / Delete       delete (asks first)",
+        "F9 / Ctrl+T       a terminal in this folder",
+        "F10               quit",
+        "",
+        "Copy, move and delete take the marked files, else the one under the cursor.",
+        "Nothing that exists is ever replaced.",
+        "Ctrl+H hidden files   Ctrl+R reread   Ctrl+L type a path",
+        "Shift+Up / Down scrolls the preview   a letter jumps to a name",
+        "",
+        "Any key or click closes this list",
+    };
+    int n = (int)(sizeof(lines) / sizeof(lines[0])), cw = 0;
+    for (int i = 0; i < n; i++)
+        cw = LM_MAX(cw, (int)strlen(lines[i]));
+    int bw = LM_MIN(cw * LM_FONT_W + 32, w->bw - 8), bh = LM_MIN(n * LM_FONT_H + 24, w->bh - 8);
+    int x = (w->bw - bw) / 2, y = (w->bh - bh) / 2;
+    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, 9, COL_DIR);
+    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, 8, COL_BAR);
+    for (int i = 0; i < n && 12 + (i + 1) * LM_FONT_H <= bh; i++)
+        wlwin_text(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_DIR : COL_FG, bw - 24);
+}
+
+static void paint(struct wlwin *w)
+{
+    struct app *a = w->data;
+    int list_y = list_top();
+    a->rows_visible = LM_MAX((w->bh - list_y - bottom_h(a)) / ROW_H, 1);
+    wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
+
+    wlwin_fill(w, 0, 0, w->bw, TOOL_H, COL_BAR);
+    struct rbtn b[N_FKEY];
+    toolbar(a, b);
+    for (int i = 0; i < N_TOOL; i++) {
+        if (!a->dual && i == B_PREVIEW)
+            continue;
+        draw_rbtn(w, &b[i], 4, TOOL_H - 8, a->hover == i, 0);
+    }
+    if (a->preview)
+        preview_update(a);
+    for (int i = 0; i < (a->dual ? 2 : 1); i++) {
+        if (pane_is_preview(a, i))
+            paint_preview(w, a, i);
+        else
+            paint_pane(w, a, i);
+    }
+    if (a->dual) {
+        int mid = w->bw / 2;
+        wlwin_fill(w, mid - 1, TOOL_H, 1, w->bh - TOOL_H - bottom_h(a), COL_BAR);
+    }
+
+    int sy = w->bh - STATUS_H - (a->dual ? FKEY_H : 0);
     wlwin_fill(w, 0, sy, w->bw, STATUS_H, COL_BAR);
+    struct pane *p = cur(a);
     bool showing = a->msg[0] && now_ms() < a->msg_until;
-    char status[PATH_MAX + 64];
-    snprintf(status, sizeof(status), "%d item%s%s", a->n, a->n == 1 ? "" : "s", a->show_hidden ? "  (hidden files shown)" : "");
+    char status[PATH_MAX + 128];
+    const struct entry *e = row_entry(p, p->sel);
+    if (e && a->dual) {
+        char sz[32], tm[32];
+        struct tm lt;
+        human_size(e->size, sz, sizeof(sz));
+        localtime_r(&e->mtime, &lt);
+        strftime(tm, sizeof(tm), "%Y-%m-%d %H:%M", &lt);
+        snprintf(status, sizeof(status), "%s  %s  %s   (%d item%s)", e->name, e->dir ? "folder" : sz, tm, p->n, p->n == 1 ? "" : "s");
+    } else {
+        snprintf(status, sizeof(status), "%d item%s%s", p->n, p->n == 1 ? "" : "s", a->show_hidden ? "  (hidden files shown)" : "");
+    }
     wlwin_text(w, 6, sy + 2, showing ? a->msg : status, 1, showing ? COL_WARN : COL_FG, w->bw - 12);
-    if (a->prompt) {
+    if (a->prompt != P_NONE) {
         int py = sy - STATUS_H;
         wlwin_fill(w, 0, py, w->bw, STATUS_H, COL_BAR);
         wlwin_fill(w, 0, py, w->bw, 1, COL_DIR);
-        char line[PATH_MAX + 16];
-        snprintf(line, sizeof(line), "Go to: %s_", a->pbuf);
-        wlwin_text(w, 6, py + 2, line, 1, COL_FG, w->bw - 12);
+        char line[PATH_MAX + 80];
+        if (a->prompt == P_DELETE) {
+            char **names;
+            int n = op_targets(a, &names);
+            snprintf(line, sizeof(line), "Delete %d item%s%s%s? This cannot be undone: Enter deletes, Esc cancels", n, n == 1 ? "" : "s",
+                     n == 1 ? " (" : "", n == 1 ? names[0] : "");
+            if (n == 1)
+                strncat(line, ")", sizeof(line) - strlen(line) - 1);
+            free_names(names, n);
+        } else {
+            snprintf(line, sizeof(line), "%s%s_", prompt_label(a->prompt), a->pbuf);
+        }
+        wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
     }
+    if (a->dual) {
+        struct rbtn f[N_FKEY];
+        fkeybar(a, f);
+        for (int i = 0; i < N_FKEY; i++)
+            draw_rbtn(w, &f[i], w->bh - FKEY_H + 3, FKEY_H - 6, a->hover == 100 + i, i + 1);
+    }
+    if (a->help)
+        paint_help(w);
 }
 
 /* ---- events --------------------------------------------------------------------------------------------------------------- */
 
+static int hover_at(const struct app *a, double px, double py)
+{
+    int x = (int)px, y = (int)py;
+    struct rbtn b[N_FKEY];
+    if (y >= 4 && y < TOOL_H - 4) {
+        toolbar(a, b);
+        for (int i = 0; i < N_TOOL; i++)
+            if ((a->dual || i != B_PREVIEW) && x >= b[i].x && x < b[i].x + b[i].w)
+                return i;
+    }
+    if (a->dual && y >= a->win.bh - FKEY_H + 3 && y < a->win.bh - 3) {
+        fkeybar(a, b);
+        for (int i = 0; i < N_FKEY; i++)
+            if (x >= b[i].x && x < b[i].x + b[i].w)
+                return 100 + i;
+    }
+    return -1;
+}
+
+static int pane_at(const struct app *a, int x)
+{
+    if (!a->dual)
+        return 0;
+    return x < a->win.bw / 2 ? 0 : 1;
+}
+
 static void click(struct app *a, uint32_t time_ms)
 {
     int x = (int)a->px, y = (int)a->py;
-    if (y < TOOL_H) {
-        struct button b[N_BUTTONS];
-        toolbar(a, b);
-        for (int i = 0; i < N_BUTTONS; i++)
-            if (x >= b[i].x && x < b[i].x + b[i].w && y >= 4 && y < TOOL_H - 4)
-                press_button(a, i);
+    int h = hover_at(a, a->px, a->py);
+    if (h >= 100) {
+        press_fkey(a, h - 100);
         return;
     }
-    int list_y = TOOL_H + HEAD_H;
+    if (h >= 0) {
+        press_tool(a, h);
+        return;
+    }
+    if (y < TOOL_H || y >= a->win.bh - bottom_h(a))
+        return;
+    int idx = pane_at(a, x);
+    if (pane_is_preview(a, idx))
+        return;
+    if (idx != a->act) {
+        a->act = idx;
+        set_title(a);
+        a->win.redraw = true;
+    }
+    struct pane *p = &a->pane[idx];
+    int px0, pw;
+    pane_rect(a, idx, &px0, &pw);
+    int list_y = list_top();
     if (y < list_y)
         return;
-    if (rows(a) > a->rows_visible && x >= a->win.bw - lm_metrics.scrollbar_width) {       /* the scroll bar */
+    if (rows(p) > a->rows_visible && x >= px0 + pw - lm_metrics.scrollbar_width) {       /* the scroll bar */
         int ty, th;
-        scrollbar_thumb(a, &ty, &th);
-        int page = LM_MAX(a->rows_visible - 1, 1), maxtop = LM_MAX(rows(a) - a->rows_visible, 0);
+        scrollbar_thumb(a, p, &ty, &th);
+        int page = LM_MAX(a->rows_visible - 1, 1), maxtop = LM_MAX(rows(p) - a->rows_visible, 0);
         if (y >= ty && y < ty + th) {
-            a->sb_drag = true;
-            a->sb_grab = y - ty;
+            p->sb_drag = true;
+            p->sb_grab = y - ty;
         } else {
-            a->top = LM_CLAMP(a->top + (y < ty ? -page : page), 0, maxtop);
+            p->top = LM_CLAMP(p->top + (y < ty ? -page : page), 0, maxtop);
         }
         return;
     }
-    int row = a->top + (y - list_y) / ROW_H;
-    if (row >= rows(a) || (y - list_y) / ROW_H >= a->rows_visible)
+    int row = p->top + (y - list_y) / ROW_H;
+    if (row >= rows(p) || (y - list_y) / ROW_H >= a->rows_visible)
         return;
-    bool dbl = row == a->last_click_row && time_ms - a->last_click_ms < 400;
-    a->last_click_ms = time_ms;
-    a->last_click_row = row;
+    bool dbl = row == p->last_click_row && time_ms - p->last_click_ms < 400;
+    p->last_click_ms = time_ms;
+    p->last_click_row = row;
     select_row(a, row);
     if (dbl) {
-        a->last_click_row = -1;
+        p->last_click_row = -1;
         open_selected(a);
     }
 }
@@ -821,19 +2028,33 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_ENTER:
         a->px = lm_fixed_to_double(args[2].f);
         a->py = lm_fixed_to_double(args[3].f);
+        a->hover = hover_at(a, a->px, a->py);
+        w->redraw = true;
+        break;
+    case LM_WL_POINTER_EVT_LEAVE:
+        a->hover = -1;
+        w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
-        if (a->sb_drag)
-            scrollbar_drag(a, a->py);
+        a->hover = hover_at(a, a->px, a->py);
+        for (int i = 0; i < 2; i++)
+            if (a->pane[i].sb_drag)
+                scrollbar_drag(a, &a->pane[i], a->py);
         w->redraw = true;                                               /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
-        if (args[2].u == 272 && args[3].u == 1)
+        if (args[2].u == 272 && args[3].u == 1) {
+            if (a->help) {                                              /* a click closes the key list */
+                a->help = false;
+                w->redraw = true;
+                break;
+            }
             click(a, args[1].u);
-        else if (args[2].u == 272)
-            a->sb_drag = false;
+        } else if (args[2].u == 272) {
+            a->pane[0].sb_drag = a->pane[1].sb_drag = false;
+        }
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:
@@ -841,7 +2062,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
             if (lines == 0)
                 lines = args[2].f > 0 ? 1 : -1;
-            a->top = LM_CLAMP(a->top + lines, 0, LM_MAX(rows(a) - a->rows_visible, 0));
+            int idx = pane_at(a, (int)a->px);
+            if (pane_is_preview(a, idx))
+                scroll_preview(a, lines);
+            else {
+                struct pane *p = &a->pane[idx];
+                p->top = LM_CLAMP(p->top + lines, 0, LM_MAX(rows(p) - a->rows_visible, 0));
+            }
             w->redraw = true;
         }
         break;
@@ -894,6 +2121,27 @@ static void touch(const char *dir, const char *name, const char *content, size_t
     }
 }
 
+static void write_file(const char *path, const char *content, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(content, 1, n, f);
+        fclose(f);
+    }
+}
+
+static bool file_is(const char *path, const char *content)
+{
+    char buf[256];
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return !strcmp(buf, content);
+}
+
 static int selftest(void)
 {
     char out[PATH_MAX];
@@ -916,6 +2164,7 @@ static int selftest(void)
     CHECK(!strcmp(out, "20 MB"), "size 20 MB: %s", out);
 
     CHECK(ext_is("a/b.PNG", "png") && !ext_is(".png", "png") && !ext_is("png", "png"), "extensions");
+    CHECK(path_inside("/a/b", "/a") && path_inside("/a", "/a") && !path_inside("/ab", "/a") && path_inside("/x", "/"), "path_inside");
 
     char dir[] = "/tmp/mellagui-files-selftest-XXXXXX";
     if (!mkdtemp(dir)) {
@@ -934,18 +2183,17 @@ static int selftest(void)
     touch(dir, "pic.PNG", "", 0);
     snprintf(p, sizeof(p), "%s/dangling", dir);
     if (symlink("/nonexistent-target", p) < 0) {}
-    static struct app a;
+    static struct pane lp;
     char err[200];
-    CHECK(list_dir(&a, dir, err, sizeof(err)) == 0, "list: %s", err);
+    CHECK(list_dir(&lp, dir, false, err, sizeof(err)) == 0, "list: %s", err);
     const char *want[] = { "Alpha", "zeta", "Apple.txt", "beta.txt", "bin.dat", "dangling", "pic.PNG" };
-    CHECK(a.n == 7, "%d entries without hidden files", a.n);
-    for (int i = 0; i < a.n && i < 7; i++)
-        CHECK(!strcmp(a.e[i].name, want[i]), "entry %d is %s, want %s", i, a.e[i].name, want[i]);
-    CHECK(a.n >= 6 && a.e[5].broken && !a.e[5].dir, "a dangling link is marked");
-    CHECK(a.n >= 2 && a.e[0].dir && a.e[1].dir && !a.e[2].dir, "folders first");
-    a.show_hidden = true;
-    CHECK(list_dir(&a, dir, err, sizeof(err)) == 0 && a.n == 8 && !strcmp(a.e[2].name, ".secret"), "hidden files listed and sorted");
-    CHECK(list_dir(&a, "/nonexistent-dir", err, sizeof(err)) < 0 && a.n == 8, "a failed listing keeps the old one");
+    CHECK(lp.n == 7, "%d entries without hidden files", lp.n);
+    for (int i = 0; i < lp.n && i < 7; i++)
+        CHECK(!strcmp(lp.e[i].name, want[i]), "entry %d is %s, want %s", i, lp.e[i].name, want[i]);
+    CHECK(lp.n >= 6 && lp.e[5].broken && !lp.e[5].dir, "a dangling link is marked");
+    CHECK(lp.n >= 2 && lp.e[0].dir && lp.e[1].dir && !lp.e[2].dir, "folders first");
+    CHECK(list_dir(&lp, dir, true, err, sizeof(err)) == 0 && lp.n == 8 && !strcmp(lp.e[2].name, ".secret"), "hidden files listed and sorted");
+    CHECK(list_dir(&lp, "/nonexistent-dir", true, err, sizeof(err)) < 0 && lp.n == 8, "a failed listing keeps the old one");
 
     snprintf(p, sizeof(p), "%s/beta.txt", dir);
     CHECK(classify(p) == K_TEXT, "text");
@@ -955,15 +2203,144 @@ static int selftest(void)
     CHECK(classify(p) == K_IMAGE, "image by extension");
     snprintf(p, sizeof(p), "%s/nope", dir);
     CHECK(classify(p) == K_UNREADABLE, "unreadable");
+    entries_free(&lp);
+    free(lp.e);
 
-    entries_free(&a);
-    free(a.e);
+    /* ---- the preview ---- */
+    static struct preview pv;
+    snprintf(p, sizeof(p), "%s/beta.txt", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT && pv.nlines == 1 && !strcmp(pv.lines[0], "hello"), "text preview: kind %d, %d lines", pv.kind, pv.nlines);
+    touch(dir, "tabs.txt", "a\tb\r\nsecond\n\nlast", 17);
+    snprintf(p, sizeof(p), "%s/tabs.txt", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT && pv.nlines == 4 && !strcmp(pv.lines[0], "a   b") && !strcmp(pv.lines[2], "") && !strcmp(pv.lines[3], "last"),
+          "tabs and line ends: %d lines, first '%s'", pv.nlines, pv.nlines ? pv.lines[0] : "");
+    snprintf(p, sizeof(p), "%s/bin.dat", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_HEX && pv.nlines == 1 && strstr(pv.lines[0], "61 00 62") && strstr(pv.lines[0], "|a.b"), "hex dump: '%s'", pv.nlines ? pv.lines[0] : "");
+    preview_load(&pv, dir, false);
+    CHECK(pv.kind == PV_DIR && pv.nlines >= 7 && !strcmp(pv.lines[0], "Alpha/") && strstr(pv.info, "items"), "folder preview: %d lines '%s'", pv.nlines, pv.info);
+    snprintf(p, sizeof(p), "%s/nope", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_ERROR, "a missing file is an error");
+    touch(dir, "one.ppm", "P6\n2 1\n255\n\xff\x00\x00\x00\x00\xff", 17);
+    snprintf(p, sizeof(p), "%s/one.ppm", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_IMAGE && pv.img.w == 2 && pv.img.h == 1, "picture preview: kind %d", pv.kind);
+    preview_scale(&pv, 100, 100);
+    CHECK(pv.scaled && pv.sw == 16 && pv.sh == 8, "scaled up at most 8 times: %dx%d", pv.sw, pv.sh);
+    CHECK(pv.scaled && pv.scaled[0] == 0xff0000 && pv.scaled[15] == 0x0000ff, "scaled colours %06x %06x", pv.scaled ? pv.scaled[0] : 0, pv.scaled ? pv.scaled[15] : 0);
+    preview_clear(&pv);
+
+    /* ---- copy, move, delete (the app functions, without a window) ---- */
+    static struct app a;
+    a.dual = true;
+    a.hover = -1;
+    char src[PATH_MAX], dst[PATH_MAX];
+    snprintf(src, sizeof(src), "%s/left", dir);
+    snprintf(dst, sizeof(dst), "%s/right", dir);
+    mkdir(src, 0755);
+    mkdir(dst, 0755);
+    snprintf(p, sizeof(p), "%s/tree", src);
+    mkdir(p, 0755);
+    snprintf(p, sizeof(p), "%s/tree/deep", src);
+    mkdir(p, 0755);
+    touch(src, "tree/deep/f.txt", "deep\n", 5);
+    touch(src, "one.txt", "one\n", 4);
+    touch(src, "two.txt", "two\n", 4);
+    snprintf(p, sizeof(p), "%s/link", src);
+    if (symlink("one.txt", p) < 0) {}
+    CHECK(go_to(&a, &a.pane[0], src, NULL) && go_to(&a, &a.pane[1], dst, NULL), "both panes list");
+    CHECK(a.pane[0].n == 4, "left has %d entries", a.pane[0].n);
+    a.act = 0;
+    int r_one = -1;
+    for (int r = 0; r < rows(&a.pane[0]); r++)
+        if (!strcmp(row_name(&a.pane[0], r), "one.txt"))
+            r_one = r;
+    a.pane[0].sel = r_one;
+    do_copy_move(&a, dst, false);                                         /* copy one file into the other folder */
+    snprintf(p, sizeof(p), "%s/one.txt", dst);
+    CHECK(file_is(p, "one\n"), "copied: %s", a.msg);
+    CHECK(a.pane[1].n == 1, "the right pane was reread: %d", a.pane[1].n);
+    write_file(p, "changed", 7);
+    do_copy_move(&a, dst, false);                                         /* the same copy again: nothing is replaced */
+    CHECK(file_is(p, "changed") && strstr(a.msg, "not replaced"), "an existing file stays: %s", a.msg);
+    struct entry *e;
+    for (int i = 0; i < a.pane[0].n; i++) {                              /* mark the tree and the link: copy both */
+        e = &a.pane[0].e[i];
+        e->marked = !strcmp(e->name, "tree") || !strcmp(e->name, "link");
+    }
+    do_copy_move(&a, dst, false);
+    snprintf(p, sizeof(p), "%s/tree/deep/f.txt", dst);
+    CHECK(file_is(p, "deep\n"), "a folder is copied with everything in it: %s", a.msg);
+    snprintf(p, sizeof(p), "%s/link", dst);
+    char tgt[64] = "";
+    ssize_t tl = readlink(p, tgt, sizeof(tgt) - 1);
+    CHECK(tl > 0 && !strcmp(tgt, "one.txt"), "a link is copied as a link");
+    CHECK(count_marked(&a.pane[0]) == 0, "the marks are cleared after the operation");
+    char into_self[PATH_MAX + 32];
+    snprintf(into_self, sizeof(into_self), "%s/tree/deep", src);
+    for (int i = 0; i < a.pane[0].n; i++)
+        a.pane[0].e[i].marked = !strcmp(a.pane[0].e[i].name, "tree");
+    do_copy_move(&a, into_self, false);                                   /* a folder into itself is refused */
+    CHECK(strstr(a.msg, "into itself"), "into itself: %s", a.msg);
+
+    for (int i = 0; i < a.pane[0].n; i++)                                 /* move two.txt under a new name */
+        a.pane[0].e[i].marked = false;
+    for (int r = 0; r < rows(&a.pane[0]); r++)
+        if (!strcmp(row_name(&a.pane[0], r), "two.txt"))
+            a.pane[0].sel = r;
+    snprintf(p, sizeof(p), "%s/renamed.txt", dst);
+    do_copy_move(&a, p, true);
+    snprintf(src, sizeof(src), "%s/left/two.txt", dir);
+    CHECK(file_is(p, "two\n") && access(src, F_OK) != 0, "moved under a new name: %s", a.msg);
+    for (int r = 0; r < rows(&a.pane[0]); r++)                            /* several things need a folder */
+        a.pane[0].e[r > 0 ? r - 1 : 0].marked = true;
+    snprintf(p, sizeof(p), "%s/renamed.txt", dst);
+    do_copy_move(&a, p, false);
+    CHECK(strstr(a.msg, "not a folder"), "several files to a file name: %s", a.msg);
+    for (int i = 0; i < a.pane[0].n; i++)
+        a.pane[0].e[i].marked = false;
+
+    a.act = 1;                                                            /* delete in the right pane: the tree and a file */
+    for (int i = 0; i < a.pane[1].n; i++)
+        a.pane[1].e[i].marked = !strcmp(a.pane[1].e[i].name, "tree") || !strcmp(a.pane[1].e[i].name, "one.txt");
+    do_delete(&a);
+    snprintf(p, sizeof(p), "%s/right/tree", dir);
+    char p2[PATH_MAX];
+    snprintf(p2, sizeof(p2), "%s/right/one.txt", dir);
+    CHECK(access(p, F_OK) != 0 && access(p2, F_OK) != 0 && strstr(a.msg, "Deleted 2"), "deleted: %s", a.msg);
+    snprintf(p, sizeof(p), "%s/left/tree/deep/f.txt", dir);
+    CHECK(access(p, F_OK) == 0, "the source of the copy is untouched");
+
+    a.act = 1;                                                            /* rename and mkdir */
+    for (int r = 0; r < rows(&a.pane[1]); r++)
+        if (!strcmp(row_name(&a.pane[1], r), "renamed.txt"))
+            a.pane[1].sel = r;
+    do_rename(&a, "final.txt");
+    snprintf(p, sizeof(p), "%s/right/final.txt", dir);
+    CHECK(file_is(p, "two\n"), "renamed: %s", a.msg);
+    do_rename(&a, "a/b");
+    CHECK(strstr(a.msg, "no slash"), "a name with a slash: %s", a.msg);
+    do_mkdir(&a, "x/y/z");
+    snprintf(p, sizeof(p), "%s/right/x/y/z", dir);
+    CHECK(access(p, F_OK) == 0, "mkdir makes the folders in between: %s", a.msg);
+    do_mkdir(&a, "x");
+    CHECK(strstr(a.msg, "already exists"), "mkdir on an existing name: %s", a.msg);
+    CHECK(remove_tree("/", 0, err, sizeof(err)) < 0, "the root is never deleted");
+
+    entries_free(&a.pane[0]);
+    entries_free(&a.pane[1]);
+    free(a.pane[0].e);
+    free(a.pane[1].e);
     char cmd[PATH_MAX + 32];
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
     if (system(cmd) != 0) {}
     puts(bad ? "selftest FAILED" : "selftest ok");
     return bad ? 1 : 0;
 }
+
 
 /* ---- main ----------------------------------------------------------------------------------------------------------------- */
 
@@ -990,12 +2367,15 @@ int main(int argc, char **argv)
     static struct app a;
     a.rep_rate = 25;
     a.rep_delay = 400;
-    a.last_click_row = -1;
+    a.pane[0].last_click_row = a.pane[1].last_click_row = -1;
+    a.hover = -1;
+    a.dual = choose == NULL;
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event };
     a.choose_key = choose;
     if (wlwin_connect(&a.win, "mellagui-files", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, choose ? "Choose a picture" : "Files", choose ? "mellagui.files.choose" : "mellagui.files", 640, 460, 360, 160) < 0)
+    if (wlwin_open(&a.win, choose ? "Choose a picture" : "Files", choose ? "mellagui.files.choose" : "mellagui.files",
+                   choose ? 640 : 880, choose ? 460 : 460, choose ? 360 : 640, choose ? 160 : 240) < 0)
         return 1;
     char start[PATH_MAX], cwd[PATH_MAX];
     const char *home = getenv("HOME");
@@ -1011,22 +2391,33 @@ int main(int argc, char **argv)
     } else {
         normalize(home && *home ? home : "/", start, sizeof(start));
     }
-    if (!go_to(&a, start, NULL) && !go_to(&a, "/", NULL)) {
+    if (!go_to(&a, &a.pane[0], start, NULL) && !go_to(&a, &a.pane[0], "/", NULL)) {
         fprintf(stderr, "mellagui-files: cannot list %s\n", start);
         return 1;
     }
-    if (strcmp(a.cwd, start) != 0)
+    if (a.dual && !go_to(&a, &a.pane[1], a.pane[0].cwd, NULL))
+        return 1;
+    if (strcmp(a.pane[0].cwd, start) != 0)
         msg(&a, "Could not open %s", start);
     else if (choose)
         msg(&a, "Choose a picture: Enter or double click (Esc cancels)");
+    else
+        msg(&a, "F1 shows the keys: Tab switches panes, F3 previews, F5 copies, F6 moves, F8 deletes");
     while (a.win.running) {
         int timeout = 250;
         if (a.rep_code) {
             int64_t wait = a.rep_next - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, 250);
         }
+        if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
+            int64_t wait = a.pv.due - now_ms();
+            timeout = (int)LM_CLAMP(wait, 1, timeout);
+            a.win.redraw = a.win.redraw || wait <= 0;
+        }
         if (!wlwin_step(&a.win, timeout))
             break;
+        if (a.preview && !a.pv.loaded && a.pv.want[0] && now_ms() >= a.pv.due)
+            a.win.redraw = true;
         if (a.rep_code && now_ms() >= a.rep_next) {
             handle_key(&a, lm_keymap_keysym(a.rep_code, a.win.mods));
             a.rep_next = now_ms() + (a.rep_rate > 0 ? 1000 / a.rep_rate : 40);

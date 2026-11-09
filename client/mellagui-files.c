@@ -1919,7 +1919,11 @@ enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, B_EMPTY, N
 /* The buttons that belong to the two-pane manager (the picture chooser has neither). */
 static bool tool_visible(const struct app *a, int i)
 {
-    return a->dual || (i != B_PREVIEW && i != B_TRASH && i != B_RESTORE && i != B_EMPTY);
+    if (i == B_RESTORE)                                                 /* only inside the trashed files */
+        return a->dual && in_trash_files(a->pane[a->act].cwd);
+    if (i == B_EMPTY)                                                   /* only while looking at the trash */
+        return a->dual && in_trash(a->pane[a->act].cwd);
+    return a->dual || (i != B_PREVIEW && i != B_TRASH);
 }
 enum { F_HELP, F_RENAME, F_VIEW, F_EDIT, F_COPY, F_MOVE, F_MKDIR, F_DELETE, F_TERM, F_QUIT, N_FKEY };
 
@@ -1939,13 +1943,10 @@ static void toolbar(const struct app *a, struct rbtn *b)
             b[i].base = hover[i];
             b[i].hover = lm_mix_rgb(hover[i], 0xffffff, 0.25);
         }
-        if (i == B_RESTORE && !(a->dual && in_trash_files(a->pane[a->act].cwd))) {      /* only useful inside the trash: dim elsewhere */
-            b[i].base = lm_mix_rgb(base[i], COL_BAR, 0.65);
-            b[i].hover = lm_mix_rgb(hover[i], COL_BAR, 0.5);
-        }
         b[i].w = (int)strlen(labels[i]) * LM_FONT_W + 20;
         b[i].x = x;
-        x += b[i].w + 6;
+        if (tool_visible(a, i))                                         /* hidden buttons take no room */
+            x += b[i].w + 6;
     }
 }
 

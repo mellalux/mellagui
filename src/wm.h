@@ -684,7 +684,7 @@ bool lm_wm_osk_is_open(const struct lm_wm *wm);
  * the user gave it is kept in the gadgets file (`keyboard x y w kh`, --gadgets-file). */
 void lm_wm_osk_reset(struct lm_wm *wm);
 /* Control socket `osk`: "osk open=<0|1> latched=<LM_MOD_* mask> n=<keys>" and, while open, "card x= y= w= h=" and one
- * "key <i> code=<evdev> kind=<k> x= y= w= h= label=<text>" line per key. */
+ * "key <i> code=<evdev> kind=<k> x= y= w= h= on=<latched> held=<lit by a key that is down> label=<text>" line per key. */
 size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The clipboard card's view: the first history entry it shows and how many entries fit (control socket `clip`). */

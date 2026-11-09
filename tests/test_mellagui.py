@@ -3122,8 +3122,8 @@ class TestClients(Base):
     def osk_parse(text):
         head = dict(kv.split('=') for kv in text.split('\n')[0].split()[1:])
         keys = {}
-        for m in re.finditer(r'key (\d+) code=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) on=(\d) label=(.*)', text):
-            keys[int(m.group(2))] = (int(m.group(4)), int(m.group(5)), int(m.group(6)), int(m.group(7)), m.group(9), int(m.group(8)))
+        for m in re.finditer(r'key (\d+) code=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) on=(\d) held=(\d) label=(.*)', text):
+            keys[int(m.group(2))] = (int(m.group(4)), int(m.group(5)), int(m.group(6)), int(m.group(7)), m.group(10), int(m.group(8)), int(m.group(9)))
         return head, keys
 
     def osk_click(self, code):
@@ -3243,6 +3243,25 @@ class TestClients(Base):
         ctl.click(x5 + 40, y5 + 5)
         time.sleep(0.1)
         self.assertEqual(self.osk_card(), (4, 600 - 260 - 6, 1016, 260))
+
+    def test_osk_shows_what_is_held_down_on_the_real_keyboard(self):
+        self.osk('open')
+        keys = self.osk()[1]
+        self.assertEqual((keys[30][6], keys[42][6], keys[54][6]), (0, 0, 0))
+        ctl.key(30, True)                                                        # a, on the real keyboard
+        time.sleep(0.1)
+        keys = self.osk()[1]
+        self.assertEqual(keys[30][6], 1)
+        self.assertEqual(keys[31][6], 0)
+        ctl.key(30, False)
+        ctl.key(54, True)                                                        # the right Shift: both Shift keys light and the letters change
+        time.sleep(0.1)
+        keys = self.osk()[1]
+        self.assertEqual((keys[42][6], keys[54][6], keys[30][4]), (1, 1, 'A'))
+        ctl.key(54, False)
+        time.sleep(0.1)
+        keys = self.osk()[1]
+        self.assertEqual((keys[30][6], keys[42][6], keys[54][6], keys[30][4]), (0, 0, 0, 'a'))
 
     def test_osk_labels_follow_the_layout(self):
         self.addCleanup(settings_restore)

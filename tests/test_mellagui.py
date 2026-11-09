@@ -3113,6 +3113,9 @@ class TestClients(Base):
 
     def osk(self, arg=''):
         """The control socket's `osk` answer: (head fields, {evdev code: (x, y, w, h, label, on)} of the keys)."""
+        if arg == 'open':                                                        # (the next test must find the keyboard closed and in its default place)
+            self.addCleanup(ctl.cmd, 'osk reset')
+            self.addCleanup(ctl.cmd, 'osk close')
         return self.osk_parse('\n'.join(ctl.cmd('osk %s' % arg if arg else 'osk')))
 
     @staticmethod
@@ -3191,6 +3194,55 @@ class TestClients(Base):
         self.assertEqual(self.read_file(path).strip(), b'b')
         self.chord(self.CTRL, self.K_Q)
         self.assertEqual(p.wait(timeout=5), 0)
+
+    def osk_card(self):
+        m = re.search(r'card x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', '\n'.join(ctl.cmd('osk')))
+        return tuple(int(v) for v in m.groups())
+
+    def test_osk_is_moved_by_its_top_strip_and_resized_by_its_right_and_bottom_margin(self):
+        self.osk('open')
+        x, y, w, h = self.osk_card()
+        ctl.abs(x + 40, y + 5)                                                   # the top strip moves it
+        ctl.button(272, True)
+        ctl.abs(x + 40 - 4, y + 5 - 120)
+        ctl.button(272, False)
+        time.sleep(0.1)
+        x2, y2, w2, h2 = self.osk_card()
+        self.assertEqual((x2, y2, w2, h2), (x - 4, y - 120, w, h))
+        ctl.abs(x2 + w2 - 4, y2 + h2 - 4)                                        # the corner resizes: wider and taller
+        ctl.button(272, True)
+        ctl.abs(x2 + w2 - 4 - 200, y2 + h2 - 4 + 40)
+        ctl.button(272, False)
+        time.sleep(0.1)
+        x3, y3, w3, h3 = self.osk_card()
+        self.assertEqual((x3, y3), (x2, y2))                                     # the top left corner stays
+        self.assertEqual(w3, w2 - 200)
+        self.assertGreater(h3, h2)
+        head, keys = self.osk()
+        self.assertGreater(keys[30][0], x3)                                      # the keys follow the card
+        self.assertLess(keys[28][0] + keys[28][2], x3 + w3)
+        ctl.abs(x3 + 40, y3 + 5)                                                 # it cannot be dragged off the screen
+        ctl.button(272, True)
+        ctl.abs(-500, -500)
+        ctl.button(272, False)
+        time.sleep(0.1)
+        x4, y4, w4, h4 = self.osk_card()
+        self.assertGreaterEqual(x4, 0)
+        self.assertGreaterEqual(y4, 0)
+        ctl.abs(x4 + w4 - 4, y4 + h4 - 4)                                        # and cannot be made smaller than its keys allow
+        ctl.button(272, True)
+        ctl.abs(x4 + 10, y4 + 10)
+        ctl.button(272, False)
+        time.sleep(0.1)
+        self.assertGreaterEqual(self.osk_card()[2], 240)
+        self.osk('close')
+        self.osk('open')
+        self.assertEqual(self.osk_card()[:2], (x4, y4))                          # it comes back where it was left
+        x5, y5 = self.osk_card()[:2]
+        ctl.click(x5 + 40, y5 + 5)                                               # a double click on the margin puts it back
+        ctl.click(x5 + 40, y5 + 5)
+        time.sleep(0.1)
+        self.assertEqual(self.osk_card(), (4, 600 - 260 - 6, 1016, 260))
 
     def test_osk_labels_follow_the_layout(self):
         self.addCleanup(settings_restore)
@@ -4000,6 +4052,41 @@ esac
 
 
 FAKES = os.path.join(ROOT, 'tests', 'fakes')
+
+
+class TestOskSaved(Base):
+    """The on-screen keyboard's place and size are kept in the gadgets file and used by the next run."""
+
+    def test_place_and_size_are_saved_and_a_reset_forgets_them(self):
+        path = os.path.join(tmp, 'gadgets-osk.conf')
+        if os.path.exists(path):
+            os.unlink(path)
+        p, c, stop = self.private_compositor('mellagui-osk1', '--gadgets-file', path)
+        c.cmd('osk open')
+        m = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(c.cmd('osk')))
+        x, y, w, h = map(int, m.groups())
+        c.abs(x + 40, y + 5)
+        c.button(272, True)
+        c.abs(x + 40, y - 95)                                                    # 100 px up
+        c.button(272, False)
+        c.abs(x + w - 4, y - 100 + h - 4)
+        c.button(272, True)
+        c.abs(x + w - 4 - 300, y - 100 + h - 4)                                  # 300 px narrower
+        c.button(272, False)
+        m = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(c.cmd('osk')))
+        placed = tuple(map(int, m.groups()))
+        self.assertEqual(placed[:3], (x, y - 100, w - 300))
+        lines = open(path).read().split('\n')[:-1]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith('keyboard %d %d %d ' % placed[:3]), lines)
+        p2, c2, stop2 = self.private_compositor('mellagui-osk2', '--gadgets-file', path)
+        c2.cmd('osk open')
+        m = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(c2.cmd('osk')))
+        self.assertEqual(tuple(map(int, m.groups())), placed)                    # the next run starts where it was left
+        c2.cmd('osk reset')
+        self.assertEqual(open(path).read(), '')                                  # the file forgets it
+        m = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(c2.cmd('osk')))
+        self.assertEqual(int(m.group(3)), w)                                     # the default width again
 
 
 class TestMixer(Base):

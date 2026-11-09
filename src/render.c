@@ -1701,9 +1701,24 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         sbg = 0x8fbcffu;
     fill_round(c, &p->sticky, 8, 0xff000000u | sbg);
     draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? 0x0b0d12u : COL_PANEL_TEXT);
-    uint32_t obg = p->osk_open ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_osk ? 30 : 18);
-    fill_round(c, &p->osk, 8, 0xff000000u | obg);
-    draw_text_centered(c, &p->osk, "Kbd", p->osk_open ? 0x0b0d12u : COL_PANEL_TEXT);
+    {                                                   /* the on-screen keyboard: a teal button with a little keyboard, white while it is showing */
+        uint32_t obg = p->osk_open ? 0xffffffu : p->hover_osk ? mix_rgb(panel_palette[4], 0xffffffu, 55) : panel_palette[4];
+        uint32_t ofg = p->osk_open ? panel_palette[4] : 0xffffffu;
+        fill_round(c, &p->osk, 8, 0xff000000u | obg);
+        int cx = p->osk.x + p->osk.w / 2, cy = p->osk.y + p->osk.h / 2, bx = cx - 11, by = cy - 6;
+        struct lm_rect body = lm_rect_make(bx, by, 22, 12);
+        fill_round(c, &body, 3, 0xff000000u | ofg);
+        for (int i = 0; i < 5; i++) {                   /* the keys are holes in the body: two rows and a space bar */
+            struct lm_rect k = lm_rect_make(bx + 3 + i * 4, by + 2, 2, 2);
+            fill_rect(c, &k, obg);
+        }
+        for (int i = 0; i < 4; i++) {
+            struct lm_rect k = lm_rect_make(bx + 5 + i * 4, by + 5, 2, 2);
+            fill_rect(c, &k, obg);
+        }
+        struct lm_rect bar = lm_rect_make(bx + 6, by + 8, 10, 2);
+        fill_rect(c, &bar, obg);
+    }
     fill_round(c, &p->run, 8, 0xff000000u | (p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN));
     draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
@@ -1716,13 +1731,23 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     }
 }
 
-/* The on-screen keyboard: a slightly transparent dark card with round (pill shaped) colourful keys, every row in its own colour, the
- * modifiers steel blue, Hide red. The key under the pointer is lighter, the one held down is nearly white, a latched modifier or Caps Lock
- * is lit and has a white rim. Single characters are drawn twice as big as the font when the keys are tall enough. */
+/* The on-screen keyboard, in the launcher's light glass: a white veil over whatever is below, round corners, pill shaped colourful keys (a colour
+ * per row, the modifiers steel blue, Hide red) with white text and a 1 px shadow. The key under the pointer is lighter, the one held down
+ * nearly white, a latched modifier or Caps Lock is lit and has a white rim. A small grip in the top strip (move) and in the bottom right
+ * corner (resize) shows where to take hold. Single characters are drawn twice as big as the font when the keys are tall enough. */
 static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
 {
     static const int row_col[5] = { 2, 0, 1, 3, 4 };
-    fill_round(c, &oi->rect, 18, 0xd2000000u | COL_PANEL);
+    fill_round(c, &oi->rect, 22, 0x8cffffffu);                                  /* the rim ... */
+    struct lm_rect in = lm_rect_make(oi->rect.x + 1, oi->rect.y + 1, oi->rect.w - 2, oi->rect.h - 2);
+    fill_round(c, &in, 21, 0x4cffffffu);                                        /* ... and the veil inside it, translucent all through */
+    struct lm_rect grip = lm_rect_make(oi->rect.x + oi->rect.w / 2 - 22, oi->rect.y + 8, 44, 5);
+    fill_round(c, &grip, 2, 0xb0ffffffu);
+    for (int k = 0; k < 3; k++) {                                               /* three dots along the diagonal of the bottom right corner */
+        int d = 4 + k * 4;
+        struct lm_rect dot = lm_rect_make(oi->rect.x + oi->rect.w - 6 - d, oi->rect.y + oi->rect.h - 6 - (8 - d + 4), 2, 2);
+        fill_rect(c, &dot, 0xffffffu);
+    }
     for (int i = 0; i < oi->n; i++) {
         const struct lm_rect *r = &oi->key[i].rect;
         uint32_t st = oi->key[i].state;
@@ -1730,20 +1755,20 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
         if (oi->key[i].kind == LM_OSK_HIDE)
             col = panel_palette[5];
         else if (oi->key[i].kind != LM_OSK_KEY)
-            col = 0x5a6a8au;
-        uint32_t bg = mix_rgb(COL_PANEL, col, 205);
+            col = 0x6b7a99u;
+        uint32_t bg = col;
         if (st & LM_OSK_KEY_HOVER)
-            bg = mix_rgb(bg, 0xffffffu, 45);
+            bg = mix_rgb(bg, 0xffffffu, 55);
         if (st & LM_OSK_KEY_ON)
-            bg = mix_rgb(col, 0xffffffu, 70);
+            bg = mix_rgb(col, 0xffffffu, 80);
         if (st & LM_OSK_KEY_DOWN)
-            bg = mix_rgb(col, 0xffffffu, 140);
+            bg = mix_rgb(col, 0xffffffu, 170);
         int rad = r->h / 2;
         if (st & LM_OSK_KEY_ON) {
             struct lm_rect rim = lm_rect_make(r->x - 2, r->y - 2, r->w + 4, r->h + 4);
-            fill_round(c, &rim, rad + 2, 0xf0ffffffu);
+            fill_round(c, &rim, rad + 2, 0xf4ffffffu);
         }
-        fill_round(c, r, rad, 0xf0000000u | bg);
+        fill_round(c, r, rad, 0xdc000000u | bg);
         uint32_t fg = (st & LM_OSK_KEY_DOWN) ? 0x0b0d12u : 0xffffffu;
         const char *t = oi->key[i].label;
         int chars = 0;

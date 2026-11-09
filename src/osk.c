@@ -39,22 +39,45 @@ static const struct { const struct spec *s; int n; } rows[5] = {
     { row4, (int)(sizeof(row4) / sizeof(row4[0])) },
 };
 
-#define PAD 8
+#define PAD 12                  /* the margin left, right and below the keys (the right and bottom ones resize) */
+#define TOP_PAD 22              /* above the keys: the strip to take hold of and move it, with a small grip drawn in it */
 #define GAP 4
 #define ROW_QUARTERS 60
+#define MIN_KH 24
+#define MAX_KH 96
 
-void lm_osk_geometry(const struct lm_rect *out, struct lm_osk_geo *g)
+int lm_osk_card_h(int kh) { return 5 * kh + 4 * GAP + TOP_PAD + PAD; }
+int lm_osk_kh_for_h(int h) { return LM_CLAMP((h - 4 * GAP - TOP_PAD - PAD) / 5, MIN_KH, MAX_KH); }
+int lm_osk_margin(void) { return PAD; }
+
+void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place, struct lm_osk_geo *g)
 {
     memset(g, 0, sizeof(*g));
-    int w = LM_MIN(out->w - 8, 1180);
-    if (w < 15 * 16 + 2 * PAD)
-        w = LM_MAX(out->w, 15 * 16 + 2 * PAD);
+    int min_w = 15 * 16 + 2 * PAD, w, kh;
+    bool dflt = !place || place->w <= 0;
+    if (dflt) {
+        w = LM_MIN(out->w - 8, 1180);
+        if (w < min_w)
+            w = LM_MAX(out->w, min_w);
+        kh = LM_CLAMP((w - 2 * PAD) / 15 * 65 / 100, 30, 56);
+    } else {
+        w = LM_CLAMP(place->w, LM_MIN(min_w, out->w), LM_MAX(out->w, 1));
+        kh = LM_CLAMP(place->kh, MIN_KH, MAX_KH);
+    }
+    int h = lm_osk_card_h(kh);
+    if (h > out->h) {                                   /* a small output: the keys get less tall */
+        kh = lm_osk_kh_for_h(out->h);
+        h = lm_osk_card_h(kh);
+    }
+    int x = dflt ? out->x + (out->w - w) / 2 : place->x;
+    int y = dflt ? out->y + out->h - h - 6 : place->y;
+    x = LM_CLAMP(x, out->x, LM_MAX(out->x + out->w - w, out->x));
+    y = LM_CLAMP(y, out->y, LM_MAX(out->y + out->h - h, out->y));
+    g->card = lm_rect_make(x, y, w, h);
+    g->kh = kh;
     int inner = w - 2 * PAD;
-    int kh = LM_CLAMP(inner / 15 * 65 / 100, 30, 56);
-    int h = 5 * kh + 4 * GAP + 2 * PAD;
-    g->card = lm_rect_make(out->x + (out->w - w) / 2, out->y + out->h - h - 6, w, h);
     for (int r = 0; r < 5; r++) {
-        int qx = 0, y = g->card.y + PAD + r * (kh + GAP);
+        int qx = 0, ky = g->card.y + TOP_PAD + r * (kh + GAP);
         for (int i = 0; i < rows[r].n && g->n < LM_OSK_MAX_KEYS; i++) {
             const struct spec *s = &rows[r].s[i];
             int x0 = g->card.x + PAD + inner * qx / ROW_QUARTERS;
@@ -63,7 +86,7 @@ void lm_osk_geometry(const struct lm_rect *out, struct lm_osk_geo *g)
             k->code = s->code;
             k->row = r;
             k->kind = s->kind;
-            k->rect = lm_rect_make(x0 + GAP / 2, y, LM_MAX(x1 - x0 - GAP, 1), kh);
+            k->rect = lm_rect_make(x0 + GAP / 2, ky, LM_MAX(x1 - x0 - GAP, 1), kh);
             qx += s->q;
         }
     }

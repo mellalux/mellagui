@@ -36,14 +36,27 @@ struct lm_osk_key {
     struct lm_rect rect;
 };
 
+/* Where the keyboard is and how big: the user drags and resizes it. w == 0 = the default (as wide as the output allows up to 1180 px,
+ * centred along the bottom); otherwise x / y is the card's top left corner, w its width and kh the height of one key row. */
+struct lm_osk_place {
+    int x, y, w, kh;
+};
+
 struct lm_osk_geo {
     struct lm_rect card;                    /* the whole keyboard, with its margin */
+    int kh;                                 /* the height of a key (the place to resize from) */
     int n;
     struct lm_osk_key key[LM_OSK_MAX_KEYS];
 };
 
-/* Lays the keys out along the bottom of `out` (the output's rectangle). The width follows the output (at most 1180 px). */
-void lm_osk_geometry(const struct lm_rect *out, struct lm_osk_geo *g);
+/* Lays the keys out inside `out` (the output's rectangle) at `place` (NULL = the default); the result is kept inside the output and
+ * its size within sane limits. */
+void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place, struct lm_osk_geo *g);
+/* The card's height for a key height, and the other way round (for resizing with the mouse). */
+int lm_osk_card_h(int kh);
+int lm_osk_kh_for_h(int h);
+/* The width of the strips along the edges of the card that move / resize it (nothing but margin there). */
+int lm_osk_margin(void);
 
 /* The modifier a latching kind stands for (LM_MOD_*), 0 for the others. */
 uint32_t lm_osk_kind_mod(enum lm_osk_kind kind);

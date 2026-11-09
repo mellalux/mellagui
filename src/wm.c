@@ -117,6 +117,12 @@ struct lm_wm {
     bool osk_open;              /* the on-screen keyboard is showing on the primary output */
     uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
     int osk_hover, osk_down;    /* the key under the pointer / held by it (index into the geometry), -1 = none */
+    struct lm_osk_place osk_pl;  /* where the user put it and how big (w == 0: the default) */
+    uint32_t osk_click_ms;      /* when the margin was last pressed (a double click resets the place) */
+    int osk_drag;               /* 0 = none, 1 = moving, 2 = resizing the keyboard with the pointer */
+    uint32_t osk_drag_edges;    /* LM_EDGE_RIGHT / LM_EDGE_BOTTOM while resizing */
+    int osk_press_x, osk_press_y;
+    struct lm_osk_place osk_start;   /* the place when the drag began */
     uint32_t osk_down_code, osk_down_mods;   /* what was pressed for the held key: its code and the latched modifiers pressed with it */
     bool power_open;            /* the session dialog (Lock / Exit) is showing on the output called power_out */
     char power_out[32];
@@ -665,6 +671,8 @@ static void gadgets_save(struct lm_wm *wm)
     for (int i = 0; i < LM_GADGET_COUNT; i++)
         if (wm->gad[i].placed)
             fprintf(f, "%s %d %d %d %d\n", gadget_names[i], wm->gad[i].x, wm->gad[i].y, wm->gad[i].w, wm->gad[i].h);
+    if (wm->osk_pl.w > 0)                                           /* the on-screen keyboard: top left corner, width and key height */
+        fprintf(f, "keyboard %d %d %d %d\n", wm->osk_pl.x, wm->osk_pl.y, wm->osk_pl.w, wm->osk_pl.kh);
     bool ok = !ferror(f);
     if (fclose(f) != 0)
         ok = false;
@@ -685,6 +693,15 @@ static void gadgets_load(struct lm_wm *wm)
         int x, y, w, h;
         if (sscanf(line, "%23s %d %d %d %d", name, &x, &y, &w, &h) != 5)
             continue;
+        if (!strcmp(name, "keyboard")) {                            /* (clamped to the output and to the size limits when it is laid out) */
+            if (abs(x) <= 20000 && abs(y) <= 20000 && w > 0 && w <= 20000 && h > 0 && h <= 1000) {
+                wm->osk_pl.x = x;
+                wm->osk_pl.y = y;
+                wm->osk_pl.w = w;
+                wm->osk_pl.kh = h;
+            }
+            continue;
+        }
         for (int i = 0; i < LM_GADGET_COUNT; i++) {
             if (strcmp(name, gadget_names[i]))
                 continue;
@@ -1825,7 +1842,7 @@ static bool osk_geo(const struct lm_wm *wm, struct lm_osk_geo *g)
     if (!o)
         return false;
     struct lm_rect r = lm_output_rect(o);
-    lm_osk_geometry(&r, g);
+    lm_osk_geometry(&r, &wm->osk_pl, g);
     return true;
 }
 
@@ -1904,6 +1921,7 @@ static void osk_set(struct lm_wm *wm, bool open)
         wm->osk_latched = 0;
         wm->hover_osk = false;
         wm->osk_hover = -1;
+        wm->osk_drag = 0;
     }
     osk_damage(wm);
 }
@@ -1942,12 +1960,82 @@ static bool osk_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out
         return false;
     out->kind = LM_PICK_OSK;
     out->rect = g.card;
+    int m = lm_osk_margin();
+    uint32_t edges = 0;                                         /* the right and the bottom margin resize (both: the corner) */
+    if (ix >= g.card.x + g.card.w - m)
+        edges |= LM_EDGE_RIGHT;
+    if (iy >= g.card.y + g.card.h - m)
+        edges |= LM_EDGE_BOTTOM;
+    if (edges) {
+        out->kind = LM_PICK_OSK_GRIP;
+        out->edges = edges;
+        return true;
+    }
     for (int i = 0; i < g.n; i++)
         if (lm_rect_contains(&g.key[i].rect, ix, iy)) {
             out->kind = LM_PICK_OSK_KEY;
             out->index = i;
         }
     return true;
+}
+
+/* Dragging the keyboard: its margin moves it, its right / bottom margin resizes it (the top left corner stays where it is). The place is
+ * pinned at the first press, so from then on it stays where the user put it. */
+static void osk_drag_begin(struct lm_wm *wm, int kind, uint32_t edges)
+{
+    struct lm_osk_geo g;
+    if (!osk_geo(wm, &g) || !wm->srv->seat)
+        return;
+    osk_release(wm);
+    wm->osk_start.x = g.card.x;
+    wm->osk_start.y = g.card.y;
+    wm->osk_start.w = g.card.w;
+    wm->osk_start.kh = g.kh;
+    wm->osk_pl = wm->osk_start;
+    wm->osk_drag = kind;
+    wm->osk_drag_edges = edges;
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    wm->osk_press_x = (int)px;
+    wm->osk_press_y = (int)py;
+}
+
+static void osk_drag_motion(struct lm_wm *wm)
+{
+    if (!wm->osk_drag || !wm->srv->seat || !wm->osk_open)
+        return;
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    int dx = (int)px - wm->osk_press_x, dy = (int)py - wm->osk_press_y;
+    struct lm_osk_place p = wm->osk_start;
+    if (wm->osk_drag == 1) {
+        p.x += dx;
+        p.y += dy;
+    } else {
+        if (wm->osk_drag_edges & LM_EDGE_RIGHT)
+            p.w += dx;
+        if (wm->osk_drag_edges & LM_EDGE_BOTTOM)
+            p.kh = lm_osk_kh_for_h(lm_osk_card_h(wm->osk_start.kh) + dy);
+    }
+    osk_damage(wm);                                             /* the old place ... */
+    wm->osk_pl = p;
+    struct lm_osk_geo g;
+    if (osk_geo(wm, &g)) {                                      /* ... the new one, kept inside the output and within the size limits */
+        wm->osk_pl.x = g.card.x;
+        wm->osk_pl.y = g.card.y;
+        wm->osk_pl.w = g.card.w;
+        wm->osk_pl.kh = g.kh;
+    }
+    osk_damage(wm);
+}
+
+void lm_wm_osk_reset(struct lm_wm *wm)
+{
+    osk_damage(wm);
+    memset(&wm->osk_pl, 0, sizeof(wm->osk_pl));
+    wm->osk_drag = 0;
+    osk_damage(wm);
+    gadgets_save(wm);
 }
 
 void lm_wm_osk_set(struct lm_wm *wm, bool open) { osk_set(wm, open); }
@@ -3558,6 +3646,7 @@ static enum lm_cursor_shape cursor_for_edges(uint32_t e)
 
 void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
 {
+    osk_drag_motion(wm);
     dock_drag_motion(wm);
     launcher_drag_motion(wm);
     struct lm_window *hw = NULL;
@@ -3593,6 +3682,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_OSK: osk_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_OSK_KEY: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_OSK: shape = LM_CURSOR_MOVE; break;
+    case LM_PICK_OSK_GRIP: shape = cursor_for_edges(pick->edges); break;
     case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_TASK: task = pick->window; shape = LM_CURSOR_POINTER; break;
     default: break;
@@ -4110,9 +4201,23 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         osk_release(wm);
         return true;
     }
-    if (pick->kind == LM_PICK_OSK_KEY || pick->kind == LM_PICK_OSK) {
-        if (pressed && pick->kind == LM_PICK_OSK_KEY && button == BTN_LEFT)
-            osk_press(wm, pick->index);
+    if (!pressed && wm->osk_drag && button == BTN_LEFT) {        /* the keyboard was moved / resized: remember where it is */
+        wm->osk_drag = 0;
+        gadgets_save(wm);
+        return true;
+    }
+    if (pick->kind == LM_PICK_OSK_KEY || pick->kind == LM_PICK_OSK || pick->kind == LM_PICK_OSK_GRIP) {
+        if (pressed && button == BTN_LEFT) {
+            if (pick->kind == LM_PICK_OSK_KEY) {
+                osk_press(wm, pick->index);
+            } else if (pick->kind == LM_PICK_OSK && time_ms - wm->osk_click_ms < 400 && wm->osk_pl.w > 0) {
+                wm->osk_click_ms = 0;                            /* a double click on the margin puts it back to its default place and size */
+                lm_wm_osk_reset(wm);
+            } else {
+                wm->osk_click_ms = pick->kind == LM_PICK_OSK ? time_ms : 0;
+                osk_drag_begin(wm, pick->kind == LM_PICK_OSK ? 1 : 2, pick->edges);
+            }
+        }
         return true;                                            /* the keyboard never moves the focus and nothing under it gets the click */
     }
     if (pick->kind == LM_PICK_POWER_BUTTON || pick->kind == LM_PICK_POWER_CARD || pick->kind == LM_PICK_POWER_BACKDROP) {

@@ -279,7 +279,8 @@ enum lm_pick_kind {
     LM_PICK_POWER_BACKDROP, /* anything else while the session dialog is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_OSK,      /* the panel's on-screen keyboard button: shows / hides the keyboard */
     LM_PICK_OSK_KEY,        /* a key of the on-screen keyboard (`index` = key) */
-    LM_PICK_OSK,            /* the on-screen keyboard between its keys: swallows the click */
+    LM_PICK_OSK,            /* the on-screen keyboard between its keys (its top strip, the left margin, the gaps): drag to move it */
+    LM_PICK_OSK_GRIP,       /* its right / bottom margin (`edges` = LM_EDGE_RIGHT / LM_EDGE_BOTTOM, both in the corner): drag to resize it */
     LM_PICK_PANEL_LAYOUT,   /* keyboard layout indicator: left click = next layout, right click = previous */
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
@@ -679,6 +680,9 @@ size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
 /* The on-screen keyboard (panel button, key action `osk`, control socket `osk`). */
 void lm_wm_osk_set(struct lm_wm *wm, bool open);
 bool lm_wm_osk_is_open(const struct lm_wm *wm);
+/* Back to the default place and size (a double click on its margin, control socket `osk reset`); the saved place is forgotten. The place
+ * the user gave it is kept in the gadgets file (`keyboard x y w kh`, --gadgets-file). */
+void lm_wm_osk_reset(struct lm_wm *wm);
 /* Control socket `osk`: "osk open=<0|1> latched=<LM_MOD_* mask> n=<keys>" and, while open, "card x= y= w= h=" and one
  * "key <i> code=<evdev> kind=<k> x= y= w= h= label=<text>" line per key. */
 size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size);

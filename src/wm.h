@@ -74,6 +74,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "list.h"
+#include "osk.h"
 #include "metrics.h"
 #include "lock.h"
 #include "server.h"
@@ -276,6 +277,9 @@ enum lm_pick_kind {
     LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
     LM_PICK_POWER_CARD,     /* the session dialog's card (between its buttons) */
     LM_PICK_POWER_BACKDROP, /* anything else while the session dialog is open: a click closes it, nothing below gets it */
+    LM_PICK_PANEL_OSK,      /* the panel's on-screen keyboard button: shows / hides the keyboard */
+    LM_PICK_OSK_KEY,        /* a key of the on-screen keyboard (`index` = key) */
+    LM_PICK_OSK,            /* the on-screen keyboard between its keys: swallows the click */
     LM_PICK_PANEL_LAYOUT,   /* keyboard layout indicator: left click = next layout, right click = previous */
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
@@ -397,6 +401,9 @@ struct lm_panel_info {
     bool about_open;                /* the About dialog is open: the logo button shows it */
     struct lm_rect caps;            /* Caps / Num Lock indicator; zero width while no lock is on */
     char caps_text[8];              /* "CAPS", "NUM" or "CAPS+N" */
+    struct lm_rect osk;             /* the on-screen keyboard button, left of the layout indicator */
+    bool hover_osk;
+    bool osk_open;                  /* the keyboard is showing: the button is lit */
     struct lm_rect layout;          /* keyboard layout indicator */
     bool hover_layout;
     char layout_text[8];            /* "US", "EE" ... */
@@ -429,6 +436,26 @@ struct lm_power_info {
     struct lm_rect button[2];       /* the squares the round buttons are drawn in: [0] Lock, [1] Exit */
     struct lm_rect hit[2];          /* what a click counts for: the button and its label below */
     int sel;                        /* highlighted button (pointer or keyboard), -1 none */
+};
+
+/*
+ * The on-screen keyboard (osk.h): not modal, it floats along the bottom of the primary output above windows and the dock and never takes
+ * the focus; keys are injected like a real keyboard's.
+ */
+#define LM_OSK_KEY_HOVER 1u
+#define LM_OSK_KEY_DOWN 2u          /* held by the pointer */
+#define LM_OSK_KEY_ON 4u            /* a latched Shift / Ctrl / Alt / AltGr, or Caps Lock is on */
+
+struct lm_osk_info {
+    struct lm_rect rect;            /* the card */
+    int n;
+    struct {
+        struct lm_rect rect;
+        char label[LM_OSK_LABEL * 4];
+        uint32_t state;             /* LM_OSK_KEY_* */
+        int kind;                   /* enum lm_osk_kind */
+        int row;                    /* 0 = number row ... 4 = bottom row (the colour) */
+    } key[LM_OSK_MAX_KEYS];
 };
 
 /*
@@ -582,6 +609,7 @@ enum lm_scene_kind {
     LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
     LM_SCENE_ABOUT,                 /* the About dialog (same place as the session dialog; the two are never open together) */
     LM_SCENE_LAUNCHER,              /* the launcher dialog (same place, never open together with the others) */
+    LM_SCENE_OSK,                   /* the on-screen keyboard (above the dialogs, so it can type into the launcher's form) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
@@ -601,6 +629,7 @@ struct lm_scene_item {
         struct lm_about_info about; /* LM_SCENE_ABOUT */
         struct lm_launcher_info launcher; /* LM_SCENE_LAUNCHER */
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
+        struct lm_osk_info osk;     /* LM_SCENE_OSK */
         struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
@@ -646,6 +675,13 @@ bool lm_wm_launcher_is_open(const struct lm_wm *wm);
 /* Control socket `launcher`: "launcher open=<0|1> edit=<0|1> form=<0|1> n=<icons> sel=<i>" and, while open, "card x= y= w= h=", one
  * "icon <i> "<name>" x= y= w= h= remove=x,y add=x,y,w,h"-style line each (see the function), then the buttons. */
 size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
+
+/* The on-screen keyboard (panel button, key action `osk`, control socket `osk`). */
+void lm_wm_osk_set(struct lm_wm *wm, bool open);
+bool lm_wm_osk_is_open(const struct lm_wm *wm);
+/* Control socket `osk`: "osk open=<0|1> latched=<LM_MOD_* mask> n=<keys>" and, while open, "card x= y= w= h=" and one
+ * "key <i> code=<evdev> kind=<k> x= y= w= h= label=<text>" line per key. */
+size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The clipboard card's view: the first history entry it shows and how many entries fit (control socket `clip`). */
 void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);

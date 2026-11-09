@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock;
+    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, osk;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
@@ -67,6 +67,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->switcher);
     gl_chrome_free(r, &go->power);
     gl_chrome_free(r, &go->dock);
+    gl_chrome_free(r, &go->osk);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
@@ -188,6 +189,7 @@ static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
 static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power(c, it); }
 static void gl_do_dock(const struct paint_ctx *c, const void *it) { paint_dock(c, it); }
+static void gl_do_osk(const struct paint_ctx *c, const void *it) { paint_osk(c, it); }
 static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
 
 static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
@@ -569,6 +571,19 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             }
             if (ch->tex)
                 gl_tex_at(p, ch->tex, &pw->rect, false);
+        }
+        break;
+    case LM_SCENE_OSK:
+        if (item->output == p->st->out) {               /* translucent and independent of what is below: redrawn only when it changes */
+            const struct lm_osk_info *oi = &item->u.osk;
+            struct gl_chrome *ch = &p->go->osk;
+            uint64_t h = fnv(1469598103934665603ull, oi, sizeof(*oi));
+            if (!ch->tex || ch->hash != h || ch->w != oi->rect.w || ch->h != oi->rect.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &oi->rect, gl_do_osk, oi);
+                ch->hash = h;
+            }
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &oi->rect, false);
         }
         break;
     case LM_SCENE_SWITCHER:

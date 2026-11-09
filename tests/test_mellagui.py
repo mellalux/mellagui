@@ -2397,6 +2397,44 @@ class TestClients(Base):
         time.sleep(0.5)
         self.assertEqual(self.read_file(os.path.join(d, 'sub', 'a.txt')), b'text a\n')
 
+    def trash_one_file(self, d, name):
+        """Makes d/name, shows it (Ctrl+R), puts the cursor on it (its first letter) and sends it to the trash with F8, Enter."""
+        with open(os.path.join(d, name), 'wb') as f:
+            f.write(b'restore me\n')
+        self.chord(self.CTRL, 19)                              # Ctrl+R: read the folder again
+        time.sleep(0.3)
+        ctl.tap(self.LETTERS[name[0]])
+        ctl.tap(self.FKEYS[8])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(os.path.join(d, name)))
+        trash = os.path.join(os.environ['XDG_DATA_HOME'], 'Trash')
+        self.assertTrue(os.path.exists(os.path.join(trash, 'files', name)))
+        return trash
+
+    def test_files_trash_and_restore_with_keys(self):
+        p, d = self.files_start()
+        trash = self.trash_one_file(d, 'zz_back_keys.txt')
+        self.chord(self.CTRL, 48)                              # Ctrl+B: the trash
+        self.wait_title('mellagui.files', 'files - Files')
+        ctl.tap(self.LETTERS['z'])
+        self.chord(self.CTRL, 44)                              # Ctrl+Z: put it back
+        time.sleep(0.6)
+        self.assertEqual(self.read_file(os.path.join(d, 'zz_back_keys.txt')), b'restore me\n')
+        self.assertFalse(os.path.exists(os.path.join(trash, 'files', 'zz_back_keys.txt')))
+        self.assertFalse(os.path.exists(os.path.join(trash, 'info', 'zz_back_keys.txt.trashinfo')))
+
+    def test_files_trash_and_restore_buttons(self):
+        p, d = self.files_start()
+        win = wait_for_window('mellagui.files')
+        trash = self.trash_one_file(d, 'zz_back_buttons.txt')
+        ctl.click(win['x'] + 380, win['y'] + 15)               # the Trash button (x 354..414)
+        self.wait_title('mellagui.files', 'files - Files')
+        ctl.tap(self.LETTERS['z'])
+        ctl.click(win['x'] + 450, win['y'] + 15)               # the Restore button (x 420..496)
+        time.sleep(0.6)
+        self.assertEqual(self.read_file(os.path.join(d, 'zz_back_buttons.txt')), b'restore me\n')
+
     def test_files_marked_files_move_together_and_nothing_is_replaced(self):
         p, d = self.files_start()
         sub = os.path.join(d, 'sub')

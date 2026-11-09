@@ -7,8 +7,8 @@
  * state (open, latched modifiers, the key held) and injects the keys through the input module, so they pass the same
  * modifier tracking, shortcuts and sticky keys as a real keyboard.
  *
- * Five rows of 15 units (a unit = 4 quarters): number row, Tab row, Caps row, Shift row, and a bottom row with Hide,
- * Esc, Ctrl, Alt, Space, AltGr and the arrows. The labels come from lm_keymap_keysym(), so Estonian shows õ ä ö ü, German
+ * Six rows of 15 units (a unit = 4 quarters): Esc, F1..F12 and Del, number row, Tab row, Caps row, Shift row, and a bottom row with Hide,
+ * Ctrl, Alt, Space, AltGr and the arrows. The labels come from lm_keymap_keysym(), so Estonian shows õ ä ö ü, German
  * ß and so on; Shift / AltGr change them while they are latched.
  */
 
@@ -26,12 +26,13 @@ enum lm_osk_kind {
     LM_OSK_HIDE,        /* closes the keyboard */
 };
 
+#define LM_OSK_ROWS 6
 #define LM_OSK_MAX_KEYS 80
 #define LM_OSK_LABEL 8
 
 struct lm_osk_key {
     uint32_t code;      /* evdev KEY_* (0 for Hide) */
-    int row;            /* 0 = number row ... 4 = bottom row */
+    int row;            /* 0 = Esc, F1..F12 ... 5 = bottom row */
     enum lm_osk_kind kind;
     struct lm_rect rect;
 };

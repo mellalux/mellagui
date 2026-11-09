@@ -1331,6 +1331,7 @@ void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g)
     struct lm_rect ng = *g;
     if (ng.w < 1 || ng.h < 1)
         return;
+    bool resized = w->mapped && (w->width != ng.w || w->height != ng.h);
     w->geometry = ng;
     w->width = ng.w;
     w->height = ng.h;
@@ -1339,6 +1340,25 @@ void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g)
             w->x = wm->grab_x + wm->grab_w - w->width;
         if (wm->grab_edges & LM_EDGE_TOP)
             w->y = wm->grab_y + wm->grab_h - w->height;
+    } else if (resized && !(w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN)) && !w->parent) {
+        /* A floating window that made itself bigger (a terminal zooming its font) must not stick out of the screen:
+         * it moves back inside, and when it is bigger than the usable area it is asked to shrink to fit. */
+        struct lm_rect ua;
+        lm_wm_usable_area(wm, w->x + w->width / 2, w->y + w->height / 2, &ua);
+        int32_t fw = LM_MIN(w->width, ua.w - 2 * LM_BORDER_WIDTH);
+        int32_t fh = LM_MIN(w->height, ua.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH);
+        if (w->x + w->width + LM_BORDER_WIDTH > ua.x + ua.w)
+            w->x = ua.x + ua.w - LM_MIN(w->width, fw) - LM_BORDER_WIDTH;
+        if (w->y + w->height + LM_BORDER_WIDTH > ua.y + ua.h)
+            w->y = ua.y + ua.h - LM_MIN(w->height, fh) - LM_BORDER_WIDTH;
+        if (w->x < ua.x + LM_BORDER_WIDTH)
+            w->x = ua.x + LM_BORDER_WIDTH;
+        if (w->y < ua.y + LM_TITLEBAR_HEIGHT)
+            w->y = ua.y + LM_TITLEBAR_HEIGHT;
+        if (fw != w->width || fh != w->height) {
+            clamp_size(w, &fw, &fh);
+            send_configure(wm, w, fw, fh);
+        }
     }
     if (w->mapped) {
         damage_rect(wm, &before);

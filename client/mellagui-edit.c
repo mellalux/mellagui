@@ -7,9 +7,13 @@
  * Keys: arrows, Home / End, PageUp / PageDown, Ctrl+Left / Right (words), Ctrl+Home / End; Shift extends the selection;
  * Ctrl+A select all, Ctrl+C / X / V clipboard, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+S save, Ctrl+Shift+S save as, Ctrl+O open,
  * Ctrl+N new, Ctrl+F find (Enter / F3 next), Ctrl+G go to line, Ctrl+Q quit (twice to discard changes), Esc clears the
- * message / selection. Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
+ * message / selection, F1 help, Ctrl+= / Ctrl+- / Ctrl+0 (or Ctrl+wheel, or the A- / A+ buttons) zoom the text 50..500 % like the
+ * terminal and the window grows with it (kept in $XDG_CONFIG_HOME/mellagui/editor.conf). A button bar (New, Open, Save, Save as, Find, Help) does the same with the mouse. The Open
+ * and Save as prompts start in the folder of the current file, accept ~/ and relative names, and Tab completes names.
+ * Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
  * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <fcntl.h>
@@ -26,12 +30,14 @@
 #include "font.h"
 #include "keymap.h"
 #include "protocol.h"
+#include "uikit.h"
 #include "util.h"
 #include "wlwin.h"
 
 #define MAX_FILE (8u << 20)
 #define TAB_W 4
 #define STATUS_H 20
+#define TOP_H (LM_FONT_H + 8)           /* button bar above the text */
 #define UNDO_MAX 64
 #define COL_BG (lm_theme.background)
 #define COL_FG (lm_theme.text_soft)
@@ -75,6 +81,14 @@ struct app {
     char msg[200];
     int64_t msg_until;
     bool quit_armed;
+    int pfresh;                         /* prompt text is a suggestion: 1 = a folder (typing "/" or "~" replaces it), 2 = a file name (any typing replaces it) */
+    bool ow_armed;                      /* "file exists" was shown, the next Enter overwrites */
+    bool help;                          /* the key list is on screen */
+    int hover;                          /* button under the pointer, -1 = none */
+    int zoom;                           /* text size in percent (LM_ZOOM_LEVELS); the button bar, status line and prompts keep their size */
+    struct lm_zoomtab zt;               /* the cell size and font weights for it */
+    bool conf_dirty;                    /* the zoom changed and is not in editor.conf yet */
+    int64_t conf_time;
     struct snap undo[UNDO_MAX], redo[UNDO_MAX];
     int nundo, nredo;
     bool typing_run;                    /* the last change was typing: the next typed character joins its undo step */
@@ -570,6 +584,113 @@ static void do_open(struct app *a, const char *path)
     a->quit_armed = false;
 }
 
+
+/* ---- file names in the prompts ------------------------------------------------------------------------------------------- */
+
+/* The folder relative names are taken from: the folder of the current file, else the working directory (always absolute). */
+static void base_dir(const struct app *a, char *out, size_t sz)
+{
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)))
+        snprintf(cwd, sizeof(cwd), "/");
+    const char *sl = a->path[0] ? strrchr(a->path, '/') : NULL;
+    if (!sl) {
+        snprintf(out, sz, "%s", cwd);
+    } else if (a->path[0] == '/') {
+        snprintf(out, sz, "%.*s", (int)(sl == a->path ? 1 : sl - a->path), a->path);
+    } else {
+        snprintf(out, sz, "%.*s/%.*s", (int)(sizeof(cwd) / 2), cwd, (int)(sl - a->path), a->path);
+    }
+}
+
+/* "~/x" is in the home folder, "/x" is absolute, anything else is relative to `base`. */
+static void resolve_path(const char *base, const char *text, char *out, size_t sz)
+{
+    const char *home = getenv("HOME");
+    if (text[0] == '~' && (text[1] == '/' || !text[1]) && home && home[0])
+        snprintf(out, sz, "%s%s", home, text + 1);
+    else if (text[0] == '/')
+        snprintf(out, sz, "%s", text);
+    else
+        snprintf(out, sz, "%s%s%s", base, base[1] ? "/" : "", text);
+}
+
+struct cand {
+    char *name;
+    bool dir;
+};
+
+static int cand_cmp(const void *x, const void *y)
+{
+    return strcmp(((const struct cand *)x)->name, ((const struct cand *)y)->name);
+}
+
+/*
+ * Tab in a file prompt. The last name in `buf` is completed as far as all candidates agree (`extend`; without it only
+ * the list is made). `list` gets the candidates (folders with a trailing "/"). Returns how many there are.
+ * A single candidate is completed fully, a folder with its "/".
+ */
+static int complete_path(const char *base, char *buf, size_t bufsz, bool extend, char *list, size_t listsz)
+{
+    list[0] = 0;
+    if (!strcmp(buf, "~") && getenv("HOME")) {
+        snprintf(buf, bufsz, "~/");
+        return 1;
+    }
+    char full[PATH_MAX], dir[PATH_MAX];
+    resolve_path(base, buf, full, sizeof(full));
+    char *slash = strrchr(full, '/');
+    if (!slash)
+        return 0;
+    snprintf(dir, sizeof(dir), "%.*s", (int)(slash == full ? 1 : slash - full), full);
+    const char *pre = slash + 1;
+    size_t pl = strlen(pre);
+    DIR *d = opendir(dir);
+    if (!d)
+        return 0;
+    struct cand c[512];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < 512) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        if (e->d_name[0] == '.' && !(pl > 0 && pre[0] == '.'))          /* hidden names only when a dot was typed */
+            continue;
+        if (strncmp(e->d_name, pre, pl) != 0)
+            continue;
+        char p[PATH_MAX + 300];
+        struct stat st;
+        snprintf(p, sizeof(p), "%s%s%s", dir, dir[1] ? "/" : "", e->d_name);
+        c[n].dir = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+        c[n++].name = strdup(e->d_name);
+    }
+    closedir(d);
+    qsort(c, (size_t)n, sizeof(c[0]), cand_cmp);
+    size_t used = 0;
+    for (int i = 0; i < n && used + 4 < listsz; i++)
+        used += (size_t)snprintf(list + used, listsz - used, "%s%s%s", i ? "  " : "", c[i].name, c[i].dir ? "/" : "");
+    if (n > 0 && extend) {
+        size_t common = strlen(c[0].name);
+        for (int i = 1; i < n; i++) {
+            size_t k = 0;
+            while (k < common && c[i].name[k] == c[0].name[k])
+                k++;
+            common = k;
+        }
+        while (common > pl && (c[0].name[common] & 0xc0) == 0x80)       /* do not cut a UTF-8 character */
+            common--;
+        const char *last = strrchr(buf, '/');
+        size_t keep = last ? (size_t)(last - buf) + 1 : 0;
+        char out[512];
+        snprintf(out, sizeof(out), "%.*s%.*s%s", (int)keep, buf, (int)common, c[0].name, n == 1 && c[0].dir ? "/" : "");
+        if (strlen(out) < bufsz)
+            snprintf(buf, bufsz, "%s", out);
+    }
+    for (int i = 0; i < n; i++)
+        free(c[i].name);
+    return n;
+}
+
 /* ---- find ---------------------------------------------------------------------------------------------------------------- */
 
 /* The next occurrence of `needle` starting at or after (y, x), wrapping around the document once. */
@@ -859,18 +980,183 @@ static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
 
 /* ---- keys ----------------------------------------------------------------------------------------------------------------- */
 
-static void prompt_open(struct app *a, int kind, const char *initial)
+static void prompt_open(struct app *a, int kind, const char *initial, int fresh)
 {
     a->prompt = kind;
     snprintf(a->pbuf, sizeof(a->pbuf), "%.511s", initial);
+    a->pfresh = fresh;
+    a->ow_armed = false;
     a->win.redraw = true;
+}
+
+/* A folder name with a closing "/" (but "/" stays "/"). */
+static void dir_slash(const char *dir, char *out, size_t sz)
+{
+    snprintf(out, sz, "%s%s", dir, dir[0] && dir[strlen(dir) - 1] == '/' ? "" : "/");
+}
+
+/* ---- commands (keys and buttons) */
+
+static void cmd_open(struct app *a)
+{
+    char base[PATH_MAX], init[PATH_MAX + 2];
+    base_dir(a, base, sizeof(base));
+    dir_slash(base, init, sizeof(init));
+    prompt_open(a, P_OPEN, init, 1);
+    msg(a, "Type a name (Tab completes), or a folder to look inside; Enter opens, Esc cancels");
+}
+
+static void cmd_save(struct app *a, bool as)
+{
+    if (as || !a->path[0]) {
+        char base[PATH_MAX], init[PATH_MAX + 2];
+        base_dir(a, base, sizeof(base));
+        if (a->path[0]) {
+            prompt_open(a, P_SAVEAS, a->path, 2);
+        } else {
+            dir_slash(base, init, sizeof(init));
+            prompt_open(a, P_SAVEAS, init, 1);
+        }
+        msg(a, "Type a file name (Tab completes); Enter saves, Esc cancels");
+    } else {
+        do_save(a, a->path);
+    }
+    set_title(a);
+}
+
+static void cmd_new(struct app *a)
+{
+    if (a->modified && !a->quit_armed) {
+        a->quit_armed = true;
+        msg(a, "Unsaved changes: save first (Ctrl+S), or start a new document again to discard them");
+        return;
+    }
+    doc_clear(a);
+    a->path[0] = 0;
+    a->modified = a->quit_armed = false;
+    a->final_nl = true;
+    a->crlf = false;
+    set_title(a);
+}
+
+static void cmd_find(struct app *a)
+{
+    prompt_open(a, P_FIND, a->find, 0);
+}
+
+/* ---- zoom ------------------------------------------------------------------------------------------------------------------- */
+
+static int gutter_w(const struct app *a);
+
+/* The text gets bigger or smaller; the window follows (the same number of columns and rows stay visible). A maximized
+ * window keeps its size and shows more or fewer columns and rows instead. */
+static void set_zoom_pct(struct app *a, int pct)
+{
+    pct = LM_CLAMP(pct, LM_ZOOM_LEVELS[0], LM_ZOOM_LEVELS[LM_N_ZOOM - 1]);
+    if (pct == a->zoom)
+        return;
+    a->zoom = pct;
+    lm_zoom_build(&a->zt, pct);
+    a->conf_dirty = true;
+    a->conf_time = now_ms();
+    if (a->rows_visible > 0 && a->cols_visible > 0) {
+        int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
+        wlwin_request_size(&a->win, gutter_w(a) + a->cols_visible * a->zt.cw, TOP_H + a->rows_visible * a->zt.ch + bars);
+    }
+    a->win.redraw = true;
+}
+
+static void set_zoom(struct app *a, int delta)
+{
+    set_zoom_pct(a, lm_zoom_step(a->zoom, delta));
+}
+
+enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, N_BTNS };
+
+static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
+{
+    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Find", "A-", "", "A+", "Help" };
+    if (i == B_ZOOM) {
+        snprintf(buf, n, "%d%%", a->zoom);
+        return buf;
+    }
+    return l[i];
+}
+
+/* Where button i is (x, width). A button that does not fit in the window width is left out (from the right), so a narrow
+ * window shows the first buttons whole and never draws over the edge: its width is 0 then. */
+static void btn_rect(const struct app *a, int i, int *x, int *w)
+{
+    char tmp[16];
+    int bx = 6;
+    for (int k = 0; k < i; k++) {
+        int chars = k == B_ZOOM ? 4 : (int)strlen(btn_label(a, k, tmp, sizeof(tmp)));
+        bx += chars * LM_FONT_W + 16 + 4;
+    }
+    int chars = i == B_ZOOM ? 4 : (int)strlen(btn_label(a, i, tmp, sizeof(tmp)));
+    *x = bx;
+    *w = chars * LM_FONT_W + 16;
+    if (a->win.bw > 0 && bx + *w + 6 > a->win.bw)
+        *w = 0;
+}
+
+static int btn_at(const struct app *a, double px, double py)
+{
+    if (py < 2 || py >= TOP_H - 2)
+        return -1;
+    for (int i = 0; i < N_BTNS; i++) {
+        int x, w;
+        btn_rect(a, i, &x, &w);
+        if (w > 0 && px >= x && px < x + w)
+            return i;
+    }
+    return -1;
+}
+
+static void do_button(struct app *a, int i)
+{
+    switch (i) {
+    case B_NEW: cmd_new(a); break;
+    case B_OPEN: cmd_open(a); break;
+    case B_SAVE: cmd_save(a, false); break;
+    case B_SAVEAS: cmd_save(a, true); break;
+    case B_FIND: cmd_find(a); break;
+    case B_SMALLER: set_zoom(a, -1); break;
+    case B_ZOOM: set_zoom(a, 0); break;                                 /* the size shown: a click goes back to 100 % */
+    case B_BIGGER: set_zoom(a, 1); break;
+    case B_HELP: a->help = true; break;
+    }
+    a->win.redraw = true;
+}
+
+/* A folder was named: go into it, showing what is inside. */
+static void prompt_enter_dir(struct app *a, const char *base)
+{
+    char tmp[512], list[160];
+    dir_slash(a->pbuf, tmp, sizeof(tmp));
+    snprintf(a->pbuf, sizeof(a->pbuf), "%s", tmp);
+    int n = complete_path(base, a->pbuf, sizeof(a->pbuf), false, list, sizeof(list));
+    if (n > 0)
+        msg(a, "%d here: %s", n, list);
+    else
+        msg(a, "An empty folder");
+    a->pfresh = 0;
 }
 
 static void prompt_accept(struct app *a)
 {
     int kind = a->prompt;
-    char text[512];
+    char text[512], base[PATH_MAX], full[PATH_MAX];
     snprintf(text, sizeof(text), "%s", a->pbuf);
+    base_dir(a, base, sizeof(base));
+    resolve_path(base, text, full, sizeof(full));
+    struct stat st;
+    bool is_dir = (kind == P_OPEN || kind == P_SAVEAS) && text[0] && stat(full, &st) == 0 && S_ISDIR(st.st_mode);
+    if (is_dir) {                                                       /* Enter on a folder looks inside it */
+        prompt_enter_dir(a, base);
+        a->win.redraw = true;
+        return;
+    }
     switch (kind) {
     case P_OPEN:
         a->prompt = P_NONE;
@@ -881,13 +1167,22 @@ static void prompt_accept(struct app *a)
             return;
         }
         if (text[0])
-            do_open(a, text);
+            do_open(a, full);
         break;
-    case P_SAVEAS:
+    case P_SAVEAS: {
+        struct stat cur;
+        bool other = text[0] && stat(full, &st) == 0 &&
+                     !(a->path[0] && stat(a->path, &cur) == 0 && cur.st_dev == st.st_dev && cur.st_ino == st.st_ino);
+        if (other && !a->ow_armed) {                                    /* do not overwrite another file by accident */
+            a->ow_armed = true;
+            msg(a, "%s exists: Enter again to replace it, Esc to cancel", text);
+            return;
+        }
         a->prompt = P_NONE;
         if (text[0])
-            do_save(a, text);
+            do_save(a, full);
         break;
+    }
     case P_FIND:
         a->prompt = P_NONE;
         snprintf(a->find, sizeof(a->find), "%.255s", text);
@@ -911,19 +1206,45 @@ static void edit_prompt(struct app *a, uint32_t ks, bool plain)
 {
     size_t len = strlen(a->pbuf);
     char txt[8];
+    bool files = a->prompt == P_OPEN || a->prompt == P_SAVEAS;
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         prompt_accept(a);
-    } else if (ks == LM_KS_Escape) {
+        return;
+    }
+    a->ow_armed = false;
+    if (ks == LM_KS_Escape) {
         a->prompt = P_NONE;
         a->quit_armed = false;
+        a->msg[0] = 0;
+    } else if (ks == LM_KS_Tab) {
+        if (files) {
+            char base[PATH_MAX], list[160];
+            base_dir(a, base, sizeof(base));
+            int n = complete_path(base, a->pbuf, sizeof(a->pbuf), true, list, sizeof(list));
+            if (n == 0)
+                msg(a, "Nothing here starts like that");
+            else if (n > 1)
+                msg(a, "%d matches: %s", n, list);
+            a->pfresh = 0;
+        }
     } else if (ks == LM_KS_BackSpace) {
-        while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
-            len--;
-        if (len > 0)
-            len--;
-        a->pbuf[len] = 0;
-    } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && len + strlen(txt) < sizeof(a->pbuf)) {
-        memcpy(a->pbuf + len, txt, strlen(txt) + 1);
+        if (a->pfresh == 2) {
+            a->pbuf[0] = 0;
+        } else {
+            while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
+                len--;
+            if (len > 0)
+                len--;
+            a->pbuf[len] = 0;
+        }
+        a->pfresh = 0;
+    } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && (unsigned char)txt[0] >= 0x20) {
+        if (a->pfresh == 2 || (a->pfresh == 1 && (txt[0] == '/' || txt[0] == '~')))
+            a->pbuf[0] = 0;                                             /* typing over a suggestion replaces it */
+        a->pfresh = 0;
+        len = strlen(a->pbuf);
+        if (len + strlen(txt) < sizeof(a->pbuf))
+            memcpy(a->pbuf + len, txt, strlen(txt) + 1);
     }
     a->win.redraw = true;
 }
@@ -942,6 +1263,11 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     bool alt = (a->win.mods & LM_MOD_ALT) != 0, super = (a->win.mods & LM_MOD_SUPER) != 0;
     bool plain = !ctrl && !alt && !super;
     (void)code;
+    if (a->help) {                                                      /* any key closes the key list (but not a bare modifier) */
+        if (ks < 0xffe1 || ks > 0xffee)
+            a->help = false;
+        return;
+    }
     if (a->prompt != P_NONE) {
         edit_prompt(a, ks, plain);
         return;
@@ -954,34 +1280,20 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
         case 'q':
             if (a->modified && !a->quit_armed) {
                 a->quit_armed = true;
-                msg(a, "Unsaved changes: Ctrl+Q again to discard them and quit");
+                msg(a, "Unsaved changes: save first (Ctrl+S), or press Ctrl+Q again to discard them and quit");
             } else {
                 a->win.running = false;
             }
             return;
-        case 's':
-            if (shift || !a->path[0])
-                prompt_open(a, P_SAVEAS, a->path);
-            else
-                do_save(a, a->path);
-            set_title(a);
-            return;
-        case 'o': prompt_open(a, P_OPEN, ""); return;
-        case 'n':
-            if (a->modified && !a->quit_armed) {
-                a->quit_armed = true;
-                msg(a, "Unsaved changes: Ctrl+N again to start a new document anyway");
-                return;
-            }
-            doc_clear(a);
-            a->path[0] = 0;
-            a->modified = a->quit_armed = false;
-            a->final_nl = true;
-            a->crlf = false;
-            set_title(a);
-            return;
-        case 'f': prompt_open(a, P_FIND, a->find); return;
-        case 'g': prompt_open(a, P_GOTO, ""); return;
+        case 's': cmd_save(a, shift); return;
+        case 'o': cmd_open(a); return;
+        case 'n': cmd_new(a); return;
+        case 'f': cmd_find(a); return;
+        case '=':
+        case '+': set_zoom(a, 1); return;
+        case '-': set_zoom(a, -1); return;
+        case '0': set_zoom(a, 0); return;
+        case 'g': prompt_open(a, P_GOTO, "", 0); return;
         case 'a':
             a->ay = 0;
             a->ax = 0;
@@ -1075,6 +1387,7 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
         return;
     case LM_KS_Page_Up: page_move(a, -1, shift); return;
     case LM_KS_Page_Down: page_move(a, 1, shift); return;
+    case LM_KS_F1: a->help = true; return;
     case LM_KS_F1 + 2: find_next(a); return;                            /* F3 */
     case LM_KS_BackSpace: key_backspace(a, ctrl); set_title(a); return;
     case LM_KS_Delete: key_delete(a, ctrl); set_title(a); return;
@@ -1096,7 +1409,7 @@ static int gutter_w(const struct app *a)
     int digits = 1;
     for (int n = a->n; n >= 10; n /= 10)
         digits++;
-    return (LM_MAX(digits, 3) + 2) * LM_FONT_W;
+    return (LM_MAX(digits, 3) + 2) * a->zt.cw;
 }
 
 static uint32_t cp_at(const struct line *l, size_t off)
@@ -1122,16 +1435,67 @@ static void scroll_to_cursor(struct app *a)
     a->top = LM_CLAMP(a->top, 0, a->n - 1);
 }
 
+static void fill_round(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb)
+{
+    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, width, height, r, rgb);
+}
+
+static void paint_help(struct wlwin *w)
+{
+    static const char *const lines[] = {
+        "Editor keys",
+        "",
+        "Ctrl+N          new document",
+        "Ctrl+O          open a file (Tab completes names)",
+        "Ctrl+S          save (asks for a name when untitled)",
+        "Ctrl+Shift+S    save under another name",
+        "Ctrl+Q          quit (asks when there are unsaved changes)",
+        "",
+        "Ctrl+F          find, then Enter or F3 for the next match",
+        "Ctrl+G          go to a line number",
+        "Ctrl+Z / Ctrl+Y undo / redo",
+        "Ctrl+A C X V    select all, copy, cut, paste",
+        "",
+        "Shift+arrows    select; Ctrl+Left / Right moves by word",
+        "Home / End      line start / end (Ctrl: document)",
+        "Mouse           click, drag to select, double click = word",
+        "Ctrl+= / Ctrl+-  bigger / smaller text (or Ctrl+wheel); Ctrl+0 resets",
+        "",
+        "Any key or click closes this list",
+    };
+    int n = (int)(sizeof(lines) / sizeof(lines[0])), cw = 0;
+    for (int i = 0; i < n; i++)
+        cw = LM_MAX(cw, (int)strlen(lines[i]));
+    int bw = LM_MIN(cw * LM_FONT_W + 32, w->bw - 8), bh = LM_MIN(n * LM_FONT_H + 24, w->bh - 8);
+    int x = (w->bw - bw) / 2, y = (w->bh - bh) / 2;
+    fill_round(w, x - 1, y - 1, bw + 2, bh + 2, 9, COL_ACCENT);
+    fill_round(w, x, y, bw, bh, 8, COL_BAR);
+    for (int i = 0; i < n && 12 + (i + 1) * LM_FONT_H <= bh; i++)
+        wlwin_text(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_ACCENT : COL_FG, bw - 24);
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
     int gw = gutter_w(a);
-    a->rows_visible = LM_MAX((w->bh - bars) / LM_FONT_H, 1);
-    a->cols_visible = LM_MAX((w->bw - gw) / LM_FONT_W, 1);
+    a->rows_visible = LM_MAX((w->bh - bars - TOP_H) / a->zt.ch, 1);
+    a->cols_visible = LM_MAX((w->bw - gw) / a->zt.cw, 1);
     scroll_to_cursor(a);
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
-    wlwin_fill(w, 0, 0, gw, w->bh - bars, COL_GUTTER_BG);
+    wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                         /* the button bar */
+    for (int i = 0; i < N_BTNS; i++) {
+        int bx, bwid;
+        char tmp[16];
+        btn_rect(a, i, &bx, &bwid);
+        if (bwid == 0)
+            continue;
+        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, a->hover == i ? 0x5e6a82u : 0x434c5eu);
+        const char *t = btn_label(a, i, tmp, sizeof(tmp));
+        int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
+        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, i == B_SAVE && a->modified ? COL_WARN : COL_FG, 0);
+    }
+    wlwin_fill(w, 0, TOP_H, gw, w->bh - bars - TOP_H, COL_GUTTER_BG);
     int y0, y1;
     size_t x0, x1;
     sel_order(a, &y0, &x0, &y1, &x1);
@@ -1141,12 +1505,14 @@ static void paint(struct wlwin *w)
         if (ly >= a->n)
             break;
         const struct line *l = &a->l[ly];
-        int py = r * LM_FONT_H;
+        int py = TOP_H + r * a->zt.ch;
         if (ly == a->cy)
-            wlwin_fill(w, gw, py, w->bw - gw, LM_FONT_H, COL_LINE);
+            wlwin_fill(w, gw, py, w->bw - gw, a->zt.ch, COL_LINE);
         char num[16];
         snprintf(num, sizeof(num), "%d", ly + 1);
-        wlwin_text(w, gw - (int)(strlen(num) + 1) * LM_FONT_W, py, num, 1, ly == a->cy ? COL_FG : COL_DIM, 0);
+        for (int k = 0; num[k]; k++)
+            lm_zoom_glyph(w->pixels, w->bw, w->bw, w->bh, &a->zt, gw - ((int)strlen(num) + 1 - k) * a->zt.cw, py,
+                          (uint32_t)num[k], ly == a->cy ? COL_FG : COL_DIM);
         int col = 0;
         size_t i = 0;
         int sel_from = -1, sel_to = -1;                                  /* selected display columns of this line */
@@ -1156,11 +1522,11 @@ static void paint(struct wlwin *w)
         }
         if (sel_from >= 0)
             for (int c = LM_MAX(sel_from, a->left); c < sel_to && c < a->left + a->cols_visible; c++)
-                wlwin_fill(w, gw + (c - a->left) * LM_FONT_W, py, LM_FONT_W, LM_FONT_H, COL_SEL);
+                wlwin_fill(w, gw + (c - a->left) * a->zt.cw, py, a->zt.cw, a->zt.ch, COL_SEL);
         while (i < l->len) {
             int nc = l->s[i] == '\t' ? (col / TAB_W + 1) * TAB_W : col + 1;
             if (l->s[i] != '\t' && col >= a->left && col < a->left + a->cols_visible)
-                wlwin_glyph(w, gw + (col - a->left) * LM_FONT_W, py, cp_at(l, i), 1, COL_FG);
+                lm_zoom_glyph(w->pixels, w->bw, w->bw, w->bh, &a->zt, gw + (col - a->left) * a->zt.cw, py, cp_at(l, i), COL_FG);
             col = nc;
             i = cp_next(l, i);
             if (col >= a->left + a->cols_visible)
@@ -1169,7 +1535,7 @@ static void paint(struct wlwin *w)
         if (ly == a->cy) {                                               /* the cursor: a bar at the left edge of its cell */
             int cc = col_of(l, a->cx);
             if (cc >= a->left && cc < a->left + a->cols_visible)
-                wlwin_fill(w, gw + (cc - a->left) * LM_FONT_W, py, 2, LM_FONT_H, COL_ACCENT);
+                wlwin_fill(w, gw + (cc - a->left) * a->zt.cw, py, LM_MAX(2, a->zoom / 100 + 1), a->zt.ch, COL_ACCENT);
         }
     }
     int sy = w->bh - STATUS_H;
@@ -1183,13 +1549,23 @@ static void paint(struct wlwin *w)
     wlwin_text(w, w->bw - 6 - (int)strlen(right) * LM_FONT_W, sy + 2, right, 1, COL_DIM, 0);
     if (a->prompt != P_NONE) {
         static const char *const labels[] = { "", "Open: ", "Save as: ", "Find: ", "Go to line: " };
+        static const char *const hints[] = { "", "Tab completes", "Tab completes", "Enter = next", "" };
         int py = sy - STATUS_H;
         wlwin_fill(w, 0, py, w->bw, STATUS_H, COL_BAR);
         wlwin_fill(w, 0, py, w->bw, 1, COL_ACCENT);
         char line[640];
         snprintf(line, sizeof(line), "%s%s_", labels[a->prompt], a->pbuf);
-        wlwin_text(w, 6, py + 2, line, 1, COL_FG, w->bw - 12);
+        int hw = (int)strlen(hints[a->prompt]) * LM_FONT_W;
+        if (a->pfresh) {                                                 /* a suggestion: shown selected */
+            int lw = (int)strlen(labels[a->prompt]) * LM_FONT_W;
+            wlwin_fill(w, 6 + lw, py + 1, LM_MIN((int)strlen(a->pbuf) * LM_FONT_W, w->bw - 12 - lw), LM_FONT_H, COL_SEL);
+        }
+        wlwin_text(w, 6, py + 2, line, 1, COL_FG, w->bw - 18 - hw);
+        if (hw)
+            wlwin_text(w, w->bw - 6 - hw, py + 2, hints[a->prompt], 1, COL_DIM, 0);
     }
+    if (a->help)
+        paint_help(w);
 }
 
 /* ---- mouse ----------------------------------------------------------------------------------------------------------------- */
@@ -1197,9 +1573,9 @@ static void paint(struct wlwin *w)
 static void place_from_pointer(struct app *a, bool extend)
 {
     int gw = gutter_w(a);
-    int row = LM_CLAMP((int)a->py / LM_FONT_H, 0, a->rows_visible - 1);
+    int row = LM_CLAMP(((int)a->py - TOP_H) / a->zt.ch, 0, a->rows_visible - 1);
     int y = LM_CLAMP(a->top + row, 0, a->n - 1);
-    int col = a->left + (int)((a->px - gw) / LM_FONT_W + (a->px < gw ? -1 : 0));
+    int col = a->left + (int)((a->px - gw) / a->zt.cw + (a->px < gw ? -1 : 0));
     move_to(a, y, off_at_col(&a->l[y], LM_MAX(col, 0)), extend);
     set_want(a);
 }
@@ -1211,10 +1587,20 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_ENTER:
         a->px = lm_fixed_to_double(args[2].f);
         a->py = lm_fixed_to_double(args[3].f);
+        a->hover = btn_at(a, a->px, a->py);
+        w->redraw = true;
+        break;
+    case LM_WL_POINTER_EVT_LEAVE:
+        a->hover = -1;
+        w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
+        if (btn_at(a, a->px, a->py) != a->hover) {
+            a->hover = btn_at(a, a->px, a->py);
+            w->redraw = true;
+        }
         if (a->dragging) {
             place_from_pointer(a, true);
             w->redraw = true;
@@ -1223,6 +1609,19 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         a->last_serial = args[0].u;
         if (args[2].u != 272)
+            break;
+        if (args[3].u == 1 && a->help) {                                 /* a click closes the key list */
+            a->help = false;
+            w->redraw = true;
+            break;
+        }
+        if (args[3].u == 1 && a->py < TOP_H) {                           /* the button bar */
+            int b = btn_at(a, a->px, a->py);
+            if (b >= 0)
+                do_button(a, b);
+            break;
+        }
+        if (args[3].u == 1 && a->py >= TOP_H + a->rows_visible * a->zt.ch)    /* the status line is not text */
             break;
         if (args[3].u == 1) {
             bool dbl = args[1].u - a->last_click_ms < 400;
@@ -1248,7 +1647,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:
-        if (args[1].u == 0) {
+        if (args[1].u == 0 && (w->mods & LM_MOD_CTRL)) {                 /* Ctrl + wheel: the text size */
+            set_zoom(a, args[2].f > 0 ? -1 : 1);
+        } else if (args[1].u == 0) {
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
             if (lines == 0)
                 lines = args[2].f > 0 ? 1 : -1;
@@ -1294,7 +1695,7 @@ static bool close_event(struct wlwin *w)
     struct app *a = w->data;
     if (a->modified && !a->quit_armed) {
         a->quit_armed = true;
-        msg(a, "Unsaved changes: close again to discard them");
+        msg(a, "Unsaved changes: save first (Ctrl+S), or close again to discard them");
         return false;
     }
     return true;
@@ -1408,6 +1809,45 @@ static int selftest(void)
     CHECK(!valid_utf8((const unsigned char *)"\xc3", 1) && !valid_utf8((const unsigned char *)"\xe2\x82", 2), "truncated sequences");
     CHECK(!valid_utf8((const unsigned char *)"\xc0\xaf", 2), "overlong form");
     puts(bad ? "selftest FAILED" : "selftest ok");
+    char tdir[] = "/tmp/mellagui-edit-selftest-XXXXXX";                  /* names in the prompts */
+    if (mkdtemp(tdir)) {
+        char p[PATH_MAX], buf[512], list[160];
+        snprintf(p, sizeof(p), "%s/alpha.txt", tdir);
+        FILE *f = fopen(p, "w");
+        if (f)
+            fclose(f);
+        snprintf(p, sizeof(p), "%s/alpine.txt", tdir);
+        f = fopen(p, "w");
+        if (f)
+            fclose(f);
+        snprintf(p, sizeof(p), "%s/sub", tdir);
+        mkdir(p, 0755);
+        snprintf(buf, sizeof(buf), "%s/a", tdir);
+        CHECK(complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 2, "two names start with a");
+        CHECK(strlen(buf) > 3 && !strcmp(buf + strlen(buf) - 4, "/alp") && strstr(list, "alpha.txt  alpine.txt"), "common prefix '%s' list '%s'", buf, list);
+        snprintf(buf, sizeof(buf), "%s/su", tdir);
+        CHECK(complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 1 && strstr(buf, "/sub/"), "a folder gets a slash: '%s'", buf);
+        snprintf(buf, sizeof(buf), "sub");                              /* relative to the base folder */
+        CHECK(complete_path(tdir, buf, sizeof(buf), true, list, sizeof(list)) == 1 && !strcmp(buf, "sub/"), "relative: '%s'", buf);
+        snprintf(buf, sizeof(buf), "%s/zzz", tdir);
+        CHECK(complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 0, "no candidates");
+        snprintf(buf, sizeof(buf), "%s/", tdir);
+        CHECK(complete_path("/", buf, sizeof(buf), false, list, sizeof(list)) == 3 && buf[strlen(buf) - 1] == '/', "list only, three entries");
+        char r[PATH_MAX];
+        resolve_path("/base", "x/y", r, sizeof(r));
+        CHECK(!strcmp(r, "/base/x/y"), "relative name '%s'", r);
+        resolve_path("/", "x", r, sizeof(r));
+        CHECK(!strcmp(r, "/x"), "relative to / '%s'", r);
+        resolve_path("/base", "/abs", r, sizeof(r));
+        CHECK(!strcmp(r, "/abs"), "absolute name '%s'", r);
+        snprintf(p, sizeof(p), "%s/sub", tdir);
+        rmdir(p);
+        snprintf(p, sizeof(p), "%s/alpha.txt", tdir);
+        unlink(p);
+        snprintf(p, sizeof(p), "%s/alpine.txt", tdir);
+        unlink(p);
+        rmdir(tdir);
+    }
     return bad ? 1 : 0;
 }
 
@@ -1425,13 +1865,18 @@ int main(int argc, char **argv)
     static struct app a;
     doc_clear(&a);
     a.final_nl = true;
+    a.hover = -1;
+    a.zoom = lm_zoom_conf_load("editor");
+    if (a.zoom == 0)
+        a.zoom = LM_ZOOM_DEFAULT;
+    lm_zoom_build(&a.zt, a.zoom);
     a.rep_rate = 25;
     a.rep_delay = 400;
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event, .close = close_event };
     if (wlwin_connect(&a.win, "mellagui-edit", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, "Editor", "mellagui.edit", 760, 520, 240, 120) < 0)
+    if (wlwin_open(&a.win, "Editor", "mellagui.edit", 760 * a.zoom / 100, 520 * a.zoom / 100, 240, 120) < 0)
         return 1;
     if (a.ddm && a.win.seat) {
         a.ddev = wlc_alloc(a.win.c, &lm_wl_data_device_interface, ddev_event, &a);
@@ -1443,6 +1888,8 @@ int main(int argc, char **argv)
         do_open(&a, full);
     }
     set_title(&a);
+    if (argc == 1)
+        msg(&a, "Welcome! F1 shows the keys, Ctrl+O opens a file, Ctrl+S saves");
     while (a.win.running) {
         int timeout = 250;
         if (a.rep_code) {
@@ -1456,12 +1903,18 @@ int main(int argc, char **argv)
             a.rep_next = now_ms() + (a.rep_rate > 0 ? 1000 / a.rep_rate : 40);
             a.win.redraw = true;
         }
+        if (a.conf_dirty && now_ms() - a.conf_time >= 400) {              /* a burst of zoom steps writes the file once */
+            lm_zoom_conf_save("editor", a.zoom);
+            a.conf_dirty = false;
+        }
         if (a.msg[0] && now_ms() >= a.msg_until) {
             a.msg[0] = 0;
             a.quit_armed = false;                                        /* the question has timed out, too */
             a.win.redraw = true;
         }
     }
+    if (a.conf_dirty)
+        lm_zoom_conf_save("editor", a.zoom);
     wlwin_destroy(&a.win);
     return 0;
 }

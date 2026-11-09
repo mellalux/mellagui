@@ -2121,7 +2121,7 @@ class TestClients(Base):
             time.sleep(0.3)
         bar(370)                                                 # A+: 110 %, 9 px cells; the same 90 columns stay visible
         w1 = self.edit_window()
-        self.assertEqual(w1['w'], 45 + 90 * 9)
+        self.assertEqual(w1['w'], 45 + 88 * 9 + 14)       # 88 columns stay visible (the scroll bar takes 14 px of the 90)
         self.assertGreater(w1['h'], w0['h'])
         bar(370)                                                 # 125 %: not a whole multiple, anti-aliased text
         time.sleep(0.3)
@@ -2140,7 +2140,7 @@ class TestClients(Base):
         self.chord(self.CTRL, 11)                                # Ctrl+0: back to 100 %
         time.sleep(0.3)
         w2 = self.edit_window()
-        self.assertEqual(w2['w'], 760)
+        self.assertEqual(w2['w'], 40 + 88 * 8 + 14)               # (the scroll bar takes 14 px of the 90 columns)
         ctl.tap(self.K_END)
         self.type_text('x')                                      # typing and saving still work
         self.chord(self.CTRL, self.K_S)
@@ -2148,7 +2148,7 @@ class TestClients(Base):
         self.assertEqual(self.read_file(path), b'onex\n')
         self.chord(self.CTRL, 13)                                # Ctrl+= : 110 %
         time.sleep(0.5)
-        self.assertEqual(self.edit_window()['w'], 45 + 90 * 9)
+        self.assertEqual(self.edit_window()['w'], 45 + 88 * 9 + 14)
         self.chord(self.CTRL, self.K_Q)
         self.assertEqual(p.wait(timeout=5), 0)
         self.assertIn('zoom=110', open(conf).read())
@@ -2266,6 +2266,7 @@ class TestClients(Base):
 
     def thumb(self, win, name):
         """(top, height, width) of the scroll bar's thumb in the file browser's right edge, from a screenshot."""
+        time.sleep(0.2)                                                  # (the program repaints after the pointer moved away)
         ppm = ctl.dump(os.path.join(tmp, name))
         thumb = (0x35, 0x3b, 0x49)
         x = win['x'] + win['w'] - 5
@@ -2869,7 +2870,7 @@ class TestClients(Base):
         self.assertGreater(w200['w'], w100, 'the window grows with the font')
         self.assertLessEqual(w200['x'] + w200['w'], 1024, 'and stays on the screen')
         self.assertGreater(cols, 40)                                              # 80 columns of 16 px do not fit: the window is as wide as the screen allows
-        self.assertEqual((w200['w'] - 6) % 16, 0)
+        self.assertEqual((w200['w'] - 6 - 14) % 16, 0)
         ctl.click(win['x'] + 130, win['y'] + 8)
         time.sleep(0.2)
         ctl.tap(KEY_ESC)                                                          # Esc closes the list without changing anything
@@ -2881,18 +2882,18 @@ class TestClients(Base):
         self.bar_click(180)                                  # A+: 100 -> 110 %, 9 px cells
         time.sleep(0.3)
         self.assertEqual(self.size_now(out, 1)[1], 80)                           # the grid stays, the window grows
-        self.assertEqual(self.term_window()['w'], 80 * 9 + 6)
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6 + 14)
         self.bar_click(180)                                  # 125 %, 10 px cells
         time.sleep(0.3)
         self.assertEqual(self.size_now(out, 2)[1], 80)
-        self.assertEqual(self.term_window()['w'], 80 * 10 + 6)
+        self.assertEqual(self.term_window()['w'], 80 * 10 + 6 + 14)
         self.bar_click(80)                                   # A-: back to 110 %
         time.sleep(0.3)
-        self.assertEqual(self.term_window()['w'], 80 * 9 + 6)
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6 + 14)
         self.bar_click(220)                                  # Reset
         time.sleep(0.3)
         self.assertEqual(self.size_now(out, 3)[1], 80)
-        self.assertEqual(self.term_window()['w'], 80 * 8 + 6)
+        self.assertEqual(self.term_window()['w'], 80 * 8 + 6 + 14)
 
     def test_terminal_fractional_zoom_is_smooth_and_keeps_the_text_readable(self):
         win, out = self.term('term-frac.txt')
@@ -2922,8 +2923,8 @@ class TestClients(Base):
         """The terminal's cell width in pixels, from its own answer (columns) and the window it made (w = cols * cell + 6)."""
         cols = self.size_now(out, n)[1]
         w = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.term'][0]['w']
-        self.assertEqual((w - 6) % cols, 0, (w, cols))
-        return (w - 6) // cols
+        self.assertEqual((w - 6 - 14) % cols, 0, (w, cols))      # (14 = the scroll bar strip)
+        return (w - 6 - 14) // cols
 
     def conf(self, name):
         d = os.path.join(tmp, name)
@@ -3024,14 +3025,89 @@ class TestClients(Base):
         ctl.tap(13)                                                               # Ctrl+= : 110 %
         ctl.key(KEY_LEFTCTRL, False)
         time.sleep(0.3)
-        self.assertEqual(self.term_window()['w'], 80 * 9 + 6)                     # the window grew, still 80 columns
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6 + 14)                     # the window grew, still 80 columns
         self.assertEqual(self.size_now(out, 1)[1], 80)
         ctl.key(KEY_LEFTCTRL, True)
         ctl.tap(11)                                                               # Ctrl+0 : reset
         ctl.key(KEY_LEFTCTRL, False)
         time.sleep(0.3)
         self.assertEqual(self.size_now(out, 2)[1], 80)
-        self.assertEqual(self.term_window()['w'], 80 * 8 + 6)
+        self.assertEqual(self.term_window()['w'], 80 * 8 + 6 + 14)
+
+    def test_terminal_has_a_scrollbar_for_the_scrollback(self):
+        script = os.path.join(tmp, 'many.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do echo line$i; i=$((i+1)); done\nread l\n')
+        os.chmod(script, 0o755)
+        self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win)
+        time.sleep(0.6)
+        ctl.abs(win['x'] + 100, win['y'] + 100)                          # (a hovered thumb is lighter)
+        t0 = self.thumb(win, 'tsb0.ppm')
+        self.assertIsNotNone(t0, 'the scrollback should show a thumb')
+        self.assertEqual(t0[2], 14 - 4)
+        self.assertGreater(t0[0] + t0[1], win['y'] + win['h'] - 6)       # live view: the thumb is at the bottom
+        right = win['x'] + win['w'] - 6
+        ctl.click(right, win['y'] + 60)                                  # the track above it: one page back
+        time.sleep(0.3)
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        t1 = self.thumb(win, 'tsb1.ppm')
+        self.assertLess(t1[0], t0[0])
+        ctl.abs(right, t1[0] + 5)                                        # drag the thumb to the top: the oldest line
+        ctl.button(272, True)
+        ctl.abs(right, win['y'] + 10)
+        ctl.button(272, False)
+        time.sleep(0.3)
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        t2 = self.thumb(win, 'tsb2.ppm')
+        self.assertLess(t2[0], win['y'] + 60)
+        ctl.abs(right, t2[0] + 5)                                        # and back down to the live view
+        ctl.button(272, True)
+        ctl.abs(right, win['y'] + win['h'] - 2)
+        ctl.button(272, False)
+        time.sleep(0.3)
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        t3 = self.thumb(win, 'tsb3.ppm')
+        self.assertGreater(t3[0] + t3[1], win['y'] + win['h'] - 6)
+
+    def test_terminal_scrollbar_is_empty_without_scrollback(self):
+        win, out = self.term('term-nosb.txt')
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        self.assertIsNone(self.thumb(win, 'tsb-none.ppm'))
+
+    def test_edit_has_a_scrollbar_and_the_wheel_stays_where_it_is(self):
+        p, path = self.edit_start(''.join('line %d\n' % i for i in range(150)).encode())
+        win = self.edit_window()
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        t0 = self.thumb(win, 'esb0.ppm')
+        self.assertIsNotNone(t0)
+        self.assertEqual(t0[2], 14 - 4)
+        self.assertLess(t0[0], win['y'] + 40)                            # the cursor is on line 1: the thumb is at the top
+        right = win['x'] + win['w'] - 6
+        ctl.click(right, win['y'] + win['h'] - 40)                       # the track below it: one page down
+        time.sleep(0.3)
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        t1 = self.thumb(win, 'esb1.ppm')
+        self.assertGreater(t1[0], t0[0])
+        time.sleep(0.3)
+        t1b = self.thumb(win, 'esb1b.ppm')                               # (the view does not jump back to the cursor)
+        self.assertEqual(t1b[0], t1[0])
+        ctl.abs(right, t1[0] + 5)                                        # drag to the bottom
+        ctl.button(272, True)
+        ctl.abs(right, win['y'] + win['h'] - 20)
+        ctl.button(272, False)
+        time.sleep(0.3)
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        t2 = self.thumb(win, 'esb2.ppm')
+        self.assertGreater(t2[0], t1[0] + 50)
+        ctl.cmd('axis v 15 1')                                           # the wheel scrolls from there, the cursor stays on line 1
+        time.sleep(0.3)
+        t3 = self.thumb(win, 'esb3.ppm')
+        self.assertIsNotNone(t3)
+        self.assertGreaterEqual(t3[0], t2[0])
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
 
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',

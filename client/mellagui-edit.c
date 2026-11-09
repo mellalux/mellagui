@@ -28,6 +28,7 @@
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
+#include "metrics.h"
 #include "pathcomp.h"
 #include "protocol.h"
 #include "uikit.h"
@@ -103,6 +104,11 @@ struct app {
     bool dragging;
     uint32_t last_click_ms;
     int rows_visible, cols_visible;
+    bool sb_drag;                       /* the scroll bar thumb is being dragged */
+    int sb_grab;                        /* pixels between the top of the thumb and the pointer */
+    int seen_cy, seen_n;                /* where the cursor was when the view last followed it (a wheel / scroll bar move must stay) */
+    size_t seen_cx;
+    int seen_rows, seen_cols;
 };
 
 static int64_t now_ms(void)
@@ -869,7 +875,7 @@ static void set_zoom_pct(struct app *a, int pct)
     a->conf_time = now_ms();
     if (a->rows_visible > 0 && a->cols_visible > 0) {
         int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
-        wlwin_request_size(&a->win, gutter_w(a) + a->cols_visible * a->zt.cw, TOP_H + a->rows_visible * a->zt.ch + bars);
+        wlwin_request_size(&a->win, gutter_w(a) + a->cols_visible * a->zt.cw + lm_metrics.scrollbar_width, TOP_H + a->rows_visible * a->zt.ch + bars);
     }
     a->win.redraw = true;
 }
@@ -1282,14 +1288,60 @@ static void paint_help(struct wlwin *w)
         wlwin_text(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_ACCENT : COL_FG, bw - 24);
 }
 
+/* ---- scroll bar -------------------------------------------------------------------------------------------------------------
+ * A strip at the right edge between the button bar and the status line. The first visible line can go anywhere from 0 to n - 1,
+ * so the thumb (as long as the visible part of n + rows - 1 lines) slides over that whole range. */
+
+static int sb_track_h(const struct app *a)
+{
+    int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
+    return LM_MAX(a->win.bh - bars - TOP_H, 1);
+}
+
+static void sb_thumb(const struct app *a, int *ty, int *th)
+{
+    int track = sb_track_h(a), total = LM_MAX(a->n + a->rows_visible - 1, 1);
+    *th = LM_CLAMP(track * a->rows_visible / total, LM_MIN(28, track), track);
+    *ty = TOP_H + (track - *th) * a->top / LM_MAX(a->n - 1, 1);
+}
+
+static void paint_scrollbar(struct wlwin *w, const struct app *a)
+{
+    int sbw = lm_metrics.scrollbar_width, x = w->bw - sbw;
+    wlwin_fill(w, x, TOP_H, sbw, sb_track_h(a), COL_BAR);
+    if (a->n <= 1)
+        return;
+    int ty, th;
+    sb_thumb(a, &ty, &th);
+    bool hot = a->sb_drag || (a->px >= x && a->py >= ty && a->py < ty + th);
+    wlwin_fill(w, x + 2, ty + 1, sbw - 4, th - 2, hot ? 0x4a5266u : 0x353b49u);
+}
+
+static void sb_drag_to(struct app *a, double py)
+{
+    int ty, th, room = LM_MAX(sb_track_h(a) - 0, 1);
+    sb_thumb(a, &ty, &th);
+    room = LM_MAX(room - th, 1);
+    int pos = LM_CLAMP((int)py - a->sb_grab - TOP_H, 0, room);
+    a->top = LM_CLAMP(pos * (a->n - 1) / room, 0, LM_MAX(a->n - 1, 0));
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
     int gw = gutter_w(a);
     a->rows_visible = LM_MAX((w->bh - bars - TOP_H) / a->zt.ch, 1);
-    a->cols_visible = LM_MAX((w->bw - gw) / a->zt.cw, 1);
-    scroll_to_cursor(a);
+    a->cols_visible = LM_MAX((w->bw - gw - lm_metrics.scrollbar_width) / a->zt.cw, 1);
+    if (a->cy != a->seen_cy || a->cx != a->seen_cx || a->n != a->seen_n || a->rows_visible != a->seen_rows ||
+        a->cols_visible != a->seen_cols) {                               /* the view follows the cursor only when that moved */
+        scroll_to_cursor(a);
+        a->seen_cy = a->cy;
+        a->seen_cx = a->cx;
+        a->seen_n = a->n;
+        a->seen_rows = a->rows_visible;
+        a->seen_cols = a->cols_visible;
+    }
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
     wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                         /* the button bar */
     for (int i = 0; i < N_BTNS; i++) {
@@ -1318,7 +1370,7 @@ static void paint(struct wlwin *w)
         const struct line *l = &a->l[ly];
         int py = TOP_H + r * a->zt.ch;
         if (ly == a->cy)
-            wlwin_fill(w, gw, py, w->bw - gw, a->zt.ch, COL_LINE);
+            wlwin_fill(w, gw, py, w->bw - gw - lm_metrics.scrollbar_width, a->zt.ch, COL_LINE);
         char num[16];
         snprintf(num, sizeof(num), "%d", ly + 1);
         for (int k = 0; num[k]; k++)
@@ -1349,6 +1401,7 @@ static void paint(struct wlwin *w)
                 wlwin_fill(w, gw + (cc - a->left) * a->zt.cw, py, LM_MAX(2, a->zoom / 100 + 1), a->zt.ch, COL_ACCENT);
         }
     }
+    paint_scrollbar(w, a);
     int sy = w->bh - STATUS_H;
     wlwin_fill(w, 0, sy, w->bw, STATUS_H, COL_BAR);
     char left[PATH_MAX + 64], right[64];
@@ -1412,10 +1465,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->hover = btn_at(a, a->px, a->py);
             w->redraw = true;
         }
-        if (a->dragging) {
+        if (a->sb_drag)
+            sb_drag_to(a, a->py);
+        else if (a->dragging)
             place_from_pointer(a, true);
-            w->redraw = true;
-        }
+        w->redraw = true;                                                /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
@@ -1430,6 +1484,18 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int b = btn_at(a, a->px, a->py);
             if (b >= 0)
                 do_button(a, b);
+            break;
+        }
+        if (args[3].u == 1 && a->px >= w->bw - lm_metrics.scrollbar_width && a->py < TOP_H + sb_track_h(a)) {
+            int ty, th;                                                  /* the scroll bar: drag the thumb, or a click beside it pages */
+            sb_thumb(a, &ty, &th);
+            if (a->py >= ty && a->py < ty + th) {
+                a->sb_drag = true;
+                a->sb_grab = (int)a->py - ty;
+            } else {
+                a->top = LM_CLAMP(a->top + (a->py < ty ? -1 : 1) * LM_MAX(a->rows_visible - 1, 1), 0, LM_MAX(a->n - 1, 0));
+            }
+            w->redraw = true;
             break;
         }
         if (args[3].u == 1 && a->py >= TOP_H + a->rows_visible * a->zt.ch)    /* the status line is not text */
@@ -1454,6 +1520,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             }
         } else {
             a->dragging = false;
+            a->sb_drag = false;
         }
         w->redraw = true;
         break;

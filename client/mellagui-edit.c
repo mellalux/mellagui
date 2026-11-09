@@ -13,7 +13,6 @@
  * Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
  * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
  */
-#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <fcntl.h>
@@ -29,6 +28,7 @@
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
+#include "pathcomp.h"
 #include "protocol.h"
 #include "uikit.h"
 #include "util.h"
@@ -603,94 +603,6 @@ static void base_dir(const struct app *a, char *out, size_t sz)
     }
 }
 
-/* "~/x" is in the home folder, "/x" is absolute, anything else is relative to `base`. */
-static void resolve_path(const char *base, const char *text, char *out, size_t sz)
-{
-    const char *home = getenv("HOME");
-    if (text[0] == '~' && (text[1] == '/' || !text[1]) && home && home[0])
-        snprintf(out, sz, "%s%s", home, text + 1);
-    else if (text[0] == '/')
-        snprintf(out, sz, "%s", text);
-    else
-        snprintf(out, sz, "%s%s%s", base, base[1] ? "/" : "", text);
-}
-
-struct cand {
-    char *name;
-    bool dir;
-};
-
-static int cand_cmp(const void *x, const void *y)
-{
-    return strcmp(((const struct cand *)x)->name, ((const struct cand *)y)->name);
-}
-
-/*
- * Tab in a file prompt. The last name in `buf` is completed as far as all candidates agree (`extend`; without it only
- * the list is made). `list` gets the candidates (folders with a trailing "/"). Returns how many there are.
- * A single candidate is completed fully, a folder with its "/".
- */
-static int complete_path(const char *base, char *buf, size_t bufsz, bool extend, char *list, size_t listsz)
-{
-    list[0] = 0;
-    if (!strcmp(buf, "~") && getenv("HOME")) {
-        snprintf(buf, bufsz, "~/");
-        return 1;
-    }
-    char full[PATH_MAX], dir[PATH_MAX];
-    resolve_path(base, buf, full, sizeof(full));
-    char *slash = strrchr(full, '/');
-    if (!slash)
-        return 0;
-    snprintf(dir, sizeof(dir), "%.*s", (int)(slash == full ? 1 : slash - full), full);
-    const char *pre = slash + 1;
-    size_t pl = strlen(pre);
-    DIR *d = opendir(dir);
-    if (!d)
-        return 0;
-    struct cand c[512];
-    int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d)) && n < 512) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-            continue;
-        if (e->d_name[0] == '.' && !(pl > 0 && pre[0] == '.'))          /* hidden names only when a dot was typed */
-            continue;
-        if (strncmp(e->d_name, pre, pl) != 0)
-            continue;
-        char p[PATH_MAX + 300];
-        struct stat st;
-        snprintf(p, sizeof(p), "%s%s%s", dir, dir[1] ? "/" : "", e->d_name);
-        c[n].dir = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-        c[n++].name = strdup(e->d_name);
-    }
-    closedir(d);
-    qsort(c, (size_t)n, sizeof(c[0]), cand_cmp);
-    size_t used = 0;
-    for (int i = 0; i < n && used + 4 < listsz; i++)
-        used += (size_t)snprintf(list + used, listsz - used, "%s%s%s", i ? "  " : "", c[i].name, c[i].dir ? "/" : "");
-    if (n > 0 && extend) {
-        size_t common = strlen(c[0].name);
-        for (int i = 1; i < n; i++) {
-            size_t k = 0;
-            while (k < common && c[i].name[k] == c[0].name[k])
-                k++;
-            common = k;
-        }
-        while (common > pl && (c[0].name[common] & 0xc0) == 0x80)       /* do not cut a UTF-8 character */
-            common--;
-        const char *last = strrchr(buf, '/');
-        size_t keep = last ? (size_t)(last - buf) + 1 : 0;
-        char out[512];
-        snprintf(out, sizeof(out), "%.*s%.*s%s", (int)keep, buf, (int)common, c[0].name, n == 1 && c[0].dir ? "/" : "");
-        if (strlen(out) < bufsz)
-            snprintf(buf, bufsz, "%s", out);
-    }
-    for (int i = 0; i < n; i++)
-        free(c[i].name);
-    return n;
-}
-
 /* ---- find ---------------------------------------------------------------------------------------------------------------- */
 
 /* The next occurrence of `needle` starting at or after (y, x), wrapping around the document once. */
@@ -1135,7 +1047,7 @@ static void prompt_enter_dir(struct app *a, const char *base)
     char tmp[512], list[160];
     dir_slash(a->pbuf, tmp, sizeof(tmp));
     snprintf(a->pbuf, sizeof(a->pbuf), "%s", tmp);
-    int n = complete_path(base, a->pbuf, sizeof(a->pbuf), false, list, sizeof(list));
+    int n = lm_complete_path(base, a->pbuf, sizeof(a->pbuf), false, list, sizeof(list));
     if (n > 0)
         msg(a, "%d here: %s", n, list);
     else
@@ -1149,7 +1061,7 @@ static void prompt_accept(struct app *a)
     char text[512], base[PATH_MAX], full[PATH_MAX];
     snprintf(text, sizeof(text), "%s", a->pbuf);
     base_dir(a, base, sizeof(base));
-    resolve_path(base, text, full, sizeof(full));
+    lm_resolve_path(base, text, full, sizeof(full));
     struct stat st;
     bool is_dir = (kind == P_OPEN || kind == P_SAVEAS) && text[0] && stat(full, &st) == 0 && S_ISDIR(st.st_mode);
     if (is_dir) {                                                       /* Enter on a folder looks inside it */
@@ -1220,7 +1132,7 @@ static void edit_prompt(struct app *a, uint32_t ks, bool plain)
         if (files) {
             char base[PATH_MAX], list[160];
             base_dir(a, base, sizeof(base));
-            int n = complete_path(base, a->pbuf, sizeof(a->pbuf), true, list, sizeof(list));
+            int n = lm_complete_path(base, a->pbuf, sizeof(a->pbuf), true, list, sizeof(list));
             if (n == 0)
                 msg(a, "Nothing here starts like that");
             else if (n > 1)
@@ -1823,22 +1735,22 @@ static int selftest(void)
         snprintf(p, sizeof(p), "%s/sub", tdir);
         mkdir(p, 0755);
         snprintf(buf, sizeof(buf), "%s/a", tdir);
-        CHECK(complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 2, "two names start with a");
+        CHECK(lm_complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 2, "two names start with a");
         CHECK(strlen(buf) > 3 && !strcmp(buf + strlen(buf) - 4, "/alp") && strstr(list, "alpha.txt  alpine.txt"), "common prefix '%s' list '%s'", buf, list);
         snprintf(buf, sizeof(buf), "%s/su", tdir);
-        CHECK(complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 1 && strstr(buf, "/sub/"), "a folder gets a slash: '%s'", buf);
+        CHECK(lm_complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 1 && strstr(buf, "/sub/"), "a folder gets a slash: '%s'", buf);
         snprintf(buf, sizeof(buf), "sub");                              /* relative to the base folder */
-        CHECK(complete_path(tdir, buf, sizeof(buf), true, list, sizeof(list)) == 1 && !strcmp(buf, "sub/"), "relative: '%s'", buf);
+        CHECK(lm_complete_path(tdir, buf, sizeof(buf), true, list, sizeof(list)) == 1 && !strcmp(buf, "sub/"), "relative: '%s'", buf);
         snprintf(buf, sizeof(buf), "%s/zzz", tdir);
-        CHECK(complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 0, "no candidates");
+        CHECK(lm_complete_path("/", buf, sizeof(buf), true, list, sizeof(list)) == 0, "no candidates");
         snprintf(buf, sizeof(buf), "%s/", tdir);
-        CHECK(complete_path("/", buf, sizeof(buf), false, list, sizeof(list)) == 3 && buf[strlen(buf) - 1] == '/', "list only, three entries");
+        CHECK(lm_complete_path("/", buf, sizeof(buf), false, list, sizeof(list)) == 3 && buf[strlen(buf) - 1] == '/', "list only, three entries");
         char r[PATH_MAX];
-        resolve_path("/base", "x/y", r, sizeof(r));
+        lm_resolve_path("/base", "x/y", r, sizeof(r));
         CHECK(!strcmp(r, "/base/x/y"), "relative name '%s'", r);
-        resolve_path("/", "x", r, sizeof(r));
+        lm_resolve_path("/", "x", r, sizeof(r));
         CHECK(!strcmp(r, "/x"), "relative to / '%s'", r);
-        resolve_path("/base", "/abs", r, sizeof(r));
+        lm_resolve_path("/base", "/abs", r, sizeof(r));
         CHECK(!strcmp(r, "/abs"), "absolute name '%s'", r);
         snprintf(p, sizeof(p), "%s/sub", tdir);
         rmdir(p);

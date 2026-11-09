@@ -51,6 +51,7 @@ def setUpModule():
     os.environ['WAYLAND_DISPLAY'] = 'mellagui-test'
     os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
+    os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
     LOG = os.path.join(tmp, 'mellagui.log')
     OUT = os.path.join(tmp, 'mellagui.out')        # a file, not a pipe: nobody reads a pipe while the tests run and 64 KB of log would block the compositor
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77',
@@ -2368,10 +2369,33 @@ class TestClients(Base):
         time.sleep(0.3)
         self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'Esc must keep the file')
         ctl.tap(self.FKEYS[8])
-        ctl.tap(KEY_ENTER)                                     # ... and Enter deletes
+        ctl.tap(KEY_ENTER)                                     # ... and Enter moves it to the trash
         time.sleep(0.4)
         self.assertFalse(os.path.exists(os.path.join(d, 'a.txt')))
         self.assertTrue(os.path.exists(os.path.join(sub, 'a.txt')), 'only the one in this folder is deleted')
+        trash = os.path.join(os.environ['XDG_DATA_HOME'], 'Trash')
+        self.assertEqual(self.read_file(os.path.join(trash, 'files', 'a.txt')), b'text a\n')
+        info = self.read_file(os.path.join(trash, 'info', 'a.txt.trashinfo')).decode()
+        self.assertIn('[Trash Info]', info)
+        self.assertIn('Path=' + os.path.join(d, 'a.txt'), info)
+        ctl.tap(self.K_END)                                    # p.ppm: Shift+F8 deletes for good
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(self.FKEYS[8])
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertFalse(os.path.exists(os.path.join(d, 'p.ppm')))
+        self.assertFalse(os.path.exists(os.path.join(trash, 'files', 'p.ppm')), 'Shift+F8 does not use the trash')
+
+    def test_files_tab_completes_the_target_of_a_copy(self):
+        p, d = self.files_start()
+        ctl.tap(self.K_DOWN)                                   # a.txt
+        ctl.tap(self.FKEYS[5])                                 # the question starts with this folder (the other pane shows it, too)
+        self.type_chars('su')
+        ctl.tap(self.K_TAB)                                    # su -> sub/
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.5)
+        self.assertEqual(self.read_file(os.path.join(d, 'sub', 'a.txt')), b'text a\n')
 
     def test_files_marked_files_move_together_and_nothing_is_replaced(self):
         p, d = self.files_start()

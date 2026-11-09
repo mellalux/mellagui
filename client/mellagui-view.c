@@ -27,6 +27,9 @@
 
 #include "theme.h"
 #include "font.h"
+#include "ffdec.h"
+#include "ffpipe.h"
+#include "h264dec.h"
 #include "img.h"
 #include "keymap.h"
 #include "loop.h"
@@ -40,6 +43,7 @@
 #define BG (lm_theme.card)
 #define BAR_BG 0x0e1118u
 #define BAR_FG 0xd8dde8u
+#define FF_FPS 30                       /* ffmpeg plays at a constant 30 pictures a second */
 #define ZMIN 0.05
 #define ZMAX 32.0
 
@@ -60,7 +64,19 @@ struct app {
     double px, py, drag_x, drag_y;
     uint32_t last_click_ms;
     double last_click_x, last_click_y;
-    struct lm_mp4r *vid;                /* the video being played (NULL: an image) */
+    struct lm_mp4r *vid;                /* the video being played with our own reader (Motion JPEG) ... */
+    struct ffdec *fd;                   /* ... or through ffmpeg (anything else, when it is installed) */
+    int vmode;                          /* 0 an image, 1 Motion JPEG (vid), 2 ffmpeg (fd), 3 our own H.264 decoder (vid + hd) */
+    struct lm_h264dec *hd;              /* 3: the decoder ... */
+    uint32_t hdone;                     /* ... and the picture it has decoded last (~0u: none, it has to start at an IDR picture) */
+    int fw, fh;                         /* ffmpeg: the size of its pictures */
+    uint64_t fdur;                      /* ffmpeg: duration of the video, 0 = unknown */
+    uint64_t fbase;                     /* ffmpeg: the position its first picture belongs to */
+    uint64_t fidx;                      /* ffmpeg: pictures taken from it so far */
+    uint32_t *fbuf;                     /* ffmpeg: the picture being collected */
+    size_t fhave;
+    bool fended;                        /* ffmpeg has sent its last picture */
+    bool fready, fwant;                 /* a whole picture waits in fbuf; show the next one even when paused (after a seek) */
     uint32_t vframe;                    /* the picture shown */
     bool playing, seeking;
     uint64_t pos_ms;                    /* where the video is (paused), or where it was when playing (re)started */
@@ -144,16 +160,58 @@ static void set_title(struct app *a)
 
 /* ---- video ------------------------------------------------------------------------------------------------------------- */
 
+static uint64_t video_len(const struct app *a)
+{
+    return a->vmode == 1 || a->vmode == 3 ? a->vid->duration_ms : a->vmode == 2 ? a->fdur : 0;
+}
+
 static uint64_t video_pos(const struct app *a)
 {
-    if (!a->vid)
+    if (!a->vmode)
         return 0;
     uint64_t p = a->playing ? a->pos_ms + (lm_now_ms() - a->play_t0) : a->pos_ms;
-    return p > a->vid->duration_ms ? a->vid->duration_ms : p;
+    uint64_t len = video_len(a);
+    return len && p > len ? len : p;
+}
+
+/* Own H.264 decoder: picture f, decoded from the IDR picture before it (or on from the one before, which is what playing does). */
+static void show_h264(struct app *a, uint32_t f)
+{
+    char err[160] = "";
+    uint32_t from = f;
+    if (a->hdone != ~0u && f > a->hdone && f - a->hdone <= 120)
+        from = a->hdone + 1;
+    else
+        while (from > 0 && !a->vid->key[from])
+            from--;
+    for (uint32_t k = from; k <= f; k++) {
+        size_t len = 0;
+        uint8_t *au = lm_mp4r_sample(a->vid, k, &len);
+        int rc = au ? lm_h264dec_decode(a->hd, au, len, err, sizeof(err)) : -1;
+        free(au);
+        if (rc < 0) {
+            a->hdone = ~0u;
+            snprintf(a->err, sizeof(a->err), "picture %u: %s", (unsigned)k + 1, err[0] ? err : "cannot read it");
+            a->playing = false;
+            a->win.redraw = true;
+            return;
+        }
+    }
+    a->hdone = f;
+    lm_h264dec_xrgb(a->hd, a->img.px, (size_t)a->img.w);
+    free(a->scaled);
+    a->scaled = NULL;
+    a->vframe = f;
+    a->err[0] = 0;
+    a->win.redraw = true;
 }
 
 static void show_frame(struct app *a, uint32_t f)
 {
+    if (a->vmode == 3) {
+        show_h264(a, f);
+        return;
+    }
     size_t len = 0;
     uint8_t *jpg = lm_mp4r_sample(a->vid, f, &len);
     struct lm_image img = { 0 };
@@ -173,16 +231,83 @@ static void show_frame(struct app *a, uint32_t f)
     a->win.redraw = true;
 }
 
+/* ffmpeg: (re)start decoding at `ms`; the first picture shows even while paused. */
+static bool ff_start(struct app *a, uint64_t ms, const char *path)
+{
+    ffdec_close(a->fd);
+    a->fd = ffdec_open(path, a->fw, a->fh, FF_FPS, ms, a->err, sizeof(a->err));
+    a->fbase = ms;
+    a->fidx = 0;
+    a->fhave = 0;
+    a->fready = false;
+    a->fwant = true;
+    a->fended = false;
+    return a->fd != NULL;
+}
+
+static char g_ff_path[PATH_MAX + 300];                 /* the file ffmpeg plays (for seeks) */
+
+/* Takes pictures from ffmpeg: the one that is due now is shown, late ones are dropped. */
+static void ff_tick(struct app *a)
+{
+    if (!a->fd || (!a->playing && !a->fwant))
+        return;
+    uint64_t pos = video_pos(a);
+    for (int guard = 0; guard < 4; guard++) {
+        if (!a->fready) {
+            int r = ffdec_read(a->fd, a->fbuf, &a->fhave);
+            if (r < 0) {                                    /* the end of the video */
+                a->playing = false;
+                a->fwant = false;
+                a->fended = true;
+                if (a->fdur)
+                    a->pos_ms = LM_MAX(a->pos_ms, a->fbase + a->fidx * 1000 / FF_FPS);
+                else
+                    a->pos_ms = a->fbase + a->fidx * 1000 / FF_FPS;
+                a->win.redraw = true;
+                return;
+            }
+            if (r == 0)
+                return;
+            a->fready = true;
+        }
+        uint64_t due = a->fbase + a->fidx * 1000 / FF_FPS;
+        if (!a->fwant && pos < due)
+            return;                                         /* not yet */
+        memcpy(a->img.px, a->fbuf, (size_t)a->fw * (size_t)a->fh * 4);
+        free(a->scaled);
+        a->scaled = NULL;
+        a->fidx++;
+        a->fready = false;
+        a->win.redraw = true;
+        if (a->fwant) {                                     /* the first one after a start or a seek: the clock begins now, not when ffmpeg was asked */
+            a->fwant = false;
+            a->pos_ms = due;
+            a->play_t0 = lm_now_ms();
+            return;
+        }
+        if (pos < a->fbase + a->fidx * 1000 / FF_FPS)       /* the next one is not due: this one stays */
+            return;
+    }
+}
+
 static void video_seek(struct app *a, int64_t ms)
 {
-    if (!a->vid)
+    if (!a->vmode)
         return;
+    uint64_t len = video_len(a);
     if (ms < 0)
         ms = 0;
-    if ((uint64_t)ms > a->vid->duration_ms)
-        ms = (int64_t)a->vid->duration_ms;
+    if (len && (uint64_t)ms > len)
+        ms = (int64_t)len;
     a->pos_ms = (uint64_t)ms;
     a->play_t0 = lm_now_ms();
+    if (a->vmode == 2) {
+        if (!ff_start(a, a->pos_ms, g_ff_path))
+            a->playing = false;
+        a->win.redraw = true;
+        return;
+    }
     uint32_t f = lm_mp4r_frame_at(a->vid, a->pos_ms);
     if (f != a->vframe || !a->img.px)
         show_frame(a, f);
@@ -191,13 +316,16 @@ static void video_seek(struct app *a, int64_t ms)
 
 static void video_toggle(struct app *a)
 {
-    if (!a->vid)
+    if (!a->vmode)
         return;
     if (a->playing) {
         a->pos_ms = video_pos(a);
         a->playing = false;
     } else {
-        if (a->pos_ms >= a->vid->duration_ms)           /* at the end: again from the start */
+        uint64_t len = video_len(a);
+        if (len && a->pos_ms >= len)                    /* at the end: again from the start */
+            video_seek(a, 0);
+        else if (a->vmode == 2 && a->fended)            /* ffmpeg had ended (a video of unknown length): again from the start */
             video_seek(a, 0);
         a->play_t0 = lm_now_ms();
         a->playing = true;
@@ -208,6 +336,15 @@ static void video_toggle(struct app *a)
 /* Called after every loop turn: shows the picture that belongs to now; ends the playback at the end. */
 static void video_tick(struct app *a)
 {
+    if (a->vmode == 2) {
+        ff_tick(a);
+        if (a->playing && video_len(a) && video_pos(a) >= video_len(a)) {
+            a->pos_ms = video_len(a);
+            a->playing = false;
+            a->win.redraw = true;
+        }
+        return;
+    }
     if (!a->vid || !a->playing)
         return;
     uint64_t pos = video_pos(a);
@@ -224,6 +361,14 @@ static void video_tick(struct app *a)
 /* How long the loop may sleep: until the next picture (at most 250 ms: the clock in the bar). */
 static int video_timeout(const struct app *a)
 {
+    if (a->vmode == 2) {
+        if (!a->fd || (!a->playing && !a->fwant))
+            return -1;
+        if (!a->fready)
+            return 4;                                       /* waiting for ffmpeg's data */
+        uint64_t pos = video_pos(a), due = a->fbase + a->fidx * 1000 / FF_FPS;
+        return due > pos ? (int)LM_MIN(due - pos, 50) : 1;
+    }
     if (!a->vid || !a->playing)
         return -1;
     uint64_t pos = video_pos(a);
@@ -252,6 +397,14 @@ static void load_current(struct app *a)
     a->err[0] = 0;
     lm_mp4r_close(a->vid);
     a->vid = NULL;
+    lm_h264dec_free(a->hd);
+    a->hd = NULL;
+    a->hdone = ~0u;
+    ffdec_close(a->fd);
+    a->fd = NULL;
+    free(a->fbuf);
+    a->fbuf = NULL;
+    a->vmode = 0;
     a->playing = false;
     a->vframe = 0;
     a->pos_ms = 0;
@@ -259,17 +412,66 @@ static void load_current(struct app *a)
         char path[PATH_MAX + 300];
         snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[a->cur]);
         if (is_video_name(a->names[a->cur])) {
-            a->vid = lm_mp4r_open(path, a->err, sizeof(a->err));
-            if (a->vid && !a->vid->mjpeg) {
-                snprintf(a->err, sizeof(a->err), "This video is %s (%dx%d): only Motion JPEG can be shown, what mellagui-record writes", a->vid->codec,
-                         a->vid->w, a->vid->h);
+            char why[160] = "";
+            a->vid = lm_mp4r_open(path, why, sizeof(why));          /* our own reader first: Motion JPEG needs nothing else */
+            if (a->vid && a->vid->h264) {                           /* H.264 of our own making plays without ffmpeg */
+                char herr[160];
+                a->hd = lm_h264dec_create(a->vid->sps, a->vid->sps_n, a->vid->pps, a->vid->pps_n, herr, sizeof(herr));
+                if (a->hd) {
+                    a->img.w = lm_h264dec_width(a->hd);
+                    a->img.h = lm_h264dec_height(a->hd);
+                    a->img.px = calloc((size_t)a->img.w * (size_t)a->img.h, 4);
+                    if (!a->img.px) {
+                        lm_h264dec_free(a->hd);
+                        a->hd = NULL;
+                    }
+                } else {
+                    snprintf(why, sizeof(why), "%s", herr);
+                }
+                if (!a->hd) {
+                    lm_mp4r_close(a->vid);
+                    a->vid = NULL;
+                }
+            } else if (a->vid && !a->vid->mjpeg) {
+                snprintf(why, sizeof(why), "This video is %s (%dx%d)", a->vid->codec, a->vid->w, a->vid->h);
                 lm_mp4r_close(a->vid);
                 a->vid = NULL;
             }
             if (a->vid) {
+                a->vmode = a->hd ? 3 : 1;
                 show_frame(a, 0);
                 a->play_t0 = lm_now_ms();
                 a->playing = a->img.px != NULL;
+            } else {                                                /* anything else: ffmpeg, when it is installed */
+                struct ffdec_info info;
+                char ferr[160];
+                if (ffpipe_ffmpeg_path() && ffdec_probe(path, &info, ferr, sizeof(ferr))) {
+                    a->fw = info.w;
+                    a->fh = info.h;
+                    a->fdur = info.duration_ms;
+                    a->fbuf = malloc((size_t)a->fw * (size_t)a->fh * 4);
+                    a->img.w = a->fw;
+                    a->img.h = a->fh;
+                    a->img.px = calloc((size_t)a->fw * (size_t)a->fh, 4);
+                    snprintf(g_ff_path, sizeof(g_ff_path), "%s", path);
+                    if (a->fbuf && a->img.px && ff_start(a, 0, path)) {
+                        a->vmode = 2;
+                        a->play_t0 = lm_now_ms();
+                        a->playing = true;
+                    } else {
+                        lm_img_free(&a->img);
+                        free(a->fbuf);
+                        a->fbuf = NULL;
+                        snprintf(why, sizeof(why), "%s", a->err[0] ? a->err : "cannot play it");
+                    }
+                } else if (!ffpipe_ffmpeg_path()) {
+                    snprintf(a->err, sizeof(a->err), "%s%sSound-free Motion JPEG plays by itself; for this one install ffmpeg", why, why[0] ? ": " : "");
+                    why[0] = 0;
+                } else {
+                    snprintf(why, sizeof(why), "%s", ferr);
+                }
+                if (!a->vmode && !a->err[0])
+                    snprintf(a->err, sizeof(a->err), "%s", why);
             }
         } else if (lm_img_load(path, &a->img, a->err, sizeof(a->err)) < 0) {
             a->img.px = NULL;
@@ -378,10 +580,10 @@ static void paint(struct wlwin *w)
                 memcpy(dst + ox + x0, src + (size_t)y * (size_t)stride + (size_t)x0, (size_t)(x1 - x0) * 4);
             }
         }
-        if (a->vid) {
+        if (a->vmode) {
             char t1[16], t2[16];
             fmt_time(t1, sizeof(t1), video_pos(a));
-            fmt_time(t2, sizeof(t2), a->vid->duration_ms);
+            fmt_time(t2, sizeof(t2), video_len(a));
             snprintf(status, sizeof(status), "%s   %dx%d   %s / %s   %s   %d%%   %d/%d", a->names[a->cur], a->img.w, a->img.h, t1, t2,
                      a->playing ? "playing" : "paused", (int)(z * 100 + 0.5), a->cur + 1, a->n);
         } else {
@@ -396,9 +598,9 @@ static void paint(struct wlwin *w)
         wlwin_text(w, 16, 16, "No images or videos here. Press Print to take a screenshot, R to look again.", 1, BAR_FG, vw - 32);
     }
     wlwin_fill(w, 0, vh, w->bw, w->bh - vh, BAR_BG);
-    if (a->vid && a->vid->duration_ms) {                         /* the progress: a strip along the top of the bar */
+    if (a->vmode && video_len(a)) {                              /* the progress: a strip along the top of the bar */
         wlwin_fill(w, 0, vh, w->bw, 4, 0x2a3040u);
-        wlwin_fill(w, 0, vh, (int)((uint64_t)w->bw * video_pos(a) / a->vid->duration_ms), 4, lm_theme.accent);
+        wlwin_fill(w, 0, vh, (int)((uint64_t)w->bw * video_pos(a) / video_len(a)), 4, lm_theme.accent);
     }
     wlwin_text(w, 8, vh + (BAR_H - LM_FONT_H) / 2 + 2, status, 1, BAR_FG, w->bw - 16);
 }
@@ -421,8 +623,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_MOTION: {
         double x = lm_fixed_to_double(args[1].f), y = lm_fixed_to_double(args[2].f);
-        if (a->seeking && a->vid)
-            video_seek(a, (int64_t)(LM_CLAMP(x / (double)w->bw, 0.0, 1.0) * (double)a->vid->duration_ms));
+        if (a->seeking && a->vmode)
+            video_seek(a, (int64_t)(LM_CLAMP(x / (double)w->bw, 0.0, 1.0) * (double)video_len(a)));
         if (a->dragging && a->img.px) {
             double z = cur_zoom(a);
             if (a->fit) {                               /* dragging starts from the centred position */
@@ -445,9 +647,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         if (args[2].u != 272)                           /* BTN_LEFT */
             break;
-        if (args[3].u == 1 && a->vid && a->py >= view_h(a)) {   /* a click on the bar of a video seeks */
+        if (args[3].u == 1 && a->vmode && a->py >= view_h(a)) {  /* a click on the bar of a video seeks */
             a->seeking = true;
-            video_seek(a, (int64_t)(LM_CLAMP(a->px / (double)w->bw, 0.0, 1.0) * (double)a->vid->duration_ms));
+            video_seek(a, (int64_t)(LM_CLAMP(a->px / (double)w->bw, 0.0, 1.0) * (double)video_len(a)));
             break;
         }
         if (args[3].u != 1)
@@ -500,22 +702,27 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     }
     if (ks == LM_KS_Escape || c == 'q' || c == 'Q') {
         w->running = false;
-    } else if (a->vid && c == ' ') {
+    } else if (a->vmode && c == ' ') {
         video_toggle(a);
-    } else if (a->vid && ks == LM_KS_Right) {
+    } else if (a->vmode && ks == LM_KS_Right) {
         video_seek(a, (int64_t)video_pos(a) + 5000);
-    } else if (a->vid && ks == LM_KS_Left) {
+    } else if (a->vmode && ks == LM_KS_Left) {
         video_seek(a, (int64_t)video_pos(a) - 5000);
-    } else if (a->vid && (c == ',' || c == '.')) {                 /* one picture back / on, paused */
+    } else if ((a->vmode == 1 || a->vmode == 3) && (c == ',' || c == '.')) {          /* one picture back / on, paused */
         uint32_t f = lm_mp4r_frame_at(a->vid, video_pos(a));
         if (a->playing)
             video_toggle(a);
         f = c == '.' ? LM_MIN(f + 1, a->vid->n - 1) : (f ? f - 1 : 0);
         video_seek(a, (int64_t)a->vid->pts_ms[f]);
-    } else if (a->vid && ks == LM_KS_Home) {
+    } else if (a->vmode == 2 && (c == ',' || c == '.')) {
+        int64_t at = (int64_t)video_pos(a) + (c == '.' ? 1000 / FF_FPS : -1000 / FF_FPS);
+        if (a->playing)
+            video_toggle(a);
+        video_seek(a, at);
+    } else if (a->vmode && ks == LM_KS_Home) {
         video_seek(a, 0);
-    } else if (a->vid && ks == LM_KS_End) {
-        video_seek(a, (int64_t)a->vid->duration_ms);
+    } else if (a->vmode && ks == LM_KS_End) {
+        video_seek(a, (int64_t)(video_len(a) ? video_len(a) : 0));
     } else if (ks == LM_KS_Right || ks == LM_KS_Page_Down || c == ' ' || c == 'n' || c == 'N') {
         go(a, a->cur + 1);
     } else if (ks == LM_KS_Left || ks == LM_KS_Page_Up || ks == LM_KS_BackSpace || c == 'p' || c == 'P') {
@@ -590,10 +797,35 @@ static int decode_cmd(const char *in, const char *out, int frame)
     char err[160];
     if (is_video_name(in)) {
         struct lm_mp4r *r = lm_mp4r_open(in, err, sizeof(err));
-        size_t len = 0;
-        uint8_t *jpg = r && r->mjpeg && frame >= 0 && (uint32_t)frame < r->n ? lm_mp4r_sample(r, (uint32_t)frame, &len) : NULL;
-        int rc = !r ? -1 : !jpg ? (snprintf(err, sizeof(err), "no such picture, or not Motion JPEG"), -1) : lm_jpeg_decode(jpg, len, &img, err, sizeof(err));
-        free(jpg);
+        int rc = -1;
+        if (r && r->h264 && frame >= 0 && (uint32_t)frame < r->n) {          /* our own H.264: from the IDR picture before it */
+            struct lm_h264dec *hd = lm_h264dec_create(r->sps, r->sps_n, r->pps, r->pps_n, err, sizeof(err));
+            uint32_t from = (uint32_t)frame;
+            while (from > 0 && !r->key[from])
+                from--;
+            rc = hd ? 0 : -1;
+            for (uint32_t k = from; hd && rc == 0 && k <= (uint32_t)frame; k++) {
+                size_t len = 0;
+                uint8_t *au = lm_mp4r_sample(r, k, &len);
+                rc = au ? lm_h264dec_decode(hd, au, len, err, sizeof(err)) : (snprintf(err, sizeof(err), "cannot read the picture"), -1);
+                free(au);
+            }
+            if (rc == 0) {
+                img.w = lm_h264dec_width(hd);
+                img.h = lm_h264dec_height(hd);
+                img.px = malloc((size_t)img.w * (size_t)img.h * 4);
+                if (img.px)
+                    lm_h264dec_xrgb(hd, img.px, (size_t)img.w);
+                else
+                    rc = (snprintf(err, sizeof(err), "out of memory"), -1);
+            }
+            lm_h264dec_free(hd);
+        } else {
+            size_t len = 0;
+            uint8_t *jpg = r && r->mjpeg && frame >= 0 && (uint32_t)frame < r->n ? lm_mp4r_sample(r, (uint32_t)frame, &len) : NULL;
+            rc = !r ? -1 : !jpg ? (snprintf(err, sizeof(err), "no such picture, or not Motion JPEG or H.264"), -1) : lm_jpeg_decode(jpg, len, &img, err, sizeof(err));
+            free(jpg);
+        }
         lm_mp4r_close(r);
         if (rc < 0) {
             fprintf(stderr, "mellagui-view: %s\n", err);
@@ -658,6 +890,9 @@ int main(int argc, char **argv)
         video_tick(&a);
     wlwin_destroy(&a.win);
     lm_mp4r_close(a.vid);
+    lm_h264dec_free(a.hd);
+    ffdec_close(a.fd);
+    free(a.fbuf);
     lm_img_free(&a.img);
     free(a.scaled);
     free_names(&a);

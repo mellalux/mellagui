@@ -299,6 +299,40 @@ static void ctl_command(struct ctl_client *c, char *line)
         lm_list_for_each(o, &h->base.outputs, link)
             ctl_reply(c, "output %s x=%d y=%d w=%d h=%d\n", o->name, o->x, o->y, o->width, o->height);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "unplug")) {
+        /* unplug -> the first output goes away like a monitor whose KVM switch looks at another computer (tests); its fb is kept */
+        if (h->output_live) {
+            h->output_live = false;
+            if (h->base.listener.output_removed)
+                h->base.listener.output_removed(h->base.listener.data, &h->out);
+            lm_list_remove(&h->out.link);
+        }
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "replug")) {
+        /* replug [WxH] -> the first output is back, at that size when given (the monitor may wake up in another mode) */
+        int nw = h->w, nh = h->h;
+        if (a1 && sscanf(a1, "%dx%d", &nw, &nh) != 2) { ctl_reply(c, "err usage: replug [WxH]\n"); return; }
+        if (nw < 16 || nh < 16 || nw > 8192 || nh > 8192) { ctl_reply(c, "err size\n"); return; }
+        if (!h->output_live) {
+            if (nw != h->w || nh != h->h) {
+                uint32_t *px = calloc((size_t)nw * (size_t)nh, 4);
+                if (!px) { ctl_reply(c, "err memory\n"); return; }
+                free(h->fb.pixels);
+                h->fb = (struct lm_framebuffer){ .width = nw, .height = nh, .stride = nw * 4, .pixels = px };
+                h->w = nw;
+                h->h = nh;
+                h->out.width = nw;
+                h->out.height = nh;
+                h->out.phys_width_mm = nw * 254 / 960;
+                h->out.phys_height_mm = nh * 254 / 960;
+            }
+            lm_list_insert(&h->base.outputs, &h->out.link);         /* the first one again */
+            h->output_live = true;
+            if (h->base.listener.output_added)
+                h->base.listener.output_added(h->base.listener.data, &h->out);
+            lm_timer_arm_ms(h->ready_timer, 1, 0);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "saver")) {
         /* saver [start|stop] -> "saver running=<0|1> enabled=<0|1> minutes=<n>" after the optional change, then "ok" (the screensaver) */
         if (srv->saver && a1 && !strcmp(a1, "start"))

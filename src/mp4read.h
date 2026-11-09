@@ -4,7 +4,8 @@
 /*
  * MP4 / MOV reader for mellagui-view: the first video track's sample table (offsets, sizes, times) and the raw samples. Only Motion
  * JPEG can be shown (what mellagui-record writes, and what `ffmpeg -c:v mjpeg` makes): sample entry "mp4v" with an esds of object
- * type 0x6C, or "jpeg" / "MJPG"; other codecs are opened (so the viewer can say what they are) but `mjpeg` is false. No fragments, no
+ * type 0x6C, or "jpeg" / "MJPG", or H.264 ("avc1": the samples and the parameter sets are given, decoding is h264dec.c's business);
+ * other codecs are opened (so the viewer can say what they are) but `mjpeg` and `h264` are false. No fragments, no
  * edit lists, no sound. The whole `moov` box is read into memory (at most 256 MB), the samples are read one at a time. Owner: mp4read.c.
  */
 
@@ -19,6 +20,10 @@ struct lm_mp4r {
     int w, h;
     char codec[5];                  /* the sample entry's four characters, e.g. "mp4v", "avc1" */
     bool mjpeg;                     /* the samples are JPEG pictures */
+    bool h264;                      /* the samples are H.264 access units (4 byte lengths); sps / pps are the parameter sets, NAL units with their header byte */
+    uint8_t *sps, *pps;
+    size_t sps_n, pps_n;
+    uint8_t *key;                   /* n flags: the sample can be started at (all 1 for JPEG) */
     uint32_t n;                     /* samples (pictures) */
     uint64_t *off;                  /* n file offsets */
     uint32_t *size;                 /* n sizes */

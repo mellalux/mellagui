@@ -1,15 +1,22 @@
 /*
- * mellagui-record: screen recorder. Records one output into an MP4 file (Motion JPEG, see src/mp4.h) that plays in ffmpeg, VLC, mpv.
+ * mellagui-record: screen recorder. Records one output into an MP4 file.
  *
  *   mellagui-record [--start] [--duration SECONDS] [--output N] [--fps N] [--quality 1..100] [--dir DIR] [--name FILE]
+ *                   [--codec auto|h264|ffmpeg|mjpeg]
  *   mellagui-record --list           the outputs (index, name, size) and exit
- *   mellagui-record --selftest       encoder and MP4 writer without a display
+ *   mellagui-record --selftest       encoders and MP4 writer without a display
+ *
+ * Codecs: `ffmpeg` = H.264 by x264 through a pipe to ffmpeg (src: client/ffpipe.c; best compression, needs ffmpeg with libx264), `h264` =
+ * H.264 by mellagui's own encoder (src/h264enc.c, constrained baseline, no ffmpeg needed, ~35 times smaller than Motion JPEG), `mjpeg` =
+ * Motion JPEG by src/jpegenc.c (big files, simplest). `auto` (default) takes ffmpeg when it is installed, else our own H.264. $MELLAGUI_FFMPEG
+ * names another ffmpeg ("none" = pretend there is none).
  *
  * The pictures come from the compositor's private mellagui_capture_v1 global (src/capture.h; only MellaGUI's own programs get
- * it): the main thread asks for one at a time into a small ring of shared buffers, a picture that is identical to the one before
- * is dropped (a still screen costs nothing, the earlier picture just lasts longer), the others are JPEG coded by a thread
- * (src/jpegenc.c) and appended to the file (src/mp4.c) straight from the shared memory. When the encoder is slower than the frame
- * rate pictures are skipped, never queued up. The cursor is not in the picture (as in screenshots), and neither is sound.
+ * it): the main thread asks for one at a time into a small ring of shared buffers and a picture that is identical to the one before is
+ * dropped (a still screen costs nothing, the earlier picture just lasts longer). The others go to the encoder: Motion JPEG on up to 4 threads
+ * (src/jpegenc.c, written to src/mp4.c in order), own H.264 on one thread (src/h264enc.c: a picture is predicted from the one before),
+ * ffmpeg through a pipe, stamped with the time it is read. When the encoder is slower than the frame rate pictures are skipped, never queued
+ * up. The cursor is not in the picture (as in screenshots), and neither is sound.
  *
  * Window: Record / Stop, the output and the frame rate to use (not while recording). Keys: Space or Enter record / stop,
  * O next output, F next frame rate, Esc or Q close (a recording is finished first). SIGINT / SIGTERM also finish the file.
@@ -30,6 +37,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "ffpipe.h"
+#include "h264dec.h"
+#include "h264enc.h"
 #include "jpegenc.h"
 #include "keymap.h"
 #include "loop.h"
@@ -76,6 +86,7 @@ struct app {
 
     /* settings of the recording */
     int out_sel, fps_sel, quality;
+    int codec_opt;                  /* --codec: 0 auto, 1 mjpeg (our own encoder), 2 ffmpeg (H.264 through libx264), 3 h264 (our own encoder) */
     const char *dir, *name;         /* --dir, --name */
     double duration;                /* --duration: stop (and quit) after that many seconds, 0 = never */
 
@@ -83,7 +94,10 @@ struct app {
     bool rec;
     int rw, rh;                     /* size of the recorded output */
     int rout;                       /* output index being recorded */
-    struct lm_mp4 *mp4;
+    struct lm_mp4 *mp4;             /* Motion JPEG: our own file writer */
+    struct ffpipe *ff;              /* H.264: ffmpeg writes the file (NULL when mp4 is used) */
+    struct lm_h264enc *h264;        /* H.264 by our own encoder, into mp4 (NULL otherwise) */
+    uint8_t *ff_last;               /* the last picture sent, sent once more when the recording ends (that defines its end) */
     char path[600];
     uint64_t t0, next_grab, interval;
     struct frame fr[MAX_FRAMES];
@@ -192,14 +206,15 @@ static const char *record_dir(const struct app *a, char *buf, size_t n)
     return ".";
 }
 
-/* Creates the next free file; returns the lm_mp4 or NULL (message in a->msg). */
-static struct lm_mp4 *create_file(struct app *a, int w, int h)
+/* Picks and creates the next free file (mode 0600, never an existing one): a Motion JPEG writer in *mp4 when `native`, else just an empty
+ * file for ffmpeg to fill. false with a message in a->msg. */
+static bool create_file(struct app *a, int w, int h, bool native, struct lm_mp4 **mp4)
 {
     char dirbuf[512];
     const char *dir = record_dir(a, dirbuf, sizeof(dirbuf));
     if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
         set_msg(a, "cannot create %s: %s", dir, strerror(errno));
-        return NULL;
+        return false;
     }
     char stamp[32];
     time_t now = time(NULL);
@@ -213,16 +228,25 @@ static struct lm_mp4 *create_file(struct app *a, int w, int h)
             snprintf(a->path, sizeof(a->path), "%s/mellagui-%s.mp4", dir, stamp);
         else
             snprintf(a->path, sizeof(a->path), "%s/mellagui-%s-%d.mp4", dir, stamp, n);
-        struct lm_mp4 *m = lm_mp4_create(a->path, w, h);
-        if (m)
-            return m;
+        bool ok;
+        if (native) {
+            *mp4 = lm_mp4_create(a->path, w, h);
+            ok = *mp4 != NULL;
+        } else {
+            int fd = open(a->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            ok = fd >= 0;
+            if (ok)
+                close(fd);
+        }
+        if (ok)
+            return true;
         if (errno != EEXIST || (a->name && *a->name)) {
             set_msg(a, "cannot write %s: %s", a->path, strerror(errno));
-            return NULL;
+            return false;
         }
     }
     set_msg(a, "no free file name in %s", dir);
-    return NULL;
+    return false;
 }
 
 /* ---- encoder thread -------------------------------------------------------------------------------------------------- */
@@ -262,6 +286,89 @@ static void *encoder_main(void *arg)
         }
         a->seq_write++;
         pthread_cond_broadcast(&a->cond);
+        f->state = F_FREE;
+    }
+    pthread_mutex_unlock(&a->lock);
+    return NULL;
+}
+
+/* The H.264 way: one thread hands the changed pictures to ffmpeg in the order they were taken. ffmpeg stamps each with the time it reads it,
+ * so this must not wait for anything; when the recording ends the last picture goes once more, which sets the end of the video. */
+static void *ff_writer_main(void *arg)
+{
+    struct app *a = arg;
+    size_t bytes = (size_t)a->rw * (size_t)a->rh * 4;
+    bool have_last = false;
+    pthread_mutex_lock(&a->lock);
+    for (;;) {
+        while (a->qn == 0 && !a->stop_thread)
+            pthread_cond_wait(&a->cond, &a->lock);
+        if (a->qn == 0)
+            break;
+        int i = a->queue[0];
+        memmove(a->queue, a->queue + 1, (size_t)(a->qn - 1) * sizeof(int));
+        a->qn--;
+        struct frame *f = &a->fr[i];
+        f->state = F_ENCODING;
+        pthread_mutex_unlock(&a->lock);
+
+        bool bad = ffpipe_write(a->ff, f->px, bytes) < 0;
+        if (!bad && a->ff_last) {
+            memcpy(a->ff_last, f->px, bytes);
+            have_last = true;
+        }
+
+        pthread_mutex_lock(&a->lock);
+        if (bad) {
+            a->enc_error = true;
+        } else {
+            a->enc_frames++;
+        }
+        f->state = F_FREE;
+    }
+    pthread_mutex_unlock(&a->lock);
+    if (have_last && !a->enc_error && ffpipe_write(a->ff, a->ff_last, bytes) < 0)
+        a->enc_error = true;
+    return NULL;
+}
+
+/* H.264 by our own encoder: one thread (a picture is predicted from the one before), the changed pictures in the order they were taken; an
+ * IDR picture every five seconds is a place to start playing at. */
+static void *h264_writer_main(void *arg)
+{
+    struct app *a = arg;
+    uint64_t last_idr = 0;
+    bool first = true;
+    pthread_mutex_lock(&a->lock);
+    for (;;) {
+        while (a->qn == 0 && !a->stop_thread)
+            pthread_cond_wait(&a->cond, &a->lock);
+        if (a->qn == 0)
+            break;
+        int i = a->queue[0];
+        memmove(a->queue, a->queue + 1, (size_t)(a->qn - 1) * sizeof(int));
+        a->qn--;
+        struct frame *f = &a->fr[i];
+        f->state = F_ENCODING;
+        pthread_mutex_unlock(&a->lock);
+
+        size_t len = 0;
+        bool key = false, want_idr = first || f->pts - last_idr >= 5000;
+        uint8_t *au = lm_h264enc_encode(a->h264, f->px, (size_t)a->rw * 4, want_idr, &len, &key);
+        if (au && key) {
+            last_idr = f->pts;
+            first = false;
+        }
+        bool bad = !au || lm_mp4_add_sample(a->mp4, au, len, f->pts, key) < 0;
+        free(au);
+
+        pthread_mutex_lock(&a->lock);
+        if (bad) {
+            a->enc_error = true;
+        } else {
+            a->enc_frames++;
+            a->enc_bytes += len;
+        }
         f->state = F_FREE;
     }
     pthread_mutex_unlock(&a->lock);
@@ -414,7 +521,13 @@ static bool start_recording(struct app *a)
     size_t frame_bytes = (size_t)a->rw * (size_t)a->rh * 4;
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     a->nthreads = 0;
-    int workers = (int)(cpus < 2 ? 1 : cpus - 1 > MAX_WORKERS ? MAX_WORKERS : cpus - 1);
+    bool use_ff = a->codec_opt == 2 || (a->codec_opt == 0 && ffpipe_available());
+    bool use_h264 = a->codec_opt == 3 || (a->codec_opt == 0 && !use_ff);        /* auto: x264 through ffmpeg when it is there, else our own H.264 */
+    if (use_ff && !ffpipe_available()) {
+        set_msg(a, "ffmpeg with libx264 is not installed (--codec h264 and --codec mjpeg work without it)");
+        return false;
+    }
+    int workers = use_ff || use_h264 ? 1 : (int)(cpus < 2 ? 1 : cpus - 1 > MAX_WORKERS ? MAX_WORKERS : cpus - 1);
     a->nframes = workers + 3;
     a->map_size = frame_bytes * (size_t)a->nframes;
     int fd = memfd_create("mellagui-record", MFD_CLOEXEC);
@@ -431,8 +544,22 @@ static bool start_recording(struct app *a)
         set_msg(a, "mmap: %s", strerror(errno));
         return false;
     }
-    a->mp4 = create_file(a, a->rw, a->rh);
-    if (!a->mp4) {
+    int cw = a->rw, ch = a->rh;                     /* the size of the picture in the file */
+    if (use_h264) {
+        a->h264 = lm_h264enc_create(a->rw, a->rh, LM_CLAMP((int)(46 - a->quality * 0.25 + 0.5), 10, 40));
+        if (!a->h264) {
+            set_msg(a, "cannot start the H.264 encoder (a picture of %dx%d?)", a->rw, a->rh);
+            munmap(a->map, a->map_size);
+            a->map = NULL;
+            close(fd);
+            return false;
+        }
+        cw = lm_h264enc_width(a->h264);
+        ch = lm_h264enc_height(a->h264);
+    }
+    if (!create_file(a, cw, ch, !use_ff, &a->mp4)) {
+        lm_h264enc_free(a->h264);
+        a->h264 = NULL;
         munmap(a->map, a->map_size);
         a->map = NULL;
         close(fd);
@@ -463,14 +590,57 @@ static bool start_recording(struct app *a)
     pthread_mutex_init(&a->lock, NULL);
     pthread_cond_init(&a->cond, NULL);
     a->seq_next = a->seq_write = 0;
-    lm_jpeg_encode_init();                          /* the tables are built before several threads use them */
+    if (use_h264) {
+        uint8_t *sps = NULL, *pps = NULL;
+        size_t sn = 0, pn = 0;
+        if (!lm_h264enc_headers(a->h264, &sps, &sn, &pps, &pn) || lm_mp4_set_h264(a->mp4, sps, sn, pps, pn) < 0) {
+            free(sps);
+            free(pps);
+            set_msg(a, "cannot start the H.264 encoder");
+            lm_mp4_close(a->mp4, 0);
+            a->mp4 = NULL;
+            lm_h264enc_free(a->h264);
+            a->h264 = NULL;
+            free_frames(a);
+            return false;
+        }
+        free(sps);
+        free(pps);
+    } else if (use_ff) {
+        char why[160];
+        a->ff = ffpipe_start(a->path, a->rw, a->rh, 21, why, sizeof(why));
+        a->ff_last = a->ff ? malloc(frame_bytes) : NULL;
+        if (!a->ff_last && a->ff) {
+            ffpipe_finish(a->ff);
+            a->ff = NULL;
+            snprintf(why, sizeof(why), "out of memory");
+        }
+        if (!a->ff) {
+            set_msg(a, "%s", why);
+            unlink(a->path);
+            free_frames(a);
+            return false;
+        }
+    } else {
+        lm_jpeg_encode_init();                      /* the tables are built before several threads use them */
+    }
     for (int i = 0; i < workers; i++)
-        if (pthread_create(&a->threads[a->nthreads], NULL, encoder_main, a) == 0)
+        if (pthread_create(&a->threads[a->nthreads], NULL, use_ff ? ff_writer_main : use_h264 ? h264_writer_main : encoder_main, a) == 0)
             a->nthreads++;
     if (a->nthreads == 0) {
         set_msg(a, "cannot start the encoder thread");
-        lm_mp4_close(a->mp4, 0);
-        a->mp4 = NULL;
+        if (a->ff) {
+            ffpipe_finish(a->ff);
+            a->ff = NULL;
+            free(a->ff_last);
+            a->ff_last = NULL;
+            unlink(a->path);
+        } else {
+            lm_mp4_close(a->mp4, 0);
+            a->mp4 = NULL;
+            lm_h264enc_free(a->h264);
+            a->h264 = NULL;
+        }
         free_frames(a);
         return false;
     }
@@ -482,7 +652,8 @@ static bool start_recording(struct app *a)
     a->win.redraw = true;
     tray_start(a);
     a->want_min = a->tray != 0;                     /* the bar's item shows that it runs: the window can go out of the way */
-    fprintf(stderr, "mellagui-record: recording %s %dx%d at %d fps -> %s\n", o->name, a->rw, a->rh, FPS_CHOICES[a->fps_sel], a->path);
+    fprintf(stderr, "mellagui-record: recording %s %dx%d at %d fps (%s) -> %s\n", o->name, a->rw, a->rh, FPS_CHOICES[a->fps_sel],
+            use_ff ? "H.264 through ffmpeg" : use_h264 ? "H.264, built in" : "Motion JPEG", a->path);
     return true;
 }
 
@@ -504,10 +675,31 @@ static void stop_recording(struct app *a)
     pthread_mutex_destroy(&a->lock);
     pthread_cond_destroy(&a->cond);
     bool bad = a->enc_error;
-    uint32_t frames = lm_mp4_frames(a->mp4);
-    uint64_t bytes = lm_mp4_bytes(a->mp4);
-    int rc = lm_mp4_close(a->mp4, end);
-    a->mp4 = NULL;
+    uint32_t frames;
+    uint64_t bytes;
+    int rc;
+    if (a->ff) {
+        frames = a->enc_frames;
+        rc = ffpipe_finish(a->ff);                  /* waits until ffmpeg has finished the file */
+        a->ff = NULL;
+        free(a->ff_last);
+        a->ff_last = NULL;
+        struct stat st;
+        bytes = stat(a->path, &st) == 0 ? (uint64_t)st.st_size : 0;
+        if (frames == 0 || bytes == 0)
+            rc = -1;
+        if (rc < 0)
+            unlink(a->path);
+        else if (bad)
+            rc = 0;
+    } else {
+        frames = lm_mp4_frames(a->mp4);
+        bytes = lm_mp4_bytes(a->mp4);
+        rc = lm_mp4_close(a->mp4, end);
+        a->mp4 = NULL;
+        lm_h264enc_free(a->h264);
+        a->h264 = NULL;
+    }
     free_frames(a);
     a->grabbing = -1;
     if (rc < 0) {
@@ -568,6 +760,14 @@ static void tick(struct app *a)
     }
     if (a->win.running && (now - a->t0) / 1000 != a->shown_sec) {
         a->shown_sec = (now - a->t0) / 1000;
+        if (a->ff) {                                /* ffmpeg writes the file: its size is the best news we have */
+            struct stat st;
+            if (stat(a->path, &st) == 0) {
+                pthread_mutex_lock(&a->lock);
+                a->enc_bytes = (uint64_t)st.st_size;
+                pthread_mutex_unlock(&a->lock);
+            }
+        }
         a->win.redraw = true;
     }
     if (a->grabbing >= 0 || now < a->next_grab)
@@ -935,6 +1135,43 @@ static int selftest(void)
     snprintf(path2, sizeof(path2), "%s/e.mp4", dir);
     m2 = lm_mp4_create(path2, w, h);
     CHECK(m2 && lm_mp4_close(m2, 100) < 0 && access(path2, F_OK) != 0);
+    /* our H.264 encoder and decoder agree, picture for picture: an I picture, P pictures with changes, an IDR in the middle */
+    {
+        const int hw = 70, hh = 46;                                 /* not a multiple of 16 */
+        struct lm_h264enc *he = lm_h264enc_create(hw, hh, 24);
+        uint8_t *sps = NULL, *pps = NULL;
+        size_t sn = 0, pn = 0;
+        char herr[120] = "";
+        CHECK(he != NULL && lm_h264enc_headers(he, &sps, &sn, &pps, &pn));
+        struct lm_h264dec *hd = he ? lm_h264dec_create(sps, sn, pps, pn, herr, sizeof(herr)) : NULL;
+        CHECK(hd != NULL);
+        for (int f = 0; he && hd && f < 8; f++) {
+            for (int y = 0; y < hh; y++)
+                for (int x = 0; x < hw; x++)
+                    px[(size_t)y * (size_t)w + (size_t)x] = (uint32_t)((((x * 4) & 255) << 16) | ((y * 5) & 255) << 8 | 0x40);
+            for (int y = 8; y < 24; y++)                          /* something that moves and changes colour */
+                for (int x = f * 6; x < f * 6 + 20 && x < hw; x++)
+                    px[(size_t)y * (size_t)w + (size_t)x] = f & 1 ? 0xffffff : 0x101010;
+            size_t len = 0;
+            bool key = false;
+            uint8_t *au = lm_h264enc_encode(he, px, (size_t)w * 4, f == 0 || f == 4, &len, &key);
+            CHECK(au != NULL && key == (f == 0 || f == 4));
+            bool got = au != NULL;
+            CHECK(got && lm_h264dec_decode(hd, au, len, herr, sizeof(herr)) == 0);
+            free(au);
+            for (int pl = 0; pl < 3 && got; pl++) {
+                int s1, s2;
+                const uint8_t *pa = lm_h264enc_recon(he, pl, &s1), *pb = lm_h264dec_plane(hd, pl, &s2);
+                int pw2 = pl ? hw / 2 : hw, ph2 = pl ? hh / 2 : hh;
+                for (int y = 0; y < ph2; y++)
+                    CHECK(!memcmp(pa + (size_t)y * (size_t)s1, pb + (size_t)y * (size_t)s2, (size_t)pw2));
+            }
+        }
+        lm_h264dec_free(hd);
+        lm_h264enc_free(he);
+        free(sps);
+        free(pps);
+    }
     /* the flat-block shortcut of the DCT: a plain colour must come out as that colour */
     for (size_t i = 0; i < (size_t)w * h; i++)
         px[i] = 0x336699;
@@ -956,6 +1193,7 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: mellagui-record [--start] [--duration SECONDS] [--output N] [--fps N] [--quality 1..100] [--dir DIR] [--name FILE]\n"
+            "                        [--codec auto|h264|ffmpeg|mjpeg]\n"
             "       mellagui-record --list | --selftest\n");
 }
 
@@ -975,6 +1213,14 @@ int main(int argc, char **argv)
         else if (!strcmp(s, "--quality") && val) { a.quality = LM_CLAMP(atoi(val), 1, 100); i++; }
         else if (!strcmp(s, "--dir") && val) { a.dir = val; i++; }
         else if (!strcmp(s, "--name") && val) { a.name = val; i++; }
+        else if (!strcmp(s, "--codec") && val) {
+            a.codec_opt = !strcmp(val, "auto") ? 0 : !strcmp(val, "mjpeg") ? 1 : !strcmp(val, "ffmpeg") ? 2 : !strcmp(val, "h264") ? 3 : -1;
+            if (a.codec_opt < 0) {
+                usage();
+                return 2;
+            }
+            i++;
+        }
         else if (!strcmp(s, "--fps") && val) {
             int f = atoi(val), best = 0;
             for (int k = 0; k < N_FPS; k++)

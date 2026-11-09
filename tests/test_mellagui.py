@@ -1290,18 +1290,131 @@ class TestGadget(Base):
         self.assertEqual(os.path.getsize(path), 0)                                 # clearing is saved, too
 
     def test_history_is_limited_and_multiline_text_is_kept(self):
-        for i in range(7):
-            self.copy('item %d' % i)
-            self.wait_clips(min(i + 1, 5))
-        got = self.wait_clips(5)
-        self.assertEqual(got[0], 'item 6')
-        self.assertEqual(got[-1], 'item 2')
+        for i in range(55):
+            ctl.cmd('clip add item %d' % i)
+        got = self.clips()
+        self.assertEqual(len(got), 50)                                # fifty entries are kept (it used to be five)
+        self.assertEqual(got[0], 'item 54')
+        self.assertEqual(got[-1], 'item 5')
         self.copy('two\nlines')
         for _ in range(100):
             if self.clips()[:1] == ['two\\nlines']:
                 break
             time.sleep(0.02)
         self.assertEqual(self.clips()[0], 'two\\nlines')
+        self.assertEqual(len(self.clips()), 50)
+
+    # ---- the card scrolls, with small arrow buttons; entries and the whole history can be deleted -----------------------------------
+
+    def view(self):
+        ctl.cmd('clip')
+        f = dict(kv.split('=') for kv in ctl.last.split()[1:])
+        return int(f['top']), int(f['slots']), int(f['n'])
+
+    def buttons(self):
+        """Centres of the title bar buttons (up, down, clear all) and a function giving the x of entry k and the centre of the card."""
+        x, y, w, h = self.rect()
+        clear = x + w - 14 - 20 + 10
+        return (clear - 48, y + 13), (clear - 24, y + 13), (clear, y + 13)
+
+    def entry_pos(self, k, delete=False):
+        x, y, w, h = self.rect()
+        return (x + w - 12 - 13 if delete else x + w // 2 - 20, y + 26 + 4 + k * 36 + 16)
+
+    def test_the_card_shows_five_entries_and_the_arrows_scroll_by_pages(self):
+        for i in range(20):
+            ctl.cmd('clip add e%02d' % i)
+        top, slots, n = self.view()
+        self.assertEqual((top, slots, n), (0, 5, 20))
+        up, down, clear = self.buttons()
+        ctl.click(*down)
+        self.assertEqual(self.view()[0], 5)                           # a page down
+        ctl.click(*down)
+        ctl.click(*down)
+        self.assertEqual(self.view()[0], 15)                          # the end: 20 - 5
+        ctl.click(*down)
+        self.assertEqual(self.view()[0], 15)                          # no further
+        ctl.click(*up)
+        self.assertEqual(self.view()[0], 10)
+        ctl.click(*up)
+        ctl.click(*up)
+        ctl.click(*up)
+        self.assertEqual(self.view()[0], 0)
+        # a click on a visible entry after scrolling picks THAT entry
+        ctl.click(*down)
+        ctl.click(*self.entry_pos(2))
+        for _ in range(100):
+            if self.clips()[0] == 'e12':                              # (the 20 entries were added oldest first: e19 is the newest, so top 5 -> e14.. , entry 2 = e12)
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.clips()[0], 'e12')
+
+    def test_a_taller_card_shows_more_entries(self):
+        for i in range(30):
+            ctl.cmd('clip add e%02d' % i)
+        x, y, w, h = self.rect()
+        self.drag(x + w // 2, y + h - 2, 0, 0)                        # (just a click on the bottom edge: no resize)
+        ctl.abs(x + w // 2, y + h - 3)
+        ctl.button(272, True)
+        ctl.cmd('motion 0 220')                                       # drag the bottom edge down
+        ctl.button(272, False)
+        top, slots, n = self.view()
+        self.assertGreaterEqual(slots, 10)
+        self.assertLessEqual(slots, 30)
+
+    def test_the_x_forgets_one_entry(self):
+        for i in range(8):
+            ctl.cmd('clip add e%d' % i)
+        ctl.click(*self.entry_pos(1, delete=True))                    # the x of the second entry (e6)
+        got = self.clips()
+        self.assertEqual(len(got), 7)
+        self.assertNotIn('e6', got)
+        self.assertEqual(got[:2], ['e7', 'e5'])
+        up, down, clear = self.buttons()                              # scrolled down, the x belongs to the entry it is on
+        ctl.click(*down)
+        ctl.click(*self.entry_pos(0, delete=True))
+        self.assertEqual(len(self.clips()), 6)
+        self.assertNotIn('e4', self.clips())                          # (e7 e5 e4 e3 e2 e1 e0: scrolled to the end the card shows e4 first)
+
+    def test_the_trash_can_forgets_everything(self):
+        for i in range(8):
+            ctl.cmd('clip add e%d' % i)
+        up, down, clear = self.buttons()
+        ctl.click(*clear)
+        self.assertEqual(self.clips(), [])
+        self.assertEqual(self.view()[0], 0)
+
+    def test_a_new_copy_brings_the_newest_back_into_view(self):
+        for i in range(12):
+            ctl.cmd('clip add e%02d' % i)
+        up, down, clear = self.buttons()
+        ctl.click(*down)
+        self.assertEqual(self.view()[0], 5)
+        ctl.cmd('clip add brand new')
+        self.assertEqual(self.view()[0], 0)
+
+    def test_keyboard_mode_follows_the_cursor_over_the_whole_history_and_deletes(self):
+        for i in range(12):
+            ctl.cmd('clip add e%02d' % i)
+        self.c.wl.roundtrip()
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_C)
+        ctl.key(KEY_LEFTMETA, False)
+        for _ in range(8):
+            ctl.tap(KEY_DOWN)                                         # past the five that were in view
+        self.assertEqual(self.view()[0], 4)                           # the card scrolled (cursor on entry 8 = the last visible one)
+        ctl.tap(111)                                                  # Delete: forget entry 8 (e03)
+        got = self.clips()
+        self.assertEqual(len(got), 11)
+        self.assertNotIn('e03', got)
+        ctl.tap(107)                                                  # End
+        self.assertEqual(self.view()[0], 6)                           # 11 - 5
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(111)                                                  # Shift+Delete: the whole history
+        ctl.key(KEY_LEFTSHIFT, False)
+        self.assertEqual(self.clips(), [])
+        ctl.tap(KEY_A)                                                # the mode ended by itself: keys go to the application again
+        self.c.wl.roundtrip()
 
     def test_non_text_selection_is_ignored(self):
         self.copy('', mime='image/png', answer=False)
@@ -1326,7 +1439,7 @@ class TestGadget(Base):
         ctl.key(KEY_LEFTMETA, False)
         self.assertTrue(ctl.last.startswith('ok'))
         ctl.cmd('clip')
-        self.assertTrue(ctl.last.endswith('gadget=0'))
+        self.assertRegex(ctl.last, r' gadget=0( |$)')
         ctl.sync()
         hidden = ctl.dump(os.path.join(tmp, 'gadget0.ppm')).px(*probe)
         self.assertNotEqual(hidden, shown)

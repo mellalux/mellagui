@@ -52,11 +52,11 @@
 #define PANEL_CAPS_W (lm_metrics.panel_caps_width)
 #define SW_MAX_WINDOWS 32
 #define GADGET_W (lm_metrics.gadget_width)                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
-#define GADGET_H (GADGET_TITLE_H + LM_GADGET_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
+#define GADGET_H (GADGET_TITLE_H + LM_CLIP_DEFAULT_ENTRIES * GADGET_ENTRY_H + GADGET_PAD)
 #define GADGET_MIN_W 180
 #define GADGET_MAX_W 640
 #define GADGET_MIN_H (GADGET_TITLE_H + GADGET_ENTRY_H + GADGET_PAD)
-#define GADGET_MAX_H 560            /* taller than 5 slots: each entry gets more lines */
+#define GADGET_MAX_H 1600           /* taller than 5 slots: more entries are shown at once */
 #define GADGET_TITLE_H 26
 #define GADGET_ENTRY_H 36
 #define GADGET_PAD 8
@@ -137,7 +137,10 @@ struct lm_wm {
     int sw_n, sw_idx;
     struct lm_window *sw_win[SW_MAX_WINDOWS];
     bool clip_nav;              /* keyboard mode of the clipboard gadget (Super+C): arrows move, Enter uses the entry */
-    int clip_cur;               /* the highlighted entry while clip_nav */
+    int clip_cur;               /* the highlighted entry while clip_nav (index in the history) */
+    int clip_top;               /* the first history entry the card shows (it scrolls) */
+    int clip_total;             /* history length when the card last changed (a longer one = something new was copied: back to the top) */
+    int hover_clip;             /* what the pointer is on in the card: see lm_gadget_info.hover */
     struct {                    /* the desktop gadgets, indexed by enum lm_gadget_id */
         bool visible;
         bool placed;            /* false: docked top right (default); true: x/y chosen by dragging */
@@ -729,13 +732,21 @@ static struct lm_rect gadget_bounds(const struct lm_rect *r)
                         r->h + 2 * LM_GADGET_SHADOW);
 }
 
-/* Entry slots of a card of height `h`: as many as fit (1..5); with room for all five the slots grow (more lines). */
+/* Entry slots of a card of height `h`: as many as fit; the entries have one fixed height, the card scrolls through a longer history. */
 static void gadget_slots(int h, int *slots, int *entry_h)
 {
     int body = h - GADGET_TITLE_H - GADGET_PAD;
-    int n = LM_CLAMP(body / GADGET_ENTRY_H, 1, LM_GADGET_ENTRIES);
-    *slots = n;
-    *entry_h = n == LM_GADGET_ENTRIES ? body / LM_GADGET_ENTRIES : GADGET_ENTRY_H;
+    *slots = LM_CLAMP(body / GADGET_ENTRY_H, 1, LM_GADGET_ENTRIES);
+    *entry_h = GADGET_ENTRY_H;
+}
+
+/* The title bar buttons of a clipboard card: [0] up, [1] down, [2] clear all. */
+static void clip_buttons(const struct lm_rect *card, struct lm_rect b[3])
+{
+    int y = card->y + (GADGET_TITLE_H - LM_CLIP_BTN) / 2;
+    int x = card->x + card->w - 14 - LM_CLIP_BTN;
+    for (int i = 2; i >= 0; i--, x -= LM_CLIP_BTN + LM_CLIP_BTN_GAP)
+        b[i] = lm_rect_make(x, y, LM_CLIP_BTN, LM_CLIP_BTN);
 }
 
 static void damage_gadget(struct lm_wm *wm, int id)
@@ -754,15 +765,39 @@ static void damage_gadgets(struct lm_wm *wm)
         damage_gadget(wm, i);
 }
 
-/* Entries the keyboard can reach: those drawn in the card. */
-static int clip_nav_count(struct lm_wm *wm)
+/* How many entries fit in the card now (0 when it is hidden) and the history's length. */
+static int clip_slots(struct lm_wm *wm)
 {
     struct lm_rect gr;
     if (!lm_wm_gadget_rect_id(wm, LM_GADGET_CLIPBOARD, &gr))
         return 0;
     int slots, entry_h;
     gadget_slots(gr.h, &slots, &entry_h);
-    return LM_MIN(lm_seat_clip_count(wm->srv->seat), slots);
+    return slots;
+}
+
+/* The first entry the card shows: clip_top kept inside the history. */
+static int clip_top(struct lm_wm *wm)
+{
+    int slots = clip_slots(wm), total = lm_seat_clip_count(wm->srv->seat);
+    return LM_CLAMP(wm->clip_top, 0, LM_MAX(total - LM_MAX(slots, 1), 0));
+}
+
+/* Entries the keyboard can reach: the whole history (the card follows the cursor). */
+static int clip_nav_count(struct lm_wm *wm)
+{
+    return clip_slots(wm) > 0 ? lm_seat_clip_count(wm->srv->seat) : 0;
+}
+
+/* Scroll so that entry `i` is drawn. */
+static void clip_show(struct lm_wm *wm, int i)
+{
+    int slots = LM_MAX(clip_slots(wm), 1), top = clip_top(wm);
+    if (i < top)
+        top = i;
+    else if (i >= top + slots)
+        top = i - slots + 1;
+    wm->clip_top = top;
 }
 
 static void clip_nav_set(struct lm_wm *wm, bool on)
@@ -770,18 +805,24 @@ static void clip_nav_set(struct lm_wm *wm, bool on)
     if (wm->clip_nav == on)
         return;
     wm->clip_nav = on;
-    wm->clip_cur = 0;
+    wm->clip_cur = on ? clip_top(wm) : 0;
     damage_gadget(wm, LM_GADGET_CLIPBOARD);
 }
 
 void lm_wm_clipboard_changed(struct lm_wm *wm)
 {
+    int total = lm_seat_clip_count(wm->srv->seat);
+    if (total > wm->clip_total)                                 /* something new was copied: the card shows the newest again */
+        wm->clip_top = 0;
+    wm->clip_total = total;
+    wm->clip_top = clip_top(wm);
     if (wm->clip_nav) {                                         /* the list moved under the cursor: keep it inside */
-        int n = clip_nav_count(wm);
-        if (n == 0)
+        if (total == 0 || clip_slots(wm) == 0) {
             wm->clip_nav = false;
-        else
-            wm->clip_cur = LM_CLAMP(wm->clip_cur, 0, n - 1);
+        } else {
+            wm->clip_cur = LM_CLAMP(wm->clip_cur, 0, total - 1);
+            clip_show(wm, wm->clip_cur);
+        }
     }
     damage_gadget(wm, LM_GADGET_CLIPBOARD);
 }
@@ -2047,6 +2088,12 @@ static void dock_anim_tick(void *data)
         lm_timer_arm_ms(wm->dock_anim, 0, 0);
 }
 
+void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots)
+{
+    *top = clip_top(wm);
+    *slots = clip_slots(wm);
+}
+
 bool lm_wm_has_fullscreen(const struct lm_wm *wm)
 {
     struct lm_window *w;
@@ -2128,14 +2175,16 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         } else {
             gadget_slots(gr.h, &it.u.gadget.slots, &it.u.gadget.entry_h);
             int total = lm_seat_clip_count(wm->srv->seat);
-            if (total > LM_GADGET_ENTRIES)
-                total = LM_GADGET_ENTRIES;
+            int top = clip_top(wm);
             it.u.gadget.total = total;
-            int n = LM_MIN(total, it.u.gadget.slots);
+            it.u.gadget.top = top;
+            int n = LM_MAX(LM_MIN(total - top, it.u.gadget.slots), 0);
             it.u.gadget.n = n;
-            it.u.gadget.cursor = wm->clip_nav && n > 0 ? LM_CLAMP(wm->clip_cur, 0, n - 1) : -1;
+            it.u.gadget.cursor = wm->clip_nav && wm->clip_cur >= top && wm->clip_cur < top + n ? wm->clip_cur - top : -1;
+            it.u.gadget.hover = wm->hover_clip;
+            clip_buttons(&gr, it.u.gadget.btn);
             for (int i = 0; i < n; i++)
-                it.u.gadget.text[i] = lm_seat_clip_get(wm->srv->seat, i);
+                it.u.gadget.text[i] = lm_seat_clip_get(wm->srv->seat, top + i);
         }
         if (!fn(&it, data))
             return;
@@ -2491,16 +2540,28 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             out->edges = e;
         } else if (iy < gr.y + GADGET_TITLE_H) {
             out->kind = LM_PICK_GADGET_TITLE;
+            if (gid == LM_GADGET_CLIPBOARD) {                         /* the small buttons in its title bar */
+                struct lm_rect b[3];
+                clip_buttons(&gr, b);
+                static const enum lm_pick_kind kinds[3] = { LM_PICK_CLIP_UP, LM_PICK_CLIP_DOWN, LM_PICK_CLIP_CLEAR };
+                for (int k = 0; k < 3; k++)
+                    if (lm_rect_contains(&b[k], ix, iy)) {
+                        out->kind = kinds[k];
+                        out->rect = gr;
+                        return;
+                    }
+            }
         } else if (gid == LM_GADGET_MIXER) {
             out->kind = LM_PICK_GADGET_BODY;                      /* sliders and buttons */
         } else if (gid == LM_GADGET_CLIPBOARD) {                  /* an entry slot with text in it */
             int slots, entry_h;
             gadget_slots(gr.h, &slots, &entry_h);
-            int n = LM_MIN(lm_seat_clip_count(wm->srv->seat), slots);
+            int top = clip_top(wm);
+            int n = LM_MAX(LM_MIN(lm_seat_clip_count(wm->srv->seat) - top, slots), 0);
             int k = (iy - gr.y - GADGET_TITLE_H) / entry_h;
             if (k >= 0 && k < n && ix >= gr.x + 12 && ix < gr.x + gr.w - 12) {
-                out->kind = LM_PICK_CLIP_ENTRY;
-                out->index = k;
+                out->kind = ix >= gr.x + gr.w - 12 - LM_CLIP_DEL_W ? LM_PICK_CLIP_DELETE : LM_PICK_CLIP_ENTRY;
+                out->index = top + k;
                 out->rect = gr;
                 return;
             }
@@ -2575,7 +2636,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     uint32_t bits = 0;
     int pws = -1;
     bool about_btn = false, launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false;
-    int power_item = -1;
+    int power_item = -1, clip_code = 0;
     struct lm_window *task = NULL;
     enum lm_cursor_shape shape = LM_CURSOR_NONE;
 
@@ -2590,6 +2651,11 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_ABOUT_BUTTON: about_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_DOCK_ITEM: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_CLIP_UP: clip_code = 1; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_CLIP_DOWN: clip_code = 2; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_CLIP_CLEAR: clip_code = 3; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_CLIP_DELETE: clip_code = 10 + pick->index - clip_top(wm); shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_CLIP_ENTRY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
@@ -2610,6 +2676,10 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         wm->hover_bits = bits;
         if (hw)
             damage_frame(wm, hw);
+    }
+    if (clip_code != wm->hover_clip) {
+        wm->hover_clip = clip_code;
+        damage_gadget(wm, LM_GADGET_CLIPBOARD);
     }
     if (wm->about_open && about_btn != wm->about_hover_close) {
         wm->about_hover_close = about_btn;
@@ -3236,6 +3306,25 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (button == BTN_LEFT)
             lm_seat_clip_use(wm->srv->seat, pick->index);
         return true;
+    case LM_PICK_CLIP_DELETE:
+        if (button == BTN_LEFT)
+            lm_seat_clip_remove(wm->srv->seat, pick->index);
+        return true;
+    case LM_PICK_CLIP_UP:
+    case LM_PICK_CLIP_DOWN:
+        if (button == BTN_LEFT) {                                       /* a page at a time */
+            int slots = LM_MAX(clip_slots(wm), 1);
+            wm->clip_top = clip_top(wm) + (pick->kind == LM_PICK_CLIP_UP ? -slots : slots);
+            wm->clip_top = clip_top(wm);
+            if (wm->clip_nav)
+                wm->clip_cur = LM_CLAMP(wm->clip_cur, wm->clip_top, wm->clip_top + slots - 1);
+            damage_gadget(wm, LM_GADGET_CLIPBOARD);
+        }
+        return true;
+    case LM_PICK_CLIP_CLEAR:
+        if (button == BTN_LEFT)
+            lm_seat_clip_clear(wm->srv->seat);
+        return true;
     case LM_PICK_DOCK_ITEM:
         if (button == BTN_LEFT || button == BTN_MIDDLE) {
             wm->press_panel_kind = LM_PICK_DOCK_ITEM;
@@ -3550,13 +3639,14 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
         }
     }
     if (wm->clip_nav && !super && !ctrl && !alt) {
-        bool arrow = code == KEY_UP || code == KEY_DOWN || code == KEY_HOME || code == KEY_END;
+        bool arrow = code == KEY_UP || code == KEY_DOWN || code == KEY_HOME || code == KEY_END || code == KEY_PAGEUP || code == KEY_PAGEDOWN;
+        bool del = code == KEY_DELETE;                          /* Delete forgets the highlighted entry, Shift+Delete the whole history */
         bool pick = code == KEY_ENTER || code == KEY_KPENTER;
         if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT || code == KEY_CAPSLOCK || code == KEY_NUMLOCK ||
             code == KEY_LEFTMETA || code == KEY_RIGHTMETA || code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL ||
             code == KEY_LEFTALT || code == KEY_RIGHTALT)
             return false;                                       /* modifiers do not end the mode (the Super of Super+C is released) */
-        if (!arrow && !pick && code != KEY_ESC) {
+        if (!arrow && !pick && !del && code != KEY_ESC) {
             clip_nav_set(wm, false);                            /* any other key: the application gets it */
             return false;
         }
@@ -3569,12 +3659,20 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
             if (!repeat)
                 lm_seat_clip_use(wm->srv->seat, LM_CLAMP(wm->clip_cur, 0, n - 1));
             clip_nav_set(wm, false);
+        } else if (del) {
+            if (shift)
+                lm_seat_clip_clear(wm->srv->seat);
+            else
+                lm_seat_clip_remove(wm->srv->seat, LM_CLAMP(wm->clip_cur, 0, n - 1));   /* (the mode ends by itself when nothing is left) */
         } else {
+            int page = LM_MAX(clip_slots(wm) - 1, 1);
             int cur = LM_CLAMP(wm->clip_cur, 0, n - 1);
             cur = code == KEY_UP ? LM_MAX(cur - 1, 0) : code == KEY_DOWN ? LM_MIN(cur + 1, n - 1) :
+                  code == KEY_PAGEUP ? LM_MAX(cur - page, 0) : code == KEY_PAGEDOWN ? LM_MIN(cur + page, n - 1) :
                   code == KEY_HOME ? 0 : n - 1;
             if (cur != wm->clip_cur) {
                 wm->clip_cur = cur;
+                clip_show(wm, cur);
                 damage_gadget(wm, LM_GADGET_CLIPBOARD);
             }
         }

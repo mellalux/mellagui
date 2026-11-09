@@ -147,6 +147,7 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    bool osk_avoid;             /* windows keep out of the on-screen keyboard's way (settings: osk-avoid; default true) */
     const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
     const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
@@ -209,6 +210,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .gadget = true,
         .saver = true,
         .saver_min = 10,
+        .osk_avoid = true,
     };
     lm_keys_defaults(&c->keys);
 }

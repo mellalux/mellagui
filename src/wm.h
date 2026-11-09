@@ -683,6 +683,10 @@ bool lm_wm_osk_is_open(const struct lm_wm *wm);
 /* Back to the default place and size (a double click on its margin, control socket `osk reset`); the saved place is forgotten. The place
  * the user gave it is kept in the gadgets file (`keyboard x y w kh`, --gadgets-file). */
 void lm_wm_osk_reset(struct lm_wm *wm);
+/* The keyboard opened, closed, was moved / resized, or the setting `osk-avoid` changed: maximized windows are refitted to the usable area (which leaves out the
+ * keyboard while it sits in the bottom or top half of the screen) and floating ones that it would cover move up (and shrink when they must) and
+ * go back when it is gone. */
+void lm_wm_osk_layout_changed(struct lm_wm *wm);
 /* Control socket `osk`: "osk open=<0|1> latched=<LM_MOD_* mask> n=<keys>" and, while open, "card x= y= w= h=" and one
  * "key <i> code=<evdev> kind=<k> x= y= w= h= on=<latched> held=<lit by a key that is down> label=<text>" line per key. */
 size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size);

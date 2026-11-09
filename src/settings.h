@@ -20,6 +20,7 @@
 
  *   saver           0 | 1                      start the screensaver (mellagui-matrix, [commands] saver) when nothing was touched for saver-minutes
  *   saver-minutes   0 .. 240                   that many minutes of idle time, 0 = never (default 10; saved)
+ *   osk-avoid       0 | 1                      windows keep out of the on-screen keyboard's way: maximized ones get smaller, others move up (default 1; saved)
  *   saver-now       (write only)               1 = start it now (a preview), 0 = end it (saver.h)
  *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)
  *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm

@@ -85,6 +85,11 @@ struct wm_win {
     bool have_restore;
     uint32_t tiled;             /* LM_EDGE_LEFT / LM_EDGE_RIGHT half-screen tile, 0 = none */
     uint64_t focus_seq;         /* when it last had the focus (Alt+Tab lists the most recent first) */
+    /* the on-screen keyboard made it move up / shrink (setting osk-avoid): where it was, and what it was given (when it is not that any more
+     * the user changed it and it stays as it is) */
+    bool osk_moved;
+    int32_t osk_ox, osk_oy, osk_ow, osk_oh;
+    int32_t osk_ax, osk_ay, osk_aw, osk_ah;
 };
 
 struct wm_popup {
@@ -949,6 +954,8 @@ static void update_outputs(struct lm_wm *wm, struct lm_window *w)
 
 /* ---- usable area ------------------------------------------------------------------------- */
 
+static bool osk_geo(const struct lm_wm *wm, struct lm_osk_geo *g);
+
 void lm_wm_usable_area(struct lm_wm *wm, int32_t gx, int32_t gy, struct lm_rect *out)
 {
     struct lm_output *o = lm_output_nearest(wm->srv, gx, gy);
@@ -959,6 +966,22 @@ void lm_wm_usable_area(struct lm_wm *wm, int32_t gx, int32_t gy, struct lm_rect 
     struct lm_rect r = lm_output_rect(o);
     r.y += LM_PANEL_HEIGHT;
     r.h -= LM_PANEL_HEIGHT;
+    struct lm_osk_geo kb;
+    if (wm->srv->config.osk_avoid && wm->osk_open && o == lm_output_primary(wm->srv) && osk_geo(wm, &kb)) {
+        /* the on-screen keyboard takes the strip it sits in: from the bottom when it is in the lower half, from the top otherwise
+         * (not when what is left would be too small to work in) */
+        if (kb.card.y + kb.card.h / 2 >= o->y + o->height / 2) {
+            int h = kb.card.y - r.y;
+            if (h >= 160)
+                r.h = h;
+        } else {
+            int y = kb.card.y + kb.card.h, h = r.y + r.h - y;
+            if (h >= 160 && y > r.y) {
+                r.y = y;
+                r.h = h;
+            }
+        }
+    }
     *out = r;
 }
 
@@ -1827,6 +1850,87 @@ static bool osk_phys_down(const struct lm_wm *wm, uint32_t code)
     return code < 24 * 32 && ((wm->osk_phys[code / 32] >> (code % 32)) & 1u);
 }
 
+/* Puts floating window `w` at a geometry (the client is asked for the size when it differs) and repaints both places. */
+static void osk_place(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y, int32_t cw, int32_t ch)
+{
+    struct lm_rect before = frame_outer(w);
+    w->x = x;
+    w->y = y;
+    if (cw != w->width || ch != w->height) {
+        clamp_size(w, &cw, &ch);
+        send_configure(wm, w, cw, ch);
+    }
+    damage_rect(wm, &before);
+    damage_frame(wm, w);
+    update_outputs(wm, w);
+}
+
+void lm_wm_osk_layout_changed(struct lm_wm *wm)
+{
+    bool avoid = wm->srv->config.osk_avoid && wm->osk_open;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        struct wm_win *ww = WIN(w);
+        if (w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN)) {
+            ww->osk_moved = false;
+            if (w->states & LM_WINDOW_MAXIMIZED)
+                apply_state(wm, w);                              /* the usable area is another one now */
+            continue;
+        }
+        if (!w->mapped || w->parent)
+            continue;
+        int32_t bx = w->x, by = w->y, bw = w->width, bh = w->height;        /* the geometry the user gave it */
+        if (ww->osk_moved) {
+            bool same_pos = w->x == ww->osk_ax && w->y == ww->osk_ay;
+            bool same_size = (w->width == ww->osk_aw && w->height == ww->osk_ah) || (w->width == ww->osk_ow && w->height == ww->osk_oh);
+            if (same_pos && same_size) {
+                bx = ww->osk_ox;
+                by = ww->osk_oy;
+                bw = ww->osk_ow;
+                bh = ww->osk_oh;
+            } else {
+                ww->osk_moved = false;                           /* it was moved or resized since: that is the new original */
+            }
+        }
+        int32_t nx = bx, ny = by, nw = bw, nh = bh;
+        if (avoid) {
+            struct lm_rect ua;
+            lm_wm_usable_area(wm, bx + bw / 2, by + bh / 2, &ua);
+            int32_t bottom = ua.y + ua.h - LM_BORDER_WIDTH, top = ua.y + LM_TITLEBAR_HEIGHT;
+            if (by + bh > bottom) {                              /* its lower edge is under the keyboard (or the screen's edge): up, and smaller if it must */
+                ny = LM_MAX(bottom - bh, top);
+                if (ny + bh > bottom)
+                    nh = bottom - ny;
+            } else if (by < top) {                               /* the keyboard is at the top: down */
+                ny = top;
+                if (ny + bh > bottom)
+                    nh = bottom - ny;
+            }
+            if (nh < bh)
+                clamp_size(w, &nw, &nh);
+        }
+        bool differs = nx != bx || ny != by || nw != bw || nh != bh;
+        if (differs && !ww->osk_moved) {
+            ww->osk_moved = true;
+            ww->osk_ox = bx;
+            ww->osk_oy = by;
+            ww->osk_ow = bw;
+            ww->osk_oh = bh;
+        }
+        if (differs) {
+            ww->osk_ax = nx;
+            ww->osk_ay = ny;
+            ww->osk_aw = nw;
+            ww->osk_ah = nh;
+            osk_place(wm, w, nx, ny, nw, nh);
+        } else if (ww->osk_moved) {                              /* nothing is in its way any more: back where it was */
+            ww->osk_moved = false;
+            osk_place(wm, w, bx, by, bw, bh);
+        }
+    }
+    damage_all(wm);
+}
+
 /* Is the on-screen key `k` lit by a key held on the real keyboard? A modifier key lights for either of its two keys. */
 static bool osk_key_held(const struct lm_wm *wm, const struct lm_osk_key *k)
 {
@@ -1946,6 +2050,7 @@ static void osk_set(struct lm_wm *wm, bool open)
         wm->osk_drag = 0;
     }
     osk_damage(wm);
+    lm_wm_osk_layout_changed(wm);                               /* the windows make room for it / come back */
 }
 
 /* A press on key `i`: modifiers latch for the next key, Hide closes, anything else is typed (pressed now, released with the pointer). */
@@ -2058,6 +2163,7 @@ void lm_wm_osk_reset(struct lm_wm *wm)
     wm->osk_drag = 0;
     osk_damage(wm);
     gadgets_save(wm);
+    lm_wm_osk_layout_changed(wm);
 }
 
 void lm_wm_osk_set(struct lm_wm *wm, bool open) { osk_set(wm, open); }
@@ -4226,6 +4332,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
     if (!pressed && wm->osk_drag && button == BTN_LEFT) {        /* the keyboard was moved / resized: remember where it is */
         wm->osk_drag = 0;
         gadgets_save(wm);
+        lm_wm_osk_layout_changed(wm);                           /* (not while it is dragged: the windows would run about) */
         return true;
     }
     if (pick->kind == LM_PICK_OSK_KEY || pick->kind == LM_PICK_OSK || pick->kind == LM_PICK_OSK_GRIP) {

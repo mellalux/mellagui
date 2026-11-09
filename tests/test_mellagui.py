@@ -2334,7 +2334,7 @@ class TestClients(Base):
         if not os.path.exists(rec):
             self.skipTest('mellagui-record not built')
         p, d = self.files_start()
-        r = subprocess.run([rec, '--start', '--duration', '0.5', '--dir', d, '--name', 'clip.mp4'], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([rec, '--start', '--duration', '0.5', '--dir', d, '--name', 'clip.mp4', '--codec', 'mjpeg'], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         ctl.key(KEY_LEFTCTRL, True); ctl.tap(19); ctl.key(KEY_LEFTCTRL, False)            # Ctrl+R: read the folder again
         time.sleep(0.3)
@@ -6262,7 +6262,7 @@ class TestRecord(Base):
     def test_a_recording(self):
         d = self.outdir()
         win_client = self.client()
-        r = subprocess.Popen([self.REC, '--start', '--duration', '2.5', '--dir', d, '--fps', '15'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        r = subprocess.Popen([self.REC, '--start', '--duration', '2.5', '--dir', d, '--fps', '15', '--codec', 'mjpeg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
         time.sleep(0.9)
         self.assertEqual(ctl.cmd('tray')[0], 'tray n=1', 'the bar has no item while recording')
@@ -6307,7 +6307,7 @@ class TestRecord(Base):
 
     def test_sigterm_finishes_the_file(self):
         d = self.outdir()
-        r = subprocess.Popen([self.REC, '--start', '--dir', d], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        r = subprocess.Popen([self.REC, '--start', '--dir', d, '--codec', 'mjpeg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
         for _ in range(100):
             if any(f.endswith('.mp4') for f in os.listdir(d)):
@@ -6322,7 +6322,7 @@ class TestRecord(Base):
 
     def test_names_are_never_reused(self):
         d = self.outdir()
-        args = ('--start', '--duration', '0.4', '--dir', d, '--name', 'one.mp4')
+        args = ('--start', '--duration', '0.4', '--dir', d, '--name', 'one.mp4', '--codec', 'mjpeg')
         self.assertEqual(self.run_rec(*args).returncode, 0)
         before = os.stat(os.path.join(d, 'one.mp4')).st_size
         r = self.run_rec(*args)
@@ -6336,7 +6336,7 @@ class TestRecord(Base):
     def test_the_window(self):
         """Space starts, the window goes out of the way and the bar's item shows the recording; a click on the item ends it."""
         d = self.outdir()
-        p = subprocess.Popen([self.REC, '--dir', d], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        p = subprocess.Popen([self.REC, '--dir', d, '--codec', 'mjpeg'], env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.record')
         self.assertIsNotNone(win, 'the recorder window did not appear')
@@ -6373,6 +6373,133 @@ class TestRecord(Base):
         self.assertEqual(len(files), 1)
         self.assertGreaterEqual(len(self.parse_mp4(os.path.join(d, files[0]))['samples']), 1)
         self.assertEqual(ctl.cmd('tray')[0], 'tray n=0')
+
+    VIEW = os.path.join(os.path.dirname(BIN), 'mellagui-view')
+
+    def view_info(self, path):
+        r = subprocess.run([self.VIEW, '--video-info', path], capture_output=True, text=True, timeout=20)
+        return r.stdout.strip()
+
+    def view_frame(self, path, n):
+        """Picture n of a recording as a PIL image, decoded by the viewer's own decoders."""
+        from PIL import Image
+        out = path + '.%d.ppm' % n
+        r = subprocess.run([self.VIEW, '--decode', path, out, str(n)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return Image.open(out).convert('RGB')
+
+    def test_our_own_h264(self):
+        """--codec h264: no ffmpeg involved; the file is H.264 (constrained baseline) that ffmpeg decodes, and the viewer decodes it by itself."""
+        if not os.path.exists(self.VIEW):
+            self.skipTest('mellagui-view not built')
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow not installed')
+        d = self.outdir()
+        win_client = self.client()
+        r = subprocess.Popen([self.REC, '--start', '--duration', '3', '--dir', d, '--codec', 'h264', '--name', 'own.mp4'],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ, MELLAGUI_FFMPEG='none'))
+        self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
+        time.sleep(1.2)
+        win = Window(win_client, 300, 200, color=0xffff00ff)                # appears while recording
+        win_client.wl.roundtrip()
+        out, err = r.communicate(timeout=30)
+        self.assertEqual(r.returncode, 0, err)
+        self.assertIn('H.264, built in', err)
+        path = os.path.join(d, 'own.mp4')
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        info = self.view_info(path)
+        self.assertRegex(info, r'^1024x600 codec=avc1 mjpeg=0 pictures=\d+ duration_ms=[23]\d\d\d$')
+        n = int(re.search(r'pictures=(\d+)', info)[1])
+        self.assertGreaterEqual(n, 2)
+        w = [x for x in ctl.windows()['windows'] if x['title'] == 'test'][0]
+        cx, cy = w['x'] + w['w'] // 2, w['y'] + w['h'] // 2
+
+        def magenta(p):
+            return p[0] > 200 and p[1] < 60 and p[2] > 200
+        self.assertFalse(magenta(self.view_frame(path, 0).getpixel((cx, cy))), 'the window is in the first picture')
+        last = self.view_frame(path, n - 1)
+        self.assertTrue(magenta(last.getpixel((cx, cy))), 'the window is not in the last picture: %r' % (last.getpixel((cx, cy)),))
+        # an independent decoder agrees (ffmpeg, when it is there)
+        ffmpeg = shutil.which('ffmpeg')
+        if ffmpeg:
+            r2 = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,profile,pix_fmt,width,height',
+                                 '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=20)
+            self.assertEqual(r2.stdout.strip(), 'h264,Constrained Baseline,1024,600,yuv420p', r2.stderr)
+            png = os.path.join(d, 'ff.png')
+            subprocess.run([ffmpeg, '-v', 'error', '-y', '-i', path, '-vf', 'select=eq(n\\,%d)' % (n - 1), '-frames:v', '1', png], check=True, timeout=30)
+            ref = Image.open(png).convert('RGB')
+            diff = sum(abs(a - b) for x in range(0, 1024, 7) for y in range(0, 600, 5)
+                       for a, b in zip(ref.getpixel((x, y)), last.getpixel((x, y)))) / (len(range(0, 1024, 7)) * len(range(0, 600, 5)) * 3)
+            self.assertLess(diff, 3.0, 'our decoder and ffmpeg disagree about the last picture')
+
+    def test_our_own_h264_with_an_odd_sized_screen(self):
+        if not os.path.exists(self.VIEW):
+            self.skipTest('mellagui-view not built')
+        p, c, stop = self.private_compositor('rec-odd', '--size', '1001x601')
+        d = self.outdir()
+        r = self.run_rec('--start', '--duration', '0.8', '--dir', d, '--codec', 'h264', '--name', 'odd.mp4', display='rec-odd')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.view_info(os.path.join(d, 'odd.mp4')), r'^1000x600 codec=avc1 ')            # 4:2:0 wants even sides
+        if shutil.which('ffprobe'):
+            self.assertEqual(self.probe(os.path.join(d, 'odd.mp4'))['width'], '1000')
+
+    @staticmethod
+    def have_x264():
+        ff = shutil.which('ffmpeg')
+        if not ff:
+            return False
+        r = subprocess.run([ff, '-hide_banner', '-encoders'], capture_output=True, text=True, timeout=20)
+        return 'libx264' in r.stdout
+
+    def probe(self, path):
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt,width,height',
+                            '-show_entries', 'format=duration', '-of', 'default=nw=1', path], capture_output=True, text=True, timeout=20)
+        return dict(l.split('=', 1) for l in r.stdout.split())
+
+    def test_h264_through_ffmpeg(self):
+        if not self.have_x264():
+            self.skipTest('ffmpeg with libx264 not installed')
+        d = self.outdir()
+        win_client = self.client()
+        r = subprocess.Popen([self.REC, '--start', '--duration', '3', '--dir', d, '--codec', 'ffmpeg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
+        time.sleep(1.2)
+        win = Window(win_client, 300, 200, color=0xffff00ff)                # appears while recording
+        win_client.wl.roundtrip()
+        out, err = r.communicate(timeout=30)
+        self.assertEqual(r.returncode, 0, err)
+        self.assertIn('H.264 through ffmpeg', err)
+        files = [f for f in os.listdir(d) if f.endswith('.mp4')]
+        self.assertEqual(len(files), 1, files)
+        path = os.path.join(d, files[0])
+        self.assertEqual(out.strip(), path)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        info = self.probe(path)
+        self.assertEqual((info['codec_name'], info['pix_fmt'], info['width'], info['height']), ('h264', 'yuv420p', '1024', '600'))
+        self.assertTrue(2.2 <= float(info['duration']) <= 4.0, info)
+        try:
+            from PIL import Image
+        except ImportError:
+            return
+        png = os.path.join(d, 'last.png')
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-sseof', '-0.3', '-i', path, '-frames:v', '1', png], check=True, timeout=30)
+        w = [x for x in ctl.windows()['windows'] if x['title'] == 'test'][0]
+        p = Image.open(png).convert('RGB').getpixel((w['x'] + w['w'] // 2, w['y'] + w['h'] // 2))
+        self.assertTrue(p[0] > 200 and p[1] < 60 and p[2] > 200, 'the window is not in the last picture: %r' % (p,))
+
+    def test_codec_choice_without_ffmpeg(self):
+        d = self.outdir()
+        env = dict(os.environ, MELLAGUI_FFMPEG='none')
+        r = subprocess.run([self.REC, '--start', '--duration', '0.3', '--dir', d, '--codec', 'ffmpeg'], env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('not installed', r.stderr)
+        self.assertEqual([f for f in os.listdir(d)], [], 'a file was left behind')
+        r = subprocess.run([self.REC, '--start', '--duration', '0.4', '--dir', d], env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)                          # auto falls back on our own H.264
+        self.assertIn('H.264, built in', r.stderr)
+        self.assertEqual(self.run_rec('--codec', 'x264?').returncode, 2)
 
     def test_closed_to_other_programs(self):
         p, c, stop = self.private_compositor('rec-own', '--settings-access', 'own')
@@ -6555,10 +6682,10 @@ class TestViewer(Base):
     def solid(self, rgb, w=60, h=40):
         return make_png(w, h, 2, 8, [[rgb] * w for _ in range(h)])
 
-    def start(self, directory, *args):
+    def start(self, directory, *args, env=None):
         if not os.path.exists(self.VIEW):
             self.skipTest('mellagui-view not built')
-        p = subprocess.Popen([self.VIEW] + list(args or [directory]), env=dict(os.environ, HOME=directory),
+        p = subprocess.Popen([self.VIEW] + list(args or [directory]), env=dict(os.environ, HOME=directory, **(env or {})),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.view')
@@ -6714,7 +6841,7 @@ class TestViewer(Base):
         if not os.path.exists(rec) or not os.path.exists(self.VIEW):
             self.skipTest('mellagui-record / mellagui-view not built')
         d = self.video_dir()
-        r = subprocess.run([rec, '--start', '--duration', '1.2', '--dir', d, '--name', 'ours.mp4'], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([rec, '--start', '--duration', '1.2', '--dir', d, '--name', 'ours.mp4', '--codec', 'mjpeg'], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         info = self.info(os.path.join(d, 'ours.mp4')).stdout
         self.assertRegex(info, r'^1024x600 codec=mp4v mjpeg=1 pictures=\d+ duration_ms=1[2-3]\d\d$')
@@ -6765,6 +6892,105 @@ class TestViewer(Base):
         _, _, i = self.window_pixels('vid8.ppm')
         self.assertNotEqual(h, i)
 
+    def test_h264_plays_through_ffmpeg(self):
+        d = self.video_dir()
+        self.make_video(d, codec='libx264')
+        p, win = self.start(d, os.path.join(d, 'clip.mp4'))
+        self.assertTrue(self.wait_title('clip.mp4 - Images'))
+        ctl.abs(900, 590)
+        time.sleep(0.8)
+        _, _, a = self.window_pixels('h264a.ppm')
+        time.sleep(0.6)
+        _, _, b = self.window_pixels('h264b.ppm')
+        self.assertNotEqual(a, b, 'the picture does not change: the video is not playing')
+        ctl.tap(KEY_SPACE)                                                        # pause
+        time.sleep(0.4)
+        _, _, c = self.window_pixels('h264c.ppm')
+        time.sleep(0.6)
+        _, _, e = self.window_pixels('h264d.ppm')
+        self.assertEqual(c, e, 'the video moves while it is paused')
+        ctl.tap(107)                                                              # End
+        time.sleep(1.0)
+        _, _, f = self.window_pixels('h264e.ppm')
+        time.sleep(0.6)
+        _, _, g = self.window_pixels('h264f.ppm')
+        self.assertEqual(f, g, 'the video does not stop at its end')
+        ctl.tap(KEY_SPACE)                                                        # at the end: again from the start
+        time.sleep(0.8)
+        _, _, h = self.window_pixels('h264g.ppm')
+        self.assertNotEqual(g, h)
+        self.assertIsNone(p.poll())
+
+    def record_changing(self, d, name='own.mp4', seconds=3):
+        """A recording of the test screen (our own H.264) in which a window changes its colour every quarter of a second."""
+        rec = os.path.join(os.path.dirname(BIN), 'mellagui-record')
+        if not os.path.exists(rec):
+            self.skipTest('mellagui-record not built')
+        cl = Client()
+        self.addCleanup(cl.wl.close)
+        win = Window(cl, 400, 300, color=0xffff0000)
+        cl.wl.roundtrip()
+        r = subprocess.Popen([rec, '--start', '--duration', str(seconds), '--dir', d, '--codec', 'h264', '--name', name],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ, MELLAGUI_FFMPEG='none'))
+        self.addCleanup(lambda: (r.poll() is None) and (r.kill(), r.wait()))
+        colours = [0xff00ff00, 0xff0000ff, 0xffffff00, 0xff00ffff, 0xffff00ff, 0xff202020]
+        t0 = time.time()
+        i = 0
+        while r.poll() is None and time.time() - t0 < seconds + 2:
+            win.commit_buffer(400, 300, color=colours[i % len(colours)])
+            cl.wl.roundtrip()
+            i += 1
+            time.sleep(0.25)
+        out, err = r.communicate(timeout=30)
+        self.assertEqual(r.returncode, 0, err)
+        cl.wl.close()
+        for _ in range(100):                                                      # the test window must be gone before the viewer starts
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.test']:
+                break
+            time.sleep(0.03)
+        return os.path.join(d, name)
+
+    def test_our_own_h264_plays_without_ffmpeg(self):
+        d = self.video_dir()
+        path = self.record_changing(d)
+        p, win = self.start(d, path, env={'MELLAGUI_FFMPEG': 'none'})              # no ffmpeg: the viewer's own decoder
+        self.assertTrue(self.wait_title('own.mp4 - Images'))
+        ctl.abs(900, 590)
+        time.sleep(0.3)
+        _, _, a = self.window_pixels('own1.ppm')
+        time.sleep(0.7)
+        _, _, b = self.window_pixels('own2.ppm')
+        self.assertNotEqual(a, b, 'the picture does not change: the video is not playing')
+        ctl.tap(KEY_SPACE)                                                        # pause
+        time.sleep(0.3)
+        _, _, c = self.window_pixels('own3.ppm')
+        time.sleep(0.6)
+        _, _, e = self.window_pixels('own4.ppm')
+        self.assertEqual(c, e, 'the video moves while it is paused')
+        ctl.tap(107)                                                              # End
+        time.sleep(0.5)
+        _, _, f = self.window_pixels('own5.ppm')
+        time.sleep(0.5)
+        _, _, g = self.window_pixels('own6.ppm')
+        self.assertEqual(f, g, 'the video does not stop at its end')
+        ctl.tap(102)                                                              # Home: the first picture again (and seeking backwards works)
+        time.sleep(0.5)
+        _, _, h = self.window_pixels('own7.ppm')
+        self.assertNotEqual(g, h)
+        ctl.tap(KEY_SPACE)                                                        # plays on from the start
+        time.sleep(0.8)
+        _, _, i = self.window_pixels('own8.ppm')
+        self.assertNotEqual(h, i)
+        self.assertIsNone(p.poll())
+
+    def test_h264_without_ffmpeg_is_refused_politely(self):
+        d = self.video_dir()
+        self.make_video(d, codec='libx264')
+        p, win = self.start(d, os.path.join(d, 'clip.mp4'), env={'MELLAGUI_FFMPEG': 'none'})
+        self.assertTrue(self.wait_title('clip.mp4 - Images'))
+        time.sleep(0.4)
+        self.assertIsNone(p.poll())
+
     def test_a_video_that_cannot_be_shown_does_not_hurt(self):
         d = self.video_dir()
         self.make_video(d, 'm.mp4', seconds=1, codec='mpeg4')
@@ -6772,7 +6998,7 @@ class TestViewer(Base):
             f.write(os.urandom(500))
         p, win = self.start(d, os.path.join(d, 'm.mp4'))
         self.assertTrue(self.wait_title('m.mp4 - Images'))
-        ctl.tap(106)                                                              # Right: the junk file after it
+        ctl.tap(109)                                                              # PgDn: the junk file after it (Right seeks in a video that plays)
         self.assertTrue(self.wait_title('z-junk.mp4 - Images'))
         self.assertIsNone(p.poll())
 
@@ -7382,6 +7608,61 @@ class TestNotify(Base):
         for line in ('settings notify nothing-with-tabs', 'notify 999999999 Title'):
             with self.assertRaises(RuntimeError, msg=line):
                 c.cmd(line)
+
+
+class TestMonitorComesBack(Base):
+    """An output that goes away and returns (KVM switch, cable): windows that fill the screen are fitted to it again."""
+
+    @staticmethod
+    def settle(cl, win, c, state=None, timeout=3.0):
+        """Answer configures until one with `state` (xdg_toplevel state number) arrives; returns the last one."""
+        end = time.time() + timeout
+        cfg = None
+        while time.time() < end:
+            cl.wl.roundtrip()
+            got = win.handle_configure()
+            if got is not None:
+                cfg = got
+                if state is None or state in got[2]:
+                    break
+            time.sleep(0.05)
+        c.sync()
+        return cfg
+
+    def test_maximized_and_fullscreen_windows_follow(self):
+        p, c, stop = self.private_compositor('mellagui-hp1')
+        cl = Client(os.path.join(tmp, 'mellagui-hp1'))
+        self.clients.append(cl)
+        win = Window(cl, 300, 200)
+        cl.wl.roundtrip()
+        c.sync()
+        cl.wl.request(win.toplevel, 'set_maximized')
+        cfg = self.settle(cl, win, c, XDG_STATE_MAXIMIZED)
+        self.assertIn(XDG_STATE_MAXIMIZED, cfg[2])
+        w0 = c.windows()['windows'][0]
+        self.assertIn('maximized', w0['flags'])
+        self.assertGreater(w0['w'], 700)
+        c.cmd('unplug')
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(c.cmd('outputs'), [])
+        c.cmd('replug 1000x600')
+        cfg = self.settle(cl, win, c, XDG_STATE_MAXIMIZED)
+        w1 = c.windows()['windows'][0]
+        self.assertEqual((w1['w'] - w0['w'], w1['h'] - w0['h']), (200, 100), 'the maximized window was not fitted to the monitor that came back')
+        # full screen: the same
+        cl.wl.request(win.toplevel, 'unset_maximized')
+        self.settle(cl, win, c)
+        cl.wl.request(win.toplevel, 'set_fullscreen', 0)
+        self.settle(cl, win, c, XDG_STATE_FULLSCREEN)
+        w2 = c.windows()['windows'][0]
+        self.assertEqual((w2['x'], w2['y'], w2['w'], w2['h']), (0, 0, 1000, 600))
+        c.cmd('unplug')
+        c.cmd('replug 700x400')
+        self.settle(cl, win, c, XDG_STATE_FULLSCREEN)
+        w3 = c.windows()['windows'][0]
+        self.assertEqual((w3['x'], w3['y'], w3['w'], w3['h']), (0, 0, 700, 400))
+        self.assertIsNone(cl.wl.error)
 
 
 class TestOutputLayout(Base):
@@ -8048,6 +8329,43 @@ class TestSaver(Base):
         self.assertNotEqual(a.data, b.data, 'the rain does not move')
         self.assertEqual(a.px(2, 2), (0, 0, 0))                  # no panel, no dock over it
         c.tap(KEY_A)                                             # any key
+        self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
+
+    def test_the_screensaver_follows_a_monitor_that_goes_away_and_comes_back(self):
+        """A KVM switch: the monitor leaves, comes back, maybe in another mode; the screensaver must fill it again."""
+        p, c = self.start('mellagui-sv-kvm1', '--config', 'none')
+        c.cmd('saver start')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        c.cmd('unplug')
+        self.assertEqual(c.cmd('outputs'), [])
+        time.sleep(0.3)
+        self.assertEqual(len(self.matrix_windows(c)), 1, 'the screensaver went away with the monitor')
+        c.cmd('replug 1000x600')
+        self.wait(lambda: [(w['x'], w['y'], w['w'], w['h']) for w in self.matrix_windows(c)] == [(0, 0, 1000, 600)], 'the saver fits the bigger monitor')
+        time.sleep(0.5)
+        a = c.dump(os.path.join(tmp, 'svkvm1.ppm'))
+        self.assertEqual((a.w, a.h), (1000, 600))
+        right = [(x, y) for x in range(850, 1000, 3) for y in range(0, 600, 3) if a.px(x, y)[1] > a.px(x, y)[0] + 30]
+        self.assertGreater(len(right), 10, 'no green code on the new part of the screen')
+        c.cmd('unplug')
+        c.cmd('replug 640x480')                                  # and a smaller one
+        self.wait(lambda: [(w['x'], w['y'], w['w'], w['h']) for w in self.matrix_windows(c)] == [(0, 0, 640, 480)], 'the saver fits the smaller monitor')
+        self.assertIn('fullscreen', self.matrix_windows(c)[0]['flags'])
+        self.assertTrue(alive())
+
+    def test_a_screensaver_that_starts_while_the_monitor_is_away(self):
+        """The saver starts on a computer nobody looks at: no output, so no size. The monitor coming back gives it one."""
+        p, c = self.start('mellagui-sv-kvm2', '--config', 'none')
+        c.cmd('unplug')
+        c.cmd('saver start')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        time.sleep(0.4)
+        c.cmd('replug 900x540')
+        self.wait(lambda: [(w['x'], w['y'], w['w'], w['h']) for w in self.matrix_windows(c)] == [(0, 0, 900, 540)], 'the saver fills the monitor that came back')
+        time.sleep(0.5)
+        a = c.dump(os.path.join(tmp, 'svkvm2.ppm'))
+        self.assertEqual(a.px(2, 2), (0, 0, 0))                  # no panel over it
+        c.tap(KEY_A)
         self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
 
     def test_the_first_input_is_not_passed_on(self):

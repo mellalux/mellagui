@@ -103,7 +103,7 @@ $(BUILD)/mellagui-notify: $(BUILD)/client/mellagui-notify.o $(BUILD)/client/wlc.
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-view: $(BUILD)/client/mellagui-view.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/mp4read.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/src/png.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-view: $(BUILD)/client/mellagui-view.o $(BUILD)/src/h264dec.o $(BUILD)/src/h264.o $(BUILD)/client/ffdec.o $(BUILD)/client/ffpipe.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/mp4read.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/src/png.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -111,7 +111,7 @@ $(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/src/img.o $(BUILD
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-record: $(BUILD)/client/mellagui-record.o $(BUILD)/src/jpegenc.o $(BUILD)/src/mp4.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-record: $(BUILD)/client/mellagui-record.o $(BUILD)/client/ffpipe.o $(BUILD)/src/jpegenc.o $(BUILD)/src/h264.o $(BUILD)/src/h264enc.o $(BUILD)/src/h264dec.o $(BUILD)/src/mp4.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

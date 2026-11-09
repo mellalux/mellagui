@@ -18,6 +18,9 @@ struct lm_mp4 {
     uint64_t *pts;              /* per picture, relative to the first one */
     uint64_t first_pts;
     int failed;
+    uint8_t *sps, *pps;             /* H.264: the parameter sets (NAL units) */
+    size_t sps_n, pps_n;
+    uint8_t *key;                   /* H.264: per picture, 1 = IDR */
 };
 
 /* ---- box building in memory ---------------------------------------------------------------------------------------- */
@@ -146,7 +149,7 @@ static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration,
     size_t stbl = begin_box(b, "stbl");
     size_t stsd = begin_full(b, "stsd", 0, 0);
     b_u32(b, 1);
-    size_t mp4v = begin_box(b, "mp4v");
+    size_t mp4v = begin_box(b, m->sps ? "avc1" : "mp4v");
     b_zero(b, 6);
     b_u16(b, 1);                                    /* data reference index */
     b_zero(b, 16);                                  /* pre_defined, reserved */
@@ -158,16 +161,30 @@ static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration,
     b_zero(b, 32);                                  /* compressor name */
     b_u16(b, 0x18);                                 /* depth */
     b_u16(b, 0xffff);
-    size_t esds = begin_full(b, "esds", 0, 0);
-    b_u8(b, 0x03); b_u8(b, 21);                     /* ES_Descriptor */
-    b_u16(b, 1); b_u8(b, 0);                        /* ES id, flags */
-    b_u8(b, 0x04); b_u8(b, 13);                     /* DecoderConfigDescriptor */
-    b_u8(b, 0x6c);                                  /* object type: JPEG */
-    b_u8(b, 0x11);                                  /* stream type: visual */
-    b_u8(b, 0); b_u16(b, 0);                        /* buffer size */
-    b_u32(b, 0); b_u32(b, 0);                       /* max / average bit rate (unknown) */
-    b_u8(b, 0x06); b_u8(b, 1); b_u8(b, 0x02);       /* SLConfigDescriptor */
-    end_box(b, esds);
+    if (m->sps) {
+        size_t avcc = begin_box(b, "avcC");
+        b_u8(b, 1);                                 /* configurationVersion */
+        b_u8(b, m->sps[1]); b_u8(b, m->sps[2]); b_u8(b, m->sps[3]);      /* profile, compatibility, level of the SPS */
+        b_u8(b, 0xff);                              /* 4 byte NAL unit lengths */
+        b_u8(b, 0xe1);                              /* one SPS */
+        b_u16(b, (unsigned)m->sps_n);
+        b_bytes(b, m->sps, m->sps_n);
+        b_u8(b, 1);                                 /* one PPS */
+        b_u16(b, (unsigned)m->pps_n);
+        b_bytes(b, m->pps, m->pps_n);
+        end_box(b, avcc);
+    } else {
+        size_t esds = begin_full(b, "esds", 0, 0);
+        b_u8(b, 0x03); b_u8(b, 21);                 /* ES_Descriptor */
+        b_u16(b, 1); b_u8(b, 0);                    /* ES id, flags */
+        b_u8(b, 0x04); b_u8(b, 13);                 /* DecoderConfigDescriptor */
+        b_u8(b, 0x6c);                              /* object type: JPEG */
+        b_u8(b, 0x11);                              /* stream type: visual */
+        b_u8(b, 0); b_u16(b, 0);                    /* buffer size */
+        b_u32(b, 0); b_u32(b, 0);                   /* max / average bit rate (unknown) */
+        b_u8(b, 0x06); b_u8(b, 1); b_u8(b, 0x02);   /* SLConfigDescriptor */
+        end_box(b, esds);
+    }
     end_box(b, mp4v);
     end_box(b, stsd);
 
@@ -196,6 +213,18 @@ static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration,
         b->p[count_at + 2] = (uint8_t)(runs >> 8); b->p[count_at + 3] = (uint8_t)runs;
     }
     end_box(b, stts);
+
+    if (m->sps) {                                   /* the pictures a player can start at */
+        uint32_t nk = 0;
+        for (uint32_t i = 0; i < m->n; i++)
+            nk += m->key[i] != 0;
+        size_t stss = begin_full(b, "stss", 0, 0);
+        b_u32(b, nk);
+        for (uint32_t i = 0; i < m->n; i++)
+            if (m->key[i])
+                b_u32(b, i + 1);
+        end_box(b, stss);
+    }
 
     size_t stsc = begin_full(b, "stsc", 0, 0);      /* all pictures are one chunk */
     b_u32(b, 1);
@@ -270,7 +299,7 @@ struct lm_mp4 *lm_mp4_create(const char *path, int width, int height)
     struct buf b = { 0 };
     size_t ftyp = begin_box(&b, "ftyp");
     b_tag(&b, "isom"); b_u32(&b, 512);
-    b_tag(&b, "isom"); b_tag(&b, "iso2"); b_tag(&b, "mp41");
+    b_tag(&b, "isom"); b_tag(&b, "iso2"); b_tag(&b, "avc1"); b_tag(&b, "mp41");
     end_box(&b, ftyp);
     b_u32(&b, 1);                                   /* mdat with a 64 bit size, patched at the end */
     b_tag(&b, "mdat");
@@ -289,7 +318,31 @@ struct lm_mp4 *lm_mp4_create(const char *path, int width, int height)
     return m;
 }
 
+int lm_mp4_set_h264(struct lm_mp4 *m, const uint8_t *sps, size_t sps_len, const uint8_t *pps, size_t pps_len)
+{
+    if (!m || m->n || sps_len < 4 || sps_len > 255 || pps_len < 1 || pps_len > 255)
+        return -1;
+    m->sps = malloc(sps_len);
+    m->pps = malloc(pps_len);
+    if (!m->sps || !m->pps) {
+        free(m->sps);
+        free(m->pps);
+        m->sps = m->pps = NULL;
+        return -1;
+    }
+    memcpy(m->sps, sps, sps_len);
+    memcpy(m->pps, pps, pps_len);
+    m->sps_n = sps_len;
+    m->pps_n = pps_len;
+    return 0;
+}
+
 int lm_mp4_add(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_ms)
+{
+    return lm_mp4_add_sample(m, jpeg, len, pts_ms, 1);
+}
+
+int lm_mp4_add_sample(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_ms, int key)
 {
     if (!m || m->failed || !jpeg || len == 0 || len > 0x7fffffffu)
         return -1;
@@ -299,11 +352,13 @@ int lm_mp4_add(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_m
         if (ns)
             m->size = ns;
         uint64_t *np = ns ? realloc(m->pts, (size_t)nc * sizeof(*np)) : NULL;
-        if (!ns || !np) {
+        uint8_t *nk = np ? realloc(m->key, nc) : NULL;
+        if (!ns || !np || !nk) {
             m->failed = 1;
             return -1;
         }
         m->pts = np;
+        m->key = nk;
         m->cap = nc;
     }
     if (m->n == 0)
@@ -314,6 +369,7 @@ int lm_mp4_add(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_m
     if (put(m, jpeg, len) < 0)
         return -1;
     m->size[m->n] = (uint32_t)len;
+    m->key[m->n] = key != 0;
     m->pts[m->n] = rel;
     m->n++;
     return 0;
@@ -350,6 +406,9 @@ int lm_mp4_close(struct lm_mp4 *m, uint64_t end_ms)
     free(m->path);
     free(m->size);
     free(m->pts);
+    free(m->key);
+    free(m->sps);
+    free(m->pps);
     free(m);
     return rc;
 }

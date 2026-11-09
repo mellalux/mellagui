@@ -91,6 +91,9 @@ void lm_mp4r_close(struct lm_mp4r *r)
     free(r->off);
     free(r->size);
     free(r->pts_ms);
+    free(r->sps);
+    free(r->pps);
+    free(r->key);
     free(r);
 }
 
@@ -134,6 +137,35 @@ static int parse_trak(struct lm_mp4r *r, const struct span *trak, char *err, siz
         struct span ext = { ebody.p + 78, ebody.n - 78 }, esds;
         r->mjpeg = find_box(&ext, "esds", &esds) && esds_object_type(&esds) == 0x6c;
     }
+    r->h264 = !memcmp(type, "avc1", 4);
+    if (r->h264) {                                  /* the parameter sets: avcC */
+        struct span ext = { ebody.p + 78, ebody.n - 78 }, avcc;
+        if (!find_box(&ext, "avcC", &avcc) || avcc.n < 8 || avcc.p[0] != 1 || (avcc.p[4] & 3) != 3 || (avcc.p[5] & 31) != 1)
+            FAIL("unusual H.264 setup in the file");
+        size_t at2 = 6;
+        unsigned sn = be16(avcc.p + at2);
+        at2 += 2;
+        if (at2 + sn + 3 > avcc.n || sn < 4)
+            FAIL("damaged file (SPS)");
+        r->sps = malloc(sn);
+        if (!r->sps)
+            FAIL("out of memory");
+        memcpy(r->sps, avcc.p + at2, sn);
+        r->sps_n = sn;
+        at2 += sn;
+        if (avcc.p[at2] != 1)
+            FAIL("unusual H.264 setup in the file");
+        at2++;
+        unsigned pn = be16(avcc.p + at2);
+        at2 += 2;
+        if (at2 + pn > avcc.n || pn < 1)
+            FAIL("damaged file (PPS)");
+        r->pps = malloc(pn);
+        if (!r->pps)
+            FAIL("out of memory");
+        memcpy(r->pps, avcc.p + at2, pn);
+        r->pps_n = pn;
+    }
     /* sample sizes */
     if (stsz.n < 12)
         FAIL("damaged file (sample sizes)");
@@ -150,6 +182,22 @@ static int parse_trak(struct lm_mp4r *r, const struct span *trak, char *err, siz
         r->size[i] = constant ? constant : be32(stsz.p + 12 + (size_t)i * 4);
         if (r->size[i] > MAX_SAMPLE_BYTES)
             FAIL("damaged file (a sample of %u bytes)", (unsigned)r->size[i]);
+    }
+    r->key = malloc(n);
+    if (!r->key)
+        FAIL("out of memory");
+    memset(r->key, 1, n);
+    struct span stss;
+    if (find_box(&stbl, "stss", &stss) && stss.n >= 8) {            /* the pictures one can start at: the others are not */
+        uint32_t nk = be32(stss.p + 4);
+        if (stss.n < 8 + (size_t)nk * 4)
+            FAIL("damaged file (sync samples)");
+        memset(r->key, 0, n);
+        for (uint32_t k = 0; k < nk; k++) {
+            uint32_t sn1 = be32(stss.p + 8 + (size_t)k * 4);
+            if (sn1 >= 1 && sn1 <= n)
+                r->key[sn1 - 1] = 1;
+        }
     }
     /* times */
     if (stts.n < 8)

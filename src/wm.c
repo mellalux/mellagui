@@ -166,6 +166,7 @@ struct lm_wm {
     int64_t dock_launch_ms[LM_DOCK_MAX];
     int dock_launch_base[LM_DOCK_MAX];
     struct lm_timer *dock_anim;
+    struct lm_idle *refit;      /* after an output went away: fit the maximized / fullscreen windows to what is left, once the output is out of the list */
     /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
     bool sw_open;
     int sw_n, sw_idx;
@@ -1044,6 +1045,11 @@ static void apply_state(struct lm_wm *wm, struct lm_window *w)
     int32_t tw = 0, th = 0;
 
     ww->tiled = 0;
+    if ((w->states & (LM_WINDOW_FULLSCREEN | LM_WINDOW_MAXIMIZED)) && !lm_output_primary(wm->srv)) {
+        /* no output at all (a KVM switch looked at another computer, a cable was pulled): keep the size, it is fitted when one comes back */
+        send_configure(wm, w, w->width, w->height);
+        return;
+    }
     if (w->states & LM_WINDOW_FULLSCREEN) {
         struct lm_output *o = window_output(wm, w);
         if (o) {
@@ -1193,6 +1199,11 @@ static void clock_tick(void *data)
     update_clock(data, false);
 }
 
+static void refit_idle(void *data)
+{
+    lm_wm_output_changed(data, NULL);
+}
+
 struct lm_wm *lm_wm_create(struct lm_server *srv)
 {
     gadget_def_init();
@@ -1218,6 +1229,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->dock_timer = lm_loop_add_timer(srv->loop, dock_hide_tick, wm);
     wm->dock_anim = lm_loop_add_timer(srv->loop, dock_anim_tick, wm);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
+    wm->refit = lm_loop_add_idle(srv->loop, refit_idle, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
     return wm;
@@ -1237,13 +1249,14 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_timer_destroy(wm->dock_anim);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
+    if (wm->refit)
+        lm_idle_destroy(wm->refit);
     free(wm);
 }
 
 void lm_wm_output_added(struct lm_wm *wm, struct lm_output *out)
 {
-    (void)out;
-    damage_all(wm);
+    lm_wm_output_changed(wm, out);                      /* a monitor that comes back (KVM, cable) gets its fullscreen / maximized windows at its size */
 }
 
 void lm_wm_relayout_outputs(struct lm_wm *wm)
@@ -1300,6 +1313,8 @@ void lm_wm_output_removed(struct lm_wm *wm, struct lm_output *out)
     lm_list_for_each(w, &wm->windows, link)
         update_outputs(wm, w);
     damage_all(wm);
+    if (wm->refit)
+        lm_idle_schedule(wm->refit);                    /* (the output is unlinked after this call: refit then) */
 }
 
 /* ---- windows --------------------------------------------------------------------------------- */

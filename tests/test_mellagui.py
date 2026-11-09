@@ -1788,16 +1788,55 @@ class TestClients(Base):
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_calc_functions_memory_copy_and_paste(self):
+        p = self.spawn('mellagui-calc')
+        win = wait_for_window('mellagui.calc')
+        self.assertIsNotNone(win)
+        time.sleep(0.3)
+        n = [0]
+
+        def result():
+            n[0] += 1
+            ctl.abs(win['x'] + 100, win['y'] + 120)           # the pointer inside the window: the keyboard goes here; away from the keys
+            time.sleep(0.1)
+            ppm = ctl.dump(os.path.join(tmp, 'calcf%d.ppm' % n[0]))
+            return [ppm.px(win['x'] + x, win['y'] + y) for y in range(36, 76, 2) for x in range(8, 272, 2)]
+
+        def keys(*codes):
+            for c in codes:
+                ctl.tap(c)
+            time.sleep(0.1)
+
+        ctl.abs(win['x'] + 100, win['y'] + 120)
+        zero = result()
+        keys(4)                                                 # 3
+        three = result()
+        self.assertNotEqual(three, zero)
+        keys(1)                                                 # Esc
+        keys(10, 19)                                            # 9 r: the square root is 3, the same picture as a typed 3
+        self.assertEqual(result(), three)
+        ctl.key(29, True); ctl.tap(46); ctl.key(29, False)      # Ctrl+C copies the 3
+        keys(1)
+        self.assertEqual(result(), zero)
+        ctl.key(29, True); ctl.tap(47); ctl.key(29, False)      # Ctrl+V pastes it back
+        time.sleep(0.1)
+        self.assertEqual(result(), three)
+        keys(1)
+        keys(4, 25)                                             # 3 p: M+ keeps it in the memory (p = KEY_P)
+        keys(1, 50)                                             # Esc, m: MR types it again
+        self.assertEqual(result(), three)
+        self.assertTrue(alive_p(p))
+
     def test_calc_clicks_and_keys(self):
         p = self.spawn('mellagui-calc')
         win = wait_for_window('mellagui.calc')
         self.assertIsNotNone(win, 'calculator window did not appear')
-        self.assertEqual((win['w'], win['h']), (264, 360))
+        self.assertEqual((win['w'], win['h']), (280, 440))
         time.sleep(0.3)
         n = [0]
 
-        def centre(row, col):       # layout: 8px padding, 56x48 keys, 8px gaps, 60px display
-            return win['x'] + 8 + col * 64 + 28, win['y'] + 76 + row * 56 + 24
+        def centre(row, col):       # layout: 8px padding and gaps, 60x42 keys, 73px display on top
+            return win['x'] + 8 + col * 68 + 30, win['y'] + 89 + row * 50 + 21
 
         def click(row, col):
             ctl.click(*centre(row, col))
@@ -1808,16 +1847,16 @@ class TestClients(Base):
             ctl.abs(900, 500)       # keep the hover highlight out of the picture
             time.sleep(0.1)
             ppm = ctl.dump(os.path.join(tmp, 'calc%d.ppm' % n[0]))
-            return [ppm.px(win['x'] + x, win['y'] + y) for y in range(8, 68, 2) for x in range(8, 256, 2)]
+            return [ppm.px(win['x'] + x, win['y'] + y) for y in range(36, 76, 2) for x in range(8, 272, 2)]     # the result, not the sum above it
 
         zero = display()
-        # grid: row0 C < % / | row1 7 8 9 x | row2 4 5 6 - | row3 1 2 3 + | row4 +/- 0 . =
-        click(3, 0); click(3, 1); click(3, 3); click(3, 2); click(4, 3)    # 1 2 + 3 =
+        # grid: row0 MC MR M+ M- | row1 sqrt x2 1/x / | row2 C <- % x | row3 7 8 9 - | row4 4 5 6 + | row5 1 2 3 = | row6 +/- 0 .
+        click(5, 0); click(5, 1); click(4, 3); click(5, 2); click(5, 3)    # 1 2 + 3 =
         mouse_15 = display()
         self.assertNotEqual(mouse_15, zero)
-        click(0, 0)                                                       # C
+        click(2, 0)                                                       # C
         self.assertEqual(display(), zero)
-        click(3, 0); click(2, 1)                                          # 1 5
+        click(5, 0); click(4, 1)                                          # 1 5
         self.assertEqual(display(), mouse_15)                             # same text as 12+3=
         # keyboard: Esc clears, digits and Enter are accepted
         ctl.tap(KEY_ESC)

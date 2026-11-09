@@ -15,7 +15,7 @@
  * Keys: Tab switches the active pane; Up / Down / PageUp / PageDown / Home / End move; Enter or Right opens (a folder: goes in; png / jpg /
  * ppm: mellagui-view; text: mellagui-edit; binary files are not opened); Backspace / Left / Alt+Up goes to the parent folder;
  * Insert or Space marks the file and moves down; F1 help, F2 rename, F3 preview, F4 edit, F5 copy, F6 move, F7 new folder,
- * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good; Ctrl+B opens the trash, Ctrl+Z puts the marked files in it back), F9 terminal here, F10 quit; copy / move / delete work on the marked
+ * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good; Ctrl+B opens the trash, Ctrl+Z puts the marked files in it back, Ctrl+E empties it), F9 terminal here, F10 quit; copy / move / delete work on the marked
  * files, else on the one under the cursor, copy and move go to the folder shown in the other pane (editable first, Tab completes names) and
  * never replace an existing file, delete asks first. They run in a thread: the window stays alive, the status line shows the progress and Esc
  * cancels.
@@ -121,7 +121,7 @@ struct preview {
     int sw, sh;
 };
 
-enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD };
+enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY };
 
 enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH, J_RESTORE };
 
@@ -146,6 +146,8 @@ struct job {
     char first_err[PATH_MAX + 200];
     int ok, failed;                     /* set by the thread before `finished` */
     int pane;                           /* the pane the names came from (its marks are cleared when the job is over) */
+    bool emptying;                      /* "Empty": a J_DELETE of everything in the trash (its info files included) */
+    int nfiles;                         /* ... and how many of the items are trashed files (what the message counts) */
     int requested;                      /* how many things were asked for */
     int planned_skips;                  /* items left out while planning (they exist, are the same, ...) */
     char first_skip[PATH_MAX + 200];
@@ -1511,7 +1513,9 @@ static void job_finish(struct app *a)
     int n = j->requested, bad = n - j->ok;
     const char *first = j->first_skip[0] ? j->first_skip : j->first_err;
     const char *verb = j->kind == J_COPY ? "Copied" : j->kind == J_MOVE ? "Moved" : j->kind == J_TRASH ? "Trashed" : j->kind == J_RESTORE ? "Restored" : "Deleted";
-    if (cancelled)
+    if (j->emptying && !cancelled && bad <= 0)
+        msg(a, "Emptied the trash (%d item%s)", j->nfiles, j->nfiles == 1 ? "" : "s");
+    else if (cancelled)
         msg(a, "Cancelled: %s %d of %d", verb, j->ok, n);
     else if (bad > 0)
         msg(a, "%s %d of %d: %s", verb, j->ok, n, first);
@@ -1669,6 +1673,75 @@ static void do_restore(struct app *a)
         snprintf(why, sizeof(why), "%s", j->first_skip);
         job_free(j);
         msg(a, "Restored 0 of %d: %s", n, why);
+        return;
+    }
+    job_start(a, j);
+}
+
+/* The top-level entries of a folder (not . and ..). */
+static int count_dir(const char *path)
+{
+    DIR *d = opendir(path);
+    int n = 0;
+    struct dirent *de;
+    while (d && (de = readdir(d)))
+        n += strcmp(de->d_name, ".") && strcmp(de->d_name, "..");
+    if (d)
+        closedir(d);
+    return n;
+}
+
+static void prompt_start(struct app *a, enum prompt kind, const char *initial);
+
+static void cmd_empty_trash(struct app *a)
+{
+    if (job_busy(a))
+        return;
+    char t[PATH_MAX];
+    if (!trash_files_dir(t, sizeof(t))) {
+        msg(a, "There is no trash folder (HOME is not set)");
+        return;
+    }
+    if (count_dir(t) == 0) {
+        msg(a, "The trash is already empty");
+        return;
+    }
+    prompt_start(a, P_EMPTY, "");
+}
+
+/* Deletes everything that is in the trash for good: the trashed files and their info files. The folders themselves stay. */
+static void do_empty_trash(struct app *a)
+{
+    char files[PATH_MAX], info[PATH_MAX + 16];
+    if (!trash_files_dir(files, sizeof(files)))
+        return;
+    snprintf(info, sizeof(info), "%.*s", PATH_MAX - 1, files);
+    char *slash = strrchr(info, '/');
+    if (slash)
+        snprintf(slash + 1, sizeof(info) - (size_t)(slash + 1 - info), "info");
+    int nf = count_dir(files), ni = count_dir(info);
+    struct job *j = job_new(J_DELETE, nf + ni);
+    if (!j)
+        return;
+    j->pane = a->act;
+    j->emptying = true;
+    j->nfiles = nf;
+    for (int pass = 0; pass < 2; pass++) {
+        const char *dir = pass == 0 ? files : info;
+        DIR *d = opendir(dir);
+        struct dirent *de;
+        while (d && (de = readdir(d)) && j->n < nf + ni) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+                continue;
+            snprintf(j->items[j->n++].src, sizeof(j->items[0].src), "%.*s/%.*s", PATH_MAX / 2, dir, NAME_MAX, de->d_name);
+        }
+        if (d)
+            closedir(d);
+    }
+    j->requested = j->n;
+    if (j->n == 0) {
+        job_free(j);
+        msg(a, "The trash is already empty");
         return;
     }
     job_start(a, j);
@@ -1841,20 +1914,20 @@ struct rbtn {
     int x, w;
 };
 
-enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, N_TOOL };
+enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, B_EMPTY, N_TOOL };
 
 /* The buttons that belong to the two-pane manager (the picture chooser has neither). */
 static bool tool_visible(const struct app *a, int i)
 {
-    return a->dual || (i != B_PREVIEW && i != B_TRASH && i != B_RESTORE);
+    return a->dual || (i != B_PREVIEW && i != B_TRASH && i != B_RESTORE && i != B_EMPTY);
 }
 enum { F_HELP, F_RENAME, F_VIEW, F_EDIT, F_COPY, F_MOVE, F_MKDIR, F_DELETE, F_TERM, F_QUIT, N_FKEY };
 
 static void toolbar(const struct app *a, struct rbtn *b)
 {
-    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview", "Trash", "Restore" };
-    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f };
-    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50, 0xd65f5f, 0x98b84a };
+    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview", "Trash", "Restore", "Empty" };
+    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f, 0x8a3434 };
+    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50, 0xd65f5f, 0x98b84a, 0xad4a4a };
     int x = 8;
     for (int i = 0; i < N_TOOL; i++) {
         b[i].label = labels[i];
@@ -1923,6 +1996,7 @@ static void press_tool(struct app *a, int i)
     case B_PREVIEW: toggle_preview(a); break;
     case B_TRASH: go_trash(a); break;
     case B_RESTORE: do_restore(a); break;
+    case B_EMPTY: cmd_empty_trash(a); break;
     }
 }
 
@@ -1971,6 +2045,7 @@ static void prompt_accept(struct app *a)
     switch (kind) {
     case P_DELETE: do_delete(a, false); return;
     case P_DELETE_HARD: do_delete(a, true); return;
+    case P_EMPTY: do_empty_trash(a); return;
     case P_COPY: if (text[0]) do_copy_move(a, text, false); return;
     case P_MOVE: if (text[0]) do_copy_move(a, text, true); return;
     case P_MKDIR: if (text[0]) do_mkdir(a, text); return;
@@ -2007,7 +2082,8 @@ static const char *prompt_label(enum prompt k)
     case P_MKDIR: return "New folder: ";
     case P_RENAME: return "Rename to: ";
     case P_DELETE:
-    case P_DELETE_HARD: return "";
+    case P_DELETE_HARD:
+    case P_EMPTY: return "";
     default: return "";
     }
 }
@@ -2042,7 +2118,7 @@ static void handle_key(struct app *a, uint32_t ks)
             prompt_accept(a);
         } else if (ks == LM_KS_Escape) {
             a->prompt = P_NONE;
-        } else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD) {
+        } else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY) {
             /* a question: only Enter and Esc answer it */
         } else if (ks == LM_KS_Tab) {                                   /* complete a name (not for the new folder / rename fields) */
             if (a->prompt == P_GOTO || a->prompt == P_COPY || a->prompt == P_MOVE) {
@@ -2073,6 +2149,7 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'q': toggle_preview(a); return;
         case 'b': if (a->dual) go_trash(a); return;
         case 'z': if (a->dual) do_restore(a); return;
+        case 'e': if (a->dual) cmd_empty_trash(a); return;
         case 'l':
             prompt_start(a, P_GOTO, "");
             snprintf(a->pbuf, sizeof(a->pbuf), "%.*s%s", (int)sizeof(a->pbuf) - 2, cur(a)->cwd, strcmp(cur(a)->cwd, "/") ? "/" : "");
@@ -2378,6 +2455,7 @@ static void paint_help(struct wlwin *w)
         "F7                new folder",
         "F8 / Delete       move to the trash (asks first); Shift+F8: delete for good",
         "Ctrl+B            open the trash; in it, Ctrl+Z / Restore puts files back",
+        "Ctrl+E / Empty    delete everything in the trash for good (asks first)",
         "F9 / Ctrl+T       a terminal in this folder",
         "F10               quit",
         "",
@@ -2484,10 +2562,15 @@ static void paint(struct wlwin *w)
                      n == 1 ? names[0] : "", n == 1 ? ")" : "",
                      hard ? "for good? This cannot be undone: Enter deletes, Esc cancels" : "to the trash? Enter moves, Esc cancels");
             free_names(names, n);
+        } else if (a->prompt == P_EMPTY) {
+            char t[PATH_MAX];
+            int n = trash_files_dir(t, sizeof(t)) ? count_dir(t) : 0;
+            snprintf(line, sizeof(line), "Empty the trash (%d item%s) for good? This cannot be undone: Enter empties it, Esc cancels", n,
+                     n == 1 ? "" : "s");
         } else {
             snprintf(line, sizeof(line), "%s%s_", prompt_label(a->prompt), a->pbuf);
         }
-        wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
+        wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
     }
     if (a->dual) {
         struct rbtn f[N_FKEY];
@@ -2978,6 +3061,27 @@ static int selftest(void)
     a.pane[1].sel = 1;
     do_restore(&a);
     CHECK(strstr(a.msg, "no record") && access(p2, F_OK) == 0, "no info file: %s", a.msg);
+
+    /* emptying the trash: files and their info files go, the folders stay */
+    snprintf(p, sizeof(p), "%s/Trash/files", xdg);
+    CHECK(count_dir(p) == 1, "the trash still holds clash.txt (%d)", count_dir(p));
+    snprintf(src, sizeof(src), "%s/right/more.txt", dir);
+    write_file(src, "m", 1);
+    CHECK(go_to(&a, &a.pane[1], dst, NULL), "right pane");
+    a.act = 1;
+    for (int r = 0; r < rows(&a.pane[1]); r++)
+        if (!strcmp(row_name(&a.pane[1], r), "more.txt"))
+            a.pane[1].sel = r;
+    do_delete(&a, false);                                                 /* now two things are in the trash */
+    CHECK(count_dir(p) == 2, "two trashed files (%d)", count_dir(p));
+    snprintf(p2, sizeof(p2), "%s/Trash/info", xdg);
+    do_empty_trash(&a);
+    CHECK(count_dir(p) == 0 && count_dir(p2) == 0 && strstr(a.msg, "Emptied the trash (2 items)"), "emptied: %s", a.msg);
+    CHECK(access(p, F_OK) == 0 && access(p2, F_OK) == 0, "the folders stay");
+    do_empty_trash(&a);
+    CHECK(strstr(a.msg, "already empty"), "nothing to empty: %s", a.msg);
+    cmd_empty_trash(&a);
+    CHECK(a.prompt == P_NONE && strstr(a.msg, "already empty"), "no question for an empty trash");
 
     /* a cancelled job stops at once and leaves no half-written file behind */
     static struct job *cj;

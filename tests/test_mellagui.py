@@ -2435,6 +2435,22 @@ class TestClients(Base):
         time.sleep(0.6)
         self.assertEqual(self.read_file(os.path.join(d, 'zz_back_buttons.txt')), b'restore me\n')
 
+    def test_files_empty_trash_asks_and_empties(self):
+        p, d = self.files_start()
+        win = wait_for_window('mellagui.files')
+        trash = self.trash_one_file(d, 'zz_empty_me.txt')
+        self.assertTrue(os.path.exists(os.path.join(trash, 'info', 'zz_empty_me.txt.trashinfo')))
+        ctl.click(win['x'] + 520, win['y'] + 15)               # the Empty button (x 502..562)
+        time.sleep(0.3)
+        ctl.tap(KEY_ESC)                                       # Esc: the question is withdrawn
+        time.sleep(0.3)
+        self.assertTrue(os.path.exists(os.path.join(trash, 'files', 'zz_empty_me.txt')))
+        self.chord(self.CTRL, 18)                              # Ctrl+E asks again
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        self.assertEqual(os.listdir(os.path.join(trash, 'files')), [])
+        self.assertEqual(os.listdir(os.path.join(trash, 'info')), [])
+
     def test_files_marked_files_move_together_and_nothing_is_replaced(self):
         p, d = self.files_start()
         sub = os.path.join(d, 'sub')

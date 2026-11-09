@@ -1992,6 +1992,7 @@ static void osk_info(const struct lm_wm *wm, const struct lm_osk_geo *g, struct 
         oi->key[i].rect = k->rect;
         oi->key[i].kind = (int)k->kind;
         oi->key[i].row = k->row;
+        oi->key[i].code = k->code;
         lm_osk_label(k, label_mods, locks, oi->key[i].label);
         uint32_t st = 0;
         if (i == wm->osk_hover)

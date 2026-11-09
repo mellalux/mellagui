@@ -12,6 +12,10 @@ struct spec { uint32_t code; int q; enum lm_osk_kind kind; };       /* q = width
 #define K(c, w) { KEY_##c, w, LM_OSK_KEY }
 #define M(c, w, k) { KEY_##c, w, k }
 
+static const struct spec row_f[] = {
+    K(ESC, 4), K(F1, 4), K(F2, 4), K(F3, 4), K(F4, 4), K(F5, 4), K(F6, 4), K(F7, 4), K(F8, 4), K(F9, 4), K(F10, 4), K(F11, 4),
+    K(F12, 4), K(DELETE, 8),
+};
 static const struct spec row0[] = {
     K(GRAVE, 4), K(1, 4), K(2, 4), K(3, 4), K(4, 4), K(5, 4), K(6, 4), K(7, 4), K(8, 4), K(9, 4), K(0, 4), K(MINUS, 4), K(EQUAL, 4),
     K(BACKSPACE, 8),
@@ -29,11 +33,12 @@ static const struct spec row3[] = {
     K(SLASH, 4), M(RIGHTSHIFT, 11, LM_OSK_SHIFT),
 };
 static const struct spec row4[] = {
-    M(RESERVED, 5, LM_OSK_HIDE), K(ESC, 5), M(LEFTCTRL, 5, LM_OSK_CTRL), M(LEFTALT, 5, LM_OSK_ALT), K(SPACE, 19),
+    M(RESERVED, 5, LM_OSK_HIDE), M(LEFTCTRL, 5, LM_OSK_CTRL), M(LEFTALT, 5, LM_OSK_ALT), K(SPACE, 24),
     M(RIGHTALT, 5, LM_OSK_ALTGR), K(LEFT, 4), K(UP, 4), K(DOWN, 4), K(RIGHT, 4),
 };
 
-static const struct { const struct spec *s; int n; } rows[5] = {
+static const struct { const struct spec *s; int n; } rows[LM_OSK_ROWS] = {
+    { row_f, (int)(sizeof(row_f) / sizeof(row_f[0])) },
     { row0, (int)(sizeof(row0) / sizeof(row0[0])) }, { row1, (int)(sizeof(row1) / sizeof(row1[0])) },
     { row2, (int)(sizeof(row2) / sizeof(row2[0])) }, { row3, (int)(sizeof(row3) / sizeof(row3[0])) },
     { row4, (int)(sizeof(row4) / sizeof(row4[0])) },
@@ -46,8 +51,8 @@ static const struct { const struct spec *s; int n; } rows[5] = {
 #define MIN_KH 24
 #define MAX_KH 96
 
-int lm_osk_card_h(int kh) { return 5 * kh + 4 * GAP + TOP_PAD + PAD; }
-int lm_osk_kh_for_h(int h) { return LM_CLAMP((h - 4 * GAP - TOP_PAD - PAD) / 5, MIN_KH, MAX_KH); }
+int lm_osk_card_h(int kh) { return LM_OSK_ROWS * kh + (LM_OSK_ROWS - 1) * GAP + TOP_PAD + PAD; }
+int lm_osk_kh_for_h(int h) { return LM_CLAMP((h - (LM_OSK_ROWS - 1) * GAP - TOP_PAD - PAD) / LM_OSK_ROWS, MIN_KH, MAX_KH); }
 int lm_osk_margin(void) { return PAD; }
 
 void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place, struct lm_osk_geo *g)
@@ -76,7 +81,7 @@ void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place
     g->card = lm_rect_make(x, y, w, h);
     g->kh = kh;
     int inner = w - 2 * PAD;
-    for (int r = 0; r < 5; r++) {
+    for (int r = 0; r < LM_OSK_ROWS; r++) {
         int qx = 0, ky = g->card.y + TOP_PAD + r * (kh + GAP);
         for (int i = 0; i < rows[r].n && g->n < LM_OSK_MAX_KEYS; i++) {
             const struct spec *s = &rows[r].s[i];
@@ -119,6 +124,7 @@ void lm_osk_label(const struct lm_osk_key *k, uint32_t mods, uint32_t locks, cha
 {
     out[0] = 0;
     const char *name = NULL;
+    char fname[8] = "";
     switch (k->kind) {
     case LM_OSK_SHIFT: name = "Shift"; break;
     case LM_OSK_CTRL: name = "Ctrl"; break;
@@ -134,12 +140,20 @@ void lm_osk_label(const struct lm_osk_key *k, uint32_t mods, uint32_t locks, cha
         case KEY_BACKSPACE: name = "Bksp"; break;
         case KEY_ENTER: name = "Enter"; break;
         case KEY_ESC: name = "Esc"; break;
+        case KEY_DELETE: name = "Del"; break;
         case KEY_SPACE: name = ""; break;
         case KEY_LEFT: name = "<"; break;
         case KEY_RIGHT: name = ">"; break;
         case KEY_UP: name = "^"; break;
         case KEY_DOWN: name = "v"; break;
-        default: break;
+        default:
+            if (k->code >= KEY_F1 && k->code <= KEY_F10)
+                snprintf(fname, sizeof(fname), "F%u", k->code - KEY_F1 + 1);
+            else if (k->code == KEY_F11 || k->code == KEY_F12)
+                snprintf(fname, sizeof(fname), "F%u", k->code - KEY_F11 + 11);
+            if (fname[0])
+                name = fname;
+            break;
         }
     if (name) {
         snprintf(out, LM_OSK_LABEL * 4, "%s", name);

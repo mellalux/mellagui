@@ -455,7 +455,8 @@ struct lm_osk_info {
         char label[LM_OSK_LABEL * 4];
         uint32_t state;             /* LM_OSK_KEY_* */
         int kind;                   /* enum lm_osk_kind */
-        int row;                    /* 0 = number row ... 4 = bottom row (the colour) */
+        int row;                    /* 0 = the Esc / F row ... 5 = bottom row (the colour) */
+        uint32_t code;              /* evdev KEY_* (the arrows are drawn as shapes) */
     } key[LM_OSK_MAX_KEYS];
 };
 

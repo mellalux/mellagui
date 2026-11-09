@@ -3242,7 +3242,7 @@ class TestClients(Base):
         ctl.click(x5 + 40, y5 + 5)                                               # a double click on the margin puts it back
         ctl.click(x5 + 40, y5 + 5)
         time.sleep(0.1)
-        self.assertEqual(self.osk_card(), (4, 600 - 260 - 6, 1016, 260))
+        self.assertEqual(self.osk_card(), (4, 600 - 306 - 6, 1016, 306))
 
     def test_osk_shows_what_is_held_down_on_the_real_keyboard(self):
         self.osk('open')

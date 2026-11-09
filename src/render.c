@@ -28,6 +28,7 @@
 #include "surface.h"
 #include "wm.h"
 #include <stdio.h>
+#include <linux/input-event-codes.h>
 
 #define HIST 3
 #define MAX_REDRAW_RECTS 12
@@ -759,7 +760,7 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
 
 /* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
 
-enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS };
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT };
 
 static float cov01(float v)
 {
@@ -804,6 +805,10 @@ static float shape_cov(enum shape s, float dx, float dy, float R)
         float d = d1 < d2 ? d1 : d2;
         return cov01(t * 0.5f - d + 0.5f);
     }
+    case SHAPE_LEFT:                                    /* the chevron turned a quarter */
+        return shape_cov(SHAPE_UP, dy, dx, R);
+    case SHAPE_RIGHT:
+        return shape_cov(SHAPE_UP, dy, -dx, R);
     case SHAPE_CROSS: {                                 /* an x */
         float t = R * 0.30f < 1.1f ? 1.1f : R * 0.30f;
         float d1 = seg_dist(dx, dy, -R * 0.62f, -R * 0.62f, R * 0.62f, R * 0.62f);
@@ -1737,7 +1742,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
  * corner (resize) shows where to take hold. Single characters are drawn twice as big as the font when the keys are tall enough. */
 static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
 {
-    static const int row_col[5] = { 2, 0, 1, 3, 4 };
+    static const int row_col[LM_OSK_ROWS] = { 6, 2, 0, 1, 3, 4 };
     fill_round(c, &oi->rect, 22, 0x8cffffffu);                                  /* the rim ... */
     struct lm_rect in = lm_rect_make(oi->rect.x + 1, oi->rect.y + 1, oi->rect.w - 2, oi->rect.h - 2);
     fill_round(c, &in, 21, 0x4cffffffu);                                        /* ... and the veil inside it, translucent all through */
@@ -1751,7 +1756,7 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
     for (int i = 0; i < oi->n; i++) {
         const struct lm_rect *r = &oi->key[i].rect;
         uint32_t st = oi->key[i].state;
-        uint32_t col = panel_palette[row_col[LM_CLAMP(oi->key[i].row, 0, 4)]];
+        uint32_t col = panel_palette[row_col[LM_CLAMP(oi->key[i].row, 0, LM_OSK_ROWS - 1)]];
         if (oi->key[i].kind == LM_OSK_HIDE)
             col = panel_palette[5];
         else if (oi->key[i].kind != LM_OSK_KEY)
@@ -1771,6 +1776,15 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
         fill_round(c, r, rad, 0xdc000000u | bg);
         uint32_t fg = (st & LM_OSK_KEY_DOWN) ? 0x0b0d12u : 0xffffffu;
         const char *t = oi->key[i].label;
+        enum shape arrow = oi->key[i].code == KEY_LEFT ? SHAPE_LEFT : oi->key[i].code == KEY_RIGHT ? SHAPE_RIGHT :
+                           oi->key[i].code == KEY_UP ? SHAPE_UP : oi->key[i].code == KEY_DOWN ? SHAPE_DOWN : SHAPE_DISC;
+        if (arrow != SHAPE_DISC) {                                          /* the arrow keys carry a drawn arrow instead of a letter */
+            float cx = (float)r->x + (float)r->w / 2.0f, cy = (float)r->y + (float)r->h / 2.0f;
+            float R = (float)LM_MIN(r->w, r->h) * 0.34f;
+            paint_shape(c, cx + 1.0f, cy + 1.0f, R, arrow, 0x10141c, 0xa0);   /* the same 1 px shadow as the letters */
+            paint_shape(c, cx, cy, R, arrow, fg, 0xff);
+            continue;
+        }
         int chars = 0;
         for (const char *q = t; *q; q++)
             chars += ((unsigned char)*q & 0xc0) != 0x80;

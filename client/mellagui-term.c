@@ -42,7 +42,6 @@
 #define MAX_MIMES 32
 #define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
 #define BAR_BG (lm_theme.bar)
-#define BAR_BTN 0x434c5eu
 #define BAR_BTN_ON 0x5e6a82u
 #define MENU_BORDER 0x4c566au
 #define MENU_CURRENT 0x88c0d0u
@@ -925,6 +924,15 @@ static void round_box(uint32_t *px, int x, int y, int w, int h, int r, uint32_t 
     lm_round_fill(px, A.bw, A.bw, A.bh, x, y, w, h, r, color);
 }
 
+/* One colour for each button, a lighter one under the pointer (the same palette as the file manager's round buttons). */
+static void btn_colors(int i, uint32_t *base, uint32_t *hover)
+{
+    static const uint32_t b[N_BTNS] = { 0x3f9a5e, 0x3d6fb4, 0x8a6fb8, 0x2f8f9a, 0xb8803a };
+    static const uint32_t h[N_BTNS] = { 0x56b878, 0x5588d0, 0xa088d0, 0x45aab5, 0xd49a50 };
+    *base = b[i];
+    *hover = h[i];
+}
+
 static void draw_bar(uint32_t *px)
 {
     fill_box(px, 0, 0, A.bw, BAR_H, BAR_BG);
@@ -934,15 +942,17 @@ static void draw_bar(uint32_t *px)
         btn_rect(i, &bx, &by, &bw, &bh);
         if (bw == 0)
             continue;
-        round_box(px, bx, by, bw, bh, bh / 2, (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? BAR_BTN_ON : BAR_BTN);
+        uint32_t base, hover;
+        btn_colors(i, &base, &hover);
+        round_box(px, bx, by, bw, bh, bh / 2, (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? hover : base);
         const char *t = btn_text(i, tmp, sizeof(tmp));
         int w = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS * LM_FONT_W : (int)strlen(t) * LM_FONT_W;
         int tx = bx + 8 + (i == BTN_ZOOM_ID ? w - (int)strlen(t) * LM_FONT_W : 0), ty = by + (bh - LM_FONT_H) / 2;
-        put_text(px, tx, ty, t, BAR_FG);
+        put_text(px, tx, ty, t, 0xffffffu);
         if (i == BTN_ZOOM_ID) {                                 /* the drop-down triangle */
             int ax = bx + bw - 8 - 7, ay = by + bh / 2 - 2;
             for (int r = 0; r < 4; r++)
-                fill_box(px, ax + r, ay + r, 7 - 2 * r, 1, BAR_FG);
+                fill_box(px, ax + r, ay + r, 7 - 2 * r, 1, 0xffffffu);
         }
     }
 }

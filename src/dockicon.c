@@ -21,6 +21,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_CODE] = { "code", 0x1f6feb },
     [LM_DOCKICON_WEB] = { "web", 0xe8590c },
     [LM_DOCKICON_RUN] = { "run", 0x238636 },
+    [LM_DOCKICON_LAUNCHER] = { "launcher", 0x5b5fc7 },
 };
 
 const char *lm_dockicon_name(int kind)
@@ -45,7 +46,7 @@ int lm_dockicon_guess(const char *entry_name)
         { "image", LM_DOCKICON_IMAGES }, { "photo", LM_DOCKICON_IMAGES }, { "picture", LM_DOCKICON_IMAGES }, { "view", LM_DOCKICON_IMAGES },
         { "setting", LM_DOCKICON_SETTINGS }, { "config", LM_DOCKICON_SETTINGS }, { "prefer", LM_DOCKICON_SETTINGS },
         { "code", LM_DOCKICON_CODE }, { "firefox", LM_DOCKICON_WEB }, { "browser", LM_DOCKICON_WEB }, { "chrom", LM_DOCKICON_WEB },
-        { "web", LM_DOCKICON_WEB }, { "internet", LM_DOCKICON_WEB }, { "run", LM_DOCKICON_RUN },
+        { "web", LM_DOCKICON_WEB }, { "internet", LM_DOCKICON_WEB }, { "run", LM_DOCKICON_RUN }, { "launcher", LM_DOCKICON_LAUNCHER },
     };
     for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++)
         if (strcasestr(entry_name, hints[i].part))
@@ -157,6 +158,13 @@ static float glyph(int kind, float u, float v)
         d = fminf2(d, fmaxf2(fabsf(v) - 0.03f, inside));
         d = fminf2(d, fmaxf2(fabsf(fabsf(v) - 0.25f) - 0.03f, inside));
         return fminf2(d, fmaxf2(fabsf(u) - 0.03f, inside));
+    }
+    case LM_DOCKICON_LAUNCHER: {
+        float d = 1e9f;
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                d = fminf2(d, sd_box(u, v, -0.28f + 0.28f * (float)c, -0.28f + 0.28f * (float)r, 0.095f, 0.095f, 0.03f));
+        return d;
     }
     case LM_DOCKICON_RUN:
         return sd_tri(u, v, -0.15f, -0.27f, -0.15f, 0.27f, 0.29f, 0.0f) - 0.05f;

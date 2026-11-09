@@ -19,6 +19,7 @@ enum lm_dockicon {
     LM_DOCKICON_CODE,
     LM_DOCKICON_WEB,
     LM_DOCKICON_RUN,
+    LM_DOCKICON_LAUNCHER,       /* a grid of nine dots: opens the launcher dialog */
     LM_DOCKICON_COUNT
 };
 

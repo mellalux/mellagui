@@ -58,6 +58,8 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
 /* ---- pointer ----------------------------------------------------------------------------- */
 
 void lm_seat_pointer_position(const struct lm_seat *seat, double *x, double *y);
+/* The active keyboard layout (XKB group), for the dialogs that turn key presses into text themselves. */
+uint32_t lm_seat_group(const struct lm_seat *seat);
 /* Move the pointer (global coords, clamped) as if the user did; triggers focus update. */
 void lm_seat_pointer_warp(struct lm_seat *seat, double x, double y);
 struct lm_surface *lm_seat_pointer_focus(const struct lm_seat *seat);

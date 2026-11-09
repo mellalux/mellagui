@@ -6483,7 +6483,7 @@ class TestConfig(Base):
     def test_default_dock_when_there_is_no_file(self):
         p, c, stop = self.private_compositor('mellagui-cfg0', '--config', 'none')
         names = [n for n, _ in self.buttons(c)]
-        self.assertEqual(names[:5], ['Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
+        self.assertEqual(names[:6], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
         self.assertEqual(names[-1], 'Settings')
 
     def test_dock_apps_section_replaces_the_default_dock(self):
@@ -6644,7 +6644,7 @@ class TestKeys(Base):
                      'Super+Down = restore', 'Super+Shift+Space = layout-prev'):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
-        self.assertEqual(len(t), 29)
+        self.assertEqual(len(t), 30)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -6689,7 +6689,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 30)
+        self.assertEqual(len(t), 31)
         self.assertTrue(alive_p(p))
 
 
@@ -6811,7 +6811,7 @@ class TestReload(Base):
         self.assertEqual(dock_apps(c), ['File|echo f'])
         self.write('# nothing\n')
         c.cmd('reload')
-        self.assertEqual(dock_apps(c)[0].split('|')[0], 'Terminal')                # the built-in dock is back
+        self.assertEqual(dock_apps(c)[0].split('|')[0], 'Launcher')                # the built-in dock is back
         self.assertEqual(dict(l.split('=', 1) for l in c.cmd('commands'))['terminal'], 'echo t')      # what the command line set stays
         self.assertEqual(self.menu_px(c, 'rl3'), (0x14, 0x17, 0x1f))
 
@@ -7149,9 +7149,9 @@ class TestDock(Base):
     def dock(c):
         info, icons = None, []
         for l in c.cmd('dock'):
-            m = re.match(r'dock shown=(\d) hover=(-?\d+) n=(\d+)', l)
+            m = re.match(r'dock shown=(\d) hover=(-?\d+) n=(\d+)(?: drag=(-?\d+) to=(-?\d+))?', l)
             if m:
-                info = dict(shown=int(m[1]), hover=int(m[2]), n=int(m[3]))
+                info = dict(shown=int(m[1]), hover=int(m[2]), n=int(m[3]), drag=int(m[4] or -1), to=int(m[5] or -1))
             m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) running=(\d) launching=(\d)', l)
             if m:
                 icons.append(dict(i=int(m[1]), name=m[2], x=int(m[3]), y=int(m[4]), w=int(m[5]), h=int(m[6]), running=int(m[7]),
@@ -7163,7 +7163,7 @@ class TestDock(Base):
         info, icons = self.dock(c)
         self.assertEqual(info['shown'], 1)
         names = [i['name'] for i in icons]
-        self.assertEqual(names[:5], ['Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
+        self.assertEqual(names[:6], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
         self.assertEqual(names[-1], 'Settings')
 
     def test_entries_geometry_and_options(self):
@@ -7424,7 +7424,7 @@ class TestDockEdit(Base):
         self.assertEqual(self.entries(c)[1], ('Renamed', '', 'echo r || echo s'))
         c.cmd('setraw dock-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[theme]\naccent = #ff0000\n\n[keys]\nSuper+T = run\n')
-        self.assertEqual(self.entries(c)[0][0], 'Terminal')                          # the defaults are back
+        self.assertEqual(self.entries(c)[0][0], 'Launcher')                          # the defaults are back
 
     def test_options_are_written_as_single_lines(self):
         c = self.start('mellagui-de2', '[dock]\n# look\nzoom = 200\n')
@@ -7527,11 +7527,11 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '29')
+        self.assertEqual(self.get(c, 'keys-count'), '30')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
-        self.assertEqual(len(self.rows(c, 2)), 9)
+        self.assertEqual(len(self.rows(c, 2)), 10)
         self.assertEqual(self.rows(c, 99), self.rows(c, 2))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -7555,13 +7555,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '29')
+        self.assertEqual(self.get(c, 'keys-count'), '30')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '30')
+        self.assertEqual(self.get(c, 'keys-count'), '31')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -8161,6 +8161,354 @@ class TestScreenshot(Base):
         cl, dev = self.clipboard_client(name)
         c.tap(self.KEY_PRINT)
         self.assertIsNotNone(self.paste_png(cl, dev))
+
+
+class TestLauncher(Base):
+    """The launcher dialog (Super+A, the dock's Launcher button): every dock button as a big icon, add and remove."""
+
+    KEY_A, KEY_E, KEY_ESC, KEY_ENTER, KEY_TAB, KEY_LEFTMETA, KEY_RIGHT, KEY_DELETE = 30, 18, 1, 28, 15, 125, 106, 111
+
+    def start(self, name, text=None):
+        self.path = os.path.join(tmp, name + '.conf')
+        self.mark = os.path.join(tmp, name + '.mark')
+        if os.path.exists(self.mark):
+            os.unlink(self.mark)
+        if text is None:
+            text = ('[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [terminal] true\nBeta = [files] touch %s\nGamma = [editor] true\n'
+                    % self.mark)
+        with open(self.path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path)
+        c.sync()
+        return c
+
+    @staticmethod
+    def info(c):
+        d = dict(icons=[], buttons={}, fields={}, kinds={}, add=None)
+        for l in c.cmd('launcher'):
+            m = re.match(r'launcher open=(\d) edit=(\d) form=(\d) n=(\d+) sel=(-?\d+)', l)
+            if m:
+                d.update(open=int(m[1]), edit=int(m[2]), form=int(m[3]), n=int(m[4]), sel=int(m[5]))
+            m = re.match(r'card x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['card'] = tuple(int(v) for v in m.groups())
+            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)(?: remove=(-?\d+),(-?\d+),(\d+),(\d+))?', l)
+            if m:
+                d['icons'].append(dict(name=m[2], box=tuple(int(v) for v in m.groups()[2:6]),
+                                       remove=tuple(int(v) for v in m.groups()[6:]) if m[7] else None))
+            m = re.match(r'add x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['add'] = tuple(int(v) for v in m.groups())
+            m = re.match(r'button (\d) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) "(.*)"', l)
+            if m:
+                d['buttons'][int(m[1])] = (tuple(int(v) for v in m.groups()[1:5]), m[6])
+            m = re.match(r'field (\d) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) text="(.*)"', l)
+            if m:
+                d['fields'][int(m[1])] = (tuple(int(v) for v in m.groups()[1:5]), m[6])
+            m = re.match(r'kind (-?\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['kinds'][int(m[1])] = tuple(int(v) for v in m.groups()[1:])
+        return d
+
+    @staticmethod
+    def centre(r):
+        return r[0] + r[2] // 2, r[1] + r[3] // 2
+
+    def type_text(self, c, text):
+        for ch in text:
+            c.tap(KEYCODES[ch])
+        c.sync()
+
+    def super_a(self, c):
+        c.key(self.KEY_LEFTMETA, True)
+        c.tap(self.KEY_A)
+        c.key(self.KEY_LEFTMETA, False)
+        c.sync()
+
+    def conf_apps(self):
+        with open(self.path) as f:
+            return [l.split('=')[0].strip() for l in f.read().split('[dock-apps]')[1].splitlines() if '=' in l]
+
+    def test_super_a_opens_and_closes_it_and_the_icons_are_the_docks(self):
+        c = self.start('mellagui-lc1')
+        self.assertEqual(self.info(c)['open'], 0)
+        self.super_a(c)
+        d = self.info(c)
+        self.assertEqual((d['open'], d['edit'], d['form'], d['n']), (1, 0, 0, 3))
+        self.assertEqual([i['name'] for i in d['icons']], ['Alpha', 'Beta', 'Gamma'])      # the Launcher button is not listed
+        self.assertIsNotNone(d['add'])
+        self.assertEqual(d['buttons'][0][1], 'Edit')
+        card = d['card']
+        for i in d['icons']:                                                               # big round icons inside the card
+            self.assertEqual(i['box'][2], 64)
+            self.assertTrue(card[0] < i['box'][0] and i['box'][0] + 64 < card[0] + card[2])
+            self.assertTrue(card[1] < i['box'][1] and i['box'][1] + 64 < card[1] + card[3])
+        self.assertEqual(card[0] + card[2] // 2, 400)                                      # centred on the 800x500 output
+        self.super_a(c)                                                                    # Super+A again: closed (Esc, too)
+        self.assertEqual(self.info(c)['open'], 0)
+        self.super_a(c)
+        c.tap(self.KEY_ESC)
+        c.sync()
+        self.assertEqual(self.info(c)['open'], 0)
+
+    def test_the_docks_launcher_button_opens_it_and_a_click_outside_closes_it(self):
+        c = self.start('mellagui-lc2')
+        icons = TestDock.dock(c)[1]
+        self.assertEqual(icons[0]['name'], 'Launcher')
+        c.click(icons[0]['x'] + icons[0]['w'] // 2, icons[0]['y'] + icons[0]['h'] // 2)
+        c.sync()
+        self.assertEqual(self.info(c)['open'], 1)
+        c.click(5, 250)                                                                    # outside the card: closes, nothing below gets it
+        c.sync()
+        self.assertEqual(self.info(c)['open'], 0)
+
+    def test_a_click_starts_the_program_and_closes_it(self):
+        c = self.start('mellagui-lc3')
+        self.super_a(c)
+        d = self.info(c)
+        c.click(*self.centre(d['icons'][1]['box']))                                        # Beta = touch MARK
+        c.sync()
+        for _ in range(50):
+            if os.path.exists(self.mark):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(self.mark))
+        self.assertEqual(self.info(c)['open'], 0)
+
+    def test_the_keyboard_walks_the_icons_and_enter_starts_one(self):
+        c = self.start('mellagui-lc4')
+        self.super_a(c)
+        self.assertEqual(self.info(c)['sel'], -1)
+        c.tap(self.KEY_RIGHT)
+        c.tap(self.KEY_RIGHT)                                                              # first arrow selects the first icon
+        c.sync()
+        self.assertEqual(self.info(c)['sel'], 1)
+        c.tap(self.KEY_ENTER)
+        c.sync()
+        for _ in range(50):
+            if os.path.exists(self.mark):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(self.mark))
+        self.assertEqual(self.info(c)['open'], 0)
+
+    def test_edit_mode_shows_an_x_that_removes_the_button_from_the_file(self):
+        c = self.start('mellagui-lc5')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))                               # Edit
+        c.sync()
+        d = self.info(c)
+        self.assertEqual((d['edit'], d['buttons'][0][1]), (1, 'Done'))
+        self.assertTrue(all(i['remove'] for i in d['icons']))
+        c.click(*self.centre(d['icons'][0]['remove']))                                     # remove Alpha
+        c.sync()
+        d = self.info(c)
+        self.assertEqual([i['name'] for i in d['icons']], ['Beta', 'Gamma'])
+        self.assertEqual(d['open'], 1)                                                     # still open, still editing
+        self.assertEqual(d['edit'], 1)
+        self.assertEqual(self.conf_apps(), ['Launcher', 'Beta', 'Gamma'])
+        self.assertEqual([i['name'] for i in TestDock.dock(c)[1]], ['Launcher', 'Beta', 'Gamma'])      # the dock follows
+        c.click(*self.centre(d['buttons'][0][0]))                                          # Done
+        c.sync()
+        self.assertEqual(self.info(c)['edit'], 0)
+
+    def test_the_plus_tile_opens_a_form_that_adds_a_button(self):
+        c = self.start('mellagui-lc6')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['add']))
+        c.sync()
+        d = self.info(c)
+        self.assertEqual(d['form'], 1)
+        self.type_text(c, 'notes')
+        c.tap(self.KEY_ENTER)                                                              # next field
+        self.type_text(c, 'true')
+        d = self.info(c)
+        self.assertEqual((d['fields'][0][1], d['fields'][1][1]), ('notes', 'true'))
+        c.click(*self.centre(d['kinds'][3]))                                               # the icon choice "files"
+        c.tap(self.KEY_ENTER)
+        c.sync()
+        d = self.info(c)
+        self.assertEqual((d['form'], d['n']), (0, 4))
+        self.assertEqual([i['name'] for i in d['icons']][-1], 'notes')
+        with open(self.path) as f:
+            self.assertIn('notes = [files] true', f.read())
+        self.assertEqual(self.info(c)['sel'], 3)
+
+    LAUNCHER_APPS = ('[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [terminal] true\nBeta = [files] true\nGamma = [editor] true\n'
+                     '[launcher-apps]\nDelta = [web] true\nEpsilon = [code] true\n')
+
+    def section(self, name):
+        with open(self.path) as f:
+            text = f.read()
+        if '[%s]' % name not in text:
+            return []
+        body = text.split('[%s]' % name)[1].split('\n[')[0]
+        return [l.split('=')[0].strip() for l in body.splitlines() if '=' in l]
+
+    def drag(self, c, frm, to, steps=6, release=True):
+        c.abs(*frm)
+        c.button(272, True)
+        for i in range(1, steps + 1):
+            c.abs(frm[0] + (to[0] - frm[0]) * i // steps, frm[1] + (to[1] - frm[1]) * i // steps)
+        c.sync()
+        if release:
+            c.button(272, False)
+            c.sync()
+
+    def test_the_launcher_lists_its_own_buttons_after_the_docks(self):
+        c = self.start('mellagui-lc10', self.LAUNCHER_APPS)
+        self.super_a(c)
+        d = self.info(c)
+        self.assertEqual([i['name'] for i in d['icons']], ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'])
+        self.assertEqual([i['name'] for i in TestDock.dock(c)[1]], ['Launcher', 'Alpha', 'Beta', 'Gamma'])    # the dock has only its own
+
+    def test_a_button_added_in_the_launcher_stays_out_of_the_dock(self):
+        c = self.start('mellagui-lc11', self.LAUNCHER_APPS)
+        self.super_a(c)
+        c.tap(self.KEY_A)
+        self.type_text(c, 'zeta')
+        c.tap(self.KEY_ENTER)
+        self.type_text(c, 'true')
+        c.tap(self.KEY_ENTER)
+        c.sync()
+        self.assertEqual(self.section('launcher-apps'), ['Delta', 'Epsilon', 'zeta'])
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Alpha', 'Beta', 'Gamma'])
+        self.assertEqual([i['name'] for i in self.info(c)['icons']][-1], 'zeta')
+
+    def test_edit_mode_removes_a_launcher_only_button_from_its_own_list(self):
+        c = self.start('mellagui-lc12', self.LAUNCHER_APPS)
+        self.super_a(c)
+        c.tap(self.KEY_E)
+        c.sync()
+        d = self.info(c)
+        c.click(*self.centre(d['icons'][3]['remove']))                                     # Delta
+        c.sync()
+        self.assertEqual(self.section('launcher-apps'), ['Epsilon'])
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Alpha', 'Beta', 'Gamma'])
+
+    def test_dragging_a_launcher_icon_onto_the_dock_adds_it_there(self):
+        c = self.start('mellagui-lc13', self.LAUNCHER_APPS)
+        self.super_a(c)
+        d = self.info(c)
+        dock = TestDock.dock(c)[1]
+        beta = dock[2]
+        target = (beta['x'] + 2, beta['y'] + beta['h'] // 2)                               # the left edge of Beta: it joins before Beta
+        self.drag(c, self.centre(d['icons'][3]['box']), target, release=False)             # Delta
+        mid = self.info(c)
+        self.assertEqual(mid['icons'][3]['name'], 'Delta')
+        self.assertTrue(any(l.startswith('drop ') for l in c.cmd('launcher')))
+        self.assertEqual(mid['open'], 1)
+        c.button(272, False)
+        c.sync()
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Alpha', 'Delta', 'Beta', 'Gamma'])
+        self.assertEqual(self.section('launcher-apps'), ['Epsilon'])
+        self.assertEqual([i['name'] for i in TestDock.dock(c)[1]], ['Launcher', 'Alpha', 'Delta', 'Beta', 'Gamma'])
+        self.assertEqual(self.info(c)['open'], 1)                                          # still open
+
+    def test_dropping_a_launcher_icon_elsewhere_changes_nothing(self):
+        c = self.start('mellagui-lc14', self.LAUNCHER_APPS)
+        self.super_a(c)
+        d = self.info(c)
+        self.drag(c, self.centre(d['icons'][3]['box']), (40, 200))
+        self.assertEqual(self.section('launcher-apps'), ['Delta', 'Epsilon'])
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Alpha', 'Beta', 'Gamma'])
+        info = self.info(c)
+        self.assertEqual((info['open'], info['drag'] if 'drag' in info else -1), (1, -1))
+        self.assertFalse(os.path.exists(self.mark))                                        # and the drag did not click-start anything
+
+    def test_a_dock_icon_can_be_dragged_along_the_dock_to_reorder(self):
+        c = self.start('mellagui-lc15', self.LAUNCHER_APPS)
+        dock = TestDock.dock(c)[1]
+        alpha, gamma = dock[1], dock[3]
+        frm = (alpha['x'] + alpha['w'] // 2, alpha['y'] + alpha['h'] // 2)
+        self.drag(c, frm, (gamma['x'] + gamma['w'] // 2, frm[1]), release=False)
+        info, icons = TestDock.dock(c)
+        self.assertEqual((info['drag'], info['to']), (1, 3))
+        self.assertEqual(info['n'], 3)                                                     # the icon in the hand is not in the row
+        c.button(272, False)
+        c.sync()
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Beta', 'Gamma', 'Alpha'])
+        self.assertEqual([i['name'] for i in TestDock.dock(c)[1]], ['Launcher', 'Beta', 'Gamma', 'Alpha'])
+        self.assertEqual(TestDock.dock(c)[0]['drag'], -1)
+
+    def test_a_dock_icon_dragged_out_of_the_dock_goes_to_the_launcher(self):
+        c = self.start('mellagui-lc16', self.LAUNCHER_APPS)
+        beta = TestDock.dock(c)[1][2]
+        frm = (beta['x'] + beta['w'] // 2, beta['y'] + beta['h'] // 2)
+        self.drag(c, frm, (frm[0], frm[1] - 200), release=False)
+        info = TestDock.dock(c)[0]
+        self.assertEqual((info['drag'], info['to']), (2, -1))
+        c.button(272, False)
+        c.sync()
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Alpha', 'Gamma'])
+        self.assertEqual(self.section('launcher-apps'), ['Delta', 'Epsilon', 'Beta'])
+        self.assertEqual([i['name'] for i in TestDock.dock(c)[1]], ['Launcher', 'Alpha', 'Gamma'])
+        self.super_a(c)
+        self.assertEqual([i['name'] for i in self.info(c)['icons']], ['Alpha', 'Gamma', 'Delta', 'Epsilon', 'Beta'])    # nothing was lost
+
+    def test_the_launcher_button_cannot_be_dragged_out_of_the_dock(self):
+        c = self.start('mellagui-lc17', self.LAUNCHER_APPS)
+        first = TestDock.dock(c)[1][0]
+        frm = (first['x'] + first['w'] // 2, first['y'] + first['h'] // 2)
+        self.drag(c, frm, (frm[0], frm[1] - 200))
+        self.assertEqual(self.section('dock-apps'), ['Launcher', 'Alpha', 'Beta', 'Gamma'])
+        self.assertEqual(self.info(c)['open'], 0)                                          # and the drag did not open the launcher
+
+    def test_a_small_movement_is_still_a_click(self):
+        c = self.start('mellagui-lc18')
+        beta = TestDock.dock(c)[1][2]
+        frm = (beta['x'] + beta['w'] // 2, beta['y'] + beta['h'] // 2)
+        self.drag(c, frm, (frm[0] + 3, frm[1] - 2), steps=2)
+        for _ in range(50):
+            if os.path.exists(self.mark):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(self.mark))                                         # Beta = touch MARK ran
+
+    def test_the_form_checks_its_fields_and_esc_goes_back(self):
+        c = self.start('mellagui-lc7')
+        self.super_a(c)
+        c.tap(self.KEY_A)                                                                  # A opens the form
+        c.sync()
+        self.assertEqual(self.info(c)['form'], 1)
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))                               # Add with nothing typed
+        c.sync()
+        self.assertTrue(any('message "Give it a name' in l for l in c.cmd('launcher')))
+        self.type_text(c, 'alpha')                                                         # the name is taken (any case)
+        c.tap(self.KEY_ENTER)
+        self.type_text(c, 'true')
+        c.tap(self.KEY_ENTER)
+        c.sync()
+        self.assertTrue(any('message "Not added' in l for l in c.cmd('launcher')))
+        self.assertEqual(self.info(c)['form'], 1)
+        c.tap(self.KEY_ESC)                                                                # Esc: back to the icons, not closed
+        c.sync()
+        d = self.info(c)
+        self.assertEqual((d['open'], d['form'], d['n']), (1, 0, 3))
+
+    def test_without_a_config_file_nothing_can_be_removed(self):
+        p, c, stop = self.private_compositor('mellagui-lc8', '--config', 'none')
+        c.sync()
+        self.super_a(c)
+        d = self.info(c)
+        self.assertEqual((d['open'], d['n']), (1, 8))                                      # the built-in dock, without its Launcher button
+        c.tap(self.KEY_E)
+        c.sync()
+        c.click(*self.centre(self.info(c)['icons'][0]['remove']))
+        c.sync()
+        self.assertEqual(self.info(c)['n'], 8)
+
+    def test_the_dialog_is_painted_translucent(self):
+        c = self.start('mellagui-lc9')
+        before = c.dump(os.path.join(tmp, 'lc9a.ppm'))
+        self.super_a(c)
+        d = self.info(c)
+        after = c.dump(os.path.join(tmp, 'lc9b.ppm'))
+        x, y = d['card'][0] + 10, d['card'][1] + 10                                        # a corner area inside the card, no text
+        a, b = before.px(x, y), after.px(x, y)
+        self.assertNotEqual(a, b)
+        self.assertTrue(all(bc > ac for ac, bc in zip(a, b)), (a, b))                      # a light veil: every channel brighter
+        self.assertTrue(all(bc < 255 for bc in b), b)                                      # but not opaque white
 
 
 if __name__ == '__main__':

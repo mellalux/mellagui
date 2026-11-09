@@ -129,6 +129,10 @@ static bool resolve_one(const char *alt, bool tokens, char *out, size_t n, bool 
         const char *name = alt + 1, *e = name;
         while (*e && !isspace((unsigned char)*e))
             e++;
+        if (e - name == 8 && !strncmp(name, "launcher", 8)) {             /* the dock button that opens the launcher dialog */
+            *own = true;
+            return snprintf(out, n, "@launcher") < (int)n;
+        }
         const char *cmd = token_cmd(name, (size_t)(e - name));
         if (!cmd)
             return false;

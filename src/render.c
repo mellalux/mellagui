@@ -759,7 +759,7 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
 
 /* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
 
-enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH };
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS };
 
 static float cov01(float v)
 {
@@ -808,6 +808,13 @@ static float shape_cov(enum shape s, float dx, float dy, float R)
         float t = R * 0.30f < 1.1f ? 1.1f : R * 0.30f;
         float d1 = seg_dist(dx, dy, -R * 0.62f, -R * 0.62f, R * 0.62f, R * 0.62f);
         float d2 = seg_dist(dx, dy, -R * 0.62f, R * 0.62f, R * 0.62f, -R * 0.62f);
+        float d = d1 < d2 ? d1 : d2;
+        return cov01(t * 0.5f - d + 0.5f);
+    }
+    case SHAPE_PLUS: {                                  /* a plus */
+        float t = R * 0.22f < 1.2f ? 1.2f : R * 0.22f;
+        float d1 = seg_dist(dx, dy, -R * 0.62f, 0.0f, R * 0.62f, 0.0f);
+        float d2 = seg_dist(dx, dy, 0.0f, -R * 0.62f, 0.0f, R * 0.62f);
         float d = d1 < d2 ? d1 : d2;
         return cov01(t * 0.5f - d + 0.5f);
     }
@@ -874,6 +881,7 @@ static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, 
 #include "logo_data.h"
 
 static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *box, int x, int y);
+static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift);
 
 /* Paints the logo (premultiplied ARGB, already a circle) into `box`, from the 32 px picture when that is enough, else from the 96 px one. */
 static void paint_logo(const struct paint_ctx *c, const struct lm_rect *box)
@@ -950,6 +958,198 @@ static void paint_about(const struct paint_ctx *c, const struct lm_about_info *a
     draw_text_centered(c, &ai->close, "Close", ai->hover_close ? COL_PANEL : COL_PANEL_TEXT);
 }
 
+/* A one pixel ring just inside `rect` (the border of a translucent card: filling a border colour below the card would shine through). */
+static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
+{
+    struct lm_rect r;
+    if (!lm_rect_intersect(rect, &c->clip, &r))
+        return;
+    float hw = (float)rect->w / 2.0f, hh = (float)rect->h / 2.0f, rad = (float)LM_MIN(radius, LM_MIN(rect->w, rect->h) / 2);
+    float cx = (float)rect->x + hw, cy = (float)rect->y + hh;
+    uint32_t src = argb & 0x00ffffffu;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++) {
+            float qx = fabsf((float)x + 0.5f - cx) - (hw - rad), qy = fabsf((float)y + 0.5f - cy) - (hh - rad);
+            float ox = qx > 0.0f ? qx : 0.0f, oy = qy > 0.0f ? qy : 0.0f, m = qx > qy ? qx : qy;
+            float d = sqrtf(ox * ox + oy * oy) + (m < 0.0f ? m : 0.0f) - rad;
+            float cov = cov01(0.5f - fabsf(d + 0.5f));
+            uint32_t pa = (uint32_t)(cov * (float)(argb >> 24) + 0.5f);
+            if (pa == 0)
+                continue;
+            uint32_t pr = div255(((src >> 16) & 255) * pa), pg = div255(((src >> 8) & 255) * pa), pb = div255((src & 255) * pa);
+            row[x] = blend_px((pa << 24) | (pr << 16) | (pg << 8) | pb, row[x]);
+        }
+    }
+}
+
+/* `text` cut to `maxw` pixels: with ".." at the end (names of icons) or, for fields, its tail (so the caret stays visible). */
+static void fit_text(char *out, size_t n, const char *text, int maxw, bool tail)
+{
+    snprintf(out, n, "%s", text);
+    if (lm_font_text_width(out) <= maxw)
+        return;
+    if (tail) {
+        const char *p = text;
+        while (*p && lm_font_text_width(p) > maxw) {
+            p++;
+            while (((unsigned char)*p & 0xc0) == 0x80)
+                p++;
+        }
+        snprintf(out, n, "%s", p);
+        return;
+    }
+    size_t len = strlen(out);
+    while (len > 0 && lm_font_text_width(out) + 2 * LM_FONT_W > maxw) {
+        len--;
+        while (len > 0 && ((unsigned char)out[len] & 0xc0) == 0x80)
+            len--;
+        out[len] = 0;
+    }
+    snprintf(out + len, n - len, "..");
+}
+
+/* Text on the light glass of the launcher: a one pixel dark shadow keeps it readable over any wallpaper. */
+static void lc_text(const struct paint_ctx *c, const struct lm_rect *area, int x, int y, const char *text, uint32_t color)
+{
+    struct lm_rect sh = *area;
+    sh.x++;
+    sh.y++;
+    draw_text(c, &sh, x + 1, y + 1, text, 0x0b1220u);
+    draw_text(c, area, x, y, text, color);
+}
+
+static void lc_text_centered(const struct paint_ctx *c, const struct lm_rect *area, const char *text, uint32_t color)
+{
+    int w = lm_font_text_width(text);
+    lc_text(c, area, area->x + (area->w - w) / 2, area->y + (area->h - LM_FONT_H) / 2, text, color);
+}
+
+static void paint_launcher_button(const struct paint_ctx *c, const struct lm_rect *r, const char *text, bool hot, bool on)
+{
+    fill_round(c, r, 8, hot ? (0xf0000000u | COL_PANEL_ACCENT) : on ? 0x70ffffffu : 0x48ffffffu);
+    stroke_round(c, r, 8, 0x80ffffffu);
+    if (hot)
+        draw_text_centered(c, r, text, COL_PANEL);
+    else
+        lc_text_centered(c, r, text, 0xffffffu);
+}
+
+/* The launcher dialog: the output dimmed a little, a big light translucent card with the dock's icons as large round buttons, a "+" tile and (edit mode)
+ * a red x on every icon; the add form replaces the icons. */
+static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_info *li)
+{
+    fill_round(c, &li->rect, 0, 0x40000000u);
+    fill_round(c, &li->card, 18, 0x3cffffffu);                                  /* light glass: a white veil over the wallpaper */
+    stroke_round(c, &li->card, 18, 0x8cffffffu);
+    lc_text_centered(c, &li->title, li->form ? "Add an application" : "Applications", 0xffffffu);
+    if (!li->form) {
+        for (int g = 0; g < li->n; g++) {
+            const struct lm_rect *b = &li->icon[g].box;
+            bool sel = li->sel == g;
+            if (sel) {
+                struct lm_rect hl = li->icon[g].hit;
+                hl.x += 4;
+                hl.w -= 8;
+                fill_round(c, &hl, 12, 0x48ffffffu);
+            }
+            paint_dock_icon(c, b, li->icon[g].item, sel ? 1.0f : 0.0f);
+            char fit[LM_DOCK_NAME_MAX + 4];
+            fit_text(fit, sizeof(fit), li->icon[g].item->name, LM_LAUNCHER_CELL_W - 12, false);
+            struct lm_rect label = lm_rect_make(li->icon[g].hit.x, b->y + b->h + 10, li->icon[g].hit.w, LM_FONT_H);
+            lc_text_centered(c, &label, fit, 0xffffffu);
+            if (li->icon[g].running)
+                paint_shape(c, (float)(b->x + b->w / 2), (float)(label.y + LM_FONT_H + 4), 2.2f, SHAPE_DISC, COL_PANEL_TEXT, 0xdd);
+            if (li->edit) {
+                const struct lm_rect *x = &li->icon[g].remove;
+                float xc = (float)x->x + (float)x->w / 2.0f, yc = (float)x->y + (float)x->h / 2.0f;
+                paint_shape(c, xc, yc, 10.5f, SHAPE_DISC, COL_PANEL, 0xff);
+                paint_shape(c, xc, yc, 9.0f, SHAPE_DISC, COL_PANEL_DANGER, 0xff);
+                paint_shape(c, xc, yc, 5.5f, SHAPE_CROSS, 0xffffffu, 0xff);
+            }
+        }
+        if (li->add.w > 0) {
+            bool sel = li->sel == li->n;
+            float cx = (float)li->add.x + (float)li->add.w / 2.0f, cy = (float)li->add.y + 6.0f + (float)LM_LAUNCHER_ICON / 2.0f;
+            if (sel) {
+                struct lm_rect hl = li->add;
+                hl.x += 4;
+                hl.w -= 8;
+                fill_round(c, &hl, 12, 0x48ffffffu);
+            }
+            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON / 2.0f, SHAPE_DISC, sel ? COL_PANEL_ACCENT : 0xffffffu, sel ? 0xff : 0x70);
+            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, sel ? COL_PANEL : 0xffffffu, 0xff);
+            struct lm_rect label = lm_rect_make(li->add.x, (int)cy + LM_LAUNCHER_ICON / 2 + 10, li->add.w, LM_FONT_H);
+            lc_text_centered(c, &label, "Add", 0xffffffu);
+        }
+        if (li->n == 0 && li->add.w <= 0) {
+            struct lm_rect none = lm_rect_make(li->card.x, li->card.y + li->card.h / 2, li->card.w, LM_FONT_H);
+            lc_text_centered(c, &none, "Nothing here", 0xffffffu);
+        }
+    } else {
+        for (int i = 0; i < 2; i++) {
+            const struct lm_rect *f = &li->field[i];
+            struct lm_rect lab = lm_rect_make(f->x, f->y - LM_FONT_H - 4, f->w, LM_FONT_H);
+            lc_text(c, &lab, lab.x, lab.y, li->field_label[i], 0xffffffu);
+            fill_round(c, f, 8, 0x58000000u);
+            stroke_round(c, f, 8, li->focus == i ? (0xff000000u | COL_PANEL_ACCENT) : 0x90ffffffu);
+            char fit[LM_DOCK_CMD_MAX];
+            fit_text(fit, sizeof(fit), li->field_text[i], f->w - 24, true);
+            int ty = f->y + (f->h - LM_FONT_H) / 2;
+            draw_text(c, f, f->x + 10, ty, fit, COL_PANEL_TEXT);
+            if (li->focus == i) {
+                struct lm_rect caret = lm_rect_make(f->x + 10 + lm_font_text_width(fit) + 1, ty, 2, LM_FONT_H);
+                fill_rect(c, &caret, COL_PANEL_ACCENT);
+            }
+        }
+        struct lm_rect kl = lm_rect_make(li->card.x + 28, li->kind_box[0].y - LM_FONT_H - 6, li->card.w - 56, LM_FONT_H);
+        char lab[64];
+        snprintf(lab, sizeof(lab), "Icon   (%s)", li->kind_name);
+        lc_text(c, &kl, kl.x, kl.y, lab, 0xffffffu);
+        for (int i = 0; i < LM_LAUNCHER_KIND_N; i++) {
+            const struct lm_rect *b = &li->kind_box[i];
+            bool on = li->kind == i - 1;
+            float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f - 2.0f;
+            if (on)
+                paint_shape(c, cx, cy, R + 3.0f, SHAPE_DISC, li->focus == 2 ? COL_PANEL_ACCENT : 0xffffffu, 0xd0);
+            if (i == 0) {
+                paint_shape(c, cx, cy, R, SHAPE_DISC, COL_PANEL_BTN, 0xc0);
+                draw_text_centered(c, b, "auto", COL_PANEL_TEXT);
+                continue;
+            }
+            struct lm_rect box = lm_rect_make((int)(cx - R), (int)(cy - R), (int)(2.0f * R), (int)(2.0f * R));
+            struct lm_dock_item it = { .kind = i - 1 };
+            paint_dock_icon(c, &box, &it, 0.0f);
+        }
+        if (li->message[0]) {
+            struct lm_rect m = lm_rect_make(li->card.x + 12, li->card.y + 270, li->card.w - 24, LM_FONT_H);
+            char fit[160];
+            fit_text(fit, sizeof(fit), li->message, m.w, false);
+            lc_text_centered(c, &m, fit, 0xffb4a8u);
+        }
+    }
+    struct lm_rect hint = lm_rect_make(li->card.x, li->button[0].y - LM_FONT_H - 12, li->card.w, LM_FONT_H);
+    lc_text_centered(c, &hint, li->hint, 0xe6edf7u);
+    for (int i = 0; i < 2; i++)
+        paint_launcher_button(c, &li->button[i], li->button_text[i], li->hover_button == i, i == 0 && li->edit);
+    if (li->drag >= 0 && li->icon[li->drag].item) {                     /* an icon in the hand: the dock lights up as the place to drop it */
+        if (li->drop.w > 0) {
+            bool hot = li->drop_pos >= 0;
+            fill_round(c, &li->drop, 22, hot ? 0x40ffffffu : 0x1cffffffu);
+            stroke_round(c, &li->drop, 22, hot ? 0xc0ffffffu : 0x60ffffffu);
+            struct lm_rect tl = lm_rect_make(li->drop.x, li->drop.y + 8, li->drop.w, LM_FONT_H);
+            lc_text_centered(c, &tl, "Drop it on the dock", 0xffffffu);
+            if (hot)
+                fill_round(c, &li->marker, 1, 0xf0000000u | COL_PANEL_ACCENT);
+        }
+        struct lm_rect hl = li->icon[li->drag].hit;
+        hl.x += 4;
+        hl.w -= 8;
+        fill_round(c, &hl, 12, 0x30000000u);                              /* the place it came from dims */
+        paint_dock_icon(c, &li->drag_box, li->icon[li->drag].item, 1.0f);
+    }
+}
+
 /* ---- the dock ------------------------------------------------------------------------------------------------------------ */
 
 /* Premultiplied pixel of a picture icon at (px, py) inside `box`: the picture is fitted into the square and sampled bilinearly. */
@@ -976,29 +1176,43 @@ static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *
     return ((uint32_t)(acc[0] + 0.5f) << 24) | ((uint32_t)(acc[1] + 0.5f) << 16) | ((uint32_t)(acc[2] + 0.5f) << 8) | (uint32_t)(acc[3] + 0.5f);
 }
 
+/* One round icon (a picture or a built-in one) in `b`; lift 0..1 brightens it (hovered). */
+static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift)
+{
+    float R = (float)b->w / 2.0f, cx = (float)b->x + R, cy = (float)b->y + (float)b->h / 2.0f;
+    int m = it->img ? 1 : (int)(R * 0.45f) + 2;                      /* built-in icons have a shadow beyond the box */
+    struct lm_rect box = lm_rect_make(b->x - m, b->y - m, b->w + 2 * m, b->h + 2 * m + (it->img ? 0 : 2)), r;
+    if (!lm_rect_intersect(&box, &c->clip, &r))
+        return;
+    for (int y = r.y; y < r.y + r.h; y++) {
+        uint32_t *row = fb_row(c, y);
+        for (int x = r.x; x < r.x + r.w; x++) {
+            uint32_t px = it->img ? dock_image_px(it->img, b, x, y)
+                                  : lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+            if (px >> 24)
+                row[x] = blend_px(px, row[x]);
+        }
+    }
+}
+
 /* The dock: round icons without any background, a dot under the ones that have a window, the name of the hovered one above it. */
 static void paint_dock(const struct paint_ctx *c, const struct lm_dock_info *d)
 {
     for (int i = 0; i < d->n; i++) {
         const struct lm_rect *b = &d->icon[i].box;
         const struct lm_dock_item *it = d->icon[i].item;
-        float R = (float)b->w / 2.0f, cx = (float)b->x + R, cy = (float)b->y + (float)b->h / 2.0f;
-        int m = it->img ? 1 : (int)(R * 0.45f) + 2;                      /* built-in icons have a shadow beyond the box */
-        struct lm_rect box = lm_rect_make(b->x - m, b->y - m, b->w + 2 * m, b->h + 2 * m + (it->img ? 0 : 2)), r;
-        if (!lm_rect_intersect(&box, &c->clip, &r))
-            continue;
-        float lift = i == d->hover ? 1.0f : 0.0f;
-        for (int y = r.y; y < r.y + r.h; y++) {
-            uint32_t *row = fb_row(c, y);
-            for (int x = r.x; x < r.x + r.w; x++) {
-                uint32_t px = it->img ? dock_image_px(it->img, b, x, y)
-                                      : lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
-                if (px >> 24)
-                    row[x] = blend_px(px, row[x]);
-            }
-        }
+        paint_dock_icon(c, b, it, i == d->hover ? 1.0f : 0.0f);
         if (d->icon[i].running)
             paint_shape(c, (float)(b->x + b->w / 2), (float)d->dot_y, 2.6f, SHAPE_DISC, COL_PANEL_TEXT, 0xdd);
+    }
+    if (d->drag_item) {                                                  /* the icon in the hand; a red x says that letting go removes it */
+        paint_dock_icon(c, &d->drag_box, d->drag_item, 1.0f);
+        if (d->drag_remove) {
+            float xc = (float)d->drag_box.x + 6.0f, yc = (float)d->drag_box.y + 6.0f;
+            paint_shape(c, xc, yc, 10.5f, SHAPE_DISC, COL_PANEL, 0xff);
+            paint_shape(c, xc, yc, 9.0f, SHAPE_DISC, COL_PANEL_DANGER, 0xff);
+            paint_shape(c, xc, yc, 5.5f, SHAPE_CROSS, 0xffffffu, 0xff);
+        }
     }
     if (d->label_text) {
         fill_round(c, &d->label, 7, 0xff000000u | lm_theme.border);
@@ -1759,6 +1973,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_ABOUT:
         if (item->output == c->out)
             paint_about(c, &item->u.about);
+        break;
+    case LM_SCENE_LAUNCHER:
+        if (item->output == c->out)
+            paint_launcher(c, &item->u.launcher);
         break;
     case LM_SCENE_NOTIFY:
         paint_notify(c, &item->u.notify);

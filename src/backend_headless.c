@@ -321,6 +321,18 @@ static void ctl_command(struct ctl_client *c, char *line)
             ctl_reply(c, "%s", text);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "launcher")) {
+        /* launcher [open|close] -> the lines of lm_wm_launcher_describe ("launcher open=.. edit=.. form=.. n=.. sel=..", card, icons, buttons ...), then "ok" */
+        static char text[8192];
+        if (srv->wm && a1 && !strcmp(a1, "open"))
+            lm_wm_launcher_set(srv->wm, true);
+        else if (srv->wm && a1 && !strcmp(a1, "close"))
+            lm_wm_launcher_set(srv->wm, false);
+        if (srv->wm) {
+            lm_wm_launcher_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "dock")) {
         /* dock -> "dock shown=.. hover=.. n=.." and one "icon ..." line per button, then "ok" (see lm_wm_dock_describe) */
         static char text[8192];

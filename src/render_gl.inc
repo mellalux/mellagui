@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, shadow, lock, card, switcher, power, about, dock;
+    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
@@ -61,6 +61,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->panel);
     gl_chrome_free(r, &go->shadow);
     gl_chrome_free(r, &go->about);
+    gl_chrome_free(r, &go->launcher);
     gl_chrome_free(r, &go->lock);
     gl_chrome_free(r, &go->card);
     gl_chrome_free(r, &go->switcher);
@@ -182,6 +183,7 @@ static void gl_do_frame(const struct paint_ctx *c, const void *it) { paint_frame
 static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel(c, it); }
 static void gl_do_shadow(const struct paint_ctx *c, const void *it) { paint_panel_shadow(c, it); }
 static void gl_do_about(const struct paint_ctx *c, const void *it) { paint_about(c, it); }
+static void gl_do_launcher(const struct paint_ctx *c, const void *it) { paint_launcher(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
 static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power(c, it); }
@@ -466,6 +468,9 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             uint64_t h = fnv(1469598103934665603ull, &d->rect, sizeof(d->rect));
             h = fnv(h, &d->hover, sizeof(d->hover));
             h = fnv(h, &d->label, sizeof(d->label));
+            h = fnv(h, &d->drag_item, sizeof(d->drag_item));
+            h = fnv(h, &d->drag_box, sizeof(d->drag_box));
+            h = fnv(h, &d->drag_remove, sizeof(d->drag_remove));
             for (int i = 0; i < d->n; i++) {
                 h = fnv(h, &d->icon[i].box, sizeof(d->icon[i].box));
                 h = fnv(h, &d->icon[i].running, sizeof(d->icon[i].running));
@@ -496,6 +501,41 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             }
             if (ch->tex)
                 gl_tex_at(p, ch->tex, &ai->rect, false);
+        }
+        break;
+    case LM_SCENE_LAUNCHER:
+        if (item->output == p->st->out) {               /* translucent like the About dialog: redrawn only when it changes */
+            const struct lm_launcher_info *li = &item->u.launcher;
+            struct gl_chrome *ch = &p->go->launcher;
+            uint64_t h = fnv(1469598103934665603ull, &li->card, sizeof(li->card));
+            h = fnv(h, &li->form, sizeof(li->form));
+            h = fnv(h, &li->edit, sizeof(li->edit));
+            h = fnv(h, &li->n, sizeof(li->n));
+            h = fnv(h, &li->sel, sizeof(li->sel));
+            h = fnv(h, &li->hover_button, sizeof(li->hover_button));
+            h = fnv(h, &li->focus, sizeof(li->focus));
+            h = fnv(h, &li->drag, sizeof(li->drag));
+            h = fnv(h, &li->drag_box, sizeof(li->drag_box));
+            h = fnv(h, &li->drop_pos, sizeof(li->drop_pos));
+            h = fnv(h, &li->kind, sizeof(li->kind));
+            h = fnv(h, li->button_text[0], strlen(li->button_text[0]) + 1);
+            h = fnv(h, li->message, strlen(li->message) + 1);
+            if (li->form)
+                for (int i = 0; i < 2; i++)
+                    h = fnv(h, li->field_text[i], strlen(li->field_text[i]) + 1);
+            else
+                for (int i = 0; i < li->n; i++) {
+                    h = fnv(h, li->icon[i].item->name, strlen(li->icon[i].item->name) + 1);
+                    h = fnv(h, &li->icon[i].item->kind, sizeof(int));
+                    h = fnv(h, &li->icon[i].item->img, sizeof(void *));
+                    h = fnv(h, &li->icon[i].running, sizeof(bool));
+                }
+            if (!ch->tex || ch->hash != h || ch->w != li->rect.w || ch->h != li->rect.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &li->rect, gl_do_launcher, li);
+                ch->hash = h;
+            }
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &li->rect, false);
         }
         break;
     case LM_SCENE_NOTIFY: {                             /* a texture per card, kept while its content (hashed) stays the same */

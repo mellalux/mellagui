@@ -756,7 +756,7 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
 
 /* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
 
-enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK };
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH };
 
 static float cov01(float v)
 {
@@ -791,6 +791,37 @@ static float shape_cov(enum shape s, float dx, float dy, float R)
         }
         float bar = cov01(t * 0.5f - seg_dist(dx, dy, 0.0f, -R + t * 0.5f, 0.0f, -R * 0.1f) + 0.5f);
         return ring > bar ? ring : bar;
+    }
+    case SHAPE_UP:
+    case SHAPE_DOWN: {                                  /* a chevron: two strokes meeting at the tip (a small arrow) */
+        float t = R * 0.26f < 1.2f ? 1.2f : R * 0.26f;
+        float sy = s == SHAPE_UP ? 1.0f : -1.0f;
+        float d1 = seg_dist(dx, dy, -R * 0.62f, sy * R * 0.28f, 0.0f, -sy * R * 0.30f);
+        float d2 = seg_dist(dx, dy, R * 0.62f, sy * R * 0.28f, 0.0f, -sy * R * 0.30f);
+        float d = d1 < d2 ? d1 : d2;
+        return cov01(t * 0.5f - d + 0.5f);
+    }
+    case SHAPE_CROSS: {                                 /* an x */
+        float t = R * 0.30f < 1.1f ? 1.1f : R * 0.30f;
+        float d1 = seg_dist(dx, dy, -R * 0.62f, -R * 0.62f, R * 0.62f, R * 0.62f);
+        float d2 = seg_dist(dx, dy, -R * 0.62f, R * 0.62f, R * 0.62f, -R * 0.62f);
+        float d = d1 < d2 ? d1 : d2;
+        return cov01(t * 0.5f - d + 0.5f);
+    }
+    case SHAPE_TRASH: {                                 /* a bin: a lid with a handle, a tapering body with two slits */
+        float t = R * 0.17f < 1.0f ? 1.0f : R * 0.17f;
+        float d = seg_dist(dx, dy, -R * 0.78f, -R * 0.50f, R * 0.78f, -R * 0.50f);                    /* the lid */
+        float h = seg_dist(dx, dy, -R * 0.24f, -R * 0.78f, R * 0.24f, -R * 0.78f);                     /* its handle */
+        d = d < h ? d : h;
+        h = seg_dist(dx, dy, -R * 0.55f, -R * 0.30f, -R * 0.43f, R * 0.80f);                           /* the body: left side, bottom, right side */
+        d = d < h ? d : h;
+        h = seg_dist(dx, dy, -R * 0.43f, R * 0.80f, R * 0.43f, R * 0.80f);
+        d = d < h ? d : h;
+        h = seg_dist(dx, dy, R * 0.43f, R * 0.80f, R * 0.55f, -R * 0.30f);
+        d = d < h ? d : h;
+        float s1 = seg_dist(fabsf(dx), dy, R * 0.17f, -R * 0.05f, R * 0.17f, R * 0.52f);               /* two slits (mirrored) */
+        d = d < s1 ? d : s1;
+        return cov01(t * 0.5f - d + 0.5f);
     }
     case SHAPE_LOCK: {                                  /* a padlock: body with a keyhole, shackle above */
         dy += R * 0.08f;                                /* (optical centring) */
@@ -1027,15 +1058,29 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     char badge[8];
     snprintf(badge, sizeof(badge), "%d", g->total);
     int bw = lm_font_text_width(badge) + 14;
-    struct lm_rect pill = lm_rect_make(card.x + card.w - 14 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
-    fill_round(c, &pill, 8, (0xff000000u | lm_theme.button));
-    draw_text_centered(c, &pill, badge, COL_PANEL_ACCENT);
+    struct lm_rect pill = lm_rect_make(g->btn[0].x - 8 - bw, card.y + (g->title_h - 16) / 2, bw, 16);
+    if (pill.x > card.x + 112) {                                         /* (a narrow card has no room for the count) */
+        fill_round(c, &pill, 8, (0xff000000u | lm_theme.button));
+        draw_text_centered(c, &pill, badge, COL_PANEL_ACCENT);
+    }
     struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
     fill_round(c, &sep, 0, 0x30ffffffu);
 
     paint_grip(c, &card);
 
-    int cols = (card.w - 2 * 12 - 2 * 10 - 4) / LM_FONT_W;     /* chip inset 12, text inset 10 (+ accent bar) */
+    /* the small buttons: up and down (a page; dim when there is nothing more that way), clear all */
+    static const enum shape icons[3] = { SHAPE_UP, SHAPE_DOWN, SHAPE_TRASH };
+    for (int k = 0; k < 3; k++) {
+        const struct lm_rect *b = &g->btn[k];
+        bool can = k == 0 ? g->top > 0 : k == 1 ? g->top + g->slots < g->total : g->total > 0;
+        bool hot = g->hover == k + 1;
+        if (hot && can)
+            fill_round(c, b, 6, 0x34ffffffu);
+        uint32_t col = !can ? 0x58ffffffu : hot && k == 2 ? (0xff000000u | COL_PANEL_DANGER) : (0xff000000u | COL_PANEL_TEXT);
+        paint_shape(c, (float)b->x + (float)b->w / 2.0f, (float)b->y + (float)b->h / 2.0f, 7.5f, icons[k], col & 0xffffffu, col >> 24);
+    }
+
+    int cols = (card.w - 2 * 12 - 2 * 10 - 4 - LM_CLIP_DEL_W) / LM_FONT_W;     /* chip inset 12, text inset 10 (+ accent bar), the x on the right */
     int lines = LM_MAX(1, (g->entry_h - 12) / LM_FONT_H);
     if (!g->n) {
         struct lm_rect r = lm_rect_make(card.x + 1, card.y + g->title_h, card.w - 2, g->entry_h);
@@ -1045,8 +1090,9 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     for (int i = 0; i < g->n; i++) {
         struct lm_rect slot = lm_rect_make(card.x + 12, card.y + g->title_h + 4 + i * g->entry_h, card.w - 24,
                                            g->entry_h - 4);
-        fill_round(c, &slot, 7, i == 0 ? 0x26ffffffu : 0x12ffffffu);
-        if (i == 0) {                                                    /* newest: accent bar on the left */
+        fill_round(c, &slot, 7, g->top + i == 0 ? 0x26ffffffu : 0x12ffffffu);
+        bool newest = g->top + i == 0;
+        if (newest) {                                                    /* newest: accent bar on the left */
             struct lm_rect bar = lm_rect_make(slot.x + 4, slot.y + 6, 3, slot.h - 12);
             fill_round(c, &bar, 1, (0xff000000u | lm_theme.accent));
         }
@@ -1056,7 +1102,13 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
             for (int e = 0; e < 4; e++)
                 fill_round(c, &edge[e], 0, (0xff000000u | lm_theme.accent));
         }
-        uint32_t col = i == 0 ? COL_PANEL_TEXT : COL_PANEL_DIM;
+        bool del_hot = g->hover == 10 + i;
+        struct lm_rect del = lm_rect_make(slot.x + slot.w - LM_CLIP_DEL_W, slot.y + (slot.h - 22) / 2, LM_CLIP_DEL_W - 4, 22);
+        if (del_hot)
+            fill_round(c, &del, 6, 0x34ffffffu);
+        paint_shape(c, (float)del.x + (float)del.w / 2.0f, (float)del.y + (float)del.h / 2.0f, 5.0f, SHAPE_CROSS,
+                    del_hot ? COL_PANEL_DANGER : COL_PANEL_DIM, del_hot ? 255 : 0xa0);
+        uint32_t col = newest ? COL_PANEL_TEXT : COL_PANEL_DIM;
         int tx = slot.x + 14;
         int ty = slot.y + (slot.h - lines * LM_FONT_H) / 2;
         size_t pos = 0;

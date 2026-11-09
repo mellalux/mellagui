@@ -275,6 +275,10 @@ enum lm_pick_kind {
     LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
     LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
     LM_PICK_CLIP_ENTRY,     /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
+    LM_PICK_CLIP_DELETE,    /* the x at the right end of an entry: forget that entry (`index` = entry) */
+    LM_PICK_CLIP_UP,        /* the clipboard card's up arrow: a page back towards the newest */
+    LM_PICK_CLIP_DOWN,      /* ... its down arrow: a page towards the oldest */
+    LM_PICK_CLIP_CLEAR,     /* ... its trash can: forget the whole history */
     LM_PICK_DOCK_ITEM,      /* a button of the dock (`index` = lm_dock_item index) */
     LM_PICK_DOCK,           /* the dock between its buttons, or (autohide) the bottom edge of the screen that shows it: swallows the click */
     LM_PICK_SHOT_CARD,      /* the screenshot card (above everything): click = open the file in the viewer */
@@ -453,7 +457,11 @@ struct lm_dock_info {
     const char *label_text;         /* valid only during the callback */
 };
 
-#define LM_GADGET_ENTRIES 5         /* == LM_CLIP_HISTORY */
+#define LM_GADGET_ENTRIES 50        /* == LM_CLIP_HISTORY: the history can hold this many, the card shows as many as fit and scrolls */
+#define LM_CLIP_DEFAULT_ENTRIES 5   /* entries a card of the default height shows */
+#define LM_CLIP_BTN 20              /* the small icon buttons in the clipboard card's title bar: up, down, clear all (right to left: clear, down, up) */
+#define LM_CLIP_BTN_GAP 4
+#define LM_CLIP_DEL_W 26            /* the x of an entry sits in the last this many pixels of its slot */
 #define LM_GADGET_SHADOW 14         /* the drop shadow reaches this far beyond `rect` (scene bounds include it) */
 /*
  * The desktop gadget: a rounded, shadowed card on the first output (docked top right below the panel until the user
@@ -468,9 +476,12 @@ struct lm_gadget_info {
     const struct lm_mixer_state *mixer; /* LM_GADGET_MIXER: what to draw (valid only during the callback) */
     struct lm_rect rect;            /* the card; the shadow lies outside */
     int n;                          /* entries drawn (<= slots) */
+    int top;                        /* index (0 = newest) in the history of the first entry drawn */
     int total;                      /* entries in the history (the title badge) */
-    int cursor;                     /* highlighted entry (keyboard mode, Super+C), -1 = none */
-    int slots;                      /* entry slots that fit (1..LM_GADGET_ENTRIES) */
+    int cursor;                     /* highlighted entry among the drawn ones (keyboard mode, Super+C), -1 = none */
+    int hover;                      /* 0 nothing, 1 up, 2 down, 3 clear, 10 + k = the x of the k-th drawn entry (pointer on it) */
+    struct lm_rect btn[3];          /* the title bar buttons: up, down, clear all */
+    int slots;                      /* entry slots that fit (1..LM_GADGET_ENTRIES); the card scrolls when the history is longer */
     int entry_h;                    /* height of one entry slot; the title bar is `title_h` high */
     int title_h;
     bool dragging;                  /* being moved / resized */
@@ -569,6 +580,9 @@ size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size);
 void lm_wm_about_set(struct lm_wm *wm, bool open);
 bool lm_wm_about_is_open(const struct lm_wm *wm);
 size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* the lines of the control socket `about` while it is open */
+
+/* The clipboard card's view: the first history entry it shows and how many entries fit (control socket `clip`). */
+void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);
 
 /* Some visible window is fullscreen (the screensaver does not start over a film or a game). */
 bool lm_wm_has_fullscreen(const struct lm_wm *wm);

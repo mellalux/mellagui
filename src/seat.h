@@ -130,7 +130,7 @@ struct lm_surface *lm_seat_keyboard_focus(const struct lm_seat *seat);
  * gadget. Clearing the selection keeps the history. Entry 0 is the newest; the pointer is valid until the next
  * clipboard change. A change is announced with lm_wm_clipboard_changed().
  */
-#define LM_CLIP_HISTORY 5
+#define LM_CLIP_HISTORY 50
 /* Settings panel: new set of keyboard layouts (XKB groups) / new key repeat values (from server->config). */
 void lm_seat_set_layouts(struct lm_seat *seat, const int *layouts, int n);
 void lm_seat_send_repeat_info(struct lm_seat *seat);
@@ -143,6 +143,8 @@ void lm_seat_clip_use(struct lm_seat *seat, int i);
  * (screenshots: "image/png"). The history is not touched. */
 bool lm_seat_set_selection_data(struct lm_seat *seat, const char *mime, uint8_t *data, size_t len);
 void lm_seat_clip_clear(struct lm_seat *seat);      /* forget the history (control socket `clip clear`) */
+void lm_seat_clip_remove(struct lm_seat *seat, int i);   /* forget history entry `i` (the gadget's x button; control socket `clip remove N`) */
+void lm_seat_clip_add(struct lm_seat *seat, const char *text);   /* put a text on top of the history as if it had been copied (control socket `clip add TEXT`; tests) */
 
 /*
  * Screen lock (lock.c): while locked the seat sends nothing to clients. Keyboard and pointer focus are dropped (and stay

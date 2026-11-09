@@ -1595,6 +1595,27 @@ changed:
         lm_wm_clipboard_changed(seat->srv->wm);
 }
 
+void lm_seat_clip_add(struct lm_seat *seat, const char *text)
+{
+    if (!seat || !text || !*text)
+        return;
+    char *copy = strndup(text, CLIP_MAX);
+    if (copy)
+        clip_push(seat, copy);
+}
+
+void lm_seat_clip_remove(struct lm_seat *seat, int i)
+{
+    if (!seat || i < 0 || i >= seat->clip_n)
+        return;
+    free(seat->clip_hist[i]);
+    memmove(&seat->clip_hist[i], &seat->clip_hist[i + 1], (size_t)(seat->clip_n - i - 1) * sizeof(char *));
+    seat->clip_n--;
+    clip_save(seat);
+    if (!seat->dying && seat->srv->wm)
+        lm_wm_clipboard_changed(seat->srv->wm);
+}
+
 static void clip_capture_stop(struct lm_seat *seat)
 {
     if (seat->cap.src)

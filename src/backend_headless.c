@@ -253,6 +253,13 @@ static void ctl_command(struct ctl_client *c, char *line)
     } else if (!strcmp(cmd, "clip")) {
         if (a1 && !strcmp(a1, "clear"))
             lm_seat_clip_clear(srv->seat);
+        else if (a1 && !strcmp(a1, "add") && a2) {                   /* clip add TEXT: as if it had been copied (single spaces only) */
+            char text[300];
+            snprintf(text, sizeof(text), "%s%s%s%s%s", a2, a3 ? " " : "", a3 ? a3 : "", save && *save ? " " : "", save && *save ? save : "");
+            lm_seat_clip_add(srv->seat, text);
+        }
+        else if (a1 && !strcmp(a1, "remove") && a2)
+            lm_seat_clip_remove(srv->seat, atoi(a2));
         /* one "clip <i> <text>" line per history entry (\ and newline escaped), then "ok n=<count> gadget=<0|1>" */
         int n = lm_seat_clip_count(srv->seat);
         for (int i = 0; i < n; i++) {
@@ -272,7 +279,10 @@ static void ctl_command(struct ctl_client *c, char *line)
             line[o++] = '\n';
             ctl_reply(c, "%.*s", (int)o, line);
         }
-        ctl_reply(c, "ok n=%d gadget=%d\n", n, srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0);
+        int top = 0, slots = 0;
+        if (srv->wm)
+            lm_wm_clip_view(srv->wm, &top, &slots);
+        ctl_reply(c, "ok n=%d gadget=%d top=%d slots=%d\n", n, srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0, top, slots);
     } else if (!strcmp(cmd, "settings")) {
         /* settings                -> ok key=value ...
          * settings <key> <value>  -> same, after the change ("err rejected" if it was refused) */

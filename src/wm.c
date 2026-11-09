@@ -4416,7 +4416,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (pressed && button == BTN_LEFT) {
             if (pick->kind == LM_PICK_OSK_KEY) {
                 osk_press(wm, pick->index);
-            } else if (pick->kind == LM_PICK_OSK && time_ms - wm->osk_click_ms < 400 && wm->osk_pl.w > 0) {
+            } else if (pick->kind == LM_PICK_OSK && time_ms - wm->osk_click_ms < (uint32_t)DOUBLE_CLICK_MS && wm->osk_pl.w > 0) {
                 wm->osk_click_ms = 0;                            /* a double click on the margin puts it back to its default place and size */
                 lm_wm_osk_reset(wm);
             } else {

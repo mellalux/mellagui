@@ -2683,7 +2683,7 @@ static void click(struct app *a, uint32_t time_ms)
     int row = p->top + (y - list_y) / ROW_H;
     if (row >= rows(p) || (y - list_y) / ROW_H >= a->rows_visible)
         return;
-    bool dbl = row == p->last_click_row && time_ms - p->last_click_ms < 400;
+    bool dbl = row == p->last_click_row && time_ms - p->last_click_ms < (uint32_t)lm_metrics.double_click_ms;
     p->last_click_ms = time_ms;
     p->last_click_row = row;
     select_row(a, row);

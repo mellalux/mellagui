@@ -1501,7 +1501,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (args[3].u == 1 && a->py >= TOP_H + a->rows_visible * a->zt.ch)    /* the status line is not text */
             break;
         if (args[3].u == 1) {
-            bool dbl = args[1].u - a->last_click_ms < 400;
+            bool dbl = args[1].u - a->last_click_ms < (uint32_t)lm_metrics.double_click_ms;
             a->last_click_ms = args[1].u;
             place_from_pointer(a, (w->mods & LM_MOD_SHIFT) != 0);
             if (dbl) {                                                   /* double click: the word under the pointer */

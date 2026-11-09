@@ -1742,7 +1742,6 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
  * corner (resize) shows where to take hold. Single characters are drawn twice as big as the font when the keys are tall enough. */
 static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
 {
-    static const int row_col[LM_OSK_ROWS] = { 6, 2, 0, 1, 3, 4 };
     fill_round(c, &oi->rect, 22, 0x8cffffffu);                                  /* the rim ... */
     struct lm_rect in = lm_rect_make(oi->rect.x + 1, oi->rect.y + 1, oi->rect.w - 2, oi->rect.h - 2);
     fill_round(c, &in, 21, 0x4cffffffu);                                        /* ... and the veil inside it, translucent all through */
@@ -1756,11 +1755,18 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
     for (int i = 0; i < oi->n; i++) {
         const struct lm_rect *r = &oi->key[i].rect;
         uint32_t st = oi->key[i].state;
-        uint32_t col = panel_palette[row_col[LM_CLAMP(oi->key[i].row, 0, LM_OSK_ROWS - 1)]];
+        uint32_t col = panel_palette[0];                                    /* the keys that type something: one colour ... */
+        uint32_t kc = oi->key[i].code;
         if (oi->key[i].kind == LM_OSK_HIDE)
             col = panel_palette[5];
         else if (oi->key[i].kind != LM_OSK_KEY)
-            col = 0x6b7a99u;
+            col = 0x6b7a99u;                                                /* ... the modifiers steel blue ... */
+        else if (kc == KEY_ESC || (kc >= KEY_F1 && kc <= KEY_F10) || kc == KEY_F11 || kc == KEY_F12)
+            col = panel_palette[2];                                         /* ... and the others by what they do */
+        else if (kc == KEY_TAB || kc == KEY_BACKSPACE || kc == KEY_ENTER || kc == KEY_DELETE)
+            col = panel_palette[3];
+        else if (kc == KEY_LEFT || kc == KEY_RIGHT || kc == KEY_UP || kc == KEY_DOWN)
+            col = panel_palette[4];
         uint32_t bg = col;
         if (st & LM_OSK_KEY_HOVER)
             bg = mix_rgb(bg, 0xffffffu, 55);
@@ -1792,12 +1798,16 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
             int tx = r->x + (r->w - LM_FONT_W * 2) / 2, ty = r->y + (r->h - LM_FONT_H * 2) / 2;
             draw_text_scaled(c, tx + 1, ty + 1, t, 2, 0x10141c);            /* a 1 px shadow keeps white on the lighter colours readable */
             draw_text_scaled(c, tx, ty, t, 2, fg);
+            draw_text_scaled(c, tx + 1, ty, t, 2, fg);                      /* bold: the glyph struck twice, a pixel apart */
         } else {
             struct lm_rect sh = *r;
             sh.x++;
             sh.y++;
             draw_text_centered(c, &sh, t, 0x10141c);
             draw_text_centered(c, r, t, fg);
+            struct lm_rect bold = *r;
+            bold.x++;
+            draw_text_centered(c, &bold, t, fg);
         }
     }
 }

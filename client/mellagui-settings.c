@@ -507,6 +507,8 @@ static void build_keyboard(struct app *a, int x, int y, int w)
     add_slider(a, x, y, w, "Repeat delay", "repeat-delay", 150, 1000, 50, " ms");
     y += ROW_H;
     add_slider(a, x, y, w, "Repeat rate", "repeat-rate", 1, 60, 1, "/s");
+    y += ROW_H;
+    add_check(a, x, y, w, "Windows keep out of the on-screen keyboard's way", "osk-avoid", kv_int(a, "osk-avoid", 1) != 0);
     y += ROW_H + 8;
     add(a, W_TEXT, (struct rect){ x, y, w, 48 }, "Try it:");
 }

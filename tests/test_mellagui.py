@@ -3263,6 +3263,50 @@ class TestClients(Base):
         keys = self.osk()[1]
         self.assertEqual((keys[30][6], keys[42][6], keys[54][6], keys[30][4]), (0, 0, 0, 'a'))
 
+    def test_windows_make_room_for_the_keyboard_and_come_back_with_the_setting_on(self):
+        self.addCleanup(ctl.cmd, 'settings osk-avoid 1')
+        p, path = self.edit_start(b'one\n')
+        w0 = self.edit_window()
+        self.osk('open')
+        time.sleep(0.5)
+        card = self.osk_card()
+        w1 = self.edit_window()
+        self.assertLessEqual(w1['y'] + w1['h'] + 4, card[1])                     # (4 = the frame) the window ends above the keyboard
+        self.assertGreaterEqual(w1['y'], 28)                                     # and still starts below the panel
+        self.osk('close')
+        time.sleep(0.5)
+        self.assertEqual({k: self.edit_window()[k] for k in 'xywh'}, {k: w0[k] for k in 'xywh'})   # back where it was
+        ctl.cmd('settings osk-avoid 0')
+        self.osk('open')
+        time.sleep(0.4)
+        self.assertEqual({k: self.edit_window()[k] for k in 'xywh'}, {k: w0[k] for k in 'xywh'})   # the setting is off: it stays under the keyboard
+        ctl.cmd('settings osk-avoid 1')                                          # switching it on moves the windows at once
+        time.sleep(0.4)
+        w2 = self.edit_window()
+        self.assertLessEqual(w2['y'] + w2['h'] + 4, card[1])
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_a_maximized_window_gets_smaller_for_the_keyboard(self):
+        self.addCleanup(ctl.cmd, 'settings osk-avoid 1')
+        p, path = self.edit_start(b'one\n')
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(KEY_UP)                                                          # Super+Up: maximize
+        ctl.key(KEY_LEFTMETA, False)
+        time.sleep(0.5)
+        full = self.edit_window()
+        self.osk('open')
+        time.sleep(0.5)
+        card = self.osk_card()
+        part = self.edit_window()
+        self.assertLess(part['h'], full['h'])
+        self.assertLessEqual(part['y'] + part['h'] + 4, card[1])
+        self.osk('close')
+        time.sleep(0.5)
+        self.assertEqual(self.edit_window()['h'], full['h'])
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
+
     def test_osk_labels_follow_the_layout(self):
         self.addCleanup(settings_restore)
         ctl.cmd('settings layouts us,ee')
@@ -4047,15 +4091,15 @@ esac
     def test_try_field_follows_the_layout(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 200, y0 + 366)                           # the "Try it" field
+        ctl.click(x0 + 200, y0 + 394)                           # the "Try it" field
         time.sleep(0.15)
 
         def field():
             ctl.abs(900, 500)
             time.sleep(0.15)
             ppm = ctl.dump(os.path.join(tmp, 'try.ppm'))
-            ctl.abs(x0 + 200, y0 + 366)
-            return [ppm.px(x0 + x, y0 + y) for y in range(356, 376) for x in range(166, 190)]
+            ctl.abs(x0 + 200, y0 + 394)
+            return [ppm.px(x0 + x, y0 + y) for y in range(384, 404) for x in range(166, 190)]
         empty = field()
         ctl.tap(39)                                             # KEY_SEMICOLON: ';' on us, o-umlaut on ee
         us_text = field()

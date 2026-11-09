@@ -1701,6 +1701,9 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         sbg = 0x8fbcffu;
     fill_round(c, &p->sticky, 8, 0xff000000u | sbg);
     draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? 0x0b0d12u : COL_PANEL_TEXT);
+    uint32_t obg = p->osk_open ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_osk ? 30 : 18);
+    fill_round(c, &p->osk, 8, 0xff000000u | obg);
+    draw_text_centered(c, &p->osk, "Kbd", p->osk_open ? 0x0b0d12u : COL_PANEL_TEXT);
     fill_round(c, &p->run, 8, 0xff000000u | (p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN));
     draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
@@ -1710,6 +1713,53 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         uint32_t bg = p->power_open ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 45) : p->hover_power ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 25) : COL_PANEL_DANGER;
         paint_shape(c, cx, cy, R, SHAPE_DISC, bg, 255);                                   /* red: it ends the session */
         paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, 0xffffffu, 255);
+    }
+}
+
+/* The on-screen keyboard: a slightly transparent dark card with round (pill shaped) colourful keys, every row in its own colour, the
+ * modifiers steel blue, Hide red. The key under the pointer is lighter, the one held down is nearly white, a latched modifier or Caps Lock
+ * is lit and has a white rim. Single characters are drawn twice as big as the font when the keys are tall enough. */
+static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
+{
+    static const int row_col[5] = { 2, 0, 1, 3, 4 };
+    fill_round(c, &oi->rect, 18, 0xd2000000u | COL_PANEL);
+    for (int i = 0; i < oi->n; i++) {
+        const struct lm_rect *r = &oi->key[i].rect;
+        uint32_t st = oi->key[i].state;
+        uint32_t col = panel_palette[row_col[LM_CLAMP(oi->key[i].row, 0, 4)]];
+        if (oi->key[i].kind == LM_OSK_HIDE)
+            col = panel_palette[5];
+        else if (oi->key[i].kind != LM_OSK_KEY)
+            col = 0x5a6a8au;
+        uint32_t bg = mix_rgb(COL_PANEL, col, 205);
+        if (st & LM_OSK_KEY_HOVER)
+            bg = mix_rgb(bg, 0xffffffu, 45);
+        if (st & LM_OSK_KEY_ON)
+            bg = mix_rgb(col, 0xffffffu, 70);
+        if (st & LM_OSK_KEY_DOWN)
+            bg = mix_rgb(col, 0xffffffu, 140);
+        int rad = r->h / 2;
+        if (st & LM_OSK_KEY_ON) {
+            struct lm_rect rim = lm_rect_make(r->x - 2, r->y - 2, r->w + 4, r->h + 4);
+            fill_round(c, &rim, rad + 2, 0xf0ffffffu);
+        }
+        fill_round(c, r, rad, 0xf0000000u | bg);
+        uint32_t fg = (st & LM_OSK_KEY_DOWN) ? 0x0b0d12u : 0xffffffu;
+        const char *t = oi->key[i].label;
+        int chars = 0;
+        for (const char *q = t; *q; q++)
+            chars += ((unsigned char)*q & 0xc0) != 0x80;
+        if (chars == 1 && r->h >= 40) {
+            int tx = r->x + (r->w - LM_FONT_W * 2) / 2, ty = r->y + (r->h - LM_FONT_H * 2) / 2;
+            draw_text_scaled(c, tx + 1, ty + 1, t, 2, 0x10141c);            /* a 1 px shadow keeps white on the lighter colours readable */
+            draw_text_scaled(c, tx, ty, t, 2, fg);
+        } else {
+            struct lm_rect sh = *r;
+            sh.x++;
+            sh.y++;
+            draw_text_centered(c, &sh, t, 0x10141c);
+            draw_text_centered(c, r, t, fg);
+        }
     }
 }
 
@@ -1984,6 +2034,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_POWER:
         if (item->output == c->out)
             paint_power(c, &item->u.power);
+        break;
+    case LM_SCENE_OSK:
+        if (item->output == c->out)
+            paint_osk(c, &item->u.osk);
         break;
     case LM_SCENE_SWITCHER:
         paint_switcher(c, &item->u.switcher);

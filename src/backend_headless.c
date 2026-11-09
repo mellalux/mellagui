@@ -321,6 +321,25 @@ static void ctl_command(struct ctl_client *c, char *line)
             ctl_reply(c, "%s", text);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "osk")) {
+        /* osk [open|close|toggle] -> the lines of lm_wm_osk_describe ("osk open=.. latched=.. n=..", "card ...", one "key ..." line per key), then "ok" */
+        static char text[16384];
+        if (srv->wm && a1 && !strcmp(a1, "open"))
+            lm_wm_osk_set(srv->wm, true);
+        else if (srv->wm && a1 && !strcmp(a1, "close"))
+            lm_wm_osk_set(srv->wm, false);
+        else if (srv->wm && a1 && !strcmp(a1, "toggle"))
+            lm_wm_osk_set(srv->wm, !lm_wm_osk_is_open(srv->wm));
+        if (srv->wm) {
+            lm_wm_osk_describe(srv->wm, text, sizeof(text));
+            for (const char *l = text; *l;) {                   /* (ctl_reply's buffer is small: a line at a time) */
+                const char *e = strchr(l, '\n');
+                int len = e ? (int)(e - l) + 1 : (int)strlen(l);
+                ctl_reply(c, "%.*s", len, l);
+                l += len;
+            }
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "launcher")) {
         /* launcher [open|close] -> the lines of lm_wm_launcher_describe ("launcher open=.. edit=.. form=.. n=.. sel=..", card, icons, buttons ...), then "ok" */
         static char text[8192];

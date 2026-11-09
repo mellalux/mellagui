@@ -3109,6 +3109,100 @@ class TestClients(Base):
         self.chord(self.CTRL, self.K_Q)
         self.assertEqual(p.wait(timeout=5), 0)
 
+    # ---- the on-screen keyboard ----------------------------------------------------------------------------------------------
+
+    def osk(self, arg=''):
+        """The control socket's `osk` answer: (head fields, {evdev code: (x, y, w, h, label, on)} of the keys)."""
+        return self.osk_parse('\n'.join(ctl.cmd('osk %s' % arg if arg else 'osk')))
+
+    @staticmethod
+    def osk_parse(text):
+        head = dict(kv.split('=') for kv in text.split('\n')[0].split()[1:])
+        keys = {}
+        for m in re.finditer(r'key (\d+) code=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) on=(\d) label=(.*)', text):
+            keys[int(m.group(2))] = (int(m.group(4)), int(m.group(5)), int(m.group(6)), int(m.group(7)), m.group(9), int(m.group(8)))
+        return head, keys
+
+    def osk_click(self, code):
+        x, y, w, h = self.osk()[1][code][:4]
+        ctl.click(x + w // 2, y + h // 2)
+        time.sleep(0.1)
+
+    def test_osk_opens_with_a_key_closes_with_hide_and_lists_its_keys(self):
+        head, keys = self.osk()
+        self.assertEqual(head['open'], '0')
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(37)                                                              # Super+K
+        ctl.key(KEY_LEFTMETA, False)
+        time.sleep(0.2)
+        head, keys = self.osk()
+        self.assertEqual(head['open'], '1')
+        self.assertEqual(int(head['n']), len(keys))                              # (Hide has no code: it is listed under code 0)
+        self.assertEqual(keys[30][4], 'a')
+        self.assertEqual(keys[30][5], 0)
+        card = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(ctl.cmd('osk')))
+        self.assertLessEqual(int(card.group(2)) + int(card.group(4)), 600)       # it sits inside the output, along the bottom
+        self.assertGreater(int(card.group(2)), 300)
+        self.osk_click(0)                                                        # the Hide key
+        time.sleep(0.1)
+        self.assertEqual(self.osk()[0]['open'], '0')
+        self.osk('open')
+        self.assertEqual(self.osk()[0]['open'], '1')
+        self.osk('close')
+        self.assertEqual(self.osk()[0]['open'], '0')
+
+    def test_osk_types_into_the_editor_with_shift_and_does_not_take_the_focus(self):
+        p, path = self.edit_start(b'')
+        win = self.edit_window()
+        self.assertIn('focused', win['flags'])
+        self.osk('open')
+        self.osk_click(35)                                                       # h
+        self.osk_click(23)                                                       # i
+        self.osk_click(42)                                                       # Shift latches ...
+        head, keys = self.osk()
+        self.assertEqual(keys[35][4], 'H')                                       # ... and the labels change
+        self.assertEqual(keys[42][5], 1)
+        self.osk_click(35)                                                       # H, and the latch is gone again
+        head, keys = self.osk()
+        self.assertEqual(keys[35][4], 'h')
+        self.assertEqual(keys[42][5], 0)
+        self.assertEqual(int(head['latched']), 0)
+        self.assertIn('focused', self.edit_window()['flags'])                    # the editor kept the focus
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path).strip(), b'hiH')
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_osk_ctrl_latch_makes_a_shortcut_and_a_second_tap_lets_go(self):
+        p, path = self.edit_start(b'abc\n')
+        self.osk('open')
+        self.osk_click(29)                                                       # Ctrl on
+        self.assertEqual(self.osk()[1][29][5], 1)
+        self.osk_click(29)                                                       # off again
+        self.assertEqual(self.osk()[1][29][5], 0)
+        self.osk_click(29)                                                       # Ctrl + A: select everything
+        self.osk_click(30)
+        self.assertEqual(int(self.osk()[0]['latched']), 0)
+        self.osk_click(48)                                                       # b replaces the selection
+        time.sleep(0.2)
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path).strip(), b'b')
+        self.chord(self.CTRL, self.K_Q)
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_osk_labels_follow_the_layout(self):
+        self.addCleanup(settings_restore)
+        ctl.cmd('settings layouts us,ee')
+        self.osk('open')
+        self.assertEqual(self.osk()[1][26][4], '[')                             # the key right of P
+        ctl.cmd('layout next')
+        time.sleep(0.2)
+        self.assertEqual(self.osk()[1][26][4], '\u00fc')                         # u-umlaut on the Estonian layout
+        ctl.cmd('layout prev')
+        self.osk('close')
+
 
 DEFAULT_SETTINGS = {'layouts': 'us,ee,de,fi', 'layout': 'us', 'sticky': '0', 'repeat-delay': '400',
                     'repeat-rate': '25', 'pointer-speed': '100', 'natural-scroll': '0', 'sound': '1', 'gadget': '1', 'mixer': '0', 'sysinfo': '0'}
@@ -6909,7 +7003,7 @@ class TestKeys(Base):
                      'Super+Down = restore', 'Super+Shift+Space = layout-prev'):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
-        self.assertEqual(len(t), 30)
+        self.assertEqual(len(t), 31)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -6954,7 +7048,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 31)
+        self.assertEqual(len(t), 32)
         self.assertTrue(alive_p(p))
 
 
@@ -7795,12 +7889,13 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '30')
+        self.assertEqual(self.get(c, 'keys-count'), '31')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(self.rows(c, 99), self.rows(c, 2))                   # a page past the end is the last one
+        self.assertEqual(len(self.rows(c, 3)), 1)
+        self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
 
@@ -7823,13 +7918,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '30')
+        self.assertEqual(self.get(c, 'keys-count'), '31')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '31')
+        self.assertEqual(self.get(c, 'keys-count'), '32')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')

@@ -28,6 +28,7 @@
 #include "log.h"
 #include "mixer.h"
 #include "sysinfo.h"
+#include "osk.h"
 #include "output.h"
 #include "render.h"
 #include "screenshot.h"
@@ -49,6 +50,7 @@
 #define PANEL_RUN_W (lm_metrics.panel_run_width)
 #define PANEL_LAYOUT_W (lm_metrics.panel_layout_width)
 #define PANEL_STICKY_W (lm_metrics.panel_sticky_width)
+#define PANEL_OSK_W 36                              /* the on-screen keyboard button (not a configurable size) */
 #define PANEL_CAPS_W (lm_metrics.panel_caps_width)
 #define SW_MAX_WINDOWS 32
 #define GADGET_W (lm_metrics.gadget_width)                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
@@ -111,7 +113,11 @@ struct lm_wm {
     uint32_t hover_bits;
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
-    bool hover_power, hover_run, hover_layout, hover_sticky;
+    bool hover_power, hover_run, hover_layout, hover_sticky, hover_osk;
+    bool osk_open;              /* the on-screen keyboard is showing on the primary output */
+    uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
+    int osk_hover, osk_down;    /* the key under the pointer / held by it (index into the geometry), -1 = none */
+    uint32_t osk_down_code, osk_down_mods;   /* what was pressed for the held key: its code and the latched modifiers pressed with it */
     bool power_open;            /* the session dialog (Lock / Exit) is showing on the output called power_out */
     char power_out[32];
     int power_sel;              /* its highlighted button: 0 Lock, 1 Exit, -1 none yet */
@@ -258,6 +264,9 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->run = lm_rect_make(p->clock.x - 8 - PANEL_RUN_W, y, PANEL_RUN_W, h);
     p->sticky = lm_rect_make(p->run.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
     p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
+    p->osk = lm_rect_make(p->layout.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
+    p->hover_osk = wm->hover_osk;
+    p->osk_open = wm->osk_open;
     uint32_t locks = wm->srv->input ? lm_input_locks(wm->srv->input) : 0;
     p->caps_text[0] = 0;
     if ((locks & LM_MOD_CAPS) && (locks & LM_MOD_NUM))
@@ -267,7 +276,7 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     else if (locks & LM_MOD_NUM)
         snprintf(p->caps_text, sizeof(p->caps_text), "NUM");
     int caps_w = !p->caps_text[0] ? 0 : (locks & LM_MOD_NUM) && (locks & LM_MOD_CAPS) ? PANEL_CAPS_W + 24 : PANEL_CAPS_W;
-    p->caps = lm_rect_make(p->layout.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
+    p->caps = lm_rect_make(p->osk.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
     int tx = x + 12;
     p->title_area = lm_rect_make(tx, y, p->caps.x - 12 - tx, h);
     p->hover_layout = wm->hover_layout;
@@ -1128,6 +1137,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     lm_list_init(&wm->windows);
     lm_list_init(&wm->popups);
     wm->hover_panel_ws = -1;
+    wm->osk_hover = wm->osk_down = -1;
     wm->hover_dock = -1;
     wm->gad[LM_GADGET_CLIPBOARD].visible = srv->config.gadget;
     wm->gad[LM_GADGET_MIXER].visible = srv->config.mixer;
@@ -1792,6 +1802,174 @@ static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
 }
 
 
+/* ---- the on-screen keyboard ------------------------------------------------------------------------------------------------- */
+
+/* Gives the keymap lookups (lm_keymap_keysym) the configured layouts and the active group, for labels and the launcher form. */
+static void keymap_sync(const struct lm_wm *wm)
+{
+    int layouts[LM_KBD_MAX_LAYOUTS], n = wm->srv->config.kbd_nlayouts;
+    if (n < 1 || n > LM_KBD_MAX_LAYOUTS)
+        n = 0;
+    for (int i = 0; i < n; i++)
+        layouts[i] = wm->srv->config.kbd_layouts[i];
+    lm_keymap_set_groups(layouts, n);
+    if (wm->srv->seat)
+        lm_keymap_client_group(lm_seat_group(wm->srv->seat));
+}
+
+static bool osk_geo(const struct lm_wm *wm, struct lm_osk_geo *g)
+{
+    if (!wm->osk_open || !wm->srv->backend)
+        return false;
+    struct lm_output *o = lm_output_primary(wm->srv);
+    if (!o)
+        return false;
+    struct lm_rect r = lm_output_rect(o);
+    lm_osk_geometry(&r, g);
+    return true;
+}
+
+static void osk_damage(struct lm_wm *wm)
+{
+    struct lm_osk_geo g;
+    if (osk_geo(wm, &g))
+        damage_rect(wm, &g.card);
+    damage_panels(wm);
+}
+
+static void osk_info(const struct lm_wm *wm, const struct lm_osk_geo *g, struct lm_osk_info *oi)
+{
+    memset(oi, 0, sizeof(*oi));
+    oi->rect = g->card;
+    oi->n = g->n;
+    keymap_sync(wm);
+    uint32_t locks = wm->srv->input ? lm_input_locks(wm->srv->input) : 0;
+    for (int i = 0; i < g->n; i++) {
+        const struct lm_osk_key *k = &g->key[i];
+        oi->key[i].rect = k->rect;
+        oi->key[i].kind = (int)k->kind;
+        oi->key[i].row = k->row;
+        lm_osk_label(k, wm->osk_latched, locks, oi->key[i].label);
+        uint32_t st = 0;
+        if (i == wm->osk_hover)
+            st |= LM_OSK_KEY_HOVER;
+        if (i == wm->osk_down)
+            st |= LM_OSK_KEY_DOWN;
+        if ((lm_osk_kind_mod(k->kind) & wm->osk_latched) || (k->kind == LM_OSK_CAPS && (locks & LM_MOD_CAPS)))
+            st |= LM_OSK_KEY_ON;
+        oi->key[i].state = st;
+    }
+}
+
+static void osk_inject(struct lm_wm *wm, uint32_t code, bool pressed)
+{
+    if (!wm->srv->input || !code)
+        return;
+    struct lm_input_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = LM_INPUT_KEY;
+    ev.u.key.code = code;
+    ev.u.key.pressed = pressed;
+    lm_input_inject(wm->srv->input, &ev);
+}
+
+static const enum lm_osk_kind osk_mod_kinds[4] = { LM_OSK_SHIFT, LM_OSK_CTRL, LM_OSK_ALT, LM_OSK_ALTGR };
+
+/* The held key comes up (and the modifiers that were pressed with it): the pointer let go, or the keyboard closes. */
+static void osk_release(struct lm_wm *wm)
+{
+    if (wm->osk_down < 0)
+        return;
+    wm->osk_down = -1;
+    osk_inject(wm, wm->osk_down_code, false);
+    for (int i = 3; i >= 0; i--)
+        if (wm->osk_down_mods & lm_osk_kind_mod(osk_mod_kinds[i]))
+            osk_inject(wm, lm_osk_kind_code(osk_mod_kinds[i]), false);
+    wm->osk_down_code = wm->osk_down_mods = 0;
+    osk_damage(wm);
+}
+
+static void osk_set(struct lm_wm *wm, bool open)
+{
+    if (open == wm->osk_open)
+        return;
+    if (open) {
+        wm->osk_open = true;
+        wm->osk_latched = 0;
+        wm->osk_hover = wm->osk_down = -1;
+    } else {
+        osk_release(wm);
+        osk_damage(wm);                                         /* (while the geometry is still known) */
+        wm->osk_open = false;
+        wm->osk_latched = 0;
+        wm->hover_osk = false;
+        wm->osk_hover = -1;
+    }
+    osk_damage(wm);
+}
+
+/* A press on key `i`: modifiers latch for the next key, Hide closes, anything else is typed (pressed now, released with the pointer). */
+static void osk_press(struct lm_wm *wm, int i)
+{
+    struct lm_osk_geo g;
+    if (!osk_geo(wm, &g) || i < 0 || i >= g.n)
+        return;
+    const struct lm_osk_key *k = &g.key[i];
+    uint32_t mod = lm_osk_kind_mod(k->kind);
+    if (k->kind == LM_OSK_HIDE) {
+        osk_set(wm, false);
+    } else if (mod) {
+        wm->osk_latched ^= mod;
+        osk_damage(wm);
+    } else {
+        osk_release(wm);
+        wm->osk_down = i;
+        wm->osk_down_code = k->code;
+        wm->osk_down_mods = wm->osk_latched;
+        wm->osk_latched = 0;
+        for (int m = 0; m < 4; m++)
+            if (wm->osk_down_mods & lm_osk_kind_mod(osk_mod_kinds[m]))
+                osk_inject(wm, lm_osk_kind_code(osk_mod_kinds[m]), true);
+        osk_inject(wm, k->code, true);
+        osk_damage(wm);
+    }
+}
+
+static bool osk_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
+{
+    struct lm_osk_geo g;
+    if (lm_lock_active(wm->srv->lock) || !osk_geo(wm, &g) || !lm_rect_contains(&g.card, ix, iy))
+        return false;
+    out->kind = LM_PICK_OSK;
+    out->rect = g.card;
+    for (int i = 0; i < g.n; i++)
+        if (lm_rect_contains(&g.key[i].rect, ix, iy)) {
+            out->kind = LM_PICK_OSK_KEY;
+            out->index = i;
+        }
+    return true;
+}
+
+void lm_wm_osk_set(struct lm_wm *wm, bool open) { osk_set(wm, open); }
+bool lm_wm_osk_is_open(const struct lm_wm *wm) { return wm->osk_open; }
+
+size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    struct lm_osk_geo g;
+    bool open = osk_geo(wm, &g);
+    size_t n = (size_t)snprintf(buf, size, "osk open=%d latched=%u n=%d down=%d\n", open, wm->osk_latched, open ? g.n : 0, wm->osk_down);
+    if (!open)
+        return n;
+    static struct lm_osk_info oi;
+    osk_info(wm, &g, &oi);
+    n += (size_t)snprintf(buf + n, size - n, "card x=%d y=%d w=%d h=%d\n", g.card.x, g.card.y, g.card.w, g.card.h);
+    for (int i = 0; i < g.n && n < size; i++)
+        n += (size_t)snprintf(buf + n, size - n, "key %d code=%u kind=%d x=%d y=%d w=%d h=%d on=%d label=%s\n", i, g.key[i].code,
+                              (int)g.key[i].kind, g.key[i].rect.x, g.key[i].rect.y, g.key[i].rect.w, g.key[i].rect.h,
+                              (oi.key[i].state & LM_OSK_KEY_ON) != 0, oi.key[i].label);
+    return n;
+}
+
 /* ---- the About dialog ----------------------------------------------------------------------------------------------------- */
 
 static struct lm_output *about_output(const struct lm_wm *wm)
@@ -2367,13 +2545,7 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
     if (code == KEY_BACKSPACE) {
         launcher_pop(text);
     } else if (!(mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {
-        int layouts[LM_KBD_MAX_LAYOUTS], n = wm->srv->config.kbd_nlayouts;
-        if (n < 1 || n > LM_KBD_MAX_LAYOUTS)
-            n = 0;
-        for (int i = 0; i < n; i++)
-            layouts[i] = wm->srv->config.kbd_layouts[i];
-        lm_keymap_set_groups(layouts, n);
-        lm_keymap_client_group(lm_seat_group(wm->srv->seat));
+        keymap_sync(wm);
         if (code >= KEY_KP7 && code <= KEY_KPDOT)
             mods |= LM_MOD_NUM;
         uint32_t ks = lm_keymap_keysym(code, mods);
@@ -3058,6 +3230,18 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
+    if (wm->osk_open) {                                          /* the on-screen keyboard: above the dialogs, below the Alt+Tab list */
+        struct lm_osk_geo og;
+        if (osk_geo(wm, &og) && (!clip || lm_rect_overlaps(&og.card, clip))) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_OSK;
+            it.output = lm_output_primary(wm->srv);
+            osk_info(wm, &og, &it.u.osk);
+            if (!fn(&it, data))
+                return;
+        }
+    }
+
     if (wm->sw_open) {                                           /* the Alt+Tab list, above everything */
         struct lm_rect r = sw_rect(wm);
         if (r.w > 0 && (!clip || lm_rect_overlaps(&r, clip))) {
@@ -3164,6 +3348,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
     out->kind = LM_PICK_NONE;
     int32_t ix = (int32_t)x, iy = (int32_t)y;
 
+    if (osk_pick(wm, ix, iy, out))                               /* the on-screen keyboard is above everything, dialogs included */
+        return;
     if (launcher_pick(wm, ix, iy, out))                          /* the launcher dialog is modal: it gets every pick */
         return;
     struct lm_output *ao = about_output(wm);
@@ -3334,6 +3520,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                 out->kind = LM_PICK_PANEL_POWER;
             if (lm_rect_contains(&pi.layout, ix, iy))
                 out->kind = LM_PICK_PANEL_LAYOUT;
+            if (lm_rect_contains(&pi.osk, ix, iy))
+                out->kind = LM_PICK_PANEL_OSK;
             if (lm_rect_contains(&pi.sticky, ix, iy))
                 out->kind = LM_PICK_PANEL_STICKY;
             for (int i = 0; i < LM_NUM_WORKSPACES; i++)
@@ -3375,7 +3563,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool about_btn = false, launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false;
+    bool about_btn = false, launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false;
     int power_item = -1, clip_code = 0;
     struct lm_window *task = NULL;
     enum lm_cursor_shape shape = LM_CURSOR_NONE;
@@ -3403,6 +3591,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_OSK: osk_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_OSK_KEY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_TASK: task = pick->window; shape = LM_CURSOR_POINTER; break;
     default: break;
@@ -3438,6 +3628,13 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
             launcher_damage(wm);
         }
     }
+    if (wm->osk_open) {                                         /* the key under the pointer lights up */
+        int hk = pick->kind == LM_PICK_OSK_KEY ? pick->index : -1;
+        if (hk != wm->osk_hover) {
+            wm->osk_hover = hk;
+            osk_damage(wm);
+        }
+    }
     if (wm->about_open && about_btn != wm->about_hover_close) {
         wm->about_hover_close = about_btn;
         about_damage(wm);
@@ -3448,7 +3645,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     }
     if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || power_btn != wm->hover_power ||
         run_btn != wm->hover_run || task != wm->hover_task || layout_btn != wm->hover_layout ||
-        sticky_btn != wm->hover_sticky) {
+        sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk) {
+        wm->hover_osk = osk_btn;
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
         wm->hover_run = run_btn;
@@ -3908,6 +4106,15 @@ static void power_activate(struct lm_wm *wm, int which)
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (!pressed && wm->osk_down >= 0 && button == BTN_LEFT) {   /* the held on-screen key comes up wherever the pointer is */
+        osk_release(wm);
+        return true;
+    }
+    if (pick->kind == LM_PICK_OSK_KEY || pick->kind == LM_PICK_OSK) {
+        if (pressed && pick->kind == LM_PICK_OSK_KEY && button == BTN_LEFT)
+            osk_press(wm, pick->index);
+        return true;                                            /* the keyboard never moves the focus and nothing under it gets the click */
+    }
     if (pick->kind == LM_PICK_POWER_BUTTON || pick->kind == LM_PICK_POWER_CARD || pick->kind == LM_PICK_POWER_BACKDROP) {
         int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
         if (pressed) {
@@ -4013,6 +4220,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             launch_run(wm);
         if (pk == LM_PICK_PANEL_LAYOUT && pick->kind == LM_PICK_PANEL_LAYOUT && wm->srv->input)
             lm_input_cycle_layout(wm->srv->input, pi);
+        if (pk == LM_PICK_PANEL_OSK && pick->kind == LM_PICK_PANEL_OSK)
+            osk_set(wm, !wm->osk_open);
         if (pk == LM_PICK_PANEL_STICKY && pick->kind == LM_PICK_PANEL_STICKY && wm->srv->input)
             lm_input_set_sticky(wm->srv->input, !lm_input_sticky(wm->srv->input));
         if (pk == LM_PICK_PANEL_POWER && pick->kind == LM_PICK_PANEL_POWER) {
@@ -4144,6 +4353,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         return true;
     case LM_PICK_PANEL_LAYOUT:
     case LM_PICK_PANEL_STICKY:
+    case LM_PICK_PANEL_OSK:
         if (button == BTN_LEFT || (button == BTN_RIGHT && pick->kind == LM_PICK_PANEL_LAYOUT)) {
             wm->press_panel_kind = pick->kind;
             wm->press_panel_ws = button == BTN_RIGHT ? -1 : 1;     /* layout direction, see the release code */
@@ -4272,6 +4482,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_TERMINAL: launch_terminal(wm); break;
     case LM_ACT_RUN: launch_run(wm); break;
     case LM_ACT_LAUNCHER: launcher_set(wm, !wm->launcher_open, NULL); break;
+    case LM_ACT_OSK: osk_set(wm, !wm->osk_open); break;
     case LM_ACT_SETTINGS: launch_settings(wm); break;
     case LM_ACT_EXEC: {
         char cmd[2048];

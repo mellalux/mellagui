@@ -1686,6 +1686,29 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     }
     if (!p->ntasks && p->active_title && p->active_title[0])
         draw_text_centered(c, &p->title_area, p->active_title, COL_PANEL_TEXT);
+    for (int i = 0; i < p->ntray; i++) {                 /* programs' icons: a button with the icon and / or a label */
+        const struct lm_rect *r = &p->tray[i].rect;
+        const struct lm_texture *ic = p->tray[i].icon;
+        fill_round(c, r, 8, 0xff000000u | (p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN));
+        int x = r->x + 6, tw = p->tray[i].text[0] ? lm_font_text_width(p->tray[i].text) : 0;
+        if (ic && !tw)
+            x = r->x + (r->w - ic->width) / 2;
+        if (ic) {
+            struct lm_rect box = lm_rect_make(x, r->y + (r->h - ic->height) / 2, ic->width, ic->height), cl;
+            if (lm_rect_intersect(&box, &c->clip, &cl))
+                for (int yy = cl.y; yy < cl.y + cl.h; yy++) {
+                    uint32_t *row = fb_row(c, yy);
+                    for (int xx = cl.x; xx < cl.x + cl.w; xx++) {
+                        uint32_t px = ic->pixels[(size_t)(yy - box.y) * (size_t)ic->width + (size_t)(xx - box.x)];
+                        if (px >> 24)
+                            row[xx] = blend_px(px, row[xx]);
+                    }
+                }
+            x += ic->width + 4;
+        }
+        if (tw)
+            draw_text(c, r, x, r->y + (r->h - LM_FONT_H) / 2, p->tray[i].text, COL_PANEL_TEXT);
+    }
     if (p->caps.w > 0) {
         fill_rect(c, &p->caps, COL_PANEL_DANGER);
         draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);

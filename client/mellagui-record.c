@@ -18,6 +18,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -66,7 +67,7 @@ struct button {
 
 struct app {
     struct wlwin win;
-    uint32_t capture, settings;
+    uint32_t capture, settings, tray;
     struct output outs[MAX_OUTPUTS];
     int nouts;
     bool listed;
@@ -103,6 +104,17 @@ struct app {
     bool enc_error;
     uint32_t enc_frames;            /* what the encoder has written so far (under lock), for the window */
     uint64_t enc_bytes;
+
+    /* the item in the top bar (mellagui_tray_v1): a blinking dot and the elapsed time while recording */
+    uint32_t tray_item, tray_pool, tray_buf[2];
+    int tray_size, tray_phase;
+    uint64_t tray_sec;
+    void *tray_map;
+    size_t tray_map_size;
+    bool drawn;                     /* the window has had its first picture */
+    bool want_min;                  /* minimize the window as soon as it is on the screen */
+    bool tray_clicked;              /* the bar's item was clicked: stop */
+    bool hidden;                    /* we minimized it: a click on the bar's item then ends the program too */
 
     /* what the window shows */
     char saved[600];                /* the last finished file */
@@ -265,6 +277,109 @@ static void free_frames(struct app *a)
     a->map = NULL;
 }
 
+/* ---- the bar's item ---------------------------------------------------------------------------------------------------- */
+
+static void render_dot(uint32_t *px, int s, bool on)
+{
+    float c = (float)s / 2.0f, R = (float)s * 0.38f;
+    for (int y = 0; y < s; y++)
+        for (int x = 0; x < s; x++) {
+            float d = hypotf((float)x + 0.5f - c, (float)y + 0.5f - c) - R;
+            float cov = 0.5f - d;
+            cov = cov < 0.0f ? 0.0f : cov > 1.0f ? 1.0f : cov;
+            float a = cov * (on ? 1.0f : 0.28f);
+            px[(size_t)y * (size_t)s + (size_t)x] = ((uint32_t)(a * 255.0f + 0.5f) << 24) | ((uint32_t)(a * 240.0f + 0.5f) << 16) |
+                                                    ((uint32_t)(a * 50.0f + 0.5f) << 8) | (uint32_t)(a * 50.0f + 0.5f);
+        }
+}
+
+static void tray_item_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id;
+    struct app *a = data;
+    if (op == LM_MELLAGUI_TRAY_ITEM_V1_EVT_SIZE && !a->tray_buf[0] && args[0].i >= 8 && args[0].i <= 64) {
+        int s = a->tray_size = args[0].i;
+        size_t one = (size_t)s * (size_t)s * 4;
+        a->tray_map_size = one * 2;
+        int fd = memfd_create("mellagui-record-icon", MFD_CLOEXEC);
+        if (fd < 0 || ftruncate(fd, (off_t)a->tray_map_size) < 0) {
+            if (fd >= 0)
+                close(fd);
+            return;
+        }
+        a->tray_map = mmap(NULL, a->tray_map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (a->tray_map == MAP_FAILED) {
+            a->tray_map = NULL;
+            close(fd);
+            return;
+        }
+        render_dot((uint32_t *)a->tray_map, s, true);
+        render_dot((uint32_t *)(void *)((uint8_t *)a->tray_map + one), s, false);
+        a->tray_pool = wlc_alloc(a->win.c, &lm_wl_shm_pool_interface, NULL, NULL);
+        WLC_SEND(a->win.c, a->win.shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = a->tray_pool }, { .h = fd }, { .i = (int32_t)a->tray_map_size });
+        close(fd);
+        for (int i = 0; i < 2; i++) {
+            a->tray_buf[i] = wlc_alloc(a->win.c, &lm_wl_buffer_interface, buffer_nothing, NULL);
+            WLC_SEND(a->win.c, a->tray_pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = a->tray_buf[i] }, { .i = (int32_t)(one * (size_t)i) },
+                     { .i = s }, { .i = s }, { .i = s * 4 }, { .u = LM_WL_SHM_FORMAT_ARGB8888 });
+        }
+        WLC_SEND0(a->win.c, a->tray_pool, LM_WL_SHM_POOL_REQ_DESTROY);
+        wlc_forget(a->win.c, a->tray_pool);
+        a->tray_pool = 0;
+        a->tray_phase = -1;                         /* the next tick sets the icon */
+    } else if (op == LM_MELLAGUI_TRAY_ITEM_V1_EVT_CLICKED) {
+        a->tray_clicked = true;
+    }
+}
+
+static void tray_start(struct app *a)
+{
+    if (!a->tray || a->tray_item)
+        return;
+    a->tray_item = wlc_alloc(a->win.c, &lm_mellagui_tray_item_v1_interface, tray_item_event, a);
+    WLC_SEND(a->win.c, a->tray, LM_MELLAGUI_TRAY_V1_REQ_CREATE_ITEM, { .n = a->tray_item });
+    a->tray_phase = -1;
+    a->tray_sec = UINT64_MAX;
+}
+
+static void tray_stop(struct app *a)
+{
+    if (!a->tray_item)
+        return;
+    WLC_SEND0(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_DESTROY);
+    wlc_forget(a->win.c, a->tray_item);
+    a->tray_item = 0;
+    for (int i = 0; i < 2; i++)
+        if (a->tray_buf[i]) {
+            WLC_SEND0(a->win.c, a->tray_buf[i], LM_WL_BUFFER_REQ_DESTROY);
+            wlc_forget(a->win.c, a->tray_buf[i]);
+            a->tray_buf[i] = 0;
+        }
+    if (a->tray_map)
+        munmap(a->tray_map, a->tray_map_size);
+    a->tray_map = NULL;
+}
+
+/* The dot blinks twice a second, the label counts the seconds. */
+static void tray_update(struct app *a, uint64_t elapsed)
+{
+    if (!a->tray_item)
+        return;
+    if (a->tray_buf[0]) {
+        int ph = (int)((elapsed / 500) % 2);
+        if (ph != a->tray_phase) {
+            a->tray_phase = ph;
+            WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_ICON, { .o = a->tray_buf[ph] });
+        }
+    }
+    if (elapsed / 1000 != a->tray_sec) {
+        a->tray_sec = elapsed / 1000;
+        char t[16];
+        snprintf(t, sizeof(t), "%02u:%02u", (unsigned)(a->tray_sec / 60), (unsigned)(a->tray_sec % 60));
+        WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT, { .s = t });
+    }
+}
+
 static bool start_recording(struct app *a)
 {
     if (a->rec)
@@ -346,6 +461,8 @@ static bool start_recording(struct app *a)
     a->rec = true;
     a->shown_sec = 0;
     a->win.redraw = true;
+    tray_start(a);
+    a->want_min = a->tray != 0;                     /* the bar's item shows that it runs: the window can go out of the way */
     fprintf(stderr, "mellagui-record: recording %s %dx%d at %d fps -> %s\n", o->name, a->rw, a->rh, FPS_CHOICES[a->fps_sel], a->path);
     return true;
 }
@@ -356,6 +473,8 @@ static void stop_recording(struct app *a)
         return;
     uint64_t end = lm_now_ms() - a->t0;
     a->rec = false;
+    a->want_min = false;
+    tray_stop(a);
     pthread_mutex_lock(&a->lock);
     a->stop_thread = true;
     pthread_cond_broadcast(&a->cond);
@@ -398,9 +517,24 @@ static void tick(struct app *a)
         a->quit = true;
         return;
     }
+    if (a->want_min && a->drawn) {
+        a->want_min = false;
+        a->hidden = true;
+        WLC_SEND0(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_MINIMIZED);
+    }
+    if (a->tray_clicked) {
+        a->tray_clicked = false;
+        if (a->rec) {
+            stop_recording(a);
+            if (a->hidden)
+                a->quit = true;                     /* nobody is looking at the window: the program ends with the recording */
+        }
+        return;
+    }
     if (!a->rec)
         return;
     uint64_t now = lm_now_ms();
+    tray_update(a, now - a->t0);
     pthread_mutex_lock(&a->lock);
     bool err = a->enc_error;
     pthread_mutex_unlock(&a->lock);
@@ -515,6 +649,8 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_capture_v1"))
         a->capture = wlc_bind(w->c, w->registry, name, &lm_mellagui_capture_v1_interface, 1, capture_event, a);
+    else if (!strcmp(iface, "mellagui_tray_v1"))
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, 1, settings_event, a);
     else if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }
@@ -561,6 +697,7 @@ static void draw_button(struct app *a, const struct button *b, int id, uint32_t 
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
+    a->drawn = true;
     layout(a);
     wlwin_fill(w, 0, 0, w->bw, w->bh, lm_theme.background);
     char line[200];
@@ -658,6 +795,27 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->win.redraw = true;
 }
 
+/* Esc / Q / the window's close button: a recording goes on (the window is minimized, the bar's item stops it), else the program ends. */
+static void close_or_hide(struct app *a)
+{
+    if (a->rec && a->tray) {
+        a->hidden = true;
+        WLC_SEND0(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_MINIMIZED);
+    } else {
+        a->quit = true;
+    }
+}
+
+static bool win_close(struct wlwin *w)
+{
+    struct app *a = w->data;
+    if (a->rec && a->tray) {
+        close_or_hide(a);
+        return false;
+    }
+    return true;
+}
+
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -668,7 +826,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         press_button(a, 1);
     } else if (ks == LM_KS_Escape) {
-        a->quit = true;
+        close_or_hide(a);
     } else if (lm_keysym_to_utf8(ks, txt) == 1 && !(a->win.mods & (LM_MOD_ALT | LM_MOD_SUPER | LM_MOD_CTRL))) {
         if (txt[0] == ' ')
             press_button(a, 1);
@@ -677,7 +835,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         else if (txt[0] == 'f' || txt[0] == 'F')
             press_button(a, 3);
         else if (txt[0] == 'q' || txt[0] == 'Q')
-            a->quit = true;
+            close_or_hide(a);
     }
 }
 
@@ -816,7 +974,7 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .close = win_close };
     if (wlwin_connect(&a.win, "mellagui-record", &ops, &a) < 0)
         return 1;
     if (!a.capture) {

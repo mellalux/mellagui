@@ -402,6 +402,25 @@ static const struct lm_message mellagui_capture_events[] = {
 DEFINE_IFACE(lm_mellagui_capture_v1_interface, "mellagui_capture_v1", 1,
              mellagui_capture_requests, mellagui_capture_events);
 
+/* ---- mellagui_tray_v1 ---------------------------------------------------------------- */
+static const struct lm_message mellagui_tray_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("create_item", "n", 1, TY(&lm_mellagui_tray_item_v1_interface)),
+};
+DEFINE_IFACE_REQ(lm_mellagui_tray_v1_interface, "mellagui_tray_v1", 1, mellagui_tray_requests);
+
+static const struct lm_message mellagui_tray_item_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("set_icon", "?o", 1, TY(&lm_wl_buffer_interface)),
+    MSG("set_text", "s", 1, NULL),
+};
+static const struct lm_message mellagui_tray_item_events[] = {
+    MSG("size", "i", 1, NULL),
+    MSG("clicked", "u", 1, NULL),
+};
+DEFINE_IFACE(lm_mellagui_tray_item_v1_interface, "mellagui_tray_item_v1", 1,
+             mellagui_tray_item_requests, mellagui_tray_item_events);
+
 /* ---- zwp_linux_dmabuf_v1 -------------------------------------------------------------------- */
 static const struct lm_message dmabuf_requests[] = {
     MSG("destroy", "", 1, NULL),

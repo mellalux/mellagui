@@ -28,6 +28,7 @@
 #include "seat.h"
 #include "settings.h"
 #include "capture.h"
+#include "tray.h"
 #include "lock.h"
 #include "saver.h"
 #include "logind.h"
@@ -606,7 +607,8 @@ int main(int argc, char **argv)
         !(srv->wm = lm_wm_create(srv)) ||
         !(srv->input = lm_input_create(srv)) ||
         !(srv->settings = lm_settings_create(srv)) ||
-        !(srv->capture = lm_capture_create(srv))) {
+        !(srv->capture = lm_capture_create(srv)) ||
+        !(srv->tray = lm_tray_create(srv))) {
         lm_error("module initialisation failed");
         goto out;
     }
@@ -661,6 +663,8 @@ out:
     srv->saver = NULL;
     if (srv->lock) lm_lock_destroy(srv->lock);
     srv->lock = NULL;
+    if (srv->tray) lm_tray_destroy(srv->tray);
+    srv->tray = NULL;
     if (srv->capture) lm_capture_destroy(srv->capture);
     srv->capture = NULL;
     if (srv->settings) lm_settings_destroy(srv->settings);

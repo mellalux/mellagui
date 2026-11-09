@@ -32,6 +32,7 @@
 #include "output.h"
 #include "render.h"
 #include "screenshot.h"
+#include "tray.h"
 #include "seat.h"
 #include "settings.h"
 #include "surface.h"
@@ -119,6 +120,7 @@ struct lm_wm {
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
     bool hover_power, hover_run, hover_layout, hover_sticky, hover_osk;
+    int hover_tray;             /* id of the tray item under the pointer, 0 = none */
     bool osk_open;              /* the on-screen keyboard is showing on the primary output */
     uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
     int osk_hover, osk_down;    /* the key under the pointer / held by it (index into the geometry), -1 = none */
@@ -290,7 +292,30 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     int caps_w = !p->caps_text[0] ? 0 : (locks & LM_MOD_NUM) && (locks & LM_MOD_CAPS) ? PANEL_CAPS_W + 24 : PANEL_CAPS_W;
     p->caps = lm_rect_make(p->osk.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
     int tx = x + 12;
-    p->title_area = lm_rect_make(tx, y, p->caps.x - 12 - tx, h);
+    int title_end = p->caps.x;
+    if (wm->srv->tray) {                                            /* programs' icons: the first one created is the rightmost */
+        int right = (caps_w ? p->caps.x : p->osk.x) - 4, n = lm_tray_count(wm->srv->tray);
+        for (int i = 0; i < n && p->ntray < LM_PANEL_MAX_TRAY; i++) {
+            struct lm_tray_view v;
+            if (!lm_tray_get(wm->srv->tray, i, &v))
+                break;
+            int iw = v.icon ? v.icon->width : 0, tw = v.text[0] ? lm_font_text_width(v.text) : 0;
+            int bw = 12 + iw + (iw && tw ? 4 : 0) + tw;
+            if (bw < h)
+                bw = h;
+            if (right - bw < tx + 120)                              /* the taskbar keeps some room */
+                break;
+            int k = p->ntray++;
+            p->tray[k].rect = lm_rect_make(right - bw, y, bw, h);
+            p->tray[k].id = v.id;
+            p->tray[k].icon = v.icon;
+            p->tray[k].text = v.text;
+            p->tray[k].hover = wm->hover_tray == v.id;
+            right -= bw + 4;
+            title_end = p->tray[k].rect.x - 4;
+        }
+    }
+    p->title_area = lm_rect_make(tx, y, title_end - 12 - tx, h);
     p->hover_layout = wm->hover_layout;
     p->hover_sticky = wm->hover_sticky;
     snprintf(p->layout_text, sizeof(p->layout_text), "us");
@@ -2170,6 +2195,33 @@ void lm_wm_osk_reset(struct lm_wm *wm)
 void lm_wm_osk_set(struct lm_wm *wm, bool open) { osk_set(wm, open); }
 bool lm_wm_osk_is_open(const struct lm_wm *wm) { return wm->osk_open; }
 
+void lm_wm_tray_changed(struct lm_wm *wm)
+{
+    damage_panels(wm);
+}
+
+size_t lm_wm_tray_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    struct lm_output *o = lm_output_primary(wm->srv);
+    struct lm_panel_info pi;
+    size_t n = 0;
+    if (!o || size == 0) {
+        if (size)
+            buf[0] = 0;
+        return 0;
+    }
+    panel_info(wm, o, &pi);
+    n += (size_t)snprintf(buf + n, size - n, "tray n=%d\n", pi.ntray);
+    for (int i = 0; i < pi.ntray && n < size; i++) {
+        char ic[24] = "-";
+        if (pi.tray[i].icon)
+            snprintf(ic, sizeof(ic), "%dx%d", pi.tray[i].icon->width, pi.tray[i].icon->height);
+        n += (size_t)snprintf(buf + n, size - n, "item %d x=%d y=%d w=%d h=%d icon=%s text=%s\n", pi.tray[i].id, pi.tray[i].rect.x,
+                              pi.tray[i].rect.y, pi.tray[i].rect.w, pi.tray[i].rect.h, ic, pi.tray[i].text);
+    }
+    return n < size ? n : size - 1;
+}
+
 size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size)
 {
     struct lm_osk_geo g;
@@ -3741,6 +3793,12 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                 out->kind = LM_PICK_PANEL_OSK;
             if (lm_rect_contains(&pi.sticky, ix, iy))
                 out->kind = LM_PICK_PANEL_STICKY;
+            for (int i = 0; i < pi.ntray; i++)
+                if (lm_rect_contains(&pi.tray[i].rect, ix, iy)) {
+                    out->kind = LM_PICK_PANEL_TRAY;
+                    out->index = pi.tray[i].id;
+                    out->rect = pi.tray[i].rect;
+                }
             for (int i = 0; i < LM_NUM_WORKSPACES; i++)
                 if (lm_rect_contains(&pi.workspace[i], ix, iy)) {
                     out->kind = LM_PICK_PANEL_WORKSPACE;
@@ -3784,6 +3842,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     bool about_btn = false, launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false;
     int power_item = -1, clip_code = 0;
     struct lm_window *task = NULL;
+    int tray_id = 0;
     enum lm_cursor_shape shape = LM_CURSOR_NONE;
 
     switch (pick->kind) {
@@ -3815,6 +3874,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_OSK_GRIP: shape = cursor_for_edges(pick->edges); break;
     case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_TASK: task = pick->window; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_TRAY: tray_id = pick->index; shape = LM_CURSOR_POINTER; break;
     default: break;
     }
     if (bits)
@@ -3865,7 +3925,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     }
     if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || power_btn != wm->hover_power ||
         run_btn != wm->hover_run || task != wm->hover_task || layout_btn != wm->hover_layout ||
-        sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk) {
+        sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk || tray_id != wm->hover_tray) {
+        wm->hover_tray = tray_id;
         wm->hover_osk = osk_btn;
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
@@ -4459,6 +4520,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             osk_set(wm, !wm->osk_open);
         if (pk == LM_PICK_PANEL_STICKY && pick->kind == LM_PICK_PANEL_STICKY && wm->srv->input)
             lm_input_set_sticky(wm->srv->input, !lm_input_sticky(wm->srv->input));
+        if (pk == LM_PICK_PANEL_TRAY && pick->kind == LM_PICK_PANEL_TRAY && pick->index == pi)
+            lm_tray_click(wm->srv->tray, pi, button);               /* pressed and let go on the same item */
         if (pk == LM_PICK_PANEL_POWER && pick->kind == LM_PICK_PANEL_POWER) {
             double px = 0, py = 0;
             if (wm->srv->seat)
@@ -4592,6 +4655,14 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (button == BTN_LEFT || (button == BTN_RIGHT && pick->kind == LM_PICK_PANEL_LAYOUT)) {
             wm->press_panel_kind = pick->kind;
             wm->press_panel_ws = button == BTN_RIGHT ? -1 : 1;     /* layout direction, see the release code */
+            wm->press_win = NULL;
+            wm->press_bits = 0;
+        }
+        return true;
+    case LM_PICK_PANEL_TRAY:
+        if (button == BTN_LEFT || button == BTN_RIGHT || button == BTN_MIDDLE) {
+            wm->press_panel_kind = LM_PICK_PANEL_TRAY;
+            wm->press_panel_ws = pick->index;
             wm->press_win = NULL;
             wm->press_bits = 0;
         }

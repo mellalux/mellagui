@@ -13,7 +13,7 @@
  * the Preview button): text, a hex dump of binary files, a picture, or the inside of a folder.
  *
  * Keys: Tab switches the active pane; Up / Down / PageUp / PageDown / Home / End move; Enter or Right opens (a folder: goes in; png / jpg /
- * ppm: mellagui-view; text: mellagui-edit; binary files are not opened); Backspace / Left / Alt+Up goes to the parent folder;
+ * ppm and mp4 videos: mellagui-view; text: mellagui-edit; a program (an ELF file you may execute): it is started in this folder; other binary files are not opened); Backspace / Left / Alt+Up goes to the parent folder;
  * Insert or Space marks the file and moves down; F1 help, F2 rename, F3 preview, F4 edit, F5 copy, F6 move, F7 new folder,
  * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good; Ctrl+B opens the trash, Ctrl+Z puts the marked files in it back, Ctrl+E empties it), F9 terminal here, F10 quit; copy / move / delete work on the marked
  * files, else on the one under the cursor, copy and move go to the folder shown in the other pane (editable first, Tab completes names) and
@@ -353,7 +353,7 @@ static void join_path(const char *dir, const char *name, char *out, size_t outsz
 
 /* ---- what a file is ------------------------------------------------------------------------------------------------------- */
 
-enum kind { K_IMAGE, K_TEXT, K_BINARY, K_UNREADABLE };
+enum kind { K_IMAGE, K_VIDEO, K_PROGRAM, K_TEXT, K_BINARY, K_UNREADABLE };
 
 static bool ext_is(const char *name, const char *ext)
 {
@@ -361,11 +361,14 @@ static bool ext_is(const char *name, const char *ext)
     return dot && dot != name && !strcasecmp(dot + 1, ext);
 }
 
-/* Images by extension; everything else by looking at the first 4 KB: a NUL byte means binary. */
+/* Images and videos by extension; everything else by looking at the first 4 KB: an ELF file that may be executed is a program, a NUL
+ * byte means binary (an executable script stays text: it opens in the editor). */
 static enum kind classify(const char *path)
 {
     if (ext_is(path, "png") || ext_is(path, "ppm") || ext_is(path, "jpg") || ext_is(path, "jpeg"))
         return K_IMAGE;
+    if (ext_is(path, "mp4") || ext_is(path, "m4v"))
+        return K_VIDEO;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return K_UNREADABLE;
@@ -374,6 +377,8 @@ static enum kind classify(const char *path)
     close(fd);
     if (n < 0)
         return K_UNREADABLE;
+    if (n >= 4 && !memcmp(buf, "\x7f" "ELF", 4) && access(path, X_OK) == 0)
+        return K_PROGRAM;
     return memchr(buf, 0, (size_t)n) ? K_BINARY : K_TEXT;
 }
 
@@ -413,11 +418,16 @@ static void sibling(const char *name, char *out, size_t outsz)
     snprintf(out, outsz, "%s", name);
 }
 
-/* Starts `prog [arg]` in `cwd`. false when it could not be executed (reported through a close-on-exec pipe). */
+/* Starts `prog [arg]` in `cwd`: a name is looked for next to this binary, then in PATH; a path (starts with "/") is run as it is, with
+ * its output thrown away (it is somebody's program, not ours). false when it could not be executed (reported through a close-on-exec pipe). */
 static bool launch(const char *prog, const char *arg, const char *cwd, char *err, size_t errsz)
 {
     char path[PATH_MAX];
-    sibling(prog, path, sizeof(path));
+    bool foreign = prog[0] == '/';
+    if (foreign)
+        snprintf(path, sizeof(path), "%s", prog);
+    else
+        sibling(prog, path, sizeof(path));
     int pf[2];
     if (pipe2(pf, O_CLOEXEC) < 0) {
         snprintf(err, errsz, "pipe: %s", strerror(errno));
@@ -436,6 +446,16 @@ static bool launch(const char *prog, const char *arg, const char *cwd, char *err
             int e = errno;
             if (write(pf[1], &e, sizeof(e)) < 0) {}
             _exit(127);
+        }
+        if (foreign) {
+            int nul = open("/dev/null", O_RDWR);
+            if (nul >= 0) {
+                dup2(nul, 0);
+                dup2(nul, 1);
+                dup2(nul, 2);
+                if (nul > 2)
+                    close(nul);
+            }
         }
         char *argv[3] = { path, (char *)arg, NULL };
         execvp(path, argv);
@@ -1339,9 +1359,17 @@ static void open_path(struct app *a, const char *path)
     }
     switch (classify(path)) {
     case K_IMAGE:
+    case K_VIDEO:
         if (!launch("mellagui-view", path, cur(a)->cwd, err, sizeof(err)))
             msg(a, "%s", err);
         break;
+    case K_PROGRAM: {
+        char full[PATH_MAX];
+        join_path(cur(a)->cwd, path, full, sizeof(full));
+        if (!launch(full, NULL, cur(a)->cwd, err, sizeof(err)))
+            msg(a, "%s", err);
+        break;
+    }
     case K_TEXT:
         if (!launch("mellagui-edit", path, cur(a)->cwd, err, sizeof(err)))
             msg(a, "%s", err);
@@ -2292,7 +2320,8 @@ static uint32_t entry_color(const struct entry *e)
         return COL_MARK;
     if (e->broken)
         return COL_DIM;
-    if (ext_is(e->name, "png") || ext_is(e->name, "jpg") || ext_is(e->name, "jpeg") || ext_is(e->name, "ppm"))
+    if (ext_is(e->name, "png") || ext_is(e->name, "jpg") || ext_is(e->name, "jpeg") || ext_is(e->name, "ppm") || ext_is(e->name, "mp4") ||
+        ext_is(e->name, "m4v"))
         return COL_PIC;
     return e->exec ? COL_EXEC : COL_FG;
 }
@@ -2846,6 +2875,18 @@ static int selftest(void)
     CHECK(classify(p) == K_IMAGE, "image by extension");
     snprintf(p, sizeof(p), "%s/nope", dir);
     CHECK(classify(p) == K_UNREADABLE, "unreadable");
+    touch(dir, "clip.MP4", "\0\0\0\x10", 4);
+    snprintf(p, sizeof(p), "%s/clip.MP4", dir);
+    CHECK(classify(p) == K_VIDEO, "video by extension");
+    touch(dir, "prog", "\x7f" "ELF\0\1\2\3", 8);
+    snprintf(p, sizeof(p), "%s/prog", dir);
+    CHECK(classify(p) == K_BINARY, "an ELF file that cannot be executed is a binary file");
+    chmod(p, 0755);
+    CHECK(classify(p) == K_PROGRAM, "an executable ELF file is a program");
+    touch(dir, "script.sh", "#!/bin/sh\necho hi\n", 18);
+    snprintf(p, sizeof(p), "%s/script.sh", dir);
+    chmod(p, 0755);
+    CHECK(classify(p) == K_TEXT, "an executable script is still text");
     entries_free(&lp);
     free(lp.e);
 

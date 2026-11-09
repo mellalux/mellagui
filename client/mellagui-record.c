@@ -40,7 +40,8 @@
 #include "wlwin.h"
 
 #define MAX_OUTPUTS 8
-#define NFRAMES 4
+#define MAX_WORKERS 4                   /* encoder threads: one fewer than the processors, at most this many */
+#define MAX_FRAMES (MAX_WORKERS + 3)    /* shared pictures: one per worker, one being captured, two waiting */
 #define DEFAULT_FPS 15
 #define DEFAULT_QUALITY 80
 
@@ -54,6 +55,7 @@ struct frame {
     uint32_t *px;                   /* its pixels, shared with the compositor */
     enum frame_state state;         /* under app.lock */
     uint64_t pts;                   /* ms since the start of the recording */
+    uint64_t seq;                   /* the order the pictures must be written in */
 };
 
 struct output {
@@ -84,7 +86,8 @@ struct app {
     struct lm_mp4 *mp4;
     char path[600];
     uint64_t t0, next_grab, interval;
-    struct frame fr[NFRAMES];
+    struct frame fr[MAX_FRAMES];
+    int nframes;
     void *map;
     size_t map_size;
     uint32_t pool;
@@ -95,11 +98,12 @@ struct app {
     char fail_reason[24];
 
     /* the encoder thread */
-    pthread_t thread;
-    bool thread_on;
+    pthread_t threads[MAX_WORKERS];
+    int nthreads;
+    uint64_t seq_next, seq_write;   /* pictures queued so far / written so far (under lock) */
     pthread_mutex_t lock;
     pthread_cond_t cond;
-    int queue[NFRAMES], qn;
+    int queue[MAX_FRAMES], qn;
     bool stop_thread;
     bool enc_error;
     uint32_t enc_frames;            /* what the encoder has written so far (under lock), for the window */
@@ -241,7 +245,12 @@ static void *encoder_main(void *arg)
 
         size_t len = 0;
         uint8_t *jpeg = lm_jpeg_encode_xrgb(f->px, a->rw, a->rh, (size_t)a->rw * 4, a->quality, &len);
-        bool bad = !jpeg || lm_mp4_add(a->mp4, jpeg, len, f->pts) < 0;
+
+        pthread_mutex_lock(&a->lock);                   /* the pictures go into the file in the order they were taken */
+        while (a->seq_write != f->seq)
+            pthread_cond_wait(&a->cond, &a->lock);
+        pthread_mutex_unlock(&a->lock);
+        bool bad = !jpeg || lm_mp4_add(a->mp4, jpeg, len, f->pts) < 0;      /* (only the thread whose turn it is gets here) */
         free(jpeg);
 
         pthread_mutex_lock(&a->lock);
@@ -251,6 +260,8 @@ static void *encoder_main(void *arg)
             a->enc_frames++;
             a->enc_bytes += len;
         }
+        a->seq_write++;
+        pthread_cond_broadcast(&a->cond);
         f->state = F_FREE;
     }
     pthread_mutex_unlock(&a->lock);
@@ -266,7 +277,7 @@ static void buffer_nothing(struct wlc *c, uint32_t id, uint32_t op, const union 
 
 static void free_frames(struct app *a)
 {
-    for (int i = 0; i < NFRAMES; i++)
+    for (int i = 0; i < a->nframes; i++)
         if (a->fr[i].buf && a->win.c) {
             WLC_SEND0(a->win.c, a->fr[i].buf, LM_WL_BUFFER_REQ_DESTROY);
             wlc_forget(a->win.c, a->fr[i].buf);
@@ -401,7 +412,11 @@ static bool start_recording(struct app *a)
     a->fail_reason[0] = 0;
 
     size_t frame_bytes = (size_t)a->rw * (size_t)a->rh * 4;
-    a->map_size = frame_bytes * NFRAMES;
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    a->nthreads = 0;
+    int workers = (int)(cpus < 2 ? 1 : cpus - 1 > MAX_WORKERS ? MAX_WORKERS : cpus - 1);
+    a->nframes = workers + 3;
+    a->map_size = frame_bytes * (size_t)a->nframes;
     int fd = memfd_create("mellagui-record", MFD_CLOEXEC);
     if (fd < 0 || ftruncate(fd, (off_t)a->map_size) < 0) {
         set_msg(a, "memfd: %s", strerror(errno));
@@ -426,7 +441,7 @@ static bool start_recording(struct app *a)
     a->pool = wlc_alloc(a->win.c, &lm_wl_shm_pool_interface, NULL, NULL);
     WLC_SEND(a->win.c, a->win.shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = a->pool }, { .h = fd }, { .i = (int32_t)a->map_size });
     close(fd);
-    for (int i = 0; i < NFRAMES; i++) {
+    for (int i = 0; i < a->nframes; i++) {
         struct frame *f = &a->fr[i];
         f->px = (uint32_t *)(void *)((uint8_t *)a->map + (size_t)i * frame_bytes);
         f->buf = wlc_alloc(a->win.c, &lm_wl_buffer_interface, buffer_nothing, NULL);
@@ -447,14 +462,18 @@ static bool start_recording(struct app *a)
     a->enc_bytes = 0;
     pthread_mutex_init(&a->lock, NULL);
     pthread_cond_init(&a->cond, NULL);
-    if (pthread_create(&a->thread, NULL, encoder_main, a) != 0) {
+    a->seq_next = a->seq_write = 0;
+    lm_jpeg_encode_init();                          /* the tables are built before several threads use them */
+    for (int i = 0; i < workers; i++)
+        if (pthread_create(&a->threads[a->nthreads], NULL, encoder_main, a) == 0)
+            a->nthreads++;
+    if (a->nthreads == 0) {
         set_msg(a, "cannot start the encoder thread");
         lm_mp4_close(a->mp4, 0);
         a->mp4 = NULL;
         free_frames(a);
         return false;
     }
-    a->thread_on = true;
     a->interval = 1000u / (uint64_t)FPS_CHOICES[a->fps_sel];
     a->t0 = lm_now_ms();
     a->next_grab = a->t0;
@@ -479,8 +498,9 @@ static void stop_recording(struct app *a)
     a->stop_thread = true;
     pthread_cond_broadcast(&a->cond);
     pthread_mutex_unlock(&a->lock);
-    pthread_join(a->thread, NULL);                  /* encodes what is queued */
-    a->thread_on = false;
+    for (int i = 0; i < a->nthreads; i++)
+        pthread_join(a->threads[i], NULL);          /* they encode what is queued */
+    a->nthreads = 0;
     pthread_mutex_destroy(&a->lock);
     pthread_cond_destroy(&a->cond);
     bool bad = a->enc_error;
@@ -554,7 +574,7 @@ static void tick(struct app *a)
         return;
     int free_i = -1;
     pthread_mutex_lock(&a->lock);
-    for (int i = 0; i < NFRAMES; i++)
+    for (int i = 0; i < a->nframes; i++)
         if (a->fr[i].state == F_FREE) {
             free_i = i;
             a->fr[i].state = F_GRAB;
@@ -609,8 +629,9 @@ static void capture_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         a->have_hash = true;
         pthread_mutex_lock(&a->lock);
         f->state = F_QUEUED;
+        f->seq = a->seq_next++;
         a->queue[a->qn++] = i;
-        pthread_cond_signal(&a->cond);
+        pthread_cond_broadcast(&a->cond);
         pthread_mutex_unlock(&a->lock);
         break;
     }
@@ -1011,7 +1032,13 @@ int main(int argc, char **argv)
     if (want_start && !start_recording(&a))
         rc = 1;
     while (rc == 0 && !a.quit) {
-        int timeout = a.rec ? 20 : 250;
+        int timeout = 250;
+        if (a.rec) {                                /* wake up when the next picture is due: a fixed 20 ms made the intervals uneven */
+            uint64_t now = lm_now_ms();
+            timeout = a.next_grab > now ? (int)LM_MIN(a.next_grab - now, 20) : 1;
+            if (a.grabbing >= 0)
+                timeout = LM_MIN(timeout, 5);       /* the answer is on its way */
+        }
         if (!wlwin_step(&a.win, timeout))
             break;
         tick(&a);

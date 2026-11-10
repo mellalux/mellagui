@@ -1041,6 +1041,26 @@ static bool apps_put(struct lm_server *srv, bool launcher, const char *name, con
     return dock_commit(srv, &l, launcher ? "launcher-apps" : "dock-apps");
 }
 
+/* Change entry `raw` of [dock-apps] / [launcher-apps] in place (name, icon text and command); its place in the list stays. The name may not be
+ * one that another entry has (its own, in any letter case, is fine). */
+static bool apps_replace(struct lm_server *srv, bool launcher, int raw, const char *name, const char *icon, const char *cmd)
+{
+    static struct dock_list l;
+    apps_load(&l, launcher);
+    if (raw < 0 || raw >= l.n)
+        return false;
+    if (!dock_name_ok(name) || strlen(name) >= LM_DOCK_NAME_MAX || !dock_text_ok(icon, LM_DOCK_ICON_MAX, true) || strchr(icon, ']') ||
+        icon[0] == '[' || !dock_text_ok(cmd, LM_DOCK_CMD_MAX, false))
+        return false;
+    for (int i = 0; i < l.n; i++)
+        if (i != raw && !strcasecmp(l.name[i], name))
+            return false;
+    snprintf(l.name[raw], sizeof(l.name[0]), "%s", name);
+    snprintf(l.icon[raw], sizeof(l.icon[0]), "%s", icon);
+    snprintf(l.cmd[raw], sizeof(l.cmd[0]), "%s", cmd);
+    return dock_commit(srv, &l, launcher ? "launcher-apps" : "dock-apps");
+}
+
 static bool apps_del(struct lm_server *srv, bool launcher, int raw)
 {
     static struct dock_list l;
@@ -1062,6 +1082,14 @@ bool lm_settings_dock_put(struct lm_server *srv, const char *name, const char *i
 }
 
 bool lm_settings_dock_del(struct lm_server *srv, int raw_index) { return apps_del(srv, false, raw_index); }
+bool lm_settings_dock_replace(struct lm_server *srv, int raw_index, const char *name, const char *icon, const char *cmd)
+{
+    return apps_replace(srv, false, raw_index, name, icon, cmd);
+}
+bool lm_settings_launcher_replace(struct lm_server *srv, int raw_index, const char *name, const char *icon, const char *cmd)
+{
+    return apps_replace(srv, true, raw_index, name, icon, cmd);
+}
 bool lm_settings_launcher_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd)
 {
     return apps_put(srv, true, name, icon, cmd, -1);

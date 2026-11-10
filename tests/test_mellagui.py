@@ -52,6 +52,7 @@ def setUpModule():
     os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
+    os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
     LOG = os.path.join(tmp, 'mellagui.log')
     OUT = os.path.join(tmp, 'mellagui.out')        # a file, not a pipe: nobody reads a pipe while the tests run and 64 KB of log would block the compositor
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77',
@@ -9123,29 +9124,33 @@ class TestDock(Base):
             time.sleep(0.05)
         self.assertEqual(self.dock(c)[1][0]['running'], 0)
 
-    def test_an_icon_hops_while_its_program_starts_and_stops_when_the_window_is_there(self):
+    def test_an_icon_zooms_in_and_out_while_its_program_starts_and_stops_when_the_window_is_there(self):
         c = self.start('mellagui-dk15', '[dock]\nicon-size = 40\n[dock-apps]\nSlow = sleep 30\n', )
-        base = self.dock(c)[1][0]['y']
-        self.assertEqual(self.dock(c)[1][0]['launching'], 0)
+        base = self.dock(c)[1][0]
+        self.assertEqual(base['launching'], 0)
+        bottom, centre = base['y'] + base['h'], base['x'] + base['w'] / 2
         c.click(400, 464)                                              # starts `sleep`, which never opens a window
         c.abs(400, 100)                                                # (the pointer leaves: no magnifying to confuse the numbers)
-        ys = []
-        for _ in range(40):
+        sizes = []
+        for _ in range(50):
             icon = self.dock(c)[1][0]
-            ys.append(icon['y'])
+            sizes.append(icon['w'])
             self.assertEqual(icon['launching'], 1)
+            self.assertEqual(icon['w'], icon['h'])
+            self.assertLessEqual(abs(icon['y'] + icon['h'] - bottom), 1)             # it stays on its foot ...
+            self.assertLessEqual(abs(icon['x'] + icon['w'] / 2 - centre), 1)         # ... and in the middle of its place
             time.sleep(0.03)
-        self.assertEqual(max(ys), base)                                # it never goes below its place ...
-        self.assertLessEqual(min(ys), base - 12)                       # ... and hops up by about a third of its size at least
-        self.assertGreater(len(set(ys)), 5)
-        cl = Client('mellagui-dk15')                                   # a window of the program appears: the hopping ends
+        self.assertEqual(min(sizes), base['w'])                        # never smaller than it is ...
+        self.assertGreaterEqual(max(sizes), base['w'] + 10)            # ... up to about a third bigger
+        self.assertGreater(len(set(sizes)), 5)                         # and smooth: not just two states
+        cl = Client('mellagui-dk15')                                   # a window of the program appears: the pulsing ends
         self.clients.append(cl)
         win = Window(cl, 200, 100, app_id='sleep')
         cl.wl.roundtrip()
-        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the hopping ends with the window')
-        self.assertEqual(self.dock(c)[1][0]['y'], base)
+        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the pulsing ends with the window')
+        self.assertEqual(self.dock(c)[1][0]['w'], base['w'])
 
-    def test_hopping_gives_up_after_a_while(self):
+    def test_the_zooming_gives_up_after_a_while(self):
         p, c, stop = self.private_compositor('mellagui-dk16', '--config', self.write_conf('dk16', '[dock-apps]\nSlow = sleep 30\n'),
                                              env={'MELLAGUI_DOCK_BOUNCE_MS': '700'})
         c.sync()
@@ -9154,7 +9159,7 @@ class TestDock(Base):
         self.assertEqual(self.dock(c)[1][0]['launching'], 1)
         self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'it gives up', timeout=3.0)
 
-    def test_a_second_instance_hops_until_its_own_window_is_there(self):
+    def test_a_second_instance_zooms_until_its_own_window_is_there(self):
         c = self.start('mellagui-dk17', '[dock]\nicon-size = 40\n[dock-apps]\nSlow = sleep 30\n')
         cl = Client('mellagui-dk17')
         self.clients.append(cl)
@@ -9166,7 +9171,7 @@ class TestDock(Base):
         self.assertEqual(self.dock(c)[1][0]['launching'], 1)
         win2 = Window(cl, 200, 100, app_id='sleep')
         cl.wl.roundtrip()
-        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the second window ends the hopping')
+        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the second window ends the zooming')
 
     @staticmethod
     def write_conf(name, text):
@@ -9234,6 +9239,52 @@ class TestDock(Base):
         mid = ppm.px(400, 464)
         self.assertTrue(abs(mid[0]) < 3 and abs(mid[1] - 200) < 3 and abs(mid[2]) < 3, mid)
         self.assertNotEqual(ppm.px(381, 445), mid)                                   # the corner of the square stays unpainted
+
+    @staticmethod
+    def write_png(path, rgba, size=16):
+        import zlib, struct
+        raw = b''.join(b'\x00' + bytes(rgba) * size for _ in range(size))
+        def chunk(t, d):
+            return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)) +
+                    chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+    def icon_start(self, name, text):
+        root = os.path.join(tmp, name + '-icons')
+        self.write_png(os.path.join(root, 'icons', 'hicolor', '48x48', 'apps', 'fooapp.png'), (200, 0, 0, 255))
+        self.write_png(os.path.join(root, 'icons', 'hicolor', '256x256', 'apps', 'bigapp.png'), (0, 0, 200, 255), 32)
+        self.write_png(os.path.join(root, 'icons', 'hicolor', '48x48', 'apps', 'bigapp.png'), (0, 200, 0, 255))   # (the 256 one wins)
+        self.write_png(os.path.join(root, 'pixmaps', 'pixapp.png'), (200, 200, 0, 255))
+        self.path = os.path.join(tmp, name + '.conf')
+        with open(self.path, 'w') as f:
+            f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', self.path, env={'MELLAGUI_ICON_PATH': root})
+        c.sync()
+        c.abs(10, 10)
+        return c
+
+    def test_an_installed_programs_own_icon_is_used(self):
+        c = self.icon_start('mellagui-dk18', '[dock]\nicon-size = 40\nzoom = 100\n[dock-apps]\n'
+                            'A = [theme:fooapp] true\nB = [bigapp] true\nC = [theme:nothere|pixapp] true\nD = [theme:nothere] true\nE = [nosuch] true\n')
+        info, icons = self.dock(c)
+        self.assertEqual([i['name'] for i in icons], ['A', 'B', 'C', 'D', 'E'])
+        ppm = c.dump(os.path.join(tmp, 'dock18.ppm'))
+        mid = lambda i: ppm.px(icons[i]['x'] + icons[i]['w'] // 2, icons[i]['y'] + icons[i]['h'] // 2)
+        close = lambda a, b: all(abs(x - y) < 4 for x, y in zip(a, b))
+        self.assertTrue(close(mid(0), (200, 0, 0)), mid(0))            # theme:NAME, hicolor 48x48
+        self.assertTrue(close(mid(1), (0, 0, 200)), mid(1))            # a bare name that is no built-in icon; the 256 px file is preferred
+        self.assertTrue(close(mid(2), (200, 200, 0)), mid(2))          # the first name that has an icon wins; pixmaps work
+        for i in (3, 4):                                               # no such icon: the built-in one, no crash
+            self.assertFalse(close(mid(i), (200, 0, 0)) or close(mid(i), (0, 0, 200)) or close(mid(i), (200, 200, 0)))
+        self.assertTrue(alive())
+
+    def test_the_default_dock_asks_for_the_icons_of_firefox_and_code(self):
+        p, c, stop = self.private_compositor('mellagui-dk19', '--config', 'none')
+        text = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10).stdout
+        self.assertIn('Firefox    = [theme:firefox]', text)
+        self.assertIn('Code       = [theme:vscode|code]', text)
 
     def test_a_missing_picture_falls_back_to_a_built_in_icon(self):
         c = self.start('mellagui-dk13', '[dock-apps]\nEditor = [/no/such/file.png] true\nQ = [nosuchicon] true\n')
@@ -10379,6 +10430,116 @@ class TestLauncher(Base):
         self.assertNotEqual(a, b)
         self.assertTrue(all(bc > ac for ac, bc in zip(a, b)), (a, b))                      # a light veil: every channel brighter
         self.assertTrue(all(bc < 255 for bc in b), b)                                      # but not opaque white
+
+    # ---- changing a button that is there -------------------------------------------------------------------------------------
+
+    def conf_text(self):
+        with open(self.path) as f:
+            return f.read()
+
+    def open_change(self, c, name):
+        """Launcher open, edit mode on, a click on the icon `name`: the form with that button's values."""
+        if not self.info(c).get('open'):
+            self.super_a(c)
+        d = self.info(c)
+        if not d['edit']:
+            c.click(*self.centre(d['buttons'][0][0]))                          # Edit
+            d = self.info(c)
+        self.assertEqual(d['edit'], 1)
+        icon = [i for i in d['icons'] if i['name'] == name][0]
+        c.click(*self.centre(icon['box']))
+        d = self.info(c)
+        self.assertEqual(d['form'], 1, 'the click did not open the form')
+        return d
+
+    def focus_line(self, c):
+        return [l for l in c.cmd('launcher') if l.startswith('focus')][0]
+
+    def test_a_click_on_an_icon_in_edit_mode_changes_that_button_in_place(self):
+        c = self.start('mellagui-lc30')
+        d = self.open_change(c, 'Beta')
+        self.assertEqual(d['fields'][0][1], 'Beta')                           # the form holds what the file has: name and command as written
+        self.assertEqual(d['fields'][1][1], 'touch %s' % self.mark)
+        self.assertIn('editing=1', c.cmd('launcher')[0])
+        self.assertEqual(d['buttons'][0][1], 'Save')
+        for _ in range(4):
+            c.tap(14)                                                           # Backspace: "Beta" -> ""
+        self.type_text(c, 'bravo')
+        c.tap(self.KEY_TAB)
+        for _ in range(len(self.mark) + 6):
+            c.tap(14)
+        self.type_text(c, 'true')
+        c.click(*self.centre(d['kinds'][4]))                                    # another icon (kind 4)
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))                    # Save
+        d = self.info(c)
+        self.assertEqual(d['form'], 0)
+        self.assertEqual([i['name'] for i in d['icons']], ['Alpha', 'bravo', 'Gamma'])      # the same place in the row
+        text = self.conf_text()
+        self.assertEqual(self.conf_apps(), ['Launcher', 'Alpha', 'bravo', 'Gamma'])
+        self.assertIn('bravo = [', text)
+        self.assertIn('] true\n', text)
+        self.assertNotIn('touch', text)
+        self.assertNotIn('Beta', text)
+        self.assertEqual(d['edit'], 1)                                          # still in edit mode
+
+    def test_a_launcher_only_button_is_changed_in_its_own_list(self):
+        c = self.start('mellagui-lc31', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [terminal] true\n[launcher-apps]\nSolo = [files] true\nTwo = true\n')
+        d = self.open_change(c, 'Solo')
+        self.assertEqual(d['fields'][0][1], 'Solo')
+        for _ in range(4):
+            c.tap(14)
+        self.type_text(c, 'x')
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))
+        text = self.conf_text()
+        self.assertEqual(text.split('[launcher-apps]')[1].splitlines()[1:3], ['x = [files] true', 'Two = true'])
+        self.assertIn('Alpha = [terminal] true', text.split('[launcher-apps]')[0])         # the dock's list is as it was
+
+    def test_changing_keeps_a_picture_or_theme_icon_unless_another_is_chosen(self):
+        c = self.start('mellagui-lc32', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [theme:nosuchicon|alsonone] true\nBeta = [files] true\n')
+        d = self.open_change(c, 'Alpha')
+        self.assertIn('kind -2', self.focus_line(c))
+        c.click(*self.centre(d['buttons'][0][0]))                               # Save without touching the icon
+        self.assertIn('Alpha = [theme:nosuchicon|alsonone] true', self.conf_text())
+        d = self.open_change(c, 'Alpha')
+        c.click(*self.centre(d['kinds'][-1]))                                   # "auto"
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))
+        self.assertIn('Alpha = true', self.conf_text())
+
+    def test_a_name_another_button_has_is_refused_and_cancel_changes_nothing(self):
+        c = self.start('mellagui-lc33')
+        before = self.conf_text()
+        d = self.open_change(c, 'Gamma')
+        for _ in range(5):
+            c.tap(14)
+        self.type_text(c, 'alpha')                                              # (any letter case): Alpha is taken
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))
+        d = self.info(c)
+        self.assertEqual(d['form'], 1)
+        self.assertIn('Not saved', self.focus_line(c))
+        self.assertEqual(self.conf_text(), before)
+        c.click(*self.centre(d['buttons'][1][0]))                               # Cancel
+        d = self.info(c)
+        self.assertEqual((d['form'], d['edit']), (0, 1))
+        self.assertEqual(self.conf_text(), before)
+        self.open_change(c, 'Gamma')                                            # its own name in another letter case is fine
+        for _ in range(5):
+            c.tap(14)
+        self.type_text(c, 'gamma')
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))
+        self.assertIn('gamma = ', self.conf_text())
+
+    def test_enter_on_the_highlighted_icon_in_edit_mode_changes_it(self):
+        c = self.start('mellagui-lc34')
+        self.super_a(c)
+        c.tap(self.KEY_E)                                                       # edit mode
+        c.tap(self.KEY_RIGHT)                                                   # first the sel moves onto the first icon, then on to Beta
+        c.tap(self.KEY_RIGHT)
+        c.tap(self.KEY_ENTER)
+        d = self.info(c)
+        self.assertEqual(d['form'], 1)
+        self.assertIn(d['fields'][0][1], ('Alpha', 'Beta'))
+        c.tap(self.KEY_ESC)                                                     # back to the icons
+        self.assertEqual(self.info(c)['form'], 0)
 
 
 if __name__ == '__main__':

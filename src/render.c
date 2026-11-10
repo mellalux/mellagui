@@ -1047,7 +1047,7 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
     fill_round(c, &li->rect, 0, 0x40000000u);
     fill_round(c, &li->card, 18, 0x3cffffffu);                                  /* light glass: a white veil over the wallpaper */
     stroke_round(c, &li->card, 18, 0x8cffffffu);
-    lc_text_centered(c, &li->title, li->form ? "Add an application" : "Applications", 0xffffffu);
+    lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", 0xffffffu);
     if (!li->form) {
         for (int g = 0; g < li->n; g++) {
             const struct lm_rect *b = &li->icon[g].box;

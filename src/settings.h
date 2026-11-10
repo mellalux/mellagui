@@ -145,6 +145,10 @@ void lm_settings_changed(struct lm_settings *s);
  *   dock_to_launcher             a dock button leaves the dock and goes to the launcher list */
 bool lm_settings_dock_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd);
 bool lm_settings_dock_del(struct lm_server *srv, int raw_index);
+/* Change one entry of [dock-apps] / [launcher-apps] in place (the launcher dialog's edit form); false when the text is not allowed, another entry
+ * has that name or there is no config file. */
+bool lm_settings_dock_replace(struct lm_server *srv, int raw_index, const char *name, const char *icon, const char *cmd);
+bool lm_settings_launcher_replace(struct lm_server *srv, int raw_index, const char *name, const char *icon, const char *cmd);
 bool lm_settings_launcher_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd);
 bool lm_settings_launcher_del(struct lm_server *srv, int raw_index);
 bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to);

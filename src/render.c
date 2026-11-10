@@ -907,6 +907,30 @@ static void paint_logo(const struct paint_ctx *c, const struct lm_rect *box)
     }
 }
 
+static void fit_text(char *out, size_t n, const char *text, int maxw, bool tail);
+
+/* The dock's right-click menu: a rounded card with the button's name in the accent colour and four entries; the highlighted one is lit, an entry
+ * that does nothing right now (no window to close) is dim. */
+static void paint_dockmenu(const struct paint_ctx *c, const struct lm_dockmenu_info *mi)
+{
+    fill_round(c, &mi->rect, 12, 0xff000000u | lm_theme.border);
+    struct lm_rect in = lm_rect_make(mi->rect.x + 1, mi->rect.y + 1, mi->rect.w - 2, mi->rect.h - 2);
+    fill_round(c, &in, 11, 0xf2000000u | COL_PANEL);
+    struct lm_rect head = lm_rect_make(mi->rect.x + 12, mi->rect.y + 6, mi->rect.w - 24, LM_FONT_H);
+    char fit[LM_DOCK_NAME_MAX + 4];
+    fit_text(fit, sizeof(fit), mi->title, head.w, false);
+    draw_text(c, &head, head.x, head.y + 2, fit, COL_PANEL_ACCENT);
+    struct lm_rect line = lm_rect_make(mi->rect.x + 10, mi->rect.y + LM_DOCKMENU_HEAD - 2, mi->rect.w - 20, 1);
+    fill_rect(c, &line, lm_theme.border);
+    for (int i = 0; i < LM_DOCKMENU_N; i++) {
+        const struct lm_rect *e = &mi->entry[i];
+        if (mi->sel == i && mi->enabled[i])
+            fill_round(c, e, 8, 0xff000000u | COL_PANEL_HOVER);
+        uint32_t col = !mi->enabled[i] ? COL_PANEL_DIM : mi->sel == i ? COL_PANEL_TEXT : 0x00c4c9d4u;
+        draw_text(c, e, e->x + 12, e->y + (e->h - LM_FONT_H) / 2, mi->label[i], col);
+    }
+}
+
 /* The session dialog: the output dimmed, a rounded card with a title and two round buttons with their icons and names. */
 static void paint_power(const struct paint_ctx *c, const struct lm_power_info *pw)
 {
@@ -1185,15 +1209,28 @@ static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *
 static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift)
 {
     float R = (float)b->w / 2.0f, cx = (float)b->x + R, cy = (float)b->y + (float)b->h / 2.0f;
-    int m = it->img ? 1 : (int)(R * 0.45f) + 2;                      /* built-in icons have a shadow beyond the box */
-    struct lm_rect box = lm_rect_make(b->x - m, b->y - m, b->w + 2 * m, b->h + 2 * m + (it->img ? 0 : 2)), r;
+    int plate = it->img && it->plate ? lm_dock_plate_rgb() : -1;     /* a logo with no background of its own sits on a round plate */
+    bool shadowed = !it->img || plate >= 0;
+    int m = !shadowed ? 1 : (int)(R * 0.45f) + 2;                    /* built-in icons and plates have a shadow beyond the box */
+    struct lm_rect box = lm_rect_make(b->x - m, b->y - m, b->w + 2 * m, b->h + 2 * m + (shadowed ? 2 : 0)), r;
     if (!lm_rect_intersect(&box, &c->clip, &r))
         return;
+    int in = (int)lroundf((float)b->w * 0.68f);                       /* the logo on the plate */
+    struct lm_rect logo = lm_rect_make(b->x + (b->w - in) / 2, b->y + (b->h - in) / 2, in, in);
     for (int y = r.y; y < r.y + r.h; y++) {
         uint32_t *row = fb_row(c, y);
         for (int x = r.x; x < r.x + r.w; x++) {
-            uint32_t px = it->img ? dock_image_px(it->img, b, x, y)
-                                  : lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+            uint32_t px;
+            if (!it->img) {
+                px = lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+            } else if (plate >= 0) {
+                px = lm_dockicon_plate_pixel((uint32_t)plate, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+                if (px >> 24)
+                    row[x] = blend_px(px, row[x]);
+                px = dock_image_px(it->img, &logo, x, y);
+            } else {
+                px = dock_image_px(it->img, b, x, y);
+            }
             if (px >> 24)
                 row[x] = blend_px(px, row[x]);
         }
@@ -2091,6 +2128,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_DOCK:
         if (item->output == c->out)
             paint_dock(c, &item->u.dock);
+        break;
+    case LM_SCENE_DOCKMENU:
+        if (item->output == c->out)
+            paint_dockmenu(c, &item->u.dockmenu);
         break;
     case LM_SCENE_ABOUT:
         if (item->output == c->out)

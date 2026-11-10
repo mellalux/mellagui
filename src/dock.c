@@ -16,7 +16,7 @@
 #include "launchers.h"
 #include "log.h"
 
-struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 160, .gap = 10, .margin = 8 };
+struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 160, .gap = 10, .margin = 8, .icon_bg = LM_DOCK_BG_LIGHT };
 
 #define DEFAULT_APPS \
     "[dock-apps]\n" \
@@ -40,7 +40,9 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "icon-size = 48\n" \
     "zoom      = 160\n" \
     "gap       = 10\n" \
-    "margin    = 8\n"
+    "margin    = 8\n" \
+    "# The plate under the logos of installed programs: light, dark, none or a colour like #ffffff.\n" \
+    "icon-background = light\n"
 
 static const char default_text[] = DEFAULT_SETTINGS "\n" DEFAULT_APPS;
 const char *lm_dock_default_conf(void) { return default_text; }
@@ -128,6 +130,20 @@ bool lm_dock_conf(void *ud, const char *section, const char *key, const char *va
         if (!strcmp(key, "zoom")) return parse_int(value, 100, 250, &lm_dock.zoom);
         if (!strcmp(key, "gap")) return parse_int(value, 0, 40, &lm_dock.gap);
         if (!strcmp(key, "margin")) return parse_int(value, 0, 100, &lm_dock.margin);
+        if (!strcmp(key, "icon-background")) {
+            unsigned rgb;
+            char tail;
+            if (!strcasecmp(value, "light")) lm_dock.icon_bg = LM_DOCK_BG_LIGHT;
+            else if (!strcasecmp(value, "dark")) lm_dock.icon_bg = LM_DOCK_BG_DARK;
+            else if (!strcasecmp(value, "none")) lm_dock.icon_bg = LM_DOCK_BG_NONE;
+            else if (value[0] == '#' && strlen(value) == 7 && sscanf(value + 1, "%6x%c", &rgb, &tail) == 1) {
+                lm_dock.icon_bg = LM_DOCK_BG_COLOUR;
+                lm_dock.icon_bg_rgb = rgb & 0xffffffu;
+            } else {
+                return false;
+            }
+            return true;
+        }
         return false;
     }
     if (!strcmp(section, "dock-apps") || !strcmp(section, "launcher-apps")) {
@@ -146,7 +162,27 @@ bool lm_dock_conf(void *ud, const char *section, const char *key, const char *va
     return false;
 }
 
-#define BUILTIN_SETTINGS ((struct lm_dock_settings){ .enabled = true, .autohide = false, .icon_size = 48, .zoom = 160, .gap = 10, .margin = 8 })
+#define BUILTIN_SETTINGS ((struct lm_dock_settings){ .enabled = true, .autohide = false, .icon_size = 48, .zoom = 160, .gap = 10, .margin = 8, .icon_bg = LM_DOCK_BG_LIGHT })
+
+int lm_dock_plate_rgb(void)
+{
+    switch (lm_dock.icon_bg) {
+    case LM_DOCK_BG_LIGHT: return 0xf3f5f9;
+    case LM_DOCK_BG_DARK: return 0x2a2f3b;
+    case LM_DOCK_BG_COLOUR: return (int)lm_dock.icon_bg_rgb;
+    default: return -1;
+    }
+}
+
+void lm_dock_bg_text(char *out, size_t n)
+{
+    switch (lm_dock.icon_bg) {
+    case LM_DOCK_BG_DARK: snprintf(out, n, "dark"); break;
+    case LM_DOCK_BG_NONE: snprintf(out, n, "none"); break;
+    case LM_DOCK_BG_COLOUR: snprintf(out, n, "#%06x", (unsigned)lm_dock.icon_bg_rgb); break;
+    default: snprintf(out, n, "light"); break;
+    }
+}
 
 void lm_dock_reset(void)
 {
@@ -305,6 +341,7 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
 {
     it->pub.kind = LM_DOCKICON_GENERIC;
     it->pub.img = NULL;
+    it->pub.plate = false;
     if (!*spec) {
         it->pub.kind = lm_dockicon_guess(name);
         return;
@@ -315,6 +352,7 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
         return;
     }
     char path[PATH_MAX], err[160];
+    bool plate = false;
     if (!strncmp(spec, "theme:", 6)) {                                /* the icon the installed program brings along; none: the built-in one */
         if (!lm_icon_find(spec + 6, path, sizeof(path))) {
             it->pub.kind = lm_dockicon_guess(name);
@@ -342,6 +380,12 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
         it->pub.kind = lm_dockicon_guess(name);
         return;
     }
+    {                                                                 /* a logo (transparent corners) gets a plate, a picture that fills its square does not */
+        const struct lm_image *im = &it->img;                         /* (looked at before prepare_image cuts it to a circle) */
+        int a0 = (int)(im->px[0] >> 24), a1 = (int)(im->px[im->w - 1] >> 24), a2 = (int)(im->px[(size_t)(im->h - 1) * (size_t)im->w] >> 24),
+            a3 = (int)(im->px[(size_t)im->h * (size_t)im->w - 1] >> 24);
+        plate = a0 < 0x80 && a1 < 0x80 && a2 < 0x80 && a3 < 0x80;
+    }
     int max = (lm_dock.icon_size * lm_dock.zoom + 99) / 100 + 2;
     if (!prepare_image(&it->img, max)) {
         lm_img_free(&it->img);
@@ -350,6 +394,7 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
     }
     it->has_img = true;
     it->pub.img = &it->img;
+    it->pub.plate = plate;
 }
 
 static void resolve_list(struct applist *L, bool launcher_only)

@@ -384,6 +384,19 @@ static void ctl_command(struct ctl_client *c, char *line)
         /* cascade -> the next window is placed at the first cascade position again (tests), then "ok" */
         lm_wm_reset_cascade(srv->wm);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "dockmenu")) {
+        /* dockmenu -> "dockmenu open= item= sel=" and, while it is open, "card ..." and one "entry ..." line each (the dock's right-click menu), then "ok" */
+        static char text[2048];
+        if (srv->wm) {
+            lm_wm_dockmenu_describe(srv->wm, text, sizeof(text));
+            for (const char *l = text; *l;) {
+                const char *e = strchr(l, '\n');
+                int len = e ? (int)(e - l) + 1 : (int)strlen(l);
+                ctl_reply(c, "%.*s", len, l);
+                l += len;
+            }
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "clock")) {
         /* clock [calendar] -> "clock x= y= w= h= tasks=N calendar=0|1|2 text=..." (calendar: 0 no window, 1 hidden, 2 shown); the word `calendar`
          * first shows / hides it as a click on the clock does. Then "ok". */

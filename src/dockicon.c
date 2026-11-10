@@ -191,6 +191,31 @@ static float cov(float sd, float px)
     return clampf(0.5f - sd / px, 0.0f, 1.0f);
 }
 
+uint32_t lm_dockicon_plate_pixel(uint32_t base, float dx, float dy, float R, float lift)
+{
+    if (R <= 0.0f)
+        return 0;
+    float u = dx / R, v = dy / R, px = 1.0f / R;
+    float dist = hypotf(u, v);
+    float shadow = 0.0f;
+    float sd = hypotf(u, v - 0.07f) - 1.0f;
+    if (sd < 0.3f)
+        shadow = 0.42f * (1.0f - clampf(sd / 0.3f, 0.0f, 1.0f)) * (1.0f - clampf(sd / 0.3f, 0.0f, 1.0f));
+    float dc = cov(dist - 1.0f, px);
+    if (dc <= 0.0f && shadow <= 0.004f)
+        return 0;
+    float shade = 1.04f - 0.16f * (v * 0.5f + 0.5f);   /* a plain plate: a little lighter at the top, darker at the foot */
+    float out[3];
+    for (int i = 0; i < 3; i++) {
+        float c = (float)((base >> (16 - 8 * i)) & 255) * shade;
+        c += (255.0f - c) * 0.20f * lift;
+        out[i] = clampf(c, 0.0f, 255.0f) * dc;
+    }
+    float a = dc + shadow * (1.0f - dc);
+    return ((uint32_t)(a * 255.0f + 0.5f) << 24) | ((uint32_t)(out[0] + 0.5f) << 16) | ((uint32_t)(out[1] + 0.5f) << 8) |
+           (uint32_t)(out[2] + 0.5f);
+}
+
 uint32_t lm_dockicon_pixel(int kind, float dx, float dy, float R, float lift)
 {
     if (kind < 0 || kind >= LM_DOCKICON_COUNT || R <= 0.0f)

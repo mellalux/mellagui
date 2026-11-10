@@ -9337,6 +9337,214 @@ class TestDock(Base):
         self.assertIn('Firefox    = [theme:firefox]', text)
         self.assertIn('Code       = [theme:vscode|code]', text)
 
+    # ---- the right-click menu of a dock icon -------------------------------------------------------------------------------
+
+    BTN_RIGHT = 273
+
+    @staticmethod
+    def menu(c):
+        d = dict(entries=[])
+        for l in c.cmd('dockmenu'):
+            m = re.match(r'dockmenu open=(\d) item=(-?\d+) sel=(-?\d+)', l)
+            if m:
+                d.update(open=int(m[1]), item=int(m[2]), sel=int(m[3]))
+            m = re.match(r'card x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) title="(.*)"', l)
+            if m:
+                d.update(card=tuple(int(v) for v in m.groups()[:4]), title=m[5])
+            m = re.match(r'entry (\d) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) enabled=(\d)', l)
+            if m:
+                d['entries'].append(dict(label=m[2], box=tuple(int(v) for v in m.groups()[2:6]), enabled=int(m[7])))
+        return d
+
+    def right_click(self, c, icon):
+        c.abs(icon['x'] + icon['w'] // 2, icon['y'] + icon['h'] // 2)
+        c.button(self.BTN_RIGHT, True)
+        c.button(self.BTN_RIGHT, False)
+        c.sync()
+
+    @staticmethod
+    def centre(box):
+        return box[0] + box[2] // 2, box[1] + box[3] // 2
+
+    def test_a_right_click_on_an_icon_opens_a_menu_and_esc_or_a_click_outside_closes_it(self):
+        mark = os.path.join(tmp, 'dk20.mark')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        c = self.start('mellagui-dk20', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [files] touch %s\nBeta = true\n' % mark)
+        icons = self.dock(c)[1]
+        self.right_click(c, icons[0])                                   # the Launcher button has no menu
+        self.assertEqual(self.menu(c)['open'], 0)
+        self.right_click(c, icons[1])
+        m = self.menu(c)
+        self.assertEqual((m['open'], m['item'], m['title']), (1, 1, 'Alpha'))
+        self.assertEqual([e['label'] for e in m['entries']], ['New window', 'Close all windows', 'Change...', 'Remove from dock'])
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 0, 1, 1])        # no window: nothing to close
+        card = m['card']
+        self.assertLess(card[1] + card[3], icons[1]['y'])                # above the icon
+        c.tap(1)                                                         # Esc
+        self.assertEqual(self.menu(c)['open'], 0)
+        self.right_click(c, icons[1])
+        self.assertEqual(self.menu(c)['open'], 1)
+        c.click(10, 300)                                                 # a click elsewhere closes it and nothing else happens
+        self.assertEqual(self.menu(c)['open'], 0)
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(mark))
+
+    def test_the_menu_follows_the_pointer_and_the_keys(self):
+        c = self.start('mellagui-dk21', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = true\n')
+        self.right_click(c, self.dock(c)[1][1])
+        m = self.menu(c)
+        c.abs(*self.centre(m['entries'][2]['box']))
+        self.assertEqual(self.menu(c)['sel'], 2)
+        c.abs(*self.centre(m['entries'][1]['box']))                      # the disabled entry is not lit
+        self.assertEqual(self.menu(c)['sel'], -1)
+        c.tap(108)                                                       # Down: the first usable entry
+        self.assertEqual(self.menu(c)['sel'], 0)
+        c.tap(108)                                                       # (entry 1 is skipped)
+        self.assertEqual(self.menu(c)['sel'], 2)
+        c.tap(103)                                                       # Up
+        self.assertEqual(self.menu(c)['sel'], 0)
+
+    def test_new_window_starts_another_instance(self):
+        mark = os.path.join(tmp, 'dk22.mark')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        c = self.start('mellagui-dk22', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = touch %s\n' % mark)
+        self.right_click(c, self.dock(c)[1][1])
+        c.click(*self.centre(self.menu(c)['entries'][0]['box']))
+        self.wait_for(lambda: os.path.exists(mark), 'the program was started')
+        self.assertEqual(self.menu(c)['open'], 0)
+
+    def test_close_all_windows_asks_every_window_of_the_program_to_close(self):
+        c = self.start('mellagui-dk23', '[dock-apps]\nLauncher = [launcher] @launcher\nSlow = sleep 30\n')
+        cl = Client('mellagui-dk23')
+        self.clients.append(cl)
+        w1 = Window(cl, 200, 100, app_id='sleep')
+        w2 = Window(cl, 200, 100, app_id='sleep')
+        other = Window(cl, 200, 100, app_id='else')
+        cl.wl.roundtrip()
+        c.sync()
+        self.right_click(c, self.dock(c)[1][1])
+        m = self.menu(c)
+        self.assertEqual(m['entries'][1]['enabled'], 1)
+        c.click(*self.centre(m['entries'][1]['box']))
+        got = set()
+        end = time.time() + 3
+        while time.time() < end and len(got) < 2:
+            for w in (w1, w2):
+                if cl.wl.wait_for(lambda e, w=w: e.obj == w.toplevel and e.name == 'close', 0.2):
+                    got.add(w.toplevel)
+        self.assertEqual(len(got), 2, 'both windows of the program are asked to close')
+        self.assertIsNone(cl.wl.wait_for(lambda e: e.obj == other.toplevel and e.name == 'close', 0.4), 'the other program is left alone')
+
+    def test_change_opens_the_launchers_form_with_that_button(self):
+        c = self.start('mellagui-dk24', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [files] true\nBeta = [editor] false\n')
+        self.right_click(c, self.dock(c)[1][2])                          # Beta
+        c.click(*self.centre(self.menu(c)['entries'][2]['box']))
+        lines = c.cmd('launcher')
+        self.assertIn('open=1', lines[0])
+        self.assertIn('form=1', lines[0])
+        self.assertIn('editing=1', lines[0])
+        self.assertTrue(any(l.startswith('field 0') and 'text="Beta"' in l for l in lines), lines)
+        self.assertTrue(any(l.startswith('field 1') and 'text="false"' in l for l in lines), lines)
+        self.assertTrue(any(l.startswith('field 2') and 'text="editor"' in l for l in lines), lines)
+
+    def test_remove_from_dock_moves_the_button_to_the_launcher(self):
+        c = self.start('mellagui-dk25', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [files] true\nBeta = [editor] true\n')
+        self.right_click(c, self.dock(c)[1][1])
+        c.click(*self.centre(self.menu(c)['entries'][3]['box']))
+        self.wait_for(lambda: [i['name'] for i in self.dock(c)[1]] == ['Launcher', 'Beta'], 'Alpha leaves the dock')
+        text = open(self.path).read()
+        self.assertIn('[launcher-apps]', text)
+        self.assertIn('Alpha = [files] true', text.split('[launcher-apps]')[1])
+        self.assertNotIn('Alpha', text.split('[launcher-apps]')[0])
+
+    def test_the_menu_is_drawn_with_either_renderer(self):
+        for rend in ('software', 'gl'):
+            path = os.path.join(tmp, 'mellagui-dk26-%s.conf' % rend)
+            with open(path, 'w') as f:
+                f.write('[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = true\n')
+            p, c, stop = self.private_compositor('mellagui-dk26-' + rend, '--config', path, '--renderer', rend)
+            c.sync()
+            c.abs(10, 10)
+            before = c.dump(os.path.join(tmp, 'dk26-%s-a.ppm' % rend))
+            self.right_click(c, self.dock(c)[1][1])
+            m = self.menu(c)
+            c.abs(10, 10)
+            after = c.dump(os.path.join(tmp, 'dk26-%s-b.ppm' % rend))
+            x, y, w, h = m['card']
+            px = after.px(x + 8, y + h - 5)
+            self.assertNotEqual(px, before.px(x + 8, y + h - 5), '%s: no menu on the screen' % rend)
+            self.assertTrue(all(v < 70 for v in px), (rend, px))        # the dark card
+            c.click(10, 300)
+            gone = c.dump(os.path.join(tmp, 'dk26-%s-c.ppm' % rend))
+            self.assertEqual(gone.px(x + 8, y + h - 5), before.px(x + 8, y + h - 5), '%s: the menu is still there' % rend)
+
+    # ---- the plate under the logos of installed programs --------------------------------------------------------------------
+
+    def logo_png(self, path, size=32):
+        """A logo like Firefox's: transparent corners and edges, a red square in the middle."""
+        import zlib, struct
+        rows = []
+        for y in range(size):
+            row = b'\x00'
+            for x in range(size):
+                inside = size // 3 <= x < 2 * size // 3 and size // 3 <= y < 2 * size // 3
+                row += bytes([200, 0, 0, 255]) if inside else bytes([0, 0, 0, 0])
+            rows.append(row)
+        def chunk(t, d):
+            return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+        with open(path, 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)) +
+                    chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
+
+    def plate_pixels(self, name, setting):
+        png = os.path.join(tmp, name + '.png')
+        self.logo_png(png)
+        c = self.start(name, '[dock]\nicon-size = 48\nzoom = 100\n%s[dock-apps]\nLogo = [%s] true\n' % (setting, png))
+        c.abs(10, 10)
+        icon = self.dock(c)[1][0]
+        ppm = c.dump(os.path.join(tmp, name + '.ppm'))
+        cx, cy = icon['x'] + icon['w'] // 2, icon['y'] + icon['h'] // 2
+        return c, ppm.px(cx, cy), ppm.px(cx + int(icon['w'] * 0.42), cy), ppm.px(icon['x'] - 12, cy)      # logo, plate edge, beside the icon
+
+    def test_a_logo_with_transparent_corners_sits_on_a_round_plate(self):
+        c, logo, plate, beside = self.plate_pixels('mellagui-dk27', '')
+        self.assertTrue(logo[0] > 150 and logo[1] < 60, logo)                       # the red square of the logo
+        self.assertTrue(all(v > 215 for v in plate), plate)                          # a light plate behind it (the default)
+        self.assertNotEqual(plate, beside)
+        c, logo, plate, beside = self.plate_pixels('mellagui-dk28', 'icon-background = dark\n')
+        self.assertTrue(all(v < 90 for v in plate), plate)
+        c, logo, plate, beside = self.plate_pixels('mellagui-dk29', 'icon-background = none\n')
+        self.assertEqual(plate, beside, 'no plate: the wallpaper shows around the logo')
+        c, logo, plate, beside = self.plate_pixels('mellagui-dk30', 'icon-background = #3060c0\n')
+        self.assertTrue(plate[2] > plate[0] + 60, plate)                             # blue
+
+    def test_a_picture_that_fills_its_square_gets_no_plate(self):
+        png = os.path.join(tmp, 'dk31.png')
+        self.write_png(png, (0, 200, 0, 255), 32)
+        c = self.start('mellagui-dk31', '[dock]\nicon-size = 48\nzoom = 100\n[dock-apps]\nFull = [%s] true\n' % png)
+        c.abs(10, 10)
+        icon = self.dock(c)[1][0]
+        ppm = c.dump(os.path.join(tmp, 'dk31.ppm'))
+        px = ppm.px(icon['x'] + icon['w'] // 2 + int(icon['w'] * 0.42), icon['y'] + icon['h'] // 2)
+        self.assertTrue(px[1] > 150 and px[0] < 60, px)                              # its own green all the way out, no light plate
+
+    def test_the_plate_is_a_dock_setting(self):
+        c = self.start('mellagui-dk32', '[dock-apps]\nA = true\n')
+        c.cmd('setting dock-opts')
+        self.assertIn('icon-background=light', c.last)
+        c.cmd('setraw dock-set icon-background\x1fdark')
+        self.wait_for(lambda: 'icon-background = dark' in open(self.path).read(), 'the setting is written')
+        c.cmd('setting dock-opts')
+        self.assertIn('icon-background=dark', c.last)
+        c.cmd('setraw dock-set icon-background\x1f#a0b0c0')
+        self.wait_for(lambda: 'icon-background = #a0b0c0' in open(self.path).read(), 'a colour is written')
+        c.cmd('setraw dock-set icon-background\x1flight')                          # the built-in value needs no line
+        self.wait_for(lambda: 'icon-background' not in open(self.path).read(), 'the built-in value drops its line')
+        with self.assertRaises(RuntimeError):
+            c.cmd('setraw dock-set icon-background\x1fpurple')
+
     def test_a_missing_picture_falls_back_to_a_built_in_icon(self):
         c = self.start('mellagui-dk13', '[dock-apps]\nEditor = [/no/such/file.png] true\nQ = [nosuchicon] true\n')
         info, icons = self.dock(c)
@@ -9403,7 +9611,7 @@ class TestDockEdit(Base):
         c.cmd('setraw dock-set autohide%syes' % self.US)
         self.assertEqual(open(self.path).read(), '[dock]\n# look\nzoom = 200\nicon-size = 64\nautohide = yes\n')
         c.cmd('setting dock-opts')
-        self.assertEqual(c.last[3:], 'enabled=1 autohide=1 icon-size=64 zoom=200 gap=10 margin=8')
+        self.assertEqual(c.last[3:], 'enabled=1 autohide=1 icon-size=64 zoom=200 gap=10 margin=8 icon-background=light')
         c.cmd('setraw dock-set zoom%s160' % self.US)                                  # the built-in value needs no line
         self.assertNotIn('zoom', open(self.path).read())
         for bad in ('icon-size%s5', 'icon-size%sx', 'nonsense%s1', 'zoom%s300', 'enabled%smaybe'):

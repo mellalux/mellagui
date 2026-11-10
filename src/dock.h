@@ -33,10 +33,19 @@
 #define LM_DOCK_ICON_MAX 256
 #define LM_DOCK_CMD_MAX 1024
 
+/* The round plate under the picture icons of installed programs (Firefox, Code ...), whose logos have no background of their own. */
+enum { LM_DOCK_BG_LIGHT, LM_DOCK_BG_DARK, LM_DOCK_BG_NONE, LM_DOCK_BG_COLOUR };
+
 struct lm_dock_settings {
     bool enabled, autohide;
     int icon_size, zoom, gap, margin;
+    int icon_bg;                        /* LM_DOCK_BG_*: [dock] icon-background = light | dark | none | #rrggbb */
+    uint32_t icon_bg_rgb;               /* ... for LM_DOCK_BG_COLOUR */
 };
+/* The plate colour 0xRRGGBB (light or dark: the built-in ones), or -1 for none. */
+int lm_dock_plate_rgb(void);
+/* "light" / "dark" / "none" / "#rrggbb" (what the file and the dock-opts setting say) into `out`. */
+void lm_dock_bg_text(char *out, size_t n);
 extern struct lm_dock_settings lm_dock;                  /* starts as the built-in values */
 
 /* One button as the wm sees it (valid until the next lm_dock_resolve). */
@@ -48,6 +57,7 @@ struct lm_dock_item {
     const struct lm_image *img;         /* premultiplied ARGB, at most the zoomed icon size, or NULL for a built-in icon */
     int raw;                            /* index of the entry in the file's list (lm_dock_raw_entry / lm_launchapps_raw_entry): entries that were left out leave gaps */
     bool launcher_only;                 /* from [launcher-apps] (lm_launchapps_item), not in the dock */
+    bool plate;                         /* a picture whose corners are transparent (a logo): it is painted on a round plate (see icon_bg) */
 };
 
 /* True for the sections [dock], [dock-apps] and [launcher-apps]. */

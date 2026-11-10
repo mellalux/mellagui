@@ -3710,7 +3710,25 @@ class TestClients(Base):
         ctl.abs(x4 + 10, y4 + 10)
         ctl.button(272, False)
         time.sleep(0.1)
-        self.assertGreaterEqual(self.osk_card()[2], 240)
+        x6, y6, w6, h6 = self.osk_card()
+        self.assertEqual(w6, 640, 'the keyboard can be dragged narrower than a usable width')
+        self.assertEqual(h6, 6 * 34 + 5 * 4 + 22 + 12, 'the keys can be dragged lower than 34 px')
+        ctl.abs(x6 + w6 - 4, y6 + h6 - 4)                                        # and not bigger than the screen, nor than 96 px keys
+        ctl.button(272, True)
+        ctl.abs(5000, 5000)
+        ctl.button(272, False)
+        time.sleep(0.1)
+        x7, y7, w7, h7 = self.osk_card()
+        self.assertLessEqual(w7, 1024)
+        self.assertLessEqual(x7 + w7, 1024)
+        self.assertLessEqual(y7 + h7, 600)
+        ctl.abs(x7 + w7 - 4, y7 + h7 - 4)                                        # back to the smallest one for the rest of the test
+        ctl.button(272, True)
+        ctl.abs(x7 + 10, y7 + 10)
+        ctl.button(272, False)
+        time.sleep(0.1)
+        self.assertEqual(self.osk_card()[2], 640)
+        x4, y4 = self.osk_card()[:2]
         self.osk('close')
         self.osk('open')
         self.assertEqual(self.osk_card()[:2], (x4, y4))                          # it comes back where it was left
@@ -4681,11 +4699,11 @@ class TestOskSaved(Base):
         c.button(272, False)
         c.abs(x + w - 4, y - 100 + h - 4)
         c.button(272, True)
-        c.abs(x + w - 4 - 300, y - 100 + h - 4)                                  # 300 px narrower
+        c.abs(x + w - 4 - 100, y - 100 + h - 4)                                  # 100 px narrower (it cannot get narrower than 640)
         c.button(272, False)
         m = re.search(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', '\n'.join(c.cmd('osk')))
         placed = tuple(map(int, m.groups()))
-        self.assertEqual(placed[:3], (x, y - 100, w - 300))
+        self.assertEqual(placed[:3], (x, y - 100, w - 100))
         lines = open(path).read().split('\n')[:-1]
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith('keyboard %d %d %d ' % placed[:3]), lines)

@@ -7224,6 +7224,224 @@ class TestOverview(Base):
         self.assertEqual(self.ov(c)[0]['open'], '0')
 
 
+class TestStatus(Base):
+    """mellagui-status: the battery and the network in the panel (a fake power tree and tests/fake_nmcli.py)."""
+
+    STATE = {'radio': True, 'dev': 'wifi0', 'ethernet': None, 'active': 'Home', 'ip': '192.168.1.5', 'password': 'hunter2',
+             'known': ['Home', 'Cafe'],
+             'networks': [{'ssid': 'Home', 'signal': 80, 'security': 'WPA2'}, {'ssid': 'Cafe', 'signal': 60, 'security': 'WPA2'},
+                          {'ssid': 'Open Guest', 'signal': 45, 'security': ''}, {'ssid': 'Neighbour', 'signal': 30, 'security': 'WPA2'}]}
+
+    def setup_files(self, tag, battery=True, state=None):
+        import json
+        d = os.path.join(tmp, 'status-' + tag)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'power'))
+        if battery:
+            b = os.path.join(d, 'power', 'BAT0')
+            os.makedirs(b)
+            for k, v in (('type', 'Battery'), ('status', 'Charging'), ('capacity', '56'), ('energy_now', '30000000'),
+                         ('energy_full', '50000000'), ('power_now', '12000000'), ('model_name', 'Test pack')):
+                with open(os.path.join(b, k), 'w') as f:
+                    f.write(v)
+        self.state_path = os.path.join(d, 'nm.json')
+        with open(self.state_path, 'w') as f:
+            json.dump(state or self.STATE, f)
+        self.log_path = os.path.join(d, 'nm.log')
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_nmcli.py')
+        return d, {'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': os.path.join(d, 'power'), 'MELLAGUI_NMCLI': fake,
+                   'FAKE_NM_STATE': self.state_path, 'FAKE_NM_LOG': self.log_path}
+
+    def start(self, tag, **kw):
+        d, env = self.setup_files(tag, **kw)
+        p, c, stop = self.private_compositor('mellagui-st-' + tag, '--size', '1280x600', env=env)         # (wide: the bar leaves room for the buttons)
+        return c
+
+    @staticmethod
+    def items(c, want=None, wait=6.0):
+        end = time.time() + wait
+        while True:
+            lines = c.cmd('tray')
+            its = []
+            for ln in lines[1:]:
+                head, _, text = ln.partition(' text=')                           # (the text may hold spaces)
+                its.append(dict(kv.split('=', 1) for kv in head.split()[2:] if '=' in kv) | {'id': head.split()[1], 'text': text})
+            if want is None or (len(its) >= want and all(i['icon'] != '-' for i in its)) or time.time() > end:
+                return its
+            time.sleep(0.1)
+
+    @staticmethod
+    def entries(c):
+        lines = c.cmd('dockmenu')
+        out = []
+        for ln in lines:
+            if ln.startswith('entry '):
+                label = ln.split('"')[1]
+                kv = dict(x.split('=') for x in ln.split('"')[2].split())
+                out.append((label, int(kv['x']) + int(kv['w']) // 2, int(kv['y']) + int(kv['h']) // 2, kv['enabled'] == '1'))
+        return out
+
+    def click_item(self, c, it):
+        c.click(int(it['x']) + 5, int(it['y']) + 5)
+        end = time.time() + 5                                                       # (the network menu asks nmcli a few times first)
+        while time.time() < end and 'open=1' not in c.cmd('dockmenu')[0]:
+            time.sleep(0.1)
+        c.sync()
+
+    def nm_log(self):
+        return open(self.log_path).read() if os.path.exists(self.log_path) else ''
+
+    def wait_state(self, key, value, wait=6.0):
+        import json
+        end = time.time() + wait
+        while time.time() < end:
+            if json.load(open(self.state_path)).get(key) == value:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_the_battery_and_the_network_show_in_the_bar(self):
+        c = self.start('a')
+        its = self.items(c, 2)
+        texts = sorted(i['text'] for i in its)
+        self.assertEqual(texts, ['56%', 'Home'])
+        self.assertTrue(all(i['icon'] != '-' for i in its), its)                   # both have a picture
+
+    def test_a_click_on_the_battery_lists_it_with_the_time_left(self):
+        c = self.start('b')
+        its = self.items(c, 2)
+        bat = [i for i in its if i['text'] == '56%'][0]
+        self.click_item(c, bat)
+        e = self.entries(c)
+        self.assertEqual([x[0] for x in e], ['Test pack  56%  Charging', '   1 h 40 min until full'])
+        self.assertFalse(any(x[3] for x in e))                                      # information only
+
+    def test_the_network_menu_lists_the_networks_and_connects_to_a_known_one(self):
+        c = self.start('c')
+        net = [i for i in self.items(c, 2) if i['text'] == 'Home'][0]
+        self.click_item(c, net)
+        e = self.entries(c)
+        labels = [x[0] for x in e]
+        self.assertEqual(labels[0], 'Connected to Home  192.168.1.5')
+        self.assertIn('Turn Wi-Fi off', labels)
+        self.assertEqual(labels[3][:6], '* Home')                                  # the active one first, marked
+        cafe = [x for x in e if x[0].startswith('  Cafe')][0]
+        c.click(cafe[1], cafe[2])
+        self.assertTrue(self.wait_state('active', 'Cafe'))
+        self.assertIn('connection up id Cafe', self.nm_log())
+        for _ in range(30):                                                         # the button follows
+            if any(i['text'] == 'Cafe' for i in self.items(c)):
+                break
+            time.sleep(0.1)
+        self.assertTrue(any(i['text'] == 'Cafe' for i in self.items(c)))
+
+    def test_an_open_network_connects_without_a_password_and_disconnect_works(self):
+        c = self.start('d')
+        net = [i for i in self.items(c, 2) if i['text'] == 'Home'][0]
+        self.click_item(c, net)
+        e = self.entries(c)
+        guest = [x for x in e if 'Open Guest' in x[0]][0]
+        self.assertNotIn('lock', guest[0])
+        c.click(guest[1], guest[2])
+        self.assertTrue(self.wait_state('active', 'Open Guest'))
+        self.assertIn('dev wifi connect Open Guest', self.nm_log())
+        for _ in range(50):                                                         # the button follows
+            if any(i['text'] == 'Open Guest' for i in self.items(c)):
+                break
+            time.sleep(0.1)
+        net = [i for i in self.items(c) if i['text'] == 'Open Guest'][0]
+        self.click_item(c, net)
+        act = [x for x in self.entries(c) if x[0].startswith('* Open Guest')][0]
+        c.click(act[1], act[2])                                                     # the active one: disconnect
+        self.assertTrue(self.wait_state('active', None))
+        self.assertIn('dev disconnect wifi0', self.nm_log())
+
+    def test_the_wifi_switch_is_in_the_menu(self):
+        c = self.start('e')
+        net = [i for i in self.items(c, 2) if i['text'] == 'Home'][0]
+        self.click_item(c, net)
+        off = [x for x in self.entries(c) if x[0] == 'Turn Wi-Fi off'][0]
+        c.click(off[1], off[2])
+        self.assertTrue(self.wait_state('radio', False))
+        self.assertIn('radio wifi off', self.nm_log())
+        end = time.time() + 5
+        while time.time() < end and any(i['text'] == 'Home' for i in self.items(c)):
+            time.sleep(0.1)
+        net = [i for i in self.items(c) if i['text'] == ''][0]                      # the button stays, without a name
+        self.click_item(c, net)
+        self.assertIn('Turn Wi-Fi on', [x[0] for x in self.entries(c)])
+
+    def test_a_new_secured_network_asks_for_the_password_in_a_window(self):
+        c = self.start('f')
+        net = [i for i in self.items(c, 2) if i['text'] == 'Home'][0]
+        self.click_item(c, net)
+        nb = [x for x in self.entries(c) if 'Neighbour' in x[0]][0]
+        self.assertIn('lock', nb[0])
+        c.click(nb[1], nb[2])
+        win = None
+        for _ in range(60):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.wifi']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(win, 'the password window did not open')
+        time.sleep(0.3)
+        for ch in 'hunter2':
+            c.tap(KEYCODES[ch])
+        c.tap(KEY_ENTER)
+        self.assertTrue(self.wait_state('active', 'Neighbour', 10.0))
+        log = self.nm_log()
+        self.assertIn('--ask --wait 30 dev wifi connect Neighbour', log)
+        self.assertNotIn('hunter2', log)                                            # never on a command line
+        for _ in range(60):                                                         # the window ends
+            if not [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.wifi']:
+                break
+            time.sleep(0.1)
+        self.assertEqual([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.wifi'], [])
+
+    def test_a_wrong_password_keeps_the_window_open_with_the_error(self):
+        c = self.start('g')
+        net = [i for i in self.items(c, 2) if i['text'] == 'Home'][0]
+        self.click_item(c, net)
+        nb = [x for x in self.entries(c) if 'Neighbour' in x[0]][0]
+        c.click(nb[1], nb[2])
+        for _ in range(60):
+            if [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.wifi']:
+                break
+            time.sleep(0.1)
+        time.sleep(0.3)
+        for ch in 'wrong':
+            c.tap(KEYCODES[ch])
+        c.tap(KEY_ENTER)
+        time.sleep(1.5)
+        self.assertEqual(len([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.wifi']), 1)
+        import json
+        self.assertNotEqual(json.load(open(self.state_path))['active'], 'Neighbour')
+
+    def test_selftest(self):
+        path = os.path.join(ROOT, 'build', 'mellagui-status')
+        if not os.path.exists(path):
+            self.skipTest('mellagui-status not built')
+        r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_without_nmcli_only_the_battery_shows(self):
+        d, env = self.setup_files('h')
+        env['MELLAGUI_NMCLI'] = '/nonexistent/nmcli'
+        p, c, stop = self.private_compositor('mellagui-st-h', '--size', '1280x600', env=env)
+        its = self.items(c, 1)
+        self.assertEqual([i['text'] for i in its], ['56%'])
+
+    def test_a_ethernet_connection_shows_as_ethernet(self):
+        import copy
+        st = copy.deepcopy(self.STATE)
+        st['ethernet'] = 'Wired'
+        c = self.start('i', state=st)
+        its = self.items(c, 2)
+        self.assertIn('Ethernet', [i['text'] for i in its])
+
+
 class TestFuzz(Base):
     """The coverage-guided fuzzer of the whole compositor (tests/fuzz_server.c): a short run must end without a sanitizer report."""
 

@@ -2122,15 +2122,15 @@ class TestClients(Base):
         p, path = self.edit_start(b'one\n', env={'XDG_CONFIG_HOME': confdir})
         w0 = self.edit_window()
         self.assertEqual(w0['w'], 760)
-        def bar(x):                                              # A- 282, zoom 318, A+ 370 (each 32..48 wide), the bar is 24 px high
+        def bar(x):                                              # A- 438, zoom 474, A+ 526 (each 32..48 wide; Cut, Copy and Paste sit before them), the bar is 24 px high
             win = self.edit_window()
             ctl.click(win['x'] + x + 10, win['y'] + 12)
             time.sleep(0.3)
-        bar(370)                                                 # A+: 110 %, 9 px cells; the same 90 columns stay visible
+        bar(526)                                                 # A+: 110 %, 9 px cells; the same 90 columns stay visible
         w1 = self.edit_window()
         self.assertEqual(w1['w'], 45 + 88 * 9 + 14)       # 88 columns stay visible (the scroll bar takes 14 px of the 90)
         self.assertGreater(w1['h'], w0['h'])
-        bar(370)                                                 # 125 %: not a whole multiple, anti-aliased text
+        bar(526)                                                 # 125 %: not a whole multiple, anti-aliased text
         time.sleep(0.3)
         win = self.edit_window()
         ppm = ctl.dump(os.path.join(tmp, 'edit-zoom.ppm'))
@@ -2185,6 +2185,57 @@ class TestClients(Base):
         self.type_text('q')
         button(102)
         self.assertEqual(self.read_file(other), b'qsecond\n')
+
+    def test_edit_cut_copy_paste_buttons_and_the_classic_keys(self):
+        p, path = self.edit_start(b'abc def\n')
+        win = self.edit_window()
+        def button(x):                                          # Cut 230, Copy 274, Paste 326 (Save as ends at 226); the bar is 24 px high
+            ctl.click(win['x'] + x + 10, win['y'] + 12)
+            time.sleep(0.25)
+        def select_abc():
+            ctl.tap(self.K_HOME)
+            ctl.key(self.SHIFT, True)
+            for _ in range(3):
+                ctl.tap(106)
+            ctl.key(self.SHIFT, False)
+        def save():
+            self.chord(self.CTRL, self.K_S)
+            time.sleep(0.25)
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        select_abc()
+        button(274)                                             # Copy: the text stays, the selection too
+        save()
+        self.assertEqual(self.read_file(path), b'abc def\n')
+        ctl.tap(self.K_END)
+        button(326)                                             # Paste at the end
+        save()
+        self.assertEqual(self.read_file(path), b'abc defabc\n')
+        select_abc()
+        button(230)                                             # Cut "abc" from the start
+        save()
+        self.assertEqual(self.read_file(path), b' defabc\n')
+        button(326)                                             # ... and paste it back where the cursor is
+        save()
+        self.assertEqual(self.read_file(path), b'abc defabc\n')
+        ctl.tap(self.K_HOME)                                    # Cut and Copy with nothing selected do nothing (the clipboard keeps "abc")
+        button(230)
+        button(274)
+        save()
+        self.assertEqual(self.read_file(path), b'abc defabc\n')
+        select_abc()
+        self.chord(self.CTRL, 110)                              # Ctrl+Insert: copy
+        ctl.tap(self.K_END)
+        ctl.key(self.SHIFT, True)
+        ctl.tap(110)                                            # Shift+Insert: paste
+        ctl.key(self.SHIFT, False)
+        save()
+        self.assertEqual(self.read_file(path), b'abc defabcabc\n')
+        select_abc()
+        ctl.key(self.SHIFT, True)
+        ctl.tap(111)                                            # Shift+Delete: cut
+        ctl.key(self.SHIFT, False)
+        save()
+        self.assertEqual(self.read_file(path), b' defabcabc\n')
 
     # ---- mellagui-files ----------------------------------------------------------------------------------------------
 
@@ -9413,6 +9464,52 @@ class TestDockEdit(Base):
         c.cmd('dock')
         self.assertTrue(c.cmd('dock')[0].startswith('dock shown=0'))
 
+    def test_the_panel_dock_page_takes_an_icon_written_with_brackets(self):
+        """The rows show "[theme:firefox] command"; typing the icon the same way, brackets and all, is accepted (they are not part of it)."""
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-de6', '[dock-apps]\nA = true\nB = [files] true\n')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-de6'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 10 * 32 + 16)                         # the Dock tab (11th)
+        time.sleep(0.3)
+        c.click(x0 + 214, y0 + 81)                                       # the name button of the first row (A): its values go into the form
+        time.sleep(0.3)
+        c.click(x0 + 443, y0 + 288)                                      # the icon field
+        keys = {ch: k for k, ch in enumerate('qwertyuiop', 16)}
+        keys.update({ch: k for k, ch in enumerate('asdfghjkl', 30)})
+        keys.update({ch: k for k, ch in enumerate('zxcvbnm', 44)})
+        for ch in '[theme:firefox]':
+            if ch == '[':
+                c.tap(26)
+            elif ch == ']':
+                c.tap(27)
+            elif ch == ':':
+                c.key(KEY_LEFTSHIFT, True)
+                c.tap(39)
+                c.key(KEY_LEFTSHIFT, False)
+            else:
+                c.tap(keys[ch])
+        time.sleep(0.2)
+        c.click(x0 + 565, y0 + 318)                                      # Add / Update
+        for _ in range(60):
+            if '[theme:firefox]' in open(self.path).read():
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(self.path).read(), '[dock-apps]\nA = [theme:firefox] true\nB = [files] true\n')
+
+
 class TestKeysEdit(Base):
     """The settings panel's Keys page: keys-row-N / keys-set / keys-del / keys-reset / keys-capture rewrite [keys] of mellagui.conf only."""
 
@@ -10540,6 +10637,102 @@ class TestLauncher(Base):
         self.assertIn(d['fields'][0][1], ('Alpha', 'Beta'))
         c.tap(self.KEY_ESC)                                                     # back to the icons
         self.assertEqual(self.info(c)['form'], 0)
+
+    # ---- the icon text field of the form ----------------------------------------------------------------------------------
+
+    def type_icon(self, c, text):
+        keys = {ch: k for k, ch in enumerate('qwertyuiop', 16)}
+        keys.update({ch: k for k, ch in enumerate('asdfghjkl', 30)})
+        keys.update({ch: k for k, ch in enumerate('zxcvbnm', 44)})
+        for ch in text:
+            if ch == '[':
+                c.tap(26)
+            elif ch == ']':
+                c.tap(27)
+            elif ch == ':':
+                c.key(KEY_LEFTSHIFT, True)
+                c.tap(39)
+                c.key(KEY_LEFTSHIFT, False)
+            else:
+                c.tap(keys[ch])
+        c.sync()
+
+    def test_the_form_has_an_icon_text_field_that_takes_theme_names_with_or_without_brackets(self):
+        c = self.start('mellagui-lc35')
+        self.super_a(c)
+        d = self.info(c)
+        c.click(*self.centre(d['add']))
+        d = self.info(c)
+        self.assertEqual(sorted(d['fields']), [0, 1, 2], 'the form has no icon field')
+        self.type_text(c, 'web')                                                 # the name
+        c.tap(self.KEY_TAB)
+        self.type_text(c, 'true')                                                # the command
+        c.click(*self.centre(d['fields'][2][0]))                                 # the icon field
+        self.type_icon(c, '[theme:fx]')
+        self.assertEqual(self.info(c)['fields'][2][1], '[theme:fx]')
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))                     # Add
+        self.assertIn('web = [theme:fx] true', self.conf_text())                 # (stored without the brackets of the typed text)
+
+    def test_a_built_in_icon_chosen_below_fills_the_field_and_typing_a_name_picks_it(self):
+        c = self.start('mellagui-lc36')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['add']))
+        d = self.info(c)
+        c.click(*self.centre(d['kinds'][3]))                                     # "files"
+        self.assertEqual(self.info(c)['fields'][2][1], 'files')
+        self.assertIn('kind 3', self.focus_line(c))
+        c.click(*self.centre(d['kinds'][-1]))                                    # auto: the field is empty again
+        self.assertEqual(self.info(c)['fields'][2][1], '')
+        c.click(*self.centre(d['fields'][2][0]))
+        self.type_icon(c, 'files')                                               # typed: the same icon is picked
+        self.assertIn('kind 3', self.focus_line(c))
+        self.type_icon(c, 'x')                                                   # "filesx" is no built-in name: it is the user's own
+        self.assertIn('kind -2', self.focus_line(c))
+
+    def test_the_icon_of_an_existing_button_can_be_typed_over(self):
+        c = self.start('mellagui-lc37', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [theme:old] true\n')
+        d = self.open_change(c, 'Alpha')
+        self.assertEqual(d['fields'][2][1], 'theme:old')                         # as the file has it
+        c.click(*self.centre(d['fields'][2][0]))
+        for _ in range(len('theme:old')):
+            c.tap(14)
+        self.type_icon(c, 'theme:new')
+        c.click(*self.centre(self.info(c)['buttons'][0][0]))
+        self.assertIn('Alpha = [theme:new] true', self.conf_text())
+
+    def test_tab_visits_name_command_icon_field_and_the_icon_row(self):
+        c = self.start('mellagui-lc38')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['add']))
+        seen = []
+        for _ in range(5):
+            seen.append(int(self.focus_line(c).split()[1]))
+            c.tap(self.KEY_TAB)
+        self.assertEqual(seen, [0, 1, 2, 3, 0])
+
+    def test_every_text_field_of_the_form_is_redrawn_while_typing_with_either_renderer(self):
+        """The GL renderer caches the dialog by a hash of what it shows: the icon text field was left out of it, so typing there did not show."""
+        for rend in ('software', 'gl'):
+            self.path = os.path.join(tmp, 'mellagui-lc39-%s.conf' % rend)
+            with open(self.path, 'w') as f:
+                f.write('[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = [terminal] true\n')
+            try:
+                p, c, stop = self.private_compositor('mellagui-lc39-' + rend, '--config', self.path, '--renderer', rend)
+            except Exception:
+                continue
+            c.sync()
+            self.super_a(c)
+            c.click(*self.centre(self.info(c)['add']))
+            d = self.info(c)
+            for i in range(3):
+                x, y, w, h = d['fields'][i][0]
+                c.click(x + 50, y + 10)
+                self.type_text(c, 'a')                                    # (the first letter may change other things the cache is keyed on)
+                before = c.dump(os.path.join(tmp, 'lc39-%s-%d-a.ppm' % (rend, i)))
+                self.type_text(c, 'bc')
+                after = c.dump(os.path.join(tmp, 'lc39-%s-%d-b.ppm' % (rend, i)))
+                changed = sum(1 for yy in range(y + 4, y + h - 4) for xx in range(x + 6, x + 60) if before.px(xx, yy) != after.px(xx, yy))
+                self.assertGreater(changed, 20, '%s renderer: field %d does not show what is typed' % (rend, i))
 
 
 if __name__ == '__main__':

@@ -34,13 +34,15 @@ struct wlwin_ops {
     void (*keyboard)(struct wlwin *w, uint32_t op, const union lm_arg *args);
     /* Optional: the compositor asked the window to close. Return false to keep it open (unsaved work); default: close. */
     bool (*close)(struct wlwin *w);
+    /* Optional: the menu of wlwin_menu() was answered: the entry chosen, or -1 when it closed without a choice. */
+    void (*menu)(struct wlwin *w, int index);
 };
 
 struct wlwin {
     struct wlc *c;
     const struct wlwin_ops *ops;
     void *data;                     /* for the ops callbacks */
-    uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard;
+    uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard, menu;       /* menu: mellagui_menu_v1, 0 without it */
     uint32_t surface, xsurface, toplevel, pool, buffer;
     int w, h;                       /* size the compositor asked for (clamped to the minimum) */
     int bw, bh;                     /* size of `pixels` */
@@ -70,6 +72,10 @@ int wlwin_open(struct wlwin *w, const char *title, const char *app_id, int def_w
 bool wlwin_step(struct wlwin *w, int timeout_ms);
 
 void wlwin_destroy(struct wlwin *w);
+
+/* Show a menu at the pointer, drawn by the compositor (it may reach beyond the window): `entries` one per line, a leading '~' = dim. The answer
+ * comes to ops->menu. False when the compositor has no such menu (the caller does the action some other way or does nothing). */
+bool wlwin_menu(struct wlwin *w, const char *entries);
 
 /* Make the window this big (a program zooming its text): the next repaint uses a buffer of that size and the compositor
  * follows it. Ignored while `fixed_size`. Returns true when the size was changed. */

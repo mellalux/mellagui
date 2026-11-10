@@ -34,6 +34,7 @@
 #include "uikit.h"
 #include "util.h"
 #include "wlclip.h"
+#include "wltext.h"
 #include "wlwin.h"
 
 #define MAX_FILE (8u << 20)
@@ -95,6 +96,7 @@ struct app {
     int nundo, nredo;
     bool typing_run;                    /* the last change was typing: the next typed character joins its undo step */
     struct wlclip clip;                 /* the clipboard (wl_data_device) */
+    int menu_kind;                      /* the right-click menu that is showing: 0 none, 1 the prompt's field, 2 the text */
     /* key repeat */
     uint32_t rep_code;
     int64_t rep_next;
@@ -1044,6 +1046,8 @@ static void edit_prompt(struct app *a, uint32_t ks, bool plain)
                 msg(a, "%d matches: %s", n, list);
             a->pfresh = 0;
         }
+    } else if (wltext_key(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods)) {          /* Ctrl+V / C / X on the prompt's field */
+        a->pfresh = 0;
     } else if (ks == LM_KS_BackSpace) {
         if (a->pfresh == 2) {
             a->pbuf[0] = 0;
@@ -1464,6 +1468,34 @@ static void place_from_pointer(struct app *a, bool extend)
     set_want(a);
 }
 
+static void menu_event(struct wlwin *w, int index)
+{
+    struct app *a = w->data;
+    int kind = a->menu_kind;
+    a->menu_kind = 0;
+    if (index < 0)
+        return;
+    if (kind == 1 && a->prompt != P_NONE) {
+        wltext_menu_do(&a->clip, a->pbuf, sizeof(a->pbuf), index);
+        a->pfresh = 0;
+    } else if (kind == 2) {
+        if (index == 0) {
+            cmd_copy(a, true);
+            set_title(a);
+        } else if (index == 1) {
+            cmd_copy(a, false);
+        } else if (index == 2) {
+            cmd_paste(a);
+            set_title(a);
+        } else if (index == 3) {
+            a->ay = 0;
+            a->ax = 0;
+            move_to(a, a->n - 1, a->l[a->n - 1].len, true);
+        }
+    }
+    w->redraw = true;
+}
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -1493,6 +1525,21 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
+        if (args[2].u == 273 && args[3].u == 1) {                        /* BTN_RIGHT: the field's menu, or the text's */
+            if (a->prompt != P_NONE) {
+                a->menu_kind = 1;
+                if (!wlwin_menu(w, wltext_menu(a->pbuf)))
+                    a->menu_kind = 0;
+            } else if (!a->help && a->py >= TOP_H && a->py < TOP_H + a->rows_visible * a->zt.ch && a->px < w->bw - lm_metrics.scrollbar_width) {
+                if (!has_sel(a))
+                    place_from_pointer(a, false);
+                a->menu_kind = 2;
+                if (!wlwin_menu(w, has_sel(a) ? "Cut\nCopy\nPaste\nSelect all" : "~Cut\n~Copy\nPaste\nSelect all"))
+                    a->menu_kind = 0;
+                w->redraw = true;
+            }
+            break;
+        }
         if (args[2].u != 272)
             break;
         if (args[3].u == 1 && a->help) {                                 /* a click closes the key list */
@@ -1770,7 +1817,7 @@ int main(int argc, char **argv)
     a.rep_rate = 25;
     a.rep_delay = 400;
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
-                                          .keyboard = keyboard_event, .close = close_event };
+                                          .keyboard = keyboard_event, .close = close_event, .menu = menu_event };
     if (wlwin_connect(&a.win, "mellagui-edit", &ops, &a) < 0)
         return 1;
     if (wlwin_open(&a.win, "Editor", "mellagui.edit", 760 * a.zoom / 100, 520 * a.zoom / 100, 240, 120) < 0)

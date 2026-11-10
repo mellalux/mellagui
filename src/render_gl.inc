@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, dockmenu, osk;
+    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     bool unread;                        /* rendered since the last readback */
@@ -67,7 +67,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->switcher);
     gl_chrome_free(r, &go->power);
     gl_chrome_free(r, &go->dock);
-    gl_chrome_free(r, &go->dockmenu);
+    gl_chrome_free(r, &go->menu);
     gl_chrome_free(r, &go->osk);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
@@ -189,7 +189,7 @@ static void gl_do_launcher(const struct paint_ctx *c, const void *it) { paint_la
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
 static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power(c, it); }
-static void gl_do_dockmenu(const struct paint_ctx *c, const void *it) { paint_dockmenu(c, it); }
+static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c, it); }
 static void gl_do_dock(const struct paint_ctx *c, const void *it) { paint_dock(c, it); }
 static void gl_do_osk(const struct paint_ctx *c, const void *it) { paint_osk(c, it); }
 static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
@@ -565,16 +565,19 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             gl_chrome_free(p->r, &own);
         break;
     }
-    case LM_SCENE_DOCKMENU:
+    case LM_SCENE_MENU:
         if (item->output == p->st->out) {               /* rounded and a little translucent: redrawn only when it changes */
-            const struct lm_dockmenu_info *mi = &item->u.dockmenu;
-            struct gl_chrome *ch = &p->go->dockmenu;
+            const struct lm_menu_info *mi = &item->u.menu;
+            struct gl_chrome *ch = &p->go->menu;
             uint64_t h = fnv(1469598103934665603ull, &mi->rect, sizeof(mi->rect));
             h = fnv(h, &mi->sel, sizeof(mi->sel));
             h = fnv(h, mi->enabled, sizeof(mi->enabled));
             h = fnv(h, mi->title, strlen(mi->title) + 1);
+            h = fnv(h, &mi->n, sizeof(mi->n));
+            for (int i = 0; i < mi->n; i++)
+                h = fnv(h, mi->label[i], strlen(mi->label[i]) + 1);
             if (!ch->tex || ch->hash != h || ch->w != mi->rect.w || ch->h != mi->rect.h) {
-                gl_scratch_alpha(p->r, p->st, ch, &mi->rect, gl_do_dockmenu, mi);
+                gl_scratch_alpha(p->r, p->st, ch, &mi->rect, gl_do_menu, mi);
                 ch->hash = h;
             }
             if (ch->tex)

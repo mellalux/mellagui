@@ -52,6 +52,8 @@
 #include "uikit.h"
 #include "wlc.h"
 #include "util.h"
+#include "wlclip.h"
+#include "wltext.h"
 #include "wlwin.h"
 
 #define MAX_ENTRIES 100000
@@ -168,6 +170,7 @@ struct app {
     bool help;
     enum prompt prompt;
     char pbuf[PATH_MAX];
+    struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu) */
     char msg[300];
     int64_t msg_until;
     int rows_visible;
@@ -1320,10 +1323,11 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    (void)ver;
     struct app *a = w->data;
     if (a->choose_key && !strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
+    else
+        wlclip_global(&a->clip, w, name, iface, ver);
 }
 
 /* --choose: hand the picture to the compositor and end. */
@@ -2158,6 +2162,8 @@ static void handle_key(struct app *a, uint32_t ks)
                 else if (cn > 1)
                     msg(a, "%d matches: %s", cn, list);
             }
+        } else if (wltext_key(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods)) {      /* Ctrl+V / C / X on the prompt */
+            ;
         } else if (ks == LM_KS_BackSpace) {
             while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
                 len--;
@@ -2717,6 +2723,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;                                               /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
+        a->clip.serial = args[0].u;
+        if (args[2].u == 273 && args[3].u == 1) {                       /* BTN_RIGHT while a text prompt is asking: Cut / Copy / Paste / Clear */
+            if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY)
+                wlwin_menu(w, wltext_menu(a->pbuf));
+            break;
+        }
         if (args[2].u == 272 && args[3].u == 1) {
             if (a->help) {                                              /* a click closes the key list */
                 a->help = false;
@@ -2747,11 +2759,21 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
 }
 
+static void menu_event(struct wlwin *w, int index)
+{
+    struct app *a = w->data;
+    if (index >= 0 && a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {
+        wltext_menu_do(&a->clip, a->pbuf, sizeof(a->pbuf), index);
+        w->redraw = true;
+    }
+}
+
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
     switch (op) {
     case LM_WL_KEYBOARD_EVT_KEY: {
+        a->clip.serial = args[0].u;
         uint32_t code = args[2].u;
         if (args[3].u == 0) {
             if (a->rep_code == code)
@@ -3182,13 +3204,14 @@ int main(int argc, char **argv)
     a.pane[0].last_click_row = a.pane[1].last_click_row = -1;
     a.hover = -1;
     a.dual = choose == NULL;
-    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     a.choose_key = choose;
     if (wlwin_connect(&a.win, "mellagui-files", &ops, &a) < 0)
         return 1;
     if (wlwin_open(&a.win, choose ? "Choose a picture" : "Files", choose ? "mellagui.files.choose" : "mellagui.files",
                    choose ? 640 : 880, choose ? 460 : 460, choose ? 360 : 640, choose ? 160 : 240) < 0)
         return 1;
+    wlclip_attach(&a.clip, &a.win);
     char start[PATH_MAX], cwd[PATH_MAX];
     const char *home = getenv("HOME");
     if (argc == 2) {

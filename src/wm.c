@@ -4,6 +4,7 @@
 #include "metrics.h"
 #include "keys.h"
 #include "launchers.h"
+#include "menu.h"
 #include "wm.h"
 
 #include <ctype.h>
@@ -139,9 +140,11 @@ struct lm_wm {
     int osk_press_x, osk_press_y;
     struct lm_osk_place osk_start;   /* the place when the drag began */
     uint32_t osk_down_code, osk_down_mods;   /* what was pressed for the held key: its code and the latched modifiers pressed with it */
-    bool dockmenu_open;         /* the dock's right-click menu is showing for dock item dockmenu_item, in the card dockmenu_rect */
-    int dockmenu_item, dockmenu_sel;
-    struct lm_rect dockmenu_rect;
+    bool menu_open;             /* a menu is showing in the card menu_rect: the dock icon's (owner 0, for dock item menu_dock_item) or a program's (owner 1) */
+    int menu_owner, menu_dock_item, menu_sel, menu_n;
+    struct lm_rect menu_rect;
+    char menu_title[LM_DOCK_NAME_MAX], menu_label[LM_MENU_MAX][48];
+    bool menu_enab[LM_MENU_MAX];
     bool power_open;            /* the session dialog (Lock / Exit) is showing on the output called power_out */
     char power_out[32];
     int power_sel;              /* its highlighted button: 0 Lock, 1 Exit, -1 none yet */
@@ -278,7 +281,7 @@ static void frame_info(const struct lm_wm *wm, const struct lm_window *w, struct
 }
 
 static struct lm_window *calendar_window(struct lm_wm *wm);
-static void dockmenu_set(struct lm_wm *wm, bool open);
+static void menu_set(struct lm_wm *wm, bool open);
 static struct lm_rect output_panel_rect(const struct lm_output *o)
 {
     return lm_rect_make(o->x, o->y, o->width, LM_PANEL_HEIGHT);
@@ -635,7 +638,7 @@ static void sw_close(struct lm_wm *wm)
 
 static void sw_step(struct lm_wm *wm, bool backwards)
 {
-    dockmenu_set(wm, false);
+    menu_set(wm, false);
     struct lm_rect before = wm->sw_open ? sw_rect(wm) : lm_rect_make(0, 0, 0, 0);
     if (!wm->sw_open) {
         wm->sw_n = 0;
@@ -963,7 +966,7 @@ void lm_wm_set_gadget(struct lm_wm *wm, bool visible)
 }
 
 static void dock_damage(struct lm_wm *wm);
-static void dockmenu_set(struct lm_wm *wm, bool open);
+static void menu_set(struct lm_wm *wm, bool open);
 static void about_set(struct lm_wm *wm, bool open, struct lm_output *o);
 static void about_damage(struct lm_wm *wm);
 static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o);
@@ -1333,7 +1336,7 @@ void lm_wm_config_changed(struct lm_wm *wm)
     wm->dock_drag = false;
     wm->hover_dock = -1;
     memset(wm->dock_launch_ms, 0, sizeof(wm->dock_launch_ms));         /* (the buttons may be others now) */
-    dockmenu_set(wm, false);
+    menu_set(wm, false);
     lm_wm_output_changed(wm, NULL);
 }
 
@@ -1912,7 +1915,7 @@ static void power_damage(struct lm_wm *wm)
 static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
 {
     if (open)
-        dockmenu_set(wm, false);
+        menu_set(wm, false);
     if (open == wm->power_open)
         return;
     if (open) {
@@ -2365,7 +2368,7 @@ static void about_damage(struct lm_wm *wm)
 static void about_set(struct lm_wm *wm, bool open, struct lm_output *o)
 {
     if (open)
-        dockmenu_set(wm, false);
+        menu_set(wm, false);
     if (open == wm->about_open)
         return;
     if (open) {
@@ -2599,7 +2602,7 @@ static void launcher_damage(struct lm_wm *wm)
 static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
 {
     if (open)
-        dockmenu_set(wm, false);
+        menu_set(wm, false);
     if (open == wm->launcher_open)
         return;
     if (open) {
@@ -2873,6 +2876,56 @@ static void launcher_activate(struct lm_wm *wm, int kind, int index)
     }
 }
 
+/* The text of the form field that has the focus (name, command, icon) and its size; NULL while the icon row has it. */
+static char *launcher_field_text(struct lm_wm *wm, size_t *max)
+{
+    switch (wm->launcher_focus) {
+    case 0: *max = sizeof(wm->launcher_name); return wm->launcher_name;
+    case 1: *max = sizeof(wm->launcher_cmd); return wm->launcher_cmd;
+    case 2: *max = sizeof(wm->launcher_icon); return wm->launcher_icon;
+    default: return NULL;
+    }
+}
+
+/* Clipboard actions on the focused field of the form: 0 cut, 1 copy (both take the whole field), 2 paste (the newest copied text as one line, on
+ * the end), 3 clear. The compositor keeps the clipboard history itself, so it can read the text without asking a program. */
+static void launcher_field_clip(struct lm_wm *wm, int what)
+{
+    size_t max;
+    char *text = launcher_field_text(wm, &max);
+    if (!text || !wm->srv->seat)
+        return;
+    if (what == 0 || what == 1) {
+        if (text[0]) {
+            lm_seat_clip_add(wm->srv->seat, text);
+            lm_seat_clip_use(wm->srv->seat, 0);
+        }
+        if (what == 0)
+            text[0] = 0;
+    } else if (what == 2) {
+        const char *c = lm_seat_clip_count(wm->srv->seat) > 0 ? lm_seat_clip_get(wm->srv->seat, 0) : NULL;
+        size_t l = strlen(text);
+        for (; c && *c && l + 1 < max; c++) {
+            unsigned char ch = (unsigned char)*c;
+            if (ch == '\n' || ch == '\r' || ch == '\t')
+                ch = ' ';
+            if (ch < 0x20 || ch == 0x7f)
+                continue;
+            if ((ch & 0xc0) != 0x80 && ch >= 0xc0) {                         /* a multi-byte character goes in whole or not at all */
+                size_t need = ch >= 0xf0 ? 4 : ch >= 0xe0 ? 3 : 2;
+                if (l + need >= max)
+                    break;
+            }
+            text[l++] = (char)ch;
+            text[l] = 0;
+        }
+    } else {
+        text[0] = 0;
+    }
+    wm->launcher_msg[0] = 0;
+    launcher_damage(wm);
+}
+
 static void launcher_pop(char *text)
 {
     size_t l = strlen(text);
@@ -2960,6 +3013,21 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
             launcher_submit(wm);
         }
         return;
+    }
+    if (!(mods & (LM_MOD_ALT | LM_MOD_SUPER))) {                    /* the clipboard keys of a text field */
+        bool ctl = (mods & LM_MOD_CTRL) != 0;
+        if ((ctl && code == KEY_V) || (shift && !ctl && code == KEY_INSERT)) {
+            launcher_field_clip(wm, 2);
+            return;
+        }
+        if ((ctl && code == KEY_C) || (ctl && !shift && code == KEY_INSERT)) {
+            launcher_field_clip(wm, 1);
+            return;
+        }
+        if ((ctl && !shift && code == KEY_X) || (shift && !ctl && code == KEY_DELETE)) {
+            launcher_field_clip(wm, 0);
+            return;
+        }
     }
     if (wm->launcher_focus == 3) {
         if (code == KEY_LEFT || code == KEY_RIGHT) {
@@ -3271,48 +3339,139 @@ static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, 
     }
 }
 
-/* ---- the dock's right-click menu ------------------------------------------------------------------------------------------------ */
+/* ---- menus: the dock icon's right-click menu and the ones programs ask for (text field actions) ----------------------------------------- */
 
 #define DM_PAD 6
-#define DM_HEAD LM_DOCKMENU_HEAD
+#define DM_HEAD LM_MENU_HEAD
 #define DM_ITEM_H 28
-#define DM_MIN_W 190
+#define DM_MIN_W 150
 
-static const char *const dockmenu_label[LM_DOCKMENU_N] = { "New window", "Close all windows", "Change...", "Remove from dock" };
-
-static void dockmenu_damage(struct lm_wm *wm)
+static void menu_damage(struct lm_wm *wm)
 {
-    if (wm->dockmenu_rect.w > 0)
-        damage_rect(wm, &wm->dockmenu_rect);
+    if (wm->menu_rect.w > 0)
+        damage_rect(wm, &wm->menu_rect);
 }
 
-static void dockmenu_info(const struct lm_wm *wm, struct lm_dockmenu_info *mi)
+static void menu_info(const struct lm_wm *wm, struct lm_menu_info *mi)
 {
     memset(mi, 0, sizeof(*mi));
-    const struct lm_dock_item *it = lm_dock_item(wm->dockmenu_item);
-    mi->rect = wm->dockmenu_rect;
-    mi->title = it ? it->name : "";
-    mi->sel = wm->dockmenu_sel;
-    for (int i = 0; i < LM_DOCKMENU_N; i++) {
-        mi->entry[i] = lm_rect_make(mi->rect.x + DM_PAD, mi->rect.y + DM_HEAD + DM_PAD + i * DM_ITEM_H, mi->rect.w - 2 * DM_PAD, DM_ITEM_H);
-        mi->label[i] = dockmenu_label[i];
-        mi->enabled[i] = i != 1 || (it && dock_window_count(wm, it) > 0);       /* nothing to close when there is no window */
+    mi->rect = wm->menu_rect;
+    mi->title = wm->menu_title;
+    mi->sel = wm->menu_sel;
+    mi->n = wm->menu_n;
+    int head = wm->menu_title[0] ? DM_HEAD : 0;
+    for (int i = 0; i < wm->menu_n; i++) {
+        mi->entry[i] = lm_rect_make(mi->rect.x + DM_PAD, mi->rect.y + head + DM_PAD + i * DM_ITEM_H, mi->rect.w - 2 * DM_PAD, DM_ITEM_H);
+        mi->label[i] = wm->menu_label[i];
+        mi->enabled[i] = wm->menu_enab[i];
     }
 }
 
-static void dockmenu_set(struct lm_wm *wm, bool open)
+/* Closes the menu. A menu a program asked for is told when nothing was chosen. */
+static void menu_close(struct lm_wm *wm, bool chosen)
 {
-    if (open || !wm->dockmenu_open)
+    if (!wm->menu_open)
         return;
-    dockmenu_damage(wm);
-    wm->dockmenu_open = false;
-    wm->dockmenu_sel = -1;
-    wm->dockmenu_rect = (struct lm_rect){ 0 };
+    menu_damage(wm);
+    bool client = wm->menu_owner == 1;
+    wm->menu_open = false;
+    wm->menu_sel = -1;
+    wm->menu_rect = (struct lm_rect){ 0 };
+    if (client && !chosen)
+        lm_menu_closed(wm->srv);
+}
+
+static void menu_set(struct lm_wm *wm, bool open)
+{
+    if (!open)
+        menu_close(wm, false);
+}
+
+/* Fills the entries and works out the size of the card: the caller places it (menu_place). */
+static bool menu_fill(struct lm_wm *wm, int owner, const char *title, const char *const *labels, const bool *enabled, int n, int *w, int *h)
+{
+    if (n < 1 || n > LM_MENU_MAX)
+        return false;
+    menu_close(wm, false);
+    wm->menu_owner = owner;
+    wm->menu_n = n;
+    snprintf(wm->menu_title, sizeof(wm->menu_title), "%s", title ? title : "");
+    int widest = lm_font_text_width(wm->menu_title);
+    for (int i = 0; i < n; i++) {
+        snprintf(wm->menu_label[i], sizeof(wm->menu_label[i]), "%s", labels[i]);
+        wm->menu_enab[i] = enabled ? enabled[i] : true;
+        widest = LM_MAX(widest, lm_font_text_width(wm->menu_label[i]));
+    }
+    *w = LM_MAX(DM_MIN_W, widest + 40);
+    *h = (wm->menu_title[0] ? DM_HEAD : 0) + 2 * DM_PAD + n * DM_ITEM_H;
+    return true;
+}
+
+static void menu_place(struct lm_wm *wm, int x, int y, int w, int h, const struct lm_output *o)
+{
+    struct lm_rect orect = lm_output_rect(o);
+    x = LM_CLAMP(x, orect.x + 4, LM_MAX(orect.x + orect.w - w - 4, orect.x + 4));
+    y = LM_CLAMP(y, orect.y + LM_PANEL_HEIGHT + 4, LM_MAX(orect.y + orect.h - h - 4, orect.y + LM_PANEL_HEIGHT + 4));
+    wm->menu_open = true;
+    wm->menu_sel = -1;
+    wm->menu_rect = lm_rect_make(x, y, w, h);
+    menu_damage(wm);
+}
+
+bool lm_wm_menu_popup(struct lm_wm *wm, const char *const *labels, int n)
+{
+    if (!wm || lm_lock_active(wm->srv->lock) || !wm->srv->seat)
+        return false;
+    double px = 0, py = 0;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    struct lm_output *o = lm_output_nearest(wm->srv, px, py);
+    int w, h;
+    if (!o || !menu_fill(wm, 1, NULL, labels, NULL, n, &w, &h))
+        return false;
+    for (int i = 0; i < n; i++)                                      /* a leading '~' marks an entry that cannot be chosen */
+        if (labels[i][0] == '~') {
+            wm->menu_enab[i] = false;
+            memmove(wm->menu_label[i], wm->menu_label[i] + 1, strlen(wm->menu_label[i]));
+        }
+    menu_place(wm, (int)px - 4, (int)py - 4, w, h, o);
+    return true;
+}
+
+void lm_wm_menu_cancel(struct lm_wm *wm)
+{
+    if (wm && wm->menu_open && wm->menu_owner == 1) {
+        menu_damage(wm);
+        wm->menu_open = false;
+        wm->menu_sel = -1;
+        wm->menu_rect = (struct lm_rect){ 0 };
+    }
+}
+
+/* Right click on a text field of the launcher's form: Cut / Copy / Paste / Clear at the pointer. */
+static void launcher_field_menu(struct lm_wm *wm, int field)
+{
+    static const char *const labels[4] = { "Cut", "Copy", "Paste", "Clear" };
+    wm->launcher_focus = field;
+    size_t max;
+    const char *text = launcher_field_text(wm, &max);
+    if (!text || !wm->srv->seat)
+        return;
+    bool has = text[0] != 0, clip = lm_seat_clip_count(wm->srv->seat) > 0;
+    bool enabled[4] = { has, has, clip, has };
+    double px = 0, py = 0;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    struct lm_output *o = lm_output_nearest(wm->srv, px, py);
+    int w, h;
+    if (!o || !menu_fill(wm, 2, NULL, labels, enabled, 4, &w, &h))
+        return;
+    menu_place(wm, (int)px - 4, (int)py - 4, w, h, o);
+    launcher_damage(wm);
 }
 
 /* Right click on dock icon `i`: the menu opens above the icon. The Launcher button has none (it is not a program). */
-static void dockmenu_open(struct lm_wm *wm, int i)
+static void dockitem_menu_open(struct lm_wm *wm, int i)
 {
+    static const char *const labels[4] = { "New window", "Close all windows", "Change...", "Remove from dock" };
     const struct lm_dock_item *it = lm_dock_item(i);
     struct lm_output *o = dock_output(wm);
     if (!it || !o || launcher_is_self(it))
@@ -3325,27 +3484,21 @@ static void dockmenu_open(struct lm_wm *wm, int i)
             box = d.icon[k].box;
     if (box.w <= 0)
         return;
-    int w = LM_MAX(DM_MIN_W, lm_font_text_width(dockmenu_label[1]) + 40);
-    w = LM_MAX(w, lm_font_text_width(it->name) + 40);
-    int h = DM_HEAD + 2 * DM_PAD + LM_DOCKMENU_N * DM_ITEM_H;
-    struct lm_rect orect = lm_output_rect(o);
-    int x = LM_CLAMP(box.x + box.w / 2 - w / 2, orect.x + 4, orect.x + orect.w - w - 4);
-    int y = LM_MAX(box.y - 14 - h, orect.y + LM_PANEL_HEIGHT + 4);
-    dockmenu_set(wm, false);
-    wm->dockmenu_open = true;
-    wm->dockmenu_item = i;
-    wm->dockmenu_sel = -1;
-    wm->dockmenu_rect = lm_rect_make(x, y, w, h);
-    dockmenu_damage(wm);
+    bool enabled[4] = { true, dock_window_count(wm, it) > 0, true, true };      /* nothing to close when there is no window */
+    int w, h;
+    if (!menu_fill(wm, 0, it->name, labels, enabled, 4, &w, &h))
+        return;
+    w = LM_MAX(w, 190);
+    wm->menu_dock_item = i;
+    menu_place(wm, box.x + box.w / 2 - w / 2, box.y - 14 - h, w, h, o);
 }
 
 /* An entry was chosen: 0 a new window (another instance), 1 close every window of the program, 2 change the button in the launcher's form,
  * 3 take it out of the dock (it stays in the launcher). */
-static void dockmenu_activate(struct lm_wm *wm, int which)
+static void dockitem_menu_activate(struct lm_wm *wm, int which)
 {
-    int di = wm->dockmenu_item;
+    int di = wm->menu_dock_item;
     const struct lm_dock_item *it = lm_dock_item(di);
-    dockmenu_set(wm, false);
     if (!it || launcher_is_self(it))
         return;
     switch (which) {
@@ -3377,16 +3530,32 @@ static void dockmenu_activate(struct lm_wm *wm, int which)
     }
 }
 
-size_t lm_wm_dockmenu_describe(struct lm_wm *wm, char *buf, size_t size)
+/* An entry was chosen: whoever asked for the menu gets it. */
+static void menu_activate(struct lm_wm *wm, int which)
 {
-    size_t n = (size_t)snprintf(buf, size, "dockmenu open=%d item=%d sel=%d\n", wm->dockmenu_open, wm->dockmenu_open ? wm->dockmenu_item : -1,
-                                wm->dockmenu_open ? wm->dockmenu_sel : -1);
-    if (!wm->dockmenu_open)
+    int owner = wm->menu_owner;
+    if (which < 0 || which >= wm->menu_n || !wm->menu_enab[which])
+        return;
+    menu_close(wm, true);
+    if (owner == 0)
+        dockitem_menu_activate(wm, which);
+    else if (owner == 2)
+        launcher_field_clip(wm, which);
+    else
+        lm_menu_chosen(wm->srv, which);
+}
+
+size_t lm_wm_menu_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    size_t n = (size_t)snprintf(buf, size, "dockmenu open=%d item=%d sel=%d owner=%d\n", wm->menu_open,
+                                wm->menu_open && wm->menu_owner == 0 ? wm->menu_dock_item : -1, wm->menu_open ? wm->menu_sel : -1,
+                                wm->menu_open ? wm->menu_owner : -1);
+    if (!wm->menu_open)
         return n < size ? n : size - 1;
-    struct lm_dockmenu_info mi;
-    dockmenu_info(wm, &mi);
+    struct lm_menu_info mi;
+    menu_info(wm, &mi);
     n += (size_t)snprintf(buf + n, size - n, "card x=%d y=%d w=%d h=%d title=\"%s\"\n", mi.rect.x, mi.rect.y, mi.rect.w, mi.rect.h, mi.title);
-    for (int i = 0; i < LM_DOCKMENU_N && n < size; i++)
+    for (int i = 0; i < mi.n && n < size; i++)
         n += (size_t)snprintf(buf + n, size - n, "entry %d \"%s\" x=%d y=%d w=%d h=%d enabled=%d\n", i, mi.label[i], mi.entry[i].x, mi.entry[i].y,
                               mi.entry[i].w, mi.entry[i].h, mi.enabled[i]);
     return n < size ? n : size - 1;
@@ -3802,17 +3971,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 return;
         }
     }
-    if (wm->dockmenu_open && !lm_lock_active(wm->srv->lock) && (!clip || lm_rect_overlaps(&wm->dockmenu_rect, clip))) {    /* the dock's menu */
-        memset(&it, 0, sizeof(it));
-        it.kind = LM_SCENE_DOCKMENU;
-        it.output = dock_output(wm);
-        if (it.output) {
-            dockmenu_info(wm, &it.u.dockmenu);
-            if (!fn(&it, data))
-                return;
-        }
-    }
-
     struct lm_popup *p;
     lm_list_for_each(p, &wm->popups, link) {
         if (!popup_visible(wm, p, 0))
@@ -3890,6 +4048,18 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             }
         }
     }
+
+    if (wm->menu_open && !lm_lock_active(wm->srv->lock) && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {    /* a menu: above the dialogs */
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_MENU;
+        it.output = lm_output_nearest(wm->srv, wm->menu_rect.x + wm->menu_rect.w / 2, wm->menu_rect.y + wm->menu_rect.h / 2);
+        if (it.output) {
+            menu_info(wm, &it.u.menu);
+            if (!fn(&it, data))
+                return;
+        }
+    }
+
 
     if (wm->osk_open) {                                          /* the on-screen keyboard: above the dialogs, below the Alt+Tab list */
         struct lm_osk_geo og;
@@ -4011,6 +4181,18 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
 
     if (osk_pick(wm, ix, iy, out))                               /* the on-screen keyboard is above everything, dialogs included */
         return;
+    if (wm->menu_open && !lm_lock_active(wm->srv->lock)) {   /* a menu (above every dialog) takes every pick while it is open */
+        struct lm_menu_info mi;
+        menu_info(wm, &mi);
+        out->kind = lm_rect_contains(&mi.rect, ix, iy) ? LM_PICK_MENU : LM_PICK_MENU_BACKDROP;
+        for (int i = 0; i < mi.n; i++)
+            if (mi.enabled[i] && lm_rect_contains(&mi.entry[i], ix, iy)) {
+                out->kind = LM_PICK_MENU_ITEM;
+                out->index = i;
+            }
+        out->rect = mi.rect;
+        return;
+    }
     if (launcher_pick(wm, ix, iy, out))                          /* the launcher dialog is modal: it gets every pick */
         return;
     struct lm_output *ao = about_output(wm);
@@ -4021,18 +4203,6 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
         if (lm_rect_contains(&ai.close, ix, iy))
             out->kind = LM_PICK_ABOUT_BUTTON;
         out->rect = ai.card;
-        return;
-    }
-    if (wm->dockmenu_open && !lm_lock_active(wm->srv->lock)) {   /* the dock's menu takes every pick while it is open */
-        struct lm_dockmenu_info mi;
-        dockmenu_info(wm, &mi);
-        out->kind = lm_rect_contains(&mi.rect, ix, iy) ? LM_PICK_DOCKMENU : LM_PICK_DOCKMENU_BACKDROP;
-        for (int i = 0; i < LM_DOCKMENU_N; i++)
-            if (mi.enabled[i] && lm_rect_contains(&mi.entry[i], ix, iy)) {
-                out->kind = LM_PICK_DOCKMENU_ITEM;
-                out->index = i;
-            }
-        out->rect = mi.rect;
         return;
     }
     struct lm_output *po = power_output(wm);
@@ -4275,7 +4445,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_CLOCK: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
-    case LM_PICK_DOCKMENU_ITEM: dm_item = pick->index; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_MENU_ITEM: dm_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_OSK: osk_btn = true; shape = LM_CURSOR_POINTER; break;
@@ -4329,9 +4499,9 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         wm->about_hover_close = about_btn;
         about_damage(wm);
     }
-    if (wm->dockmenu_open && dm_item != wm->dockmenu_sel && (dm_item >= 0 || pick->kind == LM_PICK_DOCKMENU || pick->kind == LM_PICK_DOCKMENU_BACKDROP)) {
-        wm->dockmenu_sel = dm_item;                              /* the pointer moves the menu's highlight */
-        dockmenu_damage(wm);
+    if (wm->menu_open && dm_item != wm->menu_sel && (dm_item >= 0 || pick->kind == LM_PICK_MENU || pick->kind == LM_PICK_MENU_BACKDROP)) {
+        wm->menu_sel = dm_item;                              /* the pointer moves the menu's highlight */
+        menu_damage(wm);
     }
     if (wm->power_open && power_item >= 0 && power_item != wm->power_sel) {     /* the pointer moves the dialog's highlight */
         wm->power_sel = power_item;
@@ -4825,21 +4995,21 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         return true;                                            /* the keyboard never moves the focus and nothing under it gets the click */
     }
-    if (pick->kind == LM_PICK_DOCKMENU_ITEM || pick->kind == LM_PICK_DOCKMENU || pick->kind == LM_PICK_DOCKMENU_BACKDROP) {
+    if (pick->kind == LM_PICK_MENU_ITEM || pick->kind == LM_PICK_MENU || pick->kind == LM_PICK_MENU_BACKDROP) {
         int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
         if (pressed) {
-            if (pick->kind == LM_PICK_DOCKMENU_BACKDROP) {      /* a click outside the menu closes it, nothing below gets it */
-                dockmenu_set(wm, false);
-            } else if (pick->kind == LM_PICK_DOCKMENU_ITEM && button == BTN_LEFT) {
-                wm->press_panel_kind = LM_PICK_DOCKMENU_ITEM;
+            if (pick->kind == LM_PICK_MENU_BACKDROP) {      /* a click outside the menu closes it, nothing below gets it */
+                menu_set(wm, false);
+            } else if (pick->kind == LM_PICK_MENU_ITEM && button == BTN_LEFT) {
+                wm->press_panel_kind = LM_PICK_MENU_ITEM;
                 wm->press_panel_ws = pick->index;
                 wm->press_win = NULL;
                 wm->press_bits = 0;
             }
         } else {
             wm->press_panel_kind = 0;
-            if (pk == LM_PICK_DOCKMENU_ITEM && pick->kind == LM_PICK_DOCKMENU_ITEM && pick->index == pi && button == BTN_LEFT)
-                dockmenu_activate(wm, pi);                      /* released on the entry it was pressed on */
+            if (pk == LM_PICK_MENU_ITEM && pick->kind == LM_PICK_MENU_ITEM && pick->index == pi && button == BTN_LEFT)
+                menu_activate(wm, pi);                          /* released on the entry it was pressed on */
         }
         return true;
     }
@@ -4859,6 +5029,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             if (pk == LM_PICK_POWER_BUTTON && pick->kind == LM_PICK_POWER_BUTTON && pick->index == pi && button == BTN_LEFT)
                 power_activate(wm, pi);                         /* released on the button it was pressed on */
         }
+        return true;
+    }
+    if (pressed && button == BTN_RIGHT && pick->kind == LM_PICK_LAUNCHER_FIELD) {      /* a right click on a field of the form: its menu */
+        launcher_field_menu(wm, pick->index);
         return true;
     }
     if (pick->kind >= LM_PICK_LAUNCHER_ITEM && pick->kind <= LM_PICK_LAUNCHER_BACKDROP) {
@@ -5053,7 +5227,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         return true;
     case LM_PICK_DOCK_ITEM:
         if (button == BTN_RIGHT) {
-            dockmenu_open(wm, pick->index);
+            dockitem_menu_open(wm, pick->index);
             return true;
         }
         if (button == BTN_LEFT || button == BTN_MIDDLE) {
@@ -5185,7 +5359,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
     if (!wm)
         return;
     if (locked) {
-        dockmenu_set(wm, false);
+        menu_set(wm, false);
         sw_close(wm);
         power_set(wm, false, NULL);
         about_set(wm, false, NULL);
@@ -5348,6 +5522,28 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     bool ctrl = (mods & LM_MOD_CTRL) != 0;
     bool alt = (mods & LM_MOD_ALT) != 0;
 
+    if (wm->menu_open && !(ctrl && alt)) {                  /* a menu takes every key: Esc closes, Up / Down choose, Enter does it */
+        if (pressed && !repeat) {
+            struct lm_menu_info mi;
+            menu_info(wm, &mi);
+            if (code == KEY_ESC) {
+                menu_set(wm, false);
+            } else if (code == KEY_UP || code == KEY_DOWN) {
+                int dir = code == KEY_UP ? -1 : 1, k = wm->menu_sel;
+                for (int step = 0; step < mi.n; step++) {
+                    k = k < 0 ? (dir > 0 ? 0 : mi.n - 1) : (k + dir + mi.n) % mi.n;
+                    if (mi.enabled[k]) {
+                        wm->menu_sel = k;
+                        menu_damage(wm);
+                        break;
+                    }
+                }
+            } else if ((code == KEY_ENTER || code == KEY_KPENTER) && wm->menu_sel >= 0 && mi.enabled[wm->menu_sel]) {
+                menu_activate(wm, wm->menu_sel);
+            }
+        }
+        return true;
+    }
     if (wm->launcher_open && !(ctrl && alt)) {                  /* the launcher dialog is modal and takes every key */
         if (pressed && !is_modifier_key(code))
             launcher_key(wm, code, repeat, mods);
@@ -5356,28 +5552,6 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     if (wm->about_open && !(ctrl && alt)) {                     /* the About dialog is modal, too: Esc, Enter and Space close it */
         if (pressed && !repeat && (code == KEY_ESC || code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE))
             about_set(wm, false, NULL);
-        return true;
-    }
-    if (wm->dockmenu_open && !(ctrl && alt)) {                  /* the dock's menu takes every key: Esc closes, Up / Down choose, Enter does it */
-        if (pressed && !repeat) {
-            struct lm_dockmenu_info mi;
-            dockmenu_info(wm, &mi);
-            if (code == KEY_ESC) {
-                dockmenu_set(wm, false);
-            } else if (code == KEY_UP || code == KEY_DOWN) {
-                int dir = code == KEY_UP ? -1 : 1, k = wm->dockmenu_sel;
-                for (int step = 0; step < LM_DOCKMENU_N; step++) {
-                    k = k < 0 ? (dir > 0 ? 0 : LM_DOCKMENU_N - 1) : (k + dir + LM_DOCKMENU_N) % LM_DOCKMENU_N;
-                    if (mi.enabled[k]) {
-                        wm->dockmenu_sel = k;
-                        dockmenu_damage(wm);
-                        break;
-                    }
-                }
-            } else if ((code == KEY_ENTER || code == KEY_KPENTER) && wm->dockmenu_sel >= 0 && mi.enabled[wm->dockmenu_sel]) {
-                dockmenu_activate(wm, wm->dockmenu_sel);
-            }
-        }
         return true;
     }
     if (wm->power_open && !(ctrl && alt)) {                     /* the session dialog is modal: it takes every key */

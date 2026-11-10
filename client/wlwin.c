@@ -138,6 +138,26 @@ static void seat_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
     }
 }
 
+static void menu_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id;
+    struct wlwin *w = data;
+    if (!w->ops->menu)
+        return;
+    if (op == LM_MELLAGUI_MENU_V1_EVT_CHOSEN)
+        w->ops->menu(w, args[0].i);
+    else if (op == LM_MELLAGUI_MENU_V1_EVT_CLOSED)
+        w->ops->menu(w, -1);
+}
+
+bool wlwin_menu(struct wlwin *w, const char *entries)
+{
+    if (!w->menu)
+        return false;
+    WLC_SEND(w->c, w->menu, LM_MELLAGUI_MENU_V1_REQ_POPUP, { .s = entries });
+    return true;
+}
+
 static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)id;
@@ -154,6 +174,8 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         w->wm_base = wlc_bind(c, w->registry, name, &lm_xdg_wm_base_interface, LM_MIN(ver, 3u), wm_base_event, w);
     else if (!strcmp(iface, "wl_seat"))
         w->seat = wlc_bind(c, w->registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, w);
+    else if (!strcmp(iface, "mellagui_menu_v1"))
+        w->menu = wlc_bind(c, w->registry, name, &lm_mellagui_menu_v1_interface, 1, menu_event, w);
     else if (w->ops->global)
         w->ops->global(w, name, iface, ver);
 }

@@ -911,18 +911,20 @@ static void fit_text(char *out, size_t n, const char *text, int maxw, bool tail)
 
 /* The dock's right-click menu: a rounded card with the button's name in the accent colour and four entries; the highlighted one is lit, an entry
  * that does nothing right now (no window to close) is dim. */
-static void paint_dockmenu(const struct paint_ctx *c, const struct lm_dockmenu_info *mi)
+static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *mi)
 {
     fill_round(c, &mi->rect, 12, 0xff000000u | lm_theme.border);
     struct lm_rect in = lm_rect_make(mi->rect.x + 1, mi->rect.y + 1, mi->rect.w - 2, mi->rect.h - 2);
     fill_round(c, &in, 11, 0xf2000000u | COL_PANEL);
-    struct lm_rect head = lm_rect_make(mi->rect.x + 12, mi->rect.y + 6, mi->rect.w - 24, LM_FONT_H);
-    char fit[LM_DOCK_NAME_MAX + 4];
-    fit_text(fit, sizeof(fit), mi->title, head.w, false);
-    draw_text(c, &head, head.x, head.y + 2, fit, COL_PANEL_ACCENT);
-    struct lm_rect line = lm_rect_make(mi->rect.x + 10, mi->rect.y + LM_DOCKMENU_HEAD - 2, mi->rect.w - 20, 1);
-    fill_rect(c, &line, lm_theme.border);
-    for (int i = 0; i < LM_DOCKMENU_N; i++) {
+    if (mi->title[0]) {
+        struct lm_rect head = lm_rect_make(mi->rect.x + 12, mi->rect.y + 6, mi->rect.w - 24, LM_FONT_H);
+        char fit[LM_DOCK_NAME_MAX + 4];
+        fit_text(fit, sizeof(fit), mi->title, head.w, false);
+        draw_text(c, &head, head.x, head.y + 2, fit, COL_PANEL_ACCENT);
+        struct lm_rect line = lm_rect_make(mi->rect.x + 10, mi->rect.y + LM_MENU_HEAD - 2, mi->rect.w - 20, 1);
+        fill_rect(c, &line, lm_theme.border);
+    }
+    for (int i = 0; i < mi->n; i++) {
         const struct lm_rect *e = &mi->entry[i];
         if (mi->sel == i && mi->enabled[i])
             fill_round(c, e, 8, 0xff000000u | COL_PANEL_HOVER);
@@ -2129,9 +2131,9 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
         if (item->output == c->out)
             paint_dock(c, &item->u.dock);
         break;
-    case LM_SCENE_DOCKMENU:
+    case LM_SCENE_MENU:
         if (item->output == c->out)
-            paint_dockmenu(c, &item->u.dockmenu);
+            paint_menu(c, &item->u.menu);
         break;
     case LM_SCENE_ABOUT:
         if (item->output == c->out)

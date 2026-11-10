@@ -153,6 +153,7 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    const char *status_cmd;     /* the battery / network buttons of the panel, started with the compositor ([commands] status, default "mellagui-status", "none" = off) */
     const char *calendar_cmd;   /* the calendar program, started with the compositor and shown by a click on the clock ([commands] calendar, default "mellagui-calendar") */
     struct lm_clockfmt clock;   /* how the panel's clock and the date are written (settings: clock-hours, clock-seconds, clock-date, clock-weekday, date-format) */
     bool cal_enabled;           /* a click on the clock shows the calendar (settings: cal-enabled; default true) */

@@ -655,6 +655,8 @@ int main(int argc, char **argv)
         lm_server_spawn(srv, cfg.exec_cmd);
     if (srv->wm && (!headless || getenv("MELLAGUI_CALENDAR_PRELOAD")))      /* the calendar waits hidden for a click on the clock (tests start it by that click) */
         lm_wm_calendar_start(srv->wm);
+    if (srv->wm && cfg.status_cmd && *cfg.status_cmd && strcmp(cfg.status_cmd, "none") && (!headless || getenv("MELLAGUI_STATUS_PRELOAD")))
+        lm_server_spawn(srv, cfg.status_cmd);                              /* the battery and network buttons of the panel (tests start it with MELLAGUI_STATUS_PRELOAD) */
 
     rc = lm_loop_run(loop);
 

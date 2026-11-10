@@ -11,6 +11,7 @@
  *                                     settings = mellagui-settings  Super+I
  *                                     view     = mellagui-view      the screenshot card's click
  *                                     saver    = mellagui-matrix    the screensaver (a full screen client; saver.h)
+ *                                     status   = mellagui-status    the battery and network buttons of the panel (kept running; none = off)
  *                                     calendar = mellagui-calendar  the calendar a click on the panel's clock shows (kept running, hidden)
  *                                     suspend / reboot / poweroff = systemctl suspend ...   the session dialog's Suspend, Restart and Shutdown buttons (`suspend = none` turns Suspend off: a server)
  *

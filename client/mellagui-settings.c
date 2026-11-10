@@ -323,8 +323,8 @@ static int selftest(void)
 #define MAX_KV 160
 #define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, PAGE_CLOCK, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver", "Clock" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver", "Clock", "Night" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP };
 
@@ -1013,6 +1013,53 @@ static void build_clock(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y + ROW_H - 8, w, ROW_H }, "another program: [commands] calendar = ... in mellagui.conf.");
 }
 
+/* "HH:MM" -> minutes after midnight rounded down to 15, def when it is not a time */
+static int time_minutes(const char *t, int def)
+{
+    int h, m;
+    return t && sscanf(t, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60 ? h * 60 + m / 15 * 15 : def;
+}
+
+static bool time_slider(const struct widget *w)
+{
+    return w->kind == W_SLIDER && (!strcmp(w->key, "night-from") || !strcmp(w->key, "night-to"));
+}
+
+/* Night light: a warmer display in the evening (src/nightlight.c). */
+static void build_night(struct app *a, int x, int y, int w)
+{
+    static const char *const modes[3] = { "off", "on", "auto" };
+    static const char *const names[3] = { "Off", "On", "Scheduled" };
+    const char *cur = kv_get(a, "night-light");
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Night light");
+    y += ROW_H;
+    for (int i = 0; i < 3; i++)
+        add_radio(a, x + i * (w / 3), y, w / 3, names[i], "night-light", modes[i], !strcmp(cur, modes[i]));
+    y += ROW_H + 6;
+    add_slider(a, x, y, w, "Colour temperature", "night-temp", 2000, 6500, 100, " K");
+    y += ROW_H;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "6500 K is no change; lower is warmer (less blue).");
+    y += ROW_H + 8;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Schedule");
+    y += ROW_H;
+    struct widget *f = add(a, W_SLIDER, (struct rect){ x, y, w, ROW_H }, "From");
+    snprintf(f->key, sizeof(f->key), "night-from");
+    f->lo = 0;
+    f->hi = 23 * 60 + 45;
+    f->step = 15;
+    f->val = time_minutes(kv_get(a, "night-from"), 21 * 60);
+    y += ROW_H;
+    struct widget *t = add(a, W_SLIDER, (struct rect){ x, y, w, ROW_H }, "Until");
+    snprintf(t->key, sizeof(t->key), "night-to");
+    t->lo = 0;
+    t->hi = 23 * 60 + 45;
+    t->step = 15;
+    t->val = time_minutes(kv_get(a, "night-to"), 6 * 60 + 30);
+    y += ROW_H + 6;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Used when 'Scheduled' is chosen.");
+    add(a, W_LABEL, (struct rect){ x, y + ROW_H - 8, w, ROW_H }, "Super+Shift+N switches the night light on and off.");
+}
+
 static void dock_clear_form(struct app *a)
 {
     a->input[4][0] = a->input[5][0] = a->input[6][0] = 0;
@@ -1489,6 +1536,7 @@ static void build(struct app *a)
     case PAGE_DOCK: build_dock(a, x, y, w); break;
     case PAGE_SAVER: build_saver(a, x, y, w); break;
     case PAGE_CLOCK: build_clock(a, x, y, w); break;
+    case PAGE_NIGHT: build_night(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     attach_help(a, x, w);
@@ -1811,6 +1859,10 @@ static void slider_set(struct app *a, const struct widget *w, int v)
         colour_set_hex(a);
         a->col_err[0] = 0;
         a->win.redraw = true;
+    } else if (time_slider(w)) {
+        char t[16];
+        snprintf(t, sizeof(t), "%02d:%02d", v / 60, v % 60);
+        send_set(a, w->key, t);
     } else {
         send_set_int(a, w->key, v);
     }
@@ -2201,7 +2253,10 @@ static void paint_widget(struct app *a, int idx)
         if (focus)
             outline(a, (struct rect){ knob.x - 2, knob.y - 2, knob.w + 4, knob.h + 4 }, COL_ACCENT);
         char v[24];
-        snprintf(v, sizeof(v), "%d%s", w->val, w->unit ? w->unit : "");
+        if (time_slider(w))
+            snprintf(v, sizeof(v), "%02d:%02d", w->val / 60, w->val % 60);
+        else
+            snprintf(v, sizeof(v), "%d%s", w->val, w->unit ? w->unit : "");
         draw_text(a, t.x + t.w + 12, text_y(r), v, COL_DIM, 0);
         break;
     }

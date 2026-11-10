@@ -45,6 +45,13 @@ int lm_audio_list_profiles(char *list, size_t n, char *current, size_t cn);
 /* Switches the card to the profile of an entry of that list ("43:6"). True when PipeWire reports it active afterwards. */
 bool lm_audio_set_profile(const char *entry);
 
+/* The lasting name of a profile entry ("43:6" -> "Built-in Audio|output:hdmi-stereo"): the card's description and the
+ * profile's name survive a restart of PipeWire, the ids do not. False when it cannot be found. */
+bool lm_audio_profile_key(const char *entry, char *out, size_t n);
+/* Switches the card to a profile saved by lm_audio_profile_key(). 0 = it is active now, 1 = nothing to do / the profile is gone
+ * (give up), -1 = the sound server or the card is not there yet (try again later). */
+int lm_audio_apply_profile_key(const char *key);
+
 struct lm_audio_card { int id; char desc[64]; };
 struct lm_audio_profile { int index; char name[64]; char desc[96]; bool available; };
 /* `pw-cli ls Device`: the Audio/Device objects (id, device.description). */

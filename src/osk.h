@@ -22,6 +22,7 @@ enum lm_osk_kind {
     LM_OSK_CTRL,
     LM_OSK_ALT,
     LM_OSK_ALTGR,
+    LM_OSK_SUPER,       /* the Super (logo) key, latched like the others: Super+Enter, Super+W ... */
     LM_OSK_CAPS,        /* taps Caps Lock (the input module toggles it) */
     LM_OSK_HIDE,        /* closes the keyboard */
 };

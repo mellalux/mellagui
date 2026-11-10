@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "loop.h"
+#include "util.h"
 
 bool lm_audio_name_ok(const char *name)
 {
@@ -629,6 +630,82 @@ bool lm_audio_set_profile(const char *entry)
     if (!run_capture(cur_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
         return false;
     return lm_audio_parse_current_profile(g_profile_buf) == index;
+}
+
+/* A profile entry "43:6" is only good until PipeWire restarts (ids change); the lasting form is "card description|profile name". */
+bool lm_audio_profile_key(const char *entry, char *out, size_t n)
+{
+    int card, index;
+    char junk;
+    if (n)
+        out[0] = 0;
+    if (!entry || !n || sscanf(entry, "%d:%d%c", &card, &index, &junk) != 2 || !in_path("pw-cli"))
+        return false;
+    char *const ls_cmd[] = { "pw-cli", "ls", "Device", NULL };
+    if (!run_capture(ls_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+        return false;
+    struct lm_audio_card cards[8];
+    int nc = lm_audio_parse_cards(g_profile_buf, cards, 8);
+    for (int c = 0; c < nc; c++) {
+        if (cards[c].id != card)
+            continue;
+        char id[16];
+        snprintf(id, sizeof(id), "%d", card);
+        char *const enum_cmd[] = { "pw-cli", "enum-params", id, "EnumProfile", NULL };
+        if (!run_capture(enum_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+            return false;
+        static struct lm_audio_profile profs[64];
+        int np = lm_audio_parse_profiles(g_profile_buf, profs, 64);
+        for (int i = 0; i < np; i++)
+            if (profs[i].index == index && !strchr(profs[i].name, '|') && !strchr(cards[c].desc, '\n')) {
+                snprintf(out, n, "%s|%s", cards[c].desc, profs[i].name);
+                return true;
+            }
+        return false;
+    }
+    return false;
+}
+
+int lm_audio_apply_profile_key(const char *key)
+{
+    const char *bar = key ? strrchr(key, '|') : NULL;
+    if (!bar || bar == key || !bar[1])
+        return 1;                                       /* nothing saved: nothing to do */
+    if (!in_path("pw-cli"))
+        return -1;
+    char desc[96];
+    snprintf(desc, sizeof(desc), "%.*s", (int)LM_MIN((size_t)(bar - key), sizeof(desc) - 1), key);
+    char *const ls_cmd[] = { "pw-cli", "ls", "Device", NULL };
+    if (!run_capture(ls_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+        return -1;                                      /* no PipeWire yet */
+    struct lm_audio_card cards[8];
+    int nc = lm_audio_parse_cards(g_profile_buf, cards, 8);
+    for (int c = 0; c < nc; c++) {
+        if (strcmp(cards[c].desc, desc))
+            continue;
+        char id[16];
+        snprintf(id, sizeof(id), "%d", cards[c].id);
+        char *const enum_cmd[] = { "pw-cli", "enum-params", id, "EnumProfile", NULL };
+        if (!run_capture(enum_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+            return -1;
+        static struct lm_audio_profile profs[64];
+        int np = lm_audio_parse_profiles(g_profile_buf, profs, 64);
+        char *const cur_cmd[] = { "pw-cli", "enum-params", id, "Profile", NULL };
+        int cur = -1;
+        if (run_capture(cur_cmd, g_profile_buf, sizeof(g_profile_buf), 1500))
+            cur = lm_audio_parse_current_profile(g_profile_buf);
+        for (int i = 0; i < np; i++) {
+            if (strcmp(profs[i].name, bar + 1))
+                continue;
+            if (profs[i].index == cur)
+                return 0;                               /* already the one */
+            char entry[24];
+            snprintf(entry, sizeof(entry), "%d:%d", cards[c].id, profs[i].index);
+            return lm_audio_set_profile(entry) ? 0 : -1;
+        }
+        return 1;                                       /* this card has no such profile any more */
+    }
+    return -1;                                          /* the card is not there (yet) */
 }
 
 /* ---- asynchronous processes (mixer) ---------------------------------------------------------------------------- */

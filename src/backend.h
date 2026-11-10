@@ -163,6 +163,12 @@ struct lm_backend_ops {
      */
     struct lm_gl_window *(*gl_window)(struct lm_output *out);
     int (*gl_present)(struct lm_output *out);
+    /*
+     * Colour tint for the whole display (night light): b->tint[0..2] (red, green, blue gain, 0..1; 1 1 1 = no tint) and b->tinted are
+     * already set when this is called. DRM puts it in the CRTCs' gamma tables (no cost per frame, screenshots and recordings stay
+     * untinted); headless applies it to the pictures it writes (dump). NULL = unsupported. Returns 0 or -1.
+     */
+    int (*set_tint)(struct lm_backend *b);
 };
 
 struct lm_backend {
@@ -172,6 +178,8 @@ struct lm_backend {
     struct lm_list outputs;         /* struct lm_output.link */
     bool session_active;
     bool blanked;                   /* set_power(false) is in effect */
+    float tint[3];                  /* lm_backend_set_tint(): colour gains of the night light */
+    bool tinted;                    /* tint is not 1 1 1 */
     struct lm_gl *gl;               /* set by a backend that renders with OpenGL (owned by it); the renderer picks it up */
     void *priv;
 };
@@ -189,6 +197,16 @@ struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int 
 int lm_backend_headless_dump(struct lm_backend *b, const char *path);
 /* The same for output `index` (0 = the first, 1.. the --output ones). -1 when there is no such output. */
 int lm_backend_headless_dump_output(struct lm_backend *b, const char *path, int index);
+
+/* Sets the display's colour gains (each 0..1; all 1 = none). Remembered by the backend and put back after a mode change or a VT switch. */
+static inline int lm_backend_set_tint(struct lm_backend *b, float r, float g, float bl)
+{
+    b->tint[0] = r < 0 ? 0 : r > 1 ? 1 : r;
+    b->tint[1] = g < 0 ? 0 : g > 1 ? 1 : g;
+    b->tint[2] = bl < 0 ? 0 : bl > 1 ? 1 : bl;
+    b->tinted = b->tint[0] < 1 || b->tint[1] < 1 || b->tint[2] < 1;
+    return b->ops->set_tint ? b->ops->set_tint(b) : -1;
+}
 
 /* Thin wrappers around the vtable. */
 static inline int lm_backend_init(struct lm_backend *b) { return b->ops->init(b); }

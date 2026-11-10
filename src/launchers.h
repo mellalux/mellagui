@@ -11,9 +11,10 @@
  *                                     settings = mellagui-settings  Super+I
  *                                     view     = mellagui-view      the screenshot card's click
  *                                     saver    = mellagui-matrix    the screensaver (a full screen client; saver.h)
+ *                                     calendar = mellagui-calendar  the calendar a click on the panel's clock shows (kept running, hidden)
  *
  * A command is a shell command line. Before it is used:
- *   @terminal @run @settings @view @saver   stand for the commands above ("Files = @terminal -e mc")
+ *   @terminal @run @settings @view @saver @calendar   stand for the commands above ("Files = @terminal -e mc")
  *   mellagui-calc ...                a bare mellagui-* program is looked up next to the compositor binary first, then in PATH
  *   ~/prog                           ~ is the home directory
  *   a || b                           alternatives, the first whose program exists wins (quote-aware, outside '...' / "...");

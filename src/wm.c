@@ -16,10 +16,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "about.h"
+#include "clockfmt.h"
 #include "saver.h"
 #include "backend.h"
 #include "input.h"
@@ -41,7 +44,7 @@
 #define RESIZE_CORNER (lm_metrics.resize_corner)
 #define DOUBLE_CLICK_MS (lm_metrics.double_click_ms)
 #define PANEL_WS_W (lm_metrics.panel_ws_width)
-#define PANEL_CLOCK_W 136                       /* "DD.MM.YYYY HH:MM" = 16 glyphs */
+#define PANEL_CLOCK_MIN_W 136                   /* "DD.MM.YYYY HH:MM" = 16 glyphs; longer texts (seconds, a weekday ...) make it wider */
 #define PANEL_POWER_D (LM_PANEL_HEIGHT - 4)     /* the round power button's diameter: as tall as the other buttons */
 #define POWER_CARD_W 264                        /* the session dialog */
 #define POWER_CARD_H 172
@@ -108,11 +111,15 @@ struct lm_wm {
     int next_id;
     uint64_t focus_counter;
     int cascade;
+    pid_t cal_pid;                      /* the calendar program we started (0 = none) */
+    bool cal_pending;                   /* a click started it: show it when its window appears */
+    uint64_t cal_pending_ms;
+    struct lm_rect cal_clock;           /* where the clock was clicked (the calendar opens under it) */
     struct lm_timer *clock_timer;
     struct note { int id; char title[LM_NOTIFY_COLS * 4 + 1]; char body[200]; int64_t expire; } notes[LM_NOTIFY_MAX];   /* newest first */
     int nnotes, next_note_id;
     struct lm_timer *note_timer;
-    char clock_text[24];
+    char clock_text[40];
 
     /* hover / pressed state */
     struct lm_window *hover_win;
@@ -222,6 +229,12 @@ static bool win_visible(const struct lm_wm *wm, const struct lm_window *w)
     return w->mapped && !w->minimized && w->workspace == wm->workspace;
 }
 
+/* The calendar program's window: it lives hidden (minimized) and is not listed in the taskbar, Alt+Tab or the dock. */
+static bool win_is_calendar(const struct lm_window *w)
+{
+    return w->app_id && !strcmp(w->app_id, "mellagui.calendar");
+}
+
 static void win_origin(const struct lm_window *w, int32_t *ox, int32_t *oy)
 {
     *ox = w->x - w->geometry.x;
@@ -257,6 +270,7 @@ static void frame_info(const struct lm_wm *wm, const struct lm_window *w, struct
         f->pressed = wm->press_bits;
 }
 
+static struct lm_window *calendar_window(struct lm_wm *wm);
 static struct lm_rect output_panel_rect(const struct lm_output *o)
 {
     return lm_rect_make(o->x, o->y, o->width, LM_PANEL_HEIGHT);
@@ -275,7 +289,8 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
         x += PANEL_WS_W + 2;
     }
     p->power = lm_rect_make(p->bar.x + p->bar.w - PANEL_POWER_D - 4, y, PANEL_POWER_D, PANEL_POWER_D);
-    p->clock = lm_rect_make(p->power.x - 4 - PANEL_CLOCK_W, y, PANEL_CLOCK_W, h);
+    int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_font_text_width(wm->clock_text) + 8);
+    p->clock = lm_rect_make(p->power.x - 4 - clock_w, y, clock_w, h);
     p->run = lm_rect_make(p->clock.x - 8 - PANEL_RUN_W, y, PANEL_RUN_W, h);
     p->sticky = lm_rect_make(p->run.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
     p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
@@ -360,7 +375,7 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     struct lm_window *tw[LM_PANEL_MAX_TASKS];
     int n = 0;
     lm_list_for_each(w, &wm->windows, link) {
-        if (!w->mapped || w->workspace != wm->workspace || n >= LM_PANEL_MAX_TASKS)
+        if (!w->mapped || w->workspace != wm->workspace || n >= LM_PANEL_MAX_TASKS || win_is_calendar(w))
             continue;
         int i = n++;
         for (; i > 0 && WIN(tw[i - 1])->id > WIN(w)->id; i--)
@@ -617,7 +632,7 @@ static void sw_step(struct lm_wm *wm, bool backwards)
         wm->sw_n = 0;
         struct lm_window *w;
         lm_list_for_each_reverse(w, &wm->windows, link)           /* top of the stack first, then by when it last had the focus */
-            if (w->mapped && wm->sw_n < SW_MAX_WINDOWS)
+            if (w->mapped && wm->sw_n < SW_MAX_WINDOWS && !win_is_calendar(w))
                 wm->sw_win[wm->sw_n++] = w;
         for (int i = 1; i < wm->sw_n; i++) {                      /* stable insertion sort, most recently focused first */
             struct lm_window *t = wm->sw_win[i];
@@ -1122,6 +1137,8 @@ static void set_focus(struct lm_wm *wm, struct lm_window *w)
     if (wm->srv->seat)
         lm_seat_set_keyboard_focus(wm->srv->seat, w ? w->surface : NULL);
     damage_panels(wm);
+    if (old && win_is_calendar(old) && old->mapped && !old->minimized)
+        lm_wm_window_request_minimize(old);                 /* the calendar goes away when something else is clicked */
 }
 
 /* Topmost visible window on the current workspace (excluding `skip`). */
@@ -1182,11 +1199,11 @@ struct lm_window *lm_wm_focused_window(const struct lm_wm *wm) { return wm->focu
 
 static void update_clock(struct lm_wm *wm, bool force)
 {
-    char buf[24];
+    char buf[40];
     time_t t = time(NULL);
     struct tm tm;
     localtime_r(&t, &tm);
-    strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M", &tm);
+    lm_clock_bar_text(&wm->srv->config.clock, &tm, buf, sizeof(buf));
     if (!force && !strcmp(buf, wm->clock_text))
         return;
     snprintf(wm->clock_text, sizeof(wm->clock_text), "%s", buf);
@@ -1197,6 +1214,14 @@ static void update_clock(struct lm_wm *wm, bool force)
 static void clock_tick(void *data)
 {
     update_clock(data, false);
+}
+
+void lm_wm_clock_changed(struct lm_wm *wm)
+{
+    if (!wm)
+        return;
+    update_clock(wm, false);
+    damage_panels(wm);
 }
 
 static void refit_idle(void *data)
@@ -1521,6 +1546,16 @@ void lm_wm_window_map(struct lm_window *w)
             if (w->x < ua.x + LM_BORDER_WIDTH) w->x = ua.x + LM_BORDER_WIDTH;
             if (w->y < ua.y + LM_TITLEBAR_HEIGHT) w->y = ua.y + LM_TITLEBAR_HEIGHT;
         }
+    }
+    if (win_is_calendar(w)) {                                /* it starts hidden; a click on the clock (maybe the one that started it) shows it */
+        w->mapped = true;
+        w->workspace = wm->workspace;
+        w->minimized = true;
+        damage_panels(wm);
+        if (wm->cal_pending && lm_now_ms() - wm->cal_pending_ms < 5000)
+            lm_wm_calendar_toggle(wm, &wm->cal_clock);
+        wm->cal_pending = false;
+        return;
     }
     w->mapped = true;
     w->workspace = wm->workspace;
@@ -2234,6 +2269,22 @@ size_t lm_wm_tray_describe(struct lm_wm *wm, char *buf, size_t size)
         n += (size_t)snprintf(buf + n, size - n, "item %d x=%d y=%d w=%d h=%d icon=%s text=%s\n", pi.tray[i].id, pi.tray[i].rect.x,
                               pi.tray[i].rect.y, pi.tray[i].rect.w, pi.tray[i].rect.h, ic, pi.tray[i].text);
     }
+    return n < size ? n : size - 1;
+}
+
+size_t lm_wm_clock_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    struct lm_output *o = lm_output_primary(wm->srv);
+    if (!o || size == 0) {
+        if (size)
+            buf[0] = 0;
+        return 0;
+    }
+    struct lm_panel_info pi;
+    panel_info(wm, o, &pi);
+    struct lm_window *cw = calendar_window(wm);
+    size_t n = (size_t)snprintf(buf, size, "clock x=%d y=%d w=%d h=%d tasks=%d calendar=%d text=%s\n", pi.clock.x, pi.clock.y, pi.clock.w, pi.clock.h,
+                                pi.ntasks, !cw ? 0 : win_visible(wm, cw) ? 2 : 1, pi.clock_text);
     return n < size ? n : size - 1;
 }
 
@@ -3270,6 +3321,92 @@ void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots)
     *slots = clip_slots(wm);
 }
 
+/* ---- the calendar ------------------------------------------------------------------------------------------------------- */
+
+static struct lm_window *calendar_window(struct lm_wm *wm)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->mapped && win_is_calendar(w))
+            return w;
+    return NULL;
+}
+
+static bool calendar_alive(struct lm_wm *wm)
+{
+    if (wm->cal_pid <= 0)
+        return false;
+    int st;
+    pid_t r = waitpid(wm->cal_pid, &st, WNOHANG);
+    if (r == wm->cal_pid || (r < 0 && kill(wm->cal_pid, 0) != 0)) {
+        wm->cal_pid = 0;
+        return false;
+    }
+    return true;
+}
+
+static void calendar_spawn(struct lm_wm *wm)
+{
+    const char *cmd = wm->srv->config.calendar_cmd;
+    if (!wm->srv->config.cal_enabled || !cmd || !*cmd || calendar_alive(wm))
+        return;
+    wm->cal_pid = lm_server_spawn(wm->srv, cmd);
+    if (wm->cal_pid < 0)
+        wm->cal_pid = 0;
+}
+
+void lm_wm_calendar_start(struct lm_wm *wm)
+{
+    if (wm)
+        calendar_spawn(wm);
+}
+
+bool lm_wm_calendar_toggle(struct lm_wm *wm, const struct lm_rect *clock)
+{
+    if (!wm || !wm->srv->config.cal_enabled || !wm->srv->config.calendar_cmd || !*wm->srv->config.calendar_cmd)
+        return false;
+    struct lm_output *o = NULL;
+    if (clock) {
+        wm->cal_clock = *clock;
+    } else {
+        o = lm_output_primary(wm->srv);
+        if (!o)
+            return false;
+        struct lm_panel_info pi;
+        panel_info(wm, o, &pi);
+        wm->cal_clock = pi.clock;
+    }
+    struct lm_window *w = calendar_window(wm);
+    if (!w) {                                                /* not there (yet, or it ended): start it and show it when its window comes */
+        wm->cal_pending = true;
+        wm->cal_pending_ms = lm_now_ms();
+        calendar_spawn(wm);
+        return true;
+    }
+    if (win_visible(wm, w)) {
+        lm_wm_window_request_minimize(w);
+        return true;
+    }
+    o = lm_output_nearest(wm->srv, wm->cal_clock.x, wm->cal_clock.y);
+    int32_t right = wm->cal_clock.x + wm->cal_clock.w;
+    int32_t ox = o ? o->x : 0, ow = o ? o->width : 1280;
+    w->x = right - LM_BORDER_WIDTH - w->width;
+    if (w->x < ox + LM_BORDER_WIDTH)
+        w->x = ox + LM_BORDER_WIDTH;
+    if (w->x + w->width + LM_BORDER_WIDTH > ox + ow)
+        w->x = ox + ow - w->width - LM_BORDER_WIDTH;
+    w->y = wm->cal_clock.y + wm->cal_clock.h + 4 + LM_TITLEBAR_HEIGHT;
+    w->workspace = wm->workspace;
+    w->minimized = false;
+    update_outputs(wm, w);
+    raise_window(wm, w);
+    damage_frame(wm, w);
+    set_focus(wm, w);
+    damage_panels(wm);
+    refresh_pointer(wm);
+    return true;
+}
+
 bool lm_wm_has_fullscreen(const struct lm_wm *wm)
 {
     struct lm_window *w;
@@ -3811,6 +3948,10 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             }
             if (lm_rect_contains(&pi.run, ix, iy))
                 out->kind = LM_PICK_PANEL_RUN;
+            if (lm_rect_contains(&pi.clock, ix, iy) && wm->srv->config.cal_enabled) {
+                out->kind = LM_PICK_PANEL_CLOCK;
+                out->rect = pi.clock;
+            }
             int pcx = pi.power.x + pi.power.w / 2, pcy = pi.power.y + pi.power.h / 2, pr2 = pi.power.w / 2 + 1;
             if ((ix - pcx) * (ix - pcx) + (iy - pcy) * (iy - pcy) <= pr2 * pr2)   /* the circle, not its square */
                 out->kind = LM_PICK_PANEL_POWER;
@@ -3891,6 +4032,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_CLIP_DELETE: clip_code = 10 + pick->index - clip_top(wm); shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_ENTRY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_CLOCK: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
@@ -4541,6 +4683,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             dock_activate(wm, pi, button != BTN_MIDDLE);        /* the middle button always starts another instance */
         if (pk == LM_PICK_PANEL_RUN && pick->kind == LM_PICK_PANEL_RUN)
             launch_run(wm);
+        if (pk == LM_PICK_PANEL_CLOCK && pick->kind == LM_PICK_PANEL_CLOCK)
+            lm_wm_calendar_toggle(wm, &pick->rect);
         if (pk == LM_PICK_PANEL_LAYOUT && pick->kind == LM_PICK_PANEL_LAYOUT && wm->srv->input)
             lm_input_cycle_layout(wm->srv->input, pi);
         if (pk == LM_PICK_PANEL_OSK && pick->kind == LM_PICK_PANEL_OSK)
@@ -4668,6 +4812,14 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             wm->press_bits = 0;
         }
         return true;
+    case LM_PICK_PANEL_CLOCK:
+        if (button == BTN_LEFT) {
+            wm->press_panel_kind = pick->kind;
+            wm->cal_clock = pick->rect;
+            wm->press_win = NULL;
+            wm->press_bits = 0;
+        }
+        return true;
     case LM_PICK_PANEL_RUN:
     case LM_PICK_PANEL_POWER:
         if (button == BTN_LEFT) {
@@ -4740,14 +4892,14 @@ static void cycle_focus(struct lm_wm *wm, bool backwards)
         /* second from the top: swap back to the previous window */
         int seen = 0;
         lm_list_for_each_reverse(w, &wm->windows, link)
-            if (w->mapped && w->workspace == wm->workspace && !w->minimized && ++seen == 2) {
+            if (w->mapped && w->workspace == wm->workspace && !w->minimized && !win_is_calendar(w) && ++seen == 2) {
                 pick = w;
                 break;
             }
     } else {
         /* the lowest window of the workspace (minimized ones included) comes to the front */
         lm_list_for_each(w, &wm->windows, link)
-            if (w->mapped && w->workspace == wm->workspace && w != wm->focused) {
+            if (w->mapped && w->workspace == wm->workspace && w != wm->focused && !win_is_calendar(w)) {
                 pick = w;
                 break;
             }

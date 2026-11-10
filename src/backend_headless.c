@@ -380,6 +380,17 @@ static void ctl_command(struct ctl_client *c, char *line)
             }
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "clock")) {
+        /* clock [calendar] -> "clock x= y= w= h= tasks=N calendar=0|1|2 text=..." (calendar: 0 no window, 1 hidden, 2 shown); the word `calendar`
+         * first shows / hides it as a click on the clock does. Then "ok". */
+        static char text[512];
+        if (srv->wm && a1 && !strcmp(a1, "calendar"))
+            lm_wm_calendar_toggle(srv->wm, NULL);
+        if (srv->wm) {
+            lm_wm_clock_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "tray")) {
         /* tray -> the lines of lm_wm_tray_describe ("tray n=..", one "item .." line each), then "ok" */
         static char text[4096];

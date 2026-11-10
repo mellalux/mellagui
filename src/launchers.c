@@ -22,18 +22,19 @@ static const char default_conf[] =
     "run      = mellagui-run\n"
     "settings = mellagui-settings\n"
     "view     = mellagui-view\n"
-    "saver    = mellagui-matrix\n";
+    "saver    = mellagui-matrix\n"
+    "calendar = mellagui-calendar\n";
 
 const char *lm_launch_default_conf(void) { return default_conf; }
 
 /* ---- collected input ---------------------------------------------------------------------------------------------- */
 
-enum { C_TERMINAL, C_RUN, C_SETTINGS, C_VIEW, C_SAVER, C_COUNT };
-static const char *const cmd_names[C_COUNT] = { "terminal", "run", "settings", "view", "saver" };
+enum { C_TERMINAL, C_RUN, C_SETTINGS, C_VIEW, C_SAVER, C_CALENDAR, C_COUNT };
+static const char *const cmd_names[C_COUNT] = { "terminal", "run", "settings", "view", "saver", "calendar" };
 
-static char cmd_raw[C_COUNT][CMD_MAX] = { "mellagui-term", "mellagui-run", "mellagui-settings", "mellagui-view", "mellagui-matrix" };
+static char cmd_raw[C_COUNT][CMD_MAX] = { "mellagui-term", "mellagui-run", "mellagui-settings", "mellagui-view", "mellagui-matrix", "mellagui-calendar" };
 static char cmd_res[C_COUNT][CMD_MAX];
-static const char *const cmd_defaults[C_COUNT] = { "mellagui-term", "mellagui-run", "mellagui-settings", "mellagui-view", "mellagui-matrix" };
+static const char *const cmd_defaults[C_COUNT] = { "mellagui-term", "mellagui-run", "mellagui-settings", "mellagui-view", "mellagui-matrix", "mellagui-calendar" };
 static bool cmd_cli[C_COUNT];                   /* set on the command line: the file may not change it, also on a reload */
 
 void lm_launch_reset(void)
@@ -260,6 +261,7 @@ void lm_launch_resolve(struct lm_config *cfg)
     cfg->settings_cmd = cmd_res[C_SETTINGS];
     cfg->view_cmd = cmd_res[C_VIEW];
     cfg->saver_cmd = cmd_res[C_SAVER];
+    cfg->calendar_cmd = cmd_res[C_CALENDAR];
 }
 
 bool lm_launch_exists(const char *spec, char *out, size_t n)

@@ -12,6 +12,7 @@
 #include "conf.h"
 #include "dock.h"
 #include "dockicon.h"
+#include "iconfind.h"
 #include "launchers.h"
 #include "log.h"
 
@@ -27,8 +28,8 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Images     = [images] @view\n" \
     "Camera     = [camera] mellagui-cam\n" \
     "Record     = [record] mellagui-record\n" \
-    "Code       = [code] ~/VSCode/code " LM_CODE_FLAGS " || /snap/code/current/usr/share/code/code " LM_CODE_FLAGS "\n" \
-    "Firefox    = [web] " LM_FF_ENV " /snap/bin/firefox || " LM_FF_ENV " /usr/bin/firefox\n" \
+    "Code       = [theme:vscode|code] ~/VSCode/code " LM_CODE_FLAGS " || /snap/code/current/usr/share/code/code " LM_CODE_FLAGS "\n" \
+    "Firefox    = [theme:firefox] " LM_FF_ENV " /snap/bin/firefox || " LM_FF_ENV " /usr/bin/firefox\n" \
     "Settings   = [settings] @settings\n"
 
 #define DEFAULT_SETTINGS \
@@ -313,17 +314,28 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
         it->pub.kind = k;
         return;
     }
-    if (!looks_like_path(spec)) {
-        lm_warn("dock: '%s': unknown icon '%s'", name, spec);
-        it->pub.kind = lm_dockicon_guess(name);
-        return;
-    }
     char path[PATH_MAX], err[160];
-    if (!strncmp(spec, "~/", 2)) {
-        const char *home = getenv("HOME");
-        snprintf(path, sizeof(path), "%s%s", home && *home ? home : "", spec + 1);
-    } else {
-        snprintf(path, sizeof(path), "%s", spec);
+    if (!strncmp(spec, "theme:", 6)) {                                /* the icon the installed program brings along; none: the built-in one */
+        if (!lm_icon_find(spec + 6, path, sizeof(path))) {
+            it->pub.kind = lm_dockicon_guess(name);
+            return;
+        }
+        spec = path;
+    } else if (!looks_like_path(spec)) {
+        if (!lm_icon_find(spec, path, sizeof(path))) {                /* a bare name that is no built-in icon: maybe an installed one */
+            lm_warn("dock: '%s': unknown icon '%s'", name, spec);
+            it->pub.kind = lm_dockicon_guess(name);
+            return;
+        }
+        spec = path;
+    }
+    if (spec != path) {
+        if (!strncmp(spec, "~/", 2)) {
+            const char *home = getenv("HOME");
+            snprintf(path, sizeof(path), "%s%s", home && *home ? home : "", spec + 1);
+        } else {
+            snprintf(path, sizeof(path), "%s", spec);
+        }
     }
     if (lm_img_load_alpha(path, &it->img, err, sizeof(err)) < 0) {
         lm_warn("dock: '%s': icon %s: %s", name, path, err);

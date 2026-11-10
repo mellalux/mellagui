@@ -489,7 +489,8 @@ struct lm_about_info {
 
 /*
  * The launcher dialog (Launchpad): a big translucent card over the dimmed output with every dock button as a big round icon with its name,
- * a "+" tile that opens the add form (name, command, icon) and an Edit button that puts a red x on every icon to remove it. Modal like the
+ * a "+" tile that opens the add form (name, command, icon) and an Edit button that puts a red x on every icon to remove it; in edit mode a click on an icon
+ * opens the same form to change that button. Modal like the
  * About dialog. Buttons are taken from the dock (dock.h), added and removed in [dock-apps] of mellagui.conf.
  */
 #define LM_LAUNCHER_CELL_W 124          /* one icon with its name */
@@ -499,7 +500,8 @@ struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
     struct lm_rect card;
     struct lm_rect title;
-    bool form;                      /* the add form is showing instead of the icons */
+    bool form;                      /* the add / change form is showing instead of the icons */
+    bool editing;                   /* ... and it changes an existing button (title "Change an application", button "Save") */
     bool edit;                      /* edit mode: a red x on every icon */
     int n;                          /* icons */
     int cols;                       /* icons per row (the "+" tile counts as one) */
@@ -528,7 +530,7 @@ struct lm_launcher_info {
     const char *field_text[2];
     int focus;                      /* 0 name, 1 command, 2 icon row */
     struct lm_rect kind_box[LM_LAUNCHER_KIND_N];
-    int kind;                       /* chosen icon (-1 = guess), what kind_box[i + 1] stands for */
+    int kind;                       /* chosen icon (-1 = guess, -2 = the icon text the button had, a picture or theme:NAME, kept), what kind_box[i + 1] stands for */
     const char *kind_name;          /* its name for the label */
 };
 
@@ -546,7 +548,7 @@ struct lm_dock_info {
     struct {
         struct lm_rect box;
         bool running;
-        bool launching;             /* its program was just started and has no window yet: the icon hops */
+        bool launching;             /* its program was just started and has no window yet: the icon zooms in and out */
         const struct lm_dock_item *item;
     } icon[LM_DOCK_MAX];
     const struct lm_dock_item *drag_item;   /* an icon is being dragged along the dock / out of it: it is painted at drag_box, the row has a gap */

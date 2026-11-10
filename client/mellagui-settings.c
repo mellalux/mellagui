@@ -914,7 +914,7 @@ static void build_dock(struct app *a, int x, int y, int w)
         a->dock_sel = -1;
     struct widget *fn = add(a, W_INPUT, (struct rect){ x, y, 120, 26 }, "name");
     snprintf(fn->arg, sizeof(fn->arg), "4");
-    struct widget *fi = add(a, W_INPUT, (struct rect){ x + 128, y, w - 128, 26 }, "icon: terminal, files ... or a picture file");
+    struct widget *fi = add(a, W_INPUT, (struct rect){ x + 128, y, w - 128, 26 }, "icon: terminal, files, theme:firefox ... or a picture file");
     snprintf(fi->arg, sizeof(fi->arg), "5");
     y += 30;
     struct widget *fc = add(a, W_INPUT, (struct rect){ x, y, w - 78, 26 }, "command");
@@ -985,16 +985,28 @@ static void dock_clear_form(struct app *a)
 static void dock_put(struct app *a)
 {
     a->dock_err[0] = 0;
+    char *icon_text = a->input[5];
+    size_t il = strlen(icon_text);
+    if (il >= 2 && icon_text[0] == '[' && icon_text[il - 1] == ']') {      /* "[theme:firefox]" as the file writes it: the brackets are not part of the icon */
+        memmove(icon_text, icon_text + 1, il - 2);
+        icon_text[il - 2] = 0;
+    }
     const char *name = a->input[4], *icon = a->input[5], *cmd = a->input[6];
     size_t nl = strlen(name);
     if (!nl || !*cmd) {
         snprintf(a->dock_err, sizeof(a->dock_err), "Type a name and a command.");
         return;
     }
-    if (nl >= 64 || strchr(name, '=') || name[0] == '#' || name[0] == ';' || name[0] == '[' || name[0] == ' ' || name[nl - 1] == ' ' ||
-        cmd[0] == ' ' || cmd[strlen(cmd) - 1] == ' ' || icon[0] == ' ' || (*icon && icon[strlen(icon) - 1] == ' ') || strchr(icon, ']') ||
-        icon[0] == '[') {
-        snprintf(a->dock_err, sizeof(a->dock_err), "Not allowed: '=', leading '#;[' or spaces at the ends.");
+    if (nl >= 64 || strchr(name, '=') || name[0] == '#' || name[0] == ';' || name[0] == '[' || name[0] == ' ' || name[nl - 1] == ' ') {
+        snprintf(a->dock_err, sizeof(a->dock_err), "Name: no '=', no leading # ; [ or spaces.");
+        return;
+    }
+    if (icon[0] == ' ' || (*icon && icon[strlen(icon) - 1] == ' ') || strchr(icon, ']') || icon[0] == '[') {
+        snprintf(a->dock_err, sizeof(a->dock_err), "Icon: a name, theme:NAME or a picture file.");
+        return;
+    }
+    if (cmd[0] == ' ' || cmd[strlen(cmd) - 1] == ' ') {
+        snprintf(a->dock_err, sizeof(a->dock_err), "Command: no space at the start or end.");
         return;
     }
     char key[16];
@@ -1747,6 +1759,28 @@ static int text_y(const struct rect *r)
     return r->y + (r->h - LM_FONT_H) / 2;
 }
 
+/* The one-character buttons of the lists (^ v x < >) are drawn as small arrows and a cross instead of letters. */
+static bool draw_glyph_button(struct app *a, const struct rect *r, const char *text, uint32_t color)
+{
+    if (!text || !text[0] || text[1] || !strchr("^vx<>", text[0]))
+        return false;
+    int cx = r->x + r->w / 2, cy = r->y + r->h / 2, n = 4;
+    for (int i = -n; i <= n; i++) {
+        int k = i < 0 ? -i : i;
+        switch (text[0]) {
+        case '^': fill(a, (struct rect){ cx + i - 1, cy - n / 2 + k - 1, 2, 2 }, color); break;      /* a chevron pointing up ... */
+        case 'v': fill(a, (struct rect){ cx + i - 1, cy + n / 2 - k - 1, 2, 2 }, color); break;      /* ... down */
+        case '<': fill(a, (struct rect){ cx - n / 2 + k - 1, cy + i - 1, 2, 2 }, color); break;      /* ... left */
+        case '>': fill(a, (struct rect){ cx + n / 2 - k - 1, cy + i - 1, 2, 2 }, color); break;      /* ... right */
+        default:                                                                                     /* a cross */
+            fill(a, (struct rect){ cx + i - 1, cy + i - 1, 2, 2 }, color);
+            fill(a, (struct rect){ cx + i - 1, cy - i - 1, 2, 2 }, color);
+            break;
+        }
+    }
+    return true;
+}
+
 static void paint_widget(struct app *a, int idx)
 {
     const struct widget *w = &a->wd[idx];
@@ -1787,7 +1821,8 @@ static void paint_widget(struct app *a, int idx)
     }
     case W_BUTTON:
         fill(a, *r, w->on && !strcmp(w->key, "dbl-try") ? lm_theme.ok : a->press == idx && hot ? COL_DOWN : (hot ? COL_HOVER : COL_KEY));
-        draw_text(a, r->x + (r->w - lm_font_text_width(w->text)) / 2, text_y(r), w->text, COL_TEXT, 0);
+        if (!draw_glyph_button(a, r, w->text, w->text[0] == 'x' ? lm_theme.alert : COL_TEXT))
+            draw_text(a, r->x + (r->w - lm_font_text_width(w->text)) / 2, text_y(r), w->text, COL_TEXT, 0);
         if (focus)
             outline(a, *r, COL_ACCENT);
         break;

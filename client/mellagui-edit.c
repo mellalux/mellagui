@@ -5,10 +5,10 @@
  *   mellagui-edit --selftest      the editing model without a display
  *
  * Keys: arrows, Home / End, PageUp / PageDown, Ctrl+Left / Right (words), Ctrl+Home / End; Shift extends the selection;
- * Ctrl+A select all, Ctrl+C / X / V clipboard, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+S save, Ctrl+Shift+S save as, Ctrl+O open,
+ * Ctrl+A select all, Ctrl+C / X / V clipboard (Ctrl+Insert, Shift+Delete, Shift+Insert too), Ctrl+Z / Ctrl+Y undo / redo, Ctrl+S save, Ctrl+Shift+S save as, Ctrl+O open,
  * Ctrl+N new, Ctrl+F find (Enter / F3 next), Ctrl+G go to line, Ctrl+Q quit (twice to discard changes), Esc clears the
  * message / selection, F1 help, Ctrl+= / Ctrl+- / Ctrl+0 (or Ctrl+wheel, or the A- / A+ buttons) zoom the text 50..500 % like the
- * terminal and the window grows with it (kept in $XDG_CONFIG_HOME/mellagui/editor.conf). A button bar (New, Open, Save, Save as, Find, Help) does the same with the mouse. The Open
+ * terminal and the window grows with it (kept in $XDG_CONFIG_HOME/mellagui/editor.conf). A button bar (New, Open, Save, Save as, Cut, Copy, Paste, Find, A-, A+, Help) does the same with the mouse. The Open
  * and Save as prompts start in the folder of the current file, accept ~/ and relative names, and Tab completes names.
  * Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
  * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
@@ -885,11 +885,11 @@ static void set_zoom(struct app *a, int delta)
     set_zoom_pct(a, lm_zoom_step(a->zoom, delta));
 }
 
-enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, N_BTNS };
+enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_CUT, B_COPY, B_PASTE, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, N_BTNS };
 
 static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
 {
-    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Find", "A-", "", "A+", "Help" };
+    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Cut", "Copy", "Paste", "Find", "A-", "", "A+", "Help" };
     if (i == B_ZOOM) {
         snprintf(buf, n, "%d%%", a->zoom);
         return buf;
@@ -934,6 +934,9 @@ static void do_button(struct app *a, int i)
     case B_OPEN: cmd_open(a); break;
     case B_SAVE: cmd_save(a, false); break;
     case B_SAVEAS: cmd_save(a, true); break;
+    case B_CUT: cmd_copy(a, true); set_title(a); break;
+    case B_COPY: cmd_copy(a, false); break;
+    case B_PASTE: cmd_paste(a); set_title(a); break;
     case B_FIND: cmd_find(a); break;
     case B_SMALLER: set_zoom(a, -1); break;
     case B_ZOOM: set_zoom(a, 0); break;                                 /* the size shown: a click goes back to 100 % */
@@ -1204,7 +1207,23 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     case LM_KS_F1: a->help = true; return;
     case LM_KS_F1 + 2: find_next(a); return;                            /* F3 */
     case LM_KS_BackSpace: key_backspace(a, ctrl); set_title(a); return;
-    case LM_KS_Delete: key_delete(a, ctrl); set_title(a); return;
+    case LM_KS_Delete:
+        if (shift && !ctrl) {                                           /* Shift+Delete: cut (the classic keys) */
+            cmd_copy(a, true);
+            set_title(a);
+            return;
+        }
+        key_delete(a, ctrl);
+        set_title(a);
+        return;
+    case LM_KS_Insert:
+        if (ctrl && !shift)
+            cmd_copy(a, false);                                          /* Ctrl+Insert: copy, Shift+Insert: paste */
+        else if (shift && !ctrl) {
+            cmd_paste(a);
+            set_title(a);
+        }
+        return;
     case LM_KS_Return:
     case LM_KS_KP_Enter: key_enter(a); set_title(a); return;
     case LM_KS_Tab: type_text(a, "\t", 1, true); set_title(a); return;
@@ -1268,7 +1287,7 @@ static void paint_help(struct wlwin *w)
         "Ctrl+F          find, then Enter or F3 for the next match",
         "Ctrl+G          go to a line number",
         "Ctrl+Z / Ctrl+Y undo / redo",
-        "Ctrl+A C X V    select all, copy, cut, paste",
+        "Ctrl+A C X V    select all, copy, cut, paste (also Ctrl+Insert, Shift+Delete, Shift+Insert)",
         "",
         "Shift+arrows    select; Ctrl+Left / Right moves by word",
         "Home / End      line start / end (Ctrl: document)",
@@ -1350,13 +1369,14 @@ static void paint(struct wlwin *w)
         btn_rect(a, i, &bx, &bwid);
         if (bwid == 0)
             continue;
-        static const uint32_t base[N_BTNS] = { 0x3f9a5e, 0x3d6fb4, 0xb8803a, 0x2f8f9a, 0x8a6fb8, 0x5a6a8a, 0x6b6f7a, 0x5a6a8a, 0xb84a6a };
-        static const uint32_t lite[N_BTNS] = { 0x56b878, 0x5588d0, 0xd49a50, 0x45aab5, 0xa088d0, 0x7488ad, 0x868b98, 0x7488ad, 0xd6638a };
+        static const uint32_t base[N_BTNS] = { 0x3f9a5e, 0x3d6fb4, 0xb8803a, 0x2f8f9a, 0xb5603c, 0x3c82b5, 0x6a9a3c, 0x8a6fb8, 0x5a6a8a, 0x6b6f7a, 0x5a6a8a, 0xb84a6a };
+        static const uint32_t lite[N_BTNS] = { 0x56b878, 0x5588d0, 0xd49a50, 0x45aab5, 0xd07a52, 0x569ccf, 0x84b552, 0xa088d0, 0x7488ad, 0x868b98, 0x7488ad, 0xd6638a };
         bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
-        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, lit ? lite[i] : base[i]);
+        bool idle = (i == B_CUT || i == B_COPY) && !has_sel(a);             /* nothing selected: Cut and Copy have nothing to take */
+        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, idle ? 0x4a4f5c : lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
-        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, 0xffffffu, 0);
+        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? 0x9aa0ae : 0xffffffu, 0);
     }
     wlwin_fill(w, 0, TOP_H, gw, w->bh - bars - TOP_H, COL_GUTTER_BG);
     int y0, y1;

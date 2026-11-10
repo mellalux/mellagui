@@ -156,8 +156,8 @@ struct lm_wm {
     bool launcher_editing;      /* the form changes the button (launcher_edit_raw, in the launcher's own list when launcher_edit_only) */
     bool launcher_edit_only;
     int launcher_edit_raw;
-    char launcher_icon_keep[LM_DOCK_ICON_MAX];      /* the icon text of the button being changed when it is no built-in name (launcher_kind == -2) */
-    int launcher_sel, launcher_hover_btn, launcher_focus, launcher_kind;
+    char launcher_icon[LM_DOCK_ICON_MAX];           /* the form's icon text: empty (guess), a built-in name, theme:NAME or a picture file */
+    int launcher_sel, launcher_hover_btn, launcher_focus;
     char launcher_name[LM_DOCK_NAME_MAX], launcher_cmd[LM_DOCK_CMD_MAX], launcher_msg[112];
     /* mouse drags (a press on an icon that moved far enough): a launcher icon onto the dock, a dock icon along the dock (reorder) or out of it
      * (back to the launcher). drag_x/y = the pointer. */
@@ -2420,7 +2420,7 @@ static int dock_window_count(const struct lm_wm *wm, const struct lm_dock_item *
 #define LC_BTN_H 28
 #define LC_KIND 36                  /* the icon choices of the form */
 #define LC_FORM_W 580
-#define LC_FORM_H 370
+#define LC_FORM_H 440
 
 /* The buttons the launcher shows: the dock's (all but the one that opens the launcher itself) and then the launcher's own ([launcher-apps]). */
 static bool launcher_is_self(const struct lm_dock_item *it)
@@ -2487,6 +2487,15 @@ static struct lm_output *launcher_output(const struct lm_wm *wm)
     return NULL;
 }
 
+/* The built-in icon the form's icon text names: -1 when it is empty, -2 when it is something else (a theme name, a file). */
+static int launcher_kind_of(const struct lm_wm *wm)
+{
+    if (!wm->launcher_icon[0])
+        return -1;
+    int k = lm_dockicon_by_name(wm->launcher_icon);
+    return k >= 0 ? k : -2;
+}
+
 static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launcher_info *li)
 {
     memset(li, 0, sizeof(*li));
@@ -2497,8 +2506,8 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
     li->hover_button = wm->launcher_hover_btn;
     li->message = wm->launcher_msg;
     li->focus = wm->launcher_focus;
-    li->kind = wm->launcher_kind;
-    li->kind_name = wm->launcher_kind >= 0 ? lm_dockicon_name(wm->launcher_kind) : wm->launcher_kind == -2 ? wm->launcher_icon_keep : "auto";
+    li->kind = launcher_kind_of(wm);
+    li->kind_name = li->kind >= 0 ? lm_dockicon_name(li->kind) : li->kind == -2 ? "yours" : "auto";
     int n = launcher_count(), cells = n + (launcher_can_add() ? 1 : 0);
     li->n = n;
     li->sel = LM_CLAMP(wm->launcher_sel, -1, cells - 1);
@@ -2552,13 +2561,16 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
     if (li->form) {
         li->field_label[0] = "Name";
         li->field_label[1] = "Command   (@terminal, mellagui-*, ~/prog, a || b)";
+        li->field_label[2] = "Icon   (empty = guessed, theme:firefox, a file, or pick below)";
         li->field_text[0] = wm->launcher_name;
         li->field_text[1] = wm->launcher_cmd;
+        li->field_text[2] = wm->launcher_icon;
         int fx = li->card.x + LC_PAD, fw = li->card.w - 2 * LC_PAD;
         li->field[0] = lm_rect_make(fx, li->card.y + 60 + LM_FONT_H + 4, fw, 30);
         li->field[1] = lm_rect_make(fx, li->card.y + 126 + LM_FONT_H + 4, fw, 30);
+        li->field[2] = lm_rect_make(fx, li->card.y + 192 + LM_FONT_H + 4, fw, 30);
         int total = LM_LAUNCHER_KIND_N * LC_KIND + (LM_LAUNCHER_KIND_N - 1) * 6;
-        int kx = li->card.x + (li->card.w - total) / 2, ky = li->card.y + 214;
+        int kx = li->card.x + (li->card.w - total) / 2, ky = li->card.y + 286;
         for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
             li->kind_box[i] = lm_rect_make(kx + i * (LC_KIND + 6), ky, LC_KIND, LC_KIND);
     }
@@ -2628,7 +2640,7 @@ size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size)
         if (li.add.w > 0)
             n += (size_t)snprintf(buf + n, size - n, "add x=%d y=%d w=%d h=%d\n", LCR(li.add));
     } else {
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < 3; i++)
             n += (size_t)snprintf(buf + n, size - n, "field %d x=%d y=%d w=%d h=%d text=\"%s\"\n", i, LCR(li.field[i]), li.field_text[i]);
         for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
             n += (size_t)snprintf(buf + n, size - n, "kind %d x=%d y=%d w=%d h=%d\n", i - 1, LCR(li.kind_box[i]));
@@ -2659,7 +2671,7 @@ static bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick
             return true;
         }
     if (li.form) {
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < 3; i++)
             if (lm_rect_contains(&li.field[i], ix, iy)) {
                 out->kind = LM_PICK_LAUNCHER_FIELD;
                 out->index = i;
@@ -2698,7 +2710,7 @@ static void launcher_open_form(struct lm_wm *wm)
     wm->launcher_form = true;
     wm->launcher_editing = false;
     wm->launcher_name[0] = wm->launcher_cmd[0] = wm->launcher_msg[0] = 0;
-    wm->launcher_kind = -1;
+    wm->launcher_icon[0] = 0;
     wm->launcher_focus = 0;
     wm->launcher_hover_btn = -1;
     launcher_damage(wm);
@@ -2718,13 +2730,7 @@ static void launcher_open_change(struct lm_wm *wm, int g)
     snprintf(wm->launcher_name, sizeof(wm->launcher_name), "%s", nm);
     snprintf(wm->launcher_cmd, sizeof(wm->launcher_cmd), "%s", cm);
     wm->launcher_msg[0] = 0;
-    wm->launcher_icon_keep[0] = 0;
-    int k = *ic ? lm_dockicon_by_name(ic) : -1;
-    if (k < 0 && *ic) {                                               /* a picture or theme:NAME: kept unless another icon is chosen */
-        snprintf(wm->launcher_icon_keep, sizeof(wm->launcher_icon_keep), "%s", ic);
-        k = -2;
-    }
-    wm->launcher_kind = k;
+    snprintf(wm->launcher_icon, sizeof(wm->launcher_icon), "%s", ic);
     wm->launcher_focus = 0;
     wm->launcher_hover_btn = -1;
     launcher_damage(wm);
@@ -2767,10 +2773,20 @@ static void launcher_submit(struct lm_wm *wm)
         launcher_damage(wm);
         return;
     }
-    const char *icon = wm->launcher_kind >= 0 ? lm_dockicon_name(wm->launcher_kind) : wm->launcher_kind == -2 ? wm->launcher_icon_keep : "";
+    char icon[LM_DOCK_ICON_MAX];                                     /* "[theme:firefox]" as the file shows it: the brackets are not part of it */
+    snprintf(icon, sizeof(icon), "%s", wm->launcher_icon);
+    for (char *t = icon; *t == ' ';)
+        memmove(t, t + 1, strlen(t));
+    for (size_t l = strlen(icon); l > 0 && icon[l - 1] == ' '; l--)
+        icon[l - 1] = 0;
+    size_t il = strlen(icon);
+    if (il >= 2 && icon[0] == '[' && icon[il - 1] == ']') {
+        memmove(icon, icon + 1, il - 2);
+        icon[il - 2] = 0;
+    }
     int before = launcher_count();
     if (wm->launcher_editing) {                                      /* change the button in place; its own name does not count as taken */
-        bool ok = launcher_replace(wm, name, icon ? icon : "", cmd);
+        bool ok = launcher_replace(wm, name, icon, cmd);
         if (!ok) {
             snprintf(wm->launcher_msg, sizeof(wm->launcher_msg), "Not saved: the name is in use or not allowed, or there is no config file.");
             launcher_damage(wm);
@@ -2785,7 +2801,7 @@ static void launcher_submit(struct lm_wm *wm)
         launcher_damage(wm);
         return;
     }
-    if (launcher_name_taken(name) || !lm_settings_launcher_put(wm->srv, name, icon ? icon : "", cmd)) {
+    if (launcher_name_taken(name) || !lm_settings_launcher_put(wm->srv, name, icon, cmd)) {
         snprintf(wm->launcher_msg, sizeof(wm->launcher_msg), "Not added: the name is in use or not allowed, the list is full, or there is no config file.");
         launcher_damage(wm);
         return;
@@ -2821,9 +2837,9 @@ static void launcher_activate(struct lm_wm *wm, int kind, int index)
         wm->launcher_focus = index;
         launcher_damage(wm);
         break;
-    case LM_PICK_LAUNCHER_KIND:
-        wm->launcher_kind = index;
-        wm->launcher_focus = 2;
+    case LM_PICK_LAUNCHER_KIND:                                       /* a built-in icon: its name goes into the icon text, "auto" empties it */
+        snprintf(wm->launcher_icon, sizeof(wm->launcher_icon), "%s", index >= 0 ? lm_dockicon_name(index) : "");
+        wm->launcher_focus = 3;
         launcher_damage(wm);
         break;
     case LM_PICK_LAUNCHER_BUTTON:
@@ -2917,7 +2933,7 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
         if (repeat)
             return;
         bool back = code == KEY_UP || (code == KEY_TAB && shift);
-        wm->launcher_focus = (wm->launcher_focus + (back ? 2 : 1)) % 3;
+        wm->launcher_focus = (wm->launcher_focus + (back ? 3 : 1)) % 4;
         launcher_damage(wm);
         return;
     }
@@ -2932,16 +2948,17 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
         }
         return;
     }
-    if (wm->launcher_focus == 2) {
+    if (wm->launcher_focus == 3) {
         if (code == KEY_LEFT || code == KEY_RIGHT) {
-            int k = LM_MAX(wm->launcher_kind, -1) + (code == KEY_LEFT ? -1 : 1);
-            wm->launcher_kind = LM_CLAMP(k, -1, LM_DOCKICON_COUNT - 1);
+            int k = LM_MAX(launcher_kind_of(wm), -1) + (code == KEY_LEFT ? -1 : 1);
+            k = LM_CLAMP(k, -1, LM_DOCKICON_COUNT - 1);
+            snprintf(wm->launcher_icon, sizeof(wm->launcher_icon), "%s", k >= 0 ? lm_dockicon_name(k) : "");
             launcher_damage(wm);
         }
         return;
     }
-    char *text = wm->launcher_focus == 0 ? wm->launcher_name : wm->launcher_cmd;
-    size_t max = wm->launcher_focus == 0 ? sizeof(wm->launcher_name) : sizeof(wm->launcher_cmd);
+    char *text = wm->launcher_focus == 0 ? wm->launcher_name : wm->launcher_focus == 1 ? wm->launcher_cmd : wm->launcher_icon;
+    size_t max = wm->launcher_focus == 0 ? sizeof(wm->launcher_name) : wm->launcher_focus == 1 ? sizeof(wm->launcher_cmd) : sizeof(wm->launcher_icon);
     if (code == KEY_BACKSPACE) {
         launcher_pop(text);
     } else if (!(mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {

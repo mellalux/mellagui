@@ -523,7 +523,7 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, li->button_text[0], strlen(li->button_text[0]) + 1);
             h = fnv(h, li->message, strlen(li->message) + 1);
             if (li->form)
-                for (int i = 0; i < 2; i++)
+                for (int i = 0; i < 3; i++)                      /* name, command and icon text: a changed one is redrawn */
                     h = fnv(h, li->field_text[i], strlen(li->field_text[i]) + 1);
             else
                 for (int i = 0; i < li->n; i++) {

@@ -525,12 +525,12 @@ struct lm_launcher_info {
     const char *hint;
     const char *message;            /* an error of the form, "" none */
     /* the form */
-    struct lm_rect field[2];
-    const char *field_label[2];
-    const char *field_text[2];
-    int focus;                      /* 0 name, 1 command, 2 icon row */
+    struct lm_rect field[3];        /* name, command, icon text (a built-in name, theme:NAME or a picture file) */
+    const char *field_label[3];
+    const char *field_text[3];
+    int focus;                      /* 0 name, 1 command, 2 icon text, 3 the row of built-in icons */
     struct lm_rect kind_box[LM_LAUNCHER_KIND_N];
-    int kind;                       /* chosen icon (-1 = guess, -2 = the icon text the button had, a picture or theme:NAME, kept), what kind_box[i + 1] stands for */
+    int kind;                       /* the built-in icon the icon text names (-1 = empty = guess, -2 = something else), what kind_box[i + 1] stands for */
     const char *kind_name;          /* its name for the label */
 };
 

@@ -1092,7 +1092,7 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             lc_text_centered(c, &none, "Nothing here", 0xffffffu);
         }
     } else {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             const struct lm_rect *f = &li->field[i];
             struct lm_rect lab = lm_rect_make(f->x, f->y - LM_FONT_H - 4, f->w, LM_FONT_H);
             lc_text(c, &lab, lab.x, lab.y, li->field_label[i], 0xffffffu);
@@ -1109,14 +1109,14 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         }
         struct lm_rect kl = lm_rect_make(li->card.x + 28, li->kind_box[0].y - LM_FONT_H - 6, li->card.w - 56, LM_FONT_H);
         char lab[64];
-        snprintf(lab, sizeof(lab), "Icon   (%s)", li->kind_name);
+        snprintf(lab, sizeof(lab), "Built-in icons   (%s)", li->kind_name);
         lc_text(c, &kl, kl.x, kl.y, lab, 0xffffffu);
         for (int i = 0; i < LM_LAUNCHER_KIND_N; i++) {
             const struct lm_rect *b = &li->kind_box[i];
             bool on = li->kind == i - 1;
             float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f - 2.0f;
             if (on)
-                paint_shape(c, cx, cy, R + 3.0f, SHAPE_DISC, li->focus == 2 ? COL_PANEL_ACCENT : 0xffffffu, 0xd0);
+                paint_shape(c, cx, cy, R + 3.0f, SHAPE_DISC, li->focus == 3 ? COL_PANEL_ACCENT : 0xffffffu, 0xd0);
             if (i == 0) {
                 paint_shape(c, cx, cy, R, SHAPE_DISC, COL_PANEL_BTN, 0xc0);
                 draw_text_centered(c, b, "auto", COL_PANEL_TEXT);
@@ -1127,7 +1127,7 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             paint_dock_icon(c, &box, &it, 0.0f);
         }
         if (li->message[0]) {
-            struct lm_rect m = lm_rect_make(li->card.x + 12, li->card.y + 270, li->card.w - 24, LM_FONT_H);
+            struct lm_rect m = lm_rect_make(li->card.x + 12, li->card.y + 342, li->card.w - 24, LM_FONT_H);
             char fit[160];
             fit_text(fit, sizeof(fit), li->message, m.w, false);
             lc_text_centered(c, &m, fit, 0xffb4a8u);

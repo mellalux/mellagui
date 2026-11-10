@@ -101,6 +101,12 @@ class Base(unittest.TestCase):
             if not ctl.windows()['windows']:
                 break
             time.sleep(0.02)
+        if ctl.windows()['workspace'] != 0:                  # a test that ended on another workspace must not leak into the next ones
+            ctl.key(KEY_LEFTMETA, True)
+            ctl.tap(2)                                      # Super+1
+            ctl.key(KEY_LEFTMETA, False)
+            ctl.sync()
+        ctl.cmd('cascade')                                  # windows are placed the same way whatever ran before
         ctl.cmd('abs 900 500')
 
     def tearDown(self):
@@ -3118,7 +3124,7 @@ class TestClients(Base):
         self.assertEqual(t0[2], 14 - 4)
         self.assertLess(t0[0], win['y'] + 40)                            # the cursor is on line 1: the thumb is at the top
         right = win['x'] + win['w'] - 6
-        ctl.click(right, win['y'] + win['h'] - 40)                       # the track below it: one page down
+        ctl.click(right, min(win['y'] + win['h'] - 40, 500))             # the track below it: one page down (not where the dock floats)
         time.sleep(0.3)
         ctl.abs(win['x'] + 100, win['y'] + 100)
         t1 = self.thumb(win, 'esb1.ppm')
@@ -6111,6 +6117,14 @@ class TestCamera(Base):
         self.assertEqual(len(files), 1)
         self.assertRegex(files[0], r'^camera-\d{8}-\d{6}\.png$')
         self.assertEqual(self.png_size(os.path.join(d, files[0])), (640, 480))
+        if win['x'] + 30 > 150:                                               # the dock floats over the bottom of the screen from x ~ 197 on and
+            ctl.abs(win['x'] + 200, win['y'] - 12)                            # (the window's place depends on the tests before) would take the click:
+            ctl.button(BTN_LEFT, True)                                        # drag the window to the left edge first
+            ctl.abs(win['x'] + 200 - (win['x'] - 40), win['y'] - 12)
+            ctl.button(BTN_LEFT, False)
+            time.sleep(0.2)
+            win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
+            self.assertLess(win['x'], 100)
         ctl.click(win['x'] + 30, win['y'] + win['h'] - 22)                    # the Snapshot button (left end of the bar)
         time.sleep(0.5)
         files = sorted(os.listdir(d))

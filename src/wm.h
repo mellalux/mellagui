@@ -717,6 +717,9 @@ void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);
 
 /* Some visible window is fullscreen (the screensaver does not start over a film or a game). */
 bool lm_wm_has_fullscreen(const struct lm_wm *wm);
+/* Next window placement starts at the first cascade position again (tests: the place of a window then does not depend on how many
+ * windows the tests before it opened). */
+void lm_wm_reset_cascade(struct lm_wm *wm);
 /* The clock / date settings changed: write the panel's clock again. */
 void lm_wm_clock_changed(struct lm_wm *wm);
 /* Calendar (client/mellagui-calendar.c, app id "mellagui.calendar"): a program that runs hidden (a minimized window that the taskbar, Alt+Tab and

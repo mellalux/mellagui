@@ -524,6 +524,8 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, &li->drag_box, sizeof(li->drag_box));
             h = fnv(h, &li->drop_pos, sizeof(li->drop_pos));
             h = fnv(h, &li->kind, sizeof(li->kind));
+            h = fnv(h, li->caret, sizeof(li->caret));
+            h = fnv(h, &li->help, sizeof(li->help));
             h = fnv(h, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
             h = fnv(h, &lm_dock.icon_bg_rgb, sizeof(lm_dock.icon_bg_rgb));
             h = fnv(h, li->search, strlen(li->search) + 1);

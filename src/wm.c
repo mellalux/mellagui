@@ -170,6 +170,9 @@ struct lm_wm {
     int launcher_edit_raw;
     char launcher_icon[LM_DOCK_ICON_MAX];           /* the form's icon text: empty (guess), a built-in name, theme:NAME or a picture file */
     int launcher_sel, launcher_hover_btn, launcher_focus;
+    int64_t settings_spawn_ms;  /* when the settings panel was last started (its window may not be there yet) */
+    int launcher_caret[3];      /* the text cursor of the form's name / command / icon field (a byte offset; -1 = the end) */
+    int launcher_help;          /* 0 none, else the form field (+ 1) whose help card is open */
     char launcher_name[LM_DOCK_NAME_MAX], launcher_cmd[LM_DOCK_CMD_MAX], launcher_msg[112];
     /* mouse drags (a press on an icon that moved far enough): a launcher icon onto the dock, a dock icon along the dock (reorder) or out of it
      * (back to the launcher). drag_x/y = the pointer. */
@@ -2575,6 +2578,103 @@ static int launcher_kind_of(const struct lm_wm *wm)
     return k >= 0 ? k : -2;
 }
 
+/* ---- the text cursor of the form's fields ---- */
+
+static int text_width_to(const char *text, int from, int to)
+{
+    char tmp[LM_DOCK_CMD_MAX];
+    int n = LM_MIN(to - from, (int)sizeof(tmp) - 1);
+    memcpy(tmp, text + from, (size_t)LM_MAX(n, 0));
+    tmp[LM_MAX(n, 0)] = 0;
+    return lm_font_text_width(tmp);
+}
+
+static int utf8_prev(const char *t, int i)
+{
+    if (i > 0)
+        i--;
+    while (i > 0 && ((unsigned char)t[i] & 0xc0) == 0x80)
+        i--;
+    return i;
+}
+
+static int utf8_next(const char *t, int i, int len)
+{
+    if (i < len)
+        i++;
+    while (i < len && ((unsigned char)t[i] & 0xc0) == 0x80)
+        i++;
+    return i;
+}
+
+void lm_launcher_field_view(const char *text, int caret, int avail, int *start, int *end)
+{
+    int len = (int)strlen(text), st = 0;
+    caret = LM_CLAMP(caret, 0, len);
+    while (st < caret && text_width_to(text, st, caret) > avail - 2)       /* scrolled so that the caret shows */
+        st = utf8_next(text, st, len);
+    int en = st;
+    while (en < len) {
+        int nx = utf8_next(text, en, len);
+        if (text_width_to(text, st, nx) > avail)
+            break;
+        en = nx;
+    }
+    *start = st;
+    *end = en;
+}
+
+/* The caret of field f, always on a character boundary inside the text (-1 = the end). */
+static int lf_caret(const struct lm_wm *wm, int f, const char *text)
+{
+    int len = (int)strlen(text), c = wm->launcher_caret[f];
+    if (c < 0 || c > len)
+        c = len;
+    while (c > 0 && ((unsigned char)text[c] & 0xc0) == 0x80)
+        c--;
+    return c;
+}
+
+static bool is_word_char(unsigned char c)
+{
+    return isalnum(c) || c >= 0x80 || c == '_';
+}
+
+static int lf_word_prev(const char *t, int i)
+{
+    while (i > 0 && !is_word_char((unsigned char)t[i - 1]))
+        i--;
+    while (i > 0 && is_word_char((unsigned char)t[i - 1]))
+        i--;
+    return i;
+}
+
+static int lf_word_next(const char *t, int i, int len)
+{
+    while (i < len && !is_word_char((unsigned char)t[i]))
+        i++;
+    while (i < len && is_word_char((unsigned char)t[i]))
+        i++;
+    return i;
+}
+
+/* Puts `s` (n bytes) into text at the caret; false when it does not fit. The caret moves behind it. */
+static bool lf_insert(char *text, size_t max, int *caret, const char *s, size_t n)
+{
+    size_t len = strlen(text);
+    if (len + n >= max)
+        return false;
+    memmove(text + *caret + n, text + *caret, len - (size_t)*caret + 1);
+    memcpy(text + *caret, s, n);
+    *caret += (int)n;
+    return true;
+}
+
+static void lf_erase(char *text, int from, int to)
+{
+    memmove(text + from, text + to, strlen(text + to) + 1);
+}
+
 static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launcher_info *li)
 {
     memset(li, 0, sizeof(*li));
@@ -2636,8 +2736,8 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
     li->button_text[0] = li->form ? (li->editing ? "Save" : "Add") : li->edit ? "Done" : "Edit";
     li->button_text[1] = li->form ? "Cancel" : "Close";
     static const char hint_grid[] = "Enter starts   E edit   A add   Type to search   Esc closes", hint_edit[] = "Click an icon to change it   red x removes   E or Done ends   Esc closes",
-                      hint_form[] = "Tab next field   Left / Right icon   Enter adds   Esc back",
-                      hint_change[] = "Tab next field   Left / Right icon   Enter saves   Esc back";
+                      hint_form[] = "Tab next field   Left / Right cursor (or icon)   Enter adds   Esc back",
+                      hint_change[] = "Tab next field   Left / Right cursor (or icon)   Enter saves   Esc back";
     static const char hint_search[] = "Type to search   Enter starts   Esc clears";
     li->hint = li->form ? (li->editing ? hint_change : hint_form) : li->searching ? hint_search : li->edit ? hint_edit : hint_grid;
     if (li->form) {
@@ -2647,10 +2747,33 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
         li->field_text[0] = wm->launcher_name;
         li->field_text[1] = wm->launcher_cmd;
         li->field_text[2] = wm->launcher_icon;
+        for (int i = 0; i < 3; i++)
+            li->caret[i] = lf_caret(wm, i, li->field_text[i]);
         int fx = li->card.x + LC_PAD, fw = li->card.w - 2 * LC_PAD;
         li->field[0] = lm_rect_make(fx, li->card.y + 60 + LM_FONT_H + 4, fw, 30);
         li->field[1] = lm_rect_make(fx, li->card.y + 126 + LM_FONT_H + 4, fw, 30);
         li->field[2] = lm_rect_make(fx, li->card.y + 192 + LM_FONT_H + 4, fw, 30);
+        for (int i = 0; i < 3; i++)                                     /* the "?" at the end of each field */
+            li->help_btn[i] = lm_rect_make(li->field[i].x + li->field[i].w - LM_LAUNCHER_HELP_D - 8, li->field[i].y + (li->field[i].h - LM_LAUNCHER_HELP_D) / 2,
+                                           LM_LAUNCHER_HELP_D, LM_LAUNCHER_HELP_D);
+        li->help = wm->launcher_help;
+        if (li->help >= 1 && li->help <= 3) {
+            static const char *const titles[3] = { "Name", "Command", "Icon" };
+            static const char *const texts[3] = {
+                "The name of the button. It is written under its icon and the search finds it by it. Every button needs a name of its own (capital "
+                "and small letters do not count as different).",
+                "The program to start. @terminal, @run, @settings ... are MellaGUI's own programs, mellagui-* are found next to MellaGUI, ~/prog is in "
+                "your home folder. 'a || b' tries a and, if it is not installed, b. '@terminal -e alpine' runs a text program in a terminal. "
+                "env VAR=value comes before the program.",
+                "Empty: guessed from the name. A built-in icon: pick one below or type its name. theme:NAME takes an installed program's own icon "
+                "(theme:firefox, or theme:vscode|code to try several names). Or the path of a PNG or JPEG picture; a logo with transparent corners "
+                "gets a round plate.",
+            };
+            li->help_title = titles[li->help - 1];
+            li->help_text = texts[li->help - 1];
+            li->help_card = lm_rect_make(li->card.x + 50, li->card.y + 86, li->card.w - 100, 210);
+            li->help_close = lm_rect_make(li->help_card.x + (li->help_card.w - 90) / 2, li->help_card.y + li->help_card.h - 42, 90, 28);
+        }
         int kgap = 5, ksz = LM_MIN(LC_KIND, (li->card.w - 2 * LC_PAD - (LM_LAUNCHER_KIND_N - 1) * kgap) / LM_LAUNCHER_KIND_N);       /* all the icon choices fit the card */
         int total = LM_LAUNCHER_KIND_N * ksz + (LM_LAUNCHER_KIND_N - 1) * kgap;
         int kx = li->card.x + (li->card.w - total) / 2, ky = li->card.y + 286;
@@ -2730,6 +2853,10 @@ size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size)
     } else {
         for (int i = 0; i < 3; i++)
             n += (size_t)snprintf(buf + n, size - n, "field %d x=%d y=%d w=%d h=%d text=\"%s\"\n", i, LCR(li.field[i]), li.field_text[i]);
+        for (int i = 0; i < 3; i++)
+            n += (size_t)snprintf(buf + n, size - n, "caret %d %d\nhelp %d x=%d y=%d w=%d h=%d\n", i, li.caret[i], i, LCR(li.help_btn[i]));
+        n += (size_t)snprintf(buf + n, size - n, "helpcard open=%d x=%d y=%d w=%d h=%d close=%d,%d,%d,%d title=\"%s\"\n", li.help, LCR(li.help_card), LCR(li.help_close),
+                              li.help_title ? li.help_title : "");
         for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
             n += (size_t)snprintf(buf + n, size - n, "kind %d x=%d y=%d w=%d h=%d\n", i - 1, LCR(li.kind_box[i]));
         n += (size_t)snprintf(buf + n, size - n, "focus %d kind %d message \"%s\"\n", li.focus, li.kind, li.message);
@@ -2749,6 +2876,10 @@ static bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick
     struct lm_launcher_info li;
     launcher_info(wm, lo, &li);
     out->rect = li.card;
+    if (li.form && li.help) {                                       /* a help card is open: its Close button, a click elsewhere also closes it */
+        out->kind = lm_rect_contains(&li.help_card, ix, iy) && !lm_rect_contains(&li.help_close, ix, iy) ? LM_PICK_LAUNCHER_CARD : LM_PICK_LAUNCHER_HELPCLOSE;
+        return true;
+    }
     out->kind = lm_rect_contains(&li.card, ix, iy) ? LM_PICK_LAUNCHER_CARD : LM_PICK_LAUNCHER_BACKDROP;
     if (out->kind == LM_PICK_LAUNCHER_BACKDROP)
         return true;
@@ -2759,6 +2890,12 @@ static bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick
             return true;
         }
     if (li.form) {
+        for (int i = 0; i < 3; i++)
+            if (lm_rect_contains(&li.help_btn[i], ix, iy)) {
+                out->kind = LM_PICK_LAUNCHER_HELP;
+                out->index = i;
+                return true;
+            }
         for (int i = 0; i < 3; i++)
             if (lm_rect_contains(&li.field[i], ix, iy)) {
                 out->kind = LM_PICK_LAUNCHER_FIELD;
@@ -2802,6 +2939,8 @@ static void launcher_open_form(struct lm_wm *wm)
     wm->launcher_name[0] = wm->launcher_cmd[0] = wm->launcher_msg[0] = 0;
     wm->launcher_icon[0] = 0;
     wm->launcher_focus = 0;
+    wm->launcher_caret[0] = wm->launcher_caret[1] = wm->launcher_caret[2] = -1;
+    wm->launcher_help = 0;
     wm->launcher_hover_btn = -1;
     launcher_damage(wm);
 }
@@ -2822,6 +2961,8 @@ static void launcher_open_change(struct lm_wm *wm, int g)
     wm->launcher_msg[0] = 0;
     snprintf(wm->launcher_icon, sizeof(wm->launcher_icon), "%s", ic);
     wm->launcher_focus = 0;
+    wm->launcher_caret[0] = wm->launcher_caret[1] = wm->launcher_caret[2] = -1;
+    wm->launcher_help = 0;
     wm->launcher_hover_btn = -1;
     launcher_damage(wm);
 }
@@ -2923,12 +3064,45 @@ static void launcher_activate(struct lm_wm *wm, int kind, int index)
     }
     case LM_PICK_LAUNCHER_REMOVE: launcher_remove(wm, index); break;
     case LM_PICK_LAUNCHER_ADD: launcher_open_form(wm); break;
-    case LM_PICK_LAUNCHER_FIELD:
+    case LM_PICK_LAUNCHER_FIELD: {                                    /* the caret goes where the pointer is */
         wm->launcher_focus = index;
+        struct lm_output *lo = launcher_output(wm);
+        double px = 0, py = 0;
+        if (lo && wm->srv->seat) {
+            lm_seat_pointer_position(wm->srv->seat, &px, &py);
+            struct lm_launcher_info li;
+            launcher_info(wm, lo, &li);
+            const char *text = li.field_text[index];
+            int avail = li.field[index].w - 20 - LM_LAUNCHER_HELP_D - 8, st, en;
+            lm_launcher_field_view(text, li.caret[index], avail, &st, &en);
+            int tx = li.field[index].x + 10, best = st, bestd = 1 << 30;
+            for (int b = st; b <= en;) {
+                int d = abs(tx + text_width_to(text, st, b) - (int)px);
+                if (d < bestd) {
+                    bestd = d;
+                    best = b;
+                }
+                if (b >= en)
+                    break;
+                b = utf8_next(text, b, (int)strlen(text));
+            }
+            wm->launcher_caret[index] = best;
+        }
+        launcher_damage(wm);
+        break;
+    }
+    case LM_PICK_LAUNCHER_HELP:
+        wm->launcher_help = index + 1;
+        wm->launcher_focus = index;
+        launcher_damage(wm);
+        break;
+    case LM_PICK_LAUNCHER_HELPCLOSE:
+        wm->launcher_help = 0;
         launcher_damage(wm);
         break;
     case LM_PICK_LAUNCHER_KIND:                                       /* a built-in icon: its name goes into the icon text, "auto" empties it */
         snprintf(wm->launcher_icon, sizeof(wm->launcher_icon), "%s", index >= 0 ? lm_dockicon_name(index) : "");
+        wm->launcher_caret[2] = -1;
         wm->launcher_focus = 3;
         launcher_damage(wm);
         break;
@@ -2974,12 +3148,14 @@ static void launcher_field_clip(struct lm_wm *wm, int what)
             lm_seat_clip_add(wm->srv->seat, text);
             lm_seat_clip_use(wm->srv->seat, 0);
         }
-        if (what == 0)
+        if (what == 0) {
             text[0] = 0;
-    } else if (what == 2) {
+            wm->launcher_caret[wm->launcher_focus] = 0;
+        }
+    } else if (what == 2) {                                                  /* paste: at the caret, as one line */
         const char *c = lm_seat_clip_count(wm->srv->seat) > 0 ? lm_seat_clip_get(wm->srv->seat, 0) : NULL;
-        size_t l = strlen(text);
-        for (; c && *c && l + 1 < max; c++) {
+        int caret = lf_caret(wm, wm->launcher_focus, text);
+        for (; c && *c; c++) {
             unsigned char ch = (unsigned char)*c;
             if (ch == '\n' || ch == '\r' || ch == '\t')
                 ch = ' ';
@@ -2987,14 +3163,17 @@ static void launcher_field_clip(struct lm_wm *wm, int what)
                 continue;
             if ((ch & 0xc0) != 0x80 && ch >= 0xc0) {                         /* a multi-byte character goes in whole or not at all */
                 size_t need = ch >= 0xf0 ? 4 : ch >= 0xe0 ? 3 : 2;
-                if (l + need >= max)
+                if (strlen(text) + need >= max)
                     break;
             }
-            text[l++] = (char)ch;
-            text[l] = 0;
+            char one = (char)ch;
+            if (!lf_insert(text, max, &caret, &one, 1))
+                break;
         }
+        wm->launcher_caret[wm->launcher_focus] = caret;
     } else {
         text[0] = 0;
+        wm->launcher_caret[wm->launcher_focus] = 0;
     }
     wm->launcher_msg[0] = 0;
     launcher_damage(wm);
@@ -3021,6 +3200,13 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
     if (code == KEY_A && (mods & LM_MOD_SUPER) && !(mods & ~(uint32_t)LM_MOD_SUPER & LM_KEY_MODS_MASK)) {   /* Super+A again closes it */
         if (!repeat)
             launcher_set(wm, false, NULL);
+        return;
+    }
+    if (wm->launcher_form && wm->launcher_help) {                   /* a help card is open: Esc / Enter / Space close it, nothing else is typed */
+        if (!repeat && (code == KEY_ESC || code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE)) {
+            wm->launcher_help = 0;
+            launcher_damage(wm);
+        }
         return;
     }
     bool arrow = code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN;
@@ -3114,6 +3300,8 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
             return;
         bool back = code == KEY_UP || (code == KEY_TAB && shift);
         wm->launcher_focus = (wm->launcher_focus + (back ? 3 : 1)) % 4;
+        if (wm->launcher_focus < 3)
+            wm->launcher_caret[wm->launcher_focus] = -1;                /* (a field entered with the keyboard has the caret at its end) */
         launcher_damage(wm);
         return;
     }
@@ -3122,6 +3310,7 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
             return;
         if (wm->launcher_focus == 0) {
             wm->launcher_focus = 1;
+            wm->launcher_caret[1] = -1;
             launcher_damage(wm);
         } else {
             launcher_submit(wm);
@@ -3148,14 +3337,31 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
             int k = LM_MAX(launcher_kind_of(wm), -1) + (code == KEY_LEFT ? -1 : 1);
             k = LM_CLAMP(k, -1, LM_DOCKICON_COUNT - 1);
             snprintf(wm->launcher_icon, sizeof(wm->launcher_icon), "%s", k >= 0 ? lm_dockicon_name(k) : "");
+            wm->launcher_caret[2] = -1;
             launcher_damage(wm);
         }
         return;
     }
-    char *text = wm->launcher_focus == 0 ? wm->launcher_name : wm->launcher_focus == 1 ? wm->launcher_cmd : wm->launcher_icon;
-    size_t max = wm->launcher_focus == 0 ? sizeof(wm->launcher_name) : wm->launcher_focus == 1 ? sizeof(wm->launcher_cmd) : sizeof(wm->launcher_icon);
-    if (code == KEY_BACKSPACE) {
-        launcher_pop(text);
+    size_t max = 0;
+    char *text = launcher_field_text(wm, &max);
+    if (!text)
+        return;
+    int f = wm->launcher_focus, len = (int)strlen(text), caret = lf_caret(wm, f, text);
+    bool ctrl = (mods & LM_MOD_CTRL) != 0;
+    if (code == KEY_LEFT) {                                          /* the caret: a character, with Ctrl a word */
+        caret = ctrl ? lf_word_prev(text, caret) : utf8_prev(text, caret);
+    } else if (code == KEY_RIGHT) {
+        caret = ctrl ? lf_word_next(text, caret, len) : utf8_next(text, caret, len);
+    } else if (code == KEY_HOME) {
+        caret = 0;
+    } else if (code == KEY_END) {
+        caret = len;
+    } else if (code == KEY_BACKSPACE) {                              /* before the caret */
+        int from = ctrl ? lf_word_prev(text, caret) : utf8_prev(text, caret);
+        lf_erase(text, from, caret);
+        caret = from;
+    } else if (code == KEY_DELETE) {                                 /* at the caret (Shift+Delete is Cut, handled above) */
+        lf_erase(text, caret, ctrl ? lf_word_next(text, caret, len) : utf8_next(text, caret, len));
     } else if (!(mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {
         keymap_sync(wm);
         if (code >= KEY_KP7 && code <= KEY_KPDOT)
@@ -3163,14 +3369,12 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
         uint32_t ks = lm_keymap_keysym(code, mods);
         char txt[8];
         int k = ks ? lm_keysym_to_utf8(ks, txt) : 0;
-        size_t l = strlen(text);
-        if (k <= 0 || (unsigned char)txt[0] < 0x20 || l + (size_t)k >= max)
+        if (k <= 0 || (unsigned char)txt[0] < 0x20 || !lf_insert(text, max, &caret, txt, (size_t)k))
             return;
-        memcpy(text + l, txt, (size_t)k);
-        text[l + (size_t)k] = 0;
     } else {
         return;
     }
+    wm->launcher_caret[f] = caret;
     wm->launcher_msg[0] = 0;
     launcher_damage(wm);
 }
@@ -3429,8 +3633,26 @@ static void dock_activate(struct lm_wm *wm, int i, bool reuse)
 
 /* Starts the program of `it` or brings its window forward. `i` is its place in the dock (the icon swells there while it starts), -1 for a
  * launcher button that is not in the dock. */
+/* The settings panel is there once: when it is open (or was started a moment ago and is still coming up) it is brought forward and no second one
+ * starts. True when that happened. */
+static bool settings_present(struct lm_wm *wm)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->mapped && w->app_id && !strcmp(w->app_id, "mellagui.settings")) {
+            lm_wm_focus_window(wm, w);
+            return true;
+        }
+    return wm->settings_spawn_ms && (int64_t)lm_now_ms() - wm->settings_spawn_ms < 4000;
+}
+
 static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool reuse)
 {
+    bool is_settings = !launcher_is_self(it) && dock_app_matches(it->match, "mellagui.settings");
+    if (is_settings && settings_present(wm))
+        return;
+    if (is_settings)
+        wm->settings_spawn_ms = (int64_t)lm_now_ms();
     if (launcher_is_self(it)) {                                       /* the Launcher button: not a program */
         launcher_set(wm, true, dock_output(wm));
         return;
@@ -4598,7 +4820,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_ABOUT_BUTTON: about_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_DOCK_ITEM: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_LAUNCHER_ITEM: case LM_PICK_LAUNCHER_REMOVE: case LM_PICK_LAUNCHER_ADD: case LM_PICK_LAUNCHER_BUTTON:
-    case LM_PICK_LAUNCHER_KIND: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_LAUNCHER_KIND: case LM_PICK_LAUNCHER_HELP: case LM_PICK_LAUNCHER_HELPCLOSE: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_UP: clip_code = 1; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_DOWN: clip_code = 2; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_CLEAR: clip_code = 3; shape = LM_CURSOR_POINTER; break;
@@ -5086,6 +5308,9 @@ static void request_quit(struct lm_wm *wm)
 
 static void launch_settings(struct lm_wm *wm)
 {
+    if (settings_present(wm))
+        return;
+    wm->settings_spawn_ms = (int64_t)lm_now_ms();
     const char *cmd = wm->srv->config.settings_cmd ? wm->srv->config.settings_cmd : "mellagui-settings";
     lm_server_spawn(wm->srv, cmd);
 }

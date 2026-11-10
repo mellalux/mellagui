@@ -271,6 +271,8 @@ enum lm_pick_kind {
     LM_PICK_LAUNCHER_BUTTON,/* a button of the launcher dialog (`index` 0 = Edit / Add, 1 = Close / Cancel) */
     LM_PICK_LAUNCHER_FIELD, /* a text field of the add form (`index` 0 = name, 1 = command) */
     LM_PICK_LAUNCHER_KIND,  /* an icon choice of the add form (`index` = enum lm_dockicon, or -1 = "guess from the name") */
+    LM_PICK_LAUNCHER_HELP,  /* the small "?" at the end of a form field (`index` 0 = name, 1 = command, 2 = icon): opens its help card */
+    LM_PICK_LAUNCHER_HELPCLOSE, /* while a help card is open: its Close button, or anything outside the card */
     LM_PICK_LAUNCHER_CARD,  /* the launcher's card (between its items) */
     LM_PICK_LAUNCHER_BACKDROP, /* anything else while the launcher is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
@@ -517,6 +519,7 @@ struct lm_about_info {
  */
 #define LM_LAUNCHER_CELL_W 124          /* one icon with its name */
 #define LM_LAUNCHER_ICON 64             /* the round icon */
+#define LM_LAUNCHER_HELP_D 18                          /* the "?" circle of a form field */
 #define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
 struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
@@ -552,11 +555,20 @@ struct lm_launcher_info {
     struct lm_rect field[3];        /* name, command, icon text (a built-in name, theme:NAME or a picture file) */
     const char *field_label[3];
     const char *field_text[3];
+    int caret[3];                   /* the text cursor of each field: a byte offset on a character boundary */
+    struct lm_rect help_btn[3];     /* the "?" circle at the end of each field */
+    int help;                       /* 0 none, else the field (+ 1) whose help card is open: the card, its text and its Close button follow */
+    const char *help_title, *help_text;
+    struct lm_rect help_card, help_close;
     int focus;                      /* 0 name, 1 command, 2 icon text, 3 the row of built-in icons */
     struct lm_rect kind_box[LM_LAUNCHER_KIND_N];
     int kind;                       /* the built-in icon the icon text names (-1 = empty = guess, -2 = something else), what kind_box[i + 1] stands for */
     const char *kind_name;          /* its name for the label */
 };
+
+/* The part of a form field's text that is shown: [*start, *end) of `text`, at most `avail` pixels wide and holding the caret (a byte offset). The
+ * painter and the pointer both use it, so a click lands where the caret is drawn. */
+void lm_launcher_field_view(const char *text, int caret, int avail, int *start, int *end);
 
 /*
  * The dock (dock.h): round icons along the bottom of the primary output. `box` is where each icon is painted now (the icon under the

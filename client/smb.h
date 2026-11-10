@@ -26,6 +26,8 @@ struct smb_conn {
     char user[64];                      /* "" = guest */
     char pass[128];                     /* for this run only (never saved by smb.c) */
     bool legacy;                        /* allow the old SMB1 protocol (some old routers; not recommended) */
+    bool sftp;                          /* an SSH server (sftp.c), not a Windows share: `host` may carry a port, `user` empty = ssh's own choice */
+    int port;                           /* sftp: 0 = 22 */
 };
 
 struct smb_item {
@@ -54,6 +56,12 @@ int smb_put(const struct smb_conn *c, const char *share, const char *local, cons
 int smb_del(const struct smb_conn *c, const char *share, const char *remote, bool dir, char *err, size_t errsz, smb_poll_fn poll, void *pd);
 int smb_mkdir(const struct smb_conn *c, const char *share, const char *remote, char *err, size_t errsz, smb_poll_fn poll, void *pd);
 int smb_rename(const struct smb_conn *c, const char *share, const char *from, const char *to, char *err, size_t errsz, smb_poll_fn poll, void *pd);
+/* Runs `prog_name argv...` (argv[0] is filled in) with `input` on its standard input (may be NULL) and the "NAME=value" strings of `env` added to its
+ * environment (may be NULL): stdout and stderr come back in one text in *out (malloc'd). Exit status, or -1 (could not run: err, `missing_text` when
+ * the program is not there; cancelled / timed out). The process of the call is known to smb_child_pid() while it runs. Used by sftp.c, too. */
+int smb_run_program(const char *prog_name, char **argv, const char *input, const char *const *env, int timeout_ms, char **out, char *err, size_t errsz,
+                    smb_poll_fn poll_fn, void *pd, const char *missing_text);
+
 /* True when the name may be used in an operation (no quote, ';', back slash, control character). */
 bool smb_name_ok(const char *name);
 

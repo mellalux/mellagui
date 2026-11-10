@@ -47,6 +47,7 @@
 #include <unistd.h>
 
 #include "img.h"
+#include "sftp.h"
 #include "smb.h"
 #include "metrics.h"
 #include "pathcomp.h"
@@ -65,7 +66,9 @@
 #define ROW_H 18
 #define TOOL_H 30
 #define HEAD_H 22
-#define NET_PREFIX "smb://"
+#define NET_PREFIX "smb://"                /* the list of servers; a Windows share is smb://SERVER/SHARE/..., an SSH server sftp://SERVER/abs/path */
+#define SFTP_PREFIX "sftp://"
+#define SFTP_TAG " (sftp)"                 /* how the list of servers marks an SSH server (a name may be both) */
 #define STATUS_H 20
 #define FKEY_H 30
 #define COL_BG (lm_theme.background)
@@ -927,6 +930,7 @@ struct netconn {
     struct smb_conn c;
     bool saved;                         /* in network.conf */
     bool keep;                          /* the user typed it or logged in: it is saved once it worked */
+    char home[256];                     /* an SSH server: its home folder (asked once) */
 };
 
 static struct netconn g_net[NET_MAX];
@@ -938,7 +942,7 @@ static char g_net_login_dir[PATH_MAX];  /* ... and the place that was asked for 
 
 static bool is_net(const char *path)
 {
-    return !strncmp(path, NET_PREFIX, strlen(NET_PREFIX));
+    return !strncmp(path, NET_PREFIX, strlen(NET_PREFIX)) || !strncmp(path, SFTP_PREFIX, strlen(SFTP_PREFIX));
 }
 
 static bool net_conf_path(char *out, size_t n)
@@ -953,12 +957,41 @@ static bool net_conf_path(char *out, size_t n)
     return true;
 }
 
-static struct netconn *net_find(const char *name)
+static struct netconn *net_find_kind(const char *name, bool sftp)
 {
     for (int i = 0; i < g_nnet; i++)
-        if (!strcasecmp(g_net[i].c.name, name))
+        if (g_net[i].c.sftp == sftp && !strcasecmp(g_net[i].c.name, name))
             return &g_net[i];
     return NULL;
+}
+
+static struct netconn *net_find(const char *name)                       /* a Windows share's server */
+{
+    return net_find_kind(name, false);
+}
+
+/* An SSH server: `host` (the name in paths is host, or host:port for another port). */
+static struct netconn *net_add_sftp(const char *host, const char *user, int port)
+{
+    char name[48];
+    if (port > 0 && port != 22)
+        snprintf(name, sizeof(name), "%.40s:%d", host, port);
+    else
+        snprintf(name, sizeof(name), "%.47s", host);
+    struct netconn *n = net_find_kind(name, true);
+    if (!n) {
+        if (g_nnet >= NET_MAX)
+            return NULL;
+        n = &g_net[g_nnet++];
+        memset(n, 0, sizeof(*n));
+        snprintf(n->c.name, sizeof(n->c.name), "%s", name);
+        snprintf(n->c.host, sizeof(n->c.host), "%s", host);
+        n->c.sftp = true;
+        n->c.port = port > 0 && port != 22 ? port : 0;
+    }
+    if (user)
+        snprintf(n->c.user, sizeof(n->c.user), "%s", user);
+    return n;
 }
 
 static struct netconn *net_add(const char *host, const char *user, bool legacy)
@@ -992,7 +1025,18 @@ static void net_load(void)
             line[strcspn(line, "\r\n")] = 0;
             if (line[0] == '#' || sscanf(line, "%127s %63s %15s", host, user, flag) < 1)
                 continue;
-            struct netconn *n = net_add(host, !strcmp(user, "-") ? "" : user, !strcmp(flag, "legacy"));
+            struct netconn *n;
+            if (!strncmp(host, SFTP_PREFIX, strlen(SFTP_PREFIX))) {         /* "sftp://host[:port] user" */
+                char *hp = host + strlen(SFTP_PREFIX), *colon = strrchr(hp, ':');
+                int port = 0;
+                if (colon) {
+                    port = atoi(colon + 1);
+                    *colon = 0;
+                }
+                n = net_add_sftp(hp, !strcmp(user, "-") ? "" : user, port);
+            } else {
+                n = net_add(host, !strcmp(user, "-") ? "" : user, !strcmp(flag, "legacy"));
+            }
             if (n)
                 n->saved = true;
         }
@@ -1014,17 +1058,29 @@ static void net_save(void)
     if (!f)
         return;
     fchmod(fileno(f), 0600);
-    fprintf(f, "# MellaGUI file manager: network servers (host user [legacy]); no passwords are kept\n");
-    for (int i = 0; i < g_nnet; i++)
-        if (g_net[i].saved)
-            fprintf(f, "%s %s%s\n", g_net[i].c.host, g_net[i].c.user[0] ? g_net[i].c.user : "-", g_net[i].c.legacy ? " legacy" : "");
+    fprintf(f, "# MellaGUI file manager: network servers (host user [legacy] for a Windows share, sftp://host[:port] user for an SSH server); no passwords are kept\n");
+    for (int i = 0; i < g_nnet; i++) {
+        if (!g_net[i].saved)
+            continue;
+        const struct smb_conn *c = &g_net[i].c;
+        if (c->sftp)
+            fprintf(f, SFTP_PREFIX "%s%s%.0d %s\n", c->host, c->port ? ":" : "", c->port, c->user[0] ? c->user : "-");
+        else
+            fprintf(f, "%s %s%s\n", c->host, c->user[0] ? c->user : "-", c->legacy ? " legacy" : "");
+    }
     fclose(f);
 }
 
-static void net_forget(const char *name)
+static void net_forget(const char *shown)                               /* the name as the list of servers shows it ("nas" or "nas (sftp)") */
 {
+    char name[64];
+    snprintf(name, sizeof(name), "%s", shown);
+    size_t tl = strlen(SFTP_TAG), nl = strlen(name);
+    bool sftp = nl > tl && !strcmp(name + nl - tl, SFTP_TAG);
+    if (sftp)
+        name[nl - tl] = 0;
     for (int i = 0; i < g_nnet; i++)
-        if (!strcasecmp(g_net[i].c.name, name)) {
+        if (g_net[i].c.sftp == sftp && !strcasecmp(g_net[i].c.name, name)) {
             memmove(&g_net[i], &g_net[i + 1], (size_t)(g_nnet - i - 1) * sizeof(g_net[0]));
             g_nnet--;
             break;
@@ -1035,6 +1091,7 @@ static void net_forget(const char *name)
 /* "smb://SERVER/SHARE/a/b" -> conn "SERVER", share "SHARE", dir "a/b". `level`: 0 servers, 1 shares, 2 inside a share. */
 struct netpath {
     int level;
+    bool sftp;                          /* an SSH server: level 1 is its home folder, level 2 any folder (`dir` is the absolute path without the first slash, "" = /) */
     char conn[48], share[64], dir[PATH_MAX];
 };
 
@@ -1043,6 +1100,24 @@ static bool net_parse(const char *path, struct netpath *np)
     memset(np, 0, sizeof(*np));
     if (!is_net(path))
         return false;
+    if (!strncmp(path, SFTP_PREFIX, strlen(SFTP_PREFIX))) {
+        const char *q = path + strlen(SFTP_PREFIX);
+        size_t cl = strcspn(q, "/");
+        if (!cl || cl >= sizeof(np->conn))
+            return false;
+        np->sftp = true;
+        snprintf(np->conn, sizeof(np->conn), "%.*s", (int)cl, q);
+        if (!q[cl]) {
+            np->level = 1;
+            return true;
+        }
+        np->level = 2;
+        snprintf(np->dir, sizeof(np->dir), "%s", q + cl + 1);
+        size_t dl = strlen(np->dir);
+        while (dl && np->dir[dl - 1] == '/')
+            np->dir[--dl] = 0;
+        return true;
+    }
     const char *s = path + strlen(NET_PREFIX);
     size_t l = strcspn(s, "/");
     if (!l) {
@@ -1071,6 +1146,13 @@ static bool net_parse(const char *path, struct netpath *np)
 
 static void net_make(const struct netpath *np, char *out, size_t n)
 {
+    if (np->sftp) {
+        if (np->level == 1)
+            snprintf(out, n, SFTP_PREFIX "%s", np->conn);
+        else
+            snprintf(out, n, SFTP_PREFIX "%s/%s", np->conn, np->dir);
+        return;
+    }
     if (np->level == 0)
         snprintf(out, n, NET_PREFIX);
     else if (np->level == 1)
@@ -1086,6 +1168,19 @@ static void net_parent(const char *path, char *out, size_t n)
     struct netpath np;
     if (!net_parse(path, &np) || np.level == 0) {
         snprintf(out, n, NET_PREFIX);
+        return;
+    }
+    if (np.sftp) {                                                      /* up from a folder; from "/" to the list of servers */
+        char *slash = strrchr(np.dir, '/');
+        if (np.level == 2 && np.dir[0]) {
+            if (slash)
+                *slash = 0;
+            else
+                np.dir[0] = 0;
+            net_make(&np, out, n);
+        } else {
+            snprintf(out, n, NET_PREFIX);
+        }
         return;
     }
     char *sl = strrchr(np.dir, '/');
@@ -1110,10 +1205,16 @@ static void net_join(const char *dir, const char *name, char *out, size_t n)
         if (net_parse(name, &np))
             return net_make(&np, out, n);
     }
-    if (!strcmp(dir, NET_PREFIX))
-        snprintf(out, n, NET_PREFIX "%s", name);
-    else
-        snprintf(out, n, "%s/%s", dir, name);
+    if (!strcmp(dir, NET_PREFIX)) {
+        size_t tl = strlen(SFTP_TAG), nl = strlen(name);
+        if (nl > tl && !strcmp(name + nl - tl, SFTP_TAG))               /* an SSH server of the list */
+            snprintf(out, n, SFTP_PREFIX "%.*s", (int)(nl - tl), name);
+        else
+            snprintf(out, n, NET_PREFIX "%s", name);
+    } else {
+        size_t dl = strlen(dir);
+        snprintf(out, n, "%s%s%s", dir, dl && dir[dl - 1] == '/' ? "" : "/", name);
+    }
 }
 
 static bool net_poll_cancel(void *data)
@@ -1183,10 +1284,84 @@ static bool net_poll_progress(void *data)
 static const struct smb_conn *net_conn(const struct netpath *np, char *err, size_t errsz)
 {
     net_load();
-    struct netconn *c = np->conn[0] ? net_find(np->conn) : NULL;
+    struct netconn *c = np->conn[0] ? net_find_kind(np->conn, np->sftp) : NULL;
     if (!c)
         snprintf(err, errsz, "No server called %s", np->conn);
     return c ? &c->c : NULL;
+}
+
+/* The calls that differ between the two kinds of server (a Windows share / an SSH server); `rel` is a path inside the share, or the absolute path
+ * below "/" of an SSH server. Same contracts as smb.h / sftp.h. */
+static void rf_abs(const struct netpath *np, const char *rel, char *out, size_t n)
+{
+    (void)np;
+    snprintf(out, n, "/%s", rel);
+}
+
+static int rf_ls(const struct smb_conn *c, const struct netpath *np, const char *rel, struct smb_item **it, int *n, char *err, size_t errsz, bool *need_login,
+                 smb_poll_fn poll)
+{
+    if (need_login)
+        *need_login = false;
+    if (np->sftp) {
+        char abs[PATH_MAX];
+        rf_abs(np, rel, abs, sizeof(abs));
+        return sftp_ls(c, abs, it, n, err, errsz, need_login, poll, NULL);
+    }
+    return smb_ls(c, np->share, rel, it, n, err, errsz, poll, NULL);
+}
+
+static int rf_get(const struct smb_conn *c, const struct netpath *np, const char *rel, const char *local, bool dir, char *err, size_t errsz, smb_poll_fn poll,
+                  void *pd)
+{
+    if (np->sftp) {
+        char abs[PATH_MAX];
+        rf_abs(np, rel, abs, sizeof(abs));
+        return sftp_get(c, abs, local, dir, err, errsz, poll, pd);
+    }
+    return smb_get(c, np->share, rel, local, err, errsz, poll, pd);
+}
+
+static int rf_put(const struct smb_conn *c, const struct netpath *np, const char *local, const char *rel, bool dir, char *err, size_t errsz,
+                  smb_poll_fn poll, void *pd)
+{
+    if (np->sftp) {
+        char abs[PATH_MAX];
+        rf_abs(np, rel, abs, sizeof(abs));
+        return sftp_put(c, local, abs, dir, err, errsz, poll, pd);
+    }
+    return smb_put(c, np->share, local, rel, err, errsz, poll, pd);
+}
+
+static int rf_del(const struct smb_conn *c, const struct netpath *np, const char *rel, bool dir, char *err, size_t errsz, smb_poll_fn poll)
+{
+    if (np->sftp) {
+        char abs[PATH_MAX];
+        rf_abs(np, rel, abs, sizeof(abs));
+        return sftp_del(c, abs, dir, err, errsz, poll, NULL);
+    }
+    return smb_del(c, np->share, rel, dir, err, errsz, poll, NULL);
+}
+
+static int rf_mkdir(const struct smb_conn *c, const struct netpath *np, const char *rel, char *err, size_t errsz, smb_poll_fn poll)
+{
+    if (np->sftp) {
+        char abs[PATH_MAX];
+        rf_abs(np, rel, abs, sizeof(abs));
+        return sftp_mkdir(c, abs, err, errsz, poll, NULL);
+    }
+    return smb_mkdir(c, np->share, rel, err, errsz, poll, NULL);
+}
+
+static int rf_rename(const struct smb_conn *c, const struct netpath *np, const char *from, const char *to, char *err, size_t errsz, smb_poll_fn poll)
+{
+    if (np->sftp) {
+        char a[PATH_MAX], b[PATH_MAX];
+        rf_abs(np, from, a, sizeof(a));
+        rf_abs(np, to, b, sizeof(b));
+        return sftp_rename(c, a, b, err, errsz, poll, NULL);
+    }
+    return smb_rename(c, np->share, from, to, err, errsz, poll, NULL);
 }
 
 /* A failed call that means "log in": the user is asked. */
@@ -1198,14 +1373,47 @@ static void net_note_error(const char *reason, const char *place)
     }
 }
 
-static bool net_conn_used(const char *name)
+static bool net_conn_used(const struct netpath *np)
 {
-    struct netconn *c = net_find(name);
+    struct netconn *c = net_find_kind(np->conn, np->sftp);
     if (c && !c->saved && c->keep) {                                    /* a server the user typed or logged in to is kept */
         c->saved = true;
         net_save();
     }
     return c != NULL;
+}
+
+/* "sftp://SERVER" is the server's home folder: its real path comes from the server (asked once). Other paths stay as they are. */
+static bool net_resolve(const char *path, char *out, size_t n, char *err, size_t errsz)
+{
+    net_load();
+    struct netpath np;
+    snprintf(out, n, "%s", path);
+    if (!net_parse(path, &np) || !np.sftp || np.level != 1)
+        return true;
+    struct netconn *c = net_find_kind(np.conn, true);
+    if (!c) {
+        snprintf(err, errsz, "No server called %s", np.conn);
+        return false;
+    }
+    if (!c->home[0]) {
+        bool login = false;
+        char why[SMB_ERR];
+        if (sftp_pwd(&c->c, c->home, sizeof(c->home), why, sizeof(why), &login, NULL, NULL) < 0) {
+            c->home[0] = 0;
+            snprintf(err, errsz, "%s: %s", np.conn, why);
+            if (login) {
+                g_net_need_login = true;
+                snprintf(g_net_login_dir, sizeof(g_net_login_dir), "%s", path);
+            }
+            return false;
+        }
+    }
+    snprintf(out, n, SFTP_PREFIX "%s%s", np.conn, c->home);
+    size_t l = strlen(out);
+    while (l > strlen(SFTP_PREFIX) + strlen(np.conn) + 1 && out[l - 1] == '/')
+        out[--l] = 0;
+    return true;
 }
 
 /* Lists a network place into `p` (same contract as list_dir: 0, or -1 with the reason in err). */
@@ -1219,8 +1427,11 @@ static int net_list(struct pane *p, const char *dir, bool hidden, char *err, siz
     }
     struct pane tmp = { 0 };
     if (np.level == 0) {
-        for (int i = 0; i < g_nnet; i++)
-            add_entry(&tmp, g_net[i].c.name, true, false, false, 0, 0);
+        for (int i = 0; i < g_nnet; i++) {
+            char shown[64];
+            snprintf(shown, sizeof(shown), "%s%s", g_net[i].c.name, g_net[i].c.sftp ? SFTP_TAG : "");
+            add_entry(&tmp, shown, true, false, false, 0, 0);
+        }
         if (g_net_gateway[0] && !net_find(g_net_gateway))
             net_add(g_net_gateway, "", false), add_entry(&tmp, g_net_gateway, true, false, false, 0, 0);
         qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
@@ -1235,7 +1446,7 @@ static int net_list(struct pane *p, const char *dir, bool hidden, char *err, siz
         if (!c)
             return -1;
         char why[SMB_ERR];
-        if (np.level == 1) {
+        if (np.level == 1 && !np.sftp) {
             char (*sh)[64] = NULL;
             int n = 0;
             if (smb_shares(c, &sh, &n, why, sizeof(why), NULL, NULL) < 0) {
@@ -1249,9 +1460,19 @@ static int net_list(struct pane *p, const char *dir, bool hidden, char *err, siz
         } else {
             struct smb_item *it = NULL;
             int n = 0;
-            if (smb_ls(c, np.share, np.dir, &it, &n, why, sizeof(why), NULL, NULL) < 0) {
+            bool login = false;
+            if (np.sftp && np.level == 1) {                             /* the home folder is listed as the place it is (go_to resolves it first) */
+                snprintf(err, errsz, "%s: open its folders from the path", np.conn);
+                return -1;
+            }
+            if (rf_ls(c, &np, np.dir, &it, &n, why, sizeof(why), &login, NULL) < 0) {
                 snprintf(err, errsz, "%s: %s", dir, why);
-                net_note_error(why, dir);
+                if (login) {
+                    g_net_need_login = true;
+                    snprintf(g_net_login_dir, sizeof(g_net_login_dir), "%s", dir);
+                } else {
+                    net_note_error(why, dir);
+                }
                 return -1;
             }
             for (int i = 0; i < n; i++)
@@ -1259,7 +1480,7 @@ static int net_list(struct pane *p, const char *dir, bool hidden, char *err, siz
                     add_entry(&tmp, it[i].name, it[i].dir, false, false, (off_t)it[i].size, it[i].mtime);
             free(it);
         }
-        net_conn_used(np.conn);
+        net_conn_used(&np);
         qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
     }
     entries_free(p);
@@ -1296,7 +1517,7 @@ static int net_stat(const char *path, bool *isdir, long long *size, char *err, s
         parent[0] = 0;
     struct smb_item *it = NULL;
     int n = 0;
-    if (smb_ls(c, np.share, parent, &it, &n, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+    if (rf_ls(c, &np, parent, &it, &n, why, sizeof(why), NULL, net_poll_cancel) < 0) {
         snprintf(err, errsz, "%s", why);
         return -1;
     }
@@ -1354,7 +1575,7 @@ static int net_get_node(const struct smb_conn *c, const struct netpath *np, cons
         snprintf(rp, sizeof(rp), "%s", np->dir);
         struct net_prog pr = { .upload = false };
         snprintf(pr.path, sizeof(pr.path), "%s", part);
-        if (smb_get(c, np->share, rp, part, why, sizeof(why), net_poll_progress, &pr) < 0) {
+        if (rf_get(c, np, rp, part, false, why, sizeof(why), net_poll_progress, &pr) < 0) {
             unlink(part);
             snprintf(err, errsz, "%s: %s", np->dir, why);
             return -1;
@@ -1369,13 +1590,20 @@ static int net_get_node(const struct smb_conn *c, const struct netpath *np, cons
         }
         return 0;
     }
+    if (np->sftp) {                                                     /* sftp copies a folder with what is in it in one go */
+        if (rf_get(c, np, np->dir, dst, true, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+            snprintf(err, errsz, "%s: %s", np->dir, why);
+            return -1;
+        }
+        return 0;
+    }
     if (mkdir(dst, 0755) < 0 && errno != EEXIST) {
         snprintf(err, errsz, "cannot create %s: %s", dst, strerror(errno));
         return -1;
     }
     struct smb_item *it = NULL;
     int n = 0;
-    if (smb_ls(c, np->share, np->dir, &it, &n, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+    if (rf_ls(c, np, np->dir, &it, &n, why, sizeof(why), NULL, net_poll_cancel) < 0) {
         snprintf(err, errsz, "%s: %s", np->dir, why);
         return -1;
     }
@@ -1408,7 +1636,7 @@ static int net_put_node(const struct smb_conn *c, const struct netpath *np, cons
         struct net_prog pr = { .upload = true };
         if (!realpath(src, pr.path))
             snprintf(pr.path, sizeof(pr.path), "%s", src);
-        if (smb_put(c, np->share, src, np->dir, why, sizeof(why), net_poll_progress, &pr) < 0) {
+        if (rf_put(c, np, src, np->dir, false, why, sizeof(why), net_poll_progress, &pr) < 0) {
             snprintf(err, errsz, "%s: %s", np->dir, why);
             return -1;
         }
@@ -1420,7 +1648,14 @@ static int net_put_node(const struct smb_conn *c, const struct netpath *np, cons
         snprintf(err, errsz, "%s is not a plain file or folder: left out", src);
         return -1;
     }
-    if (smb_mkdir(c, np->share, np->dir, why, sizeof(why), net_poll_cancel, NULL) < 0 && strcmp(why, "It exists already") != 0) {
+    if (np->sftp) {                                                     /* a folder goes up with what is in it in one go */
+        if (rf_put(c, np, src, np->dir, true, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+            snprintf(err, errsz, "%s: %s", np->dir, why);
+            return -1;
+        }
+        return 0;
+    }
+    if (rf_mkdir(c, np, np->dir, why, sizeof(why), net_poll_cancel) < 0 && strcmp(why, "It exists already") != 0) {
         snprintf(err, errsz, "%s: %s", np->dir, why);
         return -1;
     }
@@ -1460,7 +1695,7 @@ static int net_remove_node(const char *path, char *err, size_t errsz)
     long long sz;
     if (net_stat(path, &isdir, &sz, err, errsz) < 0)
         return -1;
-    if (smb_del(c, np.share, np.dir, isdir, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+    if (rf_del(c, &np, np.dir, isdir, why, sizeof(why), net_poll_cancel) < 0) {
         snprintf(err, errsz, "%s: %s", path, why);
         return -1;
     }
@@ -1473,12 +1708,12 @@ static int net_copy_node(const char *src, const char *dst, bool move, char *err,
     struct netpath s, d;
     bool sn = is_net(src), dn = is_net(dst);
     if (sn && dn) {
-        if (net_parse(src, &s) && net_parse(dst, &d) && move && s.level == 2 && d.level == 2 && !strcmp(s.conn, d.conn) && !strcmp(s.share, d.share)) {
+        if (net_parse(src, &s) && net_parse(dst, &d) && move && s.level == 2 && d.level == 2 && s.sftp == d.sftp && !strcmp(s.conn, d.conn) && !strcmp(s.share, d.share)) {
             const struct smb_conn *c = net_conn(&s, err, errsz);          /* inside one share a move is a rename */
             char why[SMB_ERR];
             if (!c)
                 return -1;
-            if (smb_rename(c, s.share, s.dir, d.dir, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+            if (rf_rename(c, &s, s.dir, d.dir, why, sizeof(why), net_poll_cancel) < 0) {
                 snprintf(err, errsz, "%s: %s", src, why);
                 return -1;
             }
@@ -1563,7 +1798,7 @@ static bool net_fetch(const char *path, char *local, size_t lsz, char *err, size
     unlink(local);
     char why[SMB_ERR];
     int64_t t0 = now_ms();
-    if (smb_get(c, np.share, np.dir, local, why, sizeof(why), net_poll_slow, &t0) < 0) {
+    if (rf_get(c, &np, np.dir, local, false, why, sizeof(why), net_poll_slow, &t0) < 0) {
         snprintf(err, errsz, "%s", why);
         return false;
     }
@@ -1931,6 +2166,9 @@ static void set_title(struct app *a)
     const char *dir = cur(a)->cwd;
     const char *base = strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir;
     char t[PATH_MAX + 32];
+    struct netpath tnp;
+    if (!*base && net_parse(dir, &tnp) && tnp.sftp)                     /* "sftp://nas/": the server's name */
+        base = tnp.conn;
     snprintf(t, sizeof(t), "%s - %s", !strcmp(dir, NET_PREFIX) ? "Network" : *base ? base : "/", a->choose_key ? "Choose a picture" : "Files");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
@@ -1941,14 +2179,23 @@ static void go_network(struct app *a);
 /* Shows `dir` (an absolute, normalized path) in pane p, selecting the row called `select` when there is one, else the first entry. */
 static bool go_to(struct app *a, struct pane *p, const char *dir, const char *select)
 {
-    char err[PATH_MAX + 80];
+    char err[PATH_MAX + 80], rdir[PATH_MAX];
     g_net_need_login = false;
-    if (list_dir(p, dir, a->show_hidden, err, sizeof(err)) < 0) {
+    bool listed = false;
+    if (is_net(dir)) {                                                  /* an SSH server's home folder has its real path first */
+        if (net_resolve(dir, rdir, sizeof(rdir), err, sizeof(err))) {
+            dir = rdir;
+            listed = list_dir(p, dir, a->show_hidden, err, sizeof(err)) == 0;
+        }
+    } else {
+        listed = list_dir(p, dir, a->show_hidden, err, sizeof(err)) == 0;
+    }
+    if (!listed) {
         msg(a, "%s", err);
         if (g_net_need_login) {                                         /* the server wants a user name and a password */
             struct netpath np;
             net_parse(g_net_login_dir, &np);
-            struct netconn *c = net_find(np.conn);
+            struct netconn *c = net_find_kind(np.conn, np.sftp);
             g_net_need_login = false;
             snprintf(a->net_pending, sizeof(a->net_pending), "%s", g_net_login_dir);
             a->net_pane = (int)(p - a->pane);
@@ -2576,7 +2823,7 @@ static void do_net_mkdir(struct app *a, const char *name)
         return;
     }
     net_join_dir(&np, name, rp, sizeof(rp));
-    if (smb_mkdir(c, np.share, rp, why, sizeof(why), NULL, NULL) < 0) {
+    if (rf_mkdir(c, &np, rp, why, sizeof(why), NULL) < 0) {
         msg(a, "cannot create %s: %s", name, why);
         return;
     }
@@ -2596,7 +2843,7 @@ static void do_net_rename(struct app *a, const char *old, const char *new_name)
         return;
     net_join_dir(&np, old, from, sizeof(from));
     net_join_dir(&np, new_name, to, sizeof(to));
-    if (smb_rename(c, np.share, from, to, why, sizeof(why), NULL, NULL) < 0) {
+    if (rf_rename(c, &np, from, to, why, sizeof(why), NULL) < 0) {
         msg(a, "cannot rename %s: %s", old, why);
         return;
     }
@@ -2928,31 +3175,48 @@ static void net_connect(struct app *a, const char *text)
     if (sscanf(text, "%127s %15s", host, flag) < 1)
         return;
     bool legacy = !strcmp(flag, "legacy");
+    bool sftp = false;
+    int port = 0;
+    if (!strncmp(host, SFTP_PREFIX, strlen(SFTP_PREFIX)) || !strncmp(host, "ssh://", 6)) {          /* an SSH server: sftp://[user@]host[:port] */
+        memmove(host, strstr(host, "://") + 3, strlen(strstr(host, "://") + 3) + 1);
+        sftp = true;
+    }
     char *at = strchr(host, '@');
     if (at) {
         *at = 0;
         snprintf(user, sizeof(user), "%s", host);
         memmove(host, at + 1, strlen(at + 1) + 1);
     }
+    if (sftp) {
+        char *colon = strrchr(host, ':');
+        if (colon && colon != host && atoi(colon + 1) > 0) {
+            port = atoi(colon + 1);
+            *colon = 0;
+        }
+        if (!sftp_available()) {
+            msg(a, "SSH servers need sftp (package openssh-client)");
+            return;
+        }
+    }
     if (!host[0] || strchr(host, '/') || strchr(host, '\\') || !smb_name_ok(host)) {
         msg(a, "That is not a server name");
         return;
     }
-    struct netconn *c = net_add(host, user, legacy);
+    struct netconn *c = sftp ? net_add_sftp(host, user, port) : net_add(host, user, legacy);
     if (!c) {
         msg(a, "Too many servers: remove one first (Delete in the list of servers)");
         return;
     }
     c->keep = true;
     char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), NET_PREFIX "%s", c->c.name);
+    snprintf(dir, sizeof(dir), "%s%s", c->c.sftp ? SFTP_PREFIX : NET_PREFIX, c->c.name);
     go_to(a, cur(a), dir, NULL);
 }
 
 static void go_network(struct app *a)
 {
-    if (!smb_available()) {
-        msg(a, "Network drives need smbclient (package smbclient or samba-client)");
+    if (!smb_available() && !sftp_available()) {
+        msg(a, "Network drives need smbclient (package smbclient) or sftp (package openssh-client)");
         return;
     }
     go_to(a, cur(a), NET_PREFIX, NULL);
@@ -2980,7 +3244,7 @@ static void prompt_accept(struct app *a)
         return;
     case P_NETPASS: {
         struct netpath np;
-        struct netconn *c = net_parse(a->net_pending, &np) ? net_find(np.conn) : NULL;
+        struct netconn *c = net_parse(a->net_pending, &np) ? net_find_kind(np.conn, np.sftp) : NULL;
         if (c) {
             snprintf(c->c.user, sizeof(c->c.user), "%s", a->net_user);
             snprintf(c->c.pass, sizeof(c->c.pass), "%.127s", text);
@@ -3024,7 +3288,7 @@ static const char *prompt_label(enum prompt k)
     case P_MOVE: return "Move to: ";
     case P_MKDIR: return "New folder: ";
     case P_RENAME: return "Rename to: ";
-    case P_CONNECT: return "Server (name, user@name or name legacy): ";
+    case P_CONNECT: return "Server (name, user@name, sftp://user@name): ";
     case P_NETUSER: return "User name (empty = guest): ";
     case P_NETPASS: return "Password: ";
     case P_DELETE:
@@ -3095,9 +3359,19 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'z': if (a->dual) do_restore(a); return;
         case 'e': if (a->dual) cmd_empty_trash(a); return;
         case 'n': if (a->dual) go_network(a); return;
+        case 'u': {                                                     /* what eats the disk in this folder */
+            if (is_net(cur(a)->cwd)) {
+                msg(a, "Disk usage is for folders on this computer");
+                return;
+            }
+            char err[PATH_MAX + 80];
+            if (!launch("mellagui-du", cur(a)->cwd, cur(a)->cwd, err, sizeof(err)))
+                msg(a, "%s", err);
+            return;
+        }
         case 'k':
             if (a->dual) {
-                if (smb_available())
+                if (smb_available() || sftp_available())
                     prompt_start(a, P_CONNECT, "");
                 else
                     go_network(a);
@@ -3417,7 +3691,8 @@ static void paint_help(struct wlwin *w)
         "Nothing that exists is ever replaced. They run in the background: Esc cancels.",
         "In the question of F5 / F6 / Ctrl+L, Tab completes the names.",
         "Ctrl+H hidden files   Ctrl+R reread   Ctrl+L type a path",
-        "Ctrl+N / Network  network drives (smb://); Ctrl+K connect to a server",
+        "Ctrl+N / Network  network drives (smb:// and sftp://); Ctrl+K connect to a server",
+        "Ctrl+U            disk usage of this folder (mellagui-du)",
         "Shift+Up / Down scrolls the preview   a letter jumps to a name",
         "",
         "Any key or click closes this list",
@@ -3852,9 +4127,25 @@ static int selftest(void)
         CHECK(!strcmp(out, "smb://nas/data/x y"), "join in a share: %s", out);
         join_path("smb://nas/data/x", "..", out, sizeof(out));
         CHECK(!strcmp(out, "smb://nas/data"), "join ..: %s", out);
+        CHECK(net_parse("sftp://nas", &np) && np.sftp && np.level == 1 && !strcmp(np.conn, "nas"), "sftp level 1");
+        CHECK(net_parse("sftp://nas/", &np) && np.sftp && np.level == 2 && !np.dir[0], "sftp root");
+        CHECK(net_parse("sftp://nas:2222/home/me/x/", &np) && np.level == 2 && !strcmp(np.conn, "nas:2222") && !strcmp(np.dir, "home/me/x"), "sftp path");
+        net_parent("sftp://nas/home/me", out, sizeof(out));
+        CHECK(!strcmp(out, "sftp://nas/home"), "sftp parent: %s", out);
+        net_parent("sftp://nas/home", out, sizeof(out));
+        CHECK(!strcmp(out, "sftp://nas/"), "sftp parent to the root: %s", out);
+        net_parent("sftp://nas/", out, sizeof(out));
+        CHECK(!strcmp(out, "smb://"), "sftp root to the list: %s", out);
+        join_path("sftp://nas/", "etc", out, sizeof(out));
+        CHECK(!strcmp(out, "sftp://nas/etc"), "sftp join in the root: %s", out);
+        join_path("sftp://nas/etc", "ssh", out, sizeof(out));
+        CHECK(!strcmp(out, "sftp://nas/etc/ssh"), "sftp join: %s", out);
+        join_path("smb://", "nas" SFTP_TAG, out, sizeof(out));
+        CHECK(!strcmp(out, "sftp://nas"), "the list's tagged name opens the SSH server: %s", out);
         join_path("smb://nas/data", "/home", out, sizeof(out));
         CHECK(!strcmp(out, "/home"), "an absolute local path leaves the network: %s", out);
         CHECK(smb_selftest() == 0, "smb selftest");
+        CHECK(sftp_selftest() == 0, "sftp selftest");
         char tmpf[] = "/tmp/mellagui-files-prog-XXXXXX";                     /* the progress of a download is the size of the file that grows */
         int tfd = mkstemp(tmpf);
         if (tfd >= 0) {
@@ -4215,6 +4506,8 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    if (getenv("MELLAGUI_ASKPASS"))                                     /* ssh asks for a password through SSH_ASKPASS, which names this program (sftp.h) */
+        return sftp_askpass_main();
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

@@ -41,7 +41,8 @@
 
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
-    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_OSK_AVOID, K_FILE,
+    K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_OSK_AVOID,
+    K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
@@ -55,7 +56,9 @@ enum key_id {
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
-    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_OSK_AVOID] = "osk-avoid", [K_FILE] = "file",
+    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_OSK_AVOID] = "osk-avoid",
+    [K_CLOCK_HOURS] = "clock-hours", [K_CLOCK_SECONDS] = "clock-seconds", [K_CLOCK_DATE] = "clock-date", [K_CLOCK_WEEKDAY] = "clock-weekday",
+    [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
@@ -305,6 +308,40 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if (!parse_bool(val, &b)) return -1;
         cfg->osk_avoid = b;
         break;
+    case K_CLOCK_HOURS:
+        if (!strcmp(val, "12")) cfg->clock.h12 = true;
+        else if (!strcmp(val, "24")) cfg->clock.h12 = false;
+        else return -1;
+        break;
+    case K_CLOCK_SECONDS:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->clock.seconds = b;
+        break;
+    case K_CLOCK_DATE:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->clock.show_date = b;
+        break;
+    case K_CLOCK_WEEKDAY:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->clock.weekday = b;
+        break;
+    case K_DATE_FORMAT:
+        if ((n = lm_date_format_parse(val)) < 0) return -1;
+        cfg->clock.date_fmt = n;
+        break;
+    case K_CAL_ENABLED:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->cal_enabled = b;
+        break;
+    case K_CAL_WEEK_START:
+        if (!strcmp(val, "mon")) cfg->cal_week_start = 1;
+        else if (!strcmp(val, "sun")) cfg->cal_week_start = 0;
+        else return -1;
+        break;
+    case K_CAL_WEEKS:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->cal_weeknum = b;
+        break;
     case K_OUTPUT_ORDER:
         if (!output_order_ok(val)) return -1;
         snprintf(cfg->output_order, sizeof(cfg->output_order), "%s", val);
@@ -405,6 +442,14 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SAVER: snprintf(out, n, "%d", c->saver ? 1 : 0); break;
     case K_SAVER_MINUTES: snprintf(out, n, "%d", c->saver_min); break;
     case K_OSK_AVOID: snprintf(out, n, "%d", c->osk_avoid ? 1 : 0); break;
+    case K_CLOCK_HOURS: snprintf(out, n, "%d", c->clock.h12 ? 12 : 24); break;
+    case K_CLOCK_SECONDS: snprintf(out, n, "%d", c->clock.seconds ? 1 : 0); break;
+    case K_CLOCK_DATE: snprintf(out, n, "%d", c->clock.show_date ? 1 : 0); break;
+    case K_CLOCK_WEEKDAY: snprintf(out, n, "%d", c->clock.weekday ? 1 : 0); break;
+    case K_DATE_FORMAT: snprintf(out, n, "%s", lm_date_format_name(c->clock.date_fmt)); break;
+    case K_CAL_ENABLED: snprintf(out, n, "%d", c->cal_enabled ? 1 : 0); break;
+    case K_CAL_WEEK_START: snprintf(out, n, "%s", c->cal_week_start ? "mon" : "sun"); break;
+    case K_CAL_WEEKS: snprintf(out, n, "%d", c->cal_weeknum ? 1 : 0); break;
     case K_SAVER_NOW: break;                                            /* write only */
     case K_GADGET: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0); break;
     case K_MIXER: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER) ? 1 : 0); break;
@@ -1283,6 +1328,20 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         if (srv->wm)
             lm_wm_osk_layout_changed(srv->wm);
         return true;
+    case K_CLOCK_HOURS:                                 /* the panel's clock is written again at once */
+    case K_CLOCK_SECONDS:
+    case K_CLOCK_DATE:
+    case K_CLOCK_WEEKDAY:
+    case K_DATE_FORMAT:
+        if (cfg_set(cfg, key, val, NULL, 0) < 0)
+            return false;
+        if (srv->wm)
+            lm_wm_clock_changed(srv->wm);
+        return true;
+    case K_CAL_ENABLED:
+    case K_CAL_WEEK_START:
+    case K_CAL_WEEKS:
+        return cfg_set(cfg, key, val, NULL, 0) >= 0;
     case K_SAVER_NOW:                                   /* "1": start the screensaver now (a preview), "0": end it */
         if (!srv->saver || !parse_bool(val, &b)) return false;
         if (b)

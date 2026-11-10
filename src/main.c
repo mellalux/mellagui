@@ -650,6 +650,8 @@ int main(int argc, char **argv)
     lm_info("MellaGUI ready on WAYLAND_DISPLAY=%s (backend %s)", lm_server_socket_name(srv), cfg.backend);
     if (cfg.exec_cmd)
         lm_server_spawn(srv, cfg.exec_cmd);
+    if (srv->wm && (!headless || getenv("MELLAGUI_CALENDAR_PRELOAD")))      /* the calendar waits hidden for a click on the clock (tests start it by that click) */
+        lm_wm_calendar_start(srv->wm);
 
     rc = lm_loop_run(loop);
 

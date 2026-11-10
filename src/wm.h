@@ -274,6 +274,7 @@ enum lm_pick_kind {
     LM_PICK_LAUNCHER_CARD,  /* the launcher's card (between its items) */
     LM_PICK_LAUNCHER_BACKDROP, /* anything else while the launcher is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
+    LM_PICK_PANEL_CLOCK,    /* the clock: shows / hides the calendar (`rect` = the clock) */
     LM_PICK_PANEL_POWER,    /* the round power button in the top right corner: opens / closes the session dialog */
     LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
     LM_PICK_POWER_CARD,     /* the session dialog's card (between its buttons) */
@@ -431,7 +432,7 @@ struct lm_panel_info {
     } task[LM_PANEL_MAX_TASKS];
     struct lm_window *task_win[LM_PANEL_MAX_TASKS]; /* the window behind task[i] (for picking) */
     struct lm_rect clock;
-    char clock_text[24];            /* "DD.MM.YYYY HH:MM" local time */
+    char clock_text[40];            /* local date and time as the clock settings say (default "DD.MM.YYYY HH:MM") */
     int ntray;                      /* programs' icons (tray.h), the first one created rightmost, left of the Caps / keyboard indicators */
     struct {
         struct lm_rect rect;        /* the button */
@@ -694,6 +695,8 @@ size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
 void lm_wm_tray_changed(struct lm_wm *wm);
 /* Control socket `tray`: "tray n=<items>" and one "item <id> x= y= w= h= icon=<w>x<h>|- text=<text>" line each (first output's bar). */
 size_t lm_wm_tray_describe(struct lm_wm *wm, char *buf, size_t size);
+/* "clock x= y= w= h= tasks=N text=..." (the primary output's panel; `tasks` = windows in the taskbar) and the calendar window ("calendar ..." line). */
+size_t lm_wm_clock_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The on-screen keyboard (panel button, key action `osk`, control socket `osk`). */
 void lm_wm_osk_set(struct lm_wm *wm, bool open);
@@ -714,6 +717,14 @@ void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);
 
 /* Some visible window is fullscreen (the screensaver does not start over a film or a game). */
 bool lm_wm_has_fullscreen(const struct lm_wm *wm);
+/* The clock / date settings changed: write the panel's clock again. */
+void lm_wm_clock_changed(struct lm_wm *wm);
+/* Calendar (client/mellagui-calendar.c, app id "mellagui.calendar"): a program that runs hidden (a minimized window that the taskbar, Alt+Tab and
+ * the dock do not list) and is shown under the panel's clock by a click on it; it hides again when it loses the focus. lm_wm_calendar_start
+ * starts it (main.c, at startup); lm_wm_calendar_toggle shows / hides it, starting it first when it is not there (`clock` = where the clock is, NULL =
+ * the primary output's); false when calendars are off (setting cal-enabled) or there is no command. */
+void lm_wm_calendar_start(struct lm_wm *wm);
+bool lm_wm_calendar_toggle(struct lm_wm *wm, const struct lm_rect *clock);
 /* The window of this surface (or of the root it belongs to) is mapped, not minimized and on the current workspace. */
 bool lm_wm_surface_visible(const struct lm_wm *wm, struct lm_surface *s);
 

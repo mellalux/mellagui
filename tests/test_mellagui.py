@@ -3763,7 +3763,7 @@ esac
         win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
-        c.click(x0 + 70, y0 + 12 + 4 * 36 + 16)                           # Sound tab: asks the sound server again
+        c.click(x0 + 70, y0 + 12 + 4 * 32 + 16)                           # Sound tab: asks the sound server again
         time.sleep(0.8)
         # "Output device" heading at y=14, then Analog (42), HDMI (70), IEC958 (98)
         c.click(x0 + 200, y0 + 70 + 14)
@@ -3793,7 +3793,7 @@ esac
         win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
-        c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)                               # Display page
+        c.click(x0 + 70, y0 + 12 + 3 * 32 + 16)                               # Display page
         time.sleep(0.4)
         modes = min(7, len(self.get_setting(c, 'resolutions').split(';')))
         # rows: monitor heading + line (14, 42), resolution heading (76), Automatic (104), Preferred, then the modes; the button follows by 10 px
@@ -3818,7 +3818,7 @@ esac
         g = lambda k: self.get_setting(c, k)
         # Sound page (no card profiles here): "Applications" heading at y=14, its two rows at 42 and 70, then the beeps heading at 104
         # and its rows from 132: default, HDMI 0, HDMI 1, HDMI 2 (the HDMI outputs are shown before the analog ones)
-        c.click(x0 + 70, y0 + 12 + 4 * 36 + 16)
+        c.click(x0 + 70, y0 + 12 + 4 * 32 + 16)
         time.sleep(0.5)
         c.click(x0 + 200, y0 + 70 + 14)                                       # second system output: "Digital Stereo (HDMI)"
         time.sleep(0.2)
@@ -3827,7 +3827,7 @@ esac
         time.sleep(0.2)
         self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
         # Display page: rows are Automatic, Preferred, then the modes (800x500 preferred, 1920x1080, 1280x720, ...)
-        c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)
+        c.click(x0 + 70, y0 + 12 + 3 * 32 + 16)
         time.sleep(0.3)
         c.click(x0 + 200, y0 + 42 + 2 * 28 + 6 + 4 * 28 + 14)                 # third mode = 1280x720 (below the two monitor lines)
         time.sleep(0.4)
@@ -3981,21 +3981,21 @@ esac
     def test_panel_pages_and_keyboard_navigation(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 36 + 16)                   # "Pointer" tab
+        ctl.click(x0 + 70, y0 + 12 + 32 + 16)                   # "Pointer" tab
         time.sleep(0.15)
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # natural scrolling box (second row, below the speed slider)
         time.sleep(0.15)
         self.assertEqual(settings()['natural-scroll'], '1')
-        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 64 + 16)                   # "Desktop" tab
         time.sleep(0.15)
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # sound box (second row, below the gadget box)
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its three buttons, wraps over the twelve page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 23rd press; Space toggles it
+        # the wallpaper field, its four radio buttons and its three buttons, wraps over the thirteen page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 24th press; Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(23):
+        for _ in range(24):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -4014,7 +4014,7 @@ esac
         self.assertEqual(lock_kind(), 'kind=none')
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 5 * 36 + 16)               # "Security" tab
+        ctl.click(x0 + 70, y0 + 12 + 5 * 32 + 16)               # "Security" tab
         time.sleep(0.2)
         self.assertEqual(settings()['lock-kind'], 'none')
         ctl.click(x0 + 300, y0 + 111)                           # New
@@ -4042,7 +4042,7 @@ esac
     def test_panel_desktop_page_has_the_mixer_checkbox(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 64 + 16)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 168, y0 + 42 + 2 * 28 + 14)              # third row: Volume mixer gadget
         time.sleep(0.3)
@@ -4066,7 +4066,7 @@ esac
             self.skipTest('mellagui-files not built')
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 64 + 16)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 460, y0 + 291)                           # "Browse..."
         chooser = wait_for_window('mellagui.files.choose')
@@ -4083,7 +4083,7 @@ esac
         self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 72 + 16)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 64 + 16)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 410, y0 + 265)                           # Stretch
         time.sleep(0.2)
@@ -7166,6 +7166,161 @@ class TestIdleInhibit(Base):
             self.fail('the screensaver never started after the inhibitor was gone')
 
 
+class TestCalendar(Base):
+    """The clock settings (src/clockfmt.c), the panel's clock and mellagui-calendar, which a click on the clock shows."""
+    CAL = os.path.join(ROOT, 'build', 'mellagui-calendar')
+
+    def start(self, name, *args, env=None):
+        if not os.path.exists(self.CAL):
+            self.skipTest('mellagui-calendar not built')
+        p, c, stop = self.private_compositor(name, '--config', 'none', *args, env=env)
+        c.sync()
+        return c
+
+    @staticmethod
+    def clock(c):
+        line = c.cmd('clock')[0]
+        m = re.match(r'clock x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) tasks=(\d+) calendar=(\d) text=(.*)$', line)
+        return dict(x=int(m[1]), y=int(m[2]), w=int(m[3]), h=int(m[4]), tasks=int(m[5]), cal=int(m[6]), text=m[7])
+
+    def wait_cal(self, c, state, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.clock(c)['cal'] == state:
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what + ' (calendar=%d)' % self.clock(c)['cal'])
+
+    @staticmethod
+    def click_clock(c):
+        k = TestCalendar.clock(c)
+        c.click(k['x'] + k['w'] // 2, k['y'] + k['h'] // 2)
+
+    @staticmethod
+    def cal_window(c):
+        ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.calendar']
+        return ws[0] if ws else None
+
+    def test_selftest(self):
+        if not os.path.exists(self.CAL):
+            self.skipTest('mellagui-calendar not built')
+        r = subprocess.run([self.CAL, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('selftest ok', r.stdout)
+
+    def test_the_clock_follows_its_settings(self):
+        c = self.start('mellagui-cal1')
+        k = self.clock(c)
+        self.assertRegex(k['text'], r'^\d\d\.\d\d\.\d{4} \d\d:\d\d$')
+        self.assertEqual(k['w'], 136)                               # the width it always had
+        c.cmd('settings clock-seconds 1')
+        k2 = self.clock(c)
+        self.assertRegex(k2['text'], r'^\d\d\.\d\d\.\d{4} \d\d:\d\d:\d\d$')
+        self.assertGreater(k2['w'], k['w'])                         # the clock grows to the left
+        self.assertEqual(k2['x'] + k2['w'], k['x'] + k['w'])
+        c.cmd('settings clock-hours 12')
+        self.assertRegex(self.clock(c)['text'], r'^\d\d\.\d\d\.\d{4} \d{1,2}:\d\d:\d\d [AP]M$')
+        c.cmd('settings clock-seconds 0')
+        c.cmd('settings date-format ymd')
+        self.assertRegex(self.clock(c)['text'], r'^\d{4}-\d\d-\d\d \d{1,2}:\d\d [AP]M$')
+        c.cmd('settings date-format mdy')
+        self.assertRegex(self.clock(c)['text'], r'^\d\d/\d\d/\d{4} ')
+        c.cmd('settings date-format long')
+        c.cmd('settings clock-weekday 1')
+        self.assertRegex(self.clock(c)['text'], r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2} \d{4} \d{1,2}:\d\d [AP]M$')
+        c.cmd('settings clock-date 0')
+        self.assertRegex(self.clock(c)['text'], r'^\d{1,2}:\d\d [AP]M$')
+        c.cmd('settings clock-hours 24')
+        self.assertRegex(self.clock(c)['text'], r'^\d\d:\d\d$')
+        for bad in ('clock-hours 7', 'date-format iso', 'cal-week-start tue'):
+            with self.assertRaises(RuntimeError):
+                c.cmd('settings ' + bad)
+
+    def test_the_clock_settings_are_saved(self):
+        path = os.path.join(tmp, 'cal-settings.conf')
+        if os.path.exists(path):
+            os.unlink(path)
+        c = self.start('mellagui-cal2', '--settings', path)
+        for kv in ('clock-hours 12', 'clock-seconds 1', 'date-format long', 'cal-week-start sun', 'cal-weeks 1'):
+            c.cmd('settings ' + kv)
+        time.sleep(0.6)
+        with open(path) as f:
+            text = f.read()
+        for line in ('clock-hours=12', 'clock-seconds=1', 'date-format=long', 'cal-week-start=sun', 'cal-weeks=1', 'clock-date=1', 'cal-enabled=1'):
+            self.assertIn(line, text.split('\n'))
+        c2 = self.start('mellagui-cal2b', '--settings', path)
+        self.assertRegex(self.clock(c2)['text'], r'^\d{1,2} [A-Z][a-z]{2} \d{4} \d{1,2}:\d\d:\d\d [AP]M$')
+
+    def test_a_click_on_the_clock_shows_the_calendar_and_the_next_one_hides_it(self):
+        c = self.start('mellagui-cal3')
+        self.assertIsNone(self.cal_window(c))                       # (headless: it is started by the first click)
+        self.click_clock(c)
+        self.wait_cal(c, 2, 'the calendar shows')
+        k, w = self.clock(c), self.cal_window(c)
+        self.assertNotIn('minimized', w['flags'])
+        self.assertGreaterEqual(w['y'], k['y'] + k['h'])             # under the bar
+        self.assertLessEqual(abs((w['x'] + w['w']) - (k['x'] + k['w'])), 8)   # its right edge is the clock's
+        self.assertEqual(k['tasks'], 0, 'the calendar is in the taskbar')
+        time.sleep(0.3)
+        ppm = c.dump(os.path.join(tmp, 'cal3.ppm'))
+        accent = sum(1 for yy in range(w['y'], w['y'] + w['h'], 2) for xx in range(w['x'], w['x'] + w['w'], 2)
+                     if ppm.px(xx, yy) == (0x6f, 0xa8, 0xff))
+        self.assertGreater(accent, 100, 'today is not marked in the calendar')
+        self.click_clock(c)
+        self.wait_cal(c, 1, 'the calendar hides')
+        self.assertIn('minimized', self.cal_window(c)['flags'])
+        self.click_clock(c)                                          # and again: no new process, it is just shown
+        self.wait_cal(c, 2, 'the calendar shows again')
+        self.assertEqual(len([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.calendar']), 1)
+
+    def test_it_hides_when_something_else_is_clicked_and_stays_out_of_the_taskbar(self):
+        c = self.start('mellagui-cal4')
+        cl = Client('mellagui-cal4')
+        win = Window(cl, 300, 200, color=0xffff0000)
+        win.wait_configure()
+        c.sync()
+        self.assertEqual(self.clock(c)['tasks'], 1)
+        self.click_clock(c)
+        self.wait_cal(c, 2, 'the calendar shows')
+        self.assertEqual(self.clock(c)['tasks'], 1)
+        r = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.test'][0]
+        c.click(r['x'] + 50, r['y'] + 50)                            # a click in the other window
+        self.wait_cal(c, 1, 'the calendar goes away')
+        self.assertEqual(self.clock(c)['cal'], 1)
+
+    def test_calendars_can_be_turned_off(self):
+        c = self.start('mellagui-cal5')
+        c.cmd('settings cal-enabled 0')
+        self.click_clock(c)
+        time.sleep(0.8)
+        self.assertIsNone(self.cal_window(c))
+        c.cmd('settings cal-enabled 1')
+        self.click_clock(c)
+        self.wait_cal(c, 2, 'the calendar shows after it was turned on')
+
+    def test_preloaded_it_is_there_hidden_and_shows_at_once(self):
+        c = self.start('mellagui-cal6', env={'MELLAGUI_CALENDAR_PRELOAD': '1'})
+        self.wait_cal(c, 1, 'the calendar waits hidden')
+        self.assertEqual(self.clock(c)['tasks'], 0)
+        t0 = time.time()
+        self.click_clock(c)
+        self.wait_cal(c, 2, 'the calendar shows')
+        self.assertLess(time.time() - t0, 1.0)
+
+    def test_escape_hides_it_and_the_close_button_does_not_end_it(self):
+        c = self.start('mellagui-cal7')
+        self.click_clock(c)
+        self.wait_cal(c, 2, 'the calendar shows')
+        c.tap(1)                                                     # Esc
+        self.wait_cal(c, 1, 'Esc hides it')
+        self.click_clock(c)
+        self.wait_cal(c, 2, 'shown again')
+        w = self.cal_window(c)
+        c.click(w['x'] + w['w'] - 12, w['y'] - 12)                   # the close button of the title bar
+        time.sleep(0.5)
+        self.assertIsNotNone(self.cal_window(c), 'the close button ended the calendar')
+
+
 class TestGL(unittest.TestCase):
     """src/gl.c: the dlopen()ed EGL / OpenGL ES layer (needs a GPU or Mesa's software driver; skipped without)."""
     def test_gl_layer(self):
@@ -7933,7 +8088,7 @@ class TestDoubleClickTime(Base):
         self.assertIsNotNone(win)
         time.sleep(0.5)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 35 + 16)                                    # the Pointer tab
+        c.click(x0 + 70, y0 + 12 + 32 + 16)                                    # the Pointer tab
         time.sleep(0.3)
 
         def current():
@@ -8096,7 +8251,7 @@ class TestOutputLayout(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 3 * 36 + 16)                         # the Display tab
+        c.click(x0 + 70, y0 + 12 + 3 * 32 + 16)                         # the Display tab
         time.sleep(0.3)
         # "Monitors, left to right": headless-0 then headless-1, each row with < and > at the right edge
         row0 = y0 + 14 + 28 + 14                                        # first monitor row
@@ -8569,7 +8724,7 @@ class TestConfigSettings(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 6 * 36 + 16)                         # the Config tab (7th)
+        c.click(x0 + 70, y0 + 12 + 6 * 32 + 16)                         # the Config tab (7th)
         time.sleep(0.3)
         button = (x0 + 160 + 100, y0 + 14 + 3 * 28 + 6 + 12)            # first button below the three lines
         self.assertFalse(os.path.exists(path))
@@ -8819,7 +8974,7 @@ class TestSaver(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 11 * 35 + 16)                         # the Saver tab (12th; twelve tabs share the height)
+        c.click(x0 + 70, y0 + 12 + 11 * 32 + 16)                         # the Saver tab (12th; thirteen tabs share the height)
         time.sleep(0.3)
         c.click(x0 + 168, y0 + 14 + 28 + 14)                             # the check box
         self.wait(lambda: self.saver(c)['enabled'] == '0', 'the box switches it off')
@@ -9174,7 +9329,7 @@ class TestDockEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 10 * 36 + 16)                         # the Dock tab (11th)
+        c.click(x0 + 70, y0 + 12 + 10 * 32 + 16)                         # the Dock tab (11th)
         time.sleep(0.3)
         c.click(x0 + 160 + 440 - 78 + 52 + 12, y0 + 14 + 28 + 22 + 8 + 11)   # "x" of the first row
         for _ in range(60):
@@ -9319,7 +9474,7 @@ class TestKeysEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 7 * 36 + 16)                          # the Keys tab (8th)
+        c.click(x0 + 70, y0 + 12 + 7 * 32 + 16)                          # the Keys tab (8th)
         time.sleep(0.3)
         # the first row is Super+Enter = terminal: its "x" switches the built-in shortcut off
         c.click(x0 + 160 + 440 - 12, y0 + 14 + 28 + 11)
@@ -9439,7 +9594,7 @@ class TestThemeEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 8 * 36 + 16)                          # the Colours tab (9th)
+        c.click(x0 + 70, y0 + 12 + 8 * 32 + 16)                          # the Colours tab (9th)
         time.sleep(0.3)
         # row 11 of the palette is "background": page 2 (8 per page), third row
         c.click(x0 + 160 + 24, y0 + 14 + 28 + 11)                         # first row: wallpaper-top, to be sure a click selects
@@ -9537,7 +9692,7 @@ class TestMetricsEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 9 * 36 + 16)                          # the Sizes tab (10th)
+        c.click(x0 + 70, y0 + 12 + 9 * 32 + 16)                          # the Sizes tab (10th)
         time.sleep(0.3)
         y = y0 + 14 + 28 + 13                                              # the first slider: windows.titlebar-height (20..64)
         c.abs(x0 + 160 + 200 + 10, y)                                      # drag from near the left end to the right end

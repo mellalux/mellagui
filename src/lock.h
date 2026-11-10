@@ -53,8 +53,8 @@ struct lm_lock_info {
     char message[96];           /* "Wrong password.", "Too many attempts. Try again in 25 s." or "" */
     bool quit;                  /* locked on purpose: the secret quits MellaGUI (lm_lock_request_quit) */
     bool blocked;               /* inside the delay after wrong attempts: typing does nothing */
-    char clock[8];              /* "HH:MM" */
-    char date[24];              /* "DD.MM.YYYY" */
+    char clock[16];             /* "HH:MM" (or with seconds, or "2:05 PM": the clock settings) */
+    char date[32];              /* "DD.MM.YYYY" (the date-format setting) */
     char layout[8];             /* "US", "EE" ... */
 };
 

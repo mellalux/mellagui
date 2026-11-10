@@ -56,6 +56,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "clockfmt.h"
 #include "keys.h"
 #include "list.h"
 #include "loop.h"
@@ -150,6 +151,11 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    const char *calendar_cmd;   /* the calendar program, started with the compositor and shown by a click on the clock ([commands] calendar, default "mellagui-calendar") */
+    struct lm_clockfmt clock;   /* how the panel's clock and the date are written (settings: clock-hours, clock-seconds, clock-date, clock-weekday, date-format) */
+    bool cal_enabled;           /* a click on the clock shows the calendar (settings: cal-enabled; default true) */
+    int cal_week_start;         /* the calendar's first weekday: 1 Monday (default), 0 Sunday (settings: cal-week-start mon|sun) */
+    bool cal_weeknum;           /* ... with ISO week numbers (settings: cal-weeks; default false) */
     bool osk_avoid;             /* windows keep out of the on-screen keyboard's way (settings: osk-avoid; default true) */
     const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
     const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
@@ -214,6 +220,9 @@ static inline void lm_config_defaults(struct lm_config *c)
         .saver = true,
         .saver_min = 10,
         .osk_avoid = true,
+        .clock = { .show_date = true },
+        .cal_enabled = true,
+        .cal_week_start = 1,
     };
     lm_keys_defaults(&c->keys);
 }

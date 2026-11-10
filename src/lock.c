@@ -17,6 +17,7 @@
 #include <linux/input-event-codes.h>
 
 #include "backend.h"
+#include "clockfmt.h"
 #include "input.h"
 #include "keymap.h"
 #include "log.h"
@@ -68,7 +69,7 @@ struct lm_lock {
     char status[24];
     uint64_t last_activity;
     struct lm_timer *tick;           /* 1 s: idle check, countdown, clock */
-    char shown_clock[8];
+    char shown_clock[16];
     int shown_wait;
 };
 
@@ -669,7 +670,7 @@ done:
 
 /* ---- timer, scene info ------------------------------------------------------------------------------------------ */
 
-static void format_clock(char *clock, size_t cn, char *date, size_t dn)
+static void format_clock(const struct lm_lock *l, char *clock, size_t cn, char *date, size_t dn)
 {
     time_t t = time(NULL);
     struct tm tm;
@@ -677,8 +678,9 @@ static void format_clock(char *clock, size_t cn, char *date, size_t dn)
         clock[0] = date[0] = 0;
         return;
     }
-    snprintf(clock, cn, "%02d:%02d", tm.tm_hour, tm.tm_min);
-    snprintf(date, dn, "%02d.%02d.%04d", tm.tm_mday, tm.tm_mon + 1, (tm.tm_year + 1900) % 10000);
+    const struct lm_clockfmt f = l->srv->config.clock;                  /* the lock screen writes the time and the date like the panel does */
+    lm_clock_time_text(&f, &tm, clock, cn);
+    lm_clock_date_text(&f, &tm, date, dn);
 }
 
 static void tick_cb(void *data)
@@ -701,8 +703,8 @@ static void tick_cb(void *data)
         set_blank(l, true);
         return;
     }
-    char clock[8], date[24];
-    format_clock(clock, sizeof(clock), date, sizeof(date));
+    char clock[16], date[32];
+    format_clock(l, clock, sizeof(clock), date, sizeof(date));
     int wait = wait_seconds(l);
     if (strcmp(clock, l->shown_clock) || wait != l->shown_wait) {
         snprintf(l->shown_clock, sizeof(l->shown_clock), "%s", clock);
@@ -728,7 +730,7 @@ void lm_lock_info(const struct lm_lock *l, struct lm_output *out, struct lm_lock
     else if (l->quit_pending)
         snprintf(info->message, sizeof(info->message), "Enter the secret to quit MellaGUI. Esc on an empty field cancels.");
     info->quit = l->quit_pending;
-    format_clock(info->clock, sizeof(info->clock), info->date, sizeof(info->date));
+    format_clock(l, info->clock, sizeof(info->clock), info->date, sizeof(info->date));
     if (l->srv->input)
         snprintf(info->layout, sizeof(info->layout), "%s", lm_input_layout_id(l->srv->input, lm_input_layout(l->srv->input)));
     for (char *p = info->layout; *p; p++)

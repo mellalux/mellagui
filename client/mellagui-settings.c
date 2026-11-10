@@ -318,8 +318,8 @@ static int selftest(void)
 #define MAX_KV 160
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, PAGE_CLOCK, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver", "Clock" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH };
 
@@ -943,6 +943,39 @@ static void build_saver(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y + 3 * ROW_H - 18, w, ROW_H }, "Another program: [commands] saver = ... in mellagui.conf.");
 }
 
+/* ---- Clock page: the panel's clock, the date and the calendar that a click on the clock shows (mellagui-calendar) ---------------- */
+
+static void build_clock(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Clock and date");
+    y += ROW_H;
+    add_radio(a, x, y, w / 2, "24 hour clock", "clock-hours", "24", !strcmp(kv_get(a, "clock-hours"), "24"));
+    add_radio(a, x + w / 2, y, w / 2, "12 hour (AM / PM)", "clock-hours", "12", !strcmp(kv_get(a, "clock-hours"), "12"));
+    y += ROW_H;
+    add_check(a, x, y, w, "Show seconds", "clock-seconds", kv_int(a, "clock-seconds", 0) != 0);
+    y += ROW_H;
+    add_check(a, x, y, w, "Show the date in the panel", "clock-date", kv_int(a, "clock-date", 1) != 0);
+    y += ROW_H;
+    add_check(a, x, y, w, "Weekday before the date", "clock-weekday", kv_int(a, "clock-weekday", 0) != 0);
+    y += ROW_H;
+    static const char *const fmts[4] = { "dmy", "ymd", "mdy", "long" };
+    static const char *const names[4] = { "10.11.2026", "2026-11-10", "11/10/2026", "10 Nov 2026" };
+    for (int i = 0; i < 4; i++)
+        add_radio(a, x + (i % 2) * (w / 2), y + (i / 2) * ROW_H, w / 2, names[i], "date-format", fmts[i], !strcmp(kv_get(a, "date-format"), fmts[i]));
+    y += 2 * ROW_H + 8;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Calendar");
+    y += ROW_H;
+    add_check(a, x, y, w, "A click on the clock shows the calendar", "cal-enabled", kv_int(a, "cal-enabled", 1) != 0);
+    y += ROW_H;
+    add_radio(a, x, y, w / 2, "Week starts on Monday", "cal-week-start", "mon", !strcmp(kv_get(a, "cal-week-start"), "mon"));
+    add_radio(a, x + w / 2, y, w / 2, "... on Sunday", "cal-week-start", "sun", !strcmp(kv_get(a, "cal-week-start"), "sun"));
+    y += ROW_H;
+    add_check(a, x, y, w, "Show week numbers", "cal-weeks", kv_int(a, "cal-weeks", 0) != 0);
+    y += ROW_H + 6;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "The calendar is mellagui-calendar, started with the desktop;");
+    add(a, W_LABEL, (struct rect){ x, y + ROW_H - 8, w, ROW_H }, "another program: [commands] calendar = ... in mellagui.conf.");
+}
+
 static void dock_clear_form(struct app *a)
 {
     a->input[4][0] = a->input[5][0] = a->input[6][0] = 0;
@@ -1364,6 +1397,7 @@ static void build(struct app *a)
     case PAGE_SIZES: build_sizes(a, x, y, w); break;
     case PAGE_DOCK: build_dock(a, x, y, w); break;
     case PAGE_SAVER: build_saver(a, x, y, w); break;
+    case PAGE_CLOCK: build_clock(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
     if (a->focus >= a->nw)

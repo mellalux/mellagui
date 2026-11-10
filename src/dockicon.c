@@ -24,6 +24,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_LAUNCHER] = { "launcher", 0x5b5fc7 },
     [LM_DOCKICON_CAMERA] = { "camera", 0xd6336c },
     [LM_DOCKICON_RECORD] = { "record", 0xc92a2a },
+    [LM_DOCKICON_MONITOR] = { "monitor", 0x0c8599 },
 };
 
 const char *lm_dockicon_name(int kind)
@@ -42,7 +43,8 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
-        { "record", LM_DOCKICON_RECORD }, { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
+        { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
+        { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
         { "term", LM_DOCKICON_TERMINAL }, { "console", LM_DOCKICON_TERMINAL }, { "shell", LM_DOCKICON_TERMINAL },
         { "calc", LM_DOCKICON_CALCULATOR }, { "file", LM_DOCKICON_FILES }, { "folder", LM_DOCKICON_FILES },
         { "edit", LM_DOCKICON_EDITOR }, { "text", LM_DOCKICON_EDITOR }, { "note", LM_DOCKICON_EDITOR },
@@ -177,6 +179,13 @@ static float glyph(int kind, float u, float v)
     }
     case LM_DOCKICON_RECORD:                            /* a ring with a dot in it */
         return fminf2(fabsf(hypotf(u, v) - 0.40f) - 0.05f, sd_circle(u, v, 0.0f, 0.0f, 0.21f));
+    case LM_DOCKICON_MONITOR: {                         /* a screen with three bars */
+        float d = sd_sub(sd_box(u, v, 0, -0.04f, 0.46f, 0.34f, 0.07f), sd_box(u, v, 0, -0.04f, 0.37f, 0.25f, 0.03f));
+        d = fminf2(d, sd_box(u, v, 0, 0.39f, 0.14f, 0.045f, 0.02f));
+        d = fminf2(d, sd_box(u, v, -0.19f, 0.05f, 0.055f, 0.12f, 0.015f));
+        d = fminf2(d, sd_box(u, v, 0.0f, -0.02f, 0.055f, 0.19f, 0.015f));
+        return fminf2(d, sd_box(u, v, 0.19f, -0.09f, 0.055f, 0.08f, 0.015f));
+    }
     case LM_DOCKICON_RUN:
         return sd_tri(u, v, -0.15f, -0.27f, -0.15f, 0.27f, 0.29f, 0.0f) - 0.05f;
     default: {                                          /* GENERIC: four rounded squares */

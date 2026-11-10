@@ -830,6 +830,21 @@ static int dock_opt(const struct app *a, const char *key, int def)
     return def;
 }
 
+/* The icon-background option ("light", "dark", "none" or "#rrggbb"). */
+static const char *dock_bg(const struct app *a, char *buf, size_t n)
+{
+    const char *p = kv_get(a, "dock-opts"), *key = "icon-background=";
+    size_t kl = strlen(key);
+    for (const char *q = p; *q; q++)
+        if ((q == p || q[-1] == ' ') && !strncmp(q, key, kl)) {
+            size_t l = strcspn(q + kl, " ");
+            snprintf(buf, n, "%.*s", (int)l, q + kl);
+            return buf;
+        }
+    snprintf(buf, n, "light");
+    return buf;
+}
+
 static void dock_flush(struct app *a)
 {
     if (!a->dpend[0])
@@ -857,6 +872,16 @@ static void build_dock(struct app *a, int x, int y, int w)
         y += ROW_H;
         add_check(a, x, y, w, "Hide it until the pointer touches the bottom edge", "dock-autohide", dock_opt(a, "autohide", 0));
         y += ROW_H + 6;
+        {
+            char bg[16];
+            dock_bg(a, bg, sizeof(bg));
+            add(a, W_LABEL, (struct rect){ x, y, 200, ROW_H }, "Plate under logos");
+            static const char *const vals[3] = { "light", "dark", "none" };
+            static const char *const names[3] = { "Light", "Dark", "None" };
+            for (int i = 0; i < 3; i++)
+                add_radio(a, x + 200 + i * ((w - 200) / 3), y, (w - 200) / 3, names[i], "dock-bg", vals[i], !strcmp(bg, vals[i]));
+            y += ROW_H + 6;
+        }
         for (size_t i = 0; i < sizeof(dock_opts) / sizeof(dock_opts[0]); i++) {
             const struct dock_opt *o = &dock_opts[i];
             struct widget *sl = add(a, W_SLIDER, (struct rect){ x, y, w, 26 }, o->label);
@@ -1572,9 +1597,13 @@ static void activate(struct app *a, int idx)
         }
         break;
     case W_RADIO:
-        if (!strcmp(w->key, "sec-kind"))
+        if (!strcmp(w->key, "sec-kind")) {
             a->sec_pin = !strcmp(w->arg, "pin");
-        else
+        } else if (!strcmp(w->key, "dock-bg")) {                        /* the plate under the logos: a dock option */
+            char v[48];
+            snprintf(v, sizeof(v), "icon-background\x1f%s", w->arg);
+            send_set(a, "dock-set", v);
+        } else
             send_set(a, w->key, w->arg);
         break;
     case W_BUTTON:

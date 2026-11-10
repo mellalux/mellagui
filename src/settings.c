@@ -579,8 +579,12 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
         break;
     }
     case K_DOCK_OPTS:                           /* "enabled=1 autohide=0 icon-size=48 zoom=160 gap=10 margin=8" */
-        snprintf(out, n, "enabled=%d autohide=%d icon-size=%d zoom=%d gap=%d margin=%d", lm_dock.enabled, lm_dock.autohide,
-                 lm_dock.icon_size, lm_dock.zoom, lm_dock.gap, lm_dock.margin);
+        {
+            char bg[16];
+            lm_dock_bg_text(bg, sizeof(bg));
+            snprintf(out, n, "enabled=%d autohide=%d icon-size=%d zoom=%d gap=%d margin=%d icon-background=%s", lm_dock.enabled, lm_dock.autohide,
+                     lm_dock.icon_size, lm_dock.zoom, lm_dock.gap, lm_dock.margin, bg);
+        }
         break;
     }
 }

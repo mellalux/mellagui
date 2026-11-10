@@ -497,6 +497,8 @@ static void ctl_command(struct ctl_client *c, char *line)
             ok = lm_lock_now(srv->lock);
         } else if (a1 && !strcmp(a1, "quit")) {            /* what Super+Shift+E does: ask for the secret, then quit */
             ok = lm_lock_request_quit(srv->lock);
+        } else if (a1 && (!strcmp(a1, "suspend") || !strcmp(a1, "reboot") || !strcmp(a1, "poweroff"))) {      /* the session dialog's buttons when a secret is set */
+            ok = lm_lock_request_action(srv->lock, !strcmp(a1, "suspend") ? LM_LOCK_ACT_SUSPEND : !strcmp(a1, "reboot") ? LM_LOCK_ACT_REBOOT : LM_LOCK_ACT_POWEROFF);
         } else if (a1 && !strcmp(a1, "set")) {
             char *t[7] = { a2, a3, strtok_r(NULL, " \t", &save), NULL, NULL, NULL, NULL };
             for (int i = 3; i < 7; i++)

@@ -8,6 +8,7 @@
 #include "wm.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
@@ -150,7 +151,9 @@ struct lm_wm {
     bool menu_enab[LM_MENU_MAX];
     bool power_open;            /* the session dialog (Lock / Exit) is showing on the output called power_out */
     char power_out[32];
-    int power_sel;              /* its highlighted button: 0 Lock, 1 Exit, -1 none yet */
+    int power_sel;              /* its highlighted button: 0 Lock, 1 Exit, ... -1 none yet */
+    int power_others;           /* ... and this many other login sessions are open (logind) */
+    int power_confirm;          /* the dialog asks "are you sure?" about this action (LM_LOCK_ACT_*), 0 none */
     bool key_capture;           /* the next key combination is recorded, not handled (lm_wm_key_capture) */
     char key_captured[64];      /* ... and the result ("" = cancelled / none yet) */
     uint32_t capture_release;   /* its key: the release is swallowed, too (0 = none) */
@@ -1894,6 +1897,35 @@ static struct lm_output *power_output(const struct lm_wm *wm)
     return NULL;
 }
 
+/* Suspend makes no sense on a server: `[commands] suspend = none` (or empty) turns the button off. */
+static bool power_suspend_off(const struct lm_wm *wm)
+{
+    const char *c = wm->srv->config.suspend_cmd;
+    return !c || !*c || !strcmp(c, "none");
+}
+
+/* How many login sessions other than ours logind knows about (a server may have people on ssh): /run/systemd/sessions has one file per session. */
+static int other_sessions(void)
+{
+    DIR *d = opendir("/run/systemd/sessions");
+    if (!d)
+        return 0;
+    const char *mine = getenv("XDG_SESSION_ID");
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *nm = e->d_name;
+        bool digits = *nm != 0;
+        for (const char *p = nm; *p; p++)
+            if (*p < '0' || *p > '9')
+                digits = false;
+        if (digits && (!mine || strcmp(mine, nm)))
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
 static void power_info(const struct lm_wm *wm, struct lm_output *o, struct lm_power_info *pi)
 {
     memset(pi, 0, sizeof(*pi));
@@ -1913,6 +1945,14 @@ static void power_info(const struct lm_wm *wm, struct lm_output *o, struct lm_po
         pi->hit[2 + i] = lm_rect_make(pi->button[2 + i].x - 8, y2, POWER_BTN2_D + 16, POWER_BTN2_D + 8 + LM_FONT_H + 4);
     }
     pi->sel = wm->power_sel;
+    pi->confirm = wm->power_confirm;
+    pi->others = wm->power_others;
+    pi->off[2] = power_suspend_off(wm);
+    if (pi->off[2])
+        pi->hit[2] = (struct lm_rect){ 0 };
+    if (wm->power_confirm)                                       /* only Yes and Cancel (the upper row's places) are there */
+        for (int i = 2; i < LM_POWER_N; i++)
+            pi->button[i] = pi->hit[i] = (struct lm_rect){ 0 };
 }
 
 static void power_damage(struct lm_wm *wm)
@@ -1943,11 +1983,13 @@ static void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
         clip_nav_set(wm, false);
         snprintf(wm->power_out, sizeof(wm->power_out), "%s", o->name);
         wm->power_open = true;
+        wm->power_confirm = 0;
         wm->power_sel = -1;
         power_damage(wm);
     } else {
         power_damage(wm);                                       /* (while the output is still found) */
         wm->power_open = false;
+        wm->power_confirm = 0;
         wm->hover_power = false;
         damage_panels(wm);
     }
@@ -5075,17 +5117,87 @@ static void open_shot(struct lm_wm *wm)
     lm_server_spawn(wm->srv, cmd);
 }
 
+/* ---- Suspend / Restart / Shutdown ------------------------------------------------------------------------------------------ */
+
+struct power_run {
+    struct lm_wm *wm;
+    int action;
+};
+
+static const char *power_word(int action)
+{
+    return action == LM_LOCK_ACT_SUSPEND ? "Suspend" : action == LM_LOCK_ACT_REBOOT ? "Restart" : "Shutdown";
+}
+
+static void power_exit(void *data, int status, const char *err)
+{
+    struct power_run *pr = data;
+    if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {                 /* it did not work (no permission, an inhibitor ...): say so */
+        char msg[256];
+        while (*err == ' ')
+            err++;
+        if (*err)
+            snprintf(msg, sizeof(msg), "%s failed: %s", power_word(pr->action), err);
+        else
+            snprintf(msg, sizeof(msg), "%s failed (exit status %d)", power_word(pr->action), WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        lm_wm_notify(pr->wm, "Session", msg, 10000);
+    }
+    free(pr);
+}
+
+void lm_wm_power_run(struct lm_wm *wm, int action)
+{
+    if (!wm || action < LM_LOCK_ACT_SUSPEND || action > LM_LOCK_ACT_POWEROFF)
+        return;
+    const struct lm_config *c = &wm->srv->config;
+    const char *cmd = action == LM_LOCK_ACT_SUSPEND ? c->suspend_cmd : action == LM_LOCK_ACT_REBOOT ? c->reboot_cmd : c->poweroff_cmd;
+    if (!cmd || !*cmd) {
+        lm_wm_notify(wm, "Session", "There is no command for that: set it in [commands] of mellagui.conf", 6000);
+        return;
+    }
+    lm_info("session: %s", power_word(action));
+    struct power_run *pr = malloc(sizeof(*pr));
+    if (!pr)
+        return;
+    pr->wm = wm;
+    pr->action = action;
+    if (lm_server_spawn_watch(wm->srv, cmd, power_exit, pr) <= 0) {
+        free(pr);
+        lm_wm_notify(wm, "Session", "Could not start the command", 6000);
+    }
+}
+
+/* The answer of the confirmation the dialog asks for a power action. */
+static void power_answer(struct lm_wm *wm, bool yes)
+{
+    int act = wm->power_confirm;
+    power_set(wm, false, NULL);
+    if (yes)
+        lm_wm_power_run(wm, act);
+}
+
 /* Lock (0), Exit (1), Suspend (2), Restart (3) or Shutdown (4) was chosen in the session dialog. */
 static void power_activate(struct lm_wm *wm, int which)
 {
-    power_set(wm, false, NULL);
-    if (which >= 2 && which <= 4) {                             /* the configured commands ([commands] suspend / reboot / poweroff: systemctl) */
-        const char *cmd = which == 2 ? wm->srv->config.suspend_cmd : which == 3 ? wm->srv->config.reboot_cmd : wm->srv->config.poweroff_cmd;
-        lm_info("session dialog: %s", which == 2 ? "suspend" : which == 3 ? "restart" : "shutdown");
-        if (cmd && *cmd)
-            lm_server_spawn(wm->srv, cmd);
+    if (wm->power_confirm) {                                    /* the question is up: 0 = Yes, 1 = Cancel */
+        power_answer(wm, which == 0);
         return;
     }
+    if (which == 2 && power_suspend_off(wm))
+        return;                                                 /* (no command: the button is off) */
+    if (which >= 2 && which <= 4) {
+        int act = which;                                        /* (the dialog's index is the action number) */
+        if (wm->srv->lock && lm_lock_request_action(wm->srv->lock, act)) {      /* a secret is set: the lock screen asks for it */
+            power_set(wm, false, NULL);
+            return;
+        }
+        wm->power_confirm = act;                                /* no secret: the dialog asks once more; Cancel is highlighted */
+        wm->power_others = other_sessions();
+        wm->power_sel = 1;
+        power_damage(wm);
+        return;
+    }
+    power_set(wm, false, NULL);
     if (which == 0) {
         if (!lm_lock_now(wm->srv->lock))                        /* no password / PIN yet: open the settings to set one */
             launch_settings(wm);
@@ -5689,11 +5801,30 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     }
     if (wm->power_open && !(ctrl && alt)) {                     /* the session dialog is modal: it takes every key */
         if (pressed && !repeat) {
+            if (wm->power_confirm) {                            /* "Are you sure?": Left / Right / Tab choose, Enter answers, Y / N, Esc closes */
+                if (code == KEY_ESC || code == KEY_N) {
+                    power_set(wm, false, NULL);
+                } else if (code == KEY_Y) {
+                    power_answer(wm, true);
+                } else if (code == KEY_LEFT || code == KEY_RIGHT || code == KEY_TAB) {
+                    wm->power_sel = wm->power_sel == 0 ? 1 : 0;
+                    power_damage(wm);
+                } else if ((code == KEY_ENTER || code == KEY_KPENTER) && wm->power_sel >= 0) {
+                    power_activate(wm, wm->power_sel);
+                }
+                return true;
+            }
             if (code == KEY_ESC)
                 power_set(wm, false, NULL);
             else if (code == KEY_LEFT || code == KEY_RIGHT || code == KEY_TAB) {
                 int dir = code == KEY_LEFT || (code == KEY_TAB && (mods & LM_MOD_SHIFT)) ? LM_POWER_N - 1 : 1;
-                wm->power_sel = wm->power_sel < 0 ? (dir == 1 ? 0 : LM_POWER_N - 1) : (wm->power_sel + dir) % LM_POWER_N;
+                int k = wm->power_sel;
+                for (int step = 0; step < LM_POWER_N; step++) {         /* (a button that is off is skipped) */
+                    k = k < 0 ? (dir == 1 ? 0 : LM_POWER_N - 1) : (k + dir) % LM_POWER_N;
+                    if (!(k == 2 && power_suspend_off(wm)))
+                        break;
+                }
+                wm->power_sel = k;
                 power_damage(wm);
             } else if ((code == KEY_ENTER || code == KEY_KPENTER) && wm->power_sel >= 0)
                 power_activate(wm, wm->power_sel);

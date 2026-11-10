@@ -52,7 +52,8 @@ struct lm_lock {
     bool lock_on_start;
     int blank_min;                   /* monitors go to standby this long after the last input while locked, 0 = never */
     bool vt_switch;                  /* Ctrl+Alt+F1..F12 works while locked (default yes) */
-    bool quit_pending;               /* locked on purpose to ask for the secret before MellaGUI quits */
+    int pending_act;                 /* locked on purpose to ask for the secret before an action: LM_LOCK_ACT_* (quit, suspend, restart, shutdown), 0 none */
+    bool pending_temp;               /* ... and the screen was not locked before: cancelling unlocks it again */
     /* run time */
     bool locked;
     bool blanked;                    /* we put the monitors in standby */
@@ -324,7 +325,8 @@ static void lock_leave(struct lm_lock *l)
     if (!l->locked)
         return;
     l->locked = false;
-    l->quit_pending = false;
+    l->pending_act = 0;
+    l->pending_temp = false;
     set_blank(l, false);
     wipe_input(l);
     l->message[0] = 0;
@@ -359,14 +361,26 @@ bool lm_lock_start(const struct lm_lock *l) { return l && l->lock_on_start; }
 int lm_lock_blank(const struct lm_lock *l) { return l ? l->blank_min : 0; }
 bool lm_lock_vt(const struct lm_lock *l) { return !l || l->vt_switch; }
 
+bool lm_lock_request_action(struct lm_lock *l, int action)
+{
+    if (!l || l->kind == KIND_NONE)
+        return false;
+    bool was_locked = l->locked;
+    if (!l->locked)
+        lock_enter(l);
+    l->pending_act = action;
+    l->pending_temp = !was_locked;
+    announce(l);
+    return true;
+}
+
 bool lm_lock_request_quit(struct lm_lock *l)
 {
     if (!l || l->kind == KIND_NONE)
         return false;
-    if (!l->locked) {
-        lock_enter(l);
-        l->quit_pending = true;
-        announce(l);
+    if (!l->locked) {                                           /* (an already locked screen just asks the next secret, as before) */
+        lm_lock_request_action(l, LM_LOCK_ACT_QUIT);
+        return true;
     }
     return true;
 }
@@ -411,11 +425,25 @@ static void try_unlock(struct lm_lock *l)
     bool ok = verify(l, l->input, l->len);
     wipe_input(l);
     if (ok) {
-        bool quit = l->quit_pending;
+        int act = l->pending_act;
+        if (act == LM_LOCK_ACT_SUSPEND) {                       /* it stays locked: after the wake-up the secret is asked again */
+            l->pending_act = 0;
+            l->pending_temp = false;
+            snprintf(l->message, sizeof(l->message), "Suspending...");
+            repaint(l);
+            lm_info("lock: secret accepted, suspending as asked");
+            if (l->srv->wm)
+                lm_wm_power_run(l->srv->wm, act);
+            return;
+        }
         lock_leave(l);
-        if (quit) {
+        if (act == LM_LOCK_ACT_QUIT) {
             lm_info("lock: secret accepted, quitting as asked");
             lm_server_quit(l->srv);
+        } else if (act == LM_LOCK_ACT_REBOOT || act == LM_LOCK_ACT_POWEROFF) {
+            lm_info("lock: secret accepted, %s as asked", act == LM_LOCK_ACT_REBOOT ? "restarting" : "shutting down");
+            if (l->srv->wm)
+                lm_wm_power_run(l->srv->wm, act);
         }
         return;
     }
@@ -468,9 +496,14 @@ void lm_lock_key(struct lm_lock *l, uint32_t code, uint32_t mods, uint32_t group
     if (code == KEY_BACKSPACE) {
         utf8_pop(l);
     } else if (code == KEY_ESC) {
-        if (l->len == 0 && l->quit_pending) {                     /* Esc on an empty field: do not quit after all */
-            l->quit_pending = false;
-            announce(l);
+        if (l->len == 0 && l->pending_act) {                      /* Esc on an empty field: do not do it after all */
+            bool unlock = l->pending_temp && l->pending_act != LM_LOCK_ACT_QUIT;
+            l->pending_act = 0;
+            l->pending_temp = false;
+            if (unlock)
+                lock_leave(l);                                    /* it was locked only to ask */
+            else
+                announce(l);
         }
         wipe_input(l);
     } else {
@@ -727,9 +760,11 @@ void lm_lock_info(const struct lm_lock *l, struct lm_output *out, struct lm_lock
         snprintf(info->message, sizeof(info->message), "Too many attempts. Try again in %d s.", wait);
     else if (l->message[0])
         snprintf(info->message, sizeof(info->message), "%s", l->message);
-    else if (l->quit_pending)
-        snprintf(info->message, sizeof(info->message), "Enter the secret to quit MellaGUI. Esc on an empty field cancels.");
-    info->quit = l->quit_pending;
+    else if (l->pending_act) {
+        static const char *const what[5] = { "", "quit MellaGUI", "suspend", "restart", "shut down" };
+        snprintf(info->message, sizeof(info->message), "Enter the secret to %s. Esc on an empty field cancels.", what[l->pending_act]);
+    }
+    info->quit = l->pending_act == LM_LOCK_ACT_QUIT;
     format_clock(l, info->clock, sizeof(info->clock), info->date, sizeof(info->date));
     if (l->srv->input)
         snprintf(info->layout, sizeof(info->layout), "%s", lm_input_layout_id(l->srv->input, lm_input_layout(l->srv->input)));
@@ -746,9 +781,9 @@ void lm_lock_describe(const struct lm_lock *l, char *out, size_t n)
     }
     struct lm_lock_info info;
     lm_lock_info(l, NULL, &info);
-    snprintf(out, n, "kind=%s locked=%d timeout=%d start=%d blank=%d blanked=%d vt=%d quit=%d typed=%d fails=%d wait=%d status=%s message=%s",
+    snprintf(out, n, "kind=%s locked=%d timeout=%d start=%d blank=%d blanked=%d vt=%d quit=%d action=%d typed=%d fails=%d wait=%d status=%s message=%s",
              lm_lock_kind(l), l->locked ? 1 : 0, l->timeout_min, l->lock_on_start ? 1 : 0, l->blank_min, l->blanked ? 1 : 0,
-             l->vt_switch ? 1 : 0, l->quit_pending ? 1 : 0,
+             l->vt_switch ? 1 : 0, l->pending_act == LM_LOCK_ACT_QUIT ? 1 : 0, l->pending_act,
              l->nchars, l->fails,
              wait_seconds(l), l->status[0] ? l->status : "-", info.message[0] ? info.message : "-");
 }

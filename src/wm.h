@@ -469,6 +469,9 @@ struct lm_power_info {
     struct lm_rect button[LM_POWER_N]; /* the squares the round buttons are drawn in: [0] Lock, [1] Exit, [2] Suspend, [3] Restart, [4] Shutdown */
     struct lm_rect hit[LM_POWER_N]; /* what a click counts for: the button and its label below */
     int sel;                        /* highlighted button (pointer or keyboard), -1 none */
+    bool off[LM_POWER_N];           /* the button does nothing here (Suspend on a server: `[commands] suspend = none`): drawn dim, cannot be chosen */
+    int others;                     /* while a restart / shutdown is confirmed: how many other login sessions are open */
+    int confirm;                    /* 0, else the action (LM_LOCK_ACT_SUSPEND / REBOOT / POWEROFF, lock.h) the dialog asks to confirm: only [0] Yes and [1] Cancel are shown */
 };
 
 /*
@@ -717,6 +720,9 @@ bool lm_wm_launcher_is_open(const struct lm_wm *wm);
 size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
 /* Control socket `dockmenu`: "dockmenu open=<0|1> item=<dock index> sel=<i>" and, while open, "card x= y= w= h=" and one "entry i \"label\" x= y= w= h= enabled=" line each. */
 size_t lm_wm_menu_describe(struct lm_wm *wm, char *buf, size_t size);
+/* Run the configured command of a session action (LM_LOCK_ACT_SUSPEND / REBOOT / POWEROFF, lock.h; `[commands] suspend` ...). A command that fails is
+ * reported in a notification with what it wrote to stderr ("Suspend failed: Interactive authentication required"). */
+void lm_wm_power_run(struct lm_wm *wm, int action);
 /* A menu for the program behind mellagui_menu_v1 at the pointer (menu.c): `labels` (a leading '~' = shown dim, cannot be chosen), n <= LM_MENU_MAX.
  * The wm answers through lm_menu_chosen(index) / lm_menu_closed() (menu.h). False when it cannot be shown (locked, no output, too many entries). */
 bool lm_wm_menu_popup(struct lm_wm *wm, const char *const *labels, int n);

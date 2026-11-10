@@ -84,6 +84,17 @@ bool lm_lock_now(struct lm_lock *l);
  */
 bool lm_lock_request_quit(struct lm_lock *l);
 /*
+ * The same for the session dialog's Suspend / Restart / Shutdown (LM_LOCK_ACT_*): with a secret set the screen is locked and asks for it ("Enter the
+ * secret to suspend ..."); the right one runs the action (lm_wm_power_run): a suspend leaves the screen locked (after the wake-up it asks again),
+ * a restart / shutdown lets go of the lock first. Esc on an empty field cancels and, when the screen was locked only for this, unlocks it again.
+ * Returns false when no secret is set: the caller asks for a confirmation itself.
+ */
+#define LM_LOCK_ACT_QUIT 1
+#define LM_LOCK_ACT_SUSPEND 2
+#define LM_LOCK_ACT_REBOOT 3
+#define LM_LOCK_ACT_POWEROFF 4
+bool lm_lock_request_action(struct lm_lock *l, int action);
+/*
  * Any input event happened (idle timers). Returns true when the event only woke the monitors from standby: the seat then
  * drops it (the first key press or click after a standby is not typing).
  */

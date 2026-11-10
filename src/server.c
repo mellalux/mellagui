@@ -997,6 +997,14 @@ struct lm_server *lm_server_create(struct lm_loop *loop, const struct lm_config 
     return srv;
 }
 
+#define MAX_WATCH 4
+static struct watch {
+    pid_t pid;
+    int fd;                             /* the read end of the child's stderr, -1 when the slot is free */
+    lm_exit_fn fn;
+    void *data;
+} watches[MAX_WATCH] = { { 0, -1, NULL, NULL }, { 0, -1, NULL, NULL }, { 0, -1, NULL, NULL }, { 0, -1, NULL, NULL } };
+
 static void sigchld_cb(int signo, void *data)
 {
     (void)signo;
@@ -1004,6 +1012,21 @@ static void sigchld_cb(int signo, void *data)
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        for (int i = 0; i < MAX_WATCH; i++)
+            if (watches[i].fd >= 0 && watches[i].pid == pid) {              /* somebody wants to know how this one ended */
+                char err[208];
+                ssize_t n = read(watches[i].fd, err, sizeof(err) - 1);
+                err[n > 0 ? n : 0] = 0;
+                for (char *p = err; *p; p++)
+                    if (*p == '\n' || *p == '\r')
+                        *p = ' ';
+                close(watches[i].fd);
+                lm_exit_fn fn = watches[i].fn;
+                void *wd = watches[i].data;
+                watches[i].fd = -1;
+                if (fn)
+                    fn(wd, status, err);
+            }
         if (WIFEXITED(status))
             lm_debug("child %d exited with status %d", (int)pid, WEXITSTATUS(status));
         else if (WIFSIGNALED(status))
@@ -1226,7 +1249,7 @@ void lm_server_quit(struct lm_server *srv)
     lm_loop_quit(srv->loop, 0);
 }
 
-pid_t lm_server_spawn(struct lm_server *srv, const char *cmd)
+static pid_t spawn_impl(struct lm_server *srv, const char *cmd, int err_fd)
 {
     if (!cmd || !*cmd)
         return -1;
@@ -1240,6 +1263,15 @@ pid_t lm_server_spawn(struct lm_server *srv, const char *cmd)
         return -1;
     }
     if (pid == 0) {
+        if (err_fd >= 0) {                              /* a watched child: stderr is the pipe, stdout goes nowhere */
+            int nul = open("/dev/null", O_WRONLY);
+            if (nul >= 0) {
+                dup2(nul, 1);
+                close(nul);
+            }
+            dup2(err_fd, 2);
+            close(err_fd);
+        }
         sigset_t none;
         sigemptyset(&none);
         sigprocmask(SIG_SETMASK, &none, NULL); /* the loop blocks signals for signalfd */
@@ -1253,5 +1285,32 @@ pid_t lm_server_spawn(struct lm_server *srv, const char *cmd)
         _exit(127);
     }
     lm_info("spawned pid %d: %s", (int)pid, cmd);
+    return pid;
+}
+
+pid_t lm_server_spawn(struct lm_server *srv, const char *cmd)
+{
+    return spawn_impl(srv, cmd, -1);
+}
+
+pid_t lm_server_spawn_watch(struct lm_server *srv, const char *cmd, lm_exit_fn fn, void *data)
+{
+    int slot = -1;
+    for (int i = 0; i < MAX_WATCH && slot < 0; i++)
+        if (watches[i].fd < 0)
+            slot = i;
+    int fds[2] = { -1, -1 };
+    if (slot < 0 || pipe2(fds, O_CLOEXEC | O_NONBLOCK) < 0)
+        return spawn_impl(srv, cmd, -1);                /* no watching, but it still runs */
+    pid_t pid = spawn_impl(srv, cmd, fds[1]);
+    close(fds[1]);
+    if (pid <= 0) {
+        close(fds[0]);
+        return pid;
+    }
+    watches[slot].pid = pid;
+    watches[slot].fd = fds[0];
+    watches[slot].fn = fn;
+    watches[slot].data = data;
     return pid;
 }

@@ -379,6 +379,8 @@ void lm_wm_key_capture(struct lm_wm *wm, bool on);
 bool lm_wm_key_capturing(const struct lm_wm *wm);
 const char *lm_wm_key_captured(const struct lm_wm *wm);
 void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
+/* A card now, even in "do not disturb", and not in the history (the answer to the user's own switch). */
+void lm_wm_notify_now(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
 /*
  * The outputs are about to be placed again (settings output-order): packs them (output.c) and moves every window along with the output
  * it is on, so that it keeps its place on that monitor; maximized / fullscreen windows follow their output's new geometry.

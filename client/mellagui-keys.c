@@ -60,6 +60,7 @@ static const char *describe(const char *act, char *buf, size_t n)
         { "maximize-toggle", "maximize / restore" }, { "tile-left", "window to the left half" }, { "tile-right", "window to the right half" },
         { "maximize", "maximize" }, { "restore", "restore the size" }, { "quit", "quit MellaGUI" }, { "launcher", "the application launcher" },
         { "osk", "on-screen keyboard on / off" }, { "reload-config", "read mellagui.conf again" },
+        { "overview", "show all windows" }, { "night-light", "night light on / off" }, { "dnd", "do not disturb on / off" },
     };
     for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
         if (!strcmp(act, t[i].act)) {

@@ -48,7 +48,8 @@ static const struct { const struct spec *s; int n; } rows[LM_OSK_ROWS] = {
 #define TOP_PAD 22              /* above the keys: the strip to take hold of and move it, with a small grip drawn in it */
 #define GAP 4
 #define ROW_QUARTERS 60
-#define MIN_KH 24
+#define MIN_KH 34                /* the smallest key height a drag can make (the default keyboard of a small screen may be a little lower) */
+#define MIN_PLACE_W 640          /* the narrowest the keyboard can be dragged: about 40 px for a key (a narrower output limits it) */
 #define MAX_KH 96
 
 int lm_osk_card_h(int kh) { return LM_OSK_ROWS * kh + (LM_OSK_ROWS - 1) * GAP + TOP_PAD + PAD; }
@@ -66,7 +67,7 @@ void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place
             w = LM_MAX(out->w, min_w);
         kh = LM_CLAMP((w - 2 * PAD) / 15 * 65 / 100, 30, 56);
     } else {
-        w = LM_CLAMP(place->w, LM_MIN(min_w, out->w), LM_MAX(out->w, 1));
+        w = LM_CLAMP(place->w, LM_MIN(MIN_PLACE_W, out->w), LM_MAX(out->w, 1));
         kh = LM_CLAMP(place->kh, MIN_KH, MAX_KH);
     }
     int h = lm_osk_card_h(kh);

@@ -359,6 +359,7 @@ struct app {
     bool wall_edited;                   /* (else the field shows the compositor's value) */
     struct wlclip clip;                 /* the clipboard of the text fields (Ctrl+V / C / X, the right-click menu) */
     int menu_widget;                    /* the field whose right-click menu is showing, -1 none */
+    int sel_widget;                     /* the field in which the left button is down (a selection is being dragged), -1 none */
     /* Menu page: the two fields below the entry list ([0] name, [1] command) and the entry they edit (-1 = a new one) */
     char input[7][1024];                /* [2] = the action of the Keys page, [3] = the colour (#rrggbb) of the Colours page,
                                          * [4] [5] [6] = name, icon and command of a Dock button */
@@ -1893,9 +1894,13 @@ static void paint_widget(struct app *a, int idx)
     case W_FIELD: {
         fill(a, *r, COL_FIELD);
         outline(a, *r, focus ? COL_ACCENT : COL_KEY);
-        char shown[240];
-        snprintf(shown, sizeof(shown), "%s%s", a->wall_edited ? a->wall : kv_get(a, "wallpaper"), focus ? "_" : "");
-        draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, COL_TEXT, r->w - 12);
+        if (focus && a->wall_edited) {
+            wltext_paint(&a->win, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, r->w - 12, a->wall, true, COL_TEXT, COL_HOVER, COL_ACCENT);
+        } else {
+            char shown[240];
+            snprintf(shown, sizeof(shown), "%s%s", a->wall_edited ? a->wall : kv_get(a, "wallpaper"), focus ? "_" : "");
+            draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, COL_TEXT, r->w - 12);
+        }
         break;
     }
     case W_SWATCH:
@@ -1906,9 +1911,11 @@ static void paint_widget(struct app *a, int idx)
         const char *buf = a->input[atoi(w->arg)];
         fill(a, *r, COL_FIELD);
         outline(a, *r, focus ? COL_ACCENT : COL_KEY);
-        char shown[1100];
-        snprintf(shown, sizeof(shown), "%s%s", *buf ? buf : (focus ? "" : w->text), focus ? "_" : "");
-        draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, shown, *buf ? COL_TEXT : COL_DIM, r->w - 12);
+        if (focus) {
+            wltext_paint(&a->win, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, r->w - 12, buf, true, COL_TEXT, COL_HOVER, COL_ACCENT);
+        } else {
+            draw_text(a, r->x + 6, r->y + (r->h - LM_FONT_H) / 2, *buf ? buf : w->text, *buf ? COL_TEXT : COL_DIM, r->w - 12);
+        }
         break;
     }
     case W_TEXT: {
@@ -1916,9 +1923,10 @@ static void paint_widget(struct app *a, int idx)
         struct rect f = { r->x, r->y + 20, r->w, 28 };
         fill(a, f, COL_FIELD);
         outline(a, f, focus ? COL_ACCENT : COL_KEY);
-        char shown[80];
-        snprintf(shown, sizeof(shown), "%s%s", a->test, focus ? "_" : "");
-        draw_text(a, f.x + 6, f.y + (f.h - LM_FONT_H) / 2, shown, COL_TEXT, f.w - 12);
+        if (focus)
+            wltext_paint(&a->win, f.x + 6, f.y + (f.h - LM_FONT_H) / 2, f.w - 12, a->test, true, COL_TEXT, COL_HOVER, COL_ACCENT);
+        else
+            draw_text(a, f.x + 6, f.y + (f.h - LM_FONT_H) / 2, a->test, COL_TEXT, f.w - 12);
         break;
     }
     }
@@ -2003,6 +2011,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->py = lm_fixed_to_double(args[2].f);
         if (a->drag >= 0)
             slider_drag_to(a, a->drag, a->px);
+        if (a->sel_widget >= 0 && a->sel_widget < a->nw) {                          /* dragging in a text field: the selection follows */
+            size_t max;
+            char *buf = field_buffer(a, &a->wd[a->sel_widget], &max);
+            if (buf) {
+                wltext_click(buf, (int)a->px - (a->wd[a->sel_widget].r.x + 6), true);
+                a->win.redraw = true;
+            }
+        }
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
@@ -2033,6 +2049,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 a->dbl_state = dbl ? 2 : 1;
                 a->dbl_last_ms = dbl ? 0 : t;                      /* (a third click starts again) */
             }
+            if (idx >= 0 && (a->wd[idx].kind == W_INPUT || a->wd[idx].kind == W_FIELD || a->wd[idx].kind == W_TEXT)) {
+                size_t max;
+                char *buf = field_buffer(a, &a->wd[idx], &max);                   /* the caret goes where it was clicked */
+                if (buf) {
+                    wltext_click(buf, (int)a->px - (a->wd[idx].r.x + 6), (a->win.mods & LM_MOD_SHIFT) != 0);
+                    a->sel_widget = idx;
+                }
+            }
             if (idx >= 0) {
                 a->focus = idx;
                 if (a->wd[idx].kind == W_SLIDER) {
@@ -2041,6 +2065,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 }
             }
         } else {
+            a->sel_widget = -1;
             int idx = widget_at(a, a->px, a->py);
             if (idx >= 0 && idx == a->press && a->drag < 0)
                 activate(a, idx);
@@ -2128,12 +2153,6 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             a->win.running = false;
         } else if (ks == LM_KS_Tab) {
             move_focus(a, (a->win.mods & LM_MOD_SHIFT) ? -1 : 1);
-        } else if (f && (f->kind == W_INPUT || f->kind == W_FIELD || f->kind == W_TEXT) && wltext_is_clipkey(ks, a->win.mods)) {
-            size_t max;
-            char *buf = field_buffer(a, f, &max);                            /* Ctrl+V / C / X on a text field */
-            if (buf && wltext_key(&a->clip, buf, max, ks, a->win.mods))
-                field_edited(a, f);
-            a->win.redraw = true;
         } else if (f && f->kind == W_PASS) {
             if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
                 sec_send(a, false);
@@ -2151,15 +2170,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
                 else
                     dock_put(a);
             } else {
-                int which = atoi(f->arg);
-                edit_text(a->input[which], which == 4 ? 64 : which == 2 || which == 5 ? 250 : which == 3 ? 12 : sizeof(a->input[1]), ks, plain);
-                a->keys_err[0] = a->col_err[0] = a->dock_err[0] = 0;
-                uint32_t c;
-                if (which == 3 && lm_theme_parse_color(a->input[3], &c)) {         /* the sliders and the preview follow the text */
-                    a->cr = (int)(c >> 16) & 255;
-                    a->cg = (int)(c >> 8) & 255;
-                    a->cb = (int)c & 255;
-                }
+                size_t max;
+                char *buf = field_buffer(a, f, &max);
+                if (buf && wltext_edit(&a->clip, buf, max, ks, a->win.mods))     /* a caret, a selection, the clipboard (wltext.h) */
+                    field_edited(a, f);
             }
             a->win.redraw = true;
         } else if (f && f->kind == W_FIELD) {
@@ -2167,25 +2181,14 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
                 send_set(a, "wallpaper", a->wall_edited ? a->wall : kv_get(a, "wallpaper"));
                 a->wall_edited = false;
             } else {
-                if (!a->wall_edited) {
-                    snprintf(a->wall, sizeof(a->wall), "%s", kv_get(a, "wallpaper"));
-                    a->wall_edited = true;
-                }
-                edit_text(a->wall, sizeof(a->wall), ks, plain);
+                size_t max;
+                char *buf = field_buffer(a, f, &max);                            /* (starts from the compositor's value) */
+                if (buf)
+                    wltext_edit(&a->clip, buf, max, ks, a->win.mods);
             }
             a->win.redraw = true;
         } else if (f && f->kind == W_TEXT) {
-            size_t len = strlen(a->test);
-            char txt[8];
-            if (ks == LM_KS_BackSpace) {
-                while (len > 0 && (a->test[len - 1] & 0xc0) == 0x80)
-                    len--;
-                if (len > 0)
-                    len--;
-                a->test[len] = 0;
-            } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && len + strlen(txt) < sizeof(a->test)) {
-                memcpy(a->test + len, txt, strlen(txt) + 1);
-            }
+            wltext_edit(&a->clip, a->test, sizeof(a->test), ks, a->win.mods);
             a->win.redraw = true;
         } else if (f && f->kind == W_SLIDER && (ks == LM_KS_Left || ks == LM_KS_Right)) {
             int v = LM_MAX(f->lo, LM_MIN(f->hi, f->val + (ks == LM_KS_Right ? f->step : -f->step)));
@@ -2272,7 +2275,7 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event, .menu = menu_event };
-    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .csel = -1, .mpend = -1, .dock_sel = -1, .menu_widget = -1 };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .csel = -1, .mpend = -1, .dock_sel = -1, .menu_widget = -1, .sel_widget = -1 };
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */

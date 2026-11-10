@@ -169,6 +169,7 @@ struct app {
     bool show_hidden;
     bool help;
     enum prompt prompt;
+    int menu_kind;                      /* the right-click menu that is showing: 0 none / the prompt's field, 1 a file's, 2 an empty place's */
     char pbuf[PATH_MAX];
     struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu) */
     char msg[300];
@@ -1868,6 +1869,7 @@ static void prompt_start(struct app *a, enum prompt kind, const char *initial)
 {
     a->prompt = kind;
     snprintf(a->pbuf, sizeof(a->pbuf), "%.*s", (int)sizeof(a->pbuf) - 1, initial);
+    wltext_end(a->pbuf);                                                /* the caret at the end of what is suggested */
     a->win.redraw = true;
 }
 
@@ -2146,7 +2148,6 @@ static void handle_key(struct app *a, uint32_t ks)
         return;
     }
     if (a->prompt != P_NONE) {
-        size_t len = strlen(a->pbuf);
         if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
             prompt_accept(a);
         } else if (ks == LM_KS_Escape) {
@@ -2162,16 +2163,8 @@ static void handle_key(struct app *a, uint32_t ks)
                 else if (cn > 1)
                     msg(a, "%d matches: %s", cn, list);
             }
-        } else if (wltext_key(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods)) {      /* Ctrl+V / C / X on the prompt */
-            ;
-        } else if (ks == LM_KS_BackSpace) {
-            while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
-                len--;
-            if (len > 0)
-                len--;
-            a->pbuf[len] = 0;
-        } else if (!ctrl && !alt && !super && tl > 0 && (unsigned char)txt[0] >= 0x20 && len + (size_t)tl < sizeof(a->pbuf)) {
-            memcpy(a->pbuf + len, txt, (size_t)tl + 1);
+        } else {
+            wltext_edit(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods);      /* a caret, a selection, the clipboard (wltext.h) */
         }
         a->win.redraw = true;
         return;
@@ -2604,9 +2597,16 @@ static void paint(struct wlwin *w)
             snprintf(line, sizeof(line), "Empty the trash (%d item%s) for good? This cannot be undone: Enter empties it, Esc cancels", n,
                      n == 1 ? "" : "s");
         } else {
-            snprintf(line, sizeof(line), "%s%s_", prompt_label(a->prompt), a->pbuf);
+            line[0] = 0;
         }
-        wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
+        if (a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {          /* the label, then the field with its caret and selection */
+            const char *label = prompt_label(a->prompt);
+            wlwin_text(w, 6, py + 2, label, 1, COL_FG, w->bw - 12);
+            int lw = lm_font_text_width(label);
+            wltext_paint(w, 6 + lw, py + 2, w->bw - 12 - lw, a->pbuf, true, COL_FG, lm_theme.button_hover, COL_FG);
+        } else {
+            wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
+        }
     }
     if (a->dual) {
         struct rbtn f[N_FKEY];
@@ -2699,6 +2699,32 @@ static void click(struct app *a, uint32_t time_ms)
     }
 }
 
+/* The row of the list under the pointer (making its pane the active one), -1 when the pointer is not on a row; *in_list tells whether it is in a list at all. */
+static int row_under_pointer(struct app *a, bool *in_list)
+{
+    int x = (int)a->px, y = (int)a->py;
+    *in_list = false;
+    if (hover_at(a, a->px, a->py) >= 0 || y < TOOL_H || y >= a->win.bh - bottom_h(a))
+        return -1;
+    int idx = pane_at(a, x);
+    if (pane_is_preview(a, idx) || y < list_top())
+        return -1;
+    *in_list = true;
+    if (idx != a->act) {
+        a->act = idx;
+        set_title(a);
+    }
+    struct pane *p = &a->pane[idx];
+    int px0, pw;
+    pane_rect(a, idx, &px0, &pw);
+    if (rows(p) > a->rows_visible && x >= px0 + pw - lm_metrics.scrollbar_width)
+        return -1;
+    int row = p->top + (y - list_top()) / ROW_H;
+    if (row >= rows(p) || (y - list_top()) / ROW_H >= a->rows_visible)
+        return -1;
+    return row;
+}
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -2725,8 +2751,24 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
         if (args[2].u == 273 && args[3].u == 1) {                       /* BTN_RIGHT while a text prompt is asking: Cut / Copy / Paste / Clear */
-            if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY)
+            if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {
+                a->menu_kind = 0;
                 wlwin_menu(w, wltext_menu(a->pbuf));
+            } else if (a->prompt == P_NONE && a->dual && !a->help && !a->job) {      /* a file's menu, or one for the empty part of the list */
+                bool in_list;
+                int row = row_under_pointer(a, &in_list);
+                const struct entry *e = row >= 0 ? row_entry(cur(a), row) : NULL;
+                if (e) {
+                    select_row(a, row);
+                    a->menu_kind = 1;
+                    wlwin_menu(w, e->dir ? "Open\n~Edit\nRename...\nCopy...\nMove...\nDelete...\nNew folder...\nTerminal here" :
+                                                "Open\nEdit\nRename...\nCopy...\nMove...\nDelete...\nNew folder...\nTerminal here");
+                } else if (in_list) {
+                    a->menu_kind = 2;
+                    wlwin_menu(w, "New folder...\nTerminal here\nRead the folder again");
+                }
+                w->redraw = true;
+            }
             break;
         }
         if (args[2].u == 272 && args[3].u == 1) {
@@ -2762,10 +2804,27 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 static void menu_event(struct wlwin *w, int index)
 {
     struct app *a = w->data;
-    if (index >= 0 && a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {
+    int kind = a->menu_kind;
+    a->menu_kind = 0;
+    if (index < 0)
+        return;
+    if (kind == 1) {                                                    /* a file: the same as its keys */
+        static const int fkey[8] = { -1, F_EDIT, F_RENAME, F_COPY, F_MOVE, F_DELETE, F_MKDIR, F_TERM };
+        if (index == 0)
+            open_selected(a);
+        else if (index < 8)
+            press_fkey(a, fkey[index]);
+    } else if (kind == 2) {
+        if (index == 0)
+            press_fkey(a, F_MKDIR);
+        else if (index == 1)
+            press_fkey(a, F_TERM);
+        else
+            reread(a);
+    } else if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {
         wltext_menu_do(&a->clip, a->pbuf, sizeof(a->pbuf), index);
-        w->redraw = true;
     }
+    w->redraw = true;
 }
 
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)

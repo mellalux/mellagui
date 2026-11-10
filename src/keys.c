@@ -45,7 +45,8 @@
     "Super+Shift+E     = quit\n" \
     "Super+A           = launcher\n" \
     "Super+K           = osk\n" \
-    "Super+Shift+R     = reload-config\n"
+    "Super+Shift+R     = reload-config\n" \
+    "Super+Slash       = exec mellagui-keys\n"
 
 const char *lm_keys_default_conf(void)
 {

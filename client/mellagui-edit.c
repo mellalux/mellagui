@@ -800,6 +800,10 @@ static void prompt_open(struct app *a, int kind, const char *initial, int fresh)
 {
     a->prompt = kind;
     snprintf(a->pbuf, sizeof(a->pbuf), "%.511s", initial);
+    if (fresh == 2)
+        wltext_select_all(a->pbuf);                                     /* a suggested file name starts selected: typing replaces it */
+    else
+        wltext_end(a->pbuf);
     a->pfresh = fresh;
     a->ow_armed = false;
     a->win.redraw = true;
@@ -1023,7 +1027,6 @@ static void prompt_accept(struct app *a)
 
 static void edit_prompt(struct app *a, uint32_t ks, bool plain)
 {
-    size_t len = strlen(a->pbuf);
     char txt[8];
     bool files = a->prompt == P_OPEN || a->prompt == P_SAVEAS;
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
@@ -1046,26 +1049,11 @@ static void edit_prompt(struct app *a, uint32_t ks, bool plain)
                 msg(a, "%d matches: %s", n, list);
             a->pfresh = 0;
         }
-    } else if (wltext_key(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods)) {          /* Ctrl+V / C / X on the prompt's field */
+    } else {
+        if (a->pfresh == 1 && plain && lm_keysym_to_utf8(ks, txt) > 0 && (txt[0] == '/' || txt[0] == '~'))
+            a->pbuf[0] = 0;                                             /* typing a path over a suggested folder replaces it */
+        wltext_edit(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods);       /* a caret, a selection, the clipboard (wltext.h) */
         a->pfresh = 0;
-    } else if (ks == LM_KS_BackSpace) {
-        if (a->pfresh == 2) {
-            a->pbuf[0] = 0;
-        } else {
-            while (len > 0 && (a->pbuf[len - 1] & 0xc0) == 0x80)
-                len--;
-            if (len > 0)
-                len--;
-            a->pbuf[len] = 0;
-        }
-        a->pfresh = 0;
-    } else if (plain && lm_keysym_to_utf8(ks, txt) > 0 && (unsigned char)txt[0] >= 0x20) {
-        if (a->pfresh == 2 || (a->pfresh == 1 && (txt[0] == '/' || txt[0] == '~')))
-            a->pbuf[0] = 0;                                             /* typing over a suggestion replaces it */
-        a->pfresh = 0;
-        len = strlen(a->pbuf);
-        if (len + strlen(txt) < sizeof(a->pbuf))
-            memcpy(a->pbuf + len, txt, strlen(txt) + 1);
     }
     a->win.redraw = true;
 }
@@ -1441,14 +1429,12 @@ static void paint(struct wlwin *w)
         int py = sy - STATUS_H;
         wlwin_fill(w, 0, py, w->bw, STATUS_H, COL_BAR);
         wlwin_fill(w, 0, py, w->bw, 1, COL_ACCENT);
-        char line[640];
-        snprintf(line, sizeof(line), "%s%s_", labels[a->prompt], a->pbuf);
         int hw = (int)strlen(hints[a->prompt]) * LM_FONT_W;
-        if (a->pfresh) {                                                 /* a suggestion: shown selected */
-            int lw = (int)strlen(labels[a->prompt]) * LM_FONT_W;
+        int lw = (int)strlen(labels[a->prompt]) * LM_FONT_W;
+        if (a->pfresh == 1)                                              /* a suggested folder: shown selected (the file name's is a real selection) */
             wlwin_fill(w, 6 + lw, py + 1, LM_MIN((int)strlen(a->pbuf) * LM_FONT_W, w->bw - 12 - lw), LM_FONT_H, COL_SEL);
-        }
-        wlwin_text(w, 6, py + 2, line, 1, COL_FG, w->bw - 18 - hw);
+        wlwin_text(w, 6, py + 2, labels[a->prompt], 1, COL_FG, 0);
+        wltext_paint(w, 6 + lw, py + 2, w->bw - 18 - hw - lw, a->pbuf, true, COL_FG, COL_SEL, COL_FG);
         if (hw)
             wlwin_text(w, w->bw - 6 - hw, py + 2, hints[a->prompt], 1, COL_DIM, 0);
     }

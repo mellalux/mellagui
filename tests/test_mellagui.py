@@ -582,11 +582,11 @@ class TestWindows(Base):
         ctl.tap(KEY_ESC)
         self.assertTrue(alive())
 
-    def start_exit_instance(self):
+    def start_exit_instance(self, *extra):
         d = tempfile.mkdtemp(prefix='mellagui-exit-')
         os.chmod(d, 0o700)
         p2 = subprocess.Popen([BIN, '--backend', 'headless', '--size', '1024x600', '--socket', 'mellagui-exit',
-                               '--control', os.path.join(d, 'ctl'), '--terminal', 'true'],
+                               '--control', os.path.join(d, 'ctl'), '--terminal', 'true'] + list(extra),
                               env=dict(os.environ, XDG_RUNTIME_DIR=d),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         def cleanup():
@@ -601,6 +601,39 @@ class TestWindows(Base):
                 break
             time.sleep(0.05)
         return p2, Ctl(os.path.join(d, 'ctl'))
+
+    def test_session_dialog_suspend_restart_and_shutdown_run_the_configured_commands(self):
+        marks = {k: os.path.join(tmp, 'pwr-%s.mark' % k) for k in ('suspend', 'reboot', 'poweroff')}
+        for m in marks.values():
+            if os.path.exists(m):
+                os.unlink(m)
+        conf = os.path.join(tmp, 'pwr.conf')
+        with open(conf, 'w') as f:
+            f.write('[commands]\nsuspend = touch %s\nreboot = touch %s\npoweroff = touch %s\n' % (marks['suspend'], marks['reboot'], marks['poweroff']))
+        p2, c = self.start_exit_instance('--config', conf)
+        def appeared(name):
+            for _ in range(60):
+                if os.path.exists(marks[name]):
+                    return True
+                time.sleep(0.05)
+            return False
+        for key, name in ((31, 'suspend'), (19, 'reboot'), (25, 'poweroff')):          # the letters S, R, P in the open dialog
+            c.click(*self.POWER_BTN)
+            c.tap(key)
+            self.assertTrue(appeared(name), '%s: the key did not run the command' % name)
+            os.unlink(marks[name])
+        SUSPEND, RESTART, SHUTDOWN = (428, 394), (512, 394), (596, 394)                # the lower row of the card on a 1024x600 output
+        for pos, name in ((SUSPEND, 'suspend'), (RESTART, 'reboot'), (SHUTDOWN, 'poweroff')):
+            c.click(*self.POWER_BTN)
+            c.click(*pos)
+            self.assertTrue(appeared(name), '%s: the button did not run the command' % name)
+            os.unlink(marks[name])
+        c.click(*self.POWER_BTN)                                                        # Right x3 from nothing highlighted: Suspend, then Enter
+        for _ in range(3):
+            c.tap(106)
+        c.tap(KEY_ENTER)
+        self.assertTrue(appeared('suspend'), 'Enter on the highlighted Suspend did not run it')
+        self.assertIsNone(p2.poll())                                                     # (nothing quit the compositor)
 
     def test_session_dialog_exit_button_quits(self):
         # separate instance: the shared compositor must keep running
@@ -715,6 +748,43 @@ class TestWindows(Base):
         ctl.sync()
         self.assertNotIn('minimized', flags(0))
         self.assertIn('focused', flags(0))
+
+    def test_a_right_click_on_the_title_bar_or_the_taskbar_button_opens_the_window_menu(self):
+        c1, w1 = self.window(300, 200, title='menu window')
+        r = ctl.windows()['windows'][0]
+        self.right_click(r['x'] + 100, r['y'] - 12)                      # the title bar
+        m = self.menu_state()
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]),
+                         (1, ['Maximize', 'Minimize', 'Move to workspace 1', 'Move to workspace 2', 'Move to workspace 3', 'Move to workspace 4', 'Close']))
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 0, 1, 1, 1, 1])        # (it is on workspace 1)
+        ctl.click(m['entries'][0]['x'], m['entries'][0]['y'])            # Maximize
+        ctl.sync()
+        self.assertIn('maximized', ctl.windows()['windows'][0]['flags'])
+        r = ctl.windows()['windows'][0]
+        self.right_click(r['x'] + 100, r['y'] - 12)
+        self.assertEqual(self.menu_state()['entries'][0]['label'], 'Restore')
+        ctl.tap(KEY_ESC)                                                 # Esc closes the menu only
+        self.assertEqual(self.menu_state()['open'], 0)
+        self.assertEqual(len(ctl.windows()['windows']), 1)
+        self.right_click(250, 14)                                        # the taskbar button
+        m = self.menu_state()
+        self.assertEqual(m['open'], 1)
+        ctl.click(m['entries'][3]['x'], m['entries'][3]['y'])            # Move to workspace 2: the window leaves this workspace
+        ctl.sync()
+        self.assertEqual(ctl.windows()['windows'][0]['ws'], 1)
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(3)                                                       # Super+2: there it is
+        ctl.key(KEY_LEFTMETA, False)
+        ctl.sync()
+        r = ctl.windows()['windows'][0]
+        self.right_click(r['x'] + 100, r['y'] - 12)
+        m = self.menu_state()
+        ctl.click(m['entries'][-1]['x'], m['entries'][-1]['y'])          # Close: the program is asked to
+        ev = c1.wl.wait_for(lambda e: e.obj == w1.toplevel and e.name == 'close', 2.0)
+        self.assertIsNotNone(ev, 'Close did not ask the window to close')
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(2)                                                       # back to workspace 1 for the next tests
+        ctl.key(KEY_LEFTMETA, False)
 
     def test_taskbar_paints_buttons(self):
         c, w = self.window(300, 200)
@@ -2002,21 +2072,63 @@ class TestClients(Base):
         ctl.tap(KEY_ENTER)
         self.assertTrue(self.wait_flag(flag2), 'Shift+Insert did not paste into the Run line')
 
+    def test_run_line_has_a_caret_and_a_selection(self):
+        flag = self.flag_path('runcaretflag')
+        win = self.open_run()
+        self.type_text('qq touch runcaretflag')
+        ctl.tap(102)                                                 # Home
+        for _ in range(3):
+            ctl.tap(111)                                             # Delete x3: "qq " goes
+        ctl.tap(107)                                                 # End
+        self.type_text('x')
+        ctl.tap(14)                                                  # Backspace: the x is gone again
+        self.chord(self.CTRL, 30)                                    # Ctrl+A selects the whole line ...
+        self.type_text('touch runcaretflag')                         # ... and typing replaces it
+        ctl.key(self.SHIFT, True)
+        for _ in range(4):
+            ctl.tap(105)                                             # Shift+Left x4 selects "flag"
+        ctl.key(self.SHIFT, False)
+        self.chord(self.CTRL, 45)                                    # Ctrl+X cuts the selection (not the whole line)
+        self.chord(self.CTRL, 47)                                    # Ctrl+V puts it back
+        time.sleep(0.3)
+        ctl.tap(KEY_ENTER)
+        self.assertTrue(self.wait_flag(flag), 'the line was not "touch runcaretflag"')
+
+    def test_run_menu_select_all_and_a_click_places_the_caret(self):
+        flag = self.flag_path('runclickflag')
+        win = self.open_run()
+        self.type_text('touch runclickflag')
+        ctl.click(win['x'] + 70, win['y'] + 36)                      # a click in the line: the caret goes there (after "to")
+        time.sleep(0.2)
+        ctl.tap(14)                                                  # Backspace removes the o before it ...
+        time.sleep(0.2)
+        self.type_text('o')                                          # ... which is typed again at the caret
+        time.sleep(0.2)
+        self.right_click(win['x'] + 100, win['y'] + 36)
+        m = self.menu_state()
+        self.assertEqual([e['label'] for e in m['entries']][3], 'Select all')
+        ctl.click(m['entries'][3]['x'], m['entries'][3]['y'])
+        self.chord(self.CTRL, 45)                                    # Ctrl+X: everything is selected, so everything is cut
+        self.chord(self.CTRL, 47)                                    # and pasted again
+        time.sleep(0.3)
+        ctl.tap(KEY_ENTER)
+        self.assertTrue(self.wait_flag(flag), 'the line was changed by the click / selection')
+
     def test_run_right_click_menu_cut_paste_and_clear(self):
         flag = self.flag_path('runmenuflag')
         win = self.open_run()
         self.right_click(win['x'] + 100, win['y'] + 30)
         m = self.menu_state()
         self.assertEqual((m['open'], m['owner']), (1, 1))
-        self.assertEqual([(e['label'], e['enabled']) for e in m['entries']], [('Cut', 0), ('Copy', 0), ('Paste', 1), ('Clear', 0)])   # an empty line
+        self.assertEqual([(e['label'], e['enabled']) for e in m['entries']], [('Cut', 0), ('Copy', 0), ('Paste', 1), ('Select all', 0), ('Clear', 0)])   # an empty line
         ctl.tap(KEY_ESC)                                             # Esc closes the menu, not the dialog
         self.assertEqual(self.menu_state()['open'], 0)
         self.assertIsNotNone(wait_for_window('mellagui.run', 1.0))
         self.type_text('zz')
         self.right_click(win['x'] + 100, win['y'] + 30)
         m = self.menu_state()
-        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1])
-        clear = m['entries'][3]
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1, 1])
+        clear = m['entries'][4]
         ctl.click(clear['x'], clear['y'])                            # Clear: the line is empty again
         self.type_text('touch runmenuflag')
         self.right_click(win['x'] + 100, win['y'] + 30)
@@ -2406,7 +2518,7 @@ class TestClients(Base):
         self.chord(self.CTRL, 33)                                        # the prompt again: its right-click menu
         self.right_click(win['x'] + 300, win['y'] + 200)
         m = self.menu_state()
-        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Clear']))
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Select all', 'Clear']))
         ctl.tap(KEY_ESC)
         ctl.tap(KEY_ESC)
 
@@ -2653,17 +2765,49 @@ class TestClients(Base):
         self.right_click(win['x'] + 200, win['y'] + 150)                 # the right-click menu of the prompt
         m = self.menu_state()
         self.assertEqual((m['open'], [(e['label'], e['enabled']) for e in m['entries']]),
-                         (1, [('Cut', 1), ('Copy', 1), ('Paste', 1), ('Clear', 1)]))
-        ctl.click(m['entries'][3]['x'], m['entries'][3]['y'])           # Clear
+                         (1, [('Cut', 1), ('Copy', 1), ('Paste', 1), ('Select all', 1), ('Clear', 1)]))
+        ctl.click(m['entries'][4]['x'], m['entries'][4]['y'])           # Clear
         self.assertEqual(self.menu_state()['open'], 0)
         self.right_click(win['x'] + 200, win['y'] + 150)
         m = self.menu_state()
-        self.assertEqual([e['enabled'] for e in m['entries']], [0, 0, 1, 0])
+        self.assertEqual([e['enabled'] for e in m['entries']], [0, 0, 1, 0, 0])
         ctl.click(m['entries'][2]['x'], m['entries'][2]['y'])           # Paste
         time.sleep(0.4)
         ctl.tap(KEY_ENTER)
         time.sleep(0.4)
         self.assertTrue(os.path.isdir(os.path.join(d, 'pasted folder')), os.listdir(d))
+
+    def test_files_right_click_menu_on_a_file_and_on_empty_space(self):
+        p, d = self.files_start()
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        names = []
+        for y in range(win['y'] + 40, win['y'] + 150, 6):                # find the row of a.txt: its menu has an enabled Edit
+            self.right_click(win['x'] + 100, y)
+            m = self.menu_state()
+            if m['open'] and len(m['entries']) == 8 and m['entries'][1]['enabled'] == 1:
+                break
+            if m['open']:
+                ctl.tap(KEY_ESC)
+        m = self.menu_state()
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]),
+                         (1, ['Open', 'Edit', 'Rename...', 'Copy...', 'Move...', 'Delete...', 'New folder...', 'Terminal here']))
+        ctl.click(m['entries'][2]['x'], m['entries'][2]['y'])            # Rename...: the prompt starts with the name of the file under the pointer
+        time.sleep(0.2)
+        for _ in range(12):
+            ctl.tap(14)                                                  # Backspace x12
+        self.type_chars('renamed.txt')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertEqual(sorted(n for n in os.listdir(d) if not n.startswith('.')), ['blob.bin', 'p.ppm', 'renamed.txt', 'sub'])
+        self.right_click(win['x'] + 100, win['y'] + win['h'] - 90)       # below the last row of the list: the menu of the empty place
+        m = self.menu_state()
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['New folder...', 'Terminal here', 'Read the folder again']))
+        ctl.click(m['entries'][0]['x'], m['entries'][0]['y'])
+        time.sleep(0.2)
+        self.type_chars('fromrc')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertTrue(os.path.isdir(os.path.join(d, 'fromrc')))
 
     def test_files_copy_move_mkdir_and_delete(self):
         p, d = self.files_start()
@@ -2907,6 +3051,28 @@ class TestClients(Base):
         self.type_chars(os.path.join(d, 'sub'))
         ctl.tap(KEY_ENTER)
         self.wait_title('mellagui.files', 'sub - Files')
+
+    def test_the_shortcut_list_opens_with_super_slash_and_closes_with_esc(self):
+        path = os.path.join(ROOT, 'build', 'mellagui-keys')
+        if not os.path.exists(path):
+            self.skipTest('mellagui-keys not built')
+        r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(53)                                              # Super+/
+        ctl.key(KEY_LEFTMETA, False)
+        win = wait_for_window('mellagui.keys')
+        self.assertIsNotNone(win, 'the shortcut list did not open')
+        time.sleep(0.4)
+        ppm = ctl.dump(os.path.join(tmp, 'keys-list.ppm'))
+        lit = sum(1 for y in range(win['y'] + 40, win['y'] + 200, 2) for x in range(win['x'] + 20, win['x'] + 300, 2) if ppm.px(x, y)[0] > 150)
+        self.assertGreater(lit, 100, 'the list shows no text')
+        ctl.tap(KEY_ESC)
+        for _ in range(60):
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.keys']:
+                break
+            time.sleep(0.05)
+        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.keys'])
 
     def test_run_dialog_selftest(self):
         path = os.path.join(ROOT, 'build', 'mellagui-run')
@@ -4405,9 +4571,9 @@ esac
         self.assertEqual(ctl.last, 'ok pasted.png')
         self.right_click(x0 + 300, y0 + 231)                    # the right-click menu: Clear empties the field
         m = self.menu_state()
-        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Clear']))
-        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1])
-        clear = m['entries'][3]
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Select all', 'Clear']))
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1, 1])
+        clear = m['entries'][4]
         ctl.click(clear['x'], clear['y'])
         time.sleep(0.2)
         ctl.tap(KEY_ENTER)
@@ -4424,6 +4590,39 @@ esac
         self.assertEqual(ctl.last, 'ok pasted.png')
         self.right_click(x0 + 300, y0 + 100)                    # a place that is no field: no menu
         self.assertEqual(self.menu_state()['open'], 0)
+
+    def test_panel_text_fields_have_a_caret_and_a_selection(self):
+        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 64 + 16)                   # "Desktop" tab
+        time.sleep(0.2)
+        ctl.click(x0 + 300, y0 + 231)                           # the file field
+        for ch in 'abxcd':                                      # (type_text() would press Enter at the end)
+            ctl.tap(KEYCODES[ch])
+        ctl.tap(105)                                            # Left x2: the caret is behind the x
+        ctl.tap(105)
+        ctl.tap(14)                                             # Backspace removes the x
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok abcd')
+        ctl.click(x0 + 300, y0 + 231)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(30)                                             # Ctrl+A: everything is selected ...
+        ctl.key(KEY_LEFTCTRL, False)
+        ctl.tap(KEYCODES['z'])                                  # ... and typing replaces it
+        ctl.tap(KEYCODES['z'])
+        ctl.tap(102)                                            # Home, then Shift+End selects all of it again, Delete removes it
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(107)
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.tap(111)
+        ctl.tap(KEYCODES['q'])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok q')
 
     def test_panel_follows_changes_made_elsewhere(self):
         p, win = self.open_panel()
@@ -6528,6 +6727,25 @@ class TestRecord(Base):
             off += sz
         assert off <= boxes[b'mdat'][1], 'samples run out of the mdat box'
         return dict(w=w, h=h, duration_ms=dur, samples=samples)
+
+    def test_the_pointer_is_in_the_recording(self):
+        view = os.path.join(os.path.dirname(BIN), 'mellagui-view')
+        if not os.path.exists(view):
+            self.skipTest('mellagui-view not built')
+        p, c, stop = self.private_compositor('mellagui-rec-cur', '--config', 'none')
+        c.sync()
+        d = self.outdir()
+        c.abs(300, 250)                                           # over the bare wallpaper
+        r = self.run_rec('--start', '--duration', '1', '--codec', 'mjpeg', '--dir', d, '--name', 'cur.mp4', display='mellagui-rec-cur')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(d, 'cur.mp4')
+        out = os.path.join(d, 'cur.ppm')
+        self.assertEqual(subprocess.run([view, '--decode', path, out, '0'], capture_output=True, timeout=20).returncode, 0)
+        ppm = Ppm(out)
+        white = sum(1 for y in range(250, 272) for x in range(300, 316) if all(v > 200 for v in ppm.px(x, y)))
+        self.assertGreater(white, 15, 'the pointer is not in the picture')
+        far = sum(1 for y in range(100, 122) for x in range(100, 116) if all(v > 200 for v in ppm.px(x, y)))
+        self.assertEqual(far, 0, 'something white where the pointer is not')
 
     def test_selftest(self):
         r = self.run_rec('--selftest')
@@ -8782,7 +9000,8 @@ class TestKeys(Base):
                      'Super+Down = restore', 'Super+Shift+Space = layout-prev'):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
-        self.assertEqual(len(t), 31)
+        self.assertIn('Super+Slash = exec mellagui-keys', t)
+        self.assertEqual(len(t), 32)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -8827,7 +9046,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 32)
+        self.assertEqual(len(t), 33)
         self.assertTrue(alive_p(p))
 
 
@@ -10009,12 +10228,12 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '31')
+        self.assertEqual(self.get(c, 'keys-count'), '32')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 1)
+        self.assertEqual(len(self.rows(c, 3)), 2)
         self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -10038,13 +10257,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '31')
+        self.assertEqual(self.get(c, 'keys-count'), '32')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '32')
+        self.assertEqual(self.get(c, 'keys-count'), '33')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -10229,7 +10448,8 @@ class TestThemeEdit(Base):
         c.click(x0 + 160 + 32 + 30, y0 + 14 + 28 + 11)                    # its name button
         time.sleep(0.2)
         form_y = y0 + 14 + 28 + 8 * 22 + 4 + 22 + 6
-        c.click(x0 + 160 + 34 + 50, form_y + 13)                          # the hex field
+        c.click(x0 + 160 + 34 + 50, form_y + 13)                          # the hex field (the caret is where it was clicked)
+        c.tap(107)                                                         # End
         for _ in range(8):
             c.tap(14)                                                      # Backspace x8
         for ch in '102030':
@@ -11246,6 +11466,68 @@ class TestLauncher(Base):
         self.assertEqual(self.popup(c)['open'], 1)
         c.tap(self.KEY_ESC)                                             # Esc closes the menu, not the form
         self.assertEqual((self.popup(c)['open'], self.info(c)['form']), (0, 1))
+
+    def test_typing_in_the_launcher_searches_by_name(self):
+        c = self.start('mellagui-lc41', '[dock-apps]\nLauncher = [launcher] @launcher\nTerminal = [terminal] true\nText Editor = [editor] true\nCalculator = [calculator] true\n')
+        self.super_a(c)
+        self.assertEqual(self.info(c)['n'], 3)
+        c.tap(20)                                                       # "t": the search starts
+        self.assertIn('searching=1 search="t"', c.cmd('launcher')[0])
+        c.tap(18)                                                       # "e": "te" -> Terminal and Text Editor (E is a shortcut only outside a search)
+        d = self.info(c)
+        self.assertEqual([i['name'] for i in d['icons']], ['Terminal', 'Text Editor'])
+        self.assertIsNone(d['add'], 'no "+" tile while searching')
+        self.assertEqual(d['edit'], 0)
+        c.tap(45)                                                       # "x": "tex" -> Text Editor, and the first icon is highlighted
+        d = self.info(c)
+        self.assertEqual([i['name'] for i in d['icons']], ['Text Editor'])
+        self.assertEqual(d['sel'], 0)
+        c.tap(14)                                                       # Backspace: "te"
+        self.assertEqual([i['name'] for i in self.info(c)['icons']], ['Terminal', 'Text Editor'])
+        c.tap(self.KEY_ESC)                                             # the first Esc clears the text, the search stays
+        d = self.info(c)
+        self.assertEqual((d['open'], d['n']), (1, 3))
+        self.assertIn('searching=1 search=""', c.cmd('launcher')[0])
+        c.tap(self.KEY_ESC)                                             # the second leaves the search, the third closes the dialog
+        self.assertIn('searching=0', c.cmd('launcher')[0])
+        c.tap(self.KEY_ESC)
+        self.assertEqual(self.info(c)['open'], 0)
+
+    def test_enter_starts_the_found_program_and_nothing_found_says_so(self):
+        mark = os.path.join(tmp, 'lc42.mark')
+        if os.path.exists(mark):
+            os.unlink(mark)
+        c = self.start('mellagui-lc42', '[dock-apps]\nLauncher = [launcher] @launcher\nAlpha = touch %s\nBeta = true\n' % mark)
+        self.super_a(c)
+        c.tap(48)                                                       # "b": only Beta
+        self.assertEqual([i['name'] for i in self.info(c)['icons']], ['Beta'])
+        c.tap(44)                                                       # "bz": nothing
+        d = self.info(c)
+        self.assertEqual((d['n'], d['sel']), (0, -1))
+        c.tap(14)
+        c.tap(14)                                                       # empty again: everything
+        self.assertEqual(self.info(c)['n'], 2)
+        c.tap(30)                                                       # "a" is a shortcut (add) outside the search, but here it is text
+        self.assertEqual([i['name'] for i in self.info(c)['icons']], ['Alpha', 'Beta'])    # "a" is in both names
+        c.tap(38)                                                       # "al": Alpha
+        c.tap(self.KEY_ENTER)
+        for _ in range(100):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(mark), 'the program was started')
+        self.assertEqual(self.info(c)['open'], 0)
+
+    def test_the_shortcuts_still_work_outside_a_search_and_slash_starts_one(self):
+        c = self.start('mellagui-lc43')
+        self.super_a(c)
+        c.tap(self.KEY_E)                                               # E: edit mode (not a search)
+        self.assertEqual((self.info(c)['edit'], 'searching=0' in c.cmd('launcher')[0]), (1, True))
+        c.tap(self.KEY_E)
+        c.tap(53)                                                       # "/": a search with no text yet
+        self.assertIn('searching=1 search=""', c.cmd('launcher')[0])
+        c.tap(self.KEY_E)                                               # now "e" is text: Beta and Gamma ... have an "e"? "Beta" does
+        self.assertIn('search="e"', c.cmd('launcher')[0])
 
 
 if __name__ == '__main__':

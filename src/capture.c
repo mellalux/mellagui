@@ -83,7 +83,7 @@ static void req_grab(struct lm_resource *res, const union lm_arg *args)
     }
     struct lm_rect r = lm_output_rect(out);
     int w = 0, h = 0;
-    uint32_t *px = srv->render ? lm_render_capture(srv->render, &r, &w, &h) : NULL;
+    uint32_t *px = srv->render ? lm_render_capture_cursor(srv->render, &r, &w, &h, true) : NULL;     /* the pointer is in the picture */
     if (!px || lm_buffer_write(buf, px, w, h) < 0) {
         free(px);
         lm_resource_post(res, LM_MELLAGUI_CAPTURE_V1_EVT_FAILED, index, "capture");

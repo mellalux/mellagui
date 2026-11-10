@@ -149,6 +149,7 @@ struct lm_config {
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
     const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
     const char *view_cmd;       /* command for the screenshot card's click: the image viewer (default "mellagui-view") */
+    const char *suspend_cmd, *reboot_cmd, *poweroff_cmd;     /* the session dialog's Suspend / Restart / Shutdown ([commands] suspend, reboot, poweroff; default systemctl ...) */
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */

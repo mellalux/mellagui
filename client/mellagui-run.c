@@ -67,6 +67,7 @@ static void line_set(struct line *l, const char *s)
     snprintf(l->text, sizeof(l->text), "%s", s);
     l->len = strlen(l->text);
     l->cur = l->len;
+    wltext_end(l->text);                                    /* the field's caret goes with it */
 }
 
 static void line_insert(struct line *l, const char *s, size_t n)
@@ -288,7 +289,9 @@ struct app {
     int repeat_rate, repeat_delay;
     uint32_t repeat_code;
     struct timespec repeat_next;
-    struct wlclip clip;                 /* the clipboard (Ctrl+V / C / X and the right-click menu work on the whole line) */
+    struct wlclip clip;                 /* the clipboard, the caret and the selection (wltext.h) */
+    int fx, fy, fw;                     /* where the text of the field is (set by paint) */
+    bool selecting;                     /* the left button is down in the field */
 };
 
 static void fill(struct app *a, int x, int y, int w, int h, uint32_t color)
@@ -307,25 +310,10 @@ static void paint(struct wlwin *w)
     fill(a, fx, fy, fw, LM_FONT_H + 12, COL_FIELD);
     fill(a, fx, fy + LM_FONT_H + 11, fw, 1, COL_ACCENT);
 
-    /* scroll horizontally so that the cursor stays visible */
-    int cols = (fw - 12) / LM_FONT_W;
-    int ccol = 0;                                     /* cursor column = code points before it */
-    for (size_t i = 0; i < a->line.cur; i++)
-        if (!is_cont((unsigned char)a->line.text[i]))
-            ccol++;
-    int first = ccol >= cols ? ccol - cols + 1 : 0;   /* first visible column */
-    int col = 0;
-    const char *s = a->line.text;
-    size_t len = a->line.len;
-    for (size_t i = 0; i < len;) {
-        int used;
-        uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
-        i += used > 0 ? (size_t)used : 1;
-        if (col >= first && col - first < cols)
-            wlwin_glyph(w, fx + 6 + (col - first) * LM_FONT_W, fy + 6, cp, 1, COL_TEXT);
-        col++;
-    }
-    fill(a, fx + 6 + (ccol - first) * LM_FONT_W, fy + 5, 2, LM_FONT_H + 2, COL_ACCENT);
+    a->fx = fx + 6;
+    a->fy = fy + 6;
+    a->fw = fw - 12;
+    wltext_paint(w, a->fx, a->fy, a->fw, a->line.text, true, COL_TEXT, lm_theme.button_hover, COL_ACCENT);
 }
 
 /* ---- keyboard ------------------------------------------------------------------------------------ */
@@ -343,64 +331,32 @@ static void run_line(struct app *a)
     a->win.running = false;
 }
 
-/* Clipboard actions on the line: 0 cut, 1 copy (both take the whole line), 2 paste (at the cursor), 3 clear. */
-static void clip_action(struct app *a, int what)
+/* The line was changed through wltext: keep struct line in step (the history and the selftest use it). */
+static void line_synced(struct app *a)
 {
-    if (what == 0 || what == 1) {
-        if (a->line.len)
-            wlclip_copy(&a->clip, a->line.text);
-        if (what == 0)
-            line_set(&a->line, "");
-    } else if (what == 2) {
-        size_t n = 0;
-        char *t = wltext_paste_text(&a->clip, &n);
-        if (t) {
-            line_insert(&a->line, t, n);
-            free(t);
-        }
-    } else if (what == 3) {
-        line_set(&a->line, "");
-    }
+    a->line.len = strlen(a->line.text);
+    a->line.cur = wltext_cursor(a->line.text);
     a->win.redraw = true;
 }
 
 static void handle_key(struct app *a, uint32_t code)
 {
     uint32_t ks = lm_keymap_keysym(code, a->win.mods);
-    char txt[8];
-    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0, shift = (a->win.mods & LM_MOD_SHIFT) != 0, other = (a->win.mods & (LM_MOD_ALT | LM_MOD_SUPER)) != 0;
-    if (!other && ((ctrl && (ks == 'v' || ks == 'V')) || (shift && !ctrl && ks == LM_KS_Insert))) {
-        clip_action(a, 2);                                  /* Ctrl+V / Shift+Insert: paste */
-    } else if (!other && ((ctrl && (ks == 'c' || ks == 'C')) || (ctrl && !shift && ks == LM_KS_Insert))) {
-        clip_action(a, 1);                                  /* Ctrl+C / Ctrl+Insert: copy the line */
-    } else if (!other && ((ctrl && (ks == 'x' || ks == 'X')) || (shift && !ctrl && ks == LM_KS_Delete))) {
-        clip_action(a, 0);                                  /* Ctrl+X / Shift+Delete: cut the line */
-    } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0;
+    if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         run_line(a);
     } else if (ks == LM_KS_Escape) {
         a->win.running = false;
-    } else if (ks == LM_KS_BackSpace) {
-        line_backspace(&a->line);
-    } else if (ks == LM_KS_Delete) {
-        line_delete(&a->line);
-    } else if (ks == LM_KS_Left) {
-        a->line.cur = prev_boundary(&a->line, a->line.cur);
-    } else if (ks == LM_KS_Right) {
-        a->line.cur = next_boundary(&a->line, a->line.cur);
-    } else if (ks == LM_KS_Home || (ctrl && (ks == 'a' || ks == 'A'))) {
-        a->line.cur = 0;
-    } else if (ks == LM_KS_End || (ctrl && (ks == 'e' || ks == 'E'))) {
-        a->line.cur = a->line.len;
-    } else if (ctrl && (ks == 'u' || ks == 'U')) {
+    } else if (ctrl && (ks == 'u' || ks == 'U')) {                  /* Ctrl+U: clear the line (readline) */
         line_set(&a->line, "");
+    } else if (ctrl && (ks == 'e' || ks == 'E')) {                  /* Ctrl+E: the end of the line (readline) */
+        wltext_end(a->line.text);
     } else if (ks == LM_KS_Up) {
         hist_move(&a->hist, &a->line, -1);
     } else if (ks == LM_KS_Down) {
         hist_move(&a->hist, &a->line, 1);
-    } else if (!(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) {
-        int n = lm_keysym_to_utf8(ks, txt);
-        if (n > 0)
-            line_insert(&a->line, txt, (size_t)n);
+    } else if (wltext_edit(&a->clip, a->line.text, sizeof(a->line.text), ks, a->win.mods)) {
+        line_synced(a);
     }
     a->win.redraw = true;
 }
@@ -481,17 +437,42 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
-    if (op != LM_WL_POINTER_EVT_BUTTON || args[3].u != 1)
-        return;
-    a->clip.serial = args[0].u;
-    if (args[2].u == 273)                                     /* BTN_RIGHT: Cut / Copy / Paste / Clear */
-        wlwin_menu(w, wltext_menu(a->line.text));
+    static double px;
+    switch (op) {
+    case LM_WL_POINTER_EVT_ENTER:
+        px = lm_fixed_to_double(args[2].f);
+        break;
+    case LM_WL_POINTER_EVT_MOTION:
+        px = lm_fixed_to_double(args[1].f);
+        if (a->selecting) {                                          /* drag: the selection follows the pointer */
+            wltext_click(a->line.text, (int)px - a->fx, true);
+            w->redraw = true;
+        }
+        break;
+    case LM_WL_POINTER_EVT_BUTTON:
+        a->clip.serial = args[0].u;
+        if (args[2].u == 272) {                                      /* BTN_LEFT: the caret goes where it was clicked; Shift extends the selection */
+            if (args[3].u == 1) {
+                wltext_click(a->line.text, (int)px - a->fx, (w->mods & LM_MOD_SHIFT) != 0);
+                a->selecting = true;
+                w->redraw = true;
+            } else {
+                a->selecting = false;
+            }
+        } else if (args[2].u == 273 && args[3].u == 1) {            /* BTN_RIGHT: Cut / Copy / Paste / Select all / Clear */
+            wlwin_menu(w, wltext_menu(a->line.text));
+        }
+        break;
+    }
 }
 
 static void menu_event(struct wlwin *w, int index)
 {
-    if (index >= 0)
-        clip_action(w->data, index);
+    struct app *a = w->data;
+    if (index < 0)
+        return;
+    wltext_menu_do(&a->clip, a->line.text, sizeof(a->line.text), index);
+    line_synced(a);
 }
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)

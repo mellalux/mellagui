@@ -48,7 +48,9 @@
 #define PANEL_CLOCK_MIN_W 136                   /* "DD.MM.YYYY HH:MM" = 16 glyphs; longer texts (seconds, a weekday ...) make it wider */
 #define PANEL_POWER_D (LM_PANEL_HEIGHT - 4)     /* the round power button's diameter: as tall as the other buttons */
 #define POWER_CARD_W 264                        /* the session dialog */
-#define POWER_CARD_H 172
+#define POWER_CARD_H 268                        /* (the card grows downwards: the upper row stays where it was) */
+#define POWER_ROW1_H 172
+#define POWER_BTN2_D 48                         /* the lower row's buttons */
 #define POWER_BTN_D 64                          /* its round buttons */
 #define ABOUT_CARD_W 520                        /* the About dialog */
 #define ABOUT_ROW_H 18
@@ -141,6 +143,7 @@ struct lm_wm {
     struct lm_osk_place osk_start;   /* the place when the drag began */
     uint32_t osk_down_code, osk_down_mods;   /* what was pressed for the held key: its code and the latched modifiers pressed with it */
     bool menu_open;             /* a menu is showing in the card menu_rect: the dock icon's (owner 0, for dock item menu_dock_item) or a program's (owner 1) */
+    struct lm_window *menu_window;      /* owner 3: the window whose title bar / taskbar button was right-clicked */
     int menu_owner, menu_dock_item, menu_sel, menu_n;
     struct lm_rect menu_rect;
     char menu_title[LM_DOCK_NAME_MAX], menu_label[LM_MENU_MAX][48];
@@ -281,6 +284,9 @@ static void frame_info(const struct lm_wm *wm, const struct lm_window *w, struct
 }
 
 static struct lm_window *calendar_window(struct lm_wm *wm);
+static void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws);
+static void window_menu_activate(struct lm_wm *wm, int which);
+static void menu_close(struct lm_wm *wm, bool chosen);
 static void menu_set(struct lm_wm *wm, bool open);
 static struct lm_rect output_panel_rect(const struct lm_output *o)
 {
@@ -1402,6 +1408,8 @@ void lm_wm_window_destroy(struct lm_window *w)
     if (wm->hover_task == w) wm->hover_task = NULL;
     if (wm->press_win == w) { wm->press_win = NULL; wm->press_bits = 0; }
     if (wm->last_click_win == w) wm->last_click_win = NULL;
+    if (wm->menu_open && wm->menu_owner == 3 && wm->menu_window == w)
+        menu_close(wm, true);                                  /* the menu is of this window */
     sw_close(wm);                                               /* the list holds window pointers */
     struct lm_window *c;
     lm_list_for_each(c, &wm->windows, link)
@@ -1890,13 +1898,19 @@ static void power_info(const struct lm_wm *wm, struct lm_output *o, struct lm_po
 {
     memset(pi, 0, sizeof(*pi));
     pi->rect = lm_output_rect(o);
-    pi->card = lm_rect_make(pi->rect.x + (pi->rect.w - POWER_CARD_W) / 2, pi->rect.y + (pi->rect.h - POWER_CARD_H) / 2,
+    pi->card = lm_rect_make(pi->rect.x + (pi->rect.w - POWER_CARD_W) / 2, pi->rect.y + (pi->rect.h - POWER_ROW1_H) / 2,
                             POWER_CARD_W, POWER_CARD_H);
     int gap = 40, total = 2 * POWER_BTN_D + gap;
     int x = pi->card.x + (POWER_CARD_W - total) / 2, y = pi->card.y + 46;
     for (int i = 0; i < 2; i++) {
         pi->button[i] = lm_rect_make(x + i * (POWER_BTN_D + gap), y, POWER_BTN_D, POWER_BTN_D);
         pi->hit[i] = lm_rect_make(pi->button[i].x - 8, y, POWER_BTN_D + 16, POWER_BTN_D + 8 + LM_FONT_H + 4);
+    }
+    int gap2 = 36, total2 = 3 * POWER_BTN2_D + 2 * gap2;                 /* the lower row: Suspend, Restart, Shutdown */
+    int x2 = pi->card.x + (POWER_CARD_W - total2) / 2, y2 = pi->card.y + 156;
+    for (int i = 0; i < 3; i++) {
+        pi->button[2 + i] = lm_rect_make(x2 + i * (POWER_BTN2_D + gap2), y2, POWER_BTN2_D, POWER_BTN2_D);
+        pi->hit[2 + i] = lm_rect_make(pi->button[2 + i].x - 8, y2, POWER_BTN2_D + 16, POWER_BTN2_D + 8 + LM_FONT_H + 4);
     }
     pi->sel = wm->power_sel;
 }
@@ -2442,14 +2456,23 @@ static bool launcher_is_self(const struct lm_dock_item *it)
     return !strcmp(it->cmd, "@launcher");
 }
 
+/* Search: what is typed in the dialog filters the icons by name (one wm, so file scope). */
+static char launcher_filter[48];
+static bool launcher_searching;
+
+static bool launcher_shown(const struct lm_dock_item *it)
+{
+    return !launcher_is_self(it) && (!launcher_filter[0] || strcasestr(it->name, launcher_filter));
+}
+
 static int launcher_count(void)
 {
     int n = 0;
     for (int i = 0; i < lm_dock_count(); i++)
-        if (!launcher_is_self(lm_dock_item(i)))
+        if (launcher_shown(lm_dock_item(i)))
             n++;
     for (int i = 0; i < lm_launchapps_count(); i++)
-        if (!launcher_is_self(lm_launchapps_item(i)))
+        if (launcher_shown(lm_launchapps_item(i)))
             n++;
     return n;
 }
@@ -2460,13 +2483,13 @@ static const struct lm_dock_item *launcher_item(int g, int *dock_index)
     if (dock_index)
         *dock_index = -1;
     for (int i = 0; i < lm_dock_count(); i++)
-        if (!launcher_is_self(lm_dock_item(i)) && g-- == 0) {
+        if (launcher_shown(lm_dock_item(i)) && g-- == 0) {
             if (dock_index)
                 *dock_index = i;
             return lm_dock_item(i);
         }
     for (int i = 0; i < lm_launchapps_count(); i++)
-        if (!launcher_is_self(lm_launchapps_item(i)) && g-- == 0)
+        if (launcher_shown(lm_launchapps_item(i)) && g-- == 0)
             return lm_launchapps_item(i);
     return NULL;
 }
@@ -2522,7 +2545,9 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
     li->focus = wm->launcher_focus;
     li->kind = launcher_kind_of(wm);
     li->kind_name = li->kind >= 0 ? lm_dockicon_name(li->kind) : li->kind == -2 ? "yours" : "auto";
-    int n = launcher_count(), cells = n + (launcher_can_add() ? 1 : 0);
+    int n = launcher_count(), cells = n + (launcher_can_add() && !launcher_searching ? 1 : 0);
+    li->search = launcher_filter;
+    li->searching = launcher_searching && !li->form;
     li->n = n;
     li->sel = LM_CLAMP(wm->launcher_sel, -1, cells - 1);
     int cw, ch;
@@ -2568,10 +2593,11 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
     li->button[1] = lm_rect_make(bx + 8, by, LC_BTN_W, LC_BTN_H);
     li->button_text[0] = li->form ? (li->editing ? "Save" : "Add") : li->edit ? "Done" : "Edit";
     li->button_text[1] = li->form ? "Cancel" : "Close";
-    static const char hint_grid[] = "Enter starts   E edit   A add   Esc closes", hint_edit[] = "Click an icon to change it   red x removes   E or Done ends   Esc closes",
+    static const char hint_grid[] = "Enter starts   E edit   A add   Type to search   Esc closes", hint_edit[] = "Click an icon to change it   red x removes   E or Done ends   Esc closes",
                       hint_form[] = "Tab next field   Left / Right icon   Enter adds   Esc back",
                       hint_change[] = "Tab next field   Left / Right icon   Enter saves   Esc back";
-    li->hint = li->form ? (li->editing ? hint_change : hint_form) : li->edit ? hint_edit : hint_grid;
+    static const char hint_search[] = "Type to search   Enter starts   Esc clears";
+    li->hint = li->form ? (li->editing ? hint_change : hint_form) : li->searching ? hint_search : li->edit ? hint_edit : hint_grid;
     if (li->form) {
         li->field_label[0] = "Name";
         li->field_label[1] = "Command   (@terminal, mellagui-*, ~/prog, a || b)";
@@ -2610,6 +2636,8 @@ static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
             o = lm_output_primary(wm->srv);
         if (!o)
             return;
+        launcher_filter[0] = 0;
+        launcher_searching = false;
         about_set(wm, false, NULL);
         power_set(wm, false, NULL);
         sw_close(wm);
@@ -2638,8 +2666,9 @@ size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size)
     struct lm_launcher_info li;
     if (o)
         launcher_info(wm, o, &li);
-    n += (size_t)snprintf(buf, size, "launcher open=%d edit=%d form=%d n=%d sel=%d drag=%d droppos=%d editing=%d\n", o != NULL, o ? li.edit : 0,
-                          o ? li.form : 0, o ? li.n : 0, o ? li.sel : -1, o ? li.drag : -1, o ? li.drop_pos : -1, o ? li.editing : 0);
+    n += (size_t)snprintf(buf, size, "launcher open=%d edit=%d form=%d n=%d sel=%d drag=%d droppos=%d editing=%d searching=%d search=\"%s\"\n", o != NULL, o ? li.edit : 0,
+                          o ? li.form : 0, o ? li.n : 0, o ? li.sel : -1, o ? li.drag : -1, o ? li.drop_pos : -1, o ? li.editing : 0,
+                          o ? li.searching : 0, o ? li.search : "");
     if (!o)
         return n;
 #define LCR(r) (r).x, (r).y, (r).w, (r).h
@@ -2723,6 +2752,8 @@ static void launcher_open_form(struct lm_wm *wm)
 {
     if (!launcher_can_add())
         return;
+    launcher_filter[0] = 0;                                         /* (the "+" tile and the counts want the whole list) */
+    launcher_searching = false;
     wm->launcher_form = true;
     wm->launcher_editing = false;
     wm->launcher_name[0] = wm->launcher_cmd[0] = wm->launcher_msg[0] = 0;
@@ -2952,6 +2983,46 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
     bool arrow = code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN;
     if (!wm->launcher_form) {
         int cells = li.n + (li.add.w > 0 ? 1 : 0);
+        keymap_sync(wm);
+        uint32_t sks = lm_keymap_keysym(code, mods);
+        char stxt[8];
+        int stl = sks ? lm_keysym_to_utf8(sks, stxt) : 0;
+        bool splain = !(mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER));
+        bool sprint = splain && stl == 1 && (unsigned char)stxt[0] >= 0x20 && (unsigned char)stxt[0] < 0x7f;
+        bool changed = false;
+        if (launcher_searching) {                                       /* search mode: the letters go into the text */
+            size_t l = strlen(launcher_filter);
+            if (code == KEY_BACKSPACE) {
+                launcher_pop(launcher_filter);
+                changed = true;
+            } else if (code == KEY_ESC) {
+                if (repeat)
+                    return;
+                if (l)
+                    launcher_filter[0] = 0;
+                else
+                    launcher_searching = false;
+                changed = true;
+            } else if (sprint && l + 1 < sizeof(launcher_filter)) {
+                launcher_filter[l] = stxt[0];
+                launcher_filter[l + 1] = 0;
+                changed = true;
+            }
+        } else if (!repeat && ((sprint && code != KEY_E && code != KEY_A && code != KEY_N && code != KEY_SPACE) ||
+                               (code == KEY_F && (mods & LM_MOD_CTRL) && !(mods & (LM_MOD_ALT | LM_MOD_SUPER))))) {
+            launcher_searching = true;                                  /* typing a letter other than the shortcuts (E A N) starts a search; "/" and Ctrl+F too */
+            launcher_filter[0] = 0;
+            if (sprint && code != KEY_SLASH) {
+                launcher_filter[0] = stxt[0];
+                launcher_filter[1] = 0;
+            }
+            changed = true;
+        }
+        if (changed) {
+            wm->launcher_sel = launcher_count() > 0 ? 0 : -1;
+            launcher_damage(wm);
+            return;
+        }
         if (repeat && !arrow)
             return;
         if (code == KEY_ESC) {
@@ -3447,6 +3518,53 @@ void lm_wm_menu_cancel(struct lm_wm *wm)
     }
 }
 
+/* Right click on a window's title bar or its taskbar button: Maximize / Restore, Minimize, Move to workspace 1..4, Close. */
+static void window_menu_open(struct lm_wm *wm, struct lm_window *w)
+{
+    if (!w || !w->mapped || win_is_calendar(w) || !wm->srv->seat)
+        return;
+    static char names[LM_NUM_WORKSPACES][24];
+    const char *labels[3 + LM_NUM_WORKSPACES + 1];
+    bool enabled[3 + LM_NUM_WORKSPACES + 1];
+    int n = 0;
+    bool max = (w->states & LM_WINDOW_MAXIMIZED) != 0;
+    labels[n] = max ? "Restore" : "Maximize";
+    enabled[n++] = !(w->states & LM_WINDOW_FULLSCREEN);
+    labels[n] = "Minimize";
+    enabled[n++] = !w->minimized;
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
+        snprintf(names[i], sizeof(names[i]), "Move to workspace %d", i + 1);
+        labels[n] = names[i];
+        enabled[n++] = i != w->workspace;
+    }
+    labels[n] = "Close";
+    enabled[n++] = true;
+    double px = 0, py = 0;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    struct lm_output *o = lm_output_nearest(wm->srv, px, py);
+    int mw, mh;
+    if (!o || !menu_fill(wm, 3, w->title && w->title[0] ? w->title : NULL, labels, enabled, n, &mw, &mh))
+        return;
+    wm->menu_window = w;
+    menu_place(wm, (int)px - 4, (int)py - 4, mw, mh, o);
+}
+
+static void window_menu_activate(struct lm_wm *wm, int which)
+{
+    struct lm_window *w = wm->menu_window;
+    wm->menu_window = NULL;
+    if (!w)
+        return;
+    if (which == 0)
+        lm_wm_window_request_maximize(w, !(w->states & LM_WINDOW_MAXIMIZED));
+    else if (which == 1)
+        lm_wm_window_request_minimize(w);
+    else if (which >= 2 && which < 2 + LM_NUM_WORKSPACES)
+        move_to_workspace(wm, w, which - 2);
+    else
+        lm_wm_window_close(w);
+}
+
 /* Right click on a text field of the launcher's form: Cut / Copy / Paste / Clear at the pointer. */
 static void launcher_field_menu(struct lm_wm *wm, int field)
 {
@@ -3541,6 +3659,8 @@ static void menu_activate(struct lm_wm *wm, int which)
         dockitem_menu_activate(wm, which);
     else if (owner == 2)
         launcher_field_clip(wm, which);
+    else if (owner == 3)
+        window_menu_activate(wm, which);
     else
         lm_menu_chosen(wm->srv, which);
 }
@@ -4210,7 +4330,7 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
         struct lm_power_info pi;
         power_info(wm, po, &pi);
         out->kind = lm_rect_contains(&pi.card, ix, iy) ? LM_PICK_POWER_CARD : LM_PICK_POWER_BACKDROP;
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < LM_POWER_N; i++)
             if (lm_rect_contains(&pi.hit[i], ix, iy)) {
                 out->kind = LM_PICK_POWER_BUTTON;
                 out->index = i;
@@ -4955,10 +5075,17 @@ static void open_shot(struct lm_wm *wm)
     lm_server_spawn(wm->srv, cmd);
 }
 
-/* Lock (0) or Exit (1) was chosen in the session dialog. */
+/* Lock (0), Exit (1), Suspend (2), Restart (3) or Shutdown (4) was chosen in the session dialog. */
 static void power_activate(struct lm_wm *wm, int which)
 {
     power_set(wm, false, NULL);
+    if (which >= 2 && which <= 4) {                             /* the configured commands ([commands] suspend / reboot / poweroff: systemctl) */
+        const char *cmd = which == 2 ? wm->srv->config.suspend_cmd : which == 3 ? wm->srv->config.reboot_cmd : wm->srv->config.poweroff_cmd;
+        lm_info("session dialog: %s", which == 2 ? "suspend" : which == 3 ? "restart" : "shutdown");
+        if (cmd && *cmd)
+            lm_server_spawn(wm->srv, cmd);
+        return;
+    }
     if (which == 0) {
         if (!lm_lock_now(wm->srv->lock))                        /* no password / PIN yet: open the settings to set one */
             launch_settings(wm);
@@ -5162,6 +5289,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (!pick->window)
             return true;
         lm_wm_focus_window(wm, pick->window);
+        if (button == BTN_RIGHT) {
+            window_menu_open(wm, pick->window);
+            return true;
+        }
         if (button != BTN_LEFT)
             return true;
         if (wm->last_click_win == pick->window && time_ms - wm->last_click_time < (uint32_t)DOUBLE_CLICK_MS) {
@@ -5299,6 +5430,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
                 lm_wm_focus_window(wm, pick->window);
         } else if (button == BTN_MIDDLE && pick->window) {
             lm_wm_window_close(pick->window);
+        } else if (button == BTN_RIGHT && pick->window) {
+            window_menu_open(wm, pick->window);
         }
         return true;
     case LM_PICK_PANEL:
@@ -5559,7 +5692,8 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
             if (code == KEY_ESC)
                 power_set(wm, false, NULL);
             else if (code == KEY_LEFT || code == KEY_RIGHT || code == KEY_TAB) {
-                wm->power_sel = wm->power_sel < 0 ? (code == KEY_LEFT ? 1 : 0) : 1 - wm->power_sel;
+                int dir = code == KEY_LEFT || (code == KEY_TAB && (mods & LM_MOD_SHIFT)) ? LM_POWER_N - 1 : 1;
+                wm->power_sel = wm->power_sel < 0 ? (dir == 1 ? 0 : LM_POWER_N - 1) : (wm->power_sel + dir) % LM_POWER_N;
                 power_damage(wm);
             } else if ((code == KEY_ENTER || code == KEY_KPENTER) && wm->power_sel >= 0)
                 power_activate(wm, wm->power_sel);
@@ -5567,6 +5701,12 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
                 power_activate(wm, 0);
             else if (code == KEY_E)
                 power_activate(wm, 1);
+            else if (code == KEY_S)
+                power_activate(wm, 2);
+            else if (code == KEY_R)
+                power_activate(wm, 3);
+            else if (code == KEY_P)
+                power_activate(wm, 4);
         }
         return true;
     }

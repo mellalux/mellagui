@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +69,7 @@ bool ffdec_probe(const char *path, struct ffdec_info *info, char *err, size_t er
     const char *d = strstr(buf, "Duration: ");
     if (d)
         info->duration_ms = parse_hms(d + 10);
+    info->has_audio = strstr(buf, "Audio: ") != NULL;
     const char *v = strstr(buf, "Video: ");
     if (!v) {
         snprintf(err, errsz, "no video stream in this file");
@@ -98,7 +100,7 @@ bool ffdec_probe(const char *path, struct ffdec_info *info, char *err, size_t er
     return true;
 }
 
-struct ffdec *ffdec_open(const char *path, int w, int h, int fps, uint64_t start_ms, char *err, size_t errsz)
+struct ffdec *ffdec_open(const char *path, int w, int h, int src_w, int src_h, int fps, uint64_t start_ms, char *err, size_t errsz)
 {
     const char *ff = ffpipe_ffmpeg_path();
     if (!ff) {
@@ -112,7 +114,10 @@ struct ffdec *ffdec_open(const char *path, int w, int h, int fps, uint64_t start
     }
     char ss[32], vf[64];
     snprintf(ss, sizeof(ss), "%llu.%03llu", (unsigned long long)(start_ms / 1000), (unsigned long long)(start_ms % 1000));
-    snprintf(vf, sizeof(vf), "fps=%d", fps);
+    if (w != src_w || h != src_h)
+        snprintf(vf, sizeof(vf), "fps=%d,scale=%d:%d:flags=bilinear", fps, w, h);
+    else
+        snprintf(vf, sizeof(vf), "fps=%d", fps);
     pid_t pid = fork();
     if (pid < 0) {
         snprintf(err, errsz, "fork: %s", strerror(errno));
@@ -151,6 +156,9 @@ struct ffdec *ffdec_open(const char *path, int w, int h, int fps, uint64_t start
     d->fd = out[0];
     d->frame_bytes = (size_t)w * (size_t)h * 4;
     fcntl(d->fd, F_SETFL, fcntl(d->fd, F_GETFL) | O_NONBLOCK);
+#ifdef F_SETPIPE_SZ
+    if (fcntl(d->fd, F_SETPIPE_SZ, 1 << 20) < 0) {}                  /* a picture is megabytes: the default 64 KB pipe means a hundred wake-ups for each */
+#endif
     return d;
 }
 
@@ -170,6 +178,12 @@ int ffdec_read(struct ffdec *d, void *buf, size_t *have)
     }
     *have = 0;
     return 1;
+}
+
+void ffdec_wait(struct ffdec *d, int ms)
+{
+    struct pollfd p = { .fd = d->fd, .events = POLLIN };
+    if (poll(&p, 1, ms) < 0 && errno != EINTR) {}
 }
 
 void ffdec_close(struct ffdec *d)

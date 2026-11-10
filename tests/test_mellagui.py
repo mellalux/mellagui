@@ -3060,6 +3060,185 @@ class TestClients(Base):
         self.assertTrue(os.path.exists(os.path.join(d, 'b.txt')))
         self.assertFalse(os.path.exists(os.path.join(d, 'a.txt')))
 
+    # ---- network drives (smb://) with a stand-in for smbclient (tests/fake_smbclient.py) ----------------------------------------------
+
+    def net_start(self, **fake):
+        """The browser with a fake server: folder "data" (a.txt, 'with space.txt', sub/inner.txt) of the server. Returns (process, local folder, server folder, dict)."""
+        root = tempfile.mkdtemp(prefix='smb-', dir=tmp)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        share = os.path.join(root, 'data')
+        os.makedirs(os.path.join(share, 'sub'))
+        for name, text in (('a.txt', b'remote a\n'), ('with space.txt', b'remote spaced\n'), ('sub/inner.txt', b'remote inner\n')):
+            with open(os.path.join(share, name), 'wb') as f:
+                f.write(text)
+        conf, cache = os.path.join(root, 'conf'), os.path.join(root, 'cache')
+        log = os.path.join(root, 'smb.log')
+        env = {'MELLAGUI_SMBCLIENT': os.path.join(ROOT, 'tests', 'fake_smbclient.py'), 'FAKE_SMB_ROOT': root, 'FAKE_SMB_LOG': log,
+               'XDG_CONFIG_HOME': conf, 'XDG_CACHE_HOME': cache, 'MELLAGUI_SMB_GATEWAY': 'none'}
+        env.update(fake)
+        p, d = self.files_start(env=env)
+        return p, d, share, dict(root=root, conf=os.path.join(conf, 'mellagui', 'network.conf'), cache=cache, log=log)
+
+    def net_connect(self, host):
+        self.chord(self.CTRL, 49)                                        # Ctrl+N: the list of servers
+        self.wait_title('mellagui.files', 'Network - Files')
+        self.chord(self.CTRL, 37)                                        # Ctrl+K: connect to a server
+        self.type_chars(host)
+        ctl.tap(KEY_ENTER)
+
+    def test_files_network_lists_servers_shares_and_folders(self):
+        p, d, share, n = self.net_start()
+        self.net_connect('fakehost')
+        self.wait_title('mellagui.files', 'fakehost - Files')            # the shares of the server are folders
+        ctl.tap(KEY_ENTER)                                               # "data" (the first row after "..")
+        self.wait_title('mellagui.files', 'data - Files')
+        ctl.tap(KEY_ENTER)                                               # "sub" (folders come first)
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(14)                                                      # Backspace: up
+        self.wait_title('mellagui.files', 'data - Files')
+        ctl.tap(14)
+        self.wait_title('mellagui.files', 'fakehost - Files')
+        ctl.tap(14)
+        self.wait_title('mellagui.files', 'Network - Files')
+        with open(n['conf']) as f:                                       # the server is remembered, with no password
+            self.assertIn('fakehost -', f.read())
+
+    def test_files_network_copies_both_ways_and_deletes(self):
+        p, d, share, n = self.net_start()
+        self.net_connect('fakehost')
+        self.wait_title('mellagui.files', 'fakehost - Files')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'data - Files')
+        for _ in range(2):
+            ctl.tap(self.K_DOWN)                                         # sub, a.txt, with space.txt
+        ctl.tap(self.FKEYS[5])                                           # F5: copy into the other pane (the local folder)
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.0)
+        self.assertEqual(self.read_file(os.path.join(d, 'with space.txt')), b'remote spaced\n')
+        ctl.tap(self.K_HOME)
+        ctl.tap(self.K_DOWN)                                             # the folder "sub": a folder is copied with what is in it
+        ctl.tap(self.FKEYS[5])
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.0)
+        self.assertTrue(os.path.exists(os.path.join(d, 'sub', 'inner.txt')))     # (sub exists locally already: nothing is replaced)
+        self.assertEqual(self.read_file(os.path.join(d, 'sub', 'inner.txt')), b'inner\n')
+        ctl.tap(self.K_TAB)                                              # the local pane: blob.bin goes to the server
+        ctl.tap(self.K_END)
+        ctl.tap(self.K_UP)
+        self.assertTrue(os.path.exists(os.path.join(d, 'blob.bin')))
+        ctl.tap(30)                                                      # (the letter b)
+        ctl.tap(48)
+        ctl.tap(self.FKEYS[5])
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.0)
+        self.assertEqual(self.read_file(os.path.join(share, 'blob.bin')), b'\x00\x01\x02')
+        self.assertTrue(os.path.exists(os.path.join(d, 'blob.bin')), 'a copy leaves the original')
+
+    def test_files_network_mkdir_rename_and_delete(self):
+        p, d, share, n = self.net_start()
+        self.net_connect('fakehost')
+        self.wait_title('mellagui.files', 'fakehost - Files')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'data - Files')
+        ctl.tap(self.FKEYS[7])                                           # F7: a new folder on the server
+        self.type_chars('made')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        self.assertTrue(os.path.isdir(os.path.join(share, 'made')))
+        ctl.tap(60)                                           # F2: the folder under the cursor ("made" is selected) gets a new name
+        for _ in range(4):
+            ctl.tap(14)
+        self.type_chars('newer')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        self.assertTrue(os.path.isdir(os.path.join(share, 'newer')), os.listdir(share))
+        self.assertFalse(os.path.exists(os.path.join(share, 'made')))
+        ctl.tap(self.FKEYS[8])                                           # F8: a network file is not trashed, it is deleted after asking
+        ctl.tap(KEY_ESC)
+        time.sleep(0.3)
+        self.assertTrue(os.path.isdir(os.path.join(share, 'newer')), 'Esc keeps it')
+        ctl.tap(self.FKEYS[8])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        self.assertFalse(os.path.exists(os.path.join(share, 'newer')))
+        self.assertTrue(os.path.exists(os.path.join(share, 'a.txt')))
+
+    def test_files_network_asks_for_a_login_and_never_puts_the_password_on_a_command_line(self):
+        p, d, share, n = self.net_start(FAKE_SMB_USER='bob', FAKE_SMB_PASS='hunter22')
+        self.net_connect('locked')
+        time.sleep(0.8)
+        self.assertEqual(self.window_title('mellagui.files'), 'Network - Files')       # the guest was refused: a question, not a listing
+        self.type_chars('bob')
+        ctl.tap(KEY_ENTER)
+        self.type_chars('wrongpass')                                     # a wrong password asks again
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        self.type_chars('bob')
+        ctl.tap(KEY_ENTER)
+        self.type_chars('hunter22')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'locked - Files')
+        with open(n['log']) as f:
+            log = f.read()
+        self.assertIn('auth=file', log)
+        self.assertNotIn('hunter22', log)
+        self.assertNotIn('wrongpass', log)
+        with open(n['conf']) as f:
+            conf = f.read()
+        self.assertIn('locked bob', conf)
+        self.assertNotIn('hunter22', conf)
+        self.assertEqual(oct(os.stat(n['conf']).st_mode & 0o777), '0o600')
+        left = [x for x in os.listdir(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) if x.startswith('mellagui-smb-')]
+        self.assertEqual(left, [], 'the temporary credential file must be gone')
+
+    def test_files_network_opens_a_file_as_a_copy_and_shows_errors(self):
+        p, d, share, n = self.net_start()
+        self.net_connect('fakehost')
+        self.wait_title('mellagui.files', 'fakehost - Files')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'data - Files')
+        ctl.tap(self.K_DOWN)                                              # a.txt
+        ctl.tap(KEY_ENTER)
+        self.assertIsNotNone(wait_for_window('mellagui.edit'), 'the editor did not open the copy')
+        self.assertEqual(self.read_file(os.path.join(n['cache'], 'mellagui', 'network', 'fakehost', 'data', 'a.txt')), b'remote a\n')
+
+    def test_files_network_old_servers_need_the_legacy_word_and_nothing_is_replaced(self):
+        p, d, share, n = self.net_start(FAKE_SMB_V1='1')
+        self.chord(self.CTRL, 49)
+        self.wait_title('mellagui.files', 'Network - Files')
+        self.chord(self.CTRL, 37)
+        self.type_chars('old')
+        ctl.tap(KEY_ENTER)                                               # without "legacy" an SMB1-only server is refused
+        time.sleep(0.8)
+        self.assertEqual(self.window_title('mellagui.files'), 'Network - Files')
+        self.chord(self.CTRL, 37)
+        self.type_chars('old')
+        ctl.tap(KEY_SPACE)
+        self.type_chars('legacy')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'old - Files')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'data - Files')
+        ctl.tap(self.K_DOWN)                                             # a.txt exists in the local folder, too
+        ctl.tap(self.FKEYS[5])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        self.assertEqual(self.read_file(os.path.join(d, 'a.txt')), b'text a\n')
+        with open(n['conf']) as f:
+            self.assertIn('old - legacy', f.read())
+
+    def test_files_network_forgets_a_server_with_delete(self):
+        p, d, share, n = self.net_start()
+        self.net_connect('fakehost')
+        self.wait_title('mellagui.files', 'fakehost - Files')
+        ctl.tap(14)
+        self.wait_title('mellagui.files', 'Network - Files')
+        ctl.tap(self.K_DOWN)                                              # the first row is "Connect to a server...", then the server
+        ctl.tap(self.K_DELETE if hasattr(self, 'K_DELETE') else 111)
+        time.sleep(0.5)
+        with open(n['conf']) as f:
+            self.assertNotIn('fakehost', f.read())
+
     def test_files_choose_sets_the_wallpaper(self):
         self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
         ctl.cmd('settings wallpaper ""')
@@ -7516,6 +7695,140 @@ class TestViewer(Base):
         near = sum(1 for x in range(300, 400) for y in range(0, 30)
                    if all(abs(a - b) <= 8 for a, b in zip(ppm.px(x, y), (0x14, 0x17, 0x1f))))
         self.assertGreater(near, 500, 'the panel of the recorded screen is not in the picture')
+
+    def procs_of(self, ppid, word):
+        """(pid, state) of the children of ppid (and their children) whose command line has `word`."""
+        found = []
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit():
+                continue
+            try:
+                with open('/proc/%s/stat' % pid) as f:
+                    rest = f.read().rsplit(')', 1)[1].split()
+                with open('/proc/%s/cmdline' % pid, 'rb') as f:
+                    cmd = f.read().replace(b'\0', b' ').decode(errors='replace')
+            except (OSError, IndexError):
+                continue
+            if int(rest[1]) == ppid and word in cmd:
+                found.append((int(pid), rest[0], cmd))
+        return found
+
+    def make_big_video(self, d, name='big.mp4', seconds=4, with_audio=True):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        path = os.path.join(d, name)
+        args = [ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=duration=%d:size=1920x1080:rate=30' % seconds]
+        if with_audio:
+            args += ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=%d' % seconds, '-c:a', 'aac']
+        subprocess.run(args + ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', path], check=True, timeout=120)
+        return path
+
+    def test_a_big_video_is_decoded_at_the_size_of_the_window_until_it_is_zoomed(self):
+        d = self.video_dir()
+        self.make_big_video(d, with_audio=False)
+        p, win = self.start(d, os.path.join(d, 'big.mp4'), env={'MELLAGUI_AUDIO_PLAYER': 'none'})
+        self.assertTrue(self.wait_title('big.mp4 - Images'))
+        time.sleep(0.5)
+        ff = self.procs_of(p.pid, 'ffmpeg')
+        self.assertEqual(len(ff), 1, ff)
+        self.assertIn('scale=', ff[0][2], 'ffmpeg must shrink the pictures to what the window shows')
+        ctl.abs(900, 590)
+        ctl.tap(11)                                                               # 0: 100 % needs the real pixels
+        time.sleep(1.0)
+        ff = self.procs_of(p.pid, 'ffmpeg')
+        self.assertEqual(len(ff), 1, ff)
+        self.assertNotIn('scale=', ff[0][2], 'at 100 % the pictures are not shrunk')
+        ctl.tap(KEY_F)                                                            # fit again: shrunk again
+        time.sleep(1.2)
+        ff = self.procs_of(p.pid, 'ffmpeg')
+        self.assertEqual(len(ff), 1, ff)
+        self.assertIn('scale=', ff[0][2])
+
+    def test_a_video_with_sound_plays_it_pauses_it_and_mutes_it(self):
+        d = self.video_dir()
+        self.make_big_video(d, seconds=6)
+        got = os.path.join(d, 'pcm.raw')
+        player = os.path.join(d, 'fakeplayer')
+        with open(player, 'w') as f:                                              # a player that keeps what it is given
+            f.write('#!/usr/bin/env python3\nimport sys, time\nout = open("%s", "wb")\nwhile True:\n    b = sys.stdin.buffer.read(19200)\n    if not b:\n        break\n    out.write(b)\n    out.flush()\n    time.sleep(0.1)\n' % got)       # real time: 192000 bytes a second
+        os.chmod(player, 0o755)
+        p, win = self.start(d, os.path.join(d, 'big.mp4'), env={'MELLAGUI_AUDIO_PLAYER': player})
+        self.assertTrue(self.wait_title('big.mp4 - Images'))
+        time.sleep(1.0)
+        self.assertTrue(os.path.exists(got) and os.path.getsize(got) > 10000, 'no sound was sent to the player')
+        pl = self.procs_of(p.pid, 'fakeplayer')
+        self.assertEqual(len(pl), 1, pl)
+        ctl.abs(900, 590)
+        ctl.tap(KEY_SPACE)                                                        # pause: silence at once
+        time.sleep(0.4)
+        self.assertEqual(self.procs_of(p.pid, 'fakeplayer'), [])
+        ctl.tap(KEY_SPACE)                                                        # on again: the sound starts afresh where the picture is
+        time.sleep(0.6)
+        pl2 = self.procs_of(p.pid, 'fakeplayer')
+        self.assertEqual(len(pl2), 1, pl2)
+        ctl.tap(50)                                                               # M: sound off
+        time.sleep(0.4)
+        self.assertEqual(self.procs_of(p.pid, 'fakeplayer'), [])
+        self.assertEqual(self.procs_of(p.pid, 'ffmpeg') and len([x for x in self.procs_of(p.pid, 'ffmpeg') if '-vn' in x[2]]), 0)
+        ctl.tap(50)                                                               # M again: it starts where the picture is
+        time.sleep(0.6)
+        self.assertEqual(len(self.procs_of(p.pid, 'fakeplayer')), 1)
+        p.kill()
+        p.wait()
+        time.sleep(0.4)
+        left = []
+        for pid in os.listdir('/proc'):
+            try:
+                with open('/proc/%s/cmdline' % pid, 'rb') as f:
+                    if b'fakeplayer' in f.read():
+                        left.append(pid)
+            except OSError:
+                pass
+        self.assertEqual(left, [], 'the sound outlived the viewer')
+
+    def test_the_sound_starts_ahead_by_a_lead_that_the_keys_change_and_the_config_keeps(self):
+        d = self.video_dir()
+        self.make_big_video(d, seconds=8)
+        conf = os.path.join(d, 'conf')
+        os.makedirs(os.path.join(conf, 'mellagui'))
+        with open(os.path.join(conf, 'mellagui', 'viewer.conf'), 'w') as f:
+            f.write('audio-lead-ms = 1500\n')
+        player = os.path.join(d, 'fakeplayer')
+        with open(player, 'w') as f:
+            f.write('#!/usr/bin/env python3\nimport sys, time\nwhile sys.stdin.buffer.read(19200):\n    time.sleep(0.1)\n')
+        os.chmod(player, 0o755)
+        p, win = self.start(d, os.path.join(d, 'big.mp4'), env={'MELLAGUI_AUDIO_PLAYER': player, 'XDG_CONFIG_HOME': conf})
+        self.assertTrue(self.wait_title('big.mp4 - Images'))
+        time.sleep(0.8)
+        snd = [x for x in self.procs_of(p.pid, 'ffmpeg') if '-vn' in x[2]]
+        self.assertEqual(len(snd), 1, snd)
+        m = re.search(r'-ss (\d+)\.(\d+)', snd[0][2])
+        self.assertTrue(m and int(m.group(1)) == 1, 'the sound must start 1.5 s ahead of the picture: ' + snd[0][2])
+        ctl.abs(900, 590)
+        ctl.tap(27)                                                               # ]: the sound later, 50 ms
+        time.sleep(0.5)
+        with open(os.path.join(conf, 'mellagui', 'viewer.conf')) as f:
+            self.assertIn('audio-lead-ms = 1450', f.read())
+        ctl.tap(26)                                                               # [: earlier
+        time.sleep(0.5)
+        ctl.tap(26)
+        time.sleep(0.5)
+        with open(os.path.join(conf, 'mellagui', 'viewer.conf')) as f:
+            self.assertIn('audio-lead-ms = 1550', f.read())
+
+    def test_a_player_that_fails_hands_over_to_the_next_one_or_stays_silent(self):
+        d = self.video_dir()
+        self.make_big_video(d, seconds=3)
+        bad = os.path.join(d, 'badplayer')
+        with open(bad, 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')
+        os.chmod(bad, 0o755)
+        p, win = self.start(d, os.path.join(d, 'big.mp4'), env={'MELLAGUI_AUDIO_PLAYER': bad})
+        self.assertTrue(self.wait_title('big.mp4 - Images'))
+        time.sleep(1.5)
+        self.assertEqual(p.poll(), None, 'the viewer must not die because a player does')
+        ctl.tap(KEY_SPACE)
 
     def test_a_video_plays_pauses_and_seeks(self):
         d = self.video_dir()

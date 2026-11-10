@@ -19,6 +19,10 @@
  * files, else on the one under the cursor, copy and move go to the folder shown in the other pane (editable first, Tab completes names) and
  * never replace an existing file, delete asks first. They run in a thread: the window stays alive, the status line shows the progress and Esc
  * cancels.
+ * Network drives: the Network button / Ctrl+N shows "smb://" (the servers you connected to, the router when there is one, and
+ * "Connect to a server..."; Ctrl+K asks for a name, user@name or "name legacy"). A server's shares are folders, and everything works there as on
+ * a local disk (F2 / F5 / F6 / F7 / F8, a file opens as a copy) through smbclient: nothing is mounted, no root is needed. Servers are kept in
+ * network.conf (never the password); a login is asked for when the guest is refused. Delete in the list of servers forgets one.
  * Ctrl+H hidden files, Ctrl+R reread, Ctrl+T terminal here, Ctrl+L type a path, Shift+Up / Down scroll the preview, a letter jumps
  * to the next name starting with it, Esc clears the message. Mouse: click selects (and activates the pane), double click opens, wheel
  * scrolls the pane under the pointer, the round buttons at the top and bottom do what their names say.
@@ -43,6 +47,7 @@
 #include <unistd.h>
 
 #include "img.h"
+#include "smb.h"
 #include "metrics.h"
 #include "pathcomp.h"
 #include "theme.h"
@@ -60,6 +65,7 @@
 #define ROW_H 18
 #define TOOL_H 30
 #define HEAD_H 22
+#define NET_PREFIX "smb://"
 #define STATUS_H 20
 #define FKEY_H 30
 #define COL_BG (lm_theme.background)
@@ -123,7 +129,7 @@ struct preview {
     int sw, sh;
 };
 
-enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY };
+enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY, P_CONNECT, P_NETUSER, P_NETPASS };
 
 enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH, J_RESTORE };
 
@@ -171,6 +177,9 @@ struct app {
     enum prompt prompt;
     int menu_kind;                      /* the right-click menu that is showing: 0 none / the prompt's field, 1 a file's, 2 an empty place's */
     char pbuf[PATH_MAX];
+    char net_pending[PATH_MAX];         /* the network place that wants a login (P_NETUSER / P_NETPASS) ... */
+    char net_user[64];                  /* ... the user name typed so far ... */
+    int net_pane;                       /* ... and the pane that asked */
     struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu) */
     char msg[300];
     int64_t msg_until;
@@ -184,6 +193,10 @@ struct app {
     int64_t rep_next;
     int rep_rate, rep_delay;
 };
+
+static bool is_net(const char *path);
+static int net_list(struct pane *p, const char *dir, bool hidden, char *err, size_t errsz);
+static void net_join(const char *dir, const char *name, char *out, size_t n);
 
 static int64_t now_ms(void)
 {
@@ -242,6 +255,8 @@ static bool add_entry(struct pane *p, const char *name, bool dir, bool broken, b
 /* Reads `dir` into the list (hidden files only when `hidden`). 0, or -1 with the reason in err; the old list stays then. */
 static int list_dir(struct pane *p, const char *dir, bool hidden, char *err, size_t errsz)
 {
+    if (is_net(dir))
+        return net_list(p, dir, hidden, err, errsz);
     DIR *d = opendir(dir);
     if (!d) {
         snprintf(err, errsz, "cannot open %s: %s", dir, strerror(errno));
@@ -280,7 +295,7 @@ static int list_dir(struct pane *p, const char *dir, bool hidden, char *err, siz
 /* Row 0 is ".." (except in "/"), the rest are the entries. */
 static bool has_up(const struct pane *p)
 {
-    return strcmp(p->cwd, "/") != 0;
+    return strcmp(p->cwd, "/") != 0 && strcmp(p->cwd, NET_PREFIX) != 0;
 }
 
 static int rows(const struct pane *p)
@@ -348,6 +363,10 @@ static void normalize(const char *in, char *out, size_t outsz)
 static void join_path(const char *dir, const char *name, char *out, size_t outsz)
 {
     char raw[PATH_MAX * 2];
+    if (is_net(name) || (name[0] != '/' && is_net(dir))) {              /* a network place: no normalizing of "smb://" */
+        net_join(dir, name, out, outsz);
+        return;
+    }
     if (name[0] == '/')
         snprintf(raw, sizeof(raw), "%s", name);
     else
@@ -892,6 +911,668 @@ static int restore_item(const char *src, const char *dst, char *err, size_t errs
     return 0;
 }
 
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"            /* names are cut on purpose where a message does not fit */
+
+/* ---- network drives (smb://) ---------------------------------------------------------------------------------------------- */
+
+/* A network place is the path "smb://" (the servers), "smb://SERVER" (its shares), "smb://SERVER/SHARE/folder/...". Everything goes through
+ * smbclient (smb.c): nothing is mounted. The servers are in network.conf (host, user, legacy; never a password). */
+#define NET_MAX 16
+#define NET_ASK "Connect to a server..."          /* the first row of "smb://": the name has blanks, so no host can have it */
+#define NET_CACHE_MAX (64ll << 20)
+
+struct netconn {
+    struct smb_conn c;
+    bool saved;                         /* in network.conf */
+    bool keep;                          /* the user typed it or logged in: it is saved once it worked */
+};
+
+static struct netconn g_net[NET_MAX];
+static int g_nnet;
+static bool g_net_loaded;
+static char g_net_gateway[32];
+static bool g_net_need_login;           /* set by net_list when the server wants a user and password */
+static char g_net_login_dir[PATH_MAX];  /* ... and the place that was asked for */
+
+static bool is_net(const char *path)
+{
+    return !strncmp(path, NET_PREFIX, strlen(NET_PREFIX));
+}
+
+static bool net_conf_path(char *out, size_t n)
+{
+    const char *x = getenv("XDG_CONFIG_HOME"), *h = getenv("HOME");
+    if (x && *x)
+        snprintf(out, n, "%s/mellagui/network.conf", x);
+    else if (h && *h)
+        snprintf(out, n, "%s/.config/mellagui/network.conf", h);
+    else
+        return false;
+    return true;
+}
+
+static struct netconn *net_find(const char *name)
+{
+    for (int i = 0; i < g_nnet; i++)
+        if (!strcasecmp(g_net[i].c.name, name))
+            return &g_net[i];
+    return NULL;
+}
+
+static struct netconn *net_add(const char *host, const char *user, bool legacy)
+{
+    struct netconn *n = net_find(host);
+    if (!n) {
+        if (g_nnet >= NET_MAX)
+            return NULL;
+        n = &g_net[g_nnet++];
+        memset(n, 0, sizeof(*n));
+        snprintf(n->c.name, sizeof(n->c.name), "%s", host);
+        snprintf(n->c.host, sizeof(n->c.host), "%s", host);
+    }
+    if (user)
+        snprintf(n->c.user, sizeof(n->c.user), "%s", user);
+    n->c.legacy = legacy;
+    return n;
+}
+
+static void net_load(void)
+{
+    if (g_net_loaded)
+        return;
+    g_net_loaded = true;
+    char path[PATH_MAX];
+    if (net_conf_path(path, sizeof(path))) {
+        FILE *f = fopen(path, "r");
+        char line[400];
+        while (f && fgets(line, sizeof(line), f)) {
+            char host[128], user[64] = "", flag[16] = "";
+            line[strcspn(line, "\r\n")] = 0;
+            if (line[0] == '#' || sscanf(line, "%127s %63s %15s", host, user, flag) < 1)
+                continue;
+            struct netconn *n = net_add(host, !strcmp(user, "-") ? "" : user, !strcmp(flag, "legacy"));
+            if (n)
+                n->saved = true;
+        }
+        if (f)
+            fclose(f);
+    }
+    smb_default_gateway(g_net_gateway, sizeof(g_net_gateway));
+}
+
+static void net_save(void)
+{
+    char path[PATH_MAX], dir[PATH_MAX];
+    if (!net_conf_path(path, sizeof(path)))
+        return;
+    snprintf(dir, sizeof(dir), "%s", path);
+    *strrchr(dir, '/') = 0;
+    mkdir_p(dir, 0700);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    fchmod(fileno(f), 0600);
+    fprintf(f, "# MellaGUI file manager: network servers (host user [legacy]); no passwords are kept\n");
+    for (int i = 0; i < g_nnet; i++)
+        if (g_net[i].saved)
+            fprintf(f, "%s %s%s\n", g_net[i].c.host, g_net[i].c.user[0] ? g_net[i].c.user : "-", g_net[i].c.legacy ? " legacy" : "");
+    fclose(f);
+}
+
+static void net_forget(const char *name)
+{
+    for (int i = 0; i < g_nnet; i++)
+        if (!strcasecmp(g_net[i].c.name, name)) {
+            memmove(&g_net[i], &g_net[i + 1], (size_t)(g_nnet - i - 1) * sizeof(g_net[0]));
+            g_nnet--;
+            break;
+        }
+    net_save();
+}
+
+/* "smb://SERVER/SHARE/a/b" -> conn "SERVER", share "SHARE", dir "a/b". `level`: 0 servers, 1 shares, 2 inside a share. */
+struct netpath {
+    int level;
+    char conn[48], share[64], dir[PATH_MAX];
+};
+
+static bool net_parse(const char *path, struct netpath *np)
+{
+    memset(np, 0, sizeof(*np));
+    if (!is_net(path))
+        return false;
+    const char *s = path + strlen(NET_PREFIX);
+    size_t l = strcspn(s, "/");
+    if (!l) {
+        np->level = 0;
+        return true;
+    }
+    if (l >= sizeof(np->conn))
+        return false;
+    snprintf(np->conn, sizeof(np->conn), "%.*s", (int)l, s);
+    np->level = 1;
+    s += l + (s[l] ? 1 : 0);
+    l = strcspn(s, "/");
+    if (!l)
+        return true;
+    if (l >= sizeof(np->share))
+        return false;
+    snprintf(np->share, sizeof(np->share), "%.*s", (int)l, s);
+    np->level = 2;
+    s += l + (s[l] ? 1 : 0);
+    snprintf(np->dir, sizeof(np->dir), "%s", s);
+    size_t dl = strlen(np->dir);
+    while (dl && np->dir[dl - 1] == '/')
+        np->dir[--dl] = 0;
+    return true;
+}
+
+static void net_make(const struct netpath *np, char *out, size_t n)
+{
+    if (np->level == 0)
+        snprintf(out, n, NET_PREFIX);
+    else if (np->level == 1)
+        snprintf(out, n, NET_PREFIX "%s", np->conn);
+    else if (np->dir[0])
+        snprintf(out, n, NET_PREFIX "%s/%s/%s", np->conn, np->share, np->dir);
+    else
+        snprintf(out, n, NET_PREFIX "%s/%s", np->conn, np->share);
+}
+
+static void net_parent(const char *path, char *out, size_t n)
+{
+    struct netpath np;
+    if (!net_parse(path, &np) || np.level == 0) {
+        snprintf(out, n, NET_PREFIX);
+        return;
+    }
+    char *sl = strrchr(np.dir, '/');
+    if (np.level == 2 && np.dir[0]) {
+        if (sl)
+            *sl = 0;
+        else
+            np.dir[0] = 0;
+    } else {
+        np.level--;
+    }
+    net_make(&np, out, n);
+}
+
+/* `join_path` for network places: a name goes after a slash, ".." goes up, "smb://..." and absolute local paths replace everything. */
+static void net_join(const char *dir, const char *name, char *out, size_t n)
+{
+    if (!strcmp(name, ".."))
+        return net_parent(dir, out, n);
+    if (is_net(name)) {
+        struct netpath np;
+        if (net_parse(name, &np))
+            return net_make(&np, out, n);
+    }
+    if (!strcmp(dir, NET_PREFIX))
+        snprintf(out, n, NET_PREFIX "%s", name);
+    else
+        snprintf(out, n, "%s/%s", dir, name);
+}
+
+static bool net_poll_cancel(void *data)
+{
+    (void)data;
+    return !job_cancelled();
+}
+
+/* Progress of a transfer: a download is the size of the file being written, an upload is how far smbclient has read the local file (its
+ * position in /proc/PID/fdinfo). Called by smb.c about every 50 ms in the job's thread; the bytes seen so far are added to the job. */
+struct net_prog {
+    char path[PATH_MAX];                /* the file that grows (download) or is read (upload) */
+    bool upload;
+    long long seen;
+};
+
+static long long net_progress_now(const struct net_prog *np)
+{
+    if (!np->upload) {
+        struct stat st;
+        return stat(np->path, &st) == 0 ? (long long)st.st_size : 0;
+    }
+    pid_t pid = smb_child_pid();
+    if (pid <= 0)
+        return 0;
+    char dir[64], link[96], target[PATH_MAX];
+    snprintf(dir, sizeof(dir), "/proc/%d/fd", (int)pid);
+    DIR *d = opendir(dir);
+    long long pos = 0;
+    struct dirent *de;
+    while (d && (de = readdir(d))) {
+        snprintf(link, sizeof(link), "%s/%s", dir, de->d_name);
+        ssize_t l = readlink(link, target, sizeof(target) - 1);
+        if (l <= 0)
+            continue;
+        target[l] = 0;
+        if (strcmp(target, np->path) != 0)
+            continue;
+        snprintf(link, sizeof(link), "/proc/%d/fdinfo/%s", (int)pid, de->d_name);
+        FILE *f = fopen(link, "r");
+        char line[128];
+        while (f && fgets(line, sizeof(line), f))
+            if (!strncmp(line, "pos:", 4))
+                pos = atoll(line + 4);
+        if (f)
+            fclose(f);
+        break;
+    }
+    if (d)
+        closedir(d);
+    return pos;
+}
+
+static bool net_poll_progress(void *data)
+{
+    struct net_prog *np = data;
+    if (job_cancelled())
+        return false;
+    long long now = net_progress_now(np);
+    if (now > np->seen && tl_job) {
+        atomic_fetch_add(&tl_job->done, now - np->seen);
+        np->seen = now;
+    }
+    return true;
+}
+
+static const struct smb_conn *net_conn(const struct netpath *np, char *err, size_t errsz)
+{
+    net_load();
+    struct netconn *c = np->conn[0] ? net_find(np->conn) : NULL;
+    if (!c)
+        snprintf(err, errsz, "No server called %s", np->conn);
+    return c ? &c->c : NULL;
+}
+
+/* A failed call that means "log in": the user is asked. */
+static void net_note_error(const char *reason, const char *place)
+{
+    if (!strcmp(reason, "Wrong user name or password") || !strcmp(reason, "Access denied")) {
+        g_net_need_login = true;
+        snprintf(g_net_login_dir, sizeof(g_net_login_dir), "%s", place);
+    }
+}
+
+static bool net_conn_used(const char *name)
+{
+    struct netconn *c = net_find(name);
+    if (c && !c->saved && c->keep) {                                    /* a server the user typed or logged in to is kept */
+        c->saved = true;
+        net_save();
+    }
+    return c != NULL;
+}
+
+/* Lists a network place into `p` (same contract as list_dir: 0, or -1 with the reason in err). */
+static int net_list(struct pane *p, const char *dir, bool hidden, char *err, size_t errsz)
+{
+    net_load();
+    struct netpath np;
+    if (!net_parse(dir, &np)) {
+        snprintf(err, errsz, "bad network address %s", dir);
+        return -1;
+    }
+    struct pane tmp = { 0 };
+    if (np.level == 0) {
+        for (int i = 0; i < g_nnet; i++)
+            add_entry(&tmp, g_net[i].c.name, true, false, false, 0, 0);
+        if (g_net_gateway[0] && !net_find(g_net_gateway))
+            net_add(g_net_gateway, "", false), add_entry(&tmp, g_net_gateway, true, false, false, 0, 0);
+        qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
+        add_entry(&tmp, NET_ASK, false, false, false, 0, 0);
+        if (tmp.n > 1) {                                                /* the question goes first */
+            struct entry q = tmp.e[tmp.n - 1];
+            memmove(&tmp.e[1], &tmp.e[0], (size_t)(tmp.n - 1) * sizeof(tmp.e[0]));
+            tmp.e[0] = q;
+        }
+    } else {
+        const struct smb_conn *c = net_conn(&np, err, errsz);
+        if (!c)
+            return -1;
+        char why[SMB_ERR];
+        if (np.level == 1) {
+            char (*sh)[64] = NULL;
+            int n = 0;
+            if (smb_shares(c, &sh, &n, why, sizeof(why), NULL, NULL) < 0) {
+                snprintf(err, errsz, "%s: %s", np.conn, why);
+                net_note_error(why, dir);
+                return -1;
+            }
+            for (int i = 0; i < n; i++)
+                add_entry(&tmp, sh[i], true, false, false, 0, 0);
+            free(sh);
+        } else {
+            struct smb_item *it = NULL;
+            int n = 0;
+            if (smb_ls(c, np.share, np.dir, &it, &n, why, sizeof(why), NULL, NULL) < 0) {
+                snprintf(err, errsz, "%s: %s", dir, why);
+                net_note_error(why, dir);
+                return -1;
+            }
+            for (int i = 0; i < n; i++)
+                if (hidden || it[i].name[0] != '.')
+                    add_entry(&tmp, it[i].name, it[i].dir, false, false, (off_t)it[i].size, it[i].mtime);
+            free(it);
+        }
+        net_conn_used(np.conn);
+        qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
+    }
+    entries_free(p);
+    free(p->e);
+    p->e = tmp.e;
+    p->n = tmp.n;
+    p->cap = tmp.cap;
+    return 0;
+}
+
+/* Is there something called like this, and is it a folder? 0, or -1 with the reason. Servers, shares and the top of a share count as folders. */
+static int net_stat(const char *path, bool *isdir, long long *size, char *err, size_t errsz)
+{
+    struct netpath np;
+    if (!net_parse(path, &np)) {
+        snprintf(err, errsz, "bad network address");
+        return -1;
+    }
+    *size = 0;
+    if (np.level < 2 || !np.dir[0]) {
+        *isdir = true;
+        return 0;
+    }
+    const struct smb_conn *c = net_conn(&np, err, errsz);
+    if (!c)
+        return -1;
+    char parent[PATH_MAX], base[NAME_MAX + 1], why[SMB_ERR];
+    snprintf(parent, sizeof(parent), "%s", np.dir);
+    char *sl = strrchr(parent, '/');
+    snprintf(base, sizeof(base), "%s", sl ? sl + 1 : parent);
+    if (sl)
+        *sl = 0;
+    else
+        parent[0] = 0;
+    struct smb_item *it = NULL;
+    int n = 0;
+    if (smb_ls(c, np.share, parent, &it, &n, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+        snprintf(err, errsz, "%s", why);
+        return -1;
+    }
+    int rc = -1;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(it[i].name, base)) {
+            *isdir = it[i].dir;
+            *size = it[i].size;
+            rc = 0;
+        }
+    free(it);
+    if (rc < 0)
+        snprintf(err, errsz, "%s does not exist", base);
+    return rc;
+}
+
+/* The same for any path: a local one (stat) or a network one. */
+static int stat_any(const char *path, bool *isdir, long long *size, char *err, size_t errsz)
+{
+    if (is_net(path))
+        return net_stat(path, isdir, size, err, errsz);
+    struct stat st;
+    if (stat(path, &st) < 0) {
+        snprintf(err, errsz, "%s", strerror(errno));
+        return -1;
+    }
+    *isdir = S_ISDIR(st.st_mode);
+    *size = (long long)st.st_size;
+    return 0;
+}
+
+static bool exists_net_or_local(const char *path)
+{
+    if (!is_net(path))
+        return exists_any(path);
+    bool d;
+    long long sz;
+    char e[200];
+    return net_stat(path, &d, &sz, e, sizeof(e)) == 0;
+}
+
+/* ---- copying to and from a network place (in a job's thread) ----- */
+
+static int net_get_node(const struct smb_conn *c, const struct netpath *np, const char *dst, bool isdir, int depth, char *err, size_t errsz)
+{
+    char why[SMB_ERR];
+    if (depth > MAX_DEPTH || job_cancelled()) {
+        snprintf(err, errsz, "cancelled");
+        return -1;
+    }
+    if (!isdir) {
+        char part[PATH_MAX + 8];
+        snprintf(part, sizeof(part), "%s.part", dst);
+        char rp[PATH_MAX];
+        snprintf(rp, sizeof(rp), "%s", np->dir);
+        struct net_prog pr = { .upload = false };
+        snprintf(pr.path, sizeof(pr.path), "%s", part);
+        if (smb_get(c, np->share, rp, part, why, sizeof(why), net_poll_progress, &pr) < 0) {
+            unlink(part);
+            snprintf(err, errsz, "%s: %s", np->dir, why);
+            return -1;
+        }
+        struct stat st;
+        if (stat(part, &st) == 0 && tl_job && (long long)st.st_size > pr.seen)
+            atomic_fetch_add(&tl_job->done, (long long)st.st_size - pr.seen);
+        if (rename(part, dst) < 0) {
+            snprintf(err, errsz, "cannot write %s: %s", dst, strerror(errno));
+            unlink(part);
+            return -1;
+        }
+        return 0;
+    }
+    if (mkdir(dst, 0755) < 0 && errno != EEXIST) {
+        snprintf(err, errsz, "cannot create %s: %s", dst, strerror(errno));
+        return -1;
+    }
+    struct smb_item *it = NULL;
+    int n = 0;
+    if (smb_ls(c, np->share, np->dir, &it, &n, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+        snprintf(err, errsz, "%s: %s", np->dir, why);
+        return -1;
+    }
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i++) {
+        struct netpath sub = *np;
+        char d2[PATH_MAX];
+        snprintf(sub.dir, sizeof(sub.dir), "%s%s%s", np->dir, np->dir[0] ? "/" : "", it[i].name);
+        if (snprintf(d2, sizeof(d2), "%s/%s", dst, it[i].name) >= (int)sizeof(d2) || !strcmp(it[i].name, ".."))
+            continue;
+        rc = net_get_node(c, &sub, d2, it[i].dir, depth + 1, err, errsz);
+    }
+    free(it);
+    return rc;
+}
+
+static int net_put_node(const struct smb_conn *c, const struct netpath *np, const char *src, int depth, char *err, size_t errsz)
+{
+    char why[SMB_ERR];
+    struct stat st;
+    if (depth > MAX_DEPTH || job_cancelled()) {
+        snprintf(err, errsz, "cancelled");
+        return -1;
+    }
+    if (lstat(src, &st) < 0) {
+        snprintf(err, errsz, "%s: %s", src, strerror(errno));
+        return -1;
+    }
+    if (S_ISREG(st.st_mode)) {
+        struct net_prog pr = { .upload = true };
+        if (!realpath(src, pr.path))
+            snprintf(pr.path, sizeof(pr.path), "%s", src);
+        if (smb_put(c, np->share, src, np->dir, why, sizeof(why), net_poll_progress, &pr) < 0) {
+            snprintf(err, errsz, "%s: %s", np->dir, why);
+            return -1;
+        }
+        if (tl_job && (long long)st.st_size > pr.seen)
+            atomic_fetch_add(&tl_job->done, (long long)st.st_size - pr.seen);
+        return 0;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        snprintf(err, errsz, "%s is not a plain file or folder: left out", src);
+        return -1;
+    }
+    if (smb_mkdir(c, np->share, np->dir, why, sizeof(why), net_poll_cancel, NULL) < 0 && strcmp(why, "It exists already") != 0) {
+        snprintf(err, errsz, "%s: %s", np->dir, why);
+        return -1;
+    }
+    DIR *d = opendir(src);
+    if (!d) {
+        snprintf(err, errsz, "cannot read %s: %s", src, strerror(errno));
+        return -1;
+    }
+    int rc = 0;
+    struct dirent *de;
+    while (rc == 0 && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        struct netpath sub = *np;
+        char s2[PATH_MAX];
+        snprintf(sub.dir, sizeof(sub.dir), "%s/%s", np->dir, de->d_name);
+        if (snprintf(s2, sizeof(s2), "%s/%s", src, de->d_name) >= (int)sizeof(s2))
+            continue;
+        rc = net_put_node(c, &sub, s2, depth + 1, err, errsz);
+    }
+    closedir(d);
+    return rc;
+}
+
+static int net_remove_node(const char *path, char *err, size_t errsz)
+{
+    struct netpath np;
+    char why[SMB_ERR];
+    if (!net_parse(path, &np) || np.level < 2 || !np.dir[0]) {
+        snprintf(err, errsz, "Servers and shares cannot be deleted here");
+        return -1;
+    }
+    const struct smb_conn *c = net_conn(&np, err, errsz);
+    if (!c)
+        return -1;
+    bool isdir;
+    long long sz;
+    if (net_stat(path, &isdir, &sz, err, errsz) < 0)
+        return -1;
+    if (smb_del(c, np.share, np.dir, isdir, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+        snprintf(err, errsz, "%s: %s", path, why);
+        return -1;
+    }
+    return 0;
+}
+
+/* Copies src to dst when at least one of them is a network place. A move is the copy and then removing the source. */
+static int net_copy_node(const char *src, const char *dst, bool move, char *err, size_t errsz)
+{
+    struct netpath s, d;
+    bool sn = is_net(src), dn = is_net(dst);
+    if (sn && dn) {
+        if (net_parse(src, &s) && net_parse(dst, &d) && move && s.level == 2 && d.level == 2 && !strcmp(s.conn, d.conn) && !strcmp(s.share, d.share)) {
+            const struct smb_conn *c = net_conn(&s, err, errsz);          /* inside one share a move is a rename */
+            char why[SMB_ERR];
+            if (!c)
+                return -1;
+            if (smb_rename(c, s.share, s.dir, d.dir, why, sizeof(why), net_poll_cancel, NULL) < 0) {
+                snprintf(err, errsz, "%s: %s", src, why);
+                return -1;
+            }
+            return 0;
+        }
+        snprintf(err, errsz, "Copying from one network place to another is not possible yet: copy to this computer first");
+        return -1;
+    }
+    int rc;
+    if (sn) {
+        bool isdir;
+        long long sz;
+        const struct smb_conn *c;
+        if (!net_parse(src, &s) || s.level < 2 || !s.dir[0]) {
+            snprintf(err, errsz, "Only files and folders inside a share can be copied");
+            return -1;
+        }
+        if (!(c = net_conn(&s, err, errsz)) || net_stat(src, &isdir, &sz, err, errsz) < 0)
+            return -1;
+        rc = net_get_node(c, &s, dst, isdir, 0, err, errsz);
+    } else {
+        const struct smb_conn *c;
+        if (!net_parse(dst, &d) || d.level < 2 || !d.dir[0]) {
+            snprintf(err, errsz, "Files go into a folder of a share, not into a server");
+            return -1;
+        }
+        if (!(c = net_conn(&d, err, errsz)))
+            return -1;
+        rc = net_put_node(c, &d, src, 0, err, errsz);
+    }
+    if (rc == 0 && move) {
+        if (sn)
+            rc = net_remove_node(src, err, errsz);
+        else
+            rc = remove_tree(src, 0, err, errsz);
+    }
+    return rc;
+}
+
+/* Opening a file: a copy goes to the cache folder and is opened from there (edits are not sent back). */
+static bool net_poll_slow(void *data)
+{
+    return now_ms() - *(int64_t *)data < 60000;
+}
+
+static bool net_fetch(const char *path, char *local, size_t lsz, char *err, size_t errsz)
+{
+    struct netpath np;
+    bool isdir;
+    long long size;
+    if (net_stat(path, &isdir, &size, err, errsz) < 0)
+        return false;
+    if (isdir || !net_parse(path, &np))
+        return false;
+    if (size > NET_CACHE_MAX) {
+        snprintf(err, errsz, "%s is too big to open from the network (%lld MB): copy it with F5", strrchr(path, '/') + 1, size >> 20);
+        return false;
+    }
+    const struct smb_conn *c = net_conn(&np, err, errsz);
+    if (!c)
+        return false;
+    const char *x = getenv("XDG_CACHE_HOME"), *h = getenv("HOME");
+    char dir[PATH_MAX];
+    if (x && *x)
+        snprintf(dir, sizeof(dir), "%s/mellagui/network/%s/%s", x, np.conn, np.share);
+    else if (h && *h)
+        snprintf(dir, sizeof(dir), "%s/.cache/mellagui/network/%s/%s", h, np.conn, np.share);
+    else {
+        snprintf(err, errsz, "There is no place for a copy (HOME is not set)");
+        return false;
+    }
+    char sub[PATH_MAX];
+    snprintf(sub, sizeof(sub), "%s", np.dir);
+    char *sl = strrchr(sub, '/');
+    if (sl) {
+        *sl = 0;
+        size_t dl = strlen(dir);
+        snprintf(dir + dl, sizeof(dir) - dl, "/%s", sub);
+    }
+    mkdir_p(dir, 0700);
+    snprintf(local, lsz, "%s/%s", dir, strrchr(np.dir, '/') ? strrchr(np.dir, '/') + 1 : np.dir);
+    unlink(local);
+    char why[SMB_ERR];
+    int64_t t0 = now_ms();
+    if (smb_get(c, np.share, np.dir, local, why, sizeof(why), net_poll_slow, &t0) < 0) {
+        snprintf(err, errsz, "%s", why);
+        return false;
+    }
+    chmod(local, 0600);
+    return true;
+}
+
+#pragma GCC diagnostic pop
+
 /* ---- running a job -------------------------------------------------------------------------------------------------------- */
 
 /* The number of units (bytes, or files and folders when `nodes`) below `path`. */
@@ -934,7 +1615,14 @@ static void job_execute(struct job *j)
     long long total = 0;
     long long *sizes = calloc((size_t)LM_MAX(j->n, 1), sizeof(long long));
     for (int i = 0; i < j->n && !job_cancelled(); i++) {
-        sizes[i] = scan_units(j->items[i].src, nodes, 0);
+        if (is_net(j->items[i].src)) {                                   /* a network file: its size is one question to the server */
+            bool d;
+            long long sz;
+            char e[200];
+            sizes[i] = nodes ? 1 : (net_stat(j->items[i].src, &d, &sz, e, sizeof(e)) == 0 && !d ? sz : 0);
+        } else {
+            sizes[i] = scan_units(j->items[i].src, nodes, 0);
+        }
         total += sizes[i];
     }
     atomic_store(&j->total, total);
@@ -948,11 +1636,11 @@ static void job_execute(struct job *j)
         long long before = atomic_load(&j->done);
         int rc;
         switch (j->kind) {
-        case J_COPY: rc = copy_node(src, dst, 0, err, sizeof(err)); break;
-        case J_MOVE: rc = move_node(src, dst, err, sizeof(err)); break;
+        case J_COPY: rc = is_net(src) || is_net(dst) ? net_copy_node(src, dst, false, err, sizeof(err)) : copy_node(src, dst, 0, err, sizeof(err)); break;
+        case J_MOVE: rc = is_net(src) || is_net(dst) ? net_copy_node(src, dst, true, err, sizeof(err)) : move_node(src, dst, err, sizeof(err)); break;
         case J_TRASH: rc = trash_item(j->trash, src, err, sizeof(err)); break;
         case J_RESTORE: rc = restore_item(src, dst, err, sizeof(err)); break;
-        default: rc = remove_tree(src, 0, err, sizeof(err)); break;
+        default: rc = is_net(src) ? net_remove_node(src, err, sizeof(err)) : remove_tree(src, 0, err, sizeof(err)); break;
         }
         if (rc < 0) {
             j->failed++;
@@ -1110,6 +1798,11 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
     snprintf(pv->title, sizeof(pv->title), "%s", base ? base + 1 : path);
     int cap = 0;
     struct stat st;
+    if (is_net(path)) {                                                  /* nothing is read from the network just for a look */
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "No preview of a network place: copy the file first (F5)");
+        return;
+    }
     if (stat(path, &st) < 0) {
         pv->kind = PV_ERROR;
         pv_linef(pv, &cap, "%s", strerror(errno));
@@ -1238,16 +1931,29 @@ static void set_title(struct app *a)
     const char *dir = cur(a)->cwd;
     const char *base = strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir;
     char t[PATH_MAX + 32];
-    snprintf(t, sizeof(t), "%s - %s", *base ? base : "/", a->choose_key ? "Choose a picture" : "Files");
+    snprintf(t, sizeof(t), "%s - %s", !strcmp(dir, NET_PREFIX) ? "Network" : *base ? base : "/", a->choose_key ? "Choose a picture" : "Files");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
+
+static void prompt_start(struct app *a, enum prompt kind, const char *initial);
+static void go_network(struct app *a);
 
 /* Shows `dir` (an absolute, normalized path) in pane p, selecting the row called `select` when there is one, else the first entry. */
 static bool go_to(struct app *a, struct pane *p, const char *dir, const char *select)
 {
     char err[PATH_MAX + 80];
+    g_net_need_login = false;
     if (list_dir(p, dir, a->show_hidden, err, sizeof(err)) < 0) {
         msg(a, "%s", err);
+        if (g_net_need_login) {                                         /* the server wants a user name and a password */
+            struct netpath np;
+            net_parse(g_net_login_dir, &np);
+            struct netconn *c = net_find(np.conn);
+            g_net_need_login = false;
+            snprintf(a->net_pending, sizeof(a->net_pending), "%s", g_net_login_dir);
+            a->net_pane = (int)(p - a->pane);
+            prompt_start(a, P_NETUSER, c ? c->c.user : "");
+        }
         return false;
     }
     snprintf(p->cwd, sizeof(p->cwd), "%s", dir);
@@ -1343,9 +2049,38 @@ static void choose_path(struct app *a, const char *path)
     a->win.running = false;
 }
 
+/* Where a started program runs: the folder of the pane, or the home folder when that is a network place. */
+static const char *workdir(const struct app *a)
+{
+    const char *c = a->pane[a->act].cwd;
+    if (!is_net(c))
+        return c;
+    const char *h = getenv("HOME");
+    return h && *h ? h : "/";
+}
+
 static void open_path(struct app *a, const char *path)
 {
     struct stat st;
+    if (is_net(path)) {
+        bool isdir;
+        long long size;
+        char err[300], local[PATH_MAX];
+        if (stat_any(path, &isdir, &size, err, sizeof(err)) < 0) {
+            msg(a, "%s", err);
+        } else if (isdir) {
+            go_to(a, cur(a), path, NULL);
+        } else if (a->choose_key) {
+            msg(a, "Choose a picture from this computer");
+        } else if (net_fetch(path, local, sizeof(local), err, sizeof(err))) {
+            open_path(a, local);
+            if (a->msg[0] == 0)
+                msg(a, "Opened a copy of %s (changes are not sent back)", strrchr(path, '/') + 1);
+        } else {
+            msg(a, "%s", err);
+        }
+        return;
+    }
     if (stat(path, &st) < 0) {
         msg(a, "%s: %s", path, strerror(errno));
         return;
@@ -1365,18 +2100,18 @@ static void open_path(struct app *a, const char *path)
     switch (classify(path)) {
     case K_IMAGE:
     case K_VIDEO:
-        if (!launch("mellagui-view", path, cur(a)->cwd, err, sizeof(err)))
+        if (!launch("mellagui-view", path, workdir(a), err, sizeof(err)))
             msg(a, "%s", err);
         break;
     case K_PROGRAM: {
         char full[PATH_MAX];
         join_path(cur(a)->cwd, path, full, sizeof(full));
-        if (!launch(full, NULL, cur(a)->cwd, err, sizeof(err)))
+        if (!launch(full, NULL, workdir(a), err, sizeof(err)))
             msg(a, "%s", err);
         break;
     }
     case K_TEXT:
-        if (!launch("mellagui-edit", path, cur(a)->cwd, err, sizeof(err)))
+        if (!launch("mellagui-edit", path, workdir(a), err, sizeof(err)))
             msg(a, "%s", err);
         break;
     case K_BINARY: msg(a, "%s looks like a binary file: not opened (F3 shows it)", strrchr(path, '/') + 1); break;
@@ -1394,6 +2129,10 @@ static void open_selected(struct app *a)
     const struct entry *e = row_entry(p, p->sel);
     if (!e)
         return;
+    if (!strcmp(p->cwd, NET_PREFIX) && !strcmp(e->name, NET_ASK)) {
+        prompt_start(a, P_CONNECT, "");
+        return;
+    }
     char path[PATH_MAX];
     join_path(p->cwd, e->name, path, sizeof(path));
     if (e->broken) {
@@ -1418,6 +2157,10 @@ static void select_row(struct app *a, int row)
 static void start_terminal(struct app *a)
 {
     char err[PATH_MAX + 80];
+    if (is_net(cur(a)->cwd)) {
+        msg(a, "There is no terminal on a network drive");
+        return;
+    }
     if (!launch("mellagui-term", NULL, cur(a)->cwd, err, sizeof(err)))
         msg(a, "%s", err);
 }
@@ -1585,8 +2328,13 @@ static void do_copy_move(struct app *a, const char *where, bool move)
     char t0[PATH_MAX], target[PATH_MAX];
     expand_home(where, t0, sizeof(t0));
     join_path(p->cwd, t0, target, sizeof(target));
-    struct stat st;
-    bool into = stat(target, &st) == 0 && S_ISDIR(st.st_mode);
+    bool into = false;
+    {
+        bool isdir;
+        long long sz;
+        char e[200];
+        into = stat_any(target, &isdir, &sz, e, sizeof(e)) == 0 && isdir;
+    }
     if (!into && n > 1) {
         msg(a, "%s is not a folder: several files can only go into a folder", target);
         free_names(names, n);
@@ -1612,7 +2360,7 @@ static void do_copy_move(struct app *a, const char *where, bool move)
             snprintf(err, sizeof(err), "%s is already there", names[i]);
         else if (path_inside(it->dst, it->src))
             snprintf(err, sizeof(err), "cannot put %s into itself", names[i]);
-        else if (exists_any(it->dst))
+        else if (exists_net_or_local(it->dst))
             snprintf(err, sizeof(err), "%s already exists: not replaced", it->dst);
         else {
             j->n++;
@@ -1641,7 +2389,7 @@ static void do_delete(struct app *a, bool hard)
     char **names;
     int n = op_targets(a, &names);
     struct pane *p = cur(a);
-    hard = hard || in_trash(p->cwd);
+    hard = hard || in_trash(p->cwd) || is_net(p->cwd);
     struct job *j = job_new(hard ? J_DELETE : J_TRASH, n);
     if (!j) {
         free_names(names, n);
@@ -1796,10 +2544,77 @@ static void go_trash(struct app *a)
     go_to(a, cur(a), t, NULL);
 }
 
+/* The server and share of the pane's network place for an operation in it (NULL with a message when it cannot be one). */
+static const struct smb_conn *net_pane_conn(struct app *a, struct netpath *np)
+{
+    char err[200];
+    if (!net_parse(cur(a)->cwd, np) || np->level < 2) {
+        msg(a, "This works inside a share, not in the list of servers or shares");
+        return NULL;
+    }
+    const struct smb_conn *c = net_conn(np, err, sizeof(err));
+    if (!c)
+        msg(a, "%s", err);
+    return c;
+}
+
+static void net_join_dir(const struct netpath *np, const char *name, char *out, size_t n)
+{
+    int w = snprintf(out, n, "%.2000s%s%.1000s", np->dir, np->dir[0] ? "/" : "", name);
+    (void)w;
+}
+
+static void do_net_mkdir(struct app *a, const char *name)
+{
+    struct netpath np;
+    const struct smb_conn *c = net_pane_conn(a, &np);
+    char rp[PATH_MAX], why[SMB_ERR];
+    if (!c)
+        return;
+    if (strchr(name, '/')) {
+        msg(a, "A name has no slash here");
+        return;
+    }
+    net_join_dir(&np, name, rp, sizeof(rp));
+    if (smb_mkdir(c, np.share, rp, why, sizeof(why), NULL, NULL) < 0) {
+        msg(a, "cannot create %s: %s", name, why);
+        return;
+    }
+    reread(a);
+    for (int r = 0; r < rows(cur(a)); r++)
+        if (!strcmp(row_name(cur(a), r), name))
+            select_row(a, r);
+    msg(a, "Created %s", name);
+}
+
+static void do_net_rename(struct app *a, const char *old, const char *new_name)
+{
+    struct netpath np;
+    const struct smb_conn *c = net_pane_conn(a, &np);
+    char from[PATH_MAX], to[PATH_MAX], why[SMB_ERR];
+    if (!c)
+        return;
+    net_join_dir(&np, old, from, sizeof(from));
+    net_join_dir(&np, new_name, to, sizeof(to));
+    if (smb_rename(c, np.share, from, to, why, sizeof(why), NULL, NULL) < 0) {
+        msg(a, "cannot rename %s: %s", old, why);
+        return;
+    }
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", cur(a)->cwd);
+    reread_pane(a, other(a));
+    go_to(a, cur(a), dir, new_name);
+    msg(a, "Renamed to %s", new_name);
+}
+
 static void do_mkdir(struct app *a, const char *name)
 {
     struct pane *p = cur(a);
     char full[PATH_MAX], t0[PATH_MAX];
+    if (is_net(p->cwd)) {
+        do_net_mkdir(a, name);
+        return;
+    }
     expand_home(name, t0, sizeof(t0));
     join_path(p->cwd, t0, full, sizeof(full));
     if (exists_any(full)) {
@@ -1841,6 +2656,11 @@ static void do_rename(struct app *a, const char *new_name)
         return;
     if (strchr(new_name, '/')) {
         msg(a, "A name has no slash: use F6 to move a file somewhere else");
+        return;
+    }
+    if (is_net(p->cwd)) {
+        if (strcmp(e->name, new_name) != 0)
+            do_net_rename(a, e->name, new_name);
         return;
     }
     char src[PATH_MAX], dst[PATH_MAX];
@@ -1885,7 +2705,7 @@ static void cmd_copy_move(struct app *a, bool move)
         return;
     }
     char init[PATH_MAX + 2];
-    snprintf(init, sizeof(init), "%s%s", other(a)->cwd, strcmp(other(a)->cwd, "/") ? "/" : "");
+    snprintf(init, sizeof(init), "%s%s", other(a)->cwd, other(a)->cwd[strlen(other(a)->cwd) - 1] != '/' ? "/" : "");
     prompt_start(a, move ? P_MOVE : P_COPY, init);
 }
 
@@ -1893,6 +2713,26 @@ static void cmd_delete(struct app *a, bool hard)
 {
     if (job_busy(a))
         return;
+    if (!strcmp(cur(a)->cwd, NET_PREFIX)) {                             /* in the list of servers a delete forgets one */
+        const struct entry *e = row_entry(cur(a), cur(a)->sel);
+        if (!e || !strcmp(e->name, NET_ASK)) {
+            msg(a, "Select a server to remove it from the list");
+            return;
+        }
+        char nm[64];
+        snprintf(nm, sizeof(nm), "%s", e->name);
+        net_forget(nm);
+        reread(a);
+        msg(a, "%s is not in the list any more", nm);
+        return;
+    }
+    if (is_net(cur(a)->cwd)) {
+        struct netpath np;
+        if (net_parse(cur(a)->cwd, &np) && np.level < 2) {
+            msg(a, "Shares cannot be deleted here");
+            return;
+        }
+    }
     char **names;
     int n = op_targets(a, &names);
     free_names(names, n);
@@ -1900,7 +2740,7 @@ static void cmd_delete(struct app *a, bool hard)
         msg(a, "Nothing to delete");
         return;
     }
-    prompt_start(a, hard || in_trash(cur(a)->cwd) ? P_DELETE_HARD : P_DELETE, "");
+    prompt_start(a, hard || in_trash(cur(a)->cwd) || is_net(cur(a)->cwd) ? P_DELETE_HARD : P_DELETE, "");
 }
 
 static void cmd_mkdir(struct app *a)
@@ -1932,11 +2772,20 @@ static void cmd_edit(struct app *a)
     }
     char path[PATH_MAX], err[PATH_MAX + 80];
     join_path(p->cwd, e->name, path, sizeof(path));
+    if (is_net(path)) {                                                 /* edit a copy of it */
+        char local[PATH_MAX];
+        if (!net_fetch(path, local, sizeof(local), err, sizeof(err))) {
+            msg(a, "%s", err);
+            return;
+        }
+        snprintf(path, sizeof(path), "%s", local);
+        msg(a, "Editing a copy of %s: it is not sent back, copy it over with F5", e->name);
+    }
     if (classify(path) != K_TEXT) {
         msg(a, "%s is not a text file (Enter opens pictures)", e->name);
         return;
     }
-    if (!launch("mellagui-edit", path, p->cwd, err, sizeof(err)))
+    if (!launch("mellagui-edit", path, workdir(a), err, sizeof(err)))
         msg(a, "%s", err);
 }
 
@@ -1948,7 +2797,7 @@ struct rbtn {
     int x, w;
 };
 
-enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, B_EMPTY, N_TOOL };
+enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, B_EMPTY, B_NET, N_TOOL };
 
 /* The buttons that belong to the two-pane manager (the picture chooser has neither). */
 static bool tool_visible(const struct app *a, int i)
@@ -1957,22 +2806,22 @@ static bool tool_visible(const struct app *a, int i)
         return a->dual && in_trash_files(a->pane[a->act].cwd);
     if (i == B_EMPTY)                                                   /* only while looking at the trash */
         return a->dual && in_trash(a->pane[a->act].cwd);
-    return a->dual || (i != B_PREVIEW && i != B_TRASH);
+    return a->dual || (i != B_PREVIEW && i != B_TRASH && i != B_NET);
 }
 enum { F_HELP, F_RENAME, F_VIEW, F_EDIT, F_COPY, F_MOVE, F_MKDIR, F_DELETE, F_TERM, F_QUIT, N_FKEY };
 
 static void toolbar(const struct app *a, struct rbtn *b)
 {
-    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview", "Trash", "Restore", "Empty" };
-    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f, 0x8a3434 };
-    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50, 0xd65f5f, 0x98b84a, 0xad4a4a };
+    static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview", "Trash", "Restore", "Empty", "Network" };
+    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f, 0x8a3434, 0x2f7f8f };
+    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50, 0xd65f5f, 0x98b84a, 0xad4a4a, 0x45a0b2 };
     int x = 8;
     for (int i = 0; i < N_TOOL; i++) {
         b[i].label = labels[i];
         b[i].base = base[i];
         b[i].hover = hover[i];
         bool on = (i == B_HIDDEN && a->show_hidden) || (i == B_PREVIEW && a->preview) ||
-                  (i == B_TRASH && a->dual && in_trash(a->pane[a->act].cwd));
+                  (i == B_TRASH && a->dual && in_trash(a->pane[a->act].cwd)) || (i == B_NET && is_net(a->pane[a->act].cwd));
         if (on) {                                                       /* a switch that is on is lighter */
             b[i].base = hover[i];
             b[i].hover = lm_mix_rgb(hover[i], 0xffffff, 0.25);
@@ -2032,6 +2881,7 @@ static void press_tool(struct app *a, int i)
     case B_TRASH: go_trash(a); break;
     case B_RESTORE: do_restore(a); break;
     case B_EMPTY: cmd_empty_trash(a); break;
+    case B_NET: go_network(a); break;
     }
 }
 
@@ -2070,6 +2920,44 @@ static void jump_to_letter(struct app *a, char ch)
     }
 }
 
+/* "host", "user@host", "host legacy": adds the server and goes in. */
+static void net_connect(struct app *a, const char *text)
+{
+    net_load();
+    char host[128] = "", user[64] = "", flag[16] = "";
+    if (sscanf(text, "%127s %15s", host, flag) < 1)
+        return;
+    bool legacy = !strcmp(flag, "legacy");
+    char *at = strchr(host, '@');
+    if (at) {
+        *at = 0;
+        snprintf(user, sizeof(user), "%s", host);
+        memmove(host, at + 1, strlen(at + 1) + 1);
+    }
+    if (!host[0] || strchr(host, '/') || strchr(host, '\\') || !smb_name_ok(host)) {
+        msg(a, "That is not a server name");
+        return;
+    }
+    struct netconn *c = net_add(host, user, legacy);
+    if (!c) {
+        msg(a, "Too many servers: remove one first (Delete in the list of servers)");
+        return;
+    }
+    c->keep = true;
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), NET_PREFIX "%s", c->c.name);
+    go_to(a, cur(a), dir, NULL);
+}
+
+static void go_network(struct app *a)
+{
+    if (!smb_available()) {
+        msg(a, "Network drives need smbclient (package smbclient or samba-client)");
+        return;
+    }
+    go_to(a, cur(a), NET_PREFIX, NULL);
+}
+
 static void prompt_accept(struct app *a)
 {
     enum prompt kind = a->prompt;
@@ -2085,6 +2973,24 @@ static void prompt_accept(struct app *a)
     case P_MOVE: if (text[0]) do_copy_move(a, text, true); return;
     case P_MKDIR: if (text[0]) do_mkdir(a, text); return;
     case P_RENAME: do_rename(a, text); return;
+    case P_CONNECT: if (text[0]) net_connect(a, text); return;
+    case P_NETUSER:
+        snprintf(a->net_user, sizeof(a->net_user), "%.63s", text);
+        prompt_start(a, P_NETPASS, "");
+        return;
+    case P_NETPASS: {
+        struct netpath np;
+        struct netconn *c = net_parse(a->net_pending, &np) ? net_find(np.conn) : NULL;
+        if (c) {
+            snprintf(c->c.user, sizeof(c->c.user), "%s", a->net_user);
+            snprintf(c->c.pass, sizeof(c->c.pass), "%.127s", text);
+            c->keep = true;
+            go_to(a, &a->pane[a->net_pane], a->net_pending, NULL);
+        }
+        explicit_bzero(text, sizeof(text));
+        explicit_bzero(a->pbuf, sizeof(a->pbuf));
+        return;
+    }
     default: break;
     }
     if (!text[0])
@@ -2093,12 +2999,14 @@ static void prompt_accept(struct app *a)
     expand_home(text, t2, sizeof(t2));
     struct pane *p = cur(a);
     join_path(p->cwd, t2, full, sizeof(full));
-    struct stat st;
-    if (stat(full, &st) < 0) {
-        msg(a, "%s: %s", full, strerror(errno));
+    bool isdir;
+    long long fsize;
+    char serr[300];
+    if (stat_any(full, &isdir, &fsize, serr, sizeof(serr)) < 0) {
+        msg(a, "%s: %s", full, serr);
         return;
     }
-    if (S_ISDIR(st.st_mode)) {
+    if (isdir) {
         go_to(a, p, full, NULL);
     } else {                                                           /* a file: show its folder with it selected, and open it */
         char dir[PATH_MAX];
@@ -2116,6 +3024,9 @@ static const char *prompt_label(enum prompt k)
     case P_MOVE: return "Move to: ";
     case P_MKDIR: return "New folder: ";
     case P_RENAME: return "Rename to: ";
+    case P_CONNECT: return "Server (name, user@name or name legacy): ";
+    case P_NETUSER: return "User name (empty = guest): ";
+    case P_NETPASS: return "Password: ";
     case P_DELETE:
     case P_DELETE_HARD:
     case P_EMPTY: return "";
@@ -2151,11 +3062,13 @@ static void handle_key(struct app *a, uint32_t ks)
         if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
             prompt_accept(a);
         } else if (ks == LM_KS_Escape) {
+            if (a->prompt == P_NETPASS)
+                explicit_bzero(a->pbuf, sizeof(a->pbuf));
             a->prompt = P_NONE;
         } else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY) {
             /* a question: only Enter and Esc answer it */
         } else if (ks == LM_KS_Tab) {                                   /* complete a name (not for the new folder / rename fields) */
-            if (a->prompt == P_GOTO || a->prompt == P_COPY || a->prompt == P_MOVE) {
+            if ((a->prompt == P_GOTO || a->prompt == P_COPY || a->prompt == P_MOVE) && !is_net(cur(a)->cwd) && !is_net(a->pbuf)) {
                 char list[200];
                 int cn = lm_complete_path(cur(a)->cwd, a->pbuf, sizeof(a->pbuf), true, list, sizeof(list));
                 if (cn == 0)
@@ -2163,6 +3076,9 @@ static void handle_key(struct app *a, uint32_t ks)
                 else if (cn > 1)
                     msg(a, "%d matches: %s", cn, list);
             }
+        } else if (a->prompt == P_NETPASS && (((a->win.mods & LM_MOD_CTRL) && ks != 'v' && ks != 'V' && ks != 'a' && ks != 'A') ||
+                                              (ks == LM_KS_Delete && (a->win.mods & LM_MOD_SHIFT)))) {
+            /* a password is never copied or cut to the clipboard */
         } else {
             wltext_edit(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods);      /* a caret, a selection, the clipboard (wltext.h) */
         }
@@ -2178,9 +3094,18 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'b': if (a->dual) go_trash(a); return;
         case 'z': if (a->dual) do_restore(a); return;
         case 'e': if (a->dual) cmd_empty_trash(a); return;
+        case 'n': if (a->dual) go_network(a); return;
+        case 'k':
+            if (a->dual) {
+                if (smb_available())
+                    prompt_start(a, P_CONNECT, "");
+                else
+                    go_network(a);
+            }
+            return;
         case 'l':
             prompt_start(a, P_GOTO, "");
-            snprintf(a->pbuf, sizeof(a->pbuf), "%.*s%s", (int)sizeof(a->pbuf) - 2, cur(a)->cwd, strcmp(cur(a)->cwd, "/") ? "/" : "");
+            snprintf(a->pbuf, sizeof(a->pbuf), "%.*s%s", (int)sizeof(a->pbuf) - 2, cur(a)->cwd, cur(a)->cwd[strlen(cur(a)->cwd) - 1] != '/' ? "/" : "");
             return;
         default: return;
         }
@@ -2361,12 +3286,12 @@ static void paint_pane(struct wlwin *w, struct app *a, int idx)
         char name[NAME_MAX + 4];
         snprintf(name, sizeof(name), "%s%s%s", e && e->marked ? "* " : "", e ? e->name : "..", dir ? "/" : "");
         wlwin_text(w, x0 + 10, y + 1, name, 1, entry_color(e), (cols > 1 ? size_x : right) - x0 - 20);
-        if (cols > 1 && e && !e->dir && !e->broken) {
+        if (cols > 1 && e && !e->dir && !e->broken && !(is_net(p->cwd) && !e->mtime)) {
             char sz[32];
             human_size(e->size, sz, sizeof(sz));
             wlwin_text(w, size_x, y + 1, sz, 1, COL_DIM, 0);
         }
-        if (cols > 2 && e) {
+        if (cols > 2 && e && !(is_net(p->cwd) && !e->mtime)) {
             char tm[32];
             struct tm lt;
             localtime_r(&e->mtime, &lt);
@@ -2492,6 +3417,7 @@ static void paint_help(struct wlwin *w)
         "Nothing that exists is ever replaced. They run in the background: Esc cancels.",
         "In the question of F5 / F6 / Ctrl+L, Tab completes the names.",
         "Ctrl+H hidden files   Ctrl+R reread   Ctrl+L type a path",
+        "Ctrl+N / Network  network drives (smb://); Ctrl+K connect to a server",
         "Shift+Up / Down scrolls the preview   a letter jumps to a name",
         "",
         "Any key or click closes this list",
@@ -2603,7 +3529,18 @@ static void paint(struct wlwin *w)
             const char *label = prompt_label(a->prompt);
             wlwin_text(w, 6, py + 2, label, 1, COL_FG, w->bw - 12);
             int lw = lm_font_text_width(label);
-            wltext_paint(w, 6 + lw, py + 2, w->bw - 12 - lw, a->pbuf, true, COL_FG, lm_theme.button_hover, COL_FG);
+            if (a->prompt == P_NETPASS) {                               /* stars, no caret model: a password is never shown */
+                char stars[130];
+                int k = 0;
+                for (const char *c = a->pbuf; *c && k < 126; c++)
+                    if (((unsigned char)*c & 0xc0) != 0x80)
+                        stars[k++] = '*';
+                stars[k++] = '_';
+                stars[k] = 0;
+                wlwin_text(w, 6 + lw, py + 2, stars, 1, COL_FG, w->bw - 12 - lw);
+            } else {
+                wltext_paint(w, 6 + lw, py + 2, w->bw - 12 - lw, a->pbuf, true, COL_FG, lm_theme.button_hover, COL_FG);
+            }
         } else {
             wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
         }
@@ -2751,7 +3688,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
         if (args[2].u == 273 && args[3].u == 1) {                       /* BTN_RIGHT while a text prompt is asking: Cut / Copy / Paste / Clear */
-            if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {
+            if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY && a->prompt != P_NETPASS) {
                 a->menu_kind = 0;
                 wlwin_menu(w, wltext_menu(a->pbuf));
             } else if (a->prompt == P_NONE && a->dual && !a->help && !a->job) {      /* a file's menu, or one for the empty part of the list */
@@ -2898,6 +3835,45 @@ static bool file_is(const char *path, const char *content)
 static int selftest(void)
 {
     char out[PATH_MAX];
+    {
+        struct netpath np;
+        CHECK(net_parse("smb://nas/data/a/b", &np) && np.level == 2 && !strcmp(np.conn, "nas") && !strcmp(np.share, "data") && !strcmp(np.dir, "a/b"), "net_parse");
+        CHECK(net_parse("smb://", &np) && np.level == 0 && net_parse("smb://nas", &np) && np.level == 1 && net_parse("smb://nas/data/", &np) && np.level == 2 && !np.dir[0], "net_parse levels");
+        net_parent("smb://nas/data/a/b", out, sizeof(out));
+        CHECK(!strcmp(out, "smb://nas/data/a"), "net_parent: %s", out);
+        net_parent("smb://nas/data/a", out, sizeof(out));
+        net_parent(out, out, sizeof(out));
+        CHECK(!strcmp(out, "smb://nas"), "net_parent to the server: %s", out);
+        net_parent("smb://nas", out, sizeof(out));
+        CHECK(!strcmp(out, "smb://"), "net_parent to the list: %s", out);
+        join_path("smb://", "nas", out, sizeof(out));
+        CHECK(!strcmp(out, "smb://nas"), "join in the list: %s", out);
+        join_path("smb://nas/data", "x y", out, sizeof(out));
+        CHECK(!strcmp(out, "smb://nas/data/x y"), "join in a share: %s", out);
+        join_path("smb://nas/data/x", "..", out, sizeof(out));
+        CHECK(!strcmp(out, "smb://nas/data"), "join ..: %s", out);
+        join_path("smb://nas/data", "/home", out, sizeof(out));
+        CHECK(!strcmp(out, "/home"), "an absolute local path leaves the network: %s", out);
+        CHECK(smb_selftest() == 0, "smb selftest");
+        char tmpf[] = "/tmp/mellagui-files-prog-XXXXXX";                     /* the progress of a download is the size of the file that grows */
+        int tfd = mkstemp(tmpf);
+        if (tfd >= 0) {
+            struct job pj = { 0 };
+            struct net_prog pr = { .upload = false };
+            snprintf(pr.path, sizeof(pr.path), "%s", tmpf);
+            tl_job = &pj;
+            CHECK(write(tfd, "x", 1) == 1 && net_poll_progress(&pr) && atomic_load(&pj.done) == 1, "progress of 1 byte: %lld", (long long)atomic_load(&pj.done));
+            char blk[999];
+            memset(blk, 'y', sizeof(blk));
+            CHECK(write(tfd, blk, sizeof(blk)) == (ssize_t)sizeof(blk) && net_poll_progress(&pr) && atomic_load(&pj.done) == 1000, "progress adds only what is new");
+            CHECK(net_poll_progress(&pr) && atomic_load(&pj.done) == 1000, "no growth, no change");
+            atomic_store(&pj.cancel, true);
+            CHECK(!net_poll_progress(&pr), "a cancelled job stops the transfer");
+            tl_job = NULL;
+            close(tfd);
+            unlink(tmpf);
+        }
+    }
     normalize("/a/b/../c//d/./", out, sizeof(out));
     CHECK(!strcmp(out, "/a/c/d"), "normalize: %s", out);
     normalize("/..", out, sizeof(out));

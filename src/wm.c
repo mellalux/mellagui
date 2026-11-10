@@ -106,8 +106,32 @@ struct wm_popup {
 
 enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_GADGET_MOVE, GRAB_GADGET_RESIZE, GRAB_MIXER };
 
+/*
+ * Window animations (metrics `animation-ms`, 0 = off; headless only with MELLAGUI_ANIMATIONS): a window that opens, closes,
+ * is minimized or comes back is shown as a picture (struct lm_ghost, made by lm_render_snapshot) that grows / shrinks and
+ * fades or flies to / from its taskbar button or dock icon, painted as LM_SCENE_GHOST above the windows. The real window
+ * is left out of the scene while its opening / restoring picture runs (`anim_hidden`); a closed one is gone already.
+ */
+enum anim_kind { ANIM_OPEN, ANIM_CLOSE, ANIM_MINIMIZE, ANIM_RESTORE };
+#define ANIM_MAX 8
+#define ANIM_TICK_MS 16
+struct wm_anim {
+    bool used;
+    enum anim_kind kind;
+    struct lm_window *win;              /* OPEN / RESTORE: the window to show again at the end */
+    struct lm_ghost ghost;
+    struct lm_rect home;                /* where the picture is at full size (global) */
+    struct lm_rect away;                /* MINIMIZE / RESTORE: the taskbar button or dock icon it flies to / from */
+    uint64_t start;
+    int dur;
+    struct lm_rect shown;               /* painted now */
+    int alpha;
+};
+
 struct lm_wm {
     struct lm_server *srv;
+    struct wm_anim anim[ANIM_MAX];
+    struct lm_timer *anim_timer;
     struct lm_list windows;     /* stacking order, bottom first; lm_window.link */
     struct lm_list popups;
     struct lm_window *focused;
@@ -986,6 +1010,15 @@ static void dock_activate(struct lm_wm *wm, int i, bool reuse);
 static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool reuse);
 static void dock_hide_tick(void *data);
 static void dock_anim_tick(void *data);
+static void anim_tick(void *data);
+static bool anim_prepare(struct lm_wm *wm, struct lm_window *w, struct lm_ghost *g, struct lm_rect *home);
+static void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home);
+static void anim_finish_all(struct lm_wm *wm);
+static void anim_forget(struct lm_wm *wm, struct lm_window *w);
+static void anim_open(struct lm_wm *wm, struct lm_window *w);
+static void anim_fly(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w);
+static void anim_remember_close(struct lm_wm *wm, struct lm_window *w);
+static void anim_play_close(struct lm_wm *wm, struct lm_window *w);
 
 static void damage_panels(struct lm_wm *wm)
 {
@@ -1191,6 +1224,7 @@ void lm_wm_switch_workspace(struct lm_wm *wm, int ws)
         return;
     if (wm->focused)
         lm_xdg_dismiss_popups(wm->focused->surface);
+    anim_finish_all(wm);
     wm->workspace = ws;
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link)
@@ -1210,6 +1244,7 @@ void lm_wm_focus_window(struct lm_wm *wm, struct lm_window *w)
     if (w->workspace != wm->workspace)
         lm_wm_switch_workspace(wm, w->workspace);
     if (w->minimized) {
+        anim_fly(wm, ANIM_RESTORE, w);                           /* (a picture flies from the button; the window itself is hidden meanwhile) */
         w->minimized = false;
         update_outputs(wm, w);
         damage_frame(wm, w);
@@ -1285,6 +1320,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->dock_timer = lm_loop_add_timer(srv->loop, dock_hide_tick, wm);
     wm->dock_anim = lm_loop_add_timer(srv->loop, dock_anim_tick, wm);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
+    wm->anim_timer = lm_loop_add_timer(srv->loop, anim_tick, wm);
     wm->refit = lm_loop_add_idle(srv->loop, refit_idle, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
@@ -1305,6 +1341,11 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_timer_destroy(wm->dock_anim);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
+    for (int i = 0; i < ANIM_MAX; i++)
+        if (wm->anim[i].used)
+            free(wm->anim[i].ghost.px);
+    if (wm->anim_timer)
+        lm_timer_destroy(wm->anim_timer);
     if (wm->refit)
         lm_idle_destroy(wm->refit);
     free(wm);
@@ -1423,6 +1464,7 @@ void lm_wm_window_destroy(struct lm_window *w)
             c->parent = NULL;
     if (w->mapped)
         lm_wm_window_unmap(w);
+    anim_forget(wm, w);
     if (wm->focused == w)
         set_focus(wm, top_visible(wm, w));
     lm_list_remove(&w->link);
@@ -1601,6 +1643,7 @@ void lm_wm_window_map(struct lm_window *w)
     if (fit_w > 0)
         send_configure(wm, w, fit_w, fit_h);
     damage_panels(wm);
+    anim_open(wm, w);
     refresh_pointer(wm);
 }
 
@@ -1610,6 +1653,7 @@ void lm_wm_window_unmap(struct lm_window *w)
     if (!w->mapped)
         return;
     sw_close(wm);
+    anim_play_close(wm, w);
     struct lm_rect r = frame_outer(w);
     lm_xdg_dismiss_popups(w->surface);
     w->mapped = false;
@@ -1704,6 +1748,7 @@ void lm_wm_window_request_minimize(struct lm_window *w)
         return;
     struct lm_rect r = frame_outer(w);
     lm_xdg_dismiss_popups(w->surface);
+    anim_fly(wm, ANIM_MINIMIZE, w);
     w->minimized = true;
     lm_surface_set_outputs(w->surface, NULL, 0);
     if (wm->focused == w)
@@ -1715,6 +1760,7 @@ void lm_wm_window_request_minimize(struct lm_window *w)
 
 void lm_wm_window_close(struct lm_window *w)
 {
+    anim_remember_close(w->wm, w);
     if (w->ops && w->ops->close)
         w->ops->close(w);
 }
@@ -4216,6 +4262,287 @@ size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
     return o < size ? o : size - 1;
 }
 
+/* ---- window animations ------------------------------------------------------------------------------------------------ */
+
+/* How long an animation takes (ms); 0 = none. MELLAGUI_ANIMATIONS (tests; headless otherwise never animates): a number above 1 is the
+ * time, 1 the metrics value, 0 off. */
+static int anim_duration(const struct lm_wm *wm)
+{
+    const char *e = getenv("MELLAGUI_ANIMATIONS");
+    if (e && *e) {
+        int v = atoi(e);
+        return v > 1 ? LM_MIN(v, 5000) : v == 1 ? lm_metrics.animation_ms : 0;
+    }
+    if (wm->srv->backend && !strcmp(wm->srv->backend->ops->name, "headless"))
+        return 0;
+    return lm_metrics.animation_ms;
+}
+
+static bool anim_wanted(struct lm_wm *wm, const struct lm_window *w)
+{
+    return anim_duration(wm) > 0 && wm->srv->render && !lm_lock_active(wm->srv->lock) && !(w->states & LM_WINDOW_FULLSCREEN) &&
+           !win_is_calendar(w);
+}
+
+/* The window's picture (frame and content, without popups) and the rectangle it covers. */
+static bool anim_prepare(struct lm_wm *wm, struct lm_window *w, struct lm_ghost *g, struct lm_rect *home)
+{
+    struct lm_scene_item it[2];
+    memset(it, 0, sizeof(it));
+    it[0].kind = LM_SCENE_FRAME;
+    frame_info(wm, w, &it[0].u.frame);
+    int32_t ox, oy;
+    win_origin(w, &ox, &oy);
+    it[1].kind = LM_SCENE_SURFACE;
+    it[1].u.surface.root = w->surface;
+    it[1].u.surface.x = ox;
+    it[1].u.surface.y = oy;
+    struct lm_rect outer = frame_outer(w), ext;
+    *home = outer;
+    if (lm_surface_tree_extents(w->surface, &ext)) {
+        struct lm_rect eb = lm_rect_make(ox + ext.x, oy + ext.y, ext.w, ext.h);
+        *home = lm_rect_union(&outer, &eb);
+    }
+    return lm_render_snapshot(wm->srv->render, it, 2, home, g);
+}
+
+/* Where a minimized window goes to: the dock icon of its program when the dock shows one, else its taskbar button, else the bottom centre. */
+static struct lm_rect anim_target(struct lm_wm *wm, struct lm_window *w, const struct lm_rect *home)
+{
+    struct lm_output *o = window_output(wm, w);
+    if (!o)
+        o = lm_output_nearest(wm->srv, home->x + home->w / 2, home->y + home->h / 2);
+    if (o && lm_dock.enabled && dock_shown(wm)) {
+        struct lm_dock_info di;
+        dock_info(wm, o, &di);
+        for (int i = 0; i < di.n; i++)
+            if (di.icon[i].item && dock_app_matches(di.icon[i].item->match, w->app_id))
+                return di.icon[i].box;
+    }
+    if (o) {
+        struct lm_panel_info pi;
+        panel_info(wm, o, &pi);
+        for (int i = 0; i < pi.ntasks; i++)
+            if (pi.task_win[i] == w)
+                return pi.task[i].rect;
+        return lm_rect_make(o->x + o->width / 2 - 24, o->y + o->height - 12, 48, 12);
+    }
+    return lm_rect_make(home->x + home->w / 2 - 24, home->y + home->h - 12, 48, 12);
+}
+
+static float ease_out(float t) { float u = 1.0f - t; return 1.0f - u * u * u; }
+static float ease_smooth(float t) { return t * t * (3.0f - 2.0f * t); }
+
+static struct lm_rect anim_lerp_rect(const struct lm_rect *a, const struct lm_rect *b, float e)
+{
+    return lm_rect_make((int)lroundf((float)a->x + (float)(b->x - a->x) * e), (int)lroundf((float)a->y + (float)(b->y - a->y) * e),
+                        LM_MAX((int)lroundf((float)a->w + (float)(b->w - a->w) * e), 1),
+                        LM_MAX((int)lroundf((float)a->h + (float)(b->h - a->h) * e), 1));
+}
+
+/* The picture's rectangle and opacity `t` (0..1) of the way through. */
+static void anim_state(const struct wm_anim *a, float t, struct lm_rect *r, int *alpha)
+{
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    switch (a->kind) {
+    case ANIM_OPEN:
+    case ANIM_CLOSE: {
+        float e = ease_out(t), s, op;
+        if (a->kind == ANIM_OPEN) {
+            s = 0.9f + 0.1f * e;
+            op = e;
+        } else {
+            s = 1.0f - 0.08f * e;
+            op = 1.0f - e;
+        }
+        int w = LM_MAX((int)lroundf((float)a->home.w * s), 1), h = LM_MAX((int)lroundf((float)a->home.h * s), 1);
+        *r = lm_rect_make(a->home.x + (a->home.w - w) / 2, a->home.y + (a->home.h - h) / 2, w, h);
+        *alpha = (int)lroundf(255.0f * op);
+        break;
+    }
+    case ANIM_MINIMIZE:
+    case ANIM_RESTORE: {
+        float e = ease_smooth(a->kind == ANIM_MINIMIZE ? t : 1.0f - t);          /* a restore runs the minimize backwards */
+        *r = anim_lerp_rect(&a->home, &a->away, e);
+        *alpha = (int)lroundf(255.0f * (1.0f - e * e));
+        break;
+    }
+    }
+    if (*alpha < 0) *alpha = 0;
+    if (*alpha > 255) *alpha = 255;
+}
+
+static void anim_end(struct lm_wm *wm, struct wm_anim *a)
+{
+    struct lm_rect d = lm_rect_union(&a->shown, &a->home);
+    if (a->win)
+        a->win->anim_hidden = false;
+    lm_render_ghost_free(wm->srv->render, &a->ghost);
+    a->used = false;
+    a->win = NULL;
+    damage_rect(wm, &d);
+}
+
+static void anim_finish_all(struct lm_wm *wm)
+{
+    for (int i = 0; i < ANIM_MAX; i++)
+        if (wm->anim[i].used)
+            anim_end(wm, &wm->anim[i]);
+}
+
+/* The window is going away: its animation (and the picture it holds) ends. */
+static void anim_forget(struct lm_wm *wm, struct lm_window *w)
+{
+    for (int i = 0; i < ANIM_MAX; i++)
+        if (wm->anim[i].used && wm->anim[i].win == w)
+            anim_end(wm, &wm->anim[i]);
+    if (w->close_ghost) {
+        free(w->close_ghost->px);
+        free(w->close_ghost);
+        w->close_ghost = NULL;
+    }
+}
+
+/* Starts an animation; the ghost's pixels now belong to it. */
+static void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home)
+{
+    struct wm_anim *a = NULL;
+    for (int i = 0; i < ANIM_MAX && !a; i++)
+        if (!wm->anim[i].used)
+            a = &wm->anim[i];
+    if (!a) {                                                       /* all busy: the first one ends at once */
+        a = &wm->anim[0];
+        anim_end(wm, a);
+    }
+    if (w)
+        for (int i = 0; i < ANIM_MAX; i++)                          /* one animation per window: the older one stops */
+            if (wm->anim[i].used && wm->anim[i].win == w)
+                anim_end(wm, &wm->anim[i]);
+    memset(a, 0, sizeof(*a));
+    a->used = true;
+    a->kind = kind;
+    a->ghost = *g;
+    memset(g, 0, sizeof(*g));
+    a->home = *home;
+    a->dur = anim_duration(wm);
+    a->start = lm_now_ms();
+    if (kind == ANIM_MINIMIZE || kind == ANIM_RESTORE) {
+        a->away = anim_target(wm, w, home);
+        a->away.y += a->away.h / 2;                                 /* shrinks towards the middle of the button */
+        a->away.x += a->away.w / 4;
+        a->away.w = LM_MAX(a->away.w / 2, 2);
+        a->away.h = 2;
+    }
+    if (kind == ANIM_OPEN || kind == ANIM_RESTORE) {
+        a->win = w;
+        w->anim_hidden = true;
+    }
+    anim_state(a, 0.0f, &a->shown, &a->alpha);
+    struct lm_rect d = lm_rect_union(&a->home, &a->shown);
+    damage_rect(wm, &d);
+    if (wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
+        lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+}
+
+static void anim_tick(void *data)
+{
+    struct lm_wm *wm = data;
+    bool any = false;
+    uint64_t now = lm_now_ms();
+    for (int i = 0; i < ANIM_MAX; i++) {
+        struct wm_anim *a = &wm->anim[i];
+        if (!a->used)
+            continue;
+        float t = a->dur > 0 ? (float)(now - a->start) / (float)a->dur : 1.0f;
+        if (t >= 1.0f) {
+            anim_end(wm, a);
+            continue;
+        }
+        struct lm_rect old = a->shown;
+        anim_state(a, t, &a->shown, &a->alpha);
+        struct lm_rect d = lm_rect_union(&old, &a->shown);
+        damage_rect(wm, &d);
+        any = true;
+    }
+    if (!any && wm->anim_timer)
+        lm_timer_arm_ms(wm->anim_timer, 0, 0);
+}
+
+/* A window has just been mapped: its picture grows out of nothing while the real one waits. */
+static void anim_open(struct lm_wm *wm, struct lm_window *w)
+{
+    struct lm_ghost g;
+    struct lm_rect home;
+    if (!anim_wanted(wm, w) || !anim_prepare(wm, w, &g, &home))
+        return;
+    anim_start(wm, ANIM_OPEN, w, &g, &home);
+}
+
+/* Minimize (kind MINIMIZE, before the window is hidden) or restore (RESTORE, before it is shown): the picture flies between the window and its button. */
+static void anim_fly(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w)
+{
+    struct lm_ghost g;
+    struct lm_rect home;
+    if (!anim_wanted(wm, w) || !w->mapped || w->workspace != wm->workspace || !anim_prepare(wm, w, &g, &home))
+        return;
+    anim_start(wm, kind, w, &g, &home);
+}
+
+/* The window was asked to close: keep its picture, a close that follows (within 3 s) shows it fading away. */
+static void anim_remember_close(struct lm_wm *wm, struct lm_window *w)
+{
+    if (!anim_wanted(wm, w) || !w->mapped || w->minimized || w->workspace != wm->workspace)
+        return;
+    struct lm_ghost *g = calloc(1, sizeof(*g));
+    if (!g)
+        return;
+    if (!anim_prepare(wm, w, g, &w->close_rect)) {
+        free(g);
+        return;
+    }
+    if (w->close_ghost) {
+        free(w->close_ghost->px);
+        free(w->close_ghost);
+    }
+    w->close_ghost = g;
+    w->close_ms = lm_now_ms();
+}
+
+/* The window goes away (unmapped): shows the picture taken when it was asked to close, if there is a fresh one. */
+static void anim_play_close(struct lm_wm *wm, struct lm_window *w)
+{
+    for (int i = 0; i < ANIM_MAX; i++)                              /* an opening or flying picture of it ends now */
+        if (wm->anim[i].used && wm->anim[i].win == w)
+            anim_end(wm, &wm->anim[i]);
+    struct lm_ghost *g = w->close_ghost;
+    if (!g)
+        return;
+    w->close_ghost = NULL;
+    if (anim_wanted(wm, w) && !w->minimized && w->workspace == wm->workspace && lm_now_ms() - w->close_ms < 3000)
+        anim_start(wm, ANIM_CLOSE, NULL, g, &w->close_rect);
+    free(g->px);
+    free(g);
+}
+
+size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    static const char *const names[] = { "open", "close", "minimize", "restore" };
+    size_t n = 0;
+    int count = 0;
+    for (int i = 0; i < ANIM_MAX; i++)
+        count += wm->anim[i].used;
+    n += (size_t)snprintf(buf + n, size - n, "anim n=%d dur=%d\n", count, anim_duration(wm));
+    for (int i = 0; i < ANIM_MAX && n < size; i++) {
+        const struct wm_anim *a = &wm->anim[i];
+        if (!a->used)
+            continue;
+        n += (size_t)snprintf(buf + n, size - n, "item kind=%s x=%d y=%d w=%d h=%d alpha=%d\n", names[a->kind], a->shown.x, a->shown.y,
+                              a->shown.w, a->shown.h, a->alpha);
+    }
+    return n < size ? n : size - 1;
+}
+
 void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene_fn fn, void *data)
 {
     struct lm_scene_item it;
@@ -4290,7 +4617,7 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
 
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link) {
-        if (!win_visible(wm, w))
+        if (!win_visible(wm, w) || w->anim_hidden)
             continue;
         struct lm_rect outer = frame_outer(w);
         int32_t ox, oy;
@@ -4314,6 +4641,19 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         it.u.surface.root = w->surface;
         it.u.surface.x = ox;
         it.u.surface.y = oy;
+        if (!fn(&it, data))
+            return;
+    }
+
+    for (int i = 0; i < ANIM_MAX; i++) {                         /* pictures of windows that open / close / fly to their button */
+        struct wm_anim *a = &wm->anim[i];
+        if (!a->used || (clip && !lm_rect_overlaps(&a->shown, clip)))
+            continue;
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_GHOST;
+        it.u.ghost.ghost = &a->ghost;
+        it.u.ghost.dst = a->shown;
+        it.u.ghost.alpha = a->alpha;
         if (!fn(&it, data))
             return;
     }

@@ -321,7 +321,7 @@ static int selftest(void)
 #define SIDE_W 140
 #define MAX_WIDGETS 180
 #define MAX_KV 160
-#define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
+#define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
 enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, PAGE_CLOCK, N_PAGES };
 static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver", "Clock" };
@@ -372,7 +372,7 @@ struct app {
     bool recording;
     char keys_err[80];
     /* Colours page: which colour of the palette is being edited and its value (0..255 each) */
-    int cpage, csel;
+    int cpage, csel, tpage;
     char cname[32];
     int cr, cg, cb;
     char col_err[80];
@@ -1196,7 +1196,7 @@ static void keys_put(struct app *a)
 /* ---- Colours page: the palette ([theme] of mellagui.conf), changed through the theme-* settings ------------------------------- */
 
 #define COLS_ROWS 8
-#define MAX_COLOURS 48
+#define MAX_COLOURS 160
 
 struct colour { char name[32]; unsigned value; bool changed; };
 
@@ -1213,6 +1213,28 @@ static int colour_list(const struct app *a, struct colour *out, int max)
         snprintf(out[n].name, sizeof(out[n].name), "%s", t);
         out[n].value = (unsigned)strtoul(eq + 2, NULL, 16);
         out[n].changed = strchr(eq, '*') != NULL;
+        n++;
+    }
+    return n;
+}
+
+/* The themes the compositor offers (theme-list: "colorful* graphite light ...", * = in use). */
+#define MAX_THEMES 24
+#define THEMES_SHOWN 5
+#define THEME_ROW_H (MENU_ROW_H + 6)
+struct theme_entry { char name[LM_THEME_NAME_MAX]; bool active; };
+
+static int theme_names(const struct app *a, struct theme_entry *out, int max)
+{
+    char text[VALUE_MAX];
+    snprintf(text, sizeof(text), "%s", kv_get(a, "theme-list"));
+    int n = 0;
+    for (char *t = strtok(text, " "); t && n < max; t = strtok(NULL, " ")) {
+        size_t len = strlen(t);
+        out[n].active = len && t[len - 1] == '*';
+        if (out[n].active)
+            t[len - 1] = 0;
+        snprintf(out[n].name, sizeof(out[n].name), "%s", t);
         n++;
     }
     return n;
@@ -1235,6 +1257,24 @@ static void build_colours(struct app *a, int x, int y, int w)
     a->cpage = LM_CLAMP(a->cpage, 0, pages - 1);
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Colours");
     y += ROW_H;
+    struct theme_entry th[MAX_THEMES];
+    int nth = theme_names(a, th, MAX_THEMES);
+    if (nth > 0) {                                  /* the theme: a name picks a whole palette; the colours below are tweaks on top of it */
+        a->tpage = LM_CLAMP(a->tpage, 0, (nth - 1) / THEMES_SHOWN);
+        add(a, W_LABEL, (struct rect){ x, y, 56, MENU_ROW_H }, "Theme");
+        int bx = x + 60, bw = LM_MIN(104, (w - 60 - (nth > THEMES_SHOWN ? 60 : 0)) / THEMES_SHOWN - 4);
+        if (nth > THEMES_SHOWN)
+            menu_button(a, bx, y, 24, "<", "th-prev", 0);
+        if (nth > THEMES_SHOWN)
+            bx += 28;
+        for (int i = a->tpage * THEMES_SHOWN; i < LM_MIN(nth, (a->tpage + 1) * THEMES_SHOWN); i++, bx += bw + 4) {
+            struct widget *b = menu_button(a, bx, y, bw, th[i].name, "theme-use", i);
+            b->on = th[i].active;
+        }
+        if (nth > THEMES_SHOWN)
+            menu_button(a, bx, y, 24, ">", "th-next", 0);
+        y += THEME_ROW_H;
+    }
     for (int i = a->cpage * COLS_ROWS; i < LM_MIN(n, (a->cpage + 1) * COLS_ROWS); i++) {
         struct widget *sw = add(a, W_SWATCH, (struct rect){ x, y + 2, 22, MENU_ROW_H - 4 }, "");
         sw->val = (int)cols[i].value;
@@ -1245,7 +1285,7 @@ static void build_colours(struct app *a, int x, int y, int w)
         add(a, W_LABEL, (struct rect){ x + 208, y, 100, MENU_ROW_H }, hex);
         y += MENU_ROW_H;
     }
-    y = 14 + ROW_H + COLS_ROWS * MENU_ROW_H + 4;
+    y = 14 + ROW_H + (nth > 0 ? THEME_ROW_H : 0) + COLS_ROWS * MENU_ROW_H + 4;
     menu_button(a, x, y, 24, "<", "col-prev", 0);
     char lbl[32];
     snprintf(lbl, sizeof(lbl), "%d / %d", a->cpage + 1, pages);
@@ -1910,6 +1950,15 @@ static void activate(struct app *a, int idx)
                 colour_set_hex(a);
                 a->col_err[0] = 0;
             }
+        } else if (!strcmp(w->key, "theme-use")) {
+            struct theme_entry th[MAX_THEMES];
+            int n = theme_names(a, th, MAX_THEMES), i = atoi(w->arg);
+            if (i >= 0 && i < n) {
+                send_set(a, "theme-use", th[i].name);
+                a->csel = -1;
+            }
+        } else if (!strcmp(w->key, "th-prev") || !strcmp(w->key, "th-next")) {
+            a->tpage = LM_MAX(0, a->tpage + (!strcmp(w->key, "th-next") ? 1 : -1));
         } else if (!strcmp(w->key, "col-prev") || !strcmp(w->key, "col-next")) {
             a->cpage = LM_MAX(0, a->cpage + (!strcmp(w->key, "col-next") ? 1 : -1));
         } else if (!strcmp(w->key, "col-apply")) {
@@ -2517,7 +2566,7 @@ static int selftest_help(void)
         { "outputs", "A|1024x600|0,0;B|800x600|1024,0" }, { "resolutions", "1024x600|;800x600|" }, { "resolution", "auto" },
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
-        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff" },
+        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff" }, { "theme-list", "colorful* graphite light contrast" },
     };
     int bad = 0, shown = 0;
     for (int pg = 0; pg < N_PAGES; pg++) {

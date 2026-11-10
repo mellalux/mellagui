@@ -11,6 +11,7 @@
 
 #include "conf.h"
 #include "dock.h"
+#include "theme.h"
 #include "dockicon.h"
 #include "iconfind.h"
 #include "launchers.h"
@@ -168,8 +169,8 @@ bool lm_dock_conf(void *ud, const char *section, const char *key, const char *va
 int lm_dock_plate_rgb(void)
 {
     switch (lm_dock.icon_bg) {
-    case LM_DOCK_BG_LIGHT: return 0xf3f5f9;
-    case LM_DOCK_BG_DARK: return 0x2a2f3b;
+    case LM_DOCK_BG_LIGHT: return (int)lm_theme.plate_light;
+    case LM_DOCK_BG_DARK: return (int)lm_theme.plate_dark;
     case LM_DOCK_BG_COLOUR: return (int)lm_dock.icon_bg_rgb;
     default: return -1;
     }

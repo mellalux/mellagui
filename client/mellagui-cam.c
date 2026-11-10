@@ -584,13 +584,13 @@ static void paint(struct wlwin *w)
             continue;
         bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused);
         /* round colourful buttons like the terminal's and the editor's: lighter under the pointer, a switch that is on gets a white rim */
-        static const uint32_t base[N_B] = { 0x3f9a5e, 0x3d6fb4, 0xb8803a, 0x2f8f9a, 0x8a6fb8 };
-        static const uint32_t lite[N_B] = { 0x56b878, 0x5588d0, 0xd49a50, 0x45aab5, 0xa088d0 };
+        const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_purple };
+        const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
         if (on)
-            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, (bh + 2) / 2, 0xffffffu);
+            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, (bh + 2) / 2, lm_theme.on_colour);
         lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, bh / 2, on || a->hover == i ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
-        wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, 0xffffffu, 0);
+        wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
     }
     char st[240];
     if (a->note[0] && now_ms() < a->note_until)

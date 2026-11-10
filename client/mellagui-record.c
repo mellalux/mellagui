@@ -912,7 +912,7 @@ static void draw_button(struct app *a, const struct button *b, int id, uint32_t 
         col = lm_mix_rgb(base, 0xffffff, 0.18);
     lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, b->x, b->y, b->w, b->h, b->h / 2, col);
     int tw = lm_font_text_width(label);
-    wlwin_text(&a->win, b->x + (b->w - tw) / 2, b->y + (b->h - LM_FONT_H) / 2, label, 1, dim ? lm_theme.text_dim : 0xffffff, b->w - 8);
+    wlwin_text(&a->win, b->x + (b->w - tw) / 2, b->y + (b->h - LM_FONT_H) / 2, label, 1, dim ? lm_theme.text_dim : lm_theme.on_colour, b->w - 8);
 }
 
 static void paint(struct wlwin *w)

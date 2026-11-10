@@ -45,8 +45,8 @@
 #define COL_BG (lm_theme.background)
 #define COL_FG (lm_theme.text_soft)
 #define COL_DIM (lm_theme.text_dim)
-#define COL_GUTTER_BG 0x10131au
-#define COL_LINE 0x1a1e27u
+#define COL_GUTTER_BG (lm_theme.gutter)
+#define COL_LINE (lm_theme.current_line)
 #define COL_SEL (lm_theme.button_hover)
 #define COL_BAR (lm_theme.bar)
 #define COL_ACCENT (lm_theme.accent)
@@ -1325,7 +1325,7 @@ static void paint_scrollbar(struct wlwin *w, const struct app *a)
     int ty, th;
     sb_thumb(a, &ty, &th);
     bool hot = a->sb_drag || (a->px >= x && a->py >= ty && a->py < ty + th);
-    wlwin_fill(w, x + 2, ty + 1, sbw - 4, th - 2, hot ? 0x4a5266u : 0x353b49u);
+    wlwin_fill(w, x + 2, ty + 1, sbw - 4, th - 2, hot ? lm_theme.control_hot : lm_theme.control);
 }
 
 static void sb_drag_to(struct app *a, double py)
@@ -1361,14 +1361,14 @@ static void paint(struct wlwin *w)
         btn_rect(a, i, &bx, &bwid);
         if (bwid == 0)
             continue;
-        static const uint32_t base[N_BTNS] = { 0x3f9a5e, 0x3d6fb4, 0xb8803a, 0x2f8f9a, 0xb5603c, 0x3c82b5, 0x6a9a3c, 0x8a6fb8, 0x5a6a8a, 0x6b6f7a, 0x5a6a8a, 0xb84a6a };
-        static const uint32_t lite[N_BTNS] = { 0x56b878, 0x5588d0, 0xd49a50, 0x45aab5, 0xd07a52, 0x569ccf, 0x84b552, 0xa088d0, 0x7488ad, 0x868b98, 0x7488ad, 0xd6638a };
+        const uint32_t base[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_rust, lm_theme.btn_sky, lm_theme.btn_lime, lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_grey, lm_theme.btn_slate, lm_theme.btn_rose };
+        const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit };
         bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
         bool idle = (i == B_CUT || i == B_COPY) && !has_sel(a);             /* nothing selected: Cut and Copy have nothing to take */
-        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, idle ? 0x4a4f5c : lit ? lite[i] : base[i]);
+        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
-        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? 0x9aa0ae : 0xffffffu, 0);
+        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? lm_theme.title_text_idle : lm_theme.on_colour, 0);
     }
     wlwin_fill(w, 0, TOP_H, gw, w->bh - bars - TOP_H, COL_GUTTER_BG);
     int y0, y1;

@@ -757,14 +757,14 @@ static int build_buttons(const struct app *a, struct btn *b)
 {
     bool have = a->cur && nth(a, a->sel) && !nth(a, a->sel)->other;
     struct { enum btn_id id; const char *l; uint32_t base, hover; bool on, en; } d[N_BTN] = {
-        { B_UP, "Up", 0x3d6fb4, 0x5588d0, false, a->cur != NULL },
-        { B_HOME, "Home", 0x3f9a5e, 0x56b878, false, true },
-        { B_ROOT, "/", 0x8a6fb8, 0xa088d0, false, true },
-        { B_RESCAN, "Rescan", 0x2f8f9a, 0x45aab5, false, true },
-        { B_FS, a->one_fs ? "This disk" : "All disks", 0x6b6f7a, 0x868b98, !a->one_fs, true },
-        { B_APP, g_apparent ? "Apparent" : "On disk", 0x6b6f7a, 0x868b98, g_apparent, true },
-        { B_FILES, "Files", 0xb8803a, 0xd49a50, false, a->cur != NULL },
-        { B_DELETE, "Delete", 0xb84545, 0xd65f5f, false, have },
+        { B_UP, "Up", lm_theme.btn_blue, lm_theme.btn_blue_lit, false, a->cur != NULL },
+        { B_HOME, "Home", lm_theme.btn_green, lm_theme.btn_green_lit, false, true },
+        { B_ROOT, "/", lm_theme.btn_purple, lm_theme.btn_purple_lit, false, true },
+        { B_RESCAN, "Rescan", lm_theme.btn_teal, lm_theme.btn_teal_lit, false, true },
+        { B_FS, a->one_fs ? "This disk" : "All disks", lm_theme.btn_grey, lm_theme.btn_grey_lit, !a->one_fs, true },
+        { B_APP, g_apparent ? "Apparent" : "On disk", lm_theme.btn_grey, lm_theme.btn_grey_lit, g_apparent, true },
+        { B_FILES, "Files", lm_theme.btn_amber, lm_theme.btn_amber_lit, false, a->cur != NULL },
+        { B_DELETE, "Delete", lm_theme.btn_red, lm_theme.btn_red_lit, false, have },
     };
     int x = PAD;
     for (int i = 0; i < N_BTN; i++) {
@@ -823,11 +823,11 @@ static void press_button(struct app *a, enum btn_id id)
 
 static uint32_t tile_colour(const struct node *k, int i)
 {
-    static const uint32_t pal[] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f, 0x4a7fa8 };
+    const uint32_t pal[] = { lm_theme.btn_blue, lm_theme.btn_green, lm_theme.btn_purple, lm_theme.btn_teal, lm_theme.btn_amber, lm_theme.btn_red, lm_theme.btn_olive, lm_theme.btn_steel };
     if (k->other)
-        return 0x555b66;
+        return lm_theme.tile_other;
     uint32_t c = pal[i % 8];
-    return k->dir ? c : lm_mix_rgb(c, 0x2a2f3a, 0.55);
+    return k->dir ? c : lm_mix_rgb(c, lm_theme.frame_idle, 0.55);
 }
 
 static void paint_head(struct app *a, struct wlwin *w)
@@ -865,7 +865,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
     lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, h / 2, base);
     int tw = (int)strlen(b->label) * LM_FONT_W;
-    wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? 0xffffff : COL_DIM, b->w - 4);
+    wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
 
 static void paint_list(struct app *a, struct wlwin *w)
@@ -920,18 +920,18 @@ static void paint_map(struct app *a, struct wlwin *w)
         wlwin_fill(w, t->x, t->y, t->w, 1, lm_mix_rgb(c, 0x000000, 0.45));                 /* a dark edge on two sides separates the tiles */
         wlwin_fill(w, t->x, t->y, 1, t->h, lm_mix_rgb(c, 0x000000, 0.45));
         if (i == a->sel) {
-            wlwin_fill(w, t->x, t->y, t->w, 2, 0xffffff);
-            wlwin_fill(w, t->x, t->y + t->h - 2, t->w, 2, 0xffffff);
-            wlwin_fill(w, t->x, t->y, 2, t->h, 0xffffff);
-            wlwin_fill(w, t->x + t->w - 2, t->y, 2, t->h, 0xffffff);
+            wlwin_fill(w, t->x, t->y, t->w, 2, lm_theme.on_colour);
+            wlwin_fill(w, t->x, t->y + t->h - 2, t->w, 2, lm_theme.on_colour);
+            wlwin_fill(w, t->x, t->y, 2, t->h, lm_theme.on_colour);
+            wlwin_fill(w, t->x + t->w - 2, t->y, 2, t->h, lm_theme.on_colour);
         }
         if (t->w >= 7 * LM_FONT_W && t->h >= 2 * LM_FONT_H + 4) {
             char sz[24];
             human(nsize(k), sz, sizeof(sz));
-            wlwin_text(w, t->x + 5, t->y + 4, k->name, 1, 0xffffff, t->w - 8);
-            wlwin_text(w, t->x + 5, t->y + 4 + LM_FONT_H, sz, 1, lm_mix_rgb(0xffffff, c, 0.35), t->w - 8);
+            wlwin_text(w, t->x + 5, t->y + 4, k->name, 1, lm_theme.on_colour, t->w - 8);
+            wlwin_text(w, t->x + 5, t->y + 4 + LM_FONT_H, sz, 1, lm_mix_rgb(lm_theme.on_colour, c, 0.35), t->w - 8);
         } else if (t->w >= 5 * LM_FONT_W && t->h >= LM_FONT_H + 2) {
-            wlwin_text(w, t->x + 3, t->y + 2, k->name, 1, 0xffffff, t->w - 5);
+            wlwin_text(w, t->x + 3, t->y + 2, k->name, 1, lm_theme.on_colour, t->w - 5);
         }
     }
 }

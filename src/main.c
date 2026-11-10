@@ -410,6 +410,7 @@ int main(int argc, char **argv)
         /* mellagui.conf: the hand-written configuration (dock, commands ...); the command line still wins */
         snprintf(g_conf_path, sizeof(g_conf_path), "%s", config_arg);
         cfg.conf_path = g_conf_path;
+        lm_theme_set_conf_path(g_conf_path);
         int bad = lm_conf_load(config_arg, conf_line, &cfg);
         if (bad < 0 && config_arg != conf_buf)
             fprintf(stderr, "mellagui: cannot read --config %s: %s\n", config_arg, strerror(errno));

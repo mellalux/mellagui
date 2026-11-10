@@ -9,23 +9,45 @@
 #include <strings.h>
 
 #include "dockicon.h"
+#include "theme.h"
 
 static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUNT] = {
-    [LM_DOCKICON_GENERIC] = { "generic", 0x6e7681 },
-    [LM_DOCKICON_TERMINAL] = { "terminal", 0x2f353d },
-    [LM_DOCKICON_CALCULATOR] = { "calculator", 0xf0861c },
-    [LM_DOCKICON_FILES] = { "files", 0x2f81f7 },
-    [LM_DOCKICON_EDITOR] = { "editor", 0x2fa84f },
-    [LM_DOCKICON_IMAGES] = { "images", 0x8957e5 },
-    [LM_DOCKICON_SETTINGS] = { "settings", 0x768390 },
-    [LM_DOCKICON_CODE] = { "code", 0x1f6feb },
-    [LM_DOCKICON_WEB] = { "web", 0xe8590c },
-    [LM_DOCKICON_RUN] = { "run", 0x238636 },
-    [LM_DOCKICON_LAUNCHER] = { "launcher", 0x5b5fc7 },
-    [LM_DOCKICON_CAMERA] = { "camera", 0xd6336c },
-    [LM_DOCKICON_RECORD] = { "record", 0xc92a2a },
-    [LM_DOCKICON_MONITOR] = { "monitor", 0x0c8599 },
+    [LM_DOCKICON_GENERIC] = { "generic", 0 },
+    [LM_DOCKICON_TERMINAL] = { "terminal", 0 },
+    [LM_DOCKICON_CALCULATOR] = { "calculator", 0 },
+    [LM_DOCKICON_FILES] = { "files", 0 },
+    [LM_DOCKICON_EDITOR] = { "editor", 0 },
+    [LM_DOCKICON_IMAGES] = { "images", 0 },
+    [LM_DOCKICON_SETTINGS] = { "settings", 0 },
+    [LM_DOCKICON_CODE] = { "code", 0 },
+    [LM_DOCKICON_WEB] = { "web", 0 },
+    [LM_DOCKICON_RUN] = { "run", 0 },
+    [LM_DOCKICON_LAUNCHER] = { "launcher", 0 },
+    [LM_DOCKICON_CAMERA] = { "camera", 0 },
+    [LM_DOCKICON_RECORD] = { "record", 0 },
+    [LM_DOCKICON_MONITOR] = { "monitor", 0 },
 };
+
+/* The disc colour of a built-in icon: the palette's icon-* colours. */
+static uint32_t icon_color(int kind)
+{
+    switch (kind) {
+    case LM_DOCKICON_TERMINAL: return lm_theme.icon_terminal;
+    case LM_DOCKICON_CALCULATOR: return lm_theme.icon_calculator;
+    case LM_DOCKICON_FILES: return lm_theme.icon_files;
+    case LM_DOCKICON_EDITOR: return lm_theme.icon_editor;
+    case LM_DOCKICON_IMAGES: return lm_theme.icon_images;
+    case LM_DOCKICON_SETTINGS: return lm_theme.icon_settings;
+    case LM_DOCKICON_CODE: return lm_theme.icon_code;
+    case LM_DOCKICON_WEB: return lm_theme.icon_web;
+    case LM_DOCKICON_RUN: return lm_theme.icon_run;
+    case LM_DOCKICON_LAUNCHER: return lm_theme.icon_launcher;
+    case LM_DOCKICON_CAMERA: return lm_theme.icon_camera;
+    case LM_DOCKICON_RECORD: return lm_theme.icon_record;
+    case LM_DOCKICON_MONITOR: return lm_theme.icon_monitor;
+    default: return lm_theme.icon_generic;
+    }
+}
 
 const char *lm_dockicon_name(int kind)
 {
@@ -239,7 +261,7 @@ uint32_t lm_dockicon_pixel(int kind, float dx, float dy, float R, float lift)
     if (dc <= 0.0f && shadow <= 0.004f)
         return 0;
 
-    uint32_t base = icons[kind].color;
+    uint32_t base = icon_color(kind);
     float shade = 1.14f - 0.28f * (v * 0.5f + 0.5f);   /* lighter at the top */
     float rgb[3];
     for (int i = 0; i < 3; i++) {

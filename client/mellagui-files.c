@@ -78,12 +78,12 @@
 #define COL_SEL (lm_theme.button_hover)
 #define COL_SEL_IDLE (lm_theme.bar)
 #define COL_BAR (lm_theme.bar)
-#define COL_BTN 0x353b49u
+#define COL_BTN (lm_theme.control)
 #define COL_BTN_ON (lm_theme.button_hover)
 #define COL_WARN (lm_theme.caution)
 #define COL_MARK (lm_theme.warn)
 #define COL_EXEC (lm_theme.ok)
-#define COL_PIC 0xc792eau
+#define COL_PIC (lm_theme.picture)
 #define COL_ERR (lm_theme.error)
 
 #define PREVIEW_MAX_BYTES (128 * 1024)
@@ -3060,8 +3060,8 @@ enum { F_HELP, F_RENAME, F_VIEW, F_EDIT, F_COPY, F_MOVE, F_MKDIR, F_DELETE, F_TE
 static void toolbar(const struct app *a, struct rbtn *b)
 {
     static const char *const labels[N_TOOL] = { "Up", "Home", "Hidden", "Terminal", "Preview", "Trash", "Restore", "Empty", "Network" };
-    static const uint32_t base[N_TOOL] = { 0x3d6fb4, 0x3f9a5e, 0x8a6fb8, 0x2f8f9a, 0xb8803a, 0xb84545, 0x7a9a2f, 0x8a3434, 0x2f7f8f };
-    static const uint32_t hover[N_TOOL] = { 0x5588d0, 0x56b878, 0xa088d0, 0x45aab5, 0xd49a50, 0xd65f5f, 0x98b84a, 0xad4a4a, 0x45a0b2 };
+    const uint32_t base[N_TOOL] = { lm_theme.btn_blue, lm_theme.btn_green, lm_theme.btn_purple, lm_theme.btn_teal, lm_theme.btn_amber, lm_theme.btn_red, lm_theme.btn_olive, lm_theme.btn_maroon, lm_theme.btn_deep_teal };
+    const uint32_t hover[N_TOOL] = { lm_theme.btn_blue_lit, lm_theme.btn_green_lit, lm_theme.btn_purple_lit, lm_theme.btn_teal_lit, lm_theme.btn_amber_lit, lm_theme.btn_red_lit, lm_theme.btn_olive_lit, lm_theme.btn_maroon_lit, lm_theme.btn_deep_teal_lit };
     int x = 8;
     for (int i = 0; i < N_TOOL; i++) {
         b[i].label = labels[i];
@@ -3084,8 +3084,8 @@ static void toolbar(const struct app *a, struct rbtn *b)
 static void fkeybar(const struct app *a, struct rbtn *b)
 {
     static const char *const labels[N_FKEY] = { "Help", "Rename", "Preview", "Edit", "Copy", "Move", "Mkdir", "Delete", "Term", "Quit" };
-    static const uint32_t base[N_FKEY] = { 0x5a6a8a, 0xb8803a, 0x8a6fb8, 0x2f8f9a, 0x3f9a5e, 0xc0742f, 0x3d6fb4, 0xb84545, 0x2f7f8f, 0x6b6f7a };
-    static const uint32_t hover[N_FKEY] = { 0x7488ad, 0xd49a50, 0xa088d0, 0x45aab5, 0x56b878, 0xdf8f45, 0x5588d0, 0xd65f5f, 0x45a0b2, 0x868b98 };
+    const uint32_t base[N_FKEY] = { lm_theme.btn_slate, lm_theme.btn_amber, lm_theme.btn_purple, lm_theme.btn_teal, lm_theme.btn_green, lm_theme.btn_orange, lm_theme.btn_blue, lm_theme.btn_red, lm_theme.btn_deep_teal, lm_theme.btn_grey };
+    const uint32_t hover[N_FKEY] = { lm_theme.btn_slate_lit, lm_theme.btn_amber_lit, lm_theme.btn_purple_lit, lm_theme.btn_teal_lit, lm_theme.btn_green_lit, lm_theme.btn_orange_lit, lm_theme.btn_blue_lit, lm_theme.btn_red_lit, lm_theme.btn_deep_teal_lit, lm_theme.btn_grey_lit };
     int gap = 4, width = a->win.bw - 12;
     int bw = (width - gap * (N_FKEY - 1)) / N_FKEY;
     for (int i = 0; i < N_FKEY; i++) {
@@ -3110,10 +3110,10 @@ static void draw_rbtn(struct wlwin *w, const struct rbtn *b, int y, int h, bool 
     if (num > 0) {                                                      /* the key number a little dimmer than the name */
         char ns[8];
         int nl = snprintf(ns, sizeof(ns), "%d", num);
-        wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, ns, 1, lm_mix_rgb(0xffffff, b->base, 0.45), 0);
-        wlwin_text(w, tx + nl * LM_FONT_W, y + (h - LM_FONT_H) / 2, b->label, 1, 0xffffff, b->w - 8 - nl * LM_FONT_W);
+        wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, ns, 1, lm_mix_rgb(lm_theme.on_colour, b->base, 0.45), 0);
+        wlwin_text(w, tx + nl * LM_FONT_W, y + (h - LM_FONT_H) / 2, b->label, 1, lm_theme.on_colour, b->w - 8 - nl * LM_FONT_W);
     } else {
-        wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, t, 1, 0xffffff, b->w - 8);
+        wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, b->w - 8);
     }
 }
 
@@ -3537,7 +3537,7 @@ static void paint_pane(struct wlwin *w, struct app *a, int idx)
 
     int hy = TOOL_H;                                                          /* the header: the path, lit when the pane is active */
     wlwin_fill(w, x0, hy, pw, HEAD_H, active && a->dual ? COL_SEL : COL_BG);
-    wlwin_text(w, x0 + 8, hy + 3, p->cwd, 1, active && a->dual ? 0xffffff : COL_DIM, pw - 16 - (count_marked(p) ? 80 : 0));
+    wlwin_text(w, x0 + 8, hy + 3, p->cwd, 1, active && a->dual ? lm_theme.text_bright : COL_DIM, pw - 16 - (count_marked(p) ? 80 : 0));
     int nm = count_marked(p);
     if (nm) {
         char mk[32];
@@ -3762,7 +3762,7 @@ static void paint(struct wlwin *w)
         struct job *j = a->job;
         long long total = atomic_load(&j->total), done = atomic_load(&j->done);
         int pct = total > 0 ? (int)LM_CLAMP(done * 100 / total, 0, 100) : (j->n ? atomic_load(&j->items_done) * 100 / j->n : 0);
-        wlwin_fill(w, 0, sy, w->bw * pct / 100, STATUS_H, 0x2f6b46);
+        wlwin_fill(w, 0, sy, w->bw * pct / 100, STATUS_H, lm_theme.progress);
         char cur_name[NAME_MAX + 1], amount[96] = "", line[NAME_MAX + 200];
         pthread_mutex_lock(&j->mu);
         snprintf(cur_name, sizeof(cur_name), "%s", j->current);
@@ -3775,7 +3775,7 @@ static void paint(struct wlwin *w)
         }
         const char *verb = j->kind == J_COPY ? "Copying" : j->kind == J_MOVE ? "Moving" : j->kind == J_TRASH ? "Moving to the trash" : j->kind == J_RESTORE ? "Restoring" : "Deleting";
         snprintf(line, sizeof(line), "%s %s  %d%%%s   -   Esc cancels", verb, cur_name, pct, amount);
-        wlwin_text(w, 6, sy + 2, a->msg[0] && now_ms() < a->msg_until ? a->msg : line, 1, 0xffffff, w->bw - 12);
+        wlwin_text(w, 6, sy + 2, a->msg[0] && now_ms() < a->msg_until ? a->msg : line, 1, lm_theme.on_colour, w->bw - 12);
     } else {
         wlwin_text(w, 6, sy + 2, showing ? a->msg : status, 1, showing ? COL_WARN : COL_FG, w->bw - 12);
     }

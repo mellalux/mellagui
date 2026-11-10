@@ -2657,7 +2657,7 @@ class TestClients(Base):
         for i in range(extra_files):
             open(os.path.join(d, 'f%03d.txt' % i), 'wb').close()
         for w in ctl.windows()['windows']:
-            self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.files.choose', 'mellagui.edit', 'mellagui.view', 'mellagui.term'),
+            self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.files.choose', 'mellagui.edit', 'mellagui.view', 'mellagui.term', 'mellagui.du'),
                              'a window of an earlier test is still open')
         p = subprocess.Popen([exe] + list(args) + [d], env=dict(os.environ, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         def cleanup():
@@ -2698,6 +2698,17 @@ class TestClients(Base):
                 return
             time.sleep(0.05)
         self.fail('title of %s is %r, wanted %r' % (app_id, t, title))
+
+    def test_files_ctrl_u_opens_the_disk_usage_of_the_folder(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-du')):
+            self.skipTest('mellagui-du not built')
+        p, d = self.files_start()
+        self.chord(self.CTRL, 22)                                      # Ctrl+U
+        self.assertIsNotNone(wait_for_window('mellagui.du'), 'the disk usage window did not open')
+        end = time.time() + 6
+        while time.time() < end and self.window_title('mellagui.du', 0.1) != os.path.basename(d) + ' - Disk usage':
+            time.sleep(0.1)
+        self.assertEqual(self.window_title('mellagui.du', 0.1), os.path.basename(d) + ' - Disk usage')
 
     def test_files_navigates_with_keys(self):
         p, d = self.files_start()
@@ -3226,6 +3237,140 @@ class TestClients(Base):
         self.assertEqual(self.read_file(os.path.join(d, 'a.txt')), b'text a\n')
         with open(n['conf']) as f:
             self.assertIn('old - legacy', f.read())
+
+    # ---- SSH servers (sftp://) with a stand-in for `sftp -b -` (tests/fake_sftp.py) --------------------------------------------------
+
+    def sftp_start(self, **fake):
+        """The browser with a fake SSH server whose home folder /home/me has a.txt, 'with space.txt' and sub/inner.txt."""
+        root = tempfile.mkdtemp(prefix='sftp-', dir=tmp)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        home = os.path.join(root, 'home', 'me')
+        os.makedirs(os.path.join(home, 'sub'))
+        for name, text in (('a.txt', b'remote a\n'), ('with space.txt', b'remote spaced\n'), ('sub/inner.txt', b'remote inner\n')):
+            with open(os.path.join(home, name), 'wb') as f:
+                f.write(text)
+        os.makedirs(os.path.join(root, 'etc'))
+        conf, cache = os.path.join(root, 'conf'), os.path.join(root, 'cache')
+        log = os.path.join(root, 'sftp.log')
+        env = {'MELLAGUI_SFTP': os.path.join(ROOT, 'tests', 'fake_sftp.py'), 'FAKE_SFTP_ROOT': root, 'FAKE_SFTP_LOG': log,
+               'XDG_CONFIG_HOME': conf, 'XDG_CACHE_HOME': cache, 'MELLAGUI_SMB_GATEWAY': 'none'}
+        env.update(fake)
+        p, d = self.files_start(env=env)
+        return p, d, home, dict(root=root, conf=os.path.join(conf, 'mellagui', 'network.conf'), cache=cache, log=log)
+
+    def type_url(self, text):
+        for ch in text:
+            if ch == ':':
+                ctl.key(KEY_LEFTSHIFT, True); ctl.tap(39); ctl.key(KEY_LEFTSHIFT, False)
+            elif ch == '@':
+                ctl.key(KEY_LEFTSHIFT, True); ctl.tap(3); ctl.key(KEY_LEFTSHIFT, False)
+            else:
+                self.type_chars(ch)
+
+    def sftp_connect(self, url):
+        self.chord(self.CTRL, 49)
+        self.wait_title('mellagui.files', 'Network - Files')
+        self.chord(self.CTRL, 37)
+        self.type_url(url)
+        ctl.tap(KEY_ENTER)
+
+    def test_files_sftp_opens_the_home_folder_and_walks_up_to_the_list(self):
+        p, d, home, n = self.sftp_start()
+        self.sftp_connect('sftp://me@fakehost')
+        self.wait_title('mellagui.files', 'me - Files')                  # the home folder: /home/me
+        ctl.tap(14)
+        self.wait_title('mellagui.files', 'home - Files')
+        ctl.tap(14)
+        self.wait_title('mellagui.files', 'fakehost - Files')            # the root of the server
+        ctl.tap(14)
+        self.wait_title('mellagui.files', 'Network - Files')
+        with open(n['conf']) as f:
+            self.assertIn('sftp://fakehost me', f.read())
+        with open(n['log']) as f:
+            self.assertIn('user=me', f.read())
+
+    def test_files_sftp_copies_both_ways_makes_folders_and_deletes_them_whole(self):
+        p, d, home, n = self.sftp_start()
+        self.sftp_connect('sftp://me@fakehost')
+        self.wait_title('mellagui.files', 'me - Files')
+        for _ in range(2):
+            ctl.tap(self.K_DOWN)                                         # sub, a.txt, with space.txt
+        ctl.tap(self.FKEYS[5])                                           # F5: with space.txt into the local folder
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.0)
+        self.assertEqual(self.read_file(os.path.join(d, 'with space.txt')), b'remote spaced\n')
+        ctl.tap(self.K_HOME)
+        ctl.tap(self.K_DOWN)                                             # the folder "sub": it comes with what is in it (into the other pane's "sub": it exists, nothing is replaced)
+        ctl.tap(self.FKEYS[5])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.8)
+        ctl.tap(self.K_TAB)                                              # the local pane: a folder and a file go up
+        ctl.tap(self.K_HOME)
+        ctl.tap(self.K_DOWN)                                             # sub (local) -> the server under a new name via the prompt
+        ctl.tap(self.FKEYS[5])
+        for _ in range(60):
+            ctl.tap(14)
+        self.type_url('sftp://fakehost/home/me/sub2')
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.2)
+        self.assertEqual(self.read_file(os.path.join(home, 'sub2', 'inner.txt')), b'inner\n')
+        ctl.tap(self.K_TAB)                                              # the server: F8 on sub2 deletes it with what is in it, after asking
+        ctl.tap(self.K_HOME)
+        for _ in range(2):
+            ctl.tap(self.K_DOWN)                                         # sub, sub2
+        ctl.tap(self.FKEYS[8])
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.5)
+        self.assertFalse(os.path.exists(os.path.join(home, 'sub2')) and os.listdir(os.path.join(home, 'sub2')), 'the folder is deleted with its files')
+
+    def test_files_sftp_mkdir_rename_open_and_the_login(self):
+        p, d, home, n = self.sftp_start(FAKE_SFTP_USER='bob', FAKE_SFTP_PASS='hunter22')
+        self.sftp_connect('sftp://bob@locked:2222')
+        time.sleep(1.0)
+        self.assertEqual(self.window_title('mellagui.files'), 'Network - Files')      # key login failed: the question comes, with the user name typed in the address
+        ctl.tap(KEY_ENTER)
+        self.type_chars('hunter22')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('mellagui.files', 'me - Files')
+        with open(n['log']) as f:
+            log = f.read()
+        self.assertIn('port=2222', log)
+        self.assertIn('pass=env', log)                                   # the password came through the environment (askpass) ...
+        self.assertNotIn('hunter22', log)                                # ... and never in an argument
+        with open(n['conf']) as f:
+            conf = f.read()
+        self.assertIn('sftp://locked:2222 bob', conf)
+        self.assertNotIn('hunter22', conf)
+        ctl.tap(self.FKEYS[7])                                           # F7
+        self.type_chars('made')
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.0)
+        self.assertTrue(os.path.isdir(os.path.join(home, 'made')))
+        ctl.tap(60)                                                      # F2: rename the new folder
+        for _ in range(4):
+            ctl.tap(14)
+        self.type_chars('newer')
+        ctl.tap(KEY_ENTER)
+        time.sleep(1.0)
+        self.assertTrue(os.path.isdir(os.path.join(home, 'newer')), os.listdir(home))
+        ctl.tap(self.K_HOME)
+        for _ in range(3):
+            ctl.tap(self.K_DOWN)                                         # newer, sub, a.txt (folders first)
+        ctl.tap(KEY_ENTER)                                               # opens a copy of a.txt in the editor
+        self.assertIsNotNone(wait_for_window('mellagui.edit'))
+        self.assertEqual(self.read_file(os.path.join(n['cache'], 'mellagui', 'network', 'locked:2222', 'home', 'me', 'a.txt')), b'remote a\n')
+
+    def test_files_sftp_refuses_a_changed_host_key_and_can_be_forgotten(self):
+        p, d, home, n = self.sftp_start(FAKE_SFTP_CHANGED='1')
+        self.sftp_connect('sftp://me@fakehost')
+        time.sleep(1.0)
+        self.assertEqual(self.window_title('mellagui.files'), 'Network - Files')      # nobody gets in, and there is no login question for it
+        ctl.tap(self.K_DOWN)                                             # the list: "Connect to a server...", then the server
+        ctl.tap(111)                                                     # Delete: forgets it
+        time.sleep(0.5)
+        if os.path.exists(n['conf']):
+            with open(n['conf']) as f:
+                self.assertNotIn('fakehost', f.read())
 
     def test_files_network_forgets_a_server_with_delete(self):
         p, d, share, n = self.net_start()
@@ -4762,6 +4907,33 @@ esac
                 break
             time.sleep(0.05)
         self.assertIsNotNone(p.poll())
+
+    def test_the_settings_panel_opens_only_once(self):
+        self.exe()
+        def count():
+            return len([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.settings'])
+        before = count()
+        for _ in range(3):                                                      # Super+I three times in a row, before the first window is there
+            ctl.key(KEY_LEFTMETA, True)
+            ctl.tap(23)
+            ctl.key(KEY_LEFTMETA, False)
+            time.sleep(0.1)
+        win = wait_for_window('mellagui.settings')
+        self.assertIsNotNone(win)
+        time.sleep(1.0)
+        self.assertEqual(count(), before + 1, 'more than one settings window')
+        ctl.key(KEY_LEFTMETA, True)                                             # and again with the window open: it comes forward
+        ctl.tap(23)
+        ctl.key(KEY_LEFTMETA, False)
+        time.sleep(0.8)
+        self.assertEqual(count(), before + 1)
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        ctl.tap(KEY_ESC)
+        for _ in range(100):
+            if count() == before:
+                break
+            time.sleep(0.05)
+        self.assertEqual(count(), before)
 
     def test_panel_opens_from_super_i(self):
         self.exe()
@@ -7784,6 +7956,105 @@ class TestTop(Base):
             time.sleep(0.1)
         self.assertEqual(p.poll(), 0)
 
+
+class TestDu(Base):
+    """mellagui-du: the disk usage list and tree map."""
+    DU = os.environ.get('MELLAGUI_DU_BIN', os.path.join(ROOT, 'build', 'mellagui-du'))
+
+    def tree(self):
+        if not os.path.exists(self.DU):
+            self.skipTest('mellagui-du not built')
+        d = tempfile.mkdtemp(prefix='du-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'big'))
+        os.makedirs(os.path.join(d, 'empty'))
+        for path, size in (('big/blob.bin', 3 << 20), ('big/mid.bin', 1 << 20), ('small.txt', 10), ('mid.dat', 500000)):
+            with open(os.path.join(d, path), 'wb') as f:
+                f.write(b'\0' * size)
+        os.link(os.path.join(d, 'big', 'mid.bin'), os.path.join(d, 'mid-alias.bin'))      # a second name of a file counts once
+        os.symlink(d, os.path.join(d, 'loop'))                                              # a link is not followed
+        return d
+
+    def test_selftest_and_the_plain_list(self):
+        d = self.tree()
+        r = subprocess.run([self.DU, '--selftest'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run([self.DU, '--list', '--apparent', d, '10'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertIn('apparent size', lines[0])
+        self.assertIn('in 5 things', lines[0])                                   # blob, mid, small, mid.dat and the link (the alias is mid.bin again)
+        names = [l.split()[-1] for l in lines[1:]]
+        self.assertEqual(names[0], 'big/')                                       # the biggest first
+        self.assertEqual(names[1], 'mid.dat')
+        sizes = {l.split()[-1]: int(l.split()[0]) for l in lines[1:]}
+        self.assertGreaterEqual(sizes['big/'], (3 << 20) + (1 << 20))
+        self.assertTrue(sizes['mid-alias.bin'] in (0, 1 << 20) if 'mid-alias.bin' in sizes else True)
+
+    def start(self, d):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.du', 'a window of an earlier test is still open')
+        p = subprocess.Popen([self.DU, d], env=dict(os.environ, HOME=d), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.du'), 'the window did not appear')
+        return p
+
+    def title(self):
+        for w in ctl.windows()['windows']:
+            if w['app_id'] == 'mellagui.du':
+                return w['title']
+
+    def wait_title(self, text, timeout=8.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.title() == text:
+                return
+            time.sleep(0.05)
+        self.fail('title is %r, wanted %r' % (self.title(), text))
+
+    def test_it_goes_into_a_folder_and_out_and_deletes_after_asking(self):
+        d = self.tree()
+        p = self.start(d)
+        self.wait_title(os.path.basename(d) + ' - Disk usage')                  # the scan is over
+        ctl.abs(900, 590)
+        ctl.tap(KEY_ENTER)                                                       # the biggest entry is "big": go in
+        self.wait_title('big - Disk usage')
+        ctl.tap(14)                                                              # Backspace: out again (no new scan: the tree is in memory)
+        self.wait_title(os.path.basename(d) + ' - Disk usage')
+        ctl.tap(KEY_ENTER)
+        self.wait_title('big - Disk usage')
+        ctl.tap(111)                                                             # Delete: blob.bin is the biggest, asks first
+        time.sleep(0.2)
+        ctl.tap(KEY_ESC)
+        time.sleep(0.3)
+        self.assertTrue(os.path.exists(os.path.join(d, 'big', 'blob.bin')), 'Esc must keep the file')
+        ctl.tap(111)
+        ctl.tap(KEY_ENTER)
+        for _ in range(30):
+            if not os.path.exists(os.path.join(d, 'big', 'blob.bin')):
+                break
+            time.sleep(0.1)
+        self.assertFalse(os.path.exists(os.path.join(d, 'big', 'blob.bin')))
+        self.assertTrue(os.path.exists(os.path.join(d, 'big', 'mid.bin')), 'only the selected thing goes')
+        self.assertIsNone(p.poll())
+        ctl.tap(KEY_Q)
+        for _ in range(40):
+            if p.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertEqual(p.poll(), 0)
+
+    def test_a_click_on_a_tile_selects_and_a_double_click_enters(self):
+        d = self.tree()
+        p = self.start(d)
+        self.wait_title(os.path.basename(d) + ' - Disk usage')
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.du'][0]
+        # the first row of the list is the biggest entry ("big"): a double click on the row goes in
+        x, y = win['x'] + 60, win['y'] + 32 + 40 + 10
+        ctl.click(x, y)
+        time.sleep(0.05)
+        ctl.click(x, y)
+        self.wait_title('big - Disk usage')
 
 class TestViewer(Base):
     """mellagui-view in a window: browsing, zoom, title."""
@@ -11611,6 +11882,15 @@ class TestLauncher(Base):
             m = re.match(r'field (\d) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) text="(.*)"', l)
             if m:
                 d['fields'][int(m[1])] = (tuple(int(v) for v in m.groups()[1:5]), m[6])
+            m = re.match(r'caret (\d) (-?\d+)', l)
+            if m:
+                d.setdefault('carets', {})[int(m[1])] = int(m[2])
+            m = re.match(r'help (\d) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d.setdefault('helps', {})[int(m[1])] = tuple(int(v) for v in m.groups()[1:])
+            m = re.match(r'helpcard open=(\d) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) close=(-?\d+),(-?\d+),(\d+),(\d+) title="(.*)"', l)
+            if m:
+                d['helpcard'] = dict(open=int(m[1]), close=tuple(int(v) for v in m.groups()[5:9]), title=m[10])
             m = re.match(r'kind (-?\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
             if m:
                 d['kinds'][int(m[1])] = tuple(int(v) for v in m.groups()[1:])
@@ -11939,6 +12219,65 @@ class TestLauncher(Base):
 
     def focus_line(self, c):
         return [l for l in c.cmd('launcher') if l.startswith('focus')][0]
+
+    KEY_LEFT, KEY_HOME, KEY_END, KEY_BACKSPACE = 105, 102, 107, 14
+
+    def test_the_form_fields_have_a_caret_that_arrows_home_end_and_the_mouse_move(self):
+        c = self.start('mellagui-lc40')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['add']))
+        self.type_text(c, 'abcd')
+        self.assertEqual(self.info(c)['fields'][0][1], 'abcd')
+        c.tap(self.KEY_LEFT)
+        c.tap(self.KEY_LEFT)
+        self.type_text(c, 'x')                                                  # inserted at the caret, not at the end
+        self.assertEqual(self.info(c)['fields'][0][1], 'abxcd')
+        c.tap(self.KEY_BACKSPACE)                                               # removes what is before the caret
+        self.assertEqual(self.info(c)['fields'][0][1], 'abcd')
+        c.tap(self.KEY_DELETE)                                                  # ... Delete what is after it
+        self.assertEqual(self.info(c)['fields'][0][1], 'abd')
+        c.tap(self.KEY_HOME)
+        self.type_text(c, 'z')
+        self.assertEqual(self.info(c)['fields'][0][1], 'zabd')
+        c.tap(self.KEY_END)
+        self.type_text(c, 'e')
+        self.assertEqual(self.info(c)['fields'][0][1], 'zabde')
+        d = self.info(c)
+        fx, fy, fw, fh = d['fields'][0][0]
+        c.click(fx + 10 + 8 * 2 + 2, fy + fh // 2)                              # a click inside the word: between "za" and "bde" (8 pixels a letter)
+        self.assertEqual(self.info(c)['carets'][0], 2)
+        self.type_text(c, 'q')
+        self.assertEqual(self.info(c)['fields'][0][1], 'zaqbde')
+        c.key(29, True)                                                         # Ctrl+Left: to the start of the word
+        c.tap(self.KEY_LEFT)
+        c.key(29, False)
+        c.sync()
+        self.assertEqual(self.info(c)['carets'][0], 0)
+
+    def test_the_form_fields_have_a_question_mark_with_help(self):
+        c = self.start('mellagui-lc41')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['add']))
+        d = self.info(c)
+        for i, title in ((0, 'Name'), (1, 'Command'), (2, 'Icon')):
+            hx, hy, hw, hh = d['helps'][i]
+            fx, fy, fw, fh = d['fields'][i][0]
+            self.assertTrue(fx < hx and hx + hw <= fx + fw and fy <= hy and hy + hh <= fy + fh, 'the "?" is not at the end of field %d' % i)
+            c.click(hx + hw // 2, hy + hh // 2)
+            h = self.info(c)['helpcard']
+            self.assertEqual((h['open'], h['title']), (i + 1, title))
+            c.tap(self.KEY_ESC)                                                 # Esc closes the card, not the form
+            self.assertEqual(self.info(c)['helpcard']['open'], 0)
+            self.assertEqual(self.info(c)['form'], 1)
+        hx, hy, hw, hh = d['helps'][1]
+        c.click(hx + hw // 2, hy + hh // 2)
+        close = self.info(c)['helpcard']['close']
+        c.click(*self.centre(close))                                            # the Close button
+        self.assertEqual(self.info(c)['helpcard']['open'], 0)
+        self.type_text(c, 'x')                                                  # a card that is open takes the typing: nothing lands in the field
+        c.click(hx + hw // 2, hy + hh // 2)
+        self.type_text(c, 'y')
+        self.assertEqual(self.info(c)['fields'][1][1] + self.info(c)['fields'][0][1], 'x')
 
     def test_a_click_on_an_icon_in_edit_mode_changes_that_button_in_place(self):
         c = self.start('mellagui-lc30')

@@ -1171,13 +1171,21 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             fill_round(c, f, 8, 0x58000000u);
             stroke_round(c, f, 8, li->focus == i ? (0xff000000u | COL_PANEL_ACCENT) : 0x90ffffffu);
             char fit[LM_DOCK_CMD_MAX];
-            fit_text(fit, sizeof(fit), li->field_text[i], f->w - 24, true);
+            int vs, ve, avail = f->w - 20 - LM_LAUNCHER_HELP_D - 8;           /* room for the "?" at the end */
+            lm_launcher_field_view(li->field_text[i], li->caret[i], avail, &vs, &ve);
+            snprintf(fit, sizeof(fit), "%.*s", ve - vs, li->field_text[i] + vs);
             int ty = f->y + (f->h - LM_FONT_H) / 2;
             draw_text(c, f, f->x + 10, ty, fit, COL_PANEL_TEXT);
             if (li->focus == i) {
-                struct lm_rect caret = lm_rect_make(f->x + 10 + lm_font_text_width(fit) + 1, ty, 2, LM_FONT_H);
+                char before[LM_DOCK_CMD_MAX];
+                snprintf(before, sizeof(before), "%.*s", li->caret[i] - vs, li->field_text[i] + vs);
+                struct lm_rect caret = lm_rect_make(f->x + 10 + lm_font_text_width(before), ty, 2, LM_FONT_H);
                 fill_rect(c, &caret, COL_PANEL_ACCENT);
             }
+            const struct lm_rect *hb = &li->help_btn[i];                     /* the small "?" circle */
+            float hx = (float)hb->x + (float)hb->w / 2.0f, hy = (float)hb->y + (float)hb->h / 2.0f;
+            paint_shape(c, hx, hy, (float)hb->w / 2.0f, SHAPE_DISC, li->help == i + 1 ? COL_PANEL_ACCENT : 0xffffffu, li->help == i + 1 ? 0xff : 0x90);
+            draw_text_centered(c, hb, "?", li->help == i + 1 ? COL_PANEL : COL_PANEL_TEXT);
         }
         struct lm_rect kl = lm_rect_make(li->card.x + 28, li->kind_box[0].y - LM_FONT_H - 6, li->card.w - 56, LM_FONT_H);
         char lab[64];
@@ -1209,6 +1217,33 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
     lc_text_centered(c, &hint, li->hint, 0xe6edf7u);
     for (int i = 0; i < 2; i++)
         paint_launcher_button(c, &li->button[i], li->button_text[i], li->hover_button == i, i == 0 && li->edit);
+    if (li->form && li->help) {                                         /* a help card above the form: the card is veiled, the help in front of it */
+        fill_round(c, &li->card, 20, 0xa0000000u);
+        fill_round(c, &li->help_card, 14, 0xf0182030u);
+        stroke_round(c, &li->help_card, 14, 0xff000000u | COL_PANEL_ACCENT);
+        struct lm_rect tt = lm_rect_make(li->help_card.x + 20, li->help_card.y + 16, li->help_card.w - 40, LM_FONT_H);
+        lc_text(c, &tt, tt.x, tt.y, li->help_title, 0xff000000u | COL_PANEL_ACCENT);
+        int cols = LM_MAX((li->help_card.w - 40) / LM_FONT_W, 10), ly = li->help_card.y + 44;
+        char line[160];
+        for (const char *p = li->help_text; *p && ly + LM_FONT_H < li->help_close.y;) {          /* word wrap */
+            int len = 0, brk = -1;
+            while (p[len] && len < cols && len < (int)sizeof(line) - 1) {
+                if (p[len] == ' ')
+                    brk = len;
+                len++;
+            }
+            if (p[len] && brk > 0)
+                len = brk;
+            snprintf(line, sizeof(line), "%.*s", len, p);
+            struct lm_rect lr = lm_rect_make(tt.x, ly, tt.w, LM_FONT_H);
+            lc_text(c, &lr, lr.x, lr.y, line, 0xffffffffu);
+            p += len;
+            while (*p == ' ')
+                p++;
+            ly += LM_FONT_H + 3;
+        }
+        paint_launcher_button(c, &li->help_close, "Close", false, false);
+    }
     if (li->drag >= 0 && li->icon[li->drag].item) {                     /* an icon in the hand: the dock lights up as the place to drop it */
         if (li->drop.w > 0) {
             bool hot = li->drop_pos >= 0;

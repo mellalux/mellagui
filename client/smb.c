@@ -81,32 +81,66 @@ static bool write_auth(const struct smb_conn *c, char *path, size_t n)
     return true;
 }
 
-/* Runs smbclient with `argv` (NULL terminated, argv[0] is filled in here); the output goes to *out (malloc'd, NUL terminated), what it wrote on
- * stderr is appended to it. Returns the exit status (0 = fine), or -1 when it could not run / was given up / timed out (err says why). */
-static int run(char **argv, int timeout_ms, char **out, char *err, size_t errsz, smb_poll_fn poll_fn, void *pd, const char *progress_file)
+int smb_run_program(const char *prog_name, char **argv, const char *input, const char *const *env, int timeout_ms, char **out, char *err, size_t errsz,
+                    smb_poll_fn poll_fn, void *pd, const char *missing_text)
 {
-    (void)progress_file;
     *out = NULL;
-    int po[2], pe[2], px[2];                                       /* px: tells the parent that exec failed */
-    if (pipe(po) < 0 || pipe(pe) < 0 || pipe2(px, O_CLOEXEC) < 0) {
+    static bool sigpipe_set;
+    if (!sigpipe_set) {                                            /* a program that ends before it read its input must not kill the caller */
+        signal(SIGPIPE, SIG_IGN);
+        sigpipe_set = true;
+    }
+    int po[2], pe[2], px[2], ps[2], pi[2] = { -1, -1 };            /* px: tells the parent that exec failed; ps: the exit status, from the supervisor */
+    if (pipe(po) < 0 || pipe(pe) < 0 || pipe2(px, O_CLOEXEC) < 0 || pipe2(ps, O_CLOEXEC) < 0 || (input && pipe2(pi, O_CLOEXEC) < 0)) {
         snprintf(err, errsz, "cannot make a pipe");
         return -1;
     }
-    argv[0] = (char *)program();
+    argv[0] = (char *)prog_name;
     pid_t pid = fork();
     if (pid < 0) {
-        snprintf(err, errsz, "cannot start %s", program());
+        snprintf(err, errsz, "cannot start %s", prog_name);
         return -1;
     }
-    if (pid == 0) {
+    if (pid == 0) {                                                /* the supervisor: it starts the program and tells the exit status (the caller may ignore SIGCHLD, then it cannot wait) */
         setpgid(0, 0);
+        signal(SIGCHLD, SIG_DFL);                                  /* (an ignored SIGCHLD would be inherited by the program: sftp waits for its ssh) */
+        signal(SIGPIPE, SIG_DFL);
+        pid_t g = fork();
+        if (g != 0) {
+            close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); close(px[1]); close(ps[0]);
+            if (input) {
+                close(pi[0]);
+                close(pi[1]);
+            }
+            int st = -1;
+            if (g > 0 && waitpid(g, &st, 0) < 0)
+                st = -1;
+            if (write(ps[1], &st, sizeof(st)) < 0) {}
+            _exit(0);
+        }
         dup2(po[1], 1);
         dup2(pe[1], 2);
-        int nul = open("/dev/null", O_RDONLY);
-        if (nul >= 0)
-            dup2(nul, 0);
-        close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); close(px[0]);
+        if (input) {
+            dup2(pi[0], 0);
+        } else {
+            int nul = open("/dev/null", O_RDONLY);
+            if (nul >= 0)
+                dup2(nul, 0);
+        }
+        close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); close(px[0]); close(ps[0]); close(ps[1]);
+        if (input) {
+            close(pi[0]);
+            close(pi[1]);
+        }
         setenv("LC_ALL", "C", 1);                                  /* the output is parsed: no translations */
+        for (; env && *env; env++) {                               /* "NAME=value" */
+            const char *eq = strchr(*env, '=');
+            if (eq) {
+                char nm[64];
+                snprintf(nm, sizeof(nm), "%.*s", (int)(eq - *env < 63 ? eq - *env : 63), *env);
+                setenv(nm, eq + 1, 1);
+            }
+        }
         execvp(argv[0], argv);
         int e = errno;
         if (write(px[1], &e, sizeof(e)) < 0) {}
@@ -115,6 +149,13 @@ static int run(char **argv, int timeout_ms, char **out, char *err, size_t errsz,
     close(po[1]);
     close(pe[1]);
     close(px[1]);
+    close(ps[1]);
+    if (input) {                                                   /* (small: it fits the pipe) */
+        close(pi[0]);
+        size_t il = strlen(input);
+        if (write(pi[1], input, il) < 0) {}
+        close(pi[1]);
+    }
     g_child = pid;
     int exec_errno = 0;
     bool no_program = read(px[0], &exec_errno, sizeof(exec_errno)) == (ssize_t)sizeof(exec_errno);
@@ -175,10 +216,15 @@ static int run(char **argv, int timeout_ms, char **out, char *err, size_t errsz,
     close(po[0]);
     close(pe[0]);
     g_child = 0;
-    if (waitpid(pid, &status, 0) > 0)
-        exited = true;
-    else if (errno == ECHILD)                                      /* the caller ignores SIGCHLD: the status is gone, the output has to tell */
-        status = 0, exited = true;
+    if (!gave_up) {                                                /* the supervisor writes the status of the program when it is over */
+        int st;
+        if (read(ps[0], &st, sizeof(st)) == (ssize_t)sizeof(st) && st != -1) {
+            status = st;
+            exited = true;
+        }
+    }
+    close(ps[0]);
+    waitpid(pid, NULL, 0);                                         /* the supervisor (fails with ECHILD when the caller ignores SIGCHLD: no matter) */
     buf[len] = 0;
     if (elen) {
         ebuf[elen] = 0;
@@ -193,10 +239,19 @@ static int run(char **argv, int timeout_ms, char **out, char *err, size_t errsz,
     if (gave_up)
         return -1;
     if (no_program) {
-        snprintf(err, errsz, "smbclient is not installed (package smbclient / samba-client)");
+        snprintf(err, errsz, "%s", missing_text);
         return -1;
     }
     return exited && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* Runs smbclient with `argv` (NULL terminated, argv[0] is filled in here); the output goes to *out (malloc'd, NUL terminated), what it wrote on
+ * stderr is appended to it. Returns the exit status (0 = fine), or -1 when it could not run / was given up / timed out (err says why). */
+static int run(char **argv, int timeout_ms, char **out, char *err, size_t errsz, smb_poll_fn poll_fn, void *pd, const char *progress_file)
+{
+    (void)progress_file;
+    return smb_run_program(program(), argv, NULL, NULL, timeout_ms, out, err, errsz, poll_fn, pd,
+                           "smbclient is not installed (package smbclient / samba-client)");
 }
 
 /* Builds the common arguments and runs `-c cmd` (or the listing of the server when share is NULL). */

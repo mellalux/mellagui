@@ -5,6 +5,7 @@
 #   make mellagui-term build/mellagui-term   (client/mellagui-term.c)
 #   make mellagui-calc build/mellagui-calc   (client/mellagui-calc.c)
 #   make mellagui-matrix build/mellagui-matrix (client/mellagui-matrix.c, the screensaver)
+#   make mellagui-du   build/mellagui-du   (client/mellagui-du.c, disk usage: list and tree map)
 #   make mellagui-top  build/mellagui-top  (client/mellagui-top.c, the process and service manager)
 #   make mellagui-cam  build/mellagui-cam    (client/mellagui-cam.c, the webcam viewer, V4L2)
 #   make mellagui-calendar build/mellagui-calendar (client/mellagui-calendar.c, the calendar of the panel's clock)
@@ -42,9 +43,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-keys $(BUILD)/mellagui-top
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-keys mellagui-top asan test run clean fuzz fuzz-run
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-keys mellagui-top mellagui-du asan test run clean fuzz fuzz-run
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -85,6 +86,10 @@ $(BUILD)/mellagui-matrix: $(BUILD)/client/mellagui-matrix.o $(BUILD)/client/wlc.
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+$(BUILD)/mellagui-du: $(BUILD)/client/mellagui-du.o $(BUILD)/client/wlclip.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+
 $(BUILD)/mellagui-top: $(BUILD)/client/mellagui-top.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/src/sysinfo.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -105,7 +110,7 @@ $(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/smb.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/smb.o $(BUILD)/client/sftp.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

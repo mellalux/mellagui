@@ -10658,7 +10658,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 35)
+        self.assertEqual(len(t), 37)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -10703,7 +10703,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 36)
+        self.assertEqual(len(t), 38)
         self.assertTrue(alive_p(p))
 
 
@@ -11069,6 +11069,167 @@ class TestNightLight(Base):
             c.key(code, bool(down))
         self.wait(lambda: self.night(c)['mode'] == 'off' and self.night(c)['level'] == '0.00', 'off')
 
+
+class TestNotifyHistory(Base):
+    """The history of notifications, "do not disturb", the history window (mellagui-notes) and the bell of mellagui-status."""
+    ACCENT = TestNotify.ACCENT
+    CARD_X = 1280 - 320 - 12                      # (these compositors are 1280x600)
+
+    def start(self, name, env=None, conf=None):
+        path = os.path.join(tmp, name + '.settings')
+        if os.path.exists(path):
+            os.unlink(path)
+        if conf:
+            with open(path, 'w') as f:
+                f.write(conf)
+        p, c, stop = self.private_compositor(name, '--config', 'none', '--settings', path, '--size', '1280x600', env=env)
+        c.abs(20, 580)
+        c.sync()
+        self.path = path
+        return c
+
+    @staticmethod
+    def notes(c):
+        """[(id, unread, title, body)] newest first."""
+        out = []
+        for l in c.cmd('notes'):
+            head, _, body = l.partition('\t')
+            _, i, u, title = head.split(' ', 3)
+            out.append((i, u, title, body))
+        return out
+
+    @staticmethod
+    def val(c, key):
+        if key == 'notes-count':
+            return str(len(c.cmd('notes')))
+        if key == 'notes-unread':
+            c.cmd('notes')
+            return dict(kv.split('=') for kv in c.last.split()[1:])['unread']
+        c.cmd('setting ' + key)
+        return c.last[3:]
+
+    def cards(self, c, tag):
+        c.abs(20, 580)
+        c.sync()
+        time.sleep(0.15)
+        ppm = c.dump(os.path.join(tmp, 'nh-%s.ppm' % tag))
+        n, start = 0, None
+        for y in range(28, 600):
+            hit = ppm.px(self.CARD_X + 2, y) == self.ACCENT
+            if hit and start is None:
+                start = y
+            if not hit and start is not None:
+                n += (y - start > 15)
+                start = None
+        return n
+
+    def wait(self, pred, what, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def test_every_notification_is_logged_newest_first(self):
+        c = self.start('mellagui-nh1')
+        self.assertEqual(self.val(c, 'notes-count'), '0')
+        c.cmd('notify 0 First one')
+        c.cmd('notify 0 Second two words')
+        n = self.notes(c)
+        self.assertEqual([(t, b.strip()) for _, _, t, b in n], [('Second', 'two words'), ('First', 'one')])
+        self.assertEqual(self.val(c, 'notes-unread'), '2')
+        c.cmd('settings notes-read 1')
+        self.assertEqual(self.val(c, 'notes-unread'), '0')
+        c.cmd('notify 0 Third x')
+        self.assertEqual(self.val(c, 'notes-unread'), '1')
+        c.cmd('settings notes-del %s' % n[1][0])                                  # forget "First"
+        self.assertEqual([t for _, _, t, _ in self.notes(c)], ['Third', 'Second'])
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings notes-del 99999')
+        c.cmd('settings notes-clear 1')
+        self.assertEqual((self.val(c, 'notes-count'), self.notes(c)), ('0', []))
+
+    def test_the_history_keeps_fifty(self):
+        c = self.start('mellagui-nh2')
+        for i in range(55):
+            c.cmd('notify 1 N%d x' % i)
+        self.assertEqual(self.val(c, 'notes-count'), '50')
+        n = self.notes(c)
+        self.assertEqual((len(n), n[0][2], n[-1][2]), (50, 'N54', 'N5'))
+
+    def test_do_not_disturb_keeps_the_cards_away_but_logs(self):
+        c = self.start('mellagui-nh3')
+        c.cmd('settings dnd 1')
+        self.assertEqual(self.val(c, 'dnd'), '1')
+        c.click(self.CARD_X + 100, 50)                                           # the answer card ("Do not disturb: On") goes
+        self.assertEqual(self.cards(c, 'gone'), 0)
+        c.cmd('notify 0 Quiet please')
+        self.assertEqual(self.cards(c, 'dnd'), 0)
+        self.assertEqual(self.val(c, 'notes-unread'), '1')
+        self.assertEqual(self.notes(c)[0][2], 'Quiet')
+        c.cmd('settings dnd 0')                                                  # the answer says what came meanwhile
+        self.assertEqual(self.cards(c, 'off'), 1)
+        c.cmd('notify 0 Loud now')
+        self.assertEqual(self.cards(c, 'off2'), 2)
+
+    def test_do_not_disturb_is_saved_and_super_n_switches_it(self):
+        c = self.start('mellagui-nh4')
+        self.assertEqual(self.val(c, 'dnd'), '0')
+        for code, down in ((KEY_LEFTMETA, 1), (49, 1), (49, 0), (KEY_LEFTMETA, 0)):
+            c.key(code, bool(down))
+        self.wait(lambda: self.val(c, 'dnd') == '1', 'Super+N switches it on')
+        self.wait(lambda: os.path.exists(self.path) and 'dnd=1' in open(self.path).read(), 'saved')
+        c2 = self.start('mellagui-nh4b', conf='dnd=1\n')
+        self.assertEqual(self.val(c2, 'dnd'), '1')
+        for code, down in ((KEY_LEFTMETA, 1), (49, 1), (49, 0), (KEY_LEFTMETA, 0)):
+            c2.key(code, bool(down))
+        self.wait(lambda: self.val(c2, 'dnd') == '0', 'and off again')
+
+    def test_the_history_window_lists_deletes_and_clears(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-notes')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-notes not built')
+        c = self.start('mellagui-nh5')
+        for t in ('Alpha', 'Beta', 'Gamma'):
+            c.cmd('notify 1 %s body of %s' % (t, t))
+        self.assertEqual(self.val(c, 'notes-unread'), '3')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-nh5'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.notes'], 'its window')
+        self.wait(lambda: self.val(c, 'notes-unread') == '0', 'opening it marks them read')
+        c.tap(111)                                                               # Delete: forgets the chosen (newest) one
+        self.wait(lambda: [t for _, _, t, _ in self.notes(c)] == ['Beta', 'Alpha'], 'Delete forgets it')
+        c.cmd('notify 1 Delta while open')                                       # it follows what comes in ...
+        self.wait(lambda: self.val(c, 'notes-count') == '3', 'logged')
+        self.wait(lambda: self.val(c, 'notes-unread') == '0', '... and counts it as read')
+        c.tap(46)                                                                # C clears all
+        self.wait(lambda: self.val(c, 'notes-count') == '0', 'C clears the history')
+        c.tap(KEY_ESC)
+        self.wait(lambda: pr.poll() is not None, 'Esc closes it')
+
+    def test_the_bell_shows_unread_and_dnd_and_its_menu_works(self):
+        st = os.path.join(ROOT, 'build', 'mellagui-status')
+        if not os.path.exists(st):
+            self.skipTest('mellagui-status not built')
+        d = os.path.join(tmp, 'nh6-power')
+        os.makedirs(d, exist_ok=True)
+        c = self.start('mellagui-nh6', env={'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': d, 'MELLAGUI_NMCLI': 'none'})
+        time.sleep(0.5)
+        self.assertEqual(TestStatus.items(c), [])                                # nothing to say: no bell
+        c.cmd('notify 0 Hello there')
+        its = TestStatus.items(c, want=1)
+        self.assertEqual([i['text'] for i in its], ['1'])
+        c.cmd('settings dnd 1')
+        self.wait(lambda: self.val(c, 'dnd') == '1', 'dnd')
+        bell = TestStatus.items(c, want=1)[0]
+        c.click(int(bell['x']) + 5, int(bell['y']) + 5)
+        self.wait(lambda: 'open=1' in c.cmd('dockmenu')[0], 'the bell menu')
+        labels = [e[0] for e in TestStatus.entries(c)]
+        self.assertEqual(labels, ['1 unread notification', 'Show notifications...', 'Turn Do not disturb off', 'Clear the history'])
+        ents = TestStatus.entries(c)
+        c.click(ents[2][1], ents[2][2])                                          # Turn Do not disturb off
+        self.wait(lambda: self.val(c, 'dnd') == '0', 'the menu switches DND off')
 
 class TestSaver(Base):
     """The screensaver: after idle time the compositor starts mellagui-matrix (a full screen client); the first input ends it."""
@@ -12011,12 +12172,12 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '35')
+        self.assertEqual(self.get(c, 'keys-count'), '37')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 5)
+        self.assertEqual(len(self.rows(c, 3)), 7)
         self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -12040,13 +12201,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '35')
+        self.assertEqual(self.get(c, 'keys-count'), '37')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '36')
+        self.assertEqual(self.get(c, 'keys-count'), '38')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')

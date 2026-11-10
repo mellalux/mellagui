@@ -5,6 +5,7 @@
 #include "keys.h"
 #include "launchers.h"
 #include "nightlight.h"
+#include "notifylog.h"
 #include "menu.h"
 #include "wm.h"
 
@@ -656,7 +657,30 @@ static void note_tick(void *data)
     note_timer_arm(wm);
 }
 
+static void notify_card(struct lm_wm *wm, const char *title, const char *body, int timeout_ms);
+
+/* A notification: kept in the history (notifylog.h) and, unless "do not disturb" is on, shown as a card. */
 void lm_wm_notify(struct lm_wm *wm, const char *title, const char *body, int timeout_ms)
+{
+    if (!wm)
+        return;
+    if (wm->srv->notelog) {
+        lm_notelog_add(wm->srv->notelog, title, body, time(NULL));
+        if (wm->srv->settings)
+            lm_settings_changed(wm->srv->settings);                    /* the readers of notes-N / notes-unread */
+    }
+    if (!wm->srv->config.dnd)
+        notify_card(wm, title, body, timeout_ms);
+}
+
+/* The same without the history and whatever "do not disturb" says: feedback for the user's own switch. */
+void lm_wm_notify_now(struct lm_wm *wm, const char *title, const char *body, int timeout_ms)
+{
+    if (wm)
+        notify_card(wm, title, body, timeout_ms);
+}
+
+static void notify_card(struct lm_wm *wm, const char *title, const char *body, int timeout_ms)
 {
     if (!wm || !gadget_output(wm))
         return;
@@ -7049,6 +7073,10 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_OSK: osk_set(wm, !wm->osk_open); break;
     case LM_ACT_OVERVIEW: overview_set(wm, !wm->ov.open || wm->ov.closing); break;
     case LM_ACT_NIGHT_LIGHT: lm_night_toggle(wm->srv->night); break;
+    case LM_ACT_DND:
+        if (wm->srv->settings)
+            lm_settings_set(wm->srv->settings, "dnd", wm->srv->config.dnd ? "0" : "1");
+        break;
     case LM_ACT_SETTINGS: launch_settings(wm); break;
     case LM_ACT_EXEC: {
         char cmd[2048];

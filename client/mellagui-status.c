@@ -643,6 +643,41 @@ static void draw_wifi(uint32_t *px, int s, int signal, bool slash)
     }
 }
 
+/* The notification bell: a dome that flares out, a lip and a clapper; a red dot when something is unread, a slash while "do not disturb" is on. */
+static void draw_bell(uint32_t *px, int s, bool unread, bool dnd)
+{
+    memset(px, 0, (size_t)s * (size_t)s * 4);
+    float fs = (float)s, cx = fs * 0.5f;
+    for (int y = 0; y < s; y++)
+        for (int x = 0; x < s; x++) {
+            float fx = (float)x + 0.5f, fy = (float)y + 0.5f, u = fy / fs, hw = -1.0f;      /* hw = half width of the bell at this height, in s units */
+            if (u >= 0.17f && u < 0.40f) {                      /* the dome */
+                float dy = (0.40f - u) / 0.23f;
+                hw = 0.24f * sqrtf(fmaxf(1.0f - dy * dy, 0.0f));
+            } else if (u >= 0.40f && u < 0.64f) {               /* the flare */
+                hw = 0.24f + 0.12f * (u - 0.40f) / 0.24f;
+            } else if (u >= 0.64f && u < 0.71f) {               /* the lip */
+                hw = 0.40f;
+            }
+            float cov = hw > 0.0f ? clamp01(hw * fs - fabsf(fx - cx) + 0.5f) : 0.0f;
+            blend(&px[y * s + x], lm_theme.text, cov, 1.0f);
+            blend(&px[y * s + x], lm_theme.text, clamp01(fs * 0.075f + 0.5f - hypotf(fx - cx, fy - fs * 0.15f)), 1.0f);             /* the knob */
+            blend(&px[y * s + x], lm_theme.text, clamp01(fs * 0.09f + 0.5f - hypotf(fx - cx, fy - fs * 0.82f)), 1.0f);              /* the clapper */
+            if (unread)
+                blend(&px[y * s + x], lm_theme.alert, clamp01(fs * 0.14f + 0.5f - hypotf(fx - fs * 0.80f, fy - fs * 0.22f)), 1.0f);
+        }
+    if (dnd) {
+        float width = fmaxf(1.4f, fs * 0.09f);
+        for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++) {
+                float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
+                float x0 = fs * 0.12f, y0 = fs * 0.12f, x1 = fs * 0.88f, y1 = fs * 0.88f;
+                float dx = x1 - x0, dy = y1 - y0, t = clamp01(((fx - x0) * dx + (fy - y0) * dy) / (dx * dx + dy * dy));
+                blend(&px[y * s + x], lm_theme.warn, clamp01(width * 0.6f + 0.5f - hypotf(fx - (x0 + t * dx), fy - (y0 + t * dy))), 1.0f);
+            }
+    }
+}
+
 /* Ethernet: a plug (a body with a notch and a cable). */
 static void draw_ethernet(uint32_t *px, int s)
 {
@@ -662,7 +697,7 @@ static void draw_ethernet(uint32_t *px, int s)
 
 /* ---- the tray buttons ------------------------------------------------------------------------------------------------------------- */
 
-enum { ITEM_BATTERY, ITEM_NETWORK, ITEM_COUNT };
+enum { ITEM_BATTERY, ITEM_NETWORK, ITEM_BELL, ITEM_COUNT };
 
 struct tray_item {
     uint32_t id, pool, buf;
@@ -687,13 +722,16 @@ struct app {
     int nnets;
     uint64_t bat_at, net_at;
     bool warned15, warned5;
-    int menu_kind;                      /* 0 none, 1 battery, 2 network */
+    int menu_kind;                      /* 0 none, 1 battery, 2 network, 3 notifications */
+    int unread;                         /* notifications not looked at (the settings value notes-unread) */
+    bool dnd;                           /* "do not disturb" is on */
+    bool bell_dirty;                    /* unread / dnd changed: look at the bell */
     struct { int action; char ssid[64]; bool secured, known; } menu_act[MENU_ENTRIES];
     int menu_n;
     char self[512];
 };
 
-enum { ACT_NONE, ACT_RADIO, ACT_RESCAN, ACT_DISCONNECT, ACT_CONNECT_KNOWN, ACT_CONNECT_OPEN, ACT_CONNECT_PASSWORD };
+enum { ACT_NONE, ACT_NOTES_SHOW, ACT_NOTES_DND, ACT_NOTES_CLEAR, ACT_RADIO, ACT_RESCAN, ACT_DISCONNECT, ACT_CONNECT_KNOWN, ACT_CONNECT_OPEN, ACT_CONNECT_PASSWORD };
 
 static void buffer_nothing(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
@@ -797,6 +835,11 @@ static void draw_battery_item(struct app *a, struct tray_item *it)
     draw_battery(it->map, it->size, b ? b->percent : -1, b && bat_charging(b));
 }
 
+static void draw_bell_item(struct app *a, struct tray_item *it)
+{
+    draw_bell(it->map, it->size, a->unread > 0, a->dnd);
+}
+
 static void draw_network_item(struct app *a, struct tray_item *it)
 {
     const struct netinfo *n = &a->net;
@@ -837,6 +880,19 @@ static void items_update(struct app *a)
             snprintf(t, sizeof(t), "Ethernet");
         uint64_t key = (uint64_t)n->kind * 1000 + (uint64_t)(n->signal / 10) * 10 + (n->wifi_enabled ? 1 : 0) + (n->wifi_present ? 2 : 0) + ((uint64_t)lm_theme.text << 32);
         item_set(a, ITEM_NETWORK, key, t, draw_network_item);
+    }
+    bool have_bell = a->settings && (a->unread > 0 || a->dnd);          /* the bell is there while there is something to read or DND is on */
+    if (have_bell)
+        item_make(a, ITEM_BELL);
+    else
+        item_drop(a, ITEM_BELL);
+    if (have_bell) {
+        char t[32] = "";
+        if (a->unread > 0)
+            snprintf(t, sizeof(t), "%d", a->unread);
+        else
+            snprintf(t, sizeof(t), "DND");
+        item_set(a, ITEM_BELL, (uint64_t)LM_MIN(a->unread, 99) * 4 + (a->dnd ? 2 : 0) + (a->unread > 0 ? 1 : 0) + ((uint64_t)lm_theme.text << 32), t, draw_bell_item);
     }
 }
 
@@ -940,6 +996,56 @@ static void open_network_menu(struct app *a)
     wlwin_menu(&a->win, buf);
 }
 
+static void settings_send(struct app *a, const char *key, const char *value)
+{
+    if (a->settings)
+        WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = key }, { .s = value });
+}
+
+/* The history window is another program next to this one (started twice, so that nobody has to wait for it). */
+static void start_notes(struct app *a)
+{
+    char path[sizeof(a->self) + 16];
+    snprintf(path, sizeof(path), "%s", a->self);
+    char *slash = strrchr(path, '/');
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+            if (slash) {
+                snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "mellagui-notes");
+                execl(path, path, (char *)NULL);
+            }
+            execlp("mellagui-notes", "mellagui-notes", (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
+static void open_bell_menu(struct app *a)
+{
+    char buf[512], line[96];
+    size_t o = 0;
+    a->menu_n = 0;
+    if (a->unread > 0)
+        snprintf(line, sizeof(line), "~%d unread notification%s", a->unread, a->unread == 1 ? "" : "s");
+    else
+        snprintf(line, sizeof(line), "~No unread notifications");
+    menu_line(buf, sizeof(buf), &o, line);
+    a->menu_act[a->menu_n++].action = ACT_NONE;
+    menu_line(buf, sizeof(buf), &o, "Show notifications...");
+    a->menu_act[a->menu_n++].action = ACT_NOTES_SHOW;
+    menu_line(buf, sizeof(buf), &o, a->dnd ? "Turn Do not disturb off" : "Turn Do not disturb on");
+    a->menu_act[a->menu_n++].action = ACT_NOTES_DND;
+    menu_line(buf, sizeof(buf), &o, "Clear the history");
+    a->menu_act[a->menu_n++].action = ACT_NOTES_CLEAR;
+    a->menu_kind = 3;
+    wlwin_menu(&a->win, buf);
+}
+
 static void do_action(struct app *a, int idx)
 {
     if (idx < 0 || idx >= a->menu_n)
@@ -948,6 +1054,15 @@ static void do_action(struct app *a, int idx)
     char out[512];
     int rc;
     switch (a->menu_act[idx].action) {
+    case ACT_NOTES_SHOW:
+        start_notes(a);
+        return;
+    case ACT_NOTES_DND:
+        settings_send(a, "dnd", a->dnd ? "0" : "1");
+        return;
+    case ACT_NOTES_CLEAR:
+        settings_send(a, "notes-clear", "1");
+        return;
     case ACT_RADIO:
         rc = nmcli(out, sizeof(out), 8000, "radio", "wifi", a->net.wifi_enabled ? "off" : "on", NULL);
         if (rc != 0)
@@ -996,7 +1111,7 @@ static void menu_event(struct wlwin *w, int index)
     struct app *a = w->data;
     int kind = a->menu_kind;
     a->menu_kind = 0;
-    if (kind == 2 && index >= 0)
+    if ((kind == 2 || kind == 3) && index >= 0)
         do_action(a, index);
 }
 
@@ -1004,7 +1119,17 @@ static void menu_event(struct wlwin *w, int index)
 
 static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
-    (void)c; (void)id; (void)op; (void)args; (void)data;
+    (void)c; (void)id;
+    struct app *a = data;
+    if (op != LM_MELLAGUI_SETTINGS_V1_EVT_VALUE)
+        return;
+    if (!strcmp(args[0].s, "notes-unread") && atoi(args[1].s) != a->unread) {
+        a->unread = atoi(args[1].s);
+        a->bell_dirty = true;
+    } else if (!strcmp(args[0].s, "dnd") && (atoi(args[1].s) != 0) != a->dnd) {
+        a->dnd = atoi(args[1].s) != 0;
+        a->bell_dirty = true;
+    }
 }
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
@@ -1038,7 +1163,7 @@ static int run_background(bool battery, bool network)
     refresh_battery(&a);
     refresh_net(&a);
     items_update(&a);
-    if (!a.item[ITEM_BATTERY].id && !a.item[ITEM_NETWORK].id) {
+    if (!a.item[ITEM_BATTERY].id && !a.item[ITEM_NETWORK].id && !a.settings) {
         rc = 0;                                                  /* nothing to show: no battery and no NetworkManager */
         goto out;
     }
@@ -1057,6 +1182,14 @@ static int run_background(bool battery, bool network)
         if (g_icon_wanted) {
             g_icon_wanted = false;
             items_update(&a);
+        }
+        if (a.bell_dirty) {
+            a.bell_dirty = false;
+            items_update(&a);
+        }
+        if (a.item[ITEM_BELL].clicked) {
+            a.item[ITEM_BELL].clicked = false;
+            open_bell_menu(&a);
         }
         if (a.item[ITEM_BATTERY].clicked) {
             a.item[ITEM_BATTERY].clicked = false;

@@ -26,6 +26,7 @@
 #include "render.h"
 #include "seat.h"
 #include "nightlight.h"
+#include "notifylog.h"
 #include "settings.h"
 #include "lock.h"
 #include "wm.h"
@@ -347,6 +348,14 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, "saver running=%d enabled=%d minutes=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
                   srv->config.saver_min);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "notes")) {
+        /* notes -> one "note <id> <unread 0|1> <title>\t<body>" line per entry of the notification history, newest first (notifylog.h), then "ok n=<count> unread=<n> dnd=<0|1>" */
+        const struct lm_notelog *nl = srv->notelog;
+        for (int i = 0; i < lm_notelog_count(nl) && i < LM_NOTELOG_MAX; i++) {
+            const struct lm_notelog_entry *e = lm_notelog_get(nl, i);
+            ctl_reply(c, "note %d %d %s\t%s\n", e->id, e->unread, e->title, e->body);
+        }
+        ctl_reply(c, "ok n=%d unread=%d dnd=%d\n", lm_notelog_count(nl), lm_notelog_unread(nl), srv->config.dnd);
     } else if (!strcmp(cmd, "night")) {
         /* night -> "night mode=off|on|auto kelvin=<K> from=HH:MM to=HH:MM active=<0|1> level=<0..1> tint=<r>,<g>,<b>" (night light, nightlight.h; the tint is what the display shows now), then "ok" */
         const struct lm_config *cf = &srv->config;

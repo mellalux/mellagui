@@ -47,6 +47,8 @@
     "Super+K           = osk\n" \
     "Super+W           = overview\n" \
     "Super+Shift+N     = night-light\n" \
+    "Super+N           = dnd\n" \
+    "Super+Ctrl+N      = exec mellagui-notes\n" \
     "Super+Shift+R     = reload-config\n" \
     "Super+Slash       = exec mellagui-keys\n" \
     "Ctrl+Shift+Escape = exec mellagui-top\n"
@@ -151,7 +153,7 @@ static const struct action_def actions[] = {
     { "maximize", LM_ACT_MAXIMIZE, ARG_NONE }, { "restore", LM_ACT_RESTORE, ARG_NONE },
     { "tile-left", LM_ACT_TILE_LEFT, ARG_NONE }, { "tile-right", LM_ACT_TILE_RIGHT, ARG_NONE },
     { "reload-config", LM_ACT_RELOAD_CONFIG, ARG_NONE }, { "launcher", LM_ACT_LAUNCHER, ARG_NONE }, { "osk", LM_ACT_OSK, ARG_NONE }, { "overview", LM_ACT_OVERVIEW, ARG_NONE },
-    { "night-light", LM_ACT_NIGHT_LIGHT, ARG_NONE },
+    { "night-light", LM_ACT_NIGHT_LIGHT, ARG_NONE }, { "dnd", LM_ACT_DND, ARG_NONE },
 };
 
 /* ---- the table ---------------------------------------------------------------------------------------------------- */

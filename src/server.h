@@ -153,6 +153,7 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */
     int night_mode;             /* night light: 0 off, 1 on, 2 between night_from and night_to (settings: night-light), see nightlight.h */
     int night_kelvin;           /* ... at this colour temperature (settings: night-temp; default 3400) */
     char night_from[8], night_to[8];   /* "HH:MM" (settings: night-from, night-to; default 21:00 and 06:30) */
@@ -277,6 +278,7 @@ struct lm_server {
     int reload_result;
     int (*reload_config)(struct lm_server *, bool quiet); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file; `quiet` = no "read again" card on the screen */
     struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
+    struct lm_notelog *notelog;         /* the history of notifications (notifylog.h) */
     struct lm_night *night;             /* night light: warmer colours in the evening (nightlight.h) */
     struct lm_saver *saver;             /* the screensaver (starts a program when idle), see saver.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */

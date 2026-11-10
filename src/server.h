@@ -81,6 +81,7 @@ struct lm_input;
 struct lm_settings;
 struct lm_capture;
 struct lm_tray;
+struct lm_idle_inhibit;
 struct lm_mixer;
 struct lm_sysinfo;
 struct lm_dmabuf;
@@ -250,6 +251,7 @@ struct lm_server {
     struct lm_input *input;             /* evdev (or inject-only for headless) */
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
     struct lm_capture *capture;         /* mellagui_capture_v1: the screen for mellagui-record (capture.h) */
+    struct lm_idle_inhibit *idle_inhibit; /* zwp_idle_inhibit_manager_v1 (idleinhibit.h) */
     struct lm_tray *tray;               /* mellagui_tray_v1: programs' icons in the top bar (tray.h) */
     bool reloaded;                      /* a reload happened; reload_result = rejected lines of the last one, -1 = no readable file */
     int reload_result;

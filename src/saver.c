@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "idleinhibit.h"
 #include "lock.h"
 #include "log.h"
 #include "loop.h"
@@ -99,6 +100,10 @@ static void tick_cb(void *data)
     reap_if_gone(s);
     if (s->pid > 0 || !cfg->saver || cfg->saver_min <= 0)
         return;
+    if (lm_idle_inhibited(s->srv->idle_inhibit)) {              /* a film is on: the idle time starts when it is over */
+        s->last_activity = lm_now_ms();
+        return;
+    }
     if (lm_now_ms() - s->last_activity < (uint64_t)cfg->saver_min * unit_ms())
         return;
     if (s->srv->lock && lm_lock_active(s->srv->lock))

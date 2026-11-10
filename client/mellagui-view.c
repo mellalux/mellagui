@@ -72,6 +72,7 @@ struct app {
     struct lm_mp4r *vid;                /* the video being played with our own reader (Motion JPEG) ... */
     struct ffdec *fd;                   /* ... or through ffmpeg (anything else, when it is installed) */
     int vmode;                          /* 0 an image, 1 Motion JPEG (vid), 2 ffmpeg (fd), 3 our own H.264 decoder (vid + hd) */
+    uint32_t idle_mgr, inhibitor;       /* zwp_idle_inhibit_manager_v1 and the inhibitor that exists while a video plays */
     struct lm_h264dec *hd;              /* 3: the decoder ... */
     uint32_t hdone;                     /* ... and the picture it has decoded last (~0u: none, it has to start at an IDR picture) */
     int fw, fh;                         /* ffmpeg: the size of its pictures */
@@ -951,6 +952,30 @@ static int decode_cmd(const char *in, const char *out, int frame)
     return 0;
 }
 
+/* ---- idle inhibitor: the screen must not go to sleep or lock while a video plays ----------------------------------------- */
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
+{
+    (void)ver;
+    struct app *a = w->data;
+    if (!strcmp(iface, "zwp_idle_inhibit_manager_v1"))
+        a->idle_mgr = wlc_bind(w->c, w->registry, name, &lm_zwp_idle_inhibit_manager_v1_interface, 1, NULL, a);
+}
+
+static void sync_inhibitor(struct app *a)
+{
+    if (!a->idle_mgr)
+        return;
+    if (a->playing && !a->inhibitor) {
+        a->inhibitor = wlc_alloc(a->win.c, &lm_zwp_idle_inhibitor_v1_interface, NULL, a);
+        WLC_SEND(a->win.c, a->idle_mgr, LM_ZWP_IDLE_INHIBIT_MANAGER_V1_REQ_CREATE_INHIBITOR, { .n = a->inhibitor }, { .o = a->win.surface });
+    } else if (!a->playing && a->inhibitor) {
+        WLC_SEND0(a->win.c, a->inhibitor, LM_ZWP_IDLE_INHIBITOR_V1_REQ_DESTROY);
+        wlc_forget(a->win.c, a->inhibitor);
+        a->inhibitor = 0;
+    }
+}
+
 int main(int argc, char **argv)
 {
     lm_theme_load_env();
@@ -983,14 +1008,16 @@ int main(int argc, char **argv)
     }
     scan_dir(&a, keep);
 
-    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event };
     if (wlwin_connect(&a.win, "mellagui-view", &ops, &a) < 0)
         return 1;
     if (wlwin_open(&a.win, "Images", "mellagui.view", 860, 520, 240, 160) < 0)
         return 1;
     load_current(&a);
-    while (wlwin_step(&a.win, video_timeout(&a)))
+    while (wlwin_step(&a.win, video_timeout(&a))) {
         video_tick(&a);
+        sync_inhibitor(&a);
+    }
     wlwin_destroy(&a.win);
     lm_mp4r_close(a.vid);
     lm_h264dec_free(a.hd);

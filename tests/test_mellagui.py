@@ -7049,6 +7049,122 @@ class TestViewer(Base):
         self.assertTrue(self.wait_title('z-junk.mp4 - Images'))
         self.assertIsNone(p.poll())
 
+    def test_a_playing_video_keeps_the_screen_awake(self):
+        """zwp_idle_inhibit_manager_v1: the viewer holds an inhibitor while a video plays, not while it is paused."""
+        d = self.video_dir()
+        self.make_video(d, seconds=4)
+        self.assertEqual(ctl.cmd('idle')[0], 'idle inhibitors=0 inhibited=0')
+        p, win = self.start(d, os.path.join(d, 'clip.mp4'))
+        self.assertTrue(self.wait_title('clip.mp4 - Images'))
+        ctl.abs(900, 590)
+        deadline = time.time() + 3
+        while time.time() < deadline and ctl.cmd('idle')[0] != 'idle inhibitors=1 inhibited=1':
+            time.sleep(0.05)
+        self.assertEqual(ctl.cmd('idle')[0], 'idle inhibitors=1 inhibited=1')
+        ctl.tap(KEY_SPACE)                                                        # pause
+        deadline = time.time() + 3
+        while time.time() < deadline and ctl.cmd('idle')[0] != 'idle inhibitors=0 inhibited=0':
+            time.sleep(0.05)
+        self.assertEqual(ctl.cmd('idle')[0], 'idle inhibitors=0 inhibited=0')
+        ctl.tap(KEY_SPACE)                                                        # on again
+        deadline = time.time() + 3
+        while time.time() < deadline and ctl.cmd('idle')[0] != 'idle inhibitors=1 inhibited=1':
+            time.sleep(0.05)
+        self.assertEqual(ctl.cmd('idle')[0], 'idle inhibitors=1 inhibited=1')
+
+
+class TestIdleInhibit(Base):
+    """src/idleinhibit.c: zwp_idle_inhibit_manager_v1. A visible surface with an inhibitor keeps the screensaver and the auto lock away."""
+    UNIT = {'MELLAGUI_LOCK_UNIT_MS': '250'}
+
+    def start(self, name):
+        p, c, stop = self.private_compositor(name, '--config', 'none', env=self.UNIT)
+        c.sync()
+        cl = Client(name)
+        mgr = cl.wl.bind('zwp_idle_inhibit_manager_v1')
+        return c, cl, mgr
+
+    @staticmethod
+    def idle(c):
+        return dict(kv.split('=') for kv in c.cmd('idle')[0].split()[1:])
+
+    @staticmethod
+    def workspace(c, n):
+        c.key(KEY_LEFTMETA, True)
+        c.tap(1 + n)                                                 # KEY_1 = 2
+        c.key(KEY_LEFTMETA, False)
+        c.sync()
+
+    @staticmethod
+    def inhibit(cl, mgr, surface):
+        i = cl.wl.new_id('zwp_idle_inhibitor_v1')
+        cl.wl.request(mgr, 'create_inhibitor', i, surface)
+        cl.wl.roundtrip()
+        return i
+
+    def test_it_counts_only_while_the_window_is_visible(self):
+        c, cl, mgr = self.start('mellagui-ih1')
+        self.assertEqual(self.idle(c), {'inhibitors': '0', 'inhibited': '0'})
+        win = Window(cl)
+        win.wait_configure()
+        i = self.inhibit(cl, mgr, win.surface)
+        c.sync()
+        self.assertEqual(self.idle(c), {'inhibitors': '1', 'inhibited': '1'})
+        cl.wl.request(win.toplevel, 'set_minimized')                 # hidden: nobody sees it
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.idle(c), {'inhibitors': '1', 'inhibited': '0'})
+        cl.wl.request(i, 'destroy')
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.idle(c), {'inhibitors': '0', 'inhibited': '0'})
+
+    def test_another_workspace_and_a_destroyed_surface_do_not_inhibit(self):
+        c, cl, mgr = self.start('mellagui-ih2')
+        win = Window(cl)
+        win.wait_configure()
+        self.inhibit(cl, mgr, win.surface)
+        c.sync()
+        self.assertEqual(self.idle(c)['inhibited'], '1')
+        self.workspace(c, 2)
+        self.assertEqual(self.idle(c), {'inhibitors': '1', 'inhibited': '0'})
+        self.workspace(c, 1)
+        self.assertEqual(self.idle(c)['inhibited'], '1')
+        cl.wl.request(win.toplevel, 'destroy')                       # the window goes; the inhibitor object stays but does nothing
+        cl.wl.request(win.xdg, 'destroy')
+        cl.wl.request(win.surface, 'destroy')
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.idle(c), {'inhibitors': '1', 'inhibited': '0'})
+        cl.wl.close()
+        time.sleep(0.2)
+        c.sync()
+        self.assertEqual(self.idle(c), {'inhibitors': '0', 'inhibited': '0'})
+
+    def test_the_screensaver_waits_for_the_inhibitor(self):
+        c, cl, mgr = self.start('mellagui-ih3')
+        win = Window(cl)
+        win.wait_configure()
+        i = self.inhibit(cl, mgr, win.surface)
+        c.cmd('settings saver-minutes 2')                            # 2 * 250 ms
+        time.sleep(1.6)
+        self.assertEqual(dict(kv.split('=') for kv in c.cmd('saver')[0].split()[1:])['running'], '0', 'the screensaver started under an inhibitor')
+        cl.wl.request(i, 'destroy')
+        cl.wl.roundtrip()
+        t0 = time.time()
+        while time.time() - t0 < 1.0:                                # the idle time starts over when the inhibitor goes
+            self.assertEqual(dict(kv.split('=') for kv in c.cmd('saver')[0].split()[1:])['running'], '0', 'the idle time was not restarted')
+            time.sleep(0.1)
+            if time.time() - t0 > 0.3:
+                break
+        end = time.time() + 6
+        while time.time() < end:
+            if dict(kv.split('=') for kv in c.cmd('saver')[0].split()[1:])['running'] == '1':
+                break
+            time.sleep(0.05)
+        else:
+            self.fail('the screensaver never started after the inhibitor was gone')
+
 
 class TestGL(unittest.TestCase):
     """src/gl.c: the dlopen()ed EGL / OpenGL ES layer (needs a GPU or Mesa's software driver; skipped without)."""

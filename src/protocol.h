@@ -93,6 +93,8 @@ extern const struct lm_interface lm_xdg_toplevel_interface;
 extern const struct lm_interface lm_xdg_popup_interface;
 extern const struct lm_interface lm_zxdg_decoration_manager_v1_interface;
 extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
+extern const struct lm_interface lm_zwp_idle_inhibit_manager_v1_interface;   /* idleinhibit.c */
+extern const struct lm_interface lm_zwp_idle_inhibitor_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_v1_interface;     /* dmabuf.c */
 extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
@@ -112,6 +114,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
  *   xdg_wm_base                   3    xdg.c
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
  *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
+ *   zwp_idle_inhibit_manager_v1   1    idleinhibit.c (a visible surface keeps the screensaver and the auto lock away)
  *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
  *   mellagui_capture_v1              1    capture.c  (MellaGUI private: the screen into a wl_shm buffer, for mellagui-record)
  *   mellagui_tray_v1                 1    tray.c     (MellaGUI private: icons / buttons of programs in the top bar)
@@ -125,6 +128,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 #define LM_XDG_WM_BASE_VERSION              3
 #define LM_ZXDG_DECORATION_MANAGER_V1_VERSION 1
 #define LM_ZWP_LINUX_DMABUF_V1_VERSION      4
+#define LM_ZWP_IDLE_INHIBIT_MANAGER_V1_VERSION 1
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
 #define LM_MELLAGUI_TRAY_V1_VERSION            1
@@ -492,6 +496,13 @@ enum {
     LM_XDG_POPUP_EVT_REPOSITIONED = 2, /* "u" token */
 };
 enum { LM_XDG_POPUP_ERR_INVALID_GRAB = 0 };
+
+/* ---- zwp_idle_inhibit_manager_v1 / zwp_idle_inhibitor_v1 ----------------------- */
+enum {
+    LM_ZWP_IDLE_INHIBIT_MANAGER_V1_REQ_DESTROY = 0,           /* "" */
+    LM_ZWP_IDLE_INHIBIT_MANAGER_V1_REQ_CREATE_INHIBITOR = 1,  /* "no" id, surface(wl_surface) */
+    LM_ZWP_IDLE_INHIBITOR_V1_REQ_DESTROY = 0,                 /* "" */
+};
 
 /* ---- zxdg_decoration_manager_v1 / zxdg_toplevel_decoration_v1 ------------------ */
 enum {

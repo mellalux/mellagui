@@ -355,6 +355,18 @@ static const struct lm_message xdg_popup_events[] = {
 };
 DEFINE_IFACE(lm_xdg_popup_interface, "xdg_popup", 3, xdg_popup_requests, xdg_popup_events);
 
+/* ---- zwp_idle_inhibit_manager_v1 / zwp_idle_inhibitor_v1 -------------------------------- */
+static const struct lm_message idle_inhibit_manager_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("create_inhibitor", "no", 1, TY(&lm_zwp_idle_inhibitor_v1_interface, &lm_wl_surface_interface)),
+};
+DEFINE_IFACE_REQ(lm_zwp_idle_inhibit_manager_v1_interface, "zwp_idle_inhibit_manager_v1", 1, idle_inhibit_manager_requests);
+
+static const struct lm_message idle_inhibitor_requests[] = {
+    MSG("destroy", "", 1, NULL),
+};
+DEFINE_IFACE_REQ(lm_zwp_idle_inhibitor_v1_interface, "zwp_idle_inhibitor_v1", 1, idle_inhibitor_requests);
+
 /* ---- zxdg_decoration_manager_v1 / zxdg_toplevel_decoration_v1 -------------------- */
 static const struct lm_message zxdg_decoration_manager_requests[] = {
     MSG("destroy", "", 1, NULL),

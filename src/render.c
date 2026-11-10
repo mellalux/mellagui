@@ -1955,6 +1955,52 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
     }
 }
 
+
+/* ---- the desktop overview ------------------------------------------------------------------------------------------------ */
+
+/* The workspace strip, the frame of the chosen / hovered picture and the labels (the dimming and the pictures themselves are painted apart). */
+static void paint_overview_ui(const struct paint_ctx *c, const struct lm_overview_info *ov)
+{
+    if (!ov->ui)
+        return;
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
+        const struct lm_rect *r = &ov->ws[i].rect;
+        fill_round(c, r, 10, ov->ws[i].active ? ALPHA(0xf0, lm_theme.accent) : ov->ws[i].hover ? ALPHA(0xc0, lm_theme.button_hover) : ALPHA(0x90, lm_theme.button));
+        char num[8];
+        snprintf(num, sizeof(num), "%d", i + 1);
+        uint32_t fg = ov->ws[i].active ? lm_theme.background : lm_theme.text;
+        draw_text_centered(c, r, num, fg);
+        if (ov->ws[i].count > 0) {                                                      /* a dot per window (up to 6) */
+            int n = LM_MIN(ov->ws[i].count, 6), x = r->x + (r->w - (n * 8 - 3)) / 2;
+            for (int k = 0; k < n; k++) {
+                struct lm_rect d = lm_rect_make(x + k * 8, r->y + r->h - 12, 5, 5);
+                fill_round(c, &d, 2, ALPHA(0xff, fg));
+            }
+        }
+    }
+    for (int i = 0; i < ov->n; i++) {
+        if (ov->item[i].sel)
+            fill_round(c, &ov->item[i].frame, 10, ALPHA(0xe8, lm_theme.accent));
+        else if (ov->item[i].hover)
+            fill_round(c, &ov->item[i].frame, 10, ALPHA(0x58, lm_theme.glass));
+        char fit[96];
+        fit_text(fit, sizeof(fit), ov->item[i].title, ov->item[i].label.w - 8, false);
+        const struct lm_rect *lb = &ov->item[i].label;
+        struct lm_rect sh = *lb;
+        sh.x++;
+        sh.y++;
+        draw_text_centered(c, &sh, fit, lm_theme.glass_shadow);
+        draw_text_centered(c, lb, fit, ov->item[i].minimized ? lm_theme.text_dim : lm_theme.glass_text);
+    }
+}
+
+static void paint_overview(const struct paint_ctx *c, const struct lm_overview_info *ov)
+{
+    if (ov->dim > 0)
+        fill_round(c, &ov->rect, 0, ALPHA(ov->dim, lm_theme.ink));
+    paint_overview_ui(c, ov);
+}
+
 /* ---- surface blitting ------------------------------------------------------------------------ */
 
 /*
@@ -2201,6 +2247,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_SURFACE:
         lm_surface_tree_visit(item->u.surface.root, item->u.surface.x, item->u.surface.y,
                               visit_blit, c);
+        break;
+    case LM_SCENE_OVERVIEW:
+        if (item->u.overview.rect.x == c->out->x && item->u.overview.rect.y == c->out->y)
+            paint_overview(c, &item->u.overview);
         break;
     case LM_SCENE_GHOST:
         paint_ghost(c, item->u.ghost.ghost, &item->u.ghost.src, &item->u.ghost.dst, item->u.ghost.alpha);

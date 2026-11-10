@@ -150,9 +150,29 @@ struct wm_wobble {
     struct lm_rect shown;               /* the union of the cells painted last */
 };
 
+#define OV_MAX_ITEMS LM_OVERVIEW_MAX
+struct wm_ov_item {
+    struct lm_window *win;
+    struct lm_ghost ghost;
+    struct lm_rect home;                /* where its picture is at full size (the window, global) */
+    struct lm_rect slot;                /* ... and in the grid */
+};
+struct wm_overview {
+    bool open, closing;
+    char out[32];                       /* the output it is shown on */
+    int n, cols;
+    struct wm_ov_item item[LM_OVERVIEW_MAX];
+    float prog, from;                   /* 0 = the windows where they are, 1 = in the grid */
+    uint64_t start;
+    int dur;
+    int sel, hover, hover_ws, press;
+};
+
 struct lm_wm {
     struct lm_server *srv;
     struct wm_anim anim[ANIM_MAX];
+    struct wm_overview ov;
+    bool anim_suppress;                 /* no fly-in / fly-out animations just now (the overview brings a window back itself) */
     struct wm_wobble wb;
     struct lm_timer *anim_timer;
     struct lm_window *glide_win;        /* a window that glides to glide_tx / glide_ty (dragged, or let go a moment ago) */
@@ -1044,6 +1064,16 @@ static void anim_forget(struct lm_wm *wm, struct lm_window *w);
 static bool anim_glide_to(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y);
 static void wobble_start(struct lm_wm *wm, struct lm_window *w, double px, double py);
 static void wobble_stop(struct lm_wm *wm);
+static bool ov_hides(const struct lm_wm *wm, const struct lm_window *w);
+static void overview_changed(struct lm_wm *wm);
+static void overview_finish(struct lm_wm *wm);
+static bool overview_tick(struct lm_wm *wm, uint64_t now);
+static void overview_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods);
+static bool overview_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out);
+static void overview_click(struct lm_wm *wm, const struct lm_pick *pick, uint32_t button);
+static void overview_set(struct lm_wm *wm, bool open);
+static struct lm_output *overview_output(const struct lm_wm *wm);
+static void overview_damage(struct lm_wm *wm);
 static void wobble_tick(struct lm_wm *wm, uint64_t now);
 static bool wobble_wanted(const struct lm_wm *wm, const struct lm_window *w);
 static void anim_open(struct lm_wm *wm, struct lm_window *w);
@@ -1262,6 +1292,7 @@ void lm_wm_switch_workspace(struct lm_wm *wm, int ws)
         update_outputs(wm, w);
     set_focus(wm, NULL);
     set_focus(wm, top_visible(wm, NULL));
+    overview_changed(wm);
     damage_all(wm);
     refresh_pointer(wm);
 }
@@ -1376,6 +1407,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         if (wm->anim[i].used)
             free(wm->anim[i].ghost.px);
     free(wm->wb.ghost.px);
+    for (int i = 0; i < wm->ov.n; i++)
+        free(wm->ov.item[i].ghost.px);
     if (wm->anim_timer)
         lm_timer_destroy(wm->anim_timer);
     if (wm->refit)
@@ -1432,6 +1465,10 @@ void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
     lm_list_for_each(w, &wm->windows, link)
         if (w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN))
             apply_state(wm, w);
+    if (wm->ov.open && !overview_output(wm))
+        overview_finish(wm);                                    /* its output went away */
+    else
+        overview_changed(wm);
     damage_all(wm);
 }
 
@@ -1675,7 +1712,10 @@ void lm_wm_window_map(struct lm_window *w)
     if (fit_w > 0)
         send_configure(wm, w, fit_w, fit_h);
     damage_panels(wm);
-    anim_open(wm, w);
+    if (wm->ov.open)
+        overview_changed(wm);                                   /* (its picture joins the overview) */
+    else
+        anim_open(wm, w);
     refresh_pointer(wm);
 }
 
@@ -1694,6 +1734,7 @@ void lm_wm_window_unmap(struct lm_window *w)
         set_focus(wm, top_visible(wm, w));
     damage_rect(wm, &r);
     damage_panels(wm);
+    overview_changed(wm);
     refresh_pointer(wm);
 }
 
@@ -4312,8 +4353,8 @@ static int anim_duration(const struct lm_wm *wm)
 
 static bool anim_wanted(struct lm_wm *wm, const struct lm_window *w)
 {
-    return anim_duration(wm) > 0 && wm->srv->render && !lm_lock_active(wm->srv->lock) && !(w->states & LM_WINDOW_FULLSCREEN) &&
-           !win_is_calendar(w);
+    return anim_duration(wm) > 0 && !wm->anim_suppress && wm->srv->render && !lm_lock_active(wm->srv->lock) &&
+           !(w->states & LM_WINDOW_FULLSCREEN) && !win_is_calendar(w);
 }
 
 /* The window's picture (frame and content, without popups) and the rectangle it covers. */
@@ -4506,6 +4547,8 @@ static void anim_tick(void *data)
         wobble_tick(wm, now);
         any = true;
     }
+    if (overview_tick(wm, now))
+        any = true;
     struct lm_window *g = wm->glide_win;
     if (g) {                                                        /* a dragged window follows the pointer with a short delay: it glides */
         float tau = (float)LM_MAX(anim_duration(wm) / 5, 20);       /* ms: how fast it catches up (a fifth of the animation time) */
@@ -4694,6 +4737,406 @@ static void wobble_tick(struct lm_wm *wm, uint64_t now)
     }
 }
 
+/* ---- the desktop overview ----------------------------------------------------------------------------------------------- */
+
+#define OV_STRIP_H 56                       /* the band of workspace cells at the top */
+#define OV_LABEL_H 20
+#define OV_GAP 28
+
+static struct lm_output *overview_output(const struct lm_wm *wm)
+{
+    if (!wm->ov.open || !wm->srv->backend)
+        return NULL;
+    struct lm_output *o;
+    lm_list_for_each(o, &wm->srv->backend->outputs, link)
+        if (!strcmp(o->name, wm->ov.out))
+            return o;
+    return NULL;
+}
+
+/* True while the window is shown as a picture in the overview (the scene and the picking leave the real one out). */
+static bool ov_hides(const struct lm_wm *wm, const struct lm_window *w)
+{
+    if (!wm->ov.open)
+        return false;
+    for (int i = 0; i < wm->ov.n; i++)
+        if (wm->ov.item[i].win == w)
+            return true;
+    return false;
+}
+
+static void overview_free(struct lm_wm *wm)
+{
+    for (int i = 0; i < wm->ov.n; i++)
+        lm_render_ghost_free(wm->srv->render, &wm->ov.item[i].ghost);
+    wm->ov.n = 0;
+}
+
+static void overview_damage(struct lm_wm *wm)
+{
+    struct lm_output *o = overview_output(wm);
+    if (o) {
+        struct lm_rect r = lm_output_rect(o);
+        damage_rect(wm, &r);
+    }
+}
+
+/* Slots for the pictures: the grid (rows of `cols`, the last row centred) that makes them largest, below the workspace cells. */
+static void overview_layout(struct lm_wm *wm, struct lm_output *o)
+{
+    struct wm_overview *ov = &wm->ov;
+    int n = ov->n;
+    if (n == 0)
+        return;
+    int top = o->y + LM_PANEL_HEIGHT + OV_STRIP_H + 36, bottom = o->y + o->height - 24;
+    struct lm_output *dock_o = dock_output(wm);
+    if (dock_o == o) {
+        struct dock_geo g;
+        dock_geometry(o, &g);
+        bottom = LM_MIN(bottom, g.strip.y - 12);
+    }
+    int left = o->x + 40, aw = o->width - 80, ah = LM_MAX(bottom - top, 120);
+    int best_cols = 1;
+    float best = -1;
+    for (int cols = 1; cols <= n; cols++) {
+        int rows = (n + cols - 1) / cols, cw = (aw - (cols - 1) * OV_GAP) / cols, ch = (ah - (rows - 1) * OV_GAP) / rows;
+        if (cw < 48 || ch < 48 + OV_LABEL_H)
+            continue;
+        float sum = 0;
+        for (int i = 0; i < n; i++) {
+            float sx = (float)cw / (float)ov->item[i].home.w, sy = (float)(ch - OV_LABEL_H - 6) / (float)ov->item[i].home.h;
+            sum += fminf(1.0f, fminf(sx, sy));
+        }
+        if (sum > best) {
+            best = sum;
+            best_cols = cols;
+        }
+    }
+    int cols = best_cols, rows = (n + cols - 1) / cols, cw = (aw - (cols - 1) * OV_GAP) / cols, ch = (ah - (rows - 1) * OV_GAP) / rows;
+    cw = LM_MAX(cw, 48);
+    ov->cols = cols;
+    for (int r = 0; r < rows; r++) {                             /* a row: the pictures side by side with a gap, the row centred */
+        int first = r * cols, last = LM_MIN(first + cols, n), total = (last - first - 1) * OV_GAP;
+        int ws[LM_OVERVIEW_MAX], hs[LM_OVERVIEW_MAX];
+        for (int i = first; i < last; i++) {
+            struct lm_rect hm = ov->item[i].home;
+            float sc = fminf(1.0f, fminf((float)cw / (float)hm.w, (float)(ch - OV_LABEL_H - 6) / (float)hm.h));
+            ws[i - first] = LM_MAX((int)((float)hm.w * sc), 8);
+            hs[i - first] = LM_MAX((int)((float)hm.h * sc), 8);
+            total += ws[i - first];
+        }
+        int x = left + (aw - total) / 2, y0 = top + r * (ch + OV_GAP);
+        for (int i = first; i < last; i++) {
+            ov->item[i].slot = lm_rect_make(x, y0 + (ch - OV_LABEL_H - 6 - hs[i - first]) / 2, ws[i - first], hs[i - first]);
+            x += ws[i - first] + OV_GAP;
+        }
+    }
+}
+
+/* The pictures of this workspace's windows on the overview's output, in taskbar order. */
+static void overview_build(struct lm_wm *wm)
+{
+    struct wm_overview *ov = &wm->ov;
+    struct lm_output *o = overview_output(wm);
+    struct lm_window *prev_sel = ov->sel >= 0 && ov->sel < ov->n ? ov->item[ov->sel].win : NULL;
+    overview_free(wm);
+    ov->hover = ov->hover_ws = ov->press = -1;
+    if (!o)
+        return;
+    struct lm_window *list[LM_OVERVIEW_MAX];
+    int n = 0;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (!w->mapped || w->workspace != wm->workspace || win_is_calendar(w) || (w->states & LM_WINDOW_FULLSCREEN) ||
+            window_output(wm, w) != o || n >= LM_OVERVIEW_MAX)
+            continue;
+        int i = n++;
+        for (; i > 0 && WIN(list[i - 1])->id > WIN(w)->id; i--)
+            list[i] = list[i - 1];
+        list[i] = w;
+    }
+    for (int i = 0; i < n; i++) {
+        struct wm_ov_item *it = &ov->item[ov->n];
+        memset(it, 0, sizeof(*it));
+        if (!anim_prepare(wm, list[i], &it->ghost, &it->home))
+            continue;                                           /* (no picture: the real window stays) */
+        it->win = list[i];
+        ov->n++;
+    }
+    ov->sel = ov->n > 0 ? ov->n - 1 : -1;
+    for (int i = 0; i < ov->n; i++)
+        if (ov->item[i].win == (prev_sel ? prev_sel : wm->focused))
+            ov->sel = i;
+    overview_layout(wm, o);
+}
+
+/* The state of the control socket / the scene: where picture i is now. */
+static struct lm_rect overview_item_rect(const struct wm_overview *ov, int i)
+{
+    return anim_lerp_rect(&ov->item[i].home, &ov->item[i].slot, ease_smooth(ov->prog));
+}
+
+static void overview_info(const struct lm_wm *wm, struct lm_output *o, struct lm_overview_info *oi)
+{
+    const struct wm_overview *ov = &wm->ov;
+    memset(oi, 0, sizeof(*oi));
+    oi->rect = lm_output_rect(o);
+    oi->dim = (int)(0xb4 * ease_smooth(ov->prog));
+    oi->ui = !ov->closing && ov->prog >= 1.0f;
+    int cw = LM_MIN(96, (o->width - 80) / LM_NUM_WORKSPACES - 12), total = LM_NUM_WORKSPACES * cw + (LM_NUM_WORKSPACES - 1) * 12;
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
+        oi->ws[i].rect = lm_rect_make(o->x + (o->width - total) / 2 + i * (cw + 12), o->y + LM_PANEL_HEIGHT + 14, cw, OV_STRIP_H - 14);
+        oi->ws[i].active = i == wm->workspace;
+        oi->ws[i].hover = i == ov->hover_ws;
+        const struct lm_window *w;
+        lm_list_for_each(w, &wm->windows, link)
+            if (w->mapped && w->workspace == i && !win_is_calendar(w))
+                oi->ws[i].count++;
+    }
+    oi->n = ov->n;
+    for (int i = 0; i < ov->n; i++) {
+        const struct lm_rect *s = &ov->item[i].slot;
+        oi->item[i].frame = lm_rect_make(s->x - 6, s->y - 6, s->w + 12, s->h + 12 + OV_LABEL_H + 2);
+        int lw = LM_MAX(s->w + 12, 96);
+        oi->item[i].label = lm_rect_make(s->x + s->w / 2 - lw / 2, s->y + s->h + 6, lw, OV_LABEL_H - 2);
+        snprintf(oi->item[i].title, sizeof(oi->item[i].title), "%s", ov->item[i].win->title);
+        oi->item[i].sel = i == ov->sel;
+        oi->item[i].hover = i == ov->hover;
+        oi->item[i].minimized = ov->item[i].win->minimized;
+    }
+}
+
+static void overview_finish(struct lm_wm *wm)
+{
+    if (!wm->ov.open)
+        return;
+    overview_damage(wm);
+    overview_free(wm);
+    wm->ov.open = wm->ov.closing = false;
+    damage_panels(wm);
+    refresh_pointer(wm);
+}
+
+/* Closes the overview; `activate` >= 0 first goes to that picture's window (a minimized one comes back, without its own fly-in). */
+static void overview_close(struct lm_wm *wm, int activate)
+{
+    struct wm_overview *ov = &wm->ov;
+    if (!ov->open)
+        return;
+    if (activate >= 0 && activate < ov->n && !ov->closing) {
+        wm->anim_suppress = true;
+        lm_wm_focus_window(wm, ov->item[activate].win);
+        wm->anim_suppress = false;
+    }
+    if (ov->closing)
+        return;
+    int dur = anim_duration(wm);
+    if (dur <= 0 || ov->n == 0) {
+        overview_finish(wm);
+        return;
+    }
+    ov->closing = true;
+    ov->from = ov->prog;
+    ov->start = lm_now_ms();
+    ov->dur = dur;
+    overview_damage(wm);
+    if (wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
+        lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+}
+
+static void overview_set(struct lm_wm *wm, bool open)
+{
+    struct wm_overview *ov = &wm->ov;
+    if (!open) {
+        overview_close(wm, -1);
+        return;
+    }
+    if (lm_lock_active(wm->srv->lock) || !wm->srv->backend)
+        return;
+    if (ov->open) {
+        if (ov->closing) {                                      /* asked again while it flies back: it turns round */
+            ov->closing = false;
+            ov->from = ov->prog;
+            ov->start = lm_now_ms();
+            ov->dur = anim_duration(wm);
+            if (wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
+                lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+        }
+        return;
+    }
+    menu_set(wm, false);
+    about_set(wm, false, NULL);
+    launcher_set(wm, false, NULL);
+    power_set(wm, false, NULL);
+    sw_close(wm);
+    clip_nav_set(wm, false);
+    if (wm->focused)
+        lm_xdg_dismiss_popups(wm->focused->surface);
+    struct lm_output *o = NULL;
+    if (wm->srv->seat) {
+        double px, py;
+        lm_seat_pointer_position(wm->srv->seat, &px, &py);
+        o = lm_output_nearest(wm->srv, (int32_t)px, (int32_t)py);
+    }
+    if (!o)
+        o = lm_output_primary(wm->srv);
+    if (!o)
+        return;
+    memset(ov, 0, sizeof(*ov));
+    snprintf(ov->out, sizeof(ov->out), "%s", o->name);
+    ov->open = true;
+    ov->sel = -1;
+    overview_build(wm);
+    ov->dur = anim_duration(wm);
+    ov->start = lm_now_ms();
+    ov->from = 0;
+    ov->prog = ov->dur > 0 ? 0.0f : 1.0f;
+    overview_damage(wm);
+    damage_panels(wm);
+    if (ov->dur > 0 && wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
+        lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+    refresh_pointer(wm);
+}
+
+/* The set of windows changed (one mapped, went away, moved to another workspace, the workspace was switched): take the pictures again. */
+static void overview_changed(struct lm_wm *wm)
+{
+    if (!wm->ov.open)
+        return;
+    if (wm->ov.closing) {
+        overview_finish(wm);
+        return;
+    }
+    overview_build(wm);
+    overview_damage(wm);
+}
+
+/* True while it still moves (the timer keeps running). */
+static bool overview_tick(struct lm_wm *wm, uint64_t now)
+{
+    struct wm_overview *ov = &wm->ov;
+    if (!ov->open)
+        return false;
+    float target = ov->closing ? 0.0f : 1.0f;
+    if (ov->dur <= 0 || ov->prog == target)
+        return false;
+    float p = fminf((float)(now - ov->start) / (float)ov->dur, 1.0f);
+    ov->prog = ov->from + (target - ov->from) * p;
+    overview_damage(wm);
+    if (p >= 1.0f) {
+        ov->prog = target;
+        if (ov->closing)
+            overview_finish(wm);
+        return false;
+    }
+    return true;
+}
+
+static bool overview_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
+{
+    struct lm_output *o = overview_output(wm);
+    if (!o || lm_lock_active(wm->srv->lock) || wm->ov.closing)
+        return false;
+    struct lm_rect orc = lm_output_rect(o);
+    if (!lm_rect_contains(&orc, ix, iy) || iy < o->y + LM_PANEL_HEIGHT)
+        return false;                                           /* (the panel above stays in use) */
+    struct lm_overview_info oi;
+    overview_info(wm, o, &oi);
+    out->kind = LM_PICK_OVERVIEW;
+    out->rect = orc;
+    for (int i = 0; i < LM_NUM_WORKSPACES; i++)
+        if (lm_rect_contains(&oi.ws[i].rect, ix, iy)) {
+            out->kind = LM_PICK_OVERVIEW_WS;
+            out->index = i;
+            return true;
+        }
+    for (int i = wm->ov.n - 1; i >= 0; i--)
+        if (lm_rect_contains(&oi.item[i].frame, ix, iy)) {
+            out->kind = LM_PICK_OVERVIEW_ITEM;
+            out->index = i;
+            out->window = wm->ov.item[i].win;
+            return true;
+        }
+    return true;
+}
+
+static void overview_switch_workspace(struct lm_wm *wm, int ws)
+{
+    if (ws < 0 || ws >= LM_NUM_WORKSPACES || ws == wm->workspace)
+        return;
+    lm_wm_switch_workspace(wm, ws);                              /* (its hook takes the pictures of the new workspace) */
+}
+
+static void overview_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods)
+{
+    struct wm_overview *ov = &wm->ov;
+    int n = ov->n, sel = ov->sel;
+    if (ov->closing)
+        return;
+    if (!repeat && (code == KEY_ESC || (code == KEY_W && (mods & LM_MOD_SUPER)))) {
+        overview_close(wm, -1);
+        return;
+    }
+    if (code >= KEY_1 && code < KEY_1 + LM_NUM_WORKSPACES && !repeat) {
+        overview_switch_workspace(wm, (int)(code - KEY_1));
+        return;
+    }
+    if (n == 0)
+        return;
+    int step = 0;
+    if (code == KEY_RIGHT || (code == KEY_TAB && !(mods & LM_MOD_SHIFT))) step = 1;
+    else if (code == KEY_LEFT || (code == KEY_TAB && (mods & LM_MOD_SHIFT))) step = -1;
+    else if (code == KEY_DOWN) step = ov->cols;
+    else if (code == KEY_UP) step = -ov->cols;
+    if (step) {
+        int to = sel < 0 ? 0 : sel + step;
+        if (abs(step) > 1 && (to < 0 || to >= n))
+            to = sel;                                           /* (Up / Down stop at the first / last row) */
+        else
+            to = (to % n + n) % n;
+        if (to != ov->sel) {
+            ov->sel = to;
+            overview_damage(wm);
+        }
+        return;
+    }
+    if (!repeat && (code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE) && sel >= 0)
+        overview_close(wm, sel);
+    else if (!repeat && (code == KEY_DELETE) && sel >= 0)
+        lm_wm_window_close(ov->item[sel].win);
+}
+
+/* A click (`button`, release) on a pick of the overview. */
+static void overview_click(struct lm_wm *wm, const struct lm_pick *pick, uint32_t button)
+{
+    if (pick->kind == LM_PICK_OVERVIEW_ITEM && pick->index >= 0 && pick->index < wm->ov.n) {
+        if (button == BTN_LEFT)
+            overview_close(wm, pick->index);
+        else if (button == BTN_MIDDLE)
+            lm_wm_window_close(wm->ov.item[pick->index].win);
+    } else if (pick->kind == LM_PICK_OVERVIEW_WS && button == BTN_LEFT) {
+        overview_switch_workspace(wm, pick->index);
+    } else if (pick->kind == LM_PICK_OVERVIEW && button == BTN_LEFT) {
+        overview_close(wm, -1);
+    }
+}
+
+void lm_wm_overview_set(struct lm_wm *wm, bool open) { overview_set(wm, open); }
+bool lm_wm_overview_is_open(const struct lm_wm *wm) { return wm->ov.open; }
+
+size_t lm_wm_overview_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    const struct wm_overview *ov = &wm->ov;
+    size_t n = (size_t)snprintf(buf, size, "overview open=%d closing=%d n=%d sel=%d cols=%d prog=%.2f ws=%d\n", ov->open, ov->closing, ov->n, ov->sel,
+                                ov->cols, (double)ov->prog, wm->workspace);
+    for (int i = 0; i < ov->n && n < size; i++) {
+        struct lm_rect r = overview_item_rect(ov, i);
+        n += (size_t)snprintf(buf + n, size - n, "item %d x=%d y=%d w=%d h=%d slot=%d,%d,%d,%d title=\"%s\"\n", i, r.x, r.y, r.w, r.h, ov->item[i].slot.x,
+                              ov->item[i].slot.y, ov->item[i].slot.w, ov->item[i].slot.h, ov->item[i].win->title);
+    }
+    return n < size ? n : size - 1;
+}
+
 /* A window has just been mapped: its picture grows out of nothing while the real one waits. */
 static void anim_open(struct lm_wm *wm, struct lm_window *w)
 {
@@ -4844,7 +5287,7 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
 
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link) {
-        if (!win_visible(wm, w) || w->anim_hidden)
+        if (!win_visible(wm, w) || w->anim_hidden || ov_hides(wm, w))
             continue;
         struct lm_rect outer = frame_outer(w);
         int32_t ox, oy;
@@ -4912,6 +5355,32 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 if (!fn(&it, data))
                     return;
             }
+    }
+
+    if (wm->ov.open) {                                           /* the desktop overview: the dimmed output, then the windows' pictures */
+        struct lm_output *oo = overview_output(wm);
+        if (oo) {
+            struct lm_rect orc = lm_output_rect(oo);
+            if (!clip || lm_rect_overlaps(&orc, clip)) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_OVERVIEW;
+                it.output = oo;
+                overview_info(wm, oo, &it.u.overview);
+                if (!fn(&it, data))
+                    return;
+                for (int i = 0; i < wm->ov.n; i++) {
+                    memset(&it, 0, sizeof(it));
+                    it.kind = LM_SCENE_GHOST;
+                    it.u.ghost.ghost = (struct lm_ghost *)&wm->ov.item[i].ghost;
+                    it.u.ghost.dst = overview_item_rect(&wm->ov, i);
+                    it.u.ghost.alpha = wm->ov.item[i].win->minimized ? 170 : 255;
+                    if (clip && !lm_rect_overlaps(&it.u.ghost.dst, clip))
+                        continue;
+                    if (!fn(&it, data))
+                        return;
+                }
+            }
+        }
     }
 
     if (wm->srv->backend) {
@@ -5233,10 +5702,12 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
 
     if (dock_pick(wm, ix, iy, out))                              /* the dock floats above the windows */
         return;
+    if (overview_pick(wm, ix, iy, out))                          /* the desktop overview takes everything below the panel (and the dock) */
+        return;
 
     struct lm_window *w;
     lm_list_for_each_reverse(w, &wm->windows, link) {
-        if (!win_visible(wm, w))
+        if (!win_visible(wm, w) || ov_hides(wm, w))
             continue;
         int32_t ox, oy;
         double sx, sy;
@@ -5411,6 +5882,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_BORDER:
     case LM_PICK_GADGET_BORDER: shape = cursor_for_edges(pick->edges); break;
     case LM_PICK_SHOT_CARD: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_OVERVIEW_ITEM: case LM_PICK_OVERVIEW_WS: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_NOTIFY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAUNCHER: launcher = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_ABOUT_BUTTON: about_btn = true; shape = LM_CURSOR_POINTER; break;
@@ -5453,6 +5925,16 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     if (clip_code != wm->hover_clip) {
         wm->hover_clip = clip_code;
         damage_gadget(wm, LM_GADGET_CLIPBOARD);
+    }
+    if (wm->ov.open) {                                          /* the pointer moves the overview's highlight */
+        int hi = pick->kind == LM_PICK_OVERVIEW_ITEM ? pick->index : -1, hws = pick->kind == LM_PICK_OVERVIEW_WS ? pick->index : -1;
+        if (hi != wm->ov.hover || hws != wm->ov.hover_ws) {
+            wm->ov.hover = hi;
+            wm->ov.hover_ws = hws;
+            if (hi >= 0)
+                wm->ov.sel = hi;
+            overview_damage(wm);
+        }
     }
     if (wm->launcher_open) {                                    /* the pointer moves the launcher's highlight */
         struct lm_output *lo = launcher_output(wm);
@@ -6085,6 +6567,22 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         }
         return true;
     }
+    if (pick->kind >= LM_PICK_OVERVIEW_ITEM && pick->kind <= LM_PICK_OVERVIEW) {       /* the desktop overview: a click is done when the button is let go on what it was pressed on */
+        if (pressed) {
+            wm->press_panel_kind = pick->kind;
+            wm->press_panel_ws = pick->index;
+            wm->press_win = NULL;
+            wm->press_bits = 0;
+            if (button == BTN_RIGHT && pick->kind == LM_PICK_OVERVIEW_ITEM && pick->index < wm->ov.n)
+                window_menu_open(wm, wm->ov.item[pick->index].win);          /* Maximize, Minimize, Move to workspace ..., Close */
+        } else {
+            int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
+            wm->press_panel_kind = 0;
+            if (pk == (int)pick->kind && pi == pick->index)
+                overview_click(wm, pick, button);
+        }
+        return true;
+    }
     if (pick->kind == LM_PICK_POWER_BUTTON || pick->kind == LM_PICK_POWER_CARD || pick->kind == LM_PICK_POWER_BACKDROP) {
         int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
         if (pressed) {
@@ -6401,6 +6899,7 @@ static void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws)
     if (wm->focused == w)
         set_focus(wm, top_visible(wm, w));
     damage_panels(wm);
+    overview_changed(wm);
     refresh_pointer(wm);
 }
 
@@ -6437,6 +6936,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
     if (!wm)
         return;
     if (locked) {
+        overview_finish(wm);
         menu_set(wm, false);
         sw_close(wm);
         power_set(wm, false, NULL);
@@ -6488,6 +6988,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_RUN: launch_run(wm); break;
     case LM_ACT_LAUNCHER: launcher_set(wm, !wm->launcher_open, NULL); break;
     case LM_ACT_OSK: osk_set(wm, !wm->osk_open); break;
+    case LM_ACT_OVERVIEW: overview_set(wm, !wm->ov.open || wm->ov.closing); break;
     case LM_ACT_SETTINGS: launch_settings(wm); break;
     case LM_ACT_EXEC: {
         char cmd[2048];
@@ -6620,6 +7121,11 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
                 menu_activate(wm, wm->menu_sel);
             }
         }
+        return true;
+    }
+    if (wm->ov.open && !(ctrl && alt)) {                        /* the desktop overview is modal: Esc, the arrows, Enter, Delete, 1..4 */
+        if (pressed && !is_modifier_key(code))
+            overview_key(wm, code, repeat, mods);
         return true;
     }
     if (wm->launcher_open && !(ctrl && alt)) {                  /* the launcher dialog is modal and takes every key */

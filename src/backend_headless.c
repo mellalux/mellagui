@@ -354,6 +354,18 @@ static void ctl_command(struct ctl_client *c, char *line)
             ctl_reply(c, "%s", text);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "overview")) {
+        /* overview [open|close] -> "overview open= closing= n= sel= cols= prog= ws=" and one "item i x= y= w= h= slot=x,y,w,h title=" line each (the desktop overview), then "ok" */
+        static char otext[2048];
+        if (srv->wm && a1 && !strcmp(a1, "open"))
+            lm_wm_overview_set(srv->wm, true);
+        else if (srv->wm && a1 && !strcmp(a1, "close"))
+            lm_wm_overview_set(srv->wm, false);
+        if (srv->wm) {
+            lm_wm_overview_describe(srv->wm, otext, sizeof(otext));
+            ctl_reply(c, "%s", otext);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "about")) {
         /* about [open|close] -> "about open=<0|1>" (after the optional change), while open "card x= y= w= h=", "close x= y= w= h=" and one "row <label>|<value>" line each, then "ok" (the About dialog of the logo button) */
         if (srv->wm && a1 && !strcmp(a1, "open"))

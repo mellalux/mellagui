@@ -310,7 +310,10 @@ enum lm_pick_kind {
     LM_PICK_DOCK_ITEM,      /* a button of the dock (`index` = lm_dock_item index) */
     LM_PICK_DOCK,           /* the dock between its buttons, or (autohide) the bottom edge of the screen that shows it: swallows the click */
     LM_PICK_SHOT_CARD,      /* the screenshot card (above everything): click = open the file in the viewer */
-    LM_PICK_NOTIFY          /* a notification card: click = dismiss it (`index` = its id) */
+    LM_PICK_NOTIFY,         /* a notification card: click = dismiss it (`index` = its id) */
+    LM_PICK_OVERVIEW_ITEM,  /* a window's picture in the desktop overview (`index` = item): click = go to it, middle = close it, right = its menu */
+    LM_PICK_OVERVIEW_WS,    /* a workspace cell at the top of the overview (`index` = workspace): click = show that workspace's windows */
+    LM_PICK_OVERVIEW        /* anything else in the overview: a click closes it, nothing below gets it */
 };
 
 struct lm_pick {
@@ -682,8 +685,28 @@ enum lm_scene_kind {
     LM_SCENE_LAUNCHER,              /* the launcher dialog (same place, never open together with the others) */
     LM_SCENE_OSK,                   /* the on-screen keyboard (above the dialogs, so it can type into the launcher's form) */
     LM_SCENE_GHOST,                 /* a picture of a window that opens, closes or is minimized (above the windows, below the panel) */
+    LM_SCENE_OVERVIEW,              /* the desktop overview: dimmed output, workspace strip, frames and labels (its window pictures are LM_SCENE_GHOST items right after it) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
+};
+
+#define LM_OVERVIEW_MAX 16
+struct lm_overview_info {
+    struct lm_rect rect;            /* the whole output */
+    int dim;                        /* 0..255: how dark the output is behind the pictures (grows while it opens) */
+    bool ui;                        /* the strip, frames and labels are shown (the pictures have arrived) */
+    struct {
+        struct lm_rect rect;
+        bool active, hover;
+        int count;                  /* windows on that workspace */
+    } ws[LM_NUM_WORKSPACES];
+    int n;
+    struct {
+        struct lm_rect frame;       /* around the picture at its place in the grid */
+        struct lm_rect label;
+        char title[64];
+        bool sel, hover, minimized;
+    } item[LM_OVERVIEW_MAX];
 };
 
 struct lm_scene_item {
@@ -706,6 +729,7 @@ struct lm_scene_item {
         } ghost;                    /* LM_SCENE_GHOST */
         struct lm_about_info about; /* LM_SCENE_ABOUT */
         struct lm_launcher_info launcher; /* LM_SCENE_LAUNCHER */
+        struct lm_overview_info overview; /* LM_SCENE_OVERVIEW */
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
         struct lm_osk_info osk;     /* LM_SCENE_OSK */
         struct lm_power_info power; /* LM_SCENE_POWER */
@@ -749,6 +773,11 @@ size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The About dialog (the panel's logo button; control socket `about`): open it on the primary output, close it, ask whether it is open. */
 void lm_wm_about_set(struct lm_wm *wm, bool open);
+/* The desktop overview (key action `overview`, control socket `overview`): the windows of this workspace as pictures in a grid with the
+ * workspaces above them; click / Enter goes to a window, Esc closes. */
+void lm_wm_overview_set(struct lm_wm *wm, bool open);
+bool lm_wm_overview_is_open(const struct lm_wm *wm);
+size_t lm_wm_overview_describe(struct lm_wm *wm, char *buf, size_t size);   /* "overview open=0|1 closing= n= sel=" and an `item` line each */
 bool lm_wm_about_is_open(const struct lm_wm *wm);
 size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* the lines of the control socket `about` while it is open */
 

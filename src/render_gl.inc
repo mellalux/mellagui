@@ -32,7 +32,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk;
+    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     uint32_t theme_gen;                 /* the palette the chromes below were painted with */
@@ -70,6 +70,7 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->dock);
     gl_chrome_free(r, &go->menu);
     gl_chrome_free(r, &go->osk);
+    gl_chrome_free(r, &go->overview);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
@@ -82,7 +83,7 @@ static void gl_chromes_free(struct lm_renderer *r, struct gl_out *go)
     for (int i = 0; i < GL_MAX_FRAMES; i++)
         gl_chrome_free(r, &go->frame[i]);
     struct gl_chrome *all[] = { &go->panel, &go->shadow, &go->about, &go->launcher, &go->lock, &go->card, &go->switcher, &go->power,
-                                &go->dock, &go->menu, &go->osk };
+                                &go->dock, &go->menu, &go->osk, &go->overview };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         gl_chrome_free(r, all[i]);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
@@ -207,6 +208,7 @@ static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c
 static void gl_do_dock(const struct paint_ctx *c, const void *it) { paint_dock(c, it); }
 static void gl_do_osk(const struct paint_ctx *c, const void *it) { paint_osk(c, it); }
 static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
+static void gl_do_overview(const struct paint_ctx *c, const void *it) { paint_overview_ui(c, it); }
 
 static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
 {
@@ -465,6 +467,33 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
         break;
     case LM_SCENE_SURFACE:
         lm_surface_tree_visit(item->u.surface.root, item->u.surface.x, item->u.surface.y, gl_visit, p);
+        break;
+    case LM_SCENE_OVERVIEW:
+        if (item->u.overview.rect.x == p->st->out->x && item->u.overview.rect.y == p->st->out->y) {
+            const struct lm_overview_info *ov = &item->u.overview;
+            if (ov->dim > 0)                                    /* the dimming changes every frame while it opens: a plain translucent quad, not a texture */
+                lm_gl_draw_rect(p->r->gl, ov->rect.x - p->ox, ov->rect.y - p->oy, ov->rect.w, ov->rect.h,
+                                (float)((lm_theme.ink >> 16) & 255) / 255.0f * (float)ov->dim / 255.0f,
+                                (float)((lm_theme.ink >> 8) & 255) / 255.0f * (float)ov->dim / 255.0f,
+                                (float)(lm_theme.ink & 255) / 255.0f * (float)ov->dim / 255.0f, (float)ov->dim / 255.0f);
+            if (ov->ui) {                                       /* strip, frames and labels: redrawn only when something they show changed */
+                struct gl_chrome *ch = &p->go->overview;
+                uint64_t h = fnv(1469598103934665603ull, &ov->rect, sizeof(ov->rect));
+                h = fnv(h, ov->ws, sizeof(ov->ws));
+                h = fnv(h, &ov->n, sizeof(ov->n));
+                for (int i = 0; i < ov->n; i++) {
+                    h = fnv(h, &ov->item[i].frame, sizeof(ov->item[i].frame));
+                    h = fnv(h, &ov->item[i].sel, 3 * sizeof(bool));
+                    h = fnv(h, ov->item[i].title, strlen(ov->item[i].title) + 1);
+                }
+                if (!ch->tex || ch->hash != h || ch->w != ov->rect.w || ch->h != ov->rect.h) {
+                    gl_scratch_alpha(p->r, p->st, ch, &ov->rect, gl_do_overview, ov);
+                    ch->hash = h;
+                }
+                if (ch->tex)
+                    gl_tex_at(p, ch->tex, &ov->rect, false);
+            }
+        }
         break;
     case LM_SCENE_GHOST: {                              /* a window that opens / closes / is minimized: its picture, scaled by the GPU */
         struct lm_ghost *g = item->u.ghost.ghost;

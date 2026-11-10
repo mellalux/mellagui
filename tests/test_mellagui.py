@@ -7024,6 +7024,166 @@ class TestThemes(Base):
             c.cmd('setraw theme-use ../../etc/passwd')
 
 
+class TestOverview(Base):
+    """The desktop overview (Super+W, control socket `overview`): the windows of this workspace as pictures in a grid with the workspaces above."""
+
+    KEY_W, KEY_DELETE, KEY_RIGHT_ = 17, 111, 106
+
+    @staticmethod
+    def ov(c=None):
+        c = c or ctl
+        lines = c.cmd('overview')
+        head = dict(kv.split('=', 1) for kv in lines[0].split()[1:])
+        items = []
+        for ln in lines[1:]:
+            m = ln.split()
+            slot = [int(v) for v in ln.split('slot=')[1].split()[0].split(',')]
+            items.append({'x': int(m[2][2:]), 'y': int(m[3][2:]), 'w': int(m[4][2:]), 'h': int(m[5][2:]), 'slot': slot, 'title': ln.split('title="')[1][:-1]})
+        return head, items
+
+    def wins3(self):
+        out = []
+        for i, (col, t) in enumerate(((0xff336699, 'Blue'), (0xff993333, 'Red'), (0xff339933, 'Green'))):
+            c, w = self.window(300, 200, title=t, color=col)
+            out.append((c, w))
+        return out
+
+    @staticmethod
+    def centre(it):
+        x, y, w, h = it['slot']
+        return x + w // 2, y + h // 2
+
+    def tearDown(self):
+        ctl.cmd('overview close')
+        super().tearDown()
+
+    def test_it_lists_the_windows_of_the_workspace_in_a_grid_below_the_workspace_cells(self):
+        self.wins3()
+        ctl.cmd('overview open')
+        head, items = self.ov()
+        self.assertEqual((head['open'], head['n']), ('1', '3'))
+        self.assertEqual([i['title'] for i in items], ['Blue', 'Red', 'Green'])
+        for i in items:
+            x, y, w, h = i['slot']
+            self.assertGreaterEqual(y, 32 + 56)                                     # below the panel and the workspace cells
+            self.assertLessEqual(x + w, 1024)
+            self.assertLessEqual(y + h, 600)
+            self.assertLessEqual(w, 300)                                           # never larger than the window
+        ppm = ctl.dump(os.path.join(tmp, 'ov1.ppm'))
+        x, y, w, h = items[1]['slot']
+        px = ppm.px(x + w // 2, y + h // 2)
+        self.assertGreater(px[0], px[1] + 40)                                      # the red window's picture is there
+        ctl.cmd('overview close')
+        self.assertEqual(self.ov()[0]['open'], '0')
+
+    def test_a_click_on_a_picture_goes_to_that_window(self):
+        self.wins3()
+        ctl.cmd('overview open')
+        head, items = self.ov()
+        x, y = self.centre(items[0])                                                # Blue, the lowest one
+        ctl.click(x, y)
+        ctl.sync()
+        self.assertEqual(self.ov()[0]['open'], '0')
+        ws = ctl.windows()['windows']
+        self.assertEqual(ws[-1]['title'], 'Blue')                                  # raised ...
+        self.assertIn('focused', ws[-1]['flags'])                                  # ... and focused
+
+    def test_esc_closes_it_and_leaves_the_focus_alone(self):
+        self.wins3()
+        ctl.cmd('overview open')
+        ctl.tap(KEY_ESC)
+        ctl.sync()
+        self.assertEqual(self.ov()[0]['open'], '0')
+        self.assertEqual([w['title'] for w in ctl.windows()['windows'] if 'focused' in w['flags']], ['Green'])
+
+    def test_arrows_choose_and_enter_goes_to_the_window(self):
+        self.wins3()
+        ctl.cmd('overview open')
+        head, _ = self.ov()
+        self.assertEqual(head['sel'], '2')                                         # the focused one is chosen first
+        ctl.tap(KEY_LEFT)
+        ctl.tap(KEY_LEFT)
+        self.assertEqual(self.ov()[0]['sel'], '0')
+        ctl.tap(KEY_ENTER)
+        ctl.sync()
+        self.assertEqual(self.ov()[0]['open'], '0')
+        self.assertEqual([w['title'] for w in ctl.windows()['windows'] if 'focused' in w['flags']], ['Blue'])
+
+    def test_super_w_opens_and_closes_it(self):
+        self.wins3()
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(self.KEY_W)
+        ctl.key(KEY_LEFTMETA, False)
+        ctl.sync()
+        self.assertEqual(self.ov()[0]['open'], '1')
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(self.KEY_W)
+        ctl.key(KEY_LEFTMETA, False)
+        ctl.sync()
+        self.assertEqual(self.ov()[0]['open'], '0')
+
+    def test_a_workspace_cell_shows_that_workspaces_windows(self):
+        self.wins3()
+        ctl.cmd('overview open')
+        ctl.click(302 + 108 + 48, 67)                                              # the cell of workspace 2
+        ctl.sync()
+        head, items = self.ov()
+        self.assertEqual((head['open'], head['ws'], head['n']), ('1', '1', '0'))   # empty
+        ctl.click(302 + 48, 67)                                                    # back to workspace 1
+        ctl.sync()
+        head, items = self.ov()
+        self.assertEqual((head['ws'], head['n']), ('0', '3'))
+
+    def test_a_minimized_window_is_in_it_and_comes_back_when_chosen(self):
+        cs = self.wins3()
+        cs[1][0].wl.request(cs[1][1].toplevel, 'set_minimized')
+        cs[1][0].wl.roundtrip()
+        ctl.sync()
+        ctl.cmd('overview open')
+        head, items = self.ov()
+        self.assertEqual(head['n'], '3')
+        x, y = self.centre(items[1])
+        ctl.click(x, y)
+        ctl.sync()
+        red = [w for w in ctl.windows()['windows'] if w['title'] == 'Red'][0]
+        self.assertNotIn('minimized', red['flags'])
+        self.assertIn('focused', red['flags'])
+
+    def test_a_middle_click_closes_the_window(self):
+        cs = self.wins3()
+        ctl.cmd('overview open')
+        head, items = self.ov()
+        x, y = self.centre(items[2])
+        ctl.abs(x, y)
+        ctl.button(274, True)
+        ctl.button(274, False)
+        ev = cs[2][0].wl.wait_for(lambda e: e.obj == cs[2][1].toplevel and e.name == 'close', 2.0)
+        self.assertIsNotNone(ev, 'no xdg_toplevel.close')
+        self.assertEqual(self.ov()[0]['open'], '1')                                # still open
+
+    def test_pictures_fly_out_and_back_with_animations_on(self):
+        p, c, stop = self.private_compositor('mellagui-ov9', env={'MELLAGUI_ANIMATIONS': '800'})
+        cl = Client(name='mellagui-ov9')
+        self.clients.append(cl)
+        for t in ('A', 'B'):
+            Window(cl, 300, 200, title=t)
+        cl.wl.roundtrip()
+        time.sleep(1.0)
+        c.cmd('overview open')
+        head, items = self.ov(c)
+        self.assertLess(float(head['prog']), 1.0)                                   # on its way
+        end = time.time() + 4
+        while time.time() < end and self.ov(c)[0]['prog'] != '1.00':
+            time.sleep(0.05)
+        self.assertEqual(self.ov(c)[0]['prog'], '1.00')
+        c.cmd('overview close')
+        self.assertEqual(self.ov(c)[0]['closing'], '1')
+        end = time.time() + 4
+        while time.time() < end and self.ov(c)[0]['open'] == '1':
+            time.sleep(0.05)
+        self.assertEqual(self.ov(c)[0]['open'], '0')
+
+
 class TestFuzz(Base):
     """The coverage-guided fuzzer of the whole compositor (tests/fuzz_server.c): a short run must end without a sanitizer report."""
 
@@ -10218,7 +10378,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 33)
+        self.assertEqual(len(t), 34)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -10263,7 +10423,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 34)
+        self.assertEqual(len(t), 35)
         self.assertTrue(alive_p(p))
 
 
@@ -11445,12 +11605,12 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '33')
+        self.assertEqual(self.get(c, 'keys-count'), '34')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 3)
+        self.assertEqual(len(self.rows(c, 3)), 4)
         self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -11474,13 +11634,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '33')
+        self.assertEqual(self.get(c, 'keys-count'), '34')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '34')
+        self.assertEqual(self.get(c, 'keys-count'), '35')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')

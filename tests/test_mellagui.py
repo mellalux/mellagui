@@ -3358,6 +3358,24 @@ class TestClients(Base):
             time.sleep(0.05)
         self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.keys'])
 
+    def test_the_process_manager_opens_with_ctrl_shift_escape_and_closes_with_q(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-top')):
+            self.skipTest('mellagui-top not built')
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(KEY_ESC)
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.key(KEY_LEFTCTRL, False)
+        self.assertIsNotNone(wait_for_window('mellagui.top'), 'the process manager did not open')
+        time.sleep(0.5)
+        ctl.abs(900, 590)
+        ctl.tap(KEY_Q)
+        for _ in range(60):
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.top']:
+                break
+            time.sleep(0.05)
+        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.top'])
+
     def test_run_dialog_selftest(self):
         path = os.path.join(ROOT, 'build', 'mellagui-run')
         if not os.path.exists(path):
@@ -7518,6 +7536,177 @@ class TestTray(Base):
         self.assertIsNone(cl.wl.error)
 
 
+class TestTop(Base):
+    """mellagui-top: the process and service manager."""
+    TOP = os.environ.get('MELLAGUI_TOP_BIN', os.path.join(ROOT, 'build', 'mellagui-top'))
+
+    def start(self, **env):
+        if not os.path.exists(self.TOP):
+            self.skipTest('mellagui-top not built')
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.top', 'a window of an earlier test is still open')
+        d = tempfile.mkdtemp(prefix='top-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.log = os.path.join(d, 'systemctl.log')
+        e = dict(os.environ, MELLAGUI_SYSTEMCTL=os.path.join(ROOT, 'tests', 'fake_systemctl.py'),
+                 MELLAGUI_JOURNALCTL=os.path.join(ROOT, 'tests', 'fake_journalctl.py'), FAKE_SYSTEMCTL_LOG=self.log, HOME=d)
+        e.update(env)
+        p = subprocess.Popen([self.TOP], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.top'), 'the window did not appear')
+        time.sleep(0.5)
+        ctl.abs(900, 590)
+        return p
+
+    def victim(self, seconds):
+        """A process nobody else has: `sleep N` with an odd N (returns it and the number to filter for)."""
+        n = 30000 + seconds
+        v = subprocess.Popen(['sleep', str(n)])
+        self.addCleanup(lambda: (v.poll() is None) and (v.kill(), v.wait()))
+        return v, str(n)
+
+    def type_filter(self, text):
+        ctl.tap(53)                                                               # "/"
+        for ch in text:
+            ctl.tap(11 if ch == '0' else 1 + int(ch))
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+
+    def calls(self):
+        time.sleep(0.2)
+        try:
+            with open(self.log) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def state_of(self, pid):
+        with open('/proc/%d/stat' % pid) as f:
+            r = f.read().rsplit(')', 1)[1].split()
+        return r[0], int(r[16])                                                   # state, nice
+
+    def test_selftest_and_the_plain_list(self):
+        if not os.path.exists(self.TOP):
+            self.skipTest('mellagui-top not built')
+        r = subprocess.run([self.TOP, '--selftest'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        v, n = self.victim(1)
+        r = subprocess.run([self.TOP, '--list', '500'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('PID USER', r.stdout)
+        self.assertRegex(r.stdout, r'\n\s*%d \S+\s+\d+\.\d+\s+\S+ sleep %s' % (v.pid, n))
+
+    def test_a_process_is_ended_after_asking_and_not_when_cancelled(self):
+        v, n = self.victim(2)
+        p = self.start()
+        self.type_filter(n)
+        ctl.tap(20)                                                               # T: end it ... asks first
+        time.sleep(0.2)
+        ctl.tap(KEY_ESC)                                                          # no
+        time.sleep(0.5)
+        self.assertIsNone(v.poll(), 'Esc must keep the process')
+        ctl.tap(20)
+        ctl.tap(KEY_ENTER)                                                        # yes: SIGTERM
+        for _ in range(30):
+            if v.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertEqual(v.poll(), -15)
+
+    def test_a_process_is_killed_stopped_and_continued(self):
+        v, n = self.victim(3)
+        p = self.start()
+        self.type_filter(n)
+        ctl.tap(31)                                                               # S: stop it
+        time.sleep(0.5)
+        self.assertEqual(self.state_of(v.pid)[0], 'T')
+        ctl.tap(19)                                                               # R: go on
+        time.sleep(0.5)
+        self.assertNotEqual(self.state_of(v.pid)[0], 'T')
+        ctl.tap(37)                                                               # K: kill, asks
+        ctl.tap(KEY_ENTER)
+        for _ in range(30):
+            if v.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertEqual(v.poll(), -9)
+
+    def test_the_nice_value_changes_with_plus_and_minus(self):
+        v, n = self.victim(4)
+        p = self.start()
+        self.type_filter(n)
+        ctl.tap(13)                                                               # + (the = key)
+        time.sleep(0.5)
+        self.assertEqual(self.state_of(v.pid)[1], 5)
+        ctl.tap(13)
+        time.sleep(0.5)
+        self.assertEqual(self.state_of(v.pid)[1], 10)
+        ctl.tap(12)                                                               # - : only root may lower it: nothing changes
+        time.sleep(0.5)
+        self.assertEqual(self.state_of(v.pid)[1], 10 if os.getuid() else 5)
+
+    def test_the_menu_of_a_process(self):
+        v, n = self.victim(5)
+        p = self.start()
+        self.type_filter(n)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.top'][0]
+        self.right_click(win['x'] + 200, win['y'] + 62 + 32 + 20 + 9)           # the one row of the list
+        m = self.menu_state()
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']][:4]), (1, ['Terminate', 'Kill', 'Pause', 'Continue']))
+        ctl.click(m['entries'][2]['x'], m['entries'][2]['y'])                     # Pause
+        time.sleep(0.5)
+        self.assertEqual(self.state_of(v.pid)[0], 'T')
+
+    def test_services_are_listed_started_stopped_and_logged(self):
+        p = self.start()
+        ctl.tap(KEY_TAB)                                                          # the services
+        time.sleep(0.5)
+        self.assertTrue(any('list-units' in c and '--user' not in c for c in self.calls()), self.calls())
+        # failed ones come first: gamma is under the cursor
+        ctl.tap(31)                                                               # S: start
+        time.sleep(0.5)
+        self.assertIn('systemctl --no-ask-password start gamma-system.service', self.calls())
+        ctl.tap(45)                                                               # X: stop asks first
+        ctl.tap(KEY_ESC)
+        time.sleep(0.3)
+        self.assertFalse(any(' stop ' in c for c in self.calls()))
+        ctl.tap(45)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.5)
+        self.assertIn('systemctl --no-ask-password stop gamma-system.service', self.calls())
+        ctl.tap(19)                                                               # R: restart
+        time.sleep(0.5)
+        self.assertIn('systemctl --no-ask-password restart gamma-system.service', self.calls())
+        ctl.tap(KEY_ENTER)                                                        # the journal
+        time.sleep(0.6)
+        self.assertTrue(any(c.startswith('journalctl') and '-u gamma-system.service' in c for c in self.calls()), self.calls())
+        ctl.tap(KEY_ESC)                                                          # back to the list (the window stays)
+        time.sleep(0.3)
+        self.assertIsNotNone(wait_for_window('mellagui.top'))
+        ctl.tap(22)                                                               # U: the user session's services
+        time.sleep(0.6)
+        self.assertTrue(any('--user' in c and 'list-units' in c for c in self.calls()), self.calls())
+        self.assertEqual(p.poll(), None)
+
+    def test_a_refusal_of_systemd_does_not_end_anything(self):
+        p = self.start(FAKE_SYSTEMCTL_DENY='1')
+        ctl.tap(KEY_TAB)
+        time.sleep(0.5)
+        ctl.tap(31)
+        time.sleep(0.5)
+        self.assertIn('systemctl --no-ask-password start gamma-system.service', self.calls())
+        self.assertIsNone(p.poll())
+
+    def test_q_closes_it(self):
+        p = self.start()
+        ctl.tap(KEY_Q)
+        for _ in range(30):
+            if p.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertEqual(p.poll(), 0)
+
+
 class TestViewer(Base):
     """mellagui-view in a window: browsing, zoom, title."""
     VIEW = os.environ.get('MELLAGUI_VIEW_BIN', os.path.join(ROOT, 'build', 'mellagui-view'))
@@ -9437,7 +9626,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 32)
+        self.assertEqual(len(t), 33)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -9482,7 +9671,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 33)
+        self.assertEqual(len(t), 34)
         self.assertTrue(alive_p(p))
 
 
@@ -10664,12 +10853,12 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '32')
+        self.assertEqual(self.get(c, 'keys-count'), '33')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 2)
+        self.assertEqual(len(self.rows(c, 3)), 3)
         self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -10693,13 +10882,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '32')
+        self.assertEqual(self.get(c, 'keys-count'), '33')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '33')
+        self.assertEqual(self.get(c, 'keys-count'), '34')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -11630,12 +11819,12 @@ class TestLauncher(Base):
         c.sync()
         self.super_a(c)
         d = self.info(c)
-        self.assertEqual((d['open'], d['n']), (1, 10))                                    # the built-in dock (with the Camera and Record buttons), without its Launcher button
+        self.assertEqual((d['open'], d['n']), (1, 11))                                    # the built-in dock (with the Camera and Record buttons), without its Launcher button
         c.tap(self.KEY_E)
         c.sync()
         c.click(*self.centre(self.info(c)['icons'][0]['remove']))
         c.sync()
-        self.assertEqual(self.info(c)['n'], 10)
+        self.assertEqual(self.info(c)['n'], 11)
 
     def test_the_dialog_is_painted_translucent(self):
         c = self.start('mellagui-lc9')

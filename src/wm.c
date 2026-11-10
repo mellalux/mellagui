@@ -2651,10 +2651,11 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
         li->field[0] = lm_rect_make(fx, li->card.y + 60 + LM_FONT_H + 4, fw, 30);
         li->field[1] = lm_rect_make(fx, li->card.y + 126 + LM_FONT_H + 4, fw, 30);
         li->field[2] = lm_rect_make(fx, li->card.y + 192 + LM_FONT_H + 4, fw, 30);
-        int total = LM_LAUNCHER_KIND_N * LC_KIND + (LM_LAUNCHER_KIND_N - 1) * 6;
+        int kgap = 5, ksz = LM_MIN(LC_KIND, (li->card.w - 2 * LC_PAD - (LM_LAUNCHER_KIND_N - 1) * kgap) / LM_LAUNCHER_KIND_N);       /* all the icon choices fit the card */
+        int total = LM_LAUNCHER_KIND_N * ksz + (LM_LAUNCHER_KIND_N - 1) * kgap;
         int kx = li->card.x + (li->card.w - total) / 2, ky = li->card.y + 286;
         for (int i = 0; i < LM_LAUNCHER_KIND_N; i++)
-            li->kind_box[i] = lm_rect_make(kx + i * (LC_KIND + 6), ky, LC_KIND, LC_KIND);
+            li->kind_box[i] = lm_rect_make(kx + i * (ksz + kgap), ky, ksz, ksz);
     }
 }
 

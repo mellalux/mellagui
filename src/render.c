@@ -2177,7 +2177,7 @@ static bool cover_cb(const struct lm_scene_item *item, void *data)
     return true;
 }
 
-static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, const struct lm_rect *dst, int alpha);
+static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, const struct lm_rect *src, const struct lm_rect *dst, int alpha);
 
 static bool scene_cb(const struct lm_scene_item *item, void *data)
 {
@@ -2203,7 +2203,7 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
                               visit_blit, c);
         break;
     case LM_SCENE_GHOST:
-        paint_ghost(c, item->u.ghost.ghost, &item->u.ghost.dst, item->u.ghost.alpha);
+        paint_ghost(c, item->u.ghost.ghost, &item->u.ghost.src, &item->u.ghost.dst, item->u.ghost.alpha);
         break;
     case LM_SCENE_PANEL_SHADOW:
         if (item->output == c->out)
@@ -2260,9 +2260,11 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
       (((p11) >> (sh)) & 255u) * (w11) + 32768u) >> 16)
 
 /* Paints the ghost scaled into `dst` (global) with opacity `alpha` (0..255) over the target: bilinear sampling of the premultiplied pixels. */
-static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, const struct lm_rect *dst, int alpha)
+static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, const struct lm_rect *src, const struct lm_rect *dst, int alpha)
 {
-    struct lm_rect r;
+    struct lm_rect r, whole = lm_rect_make(0, 0, g ? g->w : 0, g ? g->h : 0);
+    if (!src || src->w <= 0 || src->h <= 0)
+        src = &whole;
     if (!g || !g->px || dst->w <= 0 || dst->h <= 0 || alpha <= 0 || !lm_rect_intersect(dst, &c->clip, &r))
         return;
     int *sx0 = malloc((size_t)r.w * sizeof(int) * 2);
@@ -2270,7 +2272,7 @@ static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, con
         return;
     int *fx = sx0 + r.w;
     for (int x = 0; x < r.w; x++) {
-        float u = ((float)(r.x + x - dst->x) + 0.5f) * (float)g->w / (float)dst->w - 0.5f;
+        float u = ((float)(r.x + x - dst->x) + 0.5f) * (float)src->w / (float)dst->w - 0.5f + (float)src->x;
         if (u < 0) u = 0;
         if (u > (float)(g->w - 1)) u = (float)(g->w - 1);
         int i = (int)u;
@@ -2279,7 +2281,7 @@ static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, con
     }
     uint32_t al = (uint32_t)LM_MIN(alpha, 255);
     for (int y = r.y; y < r.y + r.h; y++) {
-        float v = ((float)(y - dst->y) + 0.5f) * (float)g->h / (float)dst->h - 0.5f;
+        float v = ((float)(y - dst->y) + 0.5f) * (float)src->h / (float)dst->h - 0.5f + (float)src->y;
         if (v < 0) v = 0;
         if (v > (float)(g->h - 1)) v = (float)(g->h - 1);
         int j = (int)v, fy = (int)((v - (float)j) * 256.0f), j1 = LM_MIN(j + 1, g->h - 1);

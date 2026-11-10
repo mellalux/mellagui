@@ -473,8 +473,12 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             break;
         if (!g->gl_tex)
             g->gl_tex = lm_gl_tex_create(p->r->gl, g->w, g->h, g->px);
+        const struct lm_rect *sr = &item->u.ghost.src;
+        bool part = sr->w > 0 && sr->h > 0;
         if (g->gl_tex)
-            lm_gl_draw_tex(p->r->gl, g->gl_tex, d->x - p->ox, d->y - p->oy, d->w, d->h, 0, 0, 1, 1,
+            lm_gl_draw_tex(p->r->gl, g->gl_tex, d->x - p->ox, d->y - p->oy, d->w, d->h,
+                           part ? (float)sr->x / (float)g->w : 0, part ? (float)sr->y / (float)g->h : 0,
+                           part ? (float)(sr->x + sr->w) / (float)g->w : 1, part ? (float)(sr->y + sr->h) / (float)g->h : 1,
                            (float)item->u.ghost.alpha / 255.0f, false);
         break;
     }

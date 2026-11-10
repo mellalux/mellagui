@@ -701,6 +701,7 @@ struct lm_scene_item {
         struct {
             struct lm_ghost *ghost; /* the picture (w x h) */
             struct lm_rect dst;     /* where it is painted now, global: scaled to this */
+            struct lm_rect src;     /* the part of the picture painted (empty = all of it): the cells of a wobbling window */
             int alpha;              /* 0..255 */
         } ghost;                    /* LM_SCENE_GHOST */
         struct lm_about_info about; /* LM_SCENE_ABOUT */

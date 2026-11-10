@@ -26,10 +26,11 @@
     X("windows", "button-gap", button_gap, 4, 0, 16, "space between those buttons") \
     X("windows", "resize-corner", resize_corner, 14, 6, 40, "size of the corner zone that resizes diagonally") \
     X("windows", "double-click-ms", double_click_ms, 400, 100, 1000, "double click time in ms (title bar, gadget title, on-screen keyboard margin, files, viewer, editor; running programs keep theirs)") \
+    X("windows", "wobble", wobble, 60, 0, 100, "how much a dragged window bends and wobbles (springs; 0 = it stays rigid; needs animation-ms above 0)") \
     X("windows", "min-width", min_width, 160, 50, 1000, "smallest window width a user can resize to") \
     X("windows", "min-height", min_height, 80, 40, 1000, "smallest window height") \
     X("windows", "scrollbar-width", scrollbar_width, 14, 4, 40, "width of the scroll bars of MellaGUI's own programs (the file browser)") \
-    X("windows", "animation-ms", animation_ms, 180, 0, 1000, "how long a window takes to open, close, minimize and come back, in ms (0 = no animations)") \
+    X("windows", "animation-ms", animation_ms, 300, 0, 1000, "how long a window takes to open, close, minimize and come back, and how slowly a dragged window catches up with the pointer, in ms (0 = no animations)") \
     X("panel", "height", panel_height, 32, 20, 64, "height of the top panel") \
     X("panel", "workspace-width", panel_ws_width, 24, 16, 80, "one workspace cell") \
     X("panel", "run-width", panel_run_width, 44, 30, 120, "the Run button") \

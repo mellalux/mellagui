@@ -50,11 +50,11 @@ enum key_id {
     K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
     K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
-    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET,
+    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET, K_COUNT
 };
-#define VALUE_MAX 1900          /* longest value text (the lists); the wire carries it as one string */
+#define VALUE_MAX 3300          /* longest value text (the lists); the wire carries it as one string */
 
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
@@ -72,6 +72,7 @@ static const char *const key_names[K_COUNT] = {
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
+    [K_THEME_NAME] = "theme-name", [K_THEME_LIST] = "theme-list", [K_THEME_USE] = "theme-use",
     [K_METRICS] = "metrics", [K_METRICS_SET] = "metrics-set", [K_METRICS_RESET] = "metrics-reset",
     [K_DOCK_PUT] = "dock-put", [K_DOCK_DEL] = "dock-del", [K_DOCK_MOVE] = "dock-move", [K_DOCK_RESET] = "dock-reset",
     [K_DOCK_OPTS] = "dock-opts", [K_DOCK_SET] = "dock-set",
@@ -558,7 +559,18 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_KEYS_CAPTURE: snprintf(out, n, "%d", srv->wm && lm_wm_key_capturing(srv->wm) ? 1 : 0); break;
     case K_KEYS_CAPTURED: snprintf(out, n, "%s", srv->wm ? lm_wm_key_captured(srv->wm) : ""); break;
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET: break;
-    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: break;
+    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE: break;
+    case K_THEME_NAME:                          /* the active theme */
+        snprintf(out, n, "%s", lm_theme_name());
+        break;
+    case K_THEME_LIST: {                        /* "colorful* graphite light contrast ...": every theme there is, the active one marked with a * */
+        char names[24][LM_THEME_NAME_MAX];
+        int cnt = lm_theme_list(names, NULL, 24);
+        size_t o = 0;
+        for (int i = 0; i < cnt && o + LM_THEME_NAME_MAX + 3 < n; i++)
+            o += (size_t)snprintf(out + o, n - o, "%s%s%s", i ? " " : "", names[i], !strcasecmp(names[i], lm_theme_name()) ? "*" : "");
+        break;
+    }
     case K_METRICS_SET: case K_METRICS_RESET: break;
     case K_METRICS: {                           /* "section.name=value:min:max:builtin ..." every size of metrics.h */
         const char *sec, *nm;
@@ -617,7 +629,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 {
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
-        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST))
+        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_THEME_LIST || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
@@ -1225,7 +1237,22 @@ static bool theme_op(struct lm_server *srv, int kid, const char *val)
     if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
         return false;
     bool ok;
-    if (kid == K_THEME_RESET) {
+    if (kid == K_THEME_USE) {                                   /* switch the theme: the section keeps only its name (the single colours went with the old theme) */
+        char names[24][LM_THEME_NAME_MAX];
+        int cnt = lm_theme_list(names, NULL, 24);
+        bool known = false;
+        for (int i = 0; i < cnt; i++)
+            known = known || !strcasecmp(names[i], val);
+        if (!known)
+            return false;
+        if (!strcasecmp(val, "colorful"))
+            ok = lm_confedit_set_section(path, "theme", NULL);          /* the default needs no line at all */
+        else {
+            char body[64];
+            snprintf(body, sizeof(body), "name = %s\n", val);
+            ok = lm_confedit_set_section(path, "theme", body);
+        }
+    } else if (kid == K_THEME_RESET) {
         if (strcmp(val, "1"))
             return false;
         ok = lm_confedit_set_section(path, "theme", NULL);
@@ -1489,7 +1516,7 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return dock_op(srv, k, val);
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET:
         return keys_op(s, k, val);
-    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET:
+    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE:
         return theme_op(srv, k, val);
     case K_METRICS_SET: case K_METRICS_RESET:
         return metrics_op(srv, k, val);

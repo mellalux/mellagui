@@ -43,8 +43,8 @@
 
 #define BAR_H 24
 #define BG (lm_theme.card)
-#define BAR_BG 0x0e1118u
-#define BAR_FG 0xd8dde8u
+#define BAR_BG (lm_theme.bar_deep)
+#define BAR_FG (lm_theme.bar_text)
 #define VBTN_W 26                       /* the video buttons in the bar: back 5 s, play / pause, stop, on 5 s */
 #define VBTN_H 18
 #define VBTN_GAP 2
@@ -629,7 +629,7 @@ static void paint_vbuttons(struct app *a, struct wlwin *w, int vh)
 {
     for (int i = 0; i < N_VBTN; i++) {
         int x = vbtn_x(i), y = vh + 5, cx = x + VBTN_W / 2, cy = y + VBTN_H / 2;
-        uint32_t bg = a->vpress == i + 1 && a->vhover == i + 1 ? 0x3d4a6a : a->vhover == i + 1 ? 0x2d3a56 : 0x1d2433;
+        uint32_t bg = a->vpress == i + 1 && a->vhover == i + 1 ? lm_theme.viewer_button_down : a->vhover == i + 1 ? lm_theme.viewer_button_hover : lm_theme.viewer_button;
         uint32_t fg = i == 1 && !a->playing ? lm_theme.accent : BAR_FG;
         wlwin_fill(w, x, y, VBTN_W, VBTN_H, bg);
         switch (i) {
@@ -900,14 +900,14 @@ static void paint(struct wlwin *w)
         }
     } else if (a->n) {
         snprintf(status, sizeof(status), "%s: %s   %d/%d", a->names[a->cur], a->err, a->cur + 1, a->n);
-        wlwin_text(w, 16, 16, a->err, 1, 0xff8080u, vw - 32);
+        wlwin_text(w, 16, 16, a->err, 1, lm_theme.error, vw - 32);
     } else {
         snprintf(status, sizeof(status), "no images in %.300s", a->dir);
         wlwin_text(w, 16, 16, "No images or videos here. Press Print to take a screenshot, R to look again.", 1, BAR_FG, vw - 32);
     }
     wlwin_fill(w, 0, vh, w->bw, w->bh - vh, BAR_BG);
     if (a->vmode && video_len(a)) {                              /* the progress: a strip along the top of the bar */
-        wlwin_fill(w, 0, vh, w->bw, 4, 0x2a3040u);
+        wlwin_fill(w, 0, vh, w->bw, 4, lm_theme.divider);
         wlwin_fill(w, 0, vh, (int)((uint64_t)w->bw * video_pos(a) / video_len(a)), 4, lm_theme.accent);
     }
     int tx = 8;

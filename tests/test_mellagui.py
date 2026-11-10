@@ -6781,6 +6781,190 @@ class TestAccess(Base):
         self.assertEqual(r.returncode, 2)
 
 
+class TestAnimation(Base):
+    """Windows open, close and are minimized with a short animation: a picture of the window grows / shrinks / flies to its button
+    (LM_SCENE_GHOST). Headless never animates unless MELLAGUI_ANIMATIONS is set (so no other test sees half a window)."""
+
+    def start(self, name, ms='1500'):
+        p, c, stop = self.private_compositor(name, env={'MELLAGUI_ANIMATIONS': ms})
+        return c
+
+    def items(self, c):
+        lines = c.cmd('anim')
+        out = []
+        for ln in lines:
+            if ln.startswith('item '):
+                out.append(dict(kv.split('=', 1) for kv in ln.split()[1:]))
+        return out
+
+    def test_headless_does_not_animate_by_default(self):
+        lines = ctl.cmd('anim')
+        self.assertIn('dur=0', lines[0])
+        c, w = self.window(200, 150, color=0xff00ff00)
+        self.assertEqual(self.items(ctl), [])
+        r = self.wins()['windows'][0]
+        ppm = ctl.dump(os.path.join(tmp, 'noanim.ppm'))
+        self.assertEqual(ppm.px(r['x'] + 100, r['y'] + 75), (0, 255, 0))             # solid at once
+
+    def test_a_window_grows_and_fades_in_when_it_opens(self):
+        c = self.start('mellagui-an1')
+        cl = Client(name='mellagui-an1')
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        c.sync()
+        its = self.items(c)
+        self.assertEqual(len(its), 1)
+        self.assertEqual(its[0]['kind'], 'open')
+        full = c.windows()['windows'][0]
+        self.assertLess(int(its[0]['alpha']), 255)
+        self.assertLessEqual(int(its[0]['w']), full['w'] + 8 + 1)                      # never bigger than the frame
+        ppm = c.dump(os.path.join(tmp, 'an1a.ppm'))
+        px = ppm.px(full['x'] + 150, full['y'] + 100)
+        self.assertLess(px[1], 255)                                                     # not the solid window yet
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        self.assertEqual(self.items(c), [])
+        ppm = c.dump(os.path.join(tmp, 'an1b.ppm'))
+        self.assertEqual(ppm.px(full['x'] + 150, full['y'] + 100), (0, 255, 0))        # the window itself, solid
+
+    def test_minimize_flies_to_the_taskbar_and_back(self):
+        c = self.start('mellagui-an2')
+        cl = Client(name='mellagui-an2')
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        full = c.windows()['windows'][0]
+        cl.wl.request(win.toplevel, 'set_minimized')
+        cl.wl.roundtrip()
+        c.sync()
+        its = self.items(c)
+        self.assertEqual([i['kind'] for i in its], ['minimize'])
+        self.assertIn('minimized', c.windows()['windows'][0]['flags'])
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        self.assertEqual(self.items(c), [])
+        c.click(250, 14)                                                               # its taskbar button brings it back
+        c.sync()
+        its = self.items(c)
+        self.assertEqual([i['kind'] for i in its], ['restore'])
+        self.assertNotIn('minimized', c.windows()['windows'][0]['flags'])
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        self.assertEqual(self.items(c), [])
+        ppm = c.dump(os.path.join(tmp, 'an2.ppm'))
+        self.assertEqual(ppm.px(full['x'] + 150, full['y'] + 100), (0, 255, 0))
+
+    def test_closing_a_window_with_the_button_fades_it_out(self):
+        c = self.start('mellagui-an3')
+        cl = Client(name='mellagui-an3')
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        full = c.windows()['windows'][0]
+        c.click(full['x'] + full['w'] + 4 - 14, full['y'] - 14)                        # the close button of the title bar
+        ev = cl.wl.wait_for(lambda e: e.obj == win.toplevel and e.name == 'close', 2.0)
+        self.assertIsNotNone(ev, 'no xdg_toplevel.close')
+        cl.wl.request(win.toplevel, 'destroy')                                          # the client agrees: the window goes
+        cl.wl.request(win.xdg, 'destroy')
+        cl.wl.request(win.surface, 'destroy')
+        cl.wl.roundtrip()
+        c.sync()
+        its = self.items(c)
+        self.assertEqual([i['kind'] for i in its], ['close'])
+        self.assertEqual(c.windows()['windows'], [])
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        self.assertEqual(self.items(c), [])
+
+
+class TestThemes(Base):
+    """Named themes: `[theme] name = X` (built-in presets or themes/X.conf), single colours stay on top, theme-use switches."""
+
+    def start(self, name, text=None, themes=None):
+        d = os.path.join(tmp, name + '-cfg')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'themes'))
+        self.path = os.path.join(d, 'mellagui.conf')
+        if text is not None:
+            with open(self.path, 'w') as f:
+                f.write(text)
+        for fn, body in (themes or {}).items():
+            with open(os.path.join(d, 'themes', fn), 'w') as f:
+                f.write(body)
+        p, c, stop = self.private_compositor(name, '--config', self.path)
+        c.sync()
+        return c
+
+    @staticmethod
+    def colours(c):
+        c.cmd('setting theme-colors')
+        return dict(t.split('=', 1) for t in c.last[3:].split())
+
+    @staticmethod
+    def names(c):
+        c.cmd('setting theme-list')
+        return c.last[3:].split()
+
+    def test_colorful_is_the_default_and_the_presets_are_listed(self):
+        c = self.start('mellagui-th1', '')
+        c.cmd('setting theme-name')
+        self.assertEqual(c.last, 'ok colorful')
+        self.assertEqual(self.names(c), ['colorful*', 'graphite', 'light', 'contrast'])
+        self.assertEqual(self.colours(c)['accent'], '#6fa8ff')
+
+    def test_a_named_theme_changes_the_palette_and_single_colours_stay_on_top_in_any_order(self):
+        c = self.start('mellagui-th2', '[theme]\naccent = #ff0000\nname = light\n')
+        cols = self.colours(c)
+        self.assertEqual(cols['background'], '#eef1f6')                       # the light theme
+        self.assertEqual(cols['accent'], '#ff0000*')                          # ... with the one colour written by hand on top
+        self.assertEqual(self.names(c)[2], 'light*')
+
+    def test_a_theme_changes_the_colourful_parts_too(self):
+        c = self.start('mellagui-th6', '[theme]\nname = light\n')
+        cols = self.colours(c)
+        self.assertEqual((cols['glass-text'], cols['veil'], cols['text-bright']), ('#1c2433', '#000000', '#0c1220'))      # the launcher's text, the cards' light touch
+        self.assertEqual(cols['btn-green'], '#3f9a5e')                       # a hue the theme does not change stays
+        c.cmd('setraw theme-use colorful')
+        cols = self.colours(c)
+        self.assertEqual((cols['glass-text'], cols['veil'], cols['text-bright']), ('#ffffff', '#ffffff', '#ffffff'))
+
+    def test_a_theme_file_with_a_base(self):
+        c = self.start('mellagui-th3', '[theme]\nname = sea\n',
+                       {'sea.conf': '# mine\nbase = graphite\naccent = #00ffcc\nframe = #004455\n'})
+        cols = self.colours(c)
+        self.assertEqual((cols['accent'], cols['frame'], cols['background']), ('#00ffcc', '#004455', '#1b1c1e'))
+        self.assertEqual(self.names(c), ['colorful', 'graphite', 'light', 'contrast', 'sea*'])
+
+    def test_theme_use_rewrites_the_section_and_drops_the_old_colours(self):
+        c = self.start('mellagui-th4', '[keys]\nSuper+T = run\n\n[theme]\naccent = #ff0000\n')
+        c.cmd('setraw theme-use graphite')
+        text = open(self.path).read()
+        self.assertIn('[theme]\nname = graphite\n', text)
+        self.assertNotIn('#ff0000', text)
+        self.assertIn('Super+T = run', text)                                   # the rest of the file is untouched
+        self.assertEqual(self.colours(c)['accent'], '#9bb7d4')
+        c.cmd('setraw theme-use colorful')                                     # the default needs no line at all
+        self.assertNotIn('[theme]', open(self.path).read())
+        self.assertEqual(self.colours(c)['accent'], '#6fa8ff')
+
+    def test_an_unknown_theme_is_refused(self):
+        c = self.start('mellagui-th5', '')
+        with self.assertRaises(RuntimeError):
+            c.cmd('setraw theme-use nonesuch')
+        with self.assertRaises(RuntimeError):
+            c.cmd('setraw theme-use ../../etc/passwd')
+
+
 class TestFuzz(Base):
     """The coverage-guided fuzzer of the whole compositor (tests/fuzz_server.c): a short run must end without a sanitizer report."""
 
@@ -11360,7 +11544,8 @@ class TestThemeEdit(Base):
     def test_lists_every_colour_and_marks_the_changed_ones(self):
         c = self.start('mellagui-te1', '[theme]\naccent = #ff0000\n')
         cols = self.colours(c)
-        self.assertEqual(len(cols), 30)
+        self.assertGreater(len(cols), 100)                                      # the palette and the colourful parts
+        self.assertEqual((cols['btn-green'], cols['icon-files'], cols['glass-text']), ('#3f9a5e', '#2f81f7', '#ffffff'))
         self.assertEqual(cols['accent'], '#ff0000*')
         self.assertEqual(cols['background'], '#14171f')
 
@@ -11417,11 +11602,11 @@ class TestThemeEdit(Base):
         c.click(x0 + 70, y0 + 12 + 8 * 32 + 16)                          # the Colours tab (9th)
         time.sleep(0.3)
         # row 11 of the palette is "background": page 2 (8 per page), third row
-        c.click(x0 + 160 + 24, y0 + 14 + 28 + 11)                         # first row: wallpaper-top, to be sure a click selects
+        c.click(x0 + 160 + 24, y0 + 14 + 28 + 28 + 11)                    # (the Theme row is above the list) first row: wallpaper-top, to be sure a click selects
         time.sleep(0.2)
-        c.click(x0 + 160 + 32 + 30, y0 + 14 + 28 + 11)                    # its name button
+        c.click(x0 + 160 + 32 + 30, y0 + 14 + 28 + 28 + 11)               # its name button
         time.sleep(0.2)
-        form_y = y0 + 14 + 28 + 8 * 22 + 4 + 22 + 6
+        form_y = y0 + 14 + 28 + 28 + 8 * 22 + 4 + 22 + 6
         c.click(x0 + 160 + 34 + 50, form_y + 13)                          # the hex field (the caret is where it was clicked)
         c.tap(107)                                                         # End
         for _ in range(8):
@@ -11460,7 +11645,7 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 26)
+        self.assertEqual(len(m), 27)
         self.assertEqual(m['panel.height'], (36, 20, 64, 32))
         self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))

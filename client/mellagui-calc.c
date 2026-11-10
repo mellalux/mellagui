@@ -526,8 +526,8 @@ static const struct keydef KEYS[] = {
 /* One colour for each sort of key, a lighter one under the pointer (the palette of the other round buttons). */
 static void key_colors(enum kind k, uint32_t *base, uint32_t *hover)
 {
-    static const uint32_t b[] = { 0x4a5368, 0x3d6fb4, 0x3f9a5e, 0xb84545, 0xb8803a, 0x5a6a8a, 0x2f8f9a, 0x8a6fb8 };
-    static const uint32_t h[] = { 0x646f88, 0x5588d0, 0x56b878, 0xd65f5f, 0xd49a50, 0x7488ad, 0x45aab5, 0xa088d0 };
+    const uint32_t b[] = { lm_theme.calc_key, lm_theme.btn_blue, lm_theme.btn_green, lm_theme.btn_red, lm_theme.btn_amber, lm_theme.btn_slate, lm_theme.btn_teal, lm_theme.btn_purple };
+    const uint32_t h[] = { lm_theme.calc_key_lit, lm_theme.btn_blue_lit, lm_theme.btn_green_lit, lm_theme.btn_red_lit, lm_theme.btn_amber_lit, lm_theme.btn_slate_lit, lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
     *base = b[k];
     *hover = h[k];
 }
@@ -612,7 +612,7 @@ static void paint(struct wlwin *w)
         struct rect er = { d.x, d.y + 3, d.w, line_h };
         draw_text_in(a, er, e, 1, COL_DIM, true);
     }
-    draw_text_in(a, res, text, scale, a->calc.error ? 0xff7070u : COL_TEXT, true);
+    draw_text_in(a, res, text, scale, a->calc.error ? lm_theme.error : COL_TEXT, true);
 
     int hover = a->has_pointer ? key_at(a, a->px, a->py) : -1;
     for (int i = 0; i < N_KEYS; i++) {
@@ -626,7 +626,7 @@ static void paint(struct wlwin *w)
         int ls = kr.h >= 36 && kr.w >= 44 ? 2 : 1;                       /* as big as fits */
         if (lm_font_text_width(KEYS[i].label) * ls > kr.w - 6)
             ls = 1;
-        draw_text_in(a, kr, KEYS[i].label, ls, 0xffffffu, false);
+        draw_text_in(a, kr, KEYS[i].label, ls, lm_theme.on_colour, false);
     }
 }
 

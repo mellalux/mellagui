@@ -73,6 +73,16 @@ void lm_render_dmabuf_drop(struct lm_renderer *r, struct lm_surface *s);
 void lm_render_set_wallpaper(struct lm_renderer *r, const char *path, int mode);
 const char *lm_render_wallpaper_status(const struct lm_renderer *r);          /* "", "ok" or "error: ..." */
 
+/* A ghost (struct lm_ghost, wm.h) is a picture of a window that is about to appear, disappear or move. */
+struct lm_ghost;
+struct lm_scene_item;
+/* Paints `items` (n scene items, e.g. a window's FRAME and SURFACE) in the global rectangle `rect` into `g` with a transparent
+ * background. false = out of memory or empty rectangle (g stays empty). */
+bool lm_render_snapshot(struct lm_renderer *r, const struct lm_scene_item *items, int n, const struct lm_rect *rect,
+                        struct lm_ghost *g);
+/* Frees the pixels and the GL texture; g is empty afterwards. Safe on an empty ghost. */
+void lm_render_ghost_free(struct lm_renderer *r, struct lm_ghost *g);
+
 /* The surface is being freed: its GL texture (when the GL renderer made one) goes. */
 struct lm_surface;
 void lm_render_surface_gone(struct lm_renderer *r, struct lm_surface *s);

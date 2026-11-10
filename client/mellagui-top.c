@@ -855,24 +855,24 @@ static int build_buttons(const struct app *a, struct btn *b)
     struct def defs[16];
     int nd = 0;
     bool procs = a->tab == T_PROCS, has = procs ? selected_proc(a) != NULL : selected_svc(a) != NULL;
-    defs[nd++] = (struct def){ B_TAB_PROCS, "Processes", 0x3d6fb4, 0x5588d0, procs, true };
-    defs[nd++] = (struct def){ B_TAB_SVCS, "Services", 0x3d6fb4, 0x5588d0, !procs, true };
+    defs[nd++] = (struct def){ B_TAB_PROCS, "Processes", lm_theme.btn_blue, lm_theme.btn_blue_lit, procs, true };
+    defs[nd++] = (struct def){ B_TAB_SVCS, "Services", lm_theme.btn_blue, lm_theme.btn_blue_lit, !procs, true };
     if (a->logview) {
-        defs[nd++] = (struct def){ B_BACK, "Back", 0x6b6f7a, 0x868b98, false, true };
-        defs[nd++] = (struct def){ B_RELOAD, "Reload", 0x2f8f9a, 0x45aab5, false, true };
+        defs[nd++] = (struct def){ B_BACK, "Back", lm_theme.btn_grey, lm_theme.btn_grey_lit, false, true };
+        defs[nd++] = (struct def){ B_RELOAD, "Reload", lm_theme.btn_teal, lm_theme.btn_teal_lit, false, true };
     } else if (procs) {
-        defs[nd++] = (struct def){ B_END, "End", 0xb8803a, 0xd49a50, false, has };
-        defs[nd++] = (struct def){ B_KILL, "Kill", 0xb84545, 0xd65f5f, false, has };
-        defs[nd++] = (struct def){ B_PAUSE, "Pause", 0x8a6fb8, 0xa088d0, false, has };
-        defs[nd++] = (struct def){ B_GO, "Go on", 0x3f9a5e, 0x56b878, false, has };
-        defs[nd++] = (struct def){ B_MINE, "Mine", 0x2f8f9a, 0x45aab5, a->mine, true };
+        defs[nd++] = (struct def){ B_END, "End", lm_theme.btn_amber, lm_theme.btn_amber_lit, false, has };
+        defs[nd++] = (struct def){ B_KILL, "Kill", lm_theme.btn_red, lm_theme.btn_red_lit, false, has };
+        defs[nd++] = (struct def){ B_PAUSE, "Pause", lm_theme.btn_purple, lm_theme.btn_purple_lit, false, has };
+        defs[nd++] = (struct def){ B_GO, "Go on", lm_theme.btn_green, lm_theme.btn_green_lit, false, has };
+        defs[nd++] = (struct def){ B_MINE, "Mine", lm_theme.btn_teal, lm_theme.btn_teal_lit, a->mine, true };
     } else {
-        defs[nd++] = (struct def){ B_START, "Start", 0x3f9a5e, 0x56b878, false, has };
-        defs[nd++] = (struct def){ B_STOP, "Stop", 0xb84545, 0xd65f5f, false, has };
-        defs[nd++] = (struct def){ B_RESTART, "Restart", 0xb8803a, 0xd49a50, false, has };
-        defs[nd++] = (struct def){ B_LOG, "Log", 0x2f8f9a, 0x45aab5, false, has };
-        defs[nd++] = (struct def){ B_SCOPE, a->user_scope ? "User" : "System", 0x8a6fb8, 0xa088d0, a->user_scope, true };
-        defs[nd++] = (struct def){ B_RELOAD, "Reload", 0x6b6f7a, 0x868b98, false, true };
+        defs[nd++] = (struct def){ B_START, "Start", lm_theme.btn_green, lm_theme.btn_green_lit, false, has };
+        defs[nd++] = (struct def){ B_STOP, "Stop", lm_theme.btn_red, lm_theme.btn_red_lit, false, has };
+        defs[nd++] = (struct def){ B_RESTART, "Restart", lm_theme.btn_amber, lm_theme.btn_amber_lit, false, has };
+        defs[nd++] = (struct def){ B_LOG, "Log", lm_theme.btn_teal, lm_theme.btn_teal_lit, false, has };
+        defs[nd++] = (struct def){ B_SCOPE, a->user_scope ? "User" : "System", lm_theme.btn_purple, lm_theme.btn_purple_lit, a->user_scope, true };
+        defs[nd++] = (struct def){ B_RELOAD, "Reload", lm_theme.btn_grey, lm_theme.btn_grey_lit, false, true };
     }
     for (int i = 0; i < nd; i++) {
         b[n].id = defs[i].id;
@@ -997,7 +997,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
     lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, h / 2, base);
     int tw = (int)strlen(b->label) * LM_FONT_W;
-    wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? 0xffffff : COL_DIM, b->w - 4);
+    wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
 
 static void col_pos(int *pid, int *user, int *cpu, int *mem, int *st, int *ni, int *cmd)

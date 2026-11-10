@@ -35,6 +35,7 @@ struct gl_out {
     struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
+    uint32_t theme_gen;                 /* the palette the chromes below were painted with */
     bool unread;                        /* rendered since the last readback */
 };
 
@@ -73,6 +74,19 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
     st->gl = NULL;
+}
+
+/* The palette changed (a theme, a colour): everything painted into a texture with the old colours goes. */
+static void gl_chromes_free(struct lm_renderer *r, struct gl_out *go)
+{
+    for (int i = 0; i < GL_MAX_FRAMES; i++)
+        gl_chrome_free(r, &go->frame[i]);
+    struct gl_chrome *all[] = { &go->panel, &go->shadow, &go->about, &go->launcher, &go->lock, &go->card, &go->switcher, &go->power,
+                                &go->dock, &go->menu, &go->osk };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
+        gl_chrome_free(r, all[i]);
+    for (int i = 0; i < LM_NOTIFY_MAX; i++)
+        gl_chrome_free(r, &go->notify[i]);
 }
 
 static struct gl_out *gl_out_get(struct lm_renderer *r, struct out_state *st)
@@ -452,6 +466,18 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_SURFACE:
         lm_surface_tree_visit(item->u.surface.root, item->u.surface.x, item->u.surface.y, gl_visit, p);
         break;
+    case LM_SCENE_GHOST: {                              /* a window that opens / closes / is minimized: its picture, scaled by the GPU */
+        struct lm_ghost *g = item->u.ghost.ghost;
+        const struct lm_rect *d = &item->u.ghost.dst;
+        if (!g || !g->px || d->w <= 0 || d->h <= 0 || item->u.ghost.alpha <= 0)
+            break;
+        if (!g->gl_tex)
+            g->gl_tex = lm_gl_tex_create(p->r->gl, g->w, g->h, g->px);
+        if (g->gl_tex)
+            lm_gl_draw_tex(p->r->gl, g->gl_tex, d->x - p->ox, d->y - p->oy, d->w, d->h, 0, 0, 1, 1,
+                           (float)item->u.ghost.alpha / 255.0f, false);
+        break;
+    }
     case LM_SCENE_PANEL_SHADOW:
         if (item->output == p->st->out) {               /* translucent and always the same for a size: made once */
             struct gl_chrome *ch = &p->go->shadow;
@@ -631,6 +657,13 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
     return true;
 }
 
+static void lm_render_ghost_gl_free(struct lm_renderer *r, struct lm_ghost *g)
+{
+    if (g->gl_tex && r->gl)
+        lm_gl_tex_delete(r->gl, g->gl_tex);
+    g->gl_tex = 0;
+}
+
 /* ---- overlays: screenshot flash and card, the cursor ------------------------------------------------------------------ */
 
 static void gl_do_card(const struct paint_ctx *c, const void *it) { paint_shot_card(c, it); }
@@ -757,6 +790,13 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     if (!go)
         return false;
     lm_gl_make_current(r->gl);
+    if (go->theme_gen != lm_theme_generation()) {
+        if (go->theme_gen)
+            gl_chromes_free(r, go);
+        go->theme_gen = lm_theme_generation();
+        st->full = true;
+        go->bg_ok = false;
+    }
 
     struct lm_rect orect = lm_output_rect(out);
     struct lm_region redraw;

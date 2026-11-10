@@ -48,10 +48,10 @@
 #define MAX_MIMES 32
 #define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
 #define BAR_BG (lm_theme.bar)
-#define BAR_BTN_ON 0x5e6a82u
-#define MENU_BORDER 0x4c566au
-#define MENU_CURRENT 0x88c0d0u
-#define BAR_FG 0xeceff4u
+#define BAR_BTN_ON (lm_theme.terminal_button_on)
+#define MENU_BORDER (lm_theme.menu_border)
+#define MENU_CURRENT (lm_theme.menu_current)
+#define BAR_FG (lm_theme.bar_text_bright)
 /* Cell size in pixels at the current zoom. */
 #define CELL_W cell_w()
 #define CELL_H cell_h()
@@ -947,8 +947,8 @@ static void round_box(uint32_t *px, int x, int y, int w, int h, int r, uint32_t 
 /* One colour for each button, a lighter one under the pointer (the same palette as the file manager's round buttons). */
 static void btn_colors(int i, uint32_t *base, uint32_t *hover)
 {
-    static const uint32_t b[N_BTNS] = { 0x3f9a5e, 0x3d6fb4, 0x8a6fb8, 0x2f8f9a, 0xb8803a };
-    static const uint32_t h[N_BTNS] = { 0x56b878, 0x5588d0, 0xa088d0, 0x45aab5, 0xd49a50 };
+    const uint32_t b[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_purple, lm_theme.btn_teal, lm_theme.btn_amber };
+    const uint32_t h[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_purple_lit, lm_theme.btn_teal_lit, lm_theme.btn_amber_lit };
     *base = b[i];
     *hover = h[i];
 }
@@ -968,11 +968,11 @@ static void draw_bar(uint32_t *px)
         const char *t = btn_text(i, tmp, sizeof(tmp));
         int w = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS * LM_FONT_W : (int)strlen(t) * LM_FONT_W;
         int tx = bx + 8 + (i == BTN_ZOOM_ID ? w - (int)strlen(t) * LM_FONT_W : 0), ty = by + (bh - LM_FONT_H) / 2;
-        put_text(px, tx, ty, t, 0xffffffu);
+        put_text(px, tx, ty, t, lm_theme.on_colour);
         if (i == BTN_ZOOM_ID) {                                 /* the drop-down triangle */
             int ax = bx + bw - 8 - 7, ay = by + bh / 2 - 2;
             for (int r = 0; r < 4; r++)
-                fill_box(px, ax + r, ay + r, 7 - 2 * r, 1, 0xffffffu);
+                fill_box(px, ax + r, ay + r, 7 - 2 * r, 1, lm_theme.on_colour);
         }
     }
 }
@@ -1063,7 +1063,7 @@ static void draw_scrollbar(uint32_t *px)
     int ty, th;
     sb_thumb(&ty, &th);
     bool hot = A.sb_drag || (A.px >= x0 && A.py >= ty && A.py < ty + th);
-    uint32_t col = hot ? lm_theme.button_hover : 0x353b49u;
+    uint32_t col = hot ? lm_theme.button_hover : lm_theme.control;
     for (int y = ty + 1; y < ty + th - 1; y++)
         for (int x = x0 + 2; x < A.bw - 2; x++)
             px[(size_t)y * (size_t)A.bw + (size_t)x] = col;

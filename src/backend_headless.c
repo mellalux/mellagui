@@ -135,7 +135,7 @@ int lm_backend_headless_dump(struct lm_backend *b, const char *path)
 static void ctl_reply(struct ctl_client *c, const char *fmt, ...) LM_PRINTF(2, 3);
 static void ctl_reply(struct ctl_client *c, const char *fmt, ...)
 {
-    char buf[2560];
+    char buf[4608];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -346,6 +346,14 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, "saver running=%d enabled=%d minutes=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
                   srv->config.saver_min);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "anim")) {
+        /* anim -> "anim n=<running> dur=<ms>" and one "item kind=open|close|minimize|restore x= y= w= h= alpha=" line each (window animations), then "ok" */
+        static char text[1024];
+        if (srv->wm) {
+            lm_wm_anim_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "about")) {
         /* about [open|close] -> "about open=<0|1>" (after the optional change), while open "card x= y= w= h=", "close x= y= w= h=" and one "row <label>|<value>" line each, then "ok" (the About dialog of the logo button) */
         if (srv->wm && a1 && !strcmp(a1, "open"))
@@ -474,7 +482,7 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, lm_settings_set(srv->settings, "notify", msg) ? "ok\n" : "err rejected\n");
     } else if (!strcmp(cmd, "setting")) {
         /* setting <key>           -> "ok <value>" (also the long list values, which `settings` leaves out) */
-        char buf[2048];
+        char buf[4096];
         if (!srv->settings || !a1 || !lm_settings_get(srv->settings, a1, buf, sizeof(buf))) {
             ctl_reply(c, "err unknown setting\n");
             return;

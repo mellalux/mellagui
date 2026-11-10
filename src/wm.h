@@ -145,6 +145,12 @@ struct lm_window {
     bool minimized;
     int workspace;                  /* 0..LM_NUM_WORKSPACES-1 */
 
+    /* private to wm.c (animations) */
+    bool anim_hidden;               /* a picture of it is animated in its place: the scene leaves the real window out meanwhile */
+    struct lm_ghost *close_ghost;   /* its picture from the moment it was asked to close: shown shrinking when it then goes away */
+    struct lm_rect close_rect;
+    uint64_t close_ms;
+
     void *priv;
 };
 
@@ -650,6 +656,17 @@ struct lm_notify_info {
     int nlines;
 };
 
+/*
+ * A ghost is a picture of something that is about to appear, disappear or move (a window with its frame): premultiplied ARGB,
+ * painted by the scene as LM_SCENE_GHOST at any rectangle and opacity (scaled with bilinear filtering). The wm makes one when a
+ * window opens, closes or is minimized, because then the real surface is hidden or already gone (render.h: lm_render_snapshot).
+ */
+struct lm_ghost {
+    uint32_t *px;                       /* w * h premultiplied ARGB, NULL = empty */
+    int w, h;
+    unsigned gl_tex;                    /* the GL renderer's copy, made on first use */
+};
+
 enum lm_scene_kind {
     LM_SCENE_WALLPAPER,             /* one per output */
     LM_SCENE_GADGET,                /* the desktop gadget (right after the wallpapers, below all windows) */
@@ -664,6 +681,7 @@ enum lm_scene_kind {
     LM_SCENE_ABOUT,                 /* the About dialog (same place as the session dialog; the two are never open together) */
     LM_SCENE_LAUNCHER,              /* the launcher dialog (same place, never open together with the others) */
     LM_SCENE_OSK,                   /* the on-screen keyboard (above the dialogs, so it can type into the launcher's form) */
+    LM_SCENE_GHOST,                 /* a picture of a window that opens, closes or is minimized (above the windows, below the panel) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
 };
@@ -680,6 +698,11 @@ struct lm_scene_item {
         } surface;                  /* LM_SCENE_SURFACE */
         struct lm_panel_info panel; /* LM_SCENE_PANEL */
         struct lm_rect shadow;      /* LM_SCENE_PANEL_SHADOW: the strip under the panel */
+        struct {
+            struct lm_ghost *ghost; /* the picture (w x h) */
+            struct lm_rect dst;     /* where it is painted now, global: scaled to this */
+            int alpha;              /* 0..255 */
+        } ghost;                    /* LM_SCENE_GHOST */
         struct lm_about_info about; /* LM_SCENE_ABOUT */
         struct lm_launcher_info launcher; /* LM_SCENE_LAUNCHER */
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
@@ -692,6 +715,10 @@ struct lm_scene_item {
         struct lm_notify_info notify;   /* LM_SCENE_NOTIFY */
     } u;
 };
+
+/* Animation state for the control socket (`anim`): "anim n=N" and one "item kind=open|close|minimize|restore x= y= w= h= alpha=" per
+ * running animation; returns the length. */
+size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* Return false to stop the iteration. */
 typedef bool (*lm_scene_fn)(const struct lm_scene_item *item, void *data);

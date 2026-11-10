@@ -326,6 +326,23 @@ static uint32_t pick_crtc(struct drm *d, drmModeRes *res, drmModeConnector *conn
     return 0;
 }
 
+/* The night light: this CRTC's gamma table scaled by the backend's colour gains (identity when `tint` is false). */
+static void out_gamma(struct drm_out *o, bool tint)
+{
+    int size = o->saved ? (int)o->saved->gamma_size : 0;
+    if (size < 2 || size > 4096)
+        return;
+    uint16_t ramp[3][4096];
+    const float *g = o->d->base.tint;
+    for (int i = 0; i < size; i++) {
+        double v = 65535.0 * i / (size - 1);
+        for (int c = 0; c < 3; c++)
+            ramp[c][i] = (uint16_t)(v * (tint ? g[c] : 1.0) + 0.5);
+    }
+    if (drmModeCrtcSetGamma(o->d->fd, o->crtc_id, (uint32_t)size, ramp[0], ramp[1], ramp[2]) < 0 && tint)
+        lm_warn("drm: no gamma table on %s (night light has no effect there): %s", o->base.name, strerror(errno));
+}
+
 static int out_modeset(struct drm_out *o)
 {
     uint32_t fb = o->gs.win ? o->gs.scan_fb : o->buf[o->back ^ 1].fb_id;
@@ -334,6 +351,8 @@ static int out_modeset(struct drm_out *o)
         lm_error("drm: modeset of %s failed: %s", o->base.name, strerror(errno));
         return -1;
     }
+    if (o->d->base.tinted)
+        out_gamma(o, true);
     return 0;
 }
 
@@ -412,6 +431,8 @@ static void out_destroy(struct drm_out *o, bool restore)
         lm_timer_destroy(o->retry);
     if (restore && o->saved && d->is_master) {
         uint32_t conn = o->conn_id;
+        if (d->base.tinted)
+            out_gamma(o, false);                        /* the console gets its colours back */
         if (o->saved->buffer_id && o->saved->mode_valid)
             drmModeSetCrtc(d->fd, o->saved->crtc_id, o->saved->buffer_id, o->saved->x, o->saved->y,
                            &conn, 1, &o->saved->mode);
@@ -1468,6 +1489,17 @@ static int drm_set_power(struct lm_backend *b, bool on)
     return rc;
 }
 
+static int drm_set_tint(struct lm_backend *b)
+{
+    struct drm *d = (struct drm *)b;
+    if (!d->active || !d->is_master)
+        return -1;                          /* applied by the next modeset (out_modeset) */
+    struct lm_output *lo;
+    lm_list_for_each(lo, &b->outputs, link)
+        out_gamma((struct drm_out *)lo, true);
+    return 0;
+}
+
 static const struct lm_backend_ops drm_ops = {
     .name = "drm",
     .init = drm_init,
@@ -1480,6 +1512,7 @@ static const struct lm_backend_ops drm_ops = {
     .set_power = drm_set_power,
     .gl_window = drm_gl_window,
     .gl_present = drm_gl_present,
+    .set_tint = drm_set_tint,
 };
 
 struct lm_backend *lm_backend_drm_create(struct lm_server *srv)
@@ -1489,6 +1522,7 @@ struct lm_backend *lm_backend_drm_create(struct lm_server *srv)
         return NULL;
     d->base.ops = &drm_ops;
     d->base.server = srv;
+    d->base.tint[0] = d->base.tint[1] = d->base.tint[2] = 1.0f;
     lm_list_init(&d->base.outputs);
     d->fd = -1;
     d->tty_fd = -1;

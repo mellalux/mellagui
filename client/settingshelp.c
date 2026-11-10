@@ -128,6 +128,23 @@ static const struct entry table[] = {
       "it. It does not start over a full-screen window (a film) or the lock screen." },
     { "saver-minutes", NULL, "Idle time", "How many minutes of no keyboard or mouse use pass before the screensaver starts." },
 
+    /* ---- Night light */
+    { "@Night light", NULL, "Night light",
+      "Makes the whole display warmer (less blue light) in the evening. It works on the monitor's colour tables, so it costs nothing while you work, "
+      "and screenshots and recordings keep the true colours.\n"
+      "Off never tints, On tints now, Scheduled tints between the two times below. The change fades in over a second or two (half a minute when the "
+      "schedule starts it)." },
+    { "night-light", NULL, "Night light on or off",
+      "Off: no tint. On: warm colours now, until you switch it off. Scheduled: warm between 'From' and 'Until' every day. The shortcut Super+Shift+N "
+      "switches between On and Off (and so replaces Scheduled until you choose it again)." },
+    { "night-temp", NULL, "Colour temperature",
+      "How warm the display gets, in kelvin. 6500 K is the monitor's normal white, 4500 K is slightly warm, 3400 K is the default evening colour and "
+      "2000 K is very orange. A change is shown at once while the night light is on." },
+    { "@Schedule", NULL, "Schedule",
+      "The hours of the day between which a Scheduled night light is on, in 15 minute steps. The time may cross midnight (21:00 until 06:30)." },
+    { "night-from", NULL, "Night light starts", "The time of day when the Scheduled night light starts to warm the display." },
+    { "night-to", NULL, "Night light ends", "The time of day when the Scheduled night light lets the colours go back to normal." },
+
     /* ---- Clock and calendar */
     { "@Clock and date", NULL, "Clock and date", "How the clock in the panel and on the lock screen is written." },
     { "clock-hours", NULL, "24 or 12 hours", "24 hour (13:45) or 12 hour with AM / PM (1:45 PM)." },

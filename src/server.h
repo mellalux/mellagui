@@ -153,6 +153,9 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    int night_mode;             /* night light: 0 off, 1 on, 2 between night_from and night_to (settings: night-light), see nightlight.h */
+    int night_kelvin;           /* ... at this colour temperature (settings: night-temp; default 3400) */
+    char night_from[8], night_to[8];   /* "HH:MM" (settings: night-from, night-to; default 21:00 and 06:30) */
     const char *status_cmd;     /* the battery / network buttons of the panel, started with the compositor ([commands] status, default "mellagui-status", "none" = off) */
     const char *calendar_cmd;   /* the calendar program, started with the compositor and shown by a click on the clock ([commands] calendar, default "mellagui-calendar") */
     struct lm_clockfmt clock;   /* how the panel's clock and the date are written (settings: clock-hours, clock-seconds, clock-date, clock-weekday, date-format) */
@@ -174,6 +177,7 @@ struct lm_config {
     char wallpaper[256];        /* image file of the desktop background (settings: wallpaper), "" = the gradient; "~/" is the home directory */
     char output_order[200];     /* connector names, leftmost first (settings: output-order); outputs not named follow in connection order */
     int wallpaper_mode;         /* 0 fill (cover, cropped), 1 fit (whole picture, bars), 2 stretch, 3 center */
+    char audio_profile[192];    /* the sound card profile to restore at start, "card description|profile name" (settings: audio-profile-keep) */
     char audio_device[64];      /* ALSA device for MellaGUI's own beeps (settings: audio-out) */
     int drm_mode_w, drm_mode_h, drm_mode_hz;   /* --mode WxH[@Hz]: 0 = automatic (preferred, corrected to the panel's shape), -1 = --mode preferred */
     const char *control_path;   /* headless control socket path (--control), NULL = none */
@@ -222,6 +226,9 @@ static inline void lm_config_defaults(struct lm_config *c)
         .gadget = true,
         .saver = true,
         .saver_min = 10,
+        .night_kelvin = 3400,
+        .night_from = "21:00",
+        .night_to = "06:30",
         .osk_avoid = true,
         .clock = { .show_date = true },
         .cal_enabled = true,
@@ -270,6 +277,7 @@ struct lm_server {
     int reload_result;
     int (*reload_config)(struct lm_server *, bool quiet); /* set by main.c: read mellagui.conf again (SIGUSR2, control `reload`, the reload-config shortcut); returns the number of rejected lines, -1 = no file; `quiet` = no "read again" card on the screen */
     struct lm_lock *lock;               /* screen lock (password / PIN), see lock.h */
+    struct lm_night *night;             /* night light: warmer colours in the evening (nightlight.h) */
     struct lm_saver *saver;             /* the screensaver (starts a program when idle), see saver.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */

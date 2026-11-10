@@ -14,7 +14,7 @@ struct spec { uint32_t code; int q; enum lm_osk_kind kind; };       /* q = width
 
 static const struct spec row_f[] = {
     K(ESC, 4), K(F1, 4), K(F2, 4), K(F3, 4), K(F4, 4), K(F5, 4), K(F6, 4), K(F7, 4), K(F8, 4), K(F9, 4), K(F10, 4), K(F11, 4),
-    K(F12, 4), K(DELETE, 8),
+    K(F12, 4), K(DELETE, 4), M(RESERVED, 4, LM_OSK_HIDE),
 };
 static const struct spec row0[] = {
     K(GRAVE, 4), K(1, 4), K(2, 4), K(3, 4), K(4, 4), K(5, 4), K(6, 4), K(7, 4), K(8, 4), K(9, 4), K(0, 4), K(MINUS, 4), K(EQUAL, 4),
@@ -33,7 +33,7 @@ static const struct spec row3[] = {
     K(SLASH, 4), M(RIGHTSHIFT, 11, LM_OSK_SHIFT),
 };
 static const struct spec row4[] = {
-    M(RESERVED, 5, LM_OSK_HIDE), M(LEFTCTRL, 5, LM_OSK_CTRL), M(LEFTALT, 5, LM_OSK_ALT), K(SPACE, 24),
+    M(LEFTMETA, 5, LM_OSK_SUPER), M(LEFTCTRL, 5, LM_OSK_CTRL), M(LEFTALT, 5, LM_OSK_ALT), K(SPACE, 24),
     M(RIGHTALT, 5, LM_OSK_ALTGR), K(LEFT, 4), K(UP, 4), K(DOWN, 4), K(RIGHT, 4),
 };
 
@@ -105,6 +105,7 @@ uint32_t lm_osk_kind_mod(enum lm_osk_kind kind)
     case LM_OSK_CTRL: return LM_MOD_CTRL;
     case LM_OSK_ALT: return LM_MOD_ALT;
     case LM_OSK_ALTGR: return LM_MOD_ALTGR;
+    case LM_OSK_SUPER: return LM_MOD_SUPER;
     default: return 0;
     }
 }
@@ -116,6 +117,7 @@ uint32_t lm_osk_kind_code(enum lm_osk_kind kind)
     case LM_OSK_CTRL: return KEY_LEFTCTRL;
     case LM_OSK_ALT: return KEY_LEFTALT;
     case LM_OSK_ALTGR: return KEY_RIGHTALT;
+    case LM_OSK_SUPER: return KEY_LEFTMETA;
     case LM_OSK_CAPS: return KEY_CAPSLOCK;
     default: return 0;
     }
@@ -131,6 +133,7 @@ void lm_osk_label(const struct lm_osk_key *k, uint32_t mods, uint32_t locks, cha
     case LM_OSK_CTRL: name = "Ctrl"; break;
     case LM_OSK_ALT: name = "Alt"; break;
     case LM_OSK_ALTGR: name = "AltGr"; break;
+    case LM_OSK_SUPER: name = "Super"; break;
     case LM_OSK_CAPS: name = "Caps"; break;
     case LM_OSK_HIDE: name = "Hide"; break;
     default: break;

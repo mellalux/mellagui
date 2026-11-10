@@ -25,6 +25,7 @@
 #include "sysinfo.h"
 #include "render.h"
 #include "seat.h"
+#include "nightlight.h"
 #include "settings.h"
 #include "lock.h"
 #include "wm.h"
@@ -115,9 +116,9 @@ int lm_backend_headless_dump_output(struct lm_backend *b, const char *path, int 
     for (int y = 0; y < fb->height; y++) {
         const uint32_t *src = (const uint32_t *)((const uint8_t *)fb->pixels + (size_t)y * (size_t)fb->stride);
         for (int x = 0; x < fb->width; x++) {
-            row[x * 3] = (uint8_t)(src[x] >> 16);
-            row[x * 3 + 1] = (uint8_t)(src[x] >> 8);
-            row[x * 3 + 2] = (uint8_t)src[x];
+            row[x * 3] = (uint8_t)((src[x] >> 16 & 255) * b->tint[0] + 0.5f);            /* the night light, as a display's gamma table would */
+            row[x * 3 + 1] = (uint8_t)((src[x] >> 8 & 255) * b->tint[1] + 0.5f);
+            row[x * 3 + 2] = (uint8_t)((src[x] & 255) * b->tint[2] + 0.5f);
         }
         fwrite(row, 3, (size_t)fb->width, f);
     }
@@ -346,6 +347,12 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, "saver running=%d enabled=%d minutes=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
                   srv->config.saver_min);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "night")) {
+        /* night -> "night mode=off|on|auto kelvin=<K> from=HH:MM to=HH:MM active=<0|1> level=<0..1> tint=<r>,<g>,<b>" (night light, nightlight.h; the tint is what the display shows now), then "ok" */
+        const struct lm_config *cf = &srv->config;
+        ctl_reply(c, "night mode=%s kelvin=%d from=%s to=%s active=%d level=%.2f tint=%.3f,%.3f,%.3f\nok\n",
+                  cf->night_mode == 1 ? "on" : cf->night_mode == 2 ? "auto" : "off", cf->night_kelvin, cf->night_from, cf->night_to,
+                  lm_night_active(srv->night), lm_night_level(srv->night), srv->backend->tint[0], srv->backend->tint[1], srv->backend->tint[2]);
     } else if (!strcmp(cmd, "anim")) {
         /* anim -> "anim n=<running> dur=<ms>" and one "item kind=open|close|minimize|restore x= y= w= h= alpha=" line each (window animations), then "ok" */
         static char text[1024];
@@ -831,6 +838,12 @@ static int hl_set_power(struct lm_backend *b, bool on)
     return 0;
 }
 
+static int hl_set_tint(struct lm_backend *b)
+{
+    (void)b;                                /* dump applies b->tint when it writes a picture */
+    return 0;
+}
+
 static const struct lm_backend_ops headless_ops = {
     .name = "headless",
     .init = hl_init,
@@ -841,6 +854,7 @@ static const struct lm_backend_ops headless_ops = {
     .list_modes = hl_list_modes,
     .apply_mode = hl_apply_mode,
     .set_power = hl_set_power,
+    .set_tint = hl_set_tint,
 };
 
 struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h)
@@ -850,6 +864,7 @@ struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int 
         return NULL;
     hl->base.ops = &headless_ops;
     hl->base.server = srv;
+    hl->base.tint[0] = hl->base.tint[1] = hl->base.tint[2] = 1.0f;
     lm_list_init(&hl->base.outputs);
     hl->w = w > 0 ? w : 1280;
     hl->h = h > 0 ? h : 720;

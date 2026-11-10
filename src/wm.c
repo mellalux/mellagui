@@ -4,6 +4,7 @@
 #include "metrics.h"
 #include "keys.h"
 #include "launchers.h"
+#include "nightlight.h"
 #include "menu.h"
 #include "wm.h"
 
@@ -2214,6 +2215,7 @@ static bool osk_key_held(const struct lm_wm *wm, const struct lm_osk_key *k)
     switch (k->kind) {
     case LM_OSK_SHIFT: return osk_phys_down(wm, KEY_LEFTSHIFT) || osk_phys_down(wm, KEY_RIGHTSHIFT);
     case LM_OSK_CTRL: return osk_phys_down(wm, KEY_LEFTCTRL) || osk_phys_down(wm, KEY_RIGHTCTRL);
+    case LM_OSK_SUPER: return osk_phys_down(wm, KEY_LEFTMETA) || osk_phys_down(wm, KEY_RIGHTMETA);
     case LM_OSK_HIDE: return false;
     default: return k->code && osk_phys_down(wm, k->code);
     }
@@ -2294,7 +2296,7 @@ static void osk_inject(struct lm_wm *wm, uint32_t code, bool pressed)
     lm_input_inject(wm->srv->input, &ev);
 }
 
-static const enum lm_osk_kind osk_mod_kinds[4] = { LM_OSK_SHIFT, LM_OSK_CTRL, LM_OSK_ALT, LM_OSK_ALTGR };
+static const enum lm_osk_kind osk_mod_kinds[5] = { LM_OSK_SHIFT, LM_OSK_CTRL, LM_OSK_ALT, LM_OSK_ALTGR, LM_OSK_SUPER };
 
 /* The held key comes up (and the modifiers that were pressed with it): the pointer let go, or the keyboard closes. */
 static void osk_release(struct lm_wm *wm)
@@ -2303,7 +2305,7 @@ static void osk_release(struct lm_wm *wm)
         return;
     wm->osk_down = -1;
     osk_inject(wm, wm->osk_down_code, false);
-    for (int i = 3; i >= 0; i--)
+    for (int i = 4; i >= 0; i--)
         if (wm->osk_down_mods & lm_osk_kind_mod(osk_mod_kinds[i]))
             osk_inject(wm, lm_osk_kind_code(osk_mod_kinds[i]), false);
     wm->osk_down_code = wm->osk_down_mods = 0;
@@ -2350,7 +2352,7 @@ static void osk_press(struct lm_wm *wm, int i)
         wm->osk_down_code = k->code;
         wm->osk_down_mods = wm->osk_latched;
         wm->osk_latched = 0;
-        for (int m = 0; m < 4; m++)
+        for (int m = 0; m < 5; m++)
             if (wm->osk_down_mods & lm_osk_kind_mod(osk_mod_kinds[m]))
                 osk_inject(wm, lm_osk_kind_code(osk_mod_kinds[m]), true);
         osk_inject(wm, k->code, true);
@@ -7046,6 +7048,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_LAUNCHER: launcher_set(wm, !wm->launcher_open, NULL); break;
     case LM_ACT_OSK: osk_set(wm, !wm->osk_open); break;
     case LM_ACT_OVERVIEW: overview_set(wm, !wm->ov.open || wm->ov.closing); break;
+    case LM_ACT_NIGHT_LIGHT: lm_night_toggle(wm->srv->night); break;
     case LM_ACT_SETTINGS: launch_settings(wm); break;
     case LM_ACT_EXEC: {
         char cmd[2048];

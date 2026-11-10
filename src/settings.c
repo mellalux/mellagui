@@ -22,6 +22,7 @@
 #include "dock.h"
 #include "input.h"
 #include "sound.h"
+#include "nightlight.h"
 #include "output.h"
 #include "keymap.h"
 #include "lock.h"
@@ -44,7 +45,7 @@
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_OSK_AVOID,
-    K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_FILE,
+    K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_AUDIO_PROFILE_KEEP, K_NIGHT_LIGHT, K_NIGHT_TEMP, K_NIGHT_FROM, K_NIGHT_TO, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
     K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
@@ -61,7 +62,7 @@ static const char *const key_names[K_COUNT] = {
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
     [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_OSK_AVOID] = "osk-avoid",
     [K_CLOCK_HOURS] = "clock-hours", [K_CLOCK_SECONDS] = "clock-seconds", [K_CLOCK_DATE] = "clock-date", [K_CLOCK_WEEKDAY] = "clock-weekday",
-    [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_FILE] = "file",
+    [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_AUDIO_PROFILE_KEEP] = "audio-profile-keep", [K_NIGHT_LIGHT] = "night-light", [K_NIGHT_TEMP] = "night-temp", [K_NIGHT_FROM] = "night-from", [K_NIGHT_TO] = "night-to", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
@@ -114,6 +115,8 @@ struct lm_settings {
     bool no_save;           /* the current `set` must not schedule a save (resolution: only once it is kept) */
     char sinks[VALUE_MAX], sink[128];       /* cached `pactl` answers, refreshed by audio-rescan */
     char profiles[VALUE_MAX], profile[24];  /* cached PipeWire card profiles (pw-cli), the same */
+    struct lm_timer *profile_timer;         /* puts the saved card profile back once PipeWire is up */
+    int profile_tries;
     struct lm_timer *rescan_timer;          /* after a profile change PipeWire needs a moment to make the new sink */
     int rescan_left;
     struct lm_timer *capture_timer;         /* gives up a key capture nobody finished (the panel was closed meanwhile) */
@@ -289,6 +292,10 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         cfg->drm_mode_hz = hz;
         break;
     }
+    case K_AUDIO_PROFILE_KEEP:                          /* "card description|profile name", see audio.h */
+        if (strlen(val) >= sizeof(cfg->audio_profile) || strchr(val, '\n')) return -1;
+        snprintf(cfg->audio_profile, sizeof(cfg->audio_profile), "%s", val);
+        break;
     case K_AUDIO_OUT:
         if (!lm_audio_name_ok(val)) return -1;
         snprintf(cfg->audio_device, sizeof(cfg->audio_device), "%s", val);
@@ -313,6 +320,25 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if (!parse_bool(val, &b)) return -1;
         cfg->osk_avoid = b;
         break;
+    case K_NIGHT_LIGHT:
+        if (!strcmp(val, "off")) cfg->night_mode = 0;
+        else if (!strcmp(val, "on")) cfg->night_mode = 1;
+        else if (!strcmp(val, "auto")) cfg->night_mode = 2;
+        else return -1;
+        break;
+    case K_NIGHT_TEMP:
+        if (!parse_int(val, 1500, 6500, &n)) return -1;
+        cfg->night_kelvin = n;
+        break;
+    case K_NIGHT_FROM:
+    case K_NIGHT_TO: {
+        int m = lm_night_parse_time(val);
+        if (m < 0 || strlen(val) > 5) return -1;
+        char t[16];
+        snprintf(t, sizeof(t), "%02d:%02d", (m / 60) % 24, m % 60);
+        snprintf(k == K_NIGHT_FROM ? cfg->night_from : cfg->night_to, 8, "%.5s", t);
+        break;
+    }
     case K_CLOCK_HOURS:
         if (!strcmp(val, "12")) cfg->clock.h12 = true;
         else if (!strcmp(val, "24")) cfg->clock.h12 = false;
@@ -447,6 +473,10 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SAVER: snprintf(out, n, "%d", c->saver ? 1 : 0); break;
     case K_SAVER_MINUTES: snprintf(out, n, "%d", c->saver_min); break;
     case K_OSK_AVOID: snprintf(out, n, "%d", c->osk_avoid ? 1 : 0); break;
+    case K_NIGHT_LIGHT: snprintf(out, n, "%s", c->night_mode == 1 ? "on" : c->night_mode == 2 ? "auto" : "off"); break;
+    case K_NIGHT_TEMP: snprintf(out, n, "%d", c->night_kelvin); break;
+    case K_NIGHT_FROM: snprintf(out, n, "%s", c->night_from); break;
+    case K_NIGHT_TO: snprintf(out, n, "%s", c->night_to); break;
     case K_CLOCK_HOURS: snprintf(out, n, "%d", c->clock.h12 ? 12 : 24); break;
     case K_CLOCK_SECONDS: snprintf(out, n, "%d", c->clock.seconds ? 1 : 0); break;
     case K_CLOCK_DATE: snprintf(out, n, "%d", c->clock.show_date ? 1 : 0); break;
@@ -461,6 +491,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SYSINFO: snprintf(out, n, "%d", srv->wm && lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0); break;
     case K_RESOLUTION: resolution_text(c->drm_mode_w, c->drm_mode_h, c->drm_mode_hz, out, n); break;
     case K_AUDIO_OUT: snprintf(out, n, "%s", c->audio_device); break;
+    case K_AUDIO_PROFILE_KEEP: snprintf(out, n, "%s", c->audio_profile); break;
     case K_WALLPAPER: snprintf(out, n, "%s", c->wallpaper); break;
     case K_WALLPAPER_MODE: snprintf(out, n, "%s", wallpaper_mode_name(c->wallpaper_mode)); break;
     case K_WALLPAPER_STATUS: snprintf(out, n, "%s", srv->render ? lm_render_wallpaper_status(srv->render) : ""); break;
@@ -747,6 +778,21 @@ static void capture_cb(void *data)
     struct lm_settings *s = data;
     if (s->srv->wm && lm_wm_key_capturing(s->srv->wm)) {
         lm_wm_key_capture(s->srv->wm, false);
+        broadcast(s);
+    }
+}
+
+/* At start (and after a PipeWire restart is not watched): the profile of the last session, tried for ~30 s while the sound server comes up. */
+static void profile_cb(void *data)
+{
+    struct lm_settings *s = data;
+    int r = lm_audio_apply_profile_key(s->srv->config.audio_profile);
+    if (r < 0 && ++s->profile_tries < 10) {
+        lm_timer_arm_ms(s->profile_timer, 3000, 0);
+        return;
+    }
+    if (r == 0) {
+        audio_rescan(s);
         broadcast(s);
     }
 }
@@ -1395,7 +1441,16 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_SOUND:
     case K_SAVER:
     case K_SAVER_MINUTES:
+    case K_AUDIO_PROFILE_KEEP:
         return cfg_set(cfg, key, val, NULL, 0) >= 0;
+    case K_NIGHT_LIGHT:                                 /* the display fades to the new state */
+    case K_NIGHT_TEMP:
+    case K_NIGHT_FROM:
+    case K_NIGHT_TO:
+        if (cfg_set(cfg, key, val, NULL, 0) < 0)
+            return false;
+        lm_night_changed(srv->night);
+        return true;
     case K_OSK_AVOID:                                   /* the windows move out of the keyboard's way (or back) at once */
         if (cfg_set(cfg, key, val, NULL, 0) < 0)
             return false;
@@ -1465,6 +1520,13 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_AUDIO_PROFILE:
         if (!lm_audio_set_profile(val))
             return false;
+        {                                                           /* remember it by name: the ids change with PipeWire's next start */
+            char keep[sizeof(cfg->audio_profile)];
+            if (lm_audio_profile_key(val, keep, sizeof(keep))) {
+                snprintf(cfg->audio_profile, sizeof(cfg->audio_profile), "%s", keep);
+                save_later(s);
+            }
+        }
         audio_rescan(s);
         s->rescan_left = 2;                                         /* the new sink shows up within a second or two */
         if (s->rescan_timer)
@@ -1679,6 +1741,9 @@ struct lm_settings *lm_settings_create(struct lm_server *srv)
     s->save_timer = lm_loop_add_timer(srv->loop, save_timer_cb, s);
     s->revert_timer = lm_loop_add_timer(srv->loop, revert_cb, s);
     s->rescan_timer = lm_loop_add_timer(srv->loop, rescan_cb, s);
+    s->profile_timer = lm_loop_add_timer(srv->loop, profile_cb, s);
+    if (s->profile_timer && srv->config.audio_profile[0])
+        lm_timer_arm_ms(s->profile_timer, 1500, 0);
     s->capture_timer = lm_loop_add_timer(srv->loop, capture_cb, s);
     lm_sound_set_device(srv->config.audio_device);
     s->global = lm_global_create(srv, &lm_mellagui_settings_v1_interface, LM_MELLAGUI_SETTINGS_V1_VERSION,
@@ -1709,6 +1774,8 @@ void lm_settings_destroy(struct lm_settings *s)
         lm_timer_destroy(s->revert_timer);
     if (s->rescan_timer)
         lm_timer_destroy(s->rescan_timer);
+    if (s->profile_timer)
+        lm_timer_destroy(s->profile_timer);
     if (s->capture_timer)
         lm_timer_destroy(s->capture_timer);
     free(s);

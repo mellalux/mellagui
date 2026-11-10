@@ -23,6 +23,8 @@
 #include "font.h"
 #include "keymap.h"
 #include "util.h"
+#include "wlclip.h"
+#include "wltext.h"
 #include "wlwin.h"
 
 /* ---- line editor ----------------------------------------------------------------------- */
@@ -286,6 +288,7 @@ struct app {
     int repeat_rate, repeat_delay;
     uint32_t repeat_code;
     struct timespec repeat_next;
+    struct wlclip clip;                 /* the clipboard (Ctrl+V / C / X and the right-click menu work on the whole line) */
 };
 
 static void fill(struct app *a, int x, int y, int w, int h, uint32_t color)
@@ -340,12 +343,39 @@ static void run_line(struct app *a)
     a->win.running = false;
 }
 
+/* Clipboard actions on the line: 0 cut, 1 copy (both take the whole line), 2 paste (at the cursor), 3 clear. */
+static void clip_action(struct app *a, int what)
+{
+    if (what == 0 || what == 1) {
+        if (a->line.len)
+            wlclip_copy(&a->clip, a->line.text);
+        if (what == 0)
+            line_set(&a->line, "");
+    } else if (what == 2) {
+        size_t n = 0;
+        char *t = wltext_paste_text(&a->clip, &n);
+        if (t) {
+            line_insert(&a->line, t, n);
+            free(t);
+        }
+    } else if (what == 3) {
+        line_set(&a->line, "");
+    }
+    a->win.redraw = true;
+}
+
 static void handle_key(struct app *a, uint32_t code)
 {
     uint32_t ks = lm_keymap_keysym(code, a->win.mods);
     char txt[8];
-    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0;
-    if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0, shift = (a->win.mods & LM_MOD_SHIFT) != 0, other = (a->win.mods & (LM_MOD_ALT | LM_MOD_SUPER)) != 0;
+    if (!other && ((ctrl && (ks == 'v' || ks == 'V')) || (shift && !ctrl && ks == LM_KS_Insert))) {
+        clip_action(a, 2);                                  /* Ctrl+V / Shift+Insert: paste */
+    } else if (!other && ((ctrl && (ks == 'c' || ks == 'C')) || (ctrl && !shift && ks == LM_KS_Insert))) {
+        clip_action(a, 1);                                  /* Ctrl+C / Ctrl+Insert: copy the line */
+    } else if (!other && ((ctrl && (ks == 'x' || ks == 'X')) || (shift && !ctrl && ks == LM_KS_Delete))) {
+        clip_action(a, 0);                                  /* Ctrl+X / Shift+Delete: cut the line */
+    } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         run_line(a);
     } else if (ks == LM_KS_Escape) {
         a->win.running = false;
@@ -432,6 +462,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         a->repeat_delay = args[1].i;
         break;
     case LM_WL_KEYBOARD_EVT_KEY:
+        a->clip.serial = args[0].u;
         if (args[3].u == 0) {
             if (a->repeat_code == args[2].u)
                 repeat_stop(a);
@@ -447,13 +478,35 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     }
 }
 
+static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
+{
+    struct app *a = w->data;
+    if (op != LM_WL_POINTER_EVT_BUTTON || args[3].u != 1)
+        return;
+    a->clip.serial = args[0].u;
+    if (args[2].u == 273)                                     /* BTN_RIGHT: Cut / Copy / Paste / Clear */
+        wlwin_menu(w, wltext_menu(a->line.text));
+}
+
+static void menu_event(struct wlwin *w, int index)
+{
+    if (index >= 0)
+        clip_action(w->data, index);
+}
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
+{
+    struct app *a = w->data;
+    wlclip_global(&a->clip, w, name, iface, ver);
+}
+
 int main(int argc, char **argv)
 {
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
 
-    static const struct wlwin_ops ops = { .paint = paint, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     struct app a = { .repeat_rate = 25, .repeat_delay = 400 };
     int rc = 1;
     hist_load(&a.hist);
@@ -465,6 +518,7 @@ int main(int argc, char **argv)
     }
     if (wlwin_open(&a.win, "Run", "mellagui.run", DEFAULT_W, DEFAULT_H, 160, 40) < 0)
         goto out;
+    wlclip_attach(&a.clip, &a.win);
     while (wlwin_step(&a.win, repeat_timeout(&a)))
         repeat_fire(&a);
     rc = 0;

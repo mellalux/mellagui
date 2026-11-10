@@ -122,6 +122,55 @@ class Base(unittest.TestCase):
         self.clients.append(c)
         return c
 
+    def own_clipboard(self, text):
+        """Another client owns the clipboard (it serves `text` to whoever asks, in a thread)."""
+        import threading
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        mgr = c.wl.bind('wl_data_device_manager', 3)
+        dev = c.wl.new_id('wl_data_device')
+        c.wl.request(mgr, 'get_data_device', dev, seat)
+        w = Window(c, 200, 150, title='clipboard owner')
+        c.wl.roundtrip()
+        src = c.wl.new_id('wl_data_source')
+        c.wl.request(mgr, 'create_data_source', src)
+        c.wl.request(src, 'offer', 'text/plain;charset=utf-8')
+        c.wl.request(dev, 'set_selection', src, w.configures[-1][3])
+        c.wl.roundtrip()
+        stop = threading.Event()
+        def serve():
+            while not stop.is_set():
+                try:
+                    ev = c.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 0.2)
+                except Exception:
+                    return
+                if ev:
+                    os.write(ev.fds[0], text.encode())
+                    os.close(ev.fds[0])
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        self.addCleanup(lambda: (stop.set(), t.join(1)))
+        return c
+
+    @staticmethod
+    def menu_state():
+        d = dict(entries=[])
+        for l in ctl.cmd('dockmenu'):
+            m = re.match(r'dockmenu open=(\d) item=(-?\d+) sel=(-?\d+) owner=(-?\d+)', l)
+            if m:
+                d.update(open=int(m[1]), owner=int(m[4]))
+            m = re.match(r'entry (\d) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) enabled=(\d)', l)
+            if m:
+                d['entries'].append(dict(label=m[2], x=int(m[3]) + int(m[5]) // 2, y=int(m[4]) + int(m[6]) // 2, enabled=int(m[7])))
+        return d
+
+    def right_click(self, x, y):
+        ctl.abs(x, y)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        time.sleep(0.2)
+
+
     def window(self, w=300, h=200, **kw):
         c = self.client()
         win = Window(c, w, h, **kw)
@@ -1910,6 +1959,76 @@ class TestClients(Base):
         self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.run'],
                          'dialog stays open after running')
 
+    # ---- the clipboard in text fields and their right-click menu -------------------------------------------------------------
+
+    def open_run(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
+            self.skipTest('mellagui-run not built')
+        ctl.click(826, 14)
+        win = wait_for_window('mellagui.run')
+        self.assertIsNotNone(win, 'run dialog did not appear')
+        time.sleep(0.3)
+        return win
+
+    def flag_path(self, name):
+        path = os.path.join(os.getcwd(), name)
+        if os.path.exists(path):
+            os.unlink(path)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def wait_flag(self, path):
+        for _ in range(100):
+            if os.path.exists(path):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_run_pastes_with_ctrl_v_and_shift_insert(self):
+        flag = self.flag_path('run-paste-flag')
+        self.own_clipboard('touch run-paste-flag\n')                 # (the line end is not wanted in a field)
+        self.open_run()
+        self.chord(self.CTRL, 47)                                    # Ctrl+V
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        self.assertTrue(self.wait_flag(flag), 'Ctrl+V did not paste into the Run line')
+        flag2 = self.flag_path('run-paste-flag2')
+        self.own_clipboard('touch run-paste-flag2')
+        self.open_run()
+        ctl.key(self.SHIFT, True)
+        ctl.tap(110)                                                 # Shift+Insert
+        ctl.key(self.SHIFT, False)
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        self.assertTrue(self.wait_flag(flag2), 'Shift+Insert did not paste into the Run line')
+
+    def test_run_right_click_menu_cut_paste_and_clear(self):
+        flag = self.flag_path('runmenuflag')
+        win = self.open_run()
+        self.right_click(win['x'] + 100, win['y'] + 30)
+        m = self.menu_state()
+        self.assertEqual((m['open'], m['owner']), (1, 1))
+        self.assertEqual([(e['label'], e['enabled']) for e in m['entries']], [('Cut', 0), ('Copy', 0), ('Paste', 1), ('Clear', 0)])   # an empty line
+        ctl.tap(KEY_ESC)                                             # Esc closes the menu, not the dialog
+        self.assertEqual(self.menu_state()['open'], 0)
+        self.assertIsNotNone(wait_for_window('mellagui.run', 1.0))
+        self.type_text('zz')
+        self.right_click(win['x'] + 100, win['y'] + 30)
+        m = self.menu_state()
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1])
+        clear = m['entries'][3]
+        ctl.click(clear['x'], clear['y'])                            # Clear: the line is empty again
+        self.type_text('touch runmenuflag')
+        self.right_click(win['x'] + 100, win['y'] + 30)
+        cut = self.menu_state()['entries'][0]
+        ctl.click(cut['x'], cut['y'])                                # Cut: the clipboard has the line, the line is empty
+        self.right_click(win['x'] + 100, win['y'] + 30)
+        paste = self.menu_state()['entries'][2]
+        ctl.click(paste['x'], paste['y'])                            # Paste puts it back
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        self.assertTrue(self.wait_flag(flag), 'the menu did not do what it says (the line should be "touch runmenuflag")')
+
     # ---- mellagui-edit -----------------------------------------------------------------------------------------------
 
     def test_edit_selftest(self):
@@ -2237,6 +2356,60 @@ class TestClients(Base):
         save()
         self.assertEqual(self.read_file(path), b' defabcabc\n')
 
+    def test_edit_right_click_menu_on_the_text(self):
+        p, path = self.edit_start(b'abc def\n')
+        win = self.edit_window()
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        ctl.tap(self.K_HOME)
+        ctl.key(self.SHIFT, True)
+        for _ in range(3):
+            ctl.tap(106)
+        ctl.key(self.SHIFT, False)
+        self.right_click(win['x'] + 300, win['y'] + 200)
+        m = self.menu_state()
+        self.assertEqual((m['open'], [(e['label'], e['enabled']) for e in m['entries']]),
+                         (1, [('Cut', 1), ('Copy', 1), ('Paste', 1), ('Select all', 1)]))
+        ctl.click(m['entries'][0]['x'], m['entries'][0]['y'])           # Cut "abc"
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path), b' def\n')
+        self.right_click(win['x'] + 300, win['y'] + 200)                  # nothing selected: Cut and Copy are dim
+        m = self.menu_state()
+        self.assertEqual([e['enabled'] for e in m['entries']], [0, 0, 1, 1])
+        ctl.click(m['entries'][2]['x'], m['entries'][2]['y'])           # Paste: "abc" is back (at the end of the line: the click placed the caret there)
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path), b' defabc\n')
+        self.right_click(win['x'] + 300, win['y'] + 200)
+        ctl.click(*[self.menu_state()['entries'][3][k] for k in ('x', 'y')])      # Select all ...
+        self.right_click(win['x'] + 300, win['y'] + 200)
+        ctl.click(*[self.menu_state()['entries'][0][k] for k in ('x', 'y')])      # ... and Cut
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path), b'\n')                       # (the final line end stays)
+
+    def test_edit_prompts_paste_and_have_the_field_menu(self):
+        self.own_clipboard('two')                                        # (first: its window must not take the focus from the editor)
+        p, path = self.edit_start(b'one two three\n')
+        win = self.edit_window()
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        time.sleep(0.2)
+        self.chord(self.CTRL, 33)                                        # Ctrl+F: the find prompt
+        self.chord(self.CTRL, 47)                                        # Ctrl+V: "two" into it
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.2)
+        self.chord(self.CTRL, self.K_X)                                  # the match is selected: cut it
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path), b'one  three\n')
+        self.chord(self.CTRL, 33)                                        # the prompt again: its right-click menu
+        self.right_click(win['x'] + 300, win['y'] + 200)
+        m = self.menu_state()
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Clear']))
+        ctl.tap(KEY_ESC)
+        ctl.tap(KEY_ESC)
+
     # ---- mellagui-files ----------------------------------------------------------------------------------------------
 
     def test_files_selftest(self):
@@ -2468,6 +2641,29 @@ class TestClients(Base):
         dim = sum(1 for y in range(win['y'] + 56, win['y'] + 120) for x in range(win['x'] + win['w'] // 2 + 6, win['x'] + win['w'] // 2 + 200)
                   if ppm.px(x, y) == (0x7b, 0x82, 0x94))
         self.assertGreater(dim, 20)
+
+    def test_files_prompts_paste_and_have_the_field_menu(self):
+        self.own_clipboard('pasted folder\n')                          # (first: its window must not take the focus from the file manager)
+        p, d = self.files_start()
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        ctl.abs(win['x'] + 200, win['y'] + 150)
+        ctl.tap(self.FKEYS[7])                                           # F7: the new folder prompt
+        self.chord(self.CTRL, 47)                                        # Ctrl+V
+        time.sleep(0.4)
+        self.right_click(win['x'] + 200, win['y'] + 150)                 # the right-click menu of the prompt
+        m = self.menu_state()
+        self.assertEqual((m['open'], [(e['label'], e['enabled']) for e in m['entries']]),
+                         (1, [('Cut', 1), ('Copy', 1), ('Paste', 1), ('Clear', 1)]))
+        ctl.click(m['entries'][3]['x'], m['entries'][3]['y'])           # Clear
+        self.assertEqual(self.menu_state()['open'], 0)
+        self.right_click(win['x'] + 200, win['y'] + 150)
+        m = self.menu_state()
+        self.assertEqual([e['enabled'] for e in m['entries']], [0, 0, 1, 0])
+        ctl.click(m['entries'][2]['x'], m['entries'][2]['y'])           # Paste
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertTrue(os.path.isdir(os.path.join(d, 'pasted folder')), os.listdir(d))
 
     def test_files_copy_move_mkdir_and_delete(self):
         p, d = self.files_start()
@@ -2908,6 +3104,29 @@ class TestClients(Base):
                 break
             time.sleep(0.05)
         self.assertEqual(open(out).read().strip(), 'got:hello')
+
+    def test_terminal_right_click_menu_pastes(self):
+        out = os.path.join(tmp, 'term-rcpaste.txt')
+        script = os.path.join(tmp, 'rcpaste.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nread line\necho "got:$line" > "%s"\nread line2\n' % out)
+        os.chmod(script, 0o755)
+        if os.path.exists(out):
+            os.unlink(out)
+        self.own_clipboard('from the menu\n')
+        self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win, 'terminal window did not appear')
+        time.sleep(0.4)
+        self.right_click(win['x'] + 200, win['y'] + 150)
+        m = self.menu_state()
+        self.assertEqual((m['open'], [(e['label'], e['enabled']) for e in m['entries']]), (1, [('Copy', 0), ('Paste', 1)]))   # nothing is selected
+        ctl.click(m['entries'][1]['x'], m['entries'][1]['y'])
+        for _ in range(60):
+            if os.path.exists(out) and open(out).read().strip():
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(out).read().strip(), 'got:from the menu')
 
     # the bar: Paste 4..60, A- 64..96, zoom 100..160 (a drop-down), A+ 164..196, Reset 200..256; the list opens below it
     BAR_H = 24
@@ -4167,6 +4386,44 @@ esac
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok xyz')
+
+    def test_panel_text_fields_paste_and_have_a_right_click_menu(self):
+        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
+        self.own_clipboard('pasted.png\n')
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 64 + 16)                   # "Desktop" tab
+        time.sleep(0.2)
+        ctl.click(x0 + 300, y0 + 231)                           # the file field
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(47)                                             # Ctrl+V
+        ctl.key(KEY_LEFTCTRL, False)
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok pasted.png')
+        self.right_click(x0 + 300, y0 + 231)                    # the right-click menu: Clear empties the field
+        m = self.menu_state()
+        self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Clear']))
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1])
+        clear = m['entries'][3]
+        ctl.click(clear['x'], clear['y'])
+        time.sleep(0.2)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok ')
+        self.right_click(x0 + 300, y0 + 231)                    # Paste from the menu
+        paste = self.menu_state()['entries'][2]
+        ctl.click(paste['x'], paste['y'])
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        ctl.cmd('setting wallpaper')
+        self.assertEqual(ctl.last, 'ok pasted.png')
+        self.right_click(x0 + 300, y0 + 100)                    # a place that is no field: no menu
+        self.assertEqual(self.menu_state()['open'], 0)
 
     def test_panel_follows_changes_made_elsewhere(self):
         p, win = self.open_panel()
@@ -10941,6 +11198,54 @@ class TestLauncher(Base):
                 after = c.dump(os.path.join(tmp, 'lc39-%s-%d-b.ppm' % (rend, i)))
                 changed = sum(1 for yy in range(y + 4, y + h - 4) for xx in range(x + 6, x + 60) if before.px(xx, yy) != after.px(xx, yy))
                 self.assertGreater(changed, 20, '%s renderer: field %d does not show what is typed' % (rend, i))
+
+    def popup(self, c):
+        d = dict(entries=[], open=0, owner=-1)
+        for l in c.cmd('dockmenu'):
+            m = re.match(r'dockmenu open=(\d) item=(-?\d+) sel=(-?\d+) owner=(-?\d+)', l)
+            if m:
+                d.update(open=int(m[1]), owner=int(m[4]))
+            m = re.match(r'entry (\d) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) enabled=(\d)', l)
+            if m:
+                d['entries'].append(dict(label=m[2], pos=(int(m[3]) + int(m[5]) // 2, int(m[4]) + int(m[6]) // 2), enabled=int(m[7])))
+        return d
+
+    def right_click_at(self, c, pos):
+        c.abs(*pos)
+        c.button(273, True)
+        c.button(273, False)
+        c.sync()
+
+    def test_the_forms_fields_paste_and_have_a_right_click_menu(self):
+        c = self.start('mellagui-lc40')
+        self.super_a(c)
+        c.click(*self.centre(self.info(c)['add']))
+        d = self.info(c)
+        c.cmd('clip add my app')
+        c.key(29, True)
+        c.tap(47)                                                       # Ctrl+V into the name field (it has the focus)
+        c.key(29, False)
+        self.assertEqual(self.info(c)['fields'][0][1], 'my app')
+        c.key(29, True)
+        c.tap(45)                                                       # Ctrl+X: the field is empty, the text is the newest clipboard entry
+        c.key(29, False)
+        self.assertEqual(self.info(c)['fields'][0][1], '')
+        self.right_click_at(c, self.centre(d['fields'][1][0]))          # the command field's menu
+        m = self.popup(c)
+        self.assertEqual((m['open'], m['owner']), (1, 2))
+        self.assertEqual([(e['label'], e['enabled']) for e in m['entries']], [('Cut', 0), ('Copy', 0), ('Paste', 1), ('Clear', 0)])
+        c.click(*m['entries'][2]['pos'])                                # Paste: the cut text lands in the command field
+        self.assertEqual(self.info(c)['fields'][1][1], 'my app')
+        self.assertEqual(self.popup(c)['open'], 0)
+        self.right_click_at(c, self.centre(d['fields'][1][0]))
+        m = self.popup(c)
+        self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1])
+        c.click(*m['entries'][3]['pos'])                                # Clear
+        self.assertEqual(self.info(c)['fields'][1][1], '')
+        self.right_click_at(c, self.centre(d['fields'][2][0]))          # the icon field has one, too; the menu is above the dialog
+        self.assertEqual(self.popup(c)['open'], 1)
+        c.tap(self.KEY_ESC)                                             # Esc closes the menu, not the form
+        self.assertEqual((self.popup(c)['open'], self.info(c)['form']), (0, 1))
 
 
 if __name__ == '__main__':

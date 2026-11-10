@@ -388,7 +388,7 @@ static void ctl_command(struct ctl_client *c, char *line)
         /* dockmenu -> "dockmenu open= item= sel=" and, while it is open, "card ..." and one "entry ..." line each (the dock's right-click menu), then "ok" */
         static char text[2048];
         if (srv->wm) {
-            lm_wm_dockmenu_describe(srv->wm, text, sizeof(text));
+            lm_wm_menu_describe(srv->wm, text, sizeof(text));
             for (const char *l = text; *l;) {
                 const char *e = strchr(l, '\n');
                 int len = e ? (int)(e - l) + 1 : (int)strlen(l);

@@ -100,6 +100,7 @@ extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
 extern const struct lm_interface lm_mellagui_settings_v1_interface;     /* MellaGUI private: settings.c */
 extern const struct lm_interface lm_mellagui_capture_v1_interface;      /* MellaGUI private: capture.c */
+extern const struct lm_interface lm_mellagui_menu_v1_interface;         /* MellaGUI private: menu.c */
 extern const struct lm_interface lm_mellagui_tray_v1_interface;         /* MellaGUI private: tray.c */
 extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 
@@ -118,6 +119,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
  *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
  *   mellagui_capture_v1              1    capture.c  (MellaGUI private: the screen into a wl_shm buffer, for mellagui-record)
  *   mellagui_tray_v1                 1    tray.c     (MellaGUI private: icons / buttons of programs in the top bar)
+ *   mellagui_menu_v1                 1    menu.c     (MellaGUI private: a menu at the pointer, e.g. the actions of a text field)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
 #define LM_WL_SUBCOMPOSITOR_VERSION         1
@@ -132,6 +134,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
 #define LM_MELLAGUI_TRAY_V1_VERSION            1
+#define LM_MELLAGUI_MENU_V1_VERSION            1
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
 enum {
@@ -582,6 +585,14 @@ enum {
     LM_MELLAGUI_CAPTURE_V1_EVT_DONE = 1,       /* "" */
     LM_MELLAGUI_CAPTURE_V1_EVT_READY = 2,      /* "iii" output index, width, height: the buffer holds the picture (XRGB8888 content) */
     LM_MELLAGUI_CAPTURE_V1_EVT_FAILED = 3,     /* "is" output index, reason: "no-output" "buffer" "size" "locked" "capture" */
+};
+
+/* ---- mellagui_menu_v1 (see menu.h) --------------------------------------------------------------------------------- */
+enum {
+    LM_MELLAGUI_MENU_V1_REQ_DESTROY = 0,       /* "" */
+    LM_MELLAGUI_MENU_V1_REQ_POPUP = 1,         /* "s" the entries, one per line (a leading '~' = dim, cannot be chosen) */
+    LM_MELLAGUI_MENU_V1_EVT_CHOSEN = 0,        /* "i" the entry */
+    LM_MELLAGUI_MENU_V1_EVT_CLOSED = 1,        /* "" the menu went away without a choice */
 };
 
 /* ---- mellagui_tray_v1 / mellagui_tray_item_v1 (see tray.h) -------------------------------------------------------- */

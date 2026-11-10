@@ -107,7 +107,7 @@ struct term {
 
 struct app {
     struct wlc *c;
-    uint32_t registry, compositor, shm, wm_base, seat, decoration_mgr, ddm;
+    uint32_t registry, compositor, shm, wm_base, seat, decoration_mgr, ddm, menu;     /* menu: mellagui_menu_v1 (the right-click menu), 0 without it */
     uint32_t surface, xsurface, toplevel, deco, pointer, keyboard, ddev, dsrc;
     uint32_t frame_cb, pool, buffers[2];
     bool buf_busy[2];
@@ -1339,6 +1339,20 @@ static void paste_text(const char *buf, size_t len)
     free(tmp);
 }
 
+static void paste(void);
+
+/* The answer of the right-click menu: 0 Copy (what is selected), 1 Paste. */
+static void menu_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id; (void)data;
+    if (op != LM_MELLAGUI_MENU_V1_EVT_CHOSEN)
+        return;
+    if (args[0].i == 0)
+        copy_selection();
+    else if (args[0].i == 1)
+        paste();
+}
+
 static const char *const paste_mimes[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
 
 static void paste(void)
@@ -1771,6 +1785,10 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         A.last_serial = args[0].u;
+        if (args[2].u == 273 && args[3].u == 1 && !A.menu_open && A.py >= BAR_H && A.menu) {       /* BTN_RIGHT: Copy / Paste, drawn by the compositor */
+            WLC_SEND(A.c, A.menu, LM_MELLAGUI_MENU_V1_REQ_POPUP, { .s = t->sel_active ? "Copy\nPaste" : "~Copy\nPaste" });
+            break;
+        }
         if (A.eat_release && args[3].u == 0) {          /* the release of the click that closed the zoom list */
             A.eat_release = false;
             break;
@@ -1936,6 +1954,8 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         A.seat = wlc_bind(c, A.registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, NULL);
     else if (!strcmp(iface, "wl_data_device_manager"))
         A.ddm = wlc_bind(c, A.registry, name, &lm_wl_data_device_manager_interface, LM_MIN(ver, 3u), NULL, NULL);
+    else if (!strcmp(iface, "mellagui_menu_v1"))
+        A.menu = wlc_bind(c, A.registry, name, &lm_mellagui_menu_v1_interface, 1, menu_event, NULL);
     else if (!strcmp(iface, "zxdg_decoration_manager_v1"))
         A.decoration_mgr = wlc_bind(c, A.registry, name, &lm_zxdg_decoration_manager_v1_interface, 1, NULL, NULL);
 }

@@ -88,19 +88,19 @@ $(BUILD)/mellagui-calendar: $(BUILD)/client/mellagui-calendar.o $(BUILD)/client/
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-run: $(BUILD)/client/mellagui-run.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-run: $(BUILD)/client/mellagui-run.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-edit: $(BUILD)/client/mellagui-edit.o $(BUILD)/client/wlclip.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-edit: $(BUILD)/client/mellagui-edit.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

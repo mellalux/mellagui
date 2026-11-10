@@ -29,6 +29,7 @@
 #include "settings.h"
 #include "capture.h"
 #include "tray.h"
+#include "menu.h"
 #include "idleinhibit.h"
 #include "lock.h"
 #include "saver.h"
@@ -610,6 +611,7 @@ int main(int argc, char **argv)
         !(srv->settings = lm_settings_create(srv)) ||
         !(srv->capture = lm_capture_create(srv)) ||
         !(srv->idle_inhibit = lm_idle_inhibit_create(srv)) ||
+        !(srv->menu = lm_menu_create(srv)) ||
         !(srv->tray = lm_tray_create(srv))) {
         lm_error("module initialisation failed");
         goto out;
@@ -669,6 +671,8 @@ out:
     srv->lock = NULL;
     if (srv->idle_inhibit) lm_idle_inhibit_destroy(srv->idle_inhibit);
     srv->idle_inhibit = NULL;
+    if (srv->menu) lm_menu_destroy(srv->menu);
+    srv->menu = NULL;
     if (srv->tray) lm_tray_destroy(srv->tray);
     srv->tray = NULL;
     if (srv->capture) lm_capture_destroy(srv->capture);

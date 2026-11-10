@@ -31,6 +31,8 @@
 #include "keymap.h"
 #include "lock.h"
 #include "util.h"
+#include "wlclip.h"
+#include "wltext.h"
 #include "wlwin.h"
 
 /* ---- layout list helpers (pure) ---------------------------------------------------------------------------- */
@@ -355,6 +357,8 @@ struct app {
     int dbl_state;                      /* 0 not tried yet, 1 a single click, 2 a double click */
     char wall[220];                     /* the wallpaper file field while it is being edited */
     bool wall_edited;                   /* (else the field shows the compositor's value) */
+    struct wlclip clip;                 /* the clipboard of the text fields (Ctrl+V / C / X, the right-click menu) */
+    int menu_widget;                    /* the field whose right-click menu is showing, -1 none */
     /* Menu page: the two fields below the entry list ([0] name, [1] command) and the entry they edit (-1 = a new one) */
     char input[7][1024];                /* [2] = the action of the Keys page, [3] = the colour (#rrggbb) of the Colours page,
                                          * [4] [5] [6] = name, icon and command of a Dock button */
@@ -1977,6 +1981,8 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     }
 }
 
+static char *field_buffer(struct app *a, const struct widget *f, size_t *max);
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -1999,6 +2005,21 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             slider_drag_to(a, a->drag, a->px);
         break;
     case LM_WL_POINTER_EVT_BUTTON:
+        a->clip.serial = args[0].u;
+        if (args[2].u == 273 && args[3].u == 1) {                     /* BTN_RIGHT on a text field: Cut / Copy / Paste / Clear */
+            int idx = widget_at(a, a->px, a->py);
+            size_t max;
+            char *buf = idx >= 0 && (a->wd[idx].kind == W_INPUT || a->wd[idx].kind == W_FIELD || a->wd[idx].kind == W_TEXT) ?
+                        field_buffer(a, &a->wd[idx], &max) : NULL;
+            if (buf) {
+                a->focus = idx;
+                a->menu_widget = idx;
+                if (!wlwin_menu(&a->win, wltext_menu(buf)))
+                    a->menu_widget = -1;
+                a->win.redraw = true;
+            }
+            break;
+        }
         if (args[2].u != 272) /* BTN_LEFT */
             break;
         if (args[3].u == 1) {
@@ -2036,11 +2057,67 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
 }
 
+/* The text a field edits and how much fits (the wallpaper field starts from the compositor's value); NULL for a widget that is no text field
+ * (the lock secrets are left out on purpose: no clipboard for them). */
+static char *field_buffer(struct app *a, const struct widget *f, size_t *max)
+{
+    if (f->kind == W_INPUT) {
+        int which = atoi(f->arg);
+        *max = which == 4 ? 64 : which == 2 || which == 5 ? 250 : which == 3 ? 12 : sizeof(a->input[1]);
+        return a->input[which];
+    }
+    if (f->kind == W_FIELD) {
+        if (!a->wall_edited) {
+            snprintf(a->wall, sizeof(a->wall), "%s", kv_get(a, "wallpaper"));
+            a->wall_edited = true;
+        }
+        *max = sizeof(a->wall);
+        return a->wall;
+    }
+    if (f->kind == W_TEXT) {
+        *max = sizeof(a->test);
+        return a->test;
+    }
+    return NULL;
+}
+
+/* What typing into an input field also does: forget old error messages, let the colour sliders follow the hex text. */
+static void field_edited(struct app *a, const struct widget *f)
+{
+    if (f->kind != W_INPUT)
+        return;
+    a->keys_err[0] = a->col_err[0] = a->dock_err[0] = 0;
+    uint32_t c;
+    if (atoi(f->arg) == 3 && lm_theme_parse_color(a->input[3], &c)) {
+        a->cr = (int)(c >> 16) & 255;
+        a->cg = (int)(c >> 8) & 255;
+        a->cb = (int)c & 255;
+    }
+}
+
+static void menu_event(struct wlwin *w, int index)
+{
+    struct app *a = w->data;
+    int idx = a->menu_widget;
+    a->menu_widget = -1;
+    build(a);
+    if (index < 0 || idx < 0 || idx >= a->nw)
+        return;
+    size_t max;
+    char *buf = field_buffer(a, &a->wd[idx], &max);
+    if (!buf)
+        return;
+    wltext_menu_do(&a->clip, buf, max, index);
+    field_edited(a, &a->wd[idx]);
+    a->win.redraw = true;
+}
+
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
     switch (op) {
     case LM_WL_KEYBOARD_EVT_KEY: {
+        a->clip.serial = args[0].u;
         if (args[3].u == 0)
             break;
         build(a);
@@ -2051,6 +2128,12 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             a->win.running = false;
         } else if (ks == LM_KS_Tab) {
             move_focus(a, (a->win.mods & LM_MOD_SHIFT) ? -1 : 1);
+        } else if (f && (f->kind == W_INPUT || f->kind == W_FIELD || f->kind == W_TEXT) && wltext_is_clipkey(ks, a->win.mods)) {
+            size_t max;
+            char *buf = field_buffer(a, f, &max);                            /* Ctrl+V / C / X on a text field */
+            if (buf && wltext_key(&a->clip, buf, max, ks, a->win.mods))
+                field_edited(a, f);
+            a->win.redraw = true;
         } else if (f && f->kind == W_PASS) {
             if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
                 sec_send(a, false);
@@ -2122,10 +2205,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    (void)ver;
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
+    else
+        wlclip_global(&a->clip, w, name, iface, ver);
 }
 
 /* ---- command line ----------------------------------------------------------------------------------------- */
@@ -2187,8 +2271,8 @@ int main(int argc, char **argv)
 
     signal(SIGCHLD, SIG_IGN);                           /* the panels started from here are nobody's business afterwards */
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
-                                          .keyboard = keyboard_event };
-    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .csel = -1, .mpend = -1, .dock_sel = -1 };
+                                          .keyboard = keyboard_event, .menu = menu_event };
+    struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .csel = -1, .mpend = -1, .dock_sel = -1, .menu_widget = -1 };
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */
@@ -2200,6 +2284,7 @@ int main(int argc, char **argv)
     }
     if (wlwin_open(&a.win, "Settings", "mellagui.settings", DEFAULT_W, DEFAULT_H, 520, 420) < 0)
         return 1;
+    wlclip_attach(&a.clip, &a.win);
     while (wlwin_step(&a.win, -1))
         ;
     wlwin_destroy(&a.win);

@@ -279,9 +279,9 @@ enum lm_pick_kind {
     LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
     LM_PICK_POWER_CARD,     /* the session dialog's card (between its buttons) */
     LM_PICK_POWER_BACKDROP, /* anything else while the session dialog is open: a click closes it, nothing below gets it */
-    LM_PICK_DOCKMENU_ITEM,  /* an entry of the dock's right-click menu (`index` = entry) */
-    LM_PICK_DOCKMENU,       /* the menu's card (between its entries) */
-    LM_PICK_DOCKMENU_BACKDROP, /* anything else while the menu is open: a click closes it, nothing below gets it */
+    LM_PICK_MENU_ITEM,  /* an entry of the dock's right-click menu (`index` = entry) */
+    LM_PICK_MENU,       /* the menu's card (between its entries) */
+    LM_PICK_MENU_BACKDROP, /* anything else while the menu is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_OSK,      /* the panel's on-screen keyboard button: shows / hides the keyboard */
     LM_PICK_OSK_KEY,        /* a key of the on-screen keyboard (`index` = key) */
     LM_PICK_OSK,            /* the on-screen keyboard between its keys (its top strip, the left margin, the gaps): drag to move it */
@@ -446,16 +446,17 @@ struct lm_panel_info {
     } tray[LM_PANEL_MAX_TRAY];
 };
 
-/* The dock's right-click menu: a small card above the icon with the button's name and four entries (New window, Close all windows, Change...,
- * Remove from dock). */
-#define LM_DOCKMENU_N 4
-#define LM_DOCKMENU_HEAD 28             /* the title row of the card */
-struct lm_dockmenu_info {
+/* A small menu card: the dock icon's right-click menu (the button's name and New window, Close all windows, Change..., Remove from dock) or a
+ * menu a program asked for through mellagui_menu_v1 (menu.h: text field actions; no title). */
+#define LM_MENU_MAX 12
+#define LM_MENU_HEAD 28             /* the title row of the card */
+struct lm_menu_info {
     struct lm_rect rect;            /* the card */
     const char *title;              /* the button's name; valid only during the callback */
-    struct lm_rect entry[LM_DOCKMENU_N];
-    const char *label[LM_DOCKMENU_N];
-    bool enabled[LM_DOCKMENU_N];
+    int n;                          /* entries */
+    struct lm_rect entry[LM_MENU_MAX];
+    const char *label[LM_MENU_MAX];
+    bool enabled[LM_MENU_MAX];
     int sel;                        /* highlighted entry (pointer or keyboard), -1 none */
 };
 
@@ -638,7 +639,7 @@ enum lm_scene_kind {
     LM_SCENE_PANEL_SHADOW,          /* the soft shadow the top panel throws on what is below it (one per output, painted before the panel) */
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_DOCK,                  /* the dock (above the panel, below the menu) */
-    LM_SCENE_DOCKMENU,              /* the dock's right-click menu (above the dock) */
+    LM_SCENE_MENU,              /* the dock's right-click menu (above the dock) */
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
     LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
     LM_SCENE_ABOUT,                 /* the About dialog (same place as the session dialog; the two are never open together) */
@@ -665,7 +666,7 @@ struct lm_scene_item {
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
         struct lm_osk_info osk;     /* LM_SCENE_OSK */
         struct lm_power_info power; /* LM_SCENE_POWER */
-        struct lm_dockmenu_info dockmenu; /* LM_SCENE_DOCKMENU */
+        struct lm_menu_info menu; /* LM_SCENE_MENU */
         struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
         struct lm_switcher_info switcher; /* LM_SCENE_SWITCHER */
@@ -711,7 +712,12 @@ bool lm_wm_launcher_is_open(const struct lm_wm *wm);
  * "icon <i> "<name>" x= y= w= h= remove=x,y add=x,y,w,h"-style line each (see the function), then the buttons. */
 size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);
 /* Control socket `dockmenu`: "dockmenu open=<0|1> item=<dock index> sel=<i>" and, while open, "card x= y= w= h=" and one "entry i \"label\" x= y= w= h= enabled=" line each. */
-size_t lm_wm_dockmenu_describe(struct lm_wm *wm, char *buf, size_t size);
+size_t lm_wm_menu_describe(struct lm_wm *wm, char *buf, size_t size);
+/* A menu for the program behind mellagui_menu_v1 at the pointer (menu.c): `labels` (a leading '~' = shown dim, cannot be chosen), n <= LM_MENU_MAX.
+ * The wm answers through lm_menu_chosen(index) / lm_menu_closed() (menu.h). False when it cannot be shown (locked, no output, too many entries). */
+bool lm_wm_menu_popup(struct lm_wm *wm, const char *const *labels, int n);
+/* Close a menu that was asked for by a program (it went away). */
+void lm_wm_menu_cancel(struct lm_wm *wm);
 
 /* A program's tray item changed, appeared or went (tray.c): the bar is laid out and painted again. */
 void lm_wm_tray_changed(struct lm_wm *wm);

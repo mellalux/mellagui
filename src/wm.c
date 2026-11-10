@@ -128,10 +128,36 @@ struct wm_anim {
     int alpha;
 };
 
+/*
+ * A dragged window wobbles: it is painted as a mesh of (WB_COLS x WB_ROWS) cells cut from its picture, whose nodes are
+ * springs. Every node is pulled to where it would be if the window were rigid; the ones far from the grab point are softer, so
+ * they stay behind when the window moves and swing back when it stops. The real window moves with the pointer at once (and is left
+ * out of the scene meanwhile); the picture is taken again now and then so the content stays alive.
+ */
+#define WB_COLS 14
+#define WB_ROWS 32
+#define WB_N ((WB_COLS + 1) * (WB_ROWS + 1))
+struct wm_wobble {
+    bool active;
+    bool released;                      /* the button is up: it settles and ends */
+    struct lm_window *win;
+    struct lm_ghost ghost;
+    int off_x, off_y;                   /* the picture's top left relative to the window's (x, y) */
+    float gx, gy;                       /* the grab point, relative to the picture's top left */
+    float x[WB_N], y[WB_N], vx[WB_N], vy[WB_N];     /* node positions (global) and velocities */
+    uint64_t last;
+    int ticks;
+    struct lm_rect shown;               /* the union of the cells painted last */
+};
+
 struct lm_wm {
     struct lm_server *srv;
     struct wm_anim anim[ANIM_MAX];
+    struct wm_wobble wb;
     struct lm_timer *anim_timer;
+    struct lm_window *glide_win;        /* a window that glides to glide_tx / glide_ty (dragged, or let go a moment ago) */
+    int32_t glide_tx, glide_ty;
+    uint64_t glide_last;
     struct lm_list windows;     /* stacking order, bottom first; lm_window.link */
     struct lm_list popups;
     struct lm_window *focused;
@@ -1015,6 +1041,11 @@ static bool anim_prepare(struct lm_wm *wm, struct lm_window *w, struct lm_ghost 
 static void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home);
 static void anim_finish_all(struct lm_wm *wm);
 static void anim_forget(struct lm_wm *wm, struct lm_window *w);
+static bool anim_glide_to(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y);
+static void wobble_start(struct lm_wm *wm, struct lm_window *w, double px, double py);
+static void wobble_stop(struct lm_wm *wm);
+static void wobble_tick(struct lm_wm *wm, uint64_t now);
+static bool wobble_wanted(const struct lm_wm *wm, const struct lm_window *w);
 static void anim_open(struct lm_wm *wm, struct lm_window *w);
 static void anim_fly(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w);
 static void anim_remember_close(struct lm_wm *wm, struct lm_window *w);
@@ -1344,6 +1375,7 @@ void lm_wm_destroy(struct lm_wm *wm)
     for (int i = 0; i < ANIM_MAX; i++)
         if (wm->anim[i].used)
             free(wm->anim[i].ghost.px);
+    free(wm->wb.ghost.px);
     if (wm->anim_timer)
         lm_timer_destroy(wm->anim_timer);
     if (wm->refit)
@@ -4386,6 +4418,7 @@ static void anim_end(struct lm_wm *wm, struct wm_anim *a)
 
 static void anim_finish_all(struct lm_wm *wm)
 {
+    wobble_stop(wm);
     for (int i = 0; i < ANIM_MAX; i++)
         if (wm->anim[i].used)
             anim_end(wm, &wm->anim[i]);
@@ -4394,6 +4427,10 @@ static void anim_finish_all(struct lm_wm *wm)
 /* The window is going away: its animation (and the picture it holds) ends. */
 static void anim_forget(struct lm_wm *wm, struct lm_window *w)
 {
+    if (wm->glide_win == w)
+        wm->glide_win = NULL;
+    if (wm->wb.active && wm->wb.win == w)
+        wobble_stop(wm);
     for (int i = 0; i < ANIM_MAX; i++)
         if (wm->anim[i].used && wm->anim[i].win == w)
             anim_end(wm, &wm->anim[i]);
@@ -4465,8 +4502,196 @@ static void anim_tick(void *data)
         damage_rect(wm, &d);
         any = true;
     }
+    if (wm->wb.active) {
+        wobble_tick(wm, now);
+        any = true;
+    }
+    struct lm_window *g = wm->glide_win;
+    if (g) {                                                        /* a dragged window follows the pointer with a short delay: it glides */
+        float tau = (float)LM_MAX(anim_duration(wm) / 5, 20);       /* ms: how fast it catches up (a fifth of the animation time) */
+        float f = 1.0f - expf(-(float)(now - wm->glide_last) / tau);
+        wm->glide_last = now;
+        int32_t dx = wm->glide_tx - g->x, dy = wm->glide_ty - g->y;
+        int32_t sx = (int32_t)lroundf((float)dx * f), sy = (int32_t)lroundf((float)dy * f);
+        if (dx && !sx) sx = dx > 0 ? 1 : -1;
+        if (dy && !sy) sy = dy > 0 ? 1 : -1;
+        if (sx || sy) {
+            struct lm_rect before = frame_outer(g);
+            g->x += sx;
+            g->y += sy;
+            damage_rect(wm, &before);
+            damage_frame(wm, g);
+            update_outputs(wm, g);
+            any = true;
+        }
+        if (g->x == wm->glide_tx && g->y == wm->glide_ty)
+            wm->glide_win = NULL;                                   /* arrived (a new motion of the pointer starts it again) */
+    }
     if (!any && wm->anim_timer)
         lm_timer_arm_ms(wm->anim_timer, 0, 0);
+}
+
+/* The dragged window should be at (x, y): with animations on it glides there (true), else the caller moves it at once (false). */
+static bool anim_glide_to(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y)
+{
+    if (anim_duration(wm) <= 0 || !wm->anim_timer || (w->states & LM_WINDOW_FULLSCREEN))
+        return false;
+    wm->glide_win = w;
+    wm->glide_tx = x;
+    wm->glide_ty = y;
+    if (!lm_timer_is_armed(wm->anim_timer)) {
+        wm->glide_last = lm_now_ms();
+        lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+    }
+    return true;
+}
+
+/* ---- wobbling windows ------------------------------------------------------------------------------------------------- */
+
+static bool wobble_wanted(const struct lm_wm *wm, const struct lm_window *w)
+{
+    return lm_metrics.wobble > 0 && anim_duration(wm) > 0 && wm->srv->render && !(w->states & LM_WINDOW_FULLSCREEN) && !win_is_calendar(w);
+}
+
+/* Where node (i, j) is when the window is rigid. */
+static void wobble_rest(const struct wm_wobble *wb, int i, int j, float *x, float *y)
+{
+    *x = (float)(wb->win->x + wb->off_x) + (float)wb->ghost.w * (float)i / (float)WB_COLS;
+    *y = (float)(wb->win->y + wb->off_y) + (float)wb->ghost.h * (float)j / (float)WB_ROWS;
+}
+
+/* The rectangle all the nodes lie in. */
+static struct lm_rect wobble_bounds(const struct wm_wobble *wb)
+{
+    float x0 = wb->x[0], x1 = wb->x[0], y0 = wb->y[0], y1 = wb->y[0];
+    for (int n = 1; n < WB_N; n++) {
+        x0 = fminf(x0, wb->x[n]);
+        x1 = fmaxf(x1, wb->x[n]);
+        y0 = fminf(y0, wb->y[n]);
+        y1 = fmaxf(y1, wb->y[n]);
+    }
+    return lm_rect_make((int)floorf(x0) - 1, (int)floorf(y0) - 1, (int)ceilf(x1 - x0) + 3, (int)ceilf(y1 - y0) + 3);
+}
+
+static void wobble_stop(struct lm_wm *wm)
+{
+    struct wm_wobble *wb = &wm->wb;
+    if (!wb->active)
+        return;
+    struct lm_rect d = wb->shown;
+    if (wb->win) {
+        wb->win->anim_hidden = false;
+        struct lm_rect f = frame_outer(wb->win);
+        d = lm_rect_union(&d, &f);
+    }
+    lm_render_ghost_free(wm->srv->render, &wb->ghost);
+    memset(wb, 0, sizeof(*wb));
+    damage_rect(wm, &d);
+}
+
+/* The window is being dragged: from now on it wobbles. (px, py) is the grab point. */
+static void wobble_start(struct lm_wm *wm, struct lm_window *w, double px, double py)
+{
+    struct wm_wobble *wb = &wm->wb;
+    struct lm_ghost g;
+    struct lm_rect home;
+    if (wb->active)
+        wobble_stop(wm);
+    if (!wobble_wanted(wm, w) || !anim_prepare(wm, w, &g, &home))
+        return;
+    memset(wb, 0, sizeof(*wb));
+    wb->active = true;
+    wb->win = w;
+    wb->ghost = g;
+    wb->off_x = home.x - w->x;
+    wb->off_y = home.y - w->y;
+    wb->gx = (float)px - (float)home.x;
+    wb->gy = (float)py - (float)home.y;
+    for (int j = 0; j <= WB_ROWS; j++)
+        for (int i = 0; i <= WB_COLS; i++)
+            wobble_rest(wb, i, j, &wb->x[j * (WB_COLS + 1) + i], &wb->y[j * (WB_COLS + 1) + i]);
+    wb->last = lm_now_ms();
+    wb->shown = wobble_bounds(wb);
+    w->anim_hidden = true;
+    damage_rect(wm, &wb->shown);
+    if (wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
+        lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+}
+
+/* One physics step of dt seconds: every node is a damped spring to its rigid place, soft far from the grab point, and drawn
+ * towards the mean of its neighbours (so the bend travels through the window like a wave). */
+static void wobble_step(struct wm_wobble *wb, float dt)
+{
+    const int stride = WB_COLS + 1;
+    float s = (float)lm_metrics.wobble / 100.0f;
+    float kn = 1600.0f, kf = 1600.0f * powf(0.07f, s), reach = 0.7f * hypotf((float)wb->ghost.w, (float)wb->ghost.h);
+    float ox = (float)(wb->win->x + wb->off_x), oy = (float)(wb->win->y + wb->off_y);
+    static float dx[WB_N], dy[WB_N];                            /* displacement from the rigid place */
+    float rx[WB_N], ry[WB_N];
+    for (int j = 0; j <= WB_ROWS; j++)
+        for (int i = 0; i <= WB_COLS; i++) {
+            int n = j * stride + i;
+            wobble_rest(wb, i, j, &rx[n], &ry[n]);
+            dx[n] = wb->x[n] - rx[n];
+            dy[n] = wb->y[n] - ry[n];
+        }
+    for (int j = 0; j <= WB_ROWS; j++)
+        for (int i = 0; i <= WB_COLS; i++) {
+            int n = j * stride + i, cnt = 0;
+            float ax = 0, ay = 0;
+            if (i > 0) { ax += dx[n - 1]; ay += dy[n - 1]; cnt++; }
+            if (i < WB_COLS) { ax += dx[n + 1]; ay += dy[n + 1]; cnt++; }
+            if (j > 0) { ax += dx[n - stride]; ay += dy[n - stride]; cnt++; }
+            if (j < WB_ROWS) { ax += dx[n + stride]; ay += dy[n + stride]; cnt++; }
+            ax = ax / (float)cnt - dx[n];
+            ay = ay / (float)cnt - dy[n];
+            float w = fminf(hypotf(rx[n] - ox - wb->gx, ry[n] - oy - wb->gy) / reach, 1.0f);
+            float k = kn + (kf - kn) * w, c = 2.0f * 0.32f * sqrtf(k);
+            wb->vx[n] += (-k * dx[n] - c * wb->vx[n] + 90.0f * ax) * dt;
+            wb->vy[n] += (-k * dy[n] - c * wb->vy[n] + 90.0f * ay) * dt;
+        }
+    for (int n = 0; n < WB_N; n++) {
+        wb->x[n] += wb->vx[n] * dt;
+        wb->y[n] += wb->vy[n] * dt;
+    }
+}
+
+static void wobble_tick(struct lm_wm *wm, uint64_t now)
+{
+    struct wm_wobble *wb = &wm->wb;
+    float dt = fminf((float)(now - wb->last) / 1000.0f, 0.05f);
+    wb->last = now;
+    for (float t = 0; t < dt; t += 0.008f)
+        wobble_step(wb, fminf(0.008f, dt - t));
+    if (++wb->ticks % 6 == 0) {                                 /* the content stays alive: a fresh picture every ~100 ms */
+        struct lm_ghost g;
+        struct lm_rect home;
+        if (anim_prepare(wm, wb->win, &g, &home)) {
+            if (g.w == wb->ghost.w && g.h == wb->ghost.h) {
+                lm_render_ghost_free(wm->srv->render, &wb->ghost);
+                wb->ghost = g;
+            } else {
+                lm_render_ghost_free(wm->srv->render, &g);
+            }
+        }
+    }
+    struct lm_rect old = wb->shown;
+    wb->shown = wobble_bounds(wb);
+    struct lm_rect d = lm_rect_union(&old, &wb->shown);
+    damage_rect(wm, &d);
+    if (wb->released) {                                         /* settled when every node is back and still */
+        float dev = 0, spd = 0;
+        for (int j = 0; j <= WB_ROWS; j++)
+            for (int i = 0; i <= WB_COLS; i++) {
+                int n = j * (WB_COLS + 1) + i;
+                float rx, ry;
+                wobble_rest(wb, i, j, &rx, &ry);
+                dev = fmaxf(dev, fmaxf(fabsf(wb->x[n] - rx), fabsf(wb->y[n] - ry)));
+                spd = fmaxf(spd, fmaxf(fabsf(wb->vx[n]), fabsf(wb->vy[n])));
+            }
+        if (dev < 0.4f && spd < 6.0f)
+            wobble_stop(wm);
+    }
 }
 
 /* A window has just been mapped: its picture grows out of nothing while the real one waits. */
@@ -4512,6 +4737,8 @@ static void anim_remember_close(struct lm_wm *wm, struct lm_window *w)
 /* The window goes away (unmapped): shows the picture taken when it was asked to close, if there is a fresh one. */
 static void anim_play_close(struct lm_wm *wm, struct lm_window *w)
 {
+    if (wm->wb.active && wm->wb.win == w)
+        wobble_stop(wm);
     for (int i = 0; i < ANIM_MAX; i++)                              /* an opening or flying picture of it ends now */
         if (wm->anim[i].used && wm->anim[i].win == w)
             anim_end(wm, &wm->anim[i]);
@@ -4532,7 +4759,7 @@ size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size)
     int count = 0;
     for (int i = 0; i < ANIM_MAX; i++)
         count += wm->anim[i].used;
-    n += (size_t)snprintf(buf + n, size - n, "anim n=%d dur=%d\n", count, anim_duration(wm));
+    n += (size_t)snprintf(buf + n, size - n, "anim n=%d dur=%d wobble=%d\n", count, anim_duration(wm), wm->wb.active);
     for (int i = 0; i < ANIM_MAX && n < size; i++) {
         const struct wm_anim *a = &wm->anim[i];
         if (!a->used)
@@ -4656,6 +4883,35 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         it.u.ghost.alpha = a->alpha;
         if (!fn(&it, data))
             return;
+    }
+
+    if (wm->wb.active) {                                         /* the wobbling window: its picture cut into cells that follow the spring nodes */
+        const struct wm_wobble *wb = &wm->wb;
+        const int stride = WB_COLS + 1;
+        for (int j = 0; j < WB_ROWS; j++)
+            for (int i = 0; i < WB_COLS; i++) {
+                int n[4] = { j * stride + i, j * stride + i + 1, (j + 1) * stride + i, (j + 1) * stride + i + 1 };
+                float x0 = wb->x[n[0]], x1 = x0, y0 = wb->y[n[0]], y1 = y0;
+                for (int k = 1; k < 4; k++) {
+                    x0 = fminf(x0, wb->x[n[k]]);
+                    x1 = fmaxf(x1, wb->x[n[k]]);
+                    y0 = fminf(y0, wb->y[n[k]]);
+                    y1 = fmaxf(y1, wb->y[n[k]]);
+                }
+                struct lm_rect dst = lm_rect_make((int)floorf(x0), (int)floorf(y0), (int)ceilf(x1) - (int)floorf(x0), (int)ceilf(y1) - (int)floorf(y0));
+                if (clip && !lm_rect_overlaps(&dst, clip))
+                    continue;
+                int sx0 = wb->ghost.w * i / WB_COLS, sx1 = wb->ghost.w * (i + 1) / WB_COLS;
+                int sy0 = wb->ghost.h * j / WB_ROWS, sy1 = wb->ghost.h * (j + 1) / WB_ROWS;
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_GHOST;
+                it.u.ghost.ghost = (struct lm_ghost *)&wb->ghost;
+                it.u.ghost.dst = dst;
+                it.u.ghost.src = lm_rect_make(sx0, sy0, sx1 - sx0, sy1 - sy0);
+                it.u.ghost.alpha = 255;
+                if (!fn(&it, data))
+                    return;
+            }
     }
 
     if (wm->srv->backend) {
@@ -5258,6 +5514,8 @@ static void grab_end(struct lm_wm *wm)
     enum grab_kind kind = wm->grab_kind;
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
+    if (wm->wb.active)
+        wm->wb.released = true;                                  /* the mesh settles and goes */
     if (kind == GRAB_GADGET_MOVE || kind == GRAB_GADGET_RESIZE) {
         damage_gadget(wm, wm->grab_gadget);
         int gi = wm->grab_gadget;
@@ -5423,13 +5681,18 @@ static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, d
         return;
     double dx = x - wm->grab_px, dy = y - wm->grab_py;
     if (wm->grab_kind == GRAB_MOVE) {
+        if (!wm->wb.active && wobble_wanted(wm, w))
+            wobble_start(wm, w, wm->grab_px, wm->grab_py);               /* (the picture is taken before the window moves) */
         struct lm_rect before = frame_outer(w);
-        w->x = wm->grab_x + (int32_t)dx;
-        w->y = wm->grab_y + (int32_t)dy;
+        int32_t tx = wm->grab_x + (int32_t)dx, ty = wm->grab_y + (int32_t)dy;
         struct lm_rect ua;
         lm_wm_usable_area(wm, (int32_t)x, (int32_t)y, &ua);
-        if (w->y < ua.y + LM_TITLEBAR_HEIGHT && !(w->states & LM_WINDOW_FULLSCREEN))
-            w->y = ua.y + LM_TITLEBAR_HEIGHT;
+        if (ty < ua.y + LM_TITLEBAR_HEIGHT && !(w->states & LM_WINDOW_FULLSCREEN))
+            ty = ua.y + LM_TITLEBAR_HEIGHT;
+        if (!wm->wb.active && anim_glide_to(wm, w, tx, ty))
+            return;
+        w->x = tx;
+        w->y = ty;
         damage_rect(wm, &before);
         damage_frame(wm, w);
         update_outputs(wm, w);
@@ -5460,6 +5723,8 @@ static void grab_cancel(struct lm_pointer_grab *g)
     enum grab_kind kind = wm->grab_kind;
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
+    if (wm->wb.active)
+        wm->wb.released = true;
     if (kind == GRAB_GADGET_MOVE || kind == GRAB_GADGET_RESIZE)
         damage_gadget(wm, wm->grab_gadget);
     if (w && kind == GRAB_RESIZE) {
@@ -5503,6 +5768,8 @@ static void grab_begin(struct lm_wm *wm, struct lm_window *w, enum grab_kind kin
     wm->grab_win = w;
     wm->grab_px = px;
     wm->grab_py = py;
+    wobble_stop(wm);
+    wm->glide_win = NULL;                                       /* (a window still gliding from the last drag stays where it is) */
     wm->grab_x = w->x;
     wm->grab_y = w->y;
     wm->grab_w = w->width;

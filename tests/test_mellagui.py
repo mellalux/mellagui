@@ -6785,8 +6785,14 @@ class TestAnimation(Base):
     """Windows open, close and are minimized with a short animation: a picture of the window grows / shrinks / flies to its button
     (LM_SCENE_GHOST). Headless never animates unless MELLAGUI_ANIMATIONS is set (so no other test sees half a window)."""
 
-    def start(self, name, ms='1500'):
-        p, c, stop = self.private_compositor(name, env={'MELLAGUI_ANIMATIONS': ms})
+    def start(self, name, ms='1500', conf=None):
+        args = []
+        if conf is not None:
+            path = os.path.join(tmp, name + '.conf')
+            with open(path, 'w') as f:
+                f.write(conf)
+            args = ['--config', path]
+        p, c, stop = self.private_compositor(name, *args, env={'MELLAGUI_ANIMATIONS': ms})
         return c
 
     def items(self, c):
@@ -6859,6 +6865,59 @@ class TestAnimation(Base):
         self.assertEqual(self.items(c), [])
         ppm = c.dump(os.path.join(tmp, 'an2.ppm'))
         self.assertEqual(ppm.px(full['x'] + 150, full['y'] + 100), (0, 255, 0))
+
+    def test_a_dragged_window_glides_after_the_pointer(self):
+        c = self.start('mellagui-an4', '400', '[windows]\nwobble = 0\n')                 # (the window itself glides: no mesh)
+        cl = Client(name='mellagui-an4')
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        r = c.windows()['windows'][0]
+        sx, sy = r['x'] + 50, r['y'] - 14
+        c.abs(sx, sy)
+        c.button(BTN_LEFT, True)
+        c.abs(sx + 200, sy + 100)
+        c.sync()
+        r2 = c.windows()['windows'][0]
+        self.assertLess(r2['x'] - r['x'], 200)                                      # it has not caught up with the pointer yet
+        c.button(BTN_LEFT, False)                                                    # let go: it keeps gliding to where it was dragged
+        end = time.time() + 4
+        while time.time() < end and (c.windows()['windows'][0]['x'] - r['x'], c.windows()['windows'][0]['y'] - r['y']) != (200, 100):
+            time.sleep(0.05)
+        r3 = c.windows()['windows'][0]
+        self.assertEqual((r3['x'] - r['x'], r3['y'] - r['y']), (200, 100))
+
+    def test_a_dragged_window_wobbles_and_settles(self):
+        c = self.start('mellagui-an5', '600')
+        cl = Client(name='mellagui-an5')
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        r = c.windows()['windows'][0]
+        sx, sy = r['x'] + 50, r['y'] - 14
+        c.abs(sx, sy)
+        c.button(BTN_LEFT, True)
+        for k in range(1, 9):                                                         # a quick drag
+            c.abs(sx + 25 * k, sy + 10 * k)
+        c.sync()
+        self.assertIn('wobble=1', c.cmd('anim')[0])
+        r2 = c.windows()['windows'][0]
+        self.assertEqual((r2['x'] - r['x'], r2['y'] - r['y']), (200, 80))            # the window itself is where the pointer put it
+        ppm = c.dump(os.path.join(tmp, 'an5a.ppm'))
+        self.assertGreater(ppm.count((0, 255, 0), r2['x'] - 30, r2['y'] - 30, r2['x'] + 330, r2['y'] + 230), 5000)    # its picture is painted (as cells, partly behind the window's own place)
+        c.button(BTN_LEFT, False)
+        end = time.time() + 5
+        while time.time() < end and 'wobble=1' in c.cmd('anim')[0]:
+            time.sleep(0.05)
+        self.assertIn('wobble=0', c.cmd('anim')[0])
+        ppm = c.dump(os.path.join(tmp, 'an5b.ppm'))
+        self.assertEqual(ppm.px(r2['x'] + 150, r2['y'] + 100), (0, 255, 0))           # settled: the real window again
 
     def test_closing_a_window_with_the_button_fades_it_out(self):
         c = self.start('mellagui-an3')
@@ -11645,7 +11704,7 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 27)
+        self.assertEqual(len(m), 28)
         self.assertEqual(m['panel.height'], (36, 20, 64, 32))
         self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))

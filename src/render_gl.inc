@@ -592,6 +592,9 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             struct gl_chrome *ch = &p->go->power;
             uint64_t h = fnv(1469598103934665603ull, &pw->card, sizeof(pw->card));
             h = fnv(h, &pw->sel, sizeof(pw->sel));
+            h = fnv(h, &pw->confirm, sizeof(pw->confirm));
+            h = fnv(h, &pw->others, sizeof(pw->others));
+            h = fnv(h, pw->off, sizeof(pw->off));
             if (!ch->tex || ch->hash != h || ch->w != pw->rect.w || ch->h != pw->rect.h) {
                 gl_scratch_alpha(p->r, p->st, ch, &pw->rect, gl_do_power, pw);
                 ch->hash = h;

@@ -961,24 +961,41 @@ static void paint_power(const struct paint_ctx *c, const struct lm_power_info *p
     fill_round(c, &pw->card, 14, (0xff000000u | lm_theme.border));
     struct lm_rect in = lm_rect_make(pw->card.x + 1, pw->card.y + 1, pw->card.w - 2, pw->card.h - 2);
     fill_round(c, &in, 13, 0xff000000u | COL_PANEL);
+    static const char *const questions[5] = { "", "", "Suspend the computer?", "Restart the computer?", "Shut the computer down?" };
     struct lm_rect title = lm_rect_make(pw->card.x, pw->card.y + 14, pw->card.w, LM_FONT_H);
-    draw_text_centered(c, &title, "Session", COL_PANEL_TEXT);
+    draw_text_centered(c, &title, pw->confirm ? questions[pw->confirm] : "Session", pw->confirm ? COL_PANEL_ACCENT : COL_PANEL_TEXT);
     struct lm_rect hint = lm_rect_make(pw->card.x, pw->card.y + pw->card.h - LM_FONT_H - 10, pw->card.w, LM_FONT_H);
-    draw_text_centered(c, &hint, "Esc cancels", COL_PANEL_DIM);
+    draw_text_centered(c, &hint, pw->confirm ? "Enter answers  Y yes  N no" : "Esc cancels", COL_PANEL_DIM);
     static const char *const names[LM_POWER_N] = { "Lock", "Exit", "Suspend", "Restart", "Shutdown" };
     static const enum shape shapes[LM_POWER_N] = { SHAPE_LOCK, SHAPE_CROSS, SHAPE_MOON, SHAPE_RESTART, SHAPE_POWER };
     for (int i = 0; i < LM_POWER_N; i++) {
         const struct lm_rect *b = &pw->button[i];
-        float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f;
-        bool sel = pw->sel == i;
+        if (b->w <= 0)
+            continue;                                                             /* (not in this view) */
+        enum shape sh = shapes[i];
+        const char *name = names[i];
         bool danger = i == 1 || i == 4;                                           /* Exit and Shutdown */
+        if (pw->confirm) {                                                        /* "Are you sure?": Yes (the action's own icon) and Cancel */
+            sh = i == 0 ? shapes[pw->confirm] : SHAPE_CROSS;
+            name = i == 0 ? "Yes" : "Cancel";
+            danger = i == 0 && pw->confirm != LM_LOCK_ACT_SUSPEND;
+        }
+        float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f;
+        bool sel = pw->sel == i && !pw->off[i];
+        uint8_t alpha = pw->off[i] ? 0x50 : 255;                                  /* a button that does nothing here is faint */
         uint32_t base = sel ? (danger ? COL_PANEL_DANGER : COL_PANEL_ACCENT) : COL_PANEL_BTN;
         if (sel)
             paint_shape(c, cx, cy, R + 4.0f, SHAPE_DISC, base, 0x50);             /* a soft halo */
-        paint_shape(c, cx, cy, R, SHAPE_DISC, base, 255);
-        paint_shape(c, cx, cy, R * (i >= 2 ? 0.56f : 0.52f), shapes[i], sel && i != 1 && i != 4 ? COL_PANEL : COL_PANEL_TEXT, 255);
-        struct lm_rect label = lm_rect_make(pw->hit[i].x, b->y + b->h + 8, pw->hit[i].w, LM_FONT_H);
-        draw_text_centered(c, &label, names[i], sel ? COL_PANEL_TEXT : COL_PANEL_DIM);
+        paint_shape(c, cx, cy, R, SHAPE_DISC, base, alpha);
+        paint_shape(c, cx, cy, R * (i >= 2 && !pw->confirm ? 0.56f : 0.52f), sh, sel && !danger ? COL_PANEL : COL_PANEL_TEXT, alpha);
+        struct lm_rect label = lm_rect_make(pw->hit[i].w > 0 ? pw->hit[i].x : b->x - 8, b->y + b->h + 8, pw->hit[i].w > 0 ? pw->hit[i].w : b->w + 16, LM_FONT_H);
+        draw_text_centered(c, &label, name, sel ? COL_PANEL_TEXT : COL_PANEL_DIM);
+    }
+    if (pw->confirm && pw->confirm != LM_LOCK_ACT_SUSPEND && pw->others > 0) {   /* a server: other people may be logged in */
+        char warn[96];
+        snprintf(warn, sizeof(warn), "%d other login session%s will end", pw->others, pw->others == 1 ? "" : "s");
+        struct lm_rect w = lm_rect_make(pw->card.x, pw->card.y + 46 + 64 + 8 + LM_FONT_H + 22, pw->card.w, LM_FONT_H);
+        draw_text_centered(c, &w, warn, COL_PANEL_DANGER);
     }
 }
 

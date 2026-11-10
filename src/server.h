@@ -306,6 +306,13 @@ void lm_server_quit(struct lm_server *srv);
  * and DISPLAY removed from the environment. Returns pid or -1.
  */
 pid_t lm_server_spawn(struct lm_server *srv, const char *cmd);
+/*
+ * The same, but the caller is told how the command ended: `fn(data, status, err)` runs from the loop when the child is gone (`status` = the wait
+ * status as WIFEXITED / WEXITSTATUS see it, `err` = the first 200 bytes of what it wrote to stderr, "" none). stdout goes nowhere. At most 4 such
+ * children at a time (more run unwatched). Returns the pid or -1.
+ */
+typedef void (*lm_exit_fn)(void *data, int status, const char *err);
+pid_t lm_server_spawn_watch(struct lm_server *srv, const char *cmd, lm_exit_fn fn, void *data);
 
 /* ---- globals ------------------------------------------------------------------ */
 

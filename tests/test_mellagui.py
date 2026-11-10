@@ -602,38 +602,143 @@ class TestWindows(Base):
             time.sleep(0.05)
         return p2, Ctl(os.path.join(d, 'ctl'))
 
-    def test_session_dialog_suspend_restart_and_shutdown_run_the_configured_commands(self):
-        marks = {k: os.path.join(tmp, 'pwr-%s.mark' % k) for k in ('suspend', 'reboot', 'poweroff')}
+    def power_instance(self, tag, suspend='touch'):
+        marks = {k: os.path.join(tmp, 'pwr-%s-%s.mark' % (tag, k)) for k in ('suspend', 'reboot', 'poweroff')}
         for m in marks.values():
             if os.path.exists(m):
                 os.unlink(m)
-        conf = os.path.join(tmp, 'pwr.conf')
+        conf = os.path.join(tmp, 'pwr-%s.conf' % tag)
         with open(conf, 'w') as f:
-            f.write('[commands]\nsuspend = touch %s\nreboot = touch %s\npoweroff = touch %s\n' % (marks['suspend'], marks['reboot'], marks['poweroff']))
-        p2, c = self.start_exit_instance('--config', conf)
-        def appeared(name):
-            for _ in range(60):
-                if os.path.exists(marks[name]):
-                    return True
-                time.sleep(0.05)
-            return False
-        for key, name in ((31, 'suspend'), (19, 'reboot'), (25, 'poweroff')):          # the letters S, R, P in the open dialog
+            f.write('[commands]\nsuspend = %s\nreboot = touch %s\npoweroff = touch %s\n' %
+                    (('touch ' + marks['suspend']) if suspend == 'touch' else suspend, marks['reboot'], marks['poweroff']))
+        extra = ['--config', conf, '--lock-file', os.path.join(tmp, 'pwr-%s.lock' % tag)]
+        env = {'MELLAGUI_LOCK_ITER': '1000'}
+        old = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+        try:
+            p2, c = self.start_exit_instance(*extra)
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        return p2, c, marks
+
+    @staticmethod
+    def appeared(path, wait=3.0):
+        end = time.time() + wait
+        while time.time() < end:
+            if os.path.exists(path):
+                return True
+            time.sleep(0.05)
+        return False
+
+    YES, CANCEL = (460, 292), (564, 292)                        # the confirmation's buttons (the upper row's places) on a 1024x600 output
+
+    def test_session_dialog_asks_before_it_suspends_restarts_or_shuts_down(self):
+        p2, c, marks = self.power_instance('ask')
+        for key, name in ((31, 'suspend'), (19, 'reboot'), (25, 'poweroff')):          # S, R, P: a question first, nothing happens yet
             c.click(*self.POWER_BTN)
             c.tap(key)
-            self.assertTrue(appeared(name), '%s: the key did not run the command' % name)
-            os.unlink(marks[name])
-        SUSPEND, RESTART, SHUTDOWN = (428, 394), (512, 394), (596, 394)                # the lower row of the card on a 1024x600 output
-        for pos, name in ((SUSPEND, 'suspend'), (RESTART, 'reboot'), (SHUTDOWN, 'poweroff')):
+            time.sleep(0.4)
+            self.assertFalse(os.path.exists(marks[name]), '%s ran without being confirmed' % name)
+            c.tap(49)                                                                    # N: no. The dialog closes.
+            time.sleep(0.3)
+            self.assertFalse(os.path.exists(marks[name]))
             c.click(*self.POWER_BTN)
-            c.click(*pos)
-            self.assertTrue(appeared(name), '%s: the button did not run the command' % name)
+            c.tap(key)
+            c.tap(KEY_ENTER)                                                             # Enter answers the highlighted one: Cancel
+            time.sleep(0.4)
+            self.assertFalse(os.path.exists(marks[name]), '%s: Enter on the highlighted Cancel did it' % name)
+            c.click(*self.POWER_BTN)
+            c.tap(key)
+            c.tap(21)                                                                    # Y: yes
+            self.assertTrue(self.appeared(marks[name]), '%s: Y did not run it' % name)
             os.unlink(marks[name])
-        c.click(*self.POWER_BTN)                                                        # Right x3 from nothing highlighted: Suspend, then Enter
-        for _ in range(3):
-            c.tap(106)
+        c.click(*self.POWER_BTN)                                                         # the buttons: Shutdown, then Yes
+        c.click(596, 394)
+        c.click(*self.YES)
+        self.assertTrue(self.appeared(marks['poweroff']), 'the Yes button did not shut down')
+        os.unlink(marks['poweroff'])
+        c.click(*self.POWER_BTN)
+        c.click(428, 394)                                                                # Suspend, then Cancel
+        c.click(*self.CANCEL)
+        time.sleep(0.4)
+        self.assertFalse(os.path.exists(marks['suspend']))
+        c.click(*self.POWER_BTN)                                                         # Restart, Left / Right to Yes, Enter
+        c.tap(19)
+        c.tap(106)
         c.tap(KEY_ENTER)
-        self.assertTrue(appeared('suspend'), 'Enter on the highlighted Suspend did not run it')
-        self.assertIsNone(p2.poll())                                                     # (nothing quit the compositor)
+        self.assertTrue(self.appeared(marks['reboot']), 'Right + Enter on Yes did not restart')
+        self.assertIsNone(p2.poll())
+
+    @staticmethod
+    def lock_state(c):
+        c.cmd('lock')
+        head, _, msg = c.last.partition(' message=')                      # the message holds blanks
+        st = dict(kv.split('=', 1) for kv in head.split()[1:])
+        st['message'] = msg
+        return st
+
+    def test_with_a_secret_the_lock_screen_asks_for_it_first(self):
+        p2, c, marks = self.power_instance('pin')
+        c.cmd('lock set - pin 1357')
+        c.click(*self.POWER_BTN)
+        c.tap(25)                                                                        # P: shut down -> the screen locks and asks
+        c.sync()
+        st = self.lock_state(c)
+        self.assertEqual((st['locked'], st['action']), ('1', '4'))
+        self.assertIn('shut down', st['message'])
+        for ch in '9999':                                                                # a wrong secret does nothing
+            c.tap({'9': 10}[ch])
+        c.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertFalse(os.path.exists(marks['poweroff']))
+        c.tap(KEY_ESC)                                                                   # clears ...
+        c.tap(KEY_ESC)                                                                   # ... and cancels: it was locked only to ask, so it unlocks
+        c.sync()
+        st = self.lock_state(c)
+        self.assertEqual((st['locked'], st['action']), ('0', '0'))
+        c.click(*self.POWER_BTN)
+        c.tap(19)                                                                        # R: restart, right secret
+        for ch in '1357':
+            c.tap({'1': 2, '3': 4, '5': 6, '7': 8}[ch])
+        c.tap(KEY_ENTER)
+        self.assertTrue(self.appeared(marks['reboot']), 'the right secret did not restart')
+        os.unlink(marks['reboot'])
+        c.click(*self.POWER_BTN)
+        c.tap(31)                                                                        # S: suspend; it stays locked afterwards
+        for ch in '1357':
+            c.tap({'1': 2, '3': 4, '5': 6, '7': 8}[ch])
+        c.tap(KEY_ENTER)
+        self.assertTrue(self.appeared(marks['suspend']), 'the right secret did not suspend')
+        st = self.lock_state(c)
+        self.assertEqual(st['locked'], '1', 'a suspend must leave the screen locked')
+
+    def test_a_command_that_fails_is_reported_and_suspend_can_be_turned_off(self):
+        p2, c, marks = self.power_instance('off', suspend='none')
+        c.click(*self.POWER_BTN)
+        c.tap(31)                                                                        # S does nothing: no suspend on this machine
+        time.sleep(0.4)
+        c.click(*self.POWER_BTN)
+        c.click(428, 394)                                                                # nor does its (faint) button
+        c.tap(21)
+        time.sleep(0.4)
+        self.assertFalse(os.path.exists(marks['suspend']))
+        c.tap(KEY_ESC)
+        conf = os.path.join(tmp, 'pwr-fail.conf')
+        with open(conf, 'w') as f:
+            f.write("[commands]\nreboot = sh -c 'echo no permission >&2; exit 3'\n")
+        p3, c3 = self.start_exit_instance('--config', conf)
+        c3.click(*self.POWER_BTN)
+        c3.tap(19)
+        c3.tap(21)                                                                       # R, Y: the command fails ...
+        time.sleep(0.8)
+        c3.abs(20, 580)
+        ppm = c3.dump(os.path.join(tmp, 'pwr-fail.ppm'))
+        accent = sum(1 for y in range(30, 300) if ppm.px(1024 - 320 - 12 + 2, y) == (0x6f, 0xa8, 0xff))
+        self.assertGreater(accent, 15, 'no notification about the failed command')
 
     def test_session_dialog_exit_button_quits(self):
         # separate instance: the shared compositor must keep running

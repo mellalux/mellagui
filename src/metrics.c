@@ -43,6 +43,16 @@ bool lm_metrics_entry(int i, const char **section, const char **name, int *value
     return false;
 }
 
+const char *lm_metrics_what(const char *section, const char *name)
+{
+#define X(sec, nm, field, def, lo, hi, what) \
+    if (!strcmp(section, sec) && !strcmp(name, nm)) \
+        return what;
+    LM_METRICS(X)
+#undef X
+    return NULL;
+}
+
 bool lm_metrics_set(const char *section, const char *name, int value)
 {
 #define X(sec, nm, field, def, lo, hi, what) \

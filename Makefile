@@ -101,7 +101,7 @@ $(BUILD)/mellagui-run: $(BUILD)/client/mellagui-run.o $(BUILD)/client/wlclip.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/settingshelp.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

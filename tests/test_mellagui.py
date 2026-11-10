@@ -1999,7 +1999,7 @@ def wait_for_window(app_id, timeout=5.0):
 
 
 class TestClients(Base):
-    def spawn(self, name, **env):
+    def spawn(self, name, args=(), **env):
         path = os.path.join(ROOT, 'build', name)
         if not os.path.exists(path):
             self.skipTest('%s not built' % name)
@@ -2008,7 +2008,7 @@ class TestClients(Base):
             self.addCleanup(shutil.rmtree, d, ignore_errors=True)
             env = dict(env, XDG_CONFIG_HOME=d)
         e = dict(os.environ, **env)
-        p = subprocess.Popen([path], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen([path] + list(args), env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         return p
 
@@ -3440,6 +3440,55 @@ class TestClients(Base):
         p = self.spawn('mellagui-term', SHELL=script)
         self.assertEqual(p.wait(timeout=5), 0)
 
+    def test_terminal_runs_a_command_with_e_and_closes_when_it_ends(self):
+        out = os.path.join(tmp, 'term-e-out.txt')
+        script = os.path.join(tmp, 'prog.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\necho "$# $1 $2 ${TERM}" > "%s"\nread line\necho "line:$line" >> "%s"\n' % (out, out))
+        os.chmod(script, 0o755)
+        p = self.spawn('mellagui-term', args=['-e', script, 'one', 'two words'], SHELL='/bin/false')    # (the shell must not be what runs)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win, 'terminal window did not appear')
+        self.assertEqual(self.window_title_of('mellagui.term'), 'prog.sh')
+        for _ in range(50):
+            if os.path.exists(out) and open(out).read().strip():
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(out).readline().strip(), '2 one two words xterm-256color')
+        time.sleep(0.2)
+        ctl.abs(900, 590)
+        type_text('hello')                                                       # the program has the keyboard, and ending it closes the window
+        self.assertEqual(p.wait(timeout=5), 0)
+        self.assertIn('line:hello', open(out).read())
+
+    def window_title_of(self, app_id):
+        for w in ctl.windows()['windows']:
+            if w['app_id'] == app_id:
+                return w['title']
+
+    def test_terminal_e_with_a_missing_program_says_so_and_waits(self):
+        p = self.spawn('mellagui-term', args=['-e', '/nonexistent/prog'])
+        self.assertIsNotNone(wait_for_window('mellagui.term'))
+        time.sleep(0.6)
+        self.assertIsNone(p.poll(), 'the window must stay so that the message can be read')
+        ctl.abs(900, 590)
+        ctl.tap(KEY_ENTER)
+        p.wait(timeout=5)
+
+    def test_terminal_arguments(self):
+        path = os.path.join(ROOT, 'build', 'mellagui-term')
+        if not os.path.exists(path):
+            self.skipTest('mellagui-term not built')
+        r = subprocess.run([path, '-e'], capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('needs a command', r.stderr)
+        r = subprocess.run([path, '--bogus'], capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('usage', r.stderr)
+        p = self.spawn('mellagui-term', args=['--title', 'My Title'])
+        self.assertIsNotNone(wait_for_window('mellagui.term'))
+        self.assertEqual(self.window_title_of('mellagui.term'), 'My Title')
+
     FAKE_MONITOR = ('monitor HDMI-A-1 Test Monitor\n10 100 20\n12 100 50\n62 100 30\n8d 2 2\n60 18 17\n14 12 5\nd6 5 1\n'
                     'monitor DP-1 Second One\n10 100 70\n62 100 40\n')
 
@@ -4685,6 +4734,35 @@ esac
         time.sleep(0.3)
         return p, win
 
+    def test_a_question_mark_opens_a_modal_help_card(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        def lum(name):
+            ppm = ctl.dump(os.path.join(tmp, name))
+            return sum(ppm.px(x0 + 20 + i, y0 + 80) [1] for i in range(40))           # the sidebar's tab column, dimmed while the card is up
+        before = lum('help0.ppm')
+        ctl.abs(x0 + 300, y0 + 400)
+        ctl.click(x0 + 588, y0 + 232)                                                 # the "?" of the sticky keys box
+        time.sleep(0.3)
+        self.assertLess(lum('help1.ppm'), before * 0.7, 'the card did not open (the page is not dimmed)')
+        self.assertEqual(settings()['sticky'], '0', 'the click went through to the checkbox')
+        ctl.tap(KEY_ESC)                                                              # Esc closes the card, not the panel
+        time.sleep(0.3)
+        self.assertGreater(lum('help2.ppm'), before * 0.9)
+        self.assertEqual(p.poll(), None)
+        ctl.click(x0 + 588, y0 + 232)                                                 # open again and click outside the card: closes it too
+        time.sleep(0.3)
+        self.assertLess(lum('help3.ppm'), before * 0.7)
+        ctl.click(x0 + 5, y0 + 5)
+        time.sleep(0.3)
+        self.assertGreater(lum('help4.ppm'), before * 0.9)
+        ctl.tap(KEY_ESC)                                                              # now Esc closes the panel
+        for _ in range(60):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(p.poll())
+
     def test_panel_opens_from_super_i(self):
         self.exe()
         n = len(ctl.windows()['windows'])
@@ -4755,10 +4833,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its three buttons, wraps over the thirteen page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 24th press; Space toggles it
+        # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the thirteen page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 31st press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(24):
+        for _ in range(31):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)

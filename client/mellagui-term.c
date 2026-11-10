@@ -5,6 +5,11 @@
  * truecolor, scroll regions, alternate screen, bracketed paste, DSR/DA
  * replies), 8x16 bitmap font (zoom 50..500 %, any step; fractional sizes are area-averaged), scrollback, mouse selection with clipboard copy
  * and paste. Keyboard translation uses the built-in US layout from keymap.c.
+ *
+ *   mellagui-term                    your shell
+ *   mellagui-term -e CMD [ARGS...]   run CMD in the terminal instead of the shell (everything after -e is the command); the window closes
+ *                                    when it ends. "@terminal -e alpine" in a dock / launcher entry starts a text program.
+ *   mellagui-term --title TEXT       the window's title until the program sets its own
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -752,6 +757,8 @@ static void pty_set_size(void)
     ioctl(A.pty, TIOCSWINSZ, &ws);
 }
 
+static char **g_exec_argv;                       /* -e: the command to run instead of the shell (NULL: the shell) */
+
 static int spawn_shell(void)
 {
     int m = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -787,6 +794,14 @@ static int spawn_shell(void)
         setenv("COLORTERM", "truecolor", 1);
         unsetenv("COLUMNS");
         unsetenv("LINES");
+        if (g_exec_argv) {
+            execvp(g_exec_argv[0], g_exec_argv);
+            fprintf(stderr, "\r\nmellagui-term: cannot run %s: %s\r\n\r\nPress Enter to close this window.\r\n", g_exec_argv[0], strerror(errno));
+            char ch;
+            while (read(0, &ch, 1) > 0 && ch != '\n' && ch != '\r')
+                ;
+            _exit(127);
+        }
         const char *shell = getenv("SHELL");
         if (!shell || !*shell)
             shell = "/bin/sh";
@@ -1968,7 +1983,22 @@ static void sigchld(int s)
 int main(int argc, char **argv)
 {
     lm_theme_load_env();
-    (void)argc; (void)argv;
+    const char *title = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--exec")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "mellagui-term: -e needs a command\n");
+                return 2;
+            }
+            g_exec_argv = &argv[i + 1];
+            break;
+        } else if ((!strcmp(argv[i], "--title") || !strcmp(argv[i], "-T")) && i + 1 < argc) {
+            title = argv[++i];
+        } else {
+            fprintf(stderr, "usage: mellagui-term [--title TEXT] [-e COMMAND [ARGS...]]\n");
+            return strcmp(argv[i], "-h") && strcmp(argv[i], "--help") ? 2 : 0;
+        }
+    }
     A.running = true;
     A.hover = -1;
     A.zoom = ZOOM_DEFAULT;
@@ -1977,7 +2007,13 @@ int main(int argc, char **argv)
     A.repeat_fd = -1;
     A.repeat_rate = 25;
     A.repeat_delay = 400;
-    snprintf(A.title, sizeof(A.title), "mellagui-term");
+    if (title)
+        snprintf(A.title, sizeof(A.title), "%s", title);
+    else if (g_exec_argv) {
+        const char *b = strrchr(g_exec_argv[0], '/');
+        snprintf(A.title, sizeof(A.title), "%s", b ? b + 1 : g_exec_argv[0]);
+    } else
+        snprintf(A.title, sizeof(A.title), "mellagui-term");
     term_init(&A.t, DEFAULT_COLS, DEFAULT_ROWS);
 
     A.c = wlc_connect(NULL);

@@ -7134,6 +7134,46 @@ class TestOverview(Base):
         head, items = self.ov()
         self.assertEqual((head['ws'], head['n']), ('0', '3'))
 
+    def test_a_picture_can_be_carried_to_a_workspace_cell(self):
+        cs = self.wins3()
+        ctl.cmd('overview open')
+        head, items = self.ov()
+        x, y = self.centre(items[1])                                              # Red
+        ctl.abs(x, y)
+        ctl.button(BTN_LEFT, True)
+        for k in range(1, 6):                                                      # a drag, not a click
+            ctl.abs(x + (302 + 108 + 48 - x) * k // 5, y + (67 - y) * k // 5)
+        ctl.sync()
+        ppm = ctl.dump(os.path.join(tmp, 'ov-drag.ppm'))
+        reddish = sum(1 for yy in range(50, 140) for xx in range(302 + 108 + 48 - 80, 302 + 108 + 48 + 80)
+                      if ppm.px(xx, yy)[0] > 110 and ppm.px(xx, yy)[1] < 80)                 # (a little blended with the dark behind it)
+        self.assertGreater(reddish, 100)                                                  # the small picture follows the pointer
+        ctl.button(BTN_LEFT, False)
+        ctl.sync()
+        head, items = self.ov()
+        self.assertEqual((head['open'], head['n']), ('1', '2'))                    # still open, one picture fewer
+        self.assertEqual([i['title'] for i in items], ['Blue', 'Green'])
+        red = [w for w in ctl.windows()['windows'] if w['title'] == 'Red'][0]
+        self.assertEqual(red['ws'], 1)
+        ctl.click(302 + 108 + 48, 67)                                              # workspace 2: it is there
+        ctl.sync()
+        self.assertEqual([i['title'] for i in self.ov()[1]], ['Red'])
+
+    def test_a_drag_dropped_elsewhere_does_nothing(self):
+        self.wins3()
+        ctl.cmd('overview open')
+        head, items = self.ov()
+        x, y = self.centre(items[0])
+        ctl.abs(x, y)
+        ctl.button(BTN_LEFT, True)
+        for k in range(1, 6):
+            ctl.abs(x + 20 * k, y + 3 * k)
+        ctl.button(BTN_LEFT, False)
+        ctl.sync()
+        head, items = self.ov()
+        self.assertEqual((head['open'], head['n']), ('1', '3'))                    # not a click: still open, nothing moved
+        self.assertEqual([w['ws'] for w in ctl.windows()['windows']], [0, 0, 0])
+
     def test_a_minimized_window_is_in_it_and_comes_back_when_chosen(self):
         cs = self.wins3()
         cs[1][0].wl.request(cs[1][1].toplevel, 'set_minimized')

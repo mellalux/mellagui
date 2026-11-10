@@ -166,6 +166,8 @@ struct wm_overview {
     uint64_t start;
     int dur;
     int sel, hover, hover_ws, press;
+    bool drag;                          /* a picture is being carried (towards a workspace cell) ... */
+    int drag_i;                         /* ... this one; the pointer is wm->drag_x / drag_y */
 };
 
 struct lm_wm {
@@ -4841,6 +4843,7 @@ static void overview_build(struct lm_wm *wm)
     struct lm_window *prev_sel = ov->sel >= 0 && ov->sel < ov->n ? ov->item[ov->sel].win : NULL;
     overview_free(wm);
     ov->hover = ov->hover_ws = ov->press = -1;
+    ov->drag = false;
     if (!o)
         return;
     struct lm_window *list[LM_OVERVIEW_MAX];
@@ -5106,6 +5109,37 @@ static void overview_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
         lm_wm_window_close(ov->item[sel].win);
 }
 
+/* A press on a picture that moves 8 px turns into a drag: the picture follows the pointer and can be dropped on a workspace cell. */
+static void overview_drag_motion(struct lm_wm *wm)
+{
+    struct wm_overview *ov = &wm->ov;
+    if (!ov->open || ov->closing || wm->press_panel_kind != LM_PICK_OVERVIEW_ITEM || !wm->srv->seat)
+        return;
+    double x, y;
+    lm_seat_pointer_position(wm->srv->seat, &x, &y);
+    if (!ov->drag) {
+        if (!drag_far_enough(wm, x, y) || wm->press_panel_ws < 0 || wm->press_panel_ws >= ov->n)
+            return;
+        ov->drag = true;
+        ov->drag_i = wm->press_panel_ws;
+        ov->hover = -1;
+    }
+    wm->drag_x = x;
+    wm->drag_y = y;
+    overview_damage(wm);
+}
+
+/* The button was let go after a drag: on a workspace cell the window moves there. */
+static void overview_drag_finish(struct lm_wm *wm, const struct lm_pick *pick)
+{
+    struct wm_overview *ov = &wm->ov;
+    int i = ov->drag_i;
+    ov->drag = false;
+    overview_damage(wm);
+    if (pick->kind == LM_PICK_OVERVIEW_WS && i >= 0 && i < ov->n && pick->index != ov->item[i].win->workspace)
+        move_to_workspace(wm, ov->item[i].win, pick->index);              /* (its hook takes the pictures again) */
+}
+
 /* A click (`button`, release) on a pick of the overview. */
 static void overview_click(struct lm_wm *wm, const struct lm_pick *pick, uint32_t button)
 {
@@ -5368,17 +5402,31 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 overview_info(wm, oo, &it.u.overview);
                 if (!fn(&it, data))
                     return;
-                for (int i = 0; i < wm->ov.n; i++) {
-                    memset(&it, 0, sizeof(it));
-                    it.kind = LM_SCENE_GHOST;
-                    it.u.ghost.ghost = (struct lm_ghost *)&wm->ov.item[i].ghost;
-                    it.u.ghost.dst = overview_item_rect(&wm->ov, i);
-                    it.u.ghost.alpha = wm->ov.item[i].win->minimized ? 170 : 255;
-                    if (clip && !lm_rect_overlaps(&it.u.ghost.dst, clip))
-                        continue;
-                    if (!fn(&it, data))
-                        return;
-                }
+                for (int pass = 0; pass < 2; pass++)                  /* the carried picture last, above the others */
+                    for (int i = 0; i < wm->ov.n; i++) {
+                        bool carried = wm->ov.drag && i == wm->ov.drag_i;
+                        if (carried != (pass == 1))
+                            continue;
+                        memset(&it, 0, sizeof(it));
+                        it.kind = LM_SCENE_GHOST;
+                        it.u.ghost.ghost = (struct lm_ghost *)&wm->ov.item[i].ghost;
+                        it.u.ghost.dst = overview_item_rect(&wm->ov, i);
+                        it.u.ghost.alpha = wm->ov.item[i].win->minimized ? 170 : 255;
+                        if (carried) {                                /* its place in the grid stays as a faint copy, the picture itself is small and follows the pointer */
+                            struct lm_rect home = it.u.ghost.dst;
+                            it.u.ghost.alpha = 70;
+                            if (!clip || lm_rect_overlaps(&home, clip))
+                                if (!fn(&it, data))
+                                    return;
+                            int cw = LM_MAX(home.w * 55 / 100, 24), chh = LM_MAX(home.h * 55 / 100, 16);
+                            it.u.ghost.dst = lm_rect_make((int)wm->drag_x - cw / 2, (int)wm->drag_y - chh / 2, cw, chh);
+                            it.u.ghost.alpha = 235;
+                        }
+                        if (clip && !lm_rect_overlaps(&it.u.ghost.dst, clip))
+                            continue;
+                        if (!fn(&it, data))
+                            return;
+                    }
             }
         }
     }
@@ -5866,6 +5914,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     osk_drag_motion(wm);
     dock_drag_motion(wm);
     launcher_drag_motion(wm);
+    overview_drag_motion(wm);
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
@@ -5927,7 +5976,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         damage_gadget(wm, LM_GADGET_CLIPBOARD);
     }
     if (wm->ov.open) {                                          /* the pointer moves the overview's highlight */
-        int hi = pick->kind == LM_PICK_OVERVIEW_ITEM ? pick->index : -1, hws = pick->kind == LM_PICK_OVERVIEW_WS ? pick->index : -1;
+        int hi = pick->kind == LM_PICK_OVERVIEW_ITEM && !wm->ov.drag ? pick->index : -1, hws = pick->kind == LM_PICK_OVERVIEW_WS ? pick->index : -1;
         if (hi != wm->ov.hover || hws != wm->ov.hover_ws) {
             wm->ov.hover = hi;
             wm->ov.hover_ws = hws;
@@ -6575,10 +6624,18 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             wm->press_bits = 0;
             if (button == BTN_RIGHT && pick->kind == LM_PICK_OVERVIEW_ITEM && pick->index < wm->ov.n)
                 window_menu_open(wm, wm->ov.item[pick->index].win);          /* Maximize, Minimize, Move to workspace ..., Close */
+            if (wm->srv->seat) {
+                double px, py;
+                lm_seat_pointer_position(wm->srv->seat, &px, &py);
+                wm->drag_press_x = (int)px;
+                wm->drag_press_y = (int)py;
+            }
         } else {
             int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
             wm->press_panel_kind = 0;
-            if (pk == (int)pick->kind && pi == pick->index)
+            if (wm->ov.drag)
+                overview_drag_finish(wm, pick);                              /* carried to a workspace cell (or dropped nowhere) */
+            else if (pk == (int)pick->kind && pi == pick->index)
                 overview_click(wm, pick, button);
         }
         return true;

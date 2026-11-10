@@ -526,6 +526,8 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, &li->kind, sizeof(li->kind));
             h = fnv(h, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
             h = fnv(h, &lm_dock.icon_bg_rgb, sizeof(lm_dock.icon_bg_rgb));
+            h = fnv(h, li->search, strlen(li->search) + 1);
+            h = fnv(h, &li->searching, sizeof(li->searching));
             h = fnv(h, li->button_text[0], strlen(li->button_text[0]) + 1);
             h = fnv(h, li->message, strlen(li->message) + 1);
             if (li->form)

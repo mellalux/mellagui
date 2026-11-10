@@ -38,6 +38,8 @@
 
 /* Keys before K_FILE are saved to the settings file, the ones after it are read-only or live state only. */
 #define KEYS_PAGE_ROWS 10
+#define KEYS_HELP_CHUNKS 5            /* the whole shortcut table for mellagui-keys, 12 bindings in each value */
+#define KEYS_HELP_PER 12
 
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
@@ -45,6 +47,7 @@ enum key_id {
     K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
+    K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
     K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
     K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET,
@@ -65,6 +68,7 @@ static const char *const key_names[K_COUNT] = {
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
     [K_CONFIG_FILE] = "config-file", [K_CONFIG_STATUS] = "config-status", [K_CONFIG_RELOAD] = "config-reload", [K_CONFIG_CREATE] = "config-create", [K_SAVER_NOW] = "saver-now",
+    [K_KEYS_HELP_0] = "keys-help-0", [K_KEYS_HELP_0 + 1] = "keys-help-1", [K_KEYS_HELP_0 + 2] = "keys-help-2", [K_KEYS_HELP_0 + 3] = "keys-help-3", [K_KEYS_HELP_0 + 4] = "keys-help-4",
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
@@ -538,6 +542,17 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
         break;
     case K_CONFIG_RELOAD: case K_CONFIG_CREATE: break;                   /* write only */
     case K_KEYS_COUNT: snprintf(out, n, "%d", c->keys.n); break;
+    case K_KEYS_HELP_0 ... K_KEYS_HELP_LAST: {  /* "Super+Q<US>close" lines (separated by newlines) of bindings 12 * chunk ... : mellagui-keys lists them all */
+        size_t o = 0;
+        for (int i = (k - K_KEYS_HELP_0) * KEYS_HELP_PER; i < c->keys.n && i < (k - K_KEYS_HELP_0 + 1) * KEYS_HELP_PER && o + 80 < n; i++) {
+            char combo[64], act[LM_KEYBIND_ARG + 40];
+            if (!lm_keys_combo_text(c->keys.b[i].mods, c->keys.b[i].code, combo, sizeof(combo)))
+                snprintf(combo, sizeof(combo), "?");
+            lm_keys_action_text(&c->keys.b[i], act, sizeof(act));
+            o += (size_t)snprintf(out + o, n - o, "%s%s\x1f%s", o ? "\n" : "", combo, act);
+        }
+        break;
+    }
     case K_KEYS_PAGE: snprintf(out, n, "%d", keys_page_clamped(s)); break;
     case K_KEYS_ACTIONS: snprintf(out, n, "%s", lm_keys_action_names()); break;
     case K_KEYS_CAPTURE: snprintf(out, n, "%d", srv->wm && lm_wm_key_capturing(srv->wm) ? 1 : 0); break;
@@ -602,7 +617,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 {
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
-        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST))
+        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));

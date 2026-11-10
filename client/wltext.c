@@ -3,8 +3,150 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "font.h"
 #include "keymap.h"
 #include "wlclip.h"
+#include "wlwin.h"
+
+/* ---- UTF-8 ------------------------------------------------------------------------------------------------------------ */
+
+static size_t prev_char(const char *s, size_t i)
+{
+    if (i == 0)
+        return 0;
+    i--;
+    while (i > 0 && ((unsigned char)s[i] & 0xc0) == 0x80)
+        i--;
+    return i;
+}
+
+static size_t next_char(const char *s, size_t i, size_t len)
+{
+    if (i >= len)
+        return len;
+    i++;
+    while (i < len && ((unsigned char)s[i] & 0xc0) == 0x80)
+        i++;
+    return i;
+}
+
+static bool is_word(unsigned char c)
+{
+    return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static size_t word_left(const char *s, size_t i)
+{
+    while (i > 0 && !is_word((unsigned char)s[prev_char(s, i)]))
+        i = prev_char(s, i);
+    while (i > 0 && is_word((unsigned char)s[prev_char(s, i)]))
+        i = prev_char(s, i);
+    return i;
+}
+
+static size_t word_right(const char *s, size_t i, size_t len)
+{
+    while (i < len && !is_word((unsigned char)s[i]))
+        i = next_char(s, i, len);
+    while (i < len && is_word((unsigned char)s[i]))
+        i = next_char(s, i, len);
+    return i;
+}
+
+static size_t cp_count(const char *s, size_t bytes)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < bytes; i++)
+        if (((unsigned char)s[i] & 0xc0) != 0x80)
+            n++;
+    return n;
+}
+
+/* The byte offset of code point number `cp` (the end of the text when it has fewer). */
+static size_t byte_of_cp(const char *s, size_t cp)
+{
+    size_t i = 0, len = strlen(s);
+    while (cp > 0 && i < len) {
+        i = next_char(s, i, len);
+        cp--;
+    }
+    return i;
+}
+
+/* ---- the state of the fields (kept by the address of their buffer) ------------------------------------------------------ */
+
+struct state {
+    const char *buf;
+    size_t cur, anchor;                 /* bytes: the caret and the other end of the selection (== cur: none) */
+    size_t len;                         /* strlen when it was last looked at: another length = the program set the text, the caret goes to the end */
+    size_t off;                         /* the first code point shown when the text is wider than the field */
+};
+
+#define STATES 24
+static struct state states[STATES];
+static int next_slot;
+
+static struct state *get(const char *buf)
+{
+    struct state *s = NULL;
+    for (int i = 0; i < STATES; i++)
+        if (states[i].buf == buf)
+            s = &states[i];
+    size_t len = strlen(buf);
+    if (!s) {
+        s = &states[next_slot];
+        next_slot = (next_slot + 1) % STATES;
+        memset(s, 0, sizeof(*s));
+        s->buf = buf;
+        s->cur = s->anchor = s->len = len;
+    }
+    if (s->len != len) {
+        s->cur = s->anchor = s->len = len;
+    }
+    if (s->cur > len)
+        s->cur = len;
+    if (s->anchor > len)
+        s->anchor = len;
+    return s;
+}
+
+static bool sel_range(const struct state *s, size_t *a, size_t *b)
+{
+    if (s->cur == s->anchor)
+        return false;
+    *a = s->cur < s->anchor ? s->cur : s->anchor;
+    *b = s->cur < s->anchor ? s->anchor : s->cur;
+    return true;
+}
+
+static void delete_range(struct state *s, char *buf, size_t a, size_t b)
+{
+    memmove(buf + a, buf + b, strlen(buf) - b + 1);
+    s->cur = s->anchor = a;
+    s->len = strlen(buf);
+}
+
+static void insert_text(struct state *s, char *buf, size_t max, const char *text, size_t n)
+{
+    size_t a, b;
+    if (sel_range(s, &a, &b))
+        delete_range(s, buf, a, b);
+    size_t len = strlen(buf);
+    if (len + n + 1 > max) {                                            /* what does not fit is left out, never in the middle of a character */
+        if (len + 1 >= max)
+            return;
+        n = max - len - 1;
+        while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80)
+            n--;
+    }
+    if (!n)
+        return;
+    memmove(buf + s->cur + n, buf + s->cur, len - s->cur + 1);
+    memcpy(buf + s->cur, text, n);
+    s->cur += n;
+    s->anchor = s->cur;
+    s->len = len + n;
+}
 
 void wltext_append(char *buf, size_t max, const char *text, size_t n)
 {
@@ -19,6 +161,8 @@ void wltext_append(char *buf, size_t max, const char *text, size_t n)
     memcpy(buf + len, text, n);
     buf[len + n] = 0;
 }
+
+/* ---- the clipboard ------------------------------------------------------------------------------------------------------ */
 
 char *wltext_paste_text(struct wlclip *clip, size_t *len)
 {
@@ -45,12 +189,31 @@ char *wltext_paste_text(struct wlclip *clip, size_t *len)
     return t;
 }
 
-static void do_paste(struct wlclip *clip, char *buf, size_t max)
+/* The selection, or the whole text when nothing is selected (a field has little in it). */
+static void copy_out(struct state *s, struct wlclip *clip, const char *buf)
+{
+    size_t a, b;
+    if (!buf[0] || !clip)
+        return;
+    if (!sel_range(s, &a, &b)) {
+        a = 0;
+        b = strlen(buf);
+    }
+    char *t = malloc(b - a + 1);
+    if (!t)
+        return;
+    memcpy(t, buf + a, b - a);
+    t[b - a] = 0;
+    wlclip_copy(clip, t);
+    free(t);
+}
+
+static void do_paste(struct state *s, struct wlclip *clip, char *buf, size_t max)
 {
     size_t n = 0;
-    char *t = wltext_paste_text(clip, &n);
+    char *t = clip ? wltext_paste_text(clip, &n) : NULL;
     if (t) {
-        wltext_append(buf, max, t, n);
+        insert_text(s, buf, max, t, n);
         free(t);
     }
 }
@@ -75,41 +238,186 @@ bool wltext_is_clipkey(uint32_t ks, uint32_t mods)
     return clip_kind(ks, mods) != 0;
 }
 
-bool wltext_key(struct wlclip *clip, char *buf, size_t max, uint32_t ks, uint32_t mods)
+/* ---- editing ------------------------------------------------------------------------------------------------------------ */
+
+bool wltext_edit(struct wlclip *clip, char *buf, size_t max, uint32_t ks, uint32_t mods)
 {
-    int kind = clip_kind(ks, mods);
-    if (!kind || !clip)
+    bool ctrl = (mods & LM_MOD_CTRL) != 0, shift = (mods & LM_MOD_SHIFT) != 0, alt = (mods & (LM_MOD_ALT | LM_MOD_SUPER)) != 0;
+    if (alt)
         return false;
+    struct state *s = get(buf);
+    size_t len = strlen(buf), a, b;
+    int kind = clip_kind(ks, mods);
     if (kind == 1) {
-        do_paste(clip, buf, max);
-    } else if (buf[0]) {
-        wlclip_copy(clip, buf);
-        if (kind == 3)
-            buf[0] = 0;
+        do_paste(s, clip, buf, max);
+        return true;
     }
+    if (kind == 2 || kind == 3) {
+        copy_out(s, clip, buf);
+        if (kind == 3 && buf[0]) {
+            if (sel_range(s, &a, &b))
+                delete_range(s, buf, a, b);
+            else {
+                buf[0] = 0;
+                s->cur = s->anchor = s->len = 0;
+            }
+        }
+        return true;
+    }
+    if (ctrl && (ks == 'a' || ks == 'A')) {                              /* select all */
+        s->anchor = 0;
+        s->cur = len;
+        return true;
+    }
+    size_t to = s->cur;
+    if (ks == LM_KS_Left) {
+        if (!shift && sel_range(s, &a, &b))
+            to = a;
+        else
+            to = ctrl ? word_left(buf, s->cur) : prev_char(buf, s->cur);
+    } else if (ks == LM_KS_Right) {
+        if (!shift && sel_range(s, &a, &b))
+            to = b;
+        else
+            to = ctrl ? word_right(buf, s->cur, len) : next_char(buf, s->cur, len);
+    } else if (ks == LM_KS_Home) {
+        to = 0;
+    } else if (ks == LM_KS_End) {
+        to = len;
+    } else if (ks == LM_KS_BackSpace || ks == LM_KS_Delete) {
+        if (sel_range(s, &a, &b)) {
+            delete_range(s, buf, a, b);
+        } else if (ks == LM_KS_BackSpace && s->cur > 0) {
+            delete_range(s, buf, ctrl ? word_left(buf, s->cur) : prev_char(buf, s->cur), s->cur);
+        } else if (ks == LM_KS_Delete && s->cur < len) {
+            delete_range(s, buf, s->cur, ctrl ? word_right(buf, s->cur, len) : next_char(buf, s->cur, len));
+        }
+        return true;
+    } else {
+        char txt[8];
+        int tl = ctrl ? 0 : lm_keysym_to_utf8(ks, txt);
+        if (tl > 0 && (unsigned char)txt[0] >= 0x20 && txt[0] != 0x7f) {
+            insert_text(s, buf, max, txt, (size_t)tl);
+            return true;
+        }
+        return false;
+    }
+    s->cur = to;
+    if (!shift)
+        s->anchor = to;
     return true;
 }
 
+void wltext_end(char *buf)
+{
+    struct state *s = get(buf);
+    s->cur = s->anchor = strlen(buf);
+}
+
+bool wltext_selection(const char *buf, size_t *a, size_t *b)
+{
+    return sel_range(get(buf), a, b);
+}
+
+size_t wltext_cursor(const char *buf)
+{
+    return get(buf)->cur;
+}
+
+void wltext_select_all(char *buf)
+{
+    struct state *s = get(buf);
+    s->anchor = 0;
+    s->cur = strlen(buf);
+}
+
+void wltext_click(char *buf, int rel_px, bool extend)
+{
+    struct state *s = get(buf);
+    int col = (rel_px + LM_FONT_W / 2) / LM_FONT_W;
+    size_t pos = byte_of_cp(buf, (size_t)(col < 0 ? 0 : col) + s->off);
+    s->cur = pos;
+    if (!extend)
+        s->anchor = pos;
+}
+
+/* ---- painting ----------------------------------------------------------------------------------------------------------- */
+
+void wltext_paint(struct wlwin *w, int x, int y, int maxw, const char *buf, bool focus, uint32_t fg, uint32_t selbg, uint32_t caret)
+{
+    struct state *s = get(buf);
+    int cols = maxw / LM_FONT_W;
+    if (cols < 2)
+        return;
+    size_t cur_cp = cp_count(buf, s->cur), total = cp_count(buf, strlen(buf));
+    if (cur_cp < s->off)                                                /* the caret stays in view */
+        s->off = cur_cp;
+    if (cur_cp >= s->off + (size_t)cols - 1)
+        s->off = cur_cp - (size_t)cols + 2;
+    if (total <= (size_t)cols - 1)
+        s->off = 0;
+    size_t first = byte_of_cp(buf, s->off), last = byte_of_cp(buf, s->off + (size_t)cols);
+    size_t a, b;
+    if (focus && sel_range(s, &a, &b)) {                                /* the selection behind the text */
+        size_t ca = cp_count(buf, a), cb = cp_count(buf, b);
+        if (ca < s->off)
+            ca = s->off;
+        if (cb > s->off + (size_t)cols)
+            cb = s->off + (size_t)cols;
+        if (cb > ca)
+            wlwin_fill(w, x + (int)(ca - s->off) * LM_FONT_W, y, (int)(cb - ca) * LM_FONT_W, LM_FONT_H, selbg);
+    }
+    char *shown = malloc(last - first + 1);
+    if (!shown)
+        return;
+    memcpy(shown, buf + first, last - first);
+    shown[last - first] = 0;
+    wlwin_text(w, x, y, shown, 1, fg, 0);
+    free(shown);
+    if (focus)
+        wlwin_fill(w, x + (int)(cur_cp - s->off) * LM_FONT_W, y, 2, LM_FONT_H, caret);
+}
+
+/* ---- the right-click menu ------------------------------------------------------------------------------------------------ */
+
 const char *wltext_menu(const char *buf)
 {
-    return buf[0] ? "Cut\nCopy\nPaste\nClear" : "~Cut\n~Copy\nPaste\n~Clear";
+    return buf[0] ? "Cut\nCopy\nPaste\nSelect all\nClear" : "~Cut\n~Copy\nPaste\n~Select all\n~Clear";
 }
 
 void wltext_menu_do(struct wlclip *clip, char *buf, size_t max, int index)
 {
+    struct state *s = get(buf);
     switch (index) {
     case 0:
     case 1:
-        if (buf[0])
-            wlclip_copy(clip, buf);
-        if (index == 0)
-            buf[0] = 0;
+        copy_out(s, clip, buf);
+        if (index == 0 && buf[0]) {
+            size_t a, b;
+            if (sel_range(s, &a, &b))
+                delete_range(s, buf, a, b);
+            else {
+                buf[0] = 0;
+                s->cur = s->anchor = s->len = 0;
+            }
+        }
         break;
     case 2:
-        do_paste(clip, buf, max);
+        do_paste(s, clip, buf, max);
         break;
     case 3:
+        wltext_select_all(buf);
+        break;
+    case 4:
         buf[0] = 0;
+        s->cur = s->anchor = s->len = 0;
         break;
     }
+}
+
+bool wltext_key(struct wlclip *clip, char *buf, size_t max, uint32_t ks, uint32_t mods)
+{
+    if (!clip_kind(ks, mods))
+        return false;
+    return wltext_edit(clip, buf, max, ks, mods);
 }

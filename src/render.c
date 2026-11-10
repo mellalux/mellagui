@@ -760,7 +760,7 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
 
 /* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
 
-enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT };
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT, SHAPE_MOON, SHAPE_RESTART };
 
 static float cov01(float v)
 {
@@ -795,6 +795,27 @@ static float shape_cov(enum shape s, float dx, float dy, float R)
         }
         float bar = cov01(t * 0.5f - seg_dist(dx, dy, 0.0f, -R + t * 0.5f, 0.0f, -R * 0.1f) + 0.5f);
         return ring > bar ? ring : bar;
+    }
+    case SHAPE_MOON: {                                  /* a crescent: a disc with another one taken out of it */
+        float d2 = sqrtf((dx - R * 0.42f) * (dx - R * 0.42f) + (dy + R * 0.28f) * (dy + R * 0.28f));
+        float a = cov01(R - d + 0.5f), b = cov01(d2 - R * 0.82f + 0.5f);
+        return a < b ? a : b;
+    }
+    case SHAPE_RESTART: {                               /* a ring with a gap at the upper right and an arrow head at the end of the arc */
+        float t = R * 0.22f < 1.3f ? 1.3f : R * 0.22f, rr = R * 0.82f;
+        float ring = cov01(rr + t * 0.5f - d + 0.5f), inner = cov01(d - (rr - t * 0.5f) + 0.5f);
+        ring = ring < inner ? ring : inner;
+        float ang = atan2f(dy, dx);                     /* the gap: from -70 to -15 degrees (up and to the right) */
+        if (ang > -1.22f && ang < -0.26f)
+            ring = 0.0f;
+        float ex = rr * cosf(-0.26f), ey = rr * sinf(-0.26f);      /* the arc ends here and goes on clockwise */
+        float tx = -sinf(-0.26f), ty = cosf(-0.26f);              /* the way it goes on */
+        float nx = cosf(-0.26f), ny = sinf(-0.26f);
+        float tipx = ex + tx * t * 1.9f, tipy = ey + ty * t * 1.9f;
+        float w1 = seg_dist(dx, dy, tipx, tipy, ex + nx * t * 1.9f, ey + ny * t * 1.9f);
+        float w2 = seg_dist(dx, dy, tipx, tipy, ex - nx * t * 1.9f, ey - ny * t * 1.9f);
+        float head = cov01(t * 0.5f - (w1 < w2 ? w1 : w2) + 0.5f);
+        return ring > head ? ring : head;
     }
     case SHAPE_UP:
     case SHAPE_DOWN: {                                  /* a chevron: two strokes meeting at the tip (a small arrow) */
@@ -944,16 +965,18 @@ static void paint_power(const struct paint_ctx *c, const struct lm_power_info *p
     draw_text_centered(c, &title, "Session", COL_PANEL_TEXT);
     struct lm_rect hint = lm_rect_make(pw->card.x, pw->card.y + pw->card.h - LM_FONT_H - 10, pw->card.w, LM_FONT_H);
     draw_text_centered(c, &hint, "Esc cancels", COL_PANEL_DIM);
-    static const char *const names[2] = { "Lock", "Exit" };
-    for (int i = 0; i < 2; i++) {
+    static const char *const names[LM_POWER_N] = { "Lock", "Exit", "Suspend", "Restart", "Shutdown" };
+    static const enum shape shapes[LM_POWER_N] = { SHAPE_LOCK, SHAPE_CROSS, SHAPE_MOON, SHAPE_RESTART, SHAPE_POWER };
+    for (int i = 0; i < LM_POWER_N; i++) {
         const struct lm_rect *b = &pw->button[i];
         float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f;
         bool sel = pw->sel == i;
-        uint32_t base = sel ? (i == 1 ? COL_PANEL_DANGER : COL_PANEL_ACCENT) : COL_PANEL_BTN;
+        bool danger = i == 1 || i == 4;                                           /* Exit and Shutdown */
+        uint32_t base = sel ? (danger ? COL_PANEL_DANGER : COL_PANEL_ACCENT) : COL_PANEL_BTN;
         if (sel)
             paint_shape(c, cx, cy, R + 4.0f, SHAPE_DISC, base, 0x50);             /* a soft halo */
         paint_shape(c, cx, cy, R, SHAPE_DISC, base, 255);
-        paint_shape(c, cx, cy, R * 0.52f, i == 0 ? SHAPE_LOCK : SHAPE_POWER, sel && i == 0 ? COL_PANEL : COL_PANEL_TEXT, 255);
+        paint_shape(c, cx, cy, R * (i >= 2 ? 0.56f : 0.52f), shapes[i], sel && i != 1 && i != 4 ? COL_PANEL : COL_PANEL_TEXT, 255);
         struct lm_rect label = lm_rect_make(pw->hit[i].x, b->y + b->h + 8, pw->hit[i].w, LM_FONT_H);
         draw_text_centered(c, &label, names[i], sel ? COL_PANEL_TEXT : COL_PANEL_DIM);
     }
@@ -1073,7 +1096,13 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
     fill_round(c, &li->rect, 0, 0x40000000u);
     fill_round(c, &li->card, 18, 0x3cffffffu);                                  /* light glass: a white veil over the wallpaper */
     stroke_round(c, &li->card, 18, 0x8cffffffu);
-    lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", 0xffffffu);
+    if (li->searching) {
+        char st[64];
+        snprintf(st, sizeof(st), "Search: %s_", li->search);
+        lc_text_centered(c, &li->title, st, 0xffffffu);
+    } else {
+        lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", 0xffffffu);
+    }
     if (!li->form) {
         for (int g = 0; g < li->n; g++) {
             const struct lm_rect *b = &li->icon[g].box;
@@ -1115,7 +1144,7 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         }
         if (li->n == 0 && li->add.w <= 0) {
             struct lm_rect none = lm_rect_make(li->card.x, li->card.y + li->card.h / 2, li->card.w, LM_FONT_H);
-            lc_text_centered(c, &none, "Nothing here", 0xffffffu);
+            lc_text_centered(c, &none, li->searching ? "Nothing found" : "Nothing here", 0xffffffu);
         }
     } else {
         for (int i = 0; i < 3; i++) {
@@ -2463,6 +2492,11 @@ static uint32_t *gl_capture(struct lm_renderer *r, struct out_state *st, const s
 
 uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h)
 {
+    return lm_render_capture_cursor(r, rect, w, h, false);
+}
+
+uint32_t *lm_render_capture_cursor(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h, bool cursor)
+{
     if (!r->srv->backend || rect->w <= 0 || rect->h <= 0)
         return NULL;
     struct lm_output *out = lm_output_nearest(r->srv, rect->x + rect->w / 2.0, rect->y + rect->h / 2.0);
@@ -2473,8 +2507,16 @@ uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, i
     orect = lm_output_rect(out);
     if (!lm_rect_intersect(rect, &orect, &clip))
         return NULL;
-    if (r->gl)                                          /* zero-copy surfaces have no CPU pixels: the GPU renders the shot */
-        return gl_capture(r, st, &clip, w, h);
+    bool whole_out = cursor && clip.x == orect.x && clip.y == orect.y && clip.w == orect.w && clip.h == orect.h;
+    if (r->gl) {                                        /* zero-copy surfaces have no CPU pixels: the GPU renders the shot */
+        uint32_t *g = gl_capture(r, st, &clip, w, h);
+        if (g && whole_out) {                               /* (the pointer is not in the GL picture: it is put on top of what was read back) */
+            struct lm_framebuffer gfb = { .pixels = g, .width = out->width, .height = out->height, .stride = (int32_t)out->width * 4 };
+            struct paint_ctx gc = { .r = r, .out = out, .fb = &gfb, .cov_idx = -1, .clip = orect };
+            paint_cursor(&gc);
+        }
+        return g;
+    }
     size_t stride = (size_t)out->width * 4;
     uint32_t *whole = calloc((size_t)out->height, stride);
     uint32_t *res = malloc((size_t)clip.w * (size_t)clip.h * 4);
@@ -2485,6 +2527,10 @@ uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, i
     }
     struct lm_framebuffer fb = { .pixels = whole, .width = out->width, .height = out->height, .stride = (int32_t)stride };
     paint_rect(r, st, &fb, &clip, false);
+    if (whole_out) {
+        struct paint_ctx cc = { .r = r, .out = out, .fb = &fb, .cov_idx = -1, .clip = orect };
+        paint_cursor(&cc);
+    }
     for (int y = 0; y < clip.h; y++)
         memcpy(res + (size_t)y * (size_t)clip.w,
                (const uint8_t *)whole + (size_t)(clip.y - out->y + y) * stride + (size_t)(clip.x - out->x) * 4,

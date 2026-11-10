@@ -12,6 +12,7 @@
  *                                     view     = mellagui-view      the screenshot card's click
  *                                     saver    = mellagui-matrix    the screensaver (a full screen client; saver.h)
  *                                     calendar = mellagui-calendar  the calendar a click on the panel's clock shows (kept running, hidden)
+ *                                     suspend / reboot / poweroff = systemctl suspend ...   the session dialog's Suspend, Restart and Shutdown buttons
  *
  * A command is a shell command line. Before it is used:
  *   @terminal @run @settings @view @saver @calendar   stand for the commands above ("Files = @terminal -e mc")

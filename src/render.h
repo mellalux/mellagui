@@ -92,6 +92,8 @@ void lm_render_flush(struct lm_renderer *r);
  * (stride w * 4), or NULL. For screenshots.
  */
 uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h);
+/* The same with the pointer painted in when `cursor` is set and `rect` is a whole output (the screen recorder; screenshots leave it out). */
+uint32_t *lm_render_capture_cursor(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h, bool cursor);
 
 /*
  * Feedback for a screenshot of `where` (global): a short white flash over it and, for MELLAGUI_TOAST_MS (default 8 s), a

@@ -460,12 +460,14 @@ struct lm_menu_info {
     int sel;                        /* highlighted entry (pointer or keyboard), -1 none */
 };
 
-/* The session dialog: the output is dimmed, a card with two round buttons (Lock, Exit) is in the middle. */
+/* The session dialog: the output is dimmed, a card with round buttons is in the middle: Lock and Exit in the upper row, Suspend, Restart and
+ * Shutdown (smaller) in the lower one. */
+#define LM_POWER_N 5
 struct lm_power_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
     struct lm_rect card;
-    struct lm_rect button[2];       /* the squares the round buttons are drawn in: [0] Lock, [1] Exit */
-    struct lm_rect hit[2];          /* what a click counts for: the button and its label below */
+    struct lm_rect button[LM_POWER_N]; /* the squares the round buttons are drawn in: [0] Lock, [1] Exit, [2] Suspend, [3] Restart, [4] Shutdown */
+    struct lm_rect hit[LM_POWER_N]; /* what a click counts for: the button and its label below */
     int sel;                        /* highlighted button (pointer or keyboard), -1 none */
 };
 
@@ -520,6 +522,8 @@ struct lm_launcher_info {
     bool form;                      /* the add / change form is showing instead of the icons */
     bool editing;                   /* ... and it changes an existing button (title "Change an application", button "Save") */
     bool edit;                      /* edit mode: a red x on every icon */
+    const char *search;             /* the text typed to filter the icons ("" none); valid only during the callback */
+    bool searching;                 /* search mode: letters go into the text */
     int n;                          /* icons */
     int cols;                       /* icons per row (the "+" tile counts as one) */
     int sel;                        /* highlighted: an icon index, n = the "+" tile, -1 none */

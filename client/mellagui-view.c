@@ -27,6 +27,7 @@
 
 #include "theme.h"
 #include "font.h"
+#include "ffaudio.h"
 #include "ffdec.h"
 #include "ffpipe.h"
 #include "h264dec.h"
@@ -48,6 +49,7 @@
 #define VBTN_H 18
 #define VBTN_GAP 2
 #define N_VBTN 4
+#define AUDIO_LEAD_MS 190               /* the sound needs this long from the start of its process to the speaker (ffmpeg ~90 ms, the player ~100 ms): it starts this far ahead */
 #define FF_FPS 30                       /* ffmpeg plays at a constant 30 pictures a second */
 #define ZMIN 0.05
 #define ZMAX 32.0
@@ -75,7 +77,14 @@ struct app {
     uint32_t idle_mgr, inhibitor;       /* zwp_idle_inhibit_manager_v1 and the inhibitor that exists while a video plays */
     struct lm_h264dec *hd;              /* 3: the decoder ... */
     uint32_t hdone;                     /* ... and the picture it has decoded last (~0u: none, it has to start at an IDR picture) */
-    int fw, fh;                         /* ffmpeg: the size of its pictures */
+    int fw, fh;                         /* ffmpeg: the size of its pictures (smaller than the video while it is shown "fit": ffmpeg scales) */
+    int tw, th;                         /* ffmpeg: the size of the video itself */
+    int64_t ff_started;                 /* ffmpeg: when it was (re)started (a resize of the window restarts it, at most a few times a second) */
+    bool has_audio, mute, aud_ended, aud_dead;   /* the file has sound / the user switched it off / its sound is over (until a seek) / no player works */
+    struct ffaudio *aud;
+    int aud_player;                     /* the player in use (an index of ffaudio_player_name) */
+    int aud_lead;                       /* ms: how far ahead of the picture the sound starts ([ and ] change it, viewer.conf keeps it) */
+    bool aud_lead_set;
     uint64_t fdur;                      /* ffmpeg: duration of the video, 0 = unknown */
     uint64_t fbase;                     /* ffmpeg: the position its first picture belongs to */
     uint64_t fidx;                      /* ffmpeg: pictures taken from it so far */
@@ -242,7 +251,8 @@ static void show_frame(struct app *a, uint32_t f)
 static bool ff_start(struct app *a, uint64_t ms, const char *path)
 {
     ffdec_close(a->fd);
-    a->fd = ffdec_open(path, a->fw, a->fh, FF_FPS, ms, a->err, sizeof(a->err));
+    a->fd = ffdec_open(path, a->fw, a->fh, a->tw, a->th, FF_FPS, ms, a->err, sizeof(a->err));
+    a->ff_started = lm_now_ms();
     a->fbase = ms;
     a->fidx = 0;
     a->fhave = 0;
@@ -252,7 +262,173 @@ static bool ff_start(struct app *a, uint64_t ms, const char *path)
     return a->fd != NULL;
 }
 
-static char g_ff_path[PATH_MAX + 300];                 /* the file ffmpeg plays (for seeks) */
+static char g_ff_path[PATH_MAX + 300];                 /* the file that plays (for seeks and for the sound) */
+
+/* The size ffmpeg should deliver: the video's own, or - while it is shown "fit" and larger than the view - just what the view shows. */
+static void ff_target(const struct app *a, bool fit, int *w, int *h)
+{
+    *w = a->tw;
+    *h = a->th;
+    if (!fit)
+        return;
+    double z = LM_MIN((double)view_w(a) / a->tw, (double)view_h(a) / a->th);
+    if (z < 1.0) {
+        *w = LM_MAX((int)(a->tw * z + 0.5), 16);
+        *h = LM_MAX((int)(a->th * z + 0.5), 16);
+    }
+}
+
+/* Pictures of another size from now on (the old one is stretched over the new buffer so that nothing flashes), decoding goes on from where it is. */
+static void ff_resize(struct app *a, int w, int h)
+{
+    uint32_t *nb = malloc((size_t)w * (size_t)h * 4), *np = malloc((size_t)w * (size_t)h * 4);
+    if (!nb || !np) {
+        free(nb);
+        free(np);
+        return;
+    }
+    if (a->img.px) {
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                np[(size_t)y * (size_t)w + (size_t)x] = a->img.px[(size_t)(y * a->img.h / h) * (size_t)a->img.w + (size_t)(x * a->img.w / w)];
+    } else {
+        memset(np, 0, (size_t)w * (size_t)h * 4);
+    }
+    free(a->img.px);
+    free(a->fbuf);
+    a->img.px = np;
+    a->fbuf = nb;
+    a->img.w = a->fw = w;
+    a->img.h = a->fh = h;
+    free(a->scaled);
+    a->scaled = NULL;
+    uint64_t pos = video_pos(a);
+    a->pos_ms = pos;
+    a->play_t0 = lm_now_ms();
+    if (!ff_start(a, pos, g_ff_path))
+        a->playing = false;
+    else if (a->playing)
+        a->fwant = false;                                       /* the clock goes on (it is not set again by the first picture): pictures that are late are dropped */
+    a->win.redraw = true;
+}
+
+/* Before anything that works with the picture's real size (zoom, pan): the full size picture. */
+static void ff_ensure_full(struct app *a)
+{
+    if (a->vmode == 2 && a->tw && (a->fw != a->tw || a->fh != a->th))
+        ff_resize(a, a->tw, a->th);
+}
+
+/* ---- sound ---------------------------------------------------------------------------------------------------------------- */
+
+static bool lead_conf_path(char *out, size_t n)
+{
+    const char *x = getenv("XDG_CONFIG_HOME"), *h = getenv("HOME");
+    if (x && *x)
+        snprintf(out, n, "%s/mellagui/viewer.conf", x);
+    else if (h && *h)
+        snprintf(out, n, "%s/.config/mellagui/viewer.conf", h);
+    else
+        return false;
+    return true;
+}
+
+/* The sound's lead: $MELLAGUI_AUDIO_LEAD_MS, else viewer.conf (`audio-lead-ms = N`), else the built-in value. */
+static int audio_lead(struct app *a)
+{
+    if (a->aud_lead_set)
+        return a->aud_lead;
+    a->aud_lead_set = true;
+    a->aud_lead = AUDIO_LEAD_MS;
+    const char *e = getenv("MELLAGUI_AUDIO_LEAD_MS");
+    char path[PATH_MAX];
+    if (e && *e) {
+        a->aud_lead = atoi(e);
+    } else if (lead_conf_path(path, sizeof(path))) {
+        FILE *f = fopen(path, "r");
+        char line[120];
+        int v;
+        while (f && fgets(line, sizeof(line), f))
+            if (sscanf(line, " audio-lead-ms = %d", &v) == 1)
+                a->aud_lead = v;
+        if (f)
+            fclose(f);
+    }
+    a->aud_lead = LM_CLAMP(a->aud_lead, -2000, 2000);
+    return a->aud_lead;
+}
+
+static void audio_lead_save(const struct app *a)
+{
+    char path[PATH_MAX], dir[PATH_MAX];
+    if (!lead_conf_path(path, sizeof(path)))
+        return;
+    snprintf(dir, sizeof(dir), "%s", path);
+    *strrchr(dir, '/') = 0;
+    for (char *p = dir + 1; *p; p++)                            /* mkdir -p */
+        if (*p == '/') {
+            *p = 0;
+            mkdir(dir, 0700);
+            *p = '/';
+        }
+    mkdir(dir, 0700);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    fprintf(f, "# mellagui-view: how many ms ahead of the picture the sound starts ([ = earlier, ] = later)\naudio-lead-ms = %d\n", a->aud_lead);
+    fclose(f);
+}
+
+static void audio_kill(struct app *a)
+{
+    ffaudio_close(a->aud);
+    a->aud = NULL;
+}
+
+/* A seek (or a new file): the sound starts again from the new place when it is wanted. */
+static void audio_reset(struct app *a)
+{
+    audio_kill(a);
+    a->aud_ended = false;
+}
+
+/* Called after every loop turn: the sound runs while the video plays, is stopped while it is paused, and starts where the picture is. */
+static void audio_follow(struct app *a)
+{
+    if (!a->has_audio || !a->vmode)
+        return;
+    if (a->mute || a->aud_dead || ffaudio_players() == 0) {
+        audio_kill(a);
+        return;
+    }
+    if (a->aud) {
+        bool quick;
+        if (!ffaudio_alive(a->aud, &quick)) {
+            audio_kill(a);
+            if (quick && a->aud_player + 1 < ffaudio_players())
+                a->aud_player++;                                /* that player could not reach a sound server: the next one */
+            else if (quick)
+                a->aud_dead = true;
+            else
+                a->aud_ended = true;                            /* the sound track is over */
+        }
+    }
+    uint64_t len = video_len(a);
+    bool want = a->playing && (!len || video_pos(a) < len) && !(a->vmode == 2 && a->fwant);     /* (ffmpeg's first picture starts the clock: the sound waits for it) */
+    if (!want) {
+        audio_kill(a);                                          /* a pause is silence at once (a stopped player would play out its buffer); on again it starts afresh, lead and all */
+        return;
+    }
+    if (a->aud)
+        return;
+    if (a->aud_ended || a->aud_dead)
+        return;
+    char err[120];
+    int64_t at = (int64_t)video_pos(a) + audio_lead(a);
+    a->aud = ffaudio_start(g_ff_path, at > 0 ? (uint64_t)at : 0, a->aud_player, err, sizeof(err));
+    if (!a->aud)
+        a->aud_dead = true;
+}
 
 /* Takes pictures from ffmpeg: the one that is due now is shown, late ones are dropped. */
 static void ff_tick(struct app *a)
@@ -262,7 +438,16 @@ static void ff_tick(struct app *a)
     uint64_t pos = video_pos(a);
     for (int guard = 0; guard < 4; guard++) {
         if (!a->fready) {
-            int r = ffdec_read(a->fd, a->fbuf, &a->fhave);
+            int r, waits = 0;
+            for (;;) {                                      /* a picture that is (nearly) due is waited for on the pipe, not by sleeping in small steps */
+                r = ffdec_read(a->fd, a->fbuf, &a->fhave);
+                if (r != 0)
+                    break;
+                uint64_t due_now = a->fbase + a->fidx * 1000 / FF_FPS;
+                if (!(a->fwant || video_pos(a) + 20 >= due_now) || waits++ >= 6)
+                    break;
+                ffdec_wait(a->fd, 5);
+            }
             if (r < 0) {                                    /* the end of the video */
                 a->playing = false;
                 a->fwant = false;
@@ -309,6 +494,7 @@ static void video_seek(struct app *a, int64_t ms)
         ms = (int64_t)len;
     a->pos_ms = (uint64_t)ms;
     a->play_t0 = lm_now_ms();
+    audio_reset(a);
     if (a->vmode == 2) {
         if (!ff_start(a, a->pos_ms, g_ff_path))
             a->playing = false;
@@ -343,7 +529,12 @@ static void video_toggle(struct app *a)
 /* Called after every loop turn: shows the picture that belongs to now; ends the playback at the end. */
 static void video_tick(struct app *a)
 {
+    audio_follow(a);
     if (a->vmode == 2) {
+        int tw, th;                                             /* the window was resized (or "fit" was switched): pictures of the right size */
+        ff_target(a, a->fit, &tw, &th);
+        if ((abs(tw - a->fw) > 8 || abs(th - a->fh) > 8 || (!a->fit && a->fw != a->tw)) && lm_now_ms() - (uint64_t)a->ff_started > 400)
+            ff_resize(a, tw, th);
         ff_tick(a);
         if (a->playing && video_len(a) && video_pos(a) >= video_len(a)) {
             a->pos_ms = video_len(a);
@@ -481,6 +672,9 @@ static void load_current(struct app *a)
     a->fd = NULL;
     free(a->fbuf);
     a->fbuf = NULL;
+    audio_reset(a);
+    a->has_audio = false;
+    a->aud_dead = false;
     a->vmode = 0;
     a->playing = false;
     a->vframe = 0;
@@ -490,6 +684,7 @@ static void load_current(struct app *a)
         snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[a->cur]);
         if (is_video_name(a->names[a->cur])) {
             char why[160] = "";
+            snprintf(g_ff_path, sizeof(g_ff_path), "%s", path);
             a->vid = lm_mp4r_open(path, why, sizeof(why));          /* our own reader first: Motion JPEG needs nothing else */
             if (a->vid && a->vid->h264) {                           /* H.264 of our own making plays without ffmpeg */
                 char herr[160];
@@ -515,22 +710,39 @@ static void load_current(struct app *a)
                 a->vid = NULL;
             }
             if (a->vid) {
+                struct ffdec_info ai;
+                char aerr[120];
+                if (ffpipe_ffmpeg_path() && ffdec_probe(path, &ai, aerr, sizeof(aerr)))      /* does the file have sound? */
+                    a->has_audio = ai.has_audio;
                 a->vmode = a->hd ? 3 : 1;
                 show_frame(a, 0);
+                if (a->hd && a->err[0] && ffpipe_ffmpeg_path()) {   /* our decoder knows only a part of H.264 (it said "not supported" at the first picture): ffmpeg then */
+                    snprintf(why, sizeof(why), "%s", a->err);
+                    a->err[0] = 0;
+                    lm_h264dec_free(a->hd);
+                    a->hd = NULL;
+                    lm_mp4r_close(a->vid);
+                    a->vid = NULL;
+                    lm_img_free(&a->img);
+                    a->vmode = 0;
+                    a->has_audio = false;
+                }
                 a->play_t0 = lm_now_ms();
                 a->playing = a->img.px != NULL;
-            } else {                                                /* anything else: ffmpeg, when it is installed */
+            }
+            if (!a->vid) {                                          /* anything else: ffmpeg, when it is installed */
                 struct ffdec_info info;
                 char ferr[160];
                 if (ffpipe_ffmpeg_path() && ffdec_probe(path, &info, ferr, sizeof(ferr))) {
-                    a->fw = info.w;
-                    a->fh = info.h;
+                    a->tw = info.w;
+                    a->th = info.h;
+                    a->has_audio = info.has_audio;
+                    ff_target(a, true, &a->fw, &a->fh);                 /* it starts "fit": no bigger pictures than the window shows */
                     a->fdur = info.duration_ms;
                     a->fbuf = malloc((size_t)a->fw * (size_t)a->fh * 4);
                     a->img.w = a->fw;
                     a->img.h = a->fh;
                     a->img.px = calloc((size_t)a->fw * (size_t)a->fh, 4);
-                    snprintf(g_ff_path, sizeof(g_ff_path), "%s", path);
                     if (a->fbuf && a->img.px && ff_start(a, 0, path)) {
                         a->vmode = 2;
                         a->play_t0 = lm_now_ms();
@@ -562,10 +774,18 @@ static void load_current(struct app *a)
 
 static double cur_zoom(const struct app *a) { return a->fit ? fit_zoom(a) : a->zoom; }
 
+/* The zoom as a share of the picture's real size (a video shown "fit" may be decoded smaller than it is). */
+static double cur_zoom_true(const struct app *a)
+{
+    double z = cur_zoom(a);
+    return a->vmode == 2 && a->tw ? z * (double)a->img.w / a->tw : z;
+}
+
 static void zoom_to(struct app *a, double z, double mx, double my)
 {
     if (!a->img.px)
         return;
+    ff_ensure_full(a);
     double oz = cur_zoom(a);
     z = LM_CLAMP(z, ZMIN, ZMAX);
     /* the image point under (mx, my) stays there */
@@ -661,8 +881,19 @@ static void paint(struct wlwin *w)
             char t1[16], t2[16];
             fmt_time(t1, sizeof(t1), video_pos(a));
             fmt_time(t2, sizeof(t2), video_len(a));
-            snprintf(status, sizeof(status), "%s   %dx%d   %s / %s   %s   %d%%   %d/%d", a->names[a->cur], a->img.w, a->img.h, t1, t2,
-                     a->playing ? "playing" : "paused", (int)(z * 100 + 0.5), a->cur + 1, a->n);
+            double zs = a->vmode == 2 && a->tw ? z * (double)a->img.w / a->tw : z;
+            char sndtxt[48] = "";
+            if (a->has_audio) {
+                if (a->mute)
+                    snprintf(sndtxt, sizeof(sndtxt), "   sound off (M)");
+                else if (ffaudio_players() == 0 || a->aud_dead)
+                    snprintf(sndtxt, sizeof(sndtxt), "   no sound player");
+                else
+                    snprintf(sndtxt, sizeof(sndtxt), "   sound %+d ms ([ ])", audio_lead(a));
+            }
+            snprintf(status, sizeof(status), "%s   %dx%d   %s / %s   %s%s   %d%%   %d/%d", a->names[a->cur], a->vmode == 2 ? a->tw : a->img.w,
+                     a->vmode == 2 ? a->th : a->img.h, t1, t2, a->playing ? "playing" : "paused",
+                     sndtxt, (int)(zs * 100 + 0.5), a->cur + 1, a->n);
         } else {
             snprintf(status, sizeof(status), "%s   %dx%d   %d%%%s   %d/%d", a->names[a->cur], a->img.w, a->img.h,
                      (int)(z * 100 + 0.5), a->fit ? " (fit)" : "", a->cur + 1, a->n);
@@ -717,6 +948,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (a->seeking && a->vmode)
             video_seek(a, (int64_t)(LM_CLAMP(x / (double)w->bw, 0.0, 1.0) * (double)video_len(a)));
         if (a->dragging && a->img.px) {
+            ff_ensure_full(a);
             double z = cur_zoom(a);
             if (a->fit) {                               /* dragging starts from the centred position */
                 a->fit = false;
@@ -784,7 +1016,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (args[1].u == 0) {                           /* vertical: up (negative) zooms in */
             double v = lm_fixed_to_double(args[2].f);
             if (v != 0)
-                zoom_to(a, cur_zoom(a) * (v < 0 ? 1.25 : 1.0 / 1.25), a->px, a->py);
+                zoom_to(a, cur_zoom_true(a) * (v < 0 ? 1.25 : 1.0 / 1.25), a->px, a->py);
         }
         break;
     }
@@ -808,6 +1040,15 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         w->running = false;
     } else if (a->vmode && c == ' ') {
         video_toggle(a);
+    } else if (a->vmode && a->has_audio && (c == '[' || c == ']')) {      /* the sound comes earlier / later: 50 ms a step */
+        a->aud_lead = LM_CLAMP(audio_lead(a) + (c == '[' ? 50 : -50), -2000, 2000);
+        audio_lead_save(a);
+        audio_reset(a);
+        w->redraw = true;
+    } else if (a->vmode && (c == 'm' || c == 'M')) {
+        a->mute = !a->mute;
+        a->aud_ended = false;
+        w->redraw = true;
     } else if (a->vmode && ks == LM_KS_Right) {
         video_seek(a, (int64_t)video_pos(a) + 5000);
     } else if (a->vmode && ks == LM_KS_Left) {
@@ -836,9 +1077,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     } else if (ks == LM_KS_End) {
         go(a, a->n - 1);
     } else if (c == '+' || c == '=') {
-        zoom_to(a, cur_zoom(a) * 1.25, cx, cy);
+        zoom_to(a, cur_zoom_true(a) * 1.25, cx, cy);
     } else if (c == '-' || c == '_') {
-        zoom_to(a, cur_zoom(a) / 1.25, cx, cy);
+        zoom_to(a, cur_zoom_true(a) / 1.25, cx, cy);
     } else if (c == '0' || c == '1') {
         zoom_to(a, 1.0, cx, cy);
     } else if (c == 'f' || c == 'F') {
@@ -1021,6 +1262,7 @@ int main(int argc, char **argv)
     wlwin_destroy(&a.win);
     lm_mp4r_close(a.vid);
     lm_h264dec_free(a.hd);
+    audio_kill(&a);
     ffdec_close(a.fd);
     free(a.fbuf);
     lm_img_free(&a.img);

@@ -1216,6 +1216,12 @@ static void clock_tick(void *data)
     update_clock(data, false);
 }
 
+void lm_wm_reset_cascade(struct lm_wm *wm)
+{
+    if (wm)
+        wm->cascade = 0;
+}
+
 void lm_wm_clock_changed(struct lm_wm *wm)
 {
     if (!wm)

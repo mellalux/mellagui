@@ -380,6 +380,10 @@ static void ctl_command(struct ctl_client *c, char *line)
             }
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "cascade")) {
+        /* cascade -> the next window is placed at the first cascade position again (tests), then "ok" */
+        lm_wm_reset_cascade(srv->wm);
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "clock")) {
         /* clock [calendar] -> "clock x= y= w= h= tasks=N calendar=0|1|2 text=..." (calendar: 0 no window, 1 hidden, 2 shown); the word `calendar`
          * first shows / hides it as a click on the clock does. Then "ok". */

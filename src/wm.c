@@ -3279,6 +3279,18 @@ bool lm_wm_has_fullscreen(const struct lm_wm *wm)
     return false;
 }
 
+bool lm_wm_surface_visible(const struct lm_wm *wm, struct lm_surface *s)
+{
+    if (!wm || !s)
+        return false;
+    struct lm_surface *root = lm_surface_root(s);
+    struct lm_window *w;
+    lm_list_for_each(w, &((struct lm_wm *)wm)->windows, link)
+        if (w->surface == root)
+            return win_visible(wm, w);
+    return false;
+}
+
 size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
 {
     size_t o = 0;

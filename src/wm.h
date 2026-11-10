@@ -714,6 +714,8 @@ void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);
 
 /* Some visible window is fullscreen (the screensaver does not start over a film or a game). */
 bool lm_wm_has_fullscreen(const struct lm_wm *wm);
+/* The window of this surface (or of the root it belongs to) is mapped, not minimized and on the current workspace. */
+bool lm_wm_surface_visible(const struct lm_wm *wm, struct lm_surface *s);
 
 /* Text snapshot of the dock for tests (control socket `dock`): "dock shown=<0|1> hover=<i> n=<buttons>" then one line per button
  * "icon <i> "<name>" x= y= w= h= running=<0|1> launching=<0|1> cmd=<command>". Returns the length. */

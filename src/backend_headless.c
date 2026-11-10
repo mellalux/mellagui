@@ -17,6 +17,7 @@
 
 #include "keys.h"
 #include "backend.h"
+#include "idleinhibit.h"
 #include "saver.h"
 #include "input.h"
 #include "log.h"
@@ -333,6 +334,9 @@ static void ctl_command(struct ctl_client *c, char *line)
             lm_timer_arm_ms(h->ready_timer, 1, 0);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "idle")) {
+        /* idle -> "idle inhibitors=<n> inhibited=<0|1>" (zwp_idle_inhibit_manager_v1), then "ok" */
+        ctl_reply(c, "idle inhibitors=%d inhibited=%d\nok\n", lm_idle_inhibit_count(srv->idle_inhibit), lm_idle_inhibited(srv->idle_inhibit));
     } else if (!strcmp(cmd, "saver")) {
         /* saver [start|stop] -> "saver running=<0|1> enabled=<0|1> minutes=<n>" after the optional change, then "ok" (the screensaver) */
         if (srv->saver && a1 && !strcmp(a1, "start"))

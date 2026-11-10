@@ -2,6 +2,7 @@
  * Screen lock. See lock.h for the contract.
  */
 #include "lock.h"
+#include "idleinhibit.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -686,6 +687,10 @@ static void tick_cb(void *data)
     if (l->kind == KIND_NONE)
         return;
     if (!l->locked) {
+        if (lm_idle_inhibited(l->srv->idle_inhibit)) {
+            l->last_activity = lm_now_ms();                       /* a film is on: the idle time starts when it is over */
+            return;
+        }
         if (l->timeout_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->timeout_min * unit_ms())
             lock_enter(l);
         return;

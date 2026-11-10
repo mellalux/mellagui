@@ -30,6 +30,9 @@
 #include "font.h"
 #include "keymap.h"
 #include "lock.h"
+#include "metrics.h"
+#include "settingshelp.h"
+#include "uikit.h"
 #include "util.h"
 #include "wlclip.h"
 #include "wltext.h"
@@ -316,14 +319,14 @@ static int selftest(void)
 #define DEFAULT_W 620
 #define DEFAULT_H 440
 #define SIDE_W 140
-#define MAX_WIDGETS 120
+#define MAX_WIDGETS 180
 #define MAX_KV 160
 #define VALUE_MAX 1900          /* longest value (the lists of resolutions / sound outputs) */
 
 enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, PAGE_CLOCK, N_PAGES };
 static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver", "Clock" };
 
-enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH };
+enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP };
 
 struct rect { int x, y, w, h; };
 
@@ -389,6 +392,10 @@ struct app {
     bool sec_start;                     /* lock when MellaGUI starts */
     bool sec_vt;                        /* Ctrl+Alt+F1..F12 switches the console on the lock screen */
     char sec_err[64];                   /* a mistake found before sending */
+    /* the help modal: open while help_title is set (the text may be built for a setting that has no table entry) */
+    char help_title[96];
+    char help_text[1200];
+    int help_scroll;                    /* first visible line when the text is longer than the card */
 };
 
 static const char *kv_get(const struct app *a, const char *k)
@@ -1414,6 +1421,8 @@ static void build_sound(struct app *a, int x, int y, int w)
     }
 }
 
+static void attach_help(struct app *a, int px, int pw);
+
 static void build(struct app *a)
 {
     a->nw = 0;
@@ -1442,6 +1451,7 @@ static void build(struct app *a)
     case PAGE_CLOCK: build_clock(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
     }
+    attach_help(a, x, w);
     if (a->focus >= a->nw)
         a->focus = -1;
 }
@@ -1466,6 +1476,268 @@ static int widget_at(const struct app *a, double x, double y)
             return i;
     }
     return -1;
+}
+
+/* ---- help: the small "?" circle at the end of a setting opens a modal card ------------------------------------------------------- */
+
+static void fill(struct app *a, struct rect r, uint32_t color);
+static void draw_text(struct app *a, int x, int y, const char *s, uint32_t color, int max_w);
+
+#define HELP_D 18                                       /* diameter of the circle */
+#define HELP_LINES 48
+#define HELP_COLS 100
+
+/* The key under which a widget's help is kept ("@Heading" for a heading), or false for a widget that has none. */
+static bool help_key(const struct widget *w, char *key, size_t n, const char **arg)
+{
+    *arg = NULL;
+    switch (w->kind) {
+    case W_HEADING:
+        if (!strncmp(w->text, "Current resolution", 18) || !strcmp(w->text, "Resolution"))
+            snprintf(key, n, "@Resolution");
+        else
+            snprintf(key, n, "@%.62s", w->text);
+        return true;
+    case W_CHECK:
+    case W_SLIDER:
+    case W_RADIO:
+    case W_FIELD:
+        if (!strcmp(w->key, "layout-enable") || !strcmp(w->key, "layout"))          /* the layouts' rows have their own buttons at the end: the heading explains them */
+            return false;
+        snprintf(key, n, "%s", w->key);
+        *arg = w->arg;
+        return w->key[0] != 0;
+    case W_PASS:
+        snprintf(key, n, "%s", w->key);
+        *arg = w->arg;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Does something have a help text: a table entry, or one of the Sizes sliders ("met-N")? */
+static bool help_exists(const char *key, const char *arg)
+{
+    if (!strcmp(key, "@Resolution"))
+        key = "resolution";
+    return settings_help_known(key, arg) || !strncmp(key, "met-", 4);
+}
+
+/* Fills the modal's title and text for `key` (a Sizes slider gets its text from the sizes table). */
+static void help_open(struct app *a, const char *key, const char *arg)
+{
+    const char *title = NULL, *text = NULL;
+    if (!strncmp(key, "met-", 4)) {
+        struct metric m[MAX_METRICS];
+        int n = metric_list(a, m, MAX_METRICS), i = atoi(key + 4);
+        if (i >= 0 && i < n) {
+            char sec[32], nm[48];
+            const char *dot = strchr(m[i].name, '.');
+            if (dot) {
+                snprintf(sec, sizeof(sec), "%.*s", (int)LM_MIN((size_t)(dot - m[i].name), sizeof(sec) - 1), m[i].name);
+                snprintf(nm, sizeof(nm), "%s", dot + 1);
+                const char *what = lm_metrics_what(sec, nm);
+                snprintf(a->help_title, sizeof(a->help_title), "%s", m[i].name);
+                snprintf(a->help_text, sizeof(a->help_text),
+                         "%s%s.\nBuilt-in size: %d pixels; allowed: %d to %d.\nThe size is sent when you let go of the slider and the shell follows at once. "
+                         "A * after the value marks a size that is not the built-in one; 'Restore defaults' brings all of them back.",
+                         what && *what ? "Size of the " : "", what && *what ? what : "A size of the shell", m[i].def, m[i].lo, m[i].hi);
+                a->help_scroll = 0;
+                a->win.redraw = true;
+                return;
+            }
+        }
+    }
+    if (!strcmp(key, "@Resolution"))
+        key = "resolution";
+    if (!settings_help(key, arg, &title, &text)) {
+        title = "No help";
+        text = "There is no help text for this one yet.";
+    }
+    snprintf(a->help_title, sizeof(a->help_title), "%s", title);
+    snprintf(a->help_text, sizeof(a->help_text), "%s", text);
+    a->help_scroll = 0;
+    a->win.redraw = true;
+}
+
+static void help_close(struct app *a)
+{
+    a->help_title[0] = 0;
+    a->win.redraw = true;
+}
+
+/* After the page is built: a "?" at the end of every setting row (and after a heading's text), the row's own widgets made shorter to make room. */
+static void attach_help(struct app *a, int px, int pw)
+{
+    int n0 = a->nw;
+    char seen[24][80];
+    int nseen = 0;
+    for (int i = 0; i < n0; i++) {
+        const struct widget *w = &a->wd[i];
+        char key[64];
+        const char *arg;
+        if (!help_key(w, key, sizeof(key), &arg) || !help_exists(key, arg))
+            continue;
+        char id[80];                                            /* one circle for a group of radios; the lock's three fields have three */
+        snprintf(id, sizeof(id), "%s|%s", key, w->kind == W_PASS || w->kind == W_SLIDER ? (arg ? arg : "") : "");
+        bool dup = false;
+        for (int k = 0; k < nseen; k++)
+            if (!strcmp(seen[k], id))
+                dup = true;
+        if (dup)
+            continue;
+        if (nseen < 24)
+            snprintf(seen[nseen++], sizeof(seen[0]), "%s", id);
+        struct rect hr;
+        if (w->kind == W_HEADING) {
+            int tw = lm_font_text_width(w->text) + 10;
+            hr = (struct rect){ w->r.x + LM_MIN(tw, w->r.w - HELP_D - 2), w->r.y + (w->r.h - HELP_D) / 2 - 1, HELP_D, HELP_D };
+        } else {
+            hr = (struct rect){ px + pw - HELP_D - 2, w->r.y + (w->r.h - HELP_D) / 2, HELP_D, HELP_D };
+            for (int j = 0; j < n0; j++) {                      /* what lies in that row ends before the circle */
+                struct widget *o = &a->wd[j];
+                if (o->kind == W_TAB || o->kind == W_BUTTON || o->r.y + o->r.h <= w->r.y || o->r.y >= w->r.y + w->r.h)
+                    continue;
+                if (o->r.x + o->r.w > hr.x - 6)
+                    o->r.w = LM_MAX(hr.x - 6 - o->r.x, 30);
+            }
+        }
+        if (a->nw >= MAX_WIDGETS)
+            break;
+        memmove(&a->wd[i + 2], &a->wd[i + 1], (size_t)(a->nw - i - 1) * sizeof(a->wd[0]));        /* the circle comes right after its row's first widget: Tab visits it there */
+        a->nw++;
+        struct widget *h = &a->wd[i + 1];
+        memset(h, 0, sizeof(*h));
+        h->kind = W_HELP;
+        h->r = hr;
+        snprintf(h->text, sizeof(h->text), "%s", key);
+        snprintf(h->key, sizeof(h->key), "help");
+        snprintf(h->arg, sizeof(h->arg), "%s", arg ? arg : "");
+        i++;                                                    /* (the widgets that came after it have moved on one place) */
+        n0++;
+    }
+}
+
+/* Word wraps `text` into lines of at most `cols` characters; '\n' ends a paragraph (and leaves an empty line between). */
+static int help_wrap(const char *text, int cols, char lines[][HELP_COLS + 1], int max)
+{
+    int n = 0;
+    cols = LM_MIN(cols, HELP_COLS);
+    for (const char *p = text; *p && n < max;) {
+        size_t pl = strcspn(p, "\n");
+        char para[1400];
+        snprintf(para, sizeof(para), "%.*s", (int)LM_MIN(pl, sizeof(para) - 1), p);
+        p += pl + (p[pl] ? 1 : 0);
+        char line[HELP_COLS + 1] = "";
+        for (char *tok = strtok(para, " "); tok && n < max; tok = strtok(NULL, " ")) {
+            size_t tl = strlen(tok), ll = strlen(line);
+            if (ll && ll + 1 + tl > (size_t)cols) {
+                snprintf(lines[n++], HELP_COLS + 1, "%s", line);
+                line[0] = 0;
+                ll = 0;
+            }
+            if (n >= max)
+                break;
+            snprintf(line + ll, sizeof(line) - ll, "%s%.*s", ll ? " " : "", cols, tok);
+        }
+        if (n < max && line[0])
+            snprintf(lines[n++], HELP_COLS + 1, "%s", line);
+        if (n < max && *p)
+            lines[n++][0] = 0;                                  /* a gap between paragraphs */
+    }
+    return n;
+}
+
+struct help_geom {
+    struct rect card, close;
+    int cols, visible, nlines;
+    char lines[HELP_LINES][HELP_COLS + 1];
+};
+
+static void help_geom(const struct app *a, struct help_geom *g)
+{
+    int cw = LM_MIN(a->win.bw - 40, 560);
+    g->cols = LM_MAX((cw - 48) / LM_FONT_W, 20);
+    g->nlines = help_wrap(a->help_text, g->cols, g->lines, HELP_LINES);
+    int line_h = LM_FONT_H + 3, chrome = 24 + 28 + 14 + 30 + 20;
+    int max_lines = LM_MAX((a->win.bh - 40 - chrome) / line_h, 3);
+    g->visible = LM_MIN(g->nlines, max_lines);
+    int ch = chrome + g->visible * line_h;
+    g->card = (struct rect){ (a->win.bw - cw) / 2, (a->win.bh - ch) / 2, cw, ch };
+    g->close = (struct rect){ g->card.x + (cw - 90) / 2, g->card.y + ch - 20 - 28, 90, 28 };
+}
+
+static void paint_help(struct app *a)
+{
+    uint32_t *px = a->win.pixels;                               /* the page behind the card is dimmed */
+    for (size_t i = 0, n = (size_t)a->win.bw * (size_t)a->win.bh; i < n; i++)
+        px[i] = lm_mix_rgb(px[i], 0x000000, 0.6);
+    struct help_geom *g = calloc(1, sizeof(*g));
+    if (!g)
+        return;
+    help_geom(a, g);
+    const struct rect *c = &g->card;
+    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
+    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, c->x, c->y, c->w, c->h, 10, COL_BG);
+    int hx = c->x + 20, hy = c->y + 20;
+    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, hx, hy - 1, HELP_D, HELP_D, HELP_D / 2, COL_ACCENT);
+    draw_text(a, hx + (HELP_D - LM_FONT_W) / 2, hy, "?", COL_BG, 0);
+    draw_text(a, hx + HELP_D + 10, hy, a->help_title, COL_TEXT, c->w - 40 - HELP_D - 10);
+    fill(a, (struct rect){ c->x + 20, hy + 22, c->w - 40, 1 }, COL_KEY);
+    int line_h = LM_FONT_H + 3, ty = hy + 32;
+    a->help_scroll = LM_CLAMP(a->help_scroll, 0, LM_MAX(g->nlines - g->visible, 0));
+    for (int i = 0; i < g->visible; i++)
+        draw_text(a, c->x + 24, ty + i * line_h, g->lines[a->help_scroll + i], COL_TEXT, c->w - 48);
+    if (g->nlines > g->visible) {
+        char more[32];
+        snprintf(more, sizeof(more), "%d / %d", a->help_scroll + 1, g->nlines - g->visible + 1);
+        draw_text(a, c->x + c->w - 24 - (int)strlen(more) * LM_FONT_W, g->close.y + 6, more, COL_DIM, 0);
+    }
+    bool hot = a->px >= g->close.x && a->px < g->close.x + g->close.w && a->py >= g->close.y && a->py < g->close.y + g->close.h;
+    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, g->close.x, g->close.y, g->close.w, g->close.h, 14, hot ? COL_DOWN : COL_HOVER);
+    draw_text(a, g->close.x + (g->close.w - 5 * LM_FONT_W) / 2, g->close.y + (g->close.h - LM_FONT_H) / 2, "Close", COL_TEXT, 0);
+    free(g);
+}
+
+/* A pointer event while the card is open: a click on Close or outside the card ends it, the wheel scrolls a long text. */
+static void help_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+    if (op == LM_WL_POINTER_EVT_MOTION) {
+        a->px = lm_fixed_to_double(args[1].f);
+        a->py = lm_fixed_to_double(args[2].f);
+        a->win.redraw = true;
+    } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
+        double v = lm_fixed_to_double(args[2].f);
+        a->help_scroll += v > 0 ? 2 : v < 0 ? -2 : 0;
+        a->win.redraw = true;
+    } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272 && args[3].u == 1) {
+        struct help_geom *g = calloc(1, sizeof(*g));
+        if (!g)
+            return;
+        help_geom(a, g);
+        bool on_close = a->px >= g->close.x && a->px < g->close.x + g->close.w && a->py >= g->close.y && a->py < g->close.y + g->close.h;
+        bool inside = a->px >= g->card.x && a->px < g->card.x + g->card.w && a->py >= g->card.y && a->py < g->card.y + g->card.h;
+        free(g);
+        if (on_close || !inside)
+            help_close(a);
+    }
+}
+
+static void help_key_event(struct app *a, uint32_t ks)
+{
+    int page = 6;
+    if (ks == LM_KS_Escape || ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == ' ')
+        help_close(a);
+    else if (ks == LM_KS_Down)
+        a->help_scroll++;
+    else if (ks == LM_KS_Up)
+        a->help_scroll--;
+    else if (ks == LM_KS_Page_Down)
+        a->help_scroll += page;
+    else if (ks == LM_KS_Page_Up)
+        a->help_scroll -= page;
+    a->win.redraw = true;
 }
 
 /* ---- actions ------------------------------------------------------------------------------------------------ */
@@ -1568,6 +1840,9 @@ static void activate(struct app *a, int idx)
     char buf[64];
     struct idlist l;
     switch (w->kind) {
+    case W_HELP:
+        help_open(a, w->text, w->arg);
+        break;
     case W_TAB:
         a->page = (enum page)atoi(w->arg);
         a->focus = idx;
@@ -1828,6 +2103,12 @@ static void paint_widget(struct app *a, int idx)
     case W_LABEL:
         draw_text(a, r->x, text_y(r), w->text, COL_DIM, r->w);
         break;
+    case W_HELP:                                                /* the small "?" circle */
+        lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, r->x, r->y, r->w, r->h, r->w / 2, hot ? COL_ACCENT : COL_KEY);
+        draw_text(a, r->x + (r->w - LM_FONT_W) / 2, r->y + (r->h - LM_FONT_H) / 2, "?", hot ? COL_BG : COL_TEXT, 0);
+        if (focus)
+            outline(a, (struct rect){ r->x - 2, r->y - 2, r->w + 4, r->h + 4 }, COL_ACCENT);
+        break;
     case W_TAB: {
         fill(a, *r, w->on ? COL_KEY : (hot ? COL_HOVER : COL_SIDE));
         if (w->on)
@@ -1949,6 +2230,8 @@ static void paint(struct wlwin *w)
         int room = (a->win.bw - SIDE_W - 30) / LM_FONT_W, len = (int)strlen(file);
         draw_text(a, SIDE_W + 20, a->win.bh - 24, len > room ? file + (len - room) : file, COL_DIM, 0);
     }
+    if (a->help_title[0])
+        paint_help(a);
 }
 
 /* ---- protocol events -------------------------------------------------------------------------------------- */
@@ -1995,6 +2278,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 {
     struct app *a = w->data;
     build(a);
+    if (a->help_title[0] && op != LM_WL_POINTER_EVT_ENTER && op != LM_WL_POINTER_EVT_LEAVE) {      /* the help card is modal */
+        help_pointer(a, op, args);
+        return;
+    }
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
         a->has_pointer = true;
@@ -2147,6 +2434,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             break;
         build(a);
         uint32_t ks = lm_keymap_keysym(args[2].u, a->win.mods);
+        if (a->help_title[0]) {                                 /* the help card is modal: Esc / Enter / Space close it (not the panel) */
+            help_key_event(a, ks);
+            break;
+        }
         struct widget *f = a->focus >= 0 ? &a->wd[a->focus] : NULL;
         bool plain = !(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER));
         if (ks == LM_KS_Escape) {
@@ -2215,6 +2506,66 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
         wlclip_global(&a->clip, w, name, iface, ver);
 }
 
+/* Every setting on every page has a help text, every "?" opens something, and the texts wrap into the card. */
+static int selftest_help(void)
+{
+    static struct app fa;
+    static const struct { const char *k, *v; } kvs[] = {
+        { "config-file", "/x/mellagui.conf" }, { "config-status", "exists" },
+        { "metrics", "windows.titlebar-height=28:20:64:28 panel.height=32:20:64:32 windows.double-click-ms=400:100:1000:400" },
+        { "dock-opts", "enabled=1 autohide=0 icon-size=48 zoom=160 gap=10 margin=8 icon-background=light" },
+        { "outputs", "A|1024x600|0,0;B|800x600|1024,0" }, { "resolutions", "1024x600|;800x600|" }, { "resolution", "auto" },
+        { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
+        { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
+        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff" },
+    };
+    int bad = 0, shown = 0;
+    for (int pg = 0; pg < N_PAGES; pg++) {
+        memset(&fa, 0, sizeof(fa));
+        for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
+            kv_set(&fa, kvs[i].k, kvs[i].v);
+        fa.page = (enum page)pg;
+        fa.win.bw = 860;
+        fa.win.bh = 560;
+        fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;
+        fa.dock_sel = -1;
+        build(&fa);
+        for (int i = 0; i < fa.nw; i++) {
+            const struct widget *w = &fa.wd[i];
+            char key[64];
+            const char *arg;
+            if (help_key(w, key, sizeof(key), &arg)) {
+                bool owned = help_exists(key, arg);
+                if (!owned && w->kind != W_HEADING) {
+                    fprintf(stderr, "selftest: page %s: '%s' (key %s) has no help text\n", PAGE_NAMES[pg], w->text, key);
+                    bad++;
+                }
+                if (owned && w->kind == W_HEADING)
+                    shown++;
+            }
+            if (w->kind == W_HELP) {
+                help_open(&fa, w->text, w->arg);
+                if (!fa.help_title[0] || !strcmp(fa.help_title, "No help")) {
+                    fprintf(stderr, "selftest: page %s: a '?' for %s opens nothing\n", PAGE_NAMES[pg], w->text);
+                    bad++;
+                }
+                struct help_geom *g = calloc(1, sizeof(*g));
+                help_geom(&fa, g);
+                if (g->visible < 1 || g->card.h > fa.win.bh) {
+                    fprintf(stderr, "selftest: the help of %s does not fit the window\n", w->text);
+                    bad++;
+                }
+                free(g);
+                fa.help_title[0] = 0;
+            }
+        }
+    }
+    if (bad)
+        return 1;
+    printf("mellagui-settings help selftest ok (%d headings explained)\n", shown);
+    return 0;
+}
+
 /* ---- command line ----------------------------------------------------------------------------------------- */
 
 static int cli(struct app *a, int argc, char **argv)
@@ -2265,7 +2616,7 @@ int main(int argc, char **argv)
 {
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
-        return selftest();
+        return selftest() ? 1 : selftest_help();
     bool cli_mode = argc > 1 && (!strcmp(argv[1], "--get") || !strcmp(argv[1], "--set"));
     if (argc > 1 && !cli_mode) {
         fprintf(stderr, "usage: mellagui-settings [--get [KEY] | --set KEY=VALUE... | --selftest]\n");

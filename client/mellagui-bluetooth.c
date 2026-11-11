@@ -801,6 +801,25 @@ static void load_state(struct app *a)
     }
 }
 
+/* The battery of a connected device is also read again now and then: the session only hears of a change that bluez announces, and a speaker may not announce
+ * it (or the announcement went by while the device was not connected yet). A few milliseconds per device, every REFRESH_MS. */
+#define REFRESH_MS 10000
+
+static void refresh_batteries(struct app *a)
+{
+    char text[2048];
+    for (int i = 0; i < a->n; i++) {
+        struct dev *d = &a->dev[i];
+        if (!d->connected || btctl(text, sizeof(text), 1500, "info", d->mac, NULL) != 0)
+            continue;
+        int b = bt_battery(text);
+        if (b != d->battery) {
+            d->battery = b;
+            a->win.redraw = true;
+        }
+    }
+}
+
 static int selftest(void)
 {
     int bad = 0;
@@ -880,10 +899,21 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return 1;
     }
+    const char *rm = getenv("MELLAGUI_BT_REFRESH_MS");            /* (tests make it short) */
+    uint64_t refresh_ms = rm && atoi(rm) > 0 ? (uint64_t)atoi(rm) : REFRESH_MS;
+    uint64_t last_refresh;
+    { struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0); last_refresh = (uint64_t)t0.tv_sec * 1000 + (uint64_t)t0.tv_nsec / 1000000; }
     while (a.win.running) {
         struct pollfd p = { .fd = a.fd, .events = POLLIN };
         if (a.fd >= 0 && poll(&p, 1, 0) > 0)
             sess_read(&a);
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+        if (now_ms - last_refresh >= refresh_ms && a.modal == M_NONE) {
+            last_refresh = now_ms;
+            refresh_batteries(&a);
+        }
         if (!wlwin_step(&a.win, 100))
             break;
         if (a.fd >= 0) {

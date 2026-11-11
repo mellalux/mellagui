@@ -11777,6 +11777,20 @@ class TestBluetoothWindow(Base):
         self.c.tap(self.KEY_ENTER_)                                                   # connecting announces its battery
         self.wait(lambda: [d['battery'] for d in self.view()['devs'] if d['name'] == 'Headset'] == ['55'], 'the headset battery arrives')
 
+    def test_a_battery_that_changed_without_an_announcement_is_read_again(self):
+        import json
+        self.start('12')
+        self.env['MELLAGUI_BT_REFRESH_MS'] = '700'
+        st = self.state()
+        st['devices'][1]['battery'] = 100                                             # the connected Mouse says 100 at first
+        json.dump(st, open(self.state_path, 'w'))
+        self.run_window()
+        self.assertEqual([d['battery'] for d in self.view()['devs'] if d['name'] == 'Mouse'], ['100'])
+        st = self.state()
+        st['devices'][1]['battery'] = 90                                              # ... and 90 a little later, with no [CHG] line
+        json.dump(st, open(self.state_path, 'w'))
+        self.wait(lambda: [d['battery'] for d in self.view()['devs'] if d['name'] == 'Mouse'] == ['90'], 'the new value is read')
+
     def test_delete_forgets_a_paired_device_and_escape_ends_the_session(self):
         self.start('7')
         pr = self.run_window()

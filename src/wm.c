@@ -153,6 +153,22 @@ struct wm_wobble {
     struct lm_rect shown;               /* the union of the cells painted last */
 };
 
+/* The launcher dialog opens as a bubble that rises out of its dock button and takes the shape of the card, and closes the other way round. The card's
+ * picture is cut into BUB_C x BUB_R cells (like a wobbling window's) whose corners are moved by bubble_nodes(); a highlight (the sheen) lies on the bubble. */
+#define BUB_C 24
+#define BUB_R 16
+#define BUB_N ((BUB_C + 1) * (BUB_R + 1))
+struct wm_bubble {
+    bool active, closing;
+    float prog;                         /* 0 = a small bubble at the button, 1 = the card */
+    uint64_t last;
+    struct lm_ghost ghost;              /* the card as a picture */
+    struct lm_ghost sheen;              /* the highlight on the bubble */
+    struct lm_rect card;                /* where the card is (global) */
+    float cx0, cy0;                     /* the button: where the bubble comes from / goes to */
+    struct lm_rect shown;               /* the rectangle covered at the last tick */
+};
+
 #define OV_MAX_ITEMS LM_OVERVIEW_MAX
 struct wm_ov_item {
     struct lm_window *win;
@@ -179,6 +195,7 @@ struct lm_wm {
     struct wm_overview ov;
     bool anim_suppress;                 /* no fly-in / fly-out animations just now (the overview brings a window back itself) */
     struct wm_wobble wb;
+    struct wm_bubble bubble;
     struct lm_timer *anim_timer;
     struct lm_window *glide_win;        /* a window that glides to glide_tx / glide_ty (dragged, or let go a moment ago) */
     int32_t glide_tx, glide_ty;
@@ -1107,6 +1124,10 @@ static struct lm_output *overview_output(const struct lm_wm *wm);
 static void overview_damage(struct lm_wm *wm);
 static void wobble_tick(struct lm_wm *wm, uint64_t now);
 static bool wobble_wanted(const struct lm_wm *wm, const struct lm_window *w);
+static void bubble_begin(struct lm_wm *wm, bool opening);
+static void bubble_finish(struct lm_wm *wm);
+static bool bubble_tick(struct lm_wm *wm, uint64_t now);
+static void bubble_end(struct lm_wm *wm);
 static void anim_open(struct lm_wm *wm, struct lm_window *w);
 static void anim_fly(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w);
 static void anim_remember_close(struct lm_wm *wm, struct lm_window *w);
@@ -2831,6 +2852,7 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
 {
     memset(li, 0, sizeof(*li));
     li->rect = lm_output_rect(o);
+    li->veil = 1.0f;
     li->form = wm->launcher_form;
     li->editing = wm->launcher_form && wm->launcher_editing;
     li->edit = wm->launcher_edit && !li->form;
@@ -2967,7 +2989,17 @@ static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
         wm->launcher_hover_btn = -1;
         wm->launcher_msg[0] = 0;
         launcher_damage(wm);
+        if (wm->bubble.active && wm->bubble.closing)
+            wm->bubble.closing = false;                          /* it was on its way back to the button: turns round */
+        else
+            bubble_begin(wm, true);
     } else {
+        if (wm->bubble.active && !wm->bubble.closing) {
+            wm->bubble.closing = true;                           /* still rising: it goes back from where it is */
+            wm->bubble.last = lm_now_ms();
+        } else {
+            bubble_begin(wm, false);                             /* (the picture of the card as it is now) */
+        }
         launcher_damage(wm);
         wm->launcher_open = false;
         wm->launcher_edit = wm->launcher_form = false;
@@ -3346,6 +3378,10 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
     struct lm_output *lo = launcher_output(wm);
     if (!lo)
         return;
+    if (wm->bubble.active && !wm->bubble.closing && code != KEY_ESC && !(code == KEY_A && (mods & LM_MOD_SUPER))) {     /* still rising: a key only finishes it */
+        bubble_finish(wm);
+        return;
+    }
     struct lm_launcher_info li;
     launcher_info(wm, lo, &li);
     bool shift = (mods & LM_MOD_SHIFT) != 0;
@@ -4547,6 +4583,7 @@ static void anim_end(struct lm_wm *wm, struct wm_anim *a)
 static void anim_finish_all(struct lm_wm *wm)
 {
     wobble_stop(wm);
+    bubble_end(wm);
     for (int i = 0; i < ANIM_MAX; i++)
         if (wm->anim[i].used)
             anim_end(wm, &wm->anim[i]);
@@ -4610,11 +4647,209 @@ static void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *
         lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
 }
 
+/* ---- the launcher's bubble --------------------------------------------------------------------------------------------------------- */
+
+#define BUBBLE_MS 3300              /* the whole rise / return: at least three seconds (with window animations on; off = at once) */
+#define BUBBLE_R0 24.0f             /* radius of the bubble at the button */
+
+static struct lm_output *bubble_output(const struct lm_wm *wm)
+{
+    if (!wm->srv->backend)
+        return NULL;
+    struct lm_output *o;
+    lm_list_for_each(o, &wm->srv->backend->outputs, link)
+        if (!strcmp(o->name, wm->launcher_out))
+            return o;
+    return NULL;
+}
+
+/* The middle of the Launcher button in the dock (where it would be even if autohide keeps the dock away), else the bottom middle of the output. */
+static void bubble_origin(const struct lm_wm *wm, struct lm_output *o, float *cx, float *cy)
+{
+    struct lm_output *dock = lm_output_primary(wm->srv);
+    if (dock == o && lm_dock.enabled && lm_dock_count() > 0) {
+        struct dock_geo g;
+        dock_geometry(o, &g);
+        for (int i = 0; i < g.n; i++)
+            if (launcher_is_self(lm_dock_item(i))) {
+                *cx = (float)(g.x0 + i * (g.size + g.gap)) + (float)g.size / 2.0f;
+                *cy = (float)g.icon_bottom - (float)g.size / 2.0f;
+                return;
+            }
+    }
+    *cx = (float)(o->x + o->width / 2);
+    *cy = (float)(o->y + o->height - 40);
+}
+
+static float smooth01(float x)
+{
+    x = LM_CLAMP(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+/* Where the corners of the cells are at progress p. The bubble leaves the button slowly, grows as it rises, wobbles (squashed one way, then the other)
+ * and, from a little way on, spreads out into the card; the card is exactly there at p = 1. */
+static void bubble_nodes(const struct wm_bubble *b, float p, float *xs, float *ys, float *s_out)
+{
+    float pe = smooth01(p);
+    float s = smooth01((p - 0.28f) / 0.64f);                                 /* a bubble for the first quarter, then it spreads out */
+    s += 0.05f * sinf(p * 18.8496f) * sinf(p * 3.14159265f);               /* it jiggles as it takes its shape (zero at both ends) */
+    s = LM_CLAMP(s, 0.0f, 1.06f);
+    float ccx = (float)b->card.x + (float)b->card.w / 2.0f, ccy = (float)b->card.y + (float)b->card.h / 2.0f;
+    float cx = b->cx0 + (ccx - b->cx0) * pe, cy = b->cy0 + (ccy - b->cy0) * pe;
+    float r1 = 0.32f * (float)LM_MIN(b->card.w, b->card.h);
+    float R = BUBBLE_R0 + (r1 - BUBBLE_R0) * pe;
+    float k = 0.12f * sinf(p * 25.0f) * (1.0f - fminf(s, 1.0f));              /* the squash: wider and flatter, then taller and narrower */
+    float sx = 1.0f + k, sy = 1.0f - k;
+    for (int j = 0; j <= BUB_R; j++)
+        for (int i = 0; i <= BUB_C; i++) {
+            float u = (float)i / (float)BUB_C, v = (float)j / (float)BUB_R, a = 2.0f * u - 1.0f, c = 2.0f * v - 1.0f;
+            float dx = a * sqrtf(1.0f - c * c / 2.0f), dy = c * sqrtf(1.0f - a * a / 2.0f);       /* the square onto a disc */
+            float bx = cx + dx * R * sx, by = cy + dy * R * sy;
+            float rx = (float)b->card.x + u * (float)b->card.w, ry = (float)b->card.y + v * (float)b->card.h;
+            xs[j * (BUB_C + 1) + i] = bx + (rx - bx) * s;
+            ys[j * (BUB_C + 1) + i] = by + (ry - by) * s;
+        }
+    if (s_out)
+        *s_out = s;
+}
+
+/* The highlight of a wet bubble: a soft bright patch up on the left and a thin lit rim, on a transparent square. */
+static void bubble_make_sheen(struct lm_ghost *g)
+{
+    const int n = 96;
+    uint32_t *px = calloc((size_t)n * (size_t)n, 4);
+    if (!px)
+        return;
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) {
+            float fx = ((float)x + 0.5f) / (float)n * 2.0f - 1.0f, fy = ((float)y + 0.5f) / (float)n * 2.0f - 1.0f, r = sqrtf(fx * fx + fy * fy);
+            float px_ = fx + 0.36f, py_ = fy + 0.40f, rot = 0.6f;                                   /* the patch, turned a little */
+            float ex = (px_ * cosf(rot) + py_ * sinf(rot)) / 0.30f, ey = (-px_ * sinf(rot) + py_ * cosf(rot)) / 0.13f;
+            float patch = fmaxf(1.0f - (ex * ex + ey * ey), 0.0f);
+            float rim = r > 0.86f && r < 1.0f ? (1.0f - fabsf(r - 0.93f) / 0.07f) * (0.35f + 0.25f * (fx - fy)) : 0.0f;
+            float film = r < 0.93f ? 0.10f * (1.0f - 0.5f * r) : 0.0f;                                  /* the thin skin of the bubble */
+            float a = fminf(patch * patch * 0.85f + fmaxf(rim, 0.0f) * 0.55f + film, 1.0f);
+            uint32_t av = (uint32_t)lroundf(a * 255.0f);
+            px[y * n + x] = (av << 24) | (av << 16) | (av << 8) | av;                                  /* white, premultiplied */
+        }
+    g->px = px;
+    g->w = g->h = n;
+    g->gl_tex = 0;
+}
+
+static struct lm_rect bubble_bounds(const struct wm_bubble *b)
+{
+    float xs[BUB_N], ys[BUB_N];
+    bubble_nodes(b, b->prog, xs, ys, NULL);
+    float x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
+    for (int i = 1; i < BUB_N; i++) {
+        x0 = fminf(x0, xs[i]); x1 = fmaxf(x1, xs[i]);
+        y0 = fminf(y0, ys[i]); y1 = fmaxf(y1, ys[i]);
+    }
+    return lm_rect_make((int)floorf(x0) - 4, (int)floorf(y0) - 4, (int)ceilf(x1 - x0) + 8, (int)ceilf(y1 - y0) + 8);
+}
+
+static void bubble_end(struct lm_wm *wm)
+{
+    struct wm_bubble *b = &wm->bubble;
+    if (!b->active)
+        return;
+    struct lm_rect d = b->shown;
+    if (wm->srv->render) {
+        lm_render_ghost_free(wm->srv->render, &b->ghost);
+        lm_render_ghost_free(wm->srv->render, &b->sheen);
+    }
+    b->active = false;
+    damage_rect(wm, &d);
+    struct lm_output *o = bubble_output(wm);
+    if (o) {                                                        /* the whole output was dimmed, and the real launcher shows now (or nothing) */
+        struct lm_rect r = lm_output_rect(o);
+        damage_rect(wm, &r);
+    }
+}
+
+/* The launcher opens (the picture is made now, of the card as it will be) or closes (as it is now). */
+static void bubble_begin(struct lm_wm *wm, bool opening)
+{
+    struct lm_output *o = opening ? bubble_output(wm) : launcher_output(wm);
+    if (!o || anim_duration(wm) <= 0 || !wm->srv->render || lm_lock_active(wm->srv->lock))
+        return;
+    if (wm->bubble.active)
+        bubble_end(wm);
+    struct wm_bubble *b = &wm->bubble;
+    memset(b, 0, sizeof(*b));
+    struct lm_scene_item it;
+    memset(&it, 0, sizeof(it));
+    it.kind = LM_SCENE_LAUNCHER;
+    it.output = o;
+    launcher_info(wm, o, &it.u.launcher);
+    it.u.launcher.veil = 0.0f;                                      /* the dimming is not part of the picture: it fades on its own */
+    b->card = it.u.launcher.card;
+    struct lm_rect snap = lm_rect_make(b->card.x - 2, b->card.y - 2, b->card.w + 4, b->card.h + 4);
+    if (!lm_render_snapshot(wm->srv->render, &it, 1, &snap, &b->ghost))
+        return;
+    b->card = snap;                                                 /* (the picture is a little larger than the card: the cells map it exactly) */
+    bubble_make_sheen(&b->sheen);
+    bubble_origin(wm, o, &b->cx0, &b->cy0);
+    b->active = true;
+    b->closing = !opening;
+    b->prog = opening ? 0.0f : 1.0f;
+    b->last = lm_now_ms();
+    b->shown = bubble_bounds(b);
+    damage_rect(wm, &b->shown);
+    struct lm_rect r = lm_output_rect(o);
+    damage_rect(wm, &r);
+    if (wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
+        lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+}
+
+/* The opening is cut short (a key, a click): the card is there now. */
+static void bubble_finish(struct lm_wm *wm)
+{
+    if (wm->bubble.active)
+        bubble_end(wm);
+}
+
+static bool bubble_tick(struct lm_wm *wm, uint64_t now)
+{
+    struct wm_bubble *b = &wm->bubble;
+    if (!b->active)
+        return false;
+    float step = (float)(now - b->last) / (float)BUBBLE_MS;
+    b->last = now;
+    b->prog += b->closing ? -step : step;
+    if (b->prog >= 1.0f && !b->closing) {
+        bubble_end(wm);
+        return false;
+    }
+    if (b->prog <= 0.0f) {
+        b->prog = 0.0f;
+        if (b->closing) {
+            bubble_end(wm);
+            return false;
+        }
+    }
+    struct lm_rect old = b->shown;
+    b->shown = bubble_bounds(b);
+    struct lm_rect d = lm_rect_union(&old, &b->shown);
+    damage_rect(wm, &d);
+    struct lm_output *o = bubble_output(wm);
+    if (o) {                                                        /* the dimming fades with it */
+        struct lm_rect r = lm_output_rect(o);
+        damage_rect(wm, &r);
+    }
+    return true;
+}
+
+
 static void anim_tick(void *data)
 {
     struct lm_wm *wm = data;
     bool any = false;
     uint64_t now = lm_now_ms();
+    if (bubble_tick(wm, now))
+        any = true;
     for (int i = 0; i < ANIM_MAX; i++) {
         struct wm_anim *a = &wm->anim[i];
         if (!a->used)
@@ -5329,6 +5564,9 @@ size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size)
         n += (size_t)snprintf(buf + n, size - n, "item kind=%s x=%d y=%d w=%d h=%d alpha=%d\n", names[a->kind], a->shown.x, a->shown.y,
                               a->shown.w, a->shown.h, a->alpha);
     }
+    if (wm->bubble.active && n < size)                           /* the launcher's bubble: "bubble opening|closing prog=0..1 x= y= w= h=" (the box that covers it) */
+        n += (size_t)snprintf(buf + n, size - n, "bubble %s prog=%.3f x=%d y=%d w=%d h=%d\n", wm->bubble.closing ? "closing" : "opening", (double)wm->bubble.prog,
+                              wm->bubble.shown.x, wm->bubble.shown.y, wm->bubble.shown.w, wm->bubble.shown.h);
     return n < size ? n : size - 1;
 }
 
@@ -5617,7 +5855,65 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
-    if (wm->launcher_open) {                                     /* the launcher dialog */
+    if (wm->bubble.active) {                                     /* the launcher is a bubble: the dimming, then the card's picture in cells, then the sheen */
+        const struct wm_bubble *b = &wm->bubble;
+        struct lm_output *bo = bubble_output(wm);
+        struct lm_rect orc = bo ? lm_output_rect(bo) : (struct lm_rect){ 0 };
+        if (bo && (!clip || lm_rect_overlaps(&orc, clip))) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_LAUNCHER;
+            it.output = bo;
+            launcher_info(wm, bo, &it.u.launcher);
+            it.u.launcher.veil_only = true;
+            it.u.launcher.veil = smooth01(b->prog);
+            if (!fn(&it, data))
+                return;
+        }
+        float xs[BUB_N], ys[BUB_N], s;
+        bubble_nodes(b, b->prog, xs, ys, &s);
+        int alpha = (int)lroundf(255.0f * (0.62f + 0.38f * LM_CLAMP(s, 0.0f, 1.0f)) * fminf(b->prog / 0.05f, 1.0f));
+        const int stride = BUB_C + 1;
+        for (int j = 0; j < BUB_R; j++)
+            for (int i = 0; i < BUB_C; i++) {
+                int n[4] = { j * stride + i, j * stride + i + 1, (j + 1) * stride + i, (j + 1) * stride + i + 1 };
+                /* every edge is the middle of its two nodes, so neighbours share their edges exactly: no seams where the glass is translucent */
+                int x0 = (int)lroundf((xs[n[0]] + xs[n[2]]) / 2.0f), x1 = (int)lroundf((xs[n[1]] + xs[n[3]]) / 2.0f);
+                int y0 = (int)lroundf((ys[n[0]] + ys[n[1]]) / 2.0f), y1 = (int)lroundf((ys[n[2]] + ys[n[3]]) / 2.0f);
+                if (x1 <= x0 || y1 <= y0)
+                    continue;
+                struct lm_rect dst = lm_rect_make(x0, y0, x1 - x0, y1 - y0);
+                if (clip && !lm_rect_overlaps(&dst, clip))
+                    continue;
+                int sx0 = b->ghost.w * i / BUB_C, sx1 = b->ghost.w * (i + 1) / BUB_C;
+                int sy0 = b->ghost.h * j / BUB_R, sy1 = b->ghost.h * (j + 1) / BUB_R;
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_GHOST;
+                it.u.ghost.ghost = (struct lm_ghost *)&b->ghost;
+                it.u.ghost.dst = dst;
+                it.u.ghost.src = lm_rect_make(sx0, sy0, sx1 - sx0, sy1 - sy0);
+                it.u.ghost.alpha = alpha;
+                if (!fn(&it, data))
+                    return;
+            }
+        float sheen_a = powf(1.0f - LM_CLAMP(s, 0.0f, 1.0f), 1.3f);
+        if (b->sheen.px && sheen_a > 0.02f) {
+            float ccx = (float)b->card.x + (float)b->card.w / 2.0f, ccy = (float)b->card.y + (float)b->card.h / 2.0f, pe = smooth01(b->prog);
+            float R = BUBBLE_R0 + (0.32f * (float)LM_MIN(b->card.w, b->card.h) - BUBBLE_R0) * pe;
+            float cx = b->cx0 + (ccx - b->cx0) * pe, cy = b->cy0 + (ccy - b->cy0) * pe;
+            struct lm_rect dst = lm_rect_make((int)lroundf(cx - R), (int)lroundf(cy - R), (int)lroundf(2.0f * R), (int)lroundf(2.0f * R));
+            if (!clip || lm_rect_overlaps(&dst, clip)) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_GHOST;
+                it.u.ghost.ghost = (struct lm_ghost *)&b->sheen;
+                it.u.ghost.dst = dst;
+                it.u.ghost.alpha = (int)lroundf(255.0f * sheen_a * fminf(b->prog / 0.05f, 1.0f));
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+    }
+
+    if (wm->launcher_open && !(wm->bubble.active && !wm->bubble.closing)) {     /* the launcher dialog (not while it is still a bubble) */
         struct lm_output *lo = launcher_output(wm);
         if (lo) {
             struct lm_rect r = lm_output_rect(lo);
@@ -6070,7 +6366,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
             overview_damage(wm);
         }
     }
-    if (wm->launcher_open) {                                    /* the pointer moves the launcher's highlight */
+    if (wm->launcher_open && !wm->bubble.active) {              /* the pointer moves the launcher's highlight */
         struct lm_output *lo = launcher_output(wm);
         int hb = pick->kind == LM_PICK_LAUNCHER_BUTTON ? pick->index : -1, sel = wm->launcher_sel;
         if (pick->kind == LM_PICK_LAUNCHER_ITEM || pick->kind == LM_PICK_LAUNCHER_REMOVE)
@@ -6748,6 +7044,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         return true;
     }
     if (pick->kind >= LM_PICK_LAUNCHER_ITEM && pick->kind <= LM_PICK_LAUNCHER_BACKDROP) {
+        if (pressed && wm->bubble.active && !wm->bubble.closing) {      /* still rising: the first click only finishes it */
+            bubble_finish(wm);
+            return true;
+        }
         int pk = wm->press_panel_kind, pi = wm->press_panel_ws;
         if (pressed) {
             if (pick->kind == LM_PICK_LAUNCHER_BACKDROP) {      /* a click outside the card closes it, nothing below gets it */

@@ -649,7 +649,8 @@ static void draw_wifi(uint32_t *px, int s, int signal, bool slash)
     }
 }
 
-/* Bluetooth: the rune (a vertical stroke with two arrowheads); dim while the radio is off, a green dot while something is connected. */
+/* Bluetooth: the rune (a vertical stroke with two arrowheads); blue (the palette's icon-bluetooth) while the radio is on, dim while it is off, a green dot while
+ * something is connected. */
 static void draw_bluetooth(uint32_t *px, int s, bool powered, bool connected)
 {
     memset(px, 0, (size_t)s * (size_t)s * 4);
@@ -663,7 +664,7 @@ static void draw_bluetooth(uint32_t *px, int s, bool powered, bool connected)
                 float dx = bx - ax, dy = by - ay, t = clamp01(((fx - ax) * dx + (fy - ay) * dy) / (dx * dx + dy * dy));
                 best = fminf(best, hypotf(fx - (ax + t * dx), fy - (ay + t * dy)));
             }
-            blend(&px[y * s + x], powered ? lm_theme.text : lm_theme.text_dim, clamp01(width / 2 + 0.5f - best), powered ? 1.0f : 0.55f);
+            blend(&px[y * s + x], powered ? lm_theme.icon_bluetooth : lm_theme.text_dim, clamp01(width / 2 + 0.5f - best), powered ? 1.0f : 0.55f);       /* blue while the radio is on */
             if (connected)
                 blend(&px[y * s + x], lm_theme.ok, clamp01(fs * 0.13f + 0.5f - hypotf(fx - fs * 0.84f, fy - fs * 0.84f)), 1.0f);
         }
@@ -926,7 +927,7 @@ static void items_update(struct app *a)
             snprintf(t, sizeof(t), "%.12s %d%%", a->bt.first, a->bt.first_battery);        /* the name and the device's own battery */
         else if (a->bt.nconn > 0)
             snprintf(t, sizeof(t), "%.14s", a->bt.first);
-        item_set(a, ITEM_BLUETOOTH, (a->bt.powered ? 2u : 0u) + (a->bt.nconn > 0 ? 1u : 0u) + ((uint64_t)lm_theme.text << 32), t, draw_bluetooth_item);
+        item_set(a, ITEM_BLUETOOTH, (a->bt.powered ? 2u : 0u) + (a->bt.nconn > 0 ? 1u : 0u) + ((uint64_t)lm_theme.icon_bluetooth << 32), t, draw_bluetooth_item);
     }
     bool have_bell = a->settings && (a->unread > 0 || a->dnd);          /* the bell is there while there is something to read or DND is on */
     if (have_bell)

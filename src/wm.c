@@ -261,6 +261,8 @@ struct lm_wm {
     /* the dock: dock_active = the pointer is in it (so it is magnifying), hover_dock = the icon under the pointer, dock_shown = autohide has
      * revealed it, dock_timer hides it again a moment after the pointer left */
     bool dock_active, dock_shown;
+    float dock_vis;                     /* autohide: how far the dock is out, 0 = gone .. 1 = there; it melts away / rises over a few seconds (dock_info) */
+    int64_t dock_vis_ms;                /* the time of the last step of dock_vis */
     int hover_dock, dock_px;
     struct lm_timer *dock_timer;
     /* programs the dock has started and that have not shown a window yet: their icon bounces (start time, windows it had then) */
@@ -1083,6 +1085,7 @@ static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o);
 static void dock_activate(struct lm_wm *wm, int i, bool reuse);
 static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool reuse);
 static void dock_hide_tick(void *data);
+static int anim_duration(const struct lm_wm *wm);
 static void dock_anim_tick(void *data);
 static void anim_tick(void *data);
 static bool anim_prepare(struct lm_wm *wm, struct lm_window *w, struct lm_ghost *g, struct lm_rect *home);
@@ -1479,6 +1482,7 @@ void lm_wm_config_changed(struct lm_wm *wm)
 {
     gadget_def_init();
     wm->dock_active = wm->dock_shown = false;
+    wm->dock_vis = lm_dock.autohide ? 0.0f : 1.0f;
     wm->dock_drag = false;
     wm->hover_dock = -1;
     memset(wm->dock_launch_ms, 0, sizeof(wm->dock_launch_ms));         /* (the buttons may be others now) */
@@ -3536,6 +3540,9 @@ static void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t 
 #define DOCK_BOUNCE_PERIOD_MS 900   /* one swell (zoom in, zoom out) of an icon whose program is starting */
 #define DOCK_PULSE 0.35f            /* ... up to this much bigger */
 #define DOCK_ANIM_MS 33             /* ... redrawn this often while any of them swells */
+#define DOCK_LAUNCH_MIN_MS 2000     /* the swelling lasts at least this long, even when the window comes sooner */
+#define DOCK_MELT_MS 3200           /* autohide: the buttons melt into the edge of the screen this slowly ... */
+#define DOCK_RISE_MS 1100           /* ... and rise out of it, vague at first, this fast (both with window animations on; off = at once) */
 
 struct dock_geo {
     int n, size, zsize, gap, x0, icon_bottom;
@@ -3553,7 +3560,7 @@ static struct lm_output *dock_output(const struct lm_wm *wm)
 
 static bool dock_shown(const struct lm_wm *wm)
 {
-    return !lm_dock.autohide || wm->dock_shown;
+    return !lm_dock.autohide || wm->dock_shown || wm->dock_vis > 0.001f;       /* (while it melts away it is still there) */
 }
 
 static void dock_geometry(const struct lm_output *o, struct dock_geo *g)
@@ -3605,6 +3612,24 @@ static int dock_window_count(const struct lm_wm *wm, const struct lm_dock_item *
         if (w->mapped && dock_app_matches(it->match, w->app_id))
             n++;
     return n;
+}
+
+/* The pose of an icon while the autohide dock melts away or rises out of the screen edge. `p` = how far gone it is (0 there .. 1 gone), `rising`
+ * = it is coming back. Each icon follows its neighbour a little later (a wave along the row); it flattens, spreads, sinks into the edge of the screen
+ * and fades. Rising is the same movement backwards, and the icon is a vague ghost that sharpens as it reaches its place. */
+static void dock_pose(struct lm_dock_info *d, int slot, float p, bool rising, int pos, int n, int out_bottom)
+{
+    const float stagger = 0.35f;
+    float frac = n > 1 ? (float)pos / (float)(n - 1) : 0.0f;
+    float delay = stagger * (rising ? 1.0f - frac : frac);
+    float q = LM_CLAMP((p - delay) / (1.0f - stagger), 0.0f, 1.0f);
+    float e = q * q * (3.0f - 2.0f * q);
+    struct lm_rect *b = &d->icon[slot].box;
+    float cx = (float)b->x + (float)b->w / 2.0f, bottom = (float)(b->y + b->h);
+    float nw = (float)b->w * (1.0f + 0.35f * e), nh = fmaxf((float)b->h * (1.0f - e), 1.0f), nb = bottom + e * ((float)out_bottom - bottom);
+    *b = lm_rect_make((int)lroundf(cx - nw / 2.0f), (int)lroundf(nb - nh), (int)lroundf(nw), (int)lroundf(nh));
+    d->icon[slot].alpha = e >= 0.995f ? 0 : (uint8_t)lroundf(255.0f * powf(1.0f - e, 0.8f));
+    d->icon[slot].blur = rising ? e : 0.0f;
 }
 
 static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_dock_info *d)
@@ -3666,6 +3691,7 @@ static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_doc
         d->icon[vis].box = lm_rect_make((int)lroundf(cxp - w / 2.0f), (int)lroundf((float)g.icon_bottom - w), (int)lroundf(w), (int)lroundf(w));
         d->icon[vis].item = lm_dock_item(it);
         d->icon[vis].running = dock_window_count(wm, d->icon[vis].item) > 0;
+        d->icon[vis].alpha = 255;
         if (wm->dock_launch_ms[it]) {                                 /* starting: swells and shrinks again until its window is there */
             float ph = (float)((lm_now_ms() - (uint64_t)wm->dock_launch_ms[it]) % DOCK_BOUNCE_PERIOD_MS) / (float)DOCK_BOUNCE_PERIOD_MS;
             float k = 1.0f + DOCK_PULSE * (0.5f - 0.5f * cosf(6.2831853f * ph));      /* 1 -> 1 + DOCK_PULSE -> 1, smooth at both ends */
@@ -3673,6 +3699,8 @@ static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_doc
             d->icon[vis].box = lm_rect_make((int)lroundf(cxp - nw / 2.0f), (int)lroundf((float)g.icon_bottom - nw), (int)lroundf(nw), (int)lroundf(nw));
             d->icon[vis].launching = true;
         }
+        if (lm_dock.autohide && wm->dock_vis < 0.999f)
+            dock_pose(d, vis, 1.0f - wm->dock_vis, wm->dock_shown, i, g.n, o->y + o->height);
         vis++;
     }
     d->n = vis;
@@ -3736,12 +3764,14 @@ static bool dock_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *ou
     return false;
 }
 
+static void dock_set_shown(struct lm_wm *wm, bool shown);
+
 static void dock_hide_tick(void *data)
 {
     struct lm_wm *wm = data;
     if (wm->dock_shown && !wm->dock_active) {
         dock_damage(wm);
-        wm->dock_shown = false;
+        dock_set_shown(wm, false);
     }
 }
 
@@ -3759,7 +3789,7 @@ static void dock_motion(struct lm_wm *wm, bool in, int item)
         if (wm->dock_timer)
             lm_timer_arm_ms(wm->dock_timer, 0, 0);
         if (!wm->dock_shown) {
-            wm->dock_shown = true;
+            dock_set_shown(wm, true);
             changed = true;
         }
     } else if (!in && wm->dock_shown && lm_dock.autohide && wm->dock_timer && !lm_timer_is_armed(wm->dock_timer)) {
@@ -4216,22 +4246,48 @@ static void launcher_drag_finish(struct lm_wm *wm)
         lm_wm_notify(wm, "Launcher", "Could not add it to the dock: it is full, the name is in use, or there is no config file", 5000);
 }
 
-/* Every 33 ms while some icon swells: ends the swelling of the ones whose window came (or that never made one) and repaints. */
+/* The autohide dock is to be shown / hidden: with animations on it rises or melts over a few seconds (dock_vis follows, dock_anim_tick steps it), else at once. */
+static void dock_set_shown(struct lm_wm *wm, bool shown)
+{
+    wm->dock_shown = shown;
+    if (anim_duration(wm) <= 0) {
+        wm->dock_vis = shown ? 1.0f : 0.0f;
+        dock_damage(wm);
+        return;
+    }
+    wm->dock_vis_ms = (int64_t)lm_now_ms();
+    if (wm->dock_anim)
+        lm_timer_arm_ms(wm->dock_anim, DOCK_ANIM_MS, DOCK_ANIM_MS);
+}
+
+/* Every 33 ms while some icon swells or the dock melts / rises: ends the swelling of the ones whose window came (after at least DOCK_LAUNCH_MIN_MS,
+ * or that never made one), moves the autohide animation on and repaints. */
 static void dock_anim_tick(void *data)
 {
     struct lm_wm *wm = data;
     const char *e = getenv("MELLAGUI_DOCK_BOUNCE_MS");               /* how long to swell at most; tests make it short */
     int64_t limit = e && atol(e) > 0 ? atol(e) : 12000;
+    int64_t now = (int64_t)lm_now_ms();
     bool any = false;
     for (int i = 0; i < LM_DOCK_MAX; i++) {
         if (!wm->dock_launch_ms[i])
             continue;
         const struct lm_dock_item *it = lm_dock_item(i);
-        if (!it || dock_window_count(wm, it) > wm->dock_launch_base[i] || (int64_t)lm_now_ms() - wm->dock_launch_ms[i] > limit)
+        int64_t age = now - wm->dock_launch_ms[i];
+        bool came = it && dock_window_count(wm, it) > wm->dock_launch_base[i];
+        if (!it || (came && age >= DOCK_LAUNCH_MIN_MS) || age > limit)
             wm->dock_launch_ms[i] = 0;
         else
             any = true;
     }
+    float target = wm->dock_shown ? 1.0f : 0.0f;
+    if (lm_dock.autohide && wm->dock_vis != target) {
+        float dur = (float)(wm->dock_shown ? DOCK_RISE_MS : DOCK_MELT_MS);
+        float step = (float)(now - wm->dock_vis_ms) / dur;
+        wm->dock_vis = target > wm->dock_vis ? fminf(wm->dock_vis + step, 1.0f) : fmaxf(wm->dock_vis - step, 0.0f);
+        any = any || wm->dock_vis != target;
+    }
+    wm->dock_vis_ms = now;
     dock_damage(wm);
     if (!any && wm->dock_anim)
         lm_timer_arm_ms(wm->dock_anim, 0, 0);

@@ -11242,7 +11242,10 @@ class TestBluetooth(Base):
     def start(self, tag, **changes):
         import json
         st = json.loads(json.dumps(self.STATE))
+        changes = dict(changes)
+        no_spa = changes.pop('no_spa_plugin', False)
         st.update(changes)
+        changes['no_spa_plugin'] = no_spa
         d = os.path.join(tmp, 'bt-' + tag)
         shutil.rmtree(d, ignore_errors=True)
         os.makedirs(os.path.join(d, 'power'))
@@ -11337,7 +11340,7 @@ class TestBluetooth(Base):
 
     def test_a_failed_pairing_says_why(self):
         c = self.start('5', pair_fails=True, devices=[{'mac': 'AA:BB:CC:DD:EE:07', 'name': 'Keyboard', 'paired': False, 'connected': False}])
-        self.assertEqual(self.open_menu(c)[3:], ['+ Keyboard (new)'])
+        self.assertEqual(self.open_menu(c)[4:], ['+ Keyboard (new)'])
         self.choose(c, '+ Keyboard (new)')
         self.wait(lambda: 'pair AA:BB:CC:DD:EE:07' in open(self.log_path).read(), 'it tries')
         self.wait(lambda: any('pairing failed' in l.lower() for l in c.cmd('notes')), 'a notification')
@@ -11835,6 +11838,72 @@ class TestBluetoothWindow(Base):
         self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.bluetooth'], 'the window did not open')
 
 
+class TestDockAutohideAnimation(Base):
+    """With animations on, the autohide dock rises out of the screen edge (vague, squashed, a wave along the row) and melts back into it over 3 s."""
+
+    def start(self):
+        path = os.path.join(tmp, 'dkah.conf')
+        with open(path, 'w') as f:
+            f.write('[dock]\nautohide = yes\nicon-size = 40\n')
+        p, c, stop = self.private_compositor('mellagui-dkah', '--config', path, env={'MELLAGUI_ANIMATIONS': '300'})
+        c.abs(400, 100)
+        c.sync()
+        return c
+
+    @staticmethod
+    def icons(c):
+        info = None
+        out = []
+        for l in c.cmd('dock'):
+            m = re.match(r'dock shown=(\d)', l)
+            if m:
+                info = int(m[1])
+            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                out.append((int(m[3]), int(m[4]), int(m[5]), int(m[6])))
+        return info, out
+
+    def test_it_rises_squashed_and_melts_back_in_over_three_seconds(self):
+        c = self.start()
+        shown, icons = self.icons(c)
+        self.assertEqual(shown, 0)
+        c.abs(400, 499)                                                # the bottom edge reveals it
+        time.sleep(0.15)
+        shown, icons = self.icons(c)
+        self.assertEqual(shown, 1)
+        self.assertLess(max(h for _, _, _, h in icons), 40)             # still flat: they come out of the edge
+        self.assertTrue(any(h < 20 for _, _, _, h in icons))
+        time.sleep(1.4)
+        shown, icons = self.icons(c)
+        self.assertTrue(all(h >= 40 for _, _, _, h in icons), icons)    # all of them in their places
+        c.abs(400, 100)                                                 # the pointer leaves: 0.6 s, then the melt starts
+        time.sleep(1.7)                                                 # 1.1 s into the melt
+        shown, icons = self.icons(c)
+        self.assertEqual(shown, 1)                                      # still there ...
+        hs = [h for _, _, _, h in icons]
+        self.assertTrue(any(h < 38 for h in hs) and any(h > 1 for h in hs), hs)      # ... flattening, the left side first
+        self.assertLess(hs[0], hs[-1])
+        time.sleep(1.6)                                                 # 2.7 s into the melt: not done yet (it takes 3.2 s)
+        self.assertEqual(self.icons(c)[0], 1)
+        time.sleep(1.2)
+        shown, icons = self.icons(c)
+        self.assertEqual(shown, 0)                                      # gone
+        self.assertTrue(all(h <= 1 for _, _, _, h in icons))
+
+    def test_the_pointer_coming_back_turns_the_melt_around(self):
+        c = self.start()
+        c.abs(400, 499)
+        time.sleep(1.4)
+        c.abs(400, 100)
+        time.sleep(2.0)                                                 # half melted
+        mid = [h for _, _, _, h in self.icons(c)[1]]
+        c.abs(400, 470)                                                 # back on the dock
+        time.sleep(1.5)
+        back = [h for _, _, _, h in self.icons(c)[1]]
+        self.assertTrue(sum(back) > sum(mid), (mid, back))
+        self.assertTrue(all(h >= 40 for h in back), back)
+
+
 class TestSaver(Base):
     """The screensaver: after idle time the compositor starts mellagui-matrix (a full screen client); the first input ends it."""
 
@@ -12223,6 +12292,22 @@ class TestDock(Base):
         win = Window(cl, 200, 100, app_id='sleep')
         cl.wl.roundtrip()
         self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'the pulsing ends with the window')
+        self.assertEqual(self.dock(c)[1][0]['w'], base['w'])
+
+    def test_the_zooming_lasts_at_least_two_seconds_even_when_the_window_comes_at_once(self):
+        c = self.start('mellagui-dk15b', '[dock]\nicon-size = 40\n[dock-apps]\nSlow = sleep 30\n', )
+        base = self.dock(c)[1][0]
+        c.click(400, 464)
+        c.abs(400, 100)
+        t0 = time.time()
+        cl = Client('mellagui-dk15b')                                  # the window is there almost at once
+        self.clients.append(cl)
+        Window(cl, 200, 100, app_id='sleep')
+        cl.wl.roundtrip()
+        time.sleep(1.6)
+        self.assertEqual(self.dock(c)[1][0]['launching'], 1, 'it stopped before two seconds were over')
+        self.wait_for(lambda: self.dock(c)[1][0]['launching'] == 0, 'it ends once the window is there and two seconds are over', timeout=3.0)
+        self.assertGreaterEqual(time.time() - t0, 1.9)
         self.assertEqual(self.dock(c)[1][0]['w'], base['w'])
 
     def test_the_zooming_gives_up_after_a_while(self):

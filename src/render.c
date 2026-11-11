@@ -242,6 +242,13 @@ static inline uint32_t div255(uint32_t x)
     return ((x + 128) * 257) >> 16;
 }
 
+/* A premultiplied ARGB pixel at `alpha` / 255 of its strength. */
+static inline uint32_t fade_px(uint32_t p, int alpha)
+{
+    uint32_t a = (uint32_t)alpha;
+    return (((p >> 24) * a / 255) << 24) | ((((p >> 16) & 255) * a / 255) << 16) | ((((p >> 8) & 255) * a / 255) << 8) | ((p & 255) * a / 255);
+}
+
 static inline uint32_t blend_px(uint32_t src, uint32_t dst)
 {
     uint32_t a = src >> 24;
@@ -1291,46 +1298,72 @@ static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *
 }
 
 /* One round icon (a picture or a built-in one) in `b`; lift 0..1 brightens it (hovered). */
-static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift)
+/* An icon, `alpha` (0..255) as solid; a box that is not square (an icon melting into the edge of the screen) squashes the picture. */
+static void paint_dock_icon_a(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift, int alpha)
 {
-    float R = (float)b->w / 2.0f, cx = (float)b->x + R, cy = (float)b->y + (float)b->h / 2.0f;
+    if (alpha <= 0 || b->w <= 0 || b->h <= 0)
+        return;
+    float R = (float)b->w / 2.0f, cx = (float)b->x + R, cy = (float)b->y + (float)b->h / 2.0f, aspect = (float)b->w / (float)b->h;
     int plate = it->img && it->plate ? lm_dock_plate_rgb() : -1;     /* a logo with no background of its own sits on a round plate */
     bool shadowed = !it->img || plate >= 0;
     int m = !shadowed ? 1 : (int)(R * 0.45f) + 2;                    /* built-in icons and plates have a shadow beyond the box */
     struct lm_rect box = lm_rect_make(b->x - m, b->y - m, b->w + 2 * m, b->h + 2 * m + (shadowed ? 2 : 0)), r;
     if (!lm_rect_intersect(&box, &c->clip, &r))
         return;
-    int in = (int)lroundf((float)b->w * 0.68f);                       /* the logo on the plate */
-    struct lm_rect logo = lm_rect_make(b->x + (b->w - in) / 2, b->y + (b->h - in) / 2, in, in);
+    int in = (int)lroundf((float)b->w * 0.68f), inh = (int)lroundf((float)b->h * 0.68f);       /* the logo on the plate */
+    struct lm_rect logo = lm_rect_make(b->x + (b->w - in) / 2, b->y + (b->h - inh) / 2, in, inh);
     for (int y = r.y; y < r.y + r.h; y++) {
         uint32_t *row = fb_row(c, y);
         for (int x = r.x; x < r.x + r.w; x++) {
             uint32_t px;
+            float dy = ((float)y + 0.5f - cy) * aspect;
             if (!it->img) {
-                px = lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+                px = lm_dockicon_pixel(it->kind, (float)x + 0.5f - cx, dy, R, lift);
             } else if (plate >= 0) {
-                px = lm_dockicon_plate_pixel((uint32_t)plate, (float)x + 0.5f - cx, (float)y + 0.5f - cy, R, lift);
+                px = lm_dockicon_plate_pixel((uint32_t)plate, (float)x + 0.5f - cx, dy, R, lift);
+                if (alpha < 255)
+                    px = fade_px(px, alpha);
                 if (px >> 24)
                     row[x] = blend_px(px, row[x]);
                 px = dock_image_px(it->img, &logo, x, y);
             } else {
                 px = dock_image_px(it->img, b, x, y);
             }
+            if (alpha < 255)
+                px = fade_px(px, alpha);
             if (px >> 24)
                 row[x] = blend_px(px, row[x]);
         }
     }
 }
 
-/* The dock: round icons without any background, a dot under the ones that have a window, the name of the hovered one above it. */
+static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift)
+{
+    paint_dock_icon_a(c, b, it, lift, 255);
+}
+
+/* The dock: round icons without any background, a dot under the ones that have a window, the name of the hovered one above it. An icon that is
+ * rising out of the edge of the screen (autohide) is vague: a few copies of it a little apart, each faint, with a fainter one in the middle. */
 static void paint_dock(const struct paint_ctx *c, const struct lm_dock_info *d)
 {
     for (int i = 0; i < d->n; i++) {
         const struct lm_rect *b = &d->icon[i].box;
         const struct lm_dock_item *it = d->icon[i].item;
-        paint_dock_icon(c, b, it, i == d->hover ? 1.0f : 0.0f);
-        if (d->icon[i].running)
-            paint_shape(c, (float)(b->x + b->w / 2), (float)d->dot_y, 2.6f, SHAPE_DISC, COL_PANEL_TEXT, 0xdd);
+        int alpha = d->icon[i].alpha;
+        float lift = i == d->hover ? 1.0f : 0.0f;
+        if (d->icon[i].blur > 0.03f && alpha > 0) {
+            int r = 1 + (int)(d->icon[i].blur * 6.0f);
+            static const int off[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+            for (int k = 0; k < 4; k++) {
+                struct lm_rect g = lm_rect_make(b->x + off[k][0] * r, b->y + off[k][1] * r, b->w, b->h);
+                paint_dock_icon_a(c, &g, it, lift, alpha * 22 / 100);
+            }
+            paint_dock_icon_a(c, b, it, lift, alpha * (100 - (int)(d->icon[i].blur * 55.0f)) / 100);
+        } else {
+            paint_dock_icon_a(c, b, it, lift, alpha);
+        }
+        if (d->icon[i].running && alpha > 40)
+            paint_shape(c, (float)(b->x + b->w / 2), (float)d->dot_y, 2.6f, SHAPE_DISC, COL_PANEL_TEXT, 0xdd * (uint32_t)alpha / 255);
     }
     if (d->drag_item) {                                                  /* the icon in the hand; a red x says that letting go removes it */
         paint_dock_icon(c, &d->drag_box, d->drag_item, 1.0f);

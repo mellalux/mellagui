@@ -1087,7 +1087,7 @@ static bool dock_op(struct lm_server *srv, int kid, const char *val)
     if (*idx_end)
         return false;
     if (kid == K_DOCK_DEL) {
-        if (f1 || idx < 0 || idx >= l.n)
+        if (f1 || idx < 0 || idx >= l.n || lm_dock_cmd_is_launcher(l.cmd[idx]))      /* (the Launcher button cannot be removed) */
             return false;
         for (int i = (int)idx; i + 1 < l.n; i++) {
             memcpy(l.name[i], l.name[i + 1], sizeof(l.name[0]));
@@ -1122,6 +1122,8 @@ static bool dock_op(struct lm_server *srv, int kid, const char *val)
         for (int i = 0; i < l.n; i++)
             if (i != idx && !strcasecmp(l.name[i], f1))
                 return false;
+        if (idx >= 0 && lm_dock_cmd_is_launcher(l.cmd[idx]) && !lm_dock_cmd_is_launcher(cmd))
+            return false;                                       /* the Launcher button keeps its command */
         if (idx < 0)
             idx = l.n++;
         snprintf(l.name[idx], sizeof(l.name[0]), "%s", f1);
@@ -1200,6 +1202,8 @@ static bool apps_replace(struct lm_server *srv, bool launcher, int raw, const ch
     for (int i = 0; i < l.n; i++)
         if (i != raw && !strcasecmp(l.name[i], name))
             return false;
+    if (!launcher && lm_dock_cmd_is_launcher(l.cmd[raw]) && !lm_dock_cmd_is_launcher(cmd))
+        return false;                                           /* the Launcher button keeps its command */
     snprintf(l.name[raw], sizeof(l.name[0]), "%s", name);
     snprintf(l.icon[raw], sizeof(l.icon[0]), "%s", icon);
     snprintf(l.cmd[raw], sizeof(l.cmd[0]), "%s", cmd);
@@ -1212,6 +1216,8 @@ static bool apps_del(struct lm_server *srv, bool launcher, int raw)
     apps_load(&l, launcher);
     if (raw < 0 || raw >= l.n)
         return false;
+    if (!launcher && lm_dock_cmd_is_launcher(l.cmd[raw]))
+        return false;                                           /* the Launcher button stays in the dock */
     for (int i = raw; i + 1 < l.n; i++) {
         memcpy(l.name[i], l.name[i + 1], sizeof(l.name[0]));
         memcpy(l.icon[i], l.icon[i + 1], sizeof(l.icon[0]));
@@ -1269,7 +1275,7 @@ bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at)
 bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index)
 {
     const char *nm, *ic, *cm;
-    if (!lm_dock_raw_entry(raw_index, &nm, &ic, &cm))
+    if (!lm_dock_raw_entry(raw_index, &nm, &ic, &cm) || lm_dock_cmd_is_launcher(cm))      /* (the Launcher button stays in the dock) */
         return false;
     char name[LM_DOCK_NAME_MAX], icon[LM_DOCK_ICON_MAX], cmd[LM_DOCK_CMD_MAX];
     snprintf(name, sizeof(name), "%s", nm);

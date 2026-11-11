@@ -2674,13 +2674,19 @@ static bool launcher_is_self(const struct lm_dock_item *it)
     return !strcmp(it->cmd, "@launcher");
 }
 
+/* The dock's buttons that are not programs: the one that opens this dialog and the one that opens the desktop overview. */
+static bool dock_special(const struct lm_dock_item *it)
+{
+    return launcher_is_self(it) || !strcmp(it->cmd, "@overview");
+}
+
 /* Search: what is typed in the dialog filters the icons by name (one wm, so file scope). */
 static char launcher_filter[48];
 static bool launcher_searching;
 
 static bool launcher_shown(const struct lm_dock_item *it)
 {
-    return !launcher_is_self(it) && (!launcher_filter[0] || strcasestr(it->name, launcher_filter));
+    return !dock_special(it) && (!launcher_filter[0] || strcasestr(it->name, launcher_filter));
 }
 
 static int launcher_count(void)
@@ -3743,7 +3749,7 @@ static void dock_info(const struct lm_wm *wm, struct lm_output *o, struct lm_doc
     if (drag) {                                                       /* the icon in the hand follows the pointer */
         d->drag_item = lm_dock_item(wm->dock_drag_idx);
         d->drag_box = lm_rect_make((int)wm->drag_x - g.zsize / 2, (int)wm->drag_y - g.zsize / 2, g.zsize, g.zsize);
-        d->drag_remove = wm->dock_drag_to < 0 && !launcher_is_self(d->drag_item);
+        d->drag_remove = wm->dock_drag_to < 0 && !dock_special(d->drag_item);
         struct lm_rect gr = dock_ghost_rect(wm);
         d->rect = lm_rect_union(&d->rect, &gr);
     }
@@ -3864,13 +3870,17 @@ static bool settings_present(struct lm_wm *wm)
 
 static void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool reuse)
 {
-    bool is_settings = !launcher_is_self(it) && dock_app_matches(it->match, "mellagui.settings");
+    bool is_settings = !dock_special(it) && dock_app_matches(it->match, "mellagui.settings");
     if (is_settings && settings_present(wm))
         return;
     if (is_settings)
         wm->settings_spawn_ms = (int64_t)lm_now_ms();
     if (launcher_is_self(it)) {                                       /* the Launcher button: not a program */
         launcher_set(wm, true, dock_output(wm));
+        return;
+    }
+    if (dock_special(it)) {                                           /* the Overview button: opens it, a second click closes it (like Super+W) */
+        overview_set(wm, !wm->ov.open || wm->ov.closing);
         return;
     }
     struct lm_window *w, *best = NULL;
@@ -4073,7 +4083,7 @@ static void dockitem_menu_open(struct lm_wm *wm, int i)
     static const char *const labels[4] = { "New window", "Close all windows", "Change...", "Remove from dock" };
     const struct lm_dock_item *it = lm_dock_item(i);
     struct lm_output *o = dock_output(wm);
-    if (!it || !o || launcher_is_self(it))
+    if (!it || !o || dock_special(it))
         return;
     struct lm_dock_info d;
     dock_info(wm, o, &d);
@@ -4098,7 +4108,7 @@ static void dockitem_menu_activate(struct lm_wm *wm, int which)
 {
     int di = wm->menu_dock_item;
     const struct lm_dock_item *it = lm_dock_item(di);
-    if (!it || launcher_is_self(it))
+    if (!it || dock_special(it))
         return;
     switch (which) {
     case 0:
@@ -4114,7 +4124,7 @@ static void dockitem_menu_activate(struct lm_wm *wm, int which)
     case 2: {
         int g = 0;                                                    /* its place in the launcher's list: the dock's buttons come first */
         for (int k = 0; k < di; k++)
-            if (!launcher_is_self(lm_dock_item(k)))
+            if (!dock_special(lm_dock_item(k)))
                 g++;
         launcher_set(wm, true, dock_output(wm));
         wm->launcher_edit = true;
@@ -4188,7 +4198,7 @@ static void dock_drag_finish(struct lm_wm *wm)
     if (!it)
         return;
     if (to < 0) {                                                   /* out of the dock: it is gone from there, the launcher keeps it */
-        if (!launcher_is_self(it) && !lm_settings_dock_to_launcher(wm->srv, it->raw))
+        if (!dock_special(it) && !lm_settings_dock_to_launcher(wm->srv, it->raw))
             dock_drag_notify_failed(wm);
     } else if (to != idx) {
         const struct lm_dock_item *target = lm_dock_item(to);

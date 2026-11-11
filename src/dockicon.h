@@ -23,6 +23,7 @@ enum lm_dockicon {
     LM_DOCKICON_CAMERA,         /* the webcam viewer */
     LM_DOCKICON_RECORD,         /* the screen recorder: a record symbol (ring with a dot) */
     LM_DOCKICON_MONITOR,        /* the process manager: a screen with bars */
+    LM_DOCKICON_OVERVIEW,       /* four window frames: opens the desktop overview (Super+W) */
     LM_DOCKICON_COUNT
 };
 

@@ -39,6 +39,7 @@
 #include "sound.h"
 #include "logind.h"
 #include "server.h"
+#include "worker.h"
 #include "shm.h"
 #include "surface.h"
 #include "wm.h"
@@ -562,6 +563,11 @@ int main(int argc, char **argv)
         lm_error("cannot create event loop");
         return 1;
     }
+    {
+        const char *sm = getenv("MELLAGUI_STALL_MS");
+        lm_loop_set_stall_ms(loop, sm && *sm ? (unsigned)atoi(sm) : 16);       /* a callback of the loop that takes longer than a frame is logged (loop.h) */
+    }
+    lm_work_init(loop);                                                  /* the worker thread: what waits for a program runs there (worker.h) */
     struct lm_server *srv = lm_server_create(loop, &cfg);
     if (!srv) {
         lm_error("cannot create server");
@@ -717,6 +723,7 @@ out:
     lm_logind_close(srv->logind);               /* after everything that holds devices: hands them back */
     srv->logind = NULL;
     g_backend = NULL;
+    lm_work_shutdown();
     lm_server_destroy(srv);
     lm_loop_destroy(loop);
     lm_log_close();

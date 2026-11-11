@@ -28,6 +28,7 @@
 #include "seat.h"
 #include "nightlight.h"
 #include "sound.h"
+#include "worker.h"
 #include "notifylog.h"
 #include "settings.h"
 #include "lock.h"
@@ -338,6 +339,17 @@ static void ctl_command(struct ctl_client *c, char *line)
             lm_timer_arm_ms(h->ready_timer, 1, 0);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "loop")) {
+        /* loop -> "loop stalls=<n> worst_ms=<n> threshold=<ms> worker=<jobs not finished>" (the stall meter, loop.h; worker.h), then "ok";
+         * `loop stall MS` blocks the loop for that long (a test of the meter), `loop reset` forgets the counts */
+        if (a1 && !strcmp(a1, "stall")) {
+            int ms = a2 ? atoi(a2) : 0;
+            if (ms > 0 && ms <= 2000)
+                usleep((unsigned)ms * 1000u);
+        }
+        struct lm_loop_stats st;
+        lm_loop_stats(srv->loop, &st);
+        ctl_reply(c, "loop stalls=%u worst_ms=%u threshold=%u worker=%d\nok\n", st.stalls, st.worst_ms, st.threshold_ms, lm_work_pending());
     } else if (!strcmp(cmd, "idle")) {
         /* idle -> "idle inhibitors=<n> inhibited=<0|1>" (zwp_idle_inhibit_manager_v1), then "ok" */
         ctl_reply(c, "idle inhibitors=%d inhibited=%d\nok\n", lm_idle_inhibit_count(srv->idle_inhibit), lm_idle_inhibited(srv->idle_inhibit));

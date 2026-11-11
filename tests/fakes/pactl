@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """A fake `pactl` for the tests: a small PulseAudio, state in $MELLAGUI_FAKE_STATE (json). Prints what pactl prints (LC_ALL=C)."""
-import json, os, sys
+import json, os, sys, time
+
+time.sleep(float(os.environ.get('MELLAGUI_FAKE_DELAY', '0')))        # a slow sound server (the tests of the worker thread)
 
 path = os.environ.get('MELLAGUI_FAKE_STATE', '/tmp/mellagui-fake-pactl.json')
 DEFAULT = {

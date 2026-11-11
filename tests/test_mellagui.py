@@ -4572,6 +4572,18 @@ class TestSettings(Base):
     # ---- resolution and sound outputs -----------------------------------------------------------------------------
 
     @staticmethod
+    def settle(c, timeout=30):
+        """Waits until the compositor's worker thread (the sound server calls, worker.h) has nothing left to do and its answers have arrived."""
+        end = time.time() + timeout
+        quiet = 0
+        while time.time() < end:
+            quiet = quiet + 1 if re.search(r'worker=0', c.cmd('loop')[0]) else 0
+            if quiet >= 3:
+                return
+            time.sleep(0.05)
+        raise AssertionError('the worker thread did not finish')
+
+    @staticmethod
     def get_setting(c, key):
         c.cmd('setting ' + key)
         return c.last[3:]
@@ -4717,13 +4729,16 @@ esac
         # system output (PulseAudio / PipeWire) through pactl
         self.assertEqual((g('sinks'), g('sink')), ('', ''))                   # nothing asked yet
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertIn('alsa_output.hdmi-stereo|Built-in Audio Digital Stereo (HDMI)', g('sinks'))
         self.assertEqual(g('sink'), 'alsa_output.analog-stereo')
         c.cmd('settings sink alsa_output.hdmi-stereo')
-        self.assertEqual(g('sink'), 'alsa_output.hdmi-stereo')
+        self.assertEqual(g('sink'), 'alsa_output.hdmi-stereo')                  # shown at once
+        self.settle(c)
         self.assertEqual(open(state).read().strip(), 'alsa_output.hdmi-stereo')
-        with self.assertRaises(RuntimeError):
-            c.cmd('settings sink alsa_output.nosuch')                           # pactl refuses it: not accepted
+        c.cmd('settings sink alsa_output.nosuch')                               # pactl refuses it: the real one comes back
+        self.settle(c)
+        self.assertEqual(g('sink'), 'alsa_output.hdmi-stereo')
         with self.assertRaises(RuntimeError):
             c.cmd('settings sink bad;sink')                                     # not even a valid name
         stop()
@@ -4744,21 +4759,24 @@ esac
         g = lambda k: self.get_setting(c, k)
         self.assertEqual(g('sinks-status'), '')
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual(g('sinks-status'), 'ok')
         self.assertEqual(g('sinks'), '53|Built-in Audio Analog Stereo;54|Built-in Audio Digital Stereo (HDMI)')
         self.assertEqual(g('sink'), '53')
         c.cmd('settings sink 54')
+        self.settle(c)
         self.assertEqual(g('sink'), '54')
         with open(wj) as f:
             self.assertEqual(json.load(f)['default'], 54)
-        with self.assertRaises(RuntimeError):
-            c.cmd('settings sink 99')                                            # no such object: wpctl leaves the default alone
+        c.cmd('settings sink 99')                                                # no such object: wpctl leaves the default alone
+        self.settle(c)
         self.assertEqual(g('sink'), '54')
 
     def test_sound_status_says_why_there_are_no_outputs(self):
         # nothing installed
         p, c, stop = self.private_compositor('mellagui-aud6', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual(self.get_setting(c, 'sinks-status'), 'missing-tools')
         stop()
         # the tools are there but no server answers (PipeWire is not running)
@@ -4770,6 +4788,7 @@ esac
             os.chmod(os.path.join(d, prog), 0o755)
         p, c, stop = self.private_compositor('mellagui-aud7', env={'PATH': d + ':' + os.environ['PATH']})
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual(self.get_setting(c, 'sinks-status'), 'no-server')
         self.assertEqual(self.get_setting(c, 'sinks'), '')
 
@@ -4786,18 +4805,21 @@ esac
         p, c, stop = self.private_compositor('mellagui-mic1', env=env)
         g = lambda k: self.get_setting(c, k)
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual(g('sources'), 'alsa_input.builtin-mic|Built-in Audio Analog Stereo;alsa_input.usb-headset|USB Headset Mono')      # no monitor of an output
         self.assertEqual((g('source'), g('source-volume'), g('source-mute')), ('alsa_input.builtin-mic', '70', '0'))
         c.cmd('settings source alsa_input.usb-headset')
+        self.settle(c)
         self.assertEqual((g('source'), g('source-volume'), g('source-mute')), ('alsa_input.usb-headset', '40', '1'))       # that microphone's own level and mute
         c.cmd('settings source-mute 0')
         c.cmd('settings source-volume 85')
+        self.settle(c)
         with open(st) as f:
             state = json.load(f)
         self.assertEqual(state['default_source'], 'alsa_input.usb-headset')
         usb = [x for x in state['sources'] if x['name'] == 'alsa_input.usb-headset'][0]
         self.assertEqual((usb['vol'], usb['mute']), (85, False))
-        for bad in ('settings source nosuch', 'settings source-volume 101', 'settings source-volume x', 'settings source-mute maybe'):
+        for bad in ('settings source-volume 101', 'settings source-volume x', 'settings source-mute maybe'):
             with self.assertRaises(RuntimeError, msg=bad):
                 c.cmd(bad)
 
@@ -4844,28 +4866,35 @@ esac
         g = lambda k: self.get_setting(c, k)
         self.assertEqual((g('audio-profiles'), g('audio-profile')), ('', ''))              # nothing asked yet
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual(g('audio-profiles'), '43:3|Built-in Audio - Analog Stereo Output;43:6|Built-in Audio - Digital Stereo (HDMI) Output;'
                                               '43:15|Built-in Audio - Digital Stereo (IEC958) Output')
         self.assertEqual(g('audio-profile'), '43:3')                      # the active profile is analog + an IEC958 input
         c.cmd('settings audio-profile 43:6')                              # HDMI
+        self.settle(c)
         with open(pj) as f:
             self.assertEqual(json.load(f)['cur']['43'], 6)
         self.assertEqual(g('audio-profile'), '43:6')
         time.sleep(1.2)                                                   # the follow-up rescan refreshes the sink list by itself
+        self.settle(c)
         c.cmd('settings audio-profile 43:3')
+        self.settle(c)
         self.assertEqual(g('audio-profile'), '43:3')
         for bad in ('43:99', '99:1', 'foo', '43:', '43:6x', '-1:2'):
-            with self.assertRaises(RuntimeError, msg=bad):
-                c.cmd('settings audio-profile ' + bad)
+            c.cmd('settings audio-profile ' + bad)                        # the card refuses it: nothing changes, the real profile comes back
+            self.settle(c)
+            self.assertEqual(g('audio-profile'), '43:3', bad)
         with open(pj) as f:
             self.assertEqual(json.load(f)['cur']['43'], 3)                # refused: nothing changed
 
     def test_card_profiles_are_empty_without_pw_cli(self):
         p, c, stop = self.private_compositor('mellagui-pw2', env={'PATH': os.path.join(tmp, 'nonexistent-bin')})
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual((self.get_setting(c, 'audio-profiles'), self.get_setting(c, 'audio-profile')), ('', ''))
-        with self.assertRaises(RuntimeError):
-            c.cmd('settings audio-profile 43:6')
+        c.cmd('settings audio-profile 43:6')
+        self.settle(c)
+        self.assertEqual(self.get_setting(c, 'audio-profile'), '')
 
     def test_panel_sound_page_switches_to_hdmi(self):
         exe = self.exe()
@@ -4882,6 +4911,7 @@ esac
         # "Output device" heading at y=14, then Analog (42), HDMI (70), IEC958 (98)
         c.click(x0 + 200, y0 + 70 + 14)
         time.sleep(0.4)
+        self.settle(c)
         self.assertEqual(self.get_setting(c, 'audio-profile'), '43:6')
         with open(pj) as f:
             self.assertEqual(json.load(f)['cur']['43'], 6)
@@ -4891,9 +4921,11 @@ esac
                                                                 'PATH': os.path.join(tmp, 'nonexistent-bin')})
         self.assertEqual(self.get_setting(c, 'audio-outs'), 'default|System default')
         c.cmd('settings audio-rescan 1')
+        self.settle(c)
         self.assertEqual((self.get_setting(c, 'sinks'), self.get_setting(c, 'sink')), ('', ''))
-        with self.assertRaises(RuntimeError):
-            c.cmd('settings sink alsa_output.hdmi-stereo')
+        c.cmd('settings sink alsa_output.hdmi-stereo')                          # nothing to set it on: the empty answer comes back
+        self.settle(c)
+        self.assertEqual(self.get_setting(c, 'sink'), '')
 
     def test_display_page_button_opens_the_monitor_panel(self):
         exe = self.exe()
@@ -8525,6 +8557,71 @@ class TestRecord(Base):
         ev = cl.wl.wait_for(lambda e: e.obj == cap and e.name in ('ready', 'failed'), 3.0)
         self.assertEqual((ev.name, ev.args[1]), ('failed', 'locked'))
         self.assertEqual(struct.unpack_from('<I', shm.map, 0)[0], 0xff010203)
+
+
+class TestLoopStalls(Base):
+    """The stall meter of the loop (loop.h) and the worker thread (worker.h): a slow sound server must not stop the compositor."""
+
+    def start(self, name, extra_env=None):
+        d = os.path.join(tmp, 'stall-' + name)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        self.state = os.path.join(d, 'pactl.json')
+        env = {'MELLAGUI_FAKE_STATE': self.state, 'MELLAGUI_FAKE_PW': os.path.join(d, 'pw.json'), 'PATH': FAKES + ':' + os.environ['PATH']}
+        env.update(extra_env or {})
+        p, c, stop = self.private_compositor(name, '--config', 'none', env=env)
+        c.sync()
+        return c
+
+    @staticmethod
+    def loop(c):
+        m = re.match(r'loop stalls=(\d+) worst_ms=(\d+) threshold=(\d+) worker=(\d+)', c.cmd('loop')[0])
+        return tuple(int(v) for v in m.groups())
+
+    def test_a_callback_that_waits_is_counted(self):
+        c = self.start('mellagui-st1')
+        stalls, worst, threshold, _ = self.loop(c)
+        self.assertEqual(threshold, 16)
+        c.cmd('loop stall 120')
+        stalls2, worst2, _, _ = self.loop(c)
+        self.assertGreater(stalls2, stalls)
+        self.assertGreaterEqual(worst2, 100)
+
+    def test_the_threshold_comes_from_the_environment(self):
+        c = self.start('mellagui-st2', {'MELLAGUI_STALL_MS': '300'})
+        self.assertEqual(self.loop(c)[2], 300)
+        c.cmd('loop stall 120')
+        self.assertEqual(self.loop(c)[0], 0, 'under the threshold: no stall')
+
+    def test_a_slow_sound_server_does_not_stop_the_loop(self):
+        c = self.start('mellagui-st3', {'MELLAGUI_FAKE_DELAY': '0.6', 'MELLAGUI_STALL_MS': '200'})
+        c.cmd('setraw audio-rescan 1')                                       # about eight calls of 0.6 s each
+        t0 = time.time()
+        for _ in range(20):
+            c.cmd('sync')
+        self.assertLess(time.time() - t0, 0.8, 'the loop answered slowly while the sound server was asked')
+        self.assertEqual(self.loop(c)[0], 0, 'something waited in the loop')
+        self.assertGreater(self.loop(c)[3], 0, 'the job is still running on the worker thread')
+        end = time.time() + 30
+        while time.time() < end and self.loop(c)[3] > 0:
+            time.sleep(0.2)
+        self.assertEqual(self.loop(c)[3], 0)
+        c.cmd('setting sinks')
+        self.assertIn('alsa_output.analog-stereo', c.last)                    # what the worker learned arrived
+
+    def test_a_volume_that_was_set_shows_at_once_and_reaches_the_server_in_order(self):
+        c = self.start('mellagui-st4', {'MELLAGUI_FAKE_DELAY': '0.3'})
+        c.cmd('setraw sink-volume 33')
+        c.cmd('setting sink-volume')
+        self.assertEqual(c.last.split(' ', 1)[1], '33')                       # the cache is changed at once
+        c.cmd('setraw sink-mute 1')
+        end = time.time() + 20
+        while time.time() < end and self.loop(c)[3] > 0:
+            time.sleep(0.2)
+        with open(self.state) as f:
+            st = json.load(f)
+        sink = [x for x in st['sinks'] if x['name'] == 'alsa_output.analog-stereo'][0]
+        self.assertEqual((sink['vol'], sink['mute']), (33, True))
 
 
 class TestQuickSettings(Base):
@@ -14571,6 +14668,14 @@ class TestStickyNotes(Base):
         self.wait(lambda: len(self.notes(c2)) == 2, 'both notes')
         self.assertEqual(sorted(w['title'] for w in self.notes(c2)), ['first note - Note', 'second note - Note'])
 
+    def test_opening_the_notes_twice_does_not_open_a_note_twice(self):
+        c = self.start('mellagui-sn6', {'a.txt': 'one\n', 'b.txt': 'two\n'})
+        self.open_notes()
+        self.wait(lambda: len(self.notes(c)) == 2, 'both notes')
+        self.open_notes()
+        time.sleep(1.0)
+        self.assertEqual(len(self.notes(c)), 2, 'a second window for a note that is open')
+
     def test_typing_saves_by_itself_and_the_first_line_is_the_title(self):
         c = self.start('mellagui-sn3')
         self.open_notes()
@@ -14591,7 +14696,11 @@ class TestStickyNotes(Base):
         def paper():
             ppm = c.dump(os.path.join(tmp, 'sn4.ppm'))
             return ppm.px(w['x'] + w['w'] - 60, w['y'] + w['h'] - 60)
-        yellow = paper()
+        for _ in range(40):                                                   # (the first paint of a window on a busy machine)
+            yellow = paper()
+            if yellow[0] > 240:
+                break
+            time.sleep(0.1)
         self.assertGreater(yellow[0], 240)
         self.assertGreater(yellow[1], 230)
         c.key(KEY_LEFTCTRL, True)
@@ -14690,9 +14799,12 @@ class TestTimer(Base):
         item = [l for l in c.cmd('tray') if l.startswith('item')][0]
         m = re.match(r'item (\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)', item)
         c.click(int(m[2]) + 10, int(m[3]) + 10)                               # a click on the item: pause
-        self.wait(lambda: self.tray_text(c) is None, 'the click paused it (the item goes)')
-        before = self.tray_text(c)
-        self.start_button(c, win)                                             # on again
+        self.wait(lambda: (self.tray_text(c) or '').startswith('|| T '), 'the click paused it (the item stays, marked)')
+        paused = self.tray_text(c)
+        time.sleep(0.5)
+        self.assertEqual(self.tray_text(c), paused, 'a paused clock does not move')
+        c.click(int(m[2]) + 10, int(m[3]) + 10)                               # a second click continues it
+        self.wait(lambda: (self.tray_text(c) or '').startswith('T '), 'the second click continues it')
         self.wait(lambda: 'Timer' in '\n'.join(c.cmd('notes')), 'the timer ends and a card says so')
         self.assertIn('last=timer', c.cmd('sound')[0])
 
@@ -14812,6 +14924,20 @@ class TestMagnifier(Base):
         p2, c2, stop2 = self.private_compositor('mellagui-mg4b', '--config', 'none', '--settings', path)
         self.assertEqual((self.setting(c2, 'magnifier'), self.setting(c2, 'magnifier-zoom')), ('1', '250'))
 
+    def test_an_output_the_pointer_left_shows_its_own_picture_again(self):
+        p, c, stop = self.private_compositor('mellagui-mg6', '--config', 'none', '--output', '600x400')
+        c.sync()
+        c.cmd('settings magnifier-zoom 400')
+        c.cmd('settings magnifier 1')
+        c.abs(300, 200)                                                       # on the first output (800 x 500)
+        self.shot(c, 'mg6a')
+        c.abs(1000, 200)                                                      # on the second one
+        left = self.shot(c, 'mg6b')
+        c.cmd('settings magnifier 0')
+        plain = self.shot(c, 'mg6c')
+        same = sum(1 for y in range(0, 500, 7) for x in range(0, 800, 7) if left.px(x, y) == plain.px(x, y))
+        self.assertEqual(same, len(range(0, 500, 7)) * len(range(0, 800, 7)), 'the first output kept its magnified picture')
+
     def test_the_gl_renderer_shows_the_same_picture(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'gl-test')) or subprocess.run([os.path.join(ROOT, 'build', 'gl-test')], capture_output=True, timeout=60).returncode == 77:
             self.skipTest('no OpenGL ES here')
@@ -14830,7 +14956,7 @@ class TestLauncherSearch(Base):
 
     KEY_ESC, KEY_ENTER, KEY_SLASH, KEY_DOT, KEY_MINUS = 1, 28, 53, 52, 12
 
-    def start(self, name):
+    def start(self, name, odd_files=()):
         d = os.path.join(tmp, 'search-' + name)                            # (not tmp/name: that is the socket)
         shutil.rmtree(d, ignore_errors=True)
         apps, home = os.path.join(d, 'apps'), os.path.join(d, 'home')
@@ -14850,6 +14976,9 @@ class TestLauncherSearch(Base):
             f.write('money\n')
         open(os.path.join(home, 'Pictures', 'holiday.png'), 'wb').close()
         open(os.path.join(home, '.hidden', 'budget-secret.txt'), 'w').close()
+        for fn in odd_files:
+            with open(os.path.join(home, fn), 'w') as f:
+                f.write('odd\n')
         env = {'MELLAGUI_APPS_DIRS': apps, 'MELLAGUI_SEARCH_ROOT': home}
         p, c, stop = self.private_compositor(name, '--config', 'none', env=env)
         c.sync()
@@ -14931,6 +15060,26 @@ class TestLauncherSearch(Base):
             time.sleep(0.05)
         self.assertIsNotNone(win, 'the editor did not open the file')
         self.assertIn('budget-notes.txt', win['title'])
+
+    def test_a_file_name_with_quotes_and_the_alternative_sign_opens_as_one_file(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-edit')):
+            self.skipTest('mellagui-edit not built')
+        c = self.start('mellagui-ls9', ["quirky it's || touch pwned.txt.txt"])
+        home = os.path.join(tmp, 'search-mellagui-ls9', 'home')
+        self.type(c, 'quirky')
+        self.assertEqual(len(self.icons(c)), 1)
+        c.tap(self.KEY_ENTER)
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.edit']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win, 'the editor did not open the file')
+        self.assertIn('quirky', win['title'])
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(os.path.join(home, 'pwned.txt')) or os.path.exists('pwned.txt'), 'the part after || ran as a command')
 
     def test_a_calculation_shows_its_answer_and_enter_copies_it(self):
         c = self.start('mellagui-ls5')

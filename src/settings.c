@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -55,7 +56,7 @@ enum key_id {
     K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
-    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_COUNT
+    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_COUNT
 };
 #define VALUE_MAX 3300          /* longest value text (the lists); the wire carries it as one string */
 
@@ -87,7 +88,7 @@ static const char *const key_names[K_COUNT] = {
 #undef KR
     [K_NOTES_0] = "notes-0", [K_NOTES_0 + 1] = "notes-1", [K_NOTES_0 + 2] = "notes-2", [K_NOTES_0 + 3] = "notes-3", [K_NOTES_0 + 4] = "notes-4",
     [K_NOTES_COUNT] = "notes-count", [K_NOTES_UNREAD] = "notes-unread", [K_NOTES_DEL] = "notes-del", [K_NOTES_CLEAR] = "notes-clear",
-    [K_NOTES_READ] = "notes-read",
+    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png",
 };
 _Static_assert(LM_NOTELOG_MAX == 5 * LM_NOTELOG_CHUNK, "notes-0 .. notes-4 hold the whole history");
 _Static_assert(KEYS_PAGE_ROWS == 10, "key_names lists keys-row-0 .. keys-row-9");
@@ -490,6 +491,22 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_NOTES_COUNT: snprintf(out, n, "%d", lm_notelog_count(srv->notelog)); break;
     case K_NOTES_UNREAD: snprintf(out, n, "%d", lm_notelog_unread(srv->notelog)); break;
     case K_NOTES_DEL: case K_NOTES_CLEAR: case K_NOTES_READ: break;                 /* write only */
+    case K_CLIP_PNG: break;                                                          /* write only */
+    case K_POINTER_OUTPUT: {                    /* index (as mellagui_capture_v1 numbers them) of the output the pointer is on, -1 = none */
+        int idx = -1, i = 0;
+        double px = 0, py = 0;
+        if (srv->backend && srv->seat) {
+            lm_seat_pointer_position(srv->seat, &px, &py);
+            struct lm_output *near = lm_output_nearest(srv, px, py), *o;
+            lm_list_for_each(o, &srv->backend->outputs, link) {
+                if (o == near)
+                    idx = i;
+                i++;
+            }
+        }
+        snprintf(out, n, "%d", idx);
+        break;
+    }
     case K_NIGHT_FROM: snprintf(out, n, "%s", c->night_from); break;
     case K_NIGHT_TO: snprintf(out, n, "%s", c->night_to); break;
     case K_CLOCK_HOURS: snprintf(out, n, "%d", c->clock.h12 ? 12 : 24); break;
@@ -776,6 +793,36 @@ static void save_later(struct lm_settings *s)
     s->dirty = true;
     if (s->save_timer)
         lm_timer_arm_ms(s->save_timer, SAVE_DELAY_MS, 0);
+}
+
+/* Reads a PNG file of at most 64 MB (regular file, PNG signature) and offers it as the clipboard selection. */
+static bool clip_png_file(struct lm_server *srv, const char *path)
+{
+    if (!srv->seat || !path || path[0] != '/')
+        return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return false;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 8 || st.st_size > (off_t)64 << 20) {
+        close(fd);
+        return false;
+    }
+    uint8_t *buf = malloc((size_t)st.st_size);
+    size_t got = 0;
+    while (buf && got < (size_t)st.st_size) {
+        ssize_t k = read(fd, buf + got, (size_t)st.st_size - got);
+        if (k <= 0)
+            break;
+        got += (size_t)k;
+    }
+    close(fd);
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    if (!buf || got != (size_t)st.st_size || memcmp(buf, sig, 8) != 0) {
+        free(buf);
+        return false;
+    }
+    return lm_seat_set_selection_data(srv->seat, "image/png", buf, got);        /* takes the buffer over */
 }
 
 /* Asks the sound server again (pactl / wpctl / pw-cli): sinks, their default and the card profiles. */
@@ -1611,6 +1658,8 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_NOTES_CLEAR:
         lm_notelog_clear(srv->notelog);
         return true;
+    case K_CLIP_PNG:                                    /* a PNG file (the screenshot tool's) becomes the clipboard selection "image/png" */
+        return clip_png_file(srv, val);
     case K_NOTES_READ:
         lm_notelog_mark_read(srv->notelog);
         return true;

@@ -10658,7 +10658,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 37)
+        self.assertEqual(len(t), 38)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -10703,7 +10703,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 38)
+        self.assertEqual(len(t), 39)
         self.assertTrue(alive_p(p))
 
 
@@ -12172,12 +12172,12 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '37')
+        self.assertEqual(self.get(c, 'keys-count'), '38')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 7)
+        self.assertEqual(len(self.rows(c, 3)), 8)
         self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -12201,13 +12201,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '37')
+        self.assertEqual(self.get(c, 'keys-count'), '38')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '38')
+        self.assertEqual(self.get(c, 'keys-count'), '39')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -12809,6 +12809,190 @@ class TestScreenshot(Base):
         cl, dev = self.clipboard_client(name)
         c.tap(self.KEY_PRINT)
         self.assertIsNotNone(self.paste_png(cl, dev))
+
+
+class TestShot(Base):
+    """mellagui-shot: freeze the screen, drag an area, mark it up, Enter saves a PNG (and the clipboard)."""
+    decode_png = staticmethod(TestScreenshot.decode_png)
+    clipboard_client = TestScreenshot.clipboard_client
+    paste_png = TestScreenshot.paste_png
+    KEY_4, KEY_6, KEY_Z, KEY_ENTER_, KEY_C_ = 5, 7, 44, 28, 46
+
+    def setUp(self):
+        super().setUp()
+        self.exe = os.path.join(ROOT, 'build', 'mellagui-shot')
+        if not os.path.exists(self.exe):
+            self.skipTest('mellagui-shot not built')
+
+    def start(self, name):
+        self.dir = os.path.join(tmp, name + '-out')
+        shutil.rmtree(self.dir, ignore_errors=True)
+        p, c, stop = self.private_compositor(name, '--config', 'none', '--settings', os.path.join(tmp, name + '.settings'))
+        self.name = name
+        c.abs(790, 490)                                                     # the pointer in a corner, away from what is compared
+        c.sync()
+        time.sleep(0.2)
+        c.sync()
+        self.pre = c.dump(os.path.join(tmp, name + '-pre.ppm'))             # what the tool will freeze
+        return c
+
+    def run_tool(self, c, *args):
+        pr = subprocess.Popen([self.exe, '--dir', self.dir] + list(args), env=dict(os.environ, WAYLAND_DISPLAY=self.name),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        end = time.time() + 6
+        while time.time() < end and not [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot']:
+            time.sleep(0.05)
+        self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot'], 'the tool has no window')
+        time.sleep(0.3)
+        return pr
+
+    @staticmethod
+    def drag(c, x0, y0, x1, y1):
+        c.abs(x0, y0)
+        c.button(272, True)
+        c.abs((x0 + x1) // 2, (y0 + y1) // 2)
+        c.abs(x1, y1)
+        c.button(272, False)
+        time.sleep(0.15)
+        c.sync()
+
+    def files(self):
+        return sorted(os.listdir(self.dir)) if os.path.isdir(self.dir) else []
+
+    def wait_exit(self, pr, timeout=6):
+        try:
+            return pr.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.fail('the tool did not end')
+
+    def png(self):
+        self.assertEqual(len(self.files()), 1, self.files())
+        path = os.path.join(self.dir, self.files()[0])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        data = open(path, 'rb').read()
+        return (path,) + self.decode_png(data) + (data,)
+
+    @staticmethod
+    def rgb(rows, x, y):
+        return tuple(rows[y][x * 3:x * 3 + 3])
+
+    def test_an_area_is_saved_as_it_was_before_the_tool_opened(self):
+        c = self.start('mellagui-shot1')
+        pr = self.run_tool(c)
+        self.drag(c, 100, 100, 400, 300)
+        c.tap(self.KEY_ENTER_)
+        self.assertEqual(self.wait_exit(pr), 0)
+        path, w, h, rows, data = self.png()
+        self.assertEqual((w, h), (300, 200))
+        for x, y in ((0, 0), (10, 10), (150, 100), (299, 199), (60, 170)):
+            self.assertEqual(self.rgb(rows, x, y), self.pre.px(100 + x, 100 + y), (x, y))        # no dimming, no frame, no handles in it
+        self.assertEqual(pr.stdout.read().decode().strip(), path)
+
+    def test_a_box_is_drawn_and_undo_takes_it_away(self):
+        c = self.start('mellagui-shot2')
+        pr = self.run_tool(c)
+        self.drag(c, 100, 100, 400, 300)
+        c.tap(self.KEY_4)                                                  # the Box tool, red
+        self.drag(c, 150, 150, 300, 250)
+        c.tap(self.KEY_ENTER_)
+        self.assertEqual(self.wait_exit(pr), 0)
+        _, w, h, rows, _ = self.png()
+        self.assertEqual(self.rgb(rows, 50, 100), (0xe5, 0x39, 0x35))        # the left side of the box (x 150 -> 50 in the crop)
+        self.assertEqual(self.rgb(rows, 100, 50), (0xe5, 0x39, 0x35))        # its top
+        self.assertEqual(self.rgb(rows, 100, 100), self.pre.px(200, 200))    # the inside is untouched
+        self.assertEqual(self.rgb(rows, 10, 10), self.pre.px(110, 110))
+        for f in self.files():
+            os.unlink(os.path.join(self.dir, f))
+        pr = self.run_tool(c)
+        self.drag(c, 100, 100, 400, 300)
+        c.tap(self.KEY_4)
+        self.drag(c, 150, 150, 300, 250)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_Z)
+        c.key(KEY_LEFTCTRL, False)
+        c.tap(self.KEY_ENTER_)
+        self.assertEqual(self.wait_exit(pr), 0)
+        _, w, h, rows, _ = self.png()
+        self.assertEqual(self.rgb(rows, 50, 100), self.pre.px(150, 200))
+
+    def test_the_clipboard_gets_the_same_png(self):
+        c = self.start('mellagui-shot3')
+        pr = self.run_tool(c)
+        self.drag(c, 200, 120, 330, 220)
+        c.tap(self.KEY_ENTER_)
+        self.assertEqual(self.wait_exit(pr), 0)
+        path, w, h, rows, data = self.png()
+        pc, dev = self.clipboard_client(self.name)
+        got = self.paste_png(pc, dev)
+        self.assertEqual(got, data)
+
+    def test_copy_only_writes_no_file(self):
+        c = self.start('mellagui-shot4')
+        pr = self.run_tool(c)
+        self.drag(c, 200, 120, 330, 220)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_C_)
+        c.key(KEY_LEFTCTRL, False)
+        self.assertEqual(self.wait_exit(pr), 0)
+        self.assertEqual(self.files(), [])
+        pc, dev = self.clipboard_client(self.name)
+        got = self.paste_png(pc, dev)
+        self.assertIsNotNone(got)
+        w, h, rows = self.decode_png(got)
+        self.assertEqual((w, h), (130, 100))
+        self.assertEqual(self.rgb(rows, 5, 5), self.pre.px(205, 125))
+
+    def test_escape_cancels_and_enter_without_an_area_takes_the_whole_screen(self):
+        c = self.start('mellagui-shot5')
+        pr = self.run_tool(c)
+        self.drag(c, 100, 100, 400, 300)
+        c.tap(KEY_ESC)
+        self.assertEqual(self.wait_exit(pr), 0)
+        self.assertEqual(self.files(), [])
+        pr = self.run_tool(c)
+        c.tap(self.KEY_ENTER_)
+        self.assertEqual(self.wait_exit(pr), 0)
+        _, w, h, rows, _ = self.png()
+        self.assertEqual((w, h), (800, 500))
+        self.assertEqual(self.rgb(rows, 400, 250), self.pre.px(400, 250))
+
+    def test_a_text_is_typed_onto_the_picture(self):
+        c = self.start('mellagui-shot6')
+        pr = self.run_tool(c)
+        self.drag(c, 100, 100, 400, 300)
+        c.tap(self.KEY_6)                                                  # the Text tool
+        c.click(120, 120)
+        c.tap(35)                                                          # h
+        c.tap(23)                                                          # i
+        c.tap(self.KEY_ENTER_)                                             # commits the text ...
+        c.tap(self.KEY_ENTER_)                                             # ... and this one saves
+        self.assertEqual(self.wait_exit(pr), 0)
+        _, w, h, rows, _ = self.png()
+        red = sum(1 for y in range(20, 52) for x in range(20, 40) if self.rgb(rows, x, y) == (0xe5, 0x39, 0x35))
+        self.assertGreater(red, 20, 'no red letters')
+
+    def test_grab_writes_the_output_or_a_part_of_it_without_a_window(self):
+        c = self.start('mellagui-shot7')
+        out = os.path.join(tmp, 'shot7.png')
+        r = subprocess.run([self.exe, '--grab', out, '--rect', '30,60,200,100'], env=dict(os.environ, WAYLAND_DISPLAY=self.name),
+                           capture_output=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        w, h, rows = self.decode_png(open(out, 'rb').read())
+        self.assertEqual((w, h), (200, 100))
+        self.assertEqual(self.rgb(rows, 5, 5), self.pre.px(35, 65))
+        self.assertEqual(self.rgb(rows, 199, 99), self.pre.px(229, 159))
+        self.assertEqual([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot'], [])
+
+    def test_super_shift_s_starts_it(self):
+        c = self.start('mellagui-shot8')
+        for code, down in ((KEY_LEFTMETA, 1), (KEY_LEFTSHIFT, 1), (KEY_S, 1), (KEY_S, 0), (KEY_LEFTSHIFT, 0), (KEY_LEFTMETA, 0)):
+            c.key(code, bool(down))
+        end = time.time() + 6
+        while time.time() < end and not [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot']:
+            time.sleep(0.05)
+        self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot'])
+        c.tap(KEY_ESC)
 
 
 class TestLauncher(Base):

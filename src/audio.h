@@ -35,6 +35,19 @@ const char *lm_audio_sink_status(void);
 int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *current, size_t cn);
 
 /*
+ * Microphones (the sound server's inputs, monitors of outputs left out): the same through `pactl` (names) or `wpctl status` (ids). The default one is the
+ * one applications record from; its volume (0..100 %) and mute are those of @DEFAULT_SOURCE@ / @DEFAULT_AUDIO_SOURCE@.
+ */
+int lm_audio_list_sources(char *list, size_t n, char *current, size_t cn);
+bool lm_audio_set_source(const char *name);
+/* Volume and mute of the default microphone. False when there is no sound server or no microphone. */
+bool lm_audio_source_state(int *volume, bool *mute);
+bool lm_audio_set_source_volume(int percent);
+bool lm_audio_set_source_mute(bool mute);
+/* `wpctl status` -> the Sources section (exposed for the unit tests; like lm_audio_parse_wpctl_sinks). */
+int lm_audio_parse_wpctl_sources(const char *text, char *list, size_t n, char *current, size_t cn);
+
+/*
  * PipeWire card profiles (through `pw-cli`): a sound card exposes one output at a time (analog, HDMI, S/PDIF ...) and
  * switching the profile is how HDMI audio is chosen. The list has one entry per output type of each card, as
  * "cardid:profileindex|Card name - Profile description;..." (e.g. "43:6|Built-in Audio - Digital Stereo (HDMI) Output");

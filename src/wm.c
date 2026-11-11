@@ -154,15 +154,23 @@ struct wm_wobble {
 };
 
 /* The launcher dialog opens as a bubble that rises out of its dock button and takes the shape of the card, and closes the other way round. The card's
- * picture is cut into BUB_C x BUB_R cells (like a wobbling window's) whose corners are moved by bubble_nodes(); a highlight (the sheen) lies on the bubble. */
-#define BUB_C 24
-#define BUB_R 16
+ * picture is a mesh of BUB_C x BUB_R cells (two triangles each) whose corners are moved by bubble_nodes(); every tick the triangles are rasterised into one
+ * picture (`frame`, bilinear, from a chain of smaller copies of the card so that a small bubble does not glitter) that the scene shows as one ghost: no
+ * seams, no gaps. A highlight (the sheen) lies on the bubble. */
+#define BUB_C 36
+#define BUB_R 24
 #define BUB_N ((BUB_C + 1) * (BUB_R + 1))
+#define BUB_LEVELS 5
 struct wm_bubble {
     bool active, closing;
     float prog;                         /* 0 = a small bubble at the button, 1 = the card */
     uint64_t last;
     struct lm_ghost ghost;              /* the card as a picture */
+    uint32_t *mip[BUB_LEVELS];          /* the card halved again and again (level 0 is ghost.px, not owned) */
+    int mw[BUB_LEVELS], mh[BUB_LEVELS];
+    struct lm_ghost frame;              /* the mesh as it is now, one picture covering `shown` */
+    int alpha;                          /* how solid it is painted (0..255) */
+    float s;                            /* how far it has spread out (0 bubble .. 1 card) */
     struct lm_ghost sheen;              /* the highlight on the bubble */
     struct lm_rect card;                /* where the card is (global) */
     float cx0, cy0;                     /* the button: where the bubble comes from / goes to */
@@ -4659,7 +4667,7 @@ static void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *
 
 /* ---- the launcher's bubble --------------------------------------------------------------------------------------------------------- */
 
-#define BUBBLE_MS 3300              /* the whole rise / return: at least three seconds (with window animations on; off = at once) */
+#define BUBBLE_MS 2000              /* the whole rise / return: two seconds (with window animations on; off = at once) */
 #define BUBBLE_R0 24.0f             /* radius of the bubble at the button */
 
 static struct lm_output *bubble_output(const struct lm_wm *wm)
@@ -4748,17 +4756,161 @@ static void bubble_make_sheen(struct lm_ghost *g)
     g->gl_tex = 0;
 }
 
-static struct lm_rect bubble_bounds(const struct wm_bubble *b)
+/* ---- rasterising the mesh ----------------------------------------------------------------------------------------------------- */
+
+static void bubble_free_pictures(struct lm_wm *wm, struct wm_bubble *b)
 {
-    float xs[BUB_N], ys[BUB_N];
-    bubble_nodes(b, b->prog, xs, ys, NULL);
+    for (int l = BUB_LEVELS - 1; l >= 1; l--) {                    /* (a level that is a copy of the next bigger one, after an out-of-memory, is freed once) */
+        if (b->mip[l] && b->mip[l] != b->mip[l - 1])
+            free(b->mip[l]);
+        b->mip[l] = NULL;
+    }
+    b->mip[0] = NULL;
+    if (wm->srv->render) {
+        lm_render_ghost_free(wm->srv->render, &b->frame);
+        lm_render_ghost_free(wm->srv->render, &b->ghost);
+        lm_render_ghost_free(wm->srv->render, &b->sheen);
+    }
+}
+
+/* The card's picture and, halved by averaging 2 x 2 each time, its smaller copies. */
+static void bubble_make_mips(struct wm_bubble *b)
+{
+    b->mip[0] = b->ghost.px;
+    b->mw[0] = b->ghost.w;
+    b->mh[0] = b->ghost.h;
+    for (int l = 1; l < BUB_LEVELS; l++) {
+        int w = LM_MAX(b->mw[l - 1] / 2, 1), h = LM_MAX(b->mh[l - 1] / 2, 1);
+        uint32_t *px = calloc((size_t)w * (size_t)h, 4);
+        if (!px) {
+            b->mip[l] = b->mip[l - 1];                              /* out of memory: the bigger one will do */
+            b->mw[l] = b->mw[l - 1];
+            b->mh[l] = b->mh[l - 1];
+            continue;
+        }
+        b->mip[l] = px;
+        b->mw[l] = w;
+        b->mh[l] = h;
+        const uint32_t *src = b->mip[l - 1];
+        int sw = b->mw[l - 1], sh = b->mh[l - 1];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                uint32_t acc[4] = { 0, 0, 0, 0 };
+                for (int k = 0; k < 4; k++) {
+                    int sx = LM_MIN(2 * x + (k & 1), sw - 1), sy = LM_MIN(2 * y + (k >> 1), sh - 1);
+                    uint32_t p = src[(size_t)sy * (size_t)sw + (size_t)sx];
+                    acc[0] += p >> 24; acc[1] += (p >> 16) & 255; acc[2] += (p >> 8) & 255; acc[3] += p & 255;
+                }
+                px[(size_t)y * (size_t)w + (size_t)x] = ((acc[0] / 4) << 24) | ((acc[1] / 4) << 16) | ((acc[2] / 4) << 8) | (acc[3] / 4);
+            }
+    }
+}
+
+/* Bilinear lookup in level `l` at (u, v) in that level's texels (premultiplied ARGB, the edge repeats). */
+static uint32_t bubble_sample(const struct wm_bubble *b, int l, float u, float v)
+{
+    int w = b->mw[l], h = b->mh[l];
+    const uint32_t *px = b->mip[l];
+    float fx = u - 0.5f, fy = v - 0.5f;
+    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+    float tx = fx - (float)x0, ty = fy - (float)y0;
+    int x1 = LM_CLAMP(x0 + 1, 0, w - 1), y1 = LM_CLAMP(y0 + 1, 0, h - 1);
+    x0 = LM_CLAMP(x0, 0, w - 1);
+    y0 = LM_CLAMP(y0, 0, h - 1);
+    uint32_t p00 = px[(size_t)y0 * (size_t)w + (size_t)x0], p10 = px[(size_t)y0 * (size_t)w + (size_t)x1];
+    uint32_t p01 = px[(size_t)y1 * (size_t)w + (size_t)x0], p11 = px[(size_t)y1 * (size_t)w + (size_t)x1];
+    uint32_t out = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        float a = (float)((p00 >> sh) & 255) * (1.0f - tx) + (float)((p10 >> sh) & 255) * tx;
+        float c = (float)((p01 >> sh) & 255) * (1.0f - tx) + (float)((p11 >> sh) & 255) * tx;
+        out |= (uint32_t)lroundf(a * (1.0f - ty) + c * ty) << sh;
+    }
+    return out;
+}
+
+/* One triangle of the mesh: x, y = where its corners are, u, v = which texel of the card each shows. Covered pixels take the card's colour; a pixel that
+ * two triangles both reach keeps the more solid one, so a seam never shows a hole. */
+static void bubble_triangle(const struct wm_bubble *b, uint32_t *out, int bx, int by, int bw, int bh, const float *x, const float *y,
+                            const float *u, const float *v)
+{
+    float det = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+    float src = (u[1] - u[0]) * (v[2] - v[0]) - (u[2] - u[0]) * (v[1] - v[0]);
+    if (fabsf(det) < 1e-3f || fabsf(src) < 1e-6f)
+        return;
+    float step = sqrtf(fabsf(src) / fabsf(det));                    /* card texels under one pixel: above 1 the picture is shrunk */
+    int level = step > 1.0f ? LM_CLAMP((int)floorf(log2f(step)), 0, BUB_LEVELS - 1) : 0;
+    float scale = 1.0f / (float)(1 << level), inv = 1.0f / det;
+    int x0 = LM_MAX((int)floorf(fminf(x[0], fminf(x[1], x[2]))) - bx, 0), x1 = LM_MIN((int)ceilf(fmaxf(x[0], fmaxf(x[1], x[2]))) - bx, bw - 1);
+    int y0 = LM_MAX((int)floorf(fminf(y[0], fminf(y[1], y[2]))) - by, 0), y1 = LM_MIN((int)ceilf(fmaxf(y[0], fmaxf(y[1], y[2]))) - by, bh - 1);
+    const float e = -0.02f;
+    for (int py = y0; py <= y1; py++) {
+        float fy = (float)(by + py) + 0.5f;
+        for (int px = x0; px <= x1; px++) {
+            float fx = (float)(bx + px) + 0.5f;
+            float l1 = ((fx - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (fy - y[0])) * inv;
+            float l2 = ((x[1] - x[0]) * (fy - y[0]) - (fx - x[0]) * (y[1] - y[0])) * inv;
+            float l0 = 1.0f - l1 - l2;
+            if (l0 < e || l1 < e || l2 < e)
+                continue;
+            uint32_t c = bubble_sample(b, level, (l0 * u[0] + l1 * u[1] + l2 * u[2]) * scale, (l0 * v[0] + l1 * v[1] + l2 * v[2]) * scale);
+            uint32_t *dst = &out[(size_t)py * (size_t)bw + (size_t)px];
+            if ((c >> 24) >= (*dst >> 24))
+                *dst = c;
+        }
+    }
+}
+
+/* The mesh as it is at b->prog, painted into b->frame (and b->shown, b->alpha, b->s set). */
+static void bubble_render_frame(struct lm_wm *wm)
+{
+    struct wm_bubble *b = &wm->bubble;
+    float xs[BUB_N], ys[BUB_N], s;
+    bubble_nodes(b, b->prog, xs, ys, &s);
     float x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
     for (int i = 1; i < BUB_N; i++) {
         x0 = fminf(x0, xs[i]); x1 = fmaxf(x1, xs[i]);
         y0 = fminf(y0, ys[i]); y1 = fmaxf(y1, ys[i]);
     }
-    return lm_rect_make((int)floorf(x0) - 4, (int)floorf(y0) - 4, (int)ceilf(x1 - x0) + 8, (int)ceilf(y1 - y0) + 8);
+    struct lm_rect r = lm_rect_make((int)floorf(x0) - 2, (int)floorf(y0) - 2, (int)ceilf(x1 - x0) + 5, (int)ceilf(y1 - y0) + 5);
+    b->s = s;
+    b->alpha = (int)lroundf(255.0f * (0.62f + 0.38f * LM_CLAMP(s, 0.0f, 1.0f)) * fminf(b->prog / 0.05f, 1.0f));
+    if (wm->srv->render)
+        lm_render_ghost_free(wm->srv->render, &b->frame);
+    memset(&b->frame, 0, sizeof(b->frame));
+    b->shown = r;
+    if (r.w <= 0 || r.h <= 0 || (int64_t)r.w * r.h > 8 * 1000 * 1000)
+        return;
+    uint32_t *out = calloc((size_t)r.w * (size_t)r.h, 4);
+    if (!out)
+        return;
+    const float W = (float)b->mw[0], H = (float)b->mh[0];
+    const int stride = BUB_C + 1;
+    for (int j = 0; j < BUB_R; j++)
+        for (int i = 0; i < BUB_C; i++) {
+            int n[4] = { j * stride + i, j * stride + i + 1, (j + 1) * stride + i, (j + 1) * stride + i + 1 };
+            float u[4] = { W * (float)i / BUB_C, W * (float)(i + 1) / BUB_C, W * (float)i / BUB_C, W * (float)(i + 1) / BUB_C };
+            float v[4] = { H * (float)j / BUB_R, H * (float)j / BUB_R, H * (float)(j + 1) / BUB_R, H * (float)(j + 1) / BUB_R };
+            float cx[4], cy[4];
+            for (int k = 0; k < 4; k++) {
+                cx[k] = xs[n[k]];
+                cy[k] = ys[n[k]];
+            }
+            static const int t1[3] = { 0, 1, 2 }, t2[3] = { 1, 3, 2 };
+            float tx[3], ty[3], tu[3], tv[3];
+            for (int k = 0; k < 3; k++) {
+                tx[k] = cx[t1[k]]; ty[k] = cy[t1[k]]; tu[k] = u[t1[k]]; tv[k] = v[t1[k]];
+            }
+            bubble_triangle(b, out, r.x, r.y, r.w, r.h, tx, ty, tu, tv);
+            for (int k = 0; k < 3; k++) {
+                tx[k] = cx[t2[k]]; ty[k] = cy[t2[k]]; tu[k] = u[t2[k]]; tv[k] = v[t2[k]];
+            }
+            bubble_triangle(b, out, r.x, r.y, r.w, r.h, tx, ty, tu, tv);
+        }
+    b->frame.px = out;
+    b->frame.w = r.w;
+    b->frame.h = r.h;
 }
+
 
 static void bubble_end(struct lm_wm *wm)
 {
@@ -4766,10 +4918,7 @@ static void bubble_end(struct lm_wm *wm)
     if (!b->active)
         return;
     struct lm_rect d = b->shown;
-    if (wm->srv->render) {
-        lm_render_ghost_free(wm->srv->render, &b->ghost);
-        lm_render_ghost_free(wm->srv->render, &b->sheen);
-    }
+    bubble_free_pictures(wm, b);
     b->active = false;
     damage_rect(wm, &d);
     struct lm_output *o = bubble_output(wm);
@@ -4806,7 +4955,8 @@ static void bubble_begin(struct lm_wm *wm, bool opening)
     b->closing = !opening;
     b->prog = opening ? 0.0f : 1.0f;
     b->last = lm_now_ms();
-    b->shown = bubble_bounds(b);
+    bubble_make_mips(b);
+    bubble_render_frame(wm);
     damage_rect(wm, &b->shown);
     struct lm_rect r = lm_output_rect(o);
     damage_rect(wm, &r);
@@ -4841,7 +4991,7 @@ static bool bubble_tick(struct lm_wm *wm, uint64_t now)
         }
     }
     struct lm_rect old = b->shown;
-    b->shown = bubble_bounds(b);
+    bubble_render_frame(wm);
     struct lm_rect d = lm_rect_union(&old, &b->shown);
     damage_rect(wm, &d);
     struct lm_output *o = bubble_output(wm);
@@ -5879,32 +6029,16 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             if (!fn(&it, data))
                 return;
         }
-        float xs[BUB_N], ys[BUB_N], s;
-        bubble_nodes(b, b->prog, xs, ys, &s);
-        int alpha = (int)lroundf(255.0f * (0.62f + 0.38f * LM_CLAMP(s, 0.0f, 1.0f)) * fminf(b->prog / 0.05f, 1.0f));
-        const int stride = BUB_C + 1;
-        for (int j = 0; j < BUB_R; j++)
-            for (int i = 0; i < BUB_C; i++) {
-                int n[4] = { j * stride + i, j * stride + i + 1, (j + 1) * stride + i, (j + 1) * stride + i + 1 };
-                /* every edge is the middle of its two nodes, so neighbours share their edges exactly: no seams where the glass is translucent */
-                int x0 = (int)lroundf((xs[n[0]] + xs[n[2]]) / 2.0f), x1 = (int)lroundf((xs[n[1]] + xs[n[3]]) / 2.0f);
-                int y0 = (int)lroundf((ys[n[0]] + ys[n[1]]) / 2.0f), y1 = (int)lroundf((ys[n[2]] + ys[n[3]]) / 2.0f);
-                if (x1 <= x0 || y1 <= y0)
-                    continue;
-                struct lm_rect dst = lm_rect_make(x0, y0, x1 - x0, y1 - y0);
-                if (clip && !lm_rect_overlaps(&dst, clip))
-                    continue;
-                int sx0 = b->ghost.w * i / BUB_C, sx1 = b->ghost.w * (i + 1) / BUB_C;
-                int sy0 = b->ghost.h * j / BUB_R, sy1 = b->ghost.h * (j + 1) / BUB_R;
-                memset(&it, 0, sizeof(it));
-                it.kind = LM_SCENE_GHOST;
-                it.u.ghost.ghost = (struct lm_ghost *)&b->ghost;
-                it.u.ghost.dst = dst;
-                it.u.ghost.src = lm_rect_make(sx0, sy0, sx1 - sx0, sy1 - sy0);
-                it.u.ghost.alpha = alpha;
-                if (!fn(&it, data))
-                    return;
-            }
+        float s = b->s;
+        if (b->frame.px && (!clip || lm_rect_overlaps(&b->shown, clip))) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_GHOST;
+            it.u.ghost.ghost = (struct lm_ghost *)&b->frame;
+            it.u.ghost.dst = b->shown;
+            it.u.ghost.alpha = b->alpha;
+            if (!fn(&it, data))
+                return;
+        }
         float sheen_a = powf(1.0f - LM_CLAMP(s, 0.0f, 1.0f), 1.3f);
         if (b->sheen.px && sheen_a > 0.02f) {
             float ccx = (float)b->card.x + (float)b->card.w / 2.0f, ccy = (float)b->card.y + (float)b->card.h / 2.0f, pe = smooth01(b->prog);

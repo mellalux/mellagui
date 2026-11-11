@@ -233,6 +233,7 @@ struct sky {
     float sun_el, moon_el;              /* elevations in degrees */
     float zen[3], hor[3];               /* the sky's colour at the zenith and at the horizon */
     float day, night;                   /* 0..1: how much of a day it is / how deep the night is */
+    float land;                         /* 0..1: how much light the land gets (it is lit a little longer than the sky is blue) */
     float light_dir[3], light_col[3];   /* the light on the floor: direction towards its source (z > 0) and its colour, already scaled by its strength */
     float light_str;                    /* 0 = no light */
     float phase;                        /* seconds, for the twinkling of the stars */
@@ -259,6 +260,7 @@ static void room_surface_size(int surf, int *cols, int *rows)
 }
 
 static void sky_update(struct sky *k, float minutes);
+static void ridge_init(void);
 
 static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density)
 {
@@ -302,6 +304,7 @@ static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density
         if (localtime_r(&now, &tm))
             rm->minutes = (float)tm.tm_hour * 60.0f + (float)tm.tm_min + (float)tm.tm_sec / 60.0f;
     }
+    ridge_init();
     sky_update(&rm->sky, rm->minutes);
     rm->ready = true;
     return true;
@@ -462,6 +465,7 @@ static void sky_update(struct sky *k, float minutes)
     sky_colors(k->sun_el, k->zen, k->hor);
     k->day = smooth(-3.0f, 6.0f, k->sun_el);
     k->night = smooth(-2.0f, -8.0f, k->sun_el);
+    k->land = smooth(-4.0f, 3.0f, k->sun_el);
     /* the light on the floor: the sun while it is up, else the moon */
     float sunl = smooth(0.5f, 4.5f, k->sun_el), moonl = 0.3f * smooth(1.0f, 6.0f, k->moon_el) * k->night;
     /* (the light comes from a higher point of the sky than the body shows at: the patch has to land where the camera can see it) */
@@ -516,16 +520,142 @@ static inline uint32_t hash3(int a, int b, int c)
     return h;
 }
 
+/* ---- the land behind the window: three rows of hills, a meadow with fields and a path, village lights at night ---------------------------------- */
+
+static inline float noise1(float x, float p)
+{
+    return 0.5f + 0.5f * (0.5f * sinf(x * 1.7f + p) + 0.3f * sinf(x * 4.3f + p * 2.1f) + 0.2f * sinf(x * 9.1f + p * 0.7f));
+}
+
+/* The three ridges' heights by the sideways position u (-4..4), made once: three rows of sines per pixel were the most expensive part of the picture. */
+#define RIDGE_N 4096
+#define RIDGE_U 4.0f
+static float ridge_tab[3][RIDGE_N + 1];
+static bool ridge_ready;
+
+static void ridge_init(void)
+{
+    if (ridge_ready)
+        return;
+    for (int i = 0; i <= RIDGE_N; i++) {
+        float u = -RIDGE_U + 2.0f * RIDGE_U * (float)i / (float)RIDGE_N;
+        ridge_tab[0][i] = 0.012f + 0.030f * noise1(u * 2.0f, 1.3f);
+        ridge_tab[1][i] = -0.018f + 0.034f * noise1(u * 3.1f, 4.1f);
+        ridge_tab[2][i] = -0.080f + 0.038f * noise1(u * 4.3f, 7.7f);
+    }
+    ridge_ready = true;
+}
+
+static inline float ridge_at(int which, float u)
+{
+    float t = (clamp01((u + RIDGE_U) / (2.0f * RIDGE_U))) * (float)RIDGE_N;
+    int i = (int)t;
+    if (i >= RIDGE_N)
+        return ridge_tab[which][RIDGE_N];
+    float f = t - (float)i;
+    return ridge_tab[which][i] + (ridge_tab[which][i + 1] - ridge_tab[which][i]) * f;
+}
+
+/* Blends the colour `c` (scaled by the light of the hour) over rgb with coverage `cov`. */
+static inline void land_mix(float rgb[3], const float c[3], float cov)
+{
+    for (int q = 0; q < 3; q++)
+        rgb[q] = mixf(rgb[q], c[q], cov);
+}
+
+/* Lights a colour like the day does: full sun by day (warm when low), the dim blue of the night otherwise, a little of the sky's horizon colour as haze. */
+static void land_light(const struct sky *k, const float base[3], float haze, float out[3])
+{
+    float w = clamp01(k->sun_el / 12.0f);
+    float tint[3] = { 1.0f, mixf(0.66f, 1.0f, w), mixf(0.48f, 0.96f, w) };
+    for (int q = 0; q < 3; q++) {
+        float nightc = base[q] * (q == 2 ? 0.20f : q == 1 ? 0.13f : 0.09f) + (q == 2 ? 10.0f : 3.0f);     /* dark blue-green */
+        float dayc = base[q] * tint[q];
+        float c = mixf(nightc, dayc, k->land);
+        out[q] = mixf(c, k->hor[q] * mixf(0.35f, 0.85f, k->land), haze);
+    }
+}
+
+/* The three layers of the land, one function each. `cov` = how much of the pixel the layer covers. */
+static void layer_far(const struct sky *k, float cov, float rgb[3])
+{
+    float c[3], base[3] = { 78.0f, 108.0f, 140.0f };                        /* blue with haze */
+    land_light(k, base, 0.55f, c);
+    land_mix(rgb, c, cov);
+}
+
+static void layer_mid(const struct sky *k, float u, float hy, float rmid, float cov, float rgb[3])
+{
+    float c[3];
+    float edge = clamp01(1.0f - (rmid - hy) / 0.012f);                      /* the top of the hill catches the light */
+    float base[3] = { 58.0f + 22.0f * edge, 98.0f + 24.0f * edge, 80.0f + 8.0f * edge };
+    land_light(k, base, 0.28f, c);
+    land_mix(rgb, c, cov);
+    if (k->night > 0.3f && hy < rmid - 0.002f) {                            /* the lights of a village */
+        uint32_t h = hash3((int)floorf(u * 520.0f), (int)floorf(hy * 700.0f), 5);
+        if ((h & 0xffu) < 5u) {
+            float tw = 0.7f + 0.3f * sinf(k->phase * 2.0f + (float)(h >> 8));
+            static const float lamp[3] = { 255.0f, 205.0f, 120.0f };
+            land_mix(rgb, lamp, clamp01(k->night * tw));
+        }
+    }
+}
+
+static void layer_near(const struct sky *k, float hx, float hy, float hz, float cov, float rgb[3])
+{
+    float c[3], base[3];                                                    /* a meadow of fields in perspective with a winding path */
+    float ey = fminf(hy, -0.004f);                                          /* (a view from a height of 40 m: the ground at 40 / -hy metres) */
+    float inv = 40.0f / -ey, gx = hx * inv, gz = hz * inv, dist = inv;
+    uint32_t h = hash3((int)floorf(gx * (1.0f / 70.0f)), (int)floorf(gz * (1.0f / 70.0f)), 11);
+    static const float fields[4][3] = { { 66, 116, 56 }, { 92, 132, 60 }, { 126, 142, 66 }, { 52, 98, 62 } };
+    const float *f = fields[h & 3];
+    float stripe = 0.88f + 0.12f * sinf((h & 4u ? gx : gz) * 0.55f);       /* furrows, one way or the other */
+    base[0] = f[0] * stripe; base[1] = f[1] * stripe; base[2] = f[2] * stripe;
+    float pathd = fabsf(gx - 55.0f * sinf(gz * (1.0f / 160.0f)) - 20.0f);  /* the path */
+    if (pathd < 6.0f + dist * 0.002f) {
+        base[0] = 150.0f; base[1] = 126.0f; base[2] = 92.0f;
+    }
+    land_light(k, base, clamp01(dist * (1.0f / 2600.0f)) * 0.45f, c);
+    land_mix(rgb, c, cov);
+    if (k->night > 0.3f && dist > 200.0f) {                                 /* a few windows in the dark */
+        uint32_t hl = hash3((int)floorf(gx * (1.0f / 9.0f)), (int)floorf(gz * (1.0f / 9.0f)), 23);
+        if ((hl & 0xffu) < 3u) {
+            static const float lamp[3] = { 255.0f, 205.0f, 120.0f };
+            land_mix(rgb, lamp, clamp01(k->night * 0.9f));
+        }
+    }
+}
+
+/* Draws the land over `rgb` for the direction (hx, hy, hz): from the far hills to the near meadow (a layer that covers a pixel completely hides the ones behind). */
+static void land_px(const struct sky *k, float hx, float hy, float hz, float rgb[3])
+{
+    float u = hx / fmaxf(hz, 0.3f);                                         /* the sideways position along the view */
+    const float w = 0.0016f;                                                /* the soft edge of a ridge */
+    float rfar = ridge_at(0, u), rmid = ridge_at(1, u), rnear = ridge_at(2, u);
+    float cn = clamp01((rnear - hy) / w + 0.5f), cm = clamp01((rmid - hy) / w + 0.5f), cf = clamp01((rfar - hy) / w + 0.5f);
+    if (cn >= 1.0f) {                                                       /* the meadow only: the common case */
+        layer_near(k, hx, hy, hz, 1.0f, rgb);
+        return;
+    }
+    if (cm >= 1.0f) {
+        layer_mid(k, u, hy, rmid, 1.0f, rgb);
+    } else {
+        if (cf > 0.0f)
+            layer_far(k, cf, rgb);
+        if (cm > 0.0f)
+            layer_mid(k, u, hy, rmid, cm, rgb);
+    }
+    if (cn > 0.0f)
+        layer_near(k, hx, hy, hz, cn, rgb);
+}
+
 /* The sky seen along the unit direction (hx, hy, hz): the sky's gradient, the sun, the moon and stars at night, the ground below the horizon. */
 static void sky_px(const struct sky *k, float hx, float hy, float hz, float rgb[3])
 {
-    if (hy < 0.0f) {                                                        /* the ground: dark at night, green by day, tinted by the horizon */
-        float g = clamp01(-hy / 0.25f);
-        for (int q = 0; q < 3; q++) {
-            static const float night[3] = { 4, 7, 9 }, day[3] = { 56, 86, 58 };
-            float base = mixf(night[q], day[q], k->day) * (0.55f + 0.45f * (1.0f - g));
-            rgb[q] = mixf(base, k->hor[q] * 0.45f, 0.25f * (1.0f - g));
-        }
+    if (hy < 0.0f) {                                                        /* below the horizon: only land */
+        for (int q = 0; q < 3; q++)
+            rgb[q] = k->hor[q];
+        land_px(k, hx, hy, hz, rgb);
         return;
     }
     float t = powf(clamp01(hy / 0.65f), 0.7f);
@@ -563,7 +693,7 @@ static void sky_px(const struct sky *k, float hx, float hy, float hz, float rgb[
         }
     }
     float cs = hx * k->sun[0] + hy * k->sun[1] + hz * k->sun[2];            /* the sun: a disc and a glow */
-    if (cs > 0.9f && k->sun_el > -3.0f) {
+    if (cs > 0.76f && k->sun_el > -3.0f) {
         float ang = acosf(fminf(cs, 1.0f)), vis = smooth(-3.0f, 1.0f, k->sun_el);
         float glow = clamp01(1.0f - ang / 0.7f);
         glow = glow * glow * 0.8f * vis;
@@ -576,7 +706,7 @@ static void sky_px(const struct sky *k, float hx, float hy, float hz, float rgb[
         }
     }
     float cm = hx * k->moon[0] + hy * k->moon[1] + hz * k->moon[2];         /* the moon: a crescent (a disc with another disc cut out of it) and a soft glow */
-    if (cm > 0.95f && k->night > 0.05f && k->moon_el > -1.0f) {
+    if (cm > 0.92f && k->night > 0.05f && k->moon_el > -1.0f) {
         const float *m = k->moon;
         float t1[3] = { m[2], 0.0f, -m[0] }, tl = sqrtf(t1[0] * t1[0] + t1[2] * t1[2]);        /* the sky's right and up at the moon */
         t1[0] /= tl; t1[2] /= tl;
@@ -594,6 +724,8 @@ static void sky_px(const struct sky *k, float hx, float hy, float hz, float rgb[
             rgb[q] = mixf(rgb[q], pale[q], core);
         }
     }
+    if (hy < 0.07f)
+        land_px(k, hx, hy, hz, rgb);                                        /* the hills rise above the horizon: they hide the sun and the stars behind them */
 }
 
 /* A ray (from the camera, direction d) that reaches the window's frame or opening before anything else of the room: its colour. `tf` = where it crosses the
@@ -929,12 +1061,28 @@ static int selftest(void)
         {                                                                /* the sky, hour by hour */
             struct sky k;
             float g[3];
+            ridge_init();
             sky_update(&k, 12.0f * 60.0f);
             CHECK(k.day > 0.95f && k.night < 0.05f && k.sun_el > 9.0f && k.light_str > 0.9f);
             sky_px(&k, 0.0f, 0.7f, 0.714f, g);                                               /* a blue sky by day */
             CHECK(g[2] > g[0] + 60.0f && g[2] > 150.0f);
             sky_px(&k, 0.0f, -0.3f, 0.95f, g);                                               /* ground below the horizon */
             CHECK(g[1] > g[2] && g[1] > 40.0f);
+            int green = 0, lit = 0;                                                           /* the land: fields and hills in daylight ... */
+            for (int i = 0; i < 4000; i++) {
+                float hy = -0.02f - 0.12f * (float)(i / 100) / 40.0f, hx = -0.3f + 0.006f * (float)(i % 100);
+                sky_px(&k, hx, hy, 0.9f, g);
+                green += g[1] > g[2] && g[1] > g[0] && g[1] > 50.0f;
+            }
+            CHECK(green > 2400);
+            sky_update(&k, 0.0f);                                                             /* ... and with lights at night */
+            for (int i = 0; i < 40000; i++) {
+                float hy = -0.06f - 0.09f * (float)(i / 200) / 200.0f, hx = -0.3f + 0.003f * (float)(i % 200);
+                sky_px(&k, hx, hy, 0.9f, g);
+                lit += g[0] > 150.0f && g[1] > 120.0f;
+            }
+            CHECK(lit > 3);
+            sky_update(&k, 12.0f * 60.0f);
             sky_update(&k, 0.0f);
             CHECK(k.day < 0.05f && k.night > 0.95f && k.sun_el < -9.0f);
             sky_px(&k, -0.5f, 0.6f, 0.62f, g);                                               /* nearly black at night (away from the moon) */

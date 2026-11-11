@@ -1,18 +1,22 @@
 /*
- * mellagui-status - the battery and the network in the panel.
+ * mellagui-status - the battery, the network, Bluetooth and the notification bell in the panel.
  *
  *   mellagui-status                    runs in the background (the compositor starts it): two buttons in the top bar through mellagui_tray_v1,
  *                                      the battery (icon and percentage, only when there is one) and the network (Wi-Fi strength or Ethernet and
  *                                      the name); a click opens a menu (mellagui_menu_v1): the battery's details, or the Wi-Fi networks to connect to
  *   mellagui-status --password SSID    a small window that asks the password of a new Wi-Fi network and connects
  *   mellagui-status --list             the battery and the network as text
- *   mellagui-status --no-battery / --no-network    leave one of the buttons out
+ *   mellagui-status --no-battery / --no-network / --no-bluetooth    leave one of the buttons out
  *   mellagui-status --selftest
  *
  * Battery: /sys/class/power_supply ($MELLAGUI_POWER_ROOT replaces it; the main battery is the one that is not a "Device" (mouse, keyboard), the
  * others are listed in the menu). Network: NetworkManager's `nmcli` ($MELLAGUI_NMCLI names another program), always with LC_ALL=C and
  * the terse output; nothing is changed except by a click on a menu entry. A password goes to nmcli through a pty (`nmcli --ask`), never on
  * a command line. A low battery (15 %, 5 %) shows a notification.
+ * Bluetooth: `bluetoothctl` ($MELLAGUI_BLUETOOTHCTL names another program): the button exists while a controller answers (`show`); its icon is dim
+ * while the radio is off, a green dot marks a connected device, the text is the first connected one's name. The menu: power on / off, a scan
+ * (`--timeout 8 scan on`, the new devices then show with a + and are paired, trusted and connected by a click), the paired devices (* = connected:
+ * a click disconnects, else connects). Devices that need a PIN or passkey cannot be paired here (no agent): the failure is shown in a notification.
  */
 #include <ctype.h>
 #include <dirent.h>
@@ -540,6 +544,187 @@ static bool connect_with_password(const char *ssid, const char *password, char *
     return exited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+/* ---- Bluetooth (bluetoothctl) ----------------------------------------------------------------------------------------------------- */
+
+#define MAX_BT 24
+#define BT_POLL_MS 10000
+
+struct btdev {
+    char mac[18];
+    char name[64];
+    bool paired, connected;
+};
+
+struct btinfo {
+    bool have;                          /* a controller answers */
+    bool powered;
+    struct btdev dev[MAX_BT];           /* connected first, then paired, then what a scan found */
+    int n;
+    int nconn;
+    char first[64];                     /* the name of the first connected device */
+};
+
+static const char *bluetoothctl_program(void)
+{
+    const char *p = getenv("MELLAGUI_BLUETOOTHCTL");
+    return p && *p ? p : "bluetoothctl";
+}
+
+static int btctl(char *out, size_t n, int timeout_ms, ...)
+{
+    char *argv[16];
+    int k = 0;
+    argv[k++] = (char *)bluetoothctl_program();
+    va_list ap;
+    va_start(ap, timeout_ms);
+    const char *a;
+    while (k < 14 && (a = va_arg(ap, const char *)) != NULL)
+        argv[k++] = (char *)a;
+    va_end(ap);
+    argv[k] = NULL;
+    int rc = run_cmd(argv, out, n, timeout_ms);
+    if (out && n) {                                             /* colour codes and carriage returns of older versions */
+        char *w = out;
+        for (const char *r = out; *r; r++) {
+            if (*r == 0x1b && r[1] == '[') {
+                r += 2;
+                while (*r && !isalpha((unsigned char)*r))
+                    r++;
+                if (!*r)
+                    break;
+                continue;
+            }
+            if (*r != '\r')
+                *w++ = *r;
+        }
+        *w = 0;
+    }
+    return rc;
+}
+
+static bool mac_ok(const char *s)
+{
+    if (strlen(s) != 17)
+        return false;
+    for (int i = 0; i < 17; i++)
+        if (i % 3 == 2 ? s[i] != ':' : !isxdigit((unsigned char)s[i]))
+            return false;
+    return true;
+}
+
+/* "Device AA:BB:CC:DD:EE:FF Some name" lines -> devices (name = the rest of the line). */
+static int parse_bt_devices(const char *text, struct btdev *out, int max)
+{
+    int n = 0;
+    for (const char *p = text; *p && n < max;) {
+        size_t l = strcspn(p, "\n");
+        char line[160];
+        snprintf(line, sizeof(line), "%.*s", (int)LM_MIN(l, sizeof(line) - 1), p);
+        p += l + (p[l] ? 1 : 0);
+        char *s = line;
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (strncmp(s, "Device ", 7) != 0)
+            continue;
+        s += 7;
+        char mac[18];
+        snprintf(mac, sizeof(mac), "%.17s", s);
+        if (!mac_ok(mac))
+            continue;
+        struct btdev *d = &out[n++];
+        memset(d, 0, sizeof(*d));
+        copy(d->mac, sizeof(d->mac), mac);
+        s += 17;
+        while (*s == ' ')
+            s++;
+        copy(d->name, sizeof(d->name), *s ? s : mac);
+    }
+    return n;
+}
+
+/* The value of "\tKey: value" in `bluetoothctl show` / `info` output. */
+static bool bt_field(const char *text, const char *key, char *out, size_t n)
+{
+    size_t kl = strlen(key);
+    for (const char *p = text; *p;) {
+        const char *q = p;
+        while (*q == ' ' || *q == '\t')
+            q++;
+        size_t l = strcspn(q, "\n");
+        if (!strncmp(q, key, kl) && q[kl] == ':') {
+            const char *v = q + kl + 1;
+            while (*v == ' ')
+                v++;
+            snprintf(out, n, "%.*s", (int)LM_MIN(strcspn(v, "\n"), n - 1), v);
+            return true;
+        }
+        p = q + l + (q[l] ? 1 : 0);
+    }
+    return false;
+}
+
+static bool bt_yes(const char *text, const char *key)
+{
+    char v[16];
+    return bt_field(text, key, v, sizeof(v)) && !strncmp(v, "yes", 3);
+}
+
+static void read_bt(struct btinfo *bi)
+{
+    static char text[8192];
+    memset(bi, 0, sizeof(*bi));
+    if (btctl(text, sizeof(text), 3000, "show", NULL) != 0 || !strstr(text, "Controller"))
+        return;
+    bi->have = true;
+    bi->powered = bt_yes(text, "Powered");
+    if (!bi->powered)
+        return;
+    struct btdev all[MAX_BT];
+    int n = btctl(text, sizeof(text), 3000, "devices", NULL) == 0 ? parse_bt_devices(text, all, MAX_BT) : 0;
+    struct btdev paired[MAX_BT];
+    int np = 0;
+    if (btctl(text, sizeof(text), 3000, "devices", "Paired", NULL) == 0)                  /* bluez 5.65 and newer (5.72 checked) */
+        np = parse_bt_devices(text, paired, MAX_BT);
+    if (np == 0 && btctl(text, sizeof(text), 3000, "paired-devices", NULL) == 0)          /* older: removed in newer versions, where it fails */
+        np = parse_bt_devices(text, paired, MAX_BT);
+    for (int i = 0; i < np; i++) {                              /* a paired device that `devices` did not list is added */
+        bool seen = false;
+        for (int j = 0; j < n; j++)
+            seen |= !strcmp(all[j].mac, paired[i].mac);
+        if (!seen && n < MAX_BT)
+            all[n++] = paired[i];
+    }
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < np; j++)
+            if (!strcmp(all[i].mac, paired[j].mac))
+                all[i].paired = true;
+    int infos = 0;
+    for (int i = 0; i < n; i++) {                               /* who is connected: `info` of the paired ones */
+        if (!all[i].paired || infos++ >= 12)
+            continue;
+        if (btctl(text, sizeof(text), 3000, "info", all[i].mac, NULL) == 0)
+            all[i].connected = bt_yes(text, "Connected");
+    }
+    for (int pass = 0; pass < 3; pass++)                        /* connected, then paired, then the rest */
+        for (int i = 0; i < n && bi->n < MAX_BT; i++) {
+            if (!all[i].paired && !all[i].connected) {          /* a scan fills the list with beacons that have no name (it is their address): leave them out */
+                char dashed[18];
+                memcpy(dashed, all[i].mac, 18);
+                for (char *c = dashed; *c; c++)
+                    if (*c == ':')
+                        *c = '-';
+                if (!strcmp(all[i].name, dashed) || !strcmp(all[i].name, all[i].mac))
+                    continue;
+            }
+            int rank = all[i].connected ? 0 : all[i].paired ? 1 : 2;
+            if (rank == pass)
+                bi->dev[bi->n++] = all[i];
+        }
+    for (int i = 0; i < bi->n; i++)
+        if (bi->dev[i].connected && bi->nconn++ == 0)
+            copy(bi->first, sizeof(bi->first), bi->dev[i].name);
+}
+
 /* ---- icons (premultiplied ARGB, drawn with signed distances) ---------------------------------------------------------------------- */
 
 static float clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
@@ -643,6 +828,26 @@ static void draw_wifi(uint32_t *px, int s, int signal, bool slash)
     }
 }
 
+/* Bluetooth: the rune (a vertical stroke with two arrowheads); dim while the radio is off, a green dot while something is connected. */
+static void draw_bluetooth(uint32_t *px, int s, bool powered, bool connected)
+{
+    memset(px, 0, (size_t)s * (size_t)s * 4);
+    float fs = (float)s, width = fmaxf(1.5f, fs * 0.1f);
+    float pts[6][2] = { { 0.26f, 0.32f }, { 0.74f, 0.68f }, { 0.5f, 0.88f }, { 0.5f, 0.12f }, { 0.74f, 0.32f }, { 0.26f, 0.68f } };
+    for (int y = 0; y < s; y++)
+        for (int x = 0; x < s; x++) {
+            float fx = (float)x + 0.5f, fy = (float)y + 0.5f, best = 1e9f;
+            for (int i = 0; i < 5; i++) {
+                float ax = pts[i][0] * fs, ay = pts[i][1] * fs, bx = pts[i + 1][0] * fs, by = pts[i + 1][1] * fs;
+                float dx = bx - ax, dy = by - ay, t = clamp01(((fx - ax) * dx + (fy - ay) * dy) / (dx * dx + dy * dy));
+                best = fminf(best, hypotf(fx - (ax + t * dx), fy - (ay + t * dy)));
+            }
+            blend(&px[y * s + x], powered ? lm_theme.text : lm_theme.text_dim, clamp01(width / 2 + 0.5f - best), powered ? 1.0f : 0.55f);
+            if (connected)
+                blend(&px[y * s + x], lm_theme.ok, clamp01(fs * 0.13f + 0.5f - hypotf(fx - fs * 0.84f, fy - fs * 0.84f)), 1.0f);
+        }
+}
+
 /* The notification bell: a dome that flares out, a lip and a clapper; a red dot when something is unread, a slash while "do not disturb" is on. */
 static void draw_bell(uint32_t *px, int s, bool unread, bool dnd)
 {
@@ -697,7 +902,7 @@ static void draw_ethernet(uint32_t *px, int s)
 
 /* ---- the tray buttons ------------------------------------------------------------------------------------------------------------- */
 
-enum { ITEM_BATTERY, ITEM_NETWORK, ITEM_BELL, ITEM_COUNT };
+enum { ITEM_BATTERY, ITEM_NETWORK, ITEM_BELL, ITEM_BLUETOOTH, ITEM_COUNT };
 
 struct tray_item {
     uint32_t id, pool, buf;
@@ -714,7 +919,9 @@ struct app {
     struct wlwin win;
     uint32_t tray, settings, menu_global;
     struct tray_item item[ITEM_COUNT];
-    bool want_battery, want_network;
+    bool want_battery, want_network, want_bluetooth;
+    struct btinfo bt;
+    uint64_t bt_at;
     struct battery bats[MAX_BAT];
     int nbats;
     struct netinfo net;
@@ -722,7 +929,7 @@ struct app {
     int nnets;
     uint64_t bat_at, net_at;
     bool warned15, warned5;
-    int menu_kind;                      /* 0 none, 1 battery, 2 network, 3 notifications */
+    int menu_kind;                      /* 0 none, 1 battery, 2 network, 3 notifications, 4 Bluetooth */
     int unread;                         /* notifications not looked at (the settings value notes-unread) */
     bool dnd;                           /* "do not disturb" is on */
     bool bell_dirty;                    /* unread / dnd changed: look at the bell */
@@ -731,7 +938,7 @@ struct app {
     char self[512];
 };
 
-enum { ACT_NONE, ACT_NOTES_SHOW, ACT_NOTES_DND, ACT_NOTES_CLEAR, ACT_RADIO, ACT_RESCAN, ACT_DISCONNECT, ACT_CONNECT_KNOWN, ACT_CONNECT_OPEN, ACT_CONNECT_PASSWORD };
+enum { ACT_NONE, ACT_BT_POWER, ACT_BT_SCAN, ACT_BT_CONNECT, ACT_BT_DISCONNECT, ACT_BT_PAIR, ACT_NOTES_SHOW, ACT_NOTES_DND, ACT_NOTES_CLEAR, ACT_RADIO, ACT_RESCAN, ACT_DISCONNECT, ACT_CONNECT_KNOWN, ACT_CONNECT_OPEN, ACT_CONNECT_PASSWORD };
 
 static void buffer_nothing(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
@@ -840,6 +1047,11 @@ static void draw_bell_item(struct app *a, struct tray_item *it)
     draw_bell(it->map, it->size, a->unread > 0, a->dnd);
 }
 
+static void draw_bluetooth_item(struct app *a, struct tray_item *it)
+{
+    draw_bluetooth(it->map, it->size, a->bt.powered, a->bt.nconn > 0);
+}
+
 static void draw_network_item(struct app *a, struct tray_item *it)
 {
     const struct netinfo *n = &a->net;
@@ -881,6 +1093,17 @@ static void items_update(struct app *a)
         uint64_t key = (uint64_t)n->kind * 1000 + (uint64_t)(n->signal / 10) * 10 + (n->wifi_enabled ? 1 : 0) + (n->wifi_present ? 2 : 0) + ((uint64_t)lm_theme.text << 32);
         item_set(a, ITEM_NETWORK, key, t, draw_network_item);
     }
+    bool have_bt = a->want_bluetooth && a->bt.have;
+    if (have_bt)
+        item_make(a, ITEM_BLUETOOTH);
+    else
+        item_drop(a, ITEM_BLUETOOTH);
+    if (have_bt) {
+        char t[32] = "";
+        if (a->bt.nconn > 0)
+            snprintf(t, sizeof(t), "%.14s", a->bt.first);
+        item_set(a, ITEM_BLUETOOTH, (a->bt.powered ? 2u : 0u) + (a->bt.nconn > 0 ? 1u : 0u) + ((uint64_t)lm_theme.text << 32), t, draw_bluetooth_item);
+    }
     bool have_bell = a->settings && (a->unread > 0 || a->dnd);          /* the bell is there while there is something to read or DND is on */
     if (have_bell)
         item_make(a, ITEM_BELL);
@@ -915,6 +1138,12 @@ static void refresh_battery(struct app *a)
             notify(a, "Battery low", body, 10000);
         }
     }
+}
+
+static void refresh_bt(struct app *a)
+{
+    read_bt(&a->bt);
+    a->bt_at = now_ms();
 }
 
 static void refresh_net(struct app *a)
@@ -996,6 +1225,105 @@ static void open_network_menu(struct app *a)
     wlwin_menu(&a->win, buf);
 }
 
+static void open_bluetooth_menu(struct app *a)
+{
+    refresh_bt(a);
+    char buf[2048], line[128];
+    size_t o = 0;
+    a->menu_n = 0;
+#define ADD(act, text, mac_, conn_) do { \
+        if (a->menu_n < MENU_ENTRIES) { \
+            menu_line(buf, sizeof(buf), &o, text); \
+            a->menu_act[a->menu_n].action = (act); \
+            copy(a->menu_act[a->menu_n].ssid, sizeof(a->menu_act[0].ssid), mac_); \
+            a->menu_act[a->menu_n].known = (conn_); \
+            a->menu_n++; \
+        } } while (0)
+    if (!a->bt.powered)
+        snprintf(line, sizeof(line), "~Bluetooth is off");
+    else if (a->bt.nconn > 0)
+        snprintf(line, sizeof(line), "~Bluetooth on, %d connected", a->bt.nconn);
+    else
+        snprintf(line, sizeof(line), "~Bluetooth on");
+    ADD(ACT_NONE, line, "", false);
+    ADD(ACT_BT_POWER, a->bt.powered ? "Turn Bluetooth off" : "Turn Bluetooth on", "", false);
+    if (a->bt.powered) {
+        ADD(ACT_BT_SCAN, "Scan for devices (8 s)", "", false);
+        for (int i = 0; i < a->bt.n; i++) {
+            const struct btdev *d = &a->bt.dev[i];
+            snprintf(line, sizeof(line), "%c %.30s%s", d->connected ? '*' : d->paired ? ' ' : '+', d->name, d->paired || d->connected ? "" : " (new)");
+            ADD(d->connected ? ACT_BT_DISCONNECT : d->paired ? ACT_BT_CONNECT : ACT_BT_PAIR, line, d->mac, d->connected);
+        }
+    }
+#undef ADD
+    a->menu_kind = 4;
+    wlwin_menu(&a->win, buf);
+}
+
+/* The last non-empty line of a program's output, for a notification. */
+static const char *last_line(char *text)
+{
+    trim(text);
+    char *nl = strrchr(text, '\n');
+    return nl ? nl + 1 : text;
+}
+
+static void bt_action(struct app *a, int action, const char *mac)
+{
+    static char out[2048];
+    const char *name = mac;
+    for (int i = 0; i < a->bt.n; i++)
+        if (!strcmp(a->bt.dev[i].mac, mac))
+            name = a->bt.dev[i].name;
+    int rc;
+    switch (action) {
+    case ACT_BT_POWER:
+        rc = btctl(out, sizeof(out), 8000, "power", a->bt.powered ? "off" : "on", NULL);
+        if (rc != 0)
+            notify(a, "Bluetooth", out[0] ? last_line(out) : "Could not switch it (is it blocked? rfkill unblock bluetooth)", 8000);
+        break;
+    case ACT_BT_SCAN:
+    {
+        int before = 0, after = 0;
+        for (int i = 0; i < a->bt.n; i++)
+            before += !a->bt.dev[i].paired && !a->bt.dev[i].connected;
+        btctl(out, sizeof(out), 14000, "--timeout", "8", "scan", "on", NULL);
+        refresh_bt(a);
+        for (int i = 0; i < a->bt.n; i++)
+            after += !a->bt.dev[i].paired && !a->bt.dev[i].connected;
+        char msg[96];
+        if (after > before)
+            snprintf(msg, sizeof(msg), "Scan finished: %d new device%s in the menu (+)", after - before, after - before == 1 ? "" : "s");
+        else
+            snprintf(msg, sizeof(msg), "Scan finished: no new devices with a name found");
+        notify(a, "Bluetooth", msg, 5000);
+        break;
+    }
+    case ACT_BT_CONNECT:
+        rc = btctl(out, sizeof(out), 20000, "connect", mac, NULL);
+        notify(a, rc == 0 && strstr(out, "successful") ? "Bluetooth connected" : "Bluetooth", rc == 0 && strstr(out, "successful") ? name : out[0] ? last_line(out) : "Could not connect", 6000);
+        break;
+    case ACT_BT_DISCONNECT:
+        rc = btctl(out, sizeof(out), 10000, "disconnect", mac, NULL);
+        notify(a, "Bluetooth", rc == 0 ? "Disconnected" : out[0] ? last_line(out) : "Could not disconnect", 4000);
+        break;
+    case ACT_BT_PAIR:
+        rc = btctl(out, sizeof(out), 30000, "pair", mac, NULL);
+        if (rc != 0 || !strstr(out, "successful")) {
+            notify(a, "Bluetooth pairing failed", out[0] ? last_line(out) : "No answer from the device", 10000);
+            break;
+        }
+        btctl(out, sizeof(out), 5000, "trust", mac, NULL);          /* so that it reconnects by itself next time */
+        rc = btctl(out, sizeof(out), 20000, "connect", mac, NULL);
+        notify(a, rc == 0 ? "Bluetooth connected" : "Bluetooth paired", rc == 0 ? name : "Paired, but it did not connect", 6000);
+        break;
+    default:
+        break;
+    }
+    refresh_bt(a);
+    items_update(a);
+}
+
 static void settings_send(struct app *a, const char *key, const char *value)
 {
     if (a->settings)
@@ -1054,6 +1382,9 @@ static void do_action(struct app *a, int idx)
     char out[512];
     int rc;
     switch (a->menu_act[idx].action) {
+    case ACT_BT_POWER: case ACT_BT_SCAN: case ACT_BT_CONNECT: case ACT_BT_DISCONNECT: case ACT_BT_PAIR:
+        bt_action(a, a->menu_act[idx].action, ssid);
+        return;
     case ACT_NOTES_SHOW:
         start_notes(a);
         return;
@@ -1111,7 +1442,7 @@ static void menu_event(struct wlwin *w, int index)
     struct app *a = w->data;
     int kind = a->menu_kind;
     a->menu_kind = 0;
-    if ((kind == 2 || kind == 3) && index >= 0)
+    if ((kind == 2 || kind == 3 || kind == 4) && index >= 0)
         do_action(a, index);
 }
 
@@ -1144,10 +1475,10 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 
 static void paint_nothing(struct wlwin *w) { (void)w; }
 
-static int run_background(bool battery, bool network)
+static int run_background(bool battery, bool network, bool bluetooth)
 {
     static const struct wlwin_ops ops = { .paint = paint_nothing, .global = global_event, .menu = menu_event };
-    struct app a = { .want_battery = battery, .want_network = network };
+    struct app a = { .want_battery = battery, .want_network = network, .want_bluetooth = bluetooth };
     ssize_t k = readlink("/proc/self/exe", a.self, sizeof(a.self) - 1);
     if (k > 0)
         a.self[k] = 0;
@@ -1162,6 +1493,8 @@ static int run_background(bool battery, bool network)
     }
     refresh_battery(&a);
     refresh_net(&a);
+    if (bluetooth)
+        refresh_bt(&a);
     items_update(&a);
     if (!a.item[ITEM_BATTERY].id && !a.item[ITEM_NETWORK].id && !a.settings) {
         rc = 0;                                                  /* nothing to show: no battery and no NetworkManager */
@@ -1171,6 +1504,10 @@ static int run_background(bool battery, bool network)
         uint64_t now = now_ms();
         if (now - a.bat_at >= BAT_POLL_MS) {
             refresh_battery(&a);
+            items_update(&a);
+        }
+        if (a.want_bluetooth && now - a.bt_at >= BT_POLL_MS) {
+            refresh_bt(&a);
             items_update(&a);
         }
         if (now - a.net_at >= NET_POLL_MS) {
@@ -1196,6 +1533,11 @@ static int run_background(bool battery, bool network)
             refresh_battery(&a);
             items_update(&a);
             open_battery_menu(&a);
+        }
+        if (a.item[ITEM_BLUETOOTH].clicked) {
+            a.item[ITEM_BLUETOOTH].clicked = false;
+            open_bluetooth_menu(&a);
+            items_update(&a);
         }
         if (a.item[ITEM_NETWORK].clicked) {
             a.item[ITEM_NETWORK].clicked = false;
@@ -1351,6 +1693,11 @@ static int run_list(void)
     read_net(&ni);
     printf("network nm=%d wifi=%d radio=%d kind=%s dev=%s ssid=%s signal=%d ip=%s\n", ni.have_nm, ni.wifi_present, ni.wifi_enabled,
            ni.kind == NET_WIFI ? "wifi" : ni.kind == NET_ETHERNET ? "ethernet" : "none", ni.dev[0] ? ni.dev : "-", ni.ssid[0] ? ni.ssid : "-", ni.signal, ni.ip[0] ? ni.ip : "-");
+    struct btinfo bi;
+    read_bt(&bi);
+    printf("bluetooth have=%d powered=%d connected=%d\n", bi.have, bi.powered, bi.nconn);
+    for (int i = 0; i < bi.n; i++)
+        printf("bt %s %s paired=%d connected=%d\n", bi.dev[i].mac, bi.dev[i].name, bi.dev[i].paired, bi.dev[i].connected);
     if (ni.wifi_enabled) {
         struct wifi w[MAX_NETS];
         int m = wifi_list(NULL, w, MAX_NETS);
@@ -1401,6 +1748,17 @@ static int selftest(void)
     for (int i = 0; i < 22 * 22; i++)
         lit += (px[i] >> 24) > 128;
     CHECK(lit > 30, "wifi icon is empty (%d)", lit);
+    struct btdev bd[4];
+    n = parse_bt_devices("Device AA:BB:CC:DD:EE:01 My Headset\nDevice nonsense x\n\tDevice 11:22:33:44:55:66 Tab\n", bd, 4);
+    CHECK(n == 2 && !strcmp(bd[0].mac, "AA:BB:CC:DD:EE:01") && !strcmp(bd[0].name, "My Headset") && !strcmp(bd[1].name, "Tab"), "parse_bt_devices %d", n);
+    char fv[32];
+    CHECK(bt_field("Device X\n\tName: a b\n\tConnected: yes\n", "Connected", fv, sizeof(fv)) && !strcmp(fv, "yes") && bt_yes("\tPowered: yes\n", "Powered") &&
+          !bt_yes("\tPowered: no\n", "Powered") && !bt_field("\tName: x\n", "Alias", fv, sizeof(fv)), "bt_field");
+    draw_bluetooth(px, 22, true, true);
+    lit = 0;
+    for (int i = 0; i < 22 * 22; i++)
+        lit += (px[i] >> 24) > 128;
+    CHECK(lit > 20, "bluetooth icon is empty (%d)", lit);
     char t[32];
     fmt_minutes(t, sizeof(t), 135);
     CHECK(!strcmp(t, "2 h 15 min"), "fmt_minutes '%s'", t);
@@ -1413,7 +1771,7 @@ static int selftest(void)
 int main(int argc, char **argv)
 {
     lm_theme_load_env();
-    bool battery = true, network = true;
+    bool battery = true, network = true, bluetooth = true;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
             return selftest();
@@ -1425,10 +1783,12 @@ int main(int argc, char **argv)
             battery = false;
         else if (!strcmp(argv[i], "--no-network"))
             network = false;
+        else if (!strcmp(argv[i], "--no-bluetooth"))
+            bluetooth = false;
         else {
-            fprintf(stderr, "usage: mellagui-status [--no-battery] [--no-network] | --password SSID | --list | --selftest\n");
+            fprintf(stderr, "usage: mellagui-status [--no-battery] [--no-network] [--no-bluetooth] | --password SSID | --list | --selftest\n");
             return 2;
         }
     }
-    return run_background(battery, network);
+    return run_background(battery, network, bluetooth);
 }

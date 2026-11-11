@@ -7271,7 +7271,7 @@ class TestStatus(Base):
             json.dump(state or self.STATE, f)
         self.log_path = os.path.join(d, 'nm.log')
         fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_nmcli.py')
-        return d, {'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': os.path.join(d, 'power'), 'MELLAGUI_NMCLI': fake,
+        return d, {'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': os.path.join(d, 'power'), 'MELLAGUI_NMCLI': fake, 'MELLAGUI_BLUETOOTHCTL': 'none',
                    'FAKE_NM_STATE': self.state_path, 'FAKE_NM_LOG': self.log_path}
 
     def start(self, tag, **kw):
@@ -11214,7 +11214,7 @@ class TestNotifyHistory(Base):
             self.skipTest('mellagui-status not built')
         d = os.path.join(tmp, 'nh6-power')
         os.makedirs(d, exist_ok=True)
-        c = self.start('mellagui-nh6', env={'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': d, 'MELLAGUI_NMCLI': 'none'})
+        c = self.start('mellagui-nh6', env={'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': d, 'MELLAGUI_NMCLI': 'none', 'MELLAGUI_BLUETOOTHCTL': 'none'})
         time.sleep(0.5)
         self.assertEqual(TestStatus.items(c), [])                                # nothing to say: no bell
         c.cmd('notify 0 Hello there')
@@ -11230,6 +11230,120 @@ class TestNotifyHistory(Base):
         ents = TestStatus.entries(c)
         c.click(ents[2][1], ents[2][2])                                          # Turn Do not disturb off
         self.wait(lambda: self.val(c, 'dnd') == '0', 'the menu switches DND off')
+
+class TestBluetooth(Base):
+    """The Bluetooth button of mellagui-status (tests/fake_bluetoothctl.py; never tried against a real bluetoothctl)."""
+
+    STATE = {'controller': True, 'powered': True,
+             'devices': [{'mac': 'AA:BB:CC:DD:EE:01', 'name': 'Headset', 'paired': True, 'connected': False},
+                         {'mac': 'AA:BB:CC:DD:EE:02', 'name': 'Mouse', 'paired': True, 'connected': True}],
+             'nearby': [{'mac': 'AA:BB:CC:DD:EE:09', 'name': 'New Speaker'}], 'pair_fails': False}
+
+    def start(self, tag, **changes):
+        import json
+        st = json.loads(json.dumps(self.STATE))
+        st.update(changes)
+        d = os.path.join(tmp, 'bt-' + tag)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'power'))
+        self.state_path = os.path.join(d, 'bt.json')
+        with open(self.state_path, 'w') as f:
+            json.dump(st, f)
+        self.log_path = os.path.join(d, 'bt.log')
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_bluetoothctl.py')
+        env = {'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': os.path.join(d, 'power'), 'MELLAGUI_NMCLI': 'none',
+               'MELLAGUI_BLUETOOTHCTL': fake, 'FAKE_BT_STATE': self.state_path, 'FAKE_BT_LOG': self.log_path}
+        p, c, stop = self.private_compositor('mellagui-bt-' + tag, '--size', '1280x600', env=env)
+        return c
+
+    def state(self):
+        import json
+        return json.load(open(self.state_path))
+
+    def dev(self, mac):
+        return [d for d in self.state()['devices'] if d['mac'] == mac][0]
+
+    def wait(self, pred, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def button(self, c, **kw):
+        its = TestStatus.items(c, want=1)
+        self.assertTrue(its)
+        return max(its, key=lambda i: int(i['x']))                          # (the first button made is the rightmost; the bell comes later, to its left)
+
+    def open_menu(self, c):
+        it = self.button(c)
+        c.click(int(it['x']) + 5, int(it['y']) + 5)
+        self.wait(lambda: 'open=1' in c.cmd('dockmenu')[0], 'the Bluetooth menu')
+        return [e[0] for e in TestStatus.entries(c)]
+
+    def choose(self, c, label):
+        for e in TestStatus.entries(c):
+            if e[0] == label:
+                c.click(e[1], e[2])
+                return
+        self.fail('no entry %r in %r' % (label, [e[0] for e in TestStatus.entries(c)]))
+
+    def test_the_button_shows_the_connected_device_and_the_menu_lists_the_paired_ones(self):
+        c = self.start('1')
+        it = self.button(c)
+        self.assertEqual(it['text'], 'Mouse')
+        self.assertEqual(self.open_menu(c), ['Bluetooth on, 1 connected', 'Turn Bluetooth off', 'Scan for devices (8 s)', '* Mouse', '  Headset'])
+
+    def test_a_click_on_a_device_connects_or_disconnects_it(self):
+        c = self.start('2')
+        self.open_menu(c)
+        self.choose(c, '  Headset')
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:01')['connected'], 'the headset connects')
+        c.sync()
+        self.open_menu(c)
+        self.choose(c, '* Mouse')
+        self.wait(lambda: not self.dev('AA:BB:CC:DD:EE:02')['connected'], 'the mouse disconnects')
+        self.assertIn('disconnect AA:BB:CC:DD:EE:02', open(self.log_path).read())
+
+    def test_power_off_and_on(self):
+        c = self.start('3')
+        self.open_menu(c)
+        self.choose(c, 'Turn Bluetooth off')
+        self.wait(lambda: not self.state()['powered'], 'power off')
+        self.wait(lambda: TestStatus.items(c, wait=0.1)[0]['text'] == '' if TestStatus.items(c, wait=0.1) else False, 'no name any more')
+        self.assertEqual(self.open_menu(c), ['Bluetooth is off', 'Turn Bluetooth on'])
+        self.choose(c, 'Turn Bluetooth on')
+        self.wait(lambda: self.state()['powered'], 'power on')
+
+    def test_a_scan_shows_new_devices_and_a_click_pairs_and_connects_them(self):
+        c = self.start('4')
+        self.open_menu(c)
+        self.choose(c, 'Scan for devices (8 s)')
+        self.wait(lambda: any(d['mac'] == 'AA:BB:CC:DD:EE:09' for d in self.state()['devices']), 'the scan finds it')
+        time.sleep(0.5)
+        c.sync()
+        labels = self.open_menu(c)
+        self.assertIn('+ New Speaker (new)', labels)
+        self.choose(c, '+ New Speaker (new)')
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:09')['connected'], 'paired and connected')
+        log = open(self.log_path).read()
+        self.assertLess(log.index('pair AA:BB:CC:DD:EE:09'), log.index('trust AA:BB:CC:DD:EE:09'))
+        self.assertLess(log.index('trust AA:BB:CC:DD:EE:09'), log.rindex('connect AA:BB:CC:DD:EE:09'))
+
+    def test_a_failed_pairing_says_why(self):
+        c = self.start('5', pair_fails=True, devices=[{'mac': 'AA:BB:CC:DD:EE:07', 'name': 'Keyboard', 'paired': False, 'connected': False}])
+        self.assertEqual(self.open_menu(c)[3:], ['+ Keyboard (new)'])
+        self.choose(c, '+ Keyboard (new)')
+        self.wait(lambda: 'pair AA:BB:CC:DD:EE:07' in open(self.log_path).read(), 'it tries')
+        self.wait(lambda: any('pairing failed' in l.lower() for l in c.cmd('notes')), 'a notification')
+        self.assertFalse(self.dev('AA:BB:CC:DD:EE:07')['paired'])
+
+    def test_no_controller_no_button(self):
+        c = self.start('6', controller=False)
+        time.sleep(1.0)
+        self.assertEqual(TestStatus.items(c), [])
+
 
 class TestSaver(Base):
     """The screensaver: after idle time the compositor starts mellagui-matrix (a full screen client); the first input ends it."""

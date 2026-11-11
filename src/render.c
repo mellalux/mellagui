@@ -67,6 +67,8 @@ struct out_state {
     struct lm_rect wall_rect;           /* output-local */
     uint32_t wall_gen;
     int wall_w, wall_h;
+    uint32_t *mag_px;                   /* the scene before it is magnified (software renderer), output sized */
+    int mag_w, mag_h;
 };
 
 struct wallpaper {
@@ -2429,6 +2431,7 @@ static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, con
     free(sx0);
 }
 
+static bool mag_view(struct lm_renderer *r, const struct lm_output *out, float *zoom, float *ox, float *oy);
 static void lm_render_ghost_gl_free(struct lm_renderer *r, struct lm_ghost *g);      /* render_gl.inc */
 
 void lm_render_ghost_free(struct lm_renderer *r, struct lm_ghost *g)
@@ -2712,6 +2715,67 @@ static void send_frame_done(struct lm_renderer *r, uint32_t t)
 #include "render_gl.inc"
 
 /* Returns true if a frame was presented. */
+/* The screen magnifier: the output is shown zoomed by config.magnifier_zoom round the pointer. The point under the pointer stays where it is (the view's origin is
+ * pointer * (1 - 1/zoom)), so the pointer keeps pointing at what it points at and nothing has to scroll. Only the output the pointer is on is magnified. */
+static bool mag_view(struct lm_renderer *r, const struct lm_output *out, float *zoom, float *ox, float *oy)
+{
+    const struct lm_config *cfg = &r->srv->config;
+    if (!cfg->magnifier || cfg->magnifier_zoom <= 100 || !r->srv->seat)
+        return false;
+    double px, py;
+    lm_seat_pointer_position(r->srv->seat, &px, &py);
+    if (lm_output_nearest(r->srv, px, py) != out)
+        return false;
+    float z = (float)cfg->magnifier_zoom / 100.0f, k = 1.0f - 1.0f / z;
+    *zoom = z;
+    *ox = (float)(px - out->x) * k;
+    *oy = (float)(py - out->y) * k;
+    return true;
+}
+
+/* A frame of the magnified output (software): the whole scene into a scratch picture, then a nearest-neighbour zoom into the framebuffer. */
+static bool draw_output_mag(struct lm_renderer *r, struct out_state *st, struct lm_framebuffer *fb, float zoom, float mox, float moy)
+{
+    struct lm_output *out = st->out;
+    int w = out->width, h = out->height;
+    if (!st->mag_px || st->mag_w != w || st->mag_h != h) {
+        free(st->mag_px);
+        st->mag_px = calloc((size_t)w * (size_t)h, 4);
+        st->mag_w = w;
+        st->mag_h = h;
+    }
+    if (!st->mag_px)
+        return false;
+    struct lm_framebuffer scratch = { .pixels = st->mag_px, .width = w, .height = h, .stride = w * 4, .age = 0 };
+    struct lm_rect orect = lm_output_rect(out);
+    paint_rect(r, st, &scratch, &orect, true);
+    int *xmap = malloc((size_t)w * sizeof(int));
+    if (!xmap)
+        return false;
+    for (int x = 0; x < w; x++) {
+        int sx = (int)(mox + ((float)x + 0.5f) / zoom);
+        xmap[x] = sx < 0 ? 0 : sx >= w ? w - 1 : sx;
+    }
+    for (int y = 0; y < h; y++) {
+        int sy = (int)(moy + ((float)y + 0.5f) / zoom);
+        sy = sy < 0 ? 0 : sy >= h ? h - 1 : sy;
+        const uint32_t *src = st->mag_px + (size_t)sy * (size_t)w;
+        uint32_t *dst = (uint32_t *)(void *)((uint8_t *)fb->pixels + (size_t)y * (size_t)fb->stride);
+        for (int x = 0; x < w; x++)
+            dst[x] = src[xmap[x]];
+    }
+    free(xmap);
+    lm_output_present(out, NULL, 0);
+    for (int i = 0; i < HIST; i++) {                    /* (every frame is whole while it is on, so there is no damage history to keep) */
+        lm_region_clear(&st->hist[i]);
+    }
+    lm_region_clear(&st->pending);
+    st->full = false;
+    st->ready = false;
+    st->presented = true;
+    return true;
+}
+
 static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
 {
     if (r->gl)
@@ -2725,6 +2789,11 @@ static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
     struct lm_framebuffer *fb = lm_output_get_framebuffer(out);
     if (!fb || !fb->pixels)
         return false;
+    {
+        float mz, mx, my;
+        if (mag_view(r, out, &mz, &mx, &my))
+            return draw_output_mag(r, st, fb, mz, mx, my);
+    }
 
     struct lm_rect orect = lm_output_rect(out);
     struct lm_region redraw;
@@ -2962,6 +3031,7 @@ void lm_render_output_removed(struct lm_renderer *r, struct lm_output *out)
     if (r->gl)
         gl_out_free(r, st);
     free(st->wall_px);
+    free(st->mag_px);
     lm_region_fini(&st->pending);
     for (int i = 0; i < HIST; i++)
         lm_region_fini(&st->hist[i]);
@@ -3003,6 +3073,15 @@ void lm_render_damage_all(struct lm_renderer *r)
 
 void lm_render_cursor_changed(struct lm_renderer *r)
 {
+    if (r->srv->config.magnifier && r->srv->config.magnifier_zoom > 100 && r->srv->seat && r->srv->backend) {       /* the view follows the pointer: the whole output */
+        double px, py;
+        lm_seat_pointer_position(r->srv->seat, &px, &py);
+        struct lm_output *po = lm_output_nearest(r->srv, px, py);
+        if (po) {
+            struct lm_rect all = lm_output_rect(po);
+            lm_render_damage(r, &all);
+        }
+    }
     struct cursor_view v;
     cursor_view(r, &v);
     struct lm_rect old = r->cursor_rect;

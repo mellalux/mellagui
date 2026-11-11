@@ -36,6 +36,7 @@ struct gl_out {
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
     uint32_t theme_gen;                 /* the palette the chromes below were painted with */
+    struct lm_gl_target mag;            /* the scene before the magnifier zooms it (made when it is first needed) */
     bool unread;                        /* rendered since the last readback */
 };
 
@@ -54,6 +55,8 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     lm_gl_make_current(r->gl);
     if (go->tgt.fbo)
         lm_gl_target_destroy(r->gl, &go->tgt);
+    if (go->mag.fbo)
+        lm_gl_target_destroy(r->gl, &go->mag);
     if (go->bg_tex)
         lm_gl_tex_delete(r->gl, go->bg_tex);
     free(go->bg);
@@ -840,7 +843,9 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     struct lm_rect orect = lm_output_rect(out);
     struct lm_region redraw;
     lm_region_init(&redraw);
-    bool full = st->full || !go->bg_ok;
+    float mz = 1.0f, mx = 0.0f, my = 0.0f;
+    bool mag = mag_view(r, out, &mz, &mx, &my);                     /* the magnifier: every frame is whole and goes through an offscreen picture */
+    bool full = st->full || !go->bg_ok || mag;
     if (full)
         lm_region_add_rect(&redraw, &orect);
     else
@@ -849,8 +854,14 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
 
     gl_bg_update(r, st, go, &redraw);
     go->bg_ok = true;
+    if (mag && !go->mag.fbo && !lm_gl_target_create(r->gl, go->w, go->h, &go->mag))
+        mag = false;
 
     struct lm_gl_window *win = lm_output_gl_window(out);
+    if (mag) {
+        lm_gl_bind_target(r->gl, &go->mag, go->w, go->h);
+        gl_draw_scene(r, st, go, &redraw, true, true);
+    }
     if (win) {
         if (!lm_gl_window_bind(r->gl, win)) {
             lm_region_fini(&redraw);
@@ -859,7 +870,13 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     } else {
         lm_gl_bind_target(r->gl, &go->tgt, go->w, go->h);
     }
-    gl_draw_scene(r, st, go, &redraw, full, true);
+    if (mag) {
+        lm_gl_scissor(r->gl, false, 0, 0, 0, 0);
+        lm_gl_draw_tex(r->gl, go->mag.tex, 0, 0, go->w, go->h, mx / (float)go->w, my / (float)go->h, (mx + (float)go->w / mz) / (float)go->w,
+                       (my + (float)go->h / mz) / (float)go->h, 1.0f, true);
+    } else {
+        gl_draw_scene(r, st, go, &redraw, full, true);
+    }
 
     if (win) {
         lm_output_gl_present(out);                      /* swap the window's buffers, queue the page flip */

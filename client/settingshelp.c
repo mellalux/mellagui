@@ -15,6 +15,11 @@ static const struct entry table[] = {
       "Tick the layouts you want to type in. The ticked ones come first, in the order that Super+Space (or a click on the layout badge in the panel) "
       "switches through them.\n"
       "'active' marks the layout in use right now, ^ moves a layout up in the order. At least one layout stays ticked and at most four can be." },
+    { "@Screen magnifier", NULL, "Screen magnifier",
+      "Zooms the screen round the pointer so that small things can be read. The point under the pointer stays where it is, so nothing has to be scrolled: "
+      "move the pointer to bring another part of the screen under it. Super+= zooms in (and switches it on), Super+- zooms out (and off at the end)." },
+    { "magnifier", NULL, "Magnify the screen", "Switches the magnifier on or off. Screenshots and recordings are not magnified." },
+    { "magnifier-zoom", NULL, "Zoom", "How much the screen is magnified, from 125 % to 800 %. The keys Super+= and Super+- step through 125, 150, 200, 300, 400, 600 and 800 %." },
     { "@Microphone", NULL, "Microphone", "The input that programs record from: pick one, set how loud it is, or mute it. It applies at once." },
     { "source", NULL, "Microphone", "The microphone (or other input) that programs such as video calls and recorders use by default." },
     { "source-volume", NULL, "Input level", "How loud the chosen microphone is, from 0 to 100 %." },

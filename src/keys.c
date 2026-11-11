@@ -46,6 +46,8 @@
     "Super+A           = launcher\n" \
     "Super+K           = osk\n" \
     "Super+Z           = quick-settings\n" \
+    "Super+Equal       = magnify-in\n" \
+    "Super+Minus       = magnify-out\n" \
     "Super+W           = overview\n" \
     "Super+Shift+N     = night-light\n" \
     "Super+N           = dnd\n" \
@@ -154,7 +156,7 @@ static const struct action_def actions[] = {
     { "fullscreen", LM_ACT_FULLSCREEN, ARG_NONE }, { "maximize-toggle", LM_ACT_MAXIMIZE_TOGGLE, ARG_NONE },
     { "maximize", LM_ACT_MAXIMIZE, ARG_NONE }, { "restore", LM_ACT_RESTORE, ARG_NONE },
     { "tile-left", LM_ACT_TILE_LEFT, ARG_NONE }, { "tile-right", LM_ACT_TILE_RIGHT, ARG_NONE },
-    { "reload-config", LM_ACT_RELOAD_CONFIG, ARG_NONE }, { "launcher", LM_ACT_LAUNCHER, ARG_NONE }, { "osk", LM_ACT_OSK, ARG_NONE }, { "quick-settings", LM_ACT_QUICK, ARG_NONE }, { "overview", LM_ACT_OVERVIEW, ARG_NONE },
+    { "reload-config", LM_ACT_RELOAD_CONFIG, ARG_NONE }, { "launcher", LM_ACT_LAUNCHER, ARG_NONE }, { "osk", LM_ACT_OSK, ARG_NONE }, { "quick-settings", LM_ACT_QUICK, ARG_NONE }, { "magnify-in", LM_ACT_MAGNIFY_IN, ARG_NONE }, { "magnify-out", LM_ACT_MAGNIFY_OUT, ARG_NONE }, { "overview", LM_ACT_OVERVIEW, ARG_NONE },
     { "night-light", LM_ACT_NIGHT_LIGHT, ARG_NONE }, { "dnd", LM_ACT_DND, ARG_NONE },
 };
 

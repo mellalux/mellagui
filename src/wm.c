@@ -7782,6 +7782,33 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_LAUNCHER: launcher_set(wm, !wm->launcher_open, NULL); break;
     case LM_ACT_OSK: osk_set(wm, !wm->osk_open); break;
     case LM_ACT_QUICK: lm_wm_quick_toggle(wm, NULL); break;
+    case LM_ACT_MAGNIFY_IN:
+    case LM_ACT_MAGNIFY_OUT: {                                          /* the magnifier: Super+= zooms in (switching it on), Super+- out (off at the end) */
+        static const int steps[] = { 125, 150, 200, 300, 400, 600, 800 };
+        int cur = wm->srv->config.magnifier ? wm->srv->config.magnifier_zoom : 100, next = cur, count = (int)(sizeof(steps) / sizeof(steps[0]));
+        if (kb->action == LM_ACT_MAGNIFY_IN) {
+            next = steps[count - 1];
+            for (int i = count - 1; i >= 0; i--)
+                if (steps[i] > cur)
+                    next = steps[i];
+            if (cur >= steps[count - 1])
+                next = cur;
+        } else {
+            next = 100;
+            for (int i = 0; i < count; i++)
+                if (steps[i] < cur)
+                    next = steps[i];
+        }
+        if (wm->srv->settings && next != cur) {
+            char v[16];
+            if (next > 100) {
+                snprintf(v, sizeof(v), "%d", next);
+                lm_settings_set(wm->srv->settings, "magnifier-zoom", v);
+            }
+            lm_settings_set(wm->srv->settings, "magnifier", next > 100 ? "1" : "0");
+        }
+        break;
+    }
     case LM_ACT_OVERVIEW: overview_set(wm, !wm->ov.open || wm->ov.closing); break;
     case LM_ACT_NIGHT_LIGHT: lm_night_toggle(wm->srv->night); break;
     case LM_ACT_DND:

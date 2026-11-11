@@ -11920,7 +11920,7 @@ class TestDockAutohideAnimation(Base):
 
 
 class TestLauncherBubble(Base):
-    """The launcher dialog rises out of its dock button as a bubble that takes the shape of the card (3.3 s) and goes back the same way."""
+    """The launcher dialog rises out of its dock button as a bubble that takes the shape of the card (2 s) and goes back the same way."""
 
     def start(self):
         p, c, stop = self.private_compositor('mellagui-bub', '--config', 'none', '--size', '1000x640', env={'MELLAGUI_ANIMATIONS': '300'})
@@ -11950,28 +11950,28 @@ class TestLauncherBubble(Base):
             if m:
                 return tuple(int(v) for v in m.groups())
 
-    def test_it_rises_from_the_launcher_button_and_takes_the_shape_of_the_card_in_three_seconds(self):
+    def test_it_rises_from_the_launcher_button_and_takes_the_shape_of_the_card_in_two_seconds(self):
         c = self.start()
         bx, by = self.launcher_button(c)
         t0 = time.time()
         c.cmd('launcher open')
-        time.sleep(0.3)
+        time.sleep(0.2)
         b = self.bubble(c)
         self.assertEqual(b['kind'], 'opening')
         self.assertLess(b['w'], 90)                                           # a small bubble ...
         self.assertTrue(abs(b['x'] + b['w'] // 2 - bx) < 60 and abs(b['y'] + b['h'] // 2 - by) < 60, (b, bx, by))     # ... at the button
-        time.sleep(1.2)
+        time.sleep(0.7)
         mid = self.bubble(c)
         self.assertGreater(mid['w'], b['w'])
         self.assertLess(mid['y'] + mid['h'] // 2, by - 40)                    # it has risen
-        time.sleep(1.2)                                                       # 2.7 s in
-        self.assertIsNotNone(self.bubble(c), 'it was over before three seconds')
+        time.sleep(0.8)                                                       # 1.7 s in
+        self.assertIsNotNone(self.bubble(c), 'it was over before two seconds')
         end = time.time() + 2.0
         while time.time() < end and self.bubble(c):
             time.sleep(0.05)
         took = time.time() - t0
         self.assertIsNone(self.bubble(c))
-        self.assertTrue(3.0 <= took < 4.5, took)
+        self.assertTrue(1.9 <= took < 3.2, took)
         self.assertEqual(self.card(c)[2] > 300, True)                         # the real card is there now
 
     def test_closing_is_the_same_movement_backwards_into_the_button(self):
@@ -11983,17 +11983,17 @@ class TestLauncherBubble(Base):
             time.sleep(0.1)
         t1 = time.time()
         c.cmd('launcher close')
-        time.sleep(0.3)
+        time.sleep(0.2)
         b = self.bubble(c)
         self.assertEqual(b['kind'], 'closing')
         self.assertGreater(b['w'], 300)                                       # it starts as the card ...
-        time.sleep(2.2)
+        time.sleep(1.2)
         late = self.bubble(c)
         self.assertLess(late['w'], 200)                                       # ... shrinks ...
         end = time.time() + 3
         while time.time() < end and self.bubble(c):
             time.sleep(0.05)
-        self.assertGreaterEqual(time.time() - t1, 3.0)                        # ... for at least three seconds
+        self.assertGreaterEqual(time.time() - t1, 1.9)                        # ... for two seconds
         self.assertIsNone(self.bubble(c))
         self.assertEqual(c.cmd('launcher')[0].split()[1], 'open=0')
 

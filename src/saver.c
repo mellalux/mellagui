@@ -2,7 +2,9 @@
  * The screensaver: start a program after idle time, end it at the first input. See saver.h.
  */
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -72,6 +74,11 @@ bool lm_saver_start(struct lm_saver *s)
     const char *cmd = s->srv->config.saver_cmd;
     if (!cmd || !*cmd)
         return false;
+    char styled[1024];
+    if (s->srv->config.saver_style == 1 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--flat")) {      /* the style is for our own program only */
+        snprintf(styled, sizeof(styled), "%s --flat", cmd);
+        cmd = styled;
+    }
     pid_t pid = lm_server_spawn(s->srv, cmd);
     if (pid <= 0)
         return false;

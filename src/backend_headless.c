@@ -341,13 +341,14 @@ static void ctl_command(struct ctl_client *c, char *line)
         /* idle -> "idle inhibitors=<n> inhibited=<0|1>" (zwp_idle_inhibit_manager_v1), then "ok" */
         ctl_reply(c, "idle inhibitors=%d inhibited=%d\nok\n", lm_idle_inhibit_count(srv->idle_inhibit), lm_idle_inhibited(srv->idle_inhibit));
     } else if (!strcmp(cmd, "saver")) {
-        /* saver [start|stop] -> "saver running=<0|1> enabled=<0|1> minutes=<n> lock=<n> shield=<0|1>" after the optional change, then "ok" (the screensaver) */
+        /* saver [start|stop] -> "saver running=<0|1> enabled=<0|1> minutes=<n> lock=<n> shield=<0|1> style=room|flat" after the optional change, then "ok" (the screensaver) */
         if (srv->saver && a1 && !strcmp(a1, "start"))
             lm_saver_start(srv->saver);
         else if (srv->saver && a1 && !strcmp(a1, "stop"))
             lm_saver_stop(srv->saver);
-        ctl_reply(c, "saver running=%d enabled=%d minutes=%d lock=%d shield=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
-                  srv->config.saver_min, srv->config.saver_lock_min, srv->saver && lm_saver_shields(srv->saver));
+        ctl_reply(c, "saver running=%d enabled=%d minutes=%d lock=%d shield=%d style=%s\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
+                  srv->config.saver_min, srv->config.saver_lock_min, srv->saver && lm_saver_shields(srv->saver),
+                  srv->config.saver_style ? "flat" : "room");
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "sound")) {
         /* sound -> "sound last=<name> n=<count>": the last interface sound that was noted (a dock click: "dock"), then "ok" */

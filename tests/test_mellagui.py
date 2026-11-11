@@ -12417,7 +12417,7 @@ class TestSaver(Base):
 
     def test_defaults(self):
         p, c = self.start('mellagui-sv1', '--config', 'none')
-        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0'})
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0', 'style': 'room'})
 
     def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
         p, c = self.start('mellagui-sv2', '--config', 'none')
@@ -12623,7 +12623,40 @@ class TestSaver(Base):
         c.cmd('quit')
         p.wait(timeout=5)
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
-        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0'})
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0', 'style': 'room'})
+
+    def test_the_style_is_a_setting_and_flat_is_handed_to_our_program(self):
+        d = os.path.join(tmp, 'sv-style')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        fake = os.path.join(d, 'mellagui-matrix')                          # a stand-in that writes down how it was started
+        log = os.path.join(d, 'args')
+        with open(fake, 'w') as f:
+            f.write('#!/bin/sh\necho "$@" >> %s\n' % log)
+        os.chmod(fake, 0o755)
+        conf = os.path.join(d, 'sv.conf')
+        with open(conf, 'w') as f:
+            f.write('[commands]\nsaver = %s\n' % fake)
+        settings = os.path.join(d, 'sv.settings')
+        p, c = self.start('mellagui-sv12', '--config', conf, '--settings', settings)
+        self.assertEqual(self.saver(c)['style'], 'room')
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started')
+        self.assertEqual(open(log).read().strip(), '')                      # room: no argument
+        os.unlink(log)
+        time.sleep(0.5)
+        c.cmd('settings saver-style flat')
+        self.assertEqual(self.saver(c)['style'], 'flat')
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started again')
+        self.assertEqual(open(log).read().strip(), '--flat')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings saver-style cube')
+        time.sleep(0.6)
+        c.cmd('quit')
+        p.wait(timeout=5)
+        p2, c2 = self.start('mellagui-sv12b', '--config', conf, '--settings', settings)
+        self.assertEqual(self.saver(c2)['style'], 'flat')                   # saved
 
     def test_the_program_checks_itself(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
@@ -12683,7 +12716,7 @@ class TestSaver(Base):
         self.wait(lambda: self.saver(c)['enabled'] == '0', 'the box switches it off')
         c.click(x0 + 168, y0 + 14 + 28 + 14)
         self.wait(lambda: self.saver(c)['enabled'] == '1', 'and on again')
-        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 8 + 12)         # "Show it now"
+        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 28 + 8 + 12)    # "Show it now"
         self.wait(lambda: self.saver(c)['running'] == '1', 'the button shows it')
         self.wait(lambda: self.matrix_windows(c), 'its window')
         c.tap(KEY_A)

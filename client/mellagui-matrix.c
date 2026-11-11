@@ -313,7 +313,7 @@ static struct cam cam_at(float t)
     c.ox = 0.55f * sinf(t * 0.11f) + 0.2f * sinf(t * 0.29f + 1.0f);
     c.oy = 1.55f + 0.05f * sinf(t * 0.63f);
     c.oz = 1.6f + 0.7f * sinf(t * 0.07f + 0.5f);
-    float yaw = 0.22f * sinf(t * 0.09f) + 0.05f * sinf(t * 0.37f), pitch = 0.05f * sinf(t * 0.13f + 2.0f) - 0.02f;
+    float yaw = 0.22f * sinf(t * 0.09f) + 0.05f * sinf(t * 0.37f), pitch = 0.05f * sinf(t * 0.13f + 2.0f) - 0.09f;
     float sy = sinf(yaw), cy = cosf(yaw), sp = sinf(pitch), cp = cosf(pitch);
     c.fx = sy * cp; c.fy = sp; c.fz = cy * cp;
     c.rx = cy; c.ry = 0.0f; c.rz = -sy;
@@ -370,6 +370,34 @@ static inline void letters_px(const struct room *rm, const struct rain *r, int c
 }
 
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* The sun's light through the window onto the floor: how much of it (0..1) reaches the floor at (x, z). The light comes from the sun's side (up, towards the far wall,
+ * to the right), so the patch is the window's opening carried along the light to the floor, with the shadows of the bars in it and soft edges. */
+#define SUN_BX 0.35f                        /* the direction from the floor towards the sun */
+#define SUN_BY 1.3f
+#define SUN_BZ 1.0f
+
+static float sun_light(float x, float z)
+{
+    float cx = (OPEN_X0 + OPEN_X1) * 0.5f, cy = (OPEN_Y0 + OPEN_Y1) * 0.5f, f = 1.0f;
+    static const float planes[3] = { ZG, ZF, ZB0 + (ZB1 - ZB0) * 0.5f };
+    for (int i = 0; i < 3; i++) {
+        float sdist = (planes[i] - z) / SUN_BZ;
+        if (sdist < 0.0f)
+            return 0.0f;                                                  /* the point is behind that plane: not lit through it */
+        float qx = x + sdist * SUN_BX, qy = sdist * SUN_BY;
+        if (i < 2) {                                                      /* through the frame's opening and the glass's */
+            float m = fminf(fminf(qx - OPEN_X0, OPEN_X1 - qx), fminf(qy - OPEN_Y0, OPEN_Y1 - qy));
+            f *= clamp01(m / 0.07f);
+        } else {                                                          /* the bars throw shadows */
+            float m = fminf(fabsf(qx - cx) - BAR_HALF_W, fabsf(qy - cy) - BAR_HALF_H);
+            f *= clamp01(m / 0.05f);
+        }
+        if (f <= 0.0f)
+            return 0.0f;
+    }
+    return f;
+}
 
 /* The glass: light blue sky, brighter towards the horizon, with a piece of the sun in its upper right corner. (x, y) on the glass plane. */
 static void glass_px(float x, float y, float rgb[3])
@@ -479,6 +507,15 @@ static void render_rows(const struct rjob *j)
                 float ao = 0.45f + 0.55f * clamp01(fminf(du, dvv) / 0.5f);
                 letters_px(rm, r, ci, cj, cu - (float)ci, cv - (float)cj, 0, dist * inv_f / fmaxf(along / len, 0.12f), CELL_H / 16.0f,
                            ao / (1.0f + 0.018f * dist * dist), rgb);
+                if (surf == 4) {                                               /* the sun's patch on the floor: the letters in it are brighter and the light is warm */
+                    float sl = sun_light(px, pz);
+                    if (sl > 0.0f) {
+                        float lit = sl / (1.0f + 0.02f * dist * dist);
+                        rgb[0] = rgb[0] * (1.0f + 1.3f * sl) + 255.0f * 0.50f * lit;
+                        rgb[1] = rgb[1] * (1.0f + 1.3f * sl) + 226.0f * 0.50f * lit;
+                        rgb[2] = rgb[2] * (1.0f + 1.3f * sl) + 140.0f * 0.50f * lit;
+                    }
+                }
             }
             int r8 = (int)rgb[0], g8 = (int)rgb[1], b8 = (int)rgb[2];
             row[x] = 0xff000000u | ((uint32_t)(r8 > 255 ? 255 : r8) << 16) | ((uint32_t)(g8 > 255 ? 255 : g8) << 8) | (uint32_t)(b8 > 255 ? 255 : b8);
@@ -708,6 +745,14 @@ static int selftest(void)
         CHECK(room_hit(&c, 0, 0, -1, &t) == 2 && fabsf(t - 2.0f) < 1e-3f);                  /* behind: the near wall */
         CHECK(room_hit(&c, -1, 0, 0, &t) == 0 && room_hit(&c, 1, 0, 0, &t) == 1);            /* left, right */
         CHECK(room_hit(&c, 0, -1, 0, &t) == 4 && room_hit(&c, 0, 1, 0, &t) == 5);            /* floor, ceiling */
+        {                                                                /* the sun's patch on the floor: inside it is lit, the bars cast shadows, elsewhere dark */
+            float cxm = (OPEN_X0 + OPEN_X1) * 0.5f, cym = (OPEN_Y0 + OPEN_Y1) * 0.5f;
+            float qx = cxm + 0.7f, qy = cym + 0.4f, sd = qy / SUN_BY;                    /* a ray from the floor through a pane of the window */
+            CHECK(sun_light(qx - sd * SUN_BX, ZG - sd * SUN_BZ) > 0.9f);
+            float zbar = ZB0 + (ZB1 - ZB0) * 0.5f, sd2 = cym / SUN_BY;                    /* ... and one that meets the horizontal bar at its own depth */
+            CHECK(sun_light(qx - sd2 * SUN_BX, zbar - sd2 * SUN_BZ) < 0.1f);
+            CHECK(sun_light(0.0f, 0.5f) == 0.0f && sun_light(-2.5f, 3.0f) == 0.0f);
+        }
         {                                                                /* the glass is blue, the sun is at its corner, the recess and the frame have letters */
             float g1[3], g2[3];
             glass_px((OPEN_X0 + OPEN_X1) / 2, (OPEN_Y0 + OPEN_Y1) / 2, g1);

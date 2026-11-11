@@ -23,7 +23,7 @@
 #include "log.h"
 
 #define RATE 44100
-#define MAX_SAMPLES (RATE * 7 / 10)         /* the longest beep: 0.7 s (a lead-in of silence comes on top of it) */
+#define MAX_SAMPLES (RATE * 2)              /* the longest beep: 2 s (a lead-in of silence comes on top of it) */
 #define WAKE_MS 800                         /* silence in front of a beep on a bare ALSA device that may be asleep (HDMI sinks need long) */
 #define IDLE_MS 800                         /* HDA codecs power down after ~1 s (snd_hda_intel power_save=1) */
 #define CHIME_PAD_ALSA_MS 1500              /* silence in front of the start-up chime: a bare ALSA device (HDMI above all) / the sound server */
@@ -50,6 +50,7 @@ static const struct note k_unlock[] = { { 523, 90 }, { 0, 0 } };
 static const struct note k_shot[] = { { 1568, 35 }, { 0, 20 }, { 1047, 60 }, { 0, 0 } };
 static const struct note k_dock[] = { { 1047, 40 }, { 1568, 110 }, { 0, 0 } };
 static const struct note k_volume[] = { { 784, 140 }, { 0, 0 } };
+static const struct note k_timer[] = { { 880, 130 }, { 1109, 130 }, { 1319, 300 }, { 0, 220 }, { 880, 130 }, { 1109, 130 }, { 1319, 420 }, { 0, 0 } };
 
 static const struct {
     const char *name;
@@ -64,6 +65,7 @@ static const struct {
     [LM_SOUND_SHOT] = { "shot", k_shot },
     [LM_SOUND_DOCK] = { "dock", k_dock, true },
     [LM_SOUND_VOLUME] = { "volume", k_volume, true },
+    [LM_SOUND_TIMER] = { "timer", k_timer, true },
 };
 
 const char *lm_sound_name(enum lm_sound s)

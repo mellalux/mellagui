@@ -13,8 +13,10 @@
  * Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
  * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
@@ -39,17 +41,20 @@
 
 #define MAX_FILE (8u << 20)
 #define TAB_W 4
-#define STATUS_H 20
-#define TOP_H (LM_FONT_H + 8)           /* button bar above the text */
+/* A sticky note (`--note FILE`): the same editor on coloured paper with no button bar, no line numbers and no status line; it saves by itself. */
+static bool g_note;
+static uint32_t g_paper = 0xfff2a8, g_ink = 0x2a2a20;
+#define STATUS_H (g_note ? 0 : 20)
+#define TOP_H (g_note ? 0 : (LM_FONT_H + 8))           /* button bar above the text */
 #define UNDO_MAX 64
-#define COL_BG (lm_theme.background)
-#define COL_FG (lm_theme.text_soft)
-#define COL_DIM (lm_theme.text_dim)
-#define COL_GUTTER_BG (lm_theme.gutter)
-#define COL_LINE (lm_theme.current_line)
-#define COL_SEL (lm_theme.button_hover)
-#define COL_BAR (lm_theme.bar)
-#define COL_ACCENT (lm_theme.accent)
+#define COL_BG (g_note ? g_paper : lm_theme.background)
+#define COL_FG (g_note ? g_ink : lm_theme.text_soft)
+#define COL_DIM (g_note ? lm_mix_rgb(g_paper, g_ink, 0.45) : lm_theme.text_dim)
+#define COL_GUTTER_BG (g_note ? g_paper : lm_theme.gutter)
+#define COL_LINE (g_note ? lm_mix_rgb(g_paper, 0x000000, 0.06) : lm_theme.current_line)
+#define COL_SEL (g_note ? lm_mix_rgb(g_paper, 0x3a6fb4, 0.35) : lm_theme.button_hover)
+#define COL_BAR (g_note ? lm_mix_rgb(g_paper, 0x000000, 0.12) : lm_theme.bar)
+#define COL_ACCENT (g_note ? 0xb5651d : lm_theme.accent)
 #define COL_WARN (lm_theme.caution)
 /* ---- the document ----------------------------------------------------------------------------------------------------- */
 
@@ -67,6 +72,10 @@ struct snap {
 
 struct app {
     struct wlwin win;
+    int64_t edit_ms;                    /* when the text was last changed (a note saves itself a moment after) */
+    int paper;                          /* a note's colour: an index of note_papers */
+    bool delete_armed;                  /* a note: Ctrl+D was pressed once, a second press within 3 s deletes it */
+    int64_t delete_ms;
     struct line *l;                     /* the lines, without line ends */
     int n, cap;
     int cy;                             /* cursor line and byte offset in it */
@@ -314,6 +323,7 @@ static void before_edit(struct app *a, bool typing)
         snap_free(&a->redo[i]);
     a->nredo = 0;
     a->modified = true;
+    a->edit_ms = now_ms();
     a->quit_armed = false;
 }
 
@@ -331,6 +341,7 @@ static bool undo(struct app *a, bool redo)
     snap_free(&s);
     a->typing_run = false;
     a->modified = true;
+    a->edit_ms = now_ms();
     return true;
 }
 
@@ -541,6 +552,20 @@ static void set_title(struct app *a)
         return;
     const char *base = strrchr(a->path, '/') ? strrchr(a->path, '/') + 1 : a->path;
     char t[PATH_MAX + 32];
+    if (g_note) {                                                       /* a note is named by its first line */
+        char first[48] = "";
+        for (int i = 0; i < a->n && !first[0]; i++) {
+            size_t k = 0, j = 0;
+            while (j < a->l[i].len && a->l[i].s[j] == ' ')
+                j++;
+            for (; j < a->l[i].len && k < sizeof(first) - 1; j++)
+                first[k++] = a->l[i].s[j];
+            first[k] = 0;
+        }
+        snprintf(t, sizeof(t), "%s - Note", first[0] ? first : "New note");
+        WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
+        return;
+    }
     snprintf(t, sizeof(t), "%s%s - Editor", a->modified ? "* " : "", a->path[0] ? base : "untitled");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
@@ -1066,6 +1091,170 @@ static void page_move(struct app *a, int dir, bool extend)
     a->top = LM_CLAMP(a->top + step, 0, LM_MAX(a->n - 1, 0));
 }
 
+/* ---- sticky notes: files in a folder, one window (one process) each ------------------------------------------------------------------------------- */
+
+static const uint32_t note_papers[] = { 0xfff2a8, 0xffd1dc, 0xd5f5c3, 0xcfe4ff, 0xffdfb8, 0xe6e6e6 };
+#define N_PAPERS ((int)(sizeof(note_papers) / sizeof(note_papers[0])))
+
+static const char *note_dir(char *out, size_t n)
+{
+    const char *e = getenv("MELLAGUI_NOTES_DIR"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    if (e && *e)
+        snprintf(out, n, "%s", e);
+    else if (xdg && *xdg)
+        snprintf(out, n, "%s/mellagui/notes", xdg);
+    else
+        snprintf(out, n, "%s/.local/share/mellagui/notes", home && *home ? home : "/tmp");
+    for (char *p = out + 1; *p; p++)                                    /* mkdir -p */
+        if (*p == '/') {
+            *p = 0;
+            mkdir(out, 0700);
+            *p = '/';
+        }
+    mkdir(out, 0700);
+    return out;
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"          /* (a path that is too long is a failure to open, not a crash) */
+static void note_new_path(char *out, size_t n)
+{
+    char dir[PATH_MAX], tmp[PATH_MAX + 64];
+    note_dir(dir, sizeof(dir));
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    for (int k = 0; k < 100; k++) {
+        snprintf(tmp, sizeof(tmp), "%s/%04d%02d%02d-%02d%02d%02d-%d.txt", dir, (tm.tm_year + 1900) % 10000, (tm.tm_mon + 1) % 100, tm.tm_mday % 100,
+                 tm.tm_hour % 100, tm.tm_min % 100, tm.tm_sec % 100, k);
+        snprintf(out, n, "%s", tmp);
+        if (access(tmp, F_OK) != 0)
+            return;
+    }
+}
+
+#pragma GCC diagnostic pop
+
+static void note_spawn(const char *path)
+{
+    char exe[PATH_MAX];
+    ssize_t k = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (k <= 0)
+        return;
+    exe[k] = 0;
+    pid_t pid = fork();
+    if (pid == 0) {                                                     /* twice, so that nobody has to wait for the window */
+        if (fork() == 0) {
+            setsid();
+            execl(exe, exe, "--note", path, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
+static int cmp_names(const void *x, const void *y)
+{
+    return strcmp(*(char *const *)x, *(char *const *)y);
+}
+
+/* `--notes`: a window for every note there is (a new one when there is none). */
+static int notes_open_all(void)
+{
+    char dir[PATH_MAX];
+    note_dir(dir, sizeof(dir));
+    DIR *d = opendir(dir);
+    char *names[64];
+    int n = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) && n < 64) {
+        size_t l = strlen(e->d_name);
+        if (l > 4 && !strcmp(e->d_name + l - 4, ".txt"))
+            names[n++] = strdup(e->d_name);
+    }
+    if (d)
+        closedir(d);
+    qsort(names, (size_t)n, sizeof(names[0]), cmp_names);
+    for (int i = 0; i < n; i++) {
+        char path[PATH_MAX + 300];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        note_spawn(path);
+        free(names[i]);
+    }
+    if (n == 0) {
+        char path[PATH_MAX];
+        note_new_path(path, sizeof(path));
+        note_spawn(path);
+    }
+    return 0;
+}
+
+static void note_paper_load(struct app *a)
+{
+    char side[PATH_MAX + 8];
+    snprintf(side, sizeof(side), "%s.col", a->path);
+    FILE *f = fopen(side, "r");
+    int v = 0;
+    if (f) {
+        if (fscanf(f, "%d", &v) != 1)
+            v = 0;
+        fclose(f);
+    }
+    a->paper = LM_CLAMP(v, 0, N_PAPERS - 1);
+    g_paper = note_papers[a->paper];
+}
+
+static void note_paper_next(struct app *a)
+{
+    a->paper = (a->paper + 1) % N_PAPERS;
+    g_paper = note_papers[a->paper];
+    char side[PATH_MAX + 8];
+    snprintf(side, sizeof(side), "%s.col", a->path);
+    FILE *f = fopen(side, "w");
+    if (f) {
+        fprintf(f, "%d\n", a->paper);
+        fclose(f);
+    }
+    a->win.redraw = true;
+}
+
+/* Keys of a note: Ctrl+N a new note, Ctrl+D delete it (twice), Ctrl+K another colour, Ctrl+Q closes (it is saved); the file prompts of the editor are off. */
+static bool note_key(struct app *a, char letter)
+{
+    switch (letter) {
+    case 'n': {
+        char path[PATH_MAX];
+        note_new_path(path, sizeof(path));
+        note_spawn(path);
+        return true;
+    }
+    case 'k': note_paper_next(a); return true;
+    case 'd':
+        if (a->delete_armed && now_ms() - a->delete_ms < 3000) {
+            char side[PATH_MAX + 8];
+            snprintf(side, sizeof(side), "%s.col", a->path);
+            unlink(a->path);
+            unlink(side);
+            a->modified = false;
+            a->win.running = false;
+        } else {
+            a->delete_armed = true;
+            a->delete_ms = now_ms();
+            msg(a, "Ctrl+D again deletes this note");
+        }
+        return true;
+    case 'q':
+        a->win.running = false;
+        return true;
+    case 'o': case 'f': case 'g': case 'h':                             /* open, find, go to line, replace: not in a note */
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void handle_key(struct app *a, uint32_t code, uint32_t ks)
 {
     bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0, shift = (a->win.mods & LM_MOD_SHIFT) != 0;
@@ -1084,6 +1273,8 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);
     char letter = (tl == 1 && ctrl && !alt && !super) ? (char)((txt[0] >= 'A' && txt[0] <= 'Z') ? txt[0] + 32 : txt[0]) : 0;
+    if (g_note && letter && note_key(a, letter))
+        return;
     if (letter) {
         switch (letter) {
         case 'q':
@@ -1231,6 +1422,8 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
 
 static int gutter_w(const struct app *a)
 {
+    if (g_note)
+        return 8;
     int digits = 1;
     for (int n = a->n; n >= 10; n /= 10)
         digits++;
@@ -1354,8 +1547,9 @@ static void paint(struct wlwin *w)
         a->seen_cols = a->cols_visible;
     }
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
-    wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                         /* the button bar */
-    for (int i = 0; i < N_BTNS; i++) {
+    if (!g_note)
+        wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                     /* the button bar */
+    for (int i = 0; i < (g_note ? 0 : N_BTNS); i++) {
         int bx, bwid;
         char tmp[16];
         btn_rect(a, i, &bx, &bwid);
@@ -1385,7 +1579,7 @@ static void paint(struct wlwin *w)
             wlwin_fill(w, gw, py, w->bw - gw - lm_metrics.scrollbar_width, a->zt.ch, COL_LINE);
         char num[16];
         snprintf(num, sizeof(num), "%d", ly + 1);
-        for (int k = 0; num[k]; k++)
+        for (int k = 0; num[k] && !g_note; k++)
             lm_zoom_glyph(w->pixels, w->bw, w->bw, w->bh, &a->zt, gw - ((int)strlen(num) + 1 - k) * a->zt.cw, py,
                           (uint32_t)num[k], ly == a->cy ? COL_FG : COL_DIM);
         int col = 0;
@@ -1415,6 +1609,11 @@ static void paint(struct wlwin *w)
     }
     paint_scrollbar(w, a);
     int sy = w->bh - STATUS_H;
+    if (g_note) {
+        if (a->help)
+            paint_help(w);
+        return;
+    }
     wlwin_fill(w, 0, sy, w->bw, STATUS_H, COL_BAR);
     char left[PATH_MAX + 64], right[64];
     const char *name = a->path[0] ? a->path : "untitled";
@@ -1624,6 +1823,8 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 static bool close_event(struct wlwin *w)
 {
     struct app *a = w->data;
+    if (g_note)                                                         /* a note is saved when it is closed (the loop's end does it) */
+        return true;
     if (a->modified && !a->quit_armed) {
         a->quit_armed = true;
         msg(a, "Unsaved changes: save first (Ctrl+S), or close again to discard them");
@@ -1788,8 +1989,16 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    if (argc == 2 && !strcmp(argv[1], "--notes"))
+        return notes_open_all();
+    const char *note_file = NULL;
+    if (argc == 3 && !strcmp(argv[1], "--note")) {                    /* one sticky note */
+        note_file = argv[2];
+        g_note = true;
+        argc = 1;
+    }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-edit [FILE | --selftest]\n");
+        fprintf(stderr, "usage: mellagui-edit [FILE | --note FILE | --notes | --selftest]\n");
         return 2;
     }
     static struct app a;
@@ -1806,16 +2015,22 @@ int main(int argc, char **argv)
                                           .keyboard = keyboard_event, .close = close_event, .menu = menu_event };
     if (wlwin_connect(&a.win, "mellagui-edit", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, "Editor", "mellagui.edit", 760 * a.zoom / 100, 520 * a.zoom / 100, 240, 120) < 0)
+    if (wlwin_open(&a.win, g_note ? "Note" : "Editor", g_note ? "mellagui.note" : "mellagui.edit", (g_note ? 300 : 760) * a.zoom / 100,
+                   (g_note ? 320 : 520) * a.zoom / 100, g_note ? 160 : 240, g_note ? 120 : 120) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
+    if (note_file) {
+        do_open(&a, note_file);
+        note_paper_load(&a);
+        a.msg[0] = 0;
+    }
     if (argc == 2) {
         char full[PATH_MAX];
         snprintf(full, sizeof(full), "%s", argv[1]);
         do_open(&a, full);
     }
     set_title(&a);
-    if (argc == 1)
+    if (argc == 1 && !g_note)
         msg(&a, "Welcome! F1 shows the keys, Ctrl+O opens a file, Ctrl+S saves");
     while (a.win.running) {
         int timeout = 250;
@@ -1830,6 +2045,13 @@ int main(int argc, char **argv)
             a.rep_next = now_ms() + (a.rep_rate > 0 ? 1000 / a.rep_rate : 40);
             a.win.redraw = true;
         }
+        if (g_note && a.modified && a.path[0] && now_ms() - a.edit_ms >= 700) {      /* a note saves itself a moment after the last key */
+            do_save(&a, a.path);
+            a.msg[0] = 0;
+            set_title(&a);
+        }
+        if (g_note && now_ms() - a.delete_ms >= 3000)
+            a.delete_armed = false;
         if (a.conf_dirty && now_ms() - a.conf_time >= 400) {              /* a burst of zoom steps writes the file once */
             lm_zoom_conf_save("editor", a.zoom);
             a.conf_dirty = false;
@@ -1840,6 +2062,8 @@ int main(int argc, char **argv)
             a.win.redraw = true;
         }
     }
+    if (g_note && a.modified && a.path[0])
+        do_save(&a, a.path);
     if (a.conf_dirty)
         lm_zoom_conf_save("editor", a.zoom);
     wlwin_destroy(&a.win);

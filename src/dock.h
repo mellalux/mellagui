@@ -21,6 +21,7 @@
  * icon is guessed from the entry's name. `command` is a command line like in [menu] (@terminal, mellagui-* next to the compositor,
  * ~/, `a || b`); an entry whose program cannot be found is left out, MellaGUI's own programs always stay.
  * The command `@launcher` is not a program: the button opens the launcher dialog (wm.h lm_wm_launcher_set) and the dialog does not list it.
+ * `@overview` is not one either: the button opens (and closes) the desktop overview, like Super+W; the launcher does not list it, it has no menu.
  * The built-in default is the same text, parsed by the same code; with no [dock-apps] section in the file the default entries are used.
  */
 
@@ -76,6 +77,9 @@ const struct lm_dock_item *lm_dock_item(int i);          /* NULL out of range */
 /* The entries as the file (or the built-in default) defines them, before anything is expanded or dropped; for the settings panel. */
 int lm_dock_raw_count(void);
 bool lm_dock_raw_entry(int i, const char **name, const char **icon, const char **cmd);
+/* Is this command the Launcher button's (`@launcher`)? That button is always in the dock: lm_dock_resolve() puts it at the front when the file has none, and
+ * the settings refuse to remove it or to give it another command. */
+bool lm_dock_cmd_is_launcher(const char *cmd);
 
 /* The launcher dialog's own buttons, [launcher-apps] (the same "Name = [icon] command" lines, at most LM_DOCK_MAX): what the launcher shows
  * besides the dock's buttons; one whose name the dock has is not listed again (the dock's wins). Resolved like the dock's. */

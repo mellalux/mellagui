@@ -53,6 +53,7 @@ def setUpModule():
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
+    os.environ['MELLAGUI_DOCK_LAUNCHER'] = '0'                       # a dock the test wrote is not given the Launcher button (TestDockLauncherPinned turns it on)
     LOG = os.path.join(tmp, 'mellagui.log')
     OUT = os.path.join(tmp, 'mellagui.out')        # a file, not a pipe: nobody reads a pipe while the tests run and 64 KB of log would block the compositor
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77',
@@ -10496,7 +10497,7 @@ class TestConfig(Base):
     def test_default_dock_when_there_is_no_file(self):
         p, c, stop = self.private_compositor('mellagui-cfg0', '--config', 'none')
         names = [n for n, _ in self.buttons(c)]
-        self.assertEqual(names[:6], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
+        self.assertEqual(names[:7], ['Launcher', 'Overview', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
         self.assertEqual(names[-1], 'Settings')
 
     def test_dock_apps_section_replaces_the_default_dock(self):
@@ -12006,6 +12007,88 @@ class TestLauncherBubble(Base):
         self.assertGreater(self.card(c)[2], 300)
 
 
+class TestDockLauncherPinned(Base):
+    """The Launcher button cannot be missing from the dock or removed from it; the Overview button opens the desktop overview."""
+
+    def start(self, name, text=None):
+        args = ['--config', 'none']
+        if text is not None:
+            self.path = os.path.join(tmp, name + '.conf')
+            with open(self.path, 'w') as f:
+                f.write(text)
+            args = ['--config', self.path]
+        p, c, stop = self.private_compositor(name, *args, env={'MELLAGUI_DOCK_LAUNCHER': '1'})
+        c.sync()
+        return c
+
+    @staticmethod
+    def icons(c):
+        out = []
+        for l in c.cmd('dock'):
+            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                out.append(dict(name=m[2], x=int(m[3]), y=int(m[4]), w=int(m[5]), h=int(m[6])))
+        return out
+
+    def test_a_dock_without_a_launcher_button_gets_it_in_front(self):
+        c = self.start('mellagui-lp1', '[dock-apps]\nTerm = [terminal] true\nFiles = [files] true\n')
+        self.assertEqual([i['name'] for i in self.icons(c)], ['Launcher', 'Term', 'Files'])
+
+    def test_a_launcher_button_that_is_there_stays_where_it_is(self):
+        c = self.start('mellagui-lp2', '[dock-apps]\nTerm = [terminal] true\nPad = [launcher] @launcher\nFiles = [files] true\n')
+        self.assertEqual([i['name'] for i in self.icons(c)], ['Term', 'Pad', 'Files'])
+
+    def test_the_settings_cannot_remove_it_or_give_it_another_program(self):
+        c = self.start('mellagui-lp3', '[dock-apps]\nTerm = [terminal] true\nFiles = [files] true\n')
+        with self.assertRaises(RuntimeError):                                         # (the file has no Launcher line, the dock has it at index 0)
+            c.cmd('setraw dock-del 0')
+        self.assertEqual(len(self.icons(c)), 3)
+        with self.assertRaises(RuntimeError):
+            c.cmd('setraw dock-put 0\x1fLauncher\x1f\x1ftrue')                       # another command for it
+        self.assertEqual(self.icons(c)[0]['name'], 'Launcher')
+        c.cmd('setraw dock-del 1')                                                    # the others can go
+        self.assertEqual([i['name'] for i in self.icons(c)], ['Launcher', 'Files'])
+        self.assertIn('@launcher', open(self.path).read())                            # (the change wrote the button down)
+
+    def test_it_has_no_menu(self):
+        c = self.start('mellagui-lp4', '[dock-apps]\nTerm = [terminal] true\n')
+        ic = self.icons(c)[0]
+        c.abs(ic['x'] + ic['w'] // 2, ic['y'] + ic['h'] // 2)
+        c.button(273, True)
+        c.button(273, False)
+        time.sleep(0.2)
+        self.assertEqual(c.cmd('dockmenu')[0].split()[1], 'open=0')
+
+    def test_the_overview_button_opens_the_overview_and_a_second_click_closes_it(self):
+        c = self.start('mellagui-lp5')
+        ov = [i for i in self.icons(c) if i['name'] == 'Overview'][0]
+        centre = (ov['x'] + ov['w'] // 2, ov['y'] + ov['h'] // 2)
+        self.assertEqual(c.cmd('overview')[0].split()[1], 'open=0')
+        c.click(*centre)
+        time.sleep(0.3)
+        self.assertEqual(c.cmd('overview')[0].split()[1], 'open=1')
+        c.click(*centre)                                                              # the dock keeps working while the overview is open
+        time.sleep(0.5)
+        self.assertEqual(c.cmd('overview')[0].split()[1], 'open=0')
+        ppm = c.dump(os.path.join(tmp, 'lp5.ppm'))
+        self.assertGreater(len({ppm.px(ov['x'] + 10 + k, ov['y'] + ov['h'] // 2) for k in range(ov['w'] - 20)}), 3)    # an icon is painted there
+
+    def test_the_overview_button_has_no_menu_and_the_launcher_does_not_list_it(self):
+        c = self.start('mellagui-lp6')
+        ov = [i for i in self.icons(c) if i['name'] == 'Overview'][0]
+        c.abs(ov['x'] + ov['w'] // 2, ov['y'] + ov['h'] // 2)
+        c.button(273, True)
+        c.button(273, False)
+        time.sleep(0.2)
+        self.assertEqual(c.cmd('dockmenu')[0].split()[1], 'open=0')
+        c.cmd('launcher open')
+        names = [re.match(r'icon \d+ "(.*?)"', l)[1] for l in c.cmd('launcher') if l.startswith('icon ')]
+        self.assertNotIn('Overview', names)
+        self.assertNotIn('Launcher', names)
+        self.assertIn('Terminal', names)
+        c.cmd('launcher close')
+
+
 class TestSaver(Base):
     """The screensaver: after idle time the compositor starts mellagui-matrix (a full screen client); the first input ends it."""
 
@@ -12279,7 +12362,7 @@ class TestDock(Base):
         info, icons = self.dock(c)
         self.assertEqual(info['shown'], 1)
         names = [i['name'] for i in icons]
-        self.assertEqual(names[:6], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
+        self.assertEqual(names[:7], ['Launcher', 'Overview', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images'])
         self.assertEqual(names[-1], 'Settings')
 
     def test_entries_geometry_and_options(self):

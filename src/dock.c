@@ -22,6 +22,7 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
 #define DEFAULT_APPS \
     "[dock-apps]\n" \
     "Launcher   = [launcher] @launcher\n" \
+    "Overview   = [overview] @overview\n" \
     "Terminal   = [terminal] @terminal\n" \
     "Files      = [files] mellagui-files\n" \
     "Editor     = [editor] mellagui-edit\n" \
@@ -427,10 +428,46 @@ static void resolve_list(struct applist *L, bool launcher_only)
     }
 }
 
+bool lm_dock_cmd_is_launcher(const char *cmd)
+{
+    while (*cmd == ' ' || *cmd == '\t')
+        cmd++;
+    return !strncmp(cmd, "@launcher", 9) && (cmd[9] == 0 || isspace((unsigned char)cmd[9]));
+}
+
+/* The Launcher button cannot be missing from the dock: a file that lacks it gets it in front (in memory; the next change of the buttons writes it). */
+static void ensure_launcher(void)
+{
+    const char *off = getenv("MELLAGUI_DOCK_LAUNCHER");           /* "0": the test harness, whose small docks should hold what the test wrote */
+    if (off && !strcmp(off, "0"))
+        return;
+    struct applist *L = DOCK_LIST;
+    for (int i = 0; i < L->raw_n; i++)
+        if (lm_dock_cmd_is_launcher(L->raw[i].cmd))
+            return;
+    if (L->raw_n >= LM_DOCK_MAX)
+        L->raw_n = LM_DOCK_MAX - 1;                             /* the last one makes room */
+    memmove(&L->raw[1], &L->raw[0], sizeof(L->raw[0]) * (size_t)L->raw_n);
+    L->raw_n++;
+    struct raw_item *r = &L->raw[0];
+    memset(r, 0, sizeof(*r));
+    const char *name = "Launcher";
+    for (int i = 1; i < L->raw_n; i++)
+        if (!strcasecmp(L->raw[i].name, name)) {
+            name = "Launchpad";
+            break;
+        }
+    snprintf(r->name, sizeof(r->name), "%s", name);
+    snprintf(r->icon, sizeof(r->icon), "launcher");
+    snprintf(r->cmd, sizeof(r->cmd), "@launcher");
+    lm_info("dock: the Launcher button was missing, it is back in front");
+}
+
 void lm_dock_resolve(void)
 {
     if (DOCK_LIST->raw_n == 0)
         lm_conf_parse(DEFAULT_APPS, "<built-in dock>", lm_dock_conf, NULL);
+    ensure_launcher();
     resolve_list(DOCK_LIST, false);
     resolve_list(LAUNCH_LIST, true);
 }

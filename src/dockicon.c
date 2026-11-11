@@ -26,6 +26,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_CAMERA] = { "camera", 0 },
     [LM_DOCKICON_RECORD] = { "record", 0 },
     [LM_DOCKICON_MONITOR] = { "monitor", 0 },
+    [LM_DOCKICON_OVERVIEW] = { "overview", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -45,6 +46,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_CAMERA: return lm_theme.icon_camera;
     case LM_DOCKICON_RECORD: return lm_theme.icon_record;
     case LM_DOCKICON_MONITOR: return lm_theme.icon_monitor;
+    case LM_DOCKICON_OVERVIEW: return lm_theme.icon_overview;
     default: return lm_theme.icon_generic;
     }
 }
@@ -207,6 +209,17 @@ static float glyph(int kind, float u, float v)
         d = fminf2(d, sd_box(u, v, -0.19f, 0.05f, 0.055f, 0.12f, 0.015f));
         d = fminf2(d, sd_box(u, v, 0.0f, -0.02f, 0.055f, 0.19f, 0.015f));
         return fminf2(d, sd_box(u, v, 0.19f, -0.09f, 0.055f, 0.08f, 0.015f));
+    }
+    case LM_DOCKICON_OVERVIEW: {                        /* four windows side by side: frames with a title bar each (Exposé) */
+        float d = 1e9f;
+        static const float cxs[4] = { -0.235f, 0.235f, -0.235f, 0.235f }, cys[4] = { -0.215f, -0.215f, 0.225f, 0.225f };
+        static const float hws[4] = { 0.215f, 0.19f, 0.19f, 0.215f }, hhs[4] = { 0.17f, 0.17f, 0.17f, 0.17f };
+        for (int k = 0; k < 4; k++) {
+            float ring = sd_sub(sd_box(u, v, cxs[k], cys[k], hws[k], hhs[k], 0.05f), sd_box(u, v, cxs[k], cys[k], hws[k] - 0.045f, hhs[k] - 0.045f, 0.02f));
+            d = fminf2(d, ring);
+            d = fminf2(d, sd_box(u, v, cxs[k], cys[k] - hhs[k] + 0.085f, hws[k] - 0.05f, 0.022f, 0.01f));      /* the title bar */
+        }
+        return d;
     }
     case LM_DOCKICON_RUN:
         return sd_tri(u, v, -0.15f, -0.27f, -0.15f, 0.27f, 0.29f, 0.0f) - 0.05f;

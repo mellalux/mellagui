@@ -138,6 +138,10 @@ static bool resolve_one(const char *alt, bool tokens, char *out, size_t n, bool 
             *own = true;
             return snprintf(out, n, "@launcher") < (int)n;
         }
+        if (e - name == 8 && !strncmp(name, "overview", 8)) {             /* the dock button that opens the desktop overview (Super+W) */
+            *own = true;
+            return snprintf(out, n, "@overview") < (int)n;
+        }
         const char *cmd = token_cmd(name, (size_t)(e - name));
         if (!cmd)
             return false;

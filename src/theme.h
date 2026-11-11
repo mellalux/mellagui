@@ -112,6 +112,7 @@
     X("icon-camera",          icon_camera,       0xd6336c) \
     X("icon-record",          icon_record,       0xc92a2a) \
     X("icon-monitor",         icon_monitor,      0x0c8599) \
+    X("icon-overview",        icon_overview,     0x3b82f6) \
     X("btn-green",            btn_green,         0x3f9a5e) /* the programs' round coloured buttons: a colour and the lighter one for hover */ \
     X("btn-green-lit",        btn_green_lit,     0x56b878) \
     X("btn-blue",             btn_blue,          0x3d6fb4) \

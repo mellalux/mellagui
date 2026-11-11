@@ -1365,7 +1365,7 @@ static void paint(struct wlwin *w)
         const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit };
         bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
         bool idle = (i == B_CUT || i == B_COPY) && !has_sel(a);             /* nothing selected: Cut and Copy have nothing to take */
-        fill_round(w, bx, 2, bwid, TOP_H - 4, (TOP_H - 4) / 2, idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
+        fill_round(w, bx, 2, bwid, TOP_H - 4, lm_button_radius((TOP_H - 4) / 2), idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
         wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? lm_theme.title_text_idle : lm_theme.on_colour, 0);

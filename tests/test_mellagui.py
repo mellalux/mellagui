@@ -7114,6 +7114,57 @@ class TestThemes(Base):
         self.assertNotIn('[theme]', open(self.path).read())
         self.assertEqual(self.colours(c)['accent'], '#6fa8ff')
 
+    @staticmethod
+    def hsl(hexcol):
+        import colorsys
+        h = hexcol.lstrip('#').rstrip('*')
+        r, g, b = (int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+        hh, l, sat = colorsys.rgb_to_hls(r, g, b)
+        return hh, sat, l
+
+    def test_buttons_in_one_colour_keep_their_lightness_and_take_the_hue_of_the_accent(self):
+        plain = self.colours(self.start('mellagui-th7', ''))
+        c = self.start('mellagui-th8', '[theme]\nbuttons = accent\nbutton-accent = #d1493f\n')
+        cols = self.colours(c)
+        ah = self.hsl('#d1493f')[0]
+        for name in ('icon-files', 'icon-editor', 'hue-3', 'btn-green', 'btn-green-lit', 'icon-camera'):
+            h, sat, l = self.hsl(cols[name])
+            self.assertAlmostEqual(h, ah, delta=0.02, msg=name)
+            self.assertAlmostEqual(l, self.hsl(plain[name])[2], delta=0.02, msg=name)          # the lightness is the old one
+        self.assertEqual(cols['accent'], plain['accent'])                                          # the rest of the palette is not touched
+        self.assertEqual(cols['button-accent'], '#d1493f*')
+        c.cmd('setting theme-buttons')
+        self.assertEqual(c.last, 'ok accent')
+
+    def test_grey_buttons_have_no_colour_and_colourful_is_the_default(self):
+        plain = self.colours(self.start('mellagui-th9', ''))
+        self.assertEqual(plain['icon-files'], '#2f81f7')
+        cols = self.colours(self.start('mellagui-th10', '[theme]\nbuttons = grey\n'))
+        for name in ('icon-files', 'hue-2', 'btn-red', 'btn-red-lit'):
+            h = cols[name].lstrip('#').rstrip('*')
+            self.assertEqual(h[0:2], h[2:4], name)
+            self.assertEqual(h[2:4], h[4:6], name)
+
+    def test_the_button_style_is_written_by_the_panel_and_stays_when_the_theme_changes(self):
+        c = self.start('mellagui-th11', '[keys]\nSuper+T = run\n')
+        c.cmd('setraw theme-buttons grey')
+        self.assertIn('[theme]\nbuttons = grey\n', open(self.path).read())
+        self.assertEqual(self.colours(c)['icon-files'][1:3], self.colours(c)['icon-files'][3:5])
+        c.cmd('setraw theme-use graphite')                                      # a theme change keeps the buttons' style
+        text = open(self.path).read()
+        self.assertIn('name = graphite', text)
+        self.assertIn('buttons = grey', text)
+        c.cmd('setraw theme-buttons accent')
+        self.assertIn('buttons = accent', open(self.path).read())
+        c.cmd('setraw theme-set button-accent\x1f#00aa66')
+        c.cmd('setraw theme-use light')
+        self.assertIn('button-accent = #00aa66', open(self.path).read())        # the accent colour stays, too
+        c.cmd('setraw theme-buttons colourful')
+        self.assertNotIn('buttons', open(self.path).read())
+        self.assertIn('Super+T = run', open(self.path).read())
+        with self.assertRaises(RuntimeError):
+            c.cmd('setraw theme-buttons pink')
+
     def test_an_unknown_theme_is_refused(self):
         c = self.start('mellagui-th5', '')
         with self.assertRaises(RuntimeError):
@@ -12615,6 +12666,17 @@ class TestDock(Base):
         self.assertEqual([(i['x'], i['y'], i['w'], i['h']) for i in icons],
                         [(330, 444, 40, 40), (380, 444, 40, 40), (430, 444, 40, 40)])
 
+    def test_the_buttons_roundness_makes_the_icons_circles_or_squares(self):
+        for name, rnd, corner in (('mellagui-dk20', 100, False), ('mellagui-dk21', 0, True)):
+            c = self.start(name, '[windows]\nbutton-roundness = %d\n[dock]\nicon-size = 48\nzoom = 100\n[dock-apps]\nA = [files] true\n' % rnd)
+            info, icons = self.dock(c)
+            i = icons[0]
+            ppm = c.dump(os.path.join(tmp, name + '.ppm'))
+            near = ppm.px(i['x'] + 3, i['y'] + 3)                                  # just inside the corner of the icon's box
+            blue = lambda p: p[2] > p[0] + 60 and p[2] > 150
+            self.assertTrue(blue(ppm.px(i['x'] + i['w'] // 2, i['y'] + i['h'] * 9 // 10)), name)         # (the middle holds the white glyph)
+            self.assertEqual(blue(near), corner, '%s: corner pixel %s' % (name, near))
+
     def test_the_dock_can_be_switched_off_and_bad_values_are_ignored(self):
         c = self.start('mellagui-dk3', '[dock]\nenabled = no\n')
         info, icons = self.dock(c)
@@ -13522,6 +13584,44 @@ class TestThemeEdit(Base):
         self.assertIn('wallpaper-top = #102030', open(self.path).read())
         self.assertEqual(self.colours(c)['wallpaper-top'], '#102030*')
 
+    def test_the_panel_has_a_buttons_part_for_the_shape_and_the_colour_style(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        c = self.start('mellagui-te7', '[dock]\nautohide = yes\n')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-te7'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 8 * 32 + 13)                          # the Theme tab (9th)
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 50, y0 + 14 + 13)                         # its Buttons part
+        time.sleep(0.3)
+        c.click(x0 + 160 + 210 + 20, y0 + 14 + 28 + 28 + 2 + 52 + 28 + 6 + 14)           # "One colour"
+        for _ in range(60):
+            if os.path.exists(self.path) and 'buttons = accent' in open(self.path).read():
+                break
+            time.sleep(0.05)
+        self.assertIn('buttons = accent', open(self.path).read())
+        c.cmd('setting theme-buttons')
+        self.assertEqual(c.last, 'ok accent')
+        c.click(x0 + 160 + 152, y0 + 14 + 28 + 28 + 2 + 52 + 14)                          # the Roundness slider, to its left end
+        c.cmd('abs 5 5')
+        for _ in range(60):
+            if 'button-roundness = 0' in open(self.path).read():
+                break
+            time.sleep(0.05)
+        self.assertIn('button-roundness = 0', open(self.path).read())
+
+
 class TestMetricsEdit(Base):
     """The settings panel's Sizes page: metrics / metrics-set / metrics-reset rewrite the size sections of mellagui.conf only."""
 
@@ -13546,7 +13646,7 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 27)
+        self.assertEqual(len(m), 28)
         self.assertEqual(m['panel.height'], (36, 20, 64, 32))
         self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))

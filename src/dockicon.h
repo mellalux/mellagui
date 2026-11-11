@@ -34,7 +34,10 @@ enum lm_dockicon {
 
 /* Name of a built-in icon as written in mellagui.conf ("terminal", "calculator" ...), NULL when kind is out of range. */
 const char *lm_dockicon_name(int kind);
-/* One pixel (premultiplied ARGB) of a plain round plate of colour `rgb` (0xRRGGBB) with the same shadow and top light as the built-in icons, for
+/* Coverage (0..1) of the icon's shape at (dx, dy) from its centre, R = radius: a circle at [windows] button-roundness 100, a square with rounded corners
+ * below (corner radius = roundness % of R). For pictures that fill their square. */
+float lm_dockicon_shape_coverage(float dx, float dy, float R);
+/* One pixel (premultiplied ARGB) of a plain plate (in the same shape) of colour `rgb` (0xRRGGBB) with the same shadow and top light as the built-in icons, for
  * the logos of installed programs: (dx, dy) from the centre, radius R, lift as in lm_dockicon_pixel. */
 uint32_t lm_dockicon_plate_pixel(uint32_t rgb, float dx, float dy, float R, float lift);
 /* The kind called `name` (case-insensitive), or -1. */

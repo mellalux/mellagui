@@ -90,6 +90,7 @@
     X("calc-key-lit",         calc_key_lit,      0x646f88) \
     X("plate-light",          plate_light,       0xf3f5f9) /* the plate behind logo icons in the dock: light ... */ \
     X("plate-dark",           plate_dark,        0x2a2f3b) /* ... and dark */ \
+    X("button-accent",        button_accent,     0x4c8dff) /* the one colour of the buttons when [theme] buttons = accent (see lm_theme_buttons_set) */ \
     X("hue-1",                hue_1,             0x4c8dff) /* the round panel buttons (workspaces, keyboard layouts) and the keyboard's rows */ \
     X("hue-2",                hue_2,             0x3fb950) \
     X("hue-3",                hue_3,             0xf0861c) \
@@ -181,6 +182,15 @@ bool lm_theme_use(const char *name);
 void lm_theme_set_conf_path(const char *conf_path);
 /* The themes there are: presets first, then the files (sorted); fills names (and descs when not NULL), returns how many. */
 int lm_theme_list(char names[][LM_THEME_NAME_MAX], char descs[][80], int max);
+
+/*
+ * Button colours: `[theme] buttons = colourful|accent|grey`. The colours of the buttons - hue-1..8 (panel cells, keyboard rows), icon-* (the dock's and the
+ * launcher's icons), btn-* / btn-*-lit (the programs' coloured buttons) - are tinted after the theme is chosen: "colourful" leaves them (the look MellaGUI
+ * always had), "accent" gives all of them the hue and saturation of `button-accent` and keeps each one's own lightness (a dark terminal icon stays dark), "grey"
+ * takes the saturation away. A single colour written in [theme] stays on top. lm_theme_entry's built-in value is the tinted one.
+ */
+const char *lm_theme_buttons(void);                 /* "colourful", "accent" or "grey" */
+bool lm_theme_buttons_set(const char *mode);        /* false for another word */
 
 /* Walk the palette: entry i (0..lm_theme_count()-1) with its current and the active theme's own value (0xRRGGBB). */
 int lm_theme_count(void);

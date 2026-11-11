@@ -53,7 +53,7 @@ enum key_id {
     K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
     K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
-    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE,
+    K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE, K_THEME_BUTTONS,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
     K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_LAUNCHER_DEFAULTS, K_COUNT
@@ -76,7 +76,7 @@ static const char *const key_names[K_COUNT] = {
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
-    [K_THEME_NAME] = "theme-name", [K_THEME_LIST] = "theme-list", [K_THEME_USE] = "theme-use",
+    [K_THEME_NAME] = "theme-name", [K_THEME_LIST] = "theme-list", [K_THEME_USE] = "theme-use", [K_THEME_BUTTONS] = "theme-buttons",
     [K_METRICS] = "metrics", [K_METRICS_SET] = "metrics-set", [K_METRICS_RESET] = "metrics-reset",
     [K_DOCK_PUT] = "dock-put", [K_DOCK_DEL] = "dock-del", [K_DOCK_MOVE] = "dock-move", [K_DOCK_RESET] = "dock-reset",
     [K_DOCK_OPTS] = "dock-opts", [K_DOCK_SET] = "dock-set",
@@ -634,6 +634,9 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_KEYS_CAPTURED: snprintf(out, n, "%s", srv->wm ? lm_wm_key_captured(srv->wm) : ""); break;
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET: break;
     case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE: break;
+    case K_THEME_BUTTONS:                       /* colourful | accent | grey: how the buttons' colours are tinted */
+        snprintf(out, n, "%s", lm_theme_buttons());
+        break;
     case K_THEME_NAME:                          /* the active theme */
         snprintf(out, n, "%s", lm_theme_name());
         break;
@@ -1391,13 +1394,27 @@ static bool theme_op(struct lm_server *srv, int kid, const char *val)
             known = known || !strcasecmp(names[i], val);
         if (!known)
             return false;
-        if (!strcasecmp(val, "colorful"))
-            ok = lm_confedit_set_section(path, "theme", NULL);          /* the default needs no line at all */
-        else {
-            char body[64];
-            snprintf(body, sizeof(body), "name = %s\n", val);
-            ok = lm_confedit_set_section(path, "theme", body);
-        }
+        char body[128] = "";                                    /* the button style and its accent colour belong to the buttons, not to the theme: they stay */
+        size_t o = 0;
+        if (strcasecmp(val, "colorful"))
+            o += (size_t)snprintf(body + o, sizeof(body) - o, "name = %s\n", val);
+        if (strcmp(lm_theme_buttons(), "colourful"))
+            o += (size_t)snprintf(body + o, sizeof(body) - o, "buttons = %s\n", lm_theme_buttons());
+        const char *anm;
+        uint32_t acur, adef;
+        for (int i = 0; lm_theme_entry(i, &anm, &acur, &adef); i++)
+            if (!strcmp(anm, "button-accent") && acur != adef)
+                o += (size_t)snprintf(body + o, sizeof(body) - o, "button-accent = #%06x\n", (unsigned)acur);
+        ok = lm_confedit_set_section(path, "theme", body[0] ? body : NULL);    /* the default needs no line at all */
+    } else if (kid == K_THEME_BUTTONS) {
+        char *m = NULL;
+        static const char *const modes[3] = { "colourful", "accent", "grey" };
+        for (int i = 0; i < 3; i++)
+            if (!strcasecmp(val, modes[i]))
+                m = (char *)modes[i];
+        if (!m)
+            return false;
+        ok = lm_confedit_set_key(path, "theme", theme_same, "buttons", "buttons", !strcmp(m, "colourful") ? NULL : m);
     } else if (kid == K_THEME_RESET) {
         if (strcmp(val, "1"))
             return false;
@@ -1738,7 +1755,7 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return dock_op(srv, k, val);
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET:
         return keys_op(s, k, val);
-    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE:
+    case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE: case K_THEME_BUTTONS:
         return theme_op(srv, k, val);
     case K_METRICS_SET: case K_METRICS_RESET:
         return metrics_op(srv, k, val);

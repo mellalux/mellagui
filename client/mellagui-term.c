@@ -964,7 +964,7 @@ static void draw_bar(uint32_t *px)
             continue;
         uint32_t base, hover;
         btn_colors(i, &base, &hover);
-        round_box(px, bx, by, bw, bh, bh / 2, (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? hover : base);
+        round_box(px, bx, by, bw, bh, lm_button_radius(bh / 2), (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? hover : base);
         const char *t = btn_text(i, tmp, sizeof(tmp));
         int w = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS * LM_FONT_W : (int)strlen(t) * LM_FONT_W;
         int tx = bx + 8 + (i == BTN_ZOOM_ID ? w - (int)strlen(t) * LM_FONT_W : 0), ty = by + (bh - LM_FONT_H) / 2;

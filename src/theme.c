@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "conf.h"
 #include "log.h"
@@ -32,11 +33,18 @@ struct lm_theme lm_theme = {
  * `lm_theme` is base with the colours written one by one in [theme] on top (`over` marks them), so the order of the lines in the
  * file does not matter. Built-in presets are below; any other name is a file themes/NAME.conf next to mellagui.conf.
  */
-static struct lm_theme base = {
+static struct lm_theme base = {                 /* the active theme's palette with the button colours tinted */
 #define X(name, field, def) .field = def,
     LM_THEME_COLORS(X)
 #undef X
 };
+static struct lm_theme raw = {                  /* ... before the tint */
+#define X(name, field, def) .field = def,
+    LM_THEME_COLORS(X)
+#undef X
+};
+static int button_mode;                         /* 0 colourful, 1 accent, 2 grey */
+static const char *const button_modes[3] = { "colourful", "accent", "grey" };
 static bool over[160];
 static uint32_t generation = 1;                /* bumped by every change of the palette (the GL renderer caches what it painted) */
 
@@ -93,11 +101,112 @@ static int color_index(const char *name)
 
 static uint32_t *color_slot(struct lm_theme *t, int idx) { return (uint32_t *)t + idx; }
 
+/* ---- the tint of the button colours ---- */
+
+static void rgb_to_hsl(uint32_t c, float *h, float *s, float *l)
+{
+    float r = (float)((c >> 16) & 255) / 255.0f, g = (float)((c >> 8) & 255) / 255.0f, b = (float)(c & 255) / 255.0f;
+    float mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    *l = (mx + mn) / 2.0f;
+    float d = mx - mn;
+    if (d < 1e-6f) {
+        *h = *s = 0.0f;
+        return;
+    }
+    *s = *l > 0.5f ? d / (2.0f - mx - mn) : d / (mx + mn);
+    if (mx == r)
+        *h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+    else if (mx == g)
+        *h = (b - r) / d + 2.0f;
+    else
+        *h = (r - g) / d + 4.0f;
+    *h /= 6.0f;
+}
+
+static float hue_channel(float p, float q, float t)
+{
+    if (t < 0.0f) t += 1.0f;
+    if (t > 1.0f) t -= 1.0f;
+    if (t < 1.0f / 6.0f) return p + (q - p) * 6.0f * t;
+    if (t < 0.5f) return q;
+    if (t < 2.0f / 3.0f) return p + (q - p) * (2.0f / 3.0f - t) * 6.0f;
+    return p;
+}
+
+static uint32_t hsl_to_rgb(float h, float s, float l)
+{
+    float r, g, b;
+    if (s <= 0.0f) {
+        r = g = b = l;
+    } else {
+        float q = l < 0.5f ? l * (1.0f + s) : l + s - l * s, p = 2.0f * l - q;
+        r = hue_channel(p, q, h + 1.0f / 3.0f);
+        g = hue_channel(p, q, h);
+        b = hue_channel(p, q, h - 1.0f / 3.0f);
+    }
+    uint32_t out = 0;
+    float ch[3] = { r, g, b };
+    for (int i = 0; i < 3; i++) {
+        float v = ch[i] < 0.0f ? 0.0f : ch[i] > 1.0f ? 1.0f : ch[i];
+        out = (out << 8) | (uint32_t)(v * 255.0f + 0.5f);
+    }
+    return out;
+}
+
+/* Is palette entry `idx` a button colour (hue-*, icon-*, btn-*)? */
+static bool is_button_colour(int idx)
+{
+    int k = 0;
+#define X(n, field, def) if (k++ == idx) return !strncmp(n, "hue-", 4) || !strncmp(n, "icon-", 5) || !strncmp(n, "btn-", 4);
+    LM_THEME_COLORS(X)
+#undef X
+    return false;
+}
+
+/* base = raw with the button colours tinted; what the single colours of [theme] do not cover follows into lm_theme. */
+static void rebase(void)
+{
+    base = raw;
+    if (button_mode != 0) {
+        int ai = color_index("button-accent");
+        uint32_t acc = over[ai] ? *color_slot(&lm_theme, ai) : *color_slot(&raw, ai);
+        float ah, as, al;
+        rgb_to_hsl(acc, &ah, &as, &al);
+        for (int i = 0; i < NCOLORS; i++) {
+            if (!is_button_colour(i))
+                continue;
+            float h, s, l;
+            uint32_t *c = color_slot(&base, i);
+            rgb_to_hsl(*c, &h, &s, &l);
+            *c = hsl_to_rgb(ah, button_mode == 1 ? as : 0.0f, l);
+        }
+    }
+    for (int i = 0; i < NCOLORS; i++)
+        if (!over[i])
+            *color_slot(&lm_theme, i) = *color_slot(&base, i);
+    generation++;
+}
+
+const char *lm_theme_buttons(void) { return button_modes[button_mode]; }
+
+bool lm_theme_buttons_set(const char *mode)
+{
+    for (int i = 0; i < 3; i++)
+        if (!strcasecmp(mode, button_modes[i])) {
+            button_mode = i;
+            rebase();
+            return true;
+        }
+    return false;
+}
+
 void lm_theme_reset(void)
 {
     generation++;
     lm_theme = builtin;
+    raw = builtin;
     base = builtin;
+    button_mode = 0;
     memset(over, 0, sizeof(over));
     snprintf(theme_name, sizeof(theme_name), "colorful");
 }
@@ -151,6 +260,8 @@ bool lm_theme_set(const char *name, const char *value)
     *color_slot(&lm_theme, i) = c;
     over[i] = true;
     generation++;
+    if (i == color_index("button-accent"))
+        rebase();                                               /* the tint follows the accent */
     return true;
 }
 
@@ -256,11 +367,8 @@ bool lm_theme_use(const char *name)
         return false;
     int p = preset_index(name);
     snprintf(theme_name, sizeof(theme_name), "%s", p >= 0 ? presets[p].name : name);
-    base = nb;
-    generation++;
-    for (int i = 0; i < NCOLORS; i++)                           /* single colours of [theme] stay on top of the theme */
-        if (!over[i])
-            *color_slot(&lm_theme, i) = *color_slot(&base, i);
+    raw = nb;
+    rebase();                                                   /* (single colours of [theme] stay on top of the theme) */
     return true;
 }
 
@@ -271,6 +379,8 @@ bool lm_theme_conf(void *ud, const char *section, const char *key, const char *v
         return false;
     if (!strcmp(key, "name"))
         return lm_theme_use(value);
+    if (!strcmp(key, "buttons"))
+        return lm_theme_buttons_set(value);
     return lm_theme_set(key, value);
 }
 
@@ -352,7 +462,7 @@ const char *lm_theme_default_conf(void)
 {
     static char text[8192];
     if (!text[0]) {
-        size_t n = (size_t)snprintf(text, sizeof(text), "[theme]\nname                 = colorful\n");
+        size_t n = (size_t)snprintf(text, sizeof(text), "[theme]\nname                 = colorful\nbuttons              = colourful\n");
 #define X(name, field, def) n += (size_t)snprintf(text + n, sizeof(text) - n, "%-20s = #%06x\n", name, (unsigned)def);
         LM_THEME_COLORS(X)
 #undef X

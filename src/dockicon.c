@@ -9,6 +9,7 @@
 #include <strings.h>
 
 #include "dockicon.h"
+#include "metrics.h"
 #include "theme.h"
 
 static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUNT] = {
@@ -285,17 +286,32 @@ static float cov(float sd, float px)
     return clampf(0.5f - sd / px, 0.0f, 1.0f);
 }
 
+/* The icon's outline, in units of R: the unit circle at roundness 100, a rounded square (half size 1) below. Negative inside. */
+static float shape_sd(float u, float v)
+{
+    float rr = (float)lm_metrics.button_roundness / 100.0f;
+    if (rr >= 0.999f)
+        return hypotf(u, v) - 1.0f;
+    return sd_box(u, v, 0.0f, 0.0f, 1.0f, 1.0f, rr);
+}
+
+float lm_dockicon_shape_coverage(float dx, float dy, float R)
+{
+    if (R <= 0.0f)
+        return 0.0f;
+    return cov(shape_sd(dx / R, dy / R), 1.0f / R);
+}
+
 uint32_t lm_dockicon_plate_pixel(uint32_t base, float dx, float dy, float R, float lift)
 {
     if (R <= 0.0f)
         return 0;
     float u = dx / R, v = dy / R, px = 1.0f / R;
-    float dist = hypotf(u, v);
     float shadow = 0.0f;
-    float sd = hypotf(u, v - 0.07f) - 1.0f;
+    float sd = shape_sd(u, v - 0.07f);
     if (sd < 0.3f)
         shadow = 0.42f * (1.0f - clampf(sd / 0.3f, 0.0f, 1.0f)) * (1.0f - clampf(sd / 0.3f, 0.0f, 1.0f));
-    float dc = cov(dist - 1.0f, px);
+    float dc = cov(shape_sd(u, v), px);
     if (dc <= 0.0f && shadow <= 0.004f)
         return 0;
     float shade = 1.04f - 0.16f * (v * 0.5f + 0.5f);   /* a plain plate: a little lighter at the top, darker at the foot */
@@ -315,12 +331,11 @@ uint32_t lm_dockicon_pixel(int kind, float dx, float dy, float R, float lift)
     if (kind < 0 || kind >= LM_DOCKICON_COUNT || R <= 0.0f)
         return 0;
     float u = dx / R, v = dy / R, px = 1.0f / R;
-    float dist = hypotf(u, v);
     float shadow = 0.0f;
-    float sd = hypotf(u, v - 0.07f) - 1.0f;             /* the shadow: the disc moved a little down, fading out over 0.3 R */
+    float sd = shape_sd(u, v - 0.07f);                  /* the shadow: the shape moved a little down, fading out over 0.3 R */
     if (sd < 0.3f)
         shadow = 0.42f * (1.0f - clampf(sd / 0.3f, 0.0f, 1.0f)) * (1.0f - clampf(sd / 0.3f, 0.0f, 1.0f));
-    float dc = cov(dist - 1.0f, px);
+    float dc = cov(shape_sd(u, v), px);
     if (dc <= 0.0f && shadow <= 0.004f)
         return 0;
 

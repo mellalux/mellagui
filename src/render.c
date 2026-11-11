@@ -1332,6 +1332,8 @@ static void paint_dock_icon_a(const struct paint_ctx *c, const struct lm_rect *b
                 px = dock_image_px(it->img, &logo, x, y);
             } else {
                 px = dock_image_px(it->img, b, x, y);
+                if (it->round && (px >> 24))                          /* a picture that fills its square takes the shape of the icon */
+                    px = fade_px(px, (int)(lm_dockicon_shape_coverage((float)x + 0.5f - cx, dy, R) * 255.0f + 0.5f));
             }
             if (alpha < 255)
                 px = fade_px(px, alpha);

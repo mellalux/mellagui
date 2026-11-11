@@ -293,7 +293,8 @@ static void program_key(const char *cmd, char *out, size_t n)
 
 /* ARGB (not premultiplied) picture -> premultiplied, at most `max` pixels on a side (area average), cut to a circle when it has no
  * transparency in its corners. */
-static bool prepare_image(struct lm_image *img, int max)
+/* Scales a picture down to `max` and premultiplies it. *fills = it fills its square (opaque corners): the renderer cuts it to the icon shape when it paints. */
+static bool prepare_image(struct lm_image *img, int max, bool *fills)
 {
     int w = img->w, h = img->h;
     int s = w > h ? w : h;
@@ -326,12 +327,7 @@ static bool prepare_image(struct lm_image *img, int max)
                     b += (p & 255) * pa;
                     cnt++;
                 }
-            float cov = 1.0f;
-            if (round) {                                /* the circle through the middle of the sides, one pixel soft */
-                float dx = ((float)x + 0.5f) / (float)tw * 2.0f - 1.0f, dy = ((float)y + 0.5f) / (float)th * 2.0f - 1.0f;
-                float d = (sqrtf(dx * dx + dy * dy) - 1.0f) * (float)(tw < th ? tw : th) * 0.5f;
-                cov = d < -0.5f ? 1.0f : d > 0.5f ? 0.0f : 0.5f - d;
-            }
+            const float cov = 1.0f;
             uint64_t aa = cnt ? a / cnt : 0;                    /* mean alpha; colours are alpha weighted, so they premultiply as-is */
             uint32_t pr = cnt ? (uint32_t)(r / cnt / 255) : 0, pg = cnt ? (uint32_t)(g / cnt / 255) : 0, pb = cnt ? (uint32_t)(b / cnt / 255) : 0;
             out[(size_t)y * (size_t)tw + (size_t)x] = ((uint32_t)((float)aa * cov + 0.5f) << 24) | ((uint32_t)((float)pr * cov + 0.5f) << 16) |
@@ -342,6 +338,7 @@ static bool prepare_image(struct lm_image *img, int max)
     img->px = out;
     img->w = tw;
     img->h = th;
+    *fills = round;
     return true;
 }
 
@@ -404,7 +401,8 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
         plate = a0 < 0x80 && a1 < 0x80 && a2 < 0x80 && a3 < 0x80;
     }
     int max = (lm_dock.icon_size * lm_dock.zoom + 99) / 100 + 2;
-    if (!prepare_image(&it->img, max)) {
+    bool fills = false;
+    if (!prepare_image(&it->img, max, &fills)) {
         lm_img_free(&it->img);
         it->pub.kind = lm_dockicon_guess(name);
         return;
@@ -412,6 +410,7 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
     it->has_img = true;
     it->pub.img = &it->img;
     it->pub.plate = plate;
+    it->pub.round = fills && !plate;
 }
 
 static void resolve_list(struct applist *L, bool launcher_only)

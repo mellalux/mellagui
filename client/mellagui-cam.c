@@ -587,8 +587,8 @@ static void paint(struct wlwin *w)
         const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_purple };
         const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
         if (on)
-            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, (bh + 2) / 2, lm_theme.on_colour);
-        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, bh / 2, on || a->hover == i ? lite[i] : base[i]);
+            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
+        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
     }

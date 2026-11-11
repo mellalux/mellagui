@@ -995,7 +995,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
 {
     int y = HEAD_H + 4, h = TOOL_H - 8;
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, h / 2, base);
+    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, lm_button_radius(h / 2), base);
     int tw = (int)strlen(b->label) * LM_FONT_W;
     wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }

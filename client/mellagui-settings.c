@@ -324,7 +324,7 @@ static int selftest(void)
 #define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
 enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Clock", "Night" };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Theme", "Sizes", "Dock", "Clock", "Night" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP };
 
@@ -388,6 +388,7 @@ struct app {
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
     int sec_tab;                        /* the Security page's part: 0 the screen lock, 1 the screensaver */
+    int theme_tab;                      /* the Theme page's part: 0 the theme and its colours, 1 the buttons */
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
@@ -549,16 +550,25 @@ static void build_saver(struct app *a, int x, int y, int w);
 static void build_security_lock(struct app *a, int x, int y, int w);
 
 /* The Security page has two parts, the screen lock and the screensaver (which locks the screen, too); two small buttons in the heading row. */
+static void build_part_tabs(struct app *a, int x, int y, int w, const char *key, const char *const *names, int n, int cur)
+{
+    int total = -8;
+    for (int i = 0; i < n; i++)
+        total += lm_font_text_width(names[i]) + 24 + 8;
+    int at = x + w - total;
+    for (int i = 0; i < n; i++) {
+        int bw = lm_font_text_width(names[i]) + 24;
+        struct widget *b = add_button(a, at, y + 1, bw, names[i], key);
+        snprintf(b->arg, sizeof(b->arg), "%d", i);
+        b->on = cur == i;
+        at += bw + 8;
+    }
+}
+
 static void build_security_tabs(struct app *a, int x, int y, int w)
 {
     static const char *const names[2] = { "Lock", "Screensaver" };
-    int bw[2] = { 70, 120 }, at = x + w - bw[0] - bw[1] - 8;
-    for (int i = 0; i < 2; i++) {
-        struct widget *b = add_button(a, at, y + 1, bw[i], names[i], "sec-tab");
-        snprintf(b->arg, sizeof(b->arg), "%d", i);
-        b->on = a->sec_tab == i;
-        at += bw[i] + 8;
-    }
+    build_part_tabs(a, x, y, w, "sec-tab", names, 2, a->sec_tab);
 }
 
 static void build_security(struct app *a, int x, int y, int w)
@@ -1426,19 +1436,77 @@ static int metric_list(const struct app *a, struct metric *out, int max)
     return n;
 }
 
-/* The [windows] double-click-ms size: its index in the `metrics` setting (or -1) and its value (the pending one while the slider is held). */
-static int dblclick_metric(const struct app *a, int *value, int *lo, int *hi)
+/* A size by its "section.name": its index in the `metrics` setting (or -1) and its value (the pending one while the slider is held). */
+static int named_metric(const struct app *a, const char *name, int *value, int *lo, int *hi)
 {
     struct metric m[MAX_METRICS];
     int n = metric_list(a, m, MAX_METRICS);
     for (int i = 0; i < n; i++)
-        if (!strcmp(m[i].name, "windows.double-click-ms")) {
+        if (!strcmp(m[i].name, name)) {
             *value = a->mpend == i ? a->mpend_val : m[i].value;
             *lo = m[i].lo;
             *hi = m[i].hi;
             return i;
         }
     return -1;
+}
+
+/* The [windows] double-click-ms size. */
+static int dblclick_metric(const struct app *a, int *value, int *lo, int *hi)
+{
+    return named_metric(a, "windows.double-click-ms", value, lo, hi);
+}
+
+/* ---- Theme page, second part: the shape and the colours of the buttons (dock, launcher, the programs' coloured buttons) ---- */
+
+static void build_buttons(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Buttons");
+    y += ROW_H;
+    int round = 100, lo = 0, hi = 100;
+    bool have = *kv_get(a, "config-file") && named_metric(a, "windows.button-roundness", &round, &lo, &hi) >= 0;
+    if (!have) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Dock, launcher and the programs' buttons.");
+    y += ROW_H + 2;
+    const uint32_t sample[7] = { lm_theme.icon_files, lm_theme.icon_editor, lm_theme.icon_images, lm_theme.icon_camera, lm_theme.icon_code, lm_theme.icon_bell, lm_theme.icon_launcher };
+    for (int i = 0; i < 7; i++) {                                   /* a preview in the shape and the colours that are set */
+        struct widget *p = add(a, W_SWATCH, (struct rect){ x + i * 54, y, 44, 44 }, "");
+        p->val = (int)sample[i];
+        snprintf(p->arg, sizeof(p->arg), "r%d", round);
+    }
+    y += 52;
+    struct widget *sl = add(a, W_SLIDER, (struct rect){ x, y, w, ROW_H }, "Roundness");
+    snprintf(sl->key, sizeof(sl->key), "roundness");
+    sl->lo = lo;
+    sl->hi = hi;
+    sl->step = 5;
+    sl->unit = " %";
+    sl->val = round;
+    y += ROW_H + 6;
+    const char *mode = kv_get(a, "theme-buttons");
+    add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, "Colours");
+    add_radio(a, x + 80, y, 120, "Colourful", "theme-buttons", "colourful", !strcmp(mode, "colourful") || !*mode);
+    add_radio(a, x + 210, y, 130, "One colour", "theme-buttons", "accent", !strcmp(mode, "accent"));
+    add_radio(a, x + 350, y, 90, "Grey", "theme-buttons", "grey", !strcmp(mode, "grey"));
+    y += ROW_H + 4;
+    struct colour cols[MAX_COLOURS];
+    int n = colour_list(a, cols, MAX_COLOURS);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(cols[i].name, "button-accent")) {
+            struct widget *sw = add(a, W_SWATCH, (struct rect){ x + 80, y + 2, 22, ROW_H - 4 }, "");
+            sw->val = (int)cols[i].value;
+            char hex[40];
+            snprintf(hex, sizeof(hex), "#%06x%s", cols[i].value, cols[i].changed ? " *" : "");
+            add(a, W_LABEL, (struct rect){ x + 110, y, 90, ROW_H }, hex);
+            add_button(a, x + 210, y, 230, "Choose the one colour...", "theme-accent");
+            add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, "Accent");
+            break;
+        }
+    y += ROW_H + 8;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "One colour keeps each button's lightness.");
 }
 
 static void dock_flush(struct app *a);
@@ -1553,6 +1621,16 @@ static void build_sound(struct app *a, int x, int y, int w)
 
 static void attach_help(struct app *a, int px, int pw);
 
+static void build_theme(struct app *a, int x, int y, int w)
+{
+    static const char *const names[2] = { "Colours", "Buttons" };
+    if (a->theme_tab == 1)
+        build_buttons(a, x, y, w);
+    else
+        build_colours(a, x, y, w);
+    build_part_tabs(a, x, y, w, "theme-tab", names, 2, a->theme_tab);
+}
+
 static void build(struct app *a)
 {
     a->nw = 0;
@@ -1574,7 +1652,7 @@ static void build(struct app *a)
     case PAGE_SECURITY: build_security(a, x, y, w); break;
     case PAGE_CONFIG: build_config(a, x, y, w); break;
     case PAGE_KEYS: build_keys(a, x, y, w); break;
-    case PAGE_COLOURS: build_colours(a, x, y, w); break;
+    case PAGE_COLOURS: build_theme(a, x, y, w); break;
     case PAGE_SIZES: build_sizes(a, x, y, w); break;
     case PAGE_DOCK: build_dock(a, x, y, w); break;
     case PAGE_CLOCK: build_clock(a, x, y, w); break;
@@ -1885,6 +1963,13 @@ static void slider_set(struct app *a, const struct widget *w, int v)
         a->mpend = atoi(w->key + 4);
         a->mpend_val = v;
         a->win.redraw = true;
+    } else if (!strcmp(w->key, "roundness")) {                                /* the buttons' roundness: a size, sent when the slider is let go */
+        int cur, lo, hi, i = named_metric(a, "windows.button-roundness", &cur, &lo, &hi);
+        if (i >= 0) {
+            a->mpend = i;
+            a->mpend_val = v;
+            a->win.redraw = true;
+        }
     } else if (!strcmp(w->key, "dblclick")) {                                 /* the double-click time: a size, sent when the slider is let go */
         int cur, lo, hi, i = dblclick_metric(a, &cur, &lo, &hi);
         if (i >= 0) {
@@ -2122,6 +2207,27 @@ static void activate(struct app *a, int idx)
             send_set(a, "dock-reset", "1");
             dock_clear_form(a);
             a->dpend[0] = 0;
+        } else if (!strcmp(w->key, "theme-tab")) {
+            a->theme_tab = atoi(w->arg) == 1 ? 1 : 0;
+            a->focus = -1;
+            a->win.redraw = true;
+        } else if (!strcmp(w->key, "theme-accent")) {                     /* the one colour: the Colours part with it selected */
+            struct colour cols[MAX_COLOURS];
+            int n = colour_list(a, cols, MAX_COLOURS);
+            a->theme_tab = 0;
+            for (int i = 0; i < n; i++)
+                if (!strcmp(cols[i].name, "button-accent")) {
+                    a->csel = i;
+                    a->cpage = i / COLS_ROWS;
+                    snprintf(a->cname, sizeof(a->cname), "%.31s", cols[i].name);
+                    a->cr = (int)(cols[i].value >> 16) & 255;
+                    a->cg = (int)(cols[i].value >> 8) & 255;
+                    a->cb = (int)cols[i].value & 255;
+                    colour_set_hex(a);
+                    a->col_err[0] = 0;
+                }
+            a->focus = -1;
+            a->win.redraw = true;
         } else if (!strcmp(w->key, "sec-tab")) {
             a->sec_tab = atoi(w->arg) == 1 ? 1 : 0;
             a->focus = -1;
@@ -2337,6 +2443,11 @@ static void paint_widget(struct app *a, int idx)
         break;
     }
     case W_SWATCH:
+        if (w->arg[0] == 'r') {                                           /* a preview button: as round as the setting says (100 = a circle) */
+            int pct = atoi(w->arg + 1);
+            lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, r->x, r->y, r->w, r->h, LM_MIN(r->w, r->h) / 2 * pct / 100, (uint32_t)w->val & 0xffffff);
+            break;
+        }
         fill(a, *r, (uint32_t)w->val & 0xffffff);
         outline(a, *r, COL_DIM);
         break;
@@ -2669,16 +2780,18 @@ static int selftest_help(void)
         { "outputs", "A|1024x600|0,0;B|800x600|1024,0" }, { "resolutions", "1024x600|;800x600|" }, { "resolution", "auto" },
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
-        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff" }, { "theme-list", "colorful* graphite light contrast" },
+        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "config-file", "/x/mellagui.conf" },
+        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" },
     };
     int bad = 0, shown = 0;
-    for (int pgi = 0; pgi < N_PAGES + 1; pgi++) {                           /* (one more: the Security page's second part, the screensaver) */
-        int pg = pgi < N_PAGES ? pgi : PAGE_SECURITY;
+    for (int pgi = 0; pgi < N_PAGES + 2; pgi++) {                           /* (two more: the second parts of the Security and the Theme page) */
+        int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : PAGE_COLOURS;
         memset(&fa, 0, sizeof(fa));
         for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
             kv_set(&fa, kvs[i].k, kvs[i].v);
         fa.page = (enum page)pg;
-        fa.sec_tab = pgi >= N_PAGES ? 1 : 0;
+        fa.sec_tab = pgi == N_PAGES ? 1 : 0;
+        fa.theme_tab = pgi == N_PAGES + 1 ? 1 : 0;
         fa.win.bw = 860;
         fa.win.bh = 560;
         fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;

@@ -536,6 +536,7 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, &d->drag_remove, sizeof(d->drag_remove));
             h = fnv(h, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
             h = fnv(h, &lm_dock.icon_bg_rgb, sizeof(lm_dock.icon_bg_rgb));
+            h = fnv(h, &lm_metrics.button_roundness, sizeof(lm_metrics.button_roundness));
             for (int i = 0; i < d->n; i++) {
                 h = fnv(h, &d->icon[i].box, sizeof(d->icon[i].box));
                 h = fnv(h, &d->icon[i].running, sizeof(d->icon[i].running));
@@ -591,6 +592,7 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, &li->help, sizeof(li->help));
             h = fnv(h, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
             h = fnv(h, &lm_dock.icon_bg_rgb, sizeof(lm_dock.icon_bg_rgb));
+            h = fnv(h, &lm_metrics.button_roundness, sizeof(lm_metrics.button_roundness));
             h = fnv(h, li->search, strlen(li->search) + 1);
             h = fnv(h, &li->searching, sizeof(li->searching));
             h = fnv(h, li->button_text[0], strlen(li->button_text[0]) + 1);

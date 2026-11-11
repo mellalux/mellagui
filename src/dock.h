@@ -58,6 +58,7 @@ struct lm_dock_item {
     const struct lm_image *img;         /* premultiplied ARGB, at most the zoomed icon size, or NULL for a built-in icon */
     int raw;                            /* index of the entry in the file's list (lm_dock_raw_entry / lm_launchapps_raw_entry): entries that were left out leave gaps */
     bool launcher_only;                 /* from [launcher-apps] (lm_launchapps_item), not in the dock */
+    bool round;                         /* a picture that fills its square: cut to the icon's shape (circle / rounded square, [windows] button-roundness) when painted */
     bool plate;                         /* a picture whose corners are transparent (a logo): it is painted on a round plate (see icon_bg) */
 };
 

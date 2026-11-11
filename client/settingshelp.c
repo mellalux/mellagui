@@ -175,6 +175,15 @@ static const struct entry table[] = {
       "The palette of the shell and of MellaGUI's own programs. Pick a colour in the list, then change it with the three sliders or type a #rrggbb "
       "value; Apply sends it, 'Built-in' puts that colour back, 'Restore defaults' all of them. Programs that are already open keep their colours "
       "until they are restarted." },
+    { "@Buttons", NULL, "Buttons",
+      "The shape and the colours of the round buttons: the dock's and the launcher's icons and the coloured buttons of MellaGUI's own programs. "
+      "The row of samples shows the result. Programs that are already open keep their buttons until they are restarted." },
+    { "roundness", NULL, "Roundness",
+      "How round the buttons are: 100 % makes circles (and pills for the long buttons), 0 % squares, in between rounded squares. It applies to the dock "
+      "and the launcher at once." },
+    { "theme-buttons", NULL, "Colours of the buttons",
+      "Colourful: every button has its own colour, as MellaGUI always looked. One colour: all buttons take the hue of one colour (the choice below) and "
+      "keep their own lightness, so a dark button stays dark. Grey: the colour is taken away." },
     { "col-r", NULL, "Red", "The red part of the colour chosen in the list above, from 0 to 255. The colour changes in the preview at once; Apply makes it the shell's colour." },
     { "col-g", NULL, "Green", "The green part of the colour chosen in the list above, from 0 to 255. The colour changes in the preview at once; Apply makes it the shell's colour." },
     { "col-b", NULL, "Blue", "The blue part of the colour chosen in the list above, from 0 to 255. The colour changes in the preview at once; Apply makes it the shell's colour." },

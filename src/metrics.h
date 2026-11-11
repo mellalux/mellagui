@@ -30,6 +30,7 @@
     X("windows", "min-width", min_width, 160, 50, 1000, "smallest window width a user can resize to") \
     X("windows", "min-height", min_height, 80, 40, 1000, "smallest window height") \
     X("windows", "scrollbar-width", scrollbar_width, 14, 4, 40, "width of the scroll bars of MellaGUI's own programs (the file browser)") \
+    X("windows", "button-roundness", button_roundness, 100, 0, 100, "how round the dock and launcher icons and the programs' coloured buttons are (100 = circles and pills, 0 = squares; running programs keep theirs)") \
     X("windows", "animation-ms", animation_ms, 300, 0, 1000, "how long a window takes to open, close, minimize and come back, and how slowly a dragged window catches up with the pointer, in ms (0 = no animations)") \
     X("panel", "height", panel_height, 32, 20, 64, "height of the top panel") \
     X("panel", "workspace-width", panel_ws_width, 24, 16, 80, "one workspace cell") \

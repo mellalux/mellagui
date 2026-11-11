@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "font.h"
+#include "metrics.h"
 #include "util.h"
 
 static inline uint32_t lm_mix_rgb(uint32_t a, uint32_t b, double t)       /* t = 0: a, t = 1: b */
@@ -38,6 +39,13 @@ static inline void lm_fill_px(uint32_t *px, int stride, int bw, int bh, int x0, 
     for (int y = y0 < 0 ? 0 : y0; y < y0 + h && y < bh; y++)
         for (int x = x0 < 0 ? 0 : x0; x < x0 + w && x < bw; x++)
             px[(size_t)y * (size_t)stride + (size_t)x] = 0xff000000u | rgb;
+}
+
+/* The corner radius of a coloured button: `pill` is the radius of the full pill / circle (half the height), scaled by [windows] button-roundness (100 = the
+ * pill, 0 = square corners). The dock's and the launcher's icons follow the same setting. */
+static inline int lm_button_radius(int pill)
+{
+    return pill * lm_metrics.button_roundness / 100;
 }
 
 /* A box with rounded corners of radius r (r >= min(w, h) / 2 makes a pill). */

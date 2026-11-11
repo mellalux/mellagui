@@ -3104,7 +3104,7 @@ static void fkeybar(const struct app *a, struct rbtn *b)
 
 static void draw_rbtn(struct wlwin *w, const struct rbtn *b, int y, int h, bool hot, int num)
 {
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, h / 2, hot ? b->hover : b->base);
+    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, lm_button_radius(h / 2), hot ? b->hover : b->base);
     char t[48];
     if (num > 0)
         snprintf(t, sizeof(t), "%d%s", num, b->label);

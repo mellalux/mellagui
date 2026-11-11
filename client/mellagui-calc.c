@@ -622,7 +622,7 @@ static void paint(struct wlwin *w)
         if (i == hover)
             bg = a->press == i ? lm_mix_rgb(base, 0x000000, 0.25) : lite;
         struct rect kr = key_rect(a, &KEYS[i]);
-        round_rect(a, kr, LM_MIN(kr.w, kr.h) / 3, bg);
+        round_rect(a, kr, lm_button_radius(LM_MIN(kr.w, kr.h) / 3), bg);
         int ls = kr.h >= 36 && kr.w >= 44 ? 2 : 1;                       /* as big as fits */
         if (lm_font_text_width(KEYS[i].label) * ls > kr.w - 6)
             ls = 1;

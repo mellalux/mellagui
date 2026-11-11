@@ -47,7 +47,9 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Notifications = [bell] mellagui-notes\n" \
     "Bluetooth     = [bluetooth] mellagui-bluetooth\n" \
     "Screenshot    = [shot] mellagui-shot\n" \
-    "Overview      = [overview] @overview\n"
+    "Overview      = [overview] @overview\n" \
+    "Notes         = [note] mellagui-edit --notes\n" \
+    "Timer         = [timer] mellagui-timer\n"
 
 #define DEFAULT_SETTINGS \
     "[dock]\n" \

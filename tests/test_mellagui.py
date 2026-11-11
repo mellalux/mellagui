@@ -14522,6 +14522,211 @@ class TestShot(Base):
         c.tap(KEY_ESC)
 
 
+class TestStickyNotes(Base):
+    """mellagui-edit --notes / --note FILE: sticky notes, one window each, saved by themselves in a folder."""
+
+    KEY_N, KEY_D, KEY_K = 49, 32, 37
+
+    def start(self, name, files=None):
+        exe = os.path.join(ROOT, 'build', 'mellagui-edit')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-edit not built')
+        self.dir = os.path.join(tmp, 'notes-' + name)
+        shutil.rmtree(self.dir, ignore_errors=True)
+        os.makedirs(self.dir)
+        for fn, text in (files or {}).items():
+            with open(os.path.join(self.dir, fn), 'w') as f:
+                f.write(text)
+        p, c, stop = self.private_compositor(name, '--config', 'none')
+        self.env = dict(os.environ, WAYLAND_DISPLAY=name, MELLAGUI_NOTES_DIR=self.dir, XDG_CONFIG_HOME=os.path.join(tmp, 'tm-cfg'))
+        self.exe = exe
+        return c
+
+    def open_notes(self):
+        subprocess.run([self.exe, '--notes'], env=self.env, timeout=10)
+
+    @staticmethod
+    def notes(c):
+        return [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.note']
+
+    def wait(self, pred, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def files(self):
+        return sorted(f for f in os.listdir(self.dir) if f.endswith('.txt'))
+
+    def test_a_note_opens_when_there_are_none_and_a_window_for_every_note_when_there_are(self):
+        c = self.start('mellagui-sn1')
+        self.open_notes()
+        self.wait(lambda: len(self.notes(c)) == 1, 'a new note')
+        for w in self.notes(c):
+            c.cmd('sync')
+        c2 = self.start('mellagui-sn2', {'a.txt': 'first note\n', 'b.txt': 'second note\n', 'ignored.dat': 'x'})
+        self.open_notes()
+        self.wait(lambda: len(self.notes(c2)) == 2, 'both notes')
+        self.assertEqual(sorted(w['title'] for w in self.notes(c2)), ['first note - Note', 'second note - Note'])
+
+    def test_typing_saves_by_itself_and_the_first_line_is_the_title(self):
+        c = self.start('mellagui-sn3')
+        self.open_notes()
+        self.wait(lambda: len(self.notes(c)) == 1, 'a note')
+        w = self.notes(c)[0]
+        c.click(w['x'] + 100, w['y'] + 60)
+        for ch in 'buy milk':
+            c.tap(KEYCODES[ch])
+        self.wait(lambda: self.files() and open(os.path.join(self.dir, self.files()[0])).read().strip() == 'buy milk', 'saved')
+        self.wait(lambda: self.notes(c)[0]['title'] == 'buy milk - Note', 'the title follows the first line')
+
+    def test_ctrl_k_changes_the_paper_and_it_is_remembered(self):
+        c = self.start('mellagui-sn4', {'n.txt': 'x\n'})
+        self.open_notes()
+        self.wait(lambda: len(self.notes(c)) == 1, 'a note')
+        w = self.notes(c)[0]
+        time.sleep(0.4)
+        def paper():
+            ppm = c.dump(os.path.join(tmp, 'sn4.ppm'))
+            return ppm.px(w['x'] + w['w'] - 60, w['y'] + w['h'] - 60)
+        yellow = paper()
+        self.assertGreater(yellow[0], 240)
+        self.assertGreater(yellow[1], 230)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_K)
+        c.key(KEY_LEFTCTRL, False)
+        time.sleep(0.4)
+        pink = paper()
+        self.assertNotEqual(pink, yellow)
+        self.assertEqual(open(os.path.join(self.dir, 'n.txt.col')).read().strip(), '1')
+
+    def test_ctrl_n_opens_another_note_and_ctrl_d_twice_deletes_this_one(self):
+        c = self.start('mellagui-sn5', {'n.txt': 'keep me\n'})
+        self.open_notes()
+        self.wait(lambda: len(self.notes(c)) == 1, 'a note')
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_N)
+        c.key(KEY_LEFTCTRL, False)
+        self.wait(lambda: len(self.notes(c)) == 2, 'another note')
+        first = [w for w in self.notes(c) if w['title'].startswith('keep me')][0]
+        c.click(first['x'] + 100, first['y'] - 14)                          # its title bar: it comes to the front and gets the keys
+        time.sleep(0.3)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(self.KEY_D)
+        time.sleep(0.4)
+        self.assertEqual(len(self.notes(c)), 2, 'once is only a question')
+        self.assertTrue(os.path.exists(os.path.join(self.dir, 'n.txt')))
+        c.tap(self.KEY_D)
+        c.key(KEY_LEFTCTRL, False)
+        self.wait(lambda: len(self.notes(c)) == 1, 'the second press deletes it')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'n.txt')))
+
+
+class TestTimer(Base):
+    """mellagui-timer: pomodoro, countdown and stopwatch, with an item in the top bar, a card and a call when a countdown ends (a minute is 100 ms here)."""
+
+    def start(self, name):
+        exe = os.path.join(ROOT, 'build', 'mellagui-timer')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-timer not built')
+        p, c, stop = self.private_compositor(name, '--config', 'none')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY=name, MELLAGUI_TIMER_UNIT_MS='100', XDG_CONFIG_HOME=os.path.join(tmp, 'tm-cfg')),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.3)
+        self.pr = pr
+        return c, win
+
+    @staticmethod
+    def spot(win, dx, dy):
+        return win['x'] + dx, win['y'] + dy
+
+    def start_button(self, c, win):
+        c.click(*self.spot(win, 14 + 56, 190 + 17))
+
+    def tray_text(self, c):
+        for l in c.cmd('tray'):
+            m = re.match(r'item \d+ .* text=(.*)$', l)
+            if m:
+                return m[1]
+        return None
+
+    def wait(self, pred, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def test_the_pomodoro_counts_down_in_the_bar_and_calls_when_the_work_is_done(self):
+        c, win = self.start('mellagui-tm1')
+        self.assertIsNone(self.tray_text(c))
+        self.start_button(c, win)
+        self.wait(lambda: (self.tray_text(c) or '').startswith('W 00:0'), 'the bar shows the work time left')      # (25 "minutes" of 100 ms = 2.5 s)
+        self.wait(lambda: 'last=timer' in c.cmd('sound')[0], 'the call at the end')
+        notes = '\n'.join(c.cmd('notes'))
+        self.assertIn('Pomodoro', notes)
+        self.assertIn('short rest', notes)
+        self.assertIsNone(self.tray_text(c), 'the item goes away when nothing runs (the next phase waits for Start)')
+
+    def test_the_timer_part_counts_a_set_time_down_and_a_click_on_the_item_pauses_it(self):
+        c, win = self.start('mellagui-tm2')
+        c.click(*self.spot(win, 14 + 112 + 8 + 56, 12 + 14))                  # the Timer tab
+        c.click(*self.spot(win, 14 + 4 * 59 + 26, 238 + 13))                  # the 25 preset ... then 15 ("minutes" of 100 ms)
+        c.click(*self.spot(win, 14 + 3 * 59 + 26, 238 + 13))
+        self.start_button(c, win)
+        self.wait(lambda: (self.tray_text(c) or '').startswith('T '), 'the item of the timer')
+        item = [l for l in c.cmd('tray') if l.startswith('item')][0]
+        m = re.match(r'item (\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)', item)
+        c.click(int(m[2]) + 10, int(m[3]) + 10)                               # a click on the item: pause
+        self.wait(lambda: self.tray_text(c) is None, 'the click paused it (the item goes)')
+        before = self.tray_text(c)
+        self.start_button(c, win)                                             # on again
+        self.wait(lambda: 'Timer' in '\n'.join(c.cmd('notes')), 'the timer ends and a card says so')
+        self.assertIn('last=timer', c.cmd('sound')[0])
+
+    def test_the_stopwatch_counts_up(self):
+        c, win = self.start('mellagui-tm3')
+        c.click(*self.spot(win, 14 + 2 * 120 + 56, 12 + 14))                  # the Stopwatch tab
+        self.start_button(c, win)
+        self.wait(lambda: (self.tray_text(c) or '').startswith('S '), 'the item of the stopwatch')
+        t1 = self.tray_text(c)
+        time.sleep(1.3)
+        self.assertNotEqual(self.tray_text(c), t1)
+        c.click(*self.spot(win, 14 + 56, 190 + 17))                           # Pause
+        self.wait(lambda: self.tray_text(c) is None, 'stopped: no item')
+
+    def test_closing_the_window_while_a_timer_runs_hides_it_and_the_program_goes_on(self):
+        c, win = self.start('mellagui-tm4')
+        c.click(*self.spot(win, 14 + 2 * 120 + 56, 12 + 14))
+        self.start_button(c, win)
+        self.wait(lambda: self.tray_text(c) is not None, 'running')
+        c.tap(KEY_ESC)
+        time.sleep(0.5)
+        self.assertIsNone(self.pr.poll(), 'it must go on in the background')
+        flags = [w['flags'] for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer'][0]
+        self.assertIn('minimized', flags)
+        self.assertIsNotNone(self.tray_text(c))
+
+    def test_selftest(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-timer')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-timer not built')
+        r = subprocess.run([exe, '--selftest'], capture_output=True, text=True, timeout=20)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, 'mellagui-timer selftest ok'), r.stderr)
+
+
 class TestMagnifier(Base):
     """The screen magnifier: the output zoomed round the pointer (software and GL renderer), Super+= / Super+-, the settings."""
 

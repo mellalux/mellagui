@@ -29,6 +29,8 @@ enum lm_dockicon {
     LM_DOCKICON_BLUETOOTH,      /* the Bluetooth rune */
     LM_DOCKICON_SHOT,           /* the screenshot tool: viewfinder corners */
     LM_DOCKICON_DISK,           /* the disk usage tool: a pie with a slice pulled out */
+    LM_DOCKICON_TIMER,          /* the timer: a stopwatch */
+    LM_DOCKICON_NOTE,           /* the sticky notes: a sheet with lines */
     LM_DOCKICON_COUNT
 };
 

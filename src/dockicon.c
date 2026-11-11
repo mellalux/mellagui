@@ -33,6 +33,8 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_BLUETOOTH] = { "bluetooth", 0 },
     [LM_DOCKICON_SHOT] = { "shot", 0 },
     [LM_DOCKICON_DISK] = { "disk", 0 },
+    [LM_DOCKICON_TIMER] = { "timer", 0 },
+    [LM_DOCKICON_NOTE] = { "note", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -58,6 +60,8 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_BLUETOOTH: return lm_theme.icon_bluetooth;
     case LM_DOCKICON_SHOT: return lm_theme.icon_shot;
     case LM_DOCKICON_DISK: return lm_theme.icon_disk;
+    case LM_DOCKICON_TIMER: return lm_theme.icon_timer;
+    case LM_DOCKICON_NOTE: return lm_theme.icon_note;
     default: return lm_theme.icon_generic;
     }
 }
@@ -79,7 +83,7 @@ int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
         { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
-        { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK },
+        { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK }, { "timer", LM_DOCKICON_TIMER }, { "pomodoro", LM_DOCKICON_TIMER }, { "stopwatch", LM_DOCKICON_TIMER }, { "sticky", LM_DOCKICON_NOTE }, { "memo", LM_DOCKICON_NOTE },
         { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
         { "term", LM_DOCKICON_TERMINAL }, { "console", LM_DOCKICON_TERMINAL }, { "shell", LM_DOCKICON_TERMINAL },
@@ -253,6 +257,21 @@ static float glyph(int kind, float u, float v)
             d = fminf2(d, sd_line(u, v, sx, sy, sx * 0.35f, sy, 0.04f));
             d = fminf2(d, sd_line(u, v, sx, sy, sx, sy * 0.35f, 0.04f));
         }
+        return d;
+    }
+    case LM_DOCKICON_TIMER: {                           /* a stopwatch: a ring, two hands and the button on top */
+        float d = sd_sub(sd_circle(u, v, 0, 0.05f, 0.30f), sd_circle(u, v, 0, 0.05f, 0.235f));
+        d = fminf2(d, sd_line(u, v, 0, 0.05f, 0.0f, -0.13f, 0.028f));
+        d = fminf2(d, sd_line(u, v, 0, 0.05f, 0.10f, 0.11f, 0.028f));
+        d = fminf2(d, sd_box(u, v, 0, -0.30f, 0.055f, 0.035f, 0.012f));
+        d = fminf2(d, sd_line(u, v, 0.23f, -0.14f, 0.28f, -0.19f, 0.03f));
+        return d;
+    }
+    case LM_DOCKICON_NOTE: {                            /* a sheet with lines of writing and a folded corner */
+        float d = sd_box(u, v, 0, 0, 0.26f, 0.30f, 0.03f);
+        d = sd_sub(d, sd_tri(u, v, 0.26f, -0.30f, 0.07f, -0.30f, 0.26f, -0.11f));
+        for (int i = 0; i < 3; i++)
+            d = sd_sub(d, sd_box(u, v, -0.02f, -0.04f + (float)i * 0.12f, 0.15f, 0.018f, 0.01f));
         return d;
     }
     case LM_DOCKICON_DISK: {                            /* a pie with a slice pulled out: where the space went */

@@ -119,6 +119,8 @@
     X("icon-bluetooth",       icon_bluetooth,    0x1c7ed6) \
     X("icon-shot",            icon_shot,         0xae3ec9) \
     X("icon-disk",            icon_disk,         0x66a80f) \
+    X("icon-timer",           icon_timer,        0xe8590c) \
+    X("icon-note",            icon_note,         0xf2b705) \
     X("btn-green",            btn_green,         0x3f9a5e) /* the programs' round coloured buttons: a colour and the lighter one for hover */ \
     X("btn-green-lit",        btn_green_lit,     0x56b878) \
     X("btn-blue",             btn_blue,          0x3d6fb4) \

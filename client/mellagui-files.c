@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -114,7 +115,7 @@ struct pane {
     int last_click_row;
 };
 
-enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR };
+enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
 
 /* What the preview pane shows: the file under the cursor of the active pane. */
 struct preview {
@@ -2067,6 +2068,10 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv_linef(pv, &cap, "not a plain file");
         return;
     }
+    if (classify(path) == K_VIDEO) {                                     /* a picture of the video comes from mellagui-view (video_poll below) */
+        pv->kind = PV_VIDEO_WAIT;
+        return;
+    }
     if (classify(path) == K_IMAGE) {
         if ((unsigned long long)st.st_size > PREVIEW_MAX_IMAGE) {
             pv->kind = PV_ERROR;
@@ -2116,7 +2121,7 @@ static void preview_scale(struct preview *pv, int w, int h)
     free(pv->scaled);
     pv->scaled = NULL;
     pv->sw = pv->sh = 0;
-    if (pv->kind != PV_IMAGE || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
+    if ((pv->kind != PV_IMAGE && pv->kind != PV_VIDEO) || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
         return;
     double s = LM_MIN((double)w / pv->img.w, (double)h / pv->img.h);
     if (s > 8.0)
@@ -3594,6 +3599,135 @@ static void preview_target(struct app *a, char *out, size_t n)
 }
 
 /* Called while painting: notices a new cursor position and loads for it (a picture only once the cursor has rested). */
+/* ---- a picture of a video for the preview: `mellagui-view --poster FILE OUT.ppm` in a thread (one at a time; it can take a moment) -------------------- */
+
+static struct vjob {
+    pthread_t th;
+    bool started;                       /* a thread was made and not joined yet */
+    atomic_int done;                    /* the thread has finished (0 / 1) */
+    char path[PATH_MAX];                /* the video it works on */
+    char out[PATH_MAX];                 /* the picture it writes (PPM) */
+    char info[200];                     /* the info line mellagui-view printed, "" when it failed */
+    char err[200];
+} g_vj;
+
+static void *vjob_main(void *arg)
+{
+    struct vjob *j = arg;
+    char prog[PATH_MAX];
+    sibling("mellagui-view", prog, sizeof(prog));
+    int pf[2], ef[2];
+    j->info[0] = j->err[0] = 0;
+    if (pipe2(pf, O_CLOEXEC) == 0 && pipe2(ef, O_CLOEXEC) == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            int nul = open("/dev/null", O_RDONLY);
+            if (nul >= 0)
+                dup2(nul, 0);
+            dup2(pf[1], 1);
+            dup2(ef[1], 2);
+            execl(prog, prog, "--poster", j->path, j->out, (char *)NULL);
+            _exit(127);
+        }
+        close(pf[1]);
+        close(ef[1]);
+        if (pid > 0) {
+            char *dst[2] = { j->info, j->err };
+            size_t cap[2] = { sizeof(j->info), sizeof(j->err) }, len[2] = { 0, 0 };
+            int fds[2] = { pf[0], ef[0] };
+            int64_t end = now_ms() + 8000;
+            bool open_[2] = { true, true };
+            while ((open_[0] || open_[1]) && now_ms() < end) {
+                struct pollfd p[2] = { { .fd = fds[0], .events = POLLIN }, { .fd = fds[1], .events = POLLIN } };
+                if (!open_[0]) p[0].fd = -1;
+                if (!open_[1]) p[1].fd = -1;
+                if (poll(p, 2, 100) <= 0)
+                    continue;
+                for (int k = 0; k < 2; k++)
+                    if (open_[k] && (p[k].revents & (POLLIN | POLLHUP))) {
+                        ssize_t n = read(fds[k], dst[k] + len[k], cap[k] - 1 - len[k]);
+                        if (n <= 0)
+                            open_[k] = false;
+                        else
+                            len[k] += (size_t)n;
+                    }
+            }
+            if (open_[0] || open_[1]) {                                  /* too slow: give up (SIGCHLD is ignored here, the child goes away by itself) */
+                kill(-pid, SIGKILL);
+                kill(pid, SIGKILL);
+                snprintf(j->err, sizeof(j->err), "no preview: it took too long");
+                j->info[0] = 0;
+            }
+            dst[0][len[0]] = 0;
+            dst[1][len[1]] = 0;
+        }
+        close(pf[0]);
+        close(ef[0]);
+    }
+    for (char *c = j->info; *c; c++)
+        if (*c == '\n') { *c = 0; break; }
+    for (char *c = j->err; *c; c++)
+        if (*c == '\n') { *c = 0; break; }
+    atomic_store(&j->done, 1);
+    return NULL;
+}
+
+/* Starts / collects the thread for `pv`'s video; true while a picture is still being waited for. */
+static bool video_poll(struct preview *pv)
+{
+    if (pv->kind != PV_VIDEO_WAIT)
+        return false;
+    if (g_vj.started && atomic_load(&g_vj.done)) {
+        pthread_join(g_vj.th, NULL);
+        g_vj.started = false;
+        if (!strcmp(g_vj.path, pv->want)) {                                   /* it is the one that is asked for now */
+            char sz[32] = "";
+            struct stat st;
+            if (stat(pv->want, &st) == 0)
+                human_size(st.st_size, sz, sizeof(sz));
+            struct lm_image img = { 0 };
+            char err[160];
+            if (g_vj.info[0] && lm_img_load(g_vj.out, &img, err, sizeof(err)) == 0) {
+                int w = 0, h = 0, audio = 0;
+                char codec[32] = "";
+                unsigned long long ms = 0;
+                sscanf(g_vj.info, "%dx%d codec=%31s duration_ms=%llu audio=%d", &w, &h, codec, &ms, &audio);
+                int secs = (int)(ms / 1000);
+                char dur[24] = "";
+                if (secs >= 3600)
+                    snprintf(dur, sizeof(dur), ", %d:%02d:%02d", secs / 3600, secs / 60 % 60, secs % 60);
+                else if (ms)
+                    snprintf(dur, sizeof(dur), ", %d:%02d", secs / 60, secs % 60);
+                snprintf(pv->info, sizeof(pv->info), "%s, %dx%d%s, %s%s", sz, w, h, dur, codec, audio ? ", sound" : "");
+                pv->img = img;
+                pv->kind = PV_VIDEO;
+            } else {
+                int cap = 0;
+                pv->kind = PV_ERROR;
+                pv_linef(pv, &cap, "%s", g_vj.err[0] ? g_vj.err : "no preview of this video");
+            }
+        }
+        unlink(g_vj.out);
+        return pv->kind == PV_VIDEO_WAIT;                                     /* (the cursor moved on meanwhile: the next one starts below) */
+    }
+    if (!g_vj.started) {
+        snprintf(g_vj.path, sizeof(g_vj.path), "%s", pv->want);
+        const char *rt = getenv("XDG_RUNTIME_DIR");
+        snprintf(g_vj.out, sizeof(g_vj.out), "%s/mellagui-files-poster-%d.ppm", rt && *rt ? rt : "/tmp", (int)getpid());
+        atomic_store(&g_vj.done, 0);
+        if (pthread_create(&g_vj.th, NULL, vjob_main, &g_vj) == 0)
+            g_vj.started = true;
+        else {
+            int cap = 0;
+            pv->kind = PV_ERROR;
+            pv_linef(pv, &cap, "no preview: cannot start a thread");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void preview_update(struct app *a)
 {
     struct preview *pv = &a->pv;
@@ -3612,6 +3746,7 @@ static void preview_update(struct app *a)
             preview_clear(pv);
         pv->loaded = true;
     }
+    video_poll(pv);
 }
 
 static void paint_preview(struct wlwin *w, struct app *a, int idx)
@@ -3639,8 +3774,12 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
         wlwin_text(w, x0 + 10, list_y + 6, "Nothing to show", 1, COL_DIM, pw - 20);
         return;
     }
-    if (pv->kind == PV_IMAGE) {
-        int aw = pw - 16, ah = body_h - 16;
+    if (pv->kind == PV_VIDEO_WAIT) {
+        wlwin_text(w, x0 + 10, list_y + 6, "Reading the video...", 1, COL_DIM, pw - 20);
+        return;
+    }
+    if (pv->kind == PV_IMAGE || pv->kind == PV_VIDEO) {
+        int aw = pw - 16, ah = body_h - 16 - (pv->kind == PV_VIDEO ? LM_FONT_H + 6 : 0);
         if (!pv->scaled || pv->sw > aw || pv->sh > ah || (pv->sw < aw && pv->sh < ah && pv->sw < pv->img.w * 8))
             preview_scale(pv, aw, ah);
         if (pv->scaled) {
@@ -3651,6 +3790,23 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
                 for (int x = 0; x < pv->sw; x++)
                     if (ox + x >= x0 && ox + x < x0 + pw && ox + x < w->bw)
                         w->pixels[(size_t)(oy + y) * (size_t)w->bw + (size_t)(ox + x)] = 0xff000000u | pv->scaled[(size_t)y * (size_t)pv->sw + (size_t)x];
+            }
+            if (pv->kind == PV_VIDEO) {                                          /* a play mark on the picture and a hint under it */
+                int cx = ox + pv->sw / 2, cy = oy + pv->sh / 2, r = LM_CLAMP(LM_MIN(pv->sw, pv->sh) / 7, 10, 28);
+                for (int y = -r; y <= r; y++)
+                    for (int x = -r; x <= r; x++) {
+                        int px = cx + x, py = cy + y;
+                        if (px < 0 || py < 0 || px >= w->bw || py >= w->bh || x * x + y * y > r * r)
+                            continue;
+                        bool tri = x > -r / 3 && x < r / 2 && abs(y) < (r / 2 - x) * 7 / 10 + 1 && x > -r / 3 + abs(y) / 2 - 1;
+                        uint32_t *px32 = &w->pixels[(size_t)py * (size_t)w->bw + (size_t)px];
+                        uint32_t o = *px32;
+                        if (tri)
+                            *px32 = 0xffffffffu;
+                        else
+                            *px32 = 0xff000000u | ((((o >> 16) & 255) / 2) << 16) | ((((o >> 8) & 255) / 2) << 8) | ((o & 255) / 2);
+                    }
+                wlwin_text(w, x0 + 8, list_y + body_h - LM_FONT_H - 4, "Enter plays it in the viewer", 1, COL_DIM, pw - 16);
             }
         }
         return;
@@ -4574,6 +4730,8 @@ int main(int argc, char **argv)
         }
         if (a.job)                                                      /* a copy / move / delete: the progress bar moves */
             timeout = LM_MIN(timeout, 80);
+        if (a.preview && a.pv.kind == PV_VIDEO_WAIT)                    /* a video's picture is on its way */
+            timeout = LM_MIN(timeout, 80);
         if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
             int64_t wait = a.pv.due - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, timeout);
@@ -4582,6 +4740,8 @@ int main(int argc, char **argv)
         if (!wlwin_step(&a.win, timeout))
             break;
         if (a.preview && !a.pv.loaded && a.pv.want[0] && now_ms() >= a.pv.due)
+            a.win.redraw = true;
+        if (a.preview && a.pv.kind == PV_VIDEO_WAIT)                    /* (preview_update collects the picture when it is painted) */
             a.win.redraw = true;
         if (a.job) {
             a.win.redraw = true;

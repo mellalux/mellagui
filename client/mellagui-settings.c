@@ -558,6 +558,14 @@ static void build_access(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Windows keep out of its way", "osk-avoid", kv_int(a, "osk-avoid", 1) != 0);
     y += ROW_H - 4;
     add(a, W_LABEL, (struct rect){ x + BOX + 10, y, w - BOX - 10, ROW_H - 4 }, "Super+K or the Kbd button in the panel shows it.");
+    y += ROW_H + 8;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Screen magnifier");
+    y += ROW_H;
+    add_check(a, x, y, w, "Magnify the screen round the pointer", "magnifier", kv_int(a, "magnifier", 0) != 0);
+    y += ROW_H;
+    add_slider(a, x, y, w, "Zoom", "magnifier-zoom", 125, 800, 25, " %");
+    y += ROW_H;
+    add(a, W_LABEL, (struct rect){ x + BOX + 10, y, w - BOX - 10, ROW_H - 4 }, "Super + and Super - zoom in and out.");
 }
 
 /* The Security page has two parts, the screen lock and the screensaver (which locks the screen, too); two small buttons in the heading row. */

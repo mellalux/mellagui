@@ -11032,7 +11032,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 39)
+        self.assertEqual(len(t), 41)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -11077,7 +11077,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 40)
+        self.assertEqual(len(t), 42)
         self.assertTrue(alive_p(p))
 
 
@@ -13658,13 +13658,14 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '39')
+        self.assertEqual(self.get(c, 'keys-count'), '41')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 9)
-        self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
+        self.assertEqual(len(self.rows(c, 3)), 10)
+        self.assertEqual(len(self.rows(c, 4)), 1)
+        self.assertEqual(self.rows(c, 99), self.rows(c, 4))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
 
@@ -13687,13 +13688,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '39')
+        self.assertEqual(self.get(c, 'keys-count'), '41')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '40')
+        self.assertEqual(self.get(c, 'keys-count'), '42')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -14519,6 +14520,104 @@ class TestShot(Base):
             time.sleep(0.05)
         self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot'])
         c.tap(KEY_ESC)
+
+
+class TestMagnifier(Base):
+    """The screen magnifier: the output zoomed round the pointer (software and GL renderer), Super+= / Super+-, the settings."""
+
+    KEY_EQUAL, KEY_MINUS = 13, 12
+
+    def start(self, name, renderer=None):
+        env = {'MELLAGUI_RENDERER': renderer} if renderer else {}
+        p, c, stop = self.private_compositor(name, '--config', 'none', env=env)
+        c.sync()
+        return c
+
+    @staticmethod
+    def setting(c, key):
+        c.cmd('setting ' + key)
+        return c.last.split(' ', 1)[1]
+
+    def shot(self, c, name):
+        time.sleep(0.3)
+        return c.dump(os.path.join(tmp, name + '.ppm'))
+
+    def test_off_by_default_and_on_it_zooms_round_the_pointer(self):
+        c = self.start('mellagui-mg1')
+        self.assertEqual((self.setting(c, 'magnifier'), self.setting(c, 'magnifier-zoom')), ('0', '200'))
+        c.abs(200, 40)
+        plain = self.shot(c, 'mg1a')
+        self.assertEqual(plain.px(300, 20), plain.px(300, 10))                  # the panel (32 px high) covers both
+        c.cmd('settings magnifier-zoom 300')
+        c.cmd('settings magnifier 1')
+        zoomed = self.shot(c, 'mg1b')
+        # the view's origin is pointer * (1 - 1/3) = (133, 27): the panel's lower edge (y 32) is at screen y (32 - 27) * 3 = 16
+        self.assertEqual(zoomed.px(300, 10), plain.px(300, 10))                 # still the panel at the top ...
+        self.assertNotEqual(zoomed.px(300, 25), plain.px(300, 25))              # ... and below y 16 the desktop, where the panel was
+        c.cmd('settings magnifier 0')
+        self.assertEqual(self.shot(c, 'mg1c').data, plain.data, 'switched off: the picture is as before')
+
+    def test_the_view_follows_the_pointer(self):
+        c = self.start('mellagui-mg2')
+        c.cmd('settings magnifier-zoom 400')
+        c.cmd('settings magnifier 1')
+        c.abs(100, 100)
+        a = self.shot(c, 'mg2a')
+        c.abs(700, 500)
+        b = self.shot(c, 'mg2b')
+        self.assertNotEqual(a.data, b.data)
+        c.abs(100, 100)
+        self.assertEqual(self.shot(c, 'mg2c').data, a.data, 'the same pointer place gives the same picture')
+
+    def test_the_keys_step_through_the_zoom_levels_and_switch_it_off(self):
+        c = self.start('mellagui-mg3')
+        def super_key(code):
+            c.key(KEY_LEFTMETA, True)
+            c.tap(code)
+            c.key(KEY_LEFTMETA, False)
+            time.sleep(0.15)
+        seen = []
+        for _ in range(3):
+            super_key(self.KEY_EQUAL)
+            seen.append((self.setting(c, 'magnifier'), self.setting(c, 'magnifier-zoom')))
+        self.assertEqual(seen, [('1', '125'), ('1', '150'), ('1', '200')])
+        for _ in range(8):
+            super_key(self.KEY_EQUAL)
+        self.assertEqual(self.setting(c, 'magnifier-zoom'), '800')              # not further
+        for _ in range(6):
+            super_key(self.KEY_MINUS)
+        self.assertEqual((self.setting(c, 'magnifier'), self.setting(c, 'magnifier-zoom')), ('1', '125'))
+        super_key(self.KEY_MINUS)
+        self.assertEqual(self.setting(c, 'magnifier'), '0')                      # the last step down switches it off
+
+    def test_bad_values_are_refused_and_the_settings_are_saved(self):
+        d = os.path.join(tmp, 'mg-settings')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        path = os.path.join(d, 'settings.conf')
+        p, c, stop = self.private_compositor('mellagui-mg4', '--config', 'none', '--settings', path)
+        for bad in ('settings magnifier-zoom 50', 'settings magnifier-zoom 900', 'settings magnifier-zoom x', 'settings magnifier maybe'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd(bad)
+        c.cmd('settings magnifier-zoom 250')
+        c.cmd('settings magnifier 1')
+        time.sleep(0.6)
+        c.cmd('quit')
+        p.wait(timeout=5)
+        p2, c2, stop2 = self.private_compositor('mellagui-mg4b', '--config', 'none', '--settings', path)
+        self.assertEqual((self.setting(c2, 'magnifier'), self.setting(c2, 'magnifier-zoom')), ('1', '250'))
+
+    def test_the_gl_renderer_shows_the_same_picture(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'gl-test')) or subprocess.run([os.path.join(ROOT, 'build', 'gl-test')], capture_output=True, timeout=60).returncode == 77:
+            self.skipTest('no OpenGL ES here')
+        shots = []
+        for name, renderer in (('mellagui-mg5', None), ('mellagui-mg5g', 'gl')):
+            c = self.start(name, renderer)
+            c.cmd('settings magnifier-zoom 300')
+            c.cmd('settings magnifier 1')
+            c.abs(300, 200)
+            shots.append(self.shot(c, name))
+        self.assertEqual(shots[0].data, shots[1].data)
 
 
 class TestLauncherSearch(Base):

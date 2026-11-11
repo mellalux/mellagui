@@ -48,6 +48,7 @@
     "Super+W           = overview\n" \
     "Super+Shift+N     = night-light\n" \
     "Super+N           = dnd\n" \
+    "Super+Shift+S     = exec mellagui-shot\n" \
     "Super+Ctrl+N      = exec mellagui-notes\n" \
     "Super+Shift+R     = reload-config\n" \
     "Super+Slash       = exec mellagui-keys\n" \

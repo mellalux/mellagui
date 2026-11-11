@@ -55,6 +55,8 @@ def setUpModule():
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
     os.environ['MELLAGUI_APPS_DIRS'] = os.path.join(tmp, 'no-apps')    # the launcher's search finds none of the programs and files of this machine
     os.environ['MELLAGUI_SEARCH_ROOT'] = os.path.join(tmp, 'no-home')
+    os.environ['MELLAGUI_RECORD_SYSTEM_SRC'] = 'none'                 # the recorder and the camera do not record this machine's sound ...
+    os.environ['MELLAGUI_RECORD_MIC_SRC'] = 'none'                    # ... (the tests of the sound give them a synthetic source)
     os.environ['MELLAGUI_LAUNCHER_DEFAULTS'] = '0'                    # ... nor the built-in launcher buttons (TestLauncherDefaults turns them on)
     os.environ['MELLAGUI_DOCK_LAUNCHER'] = '0'                       # a dock the test wrote is not given the Launcher button (TestDockLauncherPinned turns it on)
     LOG = os.path.join(tmp, 'mellagui.log')
@@ -8043,6 +8045,62 @@ class TestCamera(Base):
     def shot(self, name):
         return ctl.dump(os.path.join(tmp, name))
 
+    def test_a_clip_has_the_microphone_in_it(self):
+        if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
+            self.skipTest('ffmpeg not installed')
+        d = tempfile.mkdtemp(prefix='mellagui-clip-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 'clip.mp4')
+        r = self.run_cam('--clip', path, '--seconds', '2.5', '--mic', MELLAGUI_RECORD_MIC_SRC='lavfi:sine=frequency=700')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), path)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        pr = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0', path], capture_output=True, text=True)
+        self.assertEqual(pr.stdout.strip(), 'h264,640,480')
+        t = audio_tones(path, (700, 1000))
+        self.assertIsNotNone(t, 'no sound track')
+        self.assertGreater(t[700], 300)
+        self.assertLess(t[1000], 30)
+        path2 = os.path.join(d, 'silent.mp4')
+        r = self.run_cam('--clip', path2, '--seconds', '1.5', '--no-mic', MELLAGUI_RECORD_MIC_SRC='lavfi:sine=frequency=700')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(audio_tones(path2, (700,)))
+
+    def test_a_clip_without_ffmpeg_says_so(self):
+        d = tempfile.mkdtemp(prefix='mellagui-clip-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        r = self.run_cam('--clip', os.path.join(d, 'c.mp4'), '--seconds', '1', MELLAGUI_FFMPEG='none')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('needs ffmpeg', r.stderr)
+        self.assertEqual(os.listdir(d), [], 'a file was left behind')
+
+    def test_the_window_records_a_clip_with_r_and_the_microphone_switch_is_remembered(self):
+        if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
+            self.skipTest('ffmpeg not installed')
+        vd = tempfile.mkdtemp(prefix='mellagui-vid-', dir=tmp)
+        cfg = tempfile.mkdtemp(prefix='mellagui-camcfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, vd, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, win, d = self.start(MELLAGUI_CAM_VIDEO_DIR=vd, XDG_CONFIG_HOME=cfg, MELLAGUI_RECORD_MIC_SRC='lavfi:sine=frequency=700')
+        time.sleep(0.5)
+        ctl.tap(19)                                                         # R: record
+        time.sleep(2.5)
+        ctl.tap(19)                                                         # R: stop
+        for _ in range(100):
+            files = [f for f in os.listdir(vd) if f.endswith('.mp4')]
+            if files:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len(files), 1, files)
+        path = os.path.join(vd, files[0])
+        time.sleep(0.5)
+        t = audio_tones(path, (700,))
+        self.assertIsNotNone(t, 'the microphone is on by default: a sound track')
+        self.assertGreater(t[700], 200)
+        ctl.tap(KEY_A)                                                      # A: the microphone off, remembered
+        time.sleep(0.4)
+        self.assertIn('microphone = 0', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
+
     def test_selftest(self):
         r = self.run_cam('--selftest')
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -8144,6 +8202,22 @@ class TestCamera(Base):
     def test_dock_has_a_camera_button_after_images(self):
         names = [l.split('"')[1] for l in ctl.cmd('dock') if l.startswith('icon ')]
         self.assertEqual(names[:8], ['Launcher', 'Overview', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images', 'Camera'])
+
+
+def audio_tones(path, freqs):
+    """{freq: amplitude} of the sound track of a file (Goertzel on the first 3 s, mono, 8 kHz); None when there is no sound track."""
+    import math, struct
+    r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=20)
+    if not r.stdout.strip():
+        return None
+    r = subprocess.run(['ffmpeg', '-v', 'quiet', '-t', '3', '-i', path, '-vn', '-ac', '1', '-af', 'aresample=8000', '-f', 's16le', '-'], capture_output=True, timeout=30)
+    n = len(r.stdout) // 2
+    s = struct.unpack('<%dh' % n, r.stdout[:n * 2])
+    out = {}
+    for f in freqs:
+        w = 2 * math.pi * f / 8000
+        out[f] = math.hypot(sum(x * math.cos(w * i) for i, x in enumerate(s)), sum(x * math.sin(w * i) for i, x in enumerate(s))) / max(n, 1)
+    return out
 
 
 class TestRecord(Base):
@@ -8507,6 +8581,66 @@ class TestRecord(Base):
         w = [x for x in ctl.windows()['windows'] if x['title'] == 'test'][0]
         p = Image.open(png).convert('RGB').getpixel((w['x'] + w['w'] // 2, w['y'] + w['h'] // 2))
         self.assertTrue(p[0] > 200 and p[1] < 60 and p[2] > 200, 'the window is not in the last picture: %r' % (p,))
+
+    def sound_rec(self, d, sound, **env):
+        e = dict(os.environ, **env)
+        r = subprocess.run([self.REC, '--start', '--duration', '2.5', '--dir', d, '--codec', 'ffmpeg', '--sound', sound], env=e, capture_output=True, text=True, timeout=40)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip(), r.stderr
+
+    def test_the_computers_sound_and_the_microphone_are_in_the_recording(self):
+        if not self.have_x264():
+            self.skipTest('ffmpeg with libx264 not installed')
+        src = dict(MELLAGUI_RECORD_SYSTEM_SRC='lavfi:sine=frequency=440', MELLAGUI_RECORD_MIC_SRC='lavfi:sine=frequency=880')
+        d = self.outdir()
+        path, err = self.sound_rec(d, 'system', **src)
+        self.assertIn('with sound', err)
+        t = audio_tones(path, (440, 880, 1000))
+        self.assertIsNotNone(t, 'no sound track')
+        self.assertGreater(t[440], 300)
+        self.assertLess(t[880], 60, 'the microphone is in a recording that did not ask for it')
+        path, err = self.sound_rec(self.outdir(), 'mic', **src)
+        t = audio_tones(path, (440, 880))
+        self.assertGreater(t[880], 300)
+        self.assertLess(t[440], 60)
+        path, err = self.sound_rec(self.outdir(), 'both', **src)
+        t = audio_tones(path, (440, 880, 1000))
+        self.assertGreater(t[440], 150)                                  # mixed: both are there
+        self.assertGreater(t[880], 150)
+        self.assertLess(t[1000], 30)
+        info = self.probe(path)
+        self.assertEqual((info['codec_name'], info['width'], info['height']), ('h264', '1024', '600'))
+
+    def test_no_sound_track_without_sound(self):
+        if not self.have_x264():
+            self.skipTest('ffmpeg with libx264 not installed')
+        path, err = self.sound_rec(self.outdir(), 'none', MELLAGUI_RECORD_SYSTEM_SRC='lavfi:sine=frequency=440')
+        self.assertNotIn('with sound', err)
+        self.assertIsNone(audio_tones(path, (440,)))
+
+    def test_the_window_has_switches_for_the_sound_and_remembers_them(self):
+        cfg = tempfile.mkdtemp(prefix='mellagui-reccfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p = subprocess.Popen([self.REC], env=dict(os.environ, XDG_CONFIG_HOME=cfg), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.record')
+        self.assertIsNotNone(win)
+        time.sleep(0.5)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.record'][0]
+        conf = os.path.join(cfg, 'mellagui', 'record.conf')
+        ctl.click(win['x'] + 16 + 20, win['y'] + 126 + 14)                       # "Computer sound": on by default, now off
+        time.sleep(0.4)
+        self.assertIn('system-sound = 0', open(conf).read())
+        ctl.click(win['x'] + win['w'] - 16 - 20, win['y'] + 126 + 14)            # "Microphone": off by default, now on
+        time.sleep(0.4)
+        text = open(conf).read()
+        self.assertIn('system-sound = 0', text)
+        self.assertIn('microphone = 1', text)
+        p.kill()
+        p.wait()
+        p = subprocess.Popen([self.REC, '--list'], env=dict(os.environ, XDG_CONFIG_HOME=cfg), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p.wait()
+        self.assertEqual(self.run_rec('--sound', 'loud').returncode, 2)
 
     def test_codec_choice_without_ffmpeg(self):
         d = self.outdir()

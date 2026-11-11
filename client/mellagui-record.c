@@ -16,7 +16,12 @@
  * dropped (a still screen costs nothing, the earlier picture just lasts longer). The others go to the encoder: Motion JPEG on up to 4 threads
  * (src/jpegenc.c, written to src/mp4.c in order), own H.264 on one thread (src/h264enc.c: a picture is predicted from the one before),
  * ffmpeg through a pipe, stamped with the time it is read. When the encoder is slower than the frame rate pictures are skipped, never queued
- * up. The cursor is not in the picture (as in screenshots), and neither is sound.
+ * up. The pointer is drawn into the pictures (screenshots have none).
+ *
+ * Sound (only with the ffmpeg codec: ffmpeg opens the sound sources itself, so picture and sound share one clock; src: client/ffpipe.c): the computer's
+ * own sound (the monitor of the default output: beeps, music, a video) and / or the microphone, mixed into one AAC track. Two switches in the window,
+ * kept in record.conf (system-sound = 1 by default, microphone = 0), `--sound none|system|mic|both` for one run. $MELLAGUI_RECORD_SYSTEM_SRC / _MIC_SRC
+ * name other sources ("format:device", ffmpeg's -f / -i; tests use lavfi:sine=frequency=440), `none` = off.
  *
  * Window: Record / Stop, the output and the frame rate to use (not while recording). Keys: Space or Enter record / stop,
  * O next output, F next frame rate, Esc or Q close (a recording is finished first). SIGINT / SIGTERM also finish the file.
@@ -44,6 +49,7 @@
 #include "keymap.h"
 #include "loop.h"
 #include "mp4.h"
+#include "sndconf.h"
 #include "theme.h"
 #include "uikit.h"
 #include "util.h"
@@ -89,6 +95,8 @@ struct app {
     int codec_opt;                  /* --codec: 0 auto, 1 mjpeg (our own encoder), 2 ffmpeg (H.264 through libx264), 3 h264 (our own encoder) */
     const char *dir, *name;         /* --dir, --name */
     double duration;                /* --duration: stop (and quit) after that many seconds, 0 = never */
+    bool snd_system, snd_mic;       /* record the computer's sound / the microphone (record.conf; --sound) */
+    bool snd_rec;                   /* the recording in progress has a sound track */
 
     /* the recording */
     bool rec;
@@ -138,8 +146,8 @@ struct app {
     char saved[600];                /* the last finished file */
     char msg[160];                  /* the last problem */
     uint64_t shown_sec;
-    struct button b_rec, b_out, b_fps;
-    int hover, press;               /* 0 none, 1 record, 2 output, 3 fps */
+    struct button b_rec, b_out, b_fps, b_sys, b_mic;
+    int hover, press;               /* 0 none, 1 record, 2 output, 3 fps, 4 system sound, 5 microphone */
     double px, py;
     bool has_pointer;
     bool quit;
@@ -608,7 +616,9 @@ static bool start_recording(struct app *a)
         free(pps);
     } else if (use_ff) {
         char why[160];
-        a->ff = ffpipe_start(a->path, a->rw, a->rh, 21, why, sizeof(why));
+        struct ffpipe_audio au = { a->snd_system ? ffpipe_audio_source(false) : NULL, a->snd_mic ? ffpipe_audio_source(true) : NULL };
+        a->snd_rec = au.system || au.mic;
+        a->ff = ffpipe_start(a->path, a->rw, a->rh, 21, &au, why, sizeof(why));
         a->ff_last = a->ff ? malloc(frame_bytes) : NULL;
         if (!a->ff_last && a->ff) {
             ffpipe_finish(a->ff);
@@ -644,6 +654,11 @@ static bool start_recording(struct app *a)
         free_frames(a);
         return false;
     }
+    if (!use_ff) {
+        if (a->snd_system || a->snd_mic)
+            fprintf(stderr, "mellagui-record: no sound in this recording: it needs ffmpeg with libx264 (the built-in encoders have no sound track)\n");
+        a->snd_rec = false;
+    }
     a->interval = 1000u / (uint64_t)FPS_CHOICES[a->fps_sel];
     a->t0 = lm_now_ms();
     a->next_grab = a->t0;
@@ -652,8 +667,8 @@ static bool start_recording(struct app *a)
     a->win.redraw = true;
     tray_start(a);
     a->want_min = a->tray != 0;                     /* the bar's item shows that it runs: the window can go out of the way */
-    fprintf(stderr, "mellagui-record: recording %s %dx%d at %d fps (%s) -> %s\n", o->name, a->rw, a->rh, FPS_CHOICES[a->fps_sel],
-            use_ff ? "H.264 through ffmpeg" : use_h264 ? "H.264, built in" : "Motion JPEG", a->path);
+    fprintf(stderr, "mellagui-record: recording %s %dx%d at %d fps (%s%s) -> %s\n", o->name, a->rw, a->rh, FPS_CHOICES[a->fps_sel],
+            use_ff ? "H.264 through ffmpeg" : use_h264 ? "H.264, built in" : "Motion JPEG", a->snd_rec ? ", with sound" : "", a->path);
     return true;
 }
 
@@ -879,7 +894,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 /* ---- window ---------------------------------------------------------------------------------------------------------- */
 
 #define DEF_W 400
-#define DEF_H 168
+#define DEF_H 200
 
 static void layout(struct app *a)
 {
@@ -890,12 +905,15 @@ static void layout(struct app *a)
     a->b_rec = (struct button){ m, y, wr, h };
     a->b_out = (struct button){ m + wr + g, y, wo, h };
     a->b_fps = (struct button){ m + wr + g + wo + g, y, wf, h };
+    int hw = (avail - g) / 2;
+    a->b_sys = (struct button){ m, y + h + g, hw, 28 };
+    a->b_mic = (struct button){ m + hw + g, y + h + g, avail - hw - g, 28 };
 }
 
 static int button_at(const struct app *a, double x, double y)
 {
-    const struct button *bs[3] = { &a->b_rec, &a->b_out, &a->b_fps };
-    for (int i = 0; i < 3; i++)
+    const struct button *bs[5] = { &a->b_rec, &a->b_out, &a->b_fps, &a->b_sys, &a->b_mic };
+    for (int i = 0; i < 5; i++)
         if (x >= bs[i]->x && x < bs[i]->x + bs[i]->w && y >= bs[i]->y && y < bs[i]->y + bs[i]->h)
             return i + 1;
     return 0;
@@ -932,12 +950,15 @@ static void paint(struct wlwin *w)
         uint32_t frames = a->enc_frames;
         uint64_t bytes = a->enc_bytes;
         pthread_mutex_unlock(&a->lock);
-        snprintf(line, sizeof(line), "%dx%d  %u pictures  %.1f MB", a->rw, a->rh, frames, (double)bytes / 1048576.0);
+        snprintf(line, sizeof(line), "%dx%d  %u pictures  %.1f MB%s", a->rw, a->rh, frames, (double)bytes / 1048576.0, a->snd_rec ? "  with sound" : "");
         wlwin_text(w, 16, 50, line, 1, lm_theme.muted, w->bw - 32);
     } else {
         wlwin_text(w, 16, 14, a->msg[0] ? "Not recorded" : a->saved[0] ? "Saved" : "Ready", 2, lm_theme.text, w->bw - 32);
-        const char *info = a->msg[0] ? a->msg : a->saved[0] ? a->saved : a->capture ? "Record one screen into an MP4 file" :
-                           "Screen capture is not available";
+        bool snd_ok = ffpipe_available() && a->codec_opt != 1 && a->codec_opt != 3;       /* sound is made by ffmpeg (the built-in encoders have no sound track) */
+        const char *info = a->msg[0] ? a->msg : a->saved[0] ? a->saved :
+                           !a->capture ? "Screen capture is not available" :
+                           (a->snd_system || a->snd_mic) && !snd_ok ? "No sound: it needs ffmpeg with libx264 (and not --codec h264 / mjpeg)" :
+                           (a->snd_system || a->snd_mic) ? "Record one screen and its sound into an MP4 file" : "Record one screen into an MP4 file";
         wlwin_text(w, 16, 50, info, 1, a->msg[0] ? lm_theme.error : lm_theme.muted, w->bw - 32);
     }
     draw_button(a, &a->b_rec, 1, a->rec ? lm_theme.danger : lm_mix_rgb(lm_theme.ok, 0x000000, 0.35), a->rec ? "Stop" : "Record", !a->capture);
@@ -947,6 +968,8 @@ static void paint(struct wlwin *w)
     draw_button(a, &a->b_out, 2, lm_theme.button, ol, a->rec || a->nouts == 0);
     snprintf(line, sizeof(line), "%d fps", FPS_CHOICES[a->fps_sel]);
     draw_button(a, &a->b_fps, 3, lm_theme.button, line, a->rec);
+    draw_button(a, &a->b_sys, 4, a->snd_system ? lm_mix_rgb(lm_theme.ok, 0x000000, 0.35) : lm_theme.button, a->snd_system ? "Computer sound: on" : "Computer sound: off", a->rec);
+    draw_button(a, &a->b_mic, 5, a->snd_mic ? lm_mix_rgb(lm_theme.ok, 0x000000, 0.35) : lm_theme.button, a->snd_mic ? "Microphone: on" : "Microphone: off", a->rec);
     char dirbuf[512];
     snprintf(line, sizeof(line), "Into %s", record_dir(a, dirbuf, sizeof(dirbuf)));
     wlwin_text(w, 16, w->bh - 28, line, 1, lm_theme.text_dim, w->bw - 32);
@@ -974,6 +997,16 @@ static void press_button(struct app *a, int id)
     case 3:
         if (!a->rec)
             a->fps_sel = (a->fps_sel + 1) % N_FPS;
+        break;
+    case 4:
+    case 5:
+        if (!a->rec) {
+            if (id == 4)
+                a->snd_system = !a->snd_system;
+            else
+                a->snd_mic = !a->snd_mic;
+            lm_snd_conf_save("record", a->snd_system, a->snd_mic);
+        }
         break;
     }
     a->win.redraw = true;
@@ -1055,6 +1088,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             press_button(a, 2);
         else if (txt[0] == 'f' || txt[0] == 'F')
             press_button(a, 3);
+        else if (txt[0] == 's' || txt[0] == 'S')
+            press_button(a, 4);
+        else if (txt[0] == 'm' || txt[0] == 'M')
+            press_button(a, 5);
         else if (txt[0] == 'q' || txt[0] == 'Q')
             close_or_hide(a);
     }
@@ -1193,14 +1230,15 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: mellagui-record [--start] [--duration SECONDS] [--output N] [--fps N] [--quality 1..100] [--dir DIR] [--name FILE]\n"
-            "                        [--codec auto|h264|ffmpeg|mjpeg]\n"
+            "                        [--codec auto|h264|ffmpeg|mjpeg] [--sound none|system|mic|both]\n"
             "       mellagui-record --list | --selftest\n");
 }
 
 int main(int argc, char **argv)
 {
     lm_theme_load_env();
-    struct app a = { .fps_sel = 2, .quality = DEFAULT_QUALITY, .grabbing = -1 };
+    struct app a = { .fps_sel = 2, .quality = DEFAULT_QUALITY, .grabbing = -1, .snd_system = true };
+    lm_snd_conf_load("record", &a.snd_system, &a.snd_mic);
     bool want_start = false, list_only = false;
     for (int i = 1; i < argc; i++) {
         const char *s = argv[i];
@@ -1219,6 +1257,14 @@ int main(int argc, char **argv)
                 usage();
                 return 2;
             }
+            i++;
+        }
+        else if (!strcmp(s, "--sound") && val) {        /* for this run only (the switches in the window are remembered) */
+            if (!strcmp(val, "none") || !strcmp(val, "off")) a.snd_system = a.snd_mic = false;
+            else if (!strcmp(val, "system")) { a.snd_system = true; a.snd_mic = false; }
+            else if (!strcmp(val, "mic")) { a.snd_system = false; a.snd_mic = true; }
+            else if (!strcmp(val, "both") || !strcmp(val, "on")) a.snd_system = a.snd_mic = true;
+            else { usage(); return 2; }
             i++;
         }
         else if (!strcmp(s, "--fps") && val) {

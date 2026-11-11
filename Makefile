@@ -154,7 +154,7 @@ $(BUILD)/mellagui-view: $(BUILD)/client/mellagui-view.o $(BUILD)/src/h264dec.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/client/ffpipe.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

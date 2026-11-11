@@ -4,11 +4,18 @@
  *   mellagui-cam [--device /dev/videoN] [--size WxH]      the live window
  *   mellagui-cam --list                                   one line per camera: DEVICE|name|formats|sizes
  *   mellagui-cam --snapshot FILE.png [--device D] [--size WxH]   take one picture without a window (after a short warm-up)
+ *   mellagui-cam --clip FILE.mp4 [--seconds N] [--mic|--no-mic] [--device D] [--size WxH]   record a clip without a window
  *   mellagui-cam --selftest
  *
- * Keys: Space / Enter = snapshot, M = mirror the preview, P = pause, S = next picture size, C = next camera, Esc / Q = quit.
+ * Keys: Space / Enter = snapshot, R = record a clip (again = stop), A = the microphone in the clip on / off, M = mirror the preview, P = pause,
+ * S = next picture size, C = next camera, Esc / Q = quit.
  * Snapshots go to $MELLAGUI_CAM_DIR (default ~/Pictures) as camera-YYYYMMDD-HHMMSS.png, the picture as the camera sees it
  * (not mirrored); mellagui-view finds them there.
+ *
+ * Clips: H.264 + AAC in an MP4 (`camera-YYYYMMDD-HHMMSS.mp4` in $MELLAGUI_CAM_VIDEO_DIR, default ~/Videos, mode 0600), made by ffmpeg from the pictures
+ * (client/ffpipe.c: sent as they come, never waiting - a picture that x264 is too slow for is dropped) and, when the microphone switch is on, the default
+ * microphone (ffmpeg reads it itself, so sound and picture share one clock). The picture is not mirrored. The switch is kept in camera.conf
+ * (microphone = 1; on by default). It needs ffmpeg with libx264.
  *
  * Formats: MJPEG (preferred: a webcam on a shared USB hub often cannot carry raw video) decoded by src/jpeg.c, whose
  * standard Huffman tables serve the frames a camera sends without a DHT segment, and YUYV. The camera is looked for again
@@ -31,10 +38,12 @@
 #include <unistd.h>
 
 #include "font.h"
+#include "ffpipe.h"
 #include "img.h"
 #include "keymap.h"
 #include "png.h"
 #include "protocol.h"
+#include "sndconf.h"
 #include "theme.h"
 #include "uikit.h"
 #include "util.h"
@@ -65,7 +74,7 @@ struct source {
     uint64_t fake_n;
 };
 
-enum { B_SNAP, B_MIRROR, B_PAUSE, B_SIZE, B_CAM, N_B };
+enum { B_SNAP, B_REC, B_MIC, B_MIRROR, B_PAUSE, B_SIZE, B_CAM, N_B };
 
 struct app {
     struct wlwin win;
@@ -82,6 +91,9 @@ struct app {
     int hover;
     double px, py;
     char outdir[PATH_MAX];
+    char videodir[PATH_MAX];            /* where clips go */
+    bool mic;                           /* the next clip has the microphone in it */
+    struct clip *clip;                  /* the clip being recorded, NULL = none */
 };
 
 static uint64_t now_ms(void)
@@ -474,6 +486,107 @@ static bool save_snapshot(struct app *a, char *name, size_t nsz)
     return false;
 }
 
+/* ---- clips -------------------------------------------------------------------------------------------------------------- */
+
+struct clip {
+    struct ffpipe *ff;
+    char path[PATH_MAX + 80];
+    int w, h;
+    uint64_t t0;
+    uint32_t frames, dropped;
+    bool sound;
+    bool remove_if_empty;
+};
+
+/* Starts a clip of the pictures that are coming, of the size of the newest one. `path` = the file (NULL: camera-<time>.mp4 in dir). NULL with err. */
+static struct clip *clip_start(const struct lm_image *img, const char *dir, const char *path, bool mic, char *err, size_t en)
+{
+    if (!img || !img->px || img->w < 16 || img->h < 16) {
+        snprintf(err, en, "no picture from the camera yet");
+        return NULL;
+    }
+    if (!ffpipe_available()) {
+        snprintf(err, en, "a clip needs ffmpeg with libx264 (not found)");
+        return NULL;
+    }
+    struct clip *c = calloc(1, sizeof(*c));
+    if (!c) {
+        snprintf(err, en, "out of memory");
+        return NULL;
+    }
+    int fd = -1;
+    if (path) {
+        snprintf(c->path, sizeof(c->path), "%s", path);
+        fd = open(c->path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    } else {
+        if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+            snprintf(err, en, "cannot create %s: %s", dir, strerror(errno));
+            free(c);
+            return NULL;
+        }
+        time_t t = time(NULL);
+        struct tm tm;
+        char stamp[32];
+        localtime_r(&t, &tm);
+        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+        for (int n = 0; n < 100 && fd < 0; n++) {
+            if (n)
+                snprintf(c->path, sizeof(c->path), "%s/camera-%s-%d.mp4", dir, stamp, n);
+            else
+                snprintf(c->path, sizeof(c->path), "%s/camera-%s.mp4", dir, stamp);
+            fd = open(c->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            if (fd < 0 && errno != EEXIST)
+                break;
+        }
+    }
+    if (fd < 0) {
+        snprintf(err, en, "cannot write %.120s: %s", c->path, strerror(errno));
+        free(c);
+        return NULL;
+    }
+    close(fd);
+    c->w = img->w;
+    c->h = img->h;
+    struct ffpipe_audio au = { NULL, mic ? ffpipe_audio_source(true) : NULL };
+    c->sound = au.mic != NULL;
+    c->ff = ffpipe_start(c->path, c->w, c->h, 23, &au, err, en);
+    if (!c->ff) {
+        unlink(c->path);
+        free(c);
+        return NULL;
+    }
+    c->t0 = now_ms();
+    return c;
+}
+
+/* A new picture: sent when ffmpeg has room, else dropped. False when ffmpeg is gone. */
+static bool clip_frame(struct clip *c, const struct lm_image *img)
+{
+    if (!img->px || img->w != c->w || img->h != c->h)
+        return true;
+    int r = ffpipe_offer(c->ff, img->px, (size_t)c->w * (size_t)c->h * 4);
+    if (r == 0)
+        c->frames++;
+    else if (r > 0)
+        c->dropped++;
+    return r >= 0;
+}
+
+/* Ends the clip: the newest picture goes once more (it defines where the file ends), ffmpeg finishes the file. True when there is a file. */
+static bool clip_stop(struct clip *c, const struct lm_image *last, uint32_t *frames)
+{
+    if (last && last->px && last->w == c->w && last->h == c->h)
+        ffpipe_write(c->ff, last->px, (size_t)c->w * (size_t)c->h * 4);
+    *frames = c->frames;
+    int rc = ffpipe_finish(c->ff);
+    c->ff = NULL;
+    struct stat st;
+    bool ok = rc == 0 && c->frames > 0 && stat(c->path, &st) == 0 && st.st_size > 0;
+    if (!ok)
+        unlink(c->path);
+    return ok;
+}
+
 /* ---- the window ----------------------------------------------------------------------------------------------------------- */
 
 #define BG (lm_theme.background)
@@ -482,6 +595,8 @@ static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
 {
     switch (i) {
     case B_SNAP: return "Snapshot";
+    case B_REC: return a->clip ? "Stop" : "Record";
+    case B_MIC: return a->mic ? "Mic on" : "Mic off";
     case B_MIRROR: return "Mirror";
     case B_PAUSE: return a->paused ? "Resume" : "Pause";
     case B_SIZE: snprintf(buf, n, "%dx%d", a->src.w ? a->src.w : 0, a->src.h ? a->src.h : 0); return buf;
@@ -582,10 +697,12 @@ static void paint(struct wlwin *w)
         char tmp[40];
         if (!btn_rect(a, i, &x, &y, &bw, &bh))
             continue;
-        bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused);
+        bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused) || (i == B_REC && a->clip) || (i == B_MIC && a->mic);
         /* round colourful buttons like the terminal's and the editor's: lighter under the pointer, a switch that is on gets a white rim */
-        const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_purple };
-        const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
+        const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_red, lm_theme.btn_slate, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal,
+                                     lm_theme.btn_purple };
+        const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_red_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit,
+                                     lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
         if (on)
             lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
         lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
@@ -593,7 +710,17 @@ static void paint(struct wlwin *w)
         wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
     }
     char st[240];
-    if (a->note[0] && now_ms() < a->note_until)
+    if (a->clip) {
+        uint64_t ms = now_ms() - a->clip->t0, s = ms / 1000;
+        char tag[24];                                           /* in the corner of the picture, where it is seen however narrow the window is */
+        snprintf(tag, sizeof(tag), "REC %02u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
+        int tw = (int)strlen(tag) * LM_FONT_W;
+        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, 8, 8, tw + 40, 24, 12, 0x000000);
+        if ((ms / 500) % 2 == 0)
+            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, 16, 14, 12, 12, 6, lm_theme.alert);
+        wlwin_text(w, 34, 14, tag, 1, 0xffffff, 0);
+        snprintf(st, sizeof(st), "REC %02u:%02u  %u pictures%s", (unsigned)(s / 60), (unsigned)(s % 60), a->clip->frames, a->clip->sound ? "  with microphone" : "");
+    } else if (a->note[0] && now_ms() < a->note_until)
         snprintf(st, sizeof(st), "%s", a->note);
     else if (a->src.on)
         snprintf(st, sizeof(st), "%s  %dx%d %s  %d fps%s", a->src.card, a->src.w, a->src.h, a->src.fake ? "test" : fourcc_name(a->src.fourcc),
@@ -625,6 +752,36 @@ static void do_snapshot(struct app *a)
         set_note(a, "Saved %s", name);
     else
         set_note(a, "Cannot save a picture (%s)", a->have ? "see the folder" : "no picture yet");
+}
+
+static void do_record(struct app *a)
+{
+    if (a->clip) {
+        uint32_t frames = 0;
+        char path[sizeof(a->clip->path)];
+        snprintf(path, sizeof(path), "%s", a->clip->path);
+        bool ok = clip_stop(a->clip, a->have ? &a->img : NULL, &frames);
+        free(a->clip);
+        a->clip = NULL;
+        if (ok) {
+            const char *base = strrchr(path, '/');
+            set_note(a, "Saved %s", base ? base + 1 : path);
+            fprintf(stderr, "mellagui-cam: saved %s (%u pictures)\n", path, frames);
+        } else {
+            set_note(a, "The clip could not be saved (%s)", frames ? "ffmpeg failed" : "no pictures");
+        }
+        return;
+    }
+    char err[200] = "";
+    if (!a->src.on || !a->have) {
+        set_note(a, "%s", "No picture to record yet");
+        return;
+    }
+    a->clip = clip_start(&a->img, a->videodir, NULL, a->mic, err, sizeof(err));
+    if (!a->clip)
+        set_note(a, "%s", err);
+    else
+        fprintf(stderr, "mellagui-cam: recording %s%s\n", a->clip->path, a->clip->sound ? " (with microphone)" : "");
 }
 
 static void start_stream(struct app *a)
@@ -690,10 +847,21 @@ static void press(struct app *a, int b)
 {
     switch (b) {
     case B_SNAP: do_snapshot(a); break;
+    case B_REC: do_record(a); break;
+    case B_MIC:
+        if (!a->clip) {                                         /* (a clip that runs keeps what it started with) */
+            a->mic = !a->mic;
+            bool sys = false;
+            lm_snd_conf_save("camera", sys, a->mic);
+        }
+        break;
     case B_MIRROR: a->mirror = !a->mirror; break;
-    case B_PAUSE: a->paused = !a->paused; break;
-    case B_SIZE: next_size(a); break;
-    case B_CAM: next_camera(a); break;
+    case B_PAUSE:
+        if (!a->clip)                                           /* a clip is made of the live pictures */
+            a->paused = !a->paused;
+        break;
+    case B_SIZE: if (!a->clip) next_size(a); break;
+    case B_CAM: if (!a->clip) next_camera(a); break;
     }
     a->win.redraw = true;
 }
@@ -741,6 +909,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         w->running = false;
     else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || c == ' ')
         press(a, B_SNAP);
+    else if (c == 'r' || c == 'R')
+        press(a, B_REC);
+    else if (c == 'a' || c == 'A')
+        press(a, B_MIC);
     else if (c == 'm' || c == 'M')
         press(a, B_MIRROR);
     else if (c == 'p' || c == 'P')
@@ -773,6 +945,8 @@ static void pull_frames(struct app *a)
 {
     int r = src_frame(&a->src, &a->img, !a->paused);
     if (r < 0) {
+        if (a->clip)                                            /* the camera went away: what was recorded is kept */
+            do_record(a);
         src_close(&a->src);
         a->have = false;
         snprintf(a->msg, sizeof(a->msg), "The camera went away. Looking for it again...");
@@ -782,6 +956,10 @@ static void pull_frames(struct app *a)
         a->have = true;
         a->frames++;
         a->win.redraw = true;
+        if (a->clip && !clip_frame(a->clip, &a->img)) {         /* ffmpeg died: say so and end the clip */
+            do_record(a);
+            set_note(a, "%s", "ffmpeg stopped: the clip is lost (is the sound server running? try Mic off)");
+        }
     }
 }
 
@@ -829,6 +1007,8 @@ static int run_window(struct app *a)
         if (n > 0 && a->src.on && !a->src.fake && (pf[1].revents & (POLLIN | POLLERR | POLLHUP)))
             pull_frames(a);
     }
+    if (a->clip)
+        do_record(a);                                           /* the window was closed while recording: the file is finished */
     src_close(&a->src);
     wlwin_destroy(&a->win);
     return 0;
@@ -904,6 +1084,73 @@ static int cmd_snapshot(const char *file, const char *dev, struct size want)
     return 0;
 }
 
+/* A clip without a window: `seconds` of the camera into `file`. */
+static int cmd_clip(const char *file, const char *dev, struct size want, double seconds, bool mic)
+{
+    struct app a = { 0 };
+    char err[200] = "";
+    char devs[MAX_DEVS][64];
+    if (!dev) {
+        if (scan_devices(devs, MAX_DEVS) == 0) {
+            fprintf(stderr, "mellagui-cam: no camera found\n");
+            return 1;
+        }
+        dev = devs[0];
+    }
+    if (src_open(&a.src, dev, err, sizeof(err)) < 0 || src_start(&a.src, want, err, sizeof(err)) < 0) {
+        fprintf(stderr, "mellagui-cam: %s\n", err);
+        return 1;
+    }
+    int got = 0;
+    uint64_t t0 = now_ms();
+    while (got < (a.src.fake ? 1 : WARMUP_FRAMES) && now_ms() - t0 < 15000) {
+        struct pollfd pf = { .fd = a.src.fd, .events = POLLIN };
+        if (!a.src.fake && poll(&pf, 1, 500) <= 0)
+            continue;
+        int r = src_frame(&a.src, &a.img, true);
+        if (r < 0)
+            break;
+        got += r > 0;
+    }
+    if (!got) {
+        fprintf(stderr, "mellagui-cam: no picture from %s\n", dev);
+        src_close(&a.src);
+        return 1;
+    }
+    struct clip *c = clip_start(&a.img, NULL, file, mic, err, sizeof(err));
+    if (!c) {
+        fprintf(stderr, "mellagui-cam: %s\n", err);
+        src_close(&a.src);
+        return 1;
+    }
+    uint64_t end = now_ms() + (uint64_t)(seconds * 1000.0);
+    bool alive = true;
+    while (alive && now_ms() < end) {
+        struct pollfd pf = { .fd = a.src.fd, .events = POLLIN };
+        if (a.src.fake) {
+            usleep(66000);
+        } else if (poll(&pf, 1, 200) <= 0) {
+            continue;
+        }
+        int r = src_frame(&a.src, &a.img, true);
+        if (r < 0)
+            break;
+        if (r > 0)
+            alive = clip_frame(c, &a.img);
+    }
+    uint32_t frames = 0;
+    bool ok = clip_stop(c, &a.img, &frames);
+    free(c);
+    src_close(&a.src);
+    free(a.img.px);
+    if (!ok) {
+        fprintf(stderr, "mellagui-cam: the clip could not be saved\n");
+        return 1;
+    }
+    printf("%s\n", file);
+    return 0;
+}
+
 static int selftest(void)
 {
     int bad = 0;
@@ -943,9 +1190,11 @@ static int selftest(void)
 int main(int argc, char **argv)
 {
     lm_theme_load_env();
-    const char *dev = NULL, *snap = NULL;
+    const char *dev = NULL, *snap = NULL, *clip = NULL;
     struct size want = { 0, 0 };
-    bool list = false;
+    bool list = false, mic = true, sys_unused = false;
+    double seconds = 5;
+    lm_snd_conf_load("camera", &sys_unused, &mic);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
             return selftest();
@@ -955,13 +1204,21 @@ int main(int argc, char **argv)
             dev = argv[++i];
         else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc)
             snap = argv[++i];
+        else if (!strcmp(argv[i], "--clip") && i + 1 < argc)
+            clip = argv[++i];
+        else if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
+            seconds = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--mic"))
+            mic = true;
+        else if (!strcmp(argv[i], "--no-mic"))
+            mic = false;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
             if (!parse_size(argv[++i], &want)) {
                 fprintf(stderr, "mellagui-cam: --size wants WIDTHxHEIGHT\n");
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: mellagui-cam [--device /dev/videoN] [--size WxH] | --list | --snapshot FILE.png | --selftest\n");
+            fprintf(stderr, "usage: mellagui-cam [--device /dev/videoN] [--size WxH] [--mic|--no-mic] | --list | --snapshot FILE.png | --clip FILE.mp4 [--seconds N] | --selftest\n");
             return 2;
         }
     }
@@ -969,9 +1226,12 @@ int main(int argc, char **argv)
         return cmd_list();
     if (snap)
         return cmd_snapshot(snap, dev, want);
+    if (clip)
+        return cmd_clip(clip, dev, want, seconds, mic);
 
     static struct app a;                                         /* zero initialised */
     a.want = want;
+    a.mic = mic;
     if (dev) {
         snprintf(a.want_dev, sizeof(a.want_dev), "%s", dev);
         a.fixed_dev = true;
@@ -981,6 +1241,11 @@ int main(int argc, char **argv)
         snprintf(a.outdir, sizeof(a.outdir), "%s", dir);
     else
         snprintf(a.outdir, sizeof(a.outdir), "%s/Pictures", home && *home ? home : ".");
+    const char *vdir = getenv("MELLAGUI_CAM_VIDEO_DIR");
+    if (vdir && *vdir)
+        snprintf(a.videodir, sizeof(a.videodir), "%s", vdir);
+    else
+        snprintf(a.videodir, sizeof(a.videodir), "%s/Videos", home && *home ? home : ".");
     a.src.fd = -1;
     int rc = run_window(&a);
     free(a.img.px);

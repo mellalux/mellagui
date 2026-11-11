@@ -1,7 +1,7 @@
 /*
  * mellagui-quick: the quick settings card of the panel.
  *
- *   mellagui-quick              runs for the whole session once it was started (the first click on the panel's quick settings button, or Super+X, starts it): its
+ *   mellagui-quick              runs for the whole session once it was started (the first click on the panel's quick settings button, or Super+Z, starts it): its
  *                               window is hidden (minimized, not in the taskbar) and the button shows it under itself; it hides when it loses the focus, on Esc and Q.
  *   mellagui-quick --selftest   checks the arithmetic of the sliders without a display
  *
@@ -394,6 +394,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     int h;
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
+        a->drag = -1;                                           /* a drag that lost its button release (the card was hidden meanwhile) ends here */
         a->px = lm_fixed_to_double(args[2].f);
         a->py = lm_fixed_to_double(args[3].f);
         h = hit(a, a->px, a->py);
@@ -449,7 +450,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 {
     struct app *a = w->data;
     if (op == LM_WL_KEYBOARD_EVT_ENTER) {                /* it was just shown: ask the sound server and the radios again */
-        send_set(a, "audio-rescan", "1");
+        send_set(a, "audio-rescan", "levels");
         refresh_radios(a);
         w->redraw = true;
         return;

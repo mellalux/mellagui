@@ -13,7 +13,7 @@
  *                                     saver    = mellagui-matrix    the screensaver (a full screen client; saver.h)
  *                                     status   = mellagui-status    the battery and network buttons of the panel (kept running; none = off)
  *                                     calendar = mellagui-calendar  the calendar a click on the panel's clock shows (kept running, hidden)
- *                                     quick    = mellagui-quick     the quick settings card the panel's button / Super+Q shows (the same; `none` = no button's card)
+ *                                     quick    = mellagui-quick     the quick settings card the panel's button / Super+Z shows (the same; `none` = no button's card)
  *                                     suspend / reboot / poweroff = systemctl suspend ...   the session dialog's Suspend, Restart and Shutdown buttons (`suspend = none` turns Suspend off: a server)
  *
  * A command is a shell command line. Before it is used:

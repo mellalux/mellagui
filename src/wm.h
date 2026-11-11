@@ -290,6 +290,7 @@ enum lm_pick_kind {
     LM_PICK_MENU,       /* the menu's card (between its entries) */
     LM_PICK_MENU_BACKDROP, /* anything else while the menu is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_OSK,      /* the panel's on-screen keyboard button: shows / hides the keyboard */
+    LM_PICK_PANEL_QUICK,    /* the panel's quick settings button (`rect` = the button): shows / hides the quick settings card */
     LM_PICK_OSK_KEY,        /* a key of the on-screen keyboard (`index` = key) */
     LM_PICK_OSK,            /* the on-screen keyboard between its keys (its top strip, the left margin, the gaps): drag to move it */
     LM_PICK_OSK_GRIP,       /* its right / bottom margin (`edges` = LM_EDGE_RIGHT / LM_EDGE_BOTTOM, both in the corner): drag to resize it */
@@ -426,6 +427,8 @@ struct lm_panel_info {
     char caps_text[8];              /* "CAPS", "NUM" or "CAPS+N" */
     struct lm_rect osk;             /* the on-screen keyboard button, left of the layout indicator */
     bool hover_osk;
+    struct lm_rect quick;               /* the quick settings button, left of the keyboard button */
+    bool hover_quick, quick_open;
     bool osk_open;                  /* the keyboard is showing: the button is lit */
     struct lm_rect layout;          /* keyboard layout indicator */
     bool hover_layout;
@@ -841,6 +844,11 @@ void lm_wm_clock_changed(struct lm_wm *wm);
  * starts it (main.c, at startup); lm_wm_calendar_toggle shows / hides it, starting it first when it is not there (`clock` = where the clock is, NULL =
  * the primary output's); false when calendars are off (setting cal-enabled) or there is no command. */
 void lm_wm_calendar_start(struct lm_wm *wm);
+/* Quick settings (client/mellagui-quick.c, app id "mellagui.quick"): a program like the calendar - a hidden window that is shown right-aligned under the panel's
+ * quick settings button (`anchor`, NULL = the primary output's button) and hides when it loses the focus. Started by the first call. False when there is no command. */
+bool lm_wm_quick_toggle(struct lm_wm *wm, const struct lm_rect *anchor);
+/* "quick x= y= w= h= window=0|1|2" (0 no window, 1 hidden, 2 shown). */
+size_t lm_wm_quick_describe(struct lm_wm *wm, char *buf, size_t size);
 bool lm_wm_calendar_toggle(struct lm_wm *wm, const struct lm_rect *clock);
 /* The window of this surface (or of the root it belongs to) is mapped, not minimized and on the current workspace. */
 bool lm_wm_surface_visible(const struct lm_wm *wm, struct lm_surface *s);

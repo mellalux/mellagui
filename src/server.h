@@ -161,6 +161,7 @@ struct lm_config {
     int night_kelvin;           /* ... at this colour temperature (settings: night-temp; default 3400) */
     char night_from[8], night_to[8];   /* "HH:MM" (settings: night-from, night-to; default 21:00 and 06:30) */
     const char *status_cmd;     /* the battery / network buttons of the panel, started with the compositor ([commands] status, default "mellagui-status", "none" = off) */
+    const char *quick_cmd;      /* the quick settings program, started by the first click on the panel's quick settings button ([commands] quick, default "mellagui-quick") */
     const char *calendar_cmd;   /* the calendar program, started with the compositor and shown by a click on the clock ([commands] calendar, default "mellagui-calendar") */
     struct lm_clockfmt clock;   /* how the panel's clock and the date are written (settings: clock-hours, clock-seconds, clock-date, clock-weekday, date-format) */
     bool cal_enabled;           /* a click on the clock shows the calendar (settings: cal-enabled; default true) */

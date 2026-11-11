@@ -60,6 +60,7 @@
 #define ABOUT_ROW_H 18
 #define PANEL_LAYOUT_W (lm_metrics.panel_layout_width)
 #define PANEL_STICKY_W (lm_metrics.panel_sticky_width)
+#define PANEL_QUICK_W 36                            /* the quick settings button (not a configurable size) */
 #define PANEL_OSK_W 36                              /* the on-screen keyboard button (not a configurable size) */
 #define PANEL_CAPS_W (lm_metrics.panel_caps_width)
 #define SW_MAX_WINDOWS 32
@@ -218,6 +219,10 @@ struct lm_wm {
     bool cal_pending;                   /* a click started it: show it when its window appears */
     uint64_t cal_pending_ms;
     struct lm_rect cal_clock;           /* where the clock was clicked (the calendar opens under it) */
+    pid_t quick_pid;                    /* the quick settings program we started (0 = none) */
+    bool quick_pending;                 /* a click started it: show it when its window appears */
+    uint64_t quick_pending_ms;
+    struct lm_rect quick_anchor;        /* the button that was clicked (the card opens under it) */
     struct lm_timer *clock_timer;
     struct note { int id; char title[LM_NOTIFY_COLS * 4 + 1]; char body[200]; int64_t expire; } notes[LM_NOTIFY_MAX];   /* newest first */
     int nnotes, next_note_id;
@@ -229,7 +234,7 @@ struct lm_wm {
     uint32_t hover_bits;
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
-    bool hover_power, hover_layout, hover_sticky, hover_osk;
+    bool hover_power, hover_layout, hover_sticky, hover_osk, hover_quick;
     int hover_tray;             /* id of the tray item under the pointer, 0 = none */
     bool osk_open;              /* the on-screen keyboard is showing on the primary output */
     uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
@@ -349,10 +354,15 @@ static bool win_visible(const struct lm_wm *wm, const struct lm_window *w)
     return w->mapped && !w->minimized && w->workspace == wm->workspace;
 }
 
-/* The calendar program's window: it lives hidden (minimized) and is not listed in the taskbar, Alt+Tab or the dock. */
+/* The calendar's and the quick settings' windows: they live hidden (minimized) and are not listed in the taskbar, Alt+Tab or the dock. */
+static bool win_is_quick(const struct lm_window *w)
+{
+    return w->app_id && !strcmp(w->app_id, "mellagui.quick");
+}
+
 static bool win_is_calendar(const struct lm_window *w)
 {
-    return w->app_id && !strcmp(w->app_id, "mellagui.calendar");
+    return w->app_id && (!strcmp(w->app_id, "mellagui.calendar") || !strcmp(w->app_id, "mellagui.quick"));
 }
 
 static void win_origin(const struct lm_window *w, int32_t *ox, int32_t *oy)
@@ -391,6 +401,7 @@ static void frame_info(const struct lm_wm *wm, const struct lm_window *w, struct
 }
 
 static struct lm_window *calendar_window(struct lm_wm *wm);
+static struct lm_window *quick_window(struct lm_wm *wm);
 static void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws);
 static void window_menu_activate(struct lm_wm *wm, int which);
 static void menu_close(struct lm_wm *wm, bool chosen);
@@ -420,6 +431,12 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->osk = lm_rect_make(p->layout.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
     p->hover_osk = wm->hover_osk;
     p->osk_open = wm->osk_open;
+    p->quick = lm_rect_make(p->osk.x - 4 - PANEL_QUICK_W, y, PANEL_QUICK_W, h);
+    p->hover_quick = wm->hover_quick;
+    {
+        struct lm_window *qw = quick_window((struct lm_wm *)wm);
+        p->quick_open = qw && win_visible(wm, qw);
+    }
     uint32_t locks = wm->srv->input ? lm_input_locks(wm->srv->input) : 0;
     p->caps_text[0] = 0;
     if ((locks & LM_MOD_CAPS) && (locks & LM_MOD_NUM))
@@ -429,11 +446,11 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     else if (locks & LM_MOD_NUM)
         snprintf(p->caps_text, sizeof(p->caps_text), "NUM");
     int caps_w = !p->caps_text[0] ? 0 : (locks & LM_MOD_NUM) && (locks & LM_MOD_CAPS) ? PANEL_CAPS_W + 24 : PANEL_CAPS_W;
-    p->caps = lm_rect_make(p->osk.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
+    p->caps = lm_rect_make(p->quick.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
     int tx = x + 12;
     int title_end = p->caps.x;
     if (wm->srv->tray) {                                            /* programs' icons: the first one created is the rightmost */
-        int right = (caps_w ? p->caps.x : p->osk.x) - 4, n = lm_tray_count(wm->srv->tray);
+        int right = (caps_w ? p->caps.x : p->quick.x) - 4, n = lm_tray_count(wm->srv->tray);
         for (int i = 0; i < n && p->ntray < LM_PANEL_MAX_TRAY; i++) {
             struct lm_tray_view v;
             if (!lm_tray_get(wm->srv->tray, i, &v))
@@ -1755,6 +1772,12 @@ void lm_wm_window_map(struct lm_window *w)
         w->workspace = wm->workspace;
         w->minimized = true;
         damage_panels(wm);
+        if (win_is_quick(w)) {
+            if (wm->quick_pending && lm_now_ms() - wm->quick_pending_ms < 5000)
+                lm_wm_quick_toggle(wm, &wm->quick_anchor);
+            wm->quick_pending = false;
+            return;
+        }
         if (wm->cal_pending && lm_now_ms() - wm->cal_pending_ms < 5000)
             lm_wm_calendar_toggle(wm, &wm->cal_clock);
         wm->cal_pending = false;
@@ -4356,9 +4379,97 @@ static struct lm_window *calendar_window(struct lm_wm *wm)
 {
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link)
-        if (w->mapped && win_is_calendar(w))
+        if (w->mapped && win_is_calendar(w) && !win_is_quick(w))
             return w;
     return NULL;
+}
+
+static struct lm_window *quick_window(struct lm_wm *wm)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link)
+        if (w->mapped && win_is_quick(w))
+            return w;
+    return NULL;
+}
+
+static bool quick_alive(struct lm_wm *wm)
+{
+    if (wm->quick_pid <= 0)
+        return false;
+    int st;
+    pid_t r = waitpid(wm->quick_pid, &st, WNOHANG);
+    if (r == wm->quick_pid || (r < 0 && kill(wm->quick_pid, 0) != 0)) {
+        wm->quick_pid = 0;
+        return false;
+    }
+    return true;
+}
+
+bool lm_wm_quick_toggle(struct lm_wm *wm, const struct lm_rect *anchor)
+{
+    const char *cmd = wm ? wm->srv->config.quick_cmd : NULL;
+    if (!wm || !cmd || !*cmd || !strcmp(cmd, "none"))
+        return false;
+    if (anchor) {
+        wm->quick_anchor = *anchor;
+    } else {
+        struct lm_output *o = lm_output_primary(wm->srv);
+        if (!o)
+            return false;
+        struct lm_panel_info pi;
+        panel_info(wm, o, &pi);
+        wm->quick_anchor = pi.quick;
+    }
+    struct lm_window *w = quick_window(wm);
+    if (!w) {                                                /* not there (yet, or it ended): start it and show it when its window comes */
+        wm->quick_pending = true;
+        wm->quick_pending_ms = lm_now_ms();
+        if (!quick_alive(wm)) {
+            wm->quick_pid = lm_server_spawn(wm->srv, cmd);
+            if (wm->quick_pid < 0)
+                wm->quick_pid = 0;
+        }
+        return true;
+    }
+    if (win_visible(wm, w)) {
+        lm_wm_window_request_minimize(w);
+        return true;
+    }
+    struct lm_output *o = lm_output_nearest(wm->srv, wm->quick_anchor.x, wm->quick_anchor.y);
+    int32_t right = wm->quick_anchor.x + wm->quick_anchor.w;
+    int32_t ox = o ? o->x : 0, ow = o ? o->width : 1280;
+    w->x = right - LM_BORDER_WIDTH - w->width;
+    if (w->x < ox + LM_BORDER_WIDTH)
+        w->x = ox + LM_BORDER_WIDTH;
+    if (w->x + w->width + LM_BORDER_WIDTH > ox + ow)
+        w->x = ox + ow - w->width - LM_BORDER_WIDTH;
+    w->y = wm->quick_anchor.y + wm->quick_anchor.h + 4 + LM_TITLEBAR_HEIGHT;
+    w->workspace = wm->workspace;
+    w->minimized = false;
+    update_outputs(wm, w);
+    raise_window(wm, w);
+    damage_frame(wm, w);
+    set_focus(wm, w);
+    damage_panels(wm);
+    refresh_pointer(wm);
+    return true;
+}
+
+size_t lm_wm_quick_describe(struct lm_wm *wm, char *buf, size_t size)
+{
+    struct lm_output *o = lm_output_primary(wm->srv);
+    if (!o || size == 0) {
+        if (size)
+            buf[0] = 0;
+        return 0;
+    }
+    struct lm_panel_info pi;
+    panel_info(wm, o, &pi);
+    struct lm_window *w = quick_window(wm);
+    size_t n = (size_t)snprintf(buf, size, "quick x=%d y=%d w=%d h=%d window=%d\n", pi.quick.x, pi.quick.y, pi.quick.w, pi.quick.h,
+                                !w ? 0 : win_visible(wm, w) ? 2 : 1);
+    return n < size ? n : size - 1;
 }
 
 static bool calendar_alive(struct lm_wm *wm)
@@ -6412,6 +6523,10 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                 out->kind = LM_PICK_PANEL_LAYOUT;
             if (lm_rect_contains(&pi.osk, ix, iy))
                 out->kind = LM_PICK_PANEL_OSK;
+            if (lm_rect_contains(&pi.quick, ix, iy)) {
+                out->kind = LM_PICK_PANEL_QUICK;
+                out->rect = pi.quick;
+            }
             if (lm_rect_contains(&pi.sticky, ix, iy))
                 out->kind = LM_PICK_PANEL_STICKY;
             for (int i = 0; i < pi.ntray; i++)
@@ -6461,7 +6576,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool about_btn = false, launcher = false, power_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false;
+    bool about_btn = false, launcher = false, power_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false, quick_btn = false;
     int power_item = -1, clip_code = 0, dm_item = -1;
     struct lm_window *task = NULL;
     int tray_id = 0;
@@ -6493,6 +6608,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_OSK: osk_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_QUICK: quick_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_OSK_KEY: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_OSK: shape = LM_CURSOR_MOVE; break;
     case LM_PICK_OSK_GRIP: shape = cursor_for_edges(pick->edges); break;
@@ -6563,8 +6679,9 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     }
     if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || power_btn != wm->hover_power ||
         task != wm->hover_task || layout_btn != wm->hover_layout ||
-        sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk || tray_id != wm->hover_tray) {
+        sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk || quick_btn != wm->hover_quick || tray_id != wm->hover_tray) {
         wm->hover_tray = tray_id;
+        wm->hover_quick = quick_btn;
         wm->hover_osk = osk_btn;
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
@@ -7125,6 +7242,13 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         lm_wm_osk_layout_changed(wm);                           /* (not while it is dragged: the windows would run about) */
         return true;
     }
+    if (pressed && button == BTN_LEFT) {                        /* a click anywhere else sends the calendar / the quick settings card away */
+        struct lm_window *pw;
+        lm_list_for_each(pw, &wm->windows, link)
+            if (pw->mapped && !pw->minimized && win_is_calendar(pw) && pick->window != pw &&
+                !(pick->kind == LM_PICK_PANEL_QUICK && win_is_quick(pw)) && !(pick->kind == LM_PICK_PANEL_CLOCK && !win_is_quick(pw)))
+                lm_wm_window_request_minimize(pw);
+    }
     if (pick->kind == LM_PICK_OSK_KEY || pick->kind == LM_PICK_OSK || pick->kind == LM_PICK_OSK_GRIP) {
         if (pressed && button == BTN_LEFT) {
             if (pick->kind == LM_PICK_OSK_KEY) {
@@ -7300,6 +7424,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             lm_input_cycle_layout(wm->srv->input, pi);
         if (pk == LM_PICK_PANEL_OSK && pick->kind == LM_PICK_PANEL_OSK)
             osk_set(wm, !wm->osk_open);
+        if (pk == LM_PICK_PANEL_QUICK && pick->kind == LM_PICK_PANEL_QUICK)
+            lm_wm_quick_toggle(wm, &pick->rect);
         if (pk == LM_PICK_PANEL_STICKY && pick->kind == LM_PICK_PANEL_STICKY && wm->srv->input)
             lm_input_set_sticky(wm->srv->input, !lm_input_sticky(wm->srv->input));
         if (pk == LM_PICK_PANEL_TRAY && pick->kind == LM_PICK_PANEL_TRAY && pick->index == pi)
@@ -7449,6 +7575,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
     case LM_PICK_PANEL_LAYOUT:
     case LM_PICK_PANEL_STICKY:
     case LM_PICK_PANEL_OSK:
+    case LM_PICK_PANEL_QUICK:
         if (button == BTN_LEFT || (button == BTN_RIGHT && pick->kind == LM_PICK_PANEL_LAYOUT)) {
             wm->press_panel_kind = pick->kind;
             wm->press_panel_ws = button == BTN_RIGHT ? -1 : 1;     /* layout direction, see the release code */
@@ -7599,6 +7726,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_RUN: launch_run(wm); break;
     case LM_ACT_LAUNCHER: launcher_set(wm, !wm->launcher_open, NULL); break;
     case LM_ACT_OSK: osk_set(wm, !wm->osk_open); break;
+    case LM_ACT_QUICK: lm_wm_quick_toggle(wm, NULL); break;
     case LM_ACT_OVERVIEW: overview_set(wm, !wm->ov.open || wm->ov.closing); break;
     case LM_ACT_NIGHT_LIGHT: lm_night_toggle(wm->srv->night); break;
     case LM_ACT_DND:

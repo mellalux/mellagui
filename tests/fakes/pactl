@@ -49,6 +49,15 @@ elif a[:2] == ['list', 'sources']:
         v = round(s['vol'] * 65536 / 100)
         out += ('Source #%d\n\tState: RUNNING\n\tName: %s\n\tDescription: %s\n\tMute: %s\n'
                 '\tVolume: front-left: %d / %3d%% / -1.00 dB\n' % (i + 50, s['name'], s['desc'], 'yes' if s['mute'] else 'no', v, s['vol']))
+elif a[:1] == ['get-sink-volume'] and len(a) == 2:
+    for s in st['sinks']:
+        if s['name'] == (st['default'] if a[1] == '@DEFAULT_SINK@' else a[1]):
+            v = round(s['vol'] * 65536 / 100)
+            out = 'Volume: front-left: %d / %3d%% / -9.29 dB,   front-right: %d / %3d%% / -9.29 dB\n        balance 0.00\n' % (v, s['vol'], v, s['vol'])
+elif a[:1] == ['get-sink-mute'] and len(a) == 2:
+    for s in st['sinks']:
+        if s['name'] == (st['default'] if a[1] == '@DEFAULT_SINK@' else a[1]):
+            out = 'Mute: %s\n' % ('yes' if s['mute'] else 'no')
 elif a[:1] == ['get-default-source']:
     out = st['default_source'] + '\n'
 elif a[:1] == ['set-default-source'] and len(a) == 2:
@@ -83,11 +92,11 @@ elif a[:1] == ['set-default-sink'] and len(a) == 2:
         st['default'] = a[1]
 elif a[:1] == ['set-sink-volume'] and len(a) == 3:
     for s in st['sinks']:
-        if s['name'] == a[1]:
+        if s['name'] == (st['default'] if a[1] == '@DEFAULT_SINK@' else a[1]):
             s['vol'] = pct(a[2])
 elif a[:1] == ['set-sink-mute'] and len(a) == 3:
     for s in st['sinks']:
-        if s['name'] == a[1]:
+        if s['name'] == (st['default'] if a[1] == '@DEFAULT_SINK@' else a[1]):
             s['mute'] = flag(a[2], s['mute'])
 elif a[:1] == ['set-sink-input-volume'] and len(a) == 3:
     for i in st['inputs']:

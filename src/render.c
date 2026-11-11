@@ -1923,6 +1923,21 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         struct lm_rect bar = lm_rect_make(bx + 6, by + 8, 10, 2);
         fill_rect(c, &bar, obg);
     }
+    {                                                   /* quick settings: three sliders (lines with knobs); the button is lit while the card shows */
+        uint32_t qbg = p->quick_open ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_quick ? 30 : 18);
+        uint32_t qfg = p->quick_open ? COL_PANEL : COL_PANEL_TEXT;
+        fill_round(c, &p->quick, btn_radius(8), 0xff000000u | qbg);
+        int cx = p->quick.x + p->quick.w / 2, cy = p->quick.y + p->quick.h / 2;
+        static const int knob[3] = { -4, 3, -1 };
+        for (int i = 0; i < 3; i++) {
+            struct lm_rect line = lm_rect_make(cx - 8, cy - 7 + i * 6, 16, 2);
+            fill_rect(c, &line, qfg);
+            struct lm_rect k = lm_rect_make(cx + knob[i] - 2, cy - 9 + i * 6, 5, 6);
+            fill_round(c, &k, 2, 0xff000000u | qbg);                               /* a gap round the knob ... */
+            struct lm_rect k2 = lm_rect_make(cx + knob[i] - 1, cy - 8 + i * 6, 3, 4);
+            fill_round(c, &k2, 1, 0xff000000u | qfg);                              /* ... and the knob itself */
+        }
+    }
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
     {                                                   /* the round power button: a disc with the power symbol */
         float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;

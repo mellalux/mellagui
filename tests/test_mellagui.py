@@ -8525,6 +8525,158 @@ class TestRecord(Base):
         self.assertEqual(struct.unpack_from('<I', shm.map, 0)[0], 0xff010203)
 
 
+class TestQuickSettings(Base):
+    """The panel's quick settings button and card (client/mellagui-quick.c, shown like the calendar): volume, microphone, switches, buttons."""
+
+    def start(self, name, extra_env=None):
+        exe = os.path.join(ROOT, 'build', 'mellagui-quick')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-quick not built')
+        d = os.path.join(tmp, 'quick-' + name)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        self.state = os.path.join(d, 'pactl.json')
+        env = {'MELLAGUI_FAKE_STATE': self.state, 'MELLAGUI_FAKE_PW': os.path.join(d, 'pw.json'), 'MELLAGUI_NMCLI': 'none', 'MELLAGUI_BLUETOOTHCTL': 'none',
+               'PATH': FAKES + ':' + os.environ['PATH']}
+        env.update(extra_env or {})
+        p, c, stop = self.private_compositor(name, '--config', 'none', env=env)
+        c.sync()
+        return c
+
+    @staticmethod
+    def button(c):
+        m = re.match(r'quick x=(\d+) y=(\d+) w=(\d+) h=(\d+) window=(\d)', c.cmd('quick')[0])
+        return tuple(int(v) for v in m.groups())
+
+    def card(self, c):
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.quick']
+            if ws and self.button(c)[4] == 2:
+                time.sleep(0.5)                                          # (it asks the sound server when it gets the focus)
+                return ws[0]
+            time.sleep(0.05)
+        self.fail('the quick settings card did not appear')
+
+    @staticmethod
+    def setting(c, key):
+        c.cmd('setting ' + key)
+        return c.last.split(' ', 1)[1]
+
+    def sinks(self):
+        with open(self.state) as f:
+            return {x['name']: x for x in json.load(f)['sinks']}
+
+    def test_the_button_shows_and_hides_the_card_under_itself(self):
+        c = self.start('mellagui-qs1')
+        x, y, w, h, win = self.button(c)
+        self.assertEqual(win, 0)
+        self.assertTrue(y < 32 and x > 300, (x, y))                       # in the top bar, left of the keyboard button
+        c.click(x + w // 2, y + h // 2)
+        card = self.card(c)
+        self.assertLessEqual(card['x'] + card['w'], x + w + 8)             # right-aligned under the button
+        self.assertGreater(card['y'], y + h)
+        c.click(x + w // 2, y + h // 2)                                    # the button again: hidden
+        for _ in range(60):
+            if self.button(c)[4] == 1:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.button(c)[4], 1)
+        c.click(x + w // 2, y + h // 2)                                    # and shown again (the program is still there)
+        self.card(c)
+        c.tap(KEY_ESC)                                                      # Esc hides it
+        for _ in range(60):
+            if self.button(c)[4] == 1:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.button(c)[4], 1)
+
+    def test_super_z_shows_it_and_a_click_elsewhere_hides_it(self):
+        c = self.start('mellagui-qs2')
+        c.key(KEY_LEFTMETA, True)
+        c.tap(44)                                                           # Z
+        c.key(KEY_LEFTMETA, False)
+        self.card(c)
+        c.click(100, 400)                                                   # the desktop
+        for _ in range(60):
+            if self.button(c)[4] == 1:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.button(c)[4], 1, 'it must go away when it loses the focus')
+
+    def test_the_volume_slider_and_the_mute_button_work(self):
+        c = self.start('mellagui-qs3')
+        x, y, w, h, win = self.button(c)
+        c.click(x + w // 2, y + h // 2)
+        card = self.card(c)
+        sx, sy = card['x'] + 14 + 54 + 10, card['y'] + 44                    # the volume slider's rectangle (see rect_of)
+        c.click(sx + 8 + 58, sy + 15)                                        # a quarter of the way: about 25 %
+        for _ in range(60):
+            if abs(self.sinks()['alsa_output.analog-stereo']['vol'] - 25) <= 4:
+                break
+            time.sleep(0.05)
+        self.assertLessEqual(abs(self.sinks()['alsa_output.analog-stereo']['vol'] - 25), 4)
+        c.click(card['x'] + 14 + 20, card['y'] + 44 + 15)                    # the mute button
+        for _ in range(60):
+            if self.sinks()['alsa_output.analog-stereo']['mute']:
+                break
+            time.sleep(0.05)
+        self.assertTrue(self.sinks()['alsa_output.analog-stereo']['mute'])
+        c.click(card['x'] + 14 + 20, card['y'] + 44 + 15)
+        for _ in range(60):
+            if not self.sinks()['alsa_output.analog-stereo']['mute']:
+                break
+            time.sleep(0.05)
+        self.assertFalse(self.sinks()['alsa_output.analog-stereo']['mute'])
+
+    def test_the_microphone_row_and_the_switches(self):
+        c = self.start('mellagui-qs4')
+        x, y, w, h, win = self.button(c)
+        c.click(x + w // 2, y + h // 2)
+        card = self.card(c)
+        mx, my = card['x'] + 14 + 54 + 10, card['y'] + 44 + 38                # the microphone slider
+        c.click(mx + 8 + 116, my + 15)                                         # the middle: about 50 %
+        for _ in range(60):
+            with open(self.state) as f:
+                mic = [s for s in json.load(f)['sources'] if s['name'] == 'alsa_input.builtin-mic'][0]
+            if abs(mic['vol'] - 50) <= 4:
+                break
+            time.sleep(0.05)
+        self.assertLessEqual(abs(mic['vol'] - 50), 4)
+        dnd_y = card['y'] + 44 + 38 + 38 + 18 + 34 + 6 + 15                    # the "Do not disturb" switch
+        self.assertEqual(self.setting(c, 'dnd'), '0')
+        c.click(card['x'] + 14 + 20, dnd_y)
+        for _ in range(60):
+            if self.setting(c, 'dnd') == '1':
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.setting(c, 'dnd'), '1')
+        c.click(card['x'] + 14 + 160 + 20, dnd_y)                              # "Night light": next to it
+        for _ in range(60):
+            if self.setting(c, 'night-light') == 'on':
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.setting(c, 'night-light'), 'on')
+
+    def test_wifi_is_switched_through_nmcli(self):
+        fake = os.path.join(ROOT, 'tests', 'fake_nmcli.py')
+        st = os.path.join(tmp, 'qs-nm.json')
+        with open(st, 'w') as f:
+            json.dump({'radio': True, 'dev': 'wifi0', 'ethernet': None, 'active': 'Home', 'ip': '192.168.1.5', 'wifi': [], 'saved': []}, f)
+        c = self.start('mellagui-qs5', {'MELLAGUI_NMCLI': fake, 'FAKE_NM_STATE': st})
+        x, y, w, h, win = self.button(c)
+        c.click(x + w // 2, y + h // 2)
+        card = self.card(c)
+        wifi_y = card['y'] + 44 + 38 + 38 + 18 + 15
+        c.click(card['x'] + 14 + 20, wifi_y)
+        for _ in range(60):
+            with open(st) as f:
+                if not json.load(f)['radio']:
+                    break
+            time.sleep(0.05)
+        with open(st) as f:
+            self.assertFalse(json.load(f)['radio'], 'the Wi-Fi radio was not switched off')
+
+
 class TestTray(Base):
     """The panel's tray (src/tray.c): programs put icons / labels into the top bar through mellagui_tray_v1."""
 
@@ -10870,7 +11022,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 38)
+        self.assertEqual(len(t), 39)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -10915,7 +11067,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 39)
+        self.assertEqual(len(t), 40)
         self.assertTrue(alive_p(p))
 
 
@@ -12688,6 +12840,44 @@ class TestSaver(Base):
         c.tap(KEY_ESC)
         self.wait(lambda: pr.poll() is not None, 'Escape ends it')
 
+    def window_of_the_day(self, name, clock):
+        """The saver's 3D room in a window at a fixed time of day: the pixels of its window area."""
+        p, c = self.start(name, '--config', 'none')
+        pr = subprocess.Popen([os.path.join(ROOT, 'build', 'mellagui-matrix'), '--windowed', '--seed', '5', '--time', clock],
+                              env=dict(os.environ, WAYLAND_DISPLAY=name))
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: self.matrix_windows(c) and self.matrix_windows(c)[0]['w'] > 0, 'its window')
+        time.sleep(0.8)
+        w = self.matrix_windows(c)[0]
+        ppm = c.dump(os.path.join(tmp, name + '.ppm'))
+        px = [ppm.px(x, y) for y in range(w['y'], w['y'] + w['h'] * 6 // 10, 2) for x in range(w['x'], w['x'] + w['w'], 2)]       # (the dock floats over the lower part)
+        return px
+
+    def test_the_window_shows_the_time_of_day_blue_sky_by_day_and_stars_at_night(self):
+        day = self.window_of_the_day('mellagui-sv13', '12:00')
+        blue = sum(1 for r, g, b in day if b > r + 40 and b > 150)
+        self.assertGreater(blue, 300, 'a blue sky by day')
+        night = self.window_of_the_day('mellagui-sv14', '00:30')
+        blue = sum(1 for r, g, b in night if b > r + 40 and b > 150)
+        white = sum(1 for r, g, b in night if r > 200 and g > 200 and b > 200)
+        self.assertLess(blue, 20, 'no blue sky at night')
+        self.assertGreater(white, 10, 'a moon and stars at night')
+
+    def test_the_options_that_take_a_number_work_together(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-matrix not built')
+        r = subprocess.run([exe, '--bench', '96x54', '--clock-speed', '60', '--speed', '200', '--density', '150', '--seed', '3'], capture_output=True, text=True, timeout=30)
+        self.assertEqual((r.returncode, r.stdout.split(':')[0]), (0, '96x54'), r.stderr)         # (an option used to eat the ones after it and crash)
+
+    def test_a_bad_time_is_refused(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-matrix not built')
+        for bad in ('25:00', 'noon', '12:61'):
+            r = subprocess.run([exe, '--time', bad], capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.returncode, 2, bad)
+
     def test_the_settings_panel_page_switches_it_and_shows_it(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-settings')
         if not os.path.exists(exe):
@@ -13458,12 +13648,12 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '38')
+        self.assertEqual(self.get(c, 'keys-count'), '39')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
-        self.assertEqual(len(self.rows(c, 3)), 8)
+        self.assertEqual(len(self.rows(c, 3)), 9)
         self.assertEqual(self.rows(c, 99), self.rows(c, 3))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -13487,13 +13677,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '38')
+        self.assertEqual(self.get(c, 'keys-count'), '39')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '39')
+        self.assertEqual(self.get(c, 'keys-count'), '40')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')

@@ -120,6 +120,7 @@ struct paint_ctx {
                                          * and so sees fewer items than the first pass (an index would point at the wrong one) */
     struct lm_rect cov_rect;
     int64_t cov_area;
+    bool snapshot;                      /* painting for lm_render_snapshot: `out` is a stand-in, scene items of any output are painted */
 };
 
 /* ---- cursor sprites --------------------------------------------------------------- */
@@ -1119,7 +1120,10 @@ static void paint_launcher_button(const struct paint_ctx *c, const struct lm_rec
  * a red x on every icon; the add form replaces the icons. */
 static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_info *li)
 {
-    fill_round(c, &li->rect, 0, 0x40000000u);
+    if (li->veil > 0.0f)
+        fill_round(c, &li->rect, 0, (uint32_t)(0x40 * LM_CLAMP(li->veil, 0.0f, 1.0f)) << 24);
+    if (li->veil_only)
+        return;
     fill_round(c, &li->card, 18, ALPHA(0x3cu, lm_theme.glass));                                  /* light glass: a white veil over the wallpaper */
     stroke_round(c, &li->card, 18, ALPHA(0x8cu, lm_theme.glass));
     if (li->searching) {
@@ -2309,7 +2313,7 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
             paint_about(c, &item->u.about);
         break;
     case LM_SCENE_LAUNCHER:
-        if (item->output == c->out)
+        if (item->output == c->out || c->snapshot)
             paint_launcher(c, &item->u.launcher);
         break;
     case LM_SCENE_NOTIFY:
@@ -2434,7 +2438,7 @@ bool lm_render_snapshot(struct lm_renderer *r, const struct lm_scene_item *items
         fake.width = w;
         fake.height = h;
         struct lm_framebuffer fb = { .pixels = bufs[k], .width = w, .height = h, .stride = w * 4 };
-        struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = *rect, .cov_idx = -1 };
+        struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = *rect, .cov_idx = -1, .snapshot = true };
         for (int i = 0; i < n; i++)
             scene_cb(&items[i], &c);
     }

@@ -575,6 +575,8 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             const struct lm_launcher_info *li = &item->u.launcher;
             struct gl_chrome *ch = &p->go->launcher;
             uint64_t h = fnv(1469598103934665603ull, &li->card, sizeof(li->card));
+            h = fnv(h, &li->veil, sizeof(li->veil));
+            h = fnv(h, &li->veil_only, sizeof(li->veil_only));
             h = fnv(h, &li->form, sizeof(li->form));
             h = fnv(h, &li->edit, sizeof(li->edit));
             h = fnv(h, &li->n, sizeof(li->n));

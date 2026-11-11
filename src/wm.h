@@ -534,6 +534,8 @@ struct lm_about_info {
 #define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
 struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
+    float veil;                     /* how strong the dimming is, 0..1 (the open / close animation fades it) */
+    bool veil_only;                 /* paint only the dimming: the card is a bubble of pictures (LM_SCENE_GHOST) while it opens and closes */
     struct lm_rect card;
     struct lm_rect title;
     bool form;                      /* the add / change form is showing instead of the icons */

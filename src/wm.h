@@ -281,7 +281,6 @@ enum lm_pick_kind {
     LM_PICK_LAUNCHER_HELPCLOSE, /* while a help card is open: its Close button, or anything outside the card */
     LM_PICK_LAUNCHER_CARD,  /* the launcher's card (between its items) */
     LM_PICK_LAUNCHER_BACKDROP, /* anything else while the launcher is open: a click closes it, nothing below gets it */
-    LM_PICK_PANEL_RUN,      /* "Run" button (starts config.run_cmd) */
     LM_PICK_PANEL_CLOCK,    /* the clock: shows / hides the calendar (`rect` = the clock) */
     LM_PICK_PANEL_POWER,    /* the round power button in the top right corner: opens / closes the session dialog */
     LM_PICK_POWER_BUTTON,   /* a round button of the session dialog (`index` 0 = Lock, 1 = Exit) */
@@ -433,8 +432,6 @@ struct lm_panel_info {
     bool hover_sticky;
     bool sticky_on;
     char sticky_text[24];           /* "Sticky", or the latched (Sh) / locked (SH) modifiers */
-    struct lm_rect run;             /* run-dialog button, left of the quit button */
-    bool hover_run;
     struct lm_rect power;           /* the round power button, the rightmost one (right of the clock); a circle in this square */
     bool hover_power;
     bool power_open;                /* the session dialog is open: the button shows it */
@@ -532,6 +529,8 @@ struct lm_about_info {
 #define LM_LAUNCHER_ICON 64             /* the round icon */
 #define LM_LAUNCHER_HELP_D 18                          /* the "?" circle of a form field */
 #define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
+/* The most icons the launcher dialog shows: the dock's buttons and the launcher's own lists. */
+#define LM_LAUNCHER_MAX (2 * LM_DOCK_MAX)
 struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
     float veil;                     /* how strong the dimming is, 0..1 (the open / close animation fades it) */
@@ -552,7 +551,7 @@ struct lm_launcher_info {
         struct lm_rect remove;      /* the x (edit mode) */
         const struct lm_dock_item *item;
         bool running;
-    } icon[LM_DOCK_MAX];
+    } icon[LM_LAUNCHER_MAX];
     struct lm_rect add;             /* the "+" tile (box == hit), empty when the list is full */
     int drag;                       /* an icon is being dragged (icon index), -1 none */
     struct lm_rect drag_box;        /* the icon under the pointer */

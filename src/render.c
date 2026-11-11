@@ -1904,8 +1904,6 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         struct lm_rect bar = lm_rect_make(bx + 6, by + 8, 10, 2);
         fill_rect(c, &bar, obg);
     }
-    fill_round(c, &p->run, 8, 0xff000000u | (p->hover_run ? COL_PANEL_HOVER : COL_PANEL_BTN));
-    draw_text_centered(c, &p->run, "Run", COL_PANEL_TEXT);
     draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
     {                                                   /* the round power button: a disc with the power symbol */
         float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;

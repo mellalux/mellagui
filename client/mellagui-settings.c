@@ -908,6 +908,7 @@ static void build_dock(struct app *a, int x, int y, int w)
         }
         y += 8;
         add_button(a, x, y, 220, "Restore the built-in dock", "dock-reset")->r.h = MENU_ROW_H - 2;
+        add_button(a, x + 230, y, LM_MIN(w - 230, 330), "Add all MellaGUI programs to the launcher", "launcher-defaults")->r.h = MENU_ROW_H - 2;
         add(a, W_LABEL, (struct rect){ x, y + MENU_ROW_H + 4, w, 24 }, "Applied when you let go of a slider.");
         return;
     }
@@ -2085,6 +2086,8 @@ static void activate(struct app *a, int idx)
             send_set(a, "dock-reset", "1");
             dock_clear_form(a);
             a->dpend[0] = 0;
+        } else if (!strcmp(w->key, "launcher-defaults")) {
+            send_set(a, "launcher-defaults", "1");
         } else if (!strcmp(w->key, "dock-put")) {
             dock_put(a);
         } else if (!strcmp(w->key, "config-edit")) {

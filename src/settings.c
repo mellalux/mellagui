@@ -56,7 +56,7 @@ enum key_id {
     K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
-    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_COUNT
+    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_LAUNCHER_DEFAULTS, K_COUNT
 };
 #define VALUE_MAX 3300          /* longest value text (the lists); the wire carries it as one string */
 
@@ -88,7 +88,7 @@ static const char *const key_names[K_COUNT] = {
 #undef KR
     [K_NOTES_0] = "notes-0", [K_NOTES_0 + 1] = "notes-1", [K_NOTES_0 + 2] = "notes-2", [K_NOTES_0 + 3] = "notes-3", [K_NOTES_0 + 4] = "notes-4",
     [K_NOTES_COUNT] = "notes-count", [K_NOTES_UNREAD] = "notes-unread", [K_NOTES_DEL] = "notes-del", [K_NOTES_CLEAR] = "notes-clear",
-    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png", [K_STARTUP_SOUND_PLAY] = "startup-sound-play",
+    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png", [K_STARTUP_SOUND_PLAY] = "startup-sound-play", [K_LAUNCHER_DEFAULTS] = "launcher-defaults",
 };
 _Static_assert(LM_NOTELOG_MAX == 5 * LM_NOTELOG_CHUNK, "notes-0 .. notes-4 hold the whole history");
 _Static_assert(KEYS_PAGE_ROWS == 10, "key_names lists keys-row-0 .. keys-row-9");
@@ -492,7 +492,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_NIGHT_TEMP: snprintf(out, n, "%d", c->night_kelvin); break;
     case K_DND: snprintf(out, n, "%d", c->dnd ? 1 : 0); break;
     case K_STARTUP_SOUND: snprintf(out, n, "%d", c->startup_sound ? 1 : 0); break;
-    case K_STARTUP_SOUND_PLAY: break;                                                /* write only */
+    case K_STARTUP_SOUND_PLAY: case K_LAUNCHER_DEFAULTS: break;                      /* write only */
     case K_NOTES_0 ... K_NOTES_LAST: lm_notelog_text(srv->notelog, k - K_NOTES_0, out, n); break;
     case K_NOTES_COUNT: snprintf(out, n, "%d", lm_notelog_count(srv->notelog)); break;
     case K_NOTES_UNREAD: snprintf(out, n, "%d", lm_notelog_unread(srv->notelog)); break;
@@ -1247,6 +1247,27 @@ bool lm_settings_launcher_put(struct lm_server *srv, const char *name, const cha
 }
 bool lm_settings_launcher_del(struct lm_server *srv, int raw_index) { return apps_del(srv, true, raw_index); }
 
+/* The built-in launcher buttons (dock.c DEFAULT_LAUNCHER) that the file's own lists do not have yet - by name or by command - are added to [launcher-apps].
+ * Returns how many were added, -1 when nothing could be written (no file). */
+int lm_settings_launcher_add_defaults(struct lm_server *srv)
+{
+    int added = 0;
+    const char *nm, *ic, *cm, *n2, *i2, *c2;
+    for (int i = 0; lm_launchapps_default(i, &nm, &ic, &cm); i++) {
+        bool have = false;
+        for (int k = 0; lm_dock_raw_entry(k, &n2, &i2, &c2) && !have; k++)
+            have = !strcasecmp(n2, nm) || !strcmp(c2, cm);
+        for (int k = 0; lm_launchapps_raw_entry(k, &n2, &i2, &c2) && !have; k++)
+            have = !strcasecmp(n2, nm) || !strcmp(c2, cm);
+        if (have)
+            continue;
+        if (!apps_put(srv, true, nm, ic, cm, -1))
+            return added ? added : -1;
+        added++;
+    }
+    return added;
+}
+
 bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to)
 {
     static struct dock_list l;
@@ -1672,6 +1693,24 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return true;
     case K_STARTUP_SOUND:
         return cfg_set(cfg, key, val, NULL, 0) >= 0;
+    case K_LAUNCHER_DEFAULTS: {                         /* "1": add the built-in launcher buttons the file lacks */
+        if (!parse_bool(val, &b))
+            return false;
+        if (!b)
+            return true;
+        int added = lm_settings_launcher_add_defaults(srv);
+        if (added < 0)
+            return false;
+        if (srv->wm) {
+            char msg[96];
+            if (added)
+                snprintf(msg, sizeof(msg), "%d MellaGUI program%s added to the launcher", added, added == 1 ? "" : "s");
+            else
+                snprintf(msg, sizeof(msg), "The launcher has all of MellaGUI's programs already");
+            lm_wm_notify(srv->wm, "Launcher", msg, 5000);
+        }
+        return true;
+    }
     case K_STARTUP_SOUND_PLAY:                          /* "1": play the start-up chime now (the Sound page's button); "wake": wake the sink (tests) */
         if (!strcmp(val, "wake")) {
             lm_sound_wake();

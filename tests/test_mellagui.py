@@ -53,6 +53,7 @@ def setUpModule():
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
+    os.environ['MELLAGUI_LAUNCHER_DEFAULTS'] = '0'                    # ... nor the built-in launcher buttons (TestLauncherDefaults turns them on)
     os.environ['MELLAGUI_DOCK_LAUNCHER'] = '0'                       # a dock the test wrote is not given the Launcher button (TestDockLauncherPinned turns it on)
     LOG = os.path.join(tmp, 'mellagui.log')
     OUT = os.path.join(tmp, 'mellagui.out')        # a file, not a pipe: nobody reads a pipe while the tests run and 64 KB of log would block the compositor
@@ -1769,8 +1770,8 @@ def type_text(text):
 
 class TestKeyboard(Base):
     """Keyboard layouts (XKB groups) and sticky keys."""
-    LAYOUT_BTN = (690, 14)          # panel indicator on the 1024 px wide test output
-    STICKY_BTN = (754, 14)
+    LAYOUT_BTN = (742, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (806, 14)
 
     def setUp(self):
         super().setUp()
@@ -2137,10 +2138,15 @@ class TestClients(Base):
 
     # ---- the clipboard in text fields and their right-click menu -------------------------------------------------------------
 
+    def super_r(self):
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.tap(19)                                                              # Super+R
+        ctl.key(KEY_LEFTMETA, False)
+
     def open_run(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
             self.skipTest('mellagui-run not built')
-        ctl.click(826, 14)
+        self.super_r()
         win = wait_for_window('mellagui.run')
         self.assertIsNotNone(win, 'run dialog did not appear')
         time.sleep(0.3)
@@ -2854,6 +2860,78 @@ class TestClients(Base):
         ppm = ctl.dump(os.path.join(tmp, 'files-pv2.ppm'))
         self.assertFalse(has_colour(win['w'] // 2, win['w'] - 4))
 
+    def video_for_files(self, d, name, codec):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        path = os.path.join(d, name)
+        args = [ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=4:size=320x240:rate=10', '-c:v', codec]
+        if codec == 'mjpeg':
+            args += ['-pix_fmt', 'yuvj420p']
+        subprocess.run(args + [path], check=True, timeout=60)
+        return path
+
+    def preview_colours(self, win, tag):
+        ppm = ctl.dump(os.path.join(tmp, 'files-%s.ppm' % tag))
+        right = {ppm.px(x, y) for y in range(win['y'] + 60, win['y'] + win['h'] - 60, 2) for x in range(win['x'] + win['w'] // 2 + 8, win['x'] + win['w'] - 8, 2)}
+        return ppm, right
+
+    def test_files_preview_shows_a_picture_of_a_video_made_by_the_viewer(self):
+        for codec, name in (('mjpeg', 'clip.mp4'), ('libx264', 'clip.mp4')):                  # our own reader / ffmpeg
+            p, d = self.files_start()
+            self.video_for_files(d, name, codec)
+            win = wait_for_window('mellagui.files')
+            self.chord(self.CTRL, 19)                                                           # Ctrl+R: read the folder again
+            time.sleep(0.4)
+            for _ in range(3):                                                                  # sub/, a.txt, blob.bin, clip.mp4
+                ctl.tap(self.K_DOWN)
+            ctl.tap(self.FKEYS[3])                                                              # F3
+            end = time.time() + 8
+            colours = set()
+            while time.time() < end:
+                time.sleep(0.3)
+                ppm, colours = self.preview_colours(win, 'vid-' + codec)
+                if len(colours) > 30:
+                    break
+            self.assertGreater(len(colours), 30, '%s: no picture of the video in the right pane' % codec)       # testsrc has many colours
+            self.assertEqual(ppm.px(win['x'] + 8, win['y'] + 70) == (0, 0, 0), False)
+            p.kill()
+            p.wait()
+            time.sleep(0.3)
+
+    def test_files_preview_of_a_video_that_needs_ffmpeg_says_so_when_there_is_none(self):
+        p, d = self.files_start(env={'MELLAGUI_FFMPEG': 'none'})
+        self.video_for_files(d, 'clip.mp4', 'libx264')
+        win = wait_for_window('mellagui.files')
+        self.chord(self.CTRL, 19)
+        time.sleep(0.4)
+        for _ in range(3):
+            ctl.tap(self.K_DOWN)
+        ctl.tap(self.FKEYS[3])
+        time.sleep(2.0)
+        ppm, colours = self.preview_colours(win, 'vid-none')
+        red = sum(1 for y in range(win['y'] + 56, win['y'] + 120) for x in range(win['x'] + win['w'] // 2 + 6, win['x'] + win['w'] - 8) if ppm.px(x, y)[0] > 200 and ppm.px(x, y)[1] < 150)
+        self.assertGreater(red, 20, 'the error text should be in the right pane')
+
+    def test_files_preview_survives_the_cursor_running_over_several_videos(self):
+        p, d = self.files_start()
+        for i in range(3):
+            self.video_for_files(d, 'v%d.mp4' % i, 'mjpeg')
+        win = wait_for_window('mellagui.files')
+        self.chord(self.CTRL, 19)
+        time.sleep(0.4)
+        ctl.tap(self.FKEYS[3])
+        for _ in range(8):
+            ctl.tap(self.K_DOWN)
+            time.sleep(0.05)
+        end = time.time() + 8
+        while time.time() < end:
+            time.sleep(0.3)
+            ppm, colours = self.preview_colours(win, 'vid-run')
+            if len(colours) > 5 or p.poll() is not None:
+                break
+        self.assertIsNone(p.poll(), 'the file manager died')
+
     def test_files_preview_shows_text_and_hex(self):
         p, d = self.files_start()
         win = wait_for_window('mellagui.files')
@@ -3529,9 +3607,6 @@ class TestClients(Base):
         r = subprocess.run([path, '--selftest'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_run_dialog_from_panel_button(self):
-        self.run_dialog_runs(lambda: ctl.click(826, 14))
-
     def test_run_dialog_from_super_r(self):
         def open_it():
             ctl.key(KEY_LEFTMETA, True)
@@ -3542,7 +3617,7 @@ class TestClients(Base):
     def test_run_dialog_escape_closes_without_running(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-run')):
             self.skipTest('mellagui-run not built')
-        ctl.click(826, 14)
+        self.super_r()
         self.assertIsNotNone(wait_for_window('mellagui.run'))
         time.sleep(0.3)
         ctl.tap(KEY_ESC)
@@ -7919,7 +7994,7 @@ class TestCamera(Base):
 
     def test_dock_has_a_camera_button_after_images(self):
         names = [l.split('"')[1] for l in ctl.cmd('dock') if l.startswith('icon ')]
-        self.assertEqual(names[:7], ['Launcher', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images', 'Camera'])
+        self.assertEqual(names[:8], ['Launcher', 'Overview', 'Terminal', 'Files', 'Editor', 'Calculator', 'Images', 'Camera'])
 
 
 class TestRecord(Base):
@@ -8758,6 +8833,23 @@ class TestViewer(Base):
         time.sleep(0.3)
         return p, win
 
+    def own_compositor(self):
+        """Tests that click the buttons in the viewer's bar: on this machine's own compositor whose dock hides itself (the default dock is wide now and
+        would sit over the bar). Swaps the module's `ctl` and the Wayland display for the test."""
+        global ctl
+        conf = os.path.join(tmp, 'viewer-compositor.conf')
+        with open(conf, 'w') as f:
+            f.write('[dock]\nautohide = yes\n')
+        p, c, stop = self.private_compositor('mellagui-vw', '--size', '1024x600', '--config', conf)
+        old, old_display = ctl, os.environ['WAYLAND_DISPLAY']
+        ctl = c
+        os.environ['WAYLAND_DISPLAY'] = 'mellagui-vw'
+        def restore():
+            global ctl
+            ctl = old
+            os.environ['WAYLAND_DISPLAY'] = old_display
+        self.addCleanup(restore)
+
     def centre(self, name):
         win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view'][0]
         ctl.abs(900, 590)
@@ -9010,6 +9102,7 @@ class TestViewer(Base):
         self.assertEqual(left, [], 'the sound outlived the viewer')
 
     def test_the_sound_starts_ahead_by_a_lead_that_the_keys_change_and_the_config_keeps(self):
+        self.own_compositor()
         d = self.video_dir()
         self.make_big_video(d, seconds=8)
         conf = os.path.join(d, 'conf')
@@ -9192,6 +9285,7 @@ class TestViewer(Base):
 
     def test_the_buttons_in_the_bar(self):
         """Back 5 s, play / pause, stop, on 5 s: the buttons at the left of the bar of a video."""
+        self.own_compositor()
         d = self.video_dir()
         self.make_video(d)
         p, win = self.start(d, os.path.join(d, 'clip.mp4'))
@@ -10742,7 +10836,7 @@ class TestMetrics(Base):
         self.assertEqual((r['w'], r['h']), (800 - 12, 500 - 40 - 32 - 6))
 
     def test_out_of_range_and_bad_values_keep_the_default(self):
-        p, c = self.start('mellagui-met3', '[panel]\nheight = 5\nrun-width = wide\n[windows]\nnosuch = 3\n[gadgets]\nwidth = 99999\n')
+        p, c = self.start('mellagui-met3', '[panel]\nheight = 5\nworkspace-width = wide\n[windows]\nnosuch = 3\n[gadgets]\nwidth = 99999\n')
         r = self.maximized(c, 'mellagui-met3')
         self.assertEqual((r['w'], r['h']), (800 - 8, 500 - 32 - 28 - 4))
         self.assertTrue(alive_p(p))
@@ -10757,7 +10851,7 @@ class TestMetrics(Base):
         out = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10).stdout
         for sec in ('[windows]', '[panel]', '[gadgets]', '[notifications]', '[keys]', '[theme]', '[dock]', '[dock-apps]'):
             self.assertIn(sec, out)
-        self.assertRegex(out, r'run-width = 44')
+        self.assertRegex(out, r'workspace-width = 24')
         self.assertRegex(out, r'scrollbar-width = 14')
 
 
@@ -12087,7 +12181,7 @@ class TestDockLauncherPinned(Base):
         ppm = c.dump(os.path.join(tmp, 'lp5.ppm'))
         self.assertGreater(len({ppm.px(ov['x'] + 10 + k, ov['y'] + ov['h'] // 2) for k in range(ov['w'] - 20)}), 3)    # an icon is painted there
 
-    def test_the_overview_button_has_no_menu_and_the_launcher_does_not_list_it(self):
+    def test_the_overview_button_has_no_menu_and_the_launcher_lists_it_but_not_the_launcher_button(self):
         c = self.start('mellagui-lp6')
         ov = [i for i in self.icons(c) if i['name'] == 'Overview'][0]
         c.abs(ov['x'] + ov['w'] // 2, ov['y'] + ov['h'] // 2)
@@ -12097,10 +12191,83 @@ class TestDockLauncherPinned(Base):
         self.assertEqual(c.cmd('dockmenu')[0].split()[1], 'open=0')
         c.cmd('launcher open')
         names = [re.match(r'icon \d+ "(.*?)"', l)[1] for l in c.cmd('launcher') if l.startswith('icon ')]
-        self.assertNotIn('Overview', names)
+        self.assertIn('Overview', names)                                              # (a button like the others in the launcher)
         self.assertNotIn('Launcher', names)
         self.assertIn('Terminal', names)
         c.cmd('launcher close')
+
+
+class TestLauncherDefaults(Base):
+    """The launcher lists every MellaGUI program: the dock's buttons and the built-in [launcher-apps] (Run, Disk usage, Display, Shortcuts, Notifications,
+    Bluetooth, Screenshot); a file with its own list gets the missing ones through the settings."""
+
+    DEFAULTS = ['Run', 'Disk usage', 'Display', 'Shortcuts', 'Notifications', 'Bluetooth', 'Screenshot']
+
+    def start(self, name, text=None):
+        args = ['--config', 'none']
+        if text is not None:
+            self.path = os.path.join(tmp, name + '.conf')
+            with open(self.path, 'w') as f:
+                f.write(text)
+            args = ['--config', self.path]
+        p, c, stop = self.private_compositor(name, *args, env={'MELLAGUI_LAUNCHER_DEFAULTS': '1'})
+        c.sync()
+        return c
+
+    @staticmethod
+    def names(c):
+        c.cmd('launcher open')
+        out = [re.match(r'icon \d+ "(.*?)"', l)[1] for l in c.cmd('launcher') if l.startswith('icon ')]
+        c.cmd('launcher close')
+        return out
+
+    def test_a_file_without_a_launcher_list_shows_all_programs(self):
+        c = self.start('mellagui-ld1', '[dock-apps]\nLauncher = [launcher] @launcher\nTerm = [terminal] true\n')
+        names = self.names(c)
+        self.assertEqual(names[0], 'Term')
+        for n in self.DEFAULTS + ['Overview']:
+            self.assertIn(n, names)
+
+    def test_no_config_file_at_all_has_them_too(self):
+        c = self.start('mellagui-ld2')
+        names = self.names(c)
+        for n in ['Terminal', 'Overview', 'Camera', 'Record', 'Processes'] + self.DEFAULTS:
+            self.assertIn(n, names)
+        self.assertEqual(len(names), len(set(names)))                                  # nothing twice (the dock's Overview is not repeated)
+
+    def test_a_file_with_its_own_list_keeps_it_and_the_missing_ones_are_added_on_request(self):
+        c = self.start('mellagui-ld3', '[dock-apps]\nLauncher = [launcher] @launcher\nTerm = [terminal] true\n[launcher-apps]\nMine = true\nRun = mellagui-run\n')
+        names = self.names(c)
+        self.assertEqual(names, ['Term', 'Mine', 'Run'])                               # (its own list: no defaults behind its back)
+        c.cmd('settings launcher-defaults 1')
+        names = self.names(c)
+        self.assertEqual(names[:3], ['Term', 'Mine', 'Run'])                           # theirs stay where they are
+        for n in self.DEFAULTS + ['Overview']:
+            self.assertIn(n, names)
+        self.assertEqual(len(names), len(set(names)))
+        before = open(self.path).read()
+        c.cmd('settings launcher-defaults 1')                                          # a second time adds nothing
+        self.assertEqual(open(self.path).read(), before)
+        self.assertEqual(before.count('mellagui-run'), 1)                              # (Run was there under that command already)
+
+    def test_the_new_buttons_start_the_programs_and_have_their_own_icons(self):
+        c = self.start('mellagui-ld4')
+        c.cmd('launcher open')
+        icons = {re.match(r'icon \d+ "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)[1]: [int(v) for v in re.match(r'icon \d+ "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l).groups()[1:]]
+                 for l in c.cmd('launcher') if l.startswith('icon ')}
+        ppm = c.dump(os.path.join(tmp, 'ld4.ppm'))
+        for n in self.DEFAULTS:
+            x, y, w, h = icons[n]
+            white = sum(1 for yy in range(y + 8, y + h - 8) for xx in range(x + 8, x + w - 8) if min(ppm.px(xx, yy)) > 200)
+            self.assertGreater(white, 30, n)                                            # a white glyph on the coloured disc, not an empty circle
+        c.cmd('launcher close')
+
+    def test_the_settings_panel_has_a_button_for_it(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        r = subprocess.run([exe, '--selftest'], capture_output=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class TestSaver(Base):
@@ -13319,7 +13486,7 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 28)
+        self.assertEqual(len(m), 27)
         self.assertEqual(m['panel.height'], (36, 20, 64, 32))
         self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))
@@ -14220,12 +14387,12 @@ class TestLauncher(Base):
         c.sync()
         self.super_a(c)
         d = self.info(c)
-        self.assertEqual((d['open'], d['n']), (1, 11))                                    # the built-in dock (with the Camera and Record buttons), without its Launcher button
+        self.assertEqual((d['open'], d['n']), (1, 12))                                    # the built-in dock (with the Overview, Camera and Record buttons), without its Launcher button
         c.tap(self.KEY_E)
         c.sync()
         c.click(*self.centre(self.info(c)['icons'][0]['remove']))
         c.sync()
-        self.assertEqual(self.info(c)['n'], 11)
+        self.assertEqual(self.info(c)['n'], 12)
 
     def test_the_dialog_is_painted_translucent(self):
         c = self.start('mellagui-lc9')

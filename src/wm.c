@@ -58,7 +58,6 @@
 #define POWER_BTN_D 64                          /* its round buttons */
 #define ABOUT_CARD_W 520                        /* the About dialog */
 #define ABOUT_ROW_H 18
-#define PANEL_RUN_W (lm_metrics.panel_run_width)
 #define PANEL_LAYOUT_W (lm_metrics.panel_layout_width)
 #define PANEL_STICKY_W (lm_metrics.panel_sticky_width)
 #define PANEL_OSK_W 36                              /* the on-screen keyboard button (not a configurable size) */
@@ -230,7 +229,7 @@ struct lm_wm {
     uint32_t hover_bits;
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
-    bool hover_power, hover_run, hover_layout, hover_sticky, hover_osk;
+    bool hover_power, hover_layout, hover_sticky, hover_osk;
     int hover_tray;             /* id of the tray item under the pointer, 0 = none */
     bool osk_open;              /* the on-screen keyboard is showing on the primary output */
     uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
@@ -416,8 +415,7 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->power = lm_rect_make(p->bar.x + p->bar.w - PANEL_POWER_D - 4, y, PANEL_POWER_D, PANEL_POWER_D);
     int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_font_text_width(wm->clock_text) + 8);
     p->clock = lm_rect_make(p->power.x - 4 - clock_w, y, clock_w, h);
-    p->run = lm_rect_make(p->clock.x - 8 - PANEL_RUN_W, y, PANEL_RUN_W, h);
-    p->sticky = lm_rect_make(p->run.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
+    p->sticky = lm_rect_make(p->clock.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);         /* (the Run dialog is Super+R and the launcher's Run button) */
     p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
     p->osk = lm_rect_make(p->layout.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
     p->hover_osk = wm->hover_osk;
@@ -493,7 +491,6 @@ static void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_pa
     p->about_open = wm->about_open;
     p->hover_power = wm->hover_power;
     p->power_open = wm->power_open;
-    p->hover_run = wm->hover_run;
     p->active_title = wm->focused ? wm->focused->title : "";
 
     /* taskbar: windows of this workspace in creation (id) order, so raising does not reshuffle it */
@@ -2694,7 +2691,7 @@ static bool launcher_searching;
 
 static bool launcher_shown(const struct lm_dock_item *it)
 {
-    return !dock_special(it) && (!launcher_filter[0] || strcasestr(it->name, launcher_filter));
+    return !launcher_is_self(it) && (!launcher_filter[0] || strcasestr(it->name, launcher_filter));          /* (the Overview button shows: it is a button like the others) */
 }
 
 static int launcher_count(void)
@@ -4132,7 +4129,7 @@ static void dockitem_menu_activate(struct lm_wm *wm, int which)
     case 2: {
         int g = 0;                                                    /* its place in the launcher's list: the dock's buttons come first */
         for (int k = 0; k < di; k++)
-            if (!dock_special(lm_dock_item(k)))
+            if (!launcher_is_self(lm_dock_item(k)))
                 g++;
         launcher_set(wm, true, dock_output(wm));
         wm->launcher_edit = true;
@@ -6381,8 +6378,6 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                 out->kind = LM_PICK_PANEL_LAUNCHER;
                 out->rect = pi.launcher;
             }
-            if (lm_rect_contains(&pi.run, ix, iy))
-                out->kind = LM_PICK_PANEL_RUN;
             if (lm_rect_contains(&pi.clock, ix, iy) && wm->srv->config.cal_enabled) {
                 out->kind = LM_PICK_PANEL_CLOCK;
                 out->rect = pi.clock;
@@ -6443,7 +6438,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool about_btn = false, launcher = false, power_btn = false, run_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false;
+    bool about_btn = false, launcher = false, power_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false;
     int power_item = -1, clip_code = 0, dm_item = -1;
     struct lm_window *task = NULL;
     int tray_id = 0;
@@ -6468,7 +6463,6 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_CLIP_CLEAR: clip_code = 3; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_DELETE: clip_code = 10 + pick->index - clip_top(wm); shape = LM_CURSOR_POINTER; break;
     case LM_PICK_CLIP_ENTRY: shape = LM_CURSOR_POINTER; break;
-    case LM_PICK_PANEL_RUN: run_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_CLOCK: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;
@@ -6545,13 +6539,12 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         power_damage(wm);
     }
     if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || power_btn != wm->hover_power ||
-        run_btn != wm->hover_run || task != wm->hover_task || layout_btn != wm->hover_layout ||
+        task != wm->hover_task || layout_btn != wm->hover_layout ||
         sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk || tray_id != wm->hover_tray) {
         wm->hover_tray = tray_id;
         wm->hover_osk = osk_btn;
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
-        wm->hover_run = run_btn;
         wm->hover_power = power_btn;
         wm->hover_task = task;
         wm->hover_panel_ws = pws;
@@ -7278,8 +7271,6 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
                 lm_sound_play(LM_SOUND_DOCK);                       /* (MELLAGUI_SOUND_FORCE: the tests play it on the headless backend, too) */
             dock_activate(wm, pi, button != BTN_MIDDLE);        /* the middle button always starts another instance */
         }
-        if (pk == LM_PICK_PANEL_RUN && pick->kind == LM_PICK_PANEL_RUN)
-            launch_run(wm);
         if (pk == LM_PICK_PANEL_CLOCK && pick->kind == LM_PICK_PANEL_CLOCK)
             lm_wm_calendar_toggle(wm, &pick->rect);
         if (pk == LM_PICK_PANEL_LAYOUT && pick->kind == LM_PICK_PANEL_LAYOUT && wm->srv->input)
@@ -7425,7 +7416,6 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             wm->press_bits = 0;
         }
         return true;
-    case LM_PICK_PANEL_RUN:
     case LM_PICK_PANEL_POWER:
         if (button == BTN_LEFT) {
             wm->press_panel_kind = pick->kind;

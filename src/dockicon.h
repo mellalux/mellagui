@@ -24,6 +24,11 @@ enum lm_dockicon {
     LM_DOCKICON_RECORD,         /* the screen recorder: a record symbol (ring with a dot) */
     LM_DOCKICON_MONITOR,        /* the process manager: a screen with bars */
     LM_DOCKICON_OVERVIEW,       /* four window frames: opens the desktop overview (Super+W) */
+    LM_DOCKICON_KEYBOARD,       /* the shortcut list */
+    LM_DOCKICON_BELL,           /* the notification history */
+    LM_DOCKICON_BLUETOOTH,      /* the Bluetooth rune */
+    LM_DOCKICON_SHOT,           /* the screenshot tool: viewfinder corners */
+    LM_DOCKICON_DISK,           /* the disk usage tool: a pie with a slice pulled out */
     LM_DOCKICON_COUNT
 };
 

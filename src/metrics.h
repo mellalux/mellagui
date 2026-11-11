@@ -33,7 +33,6 @@
     X("windows", "animation-ms", animation_ms, 300, 0, 1000, "how long a window takes to open, close, minimize and come back, and how slowly a dragged window catches up with the pointer, in ms (0 = no animations)") \
     X("panel", "height", panel_height, 32, 20, 64, "height of the top panel") \
     X("panel", "workspace-width", panel_ws_width, 24, 16, 80, "one workspace cell") \
-    X("panel", "run-width", panel_run_width, 44, 30, 120, "the Run button") \
     X("panel", "layout-width", panel_layout_width, 36, 24, 100, "the keyboard layout indicator") \
     X("panel", "sticky-width", panel_sticky_width, 84, 50, 160, "the Sticky indicator") \
     X("panel", "caps-width", panel_caps_width, 48, 30, 120, "the Caps indicator") \

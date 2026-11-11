@@ -113,6 +113,11 @@
     X("icon-record",          icon_record,       0xc92a2a) \
     X("icon-monitor",         icon_monitor,      0x0c8599) \
     X("icon-overview",        icon_overview,     0x3b82f6) \
+    X("icon-keyboard",        icon_keyboard,     0x5c677d) \
+    X("icon-bell",            icon_bell,         0xf08c00) \
+    X("icon-bluetooth",       icon_bluetooth,    0x1c7ed6) \
+    X("icon-shot",            icon_shot,         0xae3ec9) \
+    X("icon-disk",            icon_disk,         0x66a80f) \
     X("btn-green",            btn_green,         0x3f9a5e) /* the programs' round coloured buttons: a colour and the lighter one for hover */ \
     X("btn-green-lit",        btn_green_lit,     0x56b878) \
     X("btn-blue",             btn_blue,          0x3d6fb4) \

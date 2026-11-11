@@ -19,7 +19,7 @@
  * with mode 0600:
  *
  *     kind=password|pin   iter=<PBKDF2 iterations>   salt=<32 hex>   hash=<64 hex>   timeout=<minutes, 0 = never>   start=0|1
- *     blank=<minutes, 0 = never, default 3>   vt=0|1 (console switching on the lock screen, default 1)
+ *     blank=<minutes, 0 = never, default 1>   vt=0|1 (console switching on the lock screen, default 1)
  *
  * Standby: while locked and with no input for `blank` minutes the monitors are switched off (DPMS, backend.h set_power).
  * The first input wakes them and is swallowed; unlocking wakes them too.

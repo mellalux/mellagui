@@ -2037,10 +2037,10 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
 {
     if (!seat || !ev || seat->dying)
         return;
-    if (seat->srv->lock && lm_lock_activity(seat->srv->lock))
-        return;                         /* it only woke the monitors from standby */
-    if (seat->srv->saver && lm_saver_activity(seat->srv->saver))
-        return;                         /* it only ended the screensaver */
+    bool woke = seat->srv->lock && lm_lock_activity(seat->srv->lock);          /* it only woke the monitors from standby */
+    bool ended = seat->srv->saver && lm_saver_activity(seat->srv->saver);      /* it only ended the screensaver */
+    if (woke || ended)
+        return;
     ensure_pointer_pos(seat);
     if (seat->locked) {
         handle_locked_input(seat, ev);

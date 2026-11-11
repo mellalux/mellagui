@@ -132,6 +132,9 @@ static const struct entry table[] = {
       "After the idle time below a full-screen program (falling green code by default) starts. A key, a mouse button or a movement of the pointer ends "
       "it. It does not start over a full-screen window (a film) or the lock screen." },
     { "saver-minutes", NULL, "Idle time", "How many minutes of no keyboard or mouse use pass before the screensaver starts." },
+    { "saver-lock", NULL, "Lock after",
+      "That many minutes after the screensaver started the screen is locked (when a password or PIN is set on the Lock part). The screensaver goes on "
+      "running over the lock; the first key or touch ends it and shows the password field. 0 = never lock from the screensaver." },
 
     /* ---- Night light */
     { "@Night light", NULL, "Night light",

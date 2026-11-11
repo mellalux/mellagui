@@ -362,6 +362,8 @@ void lm_wm_set_gadget(struct lm_wm *wm, bool visible);
  * screen (see lm_wm_scene_for_each).
  */
 void lm_wm_lock_changed(struct lm_wm *wm, bool locked);
+/* The screensaver started / stopped covering the lock screen (lm_saver_shields): repaint. */
+void lm_wm_lock_shield_changed(struct lm_wm *wm);
 /*
  * Notifications: a card with `title` and `body` (UTF-8, long text is wrapped and cut) at the top right of the first output, newest
  * on top, at most LM_NOTIFY_MAX. It goes away after `timeout_ms` (0 = it stays until it is clicked). Not shown while locked.

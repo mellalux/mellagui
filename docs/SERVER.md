@@ -19,7 +19,7 @@ closes the ways *around* the lock.
 | another user's program connecting to the compositor | the Wayland socket is created 0600 and the compositor refuses any client whose uid is not its own (or root), on top of the 0700 runtime directory |
 | a browser or editor in the session changing the settings | on the drm backend only MellaGUI's own programs (`mellagui-*` next to the compositor binary) get the settings; others bind an inert object (`--settings-access own`, the default there). This keeps confused programs out; it is not a wall against code that already runs as the same user |
 | a program spamming wrong secrets through the settings to keep the lock screen waiting | changing the lock has its own attempt counter, and is refused altogether while the screen is locked |
-| a monitor that stays lit | *Screen off after* (default 3 minutes locked) puts the monitors in standby; the first key only wakes them |
+| a monitor that stays lit | *Screen off after* (default 1 minute locked) puts the monitors in standby; the first key only wakes them |
 
 ## Running as a service
 

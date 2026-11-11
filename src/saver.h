@@ -11,7 +11,9 @@
  *    gets no input for a long time and must not be covered); settings: `saver` (on / off) and `saver-minutes`.
  *  - The first input that arrives while it runs only ends it: the event is swallowed (nothing is typed into the window below, no click
  *    goes through), the same way the first input wakes a standby monitor (lock.c).
- *  - Locking the screen ends it, too (lm_saver_locked).
+ *  - Locking the screen ends it, too (lm_saver_locked) - except the lock that the saver makes itself: `saver-lock` minutes after it started
+ *    (default 1; only when a lock secret is set) it locks the screen and keeps running. While it runs over the lock the scene shows the
+ *    saver's window instead of the lock card (lm_saver_shields); the first input ends it (swallowed) and the lock card is there.
  *  - Tests make the minute short with the same MELLAGUI_LOCK_UNIT_MS as the lock.
  */
 
@@ -27,6 +29,9 @@ void lm_saver_destroy(struct lm_saver *s);
 bool lm_saver_activity(struct lm_saver *s);
 /* The screen was locked / unlocked. */
 void lm_saver_locked(struct lm_saver *s, bool locked);
+
+/* The screen is locked by the saver and the saver's window is what the screen shows (instead of the lock card). */
+bool lm_saver_shields(const struct lm_saver *s);
 
 /* Start it now (settings `saver-now`, control socket `saver start`); false when it runs already or there is no command. */
 bool lm_saver_start(struct lm_saver *s);

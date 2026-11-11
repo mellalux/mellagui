@@ -4,6 +4,7 @@
 
 #include "loop.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -60,6 +61,7 @@ struct lm_loop {
     struct lm_list timers;
     struct lm_list idles;
     struct lm_list pending;   /* scheduled idles */
+    struct lm_loop_stats stats;
 };
 
 struct signal_data {
@@ -142,6 +144,34 @@ void lm_loop_quit(struct lm_loop *loop, int exit_code)
     loop->exit_code = exit_code;
 }
 
+/* Times one callback; a long one is counted and logged (see lm_loop_stats). */
+static void timed_call(struct lm_loop *loop, void (*fn)(void), uint64_t t0, const char *what, int fd)
+{
+    uint64_t ms = lm_now_ms() - t0;
+    if (ms < loop->stats.threshold_ms)
+        return;
+    loop->stats.stalls++;
+    unsigned long long off = 0;
+    Dl_info info;
+    if (dladdr((void *)fn, &info) && info.dli_fbase)
+        off = (unsigned long long)((const char *)fn - (const char *)info.dli_fbase);
+    if (ms > loop->stats.worst_ms) {
+        loop->stats.worst_ms = (unsigned)ms;
+        loop->stats.worst_off = off;
+    }
+    lm_warn("stall: a %s callback (fd %d) took %llu ms - addr2line -f -e <executable> 0x%llx", what, fd, (unsigned long long)ms, off);
+}
+
+void lm_loop_stats(const struct lm_loop *loop, struct lm_loop_stats *out)
+{
+    *out = loop->stats;
+}
+
+void lm_loop_set_stall_ms(struct lm_loop *loop, unsigned ms)
+{
+    loop->stats.threshold_ms = ms;
+}
+
 static void run_idles(struct lm_loop *loop)
 {
     struct lm_list batch;
@@ -154,7 +184,10 @@ static void run_idles(struct lm_loop *loop)
     while (!lm_list_empty(&batch)) {
         struct lm_idle *idle = lm_container_of(batch.next, struct lm_idle, link);
         lm_list_remove(&idle->link);
+        uint64_t t0 = lm_now_ms();
         idle->fn(idle->data);
+        if (loop->stats.threshold_ms)
+            timed_call(loop, (void (*)(void))idle->fn, t0, "idle", -1);
     }
 }
 
@@ -185,7 +218,12 @@ int lm_loop_dispatch(struct lm_loop *loop, int timeout_ms)
         struct lm_source *src = evs[i].data.ptr;
         if (src->removed)
             continue;
-        src->fn(src->fd, evs[i].events, src->data);
+        uint64_t t0 = lm_now_ms();
+        lm_fd_fn fn = src->fn;
+        int sfd = src->fd;
+        fn(sfd, evs[i].events, src->data);
+        if (loop->stats.threshold_ms)
+            timed_call(loop, (void (*)(void))fn, t0, "event", sfd);
         count++;
     }
     loop->depth--;

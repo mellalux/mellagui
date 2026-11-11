@@ -21,6 +21,8 @@
 #include "audio.h"
 #include "chime.h"
 #include "log.h"
+#include "worker.h"
+#include <pthread.h>
 
 #define RATE 44100
 #define MAX_SAMPLES (RATE * 2)              /* the longest beep: 2 s (a lead-in of silence comes on top of it) */
@@ -104,12 +106,23 @@ static size_t synth(const struct note *n, int16_t *buf, size_t cap, bool pluck)
 }
 
 static char g_device[64] = "default";
-static long long g_last_ms;                 /* CLOCK_MONOTONIC ms of the last beep on a bare ALSA device */
+static pthread_mutex_t g_dev_lock = PTHREAD_MUTEX_INITIALIZER;     /* the loop writes the device, the worker thread plays with it */
+static long long g_last_ms;                 /* CLOCK_MONOTONIC ms of the last beep on a bare ALSA device (worker thread only) */
 
 void lm_sound_set_device(const char *name)
 {
-    if (lm_audio_name_ok(name))
-        snprintf(g_device, sizeof(g_device), "%s", name);
+    if (!lm_audio_name_ok(name))
+        return;
+    pthread_mutex_lock(&g_dev_lock);
+    snprintf(g_device, sizeof(g_device), "%s", name);
+    pthread_mutex_unlock(&g_dev_lock);
+}
+
+static void device_copy(char *out, size_t n)
+{
+    pthread_mutex_lock(&g_dev_lock);
+    snprintf(out, n, "%s", g_device);
+    pthread_mutex_unlock(&g_dev_lock);
 }
 
 /* ---- which way the sounds go --------------------------------------------------------------------------------------------------- */
@@ -217,9 +230,9 @@ static void default_sink(char *out, size_t n)
  * be heard, the sounds would play into the monitor's HDMI. So with a server that answers, the chosen device is only used while it is the card of the
  * server's own default sink. The answer is kept for 30 s (lm_sound_wake, at the dock, warms it up before the first click).
  */
-static bool use_server(void)
+static bool use_server(const char *device)
 {
-    if (!strcmp(g_device, "default"))
+    if (!strcmp(device, "default"))
         return true;
     static int cached = -1;
     static long long at_ms;
@@ -229,7 +242,7 @@ static bool use_server(void)
     if (cached < 0 || now - at_ms > 30000) {
         char sink[200], key[64];
         default_sink(sink, sizeof(sink));
-        card_key(g_device, key, sizeof(key));
+        card_key(device, key, sizeof(key));
         bool elsewhere = sink[0] && key[0] && !strstr(sink, key);
         if (elsewhere != (cached == 1))
             lm_info("sounds: %s", elsewhere ? "the sound server's default output is on another card than the chosen ALSA device: playing through the server"
@@ -255,17 +268,15 @@ static bool write_all(int fd, const void *buf, size_t len)
     return true;
 }
 
-void lm_sound_play(enum lm_sound s)
+static void play_now(enum lm_sound s, const char *g_device)
 {
-    if ((unsigned)s >= LM_SOUND_COUNT)
-        return;
     /* room for the longest lead-in (env_ms() allows 5 s) and the longest beep */
     static int16_t buf[RATE * 5 + MAX_SAMPLES];
     /* A bare ALSA device (HDMI above all) is powered down when idle and swallows the first ~0.3 s while it wakes
      * up, which eats a 60 ms beep whole. So when it has been quiet for a while, play silence first. The sound
      * server (paplay) keeps the device awake itself. */
     size_t pad = 0;
-    bool server = use_server();                     /* (a few ms at most, once in 30 s) */
+    bool server = use_server(g_device);               /* (`pactl get-default-sink`, once in 30 s: this is the worker thread) */
     if (!server) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -321,16 +332,37 @@ void lm_sound_play(enum lm_sound s)
     lm_debug("sound %s (player pid %d)", k_sounds[s].name, (int)pid);
 }
 
+struct play_job { enum lm_sound s; char device[64]; };
+
+static void play_run(void *data)
+{
+    struct play_job *j = data;
+    play_now(j->s, j->device);
+}
+
+/* Never waits: the beep is made and handed to a player by the worker thread (worker.h), after whatever was queued before it (a volume change). */
+void lm_sound_play(enum lm_sound s)
+{
+    if ((unsigned)s >= LM_SOUND_COUNT)
+        return;
+    struct play_job *j = calloc(1, sizeof(*j));
+    if (!j)
+        return;
+    j->s = s;
+    device_copy(j->device, sizeof(j->device));
+    lm_work_submit(play_run, free, j, NULL);
+}
+
 /* The pointer is heading for something that is about to click (the dock): wake the sink now, so that the click's sound is not lost to its wake-up.
  * Only through the sound server (paplay shares the sink with whatever plays next); a bare ALSA device is opened by one program at a time, so
  * there the first beep after a pause carries its own lead-in silence instead (WAKE_MS). At most once in 4 s. */
-void lm_sound_wake(void)
+static void wake_now(const char *device)
 {
     static long long last_ms;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-    if (!use_server() || (last_ms && now - last_ms < 4000))
+    if (!use_server(device) || (last_ms && now - last_ms < 4000))
         return;
     last_ms = now;
     pid_t pid = fork();
@@ -354,6 +386,20 @@ void lm_sound_wake(void)
     _exit(127);
 }
 
+static void wake_run(void *data)
+{
+    wake_now(data);
+}
+
+void lm_sound_wake(void)
+{
+    char *dev = calloc(1, 64);
+    if (!dev)
+        return;
+    device_copy(dev, 64);
+    lm_work_submit(wake_run, free, dev, NULL);
+}
+
 static const char *g_noted_name = "none";
 static unsigned g_noted;
 
@@ -373,6 +419,8 @@ static void le32(uint8_t *p, uint32_t v)
 
 void lm_sound_startup(void)
 {
+    char g_device[64];                              /* (this copy, not the global: the child must not wait for a lock another thread holds) */
+    device_copy(g_device, sizeof(g_device));
     pid_t pid = fork();
     if (pid < 0)
         return;
@@ -398,7 +446,7 @@ void lm_sound_startup(void)
             close(fd);
     static int16_t pcm[LM_CHIME_RATE * 5 + LM_CHIME_MAX_SAMPLES];             /* (room for up to 5 s of padding) */
     /* silence in front: a sleeping HDMI sink (or a codec in power save) swallows the first second or so, and the tune must not lose its start */
-    bool server = use_server();                     /* (here in the child: it may take its time) */
+    bool server = use_server(g_device);             /* (here in the child: it may take its time) */
     size_t pad = (size_t)LM_CHIME_RATE * (size_t)env_ms("MELLAGUI_CHIME_PAD_MS", server ? CHIME_PAD_SERVER_MS : CHIME_PAD_ALSA_MS) / 1000;
     size_t n = lm_chime_render(pcm + pad, LM_CHIME_MAX_SAMPLES);
     if (!n)

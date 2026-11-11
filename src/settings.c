@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "audio.h"
+#include "worker.h"
 #include "confdefault.h"
 #include "confedit.h"
 #include "keys.h"
@@ -127,6 +128,7 @@ struct lm_settings {
     int source_vol;                         /* the default microphone's volume (percent) and mute */
     bool source_mute;
     char profiles[VALUE_MAX], profile[24];  /* cached PipeWire card profiles (pw-cli), the same */
+    char sink_status[16];                   /* lm_audio_sink_status() as the last rescan found it */
     struct lm_timer *profile_timer;         /* puts the saved card profile back once PipeWire is up */
     int profile_tries;
     struct lm_timer *rescan_timer;          /* after a profile change PipeWire needs a moment to make the new sink */
@@ -609,7 +611,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_AUDIO_OUTS: lm_audio_list_alsa(out, n); break;
     case K_SINKS: snprintf(out, n, "%s", s->sinks); break;
     case K_SINK: snprintf(out, n, "%s", s->sink); break;
-    case K_SINKS_STATUS: snprintf(out, n, "%s", lm_audio_sink_status()); break;
+    case K_SINKS_STATUS: snprintf(out, n, "%s", s->sink_status); break;
     case K_SOURCES: snprintf(out, n, "%s", s->sources); break;
     case K_SOURCE: snprintf(out, n, "%s", s->source); break;
     case K_SOURCE_VOLUME: snprintf(out, n, "%d", s->source_vol); break;
@@ -868,20 +870,202 @@ static bool clip_png_file(struct lm_server *srv, const char *path)
     return lm_seat_set_selection_data(srv->seat, "image/png", buf, got);        /* takes the buffer over */
 }
 
-/* Asks the sound server again (pactl / wpctl / pw-cli): sinks, their default and the card profiles. */
-static void audio_rescan(struct lm_settings *s)
+/* ---- the sound server (pactl / wpctl / pw-cli), on the worker thread -------------------------------------------------------------------------------- */
+
+/* Every call to the sound server waits for a program, so none runs on the loop's thread (worker.h): a job is queued, in order, and what it learned
+ * is copied into the settings by its `done`, which also tells the clients. The values the clients ask for are the cached ones; a set command changes
+ * the cache at once (the card shows what was asked) and the sound server follows. */
+enum audio_op { AO_RESCAN, AO_LEVELS, AO_SET_SINK, AO_SET_SOURCE, AO_SINK_VOLUME, AO_SINK_MUTE, AO_SOURCE_VOLUME, AO_SOURCE_MUTE, AO_SET_PROFILE, AO_APPLY_KEY };
+
+struct audio_job {
+    struct lm_settings *s;
+    enum audio_op op;
+    char arg[128];
+    int n;
+    bool b, ok;
+    int apply_result;                   /* AO_APPLY_KEY: what lm_audio_apply_profile_key said */
+    char keep[sizeof(((struct lm_config *)0)->audio_profile)];       /* AO_SET_PROFILE: the lasting name of the profile */
+    bool have_keep;
+    bool full;                          /* the snapshot below has the lists (not only the levels) */
+    char sinks[VALUE_MAX], sink[128], sources[VALUE_MAX], source[128], profiles[VALUE_MAX], profile[24];
+    char status[16];
+    int sink_vol, source_vol;
+    bool sink_mute, source_mute;
+};
+
+static void snap_levels(struct audio_job *j)
+{
+    if (!lm_audio_source_state(&j->source_vol, &j->source_mute))
+        j->source_vol = 0, j->source_mute = false;
+    if (!lm_audio_sink_state(&j->sink_vol, &j->sink_mute))
+        j->sink_vol = 0, j->sink_mute = false;
+}
+
+static void snap_sink_state(struct audio_job *j)
+{
+    if (!lm_audio_sink_state(&j->sink_vol, &j->sink_mute))
+        j->sink_vol = 0, j->sink_mute = false;
+}
+
+static void snap_all(struct audio_job *j)
 {
     char list[VALUE_MAX];
-    lm_audio_list_sinks(list, sizeof(list), s->sink, sizeof(s->sink));
-    snprintf(s->sinks, sizeof(s->sinks), "%s", list);
-    lm_audio_list_sources(list, sizeof(list), s->source, sizeof(s->source));
-    snprintf(s->sources, sizeof(s->sources), "%s", list);
-    if (!lm_audio_source_state(&s->source_vol, &s->source_mute))
-        s->source_vol = 0, s->source_mute = false;
-    if (!lm_audio_sink_state(&s->sink_vol, &s->sink_mute))
-        s->sink_vol = 0, s->sink_mute = false;
-    lm_audio_list_profiles(list, sizeof(list), s->profile, sizeof(s->profile));
-    snprintf(s->profiles, sizeof(s->profiles), "%s", list);
+    lm_audio_list_sinks(list, sizeof(list), j->sink, sizeof(j->sink));
+    snprintf(j->sinks, sizeof(j->sinks), "%s", list);
+    snprintf(j->status, sizeof(j->status), "%s", lm_audio_sink_status());
+    lm_audio_list_sources(list, sizeof(list), j->source, sizeof(j->source));
+    snprintf(j->sources, sizeof(j->sources), "%s", list);
+    snap_levels(j);
+    lm_audio_list_profiles(list, sizeof(list), j->profile, sizeof(j->profile));
+    snprintf(j->profiles, sizeof(j->profiles), "%s", list);
+    j->full = true;
+}
+
+static void audio_run(void *data)                       /* the worker thread */
+{
+    struct audio_job *j = data;
+    switch (j->op) {
+    case AO_RESCAN:
+        snap_all(j);
+        break;
+    case AO_LEVELS: {                                   /* the quick settings card: the levels and the microphones (no sink list, no card profiles) */
+        char list[VALUE_MAX];
+        lm_audio_list_sources(list, sizeof(list), j->source, sizeof(j->source));
+        snprintf(j->sources, sizeof(j->sources), "%s", list);
+        snap_levels(j);
+        break;
+    }
+    case AO_SET_SINK:
+        j->ok = lm_audio_set_sink(j->arg);
+        snap_sink_state(j);
+        break;
+    case AO_SET_SOURCE:
+        j->ok = lm_audio_set_source(j->arg);
+        if (!lm_audio_source_state(&j->source_vol, &j->source_mute))
+            j->source_vol = 0, j->source_mute = false;
+        break;
+    case AO_SINK_VOLUME: j->ok = lm_audio_set_sink_volume(j->n); break;
+    case AO_SINK_MUTE: j->ok = lm_audio_set_sink_mute(j->b); break;
+    case AO_SOURCE_VOLUME: j->ok = lm_audio_set_source_volume(j->n); break;
+    case AO_SOURCE_MUTE: j->ok = lm_audio_set_source_mute(j->b); break;
+    case AO_SET_PROFILE:
+        j->ok = lm_audio_set_profile(j->arg);
+        if (j->ok) {                                    /* remember it by name: the ids change with PipeWire's next start */
+            j->have_keep = lm_audio_profile_key(j->arg, j->keep, sizeof(j->keep));
+            snap_all(j);
+        }
+        break;
+    case AO_APPLY_KEY:
+        j->apply_result = lm_audio_apply_profile_key(j->arg);
+        if (j->apply_result == 0)
+            snap_all(j);
+        break;
+    }
+}
+
+static void audio_apply_snap(struct lm_settings *s, const struct audio_job *j)
+{
+    if (j->full) {
+        snprintf(s->sinks, sizeof(s->sinks), "%s", j->sinks);
+        snprintf(s->sink, sizeof(s->sink), "%s", j->sink);
+        snprintf(s->sink_status, sizeof(s->sink_status), "%s", j->status);
+        snprintf(s->profiles, sizeof(s->profiles), "%s", j->profiles);
+        snprintf(s->profile, sizeof(s->profile), "%s", j->profile);
+    }
+    if (j->full || j->op == AO_LEVELS) {
+        snprintf(s->sources, sizeof(s->sources), "%s", j->sources);
+        if (j->op == AO_RESCAN || j->full)
+            snprintf(s->source, sizeof(s->source), "%s", j->source);
+        s->source_vol = j->source_vol;
+        s->source_mute = j->source_mute;
+        s->sink_vol = j->sink_vol;
+        s->sink_mute = j->sink_mute;
+    }
+}
+
+static void profile_cb(void *data);
+static void audio_rescan(struct lm_settings *s);
+
+static void audio_done(void *data)                      /* the loop's thread */
+{
+    struct audio_job *j = data;
+    struct lm_settings *s = j->s;
+    bool changed = false;
+    switch (j->op) {
+    case AO_RESCAN:
+    case AO_LEVELS:
+        audio_apply_snap(s, j);
+        changed = true;
+        break;
+    case AO_SET_SINK:
+        if (j->ok) {
+            snprintf(s->sink, sizeof(s->sink), "%s", j->arg);
+            s->sink_vol = j->sink_vol;
+            s->sink_mute = j->sink_mute;
+            changed = true;
+        } else {
+            audio_rescan(s);                            /* refused: what the sound server really has */
+        }
+        break;
+    case AO_SET_SOURCE:
+        if (j->ok) {
+            snprintf(s->source, sizeof(s->source), "%s", j->arg);
+            s->source_vol = j->source_vol;
+            s->source_mute = j->source_mute;
+            changed = true;
+        } else {
+            audio_rescan(s);
+        }
+        break;
+    case AO_SET_PROFILE:
+        if (j->ok) {
+            struct lm_config *cfg = &s->srv->config;
+            if (j->have_keep) {
+                snprintf(cfg->audio_profile, sizeof(cfg->audio_profile), "%s", j->keep);
+                save_later(s);
+            }
+            audio_apply_snap(s, j);
+            s->rescan_left = 2;                         /* the new sink shows up within a second or two */
+            if (s->rescan_timer)
+                lm_timer_arm_ms(s->rescan_timer, 800, 0);
+            changed = true;
+        } else {
+            audio_rescan(s);
+        }
+        break;
+    case AO_APPLY_KEY:
+        if (j->apply_result < 0 && ++s->profile_tries < 10) {
+            lm_timer_arm_ms(s->profile_timer, 3000, 0);
+        } else if (j->apply_result == 0) {
+            audio_apply_snap(s, j);
+            changed = true;
+        }
+        break;
+    default:
+        break;
+    }
+    if (changed)
+        broadcast(s);
+    free(j);
+}
+
+static void audio_submit(struct lm_settings *s, enum audio_op op, const char *arg, int n, bool b)
+{
+    struct audio_job *j = calloc(1, sizeof(*j));
+    if (!j)
+        return;
+    j->s = s;
+    j->op = op;
+    j->n = n;
+    j->b = b;
+    if (arg)
+        snprintf(j->arg, sizeof(j->arg), "%s", arg);
+    lm_work_submit(audio_run, audio_done, j, s);
+}
+
+static void audio_rescan(struct lm_settings *s)
+{
+    audio_submit(s, AO_RESCAN, NULL, 0, false);
 }
 
 static void capture_cb(void *data)
@@ -897,22 +1081,13 @@ static void capture_cb(void *data)
 static void profile_cb(void *data)
 {
     struct lm_settings *s = data;
-    int r = lm_audio_apply_profile_key(s->srv->config.audio_profile);
-    if (r < 0 && ++s->profile_tries < 10) {
-        lm_timer_arm_ms(s->profile_timer, 3000, 0);
-        return;
-    }
-    if (r == 0) {
-        audio_rescan(s);
-        broadcast(s);
-    }
+    audio_submit(s, AO_APPLY_KEY, s->srv->config.audio_profile, 0, false);
 }
 
 static void rescan_cb(void *data)
 {
     struct lm_settings *s = data;
     audio_rescan(s);
-    broadcast(s);
     if (--s->rescan_left > 0 && s->rescan_timer)
         lm_timer_arm_ms(s->rescan_timer, 1500, 0);
 }
@@ -1675,20 +1850,19 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
             lm_wm_relayout_outputs(srv->wm);                    /* the monitors move, the windows with them */
         return true;
     case K_SINK:
-        if (!lm_audio_set_sink(val)) return false;
-        snprintf(s->sink, sizeof(s->sink), "%s", val);
-        if (!lm_audio_sink_state(&s->sink_vol, &s->sink_mute))
-            s->sink_vol = 0, s->sink_mute = false;
+        if (!lm_audio_name_ok(val)) return false;
+        snprintf(s->sink, sizeof(s->sink), "%s", val);              /* shown at once; the sound server answers later (a refusal puts the real one back) */
+        audio_submit(s, AO_SET_SINK, val, 0, false);
         return true;
     case K_SOURCE:
-        if (!lm_audio_set_source(val)) return false;
+        if (!lm_audio_name_ok(val)) return false;
         snprintf(s->source, sizeof(s->source), "%s", val);
-        if (!lm_audio_source_state(&s->source_vol, &s->source_mute))
-            s->source_vol = 0, s->source_mute = false;
+        audio_submit(s, AO_SET_SOURCE, val, 0, false);
         return true;
     case K_SINK_VOLUME:
-        if (!parse_int(val, 0, 100, &n) || !lm_audio_set_sink_volume(n)) return false;
+        if (!parse_int(val, 0, 100, &n)) return false;
         s->sink_vol = n;
+        audio_submit(s, AO_SINK_VOLUME, NULL, n, false);
         return true;
     case K_TIMER_BEEP:                                  /* "1": the call of a timer that ended (the timer program asks; it is an alarm: it ignores the mute of the output) */
         if (!parse_bool(val, &b)) return false;
@@ -1707,34 +1881,27 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         }
         return true;
     case K_SINK_MUTE:
-        if (!parse_bool(val, &b) || !lm_audio_set_sink_mute(b)) return false;
+        if (!parse_bool(val, &b)) return false;
         s->sink_mute = b;
+        audio_submit(s, AO_SINK_MUTE, NULL, 0, b);
         return true;
     case K_SOURCE_VOLUME:
-        if (!parse_int(val, 0, 100, &n) || !lm_audio_set_source_volume(n)) return false;
+        if (!parse_int(val, 0, 100, &n)) return false;
         s->source_vol = n;
+        audio_submit(s, AO_SOURCE_VOLUME, NULL, n, false);
         return true;
     case K_SOURCE_MUTE:
-        if (!parse_bool(val, &b) || !lm_audio_set_source_mute(b)) return false;
+        if (!parse_bool(val, &b)) return false;
         s->source_mute = b;
+        audio_submit(s, AO_SOURCE_MUTE, NULL, 0, b);
         return true;
     case K_AUDIO_PROFILE:
-        if (!lm_audio_set_profile(val))
-            return false;
-        {                                                           /* remember it by name: the ids change with PipeWire's next start */
-            char keep[sizeof(cfg->audio_profile)];
-            if (lm_audio_profile_key(val, keep, sizeof(keep))) {
-                snprintf(cfg->audio_profile, sizeof(cfg->audio_profile), "%s", keep);
-                save_later(s);
-            }
-        }
-        audio_rescan(s);
-        s->rescan_left = 2;                                         /* the new sink shows up within a second or two */
-        if (s->rescan_timer)
-            lm_timer_arm_ms(s->rescan_timer, 800, 0);
+        if (strlen(val) >= sizeof(s->profile)) return false;
+        snprintf(s->profile, sizeof(s->profile), "%s", val);
+        audio_submit(s, AO_SET_PROFILE, val, 0, false);
         return true;
     case K_AUDIO_RESCAN:
-        audio_rescan(s);
+        audio_submit(s, !strcmp(val, "levels") ? AO_LEVELS : AO_RESCAN, NULL, 0, false);
         return true;
     case K_LOCK_SET: {
         /* "current<TAB>kind<TAB>new<TAB>minutes<TAB>start<TAB>blank<TAB>vt" (kind: password | pin | keep | none; see lock.h) */
@@ -2038,5 +2205,6 @@ void lm_settings_destroy(struct lm_settings *s)
         lm_timer_destroy(s->profile_timer);
     if (s->capture_timer)
         lm_timer_destroy(s->capture_timer);
+    lm_work_forget(s);                                          /* the jobs still queued must not call back into freed memory */
     free(s);
 }

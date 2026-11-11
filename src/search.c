@@ -6,6 +6,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -282,6 +285,16 @@ static void clean_exec(const char *in, char *out, size_t n)
     while (o && out[o - 1] == ' ')
         o--;
     out[o] = 0;
+    for (char *p = out; *p; ) {                                         /* "%f" left an empty pair of quotes: the program would get an empty argument */
+        if ((p[0] == '"' && p[1] == '"') || (p[0] == '\'' && p[1] == '\'')) {
+            memmove(p, p + 2, strlen(p + 2) + 1);
+            continue;
+        }
+        p++;
+    }
+    size_t l = strlen(out);
+    while (l && out[l - 1] == ' ')
+        out[--l] = 0;
 }
 
 static void read_desktop(const char *path, const char *id)
@@ -395,57 +408,43 @@ struct fent {
 #define POOL_MAX (14u << 20)
 #define MAX_DEPTH 6
 
-struct qdir {
-    uint32_t off;
-    uint8_t depth;
+struct index {
+    struct fent *ents;
+    size_t n;
+    char *pool;
+    size_t pool_n, pool_cap;
 };
 
-static struct fent *g_ents;
-static size_t g_nent;
-static char *g_pool;
-static size_t g_pool_n, g_pool_cap;
-static struct qdir *g_queue;
-static size_t g_q_head, g_q_n, g_q_cap;
-static bool g_scan_done, g_scan_started;
-static time_t g_scan_finished;
-static struct lm_timer *g_timer;
+/* The index is made by a thread of its own (a dead network folder or a slow disk must not stop the compositor) and published, whole, when it is
+ * ready; the old one is searched until then. */
+static struct index g_idx;                      /* the published one, guarded by g_lock */
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_thread;
+static bool g_thread_made;                      /* a thread was made and not joined yet */
+static atomic_bool g_stop, g_scan_done;
+static bool g_scan_started;
+static time_t g_scan_finished;                  /* guarded by g_lock */
+static char g_roots[2048];
 
-static uint32_t pool_add(const char *s, size_t len)
+static uint32_t pool_add(struct index *ix, const char *s, size_t len)
 {
-    if (g_pool_n + len + 1 > POOL_MAX)
+    if (ix->pool_n + len + 1 > POOL_MAX)
         return UINT32_MAX;
-    if (g_pool_n + len + 1 > g_pool_cap) {
-        size_t cap = g_pool_cap ? g_pool_cap * 2 : (1u << 20);
-        while (cap < g_pool_n + len + 1)
+    if (ix->pool_n + len + 1 > ix->pool_cap) {
+        size_t cap = ix->pool_cap ? ix->pool_cap * 2 : (1u << 20);
+        while (cap < ix->pool_n + len + 1)
             cap *= 2;
-        char *np = realloc(g_pool, cap);
+        char *np = realloc(ix->pool, cap);
         if (!np)
             return UINT32_MAX;
-        g_pool = np;
-        g_pool_cap = cap;
+        ix->pool = np;
+        ix->pool_cap = cap;
     }
-    uint32_t off = (uint32_t)g_pool_n;
-    memcpy(g_pool + off, s, len);
-    g_pool[off + len] = 0;
-    g_pool_n += len + 1;
+    uint32_t off = (uint32_t)ix->pool_n;
+    memcpy(ix->pool + off, s, len);
+    ix->pool[off + len] = 0;
+    ix->pool_n += len + 1;
     return off;
-}
-
-static bool queue_add(const char *path, int depth)
-{
-    uint32_t off = pool_add(path, strlen(path));
-    if (off == UINT32_MAX)
-        return false;
-    if (g_q_n == g_q_cap) {
-        size_t cap = g_q_cap ? g_q_cap * 2 : 256;
-        struct qdir *nq = realloc(g_queue, cap * sizeof(*nq));
-        if (!nq)
-            return false;
-        g_queue = nq;
-        g_q_cap = cap;
-    }
-    g_queue[g_q_n++] = (struct qdir){ off, (uint8_t)depth };
-    return true;
 }
 
 static bool skip_name(const char *n)
@@ -453,34 +452,53 @@ static bool skip_name(const char *n)
     return n[0] == '.' || !strcmp(n, "node_modules") || !strcmp(n, "__pycache__") || !strcmp(n, "venv") || !strcmp(n, "snap");
 }
 
-static void scan_free(void)
+struct qdir {
+    uint32_t off;                       /* in the scan's own pool */
+    uint8_t depth;
+};
+
+static void index_free(struct index *ix)
 {
-    free(g_ents);
-    free(g_pool);
-    free(g_queue);
-    g_ents = NULL;
-    g_pool = NULL;
-    g_queue = NULL;
-    g_nent = g_pool_n = g_pool_cap = g_q_head = g_q_n = g_q_cap = 0;
+    free(ix->ents);
+    free(ix->pool);
+    memset(ix, 0, sizeof(*ix));
 }
 
-/* One tick: reads some folders (about 400 names) and queues the folders it finds. */
-static void scan_tick(void *data)
+/* The thread: walks the roots breadth first (names only, links not followed), then publishes what it found. */
+static void *scan_main(void *arg)
 {
-    (void)data;
-    int budget = 400;
-    while (budget > 0 && g_q_head < g_q_n) {
-        struct qdir qd = g_queue[g_q_head++];
+    (void)arg;
+    struct index ix = { 0 };
+    struct index paths = { 0 };                                         /* the folders still to read (a pool of their own) */
+    struct qdir *queue = NULL;
+    size_t q_n = 0, q_cap = 0, q_head = 0;
+    char roots[sizeof(g_roots)];
+    snprintf(roots, sizeof(roots), "%s", g_roots);
+    char *save = NULL;
+    for (char *r = strtok_r(roots, ":", &save); r; r = strtok_r(NULL, ":", &save)) {
+        uint32_t off = pool_add(&paths, r, strlen(r));
+        if (off == UINT32_MAX)
+            break;
+        if (q_n == q_cap) {
+            q_cap = q_cap ? q_cap * 2 : 256;
+            queue = realloc(queue, q_cap * sizeof(*queue));
+            if (!queue)
+                break;
+        }
+        queue[q_n++] = (struct qdir){ off, 0 };
+    }
+    size_t ents_cap = 0;
+    while (queue && q_head < q_n && ix.n < FILES_MAX && !atomic_load(&g_stop)) {
+        struct qdir qd = queue[q_head++];
         char dir[PATH_MAX];
-        snprintf(dir, sizeof(dir), "%s", g_pool + qd.off);
+        snprintf(dir, sizeof(dir), "%s", paths.pool + qd.off);
         DIR *d = opendir(dir);
         if (!d)
             continue;
         struct dirent *e;
-        while ((e = readdir(d)) && g_nent < FILES_MAX) {
+        while ((e = readdir(d)) && ix.n < FILES_MAX && !atomic_load(&g_stop)) {
             if (skip_name(e->d_name) || !strcmp(e->d_name, ".."))
                 continue;
-            budget--;
             char path[PATH_MAX];
             int pl = snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
             if (pl <= 0 || pl >= (int)sizeof(path))
@@ -492,73 +510,96 @@ static void scan_tick(void *data)
             }
             if (e->d_type == DT_LNK)
                 isdir = false;                                          /* a link is listed as a file and not followed */
-            if (g_nent == FILES_MAX)
-                break;
-            struct fent *ents = g_ents;
-            if (g_nent % 4096 == 0) {
-                ents = realloc(g_ents, (g_nent + 4096) * sizeof(*ents));
-                if (!ents)
+            if (ix.n == ents_cap) {
+                struct fent *ne = realloc(ix.ents, (ents_cap + 4096) * sizeof(*ne));
+                if (!ne)
                     break;
-                g_ents = ents;
+                ix.ents = ne;
+                ents_cap += 4096;
             }
-            uint32_t off = pool_add(path, (size_t)pl);
+            uint32_t off = pool_add(&ix, path, (size_t)pl);
             if (off == UINT32_MAX)
                 break;
-            g_ents[g_nent++] = (struct fent){ off, (uint16_t)(pl - (int)strlen(e->d_name)), (uint8_t)isdir };
-            if (isdir && qd.depth + 1 < MAX_DEPTH)
-                queue_add(path, qd.depth + 1);
+            ix.ents[ix.n++] = (struct fent){ off, (uint16_t)(pl - (int)strlen(e->d_name)), (uint8_t)isdir };
+            if (isdir && qd.depth + 1 < MAX_DEPTH) {
+                uint32_t qo = pool_add(&paths, path, (size_t)pl);
+                if (qo == UINT32_MAX)
+                    continue;
+                if (q_n == q_cap) {
+                    struct qdir *nq = realloc(queue, q_cap * 2 * sizeof(*nq));
+                    if (!nq)
+                        continue;
+                    queue = nq;
+                    q_cap *= 2;
+                }
+                queue[q_n++] = (struct qdir){ qo, (uint8_t)(qd.depth + 1) };
+            }
         }
         closedir(d);
     }
-    if (g_q_head >= g_q_n || g_nent >= FILES_MAX) {
-        g_scan_done = true;
-        g_scan_finished = time(NULL);
-        free(g_queue);
-        g_queue = NULL;
-        g_q_head = g_q_n = g_q_cap = 0;
-        if (g_timer)
-            lm_timer_arm_ms(g_timer, 0, 0);                             /* stop */
-        lm_info("search: %zu files indexed", g_nent);
+    free(queue);
+    index_free(&paths);
+    if (atomic_load(&g_stop)) {
+        index_free(&ix);
+        return NULL;
     }
-}
-
-static void scan_start(struct lm_loop *loop)
-{
-    scan_free();
-    g_scan_done = false;
-    g_scan_started = true;
-    const char *over = getenv("MELLAGUI_SEARCH_ROOT"), *home = getenv("HOME");
-    char roots[2048];
-    snprintf(roots, sizeof(roots), "%s", over ? over : home && *home ? home : "");
-    char *save = NULL;
-    for (char *r = strtok_r(roots, ":", &save); r; r = strtok_r(NULL, ":", &save))
-        queue_add(r, 0);
-    if (!g_timer)
-        g_timer = lm_loop_add_timer(loop, scan_tick, NULL);
-    if (g_timer)
-        lm_timer_arm_ms(g_timer, 15, 15);
+    pthread_mutex_lock(&g_lock);
+    index_free(&g_idx);
+    g_idx = ix;
+    g_scan_finished = time(NULL);
+    pthread_mutex_unlock(&g_lock);
+    atomic_store(&g_scan_done, true);
+    return NULL;
 }
 
 void lm_search_begin(struct lm_loop *loop)
 {
+    (void)loop;
     read_apps();
-    if (!g_scan_started || (g_scan_done && time(NULL) - g_scan_finished > 600))
-        scan_start(loop);
+    bool old = false;
+    if (g_scan_started && atomic_load(&g_scan_done)) {
+        pthread_mutex_lock(&g_lock);
+        old = time(NULL) - g_scan_finished > 600;
+        pthread_mutex_unlock(&g_lock);
+    }
+    if (g_scan_started && !old)
+        return;                                                        /* running, or recent enough */
+    if (g_thread_made) {                                               /* the last scan is over: reap it */
+        pthread_join(g_thread, NULL);
+        g_thread_made = false;
+    }
+    const char *over = getenv("MELLAGUI_SEARCH_ROOT"), *home = getenv("HOME");
+    snprintf(g_roots, sizeof(g_roots), "%s", over ? over : home && *home ? home : "");
+    atomic_store(&g_stop, false);
+    atomic_store(&g_scan_done, false);
+    g_scan_started = true;
+    sigset_t all, oldmask;                                                  /* (no signal of the process may land in this thread) */
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, &oldmask);
+    if (pthread_create(&g_thread, NULL, scan_main, NULL) == 0)
+        g_thread_made = true;
+    else
+        g_scan_started = false;
+    pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 }
 
 int lm_search_indexed(bool *done)
 {
     if (done)
-        *done = g_scan_done;
-    return (int)g_nent;
+        *done = atomic_load(&g_scan_done);
+    pthread_mutex_lock(&g_lock);
+    int n = (int)g_idx.n;
+    pthread_mutex_unlock(&g_lock);
+    return n;
 }
 
 void lm_search_shutdown(void)
 {
-    if (g_timer)
-        lm_timer_destroy(g_timer);
-    g_timer = NULL;
-    scan_free();
+    atomic_store(&g_stop, true);
+    if (g_thread_made)
+        pthread_join(g_thread, NULL);
+    g_thread_made = false;
+    index_free(&g_idx);
     for (int i = 0; i < g_napps; i++)
         if (g_apps[i].img.px)
             lm_img_free(&g_apps[i].img);
@@ -567,6 +608,7 @@ void lm_search_shutdown(void)
     g_napps = 0;
     g_apps_read = false;
     g_scan_started = false;
+    atomic_store(&g_scan_done, false);
 }
 
 /* ---- the results ----------------------------------------------------------------------------------------------------------- */
@@ -643,30 +685,52 @@ static bool has_ext(const char *name, const char *const *list)
     return false;
 }
 
-/* What opens a file, and the icon that stands for it. */
+static bool in_path(const char *prog)
+{
+    const char *path = getenv("PATH");
+    if (!path)
+        path = "/usr/local/bin:/usr/bin:/bin";
+    char buf[PATH_MAX];
+    while (*path) {
+        size_t len = strcspn(path, ":");
+        snprintf(buf, sizeof(buf), "%.*s/%s", (int)len, path, prog);
+        if (len && access(buf, X_OK) == 0)
+            return true;
+        path += len + (path[len] ? 1 : 0);
+    }
+    return false;
+}
+
+/* What opens a file, and the icon that stands for it. The program is expanded alone and the quoted path is added after it: the launcher's expansion
+ * splits at ` || ` and would cut a file name that has those characters in it. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"          /* (a command that is too long is cut, and then fails to start) */
 static void file_open(const char *path, bool dir, char *cmd, size_t n, int *kind)
 {
     static const char *const pics[] = { "png", "jpg", "jpeg", "ppm", "gif", "bmp", "webp", "mp4", "m4v", "mkv", "webm", "avi", "mov", NULL };
     static const char *const text[] = { "txt", "md", "c", "h", "cpp", "py", "sh", "conf", "ini", "json", "xml", "html", "css", "js", "ts", "yml", "yaml", "toml",
                                         "log", "csv", "rs", "go", "java", "cfg", "tex", "rst", NULL };
-    char q[PATH_MAX * 2];
-    shell_quote(path, q, sizeof(q));
-    char raw[PATH_MAX * 2 + 40];
+    const char *prog;
     if (dir) {
         *kind = LM_DOCKICON_FILES;
-        snprintf(raw, sizeof(raw), "mellagui-files %s", q);
+        prog = "mellagui-files";
     } else if (has_ext(path, pics)) {
         *kind = LM_DOCKICON_IMAGES;
-        snprintf(raw, sizeof(raw), "@view %s", q);
+        prog = "@view";
     } else if (has_ext(path, text)) {
         *kind = LM_DOCKICON_EDITOR;
-        snprintf(raw, sizeof(raw), "mellagui-edit %s", q);
+        prog = "mellagui-edit";
     } else {
         *kind = LM_DOCKICON_GENERIC;
-        snprintf(raw, sizeof(raw), "xdg-open %s || mellagui-edit %s", q, q);
+        prog = in_path("xdg-open") ? "xdg-open" : "mellagui-edit";
     }
-    lm_launch_expand(raw, cmd, n);
+    char expanded[LM_DOCK_CMD_MAX], q[PATH_MAX * 2];
+    lm_launch_expand(prog, expanded, sizeof(expanded));
+    shell_quote(path, q, sizeof(q));
+    snprintf(cmd, n, "%s %s", expanded, q);
 }
+
+#pragma GCC diagnostic pop
 
 static void load_app_icon(struct app *a)
 {
@@ -755,12 +819,13 @@ int lm_search_query(const char *query, bool (*known)(const char *name))
     }
     struct scored files[8];                                             /* the files: the name matches, a shorter path first */
     int nf = 0;
-    for (size_t i = 0; i < g_nent && g_pool; i++) {
-        const char *path = g_pool + g_ents[i].off, *base = path + g_ents[i].base;
+    pthread_mutex_lock(&g_lock);                                        /* (the thread that makes the index publishes a new one under this) */
+    for (size_t i = 0; i < g_idx.n && g_idx.pool; i++) {
+        const char *path = g_idx.pool + g_idx.ents[i].off, *base = path + g_idx.ents[i].base;
         int sc = query_score(&q, base);
         if (!sc)
             continue;
-        sc = sc * 4 - (int)strlen(path) / 8 + (g_ents[i].dir ? 4 : 0);
+        sc = sc * 4 - (int)strlen(path) / 8 + (g_idx.ents[i].dir ? 4 : 0);
         struct scored s = { sc, (int)i };
         if (nf < 8) {
             files[nf++] = s;
@@ -775,8 +840,8 @@ int lm_search_query(const char *query, bool (*known)(const char *name))
     }
     qsort(files, (size_t)nf, sizeof(files[0]), cmp_scored);
     for (int k = 0; k < nf; k++) {
-        const struct fent *e = &g_ents[files[k].index];
-        const char *path = g_pool + e->off;
+        const struct fent *e = &g_idx.ents[files[k].index];
+        const char *path = g_idx.pool + e->off;
         char cmd[LM_DOCK_CMD_MAX];
         int kind;
         file_open(path, e->dir, cmd, sizeof(cmd), &kind);
@@ -785,5 +850,6 @@ int lm_search_query(const char *query, bool (*known)(const char *name))
             break;
         snprintf(r->detail, sizeof(r->detail), "%s", path);
     }
+    pthread_mutex_unlock(&g_lock);
     return g_nres;
 }

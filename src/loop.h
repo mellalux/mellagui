@@ -29,6 +29,22 @@ struct lm_loop *lm_loop_create(void);
 /* Frees the loop. Remaining sources/timers/idles are dropped (fds not closed). */
 void lm_loop_destroy(struct lm_loop *loop);
 
+/*
+ * The stall meter: every callback the loop runs (a source, a timer, an idle) is timed. One that takes longer than the threshold (16 ms = a frame at
+ * 60 Hz; `$MELLAGUI_STALL_MS`, 0 = meter off) is a stall: the loop could not read input or paint meanwhile. It is logged once with how long it took
+ * and where the callback is (`addr2line -f -e build/mellagui 0x<offset>` names it) and counted. A stall means something waits in the loop that
+ * should not (a program, a disk, a big computation): move it to the worker thread (worker.h) or split it into steps.
+ */
+struct lm_loop_stats {
+    unsigned stalls;                   /* callbacks over the threshold so far */
+    unsigned worst_ms;                 /* the longest one */
+    unsigned long long worst_off;      /* where it was (offset in the executable) */
+    unsigned threshold_ms;
+};
+void lm_loop_stats(const struct lm_loop *loop, struct lm_loop_stats *out);
+/* Switches the meter on (0 = off, the default: the clients do not time their callbacks). The compositor calls it with 16 or `$MELLAGUI_STALL_MS`. */
+void lm_loop_set_stall_ms(struct lm_loop *loop, unsigned ms);
+
 /* Run until lm_loop_quit(); returns the exit code passed to lm_loop_quit. */
 int lm_loop_run(struct lm_loop *loop);
 void lm_loop_quit(struct lm_loop *loop, int exit_code);

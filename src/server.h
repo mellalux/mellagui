@@ -153,6 +153,7 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    int saver_style;            /* 0 = the 3D room, 1 = the classic flat rain: handed to mellagui-matrix as --flat (settings: saver-style; default room) */
     int saver_lock_min;         /* the screensaver locks the screen this many minutes after it started (it keeps running), 0 = never (settings: saver-lock; default 1) */
     bool startup_sound;         /* play the start-up chime when MellaGUI has started (settings: startup-sound; default true), see chime.h */
     bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */

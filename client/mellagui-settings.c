@@ -1023,11 +1023,17 @@ static void build_saver(struct app *a, int x, int y, int w)
     add_slider(a, x, y, w, "After", "saver-minutes", 1, 120, 1, " min");
     y += ROW_H;
     add_slider(a, x, y, w, "Lock after", "saver-lock", 0, 60, 1, " min");
+    y += ROW_H;
+    const char *style = kv_get(a, "saver-style");
+    add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, "Style");
+    add_radio(a, x + 80, y, 170, "Room (3D)", "saver-style", "room", strcmp(style, "flat") != 0);
+    add_radio(a, x + 260, y, 170, "Flat", "saver-style", "flat", !strcmp(style, "flat"));
     y += ROW_H + 8;
     add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
     y += ROW_H + 10;
     static const char *const notes[] = {
-        "Falling green code, full screen. Any touch ends it;",
+        "Falling green code, full screen (a room or flat).",
+        "Any touch ends it;",
         "that touch is not passed on.",
         "\"Lock after\": the screen is locked that long after it",
         "started (0 = never; needs a password or PIN).",
@@ -1035,7 +1041,7 @@ static void build_saver(struct app *a, int x, int y, int w)
         "It does not start over a full screen window.",
         "Another program: [commands] saver in mellagui.conf.",
     };
-    for (int k = 0; k < 7; k++)
+    for (int k = 0; k < 8; k++)
         add(a, W_LABEL, (struct rect){ x, y + k * (ROW_H - 8), w, ROW_H }, notes[k]);
 }
 
@@ -2845,7 +2851,7 @@ static int selftest_help(void)
         { "outputs", "A|1024x600|0,0;B|800x600|1024,0" }, { "resolutions", "1024x600|;800x600|" }, { "resolution", "auto" },
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "sources", "mic1|Built-in microphone;mic2|USB headset" }, { "source", "mic1" }, { "source-volume", "60" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
-        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "config-file", "/x/mellagui.conf" },
+        { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "saver-style", "room" }, { "config-file", "/x/mellagui.conf" },
         { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" },
     };
     int bad = 0, shown = 0;

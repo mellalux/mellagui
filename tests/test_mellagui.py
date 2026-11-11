@@ -11251,8 +11251,12 @@ class TestBluetooth(Base):
             json.dump(st, f)
         self.log_path = os.path.join(d, 'bt.log')
         fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_bluetoothctl.py')
+        spa = os.path.join(d, 'spa')
+        os.makedirs(os.path.join(spa, 'bluez5'), exist_ok=True)
+        if not changes.get('no_spa_plugin'):
+            open(os.path.join(spa, 'bluez5', 'libspa-bluez5.so'), 'w').close()
         env = {'MELLAGUI_STATUS_PRELOAD': '1', 'MELLAGUI_POWER_ROOT': os.path.join(d, 'power'), 'MELLAGUI_NMCLI': 'none',
-               'MELLAGUI_BLUETOOTHCTL': fake, 'FAKE_BT_STATE': self.state_path, 'FAKE_BT_LOG': self.log_path}
+               'MELLAGUI_BLUETOOTHCTL': fake, 'FAKE_BT_STATE': self.state_path, 'FAKE_BT_LOG': self.log_path, 'MELLAGUI_SPA_DIR': spa}
         p, c, stop = self.private_compositor('mellagui-bt-' + tag, '--size', '1280x600', env=env)
         return c
 
@@ -11293,7 +11297,7 @@ class TestBluetooth(Base):
         c = self.start('1')
         it = self.button(c)
         self.assertEqual(it['text'], 'Mouse')
-        self.assertEqual(self.open_menu(c), ['Bluetooth on, 1 connected', 'Turn Bluetooth off', 'Scan for devices (8 s)', '* Mouse', '  Headset'])
+        self.assertEqual(self.open_menu(c), ['Bluetooth on, 1 connected', 'Devices around...', 'Turn Bluetooth off', 'Scan for devices (8 s)', '* Mouse', '  Headset'])
 
     def test_a_click_on_a_device_connects_or_disconnects_it(self):
         c = self.start('2')
@@ -11312,7 +11316,7 @@ class TestBluetooth(Base):
         self.choose(c, 'Turn Bluetooth off')
         self.wait(lambda: not self.state()['powered'], 'power off')
         self.wait(lambda: TestStatus.items(c, wait=0.1)[0]['text'] == '' if TestStatus.items(c, wait=0.1) else False, 'no name any more')
-        self.assertEqual(self.open_menu(c), ['Bluetooth is off', 'Turn Bluetooth on'])
+        self.assertEqual(self.open_menu(c), ['Bluetooth is off', 'Devices around...', 'Turn Bluetooth on'])
         self.choose(c, 'Turn Bluetooth on')
         self.wait(lambda: self.state()['powered'], 'power on')
 
@@ -11338,6 +11342,56 @@ class TestBluetooth(Base):
         self.wait(lambda: 'pair AA:BB:CC:DD:EE:07' in open(self.log_path).read(), 'it tries')
         self.wait(lambda: any('pairing failed' in l.lower() for l in c.cmd('notes')), 'a notification')
         self.assertFalse(self.dev('AA:BB:CC:DD:EE:07')['paired'])
+
+    def notes_text(self, c):
+        return ' | '.join(c.cmd('notes'))
+
+    def test_a_speaker_that_pairs_but_does_not_connect_says_what_is_missing(self):
+        c = self.start('7', connect_error='br-connection-profile-unavailable', no_spa_plugin=True,
+                       devices=[{'mac': 'AA:BB:CC:DD:EE:07', 'name': 'Speaker', 'paired': True, 'connected': False}])
+        self.open_menu(c)
+        self.choose(c, '  Speaker')
+        self.wait(lambda: 'connect AA:BB:CC:DD:EE:07' in open(self.log_path).read(), 'it tries')
+        self.wait(lambda: 'libspa-0.2-bluetooth' in self.notes_text(c), 'the notification says what to install')
+        self.assertIn('restart PipeWire', self.notes_text(c))
+
+    def test_with_the_plugin_there_the_advice_is_to_restart_the_sound_system(self):
+        c = self.start('8', connect_error='br-connection-profile-unavailable',
+                       devices=[{'mac': 'AA:BB:CC:DD:EE:07', 'name': 'Speaker', 'paired': True, 'connected': False}])
+        self.open_menu(c)
+        self.choose(c, '  Speaker')
+        self.wait(lambda: 'restart PipeWire / WirePlumber' in self.notes_text(c), 'the other advice')
+        self.assertNotIn('apt install', self.notes_text(c))
+
+    def with_battery(self, level):
+        devs = json_copy = [dict(d) for d in self.STATE['devices']]
+        devs[1]['battery'] = level                                                    # the connected Mouse
+        return devs
+
+    def test_the_device_battery_shows_in_the_button_and_the_menu(self):
+        c = self.start('b1', devices=self.with_battery(86))
+        it = self.button(c)
+        self.assertEqual(it['text'], 'Mouse 86%')
+        labels = self.open_menu(c)
+        self.assertIn('* Mouse  86%', labels)
+
+    def test_a_device_that_does_not_report_a_battery_shows_only_its_name(self):
+        c = self.start('b2')
+        self.assertEqual(self.button(c)['text'], 'Mouse')
+
+    def test_a_low_device_battery_is_warned_about_once_and_again_below_five_percent(self):
+        import json
+        c = self.start('b3', devices=self.with_battery(14))
+        self.wait(lambda: 'Bluetooth battery low' in self.notes_text(c), 'the 15 % warning')
+        self.assertIn('Mouse: 14% left', self.notes_text(c))
+        time.sleep(0.2)
+        n = len(c.cmd('notes'))
+        st = self.state()
+        st['devices'][1]['battery'] = 4
+        json.dump(st, open(self.state_path, 'w'))
+        self.open_menu(c)                                                             # (opening the menu reads the state again)
+        self.wait(lambda: 'almost empty' in self.notes_text(c), 'the 5 % warning')
+        self.assertEqual(len(c.cmd('notes')), n + 1)
 
     def test_no_controller_no_button(self):
         c = self.start('6', controller=False)
@@ -11524,6 +11578,261 @@ class TestChime(Base):
         c.click(int(m[3]) + int(m[5]) // 2, int(m[4]) + int(m[6]) // 2)
         c.sync()
         self.assertEqual(c.cmd('sound')[0], 'sound last=dock n=1')
+
+
+class TestBluetoothWindow(Base):
+    """mellagui-bluetooth: the devices around, with an interactive bluetoothctl on a pty (tests/fake_bluetoothctl.py)."""
+
+    KEY_ENTER_, KEY_DELETE_, KEY_DOWN_, KEY_U, KEY_Y, KEY_N = 28, 111, 108, 22, 21, 49
+
+    STATE = {'controller': True, 'powered': True,
+             'devices': [{'mac': 'AA:BB:CC:DD:EE:01', 'name': 'Headset', 'paired': True, 'connected': False},
+                         {'mac': 'AA:BB:CC:DD:EE:02', 'name': 'Mouse', 'paired': True, 'connected': True}],
+             'nearby': [{'mac': 'AA:BB:CC:DD:EE:09', 'name': 'Speaker', 'rssi': -55, 'pair': 'just_works'},
+                        {'mac': 'AA:BB:CC:DD:EE:0A', 'name': 'Phone', 'rssi': -70, 'pair': 'confirm'},
+                        {'mac': 'AA:BB:CC:DD:EE:0B', 'name': 'Keyboard', 'rssi': -80, 'pair': 'pin'},
+                        {'mac': 'AA:BB:CC:DD:EE:0C', 'name': 'Watch', 'rssi': -85, 'pair': 'display'}], 'pair_fails': False}
+
+    def setUp(self):
+        super().setUp()
+        self.exe = os.path.join(ROOT, 'build', 'mellagui-bluetooth')
+        if not os.path.exists(self.exe):
+            self.skipTest('mellagui-bluetooth not built')
+
+    def start(self, tag):
+        import json
+        d = os.path.join(tmp, 'btw-' + tag)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        self.state_path = os.path.join(d, 'bt.json')
+        with open(self.state_path, 'w') as f:
+            json.dump(self.STATE, f)
+        self.log_path = os.path.join(d, 'bt.log')
+        self.dump_path = os.path.join(d, 'dump.txt')
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_bluetoothctl.py')
+        self.env = {'MELLAGUI_BLUETOOTHCTL': fake, 'FAKE_BT_STATE': self.state_path, 'FAKE_BT_LOG': self.log_path,
+                    'MELLAGUI_BT_DUMP': self.dump_path}
+        self.name = 'mellagui-btw-' + tag
+        p, c, stop = self.private_compositor(self.name, '--size', '1280x700', env=self.env)
+        self.c = c
+        return c
+
+    def run_window(self):
+        env = dict(os.environ, WAYLAND_DISPLAY=self.name, **self.env)
+        pr = subprocess.Popen([self.exe], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        end = time.time() + 6
+        while time.time() < end and not [w for w in self.c.windows()['windows'] if w['app_id'] == 'mellagui.bluetooth']:
+            time.sleep(0.05)
+        self.assertTrue([w for w in self.c.windows()['windows'] if w['app_id'] == 'mellagui.bluetooth'], 'no window')
+        self.pr = pr
+        self.wait(lambda: self.view()['devs'], 'the list')
+        return pr
+
+    def view(self):
+        out = {'devs': []}
+        if not os.path.exists(self.dump_path):
+            return out
+        lines = open(self.dump_path).read().split('\n')
+        if len(lines) < 3:
+            return out
+        for kv in lines[0].split():
+            k, _, v = kv.partition('=')
+            out[k] = v
+        out['msg'] = lines[1][4:]
+        out['modal_text'] = lines[2][11:]
+        for l in lines[3:]:
+            if l.startswith('dev '):
+                head, _, name = l.partition(' name=')
+                f = dict(kv.split('=') for kv in head.split()[2:])
+                out['devs'].append(dict(mac=head.split()[1], name=name, **f))
+        return out
+
+    def wait(self, pred, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def state(self):
+        import json
+        for _ in range(20):
+            try:
+                return json.load(open(self.state_path))
+            except ValueError:                                                       # (the fake is writing it just now)
+                time.sleep(0.02)
+        self.fail('the state file is unreadable')
+
+    def dev(self, mac):
+        """The fake's record of a device, or an unpaired empty one while it does not know it yet."""
+        found = [d for d in self.state()['devices'] if d['mac'] == mac]
+        return found[0] if found else {'paired': False, 'connected': False}
+
+    def select(self, name):
+        """Moves the choice to the device called `name` with Down / Up."""
+        for _ in range(12):
+            v = self.view()
+            macs = [d['mac'] for d in v['devs']]
+            want = [d['mac'] for d in v['devs'] if d['name'] == name][0]
+            if v['sel'] == want:
+                return
+            self.c.tap(self.KEY_DOWN_ if macs.index(v['sel']) < macs.index(want) else 103)           # Down or Up
+            time.sleep(0.1)
+        self.fail('cannot select ' + name)
+
+    def test_the_list_has_connected_paired_and_nearby_by_signal_and_hides_the_nameless(self):
+        self.start('1')
+        self.run_window()
+        self.wait(lambda: self.view().get('discovering') == '1', 'the scan runs')
+        self.wait(lambda: len(self.view()['devs']) == 6, 'all six')
+        v = self.view()
+        self.assertEqual([d['name'] for d in v['devs']], ['Mouse', 'Headset', 'Speaker', 'Phone', 'Keyboard', 'Watch'])
+        self.assertEqual([(d['paired'], d['connected']) for d in v['devs'][:3]], [('1', '1'), ('1', '0'), ('0', '0')])
+        self.assertEqual([d['rssi'] for d in v['devs'][2:]], ['-55', '-70', '-80', '-85'])
+        self.assertEqual(v['unnamed_hidden'], '1')                                   # the beacon with only an address
+        self.c.tap(self.KEY_U)
+        self.wait(lambda: len(self.view()['devs']) == 7, 'U shows the nameless one')
+        self.c.tap(self.KEY_U)
+        self.wait(lambda: len(self.view()['devs']) == 6, 'and hides it again')
+
+    def test_enter_connects_a_paired_device_and_disconnects_a_connected_one(self):
+        self.start('2')
+        self.run_window()
+        self.select('Headset')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:01')['connected'], 'the headset connects')
+        self.wait(lambda: 'Connected to Headset' in self.view()['msg'], 'the message')
+        self.select('Mouse')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: not self.dev('AA:BB:CC:DD:EE:02')['connected'], 'the mouse disconnects')
+
+    def test_a_just_works_device_is_paired_trusted_and_connected(self):
+        self.start('3')
+        self.run_window()
+        self.wait(lambda: any(d['name'] == 'Speaker' for d in self.view()['devs']), 'the speaker is found')
+        self.select('Speaker')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:09')['connected'], 'paired and connected')
+        log = open(self.log_path).read()
+        self.assertLess(log.index('session: pair AA:BB:CC:DD:EE:09'), log.index('session: trust AA:BB:CC:DD:EE:09'))
+        self.assertLess(log.index('session: trust AA:BB:CC:DD:EE:09'), log.index('session: connect AA:BB:CC:DD:EE:09'))
+
+    def test_a_passkey_to_compare_is_a_question_in_the_window(self):
+        self.start('4')
+        self.run_window()
+        self.wait(lambda: any(d['name'] == 'Phone' for d in self.view()['devs']), 'the phone is found')
+        self.select('Phone')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.view()['modal'] == '1', 'the question')
+        self.assertIn('123456', self.view()['modal_text'])
+        self.assertIn('Phone', self.view()['modal_text'])
+        self.c.tap(self.KEY_N)                                                       # "no": the pairing fails
+        self.wait(lambda: 'Pairing' in self.view()['msg'] and self.view()['modal'] == '0', 'refused')
+        self.assertEqual([d for d in self.state()['devices'] if d['mac'] == 'AA:BB:CC:DD:EE:0A'], [])
+        self.c.tap(self.KEY_ENTER_)                                                  # again, and "yes"
+        self.wait(lambda: self.view()['modal'] == '1', 'the question again')
+        self.c.tap(self.KEY_Y)
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:0A')['paired'], 'paired')
+
+    def test_a_pin_is_typed_in_the_window(self):
+        self.start('5')
+        self.run_window()
+        self.wait(lambda: any(d['name'] == 'Keyboard' for d in self.view()['devs']), 'the keyboard is found')
+        self.select('Keyboard')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.view()['modal'] == '2', 'the PIN question')
+        for code in (11, 11, 11, 11):                                                # 0 0 0 0
+            self.c.tap(code)
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:0B')['paired'], 'paired with the right PIN')
+
+    def test_a_code_to_type_on_the_device_is_shown_until_it_is_paired(self):
+        self.start('6')
+        self.run_window()
+        self.wait(lambda: any(d['name'] == 'Watch' for d in self.view()['devs']), 'the watch is found')
+        self.select('Watch')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.view()['modal'] == '3', 'the code is shown')
+        self.assertIn('482913', self.view()['modal_text'])
+        self.wait(lambda: self.view()['modal'] == '0' and self.dev('AA:BB:CC:DD:EE:0C')['paired'], 'the pairing ends it')
+
+    def test_the_battery_of_a_connected_device_is_shown_and_follows_the_device(self):
+        import json
+        self.start('11')
+        st = self.state()
+        st['devices'][1]['battery'] = 72                                              # the connected Mouse
+        st['devices'][0]['battery'] = 55                                              # (the Headset reports one, too, once it is connected)
+        json.dump(st, open(self.state_path, 'w'))
+        self.run_window()
+        mouse = [d for d in self.view()['devs'] if d['name'] == 'Mouse'][0]
+        self.assertEqual(mouse['battery'], '72')
+        self.assertEqual([d['battery'] for d in self.view()['devs'] if d['name'] == 'Headset'], ['-1'])     # not connected: not shown
+        self.select('Headset')
+        self.c.tap(self.KEY_ENTER_)                                                   # connecting announces its battery
+        self.wait(lambda: [d['battery'] for d in self.view()['devs'] if d['name'] == 'Headset'] == ['55'], 'the headset battery arrives')
+
+    def test_delete_forgets_a_paired_device_and_escape_ends_the_session(self):
+        self.start('7')
+        pr = self.run_window()
+        self.select('Headset')
+        self.c.tap(self.KEY_DELETE_)
+        self.wait(lambda: not [d for d in self.state()['devices'] if d['mac'] == 'AA:BB:CC:DD:EE:01'], 'forgotten')
+        self.assertNotIn('Headset', [d['name'] for d in self.view()['devs'] if d['paired'] == '1'])
+        self.c.tap(KEY_ESC)
+        self.assertEqual(pr.wait(timeout=6), 0)
+        log = open(self.log_path).read()
+        self.assertIn('session: scan on', log)
+        self.assertIn('session: scan off', log)
+
+    def test_a_speaker_that_pairs_but_will_not_connect_gets_an_explanation_in_the_window(self):
+        import json
+        self.start('10')
+        st = self.state()
+        st['connect_error'] = 'br-connection-profile-unavailable'
+        json.dump(st, open(self.state_path, 'w'))
+        spa = os.path.join(os.path.dirname(self.dump_path), 'spa')
+        os.makedirs(spa, exist_ok=True)                                              # (no bluez5/libspa-bluez5.so in it)
+        self.env['MELLAGUI_SPA_DIR'] = spa
+        self.run_window()
+        self.assertIn('libspa-0.2-bluetooth', self.view()['msg'])                    # said at once: audio devices will not connect
+        self.wait(lambda: any(d['name'] == 'Speaker' for d in self.view()['devs']), 'the speaker is found')
+        self.select('Speaker')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.dev('AA:BB:CC:DD:EE:09')['paired'], 'paired')
+        self.wait(lambda: 'No Bluetooth audio support' in self.view()['msg'], 'the connect fails with the explanation')
+
+    def test_a_second_window_does_not_open(self):
+        self.start('8')
+        self.run_window()
+        env = dict(os.environ, WAYLAND_DISPLAY=self.name, **self.env)
+        r = subprocess.run([self.exe], env=env, capture_output=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len([w for w in self.c.windows()['windows'] if w['app_id'] == 'mellagui.bluetooth']), 1)
+
+    def test_the_panel_menu_opens_it(self):
+        import json
+        self.start('9')                                                              # (a second compositor with the status program is below)
+        self.c.cmd('quit')
+        d = os.path.dirname(self.dump_path)
+        os.makedirs(os.path.join(d, 'power'), exist_ok=True)
+        self.name = 'mellagui-btw-9b'
+        env = dict(self.env, MELLAGUI_STATUS_PRELOAD='1', MELLAGUI_POWER_ROOT=os.path.join(d, 'power'), MELLAGUI_NMCLI='none')
+        p, c, stop = self.private_compositor('mellagui-btw-9b', '--size', '1280x600', env=env)
+        its = TestStatus.items(c, want=1)
+        it = max(its, key=lambda i: int(i['x']))
+        c.click(int(it['x']) + 5, int(it['y']) + 5)
+        end = time.time() + 6
+        while time.time() < end and 'open=1' not in c.cmd('dockmenu')[0]:
+            time.sleep(0.1)
+        for e in TestStatus.entries(c):
+            if e[0] == 'Devices around...':
+                c.click(e[1], e[2])
+        end = time.time() + 8
+        while time.time() < end and not [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.bluetooth']:
+            time.sleep(0.1)
+        self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.bluetooth'], 'the window did not open')
 
 
 class TestSaver(Base):

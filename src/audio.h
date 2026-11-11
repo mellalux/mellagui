@@ -34,6 +34,11 @@ const char *lm_audio_sink_status(void);
 /* `wpctl status` -> list/current (exposed for the unit tests). Returns the number of sinks. */
 int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *current, size_t cn);
 
+/* Volume (0..100 %) and mute of the default output (@DEFAULT_SINK@ / @DEFAULT_AUDIO_SINK@; call lm_audio_list_sinks first so that the right tool is known). */
+bool lm_audio_sink_state(int *volume, bool *mute);
+bool lm_audio_set_sink_volume(int percent);
+bool lm_audio_set_sink_mute(bool mute);
+
 /*
  * Microphones (the sound server's inputs, monitors of outputs left out): the same through `pactl` (names) or `wpctl status` (ids). The default one is the
  * one applications record from; its volume (0..100 %) and mute are those of @DEFAULT_SOURCE@ / @DEFAULT_AUDIO_SOURCE@.

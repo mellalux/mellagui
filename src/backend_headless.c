@@ -449,6 +449,16 @@ static void ctl_command(struct ctl_client *c, char *line)
             ctl_reply(c, "%s", text);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "quick")) {
+        /* quick [toggle] -> "quick x= y= w= h= window=0|1|2" (the panel's quick settings button and its card: 0 none, 1 hidden, 2 shown), then "ok" */
+        static char text[256];
+        if (srv->wm && a1 && !strcmp(a1, "toggle"))
+            lm_wm_quick_toggle(srv->wm, NULL);
+        if (srv->wm) {
+            lm_wm_quick_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "tray")) {
         /* tray -> the lines of lm_wm_tray_describe ("tray n=..", one "item .." line each), then "ok" */
         static char text[4096];

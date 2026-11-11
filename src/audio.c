@@ -392,6 +392,65 @@ bool lm_audio_set_sink(const char *name)
     return !strcmp(buf, name);
 }
 
+/* The default output's volume and mute: the same calls as the microphone's, on @DEFAULT_SINK@ / @DEFAULT_AUDIO_SINK@. */
+bool lm_audio_sink_state(int *volume, bool *mute)
+{
+    static char buf[1024];
+    *volume = 0;
+    *mute = false;
+    if (g_sink_backend == SINKS_WPCTL) {
+        char *const cmd[] = { "wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@", NULL };
+        double v;
+        const char *p;
+        if (!run_capture(cmd, buf, sizeof(buf), 1000) || !(p = strstr(buf, "Volume:")) || sscanf(p + 7, "%lf", &v) != 1)
+            return false;
+        *volume = (int)(v * 100.0 + 0.5);
+        *mute = strstr(buf, "MUTED") != NULL;
+        return true;
+    }
+    char *const vcmd[] = { "pactl", "get-sink-volume", "@DEFAULT_SINK@", NULL };
+    if (!in_path("pactl") || !run_capture(vcmd, buf, sizeof(buf), 1000))
+        return false;
+    const char *pc = strchr(buf, '%');
+    if (!pc)
+        return false;
+    const char *b = pc;
+    while (b > buf && isdigit((unsigned char)b[-1]))
+        b--;
+    *volume = atoi(b);
+    char *const mcmd[] = { "pactl", "get-sink-mute", "@DEFAULT_SINK@", NULL };
+    if (run_capture(mcmd, buf, sizeof(buf), 1000))
+        *mute = strstr(buf, "yes") != NULL;
+    return true;
+}
+
+bool lm_audio_set_sink_volume(int percent)
+{
+    if (percent < 0 || percent > 150)
+        return false;
+    static char buf[256];
+    char v[32];
+    if (g_sink_backend == SINKS_WPCTL) {
+        snprintf(v, sizeof(v), "%d.%02d", percent / 100, percent % 100);
+        char *const cmd[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", v, NULL };
+        return run_capture(cmd, buf, sizeof(buf), 1000);
+    }
+    snprintf(v, sizeof(v), "%d%%", percent);
+    char *const cmd[] = { "pactl", "set-sink-volume", "@DEFAULT_SINK@", v, NULL };
+    return in_path("pactl") && run_capture(cmd, buf, sizeof(buf), 1000);
+}
+
+bool lm_audio_set_sink_mute(bool mute)
+{
+    static char buf[256];
+    if (g_sink_backend == SINKS_WPCTL) {
+        char *const cmd[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", mute ? "1" : "0", NULL };
+        return run_capture(cmd, buf, sizeof(buf), 1000);
+    }
+    char *const cmd[] = { "pactl", "set-sink-mute", "@DEFAULT_SINK@", mute ? "1" : "0", NULL };
+    return in_path("pactl") && run_capture(cmd, buf, sizeof(buf), 1000);
+}
+
 /* ---- microphones ----------------------------------------------------------------------------------------------- */
 
 static enum sink_backend g_source_backend = SINKS_NONE;

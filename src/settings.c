@@ -48,7 +48,7 @@ enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_SAVER_LOCK, K_SAVER_STYLE, K_OSK_AVOID,
     K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_AUDIO_PROFILE_KEEP, K_NIGHT_LIGHT, K_NIGHT_TEMP, K_NIGHT_FROM, K_NIGHT_TO, K_DND, K_STARTUP_SOUND, K_FILE,
-    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_SOURCES, K_SOURCE, K_SOURCE_VOLUME, K_SOURCE_MUTE, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_SOURCES, K_SOURCE, K_SOURCE_VOLUME, K_SOURCE_MUTE, K_SINK_VOLUME, K_SINK_MUTE, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
     K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
@@ -67,7 +67,7 @@ static const char *const key_names[K_COUNT] = {
     [K_CLOCK_HOURS] = "clock-hours", [K_CLOCK_SECONDS] = "clock-seconds", [K_CLOCK_DATE] = "clock-date", [K_CLOCK_WEEKDAY] = "clock-weekday",
     [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_AUDIO_PROFILE_KEEP] = "audio-profile-keep", [K_NIGHT_LIGHT] = "night-light", [K_NIGHT_TEMP] = "night-temp", [K_NIGHT_FROM] = "night-from", [K_NIGHT_TO] = "night-to", [K_DND] = "dnd", [K_STARTUP_SOUND] = "startup-sound", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
-    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_SOURCES] = "sources", [K_SOURCE] = "source", [K_SOURCE_VOLUME] = "source-volume", [K_SOURCE_MUTE] = "source-mute", [K_AUDIO_PROFILES] = "audio-profiles",
+    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_SOURCES] = "sources", [K_SOURCE] = "source", [K_SOURCE_VOLUME] = "source-volume", [K_SOURCE_MUTE] = "source-mute", [K_SINK_VOLUME] = "sink-volume", [K_SINK_MUTE] = "sink-mute", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
@@ -122,6 +122,8 @@ struct lm_settings {
     bool no_save;           /* the current `set` must not schedule a save (resolution: only once it is kept) */
     char sinks[VALUE_MAX], sink[128];       /* cached `pactl` answers, refreshed by audio-rescan */
     char sources[VALUE_MAX], source[128];   /* the microphones, the same */
+    int sink_vol;                           /* the default output's volume (percent) and mute */
+    bool sink_mute;
     int source_vol;                         /* the default microphone's volume (percent) and mute */
     bool source_mute;
     char profiles[VALUE_MAX], profile[24];  /* cached PipeWire card profiles (pw-cli), the same */
@@ -602,6 +604,8 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SOURCE: snprintf(out, n, "%s", s->source); break;
     case K_SOURCE_VOLUME: snprintf(out, n, "%d", s->source_vol); break;
     case K_SOURCE_MUTE: snprintf(out, n, "%d", s->source_mute ? 1 : 0); break;
+    case K_SINK_VOLUME: snprintf(out, n, "%d", s->sink_vol); break;
+    case K_SINK_MUTE: snprintf(out, n, "%d", s->sink_mute ? 1 : 0); break;
     case K_AUDIO_PROFILES: snprintf(out, n, "%s", s->profiles); break;
     case K_AUDIO_PROFILE: snprintf(out, n, "%s", s->profile); break;
     case K_AUDIO_RESCAN: snprintf(out, n, "0"); break;
@@ -862,6 +866,8 @@ static void audio_rescan(struct lm_settings *s)
     snprintf(s->sources, sizeof(s->sources), "%s", list);
     if (!lm_audio_source_state(&s->source_vol, &s->source_mute))
         s->source_vol = 0, s->source_mute = false;
+    if (!lm_audio_sink_state(&s->sink_vol, &s->sink_mute))
+        s->sink_vol = 0, s->sink_mute = false;
     lm_audio_list_profiles(list, sizeof(list), s->profile, sizeof(s->profile));
     snprintf(s->profiles, sizeof(s->profiles), "%s", list);
 }
@@ -1652,12 +1658,22 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_SINK:
         if (!lm_audio_set_sink(val)) return false;
         snprintf(s->sink, sizeof(s->sink), "%s", val);
+        if (!lm_audio_sink_state(&s->sink_vol, &s->sink_mute))
+            s->sink_vol = 0, s->sink_mute = false;
         return true;
     case K_SOURCE:
         if (!lm_audio_set_source(val)) return false;
         snprintf(s->source, sizeof(s->source), "%s", val);
         if (!lm_audio_source_state(&s->source_vol, &s->source_mute))
             s->source_vol = 0, s->source_mute = false;
+        return true;
+    case K_SINK_VOLUME:
+        if (!parse_int(val, 0, 100, &n) || !lm_audio_set_sink_volume(n)) return false;
+        s->sink_vol = n;
+        return true;
+    case K_SINK_MUTE:
+        if (!parse_bool(val, &b) || !lm_audio_set_sink_mute(b)) return false;
+        s->sink_mute = b;
         return true;
     case K_SOURCE_VOLUME:
         if (!parse_int(val, 0, 100, &n) || !lm_audio_set_source_volume(n)) return false;

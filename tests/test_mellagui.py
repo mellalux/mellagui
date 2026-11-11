@@ -4771,6 +4771,63 @@ esac
         self.assertEqual(self.get_setting(c, 'sinks-status'), 'no-server')
         self.assertEqual(self.get_setting(c, 'sinks'), '')
 
+    def mic_env(self, tag):
+        d = os.path.join(tmp, 'mic-' + tag)
+        os.makedirs(d, exist_ok=True)
+        st = os.path.join(d, 'pactl.json')
+        if os.path.exists(st):
+            os.unlink(st)
+        return st, {'MELLAGUI_FAKE_STATE': st, 'MELLAGUI_FAKE_PW': os.path.join(d, 'pw.json'), 'PATH': FAKES + ':' + os.environ['PATH']}
+
+    def test_the_microphone_is_listed_without_monitors_and_can_be_chosen_muted_and_set(self):
+        st, env = self.mic_env('a')
+        p, c, stop = self.private_compositor('mellagui-mic1', env=env)
+        g = lambda k: self.get_setting(c, k)
+        c.cmd('settings audio-rescan 1')
+        self.assertEqual(g('sources'), 'alsa_input.builtin-mic|Built-in Audio Analog Stereo;alsa_input.usb-headset|USB Headset Mono')      # no monitor of an output
+        self.assertEqual((g('source'), g('source-volume'), g('source-mute')), ('alsa_input.builtin-mic', '70', '0'))
+        c.cmd('settings source alsa_input.usb-headset')
+        self.assertEqual((g('source'), g('source-volume'), g('source-mute')), ('alsa_input.usb-headset', '40', '1'))       # that microphone's own level and mute
+        c.cmd('settings source-mute 0')
+        c.cmd('settings source-volume 85')
+        with open(st) as f:
+            state = json.load(f)
+        self.assertEqual(state['default_source'], 'alsa_input.usb-headset')
+        usb = [x for x in state['sources'] if x['name'] == 'alsa_input.usb-headset'][0]
+        self.assertEqual((usb['vol'], usb['mute']), (85, False))
+        for bad in ('settings source nosuch', 'settings source-volume 101', 'settings source-volume x', 'settings source-mute maybe'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd(bad)
+
+    def test_the_panel_sound_page_has_a_microphone_part(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        st, env = self.mic_env('b')
+        p, c, stop = self.private_compositor('mellagui-mic2', env=env)
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-mic2', **env), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 4 * 35 + 13)                           # the Sound tab
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 20 - 52, y0 + 14 + 13)                    # its Microphone part
+        time.sleep(0.6)
+        c.click(x0 + 168, y0 + 14 + 28 + 28 + 14)                         # the second microphone (a radio)
+        for _ in range(60):
+            if self.get_setting(c, 'source') == 'alsa_input.usb-headset':
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.get_setting(c, 'source'), 'alsa_input.usb-headset')
+
     def pw_env(self, tag):
         d = os.path.join(tmp, 'pw-' + tag)
         os.makedirs(d, exist_ok=True)
@@ -4818,7 +4875,7 @@ esac
         win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
-        c.click(x0 + 70, y0 + 12 + 4 * 30 + 13)                           # Sound tab: asks the sound server again
+        c.click(x0 + 70, y0 + 12 + 4 * 35 + 13)                           # Sound tab: asks the sound server again
         time.sleep(0.8)
         # "Output device" heading at y=14, then Analog (42), HDMI (70), IEC958 (98)
         c.click(x0 + 200, y0 + 70 + 14)
@@ -4848,7 +4905,7 @@ esac
         win = self.wait_window(c, 'mellagui.settings')
         x0, y0 = win['x'], win['y']
         time.sleep(0.3)
-        c.click(x0 + 70, y0 + 12 + 3 * 30 + 13)                               # Display page
+        c.click(x0 + 70, y0 + 12 + 3 * 35 + 13)                               # Display page
         time.sleep(0.4)
         modes = min(7, len(self.get_setting(c, 'resolutions').split(';')))
         # rows: monitor heading + line (14, 42), resolution heading (76), Automatic (104), Preferred, then the modes; the button follows by 10 px
@@ -4873,7 +4930,7 @@ esac
         g = lambda k: self.get_setting(c, k)
         # Sound page (no card profiles here): "Applications" heading at y=14, its two rows at 42 and 70, then the beeps heading at 104
         # and its rows from 132: default, HDMI 0, HDMI 1, HDMI 2 (the HDMI outputs are shown before the analog ones)
-        c.click(x0 + 70, y0 + 12 + 4 * 30 + 13)
+        c.click(x0 + 70, y0 + 12 + 4 * 35 + 13)
         time.sleep(0.5)
         c.click(x0 + 200, y0 + 70 + 14)                                       # second system output: "Digital Stereo (HDMI)"
         time.sleep(0.2)
@@ -4882,7 +4939,7 @@ esac
         time.sleep(0.2)
         self.assertEqual(g('audio-out'), 'plughw:CARD=PCH,DEV=3')
         # Display page: rows are Automatic, Preferred, then the modes (800x500 preferred, 1920x1080, 1280x720, ...)
-        c.click(x0 + 70, y0 + 12 + 3 * 30 + 13)
+        c.click(x0 + 70, y0 + 12 + 3 * 35 + 13)
         time.sleep(0.3)
         c.click(x0 + 200, y0 + 42 + 2 * 28 + 6 + 4 * 28 + 14)                 # third mode = 1280x720 (below the two monitor lines)
         time.sleep(0.4)
@@ -5067,24 +5124,29 @@ esac
         ctl.click(x0 + 580, y0 + 42 + 2 * 28 + 14)
         time.sleep(0.15)
         self.assertEqual(settings()['layouts'], 'us,de,ee,fi')
-        ctl.click(x0 + 168, y0 + 232)                           # sticky keys box
+        # the delay slider: track x = 310..530; clicking the right end gives the maximum
+        ctl.click(x0 + 531, y0 + 232)
+        time.sleep(0.15)
+        self.assertEqual(settings()['repeat-delay'], '1000')
+        ctl.click(x0 + 310, y0 + 232)
+        time.sleep(0.15)
+        self.assertEqual(settings()['repeat-delay'], '150')
+        ctl.click(x0 + 70, y0 + 12 + 1 * 35 + 13)               # the Accessibility tab
+        time.sleep(0.15)
+        ctl.click(x0 + 168, y0 + 42 + 14)                       # sticky keys box
         time.sleep(0.15)
         self.assertEqual(settings()['sticky'], '1')
         self.assertEqual(ctl.kbd()['sticky'], 1)
-        # the delay slider: track x = 310..530; clicking the right end gives the maximum
-        ctl.click(x0 + 531, y0 + 284)
+        ctl.click(x0 + 168, y0 + 42 + 28 + 28 + 28 + 14)        # the on-screen keyboard's box (second heading, then the box)
         time.sleep(0.15)
-        self.assertEqual(settings()['repeat-delay'], '1000')
-        ctl.click(x0 + 310, y0 + 284)
-        time.sleep(0.15)
-        self.assertEqual(settings()['repeat-delay'], '150')
+        self.assertEqual(settings()['osk-avoid'], '0')
 
     def test_panel_slider_drag(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.abs(x0 + 310 + 110, y0 + 312)                       # repeat rate slider (1..60), mid track
+        ctl.abs(x0 + 310 + 110, y0 + 260)                       # repeat rate slider (1..60), mid track
         ctl.button(272, True)
-        ctl.abs(x0 + 310 + 220, y0 + 312)                       # drag to the right end
+        ctl.abs(x0 + 310 + 220, y0 + 260)                       # drag to the right end
         ctl.button(272, False)
         time.sleep(0.15)
         self.assertEqual(settings()['repeat-rate'], '60')
@@ -5092,21 +5154,23 @@ esac
     def test_panel_pages_and_keyboard_navigation(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 1 * 30 + 13)                   # "Pointer" tab
+        ctl.click(x0 + 70, y0 + 12 + 0 * 35 + 13)                   # "Input" tab
+        time.sleep(0.15)
+        ctl.click(x0 + win['w'] - 60, y0 + 14 + 13)                 # its Pointer part
         time.sleep(0.15)
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # natural scrolling box (second row, below the speed slider)
         time.sleep(0.15)
         self.assertEqual(settings()['natural-scroll'], '1')
-        ctl.click(x0 + 70, y0 + 12 + 2 * 30 + 13)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.15)
         ctl.click(x0 + 168, y0 + 42 + 28 + 14)                  # sound box (second row, below the gadget box)
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the thirteen page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 31st press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
+        # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the twelve page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 30th press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(31):
+        for _ in range(30):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -5125,7 +5189,7 @@ esac
         self.assertEqual(lock_kind(), 'kind=none')
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 5 * 30 + 13)               # "Security" tab
+        ctl.click(x0 + 70, y0 + 12 + 5 * 35 + 13)               # "Security" tab
         time.sleep(0.2)
         self.assertEqual(settings()['lock-kind'], 'none')
         ctl.click(x0 + 300, y0 + 111)                           # New
@@ -5153,7 +5217,7 @@ esac
     def test_panel_desktop_page_has_the_mixer_checkbox(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 2 * 30 + 13)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 168, y0 + 42 + 2 * 28 + 14)              # third row: Volume mixer gadget
         time.sleep(0.3)
@@ -5177,7 +5241,7 @@ esac
             self.skipTest('mellagui-files not built')
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 2 * 30 + 13)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 460, y0 + 291)                           # "Browse..."
         chooser = wait_for_window('mellagui.files.choose')
@@ -5194,7 +5258,7 @@ esac
         self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 2 * 30 + 13)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 410, y0 + 265)                           # Stretch
         time.sleep(0.2)
@@ -5226,7 +5290,7 @@ esac
         self.own_clipboard('pasted.png\n')
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 2 * 30 + 13)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 300, y0 + 231)                           # the file field
         ctl.key(KEY_LEFTCTRL, True)
@@ -5263,7 +5327,7 @@ esac
         self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 70, y0 + 12 + 2 * 30 + 13)                   # "Desktop" tab
+        ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
         ctl.click(x0 + 300, y0 + 231)                           # the file field
         for ch in 'abxcd':                                      # (type_text() would press Enter at the end)
@@ -5300,21 +5364,21 @@ esac
         time.sleep(0.2)
         after = ctl.dump(os.path.join(tmp, 'set1.ppm'))
         x0, y0 = win['x'], win['y']
-        row = [(before.px(x0 + x, y0 + 284), after.px(x0 + x, y0 + 284)) for x in range(300, 560, 2)]
+        row = [(before.px(x0 + x, y0 + 232), after.px(x0 + x, y0 + 232)) for x in range(300, 560, 2)]
         self.assertTrue(any(a != b for a, b in row), 'the slider did not move')
 
     def test_try_field_follows_the_layout(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 200, y0 + 394)                           # the "Try it" field
+        ctl.click(x0 + 200, y0 + 314)                           # the "Try it" field
         time.sleep(0.15)
 
         def field():
             ctl.abs(900, 500)
             time.sleep(0.15)
             ppm = ctl.dump(os.path.join(tmp, 'try.ppm'))
-            ctl.abs(x0 + 200, y0 + 394)
-            return [ppm.px(x0 + x, y0 + y) for y in range(384, 404) for x in range(166, 190)]
+            ctl.abs(x0 + 200, y0 + 314)
+            return [ppm.px(x0 + x, y0 + y) for y in range(304, 324) for x in range(166, 190)]
         empty = field()
         ctl.tap(39)                                             # KEY_SEMICOLON: ';' on us, o-umlaut on ee
         us_text = field()
@@ -10432,7 +10496,9 @@ class TestDoubleClickTime(Base):
         self.assertIsNotNone(win)
         time.sleep(0.5)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 1 * 30 + 13)                                    # the Pointer tab
+        c.click(x0 + 70, y0 + 12 + 0 * 35 + 13)                                    # the Input tab
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 60, y0 + 14 + 13)                                  # its Pointer part
         time.sleep(0.3)
 
         def current():
@@ -10595,7 +10661,7 @@ class TestOutputLayout(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 3 * 30 + 13)                         # the Display tab
+        c.click(x0 + 70, y0 + 12 + 3 * 35 + 13)                         # the Display tab
         time.sleep(0.3)
         # "Monitors, left to right": headless-0 then headless-1, each row with < and > at the right edge
         row0 = y0 + 14 + 28 + 14                                        # first monitor row
@@ -11069,7 +11135,7 @@ class TestConfigSettings(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 6 * 30 + 13)                         # the Config tab (7th)
+        c.click(x0 + 70, y0 + 12 + 6 * 35 + 13)                         # the Config tab (7th)
         time.sleep(0.3)
         button = (x0 + 160 + 100, y0 + 14 + 3 * 28 + 6 + 12)            # first button below the three lines
         self.assertFalse(os.path.exists(path))
@@ -12608,7 +12674,7 @@ class TestSaver(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 5 * 30 + 13)                          # the Security tab
+        c.click(x0 + 70, y0 + 12 + 5 * 35 + 13)                          # the Security tab
         time.sleep(0.3)
         c.click(x0 + win['w'] - 80, y0 + 14 + 13)                         # its Screensaver part (a small button at the right end of the heading row)
         time.sleep(0.3)
@@ -12676,6 +12742,15 @@ class TestDock(Base):
             blue = lambda p: p[2] > p[0] + 60 and p[2] > 150
             self.assertTrue(blue(ppm.px(i['x'] + i['w'] // 2, i['y'] + i['h'] * 9 // 10)), name)         # (the middle holds the white glyph)
             self.assertEqual(blue(near), corner, '%s: corner pixel %s' % (name, near))
+
+    def test_the_panels_buttons_follow_the_roundness_too(self):
+        for name, rnd, corner in (('mellagui-dk22', 100, False), ('mellagui-dk23', 0, True)):
+            c = self.start(name, '[windows]\nbutton-roundness = %d\n' % rnd)
+            ppm = c.dump(os.path.join(tmp, name + '.ppm'))
+            red = [(x, y) for y in range(0, 32) for x in range(740, 800) if ppm.px(x, y)[0] > 150 and ppm.px(x, y)[1] < 100 and ppm.px(x, y)[2] < 100]
+            self.assertTrue(red, name)                                            # the power button
+            x0, x1, y0, y1 = min(p[0] for p in red), max(p[0] for p in red), min(p[1] for p in red), max(p[1] for p in red)
+            self.assertEqual((x0, y0) in red, corner, '%s: the corner of the power button' % name)
 
     def test_the_dock_can_be_switched_off_and_bad_values_are_ignored(self):
         c = self.start('mellagui-dk3', '[dock]\nenabled = no\n')
@@ -13250,7 +13325,7 @@ class TestDockEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 10 * 32 + 13)                         # the Dock tab (11th)
+        c.click(x0 + 70, y0 + 12 + 9 * 35 + 13)                          # the Dock tab (10th)
         time.sleep(0.3)
         c.click(x0 + 160 + 440 - 78 + 52 + 12, y0 + 14 + 28 + 22 + 8 + 11)   # "x" of the first row
         for _ in range(60):
@@ -13287,7 +13362,7 @@ class TestDockEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 10 * 32 + 13)                         # the Dock tab (11th)
+        c.click(x0 + 70, y0 + 12 + 9 * 35 + 13)                          # the Dock tab (10th)
         time.sleep(0.3)
         c.click(x0 + 214, y0 + 81)                                       # the name button of the first row (A): its values go into the form
         time.sleep(0.3)
@@ -13441,7 +13516,7 @@ class TestKeysEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 7 * 32 + 13)                          # the Keys tab (8th)
+        c.click(x0 + 70, y0 + 12 + 7 * 35 + 13)                          # the Keys tab (8th)
         time.sleep(0.3)
         # the first row is Super+Enter = terminal: its "x" switches the built-in shortcut off
         c.click(x0 + 160 + 440 - 12, y0 + 14 + 28 + 11)
@@ -13562,7 +13637,7 @@ class TestThemeEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 8 * 32 + 13)                          # the Colours tab (9th)
+        c.click(x0 + 70, y0 + 12 + 8 * 35 + 13)                          # the Themes tab (9th)
         time.sleep(0.3)
         # row 11 of the palette is "background": page 2 (8 per page), third row
         c.click(x0 + 160 + 24, y0 + 14 + 28 + 28 + 11)                    # (the Theme row is above the list) first row: wallpaper-top, to be sure a click selects
@@ -13601,9 +13676,9 @@ class TestThemeEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 8 * 32 + 13)                          # the Theme tab (9th)
+        c.click(x0 + 70, y0 + 12 + 8 * 35 + 13)                          # the Themes tab (9th)
         time.sleep(0.3)
-        c.click(x0 + win['w'] - 50, y0 + 14 + 13)                         # its Buttons part
+        c.click(x0 + win['w'] - 132, y0 + 14 + 13)                        # its Buttons part
         time.sleep(0.3)
         c.click(x0 + 160 + 210 + 20, y0 + 14 + 28 + 28 + 2 + 52 + 28 + 6 + 14)           # "One colour"
         for _ in range(60):
@@ -13699,7 +13774,9 @@ class TestMetricsEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 9 * 32 + 13)                          # the Sizes tab (10th)
+        c.click(x0 + 70, y0 + 12 + 8 * 35 + 13)                          # the Themes tab (9th)
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 52, y0 + 14 + 13)                         # its Sizes part
         time.sleep(0.3)
         y = y0 + 14 + 28 + 13                                              # the first slider: windows.titlebar-height (20..64)
         c.abs(x0 + 160 + 200 + 10, y)                                      # drag from near the left end to the right end

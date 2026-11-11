@@ -15,6 +15,12 @@ static const struct entry table[] = {
       "Tick the layouts you want to type in. The ticked ones come first, in the order that Super+Space (or a click on the layout badge in the panel) "
       "switches through them.\n"
       "'active' marks the layout in use right now, ^ moves a layout up in the order. At least one layout stays ticked and at most four can be." },
+    { "@Microphone", NULL, "Microphone", "The input that programs record from: pick one, set how loud it is, or mute it. It applies at once." },
+    { "source", NULL, "Microphone", "The microphone (or other input) that programs such as video calls and recorders use by default." },
+    { "source-volume", NULL, "Input level", "How loud the chosen microphone is, from 0 to 100 %." },
+    { "source-mute", NULL, "Mute the microphone", "While this is ticked the microphone records silence." },
+    { "@Accessibility", NULL, "Accessibility", "Settings that make the computer easier to use with one hand, a slow hand, or no keyboard at all." },
+    { "@On-screen keyboard", NULL, "On-screen keyboard", "The keyboard on the screen (Super+K, or the Kbd button in the panel) for a touch screen or when a key is hard to press." },
     { "sticky", NULL, "Sticky keys",
       "Tap Shift, Ctrl, Alt, AltGr or Super once and it stays pressed for the next key, so a shortcut can be typed one key at a time - handy with one "
       "hand or a keyboard that is hard to press.\n"

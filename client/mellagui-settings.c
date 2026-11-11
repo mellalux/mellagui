@@ -323,8 +323,8 @@ static int selftest(void)
 #define MAX_KV 160
 #define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Theme", "Sizes", "Dock", "Clock", "Night" };
+enum page { PAGE_INPUT, PAGE_ACCESS, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Input", "Accessibility", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Themes", "Dock", "Clock", "Night" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP };
 
@@ -387,8 +387,10 @@ struct app {
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
+    int sound_tab;                      /* the Sound page's part: 0 the outputs and beeps, 1 the microphone */
+    int input_tab;                      /* the Input page's part: 0 the keyboard, 1 the mouse and touchpad */
     int sec_tab;                        /* the Security page's part: 0 the screen lock, 1 the screensaver */
-    int theme_tab;                      /* the Theme page's part: 0 the theme and its colours, 1 the buttons */
+    int theme_tab;                      /* the Themes page's part: 0 the theme and its colours, 1 the buttons, 2 the sizes */
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
@@ -515,16 +517,9 @@ static void build_keyboard(struct app *a, int x, int y, int w)
     y += ROW_H + 8;
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Typing");
     y += ROW_H;
-    add_check(a, x, y, w, "Sticky keys", "sticky", kv_int(a, "sticky", 0) != 0);
-    y += ROW_H - 4;
-    add(a, W_LABEL, (struct rect){ x + BOX + 10, y, w - BOX - 10, ROW_H - 4 },
-        "Tap a modifier to latch it; Shift x5 toggles.");
-    y += ROW_H;
     add_slider(a, x, y, w, "Repeat delay", "repeat-delay", 150, 1000, 50, " ms");
     y += ROW_H;
     add_slider(a, x, y, w, "Repeat rate", "repeat-rate", 1, 60, 1, "/s");
-    y += ROW_H;
-    add_check(a, x, y, w, "Windows keep out of the on-screen keyboard's way", "osk-avoid", kv_int(a, "osk-avoid", 1) != 0);
     y += ROW_H + 8;
     add(a, W_TEXT, (struct rect){ x, y, w, 48 }, "Try it:");
 }
@@ -548,6 +543,22 @@ static struct widget *add_button(struct app *a, int x, int y, int w, const char 
 
 static void build_saver(struct app *a, int x, int y, int w);
 static void build_security_lock(struct app *a, int x, int y, int w);
+
+/* Accessibility: what makes the computer easier to use without the usual hands, keys or sight. */
+static void build_access(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Accessibility");
+    y += ROW_H;
+    add_check(a, x, y, w, "Sticky keys", "sticky", kv_int(a, "sticky", 0) != 0);
+    y += ROW_H - 4;
+    add(a, W_LABEL, (struct rect){ x + BOX + 10, y, w - BOX - 10, ROW_H - 4 }, "Tap a modifier to latch it; Shift x5 toggles.");
+    y += ROW_H + 8;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "On-screen keyboard");
+    y += ROW_H;
+    add_check(a, x, y, w, "Windows keep out of its way", "osk-avoid", kv_int(a, "osk-avoid", 1) != 0);
+    y += ROW_H - 4;
+    add(a, W_LABEL, (struct rect){ x + BOX + 10, y, w - BOX - 10, ROW_H - 4 }, "Super+K or the Kbd button in the panel shows it.");
+}
 
 /* The Security page has two parts, the screen lock and the screensaver (which locks the screen, too); two small buttons in the heading row. */
 static void build_part_tabs(struct app *a, int x, int y, int w, const char *key, const char *const *names, int n, int cur)
@@ -1560,7 +1571,7 @@ static void build_sizes(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y, w, 24 }, "Applied when you let go. * = not the built-in size.");
 }
 
-static void build_sound(struct app *a, int x, int y, int w)
+static void build_sound_output(struct app *a, int x, int y, int w)
 {
     struct entry ents[8];
     int shown;
@@ -1619,16 +1630,61 @@ static void build_sound(struct app *a, int x, int y, int w)
     pl->r.h = ROW_H - 6;
 }
 
+/* The microphone: which input applications record from, its level and mute. */
+static void build_sound_mic(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Microphone");
+    y += ROW_H;
+    struct entry ents[8];
+    int shown = pick_entries(kv_get(a, "sources"), 2, ents);
+    if (!shown) {
+        const char *why = kv_get(a, "sinks-status");
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, !strcmp(why, "ok") ? "No microphone found." : "No sound server answers (see the Output part).");
+        return;
+    }
+    const char *cur = kv_get(a, "source");
+    for (int i = 0; i < shown; i++) {
+        add_radio(a, x, y, w, *ents[i].desc ? ents[i].desc : ents[i].name, "source", ents[i].name, !strcmp(cur, ents[i].name));
+        y += ROW_H;
+    }
+    y += 6;
+    add_slider(a, x, y, w, "Input level", "source-volume", 0, 100, 5, " %");
+    y += ROW_H;
+    add_check(a, x, y, w, "Muted", "source-mute", kv_int(a, "source-mute", 0) != 0);
+}
+
+static void build_sound(struct app *a, int x, int y, int w)
+{
+    static const char *const names[2] = { "Output", "Microphone" };
+    if (a->sound_tab == 1)
+        build_sound_mic(a, x, y, w);
+    else
+        build_sound_output(a, x, y, w);
+    build_part_tabs(a, x, y, w, "sound-tab", names, 2, a->sound_tab);
+}
+
 static void attach_help(struct app *a, int px, int pw);
+
+static void build_input(struct app *a, int x, int y, int w)
+{
+    static const char *const names[2] = { "Keyboard", "Pointer" };
+    if (a->input_tab == 1)
+        build_pointer(a, x, y, w);
+    else
+        build_keyboard(a, x, y, w);
+    build_part_tabs(a, x, y, w, "input-tab", names, 2, a->input_tab);
+}
 
 static void build_theme(struct app *a, int x, int y, int w)
 {
-    static const char *const names[2] = { "Colours", "Buttons" };
-    if (a->theme_tab == 1)
+    static const char *const names[3] = { "Colours", "Buttons", "Sizes" };
+    if (a->theme_tab == 2)
+        build_sizes(a, x, y, w);
+    else if (a->theme_tab == 1)
         build_buttons(a, x, y, w);
     else
         build_colours(a, x, y, w);
-    build_part_tabs(a, x, y, w, "theme-tab", names, 2, a->theme_tab);
+    build_part_tabs(a, x, y, w, "theme-tab", names, 3, a->theme_tab);
 }
 
 static void build(struct app *a)
@@ -1645,15 +1701,14 @@ static void build(struct app *a)
     if (w < 200)
         w = 200;
     switch (a->page) {
-    case PAGE_KEYBOARD: build_keyboard(a, x, y, w); break;
-    case PAGE_POINTER: build_pointer(a, x, y, w); break;
+    case PAGE_INPUT: build_input(a, x, y, w); break;
+    case PAGE_ACCESS: build_access(a, x, y, w); break;
     case PAGE_DISPLAY: build_display(a, x, y, w); break;
     case PAGE_SOUND: build_sound(a, x, y, w); break;
     case PAGE_SECURITY: build_security(a, x, y, w); break;
     case PAGE_CONFIG: build_config(a, x, y, w); break;
     case PAGE_KEYS: build_keys(a, x, y, w); break;
     case PAGE_COLOURS: build_theme(a, x, y, w); break;
-    case PAGE_SIZES: build_sizes(a, x, y, w); break;
     case PAGE_DOCK: build_dock(a, x, y, w); break;
     case PAGE_CLOCK: build_clock(a, x, y, w); break;
     case PAGE_NIGHT: build_night(a, x, y, w); break;
@@ -2207,8 +2262,18 @@ static void activate(struct app *a, int idx)
             send_set(a, "dock-reset", "1");
             dock_clear_form(a);
             a->dpend[0] = 0;
+        } else if (!strcmp(w->key, "sound-tab")) {
+            a->sound_tab = atoi(w->arg) == 1 ? 1 : 0;
+            if (a->sound_tab == 1)
+                send_set(a, "audio-rescan", "1");                         /* ask again: microphones come and go */
+            a->focus = -1;
+            a->win.redraw = true;
+        } else if (!strcmp(w->key, "input-tab")) {
+            a->input_tab = atoi(w->arg) == 1 ? 1 : 0;
+            a->focus = -1;
+            a->win.redraw = true;
         } else if (!strcmp(w->key, "theme-tab")) {
-            a->theme_tab = atoi(w->arg) == 1 ? 1 : 0;
+            a->theme_tab = LM_CLAMP(atoi(w->arg), 0, 2);
             a->focus = -1;
             a->win.redraw = true;
         } else if (!strcmp(w->key, "theme-accent")) {                     /* the one colour: the Colours part with it selected */
@@ -2778,20 +2843,22 @@ static int selftest_help(void)
         { "metrics", "windows.titlebar-height=28:20:64:28 panel.height=32:20:64:32 windows.double-click-ms=400:100:1000:400" },
         { "dock-opts", "enabled=1 autohide=0 icon-size=48 zoom=160 gap=10 margin=8 icon-background=light" },
         { "outputs", "A|1024x600|0,0;B|800x600|1024,0" }, { "resolutions", "1024x600|;800x600|" }, { "resolution", "auto" },
-        { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
+        { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "sources", "mic1|Built-in microphone;mic2|USB headset" }, { "source", "mic1" }, { "source-volume", "60" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
         { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "config-file", "/x/mellagui.conf" },
         { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" },
     };
     int bad = 0, shown = 0;
-    for (int pgi = 0; pgi < N_PAGES + 2; pgi++) {                           /* (two more: the second parts of the Security and the Theme page) */
-        int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : PAGE_COLOURS;
+    for (int pgi = 0; pgi < N_PAGES + 5; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */
+        int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : pgi == N_PAGES + 3 ? PAGE_INPUT : pgi == N_PAGES + 4 ? PAGE_SOUND : PAGE_COLOURS;
         memset(&fa, 0, sizeof(fa));
         for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
             kv_set(&fa, kvs[i].k, kvs[i].v);
         fa.page = (enum page)pg;
         fa.sec_tab = pgi == N_PAGES ? 1 : 0;
-        fa.theme_tab = pgi == N_PAGES + 1 ? 1 : 0;
+        fa.input_tab = pgi == N_PAGES + 3 ? 1 : 0;
+        fa.sound_tab = pgi == N_PAGES + 4 ? 1 : 0;
+        fa.theme_tab = pgi == N_PAGES + 1 ? 1 : pgi == N_PAGES + 2 ? 2 : 0;
         fa.win.bw = 860;
         fa.win.bh = 560;
         fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;

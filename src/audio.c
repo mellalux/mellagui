@@ -238,7 +238,7 @@ const char *lm_audio_sink_status(void)
  *   │      54. Built-in Audio Digital Stereo (HDMI) [vol: 1.00]
  *   ├─ Sources:
  */
-int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *current, size_t cn)
+static int parse_wpctl_section(const char *text, const char *section, char *list, size_t n, char *current, size_t cn)
 {
     if (n)
         list[0] = 0;
@@ -265,11 +265,11 @@ int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *cur
         }
         if (!in_audio)
             continue;
-        if (strstr(l, "Sinks:")) {
+        if (strstr(l, section)) {
             in_sinks = true;
             continue;
         }
-        if (strstr(l, "Sources:") || strstr(l, "Filters:") || strstr(l, "Streams:") || strstr(l, "Devices:")) {
+        if (strstr(l, "Sinks:") || strstr(l, "Sources:") || strstr(l, "Filters:") || strstr(l, "Streams:") || strstr(l, "Devices:")) {
             in_sinks = false;
             continue;
         }
@@ -305,6 +305,16 @@ int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *cur
         count++;
     }
     return count;
+}
+
+int lm_audio_parse_wpctl_sinks(const char *text, char *list, size_t n, char *current, size_t cn)
+{
+    return parse_wpctl_section(text, "Sinks:", list, n, current, cn);
+}
+
+int lm_audio_parse_wpctl_sources(const char *text, char *list, size_t n, char *current, size_t cn)
+{
+    return parse_wpctl_section(text, "Sources:", list, n, current, cn);
 }
 
 int lm_audio_list_sinks(char *list, size_t n, char *current, size_t cn)
@@ -380,6 +390,145 @@ bool lm_audio_set_sink(const char *name)
         return false;
     trim(buf);
     return !strcmp(buf, name);
+}
+
+/* ---- microphones ----------------------------------------------------------------------------------------------- */
+
+static enum sink_backend g_source_backend = SINKS_NONE;
+
+int lm_audio_list_sources(char *list, size_t n, char *current, size_t cn)
+{
+    if (n)
+        list[0] = 0;
+    if (cn)
+        current[0] = 0;
+    g_source_backend = SINKS_NONE;
+    static char text[16384];
+    char *const list_cmd[] = { "pactl", "list", "sources", NULL };
+    int count = 0;
+    if (in_path("pactl") && run_capture(list_cmd, text, sizeof(text), 1000)) {
+        char name[128] = "";
+        for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+            char *p = line;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            if (!strncmp(p, "Name: ", 6)) {
+                snprintf(name, sizeof(name), "%s", p + 6);
+                trim(name);
+            } else if (!strncmp(p, "Description: ", 13) && name[0]) {
+                char desc[120];
+                snprintf(desc, sizeof(desc), "%s", p + 13);
+                trim(desc);
+                size_t nl = strlen(name);
+                bool monitor = nl > 8 && !strcmp(name + nl - 8, ".monitor");           /* the monitor of an output is not a microphone */
+                if (!monitor && lm_audio_name_ok(name)) {
+                    add_entry(list, n, name, desc);
+                    count++;
+                }
+                name[0] = 0;
+            }
+        }
+        if (count > 0) {
+            g_source_backend = SINKS_PULSE;
+            static char cur[256];
+            char *const get_cmd[] = { "pactl", "get-default-source", NULL };
+            if (cn && run_capture(get_cmd, cur, sizeof(cur), 1000)) {
+                trim(cur);
+                if (lm_audio_name_ok(cur))
+                    snprintf(current, cn, "%s", cur);
+            }
+        }
+    }
+    if (count == 0 && in_path("wpctl")) {
+        char *const status_cmd[] = { "wpctl", "status", NULL };
+        if (run_capture(status_cmd, text, sizeof(text), 1500)) {
+            count = lm_audio_parse_wpctl_sources(text, list, n, current, cn);
+            if (count > 0)
+                g_source_backend = SINKS_WPCTL;
+        }
+    }
+    return count;
+}
+
+bool lm_audio_set_source(const char *name)
+{
+    if (!lm_audio_name_ok(name))
+        return false;
+    static char buf[256];
+    if (g_source_backend == SINKS_WPCTL) {
+        char *const set_cmd[] = { "wpctl", "set-default", (char *)name, NULL };
+        run_capture(set_cmd, buf, sizeof(buf), 1500);
+        char list[2048], cur[64];
+        lm_audio_list_sources(list, sizeof(list), cur, sizeof(cur));
+        return !strcmp(cur, name);
+    }
+    char *const set_cmd[] = { "pactl", "set-default-source", (char *)name, NULL };
+    run_capture(set_cmd, buf, sizeof(buf), 1500);
+    char *const get_cmd[] = { "pactl", "get-default-source", NULL };
+    if (!run_capture(get_cmd, buf, sizeof(buf), 1000))
+        return false;
+    trim(buf);
+    return !strcmp(buf, name);
+}
+
+bool lm_audio_source_state(int *volume, bool *mute)
+{
+    static char buf[1024];
+    *volume = 0;
+    *mute = false;
+    if (g_source_backend == SINKS_WPCTL) {
+        char *const cmd[] = { "wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@", NULL };
+        if (!run_capture(cmd, buf, sizeof(buf), 1000))
+            return false;
+        double v;
+        const char *p = strstr(buf, "Volume:");
+        if (!p || sscanf(p + 7, "%lf", &v) != 1)
+            return false;
+        *volume = (int)(v * 100.0 + 0.5);
+        *mute = strstr(buf, "MUTED") != NULL;
+        return true;
+    }
+    char *const vcmd[] = { "pactl", "get-source-volume", "@DEFAULT_SOURCE@", NULL };
+    if (!in_path("pactl") || !run_capture(vcmd, buf, sizeof(buf), 1000))
+        return false;
+    const char *pc = strchr(buf, '%');                          /* "Volume: front-left: 45875 /  70% / -9.29 dB, ..." */
+    if (!pc)
+        return false;
+    const char *b = pc;
+    while (b > buf && isdigit((unsigned char)b[-1]))
+        b--;
+    *volume = atoi(b);
+    char *const mcmd[] = { "pactl", "get-source-mute", "@DEFAULT_SOURCE@", NULL };
+    if (run_capture(mcmd, buf, sizeof(buf), 1000))
+        *mute = strstr(buf, "yes") != NULL;
+    return true;
+}
+
+bool lm_audio_set_source_volume(int percent)
+{
+    if (percent < 0 || percent > 150)
+        return false;
+    static char buf[256];
+    char v[32];
+    if (g_source_backend == SINKS_WPCTL) {
+        snprintf(v, sizeof(v), "%d.%02d", percent / 100, percent % 100);
+        char *const cmd[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", v, NULL };
+        return run_capture(cmd, buf, sizeof(buf), 1000);
+    }
+    snprintf(v, sizeof(v), "%d%%", percent);
+    char *const cmd[] = { "pactl", "set-source-volume", "@DEFAULT_SOURCE@", v, NULL };
+    return in_path("pactl") && run_capture(cmd, buf, sizeof(buf), 1000);
+}
+
+bool lm_audio_set_source_mute(bool mute)
+{
+    static char buf[256];
+    if (g_source_backend == SINKS_WPCTL) {
+        char *const cmd[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", mute ? "1" : "0", NULL };
+        return run_capture(cmd, buf, sizeof(buf), 1000);
+    }
+    char *const cmd[] = { "pactl", "set-source-mute", "@DEFAULT_SOURCE@", mute ? "1" : "0", NULL };
+    return in_path("pactl") && run_capture(cmd, buf, sizeof(buf), 1000);
 }
 
 /* ---- PipeWire card profiles (pw-cli) ------------------------------------------------------------------------------- */

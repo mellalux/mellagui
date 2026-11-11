@@ -9,6 +9,12 @@ DEFAULT = {
         {'name': 'alsa_output.analog-stereo', 'desc': 'Built-in Audio Analog Stereo', 'vol': 64, 'mute': False},
         {'name': 'alsa_output.hdmi-stereo', 'desc': 'Built-in Audio Digital Stereo (HDMI)', 'vol': 100, 'mute': False},
     ],
+    'default_source': 'alsa_input.builtin-mic',
+    'sources': [
+        {'name': 'alsa_output.analog-stereo.monitor', 'desc': 'Monitor of Built-in Audio Analog Stereo', 'vol': 100, 'mute': False},
+        {'name': 'alsa_input.builtin-mic', 'desc': 'Built-in Audio Analog Stereo', 'vol': 70, 'mute': False},
+        {'name': 'alsa_input.usb-headset', 'desc': 'USB Headset Mono', 'vol': 40, 'mute': True},
+    ],
     'inputs': [
         {'id': 61, 'app': 'Firefox', 'vol': 100, 'mute': False},
         {'id': 62, 'app': 'Music Player', 'vol': 30, 'mute': False},
@@ -38,6 +44,33 @@ if a[:2] == ['list', 'sinks']:
         out += ('Sink #%d\n\tState: RUNNING\n\tName: %s\n\tDescription: %s\n\tMute: %s\n'
                 '\tVolume: front-left: %d / %3d%% / -1.00 dB,   front-right: %d / %3d%% / -1.00 dB\n\t        balance 0.00\n'
                 '\tBase Volume: 65536 / 100%% / 0.00 dB\n' % (i + 47, s['name'], s['desc'], 'yes' if s['mute'] else 'no', v, s['vol'], v, s['vol']))
+elif a[:2] == ['list', 'sources']:
+    for i, s in enumerate(st['sources']):
+        v = round(s['vol'] * 65536 / 100)
+        out += ('Source #%d\n\tState: RUNNING\n\tName: %s\n\tDescription: %s\n\tMute: %s\n'
+                '\tVolume: front-left: %d / %3d%% / -1.00 dB\n' % (i + 50, s['name'], s['desc'], 'yes' if s['mute'] else 'no', v, s['vol']))
+elif a[:1] == ['get-default-source']:
+    out = st['default_source'] + '\n'
+elif a[:1] == ['set-default-source'] and len(a) == 2:
+    if any(s['name'] == a[1] for s in st['sources']):
+        st['default_source'] = a[1]
+elif a[:1] == ['get-source-volume'] and len(a) == 2:
+    for s in st['sources']:
+        if s['name'] == (st['default_source'] if a[1] == '@DEFAULT_SOURCE@' else a[1]):
+            v = round(s['vol'] * 65536 / 100)
+            out = 'Volume: front-left: %d / %3d%% / -9.29 dB,   front-right: %d / %3d%% / -9.29 dB\n        balance 0.00\n' % (v, s['vol'], v, s['vol'])
+elif a[:1] == ['get-source-mute'] and len(a) == 2:
+    for s in st['sources']:
+        if s['name'] == (st['default_source'] if a[1] == '@DEFAULT_SOURCE@' else a[1]):
+            out = 'Mute: %s\n' % ('yes' if s['mute'] else 'no')
+elif a[:1] == ['set-source-volume'] and len(a) == 3:
+    for s in st['sources']:
+        if s['name'] == (st['default_source'] if a[1] == '@DEFAULT_SOURCE@' else a[1]):
+            s['vol'] = pct(a[2])
+elif a[:1] == ['set-source-mute'] and len(a) == 3:
+    for s in st['sources']:
+        if s['name'] == (st['default_source'] if a[1] == '@DEFAULT_SOURCE@' else a[1]):
+            s['mute'] = flag(a[2], s['mute'])
 elif a[:2] == ['list', 'sink-inputs']:
     for i in st['inputs']:
         v = round(i['vol'] * 65536 / 100)

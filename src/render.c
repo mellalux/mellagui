@@ -1808,6 +1808,23 @@ static void paint_panel_shadow(const struct paint_ctx *c, const struct lm_rect *
     }
 }
 
+/* The panel's buttons follow [windows] button-roundness like the dock's icons: the round ones (workspace cells, layout badge, power) become rounded squares
+ * below 100, the rounded rectangles (taskbar, tray, Sticky, Kbd) get a smaller corner radius. */
+static int btn_radius(int r)
+{
+    return r * lm_metrics.button_roundness / 100;
+}
+
+static void paint_round_button(const struct paint_ctx *c, float cx, float cy, float R, uint32_t rgb, uint32_t alpha)
+{
+    if (lm_metrics.button_roundness >= 100) {
+        paint_shape(c, cx, cy, R, SHAPE_DISC, rgb, alpha);
+        return;
+    }
+    struct lm_rect r = lm_rect_make((int)lroundf(cx - R), (int)lroundf(cy - R), (int)lroundf(R * 2.0f), (int)lroundf(R * 2.0f));
+    fill_round(c, &r, (int)lroundf(R * (float)lm_metrics.button_roundness / 100.0f), (alpha << 24) | (rgb & 0xffffffu));
+}
+
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
 {
     fill_rect(c, &p->bar, COL_PANEL);
@@ -1828,8 +1845,8 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
                           : mix_rgb(COL_PANEL, col, i == p->hover_workspace ? 215 : 165);
         float cx = (float)w->x + (float)w->w / 2.0f, cy = (float)w->y + (float)w->h / 2.0f, R = (float)LM_MIN(w->w, w->h) / 2.0f;
         if (cur)                                            /* the current one: a white ring and dark digit, the others a duller disc and a white digit */
-            paint_shape(c, cx, cy, R, SHAPE_DISC, lm_theme.on_colour, 255);
-        paint_shape(c, cx, cy, cur ? R - 2.0f : R, SHAPE_DISC, bg, 255);
+            paint_round_button(c, cx, cy, R, lm_theme.on_colour, 255);
+        paint_round_button(c, cx, cy, cur ? R - 2.0f : R, bg, 255);
         char n[2] = { (char)('1' + i), 0 };
         draw_text_centered(c, w, n, cur ? lm_theme.ink : lm_theme.on_colour);
         if (!cur && occupied)                               /* a window lives there: a small white dot under the digit */
@@ -1839,7 +1856,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         const struct lm_rect *r = &p->task[i].rect;
         uint32_t bg = p->task[i].active ? COL_PANEL_ACCENT : (p->task[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN);
         uint32_t fg = p->task[i].active ? COL_PANEL : (p->task[i].minimized ? COL_PANEL_DIM : COL_PANEL_TEXT);
-        fill_round(c, r, 8, 0xff000000u | bg);
+        fill_round(c, r, btn_radius(8), 0xff000000u | bg);
         struct lm_rect label = lm_rect_make(r->x + 4, r->y, r->w - 8, r->h);
         draw_text_centered(c, &label, p->task[i].title[0] ? p->task[i].title : "-", fg);
     }
@@ -1848,7 +1865,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     for (int i = 0; i < p->ntray; i++) {                 /* programs' icons: a button with the icon and / or a label */
         const struct lm_rect *r = &p->tray[i].rect;
         const struct lm_texture *ic = p->tray[i].icon;
-        fill_round(c, r, 8, 0xff000000u | (p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN));
+        fill_round(c, r, btn_radius(8), 0xff000000u | (p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN));
         int x = r->x + 6, tw = p->tray[i].text[0] ? lm_font_text_width(p->tray[i].text) : 0;
         if (ic && !tw)
             x = r->x + (r->w - ic->width) / 2;
@@ -1880,18 +1897,18 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         if (p->hover_layout)
             col = mix_rgb(col, 0xffffffu, 55);
         float cx = (float)p->layout.x + (float)p->layout.w / 2.0f, cy = (float)p->layout.y + (float)p->layout.h / 2.0f;
-        paint_shape(c, cx, cy, (float)LM_MIN(p->layout.w, p->layout.h) / 2.0f, SHAPE_DISC, col, 255);
+        paint_round_button(c, cx, cy, (float)LM_MIN(p->layout.w, p->layout.h) / 2.0f, col, 255);
         draw_text_centered(c, &p->layout, p->layout_text, lm_theme.ink);
     }
     uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_sticky ? 30 : 18);
     if (p->sticky_on && p->hover_sticky)
         sbg = lm_theme.sticky_hot;
-    fill_round(c, &p->sticky, 8, 0xff000000u | sbg);
+    fill_round(c, &p->sticky, btn_radius(8), 0xff000000u | sbg);
     draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? lm_theme.ink : COL_PANEL_TEXT);
     {                                                   /* the on-screen keyboard: a teal button with a little keyboard, white while it is showing */
         uint32_t obg = p->osk_open ? lm_theme.on_colour : p->hover_osk ? mix_rgb(panel_palette[4], 0xffffffu, 55) : panel_palette[4];
         uint32_t ofg = p->osk_open ? panel_palette[4] : lm_theme.on_colour;
-        fill_round(c, &p->osk, 8, 0xff000000u | obg);
+        fill_round(c, &p->osk, btn_radius(8), 0xff000000u | obg);
         int cx = p->osk.x + p->osk.w / 2, cy = p->osk.y + p->osk.h / 2, bx = cx - 11, by = cy - 6;
         struct lm_rect body = lm_rect_make(bx, by, 22, 12);
         fill_round(c, &body, 3, 0xff000000u | ofg);
@@ -1911,7 +1928,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;
         float R = (float)p->power.w / 2.0f;
         uint32_t bg = p->power_open ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 45) : p->hover_power ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 25) : COL_PANEL_DANGER;
-        paint_shape(c, cx, cy, R, SHAPE_DISC, bg, 255);                                   /* red: it ends the session */
+        paint_round_button(c, cx, cy, R, bg, 255);                                        /* red: it ends the session */
         paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, lm_theme.on_colour, 255);
     }
 }

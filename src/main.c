@@ -35,6 +35,7 @@
 #include "nightlight.h"
 #include "notifylog.h"
 #include "saver.h"
+#include "search.h"
 #include "sound.h"
 #include "logind.h"
 #include "server.h"
@@ -680,6 +681,7 @@ out:
     srv->notelog = NULL;
     if (srv->night) lm_night_destroy(srv->night);
     srv->night = NULL;
+    lm_search_shutdown();
     if (srv->saver) lm_saver_destroy(srv->saver);
     srv->saver = NULL;
     if (srv->lock) lm_lock_destroy(srv->lock);

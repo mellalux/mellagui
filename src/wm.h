@@ -535,7 +535,7 @@ struct lm_about_info {
 #define LM_LAUNCHER_HELP_D 18                          /* the "?" circle of a form field */
 #define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
 /* The most icons the launcher dialog shows: the dock's buttons and the launcher's own lists. */
-#define LM_LAUNCHER_MAX (2 * LM_DOCK_MAX)
+#define LM_LAUNCHER_MAX (2 * LM_DOCK_MAX + 24)         /* the buttons and the results of the search (search.h: LM_SEARCH_MAX) */
 struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
     float veil;                     /* how strong the dimming is, 0..1 (the open / close animation fades it) */

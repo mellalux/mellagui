@@ -62,6 +62,10 @@ struct lm_dock_item {
     bool plate;                         /* a picture whose corners are transparent (a logo): it is painted on a round plate (see icon_bg) */
 };
 
+/* Fills `pub` (kind, img, plate, round) from an icon text the way the entries of [dock-apps] are: a built-in icon name, theme:NAME, the name of an installed
+ * program's icon or a picture file (loaded into `img`; `pub->img` points at it then). Used by the launcher's search for the programs it finds. */
+void lm_dock_icon_load(struct lm_dock_item *pub, struct lm_image *img, const char *name, const char *spec);
+
 /* True for the sections [dock], [dock-apps] and [launcher-apps]. */
 bool lm_dock_section(const char *section);
 /* Config-file callback (lm_conf_fn) for them. */

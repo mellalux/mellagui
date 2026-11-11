@@ -5733,11 +5733,23 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
     struct lm_output *o;
 
     if (lm_lock_active(wm->srv->lock)) {                         /* locked: nothing of the session may show */
+        struct lm_window *shield = NULL;                         /* ... except the screensaver that locked the screen and runs on over the lock card */
+        if (wm->srv->saver && lm_saver_shields(wm->srv->saver)) {
+            struct lm_window *sw;
+            lm_list_for_each(sw, &wm->windows, link)
+                if (win_visible(wm, sw) && (sw->states & LM_WINDOW_FULLSCREEN))
+                    shield = sw;                                 /* (the topmost one) */
+        }
+        struct lm_rect shield_rect = { 0 };
+        if (shield)
+            shield_rect = frame_outer(shield);
         if (wm->srv->backend) {
             lm_list_for_each(o, &wm->srv->backend->outputs, link) {
                 struct lm_rect orect = lm_output_rect(o);
                 if (clip && !lm_rect_overlaps(&orect, clip))
                     continue;
+                if (shield && lm_rect_overlaps(&orect, &shield_rect))
+                    continue;                                    /* the saver fills this output */
                 memset(&it, 0, sizeof(it));
                 it.kind = LM_SCENE_LOCK;
                 it.output = o;
@@ -5745,6 +5757,17 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 if (!fn(&it, data))
                     return;
             }
+        }
+        if (shield) {
+            int32_t ox, oy;
+            win_origin(shield, &ox, &oy);
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_SURFACE;
+            it.u.surface.root = shield->surface;
+            it.u.surface.x = ox;
+            it.u.surface.y = oy;
+            if (!fn(&it, data))
+                return;
         }
         return;
     }
@@ -7511,6 +7534,12 @@ void lm_wm_keyboard_state_changed(struct lm_wm *wm)
     damage_panels(wm);
 }
 
+void lm_wm_lock_shield_changed(struct lm_wm *wm)
+{
+    if (wm)
+        damage_all(wm);
+}
+
 void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
 {
     if (!wm)
@@ -7527,6 +7556,8 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
         if (wm->focused)
             lm_xdg_dismiss_popups(wm->focused->surface);
     } else if (wm->srv->seat) {
+        if (wm->srv->saver)
+            lm_saver_locked(wm->srv->saver, false);
         struct lm_window *w = wm->focused ? wm->focused : top_visible(wm, NULL);
         if (w && w != wm->focused)
             set_focus(wm, w);

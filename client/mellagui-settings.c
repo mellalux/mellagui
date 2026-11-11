@@ -323,8 +323,8 @@ static int selftest(void)
 #define MAX_KV 160
 #define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_SAVER, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Saver", "Clock", "Night" };
+enum page { PAGE_KEYBOARD, PAGE_POINTER, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_SIZES, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Keyboard", "Pointer", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Colours", "Sizes", "Dock", "Clock", "Night" };
 
 enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP };
 
@@ -387,6 +387,7 @@ struct app {
     /* Security page: a form that is sent in one piece by "Apply" (the compositor needs the current secret for any change) */
     char pw[3][LM_LOCK_MAX_SECRET + 1]; /* current / new / repeat */
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
+    int sec_tab;                        /* the Security page's part: 0 the screen lock, 1 the screensaver */
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
@@ -544,7 +545,34 @@ static struct widget *add_button(struct app *a, int x, int y, int w, const char 
     return b;
 }
 
+static void build_saver(struct app *a, int x, int y, int w);
+static void build_security_lock(struct app *a, int x, int y, int w);
+
+/* The Security page has two parts, the screen lock and the screensaver (which locks the screen, too); two small buttons in the heading row. */
+static void build_security_tabs(struct app *a, int x, int y, int w)
+{
+    static const char *const names[2] = { "Lock", "Screensaver" };
+    int bw[2] = { 70, 120 }, at = x + w - bw[0] - bw[1] - 8;
+    for (int i = 0; i < 2; i++) {
+        struct widget *b = add_button(a, at, y + 1, bw[i], names[i], "sec-tab");
+        snprintf(b->arg, sizeof(b->arg), "%d", i);
+        b->on = a->sec_tab == i;
+        at += bw[i] + 8;
+    }
+}
+
 static void build_security(struct app *a, int x, int y, int w)
+{
+    if (a->sec_tab == 1) {
+        build_saver(a, x, y, w);
+        build_security_tabs(a, x, y, w);
+        return;
+    }
+    build_security_lock(a, x, y, w);
+    build_security_tabs(a, x, y, w);
+}
+
+static void build_security_lock(struct app *a, int x, int y, int w)
 {
     const char *kind = kv_get(a, "lock-kind");
     bool have = *kind && strcmp(kind, "none");
@@ -972,13 +1000,22 @@ static void build_saver(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Start the screensaver when nobody uses the computer", "saver", kv_int(a, "saver", 1) != 0);
     y += ROW_H;
     add_slider(a, x, y, w, "After", "saver-minutes", 1, 120, 1, " min");
+    y += ROW_H;
+    add_slider(a, x, y, w, "Lock after", "saver-lock", 0, 60, 1, " min");
     y += ROW_H + 8;
     add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
     y += ROW_H + 10;
-    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Falling green code, full screen. A key, a mouse button or a");
-    add(a, W_LABEL, (struct rect){ x, y + ROW_H - 6, w, ROW_H }, "movement of the pointer ends it; that first touch is not passed on.");
-    add(a, W_LABEL, (struct rect){ x, y + 2 * ROW_H - 12, w, ROW_H }, "It does not start over a full screen window (a film), nor on the lock screen.");
-    add(a, W_LABEL, (struct rect){ x, y + 3 * ROW_H - 18, w, ROW_H }, "Another program: [commands] saver = ... in mellagui.conf.");
+    static const char *const notes[] = {
+        "Falling green code, full screen. Any touch ends it;",
+        "that touch is not passed on.",
+        "\"Lock after\": the screen is locked that long after it",
+        "started (0 = never; needs a password or PIN).",
+        "The saver keeps running over the lock until a touch.",
+        "It does not start over a full screen window.",
+        "Another program: [commands] saver in mellagui.conf.",
+    };
+    for (int k = 0; k < 7; k++)
+        add(a, W_LABEL, (struct rect){ x, y + k * (ROW_H - 8), w, ROW_H }, notes[k]);
 }
 
 /* ---- Clock page: the panel's clock, the date and the calendar that a click on the clock shows (mellagui-calendar) ---------------- */
@@ -1540,7 +1577,6 @@ static void build(struct app *a)
     case PAGE_COLOURS: build_colours(a, x, y, w); break;
     case PAGE_SIZES: build_sizes(a, x, y, w); break;
     case PAGE_DOCK: build_dock(a, x, y, w); break;
-    case PAGE_SAVER: build_saver(a, x, y, w); break;
     case PAGE_CLOCK: build_clock(a, x, y, w); break;
     case PAGE_NIGHT: build_night(a, x, y, w); break;
     default: build_desktop(a, x, y, w); break;
@@ -1950,7 +1986,7 @@ static void activate(struct app *a, int idx)
         if (a->page == PAGE_SECURITY) {
             sec_wipe(a);
             a->sec_minutes = kv_int(a, "lock-timeout", 0);
-            a->sec_blank = kv_int(a, "lock-blank", 3);
+            a->sec_blank = kv_int(a, "lock-blank", 1);
             a->sec_start = kv_int(a, "lock-start", 0) != 0;
             a->sec_vt = kv_int(a, "lock-vt", 1) != 0;
         }
@@ -2086,6 +2122,10 @@ static void activate(struct app *a, int idx)
             send_set(a, "dock-reset", "1");
             dock_clear_form(a);
             a->dpend[0] = 0;
+        } else if (!strcmp(w->key, "sec-tab")) {
+            a->sec_tab = atoi(w->arg) == 1 ? 1 : 0;
+            a->focus = -1;
+            a->win.redraw = true;
         } else if (!strcmp(w->key, "launcher-defaults")) {
             send_set(a, "launcher-defaults", "1");
         } else if (!strcmp(w->key, "dock-put")) {
@@ -2632,11 +2672,13 @@ static int selftest_help(void)
         { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff" }, { "theme-list", "colorful* graphite light contrast" },
     };
     int bad = 0, shown = 0;
-    for (int pg = 0; pg < N_PAGES; pg++) {
+    for (int pgi = 0; pgi < N_PAGES + 1; pgi++) {                           /* (one more: the Security page's second part, the screensaver) */
+        int pg = pgi < N_PAGES ? pgi : PAGE_SECURITY;
         memset(&fa, 0, sizeof(fa));
         for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
             kv_set(&fa, kvs[i].k, kvs[i].v);
         fa.page = (enum page)pg;
+        fa.sec_tab = pgi >= N_PAGES ? 1 : 0;
         fa.win.bw = 860;
         fa.win.bh = 560;
         fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;

@@ -5103,10 +5103,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
-        # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the fourteen page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 32nd press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
+        # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the thirteen page tabs (the headings are skipped)
+        # and reaches the gadget checkbox with the 31st press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(32):
+        for _ in range(31):
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -6631,7 +6631,7 @@ class TestLock(Base):
 
     def test_delay_after_three_wrong_attempts(self):
         p, c, stop = self.start()
-        c.cmd('lock set - password hunter22x')
+        c.cmd('lock set - password hunter22x 0 1 0')                        # (no standby: the default one minute is a second here)
         c.cmd('lock now')
         for _ in range(3):
             self.type(c, 'wrongwrong')
@@ -12300,7 +12300,7 @@ class TestSaver(Base):
 
     def test_defaults(self):
         p, c = self.start('mellagui-sv1', '--config', 'none')
-        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10'})
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0'})
 
     def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
         p, c = self.start('mellagui-sv2', '--config', 'none')
@@ -12320,6 +12320,64 @@ class TestSaver(Base):
         self.assertEqual(a.px(2, 2), (0, 0, 0))                  # no panel, no dock over it
         c.tap(KEY_A)                                             # any key
         self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
+
+    def lock_line(self, c):
+        c.cmd('lock')
+        return dict(kv.split('=', 1) for kv in c.last.partition(' message=')[0].split()[1:])
+
+    def test_it_locks_the_screen_after_a_minute_and_keeps_running_over_the_lock(self):
+        p, c = self.start('mellagui-sv11', '--config', 'none')
+        c.cmd('lock set - pin 1357')
+        c.cmd('settings saver-lock 2')                          # 2 * 250 ms after it started
+        c.cmd('saver start')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        self.assertEqual(self.lock_line(c)['locked'], '0')
+        self.wait(lambda: self.lock_line(c)['locked'] == '1', 'the screensaver locks the screen')
+        self.assertEqual((self.saver(c)['running'], self.saver(c)['shield']), ('1', '1'), 'it must run on over the lock')
+        time.sleep(0.3)
+        a = c.dump(os.path.join(tmp, 'sv11a.ppm'))
+        greens = [(x, y) for x in range(0, 800, 3) for y in range(60, 440, 3) if a.px(x, y)[1] > a.px(x, y)[0] + 30]
+        self.assertGreater(len(greens), 40, 'the code rain is not what the locked screen shows')
+        c.tap(KEY_A)                                            # the first touch: only ends the saver, the lock card is there
+        self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
+        self.assertEqual((self.lock_line(c)['locked'], self.saver(c)['shield']), ('1', '0'))
+        for ch in '1357':
+            c.tap({'1': 2, '3': 4, '5': 6, '7': 8}[ch])
+        c.tap(KEY_ENTER)
+        self.wait(lambda: self.lock_line(c)['locked'] == '0', 'the PIN unlocks')
+
+    def test_zero_minutes_never_locks_and_without_a_secret_there_is_nothing_to_lock(self):
+        p, c = self.start('mellagui-sv12', '--config', 'none')
+        c.cmd('settings saver-lock 0')
+        c.cmd('lock set - pin 1357')
+        c.cmd('saver start')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        time.sleep(1.0)                                         # four "minutes"
+        self.assertEqual((self.lock_line(c)['locked'], self.saver(c)['running']), ('0', '1'))
+        c.cmd('lock set 1357 none -')
+        c.cmd('settings saver-lock 1')
+        time.sleep(1.0)
+        self.assertEqual((self.lock_line(c)['locked'], self.saver(c)['running']), ('0', '1'), 'no secret: no lock')
+
+    def test_a_locked_screen_nobody_touches_for_a_minute_switches_the_monitor_off(self):
+        p, c = self.start('mellagui-sv13', '--config', 'none')
+        c.cmd('lock set - pin 1357')
+        self.assertEqual(self.lock_line(c)['blank'], '1', 'the default is one minute')
+        c.cmd('lock now')
+        self.wait(lambda: self.lock_line(c)['blanked'] == '1', 'the monitor goes off')
+        c.tap(KEY_A)                                            # the first touch only wakes it
+        self.assertEqual(self.lock_line(c)['blanked'], '0')
+        self.assertEqual(self.lock_line(c)['locked'], '1')
+
+    def test_the_monitor_goes_off_under_the_screensaver_and_one_touch_wakes_it_and_ends_the_saver(self):
+        p, c = self.start('mellagui-sv14', '--config', 'none')
+        c.cmd('lock set - pin 1357')
+        c.cmd('settings saver-lock 1')
+        c.cmd('saver start')
+        self.wait(lambda: self.saver(c)['shield'] == '1', 'locked under the saver')
+        self.wait(lambda: self.lock_line(c)['blanked'] == '1', 'the monitor goes off')
+        c.tap(KEY_A)
+        self.wait(lambda: self.lock_line(c)['blanked'] == '0' and self.saver(c)['running'] == '0', 'one touch wakes the monitor and ends the saver')
 
     def test_the_screensaver_follows_a_monitor_that_goes_away_and_comes_back(self):
         """A KVM switch: the monitor leaves, comes back, maybe in another mode; the screensaver must fill it again."""
@@ -12447,7 +12505,7 @@ class TestSaver(Base):
         c.cmd('quit')
         p.wait(timeout=5)
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
-        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25'})
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0'})
 
     def test_the_program_checks_itself(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
@@ -12499,13 +12557,15 @@ class TestSaver(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 11 * 30 + 13)                         # the Saver tab (12th; fourteen tabs share the height)
+        c.click(x0 + 70, y0 + 12 + 5 * 30 + 13)                          # the Security tab
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 80, y0 + 14 + 13)                         # its Screensaver part (a small button at the right end of the heading row)
         time.sleep(0.3)
         c.click(x0 + 168, y0 + 14 + 28 + 14)                             # the check box
         self.wait(lambda: self.saver(c)['enabled'] == '0', 'the box switches it off')
         c.click(x0 + 168, y0 + 14 + 28 + 14)
         self.wait(lambda: self.saver(c)['enabled'] == '1', 'and on again')
-        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 8 + 12)              # "Show it now"
+        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 8 + 12)         # "Show it now"
         self.wait(lambda: self.saver(c)['running'] == '1', 'the button shows it')
         self.wait(lambda: self.matrix_windows(c), 'its window')
         c.tap(KEY_A)
@@ -13128,7 +13188,7 @@ class TestDockEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 10 * 30 + 13)                         # the Dock tab (11th)
+        c.click(x0 + 70, y0 + 12 + 10 * 32 + 13)                         # the Dock tab (11th)
         time.sleep(0.3)
         c.click(x0 + 160 + 440 - 78 + 52 + 12, y0 + 14 + 28 + 22 + 8 + 11)   # "x" of the first row
         for _ in range(60):
@@ -13165,7 +13225,7 @@ class TestDockEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 10 * 30 + 13)                         # the Dock tab (11th)
+        c.click(x0 + 70, y0 + 12 + 10 * 32 + 13)                         # the Dock tab (11th)
         time.sleep(0.3)
         c.click(x0 + 214, y0 + 81)                                       # the name button of the first row (A): its values go into the form
         time.sleep(0.3)
@@ -13319,7 +13379,7 @@ class TestKeysEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 7 * 30 + 13)                          # the Keys tab (8th)
+        c.click(x0 + 70, y0 + 12 + 7 * 32 + 13)                          # the Keys tab (8th)
         time.sleep(0.3)
         # the first row is Super+Enter = terminal: its "x" switches the built-in shortcut off
         c.click(x0 + 160 + 440 - 12, y0 + 14 + 28 + 11)
@@ -13440,7 +13500,7 @@ class TestThemeEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 8 * 30 + 13)                          # the Colours tab (9th)
+        c.click(x0 + 70, y0 + 12 + 8 * 32 + 13)                          # the Colours tab (9th)
         time.sleep(0.3)
         # row 11 of the palette is "background": page 2 (8 per page), third row
         c.click(x0 + 160 + 24, y0 + 14 + 28 + 28 + 11)                    # (the Theme row is above the list) first row: wallpaper-top, to be sure a click selects
@@ -13539,7 +13599,7 @@ class TestMetricsEdit(Base):
         self.assertIsNotNone(win)
         time.sleep(0.4)
         x0, y0 = win['x'], win['y']
-        c.click(x0 + 70, y0 + 12 + 9 * 30 + 13)                          # the Sizes tab (10th)
+        c.click(x0 + 70, y0 + 12 + 9 * 32 + 13)                          # the Sizes tab (10th)
         time.sleep(0.3)
         y = y0 + 14 + 28 + 13                                              # the first slider: windows.titlebar-height (20..64)
         c.abs(x0 + 160 + 200 + 10, y)                                      # drag from near the left end to the right end

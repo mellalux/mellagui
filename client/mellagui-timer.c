@@ -56,6 +56,7 @@ struct app {
     double px, py;
     char tray_text[32];
     bool had_tray_click;
+    int tray_hold;                      /* the clock the bar's item paused (-1 = none): the item stays so that a click can continue it */
 };
 
 static int64_t g_minute = 60000;          /* a minute in ms ($MELLAGUI_TIMER_UNIT_MS makes it short: tests) */
@@ -316,6 +317,15 @@ static void tray_update(struct app *a, int64_t now)
             run = i;
             break;
         }
+    bool paused = false;
+    if (run < 0 && a->tray_hold >= 0) {                 /* paused from the bar: still shown (a reset or a finished countdown clears t0) */
+        if (a->cw[a->tray_hold].t0 != 0) {
+            run = a->tray_hold;
+            paused = true;
+        } else {
+            a->tray_hold = -1;
+        }
+    }
     if (run < 0) {
         if (a->tray_item) {
             WLC_SEND0(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_DESTROY);
@@ -332,7 +342,7 @@ static void tray_update(struct app *a, int64_t now)
     }
     char t[24], text[32];
     fmt_time(cw_value(&a->cw[run], countdown_mode((enum mode)run), now), countdown_mode((enum mode)run), t, sizeof(t));
-    snprintf(text, sizeof(text), "%s%s", run == M_POMODORO ? (a->phase == P_WORK ? "W " : "R ") : run == M_TIMER ? "T " : "S ", t);
+    snprintf(text, sizeof(text), "%s%s%s", paused ? "|| " : "", run == M_POMODORO ? (a->phase == P_WORK ? "W " : "R ") : run == M_TIMER ? "T " : "S ", t);
     if (strcmp(text, a->tray_text)) {
         snprintf(a->tray_text, sizeof(a->tray_text), "%s", text);
         WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT, { .s = text });
@@ -416,7 +426,7 @@ static void paint(struct wlwin *w)
     char status[96];
     if (a->mode == M_POMODORO)
         snprintf(status, sizeof(status), "%s  -  pomodoro %d of %d", a->phase == P_WORK ? "Work" : a->phase == P_SHORT ? "Short rest" : "Long rest",
-                 a->done % a->cycles + (a->phase == P_WORK ? 1 : 0), a->cycles);
+                 a->phase == P_LONG ? a->cycles : a->done % a->cycles + (a->phase == P_WORK ? 1 : 0), a->cycles);
     else if (a->mode == M_TIMER)
         snprintf(status, sizeof(status), "Countdown of %d minute%s", a->timer_set_min, a->timer_set_min == 1 ? "" : "s");
     else
@@ -626,7 +636,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .close = win_close };
-    struct app a = { .hover = -1 };
+    struct app a = { .hover = -1, .tray_hold = -1 };
     const char *unit = getenv("MELLAGUI_TIMER_UNIT_MS");
     if (unit && atoi(unit) > 0)
         g_minute = atoi(unit);
@@ -649,11 +659,18 @@ int main(int argc, char **argv)
         check_done(&a, now);
         if (a.had_tray_click) {                          /* the bar's item: pause / continue what it shows */
             a.had_tray_click = false;
-            for (int i = 0; i < M_COUNT; i++)
+            bool did = false;
+            for (int i = 0; i < M_COUNT && !did; i++)
                 if (a.cw[i].running) {
                     cw_stop(&a.cw[i], countdown_mode((enum mode)i), now);
-                    break;
+                    a.tray_hold = i;
+                    did = true;
                 }
+            if (!did && a.tray_hold >= 0) {                  /* the click on a paused one continues it */
+                cw_start(&a.cw[a.tray_hold], now);
+                a.tray_hold = -1;
+            }
+            a.win.redraw = true;
         }
         tray_update(&a, now);
         if (run || anything_runs(&a))

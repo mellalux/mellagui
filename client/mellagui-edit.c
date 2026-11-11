@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -1128,8 +1129,11 @@ static void note_new_path(char *out, size_t n)
         snprintf(tmp, sizeof(tmp), "%s/%04d%02d%02d-%02d%02d%02d-%d.txt", dir, (tm.tm_year + 1900) % 10000, (tm.tm_mon + 1) % 100, tm.tm_mday % 100,
                  tm.tm_hour % 100, tm.tm_min % 100, tm.tm_sec % 100, k);
         snprintf(out, n, "%s", tmp);
-        if (access(tmp, F_OK) != 0)
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);          /* the name is taken from now on (an empty note is removed again when it is closed) */
+        if (fd >= 0) {
+            close(fd);
             return;
+        }
     }
 }
 
@@ -1189,6 +1193,24 @@ static int notes_open_all(void)
         note_spawn(path);
     }
     return 0;
+}
+
+static int g_note_lock = -1;
+
+/* One window per note: a lock file beside it, held while the window lives. False when another window has it. */
+static bool note_lock(const char *path)
+{
+    char lock[PATH_MAX + 8];
+    snprintf(lock, sizeof(lock), "%s.lock", path);
+    g_note_lock = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (g_note_lock < 0)
+        return true;                                                    /* (no lock possible: better a second window than none) */
+    if (flock(g_note_lock, LOCK_EX | LOCK_NB) < 0) {
+        close(g_note_lock);
+        g_note_lock = -1;
+        return false;
+    }
+    return true;
 }
 
 static void note_paper_load(struct app *a)
@@ -1610,6 +1632,10 @@ static void paint(struct wlwin *w)
     paint_scrollbar(w, a);
     int sy = w->bh - STATUS_H;
     if (g_note) {
+        if (a->msg[0] && now_ms() < a->msg_until) {                     /* a note has no status line: what it has to say comes as a strip over the bottom */
+            wlwin_fill(w, 0, w->bh - 20, w->bw, 20, COL_BAR);
+            wlwin_text(w, 6, w->bh - 18, a->msg, 1, COL_FG, w->bw - 12);
+        }
         if (a->help)
             paint_help(w);
         return;
@@ -1996,6 +2022,8 @@ int main(int argc, char **argv)
         note_file = argv[2];
         g_note = true;
         argc = 1;
+        if (!note_lock(note_file))
+            return 0;                                                   /* it is open in a window already */
     }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
         fprintf(stderr, "usage: mellagui-edit [FILE | --note FILE | --notes | --selftest]\n");
@@ -2064,6 +2092,17 @@ int main(int argc, char **argv)
     }
     if (g_note && a.modified && a.path[0])
         do_save(&a, a.path);
+    if (g_note && a.path[0] && a.n == 1 && a.l[0].len == 0) {           /* an empty note is not kept */
+        char side[PATH_MAX + 8];
+        snprintf(side, sizeof(side), "%s.col", a.path);
+        unlink(a.path);
+        unlink(side);
+    }
+    if (g_note && note_file) {
+        char lock[PATH_MAX + 8];
+        snprintf(lock, sizeof(lock), "%s.lock", note_file);
+        unlink(lock);
+    }
     if (a.conf_dirty)
         lm_zoom_conf_save("editor", a.zoom);
     wlwin_destroy(&a.win);

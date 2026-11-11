@@ -108,6 +108,7 @@ struct lm_renderer {
     struct lm_idle *idle;
     struct lm_timer *frame_timer;
     struct lm_rect cursor_rect;         /* last damaged cursor rectangle (global) */
+    const struct lm_output *mag_out;    /* the output that was magnified last (the pointer was on it) */
 };
 
 struct paint_ctx {
@@ -3077,10 +3078,21 @@ void lm_render_cursor_changed(struct lm_renderer *r)
         double px, py;
         lm_seat_pointer_position(r->srv->seat, &px, &py);
         struct lm_output *po = lm_output_nearest(r->srv, px, py);
+        if (r->mag_out && r->mag_out != po) {                           /* the pointer left an output: it shows its own picture again, all of it */
+            struct lm_output *o;
+            lm_list_for_each(o, &r->srv->backend->outputs, link)
+                if (o == r->mag_out) {
+                    struct lm_rect old = lm_output_rect(o);
+                    lm_render_damage(r, &old);
+                }
+        }
+        r->mag_out = po;
         if (po) {
             struct lm_rect all = lm_output_rect(po);
             lm_render_damage(r, &all);
         }
+    } else {
+        r->mag_out = NULL;
     }
     struct cursor_view v;
     cursor_view(r, &v);

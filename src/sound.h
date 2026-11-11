@@ -14,6 +14,7 @@ enum lm_sound {
     LM_SOUND_UNLOCK,        /* modifier unlocked: one low beep */
     LM_SOUND_SHOT,          /* screenshot taken: a short falling pair */
     LM_SOUND_DOCK,          /* a click on a dock icon: a soft rising "pok-pling" (plucked, with a round decay) */
+    LM_SOUND_VOLUME,        /* the volume was set from the quick settings card: a short plucked tick, so that the new level can be heard */
     LM_SOUND_COUNT
 };
 

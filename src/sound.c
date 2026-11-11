@@ -49,6 +49,7 @@ static const struct note k_lock[] = { { 1319, 55 }, { 0, 35 }, { 1760, 70 }, { 0
 static const struct note k_unlock[] = { { 523, 90 }, { 0, 0 } };
 static const struct note k_shot[] = { { 1568, 35 }, { 0, 20 }, { 1047, 60 }, { 0, 0 } };
 static const struct note k_dock[] = { { 1047, 40 }, { 1568, 110 }, { 0, 0 } };
+static const struct note k_volume[] = { { 784, 140 }, { 0, 0 } };
 
 static const struct {
     const char *name;
@@ -62,6 +63,7 @@ static const struct {
     [LM_SOUND_UNLOCK] = { "unlock", k_unlock },
     [LM_SOUND_SHOT] = { "shot", k_shot },
     [LM_SOUND_DOCK] = { "dock", k_dock, true },
+    [LM_SOUND_VOLUME] = { "volume", k_volume, true },
 };
 
 const char *lm_sound_name(enum lm_sound s)

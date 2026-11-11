@@ -53,6 +53,8 @@ def setUpModule():
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
+    os.environ['MELLAGUI_APPS_DIRS'] = os.path.join(tmp, 'no-apps')    # the launcher's search finds none of the programs and files of this machine
+    os.environ['MELLAGUI_SEARCH_ROOT'] = os.path.join(tmp, 'no-home')
     os.environ['MELLAGUI_LAUNCHER_DEFAULTS'] = '0'                    # ... nor the built-in launcher buttons (TestLauncherDefaults turns them on)
     os.environ['MELLAGUI_DOCK_LAUNCHER'] = '0'                       # a dock the test wrote is not given the Launcher button (TestDockLauncherPinned turns it on)
     LOG = os.path.join(tmp, 'mellagui.log')
@@ -8609,7 +8611,15 @@ class TestQuickSettings(Base):
         c.click(x + w // 2, y + h // 2)
         card = self.card(c)
         sx, sy = card['x'] + 14 + 54 + 10, card['y'] + 44                    # the volume slider's rectangle (see rect_of)
+        before = int(re.search(r'n=(\d+)', c.cmd('sound')[0])[1])
         c.click(sx + 8 + 58, sy + 15)                                        # a quarter of the way: about 25 %
+        for _ in range(60):
+            if 'last=volume' in c.cmd('sound')[0]:
+                break
+            time.sleep(0.05)
+        line = c.cmd('sound')[0]
+        self.assertIn('last=volume', line, 'a click on the volume slider must make a sound')
+        self.assertGreaterEqual(int(re.search(r'n=(\d+)', line)[1]), before + 2)       # (the press and the release)
         for _ in range(60):
             if abs(self.sinks()['alsa_output.analog-stereo']['vol'] - 25) <= 4:
                 break
@@ -14509,6 +14519,149 @@ class TestShot(Base):
             time.sleep(0.05)
         self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.shot'])
         c.tap(KEY_ESC)
+
+
+class TestLauncherSearch(Base):
+    """The launcher's search (src/search.c): installed programs, files of the home folder and a calculator besides the buttons."""
+
+    KEY_ESC, KEY_ENTER, KEY_SLASH, KEY_DOT, KEY_MINUS = 1, 28, 53, 52, 12
+
+    def start(self, name):
+        d = os.path.join(tmp, 'search-' + name)                            # (not tmp/name: that is the socket)
+        shutil.rmtree(d, ignore_errors=True)
+        apps, home = os.path.join(d, 'apps'), os.path.join(d, 'home')
+        os.makedirs(apps)
+        os.makedirs(os.path.join(home, 'Documents'))
+        os.makedirs(os.path.join(home, 'Pictures'))
+        os.makedirs(os.path.join(home, '.hidden'))
+        self.mark = os.path.join(d, 'mark')
+        def desktop(fn, text):
+            with open(os.path.join(apps, fn), 'w') as f:
+                f.write('[Desktop Entry]\nType=Application\n' + text)
+        desktop('fox.desktop', 'Name=Fox Browser\nGenericName=Web Browser\nKeywords=internet;surf;\nExec=touch %s %%u\nIcon=nosuchicon\n' % self.mark)
+        desktop('paint.desktop', 'Name=Paint Studio\nExec=true\n')
+        desktop('secret.desktop', 'Name=Secret Tool\nNoDisplay=true\nExec=true\n')
+        desktop('other.desktop', 'Name=Other Desktop Thing\nOnlyShowIn=KDE;\nExec=true\n')
+        with open(os.path.join(home, 'Documents', 'budget-notes.txt'), 'w') as f:
+            f.write('money\n')
+        open(os.path.join(home, 'Pictures', 'holiday.png'), 'wb').close()
+        open(os.path.join(home, '.hidden', 'budget-secret.txt'), 'w').close()
+        env = {'MELLAGUI_APPS_DIRS': apps, 'MELLAGUI_SEARCH_ROOT': home}
+        p, c, stop = self.private_compositor(name, '--config', 'none', env=env)
+        c.sync()
+        c.cmd('launcher open')
+        time.sleep(0.8)                                                    # (the index is made in the background)
+        return c
+
+    @staticmethod
+    def icons(c):
+        names = []
+        for l in c.cmd('launcher'):
+            m = re.match(r'icon \d+ "(.*)" x=', l)
+            if m:
+                names.append(m[1])
+        return names
+
+    @staticmethod
+    def type(c, text):
+        for ch in text:
+            c.tap({'/': 53, '.': 52, '-': 12}.get(ch) or KEYCODES[ch])
+            time.sleep(0.02)
+        time.sleep(0.3)
+
+    def test_programs_are_found_by_name_generic_name_and_keywords_and_hidden_ones_are_not(self):
+        c = self.start('mellagui-ls1')
+        self.type(c, 'fox')
+        self.assertIn('Fox Browser', self.icons(c))
+        c.tap(self.KEY_ESC)
+        c.tap(self.KEY_ESC)                                                 # clears, leaves the search
+        self.type(c, 'surf')                                                # a keyword
+        self.assertIn('Fox Browser', self.icons(c))
+        c.tap(self.KEY_ESC)
+        self.type(c, 'web br')                                              # two words: the generic name
+        self.assertIn('Fox Browser', self.icons(c))
+        c.tap(self.KEY_ESC)
+        self.type(c, 'secret')
+        self.assertNotIn('Secret Tool', self.icons(c))                      # NoDisplay
+        c.tap(self.KEY_ESC)
+        self.type(c, 'desktop thing')
+        self.assertNotIn('Other Desktop Thing', self.icons(c))              # meant for another desktop
+
+    def test_enter_starts_the_program_with_its_exec_line_without_the_field_codes(self):
+        c = self.start('mellagui-ls2')
+        self.type(c, 'paint')
+        self.assertEqual(self.icons(c), ['Paint Studio'])
+        self.type(c, '')
+        c.tap(self.KEY_ESC)
+        c.tap(self.KEY_ESC)
+        self.type(c, 'fox br')
+        c.tap(self.KEY_ENTER)
+        for _ in range(60):
+            if os.path.exists(self.mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(self.mark), 'the Exec line did not run (touch MARK %u -> touch MARK)')
+        self.assertEqual(c.cmd('launcher')[0].split()[1], 'open=0')          # the launcher closed
+
+    def test_files_are_found_by_name_but_not_in_hidden_folders(self):
+        c = self.start('mellagui-ls3')
+        self.type(c, 'budget')
+        self.assertEqual(self.icons(c), ['budget-notes.txt'])
+        c.tap(self.KEY_ESC)
+        c.tap(self.KEY_ESC)
+        self.type(c, 'holiday')
+        self.assertEqual(self.icons(c), ['holiday.png'])
+
+    def test_a_text_file_opens_in_the_editor_and_a_picture_in_the_viewer(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-edit')):
+            self.skipTest('mellagui-edit not built')
+        c = self.start('mellagui-ls4')
+        self.type(c, 'budget')
+        c.tap(self.KEY_ENTER)
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.edit']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win, 'the editor did not open the file')
+        self.assertIn('budget-notes.txt', win['title'])
+
+    def test_a_calculation_shows_its_answer_and_enter_copies_it(self):
+        c = self.start('mellagui-ls5')
+        self.type(c, '100/8')
+        self.assertEqual(self.icons(c)[0], '= 12.5')
+        c.tap(self.KEY_ENTER)
+        time.sleep(0.3)
+        self.assertIn('12.5', '\n'.join(c.cmd('clip')))
+
+    def test_a_plain_number_or_word_is_no_calculation(self):
+        c = self.start('mellagui-ls6')
+        self.type(c, '42')
+        self.assertFalse([n for n in self.icons(c) if n.startswith('=')])
+        c.tap(self.KEY_ESC)
+        c.tap(self.KEY_ESC)
+        self.type(c, 'pi')
+        self.assertFalse([n for n in self.icons(c) if n.startswith('=')])
+
+    def test_the_buttons_come_first_and_a_button_of_the_same_name_is_not_listed_twice(self):
+        c = self.start('mellagui-ls7')
+        self.type(c, 'term')                                                # the dock's Terminal button
+        names = self.icons(c)
+        self.assertEqual(names[0], 'Terminal')
+        self.assertEqual(len([n for n in names if n.lower() == 'terminal']), 1)
+
+    def test_the_calculator(self):
+        c = self.start('mellagui-ls8')
+        def calc(text):
+            m = re.match(r'calc ok=(\d)(?: value=(\S+))?', c.cmd('calc ' + text)[0])
+            return m[2] if m[1] == '1' else None
+        for text, want in (('sqrt(16)', '4'), ('2^10', '1024'), ('10/4-1', '1.5'), ('(1.5+2.5)*3', '12'), ('7%4', '3'), ('2^3^2', '512'), ('-2*-3', '6'),
+                           ('1,5*2', '3'), ('pi*2', '6.283185307'), ('abs(-4)+1', '5'), ('2 * (3 + 4)', '14'), ('1/3', '0.3333333333')):
+            self.assertEqual(calc(text), want, text)
+        for text in ('42', 'pi', 'hello', '2+', '(2+3', '1/0', 'sqrt(', 'foo(3)', '3 4', '', '2^^3', '1e'):
+            self.assertIsNone(calc(text), text)
 
 
 class TestLauncher(Base):

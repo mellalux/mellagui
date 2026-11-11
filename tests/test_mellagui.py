@@ -12423,7 +12423,7 @@ class TestSaver(Base):
         p, c = self.start('mellagui-sv2', '--config', 'none')
         c.cmd('settings saver-minutes 2')                       # 2 * 250 ms of silence
         self.wait(lambda: self.saver(c)['running'] == '1', 'the screensaver starts')
-        self.wait(lambda: self.matrix_windows(c), 'its window')
+        self.wait(lambda: self.matrix_windows(c) and self.matrix_windows(c)[0]['w'] > 0, 'its window, with a size')
         w = self.matrix_windows(c)[0]
         self.assertIn('fullscreen', w['flags'])
         self.assertEqual((w['x'], w['y'], w['w'], w['h']), (0, 0, 800, 500))
@@ -12434,7 +12434,8 @@ class TestSaver(Base):
         greens = [(x, y) for x in range(0, 800, 3) for y in range(60, 440, 3) if a.px(x, y)[1] > a.px(x, y)[0] + 30]
         self.assertGreater(len(greens), 40, 'no green code on the screen')
         self.assertNotEqual(a.data, b.data, 'the rain does not move')
-        self.assertEqual(a.px(2, 2), (0, 0, 0))                  # no panel, no dock over it
+        self.assertLess(max(a.px(2, 2)), 60)                     # no panel, no dock over it (the corner of the room is dark)
+        self.assertTrue(all(a.px(x, 20)[0] < 90 for x in range(0, 800, 40)), 'the top strip is the room, not the panel')
         c.tap(KEY_A)                                             # any key
         self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
 
@@ -12529,7 +12530,7 @@ class TestSaver(Base):
         self.wait(lambda: [(w['x'], w['y'], w['w'], w['h']) for w in self.matrix_windows(c)] == [(0, 0, 900, 540)], 'the saver fills the monitor that came back')
         time.sleep(0.5)
         a = c.dump(os.path.join(tmp, 'svkvm2.ppm'))
-        self.assertEqual(a.px(2, 2), (0, 0, 0))                  # no panel over it
+        self.assertLess(max(a.px(2, 2)), 60)                     # no panel over it (the corner of the room is dark)
         c.tap(KEY_A)
         self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
 

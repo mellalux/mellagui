@@ -10,7 +10,8 @@
  * Videos (.mp4 / .m4v with Motion JPEG pictures: what mellagui-record writes, or `ffmpeg -c:v mjpeg`; no sound; H.264 and the rest
  * are recognised but cannot be shown) play at once: Space plays / pauses, Left / Right go 5 s back / on, `,` and `.` step a picture,
  * Home starts again, the buttons in the bottom bar (back 5 s, play / pause, stop = back to the first picture, on 5 s) do the same, a click or drag on the bar seeks, PgUp / PgDn / Backspace / N / P choose the previous / next file; the picture
- * zooms and pans like an image. `--video-info FILE` and `--decode FILE.mp4 OUT.ppm [N]` (picture N) are for tests.
+ * zooms and pans like an image. `--video-info FILE` and `--decode FILE.mp4 OUT.ppm [N]` (picture N) are for tests; `--poster FILE OUT.ppm` writes one picture
+ * of a video (and its info line to stdout) for the file manager's preview.
  *
  * Keys (images): Left/Right (PgUp/PgDn, Backspace/Space) previous / next, Home/End first / last, + - zoom, 0 or 1 = 100 %,
  * F = fit, R = rescan the directory, Esc or Q = quit. Mouse: wheel zooms around the pointer, drag pans, double click
@@ -1136,43 +1137,123 @@ static int video_info_cmd(const char *in)
     return 0;
 }
 
+/* Picture number `frame` of a Motion JPEG or own H.264 file (our own readers: no ffmpeg). 0 = img is filled, -1 = err says why; the info line of the
+ * file (`WxH codec=.. duration_ms=..`) goes to `info` when it is not NULL. */
+static int own_video_frame(const char *in, int frame, struct lm_image *img, char *err, size_t errsz, char *info, size_t infosz)
+{
+    struct lm_mp4r *r = lm_mp4r_open(in, err, errsz);
+    if (r && info)
+        snprintf(info, infosz, "%dx%d codec=%s duration_ms=%llu", r->w, r->h, r->codec, (unsigned long long)r->duration_ms);
+    int rc = -1;
+    if (r && r->h264 && frame >= 0 && (uint32_t)frame < r->n) {          /* our own H.264: from the IDR picture before it */
+        struct lm_h264dec *hd = lm_h264dec_create(r->sps, r->sps_n, r->pps, r->pps_n, err, errsz);
+        uint32_t from = (uint32_t)frame;
+        while (from > 0 && !r->key[from])
+            from--;
+        rc = hd ? 0 : -1;
+        for (uint32_t k = from; hd && rc == 0 && k <= (uint32_t)frame; k++) {
+            size_t len = 0;
+            uint8_t *au = lm_mp4r_sample(r, k, &len);
+            rc = au ? lm_h264dec_decode(hd, au, len, err, errsz) : (snprintf(err, errsz, "cannot read the picture"), -1);
+            free(au);
+        }
+        if (rc == 0) {
+            img->w = lm_h264dec_width(hd);
+            img->h = lm_h264dec_height(hd);
+            img->px = malloc((size_t)img->w * (size_t)img->h * 4);
+            if (img->px)
+                lm_h264dec_xrgb(hd, img->px, (size_t)img->w);
+            else
+                rc = (snprintf(err, errsz, "out of memory"), -1);
+        }
+        lm_h264dec_free(hd);
+    } else {
+        size_t len = 0;
+        uint8_t *jpg = r && r->mjpeg && frame >= 0 && (uint32_t)frame < r->n ? lm_mp4r_sample(r, (uint32_t)frame, &len) : NULL;
+        rc = !r ? -1 : !jpg ? (snprintf(err, errsz, "no such picture, or not Motion JPEG or H.264"), -1) : lm_jpeg_decode(jpg, len, img, err, errsz);
+        free(jpg);
+    }
+    lm_mp4r_close(r);
+    return rc;
+}
+
+static bool write_ppm(const char *out, const struct lm_image *img)
+{
+    FILE *f = fopen(out, "wb");
+    if (!f)
+        return false;
+    fprintf(f, "P6\n%d %d\n255\n", img->w, img->h);
+    for (size_t i = 0; i < (size_t)img->w * (size_t)img->h; i++) {
+        uint8_t rgb[3] = { (uint8_t)(img->px[i] >> 16), (uint8_t)(img->px[i] >> 8), (uint8_t)img->px[i] };
+        fwrite(rgb, 1, 3, f);
+    }
+    return fclose(f) == 0;
+}
+
+/* `--poster FILE OUT.ppm`: one picture of a video, for the file manager's preview, and its info line on stdout ("WxH codec=.. duration_ms=.. [audio=1]").
+ * The picture is from an eighth of the way in (not the first, which is often black): our own readers for Motion JPEG and own H.264, else ffmpeg
+ * (scaled down to at most 480 wide). Exit status 1 with a message on stderr when nothing could be got. */
+static int poster_cmd(const char *in, const char *out)
+{
+    struct lm_image img = { 0 };
+    char err[160] = "", info[200] = "";
+    struct lm_mp4r *r = lm_mp4r_open(in, err, sizeof(err));
+    int frame = r && r->n > 8 ? (int)(r->n / 8) : 0;
+    lm_mp4r_close(r);
+    if (own_video_frame(in, frame, &img, err, sizeof(err), info, sizeof(info)) == 0) {
+        bool ok = write_ppm(out, &img);
+        lm_img_free(&img);
+        if (ok)
+            puts(info);
+        return ok ? 0 : 1;
+    }
+    struct ffdec_info fi;
+    char ferr[200] = "";
+    if (!ffpipe_ffmpeg_path() || !ffdec_probe(in, &fi, ferr, sizeof(ferr))) {
+        fprintf(stderr, "mellagui-view: %s\n", ffpipe_ffmpeg_path() ? ferr : "no preview: the codec needs ffmpeg, which is not installed");
+        return 1;
+    }
+    int tw = LM_MIN(fi.w, 480) & ~1, th = (int)((int64_t)fi.h * tw / LM_MAX(fi.w, 1)) & ~1;
+    if (tw < 2 || th < 2) {
+        fprintf(stderr, "mellagui-view: the video has no size\n");
+        return 1;
+    }
+    uint64_t start = fi.duration_ms > 3000 ? fi.duration_ms / 8 : 0;
+    struct ffdec *d = ffdec_open(in, tw, th, fi.w, fi.h, 1, start, ferr, sizeof(ferr));
+    if (!d) {
+        fprintf(stderr, "mellagui-view: %s\n", ferr);
+        return 1;
+    }
+    uint32_t *buf = malloc((size_t)tw * (size_t)th * 4);
+    size_t have = 0;
+    int rc = 0;
+    for (int tries = 0; buf && tries < 100 && rc == 0; tries++) {              /* up to ~5 s */
+        rc = ffdec_read(d, buf, &have);
+        if (rc == 0)
+            ffdec_wait(d, 50);
+    }
+    ffdec_close(d);
+    if (!buf || rc != 1) {
+        free(buf);
+        fprintf(stderr, "mellagui-view: ffmpeg gave no picture\n");
+        return 1;
+    }
+    img.w = tw;
+    img.h = th;
+    img.px = buf;
+    bool ok = write_ppm(out, &img);
+    free(buf);
+    if (ok)
+        printf("%dx%d codec=%s duration_ms=%llu audio=%d\n", fi.w, fi.h, fi.codec, (unsigned long long)fi.duration_ms, fi.has_audio);
+    return ok ? 0 : 1;
+}
+
 static int decode_cmd(const char *in, const char *out, int frame)
 {
     struct lm_image img = { 0 };
     char err[160];
     if (is_video_name(in)) {
-        struct lm_mp4r *r = lm_mp4r_open(in, err, sizeof(err));
-        int rc = -1;
-        if (r && r->h264 && frame >= 0 && (uint32_t)frame < r->n) {          /* our own H.264: from the IDR picture before it */
-            struct lm_h264dec *hd = lm_h264dec_create(r->sps, r->sps_n, r->pps, r->pps_n, err, sizeof(err));
-            uint32_t from = (uint32_t)frame;
-            while (from > 0 && !r->key[from])
-                from--;
-            rc = hd ? 0 : -1;
-            for (uint32_t k = from; hd && rc == 0 && k <= (uint32_t)frame; k++) {
-                size_t len = 0;
-                uint8_t *au = lm_mp4r_sample(r, k, &len);
-                rc = au ? lm_h264dec_decode(hd, au, len, err, sizeof(err)) : (snprintf(err, sizeof(err), "cannot read the picture"), -1);
-                free(au);
-            }
-            if (rc == 0) {
-                img.w = lm_h264dec_width(hd);
-                img.h = lm_h264dec_height(hd);
-                img.px = malloc((size_t)img.w * (size_t)img.h * 4);
-                if (img.px)
-                    lm_h264dec_xrgb(hd, img.px, (size_t)img.w);
-                else
-                    rc = (snprintf(err, sizeof(err), "out of memory"), -1);
-            }
-            lm_h264dec_free(hd);
-        } else {
-            size_t len = 0;
-            uint8_t *jpg = r && r->mjpeg && frame >= 0 && (uint32_t)frame < r->n ? lm_mp4r_sample(r, (uint32_t)frame, &len) : NULL;
-            rc = !r ? -1 : !jpg ? (snprintf(err, sizeof(err), "no such picture, or not Motion JPEG or H.264"), -1) : lm_jpeg_decode(jpg, len, &img, err, sizeof(err));
-            free(jpg);
-        }
-        lm_mp4r_close(r);
-        if (rc < 0) {
+        if (own_video_frame(in, frame, &img, err, sizeof(err), NULL, 0) < 0) {
             fprintf(stderr, "mellagui-view: %s\n", err);
             return 1;
         }
@@ -1180,17 +1261,9 @@ static int decode_cmd(const char *in, const char *out, int frame)
         fprintf(stderr, "mellagui-view: %s\n", err);
         return 1;
     }
-    FILE *f = fopen(out, "wb");
-    if (!f)
-        return 1;
-    fprintf(f, "P6\n%d %d\n255\n", img.w, img.h);
-    for (size_t i = 0; i < (size_t)img.w * (size_t)img.h; i++) {
-        uint8_t rgb[3] = { (uint8_t)(img.px[i] >> 16), (uint8_t)(img.px[i] >> 8), (uint8_t)img.px[i] };
-        fwrite(rgb, 1, 3, f);
-    }
-    fclose(f);
+    bool ok = write_ppm(out, &img);
     lm_img_free(&img);
-    return 0;
+    return ok ? 0 : 1;
 }
 
 /* ---- idle inhibitor: the screen must not go to sleep or lock while a video plays ----------------------------------------- */
@@ -1226,6 +1299,8 @@ int main(int argc, char **argv)
         return decode_cmd(argv[2], argv[3], argc > 4 ? atoi(argv[4]) : 0);
     if (argc > 2 && !strcmp(argv[1], "--video-info"))
         return video_info_cmd(argv[2]);
+    if (argc > 3 && !strcmp(argv[1], "--poster"))
+        return poster_cmd(argv[2], argv[3]);
 
     struct app a = { 0 };
     const char *arg = argc > 1 ? argv[1] : NULL, *keep = NULL;

@@ -5,6 +5,8 @@
  *                                   when it started the program as the screensaver: settings, Screensaver page)
  *   mellagui-matrix --flat          the classic flat rain instead of the room
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
+ *   mellagui-matrix --time HH:MM    the window shows that time of day (default: the real time, following the clock): sun, moon and stars, colours
+ *   mellagui-matrix --clock-speed N the day passes N minutes a second (to look at it)
  *   mellagui-matrix --bench WxH     draws the room a few seconds without a display and prints the time of a frame
  *   mellagui-matrix --windowed      an ordinary window (to look at it, or to leave running beside other windows)
  *   mellagui-matrix --speed PERCENT how fast the rain falls, 25..400 (default 100)
@@ -218,8 +220,6 @@ static uint32_t cell_color(int b)
 #define ZB1 (ROOM_D + 0.15f)
 #define BAR_HALF_W 0.05f
 #define BAR_HALF_H 0.06f
-#define SUN_X (OPEN_X1 - 0.10f)             /* the sun is just past the glass's upper right corner: only a piece of it shows */
-#define SUN_Y (OPEN_Y1 + 0.02f)
 
 
 struct cam {
@@ -227,7 +227,22 @@ struct cam {
     float fx, fy, fz, rx, ry, rz, ux, uy, uz;       /* forward, right, up */
 };
 
+/* The sky behind the window, from the time of day: the sun and the moon in the sky, the colours, and which light falls on the floor. */
+struct sky {
+    float sun[3], moon[3];              /* directions towards them (unit; x to the right, y up, z out of the window) */
+    float sun_el, moon_el;              /* elevations in degrees */
+    float zen[3], hor[3];               /* the sky's colour at the zenith and at the horizon */
+    float day, night;                   /* 0..1: how much of a day it is / how deep the night is */
+    float light_dir[3], light_col[3];   /* the light on the floor: direction towards its source (z > 0) and its colour, already scaled by its strength */
+    float light_str;                    /* 0 = no light */
+    float phase;                        /* seconds, for the twinkling of the stars */
+};
+
 struct room {
+    struct sky sky;
+    float minutes;                      /* the time of day shown, minutes since midnight */
+    float clock_speed;                  /* simulated minutes per real second; 0 = the real clock */
+    bool fixed;                         /* --time: the clock stands still */
     struct rain s[NSURF];
     struct rain fr;                     /* the letters of the window's frame, bars and recess (finer) */
     bool ready;
@@ -242,6 +257,8 @@ static void room_surface_size(int surf, int *cols, int *rows)
     *cols = (int)ceilf(lu / CELL_W);
     *rows = (int)ceilf(lv / CELL_H);
 }
+
+static void sky_update(struct sky *k, float minutes);
 
 static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density)
 {
@@ -279,6 +296,13 @@ static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density
     for (int i = 0; i < rm->s[0].nset; i++)
         if (rm->s[0].set[i] < GLYPH_MAX_CP)
             rm->gptr[rm->s[0].set[i]] = lm_font_glyph(rm->s[0].set[i]);
+    if (!rm->fixed) {
+        time_t now = time(NULL);
+        struct tm tm;
+        if (localtime_r(&now, &tm))
+            rm->minutes = (float)tm.tm_hour * 60.0f + (float)tm.tm_min + (float)tm.tm_sec / 60.0f;
+    }
+    sky_update(&rm->sky, rm->minutes);
     rm->ready = true;
     return true;
 }
@@ -304,6 +328,18 @@ static void room_step(struct room *rm)
         if (rnd_range(&rm->fr, 100) < 4)
             rm->fr.glyph[i] = (uint16_t)pick_glyph(&rm->fr);
     rm->t += (float)TICK_MS / 1000.0f;
+    if (rm->fixed) {
+        /* a fixed time stands still */
+    } else if (rm->clock_speed > 0.0f) {
+        rm->minutes = fmodf(rm->minutes + rm->clock_speed * (float)TICK_MS / 1000.0f, 1440.0f);
+    } else {
+        time_t now = time(NULL);
+        struct tm tm;
+        if (localtime_r(&now, &tm))
+            rm->minutes = (float)tm.tm_hour * 60.0f + (float)tm.tm_min + (float)tm.tm_sec / 60.0f;
+    }
+    sky_update(&rm->sky, rm->minutes);
+    rm->sky.phase = rm->t;
 }
 
 /* The camera: a slow drift in the room and a slow turn of the head, so the walls move and the window slides over. */
@@ -371,21 +407,95 @@ static inline void letters_px(const struct room *rm, const struct rain *r, int c
 
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-/* The sun's light through the window onto the floor: how much of it (0..1) reaches the floor at (x, z). The light comes from the sun's side (up, towards the far wall,
- * to the right), so the patch is the window's opening carried along the light to the floor, with the shadows of the bars in it and soft edges. */
-#define SUN_BX 0.35f                        /* the direction from the floor towards the sun */
-#define SUN_BY 1.3f
-#define SUN_BZ 1.0f
+/* ---- the sky ---------------------------------------------------------------------------------------------------------- */
 
-static float sun_light(float x, float z)
+static float mixf(float a, float b, float t) { return a + (b - a) * t; }
+
+static float smooth(float a, float b, float v)
+{
+    float t = clamp01((v - a) / (b - a));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/* A direction towards a body that crosses the sky between 06:00 and 18:00 of its own day (`phase` hours since it rose; outside 0..12 it is below the horizon):
+ * from the left to the right of the window, as high as `max_el` degrees. */
+static void body_dir(float phase, float max_el, float dir[3], float *el_deg, float *az_rad)
+{
+    float t = phase / 12.0f, el = max_el * sinf(3.14159265f * t);
+    float az = (-40.0f + 80.0f * clamp01(t)) * 3.14159265f / 180.0f, e = el * 3.14159265f / 180.0f;
+    dir[0] = sinf(az) * cosf(e);
+    dir[1] = sinf(e);
+    dir[2] = cosf(az) * cosf(e);
+    *el_deg = el;
+    *az_rad = az;
+}
+
+/* The sky colours by the sun's elevation: night, dusk, sunset, golden hour, day. */
+static void sky_colors(float el, float zen[3], float hor[3])
+{
+    static const float E[5] = { -8.0f, -3.0f, 0.0f, 3.0f, 10.0f };
+    static const float Z[5][3] = { { 3, 5, 14 }, { 22, 30, 70 }, { 70, 90, 160 }, { 80, 130, 210 }, { 72, 135, 228 } };
+    static const float H[5][3] = { { 6, 10, 22 }, { 120, 70, 90 }, { 255, 150, 80 }, { 240, 185, 140 }, { 160, 205, 245 } };
+    int i = 0;
+    while (i < 3 && el > E[i + 1])
+        i++;
+    float t = clamp01((el - E[i]) / (E[i + 1] - E[i]));
+    for (int q = 0; q < 3; q++) {
+        zen[q] = mixf(Z[i][q], Z[i + 1][q], t);
+        hor[q] = mixf(H[i][q], H[i + 1][q], t);
+    }
+}
+
+static void sky_update(struct sky *k, float minutes)
+{
+    float h = minutes / 60.0f;
+    float saz, maz;
+    body_dir(h - 6.0f, 11.0f, k->sun, &k->sun_el, &saz);
+    float mh = h - 18.0f;
+    if (mh < 0.0f)
+        mh += 24.0f;
+    if (mh > 24.0f)
+        mh -= 24.0f;
+    body_dir(mh, 10.0f, k->moon, &k->moon_el, &maz);
+    if (k->sun_el < 0.0f && h > 6.0f && h < 18.0f)
+        k->sun_el = 0.0f;
+    sky_colors(k->sun_el, k->zen, k->hor);
+    k->day = smooth(-3.0f, 6.0f, k->sun_el);
+    k->night = smooth(-2.0f, -8.0f, k->sun_el);
+    /* the light on the floor: the sun while it is up, else the moon */
+    float sunl = smooth(0.5f, 4.5f, k->sun_el), moonl = 0.3f * smooth(1.0f, 6.0f, k->moon_el) * k->night;
+    /* (the light comes from a higher point of the sky than the body shows at: the patch has to land where the camera can see it) */
+    float az = sunl >= moonl ? saz : maz, el = sunl >= moonl ? k->sun_el : k->moon_el;
+    float lel = (sunl >= moonl ? 38.0f + 0.9f * el : 42.0f + 0.7f * el) * 3.14159265f / 180.0f;
+    k->light_str = sunl >= moonl ? sunl : moonl;
+    k->light_dir[0] = sinf(az) * cosf(lel);
+    k->light_dir[1] = sinf(lel);
+    k->light_dir[2] = cosf(az) * cosf(lel);
+    if (sunl >= moonl) {
+        float w = clamp01(k->sun_el / 12.0f);                            /* low sun: orange; high sun: pale yellow */
+        k->light_col[0] = 255.0f;
+        k->light_col[1] = mixf(140.0f, 228.0f, w);
+        k->light_col[2] = mixf(60.0f, 150.0f, w);
+    } else {
+        k->light_col[0] = 150.0f; k->light_col[1] = 180.0f; k->light_col[2] = 255.0f;
+    }
+    if (k->light_dir[1] < 0.05f || k->light_dir[2] < 0.05f)
+        k->light_str = 0.0f;
+}
+
+/* How much of the light (direction b towards its source) reaches the floor at (x, z): the window's opening carried along the light, tested at the frame's and
+ * the glass's plane, with the shadows of the bars at their depth and soft edges. */
+static float sun_light(float x, float z, const float b[3])
 {
     float cx = (OPEN_X0 + OPEN_X1) * 0.5f, cy = (OPEN_Y0 + OPEN_Y1) * 0.5f, f = 1.0f;
     static const float planes[3] = { ZG, ZF, ZB0 + (ZB1 - ZB0) * 0.5f };
+    if (b[2] < 0.05f || b[1] < 0.03f)
+        return 0.0f;
     for (int i = 0; i < 3; i++) {
-        float sdist = (planes[i] - z) / SUN_BZ;
+        float sdist = (planes[i] - z) / b[2];
         if (sdist < 0.0f)
             return 0.0f;                                                  /* the point is behind that plane: not lit through it */
-        float qx = x + sdist * SUN_BX, qy = sdist * SUN_BY;
+        float qx = x + sdist * b[0], qy = sdist * b[1];
         if (i < 2) {                                                      /* through the frame's opening and the glass's */
             float m = fminf(fminf(qx - OPEN_X0, OPEN_X1 - qx), fminf(qy - OPEN_Y0, OPEN_Y1 - qy));
             f *= clamp01(m / 0.07f);
@@ -399,19 +509,90 @@ static float sun_light(float x, float z)
     return f;
 }
 
-/* The glass: light blue sky, brighter towards the horizon, with a piece of the sun in its upper right corner. (x, y) on the glass plane. */
-static void glass_px(float x, float y, float rgb[3])
+static inline uint32_t hash3(int a, int b, int c)
 {
-    float kk = clamp01((y - OPEN_Y0) / (OPEN_Y1 - OPEN_Y0));
-    rgb[0] = 118.0f - 40.0f * kk; rgb[1] = 182.0f - 28.0f * kk; rgb[2] = 240.0f - 12.0f * kk;
-    float d = hypotf(x - SUN_X, y - SUN_Y);
-    float glow = clamp01(1.0f - d / 1.1f);
-    glow = glow * glow;
-    float core = clamp01((0.34f - d) / 0.05f);                              /* the disc, a soft edge */
-    for (int q = 0; q < 3; q++) {
-        static const float warm[3] = { 255.0f, 236.0f, 170.0f }, white[3] = { 255.0f, 252.0f, 235.0f };
-        rgb[q] = rgb[q] + (warm[q] - rgb[q]) * glow * 0.8f;
-        rgb[q] = rgb[q] + (white[q] - rgb[q]) * core;
+    uint32_t h = (uint32_t)a * 73856093u ^ (uint32_t)b * 19349663u ^ (uint32_t)c * 83492791u;
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    return h;
+}
+
+/* The sky seen along the unit direction (hx, hy, hz): the sky's gradient, the sun, the moon and stars at night, the ground below the horizon. */
+static void sky_px(const struct sky *k, float hx, float hy, float hz, float rgb[3])
+{
+    if (hy < 0.0f) {                                                        /* the ground: dark at night, green by day, tinted by the horizon */
+        float g = clamp01(-hy / 0.25f);
+        for (int q = 0; q < 3; q++) {
+            static const float night[3] = { 4, 7, 9 }, day[3] = { 56, 86, 58 };
+            float base = mixf(night[q], day[q], k->day) * (0.55f + 0.45f * (1.0f - g));
+            rgb[q] = mixf(base, k->hor[q] * 0.45f, 0.25f * (1.0f - g));
+        }
+        return;
+    }
+    float t = powf(clamp01(hy / 0.65f), 0.7f);
+    for (int q = 0; q < 3; q++)
+        rgb[q] = mixf(k->hor[q], k->zen[q], t);
+    if (k->night > 0.02f) {                                                 /* a starry sky: the Milky Way, faint stars, bright stars that twinkle */
+        float side = hx * 0.45f - hy * 0.35f + hz * 0.82f;                   /* the band's distance (in the sky's units) from its middle plane */
+        if (side * side < 0.2f) {
+            float band = expf(-(side * side) / 0.03f);
+            uint32_t mh = hash3((int)floorf(hx * 14.0f), (int)floorf(hy * 14.0f), (int)floorf(hz * 14.0f));
+            float mott = 0.55f + 0.45f * (float)(mh & 255) / 255.0f;          /* cloudy, not smooth */
+            float glow = band * mott * 0.16f * k->night * clamp01(hy / 0.12f);
+            static const float milk[3] = { 150.0f, 165.0f, 215.0f };
+            for (int q = 0; q < 3; q++)
+                rgb[q] = mixf(rgb[q], milk[q], glow);
+        }
+        for (int layer = 0; layer < 2; layer++) {
+            const float K = layer == 0 ? 90.0f : 230.0f;
+            int ix = (int)floorf(hx * K), iy = (int)floorf(hy * K), iz = (int)floorf(hz * K);
+            uint32_t h = hash3(ix + layer * 977, iy, iz);
+            if ((h & 0x3ffu) < (layer == 0 ? 60u : 90u)) {
+                float cxs = ((float)((h >> 10) & 255) + 0.5f) / 256.0f, cys = ((float)((h >> 18) & 255) + 0.5f) / 256.0f;
+                float dx = hx * K - (float)ix - cxs, dy = hy * K - (float)iy - cys;
+                float r2 = (dx * dx + dy * dy) * (1.0f / (K * K));
+                float rad = layer == 0 ? 0.0013f + 0.0006f * (float)((h >> 26) & 3) : 0.0007f;
+                if (r2 < rad * rad) {
+                    float tw = 0.78f + 0.22f * sinf(k->phase * (1.0f + (float)((h >> 5) & 3)) + (float)((h >> 8) & 63));
+                    float b = k->night * (layer == 0 ? 0.55f + 0.45f * (float)((h >> 8) & 255) / 255.0f : 0.4f) * tw * clamp01(hy / 0.08f);
+                    float tint = (float)((h >> 12) & 3);                         /* a few are bluish or warm */
+                    float col[3] = { tint == 0.0f ? 255.0f : 235.0f, 244.0f, tint == 1.0f ? 255.0f : 225.0f };
+                    for (int q = 0; q < 3; q++)
+                        rgb[q] = mixf(rgb[q], col[q], clamp01(b));
+                }
+            }
+        }
+    }
+    float cs = hx * k->sun[0] + hy * k->sun[1] + hz * k->sun[2];            /* the sun: a disc and a glow */
+    if (cs > 0.9f && k->sun_el > -3.0f) {
+        float ang = acosf(fminf(cs, 1.0f)), vis = smooth(-3.0f, 1.0f, k->sun_el);
+        float glow = clamp01(1.0f - ang / 0.7f);
+        glow = glow * glow * 0.8f * vis;
+        float core = clamp01((0.085f - ang) / 0.012f) * vis;
+        float w = clamp01(k->sun_el / 12.0f);
+        float warm[3] = { 255.0f, mixf(150.0f, 238.0f, w), mixf(70.0f, 175.0f, w) }, white[3] = { 255.0f, mixf(225.0f, 252.0f, w), mixf(190.0f, 235.0f, w) };
+        for (int q = 0; q < 3; q++) {
+            rgb[q] = mixf(rgb[q], warm[q], glow);
+            rgb[q] = mixf(rgb[q], white[q], core);
+        }
+    }
+    float cm = hx * k->moon[0] + hy * k->moon[1] + hz * k->moon[2];         /* the moon: a crescent (a disc with another disc cut out of it) and a soft glow */
+    if (cm > 0.95f && k->night > 0.05f && k->moon_el > -1.0f) {
+        const float *m = k->moon;
+        float t1[3] = { m[2], 0.0f, -m[0] }, tl = sqrtf(t1[0] * t1[0] + t1[2] * t1[2]);        /* the sky's right and up at the moon */
+        t1[0] /= tl; t1[2] /= tl;
+        float t2[3] = { m[1] * t1[2] - m[2] * t1[1], m[2] * t1[0] - m[0] * t1[2], m[0] * t1[1] - m[1] * t1[0] };
+        float lx = hx * t1[0] + hy * t1[1] + hz * t1[2], ly = hx * t2[0] + hy * t2[1] + hz * t2[2];
+        const float R = 0.088f, e = 0.009f;
+        float d1 = hypotf(lx, ly), d2 = hypotf(lx - 0.058f, ly - 0.026f);                      /* the second disc is moved up and to the right: the lit part is the left */
+        float disc = clamp01((R - d1) / e), bite = clamp01((R * 0.92f - d2) / e);
+        float core = disc * (1.0f - bite) * k->night;
+        float glow = clamp01(1.0f - d1 / 0.4f);
+        glow = glow * glow * 0.22f * k->night;
+        for (int q = 0; q < 3; q++) {
+            static const float pale[3] = { 238, 240, 255 };
+            rgb[q] = mixf(rgb[q], 150.0f, glow);
+            rgb[q] = mixf(rgb[q], pale[q], core);
+        }
     }
 }
 
@@ -453,7 +634,8 @@ static bool window_trace(const struct room *rm, const struct cam *c, float dx, f
     float dist = tend * len;
     float px = c->ox + tend * dx, py = c->oy + tend * dy, pz = c->oz + tend * dz;
     if (tend == tg) {                                                                        /* the glass */
-        glass_px(px, py, rgb);
+        sky_px(&rm->sky, dx / len, dy / len, dz / len, rgb);                              /* the sky at infinity, seen along the ray */
+        (void)px; (void)py;
         return true;
     }
     float foot = dist * inv_f / 0.5f, k = 0.8f / (1.0f + 0.018f * dist * dist);              /* the sides of the recess: letters on the reveal */
@@ -508,12 +690,11 @@ static void render_rows(const struct rjob *j)
                 letters_px(rm, r, ci, cj, cu - (float)ci, cv - (float)cj, 0, dist * inv_f / fmaxf(along / len, 0.12f), CELL_H / 16.0f,
                            ao / (1.0f + 0.018f * dist * dist), rgb);
                 if (surf == 4) {                                               /* the sun's patch on the floor: the letters in it are brighter and the light is warm */
-                    float sl = sun_light(px, pz);
+                    float sl = rm->sky.light_str > 0.0f ? sun_light(px, pz, rm->sky.light_dir) * rm->sky.light_str : 0.0f;
                     if (sl > 0.0f) {
                         float lit = sl / (1.0f + 0.02f * dist * dist);
-                        rgb[0] = rgb[0] * (1.0f + 1.3f * sl) + 255.0f * 0.50f * lit;
-                        rgb[1] = rgb[1] * (1.0f + 1.3f * sl) + 226.0f * 0.50f * lit;
-                        rgb[2] = rgb[2] * (1.0f + 1.3f * sl) + 140.0f * 0.50f * lit;
+                        for (int q = 0; q < 3; q++)
+                            rgb[q] = rgb[q] * (1.0f + 1.3f * sl) + rm->sky.light_col[q] * 0.50f * lit;
                     }
                 }
             }
@@ -745,20 +926,37 @@ static int selftest(void)
         CHECK(room_hit(&c, 0, 0, -1, &t) == 2 && fabsf(t - 2.0f) < 1e-3f);                  /* behind: the near wall */
         CHECK(room_hit(&c, -1, 0, 0, &t) == 0 && room_hit(&c, 1, 0, 0, &t) == 1);            /* left, right */
         CHECK(room_hit(&c, 0, -1, 0, &t) == 4 && room_hit(&c, 0, 1, 0, &t) == 5);            /* floor, ceiling */
-        {                                                                /* the sun's patch on the floor: inside it is lit, the bars cast shadows, elsewhere dark */
-            float cxm = (OPEN_X0 + OPEN_X1) * 0.5f, cym = (OPEN_Y0 + OPEN_Y1) * 0.5f;
-            float qx = cxm + 0.7f, qy = cym + 0.4f, sd = qy / SUN_BY;                    /* a ray from the floor through a pane of the window */
-            CHECK(sun_light(qx - sd * SUN_BX, ZG - sd * SUN_BZ) > 0.9f);
-            float zbar = ZB0 + (ZB1 - ZB0) * 0.5f, sd2 = cym / SUN_BY;                    /* ... and one that meets the horizontal bar at its own depth */
-            CHECK(sun_light(qx - sd2 * SUN_BX, zbar - sd2 * SUN_BZ) < 0.1f);
-            CHECK(sun_light(0.0f, 0.5f) == 0.0f && sun_light(-2.5f, 3.0f) == 0.0f);
-        }
-        {                                                                /* the glass is blue, the sun is at its corner, the recess and the frame have letters */
-            float g1[3], g2[3];
-            glass_px((OPEN_X0 + OPEN_X1) / 2, (OPEN_Y0 + OPEN_Y1) / 2, g1);
-            CHECK(g1[2] > g1[0] + 40.0f && g1[2] > 150.0f);
-            glass_px(SUN_X, SUN_Y, g2);
-            CHECK(g2[0] > 240.0f && g2[1] > 240.0f);
+        {                                                                /* the sky, hour by hour */
+            struct sky k;
+            float g[3];
+            sky_update(&k, 12.0f * 60.0f);
+            CHECK(k.day > 0.95f && k.night < 0.05f && k.sun_el > 9.0f && k.light_str > 0.9f);
+            sky_px(&k, 0.0f, 0.7f, 0.714f, g);                                               /* a blue sky by day */
+            CHECK(g[2] > g[0] + 60.0f && g[2] > 150.0f);
+            sky_px(&k, 0.0f, -0.3f, 0.95f, g);                                               /* ground below the horizon */
+            CHECK(g[1] > g[2] && g[1] > 40.0f);
+            sky_update(&k, 0.0f);
+            CHECK(k.day < 0.05f && k.night > 0.95f && k.sun_el < -9.0f);
+            sky_px(&k, -0.5f, 0.6f, 0.62f, g);                                               /* nearly black at night (away from the moon) */
+            CHECK(g[0] < 40.0f && g[1] < 40.0f && g[2] < 60.0f);
+            int stars = 0;
+            for (int i = 0; i < 40000; i++) {                                                /* ... with stars in it */
+                float hx = -0.3f + 0.0015f * (float)(i % 200), hy = 0.3f + 0.0015f * (float)(i / 200);
+                sky_px(&k, hx, hy, 0.8f, g);
+                stars += g[0] > 100.0f;
+            }
+            CHECK(stars > 20 && stars < 4000);
+            sky_update(&k, 18.0f * 60.0f);                                                   /* sunset: an orange horizon, the sun low on the right */
+            CHECK(k.hor[0] > 200.0f && k.hor[2] < k.hor[0] - 60.0f && k.sun[0] > 0.5f && k.sun_el < 1.0f);
+            sky_update(&k, 6.0f * 60.0f);                                                    /* sunrise: on the left */
+            CHECK(k.sun[0] < -0.5f);
+            sky_update(&k, 14.0f * 60.0f);
+            float sunp[3] = { k.light_dir[0], k.light_dir[1], k.light_dir[2] }, qx = (OPEN_X0 + OPEN_X1) * 0.5f + 0.7f, qy = OPEN_Y0 + 0.55f * (OPEN_Y1 - OPEN_Y0);
+            float sd = qy / sunp[1];                                                         /* a floor point whose light comes through a pane */
+            CHECK(sun_light(qx - sd * sunp[0], ZG - sd * sunp[2], sunp) > 0.0f);
+            CHECK(sun_light(-2.9f, 0.3f, sunp) == 0.0f);
+            sky_update(&k, 23.0f * 60.0f);                                                   /* the moon's light is dimmer and blue */
+            CHECK(k.moon_el > 4.0f && k.light_str > 0.0f && k.light_str < 0.35f && k.light_col[2] > k.light_col[0]);
             CHECK(OPEN_X1 - OPEN_X0 > 2.0f && OPEN_Y1 > OPEN_Y0 && ZG > ROOM_D && ZF < ROOM_D);
         }
         struct cam c0 = cam_at(0.0f), c1 = cam_at(20.0f);
@@ -806,15 +1004,28 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--flat")) {
             a.flat = true;
         } else if (!strcmp(argv[i], "--density") && i + 1 < argc) {
-            a.rain.density = LM_CLAMP(atoi(argv[++i]), 50, 300);
+            int dens = atoi(argv[++i]);
+            a.rain.density = LM_CLAMP(dens, 50, 300);
+        } else if (!strcmp(argv[i], "--time") && i + 1 < argc) {              /* the time of day the window shows: HH:MM, standing still */
+            int hh = 0, mm = 0;
+            if (sscanf(argv[++i], "%d:%d", &hh, &mm) != 2 || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
+                fprintf(stderr, "mellagui-matrix: --time wants HH:MM\n");
+                return 2;
+            }
+            a.room.minutes = (float)(hh * 60 + mm);
+            a.room.fixed = true;
+        } else if (!strcmp(argv[i], "--clock-speed") && i + 1 < argc) {      /* the day passes faster: this many minutes a second (to look at the sky) */
+            double spd = atof(argv[++i]);                                       /* (a macro would evaluate argv[++i] several times) */
+            a.room.clock_speed = (float)LM_CLAMP(spd, 0.0, 1440.0);
         } else if (!strcmp(argv[i], "--bench") && i + 1 < argc) {
             bench = argv[++i];
         } else if (!strcmp(argv[i], "--speed") && i + 1 < argc) {
-            a.rain.speed_pct = LM_CLAMP(atoi(argv[++i]), 25, 400);
+            int pct = atoi(argv[++i]);
+            a.rain.speed_pct = LM_CLAMP(pct, 25, 400);
         } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
         } else {
-            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--density PERCENT] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
+            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--density PERCENT] [--time HH:MM] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
     }

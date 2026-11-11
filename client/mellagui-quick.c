@@ -372,6 +372,8 @@ static void press(struct app *a, int item)
     case I_VOL: case I_MIC:
         a->drag = item;
         drag_to(a, a->px, true);
+        if (item == I_VOL)
+            send_set(a, "sink-beep", "1");                      /* a click on the volume can be heard at once */
         break;
     case I_VOL_MUTE: send_set(a, "sink-mute", a->vol_mute ? "0" : "1"); break;
     case I_MIC_MUTE: send_set(a, "source-mute", a->mic_mute ? "0" : "1"); break;
@@ -418,8 +420,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (h >= 0)
                 press(a, h);
         } else if (a->drag >= 0) {
+            int item = a->drag;
             drag_to(a, a->px, true);
             a->drag = -1;
+            if (item == I_VOL)
+                send_set(a, "sink-beep", "1");                  /* ... and the level where the drag ended */
             w->redraw = true;
         }
         break;
@@ -431,6 +436,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 int *val = h == I_VOL ? &a->vol : &a->mic;
                 *val = LM_CLAMP(*val + (v < 0 ? 5 : -5), 0, 100);
                 send_int(a, h == I_VOL ? "sink-volume" : "source-volume", *val);
+                if (h == I_VOL)
+                    send_set(a, "sink-beep", "1");
                 w->redraw = true;
             }
         }

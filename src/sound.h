@@ -13,6 +13,7 @@ enum lm_sound {
     LM_SOUND_LOCK,          /* modifier locked: two higher beeps */
     LM_SOUND_UNLOCK,        /* modifier unlocked: one low beep */
     LM_SOUND_SHOT,          /* screenshot taken: a short falling pair */
+    LM_SOUND_DOCK,          /* a click on a dock icon: a soft rising "pok-pling" (plucked, with a round decay) */
     LM_SOUND_COUNT
 };
 
@@ -21,5 +22,19 @@ const char *lm_sound_name(enum lm_sound s);     /* "latch", "lock", ... */
 void lm_sound_set_device(const char *name);
 /* Plays `s` asynchronously. Never blocks, never fails loudly. */
 void lm_sound_play(enum lm_sound s);
+/*
+ * The start-up chime (chime.h, about 4.7 s). Everything - synthesis, playing - happens in a detached child, so the compositor does not wait:
+ * the child renders the tune into a memfd (it is far bigger than a pipe holds), starts paplay / aplay on it and, when that fails because the
+ * sound server is not up yet (the compositor starts at login, PipeWire a moment later), tries again every half second for ~6 s.
+ * MELLAGUI_CHIME_WAV=FILE writes the tune there as a WAV file instead of playing it (tests).
+ */
+void lm_sound_startup(void);
+/* Wakes the sound server's sink with a few seconds of silence (nothing is heard): called when the pointer reaches the dock, so that the click sound
+ * that follows is not eaten by an HDMI output waking up. Rate limited; a no-op for a bare ALSA device. */
+void lm_sound_wake(void);
+/* Records `s` as the last interface sound (tests read it from the control socket `sound`, also on the headless backend where nothing is played). */
+void lm_sound_note(enum lm_sound s);
+const char *lm_sound_last(void);                /* name of the last lm_sound_note(), "none" before the first */
+unsigned lm_sound_noted(void);                  /* how many there were */
 
 #endif

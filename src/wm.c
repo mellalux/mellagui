@@ -6,6 +6,7 @@
 #include "launchers.h"
 #include "nightlight.h"
 #include "notifylog.h"
+#include "sound.h"
 #include "menu.h"
 #include "wm.h"
 
@@ -3764,6 +3765,8 @@ static void dock_motion(struct lm_wm *wm, bool in, int item)
     } else if (!in && wm->dock_shown && lm_dock.autohide && wm->dock_timer && !lm_timer_is_armed(wm->dock_timer)) {
         lm_timer_arm_ms(wm->dock_timer, DOCK_HIDE_MS, 0);
     }
+    if (in && !wm->dock_active && wm->srv->config.sound && strcmp(wm->srv->config.backend, "headless") != 0)
+        lm_sound_wake();                                        /* the pointer came to the dock: wake the sink before the click's sound needs it */
     wm->dock_active = in;
     wm->hover_dock = item;
     if (changed)
@@ -6769,8 +6772,12 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             about_set(wm, true, lm_output_nearest(wm->srv, pick->rect.x, pick->rect.y));
         if (pk == LM_PICK_DOCK_ITEM && wm->dock_drag)
             dock_drag_finish(wm);                               /* it was dragged: moved or taken out, not clicked */
-        else if (pk == LM_PICK_DOCK_ITEM && pick->kind == LM_PICK_DOCK_ITEM && pick->index == pi)
+        else if (pk == LM_PICK_DOCK_ITEM && pick->kind == LM_PICK_DOCK_ITEM && pick->index == pi) {
+            lm_sound_note(LM_SOUND_DOCK);                       /* our own click sound (not on the headless backend, where the tests only look at the record) */
+            if (wm->srv->config.sound && (strcmp(wm->srv->config.backend, "headless") != 0 || getenv("MELLAGUI_SOUND_FORCE")))
+                lm_sound_play(LM_SOUND_DOCK);                       /* (MELLAGUI_SOUND_FORCE: the tests play it on the headless backend, too) */
             dock_activate(wm, pi, button != BTN_MIDDLE);        /* the middle button always starts another instance */
+        }
         if (pk == LM_PICK_PANEL_RUN && pick->kind == LM_PICK_PANEL_RUN)
             launch_run(wm);
         if (pk == LM_PICK_PANEL_CLOCK && pick->kind == LM_PICK_PANEL_CLOCK)

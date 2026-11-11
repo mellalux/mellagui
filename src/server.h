@@ -153,6 +153,7 @@ struct lm_config {
     const char *saver_cmd;      /* the screensaver program, a full screen client ([commands] saver, default "mellagui-matrix") */
     bool saver;                 /* start the screensaver when idle (settings: saver; default true) */
     int saver_min;              /* ... after this many minutes without input, 0 = never (settings: saver-minutes; default 10) */
+    bool startup_sound;         /* play the start-up chime when MellaGUI has started (settings: startup-sound; default true), see chime.h */
     bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */
     int night_mode;             /* night light: 0 off, 1 on, 2 between night_from and night_to (settings: night-light), see nightlight.h */
     int night_kelvin;           /* ... at this colour temperature (settings: night-temp; default 3400) */
@@ -227,6 +228,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .gadget = true,
         .saver = true,
         .saver_min = 10,
+        .startup_sound = true,
         .night_kelvin = 3400,
         .night_from = "21:00",
         .night_to = "06:30",

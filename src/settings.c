@@ -47,7 +47,7 @@
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_OSK_AVOID,
-    K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_AUDIO_PROFILE_KEEP, K_NIGHT_LIGHT, K_NIGHT_TEMP, K_NIGHT_FROM, K_NIGHT_TO, K_DND, K_FILE,
+    K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_AUDIO_PROFILE_KEEP, K_NIGHT_LIGHT, K_NIGHT_TEMP, K_NIGHT_FROM, K_NIGHT_TO, K_DND, K_STARTUP_SOUND, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
     K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
@@ -56,7 +56,7 @@ enum key_id {
     K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
-    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_COUNT
+    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_COUNT
 };
 #define VALUE_MAX 3300          /* longest value text (the lists); the wire carries it as one string */
 
@@ -65,7 +65,7 @@ static const char *const key_names[K_COUNT] = {
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
     [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_OSK_AVOID] = "osk-avoid",
     [K_CLOCK_HOURS] = "clock-hours", [K_CLOCK_SECONDS] = "clock-seconds", [K_CLOCK_DATE] = "clock-date", [K_CLOCK_WEEKDAY] = "clock-weekday",
-    [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_AUDIO_PROFILE_KEEP] = "audio-profile-keep", [K_NIGHT_LIGHT] = "night-light", [K_NIGHT_TEMP] = "night-temp", [K_NIGHT_FROM] = "night-from", [K_NIGHT_TO] = "night-to", [K_DND] = "dnd", [K_FILE] = "file",
+    [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_AUDIO_PROFILE_KEEP] = "audio-profile-keep", [K_NIGHT_LIGHT] = "night-light", [K_NIGHT_TEMP] = "night-temp", [K_NIGHT_FROM] = "night-from", [K_NIGHT_TO] = "night-to", [K_DND] = "dnd", [K_STARTUP_SOUND] = "startup-sound", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
     [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
@@ -88,7 +88,7 @@ static const char *const key_names[K_COUNT] = {
 #undef KR
     [K_NOTES_0] = "notes-0", [K_NOTES_0 + 1] = "notes-1", [K_NOTES_0 + 2] = "notes-2", [K_NOTES_0 + 3] = "notes-3", [K_NOTES_0 + 4] = "notes-4",
     [K_NOTES_COUNT] = "notes-count", [K_NOTES_UNREAD] = "notes-unread", [K_NOTES_DEL] = "notes-del", [K_NOTES_CLEAR] = "notes-clear",
-    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png",
+    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png", [K_STARTUP_SOUND_PLAY] = "startup-sound-play",
 };
 _Static_assert(LM_NOTELOG_MAX == 5 * LM_NOTELOG_CHUNK, "notes-0 .. notes-4 hold the whole history");
 _Static_assert(KEYS_PAGE_ROWS == 10, "key_names lists keys-row-0 .. keys-row-9");
@@ -337,6 +337,10 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if (!parse_bool(val, &b)) return -1;
         cfg->dnd = b;
         break;
+    case K_STARTUP_SOUND:
+        if (!parse_bool(val, &b)) return -1;
+        cfg->startup_sound = b;
+        break;
     case K_NIGHT_TEMP:
         if (!parse_int(val, 1500, 6500, &n)) return -1;
         cfg->night_kelvin = n;
@@ -487,6 +491,8 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_NIGHT_LIGHT: snprintf(out, n, "%s", c->night_mode == 1 ? "on" : c->night_mode == 2 ? "auto" : "off"); break;
     case K_NIGHT_TEMP: snprintf(out, n, "%d", c->night_kelvin); break;
     case K_DND: snprintf(out, n, "%d", c->dnd ? 1 : 0); break;
+    case K_STARTUP_SOUND: snprintf(out, n, "%d", c->startup_sound ? 1 : 0); break;
+    case K_STARTUP_SOUND_PLAY: break;                                                /* write only */
     case K_NOTES_0 ... K_NOTES_LAST: lm_notelog_text(srv->notelog, k - K_NOTES_0, out, n); break;
     case K_NOTES_COUNT: snprintf(out, n, "%d", lm_notelog_count(srv->notelog)); break;
     case K_NOTES_UNREAD: snprintf(out, n, "%d", lm_notelog_unread(srv->notelog)); break;
@@ -1657,6 +1663,18 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return parse_int(val, 1, 1000000000, &n) && lm_notelog_remove(srv->notelog, n);
     case K_NOTES_CLEAR:
         lm_notelog_clear(srv->notelog);
+        return true;
+    case K_STARTUP_SOUND:
+        return cfg_set(cfg, key, val, NULL, 0) >= 0;
+    case K_STARTUP_SOUND_PLAY:                          /* "1": play the start-up chime now (the Sound page's button); "wake": wake the sink (tests) */
+        if (!strcmp(val, "wake")) {
+            lm_sound_wake();
+            return true;
+        }
+        if (!parse_bool(val, &b))
+            return false;
+        if (b)
+            lm_sound_startup();
         return true;
     case K_CLIP_PNG:                                    /* a PNG file (the screenshot tool's) becomes the clipboard selection "image/png" */
         return clip_png_file(srv, val);

@@ -597,6 +597,8 @@ struct lm_dock_info {
         bool running;
         bool launching;             /* its program was just started and has no window yet: the icon zooms in and out */
         const struct lm_dock_item *item;
+        uint8_t alpha;              /* 255 = solid; the autohide animation melts the icon away (and brings it back) */
+        float blur;                 /* 0 = sharp; 0..1 while an icon rises into its place it is a vague ghost that sharpens */
     } icon[LM_DOCK_MAX];
     const struct lm_dock_item *drag_item;   /* an icon is being dragged along the dock / out of it: it is painted at drag_box, the row has a gap */
     struct lm_rect drag_box;

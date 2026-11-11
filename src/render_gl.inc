@@ -539,6 +539,8 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             for (int i = 0; i < d->n; i++) {
                 h = fnv(h, &d->icon[i].box, sizeof(d->icon[i].box));
                 h = fnv(h, &d->icon[i].running, sizeof(d->icon[i].running));
+                h = fnv(h, &d->icon[i].alpha, sizeof(d->icon[i].alpha));
+                h = fnv(h, &d->icon[i].blur, sizeof(d->icon[i].blur));
                 h = fnv(h, &d->icon[i].item, sizeof(d->icon[i].item));
                 h = fnv(h, &d->icon[i].item->kind, sizeof(d->icon[i].item->kind));
             }

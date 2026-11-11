@@ -35,6 +35,20 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Firefox    = [theme:firefox] " LM_FF_ENV " /snap/bin/firefox || " LM_FF_ENV " /usr/bin/firefox\n" \
     "Settings   = [settings] @settings\n"
 
+/* The launcher's own buttons: every MellaGUI program that the dock does not have. Used while mellagui.conf has no [launcher-apps] at all; a file that has its
+ * own list gets the missing ones through the settings (launcher-defaults). The programs of the dock (Terminal, Files, Editor, Calculator, Images, Camera,
+ * Record, Processes, Settings and the Overview button) show in the launcher through the dock. */
+#define DEFAULT_LAUNCHER \
+    "[launcher-apps]\n" \
+    "Run           = [run] @run\n" \
+    "Disk usage    = [disk] mellagui-du\n" \
+    "Display       = [monitor] mellagui-monitor\n" \
+    "Shortcuts     = [keyboard] mellagui-keys\n" \
+    "Notifications = [bell] mellagui-notes\n" \
+    "Bluetooth     = [bluetooth] mellagui-bluetooth\n" \
+    "Screenshot    = [shot] mellagui-shot\n" \
+    "Overview      = [overview] @overview\n"
+
 #define DEFAULT_SETTINGS \
     "[dock]\n" \
     "# The row of round icons along the bottom edge. autohide = yes shows it only while the pointer touches the bottom edge.\n" \
@@ -463,10 +477,53 @@ static void ensure_launcher(void)
     lm_info("dock: the Launcher button was missing, it is back in front");
 }
 
+/* The built-in launcher buttons as (name, icon, command): parsed once from DEFAULT_LAUNCHER. */
+static struct raw_item default_launcher[LM_DOCK_MAX];
+static int default_launcher_n = -1;
+
+static bool default_launcher_conf(void *ud, const char *section, const char *key, const char *value)
+{
+    (void)ud;
+    struct raw_item *r = &default_launcher[default_launcher_n];
+    if (strcmp(section, "launcher-apps") || default_launcher_n >= LM_DOCK_MAX || !lm_dock_split(value, r->icon, sizeof(r->icon), r->cmd, sizeof(r->cmd)))
+        return false;
+    snprintf(r->name, sizeof(r->name), "%s", key);
+    default_launcher_n++;
+    return true;
+}
+
+static void load_default_launcher(void)
+{
+    if (default_launcher_n >= 0)
+        return;
+    default_launcher_n = 0;
+    lm_conf_parse(DEFAULT_LAUNCHER, "<built-in launcher>", default_launcher_conf, NULL);
+}
+
+int lm_launchapps_default_count(void)
+{
+    load_default_launcher();
+    return default_launcher_n;
+}
+
+bool lm_launchapps_default(int i, const char **name, const char **icon, const char **cmd)
+{
+    load_default_launcher();
+    if (i < 0 || i >= default_launcher_n)
+        return false;
+    *name = default_launcher[i].name;
+    *icon = default_launcher[i].icon;
+    *cmd = default_launcher[i].cmd;
+    return true;
+}
+
 void lm_dock_resolve(void)
 {
     if (DOCK_LIST->raw_n == 0)
         lm_conf_parse(DEFAULT_APPS, "<built-in dock>", lm_dock_conf, NULL);
+    const char *nodef = getenv("MELLAGUI_LAUNCHER_DEFAULTS");        /* "0": the test harness, whose launcher holds what the test wrote */
+    if (LAUNCH_LIST->raw_n == 0 && !(nodef && !strcmp(nodef, "0")))
+        lm_conf_parse(DEFAULT_LAUNCHER, "<built-in launcher>", lm_dock_conf, NULL);
     ensure_launcher();
     resolve_list(DOCK_LIST, false);
     resolve_list(LAUNCH_LIST, true);

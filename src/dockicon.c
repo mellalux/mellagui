@@ -27,6 +27,11 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_RECORD] = { "record", 0 },
     [LM_DOCKICON_MONITOR] = { "monitor", 0 },
     [LM_DOCKICON_OVERVIEW] = { "overview", 0 },
+    [LM_DOCKICON_KEYBOARD] = { "keyboard", 0 },
+    [LM_DOCKICON_BELL] = { "bell", 0 },
+    [LM_DOCKICON_BLUETOOTH] = { "bluetooth", 0 },
+    [LM_DOCKICON_SHOT] = { "shot", 0 },
+    [LM_DOCKICON_DISK] = { "disk", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -47,6 +52,11 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_RECORD: return lm_theme.icon_record;
     case LM_DOCKICON_MONITOR: return lm_theme.icon_monitor;
     case LM_DOCKICON_OVERVIEW: return lm_theme.icon_overview;
+    case LM_DOCKICON_KEYBOARD: return lm_theme.icon_keyboard;
+    case LM_DOCKICON_BELL: return lm_theme.icon_bell;
+    case LM_DOCKICON_BLUETOOTH: return lm_theme.icon_bluetooth;
+    case LM_DOCKICON_SHOT: return lm_theme.icon_shot;
+    case LM_DOCKICON_DISK: return lm_theme.icon_disk;
     default: return lm_theme.icon_generic;
     }
 }
@@ -67,6 +77,8 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
+        { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
+        { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK },
         { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
         { "term", LM_DOCKICON_TERMINAL }, { "console", LM_DOCKICON_TERMINAL }, { "shell", LM_DOCKICON_TERMINAL },
@@ -209,6 +221,44 @@ static float glyph(int kind, float u, float v)
         d = fminf2(d, sd_box(u, v, -0.19f, 0.05f, 0.055f, 0.12f, 0.015f));
         d = fminf2(d, sd_box(u, v, 0.0f, -0.02f, 0.055f, 0.19f, 0.015f));
         return fminf2(d, sd_box(u, v, 0.19f, -0.09f, 0.055f, 0.08f, 0.015f));
+    }
+    case LM_DOCKICON_KEYBOARD: {                        /* a keyboard: a frame, two rows of keys and the space bar */
+        float d = sd_sub(sd_box(u, v, 0, 0.02f, 0.44f, 0.29f, 0.07f), sd_box(u, v, 0, 0.02f, 0.385f, 0.235f, 0.03f));
+        for (int r = 0; r < 2; r++)
+            for (int c = 0; c < 5; c++)
+                d = fminf2(d, sd_box(u, v, -0.24f + 0.12f * (float)c, -0.075f + 0.115f * (float)r, 0.04f, 0.04f, 0.012f));
+        return fminf2(d, sd_box(u, v, 0, 0.17f, 0.17f, 0.035f, 0.012f));
+    }
+    case LM_DOCKICON_BELL: {                            /* a bell: a dome, a flare, a lip, a knob and a clapper */
+        float d = fminf2(sd_circle(u, v, 0, -0.07f, 0.24f), sd_box(u, v, 0, 0.07f, 0.24f, 0.14f, 0.0f));
+        d = fminf2(d, sd_tri(u, v, -0.24f, 0.07f, 0.24f, 0.07f, 0.34f, 0.2f));
+        d = fminf2(d, sd_tri(u, v, -0.24f, 0.07f, -0.34f, 0.2f, 0.34f, 0.2f));
+        d = fminf2(d, sd_box(u, v, 0, 0.2f, 0.34f, 0.045f, 0.03f));
+        d = fminf2(d, sd_circle(u, v, 0, -0.33f, 0.05f));
+        return fminf2(d, sd_circle(u, v, 0, 0.3f, 0.07f));
+    }
+    case LM_DOCKICON_BLUETOOTH: {                       /* the rune: a vertical stroke with two arrowheads */
+        float h = 0.04f;
+        float d = sd_line(u, v, -0.17f, -0.17f, 0.17f, 0.17f, h);
+        d = fminf2(d, sd_line(u, v, 0.17f, 0.17f, 0.0f, 0.33f, h));
+        d = fminf2(d, sd_line(u, v, 0.0f, 0.33f, 0.0f, -0.33f, h));
+        d = fminf2(d, sd_line(u, v, 0.0f, -0.33f, 0.17f, -0.17f, h));
+        return fminf2(d, sd_line(u, v, 0.17f, -0.17f, -0.17f, 0.17f, h));
+    }
+    case LM_DOCKICON_SHOT: {                            /* four viewfinder corners round a dot */
+        float d = sd_circle(u, v, 0, 0, 0.08f);
+        for (int k = 0; k < 4; k++) {
+            float sx = (k & 1) ? 0.3f : -0.3f, sy = (k & 2) ? 0.3f : -0.3f;
+            d = fminf2(d, sd_line(u, v, sx, sy, sx * 0.35f, sy, 0.04f));
+            d = fminf2(d, sd_line(u, v, sx, sy, sx, sy * 0.35f, 0.04f));
+        }
+        return d;
+    }
+    case LM_DOCKICON_DISK: {                            /* a pie with a slice pulled out: where the space went */
+        float body = fmaxf2(sd_circle(u, v, 0, 0, 0.36f), fminf2(u, -v));
+        float uo = u - 0.07f, vo = v + 0.07f;
+        float slice = fmaxf2(sd_circle(uo, vo, 0, 0, 0.36f), fmaxf2(-uo, vo));
+        return fminf2(body, slice);
     }
     case LM_DOCKICON_OVERVIEW: {                        /* four windows side by side: frames with a title bar each (Exposé) */
         float d = 1e9f;

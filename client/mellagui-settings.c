@@ -634,7 +634,7 @@ static void build_desktop(struct app *a, int x, int y, int w)
     y += ROW_H;
     add_check(a, x, y, w, "Clipboard gadget (Super+G)", "gadget", kv_int(a, "gadget", 1) != 0);
     y += ROW_H;
-    add_check(a, x, y, w, "Sound feedback for sticky keys", "sound", kv_int(a, "sound", 1) != 0);
+    add_check(a, x, y, w, "Sound feedback (keys, dock, screenshots)", "sound", kv_int(a, "sound", 1) != 0);
     y += ROW_H;
     add_check(a, x, y, w, "Volume mixer gadget (Super+V)", "mixer", kv_int(a, "mixer", 0) != 0);
     y += ROW_H;
@@ -1506,6 +1506,11 @@ static void build_sound(struct app *a, int x, int y, int w)
         add_radio(a, x, y, w, ents[i].desc, "audio-out", ents[i].name, !strcmp(cur, ents[i].name));
         y += ROW_H;
     }
+    /* 4. the start-up chime */
+    y += 4;
+    add_check(a, x, y, w - 110, "Play the start-up chime", "startup-sound", kv_int(a, "startup-sound", 1) != 0);
+    struct widget *pl = add_button(a, x + w - 100, y + 2, 84, "Play now", "startup-sound-play");
+    pl->r.h = ROW_H - 6;
 }
 
 static void attach_help(struct app *a, int px, int pw);
@@ -2086,7 +2091,7 @@ static void activate(struct app *a, int idx)
             launch_sibling("mellagui-edit", w->arg, NULL);
         } else if (!strcmp(w->key, "wall-browse")) {
             launch_sibling("mellagui-files", "--choose", "wallpaper");
-        } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create") || !strcmp(w->key, "saver-now")) {
+        } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create") || !strcmp(w->key, "saver-now") || !strcmp(w->key, "startup-sound-play")) {
             send_set(a, w->key, "1");
         } else if (!strcmp(w->key, "out-left") || !strcmp(w->key, "out-right")) {
             char names[8][40];

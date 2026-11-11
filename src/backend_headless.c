@@ -26,6 +26,7 @@
 #include "render.h"
 #include "seat.h"
 #include "nightlight.h"
+#include "sound.h"
 #include "notifylog.h"
 #include "settings.h"
 #include "lock.h"
@@ -348,6 +349,9 @@ static void ctl_command(struct ctl_client *c, char *line)
         ctl_reply(c, "saver running=%d enabled=%d minutes=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
                   srv->config.saver_min);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "sound")) {
+        /* sound -> "sound last=<name> n=<count>": the last interface sound that was noted (a dock click: "dock"), then "ok" */
+        ctl_reply(c, "sound last=%s n=%u\nok\n", lm_sound_last(), lm_sound_noted());
     } else if (!strcmp(cmd, "notes")) {
         /* notes -> one "note <id> <unread 0|1> <title>\t<body>" line per entry of the notification history, newest first (notifylog.h), then "ok n=<count> unread=<n> dnd=<0|1>" */
         const struct lm_notelog *nl = srv->notelog;

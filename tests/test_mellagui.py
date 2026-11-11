@@ -11345,6 +11345,187 @@ class TestBluetooth(Base):
         self.assertEqual(TestStatus.items(c), [])
 
 
+class TestChime(Base):
+    """The start-up chime (src/chime.c, rendered in code), the dock click sound, and their settings."""
+
+    @staticmethod
+    def goertzel(samples, hz, rate=44100):
+        import math
+        k = 2 * math.cos(2 * math.pi * hz / rate)
+        s1 = s2 = 0.0
+        for x in samples:
+            s0 = x + k * s1 - s2
+            s2, s1 = s1, s0
+        return (s1 * s1 + s2 * s2 - k * s1 * s2) / len(samples)
+
+    def start(self, name, env=None, conf=None):
+        path = os.path.join(tmp, name + '.settings')
+        if os.path.exists(path):
+            os.unlink(path)
+        if conf:
+            with open(path, 'w') as f:
+                f.write(conf)
+        p, c, stop = self.private_compositor(name, '--config', 'none', '--settings', path, env=env)
+        c.sync()
+        self.path = path
+        return c
+
+    def test_the_chime_is_rendered_as_a_quiet_five_second_tune_with_the_right_notes(self):
+        import array
+        wav = os.path.join(tmp, 'chime.wav')
+        if os.path.exists(wav):
+            os.unlink(wav)
+        c = self.start('mellagui-ch1', env={'MELLAGUI_CHIME_WAV': wav})
+        c.cmd('settings startup-sound-play 1')
+        end = time.time() + 15
+        while time.time() < end and (not os.path.exists(wav) or os.path.getsize(wav) < 100000):
+            time.sleep(0.1)
+        time.sleep(0.3)
+        data = open(wav, 'rb').read()
+        self.assertEqual(data[:4], b'RIFF')
+        self.assertEqual(struct.unpack('<HHIIHH', data[20:36]), (1, 1, 44100, 88200, 2, 16))
+        pcm = array.array('h')
+        pcm.frombytes(data[44:])
+        self.assertEqual(struct.unpack('<I', data[40:44])[0], len(pcm) * 2)
+        secs = len(pcm) / 44100
+        self.assertTrue(5.4 < secs < 6.2, secs)                          # 1 s of lead-in silence + the 4.7 s tune
+        peak = max(abs(x) for x in pcm)
+        self.assertTrue(12000 < peak < 20000, peak)                        # about half scale: a greeting, not an alarm
+        self.assertEqual(max(abs(x) for x in pcm[:int(0.98 * 44100)]), 0)  # the second of silence in front (a sleeping sink swallows the start)
+        self.assertLess(max(abs(x) for x in pcm[-200:]), 40)               # it fades out
+        at = lambda t0, t1: pcm[int((1.0 + t0) * 44100):int((1.0 + t1) * 44100)]
+        # the bounce: a high G (784 Hz) at the start, the high C (1047 Hz) at 0.6 s; the ballad's E (659 Hz) at 1.3 s
+        self.assertGreater(self.goertzel(at(0.0, 0.1), 783.99), 20 * self.goertzel(at(0.0, 0.1), 700.0))
+        self.assertGreater(self.goertzel(at(0.62, 0.72), 1046.5), 20 * self.goertzel(at(0.62, 0.72), 950.0))
+        self.assertGreater(self.goertzel(at(1.3, 1.6), 659.25), 10 * self.goertzel(at(1.3, 1.6), 600.0))
+        self.assertGreater(self.goertzel(at(2.8, 3.4), 523.25), 10 * self.goertzel(at(2.8, 3.4), 480.0))      # it ends on C
+
+    def test_the_tune_reaches_the_player_through_its_standard_input_and_a_missing_server_is_retried(self):
+        d = os.path.join(tmp, 'fake-paplay')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        out = os.path.join(d, 'got.raw')
+        tries = os.path.join(d, 'tries')
+        script = os.path.join(d, 'paplay')
+        with open(script, 'w') as f:                     # the first call fails (no sound server yet), the second one plays
+            f.write('#!/bin/sh\necho x >> %s\nif [ $(wc -l < %s) -lt 2 ]; then exit 1; fi\ncat > %s\n' % (tries, tries, out))
+        os.chmod(script, 0o755)
+        c = self.start('mellagui-ch4', env={'PATH': d + ':' + os.environ['PATH']})
+        c.cmd('settings startup-sound-play 1')
+        end = time.time() + 15
+        while time.time() < end and not (os.path.exists(out) and os.path.getsize(out) > 480000):
+            time.sleep(0.1)
+        self.assertGreater(os.path.getsize(out), 480000)               # 1 s of silence + 4.7 s of tune, 16 bit mono
+        self.assertEqual(len(open(tries).read().split()), 2)
+
+    def test_waking_the_sink_plays_three_seconds_of_silence_once_in_a_while(self):
+        d = os.path.join(tmp, 'fake-paplay2')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        out, calls = os.path.join(d, 'got.raw'), os.path.join(d, 'calls')
+        script = os.path.join(d, 'paplay')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\necho x >> %s\ncat > %s\n' % (calls, out))
+        os.chmod(script, 0o755)
+        c = self.start('mellagui-ch5', env={'PATH': d + ':' + os.environ['PATH']})
+        c.cmd('settings startup-sound-play wake')
+        end = time.time() + 8
+        while time.time() < end and not (os.path.exists(out) and os.path.getsize(out) >= 264600):
+            time.sleep(0.1)
+        data = open(out, 'rb').read()
+        self.assertEqual(len(data), 264600)                               # 3 s, 16 bit mono
+        self.assertEqual(data.count(b'\0'), len(data))                    # nothing to hear
+        c.cmd('settings startup-sound-play wake')                         # within 4 s: no second one
+        time.sleep(0.6)
+        self.assertEqual(len(open(calls).read().split()), 1)
+
+    def test_a_dock_click_on_a_bare_alsa_device_carries_a_long_lead_in_and_does_not_crash(self):
+        """The lead-in silence (0.8 s) is longer than the 0.7 s a beep may be: it once overflowed the buffer and the compositor died on a dock click."""
+        d = os.path.join(tmp, 'fake-aplay')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        out, args = os.path.join(d, 'got.raw'), os.path.join(d, 'args')
+        script = os.path.join(d, 'aplay')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\necho "$@" > %s\ncat > %s\n' % (args, out))
+        os.chmod(script, 0o755)
+        c = self.start('mellagui-ch6', env={'PATH': d + ':' + os.environ['PATH'], 'MELLAGUI_SOUND_FORCE': '1'})
+        c.cmd('settings audio-out plughw:CARD=PCH,DEV=3')
+        icons = [l for l in c.cmd('dock') if l.startswith('icon ')]
+        m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', [l for l in icons if '"Calculator"' in l][0])
+        c.click(int(m[3]) + int(m[5]) // 2, int(m[4]) + int(m[6]) // 2)
+        end = time.time() + 8
+        while time.time() < end and not (os.path.exists(out) and os.path.getsize(out) > 80000):
+            time.sleep(0.1)
+        self.assertEqual(c.cmd('sound')[0], 'sound last=dock n=1')                 # still alive
+        size = os.path.getsize(out)
+        self.assertTrue(0.8 * 88200 < size < 1.2 * 88200, size)                  # 0.8 s of silence + the 0.15 s click
+        self.assertIn('plughw:CARD=PCH,DEV=3', open(args).read())
+        data = open(out, 'rb').read()
+        self.assertEqual(data[:int(0.79 * 88200)].count(b'\0'), int(0.79 * 88200))   # the lead-in is silent
+        self.assertNotEqual(data[int(0.81 * 88200):].count(b'\0'), len(data) - int(0.81 * 88200))   # and the click follows it
+
+    def sound_route(self, tag, sink):
+        """Which player a dock click uses ('aplay' / 'paplay') with audio-out on a bare ALSA device and a fake `pactl get-default-sink` saying `sink`."""
+        d = os.path.join(tmp, 'route-' + tag)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        log = os.path.join(d, 'log')
+        for prog in ('aplay', 'paplay'):
+            with open(os.path.join(d, prog), 'w') as f:
+                f.write('#!/bin/sh\necho %s "$@" >> %s\ncat > /dev/null\n' % (prog, log))
+            os.chmod(os.path.join(d, prog), 0o755)
+        with open(os.path.join(d, 'pactl'), 'w') as f:
+            f.write('#!/bin/sh\n%s\n' % ('echo ' + sink if sink else 'exit 1'))
+        os.chmod(os.path.join(d, 'pactl'), 0o755)
+        c = self.start('mellagui-ch-' + tag, env={'PATH': d + ':' + os.environ['PATH'], 'MELLAGUI_SOUND_FORCE': '1',
+                                                   'MELLAGUI_SOUND_CARD_KEY': 'pci-0000_00_1b.0'})
+        c.cmd('settings audio-out plughw:CARD=PCH,DEV=3')
+        icons = [l for l in c.cmd('dock') if l.startswith('icon ')]
+        m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', [l for l in icons if '"Calculator"' in l][0])
+        c.click(int(m[3]) + int(m[5]) // 2, int(m[4]) + int(m[6]) // 2)
+        end = time.time() + 5
+        while time.time() < end and not (os.path.exists(log) and open(log).read().strip()):
+            time.sleep(0.05)
+        return open(log).read().split()[0] if os.path.exists(log) and open(log).read().strip() else None
+
+    def test_sounds_follow_the_sound_server_when_its_default_output_is_on_another_card(self):
+        self.assertEqual(self.sound_route('1', 'bluez_output.B2_9D_EC_2F_7C_53.1'), 'paplay')      # a Bluetooth speaker came after the choice
+
+    def test_the_chosen_alsa_device_is_kept_while_it_is_the_servers_card(self):
+        self.assertEqual(self.sound_route('2', 'alsa_output.pci-0000_00_1b.0.hdmi-stereo'), 'aplay')
+        self.assertEqual(self.sound_route('3', 'alsa_output.pci-0000_00_1b.0.analog-stereo'), 'aplay')
+
+    def test_without_a_sound_server_the_chosen_alsa_device_is_used(self):
+        self.assertEqual(self.sound_route('4', ''), 'aplay')
+
+    def test_the_setting_is_on_by_default_and_saved(self):
+        c = self.start('mellagui-ch2')
+        c.cmd('setting startup-sound')
+        self.assertEqual(c.last[3:], '1')
+        c.cmd('settings startup-sound 0')
+        deadline = time.time() + 5
+        while time.time() < deadline and not (os.path.exists(self.path) and 'startup-sound=0' in open(self.path).read()):
+            time.sleep(0.05)
+        self.assertIn('startup-sound=0', open(self.path).read())
+        c2 = self.start('mellagui-ch2b', conf='startup-sound=0\n')
+        c2.cmd('setting startup-sound')
+        self.assertEqual(c2.last[3:], '0')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings startup-sound maybe')
+
+    def test_a_click_on_a_dock_icon_has_its_own_sound(self):
+        c = self.start('mellagui-ch3')
+        c.cmd('sound')
+        self.assertEqual(c.last, 'ok')
+        self.assertEqual(c.cmd('sound')[0], 'sound last=none n=0')
+        icons = [l for l in c.cmd('dock') if l.startswith('icon ')]
+        m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', [l for l in icons if '"Calculator"' in l][0])
+        c.click(int(m[3]) + int(m[5]) // 2, int(m[4]) + int(m[6]) // 2)
+        c.sync()
+        self.assertEqual(c.cmd('sound')[0], 'sound last=dock n=1')
+
+
 class TestSaver(Base):
     """The screensaver: after idle time the compositor starts mellagui-matrix (a full screen client); the first input ends it."""
 

@@ -49,7 +49,9 @@ static const struct entry table[] = {
       "A card with the history of what you copied (the last 50 texts). Click an entry to use it again; the x deletes one, the bin empties the history. "
       "Super+G shows or hides it, Super+C picks from it with the keyboard." },
     { "sound", NULL, "Sound feedback",
-      "MellaGUI's own beeps, for instance when a sticky key is latched. They are played through ALSA on the output you choose on the Sound page." },
+      "MellaGUI's own short sounds: the beeps of sticky keys, a soft \"pok-pling\" when you click an icon in the dock and the click of a screenshot. They are played through the output you choose on the Sound page." },
+    { "startup-sound", NULL, "Start-up chime",
+      "A short tune of about five seconds when MellaGUI has started: a bouncy mandolin and accordion first, then a warm piano ending. It is made up in code (no sound file), so there is nothing to install; it plays through the Sound page's application output, and tries again for a few seconds if the sound server is not up yet. 'Play now' lets you hear it." },
     { "mixer", NULL, "Volume mixer gadget",
       "A card with the master volume and mute, the list of outputs and one slider for every program that is playing. Super+V shows or hides it." },
     { "sysinfo", NULL, "System monitor gadget",
@@ -76,8 +78,11 @@ static const struct entry table[] = {
     { "audio-profile", NULL, "Card output", "Which output of the sound card is used (analog, HDMI ...). The change applies at once." },
     { "@Applications (PulseAudio / PipeWire)", NULL, "Playback device", "The sound server's own list of outputs: all programs play to the one you choose." },
     { "sink", NULL, "Playback device", "Where the sound of the programs goes. The volume mixer and the keys act on this output." },
-    { "@MellaGUI's own beeps (ALSA)", NULL, "Beeps", "The device that plays MellaGUI's own beeps (sticky keys and the like)." },
-    { "audio-out", NULL, "Beep device", "The ALSA device for MellaGUI's own beeps. 'System default' follows the sound server." },
+    { "@MellaGUI's own beeps (ALSA)", NULL, "Beeps", "The device that plays MellaGUI's own sounds: the beeps of sticky keys, the dock click, the screenshot click and the start-up chime." },
+    { "audio-out", NULL, "Beep device",
+      "The ALSA device for MellaGUI's own sounds. 'System default' follows the sound server, wherever it plays (speakers, a Bluetooth speaker, headphones).\n"
+      "A chosen card is only used while it is also the card of the sound server's own default output; when you switch the server to another card (say a "
+      "Bluetooth speaker connects), the sounds follow it instead of playing into a monitor nobody listens to." },
 
     /* ---- Screen lock */
     { "@Screen lock", NULL, "Screen lock",

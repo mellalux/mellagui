@@ -350,33 +350,34 @@ static bool looks_like_path(const char *s)
     return dot && (!strcasecmp(dot, ".png") || !strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg") || !strcasecmp(dot, ".ppm"));
 }
 
-/* Fills the icon of items[i] from the icon text of the entry. */
-static void load_icon(struct app_item *it, const char *name, const char *spec)
+/* Fills the icon of `pub` (a built-in kind, or a picture loaded into `img`, which `pub->img` then points at) from an icon text: a built-in name, theme:NAME, a bare
+ * name of an installed program's icon or the path of a picture. Nothing usable: the built-in icon guessed from `name`. */
+void lm_dock_icon_load(struct lm_dock_item *pub, struct lm_image *img, const char *name, const char *spec)
 {
-    it->pub.kind = LM_DOCKICON_GENERIC;
-    it->pub.img = NULL;
-    it->pub.plate = false;
+    pub->kind = LM_DOCKICON_GENERIC;
+    pub->img = NULL;
+    pub->plate = false;
     if (!*spec) {
-        it->pub.kind = lm_dockicon_guess(name);
+        pub->kind = lm_dockicon_guess(name);
         return;
     }
     int k = lm_dockicon_by_name(spec);
     if (k >= 0) {
-        it->pub.kind = k;
+        pub->kind = k;
         return;
     }
     char path[PATH_MAX], err[160];
     bool plate = false;
     if (!strncmp(spec, "theme:", 6)) {                                /* the icon the installed program brings along; none: the built-in one */
         if (!lm_icon_find(spec + 6, path, sizeof(path))) {
-            it->pub.kind = lm_dockicon_guess(name);
+            pub->kind = lm_dockicon_guess(name);
             return;
         }
         spec = path;
     } else if (!looks_like_path(spec)) {
         if (!lm_icon_find(spec, path, sizeof(path))) {                /* a bare name that is no built-in icon: maybe an installed one */
             lm_warn("dock: '%s': unknown icon '%s'", name, spec);
-            it->pub.kind = lm_dockicon_guess(name);
+            pub->kind = lm_dockicon_guess(name);
             return;
         }
         spec = path;
@@ -389,28 +390,33 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
             snprintf(path, sizeof(path), "%s", spec);
         }
     }
-    if (lm_img_load_alpha(path, &it->img, err, sizeof(err)) < 0) {
+    if (lm_img_load_alpha(path, img, err, sizeof(err)) < 0) {
         lm_warn("dock: '%s': icon %s: %s", name, path, err);
-        it->pub.kind = lm_dockicon_guess(name);
+        pub->kind = lm_dockicon_guess(name);
         return;
     }
     {                                                                 /* a logo (transparent corners) gets a plate, a picture that fills its square does not */
-        const struct lm_image *im = &it->img;                         /* (looked at before prepare_image cuts it to a circle) */
+        const struct lm_image *im = img;                         /* (looked at before prepare_image cuts it to a circle) */
         int a0 = (int)(im->px[0] >> 24), a1 = (int)(im->px[im->w - 1] >> 24), a2 = (int)(im->px[(size_t)(im->h - 1) * (size_t)im->w] >> 24),
             a3 = (int)(im->px[(size_t)im->h * (size_t)im->w - 1] >> 24);
         plate = a0 < 0x80 && a1 < 0x80 && a2 < 0x80 && a3 < 0x80;
     }
     int max = (lm_dock.icon_size * lm_dock.zoom + 99) / 100 + 2;
     bool fills = false;
-    if (!prepare_image(&it->img, max, &fills)) {
-        lm_img_free(&it->img);
-        it->pub.kind = lm_dockicon_guess(name);
+    if (!prepare_image(img, max, &fills)) {
+        lm_img_free(img);
+        pub->kind = lm_dockicon_guess(name);
         return;
     }
-    it->has_img = true;
-    it->pub.img = &it->img;
-    it->pub.plate = plate;
-    it->pub.round = fills && !plate;
+    pub->img = img;
+    pub->plate = plate;
+    pub->round = fills && !plate;
+}
+
+static void load_icon(struct app_item *it, const char *name, const char *spec)
+{
+    lm_dock_icon_load(&it->pub, &it->img, name, spec);
+    it->has_img = it->pub.img != NULL;
 }
 
 static void resolve_list(struct applist *L, bool launcher_only)

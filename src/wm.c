@@ -29,6 +29,7 @@
 #include "about.h"
 #include "clockfmt.h"
 #include "saver.h"
+#include "search.h"
 #include "backend.h"
 #include "input.h"
 #include "font.h"
@@ -2717,6 +2718,27 @@ static bool launcher_shown(const struct lm_dock_item *it)
     return !launcher_is_self(it) && (!launcher_filter[0] || strcasestr(it->name, launcher_filter));          /* (the Overview button shows: it is a button like the others) */
 }
 
+static bool launcher_name_taken(const char *name);
+
+/* The results of the search for the text typed (search.h): asked again when the text changes or the file index has grown. */
+static char search_for[48];
+static int search_n, search_indexed;
+
+static void search_sync(void)
+{
+    if (!launcher_filter[0]) {
+        search_n = 0;
+        search_for[0] = 0;
+        return;
+    }
+    int idx = lm_search_indexed(NULL);
+    if (strcmp(search_for, launcher_filter) || idx != search_indexed) {
+        snprintf(search_for, sizeof(search_for), "%s", launcher_filter);
+        search_indexed = idx;
+        search_n = lm_search_query(launcher_filter, launcher_name_taken);
+    }
+}
+
 static int launcher_count(void)
 {
     int n = 0;
@@ -2726,7 +2748,8 @@ static int launcher_count(void)
     for (int i = 0; i < lm_launchapps_count(); i++)
         if (launcher_shown(lm_launchapps_item(i)))
             n++;
-    return n;
+    search_sync();
+    return n + search_n;
 }
 
 /* The g-th button of the launcher; *dock_index is its index in the dock, -1 for one that is only in the launcher. NULL when there is none. */
@@ -2743,7 +2766,8 @@ static const struct lm_dock_item *launcher_item(int g, int *dock_index)
     for (int i = 0; i < lm_launchapps_count(); i++)
         if (launcher_shown(lm_launchapps_item(i)) && g-- == 0)
             return lm_launchapps_item(i);
-    return NULL;
+    search_sync();
+    return g >= 0 && g < search_n ? lm_search_item(g) : NULL;           /* what the search found comes after the buttons */
 }
 
 static bool launcher_name_taken(const char *name)
@@ -2926,7 +2950,7 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
             li->icon[g].hit = cell;
             li->icon[g].remove = lm_rect_make(box.x - 8, box.y - 8, 24, 24);
             li->icon[g].item = launcher_item(g, NULL);
-            li->icon[g].running = dock_window_count(wm, li->icon[g].item) > 0;
+            li->icon[g].running = li->icon[g].item && !lm_search_owns(li->icon[g].item) && dock_window_count(wm, li->icon[g].item) > 0;
         }
     }
     li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, ch);
@@ -2948,6 +2972,16 @@ static void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm
                       hint_change[] = "Tab next field   Left / Right cursor (or icon)   Enter saves   Esc back";
     static const char hint_search[] = "Type to search   Enter starts   Esc clears";
     li->hint = li->form ? (li->editing ? hint_change : hint_form) : li->searching ? hint_search : li->edit ? hint_edit : hint_grid;
+    if (li->searching && li->sel >= 0 && li->sel < n) {                  /* a result of the search: what Enter does with it */
+        const struct lm_dock_item *si = li->icon[li->sel].item;
+        static char hint_result[PATH_MAX + 48];
+        if (si && lm_search_owns(si)) {
+            int ri = si->raw <= -1000 ? -1000 - si->raw : -1;
+            const char *d = ri >= 0 ? lm_search_detail(ri) : "";
+            snprintf(hint_result, sizeof(hint_result), "%s   (Esc clears)", d[0] == '/' ? d : si->cmd[0] == '@' ? d : d);
+            li->hint = hint_result;
+        }
+    }
     if (li->form) {
         li->field_label[0] = "Name";
         li->field_label[1] = "Command   (@terminal, mellagui-*, ~/prog, a || b)";
@@ -3012,6 +3046,7 @@ static void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
             return;
         launcher_filter[0] = 0;
         launcher_searching = false;
+        lm_search_begin(wm->srv->loop);                         /* the programs are read and the file index is started (or brought up to date) */
         about_set(wm, false, NULL);
         power_set(wm, false, NULL);
         sw_close(wm);
@@ -3188,7 +3223,7 @@ static void launcher_open_change(struct lm_wm *wm, int g)
 static void launcher_remove(struct lm_wm *wm, int g)
 {
     const struct lm_dock_item *it = launcher_item(g, NULL);
-    if (!it)
+    if (!it || lm_search_owns(it))
         return;
     if (!(it->launcher_only ? lm_settings_launcher_del(wm->srv, it->raw) : lm_settings_dock_del(wm->srv, it->raw)))
         lm_wm_notify(wm, "Launcher", "Could not remove it: there is no config file to write", 5000);
@@ -3272,6 +3307,23 @@ static void launcher_activate(struct lm_wm *wm, int kind, int index)
         const struct lm_dock_item *it = launcher_item(index, &di);
         if (!it)
             break;
+        if (lm_search_owns(it)) {                                     /* a result of the search */
+            if (wm->launcher_edit)
+                break;
+            char cmd[LM_DOCK_CMD_MAX];
+            snprintf(cmd, sizeof(cmd), "%s", it->cmd);
+            launcher_set(wm, false, NULL);
+            if (!strncmp(cmd, "@copy:", 6)) {                             /* the calculator's answer goes to the clipboard */
+                if (wm->srv->seat) {
+                    lm_seat_clip_add(wm->srv->seat, cmd + 6);
+                    lm_seat_clip_use(wm->srv->seat, 0);
+                }
+                lm_wm_notify(wm, "Calculator", cmd + 6, 2500);
+            } else {
+                lm_server_spawn(wm->srv, cmd);
+            }
+            break;
+        }
         if (wm->launcher_edit) {                                      /* edit mode: change it instead of starting it */
             launcher_open_change(wm, index);
             break;
@@ -4293,6 +4345,9 @@ static void launcher_drag_motion(struct lm_wm *wm)
     lm_seat_pointer_position(wm->srv->seat, &x, &y);
     if (!wm->launcher_drag) {
         if (!drag_far_enough(wm, x, y))
+            return;
+        const struct lm_dock_item *dragged = launcher_item(wm->press_panel_ws, NULL);
+        if (!dragged || lm_search_owns(dragged))                    /* what the search found cannot be moved into the dock */
             return;
         wm->launcher_drag = true;
         wm->launcher_drag_g = wm->press_panel_ws;

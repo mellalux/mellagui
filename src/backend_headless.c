@@ -19,6 +19,7 @@
 #include "backend.h"
 #include "idleinhibit.h"
 #include "saver.h"
+#include "search.h"
 #include "input.h"
 #include "log.h"
 #include "mixer.h"
@@ -447,6 +448,18 @@ static void ctl_command(struct ctl_client *c, char *line)
         if (srv->wm) {
             lm_wm_clock_describe(srv->wm, text, sizeof(text));
             ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "calc")) {
+        /* calc EXPRESSION -> "calc ok=1 value=<text>" or "calc ok=0" (the launcher's calculator, search.h), then "ok" */
+        double v;
+        char num[48], expr[256];
+        snprintf(expr, sizeof(expr), "%s %s %s %s", a1 ? a1 : "", a2 ? a2 : "", a3 ? a3 : "", save ? save : "");
+        if (lm_calc_eval(expr, &v)) {
+            lm_calc_format(v, num, sizeof(num));
+            ctl_reply(c, "calc ok=1 value=%s\n", num);
+        } else {
+            ctl_reply(c, "calc ok=0\n");
         }
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "quick")) {

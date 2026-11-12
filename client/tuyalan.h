@@ -34,6 +34,13 @@ int tuyalan_scan(int ms, struct tuyalan_found *out, int max, int stats[2], char 
  *   -1  the command was sent but not confirmed (it must not be sent again blindly: feeding the cat twice is worse than once)
  */
 int tuyalan_set(const char *ip, const char *version, const char *dev_id, const char *local_key, const char *dps, char *err, size_t errsz);
+/*
+ * Asks a device for its values over the local network (the same short connection, protocols 3.3 and 3.4): `json` gets the answer's text, an object
+ * with the member "dps" = the values by number ({"dps":{"1":true,"9":0}}). `ask` (may be NULL) is an object with every number the caller knows and the
+ * value null ({"1":null,"9":null}): a device that does not know the plain question is asked with it. False with `err` when it does not answer.
+ */
+bool tuyalan_get(const char *ip, const char *version, const char *dev_id, const char *local_key, const char *ask, char *json, size_t jn, char *err,
+                 size_t errsz);
 int tuyalan_selftest(void);
 
 #endif

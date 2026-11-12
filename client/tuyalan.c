@@ -315,16 +315,64 @@ static int connect_to(const char *ip, int timeout_ms, char *err, size_t errsz)
     return fd;
 }
 
+static bool version_ok(const char *version, const char *local_key, bool *v34, char *err, size_t errsz)
+{
+    *v34 = !strcmp(version, "3.4");
+    if ((!*v34 && strcmp(version, "3.3")) || strlen(local_key) != 16) {
+        snprintf(err, errsz, "Protocol %s is not spoken here", version);
+        return false;
+    }
+    return true;
+}
+
+/* Protocol 3.4: agrees on a session key - our random number, the device's, both proved with the local key. */
+static bool start_session(struct conn *c, const uint8_t key[16], uint8_t session[16], uint32_t *seq, char *err, size_t errsz)
+{
+    uint8_t mine[16], theirs[16], mac[32], enc[64], out[160], *body;
+    size_t blen;
+    uint32_t cmd;
+    if (getentropy(mine, 16) != 0)
+        for (int i = 0; i < 16; i++)
+            mine[i] = (uint8_t)(rand() ^ (mono_ms() >> i));
+    size_t n = build_frame(out, (*seq)++, 3, enc, ecb_encrypt(key, mine, 16, enc), key);
+    if (!send_all(c->fd, out, n) || read_frame(c, mono_ms() + 2500, &cmd, &body, &blen, true) != 1 || cmd != 4) {
+        snprintf(err, errsz, "The device does not start a session (is another program connected to it?)");
+        return false;
+    }
+    if (blen % 16 == 4) {                                       /* (a return code in front) */
+        body += 4;
+        blen -= 4;
+    }
+    long pl = ecb_decrypt(key, body, blen);
+    lm_hmac_sha256(key, 16, mine, 16, mac);
+    if (pl < 48 || !lm_ct_equal(mac, body + 16, 32)) {
+        snprintf(err, errsz, "The device does not accept the local key (was it paired again? log out and in to fetch the new one)");
+        return false;
+    }
+    memcpy(theirs, body, 16);
+    lm_hmac_sha256(key, 16, theirs, 16, mac);
+    n = build_frame(out, (*seq)++, 5, enc, ecb_encrypt(key, mac, 32, enc), key);
+    if (!send_all(c->fd, out, n)) {
+        snprintf(err, errsz, "The connection to the device broke");
+        return false;
+    }
+    struct lm_aes128 a;
+    uint8_t x[16];
+    for (int i = 0; i < 16; i++)
+        x[i] = mine[i] ^ theirs[i];
+    lm_aes128_init(&a, key);
+    lm_aes128_encrypt_block(&a, x, session);
+    return true;
+}
+
 int tuyalan_set(const char *ip, const char *version, const char *dev_id, const char *local_key, const char *dps, char *err, size_t errsz)
 {
-    bool v34 = !strcmp(version, "3.4");
-    uint8_t key[16], session[16], plain[FRAME_MAX], enc[FRAME_MAX], out[FRAME_MAX], *body;
+    bool v34;
+    uint8_t key[16], session[16] = { 0 }, plain[FRAME_MAX], enc[FRAME_MAX], out[FRAME_MAX], *body;
     size_t blen;
     uint32_t cmd, seq = 1;
-    if ((!v34 && strcmp(version, "3.3")) || strlen(local_key) != 16) {
-        snprintf(err, errsz, "Protocol %s is not spoken here", version);
+    if (!version_ok(version, local_key, &v34, err, errsz))
         return 0;
-    }
     if (strlen(dps) + strlen(dev_id) * 2 + 120 > 1200) {
         snprintf(err, errsz, "The value is too long");
         return 0;
@@ -334,41 +382,8 @@ int tuyalan_set(const char *ip, const char *version, const char *dev_id, const c
     if (c.fd < 0)
         return 0;
     int ret = 0;
-    if (v34) {                                                  /* agree on a session key: our random number, the device's, both proved with the local key */
-        uint8_t mine[16], theirs[16], mac[32];
-        if (getentropy(mine, 16) != 0)
-            for (int i = 0; i < 16; i++)
-                mine[i] = (uint8_t)(rand() ^ (mono_ms() >> i));
-        size_t n = build_frame(out, seq++, 3, enc, ecb_encrypt(key, mine, 16, enc), key);
-        long pl = -1;
-        if (!send_all(c.fd, out, n) || read_frame(&c, mono_ms() + 2500, &cmd, &body, &blen, true) != 1 || cmd != 4) {
-            snprintf(err, errsz, "The device does not start a session (is another program connected to it?)");
-            goto done;
-        }
-        if (blen % 16 == 4) {                                   /* (a return code in front) */
-            body += 4;
-            blen -= 4;
-        }
-        pl = ecb_decrypt(key, body, blen);
-        lm_hmac_sha256(key, 16, mine, 16, mac);
-        if (pl < 48 || !lm_ct_equal(mac, body + 16, 32)) {
-            snprintf(err, errsz, "The device does not accept the local key (was it paired again? log out and in to fetch the new one)");
-            goto done;
-        }
-        memcpy(theirs, body, 16);
-        lm_hmac_sha256(key, 16, theirs, 16, mac);
-        n = build_frame(out, seq++, 5, enc, ecb_encrypt(key, mac, 32, enc), key);
-        if (!send_all(c.fd, out, n)) {
-            snprintf(err, errsz, "The connection to the device broke");
-            goto done;
-        }
-        struct lm_aes128 a;
-        uint8_t x[16];
-        for (int i = 0; i < 16; i++)
-            x[i] = mine[i] ^ theirs[i];
-        lm_aes128_init(&a, key);
-        lm_aes128_encrypt_block(&a, x, session);
-    }
+    if (v34 && !start_session(&c, key, session, &seq, err, errsz))
+        goto done;
     /* the command */
     size_t n;
     uint32_t sent_cmd;
@@ -422,6 +437,106 @@ done:
     if (ret == 1)
         err[0] = 0;
     return ret;
+}
+
+/* What a frame of the device says, as text in out: the JSON it carries (decrypted), or the plain words of a refusal. *rc = its return code. */
+static void frame_text(bool v34, const uint8_t key[16], uint8_t *body, size_t blen, uint32_t *rc, char *out, size_t outsz)
+{
+    *rc = 0;
+    out[0] = 0;
+    if (blen >= 4 && (be32(body) & 0xffffff00u) == 0) {         /* (a small number in front is the return code) */
+        *rc = be32(body);
+        body += 4;
+        blen -= 4;
+    }
+    if (!v34 && blen >= 15 && !memcmp(body, "3.3", 3)) {         /* (a report of new values has the version in clear text) */
+        body += 15;
+        blen -= 15;
+    }
+    if (blen == 0 || blen >= outsz)
+        return;
+    memcpy(out, body, blen);                                    /* a refusal of 3.3 is plain text */
+    out[blen] = 0;
+    long pl = ecb_decrypt(key, body, blen);
+    if (pl <= 0)
+        return;
+    if (pl >= 15 && !memcmp(body, v34 ? "3.4" : "3.3", 3)) {
+        body += 15;
+        pl -= 15;
+    }
+    if (pl > 0 && body[0] == '{') {
+        memcpy(out, body, (size_t)pl);
+        out[pl] = 0;
+    }
+}
+
+bool tuyalan_get(const char *ip, const char *version, const char *dev_id, const char *local_key, const char *ask, char *json, size_t jn, char *err,
+                 size_t errsz)
+{
+    bool v34, ok = false, asked_again = false;
+    uint8_t key[16], session[16] = { 0 }, plain[FRAME_MAX], enc[FRAME_MAX], out[FRAME_MAX], *body;
+    size_t blen;
+    uint32_t cmd, seq = 1;
+    if (!version_ok(version, local_key, &v34, err, errsz))
+        return false;
+    if (strlen(dev_id) * 3 + (ask ? strlen(ask) : 0) + 120 > 1200) {
+        snprintf(err, errsz, "The question is too long");
+        return false;
+    }
+    memcpy(key, local_key, 16);
+    struct conn c = { .fd = connect_to(ip, 1500, err, errsz) };
+    if (c.fd < 0)
+        return false;
+    if (v34 && !start_session(&c, key, session, &seq, err, errsz))
+        goto done;
+    /* the question has no version header in either protocol */
+    int jl = snprintf((char *)plain, sizeof(plain), "{\"gwId\":\"%s\",\"devId\":\"%s\",\"uid\":\"%s\",\"t\":\"%lld\"}", dev_id, dev_id, dev_id, (long long)time(NULL));
+    uint32_t sent_cmd = v34 ? 16 : 10;
+    size_t n = build_frame(out, seq++, sent_cmd, enc, ecb_encrypt(v34 ? session : key, plain, (size_t)jl, enc), v34 ? session : NULL);
+    if (!send_all(c.fd, out, n)) {
+        snprintf(err, errsz, "The connection to the device broke");
+        goto done;
+    }
+    snprintf(err, errsz, "The device did not say its values");
+    int64_t deadline = mono_ms() + 2500;
+    while (read_frame(&c, deadline, &cmd, &body, &blen, v34) == 1) {
+        uint32_t rc;
+        static _Thread_local char text[FRAME_MAX];
+        frame_text(v34, v34 ? session : key, body, blen, &rc, text, sizeof(text));
+        if (text[0] == '{' && strstr(text, "\"dps\"")) {
+            if (strlen(text) < jn) {
+                snprintf(json, jn, "%s", text);
+                ok = true;
+            } else {
+                snprintf(err, errsz, "The device's values do not fit");
+            }
+            break;
+        }
+        /* Some 3.3 devices (ids of 22 characters) do not know the question: they are told "set these values to nothing" and report them. */
+        if (!v34 && !asked_again && ask && *ask && strstr(text, "data unvalid")) {
+            asked_again = true;
+            jl = snprintf((char *)plain, sizeof(plain), "{\"devId\":\"%s\",\"uid\":\"%s\",\"t\":\"%lld\",\"dps\":%s}", dev_id, dev_id, (long long)time(NULL), ask);
+            memcpy(enc, "3.3\0\0\0\0\0\0\0\0\0\0\0\0", 15);
+            sent_cmd = 13;
+            n = build_frame(out, seq++, sent_cmd, enc, 15 + ecb_encrypt(key, plain, (size_t)jl, enc + 15), NULL);
+            if (!send_all(c.fd, out, n))
+                break;
+            deadline = mono_ms() + 2500;
+            continue;
+        }
+        if (cmd == sent_cmd && rc != 0) {
+            snprintf(err, errsz, "The device does not say its values%s%.80s", text[0] && text[0] != '{' ? ": " : "", text[0] != '{' ? text : "");
+            if (!(sent_cmd == 13))                              /* (after the second question a report may still follow the refusal) */
+                break;
+        }
+    }
+done:
+    close(c.fd);
+    lm_secure_zero(key, sizeof(key));
+    lm_secure_zero(session, sizeof(session));
+    if (ok)
+        err[0] = 0;
+    return ok;
 }
 
 int tuyalan_selftest(void)

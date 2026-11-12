@@ -16291,11 +16291,13 @@ class TestSmart(Base):
                     'MELLAGUI_TUYA_LAN_FAKE': '',                               # (no listening in the real network; local tests name a device here)
                     'MELLAGUI_SMART_NO_BACKGROUND': '1'}                        # (the window does not start the timetable's process)
 
-    def local_device(self, version, mode='ok', key='0123456789abcdef'):
+    def local_device(self, version, mode='ok', key='0123456789abcdef', dps=None):
         """A stand-in for plug1 in the local network (tests/fake_tuya_device.py); the program is pointed at it."""
         self.dev_log = os.path.join(self.dir, 'device.log')
         fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_tuya_device.py')
-        srv = subprocess.Popen([sys.executable, fake, version, key, self.dev_log, mode], stdout=subprocess.PIPE)
+        import json
+        srv = subprocess.Popen([sys.executable, fake, version, key, self.dev_log, mode], stdout=subprocess.PIPE,
+                               env=dict(os.environ, FAKE_DPS=json.dumps(dps or {'1': False})))
         self.addCleanup(lambda: (srv.kill(), srv.wait(), srv.stdout.close()))
         line = srv.stdout.readline().decode()
         self.assertTrue(line.startswith('port '), line)
@@ -16610,6 +16612,44 @@ class TestSmart(Base):
         self.press(('blind1', 'control', 'button'), at=0)                       # not heard in this network: the cloud
         self.wait(lambda: self.state()['blind1']['status']['control'] == 'open', 'the blind goes through the cloud')
         self.assertEqual(self.view().get('lan'), '1')
+
+    def test_a_device_says_its_values_itself_in_both_protocol_versions(self):
+        for version, mode in (('3.3', 'ok'), ('3.4', 'ok'), ('3.3', 'old22')):
+            self.cloud('get' + version[-1] + mode)
+            self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+            self.local_device(version, mode, dps={'1': True, '9': 120, '77': 'x'})       # the cloud says the switch is off
+            code, out = self.cli('--get-local', 'plug1')
+            self.assertEqual(code, 0, out)
+            self.assertIn('(protocol %s) says {' % version, out)
+            self.assertRegex(out, r' 1  switch_1 +=\s+on +the cloud says off')
+            self.assertRegex(out, r' 9  countdown_1 +=\s+120 s')
+            self.assertIn('2 values read locally', out)                        # (77 is no data point the account knows)
+            if mode == 'old22':                                               # (it refuses the plain question: that is its one "error")
+                self.assertIn('{"asked": ["1", "9"]}', self.device_log())      # asked again, with every number it knows
+            else:
+                self.assertNotIn('error', self.device_log())
+        self.local_device('3.4', key='XXXXXXXXXXXXXXXX')
+        code, out = self.cli('--get-local', 'plug1')
+        self.assertEqual(code, 1)
+        self.assertIn('does not start a session', out)                         # (a device with another key just hangs up)
+
+    def test_the_window_shows_what_the_device_says_not_what_the_cloud_says(self):
+        self.cloud('lanread')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.local_device('3.4', dps={'1': True, '9': 0})                       # on, while the cloud's list says off
+        self.env['MELLAGUI_SMART_READ_MS'] = '300'
+        c = self.window('lr1')
+        self.wait(self.devices_shown, 'the devices')
+        value = lambda: self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4]
+        self.wait(lambda: value() == 'on', 'the switch shows the device\'s own value')
+        self.assertGreater(int(self.view()['reads']), 0)
+        time.sleep(1.6)                                                         # (two more answers of the cloud do not turn it back)
+        self.assertEqual(value(), 'on')
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20)
+        self.wait(lambda: '{"dps": {"1": false}}' in self.device_log(), 'the device is told')
+        time.sleep(0.8)
+        self.assertEqual(value(), 'off')
+        self.assertNotIn('error', self.device_log())
 
     def test_a_device_that_is_gone_from_the_network_is_told_through_the_cloud(self):
         self.cloud('lanfall')

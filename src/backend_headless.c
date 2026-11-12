@@ -24,6 +24,7 @@
 #include "input.h"
 #include "log.h"
 #include "mixer.h"
+#include "output.h"
 #include "sysinfo.h"
 #include "render.h"
 #include "seat.h"
@@ -328,8 +329,7 @@ static void ctl_command(struct ctl_client *c, char *line)
                 h->fb = (struct lm_framebuffer){ .width = nw, .height = nh, .stride = nw * 4, .pixels = px };
                 h->w = nw;
                 h->h = nh;
-                h->out.width = nw;
-                h->out.height = nh;
+                lm_output_set_mode(&h->out, nw, nh);
                 h->out.phys_width_mm = nw * 254 / 960;
                 h->out.phys_height_mm = nh * 254 / 960;
             }
@@ -351,6 +351,19 @@ static void ctl_command(struct ctl_client *c, char *line)
         struct lm_loop_stats st;
         lm_loop_stats(srv->loop, &st);
         ctl_reply(c, "loop stalls=%u worst_ms=%u threshold=%u worker=%d\nok\n", st.stalls, st.worst_ms, st.threshold_ms, lm_work_pending());
+    } else if (!strcmp(cmd, "scale")) {
+        /* scale [PERCENT] -> "output <name> mode=WxH logical=WxH scale=<milli>" each (after the change), then "ok" */
+        if (a1) {
+            int pct = atoi(a1);
+            if (pct < 100 || pct > 400) { ctl_reply(c, "err usage: scale [100..400]\n"); return; }
+            char v[16];
+            snprintf(v, sizeof(v), "%d", pct);
+            lm_settings_set(srv->settings, "scale", v);
+        }
+        struct lm_output *o;
+        lm_list_for_each(o, &h->base.outputs, link)
+            ctl_reply(c, "output %s mode=%dx%d logical=%dx%d scale=%d\n", o->name, lm_output_pw(o), lm_output_ph(o), o->width, o->height, o->scale_milli);
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "font")) {
         /* font -> "font generation=<n> name=<file|bitmap>" (the cells' font, see font.h), "labels <file|mono>" (the proportional one), then "ok" */
         const char *name = lm_font_name();
@@ -767,8 +780,7 @@ static int hl_init(struct lm_backend *b)
     snprintf(h->out.name, sizeof(h->out.name), "headless-0");
     snprintf(h->out.make, sizeof(h->out.make), "MellaGUI");
     snprintf(h->out.model, sizeof(h->out.model), "headless");
-    h->out.width = h->w;
-    h->out.height = h->h;
+    lm_output_set_mode(&h->out, h->w, h->h);
     h->out.refresh_mhz = 60000;
     h->out.phys_width_mm = h->w * 254 / 960;
     h->out.phys_height_mm = h->h * 254 / 960;
@@ -788,8 +800,7 @@ static int hl_init(struct lm_backend *b)
         snprintf(x->out.name, sizeof(x->out.name), "headless-%d", i + 1);
         snprintf(x->out.make, sizeof(x->out.make), "MellaGUI");
         snprintf(x->out.model, sizeof(x->out.model), "headless");
-        x->out.width = w;
-        x->out.height = hh;
+        lm_output_set_mode(&x->out, w, hh);
         x->out.refresh_mhz = 60000;
         x->out.phys_width_mm = w * 254 / 960;
         x->out.phys_height_mm = hh * 254 / 960;
@@ -868,8 +879,7 @@ static int hl_apply_mode(struct lm_output *out)
     h->fb.height = hh;
     h->fb.stride = w * 4;
     h->frames = 0;                                  /* buffer age 0: everything is redrawn */
-    out->width = w;
-    out->height = hh;
+    lm_output_set_mode(out, w, hh);
     out->phys_width_mm = w * 254 / 960;
     out->phys_height_mm = hh * 254 / 960;
     if (out->backend->listener.output_changed)

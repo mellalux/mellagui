@@ -392,6 +392,7 @@ struct app {
     int sec_tab;                        /* the Security page's part: 0 the screen lock, 1 the screensaver */
     int theme_tab;                      /* the Themes page's part: 0 the theme and its colours, 1 the buttons, 2 the sizes, 3 the font */
     int fpage;                          /* the Font part: which page of the list of fonts */
+    int display_tab;                    /* the Display page's part: 0 the resolution, 1 the scale */
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
@@ -739,12 +740,12 @@ static int output_names(const struct app *a, char names[8][40])
     return n;
 }
 
-static void build_display(struct app *a, int x, int y, int w)
+static void build_display_resolution(struct app *a, int x, int y, int w)
 {
     char onames[8][40];
     int nout = output_names(a, onames);
     if (nout >= 2) {                                    /* several monitors: their order, left to right */
-        add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Monitors, left to right");
+        { struct widget *hd = add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Monitors, left to right"); hd->label_w = w - 210; }
         y += ROW_H;
         const char *ol = kv_get(a, "outputs");
         char nm[64], ds[96];
@@ -789,7 +790,7 @@ static void build_display(struct app *a, int x, int y, int w)
                 snprintf(line, sizeof(line), "Monitor: %s", mo);                 /* no manufacturer known */
             else
                 snprintf(line, sizeof(line), "Monitor: %s %s", mk, mo);
-            add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, line);
+            { struct widget *hd = add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, line); hd->label_w = nout >= 2 ? 0 : w - 210; }
             y += ROW_H;
             char info[112];
             if (mmw > 0 && mmh > 0)
@@ -810,7 +811,7 @@ static void build_display(struct app *a, int x, int y, int w)
         else
             snprintf(head, sizeof(head), "Current resolution: %d x %d", nw, nh);
     }
-    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, head);
+    { struct widget *hd = add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, head); hd->label_w = (nout < 2 && !*kv_get(a, "monitor")) ? w - 210 : 0; }
     y += ROW_H;
     const char *cur = kv_get(a, "resolution");
     add_radio(a, x, y, w, "Automatic (the panel's own shape)", "resolution", "auto", !strcmp(cur, "auto"));
@@ -830,6 +831,47 @@ static void build_display(struct app *a, int x, int y, int w)
     struct widget *mb = add(a, W_BUTTON, (struct rect){ x, y + 10, 260, ROW_H - 4 }, "Monitor settings...");
     snprintf(mb->key, sizeof(mb->key), "launch");
     snprintf(mb->arg, sizeof(mb->arg), "mellagui-monitor");
+}
+
+/* The scale: everything of the shell and of the programs that know it gets bigger (a bigger font, bigger buttons, as sharp as ever). */
+static void build_display_scale(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Scale");
+    y += ROW_H;
+    if (!*kv_get(a, "scale")) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "This MellaGUI cannot change the scale.");
+        return;
+    }
+    int cur = atoi(kv_get(a, "scale"));
+    char line[96], nm[8], lab[16];
+    int nw = 0, nh = 0, nhz = 0;
+    if (sscanf(kv_get(a, "resolution-now"), "%dx%d@%d", &nw, &nh, &nhz) >= 2 && nw > 0)
+        snprintf(line, sizeof(line), "The screen has %d x %d pixels; at %d %% the shell works in %d x %d.", nw, nh, cur,
+                 (int)((double)nw * 100.0 / cur), (int)((double)nh * 100.0 / cur));
+    else
+        snprintf(line, sizeof(line), "Makes everything bigger. Now %d %%.", cur);
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, line);
+    y += ROW_H + 2;
+    static const int steps[] = { 100, 125, 150, 175, 200, 250, 300 };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++, y += ROW_H) {
+        snprintf(nm, sizeof(nm), "%d", steps[i]);
+        snprintf(lab, sizeof(lab), "%d %%", steps[i]);
+        add_radio(a, x, y, 200, lab, "scale", nm, cur == steps[i]);
+    }
+    y += 4;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "It applies to every monitor. A program that does not know the scale");
+    y += ROW_H - 6;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "is enlarged by the shell and looks softer until it is updated.");
+}
+
+static void build_display(struct app *a, int x, int y, int w)
+{
+    static const char *const names[2] = { "Resolution", "Scale" };
+    if (a->display_tab == 1)
+        build_display_scale(a, x, y, w);
+    else
+        build_display_resolution(a, x, y, w);
+    build_part_tabs(a, x, y, w, "display-tab", names, 2, a->display_tab);
 }
 
 /* The hand-written mellagui.conf: dock, shortcuts, colours, sizes. The panel does not edit them, it opens the file. */
@@ -1941,7 +1983,7 @@ static void attach_help(struct app *a, int px, int pw)
             snprintf(seen[nseen++], sizeof(seen[0]), "%s", id);
         struct rect hr;
         if (w->kind == W_HEADING) {
-            int tw = lm_font_text_width_bold(w->text) + 10;
+            int tw = LM_MIN(lm_font_text_width_bold(w->text), w->label_w > 0 ? w->label_w : 1 << 20) + 10;
             hr = (struct rect){ w->r.x + LM_MIN(tw, w->r.w - HELP_D - 2), w->r.y + (w->r.h - HELP_D) / 2 - 1, HELP_D, HELP_D };
         } else {
             hr = (struct rect){ px + pw - HELP_D - 2, w->r.y + (w->r.h - HELP_D) / 2, HELP_D, HELP_D };
@@ -2020,18 +2062,16 @@ static void help_geom(const struct app *a, struct help_geom *g)
 
 static void paint_help(struct app *a)
 {
-    uint32_t *px = a->win.pixels;                               /* the page behind the card is dimmed */
-    for (size_t i = 0, n = (size_t)a->win.bw * (size_t)a->win.bh; i < n; i++)
-        px[i] = lm_mix_rgb(px[i], 0x000000, 0.6);
+    wlwin_dim(&a->win, 0.6);                                    /* the page behind the card is dimmed */
     struct help_geom *g = calloc(1, sizeof(*g));
     if (!g)
         return;
     help_geom(a, g);
     const struct rect *c = &g->card;
-    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
-    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, c->x, c->y, c->w, c->h, 10, COL_BG);
+    wlwin_round_fill(&a->win, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
+    wlwin_round_fill(&a->win, c->x, c->y, c->w, c->h, 10, COL_BG);
     int hx = c->x + 20, hy = c->y + 20;
-    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, hx, hy - 1, HELP_D, HELP_D, HELP_D / 2, COL_ACCENT);
+    wlwin_round_fill(&a->win, hx, hy - 1, HELP_D, HELP_D, HELP_D / 2, COL_ACCENT);
     draw_text(a, hx + (HELP_D - lm_font_text_width("?")) / 2, hy, "?", COL_BG, 0);
     draw_text(a, hx + HELP_D + 10, hy, a->help_title, COL_TEXT, c->w - 40 - HELP_D - 10);
     fill(a, (struct rect){ c->x + 20, hy + 22, c->w - 40, 1 }, COL_KEY);
@@ -2045,7 +2085,7 @@ static void paint_help(struct app *a)
         draw_text(a, c->x + c->w - 24 - lm_font_text_width(more), g->close.y + 6, more, COL_DIM, 0);
     }
     bool hot = a->px >= g->close.x && a->px < g->close.x + g->close.w && a->py >= g->close.y && a->py < g->close.y + g->close.h;
-    lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, g->close.x, g->close.y, g->close.w, g->close.h, 14, hot ? COL_DOWN : COL_HOVER);
+    wlwin_round_fill(&a->win, g->close.x, g->close.y, g->close.w, g->close.h, 14, hot ? COL_DOWN : COL_HOVER);
     draw_text(a, g->close.x + (g->close.w - lm_font_text_width("Close")) / 2, g->close.y + (g->close.h - LM_FONT_H) / 2, "Close", COL_TEXT, 0);
     free(g);
 }
@@ -2365,6 +2405,10 @@ static void activate(struct app *a, int idx)
             a->input_tab = atoi(w->arg) == 1 ? 1 : 0;
             a->focus = -1;
             a->win.redraw = true;
+        } else if (!strcmp(w->key, "display-tab")) {
+            a->display_tab = atoi(w->arg) == 1 ? 1 : 0;
+            a->focus = -1;
+            a->win.redraw = true;
         } else if (!strcmp(w->key, "theme-tab")) {
             a->theme_tab = (LM_CLAMP(atoi(w->arg), 0, 3) + 3) % 4;       /* the buttons are Font, Colours, Buttons, Sizes */
             a->focus = -1;
@@ -2514,14 +2558,14 @@ static void paint_widget(struct app *a, int idx)
     const struct rect *r = &w->r;
     switch (w->kind) {
     case W_HEADING:
-        wlwin_text_bold(&a->win, r->x, text_y(r), w->text, 1, COL_ACCENT, r->w);
+        wlwin_text_bold(&a->win, r->x, text_y(r), w->text, 1, COL_ACCENT, w->label_w > 0 ? w->label_w : r->w);
         fill(a, (struct rect){ r->x, r->y + r->h - 2, r->w, 1 }, COL_KEY);
         break;
     case W_LABEL:
         draw_text(a, r->x, text_y(r), w->text, COL_DIM, r->w);
         break;
     case W_HELP:                                                /* the small "?" circle */
-        lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, r->x, r->y, r->w, r->h, r->w / 2, hot ? COL_ACCENT : COL_KEY);
+        wlwin_round_fill(&a->win, r->x, r->y, r->w, r->h, r->w / 2, hot ? COL_ACCENT : COL_KEY);
         draw_text(a, r->x + (r->w - lm_font_text_width("?")) / 2, r->y + (r->h - LM_FONT_H) / 2, "?", hot ? COL_BG : COL_TEXT, 0);
         if (focus)
             outline(a, (struct rect){ r->x - 2, r->y - 2, r->w + 4, r->h + 4 }, COL_ACCENT);
@@ -2607,7 +2651,7 @@ static void paint_widget(struct app *a, int idx)
     case W_SWATCH:
         if (w->arg[0] == 'r') {                                           /* a preview button: as round as the setting says (100 = a circle) */
             int pct = atoi(w->arg + 1);
-            lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, r->x, r->y, r->w, r->h, LM_MIN(r->w, r->h) / 2 * pct / 100, (uint32_t)w->val & 0xffffff);
+            wlwin_round_fill(&a->win, r->x, r->y, r->w, r->h, LM_MIN(r->w, r->h) / 2 * pct / 100, (uint32_t)w->val & 0xffffff);
             break;
         }
         fill(a, *r, (uint32_t)w->val & 0xffffff);
@@ -2953,11 +2997,11 @@ static int selftest_help(void)
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "sources", "mic1|Built-in microphone;mic2|USB headset" }, { "source", "mic1" }, { "source-volume", "60" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
         { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "saver-style", "room" }, { "config-file", "/x/mellagui.conf" },
-        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" }, { "font-ui", "auto" },
+        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" }, { "font-ui", "auto" }, { "scale", "100" }, { "resolution-now", "1024x600@60" },
     };
     int bad = 0, shown = 0;
-    for (int pgi = 0; pgi < N_PAGES + 6; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */
-        int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : pgi == N_PAGES + 3 ? PAGE_INPUT : pgi == N_PAGES + 4 ? PAGE_SOUND : PAGE_COLOURS;
+    for (int pgi = 0; pgi < N_PAGES + 7; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */
+        int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : pgi == N_PAGES + 3 ? PAGE_INPUT : pgi == N_PAGES + 4 ? PAGE_SOUND : pgi == N_PAGES + 6 ? PAGE_DISPLAY : PAGE_COLOURS;
         memset(&fa, 0, sizeof(fa));
         for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
             kv_set(&fa, kvs[i].k, kvs[i].v);
@@ -2966,6 +3010,7 @@ static int selftest_help(void)
         fa.input_tab = pgi == N_PAGES + 3 ? 1 : 0;
         fa.sound_tab = pgi == N_PAGES + 4 ? 1 : 0;
         fa.theme_tab = pgi == N_PAGES + 1 ? 1 : pgi == N_PAGES + 2 ? 2 : pgi == N_PAGES + 5 ? 3 : 0;
+        fa.display_tab = pgi == N_PAGES + 6 ? 1 : 0;
         fa.win.bw = 860;
         fa.win.bh = 560;
         fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;
@@ -3055,6 +3100,7 @@ static int cli(struct app *a, int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest() ? 1 : selftest_help();

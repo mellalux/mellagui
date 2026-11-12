@@ -707,7 +707,7 @@ static void button(struct app *a, int h, const char *text, bool on, uint32_t on_
     struct wlwin *w = &a->win;
     struct rc r = rect_of(h);
     uint32_t bg = on ? on_rgb : a->hover == h ? lm_theme.button_hover : lm_theme.button;
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
+    wlwin_round_fill(w, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
     wlwin_text(w, r.x + (r.w - lm_font_text_width(text)) / 2, r.y + (r.h - LM_FONT_H) / 2, text, 1, on ? lm_theme.ink : lm_theme.text, r.w - 6);
 }
 
@@ -738,13 +738,13 @@ static void paint_alarms(struct app *a)
         struct rc r = rect_of(H_AROW0 + i);
         const struct alarm *al = &a->alarms[i];
         uint32_t bg = i == a->asel ? lm_theme.button_hover : lm_theme.button;
-        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, r.x, r.y, r.w, r.h, lm_button_radius(8), bg);
+        wlwin_round_fill(w, r.x, r.y, r.w, r.h, lm_button_radius(8), bg);
         char tm[8];
         snprintf(tm, sizeof(tm), "%02d:%02d", al->hour, al->min);
         wlwin_text(w, r.x + 10, r.y + 1, tm, 2, al->on ? lm_theme.text : lm_theme.text_dim, 0);
         wlwin_text(w, r.x + 112, r.y + (r.h - LM_FONT_H) / 2, repeat_labels[al->repeat], 1, lm_theme.text_dim, 110);
         struct rc sw = { r.x + r.w - 64, r.y + 5, 54, r.h - 10 };                  /* the switch */
-        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, sw.x, sw.y, sw.w, sw.h, lm_button_radius(sw.h / 2), al->on ? lm_theme.ok : lm_theme.background);
+        wlwin_round_fill(w, sw.x, sw.y, sw.w, sw.h, lm_button_radius(sw.h / 2), al->on ? lm_theme.ok : lm_theme.background);
         const char *st = al->on ? "On" : "Off";
         wlwin_text(w, sw.x + (sw.w - lm_font_text_width(st)) / 2, sw.y + (sw.h - LM_FONT_H) / 2, st, 1, al->on ? lm_theme.ink : lm_theme.text_dim, 0);
     }
@@ -1255,6 +1255,7 @@ static void tray_clicked(struct app *a, int64_t now)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     bool background = false;
     for (int i = 1; i < argc; i++) {

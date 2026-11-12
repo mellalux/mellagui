@@ -160,6 +160,8 @@ bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index);
 bool lm_settings_get(struct lm_settings *s, const char *key, char *out, size_t n);
 /* Same as a `set` request (validates, applies, saves, announces). */
 bool lm_settings_set(struct lm_settings *s, const char *key, const char *value);
+/* Applies config.scale_pct to every output (output.h) and tells the wm and the clients. */
+void lm_settings_apply_scale(struct lm_server *srv);
 /* "key=value key=value ..." for the control socket. */
 void lm_settings_dump(struct lm_settings *s, char *out, size_t n);
 

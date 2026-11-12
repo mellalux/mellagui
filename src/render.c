@@ -104,6 +104,7 @@ struct lm_renderer {
     struct lm_gl *gl;                   /* the GL renderer; NULL = software (render_gl.inc) */
     bool gl_owned;                      /* we made it (headless); the DRM backend owns its own */
     unsigned sprite_tex[LM_CURSOR_POINTER + 1];
+    int sprite_k[LM_CURSOR_POINTER + 1];        /* ... and the magnification each was made for */
     struct lm_server *srv;
     struct lm_idle *idle;
     struct lm_timer *frame_timer;
@@ -115,6 +116,9 @@ struct paint_ctx {
     struct lm_renderer *r;
     struct lm_output *out;
     struct lm_framebuffer *fb;
+    double s;                           /* the output's scale (1.0 = one logical pixel is one pixel of the framebuffer) */
+    int ox, oy;                         /* the global position of framebuffer pixel (0, 0): out->x / out->y; 0 in a physical view */
+    int fbx, fby;                       /* where framebuffer pixel (0, 0) lies in the output's physical pixels (a scratch picture of a part of the output) */
     struct lm_rect clip;                /* global, already clipped to the output */
     int idx;                            /* scene items seen so far */
     const struct lm_surface *skip_until; /* the items below this opaque cover are not painted (NULL: paint all) */
@@ -273,7 +277,67 @@ static inline uint32_t blend_px(uint32_t src, uint32_t dst)
 static inline uint32_t *fb_row(const struct paint_ctx *c, int gy)
 {
     return (uint32_t *)((uint8_t *)c->fb->pixels +
-                        (size_t)(gy - c->out->y) * (size_t)c->fb->stride) - c->out->x;
+                        (size_t)(gy - c->oy) * (size_t)c->fb->stride) - c->ox;
+}
+
+/* ---- scale ---------------------------------------------------------------------------------------------------------------
+ * Painting code works in LOGICAL coordinates (global, as the wm has them: out->x / out->y .. + out->width / height). The
+ * framebuffer is PHYSICAL: `scale` times as many pixels. The primitives convert. prect() maps a logical rectangle to
+ * physical pixels relative to the output's corner; BOTH edges are rounded, so rectangles that touch still touch and a
+ * damage rectangle covers exactly the pixels its painting touched. pview() makes a context that addresses the framebuffer
+ * in those physical pixels (origin 0, clip converted): the *_px functions are the pixel loops and work in it.
+ * With scale 1 everything is the identity and the pictures are those of before the scale existed.
+ */
+static inline void ctx_init(struct paint_ctx *c)
+{
+    c->s = lm_output_scalef(c->out);
+    c->ox = c->out->x;
+    c->oy = c->out->y;
+}
+
+static inline int sround(double v)
+{
+    return (int)lround(v);
+}
+
+static inline struct lm_rect prect_at(int ox, int oy, double s, const struct lm_rect *r)
+{
+    if (s == 1.0)
+        return lm_rect_make(r->x - ox, r->y - oy, r->w, r->h);
+    int x0 = sround((double)(r->x - ox) * s), y0 = sround((double)(r->y - oy) * s);
+    int x1 = sround((double)(r->x + r->w - ox) * s), y1 = sround((double)(r->y + r->h - oy) * s);
+    return lm_rect_make(x0, y0, x1 - x0, y1 - y0);
+}
+
+static inline struct lm_rect prect(const struct paint_ctx *c, const struct lm_rect *r)
+{
+    return prect_at(c->ox, c->oy, c->s, r);
+}
+
+static inline void pview(const struct paint_ctx *c, struct paint_ctx *pc)
+{
+    *pc = *c;
+    pc->clip = prect(c, &c->clip);
+    pc->ox = c->fbx;                                    /* physical pixel (x, y) of the output is framebuffer pixel (x - fbx, y - fby) */
+    pc->oy = c->fby;
+    pc->s = 1.0;
+    pc->fbx = pc->fby = 0;
+}
+
+/* A length (radius, thickness) in physical pixels; never 0 for something that is there. */
+static inline int plen(const struct paint_ctx *c, int v)
+{
+    return v <= 0 ? 0 : c->s == 1.0 ? v : LM_MAX(sround((double)v * c->s), 1);
+}
+
+static void blit_scaled_px(const struct paint_ctx *pc, const uint32_t *px, int stride_px, int tw, int th, const struct lm_rect *src,
+                           const struct lm_rect *pdst, int alpha, bool opaque);
+static void blit_tex(const struct paint_ctx *c, const uint32_t *px, int stride_px, int w, int h, const struct lm_rect *dst, int alpha, bool opaque);
+
+/* The physical pixels of a logical rectangle of an output (what the backend is told is damaged). */
+static inline struct lm_rect out_prect(const struct lm_output *o, const struct lm_rect *r)
+{
+    return prect_at(o->x, o->y, lm_output_scalef(o), r);
 }
 
 /* Fill n pixels with one value (SSE2 stores when available). */
@@ -293,13 +357,21 @@ static inline void fill32(uint32_t *p, uint32_t v, size_t n)
         p[i] = v;
 }
 
-static void fill_rect(const struct paint_ctx *c, const struct lm_rect *rect, uint32_t color)
+static void fill_rect_px(const struct paint_ctx *c, const struct lm_rect *rect, uint32_t color)
 {
     struct lm_rect r;
     if (!lm_rect_intersect(rect, &c->clip, &r))
         return;
     for (int y = r.y; y < r.y + r.h; y++)
         fill32(fb_row(c, y) + r.x, color, (size_t)r.w);
+}
+
+static void fill_rect(const struct paint_ctx *c, const struct lm_rect *rect, uint32_t color)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pr = prect(c, rect);
+    fill_rect_px(&pc, &pr, color);
 }
 
 static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t color)
@@ -309,28 +381,42 @@ static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t colo
     fb_row(c, y)[x] = color;
 }
 
-/* One character of a label, its pen at (x, y = top of the line), cut to `lim`; returns how far the pen moves. */
+/* One character of a label, its pen at (x, y = top of the line) in logical pixels, cut to `lim`; returns how far the pen moves
+ * (logical). The picture is rasterised at the output's scale: the shell's text is as sharp at 2x as at 1x. */
 static int draw_label_glyph(const struct paint_ctx *c, const struct lm_rect *lim, int x, int y, uint32_t cp, int scale, uint32_t color)
 {
+    int sc = scale < 0 ? -scale : scale;
+    bool bold = scale < 0;
     struct lm_font_glyph g;
-    lm_font_label_styled(cp, scale < 0 ? -scale : scale, scale < 0, &g);           /* (a negative scale = bold) */
-    int gx = x - g.left;
-    if (gx + g.w <= lim->x || gx >= lim->x + lim->w)
-        return g.advance;
-    int x0 = LM_MAX(gx, lim->x), x1 = LM_MIN(gx + g.w, lim->x + lim->w);
+    if (c->s == 1.0)
+        lm_font_label_styled(cp, sc, bold, &g);
+    else
+        lm_font_label_scaled(cp, (double)sc * c->s, bold, &g);
+    int advance = lm_font_advance_styled(cp, bold) * sc;
+    struct lm_rect area, pl;
+    if (!lm_rect_intersect(lim, &c->clip, &area))
+        return advance;
+    pl = prect(c, &area);
+    int px = sround((double)(x - c->ox) * c->s), py = sround((double)(y - c->oy) * c->s);
+    int gx = px - g.left;
+    if (gx + g.w <= pl.x || gx >= pl.x + pl.w)
+        return advance;
+    int x0 = LM_MAX(gx, pl.x), x1 = LM_MIN(gx + g.w, pl.x + pl.w);
+    struct paint_ctx pc;
+    pview(c, &pc);
     for (int row = 0; row < g.h; row++) {
-        int py = y + row;
-        if (py < lim->y || py >= lim->y + lim->h)
+        int ry = py + row;
+        if (ry < pl.y || ry >= pl.y + pl.h)
             continue;
-        uint32_t *dst = fb_row(c, py);
+        uint32_t *dst = fb_row(&pc, ry);
         const uint8_t *src = g.px + (size_t)row * (size_t)g.w - gx;
-        for (int px = x0; px < x1; px++) {
-            unsigned a = src[px];
+        for (int xx = x0; xx < x1; xx++) {
+            unsigned a = src[xx];
             if (a)
-                dst[px] = lm_font_mix(dst[px], color, a);
+                dst[xx] = lm_font_mix(dst[xx], color, a);
         }
     }
-    return g.advance;
+    return advance;
 }
 
 static void draw_text_w(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
@@ -436,7 +522,7 @@ static void wall_scale(const struct lm_image *img, double sx0, double sy0, doubl
 static void wall_build(struct lm_renderer *r, struct out_state *st)
 {
     const struct lm_image *img = &r->wall.img;
-    int W = st->out->width, H = st->out->height;
+    int W = lm_output_pw(st->out), H = lm_output_ph(st->out);      /* the picture is made for the physical pixels: sharp at any scale */
     free(st->wall_px);
     st->wall_px = NULL;
     st->wall_gen = r->wall.gen;
@@ -483,32 +569,67 @@ static void wall_build(struct lm_renderer *r, struct out_state *st)
 
 static void paint_wallpaper(const struct paint_ctx *c)
 {
-    struct lm_rect r = c->clip;
+    struct paint_ctx pc;
+    pview(c, &pc);                                      /* physical pixels from here on */
+    struct lm_rect r = pc.clip;
+    int H = lm_output_ph(c->out);
     for (int y = r.y; y < r.y + r.h; y++) {
-        uint32_t col = lerp_color(COL_WALL_TOP, COL_WALL_BOTTOM, y - c->out->y, c->out->height);
-        fill32(fb_row(c, y) + r.x, col, (size_t)r.w);
+        uint32_t col = lerp_color(COL_WALL_TOP, COL_WALL_BOTTOM, y, H);
+        fill32(fb_row(&pc, y) + r.x, col, (size_t)r.w);
     }
     struct out_state *st = c->r->wall.img.px ? state_of(c->out) : NULL;
     if (!st)
         return;
-    if (!st->wall_px || st->wall_gen != c->r->wall.gen || st->wall_w != c->out->width || st->wall_h != c->out->height)
+    if (!st->wall_px || st->wall_gen != c->r->wall.gen || st->wall_w != lm_output_pw(c->out) || st->wall_h != H)
         wall_build(c->r, st);
     if (!st->wall_px)
         return;
-    struct lm_rect img = lm_rect_make(c->out->x + st->wall_rect.x, c->out->y + st->wall_rect.y, st->wall_rect.w, st->wall_rect.h), v;
+    struct lm_rect img = st->wall_rect, v;
     if (!lm_rect_intersect(&img, &r, &v))
         return;
     for (int y = v.y; y < v.y + v.h; y++)
-        memcpy(fb_row(c, y) + v.x, st->wall_px + (size_t)(y - img.y) * (size_t)img.w + (size_t)(v.x - img.x), (size_t)v.w * 4);
+        memcpy(fb_row(&pc, y) + v.x, st->wall_px + (size_t)(y - img.y) * (size_t)img.w + (size_t)(v.x - img.x), (size_t)v.w * 4);
 }
+
+static float cov01(float v);
+static float seg_dist(float px, float py, float ax, float ay, float bx, float by);
 
 static void draw_line(const struct paint_ctx *c, int x0, int y0, int x1, int y1, uint32_t color)
 {
+    if (c->s != 1.0) {                                  /* scaled: an anti-aliased stroke `scale` pixels thick */
+        struct paint_ctx pc;
+        pview(c, &pc);
+        float s = (float)c->s;
+        float ax = ((float)(x0 - c->ox) + 0.5f) * s, ay = ((float)(y0 - c->oy) + 0.5f) * s;
+        float bx = ((float)(x1 - c->ox) + 0.5f) * s, by = ((float)(y1 - c->oy) + 0.5f) * s;
+        struct lm_rect box = lm_rect_make((int)floorf(fminf(ax, bx) - s) - 1, (int)floorf(fminf(ay, by) - s) - 1,
+                                          (int)(fabsf(bx - ax) + 2.0f * s) + 3, (int)(fabsf(by - ay) + 2.0f * s) + 3), r;
+        if (!lm_rect_intersect(&box, &pc.clip, &r))
+            return;
+        for (int y = r.y; y < r.y + r.h; y++) {
+            uint32_t *row = fb_row(&pc, y);
+            for (int x = r.x; x < r.x + r.w; x++) {
+                float cov = cov01(s * 0.5f - seg_dist((float)x + 0.5f, (float)y + 0.5f, ax, ay, bx, by) + 0.5f);
+                uint32_t pa = (uint32_t)(cov * 255.0f + 0.5f);
+                if (!pa)
+                    continue;
+                uint32_t pr = div255(((color >> 16) & 255) * pa), pg = div255(((color >> 8) & 255) * pa), pb = div255((color & 255) * pa);
+                row[x] = blend_px((pa << 24) | (pr << 16) | (pg << 8) | pb, row[x]);
+            }
+        }
+        return;
+    }
+    struct paint_ctx pc;
+    pview(c, &pc);
+    x0 -= c->ox;                                        /* scale 1: the physical pixel is the logical one, relative to the output */
+    y0 -= c->oy;
+    x1 -= c->ox;
+    y1 -= c->oy;
     int dx = abs(x1 - x0), dy = -abs(y1 - y0);
     int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
     for (;;) {
-        put_px(c, x0, y0, color);
+        put_px(&pc, x0, y0, color);
         if (x0 == x1 && y0 == y1)
             break;
         int e2 = 2 * err;
@@ -751,7 +872,7 @@ static bool wrap_line(const char *text, size_t *pos, int cols, char *out, size_t
 }
 
 /* Rounded rectangle with anti-aliased corners, blended with `argb` (alpha in the top byte) over what is there. */
-static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
+static void fill_round_px(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
 {
     struct lm_rect r;
     if (!lm_rect_intersect(rect, &c->clip, &r))
@@ -784,6 +905,14 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
             row[x] = blend_px((pa << 24) | (pr << 16) | (pg << 8) | pb, row[x]);
         }
     }
+}
+
+static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pr = prect(c, rect);
+    fill_round_px(&pc, &pr, plen(c, radius), argb);
 }
 
 /* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
@@ -912,7 +1041,7 @@ static float shape_cov(enum shape s, float dx, float dy, float R)
 }
 
 /* Paints `s` centred on (cx, cy) (pixel units, may be fractional) with half size R in colour rgb at `alpha` (0..255). */
-static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha)
+static void paint_shape_px(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha)
 {
     struct lm_rect box = lm_rect_make((int)floorf(cx - R) - 1, (int)floorf(cy - R) - 1, (int)(2.0f * R) + 4, (int)(2.0f * R) + 4), r;
     if (!lm_rect_intersect(&box, &c->clip, &r))
@@ -930,6 +1059,14 @@ static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, 
     }
 }
 
+static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    float k = (float)c->s;
+    paint_shape_px(&pc, ((cx - (float)c->ox) * k), ((cy - (float)c->oy) * k), R * k, s, rgb, alpha);
+}
+
 /* ---- the logo: the round brand picture of the panel button and the About dialog -------------------------------------------- */
 
 #include "logo_data.h"
@@ -938,7 +1075,7 @@ static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *
 static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift);
 
 /* Paints the logo (premultiplied ARGB, already a circle) into `box`, from the 32 px picture when that is enough, else from the 96 px one. */
-static void paint_logo(const struct paint_ctx *c, const struct lm_rect *box)
+static void paint_logo_px(const struct paint_ctx *c, const struct lm_rect *box)
 {
     static const struct lm_image small = { LOGO_SMALL, LOGO_SMALL, (uint32_t *)logo_small },
                                  big = { LOGO_BIG, LOGO_BIG, (uint32_t *)logo_big };
@@ -954,6 +1091,14 @@ static void paint_logo(const struct paint_ctx *c, const struct lm_rect *box)
                 row[x] = blend_px(px, row[x]);
         }
     }
+}
+
+static void paint_logo(const struct paint_ctx *c, const struct lm_rect *box)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pb = prect(c, box);
+    paint_logo_px(&pc, &pb);
 }
 
 static void fit_text(char *out, size_t n, const char *text, int maxw, bool tail);
@@ -1058,7 +1203,7 @@ static void paint_about(const struct paint_ctx *c, const struct lm_about_info *a
 }
 
 /* A one pixel ring just inside `rect` (the border of a translucent card: filling a border colour below the card would shine through). */
-static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
+static void stroke_round_px(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb, float bw)
 {
     struct lm_rect r;
     if (!lm_rect_intersect(rect, &c->clip, &r))
@@ -1072,7 +1217,7 @@ static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, 
             float qx = fabsf((float)x + 0.5f - cx) - (hw - rad), qy = fabsf((float)y + 0.5f - cy) - (hh - rad);
             float ox = qx > 0.0f ? qx : 0.0f, oy = qy > 0.0f ? qy : 0.0f, m = qx > qy ? qx : qy;
             float d = sqrtf(ox * ox + oy * oy) + (m < 0.0f ? m : 0.0f) - rad;
-            float cov = cov01(0.5f - fabsf(d + 0.5f));
+            float cov = bw == 1.0f ? cov01(0.5f - fabsf(d + 0.5f)) : 0.5f * cov01(1.0f - fabsf(d + 0.5f * bw) / (0.5f * bw));   /* a line `bw` pixels wide */
             uint32_t pa = (uint32_t)(cov * (float)(argb >> 24) + 0.5f);
             if (pa == 0)
                 continue;
@@ -1080,6 +1225,14 @@ static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, 
             row[x] = blend_px((pa << 24) | (pr << 16) | (pg << 8) | pb, row[x]);
         }
     }
+}
+
+static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pr = prect(c, rect);
+    stroke_round_px(&pc, &pr, plen(c, radius), argb, (float)c->s);
 }
 
 /* `text` cut to `maxw` pixels: with ".." at the end (names of icons) or, for fields, its tail (so the caret stays visible). */
@@ -1327,7 +1480,7 @@ static uint32_t dock_image_px(const struct lm_image *img, const struct lm_rect *
 
 /* One round icon (a picture or a built-in one) in `b`; lift 0..1 brightens it (hovered). */
 /* An icon, `alpha` (0..255) as solid; a box that is not square (an icon melting into the edge of the screen) squashes the picture. */
-static void paint_dock_icon_a(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift, int alpha)
+static void paint_dock_icon_px(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift, int alpha)
 {
     if (alpha <= 0 || b->w <= 0 || b->h <= 0)
         return;
@@ -1365,6 +1518,14 @@ static void paint_dock_icon_a(const struct paint_ctx *c, const struct lm_rect *b
                 row[x] = blend_px(px, row[x]);
         }
     }
+}
+
+static void paint_dock_icon_a(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift, int alpha)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pb = prect(c, b);
+    paint_dock_icon_px(&pc, &pb, it, lift, alpha);
 }
 
 static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift)
@@ -1816,7 +1977,7 @@ static uint32_t mix_rgb(uint32_t a, uint32_t b, int t)
 }
 
 /* The shadow under the top panel: black, strongest right under the bar and fading out smoothly (quadratically) over its height. */
-static void paint_panel_shadow(const struct paint_ctx *c, const struct lm_rect *rect)
+static void paint_panel_shadow_px(const struct paint_ctx *c, const struct lm_rect *rect)
 {
     struct lm_rect r;
     if (!lm_rect_intersect(rect, &c->clip, &r))
@@ -1830,6 +1991,14 @@ static void paint_panel_shadow(const struct paint_ctx *c, const struct lm_rect *
         for (int x = r.x; x < r.x + r.w; x++)
             row[x] = blend_px(a << 24, row[x]);
     }
+}
+
+static void paint_panel_shadow(const struct paint_ctx *c, const struct lm_rect *rect)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pr = prect(c, rect);
+    paint_panel_shadow_px(&pc, &pr);
 }
 
 /* The panel's buttons follow [windows] button-roundness like the dock's icons: the round ones (workspace cells, layout badge, power) become rounded squares
@@ -1894,16 +2063,8 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         if (ic && !tw)
             x = r->x + (r->w - ic->width) / 2;
         if (ic) {
-            struct lm_rect box = lm_rect_make(x, r->y + (r->h - ic->height) / 2, ic->width, ic->height), cl;
-            if (lm_rect_intersect(&box, &c->clip, &cl))
-                for (int yy = cl.y; yy < cl.y + cl.h; yy++) {
-                    uint32_t *row = fb_row(c, yy);
-                    for (int xx = cl.x; xx < cl.x + cl.w; xx++) {
-                        uint32_t px = ic->pixels[(size_t)(yy - box.y) * (size_t)ic->width + (size_t)(xx - box.x)];
-                        if (px >> 24)
-                            row[xx] = blend_px(px, row[xx]);
-                    }
-                }
+            struct lm_rect box = lm_rect_make(x, r->y + (r->h - ic->height) / 2, ic->width, ic->height);
+            blit_tex(c, ic->pixels, ic->width, ic->width, ic->height, &box, 255, false);
             x += ic->width + 4;
         }
         if (tw)
@@ -2135,7 +2296,7 @@ static void blit_row_argb(uint32_t *d, const uint32_t *s, int n)
 
 static bool region_covers(const struct lm_region *rg, const struct lm_rect *r);
 
-static void blit_surface(const struct paint_ctx *c, struct lm_surface *s, int32_t ox, int32_t oy)
+static void blit_surface_1(const struct paint_ctx *c, struct lm_surface *s, int32_t ox, int32_t oy)
 {
     if (!s->has_content || !s->tex.pixels)
         return;
@@ -2174,6 +2335,26 @@ static void blit_surface(const struct paint_ctx *c, struct lm_surface *s, int32_
     }
 }
 
+
+/* A client surface at its logical place (ox, oy): copied 1:1 at scale 1; at another scale the buffer is mapped onto the
+ * physical pixels the surface covers (1:1 when the client draws at exactly the output's scale, else bilinear). */
+static void blit_surface(const struct paint_ctx *c, struct lm_surface *s, int32_t ox, int32_t oy)
+{
+    if (c->s == 1.0 && c->fbx == 0 && c->fby == 0) {
+        blit_surface_1(c, s, ox, oy);
+        return;
+    }
+    if (!s->has_content || !s->tex.pixels)
+        return;
+    struct lm_rect dst = lm_rect_make(ox, oy, s->width, s->height);
+    if (!lm_rect_overlaps(&dst, &c->clip))
+        return;
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pd = prect(c, &dst), whole = lm_rect_make(0, 0, s->tex.width, s->tex.height);
+    blit_scaled_px(&pc, s->tex.pixels, s->tex.stride / 4, s->tex.width, s->tex.height, &whole, &pd, 255, s->tex.opaque);
+}
+
 static bool visit_blit(struct lm_surface *s, int32_t x, int32_t y, void *data)
 {
     blit_surface(data, s, x, y);
@@ -2188,6 +2369,8 @@ struct cursor_view {
     const struct sprite *sprite;        /* built-in */
     struct lm_surface *surface;         /* client cursor */
     int32_t origin_x, origin_y;         /* surface origin, global */
+    int32_t ix, iy;                     /* the pointer, global (logical) */
+    int k;                              /* the built-in sprite is drawn k times as big (the pointer's output scale, rounded) */
 };
 
 static void cursor_view(struct lm_renderer *r, struct cursor_view *v)
@@ -2202,6 +2385,11 @@ static void cursor_view(struct lm_renderer *r, struct cursor_view *v)
     if (cur.shape == LM_CURSOR_HIDDEN || cur.shape == LM_CURSOR_NONE)
         return;
     int32_t ix = (int32_t)px, iy = (int32_t)py;
+    struct lm_output *po = lm_output_nearest(r->srv, px, py);
+    double ps = po ? lm_output_scalef(po) : 1.0;
+    v->ix = ix;
+    v->iy = iy;
+    v->k = LM_MAX(sround(ps), 1);
     if (cur.shape == LM_CURSOR_SURFACE && cur.surface) {
         struct lm_rect ext;
         if (!lm_surface_tree_extents(cur.surface, &ext))
@@ -2218,7 +2406,13 @@ static void cursor_view(struct lm_renderer *r, struct cursor_view *v)
         shape = LM_CURSOR_DEFAULT;
     sprite_build(shape);
     v->sprite = &sprites[shape];
-    v->rect = lm_rect_make(ix - v->sprite->hot_x, iy - v->sprite->hot_y, SPR_W, SPR_H);
+    if (ps == 1.0) {
+        v->rect = lm_rect_make(ix - v->sprite->hot_x, iy - v->sprite->hot_y, SPR_W, SPR_H);
+    } else {                                                            /* the logical box that covers the k times bigger sprite */
+        int hx = v->sprite->hot_x * v->k, hy = v->sprite->hot_y * v->k;
+        v->rect = lm_rect_make(ix - (int)ceil(hx / ps) - 1, iy - (int)ceil(hy / ps) - 1, (int)ceil(SPR_W * v->k / ps) + 3,
+                               (int)ceil(SPR_H * v->k / ps) + 3);
+    }
     v->visible = true;
 }
 
@@ -2232,18 +2426,22 @@ static void paint_cursor(const struct paint_ctx *c)
         lm_surface_tree_visit(v.surface, v.origin_x, v.origin_y, visit_blit, (void *)c);
         return;
     }
-    for (int y = 0; y < SPR_H; y++) {
-        int gy = v.rect.y + y;
-        if (gy < c->clip.y || gy >= c->clip.y + c->clip.h)
+    struct paint_ctx pc;
+    pview(c, &pc);
+    int k = c->s == 1.0 ? 1 : v.k;
+    int x0 = sround((double)(v.ix - c->ox) * c->s) - v.sprite->hot_x * k, y0 = sround((double)(v.iy - c->oy) * c->s) - v.sprite->hot_y * k;
+    for (int y = 0; y < SPR_H * k; y++) {
+        int py = y0 + y;
+        if (py < pc.clip.y || py >= pc.clip.y + pc.clip.h)
             continue;
-        uint32_t *row = fb_row(c, gy);
-        for (int x = 0; x < SPR_W; x++) {
-            int gx = v.rect.x + x;
-            if (gx < c->clip.x || gx >= c->clip.x + c->clip.w)
+        uint32_t *row = fb_row(&pc, py);
+        for (int x = 0; x < SPR_W * k; x++) {
+            int px = x0 + x;
+            if (px < pc.clip.x || px >= pc.clip.x + pc.clip.w)
                 continue;
-            uint32_t p = v.sprite->px[y * SPR_W + x];
+            uint32_t p = v.sprite->px[(y / k) * SPR_W + x / k];
             if (p)
-                row[gx] = blend_px(p, row[gx]);
+                row[px] = blend_px(p, row[px]);
         }
     }
 }
@@ -2402,39 +2600,63 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     (((((p00) >> (sh)) & 255u) * (w00) + (((p10) >> (sh)) & 255u) * (w10) + (((p01) >> (sh)) & 255u) * (w01) + \
       (((p11) >> (sh)) & 255u) * (w11) + 32768u) >> 16)
 
-/* Paints the ghost scaled into `dst` (global) with opacity `alpha` (0..255) over the target: bilinear sampling of the premultiplied pixels. */
-static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, const struct lm_rect *src, const struct lm_rect *dst, int alpha)
+/* Paints premultiplied ARGB pixels (`px`, `stride_px` pixels a row, tw x th) from the part `src` of the picture into the
+ * physical rectangle `pdst` of the physical view `pc`, at opacity `alpha` (0..255): bilinear when the sizes differ, a plain
+ * blend when they match. `opaque`: the pixels have no alpha (XRGB). */
+static void blit_scaled_px(const struct paint_ctx *pc, const uint32_t *px, int stride_px, int tw, int th, const struct lm_rect *src,
+                           const struct lm_rect *pdst, int alpha, bool opaque)
 {
-    struct lm_rect r, whole = lm_rect_make(0, 0, g ? g->w : 0, g ? g->h : 0);
-    if (!src || src->w <= 0 || src->h <= 0)
-        src = &whole;
-    if (!g || !g->px || dst->w <= 0 || dst->h <= 0 || alpha <= 0 || !lm_rect_intersect(dst, &c->clip, &r))
+    struct lm_rect r;
+    if (!px || src->w <= 0 || src->h <= 0 || pdst->w <= 0 || pdst->h <= 0 || alpha <= 0 || !lm_rect_intersect(pdst, &pc->clip, &r))
         return;
+    uint32_t al = (uint32_t)LM_MIN(alpha, 255);
+    if (src->w == pdst->w && src->h == pdst->h && src->x >= 0 && src->y >= 0 && src->x + src->w <= tw && src->y + src->h <= th) {
+        for (int y = r.y; y < r.y + r.h; y++) {                         /* 1:1 (a client that draws at the output's scale) */
+            uint32_t *drow = fb_row(pc, y);
+            const uint32_t *srow = px + (size_t)(src->y + y - pdst->y) * (size_t)stride_px + (size_t)(src->x + r.x - pdst->x);
+            if (al == 255 && opaque) {
+                memcpy(drow + r.x, srow, (size_t)r.w * 4);
+                continue;
+            }
+            if (al == 255) {
+                blit_row_argb(drow + r.x, srow, r.w);
+                continue;
+            }
+            for (int x = 0; x < r.w; x++) {
+                uint32_t p = opaque ? srow[x] | 0xff000000u : srow[x];
+                if (p >> 24)
+                    drow[r.x + x] = blend_px(fade_px(p, (int)al), drow[r.x + x]);
+            }
+        }
+        return;
+    }
     int *sx0 = malloc((size_t)r.w * sizeof(int) * 2);
     if (!sx0)
         return;
     int *fx = sx0 + r.w;
     for (int x = 0; x < r.w; x++) {
-        float u = ((float)(r.x + x - dst->x) + 0.5f) * (float)src->w / (float)dst->w - 0.5f + (float)src->x;
+        float u = ((float)(r.x + x - pdst->x) + 0.5f) * (float)src->w / (float)pdst->w - 0.5f + (float)src->x;
         if (u < 0) u = 0;
-        if (u > (float)(g->w - 1)) u = (float)(g->w - 1);
+        if (u > (float)(tw - 1)) u = (float)(tw - 1);
         int i = (int)u;
         sx0[x] = i;
         fx[x] = (int)((u - (float)i) * 256.0f);
     }
-    uint32_t al = (uint32_t)LM_MIN(alpha, 255);
     for (int y = r.y; y < r.y + r.h; y++) {
-        float v = ((float)(y - dst->y) + 0.5f) * (float)src->h / (float)dst->h - 0.5f + (float)src->y;
+        float v = ((float)(y - pdst->y) + 0.5f) * (float)src->h / (float)pdst->h - 0.5f + (float)src->y;
         if (v < 0) v = 0;
-        if (v > (float)(g->h - 1)) v = (float)(g->h - 1);
-        int j = (int)v, fy = (int)((v - (float)j) * 256.0f), j1 = LM_MIN(j + 1, g->h - 1);
-        const uint32_t *row0 = g->px + (size_t)j * (size_t)g->w, *row1 = g->px + (size_t)j1 * (size_t)g->w;
-        uint32_t *drow = fb_row(c, y);
+        if (v > (float)(th - 1)) v = (float)(th - 1);
+        int j = (int)v, fy = (int)((v - (float)j) * 256.0f), j1 = LM_MIN(j + 1, th - 1);
+        const uint32_t *row0 = px + (size_t)j * (size_t)stride_px, *row1 = px + (size_t)j1 * (size_t)stride_px;
+        uint32_t *drow = fb_row(pc, y);
         for (int x = 0; x < r.w; x++) {
-            int i = sx0[x], i1 = LM_MIN(i + 1, g->w - 1);
+            int i = sx0[x], i1 = LM_MIN(i + 1, tw - 1);
             uint32_t w10 = (uint32_t)fx[x] * (uint32_t)(256 - fy), w11 = (uint32_t)fx[x] * (uint32_t)fy;
             uint32_t w00 = (uint32_t)(256 - fx[x]) * (uint32_t)(256 - fy), w01 = (uint32_t)(256 - fx[x]) * (uint32_t)fy;
             uint32_t p00 = row0[i], p10 = row0[i1], p01 = row1[i], p11 = row1[i1];
+            if (opaque) {
+                p00 |= 0xff000000u; p10 |= 0xff000000u; p01 |= 0xff000000u; p11 |= 0xff000000u;
+            }
             uint32_t a = LERP4(24, p00, p10, p01, p11, w00, w10, w01, w11);
             if (!a)
                 continue;
@@ -2451,6 +2673,29 @@ static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, con
         }
     }
     free(sx0);
+}
+
+/* A texture (premultiplied ARGB, w x h) into the logical rectangle `dst` of the output, at the output's scale. */
+static void blit_tex(const struct paint_ctx *c, const uint32_t *px, int stride_px, int w, int h, const struct lm_rect *dst, int alpha, bool opaque)
+{
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pd = prect(c, dst), whole = lm_rect_make(0, 0, w, h);
+    blit_scaled_px(&pc, px, stride_px, w, h, &whole, &pd, alpha, opaque);
+}
+
+/* Paints the ghost scaled into `dst` (global) with opacity `alpha` (0..255) over the target: bilinear sampling of the premultiplied pixels. */
+static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, const struct lm_rect *src, const struct lm_rect *dst, int alpha)
+{
+    struct lm_rect whole = lm_rect_make(0, 0, g ? g->w : 0, g ? g->h : 0);
+    if (!src || src->w <= 0 || src->h <= 0)
+        src = &whole;
+    if (!g || !g->px || dst->w <= 0 || dst->h <= 0)
+        return;
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pd = prect(c, dst);
+    blit_scaled_px(&pc, g->px, g->w, g->w, g->h, src, &pd, alpha, false);
 }
 
 static bool mag_view(struct lm_renderer *r, const struct lm_output *out, float *zoom, float *ox, float *oy);
@@ -2492,10 +2737,12 @@ bool lm_render_snapshot(struct lm_renderer *r, const struct lm_scene_item *items
         struct lm_output fake = *any;
         fake.x = rect->x;
         fake.y = rect->y;
-        fake.width = w;
-        fake.height = h;
+        fake.width = fake.mode_w = w;
+        fake.height = fake.mode_h = h;
+        fake.scale_milli = 1000;                                        /* the picture is taken at logical size (animations are short) */
         struct lm_framebuffer fb = { .pixels = bufs[k], .width = w, .height = h, .stride = w * 4 };
         struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = *rect, .cov_idx = -1, .snapshot = true };
+        ctx_init(&c);
         for (int i = 0; i < n; i++)
             scene_cb(&items[i], &c);
     }
@@ -2540,12 +2787,7 @@ static void paint_shot_card(const struct paint_ctx *c, const struct shot_fx *fx)
     struct lm_rect th = lm_rect_make(card.x + 8, card.y + 8, fx->tw, fx->th);
     struct lm_rect ring = lm_rect_make(th.x - 1, th.y - 1, th.w + 2, th.h + 2);
     fill_rect(c, &ring, (0x00000000u | lm_theme.border));
-    struct lm_rect vis;
-    if (lm_rect_intersect(&th, &c->clip, &vis)) {
-        for (int y = vis.y; y < vis.y + vis.h; y++)
-            memcpy(fb_row(c, y) + vis.x, fx->thumb + (size_t)(y - th.y) * (size_t)fx->tw + (size_t)(vis.x - th.x),
-                   (size_t)vis.w * 4);
-    }
+    blit_tex(c, fx->thumb, fx->tw, fx->tw, fx->th, &th, 255, true);
     struct lm_rect text = lm_rect_make(card.x + 8, card.y + 8 + fx->th + 6, fx->tw, LM_FONT_H);
     draw_text(c, &text, text.x, text.y, fx->label, lm_theme.bar_text);
 }
@@ -2673,6 +2915,7 @@ static void paint_rect(struct lm_renderer *r, struct out_state *st, struct lm_fr
                        const struct lm_rect *rect, bool with_overlays)
 {
     struct paint_ctx c = { .r = r, .out = st->out, .fb = fb, .cov_idx = -1 };
+    ctx_init(&c);
     struct lm_rect orect = lm_output_rect(st->out);
     if (!lm_rect_intersect(rect, &orect, &c.clip))
         return;
@@ -2750,8 +2993,9 @@ static bool mag_view(struct lm_renderer *r, const struct lm_output *out, float *
         return false;
     float z = (float)cfg->magnifier_zoom / 100.0f, k = 1.0f - 1.0f / z;
     *zoom = z;
-    *ox = (float)(px - out->x) * k;
-    *oy = (float)(py - out->y) * k;
+    float sc = (float)lm_output_scalef(out);                            /* the origin is in framebuffer (physical) pixels */
+    *ox = (float)(px - out->x) * sc * k;
+    *oy = (float)(py - out->y) * sc * k;
     return true;
 }
 
@@ -2759,7 +3003,7 @@ static bool mag_view(struct lm_renderer *r, const struct lm_output *out, float *
 static bool draw_output_mag(struct lm_renderer *r, struct out_state *st, struct lm_framebuffer *fb, float zoom, float mox, float moy)
 {
     struct lm_output *out = st->out;
-    int w = out->width, h = out->height;
+    int w = lm_output_pw(out), h = lm_output_ph(out);
     if (!st->mag_px || st->mag_w != w || st->mag_h != h) {
         free(st->mag_px);
         st->mag_px = calloc((size_t)w * (size_t)h, 4);
@@ -2849,12 +3093,8 @@ static bool draw_output(struct lm_renderer *r, struct out_state *st, bool force)
     struct lm_rect *local = malloc(sizeof(*local) * (size_t)(redraw.n ? redraw.n : 1));
     int nlocal = 0;
     if (local && !full) {
-        for (int i = 0; i < redraw.n; i++) {
-            local[nlocal] = redraw.rects[i];
-            local[nlocal].x -= out->x;
-            local[nlocal].y -= out->y;
-            nlocal++;
-        }
+        for (int i = 0; i < redraw.n; i++)
+            local[nlocal++] = out_prect(out, &redraw.rects[i]);          /* the backend counts in framebuffer pixels */
     }
     lm_output_present(out, (local && nlocal) ? local : NULL, nlocal);
     free(local);
@@ -2896,33 +3136,37 @@ uint32_t *lm_render_capture_cursor(struct lm_renderer *r, const struct lm_rect *
     if (r->gl) {                                        /* zero-copy surfaces have no CPU pixels: the GPU renders the shot */
         uint32_t *g = gl_capture(r, st, &clip, w, h);
         if (g && whole_out) {                               /* (the pointer is not in the GL picture: it is put on top of what was read back) */
-            struct lm_framebuffer gfb = { .pixels = g, .width = out->width, .height = out->height, .stride = (int32_t)out->width * 4 };
+            struct lm_framebuffer gfb = { .pixels = g, .width = lm_output_pw(out), .height = lm_output_ph(out), .stride = (int32_t)lm_output_pw(out) * 4 };
             struct paint_ctx gc = { .r = r, .out = out, .fb = &gfb, .cov_idx = -1, .clip = orect };
+            ctx_init(&gc);
             paint_cursor(&gc);
         }
         return g;
     }
-    size_t stride = (size_t)out->width * 4;
-    uint32_t *whole = calloc((size_t)out->height, stride);
-    uint32_t *res = malloc((size_t)clip.w * (size_t)clip.h * 4);
+    /* The picture has the output's PHYSICAL pixels: a shot of a 2x screen is twice as wide as its logical size. */
+    struct lm_rect pclip = out_prect(out, &clip);
+    size_t stride = (size_t)lm_output_pw(out) * 4;
+    uint32_t *whole = calloc((size_t)lm_output_ph(out), stride);
+    uint32_t *res = malloc((size_t)pclip.w * (size_t)pclip.h * 4);
     if (!whole || !res) {
         free(whole);
         free(res);
         return NULL;
     }
-    struct lm_framebuffer fb = { .pixels = whole, .width = out->width, .height = out->height, .stride = (int32_t)stride };
+    struct lm_framebuffer fb = { .pixels = whole, .width = lm_output_pw(out), .height = lm_output_ph(out), .stride = (int32_t)stride };
     paint_rect(r, st, &fb, &clip, false);
     if (whole_out) {
         struct paint_ctx cc = { .r = r, .out = out, .fb = &fb, .cov_idx = -1, .clip = orect };
+        ctx_init(&cc);
         paint_cursor(&cc);
     }
-    for (int y = 0; y < clip.h; y++)
-        memcpy(res + (size_t)y * (size_t)clip.w,
-               (const uint8_t *)whole + (size_t)(clip.y - out->y + y) * stride + (size_t)(clip.x - out->x) * 4,
-               (size_t)clip.w * 4);
+    for (int y = 0; y < pclip.h; y++)
+        memcpy(res + (size_t)y * (size_t)pclip.w,
+               (const uint8_t *)whole + (size_t)(pclip.y + y) * stride + (size_t)pclip.x * 4,
+               (size_t)pclip.w * 4);
     free(whole);
-    *w = clip.w;
-    *h = clip.h;
+    *w = pclip.w;
+    *h = pclip.h;
     return res;
 }
 

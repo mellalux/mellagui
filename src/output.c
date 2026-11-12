@@ -41,6 +41,55 @@ static struct out_global *og_of(const struct lm_output *out)
     return out ? out->output_data : NULL;
 }
 
+/* ---- scale ---------------------------------------------------------------------- */
+
+static int32_t g_default_scale = 1000;
+
+void lm_output_default_scale_set(int32_t milli)
+{
+    g_default_scale = LM_CLAMP(milli, LM_SCALE_MIN, LM_SCALE_MAX);
+}
+
+int32_t lm_output_default_scale(void)
+{
+    return g_default_scale;
+}
+
+/* Recomputes the logical size from the mode and the (already clamped) scale. */
+static bool apply_scale(struct lm_output *out)
+{
+    int32_t mw = lm_output_pw(out), mh = lm_output_ph(out);
+    int32_t milli = out->scale_milli >= LM_SCALE_MIN ? out->scale_milli : LM_SCALE_MIN;
+    int64_t smax = LM_MIN((int64_t)mw * 1000 / 640, (int64_t)mh * 1000 / 360);     /* a logical size below 640 x 360 is unusable */
+    if (smax < LM_SCALE_MIN)
+        smax = LM_SCALE_MIN;
+    if (milli > smax)
+        milli = (int32_t)smax;
+    out->scale_milli = milli;
+    out->scale = (milli + 999) / 1000;
+    int32_t w = milli == 1000 ? mw : (int32_t)((int64_t)mw * 1000 / milli);
+    int32_t h = milli == 1000 ? mh : (int32_t)((int64_t)mh * 1000 / milli);
+    bool changed = w != out->width || h != out->height;
+    out->width = w;
+    out->height = h;
+    return changed;
+}
+
+void lm_output_set_mode(struct lm_output *out, int32_t w, int32_t h)
+{
+    out->mode_w = w;
+    out->mode_h = h;
+    if (out->scale_milli < LM_SCALE_MIN)
+        out->scale_milli = g_default_scale;
+    apply_scale(out);
+}
+
+bool lm_output_set_scale(struct lm_output *out, int32_t milli)
+{
+    out->scale_milli = LM_CLAMP(milli, LM_SCALE_MIN, LM_SCALE_MAX);
+    return apply_scale(out);
+}
+
 /* ---- events -------------------------------------------------------------------- */
 
 static void send_description(struct lm_resource *res, const struct lm_output *out)
@@ -55,7 +104,7 @@ static void send_description(struct lm_resource *res, const struct lm_output *ou
                      (int32_t)(out->transform & 7));
     lm_resource_post(res, LM_WL_OUTPUT_EVT_MODE,
                      (uint32_t)(LM_OUTPUT_MODE_CURRENT | LM_OUTPUT_MODE_PREFERRED),
-                     out->width, out->height, out->refresh_mhz);
+                     lm_output_pw(out), lm_output_ph(out), out->refresh_mhz);        /* the mode is physical; `scale` says how to read it */
     /* scale and done only exist from version 2 on; lm_resource_post filters them. */
     lm_resource_post(res, LM_WL_OUTPUT_EVT_SCALE, scale);
     lm_resource_post(res, LM_WL_OUTPUT_EVT_DONE);

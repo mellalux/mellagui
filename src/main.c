@@ -314,12 +314,13 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE };
     const char *layouts_arg = "us,ee,de,fi";
-    int timeout_s = 0;
+    int timeout_s = 0, cli_scale_pct = 0;
     static const struct option opts[] = {
         { "backend", required_argument, 0, 'b' },
         { "size", required_argument, 0, 's' },
+        { "scale", required_argument, 0, OPT_SCALE },
         { "socket", required_argument, 0, 'S' },
         { "exec", required_argument, 0, 'e' },
         { "terminal", required_argument, 0, 't' },
@@ -462,6 +463,16 @@ int main(int argc, char **argv)
             }
             cfg.headless_width = w;
             cfg.headless_height = h;
+            break;
+        }
+        case OPT_SCALE: {                           /* 1.5, 150 or 150% */
+            double v = atof(optarg);
+            int pct = (int)(v < 10.0 ? v * 100.0 + 0.5 : v + 0.5);
+            if (pct < 100 || pct > 400) {
+                fprintf(stderr, "mellagui: bad --scale '%s' (1.0 .. 4.0, or 100 .. 400 percent)\n", optarg);
+                return 2;
+            }
+            cli_scale_pct = pct;
             break;
         }
         case 'S': cfg.socket_name = optarg; break;
@@ -664,6 +675,9 @@ int main(int argc, char **argv)
         goto out;
     }
 
+    if (cli_scale_pct)                                      /* --scale wins over the saved setting */
+        srv->config.scale_pct = cli_scale_pct;
+    lm_output_default_scale_set(srv->config.scale_pct * 10);   /* the outputs the backend makes next get it */
     if (lm_server_listen(srv) < 0)
         goto out;
     if (lm_backend_init(srv->backend) < 0) {

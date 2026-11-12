@@ -78,10 +78,15 @@ struct lm_output {
     char make[32];
     char model[32];
     int32_t x, y;                   /* position in global compositor space; set by output.c */
-    int32_t width, height;          /* current mode in pixels */
+    /* Sizes: the backend sets the mode (what the screen really has, the framebuffer's size) with lm_output_set_mode();
+     * width / height are the LOGICAL size = mode / scale and what everything else - the wm, the layout, clients' sizes -
+     * counts in. With scale 1 they are the same. */
+    int32_t width, height;          /* logical size */
+    int32_t mode_w, mode_h;         /* current mode in pixels = the framebuffer (0 = not set: width / height) */
+    int32_t scale_milli;            /* the output scale * 1000 (1000, 1250, 1500 ... ); 0 = 1000 */
     int32_t refresh_mhz;            /* e.g. 60000 */
     int32_t phys_width_mm, phys_height_mm;
-    int32_t scale;                  /* always 1 for now */
+    int32_t scale;                  /* wl_output.scale: the scale rounded up (a client draws at that, the compositor shrinks it) */
     uint32_t transform;             /* LM_TRANSFORM_NORMAL */
 
     void *backend_data;             /* backend private */

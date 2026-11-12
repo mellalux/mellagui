@@ -50,7 +50,7 @@ static void req_list(struct lm_resource *res, const union lm_arg *args)
         int i = 0;
         struct lm_output *o;
         lm_list_for_each(o, &b->cap->srv->backend->outputs, link) {
-            lm_resource_post(res, LM_MELLAGUI_CAPTURE_V1_EVT_OUTPUT, i, o->name, o->x, o->y, o->width, o->height);
+            lm_resource_post(res, LM_MELLAGUI_CAPTURE_V1_EVT_OUTPUT, i, o->name, o->x, o->y, lm_output_pw(o), lm_output_ph(o));     /* the picture is the screen's own pixels */
             i++;
         }
     }
@@ -73,7 +73,7 @@ static void req_grab(struct lm_resource *res, const union lm_arg *args)
         why = "no-output";
     else if (!buf || !buf->pool || (buf->format != LM_WL_SHM_FORMAT_XRGB8888 && buf->format != LM_WL_SHM_FORMAT_ARGB8888))
         why = "buffer";
-    else if (buf->width != out->width || buf->height != out->height)
+    else if (buf->width != lm_output_pw(out) || buf->height != lm_output_ph(out))
         why = "size";
     else if (srv->lock && lm_lock_active(srv->lock))
         why = "locked";

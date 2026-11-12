@@ -97,6 +97,9 @@ void lm_font_label(uint32_t codepoint, int scale, struct lm_font_glyph *out);
 /* The bold weight: the bold file beside the font's (X-Bold.ttf, X-B.ttf ...), else the regular glyph struck twice a
  * pixel apart; the bitmap font has one weight (the same picture). A bold label has its own widths. */
 void lm_font_label_styled(uint32_t codepoint, int scale, bool bold, struct lm_font_glyph *out);
+/* The same at a fractional size (the compositor draws at the output's scale): the picture is round(LM_FONT_H * scale)
+ * high; `advance` is the pen's move at that size - the logical layout keeps using lm_font_advance(). */
+void lm_font_label_scaled(uint32_t codepoint, double scale, bool bold, struct lm_font_glyph *out);
 const uint8_t *lm_font_cell_styled(uint32_t codepoint, int cw, int ch, bool bold);     /* a bold cell is as wide as any */
 int lm_font_advance_styled(uint32_t codepoint, bool bold);
 int lm_font_text_width_bold(const char *utf8);

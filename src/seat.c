@@ -2059,8 +2059,13 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
             break;
         if (!isfinite(ev->u.motion.dx) || !isfinite(ev->u.motion.dy))
             break;
-        pointer_set_position(seat, seat->px + ev->u.motion.dx, seat->py + ev->u.motion.dy,
-                             ev->time_ms);
+        {
+            /* a mouse moves in device units = screen pixels; the position is logical: on a scaled output the same
+             * movement covers the same distance on the screen, so it is that many logical pixels fewer */
+            struct lm_output *po = lm_output_nearest(seat->srv, seat->px, seat->py);
+            double sc = po ? lm_output_scalef(po) : 1.0;
+            pointer_set_position(seat, seat->px + ev->u.motion.dx / sc, seat->py + ev->u.motion.dy / sc, ev->time_ms);
+        }
         break;
     case LM_INPUT_POINTER_MOTION_ABS: {
         double gx, gy;

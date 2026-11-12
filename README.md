@@ -123,6 +123,12 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
     pkill mellagui                # normal exit path restores everything
     sudo kbd_mode -u -C /dev/tty3 ; sudo chvt 1     # last resort (adjust tty number)
 
+## Screen scale (HiDPI)
+
+Settings > Display > Scale (100 - 300 %, or `--scale 1.5`) makes everything bigger: the panel, dock, window frames and every
+program that supports it are drawn at the screen's own pixels, so they stay sharp. Programs that do not support it yet (the
+file manager, editor, terminal, image viewer, camera, smart home, screenshot tool) are enlarged by the shell and look softer.
+
 ## Keys and mouse
 
 The Super+... shortcuts below are the defaults. Change them in the `[keys]` section of `~/.config/mellagui/mellagui.conf`, e.g.

@@ -880,6 +880,7 @@ static bool probe_step(struct app *a)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     fake_file = getenv("MELLAGUI_MONITOR_FAKE");
     if (fake_file && !*fake_file)

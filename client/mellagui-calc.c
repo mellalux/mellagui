@@ -576,7 +576,7 @@ static int key_at(const struct app *a, double x, double y)
 
 static void round_rect(struct app *a, struct rect r, int radius, uint32_t color)
 {
-    lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, r.x, r.y, r.w, r.h, radius, color);
+    wlwin_round_fill(&a->win, r.x, r.y, r.w, r.h, radius, color);
 }
 
 static void draw_text_in(struct app *a, struct rect r, const char *s, int scale, uint32_t color, bool right)
@@ -746,6 +746,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

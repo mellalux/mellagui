@@ -5,13 +5,16 @@
 
 Speaks the device side of the TCP protocol with Python's own crypto: 3.3 = AES-ECB commands with a CRC32, 3.4 = the session key
 negotiation and HMAC-SHA256 on every frame. Every command's values are written to LOG as a JSON line ({"dps": {...}}).
-MODE: ok (default), silent (takes the command, never confirms), refuse (answers with an error), deaf (accepts the connection and says nothing).
+MODE: ok (default), silent (takes the command, never confirms), refuse (answers with an error), deaf (accepts the connection and says nothing),
+old22 (a 3.3 device that does not know the question for its values: it reports those it is told to set to nothing).
+It also says its values when asked (3.3: command 10, 3.4: command 16): $FAKE_DPS (JSON by number, default {"1": false}) changed by the commands.
 """
 import binascii, hashlib, hmac, json, os, socket, struct, sys, threading
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 VERSION, KEY, LOG = sys.argv[1], sys.argv[2].encode(), sys.argv[3]
 MODE = sys.argv[4] if len(sys.argv) > 4 else 'ok'
+DPS = json.loads(os.environ.get('FAKE_DPS', '{"1": false}'))
 
 
 def ecb(key, data, enc):
@@ -73,6 +76,23 @@ def serve(conn):
                 if struct.unpack('>I', raw[-8:-4])[0] != binascii.crc32(raw[:-8]) & 0xffffffff:
                     log({'error': 'crc'})
                     return
+                if cmd == 10 and MODE != 'old22':               # the question for the values: no version header, the answer has a return code
+                    try:
+                        q = json.loads(unpad(ecb(KEY, payload, False)))
+                        assert q['gwId'] and q['devId']
+                    except Exception as e:
+                        log({'error': 'question %r' % e})
+                        return
+                    log({'asked': True})
+                    conn.sendall(frame(seq, 10, struct.pack('>I', 0) + ecb(KEY, pad(json.dumps({'devId': q['devId'], 'dps': DPS}).encode()), True), None))
+                    continue
+                if cmd == 13 and MODE == 'old22':               # "set these to nothing": confirmed, then reported like a change
+                    q = json.loads(unpad(ecb(KEY, payload[15:], False)))
+                    log({'asked': sorted(q['dps'])})
+                    conn.sendall(frame(seq, 13, struct.pack('>I', 0), None))
+                    said = {k: v for k, v in DPS.items() if k in q['dps']}
+                    conn.sendall(frame(0, 8, struct.pack('>I', 0) + b'3.3' + bytes(12) + ecb(KEY, pad(json.dumps({'devId': q['devId'], 'dps': said}).encode()), True), None))
+                    continue
                 try:
                     if cmd != 7 or payload[:3] != b'3.3':
                         raise ValueError('no header')
@@ -83,6 +103,8 @@ def serve(conn):
                     conn.sendall(frame(seq, cmd, struct.pack('>I', 1) + b'json obj data unvalid', None))
                     continue
                 log({'dps': data['dps']})
+                if MODE not in ('refuse', 'silent'):
+                    DPS.update(data['dps'])
                 if MODE == 'refuse':
                     conn.sendall(frame(seq, cmd, struct.pack('>I', 1) + b'dp not allowed', None))
                 elif MODE != 'silent':
@@ -112,10 +134,17 @@ def serve(conn):
                 data = json.loads(plain[15:])
                 assert data['protocol'] == 5 and isinstance(data['t'], int)
                 log({'dps': data['data']['dps']})
+                if MODE not in ('refuse', 'silent'):
+                    DPS.update(data['data']['dps'])
                 if MODE == 'refuse':
                     conn.sendall(frame(seq, cmd, struct.pack('>I', 1) + ecb(key, pad(b''), True), key))
                 elif MODE != 'silent':
                     conn.sendall(frame(seq, cmd, struct.pack('>I', 0) + ecb(key, pad(b''), True), key))
+            elif cmd == 16:                                     # the question for the values
+                q = json.loads(unpad(ecb(key, payload, False)))
+                assert q['devId']
+                log({'asked': True})
+                conn.sendall(frame(seq, 16, struct.pack('>I', 0) + ecb(key, pad(json.dumps({'dps': DPS}).encode()), True), key))
     except (OSError, ValueError, AssertionError) as e:
         log({'error': repr(e)})
     finally:

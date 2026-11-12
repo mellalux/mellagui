@@ -937,6 +937,40 @@ bool tuya_load_local_map(struct tuya_session *s, struct tuya_dev *d, char *err, 
     return true;
 }
 
+int tuya_apply_local(struct tuya_dev *d, const char *json)
+{
+    struct json *j = json_parse(json);
+    const struct json *dps = json_get(j, "dps");
+    int n = 0;
+    if (!dps)
+        dps = json_get(json_get(j, "data"), "dps");
+    for (const struct json *e = dps && dps->type == JSON_OBJ ? dps->child : NULL; e; e = e->next) {
+        int id = e->key ? atoi(e->key) : 0;
+        if (id <= 0 || e->type == JSON_NULL)
+            continue;
+        for (int i = 0; i < d->ndp; i++) {
+            struct tuya_dp *dp = &d->dp[i];
+            if (dp->lan_id == id && dp->lan_ok) {               /* (a value the cloud converts is left to the cloud) */
+                set_value(dp, e, d->specs && dp->type != TUYA_OTHER);
+                n++;
+            }
+        }
+    }
+    json_free(j);
+    return n;
+}
+
+void tuya_local_question(const struct tuya_dev *d, char *out, size_t n)
+{
+    size_t len = 0;
+    out[0] = 0;
+    for (int i = 0; i < d->ndp; i++)
+        if (d->dp[i].lan_id > 0 && len + 24 < n)
+            len += (size_t)snprintf(out + len, n - len, "%s\"%d\":null", len ? "," : "{", d->dp[i].lan_id);
+    if (len)
+        snprintf(out + len, n - len, "}");
+}
+
 bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, const char *value_json, char *err, size_t errsz)
 {
     char path[160], body[400], quoted[100];

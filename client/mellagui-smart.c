@@ -7,6 +7,7 @@
  *   mellagui-smart --login CODE        log in from a terminal: the QR code is printed there
  *   mellagui-smart --logout            forget the login
  *   mellagui-smart --set-local ID CODE VALUE   the same, but only over the local network, and it says how that went
+ *   mellagui-smart --get-local ID              asks the device itself for its values over the local network
  *   mellagui-smart --background        carry out the timetable (smartsched.h; no window, started with the compositor)
  *   mellagui-smart --scenes            the scenes ("Tap-to-Run") made in the app
  *   mellagui-smart --scene NAME        start one of them (for a key binding: Super+F1 = exec mellagui-smart --scene "Movie night")
@@ -125,6 +126,15 @@ struct lanent {
 #define MAX_LAN 64
 #define LAN_STALE_MS 180000
 
+/* What a device said itself when it was asked in this network (tuyalan_get), and what is needed to ask it. */
+struct lanread {
+    char id[40], key[40], ask[400];
+    char json[2048];
+    uint64_t at;                        /* when it answered last, 0 = never */
+    int fails, skip;                    /* one that does not answer is asked less often */
+};
+#define LAN_VALUE_MS 30000              /* an answer older than this is not believed over the cloud's */
+
 struct app {
     struct wlwin win;
     enum view view;
@@ -198,6 +208,13 @@ struct app {
     int nlan;
     bool lan_changed;
     int lan_cmds;                       /* commands that went the local way (shown in the dump) */
+    /* ... and another one asks them for their values */
+    pthread_t read_thread;
+    pthread_mutex_t lan_io;             /* one conversation with a device at a time (a command does not meet a question) */
+    struct lanread *read;               /* [TUYA_MAX_DEV], under lan_lock */
+    int nread, lan_reads;               /* lan_reads: the answers so far (shown in the dump) */
+    bool read_changed, read_kick;
+    int read_ms;
 };
 
 static void copy(char *dst, size_t n, const char *src)
@@ -303,6 +320,99 @@ static int lan_send(const struct lanent *e, struct tuya_dev *d, const char *code
     return tuyalan_set(e->ip, e->version, d->id, d->local_key, dps, err, errsz);
 }
 
+/* The devices heard in this network are asked for their values every few seconds (and right after a command): the cloud's list lags behind and
+ * needs the internet. The answers wait in a->read for the window's thread (lan_values_apply). */
+static void *lan_reader(void *arg)
+{
+    struct app *a = arg;
+    static char json[2048];
+    for (;;) {
+        uint64_t until = mono_ms() + (uint64_t)a->read_ms;
+        bool kick = false;
+        while (!kick && mono_ms() < until) {
+            struct timespec ts = { .tv_nsec = 100 * 1000000 };
+            nanosleep(&ts, NULL);
+            pthread_mutex_lock(&a->lan_lock);
+            kick = a->read_kick;
+            a->read_kick = false;
+            pthread_mutex_unlock(&a->lan_lock);
+        }
+        if (kick) {                                             /* (the device needs a moment to do what it was told) */
+            struct timespec ts = { .tv_nsec = 300 * 1000000 };
+            nanosleep(&ts, NULL);
+        }
+        for (int i = 0;; i++) {
+            char id[40], key[40], ask[400], err[200];
+            struct lanent e;
+            pthread_mutex_lock(&a->lan_lock);
+            bool more = i < a->nread, skip = false;
+            if (more) {
+                struct lanread *r = &a->read[i];
+                copy(id, sizeof(id), r->id);
+                copy(key, sizeof(key), r->key);
+                copy(ask, sizeof(ask), r->ask);
+                if (!kick && r->skip > 0) {
+                    r->skip--;
+                    skip = true;
+                }
+            }
+            pthread_mutex_unlock(&a->lan_lock);
+            if (!more)
+                break;
+            if (skip || !key[0] || !lan_lookup(a, id, &e))
+                continue;
+            pthread_mutex_lock(&a->lan_io);
+            bool ok = tuyalan_get(e.ip, e.version, id, key, ask, json, sizeof(json), err, sizeof(err));
+            pthread_mutex_unlock(&a->lan_io);
+            pthread_mutex_lock(&a->lan_lock);
+            if (i < a->nread && !strcmp(a->read[i].id, id)) {
+                struct lanread *r = &a->read[i];
+                if (ok) {
+                    if (strcmp(r->json, json) || r->at == 0 || mono_ms() - r->at >= LAN_VALUE_MS)
+                        a->read_changed = true;
+                    copy(r->json, sizeof(r->json), json);
+                    r->at = mono_ms();
+                    r->fails = r->skip = 0;
+                    a->lan_reads++;
+                } else {
+                    r->fails = LM_MIN(r->fails + 1, 6);
+                    r->skip = r->fails;
+                }
+            }
+            pthread_mutex_unlock(&a->lan_lock);
+        }
+    }
+    return NULL;
+}
+
+/* The worker's list changed: whom the reader may ask (the key and the numbers come from the cloud). */
+static void lan_read_targets(struct app *a)
+{
+    pthread_mutex_lock(&a->lan_lock);
+    for (int i = 0; i < a->nmaster && a->read; i++) {
+        const struct tuya_dev *d = &a->master[i];
+        struct lanread *r = NULL;
+        if (!d->local_key[0] || !d->map)
+            continue;
+        for (int k = 0; k < a->nread && !r; k++)
+            if (!strcmp(a->read[k].id, d->id))
+                r = &a->read[k];
+        if (!r && a->nread < TUYA_MAX_DEV) {
+            r = &a->read[a->nread++];
+            memset(r, 0, sizeof(*r));
+            copy(r->id, sizeof(r->id), d->id);
+            a->read_kick = true;                                /* (a new one is asked at once) */
+        }
+        if (r) {
+            copy(r->key, sizeof(r->key), d->local_key);
+            tuya_local_question(d, r->ask, sizeof(r->ask));
+        }
+    }
+    if (a->nmaster == 0)
+        a->nread = 0;
+    pthread_mutex_unlock(&a->lan_lock);
+}
+
 /* ---- the worker ----------------------------------------------------------------------------------------------------------------------- */
 
 static bool push_job(struct app *a, enum job_type type, const char *x, const char *y, const char *z)
@@ -343,6 +453,7 @@ static void publish_devs(struct app *a)
     a->res.ndevs = a->nmaster;
     a->res.have_devs = true;
     pthread_mutex_unlock(&a->lock);
+    lan_read_targets(a);
 }
 
 /* The devices and their values; a device seen for the first time is also asked what it can be told. */
@@ -457,13 +568,17 @@ static void *worker(void *arg)
             for (int i = 0; i < a->nmaster; i++)
                 if (!strcmp(a->master[i].id, j.a))
                     d = &a->master[i];
-            if (d && lan_lookup(a, d->id, &e))
+            if (d && lan_lookup(a, d->id, &e)) {
+                pthread_mutex_lock(&a->lan_io);
                 r = lan_send(&e, d, j.b, j.c, err, sizeof(err));
-            if (r == 1) {
-                pthread_mutex_lock(&a->lan_lock);
+                pthread_mutex_unlock(&a->lan_io);
+            }
+            pthread_mutex_lock(&a->lan_lock);
+            if (r == 1)
                 a->lan_cmds++;
-                pthread_mutex_unlock(&a->lan_lock);
-            } else if (r < 0 || !tuya_command(&a->sess, j.a, j.b, j.c, err, sizeof(err))) {
+            a->read_kick = true;                                /* what the device says now is asked for right away */
+            pthread_mutex_unlock(&a->lan_lock);
+            if (r != 1 && (r < 0 || !tuya_command(&a->sess, j.a, j.b, j.c, err, sizeof(err)))) {
                 result_msg(a, true, err);                       /* (sent but not confirmed: not sent a second time through the cloud) */
             }
             break;
@@ -471,6 +586,7 @@ static void *worker(void *arg)
         case J_LOGOUT:
             tuya_session_forget(&a->sess);
             a->nmaster = 0;
+            lan_read_targets(a);
             pthread_mutex_lock(&a->lock);
             a->res.logged_out = true;
             pthread_mutex_unlock(&a->lock);
@@ -509,6 +625,21 @@ static void apply_holds(struct app *a)
             copy(dp->str, sizeof(dp->str), h->str);
         }
     }
+}
+
+/* What the devices said themselves in this network goes over the cloud's values (the window's list). */
+static void lan_values_apply(struct app *a)
+{
+    uint64_t now = mono_ms();
+    pthread_mutex_lock(&a->lan_lock);
+    a->read_changed = false;
+    for (int i = 0; i < a->nread; i++) {
+        struct lanread *r = &a->read[i];
+        struct tuya_dev *d = r->at && now - r->at < LAN_VALUE_MS ? find_dev(a, r->id) : NULL;
+        if (d)
+            tuya_apply_local(d, r->json);
+    }
+    pthread_mutex_unlock(&a->lan_lock);
 }
 
 /* Tells the device the data point's value as it is now in the window's list. */
@@ -1264,7 +1395,7 @@ static void dump_state(struct app *a)
     if (!f)
         return;
     pthread_mutex_lock(&a->lan_lock);
-    int lan_cmds = a->lan_cmds;
+    int lan_cmds = a->lan_cmds, lan_reads = a->lan_reads;
     pthread_mutex_unlock(&a->lan_lock);
     if (a->view == V_DEVICES && !a->modal_dev[0]) {
         struct box b = a->confirm_logout ? btn_logout(a) : btn_account(a);
@@ -1272,8 +1403,8 @@ static void dump_state(struct app *a)
     } else {
         fprintf(f, "foot - 0 0 0 0\n");
     }
-    fprintf(f, "view=%s ndev=%d loaded=%d err=%d lan=%d modal=%s\nmsg %s\nqr %s\n", a->view == V_LOGIN ? "login" : a->view == V_QR ? "qr" : "devices", a->ndev,
-            a->loaded, a->msg_err, lan_cmds, a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
+    fprintf(f, "view=%s ndev=%d loaded=%d err=%d lan=%d reads=%d modal=%s\nmsg %s\nqr %s\n", a->view == V_LOGIN ? "login" : a->view == V_QR ? "qr" : "devices", a->ndev,
+            a->loaded, a->msg_err, lan_cmds, lan_reads, a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
     if (a->view == V_DEVICES) {
         for (int i = 0; i < a->ndev; i++)
             fprintf(f, "dev %s online=%d local=%d name=%s\n", a->dev[i].id, a->dev[i].online, lan_lookup(a, a->dev[i].id, NULL), a->dev[i].name);
@@ -2063,6 +2194,7 @@ static void apply_results(struct app *a)
                     if (r.devs[i].online == (pass == 0))
                         a->dev[a->ndev++] = r.devs[i];
             a->loaded = true;
+            lan_values_apply(a);
             apply_holds(a);
             a->win.redraw = true;
         }
@@ -2098,7 +2230,13 @@ static void tick(struct app *a)
         a->lan_changed = false;
         a->win.redraw = true;
     }
+    bool said = a->read_changed;
     pthread_mutex_unlock(&a->lan_lock);
+    if (said && !a->dragging && a->view == V_DEVICES && a->loaded) {
+        lan_values_apply(a);
+        apply_holds(a);
+        a->win.redraw = true;
+    }
     if (a->view == V_QR && a->have_qr) {
         if (!a->qrpoll_busy && now - a->qr_poll_at >= QR_POLL_MS && push_job(a, J_QR_POLL, a->code, NULL, a->qr_token)) {
             a->qrpoll_busy = true;
@@ -2190,55 +2328,99 @@ static int cmd_set(const char *id, const char *code, const char *value)
     return 0;
 }
 
-/* The same over the local network only, saying how it went (to try a device's local protocol). */
-static int cmd_set_local(const char *id, const char *code, const char *value)
+/* The device of the account with what the cloud knows about it, and where it is in this network. Messages on stderr. */
+static bool local_device(const char *id, struct tuya_dev **dout, struct lanent *e)
 {
     static struct tuya_session s;
     static struct tuya_dev dev[TUYA_MAX_DEV];
     static struct tuyalan_found found[MAX_LAN];
     struct tuya_dev *d = NULL;
-    struct lanent e = { .at = 0 };
     int n = 0;
-    char err[200] = "", json[120], *end;
+    char err[200] = "";
+    memset(e, 0, sizeof(*e));
     if (need_login(&s))
-        return 1;
+        return false;
     if (!tuya_load_devices(&s, dev, &n, err, sizeof(err))) {
         fprintf(stderr, "mellagui-smart: %s\n", err);
-        return 1;
+        return false;
     }
     for (int i = 0; i < n; i++)
         if (!strcmp(dev[i].id, id))
             d = &dev[i];
     if (!d) {
         fprintf(stderr, "mellagui-smart: the account has no device %s\n", id);
-        return 1;
+        return false;
     }
     if (!tuya_load_specs(&s, d, err, sizeof(err)) || !tuya_load_local_map(&s, d, err, sizeof(err))) {
         fprintf(stderr, "mellagui-smart: %s\n", err);
-        return 1;
+        return false;
     }
     const char *fake = getenv("MELLAGUI_TUYA_LAN_FAKE");        /* "id=address=version" (tests) */
     char fid[40], fip[48], fver[8];
     if (fake && sscanf(fake, "%39[^=]=%47[^=]=%7[^;]", fid, fip, fver) == 3 && !strcmp(fid, id)) {
-        copy(e.ip, sizeof(e.ip), fip);
-        copy(e.version, sizeof(e.version), fver);
+        copy(e->ip, sizeof(e->ip), fip);
+        copy(e->version, sizeof(e->version), fver);
     }
-    for (int round = 0; round < 6 && !e.ip[0]; round++) {       /* a device says where it is every few seconds */
+    for (int round = 0; round < 6 && !e->ip[0]; round++) {      /* a device says where it is every few seconds */
         int f = tuyalan_scan(2500, found, MAX_LAN, NULL, err, sizeof(err));
         if (f < 0) {
             fprintf(stderr, "mellagui-smart: %s\n", err);
-            return 1;
+            return false;
         }
         for (int i = 0; i < f; i++)
             if (!strcmp(found[i].id, id)) {
-                copy(e.ip, sizeof(e.ip), found[i].ip);
-                copy(e.version, sizeof(e.version), found[i].version);
+                copy(e->ip, sizeof(e->ip), found[i].ip);
+                copy(e->version, sizeof(e->version), found[i].version);
             }
     }
-    if (!e.ip[0]) {
+    if (!e->ip[0]) {
         fprintf(stderr, "mellagui-smart: %s was not heard in this network\n", d->name);
+        return false;
+    }
+    *dout = d;
+    return true;
+}
+
+/* What the device says itself when it is asked in the local network, beside what the cloud says. */
+static int cmd_get_local(const char *id)
+{
+    struct tuya_dev *d = NULL;
+    struct lanent e;
+    static struct tuya_dev before;
+    static char json[2048];
+    char err[200] = "", ask[400];
+    if (!local_device(id, &d, &e))
+        return 1;
+    before = *d;
+    tuya_local_question(d, ask, sizeof(ask));
+    if (!tuyalan_get(e.ip, e.version, d->id, d->local_key, ask, json, sizeof(json), err, sizeof(err))) {
+        fprintf(stderr, "mellagui-smart: %s\n", err);
         return 1;
     }
+    int took = tuya_apply_local(d, json);
+    printf("%s at %s (protocol %s) says %s\n", d->name, e.ip, e.version, json);
+    for (int k = 0; k < d->ndp; k++) {
+        struct tuya_dp *dp = &d->dp[k];
+        char v[80], c[80];
+        if (dp->lan_id <= 0)
+            continue;
+        tuya_dp_text(dp, v, sizeof(v));
+        tuya_dp_text(&before.dp[k], c, sizeof(c));
+        printf("    %3d  %-24s = %-16s%s%s%s\n", dp->lan_id, dp->code, v, dp->lan_ok ? "" : "  (from the cloud: it converts this value)",
+               dp->lan_ok && strcmp(v, c) ? "  the cloud says " : "", dp->lan_ok && strcmp(v, c) ? c : "");
+    }
+    printf("%d value%s read locally\n", took, took == 1 ? "" : "s");
+    return 0;
+}
+
+/* A command over the local network only, saying how it went (to try a device's local protocol). */
+static int cmd_set_local(const char *id, const char *code, const char *value)
+{
+    struct tuya_dev *d = NULL;
+    struct lanent e;
+    char err[200] = "", json[120], *end;
+    if (!local_device(id, &d, &e))
+        return 1;
     strtod(value, &end);
     if (!strcmp(value, "true") || !strcmp(value, "false") || (*value && !*end))
         copy(json, sizeof(json), value);
@@ -2447,6 +2629,8 @@ int main(int argc, char **argv)
         return cmd_list();
     if (argc == 5 && !strcmp(argv[1], "--set"))
         return cmd_set(argv[2], argv[3], argv[4]);
+    if (argc == 3 && !strcmp(argv[1], "--get-local"))
+        return cmd_get_local(argv[2]);
     if (argc == 5 && !strcmp(argv[1], "--set-local"))
         return cmd_set_local(argv[2], argv[3], argv[4]);
     if (argc == 2 && !strcmp(argv[1], "--background"))
@@ -2475,7 +2659,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc > 1) {
-        fprintf(stderr, "usage: mellagui-smart | --list | --set ID CODE VALUE | --set-local ID CODE VALUE | --scan [SECONDS] | --scenes | --scene NAME | --background | --login USERCODE | --logout | --qr TEXT | --selftest\n");
+        fprintf(stderr, "usage: mellagui-smart | --list | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --login USERCODE | --logout | --qr TEXT | --selftest\n");
         return 2;
     }
     const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");
@@ -2491,10 +2675,14 @@ int main(int argc, char **argv)
     a.poll_ms = pm && atoi(pm) >= 100 ? atoi(pm) : 10000;
     a.dev = calloc(TUYA_MAX_DEV, sizeof(*a.dev));
     a.master = calloc(TUYA_MAX_DEV, sizeof(*a.master));
-    if (!a.dev || !a.master)
+    a.read = calloc(TUYA_MAX_DEV, sizeof(*a.read));
+    if (!a.dev || !a.master || !a.read)
         return 1;
+    const char *rm = getenv("MELLAGUI_SMART_READ_MS");
+    a.read_ms = rm && atoi(rm) >= 100 ? atoi(rm) : 5000;
     pthread_mutex_init(&a.lock, NULL);
     pthread_mutex_init(&a.lan_lock, NULL);
+    pthread_mutex_init(&a.lan_io, NULL);
     pthread_cond_init(&a.cond, NULL);
     a.nrules = sched_load(a.rules, SCHED_MAX);
     bool logged_in = tuya_session_load(&a.sess);
@@ -2524,6 +2712,8 @@ int main(int argc, char **argv)
     } else if (pthread_create(&a.scan_thread, NULL, scanner, &a) != 0) {
         fprintf(stderr, "mellagui-smart: no thread to listen in the local network\n");
     }
+    if (pthread_create(&a.read_thread, NULL, lan_reader, &a) != 0)
+        fprintf(stderr, "mellagui-smart: no thread to ask the devices in the local network\n");
     if (logged_in) {
         a.view = V_DEVICES;
         a.poll_busy = push_job(&a, J_LOAD, NULL, NULL, NULL);

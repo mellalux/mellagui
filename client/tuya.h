@@ -80,6 +80,11 @@ bool tuya_load_devices(struct tuya_session *s, struct tuya_dev *dev, int *n, cha
 bool tuya_load_specs(struct tuya_session *s, struct tuya_dev *d, char *err, size_t errsz);
 /* The numbers the device's data points have in the local protocol (sets d->map whatever the answer). */
 bool tuya_load_local_map(struct tuya_session *s, struct tuya_dev *d, char *err, size_t errsz);
+/* Takes the values a device said itself in the local network (tuyalan_get: {"dps":{"1":true}} by number) into its data points; only those whose
+ * value is the same on both sides (lan_ok). Returns how many it took. */
+int tuya_apply_local(struct tuya_dev *d, const char *json);
+/* Every local number of the device with the value null, {"1":null,"9":null} (what tuyalan_get may ask with); empty when none is known. */
+void tuya_local_question(const struct tuya_dev *d, char *out, size_t n);
 /* Tells a device a value: `value_json` is JSON (true, 50, "open"). */
 bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, const char *value_json, char *err, size_t errsz);
 

@@ -250,6 +250,15 @@ int lm_ttf_glyph(const struct lm_ttf *f, uint32_t cp)
     return g > 0 && g < f->glyphs ? g : 0;
 }
 
+bool lm_ttf_monospace(const struct lm_ttf *f)
+{
+    int i = lm_ttf_glyph(f, 'i'), m = lm_ttf_glyph(f, 'M'), d = lm_ttf_glyph(f, '0');
+    if (!i || !m || !d)
+        return false;
+    int a = lm_ttf_advance(f, i);
+    return a > 0 && a == lm_ttf_advance(f, m) && a == lm_ttf_advance(f, d);
+}
+
 /* ---- outlines ------------------------------------------------------------------------------------------------ */
 
 /* Where a glyph's data is; false = no outline (a space) or out of the file. */

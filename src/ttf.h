@@ -31,6 +31,8 @@ int lm_ttf_units(const struct lm_ttf *f);
 int lm_ttf_ascent(const struct lm_ttf *f);
 int lm_ttf_descent(const struct lm_ttf *f);
 int lm_ttf_xheight(const struct lm_ttf *f);
+/* True when the letters i and M and the digits are equally wide (a font for cells). */
+bool lm_ttf_monospace(const struct lm_ttf *f);
 /* Advance width of a glyph in font units. */
 int lm_ttf_advance(const struct lm_ttf *f, int glyph);
 

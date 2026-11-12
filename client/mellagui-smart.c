@@ -1319,8 +1319,8 @@ static void sbar_paint(struct app *a, int which)
         return;
     struct box t = sbar_thumb(&s);
     bool hot = a->sb_drag == which || (!a->sb_drag && in(a->px, a->py, t) && (which == 2 || !a->modal_dev[0]));
-    lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, s.track.x, s.track.y, s.track.w, s.track.h, s.track.w / 2, lm_theme.field);
-    lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, t.x + 2, t.y + 2, t.w - 4, t.h - 4, (t.w - 4) / 2, hot ? lm_theme.button_hover : lm_theme.button_down);
+    wlwin_round_fill(&a->win, s.track.x, s.track.y, s.track.w, s.track.h, s.track.w / 2, lm_theme.field);
+    wlwin_round_fill(&a->win, t.x + 2, t.y + 2, t.w - 4, t.h - 4, (t.w - 4) / 2, hot ? lm_theme.button_hover : lm_theme.button_down);
 }
 
 static void clamp_scroll(struct app *a)
@@ -1344,7 +1344,7 @@ static struct box qr_back(const struct app *a) { return (struct box){ 24, a->win
 
 static void rbox(struct wlwin *w, struct box b, int r, uint32_t rgb)
 {
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b.x, b.y, b.w, b.h, r, rgb);
+    wlwin_round_fill(w, b.x, b.y, b.w, b.h, r, rgb);
 }
 
 static void button(struct wlwin *w, struct box b, const char *label, bool hot, uint32_t bg, uint32_t fg)
@@ -1638,10 +1638,7 @@ static void paint_modal(struct app *a)
     struct tuya_dev *d = find_dev(a, a->modal_dev);
     if (!d)
         return;
-    for (size_t i = 0; i < (size_t)w->bw * (size_t)w->bh; i++) {
-        uint32_t p = w->pixels[i];
-        w->pixels[i] = 0xff000000u | ((((p >> 16) & 255) * 2 / 5) << 16) | ((((p >> 8) & 255) * 2 / 5) << 8) | ((p & 255) * 2 / 5);
-    }
+    wlwin_dim(w, 0.6);
     struct box m = a->modal;
     rbox(w, (struct box){ m.x - 1, m.y - 1, m.w + 2, m.h + 2 }, 11, lm_theme.accent);
     rbox(w, m, 10, lm_theme.card);
@@ -2620,6 +2617,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     signal(SIGPIPE, SIG_IGN);
     if (argc == 2 && !strcmp(argv[1], "--selftest"))

@@ -492,9 +492,9 @@ class Ctl:
                 res['pointer'] = (int(p[1]), int(p[2]))
             elif p[0] == 'window':
                 import re
-                m = re.match(r'window (\d+) "(.*?)" "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) ws=(\d+) flags=(\S+)', l)
+                m = re.match(r'window (\d+) "(.*?)" "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) ws=(\d+) flags=(\S+)(?: bscale=(\d+))?', l)
                 res['windows'].append(dict(id=int(m[1]), title=m[2], app_id=m[3], x=int(m[4]), y=int(m[5]),
-                                           w=int(m[6]), h=int(m[7]), ws=int(m[8]), flags=set(m[9].split(','))))
+                                           w=int(m[6]), h=int(m[7]), ws=int(m[8]), flags=set(m[9].split(',')), bscale=int(m[10] or 1)))
         return res
 
     def dump(self, path):

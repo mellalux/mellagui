@@ -197,7 +197,7 @@ static bool g_hidpi;
 
 void wlwin_hidpi(void)
 {
-    g_hidpi = true;
+    g_hidpi = !getenv("MELLAGUI_NO_HIDPI");                     /* (an escape hatch, and how the tests tell sharp from enlarged) */
 }
 
 static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
@@ -327,6 +327,42 @@ void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint
         uint32_t *drow = w->pixels + (size_t)py * (size_t)w->pw;
         for (int px = LM_MAX(dx0, 0); px < LM_MIN(dx0 + dw, w->pw); px++)
             drow[px] = 0xff000000u | srow[LM_MIN((px - dx0) * sw / dw, sw - 1)];
+    }
+}
+
+void wlwin_cell(struct wlwin *w, int x, int y, uint32_t cp, int cw, int ch, uint32_t rgb, bool bold)
+{
+    int s = w->scale > 1 ? w->scale : 1;
+    int pcw = cw * s, pch = ch * s;
+    if (pcw < 1 || pch < 1)
+        return;
+    const uint8_t *g = lm_font_cell_styled(cp, pcw, pch, bold);
+    x *= s;
+    y *= s;
+    for (int r = 0; r < pch; r++) {
+        int py = y + r;
+        if (py < 0 || py >= w->ph)
+            continue;
+        uint32_t *row = w->pixels + (size_t)py * (size_t)w->pw;
+        for (int c = 0; c < pcw; c++) {
+            int px = x + c;
+            unsigned a = g[r * pcw + c];
+            if (a && px >= 0 && px < w->pw)
+                row[px] = lm_font_mix(row[px], 0xff000000u | rgb, a);
+        }
+    }
+}
+
+void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride, int cx, int cy, int cw, int ch)
+{
+    int s = w->scale > 1 ? w->scale : 1;
+    int x0 = LM_MAX(LM_MAX(cx * s, x * s), 0), x1 = LM_MIN(LM_MIN((cx + cw) * s, x * s + sw), w->pw);
+    int y0 = LM_MAX(LM_MAX(cy * s, y * s), 0), y1 = LM_MIN(LM_MIN((cy + ch) * s, y * s + sh), w->ph);
+    for (int py = y0; py < y1; py++) {
+        const uint32_t *srow = src + (size_t)(py - y * s) * (size_t)stride - (size_t)(x * s);
+        uint32_t *drow = w->pixels + (size_t)py * (size_t)w->pw;
+        for (int px = x0; px < x1; px++)
+            drow[px] = 0xff000000u | srow[px];
     }
 }
 

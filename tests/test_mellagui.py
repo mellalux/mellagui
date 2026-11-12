@@ -17179,6 +17179,71 @@ class TestScale(Base):
         ppm = c.dump(os.path.join(tmp, 'sc13b.ppm'))
         self.assertEqual(ppm.count((0, 255, 0), 2 * x, 2 * y, 2 * (x + w), 2 * (y + h)), 400 * 200)
 
+    def run_client(self, name, *args, env=None):
+        exe = os.path.join(ROOT, 'build', args[0])
+        if not os.path.exists(exe):
+            self.skipTest('%s not built' % args[0])
+        pr = subprocess.Popen([exe] + list(args[1:]), env=dict(os.environ, WAYLAND_DISPLAY=name, **(env or {})),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        return pr
+
+    def window_of(self, c, app_id):
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == app_id]
+            if ws:
+                time.sleep(0.4)
+                return ws[0]
+            time.sleep(0.05)
+        self.fail('no window ' + app_id)
+
+    def test_a_program_that_knows_the_scale_draws_into_a_buffer_of_that_scale(self):
+        for name, env, want in (('mellagui-sc17', {}, 2), ('mellagui-sc18', {'MELLAGUI_NO_HIDPI': '1'}, 1)):
+            c = self.start(name, 2)
+            self.run_client(name, 'mellagui-timer', env=env)
+            win = self.window_of(c, 'mellagui.timer')
+            for _ in range(50):                                         # (the screen's scale reaches the program a moment after the window)
+                win = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer'][0]
+                if win['bscale'] == want:
+                    break
+                time.sleep(0.1)
+            self.assertEqual(win['bscale'], want)
+            self.assertEqual((win['w'], win['h']) == (win['w'], win['h']), True)
+
+    def test_a_screenshot_and_a_recording_have_the_screens_own_pixels(self):
+        c = self.start('mellagui-sc19', 2)
+        out = os.path.join(tmp, 'sc19.png')
+        pr = self.run_client('mellagui-sc19', 'mellagui-shot', '--grab', out)
+        self.assertEqual(pr.wait(timeout=20), 0, pr.stdout.read().decode())
+        with open(out, 'rb') as f:
+            hdr = f.read(24)
+        self.assertEqual(struct.unpack('>II', hdr[16:24]), (1600, 900))
+        rec = os.path.join(tmp, 'sc19-rec')
+        os.makedirs(rec, exist_ok=True)
+        pr = self.run_client('mellagui-sc19', 'mellagui-record', '--start', '--duration', '1', '--codec', 'mjpeg', '--dir', rec,
+                             env={'MELLAGUI_RECORD_SYSTEM_SRC': 'none', 'MELLAGUI_RECORD_MIC_SRC': 'none'})
+        pr.wait(timeout=30)
+        files = [f for f in os.listdir(rec) if f.endswith('.mp4')]
+        self.assertEqual(len(files), 1)
+        info = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-view'), '--video-info', os.path.join(rec, files[0])],
+                              capture_output=True, text=True).stdout
+        self.assertIn('1600x900', info)
+
+    def test_the_converted_programs_start_and_draw_on_a_scaled_screen(self):
+        c = self.start('mellagui-sc20', 2)
+        for prog, app in (('mellagui-term', None), ('mellagui-edit', 'mellagui.edit'), ('mellagui-files', 'mellagui.files'),
+                          ('mellagui-view', None), ('mellagui-keys', 'mellagui.keys')):
+            before = len(c.windows()['windows'])
+            args = [prog] + ([os.path.join(ROOT, 'docs', 'screenshot.jpg')] if prog == 'mellagui-view' else [])
+            pr = self.run_client('mellagui-sc20', *args)
+            for _ in range(100):
+                if len(c.windows()['windows']) > before:
+                    break
+                time.sleep(0.05)
+            self.assertGreater(len(c.windows()['windows']), before, prog)
+            time.sleep(0.4)
+            self.assertIsNone(pr.poll(), prog)                         # still running: it drew into a 2x buffer and the compositor accepted it
+
     def test_the_pointer_is_drawn_at_the_screens_pixels(self):
         c = self.start('mellagui-sc14', 2)
         c.cmd('abs 400 225')

@@ -663,7 +663,6 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
         lo->phys_width_mm = (int32_t)conn->mmWidth;
         lo->phys_height_mm = (int32_t)conn->mmHeight;
     }
-    lo->scale = 1;
     lo->backend_data = o;
     o->retry = lm_loop_add_timer(d->base.server->loop, retry_fire, o);
     lm_list_append(&d->base.outputs, &lo->link);

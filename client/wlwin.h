@@ -103,6 +103,15 @@ void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int 
 /* Everything drawn so far mixed with black: t = 0 nothing, 1 all black (a modal card dims the page behind it). */
 void wlwin_dim(struct wlwin *w, double t);
 /* An XRGB / ARGB picture of sw x sh pixels (stride in pixels) scaled to the logical rectangle (x, y, width, height). */
+/* The scale factor of the buffer (1 when the program is not hidpi or the screen is not scaled): a program that makes pictures for its window
+ * (an image viewer, a camera) makes them wlwin_scale() times as big as their logical size and puts them with wlwin_blit_px. */
+static inline int wlwin_scale(const struct wlwin *w) { return w->scale > 1 ? w->scale : 1; }
+/* One character in a cell of cw x ch LOGICAL pixels (a text grid: an editor, a table), drawn at the buffer's scale: the glyph is rasterised for
+ * cw * scale x ch * scale pixels, so the grid stays exact at any scale. */
+void wlwin_cell(struct wlwin *w, int x, int y, uint32_t cp, int cw, int ch, uint32_t rgb, bool bold);
+/* An opaque picture of sw x sh PHYSICAL pixels (stride in pixels) with its top left corner at the logical position (x, y), clipped to the rectangle
+ * (cx, cy, cw, ch) (logical). */
+void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride, int cx, int cy, int cw, int ch);
 void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint32_t *src, int sw, int sh, int stride);
 /* One glyph scaled up by `scale` (>= 1). */
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb);

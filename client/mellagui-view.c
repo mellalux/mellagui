@@ -272,7 +272,8 @@ static void ff_target(const struct app *a, bool fit, int *w, int *h)
     *h = a->th;
     if (!fit)
         return;
-    double z = LM_MIN((double)view_w(a) / a->tw, (double)view_h(a) / a->th);
+    int k = wlwin_scale(&a->win);                               /* decode for the buffer's own pixels: sharp on a scaled screen */
+    double z = LM_MIN((double)(view_w(a) * k) / a->tw, (double)(view_h(a) * k) / a->th);
     if (z < 1.0) {
         *w = LM_MAX((int)(a->tw * z + 0.5), 16);
         *h = LM_MAX((int)(a->th * z + 0.5), 16);
@@ -855,27 +856,33 @@ static void paint(struct wlwin *w)
             a->ox = ox;
         if (sh > vh)
             a->oy = oy;
-        const uint32_t *src = a->img.px;
-        int stride = a->img.w;
-        if (z < 0.999) {
-            if (!a->scaled || a->scaled_zoom != z)
-                build_scaled(a, z);
+        /* The picture is put on the buffer's own pixels: zoom, size and offsets in physical pixels (1 on a screen without scale). */
+        int k = wlwin_scale(w);
+        double zp = z * k;
+        int vwp = vw * k, vhp = vh * k;
+        int swp = LM_MAX((int)(a->img.w * zp + 0.5), 1), shp = LM_MAX((int)(a->img.h * zp + 0.5), 1);
+        int oxp = ox * k, oyp = oy * k;
+        const uint32_t *srcp = a->img.px;
+        int stridep = a->img.w;
+        if (zp < 0.999) {
+            if (!a->scaled || a->scaled_zoom != zp)
+                build_scaled(a, zp);
             if (a->scaled) {
-                src = a->scaled;
-                stride = a->sw;
-                sw = a->sw;
-                sh = a->sh;
+                srcp = a->scaled;
+                stridep = a->sw;
+                swp = a->sw;
+                shp = a->sh;
             }
         }
-        for (int y = LM_MAX(0, -oy); y < sh && oy + y < vh; y++) {
-            uint32_t *dst = w->pixels + (size_t)(oy + y) * (size_t)w->bw;
-            int x0 = LM_MAX(0, -ox), x1 = LM_MIN(sw, vw - ox);
-            if (z > 1.001) {                                    /* nearest neighbour */
-                int sy = (int)((double)y / z);
+        for (int y = LM_MAX(0, -oyp); y < shp && oyp + y < vhp; y++) {
+            uint32_t *dst = w->pixels + (size_t)(oyp + y) * (size_t)w->pw;
+            int x0 = LM_MAX(0, -oxp), x1 = LM_MIN(swp, vwp - oxp);
+            if (zp > 1.001) {                                   /* nearest neighbour */
+                int sy = (int)((double)y / zp);
                 for (int x = x0; x < x1; x++)
-                    dst[ox + x] = src[(size_t)sy * (size_t)stride + (size_t)((double)x / z)];
+                    dst[oxp + x] = srcp[(size_t)sy * (size_t)stridep + (size_t)((double)x / zp)];
             } else if (x1 > x0) {
-                memcpy(dst + ox + x0, src + (size_t)y * (size_t)stride + (size_t)x0, (size_t)(x1 - x0) * 4);
+                memcpy(dst + oxp + x0, srcp + (size_t)y * (size_t)stridep + (size_t)x0, (size_t)(x1 - x0) * 4);
             }
         }
         if (a->vmode) {
@@ -1292,6 +1299,7 @@ static void sync_inhibitor(struct app *a)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

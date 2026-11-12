@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "font.h"
+#include "util.h"
 #include "keymap.h"
 #include "wlclip.h"
 #include "wlwin.h"
@@ -331,11 +332,33 @@ void wltext_select_all(char *buf)
     s->cur = strlen(buf);
 }
 
+/* Pixels of the label buf[from..to) (bytes). */
+static int span_px(const char *buf, size_t from, size_t to)
+{
+    int px = 0;
+    for (size_t i = from; i < to;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(buf + i, (int)(to - i), &used);
+        px += lm_font_advance(cp);
+        i += used > 0 ? (size_t)used : 1;
+    }
+    return px;
+}
+
 void wltext_click(char *buf, int rel_px, bool extend)
 {
     struct state *s = get(buf);
-    int col = (rel_px + LM_FONT_W / 2) / LM_FONT_W;
-    size_t pos = byte_of_cp(buf, (size_t)(col < 0 ? 0 : col) + s->off);
+    size_t len = strlen(buf), pos = byte_of_cp(buf, s->off);
+    int x = 0;
+    while (pos < len) {                                                 /* the gap between two letters that is nearest */
+        int used;
+        uint32_t cp = lm_utf8_decode(buf + pos, (int)(len - pos), &used);
+        int adv = lm_font_advance(cp);
+        if (rel_px < x + (adv + 1) / 2)
+            break;
+        x += adv;
+        pos += used > 0 ? (size_t)used : 1;
+    }
     s->cur = pos;
     if (!extend)
         s->anchor = pos;
@@ -343,39 +366,43 @@ void wltext_click(char *buf, int rel_px, bool extend)
 
 /* ---- painting ----------------------------------------------------------------------------------------------------------- */
 
+/* The field is a label: every letter as wide as it is (LM_FONT_W each while labels are cells, which gives the old
+ * columns). `off` (the first letter shown, a code point number) moves so that the caret stays inside. */
 void wltext_paint(struct wlwin *w, int x, int y, int maxw, const char *buf, bool focus, uint32_t fg, uint32_t selbg, uint32_t caret)
 {
     struct state *s = get(buf);
-    int cols = maxw / LM_FONT_W;
-    if (cols < 2)
+    int room = maxw - maxw % LM_FONT_W;
+    if (room < 2 * LM_FONT_W)
         return;
-    size_t cur_cp = cp_count(buf, s->cur), total = cp_count(buf, strlen(buf));
+    size_t len = strlen(buf), cur = LM_MIN(s->cur, len);
+    size_t cur_cp = cp_count(buf, cur);
     if (cur_cp < s->off)                                                /* the caret stays in view */
         s->off = cur_cp;
-    if (cur_cp >= s->off + (size_t)cols - 1)
-        s->off = cur_cp - (size_t)cols + 2;
-    if (total <= (size_t)cols - 1)
+    size_t first = byte_of_cp(buf, s->off);
+    while (first < cur && span_px(buf, first, cur) > room - 2 * LM_FONT_W) {     /* ... two cells before the right end */
+        first = byte_of_cp(buf, ++s->off);
+    }
+    if (span_px(buf, 0, len) <= room - LM_FONT_W) {
         s->off = 0;
-    size_t first = byte_of_cp(buf, s->off), last = byte_of_cp(buf, s->off + (size_t)cols);
+        first = 0;
+    }
+    size_t last = first + (size_t)lm_font_fit(buf + first, room);
     size_t a, b;
     if (focus && sel_range(s, &a, &b)) {                                /* the selection behind the text */
-        size_t ca = cp_count(buf, a), cb = cp_count(buf, b);
-        if (ca < s->off)
-            ca = s->off;
-        if (cb > s->off + (size_t)cols)
-            cb = s->off + (size_t)cols;
-        if (cb > ca)
-            wlwin_fill(w, x + (int)(ca - s->off) * LM_FONT_W, y, (int)(cb - ca) * LM_FONT_W, LM_FONT_H, selbg);
+        a = LM_MAX(a, first);
+        b = LM_MIN(b, last);
+        if (b > a)
+            wlwin_fill(w, x + span_px(buf, first, a), y, span_px(buf, a, b), LM_FONT_H, selbg);
     }
     char *shown = malloc(last - first + 1);
     if (!shown)
         return;
     memcpy(shown, buf + first, last - first);
     shown[last - first] = 0;
-    wlwin_text_cells(w, x, y, shown, 1, fg, 0);          /* a field is cells: the caret and the selection count characters */
+    wlwin_text(w, x, y, shown, 1, fg, 0);
     free(shown);
     if (focus)
-        wlwin_fill(w, x + (int)(cur_cp - s->off) * LM_FONT_W, y, 2, LM_FONT_H, caret);
+        wlwin_fill(w, x + span_px(buf, first, cur), y, 2, LM_FONT_H, caret);
 }
 
 /* ---- the right-click menu ------------------------------------------------------------------------------------------------ */

@@ -1356,9 +1356,8 @@ static void button(struct wlwin *w, struct box b, const char *label, bool hot, u
 /* Text broken at spaces to fit max_w; returns the y after the last line. */
 static int wrap_text(struct wlwin *w, int x, int y, int max_w, const char *text, uint32_t rgb)
 {
-    int per = LM_MAX(max_w / LM_FONT_W, 8);
     while (*text) {
-        int n = (int)strlen(text);
+        int n = (int)strlen(text), per = LM_MAX(lm_font_fit(text, max_w), 8);     /* what of it fits the width */
         if (n > per) {
             n = per;
             while (n > 0 && text[n] != ' ')

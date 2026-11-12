@@ -94,6 +94,14 @@ struct lm_font_glyph {
     int advance;                        /* how far the pen moves */
 };
 void lm_font_label(uint32_t codepoint, int scale, struct lm_font_glyph *out);
+/* The bold weight: the bold file beside the font's (X-Bold.ttf, X-B.ttf ...), else the regular glyph struck twice a
+ * pixel apart; the bitmap font has one weight (the same picture). A bold label has its own widths. */
+void lm_font_label_styled(uint32_t codepoint, int scale, bool bold, struct lm_font_glyph *out);
+const uint8_t *lm_font_cell_styled(uint32_t codepoint, int cw, int ch, bool bold);     /* a bold cell is as wide as any */
+int lm_font_advance_styled(uint32_t codepoint, bool bold);
+int lm_font_text_width_bold(const char *utf8);
+/* How many bytes of a label (whole characters) fit into max_px pixels: for wrapping and cutting text. */
+int lm_font_fit(const char *utf8, int max_px);
 /* The advance of one character of a label at scale 1. Thread safe once the fonts are chosen. */
 int lm_font_advance(uint32_t codepoint);
 /* Are labels proportional right now (a font is there and this program did not ask for cells)? */

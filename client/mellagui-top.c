@@ -877,7 +877,7 @@ static int build_buttons(const struct app *a, struct btn *b)
     for (int i = 0; i < nd; i++) {
         b[n].id = defs[i].id;
         b[n].label = defs[i].label;
-        b[n].w = (int)strlen(defs[i].label) * LM_FONT_W + 22;
+        b[n].w = lm_font_text_width(defs[i].label) + 22;
         b[n].x = x;
         b[n].base = defs[i].on ? defs[i].hover : defs[i].base;
         b[n].hover = defs[i].on ? lm_mix_rgb(defs[i].hover, 0xffffff, 0.25) : defs[i].hover;
@@ -996,7 +996,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
     int y = HEAD_H + 4, h = TOOL_H - 8;
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
     lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, lm_button_radius(h / 2), base);
-    int tw = (int)strlen(b->label) * LM_FONT_W;
+    int tw = lm_font_text_width(b->label);
     wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
 
@@ -1142,7 +1142,7 @@ static void paint_log(struct app *a, struct wlwin *w)
         size_t l = strlen(line);
         size_t skip = LM_MIN((size_t)a->logx, l);
         uint32_t col = strcasestr(line, "fail") || strcasestr(line, "error") ? lm_theme.error : strcasestr(line, "warn") ? lm_theme.warn : COL_TEXT;
-        wlwin_text(w, PAD, y + r * ROW_H + 1, line + skip, 1, col, w->bw - 2 * PAD);
+        wlwin_text_cells(w, PAD, y + r * ROW_H + 1, line + skip, 1, col, w->bw - 2 * PAD);    /* a log: columns, and logx scrolls by characters */
     }
     paint_scrollbar(a, w, a->nlog, a->logtop);
 }
@@ -1584,7 +1584,6 @@ static int list_cmd(int n)
 
 int main(int argc, char **argv)
 {
-    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

@@ -125,6 +125,7 @@ static struct {
     struct lm_ttf *ui;                  /* NULL = labels are set in cells too */
     char ui_name[512];                  /* the file, or "mono" */
     char ui_conf[512], ui_env[512];
+    struct lm_ttf *bold, *ui_bold;      /* the bold faces beside the two files, NULL = the regular one struck twice */
 } F = { .name = "bitmap", .ui_name = "mono" };
 
 static void cache_clear(void)
@@ -153,6 +154,29 @@ static const char *const k_auto[] = {
     "/usr/share/fonts/gnu-free/FreeMono.ttf",
 };
 
+/* The bold face that belongs to a font file: the usual names beside it. NULL when there is none. */
+static struct lm_ttf *open_bold(const char *path)
+{
+    static const char *const swap[][2] = {
+        { "-Regular.ttf", "-Bold.ttf" }, { "-R.ttf", "-B.ttf" }, { ".ttf", "-Bold.ttf" }, { ".ttf", "Bold.ttf" },
+    };
+    size_t len = strlen(path);
+    for (size_t i = 0; i < sizeof(swap) / sizeof(swap[0]); i++) {
+        size_t sl = strlen(swap[i][0]);
+        if (len <= sl || strcmp(path + len - sl, swap[i][0]) != 0)
+            continue;
+        char cand[600];
+        if (snprintf(cand, sizeof(cand), "%.*s%s", (int)(len - sl), path, swap[i][1]) >= (int)sizeof(cand))
+            continue;
+        if (access(cand, R_OK) != 0)
+            continue;
+        struct lm_ttf *t = lm_ttf_open(cand, NULL);
+        if (t)
+            return t;
+    }
+    return NULL;
+}
+
 static bool open_file(const char *path, bool quiet)
 {
     const char *why = NULL;
@@ -174,6 +198,11 @@ static bool open_file(const char *path, bool quiet)
     F.ttf = t;
     F.adv = adv;
     snprintf(F.name, sizeof(F.name), "%s", path);
+    F.bold = open_bold(path);
+    if (F.bold && (!lm_ttf_glyph(F.bold, '0') || lm_ttf_advance(F.bold, lm_ttf_glyph(F.bold, '0')) * lm_ttf_units(t) != adv * lm_ttf_units(F.bold))) {
+        lm_ttf_close(F.bold);                           /* its cells would be another width: not this font's bold */
+        F.bold = NULL;
+    }
     return true;
 }
 
@@ -189,7 +218,8 @@ bool lm_font_use(const char *spec)
         return true;                                    /* the same file again: keep the cache */
     if (F.ttf)
         lm_ttf_close(F.ttf);
-    F.ttf = NULL;
+    lm_ttf_close(F.bold);
+    F.ttf = F.bold = NULL;
     snprintf(F.name, sizeof(F.name), "bitmap");
     for (int i = 0; i < 256; i++)                       /* thin strokes of small text a little darker than linear */
         F.gamma[i] = (uint8_t)(pow(i / 255.0, 0.78) * 255.0 + 0.5);
@@ -267,7 +297,8 @@ bool lm_font_use_ui(const char *spec)
     F.ui_chosen = true;
     if (F.ui)
         lm_ttf_close(F.ui);
-    F.ui = NULL;
+    lm_ttf_close(F.ui_bold);
+    F.ui = F.ui_bold = NULL;
     snprintf(F.ui_name, sizeof(F.ui_name), "mono");
     bool ok = true;
     if (!strcmp(spec, "auto")) {
@@ -281,6 +312,8 @@ bool lm_font_use_ui(const char *spec)
             lm_warn("font: %s %s - labels are set in the cells' font", spec, why ? why : "cannot be used");
         ok = F.ui != NULL;
     }
+    if (F.ui)
+        F.ui_bold = open_bold(F.ui_name);
     if (strcmp(old, F.ui_name) != 0) {
         cache_clear();
         F.generation++;
@@ -338,14 +371,67 @@ static int ui_glyph_id(uint32_t cp)
     return lm_ttf_glyph(F.ui, cp);
 }
 
-int lm_font_advance(uint32_t cp)
+/* The face a label's character comes from (the bold file when it has the character), its glyph and its advance at scale 1. */
+static struct lm_ttf *ui_face(uint32_t cp, bool bold, int *glyph, int *adv1)
 {
-    ensure();
     int g = ui_glyph_id(cp);
     if (!g)
-        return LM_FONT_W;
-    int a = (int)(lm_ttf_advance(F.ui, g) * ui_scale() + 0.5);
-    return a < 1 ? 1 : a;
+        return NULL;
+    struct lm_ttf *t = F.ui;
+    if (bold && F.ui_bold) {
+        int gb = lm_ttf_glyph(F.ui_bold, cp);
+        if (gb) {
+            t = F.ui_bold;
+            g = gb;
+        }
+    }
+    double s = ui_scale() * lm_ttf_units(F.ui) / lm_ttf_units(t);
+    int a = (int)(lm_ttf_advance(t, g) * s + 0.5);
+    *glyph = g;
+    *adv1 = (a < 1 ? 1 : a) + (bold && t == F.ui ? 1 : 0);     /* struck twice: a pixel wider */
+    return t;
+}
+
+int lm_font_advance_styled(uint32_t cp, bool bold)
+{
+    ensure();
+    int g, a;
+    return ui_face(cp, bold, &g, &a) ? a : LM_FONT_W;
+}
+
+int lm_font_advance(uint32_t cp)
+{
+    return lm_font_advance_styled(cp, false);
+}
+
+int lm_font_text_width_bold(const char *utf8)
+{
+    int n = 0;
+    size_t len = strlen(utf8);
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(utf8 + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        n += lm_font_advance_styled(cp, true);
+    }
+    return n;
+}
+
+int lm_font_fit(const char *utf8, int max_px)
+{
+    int px = 0;
+    size_t len = strlen(utf8), i = 0;
+    while (i < len) {
+        int used;
+        uint32_t cp = lm_utf8_decode(utf8 + i, (int)(len - i), &used);
+        used = used > 0 ? used : 1;
+        int a = lm_font_advance(cp);
+        if (px + a > max_px)
+            break;
+        px += a;
+        i += (size_t)used;
+    }
+    return (int)i;
 }
 
 bool lm_font_proportional(void)
@@ -577,7 +663,19 @@ static bool in_bitmap(uint32_t cp)
     return false;
 }
 
-static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out)
+/* Bold without a bold file: the picture struck again `n` pixels to the right. */
+static void strike_twice(uint8_t *px, int w, int h, int n)
+{
+    for (int y = 0; y < h; y++) {
+        uint8_t *row = px + (size_t)y * (size_t)w;
+        for (int x = w - 1; x >= 0; x--)
+            for (int k = 1; k <= n && x - k >= 0; k++)
+                if (row[x - k] > row[x])
+                    row[x] = row[x - k];
+    }
+}
+
+static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out, bool bold)
 {
     bool lines = cp >= 0x2500 && cp <= 0x259f;
     int g = F.ttf && !(lines && in_bitmap(cp)) ? lm_ttf_glyph(F.ttf, cp) : 0;
@@ -592,13 +690,24 @@ static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out)
     struct lm_ttf *t = F.ttf;
     double asc = lm_ttf_ascent(t), desc = -lm_ttf_descent(t);
     double s = cw / (double)F.adv;                              /* pixels per font unit */
+    int xh = lm_ttf_xheight(t);
+    bool strike = bold;
+    if (bold && F.bold && lm_ttf_glyph(F.bold, cp)) {           /* the bold file: the same metrics, its own outlines */
+        double k = lm_ttf_units(t) / (double)lm_ttf_units(F.bold);
+        t = F.bold;
+        g = lm_ttf_glyph(t, cp);
+        s *= k;
+        asc /= k;
+        desc /= k;
+        xh = (int)(xh / k);
+        strike = false;
+    }
     if ((asc + desc) * s > ch)
         s = ch / (asc + desc);
     /* the line sits in the middle of the cell, its baseline on a whole pixel */
     double base = floor((ch - (asc + desc) * s) / 2 + asc * s + 0.5);
     /* the x height on whole pixels too: the tops of the small letters are then sharp (all the hinting there is) */
     double sy = s;
-    int xh = lm_ttf_xheight(t);
     if (xh > 0) {
         double px = xh * s, snapped = floor(px + 0.5);
         if (snapped >= 1 && snapped / px > 0.88 && snapped / px < 1.14)
@@ -615,11 +724,21 @@ static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out)
     if (ch < 40)
         for (int i = 0; i < cw * ch; i++)
             out[i] = F.gamma[out[i]];
+    if (strike)
+        strike_twice(out, cw, ch, cw / 12 > 1 ? cw / 12 : 1);
 }
 
 const uint8_t *lm_font_cell(uint32_t cp, int cw, int ch)
 {
+    return lm_font_cell_styled(cp, cw, ch, false);
+}
+
+const uint8_t *lm_font_cell_styled(uint32_t cp, int cw, int ch, bool bold)
+{
     ensure();
+    bold = bold && F.ttf;                                       /* the bitmap font has one weight */
+    uint32_t real = cp;
+    cp = (cp & 0x1fffffu) | (bold ? 0x40000000u : 0);
     cw = cw < 1 ? 1 : cw > CELL_MAX_W ? CELL_MAX_W : cw;
     ch = ch < 1 ? 1 : ch > CELL_MAX_H ? CELL_MAX_H : ch;
     uint32_t h = (cp * 2654435761u) ^ ((uint32_t)cw * 40503u) ^ ((uint32_t)ch * 2246822519u);
@@ -642,7 +761,7 @@ const uint8_t *lm_font_cell(uint32_t cp, int cw, int ch)
         static uint8_t none[CELL_MAX_W * CELL_MAX_H];
         return none;
     }
-    render_cell(cp, cw, ch, px);
+    render_cell(real, cw, ch, px, bold);
     F.slot[i] = (struct cell){ cp, (uint16_t)cw, (uint16_t)ch, px };
     F.used++;
     F.bytes += size;
@@ -653,29 +772,33 @@ const uint8_t *lm_font_cell(uint32_t cp, int cw, int ch)
 
 void lm_font_label(uint32_t cp, int scale, struct lm_font_glyph *out)
 {
+    lm_font_label_styled(cp, scale, false, out);
+}
+
+void lm_font_label_styled(uint32_t cp, int scale, bool bold, struct lm_font_glyph *out)
+{
     ensure();
     scale = scale < 1 ? 1 : scale > 32 ? 32 : scale;
     int ch = LM_FONT_H * scale;
-    int g = ui_glyph_id(cp);
-    if (!g) {                                                   /* cells: this program's choice, no file, or no such glyph */
-        out->px = lm_font_cell(cp, LM_FONT_W * scale, ch);
+    int g = 0, adv1 = 0;
+    struct lm_ttf *t = ui_face(cp, bold, &g, &adv1);
+    if (!t) {                                                   /* cells: this program's choice, no file, or no such glyph */
+        out->px = lm_font_cell_styled(cp, LM_FONT_W * scale, ch, bold);
         out->w = LM_FONT_W * scale;
         out->h = ch;
         out->left = 0;
         out->advance = LM_FONT_W * scale;
         return;
     }
-    struct lm_ttf *t = F.ui;
-    double s1 = ui_scale();
-    int adv1 = (int)(lm_ttf_advance(t, g) * s1 + 0.5);
-    adv1 = adv1 < 1 ? 1 : adv1;
+    bool strike = bold && t == F.ui;
+    double s1 = ui_scale() * lm_ttf_units(F.ui) / lm_ttf_units(t);
     int pad = 2 * scale, w = adv1 * scale + 2 * pad;            /* room for what hangs over the advance (j, f, W) */
     out->w = w;
     out->h = ch;
     out->left = pad;
     out->advance = adv1 * scale;
 
-    uint32_t key = cp | 0x80000000u;                            /* (code points end at 0x10ffff: the bit marks a label) */
+    uint32_t key = cp | 0x80000000u | (bold ? 0x40000000u : 0);  /* (code points end at 0x10ffff: the bits mark a label, a bold one) */
     uint32_t h = (key * 2654435761u) ^ ((uint32_t)ch * 2246822519u);
     h ^= h >> 15;
     int i = (int)(h & (CACHE_SLOTS - 1));
@@ -708,11 +831,13 @@ void lm_font_label(uint32_t cp, int scale, struct lm_font_glyph *out)
         if (snapped >= 1 && snapped / hp > 0.88 && snapped / hp < 1.14)
             sy = s * snapped / hp;
     }
-    double ox = pad + (adv1 * scale - lm_ttf_advance(t, g) * s) / 2;
+    double ox = pad + ((adv1 - (strike ? 1 : 0)) * scale - lm_ttf_advance(t, g) * s) / 2;
     lm_ttf_render(t, g, s, sy, ox, base, px, w, ch);
     if (ch < 40)
         for (size_t k = 0; k < size; k++)
             px[k] = F.gamma[px[k]];
+    if (strike)
+        strike_twice(px, w, ch, scale);
     F.slot[i] = (struct cell){ key, (uint16_t)w, (uint16_t)ch, px };
     F.used++;
     F.bytes += size;

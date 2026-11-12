@@ -1142,7 +1142,7 @@ static void render(void)
             }
             int cw = CELL_W, ch = CELL_H;
             int x0 = PAD + col * cw, y0 = BAR_H + PAD + row * ch;
-            const uint8_t *g = lm_font_cell(c->cp, cw, ch);     /* drawn at the cell's own size, whatever the zoom */
+            const uint8_t *g = lm_font_cell_styled(c->cp, cw, ch, (c->attr & ATTR_BOLD) != 0);    /* drawn at the cell's own size, whatever the zoom */
             for (int r = 0; r < ch; r++) {
                 uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
                 const uint8_t *cov = g + (size_t)r * (size_t)cw;

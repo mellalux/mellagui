@@ -166,7 +166,8 @@ static void wrap_text(struct wlwin *w, int x, int y, int max_w, const char *s, i
             int cl = 1;
             while ((q[cl] & 0xc0) == 0x80)
                 cl++;
-            wpx += LM_FONT_W;
+            int used;
+            wpx += lm_font_advance(lm_utf8_decode(q, cl, &used));
             if (wpx > max_w)
                 break;
             if (*q == ' ')
@@ -196,7 +197,7 @@ static void paint(struct wlwin *w)
     snprintf(head, sizeof(head), "Notifications (%d)", a->n);
     wlwin_text(w, PAD, 14, head, 1, lm_theme.accent, 0);
     if (a->dnd)
-        wlwin_text(w, w->bw - PAD - 17 * LM_FONT_W, 14, "Do not disturb: on", 1, lm_theme.warn, 0);
+        wlwin_text(w, w->bw - PAD - lm_font_text_width("Do not disturb: on") + LM_FONT_W, 14, "Do not disturb: on", 1, lm_theme.warn, 0);
     wlwin_fill(w, PAD, HEAD - 8, w->bw - 2 * PAD, 1, lm_theme.border);
     clamp(a);
     int vis = rows_visible(a);
@@ -317,7 +318,6 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
-    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

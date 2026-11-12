@@ -70,6 +70,20 @@ void lm_font_reset(void);
 bool lm_font_conf(void *ud, const char *section, const char *key, const char *value);
 void lm_font_apply(void);
 
+/* What was asked for ("auto", "bitmap" or a file): MELLAGUI_FONT when it was set from outside, else the file's line.
+ * lm_font_locked() = it is the environment's, so the file's line has no effect. Meaningful after lm_font_apply(). */
+const char *lm_font_choice(void);
+bool lm_font_locked(void);
+/* Could this be chosen: "auto", "bitmap", or a whole path of a TrueType file that reads (it is opened to see). */
+bool lm_font_usable(const char *spec);
+
+/* The monospace TrueType fonts installed: regular faces (no Bold / Italic / Oblique in the file name) below
+ * /usr/share/fonts, /usr/local/share/fonts, ~/.local/share/fonts and ~/.fonts ($MELLAGUI_FONT_DIRS, colon separated,
+ * replaces the list), sorted by file name. Opens every .ttf it finds (at most 600, 16 MB each), so it takes a
+ * moment: for the settings panel, not for the compositor's loop. Returns how many paths it stored. */
+#define LM_FONT_PATH_MAX 256
+int lm_font_list(char (*out)[LM_FONT_PATH_MAX], int max);
+
 /* dst with `a`/255 of src over it, all four channels (so opaque stays opaque, premultiplied stays right). */
 static inline uint32_t lm_font_mix(uint32_t dst, uint32_t src, unsigned a)
 {

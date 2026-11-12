@@ -390,7 +390,8 @@ struct app {
     int sound_tab;                      /* the Sound page's part: 0 the outputs and beeps, 1 the microphone */
     int input_tab;                      /* the Input page's part: 0 the keyboard, 1 the mouse and touchpad */
     int sec_tab;                        /* the Security page's part: 0 the screen lock, 1 the screensaver */
-    int theme_tab;                      /* the Themes page's part: 0 the theme and its colours, 1 the buttons, 2 the sizes */
+    int theme_tab;                      /* the Themes page's part: 0 the theme and its colours, 1 the buttons, 2 the sizes, 3 the font */
+    int fpage;                          /* the Font part: which page of the list of fonts */
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
     bool sec_start;                     /* lock when MellaGUI starts */
@@ -1534,6 +1535,71 @@ static void build_buttons(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "One colour keeps each button's lightness.");
 }
 
+/* ---- the Font part of the Themes page ------------------------------------------------------------------------------------ */
+
+#define FONTS_MAX 64
+#define FONTS_ROWS 6
+
+static char g_fonts[FONTS_MAX][LM_FONT_PATH_MAX];       /* the monospace fonts found, looked for once (-1 = not yet) */
+static int g_nfonts = -1;
+
+static void font_label(const char *path, char *out, size_t n)
+{
+    if (!strcmp(path, "bitmap")) {
+        snprintf(out, n, "the built-in pixel font");
+        return;
+    }
+    const char *b = strrchr(path, '/');
+    snprintf(out, n, "%s", b ? b + 1 : path);
+    size_t len = strlen(out);
+    if (len > 4 && !strcasecmp(out + len - 4, ".ttf"))
+        out[len - 4] = 0;
+}
+
+static void build_font(struct app *a, int x, int y, int w)
+{
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Font");
+    y += ROW_H;
+    if (!*kv_get(a, "config-file")) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MellaGUI was started without a configuration file.");
+        return;
+    }
+    if (g_nfonts < 0)
+        g_nfonts = lm_font_list(g_fonts, FONTS_MAX);
+    char name[48], line[64];
+    font_label(kv_get(a, "font-name"), name, sizeof(name));
+    snprintf(line, sizeof(line), "In use: %.50s", name);
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, line);
+    y += ROW_H;
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "AaBbCc ÕÄÖÜ õäöü Šš Žž 0123456789 {}[]");
+    y += ROW_H + 4;
+    if (!strcmp(kv_get(a, "font-locked"), "1")) {
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "MELLAGUI_FONT is set: it decides, not this page.");
+        y += ROW_H;
+    }
+    const char *cur = kv_get(a, "font-file");
+    add_radio(a, x, y, 130, "Automatic", "font-pick", "auto", !strcmp(cur, "auto") || !*cur);
+    add_radio(a, x + 140, y, 200, "Built-in pixel font", "font-pick", "bitmap", !strcmp(cur, "bitmap"));
+    y += ROW_H + 4;
+    int pages = LM_MAX(1, (g_nfonts + FONTS_ROWS - 1) / FONTS_ROWS);
+    a->fpage = LM_CLAMP(a->fpage, 0, pages - 1);
+    if (g_nfonts == 0)
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "No monospace TrueType font is installed.");
+    for (int i = a->fpage * FONTS_ROWS; i < LM_MIN(g_nfonts, (a->fpage + 1) * FONTS_ROWS); i++, y += ROW_H) {
+        char idx[16];
+        snprintf(idx, sizeof(idx), "#%d", i);
+        font_label(g_fonts[i], name, sizeof(name));
+        add_radio(a, x, y, LM_MIN(w, 340), name, "font-pick", idx, !strcmp(cur, g_fonts[i]));
+    }
+    if (pages > 1) {
+        y += 4;
+        add_button(a, x, y, 40, "<", "font-prev");
+        add_button(a, x + 48, y, 40, ">", "font-next");
+        snprintf(line, sizeof(line), "%d-%d of %d", a->fpage * FONTS_ROWS + 1, LM_MIN(g_nfonts, (a->fpage + 1) * FONTS_ROWS), g_nfonts);
+        add(a, W_LABEL, (struct rect){ x + 100, y, w - 100, ROW_H }, line);
+    }
+}
+
 static void dock_flush(struct app *a);
 
 static void metric_flush(struct app *a)
@@ -1691,14 +1757,16 @@ static void build_input(struct app *a, int x, int y, int w)
 
 static void build_theme(struct app *a, int x, int y, int w)
 {
-    static const char *const names[3] = { "Colours", "Buttons", "Sizes" };
-    if (a->theme_tab == 2)
+    static const char *const names[4] = { "Font", "Colours", "Buttons", "Sizes" };  /* Font (part 3) stands first: the others keep their places */
+    if (a->theme_tab == 3)
+        build_font(a, x, y, w);
+    else if (a->theme_tab == 2)
         build_sizes(a, x, y, w);
     else if (a->theme_tab == 1)
         build_buttons(a, x, y, w);
     else
         build_colours(a, x, y, w);
-    build_part_tabs(a, x, y, w, "theme-tab", names, 3, a->theme_tab);
+    build_part_tabs(a, x, y, w, "theme-tab", names, 4, (a->theme_tab + 1) % 4);
 }
 
 static void build(struct app *a)
@@ -2167,6 +2235,12 @@ static void activate(struct app *a, int idx)
     case W_RADIO:
         if (!strcmp(w->key, "sec-kind")) {
             a->sec_pin = !strcmp(w->arg, "pin");
+        } else if (!strcmp(w->key, "font-pick")) {                      /* a font of the list goes by its number: a path does not fit the widget */
+            int i = w->arg[0] == '#' ? atoi(w->arg + 1) : -1;
+            if (w->arg[0] != '#')
+                send_set(a, "font-use", w->arg);
+            else if (i >= 0 && i < g_nfonts)
+                send_set(a, "font-use", g_fonts[i]);
         } else if (!strcmp(w->key, "dock-bg")) {                        /* the plate under the logos: a dock option */
             char v[48];
             snprintf(v, sizeof(v), "icon-background\x1f%s", w->arg);
@@ -2287,7 +2361,11 @@ static void activate(struct app *a, int idx)
             a->focus = -1;
             a->win.redraw = true;
         } else if (!strcmp(w->key, "theme-tab")) {
-            a->theme_tab = LM_CLAMP(atoi(w->arg), 0, 2);
+            a->theme_tab = (LM_CLAMP(atoi(w->arg), 0, 3) + 3) % 4;       /* the buttons are Font, Colours, Buttons, Sizes */
+            a->focus = -1;
+            a->win.redraw = true;
+        } else if (!strcmp(w->key, "font-prev") || !strcmp(w->key, "font-next")) {
+            a->fpage += !strcmp(w->key, "font-next") ? 1 : -1;
             a->focus = -1;
             a->win.redraw = true;
         } else if (!strcmp(w->key, "theme-accent")) {                     /* the one colour: the Colours part with it selected */
@@ -2585,6 +2663,10 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op == LM_MELLAGUI_SETTINGS_V1_EVT_VALUE) {
         bool changed = strcmp(kv_get(a, args[0].s), args[1].s) != 0;
         kv_set(a, args[0].s, args[1].s);
+        if (changed && !strcmp(args[0].s, "font-name") && args[1].s[0]) {    /* ... and the font it chooses */
+            lm_font_use(args[1].s);
+            a->win.redraw = true;
+        }
         if (changed && !strcmp(args[0].s, "theme-colors")) {                 /* the panel wears the palette it edits */
             struct colour cols[MAX_COLOURS];
             char hex[16];
@@ -2860,10 +2942,10 @@ static int selftest_help(void)
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "sources", "mic1|Built-in microphone;mic2|USB headset" }, { "source", "mic1" }, { "source-volume", "60" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
         { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "saver-style", "room" }, { "config-file", "/x/mellagui.conf" },
-        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" },
+        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" },
     };
     int bad = 0, shown = 0;
-    for (int pgi = 0; pgi < N_PAGES + 5; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */
+    for (int pgi = 0; pgi < N_PAGES + 6; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */
         int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : pgi == N_PAGES + 3 ? PAGE_INPUT : pgi == N_PAGES + 4 ? PAGE_SOUND : PAGE_COLOURS;
         memset(&fa, 0, sizeof(fa));
         for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
@@ -2872,7 +2954,7 @@ static int selftest_help(void)
         fa.sec_tab = pgi == N_PAGES ? 1 : 0;
         fa.input_tab = pgi == N_PAGES + 3 ? 1 : 0;
         fa.sound_tab = pgi == N_PAGES + 4 ? 1 : 0;
-        fa.theme_tab = pgi == N_PAGES + 1 ? 1 : pgi == N_PAGES + 2 ? 2 : 0;
+        fa.theme_tab = pgi == N_PAGES + 1 ? 1 : pgi == N_PAGES + 2 ? 2 : pgi == N_PAGES + 5 ? 3 : 0;
         fa.win.bw = 860;
         fa.win.bh = 560;
         fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;

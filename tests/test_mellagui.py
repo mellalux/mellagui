@@ -16973,6 +16973,82 @@ class TestFont(Base):
         out = p.communicate(timeout=5)[0].decode()
         self.assertIn('2 line(s) ignored', out)
 
+    AUTO_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+
+    def test_the_settings_choose_the_font_and_write_the_file(self):
+        if not os.path.exists(self.AUTO_FONT):
+            self.skipTest('DejaVu Sans Mono is not installed')
+        c = self.start('mellagui-font5', '# mine\n[theme]\naccent = #ff0000\n')
+        c.cmd('setting font-file')
+        self.assertEqual(c.last, 'ok auto')
+        c.cmd('setraw font-use bitmap')
+        self.assertIn('[font]\nfile = bitmap\n', open(self.path).read())
+        self.assertIn('# mine\n[theme]\naccent = #ff0000\n', open(self.path).read())
+        self.assertEqual(self.font(c)[1], 'bitmap')
+        c.cmd('setraw font-use ' + self.AUTO_FONT)
+        self.assertEqual(self.font(c)[1], self.AUTO_FONT)
+        c.cmd('setting font-name')
+        self.assertEqual(c.last, 'ok ' + self.AUTO_FONT)
+        for bad in ('Mono.ttf', '/nonexistent/Mono.ttf', self.path):       # a relative name, no file, a file that is no font
+            with self.assertRaises(RuntimeError):
+                c.cmd('setraw font-use ' + bad)
+        self.assertEqual(self.font(c)[1], self.AUTO_FONT)
+        c.cmd('setraw font-use auto')                                       # the default needs no line
+        self.assertNotIn('file =', open(self.path).read())
+
+    def test_the_environment_locks_the_choice(self):
+        c = self.start('mellagui-font6', '', font='bitmap')
+        c.cmd('setting font-locked')
+        self.assertEqual(c.last, 'ok 1')
+        c.cmd('setting font-file')
+        self.assertEqual(c.last, 'ok bitmap')
+
+    def test_the_panel_has_a_font_part_that_lists_the_monospace_fonts(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe) or not os.path.exists(self.AUTO_FONT):
+            self.skipTest('mellagui-settings not built or DejaVu Sans Mono not installed')
+        fonts = os.path.join(tmp, 'font7-fonts')
+        shutil.rmtree(fonts, ignore_errors=True)
+        os.makedirs(fonts)
+        mine = os.path.join(fonts, 'Testmono.ttf')
+        shutil.copy(self.AUTO_FONT, mine)
+        shutil.copy(self.AUTO_FONT, os.path.join(fonts, 'Testmono-Bold.ttf'))       # styled faces are left out
+        with open(os.path.join(fonts, 'Broken.ttf'), 'wb') as f:
+            f.write(os.urandom(3000))
+        c = self.start('mellagui-font7', '')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-font7', MELLAGUI_FONT_DIRS=fonts),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 8 * 35 + 13)                          # the Themes tab (9th)
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 296, y0 + 14 + 13)                        # its Font part, left of Colours
+        time.sleep(0.3)
+        top = y0 + 14 + 28 + 28 + 28 + 4                                  # the row of Automatic / Built-in pixel font
+        c.click(x0 + 160 + 30, top + 28 + 4 + 14)                         # the first (only) font of the list
+
+        def wait_for(text, there=True):
+            for _ in range(60):
+                if (text in open(self.path).read()) == there:
+                    return
+                time.sleep(0.05)
+            self.fail('%r %s in %r' % (text, 'not' if there else 'still', open(self.path).read()))
+        wait_for('file = ' + mine)
+        self.assertEqual(self.font(c)[1], mine)
+        c.click(x0 + 160 + 140 + 30, top + 14)                            # Built-in pixel font
+        wait_for('file = bitmap')
+        c.click(x0 + 160 + 30, top + 14)                                  # Automatic
+        wait_for('file =', there=False)
+
     @staticmethod
     def conf(name, text):
         path = os.path.join(tmp, name + '.conf')

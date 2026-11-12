@@ -195,6 +195,15 @@ static const struct entry table[] = {
     { "roundness", NULL, "Roundness",
       "How round the buttons are: 100 % makes circles (and pills for the long buttons), 0 % squares, in between rounded squares. It applies to the dock "
       "and the launcher at once." },
+    { "@Font", NULL, "Font",
+      "The font of all text: the panel, the window titles and MellaGUI's own programs. Text is set in cells of equal width, so only monospace "
+      "fonts are listed. The choice is written into the [font] section of the configuration file. This panel changes at once, the shell too; "
+      "programs that are already open keep their font until they are restarted." },
+    { "font-pick", NULL, "Which font",
+      "Automatic: the first well known monospace TrueType font that is installed (DejaVu Sans Mono, Liberation Mono, Noto Sans Mono ...), and the "
+      "built-in pixel font when there is none. Built-in pixel font: the 8 x 16 pixel letters MellaGUI always had - sharp, but blocky when big. "
+      "Below them are the monospace TrueType fonts found in the system's and your own font folders (regular faces only); they are drawn with smooth edges "
+      "at every size. The line of sample text shows the font in use." },
     { "theme-buttons", NULL, "Colours of the buttons",
       "Colourful: every button has its own colour, as MellaGUI always looked. One colour: all buttons take the hue of one colour (the choice below) and "
       "keep their own lightness, so a dark button stays dark. Grey: the colour is taken away." },

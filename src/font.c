@@ -71,9 +71,12 @@ int lm_font_text_width(const char *utf8)
 
 /* ---- the font that is drawn: the bitmap or a TrueType file ------------------------------------------------------ */
 
+#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "log.h"
@@ -234,6 +237,119 @@ void lm_font_apply(void)
     }
     lm_font_use(F.env[0] ? F.env : F.conf[0] ? F.conf : "auto");
     setenv("MELLAGUI_FONT", F.name, 1);
+}
+
+const char *lm_font_choice(void)
+{
+    return F.env[0] ? F.env : F.conf[0] ? F.conf : "auto";
+}
+
+bool lm_font_locked(void)
+{
+    return F.env[0] != 0;
+}
+
+bool lm_font_usable(const char *spec)
+{
+    if (!spec || !*spec)
+        return false;
+    if (!strcmp(spec, "auto") || !strcmp(spec, "bitmap"))
+        return true;
+    if (spec[0] != '/' || strlen(spec) >= sizeof(F.conf) || strpbrk(spec, "\r\n"))
+        return false;
+    struct lm_ttf *t = lm_ttf_open(spec, NULL);
+    bool ok = t && lm_ttf_glyph(t, '0') && lm_ttf_advance(t, lm_ttf_glyph(t, '0')) > 0;
+    lm_ttf_close(t);
+    return ok;
+}
+
+struct scan {
+    char (*out)[LM_FONT_PATH_MAX];
+    int n, max, opened;
+};
+
+static bool plain_face(const char *name)
+{
+    static const char *const styled[] = { "bold", "italic", "oblique", "light", "thin", "condensed", "black", "medium" };
+    char low[256];
+    size_t i = 0;
+    for (; name[i] && i < sizeof(low) - 1; i++)
+        low[i] = (char)(name[i] >= 'A' && name[i] <= 'Z' ? name[i] + 32 : name[i]);
+    low[i] = 0;
+    for (size_t k = 0; k < sizeof(styled) / sizeof(styled[0]); k++)
+        if (strstr(low, styled[k]))
+            return false;
+    return true;
+}
+
+static void scan_dir(struct scan *sc, const char *dir, int depth)
+{
+    DIR *d = depth < 5 ? opendir(dir) : NULL;
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) && sc->n < sc->max && sc->opened < 600) {
+        if (e->d_name[0] == '.')
+            continue;
+        char path[LM_FONT_PATH_MAX];
+        if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= (int)sizeof(path))
+            continue;
+        struct stat st;
+        if (stat(path, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            scan_dir(sc, path, depth + 1);
+            continue;
+        }
+        size_t len = strlen(e->d_name);
+        if (!S_ISREG(st.st_mode) || len < 5 || strcasecmp(e->d_name + len - 4, ".ttf") != 0 || st.st_size > (16 << 20) ||
+            !plain_face(e->d_name))
+            continue;
+        sc->opened++;
+        struct lm_ttf *t = lm_ttf_open(path, NULL);
+        if (t && lm_ttf_monospace(t)) {
+            bool dup = false;                                   /* the same file name in two folders: the first one */
+            for (int i = 0; i < sc->n; i++) {
+                const char *b = strrchr(sc->out[i], '/');
+                dup = dup || !strcmp(b ? b + 1 : sc->out[i], e->d_name);
+            }
+            if (!dup)
+                snprintf(sc->out[sc->n++], LM_FONT_PATH_MAX, "%s", path);
+        }
+        lm_ttf_close(t);
+    }
+    closedir(d);
+}
+
+static int by_file_name(const void *a, const void *b)
+{
+    const char *x = a, *y = b, *bx = strrchr(x, '/'), *by = strrchr(y, '/');
+    return strcasecmp(bx ? bx + 1 : x, by ? by + 1 : y);
+}
+
+int lm_font_list(char (*out)[LM_FONT_PATH_MAX], int max)
+{
+    struct scan sc = { out, 0, max, 0 };
+    const char *dirs = getenv("MELLAGUI_FONT_DIRS");
+    if (dirs) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "%s", dirs);
+        for (char *save = NULL, *p = strtok_r(buf, ":", &save); p; p = strtok_r(NULL, ":", &save))
+            scan_dir(&sc, p, 0);
+    } else {
+        const char *home = getenv("HOME");
+        char p[LM_FONT_PATH_MAX];
+        scan_dir(&sc, "/usr/share/fonts", 0);
+        scan_dir(&sc, "/usr/local/share/fonts", 0);
+        if (home && *home) {
+            if (snprintf(p, sizeof(p), "%s/.local/share/fonts", home) < (int)sizeof(p))
+                scan_dir(&sc, p, 0);
+            if (snprintf(p, sizeof(p), "%s/.fonts", home) < (int)sizeof(p))
+                scan_dir(&sc, p, 0);
+        }
+    }
+    qsort(out, (size_t)sc.n, LM_FONT_PATH_MAX, by_file_name);
+    return sc.n;
 }
 
 /* The bitmap glyph in a cell of cw x ch: each pixel is the part of it that the font's set pixels cover. */

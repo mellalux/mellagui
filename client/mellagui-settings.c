@@ -1941,7 +1941,7 @@ static void attach_help(struct app *a, int px, int pw)
             snprintf(seen[nseen++], sizeof(seen[0]), "%s", id);
         struct rect hr;
         if (w->kind == W_HEADING) {
-            int tw = lm_font_text_width(w->text) + 10;
+            int tw = lm_font_text_width_bold(w->text) + 10;
             hr = (struct rect){ w->r.x + LM_MIN(tw, w->r.w - HELP_D - 2), w->r.y + (w->r.h - HELP_D) / 2 - 1, HELP_D, HELP_D };
         } else {
             hr = (struct rect){ px + pw - HELP_D - 2, w->r.y + (w->r.h - HELP_D) / 2, HELP_D, HELP_D };
@@ -1981,8 +1981,8 @@ static int help_wrap(const char *text, int cols, char lines[][HELP_COLS + 1], in
         p += pl + (p[pl] ? 1 : 0);
         char line[HELP_COLS + 1] = "";
         for (char *tok = strtok(para, " "); tok && n < max; tok = strtok(NULL, " ")) {
-            size_t tl = strlen(tok), ll = strlen(line);
-            if (ll && ll + 1 + tl > (size_t)cols) {
+            size_t ll = strlen(line);
+            if (ll && lm_font_text_width(line) + lm_font_advance(' ') + lm_font_text_width(tok) > cols * LM_FONT_W) {
                 snprintf(lines[n++], HELP_COLS + 1, "%s", line);
                 line[0] = 0;
                 ll = 0;
@@ -2514,7 +2514,7 @@ static void paint_widget(struct app *a, int idx)
     const struct rect *r = &w->r;
     switch (w->kind) {
     case W_HEADING:
-        draw_text(a, r->x, text_y(r), w->text, COL_ACCENT, r->w);
+        wlwin_text_bold(&a->win, r->x, text_y(r), w->text, 1, COL_ACCENT, r->w);
         fill(a, (struct rect){ r->x, r->y + r->h - 2, r->w, 1 }, COL_KEY);
         break;
     case W_LABEL:

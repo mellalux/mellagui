@@ -291,6 +291,8 @@ void wlwin_text_cells(struct wlwin *w, int x, int y, const char *s, int scale, u
     }
 }
 
+static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w, bool bold);
+
 void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)
 {
     if (scale < 1)
@@ -299,6 +301,17 @@ void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_
         wlwin_text_cells(w, x, y, s, scale, rgb, max_w);
         return;
     }
+    text_styled(w, x, y, s, scale, rgb, max_w, false);
+}
+
+void wlwin_text_bold(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)
+{
+    if (scale >= 1)
+        text_styled(w, x, y, s, scale, rgb, max_w, true);
+}
+
+static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w, bool bold)
+{
     size_t len = strlen(s);
     int x0 = x;
     for (size_t i = 0; i < len;) {
@@ -306,7 +319,7 @@ void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_
         uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
         struct lm_font_glyph g;
-        lm_font_label(cp, scale, &g);
+        lm_font_label_styled(cp, scale, bold, &g);
         if (max_w > 0 && x + g.advance > x0 + max_w)
             break;
         int gx = x - g.left;

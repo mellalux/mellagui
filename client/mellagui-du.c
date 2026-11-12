@@ -770,7 +770,7 @@ static int build_buttons(const struct app *a, struct btn *b)
     for (int i = 0; i < N_BTN; i++) {
         b[i].id = d[i].id;
         b[i].label = d[i].l;
-        b[i].w = (int)strlen(d[i].l) * LM_FONT_W + 22;
+        b[i].w = lm_font_text_width(d[i].l) + 22;
         b[i].x = x;
         b[i].base = d[i].on ? d[i].hover : d[i].base;
         b[i].hover = d[i].on ? lm_mix_rgb(d[i].hover, 0xffffff, 0.25) : d[i].hover;
@@ -864,7 +864,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
     int y = 4, h = TOOL_H - 8;
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
     lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, lm_button_radius(h / 2), base);
-    int tw = (int)strlen(b->label) * LM_FONT_W;
+    int tw = lm_font_text_width(b->label);
     wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
 
@@ -893,8 +893,8 @@ static void paint_list(struct app *a, struct wlwin *w)
         wlwin_fill(w, bx, y + 7, (int)((long long)bw * nsize(k) / total), 6, tile_colour(k, i));
         human(nsize(k), sz, sizeof(sz));
         wlwin_text(w, bx + bw + 6, y + 2, sz, 1, COL_TEXT, 0);
-        snprintf(pc, sizeof(pc), "%3d%%", (int)(100 * nsize(k) / total));
-        wlwin_text(w, lw - 4 * LM_FONT_W - 6, y + 2, pc, 1, COL_DIM, 0);
+        snprintf(pc, sizeof(pc), "%d%%", (int)(100 * nsize(k) / total));
+        wlwin_text(w, lw - 6 - lm_font_text_width(pc), y + 2, pc, 1, COL_DIM, 0);          /* right aligned */
     }
     if (a->cur->nkid > rows) {                                          /* a thin scroll bar */
         int th = LM_MAX(rows * ROW_H * rows / a->cur->nkid, 14), ty = y0 + (rows * ROW_H - th) * a->top / LM_MAX(a->cur->nkid - rows, 1);
@@ -1269,7 +1269,6 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
-    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

@@ -3078,7 +3078,7 @@ static void toolbar(const struct app *a, struct rbtn *b)
             b[i].base = hover[i];
             b[i].hover = lm_mix_rgb(hover[i], 0xffffff, 0.25);
         }
-        b[i].w = (int)strlen(labels[i]) * LM_FONT_W + 20;
+        b[i].w = lm_font_text_width(labels[i]) + 20;
         b[i].x = x;
         if (tool_visible(a, i))                                         /* hidden buttons take no room */
             x += b[i].w + 6;
@@ -3110,13 +3110,14 @@ static void draw_rbtn(struct wlwin *w, const struct rbtn *b, int y, int h, bool 
         snprintf(t, sizeof(t), "%d%s", num, b->label);
     else
         snprintf(t, sizeof(t), "%s", b->label);
-    int tw = (int)strlen(t) * LM_FONT_W;
+    int tw = lm_font_text_width(t);
     int tx = b->x + LM_MAX((b->w - tw) / 2, 4);
     if (num > 0) {                                                      /* the key number a little dimmer than the name */
         char ns[8];
-        int nl = snprintf(ns, sizeof(ns), "%d", num);
+        snprintf(ns, sizeof(ns), "%d", num);
+        int nw = lm_font_text_width(ns);
         wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, ns, 1, lm_mix_rgb(lm_theme.on_colour, b->base, 0.45), 0);
-        wlwin_text(w, tx + nl * LM_FONT_W, y + (h - LM_FONT_H) / 2, b->label, 1, lm_theme.on_colour, b->w - 8 - nl * LM_FONT_W);
+        wlwin_text(w, tx + nw, y + (h - LM_FONT_H) / 2, b->label, 1, lm_theme.on_colour, b->w - 8 - nw);
     } else {
         wlwin_text(w, tx, y + (h - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, b->w - 8);
     }
@@ -3547,7 +3548,7 @@ static void paint_pane(struct wlwin *w, struct app *a, int idx)
     if (nm) {
         char mk[32];
         snprintf(mk, sizeof(mk), "%d marked", nm);
-        wlwin_text(w, x0 + pw - 8 - (int)strlen(mk) * LM_FONT_W, hy + 3, mk, 1, COL_MARK, 0);
+        wlwin_text(w, x0 + pw - 8 - lm_font_text_width(mk), hy + 3, mk, 1, COL_MARK, 0);
     }
     wlwin_fill(w, x0, list_y - 1, pw, 1, COL_BAR);
 
@@ -3818,7 +3819,10 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
         const char *s = pv->lines[pv->top + r];
         if (pv->kind == PV_DIR && s[0] && s[strlen(s) - 1] != '/')
             col = COL_FG;
-        wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
+        if (pv->kind == PV_DIR || pv->kind == PV_ERROR)
+            wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
+        else                                                            /* what is in a file: cells, as an editor shows it */
+            wlwin_text_cells(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
     }
     if (pv->nlines == 0)
         wlwin_text(w, x0 + 10, list_y + 6, pv->kind == PV_DIR ? "An empty folder" : "An empty file", 1, COL_DIM, pw - 20);
@@ -3861,7 +3865,7 @@ static void paint_help(struct wlwin *w)
     lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, 9, COL_DIR);
     lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, 8, COL_BAR);
     for (int i = 0; i < n && 12 + (i + 1) * LM_FONT_H <= bh; i++)
-        wlwin_text(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_DIR : COL_FG, bw - 24);
+        wlwin_text_cells(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_DIR : COL_FG, bw - 24);     /* (two columns made with blanks) */
 }
 
 static void paint(struct wlwin *w)
@@ -3968,7 +3972,7 @@ static void paint(struct wlwin *w)
                         stars[k++] = '*';
                 stars[k++] = '_';
                 stars[k] = 0;
-                wlwin_text(w, 6 + lw, py + 2, stars, 1, COL_FG, w->bw - 12 - lw);
+                wlwin_text_cells(w, 6 + lw, py + 2, stars, 1, COL_FG, w->bw - 12 - lw);
             } else {
                 wltext_paint(w, 6 + lw, py + 2, w->bw - 12 - lw, a->pbuf, true, COL_FG, lm_theme.button_hover, COL_FG);
             }
@@ -4662,7 +4666,6 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
-    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     if (getenv("MELLAGUI_ASKPASS"))                                     /* ssh asks for a password through SSH_ASKPASS, which names this program (sftp.h) */
         return sftp_askpass_main();
     lm_theme_load_env();

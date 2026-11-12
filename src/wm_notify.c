@@ -1,4 +1,5 @@
 /* Part of the window manager (see wm_priv.h): notifications */
+#include "font.h"
 #include "wm_priv.h"
 
 /* ---- notifications ---------------------------------------------------------------------------------------------------- */
@@ -22,15 +23,18 @@ int note_wrap(const char *body, char line[LM_NOTIFY_LINES][LM_NOTIFY_COLS * 4 + 
         p++;
     while (*p && n < LM_NOTIFY_LINES) {
         const char *q = p;
-        int cols = 0, last_blank = -1;
+        int px = 0, last_blank = -1;                                    /* a line holds LM_NOTIFY_COLS cells of pixels */
         const char *start = p;
-        while (*q && *q != '\n' && cols < LM_NOTIFY_COLS) {
+        while (*q && *q != '\n') {
+            int used;
+            uint32_t cp = lm_utf8_decode(q, (int)strlen(q), &used);
+            int adv = lm_font_advance(cp);
+            if (px + adv > LM_NOTIFY_COLS * LM_FONT_W)
+                break;
             if (*q == ' ')
                 last_blank = (int)(q - start);
-            do
-                q++;
-            while ((*q & 0xc0) == 0x80);
-            cols++;
+            q += used > 0 ? used : 1;
+            px += adv;
         }
         size_t len = (size_t)(q - start);
         if (*q && *q != '\n' && *q != ' ' && last_blank > 0)

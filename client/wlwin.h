@@ -89,6 +89,8 @@ void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t
 /* UTF-8 text; max_w > 0 stops before the first character that would not fit completely in that many pixels. */
 /* A label: proportional when there is a font for it (font.h), so measure it with lm_font_text_width() * scale. */
 void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
+/* A label in the bold weight (headings); measure with lm_font_text_width_bold(). The bitmap font has one weight. */
+void wlwin_text_bold(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
 /* Text in cells of LM_FONT_W * scale (tables, text fields): always one cell per character. */
 void wlwin_text_cells(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
 

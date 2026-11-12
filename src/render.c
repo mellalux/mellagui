@@ -313,7 +313,7 @@ static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t colo
 static int draw_label_glyph(const struct paint_ctx *c, const struct lm_rect *lim, int x, int y, uint32_t cp, int scale, uint32_t color)
 {
     struct lm_font_glyph g;
-    lm_font_label(cp, scale, &g);
+    lm_font_label_styled(cp, scale < 0 ? -scale : scale, scale < 0, &g);           /* (a negative scale = bold) */
     int gx = x - g.left;
     if (gx + g.w <= lim->x || gx >= lim->x + lim->w)
         return g.advance;
@@ -333,8 +333,8 @@ static int draw_label_glyph(const struct paint_ctx *c, const struct lm_rect *lim
     return g.advance;
 }
 
-static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
-                      const char *text, uint32_t color)
+static void draw_text_w(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
+                        const char *text, uint32_t color, bool bold)
 {
     struct lm_rect lim;
     if (!lm_rect_intersect(area, &c->clip, &lim))
@@ -344,10 +344,23 @@ static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int
         int used;
         uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
-        x += draw_label_glyph(c, &lim, x, y, cp, 1, color);
+        x += draw_label_glyph(c, &lim, x, y, cp, bold ? -1 : 1, color);
         if (x >= lim.x + lim.w + 8)
             break;
     }
+}
+
+static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
+                      const char *text, uint32_t color)
+{
+    draw_text_w(c, area, x, y, text, color, false);
+}
+
+/* The bold weight (titles of cards); with the bitmap font it is the same picture. */
+static void draw_text_bold(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
+                           const char *text, uint32_t color)
+{
+    draw_text_w(c, area, x, y, text, color, true);
 }
 
 static void draw_text_centered(const struct paint_ctx *c, const struct lm_rect *area,
@@ -631,7 +644,7 @@ static void paint_notify(const struct paint_ctx *c, const struct lm_notify_info 
     fill_rect(c, &bar, COL_PANEL_ACCENT);                               /* the accent stripe on the left */
     int tx = n->rect.x + 12, ty = n->rect.y + 8;
     struct lm_rect tr = lm_rect_make(tx, ty, n->rect.w - 12 - 28, LM_FONT_H);
-    draw_text(c, &tr, tx, ty, n->title, COL_PANEL_ACCENT);
+    draw_text_bold(c, &tr, tx, ty, n->title, COL_PANEL_ACCENT);
     draw_text(c, &n->rect, n->rect.x + n->rect.w - 8 - LM_FONT_W, ty, "x", COL_PANEL_DIM);
     for (int i = 0; i < n->nlines; i++) {
         struct lm_rect lr = lm_rect_make(tx, ty + 22 + i * LM_FONT_H, n->rect.w - 12 - 8, LM_FONT_H);
@@ -698,14 +711,14 @@ static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
     draw_text_centered(c, &foot, tail, COL_PANEL_DIM);
 }
 
-/* Next line of at most `cols` code points from text[*pos]: whitespace runs become one space, leading blanks are
+/* Next line of at most `cols` * LM_FONT_W pixels (so `cols` code points while labels are cells) from text[*pos]: whitespace runs become one space, leading blanks are
  * dropped. Returns true if text remains after the line. */
 static bool wrap_line(const char *text, size_t *pos, int cols, char *out, size_t outsz)
 {
     size_t len = strlen(text), i = *pos, o = 0;
-    int n = 0;
+    int n = 0, room = cols * LM_FONT_W, sp = lm_font_advance(' ');
     bool pending_space = false;
-    while (i < len && n < cols) {
+    while (i < len && n < room) {
         int used;
         uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
         if (used < 1)
@@ -715,11 +728,12 @@ static bool wrap_line(const char *text, size_t *pos, int cols, char *out, size_t
             i += (size_t)used;
             continue;
         }
+        int adv = lm_font_advance(cp);
+        if (n + (pending_space ? sp : 0) + adv > room)
+            break;
         if (pending_space) {
-            if (n + 1 >= cols)
-                break;
             out[o++] = ' ';
-            n++;
+            n += sp;
             pending_space = false;
         }
         if (o + (size_t)used + 1 >= outsz)
@@ -727,7 +741,7 @@ static bool wrap_line(const char *text, size_t *pos, int cols, char *out, size_t
         memcpy(out + o, text + i, (size_t)used);
         o += (size_t)used;
         i += (size_t)used;
-        n++;
+        n += adv;
     }
     out[o] = 0;
     while (i < len && (text[i] == ' ' || text[i] == '\n' || text[i] == '\t' || text[i] == '\r'))
@@ -1243,11 +1257,17 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         int cols = LM_MAX((li->help_card.w - 40) / LM_FONT_W, 10), ly = li->help_card.y + 44;
         char line[160];
         for (const char *p = li->help_text; *p && ly + LM_FONT_H < li->help_close.y;) {          /* word wrap */
-            int len = 0, brk = -1;
-            while (p[len] && len < cols && len < (int)sizeof(line) - 1) {
+            int len = 0, brk = -1, px = 0;
+            while (p[len] && len < (int)sizeof(line) - 1) {              /* as many letters as cols * 8 pixels hold */
+                int used;
+                uint32_t cp = lm_utf8_decode(p + len, (int)strlen(p + len), &used);
+                used = used > 0 ? used : 1;
+                if (px + lm_font_advance(cp) > cols * LM_FONT_W || len + used > (int)sizeof(line) - 1)
+                    break;
                 if (p[len] == ' ')
                     brk = len;
-                len++;
+                px += lm_font_advance(cp);
+                len += used;
             }
             if (p[len] && brk > 0)
                 len = brk;

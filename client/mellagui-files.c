@@ -130,7 +130,8 @@ struct preview {
     int top;                            /* first visible line */
     struct lm_image img;                /* PV_IMAGE: the decoded picture ... */
     uint32_t *scaled;                   /* ... and a copy that fits the pane (rebuilt when the pane size changes) */
-    int sw, sh;
+    int sw, sh;                         /* its size in the buffer's own pixels, made for the buffer scale scale_k */
+    int scale_k;
 };
 
 enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY, P_CONNECT, P_NETUSER, P_NETPASS };
@@ -2116,7 +2117,7 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
 }
 
 /* The picture scaled down to fit w x h (never up beyond 8 times), by averaging the source pixels under each target pixel. */
-static void preview_scale(struct preview *pv, int w, int h)
+static void preview_scale(struct preview *pv, int w, int h, int k)
 {
     free(pv->scaled);
     pv->scaled = NULL;
@@ -2147,6 +2148,7 @@ static void preview_scale(struct preview *pv, int w, int h)
         }
     }
     pv->scaled = out;
+    pv->scale_k = k;
     pv->sw = tw;
     pv->sh = th;
 }
@@ -3104,7 +3106,7 @@ static void fkeybar(const struct app *a, struct rbtn *b)
 
 static void draw_rbtn(struct wlwin *w, const struct rbtn *b, int y, int h, bool hot, int num)
 {
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, lm_button_radius(h / 2), hot ? b->hover : b->base);
+    wlwin_round_fill(w, b->x, y, b->w, h, lm_button_radius(h / 2), hot ? b->hover : b->base);
     char t[48];
     if (num > 0)
         snprintf(t, sizeof(t), "%d%s", num, b->label);
@@ -3780,33 +3782,22 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
         return;
     }
     if (pv->kind == PV_IMAGE || pv->kind == PV_VIDEO) {
+        int k = wlwin_scale(w);                                              /* the picture is made for the buffer's own pixels */
         int aw = pw - 16, ah = body_h - 16 - (pv->kind == PV_VIDEO ? LM_FONT_H + 6 : 0);
-        if (!pv->scaled || pv->sw > aw || pv->sh > ah || (pv->sw < aw && pv->sh < ah && pv->sw < pv->img.w * 8))
-            preview_scale(pv, aw, ah);
+        if (!pv->scaled || pv->sw > aw * k || pv->sh > ah * k || (pv->sw < aw * k && pv->sh < ah * k && pv->sw < pv->img.w * 8) || pv->scale_k != k)
+            preview_scale(pv, aw * k, ah * k, k);
         if (pv->scaled) {
-            int ox = x0 + (pw - pv->sw) / 2, oy = list_y + (body_h - pv->sh) / 2;
-            for (int y = 0; y < pv->sh; y++) {
-                if (oy + y < 0 || oy + y >= w->bh)
-                    continue;
-                for (int x = 0; x < pv->sw; x++)
-                    if (ox + x >= x0 && ox + x < x0 + pw && ox + x < w->bw)
-                        w->pixels[(size_t)(oy + y) * (size_t)w->bw + (size_t)(ox + x)] = 0xff000000u | pv->scaled[(size_t)y * (size_t)pv->sw + (size_t)x];
-            }
+            int lw = (pv->sw + k - 1) / k, lh = (pv->sh + k - 1) / k;         /* its logical size */
+            int ox = x0 + (pw - lw) / 2, oy = list_y + (body_h - lh) / 2;
+            wlwin_blit_px(w, ox, oy, pv->scaled, pv->sw, pv->sh, pv->sw, x0, list_y, pw, body_h);
             if (pv->kind == PV_VIDEO) {                                          /* a play mark on the picture and a hint under it */
-                int cx = ox + pv->sw / 2, cy = oy + pv->sh / 2, r = LM_CLAMP(LM_MIN(pv->sw, pv->sh) / 7, 10, 28);
-                for (int y = -r; y <= r; y++)
-                    for (int x = -r; x <= r; x++) {
-                        int px = cx + x, py = cy + y;
-                        if (px < 0 || py < 0 || px >= w->bw || py >= w->bh || x * x + y * y > r * r)
-                            continue;
-                        bool tri = x > -r / 3 && x < r / 2 && abs(y) < (r / 2 - x) * 7 / 10 + 1 && x > -r / 3 + abs(y) / 2 - 1;
-                        uint32_t *px32 = &w->pixels[(size_t)py * (size_t)w->bw + (size_t)px];
-                        uint32_t o = *px32;
-                        if (tri)
-                            *px32 = 0xffffffffu;
-                        else
-                            *px32 = 0xff000000u | ((((o >> 16) & 255) / 2) << 16) | ((((o >> 8) & 255) / 2) << 8) | ((o & 255) / 2);
-                    }
+                int cx = ox + lw / 2, cy = oy + lh / 2, r = LM_CLAMP(LM_MIN(lw, lh) / 7, 10, 28);
+                wlwin_round_fill(w, cx - r, cy - r, 2 * r, 2 * r, r, 0x202020);
+                for (int y = -r / 2; y <= r / 2; y++) {                          /* the triangle, one row at a time */
+                    int x0t = -r / 3 + abs(y) / 2, x1t = r / 2 - abs(y) * 10 / 7;
+                    if (x1t > x0t)
+                        wlwin_fill(w, cx + x0t, cy + y, x1t - x0t + 1, 1, 0xffffff);
+                }
                 wlwin_text(w, x0 + 8, list_y + body_h - LM_FONT_H - 4, "Enter plays it in the viewer", 1, COL_DIM, pw - 16);
             }
         }
@@ -3862,8 +3853,8 @@ static void paint_help(struct wlwin *w)
         cw = LM_MAX(cw, (int)strlen(lines[i]));
     int bw = LM_MIN(cw * LM_FONT_W + 32, w->bw - 8), bh = LM_MIN(n * LM_FONT_H + 24, w->bh - 8);
     int x = (w->bw - bw) / 2, y = (w->bh - bh) / 2;
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, 9, COL_DIR);
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, 8, COL_BAR);
+    wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, 9, COL_DIR);
+    wlwin_round_fill(w, x, y, bw, bh, 8, COL_BAR);
     for (int i = 0; i < n && 12 + (i + 1) * LM_FONT_H <= bh; i++)
         wlwin_text_cells(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_DIR : COL_FG, bw - 24);     /* (two columns made with blanks) */
 }
@@ -4420,7 +4411,7 @@ static int selftest(void)
     snprintf(p, sizeof(p), "%s/one.ppm", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_IMAGE && pv.img.w == 2 && pv.img.h == 1, "picture preview: kind %d", pv.kind);
-    preview_scale(&pv, 100, 100);
+    preview_scale(&pv, 100, 100, 1);
     CHECK(pv.scaled && pv.sw == 16 && pv.sh == 8, "scaled up at most 8 times: %dx%d", pv.sw, pv.sh);
     CHECK(pv.scaled && pv.scaled[0] == 0xff0000 && pv.scaled[15] == 0x0000ff, "scaled colours %06x %06x", pv.scaled ? pv.scaled[0] : 0, pv.scaled ? pv.scaled[15] : 0);
     preview_clear(&pv);
@@ -4666,6 +4657,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     if (getenv("MELLAGUI_ASKPASS"))                                     /* ssh asks for a password through SSH_ASKPASS, which names this program (sftp.h) */
         return sftp_askpass_main();
     lm_theme_load_env();

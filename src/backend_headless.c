@@ -784,7 +784,6 @@ static int hl_init(struct lm_backend *b)
     h->out.refresh_mhz = 60000;
     h->out.phys_width_mm = h->w * 254 / 960;
     h->out.phys_height_mm = h->h * 254 / 960;
-    h->out.scale = 1;
     lm_list_append(&b->outputs, &h->out.link);
     h->output_live = true;
     b->session_active = true;
@@ -804,7 +803,6 @@ static int hl_init(struct lm_backend *b)
         x->out.refresh_mhz = 60000;
         x->out.phys_width_mm = w * 254 / 960;
         x->out.phys_height_mm = hh * 254 / 960;
-        x->out.scale = 1;
         lm_list_append(&b->outputs, &x->out.link);
         h->nextra = i + 1;
         if (b->listener.output_added)

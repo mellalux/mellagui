@@ -1477,7 +1477,7 @@ static void scroll_to_cursor(struct app *a)
 
 static void fill_round(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb)
 {
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, width, height, r, rgb);
+    wlwin_round_fill(w, x, y, width, height, r, rgb);
 }
 
 static void paint_help(struct wlwin *w)
@@ -1602,8 +1602,7 @@ static void paint(struct wlwin *w)
         char num[16];
         snprintf(num, sizeof(num), "%d", ly + 1);
         for (int k = 0; num[k] && !g_note; k++)
-            lm_zoom_glyph(w->pixels, w->bw, w->bw, w->bh, &a->zt, gw - ((int)strlen(num) + 1 - k) * a->zt.cw, py,
-                          (uint32_t)num[k], ly == a->cy ? COL_FG : COL_DIM);
+            wlwin_cell(w, gw - ((int)strlen(num) + 1 - k) * a->zt.cw, py, (uint32_t)num[k], a->zt.cw, a->zt.ch, ly == a->cy ? COL_FG : COL_DIM, false);
         int col = 0;
         size_t i = 0;
         int sel_from = -1, sel_to = -1;                                  /* selected display columns of this line */
@@ -1617,7 +1616,7 @@ static void paint(struct wlwin *w)
         while (i < l->len) {
             int nc = l->s[i] == '\t' ? (col / TAB_W + 1) * TAB_W : col + 1;
             if (l->s[i] != '\t' && col >= a->left && col < a->left + a->cols_visible)
-                lm_zoom_glyph(w->pixels, w->bw, w->bw, w->bh, &a->zt, gw + (col - a->left) * a->zt.cw, py, cp_at(l, i), COL_FG);
+                wlwin_cell(w, gw + (col - a->left) * a->zt.cw, py, cp_at(l, i), a->zt.cw, a->zt.ch, COL_FG, false);
             col = nc;
             i = cp_next(l, i);
             if (col >= a->left + a->cols_visible)
@@ -2012,6 +2011,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))

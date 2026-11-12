@@ -170,38 +170,46 @@ static void text(struct canvas *c, int x, int y, const char *s, int scale, uint3
     }
 }
 
-static void ann_draw(struct canvas *c, const struct ann *a)
+/* Draws a mark. The marks are made in LOGICAL window coordinates; the picture has the screen's own pixels, `k` times as many (1 when the
+ * screen is not scaled): coordinates and widths are multiplied, the text is rasterised at its own size. */
+static void ann_draw(struct canvas *c, const struct ann *a, double k)
 {
+#define K(v) ((int)lround((v) * k))
+    int thick = LM_MAX(K(a->thick), 1);
     switch (a->tool) {
     case T_PEN:
         for (int i = 0; i + 1 < a->npts; i++)
-            line(c, a->pts[2 * i], a->pts[2 * i + 1], a->pts[2 * i + 2], a->pts[2 * i + 3], a->thick, a->color);
+            line(c, K(a->pts[2 * i]), K(a->pts[2 * i + 1]), K(a->pts[2 * i + 2]), K(a->pts[2 * i + 3]), thick, a->color);
         if (a->npts == 1)
-            disc(c, a->pts[0], a->pts[1], LM_MAX(a->thick / 2, 1), a->color);
+            disc(c, K(a->pts[0]), K(a->pts[1]), LM_MAX(thick / 2, 1), a->color);
         break;
     case T_ARROW:
-        arrow(c, a->x0, a->y0, a->x1, a->y1, a->thick, a->color);
+        arrow(c, K(a->x0), K(a->y0), K(a->x1), K(a->y1), thick, a->color);
         break;
     case T_BOX:
-        rect_outline(c, a->x0, a->y0, a->x1, a->y1, a->thick, a->color);
+        rect_outline(c, K(a->x0), K(a->y0), K(a->x1), K(a->y1), thick, a->color);
         break;
-    case T_MARK:
-        for (int y = LM_MIN(a->y0, a->y1); y <= LM_MAX(a->y0, a->y1); y++)
-            for (int x = LM_MIN(a->x0, a->x1); x <= LM_MAX(a->x0, a->x1); x++)
+    case T_MARK: {
+        int xa = K(LM_MIN(a->x0, a->x1)), xb = K(LM_MAX(a->x0, a->x1) + 1), ya = K(LM_MIN(a->y0, a->y1)), yb = K(LM_MAX(a->y0, a->y1) + 1);
+        for (int y = ya; y < yb; y++)
+            for (int x = xa; x < xb; x++)
                 put_px(c, x, y, a->color, 100);
         break;
+    }
     case T_TEXT: {
-        text(c, a->x0, a->y0, a->text, TEXT_SCALE, a->color);
+        int ts = LM_MAX(K(TEXT_SCALE), 1);
+        text(c, K(a->x0), K(a->y0), a->text, ts, a->color);
         if (a->editing) {                                       /* the caret */
-            int x = a->x0 + text_width(a->text, TEXT_SCALE);
-            for (int y = 0; y < LM_FONT_H * TEXT_SCALE; y++)
-                put_px(c, x, a->y0 + y, a->color, 255);
+            int x = K(a->x0) + text_width(a->text, ts);
+            for (int y = 0; y < LM_FONT_H * ts; y++)
+                put_px(c, x, K(a->y0) + y, a->color, 255);
         }
         break;
     }
     default:
         break;
     }
+#undef K
 }
 
 /* ---- the program ------------------------------------------------------------------------------------------------------------------ */
@@ -348,19 +356,25 @@ static bool grab_all(struct app *a)
 
 /* ---- area and marks ------------------------------------------------------------------------------------------------------------ */
 
+/* The window's size in logical pixels = the picture's size in the units the area and the marks are given in; the picture itself has
+ * the screen's own pixels, k = shot.w / lw() times as many (--grab has no window: 1). */
+static int lw(const struct app *a) { return a->win.bw > 0 ? a->win.bw : a->shot.w; }
+static int lh(const struct app *a) { return a->win.bh > 0 ? a->win.bh : a->shot.h; }
+static double kf(const struct app *a) { return (double)a->shot.w / (double)lw(a); }
+
 static void sel_norm(struct app *a, int x0, int y0, int x1, int y1)
 {
-    a->sx0 = LM_CLAMP(LM_MIN(x0, x1), 0, a->shot.w);
-    a->sx1 = LM_CLAMP(LM_MAX(x0, x1), 0, a->shot.w);
-    a->sy0 = LM_CLAMP(LM_MIN(y0, y1), 0, a->shot.h);
-    a->sy1 = LM_CLAMP(LM_MAX(y0, y1), 0, a->shot.h);
+    a->sx0 = LM_CLAMP(LM_MIN(x0, x1), 0, lw(a));
+    a->sx1 = LM_CLAMP(LM_MAX(x0, x1), 0, lw(a));
+    a->sy0 = LM_CLAMP(LM_MIN(y0, y1), 0, lh(a));
+    a->sy1 = LM_CLAMP(LM_MAX(y0, y1), 0, lh(a));
 }
 
 static void rerender(struct app *a)
 {
     memcpy(a->work.px, a->shot.px, (size_t)a->shot.w * (size_t)a->shot.h * 4);
     for (int i = 0; i < a->nann; i++)
-        ann_draw(&a->work, &a->ann[i]);
+        ann_draw(&a->work, &a->ann[i], kf(a));
 }
 
 static void ann_free(struct ann *n)
@@ -404,7 +418,14 @@ static void text_cancel(struct app *a)
 /* The cropped picture (marks in) as XRGB8888, malloc'd; the whole output when no area is chosen. */
 static uint32_t *crop(const struct app *a, int *w, int *h)
 {
-    int x0 = a->have_sel ? a->sx0 : 0, y0 = a->have_sel ? a->sy0 : 0, x1 = a->have_sel ? a->sx1 : a->shot.w, y1 = a->have_sel ? a->sy1 : a->shot.h;
+    double k = kf(a);
+    int x0 = 0, y0 = 0, x1 = a->shot.w, y1 = a->shot.h;
+    if (a->have_sel) {                                          /* the area is in window pixels, the picture in the screen's own */
+        x0 = LM_CLAMP((int)lround(a->sx0 * k), 0, a->shot.w);
+        x1 = LM_CLAMP((int)lround(a->sx1 * k), 0, a->shot.w);
+        y0 = LM_CLAMP((int)lround(a->sy0 * k), 0, a->shot.h);
+        y1 = LM_CLAMP((int)lround(a->sy1 * k), 0, a->shot.h);
+    }
     *w = x1 - x0;
     *h = y1 - y0;
     if (*w < 1 || *h < 1)
@@ -574,7 +595,7 @@ static int bar_layout(const struct app *a, struct button *b)
     b[n].w = 26;
     x += b[n++].w;
     int total = x, bx, by;
-    int sw = a->shot.w, sh = a->shot.h;
+    int sw = lw(a), sh = lh(a);
     bx = LM_CLAMP(a->sx1 - total, 4, LM_MAX(sw - total - 4, 4));                    /* right-aligned with the area, inside the screen */
     if (a->sy1 + BAR_H + 8 <= sh)
         by = a->sy1 + 6;                                                            /* below it ... */
@@ -631,24 +652,22 @@ static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     int sw = a->shot.w, sh = a->shot.h;
-    for (int y = 0; y < w->bh; y++) {
-        uint32_t *dst = w->pixels + (size_t)y * (size_t)w->bw;
-        if (y >= sh) {
-            for (int x = 0; x < w->bw; x++)
+    int k = wlwin_scale(w);                                             /* the picture goes onto the buffer's own pixels (1:1 when the scales agree) */
+    for (int y = 0; y < w->ph; y++) {
+        uint32_t *dst = w->pixels + (size_t)y * (size_t)w->pw;
+        int py = (int)((int64_t)y * sh / w->ph);
+        if (py >= sh) {
+            for (int x = 0; x < w->pw; x++)
                 dst[x] = 0xff000000u;
             continue;
         }
-        const uint32_t *src = a->work.px + (size_t)y * (size_t)sw;
-        bool row_in = a->have_sel && y >= a->sy0 && y < a->sy1;
-        for (int x = 0; x < w->bw; x++) {
-            if (x >= sw) {
-                dst[x] = 0xff000000u;
-                continue;
-            }
-            uint32_t p = src[x];
-            if (!(row_in && x >= a->sx0 && x < a->sx1))
+        const uint32_t *src = a->work.px + (size_t)py * (size_t)sw;
+        bool row_in = a->have_sel && y >= a->sy0 * k && y < a->sy1 * k;
+        for (int x = 0; x < w->pw; x++) {
+            uint32_t p = src[sw == w->pw ? x : (int)((int64_t)x * sw / w->pw)];
+            if (!(row_in && x >= a->sx0 * k && x < a->sx1 * k))
                 p = 0xff000000u | ((((p >> 16) & 255) * 110 / 255) << 16) | ((((p >> 8) & 255) * 110 / 255) << 8) | ((p & 255) * 110 / 255);
-            dst[x] = p;
+            dst[x] = 0xff000000u | p;
         }
     }
     if (!a->have_sel) {
@@ -736,7 +755,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             sel_norm(a, a->drag_ax, a->drag_ay, x, y);
         } else if (a->drag == D_MOVE) {
             int wd = a->sx1 - a->sx0, ht = a->sy1 - a->sy0;
-            int nx = LM_CLAMP(x - a->drag_ax, 0, a->shot.w - wd), ny = LM_CLAMP(y - a->drag_ay, 0, a->shot.h - ht);
+            int nx = LM_CLAMP(x - a->drag_ax, 0, lw(a) - wd), ny = LM_CLAMP(y - a->drag_ay, 0, lh(a) - ht);
             a->sx0 = nx; a->sx1 = nx + wd; a->sy0 = ny; a->sy1 = ny + ht;
         } else if (a->drag == D_RESIZE) {
             int x0 = a->sx0, y0 = a->sy0, x1 = a->sx1, y1 = a->sy1;
@@ -946,11 +965,11 @@ static int selftest(void)
     CHECK(c.px[2 * 40 + 2] == 0xffff0000u && c.px[2 * 40 + 30] == 0xffff0000u && c.px[3 * 40 + 10] == 0, "a thin line");
     struct ann m = { .tool = T_MARK, .color = 0xffff00, .x0 = 5, .y0 = 5, .x1 = 9, .y1 = 9 };
     c.px[7 * 40 + 7] = 0xff000000u;
-    ann_draw(&c, &m);
+    ann_draw(&c, &m, 1.0);
     CHECK(((c.px[7 * 40 + 7] >> 16) & 255) > 60 && ((c.px[7 * 40 + 7] >> 16) & 255) < 130 && (c.px[7 * 40 + 7] & 255) == 0, "the mark blends");
     struct ann t = { .tool = T_TEXT, .color = 0xffffff, .x0 = 1, .y0 = 12 };
     snprintf(t.text, sizeof(t.text), "A");
-    ann_draw(&c, &t);
+    ann_draw(&c, &t, 1.0);
     int white = 0;
     for (int y = 12; y < 28; y++)
         for (int x = 1; x < 20; x++)
@@ -974,6 +993,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* the picture and the marks go through the wlwin_* calls and the buffer's own pixels */
     lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     static struct app a;

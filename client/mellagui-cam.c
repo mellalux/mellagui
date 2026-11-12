@@ -719,9 +719,11 @@ static void paint_picture(struct app *a, int vw, int vh)
 {
     struct wlwin *w = &a->win;
     const struct lm_image *im = &a->img;
-    double s = LM_MIN((double)vw / im->w, (double)vh / im->h);
+    int k = wlwin_scale(w);                                          /* the picture is made for the buffer's own pixels: sharp at any scale */
+    int pvw = vw * k, pvh = vh * k;
+    double s = LM_MIN((double)pvw / im->w, (double)pvh / im->h);
     int dw = LM_MAX((int)(im->w * s), 1), dh = LM_MAX((int)(im->h * s), 1);
-    int ox = (vw - dw) / 2, oy = (vh - dh) / 2;
+    int ox = (pvw - dw) / 2, oy = (pvh - dh) / 2;
     int *xi = malloc((size_t)dw * 2 * sizeof(int));                  /* per column: left source pixel and weight (0..256) */
     if (!xi)
         return;
@@ -733,13 +735,13 @@ static void paint_picture(struct app *a, int vw, int vh)
         xi[2 * x + 1] = (int)((sx - x0) * 256.0);
     }
     for (int y = 0; y < dh; y++) {
-        if (oy + y < 0 || oy + y >= w->bh)
+        if (oy + y < 0 || oy + y >= w->ph)
             continue;
         double sy = LM_CLAMP((y + 0.5) / s - 0.5, 0.0, (double)(im->h - 1));
         int y0 = (int)sy, y1 = LM_MIN(y0 + 1, im->h - 1), fy = (int)((sy - y0) * 256.0);
         const uint32_t *r0 = im->px + (size_t)y0 * (size_t)im->w, *r1 = im->px + (size_t)y1 * (size_t)im->w;
-        uint32_t *dst = w->pixels + (size_t)(oy + y) * (size_t)w->bw + (size_t)ox;
-        for (int x = 0; x < dw && ox + x < w->bw; x++) {
+        uint32_t *dst = w->pixels + (size_t)(oy + y) * (size_t)w->pw + (size_t)ox;
+        for (int x = 0; x < dw && ox + x < w->pw; x++) {
             int x0 = xi[2 * x], x1 = LM_MIN(x0 + 1, im->w - 1), fx = xi[2 * x + 1];
             uint32_t out = 0xff000000u;
             for (int sh = 0; sh <= 16; sh += 8) {
@@ -776,8 +778,8 @@ static void paint(struct wlwin *w)
         const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_red_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit,
                                      lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
         if (on)
-            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
-        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
+            wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
+        wlwin_round_fill(w, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
     }
@@ -787,9 +789,9 @@ static void paint(struct wlwin *w)
         char tag[24];                                           /* in the corner of the picture, where it is seen however narrow the window is */
         snprintf(tag, sizeof(tag), "REC %02u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
         int tw = (int)strlen(tag) * LM_FONT_W;
-        lm_round_fill(w->pixels, w->bw, w->bw, w->bh, 8, 8, tw + 40, 24, 12, 0x000000);
+        wlwin_round_fill(w, 8, 8, tw + 40, 24, 12, 0x000000);
         if ((ms / 500) % 2 == 0)
-            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, 16, 14, 12, 12, 6, lm_theme.alert);
+            wlwin_round_fill(w, 16, 14, 12, 12, 6, lm_theme.alert);
         wlwin_text(w, 34, 14, tag, 1, 0xffffff, 0);
         snprintf(st, sizeof(st), "REC %02u:%02u  %u pictures%s", (unsigned)(s / 60), (unsigned)(s % 60), a->clip->frames, a->clip->sound ? "  with microphone" : "");
     } else if (a->note[0] && now_ms() < a->note_until)
@@ -1264,6 +1266,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     const char *dev = NULL, *snap = NULL, *clip = NULL;

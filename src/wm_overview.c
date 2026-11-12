@@ -966,8 +966,8 @@ size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size)
         if (w->minimized) strcat(flags, "minimized,");
         size_t fl = strlen(flags);
         if (fl) flags[fl - 1] = 0; else strcpy(flags, "-");
-        APPEND("window %d \"%s\" \"%s\" x=%d y=%d w=%d h=%d ws=%d flags=%s\n", WIN(w)->id,
-               title, app, w->x, w->y, w->width, w->height, w->workspace, flags);
+        APPEND("window %d \"%s\" \"%s\" x=%d y=%d w=%d h=%d ws=%d flags=%s bscale=%d\n", WIN(w)->id,
+               title, app, w->x, w->y, w->width, w->height, w->workspace, flags, w->surface ? w->surface->scale : 1);        /* (bscale = the client's buffer scale) */
     }
 #undef APPEND
     if (n >= size)

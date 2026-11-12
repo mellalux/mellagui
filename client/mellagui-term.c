@@ -150,9 +150,34 @@ struct app {
     int sb_grab;                /* pixels between the top of the thumb and the pointer */
     bool eat_release;           /* the press that closed the menu: its release must not start / end a selection */
     char title[256];
+    /* HiDPI: the buffer has `k` times as many pixels as the window has logical ones (the biggest wl_output scale); bw / bh stay logical */
+    int k, pw, ph;
+    uint32_t out_id[8];
+    int out_scale[8], nout;
 };
 
 static struct app A;
+
+static int want_k(void)
+{
+    int k = 1;
+    for (int i = 0; i < A.nout; i++)
+        k = LM_MAX(k, A.out_scale[i]);
+    return LM_CLAMP(k, 1, 4);
+}
+
+static void output_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)data;
+    if (op != LM_WL_OUTPUT_EVT_SCALE)
+        return;
+    for (int i = 0; i < A.nout; i++)
+        if (A.out_id[i] == id) {
+            A.out_scale[i] = LM_MAX(args[0].i, 1);
+            if (A.k != want_k())
+                A.dirty = true;                                 /* render() makes the new buffer */
+        }
+}
 
 static int cell_w(void) { return LM_MAX((A.zoom * LM_FONT_W + 50) / 100, 1); }
 static int cell_h(void) { return LM_MAX((A.zoom * LM_FONT_H + 50) / 100, 1); }
@@ -921,15 +946,18 @@ static int btn_at(double px, double py)
     return -1;
 }
 
+/* All the drawing helpers take LOGICAL coordinates and write the buffer's own pixels (`A.k` times as many each way). */
 static void put_text(uint32_t *px, int x, int y, const char *text, uint32_t color)
 {
+    int k = A.k, cw = LM_FONT_W * k, ch = LM_FONT_H * k;
     for (const char *l = text; *l; l++, x += LM_FONT_W) {
-        const uint8_t *g = lm_font_cell((uint8_t)*l, LM_FONT_W, LM_FONT_H);
-        for (int r = 0; r < LM_FONT_H; r++)
-            for (int c = 0; c < LM_FONT_W; c++) {
-                unsigned a = g[r * LM_FONT_W + c];
-                if (a && x + c >= 0 && x + c < A.bw && y + r >= 0 && y + r < A.bh) {
-                    uint32_t *p = &px[(size_t)(y + r) * (size_t)A.bw + (size_t)(x + c)];
+        const uint8_t *g = lm_font_cell((uint8_t)*l, cw, ch);
+        for (int r = 0; r < ch; r++)
+            for (int c = 0; c < cw; c++) {
+                unsigned a = g[r * cw + c];
+                int xx = x * k + c, yy = y * k + r;
+                if (a && xx >= 0 && xx < A.pw && yy >= 0 && yy < A.ph) {
+                    uint32_t *p = &px[(size_t)yy * (size_t)A.pw + (size_t)xx];
                     *p = lm_font_mix(*p, color, a);
                 }
             }
@@ -938,14 +966,16 @@ static void put_text(uint32_t *px, int x, int y, const char *text, uint32_t colo
 
 static void fill_box(uint32_t *px, int x, int y, int w, int h, uint32_t color)
 {
-    for (int yy = LM_MAX(y, 0); yy < y + h && yy < A.bh; yy++)
-        for (int xx = LM_MAX(x, 0); xx < x + w && xx < A.bw; xx++)
-            px[(size_t)yy * (size_t)A.bw + (size_t)xx] = color;
+    int k = A.k;
+    for (int yy = LM_MAX(y * k, 0); yy < (y + h) * k && yy < A.ph; yy++)
+        for (int xx = LM_MAX(x * k, 0); xx < (x + w) * k && xx < A.pw; xx++)
+            px[(size_t)yy * (size_t)A.pw + (size_t)xx] = color;
 }
 
 static void round_box(uint32_t *px, int x, int y, int w, int h, int r, uint32_t color)
 {
-    lm_round_fill(px, A.bw, A.bw, A.bh, x, y, w, h, r, color);
+    int k = A.k;
+    lm_round_fill(px, A.pw, A.pw, A.ph, x * k, y * k, w * k, h * k, r * k, color);
 }
 
 /* One colour for each button, a lighter one under the pointer (the same palette as the file manager's round buttons). */
@@ -1049,18 +1079,14 @@ static void draw_scrollbar(uint32_t *px)
     int w = sb_w(), x0 = A.bw - w;
     if (x0 < 0 || A.bh <= BAR_H)
         return;
-    for (int y = BAR_H; y < A.bh; y++)
-        for (int x = x0; x < A.bw; x++)
-            px[(size_t)y * (size_t)A.bw + (size_t)x] = lm_theme.bar;
+    fill_box(px, x0, BAR_H, w, A.bh - BAR_H, lm_theme.bar);
     if (!sb_active())
         return;
     int ty, th;
     sb_thumb(&ty, &th);
     bool hot = A.sb_drag || (A.px >= x0 && A.py >= ty && A.py < ty + th);
     uint32_t col = hot ? lm_theme.button_hover : lm_theme.control;
-    for (int y = ty + 1; y < ty + th - 1; y++)
-        for (int x = x0 + 2; x < A.bw - 2; x++)
-            px[(size_t)y * (size_t)A.bw + (size_t)x] = col;
+    fill_box(px, x0 + 2, ty + 1, A.bw - 2 - (x0 + 2), th - 2, col);
 }
 
 static void sb_drag_to(double py)
@@ -1078,7 +1104,8 @@ static void render(void)
 {
     struct term *t = &A.t;
     int need_w = t->cols * CELL_W + 2 * PAD + sb_w(), need_h = t->rows * CELL_H + 2 * PAD + BAR_H;
-    if (!A.pixels || A.bw != need_w || A.bh != need_h) {
+    bool rescaled = A.k != want_k();
+    if (!A.pixels || A.bw != need_w || A.bh != need_h || rescaled) {
         /* (re)create pool and buffers */
         if (A.pixels) {
             for (int i = 0; i < 2; i++)
@@ -1094,7 +1121,11 @@ static void render(void)
         }
         A.bw = need_w;
         A.bh = need_h;
-        size_t one = (size_t)need_w * (size_t)need_h * 4;
+        A.k = want_k();
+        A.pw = need_w * A.k;
+        A.ph = need_h * A.k;
+        WLC_SEND(A.c, A.surface, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = A.k });
+        size_t one = (size_t)A.pw * (size_t)A.ph * 4;
         A.map_size = one * 2;
         int fd = memfd_create("mellagui-term", MFD_CLOEXEC);
         if (fd < 0 || ftruncate(fd, (off_t)A.map_size) < 0) {
@@ -1113,7 +1144,7 @@ static void render(void)
     if (idx < 0)
         return;     /* both buffers still held by the compositor: retry on release */
 
-    size_t one = (size_t)A.bw * (size_t)A.bh;
+    size_t one = (size_t)A.pw * (size_t)A.ph;
     uint32_t *px = A.pixels + one * (size_t)idx;
     for (size_t i = 0; i < one; i++)
         px[i] = DEFAULT_BG;
@@ -1140,11 +1171,11 @@ static void render(void)
                 fg = bg;
                 bg = tmp;
             }
-            int cw = CELL_W, ch = CELL_H;
-            int x0 = PAD + col * cw, y0 = BAR_H + PAD + row * ch;
+            int k = A.k, cw = CELL_W * k, ch = CELL_H * k;           /* the grid is exact in the buffer's own pixels */
+            int x0 = (PAD + col * CELL_W) * k, y0 = (BAR_H + PAD + row * CELL_H) * k;
             const uint8_t *g = lm_font_cell_styled(c->cp, cw, ch, (c->attr & ATTR_BOLD) != 0);    /* drawn at the cell's own size, whatever the zoom */
             for (int r = 0; r < ch; r++) {
-                uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
+                uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.pw + (size_t)x0;
                 const uint8_t *cov = g + (size_t)r * (size_t)cw;
                 for (int x = 0; x < cw; x++)
                     dst[x] = cov[x] == 0 ? bg : cov[x] == 255 ? fg : lm_font_mix(bg, fg, cov[x]);
@@ -1153,17 +1184,17 @@ static void render(void)
                 int thick = LM_MAX(ch / LM_FONT_H, 1), uy = y0 + ch - 2 * thick;
                 for (int r = 0; r < thick; r++)
                     for (int x = 0; x < cw; x++)
-                        px[(size_t)(uy + r) * (size_t)A.bw + (size_t)(x0 + x)] = fg;
+                        px[(size_t)(uy + r) * (size_t)A.pw + (size_t)(x0 + x)] = fg;
             }
             if (cursor && !A.focused) {
                 /* hollow cursor when unfocused */
                 for (int x = 0; x < cw; x++) {
-                    px[(size_t)y0 * (size_t)A.bw + (size_t)(x0 + x)] = DEFAULT_FG;
-                    px[(size_t)(y0 + ch - 1) * (size_t)A.bw + (size_t)(x0 + x)] = DEFAULT_FG;
+                    px[(size_t)y0 * (size_t)A.pw + (size_t)(x0 + x)] = DEFAULT_FG;
+                    px[(size_t)(y0 + ch - 1) * (size_t)A.pw + (size_t)(x0 + x)] = DEFAULT_FG;
                 }
                 for (int r = 0; r < ch; r++) {
-                    px[(size_t)(y0 + r) * (size_t)A.bw + (size_t)x0] = DEFAULT_FG;
-                    px[(size_t)(y0 + r) * (size_t)A.bw + (size_t)(x0 + cw - 1)] = DEFAULT_FG;
+                    px[(size_t)(y0 + r) * (size_t)A.pw + (size_t)x0] = DEFAULT_FG;
+                    px[(size_t)(y0 + r) * (size_t)A.pw + (size_t)(x0 + cw - 1)] = DEFAULT_FG;
                 }
             }
         }
@@ -1177,8 +1208,8 @@ static void render(void)
     if (!A.buffers[idx]) {
         A.buffers[idx] = wlc_alloc(A.c, &lm_wl_buffer_interface, NULL, NULL);
         WLC_SEND(A.c, A.pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = A.buffers[idx] },
-                 { .i = (int32_t)(one * 4 * (size_t)idx) }, { .i = A.bw }, { .i = A.bh },
-                 { .i = A.bw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
+                 { .i = (int32_t)(one * 4 * (size_t)idx) }, { .i = A.pw }, { .i = A.ph },
+                 { .i = A.pw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
         wlc_set_handler(A.c, A.buffers[idx], NULL, NULL);
     }
     A.buf_busy[idx] = true;
@@ -1943,7 +1974,10 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         A.wm_base = wlc_bind(c, A.registry, name, &lm_xdg_wm_base_interface, LM_MIN(ver, 3u), wm_base_event, NULL);
     else if (!strcmp(iface, "wl_seat"))
         A.seat = wlc_bind(c, A.registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, NULL);
-    else if (!strcmp(iface, "wl_data_device_manager"))
+    else if (!strcmp(iface, "wl_output") && A.nout < 8) {
+        A.out_id[A.nout] = wlc_bind(c, A.registry, name, &lm_wl_output_interface, LM_MIN(ver, 3u), output_event, NULL);
+        A.out_scale[A.nout++] = 1;
+    } else if (!strcmp(iface, "wl_data_device_manager"))
         A.ddm = wlc_bind(c, A.registry, name, &lm_wl_data_device_manager_interface, LM_MIN(ver, 3u), NULL, NULL);
     else if (!strcmp(iface, "mellagui_menu_v1"))
         A.menu = wlc_bind(c, A.registry, name, &lm_mellagui_menu_v1_interface, 1, menu_event, NULL);

@@ -2,6 +2,7 @@
  * Window manager + shell policy: the core. See wm.h for the contract and wm_priv.h for how the wm is split into files.
  */
 #include "wm_priv.h"
+#include "smarthome.h"
 
 /* ---- geometry helpers ------------------------------------------------------------ */
 
@@ -425,10 +426,13 @@ void lm_wm_switch_workspace(struct lm_wm *wm, int ws)
     if (wm->focused)
         lm_xdg_dismiss_popups(wm->focused->surface);
     anim_finish_all(wm);
+    int dir = ws > wm->workspace ? 1 : -1;
+    anim_workspace(wm, dir, true);                              /* the windows that leave slide out ... */
     wm->workspace = ws;
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link)
         update_outputs(wm, w);
+    anim_workspace(wm, dir, false);                             /* ... and the ones that arrive slide in */
     set_focus(wm, NULL);
     set_focus(wm, top_visible(wm, NULL));
     overview_changed(wm);
@@ -511,6 +515,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->gad[LM_GADGET_CLIPBOARD].visible = srv->config.gadget;
     wm->gad[LM_GADGET_MIXER].visible = srv->config.mixer;
     wm->gad[LM_GADGET_SYSTEM].visible = srv->config.sysinfo;
+    wm->gad[LM_GADGET_SMART].visible = srv->config.smart;
     for (int i = 0; i < LM_GADGET_COUNT; i++) {
         wm->gad[i].w = gadget_def[i].w;
         wm->gad[i].h = gadget_def[i].h;
@@ -1334,8 +1339,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                         return;
                     }
             }
-        } else if (gid == LM_GADGET_MIXER) {
-            out->kind = LM_PICK_GADGET_BODY;                      /* sliders and buttons */
+        } else if (gid == LM_GADGET_MIXER || gid == LM_GADGET_SMART) {
+            out->kind = LM_PICK_GADGET_BODY;                      /* sliders and buttons / switches */
         } else if (gid == LM_GADGET_CLIPBOARD) {                  /* an entry slot with text in it */
             int slots, entry_h;
             gadget_slots(gr.h, &slots, &entry_h);
@@ -1916,6 +1921,27 @@ void mixer_press(struct lm_wm *wm)
     }
 }
 
+/* Left press inside the smart home card: a switch turns, a blind's open / stop / close is sent. */
+void smart_press(struct lm_wm *wm)
+{
+    struct lm_rect card;
+    if (!wm->srv->smart || !wm->srv->seat || !lm_wm_gadget_rect_id(wm, LM_GADGET_SMART, &card))
+        return;
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    const struct lm_smart_state *st = lm_smart_state(wm->srv->smart);
+    struct lm_smart_layout l;
+    lm_smart_layout(card.x, card.y, card.w, card.h, GADGET_TITLE_H, st->n, &l);
+    int idx = 0;
+    enum lm_smart_part part = lm_smart_hit(&l, st, (int)px, (int)py, &idx);
+    if (part == LM_SMART_SWITCH_PART)
+        lm_smart_toggle(wm->srv->smart, idx);
+    else if (part != LM_SMART_NOTHING)
+        lm_smart_blind(wm->srv->smart, idx, part - LM_SMART_OPEN);
+    if (part != LM_SMART_NOTHING)
+        damage_gadget(wm, LM_GADGET_SMART);
+}
+
 /* Double click on the title bar: back to the default size, docked top right. */
 void gadget_reset(struct lm_wm *wm, int id)
 {
@@ -2168,6 +2194,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
         break;
     case LM_ACT_GADGET_MIXER: lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible); break;
     case LM_ACT_GADGET_SYSTEM: lm_wm_set_gadget_id(wm, LM_GADGET_SYSTEM, !wm->gad[LM_GADGET_SYSTEM].visible); break;
+    case LM_ACT_GADGET_SMART: lm_wm_set_gadget_id(wm, LM_GADGET_SMART, !wm->gad[LM_GADGET_SMART].visible); break;
     case LM_ACT_CLOSE:
         if (f) lm_wm_window_close(f);
         break;

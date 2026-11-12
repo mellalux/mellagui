@@ -698,6 +698,8 @@ static void build_desktop(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Volume mixer gadget (Super+V)", "mixer", kv_int(a, "mixer", 0) != 0);
     y += ROW_H;
     add_check(a, x, y, w, "System monitor gadget (Super+S)", "sysinfo", kv_int(a, "sysinfo", 0) != 0);
+    y += ROW_H;
+    add_check(a, x, y, w, "Smart home gadget (Super+H)", "smart", kv_int(a, "smart", 0) != 0);
     y += ROW_H + 8;
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Wallpaper");
     y += ROW_H;
@@ -2997,7 +2999,7 @@ static int selftest_help(void)
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "sources", "mic1|Built-in microphone;mic2|USB headset" }, { "source", "mic1" }, { "source-volume", "60" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
         { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "saver-style", "room" }, { "config-file", "/x/mellagui.conf" },
-        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" }, { "font-ui", "auto" }, { "scale", "100" }, { "resolution-now", "1024x600@60" },
+        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" }, { "font-ui", "auto" }, { "scale", "100" }, { "smart", "0" }, { "resolution-now", "1024x600@60" },
     };
     int bad = 0, shown = 0;
     for (int pgi = 0; pgi < N_PAGES + 7; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */

@@ -572,8 +572,12 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             gadget_grab_begin(wm, pick->index, GRAB_GADGET_RESIZE, pick->edges);
         return true;
     case LM_PICK_GADGET_BODY:
-        if (button == BTN_LEFT)
-            mixer_press(wm);
+        if (button == BTN_LEFT) {
+            if (pick->index == LM_GADGET_SMART)
+                smart_press(wm);
+            else
+                mixer_press(wm);
+        }
         return true;
     case LM_PICK_CLIP_ENTRY:
         if (button == BTN_LEFT)

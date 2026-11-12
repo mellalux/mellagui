@@ -46,6 +46,7 @@
 #include "wm.h"
 #include "dmabuf.h"
 #include "mixer.h"
+#include "smarthome.h"
 #include "sysinfo.h"
 #include "xdg.h"
 
@@ -149,6 +150,13 @@ static void on_output_changed(void *data, struct lm_output *out)
         lm_render_output_changed(srv->render, out);
     if (srv->wm)
         lm_wm_output_changed(srv->wm, out);
+}
+
+static void on_smart_changed(void *data)
+{
+    struct lm_server *srv = data;
+    if (srv->wm)
+        lm_wm_smart_changed(srv->wm);
 }
 
 static void on_mixer_changed(void *data)
@@ -663,6 +671,9 @@ int main(int argc, char **argv)
     srv->mixer = lm_mixer_create(loop, on_mixer_changed, srv);
     if (srv->mixer)
         lm_mixer_set_active(srv->mixer, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER));
+    srv->smart = lm_smart_create(loop, on_smart_changed, srv);
+    if (srv->smart)
+        lm_smart_set_active(srv->smart, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SMART));
     srv->sysinfo = lm_sysinfo_create(loop, on_sysinfo_changed, srv);
     if (srv->sysinfo)
         lm_sysinfo_set_active(srv->sysinfo, lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM));
@@ -723,6 +734,8 @@ out:
     srv->dmabuf = NULL;
     if (srv->mixer) lm_mixer_destroy(srv->mixer);
     srv->mixer = NULL;
+    if (srv->smart) lm_smart_destroy(srv->smart);
+    srv->smart = NULL;
     if (srv->sysinfo) lm_sysinfo_destroy(srv->sysinfo);
     srv->sysinfo = NULL;
     if (srv->notelog) lm_notelog_destroy(srv->notelog);

@@ -348,9 +348,10 @@ void lm_wm_mixer_changed(struct lm_wm *wm);
 void lm_wm_sysinfo_changed(struct lm_wm *wm);
 
 /* Desktop gadgets: the clipboard viewer and the volume mixer. */
-enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_SYSTEM, LM_GADGET_COUNT };
-/* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer, Super+S = system monitor; control socket `gadget`, `mixer`, `sysinfo`). */
+enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_SYSTEM, LM_GADGET_SMART, LM_GADGET_COUNT };
+/* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer, Super+S = system monitor, Super+H = smart home; control socket `gadget`, `mixer`, `sysinfo`, `smart`). */
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id);
+void lm_wm_smart_changed(struct lm_wm *wm);                     /* the smart home card has new state: repaint it */
 void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible);
 /* The gadget card (without shadow) in global coordinates; false when hidden or it does not fit. */
 bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out);
@@ -625,11 +626,13 @@ struct lm_dock_info {
  * moved by its title bar and resized by its edges; the renderer wraps/truncates the entries to the width.
  */
 struct lm_mixer_state;
+struct lm_smart_state;
 struct lm_sysinfo_state;
 struct lm_gadget_info {
     int id;                         /* enum lm_gadget_id */
     const struct lm_sysinfo_state *sys; /* LM_GADGET_SYSTEM: what to draw (valid only during the callback) */
     const struct lm_mixer_state *mixer; /* LM_GADGET_MIXER: what to draw (valid only during the callback) */
+    const struct lm_smart_state *smart; /* LM_GADGET_SMART: what to draw (valid only during the callback) */
     struct lm_rect rect;            /* the card; the shadow lies outside */
     int n;                          /* entries drawn (<= slots) */
     int top;                        /* index (0 = newest) in the history of the first entry drawn */

@@ -89,6 +89,10 @@
 #define GADGET_MARGIN (lm_metrics.gadget_margin)
 #define SYS_W (lm_metrics.sys_width)
 #define SYS_H (lm_metrics.sys_height)                   /* title, CPU, graph, cores, memory, swap, temperature, the device rows that fit */
+#define SMART_W 290
+#define SMART_H 180
+#define SMART_MIN_W 220
+#define SMART_MIN_H 80
 #define SYS_MIN_W 210
 #define SYS_MIN_H 130
 #define MIXER_W (lm_metrics.mixer_width)
@@ -128,8 +132,8 @@ enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_GADGET_MOVE, GRAB_GADGE
  * fades or flies to / from its taskbar button or dock icon, painted as LM_SCENE_GHOST above the windows. The real window
  * is left out of the scene while its opening / restoring picture runs (`anim_hidden`); a closed one is gone already.
  */
-enum anim_kind { ANIM_OPEN, ANIM_CLOSE, ANIM_MINIMIZE, ANIM_RESTORE };
-#define ANIM_MAX 8
+enum anim_kind { ANIM_OPEN, ANIM_CLOSE, ANIM_MINIMIZE, ANIM_RESTORE, ANIM_SLIDE_OUT, ANIM_SLIDE_IN };
+#define ANIM_MAX 16
 #define ANIM_TICK_MS 16
 struct wm_anim {
     bool used;
@@ -138,6 +142,7 @@ struct wm_anim {
     struct lm_ghost ghost;
     struct lm_rect home;                /* where the picture is at full size (global) */
     struct lm_rect away;                /* MINIMIZE / RESTORE: the taskbar button or dock icon it flies to / from */
+    int shift;                          /* SLIDE_OUT: how far it has moved at the end; SLIDE_IN: how far it is when it starts (px, signed) */
     uint64_t start;
     int dur;
     struct lm_rect shown;               /* painted now */
@@ -379,6 +384,7 @@ void gadget_snap(struct lm_wm *wm, int id, const struct lm_output *o, int32_t *p
 void grab_begin(struct lm_wm *wm, struct lm_window *w, enum grab_kind kind, uint32_t edges);
 void launch_settings(struct lm_wm *wm);
 void mixer_press(struct lm_wm *wm);
+void smart_press(struct lm_wm *wm);
 void mixer_slide(struct lm_wm *wm, enum lm_mixer_part part, int idx, double x);
 void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws);
 void open_shot(struct lm_wm *wm);
@@ -404,7 +410,7 @@ void anim_finish_all(struct lm_wm *wm);
 void anim_forget(struct lm_wm *wm, struct lm_window *w);
 struct lm_rect anim_lerp_rect(const struct lm_rect *a, const struct lm_rect *b, float e);
 bool anim_prepare(struct lm_wm *wm, struct lm_window *w, struct lm_ghost *g, struct lm_rect *home);
-void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home);
+struct wm_anim *anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home);
 void anim_state(const struct wm_anim *a, float t, struct lm_rect *r, int *alpha);
 bool anim_wanted(struct lm_wm *wm, const struct lm_window *w);
 float ease_smooth(float t);
@@ -509,6 +515,8 @@ void osk_press(struct lm_wm *wm, int i);
 void osk_release(struct lm_wm *wm);
 void osk_set(struct lm_wm *wm, bool open);
 void anim_fly(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w);
+/* A workspace switch: pictures of the windows that leave (call before the switch) and of the ones that arrive (after it) slide sideways. dir = +1: to a higher workspace. */
+void anim_workspace(struct lm_wm *wm, int dir, bool leaving);
 void anim_open(struct lm_wm *wm, struct lm_window *w);
 void anim_play_close(struct lm_wm *wm, struct lm_window *w);
 void anim_remember_close(struct lm_wm *wm, struct lm_window *w);

@@ -1,5 +1,6 @@
 /* Part of the window manager (see wm_priv.h): the desktop overview */
 #include "wm_priv.h"
+#include "smarthome.h"
 
 /* ---- the desktop overview ----------------------------------------------------------------------------------------------- */
 
@@ -493,7 +494,7 @@ void anim_play_close(struct lm_wm *wm, struct lm_window *w)
 
 size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size)
 {
-    static const char *const names[] = { "open", "close", "minimize", "restore" };
+    static const char *const names[] = { "open", "close", "minimize", "restore", "slide-out", "slide-in" };
     size_t n = 0;
     int count = 0;
     for (int i = 0; i < ANIM_MAX; i++)
@@ -586,6 +587,9 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         if (gid == LM_GADGET_MIXER) {
             if (wm->srv->mixer)
                 it.u.gadget.mixer = lm_mixer_state(wm->srv->mixer);
+        } else if (gid == LM_GADGET_SMART) {
+            if (wm->srv->smart)
+                it.u.gadget.smart = lm_smart_state(wm->srv->smart);
         } else if (gid == LM_GADGET_SYSTEM) {
             if (wm->srv->sysinfo)
                 it.u.gadget.sys = lm_sysinfo_state(wm->srv->sysinfo);

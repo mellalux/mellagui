@@ -52,6 +52,7 @@ def setUpModule():
     os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
+    os.environ['MELLAGUI_FONT'] = 'bitmap'                           # the pixel tests know the built-in 8x16 font (TestFont picks others)
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
     os.environ['MELLAGUI_APPS_DIRS'] = os.path.join(tmp, 'no-apps')    # the launcher's search finds none of the programs and files of this machine
     os.environ['MELLAGUI_SEARCH_ROOT'] = os.path.join(tmp, 'no-home')
@@ -16903,6 +16904,81 @@ class TestWindowPlaces(Base):
         c.button(BTN_LEFT, False)
         c.sync()
         self.assertEqual(open(self.path).read(), before)
+
+
+class TestFont(Base):
+    """The font text is drawn with: the built-in bitmap or a TrueType file (`[font] file`, MELLAGUI_FONT), see font.h."""
+
+    def start(self, name, text=None, font=''):
+        args = []
+        if text is not None:
+            self.path = os.path.join(tmp, name + '.conf')
+            with open(self.path, 'w') as f:
+                f.write(text)
+            args = ['--config', self.path]
+        p, c, stop = self.private_compositor(name, *args, env={'MELLAGUI_FONT': font})
+        c.sync()
+        return c
+
+    @staticmethod
+    def font(c):
+        m = re.match(r'font generation=(\d+) name=(.*)', c.cmd('font')[0])
+        return int(m[1]), m[2]
+
+    @staticmethod
+    def shades(c, name):                                                     # how many colours the top bar has (text included)
+        ppm = c.dump(os.path.join(tmp, name + '.ppm'))
+        return len({ppm.px(x, y) for y in range(4, 28) for x in range(560, 800)})
+
+    def test_the_tests_draw_with_the_bitmap_font(self):
+        p, c, stop = self.private_compositor('mellagui-font0')
+        self.assertEqual(self.font(c)[1], 'bitmap')
+
+    def test_auto_finds_a_truetype_font_and_its_text_is_anti_aliased(self):
+        c = self.start('mellagui-font1')
+        name = self.font(c)[1]
+        if name == 'bitmap':
+            self.skipTest('no well known monospace TrueType font is installed')
+        self.assertTrue(name.endswith('.ttf'), name)
+        smooth = self.shades(c, 'font1')
+        b = self.start('mellagui-font1b', font='bitmap')
+        self.assertGreater(smooth, self.shades(b, 'font1b') + 10)            # the edges of the letters are in-between colours
+
+    def test_a_file_that_is_no_font_leaves_the_bitmap(self):
+        bad = os.path.join(tmp, 'font2-not-a-font.ttf')
+        with open(bad, 'wb') as f:
+            f.write(b'\x00\x01\x00\x00' + os.urandom(4000))
+        c = self.start('mellagui-font2', '[font]\nfile = %s\n' % bad)
+        self.assertEqual(self.font(c)[1], 'bitmap')
+        c.sync()                                                             # and it still paints
+        self.assertGreater(self.shades(c, 'font2'), 1)
+
+    def test_the_file_is_read_again_on_reload_and_the_environment_wins(self):
+        c = self.start('mellagui-font3', '[font]\nfile = bitmap\n')
+        gen, name = self.font(c)
+        self.assertEqual(name, 'bitmap')
+        with open(self.path, 'w') as f:
+            f.write('[font]\nfile = auto\n')
+        c.cmd('reload')
+        gen2, name2 = self.font(c)
+        if name2 != 'bitmap':
+            self.assertGreater(gen2, gen)
+        e = self.start('mellagui-font3e', '[font]\nfile = auto\n', font='bitmap')
+        self.assertEqual(self.font(e)[1], 'bitmap')
+
+    def test_a_relative_file_name_is_refused(self):
+        p, c, stop = self.private_compositor('mellagui-font4', '--config', self.conf('font4', '[font]\nfile = Mono.ttf\nsize = 3\n'),
+                                             env={'MELLAGUI_FONT': ''})
+        c.cmd('quit')
+        out = p.communicate(timeout=5)[0].decode()
+        self.assertIn('2 line(s) ignored', out)
+
+    @staticmethod
+    def conf(name, text):
+        path = os.path.join(tmp, name + '.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        return path
 
 
 if __name__ == '__main__':

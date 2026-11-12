@@ -17,6 +17,7 @@
 
 #include "keys.h"
 #include "backend.h"
+#include "font.h"
 #include "idleinhibit.h"
 #include "saver.h"
 #include "search.h"
@@ -350,6 +351,10 @@ static void ctl_command(struct ctl_client *c, char *line)
         struct lm_loop_stats st;
         lm_loop_stats(srv->loop, &st);
         ctl_reply(c, "loop stalls=%u worst_ms=%u threshold=%u worker=%d\nok\n", st.stalls, st.worst_ms, st.threshold_ms, lm_work_pending());
+    } else if (!strcmp(cmd, "font")) {
+        /* font -> "font generation=<n> name=<file|bitmap>" (what text is drawn with, see font.h), then "ok" */
+        const char *name = lm_font_name();
+        ctl_reply(c, "font generation=%u name=%s\nok\n", lm_font_generation(), name);
     } else if (!strcmp(cmd, "idle")) {
         /* idle -> "idle inhibitors=<n> inhibited=<0|1>" (zwp_idle_inhibit_manager_v1), then "ok" */
         ctl_reply(c, "idle inhibitors=%d inhibited=%d\nok\n", lm_idle_inhibit_count(srv->idle_inhibit), lm_idle_inhibited(srv->idle_inhibit));

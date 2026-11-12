@@ -321,7 +321,7 @@ static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int
         uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
         if (x + LM_FONT_W > lim.x && x < lim.x + lim.w) {
-            const uint8_t *g = lm_font_glyph(cp);
+            const uint8_t *g = lm_font_cell(cp, LM_FONT_W, LM_FONT_H);
             for (int row = 0; row < LM_FONT_H; row++) {
                 int py = y + row;
                 if (py < lim.y || py >= lim.y + lim.h)
@@ -331,8 +331,9 @@ static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int
                     int px = x + col;
                     if (px < lim.x || px >= lim.x + lim.w)
                         continue;
-                    if (g[row] & (0x80 >> col))
-                        dst[px] = color;
+                    unsigned a = g[row * LM_FONT_W + col];
+                    if (a)
+                        dst[px] = lm_font_mix(dst[px], color, a);
                 }
             }
         }
@@ -633,7 +634,7 @@ static void paint_notify(const struct paint_ctx *c, const struct lm_notify_info 
 
 static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb);
 
-/* Text with every font pixel drawn as a scale x scale block (the lock screen's clock). */
+/* Text `scale` times the normal size (the lock screen's clock): real outlines with a TrueType font, blocks with the bitmap. */
 static void draw_text_scaled(const struct paint_ctx *c, int x, int y, const char *text, int scale, uint32_t color)
 {
     size_t len = strlen(text);
@@ -641,14 +642,21 @@ static void draw_text_scaled(const struct paint_ctx *c, int x, int y, const char
         int used;
         uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
-        const uint8_t *g = lm_font_glyph(cp);
-        for (int row = 0; row < LM_FONT_H; row++)
-            for (int col = 0; col < LM_FONT_W; col++)
-                if (g[row] & (0x80 >> col)) {
-                    struct lm_rect px = lm_rect_make(x + col * scale, y + row * scale, scale, scale);
-                    fill_rect(c, &px, color);
-                }
-        x += LM_FONT_W * scale;
+        int cw = LM_FONT_W * scale, ch = LM_FONT_H * scale;
+        const uint8_t *g = lm_font_cell(cp, cw, ch);
+        for (int row = 0; row < ch; row++) {
+            int py = y + row;
+            if (py < c->clip.y || py >= c->clip.y + c->clip.h)
+                continue;
+            uint32_t *dst = fb_row(c, py);
+            for (int col = 0; col < cw; col++) {
+                int px = x + col;
+                unsigned a = g[row * cw + col];
+                if (a && px >= c->clip.x && px < c->clip.x + c->clip.w)
+                    dst[px] = lm_font_mix(dst[px], color, a);
+            }
+        }
+        x += cw;
     }
 }
 

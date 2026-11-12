@@ -29,6 +29,7 @@
 #include "render.h"
 #include "seat.h"
 #include "nightlight.h"
+#include "smarthome.h"
 #include "sound.h"
 #include "worker.h"
 #include "notifylog.h"
@@ -633,6 +634,22 @@ static void ctl_command(struct ctl_client *c, char *line)
                   lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0, ss->ready ? 1 : 0, ss->cpu, ss->ncores, ss->mem_pct,
                   ss->mem_total_kb, ss->swap_pct, ss->temp_c, ss->load1, ss->nhist);
         /* the device strings contain blanks, so they have their own command: "sysdev" */
+    } else if (!strcmp(cmd, "smart")) {
+        /* smart [0|1|refresh]  show / hide the Smart home gadget, or ask the program again; replies "smart visible=<0|1> ready=<0|1> n=<n> note=...",
+         * then one "item <i> <name> kind=switch|blind|none online=<0|1> on=<0|1> percent=<n>" line each, then "ok" */
+        if (!srv->wm || !srv->smart) { ctl_reply(c, "err no smart\n"); return; }
+        if (a1 && !strcmp(a1, "refresh"))
+            lm_smart_refresh(srv->smart);
+        else if (a1)
+            lm_wm_set_gadget_id(srv->wm, LM_GADGET_SMART, a1[0] == '1');
+        const struct lm_smart_state *ms = lm_smart_state(srv->smart);
+        ctl_reply(c, "smart visible=%d ready=%d n=%d note=%s\n", lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SMART) ? 1 : 0, ms->ready ? 1 : 0, ms->n,
+                  ms->note[0] ? ms->note : "-");
+        for (int i = 0; i < ms->n; i++)
+            ctl_reply(c, "item %d %s kind=%s online=%d on=%d percent=%d\n", i, ms->item[i].name,
+                      ms->item[i].kind == LM_SMART_SWITCH ? "switch" : ms->item[i].kind == LM_SMART_BLIND ? "blind" : "none",
+                      ms->item[i].online ? 1 : 0, ms->item[i].on ? 1 : 0, ms->item[i].percent);
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "sysdev")) {
         /* sysdev  replies "ok maker=<..>|model=<..>|cpu=<..>|os=<..>|kernel=<..>|host=<..>|uptime=<s>" ('|' separated, values may hold blanks) */
         if (!srv->sysinfo) { ctl_reply(c, "err no sysinfo\n"); return; }
@@ -642,7 +659,8 @@ static void ctl_command(struct ctl_client *c, char *line)
     } else if (!strcmp(cmd, "gadget-rect")) {
         struct lm_rect r;
         if (srv->wm && lm_wm_gadget_rect_id(srv->wm, a1 && !strcmp(a1, "mixer") ? LM_GADGET_MIXER :
-                                            a1 && !strcmp(a1, "system") ? LM_GADGET_SYSTEM : LM_GADGET_CLIPBOARD, &r))
+                                            a1 && !strcmp(a1, "system") ? LM_GADGET_SYSTEM :
+                                            a1 && !strcmp(a1, "smart") ? LM_GADGET_SMART : LM_GADGET_CLIPBOARD, &r))
             ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
         else
             ctl_reply(c, "ok hidden\n");

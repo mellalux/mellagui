@@ -24,6 +24,7 @@
     "Super+C           = clipboard-pick\n" \
     "Super+V           = gadget-mixer\n" \
     "Super+S           = gadget-system\n" \
+    "Super+H           = gadget-smart\n" \
     "Super+Q           = close\n" \
     "Super+L           = lock\n" \
     "Super+1           = workspace 1\n" \
@@ -149,7 +150,7 @@ static const struct action_def actions[] = {
     { "exec", LM_ACT_EXEC, ARG_COMMAND },
     { "layout-next", LM_ACT_LAYOUT_NEXT, ARG_NONE }, { "layout-prev", LM_ACT_LAYOUT_PREV, ARG_NONE },
     { "gadget-clipboard", LM_ACT_GADGET_CLIPBOARD, ARG_NONE }, { "clipboard-pick", LM_ACT_CLIPBOARD_PICK, ARG_NONE },
-    { "gadget-mixer", LM_ACT_GADGET_MIXER, ARG_NONE }, { "gadget-system", LM_ACT_GADGET_SYSTEM, ARG_NONE },
+    { "gadget-mixer", LM_ACT_GADGET_MIXER, ARG_NONE }, { "gadget-system", LM_ACT_GADGET_SYSTEM, ARG_NONE }, { "gadget-smart", LM_ACT_GADGET_SMART, ARG_NONE },
     { "close", LM_ACT_CLOSE, ARG_NONE }, { "lock", LM_ACT_LOCK, ARG_NONE }, { "quit", LM_ACT_QUIT, ARG_NONE },
     { "workspace", LM_ACT_WORKSPACE, ARG_WORKSPACE }, { "move-to-workspace", LM_ACT_MOVE_TO_WORKSPACE, ARG_WORKSPACE },
     { "focus-next", LM_ACT_FOCUS_NEXT, ARG_NONE }, { "focus-prev", LM_ACT_FOCUS_PREV, ARG_NONE },

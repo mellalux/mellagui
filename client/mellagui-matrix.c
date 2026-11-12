@@ -901,12 +901,12 @@ static void draw_cell(struct wlwin *w, int x0, int y0, uint32_t cp, int scale, u
                 continue;
             for (int dy = 0; dy < scale; dy++) {
                 int y = y0 + row * scale + dy;
-                if (y < 0 || y >= w->bh)
+                if (y < 0 || y >= w->ph)
                     break;
-                uint32_t *line = w->pixels + (size_t)y * (size_t)w->bw;
+                uint32_t *line = w->pixels + (size_t)y * (size_t)w->pw;
                 for (int dx = 0; dx < scale; dx++) {
                     int x = x0 + bit * scale + dx;
-                    if (x >= 0 && x < w->bw)
+                    if (x >= 0 && x < w->pw)
                         line[x] = px;
                 }
             }
@@ -914,14 +914,15 @@ static void draw_cell(struct wlwin *w, int x0, int y0, uint32_t cp, int scale, u
     }
 }
 
-/* The room, drawn at the window's size or (a very big window) at half of it and doubled. */
+/* The room, drawn at the buffer's size (the screen's own pixels) or (a very big one) at half of it and doubled: the picture is a ray cast,
+ * so a scaled screen costs only the pixels that are really drawn. */
 static void paint_room(struct wlwin *w)
 {
     struct app *a = w->data;
-    int rs = (size_t)w->bw * (size_t)w->bh > 2600000u ? 2 : 1;
-    int rw = w->bw / rs, rh = w->bh / rs;
+    int rs = (size_t)w->pw * (size_t)w->ph > 2600000u ? 2 : 1;
+    int rw = w->pw / rs, rh = w->ph / rs;
     if (rs == 1) {
-        room_render(&a->room, w->pixels, w->bw, w->bh, w->bw, a->threads);
+        room_render(&a->room, w->pixels, w->pw, w->ph, w->pw, a->threads);
     } else {
         if (a->scratch_n < (size_t)rw * (size_t)rh) {
             free(a->scratch);
@@ -931,10 +932,10 @@ static void paint_room(struct wlwin *w)
         if (!a->scratch)
             return;
         room_render(&a->room, a->scratch, rw, rh, rw, a->threads);
-        for (int y = 0; y < w->bh; y++) {
+        for (int y = 0; y < w->ph; y++) {
             const uint32_t *src = a->scratch + (size_t)LM_MIN(y / rs, rh - 1) * (size_t)rw;
-            uint32_t *dst = w->pixels + (size_t)y * (size_t)w->bw;
-            for (int x = 0; x < w->bw; x++)
+            uint32_t *dst = w->pixels + (size_t)y * (size_t)w->pw;
+            for (int x = 0; x < w->pw; x++)
                 dst[x] = src[LM_MIN(x / rs, rw - 1)];
         }
     }
@@ -949,17 +950,17 @@ static void paint(struct wlwin *w)
         return;
     }
     struct rain *r = &a->rain;
-    a->scale = w->bh >= 900 ? 2 : 1;
+    a->scale = (w->bh >= 900 ? 2 : 1) * wlwin_scale(w);               /* the letters are as big as before on the screen: in the buffer's pixels */
     a->cw = (LM_FONT_W + 1) * a->scale;
     a->ch = LM_FONT_H * a->scale;
-    int cols = w->bw / a->cw, rows = (w->bh + a->ch - 1) / a->ch;
+    int cols = w->pw / a->cw, rows = (w->ph + a->ch - 1) / a->ch;
     if (cols != r->cols || rows != r->rows) {
         if (!rain_resize(r, cols, rows))
             return;
         rain_warm_up(r);
     }
-    memset(w->pixels, 0, (size_t)w->bw * (size_t)w->bh * 4);
-    int xoff = (w->bw - cols * a->cw) / 2;
+    memset(w->pixels, 0, (size_t)w->pw * (size_t)w->ph * 4);
+    int xoff = (w->pw - cols * a->cw) / 2;
     for (int y = 0; y < r->rows; y++)
         for (int x = 0; x < r->cols; x++) {
             int b = r->bright[(size_t)y * (size_t)r->cols + (size_t)x];
@@ -1137,6 +1138,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* the picture is made for the screen's own pixels */
     lm_theme_load_env();
     struct app a = { 0 };
     a.rain.speed_pct = 100;

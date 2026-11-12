@@ -1645,6 +1645,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* the password window draws through the wlwin_* calls only */
     lm_theme_load_env();
     bool battery = true, network = true, bluetooth = true;
     for (int i = 1; i < argc; i++) {

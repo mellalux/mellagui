@@ -46,6 +46,7 @@
 #include "keymap.h"
 #include "protocol.h"
 #include "qr.h"
+#include "smartfav.h"
 #include "smartsched.h"
 #include "theme.h"
 #include "tuya.h"
@@ -1038,6 +1039,17 @@ static void modal_controls(struct flow *f)
             flow_add(f, C_BUTTON, k, lm_font_text_width("Cancel") + 28, "Cancel", "0");
     }
     flow_break(f);
+    flow_line(f, C_LABEL, "On the desktop");                    /* the pin: the device's main switch (or the blind's buttons) on the desktop card */
+    {
+        char ids[FAV_MAX][FAV_ID_MAX];
+        bool pinned = fav_find(ids, fav_load(ids, FAV_MAX), d->id) >= 0;
+        const char *text = pinned ? "Remove it from the desktop" : "Show it on the desktop";
+        flow_add(f, C_EDIT, -1, lm_font_text_width(text) + 28, text, "fav");
+        struct ctl *pin = f->a->nctl > 0 ? &f->a->ctl[f->a->nctl - 1] : NULL;
+        if (pin)
+            pin->lit = pinned;
+        flow_break(f);
+    }
     schedule_controls(f);
     bool head = false;
     for (int k = 0; k < d->ndp; k++) {
@@ -1769,6 +1781,13 @@ static void press_edit(struct app *a, const struct ctl *c)
     struct tuya_dev *d = &a->dev[c->dev];
     const char *v = c->value;
     int n = atoi(strchr(v, ':') ? strchr(v, ':') + 1 : "0");
+    if (!strcmp(v, "fav")) {
+        char ids[FAV_MAX][FAV_ID_MAX];
+        bool pinned = fav_find(ids, fav_load(ids, FAV_MAX), d->id) >= 0;
+        if (!fav_set(d->id, !pinned))
+            set_msg(a, true, "Only eight devices fit on the desktop card");
+        return;
+    }
     if (!strcmp(v, "add")) {
         a->ed.open = true;
         a->ed.hour = 7;
@@ -2305,6 +2324,54 @@ static int cmd_list(void)
     return 0;
 }
 
+/* The pinned devices with what the desktop card needs, one tab separated line each:
+ *   fav ID NAME ONLINE KIND CODE VALUE     KIND switch (VALUE 0 / 1), blind (VALUE the position in per cent, -1 unknown; CODE control) or none */
+static int cmd_favourites(void)
+{
+    static struct tuya_session s;
+    static struct tuya_dev dev[TUYA_MAX_DEV];
+    char ids[FAV_MAX][FAV_ID_MAX], err[200] = "";
+    int nf = fav_load(ids, FAV_MAX), n = 0;
+    if (!nf) {
+        printf("favs\t0\n");
+        return 0;
+    }
+    if (need_login(&s))
+        return 1;
+    if (!tuya_load_devices(&s, dev, &n, err, sizeof(err))) {
+        fprintf(stderr, "mellagui-smart: %s\n", err);
+        return 1;
+    }
+    printf("favs\t%d\n", nf);
+    for (int f = 0; f < nf; f++)
+        for (int i = 0; i < n; i++) {
+            struct tuya_dev *d = &dev[i];
+            if (strcmp(d->id, ids[f]))
+                continue;
+            const char *kind = "none", *code = "-";
+            int value = 0;
+            struct tuya_dp *ctl = tuya_find_dp(d, "control"), *pos = tuya_find_dp(d, "percent_control");
+            if (!strcmp(d->category, "cl") && ctl) {
+                kind = "blind";
+                code = "control";
+                value = pos && pos->has ? (int)(pos->num + 0.5) : -1;
+            } else {
+                for (int k = 0; k < d->ndp; k++) {
+                    struct tuya_dp *dp = &d->dp[k];
+                    if (dp->type == TUYA_BOOL && !strncmp(dp->code, "switch", 6) && strcmp(dp->code, "switch_inching") &&
+                        strcmp(dp->code, "switch_backlight") && !is_countdown(dp)) {
+                        kind = "switch";
+                        code = dp->code;
+                        value = dp->has && dp->b ? 1 : 0;
+                        break;
+                    }
+                }
+            }
+            printf("fav\t%s\t%s\t%d\t%s\t%s\t%d\n", d->id, d->name, d->online ? 1 : 0, kind, code, value);
+        }
+    return 0;
+}
+
 static int cmd_set(const char *id, const char *code, const char *value)
 {
     static struct tuya_session s;
@@ -2624,6 +2691,10 @@ int main(int argc, char **argv)
         return selftest();
     if (argc == 2 && !strcmp(argv[1], "--list"))
         return cmd_list();
+    if (argc == 2 && !strcmp(argv[1], "--favourites"))
+        return cmd_favourites();
+    if (argc == 4 && !strcmp(argv[1], "--fav") && (!strcmp(argv[3], "on") || !strcmp(argv[3], "off")))
+        return fav_set(argv[2], !strcmp(argv[3], "on")) ? 0 : 1;
     if (argc == 5 && !strcmp(argv[1], "--set"))
         return cmd_set(argv[2], argv[3], argv[4]);
     if (argc == 3 && !strcmp(argv[1], "--get-local"))
@@ -2656,7 +2727,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc > 1) {
-        fprintf(stderr, "usage: mellagui-smart | --list | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --login USERCODE | --logout | --qr TEXT | --selftest\n");
+        fprintf(stderr, "usage: mellagui-smart | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --login USERCODE | --logout | --qr TEXT | --selftest\n");
         return 2;
     }
     const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");

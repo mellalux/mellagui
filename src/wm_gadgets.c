@@ -1,5 +1,6 @@
 /* Part of the window manager (see wm_priv.h): the gadgets' places and sizes, kept between runs */
 #include "wm_priv.h"
+#include "smarthome.h"
 
 /* ---- the gadgets' places and sizes, kept between runs ------------------------------------------------------------------ */
 
@@ -8,6 +9,7 @@ struct lm_gadget_def gadget_def[LM_GADGET_COUNT] = {
     [LM_GADGET_CLIPBOARD] = { 0, 0, GADGET_MIN_W, GADGET_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
     [LM_GADGET_MIXER] = { 0, 0, MIXER_MIN_W, MIXER_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
     [LM_GADGET_SYSTEM] = { 0, 0, SYS_MIN_W, SYS_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
+    [LM_GADGET_SMART] = { 0, 0, SMART_MIN_W, SMART_MIN_H, GADGET_MAX_W, GADGET_MAX_H },
 };
 
 /* The starting sizes come from [gadgets] in mellagui.conf (metrics.h), so they are filled in when the wm is created. */
@@ -19,9 +21,11 @@ void gadget_def_init(void)
     gadget_def[LM_GADGET_MIXER].h = MIXER_H;
     gadget_def[LM_GADGET_SYSTEM].w = SYS_W;
     gadget_def[LM_GADGET_SYSTEM].h = SYS_H;
+    gadget_def[LM_GADGET_SMART].w = SMART_W;
+    gadget_def[LM_GADGET_SMART].h = SMART_H;
 }
 
-static const char *const gadget_names[LM_GADGET_COUNT] = { "clipboard", "mixer", "system" };
+static const char *const gadget_names[LM_GADGET_COUNT] = { "clipboard", "mixer", "system", "smart" };
 
 /* One line per gadget that was moved or resized: "name x y w h". A gadget at its default place is not listed. */
 void gadgets_save(struct lm_wm *wm)
@@ -256,6 +260,11 @@ void lm_wm_sysinfo_changed(struct lm_wm *wm)
     damage_gadget(wm, LM_GADGET_SYSTEM);
 }
 
+void lm_wm_smart_changed(struct lm_wm *wm)
+{
+    damage_gadget(wm, LM_GADGET_SMART);
+}
+
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id)
 {
     return id >= 0 && id < LM_GADGET_COUNT && wm->gad[id].visible;
@@ -277,6 +286,8 @@ void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible)
         lm_mixer_set_active(wm->srv->mixer, visible);
     if (id == LM_GADGET_SYSTEM && wm->srv->sysinfo)
         lm_sysinfo_set_active(wm->srv->sysinfo, visible);
+    if (id == LM_GADGET_SMART && wm->srv->smart)
+        lm_smart_set_active(wm->srv->smart, visible);
     lm_settings_changed(wm->srv->settings);     /* the panel's checkbox follows Super+G / Super+V */
 }
 

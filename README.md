@@ -126,8 +126,7 @@ in graphics mode with the keyboard off. From another machine (ssh) or another VT
 ## Screen scale (HiDPI)
 
 Settings > Display > Scale (100 - 300 %, or `--scale 1.5`) makes everything bigger: the panel, dock, window frames and every
-program that supports it are drawn at the screen's own pixels, so they stay sharp (all MellaGUI programs except the Matrix
-screensaver do). Other programs (Firefox, ...) draw at the screen's scale themselves when they can, else the shell enlarges
+program that supports it are drawn at the screen's own pixels, so they stay sharp (all MellaGUI programs do). Other programs (Firefox, ...) draw at the screen's scale themselves when they can, else the shell enlarges
 them and they look softer. Screenshots and recordings have the screen's own pixels.
 
 To try it on a real screen safely: from a free text console, `build/mellagui --timeout 60 --scale 2` (it ends by itself).

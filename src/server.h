@@ -86,6 +86,7 @@ struct lm_menu;
 struct lm_idle_inhibit;
 struct lm_mixer;
 struct lm_sysinfo;
+struct lm_smart;
 struct lm_dmabuf;
 
 typedef void (*lm_request_fn)(struct lm_resource *res, const union lm_arg *args);
@@ -205,6 +206,7 @@ struct lm_config {
     bool mixer;                 /* volume mixer gadget visible at start (default false; --mixer; Super+V; setting `mixer`) */
     bool dmabuf;                /* offer zwp_linux_dmabuf_v1 so clients can render with the GPU (default true; --no-dmabuf) */
     bool sysinfo;               /* system monitor gadget visible at start (default false; --sysinfo; Super+S; setting `sysinfo`) */
+    bool smart;                 /* the Smart home gadget (the devices pinned in mellagui-smart) visible (default false; Super+H; setting `smart`) */
     bool sound;                 /* feedback beeps for sticky keys (default true; --no-sound; never on headless) */
     int renderer;               /* --renderer software|auto|gl: 0 = software, 1 = GL when it works, 2 = GL required (default: auto on drm, software headless) */
     int logind;                 /* --logind off|auto|on: 0 = never, 1 = when the session allows it (default), 2 = required */
@@ -296,6 +298,7 @@ struct lm_server {
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
     struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */
+    struct lm_smart *smart;             /* the pinned smart home devices behind the Smart home gadget (it asks mellagui-smart) */
     struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */
 
     void *priv;

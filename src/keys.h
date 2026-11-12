@@ -25,7 +25,7 @@
  *   tile-left tile-right             half of the screen                workspace N          switch (1..4)
  *   move-to-workspace N              move the focused window           focus-next focus-prev  cycle the windows
  *   layout-next layout-prev          keyboard layout                   lock                 lock the screen
- *   gadget-clipboard gadget-mixer gadget-system   show / hide a gadget   clipboard-pick     choose from the history with the arrows
+ *   gadget-clipboard gadget-mixer gadget-system gadget-smart   show / hide a gadget   clipboard-pick     choose from the history with the arrows
  *   quit                             leave MellaGUI (asks for the lock secret first)       none  remove the binding
  *   launcher                         the launcher dialog: big icons of the dock, add / remove (Super+A)
  *   osk                              the on-screen keyboard: show / hide (Super+K, the panel button)
@@ -43,7 +43,7 @@ enum lm_action {
     LM_ACT_NONE,
     LM_ACT_TERMINAL, LM_ACT_RUN, LM_ACT_SETTINGS, LM_ACT_EXEC,
     LM_ACT_LAYOUT_NEXT, LM_ACT_LAYOUT_PREV,
-    LM_ACT_GADGET_CLIPBOARD, LM_ACT_CLIPBOARD_PICK, LM_ACT_GADGET_MIXER, LM_ACT_GADGET_SYSTEM,
+    LM_ACT_GADGET_CLIPBOARD, LM_ACT_CLIPBOARD_PICK, LM_ACT_GADGET_MIXER, LM_ACT_GADGET_SYSTEM, LM_ACT_GADGET_SMART,
     LM_ACT_CLOSE, LM_ACT_LOCK, LM_ACT_QUIT,
     LM_ACT_WORKSPACE, LM_ACT_MOVE_TO_WORKSPACE, LM_ACT_FOCUS_NEXT, LM_ACT_FOCUS_PREV,
     LM_ACT_FULLSCREEN, LM_ACT_MAXIMIZE_TOGGLE, LM_ACT_MAXIMIZE, LM_ACT_RESTORE, LM_ACT_TILE_LEFT, LM_ACT_TILE_RIGHT,

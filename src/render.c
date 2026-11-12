@@ -19,6 +19,7 @@
 
 #include "dockicon.h"
 #include "font.h"
+#include "smarthome.h"
 #include "gl.h"
 #include "img.h"
 #include "log.h"
@@ -1599,6 +1600,7 @@ static void paint_grip(const struct paint_ctx *c, const struct lm_rect *card)
 
 static void paint_mixer(const struct paint_ctx *c, const struct lm_gadget_info *g);
 static void paint_system(const struct paint_ctx *c, const struct lm_gadget_info *g);
+static void paint_smart(const struct paint_ctx *c, const struct lm_gadget_info *g);
 
 static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info *g)
 {
@@ -1608,6 +1610,10 @@ static void paint_gadget(const struct paint_ctx *c, const struct lm_gadget_info 
     }
     if (g->id == LM_GADGET_SYSTEM) {
         paint_system(c, g);
+        return;
+    }
+    if (g->id == LM_GADGET_SMART) {
+        paint_smart(c, g);
         return;
     }
     const struct lm_rect card = g->rect;
@@ -1738,6 +1744,81 @@ static void paint_slider(const struct paint_ctx *c, const struct lm_rect *s, int
         snprintf(t, sizeof(t), "%d%%", value);
         struct lm_rect tr = lm_rect_make(s->x + s->w + 8, s->y - 4, 46, s->h + 8);
         draw_text(c, &tr, tr.x, tr.y + (tr.h - LM_FONT_H) / 2, t, muted ? COL_PANEL_DIM : COL_PANEL_TEXT);
+    }
+}
+
+/* The Smart home card: the devices pinned in mellagui-smart - a switch for a plug or a light, open / stop / close for a blind. */
+static void paint_smart(const struct paint_ctx *c, const struct lm_gadget_info *g)
+{
+    const struct lm_rect card = g->rect;
+    const struct lm_smart_state *st = g->smart;
+    paint_card_base(c, g);
+    int hy = card.y + (g->title_h - LM_FONT_H) / 2;
+    int iy = card.y + (g->title_h - 14) / 2;
+    struct lm_rect body = lm_rect_make(card.x + 14, iy + 7, 12, 7);        /* a small house: walls and a stepped roof */
+    fill_rect(c, &body, 0xff000000u | lm_theme.accent);
+    for (int i = 0; i < 4; i++) {
+        struct lm_rect roof = lm_rect_make(card.x + 20 - (i + 1) * 2 + 1, iy + 3 + i, (i + 1) * 4 - 2, 1);
+        fill_rect(c, &roof, 0xff000000u | lm_theme.accent);
+    }
+    struct lm_rect head = lm_rect_make(card.x + 1, card.y + 1, card.w - 2, g->title_h - 1);
+    draw_text(c, &head, card.x + 36, hy, "Smart home", COL_PANEL_TEXT);
+    struct lm_rect sep = lm_rect_make(card.x + 12, card.y + g->title_h - 1, card.w - 24, 1);
+    fill_round(c, &sep, 0, ALPHA(0x30u, lm_theme.veil));
+    paint_grip(c, &card);
+    if (!st || !st->n) {
+        char line[200];
+        size_t pos = 0;
+        const char *note = st && st->note[0] ? st->note : st && st->ready ? "Nothing is pinned yet." : "Asking the smart home ...";
+        int cols = LM_MAX((card.w - 28) / LM_FONT_W, 8);
+        for (int i = 0; i < 4 && note[pos]; i++) {
+            bool more = wrap_line(note, &pos, cols, line, sizeof(line));
+            struct lm_rect lr = lm_rect_make(card.x + 14, card.y + g->title_h + 8 + i * (LM_FONT_H + 2), card.w - 28, LM_FONT_H);
+            draw_text(c, &lr, lr.x, lr.y, line, COL_PANEL_DIM);
+            if (!more)
+                break;
+        }
+        return;
+    }
+    struct lm_smart_layout l;
+    lm_smart_layout(card.x, card.y, card.w, card.h, g->title_h, st->n, &l);
+    for (int i = 0; i < l.rows; i++) {
+        const struct lm_smart_item *it = &st->item[i];
+        struct lm_rect row = lm_rect_make(card.x + 8, card.y + g->title_h + 4 + i * LM_SMART_ROW_H, card.w - 16, LM_SMART_ROW_H - 4);
+        fill_round(c, &row, 7, ALPHA(0x12u, lm_theme.veil));
+        int namew = it->kind == LM_SMART_BLIND ? l.btn[i][0].x - 8 - (card.x + 18) : l.sw[i].x - 8 - (card.x + 18);
+        if (it->kind == LM_SMART_NONE)
+            namew = card.w - 36;
+        char label[80];
+        if (it->kind == LM_SMART_BLIND && it->percent >= 0)
+            snprintf(label, sizeof(label), "%s  %d%%", it->name, it->percent);
+        else
+            snprintf(label, sizeof(label), "%s", it->name);
+        struct lm_rect nr = lm_rect_make(card.x + 18, row.y, namew, row.h);
+        draw_text(c, &nr, nr.x, row.y + (row.h - LM_FONT_H) / 2, label, it->online ? COL_PANEL_TEXT : COL_PANEL_DIM);
+        if (!it->online) {
+            struct lm_rect off = lm_rect_make(row.x + row.w - 8 - lm_font_text_width("offline"), row.y, lm_font_text_width("offline"), row.h);
+            draw_text(c, &off, off.x, row.y + (row.h - LM_FONT_H) / 2, "offline", COL_PANEL_DIM);
+            continue;
+        }
+        if (it->kind == LM_SMART_SWITCH) {
+            struct lm_rect tr = lm_rect_make(l.sw[i].x, l.sw[i].y, l.sw[i].w, l.sw[i].h);
+            fill_round(c, &tr, 11, 0xff000000u | (it->on ? lm_theme.ok : lm_theme.button));
+            float kx = it->on ? (float)(tr.x + tr.w - 11) : (float)(tr.x + 11);
+            paint_shape(c, kx, (float)tr.y + (float)tr.h / 2.0f, 8.0f, SHAPE_DISC, lm_theme.text & 0xffffffu, 255);
+        } else if (it->kind == LM_SMART_BLIND) {
+            static const enum shape icons[3] = { SHAPE_UP, SHAPE_PLUS, SHAPE_DOWN };
+            for (int b = 0; b < 3; b++) {
+                struct lm_rect br = lm_rect_make(l.btn[i][b].x, l.btn[i][b].y, l.btn[i][b].w, l.btn[i][b].h);
+                fill_round(c, &br, 8, 0xff000000u | lm_theme.button);
+                if (b == 1) {                                                    /* stop: a small square */
+                    struct lm_rect sq = lm_rect_make(br.x + br.w / 2 - 4, br.y + br.h / 2 - 4, 8, 8);
+                    fill_round(c, &sq, 1, 0xff000000u | COL_PANEL_TEXT);
+                } else {
+                    paint_shape(c, (float)br.x + (float)br.w / 2.0f, (float)br.y + (float)br.h / 2.0f, 6.5f, icons[b], COL_PANEL_TEXT & 0xffffffu, 255);
+                }
+            }
+        }
     }
 }
 

@@ -67,6 +67,10 @@ static const struct entry table[] = {
       "A card with the master volume and mute, the list of outputs and one slider for every program that is playing. Super+V shows or hides it." },
     { "sysinfo", NULL, "System monitor gadget",
       "A card with the CPU load (and its history), memory, swap, temperature and the name of the machine and system. Super+S shows or hides it." },
+    { "smart", NULL, "Smart home gadget",
+      "A card with the smart home devices you pinned: a switch for a plug or a light, open / stop / close for a blind. Pin a device in the Smart home program: "
+      "open its view and press \"Show it on the desktop\". Super+H shows or hides the card. The card asks the Smart home program for the state every "
+      "15 seconds while it is shown, and a click sends the command at once." },
     { "@Wallpaper", NULL, "Wallpaper", "The picture behind the windows." },
     { "wallpaper", NULL, "Wallpaper file",
       "The path of a PNG, JPEG or PPM picture (~/ is your home folder). Enter or Apply shows it at once; 'Browse...' lets you pick one in the file "

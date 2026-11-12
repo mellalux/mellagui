@@ -100,6 +100,15 @@ void anim_state(const struct wm_anim *a, float t, struct lm_rect *r, int *alpha)
         *alpha = (int)lroundf(255.0f * op);
         break;
     }
+    case ANIM_SLIDE_OUT:
+    case ANIM_SLIDE_IN: {                                           /* sideways: the leaving windows go, the arriving ones come from the other side */
+        float e = ease_smooth(t);
+        float off = (float)a->shift * (a->kind == ANIM_SLIDE_OUT ? e : 1.0f - e);
+        *r = a->home;
+        r->x += (int)lroundf(off);
+        *alpha = 255;
+        break;
+    }
     case ANIM_MINIMIZE:
     case ANIM_RESTORE: {
         float e = ease_smooth(a->kind == ANIM_MINIMIZE ? t : 1.0f - t);          /* a restore runs the minimize backwards */
@@ -150,7 +159,7 @@ void anim_forget(struct lm_wm *wm, struct lm_window *w)
 }
 
 /* Starts an animation; the ghost's pixels now belong to it. */
-void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home)
+struct wm_anim *anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, struct lm_ghost *g, const struct lm_rect *home)
 {
     struct wm_anim *a = NULL;
     for (int i = 0; i < ANIM_MAX && !a; i++)
@@ -179,7 +188,7 @@ void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, stru
         a->away.w = LM_MAX(a->away.w / 2, 2);
         a->away.h = 2;
     }
-    if (kind == ANIM_OPEN || kind == ANIM_RESTORE) {
+    if (kind == ANIM_OPEN || kind == ANIM_RESTORE || kind == ANIM_SLIDE_IN) {
         a->win = w;
         w->anim_hidden = true;
     }
@@ -188,6 +197,31 @@ void anim_start(struct lm_wm *wm, enum anim_kind kind, struct lm_window *w, stru
     damage_rect(wm, &d);
     if (wm->anim_timer && !lm_timer_is_armed(wm->anim_timer))
         lm_timer_arm_ms(wm->anim_timer, ANIM_TICK_MS, ANIM_TICK_MS);
+    return a;
+}
+
+/* The windows of the current workspace that show now (before a switch: those that leave; after it: those that arrive) slide: each is a
+ * picture moving by one output width. Not for fullscreen windows (they just appear) or while the overview or the lock screen is up. */
+void anim_workspace(struct lm_wm *wm, int dir, bool leaving)
+{
+    if (anim_duration(wm) <= 0 || !wm->srv->render || lm_lock_active(wm->srv->lock) || wm->ov.open || wm->ov.closing)
+        return;
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (!win_visible(wm, w) || !w->mapped || !anim_wanted(wm, w))
+            continue;
+        struct lm_ghost g;
+        struct lm_rect home;
+        if (!anim_prepare(wm, w, &g, &home))
+            continue;
+        struct lm_output *o = window_output(wm, w);
+        if (!o)
+            o = lm_output_nearest(wm->srv, home.x + home.w / 2, home.y + home.h / 2);
+        int width = o ? o->width : 1280;
+        struct wm_anim *a = anim_start(wm, leaving ? ANIM_SLIDE_OUT : ANIM_SLIDE_IN, leaving ? NULL : w, &g, &home);
+        a->shift = leaving ? -dir * width : dir * width;
+        anim_state(a, 0.0f, &a->shown, &a->alpha);
+    }
 }
 
 /* ---- wobbling windows ------------------------------------------------------------------------------------------------- */

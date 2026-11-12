@@ -5205,9 +5205,9 @@ esac
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
         # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the twelve page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 30th press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
+        # and reaches the gadget checkbox with the 32nd press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(30):
+        for _ in range(32):                                     # (the Smart home box and its "?" are two more stops)
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -5280,7 +5280,7 @@ esac
         x0, y0 = win['x'], win['y']
         ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
-        ctl.click(x0 + 460, y0 + 291)                           # "Browse..."
+        ctl.click(x0 + 460, y0 + 319)                           # "Browse..."
         chooser = wait_for_window('mellagui.files.choose')
         self.assertIsNotNone(chooser, 'the picture chooser did not open')
         self.assertIn('Choose a picture', chooser['title'])
@@ -5297,27 +5297,27 @@ esac
         x0, y0 = win['x'], win['y']
         ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
-        ctl.click(x0 + 410, y0 + 265)                           # Stretch
+        ctl.click(x0 + 410, y0 + 293)                           # Stretch
         time.sleep(0.2)
         self.assertEqual(settings()['wallpaper-mode'], 'stretch')
-        ctl.click(x0 + 190, y0 + 265)                           # Fill
+        ctl.click(x0 + 190, y0 + 293)                           # Fill
         time.sleep(0.2)
         self.assertEqual(settings()['wallpaper-mode'], 'fill')
-        ctl.click(x0 + 300, y0 + 231)                           # the file field: type a name and press Enter
+        ctl.click(x0 + 300, y0 + 259)                           # the file field: type a name and press Enter
         type_text('abc')
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok abc')
         ctl.cmd('setting wallpaper-status')
         self.assertTrue(ctl.last.startswith('ok error:'), ctl.last)                    # no such file
-        ctl.click(x0 + 320, y0 + 291)                           # "No picture"
+        ctl.click(x0 + 320, y0 + 319)                           # "No picture"
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok ')
-        ctl.click(x0 + 300, y0 + 231)                           # type without Enter, then the Apply button
+        ctl.click(x0 + 300, y0 + 259)                           # type without Enter, then the Apply button
         for ch in 'xyz':
             ctl.tap(KEYCODES[ch])
-        ctl.click(x0 + 200, y0 + 291)
+        ctl.click(x0 + 200, y0 + 319)
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok xyz')
@@ -5329,7 +5329,7 @@ esac
         x0, y0 = win['x'], win['y']
         ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
-        ctl.click(x0 + 300, y0 + 231)                           # the file field
+        ctl.click(x0 + 300, y0 + 259)                           # the file field
         ctl.key(KEY_LEFTCTRL, True)
         ctl.tap(47)                                             # Ctrl+V
         ctl.key(KEY_LEFTCTRL, False)
@@ -5338,7 +5338,7 @@ esac
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok pasted.png')
-        self.right_click(x0 + 300, y0 + 231)                    # the right-click menu: Clear empties the field
+        self.right_click(x0 + 300, y0 + 259)                    # the right-click menu: Clear empties the field
         m = self.menu_state()
         self.assertEqual((m['open'], [e['label'] for e in m['entries']]), (1, ['Cut', 'Copy', 'Paste', 'Select all', 'Clear']))
         self.assertEqual([e['enabled'] for e in m['entries']], [1, 1, 1, 1, 1])
@@ -5349,7 +5349,7 @@ esac
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok ')
-        self.right_click(x0 + 300, y0 + 231)                    # Paste from the menu
+        self.right_click(x0 + 300, y0 + 259)                    # Paste from the menu
         paste = self.menu_state()['entries'][2]
         ctl.click(paste['x'], paste['y'])
         time.sleep(0.4)
@@ -5366,7 +5366,7 @@ esac
         x0, y0 = win['x'], win['y']
         ctl.click(x0 + 70, y0 + 12 + 2 * 35 + 13)                   # "Desktop" tab
         time.sleep(0.2)
-        ctl.click(x0 + 300, y0 + 231)                           # the file field
+        ctl.click(x0 + 300, y0 + 259)                           # the file field
         for ch in 'abxcd':                                      # (type_text() would press Enter at the end)
             ctl.tap(KEYCODES[ch])
         ctl.tap(105)                                            # Left x2: the caret is behind the x
@@ -5376,7 +5376,7 @@ esac
         time.sleep(0.3)
         ctl.cmd('setting wallpaper')
         self.assertEqual(ctl.last, 'ok abcd')
-        ctl.click(x0 + 300, y0 + 231)
+        ctl.click(x0 + 300, y0 + 259)
         ctl.key(KEY_LEFTCTRL, True)
         ctl.tap(30)                                             # Ctrl+A: everything is selected ...
         ctl.key(KEY_LEFTCTRL, False)
@@ -7144,6 +7144,57 @@ class TestAnimation(Base):
             time.sleep(0.05)
         self.assertEqual(self.items(c), [])
 
+
+    def switch(self, c, n):
+        c.key(KEY_LEFTMETA, True)
+        c.tap(n + 1)                                                    # Super+N (the key codes of 1..4 are 2..5)
+        c.key(KEY_LEFTMETA, False)
+        c.sync()
+
+    def test_a_workspace_switch_slides_the_windows_out_and_in(self):
+        c = self.start('mellagui-an9')
+        cl = Client(name='mellagui-an9')
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        end = time.time() + 4
+        while time.time() < end and self.items(c):                      # (the opening is over)
+            time.sleep(0.05)
+        full = c.windows()['windows'][0]
+        self.switch(c, 2)                                               # to workspace 2: nothing arrives, the window slides out to the left
+        its = self.items(c)
+        self.assertEqual([i['kind'] for i in its], ['slide-out'])
+        self.assertEqual(int(its[0]['alpha']), 255)
+        self.assertLessEqual(int(its[0]['x']), full['x'] - 4 + 1)
+        time.sleep(0.5)
+        later = self.items(c)
+        self.assertEqual(len(later), 1)
+        self.assertLess(int(later[0]['x']), int(its[0]['x']))           # and goes on moving
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        self.assertEqual(self.items(c), [])
+        self.switch(c, 1)                                               # back: the window comes in from the left
+        its = self.items(c)
+        self.assertEqual([i['kind'] for i in its], ['slide-in'])
+        self.assertLess(int(its[0]['x']), full['x'])
+        ppm = c.dump(os.path.join(tmp, 'an9.ppm'))
+        self.assertNotEqual(ppm.px(full['x'] + 150, full['y'] + 100), (0, 255, 0))      # the real window waits: only the picture is on its way
+        end = time.time() + 4
+        while time.time() < end and self.items(c):
+            time.sleep(0.05)
+        ppm = c.dump(os.path.join(tmp, 'an9b.ppm'))
+        self.assertEqual(ppm.px(full['x'] + 150, full['y'] + 100), (0, 255, 0))          # it has arrived
+
+    def test_a_workspace_switch_is_at_once_without_animations(self):
+        c = self.start('mellagui-an10', ms='0')
+        cl = Client(name='mellagui-an10')
+        self.clients.append(cl)
+        Window(cl, 300, 200, color=0xff00ff00)
+        cl.wl.roundtrip()
+        c.sync()
+        self.switch(c, 2)
+        self.assertEqual(self.items(c), [])
 
 class TestThemes(Base):
     """Named themes: `[theme] name = X` (built-in presets or themes/X.conf), single colours stay on top, theme-use switches."""
@@ -11319,7 +11370,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 41)
+        self.assertEqual(len(t), 42)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -11364,7 +11415,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 42)
+        self.assertEqual(len(t), 43)
         self.assertTrue(alive_p(p))
 
 
@@ -13945,13 +13996,13 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '41')
+        self.assertEqual(self.get(c, 'keys-count'), '42')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
         self.assertEqual(len(self.rows(c, 3)), 10)
-        self.assertEqual(len(self.rows(c, 4)), 1)
+        self.assertEqual(len(self.rows(c, 4)), 2)
         self.assertEqual(self.rows(c, 99), self.rows(c, 4))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -13975,13 +14026,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '41')
+        self.assertEqual(self.get(c, 'keys-count'), '42')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '42')
+        self.assertEqual(self.get(c, 'keys-count'), '43')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -16764,6 +16815,32 @@ class TestSmart(Base):
         self.assertEqual(pr.wait(timeout=5), 0)                                 # no rule is on: it ends by itself
 
 
+    def test_pinned_devices_are_listed_for_the_desktop_card(self):
+        self.cloud('fav')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.assertEqual(self.cli('--favourites')[1], 'favs\t0\n')                    # nothing pinned yet
+        for dev in ('blind1', 'plug1', 'plug2', 'nobody'):
+            self.assertEqual(self.cli('--fav', dev, 'on')[0], 0)
+        self.assertEqual(self.cli('--fav', 'plug1', 'off')[0], 0)
+        code, out = self.cli('--favourites')
+        self.assertEqual(code, 0)
+        self.assertEqual(out.split('\n')[:-1], ['favs\t3', 'fav\tblind1\tBlind\t1\tblind\tcontrol\t40',
+                                                 'fav\tplug2\tFar plug\t0\tswitch\tswitch_1\t1'])    # (a device that is gone is left out)
+        self.assertEqual(self.cli('--fav', 'blind1')[0], 2)                             # a wrong call
+
+    def test_a_device_is_pinned_to_the_desktop_in_its_own_view(self):
+        c = self.logged_in_window('pin1')
+        fav = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-favourites.conf')
+        self.press(('plug1', '-', 'details'))
+        self.wait(lambda: 'fav' in self.edits(), 'the pin button of the plug')
+        self.assertEqual(self.edits()['fav'][3], 'Show it on the desktop')
+        self.edit('fav')
+        self.wait(lambda: os.path.exists(fav) and 'plug1' in open(fav).read().split('\n'), 'the pin is saved')
+        self.wait(lambda: self.edits().get('fav', (0, 0, 0, ''))[3] == 'Remove it from the desktop', 'the button says what it does now')
+        self.assertNotIn('/commands', self.log())                               # pinning tells the device nothing
+        self.edit('fav')
+        self.wait(lambda: 'plug1' not in open(fav).read().split('\n'), 'the pin is taken away again')
+
     def test_the_list_has_a_scroll_bar_when_it_does_not_fit(self):
         many = [dict(self.DEVICES[0], id='plug%d' % i, name='Plug %d' % i) for i in range(1, 10)]
         self.cloud('bar', devices=many)
@@ -17265,6 +17342,150 @@ class TestScale(Base):
         diff = sum(1 for y in range(0, 48) for x in range(0, a.w, 1) if a.px(x, y) != b.px(x, y) and
                    max(abs(p - q) for p, q in zip(a.px(x, y), b.px(x, y))) > 6)
         self.assertLess(diff, 48 * a.w // 100)                          # under 1 % of the panel strip differs
+
+
+class TestSmartGadget(Base):
+    """The Smart home card of the desktop: the devices pinned in mellagui-smart, asked from the program (a stand-in here, tests/fake_smart.py)."""
+
+    DEVICES = [
+        {'id': 'plug1', 'name': 'Desk lamp', 'online': True, 'kind': 'switch', 'code': 'switch_1', 'value': 1},
+        {'id': 'blind1', 'name': 'Blind', 'online': True, 'kind': 'blind', 'code': 'control', 'value': 60},
+        {'id': 'plug2', 'name': 'Printer', 'online': True, 'kind': 'switch', 'code': 'switch_1', 'value': 0},
+        {'id': 'plug3', 'name': 'Garage', 'online': False, 'kind': 'switch', 'code': 'switch_1', 'value': 0},
+    ]
+
+    def start(self, name, bin_path=None, devices=None, real=False):
+        self.state = os.path.join(tmp, name + '.state')
+        self.log = os.path.join(tmp, name + '.log')
+        with open(self.state, 'w') as f:
+            json.dump(self.DEVICES if devices is None else devices, f)
+        if os.path.exists(self.log):
+            os.unlink(self.log)
+        env = {'MELLAGUI_SMART_BIN': bin_path or os.path.join(ROOT, 'tests', 'fake_smart.py'), 'FAKE_SMART_STATE': self.state,
+               'FAKE_SMART_LOG': self.log}
+        if real:                                                        # the real mellagui-smart next to the compositor, no pins in an empty config folder
+            cfg = os.path.join(tmp, name + '-cfg')
+            os.makedirs(cfg, exist_ok=True)
+            env = {'MELLAGUI_SMART_BIN': '', 'XDG_CONFIG_HOME': cfg}
+        p, c, stop = self.private_compositor(name, '--size', '1200x800', env=env)
+        return c
+
+    @staticmethod
+    def card(c):
+        c.cmd('gadget-rect smart')
+        v = c.last.split()
+        return None if v[1] == 'hidden' else tuple(int(x) for x in v[1:5])
+
+    def items(self, c, ready=True):
+        end = time.time() + 5
+        while time.time() < end:
+            lines = c.cmd('smart')
+            if 'ready=1' in lines[0]:
+                break
+            time.sleep(0.1)
+        head = lines[0]
+        items = [dict(kv.split('=', 1) for kv in l.split()[2:] if '=' in kv) | {'name': l.split()[2]} for l in lines[1:] if l.startswith('item ')]
+        return head, lines[1:], items
+
+    def logged(self):
+        for _ in range(60):
+            if os.path.exists(self.log):
+                return open(self.log).read().split('\n')[:-1]
+            time.sleep(0.1)
+        return []
+
+    def row_y(self, c, i):
+        x, y, w, h = self.card(c)
+        return y + 26 + 4 + i * 34 + 17
+
+    def test_it_is_hidden_until_it_is_asked_for_and_follows_the_setting_and_the_key(self):
+        c = self.start('mellagui-sg1')
+        self.assertIsNone(self.card(c))
+        c.cmd('settings smart 1')
+        self.assertIsNotNone(self.card(c))
+        c.cmd('settings smart 0')
+        self.assertIsNone(self.card(c))
+        c.key(KEY_LEFTMETA, True)
+        c.tap(35)                                                       # Super+H
+        c.key(KEY_LEFTMETA, False)
+        c.sync()
+        self.assertIsNotNone(self.card(c))
+        c.cmd('setting smart')
+        self.assertEqual(c.last, 'ok 1')
+
+    def test_it_shows_what_the_program_says(self):
+        c = self.start('mellagui-sg2')
+        c.cmd('smart 1')
+        head, _, items = self.items(c)
+        self.assertIn('n=4', head)
+        self.assertEqual([(i['name'], i['kind'], i['on'], i['online']) for i in items],
+                         [('Desk', 'switch', '1', '1'), ('Blind', 'blind', '0', '1'), ('Printer', 'switch', '0', '1'), ('Garage', 'switch', '0', '0')])
+        self.assertEqual(items[1]['percent'], '60')
+
+    def test_a_click_on_a_switch_sends_the_command_and_shows_it_at_once(self):
+        c = self.start('mellagui-sg3')
+        c.cmd('smart 1')
+        self.items(c)
+        x, y, w, h = self.card(c)
+        c.click(x + w - 12 - 22, self.row_y(c, 0))                      # the lamp's switch: it is on, so it goes off
+        c.sync()
+        self.assertEqual(c.cmd('smart')[1].split(' on=')[1].split()[0], '0')
+        self.assertEqual(self.logged(), ['plug1 switch_1 false'])
+        c.click(x + w - 12 - 22, self.row_y(c, 2))                      # the printer: on
+        for _ in range(60):
+            if len(self.logged()) > 1:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged()[-1], 'plug2 switch_1 true')
+
+    def test_the_blinds_buttons_send_open_stop_and_close(self):
+        c = self.start('mellagui-sg4')
+        c.cmd('smart 1')
+        self.items(c)
+        x, y, w, h = self.card(c)
+        ry = self.row_y(c, 1)
+        for b, word in ((0, 'open'), (1, 'stop'), (2, 'close')):
+            c.click(x + w - 12 - 3 * 30 + b * 30 + 13, ry)
+            for _ in range(60):
+                if len(self.logged()) > b:
+                    break
+                time.sleep(0.1)
+        self.assertEqual(self.logged(), ['blind1 control open', 'blind1 control stop', 'blind1 control close'])
+
+    def test_an_offline_device_is_not_clicked_and_the_card_polls_again_after_a_command(self):
+        c = self.start('mellagui-sg5')
+        c.cmd('smart 1')
+        self.items(c)
+        x, y, w, h = self.card(c)
+        c.click(x + w - 12 - 22, self.row_y(c, 3))
+        time.sleep(0.5)
+        self.assertEqual(self.logged() if os.path.exists(self.log) else [], [])
+        c.click(x + w - 12 - 22, self.row_y(c, 0))
+        self.assertEqual(self.logged(), ['plug1 switch_1 false'])
+        with open(self.state) as f:                                     # what the device now says: the lamp is off (the stand-in wrote it)
+            self.assertEqual(json.load(f)[0]['value'], 0)
+
+    def test_the_real_program_next_to_the_compositor_is_found_and_run(self):
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-smart')):
+            self.skipTest('mellagui-smart not built')
+        c = self.start('mellagui-sg8', real=True)
+        c.cmd('smart 1')
+        head, _, items = self.items(c)                                  # (no pins: the program says "favs 0" without any account)
+        self.assertIn('n=0', head)
+        self.assertIn('Nothing is pinned', head)
+
+    def test_without_a_program_or_pins_the_card_says_so(self):
+        c = self.start('mellagui-sg6', bin_path='/nonexistent/mellagui-smart')
+        c.cmd('smart 1')
+        head, _, items = self.items(c)
+        self.assertEqual(items, [])
+        self.assertIn('note=', head)
+        self.assertNotIn('note=-', head)
+        c2 = self.start('mellagui-sg7', devices=[])
+        c2.cmd('smart 1')
+        head, _, items = self.items(c2)
+        self.assertIn('n=0', head)
+        self.assertIn('Nothing', head)
 
 
 if __name__ == '__main__':

@@ -178,6 +178,7 @@ struct lm_config {
     int settings_access;        /* who may use mellagui_settings_v1: 1 = any client of the session, 0 = only MellaGUI's own programs
                                  * (an executable called mellagui-* in the compositor's directory), -1 (default) = 0 on drm, 1 on headless */
     const char *screenshot_dir; /* where Print / Alt+Print save PNGs (--screenshot-dir); NULL = the clipboard only */
+    const char *windows_path;   /* file the places of the own programs' windows are kept in (--windows-file); NULL = not remembered */
     const char *lock_path;      /* file the screen lock's password / PIN hash is kept in (--lock-file); NULL = in memory only */
     struct lm_keybinds keys;     /* keyboard shortcuts (keys.h; mellagui.conf [keys]) */
     const char *drm_device;     /* NULL = auto-detect /dev/dri/card* */

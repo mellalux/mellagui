@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -484,16 +485,55 @@ static struct json *api_call(struct tuya_session *s, const char *method, const c
     return res;
 }
 
+static bool session_path(char *out, size_t n);
+
+static int64_t session_stamp(void)
+{
+    char path[1024];
+    struct stat st;
+    if (!session_path(path, sizeof(path)) || stat(path, &st) < 0)
+        return 0;
+    return (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+}
+
+/* Another process (the window, the timetable's) may have renewed the tokens: take them from the file when it changed. */
+static void session_sync(struct tuya_session *s)
+{
+    struct tuya_session f;
+    if (session_stamp() == s->file_stamp)
+        return;
+    if (tuya_session_load(&f))
+        *s = f;
+}
+
 static bool refresh_if_needed(struct tuya_session *s, char *err, size_t errsz)
 {
+    session_sync(s);
     if (s->expire_ms - 60 * 1000 > now_ms())
         return true;
+    char lock[1100];                                            /* one process renews at a time; the others then find the new tokens in the file */
+    int lfd = -1;
+    if (session_path(lock, sizeof(lock) - 8)) {
+        strcat(lock, ".lock");
+        lfd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (lfd >= 0)
+            flock(lfd, LOCK_EX);
+    }
+    session_sync(s);
+    if (s->expire_ms - 60 * 1000 > now_ms()) {
+        if (lfd >= 0)
+            close(lfd);
+        return true;
+    }
     char path[400];
     int64_t t = 0;
     snprintf(path, sizeof(path), "/v1.0/m/token/%s", s->refresh);
     struct json *r = api_call(s, "GET", path, NULL, NULL, &t, false, err, errsz);
-    if (!r)
+    if (!r) {
+        if (lfd >= 0)
+            close(lfd);
         return false;
+    }
     const char *access = json_str(r, "accessToken", ""), *refresh = json_str(r, "refreshToken", "");
     bool ok = *access && *refresh;
     if (ok) {
@@ -507,6 +547,8 @@ static bool refresh_if_needed(struct tuya_session *s, char *err, size_t errsz)
         s->relogin = true;
     }
     json_free(r);
+    if (lfd >= 0)
+        close(lfd);
     return ok;
 }
 
@@ -550,6 +592,7 @@ bool tuya_session_load(struct tuya_session *s)
         else if (!strcmp(line, "expires")) s->expire_ms = strtoll(eq, NULL, 10);
     }
     fclose(f);
+    s->file_stamp = session_stamp();
     return tuya_logged_in(s);
 }
 
@@ -584,6 +627,7 @@ bool tuya_session_save(const struct tuya_session *s)
         unlink(tmp);
         return false;
     }
+    ((struct tuya_session *)s)->file_stamp = session_stamp();   /* (bookkeeping of the copy that was just written) */
     return true;
 }
 
@@ -903,6 +947,51 @@ bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, 
         return false;
     }
     struct json *r = api_call(s, "POST", path, NULL, body, NULL, true, err, errsz);
+    if (!r)
+        return false;
+    json_free(r);
+    return true;
+}
+
+bool tuya_load_scenes(struct tuya_session *s, struct tuya_scene *scene, int *n, char *err, size_t errsz)
+{
+    *n = 0;
+    struct json *homes = api_call(s, "GET", "/v1.0/m/life/users/homes", NULL, NULL, NULL, true, err, errsz);
+    if (!homes)
+        return false;
+    bool ok = true;
+    for (const struct json *h = homes->type == JSON_ARR ? homes->child : NULL; h; h = h->next) {
+        char params[120], quoted[80];
+        const char *home = json_str(h, "ownerId", "");
+        if (!*home || strlen(home) >= sizeof(scene[0].home))
+            continue;
+        snprintf(params, sizeof(params), "{\"homeId\":%s}", json_quote(home, quoted, sizeof(quoted)));
+        struct json *list = api_call(s, "GET", "/v1.0/m/scene/ha/home/scenes", params, NULL, NULL, true, err, errsz);
+        if (!list) {
+            ok = false;
+            break;
+        }
+        for (const struct json *j = list->type == JSON_ARR ? list->child : NULL; j && *n < TUYA_MAX_SCENE; j = j->next) {
+            const char *id = json_str(j, "scene_id", json_str(j, "sceneId", json_str(j, "id", "")));
+            if (!*id || strlen(id) >= sizeof(scene[0].id))
+                continue;
+            struct tuya_scene *sc = &scene[(*n)++];
+            copy(sc->id, sizeof(sc->id), id);
+            copy(sc->home, sizeof(sc->home), home);
+            copy(sc->name, sizeof(sc->name), json_str(j, "name", id));
+            sc->enabled = json_bool(j, "enabled", true);
+        }
+        json_free(list);
+    }
+    json_free(homes);
+    return ok;
+}
+
+bool tuya_trigger_scene(struct tuya_session *s, const char *home, const char *id, char *err, size_t errsz)
+{
+    char body[300], q1[80], q2[100];
+    snprintf(body, sizeof(body), "{\"homeId\":%s,\"sceneId\":%s}", json_quote(home, q1, sizeof(q1)), json_quote(id, q2, sizeof(q2)));
+    struct json *r = api_call(s, "POST", "/v1.0/m/scene/ha/trigger", NULL, body, NULL, true, err, errsz);
     if (!r)
         return false;
     json_free(r);

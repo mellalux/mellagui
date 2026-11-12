@@ -74,6 +74,8 @@ static const char *usage_text =
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/clipboard-history, headless: none)\n"
     "  --gadgets-file FILE      where the places and sizes of the desktop gadgets are kept between runs; \"none\" = nowhere\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/gadgets.conf, headless: none)\n"
+    "  --windows-file FILE      where the places and sizes of the windows of MellaGUI's own programs are kept, so that each opens where it\n"
+    "                           was; \"none\" = nowhere (default drm: $XDG_CONFIG_HOME/mellagui/windows.conf, headless: none)\n"
     "  --settings-access any|own  who may read and change the settings through the private mellagui_settings_v1 interface: \"own\" =\n"
     "                           only MellaGUI's own programs (mellagui-settings ... next to the compositor binary), \"any\" = every client\n"
     "                           of the session (default: own on drm, any on headless, which the tests need)\n"
@@ -307,7 +309,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0;
     static const struct option opts[] = {
@@ -327,6 +329,7 @@ int main(int argc, char **argv)
         { "print-config", no_argument, 0, OPT_PRINT_CONFIG },
         { "clipboard-file", required_argument, 0, OPT_CLIPBOARD_FILE },
         { "gadgets-file", required_argument, 0, OPT_GADGETS_FILE },
+        { "windows-file", required_argument, 0, OPT_WINDOWS_FILE },
         { "lock-file", required_argument, 0, OPT_LOCK_FILE },
         { "screenshot-dir", required_argument, 0, OPT_SCREENSHOT_DIR },
         { "logind", required_argument, 0, OPT_LOGIND },
@@ -362,7 +365,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--backend=", 10))
             headless_arg = !strcmp(argv[i] + 10, "headless");
     }
-    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX], lock_buf[PATH_MAX], shot_buf[PATH_MAX];
+    static char settings_buf[PATH_MAX], layouts_buf[64], clip_buf[PATH_MAX], gadgets_buf[PATH_MAX], windows_buf[PATH_MAX], lock_buf[PATH_MAX], shot_buf[PATH_MAX];
     if (!headless_arg)
         migrate_old_config_dir();
     if (!settings_arg && !headless_arg) {
@@ -388,6 +391,12 @@ int main(int argc, char **argv)
             snprintf(gadgets_buf, sizeof(gadgets_buf), "%s/.config/mellagui/gadgets.conf", home);
         if (gadgets_buf[0])
             cfg.gadgets_path = gadgets_buf;
+        if (xdg && *xdg)
+            snprintf(windows_buf, sizeof(windows_buf), "%s/mellagui/windows.conf", xdg);
+        else if (home && *home)
+            snprintf(windows_buf, sizeof(windows_buf), "%s/.config/mellagui/windows.conf", home);
+        if (windows_buf[0])
+            cfg.windows_path = windows_buf;
         if (xdg && *xdg)
             snprintf(lock_buf, sizeof(lock_buf), "%s/mellagui/lock.conf", xdg);
         else if (home && *home)
@@ -485,6 +494,7 @@ int main(int argc, char **argv)
         case OPT_SETTINGS: break;           /* handled above */
         case OPT_CLIPBOARD_FILE: cfg.clip_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_GADGETS_FILE: cfg.gadgets_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_WINDOWS_FILE: cfg.windows_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_SETTINGS_ACCESS:
             if (!strcmp(optarg, "any")) cfg.settings_access = 1;
             else if (!strcmp(optarg, "own")) cfg.settings_access = 0;
@@ -674,6 +684,12 @@ int main(int argc, char **argv)
         char tcmd[LM_DOCK_CMD_MAX];
         lm_launch_expand("mellagui-timer --background", tcmd, sizeof(tcmd));   /* the alarms of the timer ring without its window (it ends at once when no alarm is on) */
         lm_server_spawn(srv, tcmd);
+    }
+
+    if (srv->wm && (!headless || getenv("MELLAGUI_SMART_PRELOAD"))) {
+        char scmd[LM_DOCK_CMD_MAX];
+        lm_launch_expand("mellagui-smart --background", scmd, sizeof(scmd));    /* the smart home timetable (it ends at once when it has no rule) */
+        lm_server_spawn(srv, scmd);
     }
 
     if (!headless && cfg.startup_sound)

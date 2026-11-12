@@ -59,6 +59,42 @@ Requires gcc, make, pkg-config and the libdrm headers (`libdrm-dev`).
     make test       # end-to-end tests (headless backend, Python 3)
     MELLAGUI_BIN=build/mellagui-asan tests/run.sh   # the same tests under the sanitizers
 
+## Packages it uses at run time
+
+MellaGUI links against nothing but libc, so it starts on a bare system - but several parts are only a front end for a
+program of the distribution and stay empty, dimmed or silent without it. Package names are Debian / Ubuntu's (24.04).
+
+| Part | Package(s) | Programs used | Without it |
+|------|------------|---------------|------------|
+| **Sound**: volume, mute, output / microphone choice (mixer gadget, quick settings, Sound page) | `pipewire-pulse` `wireplumber` (the sound server) + `pulseaudio-utils` | `pactl`; else `wpctl` (`wireplumber`); the mixer gadget also `amixer` (`alsa-utils`) | "No mixer found", the Sound page says what is missing |
+| **Sounds**: start-up chime, dock click, key / screenshot feedback, alarm | `pulseaudio-utils`, or `alsa-utils` for a bare ALSA device | `paplay`, `aplay` | silent |
+| Sound card profile (Sound page, "Output device") | `pipewire-bin` | `pw-cli` | the list is empty |
+| Sound of videos in the viewer | `ffmpeg` + `pipewire-bin` / `pulseaudio-utils` / `alsa-utils` | `ffmpeg`, then `pw-cat`, else `paplay`, else `aplay` | the picture plays without sound |
+| Sound in recordings and camera clips | `ffmpeg`, or `pulseaudio-utils` | `ffmpeg -f pulse`, else `parec` | no sound track |
+| **Bluetooth**: panel button, devices window, quick settings switch | `bluez` (+ `libspa-0.2-bluetooth` for speakers and headsets under PipeWire) | `bluetoothctl` | no button, the switch is dimmed |
+| **Network**: panel button, Wi-Fi list, quick settings switch | `network-manager` | `nmcli` | no button, the switch is dimmed |
+| Battery in the panel | - (reads `/sys/class/power_supply`) | | |
+| **Graphics acceleration** (`--renderer auto` / `gl`) | `libegl1` `libgles2` `libgbm1` `libgl1-mesa-dri` | `dlopen()`ed | the software renderer is used |
+| Devices without the `video` / `input` groups, VT switching, Suspend / Restart / Shutdown, the service list of the process manager | `systemd` (logind) + `dbus` | system bus, `systemctl`, `journalctl` | join the groups (see below); the power buttons report the failure |
+| Videos other than MellaGUI's own recordings, best compression in the recorder | `ffmpeg` | `ffmpeg` | own H.264 / Motion JPEG only |
+| Network drives in the file manager (`smb://`) | `smbclient` | `smbclient` | an error message when connecting |
+| SSH servers in the file manager (`sftp://`) | `openssh-client` | `sftp` | an error message when connecting |
+| Smart home (Smart Life / Tuya) | `curl` | `curl` | no login, no devices |
+| Opening found files of unknown types (launcher search) | `xdg-utils` | `xdg-open` | nothing happens |
+| Monitor settings (brightness, input ... over DDC/CI) | kernel module `i2c-dev`, access to `/dev/i2c-*` (group `i2c`) | | only a laptop's backlight |
+| Camera | - (V4L2, `/dev/video*`, group `video`) | | |
+| Tests | `python3`; some need `ffmpeg`, `curl`, `python3-cryptography`, `python3-pil` | | those tests are skipped |
+
+Everything at once:
+
+    sudo apt install pipewire-pulse wireplumber pipewire-bin pulseaudio-utils alsa-utils \
+                     bluez libspa-0.2-bluetooth network-manager \
+                     libegl1 libgles2 libgbm1 libgl1-mesa-dri \
+                     ffmpeg smbclient openssh-client curl xdg-utils
+
+The sound server must run in the user's session (`systemctl --user enable --now pipewire pipewire-pulse wireplumber`), and
+`bluetooth` / `NetworkManager` as system services (`sudo systemctl enable --now bluetooth NetworkManager`).
+
 ## Run on a real console (first time)
 
 1. One-time: give your user access to the GPU and input devices, then log out and in again:

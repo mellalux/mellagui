@@ -16288,7 +16288,8 @@ class TestSmart(Base):
         self.assertTrue(line.startswith('port '), line)
         self.env = {'MELLAGUI_TUYA_ENDPOINT': 'http://127.0.0.1:' + line.split()[1], 'XDG_CONFIG_HOME': os.path.join(d, 'cfg'),
                     'MELLAGUI_SMART_DUMP': self.dump_path, 'MELLAGUI_SMART_POLL_MS': '700',
-                    'MELLAGUI_TUYA_LAN_FAKE': ''}                               # (no listening in the real network; local tests name a device here)
+                    'MELLAGUI_TUYA_LAN_FAKE': '',                               # (no listening in the real network; local tests name a device here)
+                    'MELLAGUI_SMART_NO_BACKGROUND': '1'}                        # (the window does not start the timetable's process)
 
     def local_device(self, version, mode='ok', key='0123456789abcdef'):
         """A stand-in for plug1 in the local network (tests/fake_tuya_device.py); the program is pointed at it."""
@@ -16322,6 +16323,8 @@ class TestSmart(Base):
         lines = open(self.dump_path).read().split('\n')
         if len(lines) < 3:
             return out
+        foot = lines.pop(0).split()                                              # "foot account|logout|- x y w h": the button at the foot
+        out['foot'] = (foot[1], int(foot[2]), int(foot[3]))
         for kv in lines[0].split():
             k, _, v = kv.partition('=')
             out[k] = v
@@ -16330,13 +16333,17 @@ class TestSmart(Base):
             p = l.split()
             if p and p[0] == 'dev':
                 out['devs'][p[1]] = p[2] == 'online=1'
+            elif p and p[0] == 'bar':                                           # a scroll bar: x y w h, the thumb's y and height, the scroll position
+                out.setdefault('bar', {})[p[1]] = tuple(int(v) for v in p[2:9])
+            elif p and p[0] == 'scene':
+                out.setdefault('scenes', {})[' '.join(p[6:])] = (int(p[2]), int(p[3]))
             elif p and p[0] in ('ctl', 'mctl'):                              # on a card / in the open device view
                 out[p[0]].setdefault((p[1], p[2], p[3]), []).append((int(p[4]), int(p[5]), int(p[6]), int(p[7]), ' '.join(p[8:])))
         return out
 
     def window(self, tag):
         self.name = 'mellagui-smart-' + tag
-        p, c, stop = self.private_compositor(self.name, '--size', '900x760', env=self.env)
+        p, c, stop = self.private_compositor(self.name, '--size', '900x1000', env=self.env)       # (tall: the window's foot is clear of the dock)
         self.c = c
         pr = subprocess.Popen([self.exe], env=dict(os.environ, WAYLAND_DISPLAY=self.name, **self.env), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
@@ -16479,7 +16486,12 @@ class TestSmart(Base):
         v = self.view()
         self.assertIn(('plug1', 'switch_1', 'toggle'), v['mctl'])
         self.assertIn('Power: 12.3 W', [t[4] for t in v['mctl'][('plug1', '-', 'text')]])     # everything it reports
-        self.assertIn('Countdown 1: 0 s', [t[4] for t in v['mctl'][('plug1', '-', 'text')]])  # (a range of a day is no slider: it is listed)
+        self.assertEqual([b[4] for b in v['mctl'][('plug1', 'countdown_1', 'button')]], ['900', '1800', '3600', '7200'])   # 15 min .. 2 h, in seconds
+        self.press(('plug1', 'countdown_1', 'button'), at=1, where='mctl')
+        self.wait(lambda: self.state()['plug1']['status']['countdown_1'] == 1800, 'half an hour is sent')
+        self.wait(lambda: [b[4] for b in self.view()['mctl'][('plug1', 'countdown_1', 'button')]][-1] == '0', 'a running countdown can be cancelled')
+        self.press(('plug1', 'countdown_1', 'button'), at=4, where='mctl')
+        self.wait(lambda: self.state()['plug1']['status']['countdown_1'] == 0, 'Cancel sends 0')
         self.press(('plug1', 'switch_1', 'toggle'), dx=20, where='mctl')
         self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the switch in the view works')
         b = v['ctl'][('blind1', 'control', 'button')][0]
@@ -16530,7 +16542,20 @@ class TestSmart(Base):
 
     def test_log_out_goes_back_to_the_login(self):
         c = self.logged_in_window('w5')
-        c.click(self.x0 + 520 - 104 + 40, self.y0 + 28)
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')
+        kind, x, y = self.view()['foot']
+        self.assertEqual(kind, 'account')                                       # no Log out button in sight: a dim "Account" at the foot
+        c.click(self.x0 + x + 10, self.y0 + y + 10)
+        self.wait(lambda: self.view()['foot'][0] == 'logout', 'the foot asks first')
+        c.click(self.x0 + x + 10, self.y0 + y + 10)                             # the same place again is Cancel
+        self.wait(lambda: self.view()['foot'][0] == 'account', 'a second click there cancels')
+        time.sleep(0.3)
+        self.assertIn('access-token=', open(conf).read())
+        c.click(self.x0 + x + 10, self.y0 + y + 10)
+        self.wait(lambda: self.view()['foot'][0] == 'logout', 'the question again')
+        kind, lx, ly = self.view()['foot']
+        self.assertLess(lx, x - 40)                                             # the button that logs out is beside the pointer, not under it
+        c.click(self.x0 + lx + 10, self.y0 + ly + 10)
         self.wait(lambda: self.view()['view'] == 'login', 'the login view')
         self.assertNotIn('access-token=', open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')).read())
         c.tap(self.KEY_ENTER_)                                                   # the user code is still in the field
@@ -16596,6 +16621,248 @@ class TestSmart(Base):
         self.press(('plug1', 'switch_1', 'toggle'), dx=20)
         self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the cloud does it')
         self.assertFalse(self.view()['msg'])
+
+
+    SCENES = [{'scene_id': 'sc1', 'name': 'Movie night', 'home': 7}, {'scene_id': 'sc2', 'name': 'Leaving', 'home': 7}]
+
+    def test_the_apps_scenes_are_buttons_and_start_from_the_command_line(self):
+        self.cloud('scn', scenes=self.SCENES)
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        code, out = self.cli('--scenes')
+        self.assertEqual(code, 0, out)
+        self.assertIn('sc1  Movie night', out)
+        self.assertIn('2 scenes', out)
+        code, out = self.cli('--scene', 'leaving')                              # by name, whatever the case
+        self.assertEqual((code, out.strip()), (0, 'started Leaving'))
+        self.assertIn('POST /v1.0/m/scene/ha/trigger {"homeId": "7", "sceneId": "sc2"}', self.log())
+        code, out = self.cli('--scene', 'Nothing')
+        self.assertEqual(code, 1)
+        self.assertIn('no scene', out)
+        c = self.window('scn')
+        self.wait(lambda: self.devices_shown() and len(self.view().get('scenes', {})) == 2, 'the scenes above the cards')
+        x, y = self.view()['scenes']['Movie night']
+        c.click(self.x0 + x + 10, self.y0 + y + 10)
+        self.wait(lambda: '"sceneId": "sc1"' in self.log(), 'a click starts the scene')
+        self.wait(lambda: self.view()['msg'] == 'Started: Movie night', 'and the foot says so')
+
+    def test_an_account_without_scenes_has_no_scene_row(self):
+        c = self.logged_in_window('noscn')
+        self.assertNotIn('scenes', self.view())
+        self.assertEqual(self.view()['ctl'][('plug1', '-', 'details')][0][1], 78)       # the first card is where it always was
+
+
+    def edits(self):
+        """The buttons of the timetable in the open device view: {value: (x, y, lit, label)}."""
+        out = {}
+        for (dev, code, kind), boxes in self.view()['mctl'].items():
+            for b in boxes:
+                if kind == 'edit':
+                    value, _, label = b[4].partition(' ')
+                    out[value] = (b[0], b[1], label.startswith('*'), label.lstrip('*'))
+        return out
+
+    def edit(self, value):
+        x, y, lit, label = self.edits()[value]
+        self.c.click(self.x0 + x + 8, self.y0 + y + 8)
+
+    def test_a_rule_of_the_timetable_is_made_in_the_blinds_view_with_a_position_in_per_cent(self):
+        c = self.logged_in_window('sch1')
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf')
+        self.press(('blind1', '-', 'details'))
+        self.wait(lambda: 'add' in self.edits(), 'the timetable of the blind')
+        self.edit('add')
+        self.wait(lambda: 'save' in self.edits(), 'the form')
+        e = self.edits()
+        self.assertEqual([e[v][3] for v in ('a0', 'a1', 'a2', 'a3')], ['Open', 'Stop', 'Close', 'Position'])
+        self.assertTrue(all(e['d%d' % i][2] for i in range(7)))                 # every day at first
+        self.edit('h+')                                                         # 07:30 -> 08:30 -> 08:35
+        self.edit('m+')
+        self.edit('dw')                                                         # weekdays
+        self.edit('a3')                                                         # the position ...
+        self.wait(lambda: ('blind1', 'percent_control', 'edslider') in self.view()['mctl'], 'a slider for the number')
+        s = self.view()['mctl'][('blind1', 'percent_control', 'edslider')][0]
+        self.assertEqual(s[4], '40')                                            # ... starts at what the blind has now
+        c.abs(self.x0 + s[0] + 150, self.y0 + s[1] + 15)                        # the left end of the track: 0 %
+        c.button(272, True)
+        c.abs(self.x0 + s[0] + 150 + (s[2] - 230) * 3 // 10, self.y0 + s[1] + 15)       # three tenths along it
+        c.button(272, False)
+        self.wait(lambda: self.view()['mctl'][('blind1', 'percent_control', 'edslider')][0][4] == '30', '30 per cent')
+        self.assertNotIn('/commands', self.log())                               # the form tells the device nothing
+        self.edit('save')
+        self.wait(lambda: os.path.exists(conf), 'the rule is saved')
+        self.assertIn('on 08:35 MTWTF-- blind1 percent_control 30\n', open(conf).read())
+        self.wait(lambda: 'tog:0' in self.edits(), 'the rule is listed')
+        texts = [t[4] for t in self.view()['mctl'][('blind1', '-', 'text')]]
+        self.assertIn('08:35 weekdays Position 30%', texts)                     # (the dump's words, single spaced)
+        self.edit('tog:0')
+        self.wait(lambda: open(conf).read().count('off 08:35'), 'a rule can be switched off')
+        self.edit('del:0')
+        self.wait(lambda: 'blind1' not in open(conf).read(), 'and deleted')
+
+    def test_the_background_process_carries_a_rule_out_once_in_its_minute(self):
+        self.cloud('sch2')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf')
+        with open(conf, 'w') as f:
+            f.write('on 07:30 MTWTFSS blind1 percent_control 30\non 07:30 MTWTFSS plug1 switch_1 true\n'
+                    'off 07:30 MTWTFSS blind1 control open\non 09:00 MTWTFSS blind1 control close\n')
+        rt = os.path.join(self.dir, 'rt')
+        os.makedirs(rt)
+        env = dict(os.environ, XDG_RUNTIME_DIR=rt, MELLAGUI_SMART_NOW='07:30', MELLAGUI_SMART_TICK_MS='100', **self.env)
+        env.pop('WAYLAND_DISPLAY', None)
+        pr = subprocess.Popen([self.exe, '--background'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: self.state()['blind1']['status']['percent_control'] == 30 and self.state()['plug1']['status']['switch_1'] is True, 'both rules of 07:30')
+        second = subprocess.run([self.exe, '--background'], env=env, timeout=10)       # only one carries the timetable out
+        self.assertEqual(second.returncode, 0)
+        time.sleep(0.6)
+        self.assertEqual(self.log().count('/commands'), 2)                      # once each; not the rule that is off, not the one of 09:00
+        self.assertEqual(self.state()['blind1']['status']['control'], 'stop')
+        with open(conf, 'w') as f:
+            f.write('off 07:30 MTWTFSS blind1 percent_control 30\n')
+        self.assertEqual(pr.wait(timeout=5), 0)                                 # no rule is on: it ends by itself
+
+
+    def test_the_list_has_a_scroll_bar_when_it_does_not_fit(self):
+        many = [dict(self.DEVICES[0], id='plug%d' % i, name='Plug %d' % i) for i in range(1, 10)]
+        self.cloud('bar', devices=many)
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        c = self.window('bar')
+        self.wait(lambda: self.devices_shown() and 'list' in self.view().get('bar', {}), 'a scroll bar beside nine cards')
+        x, y, w, h, ty, th, scroll = self.view()['bar']['list']
+        self.assertEqual((scroll, ty), (0, y))
+        first = self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][1]
+        c.abs(self.x0 + x + w // 2, self.y0 + ty + 10)                          # the thumb in the hand, down to the end of the strip
+        c.button(272, True)
+        c.abs(self.x0 + x + w // 2, self.y0 + y + h + 50)
+        c.button(272, False)
+        self.wait(lambda: self.view()['bar']['list'][6] > 0, 'dragging the thumb scrolls')
+        x, y, w, h, ty, th, scroll = self.view()['bar']['list']
+        self.assertEqual(ty + th, y + h)                                        # the thumb is at the bottom: the end of the list
+        self.assertEqual(self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][1], first - scroll)
+        c.click(self.x0 + x + w // 2, self.y0 + y + 5)                          # a click above the thumb: a page up
+        self.wait(lambda: self.view()['bar']['list'][6] < scroll, 'a click beside the thumb pages')
+        self.assertNotIn('/commands', self.log())                               # nothing under the bar was pressed
+
+    def test_a_short_list_has_no_scroll_bar(self):
+        self.cloud('nobar', devices=self.DEVICES[:2])
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        c = self.window('nobar')
+        self.wait(self.devices_shown, 'the devices')
+        self.assertNotIn('bar', self.view())
+
+
+class TestWindowPlaces(Base):
+    """The windows of MellaGUI's own programs open where they were the last time (wm_places.c, --windows-file)."""
+
+    def setUp(self):
+        super().setUp()
+        self.calc = os.path.join(ROOT, 'build', 'mellagui-calc')
+        if not os.path.exists(self.calc):
+            self.skipTest('mellagui-calc not built')
+
+    def wait(self, pred, what, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    def start(self, tag, text=None):
+        self.path = os.path.join(tmp, 'places-%s.conf' % tag)
+        if os.path.exists(self.path):
+            os.remove(self.path)
+        if text is not None:
+            with open(self.path, 'w') as f:
+                f.write(text)
+        self.name = 'mellagui-pl-' + tag
+        p, c, stop = self.private_compositor(self.name, '--size', '1280x900', '--windows-file', self.path)
+        self.c = c
+        return c
+
+    def wins(self, app='mellagui.calc'):
+        return [w for w in self.c.windows()['windows'] if w['app_id'] == app]
+
+    def run_program(self, exe, app='mellagui.calc', count=1, env=None):
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY=self.name, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: len(self.wins(app)) == count, 'the window of ' + app)
+        self.c.sync()
+        return pr
+
+    def end(self, pr, app='mellagui.calc', left=0):
+        pr.terminate()
+        pr.wait()
+        self.wait(lambda: len(self.wins(app)) == left, 'the window goes')
+
+    def test_a_window_opens_where_it_was_moved_to(self):
+        c = self.start('move')
+        pr = self.run_program(self.calc)
+        r = self.wins()[0]
+        sx, sy = r['x'] + 50, r['y'] - 14
+        c.abs(sx, sy)
+        c.button(BTN_LEFT, True)
+        c.abs(sx + 310, sy + 170)
+        c.button(BTN_LEFT, False)
+        c.sync()
+        r2 = self.wins()[0]
+        self.assertEqual((r2['x'] - r['x'], r2['y'] - r['y']), (310, 170))
+        self.wait(lambda: os.path.exists(self.path), 'the place is written down when the drag ends')
+        self.assertIn('mellagui.calc %d %d %d %d 0\n' % (r2['x'], r2['y'], r2['w'], r2['h']), open(self.path).read())
+        self.end(pr)
+        pr = self.run_program(self.calc)
+        r3 = self.wins()[0]
+        self.assertEqual((r3['x'], r3['y']), (r2['x'], r2['y']))                # not the usual first place
+        self.assertNotEqual((r3['x'], r3['y']), (r['x'], r['y']))
+
+    def test_the_size_comes_back_too_and_stays_on_the_screen(self):
+        smart = os.path.join(ROOT, 'build', 'mellagui-smart')
+        if not os.path.exists(smart):
+            self.skipTest('mellagui-smart not built')
+        c = self.start('size', 'mellagui.smart 300 120 640 500 0\nmellagui.calc 5000 5000 300 400 0\n')
+        env = {'MELLAGUI_TUYA_LAN_FAKE': '', 'MELLAGUI_SMART_NO_BACKGROUND': '1', 'XDG_CONFIG_HOME': os.path.join(tmp, 'places-cfg')}
+        self.run_program(smart, app='mellagui.smart', env=env)
+        self.wait(lambda: (self.wins('mellagui.smart')[0]['w'], self.wins('mellagui.smart')[0]['h']) == (640, 500), 'the remembered size')
+        r = self.wins('mellagui.smart')[0]
+        self.assertEqual((r['x'], r['y']), (300, 120))
+        self.run_program(self.calc)                                             # its place is far outside this screen: it is brought back onto it
+        r = self.wins()[0]
+        self.assertLessEqual(r['x'] + r['w'], 1280)
+        self.assertLessEqual(r['y'] + r['h'], 900)
+
+    def test_a_second_window_of_the_program_does_not_cover_the_first(self):
+        c = self.start('two', 'mellagui.calc 400 300 300 400 0\n')
+        self.run_program(self.calc)
+        a = self.wins()[0]
+        self.run_program(self.calc, count=2)
+        b = [w for w in self.wins() if w['id'] != a['id']][0]
+        self.assertEqual((a['x'], a['y']), (400, 300))
+        self.assertEqual((b['x'], b['y']), (428, 328))
+
+    def test_a_maximized_window_opens_maximized_and_goes_back_to_its_old_place(self):
+        c = self.start('max', 'mellagui.calc 400 300 300 420 1\n')
+        self.run_program(self.calc)
+        self.wait(lambda: 'maximized' in self.wins()[0]['flags'], 'it opens maximized')
+        self.assertGreater(self.wins()[0]['w'], 1000)
+
+    def test_other_programs_and_no_file_are_left_alone(self):
+        c = self.start('other', 'foo.bar 600 500 300 200 0\n')
+        cl = Client(os.path.join(tmp, self.name))
+        self.clients.append(cl)
+        win = Window(cl, 300, 200, app_id='foo.bar') if 'app_id' in Window.__init__.__code__.co_varnames else Window(cl, 300, 200)
+        cl.wl.roundtrip()
+        c.sync()
+        r = c.windows()['windows'][0]
+        self.assertNotEqual((r['x'], r['y']), (600, 500))                       # only MellaGUI's own programs are remembered
+        before = open(self.path).read()
+        sx, sy = r['x'] + 50, r['y'] - 14
+        c.abs(sx, sy)
+        c.button(BTN_LEFT, True)
+        c.abs(sx + 100, sy + 50)
+        c.button(BTN_LEFT, False)
+        c.sync()
+        self.assertEqual(open(self.path).read(), before)
 
 
 if __name__ == '__main__':

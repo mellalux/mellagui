@@ -465,6 +465,10 @@ void damage_panels(struct lm_wm *wm);
 struct lm_rect gadget_bounds(const struct lm_rect *r);
 void gadget_max_size(int id, const struct lm_output *o, int *mw, int *mh);
 void gadget_slots(int h, int *slots, int *entry_h);
+/* wm_places.c: where the own programs' windows were the last time (--windows-file). */
+void places_load(struct lm_wm *wm);
+bool places_find(struct lm_wm *wm, const struct lm_window *w, struct lm_rect *r, bool *maximized);
+void places_remember(struct lm_wm *wm, struct lm_window *w);
 void gadgets_load(struct lm_wm *wm);
 void gadgets_save(struct lm_wm *wm);
 bool dock_special(const struct lm_dock_item *it);

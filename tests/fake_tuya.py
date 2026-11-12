@@ -151,6 +151,13 @@ class Handler(BaseHTTPRequestHandler):
                             'online': d.get('online', True), 'local_key': d.get('local_key', 'key-' + d['id']), 'ip': '192.0.2.7',
                             'status': [{'code': k, 'value': v} for k, v in d.get('status', {}).items()]})
             return ok(out)
+        if path == '/v1.0/m/scene/ha/home/scenes':                         # "scenes": [{"scene_id", "name", "home", "enabled"}]
+            return ok([{'scene_id': x['scene_id'], 'name': x['name'], 'enabled': x.get('enabled', True), 'actions': []}
+                       for x in st.get('scenes', []) if str(x.get('home', 1)) == str(params.get('homeId'))])
+        if path == '/v1.0/m/scene/ha/trigger' and method == 'POST':
+            if not any(x['scene_id'] == data.get('sceneId') and str(x.get('home', 1)) == str(data.get('homeId')) for x in st.get('scenes', [])):
+                return self.fail('2010', 'no such scene')
+            return ok(True)
         parts = path.split('/')
         dev = next((d for d in st.get('devices', []) if d['id'] in parts), None)
         if path.endswith('/status') and '/devices/' in path and dev:        # the numbers of the local protocol: "dp_ids": {code: number}

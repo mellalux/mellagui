@@ -7,6 +7,9 @@
  *   mellagui-smart --login CODE        log in from a terminal: the QR code is printed there
  *   mellagui-smart --logout            forget the login
  *   mellagui-smart --set-local ID CODE VALUE   the same, but only over the local network, and it says how that went
+ *   mellagui-smart --background        carry out the timetable (smartsched.h; no window, started with the compositor)
+ *   mellagui-smart --scenes            the scenes ("Tap-to-Run") made in the app
+ *   mellagui-smart --scene NAME        start one of them (for a key binding: Super+F1 = exec mellagui-smart --scene "Movie night")
  *   mellagui-smart --scan [SECONDS]    listen for the devices in this network (default 20 s): their local addresses and protocol versions
  *   mellagui-smart --qr TEXT           print a QR code of TEXT (to try the encoder with a phone)
  *   mellagui-smart --selftest
@@ -32,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
@@ -41,6 +45,7 @@
 #include "keymap.h"
 #include "protocol.h"
 #include "qr.h"
+#include "smartsched.h"
 #include "theme.h"
 #include "tuya.h"
 #include "tuyalan.h"
@@ -64,8 +69,10 @@ enum view { V_LOGIN, V_QR, V_DEVICES };
 /* C_TOGGLE a switch; C_BUTTON sets its value; C_SLIDER a number, sent when let go; C_PUSH a truth value as a big button (label = what a press does while
  * it is off, value = while it is on); C_HOLD sends its value when pressed and "stop" when let go (driving the robot); C_DETAILS opens the device's own
  * view, C_CLOSE closes it; C_LABEL / C_TEXT are a heading and a line of text in that view. */
-enum ctl_kind { C_TOGGLE, C_BUTTON, C_SLIDER, C_PUSH, C_HOLD, C_DETAILS, C_CLOSE, C_LABEL, C_TEXT };
-static const char *const KIND_NAME[] = { "toggle", "button", "slider", "push", "hold", "details", "close", "label", "text" };
+enum ctl_kind { C_TOGGLE, C_BUTTON, C_SLIDER, C_PUSH, C_HOLD, C_DETAILS, C_CLOSE, C_LABEL, C_TEXT, C_EDIT, C_EDSLIDER };
+static const char *const KIND_NAME[] = { "toggle", "button", "slider", "push", "hold", "details", "close", "label", "text", "edit", "edslider" };
+/* C_EDIT is a button of the timetable (its `value` says what it does: "add", "tog:N", "del:N", "h+", "m-", "d3", "a2", "save", "cancel"), C_EDSLIDER the
+ * number of the action being made (the blind's position). They tell the device nothing. */
 
 struct box { int x, y, w, h; };
 
@@ -75,6 +82,7 @@ struct ctl {
     struct box b;
     char label[100];
     char value[24];                     /* C_BUTTON, C_HOLD: what it sends */
+    bool lit;                           /* C_EDIT: chosen (a day, an action), or a rule that is on */
     bool modal;                         /* it belongs to the device's own view, not to a card */
     bool hidden;                        /* ... and is scrolled out of it */
 };
@@ -88,7 +96,7 @@ struct hold {
     uint64_t until;
 };
 
-enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_LOGOUT, J_QUIT };
+enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_SCENE, J_LOGOUT, J_QUIT };
 
 struct job {
     enum job_type type;
@@ -104,6 +112,9 @@ struct results {
     char qr[200], username[80];
     bool have_msg, msg_err;
     char msg[200];
+    bool have_scenes;
+    struct tuya_scene scenes[TUYA_MAX_SCENE];
+    int nscenes;
 };
 
 /* A device heard in this network (tuyalan). */
@@ -130,9 +141,32 @@ struct app {
     bool loaded;
     int scroll, content_h;
     struct box card[TUYA_MAX_DEV];
+    struct tuya_scene scene[TUYA_MAX_SCENE];    /* the app's scenes: a row of buttons above the cards */
+    struct box scene_box[TUYA_MAX_SCENE];
+    int nscene;
     char modal_dev[40];                 /* the device whose own view is open ("" = none) */
     int modal_scroll, modal_h;
     struct box modal;
+    int sb_drag;                        /* a scroll bar's thumb is in the hand: 1 = the list's, 2 = the device view's */
+    int sb_grab;                        /* ... and where it was taken, from its top */
+    bool confirm_logout;                /* the foot asks "Log out?" */
+    /* the timetable (smartsched.h) and the form that adds a rule to the open device */
+    struct sched_rule rules[SCHED_MAX];
+    int nrules;
+    struct {
+        bool open;
+        int hour, min;
+        unsigned days;
+        int action;                     /* index into acts[] */
+        double num;                     /* the number of an action that has one */
+    } ed;
+    struct sact {
+        int dp;
+        bool is_int;
+        char value[24], label[64];
+    } acts[24];
+    int nacts;
+    bool ed_drag;
     bool holding;                       /* a C_HOLD button or an arrow key is down: "stop" goes out when it is let go */
     char hold_dev[40], hold_code[40];
     struct ctl ctl[MAX_CTL];
@@ -312,9 +346,21 @@ static void publish_devs(struct app *a)
 }
 
 /* The devices and their values; a device seen for the first time is also asked what it can be told. */
-static void load_all(struct app *a)
+static void load_all(struct app *a, bool scenes)
 {
     char err[200] = "";
+    if (scenes) {                                               /* (they change rarely: at the start and when the user asks again) */
+        static struct tuya_scene list[TUYA_MAX_SCENE];
+        int n = 0;
+        if (tuya_load_scenes(&a->sess, list, &n, err, sizeof(err))) {
+            pthread_mutex_lock(&a->lock);
+            memcpy(a->res.scenes, list, sizeof(list));
+            a->res.nscenes = n;
+            a->res.have_scenes = true;
+            pthread_mutex_unlock(&a->lock);
+        }
+        err[0] = 0;
+    }
     bool ok = tuya_load_devices(&a->sess, a->master, &a->nmaster, err, sizeof(err));
     if (ok) {
         publish_devs(a);
@@ -389,14 +435,21 @@ static void *worker(void *arg)
             pthread_mutex_unlock(&a->lock);
             if (r == 1) {
                 a->nmaster = 0;
-                load_all(a);
+                load_all(a, true);
             }
             break;
         }
         case J_LOAD:
         case J_POLL:
-            load_all(a);
+            load_all(a, j.type == J_LOAD || j.a[0]);
             break;
+        case J_SCENE: {
+            char text[200];
+            bool ok = tuya_trigger_scene(&a->sess, j.a, j.b, err, sizeof(err));
+            snprintf(text, sizeof(text), "%s%.100s", ok ? "Started: " : "", ok ? j.c : err);
+            result_msg(a, !ok, text);
+            break;
+        }
         case J_CMD: {                                           /* the local network when the device is heard there, else the cloud */
             struct tuya_dev *d = NULL;
             struct lanent e;
@@ -524,6 +577,18 @@ static void pretty(const char *code, char *out, size_t n)
         out[0] = (char)(out[0] - 32);
 }
 
+/* "Switch this over after a while": countdown_1 belongs to switch_1, countdown_usb1 to switch_usb1 ... The number is seconds (minutes on the few
+ * devices whose range ends at a day of minutes). */
+static bool is_countdown(const struct tuya_dp *dp)
+{
+    return dp->func && dp->type == TUYA_INT && !strncmp(dp->code, "countdown", 9) && dp->max >= 600;
+}
+
+static int countdown_unit(const struct tuya_dp *dp)
+{
+    return dp->max > 1440 ? 60 : 1;                             /* what a minute is in the device's number */
+}
+
 /* Something the window has a control for. */
 static bool controllable(const struct tuya_dp *dp)
 {
@@ -556,6 +621,16 @@ static void info_text(struct tuya_dev *d, char *out, size_t n)
     out[0] = 0;
     if (!d->online)
         o += (size_t)snprintf(out, n, "Offline");
+    for (int k = 0; k < d->ndp && d->online && o + 40 < n; k++) {      /* a countdown that runs */
+        struct tuya_dp *dp = &d->dp[k];
+        char code[48];
+        if (!is_countdown(dp) || !dp->has || dp->num <= 0)
+            continue;
+        snprintf(code, sizeof(code), "switch%s", dp->code + 9);
+        struct tuya_dp *sw = tuya_find_dp(d, code);
+        o += (size_t)snprintf(out + o, n - o, "%s%s in %d min", o ? "   " : "", sw && sw->has && sw->b ? "Off" : "On",
+                              LM_MAX((int)(dp->num / countdown_unit(dp) + 0.5), 1));
+    }
     for (int i = 0; codes[i] && o + 40 < n; i++) {
         struct tuya_dp *dp = tuya_find_dp(d, codes[i]);
         char v[80], name[48];
@@ -766,6 +841,8 @@ static void vacuum_controls(struct flow *f, bool *done)
     }
 }
 
+static void schedule_controls(struct flow *f);
+
 /* Everything of a device, for its own view: every control (a choice is a row of buttons), then what it reports. */
 static void modal_controls(struct flow *f)
 {
@@ -799,10 +876,42 @@ static void modal_controls(struct flow *f)
             flow_line(f, C_LABEL, label);
             flow_choices(f, k);
         }
+    for (int k = 0; k < d->ndp; k++) {                          /* the countdowns: "turn it off after ..." */
+        struct tuya_dp *dp = &d->dp[k], *sw;
+        char code[48], name[48], label[100];
+        static const int minutes[] = { 15, 30, 60, 120 };
+        if (!is_countdown(dp))
+            continue;
+        snprintf(code, sizeof(code), "switch%s", dp->code + 9);
+        sw = tuya_find_dp(d, code);
+        pretty(code, name, sizeof(name));
+        const char *what = sw && sw->has && sw->type == TUYA_BOOL ? (sw->b ? "off" : "on") : "over";
+        int left = dp->has ? (int)(dp->num / countdown_unit(dp) + 0.5) : 0;
+        if (dp->has && dp->num > 0)
+            snprintf(label, sizeof(label), "%s turns %s in %d min", name, what, LM_MAX(left, 1));
+        else
+            snprintf(label, sizeof(label), "Turn %s %s after", name, what);
+        flow_line(f, C_LABEL, label);
+        for (size_t i = 0; i < sizeof(minutes) / sizeof(minutes[0]); i++) {
+            char text[16], v[16];
+            if (minutes[i] * countdown_unit(dp) > dp->max)
+                continue;
+            if (minutes[i] < 60)
+                snprintf(text, sizeof(text), "%d min", minutes[i]);
+            else
+                snprintf(text, sizeof(text), "%d h", minutes[i] / 60);
+            snprintf(v, sizeof(v), "%d", minutes[i] * countdown_unit(dp));
+            flow_add(f, C_BUTTON, k, lm_font_text_width(text) + 28, text, v);
+        }
+        if (dp->has && dp->num > 0)
+            flow_add(f, C_BUTTON, k, lm_font_text_width("Cancel") + 28, "Cancel", "0");
+    }
+    flow_break(f);
+    schedule_controls(f);
     bool head = false;
     for (int k = 0; k < d->ndp; k++) {
         char v[80], name[48], line[160];
-        if (controllable(&d->dp[k]))
+        if (controllable(&d->dp[k]) || is_countdown(&d->dp[k]))
             continue;
         if (!head)
             flow_line(f, C_LABEL, "It reports");
@@ -815,14 +924,174 @@ static void modal_controls(struct flow *f)
     flow_break(f);
 }
 
+/* What a rule can tell this device: its main switches on and off, the blind's buttons and its position as a number, the robot's start and dock, the
+ * feeder's portions. */
+static void build_actions(struct app *a, struct tuya_dev *d)
+{
+    a->nacts = 0;
+#define ACT(k_, int_, value_, ...) do { if (a->nacts < 24) { struct sact *s_ = &a->acts[a->nacts++]; s_->dp = (k_); s_->is_int = (int_); \
+        copy(s_->value, sizeof(s_->value), (value_)); snprintf(s_->label, sizeof(s_->label), __VA_ARGS__); } } while (0)
+    for (int k = 0; k < d->ndp; k++) {
+        struct tuya_dp *dp = &d->dp[k];
+        char name[48];
+        if (!controllable(dp) || !primary(d, dp))
+            continue;
+        pretty(dp->code, name, sizeof(name));
+        if (!strcmp(dp->code, "manual_feed")) {
+            for (int r = 1; r <= 3 && r <= (int)dp->max; r++) {
+                char v[8];
+                snprintf(v, sizeof(v), "%d", r);
+                ACT(k, false, v, "Feed %d", r);
+            }
+        } else if (dp->type == TUYA_BOOL && (!strcmp(dp->code, "power_go") || !strcmp(dp->code, "switch_go"))) {
+            ACT(k, false, "true", "Start cleaning");
+            ACT(k, false, "false", "Stop cleaning");
+        } else if (dp->type == TUYA_BOOL) {
+            ACT(k, false, "true", "%.40s on", name);
+            ACT(k, false, "false", "%.40s off", name);
+        } else if (dp->type == TUYA_INT) {
+            ACT(k, true, "", "%.40s", name);
+        } else if (!strcmp(dp->code, "control")) {
+            for (int r = 0; r < dp->nrange; r++) {
+                pretty(dp->range[r], name, sizeof(name));
+                ACT(k, false, dp->range[r], "%.40s", name);
+            }
+        } else if (!strcmp(dp->code, "mode") && in_range(dp, "chargego")) {
+            ACT(k, false, "chargego", "To the dock");
+        }
+    }
+#undef ACT
+}
+
+/* "07:30  weekdays  Position 30%" */
+static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out, size_t n)
+{
+    char days[40], what[80], name[48];
+    struct tuya_dp *dp = tuya_find_dp(d, r->code);
+    sched_days_text(r->days, days, sizeof(days));
+    pretty(r->code, name, sizeof(name));
+    if (dp && dp->type == TUYA_BOOL && (!strcmp(r->code, "power_go") || !strcmp(r->code, "switch_go")))
+        snprintf(what, sizeof(what), "%s", !strcmp(r->value, "true") ? "Start cleaning" : "Stop cleaning");
+    else if (dp && dp->type == TUYA_BOOL)
+        snprintf(what, sizeof(what), "%.40s %s", name, !strcmp(r->value, "true") ? "on" : "off");
+    else if (dp && dp->type == TUYA_INT && !strcmp(r->code, "manual_feed"))
+        snprintf(what, sizeof(what), "Feed %.10s", r->value);
+    else if (dp && dp->type == TUYA_INT) {
+        struct tuya_dp v = *dp;
+        char num[40];
+        v.has = true;
+        v.num = atof(r->value);
+        tuya_dp_text(&v, num, sizeof(num));
+        snprintf(what, sizeof(what), "%.30s %s", name, num);
+    } else {
+        pretty(r->value, what, sizeof(what));
+    }
+    snprintf(out, n, "%02d:%02d  %s  %s", r->hour, r->min, days, what);
+}
+
+static struct ctl *modal_ctl(struct flow *f, enum ctl_kind kind, int dp, struct box b, const char *label, const char *value, bool lit)
+{
+    struct ctl *c = add_ctl(f->a, kind, f->dev, dp, b, label, value);
+    if (c) {
+        c->modal = true;
+        c->lit = lit;
+    }
+    return c;
+}
+
+/* The timetable of the open device: its rules (each can be switched off or deleted) and the form that adds one. */
+static void schedule_controls(struct flow *f)
+{
+    struct app *a = f->a;
+    struct tuya_dev *d = &a->dev[f->dev];
+    build_actions(a, d);
+    if (!a->nacts)
+        return;                                                 /* nothing a rule could tell it */
+    flow_line(f, C_LABEL, "Timetable (while this computer is on)");
+    for (int i = 0; i < a->nrules; i++) {
+        char text[160], v[16];
+        if (strcmp(a->rules[i].dev, d->id))
+            continue;
+        rule_text(d, &a->rules[i], text, sizeof(text));
+        modal_ctl(f, C_TEXT, -1, (struct box){ f->x0, f->cy + 4, f->x1 - f->x0 - 124, 18 }, text, NULL, false);
+        snprintf(v, sizeof(v), "tog:%d", i);
+        modal_ctl(f, C_EDIT, -1, (struct box){ f->x1 - 116, f->cy, 48, 24 }, a->rules[i].on ? "On" : "Off", v, a->rules[i].on);
+        snprintf(v, sizeof(v), "del:%d", i);
+        modal_ctl(f, C_EDIT, -1, (struct box){ f->x1 - 62, f->cy, 62, 24 }, "Delete", v, false);
+        f->cy += 30;
+    }
+    f->cx = f->x0;
+    f->used = false;
+    if (!a->ed.open) {
+        struct ctl *c = flow_add(f, C_EDIT, -1, lm_font_text_width("Add a time...") + 28, "Add a time...", "add");
+        (void)c;
+        flow_break(f);
+        return;
+    }
+    char text[80];
+    static const char *const day[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    static const char *const step[4][2] = { { "h-", "- 1 h" }, { "h+", "+ 1 h" }, { "m-", "- 5 min" }, { "m+", "+ 5 min" } };
+    snprintf(text, sizeof(text), "At %02d:%02d", a->ed.hour, a->ed.min);
+    flow_line(f, C_TEXT, text);
+    f->cy += 4;
+    for (int i = 0; i < 4; i++)
+        flow_add(f, C_EDIT, -1, lm_font_text_width(step[i][1]) + 24, step[i][1], step[i][0]);
+    flow_break(f);
+    for (int i = 0; i < 7; i++) {
+        char v[4] = { 'd', (char)('0' + i), 0 };
+        struct ctl *c = flow_add(f, C_EDIT, -1, 46, day[i], v);
+        if (c)
+            c->lit = a->ed.days & (1u << i);
+    }
+    flow_add(f, C_EDIT, -1, lm_font_text_width("Weekdays") + 24, "Weekdays", "dw");
+    flow_add(f, C_EDIT, -1, lm_font_text_width("Every day") + 24, "Every day", "da");
+    flow_break(f);
+    a->ed.action = LM_CLAMP(a->ed.action, 0, a->nacts - 1);
+    for (int i = 0; i < a->nacts; i++) {
+        char v[16];
+        snprintf(v, sizeof(v), "a%d", i);
+        struct ctl *c = flow_add(f, C_EDIT, -1, lm_font_text_width(a->acts[i].label) + 28, a->acts[i].label, v);
+        if (c)
+            c->lit = i == a->ed.action;
+    }
+    flow_break(f);
+    if (a->acts[a->ed.action].is_int) {                         /* the number: the blind's position in per cent */
+        struct ctl *c = flow_add(f, C_EDSLIDER, a->acts[a->ed.action].dp, f->x1 - f->x0, a->acts[a->ed.action].label, NULL);
+        (void)c;
+        flow_break(f);
+    }
+    flow_add(f, C_EDIT, -1, 80, "Save", "save");
+    flow_add(f, C_EDIT, -1, 80, "Cancel", "cancel");
+    flow_break(f);
+}
+
 #define MODAL_HEAD 62
+
+/* The room the scroll bars take at the right edge of the list and of the device view ([windows] scrollbar-width). */
+static int sbar_w(void)
+{
+    return LM_CLAMP(lm_metrics.scrollbar_width, 6, 30);
+}
 
 /* Places every card and its controls for the window's width and the scroll position, and the open device view over them (paint and the pointer both
  * go by it). */
 static void build_layout(struct app *a)
 {
-    int bw = a->win.bw, y = HEAD_H + PAD - a->scroll;
+    int bw = a->win.bw - sbar_w() - 2, y = HEAD_H + PAD - a->scroll;
     a->nctl = 0;
+    if (a->nscene > 0) {                                        /* the scenes: a heading and a row of buttons that wraps */
+        int cx = PAD, cy = y + 22;
+        for (int i = 0; i < a->nscene; i++) {
+            int w = LM_MIN(lm_font_text_width(a->scene[i].name) + 28, bw - 2 * PAD);
+            if (cx + w > bw - PAD && cx > PAD) {
+                cx = PAD;
+                cy += ROW + 6;
+            }
+            a->scene_box[i] = (struct box){ cx, cy, w, ROW };
+            cx += w + 8;
+        }
+        y = cy + ROW + 14;
+    }
     for (int i = 0; i < a->ndev; i++) {
         struct flow f = { .a = a, .dev = i, .x0 = PAD + 12, .x1 = bw - PAD - 12, .cx = PAD + 12, .cy = y + 54 };
         card_controls(&f);
@@ -837,9 +1106,10 @@ static void build_layout(struct app *a)
         a->modal_dev[0] = 0;
         return;
     }
+    bw = a->win.bw;
     int mw = LM_MIN(bw - 24, 500), room = a->win.bh - 48, first = a->nctl;
     int mx = (bw - mw) / 2, top = 24, ctop = top + MODAL_HEAD;
-    struct flow f = { .a = a, .dev = (int)(d - a->dev), .modal = true, .x0 = mx + 16, .x1 = mx + mw - 16, .cx = mx + 16, .cy = ctop - a->modal_scroll };
+    struct flow f = { .a = a, .dev = (int)(d - a->dev), .modal = true, .x0 = mx + 16, .x1 = mx + mw - 10 - sbar_w(), .cx = mx + 16, .cy = ctop - a->modal_scroll };
     modal_controls(&f);
     a->modal_h = f.cy + a->modal_scroll - ctop + 12;
     int mh = LM_MIN(MODAL_HEAD + a->modal_h, room);
@@ -849,6 +1119,77 @@ static void build_layout(struct app *a)
     struct ctl *c = add_ctl(a, C_CLOSE, f.dev, -1, (struct box){ mx + mw - 16 - 60, top + 12, 60, 24 }, "Close", NULL);
     if (c)
         c->modal = true;
+}
+
+/* A scroll bar: its strip, how much there is and how much shows, and the scroll position it moves. */
+struct sbar {
+    struct box track;
+    int content, room, *scroll;
+};
+
+/* The list's bar (which = 1) or the device view's (2): false when everything shows. */
+static bool sbar_get(struct app *a, int which, struct sbar *s)
+{
+    if (which == 1) {
+        s->room = a->win.bh - HEAD_H - FOOT_H;
+        s->content = a->content_h;
+        s->scroll = &a->scroll;
+        s->track = (struct box){ a->win.bw - sbar_w() - 2, HEAD_H - 4, sbar_w(), s->room + 2 };
+    } else {
+        if (!a->modal_dev[0])
+            return false;
+        s->room = a->modal.h - MODAL_HEAD;
+        s->content = a->modal_h;
+        s->scroll = &a->modal_scroll;
+        s->track = (struct box){ a->modal.x + a->modal.w - sbar_w() - 5, a->modal.y + MODAL_HEAD - 2, sbar_w(), s->room - 6 };
+    }
+    return s->content > s->room && s->room > 40;
+}
+
+static struct box sbar_thumb(const struct sbar *s)
+{
+    int h = LM_MAX(s->track.h * s->room / s->content, 24), max = s->content - s->room;
+    int y = s->track.y + (max > 0 ? (int)((long long)(s->track.h - h) * LM_CLAMP(*s->scroll, 0, max) / max) : 0);
+    return (struct box){ s->track.x, y, s->track.w, h };
+}
+
+/* The thumb in the hand follows the pointer. */
+static void sbar_drag(struct app *a)
+{
+    struct sbar s;
+    if (!a->sb_drag || !sbar_get(a, a->sb_drag, &s))
+        return;
+    struct box t = sbar_thumb(&s);
+    int span = s.track.h - t.h, max = s.content - s.room;
+    if (span > 0)
+        *s.scroll = LM_CLAMP((int)(((long long)((int)a->py - a->sb_grab - s.track.y)) * max / span), 0, max);
+}
+
+/* A press on a scroll bar: the thumb is taken, a click beside it turns a page. True when the press was the bar's. */
+static bool sbar_press(struct app *a, int which)
+{
+    struct sbar s;
+    if (!sbar_get(a, which, &s) || !in(a->px, a->py, s.track))
+        return false;
+    struct box t = sbar_thumb(&s);
+    if (in(a->px, a->py, t)) {
+        a->sb_drag = which;
+        a->sb_grab = (int)a->py - t.y;
+    } else {
+        *s.scroll += a->py < t.y ? -(s.room - 40) : s.room - 40;
+    }
+    return true;
+}
+
+static void sbar_paint(struct app *a, int which)
+{
+    struct sbar s;
+    if (!sbar_get(a, which, &s))
+        return;
+    struct box t = sbar_thumb(&s);
+    bool hot = a->sb_drag == which || (!a->sb_drag && in(a->px, a->py, t) && (which == 2 || !a->modal_dev[0]));
+    lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, s.track.x, s.track.y, s.track.w, s.track.h, s.track.w / 2, lm_theme.field);
+    lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, t.x + 2, t.y + 2, t.w - 4, t.h - 4, (t.w - 4) / 2, hot ? lm_theme.button_hover : lm_theme.button_down);
 }
 
 static void clamp_scroll(struct app *a)
@@ -862,8 +1203,10 @@ static void clamp_scroll(struct app *a)
 
 /* ---- painting ----------------------------------------------------------------------------------------------------------------------------- */
 
-static struct box btn_refresh(const struct app *a) { return (struct box){ a->win.bw - 200, 15, 88, 28 }; }
-static struct box btn_logout(const struct app *a) { return (struct box){ a->win.bw - 104, 15, 90, 28 }; }
+static struct box btn_refresh(const struct app *a) { return (struct box){ a->win.bw - 104, 15, 90, 28 }; }
+/* Logging out is out of the way: a dim "Account" at the foot asks first, and the button that does it appears beside the pointer, not under it. */
+static struct box btn_account(const struct app *a) { return (struct box){ a->win.bw - 14 - 76, a->win.bh - FOOT_H + 4, 76, 22 }; }
+static struct box btn_logout(const struct app *a) { return (struct box){ a->win.bw - 14 - 76 - 8 - 76, a->win.bh - FOOT_H + 4, 76, 22 }; }
 static struct box login_field(const struct app *a) { return (struct box){ 24, 250, LM_MIN(a->win.bw - 48, 260), 30 }; }
 static struct box login_go(const struct app *a) { struct box f = login_field(a); return (struct box){ f.x, f.y + 44, 150, 30 }; }
 static struct box qr_back(const struct app *a) { return (struct box){ 24, a->win.bh - FOOT_H - 40, 90, 28 }; }
@@ -923,11 +1266,26 @@ static void dump_state(struct app *a)
     pthread_mutex_lock(&a->lan_lock);
     int lan_cmds = a->lan_cmds;
     pthread_mutex_unlock(&a->lan_lock);
+    if (a->view == V_DEVICES && !a->modal_dev[0]) {
+        struct box b = a->confirm_logout ? btn_logout(a) : btn_account(a);
+        fprintf(f, "foot %s %d %d %d %d\n", a->confirm_logout ? "logout" : "account", b.x, b.y, b.w, b.h);
+    } else {
+        fprintf(f, "foot - 0 0 0 0\n");
+    }
     fprintf(f, "view=%s ndev=%d loaded=%d err=%d lan=%d modal=%s\nmsg %s\nqr %s\n", a->view == V_LOGIN ? "login" : a->view == V_QR ? "qr" : "devices", a->ndev,
             a->loaded, a->msg_err, lan_cmds, a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
     if (a->view == V_DEVICES) {
         for (int i = 0; i < a->ndev; i++)
             fprintf(f, "dev %s online=%d local=%d name=%s\n", a->dev[i].id, a->dev[i].online, lan_lookup(a, a->dev[i].id, NULL), a->dev[i].name);
+        for (int which = 1; which <= 2; which++) {              /* "bar list|view x y w h thumb_y thumb_h scroll" */
+            struct sbar s;
+            if (sbar_get(a, which, &s)) {
+                struct box t = sbar_thumb(&s);
+                fprintf(f, "bar %s %d %d %d %d %d %d %d\n", which == 1 ? "list" : "view", s.track.x, s.track.y, s.track.w, s.track.h, t.y, t.h, *s.scroll);
+            }
+        }
+        for (int i = 0; i < a->nscene; i++)
+            fprintf(f, "scene %s %d %d %d %d %s\n", a->scene[i].id, a->scene_box[i].x, a->scene_box[i].y, a->scene_box[i].w, a->scene_box[i].h, a->scene[i].name);
         for (int i = 0; i < a->nctl; i++) {                     /* "ctl" = on a card, "mctl" = in the open device view */
             const struct ctl *c = &a->ctl[i];
             struct tuya_dev *d = &a->dev[c->dev];
@@ -936,6 +1294,10 @@ static void dump_state(struct app *a)
                 continue;
             if (c->kind == C_TEXT)
                 copy(v, sizeof(v), c->label);
+            else if (c->kind == C_EDIT)
+                snprintf(v, sizeof(v), "%s %s%s", c->value, c->lit ? "*" : "", c->label);
+            else if (c->kind == C_EDSLIDER)
+                snprintf(v, sizeof(v), "%g", a->ed.num);
             else if (c->dp >= 0 && (c->kind == C_BUTTON || c->kind == C_HOLD))
                 copy(v, sizeof(v), c->value);
             else if (c->dp >= 0 && d->dp[c->dp].type == TUYA_INT)
@@ -1054,6 +1416,29 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
     case C_LABEL:
         wlwin_text(w, b.x, b.y, c->label, 1, lm_theme.accent, b.w);
         break;
+    case C_EDIT: {
+        bool hot_e = live && in(a->px, a->py, b);
+        bool save = !strcmp(c->value, "save");
+        button(w, b, c->label, hot_e, save ? lm_theme.ok : c->lit ? lm_theme.button_down : lm_theme.button, save && !hot_e ? lm_theme.ink : c->lit || hot_e || save ? lm_theme.text : lm_theme.text_dim);
+        break;
+    }
+    case C_EDSLIDER: {
+        int x0, x1;
+        char v[48];
+        struct tuya_dp shown = *dp;
+        slider_track(b, &x0, &x1);
+        shown.has = true;
+        shown.num = a->ed.num;
+        double f = dp->max > dp->min ? LM_CLAMP((a->ed.num - dp->min) / (dp->max - dp->min), 0.0, 1.0) : 0.0;
+        int kx = x0 + (int)(f * (x1 - x0) + 0.5);
+        wlwin_text(w, b.x, b.y + 7, c->label, 1, lm_theme.text, 142);
+        rbox(w, (struct box){ x0, b.y + 12, x1 - x0, 6 }, 3, lm_theme.button);
+        rbox(w, (struct box){ x0, b.y + 12, kx - x0, 6 }, 3, lm_theme.accent);
+        rbox(w, (struct box){ kx - 8, b.y + 7, 16, 16 }, 8, lm_theme.on_colour);
+        tuya_dp_text(&shown, v, sizeof(v));
+        wlwin_text(w, x1 + 14, b.y + 7, v, 1, lm_theme.text, 66);
+        break;
+    }
     case C_TEXT:
         wlwin_text(w, b.x, b.y, c->label, 1, lm_theme.text_dim, b.w);
         break;
@@ -1081,8 +1466,14 @@ static void paint_devices(struct app *a)
     clamp_scroll(a);
     build_layout(a);
     bool live = !a->modal_dev[0] && a->py >= HEAD_H && a->py < w->bh - FOOT_H;
+    if (a->nscene > 0) {
+        wlwin_text(w, PAD + 2, a->scene_box[0].y - 22, "Scenes", 1, lm_theme.accent, 0);
+        for (int i = 0; i < a->nscene; i++)
+            button(w, a->scene_box[i], a->scene[i].name, live && a->scene[i].enabled && in(a->px, a->py, a->scene_box[i]), lm_theme.button_alt,
+                   a->scene[i].enabled ? lm_theme.text : lm_theme.text_dim);
+    }
     if (!a->ndev)
-        wlwin_text(w, 24, HEAD_H + 16, a->loaded ? "This account has no devices." : "Asking for the devices...", 1, lm_theme.text_dim, w->bw - 48);
+        wlwin_text(w, 24, HEAD_H + (a->nscene ? 90 : 16), a->loaded ? "This account has no devices." : "Asking for the devices...", 1, lm_theme.text_dim, w->bw - 48);
     for (int i = 0; i < a->ndev; i++) {
         struct tuya_dev *d = &a->dev[i];
         struct box c = a->card[i];
@@ -1102,6 +1493,12 @@ static void paint_devices(struct app *a)
         if (!c->modal && c->b.y + c->b.h >= HEAD_H && c->b.y <= w->bh - FOOT_H)
             paint_ctl(a, c, live);
     }
+}
+
+/* (after the head and the foot were painted over the list's ends) */
+static void paint_list_bar(struct app *a)
+{
+    sbar_paint(a, 1);
 }
 
 /* The open device's own view: the window dims, a card with the name, what it reports in a line, its battery, and every control. */
@@ -1138,7 +1535,8 @@ static void paint_modal(struct app *a)
     wlwin_fill(w, m.x + 12, m.y + MODAL_HEAD - 6, m.w - 24, 1, lm_theme.border);
     for (int i = 0; i < a->nctl; i++)
         if (a->ctl[i].modal && !a->ctl[i].hidden)
-            paint_ctl(a, &a->ctl[i], true);
+            paint_ctl(a, &a->ctl[i], !a->sb_drag);
+    sbar_paint(a, 2);
 }
 
 static void paint(struct wlwin *w)
@@ -1161,14 +1559,26 @@ static void paint(struct wlwin *w)
     wlwin_text(w, 14, 32, sub, 1, lm_theme.text_dim, w->bw - 230);
     if (a->view == V_DEVICES) {
         button(w, btn_refresh(a), a->poll_busy ? "..." : "Refresh", in(a->px, a->py, btn_refresh(a)), lm_theme.button, lm_theme.text);
-        button(w, btn_logout(a), "Log out", in(a->px, a->py, btn_logout(a)), lm_theme.button, lm_theme.text);
     }
     wlwin_fill(w, 10, HEAD_H - 8, w->bw - 20, 1, lm_theme.border);
     wlwin_fill(w, 10, w->bh - FOOT_H, w->bw - 20, 1, lm_theme.border);
-    if (a->msg[0])
-        wlwin_text(w, 14, w->bh - FOOT_H + 8, a->msg, 1, a->msg_err ? lm_theme.error : lm_theme.text, w->bw - 28);
-    else
-        wlwin_text(w, 14, w->bh - FOOT_H + 8, a->view == V_DEVICES ? "F5 asks again   Esc closes" : "Esc closes", 1, lm_theme.text_dim, w->bw - 28);
+    int foot_w = w->bw - 28 - (a->view == V_DEVICES ? (a->confirm_logout ? 176 : 92) : 0);
+    if (a->view == V_DEVICES && a->confirm_logout) {
+        char q[160];
+        snprintf(q, sizeof(q), "Log out%s%s? The devices stay in the account.", a->username[0] ? " of " : "", a->username);
+        wlwin_text(w, 14, w->bh - FOOT_H + 8, q, 1, lm_theme.text, foot_w);
+        button(w, btn_logout(a), "Log out", in(a->px, a->py, btn_logout(a)), lm_theme.danger, lm_theme.on_colour);
+        button(w, btn_account(a), "Cancel", in(a->px, a->py, btn_account(a)), lm_theme.button, lm_theme.text);
+    } else {
+        if (a->msg[0])
+            wlwin_text(w, 14, w->bh - FOOT_H + 8, a->msg, 1, a->msg_err ? lm_theme.error : lm_theme.text, foot_w);
+        else
+            wlwin_text(w, 14, w->bh - FOOT_H + 8, a->view == V_DEVICES ? "F5 asks again   Esc closes" : "Esc closes", 1, lm_theme.text_dim, foot_w);
+        if (a->view == V_DEVICES)
+            button(w, btn_account(a), "Account", in(a->px, a->py, btn_account(a)), lm_theme.background, lm_theme.text_dim);
+    }
+    if (a->view == V_DEVICES)
+        paint_list_bar(a);
     if (a->view == V_DEVICES && a->modal_dev[0])
         paint_modal(a);
     dump_state(a);
@@ -1190,16 +1600,18 @@ static void start_qr(struct app *a)
     }
 }
 
-static void refresh(struct app *a)
+/* Asks for the values again; `full` = the list of scenes too (the user asked). */
+static void refresh(struct app *a, bool full)
 {
-    if (!a->poll_busy && push_job(a, J_POLL, NULL, NULL, NULL)) {
+    if (!a->poll_busy && push_job(a, J_POLL, full ? "scenes" : NULL, NULL, NULL)) {
         a->poll_busy = true;
         a->poll_at = mono_ms() + (uint64_t)a->poll_ms;
     }
     a->win.redraw = true;
 }
 
-static void slider_set(struct app *a, const struct ctl *c)
+/* The number the pointer stands at on a slider. */
+static double slider_value(struct app *a, const struct ctl *c)
 {
     struct tuya_dp *dp = &a->dev[c->dev].dp[c->dp];
     int x0, x1;
@@ -1207,8 +1619,91 @@ static void slider_set(struct app *a, const struct ctl *c)
     double f = LM_CLAMP((a->px - x0) / (double)(x1 - x0), 0.0, 1.0), step = dp->step > 0 ? dp->step : 1;
     double v = dp->min + f * (dp->max - dp->min);
     v = dp->min + (double)(long long)((v - dp->min) / step + 0.5) * step;
-    dp->num = LM_CLAMP(v, dp->min, dp->max);
+    return LM_CLAMP(v, dp->min, dp->max);
+}
+
+static void slider_set(struct app *a, const struct ctl *c)
+{
+    struct tuya_dp *dp = &a->dev[c->dev].dp[c->dp];
+    dp->num = slider_value(a, c);
     dp->has = true;
+}
+
+static void rules_changed(struct app *a)
+{
+    if (!sched_save(a->rules, a->nrules))
+        set_msg(a, true, "The timetable could not be saved");
+    sched_spawn_background();                                   /* (it ends by itself when another one runs or no rule is on) */
+}
+
+/* A button of the timetable. */
+static void press_edit(struct app *a, const struct ctl *c)
+{
+    struct tuya_dev *d = &a->dev[c->dev];
+    const char *v = c->value;
+    int n = atoi(strchr(v, ':') ? strchr(v, ':') + 1 : "0");
+    if (!strcmp(v, "add")) {
+        a->ed.open = true;
+        a->ed.hour = 7;
+        a->ed.min = 30;
+        a->ed.days = 0x7f;
+        a->ed.action = 0;
+        for (int i = 0; i < a->nacts; i++)                      /* a number starts at what the device has now */
+            if (a->acts[i].is_int)
+                a->ed.num = d->dp[a->acts[i].dp].num;
+    } else if (!strncmp(v, "tog:", 4) && n >= 0 && n < a->nrules) {
+        a->rules[n].on = !a->rules[n].on;
+        rules_changed(a);
+    } else if (!strncmp(v, "del:", 4) && n >= 0 && n < a->nrules) {
+        memmove(&a->rules[n], &a->rules[n + 1], sizeof(a->rules[0]) * (size_t)(a->nrules - n - 1));
+        a->nrules--;
+        rules_changed(a);
+    } else if (!strcmp(v, "h+")) {
+        a->ed.hour = (a->ed.hour + 1) % 24;
+    } else if (!strcmp(v, "h-")) {
+        a->ed.hour = (a->ed.hour + 23) % 24;
+    } else if (!strcmp(v, "m+")) {
+        a->ed.min = (a->ed.min / 5 * 5 + 5) % 60;
+    } else if (!strcmp(v, "m-")) {
+        a->ed.min = ((a->ed.min + 4) / 5 * 5 + 55) % 60;
+    } else if (!strcmp(v, "dw")) {
+        a->ed.days = 0x1f;
+    } else if (!strcmp(v, "da")) {
+        a->ed.days = 0x7f;
+    } else if (v[0] == 'd' && v[1] >= '0' && v[1] <= '6') {
+        a->ed.days ^= 1u << (v[1] - '0');
+    } else if (v[0] == 'a' && atoi(v + 1) < a->nacts) {
+        a->ed.action = atoi(v + 1);
+        if (a->acts[a->ed.action].is_int)
+            a->ed.num = d->dp[a->acts[a->ed.action].dp].num;
+    } else if (!strcmp(v, "cancel")) {
+        a->ed.open = false;
+    } else if (!strcmp(v, "save")) {
+        const struct sact *act = &a->acts[LM_CLAMP(a->ed.action, 0, LM_MAX(a->nacts - 1, 0))];
+        if (!a->nacts || !(a->ed.days & 0x7f)) {
+            set_msg(a, true, "Choose at least one day");
+            return;
+        }
+        if (a->nrules >= SCHED_MAX) {
+            set_msg(a, true, "The timetable is full");
+            return;
+        }
+        struct sched_rule *r = &a->rules[a->nrules++];
+        memset(r, 0, sizeof(*r));
+        r->on = true;
+        r->hour = a->ed.hour;
+        r->min = a->ed.min;
+        r->days = a->ed.days & 0x7f;
+        copy(r->dev, sizeof(r->dev), d->id);
+        copy(r->code, sizeof(r->code), d->dp[act->dp].code);
+        if (act->is_int)
+            snprintf(r->value, sizeof(r->value), "%lld", (long long)(a->ed.num < 0 ? a->ed.num - 0.5 : a->ed.num + 0.5));
+        else
+            copy(r->value, sizeof(r->value), act->value);
+        a->ed.open = false;
+        rules_changed(a);
+        set_msg(a, false, "Saved. It runs while this computer is on.");
+    }
 }
 
 static const struct ctl *drag_ctl(struct app *a)
@@ -1253,6 +1748,8 @@ static void hold_end(struct app *a)
 static void close_modal(struct app *a)
 {
     hold_end(a);
+    a->ed.open = false;
+    a->ed_drag = false;
     a->modal_dev[0] = 0;
     a->modal_scroll = 0;
     a->dragging = false;
@@ -1262,6 +1759,7 @@ static void close_modal(struct app *a)
 static void open_modal(struct app *a, const struct tuya_dev *d)
 {
     copy(a->modal_dev, sizeof(a->modal_dev), d->id);
+    a->ed.open = false;
     a->modal_scroll = 0;
     a->win.redraw = true;
 }
@@ -1280,6 +1778,15 @@ static void press_ctl(struct app *a, const struct ctl *c)
     }
     if (c->kind == C_LABEL || c->kind == C_TEXT)
         return;
+    if (c->kind == C_EDIT) {
+        press_edit(a, c);
+        return;
+    }
+    if (c->kind == C_EDSLIDER) {
+        a->ed_drag = true;
+        a->ed.num = slider_value(a, c);
+        return;
+    }
     struct tuya_dp *dp = &d->dp[c->dp];
     if (!d->online) {
         set_msg(a, true, "%s is offline", d->name);
@@ -1321,6 +1828,8 @@ static void press_devices(struct app *a)
             close_modal(a);
             return;
         }
+        if (sbar_press(a, 2))
+            return;
         for (int i = 0; i < a->nctl; i++)
             if (a->ctl[i].modal && !a->ctl[i].hidden && in(a->px, a->py, a->ctl[i].b)) {
                 press_ctl(a, &a->ctl[i]);
@@ -1328,16 +1837,32 @@ static void press_devices(struct app *a)
             }
         return;
     }
+    if (a->confirm_logout) {                                    /* the question takes the next click: only its Log out button logs out */
+        a->confirm_logout = false;
+        if (in(a->px, a->py, btn_logout(a)))
+            push_job(a, J_LOGOUT, NULL, NULL, NULL);
+        return;
+    }
     if (in(a->px, a->py, btn_refresh(a))) {
-        refresh(a);
+        refresh(a, true);
         return;
     }
-    if (in(a->px, a->py, btn_logout(a))) {
-        push_job(a, J_LOGOUT, NULL, NULL, NULL);
+    if (in(a->px, a->py, btn_account(a))) {
+        a->confirm_logout = true;
         return;
     }
+    if (sbar_press(a, 1))
+        return;
     if (a->py < HEAD_H - 8 || a->py >= w->bh - FOOT_H)
         return;
+    for (int i = 0; i < a->nscene; i++)
+        if (in(a->px, a->py, a->scene_box[i])) {
+            if (!a->scene[i].enabled)
+                set_msg(a, true, "%s is switched off in the app", a->scene[i].name);
+            else if (push_job(a, J_SCENE, a->scene[i].home, a->scene[i].id, a->scene[i].name))
+                set_msg(a, false, "Starting %s...", a->scene[i].name);
+            return;
+        }
     for (int i = 0; i < a->nctl; i++)
         if (!a->ctl[i].modal && in(a->px, a->py, a->ctl[i].b)) {
             press_ctl(a, &a->ctl[i]);
@@ -1362,6 +1887,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (c)
                 slider_set(a, c);
         }
+        sbar_drag(a);
+        for (int i = 0; a->ed_drag && i < a->nctl; i++)
+            if (a->ctl[i].kind == C_EDSLIDER)
+                a->ed.num = slider_value(a, &a->ctl[i]);
         w->redraw = true;
         return;
     }
@@ -1389,6 +1918,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 send_value(a, d, dp);
         }
         hold_end(a);
+        a->ed_drag = false;
+        a->sb_drag = 0;
         return;
     }
     if (a->view == V_DEVICES)
@@ -1456,12 +1987,14 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     const char *drive = drive_key(a, ks, &d, &dp);
     if (drive)
         hold_start(a, d, dp, drive);
+    else if (ks == LM_KS_Escape && a->confirm_logout)
+        a->confirm_logout = false;
     else if (ks == LM_KS_Escape && a->modal_dev[0])
         close_modal(a);
     else if (ks == LM_KS_Escape)
         w->running = false;
     else if (ks == LM_KS_F1 + 4 || ks == 'r' || ks == 'R')
-        refresh(a);
+        refresh(a, true);
     else if (ks == LM_KS_Down)
         *scroll += 48;
     else if (ks == LM_KS_Up)
@@ -1517,6 +2050,11 @@ static void apply_results(struct app *a)
         copy(a->username, sizeof(a->username), r.username);
         set_msg(a, false, "Logged in");
     }
+    if (r.have_scenes && a->view == V_DEVICES) {
+        memcpy(a->scene, r.scenes, sizeof(a->scene));
+        a->nscene = r.nscenes;
+        a->win.redraw = true;
+    }
     if (r.have_devs) {
         if (!a->dragging && a->view == V_DEVICES) {
             a->ndev = 0;
@@ -1540,6 +2078,8 @@ static void apply_results(struct app *a)
     }
     if (r.logged_out) {
         close_modal(a);
+        a->confirm_logout = false;
+        a->nscene = 0;
         a->view = V_LOGIN;
         a->ndev = 0;
         a->loaded = false;
@@ -1570,7 +2110,7 @@ static void tick(struct app *a)
         }
     }
     if (a->view == V_DEVICES && !a->poll_busy && !a->dragging && now >= a->poll_at)
-        refresh(a);
+        refresh(a, false);
 }
 
 /* ---- without a window ----------------------------------------------------------------------------------------------------------------------- */
@@ -1713,6 +2253,39 @@ static int cmd_set_local(const char *id, const char *code, const char *value)
     return 0;
 }
 
+/* The scenes of the app as text, or one of them started (by its name or id): for a key binding. */
+static int cmd_scene(const char *which)
+{
+    static struct tuya_session s;
+    static struct tuya_scene scene[TUYA_MAX_SCENE];
+    int n = 0;
+    char err[200] = "";
+    if (need_login(&s))
+        return 1;
+    if (!tuya_load_scenes(&s, scene, &n, err, sizeof(err))) {
+        fprintf(stderr, "mellagui-smart: %s\n", err);
+        return 1;
+    }
+    for (int i = 0; i < n; i++) {
+        if (!which) {
+            printf("%s  %s%s\n", scene[i].id, scene[i].name, scene[i].enabled ? "" : "  (off)");
+        } else if (!strcasecmp(scene[i].name, which) || !strcmp(scene[i].id, which)) {
+            if (!tuya_trigger_scene(&s, scene[i].home, scene[i].id, err, sizeof(err))) {
+                fprintf(stderr, "mellagui-smart: %s\n", err);
+                return 1;
+            }
+            printf("started %s\n", scene[i].name);
+            return 0;
+        }
+    }
+    if (which) {
+        fprintf(stderr, "mellagui-smart: the account has no scene '%s' (--scenes lists them)\n", which);
+        return 1;
+    }
+    printf("%d scene%s\n", n, n == 1 ? "" : "s");
+    return 0;
+}
+
 static int cmd_login(const char *code)
 {
     static struct tuya_session s;
@@ -1785,7 +2358,7 @@ static int cmd_scan(int seconds)
 
 static int selftest(void)
 {
-    int bad = tuya_selftest() + qr_selftest() + tuyalan_selftest();
+    int bad = tuya_selftest() + qr_selftest() + tuyalan_selftest() + sched_selftest();
 #define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "mellagui-smart selftest: " __VA_ARGS__); fputc('\n', stderr); bad++; } } while (0)
     char s[64];
     pretty("switch_1", s, sizeof(s));
@@ -1819,7 +2392,7 @@ static int selftest(void)
           kinds[C_BUTTON], kinds[C_SLIDER], kinds[C_TOGGLE], kinds[C_DETAILS]);
     for (int i = 0; i < a.nctl; i++)
         CHECK(a.ctl[i].b.x >= PAD && a.ctl[i].b.x + a.ctl[i].b.w <= a.win.bw - PAD, "control %d leaves its card", i);
-    /* the plug's own view: its switch, the choice as three buttons, what it reports; a range of a day is no slider */
+    /* the plug's own view: its switch, the choice as three buttons, the countdown as four ("15 min" ... "2 h"; a range of a day is no slider), what it reports */
     copy(a.modal_dev, sizeof(a.modal_dev), "plug");
     build_layout(&a);
     memset(kinds, 0, sizeof(kinds));
@@ -1828,7 +2401,7 @@ static int selftest(void)
             kinds[a.ctl[i].kind]++;
             CHECK(a.ctl[i].b.x >= a.modal.x && a.ctl[i].b.x + a.ctl[i].b.w <= a.modal.x + a.modal.w, "control %d leaves the view", i);
         }
-    CHECK(kinds[C_TOGGLE] == 1 && kinds[C_BUTTON] == 3 && kinds[C_SLIDER] == 0 && kinds[C_TEXT] == 2 && kinds[C_CLOSE] == 1, "view: %d toggles %d buttons %d sliders %d lines",
+    CHECK(kinds[C_TOGGLE] == 1 && kinds[C_BUTTON] == 3 + 4 && kinds[C_SLIDER] == 0 && kinds[C_TEXT] == 1 && kinds[C_CLOSE] == 1, "view: %d toggles %d buttons %d sliders %d lines",
           kinds[C_TOGGLE], kinds[C_BUTTON], kinds[C_SLIDER], kinds[C_TEXT]);
     /* a robot: the big buttons, a button per mode, the driving cross */
     static struct tuya_dev robot;
@@ -1876,6 +2449,12 @@ int main(int argc, char **argv)
         return cmd_set(argv[2], argv[3], argv[4]);
     if (argc == 5 && !strcmp(argv[1], "--set-local"))
         return cmd_set_local(argv[2], argv[3], argv[4]);
+    if (argc == 2 && !strcmp(argv[1], "--background"))
+        return sched_background();
+    if (argc == 2 && !strcmp(argv[1], "--scenes"))
+        return cmd_scene(NULL);
+    if (argc == 3 && !strcmp(argv[1], "--scene"))
+        return cmd_scene(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--login"))
         return cmd_login(argv[2]);
     if (argc == 2 && !strcmp(argv[1], "--logout")) {
@@ -1896,7 +2475,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc > 1) {
-        fprintf(stderr, "usage: mellagui-smart | --list | --set ID CODE VALUE | --set-local ID CODE VALUE | --scan [SECONDS] | --login USERCODE | --logout | --qr TEXT | --selftest\n");
+        fprintf(stderr, "usage: mellagui-smart | --list | --set ID CODE VALUE | --set-local ID CODE VALUE | --scan [SECONDS] | --scenes | --scene NAME | --background | --login USERCODE | --logout | --qr TEXT | --selftest\n");
         return 2;
     }
     const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");
@@ -1917,6 +2496,7 @@ int main(int argc, char **argv)
     pthread_mutex_init(&a.lock, NULL);
     pthread_mutex_init(&a.lan_lock, NULL);
     pthread_cond_init(&a.cond, NULL);
+    a.nrules = sched_load(a.rules, SCHED_MAX);
     bool logged_in = tuya_session_load(&a.sess);
     copy(a.code, sizeof(a.code), a.sess.user_code);
     copy(a.username, sizeof(a.username), a.sess.username);

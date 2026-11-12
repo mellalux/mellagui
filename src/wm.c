@@ -516,6 +516,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
         wm->gad[i].h = gadget_def[i].h;
     }
     gadgets_load(wm);
+    places_load(wm);
     update_clock(wm, true);
     wm->note_timer = lm_loop_add_timer(srv->loop, note_tick, wm);
     wm->dock_timer = lm_loop_add_timer(srv->loop, dock_hide_tick, wm);
@@ -791,6 +792,8 @@ void lm_wm_window_map(struct lm_window *w)
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
     int32_t fit_w = 0, fit_h = 0;
+    struct lm_rect was = { 0, 0, 0, 0 };                        /* where a window of this program was the last time (wm_places.c) */
+    bool was_known = false, was_max = false;
     if (w->mapped)
         return;
     if (!ww->placed) {
@@ -809,6 +812,11 @@ void lm_wm_window_map(struct lm_window *w)
         } else if (w->parent && w->parent->mapped) {
             w->x = w->parent->x + (w->parent->width - w->width) / 2;
             w->y = w->parent->y + (w->parent->height - w->height) / 2;
+        } else if (places_find(wm, w, &was, &was_max)) {
+            was_known = true;
+            w->x = was.x;
+            w->y = was.y;
+            lm_wm_usable_area(wm, was.x + was.w / 2, was.y + was.h / 2, &ua);    /* (kept on the output it was on) */
         } else {
             int step = (wm->cascade++ % 10) * 28;
             w->x = ua.x + LM_BORDER_WIDTH + 40 + step;
@@ -817,8 +825,8 @@ void lm_wm_window_map(struct lm_window *w)
         /* keep the whole frame on the output where possible */
         if (!(w->states & (LM_WINDOW_FULLSCREEN | LM_WINDOW_MAXIMIZED))) {
             /* a client that opened bigger than the usable area is asked to shrink to fit */
-            int32_t fw = LM_MIN(w->width, ua.w - 2 * LM_BORDER_WIDTH);
-            int32_t fh = LM_MIN(w->height, ua.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH);
+            int32_t fw = LM_MIN(was_known ? was.w : w->width, ua.w - 2 * LM_BORDER_WIDTH);
+            int32_t fh = LM_MIN(was_known ? was.h : w->height, ua.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH);
             if (fw != w->width || fh != w->height) {
                 clamp_size(w, &fw, &fh);
                 fit_w = fw; /* sent after set_focus(), whose configure would otherwise override it */
@@ -857,6 +865,8 @@ void lm_wm_window_map(struct lm_window *w)
     set_focus(wm, w);
     if (fit_w > 0)
         send_configure(wm, w, fit_w, fit_h);
+    if (was_known && was_max)
+        lm_wm_window_request_maximize(w, true);
     damage_panels(wm);
     if (wm->ov.open)
         overview_changed(wm);                                   /* (its picture joins the overview) */
@@ -870,6 +880,7 @@ void lm_wm_window_unmap(struct lm_window *w)
     struct lm_wm *wm = w->wm;
     if (!w->mapped)
         return;
+    places_remember(wm, w);
     sw_close(wm);
     anim_play_close(wm, w);
     struct lm_rect r = frame_outer(w);
@@ -1568,6 +1579,8 @@ static void grab_end(struct lm_wm *wm)
         w->states &= ~LM_WINDOW_RESIZING;
         send_configure(wm, w, w->width, w->height);
     }
+    if (w && (kind == GRAB_MOVE || kind == GRAB_RESIZE))
+        places_remember(wm, w);                                 /* the next window of the program opens here */
 }
 
 /*

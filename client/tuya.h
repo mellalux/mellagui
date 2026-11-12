@@ -57,6 +57,7 @@ struct tuya_session {
     char access[300], refresh[300];
     int64_t expire_ms;                  /* when the access token ends (ms since 1970) */
     bool relogin;                       /* the server refused the tokens: the user has to log in again */
+    int64_t file_stamp;                 /* the session file as this copy knows it (another process may renew the tokens) */
 };
 
 /* The saved session: false when there is none. */
@@ -81,6 +82,15 @@ bool tuya_load_specs(struct tuya_session *s, struct tuya_dev *d, char *err, size
 bool tuya_load_local_map(struct tuya_session *s, struct tuya_dev *d, char *err, size_t errsz);
 /* Tells a device a value: `value_json` is JSON (true, 50, "open"). */
 bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, const char *value_json, char *err, size_t errsz);
+
+/* A scene of the app ("Tap-to-Run"): made there, started from here. */
+#define TUYA_MAX_SCENE 24
+struct tuya_scene {
+    char id[48], home[40], name[80];
+    bool enabled;
+};
+bool tuya_load_scenes(struct tuya_session *s, struct tuya_scene *scene, int *n, char *err, size_t errsz);
+bool tuya_trigger_scene(struct tuya_session *s, const char *home, const char *id, char *err, size_t errsz);
 
 struct tuya_dp *tuya_find_dp(struct tuya_dev *d, const char *code);
 /* The value as text for people: "on" / "off", the number with its scale and unit, the text. */

@@ -2407,7 +2407,7 @@ static int cmd_get_local(const char *id)
         tuya_dp_text(dp, v, sizeof(v));
         tuya_dp_text(&before.dp[k], c, sizeof(c));
         printf("    %3d  %-24s = %-16s%s%s%s\n", dp->lan_id, dp->code, v, dp->lan_ok ? "" : "  (from the cloud: it converts this value)",
-               dp->lan_ok && strcmp(v, c) ? "  the cloud says " : "", dp->lan_ok && strcmp(v, c) ? c : "");
+               dp->lan_ok && c[0] && strcmp(v, c) ? "  the cloud says " : "", dp->lan_ok && c[0] && strcmp(v, c) ? c : "");
     }
     printf("%d value%s read locally\n", took, took == 1 ? "" : "s");
     return 0;

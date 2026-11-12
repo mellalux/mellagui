@@ -56,7 +56,7 @@ enum key_id {
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
     K_KEYS_CAPTURED, K_KEYS_SET, K_KEYS_DEL, K_KEYS_RESET,
     K_THEME_COLORS, K_THEME_SET, K_THEME_DEL, K_THEME_RESET, K_THEME_NAME, K_THEME_LIST, K_THEME_USE, K_THEME_BUTTONS,
-    K_FONT_NAME, K_FONT_FILE, K_FONT_LOCKED, K_FONT_USE,
+    K_FONT_NAME, K_FONT_FILE, K_FONT_LOCKED, K_FONT_USE, K_FONT_UI, K_FONT_UI_NAME,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
     K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_LAUNCHER_DEFAULTS, K_COUNT
@@ -80,7 +80,7 @@ static const char *const key_names[K_COUNT] = {
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
     [K_THEME_NAME] = "theme-name", [K_THEME_LIST] = "theme-list", [K_THEME_USE] = "theme-use", [K_THEME_BUTTONS] = "theme-buttons",
-    [K_FONT_NAME] = "font-name", [K_FONT_FILE] = "font-file", [K_FONT_LOCKED] = "font-locked", [K_FONT_USE] = "font-use",
+    [K_FONT_NAME] = "font-name", [K_FONT_FILE] = "font-file", [K_FONT_LOCKED] = "font-locked", [K_FONT_USE] = "font-use", [K_FONT_UI] = "font-ui", [K_FONT_UI_NAME] = "font-ui-name",
     [K_METRICS] = "metrics", [K_METRICS_SET] = "metrics-set", [K_METRICS_RESET] = "metrics-reset",
     [K_DOCK_PUT] = "dock-put", [K_DOCK_DEL] = "dock-del", [K_DOCK_MOVE] = "dock-move", [K_DOCK_RESET] = "dock-reset",
     [K_DOCK_OPTS] = "dock-opts", [K_DOCK_SET] = "dock-set",
@@ -669,6 +669,8 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_KEYS_SET: case K_KEYS_DEL: case K_KEYS_RESET: break;
     case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE: break;
     case K_FONT_USE: break;
+    case K_FONT_UI: snprintf(out, n, "%s", lm_font_ui_choice()); break;        /* the labels: auto | mono | a file (also written) */
+    case K_FONT_UI_NAME: snprintf(out, n, "%s", lm_font_ui_name()); break;     /* the file labels are drawn with, or "mono" */
     case K_FONT_NAME: snprintf(out, n, "%s", lm_font_name()); break;           /* the file text is drawn with, or "bitmap" */
     case K_FONT_FILE: snprintf(out, n, "%s", lm_font_choice()); break;         /* what was asked for: auto | bitmap | a file */
     case K_FONT_LOCKED: snprintf(out, n, "%d", lm_font_locked() ? 1 : 0); break;   /* MELLAGUI_FONT decides, not the file */
@@ -744,7 +746,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 {
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
-        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || k == K_SOURCES || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_THEME_LIST || k == K_FONT_NAME || k == K_FONT_FILE || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST) || (k >= K_NOTES_0 && k <= K_NOTES_LAST))
+        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || k == K_SOURCES || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_THEME_LIST || k == K_FONT_NAME || k == K_FONT_FILE || k == K_FONT_UI || k == K_FONT_UI_NAME || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST) || (k >= K_NOTES_0 && k <= K_NOTES_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
@@ -1673,12 +1675,13 @@ static bool theme_op(struct lm_server *srv, int kid, const char *val)
 }
 
 /* font-use auto | bitmap | /path/Mono.ttf: the `file` line of [font] (auto needs none), then the file is read again. */
-static bool font_op(struct lm_server *srv, const char *val)
+static bool font_op(struct lm_server *srv, int kid, const char *val)
 {
     const char *path = srv->config.conf_path;
-    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config || !lm_font_usable(val))
+    bool ui = kid == K_FONT_UI;                                 /* font-ui auto | mono | /path/Sans.ttf: the `ui` line */
+    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config || !(ui ? lm_font_usable_ui(val) : lm_font_usable(val)))
         return false;
-    if (!lm_confedit_set_key(path, "font", theme_same, "file", "file", !strcmp(val, "auto") ? NULL : val))
+    if (!lm_confedit_set_key(path, "font", theme_same, ui ? "ui" : "file", ui ? "ui" : "file", !strcmp(val, "auto") ? NULL : val))
         return false;
     srv->reload_config(srv, true);
     return true;
@@ -2026,8 +2029,8 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return keys_op(s, k, val);
     case K_THEME_SET: case K_THEME_DEL: case K_THEME_RESET: case K_THEME_USE: case K_THEME_BUTTONS:
         return theme_op(srv, k, val);
-    case K_FONT_USE:
-        return font_op(srv, val);
+    case K_FONT_USE: case K_FONT_UI:
+        return font_op(srv, k, val);
     case K_METRICS_SET: case K_METRICS_RESET:
         return metrics_op(srv, k, val);
     case K_KEYS_PAGE:

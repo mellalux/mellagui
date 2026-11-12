@@ -87,6 +87,9 @@ void wlwin_fill(struct wlwin *w, int x, int y, int width, int height, uint32_t r
 /* One glyph scaled up by `scale` (>= 1). */
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb);
 /* UTF-8 text; max_w > 0 stops before the first character that would not fit completely in that many pixels. */
+/* A label: proportional when there is a font for it (font.h), so measure it with lm_font_text_width() * scale. */
 void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
+/* Text in cells of LM_FONT_W * scale (tables, text fields): always one cell per character. */
+void wlwin_text_cells(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
 
 #endif

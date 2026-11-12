@@ -1538,7 +1538,7 @@ static void build_buttons(struct app *a, int x, int y, int w)
 /* ---- the Font part of the Themes page ------------------------------------------------------------------------------------ */
 
 #define FONTS_MAX 64
-#define FONTS_ROWS 6
+#define FONTS_ROWS 5
 
 static char g_fonts[FONTS_MAX][LM_FONT_PATH_MAX];       /* the monospace fonts found, looked for once (-1 = not yet) */
 static int g_nfonts = -1;
@@ -1580,6 +1580,11 @@ static void build_font(struct app *a, int x, int y, int w)
     const char *cur = kv_get(a, "font-file");
     add_radio(a, x, y, 130, "Automatic", "font-pick", "auto", !strcmp(cur, "auto") || !*cur);
     add_radio(a, x + 140, y, 200, "Built-in pixel font", "font-pick", "bitmap", !strcmp(cur, "bitmap"));
+    y += ROW_H + 4;
+    const char *ui = kv_get(a, "font-ui");
+    add(a, W_LABEL, (struct rect){ x, y, 70, ROW_H }, "Labels");
+    add_radio(a, x + 70, y, 150, "Proportional", "font-ui", "auto", strcmp(ui, "mono") != 0);
+    add_radio(a, x + 230, y, 140, "Monospace", "font-ui", "mono", !strcmp(ui, "mono"));
     y += ROW_H + 4;
     int pages = LM_MAX(1, (g_nfonts + FONTS_ROWS - 1) / FONTS_ROWS);
     a->fpage = LM_CLAMP(a->fpage, 0, pages - 1);
@@ -2027,7 +2032,7 @@ static void paint_help(struct app *a)
     lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, c->x, c->y, c->w, c->h, 10, COL_BG);
     int hx = c->x + 20, hy = c->y + 20;
     lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, hx, hy - 1, HELP_D, HELP_D, HELP_D / 2, COL_ACCENT);
-    draw_text(a, hx + (HELP_D - LM_FONT_W) / 2, hy, "?", COL_BG, 0);
+    draw_text(a, hx + (HELP_D - lm_font_text_width("?")) / 2, hy, "?", COL_BG, 0);
     draw_text(a, hx + HELP_D + 10, hy, a->help_title, COL_TEXT, c->w - 40 - HELP_D - 10);
     fill(a, (struct rect){ c->x + 20, hy + 22, c->w - 40, 1 }, COL_KEY);
     int line_h = LM_FONT_H + 3, ty = hy + 32;
@@ -2037,11 +2042,11 @@ static void paint_help(struct app *a)
     if (g->nlines > g->visible) {
         char more[32];
         snprintf(more, sizeof(more), "%d / %d", a->help_scroll + 1, g->nlines - g->visible + 1);
-        draw_text(a, c->x + c->w - 24 - (int)strlen(more) * LM_FONT_W, g->close.y + 6, more, COL_DIM, 0);
+        draw_text(a, c->x + c->w - 24 - lm_font_text_width(more), g->close.y + 6, more, COL_DIM, 0);
     }
     bool hot = a->px >= g->close.x && a->px < g->close.x + g->close.w && a->py >= g->close.y && a->py < g->close.y + g->close.h;
     lm_round_fill(px, a->win.bw, a->win.bw, a->win.bh, g->close.x, g->close.y, g->close.w, g->close.h, 14, hot ? COL_DOWN : COL_HOVER);
-    draw_text(a, g->close.x + (g->close.w - 5 * LM_FONT_W) / 2, g->close.y + (g->close.h - LM_FONT_H) / 2, "Close", COL_TEXT, 0);
+    draw_text(a, g->close.x + (g->close.w - lm_font_text_width("Close")) / 2, g->close.y + (g->close.h - LM_FONT_H) / 2, "Close", COL_TEXT, 0);
     free(g);
 }
 
@@ -2517,7 +2522,7 @@ static void paint_widget(struct app *a, int idx)
         break;
     case W_HELP:                                                /* the small "?" circle */
         lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, r->x, r->y, r->w, r->h, r->w / 2, hot ? COL_ACCENT : COL_KEY);
-        draw_text(a, r->x + (r->w - LM_FONT_W) / 2, r->y + (r->h - LM_FONT_H) / 2, "?", hot ? COL_BG : COL_TEXT, 0);
+        draw_text(a, r->x + (r->w - lm_font_text_width("?")) / 2, r->y + (r->h - LM_FONT_H) / 2, "?", hot ? COL_BG : COL_TEXT, 0);
         if (focus)
             outline(a, (struct rect){ r->x - 2, r->y - 2, r->w + 4, r->h + 4 }, COL_ACCENT);
         break;
@@ -2665,6 +2670,12 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         kv_set(a, args[0].s, args[1].s);
         if (changed && !strcmp(args[0].s, "font-name") && args[1].s[0]) {    /* ... and the font it chooses */
             lm_font_use(args[1].s);
+            if (*kv_get(a, "font-ui-name"))
+                lm_font_use_ui(kv_get(a, "font-ui-name"));
+            a->win.redraw = true;
+        }
+        if (changed && !strcmp(args[0].s, "font-ui-name") && args[1].s[0]) {
+            lm_font_use_ui(args[1].s);
             a->win.redraw = true;
         }
         if (changed && !strcmp(args[0].s, "theme-colors")) {                 /* the panel wears the palette it edits */
@@ -2942,7 +2953,7 @@ static int selftest_help(void)
         { "audio-profiles", "p1|Analog|;p2|HDMI|" }, { "sources", "mic1|Built-in microphone;mic2|USB headset" }, { "source", "mic1" }, { "source-volume", "60" }, { "audio-profile", "p1" }, { "sink", "s1" }, { "audio-outs", "default|System default;hw:0|Card 0" },
         { "audio-out", "default" }, { "layouts", "us,ee" }, { "layout", "us" }, { "wallpaper-mode", "fill" }, { "lock-state", "set" },
         { "dock-0", "Files\x1f" "files\x1f" "mellagui-files" }, { "theme-colors", "background=#14171f accent=#6fa8ff button-accent=#4c8dff" }, { "theme-buttons", "colourful" }, { "saver-style", "room" }, { "config-file", "/x/mellagui.conf" },
-        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" },
+        { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" }, { "font-ui", "auto" },
     };
     int bad = 0, shown = 0;
     for (int pgi = 0; pgi < N_PAGES + 6; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */

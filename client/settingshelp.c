@@ -204,6 +204,11 @@ static const struct entry table[] = {
       "built-in pixel font when there is none. Built-in pixel font: the 8 x 16 pixel letters MellaGUI always had - sharp, but blocky when big. "
       "Below them are the monospace TrueType fonts found in the system's and your own font folders (regular faces only); they are drawn with smooth edges "
       "at every size. The line of sample text shows the font in use." },
+    { "font-ui", NULL, "Labels",
+      "Proportional: titles, buttons, menus and messages are set in the proportional font that goes with the one chosen above (DejaVu Sans for "
+      "DejaVu Sans Mono), every letter as wide as it is - an i is narrow, an m wide. Monospace: labels use the font above, every letter equally "
+      "wide, as in a terminal. Terminals, the editor, tables and text fields are always monospace. With the built-in pixel font there is no "
+      "proportional text." },
     { "theme-buttons", NULL, "Colours of the buttons",
       "Colourful: every button has its own colour, as MellaGUI always looked. One colour: all buttons take the hue of one colour (the choice below) and "
       "keep their own lightness, so a dark button stays dark. Grey: the colour is taken away." },

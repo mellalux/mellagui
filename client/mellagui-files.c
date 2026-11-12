@@ -4662,6 +4662,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     if (getenv("MELLAGUI_ASKPASS"))                                     /* ssh asks for a password through SSH_ASKPASS, which names this program (sftp.h) */
         return sftp_askpass_main();
     lm_theme_load_env();

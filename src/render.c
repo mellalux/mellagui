@@ -309,6 +309,30 @@ static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t colo
     fb_row(c, y)[x] = color;
 }
 
+/* One character of a label, its pen at (x, y = top of the line), cut to `lim`; returns how far the pen moves. */
+static int draw_label_glyph(const struct paint_ctx *c, const struct lm_rect *lim, int x, int y, uint32_t cp, int scale, uint32_t color)
+{
+    struct lm_font_glyph g;
+    lm_font_label(cp, scale, &g);
+    int gx = x - g.left;
+    if (gx + g.w <= lim->x || gx >= lim->x + lim->w)
+        return g.advance;
+    int x0 = LM_MAX(gx, lim->x), x1 = LM_MIN(gx + g.w, lim->x + lim->w);
+    for (int row = 0; row < g.h; row++) {
+        int py = y + row;
+        if (py < lim->y || py >= lim->y + lim->h)
+            continue;
+        uint32_t *dst = fb_row(c, py);
+        const uint8_t *src = g.px + (size_t)row * (size_t)g.w - gx;
+        for (int px = x0; px < x1; px++) {
+            unsigned a = src[px];
+            if (a)
+                dst[px] = lm_font_mix(dst[px], color, a);
+        }
+    }
+    return g.advance;
+}
+
 static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
                       const char *text, uint32_t color)
 {
@@ -320,25 +344,8 @@ static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int
         int used;
         uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
-        if (x + LM_FONT_W > lim.x && x < lim.x + lim.w) {
-            const uint8_t *g = lm_font_cell(cp, LM_FONT_W, LM_FONT_H);
-            for (int row = 0; row < LM_FONT_H; row++) {
-                int py = y + row;
-                if (py < lim.y || py >= lim.y + lim.h)
-                    continue;
-                uint32_t *dst = fb_row(c, py);
-                for (int col = 0; col < LM_FONT_W; col++) {
-                    int px = x + col;
-                    if (px < lim.x || px >= lim.x + lim.w)
-                        continue;
-                    unsigned a = g[row * LM_FONT_W + col];
-                    if (a)
-                        dst[px] = lm_font_mix(dst[px], color, a);
-                }
-            }
-        }
-        x += LM_FONT_W;
-        if (x >= lim.x + lim.w)
+        x += draw_label_glyph(c, &lim, x, y, cp, 1, color);
+        if (x >= lim.x + lim.w + 8)
             break;
     }
 }
@@ -609,7 +616,7 @@ static void paint_switcher(const struct paint_ctx *c, const struct lm_switcher_i
         draw_text(c, &text, text.x, ty, s->label[i], col);
         char tag[16];
         snprintf(tag, sizeof(tag), "%s[%d]", s->minimized[i] ? "_ " : "", s->ws[i] + 1);
-        int tw = (int)strlen(tag) * LM_FONT_W;
+        int tw = lm_font_text_width(tag);
         draw_text(c, &r, r.x + r.w - 8 - tw, ty, tag, s->ws[i] == s->current_ws ? COL_PANEL_ACCENT : COL_PANEL_DIM);
     }
 }
@@ -642,21 +649,7 @@ static void draw_text_scaled(const struct paint_ctx *c, int x, int y, const char
         int used;
         uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
-        int cw = LM_FONT_W * scale, ch = LM_FONT_H * scale;
-        const uint8_t *g = lm_font_cell(cp, cw, ch);
-        for (int row = 0; row < ch; row++) {
-            int py = y + row;
-            if (py < c->clip.y || py >= c->clip.y + c->clip.h)
-                continue;
-            uint32_t *dst = fb_row(c, py);
-            for (int col = 0; col < cw; col++) {
-                int px = x + col;
-                unsigned a = g[row * cw + col];
-                if (a && px >= c->clip.x && px < c->clip.x + c->clip.w)
-                    dst[px] = lm_font_mix(dst[px], color, a);
-            }
-        }
-        x += cw;
+        x += draw_label_glyph(c, &c->clip, x, y, cp, scale, color);
     }
 }
 
@@ -2018,7 +2011,7 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
         for (const char *q = t; *q; q++)
             chars += ((unsigned char)*q & 0xc0) != 0x80;
         if (chars == 1 && r->h >= 40) {
-            int tx = r->x + (r->w - LM_FONT_W * 2) / 2, ty = r->y + (r->h - LM_FONT_H * 2) / 2;
+            int tx = r->x + (r->w - lm_font_text_width(t) * 2) / 2, ty = r->y + (r->h - LM_FONT_H * 2) / 2;
             draw_text_scaled(c, tx + 1, ty + 1, t, 2, lm_theme.text_shadow);            /* a 1 px shadow keeps white on the lighter colours readable */
             draw_text_scaled(c, tx, ty, t, 2, fg);
             draw_text_scaled(c, tx + 1, ty, t, 2, fg);                      /* bold: the glyph struck twice, a pixel apart */

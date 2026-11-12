@@ -16996,6 +16996,29 @@ class TestFont(Base):
         c.cmd('setraw font-use auto')                                       # the default needs no line
         self.assertNotIn('file =', open(self.path).read())
 
+    def labels(self, c):
+        return c.cmd('font')[1].split(' ', 1)[1]
+
+    def test_labels_are_proportional_with_a_truetype_font_and_cells_with_the_bitmap(self):
+        if not os.path.exists(self.AUTO_FONT):
+            self.skipTest('DejaVu Sans Mono is not installed')
+        c = self.start('mellagui-font8', '')
+        self.assertTrue(self.labels(c).endswith('DejaVuSans.ttf'), self.labels(c))
+        c.cmd('notify 60000 Wiii iiii')                                  # a card is as wide as ever; its text is narrower than 8 px a letter
+        c.cmd('setraw font-ui mono')
+        self.assertEqual(self.labels(c), 'mono')
+        self.assertIn('ui = mono', open(self.path).read())
+        c.cmd('setting font-ui')
+        self.assertEqual(c.last, 'ok mono')
+        with self.assertRaises(RuntimeError):
+            c.cmd('setraw font-ui Sans.ttf')
+        c.cmd('setraw font-ui auto')
+        self.assertNotIn('ui =', open(self.path).read())
+        c.cmd('setraw font-use bitmap')                                  # no proportional face for the pixel font
+        self.assertEqual(self.labels(c), 'mono')
+        b = self.start('mellagui-font8b', font='bitmap')
+        self.assertEqual(self.labels(b), 'mono')
+
     def test_the_environment_locks_the_choice(self):
         c = self.start('mellagui-font6', '', font='bitmap')
         c.cmd('setting font-locked')
@@ -17034,7 +17057,7 @@ class TestFont(Base):
         c.click(x0 + win['w'] - 296, y0 + 14 + 13)                        # its Font part, left of Colours
         time.sleep(0.3)
         top = y0 + 14 + 28 + 28 + 28 + 4                                  # the row of Automatic / Built-in pixel font
-        c.click(x0 + 160 + 30, top + 28 + 4 + 14)                         # the first (only) font of the list
+        c.click(x0 + 160 + 30, top + 2 * (28 + 4) + 14)                   # the first (only) font of the list, below the Labels row
 
         def wait_for(text, there=True):
             for _ in range(60):
@@ -17048,6 +17071,9 @@ class TestFont(Base):
         wait_for('file = bitmap')
         c.click(x0 + 160 + 30, top + 14)                                  # Automatic
         wait_for('file =', there=False)
+        c.click(x0 + 160 + 230 + 30, top + 28 + 4 + 14)                   # Labels: Monospace
+        wait_for('ui = mono')
+        self.assertEqual(self.labels(c), 'mono')
 
     @staticmethod
     def conf(name, text):

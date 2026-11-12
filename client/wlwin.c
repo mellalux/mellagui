@@ -276,7 +276,7 @@ void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t
     }
 }
 
-void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)
+void wlwin_text_cells(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)
 {
     size_t len = strlen(s);
     int x0 = x;
@@ -288,5 +288,38 @@ void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_
         i += used > 0 ? (size_t)used : 1;
         wlwin_glyph(w, x, y, cp, scale, rgb);
         x += LM_FONT_W * scale;
+    }
+}
+
+void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)
+{
+    if (scale < 1)
+        return;
+    if (!lm_font_proportional()) {
+        wlwin_text_cells(w, x, y, s, scale, rgb, max_w);
+        return;
+    }
+    size_t len = strlen(s);
+    int x0 = x;
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        struct lm_font_glyph g;
+        lm_font_label(cp, scale, &g);
+        if (max_w > 0 && x + g.advance > x0 + max_w)
+            break;
+        int gx = x - g.left;
+        for (int r = 0; r < g.h; r++) {
+            int py = y + r;
+            if (py < 0 || py >= w->bh)
+                continue;
+            uint32_t *row = w->pixels + (size_t)py * (size_t)w->bw;
+            const uint8_t *src = g.px + (size_t)r * (size_t)g.w;
+            for (int cx = LM_MAX(0, -gx); cx < g.w && gx + cx < w->bw; cx++)
+                if (src[cx])
+                    row[gx + cx] = lm_font_mix(row[gx + cx], 0xff000000u | rgb, src[cx]);
+        }
+        x += g.advance;
     }
 }

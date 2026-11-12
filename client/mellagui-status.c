@@ -1451,7 +1451,7 @@ static void pw_paint(struct wlwin *w)
         if (((unsigned char)*s & 0xc0) != 0x80)
             stars[n++] = '*';
     stars[n] = 0;
-    wlwin_text(w, 20, 46, stars, 1, lm_theme.text, w->bw - 40);
+    wlwin_text_cells(w, 20, 46, stars, 1, lm_theme.text, w->bw - 40);
     if (!p->busy)
         wlwin_fill(w, 20 + n * LM_FONT_W, 46, 2, LM_FONT_H, lm_theme.accent);
     wlwin_text(w, 14, 84, p->busy ? "Connecting..." : p->msg[0] ? p->msg : "Enter connects, Esc cancels", 1, p->busy ? lm_theme.accent : p->msg[0] ? lm_theme.error : lm_theme.text_dim, w->bw - 28);

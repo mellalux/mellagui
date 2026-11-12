@@ -1269,6 +1269,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

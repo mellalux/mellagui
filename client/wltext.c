@@ -372,7 +372,7 @@ void wltext_paint(struct wlwin *w, int x, int y, int maxw, const char *buf, bool
         return;
     memcpy(shown, buf + first, last - first);
     shown[last - first] = 0;
-    wlwin_text(w, x, y, shown, 1, fg, 0);
+    wlwin_text_cells(w, x, y, shown, 1, fg, 0);          /* a field is cells: the caret and the selection count characters */
     free(shown);
     if (focus)
         wlwin_fill(w, x + (int)(cur_cp - s->off) * LM_FONT_W, y, 2, LM_FONT_H, caret);

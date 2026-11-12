@@ -1264,6 +1264,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    lm_font_ui_cells(true);             /* this program lays its text out in columns of characters */
     lm_theme_load_env();
     const char *dev = NULL, *snap = NULL, *clip = NULL;
     struct size want = { 0, 0 };

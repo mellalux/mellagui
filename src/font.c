@@ -62,6 +62,19 @@ int lm_font_text_width(const char *utf8)
     size_t len = strlen(utf8);
     for (size_t i = 0; i < len;) {
         int used;
+        uint32_t cp = lm_utf8_decode(utf8 + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        n += lm_font_advance(cp);
+    }
+    return n;
+}
+
+int lm_font_cells_width(const char *utf8)
+{
+    int n = 0;
+    size_t len = strlen(utf8);
+    for (size_t i = 0; i < len;) {
+        int used;
         lm_utf8_decode(utf8 + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
         n++;
@@ -106,7 +119,13 @@ static struct {
     char env[512];                      /* MELLAGUI_FONT as it was before this process changed it */
     bool env_read;
     uint8_t gamma[256];
-} F = { .name = "bitmap" };
+    /* the proportional face of labels (see font.h) */
+    bool ui_chosen;
+    bool ui_mono;                       /* this program lays its text out in cells: lm_font_ui_cells() */
+    struct lm_ttf *ui;                  /* NULL = labels are set in cells too */
+    char ui_name[512];                  /* the file, or "mono" */
+    char ui_conf[512], ui_env[512];
+} F = { .name = "bitmap", .ui_name = "mono" };
 
 static void cache_clear(void)
 {
@@ -190,11 +209,160 @@ bool lm_font_use(const char *spec)
     return ok;
 }
 
+/* ---- the proportional face ------------------------------------------------------------------------------------ */
+
+/* The sans that goes with a monospace font: the same family beside it, else a well known one. */
+static bool ui_auto(void)
+{
+    static const char *const pair[][2] = {
+        { "DejaVuSansMono.ttf", "DejaVuSans.ttf" },
+        { "LiberationMono-Regular.ttf", "LiberationSans-Regular.ttf" },
+        { "NotoSansMono-Regular.ttf", "NotoSans-Regular.ttf" },
+        { "UbuntuMono-R.ttf", "Ubuntu-R.ttf" },
+        { "FreeMono.ttf", "FreeSans.ttf" },
+    };
+    static const char *const known[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    };
+    const char *base = strrchr(F.name, '/');
+    if (!base)
+        return false;                                   /* the bitmap: its labels are bitmap cells, the old look */
+    char path[sizeof(F.name) + 32];
+    for (size_t i = 0; i < sizeof(pair) / sizeof(pair[0]); i++)
+        if (!strcmp(base + 1, pair[i][0])) {
+            snprintf(path, sizeof(path), "%.*s%s", (int)(base + 1 - F.name), F.name, pair[i][1]);
+            if (strlen(path) < sizeof(F.ui_name) && access(path, R_OK) == 0 && (F.ui = lm_ttf_open(path, NULL))) {
+                memcpy(F.ui_name, path, strlen(path) + 1);
+                return true;
+            }
+        }
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (access(known[i], R_OK) == 0 && (F.ui = lm_ttf_open(known[i], NULL))) {
+            snprintf(F.ui_name, sizeof(F.ui_name), "%s", known[i]);
+            return true;
+        }
+    return false;
+}
+
+bool lm_font_use_ui(const char *spec)
+{
+    if (!F.chosen) {
+        const char *e = getenv("MELLAGUI_FONT");
+        lm_font_use(e && *e ? e : "auto");
+    }
+    if (!spec || !*spec)
+        spec = "auto";
+    char old[sizeof(F.ui_name)];
+    snprintf(old, sizeof(old), "%s", F.ui_name);
+    F.ui_chosen = true;
+    if (F.ui)
+        lm_ttf_close(F.ui);
+    F.ui = NULL;
+    snprintf(F.ui_name, sizeof(F.ui_name), "mono");
+    bool ok = true;
+    if (!strcmp(spec, "auto")) {
+        ui_auto();
+    } else if (strcmp(spec, "mono") != 0) {
+        const char *why = NULL;
+        F.ui = lm_ttf_open(spec, &why);
+        if (F.ui)
+            snprintf(F.ui_name, sizeof(F.ui_name), "%s", spec);
+        else
+            lm_warn("font: %s %s - labels are set in the cells' font", spec, why ? why : "cannot be used");
+        ok = F.ui != NULL;
+    }
+    if (strcmp(old, F.ui_name) != 0) {
+        cache_clear();
+        F.generation++;
+    }
+    return ok;
+}
+
+void lm_font_ui_cells(bool cells)
+{
+    F.ui_mono = cells;
+}
+
+static void ensure(void);
+
+const char *lm_font_ui_name(void)
+{
+    ensure();
+    return F.ui_name;
+}
+
+const char *lm_font_ui_choice(void)
+{
+    return F.ui_env[0] ? F.ui_env : F.ui_conf[0] ? F.ui_conf : "auto";
+}
+
+bool lm_font_usable_ui(const char *spec)
+{
+    if (!spec || !*spec)
+        return false;
+    if (!strcmp(spec, "auto") || !strcmp(spec, "mono"))
+        return true;
+    if (spec[0] != '/' || strlen(spec) >= sizeof(F.ui_conf) || strpbrk(spec, "\r\n"))
+        return false;
+    struct lm_ttf *t = lm_ttf_open(spec, NULL);
+    bool ok = t && lm_ttf_glyph(t, 'a');
+    lm_ttf_close(t);
+    return ok;
+}
+
+/* Pixels per font unit of the labels at the normal size: the em is 0.83 of the line, as the cells' font has it. */
+static double ui_scale(void)
+{
+    struct lm_ttf *t = F.ui;
+    double asc = lm_ttf_ascent(t), desc = -lm_ttf_descent(t);
+    double s = LM_FONT_H * 0.83 / lm_ttf_units(t);
+    if ((asc + desc) * s > LM_FONT_H)
+        s = LM_FONT_H / (asc + desc);
+    return s;
+}
+
+static int ui_glyph_id(uint32_t cp)
+{
+    if (!F.ui || F.ui_mono || (cp >= 0x2500 && cp <= 0x259f))
+        return 0;
+    return lm_ttf_glyph(F.ui, cp);
+}
+
+int lm_font_advance(uint32_t cp)
+{
+    ensure();
+    int g = ui_glyph_id(cp);
+    if (!g)
+        return LM_FONT_W;
+    int a = (int)(lm_ttf_advance(F.ui, g) * ui_scale() + 0.5);
+    return a < 1 ? 1 : a;
+}
+
+bool lm_font_proportional(void)
+{
+    ensure();
+    return F.ui && !F.ui_mono;
+}
+
 static void ensure(void)
 {
     if (!F.chosen) {
         const char *e = getenv("MELLAGUI_FONT");
         lm_font_use(e && *e ? e : "auto");
+    }
+    if (!F.ui_chosen) {
+        const char *e = getenv("MELLAGUI_FONT_UI");
+        lm_font_use_ui(e && *e ? e : "auto");
     }
 }
 
@@ -212,12 +380,20 @@ uint32_t lm_font_generation(void)
 void lm_font_reset(void)
 {
     F.conf[0] = '\0';
+    F.ui_conf[0] = '\0';
 }
 
 bool lm_font_conf(void *ud, const char *section, const char *key, const char *value)
 {
     (void)ud;
     (void)section;
+    if (!strcmp(key, "ui")) {                           /* the labels: auto | mono | a file */
+        if (!*value || strlen(value) >= sizeof(F.ui_conf) ||
+            (strcmp(value, "auto") != 0 && strcmp(value, "mono") != 0 && value[0] != '/'))
+            return false;
+        snprintf(F.ui_conf, sizeof(F.ui_conf), "%s", value);
+        return true;
+    }
     if (strcmp(key, "file") != 0)
         return false;
     if (!*value || strlen(value) >= sizeof(F.conf))
@@ -231,12 +407,15 @@ bool lm_font_conf(void *ud, const char *section, const char *key, const char *va
 void lm_font_apply(void)
 {
     if (!F.env_read) {
-        const char *e = getenv("MELLAGUI_FONT");
+        const char *e = getenv("MELLAGUI_FONT"), *u = getenv("MELLAGUI_FONT_UI");
         snprintf(F.env, sizeof(F.env), "%s", e ? e : "");
+        snprintf(F.ui_env, sizeof(F.ui_env), "%s", u ? u : "");
         F.env_read = true;
     }
     lm_font_use(F.env[0] ? F.env : F.conf[0] ? F.conf : "auto");
     setenv("MELLAGUI_FONT", F.name, 1);
+    lm_font_use_ui(F.ui_env[0] ? F.ui_env : F.ui_conf[0] ? F.ui_conf : "auto");
+    setenv("MELLAGUI_FONT_UI", F.ui_name, 1);
 }
 
 const char *lm_font_choice(void)
@@ -468,4 +647,74 @@ const uint8_t *lm_font_cell(uint32_t cp, int cw, int ch)
     F.used++;
     F.bytes += size;
     return px;
+}
+
+/* ---- one character of a label --------------------------------------------------------------------------------- */
+
+void lm_font_label(uint32_t cp, int scale, struct lm_font_glyph *out)
+{
+    ensure();
+    scale = scale < 1 ? 1 : scale > 32 ? 32 : scale;
+    int ch = LM_FONT_H * scale;
+    int g = ui_glyph_id(cp);
+    if (!g) {                                                   /* cells: this program's choice, no file, or no such glyph */
+        out->px = lm_font_cell(cp, LM_FONT_W * scale, ch);
+        out->w = LM_FONT_W * scale;
+        out->h = ch;
+        out->left = 0;
+        out->advance = LM_FONT_W * scale;
+        return;
+    }
+    struct lm_ttf *t = F.ui;
+    double s1 = ui_scale();
+    int adv1 = (int)(lm_ttf_advance(t, g) * s1 + 0.5);
+    adv1 = adv1 < 1 ? 1 : adv1;
+    int pad = 2 * scale, w = adv1 * scale + 2 * pad;            /* room for what hangs over the advance (j, f, W) */
+    out->w = w;
+    out->h = ch;
+    out->left = pad;
+    out->advance = adv1 * scale;
+
+    uint32_t key = cp | 0x80000000u;                            /* (code points end at 0x10ffff: the bit marks a label) */
+    uint32_t h = (key * 2654435761u) ^ ((uint32_t)ch * 2246822519u);
+    h ^= h >> 15;
+    int i = (int)(h & (CACHE_SLOTS - 1));
+    for (int probe = 0; probe < CACHE_SLOTS; probe++, i = (i + 1) & (CACHE_SLOTS - 1)) {
+        struct cell *c = &F.slot[i];
+        if (!c->px)
+            break;
+        if (c->cp == key && c->ch == ch && c->cw == w) {
+            out->px = c->px;
+            return;
+        }
+    }
+    size_t size = (size_t)w * (size_t)ch;
+    if (F.used >= CACHE_SLOTS * 3 / 4 || F.bytes + size > CACHE_BYTES) {
+        cache_clear();
+        i = (int)(h & (CACHE_SLOTS - 1));
+    }
+    uint8_t *px = malloc(size);
+    if (!px) {
+        static uint8_t none[CELL_MAX_W * CELL_MAX_H];
+        out->px = none;
+        out->w = out->w > CELL_MAX_W ? CELL_MAX_W : out->w;
+        return;
+    }
+    double asc = lm_ttf_ascent(t), desc = -lm_ttf_descent(t), s = s1 * scale;
+    double base = floor((ch - (asc + desc) * s) / 2 + asc * s + 0.5), sy = s;
+    int xh = lm_ttf_xheight(t);
+    if (xh > 0) {                                               /* the x height on whole pixels, as in the cells */
+        double hp = xh * s, snapped = floor(hp + 0.5);
+        if (snapped >= 1 && snapped / hp > 0.88 && snapped / hp < 1.14)
+            sy = s * snapped / hp;
+    }
+    double ox = pad + (adv1 * scale - lm_ttf_advance(t, g) * s) / 2;
+    lm_ttf_render(t, g, s, sy, ox, base, px, w, ch);
+    if (ch < 40)
+        for (size_t k = 0; k < size; k++)
+            px[k] = F.gamma[px[k]];
+    F.slot[i] = (struct cell){ key, (uint16_t)w, (uint16_t)ch, px };
+    F.used++;
+    F.bytes += size;
+    out->px = px;
 }

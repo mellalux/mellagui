@@ -29,8 +29,11 @@ const uint8_t *lm_font_glyph(uint32_t codepoint);
  * (U+FFFD on error) and stores the consumed byte count (>=1 when len>0) in *used. */
 uint32_t lm_utf8_decode(const char *s, int len, int *used);
 
-/* Width in pixels of a NUL-terminated UTF-8 string (LM_FONT_W per code point). */
+/* Width in pixels of a NUL-terminated UTF-8 string as a LABEL is drawn (see "labels" below): the sum of
+ * lm_font_advance() - LM_FONT_W per code point while labels are set in cells (the bitmap font, tests). */
 int lm_font_text_width(const char *utf8);
+/* The same string set in cells: LM_FONT_W per code point, whatever the labels' font. */
+int lm_font_cells_width(const char *utf8);
 
 /*
  * ---- the font that is drawn --------------------------------------------------------------------------------------
@@ -69,6 +72,37 @@ uint32_t lm_font_generation(void);
 void lm_font_reset(void);
 bool lm_font_conf(void *ud, const char *section, const char *key, const char *value);
 void lm_font_apply(void);
+
+/*
+ * ---- labels: proportional text ------------------------------------------------------------------------------------
+ *
+ * Two kinds of text: CELLS (a terminal, an editor, tables, text fields - lm_font_cell, LM_FONT_W per character) and
+ * LABELS (titles, buttons, menus, messages), which are set in a proportional font when there is one: every character
+ * is as wide as its glyph (lm_font_advance, whole pixels, the line is still LM_FONT_H high). Draw a label with
+ * lm_font_label() per character and measure it with lm_font_text_width(); never with strlen * LM_FONT_W.
+ *
+ * Which font: `[font] ui = auto | mono | /path/Sans.ttf`, MELLAGUI_FONT_UI (exported like MELLAGUI_FONT), or
+ * lm_font_use_ui(). auto = the sans of the cells' family beside it (DejaVu Sans for DejaVu Sans Mono ...), else a
+ * well known one; with the bitmap font there is none. mono = labels are cells (the old look).
+ * A program whose own layout counts characters calls lm_font_ui_cells(true) first: its labels are cells then.
+ * At `scale` n a label is n times the advance of scale 1, so widths just multiply.
+ */
+struct lm_font_glyph {
+    const uint8_t *px;                  /* w * h bytes of coverage, valid until the next call into the font */
+    int w, h;                           /* h = LM_FONT_H * scale */
+    int left;                           /* the pen is this many pixels right of the picture's left edge */
+    int advance;                        /* how far the pen moves */
+};
+void lm_font_label(uint32_t codepoint, int scale, struct lm_font_glyph *out);
+/* The advance of one character of a label at scale 1. Thread safe once the fonts are chosen. */
+int lm_font_advance(uint32_t codepoint);
+/* Are labels proportional right now (a font is there and this program did not ask for cells)? */
+bool lm_font_proportional(void);
+bool lm_font_use_ui(const char *spec);          /* "auto", "mono" or a file */
+void lm_font_ui_cells(bool cells);
+const char *lm_font_ui_name(void);              /* the file, or "mono" */
+const char *lm_font_ui_choice(void);            /* what was asked for */
+bool lm_font_usable_ui(const char *spec);
 
 /* What was asked for ("auto", "bitmap" or a file): MELLAGUI_FONT when it was set from outside, else the file's line.
  * lm_font_locked() = it is the environment's, so the file's line has no effect. Meaningful after lm_font_apply(). */

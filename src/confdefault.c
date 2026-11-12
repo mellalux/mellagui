@@ -20,6 +20,9 @@ const char *lm_config_default_text(void)
                  "# The font of all text: auto = the first well known monospace TrueType font that is installed\n"
                  "# (DejaVu Sans Mono, Liberation Mono, Noto Sans Mono ...), bitmap = the built-in 8x16 pixel font,\n"
                  "# or the whole path of a monospace .ttf file. Programs that are running keep theirs.\n"
-                 "file = auto\n");
+                 "file = auto\n"
+                 "# Labels (titles, buttons, menus): auto = the proportional font of the same family (DejaVu Sans ...),\n"
+                 "# mono = the font above, as in a terminal, or the whole path of a .ttf file.\n"
+                 "ui = auto\n");
     return text;
 }

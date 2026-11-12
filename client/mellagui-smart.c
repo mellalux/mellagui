@@ -1614,7 +1614,7 @@ static void paint_devices(struct app *a)
         rbox(w, c, 8, lm_theme.card);
         wlwin_text(w, c.x + 12, c.y + 10, d->name, 1, d->online ? lm_theme.text : lm_theme.text_dim, c.w - 172);
         if (d->online && lan_lookup(a, d->id, NULL))             /* heard in this network: its commands do not go round by the cloud */
-            wlwin_text(w, c.x + c.w - 12 - 68 - 8 - 5 * LM_FONT_W, c.y + 11, "local", 1, lm_theme.ok, 0);
+            wlwin_text(w, c.x + c.w - 12 - 68 - 8 - lm_font_text_width("local"), c.y + 11, "local", 1, lm_theme.ok, 0);
         char info[300];
         info_text(d, info, sizeof(info));
         wlwin_text(w, c.x + 12, c.y + 30, info[0] ? info : d->product, 1, d->online ? lm_theme.text_dim : lm_theme.alert, c.w - 24);

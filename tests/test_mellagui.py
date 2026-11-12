@@ -16221,5 +16221,261 @@ class TestLauncher(Base):
         self.assertIn('search="e"', c.cmd('launcher')[0])
 
 
+class TestSmart(Base):
+    """mellagui-smart: the devices of a Smart Life / Tuya account, against tests/fake_tuya.py (a stand-in for the cloud that checks the signature
+    and the AES-GCM of every request with Python's own crypto)."""
+
+    KEY_ENTER_ = 28
+    CODE_KEYS = (30, 48, 46, 2, 3, 4)                                   # abc123
+
+    DEVICES = [
+        {'id': 'plug1', 'home': 7, 'name': 'Plug', 'category': 'cz', 'online': True,
+         'status': {'switch_1': False, 'countdown_1': 0, 'cur_power': 123},
+         'functions': [{'code': 'switch_1', 'type': 'Boolean', 'values': '{}'},
+                       {'code': 'countdown_1', 'type': 'Integer', 'values': '{"unit":"s","min":0,"max":86400,"scale":0,"step":1}'}],
+         'status_spec': [{'code': 'cur_power', 'type': 'Integer', 'values': '{"unit":"W","min":0,"max":50000,"scale":1,"step":1}'}]},
+        {'id': 'blind1', 'home': 7, 'name': 'Blind', 'category': 'cl', 'online': True,
+         'status': {'control': 'stop', 'percent_control': 40},
+         'functions': [{'code': 'control', 'type': 'Enum', 'values': '{"range":["open","stop","close"]}'},
+                       {'code': 'percent_control', 'type': 'Integer', 'values': '{"unit":"%","min":0,"max":100,"scale":0,"step":1}'}],
+         'status_spec': []},
+        {'id': 'robot1', 'home': 7, 'name': 'Robot', 'category': 'sd', 'online': True,
+         'status': {'power_go': False, 'mode': 'standby', 'electricity_left': 87},
+         'functions': [{'code': 'power_go', 'type': 'Boolean', 'values': '{}'},
+                       {'code': 'mode', 'type': 'Enum', 'values': '{"range":["standby","smart","spiral"]}'}],
+         'status_spec': [{'code': 'electricity_left', 'type': 'Integer', 'values': '{"unit":"%","min":0,"max":100,"scale":0,"step":1}'}]},
+        {'id': 'plug2', 'home': 7, 'name': 'Far plug', 'category': 'cz', 'online': False, 'status': {'switch_1': True},
+         'functions': [{'code': 'switch_1', 'type': 'Boolean', 'values': '{}'}], 'status_spec': []},
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self.exe = os.path.join(ROOT, 'build', 'mellagui-smart')
+        if not os.path.exists(self.exe):
+            self.skipTest('mellagui-smart not built')
+        if not shutil.which('curl'):
+            self.skipTest('no curl')
+        try:
+            import cryptography                                         # noqa: F401 (the fake cloud needs it)
+        except ImportError:
+            self.skipTest('no python cryptography module')
+
+    def wait(self, pred, what, timeout=10.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: %s\n%s\n%s' % (what, open(self.dump_path).read() if os.path.exists(self.dump_path) else '(no dump)', self.log()))
+
+    def cloud(self, tag, **state):
+        import json
+        d = os.path.join(tmp, 'smart-' + tag)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'cfg'))
+        self.dir = d
+        self.state_path = os.path.join(d, 'state.json')
+        self.log_path = os.path.join(d, 'cloud.log')
+        self.dump_path = os.path.join(d, 'dump.txt')
+        st = {'user_code': 'abc123', 'scan_after': 1, 'homes': [{'ownerId': 7, 'name': 'Home'}], 'devices': self.DEVICES}
+        st.update(state)
+        with open(self.state_path, 'w') as f:
+            json.dump(st, f)
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_tuya.py')
+        srv = subprocess.Popen([sys.executable, fake, self.state_path, self.log_path], stdout=subprocess.PIPE)
+        self.addCleanup(lambda: (srv.kill(), srv.wait(), srv.stdout.close()))
+        line = srv.stdout.readline().decode()
+        self.assertTrue(line.startswith('port '), line)
+        self.env = {'MELLAGUI_TUYA_ENDPOINT': 'http://127.0.0.1:' + line.split()[1], 'XDG_CONFIG_HOME': os.path.join(d, 'cfg'),
+                    'MELLAGUI_SMART_DUMP': self.dump_path, 'MELLAGUI_SMART_POLL_MS': '700'}
+
+    def cli(self, *args):
+        r = subprocess.run([self.exe] + list(args), env=dict(os.environ, **self.env), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        return r.returncode, r.stdout.decode()
+
+    def log(self):
+        return open(self.log_path).read() if os.path.exists(self.log_path) else ''
+
+    def state(self):
+        import json
+        with open(self.state_path) as f:
+            return {d['id']: d for d in json.load(f)['devices']}
+
+    def view(self):
+        out = {'ctl': {}, 'devs': {}, 'view': '', 'msg': '', 'qr': ''}
+        if not os.path.exists(self.dump_path):
+            return out
+        lines = open(self.dump_path).read().split('\n')
+        if len(lines) < 3:
+            return out
+        for kv in lines[0].split():
+            k, _, v = kv.partition('=')
+            out[k] = v
+        out['msg'], out['qr'] = lines[1][4:], lines[2][3:]
+        for l in lines[3:]:
+            p = l.split()
+            if p and p[0] == 'dev':
+                out['devs'][p[1]] = p[2] == 'online=1'
+            elif p and p[0] == 'ctl':
+                out['ctl'].setdefault((p[1], p[2], p[3]), []).append((int(p[4]), int(p[5]), int(p[6]), int(p[7]), p[8]))
+        return out
+
+    def window(self, tag):
+        self.name = 'mellagui-smart-' + tag
+        p, c, stop = self.private_compositor(self.name, '--size', '900x760', env=self.env)
+        self.c = c
+        pr = subprocess.Popen([self.exe], env=dict(os.environ, WAYLAND_DISPLAY=self.name, **self.env), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'] and self.view()['view'], 'the window')
+        win = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'][0]
+        self.x0, self.y0 = win['x'], win['y']
+        return c
+
+    def devices_shown(self):
+        v = self.view()
+        return v['view'] == 'devices' and v.get('loaded') == '1' and ('plug1', 'switch_1', 'toggle') in v['ctl']
+
+    def press(self, key, at=0, dx=10):
+        b = self.view()['ctl'][key][at]
+        self.c.click(self.x0 + b[0] + dx, self.y0 + b[1] + b[3] // 2)
+
+    def test_selftest(self):
+        r = subprocess.run([self.exe, '--selftest'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout.decode())
+
+    def test_the_login_the_list_and_a_command_from_the_command_line(self):
+        self.cloud('cli')
+        code, out = self.cli('--list')
+        self.assertEqual(code, 1)
+        self.assertIn('not logged in', out)
+        code, out = self.cli('--login', 'nosuch')
+        self.assertEqual(code, 1)
+        self.assertIn('user code is not known', out)
+        code, out = self.cli('--login', 'abc123')
+        self.assertEqual(code, 0, out)
+        self.assertIn('Logged in', out)
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')
+        self.assertEqual(os.stat(conf).st_mode & 0o777, 0o600)                 # the tokens are the user's alone
+        self.assertIn('refresh-token=', open(conf).read())
+        code, out = self.cli('--list')
+        self.assertEqual(code, 0, out)
+        self.assertIn('4 devices', out)
+        self.assertRegex(out, r'cur_power\s+= 12\.3 W')                         # the scale and the unit of the device's description
+        self.assertRegex(out, r'control\s+= stop\s+choice, can be set \(open \| stop \| close\)')
+        code, out = self.cli('--set', 'blind1', 'control', 'open')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.state()['blind1']['status']['control'], 'open')
+        code, out = self.cli('--set', 'plug1', 'switch_1', 'true')
+        self.assertEqual(self.state()['plug1']['status']['switch_1'], True)
+        code, out = self.cli('--set', 'plug2', 'switch_1', 'false')
+        self.assertEqual(code, 1)
+        self.assertIn('offline', out)
+        self.assertNotIn('REFUSED', self.log())                                  # every signature and every encrypted text was right
+        code, out = self.cli('--logout')
+        self.assertNotIn('access-token=', open(conf).read())
+        self.assertIn('user-code=abc123', open(conf).read())                    # the code is kept for the next login
+
+    def test_the_access_token_is_renewed_when_it_runs_out(self):
+        self.cloud('renew', expire=30)                                          # (less than the minute the program keeps in hand: every call renews first)
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')
+        before = open(conf).read()
+        code, out = self.cli('--list')
+        self.assertEqual(code, 0, out)
+        self.assertIn('GET /v1.0/m/token/', self.log())
+        self.assertNotEqual(open(conf).read(), before)                          # the new tokens were saved
+        self.assertEqual(self.cli('--list')[0], 0)
+
+    def test_the_window_logs_in_with_a_qr_code_and_shows_the_devices(self):
+        self.cloud('win')
+        c = self.window('w1')
+        self.assertEqual(self.view()['view'], 'login')
+        for k in self.CODE_KEYS:
+            c.tap(k)
+        c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.view()['view'] == 'qr' and self.view()['qr'], 'the QR code')
+        c.abs(880, 740)
+        c.sync()
+        time.sleep(0.2)
+        ppm = c.dump(os.path.join(tmp, 'smart-qr.ppm'))
+        white = ppm.count((255, 255, 255), self.x0, self.y0, self.x0 + 520, self.y0 + 480)
+        black = ppm.count((0, 0, 0), self.x0, self.y0, self.x0 + 520, self.y0 + 480)
+        self.assertGreater(white, 40000)                                        # black modules on a white square, whatever the theme
+        self.assertGreater(black, 20000)
+        self.wait(self.devices_shown, 'the devices after the scan', 15)
+        v = self.view()
+        self.assertEqual(v['devs'], {'plug1': True, 'blind1': True, 'robot1': True, 'plug2': False})
+        self.assertEqual(len(v['ctl'][('blind1', 'control', 'button')]), 3)     # open / stop / close
+        self.assertIn(('blind1', 'percent_control', 'slider'), v['ctl'])
+        self.assertIn(('robot1', 'mode', 'menu'), v['ctl'])
+        self.assertNotIn(('plug1', 'countdown_1', 'slider'), v['ctl'])          # a range of a day is no slider
+
+    def logged_in_window(self, tag):
+        self.cloud(tag)
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        c = self.window(tag)
+        self.wait(self.devices_shown, 'the devices')
+        time.sleep(0.3)
+        return c
+
+    def test_a_switch_a_button_and_a_slider_tell_the_device(self):
+        c = self.logged_in_window('w2')
+        self.assertEqual(self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4], 'off')
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20)
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the plug goes on')
+        self.assertEqual(self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4], 'on')
+        self.press(('blind1', 'control', 'button'), at=2)
+        self.wait(lambda: self.state()['blind1']['status']['control'] == 'close', 'the blind closes')
+        s = self.view()['ctl'][('blind1', 'percent_control', 'slider')][0]
+        y = self.y0 + s[1] + s[3] // 2
+        c.abs(self.x0 + s[0] + 160, y)
+        c.button(272, True)
+        c.abs(self.x0 + s[0] + s[2] - 80, y)                                    # the right end of the track
+        time.sleep(0.2)
+        self.assertEqual(self.state()['blind1']['status']['percent_control'], 40)       # nothing is sent while it is dragged
+        c.button(272, False)
+        self.wait(lambda: self.state()['blind1']['status']['percent_control'] == 100, 'the position is sent when the slider is let go')
+        time.sleep(1.6)                                                         # two polls later the window still shows what the cloud says
+        self.assertEqual(self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][4], '100')
+        self.assertNotIn('REFUSED', self.log())
+
+    def test_a_choice_opens_a_menu_and_an_offline_device_is_left_alone(self):
+        c = self.logged_in_window('w3')
+        self.press(('robot1', 'mode', 'menu'))
+        self.wait(lambda: 'open=1' in c.cmd('dockmenu')[0], 'the menu')
+        entries = [l for l in c.cmd('dockmenu') if l.startswith('entry ')]
+        self.assertEqual([re.match(r'entry \d+ "(.*?)"', l)[1] for l in entries], ['standby', 'smart', 'spiral'])
+        m = re.match(r'entry 2 ".*?" x=(\d+) y=(\d+) w=(\d+) h=(\d+)', entries[2])
+        c.click(int(m[1]) + 10, int(m[2]) + 10)
+        self.wait(lambda: self.state()['robot1']['status']['mode'] == 'spiral', 'the mode is sent')
+        n = self.log().count('/commands')
+        self.press(('plug2', 'switch_1', 'toggle'), dx=20)
+        self.wait(lambda: 'offline' in self.view()['msg'], 'the window says the device is offline')
+        self.assertEqual(self.log().count('/commands'), n)
+
+    def test_a_change_made_elsewhere_shows_up_and_more_shows_everything(self):
+        import json
+        c = self.logged_in_window('w4')
+        st = json.load(open(self.state_path))
+        st['devices'][0]['status']['switch_1'] = True                           # somebody used the phone
+        with open(self.state_path, 'w') as f:
+            json.dump(st, f)
+        self.wait(lambda: self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4] == 'on', 'the next poll shows it')
+        y_blind = self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][1]
+        self.press(('plug1', '-', 'more'))
+        self.wait(lambda: self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][1] > y_blind, 'the card grows')
+        self.press(('plug1', '-', 'more'))
+        self.wait(lambda: self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][1] == y_blind, 'and shrinks again')
+
+    def test_log_out_goes_back_to_the_login(self):
+        c = self.logged_in_window('w5')
+        c.click(self.x0 + 520 - 104 + 40, self.y0 + 28)
+        self.wait(lambda: self.view()['view'] == 'login', 'the login view')
+        self.assertNotIn('access-token=', open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')).read())
+        c.tap(self.KEY_ENTER_)                                                   # the user code is still in the field
+        self.wait(lambda: self.view()['view'] == 'qr', 'a new QR code')
+        self.wait(self.devices_shown, 'logged in again', 15)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

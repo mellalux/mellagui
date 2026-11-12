@@ -35,6 +35,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_DISK] = { "disk", 0 },
     [LM_DOCKICON_TIMER] = { "timer", 0 },
     [LM_DOCKICON_NOTE] = { "note", 0 },
+    [LM_DOCKICON_HOME] = { "home", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -62,6 +63,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_DISK: return lm_theme.icon_disk;
     case LM_DOCKICON_TIMER: return lm_theme.icon_timer;
     case LM_DOCKICON_NOTE: return lm_theme.icon_note;
+    case LM_DOCKICON_HOME: return lm_theme.icon_home;
     default: return lm_theme.icon_generic;
     }
 }
@@ -93,6 +95,7 @@ int lm_dockicon_guess(const char *entry_name)
         { "setting", LM_DOCKICON_SETTINGS }, { "config", LM_DOCKICON_SETTINGS }, { "prefer", LM_DOCKICON_SETTINGS },
         { "code", LM_DOCKICON_CODE }, { "firefox", LM_DOCKICON_WEB }, { "browser", LM_DOCKICON_WEB }, { "chrom", LM_DOCKICON_WEB },
         { "web", LM_DOCKICON_WEB }, { "internet", LM_DOCKICON_WEB }, { "run", LM_DOCKICON_RUN }, { "launcher", LM_DOCKICON_LAUNCHER },
+        { "smart", LM_DOCKICON_HOME }, { "home", LM_DOCKICON_HOME },
     };
     for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++)
         if (strcasestr(entry_name, hints[i].part))
@@ -266,6 +269,12 @@ static float glyph(int kind, float u, float v)
         d = fminf2(d, sd_box(u, v, 0, -0.30f, 0.055f, 0.035f, 0.012f));
         d = fminf2(d, sd_line(u, v, 0.23f, -0.14f, 0.28f, -0.19f, 0.03f));
         return d;
+    }
+    case LM_DOCKICON_HOME: {                            /* a house: a roof with a chimney, the walls and a door */
+        float d = sd_tri(u, v, 0.0f, -0.34f, -0.36f, -0.02f, 0.36f, -0.02f) - 0.02f;
+        d = fminf2(d, sd_box(u, v, 0.21f, -0.24f, 0.045f, 0.10f, 0.01f));
+        d = fminf2(d, sd_box(u, v, 0, 0.13f, 0.25f, 0.17f, 0.02f));
+        return sd_sub(d, sd_box(u, v, 0, 0.19f, 0.065f, 0.12f, 0.015f));
     }
     case LM_DOCKICON_NOTE: {                            /* a sheet with lines of writing and a folded corner */
         float d = sd_box(u, v, 0, 0, 0.26f, 0.30f, 0.03f);

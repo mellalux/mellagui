@@ -49,7 +49,8 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Screenshot    = [shot] mellagui-shot\n" \
     "Overview      = [overview] @overview\n" \
     "Notes         = [note] mellagui-edit --notes\n" \
-    "Timer         = [timer] mellagui-timer\n"
+    "Timer         = [timer] mellagui-timer\n" \
+    "Smart home    = [home] mellagui-smart\n"
 
 #define DEFAULT_SETTINGS \
     "[dock]\n" \

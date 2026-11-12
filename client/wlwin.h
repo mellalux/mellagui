@@ -45,7 +45,12 @@ struct wlwin {
     uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard, menu;       /* menu: mellagui_menu_v1, 0 without it */
     uint32_t surface, xsurface, toplevel, pool, buffer;
     int w, h;                       /* size the compositor asked for (clamped to the minimum) */
-    int bw, bh;                     /* size of `pixels` */
+    int bw, bh;                     /* the window's drawing area in LOGICAL pixels (what a program lays out in) */
+    int pw, ph;                     /* size of `pixels`: bw * scale x bh * scale (= bw x bh unless the program asked for wlwin_hidpi) */
+    int scale;                      /* the buffer's scale factor: 1, or the largest wl_output scale for a hidpi window */
+    bool hidpi;                     /* wlwin_hidpi() was called: the program draws only through the wlwin_* calls */
+    uint32_t out_id[8];             /* the wl_outputs bound, and the scale each announced */
+    int out_scale[8], nout;
     uint32_t *pixels;
     size_t map_size;
     bool configured, running, buffer_busy, redraw;
@@ -73,6 +78,15 @@ bool wlwin_step(struct wlwin *w, int timeout_ms);
 
 void wlwin_destroy(struct wlwin *w);
 
+/*
+ * HiDPI. A program that calls this once (at the start of main) draws on a screen with a scale of 2 or more into a buffer
+ * that many times as big, so its text and buttons are as sharp as the shell's: `bw` x `bh` stay the LOGICAL size
+ * every layout counts in, and the wlwin_* drawing calls take logical coordinates and do the multiplying. Such a program
+ * must NOT touch `pixels` itself (its stride is `pw`, its size `pw` x `ph`): it uses wlwin_round_fill / wlwin_dim /
+ * wlwin_blit below. Without the call the buffer is bw x bh and the compositor enlarges it (soft, but nothing breaks).
+ */
+void wlwin_hidpi(void);                         /* call it first in main(): it is a property of the program, every window it opens is hidpi */
+
 /* Show a menu at the pointer, drawn by the compositor (it may reach beyond the window): `entries` one per line, a leading '~' = dim. The answer
  * comes to ops->menu. False when the compositor has no such menu (the caller does the action some other way or does nothing). */
 bool wlwin_menu(struct wlwin *w, const char *entries);
@@ -84,6 +98,12 @@ bool wlwin_request_size(struct wlwin *w, int width, int height);
 /* ---- drawing (all clip to the buffer) ------------------------------------------------------------------------------ */
 
 void wlwin_fill(struct wlwin *w, int x, int y, int width, int height, uint32_t rgb);
+/* A box with rounded corners (a pill when r >= min(width, height) / 2), blended over what is there. */
+void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb);
+/* Everything drawn so far mixed with black: t = 0 nothing, 1 all black (a modal card dims the page behind it). */
+void wlwin_dim(struct wlwin *w, double t);
+/* An XRGB / ARGB picture of sw x sh pixels (stride in pixels) scaled to the logical rectangle (x, y, width, height). */
+void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint32_t *src, int sw, int sh, int stride);
 /* One glyph scaled up by `scale` (>= 1). */
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb);
 /* UTF-8 text; max_w > 0 stops before the first character that would not fit completely in that many pixels. */

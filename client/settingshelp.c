@@ -209,6 +209,15 @@ static const struct entry table[] = {
       "DejaVu Sans Mono), every letter as wide as it is - an i is narrow, an m wide. Monospace: labels use the font above, every letter equally "
       "wide, as in a terminal. Terminals, the editor, tables and text fields are always monospace. With the built-in pixel font there is no "
       "proportional text." },
+    { "@Scale", NULL, "Scale",
+      "How big everything is on the screen. At 200 % the shell, the panel and every program that knows the scale are drawn twice as large - with the "
+      "same sharpness, because they are drawn at the screen's own pixels, not enlarged afterwards. In between (125, 150 %) suits a screen whose pixels "
+      "are small but not tiny. It applies to every monitor. A program that does not know the scale yet is enlarged by the shell and looks softer; "
+      "restart it after the change." },
+    { "scale", NULL, "Scale in percent",
+      "100 % is the size MellaGUI always had. The window sizes, the dock and the panel follow at once. The screen keeps its resolution; only the "
+      "number of pixels that make a button changes, so a large scale on a small screen leaves little room: the shell never works in less than "
+      "640 x 360 pixels." },
     { "theme-buttons", NULL, "Colours of the buttons",
       "Colourful: every button has its own colour, as MellaGUI always looked. One colour: all buttons take the hue of one colour (the choice below) and "
       "keep their own lightness, so a dark button stays dark. Grey: the colour is taken away." },

@@ -295,7 +295,7 @@ static void paint_button(struct app *a, int item, const char *text, bool on, boo
     struct wlwin *w = &a->win;
     struct rc r = rect_of(item);
     uint32_t bg = !avail ? lm_mix_rgb(lm_theme.button, lm_theme.background, 0.5) : on ? on_rgb : a->hover == item ? lm_theme.button_hover : lm_theme.button;
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
+    wlwin_round_fill(w, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
     uint32_t fg = !avail ? lm_theme.text_dim : on ? lm_theme.ink : lm_theme.text;
     int tw = lm_font_text_width(text);
     wlwin_text(w, r.x + (r.w - tw) / 2, r.y + (r.h - LM_FONT_H) / 2, text, 1, fg, r.w - 8);
@@ -311,7 +311,7 @@ static void paint_slider(struct app *a, int item, int value, bool muted, bool av
         return;
     int kx = lo + (hi - lo) * value / 100;
     wlwin_fill(w, lo, cy - 2, kx - lo, 4, muted ? lm_theme.text_dim : lm_theme.accent);
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, kx - 7, cy - 8, 14, 16, lm_button_radius(7), a->drag == item ? lm_theme.button_down : lm_theme.text);
+    wlwin_round_fill(w, kx - 7, cy - 8, 14, 16, lm_button_radius(7), a->drag == item ? lm_theme.button_down : lm_theme.text);
     char v[8];
     snprintf(v, sizeof(v), "%d", value);
     wlwin_text(w, r.x + r.w - lm_font_text_width(v), r.y - 2, v, 1, lm_theme.text_dim, 0);
@@ -495,6 +495,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

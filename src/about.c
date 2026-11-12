@@ -97,7 +97,12 @@ int lm_about_collect(struct lm_server *srv, struct lm_about_row *rows, int max)
 
     struct lm_output *o = srv->backend ? lm_output_primary(srv) : NULL;
     if (o)
-        add(rows, &n, max, "Display", "%s  %dx%d @ %.0f Hz", o->name, o->width, o->height, (double)o->refresh_mhz / 1000.0);
+        {
+            if (o->scale_milli > 1000)
+                add(rows, &n, max, "Display", "%s  %dx%d @ %.0f Hz, scale %d %%", o->name, lm_output_pw(o), lm_output_ph(o), (double)o->refresh_mhz / 1000.0, o->scale_milli / 10);
+            else
+                add(rows, &n, max, "Display", "%s  %dx%d @ %.0f Hz", o->name, lm_output_pw(o), lm_output_ph(o), (double)o->refresh_mhz / 1000.0);
+        }
     if (!fixed)
         add(rows, &n, max, "Graphics", "%s renderer, %s backend", srv->render && lm_render_gl(srv->render) ? "OpenGL" : "software",
         srv->config.backend);

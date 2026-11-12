@@ -995,7 +995,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
 {
     int y = HEAD_H + 4, h = TOOL_H - 8;
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
-    lm_round_fill(w->pixels, w->bw, w->bw, w->bh, b->x, y, b->w, h, lm_button_radius(h / 2), base);
+    wlwin_round_fill(w, b->x, y, b->w, h, lm_button_radius(h / 2), base);
     int tw = lm_font_text_width(b->label);
     wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
@@ -1584,6 +1584,7 @@ static int list_cmd(int n)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

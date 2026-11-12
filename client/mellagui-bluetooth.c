@@ -615,11 +615,7 @@ static void paint(struct wlwin *w)
         snprintf(hint, sizeof(hint), "Enter: connect / pair   Delete: forget   S: scan   Esc closes");
     wlwin_text(w, 14, fy + 22, hint, 1, lm_theme.text_dim, w->bw - 28);
     if (a->modal != M_NONE) {
-        for (int y = 0; y < w->bh; y++)                         /* the list dims */
-            for (int x = 0; x < w->bw; x++) {
-                uint32_t p = w->pixels[(size_t)y * (size_t)w->bw + (size_t)x];
-                w->pixels[(size_t)y * (size_t)w->bw + (size_t)x] = 0xff000000u | ((((p >> 16) & 255) / 2) << 16) | ((((p >> 8) & 255) / 2) << 8) | ((p & 255) / 2);
-            }
+        wlwin_dim(w, 0.5);                                      /* the list dims */
         struct box m = modal_box(a);
         wlwin_fill(w, m.x - 1, m.y - 1, m.w + 2, m.h + 2, lm_theme.accent);
         wlwin_fill(w, m.x, m.y, m.w, m.h, lm_theme.card);
@@ -864,6 +860,7 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();

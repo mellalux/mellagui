@@ -41,6 +41,7 @@
 #include "gl.h"
 #include "log.h"
 #include "logind.h"
+#include "output.h"
 
 #define HOTPLUG_POLL_MS 2000
 #define SIG_VT_RELEASE SIGUSR2
@@ -258,7 +259,7 @@ static int shadow_alloc(struct drm_out *o, size_t size)
 /* Copies `r` (output-local) from the shadow frame into dumb buffer `b`. */
 static void copy_to_buf(const struct drm_out *o, struct drm_buf *b, struct lm_rect r)
 {
-    struct lm_rect full = lm_rect_make(0, 0, o->base.width, o->base.height);
+    struct lm_rect full = lm_rect_make(0, 0, lm_output_pw(&o->base), lm_output_ph(&o->base));
     struct lm_rect c;
     if (!lm_rect_intersect(&r, &full, &c))
         return;
@@ -651,8 +652,7 @@ static struct drm_out *out_create(struct drm *d, drmModeRes *res, drmModeConnect
     snprintf(lo->name, sizeof(lo->name), "%s-%u", connector_type_name(conn->connector_type),
              conn->connector_type_id);
     conn_identify(d->fd, conn, lo);
-    lo->width = (int32_t)w;
-    lo->height = (int32_t)h;
+    lm_output_set_mode(lo, (int32_t)w, (int32_t)h);
     uint32_t vr = o->mode.vrefresh ? o->mode.vrefresh : 60;
     if (o->mode.htotal && o->mode.vtotal && o->mode.clock)
         lo->refresh_mhz = (int32_t)(((uint64_t)o->mode.clock * 1000000ull) /
@@ -731,7 +731,7 @@ static int probe_outputs(struct drm *d, bool force)
         if (c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 && d->active) {
             struct drm_out *o = out_create(d, res, c);
             if (o) {
-                lm_info("drm: output %s %dx%d connected", o->base.name, o->base.width, o->base.height);
+                lm_info("drm: output %s %dx%d connected", o->base.name, lm_output_pw(&o->base), lm_output_ph(&o->base));
                 lm_timer_arm_ms(d->ready_timer, 1, 0);
             }
         }
@@ -821,8 +821,8 @@ static struct lm_framebuffer *drm_get_framebuffer(struct lm_output *out)
     if (!d->active || o->flip_pending || !o->live || o->gs.win)        /* (a GL output has no memory framebuffer) */
         return NULL;
     o->fb.pixels = o->shadow;
-    o->fb.width = out->width;
-    o->fb.height = out->height;
+    o->fb.width = lm_output_pw(out);
+    o->fb.height = lm_output_ph(out);
     o->fb.stride = (int32_t)o->buf[0].pitch;
     o->fb.age = o->shadow_valid ? 1 : 0;        /* the shadow always holds the last composed frame */
     return &o->fb;
@@ -837,7 +837,7 @@ static int drm_present(struct lm_output *out, const struct lm_rect *damage, int 
     struct drm_buf *b = &o->buf[o->back];
     struct drm_buf *other = &o->buf[o->back ^ 1];
     if (d->base.blanked) {                  /* standby: a flip on a CRTC that is off fails; show the picture once it is back */
-        struct lm_rect all = lm_rect_make(0, 0, out->width, out->height);
+        struct lm_rect all = lm_rect_make(0, 0, lm_output_pw(out), lm_output_ph(out));
         dirty_add(&b->dirty, all);
         dirty_add(&other->dirty, all);
         o->shadow_valid = true;
@@ -845,7 +845,7 @@ static int drm_present(struct lm_output *out, const struct lm_rect *damage, int 
     }
     /* What changed in this frame is missing from both dumb buffers; the back one gets it now, the other (currently
      * on screen) is brought up to date by the next present. */
-    struct lm_rect whole = lm_rect_make(0, 0, out->width, out->height);
+    struct lm_rect whole = lm_rect_make(0, 0, lm_output_pw(out), lm_output_ph(out));
     if (!damage || n <= 0) {
         dirty_add(&b->dirty, whole);
         dirty_add(&other->dirty, whole);
@@ -1434,8 +1434,7 @@ static int drm_apply_mode(struct lm_output *out)
     buf_destroy(d, &old[1]);
 mode_done:
     o->seq = 0;
-    out->width = (int32_t)m.hdisplay;
-    out->height = (int32_t)m.vdisplay;
+    lm_output_set_mode(out, (int32_t)m.hdisplay, (int32_t)m.vdisplay);
     if (m.htotal && m.vtotal && m.clock)
         out->refresh_mhz = (int32_t)(((uint64_t)m.clock * 1000000ull) / ((uint64_t)m.htotal * m.vtotal));
     if (mm_w) {                                                         /* (else keep the size the EDID gave) */

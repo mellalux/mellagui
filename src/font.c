@@ -777,26 +777,32 @@ void lm_font_label(uint32_t cp, int scale, struct lm_font_glyph *out)
 
 void lm_font_label_styled(uint32_t cp, int scale, bool bold, struct lm_font_glyph *out)
 {
+    lm_font_label_scaled(cp, (double)(scale < 1 ? 1 : scale > 32 ? 32 : scale), bold, out);
+}
+
+void lm_font_label_scaled(uint32_t cp, double scale, bool bold, struct lm_font_glyph *out)
+{
     ensure();
-    scale = scale < 1 ? 1 : scale > 32 ? 32 : scale;
-    int ch = LM_FONT_H * scale;
+    scale = scale < 1.0 ? 1.0 : scale > 32.0 ? 32.0 : scale;
+    int ch = (int)lround(LM_FONT_H * scale);
     int g = 0, adv1 = 0;
     struct lm_ttf *t = ui_face(cp, bold, &g, &adv1);
     if (!t) {                                                   /* cells: this program's choice, no file, or no such glyph */
-        out->px = lm_font_cell_styled(cp, LM_FONT_W * scale, ch, bold);
-        out->w = LM_FONT_W * scale;
+        int cw = (int)lround(LM_FONT_W * scale);
+        out->px = lm_font_cell_styled(cp, cw, ch, bold);
+        out->w = cw;
         out->h = ch;
         out->left = 0;
-        out->advance = LM_FONT_W * scale;
+        out->advance = cw;
         return;
     }
     bool strike = bold && t == F.ui;
     double s1 = ui_scale() * lm_ttf_units(F.ui) / lm_ttf_units(t);
-    int pad = 2 * scale, w = adv1 * scale + 2 * pad;            /* room for what hangs over the advance (j, f, W) */
+    int pad = (int)ceil(2.0 * scale), w = (int)ceil(adv1 * scale) + 2 * pad;     /* room for what hangs over the advance (j, f, W) */
     out->w = w;
     out->h = ch;
     out->left = pad;
-    out->advance = adv1 * scale;
+    out->advance = (int)lround(adv1 * scale);
 
     uint32_t key = cp | 0x80000000u | (bold ? 0x40000000u : 0);  /* (code points end at 0x10ffff: the bits mark a label, a bold one) */
     uint32_t h = (key * 2654435761u) ^ ((uint32_t)ch * 2246822519u);
@@ -837,7 +843,7 @@ void lm_font_label_styled(uint32_t cp, int scale, bool bold, struct lm_font_glyp
         for (size_t k = 0; k < size; k++)
             px[k] = F.gamma[px[k]];
     if (strike)
-        strike_twice(px, w, ch, scale);
+        strike_twice(px, w, ch, (int)lround(scale) < 1 ? 1 : (int)lround(scale));
     F.slot[i] = (struct cell){ key, (uint16_t)w, (uint16_t)ch, px };
     F.used++;
     F.bytes += size;

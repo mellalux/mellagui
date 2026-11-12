@@ -21,7 +21,8 @@
 
 struct gl_chrome {
     unsigned tex;
-    int w, h;
+    int w, h;                           /* the LOGICAL size of what it shows */
+    int pw, ph;                         /* the texture's own size: physical pixels */
     uint64_t hash;
 };
 
@@ -35,7 +36,7 @@ struct gl_out {
     struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
-    uint32_t theme_gen;                 /* the palette and the font the chromes below were painted with */
+    uint32_t theme_gen;                 /* the palette, the font and the scale the chromes below were painted with */
     struct lm_gl_target mag;            /* the scene before the magnifier zooms it (made when it is first needed) */
     bool unread;                        /* rendered since the last readback */
 };
@@ -97,7 +98,7 @@ static struct gl_out *gl_out_get(struct lm_renderer *r, struct out_state *st)
 {
     struct lm_output *out = st->out;
     struct gl_out *go = st->gl;
-    if (go && (go->w != out->width || go->h != out->height)) {      /* the mode changed */
+    if (go && (go->w != lm_output_pw(out) || go->h != lm_output_ph(out))) {      /* the mode changed */
         gl_out_free(r, st);
         go = NULL;
     }
@@ -106,13 +107,13 @@ static struct gl_out *gl_out_get(struct lm_renderer *r, struct out_state *st)
     lm_gl_make_current(r->gl);
     go = calloc(1, sizeof(*go));
     bool window = lm_output_gl_window(out) != NULL;                 /* DRM: it renders into a GBM window, no offscreen target */
-    if (!go || (!window && !lm_gl_target_create(r->gl, out->width, out->height, &go->tgt))) {
+    if (!go || (!window && !lm_gl_target_create(r->gl, lm_output_pw(out), lm_output_ph(out), &go->tgt))) {
         free(go);
-        lm_error("gl: cannot create the %dx%d render target of %s", out->width, out->height, out->name);
+        lm_error("gl: cannot create the %dx%d render target of %s", lm_output_pw(out), lm_output_ph(out), out->name);
         return NULL;
     }
-    go->w = out->width;
-    go->h = out->height;
+    go->w = lm_output_pw(out);                          /* everything the GPU draws is in the screen's own pixels */
+    go->h = lm_output_ph(out);
     go->bg = calloc((size_t)go->w * (size_t)go->h, 4);
     go->bg_tex = lm_gl_tex_create(r->gl, go->w, go->h, NULL);
     if (!go->bg || !go->bg_tex) {
@@ -175,12 +176,13 @@ static void gl_bg_update(struct lm_renderer *r, struct out_state *st, struct gl_
                 continue;
         }
         struct paint_ctx c = { .r = r, .out = st->out, .fb = &fb, .clip = rc, .cov_idx = -1 };
+        ctx_init(&c);
         if (r->srv->wm)
             lm_wm_scene_for_each(r->srv->wm, &rc, gl_bg_cb, &c);
         else
             paint_wallpaper(&c);
-        int lx = rc.x - orect.x, ly = rc.y - orect.y;
-        lm_gl_tex_update(r->gl, go->bg_tex, lx, ly, rc.w, rc.h, go->bg + (size_t)ly * (size_t)go->w + (size_t)lx, go->w);
+        struct lm_rect pr = out_prect(st->out, &rc);                    /* the physical pixels that were painted */
+        lm_gl_tex_update(r->gl, go->bg_tex, pr.x, pr.y, pr.w, pr.h, go->bg + (size_t)pr.y * (size_t)go->w + (size_t)pr.x, go->w);
     }
 }
 
@@ -227,21 +229,23 @@ static bool gl_dirty(const struct gl_pass *p, const struct lm_rect *rect)
 static unsigned gl_scratch(struct lm_renderer *r, struct out_state *st, struct gl_chrome *ch, const struct lm_rect *rect,
                            gl_paint_fn fn, const void *item)
 {
-    int w = rect->w, h = rect->h;
+    if (rect->w <= 0 || rect->h <= 0)
+        return 0;
+    struct lm_rect pr = out_prect(st->out, rect);       /* the picture is made of the physical pixels the rectangle covers on the screen */
+    int w = pr.w, h = pr.h;
     if (w <= 0 || h <= 0)
         return 0;
     uint32_t *pix = calloc((size_t)w * (size_t)h, 4);
     if (!pix)
         return 0;
-    struct lm_output fake = *st->out;                   /* the painters only look at its origin and size */
-    fake.x = rect->x;
-    fake.y = rect->y;
-    fake.width = w;
-    fake.height = h;
+    struct lm_output fake = *st->out;
     struct lm_framebuffer fb = { .pixels = pix, .width = w, .height = h, .stride = w * 4 };
     struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = *rect, .cov_idx = -1 };
+    ctx_init(&c);
+    c.fbx = pr.x;
+    c.fby = pr.y;
     fn(&c, item);
-    if (ch->tex && (ch->w != w || ch->h != h)) {
+    if (ch->tex && (ch->pw != w || ch->ph != h)) {
         lm_gl_tex_delete(r->gl, ch->tex);
         ch->tex = 0;
     }
@@ -249,8 +253,10 @@ static unsigned gl_scratch(struct lm_renderer *r, struct out_state *st, struct g
         ch->tex = lm_gl_tex_create(r->gl, w, h, pix);
     else
         lm_gl_tex_update(r->gl, ch->tex, 0, 0, w, h, pix, w);
-    ch->w = w;
-    ch->h = h;
+    ch->w = rect->w;
+    ch->h = rect->h;
+    ch->pw = w;
+    ch->ph = h;
     free(pix);
     return ch->tex;
 }
@@ -260,9 +266,10 @@ static unsigned gl_scratch(struct lm_renderer *r, struct out_state *st, struct g
 static void gl_scratch_alpha(struct lm_renderer *r, struct out_state *st, struct gl_chrome *ch, const struct lm_rect *rect,
                              gl_paint_fn fn, const void *item)
 {
-    int w = rect->w, h = rect->h;
+    struct lm_rect pr = out_prect(st->out, rect);       /* physical, as in gl_scratch */
+    int w = pr.w, h = pr.h;
     size_t n = (size_t)w * (size_t)h;
-    if (w <= 0 || h <= 0)
+    if (rect->w <= 0 || rect->h <= 0 || w <= 0 || h <= 0)
         return;
     uint32_t *black = malloc(n * 4), *white = malloc(n * 4);
     if (black && white) {
@@ -273,12 +280,11 @@ static void gl_scratch_alpha(struct lm_renderer *r, struct out_state *st, struct
         uint32_t *bufs[2] = { black, white };
         for (int k = 0; k < 2; k++) {
             struct lm_output fake = *st->out;
-            fake.x = rect->x;
-            fake.y = rect->y;
-            fake.width = w;
-            fake.height = h;
             struct lm_framebuffer fb = { .pixels = bufs[k], .width = w, .height = h, .stride = w * 4 };
             struct paint_ctx c = { .r = r, .out = &fake, .fb = &fb, .clip = *rect, .cov_idx = -1 };
+            ctx_init(&c);
+            c.fbx = pr.x;
+            c.fby = pr.y;
             fn(&c, item);
         }
         for (size_t i = 0; i < n; i++) {
@@ -289,7 +295,7 @@ static void gl_scratch_alpha(struct lm_renderer *r, struct out_state *st, struct
             uint32_t rr = LM_MIN((b >> 16) & 255, (uint32_t)a), gg = LM_MIN((b >> 8) & 255, (uint32_t)a), bb = LM_MIN(b & 255, (uint32_t)a);
             black[i] = ((uint32_t)a << 24) | (rr << 16) | (gg << 8) | bb;
         }
-        if (ch->tex && (ch->w != w || ch->h != h)) {
+        if (ch->tex && (ch->pw != w || ch->ph != h)) {
             lm_gl_tex_delete(r->gl, ch->tex);
             ch->tex = 0;
         }
@@ -297,23 +303,33 @@ static void gl_scratch_alpha(struct lm_renderer *r, struct out_state *st, struct
             ch->tex = lm_gl_tex_create(r->gl, w, h, black);
         else
             lm_gl_tex_update(r->gl, ch->tex, 0, 0, w, h, black, w);
-        ch->w = w;
-        ch->h = h;
+        ch->w = rect->w;
+        ch->h = rect->h;
+        ch->pw = w;
+        ch->ph = h;
     }
     free(black);
     free(white);
 }
 
+/* A logical (global) rectangle in the framebuffer's physical pixels: where the GPU draws it. */
+static inline struct lm_rect gl_pr(const struct gl_pass *p, const struct lm_rect *rect)
+{
+    return out_prect(p->st->out, rect);
+}
+
 static void gl_tex_at(struct gl_pass *p, unsigned tex, const struct lm_rect *rect, bool opaque)
 {
-    lm_gl_draw_tex(p->r->gl, tex, rect->x - p->ox, rect->y - p->oy, rect->w, rect->h, 0, 0, 1, 1, 1.0f, opaque);
+    struct lm_rect pr = gl_pr(p, rect);
+    lm_gl_draw_tex(p->r->gl, tex, pr.x, pr.y, pr.w, pr.h, 0, 0, 1, 1, 1.0f, opaque);
 }
 
 static void gl_solid(struct gl_pass *p, const struct lm_rect *rect, uint32_t rgb)
 {
     if (rect->w <= 0 || rect->h <= 0)
         return;
-    lm_gl_draw_rect(p->r->gl, rect->x - p->ox, rect->y - p->oy, rect->w, rect->h, (float)((rgb >> 16) & 255) / 255.0f,
+    struct lm_rect pr = gl_pr(p, rect);
+    lm_gl_draw_rect(p->r->gl, pr.x, pr.y, pr.w, pr.h, (float)((rgb >> 16) & 255) / 255.0f,
                     (float)((rgb >> 8) & 255) / 255.0f, (float)(rgb & 255) / 255.0f, 1.0f);
 }
 
@@ -452,9 +468,10 @@ static bool gl_visit(struct lm_surface *s, int32_t x, int32_t y, void *data)
     if (!lm_rect_overlaps(&where, &orect))
         return true;
     gl_sync_tex(p->r, s);
-    if (s->gl_tex)
-        lm_gl_draw_tex(p->r->gl, s->gl_tex, x - p->ox, y - p->oy, s->width, s->height, 0, 0, 1, 1, 1.0f,
-                       s->tex.opaque || s->tex.solid);
+    if (s->gl_tex) {
+        struct lm_rect pr = gl_pr(p, &where);                           /* the GPU maps the buffer onto the physical pixels the surface covers */
+        lm_gl_draw_tex(p->r->gl, s->gl_tex, pr.x, pr.y, pr.w, pr.h, 0, 0, 1, 1, 1.0f, s->tex.opaque || s->tex.solid);
+    }
     return true;
 }
 
@@ -474,11 +491,13 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_OVERVIEW:
         if (item->u.overview.rect.x == p->st->out->x && item->u.overview.rect.y == p->st->out->y) {
             const struct lm_overview_info *ov = &item->u.overview;
-            if (ov->dim > 0)                                    /* the dimming changes every frame while it opens: a plain translucent quad, not a texture */
-                lm_gl_draw_rect(p->r->gl, ov->rect.x - p->ox, ov->rect.y - p->oy, ov->rect.w, ov->rect.h,
+            if (ov->dim > 0) {                                  /* the dimming changes every frame while it opens: a plain translucent quad, not a texture */
+                struct lm_rect pr = gl_pr(p, &ov->rect);
+                lm_gl_draw_rect(p->r->gl, pr.x, pr.y, pr.w, pr.h,
                                 (float)((lm_theme.ink >> 16) & 255) / 255.0f * (float)ov->dim / 255.0f,
                                 (float)((lm_theme.ink >> 8) & 255) / 255.0f * (float)ov->dim / 255.0f,
                                 (float)(lm_theme.ink & 255) / 255.0f * (float)ov->dim / 255.0f, (float)ov->dim / 255.0f);
+            }
             if (ov->ui) {                                       /* strip, frames and labels: redrawn only when something they show changed */
                 struct gl_chrome *ch = &p->go->overview;
                 uint64_t h = fnv(1469598103934665603ull, &ov->rect, sizeof(ov->rect));
@@ -507,8 +526,9 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             g->gl_tex = lm_gl_tex_create(p->r->gl, g->w, g->h, g->px);
         const struct lm_rect *sr = &item->u.ghost.src;
         bool part = sr->w > 0 && sr->h > 0;
+        struct lm_rect pd = gl_pr(p, d);
         if (g->gl_tex)
-            lm_gl_draw_tex(p->r->gl, g->gl_tex, d->x - p->ox, d->y - p->oy, d->w, d->h,
+            lm_gl_draw_tex(p->r->gl, g->gl_tex, pd.x, pd.y, pd.w, pd.h,
                            part ? (float)sr->x / (float)g->w : 0, part ? (float)sr->y / (float)g->h : 0,
                            part ? (float)(sr->x + sr->w) / (float)g->w : 1, part ? (float)(sr->y + sr->h) / (float)g->h : 1,
                            (float)item->u.ghost.alpha / 255.0f, false);
@@ -727,8 +747,10 @@ static void gl_overlays(struct gl_pass *p)
     if (a > 0) {
         float f = (float)a / 255.0f;
         struct lm_rect orect = lm_output_rect(p->st->out), area;
-        if (lm_rect_intersect(&fx->area, &orect, &area))
-            lm_gl_draw_rect(r->gl, area.x - p->ox, area.y - p->oy, area.w, area.h, f, f, f, f);
+        if (lm_rect_intersect(&fx->area, &orect, &area)) {
+            struct lm_rect pa = gl_pr(p, &area);
+            lm_gl_draw_rect(r->gl, pa.x, pa.y, pa.w, pa.h, f, f, f, f);
+        }
     }
     struct gl_out *go = p->go;
     if (!go->card.tex || go->card_gen != fx->gen) {
@@ -736,8 +758,8 @@ static void gl_overlays(struct gl_pass *p)
         go->card_gen = fx->gen;
     }
     if (go->card.tex) {
-        struct lm_rect cr = shot_card_rect(fx);
-        lm_gl_draw_tex(r->gl, go->card.tex, cr.x - p->ox, cr.y - p->oy, cr.w, cr.h, 0, 0, 1, 1, 1.0f, false);
+        struct lm_rect cr = shot_card_rect(fx), pc = gl_pr(p, &cr);
+        lm_gl_draw_tex(r->gl, go->card.tex, pc.x, pc.y, pc.w, pc.h, 0, 0, 1, 1, 1.0f, false);
     }
 }
 
@@ -756,9 +778,26 @@ static void gl_cursor(struct gl_pass *p)
     int shape = (int)(v.sprite - sprites);
     if (shape < 0 || shape > LM_CURSOR_POINTER)
         return;
-    if (!r->sprite_tex[shape])
-        r->sprite_tex[shape] = lm_gl_tex_create(r->gl, SPR_W, SPR_H, v.sprite->px);
-    lm_gl_draw_tex(r->gl, r->sprite_tex[shape], v.rect.x - p->ox, v.rect.y - p->oy, SPR_W, SPR_H, 0, 0, 1, 1, 1.0f, false);
+    double sc = lm_output_scalef(p->st->out);
+    int k = sc == 1.0 ? 1 : v.k;                                        /* the arrow is made k times as big with whole pixels: it stays sharp */
+    if (r->sprite_tex[shape] && r->sprite_k[shape] != k) {
+        lm_gl_tex_delete(r->gl, r->sprite_tex[shape]);
+        r->sprite_tex[shape] = 0;
+    }
+    if (!r->sprite_tex[shape]) {
+        uint32_t *big = k == 1 ? NULL : malloc((size_t)SPR_W * (size_t)SPR_H * (size_t)k * (size_t)k * 4);
+        if (k != 1 && !big)
+            return;
+        if (big)
+            for (int y = 0; y < SPR_H * k; y++)
+                for (int x = 0; x < SPR_W * k; x++)
+                    big[y * SPR_W * k + x] = v.sprite->px[(y / k) * SPR_W + x / k];
+        r->sprite_tex[shape] = lm_gl_tex_create(r->gl, SPR_W * k, SPR_H * k, big ? big : v.sprite->px);
+        r->sprite_k[shape] = k;
+        free(big);
+    }
+    int px = sround((double)(v.ix - p->ox) * sc) - v.sprite->hot_x * k, py = sround((double)(v.iy - p->oy) * sc) - v.sprite->hot_y * k;
+    lm_gl_draw_tex(r->gl, r->sprite_tex[shape], px, py, SPR_W * k, SPR_H * k, 0, 0, 1, 1, 1.0f, false);
 }
 
 /* ---- one frame ----------------------------------------------------------------------------------------------------- */
@@ -801,16 +840,17 @@ static uint32_t *gl_capture(struct lm_renderer *r, struct out_state *st, const s
     gl_draw_scene(r, st, go, &all, true, false);
     lm_region_fini(&all);
     size_t stride = (size_t)go->w * 4;
-    uint32_t *whole = malloc((size_t)go->h * stride), *res = malloc((size_t)clip->w * (size_t)clip->h * 4);
+    struct lm_rect pclip = out_prect(out, clip);                        /* the picture is made of the screen's own pixels */
+    uint32_t *whole = malloc((size_t)go->h * stride), *res = malloc((size_t)pclip.w * (size_t)pclip.h * 4);
     bool ok = whole && res && lm_gl_readback(r->gl, &tgt, whole, stride);
     lm_gl_target_destroy(r->gl, &tgt);
     if (ok) {
-        for (int y = 0; y < clip->h; y++)
-            memcpy(res + (size_t)y * (size_t)clip->w,
-                   (const uint8_t *)whole + (size_t)(clip->y - out->y + y) * stride + (size_t)(clip->x - out->x) * 4,
-                   (size_t)clip->w * 4);
-        *w = clip->w;
-        *h = clip->h;
+        for (int y = 0; y < pclip.h; y++)
+            memcpy(res + (size_t)y * (size_t)pclip.w,
+                   (const uint8_t *)whole + (size_t)(pclip.y + y) * stride + (size_t)pclip.x * 4,
+                   (size_t)pclip.w * 4);
+        *w = pclip.w;
+        *h = pclip.h;
     }
     free(whole);
     if (!ok) {
@@ -832,7 +872,7 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     if (!go)
         return false;
     lm_gl_make_current(r->gl);
-    uint32_t look_gen = lm_theme_generation() + lm_font_generation();   /* both only grow: the sum moves when either does */
+    uint32_t look_gen = lm_theme_generation() + lm_font_generation() + (uint32_t)out->scale_milli * 7u;   /* the palette and the font only grow: the sum moves when either does; the scale is mixed in */
     if (go->theme_gen != look_gen) {
         if (go->theme_gen)
             gl_chromes_free(r, go);

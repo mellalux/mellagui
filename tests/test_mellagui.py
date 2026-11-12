@@ -17083,5 +17083,124 @@ class TestFont(Base):
         return path
 
 
+class TestScale(Base):
+    """The output scale (output.h): a screen of mode W x H at scale s has the logical size W/s x H/s; the shell is painted
+    at the screen's own pixels, clients' buffers are mapped onto them, the pointer and every coordinate are logical."""
+
+    def start(self, name, scale, size='1600x900', env=None, *extra):
+        args = ['--size', size] + (['--scale', str(scale)] if scale else []) + list(extra)
+        p, c, stop = self.private_compositor(name, *args, env=env)
+        c.sync()
+        return c
+
+    @staticmethod
+    def outs(c):
+        res = {}
+        for l in c.cmd('scale'):
+            m = re.match(r'output (\S+) mode=(\d+)x(\d+) logical=(\d+)x(\d+) scale=(\d+)', l)
+            res[m[1]] = tuple(int(m[i]) for i in range(2, 7))
+        return res['headless-0']
+
+    def test_the_logical_size_is_the_mode_divided_by_the_scale(self):
+        self.assertEqual(self.outs(self.start('mellagui-sc1', 0)), (1600, 900, 1600, 900, 1000))
+        self.assertEqual(self.outs(self.start('mellagui-sc2', 2)), (1600, 900, 800, 450, 2000))
+        self.assertEqual(self.outs(self.start('mellagui-sc3', 1.5)), (1600, 900, 1066, 600, 1500))
+        c = self.start('mellagui-sc4', 2)
+        c.cmd('outputs')
+        self.assertIn('w=800 h=450', c.cmd('outputs')[0])            # everything outside the renderer counts in logical pixels
+        ppm = c.dump(os.path.join(tmp, 'sc4.ppm'))
+        self.assertEqual((ppm.w, ppm.h), (1600, 900))                  # ... the picture in the screen's own
+
+    def test_a_scale_the_screen_is_too_small_for_is_lowered(self):
+        self.assertEqual(self.outs(self.start('mellagui-sc5', 4, '800x600')), (800, 600, 640, 480, 1250))   # never under 640 x 360
+        self.assertEqual(self.outs(self.start('mellagui-sc6', 4, '1366x768')), (1366, 768, 640, 360, 2133))
+
+    def test_the_setting_changes_the_scale_at_once_and_a_bad_one_is_refused(self):
+        c = self.start('mellagui-sc7', 0)
+        c.cmd('settings scale 200')
+        self.assertEqual(self.outs(c), (1600, 900, 800, 450, 2000))
+        c.cmd('setting scale')
+        self.assertEqual(c.last, 'ok 200')
+        for bad in ('50', '500', 'x'):
+            with self.assertRaises(RuntimeError):
+                c.cmd('settings scale ' + bad)
+        c.cmd('scale 100')
+        self.assertEqual(self.outs(c), (1600, 900, 1600, 900, 1000))
+
+    def test_the_scale_is_saved_and_the_command_line_wins(self):
+        path = os.path.join(tmp, 'sc8.settings')
+        if os.path.exists(path):
+            os.unlink(path)
+        p, c, stop = self.private_compositor('mellagui-sc8', '--size', '1600x900', '--settings', path)
+        c.cmd('settings scale 150')
+        time.sleep(0.6)
+        stop()
+        self.assertIn('scale=150', open(path).read().split('\n'))
+        c2 = self.start('mellagui-sc9', 0, '1600x900', None, '--settings', path)
+        self.assertEqual(self.outs(c2)[4], 1500)
+        c3 = self.start('mellagui-sc10', 2, '1600x900', None, '--settings', path)
+        self.assertEqual(self.outs(c3)[4], 2000)
+
+    @staticmethod
+    def panel_rows(ppm):
+        """How many rows from the top have the colour of the panel at a column where nothing sits on it."""
+        x = ppm.w * 45 // 100
+        top = ppm.px(x, 3)
+        n = 0
+        while n < ppm.h and ppm.px(x, n) == top:
+            n += 1
+        return n
+
+    def test_the_panel_is_painted_at_the_screens_pixels(self):
+        one = self.panel_rows(self.start('mellagui-sc11', 0).dump(os.path.join(tmp, 'sc11.ppm')))
+        two = self.panel_rows(self.start('mellagui-sc12', 2).dump(os.path.join(tmp, 'sc12.ppm')))
+        self.assertGreater(one, 20)
+        self.assertEqual(two, 2 * one)
+
+    def test_a_client_window_covers_the_same_part_of_the_screen_whatever_its_buffer_scale(self):
+        c = self.start('mellagui-sc13', 2)
+        cl = Client(os.path.join(tmp, 'mellagui-sc13'))
+        win = Window(cl, 200, 100, color=0xffff00ff)
+        c.sync()
+        win_info = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.test'][0]
+        x, y, w, h = win_info['x'], win_info['y'], win_info['w'], win_info['h']
+        self.assertEqual((w, h), (200, 100))                           # logical, as the client sized it
+        ppm = c.dump(os.path.join(tmp, 'sc13.ppm'))
+        self.assertEqual(ppm.count((255, 0, 255), 2 * x, 2 * y, 2 * (x + w), 2 * (y + h)), 400 * 200)     # a scale 1 buffer is enlarged to it
+        wl = cl.wl                                                      # now the same window drawn at the screen's scale: a 400 x 200 buffer, scale 2
+        win.buffer = win.shm.buffer(400, 200, 0xff00ff00)
+        wl.request(win.surface, 'set_buffer_scale', I(2))
+        wl.request(win.surface, 'attach', win.buffer, I(0), I(0))
+        wl.request(win.surface, 'damage_buffer', I(0), I(0), I(400), I(200))
+        wl.request(win.surface, 'commit')
+        c.sync()
+        win_info = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.test'][0]
+        self.assertEqual((win_info['w'], win_info['h']), (200, 100))
+        ppm = c.dump(os.path.join(tmp, 'sc13b.ppm'))
+        self.assertEqual(ppm.count((0, 255, 0), 2 * x, 2 * y, 2 * (x + w), 2 * (y + h)), 400 * 200)
+
+    def test_the_pointer_is_drawn_at_the_screens_pixels(self):
+        c = self.start('mellagui-sc14', 2)
+        c.cmd('abs 400 225')
+        c.sync()
+        ppm = c.dump(os.path.join(tmp, 'sc14.ppm'))
+        self.assertEqual(ppm.px(800, 450), (0, 0, 0))                  # the tip of the arrow, made twice as big
+        self.assertEqual(ppm.px(801, 451), (0, 0, 0))
+        self.assertNotEqual(ppm.px(798, 448), (0, 0, 0))
+
+    def test_the_gl_renderer_paints_the_same_panel(self):
+        try:
+            g = self.start('mellagui-sc15', 1.5, env={'MELLAGUI_RENDERER': 'gl'})
+            s = self.start('mellagui-sc16', 1.5, env={'MELLAGUI_RENDERER': 'software'})
+        except (AssertionError, EOFError, RuntimeError):
+            self.skipTest('no GL here')
+        a, b = g.dump(os.path.join(tmp, 'sc15.ppm')), s.dump(os.path.join(tmp, 'sc16.ppm'))
+        if (a.w, a.h) != (b.w, b.h):
+            self.skipTest('no GL here')
+        diff = sum(1 for y in range(0, 48) for x in range(0, a.w, 1) if a.px(x, y) != b.px(x, y) and
+                   max(abs(p - q) for p, q in zip(a.px(x, y), b.px(x, y))) > 6)
+        self.assertLess(diff, 48 * a.w // 100)                          # under 1 % of the panel strip differs
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -963,7 +963,7 @@ static void draw_button(struct app *a, const struct button *b, int id, uint32_t 
         col = lm_mix_rgb(base, 0x000000, 0.25);
     else if (a->hover == id)
         col = lm_mix_rgb(base, 0xffffff, 0.18);
-    lm_round_fill(a->win.pixels, a->win.bw, a->win.bw, a->win.bh, b->x, b->y, b->w, b->h, lm_button_radius(b->h / 2), col);
+    wlwin_round_fill(&a->win, b->x, b->y, b->w, b->h, lm_button_radius(b->h / 2), col);
     int tw = lm_font_text_width(label);
     wlwin_text(&a->win, b->x + (b->w - tw) / 2, b->y + (b->h - LM_FONT_H) / 2, label, 1, dim ? lm_theme.text_dim : lm_theme.on_colour, b->w - 8);
 }
@@ -978,7 +978,7 @@ static void paint(struct wlwin *w)
     if (a->rec) {
         uint64_t s = (lm_now_ms() - a->t0) / 1000;
         if (s % 2 == 0)
-            lm_round_fill(w->pixels, w->bw, w->bw, w->bh, 16, 18, 14, 14, 7, lm_theme.alert);
+            wlwin_round_fill(w, 16, 18, 14, 14, 7, lm_theme.alert);
         snprintf(line, sizeof(line), "Recording  %02u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
         wlwin_text(w, 38, 14, line, 2, lm_theme.text, w->bw - 54);
         pthread_mutex_lock(&a->lock);
@@ -1271,6 +1271,7 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
     struct app a = { .fps_sel = 2, .quality = DEFAULT_QUALITY, .grabbing = -1, .snd_system = true };
     lm_snd_conf_load("record", &a.snd_system, &a.snd_mic);

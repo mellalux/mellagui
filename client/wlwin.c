@@ -8,6 +8,7 @@
 
 #include "font.h"
 #include "keymap.h"
+#include "uikit.h"
 #include "util.h"
 
 /* ---- shm buffer ---------------------------------------------------------------------------------------------- */
@@ -23,7 +24,14 @@ static void setup_buffer(struct wlwin *w)
         munmap(w->pixels, w->map_size);
     w->bw = w->w;
     w->bh = w->h;
-    w->map_size = (size_t)w->bw * (size_t)w->bh * 4;
+    w->scale = 1;
+    if (w->hidpi)
+        for (int i = 0; i < w->nout; i++)                       /* the biggest scale of any screen: a window may be dragged to it */
+            w->scale = LM_MAX(w->scale, w->out_scale[i]);
+    w->scale = LM_CLAMP(w->scale, 1, 4);
+    w->pw = w->bw * w->scale;
+    w->ph = w->bh * w->scale;
+    w->map_size = (size_t)w->pw * (size_t)w->ph * 4;
     int fd = memfd_create(w->name, MFD_CLOEXEC);
     if (fd < 0 || ftruncate(fd, (off_t)w->map_size) < 0) {
         perror("memfd");
@@ -51,14 +59,26 @@ static void buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm
     w->buffer_busy = false;
 }
 
+/* The scale the buffer should have now (1 for a program that did not ask for hidpi). */
+static int wanted_scale(const struct wlwin *w)
+{
+    int s = 1;
+    if (w->hidpi)
+        for (int i = 0; i < w->nout; i++)
+            s = LM_MAX(s, w->out_scale[i]);
+    return LM_CLAMP(s, 1, 4);
+}
+
 static void draw(struct wlwin *w)
 {
-    if (w->bw != w->w || w->bh != w->h || !w->pixels)
+    if (w->bw != w->w || w->bh != w->h || !w->pixels || w->scale != wanted_scale(w)) {
         setup_buffer(w);
+        WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = w->scale });
+    }
     w->ops->paint(w);
     w->buffer = wlc_alloc(w->c, &lm_wl_buffer_interface, buffer_event, w);
-    WLC_SEND(w->c, w->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = w->buffer }, { .i = 0 }, { .i = w->bw },
-             { .i = w->bh }, { .i = w->bw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
+    WLC_SEND(w->c, w->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = w->buffer }, { .i = 0 }, { .i = w->pw },
+             { .i = w->ph }, { .i = w->pw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
     WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_ATTACH, { .o = w->buffer }, { .i = 0 }, { .i = 0 });
     WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = w->bw }, { .i = w->bh });
     WLC_SEND0(w->c, w->surface, LM_WL_SURFACE_REQ_COMMIT);
@@ -158,6 +178,28 @@ bool wlwin_menu(struct wlwin *w, const char *entries)
     return true;
 }
 
+/* A screen told its scale: a hidpi window follows the biggest one. */
+static void output_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c;
+    struct wlwin *w = data;
+    if (op != LM_WL_OUTPUT_EVT_SCALE)
+        return;
+    for (int i = 0; i < w->nout; i++)
+        if (w->out_id[i] == id) {
+            w->out_scale[i] = LM_MAX(args[0].i, 1);
+            if (w->hidpi && w->scale != wanted_scale(w))
+                w->redraw = true;                               /* (draw() makes the new buffer) */
+        }
+}
+
+static bool g_hidpi;
+
+void wlwin_hidpi(void)
+{
+    g_hidpi = true;
+}
+
 static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)id;
@@ -174,7 +216,11 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         w->wm_base = wlc_bind(c, w->registry, name, &lm_xdg_wm_base_interface, LM_MIN(ver, 3u), wm_base_event, w);
     else if (!strcmp(iface, "wl_seat"))
         w->seat = wlc_bind(c, w->registry, name, &lm_wl_seat_interface, LM_MIN(ver, 5u), seat_event, w);
-    else if (!strcmp(iface, "mellagui_menu_v1"))
+    else if (!strcmp(iface, "wl_output") && w->nout < 8) {
+        uint32_t oid = wlc_bind(c, w->registry, name, &lm_wl_output_interface, LM_MIN(ver, 3u), output_event, w);
+        w->out_id[w->nout] = oid;
+        w->out_scale[w->nout++] = 1;
+    } else if (!strcmp(iface, "mellagui_menu_v1"))
         w->menu = wlc_bind(c, w->registry, name, &lm_mellagui_menu_v1_interface, 1, menu_event, w);
     else if (w->ops->global)
         w->ops->global(w, name, iface, ver);
@@ -185,6 +231,7 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
 int wlwin_connect(struct wlwin *w, const char *name, const struct wlwin_ops *ops, void *data)
 {
     memset(w, 0, sizeof(*w));
+    w->hidpi = g_hidpi;
     w->name = name;
     w->ops = ops;
     w->data = data;
@@ -251,26 +298,56 @@ void wlwin_destroy(struct wlwin *w)
 
 void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t rgb)
 {
-    for (int y = LM_MAX(y0, 0); y < LM_MIN(y0 + height, w->bh); y++)
-        for (int x = LM_MAX(x0, 0); x < LM_MIN(x0 + width, w->bw); x++)
-            w->pixels[(size_t)y * (size_t)w->bw + (size_t)x] = 0xff000000u | rgb;
+    int s = w->scale > 1 ? w->scale : 1;
+    for (int y = LM_MAX(y0 * s, 0); y < LM_MIN((y0 + height) * s, w->ph); y++)
+        for (int x = LM_MAX(x0 * s, 0); x < LM_MIN((x0 + width) * s, w->pw); x++)
+            w->pixels[(size_t)y * (size_t)w->pw + (size_t)x] = 0xff000000u | rgb;
+}
+
+void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb)
+{
+    int s = w->scale > 1 ? w->scale : 1;
+    lm_round_fill(w->pixels, w->pw, w->pw, w->ph, x * s, y * s, width * s, height * s, r * s, rgb);
+}
+
+void wlwin_dim(struct wlwin *w, double t)
+{
+    for (size_t i = 0, n = (size_t)w->pw * (size_t)w->ph; i < n; i++)
+        w->pixels[i] = lm_mix_rgb(w->pixels[i], 0x000000, t);
+}
+
+void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint32_t *src, int sw, int sh, int stride)
+{
+    int s = w->scale > 1 ? w->scale : 1;
+    int dx0 = x * s, dy0 = y * s, dw = width * s, dh = height * s;
+    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
+        return;
+    for (int py = LM_MAX(dy0, 0); py < LM_MIN(dy0 + dh, w->ph); py++) {
+        const uint32_t *srow = src + (size_t)LM_MIN((py - dy0) * sh / dh, sh - 1) * (size_t)stride;
+        uint32_t *drow = w->pixels + (size_t)py * (size_t)w->pw;
+        for (int px = LM_MAX(dx0, 0); px < LM_MIN(dx0 + dw, w->pw); px++)
+            drow[px] = 0xff000000u | srow[LM_MIN((px - dx0) * sw / dw, sw - 1)];
+    }
 }
 
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb)
 {
     if (scale < 1)
         return;
-    int cw = LM_FONT_W * scale, ch = LM_FONT_H * scale;
+    int s = w->scale > 1 ? w->scale : 1;
+    int cw = LM_FONT_W * scale * s, ch = LM_FONT_H * scale * s;
     const uint8_t *g = lm_font_cell(cp, cw, ch);
+    x *= s;
+    y *= s;
     for (int r = 0; r < ch; r++) {
         int py = y + r;
-        if (py < 0 || py >= w->bh)
+        if (py < 0 || py >= w->ph)
             continue;
-        uint32_t *row = w->pixels + (size_t)py * (size_t)w->bw;
+        uint32_t *row = w->pixels + (size_t)py * (size_t)w->pw;
         for (int cx = 0; cx < cw; cx++) {
             int px = x + cx;
             unsigned a = g[r * cw + cx];
-            if (a && px >= 0 && px < w->bw)
+            if (a && px >= 0 && px < w->pw)
                 row[px] = lm_font_mix(row[px], 0xff000000u | rgb, a);
         }
     }
@@ -312,6 +389,10 @@ void wlwin_text_bold(struct wlwin *w, int x, int y, const char *s, int scale, ui
 
 static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w, bool bold)
 {
+    int k = w->scale > 1 ? w->scale : 1;
+    x *= k;                                                     /* from here on physical pixels */
+    y *= k;
+    max_w *= k;
     size_t len = strlen(s);
     int x0 = x;
     for (size_t i = 0; i < len;) {
@@ -319,17 +400,17 @@ static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale,
         uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
         i += used > 0 ? (size_t)used : 1;
         struct lm_font_glyph g;
-        lm_font_label_styled(cp, scale, bold, &g);
+        lm_font_label_styled(cp, scale * k, bold, &g);
         if (max_w > 0 && x + g.advance > x0 + max_w)
             break;
         int gx = x - g.left;
         for (int r = 0; r < g.h; r++) {
             int py = y + r;
-            if (py < 0 || py >= w->bh)
+            if (py < 0 || py >= w->ph)
                 continue;
-            uint32_t *row = w->pixels + (size_t)py * (size_t)w->bw;
+            uint32_t *row = w->pixels + (size_t)py * (size_t)w->pw;
             const uint8_t *src = g.px + (size_t)r * (size_t)g.w;
-            for (int cx = LM_MAX(0, -gx); cx < g.w && gx + cx < w->bw; cx++)
+            for (int cx = LM_MAX(0, -gx); cx < g.w && gx + cx < w->pw; cx++)
                 if (src[cx])
                     row[gx + cx] = lm_font_mix(row[gx + cx], 0xff000000u | rgb, src[cx]);
         }

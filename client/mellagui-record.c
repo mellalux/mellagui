@@ -42,6 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "audiocap.h"
 #include "ffpipe.h"
 #include "h264dec.h"
 #include "h264enc.h"
@@ -97,6 +98,7 @@ struct app {
     double duration;                /* --duration: stop (and quit) after that many seconds, 0 = never */
     bool snd_system, snd_mic;       /* record the computer's sound / the microphone (record.conf; --sound) */
     bool snd_rec;                   /* the recording in progress has a sound track */
+    struct audiocap *acap;          /* the built-in encoders: the sound comes from parec (client/audiocap.c) and goes into the mp4 by tick() */
 
     /* the recording */
     bool rec;
@@ -655,9 +657,18 @@ static bool start_recording(struct app *a)
         return false;
     }
     if (!use_ff) {
-        if (a->snd_system || a->snd_mic)
-            fprintf(stderr, "mellagui-record: no sound in this recording: it needs ffmpeg with libx264 (the built-in encoders have no sound track)\n");
         a->snd_rec = false;
+        if ((a->snd_system || a->snd_mic) && a->mp4) {          /* the built-in encoders: PCM from parec into the file's own sound track */
+            char why[200];
+            a->acap = audiocap_start(a->snd_system ? ffpipe_audio_source(false) : NULL, a->snd_mic ? ffpipe_audio_source(true) : NULL, why, sizeof(why));
+            if (a->acap && lm_mp4_set_audio(a->mp4, AUDIOCAP_RATE, AUDIOCAP_CHANNELS) == 0) {
+                a->snd_rec = true;
+            } else {
+                fprintf(stderr, "mellagui-record: no sound in this recording: %s\n", a->acap ? "cannot add a sound track" : why);
+                audiocap_stop(a->acap);
+                a->acap = NULL;
+            }
+        }
     }
     a->interval = 1000u / (uint64_t)FPS_CHOICES[a->fps_sel];
     a->t0 = lm_now_ms();
@@ -671,6 +682,8 @@ static bool start_recording(struct app *a)
             use_ff ? "H.264 through ffmpeg" : use_h264 ? "H.264, built in" : "Motion JPEG", a->snd_rec ? ", with sound" : "", a->path);
     return true;
 }
+
+static void audio_pump(struct app *a);
 
 static void stop_recording(struct app *a)
 {
@@ -708,6 +721,9 @@ static void stop_recording(struct app *a)
         else if (bad)
             rc = 0;
     } else {
+        audio_pump(a);                                  /* what is left of the sound, then the end */
+        audiocap_stop(a->acap);
+        a->acap = NULL;
         frames = lm_mp4_frames(a->mp4);
         bytes = lm_mp4_bytes(a->mp4);
         rc = lm_mp4_close(a->mp4, end);
@@ -736,9 +752,28 @@ static void stop_recording(struct app *a)
     a->win.redraw = true;
 }
 
+/* The sound that parec has delivered so far goes into the file (the built-in encoders; ffmpeg reads its sound itself). */
+static void audio_pump(struct app *a)
+{
+    if (!a->acap || !a->mp4)
+        return;
+    static int16_t buf[4096 * AUDIOCAP_CHANNELS];
+    for (;;) {
+        size_t n = audiocap_read(a->acap, buf, 4096);
+        if (!n)
+            break;
+        uint64_t first = audiocap_first_ms(a->acap);
+        if (lm_mp4_add_audio(a->mp4, buf, n, first > a->t0 ? first - a->t0 : 0) < 0) {
+            a->enc_error = true;
+            break;
+        }
+    }
+}
+
 /* Called every loop turn: ask for the next picture when it is time. */
 static void tick(struct app *a)
 {
+    audio_pump(a);
     if (g_signalled) {
         stop_recording(a);
         a->quit = true;
@@ -954,10 +989,10 @@ static void paint(struct wlwin *w)
         wlwin_text(w, 16, 50, line, 1, lm_theme.muted, w->bw - 32);
     } else {
         wlwin_text(w, 16, 14, a->msg[0] ? "Not recorded" : a->saved[0] ? "Saved" : "Ready", 2, lm_theme.text, w->bw - 32);
-        bool snd_ok = ffpipe_available() && a->codec_opt != 1 && a->codec_opt != 3;       /* sound is made by ffmpeg (the built-in encoders have no sound track) */
+        bool snd_ok = (ffpipe_available() && a->codec_opt != 1 && a->codec_opt != 3) || audiocap_available();     /* ffmpeg reads the sound itself, else parec does */
         const char *info = a->msg[0] ? a->msg : a->saved[0] ? a->saved :
                            !a->capture ? "Screen capture is not available" :
-                           (a->snd_system || a->snd_mic) && !snd_ok ? "No sound: it needs ffmpeg with libx264 (and not --codec h264 / mjpeg)" :
+                           (a->snd_system || a->snd_mic) && !snd_ok ? "No sound: it needs ffmpeg or parec (neither was found)" :
                            (a->snd_system || a->snd_mic) ? "Record one screen and its sound into an MP4 file" : "Record one screen into an MP4 file";
         wlwin_text(w, 16, 50, info, 1, a->msg[0] ? lm_theme.error : lm_theme.muted, w->bw - 32);
     }

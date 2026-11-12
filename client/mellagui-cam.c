@@ -14,8 +14,9 @@
  *
  * Clips: H.264 + AAC in an MP4 (`camera-YYYYMMDD-HHMMSS.mp4` in $MELLAGUI_CAM_VIDEO_DIR, default ~/Videos, mode 0600), made by ffmpeg from the pictures
  * (client/ffpipe.c: sent as they come, never waiting - a picture that x264 is too slow for is dropped) and, when the microphone switch is on, the default
- * microphone (ffmpeg reads it itself, so sound and picture share one clock). The picture is not mirrored. The switch is kept in camera.conf
- * (microphone = 1; on by default). It needs ffmpeg with libx264.
+ * microphone (ffmpeg reads it itself, so sound and picture share one clock). Without ffmpeg the clip is Motion JPEG with the microphone as a PCM sound
+ * track (parec; src/jpegenc.c, src/mp4.c, client/audiocap.c): bigger files, played by ffmpeg / mpv / VLC but not by browsers. The picture is not
+ * mirrored. The switch is kept in camera.conf (microphone = 1; on by default).
  *
  * Formats: MJPEG (preferred: a webcam on a shared USB hub often cannot carry raw video) decoded by src/jpeg.c, whose
  * standard Huffman tables serve the frames a camera sends without a DHT segment, and YUYV. The camera is looked for again
@@ -38,9 +39,12 @@
 #include <unistd.h>
 
 #include "font.h"
+#include "audiocap.h"
 #include "ffpipe.h"
 #include "img.h"
+#include "jpegenc.h"
 #include "keymap.h"
+#include "mp4.h"
 #include "png.h"
 #include "protocol.h"
 #include "sndconf.h"
@@ -488,15 +492,61 @@ static bool save_snapshot(struct app *a, char *name, size_t nsz)
 
 /* ---- clips -------------------------------------------------------------------------------------------------------------- */
 
+/* Two ways to make the file: with ffmpeg (H.264 + AAC, ffmpeg reads the microphone itself) or, when there is none, with our own writers: Motion JPEG
+ * (src/jpegenc.c) and the microphone as a PCM sound track (parec, client/audiocap.c; src/mp4.c). */
 struct clip {
-    struct ffpipe *ff;
+    struct ffpipe *ff;                  /* ffmpeg ... */
+    struct lm_mp4 *mp4;                 /* ... or our own file writer */
+    struct audiocap *acap;
     char path[PATH_MAX + 80];
     int w, h;
     uint64_t t0;
     uint32_t frames, dropped;
     bool sound;
-    bool remove_if_empty;
 };
+
+/* Opens the file: `path` as given (an old file is replaced) or the next free camera-<time>.mp4 in dir. The file descriptor goes to *fd (ffmpeg fills the
+ * file itself) or the writer to *mp4. */
+static bool clip_open_file(struct clip *c, const char *dir, const char *path, bool native, char *err, size_t en)
+{
+    time_t t = time(NULL);
+    struct tm tm;
+    char stamp[32];
+    localtime_r(&t, &tm);
+    strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+    if (!path && mkdir(dir, 0755) < 0 && errno != EEXIST) {
+        snprintf(err, en, "cannot create %s: %s", dir, strerror(errno));
+        return false;
+    }
+    for (int n = 0; n < 100; n++) {
+        if (path)
+            snprintf(c->path, sizeof(c->path), "%s", path);
+        else if (n)
+            snprintf(c->path, sizeof(c->path), "%s/camera-%s-%d.mp4", dir, stamp, n);
+        else
+            snprintf(c->path, sizeof(c->path), "%s/camera-%s.mp4", dir, stamp);
+        if (path)
+            unlink(c->path);                                    /* an explicit name: the old file is replaced */
+        bool ok;
+        if (native) {
+            c->mp4 = lm_mp4_create(c->path, c->w, c->h);
+            ok = c->mp4 != NULL;
+        } else {
+            int fd = open(c->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            ok = fd >= 0;
+            if (ok)
+                close(fd);
+        }
+        if (ok)
+            return true;
+        if (errno != EEXIST || path) {
+            snprintf(err, en, "cannot write %.120s: %s", c->path, strerror(errno));
+            return false;
+        }
+    }
+    snprintf(err, en, "no free file name in %s", dir);
+    return false;
+}
 
 /* Starts a clip of the pictures that are coming, of the size of the newest one. `path` = the file (NULL: camera-<time>.mp4 in dir). NULL with err. */
 static struct clip *clip_start(const struct lm_image *img, const char *dir, const char *path, bool mic, char *err, size_t en)
@@ -505,65 +555,77 @@ static struct clip *clip_start(const struct lm_image *img, const char *dir, cons
         snprintf(err, en, "no picture from the camera yet");
         return NULL;
     }
-    if (!ffpipe_available()) {
-        snprintf(err, en, "a clip needs ffmpeg with libx264 (not found)");
-        return NULL;
-    }
     struct clip *c = calloc(1, sizeof(*c));
     if (!c) {
         snprintf(err, en, "out of memory");
         return NULL;
     }
-    int fd = -1;
-    if (path) {
-        snprintf(c->path, sizeof(c->path), "%s", path);
-        fd = open(c->path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    } else {
-        if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
-            snprintf(err, en, "cannot create %s: %s", dir, strerror(errno));
+    c->w = img->w;
+    c->h = img->h;
+    bool native = !ffpipe_available();
+    if (!clip_open_file(c, dir, path, native, err, en)) {
+        free(c);
+        return NULL;
+    }
+    const char *mic_src = mic ? ffpipe_audio_source(true) : NULL;
+    if (!native) {
+        struct ffpipe_audio au = { NULL, mic_src };
+        c->sound = au.mic != NULL;
+        c->ff = ffpipe_start(c->path, c->w, c->h, 23, &au, err, en);
+        if (!c->ff) {
+            unlink(c->path);
             free(c);
             return NULL;
         }
-        time_t t = time(NULL);
-        struct tm tm;
-        char stamp[32];
-        localtime_r(&t, &tm);
-        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
-        for (int n = 0; n < 100 && fd < 0; n++) {
-            if (n)
-                snprintf(c->path, sizeof(c->path), "%s/camera-%s-%d.mp4", dir, stamp, n);
-            else
-                snprintf(c->path, sizeof(c->path), "%s/camera-%s.mp4", dir, stamp);
-            fd = open(c->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-            if (fd < 0 && errno != EEXIST)
-                break;
+    } else {
+        lm_jpeg_encode_init();
+        if (mic_src) {
+            char why[160];
+            c->acap = audiocap_start(NULL, mic_src, why, sizeof(why));
+            if (c->acap && lm_mp4_set_audio(c->mp4, AUDIOCAP_RATE, AUDIOCAP_CHANNELS) == 0) {
+                c->sound = true;
+            } else {
+                fprintf(stderr, "mellagui-cam: no sound in this clip: %s\n", c->acap ? "cannot add a sound track" : why);
+                audiocap_stop(c->acap);
+                c->acap = NULL;
+            }
         }
-    }
-    if (fd < 0) {
-        snprintf(err, en, "cannot write %.120s: %s", c->path, strerror(errno));
-        free(c);
-        return NULL;
-    }
-    close(fd);
-    c->w = img->w;
-    c->h = img->h;
-    struct ffpipe_audio au = { NULL, mic ? ffpipe_audio_source(true) : NULL };
-    c->sound = au.mic != NULL;
-    c->ff = ffpipe_start(c->path, c->w, c->h, 23, &au, err, en);
-    if (!c->ff) {
-        unlink(c->path);
-        free(c);
-        return NULL;
     }
     c->t0 = now_ms();
     return c;
 }
 
-/* A new picture: sent when ffmpeg has room, else dropped. False when ffmpeg is gone. */
+/* Our own writers: the sound that parec has delivered so far goes into the file. */
+static void clip_pump(struct clip *c)
+{
+    if (!c->acap || !c->mp4)
+        return;
+    static int16_t buf[4096 * AUDIOCAP_CHANNELS];
+    for (;;) {
+        size_t n = audiocap_read(c->acap, buf, 4096);
+        if (!n)
+            break;
+        uint64_t first = audiocap_first_ms(c->acap);
+        if (lm_mp4_add_audio(c->mp4, buf, n, first > c->t0 ? first - c->t0 : 0) < 0)
+            break;
+    }
+}
+
+/* A new picture: sent when ffmpeg has room, else dropped (ffmpeg); coded as a JPEG and added (our own writers). False when ffmpeg is gone / the disk is full. */
 static bool clip_frame(struct clip *c, const struct lm_image *img)
 {
     if (!img->px || img->w != c->w || img->h != c->h)
         return true;
+    if (c->mp4) {
+        size_t len = 0;
+        uint8_t *jpeg = lm_jpeg_encode_xrgb(img->px, c->w, c->h, (size_t)c->w * 4, 80, &len);
+        int rc = jpeg ? lm_mp4_add(c->mp4, jpeg, len, now_ms() - c->t0) : -1;
+        free(jpeg);
+        clip_pump(c);
+        if (rc == 0)
+            c->frames++;
+        return rc == 0;
+    }
     int r = ffpipe_offer(c->ff, img->px, (size_t)c->w * (size_t)c->h * 4);
     if (r == 0)
         c->frames++;
@@ -572,16 +634,26 @@ static bool clip_frame(struct clip *c, const struct lm_image *img)
     return r >= 0;
 }
 
-/* Ends the clip: the newest picture goes once more (it defines where the file ends), ffmpeg finishes the file. True when there is a file. */
+/* Ends the clip: ffmpeg gets the newest picture once more (it defines where the file ends) and finishes the file; our writer writes its index. True when
+ * there is a file. */
 static bool clip_stop(struct clip *c, const struct lm_image *last, uint32_t *frames)
 {
+    *frames = c->frames;
+    bool ok;
+    if (c->mp4) {
+        clip_pump(c);
+        audiocap_stop(c->acap);
+        c->acap = NULL;
+        ok = lm_mp4_close(c->mp4, now_ms() - c->t0) == 0;
+        c->mp4 = NULL;
+        return ok && c->frames > 0;
+    }
     if (last && last->px && last->w == c->w && last->h == c->h)
         ffpipe_write(c->ff, last->px, (size_t)c->w * (size_t)c->h * 4);
-    *frames = c->frames;
     int rc = ffpipe_finish(c->ff);
     c->ff = NULL;
     struct stat st;
-    bool ok = rc == 0 && c->frames > 0 && stat(c->path, &st) == 0 && st.st_size > 0;
+    ok = rc == 0 && c->frames > 0 && stat(c->path, &st) == 0 && st.st_size > 0;
     if (!ok)
         unlink(c->path);
     return ok;
@@ -1003,9 +1075,11 @@ static int run_window(struct app *a)
             timeout = (int)LM_MIN(a->next_fake - t, 250);
         }
         struct pollfd pf[2] = { { .fd = wlc_fd(a->win.c), .events = POLLIN }, { .fd = a->src.fd, .events = POLLIN } };
-        int n = poll(pf, a->src.on && !a->src.fake ? 2 : 1, timeout);
+        int n = poll(pf, a->src.on && !a->src.fake ? 2 : 1, LM_MIN(timeout, a->clip && a->clip->acap ? 50 : timeout));
         if (n > 0 && a->src.on && !a->src.fake && (pf[1].revents & (POLLIN | POLLERR | POLLHUP)))
             pull_frames(a);
+        if (a->clip)
+            clip_pump(a->clip);                                  /* (our own writers: the sound is written as it comes) */
     }
     if (a->clip)
         do_record(a);                                           /* the window was closed while recording: the file is finished */
@@ -1137,6 +1211,7 @@ static int cmd_clip(const char *file, const char *dev, struct size want, double 
             break;
         if (r > 0)
             alive = clip_frame(c, &a.img);
+        clip_pump(c);
     }
     uint32_t frames = 0;
     bool ok = clip_stop(c, &a.img, &frames);

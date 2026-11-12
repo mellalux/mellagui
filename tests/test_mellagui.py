@@ -8066,13 +8066,25 @@ class TestCamera(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIsNone(audio_tones(path2, (700,)))
 
-    def test_a_clip_without_ffmpeg_says_so(self):
+    def test_a_clip_without_ffmpeg_is_motion_jpeg_with_the_microphone_as_pcm(self):
         d = tempfile.mkdtemp(prefix='mellagui-clip-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        r = self.run_cam('--clip', os.path.join(d, 'c.mp4'), '--seconds', '1', MELLAGUI_FFMPEG='none')
-        self.assertEqual(r.returncode, 1)
-        self.assertIn('needs ffmpeg', r.stderr)
-        self.assertEqual(os.listdir(d), [], 'a file was left behind')
+        path = os.path.join(d, 'c.mp4')
+        r = self.run_cam('--clip', path, '--seconds', '2.5', '--mic', MELLAGUI_FFMPEG='none', PATH=FAKES + ':' + os.environ['PATH'], MELLAGUI_RECORD_MIC_SRC='pulse:tone700')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
+            return                                                         # (the checks below look at the file with ffmpeg)
+        pr = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0', path], capture_output=True, text=True)
+        self.assertEqual(pr.stdout.strip(), 'mjpeg,640,480')
+        t = audio_tones(path, (700, 1000))
+        self.assertIsNotNone(t, 'no sound track')
+        self.assertGreater(t[700], 1500)
+        self.assertLess(t[1000], 60)
+        path2 = os.path.join(d, 'silent.mp4')
+        r = self.run_cam('--clip', path2, '--seconds', '1.2', '--no-mic', MELLAGUI_FFMPEG='none')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(audio_tones(path2, (700,)))
 
     def test_the_window_records_a_clip_with_r_and_the_microphone_switch_is_remembered(self):
         if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
@@ -8610,6 +8622,49 @@ class TestRecord(Base):
         self.assertLess(t[1000], 30)
         info = self.probe(path)
         self.assertEqual((info['codec_name'], info['width'], info['height']), ('h264', '1024', '600'))
+
+    def test_the_built_in_encoders_have_a_sound_track_too(self):
+        if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
+            self.skipTest('ffmpeg is needed to look at the sound')
+        env = dict(os.environ, PATH=FAKES + ':' + os.environ['PATH'], MELLAGUI_RECORD_SYSTEM_SRC='pulse:tone440', MELLAGUI_RECORD_MIC_SRC='pulse:tone880')
+        for codec in ('h264', 'mjpeg'):
+            d = self.outdir()
+            r = subprocess.run([self.REC, '--start', '--duration', '2.5', '--dir', d, '--codec', codec, '--sound', 'both'], env=env, capture_output=True, text=True, timeout=40)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('with sound', r.stderr)
+            path = r.stdout.strip()
+            t = audio_tones(path, (440, 880, 1000))
+            self.assertIsNotNone(t, codec + ': no sound track')
+            self.assertGreater(t[440], 1500, codec)
+            self.assertGreater(t[880], 1500, codec)
+            self.assertLess(t[1000], 60, codec)
+            vi = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0', path], capture_output=True, text=True)
+            self.assertEqual(vi.stdout.strip().split(',')[1:], ['1024', '600'], codec)
+            # the pictures still play with our own reader (the sound track does not get in its way)
+            vv = subprocess.run([os.path.join(os.path.dirname(BIN), 'mellagui-view'), '--video-info', path], capture_output=True, text=True, timeout=20,
+                                env=dict(os.environ, MELLAGUI_FFMPEG='none'))
+            self.assertIn('1024x600', vv.stdout)
+            # only the computer's sound
+            r = subprocess.run([self.REC, '--start', '--duration', '1.5', '--dir', d, '--codec', codec, '--sound', 'system'], env=env, capture_output=True, text=True, timeout=40)
+            t = audio_tones(r.stdout.strip(), (440, 880))
+            self.assertGreater(t[440], 1500)
+            self.assertLess(t[880], 60)
+
+    def test_a_source_only_ffmpeg_can_read_is_said_and_the_recording_goes_on_without_sound(self):
+        d = self.outdir()
+        env = dict(os.environ, MELLAGUI_RECORD_SYSTEM_SRC='lavfi:sine=frequency=440')
+        r = subprocess.run([self.REC, '--start', '--duration', '1', '--dir', d, '--codec', 'mjpeg', '--sound', 'system'], env=env, capture_output=True, text=True, timeout=40)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('can only be read by ffmpeg', r.stderr)
+        self.assertNotIn('with sound', r.stderr)
+        self.assertTrue(r.stdout.strip().endswith('.mp4'))
+
+    def test_a_missing_parec_is_said(self):
+        d = self.outdir()
+        env = dict(os.environ, MELLAGUI_PAREC='/nonexistent/parec', MELLAGUI_RECORD_SYSTEM_SRC='pulse:@DEFAULT_MONITOR@')
+        r = subprocess.run([self.REC, '--start', '--duration', '1', '--dir', d, '--codec', 'h264', '--sound', 'system'], env=env, capture_output=True, text=True, timeout=40)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('cannot start /nonexistent/parec', r.stderr)
 
     def test_no_sound_track_without_sound(self):
         if not self.have_x264():
@@ -14753,6 +14808,189 @@ class TestShot(Base):
         c.tap(KEY_ESC)
 
 
+class TestAlarm(Base):
+    """The alarm clock of mellagui-timer: alarms of a time of day (timer.conf), the ringing, the bar's item, snooze, the window-less holder."""
+    EXE = os.path.join(ROOT, 'build', 'mellagui-timer')
+
+    def setUp(self):
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-timer not built')
+        super().setUp()
+        self.duty = os.path.join(tmp, 'mellagui-timer.duty')
+        self.addCleanup(self.kill_holder)
+
+    def kill_holder(self):
+        try:
+            pid = int(open(self.duty).read().split()[0])
+            if 'mellagui-timer' in open('/proc/%d/cmdline' % pid).read():
+                os.kill(pid, 15)
+        except (OSError, ValueError, IndexError):
+            pass
+
+    def config(self, name, text):
+        d = os.path.join(tmp, 'alarm-cfg-' + name)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'mellagui'))
+        with open(os.path.join(d, 'mellagui', 'timer.conf'), 'w') as f:
+            f.write(text)
+        self.conf = os.path.join(d, 'mellagui', 'timer.conf')
+        return d
+
+    def start(self, name, conf, now='06:59:57', args=(), unit='1500', window=True):
+        cfg = self.config(name, conf)
+        p, c, stop = self.private_compositor(name, '--config', 'none')
+        env = dict(os.environ, WAYLAND_DISPLAY=name, MELLAGUI_TIMER_UNIT_MS=unit, MELLAGUI_ALARM_NOW=now, XDG_CONFIG_HOME=cfg)
+        try:
+            os.unlink(self.duty)
+        except OSError:
+            pass
+        pr = subprocess.Popen([self.EXE, *args], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.pr = pr
+        win = None
+        if window:
+            for _ in range(100):
+                ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer']
+                if ws and ws[0]['w'] > 0:
+                    win = ws[0]
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(win)
+            c.abs(win['x'] + 100, win['y'] + 100)                 # the pointer inside: the keys come here
+            time.sleep(0.3)
+        return c, win
+
+    @staticmethod
+    def tray(c):
+        for l in c.cmd('tray'):
+            m = re.match(r'item \d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) .* text=(.*)$', l)
+            if m:
+                return m[5], tuple(int(v) for v in m.groups()[:4])
+        return None, None
+
+    def wait(self, pred, what, timeout=10.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.05)
+        self.fail('timeout: ' + what)
+
+    @staticmethod
+    def beeps(c):
+        return int(re.search(r'n=(\d+)', c.cmd('sound')[0])[1])
+
+    def test_an_alarm_rings_until_it_is_dismissed_and_a_once_alarm_is_spent(self):
+        c, win = self.start('mellagui-al1', 'alarm = 07:00 once on\n')
+        self.assertEqual(self.tray(c)[0], 'A 07:00')                              # waiting: the next alarm in the bar
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('ALARM'), 'it rings')
+        self.assertEqual(self.tray(c)[0], 'ALARM 07:00')
+        self.assertIn('Alarm', '\n'.join(c.cmd('notes')))
+        n1 = self.beeps(c)
+        time.sleep(1.0)
+        self.assertGreater(self.beeps(c), n1 + 1, 'the call is repeated while it rings')
+        self.assertIn('alarm = 07:00 once off', open(self.conf).read())             # a once alarm is spent at once
+        ctl_shot = c.dump(os.path.join(tmp, 'al1.ppm'))
+        c.tap(KEY_ENTER)                                                           # dismiss
+        self.wait(lambda: self.tray(c)[0] is None, 'the item goes when nothing is left')
+        n2 = self.beeps(c)
+        time.sleep(0.8)
+        self.assertEqual(self.beeps(c), n2, 'it still rings')
+
+    def test_snooze_rings_again_later(self):
+        c, win = self.start('mellagui-al2', 'alarm = 07:00 daily on\n')
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('ALARM'), 'it rings')
+        c.tap(KEY_S)                                                               # snooze 5 "minutes" (7.5 s here)
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('Z'), 'snoozed')
+        n = self.beeps(c)
+        time.sleep(1.0)
+        self.assertEqual(self.beeps(c), n, 'a snoozed alarm is quiet')
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('ALARM'), 'it rings again', timeout=14)
+        c.tap(KEY_ENTER)
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('A '), 'a daily alarm waits for tomorrow')
+
+    def test_the_bars_item_opens_a_menu_with_dismiss_and_snooze(self):
+        c, win = self.start('mellagui-al3', 'alarm = 07:00 daily on\n')
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('ALARM'), 'it rings')
+        _, (x, y, w, h) = self.tray(c)
+        c.click(x + w // 2, y + h // 2)
+        self.wait(lambda: 'owner=1' in ' '.join(c.cmd('dockmenu')), 'the menu')
+        lines = c.cmd('dockmenu')
+        self.assertTrue(any('Dismiss' in l for l in lines) and any('Snooze' in l for l in lines), lines)
+        c.tap(KEY_DOWN)
+        c.tap(KEY_DOWN)                                                            # Snooze
+        c.tap(KEY_ENTER)
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('Z'), 'the menu snoozed it')
+
+    def test_the_alarm_tab_adds_changes_and_removes_alarms_and_writes_the_file(self):
+        c, win = self.start('mellagui-al4', 'work = 20\n', now='05:10:00')
+        c.tap(5)                                                                   # 4: the Alarm tab
+        time.sleep(0.3)
+        c.tap(KEY_A)                                                               # add: the next full hour, every day
+        self.wait(lambda: 'alarm = 06:00 daily on' in open(self.conf).read(), 'the new alarm is written')
+        self.assertIn('work = 20', open(self.conf).read(), 'the other lines of the file stay')
+        c.tap(35)                                                                  # H: an hour later
+        c.tap(50)                                                                  # M: five minutes later
+        self.wait(lambda: 'alarm = 07:05 daily on' in open(self.conf).read(), 'hour and minute changed')
+        c.tap(19)                                                                  # R: the repeat
+        self.wait(lambda: 'alarm = 07:05 weekdays on' in open(self.conf).read(), 'repeat changed')
+        c.tap(KEY_SPACE)                                                           # on / off
+        self.wait(lambda: 'alarm = 07:05 weekdays off' in open(self.conf).read(), 'switched off')
+        self.assertIsNone(self.tray(c)[0], 'an alarm that is off shows nothing in the bar')
+        c.tap(111)                                                                 # Delete
+        self.wait(lambda: 'alarm =' not in open(self.conf).read(), 'removed')
+
+    def test_a_weekday_alarm_rings_on_weekdays_only(self):
+        import datetime
+        today = datetime.date.today()
+        c, win = self.start('mellagui-al5', 'alarm = 07:00 weekdays on\n')
+        if today.weekday() >= 5:
+            time.sleep(4)
+            self.assertNotIn('ALARM', self.tray(c)[0] or '', 'a weekday alarm rang at the weekend')
+        else:
+            self.wait(lambda: (self.tray(c)[0] or '').startswith('ALARM'), 'it rings on a weekday')
+
+    def test_closing_the_window_hands_the_alarms_to_a_window_less_copy_and_a_window_takes_them_back(self):
+        c, win = self.start('mellagui-al6', 'alarm = 07:00 daily on\n', now='05:00:00')
+        self.assertEqual(self.tray(c)[0], 'A 07:00')
+        c.tap(KEY_ESC)                                                             # Esc: the window closes, nothing runs
+        self.wait(lambda: self.pr.poll() is not None, 'the window process ends')
+        self.wait(lambda: not [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer'], 'the window is gone')
+        env = dict(os.environ, WAYLAND_DISPLAY='mellagui-al6', MELLAGUI_TIMER_UNIT_MS='1500', MELLAGUI_ALARM_NOW='05:00:00', XDG_CONFIG_HOME=os.path.dirname(os.path.dirname(self.conf)))
+        self.wait(lambda: self.tray(c)[0] == 'A 07:00', 'the window-less copy keeps the item')
+        pid = int(open(self.duty).read().split()[0])
+        self.assertEqual(open(self.duty).read().split()[1], 'b')
+        self.assertEqual([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer'], [])
+        pr = subprocess.Popen([self.EXE], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)    # a window starts: it takes the alarms over
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer'], 'the window')
+        self.wait(lambda: not os.path.exists('/proc/%d' % pid) or b'timer' not in open('/proc/%d/cmdline' % pid, 'rb').read(), 'the window-less copy gave way')
+        self.wait(lambda: open(self.duty).read().split()[1] == 'w', 'the window holds the alarms now')
+        self.assertEqual(self.tray(c)[0], 'A 07:00')
+
+    def test_the_window_less_copy_rings_and_ends_with_the_last_alarm(self):
+        c, win = self.start('mellagui-al7', 'alarm = 07:00 once on\n', args=['--background'], window=False)
+        self.wait(lambda: (self.tray(c)[0] or '').startswith('ALARM'), 'it rings without a window')
+        self.assertEqual([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.timer'], [])
+        _, (x, y, w, h) = self.tray(c)
+        c.click(x + w // 2, y + h // 2)
+        self.wait(lambda: 'owner=1' in ' '.join(c.cmd('dockmenu')), 'the menu')
+        c.tap(KEY_DOWN)
+        c.tap(KEY_ENTER)                                                           # Dismiss
+        self.wait(lambda: self.pr.poll() is not None, 'it ends: no alarm is left')
+        self.assertEqual(self.pr.returncode, 0)
+
+    def test_the_window_less_copy_ends_at_once_without_alarms(self):
+        c, win = self.start('mellagui-al8', 'work = 20\n', args=['--background'], window=False)
+        self.wait(lambda: self.pr.poll() is not None, 'it ends')
+        self.assertEqual(self.pr.returncode, 0)
+        self.assertEqual(self.tray(c)[0], None)
+
+    def test_a_bad_option_is_refused(self):
+        r = subprocess.run([self.EXE, '--nonsense'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 2)
+
+
 class TestStickyNotes(Base):
     """mellagui-edit --notes / --note FILE: sticky notes, one window each, saved by themselves in a folder."""
 
@@ -14925,7 +15163,7 @@ class TestTimer(Base):
 
     def test_the_timer_part_counts_a_set_time_down_and_a_click_on_the_item_pauses_it(self):
         c, win = self.start('mellagui-tm2')
-        c.click(*self.spot(win, 14 + 112 + 8 + 56, 12 + 14))                  # the Timer tab
+        c.click(*self.spot(win, 14 + (82 + 8) + 41, 12 + 14))                  # the Timer tab (four tabs of 82 px)
         c.click(*self.spot(win, 14 + 4 * 59 + 26, 238 + 13))                  # the 25 preset ... then 15 ("minutes" of 100 ms)
         c.click(*self.spot(win, 14 + 3 * 59 + 26, 238 + 13))
         self.start_button(c, win)
@@ -14944,7 +15182,7 @@ class TestTimer(Base):
 
     def test_the_stopwatch_counts_up(self):
         c, win = self.start('mellagui-tm3')
-        c.click(*self.spot(win, 14 + 2 * 120 + 56, 12 + 14))                  # the Stopwatch tab
+        c.click(*self.spot(win, 14 + 2 * (82 + 8) + 41, 12 + 14))              # the Stopwatch tab
         self.start_button(c, win)
         self.wait(lambda: (self.tray_text(c) or '').startswith('S '), 'the item of the stopwatch')
         t1 = self.tray_text(c)
@@ -14955,7 +15193,7 @@ class TestTimer(Base):
 
     def test_closing_the_window_while_a_timer_runs_hides_it_and_the_program_goes_on(self):
         c, win = self.start('mellagui-tm4')
-        c.click(*self.spot(win, 14 + 2 * 120 + 56, 12 + 14))
+        c.click(*self.spot(win, 14 + 2 * (82 + 8) + 41, 12 + 14))
         self.start_button(c, win)
         self.wait(lambda: self.tray_text(c) is not None, 'running')
         c.tap(KEY_ESC)

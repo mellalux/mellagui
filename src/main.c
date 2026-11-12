@@ -670,6 +670,12 @@ int main(int argc, char **argv)
     if (srv->wm && cfg.status_cmd && *cfg.status_cmd && strcmp(cfg.status_cmd, "none") && (!headless || getenv("MELLAGUI_STATUS_PRELOAD")))
         lm_server_spawn(srv, cfg.status_cmd);                              /* the battery and network buttons of the panel (tests start it with MELLAGUI_STATUS_PRELOAD) */
 
+    if (srv->wm && (!headless || getenv("MELLAGUI_TIMER_PRELOAD"))) {
+        char tcmd[LM_DOCK_CMD_MAX];
+        lm_launch_expand("mellagui-timer --background", tcmd, sizeof(tcmd));   /* the alarms of the timer ring without its window (it ends at once when no alarm is on) */
+        lm_server_spawn(srv, tcmd);
+    }
+
     if (!headless && cfg.startup_sound)
         lm_sound_startup();                                                /* the start-up chime (chime.h): a child plays it, nothing waits */
 

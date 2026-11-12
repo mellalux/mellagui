@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""A fake `parec` for the tests: writes raw 44.1 kHz stereo s16le at the speed of the clock. The device names the tone: "tone440" = a sine of 440 Hz."""
+import math, os, struct, sys, time
+
+dev = ''
+a = sys.argv[1:]
+for i, x in enumerate(a):
+    if x == '-d' and i + 1 < len(a):
+        dev = a[i + 1]
+hz = 440.0
+if dev.startswith('tone'):
+    hz = float(dev[4:] or 440)
+rate = 44100
+n = 0
+t0 = time.time()
+out = sys.stdout.buffer
+while True:
+    want = int((time.time() - t0) * rate)
+    if want - n < 441:
+        time.sleep(0.01)
+        continue
+    chunk = bytearray()
+    for k in range(n, want):
+        v = int(9000 * math.sin(2 * math.pi * hz * k / rate))
+        chunk += struct.pack('<hh', v, v)
+    n = want
+    try:
+        out.write(chunk)
+        out.flush()
+    except (BrokenPipeError, ValueError):
+        break

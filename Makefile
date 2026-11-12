@@ -154,11 +154,11 @@ $(BUILD)/mellagui-view: $(BUILD)/client/mellagui-view.o $(BUILD)/src/h264dec.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/client/ffpipe.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/client/audiocap.o $(BUILD)/src/jpegenc.o $(BUILD)/src/mp4.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/client/ffpipe.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
-$(BUILD)/mellagui-record: $(BUILD)/client/mellagui-record.o $(BUILD)/client/ffpipe.o $(BUILD)/src/jpegenc.o $(BUILD)/src/h264.o $(BUILD)/src/h264enc.o $(BUILD)/src/h264dec.o $(BUILD)/src/mp4.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-record: $(BUILD)/client/mellagui-record.o $(BUILD)/client/audiocap.o $(BUILD)/client/ffpipe.o $(BUILD)/src/jpegenc.o $(BUILD)/src/h264.o $(BUILD)/src/h264enc.o $(BUILD)/src/h264dec.o $(BUILD)/src/mp4.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

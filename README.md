@@ -73,6 +73,7 @@ program of the distribution and stay empty, dimmed or silent without it. Package
 | Sound in recordings and camera clips | `ffmpeg`, or `pulseaudio-utils` | `ffmpeg -f pulse`, else `parec` | no sound track |
 | **Bluetooth**: panel button, devices window, quick settings switch | `bluez` (+ `libspa-0.2-bluetooth` for speakers and headsets under PipeWire) | `bluetoothctl` | no button, the switch is dimmed |
 | **Network**: panel button, Wi-Fi list, quick settings switch | `network-manager` | `nmcli` | no button, the switch is dimmed |
+| **Smooth text** (TrueType instead of the built-in 8x16 pixel font; `[font] file` in mellagui.conf) | `fonts-dejavu-core`, or any monospace `.ttf` | read by MellaGUI's own rasteriser | the pixel font |
 | Battery in the panel | - (reads `/sys/class/power_supply`) | | |
 | **Graphics acceleration** (`--renderer auto` / `gl`) | `libegl1` `libgles2` `libgbm1` `libgl1-mesa-dri` | `dlopen()`ed | the software renderer is used |
 | Devices without the `video` / `input` groups, VT switching, Suspend / Restart / Shutdown, the service list of the process manager | `systemd` (logind) + `dbus` | system bus, `systemctl`, `journalctl` | join the groups (see below); the power buttons report the failure |
@@ -90,7 +91,7 @@ Everything at once:
     sudo apt install pipewire-pulse wireplumber pipewire-bin pulseaudio-utils alsa-utils \
                      bluez libspa-0.2-bluetooth network-manager \
                      libegl1 libgles2 libgbm1 libgl1-mesa-dri \
-                     ffmpeg smbclient openssh-client curl xdg-utils
+                     ffmpeg smbclient openssh-client curl xdg-utils fonts-dejavu-core
 
 The sound server must run in the user's session (`systemctl --user enable --now pipewire pipewire-pulse wireplumber`), and
 `bluetooth` / `NetworkManager` as system services (`sudo systemctl enable --now bluetooth NetworkManager`).

@@ -141,11 +141,12 @@ static void rect_outline(struct canvas *c, int x0, int y0, int x1, int y1, int t
 
 static void glyph(struct canvas *c, int x, int y, uint32_t cp, int scale, uint32_t rgb)
 {
-    const uint8_t *g = lm_font_glyph(cp);
-    for (int r = 0; r < LM_FONT_H * scale; r++)
-        for (int cx = 0; cx < LM_FONT_W * scale; cx++)
-            if (g[r / scale] & (0x80 >> (cx / scale)))
-                put_px(c, x + cx, y + r, rgb, 255);
+    int cw = LM_FONT_W * scale, ch = LM_FONT_H * scale;
+    const uint8_t *g = lm_font_cell(cp, cw, ch);
+    for (int r = 0; r < ch; r++)
+        for (int cx = 0; cx < cw; cx++)
+            if (g[r * cw + cx])
+                put_px(c, x + cx, y + r, rgb, g[r * cw + cx]);
 }
 
 static int text_width(const char *s, int scale)

@@ -924,11 +924,15 @@ static int btn_at(double px, double py)
 static void put_text(uint32_t *px, int x, int y, const char *text, uint32_t color)
 {
     for (const char *l = text; *l; l++, x += LM_FONT_W) {
-        const uint8_t *g = lm_font_glyph((uint8_t)*l);
+        const uint8_t *g = lm_font_cell((uint8_t)*l, LM_FONT_W, LM_FONT_H);
         for (int r = 0; r < LM_FONT_H; r++)
-            for (int c = 0; c < LM_FONT_W; c++)
-                if ((g[r] & (0x80 >> c)) && x + c >= 0 && x + c < A.bw && y + r >= 0 && y + r < A.bh)
-                    px[(size_t)(y + r) * (size_t)A.bw + (size_t)(x + c)] = color;
+            for (int c = 0; c < LM_FONT_W; c++) {
+                unsigned a = g[r * LM_FONT_W + c];
+                if (a && x + c >= 0 && x + c < A.bw && y + r >= 0 && y + r < A.bh) {
+                    uint32_t *p = &px[(size_t)(y + r) * (size_t)A.bw + (size_t)(x + c)];
+                    *p = lm_font_mix(*p, color, a);
+                }
+            }
     }
 }
 
@@ -1018,16 +1022,6 @@ static void draw_menu(uint32_t *px)
         if (cur)
             fill_box(px, x + w - 12, ry + MENU_ROW_H / 2 - 2, 4, 4, MENU_CURRENT);       /* a dot marks the active size */
     }
-}
-
-static uint32_t lerp_rgb(uint32_t a, uint32_t b, int num, int den)
-{
-    uint32_t r = 0;
-    for (int sh = 16; sh >= 0; sh -= 8) {
-        int ca = (int)((a >> sh) & 255), cb = (int)((b >> sh) & 255);
-        r |= (uint32_t)(ca + (cb - ca) * num / den) << sh;
-    }
-    return r;
 }
 
 static void build_zoom_tables(void)
@@ -1148,36 +1142,18 @@ static void render(void)
             }
             int cw = CELL_W, ch = CELL_H;
             int x0 = PAD + col * cw, y0 = BAR_H + PAD + row * ch;
-            const uint8_t *g = lm_font_glyph(c->cp);
-            uint8_t rows16[LM_FONT_H];
-            for (int r = 0; r < LM_FONT_H; r++)
-                rows16[r] = g[r];
-            if (c->attr & ATTR_UNDERLINE)
-                rows16[LM_FONT_H - 2] = 0xff;
-            if (cw % LM_FONT_W == 0 && ch % LM_FONT_H == 0 && cw / LM_FONT_W == ch / LM_FONT_H) {
-                int z = cw / LM_FONT_W;                                 /* whole multiples: crisp pixels */
-                for (int r = 0; r < ch; r++) {
-                    uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
-                    uint8_t bits = rows16[r / z];
+            const uint8_t *g = lm_font_cell(c->cp, cw, ch);     /* drawn at the cell's own size, whatever the zoom */
+            for (int r = 0; r < ch; r++) {
+                uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
+                const uint8_t *cov = g + (size_t)r * (size_t)cw;
+                for (int x = 0; x < cw; x++)
+                    dst[x] = cov[x] == 0 ? bg : cov[x] == 255 ? fg : lm_font_mix(bg, fg, cov[x]);
+            }
+            if (c->attr & ATTR_UNDERLINE) {
+                int thick = LM_MAX(ch / LM_FONT_H, 1), uy = y0 + ch - 2 * thick;
+                for (int r = 0; r < thick; r++)
                     for (int x = 0; x < cw; x++)
-                        dst[x] = (bits & (0x80 >> (x / z))) ? fg : bg;
-                }
-            } else {                                                    /* any other size: coverage of each pixel */
-                for (int r = 0; r < ch; r++) {
-                    uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.bw + (size_t)x0;
-                    const struct lm_zt *yt = &A.yt[r];
-                    for (int x = 0; x < cw; x++) {
-                        const struct lm_zt *xt = &A.xt[x];
-                        int cov = 0;
-                        for (int i = 0; i < yt->n; i++) {
-                            uint8_t bits = rows16[yt->c0 + i];
-                            for (int j = 0; j < xt->n; j++)
-                                if (bits & (0x80 >> (xt->c0 + j)))
-                                    cov += yt->w[i] * xt->w[j];
-                        }
-                        dst[x] = cov == 0 ? bg : cov >= LM_FONT_W * LM_FONT_H ? fg : lerp_rgb(bg, fg, cov, LM_FONT_W * LM_FONT_H);
-                    }
-                }
+                        px[(size_t)(uy + r) * (size_t)A.bw + (size_t)(x0 + x)] = fg;
             }
             if (cursor && !A.focused) {
                 /* hollow cursor when unfocused */

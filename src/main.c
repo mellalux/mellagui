@@ -18,6 +18,7 @@
 #include "keys.h"
 #include "launchers.h"
 #include "metrics.h"
+#include "font.h"
 #include "theme.h"
 #include "input.h"
 #include "keymap.h"
@@ -246,6 +247,8 @@ static bool conf_line(void *ud, const char *section, const char *key, const char
         return lm_theme_conf(ud, section, key, value);
     if (lm_metrics_section(section))
         return lm_metrics_conf(ud, section, key, value);
+    if (!strcmp(section, "font"))
+        return lm_font_conf(ud, section, key, value);
     if (!strcmp(section, "keys"))
         return lm_keys_conf(&((struct lm_config *)ud)->keys, section, key, value);
     return false;
@@ -270,7 +273,9 @@ static int reload_config(struct lm_server *srv, bool quiet)
     lm_keys_defaults(&srv->config.keys);
     lm_launch_reset();
     lm_dock_reset();
+    lm_font_reset();
     int bad = lm_conf_load(g_conf_path, conf_line, &srv->config);
+    lm_font_apply();
     lm_metrics_fixup();
     lm_launch_resolve(&srv->config);
     lm_dock_resolve();
@@ -432,6 +437,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "mellagui: %s: %d line(s) ignored\n", config_arg, bad);
         lm_metrics_fixup();
     }
+    lm_font_apply();                    /* [font] of the file, or MELLAGUI_FONT; exported for the programs we start */
     if (settings_arg && *settings_arg && strcmp(settings_arg, "none")) {
         cfg.settings_path = settings_arg;
         if (lm_settings_load(&cfg, settings_arg, layouts_buf, sizeof(layouts_buf)) > 0 && layouts_buf[0])

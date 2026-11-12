@@ -35,7 +35,7 @@ struct gl_out {
     struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     uint32_t card_gen;
-    uint32_t theme_gen;                 /* the palette the chromes below were painted with */
+    uint32_t theme_gen;                 /* the palette and the font the chromes below were painted with */
     struct lm_gl_target mag;            /* the scene before the magnifier zooms it (made when it is first needed) */
     bool unread;                        /* rendered since the last readback */
 };
@@ -832,10 +832,11 @@ static bool draw_output_gl(struct lm_renderer *r, struct out_state *st, bool for
     if (!go)
         return false;
     lm_gl_make_current(r->gl);
-    if (go->theme_gen != lm_theme_generation()) {
+    uint32_t look_gen = lm_theme_generation() + lm_font_generation();   /* both only grow: the sum moves when either does */
+    if (go->theme_gen != look_gen) {
         if (go->theme_gen)
             gl_chromes_free(r, go);
-        go->theme_gen = lm_theme_generation();
+        go->theme_gen = look_gen;
         st->full = true;
         go->bg_ok = false;
     }

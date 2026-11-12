@@ -258,13 +258,22 @@ void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t
 
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb)
 {
-    const uint8_t *g = lm_font_glyph(cp);
-    for (int r = 0; r < LM_FONT_H * scale; r++)
-        for (int cx = 0; cx < LM_FONT_W * scale; cx++) {
-            int px = x + cx, py = y + r;
-            if ((g[r / scale] & (0x80 >> (cx / scale))) && px >= 0 && px < w->bw && py >= 0 && py < w->bh)
-                w->pixels[(size_t)py * (size_t)w->bw + (size_t)px] = 0xff000000u | rgb;
+    if (scale < 1)
+        return;
+    int cw = LM_FONT_W * scale, ch = LM_FONT_H * scale;
+    const uint8_t *g = lm_font_cell(cp, cw, ch);
+    for (int r = 0; r < ch; r++) {
+        int py = y + r;
+        if (py < 0 || py >= w->bh)
+            continue;
+        uint32_t *row = w->pixels + (size_t)py * (size_t)w->bw;
+        for (int cx = 0; cx < cw; cx++) {
+            int px = x + cx;
+            unsigned a = g[r * cw + cx];
+            if (a && px >= 0 && px < w->bw)
+                row[px] = lm_font_mix(row[px], 0xff000000u | rgb, a);
         }
+    }
 }
 
 void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)

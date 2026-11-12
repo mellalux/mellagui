@@ -134,34 +134,18 @@ static inline void lm_zoom_build(struct lm_zoomtab *z, int pct)
 static inline void lm_zoom_glyph(uint32_t *px, int stride, int bw, int bh, const struct lm_zoomtab *z, int x, int y,
                                  uint32_t cp, uint32_t fg)
 {
-    const uint8_t *g = lm_font_glyph(cp);
-    bool crisp = z->cw % LM_FONT_W == 0 && z->ch % LM_FONT_H == 0 && z->cw / LM_FONT_W == z->ch / LM_FONT_H;
-    int zz = z->cw / LM_FONT_W;
+    const uint8_t *g = lm_font_cell(cp, z->cw, z->ch);          /* drawn at the cell's own size, whatever the zoom */
     for (int r = 0; r < z->ch; r++) {
         int py = y + r;
         if (py < 0 || py >= bh)
             continue;
-        const struct lm_zt *yt = &z->yt[r];
         for (int c = 0; c < z->cw; c++) {
             int pxx = x + c;
-            if (pxx < 0 || pxx >= bw)
+            unsigned a = g[r * z->cw + c];
+            if (!a || pxx < 0 || pxx >= bw)
                 continue;
             uint32_t *p = &px[(size_t)py * (size_t)stride + (size_t)pxx];
-            if (crisp) {
-                if (g[r / zz] & (0x80 >> (c / zz)))
-                    *p = 0xff000000u | fg;
-                continue;
-            }
-            const struct lm_zt *xt = &z->xt[c];
-            int cov = 0;
-            for (int i = 0; i < yt->n; i++)
-                for (int j = 0; j < xt->n; j++)
-                    if (g[yt->c0 + i] & (0x80 >> (xt->c0 + j)))
-                        cov += yt->w[i] * xt->w[j];
-            if (cov >= LM_FONT_W * LM_FONT_H)
-                *p = 0xff000000u | fg;
-            else if (cov > 0)
-                *p = lm_mix_rgb(*p, fg, (double)cov / (LM_FONT_W * LM_FONT_H));
+            *p = lm_font_mix(*p, 0xff000000u | fg, a);
         }
     }
 }

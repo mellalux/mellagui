@@ -2,6 +2,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +23,16 @@ struct lm_mp4 {
     uint8_t *sps, *pps;             /* H.264: the parameter sets (NAL units) */
     size_t sps_n, pps_n;
     uint8_t *key;                   /* H.264: per picture, 1 = IDR */
+    pthread_mutex_t lock;
+    /* the sound track */
+    int arate, ach;                 /* 0 = none */
+    uint32_t anc, anc_cap;          /* chunks of sound: one per lm_mp4_add_audio call */
+    uint64_t *aoff;                 /* file offset of each chunk */
+    uint32_t *aframes;              /* PCM frames in each chunk */
+    uint64_t atotal;                /* PCM frames so far */
+    uint64_t afirst_pts;
+    int afirst_set;
+    uint64_t *voff;                 /* with sound the pictures are interleaved with it: the file offset of each picture */
 };
 
 /* ---- box building in memory ---------------------------------------------------------------------------------------- */
@@ -87,23 +99,54 @@ static size_t begin_full(struct buf *b, const char *type, unsigned version, unsi
     return at;
 }
 
+static void patch_u32(struct buf *b, size_t at, uint32_t v)
+{
+    if (b->oom)
+        return;
+    b->p[at] = (uint8_t)(v >> 24); b->p[at + 1] = (uint8_t)(v >> 16); b->p[at + 2] = (uint8_t)(v >> 8); b->p[at + 3] = (uint8_t)v;
+}
+
+/* An edit list that starts the track `offset_ms` late (an empty edit, then the whole media): how the sound and the pictures keep their places in time. */
+static void put_edts(struct buf *b, uint64_t offset_ms, uint64_t media_ms)
+{
+    if (offset_ms == 0)
+        return;
+    size_t edts = begin_box(b, "edts");
+    size_t elst = begin_full(b, "elst", 0, 0);
+    b_u32(b, 2);
+    b_u32(b, (uint32_t)offset_ms); b_u32(b, 0xffffffffu); b_u16(b, 1); b_u16(b, 0);          /* empty edit */
+    b_u32(b, (uint32_t)media_ms); b_u32(b, 0); b_u16(b, 1); b_u16(b, 0);                    /* the media */
+    end_box(b, elst);
+    end_box(b, edts);
+}
+
 static const uint32_t unity[9] = { 0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000 };
 
 static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration, uint64_t first_offset)
 {
-    uint32_t dur = duration > 0xffffffffu ? 0xffffffffu : (uint32_t)duration;
+    uint32_t dur = duration > 0xffffffffu ? 0xffffffffu : (uint32_t)duration;       /* the pictures' media */
+    uint64_t origin = m->first_pts, vofs = 0, aofs = 0, adur_ms = 0;                /* sound: both tracks count from the earlier of the two starts */
+    if (m->arate) {
+        if (m->afirst_set && m->afirst_pts < origin)
+            origin = m->afirst_pts;
+        vofs = m->first_pts - origin;
+        aofs = m->afirst_set ? m->afirst_pts - origin : 0;
+        adur_ms = m->atotal * 1000 / (uint64_t)m->arate;
+    }
+    uint64_t movie = vofs + duration > aofs + adur_ms ? vofs + duration : aofs + adur_ms;
+    uint32_t mdur = movie > 0xffffffffu ? 0xffffffffu : (uint32_t)movie;
     size_t moov = begin_box(b, "moov");
 
     size_t mvhd = begin_full(b, "mvhd", 0, 0);
     b_u32(b, 0); b_u32(b, 0);                       /* creation, modification (unknown: 0) */
     b_u32(b, 1000);
-    b_u32(b, dur);
+    b_u32(b, mdur);
     b_u32(b, 0x00010000);                           /* rate 1.0 */
     b_u16(b, 0x0100);                               /* volume */
     b_zero(b, 10);
     for (int i = 0; i < 9; i++) b_u32(b, unity[i]);
     b_zero(b, 24);                                  /* pre_defined */
-    b_u32(b, 2);                                    /* next track id */
+    b_u32(b, m->arate ? 3 : 2);                     /* next track id */
     end_box(b, mvhd);
 
     size_t trak = begin_box(b, "trak");
@@ -111,13 +154,14 @@ static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration,
     b_u32(b, 0); b_u32(b, 0);
     b_u32(b, 1);                                    /* track id */
     b_u32(b, 0);
-    b_u32(b, dur);
+    b_u32(b, (uint32_t)(vofs + dur));
     b_zero(b, 8);
     b_u16(b, 0); b_u16(b, 0); b_u16(b, 0); b_u16(b, 0);   /* layer, alternate group, volume, reserved */
     for (int i = 0; i < 9; i++) b_u32(b, unity[i]);
     b_u32(b, (uint32_t)m->w << 16);
     b_u32(b, (uint32_t)m->h << 16);
     end_box(b, tkhd);
+    put_edts(b, vofs, dur);
 
     size_t mdia = begin_box(b, "mdia");
     size_t mdhd = begin_full(b, "mdhd", 0, 0);
@@ -226,9 +270,9 @@ static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration,
         end_box(b, stss);
     }
 
-    size_t stsc = begin_full(b, "stsc", 0, 0);      /* all pictures are one chunk */
+    size_t stsc = begin_full(b, "stsc", 0, 0);      /* without sound all pictures are one chunk, with it one each (the sound sits between them) */
     b_u32(b, 1);
-    b_u32(b, 1); b_u32(b, m->n); b_u32(b, 1);
+    b_u32(b, 1); b_u32(b, m->arate ? 1 : m->n); b_u32(b, 1);
     end_box(b, stsc);
 
     size_t stsz = begin_full(b, "stsz", 0, 0);
@@ -238,21 +282,109 @@ static void build_moov(struct buf *b, const struct lm_mp4 *m, uint64_t duration,
         b_u32(b, m->size[i]);
     end_box(b, stsz);
 
-    if (first_offset > 0xffffffffu) {
-        size_t co = begin_full(b, "co64", 0, 0);
-        b_u32(b, 1);
-        b_u64(b, first_offset);
-        end_box(b, co);
-    } else {
-        size_t co = begin_full(b, "stco", 0, 0);
-        b_u32(b, 1);
-        b_u32(b, (uint32_t)first_offset);
-        end_box(b, co);
+    uint32_t nchunks = m->arate ? m->n : 1;
+    bool big = first_offset > 0xffffffffu || (m->arate && m->n && m->voff[m->n - 1] > 0xffffffffu);
+    size_t co = begin_full(b, big ? "co64" : "stco", 0, 0);
+    b_u32(b, nchunks);
+    for (uint32_t i = 0; i < nchunks; i++) {
+        uint64_t off = m->arate ? m->voff[i] : first_offset;
+        if (big)
+            b_u64(b, off);
+        else
+            b_u32(b, (uint32_t)off);
     }
+    end_box(b, co);
     end_box(b, stbl);
     end_box(b, minf);
     end_box(b, mdia);
     end_box(b, trak);
+
+    if (m->arate) {                                 /* the sound track: 16 bit PCM ("sowt"), one chunk per write */
+        size_t atrak = begin_box(b, "trak");
+        size_t atkhd = begin_full(b, "tkhd", 0, 3);
+        b_u32(b, 0); b_u32(b, 0);
+        b_u32(b, 2);
+        b_u32(b, 0);
+        b_u32(b, (uint32_t)(aofs + adur_ms));
+        b_zero(b, 8);
+        b_u16(b, 0); b_u16(b, 1); b_u16(b, 0x0100); b_u16(b, 0);   /* layer, alternate group, volume 1.0, reserved */
+        for (int i = 0; i < 9; i++) b_u32(b, unity[i]);
+        b_u32(b, 0); b_u32(b, 0);
+        end_box(b, atkhd);
+        put_edts(b, aofs, adur_ms);
+        size_t amdia = begin_box(b, "mdia");
+        size_t amdhd = begin_full(b, "mdhd", 0, 0);
+        b_u32(b, 0); b_u32(b, 0);
+        b_u32(b, (uint32_t)m->arate);
+        b_u32(b, (uint32_t)m->atotal);
+        b_u16(b, 0x55c4);
+        b_u16(b, 0);
+        end_box(b, amdhd);
+        size_t ahdlr = begin_full(b, "hdlr", 0, 0);
+        b_u32(b, 0);
+        b_tag(b, "soun");
+        b_zero(b, 12);
+        b_bytes(b, "MellaGUI sound\0", 15);
+        end_box(b, ahdlr);
+        size_t aminf = begin_box(b, "minf");
+        size_t smhd = begin_full(b, "smhd", 0, 0);
+        b_u16(b, 0); b_u16(b, 0);
+        end_box(b, smhd);
+        size_t adinf = begin_box(b, "dinf");
+        size_t adref = begin_full(b, "dref", 0, 0);
+        b_u32(b, 1);
+        size_t aurl = begin_full(b, "url ", 0, 1);
+        end_box(b, aurl);
+        end_box(b, adref);
+        end_box(b, adinf);
+        size_t astbl = begin_box(b, "stbl");
+        size_t astsd = begin_full(b, "stsd", 0, 0);
+        b_u32(b, 1);
+        size_t sowt = begin_box(b, "sowt");
+        b_zero(b, 6);
+        b_u16(b, 1);                                /* data reference index */
+        b_u16(b, 0); b_u16(b, 0); b_u32(b, 0);      /* QuickTime sound description version 0: version, revision, vendor */
+        b_u16(b, (unsigned)m->ach);
+        b_u16(b, 16);                               /* bits per sample */
+        b_u16(b, 0); b_u16(b, 0);                   /* compression id, packet size */
+        b_u32(b, (uint32_t)m->arate << 16);         /* sample rate, 16.16 */
+        end_box(b, sowt);
+        end_box(b, astsd);
+        size_t astts = begin_full(b, "stts", 0, 0); /* every PCM frame lasts one tick of the media's clock */
+        b_u32(b, 1);
+        b_u32(b, (uint32_t)m->atotal); b_u32(b, 1);
+        end_box(b, astts);
+        size_t astsc = begin_full(b, "stsc", 0, 0);
+        size_t runs_at = b->n;
+        b_u32(b, 0);
+        uint32_t runs = 0;
+        for (uint32_t i = 0; i < m->anc; i++) {
+            if (i > 0 && m->aframes[i] == m->aframes[i - 1])
+                continue;                           /* the same count as the chunk before: the entry before still holds */
+            b_u32(b, i + 1); b_u32(b, m->aframes[i]); b_u32(b, 1);
+            runs++;
+        }
+        patch_u32(b, runs_at, runs);
+        end_box(b, astsc);
+        size_t astsz = begin_full(b, "stsz", 0, 0);
+        b_u32(b, (uint32_t)m->ach * 2);             /* every sample (one PCM frame) has the same size */
+        b_u32(b, (uint32_t)m->atotal);
+        end_box(b, astsz);
+        bool abig = m->anc && m->aoff[m->anc - 1] > 0xffffffffu;
+        size_t aco = begin_full(b, abig ? "co64" : "stco", 0, 0);
+        b_u32(b, m->anc);
+        for (uint32_t i = 0; i < m->anc; i++) {
+            if (abig)
+                b_u64(b, m->aoff[i]);
+            else
+                b_u32(b, (uint32_t)m->aoff[i]);
+        }
+        end_box(b, aco);
+        end_box(b, astbl);
+        end_box(b, aminf);
+        end_box(b, amdia);
+        end_box(b, atrak);
+    }
     end_box(b, moov);
 }
 
@@ -292,6 +424,7 @@ struct lm_mp4 *lm_mp4_create(const char *path, int width, int height)
         errno = e ? e : ENOMEM;
         return NULL;
     }
+    pthread_mutex_init(&m->lock, NULL);
     m->path = strdup(path);
     m->f = f;
     m->w = width;
@@ -342,7 +475,7 @@ int lm_mp4_add(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_m
     return lm_mp4_add_sample(m, jpeg, len, pts_ms, 1);
 }
 
-int lm_mp4_add_sample(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_ms, int key)
+static int add_sample_locked(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_ms, int key)
 {
     if (!m || m->failed || !jpeg || len == 0 || len > 0x7fffffffu)
         return -1;
@@ -353,14 +486,17 @@ int lm_mp4_add_sample(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_
             m->size = ns;
         uint64_t *np = ns ? realloc(m->pts, (size_t)nc * sizeof(*np)) : NULL;
         uint8_t *nk = np ? realloc(m->key, nc) : NULL;
-        if (!ns || !np || !nk) {
+        uint64_t *nv = nk ? realloc(m->voff, (size_t)nc * sizeof(*nv)) : NULL;
+        if (!ns || !np || !nk || !nv) {
             m->failed = 1;
             return -1;
         }
         m->pts = np;
         m->key = nk;
+        m->voff = nv;
         m->cap = nc;
     }
+    m->voff[m->n] = m->pos;
     if (m->n == 0)
         m->first_pts = pts_ms;
     uint64_t rel = pts_ms > m->first_pts ? pts_ms - m->first_pts : 0;
@@ -373,6 +509,86 @@ int lm_mp4_add_sample(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_
     m->pts[m->n] = rel;
     m->n++;
     return 0;
+}
+
+int lm_mp4_add_sample(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_ms, int key)
+{
+    if (!m)
+        return -1;
+    pthread_mutex_lock(&m->lock);
+    int rc = add_sample_locked(m, jpeg, len, pts_ms, key);
+    pthread_mutex_unlock(&m->lock);
+    return rc;
+}
+
+int lm_mp4_set_audio(struct lm_mp4 *m, int rate, int channels)
+{
+    if (!m || rate < 8000 || rate > 192000 || channels < 1 || channels > 2)
+        return -1;
+    pthread_mutex_lock(&m->lock);
+    int rc = -1;
+    if (m->n == 0 && m->anc == 0) {
+        m->arate = rate;
+        m->ach = channels;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&m->lock);
+    return rc;
+}
+
+int lm_mp4_add_audio(struct lm_mp4 *m, const int16_t *pcm, size_t frames, uint64_t pts_ms)
+{
+    if (!m || !pcm || frames == 0 || frames > 0x1000000u)
+        return -1;
+    pthread_mutex_lock(&m->lock);
+    int rc = -1;
+    if (m->arate && !m->failed) {
+        if (m->anc == m->anc_cap) {
+            uint32_t nc = m->anc_cap ? m->anc_cap * 2 : 1024;
+            uint64_t *no = realloc(m->aoff, (size_t)nc * sizeof(*no));
+            if (no)
+                m->aoff = no;
+            uint32_t *nf = no ? realloc(m->aframes, (size_t)nc * sizeof(*nf)) : NULL;
+            if (nf)
+                m->aframes = nf;
+            if (!no || !nf) {
+                m->failed = 1;
+            } else {
+                m->anc_cap = nc;
+            }
+        }
+        if (!m->failed) {
+            if (!m->afirst_set) {
+                m->afirst_pts = pts_ms;
+                m->afirst_set = 1;
+            }
+            size_t bytes = frames * (size_t)m->ach * 2;
+            uint64_t at = m->pos;
+            uint8_t *le = NULL;
+            const uint8_t *src = (const uint8_t *)pcm;
+            const uint16_t probe = 1;
+            if (*(const uint8_t *)&probe != 1) {                 /* a big endian host: the samples are written little endian */
+                le = malloc(bytes);
+                if (le) {
+                    for (size_t i = 0; i < bytes; i += 2) {
+                        le[i] = ((const uint8_t *)pcm)[i + 1];
+                        le[i + 1] = ((const uint8_t *)pcm)[i];
+                    }
+                    src = le;
+                }
+            }
+            if (put(m, src, bytes) == 0) {
+                m->aoff[m->anc] = at;
+                m->aframes[m->anc] = (uint32_t)frames;
+                m->anc++;
+                m->atotal += frames;
+                rc = 0;
+            }
+            free(le);
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+    return rc;
 }
 
 uint32_t lm_mp4_frames(const struct lm_mp4 *m) { return m ? m->n : 0; }
@@ -409,6 +625,10 @@ int lm_mp4_close(struct lm_mp4 *m, uint64_t end_ms)
     free(m->key);
     free(m->sps);
     free(m->pps);
+    free(m->aoff);
+    free(m->aframes);
+    free(m->voff);
+    pthread_mutex_destroy(&m->lock);
     free(m);
     return rc;
 }

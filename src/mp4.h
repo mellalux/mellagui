@@ -2,7 +2,8 @@
 #define MELLAGUI_MP4_H
 
 /*
- * Minimal MP4 (ISO base media file) writer for one video track: JPEG pictures (Motion JPEG: sample entry "mp4v" with an esds of
+ * Minimal MP4 (ISO base media file) writer for one video track and, optionally, one sound track (16 bit little endian PCM, "sowt": ffmpeg, mpv, VLC and
+ * QuickTime play it, browsers do not; lm_mp4_set_audio / lm_mp4_add_audio): JPEG pictures (Motion JPEG: sample entry "mp4v" with an esds of
  * object type 0x6C, which ffmpeg, VLC, mpv and QuickTime play; browsers do not) or H.264 access units ("avc1" + avcC, which plays
  * everywhere; lm_mp4_set_h264 before the first picture). No audio, no fragments: the frames are
  * appended to a `mdat` box as they arrive and the `moov` box with the sample tables is written by lm_mp4_close(), so a recording
@@ -12,6 +13,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* The functions are safe to call from several threads (the pictures come from encoder threads, the sound from the loop's thread): one lock inside. */
 
 struct lm_mp4;
 
@@ -23,6 +26,11 @@ int lm_mp4_set_h264(struct lm_mp4 *m, const uint8_t *sps, size_t sps_len, const 
 int lm_mp4_add_sample(struct lm_mp4 *m, const uint8_t *data, size_t len, uint64_t pts_ms, int key);
 /* Appends one JPEG picture shown from `pts_ms` on (milliseconds since any start; must not go backwards). 0 or -1 (disk full ...). */
 int lm_mp4_add(struct lm_mp4 *m, const uint8_t *jpeg, size_t len, uint64_t pts_ms);
+/* Adds a sound track: `channels` (1 or 2) channels of signed 16 bit little endian PCM at `rate` Hz. Before the first picture or the first sound. 0 or -1. */
+int lm_mp4_set_audio(struct lm_mp4 *m, int rate, int channels);
+/* Appends `frames` PCM frames (interleaved channels). `pts_ms` says when the FIRST frame of the whole sound was heard, on the same clock as the pictures'
+ * times; it is read from the first call only (the frames after it follow each other without a gap). 0 or -1. */
+int lm_mp4_add_audio(struct lm_mp4 *m, const int16_t *pcm, size_t frames, uint64_t pts_ms);
 /* Number of pictures added so far / bytes written so far. */
 uint32_t lm_mp4_frames(const struct lm_mp4 *m);
 uint64_t lm_mp4_bytes(const struct lm_mp4 *m);

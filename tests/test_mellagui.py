@@ -16229,8 +16229,8 @@ class TestSmart(Base):
     CODE_KEYS = (30, 48, 46, 2, 3, 4)                                   # abc123
 
     DEVICES = [
-        {'id': 'plug1', 'home': 7, 'name': 'Plug', 'category': 'cz', 'online': True,
-         'status': {'switch_1': False, 'countdown_1': 0, 'cur_power': 123},
+        {'id': 'plug1', 'home': 7, 'name': 'Plug', 'category': 'cz', 'online': True, 'local_key': '0123456789abcdef',
+         'dp_ids': {'switch_1': 1, 'countdown_1': 9}, 'status': {'switch_1': False, 'countdown_1': 0, 'cur_power': 123},
          'functions': [{'code': 'switch_1', 'type': 'Boolean', 'values': '{}'},
                        {'code': 'countdown_1', 'type': 'Integer', 'values': '{"unit":"s","min":0,"max":86400,"scale":0,"step":1}'}],
          'status_spec': [{'code': 'cur_power', 'type': 'Integer', 'values': '{"unit":"W","min":0,"max":50000,"scale":1,"step":1}'}]},
@@ -16287,7 +16287,21 @@ class TestSmart(Base):
         line = srv.stdout.readline().decode()
         self.assertTrue(line.startswith('port '), line)
         self.env = {'MELLAGUI_TUYA_ENDPOINT': 'http://127.0.0.1:' + line.split()[1], 'XDG_CONFIG_HOME': os.path.join(d, 'cfg'),
-                    'MELLAGUI_SMART_DUMP': self.dump_path, 'MELLAGUI_SMART_POLL_MS': '700'}
+                    'MELLAGUI_SMART_DUMP': self.dump_path, 'MELLAGUI_SMART_POLL_MS': '700',
+                    'MELLAGUI_TUYA_LAN_FAKE': ''}                               # (no listening in the real network; local tests name a device here)
+
+    def local_device(self, version, mode='ok', key='0123456789abcdef'):
+        """A stand-in for plug1 in the local network (tests/fake_tuya_device.py); the program is pointed at it."""
+        self.dev_log = os.path.join(self.dir, 'device.log')
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fake_tuya_device.py')
+        srv = subprocess.Popen([sys.executable, fake, version, key, self.dev_log, mode], stdout=subprocess.PIPE)
+        self.addCleanup(lambda: (srv.kill(), srv.wait(), srv.stdout.close()))
+        line = srv.stdout.readline().decode()
+        self.assertTrue(line.startswith('port '), line)
+        self.env.update(MELLAGUI_TUYA_LAN_PORT=line.split()[1], MELLAGUI_TUYA_LAN_FAKE='plug1=127.0.0.1=' + version)
+
+    def device_log(self):
+        return open(self.dev_log).read() if os.path.exists(self.dev_log) else ''
 
     def cli(self, *args):
         r = subprocess.run([self.exe] + list(args), env=dict(os.environ, **self.env), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
@@ -16302,7 +16316,7 @@ class TestSmart(Base):
             return {d['id']: d for d in json.load(f)['devices']}
 
     def view(self):
-        out = {'ctl': {}, 'devs': {}, 'view': '', 'msg': '', 'qr': ''}
+        out = {'ctl': {}, 'mctl': {}, 'devs': {}, 'view': '', 'msg': '', 'qr': ''}
         if not os.path.exists(self.dump_path):
             return out
         lines = open(self.dump_path).read().split('\n')
@@ -16316,8 +16330,8 @@ class TestSmart(Base):
             p = l.split()
             if p and p[0] == 'dev':
                 out['devs'][p[1]] = p[2] == 'online=1'
-            elif p and p[0] == 'ctl':
-                out['ctl'].setdefault((p[1], p[2], p[3]), []).append((int(p[4]), int(p[5]), int(p[6]), int(p[7]), p[8]))
+            elif p and p[0] in ('ctl', 'mctl'):                              # on a card / in the open device view
+                out[p[0]].setdefault((p[1], p[2], p[3]), []).append((int(p[4]), int(p[5]), int(p[6]), int(p[7]), ' '.join(p[8:])))
         return out
 
     def window(self, tag):
@@ -16335,8 +16349,8 @@ class TestSmart(Base):
         v = self.view()
         return v['view'] == 'devices' and v.get('loaded') == '1' and ('plug1', 'switch_1', 'toggle') in v['ctl']
 
-    def press(self, key, at=0, dx=10):
-        b = self.view()['ctl'][key][at]
+    def press(self, key, at=0, dx=10, where='ctl'):
+        b = self.view()[where][key][at]
         self.c.click(self.x0 + b[0] + dx, self.y0 + b[1] + b[3] // 2)
 
     def test_selftest(self):
@@ -16407,7 +16421,9 @@ class TestSmart(Base):
         self.assertEqual(v['devs'], {'plug1': True, 'blind1': True, 'robot1': True, 'plug2': False})
         self.assertEqual(len(v['ctl'][('blind1', 'control', 'button')]), 3)     # open / stop / close
         self.assertIn(('blind1', 'percent_control', 'slider'), v['ctl'])
-        self.assertIn(('robot1', 'mode', 'menu'), v['ctl'])
+        self.assertIn(('robot1', 'power_go', 'toggle'), v['ctl'])
+        self.assertNotIn(('robot1', 'mode', 'button'), v['ctl'])                # the modes are in the robot's own view
+        self.assertEqual(len([k for k in v['ctl'] if k[2] == 'details']), 4)    # every card opens one
         self.assertNotIn(('plug1', 'countdown_1', 'slider'), v['ctl'])          # a range of a day is no slider
 
     def logged_in_window(self, tag):
@@ -16439,21 +16455,14 @@ class TestSmart(Base):
         self.assertEqual(self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][4], '100')
         self.assertNotIn('REFUSED', self.log())
 
-    def test_a_choice_opens_a_menu_and_an_offline_device_is_left_alone(self):
+    def test_an_offline_device_is_left_alone(self):
         c = self.logged_in_window('w3')
-        self.press(('robot1', 'mode', 'menu'))
-        self.wait(lambda: 'open=1' in c.cmd('dockmenu')[0], 'the menu')
-        entries = [l for l in c.cmd('dockmenu') if l.startswith('entry ')]
-        self.assertEqual([re.match(r'entry \d+ "(.*?)"', l)[1] for l in entries], ['standby', 'smart', 'spiral'])
-        m = re.match(r'entry 2 ".*?" x=(\d+) y=(\d+) w=(\d+) h=(\d+)', entries[2])
-        c.click(int(m[1]) + 10, int(m[2]) + 10)
-        self.wait(lambda: self.state()['robot1']['status']['mode'] == 'spiral', 'the mode is sent')
         n = self.log().count('/commands')
         self.press(('plug2', 'switch_1', 'toggle'), dx=20)
         self.wait(lambda: 'offline' in self.view()['msg'], 'the window says the device is offline')
         self.assertEqual(self.log().count('/commands'), n)
 
-    def test_a_change_made_elsewhere_shows_up_and_more_shows_everything(self):
+    def test_a_change_made_elsewhere_shows_up(self):
         import json
         c = self.logged_in_window('w4')
         st = json.load(open(self.state_path))
@@ -16461,11 +16470,63 @@ class TestSmart(Base):
         with open(self.state_path, 'w') as f:
             json.dump(st, f)
         self.wait(lambda: self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4] == 'on', 'the next poll shows it')
-        y_blind = self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][1]
-        self.press(('plug1', '-', 'more'))
-        self.wait(lambda: self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][1] > y_blind, 'the card grows')
-        self.press(('plug1', '-', 'more'))
-        self.wait(lambda: self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][1] == y_blind, 'and shrinks again')
+
+    def test_details_opens_the_devices_own_view(self):
+        c = self.logged_in_window('w6')
+        self.assertEqual(self.view()['modal'], '-')
+        self.press(('plug1', '-', 'details'))
+        self.wait(lambda: self.view()['modal'] == 'plug1', 'the view of the plug')
+        v = self.view()
+        self.assertIn(('plug1', 'switch_1', 'toggle'), v['mctl'])
+        self.assertIn('Power: 12.3 W', [t[4] for t in v['mctl'][('plug1', '-', 'text')]])     # everything it reports
+        self.assertIn('Countdown 1: 0 s', [t[4] for t in v['mctl'][('plug1', '-', 'text')]])  # (a range of a day is no slider: it is listed)
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20, where='mctl')
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the switch in the view works')
+        b = v['ctl'][('blind1', 'control', 'button')][0]
+        n = self.log().count('/commands')
+        c.click(self.x0 + 5, self.y0 + 300)                                     # beside the view: it closes, and the card under it gets nothing
+        self.wait(lambda: self.view()['modal'] == '-', 'a click beside the view closes it')
+        self.assertEqual(self.log().count('/commands'), n)
+        c.click(self.x0 + 100, self.y0 + b[1] - 44)                             # the blind's card itself (its name)
+        self.wait(lambda: self.view()['modal'] == 'blind1', 'a click on a card opens its view')
+        c.tap(1)                                                                # Esc closes the view, not the window
+        self.wait(lambda: self.view()['modal'] == '-', 'Esc closes the view')
+        self.assertTrue([w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'])
+
+    def test_the_robots_view_is_a_remote_control(self):
+        robot = dict(self.DEVICES[2], status={'power_go': False, 'mode': 'standby', 'electricity_left': 87, 'direction_control': 'stop', 'suction': 'normal'},
+                     functions=self.DEVICES[2]['functions'][:1] + [
+                         {'code': 'mode', 'type': 'Enum', 'values': '{"range":["standby","smart","spiral","chargego"]}'},
+                         {'code': 'suction', 'type': 'Enum', 'values': '{"range":["strong","normal"]}'},
+                         {'code': 'direction_control', 'type': 'Enum', 'values': '{"range":["forward","backward","turn_left","turn_right","stop"]}'}])
+        self.cloud('w7', devices=[self.DEVICES[0], robot])
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        c = self.window('w7')
+        self.wait(self.devices_shown, 'the devices')
+        time.sleep(0.3)
+        self.assertEqual([b[4] for b in self.view()['ctl'][('robot1', 'mode', 'button')]], ['chargego'])   # the card: a Dock button
+        self.press(('robot1', '-', 'details'))
+        self.wait(lambda: self.view()['modal'] == 'robot1', 'the view of the robot')
+        v = self.view()['mctl']
+        self.assertEqual(sorted(b[4] for b in v[('robot1', 'direction_control', 'hold')]), ['backward', 'forward', 'turn_left', 'turn_right'])
+        self.assertEqual([b[4] for b in v[('robot1', 'mode', 'button')]], ['chargego', 'standby', 'smart', 'spiral', 'chargego'])   # Return to dock + a button per mode
+        cmds = lambda: re.findall(r'"code": "(\w+)", "value": ("?\w+"?)', self.log())
+        self.press(('robot1', 'power_go', 'push'), where='mctl')
+        self.wait(lambda: ('power_go', 'true') in cmds(), 'Start cleaning')
+        self.press(('robot1', 'mode', 'button'), at=3, where='mctl')
+        self.wait(lambda: ('mode', '"spiral"') in cmds(), 'a mode is one click')
+        f = [b for b in v[('robot1', 'direction_control', 'hold')] if b[4] == 'forward'][0]
+        c.abs(self.x0 + f[0] + 20, self.y0 + f[1] + 20)
+        c.button(272, True)
+        self.wait(lambda: ('direction_control', '"forward"') in cmds(), 'a held arrow drives')
+        self.assertNotIn(('direction_control', '"stop"'), cmds())
+        c.button(272, False)
+        self.wait(lambda: cmds()[-1] == ('direction_control', '"stop"'), 'letting go stops')
+        c.key(105, True)                                                        # the Left arrow key
+        self.wait(lambda: cmds()[-1] == ('direction_control', '"turn_left"'), 'an arrow key drives too')
+        c.key(105, False)
+        self.wait(lambda: cmds()[-1] == ('direction_control', '"stop"'), 'and stops when it is let go')
+        self.assertEqual(self.view()['modal'], 'robot1')
 
     def test_log_out_goes_back_to_the_login(self):
         c = self.logged_in_window('w5')
@@ -16475,6 +16536,66 @@ class TestSmart(Base):
         c.tap(self.KEY_ENTER_)                                                   # the user code is still in the field
         self.wait(lambda: self.view()['view'] == 'qr', 'a new QR code')
         self.wait(self.devices_shown, 'logged in again', 15)
+
+
+    def test_a_command_over_the_local_network_in_both_protocol_versions(self):
+        for version in ('3.3', '3.4'):
+            self.cloud('lan' + version[-1])
+            self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+            self.local_device(version)
+            code, out = self.cli('--set-local', 'plug1', 'switch_1', 'true')
+            self.assertEqual(code, 0, out)
+            self.assertIn('(protocol %s) confirmed switch_1 = true' % version, out)
+            self.assertIn('{"dps": {"1": true}}', self.device_log())           # the number of the data point, not its name
+            self.assertNotIn('error', self.device_log())                      # the CRC / the HMAC and the encryption were right
+            self.assertNotIn('/commands', self.log())                         # the cloud was not told
+            code, out = self.cli('--list')
+            self.assertRegex(out, r'switch_1 .*\[local 1\]')
+
+    def test_a_local_command_that_fails_says_whether_it_was_sent(self):
+        self.cloud('lanbad')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.local_device('3.4', key='XXXXXXXXXXXXXXXX')                      # the device has another key
+        code, out = self.cli('--set-local', 'plug1', 'switch_1', 'true')
+        self.assertEqual(code, 1)
+        self.assertIn('nothing was sent', out)
+        self.assertNotIn('dps', self.device_log())
+        self.local_device('3.3', mode='silent')
+        code, out = self.cli('--set-local', 'plug1', 'switch_1', 'true')
+        self.assertEqual(code, 1)
+        self.assertIn('did not confirm', out)
+        self.assertIn('it was sent', out)
+        self.local_device('3.3', mode='refuse')
+        code, out = self.cli('--set-local', 'plug1', 'switch_1', 'true')
+        self.assertIn('refused the command: dp not allowed', out)
+
+    def test_the_window_uses_the_local_network_and_falls_back_on_the_cloud(self):
+        self.cloud('lanwin')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.local_device('3.4')
+        c = self.window('lw1')
+        self.wait(self.devices_shown, 'the devices')
+        self.wait(lambda: 'dev plug1 online=1 local=1' in open(self.dump_path).read(), 'the plug is marked local')
+        self.assertIn('dev blind1 online=1 local=0', open(self.dump_path).read())
+        time.sleep(0.8)                                                         # (the numbers of the local protocol are asked for after the list)
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20)
+        self.wait(lambda: '{"dps": {"1": true}}' in self.device_log(), 'the device gets the command itself')
+        self.wait(lambda: self.view().get('lan') == '1', 'the window counts it')
+        self.assertNotIn('/commands', self.log())
+        self.press(('blind1', 'control', 'button'), at=0)                       # not heard in this network: the cloud
+        self.wait(lambda: self.state()['blind1']['status']['control'] == 'open', 'the blind goes through the cloud')
+        self.assertEqual(self.view().get('lan'), '1')
+
+    def test_a_device_that_is_gone_from_the_network_is_told_through_the_cloud(self):
+        self.cloud('lanfall')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.env.update(MELLAGUI_TUYA_LAN_PORT='1', MELLAGUI_TUYA_LAN_FAKE='plug1=127.0.0.1=3.3')    # nobody listens there
+        c = self.window('lw2')
+        self.wait(self.devices_shown, 'the devices')
+        time.sleep(0.8)
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20)
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the cloud does it')
+        self.assertFalse(self.view()['msg'])
 
 
 if __name__ == '__main__':

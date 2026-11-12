@@ -836,7 +836,13 @@ static void parse_spec(struct tuya_dev *d, const struct json *e, bool func)
             dp->scale = (int)json_num(vals, "scale", 0);
             if (dp->scale < 0 || dp->scale > 6)
                 dp->scale = 0;
-            copy(dp->unit, sizeof(dp->unit), json_str(vals, "unit", ""));
+            const char *unit = json_str(vals, "unit", "");           /* (signs the font has no glyph for become their plain spelling) */
+            static const char *const plain[][2] = { { "\xe2\x84\x83", "\xc2\xb0""C" }, { "\xe2\x84\x89", "\xc2\xb0""F" }, { "\xe3\x8e\xa1", "m\xc2\xb2" },
+                                                    { "\xe5\x88\x86", "min" }, { "\xe7\xa7\x92", "s" }, { "kwh", "kWh" } };
+            for (size_t u = 0; u < sizeof(plain) / sizeof(plain[0]); u++)
+                if (!strcmp(unit, plain[u][0]))
+                    unit = plain[u][1];
+            copy(dp->unit, sizeof(dp->unit), unit);
         } else if (dp->type == TUYA_ENUM) {
             const struct json *range = json_get(vals, "range");
             dp->nrange = 0;
@@ -862,6 +868,27 @@ bool tuya_load_specs(struct tuya_session *s, struct tuya_dev *d, char *err, size
     list = json_get(r, "functions");
     for (const struct json *e = list ? list->child : NULL; e; e = e->next)
         parse_spec(d, e, true);
+    json_free(r);
+    return true;
+}
+
+bool tuya_load_local_map(struct tuya_session *s, struct tuya_dev *d, char *err, size_t errsz)
+{
+    char path[160];
+    d->map = true;
+    snprintf(path, sizeof(path), "/v1.0/m/life/devices/%s/status", d->id);
+    struct json *r = api_call(s, "GET", path, NULL, NULL, NULL, true, err, errsz);
+    if (!r)
+        return false;
+    const struct json *list = json_get(r, "dpStatusRelationDTOS");
+    for (const struct json *e = list ? list->child : NULL; e; e = e->next) {
+        struct tuya_dp *dp = tuya_find_dp(d, json_str(e, "statusCode", ""));
+        int id = (int)json_num(e, "dpId", 0);
+        if (!dp || id <= 0 || id > 255)
+            continue;
+        dp->lan_id = id;                                        /* (only "default" values are the same on both sides; the others stay with the cloud) */
+        dp->lan_ok = json_bool(e, "supportLocal", false) && !strcmp(json_str(e, "valueConvert", ""), "default");
+    }
     json_free(r);
     return true;
 }

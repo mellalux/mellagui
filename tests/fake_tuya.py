@@ -148,11 +148,16 @@ class Handler(BaseHTTPRequestHandler):
                 if str(d.get('home', 1)) != str(params.get('homeId')):
                     continue
                 out.append({'id': d['id'], 'name': d['name'], 'category': d.get('category', ''), 'product_name': d.get('product', ''),
-                            'online': d.get('online', True), 'local_key': 'key-' + d['id'], 'ip': '192.0.2.7',
+                            'online': d.get('online', True), 'local_key': d.get('local_key', 'key-' + d['id']), 'ip': '192.0.2.7',
                             'status': [{'code': k, 'value': v} for k, v in d.get('status', {}).items()]})
             return ok(out)
         parts = path.split('/')
         dev = next((d for d in st.get('devices', []) if d['id'] in parts), None)
+        if path.endswith('/status') and '/devices/' in path and dev:        # the numbers of the local protocol: "dp_ids": {code: number}
+            conv = dev.get('convert', {})
+            return ok({'productKey': 'pk', 'dpStatusRelationDTOS': [
+                {'dpId': n, 'statusCode': code, 'supportLocal': True, 'valueConvert': conv.get(code, 'default'), 'statusFormat': '{}',
+                 'valueDesc': '{}', 'valueType': 'value', 'enumMappingMap': {}} for code, n in dev.get('dp_ids', {}).items()]})
         if path.endswith('/specifications') and dev:
             return ok({'category': dev.get('category', ''), 'functions': dev.get('functions', []), 'status': dev.get('status_spec', [])})
         if path.endswith('/commands') and dev and method == 'POST':

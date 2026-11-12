@@ -38,6 +38,8 @@ struct tuya_dp {
     char unit[12];
     char range[TUYA_MAX_RANGE][24];     /* TUYA_ENUM */
     int nrange;
+    int lan_id;                         /* its number in the local protocol, 0 = not known */
+    bool lan_ok;                        /* ... and the value goes over the local network as it is (no conversion) */
 };
 
 struct tuya_dev {
@@ -45,6 +47,7 @@ struct tuya_dev {
     char local_key[40], ip[48];
     bool online;
     bool specs;                         /* the functions were asked for (also when the answer was an error) */
+    bool map;                           /* ... and the numbers of the local protocol */
     struct tuya_dp dp[TUYA_MAX_DP];
     int ndp;
 };
@@ -74,6 +77,8 @@ int tuya_qr_poll(const char *user_code, const char *token, struct tuya_session *
 bool tuya_load_devices(struct tuya_session *s, struct tuya_dev *dev, int *n, char *err, size_t errsz);
 /* What the device can be told and the ranges of its values (sets d->specs whatever the answer). */
 bool tuya_load_specs(struct tuya_session *s, struct tuya_dev *d, char *err, size_t errsz);
+/* The numbers the device's data points have in the local protocol (sets d->map whatever the answer). */
+bool tuya_load_local_map(struct tuya_session *s, struct tuya_dev *d, char *err, size_t errsz);
 /* Tells a device a value: `value_json` is JSON (true, 50, "open"). */
 bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, const char *value_json, char *err, size_t errsz);
 

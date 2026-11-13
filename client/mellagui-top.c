@@ -456,7 +456,9 @@ static void keep_visible(struct vlist *v, int rows)
         v->top = v->sel - rows + 1;
 }
 
-static void rebuild_procs(struct app *a)
+/* `follow` = the user did something (sort, filter): the cursor is kept in view. A refresh on a timer must not do that, or it would
+ * scroll the list back to the cursor under a user who is scrolling with the wheel. */
+static void rebuild_procs(struct app *a, bool follow)
 {
     int *sh = realloc(a->shown, (size_t)LM_MAX(a->np, 1) * sizeof(int));
     if (!sh)
@@ -477,7 +479,8 @@ static void rebuild_procs(struct app *a)
     clamp_view(&a->pv, a->nshown, list_rows(a));
     const struct proc *sp = selected_proc(a);
     a->sel_pid = sp ? sp->pid : 0;
-    keep_visible(&a->pv, list_rows(a));
+    if (follow)
+        keep_visible(&a->pv, list_rows(a));
 }
 
 static bool svc_matches(const struct app *a, const struct svc *s)
@@ -500,7 +503,7 @@ static int cmp_svc(const void *x, const void *y)
     return c ? c : strcasecmp(p->unit, q->unit);
 }
 
-static void rebuild_svcs(struct app *a)
+static void rebuild_svcs(struct app *a, bool follow)
 {
     int *sh = realloc(a->sshown, (size_t)LM_MAX(a->ns, 1) * sizeof(int));
     if (!sh)
@@ -518,7 +521,8 @@ static void rebuild_svcs(struct app *a)
     clamp_view(&a->sv, a->nsshown, list_rows(a));
     if (a->sv.sel < a->nsshown)
         snprintf(a->sel_unit, sizeof(a->sel_unit), "%s", a->s[a->sshown[a->sv.sel]].unit);
-    keep_visible(&a->sv, list_rows(a));
+    if (follow)
+        keep_visible(&a->sv, list_rows(a));
 }
 
 static const struct svc *selected_svc(const struct app *a)
@@ -636,7 +640,7 @@ static void read_services(struct app *a)
         first_line(out ? out : "", why, sizeof(why));
         msg(a, "systemctl: %s", why[0] ? why : rc < 0 ? "no answer (is systemd running?)" : "failed");
         free(out);
-        rebuild_svcs(a);
+        rebuild_svcs(a, false);
         return;
     }
     int cap = 0;
@@ -659,7 +663,7 @@ static void read_services(struct app *a)
             a->s[a->ns++] = sv;
     }
     free(out);
-    rebuild_svcs(a);
+    rebuild_svcs(a, false);
 }
 
 static void svc_action(struct app *a, const char *verb)
@@ -740,7 +744,7 @@ static void refresh(struct app *a)
 {
     read_machine(a);
     read_procs(a);
-    rebuild_procs(a);
+    rebuild_procs(a, false);
     a->next_refresh = now_ms() + REFRESH_MS;
     a->win.redraw = true;
 }
@@ -826,7 +830,7 @@ static void set_sort(struct app *a, enum sortkey k)
         a->sort = k;
         a->reverse = false;
     }
-    rebuild_procs(a);
+    rebuild_procs(a, true);
     a->win.redraw = true;
 }
 
@@ -911,7 +915,7 @@ static void press_button(struct app *a, enum btn_id id)
     case B_KILL: ask(a, C_KILL); break;
     case B_PAUSE: send_signal(a, SIGSTOP, "Paused"); break;
     case B_GO: send_signal(a, SIGCONT, "Continued"); break;
-    case B_MINE: a->mine = !a->mine; rebuild_procs(a); break;
+    case B_MINE: a->mine = !a->mine; rebuild_procs(a, true); break;
     case B_START: svc_action(a, "start"); break;
     case B_STOP: ask(a, C_SVC_STOP); break;
     case B_RESTART: svc_action(a, "restart"); break;
@@ -1423,9 +1427,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             wltext_edit(&a->clip, a->filter, sizeof(a->filter), ks, w->mods);
         }
         if (a->tab == T_PROCS)
-            rebuild_procs(a);
+            rebuild_procs(a, true);
         else
-            rebuild_svcs(a);
+            rebuild_svcs(a, true);
         return;
     }
     if (a->logview) {
@@ -1461,7 +1465,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     }
     if (ks == LM_KS_Escape) {
         if (a->filter[0])
-            a->filter[0] = 0, a->tab == T_PROCS ? rebuild_procs(a) : rebuild_svcs(a);
+            a->filter[0] = 0, a->tab == T_PROCS ? rebuild_procs(a, true) : rebuild_svcs(a, true);
         else
             w->running = false;
         return;
@@ -1496,7 +1500,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         case 'p': case 'P': set_sort(a, S_PID); break;
         case 'n': case 'N': set_sort(a, S_NAME); break;
         case 'o': case 'O': set_sort(a, S_USER); break;
-        case 'u': case 'U': a->mine = !a->mine; rebuild_procs(a); break;
+        case 'u': case 'U': a->mine = !a->mine; rebuild_procs(a, true); break;
         case 't': case 'T': ask(a, C_TERM); break;
         case 'k': case 'K': ask(a, C_KILL); break;
         case 's': case 'S': send_signal(a, SIGSTOP, "Paused"); break;
@@ -1555,6 +1559,27 @@ static int selftest(void)
     CHECK(!parse_unit_line("", &s));
     CHECK(contains_ci("Firefox", "FIRE") && !contains_ci("Firefox", "chrome") && contains_ci("x", ""));
     CHECK(rank_active("failed") < rank_active("active") && rank_active("active") < rank_active("inactive"));
+    {                                                                   /* a refresh on a timer must leave a scrolled list where it is */
+        static struct app a;
+        static struct proc procs[60];
+        a.p = procs;
+        a.np = 60;
+        for (int i = 0; i < 60; i++) {
+            procs[i].pid = 100 + i;
+            snprintf(procs[i].name, sizeof(procs[i].name), "p%02d", i);
+        }
+        a.sort = S_PID;
+        a.win.bh = HEAD_H + TOOL_H + COLH_H + STATUS_H + 10 * ROW_H;           /* ten rows */
+        a.sel_pid = 100;                                                /* the cursor is on the first one ... */
+        rebuild_procs(&a, true);
+        CHECK(a.pv.sel == 0 && a.pv.top == 0);
+        a.pv.top = 30;                                                  /* ... and the user scrolls far away with the wheel */
+        rebuild_procs(&a, false);
+        CHECK(a.pv.top == 30);
+        rebuild_procs(&a, true);                                        /* something the user did (a sort, a filter): back to the cursor */
+        CHECK(a.pv.top == 0);
+        free(a.shown);
+    }
     if (!bad)
         puts("mellagui-top selftest ok");
     return bad ? 1 : 0;
@@ -1570,7 +1595,7 @@ static int list_cmd(int n)
     read_machine(&a);
     read_procs(&a);
     a.sort = S_CPU;
-    rebuild_procs(&a);
+    rebuild_procs(&a, true);
     printf("%d processes, cpu %d%%, %d cores\n", a.np, a.cpu_pct, a.ncores);
     printf("%7s %-12s %6s %8s %s\n", "PID", "USER", "CPU%", "MEM", "COMMAND");
     for (int i = 0; i < a.nshown && i < n; i++) {

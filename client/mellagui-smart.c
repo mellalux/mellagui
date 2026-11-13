@@ -2353,7 +2353,7 @@ static int cmd_favourites(void)
             struct tuya_dp *ctl = tuya_find_dp(d, "control"), *pos = tuya_find_dp(d, "percent_control"), *state = tuya_find_dp(d, "percent_state");
             char extra[96] = "";
             int go = -1;
-            if (!strcmp(d->category, "sd"))                         /* what can be set (and the modes) comes with the specifications: one more call, only for vacuums */
+            if (!strcmp(d->category, "sd") || !strcmp(d->category, "cl"))   /* what can be set (and the modes, the blind's position) comes with the specifications: one more call, only for vacuums and blinds */
                 tuya_load_specs(&s, d, err, sizeof(err));
             for (const char *const *g = (const char *const[]){ "power_go", "switch_go", NULL }; *g && go < 0; g++) {
                 int k = dp_index(d, *g);
@@ -2365,6 +2365,7 @@ static int cmd_favourites(void)
                 code = "control";
                 /* percent_control is what was asked for (the cloud keeps 0 there), percent_state is where the blind is */
                 value = state && state->has ? (int)(state->num + 0.5) : pos && pos->has ? (int)(pos->num + 0.5) : -1;
+                snprintf(extra, sizeof(extra), "\t%d", pos && controllable(pos) ? 1 : 0);          /* a position can be set: the desktop card shows a slider */
             } else if (!strcmp(d->category, "sd") && go >= 0) {            /* a robot vacuum: its own buttons on the card */
                 struct tuya_dp *bat = tuya_find_dp(d, "electricity_left");
                 if (!bat || !bat->has)

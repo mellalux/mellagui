@@ -391,6 +391,7 @@ void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws);
 void open_shot(struct lm_wm *wm);
 struct lm_rect output_panel_rect(const struct lm_output *o);
 void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_info *p);
+int layout_badge_count(const struct lm_wm *wm);       /* badges in the panel (setting layout-badges), 0 = one badge that cycles */
 struct lm_rect popup_bounds(const struct lm_popup *p);
 void popup_origin(const struct lm_popup *p, int32_t *ox, int32_t *oy);
 bool popup_visible(const struct lm_wm *wm, const struct lm_popup *p, int depth);

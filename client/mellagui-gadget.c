@@ -77,6 +77,7 @@ struct app {
     /* mixer */
     struct lm_mixer *mixer;
     enum lm_mixer_part drag_part;
+    int smart_drag;                 /* the smart card: the blind whose slider is being dragged, -1 = none */
     int drag_index;
     /* system */
     struct lm_sysinfo *sys;
@@ -796,7 +797,7 @@ static void paint_system(struct app *a)
 static void smart_layout(struct app *a, struct lm_smart_layout *l)
 {
     const struct lm_smart_state *st = lm_smart_state(a->smart);
-    lm_smart_layout(0, 0, a->win.bw, a->win.bh, TITLE_H, st->n, l);
+    lm_smart_layout(0, 0, a->win.bw, a->win.bh, TITLE_H, st, l);
 }
 
 static bool smart_press(struct app *a)
@@ -806,7 +807,10 @@ static bool smart_press(struct app *a)
     smart_layout(a, &l);
     int idx = 0;
     enum lm_smart_part part = lm_smart_hit(&l, st, (int)a->px, (int)a->py, &idx);
-    if (part == LM_SMART_SWITCH_PART)
+    if (part == LM_SMART_SLIDER) {                                  /* a blind's position: follows the pointer, sent when the button is let go */
+        a->smart_drag = idx;
+        lm_smart_blind_position(a->smart, idx, lm_smart_slider_value(&l, idx, (int)a->px), false);
+    } else if (part == LM_SMART_SWITCH_PART)
         lm_smart_toggle(a->smart, idx);
     else if (part == LM_SMART_CLEAN || part == LM_SMART_DOCK)
         lm_smart_vacuum(a->smart, idx, part == LM_SMART_CLEAN ? 0 : 1);
@@ -834,21 +838,28 @@ static void paint_smart(struct app *a)
     smart_layout(a, &l);
     for (int i = 0; i < l.rows; i++) {
         const struct lm_smart_item *it = &st->item[i];
-        struct lm_rect row = lm_rect_make(8, TITLE_H + 4 + i * LM_SMART_ROW_H, w->bw - 16, LM_SMART_ROW_H - 4);
+        struct lm_rect row = lm_rect_make(l.row[i].x, l.row[i].y, l.row[i].w, l.row[i].h);
         rr(w, row, 7, veil_mix(0x12));
-        int namew = it->kind == LM_SMART_BLIND ? l.btn[i][0].x - 8 - 18 : it->kind == LM_SMART_SWITCH ? l.sw[i].x - 8 - 18 :
+        bool two = it->kind == LM_SMART_BLIND && it->can_pos;           /* a blind with a slider: the name on the first line, the slider on the second */
+        int ty = two ? row.y + 7 : row.y + (row.h - LM_FONT_H) / 2;
+        int namew = two ? w->bw - 36 : it->kind == LM_SMART_BLIND ? l.btn[i][0].x - 8 - 18 : it->kind == LM_SMART_SWITCH ? l.sw[i].x - 8 - 18 :
                     it->kind == LM_SMART_VACUUM ? l.vac[i][0].x - 8 - 18 : w->bw - 36;
         char label[80];
-        if (it->kind == LM_SMART_BLIND && it->percent >= 0)
+        if (it->kind == LM_SMART_BLIND && it->percent >= 0 && !two)
             snprintf(label, sizeof(label), "%s  %d%%", it->name, it->percent);
         else if (it->kind == LM_SMART_VACUUM && it->battery >= 0)
             snprintf(label, sizeof(label), "%s  %d%%", it->name, it->battery);
         else
             snprintf(label, sizeof(label), "%s", it->name);
-        text_fit(w, 18, row.y + (row.h - LM_FONT_H) / 2, label, namew, it->online ? lm_theme.text : lm_theme.text_dim);
+        text_fit(w, 18, ty, label, namew, it->online ? lm_theme.text : lm_theme.text_dim);
         if (!it->online) {
             int ow = lm_font_text_width("offline");
-            text(w, row.x + row.w - 8 - ow, row.y + (row.h - LM_FONT_H) / 2, "offline", lm_theme.text_dim);
+            text(w, row.x + row.w - 8 - ow, ty, "offline", lm_theme.text_dim);
+            continue;
+        }
+        if (two) {
+            struct lm_smart_rect sr = l.slider[i];
+            slider(w, lm_rect_make(sr.x, sr.y, sr.w, sr.h), it->percent < 0 ? 0 : it->percent, it->percent < 0);
             continue;
         }
         if (it->kind == LM_SMART_SWITCH) {
@@ -1166,6 +1177,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             }
         } else if (a->kind == G_MIXER && a->drag_part != LM_MIXER_NOTHING) {
             mixer_slide(a, a->drag_part, a->drag_index, a->px);
+        } else if (a->kind == G_SMART && a->smart_drag >= 0) {
+            struct lm_smart_layout l;
+            smart_layout(a, &l);
+            lm_smart_blind_position(a->smart, a->smart_drag, lm_smart_slider_value(&l, a->smart_drag, (int)a->px), false);
         }
     } else if (op == LM_WL_POINTER_EVT_LEAVE) {
         a->in = false;
@@ -1182,6 +1197,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272) {
         if (args[3].u == 0) {                                       /* released */
             a->drag_part = LM_MIXER_NOTHING;
+            if (a->kind == G_SMART && a->smart_drag >= 0) {
+                struct lm_smart_layout l;
+                smart_layout(a, &l);
+                lm_smart_blind_position(a->smart, a->smart_drag, lm_smart_slider_value(&l, a->smart_drag, (int)a->px), true);
+                a->smart_drag = -1;
+            }
             return;
         }
         uint32_t serial = args[0].u;
@@ -1315,6 +1336,7 @@ int main(int argc, char **argv)
     a->kind = (enum kind)kind;
     a->cursor = -1;
     a->drag_part = LM_MIXER_NOTHING;
+    a->smart_drag = -1;
     int dw = def[kind < 4 ? kind : 0].w, dh = def[kind < 4 ? kind : 0].h;
     int min_w = kind < 4 ? def[kind].min_w : 120, min_h = kind < 4 ? def[kind].min_h : 60;
     const char *app_name = kind < 4 ? def[kind].name : a->name, *title = kind < 4 ? def[kind].title : a->title;

@@ -9,6 +9,7 @@
 #include <emmintrin.h>
 #endif
 #include "render.h"
+#include "flag.h"
 #include "theme.h"
 #include "mixer.h"
 #include "sysinfo.h"
@@ -788,6 +789,9 @@ static void draw_text_scaled(const struct paint_ctx *c, int x, int y, const char
     }
 }
 
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT, SHAPE_MOON, SHAPE_RESTART };
+static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha);
+
 /* The lock screen: a dark screen with the time, a box with the dots of what was typed and the last message. */
 static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
 {
@@ -802,25 +806,29 @@ static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
     struct lm_rect line = lm_rect_make(o.x, top + clock_h + 8, o.w, 20);
     draw_text_centered(c, &line, li->date, COL_PANEL_DIM);
 
-    int bw = LM_MIN(o.w - 40, 360), bh = 44;
+    /* The input: a pill with a soft glow and a two pixel ring in the accent colour (red while blocked), a little padlock at the left and round dots. */
+    int bw = LM_MIN(o.w - 40, 380), bh = 48;
     struct lm_rect box = lm_rect_make(cx - bw / 2, top + clock_h + 44, bw, bh);
-    fill_round(c, &box, 8, 0xff000000u | (li->blocked ? lm_theme.lock_box_blocked : lm_theme.lock_box));
-    struct lm_rect edges[4] = {                                         /* hairline in the accent colour (corners left out) */
-        lm_rect_make(box.x + 8, box.y, box.w - 16, 1), lm_rect_make(box.x + 8, box.y + box.h - 1, box.w - 16, 1),
-        lm_rect_make(box.x, box.y + 8, 1, box.h - 16), lm_rect_make(box.x + box.w - 1, box.y + 8, 1, box.h - 16),
-    };
-    for (int i = 0; i < 4; i++)
-        fill_rect(c, &edges[i], li->blocked ? COL_PANEL_DANGER : COL_PANEL_ACCENT);
-
+    uint32_t ring = li->blocked ? COL_PANEL_DANGER : COL_PANEL_ACCENT;
+    struct lm_rect glow = lm_rect_make(box.x - 6, box.y - 6, box.w + 12, box.h + 12);
+    fill_round(c, &glow, glow.h / 2, 0x28000000u | (ring & 0xffffffu));
+    struct lm_rect glow2 = lm_rect_make(box.x - 3, box.y - 3, box.w + 6, box.h + 6);
+    fill_round(c, &glow2, glow2.h / 2, 0x40000000u | (ring & 0xffffffu));
+    fill_round(c, &box, bh / 2, 0xff000000u | ring);
+    struct lm_rect inner = lm_rect_make(box.x + 2, box.y + 2, box.w - 4, box.h - 4);
+    uint32_t fieldc = li->blocked ? lm_theme.lock_box_blocked : lm_theme.lock_box;
+    fill_round(c, &inner, inner.h / 2, 0xff000000u | fieldc);
+    paint_shape(c, (float)box.x + 32.0f, (float)box.y + (float)bh / 2.0f, 10.0f, SHAPE_LOCK,
+                li->nchars || li->blocked ? ring : COL_PANEL_DIM, 255);       /* the padlock lights up while something is typed */
+    struct lm_rect text_area = lm_rect_make(box.x + 48, box.y, box.w - 48 - 24, box.h);
     if (li->nchars == 0 && !li->blocked) {
-        draw_text_centered(c, &box, li->pin ? "Enter PIN" : "Enter password", COL_PANEL_DIM);
+        draw_text_centered(c, &text_area, li->pin ? "Enter PIN" : "Enter password", COL_PANEL_DIM);
     } else {
-        int shown = LM_MIN(li->nchars, (box.w - 40) / 20);
-        int x = box.x + (box.w - shown * 20) / 2 + 4;
-        for (int i = 0; i < shown; i++) {
-            struct lm_rect dot = lm_rect_make(x + i * 20, box.y + box.h / 2 - 5, 10, 10);
-            fill_round(c, &dot, 5, (0xff000000u | lm_theme.text));
-        }
+        int pitch = 22;
+        int shown = LM_MIN(li->nchars, text_area.w / pitch);
+        float x0 = (float)text_area.x + ((float)text_area.w - (float)shown * (float)pitch) / 2.0f + (float)pitch / 2.0f;
+        for (int i = 0; i < shown; i++)
+            paint_shape(c, x0 + (float)(i * pitch), (float)box.y + (float)box.h / 2.0f, 6.0f, SHAPE_DISC, lm_theme.text, 255);
     }
     struct lm_rect msg = lm_rect_make(o.x, box.y + box.h + 14, o.w, 20);
     if (li->message[0])
@@ -880,7 +888,6 @@ static void fill_round(const struct paint_ctx *c, const struct lm_rect *rect, in
 
 /* ---- round things: discs and the icons of the power button / session dialog ------------------------------------------- */
 
-enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT, SHAPE_MOON, SHAPE_RESTART };
 
 static float cov01(float v)
 {
@@ -1589,6 +1596,24 @@ static void paint_round_button(const struct paint_ctx *c, float cx, float cy, fl
     fill_round(c, &r, (int)lroundf(R * (float)lm_metrics.button_roundness / 100.0f), (alpha << 24) | (rgb & 0xffffffu));
 }
 
+/* The flag of the country a keyboard layout belongs to, 22 x 14 pixels centred in `box` (the colours are literals on purpose: a flag is a flag in
+ * every theme). `shade` 0..255 fades it towards the panel (the layouts that are not in use). false = no flag for that layout id (upper case). */
+static bool paint_flag(const struct paint_ctx *c, const struct lm_rect *box, const char *id, int shade, bool ring)
+{
+    struct lm_flag_rect fr[LM_FLAG_MAX];
+    int n = lm_flag_rects(id, fr);
+    if (!n)
+        return false;
+    int x = box->x + (box->w - LM_FLAG_W) / 2, y = box->y + (box->h - LM_FLAG_H) / 2;
+    struct lm_rect edge = lm_rect_make(x - 1, y - 1, LM_FLAG_W + 2, LM_FLAG_H + 2);
+    fill_round(c, &edge, btn_radius(3), 0xff000000u | (ring ? lm_theme.on_colour : mix_rgb(COL_PANEL, 0xffffffu, 40)));
+    for (int i = 0; i < n; i++) {
+        struct lm_rect r = lm_rect_make(x + fr[i].x, y + fr[i].y, fr[i].w, fr[i].h);
+        fill_rect(c, &r, 0xff000000u | mix_rgb(fr[i].rgb, COL_PANEL, shade));
+    }
+    return true;
+}
+
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
 {
     fill_rect(c, &p->bar, COL_PANEL);
@@ -1645,16 +1670,36 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         fill_rect(c, &p->caps, COL_PANEL_DANGER);
         draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);
     }
-    {                                                   /* the keyboard layout: a round badge, every layout in its own colour */
-        unsigned h = 0;
-        for (const char *q = p->layout_text; *q; q++)
-            h = h * 31 + (unsigned char)*q;
-        uint32_t col = panel_palette[(h + 3) % 8];
-        if (p->hover_layout)
-            col = mix_rgb(col, 0xffffffu, 55);
-        float cx = (float)p->layout.x + (float)p->layout.w / 2.0f, cy = (float)p->layout.y + (float)p->layout.h / 2.0f;
-        paint_round_button(c, cx, cy, (float)LM_MIN(p->layout.w, p->layout.h) / 2.0f, col, 255);
-        draw_text_centered(c, &p->layout, p->layout_text, lm_theme.ink);
+    {                                                   /* the keyboard layout: a round badge, every layout in its own colour; with layout-badges one for each layout, the active one bright */
+        int nbadge = p->nbadges > 0 ? p->nbadges : 1;
+        for (int i = 0; i < nbadge; i++) {
+            const struct lm_rect *r = p->nbadges > 0 ? &p->badge[i].rect : &p->layout;
+            const char *text = p->nbadges > 0 ? p->badge[i].text : p->layout_text;
+            bool active = p->nbadges > 0 ? p->badge[i].active : true;
+            bool hover = p->nbadges > 0 ? p->badge[i].hover : p->hover_layout;
+            if (p->nbadges > 0) {                       /* a layout with a flag shows the flag (and its label) instead of the coloured disc */
+                const char *label = p->badge[i].label;
+                struct lm_rect fb = *r;
+                if (label[0]) {
+                    fb.x += 3;
+                    fb.w = LM_FLAG_W + 6;
+                }
+                if (paint_flag(c, &fb, text, active ? 0 : hover ? 90 : 150, active)) {
+                    if (label[0])
+                        draw_text(c, r, fb.x + fb.w + 3, r->y + (r->h - LM_FONT_H) / 2, label, active ? COL_PANEL_TEXT : COL_PANEL_DIM);
+                    continue;
+                }
+            }
+            unsigned h = 0;
+            for (const char *q = text; *q; q++)
+                h = h * 31 + (unsigned char)*q;
+            uint32_t col = panel_palette[(h + 3) % 8];
+            if (hover)
+                col = mix_rgb(col, 0xffffffu, 55);
+            float cx = (float)r->x + (float)r->w / 2.0f, cy = (float)r->y + (float)r->h / 2.0f;
+            paint_round_button(c, cx, cy, (float)LM_MIN(r->w, r->h) / 2.0f, col, active ? 255 : 110);
+            draw_text_centered(c, r, text, active ? lm_theme.ink : COL_PANEL_TEXT);
+        }
     }
     uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_sticky ? 30 : 18);
     if (p->sticky_on && p->hover_sticky)

@@ -35,6 +35,13 @@ static const struct entry table[] = {
       "at once." },
     { "repeat-rate", NULL, "Repeat rate",
       "How many characters a second a key that is held down repeats once it has started." },
+    { "layout-badges", NULL, "The layout's flag in the panel",
+      "Off: the panel shows a round badge with the letters of the layout in use (US, EE ...).\n"
+      "On: it shows the flag of that country instead (US, Estonia, Germany, Finland), and the text you choose below can stand beside it. A click "
+      "switches to the next layout, a right click goes back one - the same as with the letters." },
+    { "layout-label", NULL, "Text next to the flags",
+      "With flags in the panel, this says what is written beside each one: nothing, the short code of the layout (US, EE, DE, FI) or the name of the "
+      "language (English, Estonian, German, Finnish)." },
     { "osk-avoid", NULL, "Windows and the on-screen keyboard",
       "While the on-screen keyboard (Super+K, or the Kbd button in the panel) is open, windows are kept out from under it: maximized windows get "
       "shorter and floating windows it would cover are moved up.\n"

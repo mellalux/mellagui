@@ -21,6 +21,8 @@
  *   saver           0 | 1                      start the screensaver (mellagui-matrix, [commands] saver) when nothing was touched for saver-minutes
  *   saver-minutes   0 .. 240                   that many minutes of idle time, 0 = never (default 10; saved)
  *   osk-avoid       0 | 1                      windows keep out of the on-screen keyboard's way: maximized ones get smaller, others move up (default 1; saved)
+ *   layout-badges   0 | 1                      the panel shows a badge for every enabled keyboard layout and a click picks that one (default 0 = one badge, a click switches to the next; saved)
+ *   layout-label    none | code | name         with layout-badges: written next to each flag - nothing, the short code (US, EE) or the language (default none; saved)
  *   saver-now       (write only)               1 = start it now (a preview), 0 = end it (saver.h)
  *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)
  *                                              it is undone after 15 s (env MELLAGUI_REVERT_MS), a black screen cannot confirm

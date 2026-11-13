@@ -84,6 +84,7 @@ static void parse(struct lm_smart *s, const char *text)
         int v = atoi(f[6]);
         it->on = it->kind == LM_SMART_SWITCH && v != 0;
         it->percent = it->kind == LM_SMART_BLIND ? v : -1;
+        it->can_pos = it->kind == LM_SMART_BLIND && k >= 8 && atoi(f[7]) != 0;
         if (!strcmp(f[4], "vacuum")) {
             it->kind = LM_SMART_VACUUM;
             it->on = v != 0;
@@ -229,6 +230,20 @@ void lm_smart_blind(struct lm_smart *s, int index, int what)
     send_set(s, &s->st.item[index], words[what]);
 }
 
+void lm_smart_blind_position(struct lm_smart *s, int index, int percent, bool send)
+{
+    if (!s || index < 0 || index >= s->st.n || s->st.item[index].kind != LM_SMART_BLIND || !s->st.item[index].online || !s->st.item[index].can_pos)
+        return;
+    struct lm_smart_item *it = &s->st.item[index];
+    it->percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    if (send) {
+        char v[8];
+        snprintf(v, sizeof(v), "%d", it->percent);
+        send_set_code(s, it, "percent_control", v);
+    }
+    notify(s);
+}
+
 void lm_smart_vacuum(struct lm_smart *s, int index, int what)
 {
     if (!s || index < 0 || index >= s->st.n || s->st.item[index].kind != LM_SMART_VACUUM || !s->st.item[index].online)
@@ -247,22 +262,36 @@ void lm_smart_vacuum(struct lm_smart *s, int index, int what)
 
 /* ---- layout ----------------------------------------------------------------------------------------------------------------------- */
 
-void lm_smart_layout(int x, int y, int w, int h, int title_h, int n, struct lm_smart_layout *l)
+void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_smart_state *st, struct lm_smart_layout *l)
 {
     memset(l, 0, sizeof(*l));
-    int room = (h - title_h - 8) / LM_SMART_ROW_H;
-    l->rows = room < 0 ? 0 : room > LM_SMART_MAX ? LM_SMART_MAX : room;
-    if (n < l->rows)
-        l->rows = n;
-    for (int i = 0; i < l->rows; i++) {
-        int ry = y + title_h + 4 + i * LM_SMART_ROW_H;
+    int ry = y + title_h + 4, bottom = y + h - 4;
+    for (int i = 0; i < st->n && i < LM_SMART_MAX; i++) {
+        bool two = st->item[i].kind == LM_SMART_BLIND && st->item[i].can_pos;
+        int rh = two ? LM_SMART_ROW2_H : LM_SMART_ROW_H;
+        if (ry + rh - 4 > bottom)
+            break;
+        l->rows = i + 1;
+        l->row[i] = (struct lm_smart_rect){ x + 8, ry, w - 16, rh - 4 };
         l->sw[i] = (struct lm_smart_rect){ x + w - 12 - 44, ry + 6, 44, 22 };
         for (int b = 0; b < 3; b++)
             l->btn[i][b] = (struct lm_smart_rect){ x + w - 12 - 3 * 30 + b * 30, ry + 5, 26, 24 };
         l->vac[i][0] = (struct lm_smart_rect){ x + w - 12 - 90, ry + 5, 46, 24 };
         l->vac[i][1] = (struct lm_smart_rect){ x + w - 12 - 40, ry + 5, 40, 24 };
-        l->name[i] = (struct lm_smart_rect){ x + 14, ry, w - 28 - 3 * 30 - 8, LM_SMART_ROW_H };
+        l->name[i] = (struct lm_smart_rect){ x + 14, ry, w - 28 - (two ? 0 : 3 * 30 + 8), LM_SMART_ROW_H };
+        if (two)                                                    /* the slider on the second line, the percentage to its right */
+            l->slider[i] = (struct lm_smart_rect){ x + 22, ry + 30, w - 22 - 22 - 48, 20 };
+        ry += rh;
     }
+}
+
+int lm_smart_slider_value(const struct lm_smart_layout *l, int i, int px)
+{
+    const struct lm_smart_rect *s = &l->slider[i];
+    if (s->w <= 0)
+        return 0;
+    int v = (px - s->x) * 100 / s->w;
+    return v < 0 ? 0 : v > 100 ? 100 : v;
 }
 
 static bool inside(const struct lm_smart_rect *r, int px, int py)
@@ -283,7 +312,13 @@ enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm
                     *index = i;
                     return b == 0 ? LM_SMART_CLEAN : LM_SMART_DOCK;
                 }
-        if (st->item[i].kind == LM_SMART_BLIND)
+        if (st->item[i].kind == LM_SMART_BLIND && st->item[i].can_pos && st->item[i].online) {
+            struct lm_smart_rect hit = { l->slider[i].x - 8, l->slider[i].y - 4, l->slider[i].w + 16, l->slider[i].h + 8 };
+            if (inside(&hit, px, py)) {
+                *index = i;
+                return LM_SMART_SLIDER;
+            }
+        } else if (st->item[i].kind == LM_SMART_BLIND)
             for (int b = 0; b < 3; b++)
                 if (inside(&l->btn[i][b], px, py)) {
                     *index = i;

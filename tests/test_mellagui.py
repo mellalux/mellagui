@@ -17680,7 +17680,7 @@ class TestSmart(Base):
         v = self.view()
         self.assertEqual(v['devs'], {'plug1': True, 'blind1': True, 'robot1': True, 'plug2': False})
         self.assertEqual(len(v['ctl'][('blind1', 'control', 'button')]), 3)     # open / stop / close
-        self.assertIn(('blind1', 'percent_control', 'slider'), v['ctl'])
+        self.assertNotIn(('blind1', 'percent_control', 'slider'), v['ctl'])      # the position slider is in the blind's own view, not on the card
         self.assertIn(('robot1', 'power_go', 'toggle'), v['ctl'])
         self.assertNotIn(('robot1', 'mode', 'button'), v['ctl'])                # the modes are in the robot's own view
         self.assertEqual(len([k for k in v['ctl'] if k[2] == 'details']), 4)    # every card opens one
@@ -17702,7 +17702,11 @@ class TestSmart(Base):
         self.assertEqual(self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4], 'on')
         self.press(('blind1', 'control', 'button'), at=2)
         self.wait(lambda: self.state()['blind1']['status']['control'] == 'close', 'the blind closes')
-        s = self.view()['ctl'][('blind1', 'percent_control', 'slider')][0]
+        self.assertNotIn(('blind1', 'percent_control', 'slider'), self.view()['ctl'])    # (no slider on the card: it is in the blind's view)
+        self.press(('blind1', '-', 'details'))
+        self.wait(lambda: self.view()['modal'] == 'blind1', 'the blind\'s view')
+        self.wait(lambda: ('blind1', 'percent_control', 'slider') in self.view()['mctl'], 'the position slider in the view')
+        s = self.view()['mctl'][('blind1', 'percent_control', 'slider')][0]
         y = self.y0 + s[1] + s[3] // 2
         c.abs(self.x0 + s[0] + 160, y)
         c.button(272, True)
@@ -17712,7 +17716,7 @@ class TestSmart(Base):
         c.button(272, False)
         self.wait(lambda: self.state()['blind1']['status']['percent_control'] == 100, 'the position is sent when the slider is let go')
         time.sleep(1.6)                                                         # two polls later the window still shows what the cloud says
-        self.assertEqual(self.view()['ctl'][('blind1', 'percent_control', 'slider')][0][4], '100')
+        self.assertEqual(self.view()['mctl'][('blind1', 'percent_control', 'slider')][0][4], '100')
         self.assertNotIn('REFUSED', self.log())
 
     def test_an_offline_device_is_left_alone(self):

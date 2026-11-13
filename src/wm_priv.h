@@ -349,6 +349,15 @@ struct lm_wm {
         int32_t x[LM_GADGET_TOTAL], y[LM_GADGET_TOTAL];       /* where they were when the grab began */
         int32_t minx, miny, maxx, maxy;                       /* the box of the card and everything glued to it */
     } glue;
+    struct {                    /* the glued cards that were zoomed together: their stack is put right again as each one gets its new size (wm_gadgets.c) */
+        int n;
+        uint64_t until;                                       /* lm_now_ms() after which it is forgotten */
+        struct lm_window *win[LM_GADGET_TOTAL];               /* ordered by their top edge, so a card comes after the one it hangs on */
+        int32_t x[LM_GADGET_TOTAL], y[LM_GADGET_TOTAL], w[LM_GADGET_TOTAL], h[LM_GADGET_TOTAL];       /* as they were before */
+        int parent[LM_GADGET_TOTAL];                          /* the member it hangs on, -1 = the top of a stack: it stays where it is */
+        int seq;                                              /* the number of the last order, shown in the setting `gadget-zoom` */
+        char text[512];                                       /* "SEQ:name=pct,name=pct" */
+    } zoomglue;
 };
 
 #define BUBBLE_MS 2000              /* the whole rise / return: two seconds (with window animations on; off = at once) */
@@ -401,6 +410,7 @@ void gadget_map(struct lm_wm *wm, struct lm_window *w);
 void gadgets_redock(struct lm_wm *wm);
 void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, double dy);
 void gadget_glue_begin(struct lm_wm *wm, struct lm_window *win);     /* a move of a card begins: finds what is glued to it */
+void gadget_zoomglue_fit(struct lm_wm *wm, struct lm_window *w);     /* a card of a zoomed stack got its new size: the stack is put together again */
 void gadget_glue_end(struct lm_wm *wm);                               /* ... and the move ended: they stay where they are (remembered) */
 struct lm_window *gadget_window(struct lm_wm *wm, int id);        /* the gadget's window, or NULL */
 const char *gadget_name(int id);

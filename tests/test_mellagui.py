@@ -1748,6 +1748,18 @@ class TestGadget(Base):
         self.drag(x + 2, y + h // 2, -50, 0)                     # left edge keeps the right edge in place
         self.assertEqual(self.rect(), (x - 50, y, w + 50, h))
 
+    def test_the_cursor_shows_the_resize_direction_at_the_edges(self):
+        x, y, w, h = self.rect()
+        seen = {}
+        for name, px, py in (('e', x + w - 2, y + h // 2), ('w', x + 2, y + h // 2), ('s', x + w // 2, y + h - 2),
+                             ('se', x + w - 2, y + h - 2), ('inside', x + w // 2, y + h // 2)):
+            ctl.abs(px, py)
+            time.sleep(0.1)
+            ctl.cmd('cursor')
+            seen[name] = ctl.last
+        self.assertEqual(len(set(seen[k] for k in ('e', 'w', 's', 'se'))), 4, seen)
+        self.assertNotIn(seen['inside'], [seen[k] for k in ('e', 'w', 's', 'se')])
+
     def test_resize_has_limits(self):
         x, y, w, h = self.rect()
         self.drag(x + w - 2, y + h - 2, -3000, -3000)

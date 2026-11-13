@@ -1461,6 +1461,17 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_PANEL_WORKSPACE: pws = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_TASK: task = pick->window; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_TRAY: tray_id = pick->index; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_SURFACE:
+        if (pick->window && win_is_gadget(pick->window)) {      /* a card: the program asks for a resize in the same zones (6 px, 3 px at the top) */
+            const struct lm_window *gw = pick->window;
+            uint32_t e = 0;
+            if (pick->sx < 6) e |= LM_EDGE_LEFT;
+            if (pick->sx >= gw->width - 6) e |= LM_EDGE_RIGHT;
+            if (pick->sy >= gw->height - 6) e |= LM_EDGE_BOTTOM;
+            if (pick->sy < 3) e |= LM_EDGE_TOP;
+            shape = cursor_for_edges(e);
+        }
+        break;
     default: break;
     }
     if (bits)

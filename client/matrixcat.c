@@ -172,9 +172,7 @@ static float lerp_angle(float a, float b, float t)
     return a + d * t;
 }
 
-struct state { float x, z, yaw, stand, lie, walk, dist; };
-
-static struct state state_at(float t)
+static struct mcat_state state_at(float t)
 {
     timeline_build();
     float f = fmodf(t, g_cycle), acc = 0.0f;
@@ -185,7 +183,7 @@ static struct state state_at(float t)
     }
     const struct seg *sg = &g_seg[i];
     float tau = f - acc, u = sat(tau / sg->dur);
-    struct state st = { k_spot[sg->b][0], k_spot[sg->b][1], k_spot[sg->b][2], 0, 0, 0, 0 };
+    struct mcat_state st = { k_spot[sg->b][0], k_spot[sg->b][1], k_spot[sg->b][2], 0, 0, 0, 0 };
     float x, z, dx, dz;
     switch (sg->kind) {
     case K_SIT:
@@ -254,6 +252,25 @@ static struct hang head_at(float t, float cam_yaw, float cam_pitch)
     return (struct hang){ mixf(prev.yaw, cur.yaw, s), mixf(prev.pitch, cur.pitch, s), mixf(prev.roll, cur.roll, s) };
 }
 
+void mcat_state(float t, struct mcat_state *out)
+{
+    *out = state_at(t);
+}
+
+void mcat_head_script(float t, float cam_yaw, float cam_pitch, float *yaw, float *pitch, float *roll)
+{
+    struct hang h = head_at(t, cam_yaw, cam_pitch);
+    *yaw = h.yaw + 0.03f * sinf(t * 0.7f);                              /* (never quite still) */
+    *pitch = h.pitch + 0.02f * sinf(t * 0.9f + 1.0f);
+    *roll = h.roll;
+}
+
+float mcat_eye_open(float t)
+{
+    float tb = fmodf(t + 1.3f, 4.6f);
+    return tb < 0.18f ? 1.0f - 0.92f * sinf(3.14159265f * tb / 0.18f) : 1.0f;
+}
+
 /* An ear's flick: 0 most of the time, a quick 0..1..0 every few seconds. */
 static float ear_flick(float t, float period, float phase)
 {
@@ -272,7 +289,7 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
     c->scale = 1.25f;
     c->cy = cosf(c->yaw);
     c->sy = sinf(c->yaw);
-    struct state st = state_at(t);
+    struct mcat_state st = state_at(t);
     c->pos[0] = st.x; c->pos[1] = 0.0f; c->pos[2] = st.z;
     c->yaw = st.yaw;
     c->cy = cosf(c->yaw);
@@ -290,6 +307,7 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
     memcpy(c->ldir, ldir, sizeof(c->ldir));
     memcpy(c->lcol, lcol, sizeof(c->lcol));
     c->lstr = lstr;
+    c->sh_w = 0.23f; c->sh_l = 0.28f; c->sh_h = mixf(0.55f, 0.28f, c->lie) * c->scale;
 
     float wx = cam[0] - c->pos[0], wy = cam[1] - c->pos[1], wz = cam[2] - c->pos[2], inv = 1.0f / c->scale;       /* the camera as the body sees it */
     float bx = (wx * c->cy - wz * c->sy) * inv, by = wy * inv, bz = (wx * c->sy + wz * c->cy) * inv;
@@ -821,23 +839,24 @@ float mcat_floor_shade(const struct mcat *c, float x, float z)
     if (!c->enabled)
         return 1.0f;
     float dx = x - c->pos[0], dz = z - c->pos[2];
-    if (dx * dx + dz * dz > 2.6f)
+    float reach = (c->sh_l * c->scale * 2.2f + 0.9f);
+    if (dx * dx + dz * dz > reach * reach)
         return 1.0f;
     float inv = 1.0f / c->scale, lx = (dx * c->cy - dz * c->sy) * inv, lz = (dx * c->sy + dz * c->cy) * inv;
-    float v = 1.0f;
-    float a1 = lx * lx / (0.23f * 0.23f) + (lz + 0.02f) * (lz + 0.02f) / (0.28f * 0.28f);                 /* right under it */
+    float v = 1.0f, w = c->sh_w, l = c->sh_l;
+    float a1 = lx * lx / (w * w) + (lz + 0.02f) * (lz + 0.02f) / (l * l);                                 /* right under it */
     if (a1 < 6.0f)
         v *= 1.0f - 0.88f * expf(-a1);
-    float a2 = lx * lx / (0.45f * 0.45f) + lz * lz / (0.50f * 0.50f);                                   /* round it */
+    float a2 = (lx * lx / (w * w) + lz * lz / (l * l)) * 0.27f;                                          /* round it */
     if (a2 < 6.0f)
         v *= 1.0f - 0.45f * expf(-a2);
     if (c->lstr > 0.05f && c->ldir[1] > 0.2f) {                                                         /* cast by the key light: an ellipse along its direction */
-        float h = mixf(0.55f, 0.28f, c->lie) * c->scale, k = fminf(h / c->ldir[1], 1.1f);                 /* (how far the top of Tom is thrown) */
+        float k = fminf(c->sh_h / c->ldir[1], 1.1f);                                                    /* (how far the top of him is thrown) */
         float ux = -c->ldir[0], uz = -c->ldir[2], ul2 = ux * ux + uz * uz;
         if (ul2 > 1e-6f) {
             float il = 1.0f / sqrtf(ul2), sx = x - (c->pos[0] + ux * k * 0.5f), sz = z - (c->pos[2] + uz * k * 0.5f);
             ux *= il; uz *= il;
-            float al = sx * ux + sz * uz, ac = -sx * uz + sz * ux, ax = k * 0.5f, ww = 0.20f * c->scale;
+            float al = sx * ux + sz * uz, ac = -sx * uz + sz * ux, ax = k * 0.5f, ww = 0.9f * w * c->scale;
             float a3 = al * al / (ax * ax + 0.02f) + ac * ac / (ww * ww);
             if (a3 < 6.0f)
                 v *= 1.0f - 0.82f * expf(-a3) * sat(c->lstr);

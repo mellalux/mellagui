@@ -1082,21 +1082,25 @@ static void build_saver(struct app *a, int x, int y, int w)
     add_radio(a, x + 80, y, 170, "Room (3D)", "saver-style", "room", strcmp(style, "flat") != 0);
     add_radio(a, x + 260, y, 170, "Flat", "saver-style", "flat", !strcmp(style, "flat"));
     y += ROW_H;
-    add_check(a, x, y, w, "A cat sits in the room", "saver-cat", kv_int(a, "saver-cat", 1) != 0);
+    add_check(a, x, y, w, "A cat lives in the room (Tom)", "saver-cat", kv_int(a, "saver-cat", 1) != 0);
+    y += ROW_H;
+    const char *model = kv_get(a, "saver-cat-model");
+    bool own = strcmp(model, "auto") && strcmp(model, "builtin");
+    add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, own ? "His file" : "His body");
+    add_radio(a, x + 80, y, 190, "From a .glb model", "saver-cat-model", "auto", !strcmp(model, "auto"));       /* (a chosen file is set with the setting itself: neither radio is on) */
+    add_radio(a, x + 280, y, 170, "Built-in", "saver-cat-model", "builtin", !strcmp(model, "builtin"));
     y += ROW_H + 8;
     add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
     y += ROW_H + 10;
     static const char *const notes[] = {
         "Falling green code, full screen (a room or flat).",
-        "Any touch ends it;",
-        "that touch is not passed on.",
-        "\"Lock after\": the screen is locked that long after it",
-        "started (0 = never; needs a password or PIN).",
-        "The saver keeps running over the lock until a touch.",
-        "It does not start over a full screen window.",
+        "Any touch ends it; that touch is not passed on.",
+        "\"Lock after\": the screen is locked that long after it started",
+        "(0 = never; needs a password or PIN); the saver keeps running",
+        "over the lock until a touch. Not over a full screen window.",
         "Another program: [commands] saver in mellagui.conf.",
     };
-    for (int k = 0; k < 8; k++)
+    for (int k = 0; k < 6; k++)
         add(a, W_LABEL, (struct rect){ x, y + k * (ROW_H - 8), w, ROW_H }, notes[k]);
 }
 

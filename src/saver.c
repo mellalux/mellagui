@@ -81,6 +81,30 @@ bool lm_saver_start(struct lm_saver *s)
     } else if (!s->srv->config.saver_cat && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--no-cat")) {
         snprintf(styled, sizeof(styled), "%s --no-cat", cmd);                  /* (the room without its cat) */
         cmd = styled;
+    } else if (strcmp(s->srv->config.saver_cat_model, "auto") && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--cat-model")) {
+        /* what the cat is made of: builtin or a file; the path goes in single quotes (the command is run by a shell) */
+        size_t o = (size_t)snprintf(styled, sizeof(styled), "%s --cat-model '", cmd);
+        const char *p = s->srv->config.saver_cat_model;
+        if (p[0] == '~' && p[1] == '/') {
+            const char *home = getenv("HOME");
+            if (home) {
+                for (const char *h = home; *h && o + 6 < sizeof(styled); h++) {
+                    if (*h == '\'')
+                        o += (size_t)snprintf(styled + o, sizeof(styled) - o, "'\\''");
+                    else
+                        styled[o++] = *h;
+                }
+                p++;
+            }
+        }
+        for (; *p && o + 6 < sizeof(styled); p++) {
+            if (*p == '\'')
+                o += (size_t)snprintf(styled + o, sizeof(styled) - o, "'\\''");
+            else
+                styled[o++] = *p;
+        }
+        snprintf(styled + o, sizeof(styled) - o, "'");
+        cmd = styled;
     }
     pid_t pid = lm_server_spawn(s->srv, cmd);
     if (pid <= 0)

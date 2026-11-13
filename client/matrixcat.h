@@ -65,7 +65,16 @@ struct mcat {
     const uint8_t *const *glyph;        /* MCAT_GLYPHS glyph bitmaps (16 rows of 8 pixels) */
     int nglyph;
     float ldir[3], lcol[3], lstr;       /* the room's key light: direction towards it, colour, strength (0 = none) */
+    float sh_w, sh_l, sh_h;             /* the shadow: half width and half length in the body's units, the height in metres */
 };
+
+/* Where Tom is and what he does at a time (his day, see mcat_cycle): the same for every model of him. */
+struct mcat_state { float x, z, yaw, stand, lie, walk, dist; };
+void mcat_state(float t, struct mcat_state *out);
+/* Where the head points at a time (relative to the body, radians): the script of looking about and AT THE CAMERA (cam_yaw / cam_pitch = the way to it from the neck). */
+void mcat_head_script(float t, float cam_yaw, float cam_pitch, float *yaw, float *pitch, float *roll);
+/* 1 = eyes open .. 0.08 = in the middle of a blink */
+float mcat_eye_open(float t);
 
 /* The length of Tom's whole day in seconds (he sits, stands up, walks to another place, sits, lies down, gets up, walks back ...): the pose repeats every cycle. */
 float mcat_cycle(void);

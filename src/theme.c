@@ -431,7 +431,7 @@ int lm_theme_list(char names[][LM_THEME_NAME_MAX], char descs[][80], int max)
 /* Programs only care about [theme] and [windows] (scrollbar-width); the other sections are the compositor's business and must not be reported. */
 static bool client_line(void *ud, const char *section, const char *key, const char *value)
 {
-    if (!strcmp(section, "windows")) {
+    if (!strcmp(section, "windows") || !strcmp(section, "gadgets")) {
         lm_metrics_conf(ud, section, key, value);                   /* (a bad value is the compositor's warning, not ours) */
         return true;
     }

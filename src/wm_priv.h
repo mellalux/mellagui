@@ -108,6 +108,7 @@ struct wm_win {
     struct lm_window pub;       /* must be first */
     int id;
     bool placed;
+    bool gad_placed;            /* a gadget window the user moved (or that has a remembered place): it is not docked automatically */
     /* geometry to return to when leaving maximized/fullscreen */
     int32_t rx, ry, rw, rh;
     bool have_restore;
@@ -124,7 +125,7 @@ struct wm_popup {
     struct lm_popup pub;        /* must be first */
 };
 
-enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_GADGET_MOVE, GRAB_GADGET_RESIZE, GRAB_MIXER };
+enum grab_kind { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE };
 
 /*
  * Window animations (metrics `animation-ms`, 0 = off; headless only with MELLAGUI_ANIMATIONS): a window that opens, closes,
@@ -321,20 +322,12 @@ struct lm_wm {
     bool sw_open;
     int sw_n, sw_idx;
     struct lm_window *sw_win[SW_MAX_WINDOWS];
-    bool clip_nav;              /* keyboard mode of the clipboard gadget (Super+C): arrows move, Enter uses the entry */
-    int clip_cur;               /* the highlighted entry while clip_nav (index in the history) */
-    int clip_top;               /* the first history entry the card shows (it scrolls) */
-    int clip_total;             /* history length when the card last changed (a longer one = something new was copied: back to the top) */
-    int hover_clip;             /* what the pointer is on in the card: see lm_gadget_info.hover */
     struct {                    /* the desktop gadgets, indexed by enum lm_gadget_id */
         bool visible;
         bool placed;            /* false: docked top right (default); true: x/y chosen by dragging */
         int32_t x, y, w, h;
         uint32_t click_time;
     } gad[LM_GADGET_COUNT];
-    int grab_gadget;            /* the gadget being moved / resized / operated */
-    enum lm_mixer_part mix_part;/* GRAB_MIXER: the slider being dragged ... */
-    int mix_index;              /* ... and its stream row */
     struct lm_window *hover_task;
     struct lm_window *press_win;
     uint32_t press_bits;
@@ -356,7 +349,6 @@ struct lm_wm {
 #define BUBBLE_R0 24.0f             /* radius of the bubble at the button */
 #define SW_ITEM_H 24
 
-struct lm_gadget_def { int w, h, min_w, min_h, max_w, max_h; };
 
 struct dock_geo {
     int n, size, zsize, gap, x0, icon_bottom;
@@ -378,14 +370,8 @@ void damage_rect(struct lm_wm *wm, const struct lm_rect *r);
 void frame_info(const struct lm_wm *wm, const struct lm_window *w, struct lm_frame_info *f);
 struct lm_rect frame_outer(const struct lm_window *w);
 bool fullscreen_covers(const struct lm_wm *wm, const struct lm_output *o);
-void gadget_grab_begin(struct lm_wm *wm, int id, enum grab_kind kind, uint32_t edges);
-void gadget_reset(struct lm_wm *wm, int id);
-void gadget_snap(struct lm_wm *wm, int id, const struct lm_output *o, int32_t *px, int32_t *py, int32_t w, int32_t h);
 void grab_begin(struct lm_wm *wm, struct lm_window *w, enum grab_kind kind, uint32_t edges);
 void launch_settings(struct lm_wm *wm);
-void mixer_press(struct lm_wm *wm);
-void smart_press(struct lm_wm *wm);
-void mixer_slide(struct lm_wm *wm, enum lm_mixer_part part, int idx, double x);
 void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws);
 void open_shot(struct lm_wm *wm);
 struct lm_rect output_panel_rect(const struct lm_output *o);
@@ -400,6 +386,17 @@ void send_configure(struct lm_wm *wm, struct lm_window *w, int32_t cw, int32_t c
 void set_focus(struct lm_wm *wm, struct lm_window *w);
 void update_outputs(struct lm_wm *wm, struct lm_window *w);
 bool win_is_calendar(const struct lm_window *w);
+/* A desktop gadget is a window of the program mellagui-gadget (app id "mellagui.gadget.NAME"): no frame, always below the other windows, on every
+ * workspace, never focused by a click and listed nowhere (wm_gadgets.c). `win_is_aux` = the windows the lists (taskbar, Alt+Tab, overview, focus
+ * cycling, animations) leave out: the calendar, quick settings and the gadgets. */
+bool win_is_gadget(const struct lm_window *w);
+bool win_is_aux(const struct lm_window *w);
+void gadget_map(struct lm_wm *wm, struct lm_window *w);
+void gadgets_redock(struct lm_wm *wm);
+void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, double dy);
+struct lm_window *gadget_window(struct lm_wm *wm, int id);        /* the gadget's window, or NULL */
+const char *gadget_name(int id);
+void gadget_procs_stop(struct lm_wm *wm);
 bool win_is_quick(const struct lm_window *w);
 void win_origin(const struct lm_window *w, int32_t *ox, int32_t *oy);
 bool win_visible(const struct lm_wm *wm, const struct lm_window *w);
@@ -459,22 +456,12 @@ void launcher_drag_finish(struct lm_wm *wm);
 void launcher_drag_motion(struct lm_wm *wm);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);
-void clip_buttons(const struct lm_rect *card, struct lm_rect b[3]);
-int clip_nav_count(struct lm_wm *wm);
-void clip_nav_set(struct lm_wm *wm, bool on);
-void clip_show(struct lm_wm *wm, int i);
-int clip_slots(struct lm_wm *wm);
-int clip_top(struct lm_wm *wm);
-void damage_gadget(struct lm_wm *wm, int id);
-void damage_gadgets(struct lm_wm *wm);
 void damage_panels(struct lm_wm *wm);
-struct lm_rect gadget_bounds(const struct lm_rect *r);
-void gadget_max_size(int id, const struct lm_output *o, int *mw, int *mh);
-void gadget_slots(int h, int *slots, int *entry_h);
 /* wm_places.c: where the own programs' windows were the last time (--windows-file). */
 void places_load(struct lm_wm *wm);
 bool places_find(struct lm_wm *wm, const struct lm_window *w, struct lm_rect *r, bool *maximized);
 void places_remember(struct lm_wm *wm, struct lm_window *w);
+void places_forget(struct lm_wm *wm, const struct lm_window *w);
 void gadgets_load(struct lm_wm *wm);
 void gadgets_save(struct lm_wm *wm);
 bool dock_special(const struct lm_dock_item *it);
@@ -532,9 +519,7 @@ struct lm_output *overview_output(const struct lm_wm *wm);
 bool overview_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out);
 void overview_set(struct lm_wm *wm, bool open);
 bool overview_tick(struct lm_wm *wm, uint64_t now);
-void gadget_def_init(void);
 struct lm_output *gadget_output(const struct lm_wm *wm);
-extern struct lm_gadget_def gadget_def[LM_GADGET_COUNT];
 void sw_close(struct lm_wm *wm);
 void sw_commit(struct lm_wm *wm);
 int sw_first(const struct lm_wm *wm);

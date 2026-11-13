@@ -299,14 +299,6 @@ enum lm_pick_kind {
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
     LM_PICK_PANEL_TASK,     /* taskbar button of `window` */
     LM_PICK_PANEL_TRAY,     /* an icon / button a program put into the bar (tray.h): `index` = the item's id */
-    LM_PICK_GADGET_TITLE,   /* desktop gadget title bar: drag to move, double click resets (`index` = gadget id) */
-    LM_PICK_GADGET_BORDER,  /* desktop gadget edge/corner: drag to resize, `edges` says which (`index` = gadget id) */
-    LM_PICK_GADGET_BODY,    /* inside the mixer gadget: sliders and buttons (`index` = gadget id, `rect` = the card) */
-    LM_PICK_CLIP_ENTRY,     /* an entry of the clipboard gadget: click = use it as the current clipboard (`index` = entry) */
-    LM_PICK_CLIP_DELETE,    /* the x at the right end of an entry: forget that entry (`index` = entry) */
-    LM_PICK_CLIP_UP,        /* the clipboard card's up arrow: a page back towards the newest */
-    LM_PICK_CLIP_DOWN,      /* ... its down arrow: a page towards the oldest */
-    LM_PICK_CLIP_CLEAR,     /* ... its trash can: forget the whole history */
     LM_PICK_DOCK_ITEM,      /* a button of the dock (`index` = lm_dock_item index) */
     LM_PICK_DOCK,           /* the dock between its buttons, or (autohide) the bottom edge of the screen that shows it: swallows the click */
     LM_PICK_SHOT_CARD,      /* the screenshot card (above everything): click = open the file in the viewer */
@@ -322,8 +314,8 @@ struct lm_pick {
     struct lm_surface *surface; /* LM_PICK_SURFACE: the exact (sub)surface hit */
     double sx, sy;              /* LM_PICK_SURFACE: surface-local hit position */
     uint32_t edges;             /* LM_PICK_BORDER: LM_EDGE_* */
-    int index;                  /* LM_PICK_PANEL_WORKSPACE, LM_PICK_MENU_ITEM, LM_PICK_GADGET_* */
-    struct lm_rect rect;        /* LM_PICK_PANEL_LAUNCHER, LM_PICK_GADGET_BODY */
+    int index;                  /* LM_PICK_PANEL_WORKSPACE, LM_PICK_MENU_ITEM */
+    struct lm_rect rect;        /* LM_PICK_PANEL_LAUNCHER */
 };
 
 /* Topmost thing at the global point: popups, then windows (stacking), then panel. */
@@ -342,16 +334,16 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick,
 /* The keyboard layout / sticky key state changed: repaint the indicators. */
 void lm_wm_keyboard_state_changed(struct lm_wm *wm);
 /* The clipboard history changed (seat.c): repaint the gadget. */
-void lm_wm_clipboard_changed(struct lm_wm *wm);
 /* The volume mixer's / the system monitor's state changed: repaint that gadget. */
-void lm_wm_mixer_changed(struct lm_wm *wm);
-void lm_wm_sysinfo_changed(struct lm_wm *wm);
 
 /* Desktop gadgets: the clipboard viewer and the volume mixer. */
 enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_SYSTEM, LM_GADGET_SMART, LM_GADGET_COUNT };
 /* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer, Super+S = system monitor, Super+H = smart home; control socket `gadget`, `mixer`, `sysinfo`, `smart`). */
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id);
-void lm_wm_smart_changed(struct lm_wm *wm);                     /* the smart home card has new state: repaint it */
+void lm_wm_gadgets_start(struct lm_wm *wm, bool headless);
+void lm_wm_gadget_reset(struct lm_wm *wm, int id);                 /* default size, docked again */
+void lm_wm_gadget_refresh(struct lm_wm *wm, int id);             /* the program of the gadget looks at the world again (SIGUSR1) */
+void lm_wm_focus_back(struct lm_wm *wm);                         /* the keyboard goes to the top window again (a gadget lets go of it) */                       /* the gadgets that are switched on are started (main.c, not on the headless backend) */
 void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible);
 /* The gadget card (without shadow) in global coordinates; false when hidden or it does not fit. */
 bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out);
@@ -614,39 +606,12 @@ struct lm_dock_info {
     const char *label_text;         /* valid only during the callback */
 };
 
-#define LM_GADGET_ENTRIES 50        /* == LM_CLIP_HISTORY: the history can hold this many, the card shows as many as fit and scrolls */
 #define LM_CLIP_DEFAULT_ENTRIES 5   /* entries a card of the default height shows */
-#define LM_CLIP_BTN 20              /* the small icon buttons in the clipboard card's title bar: up, down, clear all (right to left: clear, down, up) */
-#define LM_CLIP_BTN_GAP 4
-#define LM_CLIP_DEL_W 26            /* the x of an entry sits in the last this many pixels of its slot */
-#define LM_GADGET_SHADOW 14         /* the drop shadow reaches this far beyond `rect` (scene bounds include it) */
 /*
  * The desktop gadget: a rounded, shadowed card on the first output (docked top right below the panel until the user
  * drags it; above the wallpaper and below every window) that lists the clipboard history, newest first. It can be
  * moved by its title bar and resized by its edges; the renderer wraps/truncates the entries to the width.
  */
-struct lm_mixer_state;
-struct lm_smart_state;
-struct lm_sysinfo_state;
-struct lm_gadget_info {
-    int id;                         /* enum lm_gadget_id */
-    const struct lm_sysinfo_state *sys; /* LM_GADGET_SYSTEM: what to draw (valid only during the callback) */
-    const struct lm_mixer_state *mixer; /* LM_GADGET_MIXER: what to draw (valid only during the callback) */
-    const struct lm_smart_state *smart; /* LM_GADGET_SMART: what to draw (valid only during the callback) */
-    struct lm_rect rect;            /* the card; the shadow lies outside */
-    int n;                          /* entries drawn (<= slots) */
-    int top;                        /* index (0 = newest) in the history of the first entry drawn */
-    int total;                      /* entries in the history (the title badge) */
-    int cursor;                     /* highlighted entry among the drawn ones (keyboard mode, Super+C), -1 = none */
-    int hover;                      /* 0 nothing, 1 up, 2 down, 3 clear, 10 + k = the x of the k-th drawn entry (pointer on it) */
-    struct lm_rect btn[3];          /* the title bar buttons: up, down, clear all */
-    int slots;                      /* entry slots that fit (1..LM_GADGET_ENTRIES); the card scrolls when the history is longer */
-    int entry_h;                    /* height of one entry slot; the title bar is `title_h` high */
-    int title_h;
-    bool dragging;                  /* being moved / resized */
-    const char *text[LM_GADGET_ENTRIES]; /* newest first; valid only during the callback */
-};
-
 #define LM_SW_MAX 10                /* entries shown at once in the Alt+Tab list */
 struct lm_switcher_info {
     struct lm_rect rect;
@@ -685,7 +650,6 @@ struct lm_ghost {
 
 enum lm_scene_kind {
     LM_SCENE_WALLPAPER,             /* one per output */
-    LM_SCENE_GADGET,                /* the desktop gadget (right after the wallpapers, below all windows) */
     LM_SCENE_FRAME,                 /* decoration of one window */
     LM_SCENE_SURFACE,               /* a root surface tree (window content or popup) */
     LM_SCENE_PANEL_SHADOW,          /* the soft shadow the top panel throws on what is below it (one per output, painted before the panel) */
@@ -747,7 +711,6 @@ struct lm_scene_item {
         struct lm_osk_info osk;     /* LM_SCENE_OSK */
         struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_menu_info menu; /* LM_SCENE_MENU */
-        struct lm_gadget_info gadget; /* LM_SCENE_GADGET */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
         struct lm_switcher_info switcher; /* LM_SCENE_SWITCHER */
         struct lm_notify_info notify;   /* LM_SCENE_NOTIFY */
@@ -833,7 +796,6 @@ void lm_wm_osk_layout_changed(struct lm_wm *wm);
 size_t lm_wm_osk_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The clipboard card's view: the first history entry it shows and how many entries fit (control socket `clip`). */
-void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots);
 
 /* Some visible window is fullscreen (the screensaver does not start over a film or a game). */
 bool lm_wm_has_fullscreen(const struct lm_wm *wm);

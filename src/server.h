@@ -84,9 +84,6 @@ struct lm_capture;
 struct lm_tray;
 struct lm_menu;
 struct lm_idle_inhibit;
-struct lm_mixer;
-struct lm_sysinfo;
-struct lm_smart;
 struct lm_dmabuf;
 
 typedef void (*lm_request_fn)(struct lm_resource *res, const union lm_arg *args);
@@ -296,9 +293,6 @@ struct lm_server {
     struct lm_night *night;             /* night light: warmer colours in the evening (nightlight.h) */
     struct lm_saver *saver;             /* the screensaver (starts a program when idle), see saver.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
-    struct lm_mixer *mixer;             /* volume mixer behind the desktop gadget (pactl / amixer) */
-    struct lm_sysinfo *sysinfo;         /* CPU / memory / temperature behind the system monitor gadget */
-    struct lm_smart *smart;             /* the pinned smart home devices behind the Smart home gadget (it asks mellagui-smart) */
     struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */
 
     void *priv;

@@ -74,6 +74,40 @@ static inline void lm_round_fill(uint32_t *px, int stride, int bw, int bh, int x
         }
 }
 
+/* The same on a premultiplied ARGB buffer whose corners are transparent (a card with rounded corners): the anti-aliased edge pixels get
+ * the coverage as their alpha instead of being mixed with what is below. */
+static inline void lm_round_fill_argb(uint32_t *px, int stride, int bw, int bh, int x, int y, int w, int h, int r, uint32_t rgb)
+{
+    r = LM_MIN(r, LM_MIN(w, h) / 2);
+    lm_fill_px(px, stride, bw, bh, x, y + r, w, h - 2 * r, rgb);
+    lm_fill_px(px, stride, bw, bh, x + r, y, w - 2 * r, r, rgb);
+    lm_fill_px(px, stride, bw, bh, x + r, y + h - r, w - 2 * r, r, rgb);
+    for (int cy = 0; cy < r; cy++)
+        for (int cx = 0; cx < r; cx++) {
+            double dx = r - cx - 0.5, dy = r - cy - 0.5;
+            double cov = (double)r + 0.5 - sqrt(dx * dx + dy * dy);
+            if (cov <= 0.0)
+                continue;
+            if (cov > 1.0)
+                cov = 1.0;
+            int xs[2] = { x + cx, x + w - 1 - cx }, ys[2] = { y + cy, y + h - 1 - cy };
+            for (int i = 0; i < 2; i++)
+                for (int j = 0; j < 2; j++) {
+                    if (xs[i] < 0 || ys[j] < 0 || xs[i] >= bw || ys[j] >= bh)
+                        continue;
+                    uint32_t *p = &px[(size_t)ys[j] * (size_t)stride + (size_t)xs[i]];
+                    uint32_t d = *p, da = d >> 24;
+                    double oa = cov + ((double)da / 255.0) * (1.0 - cov);
+                    uint32_t out = (uint32_t)(oa * 255.0 + 0.5) << 24;
+                    for (int sh = 0; sh <= 16; sh += 8) {                  /* premultiplied: new colour * its coverage + what was there * the rest */
+                        double c = (double)((rgb >> sh) & 255) * cov + (double)((d >> sh) & 255) * (1.0 - cov);
+                        out |= (uint32_t)(c > 255.0 ? 255.0 : c + 0.5) << sh;
+                    }
+                    *p = out;
+                }
+        }
+}
+
 /* ---- font zoom ------------------------------------------------------------------------------------------------------------ */
 
 static const int LM_ZOOM_LEVELS[] = { 50, 60, 75, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500 };

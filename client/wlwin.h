@@ -49,6 +49,7 @@ struct wlwin {
     int pw, ph;                     /* size of `pixels`: bw * scale x bh * scale (= bw x bh unless the program asked for wlwin_hidpi) */
     int scale;                      /* the buffer's scale factor: 1, or the largest wl_output scale for a hidpi window */
     bool hidpi;                     /* wlwin_hidpi() was called: the program draws only through the wlwin_* calls */
+    bool argb;                      /* wlwin_argb() was called: the buffer has an alpha channel (transparent corners); it is cleared before every paint */
     uint32_t out_id[8];             /* the wl_outputs bound, and the scale each announced */
     int out_scale[8], nout;
     uint32_t *pixels;
@@ -85,7 +86,14 @@ void wlwin_destroy(struct wlwin *w);
  * must NOT touch `pixels` itself (its stride is `pw`, its size `pw` x `ph`): it uses wlwin_round_fill / wlwin_dim /
  * wlwin_blit below. Without the call the buffer is bw x bh and the compositor enlarges it (soft, but nothing breaks).
  */
-void wlwin_hidpi(void);                         /* call it first in main(): it is a property of the program, every window it opens is hidpi */
+void wlwin_hidpi(void);                                  /* call it first in main(): it is a property of the program, every window it opens is hidpi */
+/* A program that calls this (first in main) draws into a premultiplied ARGB buffer, cleared to transparent before every paint; wlwin_fill and
+ * wlwin_round_fill keep the alpha right (a card with rounded corners over the desktop). */
+void wlwin_argb(void);
+/* Ask the compositor to move / resize the window with the pointer that has the button down (the serial of the button event). `edges` are
+ * LM_EDGE_* bits of xdg_toplevel.resize_edge (1 top, 2 bottom, 4 left, 8 right: LM_EDGE_*). */
+void wlwin_move(struct wlwin *w, uint32_t serial);
+void wlwin_resize(struct wlwin *w, uint32_t serial, uint32_t edges);
 
 /* Show a menu at the pointer, drawn by the compositor (it may reach beyond the window): `entries` one per line, a leading '~' = dim. The answer
  * comes to ops->menu. False when the compositor has no such menu (the caller does the action some other way or does nothing). */

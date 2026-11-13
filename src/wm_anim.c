@@ -20,7 +20,7 @@ int anim_duration(const struct lm_wm *wm)
 bool anim_wanted(struct lm_wm *wm, const struct lm_window *w)
 {
     return anim_duration(wm) > 0 && !wm->anim_suppress && wm->srv->render && !lm_lock_active(wm->srv->lock) &&
-           !(w->states & LM_WINDOW_FULLSCREEN) && !win_is_calendar(w);
+           !(w->states & LM_WINDOW_FULLSCREEN) && !win_is_aux(w);
 }
 
 /* The window's picture (frame and content, without popups) and the rectangle it covers. */
@@ -228,7 +228,7 @@ void anim_workspace(struct lm_wm *wm, int dir, bool leaving)
 
 bool wobble_wanted(const struct lm_wm *wm, const struct lm_window *w)
 {
-    return lm_metrics.wobble > 0 && anim_duration(wm) > 0 && wm->srv->render && !(w->states & LM_WINDOW_FULLSCREEN) && !win_is_calendar(w);
+    return lm_metrics.wobble > 0 && anim_duration(wm) > 0 && wm->srv->render && !(w->states & LM_WINDOW_FULLSCREEN) && !win_is_aux(w);
 }
 
 /* Where node (i, j) is when the window is rigid. */

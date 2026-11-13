@@ -9,6 +9,7 @@
 #   make mellagui-top  build/mellagui-top  (client/mellagui-top.c, the process and service manager)
 #   make mellagui-cam  build/mellagui-cam    (client/mellagui-cam.c, the webcam viewer, V4L2)
 #   make mellagui-status   build/mellagui-status (client/mellagui-status.c, the battery and the network in the panel)
+#   make mellagui-gadget  build/mellagui-gadget (client/mellagui-gadget.c, the desktop gadgets: clipboard, mixer, system, smart home)
 #   make mellagui-notes    build/mellagui-notes (client/mellagui-notes.c, the history of notifications)
 #   make mellagui-shot     build/mellagui-shot (client/mellagui-shot.c, a screenshot of an area with marks)
 #   make mellagui-smart  build/mellagui-smart (client/mellagui-smart.c, the devices of a Smart Life / Tuya account)
@@ -39,7 +40,8 @@ ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize
 BUILD := build
 
 # ---- sources -----------------------------------------------------------------
-COMP_SRCS := $(sort $(wildcard src/*.c))
+# (mixer.c and smarthome.c belong to the gadget programs, mellagui-gadget: the compositor has no use for them)
+COMP_SRCS := $(filter-out src/mixer.c src/smarthome.c,$(sort $(wildcard src/*.c)))
 COMP_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(COMP_SRCS))
 ASAN_OBJS := $(patsubst src/%.c,$(BUILD)/asan/%.o,$(COMP_SRCS))
 
@@ -48,9 +50,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-shot $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-shot $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-shot mellagui-bluetooth mellagui-smart asan test run clean fuzz fuzz-run
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-shot mellagui-bluetooth mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -110,6 +112,10 @@ $(BUILD)/mellagui-bluetooth: $(BUILD)/client/mellagui-bluetooth.o $(BUILD)/clien
 $(BUILD)/mellagui-smart: $(BUILD)/client/mellagui-smart.o $(BUILD)/client/tuya.o $(BUILD)/client/smartsched.o $(BUILD)/client/tuyalan.o $(BUILD)/client/smartfav.o $(BUILD)/client/json.o $(BUILD)/client/qr.o $(BUILD)/src/aes.o $(BUILD)/src/md5.o $(BUILD)/src/sha256.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+
+$(BUILD)/mellagui-gadget: $(BUILD)/client/mellagui-gadget.o $(BUILD)/src/mixer.o $(BUILD)/src/sysinfo.o $(BUILD)/src/smarthome.o $(BUILD)/src/audio.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/mellagui-shot: $(BUILD)/client/mellagui-shot.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)

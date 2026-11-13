@@ -112,7 +112,7 @@ void lm_wm_menu_cancel(struct lm_wm *wm)
 /* Right click on a window's title bar or its taskbar button: Maximize / Restore, Minimize, Move to workspace 1..4, Close. */
 void window_menu_open(struct lm_wm *wm, struct lm_window *w)
 {
-    if (!w || !w->mapped || win_is_calendar(w) || !wm->srv->seat)
+    if (!w || !w->mapped || win_is_aux(w) || !wm->srv->seat)
         return;
     static char names[LM_NUM_WORKSPACES][24];
     const char *labels[3 + LM_NUM_WORKSPACES + 1];

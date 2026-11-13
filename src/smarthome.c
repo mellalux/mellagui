@@ -3,9 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "audio.h"
-#include "launchers.h"
 #include "log.h"
 #include "loop.h"
 
@@ -28,7 +28,7 @@ static void notify(struct lm_smart *s)
         s->changed(s->data);
 }
 
-/* The program's path: $MELLAGUI_SMART_BIN, else mellagui-smart next to the compositor (lm_launch_expand finds it). */
+/* The program's path: $MELLAGUI_SMART_BIN, else mellagui-smart in the folder of this executable, else the one on PATH. */
 static void program(char *out, size_t n)
 {
     const char *e = getenv("MELLAGUI_SMART_BIN");
@@ -36,14 +36,22 @@ static void program(char *out, size_t n)
         snprintf(out, n, "%s", e);
         return;
     }
-    lm_launch_expand("mellagui-smart", out, n);                    /* (a path made for a shell: it comes quoted) */
-    size_t len = strlen(out);
-    if (len >= 2 && out[0] == '\'' && out[len - 1] == '\'') {
-        memmove(out, out + 1, len - 2);
-        out[len - 2] = 0;
+    char self[470];
+    ssize_t len = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (len > 0) {
+        self[len] = 0;
+        char *slash = strrchr(self, '/');
+        if (slash) {
+            *slash = 0;
+            char path[500];
+            snprintf(path, sizeof(path), "%s/mellagui-smart", self);
+            if (access(path, X_OK) == 0) {
+                snprintf(out, n, "%s", path);
+                return;
+            }
+        }
     }
-    if (!out[0])
-        snprintf(out, n, "mellagui-smart");
+    snprintf(out, n, "mellagui-smart");
 }
 
 static void parse(struct lm_smart *s, const char *text)

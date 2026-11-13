@@ -206,13 +206,16 @@ nothing; headless runs save nothing unless `--settings` is given). The file is p
 `--layouts` or `--sticky` on the command line win over it. From a script: `mellagui-settings --set layouts=ee,us repeat-rate=30`,
 `mellagui-settings --get`. Anyone on the user's Wayland socket can change the settings (the `mellagui_settings_v1` protocol has no authentication).
 
-Desktop gadget: a rounded, shadowed card on the first output (above the wallpaper, below all windows), docked at the top right until
-you move it, with the clipboard viewer: the last five distinct texts that applications copied, newest first (up to 2 KiB read per
-copy; images and files are ignored). The compositor reads them itself, so it also sees what was copied while no window had focus.
-Drag the title bar to move it (it stays on the output, below the panel); drag an edge or corner (the dotted grip bottom right) to
-resize it, 200x86 up to 640x560: a narrower card wraps the texts, a lower one shows fewer entries, a taller one gives each entry more
-lines. Double-click the title bar to get the default size and place back (position and size are not saved). Super+G shows/hides it,
-`--no-gadget` starts it hidden.
+Desktop gadgets: each gadget is a small program of its own (`mellagui-gadget clipboard|mixer|system|smart`) that the compositor starts when
+the gadget is switched on and ends when it is switched off - a rounded card in a frameless window above the wallpaper and below all
+windows, on every workspace, docked at the top right until you move it. The first one shows the clipboard history: the last fifty
+distinct texts that applications copied, newest first (up to 2 KiB read per copy; images and files are ignored; the compositor reads
+them itself, so it also sees what was copied while no window had focus). Click an entry to use it again, the x forgets it, the arrows
+page, the trash can forgets all; Super+C gives the card the keyboard (arrows, Enter, Delete, Esc). Drag the title bar to move it (it
+stays on the output, below the panel, and sticks to the screen's and the other cards' edges); drag an edge or corner (the dotted grip
+bottom right) to resize it, 180x70 up to 640x1600: a taller card shows more entries. Double-click the title bar to get the default
+size and place back; a card you moved or resized stays there the next time (`windows.conf`). Super+G shows/hides it, `--no-gadget`
+starts it hidden.
 
 Volume mixer gadget: a second card of the same kind (Super+V, `--mixer`, or *Desktop* → *Volume mixer gadget* in the settings panel; hidden
 by default). It docks below the clipboard card (beside it on a small screen) and is moved/resized the same way. Inside: the master

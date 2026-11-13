@@ -98,7 +98,6 @@ void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
         about_set(wm, false, NULL);
         launcher_set(wm, false, NULL);
         sw_close(wm);
-        clip_nav_set(wm, false);
         snprintf(wm->power_out, sizeof(wm->power_out), "%s", o->name);
         wm->power_open = true;
         wm->power_confirm = 0;
@@ -166,7 +165,6 @@ void about_set(struct lm_wm *wm, bool open, struct lm_output *o)
         power_set(wm, false, NULL);
         launcher_set(wm, false, NULL);
         sw_close(wm);
-        clip_nav_set(wm, false);
         wm->about_n = lm_about_collect(wm->srv, wm->about_rows, LM_ABOUT_ROWS);
         snprintf(wm->about_out, sizeof(wm->about_out), "%s", o->name);
         wm->about_open = true;
@@ -455,9 +453,6 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             lm_render_shot_dismiss(wm->srv->render, NULL, 0);
         return true;
     }
-    if (pressed && wm->clip_nav && pick->kind != LM_PICK_CLIP_ENTRY)
-        clip_nav_set(wm, false);
-
     /* Releases of decoration/panel presses we consumed. */
     if (!pressed && (wm->press_bits || wm->press_panel_kind)) {
         struct lm_window *pw = wm->press_win;
@@ -512,6 +507,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
 
     switch (pick->kind) {
     case LM_PICK_SURFACE:
+        if (pick->window && win_is_gadget(pick->window))
+            return false;                                       /* a gadget is used with the pointer: the keyboard stays where it is */
         if (pick->window && wm->focused != pick->window)
             lm_wm_focus_window(wm, pick->window);
         else if (pick->window)
@@ -553,54 +550,6 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         lm_wm_focus_window(wm, pick->window);
         if (button == BTN_LEFT)
             grab_begin(wm, pick->window, GRAB_RESIZE, pick->edges);
-        return true;
-    case LM_PICK_GADGET_TITLE: {
-        int id = pick->index;
-        if (button != BTN_LEFT || id < 0 || id >= LM_GADGET_COUNT)
-            return true;
-        if (time_ms - wm->gad[id].click_time < (uint32_t)DOUBLE_CLICK_MS) {
-            wm->gad[id].click_time = 0;
-            gadget_reset(wm, id);
-            return true;
-        }
-        wm->gad[id].click_time = time_ms;
-        gadget_grab_begin(wm, id, GRAB_GADGET_MOVE, 0);
-        return true;
-    }
-    case LM_PICK_GADGET_BORDER:
-        if (button == BTN_LEFT && pick->index >= 0 && pick->index < LM_GADGET_COUNT)
-            gadget_grab_begin(wm, pick->index, GRAB_GADGET_RESIZE, pick->edges);
-        return true;
-    case LM_PICK_GADGET_BODY:
-        if (button == BTN_LEFT) {
-            if (pick->index == LM_GADGET_SMART)
-                smart_press(wm);
-            else
-                mixer_press(wm);
-        }
-        return true;
-    case LM_PICK_CLIP_ENTRY:
-        if (button == BTN_LEFT)
-            lm_seat_clip_use(wm->srv->seat, pick->index);
-        return true;
-    case LM_PICK_CLIP_DELETE:
-        if (button == BTN_LEFT)
-            lm_seat_clip_remove(wm->srv->seat, pick->index);
-        return true;
-    case LM_PICK_CLIP_UP:
-    case LM_PICK_CLIP_DOWN:
-        if (button == BTN_LEFT) {                                       /* a page at a time */
-            int slots = LM_MAX(clip_slots(wm), 1);
-            wm->clip_top = clip_top(wm) + (pick->kind == LM_PICK_CLIP_UP ? -slots : slots);
-            wm->clip_top = clip_top(wm);
-            if (wm->clip_nav)
-                wm->clip_cur = LM_CLAMP(wm->clip_cur, wm->clip_top, wm->clip_top + slots - 1);
-            damage_gadget(wm, LM_GADGET_CLIPBOARD);
-        }
-        return true;
-    case LM_PICK_CLIP_CLEAR:
-        if (button == BTN_LEFT)
-            lm_seat_clip_clear(wm->srv->seat);
         return true;
     case LM_PICK_DOCK_ITEM:
         if (button == BTN_RIGHT) {

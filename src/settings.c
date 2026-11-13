@@ -59,6 +59,7 @@ enum key_id {
     K_FONT_NAME, K_FONT_FILE, K_FONT_LOCKED, K_FONT_USE, K_FONT_UI, K_FONT_UI_NAME,
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
+    K_CLIP_0, K_CLIP_LAST = K_CLIP_0 + 4, K_CLIP_COUNT, K_CLIP_USE, K_CLIP_DEL, K_CLIP_CLEAR, K_FOCUS_BACK, K_GADGET_RESET,
     K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_LAUNCHER_DEFAULTS, K_COUNT
 };
 #define VALUE_MAX 3300          /* longest value text (the lists); the wire carries it as one string */
@@ -90,6 +91,8 @@ static const char *const key_names[K_COUNT] = {
 #define KR(i) [K_KEYS_ROW_0 + (i)] = "keys-row-" #i
     KR(0), KR(1), KR(2), KR(3), KR(4), KR(5), KR(6), KR(7), KR(8), KR(9),
 #undef KR
+    [K_CLIP_0] = "clip-0", [K_CLIP_0 + 1] = "clip-1", [K_CLIP_0 + 2] = "clip-2", [K_CLIP_0 + 3] = "clip-3", [K_CLIP_0 + 4] = "clip-4",
+    [K_CLIP_COUNT] = "clip-count", [K_CLIP_USE] = "clip-use", [K_CLIP_DEL] = "clip-del", [K_CLIP_CLEAR] = "clip-clear", [K_FOCUS_BACK] = "focus-back", [K_GADGET_RESET] = "gadget-reset",
     [K_NOTES_0] = "notes-0", [K_NOTES_0 + 1] = "notes-1", [K_NOTES_0 + 2] = "notes-2", [K_NOTES_0 + 3] = "notes-3", [K_NOTES_0 + 4] = "notes-4",
     [K_NOTES_COUNT] = "notes-count", [K_NOTES_UNREAD] = "notes-unread", [K_NOTES_DEL] = "notes-del", [K_NOTES_CLEAR] = "notes-clear",
     [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png", [K_STARTUP_SOUND_PLAY] = "startup-sound-play", [K_LAUNCHER_DEFAULTS] = "launcher-defaults",
@@ -533,6 +536,23 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_DND: snprintf(out, n, "%d", c->dnd ? 1 : 0); break;
     case K_STARTUP_SOUND: snprintf(out, n, "%d", c->startup_sound ? 1 : 0); break;
     case K_STARTUP_SOUND_PLAY: case K_LAUNCHER_DEFAULTS: break;                      /* write only */
+    case K_CLIP_0 ... K_CLIP_LAST: {            /* the clipboard history, ten entries a value (newest first), one line each: the text with line breaks as blanks, cut to 120 bytes */
+        size_t o = 0;
+        out[0] = 0;
+        int count = srv->seat ? lm_seat_clip_count(srv->seat) : 0;
+        for (int i = (k - K_CLIP_0) * 10; i < count && i < (k - K_CLIP_0 + 1) * 10 && o + 128 < n; i++) {
+            const char *t = lm_seat_clip_get(srv->seat, i);
+            size_t len = 0;
+            if (i > (k - K_CLIP_0) * 10)
+                out[o++] = '\n';
+            for (; t && *t && len < 120; t++, len++)
+                out[o++] = (*t == '\n' || *t == '\r' || *t == '\x1f') ? ' ' : *t;
+            out[o] = 0;
+        }
+        break;
+    }
+    case K_CLIP_COUNT: snprintf(out, n, "%d", srv->seat ? lm_seat_clip_count(srv->seat) : 0); break;
+    case K_CLIP_USE: case K_CLIP_DEL: case K_CLIP_CLEAR: case K_FOCUS_BACK: case K_GADGET_RESET: break;                  /* write only */
     case K_NOTES_0 ... K_NOTES_LAST: lm_notelog_text(srv->notelog, k - K_NOTES_0, out, n); break;
     case K_NOTES_COUNT: snprintf(out, n, "%d", lm_notelog_count(srv->notelog)); break;
     case K_NOTES_UNREAD: snprintf(out, n, "%d", lm_notelog_unread(srv->notelog)); break;
@@ -756,7 +776,7 @@ void lm_settings_dump(struct lm_settings *s, char *out, size_t n)
 {
     out[0] = 0;
     for (int k = 0; k < K_COUNT; k++) {
-        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || k == K_SOURCES || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_THEME_LIST || k == K_FONT_NAME || k == K_FONT_FILE || k == K_FONT_UI || k == K_FONT_UI_NAME || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST) || (k >= K_NOTES_0 && k <= K_NOTES_LAST))
+        if (k == K_RESOLUTIONS || k == K_AUDIO_OUTS || k == K_SINKS || k == K_SOURCES || (k >= K_DOCK_0 && k <= K_DOCK_LAST) || k == K_DOCK_OPTS || k == K_KEYS_ACTIONS || k == K_THEME_COLORS || k == K_THEME_LIST || k == K_FONT_NAME || k == K_FONT_FILE || k == K_FONT_UI || k == K_FONT_UI_NAME || k == K_METRICS || (k >= K_KEYS_ROW_0 && k <= K_KEYS_ROW_LAST) || (k >= K_KEYS_HELP_0 && k <= K_KEYS_HELP_LAST) || (k >= K_NOTES_0 && k <= K_NOTES_LAST) || (k >= K_CLIP_0 && k <= K_CLIP_LAST))
             continue;                                   /* lists contain spaces and are long: ask for them one by one */
         char v[VALUE_MAX];
         get_value(s, k, v, sizeof(v));
@@ -2018,6 +2038,26 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         }
         return true;
     }
+    case K_CLIP_USE:                                    /* the clipboard card: use entry N as the current clipboard / forget it / forget all */
+        return srv->seat && parse_int(val, 0, 1000, &n) && n < lm_seat_clip_count(srv->seat) && (lm_seat_clip_use(srv->seat, n), true);
+    case K_CLIP_DEL:
+        return srv->seat && parse_int(val, 0, 1000, &n) && n < lm_seat_clip_count(srv->seat) && (lm_seat_clip_remove(srv->seat, n), true);
+    case K_CLIP_CLEAR:
+        if (srv->seat)
+            lm_seat_clip_clear(srv->seat);
+        return true;
+    case K_GADGET_RESET:                                /* a gadget card: back to its default size and place (double click on its title bar) */
+        if (srv->wm) {
+            static const char *const names[] = { "clipboard", "mixer", "system", "smart" };
+            for (int g = 0; g < 4; g++)
+                if (!strcmp(val, names[g]))
+                    lm_wm_gadget_reset(srv->wm, g);
+        }
+        return true;
+    case K_FOCUS_BACK:                                  /* a gadget that had the keyboard gives it back to the window that had it */
+        if (srv->wm)
+            lm_wm_focus_back(srv->wm);
+        return true;
     case K_NOTES_DEL:
         return parse_int(val, 1, 1000000000, &n) && lm_notelog_remove(srv->notelog, n);
     case K_NOTES_CLEAR:

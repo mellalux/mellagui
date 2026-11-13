@@ -13844,7 +13844,7 @@ class TestSaver(Base):
 
     def test_defaults(self):
         p, c = self.start('mellagui-sv1', '--config', 'none')
-        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0', 'style': 'room'})
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0', 'style': 'room', 'cat': '1'})
 
     def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
         p, c = self.start('mellagui-sv2', '--config', 'none')
@@ -14050,7 +14050,7 @@ class TestSaver(Base):
         c.cmd('quit')
         p.wait(timeout=5)
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
-        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0', 'style': 'room'})
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0', 'style': 'room', 'cat': '1'})
 
     def test_the_style_is_a_setting_and_flat_is_handed_to_our_program(self):
         d = os.path.join(tmp, 'sv-style')
@@ -14079,6 +14079,20 @@ class TestSaver(Base):
         self.assertEqual(open(log).read().strip(), '--flat')
         with self.assertRaises(RuntimeError):
             c.cmd('settings saver-style cube')
+        c.cmd('settings saver-style room')
+        self.assertEqual(self.saver(c)['cat'], '1')                         # Tom is there by default
+        c.cmd('settings saver-cat 0')
+        self.assertEqual(self.saver(c)['cat'], '0')
+        os.unlink(log)
+        c.cmd('saver stop')
+        time.sleep(0.3)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started without the cat')
+        self.assertEqual(open(log).read().strip(), '--no-cat')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings saver-cat maybe')
+        c.cmd('settings saver-cat 1')
+        c.cmd('settings saver-style flat')
         time.sleep(0.6)
         c.cmd('quit')
         p.wait(timeout=5)
@@ -14183,6 +14197,13 @@ class TestSaver(Base):
         self.assertGreater(glow_at, 20, 'the eyes glow when the head looks at the camera')
         self.assertLess(glow_away, glow_at // 3, 'and not when it looks away')
 
+    def test_tom_walks_to_another_place_and_back(self):
+        _, _, sitting = self.cat_pixels(0)
+        _, _, walking = self.cat_pixels(66)                                # (he is on his way: standing, tail up)
+        self.assertGreater(abs((walking[0] + walking[2]) // 2 - (sitting[0] + sitting[2]) // 2), 60, 'the cat is somewhere else')
+        _, _, there = self.cat_pixels(80)                                  # (sitting at the other place)
+        self.assertGreater(abs((there[0] + there[2]) // 2 - (sitting[0] + sitting[2]) // 2), 60)
+
     def test_no_cat_leaves_the_room_as_it_was(self):
         _, _, a = self.matrix_frame(['--no-cat', '--at', '3'], 'nocat-a')
         _, _, b = self.matrix_frame(['--no-cat', '--at', '3'], 'nocat-b')
@@ -14226,7 +14247,7 @@ class TestSaver(Base):
         self.wait(lambda: self.saver(c)['enabled'] == '0', 'the box switches it off')
         c.click(x0 + 168, y0 + 14 + 28 + 14)
         self.wait(lambda: self.saver(c)['enabled'] == '1', 'and on again')
-        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 28 + 8 + 12)    # "Show it now"
+        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 28 + 28 + 8 + 12)    # "Show it now" (below the style radios and the cat's check)
         self.wait(lambda: self.saver(c)['running'] == '1', 'the button shows it')
         self.wait(lambda: self.matrix_windows(c), 'its window')
         c.tap(KEY_A)

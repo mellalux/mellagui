@@ -479,6 +479,18 @@ class TestWindows(Base):
         self.assertEqual((cfg[0], cfg[1]), (350, 240))
         self.assertIn(XDG_STATE_RESIZING, cfg[2])
 
+    def test_the_cursor_shows_the_resize_direction_at_the_frame(self):
+        c, w = self.window(300, 200)
+        r = ctl.windows()['windows'][-1]
+        shapes = {}
+        for name, x, y in (('e', r['x'] + r['w'] + 2, r['y'] + 100), ('w', r['x'] - 2, r['y'] + 100),
+                           ('s', r['x'] + 100, r['y'] + r['h'] + 2), ('se', r['x'] + r['w'] + 2, r['y'] + r['h'] + 2),
+                           ('inside', r['x'] + 100, r['y'] + 100)):
+            ctl.abs(x, y)
+            ctl.cmd('cursor'); shapes[name] = ctl.last
+        self.assertEqual(len(set(shapes[k] for k in ('e', 'w', 's', 'se'))), 4, shapes)    # four different arrows
+        self.assertNotEqual(shapes['inside'], shapes['e'])
+
     def test_close_button(self):
         c, w = self.window(300, 200)
         r = ctl.windows()['windows'][0]

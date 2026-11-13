@@ -14058,7 +14058,7 @@ class TestSaver(Base):
         self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == kb and e.name == 'enter', 2.0), 'no keyboard focus before')
         c.sync()
         c.cmd('saver start')
-        self.wait(lambda: self.matrix_windows(c), 'its window')
+        self.wait(lambda: any('focused' in w['flags'] for w in self.matrix_windows(c)), 'its window, mapped and in focus')    # (the window below has lost the focus: only then can it get it back)
         cl.wl.queue.clear()
         c.tap(KEY_A)                                             # ends the screensaver ...
         self.wait(lambda: not self.matrix_windows(c), 'it ends')

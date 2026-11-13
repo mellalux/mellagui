@@ -1438,7 +1438,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_CLOSE: hw = pick->window; bits = LM_FRAME_HOVER_CLOSE; break;
     case LM_PICK_MAXIMIZE: hw = pick->window; bits = LM_FRAME_HOVER_MAXIMIZE; break;
     case LM_PICK_MINIMIZE: hw = pick->window; bits = LM_FRAME_HOVER_MINIMIZE; break;
-    case LM_PICK_BORDER:
+    case LM_PICK_BORDER: shape = cursor_for_edges(pick->edges); break;
     case LM_PICK_SHOT_CARD: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_OVERVIEW_ITEM: case LM_PICK_OVERVIEW_WS: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_NOTIFY: shape = LM_CURSOR_POINTER; break;

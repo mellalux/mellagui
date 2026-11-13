@@ -211,6 +211,11 @@ static void ctl_command(struct ctl_client *c, char *line)
         if (srv->input)
             lm_input_inject(srv->input, &ev);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "cursor")) {                      /* the shape under the pointer (a number of enum lm_cursor_shape) */
+        struct lm_cursor cur = { 0 };
+        if (srv->seat)
+            lm_seat_get_cursor(srv->seat, &cur);
+        ctl_reply(c, "ok shape=%d\n", (int)cur.shape);
     } else if (!strcmp(cmd, "abs")) {
         if (!a1 || !a2) { ctl_reply(c, "err usage: abs <x> <y>\n"); return; }
         if (srv->seat)

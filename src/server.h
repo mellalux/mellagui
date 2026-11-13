@@ -157,6 +157,7 @@ struct lm_config {
     int scale_pct;              /* the screens' scale in percent, 100..400 (settings: scale, --scale; default 100): see output.h */
     int saver_style;            /* 0 = the 3D room, 1 = the classic flat rain: handed to mellagui-matrix as --flat (settings: saver-style; default room) */
     bool saver_cat;             /* the room has its cat (settings: saver-cat; default true); off: mellagui-matrix gets --no-cat */
+    int saver_blank_min;        /* with the screensaver on: the monitors go to sleep (with a fade) this many minutes after the last input, 0 = never (settings: saver-blank; default 15) */
     int saver_lock_min;         /* the screensaver locks the screen this many minutes after it started (it keeps running), 0 = never (settings: saver-lock; default 1) */
     bool startup_sound;         /* play the start-up chime when MellaGUI has started (settings: startup-sound; default true), see chime.h */
     bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */
@@ -240,6 +241,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .saver = true,
         .saver_min = 10,
         .saver_lock_min = 1,
+        .saver_blank_min = 15,
         .saver_cat = true,
         .magnifier_zoom = 200,
         .scale_pct = 100,
@@ -299,6 +301,7 @@ struct lm_server {
     struct lm_notelog *notelog;         /* the history of notifications (notifylog.h) */
     struct lm_night *night;             /* night light: warmer colours in the evening (nightlight.h) */
     struct lm_saver *saver;             /* the screensaver (starts a program when idle), see saver.h */
+    struct lm_screenoff *screenoff;     /* monitors to sleep with a fade (lock.c, saver.c), see screenoff.h */
     struct lm_logind *logind;           /* device access through systemd-logind, NULL = open(2) + VT_PROCESS (logind.h) */
     struct lm_dmabuf *dmabuf;           /* zwp_linux_dmabuf_v1 (NULL when off or no render node) */
 

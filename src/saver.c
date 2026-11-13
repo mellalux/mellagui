@@ -14,6 +14,7 @@
 #include "log.h"
 #include "loop.h"
 #include "saver.h"
+#include "screenoff.h"
 #include "server.h"
 #include "util.h"
 #include "wm.h"
@@ -55,6 +56,11 @@ static void reap_if_gone(struct lm_saver *s)
         s->pid = 0;
         drop_shield(s);
     }
+}
+
+bool lm_saver_governs(const struct lm_config *c)
+{
+    return c->saver && c->saver_min > 0;
 }
 
 bool lm_saver_running(const struct lm_saver *s)
@@ -143,6 +149,13 @@ static void tick_cb(void *data)
         lm_lock_now(s->srv->lock);
         s->locking = false;
         return;
+    }
+    if (lm_saver_governs(cfg) && cfg->saver_blank_min > 0 && !lm_screenoff_active(s->srv->screenoff)) {
+        if (lm_idle_inhibited(s->srv->idle_inhibit))            /* a film is on: the idle time starts when it is over */
+            s->last_activity = lm_now_ms();
+        else if (lm_now_ms() - s->last_activity >= (uint64_t)cfg->saver_blank_min * unit_ms() &&
+                 (s->pid > 0 || !(s->srv->wm && lm_wm_has_fullscreen(s->srv->wm))))      /* (not under a full screen window that has no saver over it) */
+            lm_screenoff_start(s->srv->screenoff);
     }
     if (s->pid > 0 || !cfg->saver || cfg->saver_min <= 0)
         return;

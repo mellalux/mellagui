@@ -134,6 +134,8 @@ void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t
 void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
 /* A label in the bold weight (headings); measure with lm_font_text_width_bold(). The bitmap font has one weight. */
 void wlwin_text_bold(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
+/* Text at a fraction of the normal size (0.5 .. 1, e.g. 0.8 for fine print); the proportional font only - with the bitmap font it is the normal size. */
+void wlwin_text_small(struct wlwin *w, int x, int y, const char *s, double size, uint32_t rgb, int max_w);
 /* Text in cells of LM_FONT_W * scale (tables, text fields): always one cell per character. */
 void wlwin_text_cells(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w);
 

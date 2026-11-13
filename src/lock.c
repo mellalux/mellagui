@@ -23,6 +23,8 @@
 #include "log.h"
 #include "loop.h"
 #include "render.h"
+#include "saver.h"
+#include "screenoff.h"
 #include "seat.h"
 #include "settings.h"
 #include "sha256.h"
@@ -294,8 +296,10 @@ static void set_blank(struct lm_lock *l, bool blank)
     if (l->blanked == blank)
         return;
     l->blanked = blank;
-    if (l->srv->backend)
-        lm_backend_set_power(l->srv->backend, !blank);
+    if (blank)
+        lm_screenoff_start(l->srv->screenoff);                  /* the picture fades out, then the monitors sleep */
+    else
+        lm_screenoff_wake(l->srv->screenoff);
     if (!blank)
         repaint(l);
     lm_info("lock: monitors %s", blank ? "in standby" : "on");
@@ -726,13 +730,13 @@ static void tick_cb(void *data)
             l->last_activity = lm_now_ms();                       /* a film is on: the idle time starts when it is over */
             return;
         }
-        if (l->timeout_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->timeout_min * unit_ms())
-            lock_enter(l);
+        if (!lm_saver_governs(&l->srv->config) && l->timeout_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->timeout_min * unit_ms())
+            lock_enter(l);                                        /* (with the screensaver on, saver.c decides when the screen locks) */
         return;
     }
-    if (l->blanked)
+    if (l->blanked || lm_screenoff_active(l->srv->screenoff))
         return;                                                   /* nobody is looking: no clock, no countdown */
-    if (l->blank_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->blank_min * unit_ms()) {
+    if (!lm_saver_governs(&l->srv->config) && l->blank_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->blank_min * unit_ms()) {
         set_blank(l, true);
         return;
     }
@@ -816,8 +820,6 @@ void lm_lock_destroy(struct lm_lock *l)
         return;
     if (l->tick)
         lm_timer_destroy(l->tick);
-    if (l->blanked && l->srv->backend)
-        lm_backend_set_power(l->srv->backend, true);
     lm_secure_zero(l, sizeof(*l));
     free(l);
 }

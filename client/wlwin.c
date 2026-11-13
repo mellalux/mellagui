@@ -469,6 +469,40 @@ void wlwin_text_cells(struct wlwin *w, int x, int y, const char *s, int scale, u
 
 static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w, bool bold);
 
+void wlwin_text_small(struct wlwin *w, int x, int y, const char *s, double size, uint32_t rgb, int max_w)
+{
+    if (!lm_font_proportional() || size >= 1.0 || size < 0.5) {
+        wlwin_text(w, x, y, s, 1, rgb, max_w);
+        return;
+    }
+    double f = fscale(w);
+    size_t len = strlen(s);
+    int cum = 0;
+    int py = P(f, y) + (int)((LM_FONT_H * (1.0 - size)) * f / 2.0 + 0.5);           /* the smaller line sits in the middle of the normal one's height */
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(s + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        struct lm_font_glyph g;
+        lm_font_label_scaled(cp, size * f, false, &g);
+        int adv = (int)((double)g.advance / f + 0.5);                               /* logical pixels */
+        if (max_w > 0 && cum + adv > max_w)
+            break;
+        int gx = P(f, x) + cum * (int)(f + 0.5) - g.left;
+        for (int r = 0; r < g.h; r++) {
+            int row_y = py + r;
+            if (row_y < 0 || row_y >= w->ph)
+                continue;
+            uint32_t *row = w->pixels + (size_t)row_y * (size_t)w->pw;
+            const uint8_t *src = g.px + (size_t)r * (size_t)g.w;
+            for (int cx = LM_MAX(0, -gx); cx < g.w && gx + cx < w->pw; cx++)
+                if (src[cx])
+                    row[gx + cx] = lm_font_mix(row[gx + cx], 0xff000000u | rgb, src[cx]);
+        }
+        cum += adv;
+    }
+}
+
 void wlwin_text(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w)
 {
     if (scale < 1)

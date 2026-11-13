@@ -36,6 +36,7 @@
 #include "nightlight.h"
 #include "notifylog.h"
 #include "saver.h"
+#include "screenoff.h"
 #include "search.h"
 #include "sound.h"
 #include "logind.h"
@@ -652,6 +653,7 @@ int main(int argc, char **argv)
     }
     lm_render_set_wallpaper(srv->render, cfg.wallpaper, cfg.wallpaper_mode);            /* from the settings file */
     lm_input_set_handler(srv->input, lm_seat_handle_input_cb, srv->seat);
+    srv->screenoff = lm_screenoff_create(srv);
     srv->lock = lm_lock_create(srv);            /* with start=1 in lock.conf the screen is locked from the first frame */
     srv->notelog = lm_notelog_create();
     srv->saver = lm_saver_create(srv);
@@ -729,6 +731,8 @@ out:
     srv->saver = NULL;
     if (srv->lock) lm_lock_destroy(srv->lock);
     srv->lock = NULL;
+    if (srv->screenoff) lm_screenoff_destroy(srv->screenoff);
+    srv->screenoff = NULL;
     if (srv->idle_inhibit) lm_idle_inhibit_destroy(srv->idle_inhibit);
     srv->idle_inhibit = NULL;
     if (srv->menu) lm_menu_destroy(srv->menu);

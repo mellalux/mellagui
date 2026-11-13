@@ -4,6 +4,8 @@
  *   mellagui-matrix                 full screen, any key, button or a pointer movement ends it (the compositor also ends it by itself
  *                                   when it started the program as the screensaver: settings, Screensaver page)
  *   mellagui-matrix --flat          the classic flat rain instead of the room
+ *   mellagui-matrix --at SECONDS   starts the camera's drift and the cat's story at that moment (to look at a certain pose, and the tests)
+ *   mellagui-matrix --no-cat        the room without the cat that sits on its floor (client/matrixcat.c)
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
  *   mellagui-matrix --time HH:MM    the window shows that time of day (default: the real time, following the clock): sun, moon and stars, colours
  *   mellagui-matrix --clock-speed N the day passes N minutes a second (to look at it)
@@ -29,6 +31,7 @@
 
 #include "font.h"
 #include "keymap.h"
+#include "matrixcat.h"
 #include "theme.h"
 #include "util.h"
 #include "wlwin.h"
@@ -248,6 +251,8 @@ struct room {
     struct rain fr;                     /* the letters of the window's frame, bars and recess (finer) */
     bool ready;
     float t;                            /* seconds of the camera's drift */
+    bool no_cat;                        /* --no-cat */
+    const uint8_t *catg[MCAT_GLYPHS];   /* the glyphs the cat's fur is made of */
     float lut[256][3];                  /* cell colour by brightness */
     const uint8_t *gptr[GLYPH_MAX_CP];  /* glyph rows by code point */
 };
@@ -304,6 +309,8 @@ static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density
         if (localtime_r(&now, &tm))
             rm->minutes = (float)tm.tm_hour * 60.0f + (float)tm.tm_min + (float)tm.tm_sec / 60.0f;
     }
+    for (int i = 0; i < MCAT_GLYPHS; i++)                               /* the fur's alphabet: a spread over the rain's own set */
+        rm->catg[i] = lm_font_glyph(rm->s[0].set[(i * 7) % rm->s[0].nset]);
     ridge_init();
     sky_update(&rm->sky, rm->minutes);
     rm->ready = true;
@@ -382,8 +389,10 @@ static inline float clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f 
 struct rjob {
     const struct room *rm;
     const struct cam *cam;
+    const struct mcat *cat;             /* NULL = no cat */
+    int cx0, cx1, cy0, cy1;             /* the part of the picture the cat (and its glow) can be in */
     uint32_t *dst;
-    int w, h, stride, y0, y1;
+    int w, h, stride, y0, y1, ystep;    /* the rows y0, y0 + ystep, ... below y1: the threads take every n-th row, so that a busy part of the picture is shared */
     float f;                            /* focal length in pixels */
 };
 
@@ -788,7 +797,7 @@ static void render_rows(const struct rjob *j)
     const struct room *rm = j->rm;
     const struct cam *c = j->cam;
     float inv_f = 1.0f / j->f, cxp = (float)j->w * 0.5f, cyp = (float)j->h * 0.5f;
-    for (int y = j->y0; y < j->y1; y++) {
+    for (int y = j->y0; y < j->y1; y += j->ystep) {
         float vy = (cyp - ((float)y + 0.5f)) * inv_f;
         float bx = c->fx + vy * c->ux, by = c->fy + vy * c->uy, bz = c->fz + vy * c->uz;
         uint32_t *row = j->dst + (size_t)y * (size_t)j->stride;
@@ -821,6 +830,10 @@ static void render_rows(const struct rjob *j)
                 float ao = 0.45f + 0.55f * clamp01(fminf(du, dvv) / 0.5f);
                 letters_px(rm, r, ci, cj, cu - (float)ci, cv - (float)cj, 0, dist * inv_f / fmaxf(along / len, 0.12f), CELL_H / 16.0f,
                            ao / (1.0f + 0.018f * dist * dist), rgb);
+                if (surf == 4 && j->cat) {      /* the cat's shadow on the floor */
+                    float sh = mcat_floor_shade(j->cat, px, pz);
+                    rgb[0] *= sh; rgb[1] *= sh; rgb[2] *= sh;
+                }
                 if (surf == 4) {                                               /* the sun's patch on the floor: the letters in it are brighter and the light is warm */
                     float sl = rm->sky.light_str > 0.0f ? sun_light(px, pz, rm->sky.light_dir) * rm->sky.light_str : 0.0f;
                     if (sl > 0.0f) {
@@ -829,6 +842,10 @@ static void render_rows(const struct rjob *j)
                             rgb[q] = rgb[q] * (1.0f + 1.3f * sl) + rm->sky.light_col[q] * 0.50f * lit;
                     }
                 }
+            }
+            if (j->cat && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1) {   /* the cat, if it is nearer than what the ray met */
+                float o3[3] = { c->ox, c->oy, c->oz }, dn[3] = { dx / len, dy / len, dz / len };
+                mcat_shade(j->cat, o3, dn, (win ? (ZF - c->oz) / dz : t) * len, inv_f, rgb);
             }
             int r8 = (int)rgb[0], g8 = (int)rgb[1], b8 = (int)rgb[2];
             row[x] = 0xff000000u | ((uint32_t)(r8 > 255 ? 255 : r8) << 16) | ((uint32_t)(g8 > 255 ? 255 : g8) << 8) | (uint32_t)(b8 > 255 ? 255 : b8);
@@ -846,13 +863,30 @@ static void *render_thread(void *arg)
 static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int stride, int threads)
 {
     struct cam c = cam_at(rm->t);
+    struct mcat cat;
+    memset(&cat, 0, sizeof(cat));
+    if (!rm->no_cat) {
+        float co[3] = { c.ox, c.oy, c.oz };
+        mcat_pose(&cat, rm->t, co, rm->catg, MCAT_GLYPHS, rm->sky.light_dir, rm->sky.light_col, rm->sky.light_str);
+    }
     float f = (float)h * 0.5f / tanf(0.5f * 62.0f * 3.14159265f / 180.0f);          /* a vertical field of view of 62 degrees */
+    int cx0 = 0, cx1 = w - 1, cy0 = 0, cy1 = h - 1;
+    if (!rm->no_cat) {                                                  /* where the cat's sphere shows: a rectangle round it (the whole picture when we are close) */
+        float vx = cat.centre[0] - c.ox, vy = cat.centre[1] - c.oy, vz = cat.centre[2] - c.oz;
+        float zc = vx * c.fx + vy * c.fy + vz * c.fz, xc = vx * c.rx + vy * c.ry + vz * c.rz, yc = vx * c.ux + vy * c.uy + vz * c.uz;
+        float rr = cat.radius;
+        if (zc > rr * 1.2f) {
+            float rpx = f * rr / sqrtf(zc * zc - rr * rr) + 4.0f, mx = (float)w * 0.5f + f * xc / zc, my = (float)h * 0.5f - f * yc / zc;
+            cx0 = (int)fmaxf(mx - rpx, 0.0f); cx1 = (int)fminf(mx + rpx, (float)(w - 1));
+            cy0 = (int)fmaxf(my - rpx, 0.0f); cy1 = (int)fminf(my + rpx, (float)(h - 1));
+        }
+    }
     threads = LM_CLAMP(threads, 1, 8);
     struct rjob jobs[8];
     pthread_t th[8];
     bool started[8] = { false };
     for (int i = 0; i < threads; i++) {
-        jobs[i] = (struct rjob){ rm, &c, dst, w, h, stride, h * i / threads, h * (i + 1) / threads, f };
+        jobs[i] = (struct rjob){ rm, &c, rm->no_cat ? NULL : &cat, cx0, cx1, cy0, cy1, dst, w, h, stride, i, h, threads, f };
         if (i > 0)
             started[i] = pthread_create(&th[i], NULL, render_thread, &jobs[i]) == 0;
     }
@@ -1123,6 +1157,37 @@ static int selftest(void)
         }
         CHECK(lit > 20 && dark > 96 * 54 / 3);                                             /* rain on dark walls, not one or the other */
         CHECK(rain_heads(&rm.s[0]) == 2);
+        {                                                                /* the cat: it is hit, it turns its head, its eyes glow when it looks at the camera */
+            struct mcat ct;
+            float cam[3] = { 0.0f, 1.55f, 1.6f }, ld[3] = { 0.0f, 0.7f, 0.7f }, lc[3] = { 255.0f, 230.0f, 180.0f };
+            int n = 0, glowing = 0, away = 0;
+            float ymin = 9.0f, ymax = -9.0f;
+            for (float t = 0.0f; t < 240.0f; t += 0.1f) {
+                mcat_pose(&ct, t, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                n++;
+                glowing += ct.glow > 0.5f;
+                away += ct.glow < 0.01f;
+                ymin = fminf(ymin, ct.head_yaw);
+                ymax = fmaxf(ymax, ct.head_yaw);
+                CHECK(ct.glow <= 1.0f && (ct.glow < 0.5f || ct.look > 0.9f));        /* a glow means the head really points at the camera */
+            }
+            CHECK(glowing > n / 10 && glowing < n * 3 / 4 && away > n / 5);            /* it does look at us now and then, and elsewhere the rest of the time */
+            CHECK(ymax - ymin > 1.0f);                                                /* the head turns */
+            mcat_pose(&ct, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+            float chest[3] = { ct.pos[0] + ct.scale * 0.25f * ct.sy, ct.pos[1] + ct.scale * 0.25f, ct.pos[2] + ct.scale * 0.25f * ct.cy }, dn[3], rgb[3] = { 12.0f, 34.0f, 56.0f };
+            float len = sqrtf((chest[0] - cam[0]) * (chest[0] - cam[0]) + (chest[1] - cam[1]) * (chest[1] - cam[1]) + (chest[2] - cam[2]) * (chest[2] - cam[2]));
+            for (int i = 0; i < 3; i++)
+                dn[i] = (chest[i] - cam[i]) / len;
+            CHECK(mcat_shade(&ct, cam, dn, 30.0f, 0.001f, rgb) && (rgb[0] != 12.0f || rgb[1] != 34.0f));        /* a ray at its chest meets it */
+            rgb[0] = 12.0f; rgb[1] = 34.0f; rgb[2] = 56.0f;
+            CHECK(mcat_shade(&ct, cam, dn, len - 0.5f, 0.001f, rgb) == false && rgb[1] == 34.0f);            /* ... not when something nearer was hit first */
+            float up[3] = { 0.0f, 1.0f, 0.0f };
+            CHECK(!mcat_shade(&ct, cam, up, 30.0f, 0.001f, rgb));                                             /* ... and a ray at the ceiling misses it */
+            CHECK(mcat_floor_shade(&ct, ct.pos[0], ct.pos[2]) < 0.5f && mcat_floor_shade(&ct, -2.0f, 1.0f) == 1.0f);   /* its shadow */
+            struct mcat c2;
+            mcat_pose(&c2, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+            CHECK(c2.glow == ct.glow && c2.head_yaw == ct.head_yaw);                  /* the same time, the same pose */
+        }
         room_free(&rm);
     }
     free(r.glyph); free(r.bright); free(r.col);
@@ -1153,6 +1218,11 @@ int main(int argc, char **argv)
             a.windowed = true;
         } else if (!strcmp(argv[i], "--flat")) {
             a.flat = true;
+        } else if (!strcmp(argv[i], "--at") && i + 1 < argc) {
+            double at = atof(argv[++i]);                                        /* (a macro would evaluate argv[++i] several times) */
+            a.room.t = (float)LM_CLAMP(at, 0.0, 100000.0);
+        } else if (!strcmp(argv[i], "--no-cat")) {
+            a.room.no_cat = true;
         } else if (!strcmp(argv[i], "--density") && i + 1 < argc) {
             int dens = atoi(argv[++i]);
             a.rain.density = LM_CLAMP(dens, 50, 300);
@@ -1175,7 +1245,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
         } else {
-            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--density PERCENT] [--time HH:MM] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
+            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
     }

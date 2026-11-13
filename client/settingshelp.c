@@ -153,10 +153,6 @@ static const struct entry table[] = {
     { "saver-cat", NULL, "A cat in the room",
       "A cat sits on the floor of the room, now and then turns its head, lies down for a while, and its eyes glow when it looks at you. Switch it off "
       "for the plain room. It applies the next time the screensaver starts; the flat style has no cat." },
-    { "saver-cat-model", NULL, "What the cat is made of",
-      "From a .glb model: a rigged 3D cat (ours is ~/.local/share/mellagui/tom.glb, so it is used when that file exists; another file can be chosen "
-      "with the setting saver-cat-model, a path) - it walks round the room, stands and turns its head. Built-in: the cat that MellaGUI draws itself, "
-      "which also sits and lies down. A model that cannot be read falls back to the built-in cat." },
     { "saver-lock", NULL, "Lock after",
       "That many minutes after the screensaver started the screen is locked (when a password or PIN is set on the Lock part). The screensaver goes on "
       "running over the lock; the first key or touch ends it and shows the password field. 0 = never lock from the screensaver." },

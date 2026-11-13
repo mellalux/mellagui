@@ -6,7 +6,7 @@
 #include <string.h>
 
 #define CELL 0.032f                     /* one letter of the fur, in the cat's own metres */
-#define SHELL 0.011f                    /* how far the loose letters of the fluffy edge reach beyond the surface */
+#define SHELL 0.018f                    /* how far the loose letters of the fluffy edge reach beyond the surface */
 #define SEG_S 6.0f                      /* the head's script: one action every 6 seconds (a little late, a little different) */
 #define WALK_SPEED 0.28f                /* metres a second */
 #define STRIDE 0.30f                    /* one gait cycle moves the body this far (the cat's own metres) */
@@ -277,20 +277,6 @@ void mcat_state(float t, struct mcat_state *out)
     *out = state_at(t);
 }
 
-void mcat_head_script(float t, float cam_yaw, float cam_pitch, float *yaw, float *pitch, float *roll)
-{
-    struct hang h = head_at(t, cam_yaw, cam_pitch);
-    *yaw = h.yaw + 0.03f * sinf(t * 0.7f);                              /* (never quite still) */
-    *pitch = h.pitch + 0.02f * sinf(t * 0.9f + 1.0f);
-    *roll = h.roll;
-}
-
-float mcat_eye_open(float t)
-{
-    float tb = fmodf(t + 1.3f, 4.6f);
-    return tb < 0.18f ? 1.0f - 0.92f * sinf(3.14159265f * tb / 0.18f) : 1.0f;
-}
-
 /* An ear's flick: 0 most of the time, a quick 0..1..0 every few seconds. */
 static float ear_flick(float t, float period, float phase)
 {
@@ -358,6 +344,9 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
         for (int k = 0; k < 6; k++)
             v[k] = mixf(mixf(d->s[k], d->l[k], lie), d->t[k], stand);
         v[1] += bob;
+        v[3] *= i == 4 ? 1.24f : 1.14f;                                          /* a stout, long-haired cat: the trunk is wider (the ruff most) ... */
+        v[4] *= i == 4 ? 1.12f : 1.07f;
+        v[5] *= 1.07f;
         if (i == 2) {
             v[3] *= br;
             v[5] *= br;
@@ -402,9 +391,9 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
         struct mcat_tube *tb = &c->tube[1 + leg];
         tb->n = 3;
         tb->part = P_BODY;
-        float pts[3][4] = { { m * hip[0], hip[1], hip[2], d->tr[0] }, { m * knee[0], knee[1], knee[2], d->tr[1] }, { m * paw[0], paw[1] + 0.012f, paw[2], d->tr[2] } };
+        float pts[3][4] = { { m * hip[0], hip[1], hip[2], d->tr[0] * 1.12f }, { m * knee[0], knee[1], knee[2], d->tr[1] * 1.12f }, { m * paw[0], paw[1] + 0.012f, paw[2], d->tr[2] * 1.12f } };       /* ... and so are the legs */
         memcpy(tb->p, pts, sizeof(pts));
-        add(c, 0, P_PAW, m * paw[0], paw[1], paw[2], pr[0], pr[1], pr[2]);
+        add(c, 0, P_PAW, m * paw[0], paw[1], paw[2], pr[0] * 1.08f, pr[1] * 1.06f, pr[2]);
         for (int k = -1; k <= 1; k += 2)                                 /* two toes at the front of the paw */
             add(c, 0, P_PAW, m * paw[0] + (float)k * 0.014f, paw[1] - 0.004f, paw[2] + 0.88f * pr[2], 0.014f, 0.014f, 0.016f);
     }
@@ -419,14 +408,44 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
             { 0.0f, 0.30f, -0.25f, 0.052f, 0.0f }, { 0.0f, 0.37f, -0.32f, 0.054f, 0.1f }, { 0.0f, 0.47f, -0.37f, 0.052f, 0.25f },
             { 0.0f, 0.57f, -0.38f, 0.048f, 0.45f }, { 0.0f, 0.65f, -0.36f, 0.044f, 0.65f }, { 0.0f, 0.71f, -0.32f, 0.040f, 0.8f },
             { 0.0f, 0.74f, -0.27f, 0.035f, 0.9f }, { 0.0f, 0.745f, -0.22f, 0.030f, 1.0f } };
+        /* lying, the tail is anywhere: every 14 s a new random pose (the side, how far it curls, which way it first goes, how high the tip is), slid into over 2.5 s */
+        float lieP[8][4];
+        if (lie > 0.001f) {
+            float ph = fmodf(t, 14.0f), blend = sstep(11.5f, 14.0f, ph);
+            uint32_t k0 = (uint32_t)floorf(t / 14.0f);
+            for (int i = 0; i < 8; i++)
+                lieP[i][0] = lieP[i][1] = lieP[i][2] = lieP[i][3] = 0.0f;
+            for (int e = 0; e < 2; e++) {
+                uint32_t h = h32((k0 + (uint32_t)e) * 2654435761u + 4242u);
+                float side = (h & 1u) ? 1.0f : -1.0f, curl = 0.5f + 2.8f * frand(h + 1u), outw = 0.25f + 0.7f * frand(h + 2u), lift = 0.05f * frand(h + 3u);
+                float wgt = e ? blend : 1.0f - blend, psi = 3.14159265f - side * outw, px = side * 0.09f, pz = -0.24f;
+                static const float rad[8] = { 0.060f, 0.062f, 0.062f, 0.059f, 0.054f, 0.048f, 0.042f, 0.034f };
+                for (int i = 0; i < 8; i++) {
+                    float f = (float)i / 7.0f;
+                    lieP[i][0] += wgt * px;
+                    lieP[i][1] += wgt * (0.065f - 0.002f * (float)i + lift * f * f);
+                    lieP[i][2] += wgt * pz;
+                    lieP[i][3] += wgt * rad[i];
+                    px += 0.088f * sinf(psi);
+                    pz += 0.088f * cosf(psi);
+                    psi -= side * curl / 7.0f;
+                }
+            }
+            for (int i = 0; i < 8; i++)
+                lieP[i][0] += 0.012f * (float)i / 7.0f * sinf(t * 1.1f + (float)i);             /* (the tip twitches a little) */
+        }
         struct mcat_tube *tb = &c->tube[0];
         tb->n = 8;
         tb->part = P_TAIL;
         for (int i = 0; i < 8; i++) {
-            tb->p[i][0] = mixf(tl[i][0] + tl[i][4] * sw, ts[i][0] + ts[i][4] * sw2, stand);
-            tb->p[i][1] = mixf(tl[i][1], ts[i][1] + bob, stand);
-            tb->p[i][2] = mixf(tl[i][2] + 0.7f * tl[i][4] * sz, ts[i][2], stand);
-            tb->p[i][3] = mixf(tl[i][3], ts[i][3], stand);
+            float sx = tl[i][0] + tl[i][4] * sw, sy = tl[i][1], sz2 = tl[i][2] + 0.7f * tl[i][4] * sz, sr = tl[i][3];
+            if (lie > 0.001f) {
+                sx = mixf(sx, lieP[i][0], lie); sy = mixf(sy, lieP[i][1], lie); sz2 = mixf(sz2, lieP[i][2], lie); sr = mixf(sr, lieP[i][3], lie);
+            }
+            tb->p[i][0] = mixf(sx, ts[i][0] + ts[i][4] * sw2, stand);
+            tb->p[i][1] = mixf(sy, ts[i][1] + bob, stand);
+            tb->p[i][2] = mixf(sz2, ts[i][2], stand);
+            tb->p[i][3] = mixf(sr, ts[i][3], stand) * 1.12f;                    /* (a bushy tail) */
         }
     }
     for (int k = 0; k < MCAT_TUBES; k++) {                               /* the segments and the box of every tube */
@@ -567,7 +586,7 @@ static bool fuzz_letter(const struct mcat *c, float bt, float inv_f, int frame, 
 {
     int ci[3] = { (int)floorf(q[0] / CELL), (int)floorf(q[1] / CELL), (int)floorf(q[2] / CELL) };
     uint32_t hc = h32((uint32_t)ci[0] * 73856093u ^ (uint32_t)ci[1] * 19349663u ^ (uint32_t)ci[2] * 83492791u ^ (uint32_t)frame * 0x9e3779b9u ^ 0x5bd1e995u);
-    if ((hc >> 5) % 8 >= 3)                                          /* about three cells in eight carry a letter */
+    if ((hc >> 5) % 8 >= 4)                                          /* about half of the cells carry a letter */
         return false;
     int epoch = (int)floorf(c->t * 1.1f + (float)((hc >> 12) & 255) / 256.0f * 4.0f);
     uint32_t hg = h32(hc + (uint32_t)epoch * 2246822519u);

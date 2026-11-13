@@ -157,7 +157,6 @@ struct lm_config {
     int scale_pct;              /* the screens' scale in percent, 100..400 (settings: scale, --scale; default 100): see output.h */
     int saver_style;            /* 0 = the 3D room, 1 = the classic flat rain: handed to mellagui-matrix as --flat (settings: saver-style; default room) */
     bool saver_cat;             /* the room has its cat (settings: saver-cat; default true); off: mellagui-matrix gets --no-cat */
-    char saver_cat_model[300];  /* what the cat is made of: auto (the .glb in ~/.local/share/mellagui/tom.glb when there is one), builtin, or a .glb file (settings: saver-cat-model; default auto) */
     int saver_lock_min;         /* the screensaver locks the screen this many minutes after it started (it keeps running), 0 = never (settings: saver-lock; default 1) */
     bool startup_sound;         /* play the start-up chime when MellaGUI has started (settings: startup-sound; default true), see chime.h */
     bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */
@@ -239,7 +238,6 @@ static inline void lm_config_defaults(struct lm_config *c)
         .saver_min = 10,
         .saver_lock_min = 1,
         .saver_cat = true,
-        .saver_cat_model = "auto",
         .magnifier_zoom = 200,
         .scale_pct = 100,
         .startup_sound = true,

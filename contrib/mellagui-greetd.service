@@ -1,0 +1,25 @@
+# The login screen: mellagui-greetd on the first text console (docs/GREETER.md).
+#   sudo cp contrib/mellagui-greetd.service /etc/systemd/system/
+#   sudo systemctl disable getty@tty1 lightdm gdm sddm   # whatever else is the display manager
+#   sudo systemctl enable mellagui-greetd.service
+[Unit]
+Description=MellaGUI login screen
+After=systemd-user-sessions.service plymouth-quit-wait.service systemd-logind.service getty@tty1.service
+Conflicts=getty@tty1.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mellagui-greetd --vt 1
+Restart=always
+RestartSec=2
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+[Install]
+Alias=display-manager.service
+WantedBy=graphical.target

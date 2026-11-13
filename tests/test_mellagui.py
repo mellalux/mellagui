@@ -11,6 +11,7 @@ import re
 import json
 import os
 import signal
+import socket
 import shutil
 import struct
 import subprocess
@@ -1760,6 +1761,131 @@ class TestGadget(Base):
         self.assertEqual(len(set(seen[k] for k in ('e', 'w', 's', 'se'))), 4, seen)
         self.assertNotIn(seen['inside'], [seen[k] for k in ('e', 'w', 's', 'se')])
 
+    def drag_card(self, name, x, y, dx, dy):
+        ctl.abs(x, y)
+        ctl.button(272, True)
+        time.sleep(0.3)
+        ctl.cmd('motion %d %d' % (dx, dy))
+        time.sleep(0.3)
+        ctl.button(272, False)
+        ctl.gadget_settle(name)
+
+    def test_cards_glued_under_a_card_come_along_when_it_is_dragged(self):
+        ctl.cmd('gadget mixer 1')
+        self.addCleanup(lambda: ctl.cmd('gadget mixer 0'))
+        cx, cy, cw, ch = self.rect()
+        mx, my, mw, mh = ctl.gadget_rect('mixer', 3.0)
+        # the mixer is pulled under the clipboard card: it snaps flush against it (that is the glue)
+        self.drag_card('mixer', mx + mw // 2, my + 10, cx - mx, cy + ch + 4 - my)
+        gx, gy, gw, gh = ctl.gadget_rect('mixer')
+        self.assertEqual((gx, gy), (cx, cy + ch))
+        # now the top card is dragged: the mixer follows
+        self.drag_card('clipboard', cx + cw // 2, cy + 10, -140, 70)
+        nc = self.rect()
+        nm = ctl.gadget_rect('mixer')
+        self.assertEqual((nc[0], nc[1]), (cx - 140, cy + 70))
+        self.assertEqual((nm[0], nm[1]), (gx - 140, gy + 70))                      # the same way
+        # dragging the lower one moves only that one
+        self.drag_card('mixer', nm[0] + nm[2] // 2, nm[1] + 10, 0, 60)
+        self.assertEqual(self.rect()[:2], (nc[0], nc[1]))
+        self.assertEqual(ctl.gadget_rect('mixer')[:2], (nm[0], nm[1] + 60))
+        # glued again (pulled back under it), the group is kept on the screen as a whole: pulled far up and left, both stop at the edges
+        far = ctl.gadget_rect('mixer')
+        self.drag_card('mixer', far[0] + far[2] // 2, far[1] + 10, 0, -58)
+        self.assertEqual(ctl.gadget_rect('mixer')[:2], (nm[0], nm[1]))
+        self.drag_card('clipboard', nc[0] + nc[2] // 2, nc[1] + 10, -3000, -3000)
+        top = self.rect()
+        below = ctl.gadget_rect('mixer')
+        self.assertEqual((top[0], top[1]), (0, 32))
+        self.assertEqual(below[:2], (0, 32 + nc[3]))                                # (still hanging under it)
+
+    def card_zoom(self, name='clipboard'):
+        for _ in range(40):
+            try:
+                first = open(ctl.gadget_file(name)).readline()
+                return int(first.split('zoom=')[1].split()[0])
+            except (OSError, IndexError):
+                time.sleep(0.05)
+        return None
+
+    def pill_point(self, which):
+        """The middle of the "- 100 % +" pill's minus / label / plus on the card (the pill is drawn in the card's own pixels: bigger at a zoom)."""
+        x, y, w, h = self.rect()
+        z = self.card_zoom() / 100.0
+        cx = {'minus': 8 + 11, 'label': 8 + 22 + 20, 'plus': 8 + 22 + 40 + 11}[which]
+        return x + round(cx * z), y + h - round(17 * z)
+
+    def title_point(self):
+        x, y, w, h = self.rect()
+        return x + w // 2, y + 10
+
+    def test_the_pill_on_the_card_makes_the_content_and_the_card_bigger_and_smaller(self):
+        x, y, w, h = self.rect()
+        self.addCleanup(lambda: (ctl.click(*self.title_point()), ctl.click(*self.title_point())))      # (a double click: back to 100 %)
+        self.assertEqual(self.card_zoom(), 100)
+        ctl.click(*self.pill_point('plus'))                              # +
+        for _ in range(40):
+            if self.card_zoom() == 125:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.card_zoom(), 125)
+        nx, ny, nw, nh = self.rect()
+        self.assertEqual((nw, nh), ((w * 125 + 50) // 100, (h * 125 + 50) // 100))     # the card grew with its content
+        first = open(ctl.gadget_file('clipboard')).readline()
+        self.assertIn('w=%d h=%d' % (round(nw / 1.25), round(nh / 1.25)), first)       # (the program still lays out in the old size)
+        ctl.click(*self.pill_point('minus'))                             # -
+        for _ in range(40):
+            if self.card_zoom() == 100:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.card_zoom(), 100)
+        self.assertEqual(self.rect()[2:], (w, h))
+        for want in (125, 150):                                          # (the pill moves with the card: wait for each step)
+            ctl.click(*self.pill_point('plus'))
+            for _ in range(40):
+                if self.card_zoom() == want and self.rect()[2] == (w * want + 50) // 100:
+                    break
+                time.sleep(0.05)
+        self.assertEqual(self.card_zoom(), 150)
+        ctl.click(*self.pill_point('label'))                             # a click on the percentage: normal size
+        for _ in range(40):
+            if self.card_zoom() == 100:
+                break
+            time.sleep(0.05)
+        self.assertEqual((self.card_zoom(), self.rect()[2:]), (100, (w, h)))
+
+    def test_the_zoom_is_kept_and_a_double_click_on_the_title_puts_it_back(self):
+        x, y, w, h = self.rect()
+        ctl.click(*self.pill_point('plus'))
+        for _ in range(40):
+            if self.card_zoom() == 125:
+                break
+            time.sleep(0.05)
+        for _ in range(40):                                              # (the card has grown by now: the pill is where it is)
+            if self.rect()[2] == (w * 125 + 50) // 100:
+                break
+            time.sleep(0.05)
+        ctl.click(*self.pill_point('plus'))                              # 150 %
+        for _ in range(40):
+            if self.card_zoom() == 150:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.card_zoom(), 150)
+        ctl.cmd('gadget 0')
+        self.assertTrue(self.wait_hidden())
+        ctl.cmd('gadget 1')                                              # a new program: it starts at the zoom it was left at
+        rect = self.rect()
+        self.assertEqual(rect[2:], (w * 3 // 2, h * 3 // 2))
+        self.assertEqual(self.card_zoom(), 150)
+        ctl.click(*self.title_point())
+        ctl.click(*self.title_point())                                   # the title: normal size, normal content
+        for _ in range(40):
+            if self.rect()[2:] == (w, h) and self.card_zoom() == 100:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.rect()[2:], (w, h))
+        self.assertEqual(self.card_zoom(), 100)
+
     def test_resize_has_limits(self):
         x, y, w, h = self.rect()
         self.drag(x + w - 2, y + h - 2, -3000, -3000)
@@ -2033,6 +2159,17 @@ def wait_for_window(app_id, timeout=5.0):
     end = time.time() + timeout
     while time.time() < end:
         for w in ctl.windows()['windows']:
+            if w['app_id'] == app_id:
+                return w
+        time.sleep(0.05)
+    return None
+
+
+def wait_for_window_in(c, app_id, timeout=5.0):
+    """Like wait_for_window, in the compositor behind the control socket `c`."""
+    end = time.time() + timeout
+    while time.time() < end:
+        for w in c.windows()['windows']:
             if w['app_id'] == app_id:
                 return w
         time.sleep(0.05)
@@ -2347,6 +2484,276 @@ class TestClients(Base):
     CTRL, SHIFT = 29, 42
     K_S, K_Q, K_Z, K_A, K_C, K_V, K_X, K_Y, K_F = 31, 16, 44, 30, 46, 47, 45, 21, 33
     K_HOME, K_END, K_BS, K_LEFT, K_UP, K_DOWN = 102, 107, 14, 105, 103, 108
+
+    MD_SAMPLE = (b'# Title\n\nSee [the site](https://example.org/a) and [notes](other.md).\n\n- one\n- two\n\n' +
+                 b''.join(b'Paragraph number %d with some words to fill the page.\n\n' % i for i in range(40)))
+
+    def md_dump(self, path, wait=3.0):
+        """The preview's state file of the editor: (header dict, [text lines]) once it says `ok` (or the mode line)."""
+        end = time.time() + wait
+        while time.time() < end:
+            try:
+                lines = open(path).read().splitlines()
+            except OSError:
+                lines = []
+            if lines and lines[-1].startswith('ok'):
+                head = dict(kv.split('=') for kv in lines[0].split() if '=' in kv)
+                return head, lines[1:-1], lines[-1]
+            time.sleep(0.05)
+        self.fail('the editor wrote no state')
+
+    def test_edit_shows_a_markdown_file_as_a_page_and_ctrl_m_goes_to_the_text(self):
+        dump = os.path.join(tmp, 'md1.dump')
+        p, path = self.edit_start(self.MD_SAMPLE, name='doc.md', env={'MELLAGUI_EDIT_DUMP': dump})
+        head, items, last = self.md_dump(dump)
+        self.assertEqual(head['preview'], '1')
+        self.assertIn('headings=1', last)
+        self.assertTrue(any(l.startswith('text') and l.endswith('"Title"') and 'scale=2' in l for l in items), items[:4])   # the heading is big
+        self.assertEqual(self.edit_window()['title'], 'doc.md - Preview')
+        ctl.abs(self.edit_window()['x'] + 300, self.edit_window()['y'] + 200)
+        ctl.tap(self.LETTERS['x'])                                    # typing does nothing on a page
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(path), self.MD_SAMPLE)
+        self.chord(self.CTRL, 50)                                     # Ctrl+M: the text
+        time.sleep(0.3)
+        self.assertEqual(self.md_dump(dump)[0]['preview'], '0')
+        self.assertEqual(self.edit_window()['title'], 'doc.md - Editor')
+        ctl.tap(self.LETTERS['x'])
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.3)
+        self.assertNotEqual(self.read_file(path), self.MD_SAMPLE)       # (now it types)
+        self.chord(self.CTRL, 50)
+        self.assertEqual(self.md_dump(dump)[0]['preview'], '1')
+
+    def test_edit_markdown_page_scrolls_and_a_link_click_opens_the_address(self):
+        dump = os.path.join(tmp, 'md2.dump')
+        log = os.path.join(tmp, 'md2.opened')
+        fake = os.path.join(tmp, 'md2-xdg-open')
+        with open(fake, 'w') as f:
+            f.write('#!/bin/sh\necho "$1" >> %s\n' % log)
+        os.chmod(fake, 0o755)
+        if os.path.exists(log):
+            os.unlink(log)
+        p, path = self.edit_start(self.MD_SAMPLE, name='doc.md', env={'MELLAGUI_EDIT_DUMP': dump, 'MELLAGUI_XDG_OPEN': fake})
+        head, items, last = self.md_dump(dump)
+        win = self.edit_window()
+        link = [l for l in items if 'link=https://example.org/a' in l][0].split()          # text x y w fl scale link "..."
+        lx, ly = int(link[1]), int(link[2])
+        ctl.click(win['x'] + int(head['colx']) + lx + 3, win['y'] + int(head['top']) + ly - int(head['scroll']) + 6)
+        for _ in range(40):
+            if os.path.exists(log):
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(log).read().strip(), 'https://example.org/a')
+        ctl.tap(109)                                                  # Page Down
+        time.sleep(0.3)
+        head2 = self.md_dump(dump)[0]
+        self.assertGreater(int(head2['scroll']), 100)
+        ctl.tap(self.K_END)
+        time.sleep(0.3)
+        end = int(self.md_dump(dump)[0]['scroll'])
+        self.assertGreater(end, int(head2['scroll']))
+        ctl.tap(self.K_HOME)
+        time.sleep(0.3)
+        self.assertEqual(int(self.md_dump(dump)[0]['scroll']), 0)
+
+    def test_edit_a_text_file_has_no_page(self):
+        dump = os.path.join(tmp, 'md3.dump')
+        p, path = self.edit_start(b'# not markdown\n', name='doc.txt', env={'MELLAGUI_EDIT_DUMP': dump})
+        self.assertEqual(self.md_dump(dump)[0]['preview'], '0')
+        self.chord(self.CTRL, 50)                                     # Ctrl+M does nothing here
+        time.sleep(0.2)
+        self.assertEqual(self.edit_window()['title'], 'doc.txt - Editor')
+
+    def files_dump(self, path, wait=4.0, want=None):
+        """The preview pane's state file of mellagui-files: (header dict, extra lines dict by first word) once it says ok."""
+        end = time.time() + wait
+        out = ({}, {})
+        while time.time() < end:
+            try:
+                lines = open(path).read().splitlines()
+            except OSError:
+                lines = []
+            if lines and lines[-1] == 'ok':
+                head = dict(kv.split('=', 1) for kv in lines[0].split(' ') if '=' in kv)
+                extra = {}
+                for l in lines[1:-1]:
+                    w = l.split()
+                    if w[0] == 'rect':
+                        extra[w[1]] = tuple(int(v) for v in w[2:6])
+                    else:
+                        extra[w[0]] = dict(kv.split('=', 1) for kv in w[1:] if '=' in kv)
+                out = (head, extra)
+                if want is None or want(out):
+                    return out
+            time.sleep(0.05)
+        return out
+
+    def files_start_preview(self, d, env):
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        p = subprocess.Popen([exe, d], env=dict(os.environ, XDG_DATA_HOME=os.path.join(d, '.xdg'), XDG_CONFIG_HOME=os.path.join(d, '.cfg'), **env),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.files')
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        ctl.abs(win['x'] + 30, win['y'] + 200)
+        ctl.tap(61)                                                       # F3: the other pane previews the file under the cursor
+        return p, win
+
+    def test_files_previews_markdown_as_a_page(self):
+        d = tempfile.mkdtemp(prefix='files-md-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.md'), 'w') as f:
+            f.write('# Title\n\nSee [the site](https://example.org).\n\n' + ''.join('Paragraph %d with some words to fill the page.\n\n' % i for i in range(60)))
+        with open(os.path.join(d, 'b.txt'), 'w') as f:
+            f.write('# not a page\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'markdown')
+        self.assertEqual(head['kind'], 'markdown')
+        self.assertEqual(extra['md']['headings'], '1')
+        self.assertGreater(int(extra['md']['height']), int(head['body']))
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        for _ in range(4):
+            ctl.key(self.SHIFT, True)
+            ctl.tap(self.K_DOWN)                                         # Shift+Down scrolls the preview
+            ctl.key(self.SHIFT, False)
+        head, extra = self.files_dump(dump, want=lambda o: int(o[0].get('top', 0)) > 0)
+        self.assertGreater(int(head['top']), 0)
+        ctl.tap(self.K_DOWN)                                              # the cursor on b.txt: text, not a page
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+
+    def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
+        d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.txt'), 'w') as f:
+            f.write('hello\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        head, _ = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        split0 = int(head['split'])
+        self.assertEqual(split0, win['w'] // 2)                                       # in the middle at first
+        ctl.abs(win['x'] + split0, win['y'] + 200)
+        ctl.button(272, True)
+        time.sleep(0.2)
+        ctl.cmd('motion -150 0')
+        time.sleep(0.2)
+        ctl.button(272, False)
+        head, _ = self.files_dump(dump, want=lambda o: int(o[0].get('split', 0)) != split0)
+        self.assertAlmostEqual(int(head['split']), split0 - 150, delta=3)
+        conf = os.path.join(d, '.cfg', 'mellagui', 'files.conf')
+        for _ in range(40):
+            if os.path.exists(conf):
+                break
+            time.sleep(0.05)
+        self.assertIn('split=', open(conf).read())
+        ctl.abs(win['x'] + int(head['split']), win['y'] + 200)                       # far to the left: a pane keeps at least 160 px
+        ctl.button(272, True)
+        time.sleep(0.2)
+        ctl.cmd('motion -900 0')
+        time.sleep(0.2)
+        ctl.button(272, False)
+        head2, _ = self.files_dump(dump, want=lambda o: int(o[0].get('split', 0)) <= 160)
+        self.assertEqual(int(head2['split']), 160)
+        x = win['x'] + 160
+        ctl.click(x, win['y'] + 200)                                                 # a double click on the divider: the middle again
+        ctl.click(x, win['y'] + 200)
+        head3, _ = self.files_dump(dump, want=lambda o: int(o[0].get('split', 0)) == win['w'] // 2)
+        self.assertEqual(int(head3['split']), win['w'] // 2)
+
+    def test_files_preview_of_a_long_text_has_a_scroll_bar_over_the_whole_file(self):
+        d = tempfile.mkdtemp(prefix='files-sb-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'big.txt'), 'w') as f:
+            f.write(''.join('line %d of a long text file\n' % i for i in range(5000)))               # more than the old 3000 lines
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text' and 'scroll' in o[1])
+        total, view = int(extra['scroll']['total']), int(extra['scroll']['view'])
+        self.assertEqual(total, 5000)
+        self.assertGreater(total, view)
+        tx, ty, tw, th = extra['pvthumb']
+        ctl.abs(win['x'] + tx + tw // 2, win['y'] + ty + th // 2)
+        ctl.button(272, True)
+        time.sleep(0.2)
+        ctl.cmd('motion 0 2000')                                                      # the thumb to the end
+        time.sleep(0.2)
+        ctl.button(272, False)
+        head, extra = self.files_dump(dump, want=lambda o: int(o[1].get('scroll', {}).get('pos', 0)) == total - view)
+        self.assertEqual(int(extra['scroll']['pos']), total - view)                   # the last line is the last row
+        tx, ty, tw, th = extra['pvthumb']
+        ctl.click(win['x'] + tx + tw // 2, win['y'] + ty - 10)                        # above the thumb: a page back
+        head, extra = self.files_dump(dump, want=lambda o: int(o[1].get('scroll', {}).get('pos', 0)) < total - view)
+        self.assertEqual(int(extra['scroll']['pos']), total - view - (view - 1))
+
+    def test_files_markdown_preview_has_a_scroll_bar_too(self):
+        d = tempfile.mkdtemp(prefix='files-mdsb-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.md'), 'w') as f:
+            f.write('# Title\n\n' + ''.join('Paragraph %d with some words to fill the page.\n\n' % i for i in range(80)))
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'markdown' and 'scroll' in o[1])
+        total, view = int(extra['scroll']['total']), int(extra['scroll']['view'])
+        self.assertGreater(total, view)
+        tx, ty, tw, th = extra['pvthumb']
+        ctl.abs(win['x'] + tx + tw // 2, win['y'] + ty + th // 2)
+        ctl.button(272, True)
+        time.sleep(0.2)
+        ctl.cmd('motion 0 3000')
+        time.sleep(0.2)
+        ctl.button(272, False)
+        head, extra = self.files_dump(dump, want=lambda o: int(o[1].get('scroll', {}).get('pos', 0)) > 0)
+        self.assertEqual(int(extra['scroll']['pos']), total - view)                   # the end of the page is reachable
+
+    def test_files_previews_a_sound_file_with_play_pause_and_a_bar(self):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        d = tempfile.mkdtemp(prefix='files-au-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=8', '-metadata', 'title=Test Tone',
+                        '-metadata', 'artist=Sine Wave', '-c:a', 'libmp3lame', os.path.join(d, 'a.mp3')], check=True, timeout=60)
+        with open(os.path.join(d, 'b.txt'), 'w') as f:
+            f.write('after\n')
+        got = os.path.join(d, 'pcm.raw')
+        player = os.path.join(d, 'fakeplayer')
+        with open(player, 'w') as f:
+            f.write('#!/usr/bin/env python3\nimport sys, time\nout = open("%s", "wb")\nwhile True:\n    b = sys.stdin.buffer.read(19200)\n    if not b:\n        break\n    out.write(b)\n    out.flush()\n    time.sleep(0.1)\n' % got)
+        os.chmod(player, 0o755)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump, 'MELLAGUI_AUDIO_PLAYER': player})
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'audio')
+        self.assertEqual(head['kind'], 'audio')
+        self.assertEqual((extra['audio']['title'], extra['audio']['artist'], extra['audio']['playing']), ('Test_Tone', 'Sine_Wave', '0'))
+        self.assertAlmostEqual(int(extra['audio']['len']), 8000, delta=200)
+        px, py, pw, ph = extra['play']
+        ctl.click(win['x'] + px + pw // 2, win['y'] + py + ph // 2)       # Play
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('audio', {}).get('playing') == '1')
+        self.assertEqual(extra['audio']['playing'], '1')
+        time.sleep(0.8)
+        self.assertTrue(os.path.exists(got) and os.path.getsize(got) > 10000, 'no sound was sent to the player')
+        self.assertEqual(len(TestViewer.procs_of(self, p.pid, 'fakeplayer')), 1)
+        bx, by, bw, bh = extra['bar']
+        ctl.click(win['x'] + bx + bw * 3 // 4, win['y'] + by + bh // 2)   # the bar: three quarters in
+        head, extra = self.files_dump(dump, want=lambda o: int(o[1].get('audio', {}).get('pos', 0)) > 5000)
+        self.assertGreater(int(extra['audio']['pos']), 5500)
+        self.chord(self.CTRL, 25)                                         # Ctrl+P: pause
+        time.sleep(0.4)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('audio', {}).get('playing') == '0')
+        self.assertEqual(extra['audio']['playing'], '0')
+        self.assertEqual(TestViewer.procs_of(self, p.pid, 'fakeplayer'), [])
+        self.chord(self.CTRL, 25)                                         # and on again
+        time.sleep(0.6)
+        self.assertEqual(len(TestViewer.procs_of(self, p.pid, 'fakeplayer')), 1)
+        ctl.tap(self.K_DOWN)                                              # the cursor moves on: the sound ends
+        time.sleep(0.6)
+        self.assertEqual(TestViewer.procs_of(self, p.pid, 'fakeplayer'), [])
 
     def test_edit_types_and_saves(self):
         p, path = self.edit_start(b'hello\nworld\n')
@@ -5885,6 +6292,81 @@ class TestSysinfo(Base):
             time.sleep(0.05)
         return c
 
+    PCI_IDS = ('# a few lines of pci.ids\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t73df  Navi 22 [Radeon RX 6700/6700 XT/6800M]\n'
+               '8086  Intel Corporation\n\t0166  3rd Gen Core processor Graphics Controller\n\t0167  something else\n'
+               '10de  NVIDIA Corporation\n\t1e87  TU104 [GeForce RTX 2080 Rev. A]\n')
+
+    def gpu_tree(self, tag, vendor, device, driver):
+        root = self.tree(tag)
+        self.write(root, 'usr/share/hwdata/pci.ids', self.PCI_IDS)
+        card = 'sys/class/drm/card0'
+        self.write(root, card + '/device/vendor', vendor + '\n')
+        self.write(root, card + '/device/device', device + '\n')
+        self.write(root, card + '/device/boot_vga', '1\n')
+        drv = os.path.join(root, card, 'device', 'driver')
+        os.makedirs(os.path.join(root, 'sys/bus/pci/drivers', driver), exist_ok=True)
+        os.symlink('../../../../bus/pci/drivers/' + driver, drv)
+        return root, card
+
+    @staticmethod
+    def gpu_of(c):
+        line = [l for l in c.cmd('sysdev') if l.startswith('gpu ')][0][4:]
+        present, rest = line.split(' ', 1)
+        d = dict(kv.split('=', 1) for kv in rest.split('|'))
+        d['present'] = present.split('=')[1]
+        return d
+
+    def test_an_intel_chip_shows_its_name_frequency_and_how_busy_it_is(self):
+        root, card = self.gpu_tree('gpu-intel', '0x8086', '0x0166', 'i915')
+        self.write(root, card + '/gt_act_freq_mhz', '650\n')
+        self.write(root, card + '/gt_max_freq_mhz', '1100\n')
+        self.write(root, card + '/gt_min_freq_mhz', '350\n')
+        self.write(root, card + '/power/rc6_residency_ms', '1000\n')
+        c = self.start('mellagui-gpu1', root)
+        time.sleep(1.3)                                                              # the counter does not move: the clock's place between its ends says how busy
+        g = self.gpu_of(c)
+        self.assertEqual((g['busy'], g['est']), ('40', '1'))                         # (650 - 350) / (1100 - 350)
+        self.assertEqual((g['present'], g['name'], g['driver'], g['freq'], g['max'], g['vram_total']), ('1', 'Intel 3rd Gen Core processor Graphics Controller', 'i915', '650', '1100', '0'))
+        for i in range(8):                                                           # the chip slept for half of each second: about half busy
+            self.write(root, card + '/power/rc6_residency_ms', str(1000 + 500 * (i + 1)) + '\n')
+            time.sleep(0.5)
+            g = self.gpu_of(c)
+            if g['est'] == '1' and int(g['busy']) >= 0:
+                break
+        self.assertEqual(g['est'], '1')
+        self.assertTrue(0 <= int(g['busy']) <= 100, g)
+
+    def test_an_amd_chip_shows_busy_memory_clock_and_temperature(self):
+        root, card = self.gpu_tree('gpu-amd', '0x1002', '0x73df', 'amdgpu')
+        self.write(root, card + '/device/gpu_busy_percent', '42\n')
+        self.write(root, card + '/device/mem_info_vram_used', str(2 * 1024 ** 3) + '\n')
+        self.write(root, card + '/device/mem_info_vram_total', str(12 * 1024 ** 3) + '\n')
+        self.write(root, card + '/device/pp_dpm_sclk', '0: 500Mhz\n1: 1500Mhz *\n2: 2400Mhz\n')
+        self.write(root, card + '/device/hwmon/hwmon3/temp1_input', '57000\n')
+        c = self.start('mellagui-gpu2', root)
+        g = self.gpu_of(c)
+        self.assertEqual((g['name'], g['busy'], g['est'], g['freq'], g['max'], g['temp'], g['vram'], g['vram_total']),
+                         ('AMD Radeon RX 6700/6700 XT/6800M', '42', '0', '1500', '2400', '57', str(2 * 1024 ** 2), str(12 * 1024 ** 2)))
+
+    def test_an_nvidia_chip_is_asked_through_nvidia_smi(self):
+        root, card = self.gpu_tree('gpu-nv', '0x10de', '0x1e87', 'nvidia')
+        smi = os.path.join(root, 'fake-smi')
+        self.write(root, 'fake-smi', '#!/bin/sh\necho "NVIDIA GeForce RTX 2080, 17, 1024, 8192, 61, 1350, 1935"\n')
+        os.chmod(smi, 0o755)
+        p, c, stop = self.private_compositor('mellagui-gpu3', '--sysinfo', env={'MELLAGUI_SYS_ROOT': root, 'MELLAGUI_NVIDIA_SMI': smi})
+        g = {}
+        for _ in range(60):
+            g = self.gpu_of(c)
+            if g.get('busy') == '17':
+                break
+            time.sleep(0.1)
+        self.assertEqual((g['name'], g['busy'], g['temp'], g['freq'], g['max'], g['vram'], g['vram_total']),
+                         ('NVIDIA GeForce RTX 2080', '17', '61', '1350', '1935', str(1024 * 1024), str(8192 * 1024)))
+
+    def test_without_a_card_there_is_no_gpu(self):
+        c = self.start('mellagui-gpu4', self.tree('gpu-none'))
+        self.assertEqual(self.gpu_of(c)['present'], '0')
+
     def test_values_come_from_proc_and_sys(self):
         root = self.tree('values')
         c = self.start('mellagui-sys1', root)
@@ -7791,6 +8273,280 @@ class TestStatus(Base):
         c = self.start('i', state=st)
         its = self.items(c, 2)
         self.assertIn('Ethernet', [i['text'] for i in its])
+
+
+class TestGreeter(Base):
+    """The login screen: mellagui-greetd (the daemon, tested here with fake users instead of PAM) and mellagui-greeter (the screen), docs/GREETER.md."""
+
+    def setUp(self):
+        super().setUp()
+        for exe in ('mellagui-greetd', 'mellagui-greeter'):
+            if not os.path.exists(os.path.join(ROOT, 'build', exe)):
+                self.skipTest('%s not built' % exe)
+        self.d = tempfile.mkdtemp(prefix='greet-', dir=tmp)
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.users = os.path.join(self.d, 'users')
+        with open(self.users, 'w') as f:
+            f.write('alice secret Alice Example\nbob * Bob\n')
+        self.sock = os.path.join(self.d, 'g.sock')
+        self.session_out = os.path.join(self.d, 'session.out')
+        self.power_log = os.path.join(self.d, 'power.log')
+        power = os.path.join(self.d, 'power.sh')
+        with open(power, 'w') as f:
+            f.write('#!/bin/sh\necho "$1" >> %s\n' % self.power_log)
+        os.chmod(power, 0o755)
+        self.power = power
+
+    def daemon(self, greeter_cmd='none', extra=(), session_cmd=None):
+        env = dict(os.environ, MELLAGUI_GREETD_FAKE=self.users, MELLAGUI_GREETD_POWER=self.power)
+        sess = session_cmd or 'echo "$USER-$XDG_SESSION_CLASS" > %s' % self.session_out
+        p = subprocess.Popen([os.path.join(ROOT, 'build', 'mellagui-greetd'), '--greeter-cmd', greeter_cmd, '--socket', self.sock,
+                              '--state-dir', os.path.join(self.d, 'state'), '--session-cmd', sess, '--once'] + list(extra),
+                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        for _ in range(100):
+            if os.path.exists(self.sock):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(self.sock), 'the daemon did not listen')
+        return p
+
+    def client(self):
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(5)
+        s.connect(self.sock)
+        self.addCleanup(s.close)
+        f = s.makefile('rw', buffering=1)
+
+        def ask(line, until):
+            f.write(line + '\n')
+            f.flush()
+            out = []
+            while True:
+                l = f.readline().rstrip('\n')
+                out.append(l)
+                if not l or until(l):
+                    return out
+        return ask
+
+    def test_the_daemon_lists_users_and_sessions_and_logs_in(self):
+        sdir = os.path.join(self.d, 'sessions')
+        os.makedirs(sdir)
+        with open(os.path.join(sdir, 'other.desktop'), 'w') as f:
+            f.write('[Desktop Entry]\nName=Another\nExec=echo other\n')
+        with open(os.path.join(sdir, 'hidden.desktop'), 'w') as f:
+            f.write('[Desktop Entry]\nName=Hidden\nExec=echo h\nNoDisplay=true\n')
+        p = self.daemon(extra=['--sessions-dir', sdir])
+        ask = self.client()
+        u = ask('users', lambda l: l == 'end')
+        self.assertEqual(u, ['user alice\tAlice Example\t1000', 'user bob\tBob\t1001', 'end'])
+        ss = ask('sessions', lambda l: l == 'end')
+        self.assertEqual([l.split('\t')[0] for l in ss], ['session mellagui', 'session other', 'end'])
+        self.assertEqual(ask('last', lambda l: l.startswith('last')), ['last -'])
+        self.assertEqual(ask('login alice', lambda l: l.startswith('prompt')), ['prompt secret Password: '])
+        self.assertEqual(ask('answer nope', lambda l: l.startswith(('ok', 'fail'))), ['fail Login incorrect'])
+        self.assertEqual(ask('login alice', lambda l: l.startswith('prompt')), ['prompt secret Password: '])
+        self.assertEqual(ask('answer secret', lambda l: l.startswith(('ok', 'fail'))), ['ok'])
+        self.assertEqual(ask('start nosuch', lambda l: l.startswith(('started', 'fail'))), ['fail No such session'])
+        self.assertEqual(ask('login bob', lambda l: l.startswith('prompt')), ['prompt secret Password: '])      # (bob has no password)
+        self.assertEqual(ask('answer anything', lambda l: l.startswith(('ok', 'fail'))), ['ok'])
+        self.assertEqual(ask('start mellagui', lambda l: l.startswith(('started', 'fail'))), ['started'])
+        self.assertEqual(p.wait(timeout=10), 0)                                    # --once: the session ended, so does the daemon
+        self.assertIn('-user', self.read_file_text(self.session_out))
+        self.assertEqual(self.read_file_text(os.path.join(self.d, 'state', 'last')).strip(), 'bob\tmellagui')
+
+    def read_file_text(self, path):
+        with open(path) as f:
+            return f.read()
+
+    def test_the_daemon_refuses_what_it_does_not_know(self):
+        self.daemon()
+        ask = self.client()
+        self.assertEqual(ask('login nobody', lambda l: l.startswith(('prompt', 'fail'))), ['prompt secret Password: '])   # (it asks anyway: no hint who exists)
+        self.assertEqual(ask('answer x', lambda l: l.startswith(('ok', 'fail'))), ['fail Login incorrect'])
+        self.assertEqual(ask('bogus', lambda l: True), ['err unknown request'])
+        self.assertEqual(ask('power explode', lambda l: True), ['err unknown action'])
+        self.assertEqual(ask('power suspend', lambda l: True), ['ok'])
+        for _ in range(40):
+            if os.path.exists(self.power_log):
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.read_file_text(self.power_log).strip(), 'suspend')
+
+    def test_the_login_screen_is_stopped_before_the_session_starts_and_comes_back(self):
+        pidfile = os.path.join(self.d, 'greeter.pid')
+        cmd = "sh -c 'echo $$ >> %s; exec sleep 60'" % pidfile
+        self.daemon(greeter_cmd=cmd, extra=[])
+        for _ in range(100):
+            if os.path.exists(pidfile):
+                break
+            time.sleep(0.05)
+        first = int(self.read_file_text(pidfile).split()[0])
+        ask = self.client()
+        ask('login alice', lambda l: l.startswith('prompt'))
+        ask('answer secret', lambda l: l.startswith(('ok', 'fail')))
+        self.assertEqual(ask('start mellagui', lambda l: l.startswith(('started', 'fail'))), ['started'])
+        for _ in range(60):
+            try:
+                os.kill(first, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        with self.assertRaises(OSError):
+            os.kill(first, 0)                                                      # the greeter is gone ...
+        for _ in range(60):
+            if os.path.exists(self.session_out):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(self.session_out))                          # ... and the session ran
+
+    def greeter_ui(self, env_extra=None, args=()):
+        """A kiosk compositor, the greeter in it and the daemon behind it; returns the control socket, the dump file and the compositor."""
+        dump = os.path.join(self.d, 'greeter.dump')
+        sock_name = 'gr' + os.path.basename(self.d)[-6:]
+        p, c, stop = self.private_compositor(sock_name, '--kiosk')
+        env = dict(os.environ, WAYLAND_DISPLAY=sock_name, GREETD_SOCK=self.sock, MELLAGUI_GREETER_DUMP=dump, MELLAGUI_FONT='bitmap',
+                   XDG_RUNTIME_DIR=tmp, **(env_extra or {}))
+        g = subprocess.Popen([os.path.join(ROOT, 'build', 'mellagui-greeter')] + list(args), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (g.poll() is None) and (g.kill(), g.wait()))
+        self.assertIsNotNone(wait_for_window_in(c, 'mellagui.greeter'), 'the login screen did not appear')
+        return c, dump
+
+    def state(self, dump, wait=3.0, want=None):
+        end = time.time() + wait
+        st = {}
+        while time.time() < end:
+            try:
+                lines = self.read_file_text(dump).splitlines()
+            except OSError:
+                lines = []
+            if lines and lines[-1] == 'ok':
+                head = dict(kv.split('=', 1) for kv in lines[0].split(' ') if '=' in kv)
+                rects = {}
+                for l in lines[1:]:
+                    if l.startswith('msg') or l.startswith('prompt'):
+                        k, _, v = l.partition(' ')
+                        head[k] = v
+                        continue
+                    w = l.split()
+                    if w[0] == 'rect':
+                        rects[w[1]] = tuple(int(v) for v in w[2:6])
+                    elif w[0] == 'tile':
+                        rects['tile:' + w[2]] = tuple(int(v) for v in w[3:7])
+                st = dict(head, rects=rects)
+                if want is None or want(st):
+                    return st
+            time.sleep(0.05)
+        return st
+
+    def type_text(self, c, text):
+        for ch in text:
+            code = TestClients.LETTERS[ch] if ch in TestClients.LETTERS else {'1': 2, '2': 3, '3': 4}[ch]
+            c.tap(code)
+            time.sleep(0.02)
+
+    def test_the_login_screen_logs_in_with_the_keyboard(self):
+        p = self.daemon()
+        c, dump = self.greeter_ui()
+        st = self.state(dump, want=lambda s: s.get('phase') == 'idle')
+        self.assertEqual((st['phase'], st['nusers'], st['user']), ('idle', '2', 'alice'))
+        self.type_text(c, 'wrong')
+        c.tap(28)                                                                   # Enter
+        st = self.state(dump, want=lambda s: s.get('err') == '1')
+        self.assertEqual((st['phase'], st['msg']), ('idle', 'Login incorrect'))
+        self.assertEqual(st['pw'], '0')                                              # (the password is forgotten)
+        self.type_text(c, 'secret')
+        c.tap(28)
+        st = self.state(dump, want=lambda s: s.get('phase') in ('done', 'starting'))
+        self.assertIn(st['phase'], ('done', 'starting'))
+        self.assertEqual(p.wait(timeout=10), 0)
+        self.assertIn('-user', self.read_file_text(self.session_out))              # (the session class of a user's session)
+
+    def test_the_login_screen_chooses_users_with_the_mouse_and_remembers_the_last_one(self):
+        p = self.daemon()
+        c, dump = self.greeter_ui()
+        st = self.state(dump, want=lambda s: s.get('phase') == 'idle')
+        x, y, w, h = st['rects']['tile:bob']
+        c.click(x + w // 2, y + h // 2)
+        st = self.state(dump, want=lambda s: s.get('user') == 'bob')
+        self.assertEqual(st['user'], 'bob')
+        x, y, w, h = st['rects']['login']
+        c.click(x + w // 2, y + h // 2)                                             # bob has no password: any answer (here none) passes
+        self.assertEqual(p.wait(timeout=10), 0)
+        self.assertEqual(self.read_file_text(os.path.join(self.d, 'state', 'last')).strip(), 'bob\tmellagui')
+
+    def test_the_login_screen_other_user_and_power_buttons(self):
+        self.daemon(extra=[])
+        c, dump = self.greeter_ui()
+        st = self.state(dump, want=lambda s: s.get('phase') == 'idle')
+        x, y, w, h = st['rects']['tile:(other)']
+        c.click(x + w // 2, y + h // 2)
+        st = self.state(dump, want=lambda s: 'name' in s['rects'])
+        self.assertEqual(st['focus'], 'name')
+        self.type_text(c, 'alice')
+        c.tap(15)                                                                    # Tab: to the password
+        self.type_text(c, 'secret')
+        st = self.state(dump, want=lambda s: s.get('pw') == '6')
+        self.assertEqual((st['name'], st['pw']), ('alice', '6'))
+        x, y, w, h = st['rects']['poweroff']                                          # two clicks: the first only asks "Sure?"
+        c.click(x + w // 2, y + h // 2)
+        st = self.state(dump, want=lambda s: s.get('armed') == '3')
+        self.assertEqual(st['armed'], '3')
+        self.assertFalse(os.path.exists(self.power_log))
+        c.click(x + w // 2, y + h // 2)
+        for _ in range(60):
+            if os.path.exists(self.power_log):
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.read_file_text(self.power_log).strip(), 'poweroff')
+
+    def test_a_kiosk_compositor_ignores_shortcuts_and_ends_with_its_program(self):
+        p, c, stop = self.private_compositor('kiosk1', '--kiosk')
+        c.key(KEY_LEFTMETA, True)
+        c.tap(17)                                                                    # Super+W: the overview, in a normal compositor
+        c.key(KEY_LEFTMETA, False)
+        self.assertIn('open=0', ' '.join(c.cmd('overview')))
+        sock = os.path.join(tmp, 'kiosk2.ctl')
+        q = subprocess.Popen([BIN, '--backend', 'headless', '--size', '800x500', '--socket', 'kiosk2', '--control', sock, '--kiosk',
+                              '--config', 'none', '--exec', 'sleep 0.5'], env=dict(os.environ, XDG_RUNTIME_DIR=tmp), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (q.poll() is None) and (q.kill(), q.wait()))
+        self.assertEqual(q.wait(timeout=10), 0)                                      # the program ended, so did the compositor
+
+    def test_the_demo_shows_a_welcome_card_and_the_way_back(self):
+        c, dump = self.greeter_ui(args=['--demo'])                                   # (no daemon: made-up users, the password is "demo")
+        st = self.state(dump, want=lambda s: s.get('phase') == 'idle')
+        self.assertEqual((st['phase'], st['nusers']), ('idle', '3'))
+        self.type_text(c, 'demo')
+        c.tap(28)
+        st = self.state(dump, want=lambda s: s.get('phase') == 'done')
+        self.assertEqual(st['phase'], 'done')
+        self.assertIn('splash demo_over=0', self.read_file_text(dump))              # the "Welcome" card with its ring is there ...
+        end = time.time() + 5
+        while time.time() < end and 'splash demo_over=1' not in self.read_file_text(dump):
+            time.sleep(0.1)
+        self.assertIn('splash demo_over=1', self.read_file_text(dump))              # ... and after a moment it says it was only the demo
+        st = self.state(dump)
+        x, y, w, h = st['rects']['back']
+        c.click(x + w // 2, y + h // 2)                                              # Back to the login screen
+        st = self.state(dump, want=lambda s: s.get('phase') == 'idle')
+        self.assertEqual(st['phase'], 'idle')
+        self.assertNotIn('splash', self.read_file_text(dump))
+
+    def test_a_login_that_went_through_shows_the_welcome_card_until_the_screen_is_closed(self):
+        p = self.daemon()
+        c, dump = self.greeter_ui()
+        self.state(dump, want=lambda s: s.get('phase') == 'idle')
+        self.type_text(c, 'secret')
+        c.tap(28)
+        end = time.time() + 5
+        while time.time() < end and 'splash' not in self.read_file_text(dump):
+            time.sleep(0.05)
+        self.assertIn('splash', self.read_file_text(dump))
+        self.assertEqual(p.wait(timeout=10), 0)
+
+    def test_the_demo_screen_and_selftest(self):
+        r = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-greeter'), '--selftest'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class TestFuzz(Base):
@@ -9723,6 +10479,72 @@ class TestViewer(Base):
         ff = self.procs_of(p.pid, 'ffmpeg')
         self.assertEqual(len(ff), 1, ff)
         self.assertIn('scale=', ff[0][2])
+
+    def make_audio(self, d, name='song.mp3', seconds=6, cover=False, tags=True):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        path = os.path.join(d, name)
+        args = [ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=%d' % seconds]
+        if cover:
+            png = os.path.join(d, 'cover-src.png')
+            subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=orange:s=200x200:d=1', '-frames:v', '1', png], check=True, timeout=30)
+            args += ['-i', png, '-map', '0', '-map', '1', '-disposition:v', 'attached_pic']
+        if tags:
+            args += ['-metadata', 'title=Test Tone', '-metadata', 'artist=Sine Wave', '-metadata', 'album=Frequencies']
+        codec = ['-c:a', 'flac'] + (['-c:v', 'png'] if cover else []) if name.endswith('.flac') else ['-c:a', 'libmp3lame'] + (['-c:v', 'copy'] if cover else [])
+        subprocess.run(args + codec + [path], check=True, timeout=60)
+        if cover:
+            os.unlink(os.path.join(d, 'cover-src.png'))
+        return path
+
+    def fake_player(self, d):
+        got = os.path.join(d, 'pcm.raw')
+        player = os.path.join(d, 'fakeplayer')
+        with open(player, 'w') as f:
+            f.write('#!/usr/bin/env python3\nimport sys, time\nout = open("%s", "wb")\nwhile True:\n    b = sys.stdin.buffer.read(19200)\n    if not b:\n        break\n    out.write(b)\n    out.flush()\n    time.sleep(0.1)\n' % got)
+        os.chmod(player, 0o755)
+        return player, got
+
+    def test_a_sound_file_plays_and_pauses_and_shows_its_picture(self):
+        d = self.video_dir()
+        self.make_audio(d, 'song.flac', cover=True)
+        player, got = self.fake_player(d)
+        p, win = self.start(d, os.path.join(d, 'song.flac'), env={'MELLAGUI_AUDIO_PLAYER': player})
+        self.assertTrue(self.wait_title('song.flac - Images'))
+        time.sleep(1.2)
+        self.assertTrue(os.path.exists(got) and os.path.getsize(got) > 10000, 'no sound was sent to the player')
+        w, ppm, data = self.window_pixels('aud1.ppm')
+        orange = sum(1 for i in range(0, len(data) - 2, 3) if data[i] > 235 and 150 < data[i + 1] < 185 and data[i + 2] < 30)
+        self.assertGreater(orange, 3000, 'the picture stored in the file is not shown')       # the orange cover
+        ctl.abs(900, 590)
+        self.assertEqual(len(self.procs_of(p.pid, 'fakeplayer')), 1)
+        ctl.tap(KEY_SPACE)                                                        # pause: silence at once
+        time.sleep(0.4)
+        self.assertEqual(self.procs_of(p.pid, 'fakeplayer'), [])
+        ctl.tap(KEY_SPACE)                                                        # on again
+        time.sleep(0.6)
+        self.assertEqual(len(self.procs_of(p.pid, 'fakeplayer')), 1)
+        ctl.tap(105)                                                              # Left: 5 s back (it restarts the sound where it is)
+        time.sleep(0.5)
+        self.assertEqual(len(self.procs_of(p.pid, 'fakeplayer')), 1)
+        p.kill()
+        p.wait()
+        time.sleep(0.4)
+        left = [pid for pid in os.listdir('/proc') if pid.isdigit() and b'fakeplayer' in open('/proc/%s/cmdline' % pid, 'rb').read()]
+        self.assertEqual(left, [], 'the player outlived the viewer')
+
+    def test_the_next_sound_file_starts_when_a_track_ends(self):
+        d = self.video_dir()
+        self.make_audio(d, 'a.mp3', seconds=2)
+        self.make_audio(d, 'b.mp3', seconds=4)
+        player, got = self.fake_player(d)
+        p, win = self.start(d, os.path.join(d, 'a.mp3'), env={'MELLAGUI_AUDIO_PLAYER': player})
+        self.assertTrue(self.wait_title('a.mp3 - Images'))
+        end = time.time() + 9
+        while time.time() < end and not self.wait_title('b.mp3 - Images'):
+            pass
+        self.assertTrue(self.wait_title('b.mp3 - Images'), 'the next track did not start')
 
     def test_a_video_with_sound_plays_it_pauses_it_and_mutes_it(self):
         d = self.video_dir()
@@ -16878,6 +17700,19 @@ class TestSmart(Base):
                                                  'fav\tplug2\tFar plug\t0\tswitch\tswitch_1\t1'])    # (a device that is gone is left out)
         self.assertEqual(self.cli('--fav', 'blind1')[0], 2)                             # a wrong call
 
+    def test_the_blind_shows_where_it_is_and_a_vacuum_gets_its_own_data(self):
+        blind = dict(self.DEVICES[1], status={'control': 'stop', 'percent_control': 0, 'percent_state': 100})      # (percent_control is what was asked for)
+        robot = json.loads(json.dumps(self.DEVICES[2]))
+        robot['functions'][1] = {'code': 'mode', 'type': 'Enum', 'values': '{"range":["standby","smart","chargego"]}'}
+        robot['status']['power_go'] = True
+        self.cloud('fav3', devices=[blind, robot])
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        for dev in ('blind1', 'robot1'):
+            self.assertEqual(self.cli('--fav', dev, 'on')[0], 0)
+        code, out = self.cli('--favourites')
+        self.assertEqual(out.split('\n')[:-1], ['favs\t2', 'fav\tblind1\tBlind\t1\tblind\tcontrol\t100',
+                                                 'fav\trobot1\tRobot\t1\tvacuum\tpower_go\t1\t87,mode,chargego'])
+
     def test_a_device_is_pinned_to_the_desktop_in_its_own_view(self):
         c = self.logged_in_window('pin1')
         fav = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-favourites.conf')
@@ -17571,6 +18406,35 @@ class TestSmartGadget(Base):
         self.assertIsNotNone(self.card(c))
         c.cmd('setting smart')
         self.assertEqual(c.last, 'ok 1')
+
+    def test_a_robot_vacuum_has_start_stop_and_dock_buttons(self):
+        devs = [{'id': 'vac1', 'name': 'Robot', 'online': True, 'kind': 'vacuum', 'code': 'power_go', 'value': 0, 'extra': '35,mode,chargego'},
+                {'id': 'vac2', 'name': 'Plain', 'online': True, 'kind': 'vacuum', 'code': 'power_go', 'value': 1, 'extra': '80,,'}]
+        c = self.start('mellagui-sg6', devices=devs)
+        c.cmd('smart 1')
+        _, _, items = self.items(c)
+        self.assertEqual([(i['name'], i['kind'], i['on'], i['battery'], i['dock']) for i in items],
+                         [('Robot', 'vacuum', '0', '35', 'mode'), ('Plain', 'vacuum', '1', '80', '-')])
+        x, y, w, h = self.card(c)
+        start = (x + w - 12 - 90 + 23, self.row_y(c, 0))
+        dock = (x + w - 12 - 40 + 20, self.row_y(c, 0))
+        c.click(*start)
+        self.assertEqual(self.logged(), ['vac1 power_go true'])
+        c.click(*dock)
+        for _ in range(40):
+            if len(self.logged()) == 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged()[1], 'vac1 mode chargego')
+        c.click(x + w - 12 - 40 + 20, self.row_y(c, 1))                  # no dock data point: no button, nothing is sent
+        time.sleep(0.4)
+        self.assertEqual(len(self.logged()), 2)
+        c.click(x + w - 12 - 90 + 23, self.row_y(c, 1))                  # the cleaning one: the button stops it
+        for _ in range(40):
+            if len(self.logged()) == 3:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged()[2], 'vac2 power_go false')
 
     def test_it_shows_what_the_program_says(self):
         c = self.start('mellagui-sg2')

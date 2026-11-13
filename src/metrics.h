@@ -43,7 +43,7 @@
     X("gadgets", "mixer-width", mixer_width, 250, 210, 640, "volume mixer gadget, starting width") \
     X("gadgets", "mixer-height", mixer_height, 196, 120, 560, "... starting height") \
     X("gadgets", "sysinfo-width", sys_width, 250, 210, 640, "system monitor gadget, starting width") \
-    X("gadgets", "sysinfo-height", sys_height, 300, 130, 560, "... starting height") \
+    X("gadgets", "sysinfo-height", sys_height, 320, 130, 560, "... starting height") \
     X("gadgets", "margin", gadget_margin, 12, 0, 100, "distance from the screen edge when docked") \
     X("gadgets", "snap", gadget_snap, 14, 0, 60, "a dragged gadget sticks to an edge within this many pixels") \
     X("notifications", "width", note_width, 320, 200, 800, "width of a notification card") \

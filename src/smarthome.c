@@ -84,6 +84,24 @@ static void parse(struct lm_smart *s, const char *text)
         int v = atoi(f[6]);
         it->on = it->kind == LM_SMART_SWITCH && v != 0;
         it->percent = it->kind == LM_SMART_BLIND ? v : -1;
+        if (!strcmp(f[4], "vacuum")) {
+            it->kind = LM_SMART_VACUUM;
+            it->on = v != 0;
+            it->battery = -1;
+            if (k >= 8) {                                           /* battery,dockcode,dockvalue */
+                char *c1 = strchr(f[7], ',');
+                if (c1) {
+                    *c1++ = 0;
+                    it->battery = atoi(f[7]);
+                    char *c2 = strchr(c1, ',');
+                    if (c2) {
+                        *c2++ = 0;
+                        snprintf(it->dock_code, sizeof(it->dock_code), "%s", c1);
+                        snprintf(it->dock_value, sizeof(it->dock_value), "%s", c2);
+                    }
+                }
+            }
+        }
     }
     free(copy);
     if (!header) {
@@ -177,15 +195,20 @@ const struct lm_smart_state *lm_smart_state(const struct lm_smart *s)
     return &s->st;
 }
 
-static void send_set(struct lm_smart *s, const struct lm_smart_item *it, const char *value)
+static void send_set_code(struct lm_smart *s, const struct lm_smart_item *it, const char *code, const char *value)
 {
     char prog[512];
     program(prog, sizeof(prog));
-    char *argv[] = { prog, (char *)"--set", (char *)it->id, (char *)it->code, (char *)value, NULL };
+    char *argv[] = { prog, (char *)"--set", (char *)it->id, (char *)code, (char *)value, NULL };
     lm_proc_run(s->loop, argv, 30000, NULL, NULL);                 /* fire and forget; the poll a few seconds later shows what happened */
     s->gen++;
     if (s->soon)
         lm_timer_arm_ms(s->soon, 4000, 0);
+}
+
+static void send_set(struct lm_smart *s, const struct lm_smart_item *it, const char *value)
+{
+    send_set_code(s, it, it->code, value);
 }
 
 void lm_smart_toggle(struct lm_smart *s, int index)
@@ -206,6 +229,22 @@ void lm_smart_blind(struct lm_smart *s, int index, int what)
     send_set(s, &s->st.item[index], words[what]);
 }
 
+void lm_smart_vacuum(struct lm_smart *s, int index, int what)
+{
+    if (!s || index < 0 || index >= s->st.n || s->st.item[index].kind != LM_SMART_VACUUM || !s->st.item[index].online)
+        return;
+    struct lm_smart_item *it = &s->st.item[index];
+    if (what == 0) {
+        it->on = !it->on;                                           /* (shown at once, the next poll confirms it) */
+        send_set(s, it, it->on ? "true" : "false");
+        notify(s);
+    } else if (what == 1 && it->dock_code[0]) {
+        it->on = false;
+        send_set_code(s, it, it->dock_code, it->dock_value);
+        notify(s);
+    }
+}
+
 /* ---- layout ----------------------------------------------------------------------------------------------------------------------- */
 
 void lm_smart_layout(int x, int y, int w, int h, int title_h, int n, struct lm_smart_layout *l)
@@ -220,6 +259,8 @@ void lm_smart_layout(int x, int y, int w, int h, int title_h, int n, struct lm_s
         l->sw[i] = (struct lm_smart_rect){ x + w - 12 - 44, ry + 6, 44, 22 };
         for (int b = 0; b < 3; b++)
             l->btn[i][b] = (struct lm_smart_rect){ x + w - 12 - 3 * 30 + b * 30, ry + 5, 26, 24 };
+        l->vac[i][0] = (struct lm_smart_rect){ x + w - 12 - 90, ry + 5, 46, 24 };
+        l->vac[i][1] = (struct lm_smart_rect){ x + w - 12 - 40, ry + 5, 40, 24 };
         l->name[i] = (struct lm_smart_rect){ x + 14, ry, w - 28 - 3 * 30 - 8, LM_SMART_ROW_H };
     }
 }
@@ -236,6 +277,12 @@ enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm
             *index = i;
             return LM_SMART_SWITCH_PART;
         }
+        if (st->item[i].kind == LM_SMART_VACUUM)
+            for (int b = 0; b < 2; b++)
+                if (inside(&l->vac[i][b], px, py) && (b == 0 || st->item[i].dock_code[0])) {
+                    *index = i;
+                    return b == 0 ? LM_SMART_CLEAN : LM_SMART_DOCK;
+                }
         if (st->item[i].kind == LM_SMART_BLIND)
             for (int b = 0; b < 3; b++)
                 if (inside(&l->btn[i][b], px, py)) {

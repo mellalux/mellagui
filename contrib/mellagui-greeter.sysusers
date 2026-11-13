@@ -1,0 +1,3 @@
+# systemd-sysusers: the unprivileged user of the login screen (docs/GREETER.md)
+#   sudo cp contrib/mellagui-greeter.sysusers /etc/sysusers.d/mellagui-greeter.conf && sudo systemd-sysusers
+u mellagui-greeter - "MellaGUI login screen" /var/lib/mellagui-greeter /usr/sbin/nologin

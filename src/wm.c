@@ -1569,6 +1569,7 @@ static void grab_end(struct lm_wm *wm)
     if (w && (kind == GRAB_MOVE || kind == GRAB_RESIZE)) {
         if (win_is_gadget(w))
             WIN(w)->gad_placed = true;                          /* from now on it stays where the user put it */
+        gadget_glue_end(wm);
         places_remember(wm, w);                                 /* the next window of the program opens here */
     }
 }
@@ -1632,6 +1633,7 @@ static void grab_cancel(struct lm_pointer_grab *g)
     enum grab_kind kind = wm->grab_kind;
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
+    gadget_glue_end(wm);
     if (wm->wb.active)
         wm->wb.released = true;
     if (w && kind == GRAB_RESIZE) {
@@ -1682,6 +1684,9 @@ void grab_begin(struct lm_wm *wm, struct lm_window *w, enum grab_kind kind, uint
     wm->grab_w = w->width;
     wm->grab_h = w->height;
     wm->grab_edges = edges;
+    wm->glue.n = 0;
+    if (kind == GRAB_MOVE && win_is_gadget(w))
+        gadget_glue_begin(wm, w);                               /* the cards glued under this one come along */
     wm->grab.ops = &grab_ops;
     wm->grab.data = wm;
     if (lm_seat_pointer_grab(wm->srv->seat, &wm->grab) < 0) {
@@ -2037,6 +2042,9 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
     bool shift = (mods & LM_MOD_SHIFT) != 0;
     bool ctrl = (mods & LM_MOD_CTRL) != 0;
     bool alt = (mods & LM_MOD_ALT) != 0;
+
+    if (wm->srv->config.kiosk && !(ctrl && alt && !super && code >= KEY_F1 && code <= KEY_F12))
+        return false;                                           /* the login screen: every key goes to its program (Ctrl+Alt+Fn still switches VT) */
 
     if (wm->menu_open && !(ctrl && alt)) {                  /* a menu takes every key: Esc closes, Up / Down choose, Enter does it */
         if (pressed && !repeat) {

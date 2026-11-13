@@ -2350,11 +2350,38 @@ static int cmd_favourites(void)
                 continue;
             const char *kind = "none", *code = "-";
             int value = 0;
-            struct tuya_dp *ctl = tuya_find_dp(d, "control"), *pos = tuya_find_dp(d, "percent_control");
+            struct tuya_dp *ctl = tuya_find_dp(d, "control"), *pos = tuya_find_dp(d, "percent_control"), *state = tuya_find_dp(d, "percent_state");
+            char extra[96] = "";
+            int go = -1;
+            if (!strcmp(d->category, "sd"))                         /* what can be set (and the modes) comes with the specifications: one more call, only for vacuums */
+                tuya_load_specs(&s, d, err, sizeof(err));
+            for (const char *const *g = (const char *const[]){ "power_go", "switch_go", NULL }; *g && go < 0; g++) {
+                int k = dp_index(d, *g);
+                if (k >= 0 && controllable(&d->dp[k]) && d->dp[k].type == TUYA_BOOL)
+                    go = k;
+            }
             if (!strcmp(d->category, "cl") && ctl) {
                 kind = "blind";
                 code = "control";
-                value = pos && pos->has ? (int)(pos->num + 0.5) : -1;
+                /* percent_control is what was asked for (the cloud keeps 0 there), percent_state is where the blind is */
+                value = state && state->has ? (int)(state->num + 0.5) : pos && pos->has ? (int)(pos->num + 0.5) : -1;
+            } else if (!strcmp(d->category, "sd") && go >= 0) {            /* a robot vacuum: its own buttons on the card */
+                struct tuya_dp *bat = tuya_find_dp(d, "electricity_left");
+                if (!bat || !bat->has)
+                    bat = tuya_find_dp(d, "battery_percentage");
+                const char *dc = "", *dv = "";
+                int k;
+                if ((k = dp_index(d, "switch_charge")) >= 0 && controllable(&d->dp[k]) && d->dp[k].type == TUYA_BOOL) {
+                    dc = "switch_charge";
+                    dv = "true";
+                } else if ((k = dp_index(d, "mode")) >= 0 && controllable(&d->dp[k]) && in_range(&d->dp[k], "chargego")) {
+                    dc = "mode";
+                    dv = "chargego";
+                }
+                kind = "vacuum";
+                code = d->dp[go].code;
+                value = d->dp[go].has && d->dp[go].b ? 1 : 0;
+                snprintf(extra, sizeof(extra), "\t%d,%s,%s", bat && bat->has ? (int)(bat->num + 0.5) : -1, dc, dv);
             } else {
                 for (int k = 0; k < d->ndp; k++) {
                     struct tuya_dp *dp = &d->dp[k];
@@ -2367,7 +2394,7 @@ static int cmd_favourites(void)
                     }
                 }
             }
-            printf("fav\t%s\t%s\t%d\t%s\t%s\t%d\n", d->id, d->name, d->online ? 1 : 0, kind, code, value);
+            printf("fav\t%s\t%s\t%d\t%s\t%s\t%d%s\n", d->id, d->name, d->online ? 1 : 0, kind, code, value, extra);
         }
     return 0;
 }

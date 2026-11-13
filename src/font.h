@@ -111,6 +111,7 @@ int lm_font_advance(uint32_t codepoint);
 bool lm_font_proportional(void);
 bool lm_font_use_ui(const char *spec);          /* "auto", "mono" or a file */
 void lm_font_ui_cells(bool cells);
+bool lm_font_ui_cells_get(void);                     /* what was asked (a program that borrows the other mode puts it back) */
 const char *lm_font_ui_name(void);              /* the file, or "mono" */
 const char *lm_font_ui_choice(void);            /* what was asked for */
 bool lm_font_usable_ui(const char *spec);

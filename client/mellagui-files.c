@@ -48,6 +48,8 @@
 #include <unistd.h>
 
 #include "img.h"
+#include "ffaudio.h"
+#include "mdview.h"
 #include "sftp.h"
 #include "smb.h"
 #include "metrics.h"
@@ -87,10 +89,10 @@
 #define COL_PIC (lm_theme.picture)
 #define COL_ERR (lm_theme.error)
 
-#define PREVIEW_MAX_BYTES (128 * 1024)
-#define PREVIEW_MAX_LINES 3000
+#define PREVIEW_MAX_BYTES (2 * 1024 * 1024)               /* a text is read up to this much; the preview scrolls over all of it */
+#define PREVIEW_MAX_LINES 40000
 #define PREVIEW_MAX_IMAGE (40u << 20)
-#define HEX_BYTES 1024
+#define HEX_BYTES (16 * 1024)
 
 struct entry {
     char *name;
@@ -115,7 +117,7 @@ struct pane {
     int last_click_row;
 };
 
-enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
+enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
 
 /* What the preview pane shows: the file under the cursor of the active pane. */
 struct preview {
@@ -127,7 +129,9 @@ struct preview {
     char info[160];
     char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
     int nlines;
-    int top;                            /* first visible line */
+    int top;                            /* first visible line (PV_MARKDOWN: pixels scrolled down) */
+    struct md_doc *md;                  /* PV_MARKDOWN: the page */
+    struct ffaudio_info ai;             /* PV_AUDIO: what the file says (its picture is `img`) */
     struct lm_image img;                /* PV_IMAGE: the decoded picture ... */
     uint32_t *scaled;                   /* ... and a copy that fits the pane (rebuilt when the pane size changes) */
     int sw, sh;                         /* its size in the buffer's own pixels, made for the buffer scale scale_k */
@@ -171,6 +175,16 @@ struct job {
 
 struct app {
     struct wlwin win;
+    int split;                          /* per mille of the width the left pane has (the divider can be dragged) */
+    bool split_drag;
+    uint32_t div_click_ms;              /* the last press on the divider (a double click resets it) */
+    bool pv_sb_drag;                    /* the preview's scroll bar thumb is held ... */
+    int pv_sb_grab;                     /* ... this many pixels below its top */
+    struct ffaudio *snd;                /* the sound of the previewed file (a sound file's preview has Play) */
+    char snd_path[PATH_MAX];            /* the file it belongs to ("" = none) */
+    uint64_t snd_len, snd_pos, snd_t0;  /* ms: its length, where it is (paused) or was (playing), when it (re)started */
+    bool snd_playing, snd_dead;
+    int snd_player;                     /* an index of ffaudio_player_name */
     const char *choose_key;             /* --choose: the setting a picked picture is written to (NULL = the two-pane manager) */
     uint32_t settings;                  /* mellagui_settings_v1 (only bound with --choose) */
     struct pane pane[2];
@@ -381,7 +395,7 @@ static void join_path(const char *dir, const char *name, char *out, size_t outsz
 
 /* ---- what a file is ------------------------------------------------------------------------------------------------------- */
 
-enum kind { K_IMAGE, K_VIDEO, K_PROGRAM, K_TEXT, K_BINARY, K_UNREADABLE };
+enum kind { K_IMAGE, K_VIDEO, K_AUDIO, K_PROGRAM, K_TEXT, K_BINARY, K_UNREADABLE };
 
 static bool ext_is(const char *name, const char *ext)
 {
@@ -397,6 +411,8 @@ static enum kind classify(const char *path)
         return K_IMAGE;
     if (ext_is(path, "mp4") || ext_is(path, "m4v"))
         return K_VIDEO;
+    if (ffaudio_name_is_audio(path))
+        return K_AUDIO;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return K_UNREADABLE;
@@ -1940,6 +1956,9 @@ static void preview_clear(struct preview *pv)
     free(pv->scaled);
     pv->scaled = NULL;
     pv->sw = pv->sh = 0;
+    md_free(pv->md);
+    pv->md = NULL;
+    memset(&pv->ai, 0, sizeof(pv->ai));
     pv->kind = PV_NONE;
     pv->top = 0;
     pv->title[0] = pv->info[0] = 0;
@@ -2028,6 +2047,11 @@ static void pv_hex(struct preview *pv, const unsigned char *buf, size_t n)
 }
 
 /* Loads what the preview pane will show for `path` (a file, a folder, or an error text). Always sets some kind. */
+static bool is_markdown_path(const char *p)
+{
+    return ext_is(p, "md") || ext_is(p, "markdown") || ext_is(p, "mdown") || ext_is(p, "mkd");
+}
+
 static void preview_load(struct preview *pv, const char *path, bool hidden)
 {
     preview_clear(pv);
@@ -2089,6 +2113,20 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         snprintf(pv->info, sizeof(pv->info), "%s, %dx%d", sz, pv->img.w, pv->img.h);
         return;
     }
+    if (ffaudio_name_is_audio(path)) {                                   /* a sound file: its picture and tags, and a way to play it (paint_audio) */
+        char err[200];
+        if (!ffaudio_probe(path, &pv->ai, err, sizeof(err))) {
+            pv->kind = PV_ERROR;
+            pv_linef(pv, &cap, "%s", err);
+            return;
+        }
+        if (pv->ai.cover && !ffaudio_cover(path, &pv->img))
+            pv->img.px = NULL;
+        pv->kind = PV_AUDIO;
+        unsigned secs = (unsigned)(pv->ai.duration_ms / 1000);
+        snprintf(pv->info, sizeof(pv->info), "%s, %u:%02u, %s", sz, secs / 60, secs % 60, pv->ai.codec);
+        return;
+    }
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         pv->kind = PV_ERROR;
@@ -2107,6 +2145,10 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
     if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);
+    } else if (is_markdown_path(path) && (off_t)n >= st.st_size) {         /* a Markdown file is shown as a page (the whole file, up to what the preview reads) */
+        pv->kind = PV_MARKDOWN;
+        pv->md = md_parse((const char *)buf, (size_t)n);
+        pv->top = 0;
     } else {
         pv->kind = PV_TEXT;
         pv_text(pv, buf, (size_t)n);
@@ -2122,7 +2164,7 @@ static void preview_scale(struct preview *pv, int w, int h, int k)
     free(pv->scaled);
     pv->scaled = NULL;
     pv->sw = pv->sh = 0;
-    if ((pv->kind != PV_IMAGE && pv->kind != PV_VIDEO) || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
+    if ((pv->kind != PV_IMAGE && pv->kind != PV_VIDEO && pv->kind != PV_AUDIO) || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
         return;
     double s = LM_MIN((double)w / pv->img.w, (double)h / pv->img.h);
     if (s > 8.0)
@@ -2354,6 +2396,7 @@ static void open_path(struct app *a, const char *path)
     switch (classify(path)) {
     case K_IMAGE:
     case K_VIDEO:
+    case K_AUDIO:
         if (!launch("mellagui-view", path, workdir(a), err, sizeof(err)))
             msg(a, "%s", err);
         break;
@@ -3306,10 +3349,62 @@ static const char *prompt_label(enum prompt k)
     }
 }
 
+static int list_top(void);
+static int bottom_h(const struct app *a);
+static void snd_toggle(struct app *a);
+static void snd_stop(struct app *a);
+
+/* The part of a preview that scrolls: how much there is, how much shows, where it is (lines; pixels for a Markdown page). */
+static bool pv_scrolls(const struct app *a, int body_h, int *total, int *view, int *pos)
+{
+    const struct preview *pv = &a->pv;
+    if (!pv->loaded)
+        return false;
+    if (pv->kind == PV_MARKDOWN && pv->md) {
+        *total = md_height(pv->md);
+        *view = body_h;
+    } else if (pv->kind == PV_TEXT || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR) {
+        *total = pv->nlines;
+        *view = LM_MAX(body_h / LM_FONT_H, 1);
+    } else {
+        return false;
+    }
+    *pos = pv->top;
+    return true;
+}
+
+static int pv_max_top(const struct app *a)
+{
+    int total, view, pos;
+    int body_h = a->win.bh - list_top() - bottom_h(a);
+    return pv_scrolls(a, body_h, &total, &view, &pos) ? LM_MAX(total - view, 0) : 0;
+}
+
+static void pv_thumb(int track, int total, int view, int pos, int *ty, int *th)
+{
+    *th = LM_CLAMP(track * view / LM_MAX(total, 1), LM_MIN(28, track), track);
+    *ty = (track - *th) * pos / LM_MAX(total - view, 1);
+}
+
+/* The thumb follows the pointer (held pv_sb_grab pixels below its top). */
+static void pv_sb_drag_to(struct app *a, double py)
+{
+    int total, view, pos, body_h = a->win.bh - list_top() - bottom_h(a), ty, th;
+    if (!pv_scrolls(a, body_h, &total, &view, &pos))
+        return;
+    pv_thumb(body_h, total, view, pos, &ty, &th);
+    int room = LM_MAX(body_h - th, 1), maxtop = LM_MAX(total - view, 0);
+    int at = LM_CLAMP((int)py - a->pv_sb_grab - list_top(), 0, room);
+    a->pv.top = LM_CLAMP(at * maxtop / room, 0, maxtop);
+}
+
 static void scroll_preview(struct app *a, int lines)
 {
     struct preview *pv = &a->pv;
-    pv->top = LM_CLAMP(pv->top + lines, 0, LM_MAX(pv->nlines - 1, 0));
+    if (pv->kind == PV_MARKDOWN && pv->md)                                /* a page scrolls by pixels */
+        pv->top = LM_CLAMP(pv->top + lines * 22, 0, pv_max_top(a));
+    else
+        pv->top = LM_CLAMP(pv->top + lines, 0, pv_max_top(a));
     a->win.redraw = true;
 }
 
@@ -3363,6 +3458,7 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'r': reread(a); return;
         case 't': start_terminal(a); return;
         case 'q': toggle_preview(a); return;
+        case 'p': snd_toggle(a); return;                                 /* play / pause the sound file in the preview */
         case 'b': if (a->dual) go_trash(a); return;
         case 'z': if (a->dual) do_restore(a); return;
         case 'e': if (a->dual) cmd_empty_trash(a); return;
@@ -3476,6 +3572,58 @@ static int list_top(void)
 }
 
 /* A pane's column: x and width. */
+#define SPLIT_MIN 160                                                    /* a pane is never narrower than this */
+#define DIVIDER_GRAB 3
+
+/* Where the left pane ends (the divider): `split` per mille of the width, each pane at least SPLIT_MIN wide. */
+static int split_x(const struct app *a)
+{
+    int bw = a->win.bw, x = bw * (a->split > 0 ? a->split : 500) / 1000;
+    if (bw < 2 * SPLIT_MIN)
+        return bw / 2;
+    return LM_CLAMP(x, SPLIT_MIN, bw - SPLIT_MIN);
+}
+
+/* files.conf keeps where the divider was left (`split=PER MILLE`, 150..850). */
+static int split_conf_load(void)
+{
+    char path[1024], line[128];
+    int v = 0;
+    if (!lm_zoom_conf_path("files", path, sizeof(path)))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f)) {
+        int n;
+        if (sscanf(line, "split=%d", &n) == 1 && n >= 150 && n <= 850)
+            v = n;
+    }
+    fclose(f);
+    return v;
+}
+
+static void split_conf_save(int v)
+{
+    char path[1024], tmp[1100];
+    if (!lm_zoom_conf_path("files", path, sizeof(path)))
+        return;
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = 0;
+        mkdir(path, 0755);
+        *p = '/';
+    }
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "# mellagui-files: written by the program itself\nsplit=%d\n", v);
+    if (fclose(f) != 0 || rename(tmp, path) < 0)
+        unlink(tmp);
+}
+
 static void pane_rect(const struct app *a, int i, int *x, int *w)
 {
     if (!a->dual) {
@@ -3483,7 +3631,7 @@ static void pane_rect(const struct app *a, int i, int *x, int *w)
         *w = a->win.bw;
         return;
     }
-    int half = a->win.bw / 2;
+    int half = split_x(a);
     *x = i == 0 ? 0 : half;
     *w = i == 0 ? half : a->win.bw - half;
 }
@@ -3737,9 +3885,11 @@ static void preview_update(struct app *a)
     char want[PATH_MAX];
     preview_target(a, want, sizeof(want));
     if (strcmp(want, pv->want) != 0) {
+        if (a->snd_path[0] && strcmp(a->snd_path, want) != 0)
+            snd_stop(a);                                                 /* the cursor moved on: the sound of the other file ends */
         snprintf(pv->want, sizeof(pv->want), "%s", want);
         pv->loaded = false;
-        bool pic = want[0] && (ext_is(want, "png") || ext_is(want, "jpg") || ext_is(want, "jpeg") || ext_is(want, "ppm"));
+        bool pic = want[0] && (ext_is(want, "png") || ext_is(want, "jpg") || ext_is(want, "jpeg") || ext_is(want, "ppm") || ffaudio_name_is_audio(want));
         pv->due = now_ms() + (pic ? 150 : 0);
     }
     if (!pv->loaded && now_ms() >= pv->due) {
@@ -3752,13 +3902,261 @@ static void preview_update(struct app *a)
     video_poll(pv);
 }
 
-static void paint_preview(struct wlwin *w, struct app *a, int idx)
+/* ---- the sound of a sound file's preview ------------------------------------------------------------------------------------------ */
+
+static void snd_stop(struct app *a)
+{
+    if (a->snd) {
+        ffaudio_close(a->snd);
+        a->snd = NULL;
+    }
+    a->snd_playing = false;
+    a->snd_path[0] = 0;
+    a->snd_pos = 0;
+    a->snd_dead = false;
+}
+
+static uint64_t snd_pos(const struct app *a)
+{
+    uint64_t p = a->snd_playing ? a->snd_pos + (uint64_t)(now_ms() - (int64_t)a->snd_t0) : a->snd_pos;
+    return a->snd_len && p > a->snd_len ? a->snd_len : p;
+}
+
+static void snd_start_at(struct app *a, const char *path, uint64_t len, uint64_t ms)
+{
+    if (a->snd) {
+        ffaudio_close(a->snd);
+        a->snd = NULL;
+    }
+    snprintf(a->snd_path, sizeof(a->snd_path), "%s", path);
+    a->snd_len = len;
+    a->snd_pos = ms;
+    a->snd_t0 = (uint64_t)now_ms();
+    char err[120];
+    a->snd = ffaudio_players() > 0 && !a->snd_dead ? ffaudio_start(path, ms, a->snd_player, err, sizeof(err)) : NULL;
+    a->snd_playing = true;                                               /* (the clock runs even when nothing can be heard: the bar says "no sound player") */
+    if (!a->snd)
+        a->snd_dead = true;
+    a->win.redraw = true;
+}
+
+static void snd_toggle(struct app *a)
+{
+    struct preview *pv = &a->pv;
+    if (pv->kind != PV_AUDIO || !pv->loaded)
+        return;
+    if (a->snd_playing && !strcmp(a->snd_path, pv->want)) {              /* a pause is silence at once; on again the sound starts afresh where it was */
+        a->snd_pos = snd_pos(a);
+        a->snd_playing = false;
+        if (a->snd) {
+            ffaudio_close(a->snd);
+            a->snd = NULL;
+        }
+    } else {
+        uint64_t at = !strcmp(a->snd_path, pv->want) ? a->snd_pos : 0;
+        if (pv->ai.duration_ms && at >= pv->ai.duration_ms)
+            at = 0;
+        snd_start_at(a, pv->want, pv->ai.duration_ms, at);
+    }
+    a->win.redraw = true;
+}
+
+static void snd_seek(struct app *a, uint64_t ms)
+{
+    struct preview *pv = &a->pv;
+    if (pv->kind != PV_AUDIO || !pv->loaded)
+        return;
+    if (strcmp(a->snd_path, pv->want) != 0 || !a->snd_playing) {         /* not playing: only the place changes, the next Play starts there */
+        snprintf(a->snd_path, sizeof(a->snd_path), "%s", pv->want);
+        a->snd_len = pv->ai.duration_ms;
+        a->snd_pos = ms;
+        a->snd_playing = false;
+        a->win.redraw = true;
+        return;
+    }
+    snd_start_at(a, pv->want, pv->ai.duration_ms, ms);
+}
+
+/* Every loop turn: the clock moves, a track that is over stops, a player that cannot reach a sound server gives way to the next one. */
+static void snd_tick(struct app *a)
+{
+    if (!a->snd_playing)
+        return;
+    if (a->snd) {
+        bool quick;
+        if (!ffaudio_alive(a->snd, &quick)) {
+            ffaudio_close(a->snd);
+            a->snd = NULL;
+            if (quick && a->snd_player + 1 < ffaudio_players()) {
+                a->snd_player++;
+                snd_start_at(a, a->snd_path, a->snd_len, snd_pos(a));
+            } else if (quick) {
+                a->snd_dead = true;
+            }
+        }
+    }
+    if (a->snd_len && snd_pos(a) >= a->snd_len) {                       /* the end */
+        a->snd_pos = 0;
+        a->snd_playing = false;
+        if (a->snd) {
+            ffaudio_close(a->snd);
+            a->snd = NULL;
+        }
+    }
+    a->win.redraw = true;
+}
+
+struct snd_ui {
+    int cover_x, cover_y, side;
+    int title_y, who_y, tech_y, time_y;
+    struct lm_rect play, bar;
+};
+
+static void snd_layout(int x0, int pw, int y0, int bh, struct snd_ui *u)
+{
+    int side = LM_CLAMP(LM_MIN(pw - 40, bh - 190), 48, 220);
+    u->side = side;
+    u->cover_x = x0 + (pw - side) / 2;
+    u->cover_y = y0 + 14;
+    int y = u->cover_y + side + 14;
+    u->title_y = y;
+    y += LM_FONT_H + 6;
+    u->who_y = y;
+    y += LM_FONT_H + 4;
+    u->tech_y = y;
+    y += LM_FONT_H + 14;
+    u->play = lm_rect_make(x0 + 14, y, 78, 28);
+    u->time_y = y + (28 - LM_FONT_H) / 2;
+    u->bar = lm_rect_make(x0 + 14, y + 38, pw - 28, 10);
+}
+
+static void snd_text_c(struct wlwin *w, int x0, int pw, int y, const char *s, bool bold, uint32_t col)
+{
+    int tw = bold ? lm_font_text_width_bold(s) : lm_font_text_width(s);
+    int x = x0 + (pw - tw) / 2;
+    if (x < x0 + 8)
+        x = x0 + 8;
+    if (bold)
+        wlwin_text_bold(w, x, y, s, 1, col, pw - 16);
+    else
+        wlwin_text(w, x, y, s, 1, col, pw - 16);
+}
+
+static void fmt_clock(char *out, size_t n, uint64_t ms)
+{
+    unsigned s = (unsigned)(ms / 1000);
+    if (s >= 3600)
+        snprintf(out, n, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
+    else
+        snprintf(out, n, "%u:%02u", s / 60, s % 60);
+}
+
+static void paint_audio(struct wlwin *w, struct app *a, int x0, int pw, int list_y, int body_h)
+{
+    struct preview *pv = &a->pv;
+    struct snd_ui u;
+    snd_layout(x0, pw, list_y, body_h, &u);
+    int k = wlwin_scale(w);
+    if (pv->img.px) {
+        if (!pv->scaled || pv->sw > u.side * k || pv->sh > u.side * k || (pv->sw < u.side * k && pv->sh < u.side * k) || pv->scale_k != k)
+            preview_scale(pv, u.side * k, u.side * k, k);
+        if (pv->scaled) {
+            int lw = (pv->sw + k - 1) / k, lh = (pv->sh + k - 1) / k;
+            wlwin_blit_px(w, u.cover_x + (u.side - lw) / 2, u.cover_y + (u.side - lh) / 2, pv->scaled, pv->sw, pv->sh, pv->sw, x0, list_y, pw, body_h);
+        }
+    } else {                                                             /* no picture in the file: a pair of notes on a card */
+        int s = u.side, x = u.cover_x, y = u.cover_y, un = s / 8;
+        uint32_t fg = COL_DIM;
+        wlwin_round_fill(w, x, y, s, s, s / 8, lm_theme.control);
+        int cx = x + s / 2, cy = y + s / 2;
+        wlwin_fill(w, cx - un * 2, cy - un * 2, un / 2 + 1, un * 3 + un / 2, fg);
+        wlwin_fill(w, cx + un, cy - un * 2 - un / 2, un / 2 + 1, un * 3 + un / 2, fg);
+        wlwin_fill(w, cx - un * 2, cy - un * 2 - un / 2, un * 3 + un / 2 + 1, un / 2 + 1, fg);
+        wlwin_round_fill(w, cx - un * 3, cy + un, un * 2, un * 3 / 2, un * 3 / 4, fg);
+        wlwin_round_fill(w, cx, cy + un * 2 - un / 2, un * 2, un * 3 / 2, un * 3 / 4, fg);
+    }
+    char title[200];
+    if (pv->ai.title[0]) {
+        snprintf(title, sizeof(title), "%s", pv->ai.title);
+    } else {
+        snprintf(title, sizeof(title), "%s", pv->title);
+        char *dot = strrchr(title, '.');
+        if (dot)
+            *dot = 0;
+    }
+    snd_text_c(w, x0, pw, u.title_y, title, true, COL_FG);
+    char who[220] = "";
+    if (pv->ai.artist[0] && pv->ai.album[0])
+        snprintf(who, sizeof(who), "%s  -  %s", pv->ai.artist, pv->ai.album);
+    else if (pv->ai.artist[0] || pv->ai.album[0])
+        snprintf(who, sizeof(who), "%s", pv->ai.artist[0] ? pv->ai.artist : pv->ai.album);
+    if (who[0])
+        snd_text_c(w, x0, pw, u.who_y, who, false, COL_FG);
+    char tech[120], rate[24] = "", ch[24] = "", kb[24] = "";
+    if (pv->ai.rate)
+        snprintf(rate, sizeof(rate), "  %d Hz", pv->ai.rate);
+    if (pv->ai.channels[0])
+        snprintf(ch, sizeof(ch), "  %s", pv->ai.channels);
+    if (pv->ai.kbps)
+        snprintf(kb, sizeof(kb), "  %d kb/s", pv->ai.kbps);
+    snprintf(tech, sizeof(tech), "%s%s%s%s", pv->ai.codec, rate, ch, kb);
+    snd_text_c(w, x0, pw, u.tech_y, tech, false, COL_DIM);
+    bool mine = !strcmp(a->snd_path, pv->want);
+    bool playing = mine && a->snd_playing;
+    wlwin_round_fill(w, u.play.x, u.play.y, u.play.w, u.play.h, lm_button_radius(u.play.h / 2), playing ? lm_theme.btn_amber : lm_theme.btn_green);
+    const char *lab = playing ? "Pause" : "Play";
+    wlwin_text(w, u.play.x + (u.play.w - lm_font_text_width(lab)) / 2, u.play.y + (u.play.h - LM_FONT_H) / 2, lab, 1, lm_theme.on_colour, 0);
+    uint64_t pos = mine ? snd_pos(a) : 0, len = pv->ai.duration_ms;
+    char t1[16], t2[16], clk[80];
+    fmt_clock(t1, sizeof(t1), pos);
+    fmt_clock(t2, sizeof(t2), len);
+    snprintf(clk, sizeof(clk), "%s / %s%s", t1, t2, playing && (a->snd_dead || ffaudio_players() == 0) ? "   (no sound player)" : "");
+    wlwin_text(w, u.play.x + u.play.w + 12, u.time_y, clk, 1, COL_FG, pw - u.play.w - 40);
+    wlwin_round_fill(w, u.bar.x, u.bar.y, u.bar.w, u.bar.h, u.bar.h / 2, lm_theme.divider);
+    if (len && pos)
+        wlwin_round_fill(w, u.bar.x, u.bar.y, LM_MAX((int)((uint64_t)u.bar.w * pos / len), u.bar.h), u.bar.h, u.bar.h / 2, lm_theme.accent);
+    if (ffaudio_players() == 0)
+        wlwin_text(w, x0 + 14, u.bar.y + 22, "No sound player found (pw-cat, paplay or aplay) or no ffmpeg", 1, COL_DIM, pw - 28);
+    else
+        wlwin_text(w, x0 + 14, u.bar.y + 22, "Ctrl+P plays and pauses, a click on the bar seeks, Enter opens the player", 1, COL_DIM, pw - 28);
+}
+
+/* A click in a preview pane: Play / Pause and the bar of a sound file. */
+static void preview_click(struct app *a, int idx, int x, int y)
 {
     struct preview *pv = &a->pv;
     int x0, pw;
     pane_rect(a, idx, &x0, &pw);
-    int list_y = list_top();
-    int body_h = w->bh - list_y - bottom_h(a);
+    int total, view, pos, body_h = a->win.bh - list_top() - bottom_h(a);
+    if (pv_scrolls(a, body_h, &total, &view, &pos) && x >= x0 + pw - lm_metrics.scrollbar_width && y >= list_top()) {     /* the scroll bar */
+        int ty, th;
+        pv_thumb(body_h, total, view, pos, &ty, &th);
+        ty += list_top();
+        int maxtop = LM_MAX(total - view, 0);
+        if (y >= ty && y < ty + th) {
+            a->pv_sb_drag = true;
+            a->pv_sb_grab = y - ty;
+        } else {
+            pv->top = LM_CLAMP(pv->top + (y < ty ? -1 : 1) * LM_MAX(view - (pv->kind == PV_MARKDOWN ? 44 : 1), 1), 0, maxtop);
+        }
+        a->win.redraw = true;
+        return;
+    }
+    if (pv->kind != PV_AUDIO || !pv->loaded)
+        return;
+    struct snd_ui u;
+    snd_layout(x0, pw, list_top(), a->win.bh - list_top() - bottom_h(a), &u);
+    if (x >= u.play.x && x < u.play.x + u.play.w && y >= u.play.y && y < u.play.y + u.play.h) {
+        snd_toggle(a);
+    } else if (x >= u.bar.x - 4 && x < u.bar.x + u.bar.w + 4 && y >= u.bar.y - 8 && y < u.bar.y + u.bar.h + 8 && pv->ai.duration_ms) {
+        double f = LM_CLAMP((double)(x - u.bar.x) / u.bar.w, 0.0, 1.0);
+        snd_seek(a, (uint64_t)(f * (double)pv->ai.duration_ms));
+    }
+}
+
+static void pv_header(struct wlwin *w, struct app *a, int x0, int pw, int list_y)
+{
+    struct preview *pv = &a->pv;
     wlwin_fill(w, x0, TOOL_H, pw, HEAD_H, COL_BG);
     char head[NAME_MAX + 200];
     if (pv->kind != PV_NONE && pv->loaded)
@@ -3767,6 +4165,106 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
         snprintf(head, sizeof(head), "Preview");
     wlwin_text(w, x0 + 8, TOOL_H + 3, head, 1, COL_DIM, pw - 16);
     wlwin_fill(w, x0, list_y - 1, pw, 1, COL_BAR);
+}
+
+/* For the tests: what the preview pane shows, after every paint ($MELLAGUI_FILES_DUMP). */
+static void files_dump(struct app *a)
+{
+    const char *path = getenv("MELLAGUI_FILES_DUMP");
+    if (!path || !*path)
+        return;
+    char tmp[PATH_MAX + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    struct preview *pv = &a->pv;
+    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio" };
+    int body_h = a->win.bh - list_top() - bottom_h(a);
+    int total, view, pos;
+    fprintf(f, "kind=%s loaded=%d top=%d body=%d split=%d want=%s\n", a->preview ? names[pv->kind] : "none", pv->loaded ? 1 : 0, pv->top, body_h, split_x(a), pv->want);
+    if (a->preview && pv_scrolls(a, body_h, &total, &view, &pos)) {
+        for (int i = 0; i < 2; i++)
+            if (pane_is_preview(a, i)) {
+                int x0, pw, ty, th;
+                pane_rect(a, i, &x0, &pw);
+                pv_thumb(body_h, total, view, pos, &ty, &th);
+                fprintf(f, "scroll total=%d view=%d pos=%d\n", total, view, pos);
+                fprintf(f, "rect pvthumb %d %d %d %d\n", x0 + pw - lm_metrics.scrollbar_width, list_top() + ty, lm_metrics.scrollbar_width, th);
+            }
+    }
+    if (pv->kind == PV_MARKDOWN && pv->md)
+        fprintf(f, "md height=%d width=%d headings=%d links=%d\n", md_height(pv->md), md_width(pv->md), md_count(pv->md, MD_N_HEADINGS), md_count(pv->md, MD_N_LINKS));
+    if (pv->kind == PV_AUDIO) {
+        bool mine = !strcmp(a->snd_path, pv->want);
+        char ti[96], ar[96];
+        snprintf(ti, sizeof(ti), "%s", pv->ai.title);
+        snprintf(ar, sizeof(ar), "%s", pv->ai.artist);
+        for (char *c = ti; *c; c++) if (*c == ' ') *c = '_';
+        for (char *c = ar; *c; c++) if (*c == ' ') *c = '_';
+        fprintf(f, "audio playing=%d pos=%llu len=%llu title=%s artist=%s cover=%d\n", mine && a->snd_playing ? 1 : 0, mine ? (unsigned long long)snd_pos(a) : 0ull,
+                (unsigned long long)pv->ai.duration_ms, ti, ar, pv->img.px ? 1 : 0);
+        for (int i = 0; i < 2; i++)
+            if (pane_is_preview(a, i)) {
+                int x0, pw;
+                pane_rect(a, i, &x0, &pw);
+                struct snd_ui u;
+                snd_layout(x0, pw, list_top(), body_h, &u);
+                fprintf(f, "rect play %d %d %d %d\n", u.play.x, u.play.y, u.play.w, u.play.h);
+                fprintf(f, "rect bar %d %d %d %d\n", u.bar.x, u.bar.y, u.bar.w, u.bar.h);
+            }
+    }
+    fprintf(f, "ok\n");
+    fclose(f);
+    rename(tmp, path);
+}
+
+/* The strip at the right edge of a preview that scrolls: a track, and a thumb when there is more than shows. */
+static void pv_scrollbar(struct wlwin *w, struct app *a, int x0, int pw, int list_y, int body_h)
+{
+    int total, view, pos, sbw = lm_metrics.scrollbar_width;
+    if (!pv_scrolls(a, body_h, &total, &view, &pos))
+        return;
+    int x = x0 + pw - sbw;
+    wlwin_fill(w, x, list_y, sbw, body_h, COL_BAR);
+    if (total <= view)
+        return;
+    int ty, th;
+    pv_thumb(body_h, total, view, pos, &ty, &th);
+    ty += list_y;
+    bool hot = a->pv_sb_drag || (a->px >= x && a->px < x0 + pw && a->py >= ty && a->py < ty + th);
+    wlwin_fill(w, x + 2, ty + 1, sbw - 4, th - 2, hot ? COL_BTN_ON : COL_BTN);
+}
+
+/* A Markdown page in the pane: laid out for the pane's width (820 px at most), scrolled by pv->top pixels. Its ends spill over the header, which is
+ * painted again after it. */
+static void paint_markdown(struct wlwin *w, struct app *a, int x0, int pw, int list_y, int body_h)
+{
+    struct preview *pv = &a->pv;
+    int sbw = lm_metrics.scrollbar_width;
+    int cw = LM_CLAMP(pw - 24 - sbw, 120, 820);
+    if (md_width(pv->md) != cw || md_height(pv->md) == 0) {
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s", pv->want);
+        char *sl = strrchr(dir, '/');
+        if (sl && sl != dir)
+            *sl = 0;
+        md_layout(pv->md, cw, dir);
+    }
+    pv->top = LM_CLAMP(pv->top, 0, LM_MAX(md_height(pv->md) - body_h, 0));
+    md_paint(w, pv->md, x0 + (pw - sbw - cw) / 2, list_y, cw, body_h, pv->top);
+    pv_header(w, a, x0, pw, list_y);
+    pv_scrollbar(w, a, x0, pw, list_y, body_h);
+}
+
+static void paint_preview(struct wlwin *w, struct app *a, int idx)
+{
+    struct preview *pv = &a->pv;
+    int x0, pw;
+    pane_rect(a, idx, &x0, &pw);
+    int list_y = list_top();
+    int body_h = w->bh - list_y - bottom_h(a);
+    pv_header(w, a, x0, pw, list_y);
     wlwin_fill(w, x0, list_y, pw, body_h, lm_theme.field);
     if (!pv->loaded) {
         if (pv->want[0])
@@ -3779,6 +4277,14 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
     }
     if (pv->kind == PV_VIDEO_WAIT) {
         wlwin_text(w, x0 + 10, list_y + 6, "Reading the video...", 1, COL_DIM, pw - 20);
+        return;
+    }
+    if (pv->kind == PV_AUDIO) {
+        paint_audio(w, a, x0, pw, list_y, body_h);
+        return;
+    }
+    if (pv->kind == PV_MARKDOWN && pv->md) {
+        paint_markdown(w, a, x0, pw, list_y, body_h);
         return;
     }
     if (pv->kind == PV_IMAGE || pv->kind == PV_VIDEO) {
@@ -3803,8 +4309,10 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
         }
         return;
     }
-    int rowsv = LM_MAX(body_h / LM_FONT_H, 1);
-    pv->top = LM_CLAMP(pv->top, 0, LM_MAX(pv->nlines - 1, 0));
+    int rowsv = LM_MAX(body_h / LM_FONT_H, 1), sbw = lm_metrics.scrollbar_width;
+    pv->top = LM_CLAMP(pv->top, 0, LM_MAX(pv->nlines - rowsv, 0));
+    pv_scrollbar(w, a, x0, pw, list_y, body_h);
+    pw -= sbw;                                                          /* (the text ends where the bar begins) */
     for (int r = 0; r < rowsv && pv->top + r < pv->nlines; r++) {
         uint32_t col = pv->kind == PV_ERROR ? COL_ERR : pv->kind == PV_DIR ? COL_DIR : pv->kind == PV_HEX ? COL_DIM : COL_FG;
         const char *s = pv->lines[pv->top + r];
@@ -3883,8 +4391,9 @@ static void paint(struct wlwin *w)
             paint_pane(w, a, i);
     }
     if (a->dual) {
-        int mid = w->bw / 2;
-        wlwin_fill(w, mid - 1, TOOL_H, 1, w->bh - TOOL_H - bottom_h(a), COL_BAR);
+        int mid = split_x(a);
+        bool hot = a->split_drag || (abs((int)a->px - mid) <= DIVIDER_GRAB && a->py >= TOOL_H && a->py < w->bh - bottom_h(a));
+        wlwin_fill(w, mid - 1, TOOL_H, hot ? 3 : 1, w->bh - TOOL_H - bottom_h(a), hot ? lm_theme.accent : COL_BAR);
     }
 
     int sy = w->bh - STATUS_H - (a->dual ? FKEY_H : 0);
@@ -3979,6 +4488,7 @@ static void paint(struct wlwin *w)
     }
     if (a->help)
         paint_help(w);
+    files_dump(a);
 }
 
 /* ---- events --------------------------------------------------------------------------------------------------------------- */
@@ -4006,7 +4516,7 @@ static int pane_at(const struct app *a, int x)
 {
     if (!a->dual)
         return 0;
-    return x < a->win.bw / 2 ? 0 : 1;
+    return x < split_x(a) ? 0 : 1;
 }
 
 static void click(struct app *a, uint32_t time_ms)
@@ -4023,9 +4533,23 @@ static void click(struct app *a, uint32_t time_ms)
     }
     if (y < TOOL_H || y >= a->win.bh - bottom_h(a))
         return;
-    int idx = pane_at(a, x);
-    if (pane_is_preview(a, idx))
+    if (a->dual && abs(x - split_x(a)) <= DIVIDER_GRAB) {                  /* the divider: drag it; a double click puts it back in the middle */
+        if (time_ms - a->div_click_ms < (uint32_t)lm_metrics.double_click_ms) {
+            a->split = 500;
+            a->div_click_ms = 0;
+            split_conf_save(a->split);
+        } else {
+            a->div_click_ms = time_ms;
+            a->split_drag = true;
+        }
+        a->win.redraw = true;
         return;
+    }
+    int idx = pane_at(a, x);
+    if (pane_is_preview(a, idx)) {
+        preview_click(a, idx, x, y);
+        return;
+    }
     if (idx != a->act) {
         a->act = idx;
         set_title(a);
@@ -4109,6 +4633,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         for (int i = 0; i < 2; i++)
             if (a->pane[i].sb_drag)
                 scrollbar_drag(a, &a->pane[i], a->py);
+        if (a->split_drag)
+            a->split = LM_CLAMP((int)(a->px * 1000 / LM_MAX(w->bw, 1)), 150, 850);
+        if (a->pv_sb_drag)
+            pv_sb_drag_to(a, a->py);
         w->redraw = true;                                               /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
@@ -4143,6 +4671,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             click(a, args[1].u);
         } else if (args[2].u == 272) {
             a->pane[0].sb_drag = a->pane[1].sb_drag = false;
+            a->pv_sb_drag = false;
+            if (a->split_drag) {
+                a->split_drag = false;
+                split_conf_save(a->split > 0 ? a->split : 500);
+            }
         }
         w->redraw = true;
         break;
@@ -4684,6 +5217,7 @@ int main(int argc, char **argv)
     a.pane[0].last_click_row = a.pane[1].last_click_row = -1;
     a.hover = -1;
     a.dual = choose == NULL;
+    a.split = split_conf_load();
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     a.choose_key = choose;
     if (wlwin_connect(&a.win, "mellagui-files", &ops, &a) < 0)
@@ -4726,6 +5260,8 @@ int main(int argc, char **argv)
         }
         if (a.job)                                                      /* a copy / move / delete: the progress bar moves */
             timeout = LM_MIN(timeout, 80);
+        if (a.snd_playing)                                              /* a sound file plays: the clock */
+            timeout = LM_MIN(timeout, 250);
         if (a.preview && a.pv.kind == PV_VIDEO_WAIT)                    /* a video's picture is on its way */
             timeout = LM_MIN(timeout, 80);
         if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
@@ -4739,6 +5275,7 @@ int main(int argc, char **argv)
             a.win.redraw = true;
         if (a.preview && a.pv.kind == PV_VIDEO_WAIT)                    /* (preview_update collects the picture when it is painted) */
             a.win.redraw = true;
+        snd_tick(&a);
         if (a.job) {
             a.win.redraw = true;
             if (atomic_load(&a.job->finished))
@@ -4759,6 +5296,7 @@ int main(int argc, char **argv)
         if (a.job->threaded)
             pthread_join(a.job->thread, NULL);
     }
+    snd_stop(&a);
     wlwin_destroy(&a.win);
     return 0;
 }

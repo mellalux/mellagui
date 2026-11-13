@@ -59,6 +59,7 @@ struct wlwin {
     int def_w, def_h, min_w, min_h;
     bool fixed_size;                /* maximized or fullscreen: the compositor decides the size, a program must not grow the window */
     bool want_fullscreen;           /* set before wlwin_open: the toplevel asks for full screen before its first commit */
+    double zoom;                    /* the content's scale (wlwin_set_zoom; 0 or 1 = none): bw x bh is the window size divided by it */
     const char *name;               /* program name for messages, e.g. "mellagui-calc" */
 };
 
@@ -98,6 +99,11 @@ void wlwin_resize(struct wlwin *w, uint32_t serial, uint32_t edges);
 /* Show a menu at the pointer, drawn by the compositor (it may reach beyond the window): `entries` one per line, a leading '~' = dim. The answer
  * comes to ops->menu. False when the compositor has no such menu (the caller does the action some other way or does nothing). */
 bool wlwin_menu(struct wlwin *w, const char *entries);
+
+/* The content of the window is drawn `percent` per cent as big as it is laid out (a gadget card whose contents can be made bigger or smaller):
+ * a program still lays out in bw x bh and draws with the wlwin_* calls, but bw x bh is now the window's size divided by the zoom, and the pointer
+ * coordinates the program gets are converted to match. Combine it with wlwin_request_size to make the window follow. */
+void wlwin_set_zoom(struct wlwin *w, int percent);
 
 /* Make the window this big (a program zooming its text): the next repaint uses a buffer of that size and the compositor
  * follows it. Ignored while `fixed_size`. Returns true when the size was changed. */

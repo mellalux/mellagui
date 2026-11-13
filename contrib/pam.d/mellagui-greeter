@@ -1,0 +1,7 @@
+#%PAM-1.0
+# /etc/pam.d/mellagui-greeter - the login screen's own session (no password: it is an unprivileged system user that only shows the screen).
+# pam_systemd gives it a logind session (class greeter) so it may open the GPU and the keyboard without any group.
+auth       required     pam_permit.so
+account    required     pam_permit.so
+session    required     pam_unix.so
+session    optional     pam_systemd.so class=greeter

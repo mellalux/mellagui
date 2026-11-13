@@ -28,6 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "mdview.h"
 #include "theme.h"
 #include "font.h"
 #include "keymap.h"
@@ -121,7 +122,18 @@ struct app {
     int seen_cy, seen_n;                /* where the cursor was when the view last followed it (a wheel / scroll bar move must stay) */
     size_t seen_cx;
     int seen_rows, seen_cols;
+    /* Markdown preview (a .md file opens as a page; Ctrl+M switches to the text and back) */
+    bool preview;
+    struct md_doc *md;
+    int md_scroll;                      /* pixels scrolled down */
+    const char *md_hover;               /* the address of the link under the pointer */
+    bool md_sb_drag;
+    int md_sb_grab;
 };
+
+static void preview_auto(struct app *a);
+static void preview_set(struct app *a, bool on);
+static bool is_md_path(const char *p);
 
 static int64_t now_ms(void)
 {
@@ -567,7 +579,7 @@ static void set_title(struct app *a)
         WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
         return;
     }
-    snprintf(t, sizeof(t), "%s%s - Editor", a->modified ? "* " : "", a->path[0] ? base : "untitled");
+    snprintf(t, sizeof(t), "%s%s - %s", a->modified ? "* " : "", a->path[0] ? base : "untitled", a->preview ? "Preview" : "Editor");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
 
@@ -612,6 +624,7 @@ static void do_open(struct app *a, const char *path)
     a->nundo = a->nredo = 0;
     a->typing_run = false;
     a->quit_armed = false;
+    preview_auto(a);
 }
 
 
@@ -882,7 +895,7 @@ static void cmd_new(struct app *a)
     a->modified = a->quit_armed = false;
     a->final_nl = true;
     a->crlf = false;
-    set_title(a);
+    preview_auto(a);
 }
 
 static void cmd_find(struct app *a)
@@ -917,15 +930,264 @@ static void set_zoom(struct app *a, int delta)
     set_zoom_pct(a, lm_zoom_step(a->zoom, delta));
 }
 
-enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_CUT, B_COPY, B_PASTE, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, N_BTNS };
+
+/* ---- Markdown preview ---------------------------------------------------------------------------------------------------------- */
+
+static bool is_md_path(const char *p)
+{
+    const char *dot = strrchr(p, '.');
+    if (!dot)
+        return false;
+    static const char *const ext[] = { ".md", ".markdown", ".mdown", ".mkd" };
+    for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+        if (!strcasecmp(dot, ext[i]))
+            return true;
+    return false;
+}
+
+#define PV_STEP 44                                                      /* a pair of lines */
+#define PV_PAD 22
+#define PV_COLW 820
+
+static int pv_view_h(const struct app *a)
+{
+    return LM_MAX(a->win.bh - STATUS_H - (a->prompt != P_NONE ? STATUS_H : 0) - TOP_H, 1);
+}
+
+static int pv_col(const struct app *a, int *x)
+{
+    int avail = a->win.bw - lm_metrics.scrollbar_width - 2 * PV_PAD;
+    int colw = LM_CLAMP(avail, 120, PV_COLW);
+    if (x)
+        *x = (a->win.bw - lm_metrics.scrollbar_width - colw) / 2;
+    return colw;
+}
+
+static void pv_dir(const struct app *a, char *out, size_t n)
+{
+    snprintf(out, n, "%s", a->path);
+    char *sl = strrchr(out, '/');
+    if (sl && sl != out)
+        *sl = 0;
+    else if (sl)
+        out[1] = 0;
+    else
+        snprintf(out, n, ".");
+}
+
+static void pv_rebuild(struct app *a)
+{
+    md_free(a->md);
+    size_t total = 0;
+    for (int i = 0; i < a->n; i++)
+        total += a->l[i].len + 1;
+    char *t = malloc(total + 1);
+    size_t o = 0;
+    for (int i = 0; i < a->n; i++) {
+        memcpy(t + o, a->l[i].s, a->l[i].len);
+        o += a->l[i].len;
+        t[o++] = '\n';
+    }
+    a->md = md_parse(t, o);
+    free(t);
+}
+
+static void pv_layout(struct app *a)
+{
+    if (!a->md)
+        return;
+    int colw = pv_col(a, NULL);
+    if (md_width(a->md) != colw || md_height(a->md) == 0) {
+        char dir[PATH_MAX];
+        pv_dir(a, dir, sizeof(dir));
+        md_layout(a->md, colw, dir);
+    }
+    int max = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
+    a->md_scroll = LM_CLAMP(a->md_scroll, 0, max);
+}
+
+static void preview_set(struct app *a, bool on)
+{
+    if (on && (g_note || !is_md_path(a->path))) {
+        msg(a, "The preview is for Markdown files (.md)");
+        return;
+    }
+    if (on == a->preview)
+        return;
+    a->preview = on;
+    a->md_hover = NULL;
+    a->md_sb_drag = false;
+    if (on) {
+        double frac = a->n > 1 ? (double)a->cy / (a->n - 1) : 0;       /* about where the cursor was */
+        pv_rebuild(a);
+        pv_layout(a);
+        a->md_scroll = (int)(frac * LM_MAX(md_height(a->md) - pv_view_h(a), 0));
+    } else {
+        double frac = md_height(a->md) > pv_view_h(a) ? (double)a->md_scroll / (md_height(a->md) - pv_view_h(a)) : 0;
+        int y = (int)(frac * (a->n - 1) + 0.5);                          /* and the other way */
+        a->ay = a->cy = LM_CLAMP(y, 0, a->n - 1);
+        a->ax = a->cx = 0;
+        a->top = LM_MAX(a->cy - 2, 0);
+        a->seen_cy = -1;
+    }
+    set_title(a);
+    a->win.redraw = true;
+}
+
+/* A Markdown file opens as a page, any other one (and a note) as text. */
+static void preview_auto(struct app *a)
+{
+    bool want = !g_note && a->path[0] && is_md_path(a->path);
+    a->preview = false;
+    md_free(a->md);
+    a->md = NULL;
+    a->md_scroll = 0;
+    if (want)
+        preview_set(a, true);
+    else
+        set_title(a);
+}
+
+static void spawn_detached(char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        pid_t pid2 = fork();
+        if (pid2 == 0) {
+            setsid();
+            int nul = open("/dev/null", O_RDWR);
+            if (nul >= 0) {
+                dup2(nul, 0);
+                dup2(nul, 1);
+                dup2(nul, 2);
+            }
+            execvp(argv[0], argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
+static void open_link(struct app *a, const char *url)
+{
+    if (!strncmp(url, "http://", 7) || !strncmp(url, "https://", 8) || !strncmp(url, "mailto:", 7)) {
+        const char *prog = getenv("MELLAGUI_XDG_OPEN");
+        char *argv[] = { (char *)(prog && *prog ? prog : "xdg-open"), (char *)url, NULL };
+        spawn_detached(argv);
+        msg(a, "Opened %s", url);
+        return;
+    }
+    if (url[0] == '#' || strstr(url, "://") || !url[0])
+        return;
+    char path[PATH_MAX], dir[PATH_MAX];
+    pv_dir(a, dir, sizeof(dir));
+    snprintf(path, sizeof(path), url[0] == '/' ? "%s%s" : "%s/%s", url[0] == '/' ? "" : dir, url);
+    char *hash = strchr(path, '#');
+    if (hash)
+        *hash = 0;
+    if (access(path, R_OK) != 0) {
+        msg(a, "No such file: %s", path);
+        return;
+    }
+    char self[PATH_MAX];
+    ssize_t k = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (k <= 0)
+        return;
+    self[k] = 0;
+    char *argv[] = { self, path, NULL };
+    spawn_detached(argv);
+}
+
+/* Keys in the preview. Returns true when the key was dealt with (the text cannot be changed there). */
+static bool preview_key(struct app *a, uint32_t ks, char letter)
+{
+    int vh = pv_view_h(a), max = LM_MAX(md_height(a->md) - vh, 0);
+    bool ctrl = (a->win.mods & LM_MOD_CTRL) != 0, shift = (a->win.mods & LM_MOD_SHIFT) != 0;
+    if (letter == 'm' || (!ctrl && (ks == 'e' || ks == 'E'))) {
+        preview_set(a, false);
+        return true;
+    }
+    if (letter == 'q' || letter == 'o' || letter == 'n' || ks == LM_KS_F1)           /* these go on as in the text */
+        return false;
+    int d = 0;
+    switch (ks) {
+    case 0xff52: d = -PV_STEP; break;                                   /* Up */
+    case 0xff54: d = PV_STEP; break;                                    /* Down */
+    case 0xff55: d = -(vh - PV_STEP); break;                            /* PageUp */
+    case 0xff56: d = vh - PV_STEP; break;                               /* PageDown */
+    case ' ': d = shift ? -(vh - PV_STEP) : vh - PV_STEP; break;
+    case 0xff50: a->md_scroll = 0; break;                               /* Home */
+    case 0xff57: a->md_scroll = max; break;                             /* End */
+    default: break;
+    }
+    a->md_scroll = LM_CLAMP(a->md_scroll + d, 0, max);
+    return true;
+}
+
+static void pv_thumb(const struct app *a, int *ty, int *th)
+{
+    int track = pv_view_h(a), total = LM_MAX(md_height(a->md), 1), vh = pv_view_h(a);
+    *th = LM_CLAMP(track * vh / total, LM_MIN(28, track), track);
+    int max = LM_MAX(total - vh, 1);
+    *ty = TOP_H + (track - *th) * a->md_scroll / max;
+}
+
+static void preview_content(struct app *a)
+{
+    pv_layout(a);
+    int cx;
+    pv_col(a, &cx);
+    md_paint(&a->win, a->md, cx, TOP_H, pv_col(a, NULL), pv_view_h(a), a->md_scroll);
+}
+
+static void preview_scrollbar(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int sbw = lm_metrics.scrollbar_width, x = w->bw - sbw;
+    wlwin_fill(w, x, TOP_H, sbw, pv_view_h(a), COL_BAR);
+    if (md_height(a->md) <= pv_view_h(a))
+        return;
+    int ty, th;
+    pv_thumb(a, &ty, &th);
+    bool hot = a->md_sb_drag || (a->px >= x && a->py >= ty && a->py < ty + th);
+    wlwin_fill(w, x + 2, ty + 1, sbw - 4, th - 2, hot ? lm_theme.control_hot : lm_theme.control);
+}
+
+static void preview_dump(struct app *a)
+{
+    const char *path = getenv("MELLAGUI_EDIT_DUMP");
+    if (!path || !*path)
+        return;
+    char tmpn[PATH_MAX + 8];
+    snprintf(tmpn, sizeof(tmpn), "%s.tmp", path);
+    FILE *f = fopen(tmpn, "w");
+    if (!f)
+        return;
+    int cx = 0;
+    if (a->preview) {
+        pv_col(a, &cx);
+        fprintf(f, "preview=1 colx=%d top=%d scroll=%d view=%d\n", cx, TOP_H, a->md_scroll, pv_view_h(a));
+        md_dump(a->md, f);
+    } else {
+        fprintf(f, "preview=0\nok\n");
+    }
+    fclose(f);
+    rename(tmpn, path);
+}
+
+enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_CUT, B_COPY, B_PASTE, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, B_VIEW, N_BTNS };
 
 static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
 {
-    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Cut", "Copy", "Paste", "Find", "A-", "", "A+", "Help" };
+    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Cut", "Copy", "Paste", "Find", "A-", "", "A+", "Help", "" };
     if (i == B_ZOOM) {
         snprintf(buf, n, "%d%%", a->zoom);
         return buf;
     }
+    if (i == B_VIEW)
+        return a->preview ? "Edit" : "Preview";
     return l[i];
 }
 
@@ -943,6 +1205,8 @@ static void btn_rect(const struct app *a, int i, int *x, int *w)
     *x = bx;
     *w = chars * LM_FONT_W + 16;
     if (a->win.bw > 0 && bx + *w + 6 > a->win.bw)
+        *w = 0;
+    if (i == B_VIEW && (g_note || !is_md_path(a->path)))                /* only a Markdown file has the button */
         *w = 0;
 }
 
@@ -974,6 +1238,7 @@ static void do_button(struct app *a, int i)
     case B_ZOOM: set_zoom(a, 0); break;                                 /* the size shown: a click goes back to 100 % */
     case B_BIGGER: set_zoom(a, 1); break;
     case B_HELP: a->help = true; break;
+    case B_VIEW: preview_set(a, !a->preview); break;
     }
     a->win.redraw = true;
 }
@@ -1295,6 +1560,12 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);
     char letter = (tl == 1 && ctrl && !alt && !super) ? (char)((txt[0] >= 'A' && txt[0] <= 'Z') ? txt[0] + 32 : txt[0]) : 0;
+    if (letter == 'm' && !g_note && is_md_path(a->path) && !a->preview) {
+        preview_set(a, true);
+        return;
+    }
+    if (a->preview && a->md && preview_key(a, ks, letter))
+        return;
     if (g_note && letter && note_key(a, letter))
         return;
     if (letter) {
@@ -1493,6 +1764,7 @@ static void paint_help(struct wlwin *w)
         "",
         "Ctrl+F          find, then Enter or F3 for the next match",
         "Ctrl+G          go to a line number",
+        "Ctrl+M          a Markdown file: the page / the text (E also goes back to the text)",
         "Ctrl+Z / Ctrl+Y undo / redo",
         "Ctrl+A C X V    select all, copy, cut, paste (also Ctrl+Insert, Shift+Delete, Shift+Insert)",
         "",
@@ -1569,6 +1841,10 @@ static void paint(struct wlwin *w)
         a->seen_cols = a->cols_visible;
     }
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
+    if (a->preview && (g_note || !is_md_path(a->path)))                  /* (Save as to another name) */
+        a->preview = false;
+    if (a->preview)
+        preview_content(a);                                              /* (under the bars: they are drawn over its ends) */
     if (!g_note)
         wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                     /* the button bar */
     for (int i = 0; i < (g_note ? 0 : N_BTNS); i++) {
@@ -1577,14 +1853,18 @@ static void paint(struct wlwin *w)
         btn_rect(a, i, &bx, &bwid);
         if (bwid == 0)
             continue;
-        const uint32_t base[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_rust, lm_theme.btn_sky, lm_theme.btn_lime, lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_grey, lm_theme.btn_slate, lm_theme.btn_rose };
-        const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit };
+        const uint32_t base[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_rust, lm_theme.btn_sky, lm_theme.btn_lime, lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_grey, lm_theme.btn_slate, lm_theme.btn_rose, lm_theme.btn_orange };
+        const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit, lm_theme.btn_orange_lit };
         bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
         bool idle = (i == B_CUT || i == B_COPY) && !has_sel(a);             /* nothing selected: Cut and Copy have nothing to take */
         fill_round(w, bx, 2, bwid, TOP_H - 4, lm_button_radius((TOP_H - 4) / 2), idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
         wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? lm_theme.title_text_idle : lm_theme.on_colour, 0);
+    }
+    if (a->preview) {
+        preview_scrollbar(a);
+        goto status;
     }
     wlwin_fill(w, 0, TOP_H, gw, w->bh - bars - TOP_H, COL_GUTTER_BG);
     int y0, y1;
@@ -1629,6 +1909,7 @@ static void paint(struct wlwin *w)
         }
     }
     paint_scrollbar(w, a);
+status:;
     int sy = w->bh - STATUS_H;
     if (g_note) {
         if (a->msg[0] && now_ms() < a->msg_until) {                     /* a note has no status line: what it has to say comes as a strip over the bottom */
@@ -1644,6 +1925,12 @@ static void paint(struct wlwin *w)
     const char *name = a->path[0] ? a->path : "untitled";
     snprintf(left, sizeof(left), "%s%s", a->modified ? "* " : "", name);
     snprintf(right, sizeof(right), "Ln %d, Col %d   %d lines", a->cy + 1, col_of(&a->l[a->cy], a->cx) + 1, a->n);
+    if (a->preview) {
+        int range = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
+        snprintf(right, sizeof(right), "Ctrl+M edits   %d%%", range ? a->md_scroll * 100 / range : 100);
+        if (a->md_hover)
+            snprintf(left, sizeof(left), "%s", a->md_hover);
+    }
     bool showing = a->msg[0] && now_ms() < a->msg_until;
     wlwin_text(w, 6, sy + 2, showing ? a->msg : left, 1, showing ? COL_WARN : COL_FG, w->bw - 12 - (int)strlen(right) * LM_FONT_W);
     wlwin_text(w, w->bw - 6 - (int)strlen(right) * LM_FONT_W, sy + 2, right, 1, COL_DIM, 0);
@@ -1664,6 +1951,7 @@ static void paint(struct wlwin *w)
     }
     if (a->help)
         paint_help(w);
+    preview_dump(a);
 }
 
 /* ---- mouse ----------------------------------------------------------------------------------------------------------------- */
@@ -1727,10 +2015,23 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->hover = btn_at(a, a->px, a->py);
             w->redraw = true;
         }
-        if (a->sb_drag)
+        if (a->preview && a->md) {
+            int cx;
+            pv_col(a, &cx);
+            const char *url = a->py >= TOP_H && a->px < w->bw - lm_metrics.scrollbar_width ?
+                              md_link_at(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll) : NULL;
+            a->md_hover = url;
+            if (a->md_sb_drag) {
+                int ty, th;
+                pv_thumb(a, &ty, &th);
+                int room = LM_MAX(pv_view_h(a) - th, 1), max = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
+                a->md_scroll = LM_CLAMP(((int)a->py - a->md_sb_grab - TOP_H) * max / room, 0, max);
+            }
+        } else if (a->sb_drag) {
             sb_drag_to(a, a->py);
-        else if (a->dragging)
+        } else if (a->dragging) {
             place_from_pointer(a, true);
+        }
         w->redraw = true;                                                /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
@@ -1740,7 +2041,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 a->menu_kind = 1;
                 if (!wlwin_menu(w, wltext_menu(a->pbuf)))
                     a->menu_kind = 0;
-            } else if (!a->help && a->py >= TOP_H && a->py < TOP_H + a->rows_visible * a->zt.ch && a->px < w->bw - lm_metrics.scrollbar_width) {
+            } else if (!a->help && !a->preview && a->py >= TOP_H && a->py < TOP_H + a->rows_visible * a->zt.ch && a->px < w->bw - lm_metrics.scrollbar_width) {
                 if (!has_sel(a))
                     place_from_pointer(a, false);
                 a->menu_kind = 2;
@@ -1761,6 +2062,31 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int b = btn_at(a, a->px, a->py);
             if (b >= 0)
                 do_button(a, b);
+            break;
+        }
+        if (a->preview && a->md) {
+            if (args[3].u == 1) {
+                int sbx = w->bw - lm_metrics.scrollbar_width, max = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
+                if (a->px >= sbx && a->py < TOP_H + pv_view_h(a)) {      /* the scroll bar: drag the thumb, a click beside it pages */
+                    int ty, th;
+                    pv_thumb(a, &ty, &th);
+                    if (a->py >= ty && a->py < ty + th) {
+                        a->md_sb_drag = true;
+                        a->md_sb_grab = (int)a->py - ty;
+                    } else {
+                        a->md_scroll = LM_CLAMP(a->md_scroll + (a->py < ty ? -1 : 1) * (pv_view_h(a) - PV_STEP), 0, max);
+                    }
+                } else if (a->py >= TOP_H && a->py < TOP_H + pv_view_h(a)) {
+                    int cx;
+                    pv_col(a, &cx);
+                    const char *url = md_link_at(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll);
+                    if (url)
+                        open_link(a, url);
+                }
+            } else {
+                a->md_sb_drag = false;
+            }
+            w->redraw = true;
             break;
         }
         if (args[3].u == 1 && a->px >= w->bw - lm_metrics.scrollbar_width && a->py < TOP_H + sb_track_h(a)) {
@@ -1802,7 +2128,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:
-        if (args[1].u == 0 && (w->mods & LM_MOD_CTRL)) {                 /* Ctrl + wheel: the text size */
+        if (a->preview && a->md && args[1].u == 0) {
+            int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
+            if (lines == 0)
+                lines = args[2].f > 0 ? 1 : -1;
+            a->md_scroll = LM_CLAMP(a->md_scroll + lines * (PV_STEP / 2), 0, LM_MAX(md_height(a->md) - pv_view_h(a), 0));
+            w->redraw = true;
+        } else if (args[1].u == 0 && (w->mods & LM_MOD_CTRL)) {          /* Ctrl + wheel: the text size */
             set_zoom(a, args[2].f > 0 ? -1 : 1);
         } else if (args[1].u == 0) {
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
@@ -2003,6 +2335,33 @@ static int selftest(void)
         snprintf(p, sizeof(p), "%s/alpine.txt", tdir);
         unlink(p);
         rmdir(tdir);
+    }
+    /* Markdown */
+    {
+        const char *src = "# Title\n\nSome **bold** and *it* and `code` with [a link](http://x.y/z) and https://bare.example/a.\n\n"
+                          "- one\n- two\n  - nested\n- [x] done\n\n1. a\n2. b\n\n> quote\n> more\n\n```\ncode block\n  indented\n```\n\n"
+                          "| a | b |\n|---|:-:|\n| 1 | **2** |\n\n---\n\nSetext\n======\n\n![pic](nofile.png)\n\n    four spaces\n";
+        struct md_doc *d = md_parse(src, strlen(src));
+        md_layout(d, 400, NULL);
+        CHECK(md_count(d, MD_N_HEADINGS) == 2, "markdown: %d headings", md_count(d, MD_N_HEADINGS));
+        CHECK(md_count(d, MD_N_CODE) == 2, "markdown: %d code blocks", md_count(d, MD_N_CODE));
+        CHECK(md_count(d, MD_N_TABLES) == 1, "markdown: %d tables", md_count(d, MD_N_TABLES));
+        CHECK(md_count(d, MD_N_LINKS) == 3, "markdown: %d addresses", md_count(d, MD_N_LINKS));       /* the link, the bare one, the picture */
+        CHECK(md_count(d, MD_N_BLOCKS) == 15, "markdown: %d blocks", md_count(d, MD_N_BLOCKS));
+        int h400 = md_height(d);
+        md_layout(d, 400, NULL);
+        CHECK(md_height(d) == h400, "markdown: the layout is not repeatable");
+        md_layout(d, 160, NULL);
+        CHECK(md_height(d) > h400, "markdown: a narrow page is taller (%d, %d)", md_height(d), h400);
+        char *buf = NULL;
+        size_t bl = 0;
+        FILE *mf = open_memstream(&buf, &bl);
+        md_dump(d, mf);
+        fclose(mf);
+        CHECK(strstr(buf, "link=http://x.y/z") && strstr(buf, "link=https://bare.example/a") && strstr(buf, "[image: pic]"), "markdown: runs\n%s", buf);
+        CHECK(strstr(buf, "\"bold\"") && strstr(buf, "\"nested\"") && strstr(buf, "\"four spaces\""), "markdown: words\n%s", buf);
+        free(buf);
+        md_free(d);
     }
     return bad ? 1 : 0;
 }

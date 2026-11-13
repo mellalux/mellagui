@@ -326,6 +326,11 @@ void lm_font_ui_cells(bool cells)
     F.ui_mono = cells;
 }
 
+bool lm_font_ui_cells_get(void)
+{
+    return F.ui_mono;
+}
+
 static void ensure(void);
 
 const char *lm_font_ui_name(void)
@@ -783,7 +788,7 @@ void lm_font_label_styled(uint32_t cp, int scale, bool bold, struct lm_font_glyp
 void lm_font_label_scaled(uint32_t cp, double scale, bool bold, struct lm_font_glyph *out)
 {
     ensure();
-    scale = scale < 1.0 ? 1.0 : scale > 32.0 ? 32.0 : scale;
+    scale = scale < 0.5 ? 0.5 : scale > 32.0 ? 32.0 : scale;       /* (a zoomed window may ask for less than the layout's size) */
     int ch = (int)lround(LM_FONT_H * scale);
     int g = 0, adv1 = 0;
     struct lm_ttf *t = ui_face(cp, bold, &g, &adv1);

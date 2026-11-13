@@ -14145,6 +14145,51 @@ class TestSaver(Base):
         r = subprocess.run([exe, '--bench', '96x54', '--clock-speed', '60', '--speed', '200', '--density', '150', '--seed', '3'], capture_output=True, text=True, timeout=30)
         self.assertEqual((r.returncode, r.stdout.split(':')[0]), (0, '96x54'), r.stderr)         # (an option used to eat the ones after it and crash)
 
+    @staticmethod
+    def matrix_frame(args, name):
+        """A frame of the room (--bench 640x360, fixed time of day and seed) as (w, h, bytes)."""
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            raise unittest.SkipTest('mellagui-matrix not built')
+        path = os.path.join(tmp, name + '.ppm')
+        r = subprocess.run([exe, '--bench', '640x360', '--time', '14:00', '--seed', '3'] + args, capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, MELLAGUI_MATRIX_PPM=path))
+        assert r.returncode == 0, r.stderr
+        d = open(path, 'rb').read().split(b'\n', 3)
+        w, h = map(int, d[1].split())
+        return w, h, d[3]
+
+    def cat_pixels(self, at):
+        """(pixels the cat changes, of those the ones that glow yellow-green, bounding box of the changes) at the moment `at` of the cat's story."""
+        w, h, a = self.matrix_frame(['--at', str(at)], 'cat-%s' % at)
+        _, _, n = self.matrix_frame(['--at', str(at), '--no-cat'], 'nocat-%s' % at)
+        diff = glow = 0
+        xs, ys = [], []
+        for i in range(w * h):
+            if a[3 * i:3 * i + 3] != n[3 * i:3 * i + 3]:
+                diff += 1
+                xs.append(i % w)
+                ys.append(i // w)
+                if a[3 * i + 1] >= 235 and 140 <= a[3 * i] <= 235 and 60 <= a[3 * i + 2] <= 190 and n[3 * i + 1] < 200:
+                    glow += 1
+        return diff, glow, ((min(xs), min(ys), max(xs), max(ys)) if xs else None)
+
+    def test_a_cat_sits_on_the_floor_and_its_eyes_glow_when_it_looks_at_the_camera(self):
+        diff, glow_away, box = self.cat_pixels(0)                         # (the head looks somewhere else)
+        self.assertGreater(diff, 3000, 'a cat is in the picture')
+        self.assertGreater(box[1], 360 // 2, 'it sits on the floor, in the lower half')
+        self.assertLess(box[2] - box[0], 360, 'and it is a cat, not a wall')
+        diff, glow_at, _ = self.cat_pixels(12)                            # (the head is turned to the camera)
+        self.assertGreater(glow_at, 20, 'the eyes glow when the head looks at the camera')
+        self.assertLess(glow_away, glow_at // 3, 'and not when it looks away')
+
+    def test_no_cat_leaves_the_room_as_it_was(self):
+        _, _, a = self.matrix_frame(['--no-cat', '--at', '3'], 'nocat-a')
+        _, _, b = self.matrix_frame(['--no-cat', '--at', '3'], 'nocat-b')
+        self.assertEqual(a, b)
+        _, _, c = self.matrix_frame(['--at', '3'], 'cat-c')
+        self.assertNotEqual(a, c)
+
     def test_a_bad_time_is_refused(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
         if not os.path.exists(exe):

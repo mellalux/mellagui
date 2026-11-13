@@ -3,7 +3,7 @@
 
 /*
  * H.264 decoder for exactly the streams h264enc.c makes (the subset in h264.h): constrained baseline, one slice per picture, CAVLC,
- * Intra16x16 DC / I_PCM / P_L0_16x16 with whole-pixel motion vectors / P_Skip (its vector inferred), no deblocking filter. It lets mellagui-view play its own recordings
+ * Intra16x16 DC / I_PCM / P_L0_16x16 with whole-pixel motion vectors / P_Skip (its vector inferred), with the deblocking filter. It lets mellagui-view play its own recordings
  * without ffmpeg. Anything else in a stream is refused with a message ("not supported: ..."), so the viewer can hand such a file to
  * ffmpeg instead. Not thread safe. Owner: h264dec.c.
  */

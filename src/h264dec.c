@@ -17,6 +17,7 @@ struct lm_h264dec {
     uint8_t *Y, *U, *V;             /* the picture; a P picture is decoded in place over the one before */
     uint8_t *rY, *rU, *rV;          /* the picture before (the reference), copied when a P picture starts */
     struct lm_mv *mvs;              /* the vectors of the macroblocks decoded so far in this picture */
+    uint8_t *qpmb;                  /* the quantizer of each macroblock of this picture (0 for I_PCM), for the deblocking filter */
     uint8_t *nzy, *nzc;
     int have_idr;
 };
@@ -169,9 +170,10 @@ struct lm_h264dec *lm_h264dec_create(const uint8_t *sps, size_t sps_len, const u
     d->rU = calloc((size_t)d->cs * (size_t)d->mbh * 8, 1);
     d->rV = calloc((size_t)d->cs * (size_t)d->mbh * 8, 1);
     d->mvs = calloc((size_t)d->mbw * (size_t)d->mbh, sizeof(*d->mvs));
+    d->qpmb = calloc((size_t)d->mbw * (size_t)d->mbh, 1);
     d->nzy = calloc((size_t)d->mbw * (size_t)d->mbh, 16);
     d->nzc = calloc((size_t)d->mbw * (size_t)d->mbh, 8);
-    if (!d->Y || !d->U || !d->V || !d->rY || !d->rU || !d->rV || !d->mvs || !d->nzy || !d->nzc) {
+    if (!d->Y || !d->U || !d->V || !d->rY || !d->rU || !d->rV || !d->mvs || !d->qpmb || !d->nzy || !d->nzc) {
         snprintf(err, errsz, "out of memory");
         goto fail;
     }
@@ -199,6 +201,7 @@ void lm_h264dec_free(struct lm_h264dec *d)
     free(d->rU);
     free(d->rV);
     free(d->mvs);
+    free(d->qpmb);
     free(d->nzy);
     free(d->nzc);
     free(d);
@@ -435,18 +438,27 @@ static int decode_slice(struct lm_h264dec *d, const uint8_t *rbsp, size_t n, int
         BAD("quantizer %d", qp);
     int qi = qp + d->chroma_qp_offset;
     int qpc = lm_h264_chroma_qp(qi < 0 ? 0 : qi > 51 ? 51 : qi);
+    int deblock = 0, off_a = 0, off_b = 0;
     if (d->deblock_present) {
-        if (lm_br_ue(&r, &v) < 0)
+        if (lm_br_ue(&r, &v) < 0 || v > 2)
             BAD("damaged slice header");
-        if (v != 1)
-            BAD("the deblocking filter");
+        deblock = v != 1;                                               /* 0 = on, 2 = on but not across slices (one slice: the same) */
+        if (deblock) {
+            int32_t oa, ob;
+            if (lm_br_se(&r, &oa) < 0 || lm_br_se(&r, &ob) < 0 || oa < -6 || oa > 6 || ob < -6 || ob > 6)
+                BAD("damaged slice header");
+            off_a = oa * 2;
+            off_b = ob * 2;
+        }
     }
     if (!idr && !d->have_idr)
         BAD("a P picture without an IDR picture before it");
 
     int mbs = d->mbw * d->mbh, mbi = 0;
-    for (int i = 0; i < mbs; i++)                                       /* (every macroblock written below before a neighbour reads it) */
+    for (int i = 0; i < mbs; i++) {                                     /* (every macroblock written below before a neighbour reads it) */
         d->mvs[i] = (struct lm_mv){ 0, 0, -1 };
+        d->qpmb[i] = (uint8_t)qp;
+    }
     if (p_slice) {                                                      /* the picture before is what the vectors point into */
         memcpy(d->rY, d->Y, (size_t)d->ys * (size_t)d->mbh * 16);
         memcpy(d->rU, d->U, (size_t)d->cs * (size_t)d->mbh * 8);
@@ -543,6 +555,7 @@ static int decode_slice(struct lm_h264dec *d, const uint8_t *rbsp, size_t n, int
             }
             memset(d->nzy + mb * 16, 16, 16);
             memset(d->nzc + mb * 8, 16, 8);
+            d->qpmb[mb] = 0;                                            /* (the filter treats an I_PCM macroblock as quantizer 0) */
         } else if (it >= 1 && it <= 24) {                               /* Intra16x16 */
             int pred = (int)(it - 1) % 4, cbp_c = ((int)(it - 1) / 4) % 3, cbp_l = (it - 1) / 12 ? 15 : 0;
             if (pred != 2)
@@ -583,6 +596,8 @@ static int decode_slice(struct lm_h264dec *d, const uint8_t *rbsp, size_t n, int
         }
         mbi++;
     }
+    if (deblock)
+        lm_h264_deblock(d->Y, d->U, d->V, d->ys, d->cs, d->mbw, d->mbh, d->mvs, d->nzy, d->qpmb, d->chroma_qp_offset, off_a, off_b);
     if (idr)
         d->have_idr = 1;
     return 0;

@@ -14,6 +14,7 @@ struct lm_h264enc {
     uint8_t *rY, *rU, *rV;          /* the reconstruction of the picture before (the reference), copied when a P picture starts */
     struct lm_mv *mvs;              /* per macroblock: its vector (this picture for the ones done, the picture before for the rest) */
     uint32_t *rowh, *rowh_prev;     /* a hash of every source row, this picture's and the one before's (to find a scroll) */
+    uint8_t *qpmb;                  /* the quantizer of each macroblock (all the same), for the deblocking filter */
     uint8_t *prev;                  /* the previous source picture (XRGB, w * h * 4), NULL before the first one */
     uint8_t *nzy;                   /* per macroblock: total_coeff of its 16 luma blocks (by block index) */
     uint8_t *nzc;                   /* ... and of its 2 x 4 chroma blocks */
@@ -62,16 +63,18 @@ struct lm_h264enc *lm_h264enc_create(int width, int height, int qp)
     e->rU = calloc((size_t)e->cs * (size_t)e->mbh * 8, 1);
     e->rV = calloc((size_t)e->cs * (size_t)e->mbh * 8, 1);
     e->mvs = calloc((size_t)e->mbw * (size_t)e->mbh, sizeof(*e->mvs));
+    e->qpmb = malloc((size_t)e->mbw * (size_t)e->mbh);
     e->rowh = calloc((size_t)e->h, sizeof(uint32_t));
     e->rowh_prev = calloc((size_t)e->h, sizeof(uint32_t));
     e->nzy = calloc((size_t)e->mbw * (size_t)e->mbh, 16);
     e->nzc = calloc((size_t)e->mbw * (size_t)e->mbh, 8);
-    if (!e->Y || !e->U || !e->V || !e->rY || !e->rU || !e->rV || !e->mvs || !e->rowh || !e->rowh_prev || !e->nzy || !e->nzc) {
+    if (!e->Y || !e->U || !e->V || !e->rY || !e->rU || !e->rV || !e->mvs || !e->qpmb || !e->rowh || !e->rowh_prev || !e->nzy || !e->nzc) {
         lm_h264enc_free(e);
         return NULL;
     }
     for (size_t i = 0; i < (size_t)e->mbw * (size_t)e->mbh; i++)
         e->mvs[i].ref = -1;
+    memset(e->qpmb, e->qp, (size_t)e->mbw * (size_t)e->mbh);
     return e;
 }
 
@@ -86,6 +89,7 @@ void lm_h264enc_free(struct lm_h264enc *e)
     free(e->rU);
     free(e->rV);
     free(e->mvs);
+    free(e->qpmb);
     free(e->rowh);
     free(e->rowh_prev);
     free(e->prev);
@@ -791,7 +795,9 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
         lm_bw_put(bw, 0, 1);                            /* adaptive_ref_pic_marking_mode_flag */
     }
     lm_bw_se(bw, 0);                                    /* slice_qp_delta */
-    lm_bw_ue(bw, 1);                                    /* disable_deblocking_filter_idc: off */
+    lm_bw_ue(bw, 0);                                    /* disable_deblocking_filter_idc: on */
+    lm_bw_se(bw, 0);                                    /* slice_alpha_c0_offset_div2 */
+    lm_bw_se(bw, 0);                                    /* slice_beta_offset_div2 */
 
     size_t nmb = (size_t)e->mbw * (size_t)e->mbh;
     int gdy = 0;                                        /* the whole picture moved this far up or down: every macroblock tries it first */
@@ -809,6 +815,7 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
 
     int ys[256], us[64], vs[64];
     int skip_run = 0;
+    bool dirty = idr;                                   /* does the deblocking filter have anything to do (a macroblock that is not a plain skip)? */
     struct mbc m;
     for (int mby = 0; mby < e->mbh; mby++)
         for (int mbx = 0; mbx < e->mbw; mbx++) {
@@ -820,6 +827,7 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
             }
             if (p_slice && mb_unchanged(e, xrgb, stride, mbx, mby)) {
                 if (skx || sky) {                       /* the skip would move it: say "no motion" with a vector and no residual */
+                    dirty = true;
                     memset(&m, 0, sizeof(m));
                     m.type = 1;
                     m.pmx = pmx;
@@ -880,9 +888,11 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
                 memset(e->nzy + mb * 16, 0, 16);
                 memset(e->nzc + mb * 8, 0, 8);
                 e->mvs[mb] = (struct lm_mv){ (int16_t)skx, (int16_t)sky, 0 };
+                dirty |= skx || sky;
                 remember_mb(e, xrgb, stride, mbx, mby);
                 continue;
             }
+            dirty = true;
             if (p_slice) {
                 lm_bw_ue(bw, (uint32_t)skip_run);
                 skip_run = 0;
@@ -899,6 +909,8 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
     if (p_slice && skip_run)
         lm_bw_ue(bw, (uint32_t)skip_run);
     lm_bw_trailing(bw);
+    if (dirty)                                          /* the reference of the next picture is the filtered one; intra prediction above used the unfiltered */
+        lm_h264_deblock(e->Y, e->U, e->V, e->ys, e->cs, e->mbw, e->mbh, e->mvs, e->nzy, e->qpmb, 0, 0, 0);
     if (bw->oom)
         return NULL;
     uint32_t *t = e->rowh_prev;                         /* this picture's rows are what the next one is compared with */

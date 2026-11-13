@@ -2596,9 +2596,14 @@ static void paint_widget(struct app *a, int idx)
         draw_text(a, r->x + BOX + 10, text_y(r), w->text, COL_TEXT, r->w - BOX - 10);
         break;
     }
-    case W_RADIO: {
-        draw_text(a, r->x, text_y(r), w->on ? "(*)" : "( )", w->on ? COL_ACCENT : (hot ? COL_TEXT : COL_DIM), 0);
-        draw_text(a, r->x + 32, text_y(r), w->text, w->on ? COL_TEXT : COL_DIM, r->w - 32);
+    case W_RADIO: {                                             /* a round radio button: a ring, with a dot in it when it is the chosen one */
+        const int d = 16;
+        int cy = r->y + (r->h - d) / 2;
+        wlwin_round_fill(&a->win, r->x, cy, d, d, d / 2, w->on || focus ? COL_ACCENT : (hot ? COL_TEXT : COL_DIM));
+        wlwin_round_fill(&a->win, r->x + 2, cy + 2, d - 4, d - 4, (d - 4) / 2, hot ? COL_HOVER : COL_FIELD);
+        if (w->on)
+            wlwin_round_fill(&a->win, r->x + 5, cy + 5, d - 10, d - 10, (d - 10) / 2, COL_ACCENT);
+        draw_text(a, r->x + 26, text_y(r), w->text, w->on ? COL_TEXT : COL_DIM, r->w - 26);
         if (focus)
             outline(a, (struct rect){ r->x - 2, r->y + 2, r->w, r->h - 4 }, COL_ACCENT);
         break;

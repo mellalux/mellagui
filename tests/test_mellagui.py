@@ -13844,7 +13844,7 @@ class TestSaver(Base):
 
     def test_defaults(self):
         p, c = self.start('mellagui-sv1', '--config', 'none')
-        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0', 'style': 'room', 'cat': '1'})
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'shield': '0', 'style': 'room', 'cat': '1', 'model': 'auto'})
 
     def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
         p, c = self.start('mellagui-sv2', '--config', 'none')
@@ -14050,7 +14050,7 @@ class TestSaver(Base):
         c.cmd('quit')
         p.wait(timeout=5)
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
-        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0', 'style': 'room', 'cat': '1'})
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'shield': '0', 'style': 'room', 'cat': '1', 'model': 'auto'})
 
     def test_the_style_is_a_setting_and_flat_is_handed_to_our_program(self):
         d = os.path.join(tmp, 'sv-style')
@@ -14092,6 +14092,25 @@ class TestSaver(Base):
         with self.assertRaises(RuntimeError):
             c.cmd('settings saver-cat maybe')
         c.cmd('settings saver-cat 1')
+        self.assertEqual(self.saver(c)['model'], 'auto')
+        c.cmd('settings saver-cat-model builtin')
+        os.unlink(log)
+        c.cmd('saver stop')
+        time.sleep(0.3)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started with the built-in model')
+        self.assertEqual(open(log).read().strip(), '--cat-model builtin')
+        c.cmd("setraw saver-cat-model /tmp/it's a cat.glb")
+        os.unlink(log)
+        c.cmd('saver stop')
+        time.sleep(0.3)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started with a file')
+        self.assertEqual(open(log).read().strip(), "--cat-model /tmp/it's a cat.glb")             # (it went through the shell in quotes: one argument, quote and spaces intact)
+        for bad in ('maybe', 'relative/path.glb'):
+            with self.assertRaises(RuntimeError):
+                c.cmd('settings saver-cat-model %s' % bad)
+        c.cmd('settings saver-cat-model auto')
         c.cmd('settings saver-style flat')
         time.sleep(0.6)
         c.cmd('quit')
@@ -14204,6 +14223,123 @@ class TestSaver(Base):
         _, _, there = self.cat_pixels(80)                                  # (sitting at the other place)
         self.assertGreater(abs((there[0] + there[2]) // 2 - (sitting[0] + sitting[2]) // 2), 60)
 
+    @staticmethod
+    def make_test_glb(path):
+        """A tiny skinned model (a box on two joints, a bobbing animation, a PNG texture) as a .glb: what the cat's loader reads."""
+        import json, struct, zlib
+        def png(w, h, px):
+            raw = b''.join(b'\x00' + b''.join(bytes(p) for p in px[y * w:(y + 1) * w]) for y in range(h))
+            def chunk(t, d):
+                return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+            return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+        pos = [(-0.1, 0, -0.4), (0.1, 0, -0.4), (0.1, 0.3, -0.4), (-0.1, 0.3, -0.4), (-0.1, 0, 0.4), (0.1, 0, 0.4), (0.1, 0.3, 0.4), (-0.1, 0.3, 0.4)]
+        idx = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 6, 2, 3, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3]
+        bin_ = b''
+        views, accs = [], []
+        def add(data, count, ctype, typ, mn=None, mx=None):
+            nonlocal bin_
+            while len(bin_) % 4:
+                bin_ += b'\x00'
+            views.append({'buffer': 0, 'byteOffset': len(bin_), 'byteLength': len(data)})
+            a = {'bufferView': len(views) - 1, 'componentType': ctype, 'count': count, 'type': typ}
+            if mn is not None:
+                a['min'], a['max'] = mn, mx
+            accs.append(a)
+            bin_ += data
+            return len(accs) - 1
+        p = add(b''.join(struct.pack('<3f', *v) for v in pos), 8, 5126, 'VEC3', [-0.1, 0, -0.4], [0.1, 0.3, 0.4])
+        n = add(b''.join(struct.pack('<3f', 0, 1, 0) for _ in pos), 8, 5126, 'VEC3')
+        uv = add(b''.join(struct.pack('<2f', (i % 2), (i // 2 % 2)) for i in range(8)), 8, 5126, 'VEC2')
+        jn = add(b''.join(bytes([0 if v[2] < 0 else 1, 0, 0, 0]) for v in pos), 8, 5121, 'VEC4')
+        wt = add(b''.join(struct.pack('<4f', 1, 0, 0, 0) for _ in pos), 8, 5126, 'VEC4')
+        ix = add(struct.pack('<%dH' % len(idx), *idx), len(idx), 5123, 'SCALAR')
+        ibm = add(struct.pack('<16f', 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -0.3, 0, 1) + struct.pack('<16f', 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -0.4, -0.3, 1), 2, 5126, 'MAT4')
+        t0 = add(struct.pack('<2f', 0, 1), 2, 5126, 'SCALAR', [0], [1])
+        tr = add(struct.pack('<6f', 0, 0.3, 0, 0, 0.32, 0), 2, 5126, 'VEC3')
+        t1 = add(struct.pack('<2f', 0, 1), 2, 5126, 'SCALAR', [0], [1])
+        ro = add(struct.pack('<8f', 0, 0, 0, 1, 0, 0.2, 0, 0.98), 2, 5126, 'VEC4')
+        pic = png(2, 2, [(250, 200, 100), (200, 150, 60), (240, 180, 90), (255, 220, 130)])
+        while len(bin_) % 4:
+            bin_ += b'\x00'
+        views.append({'buffer': 0, 'byteOffset': len(bin_), 'byteLength': len(pic)})
+        img_view = len(views) - 1
+        bin_ += pic
+        while len(bin_) % 4:
+            bin_ += b'\x00'
+        j = {'asset': {'version': '2.0'}, 'scene': 0, 'scenes': [{'nodes': [0, 2]}],
+             'nodes': [{'name': 'Hips', 'children': [1], 'translation': [0, 0.3, 0]}, {'name': 'head', 'translation': [0, 0.1, 0.3]}, {'name': 'body', 'mesh': 0, 'skin': 0}],
+             'meshes': [{'primitives': [{'attributes': {'POSITION': p, 'NORMAL': n, 'TEXCOORD_0': uv, 'JOINTS_0': jn, 'WEIGHTS_0': wt}, 'indices': ix, 'material': 0}]}],
+             'skins': [{'joints': [0, 1], 'inverseBindMatrices': ibm}],
+             'animations': [{'channels': [{'sampler': 0, 'target': {'node': 0, 'path': 'translation'}}, {'sampler': 1, 'target': {'node': 1, 'path': 'rotation'}}],
+                             'samplers': [{'input': t0, 'output': tr}, {'input': t1, 'output': ro}]}],
+             'materials': [{'pbrMetallicRoughness': {'baseColorTexture': {'index': 0}}}], 'textures': [{'source': 0}], 'images': [{'bufferView': img_view, 'mimeType': 'image/png'}],
+             'accessors': accs, 'bufferViews': views, 'buffers': [{'byteLength': len(bin_)}]}
+        js = json.dumps(j).encode()
+        while len(js) % 4:
+            js += b' '
+        data = struct.pack('<4sII', b'glTF', 2, 12 + 8 + len(js) + 8 + len(bin_)) + struct.pack('<I4s', len(js), b'JSON') + js + struct.pack('<I4s', len(bin_), b'BIN\x00') + bin_
+        with open(path, 'wb') as f:
+            f.write(data)
+        return data
+
+    def matrix_exe(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-matrix not built')
+        return exe
+
+    def test_a_glb_model_is_described_and_drawn_as_the_cat(self):
+        exe = self.matrix_exe()
+        path = os.path.join(tmp, 'tom-test.glb')
+        self.make_test_glb(path)
+        r = subprocess.run([exe, '--glb-info', path], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for want in ('mesh: 8 vertices, 12 triangles', 'joints: 2', 'animation: 2 channels, 1.000 s', 'texture: 2 x 2'):
+            self.assertIn(want, r.stdout)
+        _, _, builtin = self.matrix_frame(['--at', '64'], 'glb-builtin')
+        _, _, model = self.matrix_frame(['--at', '64', '--cat-model', path], 'glb-model')
+        _, _, none = self.matrix_frame(['--at', '64', '--no-cat'], 'glb-none')
+        self.assertNotEqual(model, none, 'the model is in the picture')
+        self.assertNotEqual(model, builtin, 'and it is not the built-in cat')
+        w = 640
+        diff = [i for i in range(len(none) // 3) if model[3 * i:3 * i + 3] != none[3 * i:3 * i + 3]]
+        self.assertGreater(len(diff), 300)
+        self.assertGreater(min(i // w for i in diff), 360 // 3, 'it stands on the floor, not at the ceiling')
+
+    def test_a_model_that_cannot_be_read_gives_the_built_in_cat(self):
+        exe = self.matrix_exe()
+        bad = os.path.join(tmp, 'not-a-model.glb')
+        with open(bad, 'wb') as f:
+            f.write(b'this is not a glb file at all, just text' * 5)
+        r = subprocess.run([exe, '--glb-info', bad], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('not a glTF 2 binary file', r.stderr)
+        path = os.path.join(tmp, 'frame-bad.ppm')
+        r = subprocess.run([exe, '--bench', '320x180', '--seed', '3', '--time', '14:00', '--at', '12', '--cat-model', bad], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, MELLAGUI_MATRIX_PPM=path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('the built-in cat is used', r.stderr)
+        _, _, builtin = self.matrix_frame(['--at', '12', '--cat-model', 'builtin'], 'frame-builtin')
+        _, _, again = self.matrix_frame(['--at', '12'], 'frame-auto')
+        self.assertEqual(builtin, again)                                    # (no tom.glb where the tests look: the harness's HOME is not the real one)
+
+    def test_damaged_models_never_crash_the_loader(self):
+        exe = self.matrix_exe()
+        path = os.path.join(tmp, 'mutant.glb')
+        good = self.make_test_glb(os.path.join(tmp, 'mutant-src.glb'))
+        import random
+        rnd = random.Random(7)
+        for k in range(160):
+            d = bytearray(good)
+            for _ in range(rnd.randint(1, 8)):
+                d[rnd.randrange(len(d))] = rnd.randrange(256)
+            if k % 5 == 0:
+                d = d[:rnd.randrange(12, len(d))]
+            with open(path, 'wb') as f:
+                f.write(d)
+            r = subprocess.run([exe, '--glb-info', path], capture_output=True, text=True, timeout=20)
+            self.assertIn(r.returncode, (0, 1), 'mutation %d: %s' % (k, r.stderr[-200:]))
+
     def test_no_cat_leaves_the_room_as_it_was(self):
         _, _, a = self.matrix_frame(['--no-cat', '--at', '3'], 'nocat-a')
         _, _, b = self.matrix_frame(['--no-cat', '--at', '3'], 'nocat-b')
@@ -14247,7 +14383,7 @@ class TestSaver(Base):
         self.wait(lambda: self.saver(c)['enabled'] == '0', 'the box switches it off')
         c.click(x0 + 168, y0 + 14 + 28 + 14)
         self.wait(lambda: self.saver(c)['enabled'] == '1', 'and on again')
-        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 28 + 28 + 8 + 12)    # "Show it now" (below the style radios and the cat's check)
+        c.click(x0 + 160 + 115, y0 + 14 + 28 + 28 + 28 + 28 + 28 + 28 + 8 + 12)    # "Show it now" (below the style radios, the cat's check and its body's radios)
         self.wait(lambda: self.saver(c)['running'] == '1', 'the button shows it')
         self.wait(lambda: self.matrix_windows(c), 'its window')
         c.tap(KEY_A)

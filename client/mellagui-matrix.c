@@ -5,8 +5,6 @@
  *                                   when it started the program as the screensaver: settings, Screensaver page)
  *   mellagui-matrix --flat          the classic flat rain instead of the room
  *   mellagui-matrix --at SECONDS   starts the camera's drift and the cat's story at that moment (to look at a certain pose, and the tests)
- *   mellagui-matrix --glb-info F  describes a .glb model (what the cat could be made of instead of the built-in one)
- *   mellagui-matrix --cat-model M the cat: builtin, auto (default: ~/.local/share/mellagui/tom.glb when it exists, else the built-in one) or a .glb file
  *   mellagui-matrix --no-cat        the room without Tom, the cat that lives on its floor (client/matrixcat.c)
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
  *   mellagui-matrix --time HH:MM    the window shows that time of day (default: the real time, following the clock): sun, moon and stars, colours
@@ -32,10 +30,8 @@
 #include <unistd.h>
 
 #include "font.h"
-#include "glb.h"
 #include "keymap.h"
 #include "matrixcat.h"
-#include "matrixglb.h"
 #include "theme.h"
 #include "util.h"
 #include "wlwin.h"
@@ -256,7 +252,6 @@ struct room {
     bool ready;
     float t;                            /* seconds of the camera's drift */
     bool no_cat;                        /* --no-cat */
-    struct mglb *glb;                   /* the cat made of a .glb model (--cat-model), or NULL: then the built-in one */
     const uint8_t *catg[MCAT_GLYPHS];   /* the glyphs the cat's fur is made of */
     float lut[256][3];                  /* cell colour by brightness */
     const uint8_t *gptr[GLYPH_MAX_CP];  /* glyph rows by code point */
@@ -394,9 +389,7 @@ static inline float clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f 
 struct rjob {
     const struct room *rm;
     const struct cam *cam;
-    const struct mcat *cat;             /* NULL = no (built-in) cat */
-    const struct mglb *glb;             /* the cat of a model, or NULL */
-    const struct mcat *shadow;          /* whose shadow lies on the floor (the built-in cat's pose or the model's), or NULL */
+    const struct mcat *cat;             /* NULL = no cat */
     int cx0, cx1, cy0, cy1;             /* the part of the picture the cat (and its glow) can be in ... */
     const uint8_t *cmask;               /* ... and which 8 x 8 pixel tiles of it (the spheres of its parts, projected), `ctw` tiles a row */
     int ctw;
@@ -847,15 +840,12 @@ static void render_rows(const struct rjob *j)
                             rgb[q] = rgb[q] * (1.0f + 1.3f * sl) + rm->sky.light_col[q] * 0.50f * lit;
                     }
                 }
-                if (surf == 4 && j->shadow) {                                  /* Tom's shadow on the floor (after the sun's patch: the light is what he blocks) */
-                    float sh = mcat_floor_shade(j->shadow, px, pz);
+                if (surf == 4 && j->cat) {                                     /* Tom's shadow on the floor (after the sun's patch: the light is what he blocks) */
+                    float sh = mcat_floor_shade(j->cat, px, pz);
                     rgb[0] *= sh; rgb[1] *= sh; rgb[2] *= sh;
                 }
             }
-            if (j->glb && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1) {   /* the cat of a model */
-                float o3[3] = { c->ox, c->oy, c->oz }, dn[3] = { dx / len, dy / len, dz / len };
-                mglb_pixel(j->glb, x, y, o3, dn, (win ? (ZF - c->oz) / dz : t) * len, inv_f, rgb);
-            } else if (j->cat && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1 && j->cmask[(y >> 3) * j->ctw + (x >> 3)]) {   /* the cat, if it is nearer than what the ray met */
+            if (j->cat && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1 && j->cmask[(y >> 3) * j->ctw + (x >> 3)]) {   /* the cat, if it is nearer than what the ray met */
                 float o3[3] = { c->ox, c->oy, c->oz }, dn[3] = { dx / len, dy / len, dz / len };
                 mcat_shade(j->cat, o3, dn, (win ? (ZF - c->oz) / dz : t) * len, inv_f, rgb);
             }
@@ -877,13 +867,13 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
     struct cam c = cam_at(rm->t);
     struct mcat cat;
     memset(&cat, 0, sizeof(cat));
-    if (!rm->no_cat && !rm->glb) {
+    if (!rm->no_cat) {
         float co[3] = { c.ox, c.oy, c.oz };
         mcat_pose(&cat, rm->t, co, rm->catg, MCAT_GLYPHS, rm->sky.light_dir, rm->sky.light_col, rm->sky.light_str);
     }
     float f = (float)h * 0.5f / tanf(0.5f * 62.0f * 3.14159265f / 180.0f);          /* a vertical field of view of 62 degrees */
     int cx0 = 0, cx1 = w - 1, cy0 = 0, cy1 = h - 1;
-    if (!rm->no_cat && !rm->glb) {                                                  /* where the cat's sphere shows: a rectangle round it (the whole picture when we are close) */
+    if (!rm->no_cat) {                                                  /* where the cat's sphere shows: a rectangle round it (the whole picture when we are close) */
         float vx = cat.centre[0] - c.ox, vy = cat.centre[1] - c.oy, vz = cat.centre[2] - c.oz;
         float zc = vx * c.fx + vy * c.fy + vz * c.fz, xc = vx * c.rx + vy * c.ry + vz * c.rz, yc = vx * c.ux + vy * c.uy + vz * c.uz;
         float rr = cat.radius;
@@ -895,7 +885,7 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
     }
     int ctw = (w + 7) / 8, cth = (h + 7) / 8;
     uint8_t *cmask = NULL;
-    if (!rm->no_cat && !rm->glb) {                                                  /* which 8 x 8 tiles the parts of the cat can be in: the spheres of its parts, projected */
+    if (!rm->no_cat) {                                                  /* which 8 x 8 tiles the parts of the cat can be in: the spheres of its parts, projected */
         cmask = calloc((size_t)ctw * (size_t)cth, 1);
         float sp[48][4];
         int ns = cmask ? mcat_spheres(&cat, sp, 48) : 0;
@@ -917,20 +907,12 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
                 }
         }
     }
-    if (!rm->no_cat && rm->glb) {                                       /* the model: posed, skinned and rasterised before the rows are coloured */
-        float co[3] = { c.ox, c.oy, c.oz }, cf[3] = { c.fx, c.fy, c.fz }, cr[3] = { c.rx, c.ry, c.rz }, cu[3] = { c.ux, c.uy, c.uz };
-        mglb_pose(rm->glb, rm->t, co, rm->catg, MCAT_GLYPHS, rm->sky.light_dir, rm->sky.light_col, rm->sky.light_str);
-        mglb_prepare(rm->glb, co, cf, cr, cu, w, h, f, threads);
-        int gx0, gy0, gx1, gy1;
-        mglb_rect(rm->glb, &gx0, &gy0, &gx1, &gy1);
-        cx0 = gx0; cx1 = gx1 - 1; cy0 = gy0; cy1 = gy1 - 1;
-    }
     threads = LM_CLAMP(threads, 1, 8);
     struct rjob jobs[8];
     pthread_t th[8];
     bool started[8] = { false };
     for (int i = 0; i < threads; i++) {
-        jobs[i] = (struct rjob){ rm, &c, cmask ? &cat : NULL, (!rm->no_cat && rm->glb) ? rm->glb : NULL, cmask ? &cat : (!rm->no_cat && rm->glb) ? mglb_shadow(rm->glb) : NULL, cx0, cx1, cy0, cy1, cmask, ctw, dst, w, h, stride, i, h, threads, f };
+        jobs[i] = (struct rjob){ rm, &c, cmask ? &cat : NULL, cx0, cx1, cy0, cy1, cmask, ctw, dst, w, h, stride, i, h, threads, f };
         if (i > 0)
             started[i] = pthread_create(&th[i], NULL, render_thread, &jobs[i]) == 0;
     }
@@ -1277,6 +1259,20 @@ static int selftest(void)
                 rgb[0] = 12.0f; rgb[1] = 34.0f; rgb[2] = 56.0f;
                 CHECK(mcat_shade(&lying, cam, dn, 30.0f, 0.001f, rgb) && (rgb[0] != 12.0f || rgb[1] != 34.0f));      /* a ray at its low back meets it */
                 CHECK(mcat_floor_shade(&lying, lying.pos[0], lying.pos[2]) < 0.4f);                                  /* and it casts a shadow, too */
+                {                                                                                  /* lying, the tail is somewhere else every 14 seconds (and always on the floor) */
+                    float seen[5][2];
+                    int distinct = 0;
+                    for (int k = 0; k < 4; k++) {
+                        struct mcat lt;
+                        mcat_pose(&lt, tlie - 6.0f + 14.0f * (float)k + 5.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                        CHECK(lt.lie > 0.9f && lt.tube[0].p[7][1] < 0.2f);
+                        seen[k][0] = lt.tube[0].p[7][0];
+                        seen[k][1] = lt.tube[0].p[7][2];
+                        for (int j = 0; j < k; j++)
+                            distinct += fabsf(seen[j][0] - seen[k][0]) + fabsf(seen[j][1] - seen[k][1]) > 0.08f;
+                    }
+                    CHECK(distinct >= 3);
+                }
             }
             mcat_pose(&ct, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
             struct mcat c2;
@@ -1305,7 +1301,6 @@ int main(int argc, char **argv)
     a.rain.rng = (uint64_t)now_ms() * 2654435761u + (uint64_t)getpid() + 1;
     bool selftest_only = false;
     const char *bench = NULL;
-    const char *cat_model = "auto";
     a.rain.density = 260;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) {
@@ -1314,18 +1309,6 @@ int main(int argc, char **argv)
             a.windowed = true;
         } else if (!strcmp(argv[i], "--flat")) {
             a.flat = true;
-        } else if (!strcmp(argv[i], "--glb-info") && i + 1 < argc) {
-            char gerr[200] = "";
-            struct glb *gm = glb_load(argv[++i], gerr, sizeof(gerr));
-            if (!gm) {
-                fprintf(stderr, "mellagui-matrix: %s\n", gerr);
-                return 1;
-            }
-            glb_describe(gm, stdout);
-            glb_free(gm);
-            return 0;
-        } else if (!strcmp(argv[i], "--cat-model") && i + 1 < argc) {
-            cat_model = argv[++i];
         } else if (!strcmp(argv[i], "--at") && i + 1 < argc) {
             double at = atof(argv[++i]);                                        /* (a macro would evaluate argv[++i] several times) */
             a.room.t = (float)LM_CLAMP(at, 0.0, 100000.0);
@@ -1353,7 +1336,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
         } else {
-            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--cat-model builtin|auto|FILE.glb] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
+            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
     }
@@ -1366,23 +1349,6 @@ int main(int argc, char **argv)
         if (!room_init(&a.room, a.rain.rng, a.rain.speed_pct, a.rain.density)) {
             fprintf(stderr, "mellagui-matrix: out of memory\n");
             return 1;
-        }
-    }
-    if (!a.flat && !a.room.no_cat && strcmp(cat_model, "builtin")) {         /* the cat of a model, if there is one and it is usable */
-        char path[600] = "", gerr[200] = "";
-        if (!strcmp(cat_model, "auto")) {
-            const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-            if (xdg && *xdg)
-                snprintf(path, sizeof(path), "%s/mellagui/tom.glb", xdg);
-            else if (home && *home)
-                snprintf(path, sizeof(path), "%s/.local/share/mellagui/tom.glb", home);
-        } else {
-            snprintf(path, sizeof(path), "%s", cat_model);
-        }
-        if (path[0] && (strcmp(cat_model, "auto") || access(path, R_OK) == 0)) {
-            a.room.glb = mglb_load(path, gerr, sizeof(gerr));
-            if (!a.room.glb)
-                fprintf(stderr, "mellagui-matrix: the cat model %s cannot be used (%s): the built-in cat is used\n", path, gerr);
         }
     }
     if (bench) {
@@ -1437,7 +1403,6 @@ int main(int argc, char **argv)
             a.win.redraw = true;
     }
     wlwin_destroy(&a.win);
-    mglb_free(a.room.glb);
     if (a.room.ready)
         room_free(&a.room);
     free(a.scratch);

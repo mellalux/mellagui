@@ -2,7 +2,9 @@
 
 Every Wayland client is untrusted input, and the request handlers (`server.c`, `surface.c`, `shm.c`, `xdg.c`, `seat.c`, `dmabuf.c`,
 `settings.c` ...) are hand-written C. `tests/fuzz_server.c` hunts for memory errors, undefined behaviour and leaks of descriptors in
-them.
+them. A plain `make` builds `build/fuzz-server` too (so `TestFuzz` in the suite runs for 20 s instead of being skipped).
+The harness sets `MELLAGUI_NO_GADGET_PROCS=1`: the settings `gadget` / `mixer` / `sysinfo` would otherwise start `mellagui-gadget`, which connects
+to the fuzz server as a client.
 
     make fuzz-run                         # 60 s (FUZZ_TIME=600 for longer); the corpus is kept in build/fuzz/corpus
     build/fuzz-server -t 300 -s 7 -c DIR  # seed 7, corpus DIR

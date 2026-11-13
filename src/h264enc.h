@@ -5,7 +5,9 @@
  * H.264 encoder for screen recordings, written from scratch (subset described in h264.h): RGB in, one access unit per picture out. The
  * first picture and every picture asked for are IDR pictures made of Intra16x16 DC macroblocks; the others are P pictures in which a
  * macroblock whose pixels are the same as in the previous picture costs one bit (P_Skip), one that changed a little carries a residual
- * against the previous reconstruction, one that changed a lot is coded as intra. Constant quantizer: `qp` 0..51 (lower is better; 24 is a
+ * against the previous reconstruction - moved by a whole-pixel motion vector when the content scrolled or slid (candidates: the neighbours', the
+ * one of the picture before, the one a skip would use, a scroll of the whole picture found by matching row hashes; then small steps) -, one
+ * that changed a lot is coded as intra. Constant quantizer: `qp` 0..51 (lower is better; 24 is a
  * good screen quality at 4:2:0). The colours are converted with BT.709 limited range and the stream says so (VUI).
  * Not thread safe: one encoder per thread. Owner: h264enc.c.
  */

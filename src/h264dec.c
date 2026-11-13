@@ -15,6 +15,8 @@ struct lm_h264dec {
     int deblock_present;
     int ys, cs;
     uint8_t *Y, *U, *V;             /* the picture; a P picture is decoded in place over the one before */
+    uint8_t *rY, *rU, *rV;          /* the picture before (the reference), copied when a P picture starts */
+    struct lm_mv *mvs;              /* the vectors of the macroblocks decoded so far in this picture */
     uint8_t *nzy, *nzc;
     int have_idr;
 };
@@ -163,9 +165,13 @@ struct lm_h264dec *lm_h264dec_create(const uint8_t *sps, size_t sps_len, const u
     d->Y = calloc((size_t)d->ys * (size_t)d->mbh * 16, 1);
     d->U = calloc((size_t)d->cs * (size_t)d->mbh * 8, 1);
     d->V = calloc((size_t)d->cs * (size_t)d->mbh * 8, 1);
+    d->rY = calloc((size_t)d->ys * (size_t)d->mbh * 16, 1);
+    d->rU = calloc((size_t)d->cs * (size_t)d->mbh * 8, 1);
+    d->rV = calloc((size_t)d->cs * (size_t)d->mbh * 8, 1);
+    d->mvs = calloc((size_t)d->mbw * (size_t)d->mbh, sizeof(*d->mvs));
     d->nzy = calloc((size_t)d->mbw * (size_t)d->mbh, 16);
     d->nzc = calloc((size_t)d->mbw * (size_t)d->mbh, 8);
-    if (!d->Y || !d->U || !d->V || !d->nzy || !d->nzc) {
+    if (!d->Y || !d->U || !d->V || !d->rY || !d->rU || !d->rV || !d->mvs || !d->nzy || !d->nzc) {
         snprintf(err, errsz, "out of memory");
         goto fail;
     }
@@ -189,6 +195,10 @@ void lm_h264dec_free(struct lm_h264dec *d)
     free(d->Y);
     free(d->U);
     free(d->V);
+    free(d->rY);
+    free(d->rU);
+    free(d->rV);
+    free(d->mvs);
     free(d->nzy);
     free(d->nzc);
     free(d);
@@ -435,12 +445,27 @@ static int decode_slice(struct lm_h264dec *d, const uint8_t *rbsp, size_t n, int
         BAD("a P picture without an IDR picture before it");
 
     int mbs = d->mbw * d->mbh, mbi = 0;
+    for (int i = 0; i < mbs; i++)                                       /* (every macroblock written below before a neighbour reads it) */
+        d->mvs[i] = (struct lm_mv){ 0, 0, -1 };
+    if (p_slice) {                                                      /* the picture before is what the vectors point into */
+        memcpy(d->rY, d->Y, (size_t)d->ys * (size_t)d->mbh * 16);
+        memcpy(d->rU, d->U, (size_t)d->cs * (size_t)d->mbh * 8);
+        memcpy(d->rV, d->V, (size_t)d->cs * (size_t)d->mbh * 8);
+    }
     while (mbi < mbs) {
         if (p_slice) {
             uint32_t run;
             if (lm_br_ue(&r, &run) < 0 || run > (uint32_t)(mbs - mbi))
                 BAD("damaged slice data");
-            for (uint32_t k = 0; k < run; k++, mbi++) {                 /* P_Skip: the picture before shows through */
+            for (uint32_t k = 0; k < run; k++, mbi++) {                 /* P_Skip: the picture before shows through, moved by the inferred vector */
+                int sx, sy, kx = mbi % d->mbw, ky = mbi / d->mbw;
+                lm_h264_skip_mv(d->mvs, d->mbw, kx, ky, &sx, &sy);
+                d->mvs[mbi] = (struct lm_mv){ (int16_t)sx, (int16_t)sy, 0 };
+                if (sx || sy) {
+                    if ((sx & 3) || (sy & 3))
+                        BAD("motion vectors that are not whole pixels");
+                    lm_h264_mc_mb(d->rY, d->rU, d->rV, d->Y, d->U, d->V, d->ys, d->cs, d->mbw, d->mbh, kx, ky, sx, sy);
+                }
                 memset(d->nzy + (size_t)mbi * 16, 0, 16);
                 memset(d->nzc + (size_t)mbi * 8, 0, 8);
             }
@@ -462,8 +487,19 @@ static int decode_slice(struct lm_h264dec *d, const uint8_t *rbsp, size_t n, int
             int32_t mvx, mvy;
             if (lm_br_se(&r, &mvx) < 0 || lm_br_se(&r, &mvy) < 0)
                 BAD("damaged slice data");
+            int pmx, pmy;
+            lm_h264_mv_pred(d->mvs, d->mbw, mbx, mby, &pmx, &pmy);
+            if (mvx < -16384 || mvx > 16384 || mvy < -16384 || mvy > 16384)
+                BAD("a motion vector out of range");
+            mvx += pmx;
+            mvy += pmy;
+            if (mvx < -8192 || mvx > 8191 || mvy < -2048 || mvy > 2047)
+                BAD("a motion vector out of range");
+            if ((mvx & 3) || (mvy & 3))
+                BAD("motion vectors that are not whole pixels");
+            d->mvs[mb] = (struct lm_mv){ (int16_t)mvx, (int16_t)mvy, 0 };
             if (mvx || mvy)
-                BAD("motion vectors");
+                lm_h264_mc_mb(d->rY, d->rU, d->rV, d->Y, d->U, d->V, d->ys, d->cs, d->mbw, d->mbh, mbx, mby, mvx, mvy);
             uint32_t code;
             if (lm_br_ue(&r, &code) < 0 || code > 47)
                 BAD("damaged slice data");

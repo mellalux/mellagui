@@ -9490,6 +9490,28 @@ class TestRecord(Base):
                        for a, b in zip(ref.getpixel((x, y)), last.getpixel((x, y)))) / (len(range(0, 1024, 7)) * len(range(0, 600, 5)) * 3)
             self.assertLess(diff, 3.0, 'our decoder and ffmpeg disagree about the last picture')
 
+    def test_our_own_h264_with_motion_is_decoded_by_ffmpeg_to_the_same_pictures(self):
+        """A texture that scrolls (whole picture, a part of it, sideways, far): the stream has motion vectors, P_Skip with an inferred vector and
+        chroma at half pixels; ffmpeg must show every picture exactly as our encoder's reconstruction (and our own decoder, checked by --selftest)."""
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        d = self.outdir()
+        r = subprocess.run([self.REC, '--selftest'], capture_output=True, text=True, timeout=120, env=dict(os.environ, MELLAGUI_H264_DUMP=d))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = os.path.join(d, 'ff.yuv')
+        subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'h264', '-i', os.path.join(d, 'scroll.h264'), '-pix_fmt', 'yuv420p', '-f', 'rawvideo', out],
+                       check=True, timeout=60)
+        with open(out, 'rb') as f:
+            theirs = f.read()
+        with open(os.path.join(d, 'scroll.yuv'), 'rb') as f:
+            ours = f.read()
+        frame = 176 * 112 * 3 // 2
+        self.assertEqual(len(ours) // frame, 16)
+        self.assertEqual(len(theirs), len(ours), 'ffmpeg decoded a different number of pictures')
+        for i in range(16):
+            self.assertEqual(theirs[i * frame:(i + 1) * frame], ours[i * frame:(i + 1) * frame], 'picture %d differs' % i)
+
     def test_our_own_h264_with_an_odd_sized_screen(self):
         if not os.path.exists(self.VIEW):
             self.skipTest('mellagui-view not built')
@@ -14050,6 +14072,17 @@ class TestSaver(Base):
         self.wait(lambda: self.lock_line(c)['locked'] == '1', 'the lock after idle')
         self.wait(lambda: self.screenoff(c)['off'] == '1', 'and the lock\'s screen off')
 
+    def test_the_lock_screen_in_front_goes_by_the_security_pages_screen_off_time_even_with_the_screensaver_on(self):
+        p, c = self.start('mellagui-sv-lockblank', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
+        c.cmd('lock set - pin 1357 0 0 2')                      # no idle lock, "Screen off after" 2 minutes (500 ms here)
+        c.cmd('settings saver-minutes 100')                     # the screensaver is on, but far away ...
+        c.cmd('settings saver-blank 100')                       # ... and so is ITS monitor time: only the Security page's can be what puts it off
+        c.cmd('lock now')
+        self.wait(lambda: self.screenoff(c)['off'] == '1', 'the locked screen goes off after the Security time')
+        c.tap(KEY_A)                                            # wakes it, still locked
+        self.wait(lambda: self.screenoff(c)['active'] == '0', 'woken')
+        self.assertEqual(self.lock_line(c)['locked'], '1')
+
     def test_the_monitor_fades_out_before_it_sleeps_and_comes_back_at_a_touch(self):
         p, c = self.start('mellagui-sv-fade', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '1600'})
         c.cmd('settings saver-minutes 100')
@@ -14072,17 +14105,6 @@ class TestSaver(Base):
 
     def test_the_screensaver_follows_a_monitor_that_goes_away_and_comes_back(self):
         """A KVM switch: the monitor leaves, comes back, maybe in another mode; the screensaver must fill it again."""
-    def test_the_lock_screen_in_front_goes_by_the_security_pages_screen_off_time_even_with_the_screensaver_on(self):
-        p, c = self.start('mellagui-sv-lockblank', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
-        c.cmd('lock set - pin 1357 0 0 2')                      # no idle lock, "Screen off after" 2 minutes (500 ms here)
-        c.cmd('settings saver-minutes 100')                     # the screensaver is on, but far away ...
-        c.cmd('settings saver-blank 100')                       # ... and so is ITS monitor time: only the Security page's can be what puts it off
-        c.cmd('lock now')
-        self.wait(lambda: self.screenoff(c)['off'] == '1', 'the locked screen goes off after the Security time')
-        c.tap(KEY_A)                                            # wakes it, still locked
-        self.wait(lambda: self.screenoff(c)['active'] == '0', 'woken')
-        self.assertEqual(self.lock_line(c)['locked'], '1')
-
         p, c = self.start('mellagui-sv-kvm1', '--config', 'none')
         c.cmd('saver start')
         self.wait(lambda: self.matrix_windows(c), 'its window')

@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "json.h"
+#include "smartsun.h"
 #include "tuya.h"
 
 static bool sched_path(char *out, size_t n)
@@ -27,13 +28,32 @@ static bool sched_path(char *out, size_t n)
     return w > 0 && (size_t)w < n;
 }
 
+/* "07:30", "sunrise", "sunset-20", "sunrise+15". */
+static bool parse_time(const char *t, struct sched_rule *r)
+{
+    char *end;
+    if (!strncmp(t, "sunrise", 7) || !strncmp(t, "sunset", 6)) {
+        r->sun = t[3] == 'r' ? 1 : 2;
+        const char *o = t + (r->sun == 1 ? 7 : 6);
+        r->offset = 0;
+        if (*o) {
+            long v = strtol(o, &end, 10);
+            if ((*o != '+' && *o != '-') || *end || v < -180 || v > 180)
+                return false;
+            r->offset = (int)v;
+        }
+        return true;
+    }
+    return sscanf(t, "%d:%d", &r->hour, &r->min) == 2 && strchr(t, ':') && r->hour >= 0 && r->hour <= 23 && r->min >= 0 && r->min <= 59;
+}
+
 bool sched_parse(const char *line, struct sched_rule *r)
 {
-    char state[8], days[16];
+    char state[8], when[24], days[16];
     memset(r, 0, sizeof(*r));
-    if (sscanf(line, "%7s %d:%d %15s %39s %39s %23s", state, &r->hour, &r->min, days, r->dev, r->code, r->value) != 7)
+    if (sscanf(line, "%7s %23s %15s %39s %39s %23s", state, when, days, r->dev, r->code, r->value) != 6)
         return false;
-    if ((strcmp(state, "on") && strcmp(state, "off")) || r->hour < 0 || r->hour > 23 || r->min < 0 || r->min > 59 || strlen(days) != 7)
+    if ((strcmp(state, "on") && strcmp(state, "off")) || !parse_time(when, r) || strlen(days) != 7)
         return false;
     r->on = !strcmp(state, "on");
     for (int i = 0; i < 7; i++)
@@ -80,12 +100,45 @@ bool sched_save(const struct sched_rule *r, int n)
         for (int d = 0; d < 7; d++)
             days[d] = r[i].days & (1u << d) ? "MTWTFSS"[d] : '-';
         days[7] = 0;
-        fprintf(f, "%s %02d:%02d %s %s %s %s\n", r[i].on ? "on" : "off", r[i].hour, r[i].min, days, r[i].dev, r[i].code, r[i].value);
+        char when[24];
+        if (r[i].sun && r[i].offset)
+            snprintf(when, sizeof(when), "%s%+d", r[i].sun == 1 ? "sunrise" : "sunset", r[i].offset);
+        else if (r[i].sun)
+            snprintf(when, sizeof(when), "%s", r[i].sun == 1 ? "sunrise" : "sunset");
+        else
+            snprintf(when, sizeof(when), "%02d:%02d", r[i].hour, r[i].min);
+        fprintf(f, "%s %s %s %s %s %s\n", r[i].on ? "on" : "off", when, days, r[i].dev, r[i].code, r[i].value);
     }
     if (fclose(f) != 0 || rename(tmp, path) < 0) {
         unlink(tmp);
         return false;
     }
+    return true;
+}
+
+void sched_time_text(const struct sched_rule *r, char *out, size_t n)
+{
+    if (!r->sun)
+        snprintf(out, n, "%02d:%02d", r->hour, r->min);
+    else if (!r->offset)
+        snprintf(out, n, "%s", r->sun == 1 ? "sunrise" : "sunset");
+    else
+        snprintf(out, n, "%s %c %d min", r->sun == 1 ? "sunrise" : "sunset", r->offset < 0 ? '-' : '+', r->offset < 0 ? -r->offset : r->offset);
+}
+
+bool sched_minute(const struct sched_rule *r, time_t when, int *minute)
+{
+    if (!r->sun) {
+        *minute = r->hour * 60 + r->min;
+        return true;
+    }
+    int rise, set;
+    if (!sun_today(when, &rise, &set))
+        return false;
+    int m = (r->sun == 1 ? rise : set) + r->offset;
+    if (m < 0 || m > 1439)
+        return false;
+    *minute = m;
     return true;
 }
 
@@ -215,7 +268,8 @@ int sched_background(void)
         for (int i = 0; i < n; i++) {
             struct sched_rule *r = &rules[i];
             char key[160], err[200] = "", json[64], *end;
-            if (!r->on || r->hour != h || r->min != m || !(r->days & today))
+            int due;
+            if (!r->on || !(r->days & today) || !sched_minute(r, t, &due) || due != h * 60 + m)
                 continue;
             snprintf(key, sizeof(key), "%s %s %s", r->dev, r->code, r->value);
             struct fired *f = NULL;
@@ -247,7 +301,9 @@ int sched_background(void)
                 f->done = true;
             } else if (f->tries >= 3) {
                 char body[300];
-                snprintf(body, sizeof(body), "The %02d:%02d command (%s) did not go out: %s", h, m, r->code, err);
+                char at[40];
+                sched_time_text(r, at, sizeof(at));
+                snprintf(body, sizeof(body), "The %s command (%s) did not go out (%02d:%02d): %s", at, r->code, h, m, err);
                 notify(body);
                 f->done = true;
             }
@@ -268,6 +324,15 @@ int sched_selftest(void)
     CHECK(sched_parse("off 23:05 -----SS d switch_1 false", &r) && !r.on && r.days == 0x60, "an off rule");
     CHECK(!sched_parse("on 24:00 MTWTFSS d c v", &r) && !sched_parse("on 07:30 MTW d c v", &r) && !sched_parse("maybe 07:30 MTWTFSS d c v", &r) &&
           !sched_parse("on 07:30 MTWTFSS d c", &r), "bad lines are accepted");
+    CHECK(sched_parse("on sunrise+15 MTWTFSS d control open\n", &r) && r.on && r.sun == 1 && r.offset == 15 && !strcmp(r.value, "open"), "a sunrise rule");
+    CHECK(sched_parse("off sunset-20 -----SS d switch_1 false", &r) && r.sun == 2 && r.offset == -20 && r.days == 0x60, "a sunset rule");
+    CHECK(sched_parse("on sunrise MTWTFSS d c v", &r) && r.sun == 1 && r.offset == 0, "sunrise without an offset");
+    CHECK(!sched_parse("on sunrise+999 MTWTFSS d c v", &r) && !sched_parse("on sunrisee MTWTFSS d c v", &r) && !sched_parse("on sunset15 MTWTFSS d c v", &r) &&
+          !sched_parse("on 7 MTWTFSS d c v", &r), "bad times are accepted");
+    sched_time_text(&r, text, sizeof(text));
+    CHECK(sched_parse("on sunset+10 MTWTFSS d c v", &r), "sunset+10");
+    sched_time_text(&r, text, sizeof(text));
+    CHECK(!strcmp(text, "sunset + 10 min"), "the text of a sunset rule");
     sched_days_text(0x7f, text, sizeof(text));
     CHECK(!strcmp(text, "every day"), "every day");
     sched_days_text(0x1f, text, sizeof(text));

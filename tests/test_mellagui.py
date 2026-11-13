@@ -18014,6 +18014,92 @@ class TestSmart(Base):
         self.assertEqual(pr.wait(timeout=5), 0)                                 # no rule is on: it ends by itself
 
 
+    def test_a_rule_can_be_at_sunrise_with_minutes_before_or_after(self):
+        self.cloud('sch3')
+        self.env.update(MELLAGUI_SMART_SUN='07:52,16:03', MELLAGUI_SMART_PLACE='59.437,24.754')        # (the sun of the test: no calculation)
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        c = self.window('sch3')
+        self.wait(self.devices_shown, 'the devices')
+        time.sleep(0.3)
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf')
+        self.press(('blind1', '-', 'details'))
+        self.wait(lambda: 'add' in self.edits(), 'the timetable of the blind')
+        self.edit('add')
+        self.wait(lambda: 'k:1' in self.edits(), 'the form with the choice of the time')
+        e = self.edits()
+        self.assertEqual([e[v][3] for v in ('k:0', 'k:1', 'k:2')], ['At a time', 'At sunrise', 'At sunset'])
+        self.assertTrue(e['k:0'][2] and 'h+' in e)                              # a time of the day at first, with its hour and minute buttons
+        self.edit('k:1')
+        self.wait(lambda: 'o:5' in self.edits() and 'h+' not in self.edits(), 'the minutes of the sun instead of the hour and minute')
+        self.edit('o:5')
+        self.edit('o:5')
+        self.edit('o:30')                                                       # + 40 min
+
+        def texts():
+            return [t[4] for t in self.view()['mctl'].get(('blind1', '-', 'text'), [])]
+        self.wait(lambda: 'At sunrise + 40 min, today 08:32' in texts(), 'the sun plus 40 minutes (the sun\'s 07:52 plus 40)')
+        self.assertTrue(any(t.startswith('Place: 59.44 N 24.75 E') for t in texts()), texts())
+        self.edit('a0')                                                         # Open
+        self.edit('save')
+        self.wait(lambda: os.path.exists(conf), 'the rule is saved')
+        self.assertIn('on sunrise+40 MTWTFSS blind1 control open\n', open(conf).read())
+        self.wait(lambda: 'tog:0' in self.edits(), 'the rule is listed')
+        self.assertIn('sunrise + 40 min (08:32) every day Open', texts())
+        self.edit('del:0')
+        self.wait(lambda: 'tog:0' not in self.edits() and 'add' in self.edits(), 'the rule is gone')
+        self.edit('add')
+        self.wait(lambda: 'k:2' in self.edits(), 'the form again')
+        self.edit('k:2')
+        self.wait(lambda: 'o:-30' in self.edits(), 'the sun buttons')
+        self.edit('o:-30')
+        self.wait(lambda: 'At sunset - 30 min, today 15:33' in texts(), 'sunset minus 30 minutes')
+        self.edit('a2')                                                         # Close
+        self.edit('save')
+        self.wait(lambda: 'on sunset-30 MTWTFSS blind1 control close\n' in open(conf).read(), 'a sunset rule')
+
+    def test_the_background_process_carries_out_a_sun_rule_in_the_sun_s_minute(self):
+        self.cloud('sch4')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf')
+        with open(conf, 'w') as f:
+            f.write('on sunrise+10 MTWTFSS blind1 percent_control 30\n'          # 07:20 + 10 = 07:30: now
+                    'on sunset-30 MTWTFSS plug1 switch_1 true\n'                 # 15:30: not now
+                    'on sunrise MTWTFSS blind1 control open\n'                    # 07:20: gone by
+                    'off sunrise+10 MTWTFSS plug1 switch_1 false\n')            # off
+        rt = os.path.join(self.dir, 'rt')
+        os.makedirs(rt)
+        env = dict(os.environ, XDG_RUNTIME_DIR=rt, MELLAGUI_SMART_NOW='07:30', MELLAGUI_SMART_SUN='07:20,16:00', MELLAGUI_SMART_TICK_MS='100', **self.env)
+        env.pop('WAYLAND_DISPLAY', None)
+        pr = subprocess.Popen([self.exe, '--background'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: self.state()['blind1']['status']['percent_control'] == 30, 'the rule of sunrise + 10 minutes')
+        time.sleep(0.6)
+        self.assertEqual(self.log().count('/commands'), 1)                      # only that one, and once
+        self.assertEqual(self.state()['blind1']['status']['control'], 'stop')
+        self.assertFalse(self.state()['plug1']['status']['switch_1'])
+        pr.kill()
+
+    def test_sunrise_and_sunset_are_worked_out_for_a_place(self):
+        env = dict(os.environ, XDG_CONFIG_HOME=os.path.join(tmp, 'sunplace'), MELLAGUI_SMART_PLACE='')
+        env.pop('MELLAGUI_SMART_SUN', None)
+        shutil.rmtree(env['XDG_CONFIG_HOME'], ignore_errors=True)
+        r = subprocess.run([self.exe, '--place', '59.437', '24.754'], capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('place 59.4370 24.7540 (chosen by you)', r.stdout)
+        m = re.search(r'sunrise (\d\d):(\d\d)\nsunset (\d\d):(\d\d)\n', r.stdout)
+        self.assertIsNotNone(m, r.stdout)
+        rise, sset = int(m[1]) * 60 + int(m[2]), int(m[3]) * 60 + int(m[4])
+        self.assertTrue(0 <= rise < sset < 1440, r.stdout)
+        self.assertEqual(open(os.path.join(env['XDG_CONFIG_HOME'], 'mellagui', 'smart-place.conf')).read(), '59.4370 24.7540\n')
+        self.assertEqual(subprocess.run([self.exe, '--place', 'north', '24'], capture_output=True, env=env, timeout=10).returncode, 2)
+        r = subprocess.run([self.exe, '--place', 'auto'], capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(env['XDG_CONFIG_HOME'], 'mellagui', 'smart-place.conf')))
+        env['MELLAGUI_SMART_PLACE'] = '78.2,15.6'                              # Svalbard: the sun may not rise or set today
+        r = subprocess.run([self.exe, '--sun'], capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('place 78.2000 15.6000', r.stdout)
+
     def test_pinned_devices_are_listed_for_the_desktop_card(self):
         self.cloud('fav')
         self.assertEqual(self.cli('--login', 'abc123')[0], 0)

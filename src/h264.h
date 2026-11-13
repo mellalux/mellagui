@@ -7,8 +7,10 @@
  *
  * What the two programs speak, and nothing else ("constrained baseline, the simplest useful subset"): 4:2:0, 8 bit, one slice per picture,
  * CAVLC, one reference picture, picture order count type 2 (no reordering), the deblocking filter OFF (disable_deblocking_filter_idc = 1),
- * macroblock types I_16x16 with DC prediction (luma and chroma), I_PCM, P_L0_16x16 with the motion vector (0, 0) and P_Skip. That is enough for
- * a screen recording (unchanged macroblocks cost a bit each) and small enough to be checked bit for bit against ffmpeg's decoder.
+ * macroblock types I_16x16 with DC prediction (luma and chroma), I_PCM, P_L0_16x16 and P_Skip. The motion vectors are WHOLE PIXELS in luma
+ * (a multiple of 4 in the quarter pixel units the stream uses; chroma then lands on halves, the bilinear filter of 8.4.2.2.2 does that), which is what
+ * scrolling needs. That is enough for a screen recording (unchanged macroblocks cost a bit each, a scrolled window costs a vector) and small
+ * enough to be checked bit for bit against ffmpeg's decoder.
  */
 
 #include <stddef.h>
@@ -80,6 +82,28 @@ void lm_h264_dequant_chroma_dc(const int *levels, int qpc, int *dc4);
  * one, and the one of the 4x4 chroma block (bx, by) (8.3.3 and 8.3.4 of the standard). */
 int lm_h264_luma_dc_pred(const uint8_t *Y, int ys, int mbx, int mby);
 int lm_h264_chroma_dc_pred(const uint8_t *plane, int cs, int mbx, int mby, int bx, int by);
+
+/* ---- motion (8.4.1 and 8.4.2 of the standard): 16x16 partitions, one reference picture -------------------------------------------------- */
+
+/* What a macroblock left behind for its neighbours: vector in quarter pixels; ref 0 = inter (P_L0_16x16 or P_Skip), -1 = intra. An array of
+ * mbw * mbh of these, in macroblock order; only macroblocks before the current one are read. */
+struct lm_mv {
+    int16_t x, y;
+    int8_t ref;
+};
+
+/* The predicted vector of the macroblock (the median of the neighbours A, B and C, or D; 8.4.1.3). */
+void lm_h264_mv_pred(const struct lm_mv *mvs, int mbw, int mbx, int mby, int *px, int *py);
+/* The vector of a P_Skip macroblock (8.4.1.1): zero next to the picture's edge or next to a macroblock that stands still, else the prediction. */
+void lm_h264_skip_mv(const struct lm_mv *mvs, int mbw, int mbx, int mby, int *mx, int *my);
+/* The prediction of the 16x16 luma block at (x0, y0) of the reference plane (`pw` x `ph`, the size rounded up to whole macroblocks) moved by (mvx, mvy)
+ * quarter pixels, which must be whole pixels (a multiple of 4); samples beyond the edge repeat the edge. */
+void lm_h264_mc_luma(const uint8_t *ref, int stride, int pw, int ph, int x0, int y0, int mvx, int mvy, uint8_t *dst, int dstride);
+/* The same for an 8x8 chroma block at (x0, y0): the luma vector is in 1/8 chroma pixels, bilinear. */
+void lm_h264_mc_chroma(const uint8_t *ref, int stride, int pw, int ph, int x0, int y0, int mvx, int mvy, uint8_t *dst, int dstride);
+/* Both, for macroblock (mbx, mby): the planes `Y`, `U`, `V` (strides ys / cs) get the prediction from the reference planes (same layout). */
+void lm_h264_mc_mb(const uint8_t *rY, const uint8_t *rU, const uint8_t *rV, uint8_t *Y, uint8_t *U, uint8_t *V, int ys, int cs, int mbw, int mbh, int mbx,
+                   int mby, int mvx, int mvy);
 
 static inline int lm_h264_clip(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 

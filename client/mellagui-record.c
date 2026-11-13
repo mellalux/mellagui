@@ -1244,6 +1244,102 @@ static int selftest(void)
         free(sps);
         free(pps);
     }
+    /* motion: a texture that scrolls (the whole picture, a part of it, sideways, far) is coded with vectors; encoder and decoder agree on every
+     * picture, a scrolled picture costs a fraction of an I picture, and with MELLAGUI_H264_DUMP=DIR the stream (Annex B) and the pictures it makes are
+     * written for the test that lets ffmpeg decode the same stream (bit for bit the same pictures). */
+    {
+        const int sw = 176, sh = 112;
+        uint32_t *tx = malloc((size_t)sw * 2 * (size_t)sh * 2 * sizeof(uint32_t));      /* a texture bigger than the picture */
+        struct lm_h264enc *he = lm_h264enc_create(sw, sh, 24);
+        uint8_t *sps = NULL, *pps = NULL;
+        size_t sn = 0, pn = 0;
+        char herr[120] = "";
+        CHECK(tx != NULL && he != NULL && lm_h264enc_headers(he, &sps, &sn, &pps, &pn));
+        struct lm_h264dec *hd = he ? lm_h264dec_create(sps, sn, pps, pn, herr, sizeof(herr)) : NULL;
+        CHECK(hd != NULL);
+        const char *dump = getenv("MELLAGUI_H264_DUMP");
+        FILE *fs = NULL, *fy = NULL;
+        if (dump && *dump && he) {
+            char fp[400];
+            snprintf(fp, sizeof(fp), "%s/scroll.h264", dump);
+            fs = fopen(fp, "wb");
+            snprintf(fp, sizeof(fp), "%s/scroll.yuv", dump);
+            fy = fopen(fp, "wb");
+            static const uint8_t sc[4] = { 0, 0, 0, 1 };
+            if (fs) {
+                fwrite(sc, 1, 4, fs);
+                fwrite(sps, 1, sn, fs);
+                fwrite(sc, 1, 4, fs);
+                fwrite(pps, 1, pn, fs);
+            }
+        }
+        if (tx) {
+            uint32_t seed = 12345;
+            for (int y = 0; y < sh * 2; y++)
+                for (int x = 0; x < sw * 2; x++) {
+                    seed = seed * 1664525u + 1013904223u;
+                    int v = (int)(seed >> 24);
+                    tx[(size_t)y * (size_t)sw * 2 + (size_t)x] = (uint32_t)((((v >> 1) + (x & 63)) & 255) << 16 | (((v >> 2) + (y & 63)) & 255) << 8 | ((v + x + y) & 255));
+                }
+        }
+        static const struct { int dx, dy, part; } mov[] = {                 /* where the picture looks into the texture, frame by frame */
+            { 0, 0, 0 }, { 0, 3, 0 }, { 0, 6, 0 }, { 0, 9, 0 }, { 5, 9, 0 }, { 10, 9, 0 }, { 10, 9, 0 }, { 10, 49, 0 },
+            { 10, 49, 0 }, { 10, 52, 1 }, { 10, 55, 1 }, { 10, 58, 1 }, { 11, 58, 0 }, { 11, 45, 0 }, { 0, 0, 0 }, { 0, 1, 0 },
+        };
+        size_t first_len = 0, scroll_len = 0;
+        for (int f = 0; tx && he && hd && f < (int)(sizeof(mov) / sizeof(mov[0])); f++) {
+            uint32_t *pic = malloc((size_t)sw * (size_t)sh * sizeof(uint32_t));
+            if (!pic)
+                break;
+            for (int y = 0; y < sh; y++)
+                for (int x = 0; x < sw; x++) {
+                    int ty = y + (mov[f].part && x >= sw / 2 ? 0 : mov[f].dy), tx_x = x + (mov[f].part && x >= sw / 2 ? 10 : mov[f].dx);   /* a part: the right half stands still */
+                    pic[(size_t)y * (size_t)sw + (size_t)x] = tx[(size_t)ty * (size_t)sw * 2 + (size_t)tx_x];
+                }
+            size_t len = 0;
+            bool key = false;
+            uint8_t *au = lm_h264enc_encode(he, pic, (size_t)sw * 4, f == 0 || f == 8, &len, &key);
+            free(pic);
+            CHECK(au != NULL);
+            if (!au)
+                break;
+            if (f == 0)
+                first_len = len;
+            if (f == 2)
+                scroll_len = len;
+            CHECK(lm_h264dec_decode(hd, au, len, herr, sizeof(herr)) == 0);
+            if (fs) {
+                static const uint8_t sc[4] = { 0, 0, 0, 1 };
+                for (size_t at = 0; at + 4 <= len;) {
+                    size_t n = (size_t)au[at] << 24 | (size_t)au[at + 1] << 16 | (size_t)au[at + 2] << 8 | au[at + 3];
+                    fwrite(sc, 1, 4, fs);
+                    fwrite(au + at + 4, 1, n, fs);
+                    at += 4 + n;
+                }
+            }
+            free(au);
+            for (int pl = 0; pl < 3; pl++) {
+                int s1, s2;
+                const uint8_t *pa = lm_h264enc_recon(he, pl, &s1), *pb = lm_h264dec_plane(hd, pl, &s2);
+                int pw2 = pl ? sw / 2 : sw, ph2 = pl ? sh / 2 : sh;
+                for (int y = 0; y < ph2; y++) {
+                    CHECK(!memcmp(pa + (size_t)y * (size_t)s1, pb + (size_t)y * (size_t)s2, (size_t)pw2));
+                    if (fy)
+                        fwrite(pa + (size_t)y * (size_t)s1, 1, (size_t)pw2, fy);
+                }
+            }
+        }
+        CHECK(first_len > 0 && scroll_len > 0 && scroll_len * 4 < first_len);       /* scrolled by 3 pixels: far smaller than the first picture */
+        if (fs)
+            fclose(fs);
+        if (fy)
+            fclose(fy);
+        lm_h264dec_free(hd);
+        lm_h264enc_free(he);
+        free(sps);
+        free(pps);
+        free(tx);
+    }
     /* the flat-block shortcut of the DCT: a plain colour must come out as that colour */
     for (size_t i = 0; i < (size_t)w * h; i++)
         px[i] = 0x336699;

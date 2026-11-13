@@ -11,6 +11,9 @@ struct lm_h264enc {
     int qp, qpc;
     int ys, cs;                     /* strides of the reconstruction planes (padded to whole macroblocks) */
     uint8_t *Y, *U, *V;             /* reconstruction: what a decoder shows; updated in place, macroblock by macroblock */
+    uint8_t *rY, *rU, *rV;          /* the reconstruction of the picture before (the reference), copied when a P picture starts */
+    struct lm_mv *mvs;              /* per macroblock: its vector (this picture for the ones done, the picture before for the rest) */
+    uint32_t *rowh, *rowh_prev;     /* a hash of every source row, this picture's and the one before's (to find a scroll) */
     uint8_t *prev;                  /* the previous source picture (XRGB, w * h * 4), NULL before the first one */
     uint8_t *nzy;                   /* per macroblock: total_coeff of its 16 luma blocks (by block index) */
     uint8_t *nzc;                   /* ... and of its 2 x 4 chroma blocks */
@@ -24,6 +27,7 @@ static const uint8_t blk_idx[4][4] = { { 0, 1, 4, 5 }, { 2, 3, 6, 7 }, { 8, 9, 1
 /* what is coded for one macroblock */
 struct mbc {
     int type;                       /* 0 P_Skip, 1 P_L0_16x16, 2 Intra16x16 (DC) */
+    int mvx, mvy, pmx, pmy;         /* type 1: the vector and its prediction, quarter pixels (the stream carries the difference) */
     int cbp_l, cbp_c;               /* luma: 4 bits (one per 8x8) for inter, 0 or 15 for intra; chroma 0..2 */
     int ydc[16];                    /* Intra16x16 DC levels, scan order */
     int yl[16][16];                 /* luma levels per block, scan order (intra: the 15 AC levels at [0..14]) */
@@ -54,12 +58,20 @@ struct lm_h264enc *lm_h264enc_create(int width, int height, int qp)
     e->Y = calloc((size_t)e->ys * (size_t)e->mbh * 16, 1);
     e->U = calloc((size_t)e->cs * (size_t)e->mbh * 8, 1);
     e->V = calloc((size_t)e->cs * (size_t)e->mbh * 8, 1);
+    e->rY = calloc((size_t)e->ys * (size_t)e->mbh * 16, 1);
+    e->rU = calloc((size_t)e->cs * (size_t)e->mbh * 8, 1);
+    e->rV = calloc((size_t)e->cs * (size_t)e->mbh * 8, 1);
+    e->mvs = calloc((size_t)e->mbw * (size_t)e->mbh, sizeof(*e->mvs));
+    e->rowh = calloc((size_t)e->h, sizeof(uint32_t));
+    e->rowh_prev = calloc((size_t)e->h, sizeof(uint32_t));
     e->nzy = calloc((size_t)e->mbw * (size_t)e->mbh, 16);
     e->nzc = calloc((size_t)e->mbw * (size_t)e->mbh, 8);
-    if (!e->Y || !e->U || !e->V || !e->nzy || !e->nzc) {
+    if (!e->Y || !e->U || !e->V || !e->rY || !e->rU || !e->rV || !e->mvs || !e->rowh || !e->rowh_prev || !e->nzy || !e->nzc) {
         lm_h264enc_free(e);
         return NULL;
     }
+    for (size_t i = 0; i < (size_t)e->mbw * (size_t)e->mbh; i++)
+        e->mvs[i].ref = -1;
     return e;
 }
 
@@ -70,6 +82,12 @@ void lm_h264enc_free(struct lm_h264enc *e)
     free(e->Y);
     free(e->U);
     free(e->V);
+    free(e->rY);
+    free(e->rU);
+    free(e->rV);
+    free(e->mvs);
+    free(e->rowh);
+    free(e->rowh_prev);
     free(e->prev);
     free(e->nzy);
     free(e->nzc);
@@ -523,10 +541,11 @@ static void write_mb(struct lm_h264enc *e, int mbx, int mby, const struct mbc *m
         while (code < 48 && lm_h264_inter_cbp[code] != cbp)
             code++;
         lm_bw_ue(bw, 0);                                /* mb_type: P_L0_16x16 */
-        lm_bw_se(bw, 0);                                /* mvd_l0 x */
-        lm_bw_se(bw, 0);                                /* mvd_l0 y */
+        lm_bw_se(bw, m->mvx - m->pmx);                  /* mvd_l0 x */
+        lm_bw_se(bw, m->mvy - m->pmy);                  /* mvd_l0 y */
         lm_bw_ue(bw, (uint32_t)code);                   /* coded_block_pattern */
-        lm_bw_se(bw, 0);                                /* mb_qp_delta (the cbp is not 0) */
+        if (cbp)
+            lm_bw_se(bw, 0);                            /* mb_qp_delta */
         for (int b = 0; b < 16; b++) {
             if (!(m->cbp_l & (1 << (b >> 2))))
                 continue;
@@ -535,6 +554,189 @@ static void write_mb(struct lm_h264enc *e, int mbx, int mby, const struct mbc *m
         }
         write_chroma(e, mbx, mby, m);
     }
+}
+
+/* ---- pictures ------------------------------------------------------------------------------------------------------------------------ */
+
+/* ---- motion search ---------------------------------------------------------------------------------------------------------------- */
+
+/* What the search needs about one macroblock. Vectors in the search are whole pixels; the stream's units are quarter pixels. */
+struct msearch {
+    const int *ys;                  /* the source luma of the macroblock, 16 x 16 */
+    const uint8_t *ref;             /* the reference luma plane */
+    int stride, pw, ph, x0, y0;
+    int pmx, pmy, skx, sky;         /* predicted vector and the one a P_Skip would use (quarter pixels) */
+    int lam;                        /* what a bit of vector costs, in units of the sum of absolute differences */
+};
+
+/* Bits the stream spends on a vector difference (a signed Exp-Golomb code). */
+static int se_bits(int v)
+{
+    unsigned k = (unsigned)(v > 0 ? 2 * v - 1 : -2 * v) + 1;
+    int n = 0;
+    while (k > 1) {
+        k >>= 1;
+        n++;
+    }
+    return 2 * n + 1;
+}
+
+static long sad_at(const struct msearch *s, int mx, int my, long limit)
+{
+    int sx = s->x0 + mx, sy = s->y0 + my;
+    long sum = 0;
+    if (sx >= 0 && sy >= 0 && sx + 16 <= s->pw && sy + 16 <= s->ph) {
+        for (int y = 0; y < 16; y++) {
+            const uint8_t *r = s->ref + (size_t)(sy + y) * (size_t)s->stride + (size_t)sx;
+            const int *q = s->ys + y * 16;
+            for (int x = 0; x < 16; x++) {
+                int d = q[x] - r[x];
+                sum += d < 0 ? -d : d;
+            }
+            if (sum >= limit)
+                return sum;
+        }
+        return sum;
+    }
+    for (int y = 0; y < 16; y++) {
+        int yy = sy + y < 0 ? 0 : sy + y >= s->ph ? s->ph - 1 : sy + y;
+        const uint8_t *r = s->ref + (size_t)yy * (size_t)s->stride;
+        for (int x = 0; x < 16; x++) {
+            int xx = sx + x < 0 ? 0 : sx + x >= s->pw ? s->pw - 1 : sx + x;
+            int d = s->ys[y * 16 + x] - r[xx];
+            sum += d < 0 ? -d : d;
+        }
+        if (sum >= limit)
+            return sum;
+    }
+    return sum;
+}
+
+/* Difference plus the price of the vector (a P_Skip's vector is free). `limit`: stop counting once it cannot win. */
+static long cost_at(const struct msearch *s, int mx, int my, long limit)
+{
+    int qx = mx * 4, qy = my * 4;
+    long pen = qx == s->skx && qy == s->sky ? 0 : (long)s->lam * (se_bits(qx - s->pmx) + se_bits(qy - s->pmy));
+    return sad_at(s, mx, my, limit - pen) + pen;
+}
+
+/* Only whole blocks inside the picture are tried, except the vector a P_Skip uses (its prediction may reach out; the edge repeats). */
+static bool mv_ok(const struct msearch *s, int mx, int my)
+{
+    int sx = s->x0 + mx, sy = s->y0 + my;
+    if (mx <= -2048 || mx >= 2047 || my <= -512 || my >= 511)       /* (what a level 5.1 stream may carry) */
+        return false;
+    if (mx * 4 == s->skx && my * 4 == s->sky)
+        return true;
+    return sx >= 0 && sy >= 0 && sx + 16 <= s->pw && sy + 16 <= s->ph;
+}
+
+/* The best whole-pixel vector: the candidates, then small steps from the best of them while that helps. Returns its cost. */
+static long search_mv(const struct msearch *s, const int (*cand)[2], int ncand, int *bx, int *by)
+{
+    int mx = 0, my = 0;
+    long best = cost_at(s, 0, 0, 1L << 40);
+    for (int i = 0; i < ncand; i++) {
+        int cx = cand[i][0], cy = cand[i][1];
+        if ((cx == 0 && cy == 0) || !mv_ok(s, cx, cy))
+            continue;
+        long c = cost_at(s, cx, cy, best);
+        if (c < best) {
+            best = c;
+            mx = cx;
+            my = cy;
+        }
+    }
+    for (int step = 0; step < 24 && best > 0; step++) {         /* a small cross, then a larger one */
+        static const int dir[8][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
+        int moved = 0;
+        for (int d = 0; d < 8; d++) {
+            int cx = mx + dir[d][0], cy = my + dir[d][1];
+            if (!mv_ok(s, cx, cy))
+                continue;
+            long c = cost_at(s, cx, cy, best);
+            if (c < best) {
+                best = c;
+                mx = cx;
+                my = cy;
+                moved = 1;
+            }
+        }
+        if (!moved)
+            break;
+    }
+    *bx = mx;
+    *by = my;
+    return best;
+}
+
+/* A hash of every row of the source (luma and chroma are not needed to find a scroll). */
+static void hash_rows(const struct lm_h264enc *e, const uint32_t *rgb, size_t stride_px, uint32_t *out)
+{
+    for (int y = 0; y < e->h; y++) {
+        const uint32_t *row = rgb + (size_t)y * stride_px;
+        uint64_t h = 1469598103934665603ull;
+        int x = 0;
+        for (; x + 2 <= e->w; x += 2) {                 /* two pixels at a time */
+            uint64_t v;
+            memcpy(&v, row + x, 8);
+            h = (h ^ v) * 1099511628211ull;
+            h ^= h >> 29;
+        }
+        for (; x < e->w; x++)
+            h = (h ^ row[x]) * 1099511628211ull;
+        out[y] = (uint32_t)(h ^ (h >> 32));
+    }
+}
+
+/* Is the picture scrolled up or down? Rows that appear once in each picture vote for the distance between the two places; the winner is the
+ * vertical vector every macroblock should try first. 0 = no scroll (or no clear winner). */
+static int find_vscroll(const uint32_t *cur, const uint32_t *prev, int h)
+{
+    size_t cap = 16;
+    while (cap < (size_t)h * 2)
+        cap <<= 1;
+    uint32_t *key = malloc(cap * sizeof(uint32_t));
+    int *row = malloc(cap * sizeof(int));                       /* -1 empty, -2 the hash is there more than once */
+    int *votes = calloc((size_t)(2 * h + 1), sizeof(int));
+    int best = 0;
+    if (key && row && votes) {
+        for (size_t i = 0; i < cap; i++)
+            row[i] = -1;
+        for (int y = 0; y < h; y++) {
+            size_t k = prev[y] & (cap - 1);
+            while (row[k] != -1 && key[k] != prev[y])
+                k = (k + 1) & (cap - 1);
+            if (row[k] == -1) {
+                key[k] = prev[y];
+                row[k] = y;
+            } else {
+                row[k] = -2;
+            }
+        }
+        for (int y = 0; y < h; y++) {
+            size_t k = cur[y] & (cap - 1);
+            while (row[k] != -1 && key[k] != cur[y])
+                k = (k + 1) & (cap - 1);
+            if (row[k] >= 0)
+                votes[row[k] - y + h]++;
+        }
+        int top = 0;
+        for (int d = -400; d <= 400; d++) {
+            if (!d || d + h < 0 || d + h > 2 * h)
+                continue;
+            if (votes[d + h] > top) {
+                top = votes[d + h];
+                best = d;
+            }
+        }
+        if (top < 6 || top < h / 40)
+            best = 0;
+    }
+    free(key);
+    free(row);
+    free(votes);
+    return best;
 }
 
 /* ---- pictures ------------------------------------------------------------------------------------------------------------------------ */
@@ -591,23 +793,79 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
     lm_bw_se(bw, 0);                                    /* slice_qp_delta */
     lm_bw_ue(bw, 1);                                    /* disable_deblocking_filter_idc: off */
 
+    size_t nmb = (size_t)e->mbw * (size_t)e->mbh;
+    int gdy = 0;                                        /* the whole picture moved this far up or down: every macroblock tries it first */
+    hash_rows(e, xrgb, stride_px, e->rowh);
+    if (idr) {
+        for (size_t i = 0; i < nmb; i++)
+            e->mvs[i] = (struct lm_mv){ 0, 0, -1 };
+    } else {
+        memcpy(e->rY, e->Y, (size_t)e->ys * (size_t)e->mbh * 16);      /* the vectors point into the picture before */
+        memcpy(e->rU, e->U, (size_t)e->cs * (size_t)e->mbh * 8);
+        memcpy(e->rV, e->V, (size_t)e->cs * (size_t)e->mbh * 8);
+        gdy = find_vscroll(e->rowh, e->rowh_prev, e->h);
+    }
+    int lam = 2 + e->qp / 6;
+
     int ys[256], us[64], vs[64];
     int skip_run = 0;
     struct mbc m;
     for (int mby = 0; mby < e->mbh; mby++)
         for (int mbx = 0; mbx < e->mbw; mbx++) {
             size_t mb = (size_t)mby * (size_t)e->mbw + (size_t)mbx;
+            int skx = 0, sky = 0, pmx = 0, pmy = 0;
+            if (p_slice) {
+                lm_h264_skip_mv(e->mvs, e->mbw, mbx, mby, &skx, &sky);
+                lm_h264_mv_pred(e->mvs, e->mbw, mbx, mby, &pmx, &pmy);
+            }
             if (p_slice && mb_unchanged(e, xrgb, stride, mbx, mby)) {
-                skip_run++;
-                memset(e->nzy + mb * 16, 0, 16);
-                memset(e->nzc + mb * 8, 0, 8);
+                if (skx || sky) {                       /* the skip would move it: say "no motion" with a vector and no residual */
+                    memset(&m, 0, sizeof(m));
+                    m.type = 1;
+                    m.pmx = pmx;
+                    m.pmy = pmy;
+                    lm_bw_ue(bw, (uint32_t)skip_run);
+                    skip_run = 0;
+                    write_mb(e, mbx, mby, &m, 1);
+                } else {
+                    skip_run++;
+                    memset(e->nzy + mb * 16, 0, 16);
+                    memset(e->nzc + mb * 8, 0, 8);
+                }
+                e->mvs[mb] = (struct lm_mv){ 0, 0, 0 };
                 continue;
             }
             fetch_mb(e, xrgb, stride_px, mbx, mby, ys, us, vs);
-            int intra = !p_slice;
-            if (p_slice) {                              /* inter against the previous picture, unless intra is clearly closer */
-                const uint8_t *yp = e->Y + (size_t)mby * 16 * (size_t)e->ys + (size_t)mbx * 16;
-                long inter = sad_to_plane(ys, yp, e->ys, 16, 0);
+            int intra = !p_slice, mvx = 0, mvy = 0;     /* the vector in whole pixels */
+            if (p_slice) {
+                struct msearch ms = { ys, e->rY, e->ys, e->mbw * 16, e->mbh * 16, mbx * 16, mby * 16, pmx, pmy, skx, sky, lam };
+                int cand[8][2], nc = 0;
+                const struct lm_mv *old = &e->mvs[mb];  /* (still the picture before's) */
+                if (old->ref >= 0) {
+                    cand[nc][0] = old->x / 4;
+                    cand[nc++][1] = old->y / 4;
+                }
+                cand[nc][0] = skx / 4;
+                cand[nc++][1] = sky / 4;
+                cand[nc][0] = pmx / 4;
+                cand[nc++][1] = pmy / 4;
+                if (gdy) {
+                    cand[nc][0] = 0;
+                    cand[nc++][1] = gdy;
+                }
+                if (mbx > 0 && e->mvs[mb - 1].ref >= 0) {
+                    cand[nc][0] = e->mvs[mb - 1].x / 4;
+                    cand[nc++][1] = e->mvs[mb - 1].y / 4;
+                }
+                if (mby > 0 && e->mvs[mb - (size_t)e->mbw].ref >= 0) {
+                    cand[nc][0] = e->mvs[mb - (size_t)e->mbw].x / 4;
+                    cand[nc++][1] = e->mvs[mb - (size_t)e->mbw].y / 4;
+                }
+                search_mv(&ms, cand, nc, &mvx, &mvy);
+                if (mvx || mvy)
+                    lm_h264_mc_mb(e->rY, e->rU, e->rV, e->Y, e->U, e->V, e->ys, e->cs, e->mbw, e->mbh, mbx, mby, mvx * 4, mvy * 4);
+                /* (a zero vector leaves the picture before in the planes as it is) */
+                long inter = sad_to_plane(ys, e->Y + (size_t)mby * 16 * (size_t)e->ys + (size_t)mbx * 16, e->ys, 16, 0);
                 int dc = luma_dc_pred(e, mbx, mby);
                 long dcs = 0;
                 for (int i = 0; i < 256; i++)
@@ -617,10 +875,11 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
             if (intra)
                 fill_dc_pred(e, mbx, mby);              /* (the planes now hold the prediction) */
             analyse(e, mbx, mby, ys, us, vs, intra, &m);
-            if (!intra && m.cbp_l == 0 && m.cbp_c == 0) {   /* nothing to send: P_Skip */
+            if (!intra && m.cbp_l == 0 && m.cbp_c == 0 && mvx * 4 == skx && mvy * 4 == sky) {   /* nothing to send: P_Skip */
                 skip_run++;
                 memset(e->nzy + mb * 16, 0, 16);
                 memset(e->nzc + mb * 8, 0, 8);
+                e->mvs[mb] = (struct lm_mv){ (int16_t)skx, (int16_t)sky, 0 };
                 remember_mb(e, xrgb, stride, mbx, mby);
                 continue;
             }
@@ -628,8 +887,13 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
                 lm_bw_ue(bw, (uint32_t)skip_run);
                 skip_run = 0;
             }
+            m.mvx = mvx * 4;
+            m.mvy = mvy * 4;
+            m.pmx = pmx;
+            m.pmy = pmy;
             write_mb(e, mbx, mby, &m, p_slice);
             reconstruct(e, mbx, mby, &m);
+            e->mvs[mb] = intra ? (struct lm_mv){ 0, 0, -1 } : (struct lm_mv){ (int16_t)(mvx * 4), (int16_t)(mvy * 4), 0 };
             remember_mb(e, xrgb, stride, mbx, mby);
         }
     if (p_slice && skip_run)
@@ -637,6 +901,9 @@ uint8_t *lm_h264enc_encode(struct lm_h264enc *e, const uint32_t *xrgb, size_t st
     lm_bw_trailing(bw);
     if (bw->oom)
         return NULL;
+    uint32_t *t = e->rowh_prev;                         /* this picture's rows are what the next one is compared with */
+    e->rowh_prev = e->rowh;
+    e->rowh = t;
     size_t nal_len = 0;
     uint8_t *nal = lm_h264_nal(3, idr ? 5 : 1, bw->p, bw->n, &nal_len);
     if (!nal)

@@ -464,3 +464,100 @@ int lm_h264_chroma_dc_pred(const uint8_t *plane, int cs, int mbx, int mby, int b
         return top ? (sT + 2) >> 2 : left ? (sL + 2) >> 2 : 128;
     return left ? (sL + 2) >> 2 : top ? (sT + 2) >> 2 : 128;
 }
+
+/* ---- motion ------------------------------------------------------------------------------------------------------------------------- */
+
+/* A neighbour: ref -2 = not there (outside the picture), -1 = intra, 0 = inter with its vector. */
+static void mv_neigh(const struct lm_mv *mvs, int mbw, int mbx, int mby, int dx, int dy, int *ref, int *x, int *y)
+{
+    int nx = mbx + dx, ny = mby + dy;
+    if (nx < 0 || ny < 0 || nx >= mbw) {
+        *ref = -2;
+        *x = *y = 0;
+        return;
+    }
+    const struct lm_mv *m = &mvs[(size_t)ny * (size_t)mbw + (size_t)nx];
+    *ref = m->ref >= 0 ? 0 : -1;
+    *x = m->ref >= 0 ? m->x : 0;
+    *y = m->ref >= 0 ? m->y : 0;
+}
+
+static int median3(int a, int b, int c)
+{
+    int lo = a < b ? a : b, hi = a < b ? b : a;
+    return c < lo ? lo : c > hi ? hi : c;
+}
+
+void lm_h264_mv_pred(const struct lm_mv *mvs, int mbw, int mbx, int mby, int *px, int *py)
+{
+    int ra, rb, rc, ax, ay, bx, by, cx, cy;
+    mv_neigh(mvs, mbw, mbx, mby, -1, 0, &ra, &ax, &ay);
+    mv_neigh(mvs, mbw, mbx, mby, 0, -1, &rb, &bx, &by);
+    mv_neigh(mvs, mbw, mbx, mby, 1, -1, &rc, &cx, &cy);
+    if (rc == -2)                                       /* C is not there: D (above left) takes its place */
+        mv_neigh(mvs, mbw, mbx, mby, -1, -1, &rc, &cx, &cy);
+    int match = (ra == 0) + (rb == 0) + (rc == 0);
+    if (match == 1) {                                   /* exactly one neighbour uses the reference: its vector */
+        *px = ra == 0 ? ax : rb == 0 ? bx : cx;
+        *py = ra == 0 ? ay : rb == 0 ? by : cy;
+    } else if (match == 0 && rb == -2 && rc == -2 && ra != -2) {      /* only A is there */
+        *px = ax;
+        *py = ay;
+    } else {
+        *px = median3(ax, bx, cx);
+        *py = median3(ay, by, cy);
+    }
+}
+
+void lm_h264_skip_mv(const struct lm_mv *mvs, int mbw, int mbx, int mby, int *mx, int *my)
+{
+    int ra, rb, ax, ay, bx, by;
+    mv_neigh(mvs, mbw, mbx, mby, -1, 0, &ra, &ax, &ay);
+    mv_neigh(mvs, mbw, mbx, mby, 0, -1, &rb, &bx, &by);
+    if (ra == -2 || rb == -2 || (ra == 0 && !ax && !ay) || (rb == 0 && !bx && !by)) {
+        *mx = *my = 0;
+        return;
+    }
+    lm_h264_mv_pred(mvs, mbw, mbx, mby, mx, my);
+}
+
+static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+void lm_h264_mc_luma(const uint8_t *ref, int stride, int pw, int ph, int x0, int y0, int mvx, int mvy, uint8_t *dst, int dstride)
+{
+    int sx = x0 + (mvx >> 2), sy = y0 + (mvy >> 2);
+    if (sx >= 0 && sy >= 0 && sx + 16 <= pw && sy + 16 <= ph) {
+        for (int y = 0; y < 16; y++)
+            memmove(dst + (size_t)y * (size_t)dstride, ref + (size_t)(sy + y) * (size_t)stride + (size_t)sx, 16);
+        return;
+    }
+    for (int y = 0; y < 16; y++) {
+        const uint8_t *row = ref + (size_t)clampi(sy + y, 0, ph - 1) * (size_t)stride;
+        for (int x = 0; x < 16; x++)
+            dst[(size_t)y * (size_t)dstride + (size_t)x] = row[clampi(sx + x, 0, pw - 1)];
+    }
+}
+
+void lm_h264_mc_chroma(const uint8_t *ref, int stride, int pw, int ph, int x0, int y0, int mvx, int mvy, uint8_t *dst, int dstride)
+{
+    int sx = x0 + (mvx >> 3), sy = y0 + (mvy >> 3), xf = mvx & 7, yf = mvy & 7;
+    uint8_t tmp[64];                                    /* (the prediction may overlap its own source: build it apart) */
+    for (int y = 0; y < 8; y++) {
+        const uint8_t *r0 = ref + (size_t)clampi(sy + y, 0, ph - 1) * (size_t)stride;
+        const uint8_t *r1 = ref + (size_t)clampi(sy + y + 1, 0, ph - 1) * (size_t)stride;
+        for (int x = 0; x < 8; x++) {
+            int xa = clampi(sx + x, 0, pw - 1), xb = clampi(sx + x + 1, 0, pw - 1);
+            tmp[y * 8 + x] = (uint8_t)(((8 - xf) * (8 - yf) * r0[xa] + xf * (8 - yf) * r0[xb] + (8 - xf) * yf * r1[xa] + xf * yf * r1[xb] + 32) >> 6);
+        }
+    }
+    for (int y = 0; y < 8; y++)
+        memcpy(dst + (size_t)y * (size_t)dstride, tmp + y * 8, 8);
+}
+
+void lm_h264_mc_mb(const uint8_t *rY, const uint8_t *rU, const uint8_t *rV, uint8_t *Y, uint8_t *U, uint8_t *V, int ys, int cs, int mbw, int mbh, int mbx,
+                   int mby, int mvx, int mvy)
+{
+    lm_h264_mc_luma(rY, ys, mbw * 16, mbh * 16, mbx * 16, mby * 16, mvx, mvy, Y + (size_t)mby * 16 * (size_t)ys + (size_t)mbx * 16, ys);
+    lm_h264_mc_chroma(rU, cs, mbw * 8, mbh * 8, mbx * 8, mby * 8, mvx, mvy, U + (size_t)mby * 8 * (size_t)cs + (size_t)mbx * 8, cs);
+    lm_h264_mc_chroma(rV, cs, mbw * 8, mbh * 8, mbx * 8, mby * 8, mvx, mvy, V + (size_t)mby * 8 * (size_t)cs + (size_t)mbx * 8, cs);
+}

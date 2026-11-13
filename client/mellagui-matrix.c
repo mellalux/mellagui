@@ -1230,17 +1230,34 @@ static int selftest(void)
             CHECK(!mcat_shade(&ct, cam, up, 30.0f, 0.001f, rgb));                                             /* ... and a ray at the ceiling misses it */
             CHECK(mcat_floor_shade(&ct, ct.pos[0], ct.pos[2]) < 0.5f && mcat_floor_shade(&ct, -2.0f, 1.0f) == 1.0f);   /* its shadow */
             {                                                                   /* Tom's day: sits, stands up and walks, sits elsewhere, lies down, walks back */
-                float cyc = mcat_cycle(), maxlie = 0.0f, maxwalk = 0.0f, xmin = 99.0f, xmax = -99.0f, tlie = 0.0f, twalk = 0.0f;
+                float cyc = mcat_cycle(), maxlie = 0.0f, maxwalk = 0.0f, xmin = 99.0f, xmax = -99.0f, tlie = 0.0f, twalk = 0.0f, tw0 = -1.0f, tw1 = 0.0f, maxrate = 0.0f;
+                struct mcat_state prev = { 0 };
                 for (float t = 0.0f; t < cyc; t += 0.25f) {
                     struct mcat d;
                     mcat_pose(&d, t, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                     CHECK(d.lie == 0.0f || d.stand == 0.0f);                                   /* never lying and standing at once */
                     if (d.lie > maxlie) { maxlie = d.lie; tlie = t; }
-                    if (d.walk > maxwalk) { maxwalk = d.walk; twalk = t; }
+                    if (d.walk > maxwalk) maxwalk = d.walk;
+                    if (d.walk > 0.99f && (tw0 < 0.0f || t - tw1 < 1.0f)) {            /* (the first walk: A to B) */
+                        if (tw0 < 0.0f) tw0 = t;
+                        tw1 = t;
+                    }
+                    struct mcat_state cur;
+                    mcat_state(t, &cur);
+                    if (t > 0.0f) {                                                            /* how fast the body turns: only while he walks, and smoothly */
+                        float dyaw = fmodf(cur.yaw - prev.yaw + 9.4247780f, 6.2831853f) - 3.1415927f;
+                        if (fabsf(dyaw) / 0.25f > maxrate)
+                            maxrate = fabsf(dyaw) / 0.25f;
+                        if (cur.walk < 0.01f && prev.walk < 0.01f)
+                            CHECK(fabsf(dyaw) < 1e-4f);                                       /* never turns on the spot */
+                    }
+                    prev = cur;
                     xmin = fminf(xmin, d.pos[0]);
                     xmax = fmaxf(xmax, d.pos[0]);
                 }
-                CHECK(maxlie > 0.99f && maxwalk > 0.95f && xmax - xmin > 1.2f);               /* he lies down, he walks, and he goes somewhere */
+                twalk = 0.5f * (tw0 + tw1);
+                CHECK(maxlie > 0.99f && maxwalk > 0.95f && xmax - xmin > 1.2f && tw0 > 0.0f);
+                CHECK(maxrate < 0.55f);                                                          /* the body never turns faster than about half a radian a second */               /* he lies down, he walks, and he goes somewhere */
                 struct mcat w0, w1, home;
                 mcat_pose(&home, cyc, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                 mcat_pose(&ct, 0.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);

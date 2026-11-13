@@ -100,53 +100,84 @@ enum { K_SIT, K_STAND, K_WALK, K_SITDOWN, K_LIE };
 struct seg { int kind, a, b; float dur; };
 
 #define N_SPOTS 2
-static const float k_spot[N_SPOTS][3] = { { 0.55f, 4.85f, 3.14159265f + 0.35f }, { -0.85f, 4.50f, 3.14159265f - 0.30f } };      /* x, z, the way he faces sitting */
+static const float k_spot[N_SPOTS][3] = { { 1.20f, 4.70f, 3.167f }, { -1.20f, 4.75f, 3.163f } };      /* x, z, the way he faces there (towards the camera: where the paths need the least turning) */
 
 static struct seg g_seg[16];
 static int g_nseg;
 static float g_cycle;
 
-/* The path between two spots: a curve (so the way back is a different one); u 0..1 along the curve. */
+/* The path between two spots: a smooth curve that leaves a spot in the direction he faces there and arrives in the direction he faces at the other one, so he never has
+ * to turn on the spot: the turning is the curve's, while he walks (a Hermite curve; the way back is another curve). u 0..1 along it. */
 static void bez_point(int a, int b, float u, float *x, float *z, float *dx, float *dz)
 {
     float ax = k_spot[a][0], az = k_spot[a][1], bx = k_spot[b][0], bz = k_spot[b][1];
-    float ex = bx - ax, ez = bz - az, el = sqrtf(ex * ex + ez * ez);
-    float cx = (ax + bx) * 0.5f - ez / el * 0.6f, cz = (az + bz) * 0.5f + ex / el * 0.6f, v = 1.0f - u;
-    *x = v * v * ax + 2.0f * v * u * cx + u * u * bx;
-    *z = v * v * az + 2.0f * v * u * cz + u * u * bz;
-    *dx = 2.0f * v * (cx - ax) + 2.0f * u * (bx - cx);
-    *dz = 2.0f * v * (cz - az) + 2.0f * u * (bz - cz);
+    float ex = bx - ax, ez = bz - az, chord = sqrtf(ex * ex + ez * ez), m = 1.76f * chord;
+    float t0x = sinf(k_spot[a][2]) * m, t0z = cosf(k_spot[a][2]) * m, t1x = sinf(k_spot[b][2]) * m, t1z = cosf(k_spot[b][2]) * m;
+    float u2 = u * u, u3 = u2 * u;
+    float h00 = 2.0f * u3 - 3.0f * u2 + 1.0f, h10 = u3 - 2.0f * u2 + u, h01 = -2.0f * u3 + 3.0f * u2, h11 = u3 - u2;
+    float d00 = 6.0f * u2 - 6.0f * u, d10 = 3.0f * u2 - 4.0f * u + 1.0f, d01 = -6.0f * u2 + 6.0f * u, d11 = 3.0f * u2 - 2.0f * u;
+    *x = h00 * ax + h10 * t0x + h01 * bx + h11 * t1x;
+    *z = h00 * az + h10 * t0z + h01 * bz + h11 * t1z;
+    *dx = d00 * ax + d10 * t0x + d01 * bx + d11 * t1x;
+    *dz = d00 * az + d10 * t0z + d01 * bz + d11 * t1z;
 }
 
-/* The arc length of a path and the u that is `frac` of the way along it. */
-static float path_arc(int a, int b, float frac, float *u_out)
+/* How he walks a path: the speed is cut where the path turns so that the body never turns faster than TURN_RATE (a turn is slow and smooth, the paws step
+ * slower), and eased at both ends. A table by samples along the curve: the arc length, the time, the speed and the curve's parameter. */
+#define PT_N 96
+#define TURN_RATE 0.42f                 /* radians a second, at most */
+#define V_MIN 0.10f                     /* metres a second, at least (while he moves) */
+struct pathtab { float arc, dur, s[PT_N + 1], t[PT_N + 1], v[PT_N + 1], u[PT_N + 1]; };
+static struct pathtab g_path[N_SPOTS][N_SPOTS];
+
+static void path_build(int a, int b)
 {
-    float cum[33], px = 0, pz = 0, dx, dz;
-    cum[0] = 0.0f;
-    bez_point(a, b, 0.0f, &px, &pz, &dx, &dz);
-    for (int i = 1; i <= 32; i++) {
-        float x, z;
-        bez_point(a, b, (float)i / 32.0f, &x, &z, &dx, &dz);
-        cum[i] = cum[i - 1] + sqrtf((x - px) * (x - px) + (z - pz) * (z - pz));
+    struct pathtab *pt = &g_path[a][b];
+    float psi[PT_N + 1], x, z, dx, dz, px = 0, pz = 0;
+    for (int i = 0; i <= PT_N; i++) {
+        pt->u[i] = (float)i / (float)PT_N;
+        bez_point(a, b, pt->u[i], &x, &z, &dx, &dz);
+        psi[i] = atan2f(dx, dz);
+        pt->s[i] = i ? pt->s[i - 1] + sqrtf((x - px) * (x - px) + (z - pz) * (z - pz)) : 0.0f;
         px = x;
         pz = z;
     }
-    if (u_out) {
-        float want = frac * cum[32];
-        int i = 1;
-        while (i < 32 && cum[i] < want)
-            i++;
-        float seg = cum[i] - cum[i - 1];
-        *u_out = ((float)(i - 1) + (seg > 1e-6f ? (want - cum[i - 1]) / seg : 0.0f)) / 32.0f;
+    pt->arc = pt->s[PT_N];
+    for (int i = 0; i <= PT_N; i++) {
+        int i0 = i > 1 ? i - 2 : 0, i1 = i < PT_N - 1 ? i + 2 : PT_N;               /* the turn rate over a few samples */
+        float d = psi[i1] - psi[i0];
+        d = fmodf(d + 3.0f * 3.14159265f, 2.0f * 3.14159265f) - 3.14159265f;
+        float kappa = fabsf(d) / fmaxf(pt->s[i1] - pt->s[i0], 1e-4f);
+        float v = clampf(TURN_RATE / fmaxf(kappa, 1e-3f), V_MIN, WALK_SPEED), f = pt->s[i] / pt->arc;
+        v *= 0.3f + 0.7f * sstep(0.0f, 0.12f, f) * sstep(0.0f, 0.12f, 1.0f - f);       /* slow at the ends */
+        pt->v[i] = fmaxf(v, 0.04f);
     }
-    return cum[32];
+    pt->t[0] = 0.0f;
+    for (int i = 1; i <= PT_N; i++)
+        pt->t[i] = pt->t[i - 1] + (pt->s[i] - pt->s[i - 1]) / (0.5f * (pt->v[i - 1] + pt->v[i]));
+    pt->dur = pt->t[PT_N];
+}
+
+/* Where he is `tau` seconds into a walk: the arc walked, the curve's parameter and the speed. */
+static void path_at(int a, int b, float tau, float *arc, float *u, float *speed)
+{
+    const struct pathtab *pt = &g_path[a][b];
+    int i = 0;
+    while (i < PT_N - 1 && pt->t[i + 1] <= tau)
+        i++;
+    float span = pt->t[i + 1] - pt->t[i], f = span > 1e-6f ? sat((tau - pt->t[i]) / span) : 0.0f;
+    *arc = mixf(pt->s[i], pt->s[i + 1], f);
+    *u = mixf(pt->u[i], pt->u[i + 1], f);
+    *speed = mixf(pt->v[i], pt->v[i + 1], f);
 }
 
 static void timeline_build(void)
 {
     if (g_nseg)
         return;
-    float ab = path_arc(0, 1, 1.0f, NULL) / WALK_SPEED, ba = path_arc(1, 0, 1.0f, NULL) / WALK_SPEED;
+    path_build(0, 1);
+    path_build(1, 0);
+    float ab = g_path[0][1].dur, ba = g_path[1][0].dur;
     const struct seg day[] = {
         { K_SIT, 0, 0, 55.0f }, { K_STAND, 0, 1, 4.0f }, { K_WALK, 0, 1, ab }, { K_SITDOWN, 0, 1, 4.0f },
         { K_SIT, 1, 1, 25.0f }, { K_LIE, 1, 1, 52.0f }, { K_SIT, 1, 1, 10.0f },
@@ -164,12 +195,6 @@ float mcat_cycle(void)
 {
     timeline_build();
     return g_cycle;
-}
-
-static float lerp_angle(float a, float b, float t)
-{
-    float d = fmodf(b - a + 3.0f * 3.14159265f, 2.0f * 3.14159265f) - 3.14159265f;
-    return a + d * t;
 }
 
 static struct mcat_state state_at(float t)
@@ -193,26 +218,21 @@ static struct mcat_state state_at(float t)
         st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
         st.lie = sstep(0.0f, 6.0f, tau) * (1.0f - sstep(sg->dur - 6.0f, sg->dur, tau));
         break;
-    case K_STAND:                                                       /* up, and turning to where the path begins */
-        bez_point(sg->a, sg->b, 0.0f, &x, &z, &dx, &dz);
-        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1];
-        st.yaw = lerp_angle(k_spot[sg->a][2], atan2f(dx, dz), sstep(0.25f, 1.0f, u));
+    case K_STAND:                                                       /* up, where he is, facing where he faced (the path begins that way) */
+        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
         st.stand = sstep(0.0f, 0.8f, u);
         break;
     case K_WALK: {
-        float arc = path_arc(sg->a, sg->b, 1.0f, NULL), e = mixf(u, sstep(0.0f, 1.0f, u), 0.6f), uu;
-        path_arc(sg->a, sg->b, e, &uu);
+        float arc, uu, speed;
+        path_at(sg->a, sg->b, tau, &arc, &uu, &speed);
         bez_point(sg->a, sg->b, uu, &x, &z, &dx, &dz);
         st.x = x; st.z = z; st.yaw = atan2f(dx, dz);
         st.stand = 1.0f;
-        st.dist = e * arc;
-        float speed = ((1.0f - 0.6f) + 0.6f * 6.0f * u * (1.0f - u)) * arc / sg->dur;      /* (the derivative of e) */
-        st.walk = sat(speed / (0.55f * WALK_SPEED));
+        st.dist = arc;
+        st.walk = sat(speed / 0.06f);
         break;
     }
-    case K_SITDOWN:                                                     /* turns to face the room, and down */
-        bez_point(sg->a, sg->b, 1.0f, &x, &z, &dx, &dz);
-        st.yaw = lerp_angle(atan2f(dx, dz), k_spot[sg->b][2], sstep(0.0f, 0.75f, u));
+    case K_SITDOWN:                                                     /* down where he arrived (the path ended facing that way) */
         st.stand = 1.0f - sstep(0.2f, 1.0f, u);
         break;
     }

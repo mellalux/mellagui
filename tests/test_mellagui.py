@@ -196,7 +196,7 @@ class Base(unittest.TestCase):
 
     def private_compositor(self, name, *args, env=None):
         sock = os.path.join(tmp, name + '.ctl')
-        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77', **(env or {}))
+        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=0:exitcode=77', MELLAGUI_GADGETS_PRELOAD='1', **(env or {}))
         p = subprocess.Popen([BIN, '--backend', 'headless', '--size', '800x500', '--socket', name, '--control', sock,
                               '--terminal', 'true'] + list(args), env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)
@@ -1328,12 +1328,17 @@ class TestClipboard(Base):
 
 
 class TestGadget(Base):
-    """The desktop gadget: clipboard history read by the compositor itself."""
-    def rect(self):
-        """The gadget card (x, y, w, h) or None when hidden."""
-        ctl.cmd('gadget-rect')
-        p = ctl.last.split()
-        return None if p[1] == 'hidden' else tuple(int(v) for v in p[1:5])
+    """The desktop gadget: the clipboard history in a card of its own program (mellagui-gadget clipboard), a frameless window."""
+    def rect(self, wait=3.0):
+        """The gadget card (x, y, w, h) or None when hidden (waits for the program to show it)."""
+        return ctl.gadget_rect('clipboard', wait)
+
+    def wait_hidden(self):
+        for _ in range(100):
+            if self.rect(wait=0) is None:
+                return True
+            time.sleep(0.05)
+        return False
 
     def is_card(self, rgb):
         """The card is slightly translucent: its dark blue shows the wallpaper a little."""
@@ -1342,21 +1347,25 @@ class TestGadget(Base):
     def drag(self, x, y, dx, dy):
         ctl.abs(x, y)
         ctl.button(272, True)
+        time.sleep(0.3)                     # the card asks for the move / resize while the button is down (as a hand takes longer than a test)
         ctl.cmd('motion %d %d' % (dx, dy))
+        time.sleep(0.3)                     # (a resize: the card answers the configure before the button goes up)
         ctl.button(272, False)
+        ctl.gadget_settle()                 # the program repainted at its new size
 
     def reset_gadget(self):
         x, y, w, h = self.rect()
         ctl.click(x + w // 2, y + 10)
         ctl.click(x + w // 2, y + 10)       # double click on the title bar: default size and place
         ctl.abs(5, 300)
+        ctl.gadget_settle()
 
     def setUp(self):
         super().setUp()
         ctl.cmd('gadget 1')
         self.reset_gadget()
         ctl.cmd('clip clear')
-        self.addCleanup(lambda: ctl.cmd('gadget 1'))
+        self.addCleanup(lambda: ctl.cmd('gadget 0'))
         self.c = self.client()
         self.seat = self.c.wl.bind('wl_seat', 5)
         self.mgr = self.c.wl.bind('wl_data_device_manager', 3)
@@ -1486,6 +1495,7 @@ class TestGadget(Base):
         ctl.key(KEY_LEFTMETA, False)
         ctl.tap(KEY_DOWN)
         ctl.tap(KEY_ESC)                                       # Esc ends the mode and is eaten
+        time.sleep(0.3)                                        # (the card asks the compositor to give the keyboard back)
         ctl.tap(KEY_DOWN)                                      # now it is the application's
         ev = self.c.wl.wait_for(lambda e: e.obj == kb and e.name == 'key' and e.args[2] == KEY_DOWN, 1.5)
         self.assertIsNotNone(ev, 'Down did not reach the application after Esc')
@@ -1546,17 +1556,20 @@ class TestGadget(Base):
     # ---- the card scrolls, with small arrow buttons; entries and the whole history can be deleted -----------------------------------
 
     def view(self):
+        ctl.gadget_settle()
         ctl.cmd('clip')
         f = dict(kv.split('=') for kv in ctl.last.split()[1:])
         return int(f['top']), int(f['slots']), int(f['n'])
 
     def buttons(self):
         """Centres of the title bar buttons (up, down, clear all) and a function giving the x of entry k and the centre of the card."""
+        ctl.gadget_settle()                                           # (the card has heard of the entries just added)
         x, y, w, h = self.rect()
         clear = x + w - 14 - 20 + 10
         return (clear - 48, y + 13), (clear - 24, y + 13), (clear, y + 13)
 
     def entry_pos(self, k, delete=False):
+        ctl.gadget_settle()
         x, y, w, h = self.rect()
         return (x + w - 12 - 13 if delete else x + w // 2 - 20, y + 26 + 4 + k * 36 + 16)
 
@@ -1592,11 +1605,7 @@ class TestGadget(Base):
         for i in range(30):
             ctl.cmd('clip add e%02d' % i)
         x, y, w, h = self.rect()
-        self.drag(x + w // 2, y + h - 2, 0, 0)                        # (just a click on the bottom edge: no resize)
-        ctl.abs(x + w // 2, y + h - 3)
-        ctl.button(272, True)
-        ctl.cmd('motion 0 220')                                       # drag the bottom edge down
-        ctl.button(272, False)
+        self.drag(x + w // 2, y + h - 3, 0, 220)                      # drag the bottom edge down
         top, slots, n = self.view()
         self.assertGreaterEqual(slots, 10)
         self.assertLessEqual(slots, 30)
@@ -1605,14 +1614,14 @@ class TestGadget(Base):
         for i in range(8):
             ctl.cmd('clip add e%d' % i)
         ctl.click(*self.entry_pos(1, delete=True))                    # the x of the second entry (e6)
-        got = self.clips()
+        got = self.wait_clips(7)
         self.assertEqual(len(got), 7)
         self.assertNotIn('e6', got)
         self.assertEqual(got[:2], ['e7', 'e5'])
         up, down, clear = self.buttons()                              # scrolled down, the x belongs to the entry it is on
         ctl.click(*down)
         ctl.click(*self.entry_pos(0, delete=True))
-        self.assertEqual(len(self.clips()), 6)
+        self.assertEqual(len(self.wait_clips(6)), 6)
         self.assertNotIn('e4', self.clips())                          # (e7 e5 e4 e3 e2 e1 e0: scrolled to the end the card shows e4 first)
 
     def test_the_trash_can_forgets_everything(self):
@@ -1620,7 +1629,7 @@ class TestGadget(Base):
             ctl.cmd('clip add e%d' % i)
         up, down, clear = self.buttons()
         ctl.click(*clear)
-        self.assertEqual(self.clips(), [])
+        self.assertEqual(self.wait_clips(0), [])
         self.assertEqual(self.view()[0], 0)
 
     def test_a_new_copy_brings_the_newest_back_into_view(self):
@@ -1636,6 +1645,7 @@ class TestGadget(Base):
         for i in range(12):
             ctl.cmd('clip add e%02d' % i)
         self.c.wl.roundtrip()
+        ctl.gadget_settle()
         ctl.key(KEY_LEFTMETA, True)
         ctl.tap(KEY_C)
         ctl.key(KEY_LEFTMETA, False)
@@ -1643,7 +1653,7 @@ class TestGadget(Base):
             ctl.tap(KEY_DOWN)                                         # past the five that were in view
         self.assertEqual(self.view()[0], 4)                           # the card scrolled (cursor on entry 8 = the last visible one)
         ctl.tap(111)                                                  # Delete: forget entry 8 (e03)
-        got = self.clips()
+        got = self.wait_clips(11)
         self.assertEqual(len(got), 11)
         self.assertNotIn('e03', got)
         ctl.tap(107)                                                  # End
@@ -1651,7 +1661,7 @@ class TestGadget(Base):
         ctl.key(KEY_LEFTSHIFT, True)
         ctl.tap(111)                                                  # Shift+Delete: the whole history
         ctl.key(KEY_LEFTSHIFT, False)
-        self.assertEqual(self.clips(), [])
+        self.assertEqual(self.wait_clips(0), [])
         ctl.tap(KEY_A)                                                # the mode ended by itself: keys go to the application again
         self.c.wl.roundtrip()
 
@@ -1679,10 +1689,10 @@ class TestGadget(Base):
         self.assertTrue(ctl.last.startswith('ok'))
         ctl.cmd('clip')
         self.assertRegex(ctl.last, r' gadget=0( |$)')
+        self.assertTrue(self.wait_hidden(), 'the card did not go away')
         ctl.sync()
         hidden = ctl.dump(os.path.join(tmp, 'gadget0.ppm')).px(*probe)
         self.assertNotEqual(hidden, shown)
-        self.assertIsNone(self.rect())
 
     def test_gadget_shows_text(self):
         self.copy('hello gadget')
@@ -1721,7 +1731,7 @@ class TestGadget(Base):
         self.drag(x + w - 2, y + h - 2, 100, 150)                # bottom right corner
         nx, ny, nw, nh = self.rect()
         self.assertEqual((nx, ny), (x - 0, y))
-        self.assertEqual((nw, nh), (min(w + 100, 640, 1024 - x), min(h + 150, 560, 600 - y)))
+        self.assertEqual((nw, nh), (min(w + 100, 640, 1024 - x), min(h + 150, 1600, 600 - y)))
         x, y, w, h = self.rect()
         self.drag(x + 2, y + h // 2, -50, 0)                     # left edge keeps the right edge in place
         self.assertEqual(self.rect(), (x - 50, y, w + 50, h))
@@ -4506,7 +4516,7 @@ class TestSettings(Base):
         self.assertEqual(self.burst(c, obj)['layout'], 'ee')
         ctl.cmd('gadget 0')
         self.assertEqual(self.burst(c, obj)['gadget'], '0')
-        ctl.cmd('gadget 1')
+        ctl.cmd('gadget 0')
 
     def test_settings_reach_every_client(self):
         a, oa = self.bound()
@@ -5553,8 +5563,10 @@ class TestMixer(Base):
         # drag from 10 % to 90 %: few commands (coalesced), the last value wins
         c.abs(sx + sw // 10, sy)
         c.button(272, True)
+        time.sleep(0.3)
         for k in range(1, 41):
             c.abs(sx + sw // 10 + (sw * 8 // 10) * k // 40, sy)
+        time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
         c.button(272, False)
         self.wait_for(lambda: 88 <= self.state(pj)['sinks'][0]['vol'] <= 92, 'sink volume about 90 after the drag')
         sets = [l for l in self.state(pj)['log'] if l.startswith('set-sink-volume')]
@@ -5594,7 +5606,9 @@ class TestMixer(Base):
         # dragging the mixer's title bar moves only the mixer
         c.abs(x + 60, y + 10)
         c.button(272, True)
+        time.sleep(0.3)
         c.abs(x - 140, y + 90)
+        time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
         c.button(272, False)
         x2, y2, w2, h2 = self.card(c)
         self.assertEqual((x2, y2), (x - 200, y + 80))
@@ -5618,7 +5632,9 @@ class TestMixer(Base):
             gx, gy, gw, gh = self.card(c)
             c.abs(gx + 60, gy + 10)
             c.button(272, True)
+            time.sleep(0.3)
             c.abs(gx + 60 + dx, gy + 10 + dy)
+            time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
             c.button(272, False)
             return self.card(c)
         # a little closer: it jumps flush under the clipboard and lines up with its right edge
@@ -5643,7 +5659,9 @@ class TestMixer(Base):
         def pull(px, py, dx, dy):
             c.abs(px, py)
             c.button(272, True)
+            time.sleep(0.3)
             c.abs(px + dx, py + dy)
+            time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
             c.button(272, False)
             return self.card(c)
         # the top edge pulled up 9 px (3 px short of the clipboard): flush against the clipboard's bottom edge
@@ -5661,7 +5679,7 @@ class TestMixer(Base):
         path = os.path.join(tmp, 'gadgets-saved.conf')
         if os.path.exists(path):
             os.unlink(path)
-        c = self.start('mellagui-gsave1', env, '--size', '1280x900', '--gadgets-file', path)
+        c = self.start('mellagui-gsave1', env, '--size', '1280x900', '--windows-file', path)
         x, y, w, h = self.card(c)
         c.cmd('gadget-rect')
         cb = tuple(map(int, c.last.split()[1:5]))
@@ -5669,7 +5687,9 @@ class TestMixer(Base):
         def grab(px, py, dx, dy):
             c.abs(px, py)
             c.button(272, True)
+            time.sleep(0.3)
             c.abs(px + dx, py + dy)
+            time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
             c.button(272, False)
         # a plain click on a title bar saves nothing; moving the mixer and stretching it do
         c.click(x + 60, y + 10)
@@ -5680,9 +5700,10 @@ class TestMixer(Base):
         mx, my, mw, mh = self.card(c)
         self.assertEqual((mx, my, mw), (x - 300, y + 100, w))
         self.assertGreater(mh, h)
-        self.assertEqual(open(path).read().split('\n')[:-1], ['mixer %d %d %d %d' % (mx, my, mw, mh)])      # only the moved one
+        saved = [l for l in open(path).read().split('\n') if l and not l.startswith('#')]
+        self.assertEqual(saved, ['mellagui.gadget.mixer %d %d %d %d 0' % (mx, my, mw, mh)])      # only the moved one
         # a new run puts it back where it was, the clipboard stays docked
-        c2 = self.start('mellagui-gsave2', env, '--size', '1280x900', '--gadgets-file', path)
+        c2 = self.start('mellagui-gsave2', env, '--size', '1280x900', '--windows-file', path)
         self.assertEqual(self.card(c2), (mx, my, mw, mh))
         c2.cmd('gadget-rect')
         self.assertEqual(tuple(map(int, c2.last.split()[1:5])), cb)
@@ -5690,11 +5711,12 @@ class TestMixer(Base):
         c2.click(mx + 60, my + 10)
         c2.click(mx + 60, my + 10)
         for _ in range(40):
-            if self.card(c2) == (x, y, w, h) or self.card(c2)[:2] == (cb[0], cb[1] + cb[3] + 12):
+            if self.card(c2)[2:] == (w, h) and self.card(c2)[:2] in ((x, y), (cb[0], cb[1] + cb[3] + 12)):
                 break
             time.sleep(0.05)
         self.assertEqual(self.card(c2)[2:], (w, h))
-        self.assertEqual(open(path).read(), '')
+        time.sleep(0.2)
+        self.assertEqual([l for l in open(path).read().split('\n') if l and not l.startswith('#')], [])
 
     def test_mixer_docks_beside_the_clipboard_on_a_small_screen(self):
         env, d = self.mixer_env('small')
@@ -5958,7 +5980,9 @@ class TestSysinfo(Base):
         x, y, w, h = map(int, c.last.split()[1:5])
         c.abs(x + 80, y + 10)
         c.button(272, True)
+        time.sleep(0.3)
         c.abs(x - 60, y + 130)
+        time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
         c.button(272, False)
         c.cmd('gadget-rect system')
         self.assertEqual(tuple(map(int, c.last.split()[1:5])), (x - 140, y + 120, w, h))
@@ -5967,7 +5991,9 @@ class TestSysinfo(Base):
         x, y, w, h = map(int, c.last.split()[1:5])
         c.abs(x + w - 3, y + h - 3)
         c.button(272, True)
+        time.sleep(0.3)
         c.abs(x - 500, y - 500)
+        time.sleep(0.3)                                              # (the card answers the move / resize while the button is down)
         c.button(272, False)
         c.cmd('gadget-rect system')
         w2, h2 = map(int, c.last.split()[3:5])
@@ -17428,8 +17454,12 @@ class TestSmartGadget(Base):
         self.items(c)
         x, y, w, h = self.card(c)
         c.click(x + w - 12 - 22, self.row_y(c, 0))                      # the lamp's switch: it is on, so it goes off
-        c.sync()
+        c.gadget_settle('smart')
         self.assertEqual(c.cmd('smart')[1].split(' on=')[1].split()[0], '0')
+        for _ in range(60):
+            if self.logged():
+                break
+            time.sleep(0.1)
         self.assertEqual(self.logged(), ['plug1 switch_1 false'])
         c.click(x + w - 12 - 22, self.row_y(c, 2))                      # the printer: on
         for _ in range(60):

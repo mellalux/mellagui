@@ -494,8 +494,3 @@ void dock_anim_tick(void *data)
         lm_timer_arm_ms(wm->dock_anim, 0, 0);
 }
 
-void lm_wm_clip_view(struct lm_wm *wm, int *top, int *slots)
-{
-    *top = clip_top(wm);
-    *slots = clip_slots(wm);
-}

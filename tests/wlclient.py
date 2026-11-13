@@ -141,7 +141,10 @@ class Wl:
 
     def send_raw(self, data, fds=()):
         anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack('%di' % len(fds), *fds))] if fds else []
-        self.sock.sendmsg([data], anc)
+        try:
+            self.sock.sendmsg([data], anc)
+        except (BrokenPipeError, ConnectionResetError):
+            pass                                    # the compositor already disconnected us after a protocol error: the error event is still to be read
 
     def request_raw(self, obj, opcode, payload=b'', fds=()):
         size = 8 + len(payload)
@@ -457,11 +460,23 @@ class Ctl:
     """Headless control socket (see backend.h)."""
 
     def __init__(self, path):
+        self.path = path
         self.s = socket.socket(socket.AF_UNIX)
         self.s.connect(path)
         self.f = self.s.makefile('rw')
 
     def cmd(self, line):
+        import time
+        end = time.time() + 5.0
+        while True:
+            lines = self._cmd(line)
+            # a gadget that is switched on but whose program has no window yet: ask again until it has
+            if line.startswith('gadget-rect') and self.last == 'ok starting' and time.time() < end:
+                time.sleep(0.03)
+                continue
+            return lines
+
+    def _cmd(self, line):
         self.f.write(line + '\n')
         self.f.flush()
         lines = []
@@ -476,6 +491,34 @@ class Ctl:
                     raise RuntimeError(l)
                 return lines
             lines.append(l)
+
+    def gadget_file(self, name):
+        """The state file the gadget program NAME (clipboard, mixer, system, smart) writes next to the control socket."""
+        return '%s.gadget.%s' % (self.path, name)
+
+    def gadget_rect(self, name='clipboard', wait=None):
+        """The gadget card's window (x, y, w, h) (cmd waits while the program starts), None when it is switched off."""
+        self.cmd('gadget-rect' + ('' if name == 'clipboard' else ' ' + name))
+        p = self.last.split()
+        return None if p[1] in ('hidden', 'starting') else tuple(int(v) for v in p[1:5])
+
+    def gadget_settle(self, name='clipboard', quiet=0.15, timeout=3.0):
+        """Waits until the gadget program has stopped repainting (its state file did not change for `quiet` seconds): what a click did is there."""
+        import os, time
+        path = self.gadget_file(name)
+        end = time.time() + timeout
+        last, since = None, time.time()
+        while time.time() < end:
+            try:
+                st = os.stat(path)
+                cur = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                cur = None
+            if cur != last:
+                last, since = cur, time.time()
+            elif time.time() - since >= quiet:
+                return
+            time.sleep(0.02)
 
     def kbd(self):
         """{'layout': 'ee', 'slot': 1, 'sticky': 0, 'latched': 0, 'slocked': 0, 'sound': 'none', 'sounds': 0} (LM_MOD_* masks)."""

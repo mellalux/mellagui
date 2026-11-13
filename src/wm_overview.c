@@ -113,7 +113,7 @@ static void overview_build(struct lm_wm *wm)
     int n = 0;
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link) {
-        if (!w->mapped || w->workspace != wm->workspace || win_is_calendar(w) || (w->states & LM_WINDOW_FULLSCREEN) ||
+        if (!w->mapped || w->workspace != wm->workspace || win_is_aux(w) || (w->states & LM_WINDOW_FULLSCREEN) ||
             window_output(wm, w) != o || n >= LM_OVERVIEW_MAX)
             continue;
         int i = n++;
@@ -156,7 +156,7 @@ static void overview_info(const struct lm_wm *wm, struct lm_output *o, struct lm
         oi->ws[i].hover = i == ov->hover_ws;
         const struct lm_window *w;
         lm_list_for_each(w, &wm->windows, link)
-            if (w->mapped && w->workspace == i && !win_is_calendar(w))
+            if (w->mapped && w->workspace == i && !win_is_aux(w))
                 oi->ws[i].count++;
     }
     oi->n = ov->n;
@@ -235,7 +235,6 @@ void overview_set(struct lm_wm *wm, bool open)
     launcher_set(wm, false, NULL);
     power_set(wm, false, NULL);
     sw_close(wm);
-    clip_nav_set(wm, false);
     if (wm->focused)
         lm_xdg_dismiss_popups(wm->focused->surface);
     struct lm_output *o = NULL;
@@ -571,46 +570,6 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
-    for (int gid = 0; gid < LM_GADGET_COUNT; gid++) {            /* bottom to top: the mixer is above the clipboard */
-        struct lm_rect gr;
-        if (!lm_wm_gadget_rect_id(wm, gid, &gr))
-            continue;
-        struct lm_rect gb = gadget_bounds(&gr);
-        if (clip && !lm_rect_overlaps(&gb, clip))
-            continue;
-        memset(&it, 0, sizeof(it));
-        it.kind = LM_SCENE_GADGET;
-        it.u.gadget.id = gid;
-        it.u.gadget.rect = gr;
-        it.u.gadget.title_h = GADGET_TITLE_H;
-        it.u.gadget.dragging = (wm->grab_kind == GRAB_GADGET_MOVE || wm->grab_kind == GRAB_GADGET_RESIZE) && wm->grab_gadget == gid;
-        if (gid == LM_GADGET_MIXER) {
-            if (wm->srv->mixer)
-                it.u.gadget.mixer = lm_mixer_state(wm->srv->mixer);
-        } else if (gid == LM_GADGET_SMART) {
-            if (wm->srv->smart)
-                it.u.gadget.smart = lm_smart_state(wm->srv->smart);
-        } else if (gid == LM_GADGET_SYSTEM) {
-            if (wm->srv->sysinfo)
-                it.u.gadget.sys = lm_sysinfo_state(wm->srv->sysinfo);
-        } else {
-            gadget_slots(gr.h, &it.u.gadget.slots, &it.u.gadget.entry_h);
-            int total = lm_seat_clip_count(wm->srv->seat);
-            int top = clip_top(wm);
-            it.u.gadget.total = total;
-            it.u.gadget.top = top;
-            int n = LM_MAX(LM_MIN(total - top, it.u.gadget.slots), 0);
-            it.u.gadget.n = n;
-            it.u.gadget.cursor = wm->clip_nav && wm->clip_cur >= top && wm->clip_cur < top + n ? wm->clip_cur - top : -1;
-            it.u.gadget.hover = wm->hover_clip;
-            clip_buttons(&gr, it.u.gadget.btn);
-            for (int i = 0; i < n; i++)
-                it.u.gadget.text[i] = lm_seat_clip_get(wm->srv->seat, top + i);
-        }
-        if (!fn(&it, data))
-            return;
-    }
-
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link) {
         if (!win_visible(wm, w) || w->anim_hidden || ov_hides(wm, w))
@@ -625,7 +584,7 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
         if (clip && !lm_rect_overlaps(&sb, clip))
             continue;
-        if (!(w->states & LM_WINDOW_FULLSCREEN) && (!clip || lm_rect_overlaps(&outer, clip))) {
+        if (!(w->states & LM_WINDOW_FULLSCREEN) && !win_is_gadget(w) && (!clip || lm_rect_overlaps(&outer, clip))) {
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_FRAME;
             frame_info(wm, w, &it.u.frame);
@@ -956,6 +915,8 @@ size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size)
     APPEND("pointer %d %d\n", (int)px, (int)py);
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link) {
+        if (win_is_gadget(w))                                   /* the cards are listed by `gadget-rect`, not among the windows the tests look at */
+            continue;
         char title[96], app[64];
         snprintf(title, sizeof(title), "%s", w->title);
         snprintf(app, sizeof(app), "%s", w->app_id);

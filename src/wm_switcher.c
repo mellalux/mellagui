@@ -51,7 +51,7 @@ void sw_step(struct lm_wm *wm, bool backwards)
         wm->sw_n = 0;
         struct lm_window *w;
         lm_list_for_each_reverse(w, &wm->windows, link)           /* top of the stack first, then by when it last had the focus */
-            if (w->mapped && wm->sw_n < SW_MAX_WINDOWS && !win_is_calendar(w))
+            if (w->mapped && wm->sw_n < SW_MAX_WINDOWS && !win_is_aux(w))
                 wm->sw_win[wm->sw_n++] = w;
         for (int i = 1; i < wm->sw_n; i++) {                      /* stable insertion sort, most recently focused first */
             struct lm_window *t = wm->sw_win[i];

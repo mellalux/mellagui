@@ -288,9 +288,21 @@ static void ctl_command(struct ctl_client *c, char *line)
             line[o++] = '\n';
             ctl_reply(c, "%.*s", (int)o, line);
         }
-        int top = 0, slots = 0;
-        if (srv->wm)
-            lm_wm_clip_view(srv->wm, &top, &slots);
+        int top = 0, slots = 0;                             /* from the card's own program (its state file), when it runs */
+        const char *base = getenv("MELLAGUI_GADGET_DUMP");
+        if (base && srv->wm && lm_wm_gadget_visible(srv->wm)) {
+            char path[640], line[200];
+            snprintf(path, sizeof(path), "%s.clipboard", base);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                if (fgets(line, sizeof(line), f)) {
+                    const char *t = strstr(line, " top="), *sl = strstr(line, " slots=");
+                    top = t ? atoi(t + 5) : 0;
+                    slots = sl ? atoi(sl + 7) : 0;
+                }
+                fclose(f);
+            }
+        }
         ctl_reply(c, "ok n=%d gadget=%d top=%d slots=%d\n", n, srv->wm && lm_wm_gadget_visible(srv->wm) ? 1 : 0, top, slots);
     } else if (!strcmp(cmd, "settings")) {
         /* settings                -> ok key=value ...
@@ -608,60 +620,67 @@ static void ctl_command(struct ctl_client *c, char *line)
         char buf[512];
         lm_lock_describe(srv->lock, buf, sizeof(buf));
         ctl_reply(c, "%s %s\n", ok ? "ok" : "err rejected", buf);
-    } else if (!strcmp(cmd, "gadget")) {
-        if (!a1 || !srv->wm) { ctl_reply(c, "err usage: gadget <0|1>\n"); return; }
-        lm_wm_set_gadget(srv->wm, a1[0] == '1');
-        ctl_reply(c, "ok\n");
-    } else if (!strcmp(cmd, "mixer")) {
-        /* mixer <0|1>  show / hide the volume mixer gadget; always replies the mixer's state:
-         * "ok visible=<0|1> backend=<none|pulse|alsa> ready=<0|1> volume=<n> mute=<0|1> output=<text> streams=<n>" */
-        if (!srv->wm || !srv->mixer) { ctl_reply(c, "err no mixer\n"); return; }
-        if (a1)
-            lm_wm_set_gadget_id(srv->wm, LM_GADGET_MIXER, a1[0] == '1');
-        const struct lm_mixer_state *ms = lm_mixer_state(srv->mixer);
-        ctl_reply(c, "ok visible=%d backend=%s ready=%d volume=%d mute=%d streams=%d output=%s\n",
-                  lm_wm_gadget_visible_id(srv->wm, LM_GADGET_MIXER) ? 1 : 0,
-                  ms->backend == LM_MIXER_PULSE ? "pulse" : ms->backend == LM_MIXER_WPCTL ? "wpctl" : ms->backend == LM_MIXER_ALSA ? "alsa" : "none", ms->ready ? 1 : 0,
-                  ms->volume, ms->mute ? 1 : 0, ms->nstreams, ms->output[0] ? ms->output : "-");
-    } else if (!strcmp(cmd, "sysinfo")) {
-        /* sysinfo [0|1]  show / hide the system monitor gadget; always replies the sampled values:
-         * "ok visible=<0|1> ready=<0|1> cpu=<%> cores=<n> mem=<%> mem_total_kb=<n> swap=<%> temp=<C or -1> load=<x.xx> hist=<n>" */
-        if (!srv->wm || !srv->sysinfo) { ctl_reply(c, "err no sysinfo\n"); return; }
-        if (a1)
-            lm_wm_set_gadget_id(srv->wm, LM_GADGET_SYSTEM, a1[0] == '1');
-        const struct lm_sysinfo_state *ss = lm_sysinfo_state(srv->sysinfo);
-        ctl_reply(c, "ok visible=%d ready=%d cpu=%d cores=%d mem=%d mem_total_kb=%ld swap=%d temp=%d load=%.2f hist=%d\n",
-                  lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SYSTEM) ? 1 : 0, ss->ready ? 1 : 0, ss->cpu, ss->ncores, ss->mem_pct,
-                  ss->mem_total_kb, ss->swap_pct, ss->temp_c, ss->load1, ss->nhist);
-        /* the device strings contain blanks, so they have their own command: "sysdev" */
-    } else if (!strcmp(cmd, "smart")) {
-        /* smart [0|1|refresh]  show / hide the Smart home gadget, or ask the program again; replies "smart visible=<0|1> ready=<0|1> n=<n> note=...",
-         * then one "item <i> <name> kind=switch|blind|none online=<0|1> on=<0|1> percent=<n>" line each, then "ok" */
-        if (!srv->wm || !srv->smart) { ctl_reply(c, "err no smart\n"); return; }
-        if (a1 && !strcmp(a1, "refresh"))
-            lm_smart_refresh(srv->smart);
+    } else if (!strcmp(cmd, "mixer") || !strcmp(cmd, "sysinfo") || !strcmp(cmd, "sysdev") || !strcmp(cmd, "smart")) {
+        /* The gadgets are programs of their own; they write their state (in the words of these replies) to $MELLAGUI_GADGET_DUMP.NAME after
+         * every change, and this command shows the file. mixer|sysinfo|smart [0|1] also switch the gadget on / off, smart refresh asks the
+         * program again. Without a file yet (just started) the state is "not ready". */
+        if (!srv->wm) { ctl_reply(c, "err no window manager\n"); return; }
+        bool smart = !strcmp(cmd, "smart");
+        int id = !strcmp(cmd, "mixer") ? LM_GADGET_MIXER : smart ? LM_GADGET_SMART : LM_GADGET_SYSTEM;
+        if (a1 && smart && !strcmp(a1, "refresh"))
+            lm_wm_gadget_refresh(srv->wm, id);
         else if (a1)
-            lm_wm_set_gadget_id(srv->wm, LM_GADGET_SMART, a1[0] == '1');
-        const struct lm_smart_state *ms = lm_smart_state(srv->smart);
-        ctl_reply(c, "smart visible=%d ready=%d n=%d note=%s\n", lm_wm_gadget_visible_id(srv->wm, LM_GADGET_SMART) ? 1 : 0, ms->ready ? 1 : 0, ms->n,
-                  ms->note[0] ? ms->note : "-");
-        for (int i = 0; i < ms->n; i++)
-            ctl_reply(c, "item %d %s kind=%s online=%d on=%d percent=%d\n", i, ms->item[i].name,
-                      ms->item[i].kind == LM_SMART_SWITCH ? "switch" : ms->item[i].kind == LM_SMART_BLIND ? "blind" : "none",
-                      ms->item[i].online ? 1 : 0, ms->item[i].on ? 1 : 0, ms->item[i].percent);
+            lm_wm_set_gadget_id(srv->wm, id, a1[0] == '1');
+        bool visible = lm_wm_gadget_visible_id(srv->wm, id);
+        char buf[4096];
+        size_t len = 0;
+        const char *base = getenv("MELLAGUI_GADGET_DUMP");
+        if (visible && base) {
+            char path[640];
+            snprintf(path, sizeof(path), "%s.%s", base, id == LM_GADGET_MIXER ? "mixer" : smart ? "smart" : "system");
+            FILE *f = fopen(path, "r");
+            if (f) {
+                len = fread(buf, 1, sizeof(buf) - 1, f);
+                fclose(f);
+            }
+        }
+        buf[len] = 0;
+        if (!strcmp(cmd, "sysdev")) {                       /* the second line of the system file */
+            char *nl = strchr(buf, '\n');
+            ctl_reply(c, "%s", nl && nl[1] ? nl + 1 : "err no sysinfo\n");
+        } else if (!strcmp(cmd, "sysinfo")) {
+            char *nl = strchr(buf, '\n');
+            if (nl)
+                *nl = 0;
+            ctl_reply(c, "%s", len ? buf : "ok visible=0 ready=0 cpu=0 cores=0 mem=0 mem_total_kb=0 swap=0 temp=-1 load=0.00 hist=0");
+            ctl_reply(c, "\n");
+        } else if (smart) {
+            ctl_reply(c, "%s", len ? buf : "smart visible=0 ready=0 n=0 note=-\nok\n");
+        } else {
+            ctl_reply(c, "%s", len ? buf : "ok visible=0 backend=none ready=0 volume=0 mute=0 streams=0 output=-\n");
+        }
+    } else if (!strcmp(cmd, "gadget")) {
+        /* gadget 0|1 = the clipboard card; gadget clipboard|mixer|system|smart 0|1 */
+        int id = LM_GADGET_CLIPBOARD;
+        const char *v = a1;
+        if (a1 && a2) {
+            id = !strcmp(a1, "mixer") ? LM_GADGET_MIXER : !strcmp(a1, "system") ? LM_GADGET_SYSTEM : !strcmp(a1, "smart") ? LM_GADGET_SMART :
+                 !strcmp(a1, "clipboard") ? LM_GADGET_CLIPBOARD : -1;
+            v = a2;
+        }
+        if (!v || !srv->wm || id < 0) { ctl_reply(c, "err usage: gadget [clipboard|mixer|system|smart] <0|1>\n"); return; }
+        lm_wm_set_gadget_id(srv->wm, id, v[0] == '1');
         ctl_reply(c, "ok\n");
-    } else if (!strcmp(cmd, "sysdev")) {
-        /* sysdev  replies "ok maker=<..>|model=<..>|cpu=<..>|os=<..>|kernel=<..>|host=<..>|uptime=<s>" ('|' separated, values may hold blanks) */
-        if (!srv->sysinfo) { ctl_reply(c, "err no sysinfo\n"); return; }
-        const struct lm_sysinfo_state *ss = lm_sysinfo_state(srv->sysinfo);
-        ctl_reply(c, "ok maker=%s|model=%s|cpu=%s|os=%s|kernel=%s|host=%s|uptime=%ld\n", ss->maker, ss->model, ss->cpu_model,
-                  ss->os_name, ss->kernel, ss->host, ss->uptime_s);
     } else if (!strcmp(cmd, "gadget-rect")) {
+        /* gadget-rect [clipboard|mixer|system|smart]: the card's window; "hidden" = switched off, "starting" = switched on, its program has
+         * no window yet (the test client waits and asks again) */
         struct lm_rect r;
-        if (srv->wm && lm_wm_gadget_rect_id(srv->wm, a1 && !strcmp(a1, "mixer") ? LM_GADGET_MIXER :
-                                            a1 && !strcmp(a1, "system") ? LM_GADGET_SYSTEM :
-                                            a1 && !strcmp(a1, "smart") ? LM_GADGET_SMART : LM_GADGET_CLIPBOARD, &r))
+        int id = !a1 || !strcmp(a1, "clipboard") ? LM_GADGET_CLIPBOARD : !strcmp(a1, "mixer") ? LM_GADGET_MIXER : !strcmp(a1, "system") ? LM_GADGET_SYSTEM :
+                 LM_GADGET_SMART;
+        if (srv->wm && lm_wm_gadget_visible_id(srv->wm, id) && lm_wm_gadget_rect_id(srv->wm, id, &r))
             ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
+        else if (srv->wm && lm_wm_gadget_visible_id(srv->wm, id))
+            ctl_reply(c, "ok starting\n");
         else
             ctl_reply(c, "ok hidden\n");
     } else if (!strcmp(cmd, "layout")) {
@@ -789,6 +808,11 @@ static int hl_init(struct lm_backend *b)
     h->fb.pixels = calloc((size_t)h->w * (size_t)h->h, 4);
     if (!h->fb.pixels)
         return -1;
+    if (srv->config.control_path && !getenv("MELLAGUI_GADGET_DUMP")) {                 /* the gadget programs write their state next to the socket */
+        char dump[600];
+        snprintf(dump, sizeof(dump), "%s.gadget", srv->config.control_path);
+        setenv("MELLAGUI_GADGET_DUMP", dump, 1);
+    }
     if (srv->config.control_path && ctl_listen(h, srv->config.control_path) < 0)
         return -1;
     h->ready_timer = lm_loop_add_timer(srv->loop, ready_fire, h);

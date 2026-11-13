@@ -134,8 +134,6 @@ static bool gl_bg_cb(const struct lm_scene_item *item, void *data)
     if (item->kind == LM_SCENE_WALLPAPER) {
         if (item->output == c->out)
             paint_wallpaper(c);
-    } else if (item->kind == LM_SCENE_GADGET) {
-        paint_gadget(c, &item->u.gadget);
     }
     return true;
 }
@@ -480,7 +478,6 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
     struct gl_pass *p = data;
     switch (item->kind) {
     case LM_SCENE_WALLPAPER:
-    case LM_SCENE_GADGET:
         break;                                          /* in the background texture */
     case LM_SCENE_FRAME:
         gl_frame(p, &item->u.frame);

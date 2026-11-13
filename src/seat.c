@@ -31,6 +31,7 @@
 #include "render.h"
 #include "saver.h"
 #include "seat.h"
+#include "settings.h"
 #include "lock.h"
 #include "server.h"
 #include "surface.h"
@@ -698,6 +699,11 @@ static void pointer_axis(struct lm_seat *seat, uint32_t time_ms, int orientation
 }
 
 /* ---- pointer grabs ------------------------------------------------------------------------------- */
+
+bool lm_seat_pointer_button_held(const struct lm_seat *seat)
+{
+    return seat && seat->n_fwd > 0;
+}
 
 int lm_seat_pointer_grab(struct lm_seat *seat, struct lm_pointer_grab *grab)
 {
@@ -1597,7 +1603,7 @@ static void clip_push(struct lm_seat *seat, char *text)   /* takes ownership */
 changed:
     clip_save(seat);
     if (!seat->dying && seat->srv->wm)
-        lm_wm_clipboard_changed(seat->srv->wm);
+        lm_settings_changed(seat->srv->settings);
 }
 
 void lm_seat_clip_add(struct lm_seat *seat, const char *text)
@@ -1618,7 +1624,7 @@ void lm_seat_clip_remove(struct lm_seat *seat, int i)
     seat->clip_n--;
     clip_save(seat);
     if (!seat->dying && seat->srv->wm)
-        lm_wm_clipboard_changed(seat->srv->wm);
+        lm_settings_changed(seat->srv->settings);
 }
 
 static void clip_capture_stop(struct lm_seat *seat)
@@ -1745,7 +1751,7 @@ void lm_seat_clip_clear(struct lm_seat *seat)
     seat->clip_n = 0;
     clip_save(seat);
     if (!seat->dying && seat->srv->wm)
-        lm_wm_clipboard_changed(seat->srv->wm);
+        lm_settings_changed(seat->srv->settings);
 }
 
 static void own_source_free(struct lm_seat *seat)

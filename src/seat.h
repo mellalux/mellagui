@@ -114,6 +114,8 @@ int lm_seat_pointer_grab(struct lm_seat *seat, struct lm_pointer_grab *grab);
 /* Remove the grab if it is the active one (does not call cancel) and recompute focus. */
 void lm_seat_pointer_ungrab(struct lm_seat *seat, struct lm_pointer_grab *grab);
 bool lm_seat_pointer_has_grab(const struct lm_seat *seat);
+/* A button press was sent to a client and is not released yet (a client's move / resize request is only good then). */
+bool lm_seat_pointer_button_held(const struct lm_seat *seat);
 
 /* ---- keyboard ------------------------------------------------------------------------------- */
 

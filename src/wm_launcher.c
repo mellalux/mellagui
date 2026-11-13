@@ -367,7 +367,6 @@ void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
         about_set(wm, false, NULL);
         power_set(wm, false, NULL);
         sw_close(wm);
-        clip_nav_set(wm, false);
         snprintf(wm->launcher_out, sizeof(wm->launcher_out), "%s", o->name);
         wm->launcher_open = true;
         wm->launcher_edit = wm->launcher_form = false;

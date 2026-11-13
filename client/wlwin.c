@@ -75,10 +75,12 @@ static void draw(struct wlwin *w)
         setup_buffer(w);
         WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = w->scale });
     }
+    if (w->argb)
+        memset(w->pixels, 0, w->map_size);
     w->ops->paint(w);
     w->buffer = wlc_alloc(w->c, &lm_wl_buffer_interface, buffer_event, w);
     WLC_SEND(w->c, w->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = w->buffer }, { .i = 0 }, { .i = w->pw },
-             { .i = w->ph }, { .i = w->pw * 4 }, { .u = LM_WL_SHM_FORMAT_XRGB8888 });
+             { .i = w->ph }, { .i = w->pw * 4 }, { .u = w->argb ? LM_WL_SHM_FORMAT_ARGB8888 : LM_WL_SHM_FORMAT_XRGB8888 });
     WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_ATTACH, { .o = w->buffer }, { .i = 0 }, { .i = 0 });
     WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = w->bw }, { .i = w->bh });
     WLC_SEND0(w->c, w->surface, LM_WL_SURFACE_REQ_COMMIT);
@@ -193,7 +195,24 @@ static void output_event(struct wlc *c, uint32_t id, uint32_t op, const union lm
         }
 }
 
-static bool g_hidpi;
+static bool g_hidpi, g_argb;
+
+void wlwin_argb(void)
+{
+    g_argb = true;
+}
+
+void wlwin_move(struct wlwin *w, uint32_t serial)
+{
+    if (w->toplevel && w->seat)
+        WLC_SEND(w->c, w->toplevel, LM_XDG_TOPLEVEL_REQ_MOVE, { .o = w->seat }, { .u = serial });
+}
+
+void wlwin_resize(struct wlwin *w, uint32_t serial, uint32_t edges)
+{
+    if (w->toplevel && w->seat)
+        WLC_SEND(w->c, w->toplevel, LM_XDG_TOPLEVEL_REQ_RESIZE, { .o = w->seat }, { .u = serial }, { .u = edges });
+}
 
 void wlwin_hidpi(void)
 {
@@ -232,6 +251,7 @@ int wlwin_connect(struct wlwin *w, const char *name, const struct wlwin_ops *ops
 {
     memset(w, 0, sizeof(*w));
     w->hidpi = g_hidpi;
+    w->argb = g_argb;
     w->name = name;
     w->ops = ops;
     w->data = data;
@@ -307,7 +327,10 @@ void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t
 void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb)
 {
     int s = w->scale > 1 ? w->scale : 1;
-    lm_round_fill(w->pixels, w->pw, w->pw, w->ph, x * s, y * s, width * s, height * s, r * s, rgb);
+    if (w->argb)
+        lm_round_fill_argb(w->pixels, w->pw, w->pw, w->ph, x * s, y * s, width * s, height * s, r * s, rgb);
+    else
+        lm_round_fill(w->pixels, w->pw, w->pw, w->ph, x * s, y * s, width * s, height * s, r * s, rgb);
 }
 
 void wlwin_dim(struct wlwin *w, double t)

@@ -106,6 +106,17 @@ static void places_save(struct lm_wm *wm)
     }
 }
 
+/* A card that went back to its docked place (double click on its title bar) forgets where it had been. */
+void places_forget(struct lm_wm *wm, const struct lm_window *w)
+{
+    struct wm_place *p = w->app_id ? place_of(w->app_id) : NULL;
+    if (!p)
+        return;
+    memmove(p, p + 1, sizeof(*p) * (size_t)(nplaces - 1 - (int)(p - places)));
+    nplaces--;
+    places_save(wm);
+}
+
 bool places_find(struct lm_wm *wm, const struct lm_window *w, struct lm_rect *r, bool *maximized)
 {
     const char *path = wm->srv->config.windows_path;
@@ -132,6 +143,8 @@ void places_remember(struct lm_wm *wm, struct lm_window *w)
 {
     const char *path = wm->srv->config.windows_path;
     if (!path || !*path || !w->mapped || w->minimized || !place_wanted(w) || (w->states & LM_WINDOW_FULLSCREEN) || w->width < 40 || w->height < 40)
+        return;
+    if (win_is_gadget(w) && !WIN(w)->gad_placed)                /* a card docked by the wm has no place of its own to keep */
         return;
     struct wm_win *ww = WIN(w);
     struct wm_place now = { .x = w->x, .y = w->y, .w = w->width, .h = w->height };

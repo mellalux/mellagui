@@ -21,7 +21,8 @@
  *     kind=password|pin   iter=<PBKDF2 iterations>   salt=<32 hex>   hash=<64 hex>   timeout=<minutes, 0 = never>   start=0|1
  *     blank=<minutes, 0 = never, default 1>   vt=0|1 (console switching on the lock screen, default 1)
  *
- * Standby: while locked and with no input for `blank` minutes the monitors are switched off (DPMS, backend.h set_power).
+ * Standby: while locked and with no input for `blank` minutes the monitors fade out and are switched off (screenoff.h) - only while the
+ * screensaver is off; with it on its `saver-blank` rules (saver.h lm_saver_governs), and the idle `timeout` below is not used either.
  * The first input wakes them and is swallowed; unlocking wakes them too.
  *
  * Locking: Super+L, the "Lock now" button of the settings panel (`lock-now`), the idle `timeout` (no input for that many

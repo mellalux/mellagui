@@ -109,7 +109,8 @@ static const struct entry table[] = {
     /* ---- Screen lock */
     { "@Screen lock", NULL, "Screen lock",
       "A password or PIN that locks the screen: Super+L, the power menu, or the idle time below. The secret is kept only as a salted hash. "
-      "To change anything on this page you must first give the current secret." },
+      "To change anything on this page you must first give the current secret.\n"
+      "The two times below are used only while the screensaver is off. With the screensaver on, its page decides when the screen locks and sleeps." },
     { "sec-kind", NULL, "Password or PIN", "A password can have any characters; a PIN is digits only (handy on the on-screen keyboard)." },
     { "pw", "0", "Current secret",
       "The password or PIN that is set now. It is needed for every change on this page, so that nobody can change it from an unlocked screen. "
@@ -117,9 +118,11 @@ static const struct entry table[] = {
     { "pw", "1", "New secret", "The new password or PIN. Leave it empty to keep the present one and change only the other settings." },
     { "pw", "2", "Repeat", "Type the new secret once more, to be sure there is no typing mistake." },
     { "sec-minutes", NULL, "Lock after idle",
-      "Lock the screen after this many minutes without keyboard or mouse use. 0 = never. A video that is playing keeps the screen awake." },
+      "Lock the screen after this many minutes without keyboard or mouse use. 0 = never. A video that is playing keeps the screen awake.\n"
+      "Used only while the screensaver is off; with it on, \"Lock after\" on the Screensaver page decides." },
     { "sec-blank", NULL, "Screen off after",
-      "Once the screen has been locked this long the monitors go to standby. Any key or mouse movement wakes them. 0 = never." },
+      "Once the screen has been locked this long the monitors fade out and go to standby. Any key or mouse movement wakes them. 0 = never.\n"
+      "Used only while the screensaver is off; with it on, \"Monitor sleeps after\" on the Screensaver page decides." },
     { "sec-start", NULL, "Lock at start", "Lock the screen as soon as MellaGUI starts - for a computer that logs in by itself." },
     { "lock-wallpaper", NULL, "Wallpaper on the lock screen",
       "The locked screen shows your wallpaper, blurred and dimmed, behind the clock and the field for the PIN or password. "
@@ -152,17 +155,23 @@ static const struct entry table[] = {
     { "dk-margin", NULL, "Distance from the edge", "The space between the dock and the bottom edge of the screen." },
 
     /* ---- Screensaver */
-    { "@Screensaver", NULL, "Screensaver", "What the screen does when nobody uses the computer." },
+    { "@Screensaver", NULL, "Screensaver",
+      "What the screen does when nobody uses the computer. The rule: while the screensaver is on, THIS page decides when the screen starts the saver, "
+      "locks and goes to sleep. Switch the screensaver off and the Lock part of the Security page decides instead (\"Lock after idle\", \"Screen off after\")." },
     { "saver", NULL, "Start the screensaver",
       "After the idle time below a full-screen program (falling green code by default) starts. A key, a mouse button or a movement of the pointer ends "
       "it. It does not start over a full-screen window (a film) or the lock screen." },
-    { "saver-minutes", NULL, "Idle time", "How many minutes of no keyboard or mouse use pass before the screensaver starts." },
+    { "saver-minutes", NULL, "Starts after", "How many minutes of no keyboard or mouse use pass before the screensaver starts." },
     { "saver-style", NULL, "Screensaver style",
       "Room: the code rains on the walls, the floor and the ceiling of a room with a window, and the camera drifts slowly. Flat: the classic falling "
       "code on a black screen. It applies to MellaGUI's own screensaver (mellagui-matrix) the next time it starts." },
     { "saver-cat", NULL, "A cat in the room",
       "A cat sits on the floor of the room, now and then turns its head, lies down for a while, and its eyes glow when it looks at you. Switch it off "
       "for the plain room. It applies the next time the screensaver starts; the flat style has no cat." },
+    { "saver-blank", NULL, "Monitor sleeps after",
+      "The monitors go to sleep this many minutes after the last keyboard or mouse use (so a bit after the screensaver started, if you set it higher "
+      "than the time it starts after). The picture fades out slowly first and then the monitors switch off; any key or mouse movement brings it "
+      "back, and that touch is not passed on. 0 = never. A video that is playing keeps it awake." },
     { "saver-lock", NULL, "Lock after",
       "That many minutes after the screensaver started the screen is locked (when a password or PIN is set on the Lock part). The screensaver goes on "
       "running over the lock; the first key or touch ends it and shows the password field. 0 = never lock from the screensaver." },

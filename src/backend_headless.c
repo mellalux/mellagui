@@ -20,6 +20,7 @@
 #include "font.h"
 #include "idleinhibit.h"
 #include "saver.h"
+#include "screenoff.h"
 #include "search.h"
 #include "input.h"
 #include "log.h"
@@ -123,9 +124,9 @@ int lm_backend_headless_dump_output(struct lm_backend *b, const char *path, int 
     for (int y = 0; y < fb->height; y++) {
         const uint32_t *src = (const uint32_t *)((const uint8_t *)fb->pixels + (size_t)y * (size_t)fb->stride);
         for (int x = 0; x < fb->width; x++) {
-            row[x * 3] = (uint8_t)((src[x] >> 16 & 255) * b->tint[0] + 0.5f);            /* the night light, as a display's gamma table would */
-            row[x * 3 + 1] = (uint8_t)((src[x] >> 8 & 255) * b->tint[1] + 0.5f);
-            row[x * 3 + 2] = (uint8_t)((src[x] & 255) * b->tint[2] + 0.5f);
+            row[x * 3] = (uint8_t)((src[x] >> 16 & 255) * lm_backend_gain(b, 0) + 0.5f);            /* the night light and the fade, as a display's gamma table would */
+            row[x * 3 + 1] = (uint8_t)((src[x] >> 8 & 255) * lm_backend_gain(b, 1) + 0.5f);
+            row[x * 3 + 2] = (uint8_t)((src[x] & 255) * lm_backend_gain(b, 2) + 0.5f);
         }
         fwrite(row, 3, (size_t)fb->width, f);
     }
@@ -395,8 +396,8 @@ static void ctl_command(struct ctl_client *c, char *line)
             lm_saver_start(srv->saver);
         else if (srv->saver && a1 && !strcmp(a1, "stop"))
             lm_saver_stop(srv->saver);
-        ctl_reply(c, "saver running=%d enabled=%d minutes=%d lock=%d shield=%d style=%s cat=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
-                  srv->config.saver_min, srv->config.saver_lock_min, srv->saver && lm_saver_shields(srv->saver),
+        ctl_reply(c, "saver running=%d enabled=%d minutes=%d lock=%d blank=%d shield=%d style=%s cat=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
+                  srv->config.saver_min, srv->config.saver_lock_min, srv->config.saver_blank_min, srv->saver && lm_saver_shields(srv->saver),
                   srv->config.saver_style ? "flat" : "room", srv->config.saver_cat ? 1 : 0);
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "sound")) {
@@ -598,6 +599,10 @@ static void ctl_command(struct ctl_client *c, char *line)
     } else if (!strcmp(cmd, "power")) {
         /* power -> "ok on" | "ok standby": whether the monitors are in standby (the lock screen's blank timeout) */
         ctl_reply(c, "ok %s\n", srv->backend && srv->backend->blanked ? "standby" : "on");
+    } else if (!strcmp(cmd, "screenoff")) {
+        /* screenoff -> "ok active=0|1 off=0|1 level=0.00..1.00 standby=0|1": the fade before the monitors sleep (screenoff.h); level = the display's brightness now */
+        ctl_reply(c, "ok active=%d off=%d level=%.2f standby=%d\n", lm_screenoff_active(srv->screenoff) ? 1 : 0, lm_screenoff_off(srv->screenoff) ? 1 : 0,
+                  lm_screenoff_level(srv->screenoff), srv->backend && srv->backend->blanked ? 1 : 0);
     } else if (!strcmp(cmd, "lock")) {
         /* lock                      -> "ok kind=.. locked=.. timeout=.. start=.. typed=.. fails=.. wait=.. status=.. message=.."
          * lock now                  lock the screen ("err no lock set" when there is no password / PIN)
@@ -973,6 +978,7 @@ struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int 
     hl->base.ops = &headless_ops;
     hl->base.server = srv;
     hl->base.tint[0] = hl->base.tint[1] = hl->base.tint[2] = 1.0f;
+    hl->base.dim = 1.0f;
     lm_list_init(&hl->base.outputs);
     hl->w = w > 0 ? w : 1280;
     hl->h = h > 0 ? h : 720;

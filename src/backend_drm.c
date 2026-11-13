@@ -334,7 +334,9 @@ static void out_gamma(struct drm_out *o, bool tint)
     if (size < 2 || size > 4096)
         return;
     uint16_t ramp[3][4096];
-    const float *g = o->d->base.tint;
+    float g[3];
+    for (int c = 0; c < 3; c++)
+        g[c] = lm_backend_gain(&o->d->base, c);
     for (int i = 0; i < size; i++) {
         double v = 65535.0 * i / (size - 1);
         for (int c = 0; c < 3; c++)
@@ -1521,6 +1523,7 @@ struct lm_backend *lm_backend_drm_create(struct lm_server *srv)
     d->base.ops = &drm_ops;
     d->base.server = srv;
     d->base.tint[0] = d->base.tint[1] = d->base.tint[2] = 1.0f;
+    d->base.dim = 1.0f;
     lm_list_init(&d->base.outputs);
     d->fd = -1;
     d->tty_fd = -1;

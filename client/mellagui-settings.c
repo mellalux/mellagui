@@ -324,10 +324,13 @@ static int selftest(void)
 #define MAX_KV 160
 #define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
-enum page { PAGE_INPUT, PAGE_ACCESS, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
-static const char *const PAGE_NAMES[N_PAGES] = { "Input", "Accessibility", "Desktop", "Display", "Sound", "Security", "Config", "Keys", "Themes", "Dock", "Clock", "Night" };
+enum page { PAGE_INPUT, PAGE_ACCESS, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_SAVER, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };
+static const char *const PAGE_NAMES[N_PAGES] = { "Input", "Accessibility", "Desktop", "Display", "Sound", "Security", "Screensaver", "Config", "Keys", "Themes", "Dock", "Clock", "Night" };
 
-enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP };
+#define NOTE_SIZE 0.8                                     /* fine print is 80 % of the normal size ... */
+#define NOTE_LINE_H 14                                  /* ... on lines 14 px apart */
+
+enum wkind { W_LABEL, W_HEADING, W_TAB, W_CHECK, W_RADIO, W_BUTTON, W_SLIDER, W_TEXT, W_PASS, W_FIELD, W_INPUT, W_SWATCH, W_HELP, W_NOTE };
 
 struct rect { int x, y, w, h; };
 
@@ -340,6 +343,7 @@ struct widget {
     bool on;                    /* check / radio state, selected tab */
     int lo, hi, step, val;      /* slider */
     const char *unit;           /* slider value suffix */
+    const char *note;           /* W_NOTE: the whole text (a string that lives on: the widget's own `text` holds 63 bytes) */
     int label_w;                /* slider: width of the label (0 = 150) */
 };
 
@@ -390,7 +394,6 @@ struct app {
     bool sec_pin;                       /* the new secret is a PIN (else a password) */
     int sound_tab;                      /* the Sound page's part: 0 the outputs and beeps, 1 the microphone */
     int input_tab;                      /* the Input page's part: 0 the keyboard, 1 the mouse and touchpad */
-    int sec_tab;                        /* the Security page's part: 0 the screen lock, 1 the screensaver */
     int theme_tab;                      /* the Themes page's part: 0 the theme and its colours, 1 the buttons, 2 the sizes, 3 the font */
     int fpage;                          /* the Font part: which page of the list of fonts */
     int display_tab;                    /* the Display page's part: 0 the resolution, 1 the scale */
@@ -567,7 +570,6 @@ static struct widget *add_button(struct app *a, int x, int y, int w, const char 
     return b;
 }
 
-static void build_saver(struct app *a, int x, int y, int w);
 static void build_security_lock(struct app *a, int x, int y, int w);
 
 /* Accessibility: what makes the computer easier to use without the usual hands, keys or sight. */
@@ -594,7 +596,7 @@ static void build_access(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x + BOX + 10, y, w - BOX - 10, ROW_H - 4 }, "Super + and Super - zoom in and out.");
 }
 
-/* The Security page has two parts, the screen lock and the screensaver (which locks the screen, too); two small buttons in the heading row. */
+/* A page with parts (Input, Sound, Display, Themes): small buttons in the heading row. */
 static void build_part_tabs(struct app *a, int x, int y, int w, const char *key, const char *const *names, int n, int cur)
 {
     int total = -8;
@@ -610,21 +612,9 @@ static void build_part_tabs(struct app *a, int x, int y, int w, const char *key,
     }
 }
 
-static void build_security_tabs(struct app *a, int x, int y, int w)
-{
-    static const char *const names[2] = { "Lock", "Screensaver" };
-    build_part_tabs(a, x, y, w, "sec-tab", names, 2, a->sec_tab);
-}
-
 static void build_security(struct app *a, int x, int y, int w)
 {
-    if (a->sec_tab == 1) {
-        build_saver(a, x, y, w);
-        build_security_tabs(a, x, y, w);
-        return;
-    }
     build_security_lock(a, x, y, w);
-    build_security_tabs(a, x, y, w);
 }
 
 static void build_security_lock(struct app *a, int x, int y, int w)
@@ -652,7 +642,12 @@ static void build_security_lock(struct app *a, int x, int y, int w)
     add_pass(a, x, y, w, have ? "New (empty = keep)" : "New", 1);
     y += ROW_H + 2;
     add_pass(a, x, y, w, "Repeat", 2);
-    y += ROW_H + 4;
+    y += ROW_H + 2;
+    {                                                                   /* the rule: the screensaver, when it is on, decides these two itself */
+        bool saver_on = kv_int(a, "saver", 1) != 0 && kv_int(a, "saver-minutes", 10) > 0;
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H - 6 }, saver_on ? "The screensaver is on: its page decides these two." : "The screensaver is off, so these two apply:");
+        y += ROW_H - 6;
+    }
     add_slider(a, x, y, w, "Lock after idle", "sec-minutes", 0, 120, 1, " min");
     a->wd[a->nw - 1].val = a->sec_minutes;
     y += ROW_H;
@@ -1099,9 +1094,11 @@ static void build_saver(struct app *a, int x, int y, int w)
     y += ROW_H;
     add_check(a, x, y, w, "Start the screensaver when nobody uses the computer", "saver", kv_int(a, "saver", 1) != 0);
     y += ROW_H;
-    add_slider(a, x, y, w, "After", "saver-minutes", 1, 120, 1, " min");
+    add_slider(a, x, y, w, "Starts after", "saver-minutes", 1, 120, 1, " min");
     y += ROW_H;
     add_slider(a, x, y, w, "Lock after", "saver-lock", 0, 60, 1, " min");
+    y += ROW_H;
+    add_slider(a, x, y, w, "Monitor sleeps after", "saver-blank", 0, 240, 1, " min");
     y += ROW_H;
     const char *style = kv_get(a, "saver-style");
     add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, "Style");
@@ -1112,18 +1109,12 @@ static void build_saver(struct app *a, int x, int y, int w)
     y += ROW_H + 8;
     add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
     y += ROW_H + 10;
-    static const char *const notes[] = {
-        "Falling green code, full screen (a room or flat).",
-        "Any touch ends it;",
-        "that touch is not passed on.",
-        "\"Lock after\": the screen is locked that long after it",
-        "started (0 = never; needs a password or PIN).",
-        "The saver keeps running over the lock until a touch.",
-        "It does not start over a full screen window.",
-        "Another program: [commands] saver in mellagui.conf.",
-    };
-    for (int k = 0; k < 8; k++)
-        add(a, W_LABEL, (struct rect){ x, y + k * (ROW_H - 8), w, ROW_H }, notes[k]);
+    struct widget *nt = add(a, W_NOTE, (struct rect){ x, y, w, 6 * NOTE_LINE_H }, "");
+    nt->note = "The rule: while the screensaver is on, these times decide, and the Security page's \"Lock after idle\" and \"Screen off after\" are not "
+               "used (they apply when it is off). \"Starts after\" and \"Monitor sleeps after\" count from the last touch, \"Lock after\" from when it "
+               "started (0 = never; needs a password or PIN). The monitor fades out, then sleeps; any touch wakes it and is not passed on. It does not "
+               "start over a full screen window.";
+    (void)nt;
 }
 
 /* ---- Clock page: the panel's clock, the date and the calendar that a click on the clock shows (mellagui-calendar) ---------------- */
@@ -1865,6 +1856,7 @@ static void build(struct app *a)
     case PAGE_DISPLAY: build_display(a, x, y, w); break;
     case PAGE_SOUND: build_sound(a, x, y, w); break;
     case PAGE_SECURITY: build_security(a, x, y, w); break;
+    case PAGE_SAVER: build_saver(a, x, y, w); break;
     case PAGE_CONFIG: build_config(a, x, y, w); break;
     case PAGE_KEYS: build_keys(a, x, y, w); break;
     case PAGE_COLOURS: build_theme(a, x, y, w); break;
@@ -2464,10 +2456,6 @@ static void activate(struct app *a, int idx)
                 }
             a->focus = -1;
             a->win.redraw = true;
-        } else if (!strcmp(w->key, "sec-tab")) {
-            a->sec_tab = atoi(w->arg) == 1 ? 1 : 0;
-            a->focus = -1;
-            a->win.redraw = true;
         } else if (!strcmp(w->key, "launcher-defaults")) {
             send_set(a, "launcher-defaults", "1");
         } else if (!strcmp(w->key, "dock-put")) {
@@ -2594,6 +2582,30 @@ static void paint_widget(struct app *a, int idx)
     case W_LABEL:
         draw_text(a, r->x, text_y(r), w->text, COL_DIM, r->w);
         break;
+    case W_NOTE: {                                              /* fine print: smaller type, wrapped to the width, as many lines as the rectangle holds */
+        const char *p = w->note ? w->note : w->text;
+        int ny = r->y, maxpx = (int)((double)r->w / NOTE_SIZE);
+        while (*p && ny + NOTE_LINE_H <= r->y + r->h + 2) {
+            int n = lm_font_fit(p, maxpx), cut = n;
+            if (n <= 0)
+                break;
+            if (p[n]) {                                         /* does not end here: break at the last blank */
+                int k = n;
+                while (k > 0 && p[k] != ' ')
+                    k--;
+                if (k > 0)
+                    cut = k;
+            }
+            char line[256];
+            snprintf(line, sizeof(line), "%.*s", cut < 255 ? cut : 255, p);
+            wlwin_text_small(&a->win, r->x, ny, line, NOTE_SIZE, COL_DIM, r->w);
+            p += cut;
+            while (*p == ' ')
+                p++;
+            ny += NOTE_LINE_H;
+        }
+        break;
+    }
     case W_HELP:                                                /* the small "?" circle */
         wlwin_round_fill(&a->win, r->x, r->y, r->w, r->h, r->w / 2, hot ? COL_ACCENT : COL_KEY);
         draw_text(a, r->x + (r->w - lm_font_text_width("?")) / 2, r->y + (r->h - LM_FONT_H) / 2, "?", hot ? COL_BG : COL_TEXT, 0);
@@ -3043,17 +3055,22 @@ static int selftest_help(void)
         { "metrics", "windows.button-roundness=100:0:100:100 windows.double-click-ms=400:100:1000:400" }, { "theme-list", "colorful* graphite light contrast" }, { "font-name", "bitmap" }, { "font-file", "auto" }, { "font-ui", "auto" }, { "scale", "100" }, { "smart", "0" }, { "resolution-now", "1024x600@60" },
     };
     int bad = 0, shown = 0;
-    for (int pgi = 0; pgi < N_PAGES + 7; pgi++) {                           /* (four more: the second parts of the Security and the Input page, the second and third of the Themes page) */
-        int pg = pgi < N_PAGES ? pgi : pgi == N_PAGES ? PAGE_SECURITY : pgi == N_PAGES + 3 ? PAGE_INPUT : pgi == N_PAGES + 4 ? PAGE_SOUND : pgi == N_PAGES + 6 ? PAGE_DISPLAY : PAGE_COLOURS;
+    static const struct { enum page pg; int input, sound, theme, display; } extra[] = {      /* the second and further parts of the pages with parts */
+        { PAGE_COLOURS, 0, 0, 1, 0 }, { PAGE_COLOURS, 0, 0, 2, 0 }, { PAGE_INPUT, 1, 0, 0, 0 }, { PAGE_SOUND, 0, 1, 0, 0 },
+        { PAGE_COLOURS, 0, 0, 3, 0 }, { PAGE_DISPLAY, 0, 0, 0, 1 },
+    };
+    for (int pgi = 0; pgi < N_PAGES + (int)(sizeof(extra) / sizeof(extra[0])); pgi++) {
+        int pg = pgi < N_PAGES ? pgi : (int)extra[pgi - N_PAGES].pg;
         memset(&fa, 0, sizeof(fa));
         for (size_t i = 0; i < sizeof(kvs) / sizeof(kvs[0]); i++)
             kv_set(&fa, kvs[i].k, kvs[i].v);
         fa.page = (enum page)pg;
-        fa.sec_tab = pgi == N_PAGES ? 1 : 0;
-        fa.input_tab = pgi == N_PAGES + 3 ? 1 : 0;
-        fa.sound_tab = pgi == N_PAGES + 4 ? 1 : 0;
-        fa.theme_tab = pgi == N_PAGES + 1 ? 1 : pgi == N_PAGES + 2 ? 2 : pgi == N_PAGES + 5 ? 3 : 0;
-        fa.display_tab = pgi == N_PAGES + 6 ? 1 : 0;
+        if (pgi >= N_PAGES) {
+            fa.input_tab = extra[pgi - N_PAGES].input;
+            fa.sound_tab = extra[pgi - N_PAGES].sound;
+            fa.theme_tab = extra[pgi - N_PAGES].theme;
+            fa.display_tab = extra[pgi - N_PAGES].display;
+        }
         fa.win.bw = 860;
         fa.win.bh = 560;
         fa.focus = fa.hover = fa.press = fa.drag = fa.menu_widget = fa.sel_widget = -1;

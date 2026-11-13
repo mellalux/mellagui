@@ -48,7 +48,7 @@
 
 enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
-    K_GADGET, K_MIXER, K_SYSINFO, K_SMART, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_SAVER_LOCK, K_SAVER_STYLE, K_SAVER_CAT, K_MAGNIFIER, K_MAGNIFIER_ZOOM, K_OSK_AVOID, K_LAYOUT_BADGES, K_LAYOUT_LABEL, K_LOCK_WALLPAPER, K_SCALE,
+    K_GADGET, K_MIXER, K_SYSINFO, K_SMART, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_SAVER_LOCK, K_SAVER_BLANK, K_SAVER_STYLE, K_SAVER_CAT, K_MAGNIFIER, K_MAGNIFIER_ZOOM, K_OSK_AVOID, K_LAYOUT_BADGES, K_LAYOUT_LABEL, K_LOCK_WALLPAPER, K_SCALE,
     K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_AUDIO_PROFILE_KEEP, K_NIGHT_LIGHT, K_NIGHT_TEMP, K_NIGHT_FROM, K_NIGHT_TO, K_DND, K_STARTUP_SOUND, K_FILE,
     K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_SOURCES, K_SOURCE, K_SOURCE_VOLUME, K_SOURCE_MUTE, K_SINK_VOLUME, K_SINK_MUTE, K_SINK_BEEP, K_TIMER_BEEP, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW,
@@ -67,7 +67,7 @@ enum key_id {
 static const char *const key_names[K_COUNT] = {
     [K_LAYOUTS] = "layouts", [K_LAYOUT] = "layout", [K_STICKY] = "sticky", [K_REPEAT_DELAY] = "repeat-delay",
     [K_REPEAT_RATE] = "repeat-rate", [K_POINTER_SPEED] = "pointer-speed", [K_NATURAL_SCROLL] = "natural-scroll",
-    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_SMART] = "smart", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_SAVER_LOCK] = "saver-lock", [K_SAVER_STYLE] = "saver-style", [K_SAVER_CAT] = "saver-cat", [K_MAGNIFIER] = "magnifier", [K_MAGNIFIER_ZOOM] = "magnifier-zoom", [K_OSK_AVOID] = "osk-avoid", [K_LAYOUT_BADGES] = "layout-badges", [K_LAYOUT_LABEL] = "layout-label", [K_LOCK_WALLPAPER] = "lock-wallpaper", [K_SCALE] = "scale",
+    [K_SOUND] = "sound", [K_GADGET] = "gadget", [K_MIXER] = "mixer", [K_SYSINFO] = "sysinfo", [K_SMART] = "smart", [K_RESOLUTION] = "resolution", [K_AUDIO_OUT] = "audio-out", [K_WALLPAPER] = "wallpaper", [K_WALLPAPER_MODE] = "wallpaper-mode", [K_OUTPUT_ORDER] = "output-order", [K_SAVER] = "saver", [K_SAVER_MINUTES] = "saver-minutes", [K_SAVER_LOCK] = "saver-lock", [K_SAVER_BLANK] = "saver-blank", [K_SAVER_STYLE] = "saver-style", [K_SAVER_CAT] = "saver-cat", [K_MAGNIFIER] = "magnifier", [K_MAGNIFIER_ZOOM] = "magnifier-zoom", [K_OSK_AVOID] = "osk-avoid", [K_LAYOUT_BADGES] = "layout-badges", [K_LAYOUT_LABEL] = "layout-label", [K_LOCK_WALLPAPER] = "lock-wallpaper", [K_SCALE] = "scale",
     [K_CLOCK_HOURS] = "clock-hours", [K_CLOCK_SECONDS] = "clock-seconds", [K_CLOCK_DATE] = "clock-date", [K_CLOCK_WEEKDAY] = "clock-weekday",
     [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_AUDIO_PROFILE_KEEP] = "audio-profile-keep", [K_NIGHT_LIGHT] = "night-light", [K_NIGHT_TEMP] = "night-temp", [K_NIGHT_FROM] = "night-from", [K_NIGHT_TO] = "night-to", [K_DND] = "dnd", [K_STARTUP_SOUND] = "startup-sound", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
@@ -344,6 +344,10 @@ static int cfg_set(struct lm_config *cfg, const char *key, const char *val, char
         if (!parse_int(val, 0, 120, &n)) return -1;
         cfg->saver_lock_min = n;
         break;
+    case K_SAVER_BLANK:
+        if (!parse_int(val, 0, 240, &n)) return -1;
+        cfg->saver_blank_min = n;
+        break;
     case K_MAGNIFIER:
         if (!parse_bool(val, &b)) return -1;
         cfg->magnifier = b;
@@ -546,6 +550,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SAVER: snprintf(out, n, "%d", c->saver ? 1 : 0); break;
     case K_SAVER_MINUTES: snprintf(out, n, "%d", c->saver_min); break;
     case K_SAVER_LOCK: snprintf(out, n, "%d", c->saver_lock_min); break;
+    case K_SAVER_BLANK: snprintf(out, n, "%d", c->saver_blank_min); break;
     case K_SAVER_STYLE: snprintf(out, n, "%s", c->saver_style ? "flat" : "room"); break;
     case K_SAVER_CAT: snprintf(out, n, "%d", c->saver_cat ? 1 : 0); break;
     case K_MAGNIFIER: snprintf(out, n, "%d", c->magnifier ? 1 : 0); break;
@@ -1866,6 +1871,7 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_SAVER:
     case K_SAVER_MINUTES:
     case K_SAVER_LOCK:
+    case K_SAVER_BLANK:
     case K_SAVER_STYLE:
     case K_SAVER_CAT:
     case K_AUDIO_PROFILE_KEEP:

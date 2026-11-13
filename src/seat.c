@@ -30,6 +30,7 @@
 #include "protocol.h"
 #include "render.h"
 #include "saver.h"
+#include "screenoff.h"
 #include "seat.h"
 #include "settings.h"
 #include "lock.h"
@@ -2045,7 +2046,8 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
         return;
     bool woke = seat->srv->lock && lm_lock_activity(seat->srv->lock);          /* it only woke the monitors from standby */
     bool ended = seat->srv->saver && lm_saver_activity(seat->srv->saver);      /* it only ended the screensaver */
-    if (woke || ended)
+    bool lit = seat->srv->screenoff && lm_screenoff_wake(seat->srv->screenoff);   /* it only woke the monitors (the saver's standby, or a fade that had begun) */
+    if (woke || ended || lit)
         return;
     ensure_pointer_pos(seat);
     if (seat->locked) {

@@ -184,7 +184,8 @@ struct lm_backend {
     bool session_active;
     bool blanked;                   /* set_power(false) is in effect */
     float tint[3];                  /* lm_backend_set_tint(): colour gains of the night light */
-    bool tinted;                    /* tint is not 1 1 1 */
+    float dim;                      /* lm_backend_set_dim(): brightness 0..1 (1 = full), multiplied with the tint: the fade before a monitor goes to sleep */
+    bool tinted;                    /* tint (times dim) is not 1 1 1 */
     struct lm_gl *gl;               /* set by a backend that renders with OpenGL (owned by it); the renderer picks it up */
     void *priv;
 };
@@ -209,7 +210,21 @@ static inline int lm_backend_set_tint(struct lm_backend *b, float r, float g, fl
     b->tint[0] = r < 0 ? 0 : r > 1 ? 1 : r;
     b->tint[1] = g < 0 ? 0 : g > 1 ? 1 : g;
     b->tint[2] = bl < 0 ? 0 : bl > 1 ? 1 : bl;
-    b->tinted = b->tint[0] < 1 || b->tint[1] < 1 || b->tint[2] < 1;
+    b->tinted = b->tint[0] < 1 || b->tint[1] < 1 || b->tint[2] < 1 || b->dim < 1;
+    return b->ops->set_tint ? b->ops->set_tint(b) : -1;
+}
+
+/* What the display's gain of channel c (0 red, 1 green, 2 blue) really is: the night light's tint times the brightness. */
+static inline float lm_backend_gain(const struct lm_backend *b, int c)
+{
+    return b->tint[c] * b->dim;
+}
+
+/* The brightness of the whole display, 0..1 (the same gamma-table / dump path as the tint, so it costs nothing per frame and screenshots stay bright). */
+static inline int lm_backend_set_dim(struct lm_backend *b, float dim)
+{
+    b->dim = dim < 0 ? 0 : dim > 1 ? 1 : dim;
+    b->tinted = b->tint[0] < 1 || b->tint[1] < 1 || b->tint[2] < 1 || b->dim < 1;
     return b->ops->set_tint ? b->ops->set_tint(b) : -1;
 }
 

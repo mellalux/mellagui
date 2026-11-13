@@ -602,6 +602,105 @@ void lm_wm_gadget_reset(struct lm_wm *wm, int id)
     places_forget(wm, w);
 }
 
+/* ---- zooming a glued stack ------------------------------------------------------------------------------------------------------------------ */
+
+/* Does `bot` hang on `top` (its top edge touches top's bottom edge with some width in common)? The same test as the one that carries cards along. */
+static bool hangs_on(const struct lm_window *top, const struct lm_window *bot)
+{
+    return abs(bot->y - (top->y + top->height)) <= 2 && bot->x < top->x + top->width && bot->x + bot->width > top->x;
+}
+
+/* A card was zoomed to `pct` per cent: all the cards glued to it - above and below, and what is glued to those - get the same zoom (the cards are
+ * separate programs, they hear it through the setting `gadget-zoom`), and the stack is remembered as it was so that it can be put together again
+ * while the cards take their new sizes (gadget_zoomglue_fit): the top of a stack stays where it is, every card below it follows the bottom edge of the
+ * one it hangs on. */
+void lm_wm_gadget_zoom(struct lm_wm *wm, int id, int pct)
+{
+    struct lm_window *origin = gadget_window(wm, id);
+    if (!origin)
+        return;
+    struct lm_window *list[LM_GADGET_TOTAL];
+    int n = 0;
+    list[n++] = origin;
+    for (int head = 0; head < n; head++) {                      /* the connected cards, breadth first */
+        struct lm_window *other;
+        lm_list_for_each(other, &wm->windows, link) {
+            if (!win_is_gadget(other) || !other->mapped || n >= LM_GADGET_TOTAL)
+                continue;
+            bool seen = false;
+            for (int i = 0; i < n; i++)
+                seen |= list[i] == other;
+            if (!seen && (hangs_on(list[head], other) || hangs_on(other, list[head])))
+                list[n++] = other;
+        }
+    }
+    for (int i = 1; i < n; i++)                                 /* by the top edge: a card comes after the one it hangs on */
+        for (int j = i; j > 0 && (list[j]->y < list[j - 1]->y || (list[j]->y == list[j - 1]->y && list[j]->x < list[j - 1]->x)); j--) {
+            struct lm_window *t = list[j];
+            list[j] = list[j - 1];
+            list[j - 1] = t;
+        }
+    wm->zoomglue.n = n;
+    wm->zoomglue.until = lm_now_ms() + 2500;
+    wm->zoomglue.seq++;
+    int o = snprintf(wm->zoomglue.text, sizeof(wm->zoomglue.text), "%d:", wm->zoomglue.seq);
+    for (int i = 0; i < n; i++) {
+        struct lm_window *w = list[i];
+        wm->zoomglue.win[i] = w;
+        wm->zoomglue.x[i] = w->x;
+        wm->zoomglue.y[i] = w->y;
+        wm->zoomglue.w[i] = w->width;
+        wm->zoomglue.h[i] = w->height;
+        wm->zoomglue.parent[i] = -1;
+        for (int j = 0; j < i && wm->zoomglue.parent[i] < 0; j++)
+            if (hangs_on(list[j], w))
+                wm->zoomglue.parent[i] = j;
+        if (i > 0)
+            WIN(w)->gad_placed = true;                          /* (it is not docked by the wm any more: it hangs on a card) */
+        if (o > 0 && (size_t)o < sizeof(wm->zoomglue.text))
+            o += snprintf(wm->zoomglue.text + o, sizeof(wm->zoomglue.text) - o, "%s%s=%d", i ? "," : "", w->app_id ? w->app_id + 16 : "", pct);
+    }
+}
+
+void lm_wm_gadget_zoom_text(const struct lm_wm *wm, char *out, size_t n)
+{
+    snprintf(out, n, "%s", wm->zoomglue.text);
+}
+
+/* A card of the zoomed stack has its new size: every card below another one is put under it again (same distance as before, the sideways offset
+ * grows with the width of the card it hangs on). The cards are asked one by one, so this runs once per card that resizes. */
+void gadget_zoomglue_fit(struct lm_wm *wm, struct lm_window *w)
+{
+    if (wm->zoomglue.n <= 0)
+        return;
+    if (lm_now_ms() > wm->zoomglue.until) {
+        wm->zoomglue.n = 0;
+        return;
+    }
+    bool member = false;
+    for (int i = 0; i < wm->zoomglue.n; i++)
+        member |= wm->zoomglue.win[i] == w;
+    if (!member)
+        return;
+    for (int i = 0; i < wm->zoomglue.n; i++) {
+        int p = wm->zoomglue.parent[i];
+        if (p < 0)
+            continue;
+        struct lm_window *par = wm->zoomglue.win[p], *m = wm->zoomglue.win[i];
+        int32_t pw0 = LM_MAX(wm->zoomglue.w[p], 1);
+        int32_t nx = par->x + (int32_t)((int64_t)(wm->zoomglue.x[i] - wm->zoomglue.x[p]) * par->width / pw0);
+        int32_t ny = par->y + par->height + (wm->zoomglue.y[i] - (wm->zoomglue.y[p] + wm->zoomglue.h[p]));
+        if (nx == m->x && ny == m->y)
+            continue;
+        struct lm_rect before = frame_outer(m);
+        m->x = nx;
+        m->y = ny;
+        damage_rect(wm, &before);
+        damage_frame(wm, m);
+        update_outputs(wm, m);
+    }
+}
+
 /* SIGUSR1: the smart home card asks its program again (the control socket's `smart refresh`). */
 void lm_wm_gadget_refresh(struct lm_wm *wm, int id)
 {

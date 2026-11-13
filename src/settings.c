@@ -60,7 +60,7 @@ enum key_id {
     K_METRICS, K_METRICS_SET, K_METRICS_RESET,
     K_DOCK_0, K_DOCK_LAST = K_DOCK_0 + LM_DOCK_MAX - 1, K_DOCK_PUT, K_DOCK_DEL, K_DOCK_MOVE, K_DOCK_RESET, K_DOCK_OPTS, K_DOCK_SET,
     K_CLIP_0, K_CLIP_LAST = K_CLIP_0 + 4, K_CLIP_COUNT, K_CLIP_USE, K_CLIP_DEL, K_CLIP_CLEAR, K_FOCUS_BACK, K_GADGET_RESET,
-    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_LAUNCHER_DEFAULTS, K_COUNT
+    K_NOTES_0, K_NOTES_LAST = K_NOTES_0 + 4, K_NOTES_COUNT, K_NOTES_UNREAD, K_NOTES_DEL, K_NOTES_CLEAR, K_NOTES_READ, K_POINTER_OUTPUT, K_CLIP_PNG, K_STARTUP_SOUND_PLAY, K_LAUNCHER_DEFAULTS, K_GADGET_ZOOM, K_COUNT
 };
 #define VALUE_MAX 3300          /* longest value text (the lists); the wire carries it as one string */
 
@@ -95,7 +95,7 @@ static const char *const key_names[K_COUNT] = {
     [K_CLIP_COUNT] = "clip-count", [K_CLIP_USE] = "clip-use", [K_CLIP_DEL] = "clip-del", [K_CLIP_CLEAR] = "clip-clear", [K_FOCUS_BACK] = "focus-back", [K_GADGET_RESET] = "gadget-reset",
     [K_NOTES_0] = "notes-0", [K_NOTES_0 + 1] = "notes-1", [K_NOTES_0 + 2] = "notes-2", [K_NOTES_0 + 3] = "notes-3", [K_NOTES_0 + 4] = "notes-4",
     [K_NOTES_COUNT] = "notes-count", [K_NOTES_UNREAD] = "notes-unread", [K_NOTES_DEL] = "notes-del", [K_NOTES_CLEAR] = "notes-clear",
-    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png", [K_STARTUP_SOUND_PLAY] = "startup-sound-play", [K_LAUNCHER_DEFAULTS] = "launcher-defaults",
+    [K_NOTES_READ] = "notes-read", [K_POINTER_OUTPUT] = "pointer-output", [K_CLIP_PNG] = "clip-png", [K_STARTUP_SOUND_PLAY] = "startup-sound-play", [K_LAUNCHER_DEFAULTS] = "launcher-defaults", [K_GADGET_ZOOM] = "gadget-zoom",
 };
 _Static_assert(LM_NOTELOG_MAX == 5 * LM_NOTELOG_CHUNK, "notes-0 .. notes-4 hold the whole history");
 _Static_assert(KEYS_PAGE_ROWS == 10, "key_names lists keys-row-0 .. keys-row-9");
@@ -536,6 +536,10 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_DND: snprintf(out, n, "%d", c->dnd ? 1 : 0); break;
     case K_STARTUP_SOUND: snprintf(out, n, "%d", c->startup_sound ? 1 : 0); break;
     case K_STARTUP_SOUND_PLAY: case K_LAUNCHER_DEFAULTS: break;                      /* write only */
+    case K_GADGET_ZOOM:                         /* the last order to the cards of a glued stack: "SEQ:name=pct,name=pct" */
+        if (srv->wm)
+            lm_wm_gadget_zoom_text(srv->wm, out, n);
+        break;
     case K_CLIP_0 ... K_CLIP_LAST: {            /* the clipboard history, ten entries a value (newest first), one line each: the text with line breaks as blanks, cut to 120 bytes */
         size_t o = 0;
         out[0] = 0;
@@ -2053,6 +2057,17 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
                 lm_wm_gadget_reset(srv->wm, g);
         }
         return true;
+    case K_GADGET_ZOOM: {                               /* "NAME PCT": a card was zoomed; the cards glued to it follow */
+        char name[48];
+        int pct;
+        if (!srv->wm || sscanf(val, "%47s %d", name, &pct) != 2 || pct < 50 || pct > 300)
+            return false;
+        int g = lm_wm_gadget_by_name(srv->wm, name);
+        if (g < 0)
+            return false;
+        lm_wm_gadget_zoom(srv->wm, g, pct);
+        return true;
+    }
     case K_FOCUS_BACK:                                  /* a gadget that had the keyboard gives it back to the window that had it */
         if (srv->wm)
             lm_wm_focus_back(srv->wm);

@@ -1819,20 +1819,75 @@ class TestGadget(Base):
         x, y, w, h = self.rect()
         return x + w // 2, y + 10
 
+    def test_the_zoom_goes_in_steps_of_five_per_cent(self):
+        self.addCleanup(lambda: (ctl.click(*self.title_point()), ctl.click(*self.title_point())))
+        for want in (105, 110, 115):
+            ctl.click(*self.pill_point('plus'))
+            for _ in range(40):
+                if self.card_zoom() == want:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(self.card_zoom(), want)
+            time.sleep(0.3)                                              # (the pill moves with the card)
+        ctl.click(*self.pill_point('minus'))
+        for _ in range(40):
+            if self.card_zoom() == 110:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.card_zoom(), 110)
+
+    def mixer_zoom(self):
+        for _ in range(40):
+            try:
+                return int(open(ctl.gadget_file('mixer')).readline().split('zoom=')[1].split()[0])
+            except (OSError, IndexError):
+                time.sleep(0.05)
+        return None
+
+    def test_cards_glued_together_are_zoomed_together(self):
+        ctl.cmd('gadget mixer 1')
+        self.addCleanup(lambda: ctl.cmd('gadget mixer 0'))
+        self.addCleanup(lambda: (ctl.click(*self.title_point()), ctl.click(*self.title_point())))
+        cx, cy, cw, ch = self.rect()
+        mx, my, mw, mh = ctl.gadget_rect('mixer', 3.0)
+        self.drag_card('mixer', mx + mw // 2, my + 10, cx - mx, cy + ch + 4 - my)      # glued under the clipboard card
+        gx, gy, gw, gh = ctl.gadget_rect('mixer')
+        self.assertEqual((gx, gy), (cx, cy + ch))
+        ctl.click(*self.pill_point('plus'))                                             # the top card: + 5 %
+        for _ in range(60):
+            if self.card_zoom() == 105 and self.mixer_zoom() == 105 and ctl.gadget_rect('mixer')[3] == (gh * 105 + 50) // 100:
+                break
+            time.sleep(0.05)
+        self.assertEqual((self.card_zoom(), self.mixer_zoom()), (105, 105))             # the glued card followed
+        top = self.rect()
+        low = ctl.gadget_rect('mixer')
+        self.assertEqual((top[0] + top[2], top[1]), (cx + cw, cy))                      # the top of the stack stays where it was (docked: its right edge)
+        self.assertEqual(low[:2], (top[0], top[1] + top[3]))                            # and the lower card still hangs on it
+        # the lower card's pill zooms the upper one too (the stack is glued both ways)
+        z = 1.05
+        ctl.click(low[0] + round((8 + 22 + 40 + 11) * z), low[1] + low[3] - round(17 * z))
+        for _ in range(60):
+            if self.card_zoom() == 110 and self.mixer_zoom() == 110:
+                break
+            time.sleep(0.05)
+        self.assertEqual((self.card_zoom(), self.mixer_zoom()), (110, 110))
+        top = self.rect()
+        self.assertEqual(ctl.gadget_rect('mixer')[:2], (top[0], top[1] + top[3]))
+
     def test_the_pill_on_the_card_makes_the_content_and_the_card_bigger_and_smaller(self):
         x, y, w, h = self.rect()
         self.addCleanup(lambda: (ctl.click(*self.title_point()), ctl.click(*self.title_point())))      # (a double click: back to 100 %)
         self.assertEqual(self.card_zoom(), 100)
         ctl.click(*self.pill_point('plus'))                              # +
         for _ in range(40):
-            if self.card_zoom() == 125:
+            if self.card_zoom() == 105:
                 break
             time.sleep(0.05)
-        self.assertEqual(self.card_zoom(), 125)
+        self.assertEqual(self.card_zoom(), 105)
         nx, ny, nw, nh = self.rect()
-        self.assertEqual((nw, nh), ((w * 125 + 50) // 100, (h * 125 + 50) // 100))     # the card grew with its content
+        self.assertEqual((nw, nh), ((w * 105 + 50) // 100, (h * 105 + 50) // 100))     # the card grew with its content
         first = open(ctl.gadget_file('clipboard')).readline()
-        self.assertIn('w=%d h=%d' % (round(nw / 1.25), round(nh / 1.25)), first)       # (the program still lays out in the old size)
+        self.assertIn('w=%d h=%d' % (round(nw / 1.05), round(nh / 1.05)), first)       # (the program still lays out in the old size)
         ctl.click(*self.pill_point('minus'))                             # -
         for _ in range(40):
             if self.card_zoom() == 100:
@@ -1840,13 +1895,13 @@ class TestGadget(Base):
             time.sleep(0.05)
         self.assertEqual(self.card_zoom(), 100)
         self.assertEqual(self.rect()[2:], (w, h))
-        for want in (125, 150):                                          # (the pill moves with the card: wait for each step)
+        for want in (105, 110):                                          # (the pill moves with the card: wait for each step)
             ctl.click(*self.pill_point('plus'))
             for _ in range(40):
                 if self.card_zoom() == want and self.rect()[2] == (w * want + 50) // 100:
                     break
                 time.sleep(0.05)
-        self.assertEqual(self.card_zoom(), 150)
+        self.assertEqual(self.card_zoom(), 110)
         ctl.click(*self.pill_point('label'))                             # a click on the percentage: normal size
         for _ in range(40):
             if self.card_zoom() == 100:
@@ -1858,25 +1913,25 @@ class TestGadget(Base):
         x, y, w, h = self.rect()
         ctl.click(*self.pill_point('plus'))
         for _ in range(40):
-            if self.card_zoom() == 125:
+            if self.card_zoom() == 105:
                 break
             time.sleep(0.05)
         for _ in range(40):                                              # (the card has grown by now: the pill is where it is)
-            if self.rect()[2] == (w * 125 + 50) // 100:
+            if self.rect()[2] == (w * 105 + 50) // 100:
                 break
             time.sleep(0.05)
-        ctl.click(*self.pill_point('plus'))                              # 150 %
+        ctl.click(*self.pill_point('plus'))                              # 110 %
         for _ in range(40):
-            if self.card_zoom() == 150:
+            if self.card_zoom() == 110:
                 break
             time.sleep(0.05)
-        self.assertEqual(self.card_zoom(), 150)
+        self.assertEqual(self.card_zoom(), 110)
         ctl.cmd('gadget 0')
         self.assertTrue(self.wait_hidden())
         ctl.cmd('gadget 1')                                              # a new program: it starts at the zoom it was left at
         rect = self.rect()
-        self.assertEqual(rect[2:], (w * 3 // 2, h * 3 // 2))
-        self.assertEqual(self.card_zoom(), 150)
+        self.assertEqual(rect[2:], ((w * 110 + 50) // 100, (h * 110 + 50) // 100))
+        self.assertEqual(self.card_zoom(), 110)
         ctl.click(*self.title_point())
         ctl.click(*self.title_point())                                   # the title: normal size, normal content
         for _ in range(40):

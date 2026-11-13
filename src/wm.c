@@ -681,6 +681,9 @@ struct lm_window *lm_wm_window_create(struct lm_wm *wm, struct lm_surface *surfa
 void lm_wm_window_destroy(struct lm_window *w)
 {
     struct lm_wm *wm = w->wm;
+    for (int i = 0; i < wm->zoomglue.n; i++)
+        if (wm->zoomglue.win[i] == w)
+            wm->zoomglue.n = 0;                                 /* (a card of the zoomed stack went away: forget the stack) */
     if (wm->grab_win == w && wm->grab_kind != GRAB_NONE) {
         wm->grab_kind = GRAB_NONE;
         wm->grab_win = NULL;
@@ -789,6 +792,7 @@ void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g)
     } else if (resized && win_is_gadget(w)) {
         if (!WIN(w)->gad_placed)
             gadgets_redock(wm);                                 /* the cards after it move to make room */
+        gadget_zoomglue_fit(wm, w);                             /* a glued stack that is being zoomed keeps together */
     } else if (resized && !(w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN)) && !w->parent) {
         /* A floating window that made itself bigger (a terminal zooming its font) must not stick out of the screen:
          * it moves back inside, and when it is bigger than the usable area it is asked to shrink to fit. */

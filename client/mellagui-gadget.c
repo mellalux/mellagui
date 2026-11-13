@@ -53,6 +53,9 @@ struct app {
     struct wlwin win;
     enum kind kind;
     struct lm_loop *loop;
+    char zoom_text[512];                /* the setting `gadget-zoom` ("SEQ:name=pct,...": the last order for a glued stack) ... */
+    int zoom_order;                     /* ... the number of the order we have dealt with ... */
+    bool zoom_seen;                     /* ... and whether the first burst of settings (it carries an old order) is over */
     int zoom;                           /* the card's content scale in per cent (the card follows: a bigger zoom makes the card bigger) */
     int min_w0, min_h0;                 /* the smallest card at 100 % */
     double base_w, base_h;              /* the card's size at 100 % (so that steps up and down do not add rounding errors) ... */
@@ -124,9 +127,9 @@ static void dump_state(struct app *a)
                 a->win.bw, a->win.bh, a->zoom);
     } else if (a->kind == G_MIXER) {
         const struct lm_mixer_state *ms = lm_mixer_state(a->mixer);
-        fprintf(f, "ok visible=1 backend=%s ready=%d volume=%d mute=%d streams=%d output=%s\n",
+        fprintf(f, "ok visible=1 backend=%s ready=%d volume=%d mute=%d streams=%d output=%s zoom=%d\n",
                 ms->backend == LM_MIXER_PULSE ? "pulse" : ms->backend == LM_MIXER_WPCTL ? "wpctl" : ms->backend == LM_MIXER_ALSA ? "alsa" : "none",
-                ms->ready ? 1 : 0, ms->volume, ms->mute ? 1 : 0, ms->nstreams, ms->output[0] ? ms->output : "-");
+                ms->ready ? 1 : 0, ms->volume, ms->mute ? 1 : 0, ms->nstreams, ms->output[0] ? ms->output : "-", a->zoom);
     } else if (a->kind == G_SYS) {
         const struct lm_sysinfo_state *ss = lm_sysinfo_state(a->sys);
         fprintf(f, "ok visible=1 ready=%d cpu=%d cores=%d mem=%d mem_total_kb=%ld swap=%d temp=%d load=%.2f hist=%d\n", ss->ready ? 1 : 0, ss->cpu,
@@ -737,9 +740,13 @@ static void paint_system(struct app *a)
     y += 30;
     if (gpu) {
         const struct lm_gpu *g = &st->gpu;
-        int pct = g->busy >= 0 ? g->busy : g->freq_max_mhz > 0 ? LM_CLAMP(g->freq_mhz * 100 / g->freq_max_mhz, 0, 100) : 0;
+        /* An estimated busy value (an Intel chip: the clock's place between its ends, or the RC6 sleep) says little - the driver raises the clock at the
+         * slightest load - so no percentage is written and the bar shows the clock, which is what is really known. */
+        bool clock_only = g->busy_estimated && g->freq_max_mhz > 0 && g->freq_mhz > 0;
+        int pct = clock_only ? LM_CLAMP(g->freq_mhz * 100 / g->freq_max_mhz, 0, 100)
+                : g->busy >= 0 ? g->busy : g->freq_max_mhz > 0 ? LM_CLAMP(g->freq_mhz * 100 / g->freq_max_mhz, 0, 100) : 0;
         char parts[96] = "";
-        if (g->busy >= 0)
+        if (g->busy >= 0 && !clock_only)
             snprintf(parts, sizeof(parts), "%d%%", g->busy);
         if (g->freq_mhz > 0) {
             size_t o = strlen(parts);
@@ -752,7 +759,7 @@ static void paint_system(struct app *a)
             size_t o = strlen(parts);
             snprintf(parts + o, sizeof(parts) - o, "%s%d \xc2\xb0""C", o ? "   " : "", g->temp_c);
         }
-        meter(w, x, y, width, "GPU", parts[0] ? parts : g->driver, pct, level_color(pct, 70, 90));
+        meter(w, x, y, width, clock_only ? "GPU clock" : "GPU", parts[0] ? parts : g->driver, pct, clock_only ? lm_theme.accent : level_color(pct, 70, 90));
         y += 30;
     }
     if (vram) {
@@ -941,11 +948,41 @@ static void changed(void *data)
     a->win.redraw = true;
 }
 
+static void zoom_apply(struct app *a, int pct, bool resize);
+
+/* After a burst of settings: was there a new order for the glued stack, and is this card named in it? (The first burst only shows the old order that
+ * was current when the card started: that one is not ours.) */
+static void zoom_order_check(struct app *a)
+{
+    int seq = a->zoom_text[0] ? atoi(a->zoom_text) : 0;
+    if (!a->zoom_seen) {
+        a->zoom_seen = true;
+        a->zoom_order = seq;
+        return;
+    }
+    if (seq == a->zoom_order || !a->zoom_text[0])
+        return;
+    a->zoom_order = seq;
+    const char *p = strchr(a->zoom_text, ':');
+    const char *me = kind_name(a->kind);
+    size_t len = strlen(me);
+    for (p = p ? p + 1 : a->zoom_text; p && *p;) {
+        if (!strncmp(p, me, len) && p[len] == '=') {
+            zoom_apply(a, atoi(p + len + 1), true);
+            break;
+        }
+        p = strchr(p, ',');
+        if (p)
+            p++;
+    }
+}
+
 static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)c; (void)id;
     struct app *a = data;
     if (op == LM_MELLAGUI_SETTINGS_V1_EVT_DONE) {
+        zoom_order_check(a);
         clip_parse(a);
         a->win.redraw = true;
         return;
@@ -953,6 +990,10 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op != LM_MELLAGUI_SETTINGS_V1_EVT_VALUE)
         return;
     const char *k = args[0].s;
+    if (!strcmp(k, "gadget-zoom")) {                                /* "SEQ:name=pct,name=pct": a card of the stack we are glued to was zoomed */
+        snprintf(a->zoom_text, sizeof(a->zoom_text), "%s", args[1].s);
+        return;
+    }
     if (!strncmp(k, "clip-", 5) && k[5] >= '0' && k[5] <= '4' && !k[6])
         snprintf(a->chunk[k[5] - '0'], sizeof(a->chunk[0]), "%s", args[1].s);
 }
@@ -969,16 +1010,15 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
  * percentage goes back to 100 %), the right button's menu, and Ctrl + / - / 0 while the clipboard card has the keyboard. The card grows and shrinks
  * with it. */
 
-static const int ZOOM_STEPS[] = { 50, 75, 100, 125, 150, 175, 200, 250, 300 };
-#define N_ZOOM ((int)(sizeof(ZOOM_STEPS) / sizeof(ZOOM_STEPS[0])))
+#define ZOOM_MIN 50
+#define ZOOM_MAX 300
+#define ZOOM_STEP 5                     /* one press of + / - */
 
-static int zoom_snap(int pct)
+static int zoom_snap(int pct)           /* the nearest step (a zoom from an old configuration file may be anything) */
 {
-    int best = 100;
-    for (int i = 0; i < N_ZOOM; i++)
-        if (abs(ZOOM_STEPS[i] - pct) < abs(best - pct))
-            best = ZOOM_STEPS[i];
-    return pct <= 0 ? 100 : best;
+    if (pct <= 0)
+        return 100;
+    return LM_CLAMP((pct + ZOOM_STEP / 2) / ZOOM_STEP * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX);
 }
 
 static void zoom_limits(struct app *a)
@@ -1014,12 +1054,22 @@ static void zoom_apply(struct app *a, int pct, bool resize)
     a->win.redraw = true;
 }
 
+/* The user zoomed this card: the cards glued to it (above, below, and what hangs on those) get the same zoom - the compositor finds them and
+ * says so through the setting `gadget-zoom` (see settings_event). */
+static void zoom_user(struct app *a, int pct)
+{
+    int before = a->zoom;
+    zoom_apply(a, pct, true);
+    if (a->zoom == before)
+        return;
+    char v[64];
+    snprintf(v, sizeof(v), "%s %d", kind_name(a->kind), a->zoom);
+    send_set(a, "gadget-zoom", v);
+}
+
 static void zoom_step(struct app *a, int dir)
 {
-    int i = 0;
-    while (i < N_ZOOM - 1 && ZOOM_STEPS[i] < a->zoom)
-        i++;
-    zoom_apply(a, ZOOM_STEPS[LM_CLAMP(i + dir, 0, N_ZOOM - 1)], true);
+    zoom_user(a, a->zoom + dir * ZOOM_STEP);
 }
 
 #define ZB_H 18
@@ -1046,9 +1096,9 @@ static void paint_zoom_ui(struct app *a)
     uint32_t bg = lm_mix_rgb(lm_theme.card, 0xffffff, 0.14), fg = lm_theme.text;
     rr(w, lm_rect_make(mi.x, mi.y, pl.x + pl.w - mi.x, mi.h), ZB_H / 2, bg);
     int cy = mi.y + mi.h / 2;
-    wlwin_fill(w, mi.x + 7, cy, ZB_W - 14, 2, a->zoom > ZOOM_STEPS[0] ? fg : lm_theme.text_dim);                       /* - */
-    wlwin_fill(w, pl.x + 7, cy, ZB_W - 14, 2, a->zoom < ZOOM_STEPS[N_ZOOM - 1] ? fg : lm_theme.text_dim);               /* + */
-    if (a->zoom < ZOOM_STEPS[N_ZOOM - 1])
+    wlwin_fill(w, mi.x + 7, cy, ZB_W - 14, 2, a->zoom > ZOOM_MIN ? fg : lm_theme.text_dim);                       /* - */
+    wlwin_fill(w, pl.x + 7, cy, ZB_W - 14, 2, a->zoom < ZOOM_MAX ? fg : lm_theme.text_dim);               /* + */
+    if (a->zoom < ZOOM_MAX)
         wlwin_fill(w, pl.x + ZB_W / 2 - 1, cy - 5, 2, 12, fg);
     char t[16];
     snprintf(t, sizeof(t), "%d%%", a->zoom);
@@ -1065,7 +1115,7 @@ static bool zoom_press(struct app *a)
     else if (in_rect(pl, a->px, a->py))
         zoom_step(a, 1);
     else if (in_rect(la, a->px, a->py))
-        zoom_apply(a, 100, true);
+        zoom_user(a, 100);
     else
         return false;
     return true;
@@ -1079,7 +1129,7 @@ static void menu_event(struct wlwin *w, int index)
     else if (index == 1)
         zoom_step(a, -1);
     else if (index == 2)
-        zoom_apply(a, 100, true);
+        zoom_user(a, 100);
 }
 
 static uint32_t edges_at(const struct wlwin *w, double x, double y)
@@ -1128,7 +1178,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 273) {
         if (args[3].u == 1)
-            wlwin_menu(w, a->zoom >= 300 ? "~Bigger\nSmaller\nNormal size (100 %)" : a->zoom <= 50 ? "Bigger\n~Smaller\nNormal size (100 %)" : "Bigger\nSmaller\nNormal size (100 %)");
+            wlwin_menu(w, a->zoom >= ZOOM_MAX ? "~Bigger\nSmaller\nNormal size (100 %)" : a->zoom <= ZOOM_MIN ? "Bigger\n~Smaller\nNormal size (100 %)" : "Bigger\nSmaller\nNormal size (100 %)");
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272) {
         if (args[3].u == 0) {                                       /* released */
             a->drag_part = LM_MIXER_NOTHING;
@@ -1182,7 +1232,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         uint32_t ks = lm_keymap_keysym(args[2].u, w->mods);
         if ((w->mods & LM_MOD_CTRL) && (ks == '=' || ks == '+' || ks == '-' || ks == '0')) {
             if (ks == '0')
-                zoom_apply(a, 100, true);
+                zoom_user(a, 100);
             else
                 zoom_step(a, ks == '-' ? -1 : 1);
             return;

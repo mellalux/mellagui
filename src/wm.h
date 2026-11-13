@@ -346,6 +346,9 @@ int lm_wm_gadget_by_name(const struct lm_wm *wm, const char *name);
 /* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer, Super+S = system monitor, Super+H = smart home; control socket `gadget`, `mixer`, `sysinfo`, `smart`). */
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id);
 void lm_wm_gadgets_start(struct lm_wm *wm, bool headless);
+void lm_wm_gadget_zoom(struct lm_wm *wm, int id, int pct);        /* a card was zoomed: every card glued to it (above or below) gets the same zoom
+                                                                      * and the stack keeps together; the order is the setting `gadget-zoom` */
+void lm_wm_gadget_zoom_text(const struct lm_wm *wm, char *out, size_t n);
 void lm_wm_gadget_reset(struct lm_wm *wm, int id);                 /* default size, docked again */
 void lm_wm_gadget_refresh(struct lm_wm *wm, int id);             /* the program of the gadget looks at the world again (SIGUSR1) */
 void lm_wm_focus_back(struct lm_wm *wm);                         /* the keyboard goes to the top window again (a gadget lets go of it) */                       /* the gadgets that are switched on are started (main.c, not on the headless backend) */

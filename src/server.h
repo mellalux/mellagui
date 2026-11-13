@@ -171,6 +171,7 @@ struct lm_config {
     int cal_week_start;         /* the calendar's first weekday: 1 Monday (default), 0 Sunday (settings: cal-week-start mon|sun) */
     bool cal_weeknum;           /* ... with ISO week numbers (settings: cal-weeks; default false) */
     bool osk_avoid;             /* windows keep out of the on-screen keyboard's way (settings: osk-avoid; default true) */
+    bool lock_wallpaper;        /* the lock screen shows the wallpaper, blurred and dimmed, behind the clock (settings: lock-wallpaper; default true; plain dark without a wallpaper) */
     int layout_label;           /* next to each flag in the panel: 0 nothing, 1 the short code (US), 2 the language (settings: layout-label none|code|name) */
     bool layout_badges;         /* the panel shows a badge for every enabled keyboard layout, a click picks one (settings: layout-badges; default false = one badge, a click cycles) */
     const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
@@ -247,6 +248,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .night_from = "21:00",
         .night_to = "06:30",
         .osk_avoid = true,
+        .lock_wallpaper = true,
         .clock = { .show_date = true },
         .cal_enabled = true,
         .cal_week_start = 1,

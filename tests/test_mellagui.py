@@ -7218,6 +7218,27 @@ class TestLock(Base):
             c.tap(KEY_ENTER)
         c.sync()
 
+    def test_the_lock_screen_shows_the_wallpaper_blurred_and_can_do_without(self):
+        _, c, _ = self.start('lock-wall')
+        pic = os.path.join(tmp, 'lock-wall.ppm')
+        with open(pic, 'wb') as f:                                       # left half red, right half green
+            f.write(b'P6\n64 36\n255\n' + b''.join((b'\xe0\x20\x20' if x < 32 else b'\x20\xe0\x20') for y in range(36) for x in range(64)))
+        c.cmd('settings wallpaper ' + pic)
+        c.cmd('lock set - pin 1357')
+        c.cmd('lock now')
+        c.sync()
+        shot = c.dump(os.path.join(tmp, 'lock-wall1.ppm'))
+        left, right = shot.px(60, 400), shot.px(740, 400)
+        self.assertGreater(left[0], left[1] + 8, left)                   # red side
+        self.assertGreater(right[1], right[0] + 8, right)                # green side
+        self.assertLess(max(left) , 200)                                 # dimmed
+        mid = [shot.px(x, 400) for x in range(300, 500, 20)]
+        self.assertEqual(len({m[0] // 24 for m in mid}) > 1, True)       # the edge between them is a soft ramp, not a step
+        c.cmd('settings lock-wallpaper 0')
+        c.sync()
+        plain = c.dump(os.path.join(tmp, 'lock-wall0.ppm'))
+        self.assertEqual(plain.px(60, 400), plain.px(740, 400))          # back to plain dark
+
     def keyboard_client(self, name):
         cl = Client(os.path.join(tmp, name))
         self.clients.append(cl)

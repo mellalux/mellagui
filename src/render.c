@@ -69,6 +69,10 @@ struct out_state {
     struct lm_rect wall_rect;           /* output-local */
     uint32_t wall_gen;
     int wall_w, wall_h;
+    uint32_t *lock_px;                  /* the wallpaper blurred and dimmed for the lock screen: lock_w x lock_h, a small picture that is scaled up */
+    int lock_w, lock_h;
+    uint32_t lock_gen, lock_ink;        /* what it was made from: the wallpaper's generation and the dimming colour */
+    int lock_pw, lock_ph;               /* the output's physical size it was made for */
     uint32_t *mag_px;                   /* the scene before it is magnified (software renderer), output sized */
     int mag_w, mag_h;
 };
@@ -793,10 +797,71 @@ enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CR
 static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha);
 
 /* The lock screen: a dark screen with the time, a box with the dots of what was typed and the last message. */
+/* The lock screen's backdrop: the wallpaper (cropped to fill) shrunk to about 1/8, blurred with two box passes and dimmed towards the theme's ink, kept per
+ * output; it is scaled back up with a bilinear filter, which blurs it further. false = no wallpaper (or no picture): the caller paints plain ink. */
+static bool paint_lock_backdrop(const struct paint_ctx *c)
+{
+    const struct lm_image *img = &c->r->wall.img;
+    struct out_state *st = img->px ? state_of(c->out) : NULL;
+    if (!st)
+        return false;
+    int W = lm_output_pw(c->out), H = lm_output_ph(c->out);
+    if (W <= 0 || H <= 0)
+        return false;
+    if (!st->lock_px || st->lock_gen != c->r->wall.gen || st->lock_ink != lm_theme.ink || st->lock_pw != W || st->lock_ph != H) {
+        free(st->lock_px);
+        int tw = LM_MAX(W / 8, 16), th = LM_MAX(H / 8, 9);
+        uint32_t *px = malloc((size_t)tw * (size_t)th * 4), *tmp = malloc((size_t)tw * (size_t)th * 4);
+        st->lock_px = NULL;
+        if (!px || !tmp) {
+            free(px);
+            free(tmp);
+            return false;
+        }
+        double iw = img->w, ih = img->h, sc = LM_MAX((double)tw / iw, (double)th / ih), sw = tw / sc, sh = th / sc;
+        wall_scale(img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, px, tw, th);
+        for (int pass = 0; pass < 2; pass++) {                  /* box blur, radius 2, horizontal then vertical */
+            for (int dir = 0; dir < 2; dir++) {
+                uint32_t *src = dir ? tmp : px, *dst = dir ? px : tmp;
+                int len = dir ? th : tw, lines = dir ? tw : th, step = dir ? tw : 1, lstep = dir ? 1 : tw;
+                for (int l = 0; l < lines; l++)
+                    for (int i = 0; i < len; i++) {
+                        unsigned r = 0, g = 0, b = 0, n = 0;
+                        for (int k = -2; k <= 2; k++) {
+                            int j = LM_CLAMP(i + k, 0, len - 1);
+                            uint32_t p = src[(size_t)l * (size_t)lstep + (size_t)j * (size_t)step];
+                            r += (p >> 16) & 255;
+                            g += (p >> 8) & 255;
+                            b += p & 255;
+                            n++;
+                        }
+                        dst[(size_t)l * (size_t)lstep + (size_t)i * (size_t)step] = 0xff000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+                    }
+            }
+        }
+        for (size_t i = 0; i < (size_t)tw * (size_t)th; i++)    /* dimmed: 62 % of the theme's dark colour over it */
+            px[i] = 0xff000000u | mix_rgb(px[i] & 0xffffffu, lm_theme.ink, 158);
+        free(tmp);
+        st->lock_px = px;
+        st->lock_w = tw;
+        st->lock_h = th;
+        st->lock_gen = c->r->wall.gen;
+        st->lock_ink = lm_theme.ink;
+        st->lock_pw = W;
+        st->lock_ph = H;
+    }
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect src = lm_rect_make(0, 0, st->lock_w, st->lock_h), dst = lm_rect_make(0, 0, W, H);
+    blit_scaled_px(&pc, st->lock_px, st->lock_w, st->lock_w, st->lock_h, &src, &dst, 255, true);
+    return true;
+}
+
 static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
 {
     struct lm_rect o = lm_output_rect(c->out);
-    fill_rect(c, &o, lm_theme.ink);
+    if (!li->wallpaper || !paint_lock_backdrop(c))
+        fill_rect(c, &o, lm_theme.ink);
     int cx = o.x + o.w / 2, cy = o.y + o.h / 2;
 
     int scale = o.w >= 1600 ? 8 : o.w >= 900 ? 6 : 3;
@@ -2910,6 +2975,7 @@ void lm_render_output_removed(struct lm_renderer *r, struct lm_output *out)
     if (r->gl)
         gl_out_free(r, st);
     free(st->wall_px);
+    free(st->lock_px);
     free(st->mag_px);
     lm_region_fini(&st->pending);
     for (int i = 0; i < HIST; i++)

@@ -27,6 +27,7 @@ struct lm_saver {
     uint64_t started;                   /* when the running program was started */
     bool locking;                       /* we are locking the screen right now: the saver stays */
     bool shield;                        /* the lock was made by the saver and it still runs over it */
+    bool gone;                          /* the program ended on its own (killed, crashed): no new one before the next input */
 };
 
 static uint64_t unit_ms(void)
@@ -54,6 +55,7 @@ static void reap_if_gone(struct lm_saver *s)
     pid_t r = waitpid(s->pid, &st, WNOHANG);
     if (r == s->pid || (r < 0 && kill(s->pid, 0) != 0)) {          /* ended (by itself, or already reaped elsewhere) */
         s->pid = 0;
+        s->gone = true;                                            /* the idle time is still long: without this it would start again in a second */
         drop_shield(s);
     }
 }
@@ -75,7 +77,10 @@ bool lm_saver_shields(const struct lm_saver *s)
 
 bool lm_saver_start(struct lm_saver *s)
 {
-    if (!s || s->pid > 0)
+    if (!s)
+        return false;
+    reap_if_gone(s);                                           /* (one that ended a moment ago must not keep a new one out) */
+    if (s->pid > 0)
         return false;
     const char *cmd = s->srv->config.saver_cmd;
     if (!cmd || !*cmd)
@@ -92,6 +97,7 @@ bool lm_saver_start(struct lm_saver *s)
     if (pid <= 0)
         return false;
     s->pid = pid;
+    s->gone = false;
     s->started = lm_now_ms();
     s->shield = false;
     lm_info("screensaver started (pid %d)", (int)pid);
@@ -116,6 +122,7 @@ bool lm_saver_activity(struct lm_saver *s)
         return false;
     s->last_activity = lm_now_ms();
     reap_if_gone(s);
+    s->gone = false;                                           /* someone is here again: it may start after the next idle period */
     if (s->pid > 0) {
         lm_saver_stop(s);
         return true;                                           /* this event only woke the screen up */
@@ -128,6 +135,7 @@ void lm_saver_locked(struct lm_saver *s, bool locked)
     if (!s)
         return;
     s->last_activity = lm_now_ms();
+    s->gone = false;
     if (locked && s->locking && s->pid > 0) {                  /* our own lock: the saver goes on running over it */
         s->shield = true;
         return;
@@ -150,6 +158,12 @@ static void tick_cb(void *data)
         s->locking = false;
         return;
     }
+    if (lm_screenoff_off(s->srv->screenoff)) {                 /* the monitors sleep: nobody sees the picture, so nothing may draw it (the room costs 4 cores) */
+        if (s->pid > 0)
+            lm_saver_stop(s);
+        s->gone = true;                                        /* and it is not started before the next input */
+        return;
+    }
     if (lm_saver_governs(cfg) && cfg->saver_blank_min > 0 && !lm_screenoff_active(s->srv->screenoff)) {
         if (lm_idle_inhibited(s->srv->idle_inhibit))            /* a film is on: the idle time starts when it is over */
             s->last_activity = lm_now_ms();
@@ -157,7 +171,7 @@ static void tick_cb(void *data)
                  (s->pid > 0 || !(s->srv->wm && lm_wm_has_fullscreen(s->srv->wm))))      /* (not under a full screen window that has no saver over it) */
             lm_screenoff_start(s->srv->screenoff);
     }
-    if (s->pid > 0 || !cfg->saver || cfg->saver_min <= 0)
+    if (s->pid > 0 || s->gone || !cfg->saver || cfg->saver_min <= 0)
         return;
     if (lm_idle_inhibited(s->srv->idle_inhibit)) {              /* a film is on: the idle time starts when it is over */
         s->last_activity = lm_now_ms();
@@ -166,6 +180,8 @@ static void tick_cb(void *data)
     if (lm_now_ms() - s->last_activity < (uint64_t)cfg->saver_min * unit_ms())
         return;
     if (s->srv->lock && lm_lock_active(s->srv->lock))
+        return;
+    if (lm_screenoff_active(s->srv->screenoff))                /* the screen is going dark: no saver for the last two seconds */
         return;
     if (s->srv->wm && lm_wm_has_fullscreen(s->srv->wm))        /* a film or a game: nobody touches the keyboard, nobody wants a screensaver */
         return;

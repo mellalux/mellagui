@@ -13905,6 +13905,45 @@ class TestSaver(Base):
         c.tap(KEY_A)                                             # any key
         self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'it ends')
 
+    @staticmethod
+    def descendants(pid):
+        """Pids of everything below `pid` (children, their children ...), read from /proc."""
+        parent = {}
+        for d in os.listdir('/proc'):
+            if d.isdigit():
+                try:
+                    with open('/proc/%s/stat' % d) as f:
+                        parent[int(d)] = int(f.read().rpartition(')')[2].split()[1])
+                except (OSError, ValueError, IndexError):
+                    pass
+        found, todo = [], [pid]
+        while todo:
+            q = todo.pop()
+            for k, v in parent.items():
+                if v == q:
+                    found.append(k)
+                    todo.append(k)
+        return found
+
+    def test_a_saver_that_was_killed_does_not_come_back_before_the_next_input(self):
+        p, c = self.start('mellagui-sv2k', '--config', 'none')
+        c.cmd('settings saver-minutes 2')
+        self.wait(lambda: self.saver(c)['running'] == '1', 'the screensaver starts')
+        self.wait(lambda: self.matrix_windows(c), 'its window')
+        for q in self.descendants(p.pid):                        # killed from outside, like the user did (only this compositor's own)
+            try:
+                with open('/proc/%d/cmdline' % q, 'rb') as f:
+                    if b'mellagui-matrix' in f.read():
+                        os.kill(q, signal.SIGKILL)
+            except OSError:
+                pass
+        self.wait(lambda: self.saver(c)['running'] == '0', 'it is noticed that it is gone')
+        time.sleep(3.0)                                          # twelve idle "minutes" later it must still be gone
+        self.assertEqual(self.saver(c)['running'], '0')
+        c.tap(KEY_A)                                             # somebody is back
+        time.sleep(3.0)                                          # ... and leaves again: the saver is allowed to start
+        self.assertEqual(self.saver(c)['running'], '1')
+
     def lock_line(self, c):
         c.cmd('lock')
         return dict(kv.split('=', 1) for kv in c.last.partition(' message=')[0].split()[1:])
@@ -13976,6 +14015,20 @@ class TestSaver(Base):
         self.wait(lambda: self.screenoff(c)['active'] == '0' and self.saver(c)['running'] == '0', 'one touch wakes the monitor and ends the saver')
         self.assertEqual(self.power(c), 'ok on')
         self.assertEqual(self.lock_line(c)['locked'], '1')
+
+    def test_the_saver_is_ended_when_the_monitor_sleeps_and_does_not_start_again_until_a_touch(self):
+        p, c = self.start('mellagui-sv-sleep', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
+        c.cmd('settings saver-minutes 2')
+        c.cmd('settings saver-lock 0')
+        c.cmd('settings saver-blank 8')                          # the monitor sleeps 8 "minutes" after the last touch, the saver ran from 2
+        self.wait(lambda: self.saver(c)['running'] == '1', 'the saver starts')
+        self.wait(lambda: self.screenoff(c)['off'] == '1', 'the monitor sleeps')
+        self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'the saver is ended with it')
+        time.sleep(1.5)                                          # six more idle "minutes": nobody sees it, so it must not come back
+        self.assertEqual(self.saver(c)['running'], '0')
+        c.tap(KEY_A)                                             # wakes the monitor only
+        self.wait(lambda: self.screenoff(c)['active'] == '0', 'the monitor is back')
+        self.assertEqual(self.saver(c)['running'], '0')
 
     def test_with_the_screensaver_on_its_times_decide_and_with_it_off_the_security_ones_do(self):
         p, c = self.start('mellagui-sv-rule', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})

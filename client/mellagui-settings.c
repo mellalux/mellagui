@@ -662,6 +662,8 @@ static void build_security_lock(struct app *a, int x, int y, int w)
     add_check(a, x, y, w, "Lock when MellaGUI starts", "sec-start", a->sec_start);
     y += ROW_H;
     add_check(a, x, y, w, "Console switch (Ctrl+Alt+Fn) works while locked", "sec-vt", a->sec_vt);
+    y += ROW_H;
+    add_check(a, x, y, w, "Show the wallpaper behind the lock screen", "lock-wallpaper", kv_int(a, "lock-wallpaper", 1) != 0);
     y += ROW_H + 4;
     add_button(a, x, y, 90, "Apply", "sec-apply");
     if (have) {

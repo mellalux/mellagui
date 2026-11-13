@@ -56,6 +56,7 @@ struct lm_lock_info {
     char clock[16];             /* "HH:MM" (or with seconds, or "2:05 PM": the clock settings) */
     char date[32];              /* "DD.MM.YYYY" (the date-format setting) */
     char layout[8];             /* "US", "EE" ... */
+    bool wallpaper;             /* paint the wallpaper (blurred, dimmed) behind it: setting lock-wallpaper */
 };
 
 struct lm_lock;

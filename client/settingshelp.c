@@ -121,6 +121,9 @@ static const struct entry table[] = {
     { "sec-blank", NULL, "Screen off after",
       "Once the screen has been locked this long the monitors go to standby. Any key or mouse movement wakes them. 0 = never." },
     { "sec-start", NULL, "Lock at start", "Lock the screen as soon as MellaGUI starts - for a computer that logs in by itself." },
+    { "lock-wallpaper", NULL, "Wallpaper on the lock screen",
+      "The locked screen shows your wallpaper, blurred and dimmed, behind the clock and the field for the PIN or password. "
+      "Switched off - or with no wallpaper chosen - it is plain dark." },
     { "sec-vt", NULL, "Console switch while locked",
       "Lets Ctrl+Alt+F1 ... F12 switch to a text console even when the screen is locked. Leave it off if a console may be logged in: that would "
       "get around the lock." },

@@ -752,6 +752,7 @@ void lm_lock_info(const struct lm_lock *l, struct lm_output *out, struct lm_lock
     info->output = out;
     if (!l)
         return;
+    info->wallpaper = l->srv->config.lock_wallpaper;
     info->pin = l->kind == KIND_PIN;
     info->nchars = l->nchars;
     int wait = wait_seconds(l);

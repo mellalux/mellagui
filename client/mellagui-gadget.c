@@ -47,7 +47,7 @@
 #define CLIP_MAX 50
 #define CLIP_LEN 124
 
-enum kind { G_CLIP, G_MIXER, G_SYS, G_SMART };
+enum kind { G_CLIP, G_MIXER, G_SYS, G_SMART, G_TEXT };
 
 struct app {
     struct wlwin win;
@@ -73,6 +73,15 @@ struct app {
     struct lm_sysinfo *sys;
     /* smart */
     struct lm_smart *smart;
+    /* text: the output of a program, shown in a card (mellagui-gadget text NAME ... -- PROGRAM ARGS) */
+    char name[25];
+    char title[48];
+    char **cmd;                         /* argv of the program */
+    uint32_t every_ms;
+    struct lm_timer *tick;
+    struct lm_proc *job;
+    char out[16384];
+    bool got;                           /* the program has answered at least once */
 };
 
 static struct app g_app;
@@ -88,6 +97,8 @@ static void on_usr1(int sig)
 static int clip_slots_of(const struct app *a);
 static const char *kind_name(enum kind k)
 {
+    if (k == G_TEXT)
+        return g_app.name;
     return k == G_CLIP ? "clipboard" : k == G_MIXER ? "mixer" : k == G_SYS ? "system" : "smart";
 }
 
@@ -116,6 +127,10 @@ static void dump_state(struct app *a)
                 ss->ncores, ss->mem_pct, ss->mem_total_kb, ss->swap_pct, ss->temp_c, ss->load1, ss->nhist);
         fprintf(f, "ok maker=%s|model=%s|cpu=%s|os=%s|kernel=%s|host=%s|uptime=%ld\n", ss->maker, ss->model, ss->cpu_model, ss->os_name, ss->kernel,
                 ss->host, ss->uptime_s);
+    } else if (a->kind == G_TEXT) {
+        fprintf(f, "text name=%s got=%d w=%d h=%d\n", a->name, a->got ? 1 : 0, a->win.bw, a->win.bh);
+        fputs(a->out, f);
+        fprintf(f, "\nok\n");
     } else {
         const struct lm_smart_state *ms = lm_smart_state(a->smart);
         fprintf(f, "smart visible=1 ready=%d n=%d note=%s\n", ms->ready ? 1 : 0, ms->n, ms->note[0] ? ms->note : "-");
@@ -806,10 +821,54 @@ static void paint_smart(struct app *a)
 
 /* ---- window --------------------------------------------------------------------------------------------------------------------- */
 
+/* ---- text: a card that shows what a program prints (the way to make a gadget out of a shell script) ------------------------------------ */
+
+static void paint_text(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    card_base(w);
+    header(w, a->title, 14);
+    int y = TITLE_H + 6, lh = LM_FONT_H + 2;
+    if (!a->got || !a->out[0]) {
+        text(w, 14, y, a->got ? "(no output)" : "...", lm_theme.text_dim);
+        return;
+    }
+    const char *p = a->out;
+    while (*p && y + LM_FONT_H <= w->bh - 8) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        char line[256];
+        snprintf(line, sizeof(line), "%.*s", n < sizeof(line) - 1 ? (int)n : (int)sizeof(line) - 1, p);
+        text_fit(w, 14, y, line, w->bw - 28, lm_theme.text);
+        y += lh;
+        p = e ? e + 1 : p + n;
+    }
+}
+
+static void text_done(void *data, const char *output)
+{
+    struct app *a = data;
+    a->job = NULL;
+    snprintf(a->out, sizeof(a->out), "%s", output ? output : "");
+    size_t n = strlen(a->out);
+    while (n && (a->out[n - 1] == '\n' || a->out[n - 1] == ' '))
+        a->out[--n] = 0;
+    a->got = true;
+    a->win.redraw = true;
+}
+
+static void text_tick(void *data)
+{
+    struct app *a = data;
+    if (!a->job)
+        a->job = lm_proc_run(a->loop, a->cmd, 30000, text_done, a);
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     switch (a->kind) {
+    case G_TEXT: paint_text(a); break;
     case G_CLIP: paint_clip(a); break;
     case G_MIXER: paint_mixer(a); break;
     case G_SYS: paint_system(a); break;
@@ -960,23 +1019,71 @@ int main(int argc, char **argv)
     };
     struct app *a = &g_app;
     int kind = -1;
-    for (int i = 1; i < argc; i++)
-        for (int k = 0; k < 4; k++)
-            if (!strcmp(argv[i], def[k].name))
-                kind = k;
+    int tw = 240, th = 120;
+    if (argc >= 2 && !strcmp(argv[1], "text")) {
+        /* mellagui-gadget text NAME [--title T] [--every SECONDS] [--size WxH] [--] PROGRAM [ARGS...] */
+        kind = G_TEXT;
+        if (argc < 3) {
+            fprintf(stderr, "usage: mellagui-gadget text NAME [--title T] [--every SECONDS] [--size WxH] [--] PROGRAM [ARGS...]\n");
+            return 2;
+        }
+        snprintf(a->name, sizeof(a->name), "%s", argv[2]);
+        snprintf(a->title, sizeof(a->title), "%s", argv[2]);
+        a->every_ms = 5000;
+        int i = 3;
+        for (; i < argc; i++) {
+            if (!strcmp(argv[i], "--")) {
+                i++;
+                break;
+            } else if (!strcmp(argv[i], "--title") && i + 1 < argc) {
+                snprintf(a->title, sizeof(a->title), "%s", argv[++i]);
+            } else if (!strcmp(argv[i], "--every") && i + 1 < argc) {
+                int sec = atoi(argv[++i]);
+                a->every_ms = (uint32_t)LM_CLAMP(sec, 1, 86400) * 1000u;
+            } else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
+                int w, h;
+                if (sscanf(argv[++i], "%dx%d", &w, &h) == 2 && w >= 120 && w <= 640 && h >= 60 && h <= 1600) {
+                    tw = w;
+                    th = h;
+                }
+            } else {
+                break;
+            }
+        }
+        if (i >= argc || !a->name[0]) {
+            fprintf(stderr, "mellagui-gadget text: which program?\n");
+            return 2;
+        }
+        for (const char *c = a->name; *c; c++)
+            if (!((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '-' || *c == '_')) {
+                fprintf(stderr, "mellagui-gadget text: the name is letters a-z, digits, - and _\n");
+                return 2;
+            }
+        a->cmd = &argv[i];
+    } else {
+        for (int i = 1; i < argc; i++)
+            for (int k = 0; k < 4; k++)
+                if (!strcmp(argv[i], def[k].name))
+                    kind = k;
+    }
     if (kind < 0) {
-        fprintf(stderr, "usage: mellagui-gadget clipboard|mixer|system|smart\n");
+        fprintf(stderr, "usage: mellagui-gadget clipboard|mixer|system|smart | text NAME [options] -- PROGRAM [ARGS...]\n");
         return 2;
     }
     a->kind = (enum kind)kind;
     a->cursor = -1;
     a->drag_part = LM_MIXER_NOTHING;
-    int dw = def[kind].w, dh = def[kind].h;
-    if (kind == G_CLIP) {
+    int dw = def[kind < 4 ? kind : 0].w, dh = def[kind < 4 ? kind : 0].h;
+    int min_w = kind < 4 ? def[kind].min_w : 120, min_h = kind < 4 ? def[kind].min_h : 60;
+    const char *app_name = kind < 4 ? def[kind].name : a->name, *title = kind < 4 ? def[kind].title : a->title;
+    if (kind == G_TEXT) {
+        dw = tw;
+        dh = th;
+    } else if (kind == G_CLIP) {
         dw = lm_metrics.gadget_width;
         dh = TITLE_H + 5 * ENTRY_H + PAD;
     } else if (kind == G_MIXER) {
-        dw = LM_MAX(lm_metrics.mixer_width, def[kind].min_w);
+        dw = LM_MAX(lm_metrics.mixer_width, min_w);
         dh = lm_metrics.mixer_height;
     } else if (kind == G_SYS) {
         dw = lm_metrics.sys_width;
@@ -1002,16 +1109,19 @@ int main(int argc, char **argv)
     } else if (kind == G_SMART) {
         a->smart = lm_smart_create(a->loop, changed, a);
         lm_smart_set_active(a->smart, true);
+    } else if (kind == G_TEXT) {
+        a->tick = lm_loop_add_timer(a->loop, text_tick, a);
+        lm_timer_arm_ms(a->tick, 1, a->every_ms);
     }
     if (kind == G_CLIP && wlc_roundtrip(a->win.c) < 0) {            /* the value burst */
         wlwin_destroy(&a->win);
         return 1;
     }
     char app_id[64];
-    snprintf(app_id, sizeof(app_id), "mellagui.gadget.%s", def[kind].name);
-    if (wlwin_open(&a->win, def[kind].title, app_id, dw, dh, def[kind].min_w, def[kind].min_h) < 0)
+    snprintf(app_id, sizeof(app_id), "mellagui.gadget.%.24s", app_name);
+    if (wlwin_open(&a->win, title, app_id, dw, dh, min_w, min_h) < 0)
         return 1;
-    WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_MIN_SIZE, { .i = def[kind].min_w }, { .i = def[kind].min_h });   /* the compositor holds the card to these */
+    WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_MIN_SIZE, { .i = min_w }, { .i = min_h });   /* the compositor holds the card to these */
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_MAX_SIZE, { .i = 640 }, { .i = 1600 });
     signal(SIGUSR1, on_usr1);
     while (wlwin_step(&a->win, 50)) {

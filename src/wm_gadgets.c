@@ -8,7 +8,9 @@
  *
  * The file the places are kept in (gadgets.conf) only has the on-screen keyboard's place now.
  */
+#include <dirent.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,9 +23,142 @@
 
 static const char *const gadget_names[LM_GADGET_COUNT] = { "clipboard", "mixer", "system", "smart" };
 
+/* Gadgets of other programs: a file NAME.conf in the gadgets folder ($MELLAGUI_GADGET_DIR, else $XDG_CONFIG_HOME/mellagui/gadgets, else
+ * ~/.config/mellagui/gadgets) each, with the lines `command = ...` (started like a dock button's: @terminal, ~/, bare mellagui-* ...), `autostart = yes|no`
+ * (default yes) and `size = WxH` (what a double click on the title bar goes back to; default 240x120). The program opens a window with the app id
+ * "mellagui.gadget.NAME" and from then on is treated like a built-in card. Read once, when the compositor starts. */
+#define EXT_NAME 25
+#define EXT_CMD 400
+static struct gad_ext {
+    char name[EXT_NAME];
+    char cmd[EXT_CMD];
+    int w, h;
+    bool autostart;
+} ext[LM_GADGET_EXT_MAX];
+static int n_ext;
+/* A file named like a built-in gadget replaces that gadget's program (`command`) and size (`size`); whether it is on stays the setting's / shortcut's business. */
+static struct { char cmd[EXT_CMD]; int w, h; } over[LM_GADGET_COUNT];
+
 const char *gadget_name(int id)
 {
-    return id >= 0 && id < LM_GADGET_COUNT ? gadget_names[id] : "?";
+    if (id >= 0 && id < LM_GADGET_COUNT)
+        return gadget_names[id];
+    if (id >= LM_GADGET_COUNT && id < LM_GADGET_COUNT + n_ext)
+        return ext[id - LM_GADGET_COUNT].name;
+    return "?";
+}
+
+int lm_wm_gadget_by_name(const struct lm_wm *wm, const char *name)
+{
+    (void)wm;
+    if (!name)
+        return -1;
+    for (int i = 0; i < LM_GADGET_COUNT + n_ext; i++)
+        if (!strcmp(name, gadget_name(i)))
+            return i;
+    return -1;
+}
+
+static bool ext_name_ok(const char *n)
+{
+    size_t len = strlen(n);
+    if (len == 0 || len >= EXT_NAME)
+        return false;
+    for (size_t i = 0; i < len; i++)
+        if (!((n[i] >= 'a' && n[i] <= 'z') || (n[i] >= '0' && n[i] <= '9') || n[i] == '-' || n[i] == '_'))
+            return false;
+    return true;
+}
+
+static void ext_read_file(const char *dir, const char *file)
+{
+    size_t fl = strlen(file);
+    if (fl < 6 || strcmp(file + fl - 5, ".conf") || n_ext >= LM_GADGET_EXT_MAX)
+        return;
+    struct gad_ext g = { .w = 240, .h = 120, .autostart = true };
+    snprintf(g.name, sizeof(g.name), "%.*s", (int)(fl - 5) < EXT_NAME ? (int)(fl - 5) : EXT_NAME - 1, file);
+    if (!ext_name_ok(g.name)) {
+        lm_warn("gadgets: %s: the name must be 1..24 letters a-z, digits, - or _, and not a built-in one", file);
+        return;
+    }
+    char path[1000];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    char line[EXT_CMD + 40];
+    while (fgets(line, sizeof(line), f)) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = 0;
+        char *eq = strchr(line, '=');
+        if (!eq || line[0] == '#' || line[0] == '[')
+            continue;
+        *eq = 0;
+        char *k = line, *v = eq + 1;
+        while (*k == ' ' || *k == '\t') k++;
+        for (char *e = k + strlen(k); e > k && (e[-1] == ' ' || e[-1] == '\t'); ) *--e = 0;
+        while (*v == ' ' || *v == '\t') v++;
+        for (char *e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t'); ) *--e = 0;
+        if (!strcmp(k, "command"))
+            snprintf(g.cmd, sizeof(g.cmd), "%s", v);
+        else if (!strcmp(k, "autostart"))
+            g.autostart = strcmp(v, "no") && strcmp(v, "0") && strcmp(v, "false") && strcmp(v, "off");
+        else if (!strcmp(k, "size")) {
+            int w, h;
+            if (sscanf(v, "%dx%d", &w, &h) == 2 && w >= 40 && w <= 640 && h >= 30 && h <= 1600) {
+                g.w = w;
+                g.h = h;
+            }
+        }
+    }
+    fclose(f);
+    if (!g.cmd[0]) {
+        lm_warn("gadgets: %s has no command", path);
+        return;
+    }
+
+    for (int i = 0; i < LM_GADGET_COUNT; i++)
+        if (!strcmp(g.name, gadget_names[i])) {
+            snprintf(over[i].cmd, sizeof(over[i].cmd), "%s", g.cmd);
+            over[i].w = g.w;
+            over[i].h = g.h;
+            return;
+        }
+    ext[n_ext++] = g;
+}
+
+static int ext_cmp(const void *a, const void *b)
+{
+    return strcmp(((const struct gad_ext *)a)->name, ((const struct gad_ext *)b)->name);
+}
+
+static void ext_load(struct lm_wm *wm, bool headless)
+{
+    const char *dir = getenv("MELLAGUI_GADGET_DIR");
+    char buf[600];
+    if (!dir || !*dir) {
+        if (headless)
+            return;                                             /* (the tests read a folder only when they name one) */
+        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg)
+            snprintf(buf, sizeof(buf), "%s/mellagui/gadgets", xdg);
+        else if (home && *home)
+            snprintf(buf, sizeof(buf), "%s/.config/mellagui/gadgets", home);
+        else
+            return;
+        dir = buf;
+    }
+    DIR *d = opendir(dir);
+    if (!d)
+        return;
+    struct dirent *de;
+    while ((de = readdir(d)))
+        ext_read_file(dir, de->d_name);
+    closedir(d);
+    qsort(ext, (size_t)n_ext, sizeof(ext[0]), ext_cmp);         /* (docked in the order of the names) */
+    for (int i = 0; i < n_ext; i++)
+        wm->gad[LM_GADGET_COUNT + i].visible = ext[i].autostart;
 }
 
 /* ---- the on-screen keyboard's place, kept between runs ----------------------------------------------------------------------- */
@@ -86,10 +221,10 @@ void gadgets_load(struct lm_wm *wm)
 
 static int gadget_rank(const struct lm_window *w)
 {
-    for (int i = 0; i < LM_GADGET_COUNT; i++)
-        if (w->app_id && !strcmp(w->app_id + 16, gadget_names[i]))
+    for (int i = 0; i < LM_GADGET_COUNT + n_ext; i++)
+        if (w->app_id && !strcmp(w->app_id + 16, gadget_name(i)))
             return i;
-    return LM_GADGET_COUNT;
+    return LM_GADGET_COUNT + n_ext;                             /* (a card nobody listed: after the others) */
 }
 
 /* The docked cards (not moved by the user) stack downwards from the top right in the order of the ids; when the next one does not fit below the
@@ -100,7 +235,7 @@ void gadgets_redock(struct lm_wm *wm)
     if (!o)
         return;
     int margin = GADGET_MARGIN, x = o->x + o->width - margin, y = o->y + LM_PANEL_HEIGHT + margin, colw = 0;
-    for (int rank = 0; rank < LM_GADGET_COUNT; rank++) {
+    for (int rank = 0; rank <= LM_GADGET_COUNT + n_ext; rank++) {
         struct lm_window *w;
         lm_list_for_each(w, &wm->windows, link) {
             if (!win_is_gadget(w) || !w->mapped || WIN(w)->gad_placed || gadget_rank(w) != rank)
@@ -143,6 +278,19 @@ void gadget_map(struct lm_wm *wm, struct lm_window *w)
         if (was.w > 0 && was.h > 0 && (was.w != w->width || was.h != w->height))
             send_configure(wm, w, was.w, was.h);
     }
+    int rank = gadget_rank(w);
+    if (!ww->gad_placed && rank < LM_GADGET_COUNT + n_ext) {      /* a card from the folder (or one whose file names a size) starts at that size */
+        int gw = 0, gh = 0;
+        if (rank >= LM_GADGET_COUNT) {
+            gw = ext[rank - LM_GADGET_COUNT].w;
+            gh = ext[rank - LM_GADGET_COUNT].h;
+        } else if (over[rank].w > 0) {
+            gw = over[rank].w;
+            gh = over[rank].h;
+        }
+        if (gw > 0 && (gw != w->width || gh != w->height))
+            send_configure(wm, w, gw, gh);
+    }
     w->mapped = true;
     w->workspace = wm->workspace;
     w->minimized = false;
@@ -160,13 +308,13 @@ static struct gad_proc {
     struct lm_wm *wm;
     int id;
     pid_t pid;
-} procs[LM_GADGET_COUNT];
+} procs[LM_GADGET_TOTAL];
 
 static void proc_exit(void *data, int status, const char *err)
 {
     struct gad_proc *p = data;
     if (status != 0)
-        lm_warn("gadget %s ended with status %d%s%s", gadget_names[p->id], status, err && *err ? ": " : "", err ? err : "");
+        lm_warn("gadget %s ended with status %d%s%s", gadget_name(p->id), status, err && *err ? ": " : "", err ? err : "");
     p->pid = 0;
     struct lm_wm *wm = p->wm;
     if (wm && wm->gad[p->id].visible) {                         /* it ended on its own (a crash, or its window was closed): the gadget is off */
@@ -186,17 +334,20 @@ static void proc_start(struct lm_wm *wm, int id)
     const char *dump = getenv("MELLAGUI_GADGET_DUMP");               /* (the tests: the program writes its state there; an old file would be stale) */
     if (dump && *dump) {
         char path[600];
-        snprintf(path, sizeof(path), "%s.%s", dump, gadget_names[id]);
+        snprintf(path, sizeof(path), "%s.%s", dump, gadget_name(id));
         unlink(path);
     }
-    snprintf(spec, sizeof(spec), "mellagui-gadget %s", gadget_names[id]);
-    lm_launch_expand(spec, cmd, sizeof(cmd));
+    snprintf(spec, sizeof(spec), "mellagui-gadget %s", gadget_name(id));
+    if (id >= LM_GADGET_COUNT)
+        lm_launch_expand(ext[id - LM_GADGET_COUNT].cmd, cmd, sizeof(cmd));
+    else
+        lm_launch_expand(over[id].cmd[0] ? over[id].cmd : spec, cmd, sizeof(cmd));
     p->wm = wm;
     p->id = id;
     p->pid = lm_server_spawn_watch(wm->srv, cmd, proc_exit, p);
     if (p->pid <= 0) {
         p->pid = 0;
-        lm_warn("gadget %s: cannot start %s", gadget_names[id], cmd);
+        lm_warn("gadget %s: cannot start %s", gadget_name(id), cmd);
     }
 }
 
@@ -210,7 +361,8 @@ static void proc_stop(int id)
 /* At start: the gadgets that are switched on. */
 void lm_wm_gadgets_start(struct lm_wm *wm, bool headless)
 {
-    for (int i = 0; i < LM_GADGET_COUNT; i++) {
+    ext_load(wm, headless);
+    for (int i = 0; i < LM_GADGET_COUNT + n_ext; i++) {
         if (!wm->gad[i].visible)
             continue;
         /* The clipboard card is on by default: the headless backend (the tests) starts it only when asked, the others are on only when asked anyway. */
@@ -349,11 +501,24 @@ void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, doub
 /* The size a gadget card starts with (and gets back after a double click on its title bar). */
 static void gadget_default_size(int id, int *w, int *h)
 {
+    if (id >= 0 && id < LM_GADGET_COUNT && over[id].w > 0) {
+        *w = over[id].w;
+        *h = over[id].h;
+        return;
+    }
     switch (id) {
     case LM_GADGET_MIXER: *w = LM_MAX(lm_metrics.mixer_width, 210); *h = lm_metrics.mixer_height; break;
     case LM_GADGET_SYSTEM: *w = lm_metrics.sys_width; *h = lm_metrics.sys_height; break;
     case LM_GADGET_SMART: *w = 290; *h = 180; break;
-    default: *w = lm_metrics.gadget_width; *h = 26 + 5 * 36 + 8; break;
+    default:
+        if (id >= LM_GADGET_COUNT && id < LM_GADGET_COUNT + n_ext) {
+            *w = ext[id - LM_GADGET_COUNT].w;
+            *h = ext[id - LM_GADGET_COUNT].h;
+            break;
+        }
+        *w = lm_metrics.gadget_width;
+        *h = 26 + 5 * 36 + 8;
+        break;
     }
 }
 
@@ -383,7 +548,7 @@ void lm_wm_gadget_refresh(struct lm_wm *wm, int id)
 void gadget_procs_stop(struct lm_wm *wm)
 {
     (void)wm;
-    for (int i = 0; i < LM_GADGET_COUNT; i++) {
+    for (int i = 0; i < LM_GADGET_COUNT + n_ext; i++) {
         proc_stop(i);
         procs[i].wm = NULL;                                     /* (its exit must not touch the wm any more) */
     }
@@ -391,7 +556,7 @@ void gadget_procs_stop(struct lm_wm *wm)
 
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id)
 {
-    return id >= 0 && id < LM_GADGET_COUNT && wm->gad[id].visible;
+    return id >= 0 && id < LM_GADGET_COUNT + n_ext && wm->gad[id].visible;
 }
 
 bool lm_wm_gadget_visible(const struct lm_wm *wm)
@@ -401,7 +566,7 @@ bool lm_wm_gadget_visible(const struct lm_wm *wm)
 
 void lm_wm_set_gadget_id(struct lm_wm *wm, int id, bool visible)
 {
-    if (id < 0 || id >= LM_GADGET_COUNT || wm->gad[id].visible == visible)
+    if (id < 0 || id >= LM_GADGET_COUNT + n_ext || wm->gad[id].visible == visible)
         return;
     wm->gad[id].visible = visible;
     if (visible)
@@ -420,10 +585,10 @@ void lm_wm_set_gadget(struct lm_wm *wm, bool visible)
 bool lm_wm_gadget_rect_id(const struct lm_wm *wm, int id, struct lm_rect *out)
 {
     struct lm_window *w;
-    if (id < 0 || id >= LM_GADGET_COUNT)
+    if (id < 0 || id >= LM_GADGET_COUNT + n_ext)
         return false;
     lm_list_for_each(w, &wm->windows, link)
-        if (win_is_gadget(w) && w->mapped && !strcmp(w->app_id + 16, gadget_names[id])) {
+        if (win_is_gadget(w) && w->mapped && !strcmp(w->app_id + 16, gadget_name(id))) {
             *out = lm_rect_make(w->x, w->y, w->width, w->height);
             return true;
         }

@@ -1924,6 +1924,12 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
         lm_server_spawn(wm->srv, cmd);
         break;
     }
+    case LM_ACT_GADGET_TOGGLE: {                                        /* gadget-toggle NAME: a built-in card or one from the gadgets folder */
+        int g = lm_wm_gadget_by_name(wm, kb->arg);
+        if (g >= 0)
+            lm_wm_set_gadget_id(wm, g, !wm->gad[g].visible);
+        break;
+    }
     case LM_ACT_LAYOUT_NEXT: case LM_ACT_LAYOUT_PREV:
         if (wm->srv->input)
             lm_input_cycle_layout(wm->srv->input, kb->action == LM_ACT_LAYOUT_PREV ? -1 : 1);

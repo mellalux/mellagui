@@ -164,7 +164,8 @@ static void tick_cb(void *data)
         s->gone = true;                                        /* and it is not started before the next input */
         return;
     }
-    if (lm_saver_governs(cfg) && cfg->saver_blank_min > 0 && !lm_screenoff_active(s->srv->screenoff)) {
+    if (lm_saver_governs(cfg) && cfg->saver_blank_min > 0 && !lm_screenoff_active(s->srv->screenoff) &&
+        !(s->srv->lock && lm_lock_active(s->srv->lock) && !s->shield)) {    /* (the lock screen in front goes by the Security page's "Screen off after", lock.c) */
         if (lm_idle_inhibited(s->srv->idle_inhibit))            /* a film is on: the idle time starts when it is over */
             s->last_activity = lm_now_ms();
         else if (lm_now_ms() - s->last_activity >= (uint64_t)cfg->saver_blank_min * unit_ms() &&

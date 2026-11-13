@@ -14072,6 +14072,17 @@ class TestSaver(Base):
 
     def test_the_screensaver_follows_a_monitor_that_goes_away_and_comes_back(self):
         """A KVM switch: the monitor leaves, comes back, maybe in another mode; the screensaver must fill it again."""
+    def test_the_lock_screen_in_front_goes_by_the_security_pages_screen_off_time_even_with_the_screensaver_on(self):
+        p, c = self.start('mellagui-sv-lockblank', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
+        c.cmd('lock set - pin 1357 0 0 2')                      # no idle lock, "Screen off after" 2 minutes (500 ms here)
+        c.cmd('settings saver-minutes 100')                     # the screensaver is on, but far away ...
+        c.cmd('settings saver-blank 100')                       # ... and so is ITS monitor time: only the Security page's can be what puts it off
+        c.cmd('lock now')
+        self.wait(lambda: self.screenoff(c)['off'] == '1', 'the locked screen goes off after the Security time')
+        c.tap(KEY_A)                                            # wakes it, still locked
+        self.wait(lambda: self.screenoff(c)['active'] == '0', 'woken')
+        self.assertEqual(self.lock_line(c)['locked'], '1')
+
         p, c = self.start('mellagui-sv-kvm1', '--config', 'none')
         c.cmd('saver start')
         self.wait(lambda: self.matrix_windows(c), 'its window')

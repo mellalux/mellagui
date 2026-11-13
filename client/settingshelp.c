@@ -121,8 +121,8 @@ static const struct entry table[] = {
       "Lock the screen after this many minutes without keyboard or mouse use. 0 = never. A video that is playing keeps the screen awake.\n"
       "Used only while the screensaver is off; with it on, \"Lock after\" on the Screensaver page decides." },
     { "sec-blank", NULL, "Screen off after",
-      "Once the screen has been locked this long the monitors fade out and go to standby. Any key or mouse movement wakes them. 0 = never.\n"
-      "Used only while the screensaver is off; with it on, \"Monitor sleeps after\" on the Screensaver page decides." },
+      "Once the screen has been locked and left alone this long the monitors fade out and go to standby. Any key or mouse movement wakes them. 0 = never.\n"
+      "The lock screen in front always follows this time, with the screensaver on or off (while the screensaver runs over the lock, its own \"Monitor sleeps after\" decides)." },
     { "sec-start", NULL, "Lock at start", "Lock the screen as soon as MellaGUI starts - for a computer that logs in by itself." },
     { "lock-wallpaper", NULL, "Wallpaper on the lock screen",
       "The locked screen shows your wallpaper, blurred and dimmed, behind the clock and the field for the PIN or password. "
@@ -157,7 +157,8 @@ static const struct entry table[] = {
     /* ---- Screensaver */
     { "@Screensaver", NULL, "Screensaver",
       "What the screen does when nobody uses the computer. The rule: while the screensaver is on, THIS page decides when the screen starts the saver, "
-      "locks and goes to sleep. Switch the screensaver off and the Lock part of the Security page decides instead (\"Lock after idle\", \"Screen off after\")." },
+      "locks and, while it runs, puts the monitors to sleep. Switch the screensaver off and the Lock part of the Security page decides instead "
+      "(\"Lock after idle\", \"Screen off after\"). When the lock screen itself is in front, the Security page's \"Screen off after\" decides when the monitors sleep." },
     { "saver", NULL, "Start the screensaver",
       "After the idle time below a full-screen program (falling green code by default) starts. A key, a mouse button or a movement of the pointer ends "
       "it. It does not start over a full-screen window (a film) or the lock screen." },
@@ -170,7 +171,7 @@ static const struct entry table[] = {
       "for the plain room. It applies the next time the screensaver starts; the flat style has no cat." },
     { "saver-blank", NULL, "Monitor sleeps after",
       "The monitors go to sleep this many minutes after the last keyboard or mouse use (so a bit after the screensaver started, if you set it higher "
-      "than the time it starts after). The picture fades out slowly first and then the monitors switch off; any key or mouse movement brings it "
+      "than the time it starts after). When the lock screen is in front instead of the screensaver, the Security page's \"Screen off after\" decides. The picture fades out slowly first and then the monitors switch off; any key or mouse movement brings it "
       "back, and that touch is not passed on. 0 = never. A video that is playing keeps it awake." },
     { "saver-lock", NULL, "Lock after",
       "That many minutes after the screensaver started the screen is locked (when a password or PIN is set on the Lock part). The screensaver goes on "

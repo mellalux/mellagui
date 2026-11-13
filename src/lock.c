@@ -736,7 +736,9 @@ static void tick_cb(void *data)
     }
     if (l->blanked || lm_screenoff_active(l->srv->screenoff))
         return;                                                   /* nobody is looking: no clock, no countdown */
-    if (!lm_saver_governs(&l->srv->config) && l->blank_min > 0 && lm_now_ms() - l->last_activity >= (uint64_t)l->blank_min * unit_ms()) {
+    if (l->blank_min > 0 && !lm_saver_shields(l->srv->saver) && lm_now_ms() - l->last_activity >= (uint64_t)l->blank_min * unit_ms()) {
+        /* (the lock screen in front always follows the Security page's "Screen off after", the screensaver on or not; while the saver runs over the
+         * lock, its own "Monitor sleeps after" decides, saver.c) */
         set_blank(l, true);
         return;
     }

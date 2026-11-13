@@ -5,7 +5,7 @@
  *                                   when it started the program as the screensaver: settings, Screensaver page)
  *   mellagui-matrix --flat          the classic flat rain instead of the room
  *   mellagui-matrix --at SECONDS   starts the camera's drift and the cat's story at that moment (to look at a certain pose, and the tests)
- *   mellagui-matrix --no-cat        the room without the cat that sits on its floor (client/matrixcat.c)
+ *   mellagui-matrix --no-cat        the room without Tom, the cat that lives on its floor (client/matrixcat.c)
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
  *   mellagui-matrix --time HH:MM    the window shows that time of day (default: the real time, following the clock): sun, moon and stars, colours
  *   mellagui-matrix --clock-speed N the day passes N minutes a second (to look at it)
@@ -390,7 +390,9 @@ struct rjob {
     const struct room *rm;
     const struct cam *cam;
     const struct mcat *cat;             /* NULL = no cat */
-    int cx0, cx1, cy0, cy1;             /* the part of the picture the cat (and its glow) can be in */
+    int cx0, cx1, cy0, cy1;             /* the part of the picture the cat (and its glow) can be in ... */
+    const uint8_t *cmask;               /* ... and which 8 x 8 pixel tiles of it (the spheres of its parts, projected), `ctw` tiles a row */
+    int ctw;
     uint32_t *dst;
     int w, h, stride, y0, y1, ystep;    /* the rows y0, y0 + ystep, ... below y1: the threads take every n-th row, so that a busy part of the picture is shared */
     float f;                            /* focal length in pixels */
@@ -830,10 +832,6 @@ static void render_rows(const struct rjob *j)
                 float ao = 0.45f + 0.55f * clamp01(fminf(du, dvv) / 0.5f);
                 letters_px(rm, r, ci, cj, cu - (float)ci, cv - (float)cj, 0, dist * inv_f / fmaxf(along / len, 0.12f), CELL_H / 16.0f,
                            ao / (1.0f + 0.018f * dist * dist), rgb);
-                if (surf == 4 && j->cat) {      /* the cat's shadow on the floor */
-                    float sh = mcat_floor_shade(j->cat, px, pz);
-                    rgb[0] *= sh; rgb[1] *= sh; rgb[2] *= sh;
-                }
                 if (surf == 4) {                                               /* the sun's patch on the floor: the letters in it are brighter and the light is warm */
                     float sl = rm->sky.light_str > 0.0f ? sun_light(px, pz, rm->sky.light_dir) * rm->sky.light_str : 0.0f;
                     if (sl > 0.0f) {
@@ -842,8 +840,12 @@ static void render_rows(const struct rjob *j)
                             rgb[q] = rgb[q] * (1.0f + 1.3f * sl) + rm->sky.light_col[q] * 0.50f * lit;
                     }
                 }
+                if (surf == 4 && j->cat) {                                     /* Tom's shadow on the floor (after the sun's patch: the light is what he blocks) */
+                    float sh = mcat_floor_shade(j->cat, px, pz);
+                    rgb[0] *= sh; rgb[1] *= sh; rgb[2] *= sh;
+                }
             }
-            if (j->cat && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1) {   /* the cat, if it is nearer than what the ray met */
+            if (j->cat && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1 && j->cmask[(y >> 3) * j->ctw + (x >> 3)]) {   /* the cat, if it is nearer than what the ray met */
                 float o3[3] = { c->ox, c->oy, c->oz }, dn[3] = { dx / len, dy / len, dz / len };
                 mcat_shade(j->cat, o3, dn, (win ? (ZF - c->oz) / dz : t) * len, inv_f, rgb);
             }
@@ -881,12 +883,36 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
             cy0 = (int)fmaxf(my - rpx, 0.0f); cy1 = (int)fminf(my + rpx, (float)(h - 1));
         }
     }
+    int ctw = (w + 7) / 8, cth = (h + 7) / 8;
+    uint8_t *cmask = NULL;
+    if (!rm->no_cat) {                                                  /* which 8 x 8 tiles the parts of the cat can be in: the spheres of its parts, projected */
+        cmask = calloc((size_t)ctw * (size_t)cth, 1);
+        float sp[48][4];
+        int ns = cmask ? mcat_spheres(&cat, sp, 48) : 0;
+        for (int i = 0; i < ns; i++) {
+            float vx = sp[i][0] - c.ox, vy = sp[i][1] - c.oy, vz = sp[i][2] - c.oz;
+            float zc = vx * c.fx + vy * c.fy + vz * c.fz, xc = vx * c.rx + vy * c.ry + vz * c.rz, yc = vx * c.ux + vy * c.uy + vz * c.uz;
+            if (zc <= sp[i][3] * 1.2f) {                                /* too close to project: the whole picture */
+                memset(cmask, 1, (size_t)ctw * (size_t)cth);
+                break;
+            }
+            float rpx = f * sp[i][3] / sqrtf(zc * zc - sp[i][3] * sp[i][3]) + 3.0f, mx = (float)w * 0.5f + f * xc / zc, my = (float)h * 0.5f - f * yc / zc;
+            int tx0 = (int)fmaxf((mx - rpx) / 8.0f, 0.0f), tx1 = (int)fminf((mx + rpx) / 8.0f, (float)(ctw - 1));
+            int ty0 = (int)fmaxf((my - rpx) / 8.0f, 0.0f), ty1 = (int)fminf((my + rpx) / 8.0f, (float)(cth - 1));
+            for (int ty = ty0; ty <= ty1; ty++)
+                for (int tx = tx0; tx <= tx1; tx++) {
+                    float ddx = ((float)tx + 0.5f) * 8.0f - mx, ddy = ((float)ty + 0.5f) * 8.0f - my, lim = rpx + 6.0f;
+                    if (ddx * ddx + ddy * ddy <= lim * lim)
+                        cmask[ty * ctw + tx] = 1;
+                }
+        }
+    }
     threads = LM_CLAMP(threads, 1, 8);
     struct rjob jobs[8];
     pthread_t th[8];
     bool started[8] = { false };
     for (int i = 0; i < threads; i++) {
-        jobs[i] = (struct rjob){ rm, &c, rm->no_cat ? NULL : &cat, cx0, cx1, cy0, cy1, dst, w, h, stride, i, h, threads, f };
+        jobs[i] = (struct rjob){ rm, &c, cmask ? &cat : NULL, cx0, cx1, cy0, cy1, cmask, ctw, dst, w, h, stride, i, h, threads, f };
         if (i > 0)
             started[i] = pthread_create(&th[i], NULL, render_thread, &jobs[i]) == 0;
     }
@@ -897,6 +923,7 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
         else
             render_rows(&jobs[i]);
     }
+    free(cmask);
 }
 
 /* ---- the window ------------------------------------------------------------------------------------------------------ */
@@ -1184,6 +1211,39 @@ static int selftest(void)
             float up[3] = { 0.0f, 1.0f, 0.0f };
             CHECK(!mcat_shade(&ct, cam, up, 30.0f, 0.001f, rgb));                                             /* ... and a ray at the ceiling misses it */
             CHECK(mcat_floor_shade(&ct, ct.pos[0], ct.pos[2]) < 0.5f && mcat_floor_shade(&ct, -2.0f, 1.0f) == 1.0f);   /* its shadow */
+            {                                                                   /* Tom's day: sits, stands up and walks, sits elsewhere, lies down, walks back */
+                float cyc = mcat_cycle(), maxlie = 0.0f, maxwalk = 0.0f, xmin = 99.0f, xmax = -99.0f, tlie = 0.0f, twalk = 0.0f;
+                for (float t = 0.0f; t < cyc; t += 0.25f) {
+                    struct mcat d;
+                    mcat_pose(&d, t, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                    CHECK(d.lie == 0.0f || d.stand == 0.0f);                                   /* never lying and standing at once */
+                    if (d.lie > maxlie) { maxlie = d.lie; tlie = t; }
+                    if (d.walk > maxwalk) { maxwalk = d.walk; twalk = t; }
+                    xmin = fminf(xmin, d.pos[0]);
+                    xmax = fmaxf(xmax, d.pos[0]);
+                }
+                CHECK(maxlie > 0.99f && maxwalk > 0.95f && xmax - xmin > 1.2f);               /* he lies down, he walks, and he goes somewhere */
+                struct mcat w0, w1, home;
+                mcat_pose(&home, cyc, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                mcat_pose(&ct, 0.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                CHECK(fabsf(home.pos[0] - ct.pos[0]) < 1e-3f && fabsf(home.pos[2] - ct.pos[2]) < 1e-3f);   /* the day starts and ends on the same spot */
+                mcat_pose(&w0, twalk, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                mcat_pose(&w1, twalk + 0.3f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                CHECK(w0.stand > 0.99f && fabsf(w1.pos[0] - w0.pos[0]) + fabsf(w1.pos[2] - w0.pos[2]) > 0.05f);       /* the body moves ... */
+                CHECK(fabsf(w1.tube[1].p[2][2] - w0.tube[1].p[2][2]) > 0.02f || fabsf(w1.tube[2].p[2][2] - w0.tube[2].p[2][2]) > 0.02f);   /* ... and so do the paws */
+                CHECK(w0.neck[1] > ct.neck[1] - 0.1f && w0.tube[0].p[7][1] > 0.5f);                  /* standing, the tail is up */
+                struct mcat lying;
+                mcat_pose(&lying, tlie, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                CHECK(ct.lie == 0.0f && lying.lie > 0.99f && lying.neck[1] < ct.neck[1] - 0.15f);
+                float low[3] = { lying.pos[0] + lying.scale * 0.12f * lying.sy, lying.pos[1] + lying.scale * 0.12f, lying.pos[2] + lying.scale * 0.12f * lying.cy };
+                float dl = sqrtf((low[0] - cam[0]) * (low[0] - cam[0]) + (low[1] - cam[1]) * (low[1] - cam[1]) + (low[2] - cam[2]) * (low[2] - cam[2]));
+                for (int i = 0; i < 3; i++)
+                    dn[i] = (low[i] - cam[i]) / dl;
+                rgb[0] = 12.0f; rgb[1] = 34.0f; rgb[2] = 56.0f;
+                CHECK(mcat_shade(&lying, cam, dn, 30.0f, 0.001f, rgb) && (rgb[0] != 12.0f || rgb[1] != 34.0f));      /* a ray at its low back meets it */
+                CHECK(mcat_floor_shade(&lying, lying.pos[0], lying.pos[2]) < 0.4f);                                  /* and it casts a shadow, too */
+            }
+            mcat_pose(&ct, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
             struct mcat c2;
             mcat_pose(&c2, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
             CHECK(c2.glow == ct.glow && c2.head_yaw == ct.head_yaw);                  /* the same time, the same pose */

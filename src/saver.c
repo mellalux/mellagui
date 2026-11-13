@@ -78,6 +78,9 @@ bool lm_saver_start(struct lm_saver *s)
     if (s->srv->config.saver_style == 1 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--flat")) {      /* the style is for our own program only */
         snprintf(styled, sizeof(styled), "%s --flat", cmd);
         cmd = styled;
+    } else if (!s->srv->config.saver_cat && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--no-cat")) {
+        snprintf(styled, sizeof(styled), "%s --no-cat", cmd);                  /* (the room without its cat) */
+        cmd = styled;
     }
     pid_t pid = lm_server_spawn(s->srv, cmd);
     if (pid <= 0)

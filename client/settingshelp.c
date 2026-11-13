@@ -150,6 +150,9 @@ static const struct entry table[] = {
     { "saver-style", NULL, "Screensaver style",
       "Room: the code rains on the walls, the floor and the ceiling of a room with a window, and the camera drifts slowly. Flat: the classic falling "
       "code on a black screen. It applies to MellaGUI's own screensaver (mellagui-matrix) the next time it starts." },
+    { "saver-cat", NULL, "A cat in the room",
+      "A cat sits on the floor of the room, now and then turns its head, lies down for a while, and its eyes glow when it looks at you. Switch it off "
+      "for the plain room. It applies the next time the screensaver starts; the flat style has no cat." },
     { "saver-lock", NULL, "Lock after",
       "That many minutes after the screensaver started the screen is locked (when a password or PIN is set on the Lock part). The screensaver goes on "
       "running over the lock; the first key or touch ends it and shows the password field. 0 = never lock from the screensaver." },

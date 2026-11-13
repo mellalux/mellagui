@@ -1081,6 +1081,8 @@ static void build_saver(struct app *a, int x, int y, int w)
     add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, "Style");
     add_radio(a, x + 80, y, 170, "Room (3D)", "saver-style", "room", strcmp(style, "flat") != 0);
     add_radio(a, x + 260, y, 170, "Flat", "saver-style", "flat", !strcmp(style, "flat"));
+    y += ROW_H;
+    add_check(a, x, y, w, "A cat sits in the room", "saver-cat", kv_int(a, "saver-cat", 1) != 0);
     y += ROW_H + 8;
     add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
     y += ROW_H + 10;

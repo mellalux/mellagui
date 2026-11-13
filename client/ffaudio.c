@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 #include "ffpipe.h"
+#include "img.h"
+#include <poll.h>
 
 struct ffaudio {
     pid_t ff, player;
@@ -219,4 +221,176 @@ void ffaudio_close(struct ffaudio *a)
     if (!a->reaped_player)
         waitpid(a->player, NULL, 0);
     free(a);
+}
+
+/* ---- sound files ---------------------------------------------------------------------------------------------------------------- */
+
+bool ffaudio_name_is_audio(const char *name)
+{
+    static const char *const ext[] = { ".mp3", ".flac", ".ogg", ".oga", ".opus", ".wav", ".m4a", ".aac", ".wma", ".aif", ".aiff", ".mka", ".weba" };
+    const char *dot = strrchr(name, '.');
+    if (!dot || name[0] == '.')
+        return false;
+    for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+        if (!strcasecmp(dot, ext[i]))
+            return true;
+    return false;
+}
+
+/* Runs argv and collects its stderr (or stdout) up to cap bytes; gives up after 10 s. Returns malloc'd text (NUL terminated) or NULL. */
+static char *capture(char *const argv[], bool from_stdout, size_t cap, size_t *len_out)
+{
+    int pp[2];
+    if (pipe2(pp, O_CLOEXEC) < 0)
+        return NULL;
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+        setpgid(0, 0);
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        if (getppid() != parent)
+            _exit(1);
+        int nul = open("/dev/null", O_RDWR);
+        dup2(nul, 0);
+        dup2(from_stdout ? pp[1] : nul, 1);
+        dup2(from_stdout ? nul : pp[1], 2);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(pp[1]);
+    if (pid < 0) {
+        close(pp[0]);
+        return NULL;
+    }
+    char *buf = malloc(cap + 1);
+    size_t n = 0;
+    int64_t end = now_ms() + 10000;
+    while (buf) {
+        int left = (int)(end - now_ms());
+        if (left <= 0)
+            break;
+        struct pollfd p = { .fd = pp[0], .events = POLLIN };
+        int r = poll(&p, 1, left);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        ssize_t k = read(pp[0], buf + n, cap - n);
+        if (k <= 0)
+            break;                                              /* the end of the output */
+        n += (size_t)k;
+        if (n >= cap)
+            break;
+    }
+    close(pp[0]);
+    kill(-pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+        ;
+    if (buf)
+        buf[n] = 0;
+    if (len_out)
+        *len_out = n;
+    return buf;
+}
+
+static void tag_value(const char *line, const char *key, char *out, size_t cap)
+{
+    while (*line == ' ')
+        line++;
+    size_t kl = strlen(key);
+    if (strncasecmp(line, key, kl) != 0 || out[0])
+        return;
+    const char *p = line + kl;
+    while (*p == ' ')
+        p++;
+    if (*p != ':')
+        return;
+    p++;
+    while (*p == ' ')
+        p++;
+    snprintf(out, cap, "%s", p);
+}
+
+bool ffaudio_probe(const char *path, struct ffaudio_info *info, char *err, size_t errsz)
+{
+    memset(info, 0, sizeof(*info));
+    const char *ff = ffpipe_ffmpeg_path();
+    if (!ff) {
+        snprintf(err, errsz, "Sound files need ffmpeg (it is not installed)");
+        return false;
+    }
+    char *argv[] = { (char *)ff, (char *)"-hide_banner", (char *)"-nostdin", (char *)"-i", (char *)path, NULL };
+    char *text = capture(argv, false, 65536, NULL);
+    if (!text) {
+        snprintf(err, errsz, "cannot run ffmpeg");
+        return false;
+    }
+    bool audio = false;
+    for (char *save = NULL, *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        const char *d = strstr(line, "Duration:");
+        if (d && !info->duration_ms) {
+            int h, m;
+            double sec;
+            if (sscanf(d + 9, " %d:%d:%lf", &h, &m, &sec) == 3)
+                info->duration_ms = (uint64_t)(((double)h * 3600 + m * 60 + sec) * 1000.0 + 0.5);
+            const char *br = strstr(line, "bitrate:");
+            if (br)
+                info->kbps = atoi(br + 8);
+        }
+        const char *au = strstr(line, "Audio:");
+        if (au && strstr(line, "Stream") && !audio) {
+            audio = true;
+            au += 6;
+            while (*au == ' ')
+                au++;
+            size_t k = 0;
+            while (au[k] && au[k] != ',' && au[k] != ' ' && k < sizeof(info->codec) - 1)
+                k++;
+            snprintf(info->codec, sizeof(info->codec), "%.*s", (int)k, au);
+            const char *hz = strstr(au, " Hz");
+            if (hz) {
+                const char *b = hz;
+                while (b > au && b[-1] >= '0' && b[-1] <= '9')
+                    b--;
+                info->rate = atoi(b);
+                const char *c = strchr(hz, ',');
+                if (c) {
+                    c++;
+                    while (*c == ' ')
+                        c++;
+                    size_t cl = strcspn(c, ",");
+                    snprintf(info->channels, sizeof(info->channels), "%.*s", (int)(cl < 15 ? cl : 15), c);
+                }
+            }
+        }
+        if (strstr(line, "Stream") && strstr(line, "Video:") && strstr(line, "attached pic"))
+            info->cover = true;
+        tag_value(line, "title", info->title, sizeof(info->title));
+        tag_value(line, "artist", info->artist, sizeof(info->artist));
+        tag_value(line, "album", info->album, sizeof(info->album));
+    }
+    free(text);
+    if (!audio) {
+        snprintf(err, errsz, "No sound track in this file");
+        return false;
+    }
+    return true;
+}
+
+bool ffaudio_cover(const char *path, struct lm_image *img)
+{
+    const char *ff = ffpipe_ffmpeg_path();
+    if (!ff)
+        return false;
+    char *argv[] = { (char *)ff, (char *)"-v", (char *)"error", (char *)"-nostdin", (char *)"-i", (char *)path, (char *)"-an", (char *)"-frames:v", (char *)"1",
+                     (char *)"-f", (char *)"image2pipe", (char *)"-vcodec", (char *)"png", (char *)"pipe:1", NULL };
+    size_t n = 0;
+    char *data = capture(argv, true, 16u << 20, &n);
+    bool ok = false;
+    if (data && n > 8) {
+        char err[80];
+        ok = lm_img_decode((const uint8_t *)data, n, img, err, sizeof(err)) == 0 && img->w > 0 && img->h > 0;
+    }
+    free(data);
+    return ok;
 }

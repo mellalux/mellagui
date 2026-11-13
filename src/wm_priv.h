@@ -343,6 +343,12 @@ struct lm_wm {
     double grab_px, grab_py;
     int32_t grab_x, grab_y, grab_w, grab_h;
     uint32_t grab_edges;
+    struct {                    /* the cards glued below a card that is being moved: they come along (wm_gadgets.c) */
+        int n;
+        struct lm_window *win[LM_GADGET_TOTAL];
+        int32_t x[LM_GADGET_TOTAL], y[LM_GADGET_TOTAL];       /* where they were when the grab began */
+        int32_t minx, miny, maxx, maxy;                       /* the box of the card and everything glued to it */
+    } glue;
 };
 
 #define BUBBLE_MS 2000              /* the whole rise / return: two seconds (with window animations on; off = at once) */
@@ -394,6 +400,8 @@ bool win_is_aux(const struct lm_window *w);
 void gadget_map(struct lm_wm *wm, struct lm_window *w);
 void gadgets_redock(struct lm_wm *wm);
 void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, double dy);
+void gadget_glue_begin(struct lm_wm *wm, struct lm_window *win);     /* a move of a card begins: finds what is glued to it */
+void gadget_glue_end(struct lm_wm *wm);                               /* ... and the move ended: they stay where they are (remembered) */
 struct lm_window *gadget_window(struct lm_wm *wm, int id);        /* the gadget's window, or NULL */
 const char *gadget_name(int id);
 void gadget_procs_stop(struct lm_wm *wm);

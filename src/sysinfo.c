@@ -7,6 +7,10 @@
 #include <string.h>
 #include <strings.h>
 
+#include <time.h>
+#include <unistd.h>
+
+#include "audio.h"
 #include "loop.h"
 
 /* ---- reading files ---------------------------------------------------------------------------------------------- */
@@ -376,6 +380,268 @@ void lm_sysinfo_read_device(const char *root, struct lm_sysinfo_state *st)
     copy_str(st->model, sizeof(st->model), name);
 }
 
+
+/* ---- the graphics chip ---------------------------------------------------------------------------------------------- */
+
+static unsigned long hex_of(const char *s)
+{
+    return strtoul(s, NULL, 16);
+}
+
+/* Short vendor names: "Intel Corporation" -> "Intel". */
+static void short_vendor(unsigned vendor, const char *full, char *out, size_t n)
+{
+    if (vendor == 0x8086) snprintf(out, n, "Intel");
+    else if (vendor == 0x1002) snprintf(out, n, "AMD");
+    else if (vendor == 0x10de) snprintf(out, n, "NVIDIA");
+    else if (vendor == 0x1414) snprintf(out, n, "Microsoft");
+    else if (vendor == 0x15ad) snprintf(out, n, "VMware");
+    else if (vendor == 0x1af4) snprintf(out, n, "Virtio");
+    else if (vendor == 0x1b36) snprintf(out, n, "QEMU");
+    else {
+        snprintf(out, n, "%.40s", full);
+        for (char *p = out; *p; p++)
+            if (*p == ',' || *p == '[' || (*p == ' ' && (!strncmp(p, " Corporation", 12) || !strncmp(p, " Inc", 4) || !strncmp(p, " Ltd", 4)))) {
+                *p = 0;
+                break;
+            }
+    }
+}
+
+bool lm_sysinfo_pci_name(const char *text, unsigned vendor, unsigned device, char *out, size_t n)
+{
+    char vname[96] = "", dname[160] = "";
+    bool in_vendor = false, got_vendor = false, got_dev = false;
+    for (const char *p = text; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len >= 6 && p[0] != '#') {
+            if (p[0] != '\t') {                                         /* a vendor line: "8086  Intel Corporation" */
+                if (in_vendor)
+                    break;                                              /* (past our vendor's devices) */
+                if (isxdigit((unsigned char)p[0]) && isxdigit((unsigned char)p[3]) && hex_of(p) == vendor && p[4] == ' ') {
+                    in_vendor = got_vendor = true;
+                    snprintf(vname, sizeof(vname), "%.*s", (int)(len - 6 < sizeof(vname) - 1 ? len - 6 : sizeof(vname) - 1), p + 6);
+                }
+            } else if (in_vendor && p[1] != '\t' && isxdigit((unsigned char)p[1]) && hex_of(p + 1) == device && p[5] == ' ') {
+                got_dev = true;
+                snprintf(dname, sizeof(dname), "%.*s", (int)(len - 7 < sizeof(dname) - 1 ? len - 7 : sizeof(dname) - 1), p + 7);
+                break;
+            }
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    if (!got_vendor)
+        return false;
+    char sv[48];
+    short_vendor(vendor, vname, sv, sizeof(sv));
+    if (got_dev) {
+        char *lb = strrchr(dname, '['), *rb = lb ? strchr(lb, ']') : NULL;
+        if (lb && rb && rb > lb + 1) {                                  /* "TU104 [GeForce RTX 2080]" -> "GeForce RTX 2080" */
+            memmove(dname, lb + 1, (size_t)(rb - lb - 1));
+            dname[rb - lb - 1] = 0;
+        }
+        if (!strncasecmp(dname, sv, strlen(sv)))                        /* (the name already begins with the vendor) */
+            snprintf(out, n, "%s", dname);
+        else
+            snprintf(out, n, "%s %s", sv, dname);
+    } else {
+        snprintf(out, n, "%s 0x%04x", sv, device);
+    }
+    return true;
+}
+
+bool lm_sysinfo_parse_dpm(const char *text, int *cur, int *max)
+{
+    int c = 0, m = 0;
+    bool any = false;
+    for (const char *p = text; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        int idx, mhz;
+        if (sscanf(p, "%d: %dMhz", &idx, &mhz) == 2 || sscanf(p, "%d: %dMHz", &idx, &mhz) == 2) {
+            any = true;
+            if (mhz > m)
+                m = mhz;
+            const char *star = strchr(p, '*');
+            if (star && (!nl || star < nl))
+                c = mhz;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    if (any) {
+        *cur = c;
+        *max = m;
+    }
+    return any;
+}
+
+bool lm_sysinfo_parse_nvidia_smi(const char *text, struct lm_gpu *g)
+{
+    char line[256];
+    snprintf(line, sizeof(line), "%s", text);
+    char *nl = strchr(line, '\n');
+    if (nl)
+        *nl = 0;
+    char *f[8];
+    int k = 0;
+    for (char *p = line; k < 8;) {
+        while (*p == ' ')
+            p++;
+        f[k++] = p;
+        p = strchr(p, ',');
+        if (!p)
+            break;
+        *p++ = 0;
+    }
+    if (k < 5)
+        return false;
+    g->present = true;
+    char *e = f[0] + strlen(f[0]);
+    while (e > f[0] && e[-1] == ' ') *--e = 0;
+    snprintf(g->name, sizeof(g->name), "%s", !strncasecmp(f[0], "NVIDIA ", 7) ? f[0] : f[0]);
+    g->busy = atoi(f[1]);
+    g->busy_estimated = false;
+    g->vram_used_kb = atol(f[2]) * 1024;
+    g->vram_total_kb = atol(f[3]) * 1024;
+    g->temp_c = atoi(f[4]);
+    g->freq_mhz = k > 5 ? atoi(f[5]) : 0;
+    g->freq_max_mhz = k > 6 ? atoi(f[6]) : 0;
+    return true;
+}
+
+enum gpu_kind { GK_NONE, GK_INTEL, GK_AMD, GK_NVIDIA, GK_OTHER };
+
+struct gpu_src {
+    enum gpu_kind kind;
+    char dir[96];                       /* /sys/class/drm/cardN */
+    unsigned vendor, device;
+};
+
+static int read_int(const char *root, const char *dir, const char *file)
+{
+    char path[200], buf[64];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    if (!read_file(root, path, buf, sizeof(buf)))
+        return -1;
+    return atoi(buf);
+}
+
+static int first_int(const char *root, const char *dir, const char *const *files)
+{
+    for (int i = 0; files[i]; i++) {
+        int v = read_int(root, dir, files[i]);
+        if (v >= 0)
+            return v;
+    }
+    return -1;
+}
+
+/* The card the screen is on: the boot display, a connected one, else the first. */
+static void gpu_find(const char *root, struct gpu_src *src, struct lm_gpu *g)
+{
+    memset(src, 0, sizeof(*src));
+    memset(g, 0, sizeof(*g));
+    g->busy = g->temp_c = -1;
+    int best = -1;
+    for (int c = 0; c < 8; c++) {
+        char dir[96], path[200], buf[64];
+        snprintf(dir, sizeof(dir), "/sys/class/drm/card%d", c);
+        snprintf(path, sizeof(path), "%s/device/vendor", dir);
+        if (!read_file(root, path, buf, sizeof(buf)))
+            continue;
+        int score = 1;
+        unsigned vendor = (unsigned)hex_of(buf);
+        snprintf(path, sizeof(path), "%s/device/boot_vga", dir);
+        if (read_file(root, path, buf, sizeof(buf)) && atoi(buf) == 1)
+            score += 2;
+        for (int k = 0; k < 12; k++) {                                  /* a connected connector of this card */
+            const char *types[] = { "HDMI-A", "DP", "eDP", "VGA", "DVI-D", "DVI-I", "LVDS" };
+            for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+                snprintf(path, sizeof(path), "%s-%s-%d/status", dir, types[t], k);
+                if (read_file(root, path, buf, sizeof(buf)) && !strncmp(buf, "connected", 9))
+                    score += 4;
+            }
+        }
+        if (score > best) {
+            best = score;
+            snprintf(src->dir, sizeof(src->dir), "%s", dir);
+            src->vendor = vendor;
+            snprintf(path, sizeof(path), "%s/device/device", dir);
+            src->device = read_file(root, path, buf, sizeof(buf)) ? (unsigned)hex_of(buf) : 0;
+        }
+    }
+    if (best < 0)
+        return;
+    g->present = true;
+    src->kind = src->vendor == 0x8086 ? GK_INTEL : src->vendor == 0x1002 ? GK_AMD : src->vendor == 0x10de ? GK_NVIDIA : GK_OTHER;
+    char link[160], full[300];
+    snprintf(full, sizeof(full), "%s%s/device/driver", root, src->dir);
+    ssize_t k = readlink(full, link, sizeof(link) - 1);
+    if (k > 0) {
+        link[k] = 0;
+        const char *base = strrchr(link, '/');
+        snprintf(g->driver, sizeof(g->driver), "%.23s", base ? base + 1 : link);
+    }
+    char *ids = malloc(2u << 20);
+    bool named = false;
+    if (ids) {
+        static const char *const paths[] = { "/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids", "/usr/share/pci.ids" };
+        for (int i = 0; i < 3 && !named; i++) {
+            char path[96];
+            snprintf(path, sizeof(path), "%s", paths[i]);
+            char fullp[512];
+            snprintf(fullp, sizeof(fullp), "%s%s", root, path);
+            FILE *f = fopen(fullp, "r");
+            if (!f)
+                continue;
+            size_t len = fread(ids, 1, (2u << 20) - 1, f);
+            ids[len] = 0;
+            fclose(f);
+            named = lm_sysinfo_pci_name(ids, src->vendor, src->device, g->name, sizeof(g->name));
+        }
+        free(ids);
+    }
+    if (!named) {
+        const char *v = src->kind == GK_INTEL ? "Intel" : src->kind == GK_AMD ? "AMD" : src->kind == GK_NVIDIA ? "NVIDIA" : "GPU";
+        snprintf(g->name, sizeof(g->name), "%s 0x%04x", v, src->device);
+    }
+}
+
+#define LM_CLAMP_INT(v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
+
+static int64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* The sensor of the card's own hwmon (amdgpu, nouveau, i915 on a discrete card): millidegrees / 1000, -1 when there is none. */
+static int gpu_hwmon_temp(const char *root, const char *dir)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s%s/device/hwmon", root, dir);
+    DIR *d = opendir(path);
+    if (!d)
+        return -1;
+    int t = -1;
+    struct dirent *e;
+    while (t < 0 && (e = readdir(d))) {
+        if (strncmp(e->d_name, "hwmon", 5) != 0)
+            continue;
+        char f[640], buf[32];
+        snprintf(f, sizeof(f), "%s/%s/temp1_input", path, e->d_name);
+        FILE *fp = fopen(f, "r");
+        if (fp) {
+            if (fgets(buf, sizeof(buf), fp))
+                t = atoi(buf) / 1000;
+            fclose(fp);
+        }
+    }
+    closedir(d);
+    return t;
+}
+
 /* ---- the live sampler -------------------------------------------------------------------------------------------- */
 
 struct lm_sysinfo {
@@ -387,7 +653,82 @@ struct lm_sysinfo {
     bool have_prev;
     bool active;
     struct lm_timer *timer;
+    struct gpu_src gpu;                 /* the card (found when the sampler starts) */
+    long long rc6_prev;                 /* Intel: rc6_residency_ms and the time of that reading */
+    bool rc6_moved;                     /* ... and whether it has ever changed (on some chips it never does) */
+    int64_t rc6_at;
+    struct lm_proc *smi;                /* NVIDIA's own driver: a `nvidia-smi` that is running */
 };
+
+static void smi_done(void *data, const char *output)
+{
+    struct lm_sysinfo *s = data;
+    s->smi = NULL;
+    struct lm_gpu g = s->st.gpu;
+    if (output && lm_sysinfo_parse_nvidia_smi(output, &g)) {
+        snprintf(g.driver, sizeof(g.driver), "%s", s->st.gpu.driver);
+        s->st.gpu = g;
+        if (s->changed)
+            s->changed(s->data);
+    }
+}
+
+/* The values of the card that change: every sample. */
+static void gpu_sample(struct lm_sysinfo *s)
+{
+    struct lm_gpu *g = &s->st.gpu;
+    if (!g->present)
+        return;
+    const char *root = root_prefix(), *dir = s->gpu.dir;
+    char path[200], buf[512];
+    g->temp_c = gpu_hwmon_temp(root, dir);
+    if (s->gpu.kind == GK_INTEL) {
+        static const char *const act[] = { "gt_act_freq_mhz", "gt_cur_freq_mhz", "gt/gt0/rps_act_freq_mhz", "gt/gt0/rps_cur_freq_mhz", NULL };
+        static const char *const mx[] = { "gt_max_freq_mhz", "gt/gt0/rps_max_freq_mhz", NULL };
+        static const char *const rc6[] = { "power/rc6_residency_ms", "gt/gt0/rc6_residency_ms", NULL };
+        static const char *const mn[] = { "gt_min_freq_mhz", "gt/gt0/rps_min_freq_mhz", NULL };
+        int f = first_int(root, dir, act), m = first_int(root, dir, mx), r = first_int(root, dir, rc6), lo = first_int(root, dir, mn);
+        g->freq_mhz = f > 0 ? f : 0;
+        g->freq_max_mhz = m > 0 ? m : 0;
+        int64_t now = mono_ms();
+        if (r >= 0 && s->rc6_at && now > s->rc6_at && r != s->rc6_prev)
+            s->rc6_moved = true;
+        g->busy = -1;
+        if (r >= 0 && s->rc6_at && now > s->rc6_at && s->rc6_moved) {    /* the time out of RC6 (the chip's sleep) is the time it was working */
+            double idle = (double)(r - s->rc6_prev) / (double)(now - s->rc6_at);
+            g->busy = (int)(100.0 - 100.0 * (idle < 0 ? 0 : idle > 1 ? 1 : idle) + 0.5);
+        } else if (f > 0 && m > f && lo >= 0 && m > lo) {                /* the counter never moves on some chips: where the clock is between its lowest and highest says how hard it works */
+            g->busy = LM_CLAMP_INT((f - lo) * 100 / (m - lo), 0, 100);
+        }
+        g->busy_estimated = g->busy >= 0;
+        if (r >= 0) {
+            s->rc6_prev = r;
+            s->rc6_at = now;
+        }
+    } else if (s->gpu.kind == GK_AMD) {
+        g->busy = -1;
+        snprintf(path, sizeof(path), "%s/device/gpu_busy_percent", dir);
+        if (read_file(root, path, buf, sizeof(buf)))
+            g->busy = atoi(buf);
+        snprintf(path, sizeof(path), "%s/device/mem_info_vram_used", dir);
+        if (read_file(root, path, buf, sizeof(buf)))
+            g->vram_used_kb = atoll(buf) / 1024;
+        snprintf(path, sizeof(path), "%s/device/mem_info_vram_total", dir);
+        if (read_file(root, path, buf, sizeof(buf)))
+            g->vram_total_kb = atoll(buf) / 1024;
+        snprintf(path, sizeof(path), "%s/device/pp_dpm_sclk", dir);
+        int cur = 0, max = 0;
+        if (read_file(root, path, buf, sizeof(buf)) && lm_sysinfo_parse_dpm(buf, &cur, &max)) {
+            g->freq_mhz = cur;
+            g->freq_max_mhz = max;
+        }
+    } else if (s->gpu.kind == GK_NVIDIA && !strcmp(g->driver, "nvidia") && !s->smi) {
+        const char *prog = getenv("MELLAGUI_NVIDIA_SMI");
+        char *argv[] = { (char *)(prog && *prog ? prog : "nvidia-smi"), (char *)"--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.gr,clocks.max.gr",
+                         (char *)"--format=csv,noheader,nounits", NULL };
+        s->smi = lm_proc_run(s->loop, argv, 5000, smi_done, s);
+    }
+}
 
 static void sample(struct lm_sysinfo *s)
 {
@@ -422,6 +763,7 @@ static void sample(struct lm_sysinfo *s)
     int c;
     if (lm_sysinfo_read_temp(root, &c, st->temp_label, sizeof(st->temp_label)))
         st->temp_c = c;
+    gpu_sample(s);
     if (read_file(root, "/proc/loadavg", buf, sizeof(buf)))
         st->load1 = atof(buf);
     st->uptime_s = read_file(root, "/proc/uptime", buf, sizeof(buf)) ? lm_sysinfo_parse_uptime(buf) : -1;
@@ -470,6 +812,8 @@ void lm_sysinfo_destroy(struct lm_sysinfo *s)
 {
     if (!s)
         return;
+    if (s->smi)
+        lm_proc_cancel(s->smi);
     if (s->timer)
         lm_timer_destroy(s->timer);
     free(s);
@@ -483,6 +827,8 @@ void lm_sysinfo_set_active(struct lm_sysinfo *s, bool active)
     if (active) {
         s->have_prev = false;
         read_static(&s->st);
+        gpu_find(root_prefix(), &s->gpu, &s->st.gpu);
+        s->rc6_at = 0;
         sample(s);
         lm_timer_arm_ms(s->timer, 1000, 1000);
     } else {

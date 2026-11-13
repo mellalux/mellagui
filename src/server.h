@@ -144,6 +144,7 @@ struct lm_config {
     int headless_nextra;
     const char *socket_name;    /* --socket, NULL = first free wayland-N */
     const char *exec_cmd;       /* --exec, shell command spawned after start */
+    bool kiosk;                 /* --kiosk: only the program of --exec (the login screen): no shortcuts but Ctrl+Alt+Fn, no dock, no helpers, no screensaver */
     const char *run_cmd;        /* command for Super+R / the panel's Run button (default "mellagui-run") */
     const char *terminal_cmd;   /* command for Super+Enter (default "mellagui-term") */
     const char *view_cmd;       /* command for the screenshot card's click: the image viewer (default "mellagui-view") */

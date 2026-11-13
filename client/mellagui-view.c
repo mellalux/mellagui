@@ -74,7 +74,9 @@ struct app {
     double last_click_x, last_click_y;
     struct lm_mp4r *vid;                /* the video being played with our own reader (Motion JPEG) ... */
     struct ffdec *fd;                   /* ... or through ffmpeg (anything else, when it is installed) */
-    int vmode;                          /* 0 an image, 1 Motion JPEG (vid), 2 ffmpeg (fd), 3 our own H.264 decoder (vid + hd) */
+    int vmode;                          /* 0 an image, 1 Motion JPEG (vid), 2 ffmpeg (fd), 3 our own H.264 decoder (vid + hd), 4 a sound file (ainfo, fdur) */
+    struct ffaudio_info ainfo;          /* 4: what the file says about itself */
+    struct lm_image cover;              /* 4: the picture stored in it (px NULL = none) */
     uint32_t idle_mgr, inhibitor;       /* zwp_idle_inhibit_manager_v1 and the inhibitor that exists while a video plays */
     struct lm_h264dec *hd;              /* 3: the decoder ... */
     uint32_t hdone;                     /* ... and the picture it has decoded last (~0u: none, it has to start at an IDR picture) */
@@ -95,6 +97,7 @@ struct app {
     bool fready, fwant;                 /* a whole picture waits in fbuf; show the next one even when paused (after a seek) */
     uint32_t vframe;                    /* the picture shown */
     bool playing, seeking;
+    bool next_track;                    /* 4: the track is over: on to the next sound file */
     int vhover, vpress;                 /* the video button under the pointer / pressed: 0 none, else index + 1 */
     uint64_t pos_ms;                    /* where the video is (paused), or where it was when playing (re)started */
     uint64_t play_t0;                   /* lm_now_ms() when it (re)started */
@@ -108,11 +111,16 @@ static bool is_video_name(const char *n)
     return l > 4 && (!strcasecmp(n + l - 4, ".mp4") || !strcasecmp(n + l - 4, ".m4v"));
 }
 
+static bool is_audio_name(const char *n)
+{
+    return ffaudio_name_is_audio(n);
+}
+
 static bool is_image_name(const char *n)
 {
     size_t l = strlen(n);
     return n[0] != '.' && l > 4 && (!strcasecmp(n + l - 4, ".png") || !strcasecmp(n + l - 4, ".ppm") || !strcasecmp(n + l - 4, ".jpg") ||
-                                    (l > 5 && !strcasecmp(n + l - 5, ".jpeg")) || is_video_name(n));
+                                    (l > 5 && !strcasecmp(n + l - 5, ".jpeg")) || is_video_name(n) || is_audio_name(n));
 }
 
 static int cmp_names(const void *a, const void *b)
@@ -179,7 +187,7 @@ static void set_title(struct app *a)
 
 static uint64_t video_len(const struct app *a)
 {
-    return a->vmode == 1 || a->vmode == 3 ? a->vid->duration_ms : a->vmode == 2 ? a->fdur : 0;
+    return a->vmode == 1 || a->vmode == 3 ? a->vid->duration_ms : a->vmode == 2 || a->vmode == 4 ? a->fdur : 0;
 }
 
 static uint64_t video_pos(const struct app *a)
@@ -497,6 +505,10 @@ static void video_seek(struct app *a, int64_t ms)
     a->pos_ms = (uint64_t)ms;
     a->play_t0 = lm_now_ms();
     audio_reset(a);
+    if (a->vmode == 4) {                                        /* a sound file: nothing to show but the clock */
+        a->win.redraw = true;
+        return;
+    }
     if (a->vmode == 2) {
         if (!ff_start(a, a->pos_ms, g_ff_path))
             a->playing = false;
@@ -532,6 +544,17 @@ static void video_toggle(struct app *a)
 static void video_tick(struct app *a)
 {
     audio_follow(a);
+    if (a->vmode == 4) {
+        if (a->playing && video_len(a) && video_pos(a) >= video_len(a)) {
+            a->pos_ms = video_len(a);
+            a->playing = false;
+            a->win.redraw = true;
+            a->next_track = true;                               /* (the loop goes on to the next sound file) */
+        } else if (a->playing) {
+            a->win.redraw = true;                               /* the clock */
+        }
+        return;
+    }
     if (a->vmode == 2) {
         int tw, th;                                             /* the window was resized (or "fit" was switched): pictures of the right size */
         ff_target(a, a->fit, &tw, &th);
@@ -561,6 +584,8 @@ static void video_tick(struct app *a)
 /* How long the loop may sleep: until the next picture (at most 250 ms: the clock in the bar). */
 static int video_timeout(const struct app *a)
 {
+    if (a->vmode == 4)
+        return a->playing ? 250 : -1;
     if (a->vmode == 2) {
         if (!a->fd || (!a->playing && !a->fwant))
             return -1;
@@ -662,9 +687,11 @@ static void fmt_time(char *out, size_t n, uint64_t ms)
 static void load_current(struct app *a)
 {
     lm_img_free(&a->img);
+    lm_img_free(&a->cover);
     free(a->scaled);
     a->scaled = NULL;
     a->err[0] = 0;
+    a->next_track = false;
     lm_mp4r_close(a->vid);
     a->vid = NULL;
     lm_h264dec_free(a->hd);
@@ -764,6 +791,20 @@ static void load_current(struct app *a)
                 if (!a->vmode && !a->err[0])
                     snprintf(a->err, sizeof(a->err), "%s", why);
             }
+        } else if (is_audio_name(a->names[a->cur])) {
+            char aerr[160] = "";
+            snprintf(g_ff_path, sizeof(g_ff_path), "%s", path);
+            if (ffaudio_probe(path, &a->ainfo, aerr, sizeof(aerr))) {
+                a->vmode = 4;
+                a->has_audio = true;
+                a->fdur = a->ainfo.duration_ms;
+                if (a->ainfo.cover && !ffaudio_cover(path, &a->cover))
+                    a->cover.px = NULL;
+                a->play_t0 = lm_now_ms();
+                a->playing = true;
+            } else {
+                snprintf(a->err, sizeof(a->err), "%s", aerr);
+            }
         } else if (lm_img_load(path, &a->img, a->err, sizeof(a->err)) < 0) {
             a->img.px = NULL;
         }
@@ -841,13 +882,91 @@ static void build_scaled(struct app *a, double z)
     }
 }
 
+static void text_c(struct wlwin *w, int vw, int y, const char *s, int scale, bool bold, uint32_t col)
+{
+    int tw = (bold ? lm_font_text_width_bold(s) : lm_font_text_width(s)) * scale;
+    int x = (vw - tw) / 2;
+    if (x < 8)
+        x = 8;
+    if (bold)
+        wlwin_text_bold(w, x, y, s, scale, col, vw - 16);
+    else
+        wlwin_text(w, x, y, s, scale, col, vw - 16);
+}
+
+/* A sound file: the picture stored in it (or a note), the title, who and what, and the clock in the bar. */
+static void paint_audio(struct app *a, struct wlwin *w, int vw, int vh, char *status, size_t status_n)
+{
+    const struct ffaudio_info *ai = &a->ainfo;
+    char title[200];
+    if (ai->title[0]) {
+        snprintf(title, sizeof(title), "%s", ai->title);
+    } else {
+        snprintf(title, sizeof(title), "%s", a->names[a->cur]);
+        char *dot = strrchr(title, '.');
+        if (dot)
+            *dot = 0;
+    }
+    int side = LM_CLAMP(vh - 190, 96, 340);
+    if (vw - 40 < side)
+        side = LM_MAX(vw - 40, 64);
+    int total = side + 24 + 2 * 32 + 22 + 22 + 20;
+    int y = LM_MAX((vh - total) / 2, 12), x = (vw - side) / 2;
+    if (a->cover.px) {
+        int cw = a->cover.w, ch = a->cover.h, dw = side, dh = side;
+        if (cw > ch) dh = side * ch / cw; else dw = side * cw / ch;
+        wlwin_blit(w, (vw - dw) / 2, y + (side - dh) / 2, dw, dh, a->cover.px, cw, ch, cw);
+    } else {
+        wlwin_round_fill(w, x, y, side, side, side / 8, lm_theme.control);
+        int cx = x + side / 2, cy = y + side / 2, u = side / 8;
+        uint32_t fg = lm_theme.text_dim;
+        wlwin_fill(w, cx - u * 2, cy - u * 2, u / 2 + 1, u * 3 + u / 2, fg);                /* the two stems and the beam of a pair of notes */
+        wlwin_fill(w, cx + u, cy - u * 2 - u / 2, u / 2 + 1, u * 3 + u / 2, fg);
+        wlwin_fill(w, cx - u * 2, cy - u * 2 - u / 2, u * 3 + u / 2 + 1, u / 2 + 1, fg);
+        wlwin_round_fill(w, cx - u * 3, cy + u, u * 2, u * 3 / 2, u * 3 / 4, fg);            /* the heads */
+        wlwin_round_fill(w, cx, cy + u * 2 - u / 2, u * 2, u * 3 / 2, u * 3 / 4, fg);
+    }
+    y += side + 24;
+    text_c(w, vw, y, title, 2, true, lm_theme.text_bright);
+    y += LM_FONT_H * 2 + 8;
+    char who[220] = "";
+    if (ai->artist[0] && ai->album[0])
+        snprintf(who, sizeof(who), "%s  -  %s", ai->artist, ai->album);
+    else if (ai->artist[0] || ai->album[0])
+        snprintf(who, sizeof(who), "%s", ai->artist[0] ? ai->artist : ai->album);
+    if (who[0])
+        text_c(w, vw, y, who, 1, false, lm_theme.text);
+    y += LM_FONT_H + 6;
+    char tech[120];
+    char rate[24] = "", ch[24] = "", kb[24] = "";
+    if (ai->rate)
+        snprintf(rate, sizeof(rate), "  %d Hz", ai->rate);
+    if (ai->channels[0])
+        snprintf(ch, sizeof(ch), "  %s", ai->channels);
+    if (ai->kbps)
+        snprintf(kb, sizeof(kb), "  %d kb/s", ai->kbps);
+    snprintf(tech, sizeof(tech), "%s%s%s%s", ai->codec, rate, ch, kb);
+    text_c(w, vw, y, tech, 1, false, lm_theme.text_dim);
+    char t1[16], t2[16];
+    fmt_time(t1, sizeof(t1), video_pos(a));
+    fmt_time(t2, sizeof(t2), video_len(a));
+    char snd[40] = "";
+    if (ffaudio_players() == 0 || a->aud_dead)
+        snprintf(snd, sizeof(snd), "   no sound player");
+    else if (a->mute)
+        snprintf(snd, sizeof(snd), "   sound off (M)");
+    snprintf(status, status_n, "%s   %s / %s   %s%s   %d/%d", a->names[a->cur], t1, t2, a->playing ? "playing" : "paused", snd, a->cur + 1, a->n);
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     int vw = view_w(a), vh = view_h(a);
     wlwin_fill(w, 0, 0, w->bw, w->bh, BG);
     char status[400];
-    if (a->img.px) {
+    if (a->vmode == 4) {
+        paint_audio(a, w, vw, vh, status, sizeof(status));
+    } else if (a->img.px) {
         double z = cur_zoom(a);
         int sw = LM_MAX((int)(a->img.w * z + 0.5), 1), sh = LM_MAX((int)(a->img.h * z + 0.5), 1);
         int ox = sw <= vw ? (vw - sw) / 2 : (int)LM_CLAMP(a->ox, (double)(vw - sw), 0.0);
@@ -1287,10 +1406,10 @@ static void sync_inhibitor(struct app *a)
 {
     if (!a->idle_mgr)
         return;
-    if (a->playing && !a->inhibitor) {
+    if (a->playing && a->vmode != 4 && !a->inhibitor) {                  /* (music does not keep the screen awake: a video does) */
         a->inhibitor = wlc_alloc(a->win.c, &lm_zwp_idle_inhibitor_v1_interface, NULL, a);
         WLC_SEND(a->win.c, a->idle_mgr, LM_ZWP_IDLE_INHIBIT_MANAGER_V1_REQ_CREATE_INHIBITOR, { .n = a->inhibitor }, { .o = a->win.surface });
-    } else if (!a->playing && a->inhibitor) {
+    } else if ((!a->playing || a->vmode == 4) && a->inhibitor) {
         WLC_SEND0(a->win.c, a->inhibitor, LM_ZWP_IDLE_INHIBITOR_V1_REQ_DESTROY);
         wlc_forget(a->win.c, a->inhibitor);
         a->inhibitor = 0;
@@ -1340,9 +1459,18 @@ int main(int argc, char **argv)
     load_current(&a);
     while (wlwin_step(&a.win, video_timeout(&a))) {
         video_tick(&a);
+        if (a.next_track) {                                     /* a track is over: the next sound file of the folder (the player stops after the last) */
+            a.next_track = false;
+            for (int i = a.cur + 1; i < a.n; i++)
+                if (is_audio_name(a.names[i])) {
+                    go(&a, i);
+                    break;
+                }
+        }
         sync_inhibitor(&a);
     }
     wlwin_destroy(&a.win);
+    lm_img_free(&a.cover);
     lm_mp4r_close(a.vid);
     lm_h264dec_free(a.hd);
     audio_kill(&a);

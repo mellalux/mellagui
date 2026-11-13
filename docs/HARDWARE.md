@@ -49,6 +49,19 @@ Mark each line `ok`, `wrong` (say how) or `n/a` (no such hardware).
 | 17 | Two monitors, Settings > Display > Layout | The order can be changed, the gadgets stay at the top right of the leftmost one, windows can be dragged across. | |
 | 18 | Mouse / touchpad / keyboard: layouts (Super+Space), key repeat, sticky keys, the on-screen keyboard (Super+K) | They work as in the settings. | `input` lines |
 
+## The login screen (docs/GREETER.md)
+
+Do this on a spare VT or a machine you can reach over ssh: a mistake in the PAM files can lock a login out. Keep a root shell open (or the old display manager enabled) until it works.
+
+| # | What to do | Should happen |
+|---|---|---|
+| G1 | `sudo systemctl start mellagui-greetd` | VT 1 shows the login screen (clock, users, password field). `journalctl -u mellagui-greetd` says `the login screen runs`. If the screen stays black: `sudo -u mellagui-greeter env XDG_RUNTIME_DIR=/tmp mellagui --kiosk --config none --exec mellagui-greeter` from another VT shows the error. |
+| G2 | A wrong password, then the right one | `Login incorrect`, the field is empty again; then the desktop starts as that user (`loginctl list-sessions`: one `greeter` session ended, one `user` session, TYPE wayland, on tty1). |
+| G3 | Log out of the desktop | The login screen comes back; the last user is preselected. |
+| G4 | Sleep / Restart / Shut down (two clicks each) | They happen. |
+| G5 | Ctrl+Alt+F2, log in on the text console, Ctrl+Alt+F1 | The login screen is still there and works. |
+| G6 | A user whose account is locked / expired | A message from PAM (`Authentication failure`, `Account expired`) and no session. |
+
 ## What is already known
 
 * The dev machine (Intel HD 4000, i915, one monitor on HDMI) runs MellaGUI every day with the GL renderer (libEGL / libgbm are loaded).

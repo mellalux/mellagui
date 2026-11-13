@@ -378,6 +378,58 @@ void lm_wm_gadgets_start(struct lm_wm *wm, bool headless)
  * needs to overlap it vertically (within the same reach), above / below it horizontally; a card that touches another one with a side also lines up with
  * it (same left / right / top / bottom edge). A resized edge sticks to the edges that line up with it.
  */
+/* Is `w` one of the cards that come along with the one being moved? */
+static bool glued_to_grab(const struct lm_wm *wm, const struct lm_window *w)
+{
+    for (int i = 0; i < wm->glue.n; i++)
+        if (wm->glue.win[i] == w)
+            return true;
+    return false;
+}
+
+/* The cards that hang under `win` - their top edge touches its bottom edge (within 2 px, a snap makes it exact) with some width in common - and
+ * those that hang under them in turn: dragging the top card carries them all. */
+void gadget_glue_begin(struct lm_wm *wm, struct lm_window *win)
+{
+    wm->glue.n = 0;
+    wm->glue.minx = win->x;
+    wm->glue.miny = win->y;
+    wm->glue.maxx = win->x + win->width;
+    wm->glue.maxy = win->y + win->height;
+    struct lm_window *queue[LM_GADGET_TOTAL + 1];
+    int qh = 0, qt = 0;
+    queue[qt++] = win;
+    while (qh < qt) {
+        const struct lm_window *cur = queue[qh++];
+        struct lm_window *other;
+        lm_list_for_each(other, &wm->windows, link) {
+            if (other == win || !win_is_gadget(other) || !other->mapped || glued_to_grab(wm, other) || wm->glue.n >= LM_GADGET_TOTAL)
+                continue;
+            bool touches = abs(other->y - (cur->y + cur->height)) <= 2 && other->x < cur->x + cur->width && other->x + other->width > cur->x;
+            if (!touches)
+                continue;
+            int i = wm->glue.n++;
+            wm->glue.win[i] = other;
+            wm->glue.x[i] = other->x;
+            wm->glue.y[i] = other->y;
+            WIN(other)->gad_placed = true;                      /* (it is not docked any more: nobody moves it but this drag) */
+            wm->glue.minx = LM_MIN(wm->glue.minx, other->x);
+            wm->glue.miny = LM_MIN(wm->glue.miny, other->y);
+            wm->glue.maxx = LM_MAX(wm->glue.maxx, other->x + other->width);
+            wm->glue.maxy = LM_MAX(wm->glue.maxy, other->y + other->height);
+            if (qt <= LM_GADGET_TOTAL)
+                queue[qt++] = other;
+        }
+    }
+}
+
+void gadget_glue_end(struct lm_wm *wm)
+{
+    for (int i = 0; i < wm->glue.n; i++)
+        places_remember(wm, wm->glue.win[i]);                   /* they moved, too: the next start puts them back there */
+    wm->glue.n = 0;
+}
+
 static void gadget_snap(struct lm_wm *wm, const struct lm_window *self, const struct lm_output *o, int32_t *px, int32_t *py, int32_t w, int32_t h)
 {
     int32_t x = *px, y = *py, nx = x, ny = y;
@@ -390,7 +442,7 @@ static void gadget_snap(struct lm_wm *wm, const struct lm_window *self, const st
     TRY_Y(o->y + o->height - h);
     struct lm_window *other;
     lm_list_for_each(other, &wm->windows, link) {
-        if (other == self || !win_is_gadget(other) || !other->mapped)
+        if (other == self || !win_is_gadget(other) || !other->mapped || glued_to_grab(wm, other))
             continue;
         struct lm_rect pr = lm_rect_make(other->x, other->y, other->width, other->height);
         bool vover = y < pr.y + pr.h + GADGET_SNAP && y + h > pr.y - GADGET_SNAP;
@@ -465,8 +517,12 @@ void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, doub
         x += (int32_t)dx;
         y += (int32_t)dy;
         gadget_snap(wm, win, o, &x, &y, w, h);
-        x = LM_CLAMP(x, o->x, LM_MAX(o->x, o->x + o->width - w));
-        y = LM_CLAMP(y, o->y + LM_PANEL_HEIGHT, LM_MAX(o->y + LM_PANEL_HEIGHT, o->y + o->height - h));
+        /* the whole group stays on the screen: the box of the card and what hangs under it is kept inside the output */
+        int32_t mx = x - wm->grab_x, my = y - wm->grab_y;
+        mx = LM_CLAMP(mx, o->x - wm->glue.minx, LM_MAX(o->x - wm->glue.minx, o->x + o->width - wm->glue.maxx));
+        my = LM_CLAMP(my, o->y + LM_PANEL_HEIGHT - wm->glue.miny, LM_MAX(o->y + LM_PANEL_HEIGHT - wm->glue.miny, o->y + o->height - wm->glue.maxy));
+        x = wm->grab_x + mx;
+        y = wm->grab_y + my;
         if (x == win->x && y == win->y)
             return;
         struct lm_rect before = frame_outer(win);
@@ -475,6 +531,15 @@ void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, doub
         damage_rect(wm, &before);
         damage_frame(wm, win);
         update_outputs(wm, win);
+        for (int i = 0; i < wm->glue.n; i++) {                  /* what is glued to it comes along */
+            struct lm_window *m = wm->glue.win[i];
+            struct lm_rect mb = frame_outer(m);
+            m->x = wm->glue.x[i] + mx;
+            m->y = wm->glue.y[i] + my;
+            damage_rect(wm, &mb);
+            damage_frame(wm, m);
+            update_outputs(wm, m);
+        }
         return;
     }
     uint32_t e = wm->grab_edges;

@@ -16,6 +16,26 @@
 #include <stdint.h>
 
 struct ffaudio;
+struct lm_image;
+
+/* ---- sound files ---------------------------------------------------------------------------------------------------------------- */
+
+struct ffaudio_info {
+    uint64_t duration_ms;           /* 0 = unknown */
+    char codec[24];                 /* "mp3", "flac", "opus" ... */
+    int rate;                       /* Hz, 0 = unknown */
+    char channels[16];              /* "stereo", "mono", "5.1" */
+    int kbps;                       /* 0 = unknown */
+    char title[96], artist[96], album[96];
+    bool cover;                     /* a picture is stored in the file (an "attached pic") */
+};
+
+/* Is it a file name of a sound file (mp3 flac ogg oga opus wav m4a aac wma aif aiff mka weba)? */
+bool ffaudio_name_is_audio(const char *name);
+/* `ffmpeg -i FILE`: false (message in err) when there is no ffmpeg or the file has no sound track. Quick (it only reads the header). */
+bool ffaudio_probe(const char *path, struct ffaudio_info *info, char *err, size_t errsz);
+/* The picture stored in the file (album art) decoded into img (XRGB, free it with lm_img_free); false when there is none. */
+bool ffaudio_cover(const char *path, struct lm_image *img);
 
 /* How many players this machine has (0 = no sound possible) and the name of number i. */
 int ffaudio_players(void);

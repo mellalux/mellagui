@@ -6,7 +6,8 @@
  * commands the card sends. The compositor does not talk to the cloud: it asks the program. Every LM_SMART_POLL_MS while the gadget is shown
  * it runs `mellagui-smart --favourites` (asynchronously, lm_proc_run; $MELLAGUI_SMART_BIN replaces the program) and reads its lines
  *     favs <TAB> count                       (a program that does not print this line did not answer)
- *     fav <TAB> id <TAB> name <TAB> online <TAB> switch|blind|none <TAB> code <TAB> value
+ *     fav <TAB> id <TAB> name <TAB> online <TAB> switch|blind|vacuum|none <TAB> code <TAB> value [<TAB> battery,dockcode,dockvalue]
+ * (a blind's value is its position in per cent, a vacuum's 1 = cleaning)
  * and a click runs `mellagui-smart --set ID CODE VALUE` (the card shows the new state at once, the next poll confirms it).
  * Owner: smarthome.c. Single threaded (the server's loop).
  */
@@ -20,7 +21,7 @@ struct lm_smart;
 #define LM_SMART_MAX 8
 #define LM_SMART_POLL_MS 15000
 
-enum lm_smart_kind { LM_SMART_NONE, LM_SMART_SWITCH, LM_SMART_BLIND };
+enum lm_smart_kind { LM_SMART_NONE, LM_SMART_SWITCH, LM_SMART_BLIND, LM_SMART_VACUUM };
 
 struct lm_smart_item {
     char id[40], name[48], code[32];
@@ -28,6 +29,9 @@ struct lm_smart_item {
     enum lm_smart_kind kind;
     bool on;                            /* a switch */
     int percent;                        /* a blind's position, -1 = unknown */
+    /* a robot vacuum: `code` is its start / stop data point, `on` = it is cleaning */
+    int battery;                        /* per cent, -1 = unknown */
+    char dock_code[32], dock_value[24]; /* what is sent to send it home ("mode" "chargego", "switch_charge" "true"); empty = no dock button */
 };
 
 struct lm_smart_state {
@@ -47,12 +51,14 @@ void lm_smart_refresh(struct lm_smart *s);
 /* A switch is turned the other way; a blind gets 0 = open, 1 = stop, 2 = close. */
 void lm_smart_toggle(struct lm_smart *s, int index);
 void lm_smart_blind(struct lm_smart *s, int index, int what);
+/* A robot vacuum: 0 = start / stop cleaning (the other way from what it does now), 1 = send it to its dock. */
+void lm_smart_vacuum(struct lm_smart *s, int index, int what);
 
 /* ---- the card's layout (shared by the painter and the pointer) ----------------------------------------------------------------- */
 
 #define LM_SMART_ROW_H 34
 
-enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE };
+enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK };
 
 struct lm_smart_rect { int x, y, w, h; };
 
@@ -61,6 +67,7 @@ struct lm_smart_layout {
     struct lm_smart_rect name[LM_SMART_MAX];
     struct lm_smart_rect sw[LM_SMART_MAX];          /* a switch's pill */
     struct lm_smart_rect btn[LM_SMART_MAX][3];      /* a blind's open / stop / close */
+    struct lm_smart_rect vac[LM_SMART_MAX][2];      /* a vacuum's start-stop and dock buttons */
 };
 
 void lm_smart_layout(int x, int y, int w, int h, int title_h, int n, struct lm_smart_layout *l);

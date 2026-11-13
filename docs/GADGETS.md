@@ -19,6 +19,15 @@ A toplevel whose **app id starts with `mellagui.gadget.`** is a gadget:
 The window is the card: paint the whole buffer yourself. Use a **premultiplied ARGB8888** buffer to get round corners over the desktop (the
 built-in cards use a 12 px radius and the palette of `[theme]`).
 
+## Glued cards and zoom
+
+* **Glue**: a card pulled against the bottom edge of another one snaps flush to it; from then on it hangs on that card, and dragging the upper one carries
+  it (and whatever hangs under it) along. Dragging a lower card moves only that card and what is under it; pulling it away unglues it.
+* **Zoom**: the small `- 100 % +` pill at a card's bottom left corner (it shows while the pointer is on the card) makes its content (and so the card)
+  bigger or smaller (50 .. 300 %); a click on the percentage, or a double click on the title, puts card and content back. The right button's menu does
+  the same, and so do Ctrl + / - / 0 while the clipboard card has the keyboard. `mellagui-gadget` programs (the four and `text`) do it themselves; a program of
+  your own can use `wlwin_set_zoom` + `wlwin_request_size` from `client/wlwin.h`.
+
 ## Adding a gadget: a file in the gadgets folder
 
 `~/.config/mellagui/gadgets/NAME.conf` (`$XDG_CONFIG_HOME/mellagui/gadgets`, `$MELLAGUI_GADGET_DIR` replaces the folder). The file name is the

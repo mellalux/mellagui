@@ -16,6 +16,18 @@ struct lm_cpu_times {
     unsigned long long busy, total;     /* jiffies: busy = total - idle - iowait */
 };
 
+/* The graphics chip the screen is on (read from /sys/class/drm, pci.ids and, for NVIDIA's own driver, `nvidia-smi`). -1 / 0 = not known. */
+struct lm_gpu {
+    bool present;
+    char name[80];                      /* "Intel 3rd Gen Core processor Graphics Controller", "AMD Radeon RX 6700 XT" */
+    char driver[24];                    /* "i915", "amdgpu", "nvidia", "nouveau" */
+    int busy;                           /* per cent, -1 unknown */
+    bool busy_estimated;                /* Intel: how long the chip was out of its sleep state (RC6) in the last second: no real counter without root */
+    int freq_mhz, freq_max_mhz;         /* 0 unknown */
+    int temp_c;                         /* -1 unknown */
+    long vram_used_kb, vram_total_kb;   /* 0 = unknown (an integrated chip shares the main memory) */
+};
+
 struct lm_sysinfo_state {
     bool ready;                         /* at least one sample */
     int cpu;                            /* overall load since the previous sample, percent */
@@ -29,6 +41,7 @@ struct lm_sysinfo_state {
     int swap_pct;
     int temp_c;                         /* CPU package/core temperature in degrees C, -1 = no sensor */
     char temp_label[24];                /* which sensor ("coretemp Package id 0") */
+    struct lm_gpu gpu;
     double load1;                       /* 1-minute load average */
     /* the device (read once when the sampler starts; uptime on every sample); an empty string = unknown */
     char maker[48];                     /* manufacturer: DMI sys_vendor / board_vendor, "devicetree" boards: first word of the model */
@@ -64,6 +77,14 @@ void lm_sysinfo_read_device(const char *root, struct lm_sysinfo_state *st);
 /* Finds the CPU temperature under `root` (""/"/tmp/x"): hwmon coretemp/k10temp/... (the "Package"/"Tctl"/"Tdie" input, else
  * the hottest one), else a thermal zone of a CPU type, else any thermal zone. False when there is none. */
 bool lm_sysinfo_read_temp(const char *root, int *celsius, char *label, size_t label_n);
+
+/* pci.ids text: "Vendor Device" for the ids ("Intel 3rd Gen Core processor Graphics Controller"; the vendor is shortened, a [marketing name] in
+ * brackets wins over the chip name). False when the ids are not in the text. */
+bool lm_sysinfo_pci_name(const char *pci_ids, unsigned vendor, unsigned device, char *out, size_t n);
+/* amdgpu's pp_dpm_sclk ("0: 300Mhz\n1: 1200Mhz *\n..."): the starred line and the highest one, in MHz. */
+bool lm_sysinfo_parse_dpm(const char *text, int *cur, int *max);
+/* `nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.gr,clocks.max.gr --format=csv,noheader,nounits`. */
+bool lm_sysinfo_parse_nvidia_smi(const char *text, struct lm_gpu *gpu);
 
 /* ---- the live sampler ------------------------------------------------------------------------------------------ */
 

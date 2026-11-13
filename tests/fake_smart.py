@@ -16,7 +16,8 @@ a = sys.argv[1:]
 if a[:1] == ['--favourites']:
     print('favs\t%d' % len(load()))
     for d in load():
-        print('\t'.join(['fav', d['id'], d['name'], '1' if d.get('online', True) else '0', d['kind'], d['code'], str(d['value'])]))
+        print('\t'.join(['fav', d['id'], d['name'], '1' if d.get('online', True) else '0', d['kind'], d['code'], str(d['value'])] +
+                        ([d['extra']] if d.get('extra') else [])))
 elif a[:1] == ['--set'] and len(a) == 4:
     if log_path:
         with open(log_path, 'a') as f:
@@ -25,6 +26,8 @@ elif a[:1] == ['--set'] and len(a) == 4:
     for d in st:
         if d['id'] == a[1]:
             if d['kind'] == 'switch':
+                d['value'] = 1 if a[3] == 'true' else 0
+            elif d['kind'] == 'vacuum' and a[2] == d['code']:
                 d['value'] = 1 if a[3] == 'true' else 0
             elif d['kind'] == 'blind':
                 d['value'] = {'open': 100, 'close': 0}.get(a[3], d['value'])

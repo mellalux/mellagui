@@ -1,0 +1,9 @@
+#%PAM-1.0
+# /etc/pam.d/mellagui - the password check and the session of a user who logs in through mellagui-greetd (Debian / Ubuntu).
+# On Fedora / Arch use `auth include system-auth` and so on instead of the @include lines.
+auth       requisite    pam_nologin.so
+@include common-auth
+@include common-account
+session    required     pam_limits.so
+@include common-session
+@include common-password

@@ -55,6 +55,7 @@ static const char *usage_text =
     "  --size WxH               headless output size (default 1280x720)\n"
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
+    "  --kiosk                  the login screen's mode: no shortcuts (but Ctrl+Alt+Fn), no dock, no gadgets and helpers, no screensaver\n"
     "  --terminal CMD           command for Super+Enter (default mellagui-term)\n"
     "  --config FILE|none       hand-written configuration: dock, commands ... (default drm: $XDG_CONFIG_HOME/mellagui/mellagui.conf,\n"
     "                           headless: none); options win. --print-config shows the built-in defaults as such a file\n"
@@ -198,6 +199,13 @@ static void sig_dump(int signo, void *data)
     }
 }
 
+static void kiosk_program_ended(void *data, int status, const char *err)
+{
+    (void)status; (void)err;
+    lm_info("--kiosk: the program ended, shutting down");
+    lm_server_quit(data);
+}
+
 static void quit_timer(void *data)
 {
     lm_info("--timeout reached, shutting down");
@@ -300,7 +308,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE, OPT_KIOSK };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0, cli_scale_pct = 0;
     static const struct option opts[] = {
@@ -309,6 +317,7 @@ int main(int argc, char **argv)
         { "scale", required_argument, 0, OPT_SCALE },
         { "socket", required_argument, 0, 'S' },
         { "exec", required_argument, 0, 'e' },
+        { "kiosk", no_argument, 0, OPT_KIOSK },
         { "terminal", required_argument, 0, 't' },
         { "run", required_argument, 0, OPT_RUN },
         { "drm-device", required_argument, 0, 'd' },
@@ -530,6 +539,7 @@ int main(int argc, char **argv)
         case OPT_LAYOUTS: layouts_arg = optarg; break;
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;
+        case OPT_KIOSK: cfg.kiosk = true; break;
         case OPT_MIXER: cfg.mixer = true; break;
         case OPT_SYSINFO: cfg.sysinfo = true; break;
         case OPT_NO_DMABUF: cfg.dmabuf = false; break;
@@ -645,6 +655,11 @@ int main(int argc, char **argv)
     srv->lock = lm_lock_create(srv);            /* with start=1 in lock.conf the screen is locked from the first frame */
     srv->notelog = lm_notelog_create();
     srv->saver = lm_saver_create(srv);
+    if (srv->config.kiosk) {                                /* nothing but the program of --exec: no screensaver, no dock (the keys are refused in lm_wm_key) */
+        srv->config.saver = false;
+        srv->config.gadget = srv->config.mixer = srv->config.sysinfo = srv->config.smart = false;
+        lm_dock.enabled = false;
+    }
     srv->night = lm_night_create(srv);
     if (!headless && lm_input_count_keyboards(srv->input) == 0) {
         /* Without a keyboard the user could not even switch VT: refuse to take over the screen. */
@@ -673,28 +688,30 @@ int main(int argc, char **argv)
         }
     }
     lm_info("MellaGUI ready on WAYLAND_DISPLAY=%s (backend %s)", lm_server_socket_name(srv), cfg.backend);
-    if (cfg.exec_cmd)
+    if (cfg.exec_cmd && cfg.kiosk)
+        lm_server_spawn_watch(srv, cfg.exec_cmd, kiosk_program_ended, srv);   /* the login screen ends: so does the compositor */
+    else if (cfg.exec_cmd)
         lm_server_spawn(srv, cfg.exec_cmd);
-    if (srv->wm)
+    if (srv->wm && !srv->config.kiosk)
         lm_wm_gadgets_start(srv->wm, headless);                                  /* the gadgets that are switched on (tests start them with the setting) */
-    if (srv->wm && (!headless || getenv("MELLAGUI_CALENDAR_PRELOAD")))      /* the calendar waits hidden for a click on the clock (tests start it by that click) */
+    if (srv->wm && !srv->config.kiosk && (!headless || getenv("MELLAGUI_CALENDAR_PRELOAD")))      /* the calendar waits hidden for a click on the clock (tests start it by that click) */
         lm_wm_calendar_start(srv->wm);
-    if (srv->wm && cfg.status_cmd && *cfg.status_cmd && strcmp(cfg.status_cmd, "none") && (!headless || getenv("MELLAGUI_STATUS_PRELOAD")))
+    if (srv->wm && !srv->config.kiosk && cfg.status_cmd && *cfg.status_cmd && strcmp(cfg.status_cmd, "none") && (!headless || getenv("MELLAGUI_STATUS_PRELOAD")))
         lm_server_spawn(srv, cfg.status_cmd);                              /* the battery and network buttons of the panel (tests start it with MELLAGUI_STATUS_PRELOAD) */
 
-    if (srv->wm && (!headless || getenv("MELLAGUI_TIMER_PRELOAD"))) {
+    if (srv->wm && !srv->config.kiosk && (!headless || getenv("MELLAGUI_TIMER_PRELOAD"))) {
         char tcmd[LM_DOCK_CMD_MAX];
         lm_launch_expand("mellagui-timer --background", tcmd, sizeof(tcmd));   /* the alarms of the timer ring without its window (it ends at once when no alarm is on) */
         lm_server_spawn(srv, tcmd);
     }
 
-    if (srv->wm && (!headless || getenv("MELLAGUI_SMART_PRELOAD"))) {
+    if (srv->wm && !srv->config.kiosk && (!headless || getenv("MELLAGUI_SMART_PRELOAD"))) {
         char scmd[LM_DOCK_CMD_MAX];
         lm_launch_expand("mellagui-smart --background", scmd, sizeof(scmd));    /* the smart home timetable (it ends at once when it has no rule) */
         lm_server_spawn(srv, scmd);
     }
 
-    if (!headless && cfg.startup_sound)
+    if (!headless && cfg.startup_sound && !srv->config.kiosk)
         lm_sound_startup();                                                /* the start-up chime (chime.h): a child plays it, nothing waits */
 
     rc = lm_loop_run(loop);

@@ -708,6 +708,22 @@ int main(void)
         CHECK(lm_sysinfo_parse_cpu_model("Hardware\t: BCM2835\nModel\t\t: Raspberry Pi 4\n", devbuf, sizeof(devbuf)) && !strcmp(devbuf, "Raspberry Pi 4"),
               "arm cpuinfo: '%s'", devbuf);
         CHECK(!lm_sysinfo_parse_cpu_model("flags : fpu\n", devbuf, sizeof(devbuf)), "cpuinfo without a model");
+        {   /* the graphics chip: names, clocks, nvidia-smi */
+            const char *ids = "# c\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t73df  Navi 22 [Radeon RX 6700 XT]\n8086  Intel Corporation\n\t0166  3rd Gen Core processor Graphics Controller\n\t0167  other\n10de  NVIDIA Corporation\n\t1e87  TU104 [GeForce RTX 2080 Rev. A]\n";
+            char nm[96];
+            CHECK(lm_sysinfo_pci_name(ids, 0x8086, 0x0166, nm, sizeof(nm)) && !strcmp(nm, "Intel 3rd Gen Core processor Graphics Controller"), "pci name: Intel '%s'", nm);
+            CHECK(lm_sysinfo_pci_name(ids, 0x1002, 0x73df, nm, sizeof(nm)) && !strcmp(nm, "AMD Radeon RX 6700 XT"), "pci name: the bracketed name wins '%s'", nm);
+            CHECK(lm_sysinfo_pci_name(ids, 0x10de, 0x1e87, nm, sizeof(nm)) && !strcmp(nm, "NVIDIA GeForce RTX 2080 Rev. A"), "pci name: NVIDIA '%s'", nm);
+            CHECK(lm_sysinfo_pci_name(ids, 0x8086, 0xabcd, nm, sizeof(nm)) && !strcmp(nm, "Intel 0xabcd"), "pci name: an unknown device '%s'", nm);
+            CHECK(!lm_sysinfo_pci_name(ids, 0x1234, 0x1, nm, sizeof(nm)), "pci name: an unknown vendor");
+            int cur = 0, mx = 0;
+            CHECK(lm_sysinfo_parse_dpm("0: 500Mhz\n1: 1500Mhz *\n2: 2400Mhz\n", &cur, &mx) && cur == 1500 && mx == 2400, "dpm %d %d", cur, mx);
+            CHECK(!lm_sysinfo_parse_dpm("nothing\n", &cur, &mx), "dpm without lines");
+            struct lm_gpu gp = { 0 };
+            CHECK(lm_sysinfo_parse_nvidia_smi("NVIDIA GeForce RTX 2080, 17, 1024, 8192, 61, 1350, 1935\n", &gp) && gp.busy == 17 && gp.temp_c == 61 &&
+                  gp.vram_total_kb == 8192 * 1024 && gp.freq_max_mhz == 1935 && !strcmp(gp.name, "NVIDIA GeForce RTX 2080"), "nvidia-smi line");
+            CHECK(!lm_sysinfo_parse_nvidia_smi("No devices were found\n", &gp), "nvidia-smi without a device");
+        }
         CHECK(lm_sysinfo_parse_os_name("NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\n", devbuf, sizeof(devbuf)) && !strcmp(devbuf, "Ubuntu 24.04.2 LTS"),
               "os-release: '%s'", devbuf);
         CHECK(lm_sysinfo_parse_os_name("NAME=Alpine\n", devbuf, sizeof(devbuf)) && !strcmp(devbuf, "Alpine"), "os-release NAME only");

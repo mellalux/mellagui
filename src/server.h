@@ -171,6 +171,8 @@ struct lm_config {
     int cal_week_start;         /* the calendar's first weekday: 1 Monday (default), 0 Sunday (settings: cal-week-start mon|sun) */
     bool cal_weeknum;           /* ... with ISO week numbers (settings: cal-weeks; default false) */
     bool osk_avoid;             /* windows keep out of the on-screen keyboard's way (settings: osk-avoid; default true) */
+    int layout_label;           /* next to each flag in the panel: 0 nothing, 1 the short code (US), 2 the language (settings: layout-label none|code|name) */
+    bool layout_badges;         /* the panel shows a badge for every enabled keyboard layout, a click picks one (settings: layout-badges; default false = one badge, a click cycles) */
     const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
     const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */

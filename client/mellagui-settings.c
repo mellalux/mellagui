@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "theme.h"
+#include "flag.h"
 #include "font.h"
 #include "keymap.h"
 #include "lock.h"
@@ -482,6 +483,8 @@ static void add_slider(struct app *a, int x, int y, int w, const char *text, con
     wd->val = LM_MAX(lo, LM_MIN(hi, kv_int(a, key, lo)));
 }
 
+static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on);
+
 static void build_keyboard(struct app *a, int x, int y, int w)
 {
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Keyboard layouts");
@@ -499,7 +502,14 @@ static void build_keyboard(struct app *a, int x, int y, int w)
             bool enabled = idlist_find(&on, id) >= 0;
             if (enabled != (pass == 0))
                 continue;
-            struct widget *c = add_check(a, x, y, LM_MIN(w - 150, 260), lm_layout_name(i), "layout-enable", enabled);
+            struct widget *fl = add(a, W_SWATCH, (struct rect){ x, y + (ROW_H - LM_FLAG_H) / 2, LM_FLAG_W, LM_FLAG_H }, "");
+            snprintf(fl->arg, sizeof(fl->arg), "f%s", id);                       /* the country's flag, then the language and its short code */
+            char nm[64];
+            if (strchr(lm_layout_name(i), '('))                                   /* "English (US)" has its code already */
+                snprintf(nm, sizeof(nm), "%s", lm_layout_name(i));
+            else
+                snprintf(nm, sizeof(nm), "%s (%c%c)", lm_layout_name(i), id[0] - 32 * (id[0] >= 'a'), id[1] - 32 * (id[1] >= 'a'));
+            struct widget *c = add_check(a, x + LM_FLAG_W + 8, y, LM_MIN(w - 150, 260) - LM_FLAG_W - 8, nm, "layout-enable", enabled);
             snprintf(c->arg, sizeof(c->arg), "%s", id);
             if (enabled) {
                 struct widget *r = add(a, W_RADIO, (struct rect){ x + w - 140, y, 90, ROW_H }, "active");
@@ -516,6 +526,20 @@ static void build_keyboard(struct app *a, int x, int y, int w)
         }
     }
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Super+Space or the panel indicator switches layouts.");
+    y += ROW_H;
+    add_check(a, x, y, w, "Show the flag of the layout in use in the panel", "layout-badges", kv_int(a, "layout-badges", 0) != 0);
+    y += ROW_H;
+    {
+        const char *lab = kv_get(a, "layout-label");
+        add(a, W_LABEL, (struct rect){ x + BOX + 10, y, 100, ROW_H }, "Next to it:");
+        static const struct { const char *arg, *text; int w; } opts[] = { { "none", "Nothing", 100 }, { "code", "Short code", 130 }, { "name", "Language", 120 } };
+        int rx = x + BOX + 10 + 100;
+        for (int k = 0; k < 3; k++) {
+            struct widget *r = add_radio(a, rx, y, opts[k].w, opts[k].text, "layout-label", opts[k].arg, !strcmp(lab[0] ? lab : "none", opts[k].arg));
+            (void)r;
+            rx += opts[k].w;
+        }
+    }
     y += ROW_H + 8;
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Typing");
     y += ROW_H;
@@ -2658,6 +2682,14 @@ static void paint_widget(struct app *a, int idx)
         break;
     }
     case W_SWATCH:
+        if (w->arg[0] == 'f') {                                           /* a keyboard layout's country flag */
+            struct lm_flag_rect fr[LM_FLAG_MAX];
+            int n = lm_flag_rects(w->arg + 1, fr);
+            for (int k = 0; k < n; k++)
+                fill(a, (struct rect){ r->x + fr[k].x, r->y + fr[k].y, fr[k].w, fr[k].h }, fr[k].rgb);
+            outline(a, *r, COL_DIM);
+            break;
+        }
         if (w->arg[0] == 'r') {                                           /* a preview button: as round as the setting says (100 = a circle) */
             int pct = atoi(w->arg + 1);
             wlwin_round_fill(&a->win, r->x, r->y, r->w, r->h, LM_MIN(r->w, r->h) / 2 * pct / 100, (uint32_t)w->val & 0xffffff);

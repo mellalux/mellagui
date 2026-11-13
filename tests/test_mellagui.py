@@ -2079,6 +2079,20 @@ class TestKeyboard(Base):
         self.assertEqual(ctl.kbd()['layout'], 'ee')
         ctl.abs(900, 500)
 
+    def test_panel_flag_shows_one_layout_and_cycles(self):
+        self.addCleanup(ctl.cmd, 'settings layout-badges 0')
+        ctl.cmd('settings layout-badges 1')
+        ctl.cmd('settings layout-label name')
+        ctl.sync()
+        x, y = self.LAYOUT_BTN
+        ctl.click(x - 20, y)                             # one flag with its text, wider than the round badge: still the same click target
+        self.assertEqual(ctl.kbd()['layout'], 'ee')
+        ctl.click(x - 20, y, code=273)                   # right click: previous
+        self.assertEqual(ctl.kbd()['layout'], 'us')
+        ctl.cmd('settings layout-label none')
+        ctl.cmd('settings layout-badges 0')
+        ctl.abs(900, 500)
+
     def test_altgr_is_right_alt_with_layouts(self):
         ctl.key(KEY_RIGHTALT, True)
         self.assertIsNotNone(self.mods(dep=1 << 7), 'right Alt should be AltGr (Mod5)')
@@ -17833,7 +17847,7 @@ class TestSmart(Base):
         self.assertEqual(self.cli('--fav', 'plug1', 'off')[0], 0)
         code, out = self.cli('--favourites')
         self.assertEqual(code, 0)
-        self.assertEqual(out.split('\n')[:-1], ['favs\t3', 'fav\tblind1\tBlind\t1\tblind\tcontrol\t40',
+        self.assertEqual(out.split('\n')[:-1], ['favs\t3', 'fav\tblind1\tBlind\t1\tblind\tcontrol\t40\t1',
                                                  'fav\tplug2\tFar plug\t0\tswitch\tswitch_1\t1'])    # (a device that is gone is left out)
         self.assertEqual(self.cli('--fav', 'blind1')[0], 2)                             # a wrong call
 
@@ -17847,7 +17861,7 @@ class TestSmart(Base):
         for dev in ('blind1', 'robot1'):
             self.assertEqual(self.cli('--fav', dev, 'on')[0], 0)
         code, out = self.cli('--favourites')
-        self.assertEqual(out.split('\n')[:-1], ['favs\t2', 'fav\tblind1\tBlind\t1\tblind\tcontrol\t100',
+        self.assertEqual(out.split('\n')[:-1], ['favs\t2', 'fav\tblind1\tBlind\t1\tblind\tcontrol\t100\t1',
                                                  'fav\trobot1\tRobot\t1\tvacuum\tpower_go\t1\t87,mode,chargego'])
 
     def test_a_device_is_pinned_to_the_desktop_in_its_own_view(self):
@@ -18528,6 +18542,28 @@ class TestSmartGadget(Base):
     def row_y(self, c, i):
         x, y, w, h = self.card(c)
         return y + 26 + 4 + i * 34 + 17
+
+    def test_a_blind_that_can_be_positioned_has_a_slider_on_a_second_line(self):
+        devs = [{'id': 'blind1', 'name': 'Blind', 'online': True, 'kind': 'blind', 'code': 'control', 'value': 60, 'extra': '1'},
+                {'id': 'plug1', 'name': 'Desk lamp', 'online': True, 'kind': 'switch', 'code': 'switch_1', 'value': 0}]
+        c = self.start('mellagui-sg-slider', devices=devs)
+        c.cmd('settings smart 1')
+        self.items(c)
+        x, y, w, h = self.card(c)
+        sx, sw = x + 22, w - 22 - 22 - 48                                # the slider's track: the second line of the blind's row
+        sy = y + 26 + 4 + 30 + 10
+        c.click(sx + sw // 4, sy)                                        # a click puts it there and tells the motor when the button is let go
+        sent = [l for l in self.logged() if l.startswith('blind1 percent_control ')]
+        self.assertEqual(len(sent), 1, sent)
+        self.assertAlmostEqual(int(sent[0].split()[-1]), 25, delta=3)
+        self.assertEqual([l for l in self.logged() if ' control ' in l], [])      # no open / stop / close buttons any more
+        # the next row is under the two-line one: the lamp's switch is at 58 px, not 34
+        c.click(x + w - 12 - 22, y + 26 + 4 + 58 + 17)
+        for _ in range(40):
+            if 'plug1 switch_1 true' in self.logged():
+                break
+            time.sleep(0.1)
+        self.assertIn('plug1 switch_1 true', self.logged())
 
     def test_it_is_hidden_until_it_is_asked_for_and_follows_the_setting_and_the_key(self):
         c = self.start('mellagui-sg1')

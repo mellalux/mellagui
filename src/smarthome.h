@@ -29,6 +29,7 @@ struct lm_smart_item {
     enum lm_smart_kind kind;
     bool on;                            /* a switch */
     int percent;                        /* a blind's position, -1 = unknown */
+    bool can_pos;                       /* a blind that can be sent to a position (percent_control): the card shows a slider, else open / stop / close buttons */
     /* a robot vacuum: `code` is its start / stop data point, `on` = it is cleaning */
     int battery;                        /* per cent, -1 = unknown */
     char dock_code[32], dock_value[24]; /* what is sent to send it home ("mode" "chargego", "switch_charge" "true"); empty = no dock button */
@@ -51,26 +52,33 @@ void lm_smart_refresh(struct lm_smart *s);
 /* A switch is turned the other way; a blind gets 0 = open, 1 = stop, 2 = close. */
 void lm_smart_toggle(struct lm_smart *s, int index);
 void lm_smart_blind(struct lm_smart *s, int index, int what);
+/* A blind with a slider: show `percent` (0..100) at once and, with `send`, tell the motor (percent_control). */
+void lm_smart_blind_position(struct lm_smart *s, int index, int percent, bool send);
 /* A robot vacuum: 0 = start / stop cleaning (the other way from what it does now), 1 = send it to its dock. */
 void lm_smart_vacuum(struct lm_smart *s, int index, int what);
 
 /* ---- the card's layout (shared by the painter and the pointer) ----------------------------------------------------------------- */
 
 #define LM_SMART_ROW_H 34
+#define LM_SMART_ROW2_H 58              /* a blind with a slider has two lines: the name, and the slider under it */
 
-enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK };
+enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK, LM_SMART_SLIDER };
 
 struct lm_smart_rect { int x, y, w, h; };
 
 struct lm_smart_layout {
     int rows;                           /* rows that fit */
+    struct lm_smart_rect row[LM_SMART_MAX];         /* the whole row (its height depends on the kind) */
+    struct lm_smart_rect slider[LM_SMART_MAX];      /* a blind's slider track (with can_pos); the percentage is written right of it */
     struct lm_smart_rect name[LM_SMART_MAX];
     struct lm_smart_rect sw[LM_SMART_MAX];          /* a switch's pill */
     struct lm_smart_rect btn[LM_SMART_MAX][3];      /* a blind's open / stop / close */
     struct lm_smart_rect vac[LM_SMART_MAX][2];      /* a vacuum's start-stop and dock buttons */
 };
 
-void lm_smart_layout(int x, int y, int w, int h, int title_h, int n, struct lm_smart_layout *l);
+void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_smart_state *st, struct lm_smart_layout *l);
+/* The percentage a pointer at `px` stands for on row i's slider. */
+int lm_smart_slider_value(const struct lm_smart_layout *l, int i, int px);
 enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm_smart_state *st, int px, int py, int *index);
 
 #endif

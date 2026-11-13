@@ -2,6 +2,7 @@
  * Window manager + shell policy: the core. See wm.h for the contract and wm_priv.h for how the wm is split into files.
  */
 #include "wm_priv.h"
+#include "flag.h"
 #include "smarthome.h"
 
 /* ---- geometry helpers ------------------------------------------------------------ */
@@ -82,6 +83,12 @@ struct lm_rect output_panel_rect(const struct lm_output *o)
     return lm_rect_make(o->x, o->y, o->width, LM_PANEL_HEIGHT);
 }
 
+/* 1 when the panel shows the flag of the layout in use (setting layout-badges), else 0 (the round badge with the letters). */
+int layout_badge_count(const struct lm_wm *wm)
+{
+    return wm->srv->config.layout_badges && wm->srv->input && lm_input_layout_count(wm->srv->input) >= 1 ? 1 : 0;
+}
+
 void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_info *p)
 {
     memset(p, 0, sizeof(*p));
@@ -98,7 +105,30 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
     int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_font_text_width(wm->clock_text) + 8);
     p->clock = lm_rect_make(p->power.x - 4 - clock_w, y, clock_w, h);
     p->sticky = lm_rect_make(p->clock.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);         /* (the Run dialog is Super+R and the launcher's Run button) */
-    p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
+    int nb = layout_badge_count(wm);
+    p->nbadges = nb;
+    if (nb > 0) {                                       /* the flag of the layout in use; with a label it is as wide as flag + text need */
+        int slot = lm_input_layout(wm->srv->input);
+        const char *id = lm_input_layout_id(wm->srv->input, slot);
+        for (size_t k = 0; k < sizeof(p->badge[0].text) - 1 && id[k]; k++)
+            p->badge[0].text[k] = (char)(id[k] >= 'a' && id[k] <= 'z' ? id[k] - 32 : id[k]);
+        p->badge[0].label[0] = 0;
+        if (wm->srv->config.layout_label == 1)
+            snprintf(p->badge[0].label, sizeof(p->badge[0].label), "%s", p->badge[0].text);
+        else if (wm->srv->config.layout_label == 2) {
+            int li = lm_layout_find(id);
+            snprintf(p->badge[0].label, sizeof(p->badge[0].label), "%s", li >= 0 ? lm_layout_name(li) : id);
+            char *paren = strstr(p->badge[0].label, " (");          /* "English (US)" -> "English" */
+            if (paren)
+                *paren = 0;
+        }
+        int bw = p->badge[0].label[0] ? LM_MAX(PANEL_LAYOUT_W, 6 + LM_FLAG_W + 6 + lm_font_text_width(p->badge[0].label)) : PANEL_LAYOUT_W;
+        p->layout = lm_rect_make(p->sticky.x - 4 - bw, y, bw, h);
+        p->badge[0].rect = p->layout;
+        p->badge[0].active = true;
+        p->badge[0].hover = wm->hover_layout;
+    } else
+        p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
     p->osk = lm_rect_make(p->layout.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
     p->hover_osk = wm->hover_osk;
     p->osk_open = wm->osk_open;

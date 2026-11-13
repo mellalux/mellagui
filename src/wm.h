@@ -431,9 +431,11 @@ struct lm_panel_info {
     struct lm_rect quick;               /* the quick settings button, left of the keyboard button */
     bool hover_quick, quick_open;
     bool osk_open;                  /* the keyboard is showing: the button is lit */
-    struct lm_rect layout;          /* keyboard layout indicator */
+    struct lm_rect layout;          /* keyboard layout indicator (with `layout_badges`: the box round all the badges) */
     bool hover_layout;
     char layout_text[8];            /* "US", "EE" ... */
+    int nbadges;                    /* setting layout-badges: 1 = `layout` shows the flag of the layout in use (badge[0]), else 0 = the round badge with letters */
+    struct { struct lm_rect rect; char text[8]; char label[24]; bool active, hover; } badge[1];   /* label: written right of the flag (setting layout-label), "" = none */
     struct lm_rect sticky;          /* sticky keys toggle */
     bool hover_sticky;
     bool sticky_on;

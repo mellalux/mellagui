@@ -561,3 +561,154 @@ void lm_h264_mc_mb(const uint8_t *rY, const uint8_t *rU, const uint8_t *rV, uint
     lm_h264_mc_chroma(rU, cs, mbw * 8, mbh * 8, mbx * 8, mby * 8, mvx, mvy, U + (size_t)mby * 8 * (size_t)cs + (size_t)mbx * 8, cs);
     lm_h264_mc_chroma(rV, cs, mbw * 8, mbh * 8, mbx * 8, mby * 8, mvx, mvy, V + (size_t)mby * 8 * (size_t)cs + (size_t)mbx * 8, cs);
 }
+
+/* ---- deblocking ----------------------------------------------------------------------------------------------------------------------- */
+
+static const uint8_t alpha_tab[52] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 17, 20, 22, 25, 28,
+    32, 36, 40, 45, 50, 56, 63, 71, 80, 90, 101, 113, 127, 144, 162, 182, 203, 226, 255, 255,
+};
+static const uint8_t beta_tab[52] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7, 8, 8,
+    9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18,
+};
+static const uint8_t tc0_tab[52][3] = {                 /* [indexA][bS - 1] */
+    { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 },
+    { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 }, { 0, 1, 1 },
+    { 0, 1, 1 }, { 1, 1, 1 }, { 1, 1, 1 }, { 1, 1, 1 }, { 1, 1, 1 }, { 1, 1, 2 }, { 1, 1, 2 }, { 1, 1, 2 }, { 1, 1, 2 }, { 1, 2, 3 }, { 1, 2, 3 },
+    { 2, 2, 3 }, { 2, 2, 4 }, { 2, 3, 4 }, { 2, 3, 4 }, { 3, 3, 5 }, { 3, 4, 6 }, { 3, 4, 6 }, { 4, 5, 7 }, { 4, 5, 8 }, { 4, 6, 9 }, { 5, 7, 10 },
+    { 6, 8, 11 }, { 6, 8, 13 }, { 7, 10, 14 }, { 8, 11, 16 }, { 9, 12, 18 }, { 10, 13, 20 }, { 11, 15, 23 }, { 13, 17, 25 },
+};
+
+static const uint8_t db_blk[4][4] = { { 0, 1, 4, 5 }, { 2, 3, 6, 7 }, { 8, 9, 12, 13 }, { 10, 11, 14, 15 } };      /* [row][column] -> block index */
+
+static inline int iabs(int v) { return v < 0 ? -v : v; }
+static inline int clip3(int lo, int hi, int v) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* One line of luma samples across an edge: s points at q0, `step` is the distance from one sample to the next across the edge. */
+static void db_luma(uint8_t *s, int step, int bs, int alpha, int beta, int tc0)
+{
+    int p0 = s[-step], p1 = s[-2 * step], p2 = s[-3 * step], q0 = s[0], q1 = s[step], q2 = s[2 * step];
+    if (iabs(p0 - q0) >= alpha || iabs(p1 - p0) >= beta || iabs(q1 - q0) >= beta)
+        return;
+    int ap = iabs(p2 - p0), aq = iabs(q2 - q0);
+    if (bs < 4) {
+        int tc = tc0 + (ap < beta) + (aq < beta);
+        int delta = clip3(-tc, tc, (((q0 - p0) * 4) + (p1 - q1) + 4) >> 3);
+        s[-step] = (uint8_t)lm_h264_clip(p0 + delta);
+        s[0] = (uint8_t)lm_h264_clip(q0 - delta);
+        if (ap < beta)
+            s[-2 * step] = (uint8_t)(p1 + clip3(-tc0, tc0, (p2 + ((p0 + q0 + 1) >> 1) - (p1 * 2)) >> 1));
+        if (aq < beta)
+            s[step] = (uint8_t)(q1 + clip3(-tc0, tc0, (q2 + ((p0 + q0 + 1) >> 1) - (q1 * 2)) >> 1));
+        return;
+    }
+    int p3 = s[-4 * step], q3 = s[3 * step];
+    int strong = iabs(p0 - q0) < ((alpha >> 2) + 2);
+    if (ap < beta && strong) {
+        s[-step] = (uint8_t)((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
+        s[-2 * step] = (uint8_t)((p2 + p1 + p0 + q0 + 2) >> 2);
+        s[-3 * step] = (uint8_t)((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
+    } else {
+        s[-step] = (uint8_t)((2 * p1 + p0 + q1 + 2) >> 2);
+    }
+    if (aq < beta && strong) {
+        s[0] = (uint8_t)((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
+        s[step] = (uint8_t)((p0 + q0 + q1 + q2 + 2) >> 2);
+        s[2 * step] = (uint8_t)((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
+    } else {
+        s[0] = (uint8_t)((2 * q1 + q0 + p1 + 2) >> 2);
+    }
+}
+
+static void db_chroma(uint8_t *s, int step, int bs, int alpha, int beta, int tc0)
+{
+    int p0 = s[-step], p1 = s[-2 * step], q0 = s[0], q1 = s[step];
+    if (iabs(p0 - q0) >= alpha || iabs(p1 - p0) >= beta || iabs(q1 - q0) >= beta)
+        return;
+    if (bs < 4) {
+        int tc = tc0 + 1;
+        int delta = clip3(-tc, tc, (((q0 - p0) * 4) + (p1 - q1) + 4) >> 3);
+        s[-step] = (uint8_t)lm_h264_clip(p0 + delta);
+        s[0] = (uint8_t)lm_h264_clip(q0 - delta);
+    } else {
+        s[-step] = (uint8_t)((2 * p1 + p0 + q1 + 2) >> 2);
+        s[0] = (uint8_t)((2 * q1 + q0 + p1 + 2) >> 2);
+    }
+}
+
+/* The strength of the edge between the 4x4 block `bp` of macroblock `mp` and `bq` of `mq` (8.7.2.1; frames, one reference picture). */
+static int db_strength(const struct lm_mv *mvs, const uint8_t *nzy, int mp, int bp, int mq, int bq, int mbedge)
+{
+    if (mvs[mp].ref < 0 || mvs[mq].ref < 0)
+        return mbedge ? 4 : 3;
+    if (nzy[(size_t)mp * 16 + (size_t)bp] || nzy[(size_t)mq * 16 + (size_t)bq])
+        return 2;
+    return iabs(mvs[mp].x - mvs[mq].x) >= 4 || iabs(mvs[mp].y - mvs[mq].y) >= 4;
+}
+
+void lm_h264_deblock(uint8_t *Y, uint8_t *U, uint8_t *V, int ys, int cs, int mbw, int mbh, const struct lm_mv *mvs, const uint8_t *nzy, const uint8_t *qp,
+                     int chroma_qp_offset, int offset_a, int offset_b)
+{
+    for (int mby = 0; mby < mbh; mby++)
+        for (int mbx = 0; mbx < mbw; mbx++) {
+            int mb = mby * mbw + mbx;
+            uint8_t bsv[4][4], bsh[4][4];                       /* [edge][segment of 4 samples] */
+            int any = 0;
+            for (int e = 0; e < 4; e++)
+                for (int k = 0; k < 4; k++) {
+                    if (e == 0) {
+                        bsv[0][k] = mbx > 0 ? (uint8_t)db_strength(mvs, nzy, mb - 1, db_blk[k][3], mb, db_blk[k][0], 1) : 0;
+                        bsh[0][k] = mby > 0 ? (uint8_t)db_strength(mvs, nzy, mb - mbw, db_blk[3][k], mb, db_blk[0][k], 1) : 0;
+                    } else {
+                        bsv[e][k] = (uint8_t)db_strength(mvs, nzy, mb, db_blk[k][e - 1], mb, db_blk[k][e], 0);
+                        bsh[e][k] = (uint8_t)db_strength(mvs, nzy, mb, db_blk[e - 1][k], mb, db_blk[e][k], 0);
+                    }
+                    any |= bsv[e][k] | bsh[e][k];
+                }
+            if (!any)
+                continue;
+            int qpq = qp[mb];
+            int qpp_l = mbx > 0 ? qp[mb - 1] : qpq, qpp_t = mby > 0 ? qp[mb - mbw] : qpq;
+            uint8_t *yp = Y + (size_t)mby * 16 * (size_t)ys + (size_t)mbx * 16;
+            for (int dir = 0; dir < 2; dir++)                   /* luma: vertical edges, then horizontal ones */
+                for (int e = 0; e < 4; e++) {
+                    int qpp = e == 0 ? (dir == 0 ? qpp_l : qpp_t) : qpq;
+                    int qav = (qpp + qpq + 1) >> 1;
+                    int ia = clip3(0, 51, qav + offset_a), ib = clip3(0, 51, qav + offset_b);
+                    int alpha = alpha_tab[ia], beta = beta_tab[ib];
+                    for (int i = 0; i < 16; i++) {
+                        int bs = dir == 0 ? bsv[e][i >> 2] : bsh[e][i >> 2];
+                        if (!bs)
+                            continue;
+                        int tc0 = bs < 4 ? tc0_tab[ia][bs - 1] : 0;
+                        if (dir == 0)
+                            db_luma(yp + (size_t)i * (size_t)ys + e * 4, 1, bs, alpha, beta, tc0);
+                        else
+                            db_luma(yp + (size_t)(e * 4) * (size_t)ys + i, ys, bs, alpha, beta, tc0);
+                    }
+                }
+            for (int c = 0; c < 2; c++) {                       /* chroma: the edges at 0 and 4, the strength of the luma edge at 0 and 8 */
+                uint8_t *cp = (c ? V : U) + (size_t)mby * 8 * (size_t)cs + (size_t)mbx * 8;
+                int qcq = lm_h264_chroma_qp(clip3(0, 51, qpq + chroma_qp_offset));
+                int qcp_l = lm_h264_chroma_qp(clip3(0, 51, qpp_l + chroma_qp_offset)), qcp_t = lm_h264_chroma_qp(clip3(0, 51, qpp_t + chroma_qp_offset));
+                for (int dir = 0; dir < 2; dir++)
+                    for (int e = 0; e < 2; e++) {
+                        int qcp = e == 0 ? (dir == 0 ? qcp_l : qcp_t) : qcq;
+                        int qav = (qcp + qcq + 1) >> 1;
+                        int ia = clip3(0, 51, qav + offset_a), ib = clip3(0, 51, qav + offset_b);
+                        int alpha = alpha_tab[ia], beta = beta_tab[ib];
+                        for (int i = 0; i < 8; i++) {
+                            int bs = dir == 0 ? bsv[e * 2][i >> 1] : bsh[e * 2][i >> 1];
+                            if (!bs)
+                                continue;
+                            int tc0 = bs < 4 ? tc0_tab[ia][bs - 1] : 0;
+                            if (dir == 0)
+                                db_chroma(cp + (size_t)i * (size_t)cs + e * 4, 1, bs, alpha, beta, tc0);
+                            else
+                                db_chroma(cp + (size_t)(e * 4) * (size_t)cs + i, cs, bs, alpha, beta, tc0);
+                        }
+                    }
+            }
+        }
+}

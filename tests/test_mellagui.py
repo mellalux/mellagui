@@ -9491,26 +9491,39 @@ class TestRecord(Base):
             self.assertLess(diff, 3.0, 'our decoder and ffmpeg disagree about the last picture')
 
     def test_our_own_h264_with_motion_is_decoded_by_ffmpeg_to_the_same_pictures(self):
-        """A texture that scrolls (whole picture, a part of it, sideways, far): the stream has motion vectors, P_Skip with an inferred vector and
-        chroma at half pixels; ffmpeg must show every picture exactly as our encoder's reconstruction (and our own decoder, checked by --selftest)."""
+        """A texture that scrolls (whole picture, a part of it, sideways, far): the stream has motion vectors, P_Skip with an inferred vector,
+        chroma at half pixels and the deblocking filter; ffmpeg must show every picture exactly as our encoder's reconstruction (and our own decoder,
+        checked by --selftest), at several quantizers."""
         ffmpeg = shutil.which('ffmpeg')
         if not ffmpeg:
             self.skipTest('ffmpeg not installed')
         d = self.outdir()
-        r = subprocess.run([self.REC, '--selftest'], capture_output=True, text=True, timeout=120, env=dict(os.environ, MELLAGUI_H264_DUMP=d))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        out = os.path.join(d, 'ff.yuv')
-        subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'h264', '-i', os.path.join(d, 'scroll.h264'), '-pix_fmt', 'yuv420p', '-f', 'rawvideo', out],
-                       check=True, timeout=60)
-        with open(out, 'rb') as f:
-            theirs = f.read()
-        with open(os.path.join(d, 'scroll.yuv'), 'rb') as f:
-            ours = f.read()
         frame = 176 * 112 * 3 // 2
-        self.assertEqual(len(ours) // frame, 16)
-        self.assertEqual(len(theirs), len(ours), 'ffmpeg decoded a different number of pictures')
-        for i in range(16):
-            self.assertEqual(theirs[i * frame:(i + 1) * frame], ours[i * frame:(i + 1) * frame], 'picture %d differs' % i)
+        out = os.path.join(d, 'ff.yuv')
+        nof = os.path.join(d, 'nofilter.yuv')
+        changed = {}
+        for qp in (10, 16, 24, 32, 40, 51):                  # the filter's tables are indexed by the quantizer: every part of them is used somewhere here
+            r = subprocess.run([self.REC, '--selftest'], capture_output=True, text=True, timeout=120,
+                               env=dict(os.environ, MELLAGUI_H264_DUMP=d, MELLAGUI_H264_QP=str(qp)))
+            self.assertEqual(r.returncode, 0, 'qp %d: %s%s' % (qp, r.stdout, r.stderr))
+            stream = os.path.join(d, 'scroll.h264')
+            subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'h264', '-i', stream, '-pix_fmt', 'yuv420p', '-f', 'rawvideo', out], check=True, timeout=60)
+            subprocess.run([ffmpeg, '-v', 'error', '-y', '-skip_loop_filter', 'all', '-f', 'h264', '-i', stream, '-pix_fmt', 'yuv420p', '-f', 'rawvideo', nof],
+                           check=True, timeout=60)
+            with open(out, 'rb') as f:
+                theirs = f.read()
+            with open(nof, 'rb') as f:
+                unfiltered = f.read()
+            with open(os.path.join(d, 'scroll.yuv'), 'rb') as f:
+                ours = f.read()
+            self.assertEqual(len(ours) // frame, 16)
+            self.assertEqual(len(theirs), len(ours), 'qp %d: ffmpeg decoded a different number of pictures' % qp)
+            for i in range(16):
+                self.assertEqual(theirs[i * frame:(i + 1) * frame], ours[i * frame:(i + 1) * frame], 'qp %d: picture %d differs' % (qp, i))
+            changed[qp] = sum(1 for x, y in zip(theirs, unfiltered) if x != y)
+        # the comparison is only worth something when the deblocking filter really changes pictures
+        self.assertGreater(changed[24], 100000, changed)
+        self.assertGreater(changed[40], 100000, changed)
 
     def test_our_own_h264_with_an_odd_sized_screen(self):
         if not os.path.exists(self.VIEW):

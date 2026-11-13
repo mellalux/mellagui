@@ -6,8 +6,8 @@
  * 9-8, 9-9, 9-10), the integer transforms, quantization scales and a bit writer / reader.
  *
  * What the two programs speak, and nothing else ("constrained baseline, the simplest useful subset"): 4:2:0, 8 bit, one slice per picture,
- * CAVLC, one reference picture, picture order count type 2 (no reordering), the deblocking filter OFF (disable_deblocking_filter_idc = 1),
- * macroblock types I_16x16 with DC prediction (luma and chroma), I_PCM, P_L0_16x16 and P_Skip. The motion vectors are WHOLE PIXELS in luma
+ * CAVLC, one reference picture, picture order count type 2 (no reordering), the deblocking filter on (disable_deblocking_filter_idc = 0; a stream with it off is read too),
+ * macroblock types I_16x16 with DC prediction (luma and chroma), I_PCM, P_L0_16x16 and P_Skip, and the in-loop deblocking filter (lm_h264_deblock). The motion vectors are WHOLE PIXELS in luma
  * (a multiple of 4 in the quarter pixel units the stream uses; chroma then lands on halves, the bilinear filter of 8.4.2.2.2 does that), which is what
  * scrolling needs. That is enough for a screen recording (unchanged macroblocks cost a bit each, a scrolled window costs a vector) and small
  * enough to be checked bit for bit against ffmpeg's decoder.
@@ -104,6 +104,16 @@ void lm_h264_mc_chroma(const uint8_t *ref, int stride, int pw, int ph, int x0, i
 /* Both, for macroblock (mbx, mby): the planes `Y`, `U`, `V` (strides ys / cs) get the prediction from the reference planes (same layout). */
 void lm_h264_mc_mb(const uint8_t *rY, const uint8_t *rU, const uint8_t *rV, uint8_t *Y, uint8_t *U, uint8_t *V, int ys, int cs, int mbw, int mbh, int mbx,
                    int mby, int mvx, int mvy);
+
+/* ---- the in-loop deblocking filter (8.7) ------------------------------------------------------------------------------------------ */
+
+/* Filters the whole picture once it is reconstructed (intra prediction reads the picture BEFORE this; the next picture's reference is the picture
+ * AFTER it): the edges of the 4x4 blocks, macroblock by macroblock, vertical edges then horizontal ones. `mvs` says which macroblocks are intra
+ * and what vector the others have, `nzy` the total_coeff of each luma 4x4 block (16 a macroblock, by block index) - together they give the
+ * boundary strengths -, `qp` the quantizer of each macroblock (0 for an I_PCM one), `chroma_qp_offset` the PPS's, offset_a / offset_b the slice's
+ * filter offsets (already doubled: slice_alpha_c0_offset_div2 * 2). */
+void lm_h264_deblock(uint8_t *Y, uint8_t *U, uint8_t *V, int ys, int cs, int mbw, int mbh, const struct lm_mv *mvs, const uint8_t *nzy, const uint8_t *qp,
+                     int chroma_qp_offset, int offset_a, int offset_b);
 
 static inline int lm_h264_clip(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 

@@ -1244,13 +1244,14 @@ static int selftest(void)
         free(sps);
         free(pps);
     }
-    /* motion: a texture that scrolls (the whole picture, a part of it, sideways, far) is coded with vectors; encoder and decoder agree on every
+    /* motion and the deblocking filter: a texture that scrolls (the whole picture, a part of it, sideways, far) is coded with vectors; encoder and decoder agree on every
      * picture, a scrolled picture costs a fraction of an I picture, and with MELLAGUI_H264_DUMP=DIR the stream (Annex B) and the pictures it makes are
      * written for the test that lets ffmpeg decode the same stream (bit for bit the same pictures). */
     {
         const int sw = 176, sh = 112;
         uint32_t *tx = malloc((size_t)sw * 2 * (size_t)sh * 2 * sizeof(uint32_t));      /* a texture bigger than the picture */
-        struct lm_h264enc *he = lm_h264enc_create(sw, sh, 24);
+        const char *qe = getenv("MELLAGUI_H264_QP");
+        struct lm_h264enc *he = lm_h264enc_create(sw, sh, qe && atoi(qe) > 0 ? atoi(qe) : 24);
         uint8_t *sps = NULL, *pps = NULL;
         size_t sn = 0, pn = 0;
         char herr[120] = "";
@@ -1278,8 +1279,9 @@ static int selftest(void)
             for (int y = 0; y < sh * 2; y++)
                 for (int x = 0; x < sw * 2; x++) {
                     seed = seed * 1664525u + 1013904223u;
-                    int v = (int)(seed >> 24);
-                    tx[(size_t)y * (size_t)sw * 2 + (size_t)x] = (uint32_t)((((v >> 1) + (x & 63)) & 255) << 16 | (((v >> 2) + (y & 63)) & 255) << 8 | ((v + x + y) & 255));
+                    int v = (int)(seed >> 29);                                  /* a little noise on smooth ramps: the deblocking filter has work to do */
+                    int blk = ((x / 24 + y / 20) & 1) * 14;                     /* and steps the filter may soften */
+                    tx[(size_t)y * (size_t)sw * 2 + (size_t)x] = (uint32_t)((((x * 2 + v + blk) & 255) << 16) | (((y * 3 + v) & 255) << 8) | ((x + y + v * 2 + blk) & 255));
                 }
         }
         static const struct { int dx, dy, part; } mov[] = {                 /* where the picture looks into the texture, frame by frame */
@@ -1329,7 +1331,9 @@ static int selftest(void)
                 }
             }
         }
-        CHECK(first_len > 0 && scroll_len > 0 && scroll_len * 4 < first_len);       /* scrolled by 3 pixels: far smaller than the first picture */
+        CHECK(first_len > 0 && scroll_len > 0);
+        if (!qe || atoi(qe) <= 40)                                                  /* (a very coarse quantizer makes every picture small) */
+            CHECK(scroll_len * 4 < first_len);                                      /* scrolled by 3 pixels: far smaller than the first picture */
         if (fs)
             fclose(fs);
         if (fy)

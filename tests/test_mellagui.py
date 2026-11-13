@@ -10094,6 +10094,8 @@ class TestTop(Base):
             ctl.tap(11 if ch == '0' else 1 + int(ch))
         ctl.tap(KEY_ENTER)
         time.sleep(0.3)
+        ctl.tap(KEY_DOWN)                                                         # nothing is selected by itself: pick the first match
+        time.sleep(0.2)
 
     def calls(self):
         time.sleep(0.2)
@@ -10185,7 +10187,11 @@ class TestTop(Base):
         ctl.tap(KEY_TAB)                                                          # the services
         time.sleep(0.5)
         self.assertTrue(any('list-units' in c and '--user' not in c for c in self.calls()), self.calls())
-        # failed ones come first: gamma is under the cursor
+        ctl.tap(31)                                                               # S with nothing selected: nothing is started
+        time.sleep(0.4)
+        self.assertFalse(any(' start ' in c for c in self.calls()), self.calls())
+        ctl.tap(KEY_DOWN)                                                         # the first row: failed ones come first, gamma is it
+        time.sleep(0.2)
         ctl.tap(31)                                                               # S: start
         time.sleep(0.5)
         self.assertIn('systemctl --no-ask-password start gamma-system.service', self.calls())
@@ -10215,6 +10221,8 @@ class TestTop(Base):
         p = self.start(FAKE_SYSTEMCTL_DENY='1')
         ctl.tap(KEY_TAB)
         time.sleep(0.5)
+        ctl.tap(KEY_DOWN)
+        time.sleep(0.2)
         ctl.tap(31)
         time.sleep(0.5)
         self.assertIn('systemctl --no-ask-password start gamma-system.service', self.calls())

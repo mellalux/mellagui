@@ -101,7 +101,7 @@ enum tab { T_PROCS, T_SVCS };
 enum confirm { C_NONE, C_TERM, C_KILL, C_SVC_STOP };
 
 struct vlist {
-    int sel, top;
+    int sel, top;                       /* sel = -1: nothing is selected (the start, a click on empty space, the selected one went away) */
 };
 
 struct app {
@@ -439,7 +439,7 @@ static const struct proc *selected_proc(const struct app *a)
 
 static void clamp_view(struct vlist *v, int n, int visible)
 {
-    v->sel = LM_CLAMP(v->sel, 0, LM_MAX(n - 1, 0));
+    v->sel = n > 0 ? LM_CLAMP(v->sel, -1, n - 1) : -1;
     v->top = LM_CLAMP(v->top, 0, LM_MAX(n - visible, 0));
 }
 
@@ -450,6 +450,8 @@ static int list_rows(const struct app *a)
 
 static void keep_visible(struct vlist *v, int rows)
 {
+    if (v->sel < 0)
+        return;
     if (v->sel < v->top)
         v->top = v->sel;
     if (v->sel >= v->top + rows)
@@ -472,10 +474,9 @@ static void rebuild_procs(struct app *a, bool follow)
     qsort(a->shown, (size_t)a->nshown, sizeof(int), cmp_shown);
     int at = -1;                                                        /* the cursor stays on its process when the order changes */
     for (int i = 0; i < a->nshown; i++)
-        if (a->p[a->shown[i]].pid == a->sel_pid)
+        if (a->sel_pid && a->p[a->shown[i]].pid == a->sel_pid)
             at = i;
-    if (at >= 0)
-        a->pv.sel = at;
+    a->pv.sel = at;                                                     /* it ended or the filter hides it: nothing is selected */
     clamp_view(&a->pv, a->nshown, list_rows(a));
     const struct proc *sp = selected_proc(a);
     a->sel_pid = sp ? sp->pid : 0;
@@ -515,12 +516,16 @@ static void rebuild_svcs(struct app *a, bool follow)
             a->sshown[a->nsshown++] = i;
     g_svc_app = a;
     qsort(a->sshown, (size_t)a->nsshown, sizeof(int), cmp_svc);
+    int sat = -1;
     for (int i = 0; i < a->nsshown; i++)
-        if (!strcmp(a->s[a->sshown[i]].unit, a->sel_unit))
-            a->sv.sel = i;
+        if (a->sel_unit[0] && !strcmp(a->s[a->sshown[i]].unit, a->sel_unit))
+            sat = i;
+    a->sv.sel = sat;
     clamp_view(&a->sv, a->nsshown, list_rows(a));
-    if (a->sv.sel < a->nsshown)
+    if (a->sv.sel >= 0)
         snprintf(a->sel_unit, sizeof(a->sel_unit), "%s", a->s[a->sshown[a->sv.sel]].unit);
+    else
+        a->sel_unit[0] = 0;
     if (follow)
         keep_visible(&a->sv, list_rows(a));
 }
@@ -666,11 +671,22 @@ static void read_services(struct app *a)
     rebuild_svcs(a, false);
 }
 
+/* True when something is selected; else says so (a key or a menu entry that works on the selected one). */
+static bool need_selection(struct app *a)
+{
+    if (a->tab == T_PROCS ? selected_proc(a) != NULL : selected_svc(a) != NULL)
+        return true;
+    msg(a, a->tab == T_PROCS ? "Select a process first" : "Select a service first");
+    return false;
+}
+
 static void svc_action(struct app *a, const char *verb)
 {
     const struct svc *s = selected_svc(a);
-    if (!s)
+    if (!s) {
+        need_selection(a);
         return;
+    }
     char unit[96];
     snprintf(unit, sizeof(unit), "%s", s->unit);
     char *argv[10];
@@ -752,8 +768,10 @@ static void refresh(struct app *a)
 static void send_signal(struct app *a, int sig, const char *what)
 {
     const struct proc *p = selected_proc(a);
-    if (!p)
+    if (!p) {
+        need_selection(a);
         return;
+    }
     if (p->pid == getpid()) {
         msg(a, "That is this program");
         return;
@@ -768,8 +786,10 @@ static void send_signal(struct app *a, int sig, const char *what)
 static void renice(struct app *a, int delta)
 {
     const struct proc *p = selected_proc(a);
-    if (!p)
+    if (!p) {
+        need_selection(a);
         return;
+    }
     int nv = LM_CLAMP(p->nice + delta, -20, 19);
     if (setpriority(PRIO_PROCESS, (id_t)p->pid, nv) < 0)
         msg(a, "nice %s (%d): %s", p->name, p->pid, errno == EACCES || errno == EPERM ? "only root may raise the priority or change another user's process" : strerror(errno));
@@ -780,7 +800,7 @@ static void renice(struct app *a, int delta)
 
 static void ask(struct app *a, enum confirm c)
 {
-    if (a->tab == T_PROCS ? !selected_proc(a) : !selected_svc(a))
+    if (!need_selection(a))
         return;
     a->confirm = c;
     a->win.redraw = true;
@@ -802,8 +822,10 @@ static void do_confirmed(struct app *a)
 static void open_log(struct app *a)
 {
     const struct svc *s = selected_svc(a);
-    if (!s)
+    if (!s) {
+        need_selection(a);
         return;
+    }
     snprintf(a->log_unit, sizeof(a->log_unit), "%s", s->unit);
     a->logview = true;
     read_log(a);
@@ -922,7 +944,7 @@ static void press_button(struct app *a, enum btn_id id)
     case B_LOG: open_log(a); break;
     case B_SCOPE:
         a->user_scope = !a->user_scope;
-        a->sv = (struct vlist){ 0, 0 };
+        a->sv = (struct vlist){ -1, 0 };
         a->sel_unit[0] = 0;
         read_services(a);
         break;
@@ -1214,14 +1236,25 @@ static void select_row(struct app *a, int row)
         a->win.redraw = true;
         return;
     }
-    v->sel = LM_CLAMP(row, 0, LM_MAX(cur_total(a) - 1, 0));
+    v->sel = cur_total(a) > 0 ? LM_CLAMP(row, 0, cur_total(a) - 1) : -1;
     keep_visible(v, list_rows(a));
     if (a->tab == T_PROCS) {
         const struct proc *p = selected_proc(a);
         a->sel_pid = p ? p->pid : 0;
-    } else if (a->sv.sel < a->nsshown) {
+    } else if (a->sv.sel >= 0 && a->sv.sel < a->nsshown) {
         snprintf(a->sel_unit, sizeof(a->sel_unit), "%s", a->s[a->sshown[a->sv.sel]].unit);
+    } else {
+        a->sel_unit[0] = 0;
     }
+    a->win.redraw = true;
+}
+
+/* Nothing selected (a click on empty space). */
+static void deselect(struct app *a)
+{
+    cur_view(a)->sel = -1;
+    a->sel_pid = 0;
+    a->sel_unit[0] = 0;
     a->win.redraw = true;
 }
 
@@ -1374,6 +1407,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 }
                 if (right)
                     open_menu(a);
+            } else if (left) {
+                deselect(a);                                            /* empty space under the list */
             }
         }
         break;
@@ -1471,9 +1506,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         return;
     }
     switch (ks) {
-    case LM_KS_Up: select_row(a, v->sel - 1); return;
+    case LM_KS_Up: select_row(a, v->sel < 0 ? cur_total(a) - 1 : v->sel - 1); return;
     case LM_KS_Down: select_row(a, v->sel + 1); return;
-    case LM_KS_Page_Up: select_row(a, v->sel - page); return;
+    case LM_KS_Page_Up: select_row(a, v->sel < 0 ? cur_total(a) - 1 : v->sel - page); return;
     case LM_KS_Page_Down: select_row(a, v->sel + page); return;
     case LM_KS_Home: select_row(a, 0); return;
     case LM_KS_End: select_row(a, cur_total(a) - 1); return;
@@ -1570,6 +1605,9 @@ static int selftest(void)
         }
         a.sort = S_PID;
         a.win.bh = HEAD_H + TOOL_H + COLH_H + STATUS_H + 10 * ROW_H;           /* ten rows */
+        a.pv.sel = -1;
+        rebuild_procs(&a, true);
+        CHECK(a.pv.sel == -1 && a.sel_pid == 0);                        /* nothing is selected to begin with, and a refresh does not pick one */
         a.sel_pid = 100;                                                /* the cursor is on the first one ... */
         rebuild_procs(&a, true);
         CHECK(a.pv.sel == 0 && a.pv.top == 0);
@@ -1578,6 +1616,19 @@ static int selftest(void)
         CHECK(a.pv.top == 30);
         rebuild_procs(&a, true);                                        /* something the user did (a sort, a filter): back to the cursor */
         CHECK(a.pv.top == 0);
+        a.sel_pid = 99999;                                              /* the selected process ended: nothing is selected, not its neighbour */
+        rebuild_procs(&a, false);
+        CHECK(a.pv.sel == -1 && a.sel_pid == 0);
+        a.tab = T_PROCS;                                                /* a key that needs a process, with none selected: it says so and asks nothing */
+        ask(&a, C_TERM);
+        CHECK(a.confirm == C_NONE && strstr(a.msg, "Select a process first"));
+        select_row(&a, 3);                                              /* a row is picked: now it asks */
+        CHECK(a.pv.sel == 3 && a.sel_pid == 103);
+        ask(&a, C_TERM);
+        CHECK(a.confirm == C_TERM);
+        a.confirm = C_NONE;
+        deselect(&a);                                                   /* a click on empty space lets go */
+        CHECK(a.pv.sel == -1 && a.sel_pid == 0 && !selected_proc(&a));
         free(a.shown);
     }
     if (!bad)
@@ -1623,6 +1674,7 @@ int main(int argc, char **argv)
     static struct app a;
     a.ncores = 1;
     a.hover = -1;
+    a.pv.sel = a.sv.sel = -1;                                           /* nothing is selected until the user picks a row */
     a.sort = S_CPU;
     if (wlwin_connect(&a.win, "mellagui-top", &ops, &a) < 0)
         return 1;

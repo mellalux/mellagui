@@ -645,7 +645,7 @@ static void build_security_lock(struct app *a, int x, int y, int w)
     y += ROW_H + 2;
     {                                                                   /* the rule: the screensaver, when it is on, decides these two itself */
         bool saver_on = kv_int(a, "saver", 1) != 0 && kv_int(a, "saver-minutes", 10) > 0;
-        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H - 6 }, saver_on ? "The screensaver is on: its page decides these two." : "The screensaver is off, so these two apply:");
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H - 6 }, saver_on ? "The screensaver is on: its page decides when the screen locks." : "The screensaver is off, so \"Lock after idle\" applies:");
         y += ROW_H - 6;
     }
     add_slider(a, x, y, w, "Lock after idle", "sec-minutes", 0, 120, 1, " min");
@@ -1110,10 +1110,10 @@ static void build_saver(struct app *a, int x, int y, int w)
     add_button(a, x, y, 230, "Show it now (any key ends it)", "saver-now");
     y += ROW_H + 10;
     struct widget *nt = add(a, W_NOTE, (struct rect){ x, y, w, 6 * NOTE_LINE_H }, "");
-    nt->note = "The rule: while the screensaver is on, these times decide, and the Security page's \"Lock after idle\" and \"Screen off after\" are not "
-               "used (they apply when it is off). \"Starts after\" and \"Monitor sleeps after\" count from the last touch, \"Lock after\" from when it "
-               "started (0 = never; needs a password or PIN). The monitor fades out, then sleeps; any touch wakes it and is not passed on. It does not "
-               "start over a full screen window.";
+    nt->note = "The rule: while the screensaver is on, these times decide, and the Security page's \"Lock after idle\" is not used (it applies when "
+               "it is off). When the lock screen itself is in front, the Security page's \"Screen off after\" decides when the monitors sleep. "
+               "\"Starts after\" and \"Monitor sleeps after\" count from the last touch, \"Lock after\" from when it started (0 = never; needs a password or PIN). The monitor fades out, "
+               "then sleeps; any touch wakes it and is not passed on. It does not start over a full screen window.";
     (void)nt;
 }
 

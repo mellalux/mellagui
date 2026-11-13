@@ -9,9 +9,9 @@
 
 #include "glb.h"
 
-#define BODY_LENGTH 0.875f              /* the rest pose is made this long in metres, whatever the model's units are (a Blender armature: centimetres under a scale of 0.01) */
+#define BODY_LENGTH 1.05f               /* the rest pose is made this long in metres, whatever the model's units are (a Blender armature: centimetres under a scale of 0.01) */
 #define EYE_UNITS 5.67e-5f              /* the radius of an eye in the model's units (of the cat this was made for) */
-#define CELLM 0.034f                    /* one letter of the fur in metres */
+#define CELLM 0.040f                    /* one letter of the fur in metres */
 
 struct mglb {
     struct glb *g;
@@ -183,7 +183,7 @@ void mglb_pose(struct mglb *m, float t, const float cam[3], const uint8_t *const
     sh->pos[0] = m->x; sh->pos[2] = m->z;
     sh->cy = m->cy; sh->sy = m->sy_;
     sh->scale = 1.0f;
-    sh->sh_w = 0.15f; sh->sh_l = 0.40f; sh->sh_h = 0.30f;
+    sh->sh_w = 0.18f; sh->sh_l = 0.48f; sh->sh_h = 0.36f;
     memcpy(sh->ldir, ldir, sizeof(sh->ldir));
     sh->lstr = lstr;
     sh->lie = 0.0f;
@@ -463,7 +463,7 @@ bool mglb_pixel(const struct mglb *m, int x, int y, const float o[3], const floa
         touched = true;
     }
     if (m->glow > 0.02f && g->has_eyes) {                                              /* the glow round the eyes (in front of what lies behind them) */
-        float hr = 0.018f;
+        float hr = 0.0215f;
         for (int e = 0; e < 2; e++) {
             float ex = m->eyew[e][0] - o[0], ey = m->eyew[e][1] - o[1], ez = m->eyew[e][2] - o[2];
             float te = ex * dn[0] + ey * dn[1] + ez * dn[2];

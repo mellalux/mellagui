@@ -180,6 +180,8 @@ static void proc_start(struct lm_wm *wm, int id)
     struct gad_proc *p = &procs[id];
     if (p->pid > 0 && kill(p->pid, 0) == 0)
         return;
+    if (getenv("MELLAGUI_NO_GADGET_PROCS"))                          /* (the fuzzer: no program may connect to it) */
+        return;
     char spec[96], cmd[PATH_MAX + 64];
     const char *dump = getenv("MELLAGUI_GADGET_DUMP");               /* (the tests: the program writes its state there; an old file would be stale) */
     if (dump && *dump) {

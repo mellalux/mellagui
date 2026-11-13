@@ -108,6 +108,7 @@ static void setup(void)
     }
     setenv("XDG_RUNTIME_DIR", dir, 1);
     setenv("PATH", "/nonexistent", 1);                      /* nothing the compositor spawns may find a program */
+    setenv("MELLAGUI_NO_GADGET_PROCS", "1", 1);             /* the gadget switches must not start programs that connect to the server */
     setenv("MELLAGUI_LOCK_ITER", "1000", 1);
     setenv("MELLAGUI_LOCK_UNIT_MS", "60000", 1);
     signal(SIGPIPE, SIG_IGN);

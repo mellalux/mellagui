@@ -327,7 +327,7 @@ struct lm_wm {
         bool placed;            /* false: docked top right (default); true: x/y chosen by dragging */
         int32_t x, y, w, h;
         uint32_t click_time;
-    } gad[LM_GADGET_COUNT];
+    } gad[LM_GADGET_TOTAL];
     struct lm_window *hover_task;
     struct lm_window *press_win;
     uint32_t press_bits;

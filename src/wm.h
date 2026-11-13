@@ -338,6 +338,11 @@ void lm_wm_keyboard_state_changed(struct lm_wm *wm);
 
 /* Desktop gadgets: the clipboard viewer and the volume mixer. */
 enum lm_gadget_id { LM_GADGET_CLIPBOARD, LM_GADGET_MIXER, LM_GADGET_SYSTEM, LM_GADGET_SMART, LM_GADGET_COUNT };
+/* Gadgets of other programs (docs/GADGETS.md): one file NAME.conf in the gadgets folder each, ids LM_GADGET_COUNT .. LM_GADGET_TOTAL - 1. */
+#define LM_GADGET_EXT_MAX 8
+#define LM_GADGET_TOTAL (LM_GADGET_COUNT + LM_GADGET_EXT_MAX)
+/* The id of the gadget with that name (a built-in one or one of the folder), -1 when there is none. */
+int lm_wm_gadget_by_name(const struct lm_wm *wm, const char *name);
 /* Visibility of gadget `id` (Super+G = clipboard, Super+V = mixer, Super+S = system monitor, Super+H = smart home; control socket `gadget`, `mixer`, `sysinfo`, `smart`). */
 bool lm_wm_gadget_visible_id(const struct lm_wm *wm, int id);
 void lm_wm_gadgets_start(struct lm_wm *wm, bool headless);

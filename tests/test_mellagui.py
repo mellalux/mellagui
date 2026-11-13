@@ -17394,6 +17394,115 @@ class TestScale(Base):
         self.assertLess(diff, 48 * a.w // 100)                          # under 1 % of the panel strip differs
 
 
+class TestExtraGadgets(Base):
+    """Gadgets of other programs: a file NAME.conf in the gadgets folder, the program's window has the app id mellagui.gadget.NAME (docs/GADGETS.md)."""
+
+    def start(self, name, files, conf=None):
+        d = os.path.join(tmp, name + '-gadgets')
+        os.makedirs(d, exist_ok=True)
+        for fn, text in files.items():
+            with open(os.path.join(d, fn), 'w') as f:
+                f.write(text)
+        args = []
+        if conf:
+            cp = os.path.join(tmp, name + '.conf')
+            with open(cp, 'w') as f:
+                f.write(conf)
+            args = ['--config', cp]
+        p, c, stop = self.private_compositor(name, *args, env={'MELLAGUI_GADGET_DIR': d})
+        return c
+
+    def rect(self, c, gname, wait=3.0):
+        end = time.time() + wait
+        while True:
+            c.cmd('gadget-rect ' + gname)
+            v = c.last.split()
+            if v[1] not in ('starting',) or time.time() > end:
+                break
+            time.sleep(0.05)
+        return None if v[1] in ('hidden', 'starting') else tuple(int(x) for x in v[1:5])
+
+    def text_of(self, c, gname, want, wait=4.0):
+        path = c.gadget_file(gname)
+        end = time.time() + wait
+        body = ''
+        while time.time() < end:
+            try:
+                body = open(path).read()
+            except OSError:
+                body = ''
+            if want in body:
+                return body
+            time.sleep(0.1)
+        return body
+
+    def test_a_gadget_from_the_folder_starts_and_shows_what_its_program_prints(self):
+        c = self.start('xg1', {'hello.conf': 'command = mellagui-gadget text hello --title Hi --every 1 -- sh -c "echo one; echo two"\n'})
+        r = self.rect(c, 'hello')
+        self.assertIsNotNone(r)
+        self.assertEqual((r[2], r[3]), (240, 120))
+        body = self.text_of(c, 'hello', 'two')
+        self.assertIn('one\ntwo', body)
+        clip = self.rect(c, 'clipboard')                                # docked under the clipboard card (a built-in one goes first), same right edge
+        self.assertEqual(clip[0] + clip[2], r[0] + r[2])
+        self.assertGreater(r[1], clip[1] + clip[3] - 1)
+
+    def test_autostart_no_waits_until_it_is_switched_on_and_it_can_be_switched_off(self):
+        c = self.start('xg2', {'later.conf': 'autostart = no\ncommand = mellagui-gadget text later -- echo hi\nsize = 300x90\n'})
+        self.assertIsNone(self.rect(c, 'later', 0))
+        c.cmd('gadget later 1')
+        r = self.rect(c, 'later')
+        self.assertEqual(r[2:], (300, 90))
+        c.cmd('gadget later 0')
+        for _ in range(60):
+            if self.rect(c, 'later', 0) is None:
+                break
+            time.sleep(0.05)
+        self.assertIsNone(self.rect(c, 'later', 0))
+
+    def test_bad_files_are_left_out(self):
+        c = self.start('xg3', {'Bad Name.conf': 'command = true\n', 'nocmd.conf': 'autostart = yes\n',
+                               'ok.conf': 'autostart = no\ncommand = true\n'})
+        with self.assertRaises(RuntimeError):
+            c.cmd('gadget-rect nocmd')                                  # (no command: left out)
+        with self.assertRaises(RuntimeError):
+            c.cmd('gadget-rect Bad')                                    # (a name with a blank or capitals: left out)
+        c.cmd('gadget-rect ok')
+        self.assertEqual(c.last, 'ok hidden')
+
+    def test_a_file_named_like_a_built_in_gadget_replaces_its_program(self):
+        c = self.start('xg6', {'clipboard.conf': 'command = mellagui-gadget text clipboard --title Mine -- echo mine\nsize = 220x110\n'})
+        r = self.rect(c, 'clipboard')
+        self.assertEqual(r[2:], (220, 110))
+        self.assertIn('mine', self.text_of(c, 'clipboard', 'mine'))        # (the dump of the text card, not the clipboard's)
+
+    def test_a_key_binding_switches_a_gadget(self):
+        c = self.start('xg4', {'toggle.conf': 'autostart = no\ncommand = mellagui-gadget text toggle -- echo x\n'},
+                       conf='[keys]\nSuper+F9 = gadget-toggle toggle\n')
+        self.assertIsNone(self.rect(c, 'toggle', 0))
+        c.key(KEY_LEFTMETA, True)
+        c.tap(67)
+        c.key(KEY_LEFTMETA, False)
+        self.assertIsNotNone(self.rect(c, 'toggle'))
+
+    def test_a_double_click_on_the_title_puts_the_card_back(self):
+        c = self.start('xg5', {'card.conf': 'command = mellagui-gadget text card --every 1 -- echo x\nsize = 200x100\n'})
+        r = self.rect(c, 'card')
+        c.abs(r[0] + r[2] // 2, r[1] + 10)
+        c.button(272, True)
+        time.sleep(0.3)
+        c.cmd('motion -200 100')
+        time.sleep(0.3)
+        c.button(272, False)
+        c.gadget_settle('card')
+        moved = self.rect(c, 'card')
+        self.assertNotEqual(moved[:2], r[:2])
+        c.click(moved[0] + moved[2] // 2, moved[1] + 10)
+        c.click(moved[0] + moved[2] // 2, moved[1] + 10)
+        c.gadget_settle('card')
+        self.assertEqual(self.rect(c, 'card'), r)
+
+
 class TestSmartGadget(Base):
     """The Smart home card of the desktop: the devices pinned in mellagui-smart, asked from the program (a stand-in here, tests/fake_smart.py)."""
 

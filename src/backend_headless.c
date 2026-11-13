@@ -669,19 +669,18 @@ static void ctl_command(struct ctl_client *c, char *line)
         int id = LM_GADGET_CLIPBOARD;
         const char *v = a1;
         if (a1 && a2) {
-            id = !strcmp(a1, "mixer") ? LM_GADGET_MIXER : !strcmp(a1, "system") ? LM_GADGET_SYSTEM : !strcmp(a1, "smart") ? LM_GADGET_SMART :
-                 !strcmp(a1, "clipboard") ? LM_GADGET_CLIPBOARD : -1;
+            id = srv->wm ? lm_wm_gadget_by_name(srv->wm, a1) : -1;
             v = a2;
         }
-        if (!v || !srv->wm || id < 0) { ctl_reply(c, "err usage: gadget [clipboard|mixer|system|smart] <0|1>\n"); return; }
+        if (!v || !srv->wm || id < 0) { ctl_reply(c, "err usage: gadget [NAME] <0|1>\n"); return; }
         lm_wm_set_gadget_id(srv->wm, id, v[0] == '1');
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "gadget-rect")) {
         /* gadget-rect [clipboard|mixer|system|smart]: the card's window; "hidden" = switched off, "starting" = switched on, its program has
          * no window yet (the test client waits and asks again) */
         struct lm_rect r;
-        int id = !a1 || !strcmp(a1, "clipboard") ? LM_GADGET_CLIPBOARD : !strcmp(a1, "mixer") ? LM_GADGET_MIXER : !strcmp(a1, "system") ? LM_GADGET_SYSTEM :
-                 LM_GADGET_SMART;
+        int id = !a1 ? LM_GADGET_CLIPBOARD : srv->wm ? lm_wm_gadget_by_name(srv->wm, a1) : -1;
+        if (id < 0) { ctl_reply(c, "err no such gadget\n"); return; }
         if (srv->wm && lm_wm_gadget_visible_id(srv->wm, id) && lm_wm_gadget_rect_id(srv->wm, id, &r))
             ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
         else if (srv->wm && lm_wm_gadget_visible_id(srv->wm, id))

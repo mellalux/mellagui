@@ -147,7 +147,7 @@ struct action_def { const char *name; enum lm_action act; enum arg_kind arg; };
 static const struct action_def actions[] = {
     { "none", LM_ACT_NONE, ARG_NONE },
     { "terminal", LM_ACT_TERMINAL, ARG_NONE }, { "run", LM_ACT_RUN, ARG_NONE }, { "settings", LM_ACT_SETTINGS, ARG_NONE },
-    { "exec", LM_ACT_EXEC, ARG_COMMAND },
+    { "exec", LM_ACT_EXEC, ARG_COMMAND }, { "gadget-toggle", LM_ACT_GADGET_TOGGLE, ARG_COMMAND },
     { "layout-next", LM_ACT_LAYOUT_NEXT, ARG_NONE }, { "layout-prev", LM_ACT_LAYOUT_PREV, ARG_NONE },
     { "gadget-clipboard", LM_ACT_GADGET_CLIPBOARD, ARG_NONE }, { "clipboard-pick", LM_ACT_CLIPBOARD_PICK, ARG_NONE },
     { "gadget-mixer", LM_ACT_GADGET_MIXER, ARG_NONE }, { "gadget-system", LM_ACT_GADGET_SYSTEM, ARG_NONE }, { "gadget-smart", LM_ACT_GADGET_SMART, ARG_NONE },
@@ -319,7 +319,7 @@ void lm_keys_action_text(const struct lm_keybind *b, char *out, size_t n)
             act = actions[i].name;
     if (b->action == LM_ACT_WORKSPACE || b->action == LM_ACT_MOVE_TO_WORKSPACE)
         snprintf(out, n, "%s %d", act, b->num + 1);
-    else if (b->action == LM_ACT_EXEC)
+    else if (b->action == LM_ACT_EXEC || b->action == LM_ACT_GADGET_TOGGLE)
         snprintf(out, n, "%s %s", act, b->arg);
     else
         snprintf(out, n, "%s", act);

@@ -2048,10 +2048,9 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
         return true;
     case K_GADGET_RESET:                                /* a gadget card: back to its default size and place (double click on its title bar) */
         if (srv->wm) {
-            static const char *const names[] = { "clipboard", "mixer", "system", "smart" };
-            for (int g = 0; g < 4; g++)
-                if (!strcmp(val, names[g]))
-                    lm_wm_gadget_reset(srv->wm, g);
+            int g = lm_wm_gadget_by_name(srv->wm, val);
+            if (g >= 0)
+                lm_wm_gadget_reset(srv->wm, g);
         }
         return true;
     case K_FOCUS_BACK:                                  /* a gadget that had the keyboard gives it back to the window that had it */

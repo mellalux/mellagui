@@ -902,10 +902,14 @@ static void flow_feed(struct flow *f, int k)
 static void card_controls(struct flow *f)
 {
     struct tuya_dev *d = &f->a->dev[f->dev];
+    int ctrl = dp_index(d, "control");
+    bool buttons = ctrl >= 0 && controllable(&d->dp[ctrl]) && d->dp[ctrl].nrange <= 4;     /* the blind has open / stop / close */
     for (int k = 0; k < d->ndp; k++) {
         struct tuya_dp *dp = &d->dp[k];
         if (!controllable(dp) || !primary(d, dp))
             continue;
+        if (buttons && !strcmp(dp->code, "percent_control"))
+            continue;                                           /* the position slider is in the blind's own view (Details), not on the card */
         if (!strcmp(dp->code, "manual_feed"))
             flow_feed(f, k);
         else if (dp->type == TUYA_INT)
@@ -2739,7 +2743,7 @@ static int selftest(void)
     int kinds[9] = { 0 };
     for (int i = 0; i < a.nctl; i++)
         kinds[a.ctl[i].kind]++;
-    CHECK(kinds[C_BUTTON] == 3 && kinds[C_SLIDER] == 1 && kinds[C_TOGGLE] == 1 && kinds[C_DETAILS] == 2, "cards: %d buttons %d sliders %d toggles %d details",
+    CHECK(kinds[C_BUTTON] == 3 && kinds[C_SLIDER] == 0 && kinds[C_TOGGLE] == 1 && kinds[C_DETAILS] == 2, "cards: %d buttons %d sliders %d toggles %d details",
           kinds[C_BUTTON], kinds[C_SLIDER], kinds[C_TOGGLE], kinds[C_DETAILS]);
     for (int i = 0; i < a.nctl; i++)
         CHECK(a.ctl[i].b.x >= PAD && a.ctl[i].b.x + a.ctl[i].b.w <= a.win.bw - PAD, "control %d leaves its card", i);

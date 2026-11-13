@@ -9,6 +9,8 @@
  *   mellagui-smart --set-local ID CODE VALUE   the same, but only over the local network, and it says how that went
  *   mellagui-smart --get-local ID              asks the device itself for its values over the local network
  *   mellagui-smart --background        carry out the timetable (smartsched.h; no window, started with the compositor)
+ *   mellagui-smart --sun               today's sunrise and sunset at the place the timetable uses (smartsun.h)
+ *   mellagui-smart --place LAT LON     the place for them (degrees, east positive); `--place auto` goes back to the one of the time zone
  *   mellagui-smart --scenes            the scenes ("Tap-to-Run") made in the app
  *   mellagui-smart --scene NAME        start one of them (for a key binding: Super+F1 = exec mellagui-smart --scene "Movie night")
  *   mellagui-smart --scan [SECONDS]    listen for the devices in this network (default 20 s): their local addresses and protocol versions
@@ -48,6 +50,7 @@
 #include "qr.h"
 #include "smartfav.h"
 #include "smartsched.h"
+#include "smartsun.h"
 #include "theme.h"
 #include "tuya.h"
 #include "tuyalan.h"
@@ -167,6 +170,8 @@ struct app {
     struct {
         bool open;
         int hour, min;
+        int kind;                       /* 0 = at hour:min, 1 = at sunrise, 2 = at sunset */
+        int offset;                     /* minutes after (+) or before (-) the sun, -180..180 */
         unsigned days;
         int action;                     /* index into acts[] */
         double num;                     /* the number of an action that has one */
@@ -1129,7 +1134,16 @@ static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out,
     } else {
         pretty(r->value, what, sizeof(what));
     }
-    snprintf(out, n, "%02d:%02d  %s  %s", r->hour, r->min, days, what);
+    char at[48];
+    sched_time_text(r, at, sizeof(at));
+    int due;
+    if (r->sun && sched_minute(r, time(NULL), &due)) {          /* a sun rule says what time that makes today */
+        char tail[16];
+        snprintf(tail, sizeof(tail), " (%02d:%02d)", due / 60, due % 60);
+        if (strlen(at) + strlen(tail) < sizeof(at))
+            strcat(at, tail);
+    }
+    snprintf(out, n, "%s  %s  %s", at, days, what);
 }
 
 static struct ctl *modal_ctl(struct flow *f, enum ctl_kind kind, int dp, struct box b, const char *label, const char *value, bool lit)
@@ -1171,14 +1185,48 @@ static void schedule_controls(struct flow *f)
         flow_break(f);
         return;
     }
-    char text[80];
+    char text[120];
     static const char *const day[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     static const char *const step[4][2] = { { "h-", "- 1 h" }, { "h+", "+ 1 h" }, { "m-", "- 5 min" }, { "m+", "+ 5 min" } };
-    snprintf(text, sizeof(text), "At %02d:%02d", a->ed.hour, a->ed.min);
-    flow_line(f, C_TEXT, text);
-    f->cy += 4;
-    for (int i = 0; i < 4; i++)
-        flow_add(f, C_EDIT, -1, lm_font_text_width(step[i][1]) + 24, step[i][1], step[i][0]);
+    static const char *const ostep[4][2] = { { "o:-30", "- 30 min" }, { "o:-5", "- 5 min" }, { "o:5", "+ 5 min" }, { "o:30", "+ 30 min" } };
+    static const char *const kinds[3][2] = { { "k:0", "At a time" }, { "k:1", "At sunrise" }, { "k:2", "At sunset" } };
+    for (int i = 0; i < 3; i++) {
+        struct ctl *c = flow_add(f, C_EDIT, -1, lm_font_text_width(kinds[i][1]) + 28, kinds[i][1], kinds[i][0]);
+        if (c)
+            c->lit = i == a->ed.kind;
+    }
+    flow_break(f);
+    if (a->ed.kind == 0) {
+        snprintf(text, sizeof(text), "At %02d:%02d", a->ed.hour, a->ed.min);
+        flow_line(f, C_TEXT, text);
+        f->cy += 4;
+        for (int i = 0; i < 4; i++)
+            flow_add(f, C_EDIT, -1, lm_font_text_width(step[i][1]) + 24, step[i][1], step[i][0]);
+    } else {
+        struct sched_rule probe = { .sun = a->ed.kind, .offset = a->ed.offset };
+        char at[48], hint[64] = "";
+        int due;
+        double lat, lon;
+        char place[64];
+        sched_time_text(&probe, at, sizeof(at));
+        if (sched_minute(&probe, time(NULL), &due))
+            snprintf(hint, sizeof(hint), ", today %02d:%02d", due / 60, due % 60);
+        else if (!sun_place(&lat, &lon, place, sizeof(place)))
+            snprintf(hint, sizeof(hint), " - the place is not known");
+        snprintf(text, sizeof(text), "At %s%s", at, hint);
+        flow_line(f, C_TEXT, text);
+        f->cy += 4;
+        for (int i = 0; i < 4; i++)
+            flow_add(f, C_EDIT, -1, lm_font_text_width(ostep[i][1]) + 24, ostep[i][1], ostep[i][0]);
+        if (sun_place(&lat, &lon, place, sizeof(place))) {
+            flow_break(f);
+            snprintf(text, sizeof(text), "Place: %.2f %c %.2f %c (%s)", lat < 0 ? -lat : lat, lat < 0 ? 'S' : 'N', lon < 0 ? -lon : lon, lon < 0 ? 'W' : 'E', place);
+            flow_line(f, C_TEXT, text);
+        } else {
+            flow_break(f);
+            flow_line(f, C_TEXT, "Tell the place with: mellagui-smart --place LAT LON");
+        }
+    }
     flow_break(f);
     for (int i = 0; i < 7; i++) {
         char v[4] = { 'd', (char)('0' + i), 0 };
@@ -1792,6 +1840,8 @@ static void press_edit(struct app *a, const struct ctl *c)
         a->ed.open = true;
         a->ed.hour = 7;
         a->ed.min = 30;
+        a->ed.kind = 0;
+        a->ed.offset = 0;
         a->ed.days = 0x7f;
         a->ed.action = 0;
         for (int i = 0; i < a->nacts; i++)                      /* a number starts at what the device has now */
@@ -1812,6 +1862,10 @@ static void press_edit(struct app *a, const struct ctl *c)
         a->ed.min = (a->ed.min / 5 * 5 + 5) % 60;
     } else if (!strcmp(v, "m-")) {
         a->ed.min = ((a->ed.min + 4) / 5 * 5 + 55) % 60;
+    } else if (!strncmp(v, "k:", 2) && n >= 0 && n <= 2) {
+        a->ed.kind = n;
+    } else if (!strncmp(v, "o:", 2)) {
+        a->ed.offset = LM_CLAMP(a->ed.offset + n, -180, 180);
     } else if (!strcmp(v, "dw")) {
         a->ed.days = 0x1f;
     } else if (!strcmp(v, "da")) {
@@ -1839,6 +1893,8 @@ static void press_edit(struct app *a, const struct ctl *c)
         r->on = true;
         r->hour = a->ed.hour;
         r->min = a->ed.min;
+        r->sun = a->ed.kind;
+        r->offset = a->ed.kind ? a->ed.offset : 0;
         r->days = a->ed.days & 0x7f;
         copy(r->dev, sizeof(r->dev), d->id);
         copy(r->code, sizeof(r->code), d->dp[act->dp].code);
@@ -2559,6 +2615,28 @@ static int cmd_scene(const char *which)
     return 0;
 }
 
+/* --sun: today's sunrise and sunset where the timetable works them out. */
+static int cmd_sun(void)
+{
+    double lat, lon;
+    char name[64];
+    int rise, set;
+    if (!getenv("MELLAGUI_SMART_SUN") && !sun_place(&lat, &lon, name, sizeof(name))) {
+        fprintf(stderr, "mellagui-smart: no place is known (no time zone table found): --place LAT LON\n");
+        return 1;
+    }
+    if (getenv("MELLAGUI_SMART_SUN") && *getenv("MELLAGUI_SMART_SUN")) {
+        lat = lon = 0;
+        snprintf(name, sizeof(name), "MELLAGUI_SMART_SUN");
+    }
+    if (!sun_today(time(NULL), &rise, &set)) {
+        printf("place %.4f %.4f (%s)\nthe sun does not rise and set today\n", lat, lon, name);
+        return 0;
+    }
+    printf("place %.4f %.4f (%s)\nsunrise %02d:%02d\nsunset %02d:%02d\n", lat, lon, name, rise / 60, rise % 60, set / 60, set % 60);
+    return 0;
+}
+
 static int cmd_login(const char *code)
 {
     static struct tuya_session s;
@@ -2631,7 +2709,7 @@ static int cmd_scan(int seconds)
 
 static int selftest(void)
 {
-    int bad = tuya_selftest() + qr_selftest() + tuyalan_selftest() + sched_selftest();
+    int bad = tuya_selftest() + qr_selftest() + tuyalan_selftest() + sched_selftest() + sun_selftest();
 #define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "mellagui-smart selftest: " __VA_ARGS__); fputc('\n', stderr); bad++; } } while (0)
     char s[64];
     pretty("switch_1", s, sizeof(s));
@@ -2731,6 +2809,27 @@ int main(int argc, char **argv)
         return cmd_set_local(argv[2], argv[3], argv[4]);
     if (argc == 2 && !strcmp(argv[1], "--background"))
         return sched_background();
+    if (argc == 2 && !strcmp(argv[1], "--sun"))
+        return cmd_sun();
+    if (argc == 3 && !strcmp(argv[1], "--place") && !strcmp(argv[2], "auto")) {
+        double lat, lon;
+        char name[64];
+        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+        char path[1024];
+        snprintf(path, sizeof(path), xdg && *xdg ? "%s/mellagui/smart-place.conf" : "%s/.config/mellagui/smart-place.conf", xdg && *xdg ? xdg : home ? home : "");
+        unlink(path);
+        printf(sun_place(&lat, &lon, name, sizeof(name)) ? "place: %.4f %.4f (%s)\n" : "no place is known: --place LAT LON\n", lat, lon, name);
+        return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "--place")) {
+        char *e1, *e2;
+        double lat = strtod(argv[2], &e1), lon = strtod(argv[3], &e2);
+        if (*e1 || *e2 || !sun_place_save(lat, lon)) {
+            fprintf(stderr, "mellagui-smart: --place LAT LON (degrees; north and east are positive, e.g. 59.437 24.754)\n");
+            return 2;
+        }
+        return cmd_sun();
+    }
     if (argc == 2 && !strcmp(argv[1], "--scenes"))
         return cmd_scene(NULL);
     if (argc == 3 && !strcmp(argv[1], "--scene"))
@@ -2755,7 +2854,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc > 1) {
-        fprintf(stderr, "usage: mellagui-smart | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --login USERCODE | --logout | --qr TEXT | --selftest\n");
+        fprintf(stderr, "usage: mellagui-smart | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --sun | --place LAT LON|auto | --login USERCODE | --logout | --qr TEXT | --selftest\n");
         return 2;
     }
     const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");

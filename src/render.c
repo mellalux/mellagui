@@ -645,21 +645,38 @@ static void draw_line(const struct paint_ctx *c, int x0, int y0, int x1, int y1,
 }
 
 static uint32_t mix_rgb(uint32_t a, uint32_t b, int t);
+static void paint_drop(const struct paint_ctx *c, const struct lm_rect *r, int radius, uint32_t rgb);
+static int btn_radius(int r);
+static void paint_round_button(const struct paint_ctx *c, float cx, float cy, float R, uint32_t rgb, uint32_t alpha);
+
+/* The title bar is a drop of water floating on a darker frame: the bar and the borders are the dark water (`col`), the title lies in a drop in the frame's
+ * own colour and its buttons are small beads of the same water. */
+static void frame_bar_pill(const struct lm_frame_info *f, struct lm_rect *pill)
+{
+    *pill = lm_rect_make(f->titlebar.x + 2, f->titlebar.y + 2, f->titlebar.w - 4, f->titlebar.h - 4);
+}
 
 static void draw_frame_button(const struct paint_ctx *c, const struct lm_frame_info *f,
                               const struct lm_rect *b, uint32_t which, uint32_t fg)
 {
-    uint32_t bg = 0;
-    bool filled = false;
-    if (f->pressed & which) {
-        bg = (which == LM_FRAME_HOVER_CLOSE) ? lm_theme.title_button_close_pressed : COL_BTN_PRESSED;
-        filled = true;
-    } else if (f->hover & which) {
-        bg = (which == LM_FRAME_HOVER_CLOSE) ? COL_BTN_CLOSE : COL_BTN_HOVER;
-        filled = true;
+    uint32_t drop = f->active ? COL_FRAME_ACTIVE : COL_FRAME_IDLE;
+    uint32_t base = which == LM_FRAME_HOVER_CLOSE ? lm_theme.btn_red : which == LM_FRAME_HOVER_MAXIMIZE ? lm_theme.btn_green : lm_theme.btn_amber;
+    uint32_t lit = which == LM_FRAME_HOVER_CLOSE ? lm_theme.btn_red_lit : which == LM_FRAME_HOVER_MAXIMIZE ? lm_theme.btn_green_lit : lm_theme.btn_amber_lit;
+    uint32_t bg = base;                                                          /* close red, maximize green, minimize amber */
+    if (f->pressed & which)
+        bg = mix_rgb(base, 0x000000u, 70);
+    else if (f->hover & which)
+        bg = lit;
+    if (!f->active)
+        bg = mix_rgb(bg, drop, 120);                                             /* a window that is not in front has duller beads */
+    struct lm_rect pill;
+    frame_bar_pill(f, &pill);
+    int sz = LM_MIN(LM_MIN(b->w, b->h), pill.h - 2);
+    if (sz >= 8) {
+        struct lm_rect bead = lm_rect_make(b->x + (b->w - sz) / 2, b->y + (b->h - sz) / 2, sz, sz);
+        paint_drop(c, &bead, btn_radius(sz / 2), bg);
     }
-    if (filled)
-        fill_rect(c, b, bg);
+    fg = lm_theme.on_colour;                                                     /* the sign on a coloured bead is white */
     int cx = b->x + b->w / 2, cy = b->y + b->h / 2;
     switch (which) {
     case LM_FRAME_HOVER_CLOSE:
@@ -697,7 +714,8 @@ static void draw_frame_button(const struct paint_ctx *c, const struct lm_frame_i
 /* The solid parts of a frame (everything but the title bar, which has the buttons and the title). Shared with the GL renderer. */
 struct frame_parts {
     struct lm_rect left, right, bottom, body;
-    uint32_t col;                       /* title bar and the three border strips */
+    uint32_t col;                       /* title bar and the three border strips (the dark water) */
+    uint32_t drop;                      /* the title's drop and its buttons */
     uint32_t body_col;                  /* behind the client area (shows where the client has not drawn) */
     bool has_body;
 };
@@ -707,7 +725,8 @@ static void frame_parts(const struct lm_frame_info *f, struct frame_parts *p)
     const struct lm_rect *o = &f->outer;
     int bw = LM_BORDER_WIDTH;
     memset(p, 0, sizeof(*p));
-    p->col = f->active ? COL_FRAME_ACTIVE : COL_FRAME_IDLE;
+    p->drop = f->active ? COL_FRAME_ACTIVE : COL_FRAME_IDLE;
+    p->col = mix_rgb(p->drop, 0x000000u, 70);
     p->body_col = COL_CONTENT_BG;
     if (o->h > f->titlebar.h) {
         p->has_body = true;
@@ -725,6 +744,9 @@ static void paint_frame(const struct paint_ctx *c, const struct lm_frame_info *f
     frame_parts(f, &fp);
 
     fill_rect(c, &f->titlebar, fp.col);
+    struct lm_rect pill;
+    frame_bar_pill(f, &pill);
+    paint_drop(c, &pill, btn_radius(pill.h / 2), fp.drop);                  /* the title bar itself: a drop of water */
     if (fp.has_body) {
         fill_rect(c, &fp.left, fp.col);
         fill_rect(c, &fp.right, fp.col);
@@ -1194,7 +1216,7 @@ static void paint_power(const struct paint_ctx *c, const struct lm_power_info *p
         uint32_t base = sel ? (danger ? COL_PANEL_DANGER : COL_PANEL_ACCENT) : COL_PANEL_BTN;
         if (sel)
             paint_shape(c, cx, cy, R + 4.0f, SHAPE_DISC, base, 0x50);             /* a soft halo */
-        paint_shape(c, cx, cy, R, SHAPE_DISC, base, alpha);
+        paint_round_button(c, cx, cy, R, base, alpha);
         paint_shape(c, cx, cy, R * (i >= 2 && !pw->confirm ? 0.56f : 0.52f), sh, sel && !danger ? COL_PANEL : COL_PANEL_TEXT, alpha);
         struct lm_rect label = lm_rect_make(pw->hit[i].w > 0 ? pw->hit[i].x : b->x - 8, b->y + b->h + 8, pw->hit[i].w > 0 ? pw->hit[i].w : b->w + 16, LM_FONT_H);
         draw_text_centered(c, &label, name, sel ? COL_PANEL_TEXT : COL_PANEL_DIM);
@@ -1233,7 +1255,7 @@ static void paint_about(const struct paint_ctx *c, const struct lm_about_info *a
         draw_text(c, &text, text.x, ry, ai->row[i].label, COL_PANEL_DIM);
         draw_text(c, &text, text.x + 96, ry, ai->row[i].value, COL_PANEL_TEXT);
     }
-    fill_round(c, &ai->close, 6, 0xff000000u | (ai->hover_close ? COL_PANEL_ACCENT : COL_PANEL_BTN));
+    paint_drop(c, &ai->close, btn_radius(LM_MIN(ai->close.w, ai->close.h) / 2), ai->hover_close ? COL_PANEL_ACCENT : COL_PANEL_BTN);
     draw_text_centered(c, &ai->close, "Close", ai->hover_close ? COL_PANEL : COL_PANEL_TEXT);
 }
 
@@ -1268,6 +1290,62 @@ static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, 
     pview(c, &pc);
     struct lm_rect pr = prect(c, rect);
     stroke_round_px(&pc, &pr, plen(c, radius), argb, (float)c->s);
+}
+
+/* ---- buttons as beads of water --------------------------------------------------------------------------------------------- */
+/* The look of every MellaGUI button (the programs' wlwin_drop, client/uikit.h lm_drop_px): a dark rim, an interior a little darker at the top that lights up
+ * towards the bottom (eight soft lens shapes, each smaller and lighter), a small glint near the upper left and, on a wide button, a thin sheen along the top.
+ * All in logical pixels, so it is exact at any output scale. `paint_drop` is for opaque buttons, `paint_glint` puts the glint and the light on something that
+ * is translucent already (glass keys, the dock's icons). */
+static void paint_drop(const struct paint_ctx *c, const struct lm_rect *r, int radius, uint32_t rgb)
+{
+    if (r->w < 10 || r->h < 12) {
+        fill_round(c, r, radius, 0xff000000u | rgb);
+        return;
+    }
+    int rr = LM_MIN(radius, LM_MIN(r->w, r->h) / 2);
+    fill_round(c, r, rr, 0xff000000u | mix_rgb(rgb, 0x000000u, 87));                                   /* the rim */
+    struct lm_rect body = lm_rect_make(r->x + 1, r->y + 1, r->w - 2, r->h - 3);
+    fill_round(c, &body, LM_MAX(rr - 1, 0), 0xff000000u | mix_rgb(rgb, 0x000000u, 26));
+    for (int i = 0; i < 8; i++) {
+        float t = (float)i / 7.0f;
+        int side = 2 + rr / 6 + (int)(t * (float)(rr * 3 / 4 + 3));
+        int ly = r->y + (int)((float)r->h * (0.28f + 0.46f * t)), lh = r->y + r->h - 3 - ly, lw = r->w - 2 * side;
+        if (lh < 3 || lw < 6)
+            continue;
+        struct lm_rect lens = lm_rect_make(r->x + side, ly, lw, lh);
+        fill_round(c, &lens, LM_MIN(lh / 2, LM_MAX(rr - 1, 1)), 0xff000000u | mix_rgb(rgb, 0xffffffu, 5 + (int)(76.0f * t * t)));
+    }
+    bool tall = r->h >= 28;
+    int gx = r->x + LM_MAX(rr * 7 / 10, 5), gw = LM_CLAMP(r->w / 4, 6, tall ? 14 : 9), gy = tall ? 2 : 1, gh = tall ? 3 : 2;
+    struct lm_rect glint = lm_rect_make(gx, r->y + gy, gw, gh);
+    fill_round(c, &glint, 1, 0xff000000u | mix_rgb(rgb, 0xffffffu, tall ? 217 : 153));
+    if (r->w > 44) {
+        int sx = gx + gw + 3, sw = r->x + r->w - rr - 4 - sx;
+        if (sw > 0) {
+            struct lm_rect sheen = lm_rect_make(sx, r->y + gy, sw, 1);
+            fill_rect(c, &sheen, 0xff000000u | mix_rgb(rgb, 0xffffffu, tall ? 89 : 64));
+        }
+    }
+}
+
+static void paint_glint(const struct paint_ctx *c, const struct lm_rect *r, int radius, int alpha)
+{
+    if (alpha <= 0 || r->w < 10 || r->h < 12)
+        return;
+    int rr = LM_MIN(radius, LM_MIN(r->w, r->h) / 2);
+    struct lm_rect lens = lm_rect_make(r->x + 2 + rr / 4, r->y + r->h * 11 / 20, r->w - 4 - rr / 2, r->h * 9 / 20 - 2);      /* the light the drop gathers */
+    if (lens.h >= 3 && lens.w >= 6)
+        fill_round(c, &lens, LM_MIN(lens.h / 2, LM_MAX(rr - 1, 1)), ALPHA(alpha * 36 / 255, 0xffffffu));
+    bool tall = r->h >= 28;
+    int gx = r->x + LM_MAX(rr * 7 / 10, 5), gw = LM_CLAMP(r->w / 4, 6, tall ? 14 : 9);
+    struct lm_rect glint = lm_rect_make(gx, r->y + (tall ? 2 : 1), gw, tall ? 3 : 2);
+    fill_round(c, &glint, 1, ALPHA(alpha * (tall ? 200 : 150) / 255, 0xffffffu));
+    if (r->w > 44) {
+        struct lm_rect sheen = lm_rect_make(gx + gw + 3, r->y + (tall ? 2 : 1), LM_MAX(r->x + r->w - rr - 4 - (gx + gw + 3), 0), 1);
+        fill_rect(c, &sheen, ALPHA(alpha * 70 / 255, 0xffffffu));
+    }
+    stroke_round(c, r, rr, ALPHA(alpha * 70 / 255, 0x000000u));                                  /* the edge that bends the light */
 }
 
 /* `text` cut to `maxw` pixels: with ".." at the end (names of icons) or, for fields, its tail (so the caret stays visible). */
@@ -1314,8 +1392,10 @@ static void lc_text_centered(const struct paint_ctx *c, const struct lm_rect *ar
 
 static void paint_launcher_button(const struct paint_ctx *c, const struct lm_rect *r, const char *text, bool hot, bool on)
 {
-    fill_round(c, r, 8, hot ? (0xf0000000u | COL_PANEL_ACCENT) : on ? ALPHA(0x70u, lm_theme.glass) : ALPHA(0x48u, lm_theme.glass));
-    stroke_round(c, r, 8, ALPHA(0x80u, lm_theme.glass));
+    int rad = btn_radius(LM_MIN(r->w, r->h) / 2);
+    fill_round(c, r, rad, hot ? (0xf0000000u | COL_PANEL_ACCENT) : on ? ALPHA(0x70u, lm_theme.glass) : ALPHA(0x48u, lm_theme.glass));
+    stroke_round(c, r, rad, ALPHA(0x80u, lm_theme.glass));
+    paint_glint(c, r, rad, hot ? 255 : 200);
     if (hot)
         draw_text_centered(c, r, text, COL_PANEL);
     else
@@ -1561,6 +1641,10 @@ static void paint_dock_icon_a(const struct paint_ctx *c, const struct lm_rect *b
     pview(c, &pc);
     struct lm_rect pb = prect(c, b);
     paint_dock_icon_px(&pc, &pb, it, lift, alpha);
+    if (alpha > 0 && b->w >= 24 && b->h >= 24) {                         /* the bead of water: the light it gathers, a glint and the edge that bends the light */
+        struct lm_rect ring = *b;
+        paint_glint(c, &ring, LM_MIN(b->w, b->h) / 2 * lm_metrics.button_roundness / 100, alpha);
+    }
 }
 
 static void paint_dock_icon(const struct paint_ctx *c, const struct lm_rect *b, const struct lm_dock_item *it, float lift)
@@ -1651,7 +1735,7 @@ static int btn_radius(int r)
     return r * lm_metrics.button_roundness / 100;
 }
 
-static void paint_round_button(const struct paint_ctx *c, float cx, float cy, float R, uint32_t rgb, uint32_t alpha)
+static void paint_flat_button(const struct paint_ctx *c, float cx, float cy, float R, uint32_t rgb, uint32_t alpha)
 {
     if (lm_metrics.button_roundness >= 100) {
         paint_shape(c, cx, cy, R, SHAPE_DISC, rgb, alpha);
@@ -1659,6 +1743,17 @@ static void paint_round_button(const struct paint_ctx *c, float cx, float cy, fl
     }
     struct lm_rect r = lm_rect_make((int)lroundf(cx - R), (int)lroundf(cy - R), (int)lroundf(R * 2.0f), (int)lroundf(R * 2.0f));
     fill_round(c, &r, (int)lroundf(R * (float)lm_metrics.button_roundness / 100.0f), (alpha << 24) | (rgb & 0xffffffu));
+}
+
+/* A round (or, with a lower [windows] button-roundness, rounded square) button: a drop of water; a faint one (alpha under 255) stays flat. */
+static void paint_round_button(const struct paint_ctx *c, float cx, float cy, float R, uint32_t rgb, uint32_t alpha)
+{
+    if (alpha < 255 || R < 7.0f) {
+        paint_flat_button(c, cx, cy, R, rgb, alpha);
+        return;
+    }
+    struct lm_rect r = lm_rect_make((int)lroundf(cx - R), (int)lroundf(cy - R), (int)lroundf(R * 2.0f), (int)lroundf(R * 2.0f));
+    paint_drop(c, &r, (int)lroundf(R * (float)lm_metrics.button_roundness / 100.0f), rgb);
 }
 
 /* The flag of the country a keyboard layout belongs to, 22 x 14 pixels centred in `box` (the colours are literals on purpose: a flag is a flag in
@@ -1699,7 +1794,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
                           : mix_rgb(COL_PANEL, col, i == p->hover_workspace ? 215 : 165);
         float cx = (float)w->x + (float)w->w / 2.0f, cy = (float)w->y + (float)w->h / 2.0f, R = (float)LM_MIN(w->w, w->h) / 2.0f;
         if (cur)                                            /* the current one: a white ring and dark digit, the others a duller disc and a white digit */
-            paint_round_button(c, cx, cy, R, lm_theme.on_colour, 255);
+            paint_flat_button(c, cx, cy, R, lm_theme.on_colour, 255);
         paint_round_button(c, cx, cy, cur ? R - 2.0f : R, bg, 255);
         char n[2] = { (char)('1' + i), 0 };
         draw_text_centered(c, w, n, cur ? lm_theme.ink : lm_theme.on_colour);
@@ -1710,7 +1805,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
         const struct lm_rect *r = &p->task[i].rect;
         uint32_t bg = p->task[i].active ? COL_PANEL_ACCENT : (p->task[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN);
         uint32_t fg = p->task[i].active ? COL_PANEL : (p->task[i].minimized ? COL_PANEL_DIM : COL_PANEL_TEXT);
-        fill_round(c, r, btn_radius(8), 0xff000000u | bg);
+        paint_drop(c, r, btn_radius(LM_MIN(r->w, r->h) / 2), bg);
         struct lm_rect label = lm_rect_make(r->x + 4, r->y, r->w - 8, r->h);
         draw_text_centered(c, &label, p->task[i].title[0] ? p->task[i].title : "-", fg);
     }
@@ -1719,7 +1814,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     for (int i = 0; i < p->ntray; i++) {                 /* programs' icons: a button with the icon and / or a label */
         const struct lm_rect *r = &p->tray[i].rect;
         const struct lm_texture *ic = p->tray[i].icon;
-        fill_round(c, r, btn_radius(8), 0xff000000u | (p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN));
+        paint_drop(c, r, btn_radius(LM_MIN(r->w, r->h) / 2), p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN);
         int x = r->x + 6, tw = p->tray[i].text[0] ? lm_font_text_width(p->tray[i].text) : 0;
         if (ic && !tw)
             x = r->x + (r->w - ic->width) / 2;
@@ -1732,7 +1827,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
             draw_text(c, r, x, r->y + (r->h - LM_FONT_H) / 2, p->tray[i].text, COL_PANEL_TEXT);
     }
     if (p->caps.w > 0) {
-        fill_rect(c, &p->caps, COL_PANEL_DANGER);
+        paint_drop(c, &p->caps, btn_radius(LM_MIN(p->caps.w, p->caps.h) / 2), COL_PANEL_DANGER);
         draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);
     }
     {                                                   /* the keyboard layout: a round badge, every layout in its own colour; with layout-badges one for each layout, the active one bright */
@@ -1769,12 +1864,12 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_sticky ? 30 : 18);
     if (p->sticky_on && p->hover_sticky)
         sbg = lm_theme.sticky_hot;
-    fill_round(c, &p->sticky, btn_radius(8), 0xff000000u | sbg);
+    paint_drop(c, &p->sticky, btn_radius(LM_MIN(p->sticky.w, p->sticky.h) / 2), sbg);
     draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? lm_theme.ink : COL_PANEL_TEXT);
     {                                                   /* the on-screen keyboard: a teal button with a little keyboard, white while it is showing */
         uint32_t obg = p->osk_open ? lm_theme.on_colour : p->hover_osk ? mix_rgb(panel_palette[4], 0xffffffu, 55) : panel_palette[4];
         uint32_t ofg = p->osk_open ? panel_palette[4] : lm_theme.on_colour;
-        fill_round(c, &p->osk, btn_radius(8), 0xff000000u | obg);
+        paint_drop(c, &p->osk, btn_radius(LM_MIN(p->osk.w, p->osk.h) / 2), obg);
         int cx = p->osk.x + p->osk.w / 2, cy = p->osk.y + p->osk.h / 2, bx = cx - 11, by = cy - 6;
         struct lm_rect body = lm_rect_make(bx, by, 22, 12);
         fill_round(c, &body, 3, 0xff000000u | ofg);
@@ -1792,7 +1887,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     {                                                   /* quick settings: three sliders (lines with knobs); the button is lit while the card shows */
         uint32_t qbg = p->quick_open ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_quick ? 30 : 18);
         uint32_t qfg = p->quick_open ? COL_PANEL : COL_PANEL_TEXT;
-        fill_round(c, &p->quick, btn_radius(8), 0xff000000u | qbg);
+        paint_drop(c, &p->quick, btn_radius(LM_MIN(p->quick.w, p->quick.h) / 2), qbg);
         int cx = p->quick.x + p->quick.w / 2, cy = p->quick.y + p->quick.h / 2;
         static const int knob[3] = { -4, 3, -1 };
         for (int i = 0; i < 3; i++) {
@@ -1852,12 +1947,12 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
             bg = mix_rgb(col, 0xffffffu, 80);
         if (st & LM_OSK_KEY_DOWN)
             bg = mix_rgb(col, 0xffffffu, 170);
-        int rad = r->h / 2;
+        int rad = btn_radius(r->h / 2);                                     /* [windows] button-roundness, like every other button */
         if (st & LM_OSK_KEY_ON) {
             struct lm_rect rim = lm_rect_make(r->x - 2, r->y - 2, r->w + 4, r->h + 4);
             fill_round(c, &rim, rad + 2, ALPHA(0xf4u, lm_theme.glass));
         }
-        fill_round(c, r, rad, 0xdc000000u | bg);
+        paint_drop(c, r, rad, bg);                                          /* every key is a drop of water */
         uint32_t fg = (st & LM_OSK_KEY_DOWN) ? lm_theme.ink : lm_theme.on_colour;
         const char *t = oi->key[i].label;
         enum shape arrow = oi->key[i].code == KEY_LEFT ? SHAPE_LEFT : oi->key[i].code == KEY_RIGHT ? SHAPE_RIGHT :

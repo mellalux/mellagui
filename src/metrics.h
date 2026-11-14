@@ -6,7 +6,7 @@
  * The defaults are the built-in look; mellagui.conf can change any of them (a value outside its range is rejected with a
  * warning and the default stays):
  *
- *   [windows]        titlebar-height = 28    border-width = 4     button-size = 20   scrollbar-width = 14   ...
+ *   [windows]        titlebar-height = 28    border-width = 4     button-size = 24   scrollbar-width = 14   ...
  *   [panel]          height = 32             task-max-width = 160   ...
  *   [gadgets]        width = 250             margin = 12          ...
  *   [notifications]  width = 320             gap = 6
@@ -22,7 +22,7 @@
 #define LM_METRICS(X) \
     X("windows", "titlebar-height", titlebar_height, 28, 20, 64, "height of a window's title bar") \
     X("windows", "border-width", border_width, 4, 1, 16, "frame width at the sides and the bottom") \
-    X("windows", "button-size", button_size, 20, 12, 40, "close / maximize / minimize squares (kept 2 px smaller than the title bar)") \
+    X("windows", "button-size", button_size, 24, 12, 40, "close / maximize / minimize squares (kept 2 px smaller than the title bar)") \
     X("windows", "button-gap", button_gap, 4, 0, 16, "space between those buttons") \
     X("windows", "resize-corner", resize_corner, 14, 6, 40, "size of the corner zone that resizes diagonally") \
     X("windows", "double-click-ms", double_click_ms, 400, 100, 1000, "double click time in ms (title bar, gadget title, on-screen keyboard margin, files, viewer, editor; running programs keep theirs)") \

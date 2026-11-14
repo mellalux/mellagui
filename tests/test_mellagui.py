@@ -5749,10 +5749,10 @@ esac
         ctl.click(x0 + 480, y0 + 42 + 28 + 14)                  # Estonian -> active
         time.sleep(0.15)
         self.assertEqual(settings()['layout'], 'ee')
-        ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)              # untick Finnish
+        ctl.click(x0 + 168 + 30, y0 + 42 + 3 * 28 + 14)         # untick Finnish (the flag stands in front of the box)
         time.sleep(0.15)
         self.assertEqual(settings()['layouts'], 'us,ee,de')
-        ctl.click(x0 + 168, y0 + 42 + 3 * 28 + 14)              # Finnish is now the 4th row again: tick it
+        ctl.click(x0 + 168 + 30, y0 + 42 + 3 * 28 + 14)         # Finnish is now the 4th row again: tick it
         time.sleep(0.15)
         self.assertEqual(settings()['layouts'], 'us,ee,de,fi')
         # move German one up: the ^ button of the third row (x = 160 + 440 - 40)
@@ -5760,10 +5760,10 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['layouts'], 'us,de,ee,fi')
         # the delay slider: track x = 310..530; clicking the right end gives the maximum
-        ctl.click(x0 + 531, y0 + 232)
+        ctl.click(x0 + 531, y0 + 288)
         time.sleep(0.15)
         self.assertEqual(settings()['repeat-delay'], '1000')
-        ctl.click(x0 + 310, y0 + 232)
+        ctl.click(x0 + 310, y0 + 288)
         time.sleep(0.15)
         self.assertEqual(settings()['repeat-delay'], '150')
         ctl.click(x0 + 70, y0 + 12 + 1 * 32 + 14)               # the Accessibility tab
@@ -5779,9 +5779,9 @@ esac
     def test_panel_slider_drag(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.abs(x0 + 310 + 110, y0 + 260)                       # repeat rate slider (1..60), mid track
+        ctl.abs(x0 + 310 + 110, y0 + 316)                       # repeat rate slider (1..60), mid track
         ctl.button(272, True)
-        ctl.abs(x0 + 310 + 220, y0 + 260)                       # drag to the right end
+        ctl.abs(x0 + 310 + 220, y0 + 316)                       # drag to the right end
         ctl.button(272, False)
         time.sleep(0.15)
         self.assertEqual(settings()['repeat-rate'], '60')
@@ -5803,9 +5803,11 @@ esac
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
         # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the twelve page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 32nd press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
+        # and reaches the gadget checkbox with the 33rd press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
+        ctl.cmd('settings gadget 1')                            # (a fresh compositor starts with the card off, a later test finds it on: start from on)
+        time.sleep(0.2)
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(32):                                     # (the Smart home box and its "?" are two more stops)
+        for _ in range(33):                                     # (the Smart home box and its "?" are two more stops)
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -5831,21 +5833,21 @@ esac
         type_text('hunter22x')
         ctl.click(x0 + 300, y0 + 141)                           # Repeat: a different text is caught in the panel
         type_text('hunter22y')
-        ctl.click(x0 + 204, y0 + 287)                            # Apply
+        ctl.click(x0 + 204, y0 + 336)                            # Apply
         time.sleep(0.2)
         self.assertEqual(lock_kind(), 'kind=none')
         ctl.click(x0 + 300, y0 + 141)
         for _ in range(9):
             ctl.tap(14)                                         # Backspace
         type_text('hunter22x')
-        ctl.click(x0 + 204, y0 + 287)
+        ctl.click(x0 + 204, y0 + 336)
         time.sleep(0.3)
         self.assertEqual(lock_kind(), 'kind=password')
         self.assertEqual(settings()['lock-kind'], 'password')
         # remove it again through the panel: the page now has a "Current password" field on top and a Remove button
         ctl.click(x0 + 300, y0 + 83)                            # Current password
         type_text('hunter22x')
-        ctl.click(x0 + 445, y0 + 317)                           # Remove lock
+        ctl.click(x0 + 445, y0 + 366)                           # Remove lock
         time.sleep(0.3)
         self.assertEqual(lock_kind(), 'kind=none')
 
@@ -5999,21 +6001,21 @@ esac
         time.sleep(0.2)
         after = ctl.dump(os.path.join(tmp, 'set1.ppm'))
         x0, y0 = win['x'], win['y']
-        row = [(before.px(x0 + x, y0 + 232), after.px(x0 + x, y0 + 232)) for x in range(300, 560, 2)]
+        row = [(before.px(x0 + x, y0 + 288), after.px(x0 + x, y0 + 288)) for x in range(300, 560, 2)]
         self.assertTrue(any(a != b for a, b in row), 'the slider did not move')
 
     def test_try_field_follows_the_layout(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
-        ctl.click(x0 + 200, y0 + 314)                           # the "Try it" field
+        ctl.click(x0 + 200, y0 + 370)                           # the "Try it" field
         time.sleep(0.15)
 
         def field():
             ctl.abs(900, 500)
             time.sleep(0.15)
             ppm = ctl.dump(os.path.join(tmp, 'try.ppm'))
-            ctl.abs(x0 + 200, y0 + 314)
-            return [ppm.px(x0 + x, y0 + y) for y in range(304, 324) for x in range(166, 190)]
+            ctl.abs(x0 + 200, y0 + 370)
+            return [ppm.px(x0 + x, y0 + y) for y in range(360, 380) for x in range(166, 190)]
         empty = field()
         ctl.tap(39)                                             # KEY_SEMICOLON: ';' on us, o-umlaut on ee
         us_text = field()

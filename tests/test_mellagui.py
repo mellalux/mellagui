@@ -15024,7 +15024,7 @@ class TestSaver(Base):
         self.assertGreater(box[1], 360 // 2, 'it sits on the floor, in the lower half')
         self.assertLess(box[2] - box[0], 360, 'and it is a cat, not a wall')
         diff, glow_at, _ = self.cat_pixels(12)                            # (the head is turned to the camera)
-        self.assertGreater(glow_at, 20, 'the eyes glow when the head looks at the camera')
+        self.assertGreater(glow_at, 10, 'the eyes glow when the head looks at the camera')
         self.assertLess(glow_away, glow_at // 3, 'and not when it looks away')
 
     def test_tom_walks_to_another_place_and_back(self):
@@ -15076,13 +15076,13 @@ class TestSaver(Base):
         self.assertGreater(plain, 3000)
         short = ['--sun', '09:17,15:21']                                                # a December day in Tallinn
         self.assertLess(self.blue_sky('sv-sun1', '15:00', short), 50)                   # 15:00 is minutes before that sunset: low orange sun, no blue sky
-        self.assertGreater(self.blue_sky('sv-sun2', '12:19', short), 3000)              # the middle of that day: full day
-        self.assertGreater(self.blue_sky('sv-sun3', '14:00', short), 3000)              # and the afternoon
-        self.assertGreater(self.blue_sky('sv-sun4', '08:00', []), 300)                  # 08:00 is morning in the model ...
+        self.assertGreater(self.blue_sky('sv-sun2', '12:19', short), 2000)              # the middle of that day: full day
+        self.assertGreater(self.blue_sky('sv-sun3', '14:00', short), 2000)              # and the afternoon
+        self.assertGreater(self.blue_sky('sv-sun4', '08:00', []), 30)                  # 08:00 is morning in the model ...
         self.assertLess(self.blue_sky('sv-sun5', '08:00', short), 20)                   # ... but before that sunrise
         # `auto` takes today's times from the place (here the test override), `none` keeps the model's day
         self.assertLess(self.blue_sky('sv-sun6', '15:00', ['--sun', 'auto'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 50)
-        self.assertGreater(self.blue_sky('sv-sun7', '15:00', ['--sun', 'none'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 3000)
+        self.assertGreater(self.blue_sky('sv-sun7', '15:00', ['--sun', 'none'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 2000)
 
     def test_a_bad_sun_option_is_refused(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-matrix')

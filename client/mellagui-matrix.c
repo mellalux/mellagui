@@ -393,8 +393,8 @@ static struct cam cam_at(float t)
     struct cam c;
     c.ox = 0.55f * sinf(t * 0.11f) + 0.2f * sinf(t * 0.29f + 1.0f);
     c.oy = 1.55f + 0.05f * sinf(t * 0.63f);
-    c.oz = 1.6f + 0.7f * sinf(t * 0.07f + 0.5f);
-    float yaw = 0.22f * sinf(t * 0.09f) + 0.05f * sinf(t * 0.37f), pitch = 0.05f * sinf(t * 0.13f + 2.0f) - 0.09f;
+    c.oz = 0.95f + 0.4f * sinf(t * 0.07f + 0.5f);                 /* far from the window, so that Tom has the floor to run about on */
+    float yaw = 0.22f * sinf(t * 0.09f) + 0.05f * sinf(t * 0.37f), pitch = 0.05f * sinf(t * 0.13f + 2.0f) - 0.13f;
     float sy = sinf(yaw), cy = cosf(yaw), sp = sinf(pitch), cp = cosf(pitch);
     c.fx = sy * cp; c.fy = sp; c.fz = cy * cp;
     c.rx = cy; c.ry = 0.0f; c.rz = -sy;
@@ -1313,7 +1313,31 @@ static int selftest(void)
                 struct mcat w0, w1, home;
                 mcat_pose(&home, cyc, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                 mcat_pose(&ct, 0.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
-                CHECK(fabsf(home.pos[0] - ct.pos[0]) < 1e-3f && fabsf(home.pos[2] - ct.pos[2]) < 1e-3f);   /* the day starts and ends on the same spot */
+                {
+                    struct mcat_state q0 = { 0 };
+                    int moves = 0, runs = 0, hops = 0;
+                    for (float t = 0.0f; t < 12.0f * cyc; t += 0.1f) {
+                        struct mcat_state s2;
+                        mcat_state(t, &s2);
+                        CHECK(s2.z > 3.0f && s2.z < 5.7f && fabsf(s2.x) < 2.9f);                          /* the next cycle goes on where this one ended, and he stays in the area whatever the day brings */
+                        if (t > 0.0f) {
+                            float dy = fmodf(fmodf(s2.yaw - q0.yaw, 6.2831853f) + 9.4247780f, 6.2831853f) - 3.1415927f;
+                            CHECK(fabsf(dy) / 0.1f < 1.1f);                                          /* he never whirls round, over twelve cycles of random days */
+                            CHECK(s2.walk > 0.01f || q0.walk > 0.01f || fabsf(dy) < 1e-4f);         /* ... nor turns on the spot */
+                            moves += s2.walk > 0.5f && q0.walk <= 0.5f;
+                            runs += s2.run > 0.5f && q0.run <= 0.5f;
+                            hops += s2.crouch > 0.5f && q0.crouch <= 0.5f;
+                        }
+                        q0 = s2;
+                    }
+                    CHECK(moves > 12 && runs > 2 && hops > 5);                                      /* the random days have walks, runs and hops in them */
+                }
+                {
+                    struct mcat_state e0, e1;
+                    mcat_state(cyc * 3.0f - 0.02f, &e0);
+                    mcat_state(cyc * 3.0f + 0.02f, &e1);
+                    CHECK(fabsf(e0.x - e1.x) < 0.01f && fabsf(e0.z - e1.z) < 0.01f);                        /* (no jump at the end of a cycle) */
+                }
                 mcat_pose(&w0, twalk, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                 mcat_pose(&w1, twalk + 0.3f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                 CHECK(w0.stand > 0.99f && fabsf(w1.pos[0] - w0.pos[0]) + fabsf(w1.pos[2] - w0.pos[2]) > 0.05f);       /* the body moves ... */

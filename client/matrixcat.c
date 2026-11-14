@@ -100,49 +100,73 @@ static const struct legdef k_hind = { true,
 
 /* ---- Tom's day: a timeline of what he does ------------------------------------------------------------------------------------------- */
 
+/* The day is made of CYCLES of CYCLE_LEN seconds. The first one is a script (sit, walk, hop twice, lie down); every other is made of random EPISODES (a stroll, a run,
+ * hops, a long lie, a long walk) that start where the one before ended, picked by a hash of the cycle's number, so everything is deterministic from the time. He
+ * moves over the floor of an AREA (in_area: the part of the room the camera sees well) and never turns on the spot: a path leaves a place in the direction he faces
+ * there and arrives in the direction he faces at the other one, so the turning is the path's, while he walks. */
+
 enum { K_SIT, K_STAND, K_WALK, K_SITDOWN, K_LIE, K_RUN, K_JUMP };
-struct seg { int kind, a, b; float dur; };
+struct pt { float x, z, yaw; };                                        /* a place on the floor and the way he faces there */
+struct seg { int kind; struct pt a, b; float dur; int path; };         /* a = where it starts, b = where it ends (the same but for a walk / run), path = index into g_ptab */
 
-#define N_SPOTS 2
-static const float k_spot[N_SPOTS][3] = { { 1.20f, 4.70f, 3.167f }, { -1.20f, 4.75f, 3.163f } };      /* x, z, the way he faces there (towards the camera: where the paths need the least turning) */
+#define CYCLE_LEN 360.0f
+#define MAX_SEG 128
+#define MAX_PATH 48
+#define AREA_Z0 3.3f                    /* the area: z from here ... */
+#define AREA_Z1 5.35f                   /* ... to here (the far wall with the window is at 6) */
 
-static struct seg g_seg[32];
-static int g_nseg;
-static float g_cycle;
+static const struct pt k_home = { 1.20f, 4.70f, 3.167f }, k_there = { -1.20f, 4.75f, 3.163f };      /* the first cycle's two places (facing the camera: where the paths need the least turning) */
 
-/* The path between two spots: a smooth curve that leaves a spot in the direction he faces there and arrives in the direction he faces at the other one, so he never has
- * to turn on the spot: the turning is the curve's, while he walks (a Hermite curve; the way back is another curve). u 0..1 along it. */
-static void bez_point(int a, int b, float u, float *x, float *z, float *dx, float *dz)
+static bool in_area(float x, float z)
 {
-    float ax = k_spot[a][0], az = k_spot[a][1], bx = k_spot[b][0], bz = k_spot[b][1];
-    float ex = bx - ax, ez = bz - az, chord = sqrtf(ex * ex + ez * ez), m = 1.76f * chord;
-    float t0x = sinf(k_spot[a][2]) * m, t0z = cosf(k_spot[a][2]) * m, t1x = sinf(k_spot[b][2]) * m, t1z = cosf(k_spot[b][2]) * m;
+    return z >= AREA_Z0 && z <= AREA_Z1 && fabsf(x) <= fminf(2.7f, 0.72f * (z - 1.4f));       /* (narrower near the camera: the view is) */
+}
+
+/* The path between two places: a smooth curve that leaves the first in the direction he faces there and arrives in the direction he faces at the second (a
+ * Hermite curve). u 0..1 along it. */
+static void bez_point(const struct pt *a, const struct pt *b, float u, float *x, float *z, float *dx, float *dz)
+{
+    float ex = b->x - a->x, ez = b->z - a->z, chord = sqrtf(ex * ex + ez * ez);
+    float turn = fabsf(fmodf(b->yaw - a->yaw + 9.4247780f, 6.2831853f) - 3.1415927f);        /* how far he turns on the way (the handles are those of a circular arc) */
+    float m = chord / cosf(fminf(turn, 2.8f) * 0.25f);
+    float t0x = sinf(a->yaw) * m, t0z = cosf(a->yaw) * m, t1x = sinf(b->yaw) * m, t1z = cosf(b->yaw) * m;
     float u2 = u * u, u3 = u2 * u;
     float h00 = 2.0f * u3 - 3.0f * u2 + 1.0f, h10 = u3 - 2.0f * u2 + u, h01 = -2.0f * u3 + 3.0f * u2, h11 = u3 - u2;
     float d00 = 6.0f * u2 - 6.0f * u, d10 = 3.0f * u2 - 4.0f * u + 1.0f, d01 = -6.0f * u2 + 6.0f * u, d11 = 3.0f * u2 - 2.0f * u;
-    *x = h00 * ax + h10 * t0x + h01 * bx + h11 * t1x;
-    *z = h00 * az + h10 * t0z + h01 * bz + h11 * t1z;
-    *dx = d00 * ax + d10 * t0x + d01 * bx + d11 * t1x;
-    *dz = d00 * az + d10 * t0z + d01 * bz + d11 * t1z;
+    *x = h00 * a->x + h10 * t0x + h01 * b->x + h11 * t1x;
+    *z = h00 * a->z + h10 * t0z + h01 * b->z + h11 * t1z;
+    *dx = d00 * a->x + d10 * t0x + d01 * b->x + d11 * t1x;
+    *dz = d00 * a->z + d10 * t0z + d01 * b->z + d11 * t1z;
 }
 
-/* How he walks a path: the speed is cut where the path turns so that the body never turns faster than TURN_RATE (a turn is slow and smooth, the paws step
+/* How he goes along a path: the speed is cut where the path turns so that the body never turns faster than a rate (a turn is slow and smooth, the paws step
  * slower), and eased at both ends. A table by samples along the curve: the arc length, the time, the speed and the curve's parameter. */
 #define PT_N 96
-#define TURN_RATE 0.42f                 /* radians a second, at most */
+#define TURN_RATE 0.42f                 /* radians a second, at most (walking) */
 #define V_MIN 0.10f                     /* metres a second, at least (while he moves) */
-struct pathtab { float arc, dur, s[PT_N + 1], t[PT_N + 1], v[PT_N + 1], u[PT_N + 1]; };
-static struct pathtab g_path[2][N_SPOTS][N_SPOTS];             /* [0] walking, [1] running */
+struct pathtab { float arc, dur, s[PT_N + 1], t[PT_N + 1], v[PT_N + 1], u[PT_N + 1]; bool ok; };      /* ok: it stays (nearly) in the area and has no cusp */
 
-static void path_build(int a, int b, int run)
+static struct seg g_seg[MAX_SEG];
+static int g_nseg;
+static struct pathtab g_ptab[MAX_PATH];
+static int g_npath;
+static float g_acc;                     /* the time of the cycle being built so far */
+static int g_built = -1;                /* the cycle in g_seg */
+static struct pt g_end;                 /* where it ended */
+
+static void path_build(struct pathtab *pt, const struct pt *a, const struct pt *b, int run)
 {
-    struct pathtab *pt = &g_path[run][a][b];
-    float vmax = run ? RUN_SPEED : WALK_SPEED, rate = run ? 0.85f : TURN_RATE, vmin = run ? 0.12f : V_MIN;
     float psi[PT_N + 1], x, z, dx, dz, px = 0, pz = 0;
+    float vmax = run ? RUN_SPEED : WALK_SPEED, rate = run ? 0.85f : TURN_RATE, vmin = run ? 0.06f : 0.04f;
+    pt->ok = true;
     for (int i = 0; i <= PT_N; i++) {
         pt->u[i] = (float)i / (float)PT_N;
         bez_point(a, b, pt->u[i], &x, &z, &dx, &dz);
         psi[i] = atan2f(dx, dz);
+        if (z < AREA_Z0 - 0.4f || z > AREA_Z1 + 0.35f || fabsf(x) > fminf(2.7f, 0.72f * (z - 1.4f)) + 0.4f)
+            pt->ok = false;
+        if (i && fabsf(fmodf(psi[i] - psi[i - 1] + 9.4247780f, 6.2831853f) - 3.1415927f) > 0.3f)
+            pt->ok = false;
         pt->s[i] = i ? pt->s[i - 1] + sqrtf((x - px) * (x - px) + (z - pz) * (z - pz)) : 0.0f;
         px = x;
         pz = z;
@@ -153,7 +177,9 @@ static void path_build(int a, int b, int run)
         float d = psi[i1] - psi[i0];
         d = fmodf(d + 3.0f * 3.14159265f, 2.0f * 3.14159265f) - 3.14159265f;
         float kappa = fabsf(d) / fmaxf(pt->s[i1] - pt->s[i0], 1e-4f);
-        float v = clampf(rate / fmaxf(kappa, 1e-3f), vmin, vmax), f = pt->s[i] / pt->arc;
+        if (kappa > 6.0f)                                               /* (a turn tighter than about 17 cm: he would spin on the spot) */
+            pt->ok = false;
+        float v = clampf(rate / fmaxf(kappa, 1e-3f), vmin, vmax), f = pt->s[i] / fmaxf(pt->arc, 1e-4f);
         v *= 0.3f + 0.7f * sstep(0.0f, 0.12f, f) * sstep(0.0f, 0.12f, 1.0f - f);       /* slow at the ends */
         pt->v[i] = fmaxf(v, 0.04f);
     }
@@ -161,12 +187,13 @@ static void path_build(int a, int b, int run)
     for (int i = 1; i <= PT_N; i++)
         pt->t[i] = pt->t[i - 1] + (pt->s[i] - pt->s[i - 1]) / (0.5f * (pt->v[i - 1] + pt->v[i]));
     pt->dur = pt->t[PT_N];
+    if (pt->dur > (run ? 14.0f : 40.0f))                                 /* (a path that takes too long is a bad one: it winds) */
+        pt->ok = false;
 }
 
 /* Where he is `tau` seconds into a walk: the arc walked, the curve's parameter and the speed. */
-static void path_at(int a, int b, int run, float tau, float *arc, float *u, float *speed)
+static void path_at(const struct pathtab *pt, float tau, float *arc, float *u, float *speed)
 {
-    const struct pathtab *pt = &g_path[run][a][b];
     int i = 0;
     while (i < PT_N - 1 && pt->t[i + 1] <= tau)
         i++;
@@ -176,43 +203,168 @@ static void path_at(int a, int b, int run, float tau, float *arc, float *u, floa
     *speed = mixf(pt->v[i], pt->v[i + 1], f);
 }
 
-static void timeline_build(void)
+static void put(int kind, struct pt a, struct pt b, float dur, int path)
 {
-    if (g_nseg)
+    if (g_nseg < MAX_SEG) {
+        g_seg[g_nseg++] = (struct seg){ kind, a, b, dur, path };
+        g_acc += dur;
+    }
+}
+
+/* A place to go to from P: the best of a few random ones within `maxturn` radians of the way he faces, inside the area, `dmin`..`dmax` metres away, a little
+ * preferring the middle of the area and the ones that need less turning. He arrives turned twice as far as the place lies from his heading (an arc: a path that leaves in the direction he faces and
+ * arrives so needs no turn on the spot; with a big `maxturn` it is a U-turn, for when a wall is ahead). */
+static bool pick_target(struct pt P, float dmin, float dmax, float maxturn, uint32_t h, struct pt *Q)
+{
+    float best = -1e9f;
+    bool ok = false;
+    for (int i = 0; i < 96; i++) {
+        uint32_t k = h * 977u + (uint32_t)i * 131u;
+        float dl = (frand(k + 1u) - 0.5f) * 2.0f * maxturn, d = mixf(dmin, dmax, frand(k + 2u)), ang = P.yaw + dl;
+        float x = P.x + d * sinf(ang), z = P.z + d * cosf(ang);
+        if (!in_area(x, z))
+            continue;
+        float yaw_in = P.yaw + 2.0f * dl;
+        if (!in_area(x + 1.0f * sinf(yaw_in), z + 1.0f * cosf(yaw_in)))        /* never end up facing a wall: he could not go on without turning on the spot */
+            continue;
+        float score = frand(k + 3u) - 0.30f * hypotf(x * 0.5f, z - 4.3f) - 0.25f * fabsf(dl);
+        if (score > best) {
+            best = score;
+            *Q = (struct pt){ x, z, fmodf(P.yaw + 2.0f * dl + (frand(k + 4u) - 0.5f) * 0.4f + 9.4247780f, 6.2831853f) - 3.1415927f };
+            ok = true;
+        }
+    }
+    return ok;
+}
+
+/* One episode of the day, from where he sits (`cur`) to where he sits at its end. `remaining` = the time left of the cycle (a long one is not started when it would not fit). */
+static void episode(uint32_t h, float remaining, struct pt *cur)
+{
+    struct pt P = *cur, Q = P;
+    int r = (int)(h % 100u), kind = r < 30 ? 0 : r < 50 ? 1 : r < 70 ? 2 : r < 85 ? 3 : 4;      /* stroll, run, hops, a lie, a long walk */
+    float sit = 6.0f + 16.0f * frand(h + 7u);
+    if (remaining < 100.0f && kind == 3)
+        kind = 2;
+    if (remaining < 60.0f && (kind == 1 || kind == 4))
+        kind = 0;
+    int idx = -1;
+    if (kind == 0 || kind == 1 || kind == 4) {
+        for (int att = 0; att < 8 && idx < 0; att++) {                  /* try some places until the path to one is a good one */
+            uint32_t ha = h + (uint32_t)att * 7919u;
+            int want_run = kind == 1 && att < 4;
+            for (int mode = 0; mode < 3 && idx < 0; mode++) {           /* what was asked for, then a shorter way, then a wide turn (a wall is ahead) */
+                int run = want_run && mode == 0;
+                bool ok;
+                if (mode == 0)
+                    ok = pick_target(P, run ? 1.6f : kind == 4 && att < 4 ? 2.6f : 0.9f, run ? 4.2f : kind == 4 && att < 4 ? 4.4f : 2.2f, run ? 1.3f : 0.8f, ha, &Q);
+                else if (mode == 1)
+                    ok = pick_target(P, 0.9f, 2.2f, 0.8f, ha + 5u, &Q);
+                else
+                    ok = pick_target(P, 0.5f, 1.8f, att < 4 ? 1.1f : 1.35f, ha + 9u, &Q);
+                if (!ok || g_npath >= MAX_PATH)
+                    continue;
+                if (hypotf(Q.x - P.x, Q.z - P.z) < 1.5f)                 /* (too short a way for a run) */
+                    run = 0;
+                path_build(&g_ptab[g_npath], &P, &Q, run);
+                if (g_ptab[g_npath].ok) {
+                    idx = g_npath++;
+                    kind = run ? 1 : 0;
+                }
+            }
+        }
+        if (idx < 0)
+            kind = 2;
+    }
+    if (kind == 3) {                                                    /* lies down for a while */
+        put(K_SIT, P, P, 3.0f, -1);
+        put(K_LIE, P, P, 32.0f + 38.0f * frand(h + 2u), -1);
+        put(K_SIT, P, P, 4.0f + 8.0f * frand(h + 3u), -1);
+    } else if (kind == 2) {                                             /* stands up and hops on the spot, once to three times */
+        put(K_STAND, P, P, 2.5f, -1);
+        for (int i = 0, n = 1 + (int)(h32(h + 11u) % 3u); i < n; i++)
+            put(K_JUMP, P, P, 1.6f, -1);
+        put(K_SITDOWN, P, P, 3.0f, -1);
+        put(K_SIT, P, P, sit, -1);
+    } else {                                                            /* walks (kind 0, 4) or runs (1) to Q and sits there */
+        int run = kind == 1;
+        put(K_STAND, P, P, run ? 3.0f : 4.0f, -1);
+        put(run ? K_RUN : K_WALK, P, Q, g_ptab[idx].dur, idx);
+        put(K_SITDOWN, Q, Q, run ? 3.0f : 4.0f, -1);
+        put(K_SIT, Q, Q, sit, -1);
+        *cur = Q;
+    }
+}
+
+/* Builds cycle `c` (it starts where the one before ended, `g_end`). */
+static void build_cycle(int c)
+{
+    g_nseg = 0;
+    g_npath = 0;
+    g_acc = 0.0f;
+    struct pt cur = g_end;
+    if (c == 0) {                                                       /* the script: sit, walk to the other place, hop twice, lie down for a minute */
+        cur = k_home;
+        path_build(&g_ptab[g_npath], &k_home, &k_there, 0);
+        put(K_SIT, k_home, k_home, 55.0f, -1);
+        put(K_STAND, k_home, k_home, 4.0f, -1);
+        put(K_WALK, k_home, k_there, g_ptab[g_npath].dur, g_npath);
+        g_npath++;
+        cur = k_there;
+        put(K_SITDOWN, cur, cur, 4.0f, -1);
+        put(K_SIT, cur, cur, 18.0f, -1);
+        put(K_STAND, cur, cur, 2.5f, -1);
+        put(K_JUMP, cur, cur, 1.6f, -1);
+        put(K_JUMP, cur, cur, 1.6f, -1);
+        put(K_SITDOWN, cur, cur, 3.0f, -1);
+        put(K_SIT, cur, cur, 8.0f, -1);
+        put(K_LIE, cur, cur, 60.0f, -1);
+        put(K_SIT, cur, cur, 10.0f, -1);
+    }
+    for (int ep = 0; ep < 200; ep++) {
+        float remaining = CYCLE_LEN - g_acc;
+        if (remaining < 30.0f || g_nseg > MAX_SEG - 8)
+            break;
+        int n0 = g_nseg, p0 = g_npath;
+        float a0 = g_acc;
+        struct pt c0 = cur;
+        episode(h32((uint32_t)c * 2654435761u + (uint32_t)ep * 40503u + 99u), remaining, &cur);
+        if (g_acc > CYCLE_LEN) {                                        /* does not fit: undo it, and a short one at the end instead */
+            g_nseg = n0; g_npath = p0; g_acc = a0; cur = c0;
+            break;
+        }
+    }
+    if (g_acc < CYCLE_LEN)
+        put(K_SIT, cur, cur, CYCLE_LEN - g_acc, -1);
+    g_end = cur;
+    g_built = c;
+}
+
+static void ensure_cycle(int c)
+{
+    if (c == g_built)
         return;
-    for (int run = 0; run < 2; run++) {
-        path_build(0, 1, run);
-        path_build(1, 0, run);
+    if (c < g_built || g_built < 0) {
+        g_end = k_home;
+        g_built = -1;
     }
-    float ab = g_path[0][0][1].dur, ba = g_path[0][1][0].dur, abr = g_path[1][0][1].dur, bar = g_path[1][1][0].dur;
-    /* A walk to B, two hops there, a long lie, a RUN back to A, a hop, a run to B and a walk back (the day starts and ends sitting at A). */
-    const struct seg day[] = {
-        { K_SIT, 0, 0, 55.0f }, { K_STAND, 0, 1, 4.0f }, { K_WALK, 0, 1, ab }, { K_SITDOWN, 0, 1, 4.0f },
-        { K_SIT, 1, 1, 18.0f }, { K_STAND, 1, 1, 2.5f }, { K_JUMP, 1, 1, 1.6f }, { K_JUMP, 1, 1, 1.6f }, { K_SITDOWN, 1, 1, 3.0f },
-        { K_SIT, 1, 1, 8.0f }, { K_LIE, 1, 1, 60.0f }, { K_SIT, 1, 1, 10.0f },
-        { K_STAND, 1, 0, 3.0f }, { K_RUN, 1, 0, bar }, { K_SITDOWN, 1, 0, 3.0f }, { K_SIT, 0, 0, 14.0f },
-        { K_STAND, 0, 0, 2.5f }, { K_JUMP, 0, 0, 1.6f }, { K_SITDOWN, 0, 0, 3.0f }, { K_SIT, 0, 0, 12.0f },
-        { K_STAND, 0, 1, 3.0f }, { K_RUN, 0, 1, abr }, { K_SITDOWN, 0, 1, 3.0f }, { K_SIT, 1, 1, 12.0f },
-        { K_STAND, 1, 0, 4.0f }, { K_WALK, 1, 0, ba }, { K_SITDOWN, 1, 0, 4.0f }, { K_SIT, 0, 0, 20.0f },
-    };
-    g_nseg = (int)(sizeof(day) / sizeof(day[0]));
-    g_cycle = 0.0f;
-    for (int i = 0; i < g_nseg; i++) {
-        g_seg[i] = day[i];
-        g_cycle += day[i].dur;
-    }
+    for (int k = g_built + 1; k <= c; k++)
+        build_cycle(k);
 }
 
 float mcat_cycle(void)
 {
-    timeline_build();
-    return g_cycle;
+    return CYCLE_LEN;
 }
 
 static struct mcat_state state_at(float t)
 {
-    timeline_build();
-    float f = fmodf(t, g_cycle), acc = 0.0f;
+    int c = (int)floorf(t / CYCLE_LEN);
+    if (c < 0)
+        c = 0;
+    ensure_cycle(c);
+    float f = t - (float)c * CYCLE_LEN, acc = 0.0f;
+    if (f < 0.0f)
+        f = 0.0f;
     int i = 0;
     while (i < g_nseg - 1 && f >= acc + g_seg[i].dur) {
         acc += g_seg[i].dur;
@@ -220,25 +372,25 @@ static struct mcat_state state_at(float t)
     }
     const struct seg *sg = &g_seg[i];
     float tau = f - acc, u = sat(tau / sg->dur);
-    struct mcat_state st = { k_spot[sg->b][0], k_spot[sg->b][1], k_spot[sg->b][2], 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    struct mcat_state st = { sg->b.x, sg->b.z, sg->b.yaw, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     float x, z, dx, dz;
     switch (sg->kind) {
     case K_SIT:
-        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
+        st.x = sg->a.x; st.z = sg->a.z; st.yaw = sg->a.yaw;
         break;
     case K_LIE:
-        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
+        st.x = sg->a.x; st.z = sg->a.z; st.yaw = sg->a.yaw;
         st.lie = sstep(0.0f, 6.0f, tau) * (1.0f - sstep(sg->dur - 6.0f, sg->dur, tau));
         break;
     case K_STAND:                                                       /* up, where he is, facing where he faced (the path begins that way) */
-        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
+        st.x = sg->a.x; st.z = sg->a.z; st.yaw = sg->a.yaw;
         st.stand = sstep(0.0f, 0.8f, u);
         break;
     case K_WALK: case K_RUN: {
         float arc, uu, speed;
         int run = sg->kind == K_RUN;
-        path_at(sg->a, sg->b, run, tau, &arc, &uu, &speed);
-        bez_point(sg->a, sg->b, uu, &x, &z, &dx, &dz);
+        path_at(&g_ptab[sg->path], tau, &arc, &uu, &speed);
+        bez_point(&sg->a, &sg->b, uu, &x, &z, &dx, &dz);
         st.x = x; st.z = z; st.yaw = atan2f(dx, dz);
         st.stand = 1.0f;
         st.dist = arc;
@@ -256,7 +408,7 @@ static struct mcat_state state_at(float t)
         break;
     }
     case K_JUMP: {                                                      /* a hop on the spot: crouch, spring, fly, land (a crouch again) */
-        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
+        st.x = sg->a.x; st.z = sg->a.z; st.yaw = sg->a.yaw;
         st.stand = 1.0f;
         float s = sat((u - 0.30f) / 0.50f);
         st.crouch = sstep(0.0f, 0.28f, u) * (1.0f - sstep(0.28f, 0.34f, u)) + 0.8f * sinf(3.14159265f * sat((u - 0.78f) / 0.22f));

@@ -123,7 +123,7 @@ $(BUILD)/mellagui-bluetooth: $(BUILD)/client/mellagui-bluetooth.o $(BUILD)/clien
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-smart: $(BUILD)/client/mellagui-smart.o $(BUILD)/client/tuya.o $(BUILD)/client/smartsched.o $(BUILD)/client/tuyalan.o $(BUILD)/client/smartfav.o $(BUILD)/client/smartsun.o $(BUILD)/client/json.o $(BUILD)/client/qr.o $(BUILD)/src/aes.o $(BUILD)/src/md5.o $(BUILD)/src/sha256.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-smart: $(BUILD)/client/mellagui-smart.o $(BUILD)/client/tuya.o $(BUILD)/client/smartsched.o $(BUILD)/client/tuyalan.o $(BUILD)/client/smartfav.o $(BUILD)/src/smartsun.o $(BUILD)/client/json.o $(BUILD)/client/qr.o $(BUILD)/src/aes.o $(BUILD)/src/md5.o $(BUILD)/src/sha256.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

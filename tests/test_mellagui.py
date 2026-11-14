@@ -5786,6 +5786,22 @@ esac
         time.sleep(0.15)
         self.assertEqual(settings()['repeat-rate'], '60')
 
+    def test_the_night_page_chooses_the_sun_and_shows_its_times(self):
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 12 * 32 + 14)                              # the "Night" tab
+        time.sleep(0.2)
+        ctl.click(x0 + 154 + 300, y0 + 168 + 14)                                # "Sunset to sunrise"
+        time.sleep(0.3)
+        self.assertEqual(settings()['night-sun'], '1')
+        ctl.abs(x0 + 20, y0 + 420)
+        shot = ctl.dump(os.path.join(tmp, 'night-sun.ppm'))
+        row = [shot.px(x0 + 204 + i, y0 + 224 + dy) for i in range(330) for dy in range(0, 16)]      # the "Today: sunset ..." line under the radios
+        self.assertGreater(len(set(row)), 6, 'no "Today: sunset ..." line')
+        ctl.click(x0 + 154 + 40, y0 + 168 + 14)                                 # "At set times" again
+        time.sleep(0.3)
+        self.assertEqual(settings()['night-sun'], '0')
+
     def test_panel_pages_and_keyboard_navigation(self):
         p, win = self.open_panel()
         x0, y0 = win['x'], win['y']
@@ -12759,13 +12775,17 @@ class TestNightLight(Base):
 
     FADE = {'MELLAGUI_NIGHT_FADE_MS': '200'}
 
-    def start(self, name, now=None, conf=None):
+    def start(self, name, now=None, conf=None, sun=None, place=None):
         path = os.path.join(tmp, name + '.settings')
         if os.path.exists(path):
             os.unlink(path)
         if conf:
             open(path, 'w').write(conf)
         env = dict(self.FADE)
+        if sun:
+            env['MELLAGUI_SMART_SUN'] = sun                                 # "sunrise,sunset" of every day
+        if place:
+            env['MELLAGUI_SMART_PLACE'] = place                             # "LAT,LON"
         if now:
             env['MELLAGUI_NIGHT_NOW'] = now
         p, c, stop = self.private_compositor(name, '--config', 'none', '--settings', path, env=env)
@@ -12779,6 +12799,11 @@ class TestNightLight(Base):
     @staticmethod
     def tint(c):
         return [float(v) for v in TestNightLight.night(c)['tint'].split(',')]
+
+    @staticmethod
+    def setting(c, key):
+        c.cmd('setting ' + key)
+        return c.last.split(' ', 1)[1] if ' ' in c.last else ''
 
     def wait(self, pred, what, timeout=4.0):
         end = time.time() + timeout
@@ -12831,6 +12856,44 @@ class TestNightLight(Base):
                 return t
             time.sleep(0.05)
         self.fail('timeout: tint')
+
+    def test_sunset_to_sunrise_follows_the_sun(self):
+        c, path = self.start('mellagui-nl20', now='16:30', sun='07:40,15:55')
+        c.cmd('settings night-light auto')
+        self.assertEqual(self.night(c)['active'], '0')                          # 16:30 is before the fixed 21:00...
+        c.cmd('settings night-sun 1')
+        n = self.night(c)
+        self.assertEqual((n['sun'], n['span']), ('1', '15:55-07:40'))
+        self.wait(lambda: self.night(c)['active'] == '1', 'after the 15:55 sunset')
+        self.assertEqual(self.setting(c, 'night-sun-info').split('|')[:2], ['07:40', '15:55'])
+        c, path = self.start('mellagui-nl21', now='12:00', sun='07:40,15:55')
+        c.cmd('settings night-light auto')
+        c.cmd('settings night-sun 1')
+        self.assertEqual(self.night(c)['active'], '0')                          # noon: the sun is up
+        c, path = self.start('mellagui-nl22', now='22:00', sun='07:40,15:55')
+        c.cmd('settings night-light auto')
+        c.cmd('settings night-from 23:00')                                      # the fixed times would say "not yet"
+        c.cmd('settings night-sun 1')
+        self.wait(lambda: self.night(c)['active'] == '1', 'the sun decides')
+        c.cmd('settings night-sun 0')
+        self.wait(lambda: self.night(c)['active'] == '0', 'without it the fixed times do')
+
+    def test_without_a_known_sun_the_set_times_are_used(self):
+        c, path = self.start('mellagui-nl23', now='22:15', place='80.0,0.0')   # far north in midsummer or midwinter: no sunset (or none known)
+        c.cmd('settings night-light auto')
+        c.cmd('settings night-sun 1')
+        n = self.night(c)
+        self.assertIn(n['span'], ('21:00-06:30', n['span']))
+        self.assertEqual(self.setting(c, 'night-sun-info') == '', n['span'] == '21:00-06:30')
+
+    def test_the_sun_setting_is_saved_and_checked(self):
+        c, path = self.start('mellagui-nl24', sun='07:00,18:00')
+        c.cmd('settings night-sun 1')
+        self.wait(lambda: 'night-sun=1' in open(path).read() if os.path.exists(path) else False, 'saved')
+        for bad in ('night-sun maybe', 'night-sun-info nothing'):               # a wrong value and a read-only value are refused
+            with self.assertRaises(RuntimeError):
+                c.cmd('settings ' + bad)
+        self.assertEqual(self.setting(c, 'night-sun'), '1')
 
     def test_the_schedule_decides_when_it_is_auto(self):
         c, path = self.start('mellagui-nl4', now='22:15')

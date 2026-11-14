@@ -191,6 +191,10 @@ static const struct entry table[] = {
       "2000 K is very orange. A change is shown at once while the night light is on." },
     { "@Schedule", NULL, "Schedule",
       "The hours of the day between which a Scheduled night light is on, in 15 minute steps. The time may cross midnight (21:00 until 06:30)." },
+    { "night-sun", NULL, "Night light at sunset",
+      "At set times uses the two times below. Sunset to sunrise works the times out for every day from the date and where you are (the place chosen "
+      "for the smart home with mellagui-smart --place, else the middle of your time zone), so the evenings follow the seasons. Without a known place "
+      "the set times are used." },
     { "night-from", NULL, "Night light starts", "The time of day when the Scheduled night light starts to warm the display." },
     { "night-to", NULL, "Night light ends", "The time of day when the Scheduled night light lets the colours go back to normal." },
 

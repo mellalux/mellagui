@@ -1179,6 +1179,28 @@ static void build_night(struct app *a, int x, int y, int w)
     y += ROW_H + 8;
     add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Schedule");
     y += ROW_H;
+    bool sun = kv_int(a, "night-sun", 0) != 0;
+    add_radio(a, x, y, w / 2, "At set times", "night-sun", "0", !sun);
+    add_radio(a, x + w / 2, y, w / 2, "Sunset to sunrise", "night-sun", "1", sun);
+    y += ROW_H;
+    char sunline[160] = "";
+    if (sun) {                                                          /* "HH:MM|HH:MM|PLACE": today's sunrise and sunset and where from */
+        const char *info = kv_get(a, "night-sun-info");
+        if (strlen(info) > 12) {
+            char place[64];
+            snprintf(place, sizeof(place), "%s", info + 12);
+            for (char *q = place; *q; q++)
+                if (*q == '_')
+                    *q = ' ';
+            snprintf(sunline, sizeof(sunline), "Today: sunset %.5s, sunrise %.5s (%s)", info + 6, info, place);
+        } else {
+            snprintf(sunline, sizeof(sunline), "The place is not known (or no sunset today): the times below apply.");
+        }
+        add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, sunline);
+        y += ROW_H;
+    }
+    bool times_shown = !sun || strlen(kv_get(a, "night-sun-info")) <= 12;
+    if (times_shown) {
     struct widget *f = add(a, W_SLIDER, (struct rect){ x, y, w, ROW_H }, "From");
     snprintf(f->key, sizeof(f->key), "night-from");
     f->lo = 0;
@@ -1192,7 +1214,9 @@ static void build_night(struct app *a, int x, int y, int w)
     t->hi = 23 * 60 + 45;
     t->step = 15;
     t->val = time_minutes(kv_get(a, "night-to"), 6 * 60 + 30);
-    y += ROW_H + 6;
+    y += ROW_H;
+    }
+    y += 6;
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Used when 'Scheduled' is chosen.");
     add(a, W_LABEL, (struct rect){ x, y + ROW_H - 8, w, ROW_H }, "Super+Shift+N switches the night light on and off.");
 }

@@ -412,10 +412,13 @@ static void ctl_command(struct ctl_client *c, char *line)
         }
         ctl_reply(c, "ok n=%d unread=%d dnd=%d\n", lm_notelog_count(nl), lm_notelog_unread(nl), srv->config.dnd);
     } else if (!strcmp(cmd, "night")) {
-        /* night -> "night mode=off|on|auto kelvin=<K> from=HH:MM to=HH:MM active=<0|1> level=<0..1> tint=<r>,<g>,<b>" (night light, nightlight.h; the tint is what the display shows now), then "ok" */
+        /* night -> "night mode=off|on|auto kelvin=<K> from=HH:MM to=HH:MM sun=<0|1> span=HH:MM-HH:MM (what is in force today) active=<0|1> level=<0..1> tint=<r>,<g>,<b>" (night light, nightlight.h; the tint is what the display shows now), then "ok" */
         const struct lm_config *cf = &srv->config;
-        ctl_reply(c, "night mode=%s kelvin=%d from=%s to=%s active=%d level=%.2f tint=%.3f,%.3f,%.3f\nok\n",
+        int sf, st;
+        lm_night_span(srv->night, &sf, &st);
+        ctl_reply(c, "night mode=%s kelvin=%d from=%s to=%s sun=%d span=%02d:%02d-%02d:%02d active=%d level=%.2f tint=%.3f,%.3f,%.3f\nok\n",
                   cf->night_mode == 1 ? "on" : cf->night_mode == 2 ? "auto" : "off", cf->night_kelvin, cf->night_from, cf->night_to,
+                  cf->night_sun ? 1 : 0, sf < 0 ? 0 : sf / 60, sf < 0 ? 0 : sf % 60, st < 0 ? 0 : st / 60, st < 0 ? 0 : st % 60,
                   lm_night_active(srv->night), lm_night_level(srv->night), srv->backend->tint[0], srv->backend->tint[1], srv->backend->tint[2]);
     } else if (!strcmp(cmd, "anim")) {
         /* anim -> "anim n=<running> dur=<ms>" and one "item kind=open|close|minimize|restore x= y= w= h= alpha=" line each (window animations), then "ok" */

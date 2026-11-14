@@ -163,6 +163,7 @@ struct lm_config {
     bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */
     int night_mode;             /* night light: 0 off, 1 on, 2 between night_from and night_to (settings: night-light), see nightlight.h */
     int night_kelvin;           /* ... at this colour temperature (settings: night-temp; default 3400) */
+    bool night_sun;             /* ... between sunset and sunrise of the day instead (settings: night-sun; smartsun.h; night_from / night_to when the place is unknown) */
     char night_from[8], night_to[8];   /* "HH:MM" (settings: night-from, night-to; default 21:00 and 06:30) */
     const char *status_cmd;     /* the battery / network buttons of the panel, started with the compositor ([commands] status, default "mellagui-status", "none" = off) */
     const char *quick_cmd;      /* the quick settings program, started by the first click on the panel's quick settings button ([commands] quick, default "mellagui-quick") */

@@ -62,6 +62,7 @@
 #include "uikit.h"
 #include "wlc.h"
 #include "util.h"
+#include "json.h"
 #include "syntax.h"
 #include "wlcard.h"
 #include "wlrail.h"
@@ -125,7 +126,14 @@ struct pane {
     int last_click_row;
 };
 
-enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO, PV_TABLE };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
+enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO, PV_TABLE, PV_JSON };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
+
+/* One node of a JSON tree, flat in document order: `end` = the index after its last descendant, `open` = its children are shown. */
+struct jrow {
+    const struct json *n;
+    int depth, end, aidx;               /* aidx: the position in an array (-1: a member of an object, or the root) */
+    bool open;
+};
 
 /* What the preview pane shows: the file under the cursor of the active pane. */
 struct preview {
@@ -137,6 +145,10 @@ struct preview {
     char info[160];
     char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
     int nlines;
+    struct json *jroot;                 /* PV_JSON: the tree, its nodes in document order (`jr`) and the rows shown (`jvis`: indexes into `jr`, one per line) */
+    struct jrow *jr;
+    int njr;
+    int *jvis;
     int left;                           /* PV_TABLE: characters scrolled out at the left */
     int tcols, trows;                   /* PV_TABLE: the table's columns and data rows (the header not counted); `lines` are its rows, ready to paint */
     const struct syn_lang *lang;        /* PV_TEXT: the syntax colours of the file (NULL: none) ... */
@@ -2070,6 +2082,13 @@ static void preview_clear(struct preview *pv)
     pv->lang = NULL;
     pv->tcols = pv->trows = 0;
     pv->left = 0;
+    json_free(pv->jroot);
+    pv->jroot = NULL;
+    free(pv->jr);
+    pv->jr = NULL;
+    pv->njr = 0;
+    free(pv->jvis);
+    pv->jvis = NULL;
     lm_img_free(&pv->img);
     free(pv->scaled);
     pv->scaled = NULL;
@@ -2360,6 +2379,143 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
     return true;
 }
 
+/* ---- JSON as a tree ---- */
+#define JSON_MAX_NODES 60000
+
+static bool json_container(const struct json *n)
+{
+    return n->type == JSON_ARR || n->type == JSON_OBJ;
+}
+
+static int json_count(const struct json *n)
+{
+    int c = 0;
+    for (const struct json *k = n->child; k; k = k->next)
+        c++;
+    return c;
+}
+
+static void json_flatten(struct preview *pv, const struct json *n, int depth, int aidx)
+{
+    if (pv->njr >= JSON_MAX_NODES)
+        return;
+    int me = pv->njr++;
+    pv->jr[me] = (struct jrow){ n, depth, 0, aidx, json_container(n) && depth < 2 };      /* the root and its children are open, deeper ones closed */
+    int i = 0;
+    for (const struct json *k = n->child; k; k = k->next)
+        json_flatten(pv, k, depth + 1, n->type == JSON_ARR ? i++ : -1);
+    pv->jr[me].end = pv->njr;
+}
+
+/* The pieces of a row's text: the key (or [i]) and the value (a summary for an object / array). */
+static void json_parts(const struct jrow *r, char *key, size_t kn, char *val, size_t vn)
+{
+    const struct json *n = r->n;
+    if (r->aidx >= 0)
+        snprintf(key, kn, "[%d]", r->aidx);
+    else
+        snprintf(key, kn, "%s", n->key ? n->key : "");
+    char tmp[240];
+    switch (n->type) {
+    case JSON_OBJ: snprintf(val, vn, json_count(n) ? "{%d}" : "{}", json_count(n)); return;
+    case JSON_ARR: snprintf(val, vn, json_count(n) ? "[%d]" : "[]", json_count(n)); return;
+    case JSON_BOOL: snprintf(val, vn, "%s", n->b ? "true" : "false"); return;
+    case JSON_NULL: snprintf(val, vn, "null"); return;
+    case JSON_NUM: snprintf(val, vn, "%s", n->str ? n->str : ""); return;
+    default: break;
+    }
+    size_t k = 0;
+    const char *s = n->str ? n->str : "";
+    tmp[k++] = '"';
+    int chars = 0;
+    for (; *s && k < sizeof(tmp) - 8 && chars < 160; s++) {                /* one line, 160 characters */
+        unsigned char c = (unsigned char)*s;
+        chars += (c & 0xc0) != 0x80;
+        tmp[k++] = c < 0x20 ? ' ' : (char)c;
+    }
+    if (*s) {
+        while (k > 0 && ((unsigned char)tmp[k - 1] & 0xc0) == 0x80)
+            k--;
+        if (k > 0 && ((unsigned char)tmp[k - 1] & 0x80))
+            k--;
+        memcpy(tmp + k, "\xe2\x80\xa6", 3);
+        k += 3;
+    }
+    tmp[k++] = '"';
+    tmp[k] = 0;
+    snprintf(val, vn, "%s", tmp);
+}
+
+/* The rows that show (a closed node hides everything below it) as lines of text. */
+static void json_rebuild(struct preview *pv)
+{
+    for (int i = 0; i < pv->nlines; i++)
+        free(pv->lines[i]);
+    pv->nlines = 0;
+    free(pv->jvis);
+    pv->jvis = malloc((size_t)(pv->njr + 1) * sizeof(int));
+    if (!pv->jvis)
+        return;
+    free(pv->lines);
+    pv->lines = NULL;
+    int cap = 0;
+    for (int i = 0; i < pv->njr;) {
+        const struct jrow *r = &pv->jr[i];
+        char key[300], val[300], line[700];
+        json_parts(r, key, sizeof(key), val, sizeof(val));
+        int k = snprintf(line, sizeof(line), "%*s%s %s%s%s", r->depth * 2, "", json_container(r->n) && r->n->child ? (r->open ? "\xe2\x96\xbe" : "\xe2\x96\xb8") : " ",
+                         key, key[0] ? ": " : "", val);
+        pv->jvis[pv->nlines] = i;
+        pv_line(pv, &cap, line, (size_t)(k < (int)sizeof(line) ? k : (int)sizeof(line) - 1));
+        i = r->open || !json_container(r->n) ? i + 1 : r->end;
+    }
+}
+
+/* A .json file whole in the buffer: a tree, the first levels open. False when it is no JSON, or only a number / a word (then it is plain text). */
+static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n)
+{
+    char *text = malloc(n + 1);
+    if (!text)
+        return false;
+    memcpy(text, buf, n);
+    text[n] = 0;
+    struct json *root = json_parse(text);
+    free(text);
+    if (!root || !json_container(root)) {
+        json_free(root);
+        return false;
+    }
+    pv->jr = calloc(JSON_MAX_NODES, sizeof(struct jrow));
+    if (!pv->jr) {
+        json_free(root);
+        return false;
+    }
+    pv->jroot = root;
+    pv->njr = 0;
+    json_flatten(pv, root, 0, -1);
+    json_rebuild(pv);
+    return true;
+}
+
+/* A click on a row (line index) opens or closes it; Shift+Right opens every node, Shift+Left closes all but the root. */
+static void json_toggle(struct preview *pv, int line)
+{
+    if (line < 0 || line >= pv->nlines || !pv->jvis)
+        return;
+    struct jrow *r = &pv->jr[pv->jvis[line]];
+    if (json_container(r->n) && r->n->child) {
+        r->open = !r->open;
+        json_rebuild(pv);
+    }
+}
+
+static void json_all(struct preview *pv, bool open)
+{
+    for (int i = 0; i < pv->njr; i++)
+        pv->jr[i].open = json_container(pv->jr[i].n) && (open || i == 0);
+    json_rebuild(pv);
+}
+
 static void pv_hex(struct preview *pv, const unsigned char *buf, size_t n)
 {
     int cap = 0;
@@ -2484,6 +2640,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_MARKDOWN;
         pv->md = md_parse((const char *)buf, (size_t)n);
         pv->top = 0;
+    } else if ((ext_is(path, "json") || ext_is(path, "geojson") || ext_is(path, "webmanifest")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n)) {
+        pv->kind = PV_JSON;                                              /* a tree: click a row to open or close it */
     } else if ((ext_is(path, "csv") || ext_is(path, "tsv")) && pv_table(pv, buf, (size_t)n, ext_is(path, "tsv") ? '\t' : csv_delim(buf, (size_t)n), (off_t)n < st.st_size)) {
         pv->kind = PV_TABLE;                                             /* a table: the rows, ready to paint */
         if ((off_t)n < st.st_size)
@@ -3741,7 +3899,7 @@ static bool pv_scrolls(const struct app *a, int body_h, int *total, int *view, i
     if (pv->kind == PV_MARKDOWN && pv->md) {
         *total = md_height(pv->md);
         *view = body_h;
-    } else if (pv->kind == PV_TEXT || pv->kind == PV_TABLE || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR) {
+    } else if (pv->kind == PV_TEXT || pv->kind == PV_TABLE || pv->kind == PV_JSON || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR) {
         *total = pv->nlines;
         *view = LM_MAX(body_h / LM_FONT_H, 1);
     } else {
@@ -3921,12 +4079,21 @@ static void handle_key(struct app *a, uint32_t ks)
     case LM_KS_Right:
         if (shift && a->preview && a->pv.kind == PV_TABLE)                /* Shift+Left / Right: a wide table moves sideways */
             scroll_table_x(a, 4);
-        else
+        else if (shift && a->preview && a->pv.kind == PV_JSON) {          /* ... a JSON tree opens / closes everything */
+            json_all(&a->pv, true);
+            a->win.redraw = true;
+        } else
             open_selected(a);
         return;
     case LM_KS_Left:
         if (shift && a->preview && a->pv.kind == PV_TABLE) {
             scroll_table_x(a, -4);
+            return;
+        }
+        if (shift && a->preview && a->pv.kind == PV_JSON) {
+            json_all(&a->pv, false);
+            a->pv.top = 0;
+            a->win.redraw = true;
             return;
         }
         go_up(a);
@@ -4736,6 +4903,11 @@ static void preview_click(struct app *a, int idx, int x, int y, uint32_t time_ms
         a->win.redraw = true;
         return;
     }
+    if (pv->kind == PV_JSON && y >= list_top() + 2 && x < x0 + pw - lm_metrics.scrollbar_width) {        /* a row of the tree opens or closes */
+        json_toggle(pv, pv->top + (y - list_top() - 2) / LM_FONT_H);
+        a->win.redraw = true;
+        return;
+    }
     if (pv->kind != PV_AUDIO || !pv->loaded)
         return;
     struct snd_ui u;
@@ -4773,7 +4945,7 @@ static void files_dump(struct app *a)
     if (!f)
         return;
     struct preview *pv = &a->pv;
-    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio", "table" };
+    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio", "table", "json" };
     int body_h = a->win.bh - list_top() - bottom_h(a);
     int total, view, pos;
     fprintf(f, "kind=%s loaded=%d top=%d body=%d split=%d want=%s\n", a->preview ? names[pv->kind] : "none", pv->loaded ? 1 : 0, pv->top, body_h, split_x(a), pv->want);
@@ -4789,6 +4961,12 @@ static void files_dump(struct app *a)
     }
     if (pv->kind == PV_TEXT)
         fprintf(f, "text lang=%s\n", pv->lang ? syn_name(pv->lang) : "-");
+    if (pv->kind == PV_JSON) {
+        int open = 0;
+        for (int i = 0; i < pv->njr; i++)
+            open += pv->jr[i].open;
+        fprintf(f, "json nodes=%d shown=%d open=%d\n", pv->njr, pv->nlines, open);
+    }
     if (pv->kind == PV_TABLE)
         fprintf(f, "table cols=%d rows=%d left=%d\n", pv->tcols, pv->trows, pv->left);
     if (pv->kind == PV_MARKDOWN && pv->md)
@@ -4888,6 +5066,29 @@ static void paint_table_row(struct wlwin *w, int x, int y, char *s, int left, bo
         col += chars;
         i = j;
     }
+}
+
+/* One row of a JSON tree: the open / closed mark, the key in the accent colour, the value in the syntax colours of its type. */
+static void paint_json_row(struct wlwin *w, int x, int y, const struct jrow *r, int max_w)
+{
+    char key[300], val[300];
+    json_parts(r, key, sizeof(key), val, sizeof(val));
+    int col = r->depth * 2;
+    if (json_container(r->n) && r->n->child) {
+        wlwin_text_cells(w, x + col * LM_FONT_W, y, r->open ? "\xe2\x96\xbe" : "\xe2\x96\xb8", 1, COL_DIM, max_w - col * LM_FONT_W);
+    }
+    col += 2;
+    if (key[0] && col * LM_FONT_W < max_w) {
+        wlwin_text_cells(w, x + col * LM_FONT_W, y, key, 1, r->aidx >= 0 ? COL_DIM : COL_DIR, max_w - col * LM_FONT_W);
+        col += utf8_len(key);
+        wlwin_text_cells(w, x + col * LM_FONT_W, y, ": ", 1, COL_DIM, max_w - col * LM_FONT_W);
+        col += 2;
+    }
+    if (col * LM_FONT_W >= max_w)
+        return;
+    uint32_t c = r->n->type == JSON_STR ? lm_theme.syntax_string : r->n->type == JSON_NUM ? lm_theme.syntax_number
+               : r->n->type == JSON_BOOL || r->n->type == JSON_NULL ? lm_theme.syntax_keyword : COL_DIM;
+    wlwin_text_cells(w, x + col * LM_FONT_W, y, val, 1, c, max_w - col * LM_FONT_W);
 }
 
 /* The colour of a syntax class (the same palette entries as the editor's). */
@@ -4998,6 +5199,8 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
             col = COL_FG;
         if (pv->kind == PV_DIR || pv->kind == PV_ERROR)
             wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
+        else if (pv->kind == PV_JSON && pv->jvis)
+            paint_json_row(w, x0 + 8, list_y + 2 + r * LM_FONT_H, &pv->jr[pv->jvis[pv->top + r]], pw - 16);
         else if (pv->kind == PV_TABLE && pv->top + r < pv->nlines)
             paint_table_row(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->left, pv->top + r == 0, pv->top + r >= 2 && (pv->top + r) % 2 == 1, pw - 16);
         else if (pv->kind == PV_TEXT && pv->lang && pv->hl_st && strlen(s) < 4000)
@@ -5888,6 +6091,18 @@ static int selftest(void)
     snprintf(p, sizeof(p), "%s/one.csv", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT, "a .csv with one column is plain text");
+    touch(dir, "t.json", "{\"a\":[1,2,{\"b\":\"x\"}],\"c\":{\"d\":{\"e\":1}},\"f\":null}", 48);
+    snprintf(p, sizeof(p), "%s/t.json", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_JSON && pv.njr == 10 && pv.nlines == 8, "json preview: kind %d, %d nodes, %d lines", pv.kind, pv.njr, pv.nlines);   /* root, a (1 2 {..}), c (d), f; d and the object inside a are closed */
+    json_toggle(&pv, 0);
+    CHECK(pv.nlines == 1, "a closed root shows one line (%d)", pv.nlines);
+    json_all(&pv, true);
+    CHECK(pv.nlines == 10, "everything open: %d lines", pv.nlines);
+    touch(dir, "bad.json", "{\"a\":", 5);
+    snprintf(p, sizeof(p), "%s/bad.json", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a broken .json is plain text");
     snprintf(p, sizeof(p), "%s/bin.dat", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_HEX && pv.nlines == 1 && strstr(pv.lines[0], "61 00 62") && strstr(pv.lines[0], "|a.b"), "hex dump: '%s'", pv.nlines ? pv.lines[0] : "");

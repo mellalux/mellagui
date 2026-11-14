@@ -2878,6 +2878,38 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_a_json_file_as_a_tree(self):
+        d = tempfile.mkdtemp(prefix='files-json-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.json'), 'w') as f:
+            f.write('{"name":"x","tags":["a","b"],"deep":{"k":{"z":1}},"n":2}')
+        with open(os.path.join(d, 'b.json'), 'w') as f:
+            f.write('{"broken":')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.json)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json')
+        self.assertEqual(head['kind'], 'json')
+        self.assertEqual((extra['json']['nodes'], extra['json']['shown']), ('9', '8'))   # the root and its members are open, the object inside deep is closed
+        ctl.click(win['x'] + 700, win['y'] + 64)                                       # a click on the root row (the first line of the pane) closes it
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '1')
+        self.assertEqual(extra['json']['shown'], '1')
+        ctl.click(win['x'] + 700, win['y'] + 64)                                       # ... and again opens it
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '8')
+        self.assertEqual(extra['json']['shown'], '8')
+        ctl.key(self.SHIFT, True)
+        ctl.tap(self.K_RIGHT)                                                          # Shift+Right opens everything
+        ctl.key(self.SHIFT, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '9')
+        self.assertEqual(extra['json']['shown'], '9')
+        ctl.key(self.SHIFT, True)
+        ctl.tap(self.K_LEFT)                                                           # Shift+Left closes all but the root
+        ctl.key(self.SHIFT, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '5')
+        self.assertEqual(extra['json']['shown'], '5')
+        ctl.tap(self.K_DOWN)                                                           # b.json is broken: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -5246,7 +5278,7 @@ class TestClients(Base):
         t0 = self.thumb(win, 'esb0.ppm')
         self.assertIsNotNone(t0)
         self.assertEqual(t0[2], 14 - 4)
-        self.assertLess(t0[0], win['y'] + 40)                            # the cursor is on line 1: the thumb is at the top
+        self.assertLess(t0[0], win['y'] + 30)                            # the cursor is on line 1: the thumb is at the top
         right = win['x'] + win['w'] - 6
         ctl.click(right, min(win['y'] + win['h'] - 40, 500))             # the track below it: one page down (not where the dock floats)
         time.sleep(0.3)

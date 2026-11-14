@@ -109,6 +109,9 @@ struct app {
     int hover;                          /* button under the pointer, -1 = none */
     /* the rail's buttons are drops of water: springs for the swelling / squashing, and a ripple after a press */
     struct wlrail_anim ran[2];          /* the springs of the left and the right rail */
+    int follow;                         /* a text size button of the right rail was pressed: the pointer follows it when the window has grown (its item, -1 = none) */
+    int follow_w;                       /* the window's width when it was pressed */
+    int64_t follow_ms;
     /* the card of the prototype (Open / Save as / Find / Go to line): the folder's entries, the highlighted row, how far the list is scrolled */
     struct centry { char name[256]; bool dir; } *cent;
     int cn, ccap, csel, ctop, cbtn_down;
@@ -2538,10 +2541,16 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (args[3].u == 1 && (a->py < TOP_H || a->px < RAIL_W || (RIGHT_W && a->px >= w->bw - RIGHT_W))) {          /* the button bar, or a rail */
             int b = btn_at(a, a->px, a->py);
             if (b >= 0 && g_rail) {
-                if (b <= B_FIND)
+                if (b <= B_FIND) {
                     wlrail_press(&a->ran[0], b, now_ms());
-                else
+                } else {
                     wlrail_press(&a->ran[1], rail_hover(a, true), now_ms());
+                    if (b == B_BIGGER || b == B_ZOOM || b == B_SMALLER) {      /* the window grows or shrinks: the pointer goes along with the button */
+                        a->follow = rail_hover(a, true);
+                        a->follow_w = a->win.w;
+                        a->follow_ms = now_ms();
+                    }
+                }
             }
             if (b >= 0)
                 do_button(a, b);
@@ -2912,6 +2921,7 @@ int main(int argc, char **argv)
     a.csel = -1;
     wlrail_init(&a.ran[0]);
     wlrail_init(&a.ran[1]);
+    a.follow = -1;
     a.zoom = lm_zoom_conf_load("editor");
     if (a.zoom == 0)
         a.zoom = LM_ZOOM_DEFAULT;
@@ -2951,6 +2961,19 @@ int main(int argc, char **argv)
         }
         if (!wlwin_step(&a.win, timeout))
             break;
+        if (a.follow >= 0) {                                             /* the new size is on screen: the pointer to the button where it is now */
+            if (a.win.w != a.follow_w && !a.win.redraw) {
+                struct wlrail L, R;
+                int ys[WLRAIL_MAX];
+                edit_rails(&a, &L, &R);
+                wlrail_layout(&R, ys);
+                if (ys[a.follow] >= 0)
+                    wlwin_warp_pointer(&a.win, R.x + WLRAIL_W / 2, ys[a.follow] + WLRAIL_D / 2);
+                a.follow = -1;
+            } else if (now_ms() - a.follow_ms > 800) {
+                a.follow = -1;
+            }
+        }
         if (a.rep_code && now_ms() >= a.rep_next) {                      /* key repeat */
             handle_key(&a, a.rep_code, lm_keymap_keysym(a.rep_code, a.win.mods));
             a.rep_next = now_ms() + (a.rep_rate > 0 ? 1000 / a.rep_rate : 40);

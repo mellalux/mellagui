@@ -7,6 +7,7 @@
 #include "list.h"
 #include "log.h"
 #include "protocol.h"
+#include "seat.h"
 #include "settings.h"
 #include "wm.h"
 
@@ -75,9 +76,18 @@ static void req_popup(struct lm_resource *res, const union lm_arg *args)
     m->active = b;
 }
 
+static void req_warp(struct lm_resource *res, const union lm_arg *args)
+{
+    struct mbind *b = res->data;
+    if (!b || !b->allowed || !b->menu || !b->menu->srv->seat)
+        return;
+    lm_seat_pointer_warp_local(b->menu->srv->seat, res->client, args[0].i, args[1].i);
+}
+
 static const lm_request_fn handlers[] = {
     [LM_MELLAGUI_MENU_V1_REQ_DESTROY] = req_destroy,
     [LM_MELLAGUI_MENU_V1_REQ_POPUP] = req_popup,
+    [LM_MELLAGUI_MENU_V1_REQ_WARP] = req_warp,
 };
 
 static void menu_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)

@@ -62,6 +62,9 @@ void lm_seat_pointer_position(const struct lm_seat *seat, double *x, double *y);
 uint32_t lm_seat_group(const struct lm_seat *seat);
 /* Move the pointer (global coords, clamped) as if the user did; triggers focus update. */
 void lm_seat_pointer_warp(struct lm_seat *seat, double x, double y);
+/* Move the pointer to (x, y) in the coordinates of the surface it is over, when that surface belongs to `client` (false otherwise: a program may only move the
+ * pointer inside its own window). */
+bool lm_seat_pointer_warp_local(struct lm_seat *seat, struct lm_client *client, int x, int y);
 struct lm_surface *lm_seat_pointer_focus(const struct lm_seat *seat);
 
 /*

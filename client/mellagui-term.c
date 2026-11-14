@@ -148,6 +148,9 @@ struct app {
     bool grown;                 /* the window was made bigger by a zoom and the new buffer is not committed yet */
     int hover;                  /* button under the pointer (-1 = none) */
     struct wlrail_anim ran[2];  /* the springs of the left and the right rail */
+    int follow;                 /* a text size button was pressed: the pointer follows it when the window has changed (its place in the right rail, -1 = none) */
+    int follow_w;               /* the window's width when it was pressed */
+    int64_t follow_ms;
     bool menu_open;             /* the zoom drop-down list is showing */
     int menu_hover;             /* its highlighted entry (index into ZOOM_LEVELS) */
     bool conf_dirty;            /* the zoom changed and is not in the settings file yet */
@@ -2047,6 +2050,11 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
                 case RB_SMALLER: set_zoom(-1); break;
                 case RB_RESET: set_zoom(0); break;
                 }
+                if (bi == RB_BIGGER || bi == RB_SMALLER || bi == RB_RESET) {         /* the window grows or shrinks: the pointer goes along with the button */
+                    A.follow = rb_hover_of(bi);
+                    A.follow_w = A.bw;
+                    A.follow_ms = now_ms();
+                }
             } else if (args[3].u == 1) {
                 int bi = btn_at(A.px, A.py);
                 switch (bi) {
@@ -2217,6 +2225,7 @@ int main(int argc, char **argv)
     g_rail = wlrail_wanted("MELLAGUI_TERM_RAIL");
     wlrail_init(&A.ran[0]);
     wlrail_init(&A.ran[1]);
+    A.follow = -1;
     A.hover = -1;
     A.zoom = ZOOM_DEFAULT;
     build_zoom_tables();
@@ -2269,6 +2278,19 @@ int main(int argc, char **argv)
     unsigned char buf[16384];
     while (A.running && !wlc_dead(A.c)) {
         maybe_render();
+        if (A.follow >= 0) {                                     /* the new size is on screen: the pointer to the button where it is now */
+            if (A.bw != A.follow_w && !A.dirty) {
+                struct wlrail L, R;
+                int ys[WLRAIL_MAX];
+                term_rail(&L, &R);
+                wlrail_layout(&R, ys);
+                if (A.menu && ys[A.follow] >= 0)
+                    WLC_SEND(A.c, A.menu, LM_MELLAGUI_MENU_V1_REQ_WARP, { .i = R.x + WLRAIL_W / 2 }, { .i = ys[A.follow] + WLRAIL_D / 2 });
+                A.follow = -1;
+            } else if (now_ms() - A.follow_ms > 800) {
+                A.follow = -1;
+            }
+        }
         wlc_flush(A.c);
         struct pollfd pf[3] = {
             { .fd = wlc_fd(A.c), .events = POLLIN },

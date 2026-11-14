@@ -7,6 +7,9 @@
  *
  *   popup(entries)   the entries, one per line; a leading '~' shows an entry dim (it cannot be chosen); at most LM_MENU_MAX, 47 bytes each
  *   chosen(index)    the user chose that entry (the menu is gone)
+ *   warp(x, y)       move the pointer to (x, y) of the surface it is over (surface pixels; only while that surface is this program's own): a program
+ *                    whose window grows under the button that was pressed (a text size button at the window's edge) takes the pointer along, so the
+ *                    button can be pressed again where it now is
  *   closed()         the menu went away without a choice (a click elsewhere, Esc, another menu, the screen was locked)
  *
  * One menu at a time; a new popup closes the old one (which gets `closed`). Served only to MellaGUI's own programs (lm_settings_client_allowed);

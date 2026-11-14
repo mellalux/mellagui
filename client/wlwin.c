@@ -224,6 +224,14 @@ static void menu_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
         w->ops->menu(w, -1);
 }
 
+void wlwin_warp_pointer(struct wlwin *w, int x, int y)
+{
+    if (!w->menu)
+        return;
+    double z = zoom_of(w);
+    WLC_SEND(w->c, w->menu, LM_MELLAGUI_MENU_V1_REQ_WARP, { .i = (int32_t)lround(x * z) }, { .i = (int32_t)lround(y * z) });
+}
+
 bool wlwin_menu(struct wlwin *w, const char *entries)
 {
     if (!w->menu)

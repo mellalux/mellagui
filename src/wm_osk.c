@@ -35,7 +35,7 @@ void lm_wm_osk_layout_changed(struct lm_wm *wm)
                 apply_state(wm, w);                              /* the usable area is another one now */
             continue;
         }
-        if (!w->mapped || w->parent)
+        if (!w->mapped || w->parent || win_is_gadget(w))        /* (the desktop cards stay where they are: the keyboard lies over them) */
             continue;
         int32_t bx = w->x, by = w->y, bw = w->width, bh = w->height;        /* the geometry the user gave it */
         if (ww->osk_moved) {

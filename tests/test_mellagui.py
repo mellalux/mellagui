@@ -4852,7 +4852,7 @@ class TestClients(Base):
         keys = self.osk()[1]
         self.assertEqual(keys[125][4], 'Super')
         self.assertEqual(keys[125][1], keys[29][1])                              # in the bottom row, next to Ctrl
-        self.assertLess(keys[125][0], keys[29][0])
+        self.assertGreater(keys[125][0], keys[29][0])                            # (to the right of it: Ctrl, Super, Alt)
         hide, esc = keys[0], keys[1]
         self.assertEqual(hide[4], 'Hide')
         self.assertEqual(hide[1], esc[1])                                        # in the top row (with Esc and the F keys) ...

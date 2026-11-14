@@ -33,7 +33,7 @@ static const struct spec row3[] = {
     K(SLASH, 4), M(RIGHTSHIFT, 11, LM_OSK_SHIFT),
 };
 static const struct spec row4[] = {
-    M(LEFTMETA, 5, LM_OSK_SUPER), M(LEFTCTRL, 5, LM_OSK_CTRL), M(LEFTALT, 5, LM_OSK_ALT), K(SPACE, 24),
+    M(LEFTCTRL, 5, LM_OSK_CTRL), M(LEFTMETA, 5, LM_OSK_SUPER), M(LEFTALT, 5, LM_OSK_ALT), K(SPACE, 24),
     M(RIGHTALT, 5, LM_OSK_ALTGR), K(LEFT, 4), K(UP, 4), K(DOWN, 4), K(RIGHT, 4),
 };
 

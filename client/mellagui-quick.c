@@ -295,7 +295,7 @@ static void paint_button(struct app *a, int item, const char *text, bool on, boo
     struct wlwin *w = &a->win;
     struct rc r = rect_of(item);
     uint32_t bg = !avail ? lm_mix_rgb(lm_theme.button, lm_theme.background, 0.5) : on ? on_rgb : a->hover == item ? lm_theme.button_hover : lm_theme.button;
-    wlwin_round_fill(w, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
+    wlwin_drop(w, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
     uint32_t fg = !avail ? lm_theme.text_dim : on ? lm_theme.ink : lm_theme.text;
     int tw = lm_font_text_width(text);
     wlwin_text(w, r.x + (r.w - tw) / 2, r.y + (r.h - LM_FONT_H) / 2, text, 1, fg, r.w - 8);

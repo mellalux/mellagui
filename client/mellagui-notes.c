@@ -16,6 +16,7 @@
 #include "keymap.h"
 #include "protocol.h"
 #include "theme.h"
+#include "uikit.h"
 #include "util.h"
 #include "wlc.h"
 #include "wlwin.h"
@@ -219,10 +220,10 @@ static void paint(struct wlwin *w)
     if (a->n > 0 && a->sel < a->n)
         wrap_text(w, PAD, dy + 8, w->bw - 2 * PAD, a->rows[a->sel].body, 3, lm_theme.text_soft);
     struct box b = btn_dnd(a);
-    wlwin_fill(w, b.x, b.y, b.w, b.h, lm_theme.button);
+    wlwin_drop(w, b.x, b.y, b.w, b.h, lm_button_radius(b.h / 2), lm_theme.button);
     wlwin_text(w, b.x + 8, b.y + 6, a->dnd ? "Do not disturb: turn off" : "Do not disturb: turn on", 1, lm_theme.text, b.w - 12);
     b = btn_clear(a);
-    wlwin_fill(w, b.x, b.y, b.w, b.h, lm_theme.button);
+    wlwin_drop(w, b.x, b.y, b.w, b.h, lm_button_radius(b.h / 2), lm_theme.button);
     wlwin_text(w, b.x + 8, b.y + 6, "Clear all", 1, lm_theme.text, b.w - 12);
 }
 

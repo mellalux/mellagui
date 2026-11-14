@@ -44,11 +44,14 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlclip.h"
+#include "wlrail.h"
 #include "wlwin.h"
 
 #define MAX_KIDS 400
 #define MAX_DEPTH 64
-#define TOOL_H 32
+/* The buttons are a rail of round drops at the left (wlrail.h; MELLAGUI_DU_RAIL=0 or MELLAGUI_RAILS=0 bring back the bar above the list). */
+static bool g_rail;
+#define TOOL_H (g_rail ? 0 : 32)
 #define HEAD_H 40
 #define STATUS_H 24
 #define ROW_H 20
@@ -452,6 +455,7 @@ struct app {
     double px, py;
     int hover;                          /* the child under the pointer (tile or row), -1 none */
     int hovertool;
+    struct wlrail_anim ran;             /* the springs of the rail */
     enum confirm confirm;
     char msg[240];
     int64_t msg_until;
@@ -781,8 +785,15 @@ static int build_buttons(const struct app *a, struct btn *b)
     return N_BTN;
 }
 
+static void du_rail(const struct app *a, struct wlrail *L);
+
 static int button_at(const struct app *a, double px, double py)
 {
+    if (g_rail) {
+        struct wlrail L;
+        du_rail(a, &L);
+        return wlrail_at(&L, a->win.rpx, a->win.rpy);
+    }
     if (py < 4 || py >= TOOL_H - 4)
         return -1;
     struct btn b[N_BTN];
@@ -863,7 +874,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
 {
     int y = 4, h = TOOL_H - 8;
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
-    wlwin_round_fill(w, b->x, y, b->w, h, lm_button_radius(h / 2), base);
+    wlwin_drop(w, b->x, y, b->w, h, lm_button_radius(h / 2), base);
     int tw = lm_font_text_width(b->label);
     wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
@@ -936,13 +947,29 @@ static void paint_map(struct app *a, struct wlwin *w)
     }
 }
 
+static void du_rail(const struct app *a, struct wlrail *L)
+{
+    struct btn b[N_BTN];
+    build_buttons(a, b);
+    static const char *const text[N_BTN] = { NULL, NULL, "/", "Rs", "Dk", "Sz", NULL, NULL };
+    static void (*const icons[N_BTN])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_up, wlrail_ic_home, NULL, NULL, NULL, NULL, wlrail_ic_open, wlrail_ic_trash };
+    const char *tips[N_BTN] = { "Up one folder", "Home folder", "The root folder", "Scan again", a->one_fs ? "This disk only: click for all disks" : "All disks: click for this disk",
+                                g_apparent ? "File sizes: click for space on disk" : "Space on disk: click for file sizes", "Show it in Files", "Delete..." };
+    memset(L, 0, sizeof(*L));
+    L->y0 = 0;
+    L->y1 = a->win.bh > 0 ? a->win.bh - STATUS_H : 400;
+    L->n = N_BTN;
+    for (int i = 0; i < N_BTN; i++)
+        L->it[i] = (struct wlrail_item){ .tip = tips[i], .text = text[i], .icon = icons[i], .base = b[i].base, .lite = b[i].hover, .show = true, .idle = !b[i].enabled };
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
     struct btn b[N_BTN];
     int n = build_buttons(a, b);
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n && !g_rail; i++)
         draw_rbtn(w, &b[i], a->hovertool == i);
     paint_head(a, w);
     if (a->sc) {                                                        /* the progress against what the disk holds */
@@ -979,6 +1006,12 @@ static void paint(struct wlwin *w)
             wlwin_text(w, PAD, sy + 4, "Enter / double click goes in   Backspace out   A apparent size   X disks   R rescan   F files   Delete deletes", 1, COL_DIM,
                        w->bw - 2 * PAD);
         }
+    }
+    if (g_rail) {
+        struct wlrail L;
+        du_rail(a, &L);
+        wlrail_paint(w, &L, &a->ran, a->hovertool, wlrail_now(), COL_BAR, COL_BAR, COL_SEL, COL_TEXT);
+        wlrail_foot(w, &L, COL_BAR);
     }
 }
 
@@ -1031,6 +1064,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->hover = a->hovertool = -1;
+        wlrail_release(&a->ran);
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_MOTION: {
@@ -1046,12 +1080,17 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
     case LM_WL_POINTER_EVT_BUTTON: {
         a->clip.serial = args[0].u;
-        if (args[3].u != 1)
+        if (args[3].u != 1) {
+            wlrail_release(&a->ran);                                    /* (the drop springs back) */
+            w->redraw = true;
             break;
+        }
         a->confirm = C_NONE;
         bool left = args[2].u == 272, right = args[2].u == 273;
         int bi = button_at(a, a->px, a->py);
         if (left && bi >= 0) {
+            if (g_rail)
+                wlrail_press(&a->ran, bi, wlrail_now());
             struct btn b[N_BTN];
             build_buttons(a, b);
             if (b[bi].enabled)
@@ -1295,6 +1334,8 @@ int main(int argc, char **argv)
     static struct app a;
     a.hover = a.hovertool = -1;
     a.one_fs = true;
+    wlrail_init(&a.ran);
+    g_rail = wlrail_wanted("MELLAGUI_DU_RAIL");
     const char *start = argc == 2 ? argv[1] : getenv("HOME");
     struct stat st;
     if (!start || !*start || stat(start, &st) != 0 || !S_ISDIR(st.st_mode))
@@ -1305,6 +1346,8 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);
     if (wlwin_connect(&a.win, "mellagui-du", &ops, &a) < 0)
         return 1;
+    if (g_rail)
+        wlwin_set_inset(&a.win, WLRAIL_W);                              /* (after the connect, which clears the window; before the open: it makes room) */
     if (wlwin_open(&a.win, "Disk usage", "mellagui.du", 920, 600, 560, 340) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
@@ -1312,6 +1355,11 @@ int main(int argc, char **argv)
     int lw_prev = 0, bw_prev = 0, bh_prev = 0;
     while (a.win.running) {
         int timeout = a.sc ? 100 : -1;
+        if (g_rail) {
+            struct wlrail L;
+            du_rail(&a, &L);
+            timeout = wlrail_loop(&a.win, &a.ran, &L, a.hovertool, timeout);
+        }
         if (!wlwin_step(&a.win, timeout))
             break;
         if (a.sc && atomic_load(&a.sc->done))

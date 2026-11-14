@@ -40,6 +40,7 @@
 #include "png.h"
 #include "protocol.h"
 #include "util.h"
+#include "uikit.h"
 #include "wlwin.h"
 
 #define BAR_H 24
@@ -658,7 +659,7 @@ static void paint_vbuttons(struct app *a, struct wlwin *w, int vh)
         int x = vbtn_x(i), y = vh + 5, cx = x + VBTN_W / 2, cy = y + VBTN_H / 2;
         uint32_t bg = a->vpress == i + 1 && a->vhover == i + 1 ? lm_theme.viewer_button_down : a->vhover == i + 1 ? lm_theme.viewer_button_hover : lm_theme.viewer_button;
         uint32_t fg = i == 1 && !a->playing ? lm_theme.accent : BAR_FG;
-        wlwin_fill(w, x, y, VBTN_W, VBTN_H, bg);
+        wlwin_drop(w, x, y, VBTN_W, VBTN_H, lm_button_radius(VBTN_H / 2), bg);
         switch (i) {
         case 0: vtri(w, cx - 4, cy, 9, 5, -1, fg); vtri(w, cx + 3, cy, 9, 5, -1, fg); break;
         case 1:

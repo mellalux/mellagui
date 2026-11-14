@@ -61,13 +61,15 @@
 #include "uikit.h"
 #include "wlc.h"
 #include "util.h"
+#include "wlcard.h"
+#include "wlrail.h"
 #include "wlclip.h"
 #include "wltext.h"
 #include "wlwin.h"
 
 #define MAX_ENTRIES 100000
 #define ROW_H 18
-#define TOOL_H 30
+#define TOOL_H (g_rails ? 0 : 30)
 #define HEAD_H 22
 #define NET_PREFIX "smb://"                /* the list of servers; a Windows share is smb://SERVER/SHARE/..., an SSH server sftp://SERVER/abs/path */
 #define SFTP_PREFIX "sftp://"
@@ -138,6 +140,11 @@ struct preview {
     int scale_k;
 };
 
+/* The toolbar's buttons are a rail of round drops at the left (the function keys stay in their bar below, Norton style) and the questions of the file operations
+ * are a modal card; `--bars` / MELLAGUI_FILES_RAIL=0 bring back the toolbar above and the line at the bottom, MELLAGUI_FILES_CARD=0 only the line. */
+static bool g_rails = true;
+static bool g_card = true;
+#define RAILS_W (g_rails ? WLRAIL_W : 0)
 enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY, P_CONNECT, P_NETUSER, P_NETPASS };
 
 enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH, J_RESTORE };
@@ -182,6 +189,8 @@ struct app {
     uint32_t pv_click_ms;               /* the last press on the page and the number of presses in a row (2: a word, 3: a line) */
     int pv_clicks;
     int pv_idx;                         /* the pane that shows the page */
+    int cbtn_down;                      /* the card: the button held down, -1 = none */
+    struct wlrail_anim ran[1];          /* the springs of the rail */
     bool pv_sb_drag;                    /* the preview's scroll bar thumb is held ... */
     int pv_sb_grab;                     /* ... this many pixels below its top */
     struct ffaudio *snd;                /* the sound of the previewed file (a sound file's preview has Play) */
@@ -2991,6 +3000,8 @@ static void prompt_start(struct app *a, enum prompt kind, const char *initial)
     a->prompt = kind;
     snprintf(a->pbuf, sizeof(a->pbuf), "%.*s", (int)sizeof(a->pbuf) - 1, initial);
     wltext_end(a->pbuf);                                                /* the caret at the end of what is suggested */
+    if (g_card)
+        a->msg[0] = 0;                                                  /* (the card shows only what is said while it is open) */
     a->win.redraw = true;
 }
 
@@ -3153,7 +3164,7 @@ static void fkeybar(const struct app *a, struct rbtn *b)
 
 static void draw_rbtn(struct wlwin *w, const struct rbtn *b, int y, int h, bool hot, int num)
 {
-    wlwin_round_fill(w, b->x, y, b->w, h, lm_button_radius(h / 2), hot ? b->hover : b->base);
+    wlwin_drop(w, b->x, y, b->w, h, lm_button_radius(h / 2), hot ? b->hover : b->base);
     char t[48];
     if (num > 0)
         snprintf(t, sizeof(t), "%d%s", num, b->label);
@@ -3356,6 +3367,7 @@ static const char *prompt_label(enum prompt k)
 static int list_top(void);
 static int bottom_h(const struct app *a);
 static bool md_copy_selection(struct app *a);
+static void files_rail(const struct app *a, struct wlrail *L);
 static void snd_toggle(struct app *a);
 static void snd_stop(struct app *a);
 
@@ -3569,7 +3581,7 @@ static void handle_key(struct app *a, uint32_t ks)
 
 static int bottom_h(const struct app *a)
 {
-    return STATUS_H + (a->dual ? FKEY_H : 0) + (a->prompt != P_NONE ? STATUS_H : 0);
+    return STATUS_H + (a->dual ? FKEY_H : 0) + (a->prompt != P_NONE && !g_card ? STATUS_H : 0);
 }
 
 static int list_top(void)
@@ -3584,10 +3596,11 @@ static int list_top(void)
 /* Where the left pane ends (the divider): `split` per mille of the width, each pane at least SPLIT_MIN wide. */
 static int split_x(const struct app *a)
 {
-    int bw = a->win.bw, x = bw * (a->split > 0 ? a->split : 500) / 1000;
-    if (bw < 2 * SPLIT_MIN)
-        return bw / 2;
-    return LM_CLAMP(x, SPLIT_MIN, bw - SPLIT_MIN);
+    int bw = a->win.bw, l = RAILS_W, r = bw, ew = r - l;
+    int x = l + ew * (a->split > 0 ? a->split : 500) / 1000;
+    if (ew < 2 * SPLIT_MIN)
+        return l + ew / 2;
+    return LM_CLAMP(x, l + SPLIT_MIN, r - SPLIT_MIN);
 }
 
 /* files.conf keeps where the divider was left (`split=PER MILLE`, 150..850). */
@@ -3638,8 +3651,8 @@ static void pane_rect(const struct app *a, int i, int *x, int *w)
         return;
     }
     int half = split_x(a);
-    *x = i == 0 ? 0 : half;
-    *w = i == 0 ? half : a->win.bw - half;
+    *x = i == 0 ? RAILS_W : half;
+    *w = i == 0 ? half - RAILS_W : a->win.bw - half;
 }
 
 static bool pane_is_preview(const struct app *a, int i)
@@ -4109,7 +4122,7 @@ static void paint_audio(struct wlwin *w, struct app *a, int x0, int pw, int list
     snd_text_c(w, x0, pw, u.tech_y, tech, false, COL_DIM);
     bool mine = !strcmp(a->snd_path, pv->want);
     bool playing = mine && a->snd_playing;
-    wlwin_round_fill(w, u.play.x, u.play.y, u.play.w, u.play.h, lm_button_radius(u.play.h / 2), playing ? lm_theme.btn_amber : lm_theme.btn_green);
+    wlwin_drop(w, u.play.x, u.play.y, u.play.w, u.play.h, lm_button_radius(u.play.h / 2), playing ? lm_theme.btn_amber : lm_theme.btn_green);
     const char *lab = playing ? "Pause" : "Play";
     wlwin_text(w, u.play.x + (u.play.w - lm_font_text_width(lab)) / 2, u.play.y + (u.play.h - LM_FONT_H) / 2, lab, 1, lm_theme.on_colour, 0);
     uint64_t pos = mine ? snd_pos(a) : 0, len = pv->ai.duration_ms;
@@ -4416,6 +4429,161 @@ static void paint_help(struct wlwin *w)
         wlwin_text_cells(w, x + 16, y + 12 + i * LM_FONT_H, lines[i], 1, i == 0 ? COL_DIR : COL_FG, bw - 24);     /* (two columns made with blanks) */
 }
 
+/* ---- the card (prototype): the questions of the file operations as a modal over the panes ---------------------------------------------- */
+
+static bool card_on(const struct app *a)
+{
+    return g_card && a->prompt != P_NONE;
+}
+
+static const char *card_title(enum prompt k)
+{
+    switch (k) {
+    case P_GOTO: return "Go to a folder";
+    case P_COPY: return "Copy to";
+    case P_MOVE: return "Move to";
+    case P_MKDIR: return "New folder";
+    case P_RENAME: return "Rename";
+    case P_DELETE: return "Move to the trash";
+    case P_DELETE_HARD: return "Delete for good";
+    case P_EMPTY: return "Empty the trash";
+    case P_CONNECT: return "Connect to a server";
+    case P_NETUSER: return "User name";
+    case P_NETPASS: return "Password";
+    default: return "";
+    }
+}
+
+static bool card_question(const struct app *a)
+{
+    return a->prompt == P_DELETE || a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY;
+}
+
+/* What the card says above its field: the hint of the field, or the question itself. */
+static void card_text(struct app *a, char *out, size_t n)
+{
+    out[0] = 0;
+    char **names = NULL;
+    int cnt = 0;
+    if (a->prompt == P_COPY || a->prompt == P_MOVE || a->prompt == P_DELETE || a->prompt == P_DELETE_HARD) {
+        cnt = op_targets(a, &names);
+    }
+    if (a->prompt == P_COPY || a->prompt == P_MOVE)
+        snprintf(out, n, "%d item%s%s%s%s", cnt, cnt == 1 ? "" : "s", cnt == 1 ? " (" : "", cnt == 1 ? names[0] : "", cnt == 1 ? ")" : "");
+    else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD)
+        snprintf(out, n, "%s %d item%s%s%s%s%s", a->prompt == P_DELETE_HARD ? "Delete" : "Move", cnt, cnt == 1 ? "" : "s", cnt == 1 ? " (" : "",
+                 cnt == 1 ? names[0] : "", cnt == 1 ? ")" : "", a->prompt == P_DELETE_HARD ? " for good? This cannot be undone." : " to the trash?");
+    else if (a->prompt == P_EMPTY) {
+        char t[PATH_MAX];
+        int k = trash_files_dir(t, sizeof(t)) ? count_dir(t) : 0;
+        snprintf(out, n, "Empty the trash (%d item%s) for good? This cannot be undone.", k, k == 1 ? "" : "s");
+    } else if (a->prompt == P_CONNECT)
+        snprintf(out, n, "A name, user@name or sftp://user@name");
+    else if (a->prompt == P_NETUSER)
+        snprintf(out, n, "Leave it empty to go in as a guest");
+    else if (a->prompt == P_GOTO)
+        snprintf(out, n, "A folder path (Tab completes)");
+    free_names(names, cnt);
+}
+
+static void card_layout(const struct app *a, struct wlcard *c, int *tx, int *ty, int *fy, int *fw)
+{
+    c->w = LM_CLAMP(a->win.bw - 16, 260, 500);
+    c->h = WLCARD_PAD + 24 + 22 + (card_question(a) ? 22 : 38) + 22 + WLCARD_BTN_H + WLCARD_PAD;
+    if (c->h > a->win.bh - 16)
+        c->h = a->win.bh - 16;
+    c->x = (a->win.bw - c->w) / 2;
+    c->y = (a->win.bh - c->h) / 2;
+    *tx = c->x + WLCARD_PAD;
+    *ty = c->y + WLCARD_PAD + 24;
+    *fy = *ty + 24;
+    *fw = c->w - 2 * WLCARD_PAD;
+}
+
+static void card_buttons(const struct app *a, const char **labels, uint32_t *cols)
+{
+    labels[0] = "Cancel";
+    cols[0] = lm_theme.btn_slate;
+    switch (a->prompt) {
+    case P_COPY: labels[1] = "Copy"; cols[1] = lm_theme.btn_green; break;
+    case P_MOVE: labels[1] = "Move"; cols[1] = lm_theme.btn_amber; break;
+    case P_MKDIR: labels[1] = "Create"; cols[1] = lm_theme.btn_teal; break;
+    case P_RENAME: labels[1] = "Rename"; cols[1] = lm_theme.btn_blue; break;
+    case P_DELETE: labels[1] = "Trash"; cols[1] = lm_theme.btn_orange; break;
+    case P_DELETE_HARD: labels[1] = "Delete"; cols[1] = lm_theme.btn_red; break;
+    case P_EMPTY: labels[1] = "Empty"; cols[1] = lm_theme.btn_red; break;
+    case P_CONNECT: labels[1] = "Connect"; cols[1] = lm_theme.btn_blue; break;
+    case P_NETUSER: labels[1] = "Next"; cols[1] = lm_theme.btn_blue; break;
+    case P_NETPASS: labels[1] = "Log in"; cols[1] = lm_theme.btn_green; break;
+    default: labels[1] = "Go"; cols[1] = lm_theme.btn_blue; break;
+    }
+}
+
+static void paint_card(struct wlwin *w, struct app *a)
+{
+    struct wlcard c;
+    int tx, ty, fy, fw;
+    card_layout(a, &c, &tx, &ty, &fy, &fw);
+    bool bad = a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY;
+    wlcard_frame(w, &c, c.w, c.h, card_title(a->prompt), bad ? COL_ERR : COL_DIR, COL_BAR, bad ? COL_ERR : COL_DIR);
+    char line[PATH_MAX + 120];
+    card_text(a, line, sizeof(line));
+    if (card_question(a)) {
+        wlwin_text(w, tx, ty, line, 1, a->prompt == P_DELETE ? COL_WARN : COL_ERR, fw);
+    } else {
+        if (line[0])
+            wlwin_text(w, tx, ty, line, 1, COL_DIM, fw);
+        wlwin_round_fill(w, tx, fy, fw, 28, 14, COL_BG);
+        if (a->prompt == P_NETPASS) {                                   /* stars, no caret model: a password is never shown */
+            char stars[130];
+            int k = 0;
+            for (const char *p = a->pbuf; *p && k < 126; p++)
+                if (((unsigned char)*p & 0xc0) != 0x80)
+                    stars[k++] = '*';
+            stars[k++] = '_';
+            stars[k] = 0;
+            wlwin_text_cells(w, tx + 12, fy + 6, stars, 1, COL_FG, fw - 24);
+        } else {
+            wltext_paint(w, tx + 12, fy + 6, fw - 24, a->pbuf, true, COL_FG, lm_theme.button_hover, COL_FG);
+        }
+    }
+    if (a->msg[0] && now_ms() < a->msg_until)
+        wlwin_text(w, tx, c.y + c.h - WLCARD_PAD - WLCARD_BTN_H - 22, a->msg, 1, COL_WARN, fw);
+    const char *labels[2];
+    uint32_t cols[2];
+    card_buttons(a, labels, cols);
+    wlcard_buttons(w, &c, labels, 2, cols, wlcard_button_at(&c, 2, (int)a->px, (int)a->py), a->cbtn_down, lm_theme.on_colour);
+}
+
+static void card_cancel(struct app *a)
+{
+    if (a->prompt == P_NETPASS)
+        explicit_bzero(a->pbuf, sizeof(a->pbuf));
+    a->prompt = P_NONE;
+}
+
+/* A press on the card (it is modal: everything else is swallowed; a press outside the card cancels). */
+static void card_press(struct app *a)
+{
+    struct wlcard c;
+    int tx, ty, fy, fw;
+    card_layout(a, &c, &tx, &ty, &fy, &fw);
+    int px = (int)a->px, py = (int)a->py;
+    if (!wlcard_has(&c, px, py)) {
+        card_cancel(a);
+        return;
+    }
+    int b = wlcard_button_at(&c, 2, px, py);
+    if (b == 0) {
+        card_cancel(a);
+    } else if (b == 1) {
+        a->cbtn_down = 1;
+        prompt_accept(a);
+    } else if (!card_question(a) && a->prompt != P_NETPASS && px >= tx && px < tx + fw && py >= fy && py < fy + 28) {
+        wltext_click(a->pbuf, px - (tx + 12), (a->win.mods & LM_MOD_SHIFT) != 0);
+    }
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
@@ -4423,13 +4591,15 @@ static void paint(struct wlwin *w)
     a->rows_visible = LM_MAX((w->bh - list_y - bottom_h(a)) / ROW_H, 1);
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
 
-    wlwin_fill(w, 0, 0, w->bw, TOOL_H, COL_BAR);
     struct rbtn b[N_FKEY];
-    toolbar(a, b);
-    for (int i = 0; i < N_TOOL; i++) {
-        if (!tool_visible(a, i))
-            continue;
-        draw_rbtn(w, &b[i], 4, TOOL_H - 8, a->hover == i, 0);
+    if (!g_rails) {
+        wlwin_fill(w, 0, 0, w->bw, TOOL_H, COL_BAR);
+        toolbar(a, b);
+        for (int i = 0; i < N_TOOL; i++) {
+            if (!tool_visible(a, i))
+                continue;
+            draw_rbtn(w, &b[i], 4, TOOL_H - 8, a->hover == i, 0);
+        }
     }
     if (a->preview)
         preview_update(a);
@@ -4488,7 +4658,7 @@ static void paint(struct wlwin *w)
     } else {
         wlwin_text(w, 6, sy + 2, showing ? a->msg : status, 1, showing ? COL_WARN : COL_FG, w->bw - 12);
     }
-    if (a->prompt != P_NONE) {
+    if (a->prompt != P_NONE && !g_card) {
         int py = sy - STATUS_H;
         wlwin_fill(w, 0, py, w->bw, STATUS_H, COL_BAR);
         wlwin_fill(w, 0, py, w->bw, 1, COL_DIR);
@@ -4535,15 +4705,48 @@ static void paint(struct wlwin *w)
         for (int i = 0; i < N_FKEY; i++)
             draw_rbtn(w, &f[i], w->bh - FKEY_H + 3, FKEY_H - 6, a->hover == 100 + i, i + 1);
     }
+    if (a->dual && g_rails) {
+        struct wlrail L;
+        files_rail(a, &L);
+        wlrail_paint(w, &L, &a->ran[0], a->hover >= 0 && a->hover < 100 ? a->hover : -1, now_ms(), COL_BAR, COL_BAR, COL_DIR, COL_FG);
+    }
     if (a->help)
         paint_help(w);
+    if (card_on(a))
+        paint_card(w, a);
     files_dump(a);
 }
 
 /* ---- events --------------------------------------------------------------------------------------------------------------- */
 
+/* The rail for the present state: the toolbar's buttons at the left (item i = B_*). */
+static void files_rail(const struct app *a, struct wlrail *L)
+{
+    static const char *const ltips[N_TOOL] = { "Up one folder", "Home folder", "Hidden files  Ctrl+H", "Terminal here  Ctrl+T", "Preview  F3", "Trash  Ctrl+B",
+                                               "Put back  Ctrl+Z", "Empty the trash  Ctrl+E", "Network  Ctrl+N" };
+    static void (*const licons[N_TOOL])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_up, wlrail_ic_home, wlrail_ic_eye, wlrail_ic_term, wlrail_ic_panes,
+                                                                                         wlrail_ic_trash, NULL, NULL, wlrail_ic_net };
+    static const char *const ltext[N_TOOL] = { NULL, NULL, NULL, NULL, NULL, NULL, "Re", "Em", NULL };
+    struct rbtn tb[N_FKEY];
+    toolbar(a, tb);
+    memset(L, 0, sizeof(*L));
+    L->x = 0;
+    L->y0 = 0;
+    L->y1 = a->win.bh > 0 ? a->win.bh - bottom_h(a) : 400;
+    L->n = N_TOOL;
+    for (int i = 0; i < N_TOOL; i++)
+        L->it[i] = (struct wlrail_item){ .tip = ltips[i], .text = ltext[i], .icon = licons[i], .base = tb[i].base, .lite = tb[i].hover, .show = tool_visible(a, i) };
+}
+
 static int hover_at(const struct app *a, double px, double py)
 {
+    if (g_rails && a->dual) {
+        struct wlrail L;
+        files_rail(a, &L);
+        int k = wlrail_at(&L, px, py);
+        if (k >= 0)
+            return k;
+    }
     int x = (int)px, y = (int)py;
     struct rbtn b[N_FKEY];
     if (y >= 4 && y < TOOL_H - 4) {
@@ -4577,9 +4780,13 @@ static void click(struct app *a, uint32_t time_ms)
         return;
     }
     if (h >= 0) {
+        if (g_rails)
+            wlrail_press(&a->ran[0], h, now_ms());
         press_tool(a, h);
         return;
     }
+    if (g_rails && a->dual && x < RAILS_W && y < a->win.bh - bottom_h(a))      /* (the rail's empty places) */
+        return;
     if (y < TOOL_H || y >= a->win.bh - bottom_h(a))
         return;
     if (a->dual && abs(x - split_x(a)) <= DIVIDER_GRAB) {                  /* the divider: drag it; a double click puts it back in the middle */
@@ -4672,6 +4879,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_LEAVE:
+        wlrail_release(&a->ran[0]);
         a->hover = -1;
         w->redraw = true;
         break;
@@ -4683,7 +4891,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (a->pane[i].sb_drag)
                 scrollbar_drag(a, &a->pane[i], a->py);
         if (a->split_drag)
-            a->split = LM_CLAMP((int)(a->px * 1000 / LM_MAX(w->bw, 1)), 150, 850);
+            a->split = LM_CLAMP((int)((a->px - RAILS_W) * 1000 / LM_MAX(w->bw - RAILS_W, 1)), 150, 850);
         if (a->pv_sb_drag)
             pv_sb_drag_to(a, a->py);
         if (a->pv_selecting && a->pv.md) {
@@ -4725,6 +4933,16 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             }
             break;
         }
+        if (card_on(a)) {                                               /* the card is modal: it takes every click */
+            if (args[2].u == 272) {
+                if (args[3].u == 1)
+                    card_press(a);
+                else
+                    a->cbtn_down = -1;
+            }
+            w->redraw = true;
+            break;
+        }
         if (args[2].u == 272 && args[3].u == 1) {
             if (a->help) {                                              /* a click closes the key list */
                 a->help = false;
@@ -4736,6 +4954,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->pane[0].sb_drag = a->pane[1].sb_drag = false;
             a->pv_sb_drag = false;
             a->pv_selecting = false;
+            wlrail_release(&a->ran[0]);
             if (a->split_drag) {
                 a->split_drag = false;
                 split_conf_save(a->split > 0 ? a->split : 500);
@@ -5265,6 +5484,20 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    const char *rail_env = getenv("MELLAGUI_FILES_RAIL"), *card_env = getenv("MELLAGUI_FILES_CARD");
+    if (rail_env && !strcmp(rail_env, "0"))
+        g_rails = false;
+    g_card = g_rails;
+    if (card_env && !strcmp(card_env, "0"))
+        g_card = false;
+    if (argc >= 2 && (!strcmp(argv[1], "--bars") || !strcmp(argv[1], "--card"))) {
+        if (argv[1][2] == 'b')                                          /* --bars: the bar above, the key bar below, the line at the bottom */
+            g_rails = g_card = false;
+        else
+            g_card = true;
+        argv++;
+        argc--;
+    }
     const char *choose = NULL;
     if (argc >= 3 && !strcmp(argv[1], "--choose")) {
         if (strcmp(argv[2], "wallpaper")) {                             /* the only setting a file may be chosen for */
@@ -5276,7 +5509,7 @@ int main(int argc, char **argv)
         argc -= 2;
     }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-files [DIR | --selftest | --choose wallpaper [DIR]]\n");
+        fprintf(stderr, "usage: mellagui-files [--bars] [DIR | --selftest | --choose wallpaper [DIR]]\n");
         return 2;
     }
     signal(SIGCHLD, SIG_IGN);                                           /* the programs we start are nobody's business afterwards */
@@ -5285,7 +5518,11 @@ int main(int argc, char **argv)
     a.rep_delay = 400;
     a.pane[0].last_click_row = a.pane[1].last_click_row = -1;
     a.hover = -1;
+    a.cbtn_down = -1;
+    wlrail_init(&a.ran[0]);
     a.dual = choose == NULL;
+    if (choose)                                                         /* (the picture chooser has no rails) */
+        g_rails = g_card = false;
     a.split = split_conf_load();
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     a.choose_key = choose;
@@ -5337,6 +5574,14 @@ int main(int argc, char **argv)
             int64_t wait = a.pv.due - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, timeout);
             a.win.redraw = a.win.redraw || wait <= 0;
+        }
+        if (g_rails && a.dual) {                                        /* the drops of the rail are moving: a frame every 16 ms */
+            struct wlrail L;
+            files_rail(&a, &L);
+            if (wlrail_step(&a.ran[0], &L, a.hover >= 0 && a.hover < 100 ? a.hover : -1, now_ms())) {
+                a.win.redraw = true;
+                timeout = LM_MIN(timeout, 16);
+            }
         }
         if (!wlwin_step(&a.win, timeout))
             break;

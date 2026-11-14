@@ -15,6 +15,7 @@
  */
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <stdarg.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -37,6 +38,8 @@
 #include "protocol.h"
 #include "uikit.h"
 #include "util.h"
+#include "wlcard.h"
+#include "wlrail.h"
 #include "wlclip.h"
 #include "wltext.h"
 #include "wlwin.h"
@@ -45,9 +48,14 @@
 #define TAB_W 4
 /* A sticky note (`--note FILE`): the same editor on coloured paper with no button bar, no line numbers and no status line; it saves by itself. */
 static bool g_note;
+/* The buttons are in two rails of round drops, at the left and the right of the text (not in a note); `--bar` (or MELLAGUI_EDIT_RAIL=0) brings back the bar above it. */
+static bool g_rail = true;
+#define RAIL_W (g_rail && !g_note ? WLRAIL_W : 0)
+#define RIGHT_W RAIL_W
 static uint32_t g_paper = 0xfff2a8, g_ink = 0x2a2a20;
 #define STATUS_H (g_note ? 0 : 20)
-#define TOP_H (g_note ? 0 : (LM_FONT_H + 8))           /* button bar above the text */
+#define PBAR(a) ((a)->prompt != P_NONE && !(g_rail && !g_note) ? STATUS_H : 0)     /* the prompt's own strip (the prototype has a card instead) */
+#define TOP_H (g_note || g_rail ? 0 : (LM_FONT_H + 8))           /* button bar above the text */
 #define UNDO_MAX 64
 #define COL_BG (g_note ? g_paper : lm_theme.background)
 #define COL_FG (g_note ? g_ink : lm_theme.text_soft)
@@ -99,6 +107,13 @@ struct app {
     bool ow_armed;                      /* "file exists" was shown, the next Enter overwrites */
     bool help;                          /* the key list is on screen */
     int hover;                          /* button under the pointer, -1 = none */
+    /* the rail's buttons are drops of water: springs for the swelling / squashing, and a ripple after a press */
+    struct wlrail_anim ran[2];          /* the springs of the left and the right rail */
+    /* the card of the prototype (Open / Save as / Find / Go to line): the folder's entries, the highlighted row, how far the list is scrolled */
+    struct centry { char name[256]; bool dir; } *cent;
+    int cn, ccap, csel, ctop, cbtn_down;
+    char cdir[PATH_MAX];
+    uint32_t cclick_ms;
     int zoom;                           /* text size in percent (LM_ZOOM_LEVELS); the button bar, status line and prompts keep their size */
     struct lm_zoomtab zt;               /* the cell size and font weights for it */
     bool conf_dirty;                    /* the zoom changed and is not in editor.conf yet */
@@ -856,6 +871,11 @@ static void prompt_open(struct app *a, int kind, const char *initial, int fresh)
         wltext_end(a->pbuf);
     a->pfresh = fresh;
     a->ow_armed = false;
+    a->csel = -1;
+    a->ctop = 0;
+    a->cdir[0] = 0;
+    if (g_rail && !g_note)
+        a->msg[0] = 0;                                                  /* (the card shows only what is said while it is open) */
     a->win.redraw = true;
 }
 
@@ -873,7 +893,8 @@ static void cmd_open(struct app *a)
     base_dir(a, base, sizeof(base));
     dir_slash(base, init, sizeof(init));
     prompt_open(a, P_OPEN, init, 1);
-    msg(a, "Type a name (Tab completes), or a folder to look inside; Enter opens, Esc cancels");
+    if (!g_rail)
+        msg(a, "Type a name (Tab completes), or a folder to look inside; Enter opens, Esc cancels");
 }
 
 static void cmd_save(struct app *a, bool as)
@@ -887,7 +908,8 @@ static void cmd_save(struct app *a, bool as)
             dir_slash(base, init, sizeof(init));
             prompt_open(a, P_SAVEAS, init, 1);
         }
-        msg(a, "Type a file name (Tab completes); Enter saves, Esc cancels");
+        if (!g_rail)
+            msg(a, "Type a file name (Tab completes); Enter saves, Esc cancels");
     } else {
         do_save(a, a->path);
     }
@@ -930,8 +952,8 @@ static void set_zoom_pct(struct app *a, int pct)
     a->conf_dirty = true;
     a->conf_time = now_ms();
     if (a->rows_visible > 0 && a->cols_visible > 0) {
-        int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
-        wlwin_request_size(&a->win, gutter_w(a) + a->cols_visible * a->zt.cw + lm_metrics.scrollbar_width, TOP_H + a->rows_visible * a->zt.ch + bars);
+        int bars = STATUS_H + PBAR(a);
+        wlwin_request_size(&a->win, gutter_w(a) + a->cols_visible * a->zt.cw + RIGHT_W + lm_metrics.scrollbar_width, TOP_H + a->rows_visible * a->zt.ch + bars);
     }
     a->win.redraw = true;
 }
@@ -962,15 +984,15 @@ static bool is_md_path(const char *p)
 
 static int pv_view_h(const struct app *a)
 {
-    return LM_MAX(a->win.bh - STATUS_H - (a->prompt != P_NONE ? STATUS_H : 0) - TOP_H, 1);
+    return LM_MAX(a->win.bh - STATUS_H - PBAR(a) - TOP_H, 1);
 }
 
 static int pv_col(const struct app *a, int *x)
 {
-    int avail = a->win.bw - lm_metrics.scrollbar_width - 2 * PV_PAD;
+    int avail = a->win.bw - RAIL_W - lm_metrics.scrollbar_width - 2 * PV_PAD;
     int colw = LM_CLAMP(avail, 120, PV_COLW);
     if (x)
-        *x = (a->win.bw - lm_metrics.scrollbar_width - colw) / 2;
+        *x = RAIL_W + (a->win.bw - RAIL_W - RIGHT_W - lm_metrics.scrollbar_width - colw) / 2;
     return colw;
 }
 
@@ -1165,7 +1187,7 @@ static void preview_content(struct app *a)
 static void preview_scrollbar(struct app *a)
 {
     struct wlwin *w = &a->win;
-    int sbw = lm_metrics.scrollbar_width, x = w->bw - sbw;
+    int sbw = lm_metrics.scrollbar_width, x = w->bw - RIGHT_W - sbw;
     wlwin_fill(w, x, TOP_H, sbw, pv_view_h(a), COL_BAR);
     if (md_height(a->md) <= pv_view_h(a))
         return;
@@ -1213,6 +1235,10 @@ static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
 
 /* Where button i is (x, width). A button that does not fit in the window width is left out (from the right), so a narrow
  * window shows the first buttons whole and never draws over the edge: its width is 0 then. */
+static void fill_round(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb);
+static void edit_rails(const struct app *a, struct wlrail *L, struct wlrail *R);
+static const int rail_right_ids[5];
+
 static void btn_rect(const struct app *a, int i, int *x, int *w)
 {
     char tmp[16];
@@ -1232,6 +1258,15 @@ static void btn_rect(const struct app *a, int i, int *x, int *w)
 
 static int btn_at(const struct app *a, double px, double py)
 {
+    if (g_rail && !g_note) {
+        struct wlrail L, R;
+        edit_rails(a, &L, &R);
+        int k = wlrail_at(&L, px, py);
+        if (k >= 0)
+            return k;
+        k = wlrail_at(&R, px, py);
+        return k >= 0 ? rail_right_ids[k] : -1;
+    }
     if (py < 2 || py >= TOP_H - 2)
         return -1;
     for (int i = 0; i < N_BTNS; i++) {
@@ -1241,6 +1276,77 @@ static int btn_at(const struct app *a, double px, double py)
             return i;
     }
     return -1;
+}
+
+/* The rails (wlrail.h): the file and edit buttons at the left, the page / text size buttons and Help at the right. A rail's item number is its position in it:
+ * the left one is B_NEW..B_FIND, the right one is rail_right_ids. */
+static const int rail_right_ids[5] = { B_VIEW, B_BIGGER, B_ZOOM, B_SMALLER, B_HELP };
+
+static void edit_rails(const struct app *a, struct wlrail *L, struct wlrail *R)
+{
+    static const char *const tips[N_BTNS] = { "New  Ctrl+N", "Open  Ctrl+O", "Save  Ctrl+S", "Save as  Ctrl+Shift+S", "Cut  Ctrl+X", "Copy  Ctrl+C", "Paste  Ctrl+V",
+                                              "Find  Ctrl+F", "Smaller text  Ctrl+-", "Text size: click for 100 %", "Bigger text  Ctrl++", "Keys  F1", "" };
+    static void (*const icons[8])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_new, wlrail_ic_open, wlrail_ic_save, wlrail_ic_saveas, wlrail_ic_cut,
+                                                                                     wlrail_ic_copy, wlrail_ic_paste, wlrail_ic_find };
+    const uint32_t base[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_rust, lm_theme.btn_sky, lm_theme.btn_lime, lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_grey, lm_theme.btn_slate, lm_theme.btn_rose, lm_theme.btn_orange };
+    const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit, lm_theme.btn_orange_lit };
+    static char zbuf[8];
+    memset(L, 0, sizeof(*L));
+    memset(R, 0, sizeof(*R));
+    int bottom = a->win.bh > 0 ? a->win.bh - STATUS_H - PBAR(a) : 400;
+    L->x = 0;
+    R->x = a->win.bw > 0 ? a->win.bw - WLRAIL_W : 0;
+    L->y0 = R->y0 = 0;
+    L->y1 = R->y1 = bottom;
+    L->n = 8;
+    for (int i = 0; i < 8; i++)
+        L->it[i] = (struct wlrail_item){ .tip = tips[i], .icon = icons[i], .base = base[i], .lite = lite[i], .show = true,
+                                         .idle = (i == B_CUT || i == B_COPY) && !has_sel(a), .lit = i == B_SAVE && a->modified, .gap = i == B_CUT };
+    R->n = 5;
+    snprintf(zbuf, sizeof(zbuf), "%d", a->zoom);
+    for (int j = 0; j < 5; j++) {
+        int id = rail_right_ids[j];
+        const char *text = id == B_VIEW ? (a->preview ? "Ed" : "Md") : id == B_BIGGER ? "A+" : id == B_ZOOM ? zbuf : id == B_SMALLER ? "A-" : "?";
+        const char *tip = id == B_VIEW ? (a->preview ? "Edit the text  Ctrl+M" : "Show the page  Ctrl+M") : tips[id];
+        R->it[j] = (struct wlrail_item){ .tip = tip, .text = text, .base = base[id], .lite = lite[id], .show = id != B_VIEW || (!g_note && is_md_path(a->path)),
+                                         .bottom = id == B_HELP };
+    }
+}
+
+static int rail_hover(const struct app *a, bool right)
+{
+    if (!right)
+        return a->hover >= 0 && a->hover <= B_FIND ? a->hover : -1;
+    for (int j = 0; j < 5; j++)
+        if (a->hover == rail_right_ids[j])
+            return j;
+    return -1;
+}
+
+static void paint_rail(struct app *a)
+{
+    struct wlrail L, R;
+    edit_rails(a, &L, &R);
+    int64_t now = now_ms();
+    wlrail_paint(&a->win, &L, &a->ran[0], rail_hover(a, false), now, COL_BAR, COL_BAR, COL_ACCENT, COL_FG);
+    wlrail_paint(&a->win, &R, &a->ran[1], rail_hover(a, true), now, COL_BAR, COL_BAR, COL_ACCENT, COL_FG);
+}
+
+/* The springs of both rails; true while something moves. */
+static bool rails_step(struct app *a)
+{
+    struct wlrail L, R;
+    edit_rails(a, &L, &R);
+    int64_t now = now_ms();
+    bool m0 = wlrail_step(&a->ran[0], &L, rail_hover(a, false), now);
+    bool m1 = wlrail_step(&a->ran[1], &R, rail_hover(a, true), now);
+    return m0 || m1;
+}
+
+static void rails_release(struct app *a)
+{
+    wlrail_release(&a->ran[0]);
+    wlrail_release(&a->ran[1]);
 }
 
 static void do_button(struct app *a, int i)
@@ -1336,10 +1442,27 @@ static void prompt_accept(struct app *a)
     a->win.redraw = true;
 }
 
+static bool card_on(const struct app *a);
+static bool card_files(const struct app *a);
+static void card_move(struct app *a, int delta);
+static void card_choose(struct app *a, int row, bool accept);
+
 static void edit_prompt(struct app *a, uint32_t ks, bool plain)
 {
     char txt[8];
     bool files = a->prompt == P_OPEN || a->prompt == P_SAVEAS;
+    if (card_on(a) && card_files(a)) {                                  /* the card's list: Up / Down / PageUp / PageDown choose a row, Enter takes it */
+        if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down) {
+            card_move(a, ks == LM_KS_Up ? -1 : ks == LM_KS_Down ? 1 : ks == LM_KS_Page_Up ? -8 : 8);
+            a->win.redraw = true;
+            return;
+        }
+        if ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->csel >= 0) {
+            card_choose(a, a->csel, true);
+            a->win.redraw = true;
+            return;
+        }
+    }
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         prompt_accept(a);
         return;
@@ -1365,8 +1488,307 @@ static void edit_prompt(struct app *a, uint32_t ks, bool plain)
             a->pbuf[0] = 0;                                             /* typing a path over a suggested folder replaces it */
         wltext_edit(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods);       /* a caret, a selection, the clipboard (wltext.h) */
         a->pfresh = 0;
+        a->csel = -1;                                                   /* (the list follows what is typed) */
+        a->ctop = 0;
     }
     a->win.redraw = true;
+}
+
+/* ---- the card (prototype): Open / Save as / Find / Go to line as a modal over the text ---------------------------------------------------- */
+
+#define CARD_ROW_H 22
+#define CARD_MAX_ROWS 10
+
+static bool card_on(const struct app *a)
+{
+    return g_rail && !g_note && a->prompt != P_NONE;
+}
+
+static bool card_files(const struct app *a)
+{
+    return a->prompt == P_OPEN || a->prompt == P_SAVEAS;
+}
+
+/* The folder part of the field ("~/a/b/" of "~/a/b/c.txt"; "" when there is no slash) and the rest, which filters the list. */
+static void card_split(const struct app *a, char *dirtext, size_t n, const char **filter)
+{
+    const char *sl = strrchr(a->pbuf, '/');
+    size_t len = sl ? (size_t)(sl - a->pbuf) + 1 : 0;
+    snprintf(dirtext, n, "%.*s", (int)LM_MIN(len, n - 1), a->pbuf);
+    *filter = a->pbuf + len;
+}
+
+static int centry_cmp(const void *x, const void *y)
+{
+    const struct centry *p = x, *q = y;
+    if (p->dir != q->dir)
+        return p->dir ? -1 : 1;
+    return strcasecmp(p->name, q->name);
+}
+
+static void card_load(struct app *a, const char *dirtext)
+{
+    char base[PATH_MAX], full[PATH_MAX];
+    base_dir(a, base, sizeof(base));
+    lm_resolve_path(base, dirtext[0] ? dirtext : ".", full, sizeof(full));
+    if (!strcmp(full, a->cdir) && a->cent)
+        return;
+    snprintf(a->cdir, sizeof(a->cdir), "%s", full);
+    a->cn = 0;
+    DIR *d = opendir(full);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) && a->cn < 4000) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || strlen(e->d_name) >= sizeof(a->cent[0].name))
+            continue;
+        if (a->cn == a->ccap) {
+            a->ccap = a->ccap ? a->ccap * 2 : 128;
+            a->cent = realloc(a->cent, (size_t)a->ccap * sizeof(a->cent[0]));
+        }
+        struct centry *c = &a->cent[a->cn++];
+        snprintf(c->name, sizeof(c->name), "%s", e->d_name);
+        char path[PATH_MAX + 260];
+        struct stat st;
+        snprintf(path, sizeof(path), "%.*s/%s", (int)LM_MIN(strlen(full), (size_t)PATH_MAX - 1), full, e->d_name);
+        c->dir = e->d_type == DT_DIR || (e->d_type == DT_LNK && stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+    }
+    closedir(d);
+    if (a->cn > 1)
+        qsort(a->cent, (size_t)a->cn, sizeof(a->cent[0]), centry_cmp);
+}
+
+/* The rows that show: ".." first (unless this is the root), then the entries that start with what is typed after the last slash.
+ * Returns the count; idx[k] = -1 is "..", else an index into a->cent. */
+static int card_rows(struct app *a, int *idx, int max)
+{
+    char dirtext[PATH_MAX];
+    const char *filter;
+    card_split(a, dirtext, sizeof(dirtext), &filter);
+    card_load(a, dirtext);
+    int n = 0;
+    size_t fl = strlen(filter);
+    for (int i = 0; i < a->cn && fl; i++)                               /* a name typed out in full (a file just picked): the whole folder shows */
+        if (!strcmp(a->cent[i].name, filter))
+            fl = 0;
+    if (strcmp(a->cdir, "/") && n < max && fl == 0)
+        idx[n++] = -1;
+    for (int i = 0; i < a->cn && n < max; i++) {
+        if (a->cent[i].name[0] == '.' && filter[0] != '.')
+            continue;
+        if (fl && strncasecmp(a->cent[i].name, filter, fl))
+            continue;
+        idx[n++] = i;
+    }
+    return n;
+}
+
+static int card_visible_rows(const struct app *a)
+{
+    int room = (a->win.bh - 16 - 200) / CARD_ROW_H;
+    return LM_CLAMP(room, 3, CARD_MAX_ROWS);
+}
+
+static void card_geometry(const struct app *a, int *cw, int *ch, int *list_rows)
+{
+    *cw = LM_CLAMP(a->win.bw - 16, 260, 560);
+    *list_rows = card_files(a) ? card_visible_rows(a) : 0;
+    *ch = WLCARD_PAD + 24 + 34 + (*list_rows ? *list_rows * CARD_ROW_H + 12 : 0) + 20 + WLCARD_BTN_H + WLCARD_PAD;
+}
+
+/* The field box, the list's top and the card: where everything is, for the painter and the mouse alike. */
+static void card_layout(const struct app *a, struct wlcard *c, int *fx, int *fy, int *fw, int *ly, int *rows)
+{
+    int cw, ch;
+    card_geometry(a, &cw, &ch, rows);
+    c->w = LM_MIN(cw, a->win.bw - 16);
+    c->h = LM_MIN(ch, a->win.bh - 16);
+    c->x = (a->win.bw - c->w) / 2;
+    c->y = (a->win.bh - c->h) / 2;
+    *fx = c->x + WLCARD_PAD;
+    *fy = c->y + WLCARD_PAD + 24;
+    *fw = c->w - 2 * WLCARD_PAD;
+    *ly = *fy + 34;
+}
+
+/* A text path with the entry's name in place of the part after the last slash; a folder gets its slash. */
+static void card_put(struct app *a, int row_idx)
+{
+    char dirtext[PATH_MAX], next[PATH_MAX + 260];
+    const char *filter;
+    card_split(a, dirtext, sizeof(dirtext), &filter);
+    if (row_idx < 0) {                                                  /* ".." */
+        size_t n = strlen(dirtext);
+        if (n == 0)
+            snprintf(next, sizeof(next), "../");
+        else {
+            const char *last = n >= 2 ? (const char *)memrchr(dirtext, '/', n - 1) : NULL;
+            const char *comp = last ? last + 1 : dirtext;
+            if (!strncmp(comp, "../", 3) || !strcmp(dirtext, "/") || !strcmp(dirtext, "~/"))
+                snprintf(next, sizeof(next), "%s../", dirtext);
+            else
+                snprintf(next, sizeof(next), "%.*s", (int)(last ? last - dirtext + 1 : 0), dirtext);
+        }
+    } else {
+        snprintf(next, sizeof(next), "%s%s%s", dirtext, a->cent[row_idx].name, a->cent[row_idx].dir ? "/" : "");
+    }
+    snprintf(a->pbuf, sizeof(a->pbuf), "%.511s", next);
+    wltext_end(a->pbuf);
+    a->pfresh = 0;
+    a->csel = -1;
+    a->ctop = 0;
+    a->win.redraw = true;
+}
+
+static void prompt_accept(struct app *a);
+
+/* A row chosen (Enter or a click): a folder is entered, a file goes into the field and, with `accept`, is opened or saved at once. */
+static void card_choose(struct app *a, int row, bool accept)
+{
+    int idx[4001];
+    int n = card_rows(a, idx, 4000);
+    if (row < 0 || row >= n)
+        return;
+    int e = idx[row];
+    card_put(a, e);
+    if (accept && e >= 0 && !a->cent[e].dir)
+        prompt_accept(a);
+}
+
+static void card_move(struct app *a, int delta)
+{
+    int idx[4001];
+    int n = card_rows(a, idx, 4000), rows = card_visible_rows(a);
+    if (n == 0)
+        return;
+    a->csel = LM_CLAMP(a->csel < 0 ? (delta > 0 ? 0 : n - 1) : a->csel + delta, 0, n - 1);
+    if (a->csel < a->ctop)
+        a->ctop = a->csel;
+    if (a->csel >= a->ctop + rows)
+        a->ctop = a->csel - rows + 1;
+}
+
+static const char *card_title(const struct app *a)
+{
+    static const char *const t[] = { "", "Open a file", "Save as", "Find", "Go to line" };
+    return t[a->prompt];
+}
+
+static void card_button_labels(const struct app *a, const char **labels, uint32_t *cols)
+{
+    static const char *const act[] = { "", "Open", "Save", "Find", "Go" };
+    labels[0] = "Cancel";
+    labels[1] = act[a->prompt];
+    cols[0] = lm_theme.btn_slate;
+    cols[1] = a->prompt == P_SAVEAS ? lm_theme.btn_amber : a->prompt == P_OPEN ? lm_theme.btn_blue : lm_theme.btn_green;
+}
+
+static void paint_card(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    struct wlcard c;
+    int fx, fy, fw, ly, rows;
+    card_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
+    wlcard_frame(w, &c, c.w, c.h, card_title(a), COL_ACCENT, COL_BAR, COL_ACCENT);
+    static const char *const hints[] = { "", "Tab completes", "Tab completes", "Enter = next", "" };
+    int hw = (int)strlen(hints[a->prompt]) * LM_FONT_W;
+    if (hw)
+        wlwin_text(w, c.x + c.w - WLCARD_PAD - hw, c.y + WLCARD_PAD - 2, hints[a->prompt], 1, COL_DIM, 0);
+    fill_round(w, fx, fy, fw, 28, 14, COL_BG);                            /* the field */
+    if (a->pfresh == 1)
+        wlwin_fill(w, fx + 12, fy + 6, LM_MIN((int)strlen(a->pbuf) * LM_FONT_W, fw - 24), LM_FONT_H, COL_SEL);
+    wltext_paint(w, fx + 12, fy + 6, fw - 24, a->pbuf, true, COL_FG, COL_SEL, COL_FG);
+    if (rows) {
+        int idx[4001];
+        int n = card_rows(a, idx, 4000);
+        a->ctop = LM_CLAMP(a->ctop, 0, LM_MAX(n - rows, 0));
+        fill_round(w, fx, ly, fw, rows * CARD_ROW_H + 8, 10, COL_BG);
+        if (n == 0)
+            wlwin_text(w, fx + 12, ly + 8, "Nothing here starts like that", 1, COL_DIM, fw - 24);
+        for (int r = 0; r < rows && a->ctop + r < n; r++) {
+            int k = a->ctop + r, e = idx[k], ry = ly + 4 + r * CARD_ROW_H;
+            bool dir = e < 0 || a->cent[e].dir;
+            bool over = a->px >= fx && a->px < fx + fw - 10 && a->py >= ry && a->py < ry + CARD_ROW_H;
+            const char *tail = strrchr(a->pbuf, '/');
+            bool named = e >= 0 && !strcmp(a->cent[e].name, tail ? tail + 1 : a->pbuf);     /* the file in the field */
+            if (k == a->csel || named || over)
+                fill_round(w, fx + 4, ry, fw - 8 - (n > rows ? lm_metrics.scrollbar_width : 0), CARD_ROW_H, 11, k == a->csel || named ? COL_SEL : COL_LINE);
+            int ix = fx + 14, iy = ry + 4;
+            if (dir) {                                                  /* a folder: a tab and a body */
+                wlwin_fill(w, ix, iy + 1, 6, 3, lm_theme.btn_amber);
+                wlwin_round_fill(w, ix, iy + 3, 14, 10, 3, lm_theme.btn_amber_lit);
+            } else {
+                wlwin_round_fill(w, ix + 2, iy, 10, 14, 2, lm_theme.btn_sky);
+                wlwin_fill(w, ix + 4, iy + 5, 6, 1, COL_BAR);
+                wlwin_fill(w, ix + 4, iy + 8, 6, 1, COL_BAR);
+            }
+            wlwin_text(w, ix + 24, ry + (CARD_ROW_H - LM_FONT_H) / 2, e < 0 ? ".." : a->cent[e].name, 1, dir ? COL_ACCENT : COL_FG, fw - 60);
+        }
+        if (n > rows) {                                                 /* a thin scroll bar */
+            int sbw = lm_metrics.scrollbar_width, th = LM_MAX((rows * CARD_ROW_H) * rows / n, 20);
+            int ty = ly + 4 + (rows * CARD_ROW_H - th) * a->ctop / LM_MAX(n - rows, 1);
+            wlwin_round_fill(w, fx + fw - sbw - 2, ty, sbw - 4, th, (sbw - 4) / 2, lm_theme.control);
+        }
+    }
+    bool showing = a->msg[0] && now_ms() < a->msg_until;                /* what the program has to say (a name exists, the folder is empty) */
+    int my = c.y + c.h - WLCARD_PAD - WLCARD_BTN_H - 24;
+    if (showing)
+        wlwin_text(w, fx, my, a->msg, 1, COL_WARN, fw);
+    const char *labels[2];
+    uint32_t cols[2];
+    card_button_labels(a, labels, cols);
+    int hot = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+    wlcard_buttons(w, &c, labels, 2, cols, hot, a->cbtn_down, lm_theme.on_colour);
+}
+
+/* A press on the card. Everything outside the buttons and the list is swallowed (it is modal); a press outside the card cancels. */
+static void card_press(struct app *a, uint32_t time_ms)
+{
+    struct wlcard c;
+    int fx, fy, fw, ly, rows;
+    card_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
+    int px = (int)a->px, py = (int)a->py;
+    if (!wlcard_has(&c, px, py)) {
+        a->prompt = P_NONE;
+        a->quit_armed = false;
+        a->msg[0] = 0;
+        set_title(a);
+        return;
+    }
+    int b = wlcard_button_at(&c, 2, px, py);
+    if (b == 0) {
+        a->prompt = P_NONE;
+        a->quit_armed = false;
+        a->msg[0] = 0;
+        set_title(a);
+        return;
+    }
+    if (b == 1) {
+        a->cbtn_down = 1;
+        prompt_accept(a);
+        return;
+    }
+    if (px >= fx && px < fx + fw && py >= fy && py < fy + 28) {         /* the field: the caret */
+        wltext_click(a->pbuf, px - (fx + 12), (a->win.mods & LM_MOD_SHIFT) != 0);
+        a->pfresh = 0;
+        return;
+    }
+    if (rows && px >= fx && px < fx + fw && py >= ly + 4 && py < ly + 4 + rows * CARD_ROW_H) {
+        int idx[4001];
+        int n = card_rows(a, idx, 4000), row = a->ctop + (py - ly - 4) / CARD_ROW_H;
+        if (row < n) {
+            bool dbl = time_ms - a->cclick_ms < (uint32_t)lm_metrics.double_click_ms;
+            a->cclick_ms = time_ms;
+            bool file = idx[row] >= 0 && !a->cent[idx[row]].dir;
+            bool was = a->csel == row;
+            card_put(a, idx[row]);
+            if (file) {
+                a->csel = row;                                          /* (the list stays as it is: the field now has the whole name) */
+                if (dbl && was)
+                    prompt_accept(a);
+            }
+        }
+    }
 }
 
 static void page_move(struct app *a, int dir, bool extend)
@@ -1740,7 +2162,7 @@ static int gutter_w(const struct app *a)
     int digits = 1;
     for (int n = a->n; n >= 10; n /= 10)
         digits++;
-    return (LM_MAX(digits, 3) + 2) * a->zt.cw;
+    return RAIL_W + (LM_MAX(digits, 3) + 2) * a->zt.cw;
 }
 
 static uint32_t cp_at(const struct line *l, size_t off)
@@ -1812,7 +2234,7 @@ static void paint_help(struct wlwin *w)
 
 static int sb_track_h(const struct app *a)
 {
-    int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
+    int bars = STATUS_H + PBAR(a);
     return LM_MAX(a->win.bh - bars - TOP_H, 1);
 }
 
@@ -1825,7 +2247,7 @@ static void sb_thumb(const struct app *a, int *ty, int *th)
 
 static void paint_scrollbar(struct wlwin *w, const struct app *a)
 {
-    int sbw = lm_metrics.scrollbar_width, x = w->bw - sbw;
+    int sbw = lm_metrics.scrollbar_width, x = w->bw - RIGHT_W - sbw;
     wlwin_fill(w, x, TOP_H, sbw, sb_track_h(a), COL_BAR);
     if (a->n <= 1)
         return;
@@ -1847,10 +2269,10 @@ static void sb_drag_to(struct app *a, double py)
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
-    int bars = STATUS_H + (a->prompt != P_NONE ? STATUS_H : 0);
+    int bars = STATUS_H + PBAR(a);
     int gw = gutter_w(a);
     a->rows_visible = LM_MAX((w->bh - bars - TOP_H) / a->zt.ch, 1);
-    a->cols_visible = LM_MAX((w->bw - gw - lm_metrics.scrollbar_width) / a->zt.cw, 1);
+    a->cols_visible = LM_MAX((w->bw - gw - RIGHT_W - lm_metrics.scrollbar_width) / a->zt.cw, 1);
     if (a->cy != a->seen_cy || a->cx != a->seen_cx || a->n != a->seen_n || a->rows_visible != a->seen_rows ||
         a->cols_visible != a->seen_cols) {                               /* the view follows the cursor only when that moved */
         scroll_to_cursor(a);
@@ -1865,9 +2287,9 @@ static void paint(struct wlwin *w)
         a->preview = false;
     if (a->preview)
         preview_content(a);                                              /* (under the bars: they are drawn over its ends) */
-    if (!g_note)
+    if (!g_note && !g_rail)
         wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                     /* the button bar */
-    for (int i = 0; i < (g_note ? 0 : N_BTNS); i++) {
+    for (int i = 0; i < (g_note || g_rail ? 0 : N_BTNS); i++) {
         int bx, bwid;
         char tmp[16];
         btn_rect(a, i, &bx, &bwid);
@@ -1877,7 +2299,7 @@ static void paint(struct wlwin *w)
         const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit, lm_theme.btn_orange_lit };
         bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
         bool idle = (i == B_CUT || i == B_COPY) && !has_sel(a);             /* nothing selected: Cut and Copy have nothing to take */
-        fill_round(w, bx, 2, bwid, TOP_H - 4, lm_button_radius((TOP_H - 4) / 2), idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
+        wlwin_drop(w, bx, 2, bwid, TOP_H - 4, lm_button_radius((TOP_H - 4) / 2), idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
         wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? lm_theme.title_text_idle : lm_theme.on_colour, 0);
@@ -1886,7 +2308,7 @@ static void paint(struct wlwin *w)
         preview_scrollbar(a);
         goto status;
     }
-    wlwin_fill(w, 0, TOP_H, gw, w->bh - bars - TOP_H, COL_GUTTER_BG);
+    wlwin_fill(w, RAIL_W, TOP_H, gw - RAIL_W, w->bh - bars - TOP_H, COL_GUTTER_BG);
     int y0, y1;
     size_t x0, x1;
     sel_order(a, &y0, &x0, &y1, &x1);
@@ -1898,7 +2320,7 @@ static void paint(struct wlwin *w)
         const struct line *l = &a->l[ly];
         int py = TOP_H + r * a->zt.ch;
         if (ly == a->cy)
-            wlwin_fill(w, gw, py, w->bw - gw - lm_metrics.scrollbar_width, a->zt.ch, COL_LINE);
+            wlwin_fill(w, gw, py, w->bw - gw - RIGHT_W - lm_metrics.scrollbar_width, a->zt.ch, COL_LINE);
         char num[16];
         snprintf(num, sizeof(num), "%d", ly + 1);
         for (int k = 0; num[k] && !g_note; k++)
@@ -1930,6 +2352,8 @@ static void paint(struct wlwin *w)
     }
     paint_scrollbar(w, a);
 status:;
+    if (g_rail && !g_note)
+        paint_rail(a);
     int sy = w->bh - STATUS_H;
     if (g_note) {
         if (a->msg[0] && now_ms() < a->msg_until) {                     /* a note has no status line: what it has to say comes as a strip over the bottom */
@@ -1954,7 +2378,7 @@ status:;
     bool showing = a->msg[0] && now_ms() < a->msg_until;
     wlwin_text(w, 6, sy + 2, showing ? a->msg : left, 1, showing ? COL_WARN : COL_FG, w->bw - 12 - (int)strlen(right) * LM_FONT_W);
     wlwin_text(w, w->bw - 6 - (int)strlen(right) * LM_FONT_W, sy + 2, right, 1, COL_DIM, 0);
-    if (a->prompt != P_NONE) {
+    if (a->prompt != P_NONE && !card_on(a)) {
         static const char *const labels[] = { "", "Open: ", "Save as: ", "Find: ", "Go to line: " };
         static const char *const hints[] = { "", "Tab completes", "Tab completes", "Enter = next", "" };
         int py = sy - STATUS_H;
@@ -1971,6 +2395,8 @@ status:;
     }
     if (a->help)
         paint_help(w);
+    if (card_on(a))
+        paint_card(a);
     preview_dump(a);
 }
 
@@ -2031,6 +2457,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->hover = -1;
+        rails_release(a);
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_MOTION:
@@ -2043,7 +2470,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (a->preview && a->md) {
             int cx;
             pv_col(a, &cx);
-            const char *url = a->py >= TOP_H && a->px < w->bw - lm_metrics.scrollbar_width ?
+            const char *url = a->px >= RAIL_W && a->py >= TOP_H && a->px < w->bw - RIGHT_W - lm_metrics.scrollbar_width ?
                               md_link_at(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll) : NULL;
             a->md_hover = url;
             if (a->md_selecting) {
@@ -2069,17 +2496,19 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
+        if (args[2].u == 272 && args[3].u == 0)
+            rails_release(a);                                           /* (the drop springs back) */
         if (args[2].u == 273 && args[3].u == 1) {                        /* BTN_RIGHT: the field's menu, or the text's */
             if (a->prompt != P_NONE) {
                 a->menu_kind = 1;
                 if (!wlwin_menu(w, wltext_menu(a->pbuf)))
                     a->menu_kind = 0;
-            } else if (!a->help && a->preview && a->md && a->py >= TOP_H && a->py < TOP_H + pv_view_h(a) && a->px < w->bw - lm_metrics.scrollbar_width) {
+            } else if (!a->help && a->preview && a->md && a->px >= RAIL_W && a->py >= TOP_H && a->py < TOP_H + pv_view_h(a) && a->px < w->bw - RIGHT_W - lm_metrics.scrollbar_width) {
                 a->menu_kind = 3;
                 if (!wlwin_menu(w, md_sel_active(a->md) ? "Copy\nSelect all" : "~Copy\nSelect all"))
                     a->menu_kind = 0;
                 w->redraw = true;
-            } else if (!a->help && !a->preview && a->py >= TOP_H && a->py < TOP_H + a->rows_visible * a->zt.ch && a->px < w->bw - lm_metrics.scrollbar_width) {
+            } else if (!a->help && !a->preview && a->px >= RAIL_W && a->py >= TOP_H && a->py < TOP_H + a->rows_visible * a->zt.ch && a->px < w->bw - RIGHT_W - lm_metrics.scrollbar_width) {
                 if (!has_sel(a))
                     place_from_pointer(a, false);
                 a->menu_kind = 2;
@@ -2089,6 +2518,16 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             }
             break;
         }
+        if (card_on(a)) {                                               /* the card is modal: it takes every click */
+            if (args[2].u == 272) {
+                if (args[3].u == 1)
+                    card_press(a, args[1].u);
+                else
+                    a->cbtn_down = -1;
+            }
+            w->redraw = true;
+            break;
+        }
         if (args[2].u != 272)
             break;
         if (args[3].u == 1 && a->help) {                                 /* a click closes the key list */
@@ -2096,15 +2535,21 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             w->redraw = true;
             break;
         }
-        if (args[3].u == 1 && a->py < TOP_H) {                           /* the button bar */
+        if (args[3].u == 1 && (a->py < TOP_H || a->px < RAIL_W || (RIGHT_W && a->px >= w->bw - RIGHT_W))) {          /* the button bar, or a rail */
             int b = btn_at(a, a->px, a->py);
+            if (b >= 0 && g_rail) {
+                if (b <= B_FIND)
+                    wlrail_press(&a->ran[0], b, now_ms());
+                else
+                    wlrail_press(&a->ran[1], rail_hover(a, true), now_ms());
+            }
             if (b >= 0)
                 do_button(a, b);
             break;
         }
         if (a->preview && a->md) {
             if (args[3].u == 1) {
-                int sbx = w->bw - lm_metrics.scrollbar_width, max = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
+                int sbx = w->bw - RIGHT_W - lm_metrics.scrollbar_width, max = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
                 if (a->px >= sbx && a->py < TOP_H + pv_view_h(a)) {      /* the scroll bar: drag the thumb, a click beside it pages */
                     int ty, th;
                     pv_thumb(a, &ty, &th);
@@ -2114,7 +2559,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                     } else {
                         a->md_scroll = LM_CLAMP(a->md_scroll + (a->py < ty ? -1 : 1) * (pv_view_h(a) - PV_STEP), 0, max);
                     }
-                } else if (a->py >= TOP_H && a->py < TOP_H + pv_view_h(a)) {
+                } else if (a->px >= RAIL_W && a->py >= TOP_H && a->py < TOP_H + pv_view_h(a)) {
                     int cx, px = 0, py;
                     pv_col(a, &cx);
                     px = (int)a->px - cx;
@@ -2145,7 +2590,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             w->redraw = true;
             break;
         }
-        if (args[3].u == 1 && a->px >= w->bw - lm_metrics.scrollbar_width && a->py < TOP_H + sb_track_h(a)) {
+        if (args[3].u == 1 && a->px >= w->bw - RIGHT_W - lm_metrics.scrollbar_width && a->px < w->bw - RIGHT_W && a->py < TOP_H + sb_track_h(a)) {
             int ty, th;                                                  /* the scroll bar: drag the thumb, or a click beside it pages */
             sb_thumb(a, &ty, &th);
             if (a->py >= ty && a->py < ty + th) {
@@ -2184,7 +2629,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:
-        if (a->preview && a->md && args[1].u == 0) {
+        if (card_on(a)) {
+            if (card_files(a) && args[1].u == 0)
+                a->ctop = LM_MAX(a->ctop + (args[2].f > 0 ? 3 : -3), 0);
+            w->redraw = true;
+        } else if (a->preview && a->md && args[1].u == 0) {
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
             if (lines == 0)
                 lines = args[2].f > 0 ? 1 : -1;
@@ -2431,6 +2880,16 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    const char *rail_env = getenv("MELLAGUI_EDIT_RAIL");
+    if (rail_env && !strcmp(rail_env, "0"))
+        g_rail = false;
+    for (int i = 1; i < argc; i++)                                      /* --bar: the old bar of buttons above the text; --rail: (the default) */
+        if (!strcmp(argv[i], "--bar") || !strcmp(argv[i], "--rail")) {
+            g_rail = argv[i][2] == 'r';
+            memmove(&argv[i], &argv[i + 1], (size_t)(argc - i) * sizeof(argv[0]));
+            argc--;
+            break;
+        }
     if (argc == 2 && !strcmp(argv[1], "--notes"))
         return notes_open_all();
     const char *note_file = NULL;
@@ -2442,13 +2901,17 @@ int main(int argc, char **argv)
             return 0;                                                   /* it is open in a window already */
     }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-edit [FILE | --note FILE | --notes | --selftest]\n");
+        fprintf(stderr, "usage: mellagui-edit [--bar] [FILE | --note FILE | --notes | --selftest]\n");
         return 2;
     }
     static struct app a;
     doc_clear(&a);
     a.final_nl = true;
     a.hover = -1;
+    a.cbtn_down = -1;
+    a.csel = -1;
+    wlrail_init(&a.ran[0]);
+    wlrail_init(&a.ran[1]);
     a.zoom = lm_zoom_conf_load("editor");
     if (a.zoom == 0)
         a.zoom = LM_ZOOM_DEFAULT;
@@ -2481,6 +2944,10 @@ int main(int argc, char **argv)
         if (a.rep_code) {
             int64_t wait = a.rep_next - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, 250);
+        }
+        if (g_rail && !g_note && rails_step(&a)) {                         /* the drops are moving: a frame every 16 ms */
+            a.win.redraw = true;
+            timeout = LM_MIN(timeout, 16);
         }
         if (!wlwin_step(&a.win, timeout))
             break;

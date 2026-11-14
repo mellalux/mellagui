@@ -38,6 +38,7 @@
 #include "keymap.h"
 #include "protocol.h"
 #include "theme.h"
+#include "uikit.h"
 #include "util.h"
 #include "wlc.h"
 #include "wlwin.h"
@@ -531,7 +532,7 @@ static struct box modal_b2(const struct app *a) { struct box m = modal_box(a); r
 
 static void button(struct wlwin *w, struct box b, const char *label, bool hot, uint32_t bg)
 {
-    wlwin_fill(w, b.x, b.y, b.w, b.h, hot ? lm_theme.button_hover : bg);
+    wlwin_drop(w, b.x, b.y, b.w, b.h, lm_button_radius(b.h / 2), hot ? lm_theme.button_hover : bg);
     int tw = lm_font_text_width(label);
     wlwin_text(w, b.x + (b.w - tw) / 2, b.y + (b.h - LM_FONT_H) / 2, label, 1, lm_theme.text, 0);
 }

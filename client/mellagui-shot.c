@@ -40,6 +40,7 @@
 #include "theme.h"
 #include "util.h"
 #include "wlc.h"
+#include "uikit.h"
 #include "wlwin.h"
 
 #define MAX_OUTPUTS 8
@@ -710,7 +711,7 @@ static void paint(struct wlwin *w)
             continue;
         }
         uint32_t bg = b[i].kind == B_SAVE ? lm_theme.ok : b[i].on ? lm_theme.button_down : hot ? lm_theme.button_hover : lm_theme.button;
-        wlwin_fill(w, b[i].x, b[i].y, b[i].w, b[i].h, bg);
+        wlwin_drop(w, b[i].x, b[i].y, b[i].w, b[i].h, lm_button_radius(b[i].h / 2), bg);
         wlwin_text(w, b[i].x + (b[i].w - text_width(b[i].label, 1)) / 2, b[i].y + (b[i].h - LM_FONT_H) / 2, b[i].label, 1,
                    b[i].kind == B_SAVE ? lm_theme.ink : lm_theme.text, 0);
     }

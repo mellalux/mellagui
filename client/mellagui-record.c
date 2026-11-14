@@ -963,7 +963,7 @@ static void draw_button(struct app *a, const struct button *b, int id, uint32_t 
         col = lm_mix_rgb(base, 0x000000, 0.25);
     else if (a->hover == id)
         col = lm_mix_rgb(base, 0xffffff, 0.18);
-    wlwin_round_fill(&a->win, b->x, b->y, b->w, b->h, lm_button_radius(b->h / 2), col);
+    wlwin_drop(&a->win, b->x, b->y, b->w, b->h, lm_button_radius(b->h / 2), col);
     int tw = lm_font_text_width(label);
     wlwin_text(&a->win, b->x + (b->w - tw) / 2, b->y + (b->h - LM_FONT_H) / 2, label, 1, dim ? lm_theme.text_dim : lm_theme.on_colour, b->w - 8);
 }

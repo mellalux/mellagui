@@ -46,6 +46,8 @@ struct wlwin {
     uint32_t surface, xsurface, toplevel, pool, buffer;
     int w, h;                       /* size the compositor asked for (clamped to the minimum) */
     int bw, bh;                     /* the window's drawing area in LOGICAL pixels (what a program lays out in) */
+    int inx;                        /* wlwin_set_inset(): the width of a rail at the left; bw is smaller by it, drawing is shifted right and pointer x left by it */
+    double rpx, rpy;                /* the pointer in WINDOW pixels (not shifted by the inset), for a program's own rail */
     int pw, ph;                     /* size of `pixels`: bw * scale x bh * scale (= bw x bh unless the program asked for wlwin_hidpi) */
     int scale;                      /* the buffer's scale factor: 1, or the largest wl_output scale for a hidpi window */
     bool hidpi;                     /* wlwin_hidpi() was called: the program draws only through the wlwin_* calls */
@@ -114,9 +116,16 @@ bool wlwin_request_size(struct wlwin *w, int width, int height);
 void wlwin_fill(struct wlwin *w, int x, int y, int width, int height, uint32_t rgb);
 /* A box with rounded corners (a pill when r >= min(width, height) / 2), blended over what is there. */
 void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb);
+/* A coloured button as a bead of water (dark rim, light gathered towards the bottom, a small glint): the look of every MellaGUI program's coloured buttons.
+ * Same arguments as wlwin_round_fill. */
+void wlwin_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t rgb);
 /* Everything drawn so far mixed with black: t = 0 nothing, 1 all black (a modal card dims the page behind it). */
 void wlwin_dim(struct wlwin *w, double t);
 /* An XRGB / ARGB picture of sw x sh pixels (stride in pixels) scaled to the logical rectangle (x, y, width, height). */
+/* Room for a side rail (wlrail.h) at the left: the program goes on drawing and hit-testing in a drawing area that starts `left` pixels in (bw is that much
+ * smaller, every wlwin_* call is shifted, pointer positions are too), and keeps the rail to itself: it paints it with wlrail_paint (which draws in window
+ * pixels) and finds the pointer over it through w->rpx / w->rpy. Call before wlwin_open (the default and minimum width grow by `left`). */
+void wlwin_set_inset(struct wlwin *w, int left);
 /* The scale factor of the buffer (1 when the program is not hidpi or the screen is not scaled): a program that makes pictures for its window
  * (an image viewer, a camera) makes them wlwin_scale() times as big as their logical size and puts them with wlwin_blit_px. */
 static inline int wlwin_scale(const struct wlwin *w) { return w->scale > 1 ? w->scale : 1; }

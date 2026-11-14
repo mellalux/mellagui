@@ -60,7 +60,7 @@
 /* The buttons are a rail of round drops at the left (wlrail.h; MELLAGUI_CAM_RAIL=0 or MELLAGUI_RAILS=0 bring back the bar under the picture); the strip under
  * the picture then only has the status line. */
 static bool g_rail;
-#define BAR_H (g_rail ? 28 : 44)
+#define BAR_H (g_rail ? 24 : 44)
 #define BTN_H 28
 #define WARMUP_FRAMES 8
 
@@ -98,6 +98,8 @@ struct app {
     int frames, fps, ndev;
     int hover;
     struct wlrail_anim ran;             /* the springs of the rail */
+    bool menu_open;                     /* the list of sizes (the Size button's drop-down) is showing */
+    int menu_hover, menu_top;           /* its highlighted entry and the first one that shows (a long list scrolls) */
     double px, py;
     char outdir[PATH_MAX];
     char videodir[PATH_MAX];            /* where clips go */
@@ -745,6 +747,112 @@ static int btn_at(const struct app *a, double px, double py)
     return -1;
 }
 
+/* ---- the Size button's drop-down: a list of the sizes the camera can deliver ----------------------------------------------------------------------- */
+
+#define MENU_ROW_H (LM_FONT_H + 4)
+
+static int cur_size_index(const struct app *a)
+{
+    for (int i = 0; i < a->src.nsizes; i++)
+        if (a->src.sizes[i].w == a->src.w && a->src.sizes[i].h == a->src.h)
+            return i;
+    return 0;
+}
+
+static int menu_rows_fit(const struct app *a)
+{
+    return LM_CLAMP((a->win.bh - 12) / MENU_ROW_H, 1, MAX_SIZES);
+}
+
+/* The list's place in the drawing area (the window beyond the rail): beside the Size drop of the rail, or above the Size button of the bar. */
+static void menu_rect(const struct app *a, int *x, int *y, int *w, int *h)
+{
+    char tmp[24];
+    int rows = LM_MIN(a->src.nsizes, menu_rows_fit(a)), tw = 0;
+    for (int i = 0; i < a->src.nsizes; i++) {
+        snprintf(tmp, sizeof(tmp), "%dx%d", a->src.sizes[i].w, a->src.sizes[i].h);
+        tw = LM_MAX(tw, (int)strlen(tmp));
+    }
+    *w = tw * LM_FONT_W + 32;
+    *h = rows * MENU_ROW_H + 4;
+    int bx = 4, by = 4;
+    if (g_rail) {
+        struct wlrail L;
+        int ys[WLRAIL_MAX];
+        cam_rail(a, &L);
+        wlrail_layout(&L, ys);
+        by = ys[B_SIZE] >= 0 ? ys[B_SIZE] : 4;
+    } else {
+        int bw, bh;
+        if (btn_rect(a, B_SIZE, &bx, &by, &bw, &bh))
+            by = by - *h - 4;
+    }
+    *x = bx;
+    *y = LM_CLAMP(by, 0, LM_MAX(a->win.bh - *h, 0));
+}
+
+static int menu_row_at(const struct app *a, double px, double py)           /* index into the sizes, or -1 */
+{
+    int x, y, w, h;
+    menu_rect(a, &x, &y, &w, &h);
+    if (px < x || px >= x + w || py < y + 2 || py >= y + h - 2)
+        return -1;
+    int row = a->menu_top + ((int)py - y - 2) / MENU_ROW_H;
+    return row < a->src.nsizes ? row : -1;
+}
+
+static void menu_scroll_to_hover(struct app *a)
+{
+    int rows = menu_rows_fit(a);
+    if (a->menu_hover < a->menu_top)
+        a->menu_top = a->menu_hover;
+    if (a->menu_hover >= a->menu_top + rows)
+        a->menu_top = a->menu_hover - rows + 1;
+    a->menu_top = LM_CLAMP(a->menu_top, 0, LM_MAX(a->src.nsizes - rows, 0));
+}
+
+static void menu_set(struct app *a, bool open)
+{
+    a->menu_open = open && a->src.nsizes > 0;
+    if (a->menu_open) {
+        a->menu_hover = cur_size_index(a);
+        a->menu_top = 0;
+        menu_scroll_to_hover(a);
+    }
+    a->win.redraw = true;
+}
+
+static void start_stream(struct app *a);
+
+static void menu_pick(struct app *a, int i)
+{
+    if (i >= 0 && i < a->src.nsizes && a->src.on && !a->clip) {
+        a->want = a->src.sizes[i];
+        start_stream(a);
+    }
+    menu_set(a, false);
+}
+
+static void paint_menu(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int x, y, mw, mh;
+    menu_rect(a, &x, &y, &mw, &mh);
+    wlwin_round_fill(w, x - 1, y - 1, mw + 2, mh + 2, 9, lm_theme.menu_border);
+    wlwin_round_fill(w, x, y, mw, mh, 8, lm_theme.bar);
+    int rows = LM_MIN(a->src.nsizes - a->menu_top, menu_rows_fit(a)), cur = cur_size_index(a);
+    for (int r = 0; r < rows; r++) {
+        int i = a->menu_top + r, ry = y + 2 + r * MENU_ROW_H;
+        char t[24];
+        snprintf(t, sizeof(t), "%dx%d", a->src.sizes[i].w, a->src.sizes[i].h);
+        if (i == a->menu_hover)
+            wlwin_round_fill(w, x + 3, ry, mw - 6, MENU_ROW_H, MENU_ROW_H / 2, lm_theme.terminal_button_on);
+        wlwin_text(w, x + 10, ry + 2, t, 1, i == cur ? lm_theme.menu_current : lm_theme.bar_text_bright, 0);
+        if (i == cur)
+            wlwin_fill(w, x + mw - 12, ry + MENU_ROW_H / 2 - 2, 4, 4, lm_theme.menu_current);       /* a dot marks the size in use */
+    }
+}
+
 static void paint_picture(struct app *a, int vw, int vh)
 {
     struct wlwin *w = &a->win;
@@ -831,15 +939,45 @@ static void paint(struct wlwin *w)
                  a->paused ? 0 : a->fps, a->paused ? "  paused" : "");
     else
         st[0] = 0;
-    int last = 0;
-    for (int i = 0; i < N_B; i++) {
-        int x, y, bw, bh;
-        if (btn_rect(a, i, &x, &y, &bw, &bh))
-            last = x + bw;
+    if (g_rail) {
+        /* The status bar (the rail has the buttons): what is happening at the left (a clip being recorded, what was saved, else the camera), how the camera
+         * delivers at the right: size, format, pictures a second and the switches that are on. */
+        char left[240], right[200];
+        uint32_t lcol = lm_theme.text_soft;
+        if (a->clip) {
+            snprintf(left, sizeof(left), "%s", st);
+            lcol = lm_theme.alert;
+        } else if (a->note[0] && now_ms() < a->note_until) {
+            snprintf(left, sizeof(left), "%s", a->note);
+            lcol = lm_theme.caution;
+        } else if (a->src.on) {
+            snprintf(left, sizeof(left), "%s", a->src.card);
+        } else {
+            snprintf(left, sizeof(left), "%s", a->msg[0] ? a->msg : "No camera");
+            lcol = lm_theme.muted;
+        }
+        right[0] = 0;
+        if (a->src.on)
+            snprintf(right, sizeof(right), "%dx%d %s  %d fps%s%s%s", a->src.w, a->src.h, a->src.fake ? "test" : fourcc_name(a->src.fourcc), a->paused ? 0 : a->fps,
+                     a->mirror ? "  mirrored" : "", a->paused ? "  paused" : "", a->mic ? "  mic" : "");
+        int rw = (int)strlen(right) * LM_FONT_W, ty = vh + (BAR_H - LM_FONT_H) / 2;
+        wlwin_fill(w, 0, vh, w->bw, 1, lm_theme.border);
+        wlwin_text(w, 10, ty, left, 1, lcol, LM_MAX(w->bw - rw - 36, 40));
+        if (rw && rw + 20 < w->bw)
+            wlwin_text(w, w->bw - rw - 10, ty, right, 1, lm_theme.muted, 0);
+    } else {
+        int last = 0;
+        for (int i = 0; i < N_B; i++) {
+            int x, y, bw, bh;
+            if (btn_rect(a, i, &x, &y, &bw, &bh))
+                last = x + bw;
+        }
+        int tw = (int)strlen(st) * LM_FONT_W;
+        if (last + 16 + tw <= w->bw)
+            wlwin_text(w, w->bw - tw - 10, vh + (BAR_H - LM_FONT_H) / 2, st, 1, lm_theme.muted, 0);
     }
-    int tw = (int)strlen(st) * LM_FONT_W;
-    if (last + 16 + tw <= w->bw)
-        wlwin_text(w, w->bw - tw - 10, vh + (BAR_H - LM_FONT_H) / 2, st, 1, lm_theme.muted, 0);
+    if (a->menu_open)
+        paint_menu(a);
     if (g_rail) {
         struct wlrail L;
         cam_rail(a, &L);
@@ -941,18 +1079,6 @@ static void next_camera(struct app *a)
     open_camera(a, a->want_dev);
 }
 
-static void next_size(struct app *a)
-{
-    if (a->src.nsizes < 2 || !a->src.on)
-        return;
-    int cur = 0;
-    for (int i = 0; i < a->src.nsizes; i++)
-        if (a->src.sizes[i].w == a->src.w && a->src.sizes[i].h == a->src.h)
-            cur = i;
-    a->want = a->src.sizes[(cur + 1) % a->src.nsizes];
-    start_stream(a);
-}
-
 static void press(struct app *a, int b)
 {
     switch (b) {
@@ -970,7 +1096,7 @@ static void press(struct app *a, int b)
         if (!a->clip)                                           /* a clip is made of the live pictures */
             a->paused = !a->paused;
         break;
-    case B_SIZE: if (!a->clip) next_size(a); break;
+    case B_SIZE: if (!a->clip) menu_set(a, !a->menu_open); break;
     case B_CAM: if (!a->clip) next_camera(a); break;
     }
     a->win.redraw = true;
@@ -994,8 +1120,29 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
         a->hover = btn_at(a, a->px, a->py);
+        if (a->menu_open) {
+            int row = menu_row_at(a, a->px, a->py);
+            if (row >= 0 && row != a->menu_hover) {
+                a->menu_hover = row;
+                w->redraw = true;
+            }
+        }
+        break;
+    case LM_WL_POINTER_EVT_AXIS:
+        if (a->menu_open && args[1].u == 0) {                   /* the wheel scrolls a long list */
+            a->menu_top = LM_CLAMP(a->menu_top + (args[2].f > 0 ? 1 : -1) * 2, 0, LM_MAX(a->src.nsizes - menu_rows_fit(a), 0));
+            w->redraw = true;
+        }
         break;
     case LM_WL_POINTER_EVT_BUTTON:
+        if (a->menu_open && args[2].u == 272 && args[3].u == 1) {           /* any press: pick an entry, or just close the list */
+            int row = menu_row_at(a, a->px, a->py);
+            if (row >= 0)
+                menu_pick(a, row);
+            else
+                menu_set(a, false);
+            break;
+        }
         if (args[2].u == 272 && args[3].u == 1) {               /* BTN_LEFT pressed */
             int b = btn_at(a, a->px, a->py);
             if (b >= 0) {
@@ -1022,6 +1169,19 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);
     char c = (tl == 1 && !(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) ? txt[0] : 0;
+    if (a->menu_open) {                                         /* the list of sizes: Up / Down / Enter / Esc */
+        if (ks == LM_KS_Escape || c == 's' || c == 'S') {
+            menu_set(a, false);
+        } else if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down) {
+            int step = ks == LM_KS_Up ? -1 : ks == LM_KS_Down ? 1 : ks == LM_KS_Page_Up ? -menu_rows_fit(a) : menu_rows_fit(a);
+            a->menu_hover = LM_CLAMP(a->menu_hover + step, 0, LM_MAX(a->src.nsizes - 1, 0));
+            menu_scroll_to_hover(a);
+            w->redraw = true;
+        } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+            menu_pick(a, a->menu_hover);
+        }
+        return;
+    }
     if (ks == LM_KS_Escape || c == 'q' || c == 'Q')
         w->running = false;
     else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || c == ' ')

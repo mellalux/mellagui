@@ -2932,6 +2932,25 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_an_xml_file_as_a_tree(self):
+        d = tempfile.mkdtemp(prefix='files-xml-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.xml'), 'w') as f:
+            f.write('<?xml version="1.0"?>\n<!-- c -->\n<project id="7"><name>A &amp; B</name><deps><dep>x</dep><dep>y</dep></deps></project>\n')
+        with open(os.path.join(d, 'b.xml'), 'w') as f:
+            f.write('<a><b></a>\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.xml)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json')
+        self.assertEqual(head['kind'], 'json')                                         # the same tree as for JSON and YAML
+        self.assertEqual((extra['json']['nodes'], extra['json']['shown']), ('6', '6'))  # project, @id, name, deps, dep, dep: the root and its children are open
+        ctl.click(win['x'] + 700, win['y'] + 64)                                       # a click on the root row closes it
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '1')
+        self.assertEqual(extra['json']['shown'], '1')
+        ctl.tap(self.K_DOWN)                                                           # b.xml does not match its tags: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

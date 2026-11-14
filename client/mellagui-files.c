@@ -64,6 +64,7 @@
 #include "util.h"
 #include "json.h"
 #include "syntax.h"
+#include "xmltree.h"
 #include "yamltree.h"
 #include "wlcard.h"
 #include "wlrail.h"
@@ -2382,6 +2383,7 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
 
 /* ---- JSON as a tree ---- */
 #define JSON_MAX_NODES 60000
+enum { FMT_JSON, FMT_YAML, FMT_XML };                                    /* what pv_json reads into the tree */
 
 static bool json_container(const struct json *n)
 {
@@ -2472,15 +2474,15 @@ static void json_rebuild(struct preview *pv)
     }
 }
 
-/* A .json (or, with `yaml`, a .yaml) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
-static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, bool yaml)
+/* A .json (or, as `fmt` says, a .yaml / .xml) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
+static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, int fmt)
 {
     char *text = malloc(n + 1);
     if (!text)
         return false;
     memcpy(text, buf, n);
     text[n] = 0;
-    struct json *root = yaml ? yaml_parse(text) : json_parse(text);
+    struct json *root = fmt == FMT_YAML ? yaml_parse(text) : fmt == FMT_XML ? xml_parse(text) : json_parse(text);
     free(text);
     if (!root || !json_container(root)) {
         json_free(root);
@@ -2542,6 +2544,15 @@ static void pv_hex(struct preview *pv, const unsigned char *buf, size_t n)
 static bool is_markdown_path(const char *p)
 {
     return ext_is(p, "md") || ext_is(p, "markdown") || ext_is(p, "mdown") || ext_is(p, "mkd");
+}
+
+static bool is_xml_path(const char *p)
+{
+    static const char *const ext[] = { "xml", "svg", "xhtml", "plist", "rss", "atom", "gpx", "kml", "xsd", "xsl", "xslt", "csproj", "pom", "xaml", "ui" };
+    for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+        if (ext_is(p, ext[i]))
+            return true;
+    return false;
 }
 
 static void preview_load(struct preview *pv, const char *path, bool hidden)
@@ -2641,10 +2652,12 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_MARKDOWN;
         pv->md = md_parse((const char *)buf, (size_t)n);
         pv->top = 0;
-    } else if ((ext_is(path, "json") || ext_is(path, "geojson") || ext_is(path, "webmanifest")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, false)) {
+    } else if ((ext_is(path, "json") || ext_is(path, "geojson") || ext_is(path, "webmanifest")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_JSON)) {
         pv->kind = PV_JSON;                                              /* a tree: click a row to open or close it */
-    } else if ((ext_is(path, "yaml") || ext_is(path, "yml")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, true)) {
+    } else if ((ext_is(path, "yaml") || ext_is(path, "yml")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_YAML)) {
         pv->kind = PV_JSON;                                              /* YAML is read into the same kind of tree */
+    } else if (is_xml_path(path) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_XML)) {
+        pv->kind = PV_JSON;                                              /* and XML */
     } else if ((ext_is(path, "csv") || ext_is(path, "tsv")) && pv_table(pv, buf, (size_t)n, ext_is(path, "tsv") ? '\t' : csv_delim(buf, (size_t)n), (off_t)n < st.st_size)) {
         pv->kind = PV_TABLE;                                             /* a table: the rows, ready to paint */
         if ((off_t)n < st.st_size)
@@ -6110,6 +6123,14 @@ static int selftest(void)
     snprintf(p, sizeof(p), "%s/plain.yml", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT, "a .yml that is no mapping or list is plain text");
+    touch(dir, "t.xml", "<?xml version=\"1.0\"?><r a=\"1\"><x>t</x><y><z/></y></r>", 53);
+    snprintf(p, sizeof(p), "%s/t.xml", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_JSON && pv.njr == 5 && pv.nlines == 5, "xml preview: kind %d, %d nodes, %d lines", pv.kind, pv.njr, pv.nlines);      /* r, @a, x, y, z */
+    touch(dir, "bad.xml", "<r><x></r>", 10);
+    snprintf(p, sizeof(p), "%s/bad.xml", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a broken .xml is plain text");
     touch(dir, "bad.json", "{\"a\":", 5);
     snprintf(p, sizeof(p), "%s/bad.json", dir);
     preview_load(&pv, p, false);

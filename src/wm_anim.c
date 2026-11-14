@@ -374,7 +374,8 @@ void wobble_start(struct lm_wm *wm, struct lm_window *w, double px, double py)
     wb->clean = g.px ? malloc((size_t)g.w * (size_t)g.h * sizeof(uint32_t)) : NULL;
     if (wb->clean)
         memcpy(wb->clean, g.px, (size_t)g.w * (size_t)g.h * sizeof(uint32_t));
-    wb->alpha = 214;                                             /* a little see-through while it is held */
+    wb->alpha = 255;                                             /* (it fades to a little see-through: see wobble_tick) */
+    wb->alpha_f = 255.0f;
     wb->off_x = home.x - w->x;
     wb->off_y = home.y - w->y;
     wb->gx = (float)px - (float)home.x;
@@ -429,6 +430,8 @@ static void wobble_ripples(struct wm_wobble *wb, float dt, float ox, float oy, f
     float amp_target = wb->released ? 0.0f : fminf(speed, 1200.0f) / 1200.0f * 30.0f * (0.5f + strength);
     wb->amp += (amp_target - wb->amp) * fminf(1.0f, dt * (amp_target > wb->amp ? 10.0f : 3.0f));
     wb->wave_t += dt;
+    if (!wb->released)
+        wb->front += 650.0f * dt;                                   /* the sway reaches lower and lower rows */
     wb->last_ox = ox;
     wb->last_oy = oy;
     wb->have_last = true;
@@ -441,16 +444,17 @@ static void wobble_ripples(struct wm_wobble *wb, float dt, float ox, float oy, f
     for (int j = 0; j <= WB_ROWS; j++)
         for (int i = 0; i <= WB_COLS; i++) {
             int n = j * stride + i;
-            int il = i > 0 ? n - 1 : n, ir = i < WB_COLS ? n + 1 : n, jt = j > 0 ? n - stride : n, jb = j < WB_ROWS ? n + stride : n;
-            float sx = (wb->u[ir] - wb->u[il]) / (((i > 0) + (i < WB_COLS)) * dx), sy = (wb->u[jb] - wb->u[jt]) / (((j > 0) + (j < WB_ROWS)) * dy);
-            float ex = LM_CLAMP(gain * sx, -0.45f * dx, 0.45f * dx), ey = LM_CLAMP(gain * sy, -0.45f * dy, 0.45f * dy);
-            /* the sheet waves: one runs along the window sideways and moves it up and down, one runs down it and moves it sideways (more far from where it is held) */
-            float far = fminf(hypotf((float)i * dx - wb->gx, (float)j * dy - wb->gy) / (0.7f * hypotf((float)wb->ghost.w, (float)wb->ghost.h)), 1.0f);
-            float aw = wb->amp * (0.4f + 0.6f * far);
-            float wy = aw * sinf(6.2832f * ((float)i * dx / 210.0f - 2.6f * wb->wave_t));
-            float wx = aw * 0.8f * sinf(6.2832f * ((float)j * dy / 170.0f - 3.0f * wb->wave_t) + 1.3f);
+            int il = i > 0 ? n - 1 : n, ir = i < WB_COLS ? n + 1 : n;
+            float sx = (wb->u[ir] - wb->u[il]) / (((i > 0) + (i < WB_COLS)) * dx);
+            float ex = LM_CLAMP(gain * sx, -0.45f * dx, 0.45f * dx);
+            /* the sheet wave: the window sways SIDEWAYS, and the sway runs down it: the top starts first and the rest follows, row by row (`front` is how far
+             * down it has got), then it goes on running down the window while it is held */
+            float row = (float)j * dy;
+            float env = LM_CLAMP((wb->front - row) / 140.0f, 0.0f, 1.0f);
+            env = env * env * (3.0f - 2.0f * env);
+            float wx = wb->amp * env * sinf(6.2832f * (row / 190.0f - 2.8f * wb->wave_t));
             wb->px[n] = wb->x[n] + ex + wx;
-            wb->py[n] = wb->y[n] + ey + wy;
+            wb->py[n] = wb->y[n];                                       /* (no up and down movement of the waves) */
         }
 }
 
@@ -511,6 +515,9 @@ void wobble_tick(struct lm_wm *wm, uint64_t now)
             }
         }
     }
+    float atarget = wb->released ? 255.0f : 212.0f;                 /* a smooth fade: see-through while it is held, solid again when it is let go */
+    wb->alpha_f += (atarget - wb->alpha_f) * fminf(1.0f, dt * 7.0f);
+    wb->alpha = (int)lroundf(wb->alpha_f);
     struct lm_rect old = wb->shown;
     wb->shown = wobble_bounds(wb);
     wobble_render(wm, wb);
@@ -528,7 +535,7 @@ void wobble_tick(struct lm_wm *wm, uint64_t now)
                 spd = fmaxf(spd, fmaxf(fabsf(wb->vx[n]), fabsf(wb->vy[n])));
                 spd = fmaxf(spd, fabsf(wb->uv[n]) * 0.3f);
             }
-        if (dev < 0.4f && spd < 6.0f && wb->amp < 0.4f)
+        if (dev < 0.4f && spd < 6.0f && wb->amp < 0.4f && wb->alpha >= 253)
             wobble_stop(wm);
     }
 }

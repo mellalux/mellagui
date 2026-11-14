@@ -14572,6 +14572,41 @@ class TestSaver(Base):
         _, _, c = self.matrix_frame(['--at', '3'], 'cat-c')
         self.assertNotEqual(a, c)
 
+    @staticmethod
+    def blue_sky(name, time_of_day, sun_args, env=None):
+        """The number of blue sky pixels in a frame of the room at that time of day (--bench 640x360)."""
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            raise unittest.SkipTest('mellagui-matrix not built')
+        path = os.path.join(tmp, name + '.ppm')
+        r = subprocess.run([exe, '--bench', '640x360', '--time', time_of_day, '--seed', '3'] + sun_args, capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, MELLAGUI_MATRIX_PPM=path, **(env or {})))
+        assert r.returncode == 0, r.stderr
+        d = open(path, 'rb').read().split(b'\n', 3)
+        px = d[3]
+        return sum(1 for i in range(0, len(px) - 2, 3) if px[i + 2] > px[i] + 40 and px[i + 2] > 150)
+
+    def test_the_sun_follows_the_real_day_when_it_is_told_the_times(self):
+        plain = self.blue_sky('sv-sun0', '15:00', [])                                   # the model's day: the sun is up until 18:00, still high at 15:00
+        self.assertGreater(plain, 3000)
+        short = ['--sun', '09:17,15:21']                                                # a December day in Tallinn
+        self.assertLess(self.blue_sky('sv-sun1', '15:00', short), 50)                   # 15:00 is minutes before that sunset: low orange sun, no blue sky
+        self.assertGreater(self.blue_sky('sv-sun2', '12:19', short), 3000)              # the middle of that day: full day
+        self.assertGreater(self.blue_sky('sv-sun3', '14:00', short), 3000)              # and the afternoon
+        self.assertGreater(self.blue_sky('sv-sun4', '08:00', []), 300)                  # 08:00 is morning in the model ...
+        self.assertLess(self.blue_sky('sv-sun5', '08:00', short), 20)                   # ... but before that sunrise
+        # `auto` takes today's times from the place (here the test override), `none` keeps the model's day
+        self.assertLess(self.blue_sky('sv-sun6', '15:00', ['--sun', 'auto'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 50)
+        self.assertGreater(self.blue_sky('sv-sun7', '15:00', ['--sun', 'none'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 3000)
+
+    def test_a_bad_sun_option_is_refused(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-matrix not built')
+        for bad in ('noon', '25:00,18:00', '09:00,09:30', '15:00,09:00', '09:00'):
+            r = subprocess.run([exe, '--sun', bad], capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.returncode, 2, bad)
+
     def test_a_bad_time_is_refused(self):
         exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
         if not os.path.exists(exe):

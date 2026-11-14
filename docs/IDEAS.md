@@ -75,6 +75,7 @@ Päikesepõhised reeglid esimesena (väike, kasutab olemasolevat, tulemuse näeb
 
 Väikesed:
 - **Öövalgus päikese järgi** **[tehtud]** - "Sunset to sunrise" Night-lehel, kasutab sama asukohta ja `smartsun`-i mis nutikodu reeglid.
+- **Matrix-ruumi taevas päris päikese järgi** **[tehtud]** - päike on üleval päris päikesetõusust loojanguni (`--sun auto`), kuu tõuseb loojangul.
 - **Nutikodu reegli järeletegemine** - kui arvuti magas reegli minutil, jääb reegel praegu täitmata. Kui reegel oli lubatud ja viimasest
   täitmisest on alla ~10 minuti, võiks selle ärgates ära teha (rulood avanevad ka siis, kui arvuti ärkab veidi pärast päikesetõusu).
 - **Piirkonna salvestus** - salvestaja võtab terve ekraani; `mellagui-shot` valib juba ala, sama valija annaks salvestajale `--rect`.

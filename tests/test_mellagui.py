@@ -2973,6 +2973,22 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_an_ini_file_as_a_tree(self):
+        d = tempfile.mkdtemp(prefix='files-ini-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.ini'), 'w') as f:
+            f.write('; top\nname = x\n[Desktop Entry]\nName=Files\nExec=run %U # now\nTerminal=false\n[Other]\nn = 3\n')
+        with open(os.path.join(d, 'b.conf'), 'w') as f:
+            f.write('server {\n  listen 80;\n}\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.ini)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json')
+        self.assertEqual(head['kind'], 'json')                                         # the same tree as for the other formats
+        self.assertEqual((extra['json']['nodes'], extra['json']['shown']), ('8', '8'))
+        ctl.tap(self.K_DOWN)                                                           # b.conf is no INI: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

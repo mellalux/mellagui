@@ -62,6 +62,7 @@
 #include "uikit.h"
 #include "wlc.h"
 #include "util.h"
+#include "initree.h"
 #include "json.h"
 #include "syntax.h"
 #include "tomltree.h"
@@ -2384,7 +2385,7 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
 
 /* ---- JSON as a tree ---- */
 #define JSON_MAX_NODES 60000
-enum { FMT_JSON, FMT_YAML, FMT_XML, FMT_TOML };                                    /* what pv_json reads into the tree */
+enum { FMT_JSON, FMT_YAML, FMT_XML, FMT_TOML, FMT_INI };                                    /* what pv_json reads into the tree */
 
 static bool json_container(const struct json *n)
 {
@@ -2475,7 +2476,7 @@ static void json_rebuild(struct preview *pv)
     }
 }
 
-/* A .json (or, as `fmt` says, a .yaml / .xml / .toml) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
+/* A .json (or, as `fmt` says, a .yaml / .xml / .toml / .ini) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
 static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, int fmt)
 {
     char *text = malloc(n + 1);
@@ -2483,7 +2484,7 @@ static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, int 
         return false;
     memcpy(text, buf, n);
     text[n] = 0;
-    struct json *root = fmt == FMT_YAML ? yaml_parse(text) : fmt == FMT_XML ? xml_parse(text) : fmt == FMT_TOML ? toml_parse(text) : json_parse(text);
+    struct json *root = fmt == FMT_YAML ? yaml_parse(text) : fmt == FMT_XML ? xml_parse(text) : fmt == FMT_TOML ? toml_parse(text) : fmt == FMT_INI ? ini_parse(text) : json_parse(text);
     free(text);
     if (!root || !json_container(root)) {
         json_free(root);
@@ -2545,6 +2546,15 @@ static void pv_hex(struct preview *pv, const unsigned char *buf, size_t n)
 static bool is_markdown_path(const char *p)
 {
     return ext_is(p, "md") || ext_is(p, "markdown") || ext_is(p, "mdown") || ext_is(p, "mkd");
+}
+
+static bool is_ini_path(const char *p)
+{
+    static const char *const ext[] = { "ini", "conf", "cfg", "desktop", "service", "timer", "socket", "mount", "properties", "editorconfig" };
+    for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+        if (ext_is(p, ext[i]))
+            return true;
+    return false;
 }
 
 static bool is_xml_path(const char *p)
@@ -2659,6 +2669,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_JSON;                                              /* YAML is read into the same kind of tree */
     } else if (ext_is(path, "toml") && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_TOML)) {
         pv->kind = PV_JSON;                                              /* TOML too */
+    } else if (is_ini_path(path) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_INI)) {
+        pv->kind = PV_JSON;                                              /* an INI file: its sections */
     } else if (is_xml_path(path) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_XML)) {
         pv->kind = PV_JSON;                                              /* and XML */
     } else if ((ext_is(path, "csv") || ext_is(path, "tsv")) && pv_table(pv, buf, (size_t)n, ext_is(path, "tsv") ? '\t' : csv_delim(buf, (size_t)n), (off_t)n < st.st_size)) {
@@ -6142,6 +6154,14 @@ static int selftest(void)
     snprintf(p, sizeof(p), "%s/bad.toml", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT, "a broken .toml is plain text");
+    touch(dir, "t.ini", "top = 1\n[s]\na = x # c\nb = true\n[t]\nc: 2\n", 40);
+    snprintf(p, sizeof(p), "%s/t.ini", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_JSON && pv.njr == 7 && pv.nlines == 7, "ini preview: kind %d, %d nodes, %d lines", pv.kind, pv.njr, pv.nlines);
+    touch(dir, "nginx.conf", "server {\n listen 80;\n}\n", 23);
+    snprintf(p, sizeof(p), "%s/nginx.conf", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a .conf that is no INI is plain text");
     touch(dir, "bad.json", "{\"a\":", 5);
     snprintf(p, sizeof(p), "%s/bad.json", dir);
     preview_load(&pv, p, false);

@@ -178,6 +178,10 @@ struct app {
     int split;                          /* per mille of the width the left pane has (the divider can be dragged) */
     bool split_drag;
     uint32_t div_click_ms;              /* the last press on the divider (a double click resets it) */
+    bool pv_selecting;                  /* the button is down on a Markdown page: the pointer extends the selection */
+    uint32_t pv_click_ms;               /* the last press on the page and the number of presses in a row (2: a word, 3: a line) */
+    int pv_clicks;
+    int pv_idx;                         /* the pane that shows the page */
     bool pv_sb_drag;                    /* the preview's scroll bar thumb is held ... */
     int pv_sb_grab;                     /* ... this many pixels below its top */
     struct ffaudio *snd;                /* the sound of the previewed file (a sound file's preview has Play) */
@@ -194,7 +198,7 @@ struct app {
     bool show_hidden;
     bool help;
     enum prompt prompt;
-    int menu_kind;                      /* the right-click menu that is showing: 0 none / the prompt's field, 1 a file's, 2 an empty place's */
+    int menu_kind;                      /* the right-click menu that is showing: 0 none / the prompt's field, 1 a file's, 2 an empty place's, 3 a Markdown page's */
     char pbuf[PATH_MAX];
     char net_pending[PATH_MAX];         /* the network place that wants a login (P_NETUSER / P_NETPASS) ... */
     char net_user[64];                  /* ... the user name typed so far ... */
@@ -3351,6 +3355,7 @@ static const char *prompt_label(enum prompt k)
 
 static int list_top(void);
 static int bottom_h(const struct app *a);
+static bool md_copy_selection(struct app *a);
 static void snd_toggle(struct app *a);
 static void snd_stop(struct app *a);
 
@@ -3458,6 +3463,7 @@ static void handle_key(struct app *a, uint32_t ks)
         case 'r': reread(a); return;
         case 't': start_terminal(a); return;
         case 'q': toggle_preview(a); return;
+        case 'c': md_copy_selection(a); return;                          /* the selected text of a Markdown page */
         case 'p': snd_toggle(a); return;                                 /* play / pause the sound file in the preview */
         case 'b': if (a->dual) go_trash(a); return;
         case 'z': if (a->dual) do_restore(a); return;
@@ -4121,8 +4127,46 @@ static void paint_audio(struct wlwin *w, struct app *a, int x0, int pw, int list
         wlwin_text(w, x0 + 14, u.bar.y + 22, "Ctrl+P plays and pauses, a click on the bar seeks, Enter opens the player", 1, COL_DIM, pw - 28);
 }
 
+/* Where the Markdown page of the preview pane starts: page position = window position - (ox, oy). */
+static void md_origin(struct app *a, int idx, int *ox, int *oy)
+{
+    int x0, pw;
+    pane_rect(a, idx, &x0, &pw);
+    *ox = x0 + (pw - lm_metrics.scrollbar_width - md_width(a->pv.md)) / 2;
+    *oy = list_top() - a->pv.top;
+}
+
+/* A press on the page: the caret (a double click: a word, a triple click: a line). */
+static void md_press(struct app *a, int idx, int x, int y, uint32_t time_ms)
+{
+    int ox, oy;
+    md_origin(a, idx, &ox, &oy);
+    a->pv_clicks = time_ms - a->pv_click_ms < (uint32_t)lm_metrics.double_click_ms ? a->pv_clicks + 1 : 1;
+    a->pv_click_ms = time_ms;
+    if (a->pv_clicks == 2)
+        md_sel_word(a->pv.md, x - ox, y - oy);
+    else if (a->pv_clicks >= 3)
+        md_sel_line(a->pv.md, x - ox, y - oy);
+    else
+        md_sel_begin(a->pv.md, x - ox, y - oy);
+    a->pv_selecting = a->pv_clicks == 1;
+    a->pv_idx = idx;
+}
+
+/* Copy the selected text of the page to the clipboard; false when nothing is selected. */
+static bool md_copy_selection(struct app *a)
+{
+    if (a->pv.kind != PV_MARKDOWN || !a->pv.md || !md_sel_active(a->pv.md))
+        return false;
+    char *t = md_sel_text(a->pv.md);
+    if (t && *t)
+        wlclip_copy(&a->clip, t);
+    free(t);
+    return true;
+}
+
 /* A click in a preview pane: Play / Pause and the bar of a sound file. */
-static void preview_click(struct app *a, int idx, int x, int y)
+static void preview_click(struct app *a, int idx, int x, int y, uint32_t time_ms)
 {
     struct preview *pv = &a->pv;
     int x0, pw;
@@ -4139,6 +4183,11 @@ static void preview_click(struct app *a, int idx, int x, int y)
         } else {
             pv->top = LM_CLAMP(pv->top + (y < ty ? -1 : 1) * LM_MAX(view - (pv->kind == PV_MARKDOWN ? 44 : 1), 1), 0, maxtop);
         }
+        a->win.redraw = true;
+        return;
+    }
+    if (pv->kind == PV_MARKDOWN && pv->md && y >= list_top() && x < x0 + pw - lm_metrics.scrollbar_width) {
+        md_press(a, idx, x, y, time_ms);
         a->win.redraw = true;
         return;
     }
@@ -4547,7 +4596,7 @@ static void click(struct app *a, uint32_t time_ms)
     }
     int idx = pane_at(a, x);
     if (pane_is_preview(a, idx)) {
-        preview_click(a, idx, x, y);
+        preview_click(a, idx, x, y, time_ms);
         return;
     }
     if (idx != a->act) {
@@ -4637,6 +4686,15 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->split = LM_CLAMP((int)(a->px * 1000 / LM_MAX(w->bw, 1)), 150, 850);
         if (a->pv_sb_drag)
             pv_sb_drag_to(a, a->py);
+        if (a->pv_selecting && a->pv.md) {
+            int ox, oy, body_h = w->bh - list_top() - bottom_h(a);
+            if (a->py < list_top())                                     /* beyond the page: it scrolls on */
+                a->pv.top = LM_CLAMP(a->pv.top - 24, 0, pv_max_top(a));
+            else if (a->py >= list_top() + body_h)
+                a->pv.top = LM_CLAMP(a->pv.top + 24, 0, pv_max_top(a));
+            md_origin(a, a->pv_idx, &ox, &oy);
+            md_sel_drag(a->pv.md, (int)a->px - ox, (int)a->py - oy);
+        }
         w->redraw = true;                                               /* (the thumb lights up under the pointer) */
         break;
     case LM_WL_POINTER_EVT_BUTTON:
@@ -4645,6 +4703,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY && a->prompt != P_NETPASS) {
                 a->menu_kind = 0;
                 wlwin_menu(w, wltext_menu(a->pbuf));
+            } else if (a->prompt == P_NONE && !a->help && a->pv.kind == PV_MARKDOWN && a->pv.md && a->dual && pane_is_preview(a, pane_at(a, (int)a->px)) &&
+                       a->py >= list_top() && a->py < w->bh - bottom_h(a) && a->px < w->bw - lm_metrics.scrollbar_width) {
+                a->menu_kind = 3;                                       /* the page: Copy / Select all */
+                wlwin_menu(w, md_sel_active(a->pv.md) ? "Copy\nSelect all" : "~Copy\nSelect all");
+                w->redraw = true;
             } else if (a->prompt == P_NONE && a->dual && !a->help && !a->job) {      /* a file's menu, or one for the empty part of the list */
                 bool in_list;
                 int row = row_under_pointer(a, &in_list);
@@ -4672,6 +4735,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         } else if (args[2].u == 272) {
             a->pane[0].sb_drag = a->pane[1].sb_drag = false;
             a->pv_sb_drag = false;
+            a->pv_selecting = false;
             if (a->split_drag) {
                 a->split_drag = false;
                 split_conf_save(a->split > 0 ? a->split : 500);
@@ -4710,6 +4774,11 @@ static void menu_event(struct wlwin *w, int index)
             open_selected(a);
         else if (index < 8)
             press_fkey(a, fkey[index]);
+    } else if (kind == 3 && a->pv.md) {
+        if (index == 0)
+            md_copy_selection(a);
+        else if (index == 1)
+            md_sel_all(a->pv.md);
     } else if (kind == 2) {
         if (index == 0)
             press_fkey(a, F_MKDIR);

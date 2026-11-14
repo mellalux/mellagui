@@ -33,6 +33,16 @@ void md_paint(struct wlwin *w, const struct md_doc *d, int x, int y, int w_box, 
 /* The address of the link at page position (px, py), NULL when there is none. */
 const char *md_link_at(const struct md_doc *d, int px, int py);
 
+/* Selecting text on the page (positions are page coordinates: x from the column's left edge, y from the top of the page). */
+void md_sel_begin(struct md_doc *d, int px, int py);                    /* a press: the anchor and the caret go there, nothing is selected yet */
+void md_sel_drag(struct md_doc *d, int px, int py);                     /* the pointer moves with the button down */
+void md_sel_word(struct md_doc *d, int px, int py);                     /* a double click */
+void md_sel_line(struct md_doc *d, int px, int py);                     /* a triple click */
+void md_sel_all(struct md_doc *d);
+void md_sel_clear(struct md_doc *d);
+bool md_sel_active(const struct md_doc *d);                             /* something (not an empty range) is selected */
+char *md_sel_text(const struct md_doc *d);                              /* a malloc'd copy of the selected text, NULL when nothing is selected */
+
 enum md_stat { MD_N_BLOCKS, MD_N_HEADINGS, MD_N_LINKS, MD_N_ITEMS, MD_N_CODE, MD_N_TABLES, MD_N_IMAGES };
 int md_count(const struct md_doc *d, enum md_stat what);
 /* For the tests: one line per text run / rectangle (`text x y w flags scale "..."`), then `ok height=H`. */

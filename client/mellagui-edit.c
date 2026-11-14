@@ -129,6 +129,10 @@ struct app {
     const char *md_hover;               /* the address of the link under the pointer */
     bool md_sb_drag;
     int md_sb_grab;
+    bool md_selecting;                  /* the left button is down on the page: the pointer extends the selection */
+    bool md_press_link;                 /* ... and it went down on a link (opened on release when nothing was selected) */
+    uint32_t md_click_ms;               /* the time of the last press on the page, and how many in a row (double click: a word, triple: a line) */
+    int md_clicks;
 };
 
 static void preview_auto(struct app *a);
@@ -799,6 +803,13 @@ static void copy_text(struct app *a, const char *t)
 
 static void cmd_copy(struct app *a, bool cut)
 {
+    if (a->preview && a->md) {                                          /* the page: the selected text (it cannot be cut) */
+        char *t = md_sel_text(a->md);
+        if (t && *t)
+            copy_text(a, t);
+        free(t);
+        return;
+    }
     if (!has_sel(a))
         return;
     int y0, y1;
@@ -1111,6 +1122,15 @@ static bool preview_key(struct app *a, uint32_t ks, char letter)
     }
     if (letter == 'q' || letter == 'o' || letter == 'n' || ks == LM_KS_F1)           /* these go on as in the text */
         return false;
+    if (letter == 'c' || ks == 0xff63) {                                /* Ctrl+C, Ctrl+Insert: copy the selected text of the page */
+        cmd_copy(a, false);
+        return true;
+    }
+    if (letter == 'a') {
+        md_sel_all(a->md);
+        a->win.redraw = true;
+        return true;
+    }
     int d = 0;
     switch (ks) {
     case 0xff52: d = -PV_STEP; break;                                   /* Up */
@@ -1976,6 +1996,11 @@ static void menu_event(struct wlwin *w, int index)
     if (kind == 1 && a->prompt != P_NONE) {
         wltext_menu_do(&a->clip, a->pbuf, sizeof(a->pbuf), index);
         a->pfresh = 0;
+    } else if (kind == 3 && a->md) {
+        if (index == 0)
+            cmd_copy(a, false);
+        else if (index == 1)
+            md_sel_all(a->md);
     } else if (kind == 2) {
         if (index == 0) {
             cmd_copy(a, true);
@@ -2021,6 +2046,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             const char *url = a->py >= TOP_H && a->px < w->bw - lm_metrics.scrollbar_width ?
                               md_link_at(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll) : NULL;
             a->md_hover = url;
+            if (a->md_selecting) {
+                int vh = pv_view_h(a), max = LM_MAX(md_height(a->md) - vh, 0);
+                if (a->py < TOP_H)                                       /* the pointer is above / below the page: it scrolls on */
+                    a->md_scroll = LM_CLAMP(a->md_scroll - 24, 0, max);
+                else if (a->py >= TOP_H + vh)
+                    a->md_scroll = LM_CLAMP(a->md_scroll + 24, 0, max);
+                md_sel_drag(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll);
+            }
             if (a->md_sb_drag) {
                 int ty, th;
                 pv_thumb(a, &ty, &th);
@@ -2041,6 +2074,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 a->menu_kind = 1;
                 if (!wlwin_menu(w, wltext_menu(a->pbuf)))
                     a->menu_kind = 0;
+            } else if (!a->help && a->preview && a->md && a->py >= TOP_H && a->py < TOP_H + pv_view_h(a) && a->px < w->bw - lm_metrics.scrollbar_width) {
+                a->menu_kind = 3;
+                if (!wlwin_menu(w, md_sel_active(a->md) ? "Copy\nSelect all" : "~Copy\nSelect all"))
+                    a->menu_kind = 0;
+                w->redraw = true;
             } else if (!a->help && !a->preview && a->py >= TOP_H && a->py < TOP_H + a->rows_visible * a->zt.ch && a->px < w->bw - lm_metrics.scrollbar_width) {
                 if (!has_sel(a))
                     place_from_pointer(a, false);
@@ -2077,14 +2115,32 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                         a->md_scroll = LM_CLAMP(a->md_scroll + (a->py < ty ? -1 : 1) * (pv_view_h(a) - PV_STEP), 0, max);
                     }
                 } else if (a->py >= TOP_H && a->py < TOP_H + pv_view_h(a)) {
-                    int cx;
+                    int cx, px = 0, py;
                     pv_col(a, &cx);
-                    const char *url = md_link_at(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll);
-                    if (url)
-                        open_link(a, url);
+                    px = (int)a->px - cx;
+                    py = (int)a->py - TOP_H + a->md_scroll;
+                    a->md_press_link = md_link_at(a->md, px, py) != NULL;
+                    a->md_clicks = args[1].u - a->md_click_ms < (uint32_t)lm_metrics.double_click_ms ? a->md_clicks + 1 : 1;
+                    a->md_click_ms = args[1].u;
+                    if (a->md_clicks == 2)
+                        md_sel_word(a->md, px, py);
+                    else if (a->md_clicks >= 3)
+                        md_sel_line(a->md, px, py);
+                    else
+                        md_sel_begin(a->md, px, py);
+                    a->md_selecting = a->md_clicks == 1;                 /* (a word or a line is not extended by dragging) */
                 }
             } else {
                 a->md_sb_drag = false;
+                if (a->md_selecting || a->md_press_link) {
+                    int cx;
+                    pv_col(a, &cx);
+                    const char *url = md_link_at(a->md, (int)a->px - cx, (int)a->py - TOP_H + a->md_scroll);
+                    if (a->md_press_link && url && a->md_clicks == 1 && !md_sel_active(a->md))
+                        open_link(a, url);                               /* a click on a link (not a drag over it) */
+                }
+                a->md_selecting = false;
+                a->md_press_link = false;
             }
             w->redraw = true;
             break;

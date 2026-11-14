@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 .vscode/
 .claude/
+docs/IDEAS.md
+docs/DESIGN-IDEAS.md

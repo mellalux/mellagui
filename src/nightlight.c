@@ -11,6 +11,7 @@
 #include "loop.h"
 #include "server.h"
 #include "settings.h"
+#include "smartsun.h"
 
 #define TICK_MS 100
 #define CHECK_MS 20000
@@ -25,6 +26,10 @@ struct lm_night {
     double step;            /* level change per tick */
     bool sched_target;      /* what the schedule said last time (a change of it is a slow fade) */
     bool sched_known;
+    int sun_day;            /* the day (year * 400 + day of the year) the sun times below are for, -1 = none yet */
+    bool sun_ok;            /* the place is known and the sun rises and sets that day */
+    int sun_rise, sun_set;  /* minutes after midnight */
+    char sun_place[64];
 };
 
 /* Tanner Helland's black body approximation, divided by its value at 6500 K so that 6500 K is exactly "no change". */
@@ -101,14 +106,78 @@ static void apply(struct lm_night *n)
     lm_backend_set_tint(b, (float)(1.0 + (g[0] - 1.0) * l), (float)(1.0 + (g[1] - 1.0) * l), (float)(1.0 + (g[2] - 1.0) * l));
 }
 
+/* Sunrise and sunset of today, worked out once a day (and again when a setting changes: `force`); sun_ok says whether there are any. */
+static void refresh_sun(struct lm_night *n, bool force)
+{
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    int day = (tm.tm_year + 1900) * 400 + tm.tm_yday;
+    if (!force && day == n->sun_day)
+        return;
+    n->sun_day = day;
+    n->sun_ok = false;
+    n->sun_place[0] = 0;
+    double lat = 0, lon = 0;
+    const char *ov = getenv("MELLAGUI_SMART_SUN");
+    if (ov && *ov) {
+        n->sun_ok = sun_events(t, 0, 0, &n->sun_rise, &n->sun_set);
+        snprintf(n->sun_place, sizeof(n->sun_place), "MELLAGUI_SMART_SUN");
+    } else if (sun_place(&lat, &lon, n->sun_place, sizeof(n->sun_place))) {
+        n->sun_ok = sun_events(t, lat, lon, &n->sun_rise, &n->sun_set);
+    }
+}
+
+/* The span the night light covers when it is scheduled: sunset until sunrise (night-sun on and the sun known), else night-from until night-to. */
+static void span(struct lm_night *n, int *from, int *to)
+{
+    const struct lm_config *c = &n->srv->config;
+    if (c->night_sun) {
+        refresh_sun(n, false);
+        if (n->sun_ok) {
+            *from = n->sun_set;
+            *to = n->sun_rise;
+            return;
+        }
+    }
+    *from = lm_night_parse_time(c->night_from);
+    *to = lm_night_parse_time(c->night_to);
+}
+
 static bool wanted(struct lm_night *n)
 {
     const struct lm_config *c = &n->srv->config;
     if (c->night_mode == 1)
         return true;
-    if (c->night_mode == 2)
-        return lm_night_in_span(minutes_now(), lm_night_parse_time(c->night_from), lm_night_parse_time(c->night_to));
+    if (c->night_mode == 2) {
+        int from, to;
+        span(n, &from, &to);
+        return lm_night_in_span(minutes_now(), from, to);
+    }
     return false;
+}
+
+void lm_night_span(struct lm_night *n, int *from, int *to)
+{
+    *from = *to = -1;
+    if (n)
+        span(n, from, to);
+}
+
+void lm_night_sun_text(struct lm_night *n, char *out, size_t size)
+{
+    if (!size)
+        return;
+    out[0] = 0;
+    if (!n)
+        return;
+    refresh_sun(n, false);
+    if (!n->sun_ok)
+        return;
+    snprintf(out, size, "%02d:%02d|%02d:%02d|%s", n->sun_rise / 60, n->sun_rise % 60, n->sun_set / 60, n->sun_set % 60, n->sun_place);
+    for (char *p = out + 12; *p; p++)                           /* a value of the settings has no blanks */
+        if (*p == ' ')
+            *p = '_';
 }
 
 static void retarget(struct lm_night *n, bool schedule_change)
@@ -150,6 +219,7 @@ struct lm_night *lm_night_create(struct lm_server *srv)
     if (!n)
         return NULL;
     n->srv = srv;
+    n->sun_day = -1;
     n->timer = lm_loop_add_timer(srv->loop, timer_cb, n);
     if (!n->timer) {
         free(n);
@@ -177,6 +247,7 @@ void lm_night_changed(struct lm_night *n)
 {
     if (!n)
         return;
+    refresh_sun(n, true);                                       /* a new place may have been chosen */
     n->sched_target = wanted(n);
     n->sched_known = true;
     retarget(n, false);

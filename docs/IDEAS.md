@@ -43,7 +43,7 @@ Nimekiri on koostatud 2026-11-13 projekti seisu põhjal. Märge **[tehtud]** / *
 ## Kasulikud ja lähedal sellele, mida just tegime
 
 - **Päikesepõhised reeglid nutikodus** **[tehtud]** - rulood avanevad päikesetõusul ja sulguvad loojangul. `mellagui-smart --background`
-  täidab juba ajareegleid; lisandub trigger "päikesetõus / loojang ± N min" (`client/smartsun.[ch]`, `client/smartsched.[ch]`). Asukoht tuleb
+  täidab juba ajareegleid; lisandub trigger "päikesetõus / loojang ± N min" (`src/smartsun.[ch]`, `client/smartsched.[ch]`). Asukoht tuleb
   ajavööndist (`zone1970.tab`) või käsust `mellagui-smart --place LAT LON`.
 - **Salvestaja kiirus ja kvaliteet** - täispikslites 16x16 liikumisotsing **[tehtud]**, deblocking **[tehtud]**. Jäänud: kvartpikslid või 8x8
   plokid (väike võit), bitikiiruse reguleerimine (kindel faili suurus pika salvestise jaoks). B-kaadreid ei soovitata (ümberjärjestus, ekraanisisu
@@ -68,3 +68,27 @@ Nimekiri on koostatud 2026-11-13 projekti seisu põhjal. Märge **[tehtud]** / *
 ## Soovitus
 
 Päikesepõhised reeglid esimesena (väike, kasutab olemasolevat, tulemuse näeb oma rullooga). Suuremast: ekraanijagamine.
+
+---
+
+## Nimekiri 2026-11-14 (aknapaigutuste järel)
+
+Väikesed:
+- **Öövalgus päikese järgi** **[tehtud]** - "Sunset to sunrise" Night-lehel, kasutab sama asukohta ja `smartsun`-i mis nutikodu reeglid.
+- **Nutikodu reegli järeletegemine** - kui arvuti magas reegli minutil, jääb reegel praegu täitmata. Kui reegel oli lubatud ja viimasest
+  täitmisest on alla ~10 minuti, võiks selle ärgates ära teha (rulood avanevad ka siis, kui arvuti ärkab veidi pärast päikesetõusu).
+- **Piirkonna salvestus** - salvestaja võtab terve ekraani; `mellagui-shot` valib juba ala, sama valija annaks salvestajale `--rect`.
+- **Aknapaigutuste jätk** - kolmandikud (3 veergu), kaks kõrvuti paigutatud akent muudavad serva lohistades koos suurust. Pooled ja veerandid
+  (klahvid, serva ja nurga lohistamine, eelvaade) on tehtud.
+
+Keskmised:
+- **Meediakontroll (MPRIS)** - muusika nupud kiirseadete kaardil ja lukustuskuval ("praegu mängib").
+- **Tapeet päevaaja järgi** - hommikune, päevane ja õhtune pilt sujuvalt vahetuvad; lukustuskuva udustatud taust järgib seda.
+- **Võrgu- ja Bluetooth-leht** seadetes (ribal on menüüd olemas).
+
+Suured:
+- **Ekraanijagamine** - PipeWire'i portal, et brauseri videokõned ja ekraanijagamine töötaksid. Suurim praktiline puudus.
+- **VNC-server** - pildi liides, H.264 kodeerija ja sisendi süstimine on olemas.
+- **Murdskaleerimine ja skaala iga väljundi jaoks.**
+
+Mitte ehitamine, aga vajalik: **päris ekraanil proovimine** (`docs/HARDWARE.md` read 3-13 ja 19-23, ka aknapaigutuse eelvaade).

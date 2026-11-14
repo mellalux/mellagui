@@ -53,6 +53,9 @@ def setUpModule():
     os.environ['XDG_CACHE_HOME'] = tmp        # mellagui-run keeps its history here
     os.environ['XDG_CONFIG_HOME'] = os.path.join(tmp, 'config')      # the terminal saves its zoom there: never the real ~/.config
     os.environ['XDG_DATA_HOME'] = os.path.join(tmp, 'data')          # the file manager's trash: never the real ~/.local/share/Trash
+    os.environ['MELLAGUI_RAILS'] = '0'                                # (the side rails of cam, du, top ... have tests of their own: MELLAGUI_RAILS=1)
+    os.environ['MELLAGUI_FILES_RAIL'] = '0'                           # (the programs' side rails have tests of their own; the rest were written for the bars)
+    os.environ['MELLAGUI_EDIT_RAIL'] = '0'
     os.environ['MELLAGUI_FONT'] = 'bitmap'                           # the pixel tests know the built-in 8x16 font (TestFont picks others)
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
     os.environ['MELLAGUI_APPS_DIRS'] = os.path.join(tmp, 'no-apps')    # the launcher's search finds none of the programs and files of this machine
@@ -648,7 +651,7 @@ class TestWindows(Base):
     # centre at (460, 292), the Exit disc at (564, 292); (460, 316) / (564, 316) are plain disc pixels below the icons.
     POWER_BTN = (1008, 14)
     LOCK_DISC, EXIT_DISC = (460, 316), (564, 316)
-    DISC_IDLE, DISC_LOCK_SEL, DISC_EXIT_SEL = (0x2d, 0x3a, 0x5a), (0x6f, 0xa8, 0xff), (0xc0, 0x39, 0x2b)
+    DISC_IDLE, DISC_LOCK_SEL, DISC_EXIT_SEL = (80, 91, 118), (135, 183, 255), (203, 90, 79)      # (the buttons are drops of water: this is the lit lower part of the bead)
 
     def disc(self, name, pos):
         ctl.sync()
@@ -1004,7 +1007,7 @@ class TestWindows(Base):
         ctl.abs(900, 500)
         ctl.sync()
         ppm = ctl.dump(os.path.join(tmp, 'tb.ppm'))
-        self.assertEqual(ppm.px(204, 14), (0x6f, 0xa8, 0xff))   # active task button background
+        self.assertEqual(ppm.px(204, 14), (117, 172, 255))   # active task button (a drop of water: the bead's colour at that height)
         self.assertEqual(ppm.px(500, 14), (0x14, 0x17, 0x1f))    # plain panel beyond it
 
     def test_taskbar_middle_click_closes(self):
@@ -2607,7 +2610,9 @@ class TestClients(Base):
                 f.write(content)
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.edit', 'an editor from an earlier test is still open')
-        p = subprocess.Popen([exe, path], env=dict(os.environ, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        e = dict(os.environ, MELLAGUI_EDIT_RAIL='0')              # (the tests below were written for the bar above the text; the rails have their own)
+        e.update(env or {})
+        p = subprocess.Popen([exe, path], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.edit')
         self.assertIsNotNone(win, 'the editor did not appear')
@@ -2833,6 +2838,7 @@ class TestClients(Base):
                 break
             time.sleep(0.05)
         self.assertIn('split=', open(conf).read())
+        time.sleep(0.6)                                                              # (a second press within the double-click time would put the divider back)
         ctl.abs(win['x'] + int(head['split']), win['y'] + 200)                       # far to the left: a pane keeps at least 160 px
         ctl.button(272, True)
         time.sleep(0.2)
@@ -3156,6 +3162,33 @@ class TestClients(Base):
         button(102)
         self.assertEqual(self.read_file(other), b'qsecond\n')
 
+    def test_edit_buttons_are_in_rails_at_both_sides(self):
+        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1'})
+        d = os.path.dirname(path)
+        win = self.edit_window()
+        def left(i, gap=0):                                      # the left rail: round buttons 36 px apart from y = 6 (the edit group has 10 px more)
+            ctl.click(win['x'] + 26, win['y'] + 6 + i * 36 + gap + 16)
+            time.sleep(0.25)
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        self.type_text('y')
+        left(2)                                                  # Save
+        self.assertEqual(self.read_file(path), b'yone\n')
+        other = os.path.join(d, 'other.txt')
+        with open(other, 'wb') as f:
+            f.write(b'second\n')
+        left(1)                                                  # Open: a card over the text
+        self.type_chars(other)
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.3)
+        self.type_text('q')
+        left(2)
+        self.assertEqual(self.read_file(other), b'qsecond\n')
+        # the right rail: Help is at the bottom, "A+" is the second button from the top (no Md button for a text file)
+        w0 = self.edit_window()['w']
+        ctl.click(win['x'] + w0 - 26, win['y'] + 6 + 16)
+        time.sleep(0.5)
+        self.assertGreater(self.edit_window()['w'], w0, 'A+ in the right rail makes the text bigger')
+
     def test_edit_cut_copy_paste_buttons_and_the_classic_keys(self):
         p, path = self.edit_start(b'abc def\n')
         win = self.edit_window()
@@ -3263,6 +3296,26 @@ class TestClients(Base):
 
     # ---- mellagui-files ----------------------------------------------------------------------------------------------
 
+    def test_files_toolbar_is_a_rail_at_the_left_and_the_questions_are_a_card(self):
+        p, d = self.files_start(env={'MELLAGUI_FILES_RAIL': '1'})
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        def fkey(n):                                             # (the function key bar is at the bottom, where the dock may lie over it: use the key)
+            ctl.tap(self.FKEYS[n])
+            time.sleep(0.3)
+        fkey(7)                                                  # Mkdir: asked for in a card
+        self.type_chars('newdir')
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertTrue(os.path.isdir(os.path.join(d, 'newdir')), 'F7 asked for a name and made the folder')
+        fkey(8)                                                  # Delete: a question card
+        ctl.tap(1)                                               # Esc answers no
+        time.sleep(0.2)
+        self.assertTrue(os.path.isdir(os.path.join(d, 'newdir')))
+        ctl.click(win['x'] + 26, win['y'] + 6 + 16)              # the rail's first button, Up: round buttons 36 px apart
+        time.sleep(0.3)
+        titles = [w['title'] for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files']
+        self.assertNotIn(os.path.basename(d) + ' - Files', titles, 'Up left the folder')
+
     def test_files_selftest(self):
         path = os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(path):
@@ -3293,7 +3346,9 @@ class TestClients(Base):
         for w in ctl.windows()['windows']:
             self.assertNotIn(w['app_id'], ('mellagui.files', 'mellagui.files.choose', 'mellagui.edit', 'mellagui.view', 'mellagui.term', 'mellagui.du'),
                              'a window of an earlier test is still open')
-        p = subprocess.Popen([exe] + list(args) + [d], env=dict(os.environ, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        e = dict(os.environ, MELLAGUI_FILES_RAIL='0')              # (the tests were written for the bars above and below the panes; the rails have their own)
+        e.update(env or {})
+        p = subprocess.Popen([exe] + list(args) + [d], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         def cleanup():
             for pid in os.listdir('/proc'):                       # the programs it started are its children
                 if not pid.isdigit():
@@ -4528,6 +4583,17 @@ class TestClients(Base):
     def term_window(self):
         """The terminal's window as it is now (a zoom moves and resizes it)."""
         return [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.term'][0]
+
+    def test_terminal_buttons_are_rails_of_round_drops_at_both_sides(self):
+        self.spawn('mellagui-term', MELLAGUI_RAILS='1')
+        self.assertIsNotNone(wait_for_window('mellagui.term'))
+        time.sleep(0.6)
+        win = self.term_window()
+        self.assertEqual(win['w'], 80 * 8 + 6 + 14 + 104)                         # the grid, the margins, the scroll bar and the two rails
+        ctl.abs(win['x'] + 200, win['y'] + 200)
+        ctl.click(win['x'] + win['w'] - 26, win['y'] + 6 + 16)                    # the right rail's first drop: A+ (the text size is at the right, 36 px apart)
+        time.sleep(0.4)
+        self.assertEqual(self.term_window()['w'], 80 * 9 + 6 + 14 + 104)          # 110 %: 9 px cells between the rails
 
     def test_terminal_zoom_dropdown_picks_a_size(self):
         win, out = self.term()
@@ -9125,6 +9191,19 @@ class TestCamera(Base):
 
     def shot(self, name):
         return ctl.dump(os.path.join(tmp, name))
+
+    def test_the_buttons_are_a_rail_of_round_drops_at_the_left(self):
+        p, win, d = self.start(MELLAGUI_RAILS='1')
+        for _ in range(20):                                          # (the first picture)
+            time.sleep(0.1)
+        ctl.click(win['x'] + 26, win['y'] + 6 + 16)                  # the first drop: Snapshot (36 px between the drops)
+        for _ in range(60):
+            if any(n.endswith('.png') for n in os.listdir(d)):
+                break
+            time.sleep(0.1)
+        self.assertTrue(any(n.endswith('.png') for n in os.listdir(d)), 'the Snapshot drop of the rail saved a picture')
+        ppm = self.shot('cam-rail.ppm')                              # the picture starts right of the rail, which has the bar's colour
+        self.assertEqual(ppm.px(win['x'] + 10, win['y'] + 300), ppm.px(win['x'] + 40, win['y'] + 400))
 
     def test_a_clip_has_the_microphone_in_it(self):
         if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
@@ -14923,7 +15002,7 @@ class TestDock(Base):
         c = self.start('mellagui-dk11', '[dock]\nicon-size = 40\nzoom = 100\n[dock-apps]\nCalculator = [calculator] true\n')
         c.abs(10, 10)
         ppm = c.dump(os.path.join(tmp, 'dock11.ppm'))
-        top = ppm.px(400, 464 - 16)                                                  # the orange disc, above the glyph
+        top = ppm.px(404, 464 - 16)                                                  # the orange disc, above the glyph
         self.assertTrue(top[0] > 220 and 120 < top[1] < 175 and top[2] < 60, top)
         corner = ppm.px(400 - 19, 444 + 1)                                           # the corner of the icon's square: only wallpaper
         self.assertFalse(corner[0] > 200 and corner[2] < 80, corner)

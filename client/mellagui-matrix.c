@@ -6,6 +6,8 @@
  *   mellagui-matrix --flat          the classic flat rain instead of the room
  *   mellagui-matrix --at SECONDS   starts the camera's drift and the cat's story at that moment (to look at a certain pose, and the tests)
  *   mellagui-matrix --no-cat        the room without Tom, the cat that lives on its floor (client/matrixcat.c)
+ *   mellagui-matrix --meow          Tom meows (a sound made in code, client/meow.c) now and then, the moment he turns his head to the camera
+ *   mellagui-matrix --meow-wav FILE writes one meow (--seed N picks which) as a WAV file and ends
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
  *   mellagui-matrix --time HH:MM    the window shows that time of day (default: the real time, following the clock): sun, moon and stars, colours
  *   mellagui-matrix --clock-speed N the day passes N minutes a second (to look at it)
@@ -37,6 +39,7 @@
 #include "font.h"
 #include "keymap.h"
 #include "matrixcat.h"
+#include "meow.h"
 #include "smartsun.h"
 #include "theme.h"
 #include "util.h"
@@ -261,6 +264,9 @@ struct room {
     bool ready;
     float t;                            /* seconds of the camera's drift */
     bool no_cat;                        /* --no-cat */
+    bool meow;                          /* --meow: Tom meows when he looks at the camera (a sound) */
+    float glow_prev, meow_last;         /* the eyes' glow at the tick before, the time of the last meow */
+    unsigned meows;                     /* how many meows so far (the seed of the next) */
     const uint8_t *catg[MCAT_GLYPHS];   /* the glyphs the cat's fur is made of */
     float lut[256][3];                  /* cell colour by brightness */
     const uint8_t *gptr[GLYPH_MAX_CP];  /* glyph rows by code point */
@@ -363,6 +369,33 @@ static void room_free(struct room *rm)
     free(rm->fr.col);
 }
 
+struct cam;
+static struct cam cam_at(float t);
+
+/* Does Tom meow now? The moment his head turns to the camera (the eyes begin to glow), not more often than every 25 seconds, and then only about half the times, so
+ * that it is a surprise and not a habit. Deterministic from the time (and the count of meows). */
+static bool meow_due(struct room *rm)
+{
+    if (!rm->meow || rm->no_cat)
+        return false;
+    struct cam c = cam_at(rm->t);
+    float co[3] = { c.ox, c.oy, c.oz }, ld[3] = { 0.0f, 0.7f, 0.7f }, lc[3] = { 255.0f, 230.0f, 180.0f };
+    struct mcat ct;
+    mcat_pose(&ct, rm->t, co, rm->catg, MCAT_GLYPHS, ld, lc, 0.0f);
+    bool rising = ct.glow > 0.6f && rm->glow_prev <= 0.6f;
+    rm->glow_prev = ct.glow;
+    if (!rising || rm->t - rm->meow_last < 25.0f)
+        return false;
+    uint32_t h = (uint32_t)(rm->t * 10.0f) * 2654435761u + rm->meows * 40503u;
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    if ((h & 0xffu) > 140u)                                              /* (a little over half the times) */
+        return false;
+    rm->meow_last = rm->t;
+    return true;
+}
+
 static void room_step(struct room *rm)
 {
     for (int i = 0; i < NSURF; i++)
@@ -372,6 +405,8 @@ static void room_step(struct room *rm)
         if (rnd_range(&rm->fr, 100) < 4)
             rm->fr.glyph[i] = (uint16_t)pick_glyph(&rm->fr);
     rm->t += (float)TICK_MS / 1000.0f;
+    if (meow_due(rm))
+        lm_meow_play(0x5eed0000u + rm->meows++ * 7919u + (uint32_t)rm->t);
     if (rm->fixed) {
         /* a fixed time stands still */
     } else if (rm->clock_speed > 0.0f) {
@@ -1382,6 +1417,38 @@ static int selftest(void)
                     CHECK(distinct >= 3);
                 }
             }
+            {                                                                   /* Tom's meow: made in code, a voice of its own every time, and heard only when he looks at the camera */
+                static int16_t m1[LM_MEOW_MAX], m2[LM_MEOW_MAX];
+                size_t n1 = lm_meow_render(m1, LM_MEOW_MAX, 1), n2 = lm_meow_render(m2, LM_MEOW_MAX, 2);
+                int peak = 0, diff = 0;
+                for (size_t i = 0; i < n1; i++)
+                    peak = abs(m1[i]) > peak ? abs(m1[i]) : peak;
+                for (size_t i = 0; i < n1 && i < n2; i++)
+                    diff += m1[i] != m2[i];
+                CHECK(n1 > LM_MEOW_RATE / 2 && n1 < LM_MEOW_MAX && n2 > LM_MEOW_RATE / 2 && n2 < LM_MEOW_MAX);        /* a meow is a little over half a second */
+                CHECK(peak > 3000 && peak < 20000 && abs(m1[0]) < 200 && abs(m1[n1 - 1]) < 200);                     /* heard, not loud, starts and ends softly */
+                CHECK(diff > (int)n1 / 2);                                                                              /* another seed, another meow */
+                int count = 0;
+                float last = -100.0f;
+                rm.meow = true;
+                rm.glow_prev = 0.0f;
+                for (float t = 0.0f; t < 3.0f * 360.0f; t += 0.1f) {
+                    rm.t = t;
+                    if (meow_due(&rm)) {
+                        CHECK(t - last >= 24.9f);                                                                      /* never closer than 25 s */
+                        last = t;
+                        count++;
+                    }
+                }
+                CHECK(count >= 3 && count <= 43);
+                rm.meow = false;
+                rm.meow_last = -100.0f;
+                for (float t = 0.0f; t < 400.0f; t += 0.1f) {
+                    rm.t = t;
+                    CHECK(!meow_due(&rm));                                                                              /* off: silent */
+                }
+                rm.t = 0.0f;
+            }
             mcat_pose(&ct, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
             struct mcat c2;
             mcat_pose(&c2, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
@@ -1410,6 +1477,7 @@ int main(int argc, char **argv)
     bool selftest_only = false;
     const char *bench = NULL;
     bool at_given = false, seed_given = false;
+    const char *meow_wav = NULL;
     bool sun_set = false;                                                 /* --sun was given */
     a.rain.density = 260;
     for (int i = 1; i < argc; i++) {
@@ -1425,6 +1493,10 @@ int main(int argc, char **argv)
             at_given = true;
         } else if (!strcmp(argv[i], "--no-cat")) {
             a.room.no_cat = true;
+        } else if (!strcmp(argv[i], "--meow")) {
+            a.room.meow = true;
+        } else if (!strcmp(argv[i], "--meow-wav") && i + 1 < argc) {          /* writes one meow (seed from --seed) as a WAV file and ends: to listen to it, and the tests */
+            meow_wav = argv[++i];
         } else if (!strcmp(argv[i], "--density") && i + 1 < argc) {
             int dens = atoi(argv[++i]);
             a.rain.density = LM_CLAMP(dens, 50, 300);
@@ -1464,7 +1536,7 @@ int main(int argc, char **argv)
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
             seed_given = true;
         } else {
-            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--sun HH:MM,HH:MM|auto|none] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
+            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--meow] [--meow-wav FILE] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--sun HH:MM,HH:MM|auto|none] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
     }
@@ -1473,6 +1545,8 @@ int main(int argc, char **argv)
         uint32_t cs = (uint32_t)(a.rain.rng >> 8) ^ (seed_given ? 0u : (uint32_t)time(NULL) * 2654435761u ^ (uint32_t)getpid());
         mcat_set_seed(fixed_day ? 0u : (cs ? cs : 1u));
     }
+    if (meow_wav)
+        return lm_meow_write_wav(meow_wav, seed_given ? (uint32_t)(a.rain.rng >> 8) : 1u) ? 0 : 1;
     make_set(&a.rain);
     if (!sun_set)                                                         /* the real clock gets the real sun; a fixed or fast clock the model's 06:00 / 18:00 */
         a.room.sun_auto = !a.room.fixed && a.room.clock_speed <= 0.0f;

@@ -93,6 +93,11 @@ bool lm_saver_start(struct lm_saver *s)
         snprintf(styled, sizeof(styled), "%s --no-cat", cmd);                  /* (the room without its cat) */
         cmd = styled;
     }
+    char meowed[1100];
+    if (s->srv->config.saver_cat && s->srv->config.saver_meow && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--meow")) {
+        snprintf(meowed, sizeof(meowed), "%s --meow", cmd);                    /* (Tom meows when he looks at the camera) */
+        cmd = meowed;
+    }
     pid_t pid = lm_server_spawn(s->srv, cmd);
     if (pid <= 0)
         return false;

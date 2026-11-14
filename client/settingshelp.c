@@ -169,6 +169,10 @@ static const struct entry table[] = {
     { "saver-cat", NULL, "A cat in the room",
       "A cat sits on the floor of the room, now and then turns its head, lies down for a while, and its eyes glow when it looks at you. Switch it off "
       "for the plain room. It applies the next time the screensaver starts; the flat style has no cat." },
+    { "saver-meow", NULL, "Tom meows",
+      "When Tom turns his head to look at you, he now and then meows - a sound made by the computer, played through the default sound output at the "
+      "volume that is set there. At most once in 25 seconds and not every time he looks. Off by default, because a screensaver that makes a noise is a "
+      "surprise. It applies the next time the screensaver starts; it needs the cat and the room style." },
     { "saver-blank", NULL, "Monitor sleeps after",
       "The monitors go to sleep this many minutes after the last keyboard or mouse use (so a bit after the screensaver started, if you set it higher "
       "than the time it starts after). When the lock screen is in front instead of the screensaver, the Security page's \"Screen off after\" decides. The picture fades out slowly first and then the monitors switch off; any key or mouse movement brings it "

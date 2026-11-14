@@ -157,6 +157,7 @@ struct lm_config {
     int scale_pct;              /* the screens' scale in percent, 100..400 (settings: scale, --scale; default 100): see output.h */
     int saver_style;            /* 0 = the 3D room, 1 = the classic flat rain: handed to mellagui-matrix as --flat (settings: saver-style; default room) */
     bool saver_cat;             /* the room has its cat (settings: saver-cat; default true); off: mellagui-matrix gets --no-cat */
+    bool saver_meow;            /* the cat meows when it looks at the camera (settings: saver-meow; default false: a screensaver that makes noise is a surprise); on: mellagui-matrix gets --meow */
     int saver_blank_min;        /* with the screensaver on: the monitors go to sleep (with a fade) this many minutes after the last input, 0 = never (settings: saver-blank; default 15) */
     int saver_lock_min;         /* the screensaver locks the screen this many minutes after it started (it keeps running), 0 = never (settings: saver-lock; default 1) */
     bool startup_sound;         /* play the start-up chime when MellaGUI has started (settings: startup-sound; default true), see chime.h */

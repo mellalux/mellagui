@@ -14564,7 +14564,7 @@ class TestSaver(Base):
 
     def test_defaults(self):
         p, c = self.start('mellagui-sv1', '--config', 'none')
-        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1'})        # (blank is 15 by default; the harness switches the monitor's sleep off)
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0'})        # (blank is 15 by default; the harness switches the monitor's sleep off)
 
     def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
         p, c = self.start('mellagui-sv2', '--config', 'none')
@@ -14880,7 +14880,65 @@ class TestSaver(Base):
         c.cmd('quit')
         p.wait(timeout=5)
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
-        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1'})
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0'})
+
+    def test_tom_meows_only_when_asked_and_the_meow_is_made_in_code(self):
+        d = os.path.join(tmp, 'sv-meow')
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        fake = os.path.join(d, 'mellagui-matrix')                          # a stand-in that writes down how it was started
+        log = os.path.join(d, 'args')
+        with open(fake, 'w') as f:
+            f.write('#!/bin/sh\necho "$@" >> %s\n' % log)
+        os.chmod(fake, 0o755)
+        conf = os.path.join(d, 'sv.conf')
+        with open(conf, 'w') as f:
+            f.write('[commands]\nsaver = %s\n' % fake)
+        settings = os.path.join(d, 'sv.settings')
+        p, c = self.start('mellagui-sv13', '--config', conf, '--settings', settings)
+        self.assertEqual(self.saver(c)['meow'], '0')                       # off by default: a screensaver must not make noise by itself
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started')
+        self.assertEqual(open(log).read().strip(), '')
+        os.unlink(log)
+        c.cmd('settings saver-meow 1')
+        self.assertEqual(self.saver(c)['meow'], '1')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings saver-meow loud')
+        c.cmd('saver stop')
+        time.sleep(0.4)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started with the meow')
+        self.assertEqual(open(log).read().strip(), '--meow')
+        os.unlink(log)
+        c.cmd('settings saver-cat 0')                                      # no cat, nobody to meow
+        c.cmd('saver stop')
+        time.sleep(0.4)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started without the cat')
+        self.assertEqual(open(log).read().strip(), '--no-cat')
+        time.sleep(0.6)
+        c.cmd('quit')
+        p.wait(timeout=5)
+
+    def test_the_meow_is_a_sound_file_made_in_code(self):
+        wavs = []
+        for seed in ('1', '2'):
+            out = os.path.join(tmp, 'meow-%s.wav' % seed)
+            r = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-matrix'), '--meow-wav', out, '--seed', seed], capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out, 'rb') as f:
+                wavs.append(f.read())
+        for w in wavs:
+            self.assertEqual(w[:4], b'RIFF')
+            self.assertEqual(w[8:16], b'WAVEfmt ')
+            rate = struct.unpack('<I', w[24:28])[0]
+            frames = (len(w) - 44) // 2
+            self.assertEqual(rate, 44100)
+            self.assertTrue(0.5 < frames / rate < 1.2, 'a meow is about a second long')
+            samples = struct.unpack('<%dh' % frames, w[44:44 + 2 * frames])
+            self.assertTrue(3000 < max(abs(v) for v in samples) < 20000)
+        self.assertNotEqual(wavs[0], wavs[1], 'every seed is another meow')
 
     def test_the_style_is_a_setting_and_flat_is_handed_to_our_program(self):
         d = os.path.join(tmp, 'sv-style')

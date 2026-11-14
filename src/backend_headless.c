@@ -396,9 +396,9 @@ static void ctl_command(struct ctl_client *c, char *line)
             lm_saver_start(srv->saver);
         else if (srv->saver && a1 && !strcmp(a1, "stop"))
             lm_saver_stop(srv->saver);
-        ctl_reply(c, "saver running=%d enabled=%d minutes=%d lock=%d blank=%d shield=%d style=%s cat=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
+        ctl_reply(c, "saver running=%d enabled=%d minutes=%d lock=%d blank=%d shield=%d style=%s cat=%d meow=%d\n", srv->saver && lm_saver_running(srv->saver), srv->config.saver,
                   srv->config.saver_min, srv->config.saver_lock_min, srv->config.saver_blank_min, srv->saver && lm_saver_shields(srv->saver),
-                  srv->config.saver_style ? "flat" : "room", srv->config.saver_cat ? 1 : 0);
+                  srv->config.saver_style ? "flat" : "room", srv->config.saver_cat ? 1 : 0, srv->config.saver_meow ? 1 : 0);
         ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "sound")) {
         /* sound -> "sound last=<name> n=<count>": the last interface sound that was noted (a dock click: "dock"), then "ok" */

@@ -3189,6 +3189,17 @@ class TestClients(Base):
         time.sleep(0.5)
         self.assertGreater(self.edit_window()['w'], w0, 'A+ in the right rail makes the text bigger')
 
+    def test_edit_the_pointer_follows_the_text_size_button_when_the_window_grows(self):
+        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1'})
+        win = self.edit_window()
+        ctl.abs(win['x'] + win['w'] - 26, win['y'] + 6 + 16)
+        for _ in range(3):                                           # A+ three times, the pointer left where it is: it must be on the button each time
+            ctl.click(*ctl.windows()['pointer'])
+            time.sleep(0.6)
+        win = self.edit_window()
+        self.assertEqual(ctl.windows()['pointer'], (win['x'] + win['w'] - 26, win['y'] + 6 + 16), 'the pointer is on the A+ button of the grown window')
+        self.assertGreater(win['w'], 760 + 40, 'three presses of A+ made the window bigger each time')
+
     def test_edit_cut_copy_paste_buttons_and_the_classic_keys(self):
         p, path = self.edit_start(b'abc def\n')
         win = self.edit_window()
@@ -4594,6 +4605,19 @@ class TestClients(Base):
         ctl.click(win['x'] + win['w'] - 26, win['y'] + 6 + 16)                    # the right rail's first drop: A+ (the text size is at the right, 36 px apart)
         time.sleep(0.4)
         self.assertEqual(self.term_window()['w'], 80 * 9 + 6 + 14 + 104)          # 110 %: 9 px cells between the rails
+
+    def test_terminal_the_pointer_follows_the_text_size_button_when_the_window_grows(self):
+        self.spawn('mellagui-term', MELLAGUI_RAILS='1')
+        self.assertIsNotNone(wait_for_window('mellagui.term'))
+        time.sleep(0.6)
+        win = self.term_window()
+        ctl.abs(win['x'] + win['w'] - 26, win['y'] + 6 + 16)
+        for _ in range(2):
+            ctl.click(*ctl.windows()['pointer'])
+            time.sleep(0.6)
+        win = self.term_window()
+        self.assertEqual(ctl.windows()['pointer'], (win['x'] + win['w'] - 26, win['y'] + 6 + 16), 'the pointer is on the A+ button of the grown window')
+        self.assertGreater(win['w'], 80 * 9 + 6 + 14 + 104, 'two presses made the font and the window bigger')
 
     def test_terminal_zoom_dropdown_picks_a_size(self):
         win, out = self.term()

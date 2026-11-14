@@ -650,6 +650,19 @@ void lm_seat_pointer_warp(struct lm_seat *seat, double x, double y)
     pointer_set_position(seat, x, y, lm_now_msec32());
 }
 
+bool lm_seat_pointer_warp_local(struct lm_seat *seat, struct lm_client *client, int x, int y)
+{
+    if (!seat || !seat->pfocus || !seat->pfocus->resource || seat->pfocus->resource->client != client || seat->grab)
+        return false;
+    int32_t ox = (int32_t)seat->pox, oy = (int32_t)seat->poy;
+    if (seat->srv->wm && !lm_wm_surface_origin(seat->srv->wm, seat->pfocus, &ox, &oy)) {      /* (the window may have moved since: where is it now?) */
+        ox = (int32_t)seat->pox;
+        oy = (int32_t)seat->poy;
+    }
+    pointer_set_position(seat, ox + x, oy + y, lm_now_msec32());
+    return true;
+}
+
 static void pointer_button(struct lm_seat *seat, uint32_t time_ms, uint32_t button, bool pressed)
 {
     if (seat->grab) {

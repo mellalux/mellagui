@@ -101,6 +101,10 @@ void wlwin_resize(struct wlwin *w, uint32_t serial, uint32_t edges);
 /* Show a menu at the pointer, drawn by the compositor (it may reach beyond the window): `entries` one per line, a leading '~' = dim. The answer
  * comes to ops->menu. False when the compositor has no such menu (the caller does the action some other way or does nothing). */
 bool wlwin_menu(struct wlwin *w, const char *entries);
+/* Move the pointer to (x, y) of this window (window pixels, as the rails count them), when it is over the window: a program whose window grows under the button
+ * that was pressed (a text size button at the window's edge) takes the pointer along. Send it after the commit of the new size. Needs the compositor's
+ * mellagui_menu_v1 (silently nothing without it). */
+void wlwin_warp_pointer(struct wlwin *w, int x, int y);
 
 /* The content of the window is drawn `percent` per cent as big as it is laid out (a gadget card whose contents can be made bigger or smaller):
  * a program still lays out in bw x bh and draws with the wlwin_* calls, but bw x bh is now the window's size divided by the zoom, and the pointer

@@ -591,6 +591,7 @@ enum {
 enum {
     LM_MELLAGUI_MENU_V1_REQ_DESTROY = 0,       /* "" */
     LM_MELLAGUI_MENU_V1_REQ_POPUP = 1,         /* "s" the entries, one per line (a leading '~' = dim, cannot be chosen) */
+    LM_MELLAGUI_MENU_V1_REQ_WARP = 2,          /* "ii" move the pointer to this place of the surface it is over (surface pixels): see menu.h */
     LM_MELLAGUI_MENU_V1_EVT_CHOSEN = 0,        /* "i" the entry */
     LM_MELLAGUI_MENU_V1_EVT_CLOSED = 1,        /* "" the menu went away without a choice */
 };

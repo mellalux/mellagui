@@ -418,6 +418,7 @@ DEFINE_IFACE(lm_mellagui_capture_v1_interface, "mellagui_capture_v1", 1,
 static const struct lm_message mellagui_menu_requests[] = {
     MSG("destroy", "", 1, NULL),
     MSG("popup", "s", 1, NULL),
+    MSG("warp", "ii", 1, NULL),
 };
 static const struct lm_message mellagui_menu_events[] = {
     MSG("chosen", "i", 1, NULL),

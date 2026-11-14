@@ -2839,6 +2839,21 @@ class TestClients(Base):
         plain = set(ppm.px(x, y) for y in range(win['y'] + 56, win['y'] + 72) for x in range(win['x'] + 520, win['x'] + 700))
         self.assertLessEqual(len(plain), 3, 'plain text is in one colour (and the background)')
 
+    def test_files_previews_markdown_code_blocks_with_syntax_colours(self):
+        d = tempfile.mkdtemp(prefix='files-mdsyn-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.md'), 'w') as f:
+            f.write('# T\n\n```c\n#include <stdio.h>\nint main(void) { return 42; } // x\n```\n\n```\nplain code here\n```\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'markdown')
+        self.assertEqual(head['kind'], 'markdown')
+        ppm = ctl.dump(os.path.join(tmp, 'files-mdsyn.ppm'))
+        def colours(y0, y1):
+            return set(ppm.px(x, y) for y in range(win['y'] + y0, win['y'] + y1) for x in range(win['x'] + 520, win['x'] + 760))
+        self.assertGreaterEqual(len(colours(100, 150)), 6, 'the C block is painted in several colours')
+        self.assertLessEqual(len(colours(160, 175)), 4, 'a block with no language stays in one colour')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

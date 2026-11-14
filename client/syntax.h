@@ -26,6 +26,9 @@ struct syn_lang;
 const struct syn_lang *syn_find(const char *path, const char *first_line);
 const char *syn_name(const struct syn_lang *l);
 
+/* The language a Markdown code fence names (```c, ```python, ```sh, ```c++, ```yml): its name, an extension, an interpreter or a usual alias. NULL: none. */
+const struct syn_lang *syn_find_tag(const char *tag);
+
 /* Lexes one line (`len` bytes, no line end). `state` is what the line before it left (0 at the top of the file); returns the state the next line
  * starts in. `cls` (len bytes) gets the class of every byte, or NULL when only the state is wanted. */
 int syn_line(const struct syn_lang *l, const char *s, size_t len, int state, uint8_t *cls);

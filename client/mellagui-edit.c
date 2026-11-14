@@ -3569,6 +3569,27 @@ static int selftest(void)
         free(buf);
         md_free(d);
     }
+    /* Markdown: a fenced block that names a language is coloured, in runs that copy back as the line it was */
+    {
+        const char *src = "```c\nint main(void) { return 42; } // x\n```\n\n```\nint plain;\n```\n";
+        struct md_doc *d = md_parse(src, strlen(src));
+        md_layout(d, 400, NULL);
+        char *buf = NULL;
+        size_t bl = 0;
+        FILE *mf = open_memstream(&buf, &bl);
+        md_dump(d, mf);
+        fclose(mf);
+        CHECK(strstr(buf, "\"int\"") && strstr(buf, "\"int plain;\""), "markdown: code runs\n%s", buf);        /* the C line is cut into runs, the plain one is whole */
+        CHECK(!strstr(buf, "\"int main(void)"), "markdown: a C block is one run\n%s", buf);
+        free(buf);
+        md_sel_all(d);
+        char *t = md_sel_text(d);
+        CHECK(t && !strncmp(t, "int main(void) { return 42; } // x\n\n", 36), "markdown: the runs of a code line copy back whole: '%s'", t ? t : "(null)");
+        free(t);
+        CHECK(syn_find_tag("c") && syn_find_tag("C++") && syn_find_tag("py") && syn_find_tag("bash") && syn_find_tag("yml") && !syn_find_tag("nosuchlang") && !syn_find_tag(""),
+              "syn_find_tag");
+        md_free(d);
+    }
     return bad ? 1 : 0;
 }
 

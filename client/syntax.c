@@ -2,6 +2,7 @@
 #include "syntax.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -162,6 +163,45 @@ const struct syn_lang *syn_find(const char *path, const char *first_line)
                 return &langs[i];
     }
     return NULL;
+}
+
+const struct syn_lang *syn_find_tag(const char *tag)
+{
+    static const char *const alias[][2] = { { "golang", "go" }, { "c++", "cpp" }, { "csharp", "cs" }, { "javascript", "js" }, { "typescript", "ts" },
+        { "python3", "py" }, { "python", "py" }, { "rust", "rs" }, { "yml", "yaml" }, { "shell", "sh" }, { "zsh", "sh" }, { "console", "sh" },
+        { "terminal", "sh" }, { "make", "makefile" }, { "jsonc", "json" }, { "patch", "diff" } };
+    char low[32];
+    size_t n = tag ? strlen(tag) : 0;
+    if (!n || n >= sizeof(low))
+        return NULL;
+    for (size_t i = 0; i < n; i++)
+        low[i] = (char)tolower((unsigned char)tag[i]);
+    low[n] = 0;
+    for (size_t i = 0; i < sizeof(alias) / sizeof(alias[0]); i++)
+        if (!strcmp(low, alias[i][0])) {
+            snprintf(low, sizeof(low), "%s", alias[i][1]);
+            break;
+        }
+    for (int i = 0; i < NLANGS; i++) {                                                  /* the language's own name */
+        const char *nm = langs[i].name;
+        if (strlen(nm) == strlen(low)) {
+            size_t k = 0;
+            while (nm[k] && tolower((unsigned char)nm[k]) == low[k])
+                k++;
+            if (!nm[k])
+                return &langs[i];
+        }
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "x.%s", low);                                            /* an extension or a file name */
+    const struct syn_lang *l = syn_find(buf, NULL);
+    if (!l)
+        l = syn_find(low, NULL);
+    if (!l) {
+        snprintf(buf, sizeof(buf), "#!/usr/bin/env %s", low);                           /* an interpreter */
+        l = syn_find("", buf);
+    }
+    return l;
 }
 
 const char *syn_name(const struct syn_lang *l)

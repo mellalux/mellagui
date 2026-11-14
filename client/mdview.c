@@ -7,6 +7,7 @@
 #include "font.h"
 #include "img.h"
 #include "mdview.h"
+#include "syntax.h"
 #include "theme.h"
 #include "uikit.h"
 #include "wlwin.h"
@@ -25,6 +26,7 @@ struct block {
     int kind, level, quote, depth;
     bool inlist;                        /* a paragraph that continues a list item */
     char *text;                         /* the inline source (paragraph, heading, item) or the lines of code */
+    const struct syn_lang *lang;        /* a fenced code block: the language its first line names (```c), NULL = no colours */
     char marker[16];                    /* an ordered item's number: "3." */
     bool bullet;
     int task;                           /* 0 no check box, 1 open, 2 done */
@@ -344,6 +346,12 @@ struct md_doc *md_parse(const char *text, size_t n)
                 fence_indent = indent;
                 int bi = add_block(d, B_CODE, q);
                 d->b[bi].text = strdup("");
+                const char *info = t + k;
+                while (*info == ' ' || *info == '\t') info++;
+                char tag[32];
+                size_t tl = strcspn(info, " \t{");
+                snprintf(tag, sizeof(tag), "%.*s", (int)(tl < sizeof(tag) - 1 ? tl : sizeof(tag) - 1), info);
+                d->b[bi].lang = syn_find_tag(tag);                      /* ```c, ```python ... */
                 fence_blk = bi;
                 prev_blank = false;
                 free(line);
@@ -814,6 +822,23 @@ static struct item *add_item(struct md_doc *d, int type, int x, int y, int w, in
     return it;
 }
 
+/* The colour of a syntax class (the editor's palette entries). */
+static uint32_t md_syn_color(int c)
+{
+    switch (c) {
+    case SYN_COMMENT: return lm_theme.syntax_comment;
+    case SYN_STRING: return lm_theme.syntax_string;
+    case SYN_NUMBER: return lm_theme.syntax_number;
+    case SYN_KEYWORD: return lm_theme.syntax_keyword;
+    case SYN_TYPE: return lm_theme.syntax_type;
+    case SYN_FUNC: return lm_theme.syntax_function;
+    case SYN_PREPROC: return lm_theme.syntax_preproc;
+    case SYN_ADDED: return lm_theme.ok;
+    case SYN_REMOVED: return lm_theme.error;
+    default: return lm_theme.text_soft;
+    }
+}
+
 static void add_text(struct md_doc *d, int x, int y, int w, const char *s, int scale, unsigned fl, int link, uint32_t rgb)
 {
     size_t n = strlen(s);
@@ -1046,12 +1071,30 @@ void md_layout(struct md_doc *d, int width, const char *base_dir)
             int lh = LM_FONT_H + 2, h = nl * lh + 12;
             add_item(d, IT_RRECT, x, y, w, h, lm_theme.gutter)->off = 6;
             const char *c = b->text;
+            int st = 0;                                                  /* the lexer's state at the start of the line (a block comment goes on) */
             for (int i = 0; i < nl; i++) {
                 const char *e = strchr(c, '\n');
                 size_t len = e ? (size_t)(e - c) : strlen(c);
                 char *ln = sdup(c, len);
-                if (len)
+                if (len && b->lang && len < 20000) {                     /* coloured: one text item for every run of one class, side by side */
+                    uint8_t *cls = malloc(len);
+                    st = syn_line(b->lang, ln, len, st, cls);
+                    int off = 0;
+                    for (size_t k = 0; k < len && off < w - 20;) {
+                        size_t m = k + 1;
+                        while (m < len && (cls[m] == cls[k] || ((unsigned char)ln[m] & 0xc0) == 0x80))
+                            m++;
+                        char *run = sdup(ln + k, m - k);
+                        int rw = lm_font_cells_width(run);
+                        add_text(d, x + 10 + off, y + 6 + i * lh, rw < w - 20 - off ? rw : w - 20 - off, run, 1, F_CODE, -1, md_syn_color(cls[k]));
+                        free(run);
+                        off += rw;
+                        k = m;
+                    }
+                    free(cls);
+                } else if (len) {
                     add_text(d, x + 10, y + 6 + i * lh, w - 20, ln, 1, F_CODE, -1, lm_theme.text_soft);
+                }
                 free(ln);
                 c = e ? e + 1 : c + len;
             }
@@ -1344,6 +1387,8 @@ char *md_sel_text(const struct md_doc *d)
                 sapp(&out, "\n", 1);
                 if (dy > prev->h + 12)
                     sapp(&out, "\n", 1);
+            } else if (dy == 0 && it->x == prev->x + prev->w && (it->fl & F_CODE) && (prev->fl & F_CODE)) {
+                /* the runs of one coloured code line touch: nothing between them */
             } else if (dy < 0 || it->x - (prev->x + prev->w) >= 14) {
                 sapp(&out, "\t", 1);
             } else {

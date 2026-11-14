@@ -245,6 +245,23 @@ static int zlib_inflate(const uint8_t *in, size_t inlen, uint8_t *out, size_t ou
     return s.outcnt == outlen ? 0 : -1;
 }
 
+/* A raw deflate stream (no zlib / gzip wrapper) -> exactly `outlen` bytes; 0 = ok. For file formats that carry their own wrapper (Parquet's gzip pages). */
+int lm_inflate_raw(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen)
+{
+    struct istate s = { .out = out, .outlen = outlen, .in = in, .inlen = inlen };
+    int last;
+    do {
+        last = bits(&s, 1);
+        int type = bits(&s, 2);
+        if (last < 0 || type < 0)
+            return -1;
+        int err = type == 0 ? stored_block(&s) : type == 1 ? fixed_block(&s) : type == 2 ? dynamic_block(&s) : -1;
+        if (err)
+            return -1;
+    } while (!last);
+    return s.outcnt == outlen ? 0 : -1;
+}
+
 /* ---- PNG ---------------------------------------------------------------------------------------------------------------- */
 
 static uint32_t be32(const uint8_t *p)

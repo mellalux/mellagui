@@ -64,6 +64,7 @@
 #include "util.h"
 #include "initree.h"
 #include "json.h"
+#include "parquet.h"
 #include "sqliteread.h"
 #include "syntax.h"
 #include "tomltree.h"
@@ -2617,6 +2618,44 @@ static bool pv_sqlite(struct preview *pv, const char *path, int tab)
     return true;
 }
 
+/* ---- Parquet: the first rows as a table ---- */
+#define PQ_MAX_ROWS 2000
+
+static bool pv_parquet(struct preview *pv, const char *path)
+{
+    struct pq_table t;
+    char err[200];
+    int r = pq_read(path, PQ_MAX_ROWS, &t, err, sizeof(err));
+    if (r == -1)
+        return false;
+    int cap = 0;
+    if (r < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "A Parquet file that cannot be shown:");
+        pv_linef(pv, &cap, "%s", err);
+        return true;
+    }
+    struct csv c = { 0 };
+    char **hdr = calloc((size_t)t.ncols, sizeof(char *));
+    for (int i = 0; i < t.ncols; i++)
+        hdr[i] = strdup(t.name[i]);
+    csv_push(&c, hdr, t.ncols);
+    for (int i = 0; i < t.nrows; i++) {
+        csv_push(&c, t.cell[i], t.ncols);                                  /* the cells change hands */
+        t.cell[i] = NULL;
+    }
+    pv->kind = PV_TABLE;
+    if (!pv_table_build(pv, &c, 1, &cap))
+        pv_linef(pv, &cap, "(no columns)");
+    else if (t.total_rows > t.nrows)
+        pv_linef(pv, &cap, "... the first %d of %lld rows", t.nrows, t.total_rows);
+    snprintf(pv->info, sizeof(pv->info), "Parquet, %lld rows, %d columns, %d row group%s", t.total_rows, t.ncols, t.row_groups, t.row_groups == 1 ? "" : "s");
+    csv_free(&c);
+    t.nrows = 0;                                                        /* (the rows now belong to `c`, freed above) */
+    pq_free(&t);
+    return true;
+}
+
 /* ---- JSON as a tree ---- */
 #define JSON_MAX_NODES 60000
 enum { FMT_JSON, FMT_YAML, FMT_XML, FMT_TOML, FMT_INI };                                    /* what pv_json reads into the tree */
@@ -2892,6 +2931,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
     }
     if (n >= 100 && !memcmp(buf, "SQLite format 3\0", 16) && (pv_sqlite(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* a SQLite database: the strip of tables and the rows of the first one */
+    } else if (n >= 12 && !memcmp(buf, "PAR1", 4) && (pv_parquet(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
+        /* a Parquet file: its first rows as a table */
     } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);
@@ -5270,6 +5311,14 @@ static void files_dump(struct app *a)
     }
     if (pv->kind == PV_TABLE)
         fprintf(f, "table cols=%d rows=%d left=%d\n", pv->tcols, pv->trows, pv->left);
+    for (int k = 0; k < 2 && pv->kind == PV_TABLE && pv->tabrows + 2 + k < pv->nlines; k++) {      /* the first data rows, blanks as _ (tests) */
+        char sq[400];
+        size_t o = 0;
+        for (const char *c = pv->lines[pv->tabrows + 2 + k]; *c && o < sizeof(sq) - 2; c++)
+            if (*c == ' ') { if (o && sq[o - 1] != '_') sq[o++] = '_'; } else sq[o++] = *c;
+        sq[o] = 0;
+        fprintf(f, "row%d v=%s\n", k + 1, sq);
+    }
     if (pv->kind == PV_TABLE && pv->ndb)
         fprintf(f, "db tables=%d tab=%d name=%s\n", pv->ndb, pv->dbtab, pv->dbname[pv->dbtab]);
     if (pv->kind == PV_MARKDOWN && pv->md)
@@ -6450,6 +6499,17 @@ static int selftest(void)
     snprintf(p, sizeof(p), "%s/nginx.conf", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT, "a .conf that is no INI is plain text");
+    {   /* snappy: a literal, then a copy that overlaps itself (offset 4, length 8) */
+        static const unsigned char sn[] = { 12, 0x0c, 'a', 'b', 'c', 'd', 0x11, 0x04 };
+        unsigned char o[16] = { 0 };
+        CHECK(pq_snappy(sn, sizeof(sn), o, sizeof(o)) == 12 && !memcmp(o, "abcdabcdabcd", 12), "snappy copy: '%.12s'", o);
+        static const unsigned char bad[] = { 12, 0x0c, 'a', 'b', 'c', 'd', 0x11, 0x09 };       /* an offset beyond what is there */
+        CHECK(pq_snappy(bad, sizeof(bad), o, sizeof(o)) < 0, "snappy: a copy from before the start is refused");
+    }
+    touch(dir, "notpq.parquet", "PAR1 just text that only starts like one", 41);
+    snprintf(p, sizeof(p), "%s/notpq.parquet", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a text that starts with PAR1 is not a Parquet file (%d)", pv.kind);
     touch(dir, "bad.json", "{\"a\":", 5);
     snprintf(p, sizeof(p), "%s/bad.json", dir);
     preview_load(&pv, p, false);

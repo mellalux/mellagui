@@ -3023,6 +3023,34 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
         self.assertEqual(head['kind'], 'hex')
 
+    def test_files_previews_parquet_files_as_tables(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+        import parquet_writer as w
+        d = tempfile.mkdtemp(prefix='files-pq-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        cols = [('id', w.I32, False, None), ('name', w.BYTES, True, 0), ('score', w.DOUBLE, True, None), ('day', w.I32, False, 6), ('ts', w.I64, False, 9)]
+        def group(n0, n):
+            return {'id': list(range(n0, n0 + n)), 'name': [None if i % 4 == 3 else ['Ada', 'Bob', 'Cy'][i % 3] for i in range(n0, n0 + n)],
+                    'score': [None if i % 5 == 2 else i / 4 for i in range(n0, n0 + n)], 'day': [19000 + i for i in range(n0, n0 + n)],
+                    'ts': [1700000000000 + i * 1001 for i in range(n0, n0 + n)]}
+        groups = [group(0, 5), group(5, 4)]
+        w.write(os.path.join(d, 'a_plain.parquet'), cols, groups)
+        w.write(os.path.join(d, 'b_snappy_dict.parquet'), cols, groups, codec=1, dictionary=('name',))
+        w.write(os.path.join(d, 'c_gzip_v2.parquet'), cols, groups, codec=2, v2=True, dictionary=('name', 'score'))
+        w.write(os.path.join(d, 'd_zstd.parquet'), cols, groups, codec=6)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_plain.parquet)
+        for k in range(3):
+            head, extra = self.files_dump(dump, want=lambda o, k=k: o[0].get('kind') == 'table' and o[0].get('want', '').endswith(('a_plain', 'b_snappy_dict', 'c_gzip_v2')[k] + '.parquet'))
+            self.assertEqual(head['kind'], 'table', 'file %d' % k)
+            self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('5', '9'), 'file %d: the two row groups come together' % k)
+            self.assertIn('Ada', extra['row1']['v'], 'file %d' % k)
+            self.assertIn('2022-01-08', extra['row1']['v'], 'file %d: a date' % k)
+            self.assertIn('2023-11-14_22:13:20.000', extra['row1']['v'], 'file %d: a timestamp' % k)
+            ctl.tap(self.K_DOWN)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('d_zstd.parquet'))
+        self.assertEqual(head['kind'], 'error')                                        # a codec this reader does not have: said, not guessed
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

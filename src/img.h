@@ -24,4 +24,7 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
 int lm_img_load_alpha(const char *path, struct lm_image *img, char *err, size_t errsz);
 void lm_img_free(struct lm_image *img);
 
+/* A raw deflate stream (no zlib or gzip wrapper) into exactly `outlen` bytes; 0 = ok. */
+int lm_inflate_raw(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen);
+
 #endif

@@ -56,6 +56,7 @@ def setUpModule():
     os.environ['MELLAGUI_RAILS'] = '0'                                # (the side rails of cam, du, top ... have tests of their own: MELLAGUI_RAILS=1)
     os.environ['MELLAGUI_FILES_RAIL'] = '0'                           # (the programs' side rails have tests of their own; the rest were written for the bars)
     os.environ['MELLAGUI_EDIT_RAIL'] = '0'
+    os.environ['MELLAGUI_TERM_STATUS'] = '0'                          # (the terminal's status bar changes its height; TestTerminalTabs turns it on)
     os.environ['MELLAGUI_FONT'] = 'bitmap'                           # the pixel tests know the built-in 8x16 font (TestFont picks others)
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
     os.environ['MELLAGUI_APPS_DIRS'] = os.path.join(tmp, 'no-apps')    # the launcher's search finds none of the programs and files of this machine
@@ -4860,6 +4861,224 @@ class TestClients(Base):
         win, out = self.term('term-nosb.txt')
         ctl.abs(win['x'] + 100, win['y'] + 100)
         self.assertIsNone(self.thumb(win, 'tsb-none.ppm'))
+
+
+    # ---- tabs in the terminal and the editor (the button bar is at the top in these tests, so the tab bar is the 24 px under it) ----
+
+    KEY_PGUP, KEY_PGDN, KEY_T_, KEY_W_ = 104, 109, 20, 17
+
+    def tab_chord(self, key, shift=True, ctrl=True):
+        for k, on in ((KEY_LEFTCTRL, ctrl), (KEY_LEFTSHIFT, shift)):
+            if on:
+                ctl.key(k, True)
+        ctl.tap(key)
+        for k, on in ((KEY_LEFTSHIFT, shift), (KEY_LEFTCTRL, ctrl)):
+            if on:
+                ctl.key(k, False)
+
+    def tab_shell(self, tag):
+        """A shell that logs `started` and every line it gets: (script, log)."""
+        out = os.path.join(tmp, 'tabs-%s.txt' % tag)
+        script = os.path.join(tmp, 'tabs-%s.sh' % tag)
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\necho started >> "%s"\nwhile read l; do echo "got:$l" >> "%s"; done\n' % (out, out))
+        os.chmod(script, 0o755)
+        if os.path.exists(out):
+            os.unlink(out)
+        return script, out
+
+    def log_lines(self, out, n, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            lines = self.read_log(out)
+            if len(lines) >= n:
+                return lines
+            time.sleep(0.05)
+        return self.read_log(out)
+
+    def read_log(self, out):
+        if not os.path.exists(out):
+            return []
+        with open(out) as f:
+            return f.read().split()
+
+    def kill_adopted(self):
+        """A window that a tab was dragged into is nobody's child: it is ended by hand when the test is over."""
+        def go():
+            for pid in os.listdir('/proc'):
+                if not pid.isdigit():
+                    continue
+                try:
+                    cmd = open('/proc/%s/cmdline' % pid, 'rb').read().split(b'\0')
+                except OSError:
+                    continue
+                if len(cmd) > 2 and cmd[1] == b'--adopt' and os.path.basename(cmd[0].decode()).startswith('mellagui-'):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except OSError:
+                        pass
+            time.sleep(0.3)
+        self.addCleanup(go)
+
+    def term_windows(self):
+        return [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.term']
+
+    def test_terminal_tabs_open_switch_and_close(self):
+        script, out = self.tab_shell('basic')
+        p = self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win)
+        self.log_lines(out, 1)
+        h1 = self.term_window()['h']
+        self.tab_chord(self.KEY_T_)                                                  # Ctrl+Shift+T: a new tab (and its own shell)
+        self.assertEqual(self.log_lines(out, 2), ['started', 'started'])
+        time.sleep(0.4)
+        self.assertEqual(self.term_window()['h'], h1 + 24, 'the tab bar shows from the second tab on')
+        type_text('two')
+        self.assertEqual(self.log_lines(out, 3)[-1], 'got:two')                   # the new tab is in front
+        self.tab_chord(self.KEY_PGUP, shift=False)                                   # Ctrl+PageUp: the first tab
+        type_text('one')
+        self.assertEqual(self.log_lines(out, 4)[-1], 'got:one')
+        self.assertEqual(len(self.read_log(out)), 4, 'two shells, not three')
+        win = self.term_window()
+        ctl.click(win['x'] + 300, win['y'] + 36)                                 # a click on the second tab (tabs are 200 px wide, from x 4)
+        time.sleep(0.2)
+        type_text('again')
+        self.assertEqual(self.log_lines(out, 5)[-1], 'got:again')
+        self.tab_chord(self.KEY_W_)                                                  # Ctrl+Shift+W closes the tab in front
+        time.sleep(0.5)
+        self.assertEqual(self.term_window()['h'], h1, 'the bar goes with the second tab')
+        self.assertIsNone(p.poll(), 'the first tab is still there')
+        self.tab_chord(self.KEY_W_)                                                  # the last tab closes the window
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_terminal_a_tab_dragged_out_becomes_a_window_with_the_same_shell(self):
+        script, out = self.tab_shell('drag')
+        self.kill_adopted()
+        self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win)
+        self.log_lines(out, 1)
+        self.tab_chord(self.KEY_T_)
+        self.log_lines(out, 2)
+        time.sleep(0.4)
+        win = self.term_window()
+        ctl.abs(win['x'] + 300, win['y'] + 36)                                   # press on the second tab, pull it out of the bar, let go
+        ctl.button(BTN_LEFT, True)
+        for dy in range(36, 260, 28):
+            ctl.abs(win['x'] + 300, win['y'] + dy)
+            time.sleep(0.03)
+        ctl.button(BTN_LEFT, False)
+        for _ in range(60):
+            if len(self.term_windows()) == 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len(self.term_windows()), 2, 'the tab is a window of its own now')
+        time.sleep(0.5)
+        old = [w for w in self.term_windows() if w['id'] == win['id']][0]
+        self.assertEqual(old['h'], win['h'] - 24, 'the old window has one tab and no bar again')
+        type_text('moved')                                                       # the new window has the keyboard: the same shell answers
+        lines = self.log_lines(out, 3)
+        self.assertEqual(lines, ['started', 'started', 'got:moved'], 'no third shell was started')
+
+    def test_terminal_status_bar_shows_the_grid_and_goes_with_ctrl_shift_b(self):
+        script, out = self.tab_shell('status')
+        self.spawn('mellagui-term', SHELL=script, MELLAGUI_TERM_STATUS='1')
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win)
+        time.sleep(0.5)
+        h_on = self.term_window()['h']
+        self.assertEqual(h_on, 24 * 16 + 6 + 24 + 22, 'the grid, its margins, the button bar and the 22 px status bar')
+        ppm = ctl.dump(os.path.join(tmp, 'tstatus.ppm'))
+        w = self.term_window()
+        bar = (0x2b, 0x30, 0x3b)                                                 # the bar colour
+        self.assertGreater(ppm.count(bar, w['x'] + 10, w['y'] + h_on - 20, w['x'] + 200, w['y'] + h_on - 4), 100)
+        self.tab_chord(48)                                                       # Ctrl+Shift+B hides it
+        time.sleep(0.5)
+        self.assertEqual(self.term_window()['h'], h_on - 22)
+
+    def edit_tabs_start(self, *names):
+        """The editor with several files (one tab each, the last one in front): (process, [paths])."""
+        exe = os.path.join(ROOT, 'build', 'mellagui-edit')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-edit not built')
+        d = tempfile.mkdtemp(prefix='edtabs-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        paths = []
+        for n in names:
+            paths.append(os.path.join(d, n))
+            with open(paths[-1], 'w') as f:
+                f.write('text of %s\n' % n)
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.edit', 'an editor from an earlier test is still open')
+        p = subprocess.Popen([exe] + paths, env=dict(os.environ, MELLAGUI_EDIT_RAIL='0'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.edit'))
+        time.sleep(0.5)
+        return p, paths
+
+    def edit_title(self, want, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.window_title_of('mellagui.edit') == want:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_edit_several_files_are_tabs_and_keys_switch_and_close_them(self):
+        p, paths = self.edit_tabs_start('a.txt', 'b.txt')
+        self.assertTrue(self.edit_title('b.txt - Editor'), 'the last file is in front')
+        h = self.edit_window()['h']
+        self.tab_chord(self.KEY_PGUP, shift=False)                                   # Ctrl+PageUp
+        self.assertTrue(self.edit_title('a.txt - Editor'))
+        ctl.key(KEY_LEFTALT, True)                                               # Alt+2
+        ctl.tap(KEY_2)
+        ctl.key(KEY_LEFTALT, False)
+        self.assertTrue(self.edit_title('b.txt - Editor'))
+        self.tab_chord(self.KEY_T_, shift=False)                                     # Ctrl+T: an empty tab
+        self.assertTrue(self.edit_title('untitled - Editor'))
+        ctl.tap(KEYCODES['h'])
+        self.assertTrue(self.edit_title('* untitled - Editor'))
+        self.tab_chord(self.KEY_W_, shift=False)                                     # Ctrl+W: it has unsaved text, so it asks first
+        time.sleep(0.3)
+        self.assertTrue(self.edit_title('* untitled - Editor'))
+        self.tab_chord(self.KEY_W_, shift=False)                                     # ... and closes the second time
+        self.assertTrue(self.edit_title('a.txt - Editor') or self.edit_title('b.txt - Editor'))
+        self.tab_chord(self.KEY_W_, shift=False)
+        self.tab_chord(self.KEY_W_, shift=False)                                     # the last tab closes the window
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_edit_a_tab_dragged_out_takes_its_unsaved_text_to_a_window_of_its_own(self):
+        p, paths = self.edit_tabs_start('a.txt')
+        self.kill_adopted()
+        self.tab_chord(self.KEY_T_, shift=False)
+        ctl.tap(KEYCODES['h'])
+        ctl.tap(KEYCODES['i'])
+        self.assertTrue(self.edit_title('* untitled - Editor'))
+        win = self.edit_window()
+        ctl.abs(win['x'] + 300, win['y'] + 36)                                   # the second tab: pull it out of the bar
+        ctl.button(BTN_LEFT, True)
+        for dy in range(36, 300, 30):
+            ctl.abs(win['x'] + 300, win['y'] + dy)
+            time.sleep(0.03)
+        ctl.button(BTN_LEFT, False)
+        for _ in range(60):
+            if len([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit']) == 2:
+                break
+            time.sleep(0.1)
+        titles = sorted(w['title'] for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit')
+        self.assertEqual(titles, ['* untitled - Editor', 'a.txt - Editor'])
+        win2 = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit' and w['title'].startswith('* untitled')][0]
+        self.assertEqual(win2['title'], '* untitled - Editor')
+        # the text came along: close it with Ctrl+Q twice (it is unsaved) and the other window stays
+        self.tab_chord(KEY_Q, shift=False)
+        time.sleep(0.2)
+        self.tab_chord(KEY_Q, shift=False)
+        for _ in range(60):
+            if len([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit']) == 1:
+                break
+            time.sleep(0.1)
+        self.assertEqual([w['title'] for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit'], ['a.txt - Editor'])
 
     def test_edit_has_a_scrollbar_and_the_wheel_stays_where_it_is(self):
         p, path = self.edit_start(''.join('line %d\n' % i for i in range(150)).encode())

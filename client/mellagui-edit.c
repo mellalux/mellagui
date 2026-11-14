@@ -12,6 +12,10 @@
  * and Save as prompts start in the folder of the current file, accept ~/ and relative names, and Tab completes names.
  * Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
  * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
+ *
+ * Tabs (not in a note): several files on the command line, Ctrl+O on a file that is not open yet, Ctrl+N and Ctrl+T make one tab each; the bar shows
+ * from the second tab on. Ctrl+W closes a tab (asks once when it has unsaved changes), Ctrl+PageUp / PageDown / Ctrl+Tab or Alt+1..9 switch, Ctrl+Shift+
+ * PageUp / PageDown move it. Pull a tab out of the bar with the mouse to make it a window of its own (`--adopt`, the document comes on fd 3).
  */
 #include <dirent.h>
 #include <errno.h>
@@ -25,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,6 +45,7 @@
 #include "util.h"
 #include "wlcard.h"
 #include "wlrail.h"
+#include "wltabs.h"
 #include "wlclip.h"
 #include "wltext.h"
 #include "wlwin.h"
@@ -55,7 +61,12 @@ static bool g_rail = true;
 static uint32_t g_paper = 0xfff2a8, g_ink = 0x2a2a20;
 #define STATUS_H (g_note ? 0 : 20)
 #define PBAR(a) ((a)->prompt != P_NONE && !(g_rail && !g_note) ? STATUS_H : 0)     /* the prompt's own strip (the prototype has a card instead) */
-#define TOP_H (g_note || g_rail ? 0 : (LM_FONT_H + 8))           /* button bar above the text */
+#define BTN_H (g_note || g_rail ? 0 : (LM_FONT_H + 8))           /* button bar above the text */
+/* Tabs: one document each. The bar shows from the second tab on (never in a note) and lies below the button bar, between the rails. */
+#define MAX_TABS 16
+static int g_ntabs = 1;
+#define TABS_H (g_note || g_ntabs < 2 ? 0 : WLTABS_H)
+#define TOP_H (BTN_H + TABS_H)                                   /* where the text area starts */
 #define UNDO_MAX 64
 #define COL_BG (g_note ? g_paper : lm_theme.background)
 #define COL_FG (g_note ? g_ink : lm_theme.text_soft)
@@ -80,22 +91,43 @@ struct snap {
     size_t cx;
 };
 
+/* Everything that belongs to ONE document. The tab that is in front lives in the app itself (the anonymous struct, so `a->l` works as ever),
+ * the others are kept in `tabs[]`; a switch copies the front one out and the other one in (the lines are heap blocks: only pointers move). */
+#define DOC_FIELDS \
+    struct line *l;                     /* the lines, without line ends */ \
+    int n, cap; \
+    int cy;                             /* cursor line and byte offset in it */ \
+    size_t cx; \
+    int ay;                             /* selection anchor; equal to the cursor = no selection */ \
+    size_t ax; \
+    int want_col;                       /* display column kept while moving up / down */ \
+    int top, left;                      /* first visible line / display column */ \
+    char path[PATH_MAX]; \
+    bool modified, final_nl, crlf; \
+    struct snap undo[UNDO_MAX], redo[UNDO_MAX]; \
+    int nundo, nredo; \
+    bool typing_run;                    /* the last change was typing: the next typed character joins its undo step */ \
+    int seen_cy, seen_n;                /* where the cursor was when the view last followed it (a wheel / scroll bar move must stay) */ \
+    size_t seen_cx; \
+    int seen_rows, seen_cols; \
+    bool preview;                       /* Markdown preview (a .md file opens as a page; Ctrl+M switches to the text and back) */ \
+    struct md_doc *md; \
+    int md_scroll;                      /* pixels scrolled down */ \
+    const char *md_hover;               /* the address of the link under the pointer */
+struct docstate { DOC_FIELDS };
+
 struct app {
     struct wlwin win;
+    union { struct docstate d; struct { DOC_FIELDS }; };    /* the document in front */
+    struct docstate *tabs[MAX_TABS];    /* all the tabs' documents (the front one's slot is stale until it is switched away from) */
+    int ntabs, cur;
+    struct wltabs_drag tdrag;           /* a tab is being dragged */
+    int thover;                         /* the tab under the pointer: 2 * index (+ 1 over its x mark), -1 none, -2 the + button */
+    int close_armed;                    /* a tab with unsaved changes was asked to close once: 1 + its index */
     int64_t edit_ms;                    /* when the text was last changed (a note saves itself a moment after) */
     int paper;                          /* a note's colour: an index of note_papers */
     bool delete_armed;                  /* a note: Ctrl+D was pressed once, a second press within 3 s deletes it */
     int64_t delete_ms;
-    struct line *l;                     /* the lines, without line ends */
-    int n, cap;
-    int cy;                             /* cursor line and byte offset in it */
-    size_t cx;
-    int ay;                             /* selection anchor; equal to the cursor = no selection */
-    size_t ax;
-    int want_col;                       /* display column kept while moving up / down */
-    int top, left;                      /* first visible line / display column */
-    char path[PATH_MAX];
-    bool modified, final_nl, crlf;
     /* prompt line: open / save as / find / go to */
     enum { P_NONE, P_OPEN, P_SAVEAS, P_FIND, P_GOTO } prompt;
     char pbuf[512];
@@ -123,9 +155,6 @@ struct app {
     struct lm_zoomtab zt;               /* the cell size and font weights for it */
     bool conf_dirty;                    /* the zoom changed and is not in editor.conf yet */
     int64_t conf_time;
-    struct snap undo[UNDO_MAX], redo[UNDO_MAX];
-    int nundo, nredo;
-    bool typing_run;                    /* the last change was typing: the next typed character joins its undo step */
     struct wlclip clip;                 /* the clipboard (wl_data_device) */
     int menu_kind;                      /* the right-click menu that is showing: 0 none, 1 the prompt's field, 2 the text */
     /* key repeat */
@@ -139,14 +168,7 @@ struct app {
     int rows_visible, cols_visible;
     bool sb_drag;                       /* the scroll bar thumb is being dragged */
     int sb_grab;                        /* pixels between the top of the thumb and the pointer */
-    int seen_cy, seen_n;                /* where the cursor was when the view last followed it (a wheel / scroll bar move must stay) */
-    size_t seen_cx;
-    int seen_rows, seen_cols;
     /* Markdown preview (a .md file opens as a page; Ctrl+M switches to the text and back) */
-    bool preview;
-    struct md_doc *md;
-    int md_scroll;                      /* pixels scrolled down */
-    const char *md_hover;               /* the address of the link under the pointer */
     bool md_sb_drag;
     int md_sb_grab;
     bool md_selecting;                  /* the left button is down on the page: the pointer extends the selection */
@@ -158,6 +180,10 @@ struct app {
 static void preview_auto(struct app *a);
 static void preview_set(struct app *a, bool on);
 static bool is_md_path(const char *p);
+static bool tab_new(struct app *a);
+static bool tab_find_path(struct app *a, const char *path);
+static void tab_discard(struct app *a);
+static bool doc_pristine(const struct app *a);
 
 static int64_t now_ms(void)
 {
@@ -625,6 +651,15 @@ static bool do_save(struct app *a, const char *path)
 static void do_open(struct app *a, const char *path)
 {
     char err[200];
+    bool fresh = false;                                                 /* a tab made for this file (it goes again if the file cannot be opened) */
+    if (!g_note) {
+        if (tab_find_path(a, path)) {                                   /* already open: that tab comes to the front */
+            msg(a, "%s is open in this tab", path);
+            return;
+        }
+        if (!doc_pristine(a))
+            fresh = tab_new(a);
+    }
     if (load_file(a, path, err, sizeof(err)) < 0) {
         if (errno == ENOENT && access(path, F_OK) != 0) {              /* a name that does not exist yet: a new file */
             doc_clear(a);
@@ -634,7 +669,10 @@ static void do_open(struct app *a, const char *path)
             a->modified = false;
             msg(a, "New file %s", path);
         } else {
+            if (fresh)
+                tab_discard(a);
             msg(a, "%s", err);
+            return;
         }
     } else {
         snprintf(a->path, sizeof(a->path), "%s", path);
@@ -923,6 +961,8 @@ static void cmd_save(struct app *a, bool as)
 
 static void cmd_new(struct app *a)
 {
+    if (!g_note && tab_new(a))                                          /* a new document is a new tab (a note has no tabs) */
+        return;
     if (a->modified && !a->quit_armed) {
         a->quit_armed = true;
         msg(a, "Unsaved changes: save first (Ctrl+S), or start a new document again to discard them");
@@ -966,6 +1006,304 @@ static void set_zoom_pct(struct app *a, int pct)
 static void set_zoom(struct app *a, int delta)
 {
     set_zoom_pct(a, lm_zoom_step(a->zoom, delta));
+}
+
+/* ---- tabs ------------------------------------------------------------------------------------------------------------------ */
+
+static void doc_free_all(struct docstate *d)
+{
+    for (int i = 0; i < d->cap; i++)
+        free(d->l[i].s);
+    free(d->l);
+    for (int i = 0; i < d->nundo; i++)
+        snap_free(&d->undo[i]);
+    for (int i = 0; i < d->nredo; i++)
+        snap_free(&d->redo[i]);
+    md_free(d->md);
+    memset(d, 0, sizeof(*d));
+}
+
+static void tabs_sync(struct app *a)                                    /* the bar comes or goes with the second tab: the text area gets 24 px less or more (the window keeps its size and place) */
+{
+    g_ntabs = a->ntabs;
+    a->thover = -1;
+    a->tdrag.active = false;
+    a->win.redraw = true;
+}
+
+/* The pointer, a prompt, a drag ... belong to the tab that was in front. */
+static void tab_reset_transient(struct app *a)
+{
+    a->prompt = P_NONE;
+    a->dragging = a->sb_drag = a->md_selecting = a->md_sb_drag = a->md_press_link = false;
+    a->zmenu_open = false;
+    a->quit_armed = false;
+    a->close_armed = 0;
+    a->help = false;
+    a->pfresh = 0;
+}
+
+static void tab_switch(struct app *a, int i)
+{
+    if (i < 0 || i >= a->ntabs || i == a->cur)
+        return;
+    *a->tabs[a->cur] = a->d;
+    a->d = *a->tabs[i];
+    a->cur = i;
+    tab_reset_transient(a);
+    set_title(a);
+    a->win.redraw = true;
+}
+
+static void tab_cycle(struct app *a, int d)
+{
+    if (a->ntabs > 1)
+        tab_switch(a, (a->cur + d + a->ntabs) % a->ntabs);
+}
+
+/* A new empty tab after the one in front, which it brings to the front. */
+static bool tab_new(struct app *a)
+{
+    if (g_note || a->ntabs >= MAX_TABS) {
+        if (!g_note)
+            msg(a, "That is as many tabs as there can be (%d)", MAX_TABS);
+        return false;
+    }
+    *a->tabs[a->cur] = a->d;
+    memmove(&a->tabs[a->cur + 2], &a->tabs[a->cur + 1], (size_t)(a->ntabs - a->cur - 1) * sizeof(a->tabs[0]));
+    a->tabs[a->cur + 1] = calloc(1, sizeof(struct docstate));
+    a->ntabs++;
+    a->cur++;
+    memset(&a->d, 0, sizeof(a->d));
+    doc_clear(a);
+    a->final_nl = true;
+    tab_reset_transient(a);
+    tabs_sync(a);
+    set_title(a);
+    return true;
+}
+
+/* The tab in front goes, with whatever was in it (the callers asked about unsaved changes); the neighbour takes its place. */
+static void tab_discard(struct app *a)
+{
+    if (a->ntabs < 2)
+        return;
+    doc_free_all(&a->d);
+    free(a->tabs[a->cur]);
+    memmove(&a->tabs[a->cur], &a->tabs[a->cur + 1], (size_t)(a->ntabs - a->cur - 1) * sizeof(a->tabs[0]));
+    a->ntabs--;
+    a->cur = LM_MIN(a->cur, a->ntabs - 1);
+    a->d = *a->tabs[a->cur];
+    tab_reset_transient(a);
+    tabs_sync(a);
+    set_title(a);
+}
+
+static bool tab_modified(const struct app *a, int i)
+{
+    return i == a->cur ? a->modified : a->tabs[i]->modified;
+}
+
+static int tabs_modified(const struct app *a)                           /* how many tabs have unsaved changes */
+{
+    if (a->ntabs == 0)
+        return a->modified ? 1 : 0;
+    int n = 0;
+    for (int i = 0; i < a->ntabs; i++)
+        n += tab_modified(a, i) ? 1 : 0;
+    return n;
+}
+
+/* Closes tab i: one with unsaved changes asks once ("close it again to discard them"). The last tab closes the window. */
+static void tab_close(struct app *a, int i)
+{
+    if (i < 0 || i >= a->ntabs)
+        return;
+    if (tab_modified(a, i) && a->close_armed != i + 1) {
+        if (i != a->cur)
+            tab_switch(a, i);
+        a->close_armed = i + 1;
+        msg(a, "Unsaved changes: save first (Ctrl+S), or close the tab again to discard them");
+        return;
+    }
+    if (a->ntabs == 1) {
+        a->win.running = false;
+        return;
+    }
+    if (i != a->cur)
+        tab_switch(a, i);
+    tab_discard(a);
+}
+
+static void tab_move(struct app *a, int from, int to)
+{
+    if (from == to || from < 0 || to < 0 || from >= a->ntabs || to >= a->ntabs)
+        return;
+    *a->tabs[a->cur] = a->d;
+    struct docstate *front = a->tabs[a->cur], *t = a->tabs[from];
+    if (from < to)
+        memmove(&a->tabs[from], &a->tabs[from + 1], (size_t)(to - from) * sizeof(a->tabs[0]));
+    else
+        memmove(&a->tabs[to + 1], &a->tabs[to], (size_t)(from - to) * sizeof(a->tabs[0]));
+    a->tabs[to] = t;
+    for (int k = 0; k < a->ntabs; k++)
+        if (a->tabs[k] == front)
+            a->cur = k;
+    a->win.redraw = true;
+}
+
+/* An empty, unnamed, untouched document: opening a file uses it instead of making another tab. */
+static bool doc_pristine(const struct app *a)
+{
+    return !a->path[0] && !a->modified && a->n == 1 && a->l[0].len == 0;
+}
+
+/* Is `path` open in some tab? Then that tab comes to the front. */
+static bool tab_find_path(struct app *a, const char *path)
+{
+    char want[PATH_MAX], have[PATH_MAX];
+    if (!realpath(path, want))
+        snprintf(want, sizeof(want), "%s", path);
+    for (int i = 0; i < a->ntabs; i++) {
+        const char *p = i == a->cur ? a->path : a->tabs[i]->path;
+        if (!p[0])
+            continue;
+        if (!realpath(p, have))
+            snprintf(have, sizeof(have), "%s", p);
+        if (!strcmp(want, have)) {
+            tab_switch(a, i);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ---- a tab as a window of its own ---------------------------------------------------------------------------------------------
+ * The document (its text, the name, whether it is unsaved, the cursor) goes into a memfd that a new `mellagui-edit --adopt` reads as its fd 3.
+ * What the other window does not get is the undo history. */
+
+#define ADOPT_MAGIC "MEDIT1"
+
+static bool wr_all(int fd, const void *buf, size_t n)
+{
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t k = write(fd, p, n);
+        if (k < 0 && errno == EINTR)
+            continue;
+        if (k <= 0)
+            return false;
+        p += k;
+        n -= (size_t)k;
+    }
+    return true;
+}
+
+static void spawn_handover(char *const argv[], int fd)                 /* a double fork: the new window is nobody's child; `fd` becomes its fd 3 */
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+            int hi = fcntl(fd, F_DUPFD, 10);
+            if (hi < 0 || dup2(hi, 3) < 0)
+                _exit(127);
+            close_range(4, ~0U, 0);
+            int nul = open("/dev/null", O_RDWR);
+            if (nul >= 0) {
+                dup2(nul, 0);
+                dup2(nul, 1);
+                dup2(nul, 2);
+                if (nul > 3)
+                    close(nul);
+            }
+            execv(argv[0], argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
+/* Pulls tab i out of this window into a window of its own. */
+static void tab_detach(struct app *a, int i)
+{
+    if (a->ntabs < 2 || i < 0 || i >= a->ntabs || g_note)
+        return;
+    tab_switch(a, i);
+    char self[PATH_MAX];
+    ssize_t k = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    int fd = memfd_create("mellagui-edit-doc", 0);
+    size_t len = 0;
+    char *text = range_text(a, 0, 0, a->n - 1, a->l[a->n - 1].len, &len);
+    char head[128];
+    int hn = snprintf(head, sizeof(head), "%s %d %zu %d %d %d %zu %zu\n", ADOPT_MAGIC, a->cy, a->cx, a->modified ? 1 : 0, a->final_nl ? 1 : 0, a->crlf ? 1 : 0,
+                      strlen(a->path), len);
+    bool ok = k > 0 && fd >= 0 && text && wr_all(fd, head, (size_t)hn) && wr_all(fd, a->path, strlen(a->path)) && wr_all(fd, text, len) && lseek(fd, 0, SEEK_SET) >= 0;
+    free(text);
+    if (ok) {
+        self[k] = 0;
+        char *argv[] = { self, "--adopt", NULL };
+        spawn_handover(argv, fd);
+    } else {
+        msg(a, "Could not hand the tab over to a window of its own");
+    }
+    if (fd >= 0)
+        close(fd);
+    if (ok)
+        tab_discard(a);
+}
+
+/* In the new window: the document that fd 3 holds. */
+static bool adopt_read(struct app *a, int fd)
+{
+    char head[128];
+    size_t hl = 0;
+    while (hl < sizeof(head) - 1) {                                     /* the header line, byte by byte (the rest is text) */
+        char c;
+        if (read(fd, &c, 1) != 1)
+            return false;
+        if (c == '\n')
+            break;
+        head[hl++] = c;
+    }
+    head[hl] = 0;
+    int cy, mod, fnl, crlf;
+    size_t cx, plen, len;
+    if (strncmp(head, ADOPT_MAGIC " ", sizeof(ADOPT_MAGIC)) || sscanf(head + sizeof(ADOPT_MAGIC), "%d %zu %d %d %d %zu %zu", &cy, &cx, &mod, &fnl, &crlf, &plen, &len) != 7)
+        return false;
+    if (plen >= PATH_MAX || len > MAX_FILE)
+        return false;
+    char path[PATH_MAX] = "";
+    char *text = malloc(len + 1);
+    bool ok = text != NULL;
+    size_t got = 0;
+    while (ok && got < plen + len) {                                    /* the path, then the text */
+        char *dst = got < plen ? path + got : text + (got - plen);
+        size_t want = got < plen ? plen - got : plen + len - got;
+        ssize_t n = read(fd, dst, want);
+        if (n <= 0)
+            ok = false;
+        else
+            got += (size_t)n;
+    }
+    if (ok) {
+        path[plen] = 0;
+        doc_set_text(a, text, len);
+        snprintf(a->path, sizeof(a->path), "%s", path);
+        a->cy = a->ay = LM_CLAMP(cy, 0, a->n - 1);
+        a->cx = a->ax = LM_MIN(cx, a->l[a->cy].len);
+        a->final_nl = fnl != 0;
+        a->crlf = crlf != 0;
+        a->modified = mod != 0;
+        for (int i = 0; i < a->nundo; i++)
+            snap_free(&a->undo[i]);
+        a->nundo = a->nredo = 0;
+        preview_auto(a);
+    }
+    free(text);
+    return ok;
 }
 
 
@@ -1274,7 +1612,7 @@ static int btn_at(const struct app *a, double px, double py)
         k = wlrail_at(&R, px, py);
         return k >= 0 ? rail_right_ids[k] : -1;
     }
-    if (py < 2 || py >= TOP_H - 2)
+    if (py < 2 || py >= BTN_H - 2)
         return -1;
     for (int i = 0; i < N_BTNS; i++) {
         int x, w;
@@ -1469,7 +1807,7 @@ static void prompt_accept(struct app *a)
     switch (kind) {
     case P_OPEN:
         a->prompt = P_NONE;
-        if (a->modified && !a->quit_armed) {
+        if (g_note && a->modified && !a->quit_armed) {                  /* (a file opens in a tab of its own: nothing is lost, except in a note) */
             a->quit_armed = true;
             msg(a, "Unsaved changes: press Enter again to open %s anyway, Esc to stay", text);
             a->prompt = P_OPEN;
@@ -2083,6 +2421,22 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);
     char letter = (tl == 1 && ctrl && !alt && !super) ? (char)((txt[0] >= 'A' && txt[0] <= 'Z') ? txt[0] + 32 : txt[0]) : 0;
+    if (!g_note) {                                                      /* tabs */
+        if (letter == 't') { tab_new(a); return; }
+        if (letter == 'w') { tab_close(a, a->cur); return; }
+        if (ctrl && !alt && a->ntabs > 1 && (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ks == LM_KS_Tab || ks == 0xfe20)) {
+            int d = ks == LM_KS_Page_Up || ks == 0xfe20 || (ks == LM_KS_Tab && shift) ? -1 : 1;
+            if (shift && (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down))
+                tab_move(a, a->cur, LM_CLAMP(a->cur + d, 0, a->ntabs - 1));         /* Ctrl+Shift+PageUp / PageDown: the tab moves */
+            else
+                tab_cycle(a, d);
+            return;
+        }
+        if (alt && !ctrl && !super && tl == 1 && txt[0] >= '1' && txt[0] <= '9' && txt[0] - '1' < a->ntabs) {
+            tab_switch(a, txt[0] - '1');
+            return;
+        }
+    }
     if (letter == 'm' && !g_note && is_md_path(a->path) && !a->preview) {
         preview_set(a, true);
         return;
@@ -2094,9 +2448,10 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     if (letter) {
         switch (letter) {
         case 'q':
-            if (a->modified && !a->quit_armed) {
+            if (tabs_modified(a) && !a->quit_armed) {
                 a->quit_armed = true;
-                msg(a, "Unsaved changes: save first (Ctrl+S), or press Ctrl+Q again to discard them and quit");
+                msg(a, tabs_modified(a) > 1 ? "%d tabs have unsaved changes: save them (Ctrl+S), or press Ctrl+Q again to discard them and quit" :
+                       "Unsaved changes: save first (Ctrl+S), or press Ctrl+Q again to discard them and quit", tabs_modified(a));
             } else {
                 a->win.running = false;
             }
@@ -2135,6 +2490,7 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
     case LM_KS_Escape:
         a->msg[0] = 0;
         a->quit_armed = false;
+        a->close_armed = 0;
         a->ay = a->cy;
         a->ax = a->cx;
         return;
@@ -2347,6 +2703,79 @@ static void sb_drag_to(struct app *a, double py)
     a->top = LM_CLAMP(pos * (a->n - 1) / room, 0, LM_MAX(a->n - 1, 0));
 }
 
+/* ---- the tab bar ------------------------------------------------------------------------------------------------------------- */
+
+static int tabs_x(void) { return RAIL_W; }
+static int tabs_w(const struct wlwin *w) { return w->bw - RAIL_W - RIGHT_W; }
+
+static void tab_label(const struct app *a, int i, char *out, size_t n, int maxchars)
+{
+    const char *p = i == a->cur ? a->path : a->tabs[i]->path;
+    const char *base = strrchr(p, '/') ? strrchr(p, '/') + 1 : p;
+    char full[PATH_MAX + 8];
+    snprintf(full, sizeof(full), "%s%s", tab_modified(a, i) ? "* " : "", p[0] ? base : "untitled");
+    size_t chars = 0, bytes = 0;
+    for (const char *q = full; *q; q++)
+        if (((unsigned char)*q & 0xc0) != 0x80)
+            chars++;
+    if ((int)chars <= maxchars) {
+        snprintf(out, n, "%s", full);
+        return;
+    }
+    int keep = LM_MAX(maxchars - 2, 0), seen = 0;                       /* cut on a character boundary and end in ".." */
+    for (; full[bytes]; bytes++) {
+        if (((unsigned char)full[bytes] & 0xc0) != 0x80 && seen++ == keep)
+            break;
+    }
+    snprintf(out, n, "%.*s..", (int)bytes, full);
+}
+
+static void draw_one_tab(struct wlwin *w, const struct app *a, int i, int x, int y, int tw, bool lifted)
+{
+    bool active = i == a->cur, hot = a->thover >= 0 && a->thover / 2 == i;
+    uint32_t bg = active ? lm_theme.terminal_button_on : hot ? lm_theme.control_hot : lm_theme.control;
+    fill_round(w, x, y + 3, tw, WLTABS_H - 3, 8, lifted ? lm_theme.button_hover : bg);
+    if (active)
+        wlwin_fill(w, x + 8, y + WLTABS_H - 3, tw - 16, 2, lm_theme.accent);
+    bool close = tw >= 60 && (active || hot || lifted);
+    char lab[PATH_MAX + 8];
+    int room = (tw - 14 - (close ? WLTABS_CLOSE_W - 6 : 0)) / LM_FONT_W;
+    tab_label(a, i, lab, sizeof(lab), room);
+    wlwin_text(w, x + 8, y + 3 + (WLTABS_H - 3 - LM_FONT_H) / 2, lab, 1, active ? lm_theme.bar_text_bright : lm_theme.bar_text, 0);
+    if (close)
+        wlwin_text(w, x + tw - WLTABS_CLOSE_W + 3, y + 3 + (WLTABS_H - 3 - LM_FONT_H) / 2, "x", 1, a->thover == i * 2 + 1 ? lm_theme.error : lm_theme.muted, 0);
+}
+
+static void paint_tabs(struct wlwin *w, const struct app *a)
+{
+    if (a->ntabs < 2 || g_note)
+        return;
+    int x0 = tabs_x(), y = BTN_H, bw = tabs_w(w), n = a->ntabs, tw = wltabs_tw(bw, n);
+    wlwin_fill(w, x0, y, bw, WLTABS_H, COL_BAR);
+    bool drag = a->tdrag.active && a->tdrag.moved;
+    for (int i = 0; i < n; i++) {
+        if (!(drag && i == a->tdrag.idx))
+            draw_one_tab(w, a, i, wltabs_x(x0, tw, i), y, tw, false);
+        else if (a->tdrag.out)
+            fill_round(w, wltabs_x(x0, tw, i), y + 3, tw, WLTABS_H - 3, 8, lm_theme.control);   /* the empty slot */
+    }
+    int plus = wltabs_plus_x(x0, tw, n);
+    if (plus + WLTABS_PLUS_W <= x0 + bw) {
+        wlwin_drop(w, plus + 2, y + 3, WLTABS_PLUS_W - 4, WLTABS_H - 6, lm_button_radius((WLTABS_H - 6) / 2), a->thover == WLTABS_PLUS ? lm_theme.btn_green_lit : lm_theme.btn_green);
+        wlwin_text(w, plus + (WLTABS_PLUS_W - LM_FONT_W) / 2, y + (WLTABS_H - LM_FONT_H) / 2, "+", 1, lm_theme.on_colour, 0);
+    }
+    if (drag && !a->tdrag.out) {
+        int x = LM_CLAMP((int)(a->tdrag.x - a->tdrag.grab), x0, LM_MAX(x0 + bw - tw, x0));
+        draw_one_tab(w, a, a->tdrag.idx, x, y, tw, true);
+    } else if (drag) {                                                  /* away from the bar: it will be a window of its own */
+        const char *hint = "Let go: open in a new window";
+        int hw = (int)strlen(hint) * LM_FONT_W + 16, hx = LM_CLAMP((int)a->tdrag.x - hw / 2, 2, LM_MAX(w->bw - hw - 2, 2)), hy = LM_CLAMP((int)a->tdrag.y + 14, 2, LM_MAX(w->bh - 26, 2));
+        fill_round(w, hx - 1, hy - 1, hw + 2, 24, 12, lm_theme.menu_border);
+        fill_round(w, hx, hy, hw, 22, 11, lm_theme.accent);
+        wlwin_text(w, hx + 8, hy + 3, hint, 1, lm_theme.ink, 0);
+    }
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
@@ -2369,7 +2798,7 @@ static void paint(struct wlwin *w)
     if (a->preview)
         preview_content(a);                                              /* (under the bars: they are drawn over its ends) */
     if (!g_note && !g_rail)
-        wlwin_fill(w, 0, 0, w->bw, TOP_H, COL_BAR);                     /* the button bar */
+        wlwin_fill(w, 0, 0, w->bw, BTN_H, COL_BAR);                     /* the button bar */
     for (int i = 0; i < (g_note || g_rail ? 0 : N_BTNS); i++) {
         int bx, bwid;
         char tmp[16];
@@ -2380,10 +2809,10 @@ static void paint(struct wlwin *w)
         const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit, lm_theme.btn_orange_lit };
         bool lit = a->hover == i || (i == B_SAVE && a->modified);          /* Save is lit while there is something to save */
         bool idle = (i == B_CUT || i == B_COPY) && !has_sel(a);             /* nothing selected: Cut and Copy have nothing to take */
-        wlwin_drop(w, bx, 2, bwid, TOP_H - 4, lm_button_radius((TOP_H - 4) / 2), idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
+        wlwin_drop(w, bx, 2, bwid, BTN_H - 4, lm_button_radius((BTN_H - 4) / 2), idle ? lm_theme.control_idle : lit ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         int tx = bx + (bwid - (int)strlen(t) * LM_FONT_W) / 2;
-        wlwin_text(w, tx, (TOP_H - LM_FONT_H) / 2, t, 1, idle ? lm_theme.title_text_idle : lm_theme.on_colour, 0);
+        wlwin_text(w, tx, (BTN_H - LM_FONT_H) / 2, t, 1, idle ? lm_theme.title_text_idle : lm_theme.on_colour, 0);
     }
     if (a->preview) {
         preview_scrollbar(a);
@@ -2435,6 +2864,7 @@ static void paint(struct wlwin *w)
 status:;
     if (g_rail && !g_note)
         paint_rail(a);
+    paint_tabs(w, a);
     int sy = w->bh - STATUS_H;
     if (g_note) {
         if (a->msg[0] && now_ms() < a->msg_until) {                     /* a note has no status line: what it has to say comes as a strip over the bottom */
@@ -2540,6 +2970,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->hover = -1;
+        a->thover = -1;
         rails_release(a);
         w->redraw = true;
         break;
@@ -2549,6 +2980,22 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (btn_at(a, a->px, a->py) != a->hover) {
             a->hover = btn_at(a, a->px, a->py);
             w->redraw = true;
+        }
+        if (a->tdrag.active) {                                          /* a tab in the hand: along the bar it changes places, away from it it leaves */
+            int from = a->tdrag.idx, to = wltabs_motion(&a->tdrag, a->px, a->py, tabs_x(), BTN_H, tabs_w(w), a->ntabs);
+            if (to >= 0)
+                tab_move(a, from, to);
+            w->redraw = true;
+            break;
+        }
+        {
+            bool on_x = false;
+            int h = a->ntabs > 1 && !g_note ? wltabs_hit(a->px, a->py, tabs_x(), BTN_H, tabs_w(w), a->ntabs, &on_x) : WLTABS_NONE;
+            int code = h >= 0 ? h * 2 + (on_x ? 1 : 0) : h;
+            if (code != a->thover) {
+                a->thover = code;
+                w->redraw = true;
+            }
         }
         if (a->zmenu_open) {
             int row = zmenu_row_at(a, a->px, a->py);
@@ -2592,6 +3039,31 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (row >= 0 && args[2].u == 272)
                 set_zoom_pct(a, LM_ZOOM_LEVELS[row]);
             zmenu_set(a, false);
+            break;
+        }
+        if (a->tdrag.active && args[2].u == 272 && args[3].u == 0) {    /* the tab is let go */
+            int idx = a->tdrag.idx;
+            if (wltabs_release(&a->tdrag) == WLTABS_DETACH)
+                tab_detach(a, idx);
+            w->redraw = true;
+            break;
+        }
+        if (args[3].u == 1 && !g_note && a->ntabs > 1 && !card_on(a) && a->py >= BTN_H && a->py < BTN_H + WLTABS_H && a->px >= tabs_x() && a->px < tabs_x() + tabs_w(w)) {
+            bool on_x = false;
+            int h = wltabs_hit(a->px, a->py, tabs_x(), BTN_H, tabs_w(w), a->ntabs, &on_x);
+            if (args[2].u == 272) {
+                if (h == WLTABS_PLUS)
+                    tab_new(a);
+                else if (h >= 0 && on_x)
+                    tab_close(a, h);
+                else if (h >= 0) {
+                    tab_switch(a, h);
+                    wltabs_press(&a->tdrag, h, a->px, a->py, tabs_x(), tabs_w(w), a->ntabs);
+                }
+            } else if (args[2].u == 274 && h >= 0) {                    /* BTN_MIDDLE: close */
+                tab_close(a, h);
+            }
+            w->redraw = true;
             break;
         }
         if (args[2].u == 272 && args[3].u == 0)
@@ -2733,7 +3205,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:
-        if (card_on(a)) {
+        if (!g_note && a->ntabs > 1 && a->py >= BTN_H && a->py < BTN_H + WLTABS_H && args[1].u == 0) {       /* the wheel over the tabs changes tab */
+            tab_cycle(a, args[2].f > 0 ? 1 : -1);
+        } else if (card_on(a)) {
             if (card_files(a) && args[1].u == 0)
                 a->ctop = LM_MAX(a->ctop + (args[2].f > 0 ? 3 : -3), 0);
             w->redraw = true;
@@ -2791,9 +3265,10 @@ static bool close_event(struct wlwin *w)
     struct app *a = w->data;
     if (g_note)                                                         /* a note is saved when it is closed (the loop's end does it) */
         return true;
-    if (a->modified && !a->quit_armed) {
+    if (tabs_modified(a) && !a->quit_armed) {
         a->quit_armed = true;
-        msg(a, "Unsaved changes: save first (Ctrl+S), or close again to discard them");
+        msg(a, tabs_modified(a) > 1 ? "%d tabs have unsaved changes: save them (Ctrl+S), or close again to discard them" :
+               "Unsaved changes: save first (Ctrl+S), or close again to discard them", tabs_modified(a));
         return false;
     }
     return true;
@@ -3004,11 +3479,20 @@ int main(int argc, char **argv)
         if (!note_lock(note_file))
             return 0;                                                   /* it is open in a window already */
     }
-    if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-edit [--bar] [FILE | --note FILE | --notes | --selftest]\n");
+    bool adopt = argc == 2 && !strcmp(argv[1], "--adopt");              /* the document of a tab that was dragged out of another window: fd 3 */
+    int first_file = 1;
+    bool bad_args = false;
+    for (int i = 1; i < argc && !adopt; i++)
+        if (argv[i][0] == '-')
+            bad_args = true;
+    if (bad_args || (g_note && argc > 1)) {
+        fprintf(stderr, "usage: mellagui-edit [--bar] [FILE...| --note FILE | --notes | --selftest]\n");
         return 2;
     }
     static struct app a;
+    a.tabs[0] = calloc(1, sizeof(struct docstate));
+    a.ntabs = 1;
+    a.thover = -1;
     doc_clear(&a);
     a.final_nl = true;
     a.hover = -1;
@@ -3036,9 +3520,11 @@ int main(int argc, char **argv)
         note_paper_load(&a);
         a.msg[0] = 0;
     }
-    if (argc == 2) {
+    if (adopt && !adopt_read(&a, 3))
+        fprintf(stderr, "mellagui-edit: the handed over document could not be read\n");
+    for (int i = first_file; i < argc && !adopt; i++) {                 /* every file is a tab */
         char full[PATH_MAX];
-        snprintf(full, sizeof(full), "%s", argv[1]);
+        snprintf(full, sizeof(full), "%s", argv[i]);
         do_open(&a, full);
     }
     set_title(&a);
@@ -3088,6 +3574,7 @@ int main(int argc, char **argv)
         if (a.msg[0] && now_ms() >= a.msg_until) {
             a.msg[0] = 0;
             a.quit_armed = false;                                        /* the question has timed out, too */
+            a.close_armed = 0;
             a.win.redraw = true;
         }
     }

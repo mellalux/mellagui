@@ -1,6 +1,7 @@
 /*
  * The screensaver: start a program after idle time, end it at the first input. See saver.h.
  */
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +29,12 @@ struct lm_saver {
     bool locking;                       /* we are locking the screen right now: the saver stays */
     bool shield;                        /* the lock was made by the saver and it still runs over it */
     bool gone;                          /* the program ended on its own (killed, crashed): no new one before the next input */
+    bool preview;                       /* started by hand (the settings panel's "Show it now"): it gets a moment of grace, the pointer has to travel, it does not lock */
+    double travel;                      /* how far the pointer has moved since it started (preview) */
 };
+
+#define PREVIEW_GRACE_MS 1500           /* a preview ignores all input for this long: the button's release, a hand that is still on the mouse */
+#define PREVIEW_TRAVEL 30.0             /* ... and then pointer motion has to add up to this many pixels to end it */
 
 static uint64_t unit_ms(void)
 {
@@ -105,7 +111,17 @@ bool lm_saver_start(struct lm_saver *s)
     s->gone = false;
     s->started = lm_now_ms();
     s->shield = false;
+    s->preview = false;
+    s->travel = 0.0;
     lm_info("screensaver started (pid %d)", (int)pid);
+    return true;
+}
+
+bool lm_saver_start_preview(struct lm_saver *s)
+{
+    if (!lm_saver_start(s))
+        return false;
+    s->preview = true;
     return true;
 }
 
@@ -121,13 +137,22 @@ void lm_saver_stop(struct lm_saver *s)
     drop_shield(s);
 }
 
-bool lm_saver_activity(struct lm_saver *s)
+bool lm_saver_activity(struct lm_saver *s, const struct lm_input_event *ev)
 {
     if (!s)
         return false;
     s->last_activity = lm_now_ms();
     reap_if_gone(s);
     s->gone = false;                                           /* someone is here again: it may start after the next idle period */
+    if (s->pid > 0 && s->preview && ev) {                      /* a preview shown by hand: it must not vanish at the click that started it */
+        if (lm_now_ms() - s->started < PREVIEW_GRACE_MS)
+            return true;                                       /* (swallowed: the settings panel under it must not see the button's release) */
+        if (ev->type == LM_INPUT_POINTER_MOTION || ev->type == LM_INPUT_POINTER_MOTION_ABS) {
+            s->travel += ev->type == LM_INPUT_POINTER_MOTION ? fabs(ev->u.motion.dx) + fabs(ev->u.motion.dy) : 40.0;
+            if (s->travel < PREVIEW_TRAVEL)
+                return true;
+        }
+    }
     if (s->pid > 0) {
         lm_saver_stop(s);
         return true;                                           /* this event only woke the screen up */
@@ -156,7 +181,7 @@ static void tick_cb(void *data)
     struct lm_saver *s = data;
     struct lm_config *cfg = &s->srv->config;
     reap_if_gone(s);
-    if (s->pid > 0 && cfg->saver_lock_min > 0 && !s->shield && s->srv->lock && !lm_lock_active(s->srv->lock) &&
+    if (s->pid > 0 && !s->preview && cfg->saver_lock_min > 0 && !s->shield && s->srv->lock && !lm_lock_active(s->srv->lock) &&
         lm_lock_configured(s->srv->lock) && lm_now_ms() - s->started >= (uint64_t)cfg->saver_lock_min * unit_ms()) {
         s->locking = true;                                     /* it has run long enough: lock the screen, but keep it running */
         lm_lock_now(s->srv->lock);

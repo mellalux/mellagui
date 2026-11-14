@@ -2058,7 +2058,7 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
     if (!seat || !ev || seat->dying)
         return;
     bool woke = seat->srv->lock && lm_lock_activity(seat->srv->lock);          /* it only woke the monitors from standby */
-    bool ended = seat->srv->saver && lm_saver_activity(seat->srv->saver);      /* it only ended the screensaver */
+    bool ended = seat->srv->saver && lm_saver_activity(seat->srv->saver, ev);      /* it only ended the screensaver */
     bool lit = seat->srv->screenoff && lm_screenoff_wake(seat->srv->screenoff);   /* it only woke the monitors (the saver's standby, or a fade that had begun) */
     if (woke || ended || lit)
         return;

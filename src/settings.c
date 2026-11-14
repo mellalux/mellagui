@@ -1945,7 +1945,7 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
     case K_SAVER_NOW:                                   /* "1": start the screensaver now (a preview), "0": end it */
         if (!srv->saver || !parse_bool(val, &b)) return false;
         if (b)
-            return lm_saver_start(srv->saver);
+            return lm_saver_start_preview(srv->saver);
         lm_saver_stop(srv->saver);
         return true;
     case K_GADGET:

@@ -20,6 +20,8 @@
 
 #include <stdbool.h>
 
+#include "input.h"
+
 struct lm_server;
 struct lm_saver;
 struct lm_config;
@@ -33,7 +35,7 @@ struct lm_saver *lm_saver_create(struct lm_server *srv);
 void lm_saver_destroy(struct lm_saver *s);
 
 /* Any input event. Returns true when it only ended the screensaver (the seat then drops the event). */
-bool lm_saver_activity(struct lm_saver *s);
+bool lm_saver_activity(struct lm_saver *s, const struct lm_input_event *ev);
 /* The screen was locked / unlocked. */
 void lm_saver_locked(struct lm_saver *s, bool locked);
 
@@ -42,6 +44,9 @@ bool lm_saver_shields(const struct lm_saver *s);
 
 /* Start it now (settings `saver-now`, control socket `saver start`); false when it runs already or there is no command. */
 bool lm_saver_start(struct lm_saver *s);
+/* Start it as a PREVIEW (the settings panel's "Show it now"): for 1.5 s no input ends it (the button's release, a hand still on the mouse), then a key or button
+ * ends it at once and the pointer has to travel about 30 pixels; it does not lock the screen. */
+bool lm_saver_start_preview(struct lm_saver *s);
 /* End it (no-op when it does not run). */
 void lm_saver_stop(struct lm_saver *s);
 bool lm_saver_running(const struct lm_saver *s);

@@ -14882,6 +14882,28 @@ class TestSaver(Base):
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
         self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0'})
 
+    def test_a_preview_started_by_hand_survives_the_click_and_a_shaking_hand(self):
+        p, c = self.start('mellagui-sv14', '--config', 'none', '--size', '800x500')
+        c.cmd('settings saver-now 1')                                      # "Show it now" in the settings panel
+        self.wait(lambda: self.saver(c)['running'] == '1', 'the preview starts')
+        c.button(272, False)                                               # the release of the click that pressed the button
+        c.cmd('motion 4 3')                                                # a hand that is still on the mouse
+        c.tap(KEY_A)
+        time.sleep(0.3)
+        self.assertEqual(self.saver(c)['running'], '1', 'in the first moments nothing ends a preview')
+        time.sleep(1.5)                                                    # (the grace is over)
+        c.cmd('motion 5 4')
+        c.cmd('motion -3 2')                                               # a bump of the desk
+        time.sleep(0.2)
+        self.assertEqual(self.saver(c)['running'], '1', 'a few pixels of movement do not end it')
+        c.cmd('motion 40 30')                                              # really moving the mouse
+        self.wait(lambda: self.saver(c)['running'] == '0', 'a real movement ends it')
+        c.cmd('settings saver-now 1')
+        self.wait(lambda: self.saver(c)['running'] == '1', 'it starts again')
+        time.sleep(1.8)
+        c.tap(KEY_A)                                                       # a key ends it at once
+        self.wait(lambda: self.saver(c)['running'] == '0', 'a key ends the preview')
+
     def test_tom_meows_only_when_asked_and_the_meow_is_made_in_code(self):
         d = os.path.join(tmp, 'sv-meow')
         shutil.rmtree(d, ignore_errors=True)

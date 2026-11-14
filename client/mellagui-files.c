@@ -64,6 +64,7 @@
 #include "util.h"
 #include "initree.h"
 #include "json.h"
+#include "sqliteread.h"
 #include "syntax.h"
 #include "tomltree.h"
 #include "xmltree.h"
@@ -149,6 +150,10 @@ struct preview {
     char info[160];
     char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
     int nlines;
+    char **dbname;                      /* PV_TABLE of a SQLite file: the tables, the one shown (`dbtab`), and the strip of names above it (`tabrows` lines) */
+    uint32_t *dbroot;
+    char **dbsql;
+    int ndb, dbtab, tabrows;
     struct json *jroot;                 /* PV_JSON: the tree, its nodes in document order (`jr`) and the rows shown (`jvis`: indexes into `jr`, one per line) */
     struct jrow *jr;
     int njr;
@@ -2074,6 +2079,8 @@ static struct job *job_new(enum job_kind kind, int max_items)
 
 /* ---- the preview -------------------------------------------------------------------------------------------------------- */
 
+static void db_forget(struct preview *pv);
+
 static void preview_clear(struct preview *pv)
 {
     for (int i = 0; i < pv->nlines; i++)
@@ -2088,6 +2095,7 @@ static void preview_clear(struct preview *pv)
     pv->left = 0;
     json_free(pv->jroot);
     pv->jroot = NULL;
+    db_forget(pv);
     free(pv->jr);
     pv->jr = NULL;
     pv->njr = 0;
@@ -2329,18 +2337,14 @@ static void csv_put_cell(struct str_buf *o, const char *s, int w, bool right)
 
 /* The rows as lines of text: columns padded to their widest cell, a bar between them, a rule under the header. The paint draws the header and the bars in
  * their own colours. False when it is no table (one column: a file that only has the extension). */
-static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, char delim, bool cut)
+static bool pv_table_build(struct preview *pv, const struct csv *tp, int min_cols, int *capp)
 {
-    struct csv t;
-    if (!csv_parse(&t, buf, n, delim, cut))
-        return false;
+    const struct csv t = *tp;
     int nc = 0;
     for (int r = 0; r < t.nrow; r++)
         nc = LM_MAX(nc, t.ncol[r]);
-    if (nc < 2) {
-        csv_free(&t);
+    if (nc < min_cols)
         return false;
-    }
     int w[CSV_MAX_COLS] = { 0 };
     bool num[CSV_MAX_COLS];
     for (int c = 0; c < nc; c++) {
@@ -2353,7 +2357,6 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
         }
         w[c] = LM_MAX(w[c], 1);
     }
-    int cap = 0;
     for (int r = 0; r < t.nrow; r++) {
         struct str_buf o = { 0 };
         for (int c = 0; c < nc; c++) {
@@ -2363,7 +2366,7 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
             csv_put_cell(&o, c < t.ncol[r] ? t.row[r][c] : "", w[c], num[c] && r > 0);
             sb_add(&o, " ", 1);
         }
-        pv_line(pv, &cap, o.s ? o.s : "", o.n);
+        pv_line(pv, capp, o.s ? o.s : "", o.n);
         free(o.s);
         if (r == 0 && t.nrow > 1) {                                       /* the rule: ───┼─── */
             struct str_buf o2 = { 0 };
@@ -2373,13 +2376,244 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
                 for (int k = 0; k < w[c] + 2; k++)
                     sb_add(&o2, "\xe2\x94\x80", 3);                    /* ─ */
             }
-            pv_line(pv, &cap, o2.s, o2.n);
+            pv_line(pv, capp, o2.s, o2.n);
             free(o2.s);
         }
     }
     pv->tcols = nc;
     pv->trows = t.nrow - 1;
+    return true;
+}
+
+static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, char delim, bool cut)
+{
+    struct csv t;
+    if (!csv_parse(&t, buf, n, delim, cut))
+        return false;
+    int cap = 0;
+    bool ok = pv_table_build(pv, &t, 2, &cap);
     csv_free(&t);
+    return ok;
+}
+
+/* ---- a SQLite database: its tables, the rows of one as a table ---- */
+#define DB_MAX_TABLES 64
+#define DB_MAX_ROWS 2000
+
+static void db_forget(struct preview *pv)
+{
+    for (int i = 0; i < pv->ndb; i++) {
+        free(pv->dbname[i]);
+        free(pv->dbsql[i]);
+    }
+    free(pv->dbname);
+    free(pv->dbsql);
+    free(pv->dbroot);
+    pv->dbname = NULL;
+    pv->dbsql = NULL;
+    pv->dbroot = NULL;
+    pv->ndb = 0;
+    pv->tabrows = 0;
+}
+
+static bool db_schema_cb(void *u, int64_t rid, const uint8_t *rec, size_t len)
+{
+    (void)rid;
+    struct preview *pv = u;
+    struct sq_val v[5];
+    if (pv->ndb >= DB_MAX_TABLES || sq_record(rec, len, v, 5) < 5)
+        return true;
+    if (v[0].type != SQ_TEXT || v[0].n != 5 || memcmp(v[0].p, "table", 5) || v[1].type != SQ_TEXT || v[3].type != SQ_INT || v[3].i < 1)
+        return true;
+    if (v[1].n >= 7 && !memcmp(v[1].p, "sqlite_", 7))
+        return true;
+    pv->dbname = realloc(pv->dbname, (size_t)(pv->ndb + 1) * sizeof(char *));
+    pv->dbsql = realloc(pv->dbsql, (size_t)(pv->ndb + 1) * sizeof(char *));
+    pv->dbroot = realloc(pv->dbroot, (size_t)(pv->ndb + 1) * sizeof(uint32_t));
+    pv->dbname[pv->ndb] = strndup((const char *)v[1].p, v[1].n);
+    pv->dbsql[pv->ndb] = v[4].type == SQ_TEXT ? strndup((const char *)v[4].p, v[4].n) : strdup("");
+    pv->dbroot[pv->ndb] = (uint32_t)v[3].i;
+    pv->ndb++;
+    return true;
+}
+
+/* The column names of a CREATE TABLE statement (the first words of the definitions between the outer brackets), and which one is an INTEGER PRIMARY KEY
+ * (its value is the rowid, the record holds NULL there). Returns the number of names. */
+static int db_columns(const char *sql, char names[][64], int max, int *ipk)
+{
+    *ipk = -1;
+    const char *p = strchr(sql, '(');
+    if (!p)
+        return 0;
+    p++;
+    int n = 0;
+    while (*p && n < max) {
+        while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r') p++;
+        const char *ds = p;
+        int depth = 0;
+        char q = 0;
+        for (; *p; p++) {                                               /* up to the comma that ends this definition */
+            if (q) { if (*p == q) q = 0; continue; }
+            if (*p == '"' || *p == '\'' || *p == '`') q = *p;
+            else if (*p == '[') q = ']';
+            else if (*p == '(') depth++;
+            else if (*p == ')') { if (depth == 0) break; depth--; }
+            else if (*p == ',' && depth == 0) break;
+        }
+        const char *de = p;
+        if (de == ds)
+            break;
+        static const char *const stop[] = { "constraint", "primary", "unique", "check", "foreign" };
+        bool is_con = false;
+        for (size_t k = 0; k < sizeof(stop) / sizeof(stop[0]); k++)
+            if (!strncasecmp(ds, stop[k], strlen(stop[k])) && !isalnum((unsigned char)ds[strlen(stop[k])]))
+                is_con = true;
+        if (is_con)
+            break;
+        const char *ns = ds, *ne;
+        if (*ds == '"' || *ds == '`' || *ds == '\'' || *ds == '[') {
+            char cl = *ds == '[' ? ']' : *ds;
+            ns = ds + 1;
+            ne = memchr(ns, cl, (size_t)(de - ns));
+            if (!ne) ne = de;
+            ds = ne < de ? ne + 1 : de;
+        } else {
+            ne = ns;
+            while (ne < de && *ne != ' ' && *ne != '\t' && *ne != '\n') ne++;
+            ds = ne;
+        }
+        snprintf(names[n], 64, "%.*s", (int)(ne - ns < 63 ? ne - ns : 63), ns);
+        while (ds < de && (*ds == ' ' || *ds == '\t' || *ds == '\n')) ds++;
+        if (de - ds >= 7 && !strncasecmp(ds, "integer", 7) && (ds[7] == ' ' || ds + 7 >= de || ds[7] == '\n')) {
+            for (const char *k = ds; k + 11 <= de; k++)
+                if (!strncasecmp(k, "primary key", 11)) {
+                    *ipk = n;
+                    break;
+                }
+        }
+        n++;
+        if (*p == ',') p++;
+        else break;
+    }
+    return n;
+}
+
+struct dbrows {
+    struct csv *t;
+    int ncols, ipk;
+};
+
+static void csv_push(struct csv *t, char **f, int n)
+{
+    if (t->nrow == t->cap) {
+        t->cap = t->cap ? t->cap * 2 : 64;
+        t->row = realloc(t->row, (size_t)t->cap * sizeof(*t->row));
+        t->ncol = realloc(t->ncol, (size_t)t->cap * sizeof(int));
+    }
+    t->row[t->nrow] = f;
+    t->ncol[t->nrow++] = n;
+}
+
+static bool db_rows_cb(void *u, int64_t rid, const uint8_t *rec, size_t len)
+{
+    struct dbrows *d = u;
+    struct sq_val v[CSV_MAX_COLS];
+    int n = sq_record(rec, len, v, CSV_MAX_COLS);
+    if (n < 0)
+        return true;
+    int nc = d->ncols;
+    char **f = calloc((size_t)nc, sizeof(char *));
+    if (!f)
+        return false;
+    for (int c = 0; c < nc; c++) {
+        char b[256];
+        if (c == d->ipk) {
+            snprintf(b, sizeof(b), "%lld", (long long)rid);
+        } else if (c >= n || c >= CSV_MAX_COLS) {
+            b[0] = 0;
+        } else if (v[c].type == SQ_INT) {
+            snprintf(b, sizeof(b), "%lld", (long long)v[c].i);
+        } else if (v[c].type == SQ_FLOAT) {
+            snprintf(b, sizeof(b), "%.15g", v[c].f);
+        } else if (v[c].type == SQ_BLOB) {
+            snprintf(b, sizeof(b), "<blob %zu>", v[c].n);
+        } else if (v[c].type == SQ_TEXT) {
+            size_t k = v[c].n < 200 ? v[c].n : 200;
+            memcpy(b, v[c].p, k);
+            b[k] = 0;
+            for (size_t i = 0; i < k; i++)
+                if ((unsigned char)b[i] < 0x20) b[i] = ' ';
+        } else {
+            b[0] = 0;                                                   /* NULL: an empty cell */
+        }
+        f[c] = strdup(b);
+    }
+    csv_push(d->t, f, nc);
+    return true;
+}
+
+/* A SQLite file: the strip of table names (one line) and the first rows of table `tab` as a table. True when the file was a SQLite file (then `kind` is set:
+ * a table, or an error line for text this reader cannot read). */
+static bool pv_sqlite(struct preview *pv, const char *path, int tab)
+{
+    struct sq q;
+    int r = sq_open(&q, path);
+    if (r == -1)
+        return false;
+    int cap = 0;
+    for (int i = 0; i < pv->nlines; i++)
+        free(pv->lines[i]);
+    pv->nlines = 0;
+    free(pv->lines);
+    pv->lines = NULL;
+    db_forget(pv);
+    pv->top = pv->left = 0;
+    if (r == -2) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "A SQLite database with UTF-16 text: not shown.");
+        return true;
+    }
+    sq_scan(&q, 1, 500, db_schema_cb, pv);
+    if (pv->ndb == 0) {
+        sq_close(&q);
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "A SQLite database with no tables.");
+        return true;
+    }
+    pv->dbtab = LM_CLAMP(tab, 0, pv->ndb - 1);
+    char names[CSV_MAX_COLS][64];
+    int ipk, nc = db_columns(pv->dbsql[pv->dbtab], names, CSV_MAX_COLS, &ipk);
+    struct csv t = { 0 };
+    char **hdr = calloc((size_t)(nc > 0 ? nc : 1), sizeof(char *));
+    for (int c = 0; c < nc; c++)
+        hdr[c] = strdup(names[c]);
+    struct dbrows d = { &t, nc, ipk };
+    if (nc > 0)
+        csv_push(&t, hdr, nc);
+    else
+        free(hdr);
+    int rows = nc > 0 ? sq_scan(&q, pv->dbroot[pv->dbtab], DB_MAX_ROWS, db_rows_cb, &d) : 0;
+    sq_close(&q);
+    struct str_buf strip = { 0 };                                       /* the line of table names (it is painted from the names; the text is for the dump) */
+    for (int i = 0; i < pv->ndb; i++) {
+        sb_add(&strip, " ", 1);
+        sb_add(&strip, pv->dbname[i], strlen(pv->dbname[i]));
+        sb_add(&strip, " ", 1);
+    }
+    pv_line(pv, &cap, strip.s, strip.n);
+    free(strip.s);
+    pv->tabrows = 1;
+    pv->kind = PV_TABLE;
+    if (nc < 1 || !pv_table_build(pv, &t, 1, &cap)) {
+        pv_linef(pv, &cap, "(a table this reader cannot show: WITHOUT ROWID, virtual)");
+        pv->tcols = pv->trows = 0;
+    } else if (rows == 0) {
+        pv_linef(pv, &cap, "(no rows)");
+    } else if (rows >= DB_MAX_ROWS) {
+        pv_linef(pv, &cap, "... the first %d rows", DB_MAX_ROWS);
+    }
+    csv_free(&t);
+    snprintf(pv->info, sizeof(pv->info), "SQLite, %d table%s, table %d: %s", pv->ndb, pv->ndb == 1 ? "" : "s", pv->dbtab + 1, pv->dbname[pv->dbtab]);
     return true;
 }
 
@@ -2656,7 +2890,9 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv_linef(pv, &cap, "cannot read: %s", strerror(errno));
         return;
     }
-    if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
+    if (n >= 100 && !memcmp(buf, "SQLite format 3\0", 16) && (pv_sqlite(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
+        /* a SQLite database: the strip of tables and the rows of the first one */
+    } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);
     } else if (is_markdown_path(path) && (off_t)n >= st.st_size) {         /* a Markdown file is shown as a page (the whole file, up to what the preview reads) */
@@ -3975,6 +4211,32 @@ static void scroll_preview(struct app *a, int lines)
     a->win.redraw = true;
 }
 
+/* Which name of the strip of SQLite tables lies at `px` (counted from the pane's text start); -1 for none. */
+static int db_tab_at(const struct preview *pv, int px, int *x0, int *w0)
+{
+    int x = 0;
+    for (int i = 0; i < pv->ndb; i++) {
+        int w = (utf8_len(pv->dbname[i]) + 2) * LM_FONT_W;
+        if (px >= x && px < x + w) {
+            if (x0) *x0 = x;
+            if (w0) *w0 = w;
+            return i;
+        }
+        x += w;
+    }
+    return -1;
+}
+
+/* Another table of the SQLite file (Ctrl+Left / Right, a click on its name): its rows are read again. */
+static void db_switch_to(struct app *a, int tab)
+{
+    struct preview *pv = &a->pv;
+    if (tab < 0 || tab >= pv->ndb || tab == pv->dbtab)
+        return;
+    pv_sqlite(pv, pv->want, tab);
+    a->win.redraw = true;
+}
+
 /* A wide table: `dx` characters sideways (never beyond its widest row). */
 static void scroll_table_x(struct app *a, int dx)
 {
@@ -3996,6 +4258,10 @@ static void handle_key(struct app *a, uint32_t ks)
         if (ks < 0xffe1 || ks > 0xffee)
             a->help = false;
         a->win.redraw = true;
+        return;
+    }
+    if (ctrl && a->preview && a->pv.kind == PV_TABLE && a->pv.ndb > 1 && (ks == LM_KS_Left || ks == LM_KS_Right)) {      /* a SQLite file: the next / the previous table */
+        db_switch_to(a, a->pv.dbtab + (ks == LM_KS_Right ? 1 : -1));
         return;
     }
     if (a->prompt == P_NONE && ks == LM_KS_Escape && a->job) {          /* Esc stops a running copy / move / delete */
@@ -4934,6 +5200,10 @@ static void preview_click(struct app *a, int idx, int x, int y, uint32_t time_ms
         a->win.redraw = true;
         return;
     }
+    if (pv->kind == PV_TABLE && pv->tabrows && pv->top == 0 && y >= list_top() + 2 && y < list_top() + 2 + LM_FONT_H && x < x0 + pw - lm_metrics.scrollbar_width) {
+        db_switch_to(a, db_tab_at(pv, x - (x0 + 8), NULL, NULL));                  /* a name in the strip of tables */
+        return;
+    }
     if (pv->kind == PV_JSON && y >= list_top() + 2 && x < x0 + pw - lm_metrics.scrollbar_width) {        /* a row of the tree opens or closes */
         json_toggle(pv, pv->top + (y - list_top() - 2) / LM_FONT_H);
         a->win.redraw = true;
@@ -5000,6 +5270,8 @@ static void files_dump(struct app *a)
     }
     if (pv->kind == PV_TABLE)
         fprintf(f, "table cols=%d rows=%d left=%d\n", pv->tcols, pv->trows, pv->left);
+    if (pv->kind == PV_TABLE && pv->ndb)
+        fprintf(f, "db tables=%d tab=%d name=%s\n", pv->ndb, pv->dbtab, pv->dbname[pv->dbtab]);
     if (pv->kind == PV_MARKDOWN && pv->md)
         fprintf(f, "md height=%d width=%d headings=%d links=%d\n", md_height(pv->md), md_width(pv->md), md_count(pv->md, MD_N_HEADINGS), md_count(pv->md, MD_N_LINKS));
     if (pv->kind == PV_AUDIO) {
@@ -5062,6 +5334,19 @@ static void paint_markdown(struct wlwin *w, struct app *a, int x0, int pw, int l
     md_paint(w, pv->md, x0 + (pw - sbw - cw) / 2, list_y, cw, body_h, pv->top);
     pv_header(w, a, x0, pw, list_y);
     pv_scrollbar(w, a, x0, pw, list_y, body_h);
+}
+
+/* The strip of table names above a SQLite table: the shown one on a lit drop (paint_db_tabs). */
+static void paint_db_tabs(struct wlwin *w, int x, int y, const struct preview *pv, int max_w)
+{
+    int px = 0;
+    for (int i = 0; i < pv->ndb && px < max_w; i++) {
+        int tw = (utf8_len(pv->dbname[i]) + 2) * LM_FONT_W;
+        if (i == pv->dbtab)
+            wlwin_round_fill(w, x + px, y, tw, LM_FONT_H, 6, COL_SEL);
+        wlwin_text_cells(w, x + px + LM_FONT_W, y, pv->dbname[i], 1, i == pv->dbtab ? COL_DIR : COL_DIM, max_w - px - LM_FONT_W);
+        px += tw;
+    }
 }
 
 /* One row of a table: the text in cells, the bars and the rule in a dim colour, the header in the accent colour, every other data row on a faint band. */
@@ -5232,8 +5517,11 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
             wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
         else if (pv->kind == PV_JSON && pv->jvis)
             paint_json_row(w, x0 + 8, list_y + 2 + r * LM_FONT_H, &pv->jr[pv->jvis[pv->top + r]], pw - 16);
+        else if (pv->kind == PV_TABLE && pv->top + r < pv->tabrows)
+            paint_db_tabs(w, x0 + 8, list_y + 2 + r * LM_FONT_H, pv, pw - 16);
         else if (pv->kind == PV_TABLE && pv->top + r < pv->nlines)
-            paint_table_row(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->left, pv->top + r == 0, pv->top + r >= 2 && (pv->top + r) % 2 == 1, pw - 16);
+            paint_table_row(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->left, pv->top + r == pv->tabrows,
+                            pv->top + r - pv->tabrows >= 2 && (pv->top + r - pv->tabrows) % 2 == 1, pw - 16);
         else if (pv->kind == PV_TEXT && pv->lang && pv->hl_st && strlen(s) < 4000)
             paint_code_line(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->lang, pv->hl_st[pv->top + r], pw - 16);
         else                                                            /* what is in a file: cells, as an editor shows it */

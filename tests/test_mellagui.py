@@ -2989,6 +2989,40 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_a_sqlite_database_as_a_table(self):
+        import sqlite3
+        d = tempfile.mkdtemp(prefix='files-db-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        db = sqlite3.connect(os.path.join(d, 'a.db'))
+        db.execute('create table users(id integer primary key, name text, age int, note text)')
+        db.executemany('insert into users(name, age, note) values(?, ?, ?)', [('n%d' % i, i, 'x' * 30 * i if i % 7 == 0 else None) for i in range(1, 400)])
+        db.execute("insert into users(name, note) values('big', ?)", ('L' * 20000,))              # a row with an overflow chain
+        db.execute('create table posts(a, b)')
+        db.execute("insert into posts values(1, 'two')")
+        db.execute('create table kv(k text primary key, v) without rowid')
+        db.commit()
+        db.close()
+        with open(os.path.join(d, 'b.db'), 'wb') as f:
+            f.write(b'not a database\0\1\2')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.db)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['db']['tables'], extra['db']['tab'], extra['db']['name']), ('3', '0', 'users'))
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('4', '400'))   # the columns come from CREATE TABLE, the id is the rowid
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(self.K_RIGHT)                                                          # Ctrl+Right: the next table
+        ctl.key(KEY_LEFTCTRL, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '1')
+        self.assertEqual((extra['db']['name'], extra['table']['cols'], extra['table']['rows']), ('posts', '2', '1'))
+        ctl.click(win['x'] + 466 + 8 + 20, win['y'] + 30 + 22 + 8)                     # a click on the first name of the strip: users again
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '0')
+        self.assertEqual(extra['db']['name'], 'users')
+        ctl.tap(self.K_DOWN)                                                           # b.db is no database: hex
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
+        self.assertEqual(head['kind'], 'hex')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

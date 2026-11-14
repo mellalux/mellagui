@@ -2910,6 +2910,28 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_a_yaml_file_as_a_tree(self):
+        d = tempfile.mkdtemp(prefix='files-yaml-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.yaml'), 'w') as f:
+            f.write('# config\nname: x\ntags:\n  - a\n  - b\ndeep:\n  k:\n    z: 1\ntext: |\n  one\n  two\nn: 2\n')
+        with open(os.path.join(d, 'b.yml'), 'w') as f:
+            f.write('just some words\nand more\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.yaml)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json')
+        self.assertEqual(head['kind'], 'json')                                         # the same tree as for JSON
+        self.assertEqual((extra['json']['nodes'], extra['json']['shown']), ('10', '9'))  # a block scalar is one value; the mapping inside deep is closed
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(self.SHIFT, True)
+        ctl.tap(self.K_RIGHT)
+        ctl.key(self.SHIFT, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '10')
+        self.assertEqual(extra['json']['shown'], '10')
+        ctl.tap(self.K_DOWN)                                                           # b.yml is no mapping or list: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

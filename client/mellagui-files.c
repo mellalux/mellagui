@@ -64,6 +64,7 @@
 #include "util.h"
 #include "json.h"
 #include "syntax.h"
+#include "yamltree.h"
 #include "wlcard.h"
 #include "wlrail.h"
 #include "wlclip.h"
@@ -2471,15 +2472,15 @@ static void json_rebuild(struct preview *pv)
     }
 }
 
-/* A .json file whole in the buffer: a tree, the first levels open. False when it is no JSON, or only a number / a word (then it is plain text). */
-static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n)
+/* A .json (or, with `yaml`, a .yaml) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
+static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, bool yaml)
 {
     char *text = malloc(n + 1);
     if (!text)
         return false;
     memcpy(text, buf, n);
     text[n] = 0;
-    struct json *root = json_parse(text);
+    struct json *root = yaml ? yaml_parse(text) : json_parse(text);
     free(text);
     if (!root || !json_container(root)) {
         json_free(root);
@@ -2640,8 +2641,10 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_MARKDOWN;
         pv->md = md_parse((const char *)buf, (size_t)n);
         pv->top = 0;
-    } else if ((ext_is(path, "json") || ext_is(path, "geojson") || ext_is(path, "webmanifest")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n)) {
+    } else if ((ext_is(path, "json") || ext_is(path, "geojson") || ext_is(path, "webmanifest")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, false)) {
         pv->kind = PV_JSON;                                              /* a tree: click a row to open or close it */
+    } else if ((ext_is(path, "yaml") || ext_is(path, "yml")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, true)) {
+        pv->kind = PV_JSON;                                              /* YAML is read into the same kind of tree */
     } else if ((ext_is(path, "csv") || ext_is(path, "tsv")) && pv_table(pv, buf, (size_t)n, ext_is(path, "tsv") ? '\t' : csv_delim(buf, (size_t)n), (off_t)n < st.st_size)) {
         pv->kind = PV_TABLE;                                             /* a table: the rows, ready to paint */
         if ((off_t)n < st.st_size)
@@ -6099,6 +6102,14 @@ static int selftest(void)
     CHECK(pv.nlines == 1, "a closed root shows one line (%d)", pv.nlines);
     json_all(&pv, true);
     CHECK(pv.nlines == 10, "everything open: %d lines", pv.nlines);
+    touch(dir, "t.yaml", "a:\n  - 1\n  - b: [x, y]\nc:\n  d:\n    e: 1\nf: null\n", 48);
+    snprintf(p, sizeof(p), "%s/t.yaml", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_JSON && pv.njr == 11 && pv.nlines == 7, "yaml preview: kind %d, %d nodes, %d lines", pv.kind, pv.njr, pv.nlines);
+    touch(dir, "plain.yml", "just some words\nand more\n", 25);
+    snprintf(p, sizeof(p), "%s/plain.yml", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a .yml that is no mapping or list is plain text");
     touch(dir, "bad.json", "{\"a\":", 5);
     snprintf(p, sizeof(p), "%s/bad.json", dir);
     preview_load(&pv, p, false);

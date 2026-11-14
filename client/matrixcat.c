@@ -9,6 +9,10 @@
 #define SHELL 0.018f                    /* how far the loose letters of the fluffy edge reach beyond the surface */
 #define SEG_S 6.0f                      /* the head's script: one action every 6 seconds (a little late, a little different) */
 #define WALK_SPEED 0.28f                /* metres a second */
+#define RUN_SPEED 1.00f                 /* ... and when he runs */
+#define LEAP_T 0.95f                    /* a leap in the middle of a run: how long it lasts, s ... */
+#define LEAP_H 0.30f                    /* ... and how high it goes, metres */
+#define JUMP_H 0.38f                    /* how high a hop goes, metres */
 #define STRIDE 0.30f                    /* one gait cycle moves the body this far (the cat's own metres) */
 
 enum { P_BODY, P_BELLY, P_PAW, P_TAIL, P_SKULL, P_MUZZLE, P_EAR, P_NOSE };
@@ -96,13 +100,13 @@ static const struct legdef k_hind = { true,
 
 /* ---- Tom's day: a timeline of what he does ------------------------------------------------------------------------------------------- */
 
-enum { K_SIT, K_STAND, K_WALK, K_SITDOWN, K_LIE };
+enum { K_SIT, K_STAND, K_WALK, K_SITDOWN, K_LIE, K_RUN, K_JUMP };
 struct seg { int kind, a, b; float dur; };
 
 #define N_SPOTS 2
 static const float k_spot[N_SPOTS][3] = { { 1.20f, 4.70f, 3.167f }, { -1.20f, 4.75f, 3.163f } };      /* x, z, the way he faces there (towards the camera: where the paths need the least turning) */
 
-static struct seg g_seg[16];
+static struct seg g_seg[32];
 static int g_nseg;
 static float g_cycle;
 
@@ -128,11 +132,12 @@ static void bez_point(int a, int b, float u, float *x, float *z, float *dx, floa
 #define TURN_RATE 0.42f                 /* radians a second, at most */
 #define V_MIN 0.10f                     /* metres a second, at least (while he moves) */
 struct pathtab { float arc, dur, s[PT_N + 1], t[PT_N + 1], v[PT_N + 1], u[PT_N + 1]; };
-static struct pathtab g_path[N_SPOTS][N_SPOTS];
+static struct pathtab g_path[2][N_SPOTS][N_SPOTS];             /* [0] walking, [1] running */
 
-static void path_build(int a, int b)
+static void path_build(int a, int b, int run)
 {
-    struct pathtab *pt = &g_path[a][b];
+    struct pathtab *pt = &g_path[run][a][b];
+    float vmax = run ? RUN_SPEED : WALK_SPEED, rate = run ? 0.85f : TURN_RATE, vmin = run ? 0.12f : V_MIN;
     float psi[PT_N + 1], x, z, dx, dz, px = 0, pz = 0;
     for (int i = 0; i <= PT_N; i++) {
         pt->u[i] = (float)i / (float)PT_N;
@@ -148,7 +153,7 @@ static void path_build(int a, int b)
         float d = psi[i1] - psi[i0];
         d = fmodf(d + 3.0f * 3.14159265f, 2.0f * 3.14159265f) - 3.14159265f;
         float kappa = fabsf(d) / fmaxf(pt->s[i1] - pt->s[i0], 1e-4f);
-        float v = clampf(TURN_RATE / fmaxf(kappa, 1e-3f), V_MIN, WALK_SPEED), f = pt->s[i] / pt->arc;
+        float v = clampf(rate / fmaxf(kappa, 1e-3f), vmin, vmax), f = pt->s[i] / pt->arc;
         v *= 0.3f + 0.7f * sstep(0.0f, 0.12f, f) * sstep(0.0f, 0.12f, 1.0f - f);       /* slow at the ends */
         pt->v[i] = fmaxf(v, 0.04f);
     }
@@ -159,9 +164,9 @@ static void path_build(int a, int b)
 }
 
 /* Where he is `tau` seconds into a walk: the arc walked, the curve's parameter and the speed. */
-static void path_at(int a, int b, float tau, float *arc, float *u, float *speed)
+static void path_at(int a, int b, int run, float tau, float *arc, float *u, float *speed)
 {
-    const struct pathtab *pt = &g_path[a][b];
+    const struct pathtab *pt = &g_path[run][a][b];
     int i = 0;
     while (i < PT_N - 1 && pt->t[i + 1] <= tau)
         i++;
@@ -175,12 +180,19 @@ static void timeline_build(void)
 {
     if (g_nseg)
         return;
-    path_build(0, 1);
-    path_build(1, 0);
-    float ab = g_path[0][1].dur, ba = g_path[1][0].dur;
+    for (int run = 0; run < 2; run++) {
+        path_build(0, 1, run);
+        path_build(1, 0, run);
+    }
+    float ab = g_path[0][0][1].dur, ba = g_path[0][1][0].dur, abr = g_path[1][0][1].dur, bar = g_path[1][1][0].dur;
+    /* A walk to B, two hops there, a long lie, a RUN back to A, a hop, a run to B and a walk back (the day starts and ends sitting at A). */
     const struct seg day[] = {
         { K_SIT, 0, 0, 55.0f }, { K_STAND, 0, 1, 4.0f }, { K_WALK, 0, 1, ab }, { K_SITDOWN, 0, 1, 4.0f },
-        { K_SIT, 1, 1, 25.0f }, { K_LIE, 1, 1, 52.0f }, { K_SIT, 1, 1, 10.0f },
+        { K_SIT, 1, 1, 18.0f }, { K_STAND, 1, 1, 2.5f }, { K_JUMP, 1, 1, 1.6f }, { K_JUMP, 1, 1, 1.6f }, { K_SITDOWN, 1, 1, 3.0f },
+        { K_SIT, 1, 1, 8.0f }, { K_LIE, 1, 1, 60.0f }, { K_SIT, 1, 1, 10.0f },
+        { K_STAND, 1, 0, 3.0f }, { K_RUN, 1, 0, bar }, { K_SITDOWN, 1, 0, 3.0f }, { K_SIT, 0, 0, 14.0f },
+        { K_STAND, 0, 0, 2.5f }, { K_JUMP, 0, 0, 1.6f }, { K_SITDOWN, 0, 0, 3.0f }, { K_SIT, 0, 0, 12.0f },
+        { K_STAND, 0, 1, 3.0f }, { K_RUN, 0, 1, abr }, { K_SITDOWN, 0, 1, 3.0f }, { K_SIT, 1, 1, 12.0f },
         { K_STAND, 1, 0, 4.0f }, { K_WALK, 1, 0, ba }, { K_SITDOWN, 1, 0, 4.0f }, { K_SIT, 0, 0, 20.0f },
     };
     g_nseg = (int)(sizeof(day) / sizeof(day[0]));
@@ -208,7 +220,7 @@ static struct mcat_state state_at(float t)
     }
     const struct seg *sg = &g_seg[i];
     float tau = f - acc, u = sat(tau / sg->dur);
-    struct mcat_state st = { k_spot[sg->b][0], k_spot[sg->b][1], k_spot[sg->b][2], 0, 0, 0, 0 };
+    struct mcat_state st = { k_spot[sg->b][0], k_spot[sg->b][1], k_spot[sg->b][2], 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     float x, z, dx, dz;
     switch (sg->kind) {
     case K_SIT:
@@ -222,14 +234,37 @@ static struct mcat_state state_at(float t)
         st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
         st.stand = sstep(0.0f, 0.8f, u);
         break;
-    case K_WALK: {
+    case K_WALK: case K_RUN: {
         float arc, uu, speed;
-        path_at(sg->a, sg->b, tau, &arc, &uu, &speed);
+        int run = sg->kind == K_RUN;
+        path_at(sg->a, sg->b, run, tau, &arc, &uu, &speed);
         bez_point(sg->a, sg->b, uu, &x, &z, &dx, &dz);
         st.x = x; st.z = z; st.yaw = atan2f(dx, dz);
         st.stand = 1.0f;
         st.dist = arc;
         st.walk = sat(speed / 0.06f);
+        st.run = run ? 1.0f : 0.0f;
+        if (run) {                                                      /* in the middle of a run he leaps: up and over, legs stretched out fore and aft */
+            float s = sat((tau - 0.45f * sg->dur) / LEAP_T);
+            if (s > 0.0f && s < 1.0f) {
+                float k = sinf(3.14159265f * s);
+                st.air = LEAP_H * 4.0f * s * (1.0f - s);
+                st.stretch = k;
+                st.walk *= 1.0f - 0.8f * k;                             /* (the paws stop their gait in the air) */
+            }
+        }
+        break;
+    }
+    case K_JUMP: {                                                      /* a hop on the spot: crouch, spring, fly, land (a crouch again) */
+        st.x = k_spot[sg->a][0]; st.z = k_spot[sg->a][1]; st.yaw = k_spot[sg->a][2];
+        st.stand = 1.0f;
+        float s = sat((u - 0.30f) / 0.50f);
+        st.crouch = sstep(0.0f, 0.28f, u) * (1.0f - sstep(0.28f, 0.34f, u)) + 0.8f * sinf(3.14159265f * sat((u - 0.78f) / 0.22f));
+        if (u > 0.30f && u < 0.80f) {
+            st.air = JUMP_H * 4.0f * s * (1.0f - s);
+            st.tuck = sinf(3.14159265f * s);
+            st.stretch = fabsf(cosf(3.14159265f * s));
+        }
         break;
     }
     case K_SITDOWN:                                                     /* down where he arrived (the path ended facing that way) */
@@ -296,15 +331,18 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
     c->cy = cosf(c->yaw);
     c->sy = sinf(c->yaw);
     struct mcat_state st = state_at(t);
-    c->pos[0] = st.x; c->pos[1] = 0.0f; c->pos[2] = st.z;
+    float run = st.run, stride = STRIDE * (1.0f + 0.78f * run);                          /* a run has longer strides */
+    float flight = 0.05f * run * st.walk * fmaxf(0.0f, sinf(6.2831853f * 2.0f * (st.dist / (stride * c->scale)) + 1.0f));   /* (a trot leaves the ground twice a stride) */
+    c->air = st.air + flight;
+    c->pos[0] = st.x; c->pos[1] = c->air; c->pos[2] = st.z;
     c->yaw = st.yaw;
     c->cy = cosf(c->yaw);
     c->sy = sinf(c->yaw);
     c->lie = st.lie;
     c->stand = st.stand;
     c->walk = st.walk;
-    float lie = c->lie, stand = c->stand, phase = st.dist / (STRIDE * c->scale);         /* the gait goes by the distance walked, so the paws do not slide */
-    float bob = 0.011f * sinf(6.2831853f * 2.0f * phase) * st.walk * stand;                 /* the body rises and falls twice a stride */
+    float lie = c->lie, stand = c->stand, phase = st.dist / (stride * c->scale);         /* the gait goes by the distance walked, so the paws do not slide */
+    float bob = (0.011f + 0.012f * run) * sinf(6.2831853f * 2.0f * phase) * st.walk * stand - 0.075f * st.crouch;      /* the body rises and falls twice a stride (and sinks to spring) */
     c->neck[0] = 0.0f;
     c->neck[1] = mixf(mixf(0.40f, 0.20f, lie), 0.355f + bob, stand);
     c->neck[2] = mixf(mixf(0.04f, 0.215f, lie), 0.255f, stand);
@@ -313,7 +351,7 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
     memcpy(c->ldir, ldir, sizeof(c->ldir));
     memcpy(c->lcol, lcol, sizeof(c->lcol));
     c->lstr = lstr;
-    c->sh_w = 0.23f; c->sh_l = 0.28f; c->sh_h = mixf(0.55f, 0.28f, c->lie) * c->scale;
+    c->sh_w = 0.23f; c->sh_l = 0.28f; c->sh_h = mixf(0.55f, 0.28f, c->lie) * c->scale + c->air;
 
     float wx = cam[0] - c->pos[0], wy = cam[1] - c->pos[1], wz = cam[2] - c->pos[2], inv = 1.0f / c->scale;       /* the camera as the body sees it */
     float bx = (wx * c->cy - wz * c->sy) * inv, by = wy * inv, bz = (wx * c->sy + wz * c->cy) * inv;
@@ -322,7 +360,7 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
 
     struct hang h = head_at(t, cam_yaw, cam_pitch);
     h.yaw += 0.03f * sinf(t * 0.7f);                                     /* it is never quite still */
-    h.pitch += 0.02f * sinf(t * 0.9f + 1.0f) + 0.10f * lie + 0.025f * sinf(6.2831853f * 2.0f * phase) * st.walk * stand;   /* (lying, the head rests lower; walking, it bobs) */
+    h.pitch += 0.02f * sinf(t * 0.9f + 1.0f) + 0.10f * lie - 0.25f * st.tuck + 0.10f * st.crouch + 0.025f * sinf(6.2831853f * 2.0f * phase) * st.walk * stand;   /* (lying, the head rests lower; walking, it bobs) */
     c->head_yaw = h.yaw;
     c->head_pitch = h.pitch;
     float ry[9], rx[9], rz[9];
@@ -360,13 +398,13 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
     for (int leg = 0; leg < 4; leg++) {
         const struct legdef *d = leg < 2 ? &k_front : &k_hind;
         float m = (leg & 1) ? -1.0f : 1.0f, hip[3], knee[3], paw[3], pr[3];
-        float u = fmodf(phase + ((leg == 1 || leg == 2) ? 0.5f : 0.0f), 1.0f), dz = 0.0f, dy = 0.0f, amp = 0.09f * st.walk;
+        float u = fmodf(phase + ((leg == 1 || leg == 2) ? 0.5f : 0.0f), 1.0f), dz = 0.0f, dy = 0.0f, amp = (0.09f + 0.07f * run) * st.walk;
         if (u < 0.6f) {                                                  /* stance: the paw goes back as fast as the body goes forward */
             dz = amp * (1.0f - 2.0f * u / 0.6f);
         } else {                                                         /* swing: up and forward */
             float v = (u - 0.6f) / 0.4f;
             dz = amp * (-1.0f + 2.0f * sstep(0.0f, 1.0f, v));
-            dy = 0.05f * st.walk * sinf(3.14159265f * v);
+            dy = (0.05f + 0.04f * run) * st.walk * sinf(3.14159265f * v);
         }
         for (int k = 0; k < 3; k++) {
             hip[k] = mixf(mixf(d->hip[0][k], d->hip[1][k], lie), d->hip[2][k], stand);
@@ -374,6 +412,8 @@ void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const
             pr[k] = mixf(mixf(d->pr[0][k], d->pr[1][k], lie), d->pr[2][k], stand);
         }
         hip[1] += bob * stand;
+        dz += (d->rear ? -0.09f : 0.11f) * st.stretch;                    /* a hop: the legs reach out while he rises and lands ... */
+        dy += 0.085f * st.tuck;                                          /* ... and are tucked at the top */
         float sh[3] = { d->hip[2][0], d->hip[2][1] + bob, d->hip[2][2] }, sp[3] = { d->paw[2][0], d->paw[2][1] + dy, d->paw[2][2] + dz };       /* the standing leg */
         paw[1] = mixf(mixf(d->paw[0][1], d->paw[1][1], lie), sp[1], stand);
         paw[2] = mixf(mixf(d->paw[0][2], d->paw[1][2], lie), sp[2], stand);
@@ -901,5 +941,6 @@ float mcat_floor_shade(const struct mcat *c, float x, float z)
                 v *= 1.0f - 0.82f * expf(-a3) * sat(c->lstr);
         }
     }
+    v = 1.0f - (1.0f - v) / (1.0f + 3.0f * c->air);                                                       /* (in the air the shadow is fainter) */
     return v < 0.0f ? 0.0f : v;
 }

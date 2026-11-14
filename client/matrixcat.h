@@ -7,7 +7,7 @@
  * round the edge a thin shell of loose letters makes it fluffy. Whiskers, a mouth, ears that flick, a bushy tail with a swishing tip. Nothing here draws a
  * picture: `mcat_pose` computes where everything is at a time, `mcat_shade` answers for one ray, `mcat_floor_shade` for the shadow on the floor.
  *
- * Tom sits, stands up and WALKS to another place in the room (a gait with four legs; `stand` / `lie` blend the poses), sits there, lies down for a while, gets up and walks back (`mcat_cycle`). The head turns now and then (a script from the time alone: look
+ * Tom sits, stands up and WALKS to another place in the room (a gait with four legs; `stand` / `lie` blend the poses), hops on the spot, sits there, lies down for a while, gets up and RUNS back (a faster gait with a flight phase), hops, runs again (`mcat_cycle`). The head turns now and then (a script from the time alone: look
  * ahead, left, right, down, or AT THE CAMERA - that target follows the drifting camera). The eyes are dark with a slit pupil, and glow (an eyeshine with a halo
  * round them) in proportion to how straight the head really points at the camera (`mcat.glow`), so the glow is a property of where the head is, not of the
  * script.
@@ -49,6 +49,7 @@ struct mcat {
     float pos[3], yaw, scale;           /* where it sits (on the floor), which way the body faces, its size */
     float cy, sy;                       /* cos / sin of the body's yaw */
     float lie;                          /* 0 sitting .. 1 lying down */
+    float air;                          /* metres off the floor (a hop, the flight of a run); pos[1] is the same */
     float rh[9];                        /* head rotation (head frame -> body frame), row major */
     float neck[3];                      /* the head's pivot, body frame */
     float head_yaw, head_pitch;         /* relative to the body (radians), for the tests */
@@ -69,7 +70,7 @@ struct mcat {
 };
 
 /* Where Tom is and what he does at a time (his day, see mcat_cycle): the same for every model of him. */
-struct mcat_state { float x, z, yaw, stand, lie, walk, dist; };
+struct mcat_state { float x, z, yaw, stand, lie, walk, dist, run, air, crouch, tuck, stretch; };   /* run 0|1 while he runs, air = height of a hop (m), crouch / tuck / stretch 0..1 shape a hop */
 void mcat_state(float t, struct mcat_state *out);
 /* The length of Tom's whole day in seconds (he sits, stands up, walks to another place, sits, lies down, gets up, walks back ...): the pose repeats every cycle. */
 float mcat_cycle(void);

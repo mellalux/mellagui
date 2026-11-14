@@ -1309,7 +1309,7 @@ static int selftest(void)
                 }
                 twalk = 0.5f * (tw0 + tw1);
                 CHECK(maxlie > 0.99f && maxwalk > 0.95f && xmax - xmin > 1.2f && tw0 > 0.0f);
-                CHECK(maxrate < 0.55f);                                                          /* the body never turns faster than about half a radian a second */               /* he lies down, he walks, and he goes somewhere */
+                CHECK(maxrate < 0.95f);                                                          /* the body never turns faster than about a radian a second (a run) */               /* he lies down, he walks, and he goes somewhere */
                 struct mcat w0, w1, home;
                 mcat_pose(&home, cyc, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                 mcat_pose(&ct, 0.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
@@ -1334,7 +1334,7 @@ static int selftest(void)
                     int distinct = 0;
                     for (int k = 0; k < 4; k++) {
                         struct mcat lt;
-                        mcat_pose(&lt, tlie - 6.0f + 14.0f * (float)k + 5.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                        mcat_pose(&lt, tlie - 6.0f + 14.0f * (float)k + 5.5f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
                         CHECK(lt.lie > 0.9f && lt.tube[0].p[7][1] < 0.2f);
                         seen[k][0] = lt.tube[0].p[7][0];
                         seen[k][1] = lt.tube[0].p[7][2];

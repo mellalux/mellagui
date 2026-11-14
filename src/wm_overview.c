@@ -623,18 +623,29 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             return;
     }
 
-    if (wm->wb.active) {                                         /* the wobbling window: its picture cut into cells that follow the spring nodes */
+    if (wm->wb.active && wm->wb.frame.px) {                      /* the wobbling window: the mesh drawn into one picture, a little see-through */
+        const struct wm_wobble *wb = &wm->wb;
+        if (!clip || lm_rect_overlaps(&wb->frame_rect, clip)) {
+            memset(&it, 0, sizeof(it));
+            it.kind = LM_SCENE_GHOST;
+            it.u.ghost.ghost = (struct lm_ghost *)&wb->frame;
+            it.u.ghost.dst = wb->frame_rect;
+            it.u.ghost.alpha = wb->alpha;
+            if (!fn(&it, data))
+                return;
+        }
+    } else if (wm->wb.active) {                                  /* (no memory for that: its picture cut into cells that follow the spring nodes) */
         const struct wm_wobble *wb = &wm->wb;
         const int stride = WB_COLS + 1;
         for (int j = 0; j < WB_ROWS; j++)
             for (int i = 0; i < WB_COLS; i++) {
                 int n[4] = { j * stride + i, j * stride + i + 1, (j + 1) * stride + i, (j + 1) * stride + i + 1 };
-                float x0 = wb->x[n[0]], x1 = x0, y0 = wb->y[n[0]], y1 = y0;
+                float x0 = wb->px[n[0]], x1 = x0, y0 = wb->py[n[0]], y1 = y0;
                 for (int k = 1; k < 4; k++) {
-                    x0 = fminf(x0, wb->x[n[k]]);
-                    x1 = fmaxf(x1, wb->x[n[k]]);
-                    y0 = fminf(y0, wb->y[n[k]]);
-                    y1 = fmaxf(y1, wb->y[n[k]]);
+                    x0 = fminf(x0, wb->px[n[k]]);
+                    x1 = fmaxf(x1, wb->px[n[k]]);
+                    y0 = fminf(y0, wb->py[n[k]]);
+                    y1 = fmaxf(y1, wb->py[n[k]]);
                 }
                 struct lm_rect dst = lm_rect_make((int)floorf(x0), (int)floorf(y0), (int)ceilf(x1) - (int)floorf(x0), (int)ceilf(y1) - (int)floorf(y0));
                 if (clip && !lm_rect_overlaps(&dst, clip))

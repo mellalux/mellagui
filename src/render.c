@@ -2474,6 +2474,12 @@ static void paint_ghost(const struct paint_ctx *c, const struct lm_ghost *g, con
 static bool mag_view(struct lm_renderer *r, const struct lm_output *out, float *zoom, float *ox, float *oy);
 static void lm_render_ghost_gl_free(struct lm_renderer *r, struct lm_ghost *g);      /* render_gl.inc */
 
+void lm_render_ghost_changed(struct lm_renderer *r, struct lm_ghost *g)
+{
+    if (g && g->gl_tex)
+        lm_render_ghost_gl_free(r, g);
+}
+
 void lm_render_ghost_free(struct lm_renderer *r, struct lm_ghost *g)
 {
     if (!g)

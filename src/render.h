@@ -80,6 +80,8 @@ struct lm_scene_item;
  * background. false = out of memory or empty rectangle (g stays empty). */
 bool lm_render_snapshot(struct lm_renderer *r, const struct lm_scene_item *items, int n, const struct lm_rect *rect,
                         struct lm_ghost *g);
+/* The pixels of g were changed by the caller: the GL renderer's copy is made again on the next use. */
+void lm_render_ghost_changed(struct lm_renderer *r, struct lm_ghost *g);
 /* Frees the pixels and the GL texture; g is empty afterwards. Safe on an empty ghost. */
 void lm_render_ghost_free(struct lm_renderer *r, struct lm_ghost *g);
 

@@ -18305,6 +18305,23 @@ class TestSmart(Base):
                                                  'fav\tplug2\tFar plug\t0\tswitch\tswitch_1\t1'])    # (a device that is gone is left out)
         self.assertEqual(self.cli('--fav', 'blind1')[0], 2)                             # a wrong call
 
+    def test_a_power_strip_is_a_row_for_every_switch_on_the_desktop_card(self):
+        bools = ('switch_1', 'switch_2', 'switch_usb1', 'switch_backlight')
+        strip = {'id': 'strip1', 'home': 7, 'name': 'Strip', 'category': 'pc', 'online': True,
+                 'status': {'switch_1': True, 'switch_2': False, 'switch_usb1': True, 'switch_backlight': True, 'countdown_1': 0},
+                 'functions': [{'code': c, 'type': 'Boolean', 'values': '{}'} for c in bools] +
+                              [{'code': 'countdown_1', 'type': 'Integer', 'values': '{"unit":"s","min":0,"max":86400,"scale":0,"step":1}'}],
+                 'status_spec': []}
+        self.cloud('fav4', devices=[strip, self.DEVICES[0]])
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        for dev in ('strip1', 'plug1'):
+            self.assertEqual(self.cli('--fav', dev, 'on')[0], 0)
+        code, out = self.cli('--favourites')
+        self.assertEqual(out.split('\n')[:-1], ['favs\t2', 'fav\tstrip1\tStrip\t1\tswitch\tswitch_1\t1\tSwitch 1',      # the device's name, the switch's label last
+                                                 'fav\tstrip1\tStrip\t1\tswitch\tswitch_2\t0\tSwitch 2',
+                                                 'fav\tstrip1\tStrip\t1\tswitch\tswitch_usb1\t1\tUSB 1',          # (not the backlight, not the countdown)
+                                                 'fav\tplug1\tPlug\t1\tswitch\tswitch_1\t0'])                       # a device with one switch: a plain row
+
     def test_the_blind_shows_where_it_is_and_a_vacuum_gets_its_own_data(self):
         blind = dict(self.DEVICES[1], status={'control': 'stop', 'percent_control': 0, 'percent_state': 100})      # (percent_control is what was asked for)
         robot = json.loads(json.dumps(self.DEVICES[2]))
@@ -18996,6 +19013,38 @@ class TestSmartGadget(Base):
     def row_y(self, c, i):
         x, y, w, h = self.card(c)
         return y + 26 + 4 + i * 34 + 17
+
+    def test_a_strip_is_one_card_with_its_name_on_top_and_its_switches_side_by_side(self):
+        devs = [{'id': 'strip1', 'name': 'Strip', 'online': True, 'kind': 'switch', 'code': 'switch_%d' % (k + 1), 'value': k % 2, 'extra': 'Switch %d' % (k + 1)}
+                for k in range(7)] + [{'id': 'plug1', 'name': 'Desk lamp', 'online': True, 'kind': 'switch', 'code': 'switch_1', 'value': 0}]
+        c = self.start('mellagui-sg-strip', devices=devs)
+        c.cmd('settings smart 1')
+        head, lines, items = self.items(c)
+        self.assertIn('n=8', head)
+        groups = [re.search(r'group=(\d+) label=(.*)$', l).groups() for l in lines if l.startswith('item ')]
+        self.assertEqual(groups[:3] + groups[-1:], [('7', 'Switch 1'), ('0', 'Switch 2'), ('0', 'Switch 3'), ('0', '-')])      # (the first row heads a group of 7; the lamp is no group)
+        x, y, w, h = self.card(c)
+        cols = (w - 24) // 58                                             # as many side by side as fit: 4 on the card's 290 px, so 7 switches are two lines
+        self.assertEqual(cols, 4)
+        need = 26 + 4 + 28 + 2 * 46 + 4 + 34                              # title, the strip's name row, its two lines of cells, the gap, the lamp's row
+        end = time.time() + 5
+        while time.time() < end and self.card(c)[3] < need:
+            time.sleep(0.1)
+        self.assertGreaterEqual(self.card(c)[3], need, 'the card did not grow to show everything')
+        x, y, w, h = self.card(c)
+        cw = (w - 24) // cols
+        cell_top = y + 26 + 4 + 28                                        # the first line of cells
+        c.click(x + 12 + 2 * cw + cw // 2, cell_top + 46 + 31)            # the 7th switch: third cell of the second line
+        sent = [l for l in self.logged() if l.startswith('strip1 switch_7 ')]
+        self.assertEqual(sent, ['strip1 switch_7 true'])                  # (it was off: 6 % 2 = 0)
+        c.click(x + 12 + 3 * cw + cw // 2, cell_top + 46 + 31)            # the empty fourth cell of the second line is nothing
+        time.sleep(0.3)
+        self.assertEqual(len([l for l in self.logged() if l.startswith('strip1 ')]), 1)
+        c.click(x + w - 34, cell_top + 2 * 46 + 4 + 17)                   # the lamp, a plain row under the group
+        end = time.time() + 3
+        while time.time() < end and not any(l.startswith('plug1 switch_1 ') for l in self.logged()):
+            time.sleep(0.1)
+        self.assertTrue(any(l.startswith('plug1 switch_1 ') for l in self.logged()))
 
     def test_a_blind_that_can_be_positioned_has_a_slider_on_a_second_line(self):
         devs = [{'id': 'blind1', 'name': 'Blind', 'online': True, 'kind': 'blind', 'code': 'control', 'value': 60, 'extra': '1'},

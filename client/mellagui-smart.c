@@ -2444,16 +2444,22 @@ static int cmd_favourites(void)
                 value = d->dp[go].has && d->dp[go].b ? 1 : 0;
                 snprintf(extra, sizeof(extra), "\t%d,%s,%s", bat && bat->has ? (int)(bat->num + 0.5) : -1, dc, dv);
             } else {
-                for (int k = 0; k < d->ndp; k++) {
+                int sw[TUYA_MAX_DP], nsw = 0;                                  /* every switch of the device: a power strip is a row for each socket */
+                for (int k = 0; k < d->ndp && nsw < TUYA_MAX_DP; k++) {
                     struct tuya_dp *dp = &d->dp[k];
                     if (dp->type == TUYA_BOOL && !strncmp(dp->code, "switch", 6) && strcmp(dp->code, "switch_inching") &&
-                        strcmp(dp->code, "switch_backlight") && !is_countdown(dp)) {
-                        kind = "switch";
-                        code = dp->code;
-                        value = dp->has && dp->b ? 1 : 0;
-                        break;
-                    }
+                        strcmp(dp->code, "switch_backlight") && !is_countdown(dp))
+                        sw[nsw++] = k;
                 }
+                for (int q = 0; q < nsw; q++) {
+                    struct tuya_dp *dp = &d->dp[sw[q]];
+                    char lab[40] = "";
+                    if (nsw > 1)                                               /* the card shows the device's name once and one row for each: "Switch 2", "USB 1" */
+                        pretty(dp->code, lab, sizeof(lab));
+                    printf("fav\t%s\t%s\t%d\tswitch\t%s\t%d%s%s\n", d->id, d->name, d->online ? 1 : 0, dp->code, dp->has && dp->b ? 1 : 0, nsw > 1 ? "\t" : "", lab);
+                }
+                if (nsw)
+                    continue;
             }
             printf("fav\t%s\t%s\t%d\t%s\t%s\t%d%s\n", d->id, d->name, d->online ? 1 : 0, kind, code, value, extra);
         }

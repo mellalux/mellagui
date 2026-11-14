@@ -78,6 +78,7 @@ struct app {
     struct lm_mixer *mixer;
     enum lm_mixer_part drag_part;
     int smart_drag;                 /* the smart card: the blind whose slider is being dragged, -1 = none */
+    int smart_need;                 /* ... and the height that showed every row last time (the card grows when it gets more) */
     int drag_index;
     /* system */
     struct lm_sysinfo *sys;
@@ -147,9 +148,10 @@ static void dump_state(struct app *a)
         const struct lm_smart_state *ms = lm_smart_state(a->smart);
         fprintf(f, "smart visible=1 ready=%d n=%d note=%s\n", ms->ready ? 1 : 0, ms->n, ms->note[0] ? ms->note : "-");
         for (int i = 0; i < ms->n; i++)
-            fprintf(f, "item %d %s kind=%s online=%d on=%d percent=%d battery=%d dock=%s\n", i, ms->item[i].name,
+            fprintf(f, "item %d %s kind=%s online=%d on=%d percent=%d battery=%d dock=%s group=%d label=%s\n", i, ms->item[i].name,
                     ms->item[i].kind == LM_SMART_SWITCH ? "switch" : ms->item[i].kind == LM_SMART_BLIND ? "blind" : ms->item[i].kind == LM_SMART_VACUUM ? "vacuum" : "none",
-                    ms->item[i].online ? 1 : 0, ms->item[i].on ? 1 : 0, ms->item[i].percent, ms->item[i].battery, ms->item[i].dock_code[0] ? ms->item[i].dock_code : "-");
+                    ms->item[i].online ? 1 : 0, ms->item[i].on ? 1 : 0, ms->item[i].percent, ms->item[i].battery, ms->item[i].dock_code[0] ? ms->item[i].dock_code : "-",
+                    ms->item[i].group_first ? ms->item[i].group_len : 0, ms->item[i].label[0] ? ms->item[i].label : "-");
         fprintf(f, "ok\n");
     }
     fclose(f);
@@ -839,6 +841,29 @@ static void paint_smart(struct app *a)
     for (int i = 0; i < l.rows; i++) {
         const struct lm_smart_item *it = &st->item[i];
         struct lm_rect row = lm_rect_make(l.row[i].x, l.row[i].y, l.row[i].w, l.row[i].h);
+        if (it->label[0]) {                                             /* one switch of a device that has several: the device is one card, its name on top */
+            if (l.group[i].w > 0) {
+                struct lm_rect gr = lm_rect_make(l.group[i].x, l.group[i].y, l.group[i].w, l.group[i].h);
+                rr(w, gr, 7, veil_mix(0x12));
+                int hy = l.head[i].y + (l.head[i].h - LM_FONT_H) / 2;
+                text_fit(w, 18, hy, it->name, l.head[i].w - 36 - (it->online ? 0 : lm_font_text_width("offline") + 8), it->online ? lm_theme.text : lm_theme.text_dim);
+                if (!it->online) {
+                    int ow = lm_font_text_width("offline");
+                    text(w, gr.x + gr.w - 8 - ow, hy, "offline", lm_theme.text_dim);
+                }
+                wlwin_fill(w, gr.x + 8, l.head[i].y + l.head[i].h - 1, gr.w - 16, 1, veil_mix(0x28));       /* a hairline under the name */
+            }
+            const char *lab = !strncmp(it->label, "Switch ", 7) ? it->label + 7 : it->label;      /* "Switch 3" -> "3" */
+            int lw = lm_font_text_width(lab);
+            text_fit(w, l.name[i].x + (l.name[i].w - LM_MIN(lw, l.name[i].w - 4)) / 2, l.name[i].y, lab, l.name[i].w - 4, it->online ? lm_theme.text : lm_theme.text_dim);
+            if (it->online) {
+                struct lm_rect tr = lm_rect_make(l.sw[i].x, l.sw[i].y, l.sw[i].w, l.sw[i].h);
+                rr(w, tr, 11, it->on ? lm_theme.ok : lm_theme.button);
+                int kx = it->on ? tr.x + tr.w - 11 : tr.x + 11;
+                rr(w, lm_rect_make(kx - 8, tr.y + tr.h / 2 - 8, 16, 16), 8, lm_theme.text);
+            }
+            continue;
+        }
         rr(w, row, 7, veil_mix(0x12));
         bool two = it->kind == LM_SMART_BLIND && it->can_pos;           /* a blind with a slider: the name on the first line, the slider on the second */
         int ty = two ? row.y + 7 : row.y + (row.h - LM_FONT_H) / 2;
@@ -957,6 +982,16 @@ static void changed(void *data)
 {
     struct app *a = data;
     a->win.redraw = true;
+    if (a->kind == G_SMART && a->win.toplevel) {                         /* more rows than before (a power strip's sockets): the card grows to show them all */
+        int need = lm_smart_height(lm_smart_state(a->smart), a->win.bw, TITLE_H);
+        if (need > a->smart_need && a->win.bh < need) {
+            a->base_h = need;
+            a->exp_w = a->win.w;
+            a->exp_h = (int)(need * a->zoom / 100.0 + 0.5);
+            wlwin_request_size(&a->win, a->exp_w, a->exp_h);
+        }
+        a->smart_need = need;
+    }
 }
 
 static void zoom_apply(struct app *a, int pct, bool resize);

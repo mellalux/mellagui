@@ -80,6 +80,8 @@ static void parse(struct lm_smart *s, const char *text)
         snprintf(it->name, sizeof(it->name), "%s", f[2]);
         snprintf(it->code, sizeof(it->code), "%s", f[4 + 1]);
         it->online = atoi(f[3]) != 0;
+        if (!strcmp(f[4], "switch") && k >= 8)
+            snprintf(it->label, sizeof(it->label), "%s", f[7]);
         it->kind = !strcmp(f[4], "switch") ? LM_SMART_SWITCH : !strcmp(f[4], "blind") ? LM_SMART_BLIND : LM_SMART_NONE;
         int v = atoi(f[6]);
         it->on = it->kind == LM_SMART_SWITCH && v != 0;
@@ -105,6 +107,14 @@ static void parse(struct lm_smart *s, const char *text)
         }
     }
     free(copy);
+    for (int i = 0; i < ns.n; i++)                                  /* the switches of one device (same id, each with a label, one after the other) are a group */
+        if (ns.item[i].label[0] && (i == 0 || !ns.item[i - 1].label[0] || strcmp(ns.item[i - 1].id, ns.item[i].id))) {
+            ns.item[i].group_first = true;
+            int m = 1;
+            while (i + m < ns.n && ns.item[i + m].label[0] && !strcmp(ns.item[i + m].id, ns.item[i].id))
+                m++;
+            ns.item[i].group_len = m;
+        }
     if (!header) {
         snprintf(ns.note, sizeof(ns.note), "Smart home does not answer (log in with the Smart home program).");
         s->st = ns;
@@ -262,15 +272,52 @@ void lm_smart_vacuum(struct lm_smart *s, int index, int what)
 
 /* ---- layout ----------------------------------------------------------------------------------------------------------------------- */
 
+/* How many switches of a group stand in a row on a card w wide. */
+static int group_cols(int w)
+{
+    int n = (w - 16 - 8) / LM_SMART_CELL_MIN_W;
+    return n < 1 ? 1 : n;
+}
+
+/* The height one item (or a whole group, on its first item) takes, and the gap that follows it. */
+static int block_height(const struct lm_smart_state *st, int i, int w)
+{
+    const struct lm_smart_item *it = &st->item[i];
+    if (it->label[0]) {
+        if (!it->group_first)
+            return 0;                                               /* (the other switches of a group are part of its first) */
+        int cols = group_cols(w), lines = (it->group_len + cols - 1) / cols;
+        return LM_SMART_HEAD_H + lines * LM_SMART_CELL_H + 4;
+    }
+    return it->kind == LM_SMART_BLIND && it->can_pos ? LM_SMART_ROW2_H : LM_SMART_ROW_H;
+}
+
 void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_smart_state *st, struct lm_smart_layout *l)
 {
     memset(l, 0, sizeof(*l));
     int ry = y + title_h + 4, bottom = y + h - 4;
-    for (int i = 0; i < st->n && i < LM_SMART_MAX; i++) {
-        bool two = st->item[i].kind == LM_SMART_BLIND && st->item[i].can_pos;
-        int rh = two ? LM_SMART_ROW2_H : LM_SMART_ROW_H;
-        if (ry + rh - 4 > bottom)
+    for (int i = 0; i < st->n && i < LM_SMART_MAX;) {
+        const struct lm_smart_item *it = &st->item[i];
+        int rh = block_height(st, i, w);
+        if (ry + rh - 4 > bottom)                                   /* (a group is shown whole or not at all) */
             break;
+        if (it->label[0]) {                                         /* a device with several switches: its name, then its switches side by side */
+            int m = it->group_len > 0 ? it->group_len : 1, cols = group_cols(w), lines = (m + cols - 1) / cols;
+            int gw = w - 16 - 8, cw = gw / (m < cols ? m : cols);   /* the cells share the width (a group with 2 switches has two wide cells) */
+            l->group[i] = (struct lm_smart_rect){ x + 8, ry, w - 16, LM_SMART_HEAD_H + lines * LM_SMART_CELL_H };
+            l->head[i] = (struct lm_smart_rect){ x + 8, ry, w - 16, LM_SMART_HEAD_H };
+            for (int q = 0; q < m && i + q < LM_SMART_MAX; q++) {
+                int r = i + q, cx = x + 8 + 4 + (q % cols) * cw, cy = ry + LM_SMART_HEAD_H + (q / cols) * LM_SMART_CELL_H;
+                l->rows = r + 1;
+                l->row[r] = (struct lm_smart_rect){ cx, cy, cw, LM_SMART_CELL_H };
+                l->name[r] = (struct lm_smart_rect){ cx, cy + 3, cw, 16 };
+                l->sw[r] = (struct lm_smart_rect){ cx + (cw - 44) / 2, cy + 20, 44, 22 };
+            }
+            i += m;
+            ry += rh;
+            continue;
+        }
+        bool two = it->kind == LM_SMART_BLIND && it->can_pos;
         l->rows = i + 1;
         l->row[i] = (struct lm_smart_rect){ x + 8, ry, w - 16, rh - 4 };
         l->sw[i] = (struct lm_smart_rect){ x + w - 12 - 44, ry + 6, 44, 22 };
@@ -282,7 +329,16 @@ void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_sm
         if (two)                                                    /* the slider on the second line, the percentage to its right */
             l->slider[i] = (struct lm_smart_rect){ x + 22, ry + 30, w - 22 - 22 - 48, 20 };
         ry += rh;
+        i++;
     }
+}
+
+int lm_smart_height(const struct lm_smart_state *st, int w, int title_h)
+{
+    int h = title_h + 4;
+    for (int i = 0; i < st->n && i < LM_SMART_MAX; i++)
+        h += block_height(st, i, w);
+    return h;
 }
 
 int lm_smart_slider_value(const struct lm_smart_layout *l, int i, int px)
@@ -302,7 +358,7 @@ static bool inside(const struct lm_smart_rect *r, int px, int py)
 enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm_smart_state *st, int px, int py, int *index)
 {
     for (int i = 0; i < l->rows && i < st->n; i++) {
-        if (st->item[i].kind == LM_SMART_SWITCH && inside(&l->sw[i], px, py)) {
+        if (st->item[i].kind == LM_SMART_SWITCH && inside(st->item[i].label[0] ? &l->row[i] : &l->sw[i], px, py)) {
             *index = i;
             return LM_SMART_SWITCH_PART;
         }

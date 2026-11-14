@@ -3190,7 +3190,9 @@ class TestClients(Base):
         self.assertGreater(self.edit_window()['w'], w0, 'A+ in the right rail makes the text bigger')
 
     def test_edit_the_pointer_follows_the_text_size_button_when_the_window_grows(self):
-        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1'})
+        cfg = tempfile.mkdtemp(prefix='cfg-', dir=tmp)                       # (the editor keeps its text size in the config folder: not the shared one)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1', 'XDG_CONFIG_HOME': cfg})
         win = self.edit_window()
         ctl.abs(win['x'] + win['w'] - 26, win['y'] + 6 + 16)
         for _ in range(3):                                           # A+ three times, the pointer left where it is: it must be on the button each time
@@ -3199,6 +3201,24 @@ class TestClients(Base):
         win = self.edit_window()
         self.assertEqual(ctl.windows()['pointer'], (win['x'] + win['w'] - 26, win['y'] + 6 + 16), 'the pointer is on the A+ button of the grown window')
         self.assertGreater(win['w'], 760 + 40, 'three presses of A+ made the window bigger each time')
+
+    def test_edit_the_size_drop_opens_a_list_of_text_sizes_like_the_terminals(self):
+        cfg = tempfile.mkdtemp(prefix='cfg-', dir=tmp)                       # (the editor keeps its text size in the config folder: not the shared one)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1', 'XDG_CONFIG_HOME': cfg})
+        win = self.edit_window()
+        w0 = win['w']
+        y_drop = win['y'] + 6 + 36 + 16                              # the right rail: A+, then the size drop (a text file has no page button)
+        ctl.click(win['x'] + w0 - 26, y_drop)                        # it opens a list at the left of the rail ...
+        time.sleep(0.4)
+        # entries are 20 px each from the drop's top: 50 60 75 90 100 110 125 150 175 200 ...; "200%" is the 10th
+        ctl.click(win['x'] + w0 - 52 - 4 - 30, win['y'] + 6 + 36 + 2 + 9 * 20 + 10)
+        time.sleep(0.6)
+        self.assertGreater(self.edit_window()['w'], w0 + 100, 'the window grew with the text')
+        big = self.edit_window()                                     # (the window moved to stay on the screen: look again)
+        ctl.click(big['x'] + big['w'] - 26, big['y'] + big['h'] - 20 - 6 - 36 + 4 + 16)       # the 1:1 drop at the bottom of the rail (above the status line)
+        time.sleep(0.6)
+        self.assertLess(self.edit_window()['w'], big['w'], 'the 1:1 drop made the text and the window smaller again')
 
     def test_edit_cut_copy_paste_buttons_and_the_classic_keys(self):
         p, path = self.edit_start(b'abc def\n')
@@ -7954,7 +7974,9 @@ class TestAnimation(Base):
         r2 = c.windows()['windows'][0]
         self.assertEqual((r2['x'] - r['x'], r2['y'] - r['y']), (200, 80))            # the window itself is where the pointer put it
         ppm = c.dump(os.path.join(tmp, 'an5a.ppm'))
-        self.assertGreater(ppm.count((0, 255, 0), r2['x'] - 30, r2['y'] - 30, r2['x'] + 330, r2['y'] + 230), 5000)    # its picture is painted (as cells, partly behind the window's own place)
+        green = sum(1 for yy in range(r2['y'] - 30, r2['y'] + 230, 2) for xx in range(r2['x'] - 30, r2['x'] + 330, 2)
+                    if (lambda p: p[1] > 190 and p[0] < 60 and p[2] < 80)(ppm.px(xx, yy)))
+        self.assertGreater(green, 1500, 'its picture is painted (as one see-through mesh picture, partly behind the window\'s own place)')
         c.button(BTN_LEFT, False)
         end = time.time() + 5
         while time.time() < end and 'wobble=1' in c.cmd('anim')[0]:
@@ -9229,6 +9251,23 @@ class TestCamera(Base):
         ppm = self.shot('cam-rail.ppm')                              # the picture starts right of the rail, which has the bar's colour
         self.assertEqual(ppm.px(win['x'] + 10, win['y'] + 300), ppm.px(win['x'] + 40, win['y'] + 400))
 
+    def test_the_size_drop_opens_a_list_of_sizes_and_a_click_chooses_one(self):
+        p, win, d = self.start(MELLAGUI_RAILS='1')
+        for _ in range(20):                                          # (the first picture)
+            time.sleep(0.1)
+        y_size = win['y'] + 6 + 3 * 36 + 10 + 2 * 36                 # the Size drop: Snapshot, Record, Mic, a gap, Mirror, Pause, Size (36 px apart)
+        ctl.click(win['x'] + 26, y_size + 16)                        # it opens a list beside the rail (no more cycling through the sizes)
+        time.sleep(0.4)
+        ctl.click(win['x'] + 52 + 4 + 30, y_size + 2 + 10)           # the first entry, the smallest size
+        time.sleep(0.8)
+        ctl.tap(28)                                                  # Enter: a snapshot at the new size
+        for _ in range(40):
+            if any(n.endswith('.png') for n in os.listdir(d)):
+                break
+            time.sleep(0.1)
+        sizes = [self.png_size(os.path.join(d, n)) for n in os.listdir(d) if n.endswith('.png')]
+        self.assertEqual(sizes, [(320, 240)], sizes)
+
     def test_a_clip_has_the_microphone_in_it(self):
         if subprocess.run(['sh', '-c', 'command -v ffmpeg ffprobe'], capture_output=True).returncode != 0:
             self.skipTest('ffmpeg not installed')
@@ -9369,12 +9408,16 @@ class TestCamera(Base):
         time.sleep(0.5)
         files = sorted(os.listdir(d))
         self.assertEqual(len(files), 2, files)                                # the same second: "-1" is added, nothing is overwritten
-        ctl.tap(31)                                                           # S: the next size
-        time.sleep(0.6)
-        ctl.tap(28)                                                           # Enter
+        ctl.tap(31)                                                           # S: the list of sizes opens (a drop-down like the terminal's)
+        time.sleep(0.4)
+        for _ in range(6):
+            ctl.tap(103)                                                      # Up: to the first entry, the smallest size
+        ctl.tap(28)                                                           # Enter: that size is chosen
+        time.sleep(0.8)
+        ctl.tap(28)                                                           # Enter: a snapshot at the new size
         time.sleep(0.5)
         sizes = sorted(self.png_size(os.path.join(d, f)) for f in os.listdir(d))
-        self.assertEqual(sizes[0], (320, 240), sizes)                         # 640x480 -> next in the list wraps to 320x240
+        self.assertEqual(sizes[0], (320, 240), sizes)                         # the smallest size of the list
         self.assertEqual(len(sizes), 3)
         self.assertTrue(alive_p(p))
 
@@ -13919,7 +13962,7 @@ class TestDockAutohideAnimation(Base):
 
 
 class TestLauncherBubble(Base):
-    """The launcher dialog rises out of its dock button as a bubble that takes the shape of the card (2 s) and goes back the same way."""
+    """The launcher dialog rises out of its dock button as a bubble that takes the shape of the card (1 s) and goes back the same way."""
 
     def start(self):
         p, c, stop = self.private_compositor('mellagui-bub', '--config', 'none', '--size', '1000x640', env={'MELLAGUI_ANIMATIONS': '300'})
@@ -13949,28 +13992,28 @@ class TestLauncherBubble(Base):
             if m:
                 return tuple(int(v) for v in m.groups())
 
-    def test_it_rises_from_the_launcher_button_and_takes_the_shape_of_the_card_in_two_seconds(self):
+    def test_it_rises_from_the_launcher_button_and_takes_the_shape_of_the_card_in_a_second(self):
         c = self.start()
         bx, by = self.launcher_button(c)
         t0 = time.time()
         c.cmd('launcher open')
-        time.sleep(0.2)
+        time.sleep(0.08)
         b = self.bubble(c)
         self.assertEqual(b['kind'], 'opening')
         self.assertLess(b['w'], 90)                                           # a small bubble ...
         self.assertTrue(abs(b['x'] + b['w'] // 2 - bx) < 60 and abs(b['y'] + b['h'] // 2 - by) < 60, (b, bx, by))     # ... at the button
-        time.sleep(0.7)
+        time.sleep(0.35)
         mid = self.bubble(c)
         self.assertGreater(mid['w'], b['w'])
         self.assertLess(mid['y'] + mid['h'] // 2, by - 40)                    # it has risen
-        time.sleep(0.8)                                                       # 1.7 s in
-        self.assertIsNotNone(self.bubble(c), 'it was over before two seconds')
+        time.sleep(0.25)                                                      # 0.7 s in
+        self.assertIsNotNone(self.bubble(c), 'it was over before a second')
         end = time.time() + 2.0
         while time.time() < end and self.bubble(c):
-            time.sleep(0.05)
+            time.sleep(0.03)
         took = time.time() - t0
         self.assertIsNone(self.bubble(c))
-        self.assertTrue(1.9 <= took < 3.2, took)
+        self.assertTrue(0.9 <= took < 1.8, took)
         self.assertEqual(self.card(c)[2] > 300, True)                         # the real card is there now
 
     def test_closing_is_the_same_movement_backwards_into_the_button(self):
@@ -13982,17 +14025,17 @@ class TestLauncherBubble(Base):
             time.sleep(0.1)
         t1 = time.time()
         c.cmd('launcher close')
-        time.sleep(0.2)
+        time.sleep(0.08)
         b = self.bubble(c)
         self.assertEqual(b['kind'], 'closing')
         self.assertGreater(b['w'], 300)                                       # it starts as the card ...
-        time.sleep(1.2)
+        time.sleep(0.6)
         late = self.bubble(c)
         self.assertLess(late['w'], 200)                                       # ... shrinks ...
         end = time.time() + 3
         while time.time() < end and self.bubble(c):
-            time.sleep(0.05)
-        self.assertGreaterEqual(time.time() - t1, 1.9)                        # ... for two seconds
+            time.sleep(0.03)
+        self.assertGreaterEqual(time.time() - t1, 0.9)                        # ... for a second
         self.assertIsNone(self.bubble(c))
         self.assertEqual(c.cmd('launcher')[0].split()[1], 'open=0')
 
@@ -18050,6 +18093,13 @@ class TestSmart(Base):
             json.dump(st, f)
         self.wait(lambda: self.view()['ctl'][('plug1', 'switch_1', 'toggle')][0][4] == 'on', 'the next poll shows it')
 
+    def test_a_second_start_with_a_device_opens_its_view_in_the_running_window(self):
+        c = self.logged_in_window('w6b')                                       # the desktop card's click on a device runs `mellagui-smart --device ID`
+        self.assertEqual(self.view()['modal'], '-')
+        r = subprocess.run([self.exe, '--device', 'blind1'], env=dict(os.environ, WAYLAND_DISPLAY=self.name, **self.env), capture_output=True, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait(lambda: self.view()['modal'] == 'blind1', 'the running window shows the blind\'s view')
+
     def test_details_opens_the_devices_own_view(self):
         c = self.logged_in_window('w6')
         self.assertEqual(self.view()['modal'], '-')
@@ -19229,15 +19279,18 @@ class TestSmartGadget(Base):
                 break
             time.sleep(0.1)
         self.assertEqual(self.logged()[1], 'vac1 mode chargego')
-        c.click(x + w - 12 - 40 + 20, self.row_y(c, 1))                  # no dock data point: no button, nothing is sent
-        time.sleep(0.4)
-        self.assertEqual(len(self.logged()), 2)
-        c.click(x + w - 12 - 90 + 23, self.row_y(c, 1))                  # the cleaning one: the button stops it
+        c.click(x + w - 12 - 40 + 20, self.row_y(c, 1))                  # no dock data point: no button, nothing is sent to the robot (it is the card: its view opens)
         for _ in range(40):
             if len(self.logged()) == 3:
                 break
             time.sleep(0.1)
-        self.assertEqual(self.logged()[2], 'vac2 power_go false')
+        self.assertEqual(self.logged()[2], 'device vac2')
+        c.click(x + w - 12 - 90 + 23, self.row_y(c, 1))                  # the cleaning one: the button stops it
+        for _ in range(40):
+            if len(self.logged()) == 4:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged()[3], 'vac2 power_go false')
 
     def test_it_shows_what_the_program_says(self):
         c = self.start('mellagui-sg2')
@@ -19268,6 +19321,26 @@ class TestSmartGadget(Base):
             time.sleep(0.1)
         self.assertEqual(self.logged()[-1], 'plug2 switch_1 true')
 
+    def test_a_click_on_the_card_beside_its_controls_opens_the_devices_own_view(self):
+        c = self.start('mellagui-sg-card')
+        c.cmd('smart 1')
+        self.items(c)
+        x, y, w, h = self.card(c)
+        c.click(x + 40, self.row_y(c, 0))                               # the lamp's name, not its switch
+        self.assertEqual(self.logged(), ['device plug1'])
+        c.click(x + 40, self.row_y(c, 3))                               # an offline device has no switch to press: the click is on its card, too
+        for _ in range(60):
+            if len(self.logged()) > 1:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged(), ['device plug1', 'device plug3'])
+        c.click(x + w - 12 - 22, self.row_y(c, 0))                      # the switch itself only switches
+        for _ in range(60):
+            if len(self.logged()) > 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged()[2:], ['plug1 switch_1 false'])
+
     def test_the_blinds_buttons_send_open_stop_and_close(self):
         c = self.start('mellagui-sg4')
         c.cmd('smart 1')
@@ -19287,11 +19360,18 @@ class TestSmartGadget(Base):
         c.cmd('smart 1')
         self.items(c)
         x, y, w, h = self.card(c)
-        c.click(x + w - 12 - 22, self.row_y(c, 3))
-        time.sleep(0.5)
-        self.assertEqual(self.logged() if os.path.exists(self.log) else [], [])
+        c.click(x + w - 12 - 22, self.row_y(c, 3))                      # (an offline device has no switch: the click is on its card, which opens its view)
+        for _ in range(60):
+            if self.logged():
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged(), ['device plug3'])
         c.click(x + w - 12 - 22, self.row_y(c, 0))
-        self.assertEqual(self.logged(), ['plug1 switch_1 false'])
+        for _ in range(60):
+            if len(self.logged()) > 1:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.logged(), ['device plug3', 'plug1 switch_1 false'])
         with open(self.state) as f:                                     # what the device now says: the lamp is off (the stand-in wrote it)
             self.assertEqual(json.load(f)[0]['value'], 0)
 

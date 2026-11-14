@@ -150,13 +150,30 @@ struct wm_anim {
     int alpha;
 };
 
+/* A picture and its smaller copies (halved by averaging 2 x 2, again and again) for drawing it through a mesh of triangles: the launcher's bubble and the
+ * wobbling window (wm_bubble.c: mips_build / mips_triangle). With `soft` the picture's edge fades out (a pixel beyond it is transparent instead of a repeat of
+ * its last one), which smooths the outline of a window drawn through the mesh. */
+#define BUB_C 36
+#define BUB_R 24
+#define BUB_N ((BUB_C + 1) * (BUB_R + 1))
+#define BUB_LEVELS 5
+struct wm_mips {
+    uint32_t *mip[BUB_LEVELS];          /* level 0 is the picture itself (not owned) */
+    int mw[BUB_LEVELS], mh[BUB_LEVELS];
+    bool soft;
+};
+void mips_build(struct wm_mips *m, uint32_t *px, int w, int h);
+void mips_free(struct wm_mips *m);
+void mips_triangle(const struct wm_mips *m, uint32_t *out, int bx, int by, int bw, int bh, const float *x, const float *y, const float *u, const float *v);
+
 /*
  * A dragged window wobbles: it is painted as a mesh of (WB_COLS x WB_ROWS) cells cut from its picture, whose nodes are
  * springs. Every node is pulled to where it would be if the window were rigid; the ones far from the grab point are softer, so
  * they stay behind when the window moves and swing back when it stops. The real window moves with the pointer at once (and is left
- * out of the scene meanwhile); the picture is taken again now and then so the content stays alive.
+ * out of the scene meanwhile); the picture is taken again now and then so the content stays alive. On top of that the window is a pond: where it is held
+ * the movement makes ripples (a height field with the wave equation, `u`), and the picture is drawn bent along their slope.
  */
-#define WB_COLS 14
+#define WB_COLS 24
 #define WB_ROWS 32
 #define WB_N ((WB_COLS + 1) * (WB_ROWS + 1))
 struct wm_wobble {
@@ -167,6 +184,18 @@ struct wm_wobble {
     int off_x, off_y;                   /* the picture's top left relative to the window's (x, y) */
     float gx, gy;                       /* the grab point, relative to the picture's top left */
     float x[WB_N], y[WB_N], vx[WB_N], vy[WB_N];     /* node positions (global) and velocities */
+    float u[WB_N], uv[WB_N];            /* the ripples: a height field that obeys the wave equation (it travels across the window, bounces off the edges, dies out) */
+    float px[WB_N], py[WB_N];           /* where the nodes are DRAWN: x / y pushed along the slope of the ripples (the picture bends like seen through water) */
+    float last_ox, last_oy;             /* the window's place at the last step: how fast it moves feeds the ripples */
+    struct wm_mips m;                   /* the window's picture and its smaller copies */
+    struct lm_ghost frame;              /* the mesh drawn into one picture (smooth, in one piece), covering `shown` */
+    int alpha;                          /* how solid the window is while it is held (it is a little see-through) */
+    struct lm_rect frame_rect;          /* where `frame` is (global) */
+    uint32_t *clean;                    /* the picture as the window made it (square corners): `ghost` is this with the corners rounded to `round_f` */
+    float round_f;                      /* the corner radius now: it grows while the window is held (it becomes a drop) and goes back after it is let go */
+    int round_applied;                  /* the radius `ghost` has now */
+    bool have_last;
+    float wave_t, amp;                  /* the sheet waves (they run along the window both ways): the clock, and how strong they are now (follows how fast the window moves) */
     uint64_t last;
     int ticks;
     struct lm_rect shown;               /* the union of the cells painted last */
@@ -176,17 +205,12 @@ struct wm_wobble {
  * picture is a mesh of BUB_C x BUB_R cells (two triangles each) whose corners are moved by bubble_nodes(); every tick the triangles are rasterised into one
  * picture (`frame`, bilinear, from a chain of smaller copies of the card so that a small bubble does not glitter) that the scene shows as one ghost: no
  * seams, no gaps. A highlight (the sheen) lies on the bubble. */
-#define BUB_C 36
-#define BUB_R 24
-#define BUB_N ((BUB_C + 1) * (BUB_R + 1))
-#define BUB_LEVELS 5
 struct wm_bubble {
     bool active, closing;
     float prog;                         /* 0 = a small bubble at the button, 1 = the card */
     uint64_t last;
     struct lm_ghost ghost;              /* the card as a picture */
-    uint32_t *mip[BUB_LEVELS];          /* the card halved again and again (level 0 is ghost.px, not owned) */
-    int mw[BUB_LEVELS], mh[BUB_LEVELS];
+    struct wm_mips m;                   /* the card halved again and again (level 0 is ghost.px, not owned) */
     struct lm_ghost frame;              /* the mesh as it is now, one picture covering `shown` */
     int alpha;                          /* how solid it is painted (0..255) */
     float s;                            /* how far it has spread out (0 bubble .. 1 card) */
@@ -363,7 +387,7 @@ struct lm_wm {
     } zoomglue;
 };
 
-#define BUBBLE_MS 2000              /* the whole rise / return: two seconds (with window animations on; off = at once) */
+#define BUBBLE_MS 1000              /* the whole rise / return: one second (with window animations on; off = at once) */
 #define BUBBLE_R0 24.0f             /* radius of the bubble at the button */
 #define SW_ITEM_H 24
 

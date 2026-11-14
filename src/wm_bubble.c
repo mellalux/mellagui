@@ -92,14 +92,19 @@ static void bubble_make_sheen(struct lm_ghost *g)
 
 /* ---- rasterising the mesh ----------------------------------------------------------------------------------------------------- */
 
-static void bubble_free_pictures(struct lm_wm *wm, struct wm_bubble *b)
+void mips_free(struct wm_mips *m)
 {
     for (int l = BUB_LEVELS - 1; l >= 1; l--) {                    /* (a level that is a copy of the next bigger one, after an out-of-memory, is freed once) */
-        if (b->mip[l] && b->mip[l] != b->mip[l - 1])
-            free(b->mip[l]);
-        b->mip[l] = NULL;
+        if (m->mip[l] && m->mip[l] != m->mip[l - 1])
+            free(m->mip[l]);
+        m->mip[l] = NULL;
     }
-    b->mip[0] = NULL;
+    m->mip[0] = NULL;
+}
+
+static void bubble_free_pictures(struct lm_wm *wm, struct wm_bubble *b)
+{
+    mips_free(&b->m);
     if (wm->srv->render) {
         lm_render_ghost_free(wm->srv->render, &b->frame);
         lm_render_ghost_free(wm->srv->render, &b->ghost);
@@ -108,11 +113,11 @@ static void bubble_free_pictures(struct lm_wm *wm, struct wm_bubble *b)
 }
 
 /* The card's picture and, halved by averaging 2 x 2 each time, its smaller copies. */
-static void bubble_make_mips(struct wm_bubble *b)
+void mips_build(struct wm_mips *b, uint32_t *px0, int w0, int h0)
 {
-    b->mip[0] = b->ghost.px;
-    b->mw[0] = b->ghost.w;
-    b->mh[0] = b->ghost.h;
+    b->mip[0] = px0;
+    b->mw[0] = w0;
+    b->mh[0] = h0;
     for (int l = 1; l < BUB_LEVELS; l++) {
         int w = LM_MAX(b->mw[l - 1] / 2, 1), h = LM_MAX(b->mh[l - 1] / 2, 1);
         uint32_t *px = calloc((size_t)w * (size_t)h, 4);
@@ -140,54 +145,106 @@ static void bubble_make_mips(struct wm_bubble *b)
     }
 }
 
-/* Bilinear lookup in level `l` at (u, v) in that level's texels (premultiplied ARGB, the edge repeats). */
-static uint32_t bubble_sample(const struct wm_bubble *b, int l, float u, float v)
+/* One texel of level `l`: a pixel beyond the picture repeats its edge, or with `soft` is transparent. */
+static inline uint32_t mips_texel(const struct wm_mips *m, int l, int x, int y)
 {
-    int w = b->mw[l], h = b->mh[l];
-    const uint32_t *px = b->mip[l];
-    float fx = u - 0.5f, fy = v - 0.5f;
-    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
-    float tx = fx - (float)x0, ty = fy - (float)y0;
-    int x1 = LM_CLAMP(x0 + 1, 0, w - 1), y1 = LM_CLAMP(y0 + 1, 0, h - 1);
-    x0 = LM_CLAMP(x0, 0, w - 1);
-    y0 = LM_CLAMP(y0, 0, h - 1);
-    uint32_t p00 = px[(size_t)y0 * (size_t)w + (size_t)x0], p10 = px[(size_t)y0 * (size_t)w + (size_t)x1];
-    uint32_t p01 = px[(size_t)y1 * (size_t)w + (size_t)x0], p11 = px[(size_t)y1 * (size_t)w + (size_t)x1];
-    uint32_t out = 0;
-    for (int sh = 0; sh < 32; sh += 8) {
-        float a = (float)((p00 >> sh) & 255) * (1.0f - tx) + (float)((p10 >> sh) & 255) * tx;
-        float c = (float)((p01 >> sh) & 255) * (1.0f - tx) + (float)((p11 >> sh) & 255) * tx;
-        out |= (uint32_t)lroundf(a * (1.0f - ty) + c * ty) << sh;
+    int w = m->mw[l], h = m->mh[l];
+    if (x < 0 || y < 0 || x >= w || y >= h) {
+        if (m->soft)
+            return 0;
+        x = LM_CLAMP(x, 0, w - 1);
+        y = LM_CLAMP(y, 0, h - 1);
     }
-    return out;
+    return m->mip[l][(size_t)y * (size_t)w + (size_t)x];
 }
 
-/* One triangle of the mesh: x, y = where its corners are, u, v = which texel of the card each shows. Covered pixels take the card's colour; a pixel that
- * two triangles both reach keeps the more solid one, so a seam never shows a hole. */
-static void bubble_triangle(const struct wm_bubble *b, uint32_t *out, int bx, int by, int bw, int bh, const float *x, const float *y,
-                            const float *u, const float *v)
+/* Bilinear lookup in level `l` at (u, v) in that level's texels (premultiplied ARGB), in fixed point: the four colour channels are worked on two at a
+ * time in the lanes of a 32 bit word, with the four weights adding up to 256. */
+static inline uint32_t mips_sample(const struct wm_mips *m, int l, float u, float v)
+{
+    float fx = u - 0.5f, fy = v - 0.5f;
+    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+    int tx = (int)((fx - (float)x0) * 256.0f), ty = (int)((fy - (float)y0) * 256.0f);
+    int w = m->mw[l], h = m->mh[l];
+    uint32_t p00, p10, p01, p11;
+    if (x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h) {
+        const uint32_t *r0 = m->mip[l] + (size_t)y0 * (size_t)w + (size_t)x0;
+        p00 = r0[0]; p10 = r0[1]; p01 = r0[w]; p11 = r0[w + 1];
+    } else {
+        p00 = mips_texel(m, l, x0, y0); p10 = mips_texel(m, l, x0 + 1, y0); p01 = mips_texel(m, l, x0, y0 + 1); p11 = mips_texel(m, l, x0 + 1, y0 + 1);
+    }
+    uint32_t w00 = (uint32_t)((256 - tx) * (256 - ty) >> 8), w10 = (uint32_t)(tx * (256 - ty) >> 8), w01 = (uint32_t)((256 - tx) * ty >> 8);
+    uint32_t w11 = 256 - w00 - w10 - w01;
+    uint32_t rb = (p00 & 0x00ff00ffu) * w00 + (p10 & 0x00ff00ffu) * w10 + (p01 & 0x00ff00ffu) * w01 + (p11 & 0x00ff00ffu) * w11;
+    uint32_t ag = ((p00 >> 8) & 0x00ff00ffu) * w00 + ((p10 >> 8) & 0x00ff00ffu) * w10 + ((p01 >> 8) & 0x00ff00ffu) * w01 + ((p11 >> 8) & 0x00ff00ffu) * w11;
+    return ((rb >> 8) & 0x00ff00ffu) | (ag & 0xff00ff00u);
+}
+
+/* One triangle of the mesh: x, y = where its corners are, u, v = which texel of the picture each shows. Covered pixels take the picture's colour; a pixel that
+ * two triangles both reach keeps the more solid one, so a seam never shows a hole. Per row the covered stretch is worked out from the three edges, and the
+ * texel position moves by a fixed step from pixel to pixel. */
+void mips_triangle(const struct wm_mips *m, uint32_t *out, int bx, int by, int bw, int bh, const float *x, const float *y, const float *u, const float *v)
 {
     float det = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
     float src = (u[1] - u[0]) * (v[2] - v[0]) - (u[2] - u[0]) * (v[1] - v[0]);
     if (fabsf(det) < 1e-3f || fabsf(src) < 1e-6f)
         return;
-    float step = sqrtf(fabsf(src) / fabsf(det));                    /* card texels under one pixel: above 1 the picture is shrunk */
+    float step = sqrtf(fabsf(src) / fabsf(det));                    /* picture texels under one pixel: above 1 the picture is shrunk */
     int level = step > 1.0f ? LM_CLAMP((int)floorf(log2f(step)), 0, BUB_LEVELS - 1) : 0;
     float scale = 1.0f / (float)(1 << level), inv = 1.0f / det;
-    int x0 = LM_MAX((int)floorf(fminf(x[0], fminf(x[1], x[2]))) - bx, 0), x1 = LM_MIN((int)ceilf(fmaxf(x[0], fmaxf(x[1], x[2]))) - bx, bw - 1);
     int y0 = LM_MAX((int)floorf(fminf(y[0], fminf(y[1], y[2]))) - by, 0), y1 = LM_MIN((int)ceilf(fmaxf(y[0], fmaxf(y[1], y[2]))) - by, bh - 1);
+    int xlo = LM_MAX((int)floorf(fminf(x[0], fminf(x[1], x[2]))) - bx, 0), xhi = LM_MIN((int)ceilf(fmaxf(x[0], fmaxf(x[1], x[2]))) - bx, bw - 1);
+    /* l1 = a1 + b1 * fx, l2 = a2 + b2 * fx (fx = the pixel's centre), l0 = 1 - l1 - l2; they are the weights of the corners 1, 2 and 0 */
+    float b1 = (y[2] - y[0]) * inv, b2 = -(y[1] - y[0]) * inv;
+    float du = ((u[1] - u[0]) * b1 + (u[2] - u[0]) * b2) * scale, dv = ((v[1] - v[0]) * b1 + (v[2] - v[0]) * b2) * scale;
     const float e = -0.02f;
     for (int py = y0; py <= y1; py++) {
         float fy = (float)(by + py) + 0.5f;
-        for (int px = x0; px <= x1; px++) {
-            float fx = (float)(bx + px) + 0.5f;
-            float l1 = ((fx - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (fy - y[0])) * inv;
-            float l2 = ((x[1] - x[0]) * (fy - y[0]) - (fx - x[0]) * (y[1] - y[0])) * inv;
-            float l0 = 1.0f - l1 - l2;
-            if (l0 < e || l1 < e || l2 < e)
+        float a1 = (-x[0] * (y[2] - y[0]) - (x[2] - x[0]) * (fy - y[0])) * inv;
+        float a2 = ((x[1] - x[0]) * (fy - y[0]) + x[0] * (y[1] - y[0])) * inv;
+        float a0 = 1.0f - a1 - a2, b0 = -b1 - b2;
+        float lo = (float)(bx + xlo) + 0.5f, hi = (float)(bx + xhi) + 0.5f;           /* the stretch of fx that is inside all three edges */
+        const float aa[3] = { a0, a1, a2 }, bb[3] = { b0, b1, b2 };
+        bool empty = false;
+        for (int k = 0; k < 3; k++) {
+            if (fabsf(bb[k]) < 1e-7f) {
+                if (aa[k] < e)
+                    empty = true;
                 continue;
-            uint32_t c = bubble_sample(b, level, (l0 * u[0] + l1 * u[1] + l2 * u[2]) * scale, (l0 * v[0] + l1 * v[1] + l2 * v[2]) * scale);
-            uint32_t *dst = &out[(size_t)py * (size_t)bw + (size_t)px];
+            }
+            float edge = (e - aa[k]) / bb[k];
+            if (bb[k] > 0.0f)
+                lo = fmaxf(lo, edge);
+            else
+                hi = fminf(hi, edge);
+        }
+        if (empty || lo > hi)
+            continue;
+        int px0 = LM_MAX((int)ceilf(lo - 0.5f) - bx, xlo), px1 = LM_MIN((int)floorf(hi - 0.5f) - bx, xhi);
+        if (px0 > px1)
+            continue;
+        float fx = (float)(bx + px0) + 0.5f;
+        float l1 = a1 + b1 * fx, l2 = a2 + b2 * fx, l0 = 1.0f - l1 - l2;
+        float cu = (l0 * u[0] + l1 * u[1] + l2 * u[2]) * scale, cv = (l0 * v[0] + l1 * v[1] + l2 * v[2]) * scale;
+        uint32_t *dst = &out[(size_t)py * (size_t)bw + (size_t)px0];
+        const int w = m->mw[level], h = m->mh[level];                       /* the texel position in 16.16 fixed point, moved by a fixed step */
+        const uint32_t *tex = m->mip[level];
+        int fu = (int)((cu - 0.5f) * 65536.0f), fv = (int)((cv - 0.5f) * 65536.0f), fdu = (int)(du * 65536.0f), fdv = (int)(dv * 65536.0f);
+        for (int px = px0; px <= px1; px++, dst++, fu += fdu, fv += fdv) {
+            int x0 = fu >> 16, y0 = fv >> 16, tx = (fu >> 8) & 255, ty = (fv >> 8) & 255;
+            uint32_t p00, p10, p01, p11;
+            if (x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h) {
+                const uint32_t *r0 = tex + (size_t)y0 * (size_t)w + (size_t)x0;
+                p00 = r0[0]; p10 = r0[1]; p01 = r0[w]; p11 = r0[w + 1];
+            } else {
+                p00 = mips_texel(m, level, x0, y0); p10 = mips_texel(m, level, x0 + 1, y0); p01 = mips_texel(m, level, x0, y0 + 1);
+                p11 = mips_texel(m, level, x0 + 1, y0 + 1);
+            }
+            uint32_t w00 = (uint32_t)((256 - tx) * (256 - ty) >> 8), w10 = (uint32_t)(tx * (256 - ty) >> 8), w01 = (uint32_t)((256 - tx) * ty >> 8);
+            uint32_t w11 = 256 - w00 - w10 - w01;
+            uint32_t rb = (p00 & 0x00ff00ffu) * w00 + (p10 & 0x00ff00ffu) * w10 + (p01 & 0x00ff00ffu) * w01 + (p11 & 0x00ff00ffu) * w11;
+            uint32_t ag = ((p00 >> 8) & 0x00ff00ffu) * w00 + ((p10 >> 8) & 0x00ff00ffu) * w10 + ((p01 >> 8) & 0x00ff00ffu) * w01 + ((p11 >> 8) & 0x00ff00ffu) * w11;
+            uint32_t c = ((rb >> 8) & 0x00ff00ffu) | (ag & 0xff00ff00u);
             if ((c >> 24) >= (*dst >> 24))
                 *dst = c;
         }
@@ -217,7 +274,7 @@ static void bubble_render_frame(struct lm_wm *wm)
     uint32_t *out = calloc((size_t)r.w * (size_t)r.h, 4);
     if (!out)
         return;
-    const float W = (float)b->mw[0], H = (float)b->mh[0];
+    const float W = (float)b->m.mw[0], H = (float)b->m.mh[0];
     const int stride = BUB_C + 1;
     for (int j = 0; j < BUB_R; j++)
         for (int i = 0; i < BUB_C; i++) {
@@ -234,11 +291,11 @@ static void bubble_render_frame(struct lm_wm *wm)
             for (int k = 0; k < 3; k++) {
                 tx[k] = cx[t1[k]]; ty[k] = cy[t1[k]]; tu[k] = u[t1[k]]; tv[k] = v[t1[k]];
             }
-            bubble_triangle(b, out, r.x, r.y, r.w, r.h, tx, ty, tu, tv);
+            mips_triangle(&b->m, out, r.x, r.y, r.w, r.h, tx, ty, tu, tv);
             for (int k = 0; k < 3; k++) {
                 tx[k] = cx[t2[k]]; ty[k] = cy[t2[k]]; tu[k] = u[t2[k]]; tv[k] = v[t2[k]];
             }
-            bubble_triangle(b, out, r.x, r.y, r.w, r.h, tx, ty, tu, tv);
+            mips_triangle(&b->m, out, r.x, r.y, r.w, r.h, tx, ty, tu, tv);
         }
     b->frame.px = out;
     b->frame.w = r.w;
@@ -289,7 +346,7 @@ void bubble_begin(struct lm_wm *wm, bool opening)
     b->closing = !opening;
     b->prog = opening ? 0.0f : 1.0f;
     b->last = lm_now_ms();
-    bubble_make_mips(b);
+    mips_build(&b->m, b->ghost.px, b->ghost.w, b->ghost.h);
     bubble_render_frame(wm);
     damage_rect(wm, &b->shown);
     struct lm_rect r = lm_output_rect(o);

@@ -189,13 +189,14 @@ struct wm_wobble {
     float last_ox, last_oy;             /* the window's place at the last step: how fast it moves feeds the ripples */
     struct wm_mips m;                   /* the window's picture and its smaller copies */
     struct lm_ghost frame;              /* the mesh drawn into one picture (smooth, in one piece), covering `shown` */
-    int alpha;                          /* how solid the window is while it is held (it is a little see-through) */
+    int alpha;                          /* how solid the window is (it fades to a little see-through while it is held and back when it is let go) */
+    float alpha_f;
     struct lm_rect frame_rect;          /* where `frame` is (global) */
     uint32_t *clean;                    /* the picture as the window made it (square corners): `ghost` is this with the corners rounded to `round_f` */
     float round_f;                      /* the corner radius now: it grows while the window is held (it becomes a drop) and goes back after it is let go */
     int round_applied;                  /* the radius `ghost` has now */
     bool have_last;
-    float wave_t, amp;                  /* the sheet waves (they run along the window both ways): the clock, and how strong they are now (follows how fast the window moves) */
+    float wave_t, amp, front;           /* the sheet wave (sideways movement, running down the window): the clock, how strong it is now (follows how fast the window moves) and how far down it has got */
     uint64_t last;
     int ticks;
     struct lm_rect shown;               /* the union of the cells painted last */

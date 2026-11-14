@@ -64,6 +64,7 @@
 #include "util.h"
 #include "json.h"
 #include "syntax.h"
+#include "tomltree.h"
 #include "xmltree.h"
 #include "yamltree.h"
 #include "wlcard.h"
@@ -2383,7 +2384,7 @@ static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, cha
 
 /* ---- JSON as a tree ---- */
 #define JSON_MAX_NODES 60000
-enum { FMT_JSON, FMT_YAML, FMT_XML };                                    /* what pv_json reads into the tree */
+enum { FMT_JSON, FMT_YAML, FMT_XML, FMT_TOML };                                    /* what pv_json reads into the tree */
 
 static bool json_container(const struct json *n)
 {
@@ -2474,7 +2475,7 @@ static void json_rebuild(struct preview *pv)
     }
 }
 
-/* A .json (or, as `fmt` says, a .yaml / .xml) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
+/* A .json (or, as `fmt` says, a .yaml / .xml / .toml) file whole in the buffer: a tree, the first levels open. False when it is no such file, or only a scalar (then it is plain text). */
 static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, int fmt)
 {
     char *text = malloc(n + 1);
@@ -2482,7 +2483,7 @@ static bool pv_json(struct preview *pv, const unsigned char *buf, size_t n, int 
         return false;
     memcpy(text, buf, n);
     text[n] = 0;
-    struct json *root = fmt == FMT_YAML ? yaml_parse(text) : fmt == FMT_XML ? xml_parse(text) : json_parse(text);
+    struct json *root = fmt == FMT_YAML ? yaml_parse(text) : fmt == FMT_XML ? xml_parse(text) : fmt == FMT_TOML ? toml_parse(text) : json_parse(text);
     free(text);
     if (!root || !json_container(root)) {
         json_free(root);
@@ -2656,6 +2657,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_JSON;                                              /* a tree: click a row to open or close it */
     } else if ((ext_is(path, "yaml") || ext_is(path, "yml")) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_YAML)) {
         pv->kind = PV_JSON;                                              /* YAML is read into the same kind of tree */
+    } else if (ext_is(path, "toml") && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_TOML)) {
+        pv->kind = PV_JSON;                                              /* TOML too */
     } else if (is_xml_path(path) && (off_t)n >= st.st_size && pv_json(pv, buf, (size_t)n, FMT_XML)) {
         pv->kind = PV_JSON;                                              /* and XML */
     } else if ((ext_is(path, "csv") || ext_is(path, "tsv")) && pv_table(pv, buf, (size_t)n, ext_is(path, "tsv") ? '\t' : csv_delim(buf, (size_t)n), (off_t)n < st.st_size)) {
@@ -6131,6 +6134,14 @@ static int selftest(void)
     snprintf(p, sizeof(p), "%s/bad.xml", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT, "a broken .xml is plain text");
+    touch(dir, "t.toml", "a = 1\n[b]\nc = [1, 2]\n[[d]]\ne = \"x\"\n[[d]]\ne = \"y\"\n", 49);
+    snprintf(p, sizeof(p), "%s/t.toml", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_JSON && pv.njr == 11 && pv.nlines == 7, "toml preview: kind %d, %d nodes, %d lines", pv.kind, pv.njr, pv.nlines);
+    touch(dir, "bad.toml", "a = \nb = 2\n", 11);
+    snprintf(p, sizeof(p), "%s/bad.toml", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a broken .toml is plain text");
     touch(dir, "bad.json", "{\"a\":", 5);
     snprintf(p, sizeof(p), "%s/bad.json", dir);
     preview_load(&pv, p, false);

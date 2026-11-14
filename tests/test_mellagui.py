@@ -2951,6 +2951,28 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_a_toml_file_as_a_tree(self):
+        d = tempfile.mkdtemp(prefix='files-toml-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.toml'), 'w') as f:
+            f.write('# config\ntitle = "x"\n[package]\nname = "n"\nversion = "0.1"\n[[bin]]\nname = "a"\n[[bin]]\nname = "b"\n[deps.serde]\nversion = 1\n')
+        with open(os.path.join(d, 'b.toml'), 'w') as f:
+            f.write('broken = \n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.toml)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json')
+        self.assertEqual(head['kind'], 'json')                                         # the same tree as for JSON, YAML and XML
+        self.assertEqual((extra['json']['nodes'], extra['json']['shown']), ('13', '10'))
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(self.SHIFT, True)
+        ctl.tap(self.K_RIGHT)
+        ctl.key(self.SHIFT, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('json', {}).get('shown') == '13')
+        self.assertEqual(extra['json']['shown'], '13')
+        ctl.tap(self.K_DOWN)                                                           # b.toml has a key with no value: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

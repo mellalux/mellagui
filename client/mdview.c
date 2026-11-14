@@ -57,6 +57,7 @@ struct md_doc {
     int nimg;
     int width, height;
     char base[512];
+    int sel_ai, sel_ao, sel_ci, sel_co;                                 /* the selection: anchor and caret as (text item, byte offset); item -1 = none */
 };
 
 struct str {
@@ -225,6 +226,7 @@ static void append_line(struct block *b, const char *t)
 struct md_doc *md_parse(const char *text, size_t n)
 {
     struct md_doc *d = calloc(1, sizeof(*d));
+    md_sel_clear(d);
     int cur = -1, icode = -1, table = -1;
     char fence = 0;
     int fence_len = 0, fence_q = 0, fence_indent = 0, fence_blk = -1;
@@ -976,6 +978,7 @@ void md_layout(struct md_doc *d, int width, const char *base_dir)
     lm_font_ui_cells(false);                                            /* the page is set in labels */
     d->ni = 0;
     d->npool = 0;
+    md_sel_clear(d);                                                    /* (the items are made again: the selection cannot be kept) */
     for (int i = 0; i < d->nurl; i++) free(d->urls[i]);
     d->nurl = 0;
     snprintf(d->base, sizeof(d->base), "%s", base_dir ? base_dir : "");
@@ -1138,16 +1141,250 @@ int md_width(const struct md_doc *d) { return d->width; }
 
 /* ---- painting and asking ---------------------------------------------------------------------------------------------------------- */
 
+/* ---- selection ------------------------------------------------------------------------------------------------------------------ */
+
+/* Width of the first n bytes of a text item (the page is set in labels, code in cells; the caller has the label mode on). */
+static int prefix_w(const struct item *it, const char *s, size_t n)
+{
+    char buf[1024];
+    char *t = n < sizeof(buf) ? buf : malloc(n + 1);
+    memcpy(t, s, n);
+    t[n] = 0;
+    int w = (it->fl & F_CODE ? lm_font_cells_width(t) : it->fl & F_BOLD ? lm_font_text_width_bold(t) : lm_font_text_width(t)) * it->scale;
+    if (t != buf)
+        free(t);
+    return w;
+}
+
+static size_t next_cp(const char *s, size_t o)
+{
+    if (s[o])
+        do
+            o++;
+        while (((unsigned char)s[o] & 0xc0) == 0x80);
+    return o;
+}
+
+/* The byte offset in a text item that is nearest to the pixel `rel` right of its left edge. */
+static size_t off_at(const struct item *it, const char *s, int rel)
+{
+    size_t len = strlen(s), o = 0;
+    int prev = 0;
+    if (rel <= 0)
+        return 0;
+    while (o < len) {
+        size_t n = next_cp(s, o);
+        int w = prefix_w(it, s, n);
+        if (rel < (prev + w + 1) / 2)
+            return o;
+        prev = w;
+        o = n;
+    }
+    return len;
+}
+
+/* The text item nearest to a page position (the one the pointer is on, else the closest line, then the closest in its line). */
+static int item_near(const struct md_doc *d, int px, int py)
+{
+    int best = -1;
+    long bk = 0;
+    for (int i = 0; i < d->ni; i++) {
+        const struct item *it = &d->it[i];
+        if (it->type != IT_TEXT)
+            continue;
+        int dy = py < it->y - 3 ? it->y - 3 - py : py >= it->y + it->h + 3 ? py - (it->y + it->h + 3) + 1 : 0;
+        int dx = px < it->x ? it->x - px : px >= it->x + it->w ? px - (it->x + it->w) + 1 : 0;
+        long k = (long)dy * 100000 + dx;
+        if (best < 0 || k < bk) {
+            best = i;
+            bk = k;
+        }
+    }
+    return best;
+}
+
+static bool pos_at(const struct md_doc *d, int px, int py, int *item, int *off)
+{
+    bool was_cells = lm_font_ui_cells_get();
+    lm_font_ui_cells(false);
+    int i = item_near(d, px, py);
+    if (i >= 0) {
+        *item = i;
+        *off = (int)off_at(&d->it[i], d->pool + d->it[i].off, px - d->it[i].x);
+    }
+    lm_font_ui_cells(was_cells);
+    return i >= 0;
+}
+
+void md_sel_clear(struct md_doc *d)
+{
+    d->sel_ai = d->sel_ci = -1;
+    d->sel_ao = d->sel_co = 0;
+}
+
+void md_sel_begin(struct md_doc *d, int px, int py)
+{
+    int i, o;
+    if (!pos_at(d, px, py, &i, &o)) {
+        md_sel_clear(d);
+        return;
+    }
+    d->sel_ai = d->sel_ci = i;
+    d->sel_ao = d->sel_co = o;
+}
+
+void md_sel_drag(struct md_doc *d, int px, int py)
+{
+    int i, o;
+    if (d->sel_ai >= 0 && pos_at(d, px, py, &i, &o)) {
+        d->sel_ci = i;
+        d->sel_co = o;
+    }
+}
+
+/* A double click: the word (letters, digits, '_', anything non-ASCII) at the position. */
+void md_sel_word(struct md_doc *d, int px, int py)
+{
+    int i, o;
+    if (!pos_at(d, px, py, &i, &o)) {
+        md_sel_clear(d);
+        return;
+    }
+    const char *s = d->pool + d->it[i].off;
+    size_t len = strlen(s), a = (size_t)o, b = (size_t)o;
+#define WORDC(c) (isalnum((unsigned char)(c)) || (c) == '_' || ((unsigned char)(c)) >= 0x80)
+    while (a > 0 && WORDC(s[a - 1]))
+        a--;
+    while (b < len && WORDC(s[b]))
+        b++;
+    if (a == b && b < len)                                              /* on a mark: that character */
+        b = next_cp(s, b);
+#undef WORDC
+    d->sel_ai = d->sel_ci = i;
+    d->sel_ao = (int)a;
+    d->sel_co = (int)b;
+}
+
+/* A triple click: the whole line (every text item that sits in the same line). */
+void md_sel_line(struct md_doc *d, int px, int py)
+{
+    int i, o;
+    if (!pos_at(d, px, py, &i, &o)) {
+        md_sel_clear(d);
+        return;
+    }
+    int y = d->it[i].y, a = i, b = i;
+    for (int k = 0; k < d->ni; k++)
+        if (d->it[k].type == IT_TEXT && d->it[k].y == y) {
+            if (k < a) a = k;
+            if (k > b) b = k;
+        }
+    d->sel_ai = a;
+    d->sel_ao = 0;
+    d->sel_ci = b;
+    d->sel_co = (int)strlen(d->pool + d->it[b].off);
+}
+
+void md_sel_all(struct md_doc *d)
+{
+    int a = -1, b = -1;
+    for (int i = 0; i < d->ni; i++)
+        if (d->it[i].type == IT_TEXT) {
+            if (a < 0)
+                a = i;
+            b = i;
+        }
+    if (a < 0) {
+        md_sel_clear(d);
+        return;
+    }
+    d->sel_ai = a;
+    d->sel_ao = 0;
+    d->sel_ci = b;
+    d->sel_co = (int)strlen(d->pool + d->it[b].off);
+}
+
+/* The selection in order: lo = (item, offset) first, hi = the end. False when nothing (or an empty range) is selected. */
+static bool sel_range(const struct md_doc *d, int *li, int *lo, int *hi, int *ho)
+{
+    if (d->sel_ai < 0 || d->sel_ci < 0)
+        return false;
+    bool fwd = d->sel_ai < d->sel_ci || (d->sel_ai == d->sel_ci && d->sel_ao <= d->sel_co);
+    *li = fwd ? d->sel_ai : d->sel_ci;
+    *lo = fwd ? d->sel_ao : d->sel_co;
+    *hi = fwd ? d->sel_ci : d->sel_ai;
+    *ho = fwd ? d->sel_co : d->sel_ao;
+    return !(*li == *hi && *lo == *ho);
+}
+
+bool md_sel_active(const struct md_doc *d)
+{
+    int a, b, c, e;
+    return sel_range(d, &a, &b, &c, &e);
+}
+
+/* The selected text: words in a line are separated by a blank (a wide gap, as between table cells, by a tab), lines by a line break and a gap
+ * between blocks by an empty line. */
+char *md_sel_text(const struct md_doc *d)
+{
+    int li, lo, hi, ho;
+    if (!sel_range(d, &li, &lo, &hi, &ho))
+        return NULL;
+    struct str out = { 0 };
+    const struct item *prev = NULL;
+    for (int i = li; i <= hi; i++) {
+        const struct item *it = &d->it[i];
+        if (it->type != IT_TEXT)
+            continue;
+        const char *s = d->pool + it->off;
+        size_t len = strlen(s), a = i == li ? (size_t)lo : 0, b = i == hi ? (size_t)ho : len;
+        if (prev) {
+            int dy = it->y - prev->y;
+            if (dy >= prev->h) {
+                sapp(&out, "\n", 1);
+                if (dy > prev->h + 12)
+                    sapp(&out, "\n", 1);
+            } else if (dy < 0 || it->x - (prev->x + prev->w) >= 14) {
+                sapp(&out, "\t", 1);
+            } else {
+                sapp(&out, " ", 1);
+            }
+        }
+        if (b > a)
+            sapp(&out, s + a, b - a);
+        prev = it;
+    }
+    if (!out.s)
+        out.s = strdup("");
+    return out.s;
+}
+
 void md_paint(struct wlwin *w, const struct md_doc *d, int x, int y, int w_box, int h_box, int scroll)
 {
     (void)w_box;
     bool was_cells = lm_font_ui_cells_get();
     lm_font_ui_cells(false);
+    int sli, slo, shi, sho;
+    bool has_sel = sel_range(d, &sli, &slo, &shi, &sho);
     for (int i = 0; i < d->ni; i++) {
         const struct item *it = &d->it[i];
         if (it->y + it->h < scroll || it->y > scroll + h_box)
             continue;
         int px = x + it->x, py = y + it->y - scroll;
+        if (has_sel && it->type == IT_TEXT && i >= sli && i <= shi) {
+            const char *s = d->pool + it->off;
+            size_t len = strlen(s), a = i == sli ? (size_t)slo : 0, b = i == shi ? (size_t)sho : len;
+            int x1 = a ? prefix_w(it, s, a) : 0, x2 = b >= len ? it->w : prefix_w(it, s, b);
+            if (b >= len && i < shi)                                    /* the blank up to the next word of the line is selected too */
+                for (int j = i + 1; j < d->ni; j++)
+                    if (d->it[j].type == IT_TEXT) {
+                        if (d->it[j].y == it->y && d->it[j].x > it->x + it->w && d->it[j].x - it->x - it->w < 24)
+                            x2 = d->it[j].x - it->x;
+                        break;
+                    }
+            if (x2 > x1)
+                wlwin_fill(w, px + x1, py - 2, x2 - x1, it->h + 4, lm_theme.button_hover);
+        }
         switch (it->type) {
         case IT_RECT:
             wlwin_fill(w, px, py, it->w, it->h, it->rgb);

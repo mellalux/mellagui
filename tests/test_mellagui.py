@@ -2715,6 +2715,30 @@ class TestClients(Base):
         time.sleep(0.3)
         self.assertEqual(int(self.md_dump(dump)[0]['scroll']), 0)
 
+    def test_edit_markdown_page_text_can_be_selected_and_copied(self):
+        dump = os.path.join(tmp, 'md4.dump')
+        p, path = self.edit_start(self.MD_SAMPLE, name='doc.md', env={'MELLAGUI_EDIT_DUMP': dump})
+        head, items, last = self.md_dump(dump)
+        win = self.edit_window()
+        first = [l for l in items if l.endswith('"Paragraph"')][0].split()
+        x0, y0 = win['x'] + int(head['colx']) + int(first[1]), win['y'] + int(head['top']) + int(first[2]) - int(head['scroll']) + 8
+        ctl.abs(x0 + 1, y0)
+        ctl.button(272, True)
+        ctl.abs(x0 + 150, y0)
+        ctl.abs(x0 + 200, y0)
+        ctl.button(272, False)
+        time.sleep(0.2)
+        self.chord(self.CTRL, 46)                                     # Ctrl+C
+        time.sleep(0.2)
+        self.chord(self.CTRL, 50)                                     # Ctrl+M: the text
+        time.sleep(0.3)
+        self.chord(self.CTRL, 47)                                     # Ctrl+V pastes what the page copied
+        self.chord(self.CTRL, self.K_S)
+        time.sleep(0.4)
+        got = self.read_file(path)
+        self.assertTrue(got.startswith(b'Paragraph number'), got[:40])
+        self.assertNotEqual(got, self.MD_SAMPLE)
+
     def test_edit_a_text_file_has_no_page(self):
         dump = os.path.join(tmp, 'md3.dump')
         p, path = self.edit_start(b'# not markdown\n', name='doc.txt', env={'MELLAGUI_EDIT_DUMP': dump})

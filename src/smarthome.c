@@ -1,6 +1,9 @@
 #include "smarthome.h"
 
+#include <signal.h>
 #include <stdio.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -222,6 +225,35 @@ static void send_set(struct lm_smart *s, const struct lm_smart_item *it, const c
     send_set_code(s, it, it->code, value);
 }
 
+/* Starts a program that has nothing to do with this one (a double fork: nobody waits for it, and it keeps none of our files). */
+static void spawn_detached(char *const argv[])
+{
+    pid_t p = fork();
+    if (p == 0) {
+        if (fork() == 0) {
+            setsid();
+            signal(SIGCHLD, SIG_DFL);
+            close_range(3, ~0U, 0);
+            execv(argv[0], argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (p > 0)
+        waitpid(p, NULL, 0);
+}
+
+void lm_smart_open_card(struct lm_smart *s, int index)
+{
+    (void)s;
+    if (!s || index < 0 || index >= s->st.n)
+        return;
+    char prog[512];
+    program(prog, sizeof(prog));
+    char *argv[] = { prog, (char *)"--device", (char *)s->st.item[index].id, NULL };
+    spawn_detached(argv);
+}
+
 void lm_smart_toggle(struct lm_smart *s, int index)
 {
     if (!s || index < 0 || index >= s->st.n || s->st.item[index].kind != LM_SMART_SWITCH || !s->st.item[index].online)
@@ -358,7 +390,7 @@ static bool inside(const struct lm_smart_rect *r, int px, int py)
 enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm_smart_state *st, int px, int py, int *index)
 {
     for (int i = 0; i < l->rows && i < st->n; i++) {
-        if (st->item[i].kind == LM_SMART_SWITCH && inside(st->item[i].label[0] ? &l->row[i] : &l->sw[i], px, py)) {
+        if (st->item[i].kind == LM_SMART_SWITCH && st->item[i].online && inside(st->item[i].label[0] ? &l->row[i] : &l->sw[i], px, py)) {
             *index = i;
             return LM_SMART_SWITCH_PART;
         }
@@ -380,6 +412,14 @@ enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm
                     *index = i;
                     return (enum lm_smart_part)(LM_SMART_OPEN + b);
                 }
+    }
+    for (int i = 0; i < l->rows && i < st->n; i++) {                /* beside every control: the card itself */
+        const struct lm_smart_item *it = &st->item[i];
+        bool hit = it->label[0] ? (inside(&l->head[i], px, py) || (l->group[i].w > 0 && inside(&l->group[i], px, py) && !inside(&l->row[i], px, py))) : inside(&l->row[i], px, py);
+        if (hit) {
+            *index = i;
+            return LM_SMART_CARD;
+        }
     }
     return LM_SMART_NOTHING;
 }

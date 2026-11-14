@@ -48,6 +48,11 @@ Mark each line `ok`, `wrong` (say how) or `n/a` (no such hardware).
 | 16 | `mellagui-monitor` (Settings > Display > Monitor) | Brightness / contrast change over DDC/CI if the monitor and `/dev/i2c-N` allow it, else it says why. | `ddc` lines |
 | 17 | Two monitors, Settings > Display > Layout | The order can be changed, the gadgets stay at the top right of the leftmost one, windows can be dragged across. | |
 | 18 | Mouse / touchpad / keyboard: layouts (Super+Space), key repeat, sticky keys, the on-screen keyboard (Super+K) | They work as in the settings. | `input` lines |
+| 19 | Drag a window by its title bar to the left / right edge, a corner, the top edge (and Super+Ctrl+Left / Right, with Shift for the lower ones) | A translucent accent rectangle shows the half / quarter / whole screen while the pointer is there, and only then; let go and the window goes there (the top edge maximizes). With two monitors, crossing from one to the other does not show it. With gl the preview is not black or flickering. | `snap` lines (the control socket's `snap` is headless only) |
+| 20 | Lock (Super+L), wait for `Screen off after`; then with the screensaver on, let it start and its `Monitor sleeps after` pass | The picture fades out over about 2 s (not a jump to black) before `dpms=off`; the first touch fades it back in over a fraction of a second and is not passed on. With the saver running `top` shows `mellagui-matrix` gone while the monitor sleeps. | `screenoff` lines, `hwprobe` |
+| 21 | Settings > Input > Keyboard: show the flag of the layout in use; the lock screen with the wallpaper behind it (Settings > Security) | The panel shows a flag (and the text you chose); the lock screen shows the blurred, dimmed wallpaper behind the clock and the pill-shaped field. | |
+| 22 | Record 10 s of scrolling a long page with `mellagui-record --start --codec h264`, play it with `mellagui-view` and with ffmpeg | The file is small (a scrolled page costs a few tens of kB a picture) and both players show the same, sharp picture without blocks at the macroblock edges. | `mellagui-record --selftest` |
+| 23 | Smart home: a rule `on sunrise+5 ...` in `smart-schedule.conf`, `mellagui-smart --sun` | The times are those of your place (compare with a weather site, within a couple of minutes); the rule fires in its minute while the computer is on. | `mellagui-smart --background` output |
 
 ## The login screen (docs/GREETER.md)
 
@@ -65,6 +70,6 @@ Do this on a spare VT or a machine you can reach over ssh: a mistake in the PAM 
 ## What is already known
 
 * The dev machine (Intel HD 4000, i915, one monitor on HDMI) runs MellaGUI every day with the GL renderer (libEGL / libgbm are loaded).
-  What nobody has written down yet is rows 3 to 13 above, which is what this list is for.
+  What nobody has written down yet is rows 3 to 13 and 19 to 23 above, which is what this list is for.
 * The night light's gamma table is scaled per CRTC (`out_gamma`); `hwprobe` is the quickest check that it reached the hardware.
 * Everything on the list can be compared with the headless pictures: `tests/run.sh` must stay green, it does not cover any of this.

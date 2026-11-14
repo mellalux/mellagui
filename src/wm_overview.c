@@ -600,6 +600,16 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             return;
     }
 
+    if (wm->snap_ghost.px && (!clip || lm_rect_overlaps(&wm->snap_rect, clip))) {          /* where the dragged window would go */
+        memset(&it, 0, sizeof(it));
+        it.kind = LM_SCENE_GHOST;
+        it.u.ghost.ghost = &wm->snap_ghost;
+        it.u.ghost.dst = wm->snap_rect;
+        it.u.ghost.alpha = 255;
+        if (!fn(&it, data))
+            return;
+    }
+
     for (int i = 0; i < ANIM_MAX; i++) {                         /* pictures of windows that open / close / fly to their button */
         struct wm_anim *a = &wm->anim[i];
         if (!a->used || (clip && !lm_rect_overlaps(&a->shown, clip)))
@@ -927,7 +937,11 @@ size_t lm_wm_describe(struct lm_wm *wm, char *buf, size_t size)
         if (wm->focused == w) strcat(flags, "focused,");
         if (w->states & LM_WINDOW_MAXIMIZED) strcat(flags, "maximized,");
         if (w->states & LM_WINDOW_FULLSCREEN) strcat(flags, "fullscreen,");
-        if (WIN(w)->tiled) strcat(flags, WIN(w)->tiled == LM_EDGE_LEFT ? "tiled-left," : "tiled-right,");
+        if (WIN(w)->tiled) {
+            strcat(flags, "tiled-");
+            strcat(flags, snap_zone_name(WIN(w)->tiled));
+            strcat(flags, ",");
+        }
         if (w->minimized) strcat(flags, "minimized,");
         size_t fl = strlen(flags);
         if (fl) flags[fl - 1] = 0; else strcpy(flags, "-");

@@ -425,6 +425,14 @@ static void ctl_command(struct ctl_client *c, char *line)
             ctl_reply(c, "%s", text);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "snap")) {
+        /* snap -> "snap zone=none" or "snap zone=left|right|topleft|...|maximize x= y= w= h=" while a window is dragged to an edge (the preview), then "ok" */
+        static char text[256];
+        if (srv->wm) {
+            lm_wm_snap_describe(srv->wm, text, sizeof(text));
+            ctl_reply(c, "%s", text);
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "overview")) {
         /* overview [open|close] -> "overview open= closing= n= sel= cols= prog= ws=" and one "item i x= y= w= h= slot=x,y,w,h title=" line each (the desktop overview), then "ok" */
         static char otext[2048];

@@ -602,6 +602,7 @@ void lm_wm_destroy(struct lm_wm *wm)
         if (wm->anim[i].used)
             free(wm->anim[i].ghost.px);
     free(wm->wb.ghost.px);
+    free(wm->snap_ghost.px);
     for (int i = 0; i < wm->ov.n; i++)
         free(wm->ov.item[i].ghost.px);
     if (wm->anim_timer)
@@ -991,7 +992,7 @@ void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
 {
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
-    if (edge != LM_EDGE_LEFT && edge != LM_EDGE_RIGHT && edge != LM_EDGE_NONE)
+    if (!snap_zone_valid(edge) || edge == LM_EDGE_TOP)
         return;
     if (!w->mapped || (w->states & LM_WINDOW_FULLSCREEN) || ww->tiled == edge)
         return;
@@ -1008,9 +1009,8 @@ void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
 
     struct lm_rect ua;
     lm_wm_usable_area(wm, w->x + w->width / 2, w->y + w->height / 2, &ua);
-    int32_t half = ua.w / 2;
-    struct lm_rect outer = edge == LM_EDGE_LEFT ? lm_rect_make(ua.x, ua.y, half, ua.h)
-                                                : lm_rect_make(ua.x + half, ua.y, ua.w - half, ua.h);
+    struct lm_rect outer;
+    snap_zone_rect(&ua, edge, &outer);
     int32_t tw = outer.w - 2 * LM_BORDER_WIDTH;
     int32_t th = outer.h - LM_TITLEBAR_HEIGHT - LM_BORDER_WIDTH;
     clamp_size(w, &tw, &th);
@@ -1590,6 +1590,8 @@ static void grab_end(struct lm_wm *wm)
     enum grab_kind kind = wm->grab_kind;
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
+    uint32_t snap = kind == GRAB_MOVE && w && !win_is_gadget(w) ? wm->snap_zone : 0;
+    snap_clear(wm);
     if (wm->wb.active)
         wm->wb.released = true;                                  /* the mesh settles and goes */
     if (wm->srv->seat) {
@@ -1599,6 +1601,14 @@ static void grab_end(struct lm_wm *wm)
     if (w && kind == GRAB_RESIZE) {
         w->states &= ~LM_WINDOW_RESIZING;
         send_configure(wm, w, w->width, w->height);
+    }
+    if (w && snap) {                                            /* let go at an edge: the window goes to the zone the preview showed */
+        wm->glide_win = NULL;                                   /* (it must not glide on to where the pointer would have taken it) */
+        wobble_stop(wm);
+        if (snap == LM_EDGE_TOP)
+            lm_wm_window_request_maximize(w, true);
+        else
+            lm_wm_window_request_tile(w, snap);
     }
     if (w && (kind == GRAB_MOVE || kind == GRAB_RESIZE)) {
         if (win_is_gadget(w))
@@ -1633,13 +1643,16 @@ static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, d
         int top = win_is_gadget(w) ? ua.y : ua.y + LM_TITLEBAR_HEIGHT;       /* (a gadget has no title bar above it) */
         if (ty < top && !(w->states & LM_WINDOW_FULLSCREEN))
             ty = top;
-        if (!wm->wb.active && anim_glide_to(wm, w, tx, ty))
+        if (!wm->wb.active && anim_glide_to(wm, w, tx, ty)) {
+            snap_update(wm, x, y);
             return;
+        }
         w->x = tx;
         w->y = ty;
         damage_rect(wm, &before);
         damage_frame(wm, w);
         update_outputs(wm, w);
+        snap_update(wm, x, y);                                  /* at an edge or a corner: show where it would go */
     } else if (wm->grab_kind == GRAB_RESIZE) {
         int32_t nw = wm->grab_w, nh = wm->grab_h;
         if (wm->grab_edges & LM_EDGE_RIGHT) nw = wm->grab_w + (int32_t)dx;
@@ -2019,6 +2032,11 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
         break;
     case LM_ACT_TILE_LEFT: case LM_ACT_TILE_RIGHT:
         if (f) lm_wm_window_request_tile(f, kb->action == LM_ACT_TILE_LEFT ? LM_EDGE_LEFT : LM_EDGE_RIGHT);
+        break;
+    case LM_ACT_TILE_TOP_LEFT: case LM_ACT_TILE_TOP_RIGHT: case LM_ACT_TILE_BOTTOM_LEFT: case LM_ACT_TILE_BOTTOM_RIGHT:
+        if (f)
+            lm_wm_window_request_tile(f, (kb->action == LM_ACT_TILE_TOP_LEFT || kb->action == LM_ACT_TILE_TOP_RIGHT ? LM_EDGE_TOP : LM_EDGE_BOTTOM) |
+                                             (kb->action == LM_ACT_TILE_TOP_LEFT || kb->action == LM_ACT_TILE_BOTTOM_LEFT ? LM_EDGE_LEFT : LM_EDGE_RIGHT));
         break;
     case LM_ACT_QUIT: request_quit(wm); break;
     case LM_ACT_RELOAD_CONFIG:

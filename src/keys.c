@@ -41,6 +41,10 @@
     "Super+M           = maximize-toggle\n" \
     "Super+Left        = tile-left\n" \
     "Super+Right       = tile-right\n" \
+    "Super+Ctrl+Left   = tile-top-left\n" \
+    "Super+Ctrl+Right  = tile-top-right\n" \
+    "Super+Ctrl+Shift+Left  = tile-bottom-left\n" \
+    "Super+Ctrl+Shift+Right = tile-bottom-right\n" \
     "Super+Up          = maximize\n" \
     "Super+Down        = restore\n" \
     "Super+Shift+E     = quit\n" \
@@ -157,6 +161,8 @@ static const struct action_def actions[] = {
     { "fullscreen", LM_ACT_FULLSCREEN, ARG_NONE }, { "maximize-toggle", LM_ACT_MAXIMIZE_TOGGLE, ARG_NONE },
     { "maximize", LM_ACT_MAXIMIZE, ARG_NONE }, { "restore", LM_ACT_RESTORE, ARG_NONE },
     { "tile-left", LM_ACT_TILE_LEFT, ARG_NONE }, { "tile-right", LM_ACT_TILE_RIGHT, ARG_NONE },
+    { "tile-top-left", LM_ACT_TILE_TOP_LEFT, ARG_NONE }, { "tile-top-right", LM_ACT_TILE_TOP_RIGHT, ARG_NONE },
+    { "tile-bottom-left", LM_ACT_TILE_BOTTOM_LEFT, ARG_NONE }, { "tile-bottom-right", LM_ACT_TILE_BOTTOM_RIGHT, ARG_NONE },
     { "reload-config", LM_ACT_RELOAD_CONFIG, ARG_NONE }, { "launcher", LM_ACT_LAUNCHER, ARG_NONE }, { "osk", LM_ACT_OSK, ARG_NONE }, { "quick-settings", LM_ACT_QUICK, ARG_NONE }, { "magnify-in", LM_ACT_MAGNIFY_IN, ARG_NONE }, { "magnify-out", LM_ACT_MAGNIFY_OUT, ARG_NONE }, { "overview", LM_ACT_OVERVIEW, ARG_NONE },
     { "night-light", LM_ACT_NIGHT_LIGHT, ARG_NONE }, { "dnd", LM_ACT_DND, ARG_NONE },
 };

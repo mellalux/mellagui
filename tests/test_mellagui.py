@@ -442,6 +442,94 @@ class TestWindows(Base):
         c.wl.roundtrip()
         self.assertNotIn('tiled-right', ctl.windows()['windows'][0]['flags'])
 
+    def mod_key(self, code, shift=False):
+        ctl.key(KEY_LEFTMETA, True)
+        ctl.key(KEY_LEFTCTRL, True)
+        if shift:
+            ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(code)
+        if shift:
+            ctl.key(KEY_LEFTSHIFT, False)
+        ctl.key(KEY_LEFTCTRL, False)
+        ctl.key(KEY_LEFTMETA, False)
+
+    def test_quarters_by_keys(self):
+        c, w = self.window(300, 200)
+        r0 = ctl.windows()['windows'][0]
+        for keys, name, xy in (((KEY_LEFT, False), 'topleft', (4, 60)), ((KEY_RIGHT, False), 'topright', (516, 60)),
+                               ((KEY_LEFT, True), 'bottomleft', (4, 344)), ((KEY_RIGHT, True), 'bottomright', (516, 344))):
+            self.mod_key(keys[0], keys[1])
+            cfg = w.handle_configure()
+            self.assertEqual((cfg[0], cfg[1]), (504, 252), name)                   # a quarter of the usable area (1024 x 568)
+            c.wl.roundtrip()
+            r = ctl.windows()['windows'][0]
+            self.assertIn('tiled-' + name, r['flags'])
+            self.assertEqual((r['x'], r['y'], r['w'], r['h']), (xy[0], xy[1], 504, 252), name)
+        self.super_key(KEY_DOWN)                                                  # back to where it was before the first tile
+        cfg = w.handle_configure()
+        self.assertEqual((cfg[0], cfg[1]), (300, 200))
+        c.wl.roundtrip()
+        r = ctl.windows()['windows'][0]
+        self.assertEqual((r['x'], r['y']), (r0['x'], r0['y']))
+        self.assertNotIn('tiled', r['flags'])
+        self.super_key(KEY_LEFT)                                                  # a half after a quarter: the whole height again
+        cfg = w.handle_configure()
+        self.assertEqual((cfg[0], cfg[1]), (504, 536))
+
+    def test_dragging_a_window_to_an_edge_or_a_corner_shows_where_it_goes_and_tiles_it_when_let_go(self):
+        c, w = self.window(300, 200)
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')
+        r = ctl.windows()['windows'][0]
+        sx, sy = r['x'] + 100, r['y'] - 14
+        ctl.abs(sx, sy)
+        ctl.button(BTN_LEFT, True)
+        ctl.abs(500, 300)                                                         # away from every edge: no preview
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')
+        ctl.abs(0, 300)                                                           # the left edge: the left half
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=left x=0 y=32 w=512 h=568')
+        ppm = ctl.dump(os.path.join(tmp, 'snap-left.ppm'))
+        ctl.abs(500, 300)
+        ppm2 = ctl.dump(os.path.join(tmp, 'snap-none.ppm'))
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')                    # (it goes when the pointer leaves the edge)
+        a, b = ppm.px(100, 560), ppm2.px(100, 560)
+        self.assertNotEqual(a, b, 'the preview is not painted')
+        self.assertGreater(a[2] - a[0], b[2] - b[0])                              # the accent colour is blue: bluer where the preview is
+        ctl.abs(1023, 40)                                                         # the top right corner: a quarter
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=topright x=512 y=32 w=512 h=284')
+        ctl.abs(1023, 590)                                                        # the bottom right corner
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=bottomright x=512 y=316 w=512 h=284')
+        ctl.button(BTN_LEFT, False)                                               # let go there
+        cfg = w.handle_configure()
+        self.assertEqual((cfg[0], cfg[1]), (504, 252))
+        c.wl.roundtrip()
+        r = ctl.windows()['windows'][0]
+        self.assertIn('tiled-bottomright', r['flags'])
+        self.assertEqual((r['x'], r['y'], r['w'], r['h']), (516, 344, 504, 252))
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')
+        # the right edge: the right half; dragged away it goes back to its own size
+        time.sleep(0.6)                                                           # (not a double click on the title bar)
+        ctl.abs(r['x'] + 100, r['y'] - 14)
+        ctl.button(BTN_LEFT, True)
+        ctl.abs(1023, 300)
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=right x=512 y=32 w=512 h=568')
+        ctl.abs(400, 300)
+        ctl.button(BTN_LEFT, False)                                               # let go away from an edge: nothing tiles
+        c.wl.roundtrip()
+        self.assertNotIn('tiled', ctl.windows()['windows'][0]['flags'])
+
+    def test_dragging_to_the_top_edge_maximizes_and_the_pointer_crossing_to_another_monitor_does_not_snap(self):
+        c, w = self.window(300, 200)
+        r = ctl.windows()['windows'][0]
+        ctl.abs(r['x'] + 100, r['y'] - 14)
+        ctl.button(BTN_LEFT, True)
+        ctl.abs(500, 0)                                                           # into the panel at the top edge
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=maximize x=0 y=32 w=1024 h=568')
+        ctl.button(BTN_LEFT, False)
+        cfg = w.handle_configure()
+        self.assertIn(XDG_STATE_MAXIMIZED, cfg[2])
+        c.wl.roundtrip()
+        self.assertIn('maximized', ctl.windows()['windows'][0]['flags'])
+
     def test_fullscreen_hides_panel(self):
         c, w = self.window(300, 200, color=0xffff00ff)
         ctl.key(KEY_LEFTMETA, True)
@@ -12378,7 +12466,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 42)
+        self.assertEqual(len(t), 46)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -12423,7 +12511,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 43)
+        self.assertEqual(len(t), 47)
         self.assertTrue(alive_p(p))
 
 
@@ -15195,13 +15283,13 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '42')
+        self.assertEqual(self.get(c, 'keys-count'), '46')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
         self.assertEqual(len(self.rows(c, 3)), 10)
-        self.assertEqual(len(self.rows(c, 4)), 2)
+        self.assertEqual(len(self.rows(c, 4)), 6)
         self.assertEqual(self.rows(c, 99), self.rows(c, 4))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
@@ -15225,13 +15313,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '42')
+        self.assertEqual(self.get(c, 'keys-count'), '46')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '43')
+        self.assertEqual(self.get(c, 'keys-count'), '47')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')

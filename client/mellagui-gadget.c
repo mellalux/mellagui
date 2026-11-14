@@ -816,6 +816,8 @@ static bool smart_press(struct app *a)
         lm_smart_toggle(a->smart, idx);
     else if (part == LM_SMART_CLEAN || part == LM_SMART_DOCK)
         lm_smart_vacuum(a->smart, idx, part == LM_SMART_CLEAN ? 0 : 1);
+    else if (part == LM_SMART_CARD)
+        lm_smart_open_card(a->smart, idx);                          /* beside the controls: the device's own view opens */
     else if (part != LM_SMART_NOTHING)
         lm_smart_blind(a->smart, idx, part - LM_SMART_OPEN);
     return part != LM_SMART_NOTHING;

@@ -61,6 +61,8 @@ void lm_smart_blind(struct lm_smart *s, int index, int what);
 void lm_smart_blind_position(struct lm_smart *s, int index, int percent, bool send);
 /* A robot vacuum: 0 = start / stop cleaning (the other way from what it does now), 1 = send it to its dock. */
 void lm_smart_vacuum(struct lm_smart *s, int index, int what);
+/* Opens the device's own view (its whole card: every control, its timetable) in mellagui-smart: a new window, or the running one switches to it. */
+void lm_smart_open_card(struct lm_smart *s, int index);
 
 /* ---- the card's layout (shared by the painter and the pointer) ----------------------------------------------------------------- */
 
@@ -70,7 +72,8 @@ void lm_smart_vacuum(struct lm_smart *s, int index, int what);
 #define LM_SMART_CELL_H 46              /* one of its switches: a cell with its label on top and the pill under it; the cells stand side by side, as many in a row as fit */
 #define LM_SMART_CELL_MIN_W 58
 
-enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK, LM_SMART_SLIDER };
+enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK, LM_SMART_SLIDER,
+                     LM_SMART_CARD /* the rest of a device's row / card: a click there opens the device's own view */ };
 
 struct lm_smart_rect { int x, y, w, h; };
 

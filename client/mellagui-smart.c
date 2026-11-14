@@ -159,6 +159,7 @@ struct app {
     struct box scene_box[TUYA_MAX_SCENE];
     int nscene;
     char modal_dev[40];                 /* the device whose own view is open ("" = none) */
+    char want_dev[40];                  /* a device whose view was asked for (the gadget's card was clicked, `--device ID`): opened as soon as the devices are known */
     int modal_scroll, modal_h;
     struct box modal;
     int sb_drag;                        /* a scroll bar's thumb is in the hand: 1 = the list's, 2 = the device view's */
@@ -2296,9 +2297,41 @@ static void apply_results(struct app *a)
     }
 }
 
+static volatile sig_atomic_t g_open_req;                        /* SIGUSR1: another start asked this window for a device's view (see open_request_file) */
+
+static void on_usr1(int sig)
+{
+    (void)sig;
+    g_open_req = 1;
+}
+
+static void open_request_path(char *out, size_t n)
+{
+    const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");
+    snprintf(out, n, "%s/mellagui-smart-%s.open", rt && *rt ? rt : "/tmp", disp && *disp && !strchr(disp, '/') ? disp : "wayland-0");
+}
+
 static void tick(struct app *a)
 {
     uint64_t now = mono_ms();
+    if (g_open_req) {                                           /* `mellagui-smart --device ID` found this window running and left the id for it */
+        g_open_req = 0;
+        char path[320];
+        open_request_path(path, sizeof(path));
+        FILE *f = fopen(path, "r");
+        if (f) {
+            if (fgets(a->want_dev, sizeof(a->want_dev), f))
+                a->want_dev[strcspn(a->want_dev, "\r\n")] = 0;
+            fclose(f);
+            unlink(path);
+        }
+    }
+    if (a->want_dev[0] && a->view == V_DEVICES && a->loaded) {  /* the devices are known: open the one that was asked for */
+        struct tuya_dev *d = find_dev(a, a->want_dev);
+        a->want_dev[0] = 0;
+        if (d)
+            open_modal(a, d);
+    }
     apply_results(a);
     pthread_mutex_lock(&a->lan_lock);
     if (a->lan_changed) {
@@ -2863,19 +2896,51 @@ int main(int argc, char **argv)
         print_qr(&q);
         return 0;
     }
+    const char *open_id = NULL;
+    if (argc == 3 && !strcmp(argv[1], "--device") && argv[2][0] && strlen(argv[2]) < 40) {         /* start with a device's own view open */
+        open_id = argv[2];
+        argc = 1;
+    }
     if (argc > 1) {
-        fprintf(stderr, "usage: mellagui-smart | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --sun | --place LAT LON|auto | --login USERCODE | --logout | --qr TEXT | --selftest\n");
+        fprintf(stderr, "usage: mellagui-smart [--device ID] | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --sun | --place LAT LON|auto | --login USERCODE | --logout | --qr TEXT | --selftest\n");
         return 2;
     }
     const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");
     char lock[300];
     snprintf(lock, sizeof(lock), "%s/mellagui-smart-%s.lock", rt && *rt ? rt : "/tmp", disp && *disp && !strchr(disp, '/') ? disp : "wayland-0");
     int lfd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lfd >= 0 && flock(lfd, LOCK_EX | LOCK_NB) != 0)
+    if (lfd >= 0 && flock(lfd, LOCK_EX | LOCK_NB) != 0) {
+        if (open_id) {                                          /* already open: leave the id for it and tell it (SIGUSR1) */
+            char path[320], pidtext[24] = "";
+            open_request_path(path, sizeof(path));
+            FILE *f = fopen(path, "w");
+            if (f) {
+                fprintf(f, "%s\n", open_id);
+                fclose(f);
+            }
+            int pfd = open(lock, O_RDONLY | O_CLOEXEC);
+            if (pfd >= 0) {
+                ssize_t k = read(pfd, pidtext, sizeof(pidtext) - 1);
+                pidtext[k > 0 ? k : 0] = 0;
+                close(pfd);
+            }
+            if (atoi(pidtext) > 1)
+                kill((pid_t)atoi(pidtext), SIGUSR1);
+        }
         return 0;                                               /* already open */
+    }
+    if (lfd >= 0 && ftruncate(lfd, 0) == 0) {                   /* (the pid, for the next start that wants this window to show a device) */
+        char pidtext[24];
+        int len = snprintf(pidtext, sizeof(pidtext), "%d\n", (int)getpid());
+        if (write(lfd, pidtext, (size_t)len) < 0)
+            (void)lfd;
+    }
+    signal(SIGUSR1, on_usr1);
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
     static struct app a;
     a.dump = getenv("MELLAGUI_SMART_DUMP");
+    if (open_id)
+        copy(a.want_dev, sizeof(a.want_dev), open_id);
     const char *pm = getenv("MELLAGUI_SMART_POLL_MS");
     a.poll_ms = pm && atoi(pm) >= 100 ? atoi(pm) : 10000;
     a.dev = calloc(TUYA_MAX_DEV, sizeof(*a.dev));

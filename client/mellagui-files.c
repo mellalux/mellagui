@@ -125,7 +125,7 @@ struct pane {
     int last_click_row;
 };
 
-enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
+enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO, PV_TABLE };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
 
 /* What the preview pane shows: the file under the cursor of the active pane. */
 struct preview {
@@ -137,6 +137,8 @@ struct preview {
     char info[160];
     char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
     int nlines;
+    int left;                           /* PV_TABLE: characters scrolled out at the left */
+    int tcols, trows;                   /* PV_TABLE: the table's columns and data rows (the header not counted); `lines` are its rows, ready to paint */
     const struct syn_lang *lang;        /* PV_TEXT: the syntax colours of the file (NULL: none) ... */
     uint8_t *hl_st;                     /* ... and the lexer's state at the start of every line (nlines + 1 of them) */
     int top;                            /* first visible line (PV_MARKDOWN: pixels scrolled down) */
@@ -2066,6 +2068,8 @@ static void preview_clear(struct preview *pv)
     free(pv->hl_st);
     pv->hl_st = NULL;
     pv->lang = NULL;
+    pv->tcols = pv->trows = 0;
+    pv->left = 0;
     lm_img_free(&pv->img);
     free(pv->scaled);
     pv->scaled = NULL;
@@ -2137,6 +2141,223 @@ static void pv_text(struct preview *pv, const unsigned char *buf, size_t n)
         if (len < 500)
             line[len++] = (char)c;
     }
+}
+
+/* The separator of a .csv: the one of , ; | that the first line has most of outside quotes (a tab counts too: a "csv" that is tab separated). */
+static char csv_delim(const unsigned char *buf, size_t n)
+{
+    static const char cand[] = { ',', ';', '\t', '|' };
+    int cnt[4] = { 0 };
+    bool q = false;
+    for (size_t i = 0; i < n && buf[i] != '\n'; i++) {
+        if (buf[i] == '"')
+            q = !q;
+        else if (!q)
+            for (int k = 0; k < 4; k++)
+                cnt[k] += buf[i] == (unsigned char)cand[k];
+    }
+    int best = 0;
+    for (int k = 1; k < 4; k++)
+        if (cnt[k] > cnt[best])
+            best = k;
+    return cand[best];
+}
+
+/* ---- CSV / TSV as a table ---- */
+#define CSV_MAX_COLS 40
+#define CSV_MAX_ROWS 20000
+#define CSV_CELL_MAX 24                                                  /* a column is at most this many characters wide */
+
+struct csv {
+    char ***row;                        /* row[r][c] */
+    int *ncol;
+    int nrow, cap;
+};
+
+static void csv_free(struct csv *t)
+{
+    for (int r = 0; r < t->nrow; r++) {
+        for (int c = 0; c < t->ncol[r]; c++)
+            free(t->row[r][c]);
+        free(t->row[r]);
+    }
+    free(t->row);
+    free(t->ncol);
+    memset(t, 0, sizeof(*t));
+}
+
+static int utf8_len(const char *s)
+{
+    int n = 0;
+    for (; *s; s++)
+        n += ((unsigned char)*s & 0xc0) != 0x80;
+    return n;
+}
+
+/* Splits the text into records and fields (RFC 4180: quotes, doubled quotes, line breaks inside quotes). A last record that the 128 KB cut in half is dropped. */
+static bool csv_parse(struct csv *t, const unsigned char *buf, size_t n, char delim, bool cut)
+{
+    memset(t, 0, sizeof(*t));
+    char *f = malloc(n + 1);
+    char **fields = malloc(CSV_MAX_COLS * sizeof(char *));
+    if (!f || !fields) {
+        free(f);
+        free(fields);
+        return false;
+    }
+    int nf = 0;
+    size_t fl = 0;
+    bool quoted = false, in_q = false, any = false;
+    for (size_t i = 0; i <= n; i++) {
+        int c = i < n ? buf[i] : -1;
+        bool end_rec = false, end_field = false;
+        if (in_q) {
+            if (c < 0) {
+                break;
+            } else if (c == '"') {
+                if (i + 1 < n && buf[i + 1] == '"') { f[fl++] = '"'; i++; }
+                else in_q = false;
+            } else {
+                f[fl++] = c == '\n' || c == '\r' || c == '\t' ? ' ' : (char)(c < 0x20 ? '?' : c);
+            }
+            continue;
+        }
+        if (c == '"' && fl == 0 && !quoted) { in_q = quoted = true; any = true; continue; }
+        if (c == delim) end_field = true;
+        else if (c == '\n' || c < 0) end_rec = true;
+        else if (c == '\r') continue;
+        else { f[fl++] = c == '\t' ? ' ' : (char)(c < 0x20 ? '?' : c); any = true; continue; }
+        if (end_field || end_rec) {
+            if (nf < CSV_MAX_COLS) {
+                f[fl] = 0;
+                fields[nf++] = strdup(f);
+            }
+            fl = 0;
+            quoted = false;
+            if (end_rec) {
+                bool empty = nf == 1 && !fields[0][0] && !any;           /* a blank line is no record */
+                if (!empty && !(c < 0 && cut)) {
+                    if (t->nrow == t->cap) {
+                        t->cap = t->cap ? t->cap * 2 : 64;
+                        t->row = realloc(t->row, (size_t)t->cap * sizeof(*t->row));
+                        t->ncol = realloc(t->ncol, (size_t)t->cap * sizeof(int));
+                    }
+                    t->row[t->nrow] = malloc((size_t)nf * sizeof(char *));
+                    memcpy(t->row[t->nrow], fields, (size_t)nf * sizeof(char *));
+                    t->ncol[t->nrow++] = nf;
+                } else {
+                    for (int k = 0; k < nf; k++) free(fields[k]);
+                }
+                nf = 0;
+                any = false;
+                if (t->nrow >= CSV_MAX_ROWS)
+                    break;
+            }
+        }
+    }
+    for (int k = 0; k < nf; k++)
+        free(fields[k]);
+    free(f);
+    free(fields);
+    return t->nrow > 0;
+}
+
+static bool csv_is_number(const char *s)
+{
+    while (*s == ' ') s++;
+    if (!*s)
+        return false;
+    if (!(isdigit((unsigned char)*s) || ((*s == '-' || *s == '+' || *s == '.') && s[1])))
+        return false;
+    char *end;
+    strtod(s, &end);
+    while (*end == ' ') end++;
+    return *end == 0;
+}
+
+struct str_buf { char *s; size_t n, cap; };
+static void sb_add(struct str_buf *o, const char *s, size_t n)
+{
+    if (o->n + n + 1 > o->cap) {
+        o->cap = (o->n + n + 1) * 2;
+        o->s = realloc(o->s, o->cap);
+    }
+    memcpy(o->s + o->n, s, n);
+    o->n += n;
+    o->s[o->n] = 0;
+}
+/* Cell text cut to `w` characters (a cut one ends in "…"), written padded to `w` (right aligned for numbers). */
+static void csv_put_cell(struct str_buf *o, const char *s, int w, bool right)
+{
+    int len = utf8_len(s), shown = len > w ? w : len;
+    size_t bytes = 0;
+    for (int k = 0; k < shown - (len > w ? 1 : 0); k++) {                /* whole characters */
+        bytes++;
+        while (((unsigned char)s[bytes] & 0xc0) == 0x80)
+            bytes++;
+    }
+    int pad = w - shown;
+    for (int k = 0; right && k < pad; k++) sb_add(o, " ", 1);
+    sb_add(o, s, bytes);
+    if (len > w)
+        sb_add(o, "\xe2\x80\xa6", 3);
+    for (int k = 0; !right && k < pad; k++) sb_add(o, " ", 1);
+}
+
+/* The rows as lines of text: columns padded to their widest cell, a bar between them, a rule under the header. The paint draws the header and the bars in
+ * their own colours. False when it is no table (one column: a file that only has the extension). */
+static bool pv_table(struct preview *pv, const unsigned char *buf, size_t n, char delim, bool cut)
+{
+    struct csv t;
+    if (!csv_parse(&t, buf, n, delim, cut))
+        return false;
+    int nc = 0;
+    for (int r = 0; r < t.nrow; r++)
+        nc = LM_MAX(nc, t.ncol[r]);
+    if (nc < 2) {
+        csv_free(&t);
+        return false;
+    }
+    int w[CSV_MAX_COLS] = { 0 };
+    bool num[CSV_MAX_COLS];
+    for (int c = 0; c < nc; c++) {
+        num[c] = t.nrow > 1;
+        for (int r = 0; r < t.nrow; r++) {
+            const char *cell = c < t.ncol[r] ? t.row[r][c] : "";
+            w[c] = LM_MAX(w[c], LM_MIN(utf8_len(cell), CSV_CELL_MAX));
+            if (r > 0 && cell[0] && !csv_is_number(cell))
+                num[c] = false;
+        }
+        w[c] = LM_MAX(w[c], 1);
+    }
+    int cap = 0;
+    for (int r = 0; r < t.nrow; r++) {
+        struct str_buf o = { 0 };
+        for (int c = 0; c < nc; c++) {
+            if (c)
+                sb_add(&o, "\xe2\x94\x82", 3);                          /* │ */
+            sb_add(&o, " ", 1);
+            csv_put_cell(&o, c < t.ncol[r] ? t.row[r][c] : "", w[c], num[c] && r > 0);
+            sb_add(&o, " ", 1);
+        }
+        pv_line(pv, &cap, o.s ? o.s : "", o.n);
+        free(o.s);
+        if (r == 0 && t.nrow > 1) {                                       /* the rule: ───┼─── */
+            struct str_buf o2 = { 0 };
+            for (int c = 0; c < nc; c++) {
+                if (c)
+                    sb_add(&o2, "\xe2\x94\xbc", 3);                    /* ┼ */
+                for (int k = 0; k < w[c] + 2; k++)
+                    sb_add(&o2, "\xe2\x94\x80", 3);                    /* ─ */
+            }
+            pv_line(pv, &cap, o2.s, o2.n);
+            free(o2.s);
+        }
+    }
+    pv->tcols = nc;
+    pv->trows = t.nrow - 1;
+    csv_free(&t);
+    return true;
 }
 
 static void pv_hex(struct preview *pv, const unsigned char *buf, size_t n)
@@ -2263,6 +2484,10 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_MARKDOWN;
         pv->md = md_parse((const char *)buf, (size_t)n);
         pv->top = 0;
+    } else if ((ext_is(path, "csv") || ext_is(path, "tsv")) && pv_table(pv, buf, (size_t)n, ext_is(path, "tsv") ? '\t' : csv_delim(buf, (size_t)n), (off_t)n < st.st_size)) {
+        pv->kind = PV_TABLE;                                             /* a table: the rows, ready to paint */
+        if ((off_t)n < st.st_size)
+            pv_linef(pv, &cap, "...");
     } else {
         pv->kind = PV_TEXT;
         pv_text(pv, buf, (size_t)n);
@@ -3516,7 +3741,7 @@ static bool pv_scrolls(const struct app *a, int body_h, int *total, int *view, i
     if (pv->kind == PV_MARKDOWN && pv->md) {
         *total = md_height(pv->md);
         *view = body_h;
-    } else if (pv->kind == PV_TEXT || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR) {
+    } else if (pv->kind == PV_TEXT || pv->kind == PV_TABLE || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR) {
         *total = pv->nlines;
         *view = LM_MAX(body_h / LM_FONT_H, 1);
     } else {
@@ -3558,6 +3783,17 @@ static void scroll_preview(struct app *a, int lines)
         pv->top = LM_CLAMP(pv->top + lines * 22, 0, pv_max_top(a));
     else
         pv->top = LM_CLAMP(pv->top + lines, 0, pv_max_top(a));
+    a->win.redraw = true;
+}
+
+/* A wide table: `dx` characters sideways (never beyond its widest row). */
+static void scroll_table_x(struct app *a, int dx)
+{
+    struct preview *pv = &a->pv;
+    int widest = 0;
+    for (int i = 0; i < pv->nlines; i++)
+        widest = LM_MAX(widest, utf8_len(pv->lines[i]));
+    pv->left = LM_CLAMP(pv->left + dx, 0, LM_MAX(widest - 8, 0));
     a->win.redraw = true;
 }
 
@@ -3682,9 +3918,20 @@ static void handle_key(struct app *a, uint32_t ks)
     case LM_KS_End: select_row(a, rows(p) - 1); return;
     case LM_KS_Return:
     case LM_KS_KP_Enter:
-    case LM_KS_Right: open_selected(a); return;
-    case LM_KS_BackSpace:
-    case LM_KS_Left: go_up(a); return;
+    case LM_KS_Right:
+        if (shift && a->preview && a->pv.kind == PV_TABLE)                /* Shift+Left / Right: a wide table moves sideways */
+            scroll_table_x(a, 4);
+        else
+            open_selected(a);
+        return;
+    case LM_KS_Left:
+        if (shift && a->preview && a->pv.kind == PV_TABLE) {
+            scroll_table_x(a, -4);
+            return;
+        }
+        go_up(a);
+        return;
+    case LM_KS_BackSpace: go_up(a); return;
     case LM_KS_Tab: switch_pane(a); return;
     case LM_KS_Insert: if (a->dual) toggle_mark(a); return;
     case LM_KS_Delete: cmd_delete(a, shift); return;
@@ -4526,7 +4773,7 @@ static void files_dump(struct app *a)
     if (!f)
         return;
     struct preview *pv = &a->pv;
-    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio" };
+    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio", "table" };
     int body_h = a->win.bh - list_top() - bottom_h(a);
     int total, view, pos;
     fprintf(f, "kind=%s loaded=%d top=%d body=%d split=%d want=%s\n", a->preview ? names[pv->kind] : "none", pv->loaded ? 1 : 0, pv->top, body_h, split_x(a), pv->want);
@@ -4542,6 +4789,8 @@ static void files_dump(struct app *a)
     }
     if (pv->kind == PV_TEXT)
         fprintf(f, "text lang=%s\n", pv->lang ? syn_name(pv->lang) : "-");
+    if (pv->kind == PV_TABLE)
+        fprintf(f, "table cols=%d rows=%d left=%d\n", pv->tcols, pv->trows, pv->left);
     if (pv->kind == PV_MARKDOWN && pv->md)
         fprintf(f, "md height=%d width=%d headings=%d links=%d\n", md_height(pv->md), md_width(pv->md), md_count(pv->md, MD_N_HEADINGS), md_count(pv->md, MD_N_LINKS));
     if (pv->kind == PV_AUDIO) {
@@ -4604,6 +4853,41 @@ static void paint_markdown(struct wlwin *w, struct app *a, int x0, int pw, int l
     md_paint(w, pv->md, x0 + (pw - sbw - cw) / 2, list_y, cw, body_h, pv->top);
     pv_header(w, a, x0, pw, list_y);
     pv_scrollbar(w, a, x0, pw, list_y, body_h);
+}
+
+/* One row of a table: the text in cells, the bars and the rule in a dim colour, the header in the accent colour, every other data row on a faint band. */
+static void paint_table_row(struct wlwin *w, int x, int y, char *s, int left, bool header, bool band, int max_w)
+{
+    for (; left > 0 && *s; left--) {                                    /* scrolled out at the left: whole characters */
+        s++;
+        while (((unsigned char)*s & 0xc0) == 0x80)
+            s++;
+    }
+    if (band)
+        wlwin_fill(w, x - 4, y, max_w + 8, LM_FONT_H, lm_mix_rgb(COL_BG, 0xffffff, 0.05));
+    int col = 0;
+    for (size_t i = 0; s[i];) {
+        bool bar = !memcmp(s + i, "\xe2\x94\x82", 3) || !memcmp(s + i, "\xe2\x94\xbc", 3) || !memcmp(s + i, "\xe2\x94\x80", 3);
+        size_t j = i;
+        int chars = 0;
+        do {
+            j++;
+            while (s[j] && ((unsigned char)s[j] & 0xc0) == 0x80)
+                j++;
+            chars++;
+            if (bar)
+                break;                                                  /* one box character at a time (they are 3 bytes) */
+        } while (s[j] && memcmp(s + j, "\xe2\x94", 2));
+        int px = col * LM_FONT_W;
+        if (px >= max_w)
+            break;
+        char keep = s[j];
+        s[j] = 0;
+        wlwin_text_cells(w, x + px, y, s + i, 1, bar ? COL_DIM : header ? COL_DIR : COL_FG, max_w - px);
+        s[j] = keep;
+        col += chars;
+        i = j;
+    }
 }
 
 /* The colour of a syntax class (the same palette entries as the editor's). */
@@ -4714,6 +4998,8 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
             col = COL_FG;
         if (pv->kind == PV_DIR || pv->kind == PV_ERROR)
             wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
+        else if (pv->kind == PV_TABLE && pv->top + r < pv->nlines)
+            paint_table_row(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->left, pv->top + r == 0, pv->top + r >= 2 && (pv->top + r) % 2 == 1, pw - 16);
         else if (pv->kind == PV_TEXT && pv->lang && pv->hl_st && strlen(s) < 4000)
             paint_code_line(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->lang, pv->hl_st[pv->top + r], pw - 16);
         else                                                            /* what is in a file: cells, as an editor shows it */
@@ -5317,6 +5603,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_AXIS:
+        if (args[1].u == 1 && pane_is_preview(a, pane_at(a, (int)a->px)) && a->pv.kind == PV_TABLE) {        /* the sideways wheel */
+            scroll_table_x(a, args[2].f > 0 ? 4 : -4);
+            break;
+        }
         if (args[1].u == 0) {
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
             if (lines == 0)
@@ -5589,6 +5879,15 @@ static int selftest(void)
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT && pv.nlines == 4 && !strcmp(pv.lines[0], "a   b") && !strcmp(pv.lines[2], "") && !strcmp(pv.lines[3], "last"),
           "tabs and line ends: %d lines, first '%s'", pv.nlines, pv.nlines ? pv.lines[0] : "");
+    touch(dir, "t.csv", "a;b\n\"x;y\";2\n\"q\"\"r\";10\n", 22);
+    snprintf(p, sizeof(p), "%s/t.csv", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TABLE && pv.tcols == 2 && pv.trows == 2 && pv.nlines == 4 && strstr(pv.lines[2], "x;y") && strstr(pv.lines[3], "q\"r"),
+          "csv preview: kind %d, %d cols, %d rows, %d lines", pv.kind, pv.tcols, pv.trows, pv.nlines);
+    touch(dir, "one.csv", "just words\nno columns\n", 22);
+    snprintf(p, sizeof(p), "%s/one.csv", dir);
+    preview_load(&pv, p, false);
+    CHECK(pv.kind == PV_TEXT, "a .csv with one column is plain text");
     snprintf(p, sizeof(p), "%s/bin.dat", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_HEX && pv.nlines == 1 && strstr(pv.lines[0], "61 00 62") && strstr(pv.lines[0], "|a.b"), "hex dump: '%s'", pv.nlines ? pv.lines[0] : "");

@@ -2647,6 +2647,7 @@ class TestClients(Base):
     CTRL, SHIFT = 29, 42
     K_S, K_Q, K_Z, K_A, K_C, K_V, K_X, K_Y, K_F = 31, 16, 44, 30, 46, 47, 45, 21, 33
     K_HOME, K_END, K_BS, K_LEFT, K_UP, K_DOWN = 102, 107, 14, 105, 103, 108
+    K_RIGHT = 106
 
     MD_SAMPLE = (b'# Title\n\nSee [the site](https://example.org/a) and [notes](other.md).\n\n- one\n- two\n\n' +
                  b''.join(b'Paragraph number %d with some words to fill the page.\n\n' % i for i in range(40)))
@@ -2853,6 +2854,29 @@ class TestClients(Base):
             return set(ppm.px(x, y) for y in range(win['y'] + y0, win['y'] + y1) for x in range(win['x'] + 520, win['x'] + 760))
         self.assertGreaterEqual(len(colours(100, 150)), 6, 'the C block is painted in several colours')
         self.assertLessEqual(len(colours(160, 175)), 4, 'a block with no language stays in one colour')
+
+    def test_files_previews_a_csv_file_as_a_table(self):
+        d = tempfile.mkdtemp(prefix='files-csv-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.csv'), 'w') as f:
+            f.write('name;qty;price;a rather long note column;another long column\nApple;3;1.50;"fresh; red";x\nBanana;12;0.25;"say ""hi""";y\n')
+        with open(os.path.join(d, 'b.csv'), 'w') as f:
+            f.write('only words\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.csv)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('5', '2'))   # the separator is found, the quoted ; stays in its cell
+        self.assertEqual(extra['table']['left'], '0')
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(self.SHIFT, True)
+        ctl.tap(self.K_RIGHT)                                                          # Shift+Right moves a wide table sideways
+        ctl.key(self.SHIFT, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('table', {}).get('left') != '0')
+        self.assertEqual(extra['table']['left'], '4')
+        ctl.tap(self.K_DOWN)                                                           # b.csv has one column: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
 
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)

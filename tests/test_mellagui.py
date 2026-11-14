@@ -2815,6 +2815,30 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_code_with_syntax_colours(self):
+        d = tempfile.mkdtemp(prefix='files-syn-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, 'a.c'), 'w') as f:
+            f.write('#include <stdio.h>\n/* a\n comment */\nint main(void) { return 42; }\n')
+        with open(os.path.join(d, 'b.txt'), 'w') as f:
+            f.write('just words\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.c)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(extra['text']['lang'], 'C')                                   # the language comes from the file's name, like in the editor
+        ppm = ctl.dump(os.path.join(tmp, 'files-syn.ppm'))
+        colours = set()
+        for y in range(win['y'] + 30, win['y'] + 90):                                  # the text of the pane: more than one colour (plain, preprocessor, comment, keyword, number)
+            for x in range(win['x'] + 520, win['x'] + 760):
+                colours.add(ppm.px(x, y))
+        self.assertGreaterEqual(len(colours), 5, 'the lines are painted in colours (the background and four or more of text)')
+        ctl.tap(self.K_DOWN)                                                           # b.txt: plain text, no colours
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('text', {}).get('lang') == '-')
+        self.assertEqual(extra['text']['lang'], '-')
+        ppm = ctl.dump(os.path.join(tmp, 'files-syn2.ppm'))
+        plain = set(ppm.px(x, y) for y in range(win['y'] + 56, win['y'] + 72) for x in range(win['x'] + 520, win['x'] + 700))
+        self.assertLessEqual(len(plain), 3, 'plain text is in one colour (and the background)')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

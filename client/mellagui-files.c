@@ -62,6 +62,7 @@
 #include "uikit.h"
 #include "wlc.h"
 #include "util.h"
+#include "syntax.h"
 #include "wlcard.h"
 #include "wlrail.h"
 #include "wlclip.h"
@@ -136,6 +137,8 @@ struct preview {
     char info[160];
     char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
     int nlines;
+    const struct syn_lang *lang;        /* PV_TEXT: the syntax colours of the file (NULL: none) ... */
+    uint8_t *hl_st;                     /* ... and the lexer's state at the start of every line (nlines + 1 of them) */
     int top;                            /* first visible line (PV_MARKDOWN: pixels scrolled down) */
     struct md_doc *md;                  /* PV_MARKDOWN: the page */
     struct ffaudio_info ai;             /* PV_AUDIO: what the file says (its picture is `img`) */
@@ -2060,6 +2063,9 @@ static void preview_clear(struct preview *pv)
     free(pv->lines);
     pv->lines = NULL;
     pv->nlines = 0;
+    free(pv->hl_st);
+    pv->hl_st = NULL;
+    pv->lang = NULL;
     lm_img_free(&pv->img);
     free(pv->scaled);
     pv->scaled = NULL;
@@ -2262,6 +2268,12 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv_text(pv, buf, (size_t)n);
         if ((off_t)n < st.st_size)
             pv_linef(pv, &cap, "...");
+        pv->lang = syn_find(path, pv->nlines > 0 ? pv->lines[0] : NULL);          /* code is shown in colours, like the editor does */
+        if (pv->lang && pv->nlines > 0) {
+            pv->hl_st = calloc((size_t)pv->nlines + 1, 1);
+            for (int i = 0; pv->hl_st && i < pv->nlines; i++)
+                pv->hl_st[i + 1] = (uint8_t)syn_line(pv->lang, pv->lines[i], strlen(pv->lines[i]), pv->hl_st[i], NULL);
+        }
     }
     free(buf);
 }
@@ -4528,6 +4540,8 @@ static void files_dump(struct app *a)
                 fprintf(f, "rect pvthumb %d %d %d %d\n", x0 + pw - lm_metrics.scrollbar_width, list_top() + ty, lm_metrics.scrollbar_width, th);
             }
     }
+    if (pv->kind == PV_TEXT)
+        fprintf(f, "text lang=%s\n", pv->lang ? syn_name(pv->lang) : "-");
     if (pv->kind == PV_MARKDOWN && pv->md)
         fprintf(f, "md height=%d width=%d headings=%d links=%d\n", md_height(pv->md), md_width(pv->md), md_count(pv->md, MD_N_HEADINGS), md_count(pv->md, MD_N_LINKS));
     if (pv->kind == PV_AUDIO) {
@@ -4590,6 +4604,51 @@ static void paint_markdown(struct wlwin *w, struct app *a, int x0, int pw, int l
     md_paint(w, pv->md, x0 + (pw - sbw - cw) / 2, list_y, cw, body_h, pv->top);
     pv_header(w, a, x0, pw, list_y);
     pv_scrollbar(w, a, x0, pw, list_y, body_h);
+}
+
+/* The colour of a syntax class (the same palette entries as the editor's). */
+static uint32_t syn_color(int c)
+{
+    switch (c) {
+    case SYN_COMMENT: return lm_theme.syntax_comment;
+    case SYN_STRING: return lm_theme.syntax_string;
+    case SYN_NUMBER: return lm_theme.syntax_number;
+    case SYN_KEYWORD: return lm_theme.syntax_keyword;
+    case SYN_TYPE: return lm_theme.syntax_type;
+    case SYN_FUNC: return lm_theme.syntax_function;
+    case SYN_PREPROC: return lm_theme.syntax_preproc;
+    case SYN_ADDED: return lm_theme.ok;
+    case SYN_REMOVED: return lm_theme.error;
+    default: return lm_theme.text_soft;
+    }
+}
+
+/* One line of code in cells, a run of one colour at a time (the line is cut into runs by writing a NUL into it for a moment). */
+static void paint_code_line(struct wlwin *w, int x, int y, char *s, const struct syn_lang *lang, int state, int max_w)
+{
+    size_t len = strlen(s);
+    uint8_t cls[4000];
+    syn_line(lang, s, len, state, cls);
+    int col = 0;
+    for (size_t i = 0; i < len;) {
+        size_t j = i;
+        int chars = 0;
+        while (j < len && cls[j] == cls[i]) {                           /* a run: same class, whole UTF-8 characters */
+            j++;
+            while (j < len && ((unsigned char)s[j] & 0xc0) == 0x80)
+                j++;
+            chars++;
+        }
+        int px = col * LM_FONT_W;
+        if (px >= max_w)
+            break;
+        char keep = s[j];
+        s[j] = 0;
+        wlwin_text_cells(w, x + px, y, s + i, 1, syn_color(cls[i]), max_w - px);
+        s[j] = keep;
+        col += chars;
+        i = j;
+    }
 }
 
 static void paint_preview(struct wlwin *w, struct app *a, int idx)
@@ -4655,6 +4714,8 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
             col = COL_FG;
         if (pv->kind == PV_DIR || pv->kind == PV_ERROR)
             wlwin_text(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
+        else if (pv->kind == PV_TEXT && pv->lang && pv->hl_st && strlen(s) < 4000)
+            paint_code_line(w, x0 + 8, list_y + 2 + r * LM_FONT_H, (char *)s, pv->lang, pv->hl_st[pv->top + r], pw - 16);
         else                                                            /* what is in a file: cells, as an editor shows it */
             wlwin_text_cells(w, x0 + 8, list_y + 2 + r * LM_FONT_H, s, 1, col, pw - 16);
     }

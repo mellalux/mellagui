@@ -112,7 +112,7 @@ struct wm_win {
     /* geometry to return to when leaving maximized/fullscreen */
     int32_t rx, ry, rw, rh;
     bool have_restore;
-    uint32_t tiled;             /* LM_EDGE_LEFT / LM_EDGE_RIGHT half-screen tile, 0 = none */
+    uint32_t tiled;             /* the zone it is tiled to (wm_snap.c): LM_EDGE_LEFT / _RIGHT = a half of the screen, with _TOP / _BOTTOM added = a quarter, 0 = none */
     uint64_t focus_seq;         /* when it last had the focus (Alt+Tab lists the most recent first) */
     /* the on-screen keyboard made it move up / shrink (setting osk-avoid): where it was, and what it was given (when it is not that any more
      * the user changed it and it stays as it is) */
@@ -223,6 +223,9 @@ struct lm_wm {
     bool anim_suppress;                 /* no fly-in / fly-out animations just now (the overview brings a window back itself) */
     struct wm_wobble wb;
     struct wm_bubble bubble;
+    uint32_t snap_zone;                 /* while a window is dragged to an edge: the zone it would be tiled to when let go (0 = none, LM_EDGE_TOP = maximize) */
+    struct lm_rect snap_rect;           /* ... where that is, and its picture (LM_SCENE_GHOST) */
+    struct lm_ghost snap_ghost;
     struct lm_timer *anim_timer;
     struct lm_window *glide_win;        /* a window that glides to glide_tx / glide_ty (dragged, or let go a moment ago) */
     int32_t glide_tx, glide_ty;
@@ -432,6 +435,14 @@ bool anim_wanted(struct lm_wm *wm, const struct lm_window *w);
 float ease_smooth(float t);
 void wobble_start(struct lm_wm *wm, struct lm_window *w, double px, double py);
 void wobble_stop(struct lm_wm *wm);
+
+/* wm_snap.c: tiling zones and the snap preview while a window is dragged to an edge */
+bool snap_zone_valid(uint32_t zone);                                                        /* a half, a quarter or none */
+void snap_zone_rect(const struct lm_rect *usable, uint32_t zone, struct lm_rect *out);       /* where a zone is in the usable area */
+const char *snap_zone_name(uint32_t zone);                                                   /* "left", "topright" ... */
+void snap_update(struct lm_wm *wm, double x, double y);                                      /* the pointer moved while dragging: show / move / drop the preview */
+void snap_clear(struct lm_wm *wm);
+void snap_free(struct lm_wm *wm);
 void wobble_tick(struct lm_wm *wm, uint64_t now);
 bool wobble_wanted(const struct lm_wm *wm, const struct lm_window *w);
 bool anim_glide_to(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y);

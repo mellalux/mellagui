@@ -23,6 +23,7 @@
  *   terminal run settings            the [commands] programs          exec CMD             a shell command
  *   close fullscreen maximize-toggle  the focused window               maximize / restore   (Super+Up / Super+Down)
  *   tile-left tile-right             half of the screen                workspace N          switch (1..4)
+ *   tile-top-left tile-top-right tile-bottom-left tile-bottom-right   a quarter of the screen (Super+Ctrl+Left / Right, with Shift: the lower ones)
  *   move-to-workspace N              move the focused window           focus-next focus-prev  cycle the windows
  *   layout-next layout-prev          keyboard layout                   lock                 lock the screen
  *   gadget-clipboard gadget-mixer gadget-system gadget-smart   show / hide a gadget   clipboard-pick     choose from the history with the arrows
@@ -47,6 +48,7 @@ enum lm_action {
     LM_ACT_CLOSE, LM_ACT_LOCK, LM_ACT_QUIT,
     LM_ACT_WORKSPACE, LM_ACT_MOVE_TO_WORKSPACE, LM_ACT_FOCUS_NEXT, LM_ACT_FOCUS_PREV,
     LM_ACT_FULLSCREEN, LM_ACT_MAXIMIZE_TOGGLE, LM_ACT_MAXIMIZE, LM_ACT_RESTORE, LM_ACT_TILE_LEFT, LM_ACT_TILE_RIGHT,
+    LM_ACT_TILE_TOP_LEFT, LM_ACT_TILE_TOP_RIGHT, LM_ACT_TILE_BOTTOM_LEFT, LM_ACT_TILE_BOTTOM_RIGHT,
     LM_ACT_RELOAD_CONFIG, LM_ACT_LAUNCHER, LM_ACT_OSK, LM_ACT_QUICK, LM_ACT_MAGNIFY_IN, LM_ACT_MAGNIFY_OUT, LM_ACT_OVERVIEW, LM_ACT_NIGHT_LIGHT, LM_ACT_DND,
     LM_ACT_GADGET_TOGGLE,
 };

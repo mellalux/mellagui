@@ -206,10 +206,12 @@ void lm_wm_window_request_maximize(struct lm_window *w, bool maximize);
 void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen);
 void lm_wm_window_request_minimize(struct lm_window *w);
 /*
- * wm-initiated: tile to LM_EDGE_LEFT / LM_EDGE_RIGHT half of the usable area, or
+ * wm-initiated: tile to LM_EDGE_LEFT / LM_EDGE_RIGHT half of the usable area, to a QUARTER (the same with LM_EDGE_TOP or LM_EDGE_BOTTOM added), or
  * LM_EDGE_NONE to undo a tile. Tiling leaves the maximized state, remembers the
  * pre-tile geometry, and is dropped by maximize/fullscreen, resize and move grabs.
- * Reported as "tiled-left"/"tiled-right" in lm_wm_describe flags.
+ * Reported as "tiled-left"/"tiled-right"/"tiled-topleft"/"tiled-topright"/"tiled-bottomleft"/"tiled-bottomright" in lm_wm_describe flags.
+ * Dragging a window by its title bar to a screen edge (a half), a corner (a quarter) or the top (maximize) shows a preview and does that when the button
+ * is let go (wm_snap.c).
  */
 void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge);
 /* Start an interactive move/resize with the seat pointer (xdg already validated the serial). */
@@ -730,6 +732,8 @@ struct lm_scene_item {
 /* Animation state for the control socket (`anim`): "anim n=N" and one "item kind=open|close|minimize|restore x= y= w= h= alpha=" per
  * running animation; returns the length. */
 size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size);
+/* "snap zone=NAME x= y= w= h=" while a drag shows a preview, else "snap zone=none" (the control socket's `snap`). */
+size_t lm_wm_snap_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* Return false to stop the iteration. */
 typedef bool (*lm_scene_fn)(const struct lm_scene_item *item, void *data);

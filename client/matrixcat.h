@@ -75,6 +75,9 @@ void mcat_state(float t, struct mcat_state *out);
 /* The length of Tom's whole day in seconds (he sits, stands up, walks to another place, sits, lies down, gets up, walks back ...): the pose repeats every cycle. */
 float mcat_cycle(void);
 
+/* Which day Tom lives: 0 = the same every time (the first cycle is a script: tests, --at), any other number = a day of its own (every cycle random). */
+void mcat_set_seed(uint32_t seed);
+
 /* Poses the cat for time `t` (seconds) with the camera at `cam`. */
 void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr);
 

@@ -1332,6 +1332,20 @@ static int selftest(void)
                     }
                     CHECK(moves > 12 && runs > 2 && hops > 5);                                      /* the random days have walks, runs and hops in them */
                 }
+                for (uint32_t sd = 1; sd <= 6; sd++) {                                              /* days of their own (a seed each): Tom walks about from the start, in the area */
+                    mcat_set_seed(sd);
+                    int walks = 0;
+                    struct mcat_state q0 = { 0 };
+                    for (float t = 0.0f; t < 4.0f * cyc; t += 0.2f) {
+                        struct mcat_state s2;
+                        mcat_state(t, &s2);
+                        CHECK(s2.z > 3.0f && s2.z < 5.7f && fabsf(s2.x) < 2.9f);
+                        walks += s2.walk > 0.5f && q0.walk <= 0.5f;
+                        q0 = s2;
+                    }
+                    CHECK(walks > 4);
+                }
+                mcat_set_seed(0);
                 {
                     struct mcat_state e0, e1;
                     mcat_state(cyc * 3.0f - 0.02f, &e0);
@@ -1395,6 +1409,7 @@ int main(int argc, char **argv)
     a.rain.rng = (uint64_t)now_ms() * 2654435761u + (uint64_t)getpid() + 1;
     bool selftest_only = false;
     const char *bench = NULL;
+    bool at_given = false, seed_given = false;
     bool sun_set = false;                                                 /* --sun was given */
     a.rain.density = 260;
     for (int i = 1; i < argc; i++) {
@@ -1407,6 +1422,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--at") && i + 1 < argc) {
             double at = atof(argv[++i]);                                        /* (a macro would evaluate argv[++i] several times) */
             a.room.t = (float)LM_CLAMP(at, 0.0, 100000.0);
+            at_given = true;
         } else if (!strcmp(argv[i], "--no-cat")) {
             a.room.no_cat = true;
         } else if (!strcmp(argv[i], "--density") && i + 1 < argc) {
@@ -1446,10 +1462,16 @@ int main(int argc, char **argv)
             a.rain.speed_pct = LM_CLAMP(pct, 25, 400);
         } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
+            seed_given = true;
         } else {
             fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--sun HH:MM,HH:MM|auto|none] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
+    }
+    {                                                                   /* Tom's day: the same script for --at / --bench / the selftest (tests), else a day of its own every time */
+        bool fixed_day = bench || selftest_only || at_given;
+        uint32_t cs = (uint32_t)(a.rain.rng >> 8) ^ (seed_given ? 0u : (uint32_t)time(NULL) * 2654435761u ^ (uint32_t)getpid());
+        mcat_set_seed(fixed_day ? 0u : (cs ? cs : 1u));
     }
     make_set(&a.rain);
     if (!sun_set)                                                         /* the real clock gets the real sun; a fixed or fast clock the model's 06:00 / 18:00 */

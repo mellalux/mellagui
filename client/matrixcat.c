@@ -153,6 +153,15 @@ static int g_npath;
 static float g_acc;                     /* the time of the cycle being built so far */
 static int g_built = -1;                /* the cycle in g_seg */
 static struct pt g_end;                 /* where it ended */
+static uint32_t g_seed;                 /* 0 = the first cycle is the script (tests, --at); else every day is its own, from this seed */
+
+void mcat_set_seed(uint32_t seed)
+{
+    if (seed != g_seed) {
+        g_seed = seed;
+        g_built = -1;
+    }
+}
 
 static void path_build(struct pathtab *pt, const struct pt *a, const struct pt *b, int run)
 {
@@ -302,7 +311,19 @@ static void build_cycle(int c)
     g_npath = 0;
     g_acc = 0.0f;
     struct pt cur = g_end;
-    if (c == 0) {                                                       /* the script: sit, walk to the other place, hop twice, lie down for a minute */
+    if (c == 0 && g_seed != 0) {                                        /* a day of its own: he starts somewhere in the area, sitting, and gets up after a while */
+        uint32_t h = h32(g_seed * 2246822519u + 5u);
+        cur = k_home;
+        for (uint32_t k = 0; k < 40; k++) {                             /* (facing into the area, with room to walk: not a wall) */
+            float z = 3.9f + 1.2f * frand(h + k * 11u + 1u), lim = fminf(2.4f, 0.72f * (z - 1.4f)), x = (frand(h + k * 11u + 2u) * 2.0f - 1.0f) * lim;
+            float yaw = frand(h + k * 11u + 3u) * 6.2831853f - 3.1415927f;
+            if (in_area(x + 1.0f * sinf(yaw), z + 1.0f * cosf(yaw))) {
+                cur = (struct pt){ x, z, yaw };
+                break;
+            }
+        }
+        put(K_SIT, cur, cur, 4.0f + 14.0f * frand(h + 4u), -1);
+    } else if (c == 0) {                                                /* the script: sit, walk to the other place, hop twice, lie down for a minute */
         cur = k_home;
         path_build(&g_ptab[g_npath], &k_home, &k_there, 0);
         put(K_SIT, k_home, k_home, 55.0f, -1);
@@ -327,7 +348,7 @@ static void build_cycle(int c)
         int n0 = g_nseg, p0 = g_npath;
         float a0 = g_acc;
         struct pt c0 = cur;
-        episode(h32((uint32_t)c * 2654435761u + (uint32_t)ep * 40503u + 99u), remaining, &cur);
+        episode(h32((uint32_t)c * 2654435761u + (uint32_t)ep * 40503u + 99u + g_seed * 0x9e3779b9u), remaining, &cur);
         if (g_acc > CYCLE_LEN) {                                        /* does not fit: undo it, and a short one at the end instead */
             g_nseg = n0; g_npath = p0; g_acc = a0; cur = c0;
             break;

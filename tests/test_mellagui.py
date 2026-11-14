@@ -5147,6 +5147,35 @@ class TestClients(Base):
             time.sleep(0.1)
         self.assertEqual([w['title'] for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.edit'], ['a.txt - Editor'])
 
+    def test_edit_colours_the_code_by_the_file_name_and_ctrl_l_switches_them(self):
+        keyword = (0xc7, 0x92, 0xea)                                             # the theme's syntax-keyword
+        p, path = self.edit_start(b'return 1;\n', name='x.c')
+        win = self.edit_window()
+        ctl.abs(win['x'] + 400, win['y'] + 300)
+        def purple():
+            ppm = ctl.dump(os.path.join(tmp, 'syn.ppm'))
+            return ppm.count(keyword, win['x'], win['y'], win['x'] + 300, win['y'] + 120)
+        def settled(want_none):                                                  # (the window may still be settling: look for up to 2 s)
+            for _ in range(20):
+                n = purple()
+                if (n == 0) if want_none else (n > 10):
+                    return n
+                time.sleep(0.1)
+            return purple()
+        self.assertGreater(settled(False), 10, 'the keyword "return" of a C file is coloured')
+        self.tab_chord(KEYCODES['l'], shift=False)                               # Ctrl+L: colours off
+        self.assertEqual(settled(True), 0)
+        self.tab_chord(KEYCODES['l'], shift=False)
+        self.assertGreater(settled(False), 10)
+
+    def test_edit_a_plain_text_file_has_no_colours(self):
+        p, path = self.edit_start(b'return 1;\n', name='x.txt')
+        win = self.edit_window()
+        ctl.abs(win['x'] + 400, win['y'] + 300)
+        time.sleep(0.3)
+        ppm = ctl.dump(os.path.join(tmp, 'syn2.ppm'))
+        self.assertEqual(ppm.count((0xc7, 0x92, 0xea), win['x'], win['y'], win['x'] + 300, win['y'] + 120), 0)
+
     def test_edit_has_a_scrollbar_and_the_wheel_stays_where_it_is(self):
         p, path = self.edit_start(''.join('line %d\n' % i for i in range(150)).encode())
         win = self.edit_window()

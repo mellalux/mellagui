@@ -155,6 +155,13 @@
     X("btn-maroon",           btn_maroon,        0x8a3434) \
     X("btn-maroon-lit",       btn_maroon_lit,    0xad4a4a) \
     X("btn-steel",            btn_steel,         0x4a7fa8) /* the disk usage map */ \
+    X("syntax-comment",       syntax_comment,    0x6f7a94) /* the editor's syntax colours (client/syntax.h): comments ... */ \
+    X("syntax-keyword",       syntax_keyword,    0xc792ea) /* ... keywords ... */ \
+    X("syntax-string",        syntax_string,     0x9fd47a) /* ... strings ... */ \
+    X("syntax-number",        syntax_number,     0xf0a060) /* ... numbers and true / false / null ... */ \
+    X("syntax-type",          syntax_type,       0x6fc3d6) /* ... types and keys ... */ \
+    X("syntax-function",      syntax_function,   0x82aaff) /* ... function names ... */ \
+    X("syntax-preproc",       syntax_preproc,    0xe5b567) /* ... #include, @decorators, diff hunks */ \
     X("tile-other",           tile_other,        0x555b66)
 
 #define LM_THEME_NAME_MAX 32

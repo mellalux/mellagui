@@ -74,7 +74,8 @@ static const struct { const char *name, *desc, *colors; } presets[] = {
       "sticky-hot=#2f6fe0 help-card=#eef1f6 bar-deep=#dfe5f0 bar-text=#2a3446 bar-text-bright=#1c2433 viewer-button=#d3dcec "
       "viewer-button-hover=#bfcce4 viewer-button-down=#a8b9d8 divider=#b8c2d4 control=#c9d3e6 control-hot=#b3c1db "
       "control-idle=#d8deea gutter=#e4e9f2 current-line=#e8edf6 terminal-button-on=#a8b9d8 menu-border=#9fb0cc menu-current=#2f6fe0 "
-      "plate-light=#ffffff plate-dark=#d5dbe8 progress=#8ccaa0 picture=#8a52c8 tile-other=#aab4c6 calc-key=#b7c3da calc-key-lit=#9fb0cc" },
+      "plate-light=#ffffff plate-dark=#d5dbe8 progress=#8ccaa0 picture=#8a52c8 tile-other=#aab4c6 calc-key=#b7c3da calc-key-lit=#9fb0cc "
+      "syntax-comment=#6a7488 syntax-keyword=#8a3fc0 syntax-string=#2e7d32 syntax-number=#b45309 syntax-type=#0f766e syntax-function=#1e5fd0 syntax-preproc=#a16207" },
     { "contrast", "Black and white with a yellow accent, for the best readability.",
       "wallpaper-top=#000000 wallpaper-bottom=#101010 frame=#0a2a6b frame-idle=#202020 content=#000000 title-text-idle=#c8c8c8 "
       "title-button-hover=#2b57c4 title-button-pressed=#173a8f title-button-close=#d11111 background=#000000 field=#000000 "
@@ -85,7 +86,8 @@ static const struct { const char *name, *desc, *colors; } presets[] = {
       "bar-deep=#000000 bar-text=#ffffff bar-text-bright=#ffffff viewer-button=#1a1a1a viewer-button-hover=#333333 "
       "viewer-button-down=#4d4d4d divider=#ffffff control=#333333 control-hot=#4d4d4d control-idle=#262626 gutter=#000000 "
       "current-line=#1a1a1a terminal-button-on=#4d4d4d menu-border=#ffffff menu-current=#ffd400 plate-dark=#000000 "
-      "progress=#007a3d picture=#e0a0ff calc-key=#333333 calc-key-lit=#4d4d4d" },
+      "progress=#007a3d picture=#e0a0ff calc-key=#333333 calc-key-lit=#4d4d4d "
+      "syntax-comment=#b0b0b0 syntax-keyword=#ff8bd0 syntax-string=#7dff9b syntax-number=#ffb000 syntax-type=#5fe3ff syntax-function=#9bbcff syntax-preproc=#ffd400" },
 };
 #define NPRESETS ((int)(sizeof(presets) / sizeof(presets[0])))
 

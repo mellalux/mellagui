@@ -13,6 +13,9 @@
  * Mouse: click, drag, double click (word), wheel. Files up to 8 MB; binary files and text that is not
  * valid UTF-8 are refused (saving them would damage them). CRLF files keep their line ends; a final newline is kept as it was.
  *
+ * Syntax colours: by the file's name (or its #! line) for C, C++, Java, C#, Python, JavaScript, TypeScript, Rust, Go, shell, Makefile, JSON, HTML / XML,
+ * CSS, INI / TOML / conf, YAML, SQL, Lua, diff and Markdown source; Ctrl+L switches them off and on (MELLAGUI_EDIT_SYNTAX=0 starts without).
+ *
  * Tabs (not in a note): several files on the command line, Ctrl+O on a file that is not open yet, Ctrl+N and Ctrl+T make one tab each; the bar shows
  * from the second tab on. Ctrl+W closes a tab (asks once when it has unsaved changes), Ctrl+PageUp / PageDown / Ctrl+Tab or Alt+1..9 switch, Ctrl+Shift+
  * PageUp / PageDown move it. Pull a tab out of the bar with the mouse to make it a window of its own (`--adopt`, the document comes on fd 3).
@@ -41,6 +44,7 @@
 #include "metrics.h"
 #include "pathcomp.h"
 #include "protocol.h"
+#include "syntax.h"
 #include "uikit.h"
 #include "util.h"
 #include "wlcard.h"
@@ -54,6 +58,7 @@
 #define TAB_W 4
 /* A sticky note (`--note FILE`): the same editor on coloured paper with no button bar, no line numbers and no status line; it saves by itself. */
 static bool g_note;
+static bool g_syntax = true;            /* the syntax colours: Ctrl+L switches them, MELLAGUI_EDIT_SYNTAX=0 starts without */
 /* The buttons are in two rails of round drops, at the left and the right of the text (not in a note); `--bar` (or MELLAGUI_EDIT_RAIL=0) brings back the bar above it. */
 static bool g_rail = true;
 #define RAIL_W (g_rail && !g_note ? WLRAIL_W : 0)
@@ -113,7 +118,10 @@ struct snap {
     bool preview;                       /* Markdown preview (a .md file opens as a page; Ctrl+M switches to the text and back) */ \
     struct md_doc *md; \
     int md_scroll;                      /* pixels scrolled down */ \
-    const char *md_hover;               /* the address of the link under the pointer */
+    const char *md_hover;               /* the address of the link under the pointer */ \
+    const struct syn_lang *lang;        /* the syntax colours of this file (NULL: none) ... */ \
+    uint8_t *hl_st;                     /* ... the lexer's state at the start of each line (hl_st[y]) ... */ \
+    int hl_cap, hl_valid;               /* ... of which the first hl_valid are up to date (an edit in line y leaves y + 1) */
 struct docstate { DOC_FIELDS };
 
 struct app {
@@ -239,6 +247,7 @@ static void doc_clear(struct app *a)
     a->cx = a->ax = 0;
     a->top = a->left = 0;
     a->want_col = 0;
+    a->hl_valid = 0;
 }
 
 /* UTF-8 steps within a line */
@@ -413,6 +422,7 @@ static bool undo(struct app *a, bool redo)
 /* Inserts text (with \n line ends; \r dropped) at the cursor and leaves the cursor after it. */
 static void insert_at_cursor(struct app *a, const char *t, size_t n)
 {
+    a->hl_valid = LM_MIN(a->hl_valid, a->cy + 1);
     const char *p = t, *end = t + n;
     while (p <= end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
@@ -444,6 +454,7 @@ static void insert_at_cursor(struct app *a, const char *t, size_t n)
 
 static void delete_range(struct app *a, int y0, size_t x0, int y1, size_t x1)
 {
+    a->hl_valid = LM_MIN(a->hl_valid, y0 + 1);
     struct line *f = &a->l[y0], *t = &a->l[y1];
     size_t tail = t->len - x1;
     line_reserve(f, x0 + tail);
@@ -1020,6 +1031,7 @@ static void doc_free_all(struct docstate *d)
     for (int i = 0; i < d->nredo; i++)
         snap_free(&d->redo[i]);
     md_free(d->md);
+    free(d->hl_st);
     memset(d, 0, sizeof(*d));
 }
 
@@ -2465,6 +2477,10 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
         case '-': set_zoom(a, -1); return;
         case '0': set_zoom(a, 0); return;
         case 'g': prompt_open(a, P_GOTO, "", 0); return;
+        case 'l':                                                       /* the syntax colours on / off */
+            g_syntax = !g_syntax;
+            msg(a, g_syntax ? "Syntax colours on" : "Syntax colours off");
+            return;
         case 'a':
             a->ay = 0;
             a->ax = 0;
@@ -2703,6 +2719,59 @@ static void sb_drag_to(struct app *a, double py)
     a->top = LM_CLAMP(pos * (a->n - 1) / room, 0, LM_MAX(a->n - 1, 0));
 }
 
+/* ---- syntax colours ------------------------------------------------------------------------------------------------------------ */
+
+static uint32_t syn_color(int c)
+{
+    switch (c) {
+    case SYN_COMMENT: return lm_theme.syntax_comment;
+    case SYN_STRING: return lm_theme.syntax_string;
+    case SYN_NUMBER: return lm_theme.syntax_number;
+    case SYN_KEYWORD: return lm_theme.syntax_keyword;
+    case SYN_TYPE: return lm_theme.syntax_type;
+    case SYN_FUNC: return lm_theme.syntax_function;
+    case SYN_PREPROC: return lm_theme.syntax_preproc;
+    case SYN_ADDED: return lm_theme.ok;
+    case SYN_REMOVED: return lm_theme.error;
+    default: return COL_FG;
+    }
+}
+
+/* The lexer's state at the start of every line up to `upto` is known (a line that was not lexed since an edit above it is lexed now, once). */
+static void hl_prepare(struct app *a, int upto)
+{
+    if (!a->lang)
+        return;
+    if (a->hl_cap < a->n + 2) {
+        int nc = (a->n + 2) * 2;
+        uint8_t *t = realloc(a->hl_st, (size_t)nc);
+        if (!t)
+            return;
+        a->hl_st = t;
+        a->hl_cap = nc;
+    }
+    if (a->hl_valid < 1) {
+        a->hl_st[0] = 0;
+        a->hl_valid = 1;
+    }
+    upto = LM_MIN(upto, a->n - 1);
+    while (a->hl_valid <= upto) {
+        int y = a->hl_valid - 1;
+        a->hl_st[y + 1] = (uint8_t)syn_line(a->lang, a->l[y].s, a->l[y].len, a->hl_st[y], NULL);
+        a->hl_valid++;
+    }
+}
+
+/* The language of the document now (the name can change with Save as): a new one starts the states again. */
+static void hl_language(struct app *a)
+{
+    const struct syn_lang *lang = g_syntax && !g_note ? syn_find(a->path, a->n > 0 ? a->l[0].s : NULL) : NULL;
+    if (lang != a->lang) {
+        a->lang = lang;
+        a->hl_valid = 0;
+    }
+}
+
 /* ---- the tab bar ------------------------------------------------------------------------------------------------------------- */
 
 static int tabs_x(void) { return RAIL_W; }
@@ -2792,6 +2861,7 @@ static void paint(struct wlwin *w)
         a->seen_rows = a->rows_visible;
         a->seen_cols = a->cols_visible;
     }
+    hl_language(a);
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
     if (a->preview && (g_note || !is_md_path(a->path)))                  /* (Save as to another name) */
         a->preview = false;
@@ -2837,6 +2907,15 @@ static void paint(struct wlwin *w)
             wlwin_cell(w, gw - ((int)strlen(num) + 1 - k) * a->zt.cw, py, (uint32_t)num[k], a->zt.cw, a->zt.ch, ly == a->cy ? COL_FG : COL_DIM, false);
         int col = 0;
         size_t i = 0;
+        uint8_t cls_stack[1024], *cls = NULL, *cls_heap = NULL;          /* the colour class of every byte of the line */
+        if (a->lang && l->len <= 20000) {
+            hl_prepare(a, ly);
+            if (a->hl_valid > ly) {
+                cls = l->len <= sizeof(cls_stack) ? cls_stack : (cls_heap = malloc(l->len));
+                if (cls)
+                    syn_line(a->lang, l->s, l->len, a->hl_st[ly], cls);
+            }
+        }
         int sel_from = -1, sel_to = -1;                                  /* selected display columns of this line */
         if (sel && ly >= y0 && ly <= y1) {
             sel_from = ly == y0 ? col_of(l, x0) : 0;
@@ -2848,12 +2927,13 @@ static void paint(struct wlwin *w)
         while (i < l->len) {
             int nc = l->s[i] == '\t' ? (col / TAB_W + 1) * TAB_W : col + 1;
             if (l->s[i] != '\t' && col >= a->left && col < a->left + a->cols_visible)
-                wlwin_cell(w, gw + (col - a->left) * a->zt.cw, py, cp_at(l, i), a->zt.cw, a->zt.ch, COL_FG, false);
+                wlwin_cell(w, gw + (col - a->left) * a->zt.cw, py, cp_at(l, i), a->zt.cw, a->zt.ch, cls ? syn_color(cls[i]) : COL_FG, false);
             col = nc;
             i = cp_next(l, i);
             if (col >= a->left + a->cols_visible)
                 break;
         }
+        free(cls_heap);
         if (ly == a->cy) {                                               /* the cursor: a bar at the left edge of its cell */
             int cc = col_of(l, a->cx);
             if (cc >= a->left && cc < a->left + a->cols_visible)
@@ -2879,7 +2959,7 @@ status:;
     char left[PATH_MAX + 64], right[64];
     const char *name = a->path[0] ? a->path : "untitled";
     snprintf(left, sizeof(left), "%s%s", a->modified ? "* " : "", name);
-    snprintf(right, sizeof(right), "Ln %d, Col %d   %d lines", a->cy + 1, col_of(&a->l[a->cy], a->cx) + 1, a->n);
+    snprintf(right, sizeof(right), "%s%sLn %d, Col %d   %d lines", a->lang ? syn_name(a->lang) : "", a->lang ? "   " : "", a->cy + 1, col_of(&a->l[a->cy], a->cx) + 1, a->n);
     if (a->preview) {
         int range = LM_MAX(md_height(a->md) - pv_view_h(a), 0);
         snprintf(right, sizeof(right), "Ctrl+M edits   %d%%", range ? a->md_scroll * 100 / range : 100);
@@ -3380,6 +3460,48 @@ static int selftest(void)
     CHECK(valid_utf8((const unsigned char *)"\xc3\xb5\xe2\x82\xac\xf0\x9f\x98\x80", 9), "valid sequences");
     CHECK(!valid_utf8((const unsigned char *)"\xc3", 1) && !valid_utf8((const unsigned char *)"\xe2\x82", 2), "truncated sequences");
     CHECK(!valid_utf8((const unsigned char *)"\xc0\xaf", 2), "overlong form");
+    /* syntax colours */
+    {
+        const struct syn_lang *c = syn_find("/x/main.c", NULL), *py = syn_find("tool", "#!/usr/bin/env python3"), *none = syn_find("notes.txt", "hello");
+        CHECK(c && !strcmp(syn_name(c), "C") && py && !strcmp(syn_name(py), "Python") && !none, "the language comes from the name or the #! line");
+        CHECK(syn_find("Makefile", NULL) && !strcmp(syn_name(syn_find("Makefile", NULL)), "Makefile"), "a file name without an extension");
+        uint8_t k[64];
+        const char *ln = "int x = 0x10; // c";
+        int st = syn_line(c, ln, strlen(ln), 0, k);
+        CHECK(st == 0 && k[0] == SYN_TYPE && k[4] == SYN_PLAIN && k[8] == SYN_NUMBER && k[14] == SYN_COMMENT, "C: type, number, comment");
+        ln = "a /* open";
+        st = syn_line(c, ln, strlen(ln), 0, k);
+        CHECK(st != 0 && k[2] == SYN_COMMENT, "a block comment goes on to the next line");
+        ln = "still */ return";
+        int st2 = syn_line(c, ln, strlen(ln), st, k);
+        CHECK(st2 == 0 && k[0] == SYN_COMMENT && k[9] == SYN_KEYWORD, "... and ends there");
+        ln = "x = \"\"\"abc";
+        st = syn_line(py, ln, strlen(ln), 0, k);
+        CHECK(st != 0 && k[5] == SYN_STRING, "a Python triple-quoted string goes on");
+        ln = "def f(): pass";
+        syn_line(py, ln, strlen(ln), 0, k);
+        CHECK(k[0] == SYN_KEYWORD && k[4] == SYN_FUNC && k[9] == SYN_KEYWORD, "Python: keyword, function");
+    }
+    /* the editor keeps the lexer's states per line and recomputes from an edit down */
+    {
+        static struct app h;
+        doc_clear(&h);
+        h.final_nl = true;
+        snprintf(h.path, sizeof(h.path), "t.c");
+        h.lang = syn_find(h.path, NULL);
+        insert_at_cursor(&h, "a\n/* c\nb\nc */ d\ne", 17);
+        hl_prepare(&h, 4);
+        CHECK(h.hl_valid == 5 && h.hl_st[2] != 0 && h.hl_st[3] != 0 && h.hl_st[4] == 0, "line states: comment on lines 2-3 (%d %d %d)", h.hl_st[2], h.hl_st[3], h.hl_st[4]);
+        h.cy = 1;
+        h.cx = 0;
+        h.ay = 1;
+        h.ax = 0;
+        delete_range(&h, 1, 0, 1, 3);                                    /* the line that opened the comment loses it */
+        CHECK(h.hl_valid <= 2, "an edit drops the states below it (%d)", h.hl_valid);
+        hl_prepare(&h, 3);
+        CHECK(h.hl_st[2] == 0 && h.hl_st[3] == 0, "... and they are worked out again: no comment now");
+        doc_free_all(&h.d);
+    }
     puts(bad ? "selftest FAILED" : "selftest ok");
     char tdir[] = "/tmp/mellagui-edit-selftest-XXXXXX";                  /* names in the prompts */
     if (mkdtemp(tdir)) {
@@ -3459,6 +3581,9 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    const char *syn_env = getenv("MELLAGUI_EDIT_SYNTAX");
+    if (syn_env && !strcmp(syn_env, "0"))
+        g_syntax = false;
     const char *rail_env = getenv("MELLAGUI_EDIT_RAIL");
     if (rail_env && !strcmp(rail_env, "0"))
         g_rail = false;

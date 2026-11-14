@@ -9,11 +9,16 @@
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
  *   mellagui-matrix --time HH:MM    the window shows that time of day (default: the real time, following the clock): sun, moon and stars, colours
  *   mellagui-matrix --clock-speed N the day passes N minutes a second (to look at it)
+ *   mellagui-matrix --sun HH:MM,HH:MM|auto|none   when the sun rises and sets (see below); default: auto with the real clock, none with --time / --clock-speed
  *   mellagui-matrix --bench WxH     draws the room a few seconds without a display and prints the time of a frame
  *   mellagui-matrix --windowed      an ordinary window (to look at it, or to leave running beside other windows)
  *   mellagui-matrix --speed PERCENT how fast the rain falls, 25..400 (default 100)
  *   mellagui-matrix --seed N        fixed random numbers (tests)
  *   mellagui-matrix --selftest      checks the rain's arithmetic without a display
+ *
+ * The sun and the moon follow the real day: with the real clock the window takes today's sunrise and sunset of the place (src/smartsun.h: the smart home's
+ * place, else the time zone's; $MELLAGUI_SMART_SUN replaces the calculation), so in a Tallinn December the sun is up from 09:17 to 15:21 and the moon from the
+ * sunset to the sunrise. `--time` / `--clock-speed` keep the plain 06:00 / 18:00 of the sky model unless --sun says otherwise (the tests rely on it).
  *
  * By default the rain is on the walls, the floor and the ceiling of a room (software ray casting, the camera drifts slowly, there is a dark window in
  * the far wall). Every column has a bright head that falls at its own speed and leaves a trail that fades out. The letters are the digits, the Latin letters
@@ -32,6 +37,7 @@
 #include "font.h"
 #include "keymap.h"
 #include "matrixcat.h"
+#include "smartsun.h"
 #include "theme.h"
 #include "util.h"
 #include "wlwin.h"
@@ -247,6 +253,9 @@ struct room {
     float minutes;                      /* the time of day shown, minutes since midnight */
     float clock_speed;                  /* simulated minutes per real second; 0 = the real clock */
     bool fixed;                         /* --time: the clock stands still */
+    int rise, set;                      /* sunrise and sunset, minutes since midnight; 0 / 0 = the model's plain 06:00 and 18:00 */
+    bool sun_auto;                      /* take today's from the place (smartsun), again when the day changes */
+    int sun_day;                        /* the day (year * 400 + day of the year) `rise` / `set` are for */
     struct rain s[NSURF];
     struct rain fr;                     /* the letters of the window's frame, bars and recess (finer) */
     bool ready;
@@ -265,7 +274,31 @@ static void room_surface_size(int surf, int *cols, int *rows)
 }
 
 static void sky_update(struct sky *k, float minutes);
+static float solar_minutes(float minutes, int rise, int set);
 static void ridge_init(void);
+
+/* Today's sunrise and sunset for the window (sun_auto): again when the day has changed; a day without a sunrise or sunset, an unknown place or a silly
+ * answer leaves the model's plain 06:00 / 18:00. */
+static void sun_refresh(struct room *rm)
+{
+    if (!rm->sun_auto)
+        return;
+    time_t now = time(NULL);
+    struct tm tm;
+    if (!localtime_r(&now, &tm))
+        return;
+    int day = (tm.tm_year + 1900) * 400 + tm.tm_yday;
+    if (day == rm->sun_day)
+        return;
+    rm->sun_day = day;
+    int r = 0, s = 0;
+    if (sun_today(now, &r, &s) && r > 0 && s > r + 60 && s < 1440) {
+        rm->rise = r;
+        rm->set = s;
+    } else {
+        rm->rise = rm->set = 0;
+    }
+}
 
 static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density)
 {
@@ -312,7 +345,8 @@ static bool room_init(struct room *rm, uint64_t seed, int speed_pct, int density
     for (int i = 0; i < MCAT_GLYPHS; i++)                               /* the fur's alphabet: a spread over the rain's own set */
         rm->catg[i] = lm_font_glyph(rm->s[0].set[(i * 7) % rm->s[0].nset]);
     ridge_init();
-    sky_update(&rm->sky, rm->minutes);
+    sun_refresh(rm);
+    sky_update(&rm->sky, solar_minutes(rm->minutes, rm->rise, rm->set));
     rm->ready = true;
     return true;
 }
@@ -348,7 +382,8 @@ static void room_step(struct room *rm)
         if (localtime_r(&now, &tm))
             rm->minutes = (float)tm.tm_hour * 60.0f + (float)tm.tm_min + (float)tm.tm_sec / 60.0f;
     }
-    sky_update(&rm->sky, rm->minutes);
+    sun_refresh(rm);
+    sky_update(&rm->sky, solar_minutes(rm->minutes, rm->rise, rm->set));
     rm->sky.phase = rm->t;
 }
 
@@ -458,6 +493,25 @@ static void sky_colors(float el, float zen[3], float hor[3])
         zen[q] = mixf(Z[i][q], Z[i + 1][q], t);
         hor[q] = mixf(H[i][q], H[i + 1][q], t);
     }
+}
+
+/* The sky model has its sun up from 06:00 to 18:00. A real day is shorter or longer: this maps the time of day so that the sunrise lands on 06:00 and the
+ * sunset on 18:00 (the day and the night each stretched evenly), and the moon, which rises at 18:00 of the model, rises at the real sunset. With no
+ * sunrise (0 / 0) it is the identity. */
+static float solar_minutes(float minutes, int rise, int set)
+{
+    if (set <= rise)
+        return minutes;
+    float r = (float)rise, s = (float)set, h;
+    if (minutes >= r && minutes < s) {
+        h = 6.0f + 12.0f * (minutes - r) / (s - r);
+    } else {
+        float night = 1440.0f - (s - r), since = fmodf(minutes - s + 1440.0f, 1440.0f);
+        h = 18.0f + 12.0f * since / night;
+        if (h >= 24.0f)
+            h -= 24.0f;
+    }
+    return h * 60.0f;
 }
 
 static void sky_update(struct sky *k, float minutes)
@@ -1168,6 +1222,22 @@ static int selftest(void)
             sky_update(&k, 23.0f * 60.0f);                                                   /* the moon's light is dimmer and blue */
             CHECK(k.moon_el > 4.0f && k.light_str > 0.0f && k.light_str < 0.35f && k.light_col[2] > k.light_col[0]);
             CHECK(OPEN_X1 - OPEN_X0 > 2.0f && OPEN_Y1 > OPEN_Y0 && ZG > ROOM_D && ZF < ROOM_D);
+            /* a short winter day (Tallinn in December: sun up 09:17 .. 15:21): the model's day is stretched to it */
+            const int rise = 9 * 60 + 17, set = 15 * 60 + 21;
+            CHECK(fabsf(solar_minutes(rise, rise, set) - 360.0f) < 0.01f && fabsf(solar_minutes(set, rise, set) - 1080.0f) < 0.01f);
+            CHECK(fabsf(solar_minutes(0.0f, 0, 0) - 0.0f) < 0.01f && fabsf(solar_minutes(700.0f, 360, 1080) - 700.0f) < 0.01f);      /* no sun times: the identity */
+            sky_update(&k, solar_minutes(2.0f * 60.0f, rise, set));                         /* 02:00 is night, the moon up ... */
+            CHECK(k.sun_el < -5.0f && k.night > 0.5f && k.moon_el > 0.0f);
+            sky_update(&k, solar_minutes(8.0f * 60.0f, rise, set));                         /* ... 08:00 is dawn: the sun still below the edge ... */
+            CHECK(k.sun_el < 0.0f && k.sun_el > -5.0f);
+            sky_update(&k, solar_minutes(10.0f * 60.0f, rise, set));                        /* ... 10:00 is morning: the sun is up on the left ... */
+            CHECK(k.sun_el > 3.0f && k.sun[0] < 0.0f);
+            sky_update(&k, solar_minutes(12.0f * 60.0f + 19.0f, rise, set));               /* ... noon (the middle of 09:17..15:21) the highest, in the middle ... */
+            CHECK(k.sun_el > 10.0f && fabsf(k.sun[0]) < 0.05f);
+            sky_update(&k, solar_minutes(16.0f * 60.0f, rise, set));                        /* ... 16:00 is dusk, the moon rises ... */
+            CHECK(k.sun_el < 0.0f && k.hor[0] < 200.0f && k.sun[0] > 0.3f);
+            sky_update(&k, solar_minutes(22.0f * 60.0f, rise, set));                        /* ... and 22:00 is the deep night */
+            CHECK(k.night > 0.95f && k.moon_el > 4.0f);
         }
         struct cam c0 = cam_at(0.0f), c1 = cam_at(20.0f);
         CHECK(c0.fz > 0.9f && (fabsf(c0.ox - c1.ox) > 0.05f || fabsf(c0.oz - c1.oz) > 0.05f));    /* it looks into the room and it drifts */
@@ -1301,6 +1371,7 @@ int main(int argc, char **argv)
     a.rain.rng = (uint64_t)now_ms() * 2654435761u + (uint64_t)getpid() + 1;
     bool selftest_only = false;
     const char *bench = NULL;
+    bool sun_set = false;                                                 /* --sun was given */
     a.rain.density = 260;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) {
@@ -1325,6 +1396,22 @@ int main(int argc, char **argv)
             }
             a.room.minutes = (float)(hh * 60 + mm);
             a.room.fixed = true;
+        } else if (!strcmp(argv[i], "--sun") && i + 1 < argc) {               /* when the sun rises and sets: HH:MM,HH:MM, auto (today's, from the place) or none */
+            const char *v = argv[++i];
+            int h1, m1, h2, m2;
+            sun_set = true;
+            if (!strcmp(v, "auto")) {
+                a.room.sun_auto = true;
+            } else if (!strcmp(v, "none")) {
+                a.room.sun_auto = false;
+            } else if (sscanf(v, "%d:%d,%d:%d", &h1, &m1, &h2, &m2) == 4 && h1 >= 0 && h1 < 24 && h2 >= 0 && h2 < 24 && m1 >= 0 && m1 < 60 && m2 >= 0 && m2 < 60 &&
+                       h1 * 60 + m1 > 0 && h2 * 60 + m2 > h1 * 60 + m1 + 60) {
+                a.room.rise = h1 * 60 + m1;
+                a.room.set = h2 * 60 + m2;
+            } else {
+                fprintf(stderr, "mellagui-matrix: --sun wants HH:MM,HH:MM (sunrise, sunset), auto or none\n");
+                return 2;
+            }
         } else if (!strcmp(argv[i], "--clock-speed") && i + 1 < argc) {      /* the day passes faster: this many minutes a second (to look at the sky) */
             double spd = atof(argv[++i]);                                       /* (a macro would evaluate argv[++i] several times) */
             a.room.clock_speed = (float)LM_CLAMP(spd, 0.0, 1440.0);
@@ -1336,11 +1423,13 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
         } else {
-            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
+            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--sun HH:MM,HH:MM|auto|none] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
     }
     make_set(&a.rain);
+    if (!sun_set)                                                         /* the real clock gets the real sun; a fixed or fast clock the model's 06:00 / 18:00 */
+        a.room.sun_auto = !a.room.fixed && a.room.clock_speed <= 0.0f;
     if (selftest_only)
         return selftest();
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);

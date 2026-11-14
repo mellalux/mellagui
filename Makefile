@@ -191,7 +191,7 @@ $(BUILD)/mellagui-monitor: $(BUILD)/client/mellagui-monitor.o $(BUILD)/client/wl
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-term: $(BUILD)/client/mellagui-term.o $(BUILD)/client/wlc.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-term: $(BUILD)/client/mellagui-term.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

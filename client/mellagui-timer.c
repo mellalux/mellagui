@@ -707,7 +707,7 @@ static void button(struct app *a, int h, const char *text, bool on, uint32_t on_
     struct wlwin *w = &a->win;
     struct rc r = rect_of(h);
     uint32_t bg = on ? on_rgb : a->hover == h ? lm_theme.button_hover : lm_theme.button;
-    wlwin_round_fill(w, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
+    wlwin_drop(w, r.x, r.y, r.w, r.h, lm_button_radius(r.h / 2), bg);
     wlwin_text(w, r.x + (r.w - lm_font_text_width(text)) / 2, r.y + (r.h - LM_FONT_H) / 2, text, 1, on ? lm_theme.ink : lm_theme.text, r.w - 6);
 }
 

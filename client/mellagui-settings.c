@@ -2667,7 +2667,7 @@ static void paint_widget(struct app *a, int idx)
         break;
     }
     case W_BUTTON:
-        fill(a, *r, w->on && !strcmp(w->key, "dbl-try") ? lm_theme.ok : a->press == idx && hot ? COL_DOWN : (hot ? COL_HOVER : COL_KEY));
+        wlwin_drop(&a->win, r->x, r->y, r->w, r->h, lm_button_radius(r->h / 2), w->on && !strcmp(w->key, "dbl-try") ? lm_theme.ok : a->press == idx && hot ? COL_DOWN : (hot ? COL_HOVER : COL_KEY));
         if (!draw_glyph_button(a, r, w->text, w->text[0] == 'x' ? lm_theme.alert : COL_TEXT))
             draw_text(a, r->x + (r->w - lm_font_text_width(w->text)) / 2, text_y(r), w->text, COL_TEXT, 0);
         if (focus)

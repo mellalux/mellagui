@@ -41,6 +41,40 @@ static inline void lm_fill_px(uint32_t *px, int stride, int bw, int bh, int x0, 
             px[(size_t)y * (size_t)stride + (size_t)x] = 0xff000000u | rgb;
 }
 
+static inline void lm_round_fill(uint32_t *px, int stride, int bw, int bh, int x, int y, int w, int h, int r, uint32_t rgb);
+
+/* A coloured button as a bead of water, in physical pixels (`d` = the size of one detail: 1 at scale 1, 2 at scale 2 ...): a dark rim (the edge that
+ * bends the light), an interior a little darker at the top that lights up towards the bottom (the light the drop gathers: eight soft lens shapes, each
+ * smaller and lighter, one inside the other), a small sharp glint near the upper left (a fixed size: a long button does not get a long bar) and, on a
+ * wide button, a thin sheen along the top. Used by wlwin_drop and by the terminal, which paints its own buffer. */
+static inline void lm_drop_px(uint32_t *px, int stride, int bw, int bh, int x, int y, int w, int h, int r, uint32_t c, int d)
+{
+    if (w < 10 * d || h < 12 * d) {
+        lm_round_fill(px, stride, bw, bh, x, y, w, h, r, c);
+        return;
+    }
+    int rr = LM_MIN(r, LM_MIN(w, h) / 2);
+    lm_round_fill(px, stride, bw, bh, x, y, w, h, rr, lm_mix_rgb(c, 0x000000, 0.34));               /* the rim */
+    lm_round_fill(px, stride, bw, bh, x + d, y + d, w - 2 * d, h - 3 * d, LM_MAX(rr - d, 0), lm_mix_rgb(c, 0x000000, 0.10));   /* the body */
+    enum { LENSES = 8 };
+    for (int i = 0; i < LENSES; i++) {
+        double t = (double)i / (LENSES - 1);
+        int side = 2 * d + rr / 6 + (int)(t * (rr * 3 / 4 + 3 * d));
+        int ly = y + (int)(h * (0.28 + 0.46 * t)), lh = y + h - 3 * d - ly, lw = w - 2 * side;
+        if (lh < 3 * d || lw < 6 * d)
+            continue;
+        lm_round_fill(px, stride, bw, bh, x + side, ly, lw, lh, LM_MIN(lh / 2, LM_MAX(rr - d, d)), lm_mix_rgb(c, 0xffffff, 0.02 + 0.30 * t * t));
+    }
+    bool tall = h >= 28 * d;                                            /* a low button keeps the glint on the rim: the label sits in the middle */
+    int gx = x + LM_MAX(rr * 7 / 10, 5 * d), gw = LM_CLAMP(w / 4, 6 * d, (tall ? 14 : 9) * d), gy = (tall ? 2 : 1) * d, gh = (tall ? 3 : 2) * d;
+    lm_round_fill(px, stride, bw, bh, gx, y + gy, gw, gh, d, lm_mix_rgb(c, 0xffffff, tall ? 0.85 : 0.6));
+    if (w > 44 * d) {
+        int sx = gx + gw + 3 * d, sw = x + w - rr - 4 * d - sx;
+        if (sw > 0)
+            lm_fill_px(px, stride, bw, bh, sx, y + gy, sw, d, lm_mix_rgb(c, 0xffffff, tall ? 0.35 : 0.25));
+    }
+}
+
 /* The corner radius of a coloured button: `pill` is the radius of the full pill / circle (half the height), scaled by [windows] button-roundness (100 = the
  * pill, 0 = square corners). The dock's and the launcher's icons follow the same setting. */
 static inline int lm_button_radius(int pill)

@@ -31,9 +31,21 @@ static double fscale(const struct wlwin *w)
     return (w->scale > 1 ? w->scale : 1) * zoom_of(w);
 }
 
+/* The drawing area's width: the window's, divided by the zoom, less the rail's. */
+static int content_w(const struct wlwin *w)
+{
+    return LM_MAX(content_len(w, w->w) - w->inx, 1);
+}
+
 static int P(double f, int v)
 {
     return (int)lround(v * f);
+}
+
+void wlwin_set_inset(struct wlwin *w, int left)
+{
+    w->inx = LM_MAX(left, 0);
+    w->redraw = true;
 }
 
 void wlwin_set_zoom(struct wlwin *w, int percent)
@@ -51,7 +63,7 @@ static void setup_buffer(struct wlwin *w)
     }
     if (w->pixels)
         munmap(w->pixels, w->map_size);
-    w->bw = content_len(w, w->w);
+    w->bw = content_w(w);
     w->bh = content_len(w, w->h);
     w->scale = 1;
     if (w->hidpi)
@@ -100,7 +112,7 @@ static int wanted_scale(const struct wlwin *w)
 
 static void draw(struct wlwin *w)
 {
-    if (w->bw != content_len(w, w->w) || w->bh != content_len(w, w->h) || w->pw != w->w * w->scale || !w->pixels || w->scale != wanted_scale(w)) {
+    if (w->bw != content_w(w) || w->bh != content_len(w, w->h) || w->pw != w->w * w->scale || !w->pixels || w->scale != wanted_scale(w)) {
         setup_buffer(w);
         WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = w->scale });
     }
@@ -159,11 +171,15 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
     (void)c; (void)id;
     struct wlwin *w = data;
     double z = zoom_of(w);
-    if (z != 1.0 && (op == LM_WL_POINTER_EVT_ENTER || op == LM_WL_POINTER_EVT_MOTION)) {   /* the pointer is in window pixels: the program thinks in content pixels */
+    if (op == LM_WL_POINTER_EVT_ENTER || op == LM_WL_POINTER_EVT_MOTION) {   /* the pointer is in window pixels: the program thinks in content pixels */
         union lm_arg *m = (union lm_arg *)args;
         int a = op == LM_WL_POINTER_EVT_ENTER ? 2 : 1;                  /* (enter: serial, surface, x, y; motion: time, x, y) */
-        m[a].f = lm_fixed_from_double(lm_fixed_to_double(m[a].f) / z);
-        m[a + 1].f = lm_fixed_from_double(lm_fixed_to_double(m[a + 1].f) / z);
+        w->rpx = lm_fixed_to_double(m[a].f) / z;
+        w->rpy = lm_fixed_to_double(m[a + 1].f) / z;
+        if (z != 1.0 || w->inx) {
+            m[a].f = lm_fixed_from_double(w->rpx - w->inx);
+            m[a + 1].f = lm_fixed_from_double(w->rpy);
+        }
     }
     w->ops->pointer(w, op, args);
 }
@@ -305,6 +321,8 @@ int wlwin_open(struct wlwin *w, const char *title, const char *app_id, int def_w
         fprintf(stderr, "%s: compositor lacks wl_compositor/wl_shm/xdg_wm_base\n", w->name);
         return -1;
     }
+    def_w += w->inx;
+    min_w += w->inx;
     w->def_w = w->w = def_w;
     w->def_h = w->h = def_h;
     w->min_w = min_w;
@@ -354,6 +372,7 @@ void wlwin_destroy(struct wlwin *w)
 
 void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t rgb)
 {
+    x0 += w->inx;
     double f = fscale(w);
     int ya = LM_MAX(P(f, y0), 0), yb = LM_MIN(P(f, y0 + height), w->ph), xa = LM_MAX(P(f, x0), 0), xb = LM_MIN(P(f, x0 + width), w->pw);
     for (int y = ya; y < yb; y++)
@@ -363,12 +382,26 @@ void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t
 
 void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb)
 {
+    x += w->inx;
     double f = fscale(w);
     int px = P(f, x), py = P(f, y), pwid = P(f, x + width) - px, phei = P(f, y + height) - py, pr = P(f, r);
     if (w->argb)
         lm_round_fill_argb(w->pixels, w->pw, w->pw, w->ph, px, py, pwid, phei, pr, rgb);
     else
         lm_round_fill(w->pixels, w->pw, w->pw, w->ph, px, py, pwid, phei, pr, rgb);
+}
+
+/* A coloured button as a bead of water; the drawing is lm_drop_px (uikit.h), here only the scale is worked out. */
+void wlwin_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t c)
+{
+    if (w->argb) {                                                      /* (a card over the desktop: plain) */
+        wlwin_round_fill(w, x, y, bw, bh, r, c);
+        return;
+    }
+    x += w->inx;
+    double f = fscale(w);
+    int px = P(f, x), py = P(f, y), pwid = P(f, x + bw) - px, phei = P(f, y + bh) - py, pr = P(f, r);
+    lm_drop_px(w->pixels, w->pw, w->pw, w->ph, px, py, pwid, phei, pr, c, LM_MAX((int)(f + 0.5), 1));
 }
 
 void wlwin_dim(struct wlwin *w, double t)
@@ -379,6 +412,7 @@ void wlwin_dim(struct wlwin *w, double t)
 
 void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint32_t *src, int sw, int sh, int stride)
 {
+    x += w->inx;
     double f = fscale(w);
     int dx0 = P(f, x), dy0 = P(f, y), dw = P(f, x + width) - dx0, dh = P(f, y + height) - dy0;
     if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
@@ -393,6 +427,7 @@ void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint
 
 void wlwin_cell(struct wlwin *w, int x, int y, uint32_t cp, int cw, int ch, uint32_t rgb, bool bold)
 {
+    x += w->inx;
     double f = fscale(w);
     int pcw = P(f, cw), pch = P(f, ch);
     if (pcw < 1 || pch < 1)
@@ -416,6 +451,8 @@ void wlwin_cell(struct wlwin *w, int x, int y, uint32_t cp, int cw, int ch, uint
 
 void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride, int cx, int cy, int cw, int ch)
 {
+    x += w->inx;
+    cx += w->inx;
     int s = w->scale > 1 ? w->scale : 1;
     int x0 = LM_MAX(LM_MAX(cx * s, x * s), 0), x1 = LM_MIN(LM_MIN((cx + cw) * s, x * s + sw), w->pw);
     int y0 = LM_MAX(LM_MAX(cy * s, y * s), 0), y1 = LM_MIN(LM_MIN((cy + ch) * s, y * s + sh), w->ph);
@@ -431,6 +468,7 @@ void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t
 {
     if (scale < 1)
         return;
+    x += w->inx;
     double f = fscale(w);
     int cw = P(f, LM_FONT_W * scale), ch = P(f, LM_FONT_H * scale);
     if (cw < 1 || ch < 1)
@@ -475,6 +513,7 @@ void wlwin_text_small(struct wlwin *w, int x, int y, const char *s, double size,
         wlwin_text(w, x, y, s, 1, rgb, max_w);
         return;
     }
+    x += w->inx;
     double f = fscale(w);
     size_t len = strlen(s);
     int cum = 0;
@@ -554,6 +593,7 @@ static void text_zoomed(struct wlwin *w, int x, int y, const char *s, int scale,
 
 static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w, bool bold)
 {
+    x += w->inx;
     if (zoom_of(w) != 1.0) {
         text_zoomed(w, x, y, s, scale, rgb, max_w, bold);
         return;

@@ -51,12 +51,16 @@
 #include "theme.h"
 #include "uikit.h"
 #include "util.h"
+#include "wlrail.h"
 #include "wlwin.h"
 
 #define NBUF 4
 #define MAX_SIZES 24
 #define MAX_DEVS 16
-#define BAR_H 44
+/* The buttons are a rail of round drops at the left (wlrail.h; MELLAGUI_CAM_RAIL=0 or MELLAGUI_RAILS=0 bring back the bar under the picture); the strip under
+ * the picture then only has the status line. */
+static bool g_rail;
+#define BAR_H (g_rail ? 28 : 44)
 #define BTN_H 28
 #define WARMUP_FRAMES 8
 
@@ -93,6 +97,7 @@ struct app {
     uint64_t note_until, next_scan, next_fake, fps_t;
     int frames, fps, ndev;
     int hover;
+    struct wlrail_anim ran;             /* the springs of the rail */
     double px, py;
     char outdir[PATH_MAX];
     char videodir[PATH_MAX];            /* where clips go */
@@ -705,8 +710,33 @@ static bool btn_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
     return false;
 }
 
+static void cam_rail(const struct app *a, struct wlrail *L)
+{
+    static void (*const icons[N_B])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_camera, wlrail_ic_rec, wlrail_ic_mic, wlrail_ic_mirror, wlrail_ic_pause,
+                                                                                       wlrail_ic_size, wlrail_ic_swap };
+    const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_red, lm_theme.btn_slate, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_purple };
+    const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_red_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit,
+                                 lm_theme.btn_purple_lit };
+    static char tips[N_B][40];
+    memset(L, 0, sizeof(*L));
+    L->y0 = 0;
+    L->y1 = a->win.bh > 0 ? a->win.bh - BAR_H : 400;
+    L->n = N_B;
+    for (int i = 0; i < N_B; i++) {
+        char tmp[40];
+        snprintf(tips[i], sizeof(tips[i]), "%s", btn_label(a, i, tmp, sizeof(tmp)));
+        bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused) || (i == B_REC && a->clip) || (i == B_MIC && a->mic);
+        L->it[i] = (struct wlrail_item){ .tip = tips[i], .icon = icons[i], .base = base[i], .lite = lite[i], .show = btn_visible(a, i), .lit = on, .gap = i == B_MIRROR };
+    }
+}
+
 static int btn_at(const struct app *a, double px, double py)
 {
+    if (g_rail) {
+        struct wlrail L;
+        cam_rail(a, &L);
+        return wlrail_at(&L, a->win.rpx, a->win.rpy);
+    }
     for (int i = 0; i < N_B; i++) {
         int x, y, w, h;
         if (btn_rect(a, i, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h)
@@ -766,7 +796,7 @@ static void paint(struct wlwin *w)
     else
         wlwin_text(w, 16, 16, a->msg[0] ? a->msg : "Waiting for the camera...", 1, lm_theme.text_soft, vw - 32);
     wlwin_fill(w, 0, vh, w->bw, w->bh - vh, lm_theme.bar);
-    for (int i = 0; i < N_B; i++) {
+    for (int i = 0; i < N_B && !g_rail; i++) {
         int x, y, bw, bh;
         char tmp[40];
         if (!btn_rect(a, i, &x, &y, &bw, &bh))
@@ -779,7 +809,7 @@ static void paint(struct wlwin *w)
                                      lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
         if (on)
             wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
-        wlwin_round_fill(w, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
+        wlwin_drop(w, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
         const char *t = btn_label(a, i, tmp, sizeof(tmp));
         wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
     }
@@ -810,6 +840,12 @@ static void paint(struct wlwin *w)
     int tw = (int)strlen(st) * LM_FONT_W;
     if (last + 16 + tw <= w->bw)
         wlwin_text(w, w->bw - tw - 10, vh + (BAR_H - LM_FONT_H) / 2, st, 1, lm_theme.muted, 0);
+    if (g_rail) {
+        struct wlrail L;
+        cam_rail(a, &L);
+        wlrail_paint(w, &L, &a->ran, a->hover, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);
+        wlrail_foot(w, &L, lm_theme.bar);
+    }
 }
 
 static void set_note(struct app *a, const char *fmt, const char *arg)
@@ -952,6 +988,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->hover = -1;
+        wlrail_release(&a->ran);
         break;
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
@@ -961,8 +998,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         if (args[2].u == 272 && args[3].u == 1) {               /* BTN_LEFT pressed */
             int b = btn_at(a, a->px, a->py);
-            if (b >= 0)
+            if (b >= 0) {
+                if (g_rail)
+                    wlrail_press(&a->ran, b, wlrail_now());
                 press(a, b);
+            }
+        } else if (args[2].u == 272) {
+            wlrail_release(&a->ran);                            /* (the drop springs back) */
+            w->redraw = true;
         }
         break;
     }
@@ -1042,6 +1085,10 @@ static int run_window(struct app *a)
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
     if (wlwin_connect(&a->win, "mellagui-cam", &ops, a) < 0)
         return 1;
+    g_rail = wlrail_wanted("MELLAGUI_CAM_RAIL");
+    wlrail_init(&a->ran);
+    if (g_rail)
+        wlwin_set_inset(&a->win, WLRAIL_W);                     /* (after the connect, which clears the window; before the open: it makes room) */
     if (wlwin_open(&a->win, "Camera", "mellagui.cam", 680, 560, 360, 240) < 0)
         return 1;
     a->mirror = true;
@@ -1075,6 +1122,11 @@ static int run_window(struct app *a)
                 continue;
             }
             timeout = (int)LM_MIN(a->next_fake - t, 250);
+        }
+        if (g_rail) {                                            /* the drops of the rail are moving: a frame every 16 ms */
+            struct wlrail L;
+            cam_rail(a, &L);
+            timeout = wlrail_loop(&a->win, &a->ran, &L, a->hover, timeout);
         }
         struct pollfd pf[2] = { { .fd = wlc_fd(a->win.c), .events = POLLIN }, { .fd = a->src.fd, .events = POLLIN } };
         int n = poll(pf, a->src.on && !a->src.fake ? 2 : 1, LM_MIN(timeout, a->clip && a->clip->acap ? 50 : timeout));

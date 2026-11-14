@@ -1413,7 +1413,7 @@ static void rbox(struct wlwin *w, struct box b, int r, uint32_t rgb)
 
 static void button(struct wlwin *w, struct box b, const char *label, bool hot, uint32_t bg, uint32_t fg)
 {
-    rbox(w, b, LM_MAX(lm_button_radius(b.h / 2), 3), hot ? lm_theme.button_hover : bg);
+    wlwin_drop(w, b.x, b.y, b.w, b.h, LM_MAX(lm_button_radius(b.h / 2), 3), hot ? lm_theme.button_hover : bg);
     wlwin_text(w, b.x + (b.w - lm_font_text_width(label)) / 2, b.y + (b.h - LM_FONT_H) / 2, label, 1, fg, 0);
 }
 

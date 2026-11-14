@@ -48,12 +48,15 @@
 #include "wlc.h"
 #include "wlclip.h"
 #include "wltext.h"
+#include "wlrail.h"
 #include "wlwin.h"
 
 #define PAD 10
 #define ROW_H 18
 #define HEAD_H 62
-#define TOOL_H 32
+/* The buttons are a rail of round drops at the left (wlrail.h; MELLAGUI_TOP_RAIL=0 or MELLAGUI_RAILS=0 bring back the bar under the gauges). */
+static bool g_rail;
+#define TOOL_H (g_rail ? 0 : 32)
 #define COLH_H 20
 #define STATUS_H 24
 #define MAX_PROCS 8192
@@ -145,6 +148,7 @@ struct app {
     int64_t msg_until, next_refresh;
     double px, py;
     int hover;
+    struct wlrail_anim ran;             /* the springs of the rail */
     bool sb_drag;
     int sb_grab;
     uint32_t last_click_ms;
@@ -915,8 +919,15 @@ static int build_buttons(const struct app *a, struct btn *b)
     return n;
 }
 
+static void top_rail(const struct app *a, struct wlrail *L);
+
 static int button_at(const struct app *a, double px, double py)
 {
+    if (g_rail) {
+        struct wlrail L;
+        top_rail(a, &L);
+        return wlrail_at(&L, a->win.rpx, a->win.rpy);
+    }
     int y0 = HEAD_H;
     if (py < y0 + 4 || py >= y0 + TOOL_H - 4)
         return -1;
@@ -1021,7 +1032,7 @@ static void draw_rbtn(struct wlwin *w, const struct btn *b, bool hot)
 {
     int y = HEAD_H + 4, h = TOOL_H - 8;
     uint32_t base = b->enabled ? (hot ? b->hover : b->base) : lm_mix_rgb(b->base, COL_BG, 0.6);
-    wlwin_round_fill(w, b->x, y, b->w, h, lm_button_radius(h / 2), base);
+    wlwin_drop(w, b->x, y, b->w, h, lm_button_radius(h / 2), base);
     int tw = lm_font_text_width(b->label);
     wlwin_text(w, b->x + (b->w - tw) / 2, y + (h - LM_FONT_H) / 2, b->label, 1, b->enabled ? lm_theme.on_colour : COL_DIM, b->w - 4);
 }
@@ -1173,6 +1184,38 @@ static void paint_log(struct app *a, struct wlwin *w)
     paint_scrollbar(a, w, a->nlog, a->logtop);
 }
 
+/* The rail: the buttons of the present view (the list changes with the tab); a button's short name is in the drop, its whole name beside it. */
+static void top_rail(const struct app *a, struct wlrail *L)
+{
+    struct btn b[16];
+    int n = build_buttons(a, b);
+    memset(L, 0, sizeof(*L));
+    L->y0 = 0;
+    L->y1 = a->win.bh > 0 ? a->win.bh - STATUS_H : 400;
+    L->n = LM_MIN(n, WLRAIL_MAX);
+    for (int i = 0; i < L->n; i++) {
+        const char *t = "";
+        switch (b[i].id) {
+        case B_TAB_PROCS: t = "Pr"; break;
+        case B_TAB_SVCS: t = "Sv"; break;
+        case B_BACK: t = "<"; break;
+        case B_RELOAD: t = "Rl"; break;
+        case B_END: t = "End"; break;
+        case B_KILL: t = "Kl"; break;
+        case B_PAUSE: t = "||"; break;
+        case B_GO: t = ">"; break;
+        case B_MINE: t = "Me"; break;
+        case B_START: t = ">"; break;
+        case B_STOP: t = "St"; break;
+        case B_RESTART: t = "Rs"; break;
+        case B_LOG: t = "Lg"; break;
+        case B_SCOPE: t = b[i].label[0] == 'U' ? "Us" : "Sy"; break;
+        default: break;
+        }
+        L->it[i] = (struct wlrail_item){ .tip = b[i].label, .text = t, .base = b[i].base, .lite = b[i].hover, .show = true, .idle = !b[i].enabled, .gap = i == 2 };
+    }
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
@@ -1181,7 +1224,7 @@ static void paint(struct wlwin *w)
     wlwin_fill(w, 0, HEAD_H, w->bw, TOOL_H, COL_BG);
     struct btn b[16];
     int n = build_buttons(a, b);
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n && !g_rail; i++)
         draw_rbtn(w, &b[i], a->hover == i);
     if (a->logview)
         paint_log(a, w);
@@ -1213,6 +1256,12 @@ static void paint(struct wlwin *w)
         snprintf(line, sizeof(line), "%d of %d services%s   S start   X stop   R restart   E enable   D disable   Enter log   U %s   Tab processes", a->nsshown,
                  a->ns, a->user_scope ? " (user session)" : "", a->user_scope ? "system" : "user");
         wlwin_text(w, PAD, sy + 4, line, 1, COL_DIM, w->bw - 2 * PAD);
+    }
+    if (g_rail) {
+        struct wlrail L;
+        top_rail(a, &L);
+        wlrail_paint(w, &L, &a->ran, a->hover, wlrail_now(), COL_BAR, COL_BAR, COL_SEL, COL_TEXT);
+        wlrail_foot(w, &L, COL_BAR);
     }
 }
 
@@ -1326,6 +1375,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->hover = -1;
+        wlrail_release(&a->ran);
         a->sb_drag = false;
         w->redraw = true;
         break;
@@ -1357,11 +1407,15 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         bool left = args[2].u == 272, right = args[2].u == 273, down = args[3].u == 1;
         if (!down) {
             a->sb_drag = false;
+            wlrail_release(&a->ran);                                    /* (the drop springs back) */
+            w->redraw = true;
             break;
         }
         a->confirm = C_NONE;
         int bi = button_at(a, a->px, a->py);
         if (left && bi >= 0) {
+            if (g_rail)
+                wlrail_press(&a->ran, bi, wlrail_now());
             struct btn b[16];
             build_buttons(a, b);
             if (b[bi].enabled)
@@ -1678,6 +1732,10 @@ int main(int argc, char **argv)
     a.sort = S_CPU;
     if (wlwin_connect(&a.win, "mellagui-top", &ops, &a) < 0)
         return 1;
+    g_rail = wlrail_wanted("MELLAGUI_TOP_RAIL");
+    wlrail_init(&a.ran);
+    if (g_rail)
+        wlwin_set_inset(&a.win, WLRAIL_W);                              /* (after the connect, which clears the window; before the open: it makes room) */
     if (wlwin_open(&a.win, "Processes", "mellagui.top", 860, 560, 560, 320) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
@@ -1687,6 +1745,11 @@ int main(int argc, char **argv)
     while (a.win.running) {
         int64_t now = now_ms();
         int timeout = a.paused ? -1 : (int)LM_CLAMP(a.next_refresh - now, 0, 250);
+        if (g_rail) {
+            struct wlrail L;
+            top_rail(&a, &L);
+            timeout = wlrail_loop(&a.win, &a.ran, &L, a.hover, timeout);
+        }
         if (!wlwin_step(&a.win, timeout))
             break;
         if (!a.paused && !a.logview && now_ms() >= a.next_refresh && a.confirm == C_NONE)

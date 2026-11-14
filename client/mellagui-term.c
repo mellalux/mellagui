@@ -12,6 +12,7 @@
  *   mellagui-term --title TEXT       the window's title until the program sets its own
  */
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -36,6 +37,7 @@
 #include "uikit.h"
 #include "util.h"
 #include "wlc.h"
+#include "wlrail.h"
 
 #define PAD 3
 #define SCROLLBACK 1000
@@ -46,7 +48,11 @@
 #define N_ZOOM LM_N_ZOOM
 #define ZOOM_DEFAULT LM_ZOOM_DEFAULT
 #define MAX_MIMES 32
-#define BAR_H (LM_FONT_H + 8)      /* button bar above the text area (not zoomed) */
+/* The buttons are a rail of round drops at the left (wlrail.h; MELLAGUI_TERM_RAIL=0 or MELLAGUI_RAILS=0 bring back the bar above the text). */
+static bool g_rail;
+#define BAR_H (g_rail ? 0 : (LM_FONT_H + 8))      /* button bar above the text area (not zoomed) */
+#define RAILX (g_rail ? WLRAIL_W : 0)             /* the left rail's width: the grid starts that far in */
+#define RAILR (g_rail ? WLRAIL_W : 0)             /* the right rail: the scroll bar is that far from the edge */
 #define BAR_BG (lm_theme.bar)
 #define BAR_BTN_ON (lm_theme.terminal_button_on)
 #define MENU_BORDER (lm_theme.menu_border)
@@ -141,6 +147,7 @@ struct app {
     bool fixed_size;            /* maximized / fullscreen: the compositor decides the size, zooming only changes the grid */
     bool grown;                 /* the window was made bigger by a zoom and the new buffer is not committed yet */
     int hover;                  /* button under the pointer (-1 = none) */
+    struct wlrail_anim ran[2];  /* the springs of the left and the right rail */
     bool menu_open;             /* the zoom drop-down list is showing */
     int menu_hover;             /* its highlighted entry (index into ZOOM_LEVELS) */
     bool conf_dirty;            /* the zoom changed and is not in the settings file yet */
@@ -935,8 +942,23 @@ static void btn_rect(int i, int *x, int *y, int *w, int *h)
         *w = 0;
 }
 
+/* The rails: Paste and friends at the left, the text size at the right (item ids of the rail mode; the bar above the text has the BTN_ ones). */
+enum { RB_NEW, RB_COPY, RB_PASTE, RB_CLEAR, RB_BOTTOM, RB_FILES, RB_BIGGER, RB_ZOOM, RB_SMALLER, RB_RESET, RB_N };
+static const int rb_left[6] = { RB_NEW, RB_COPY, RB_PASTE, RB_CLEAR, RB_BOTTOM, RB_FILES };
+static const int rb_right[4] = { RB_BIGGER, RB_ZOOM, RB_SMALLER, RB_RESET };
+static void term_rail(struct wlrail *L, struct wlrail *R);
+
 static int btn_at(double px, double py)
 {
+    if (g_rail) {
+        struct wlrail L, R;
+        term_rail(&L, &R);
+        int k = wlrail_at(&L, px, py);
+        if (k >= 0)
+            return rb_left[k];
+        k = wlrail_at(&R, px, py);
+        return k >= 0 ? rb_right[k] : -1;
+    }
     for (int i = 0; i < N_BTNS; i++) {
         int x, y, w, h;
         btn_rect(i, &x, &y, &w, &h);
@@ -972,6 +994,12 @@ static void fill_box(uint32_t *px, int x, int y, int w, int h, uint32_t color)
             px[(size_t)yy * (size_t)A.pw + (size_t)xx] = color;
 }
 
+static void drop_box(uint32_t *px, int x, int y, int w, int h, int r, uint32_t color)
+{
+    int k = A.k;
+    lm_drop_px(px, A.pw, A.pw, A.ph, x * k, y * k, w * k, h * k, r * k, color, k);
+}
+
 static void round_box(uint32_t *px, int x, int y, int w, int h, int r, uint32_t color)
 {
     int k = A.k;
@@ -987,8 +1015,67 @@ static void btn_colors(int i, uint32_t *base, uint32_t *hover)
     *hover = h[i];
 }
 
+static void term_rail(struct wlrail *L, struct wlrail *R)
+{
+    static char zbuf[8];
+    static const char *const ltips[6] = { "New terminal", "Copy the selection", "Paste", "Clear the screen and the scrollback", "Back to the newest line", "Files in this folder" };
+    static void (*const licons[6])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_term, wlrail_ic_copy, wlrail_ic_paste, NULL, wlrail_ic_down, wlrail_ic_open };
+    const uint32_t lbase[6] = { lm_theme.btn_teal, lm_theme.btn_sky, lm_theme.btn_green, lm_theme.btn_amber, lm_theme.btn_slate, lm_theme.btn_blue };
+    const uint32_t llite[6] = { lm_theme.btn_teal_lit, lm_theme.btn_sky_lit, lm_theme.btn_green_lit, lm_theme.btn_amber_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit };
+    static const char *const rtips[4] = { "Bigger text  Ctrl++", "Text size: a list of sizes", "Smaller text  Ctrl+-", "Normal size  Ctrl+0" };
+    const uint32_t rbase[4] = { lm_theme.btn_teal, lm_theme.btn_purple, lm_theme.btn_blue, lm_theme.btn_amber };
+    const uint32_t rlite[4] = { lm_theme.btn_teal_lit, lm_theme.btn_purple_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit };
+    memset(L, 0, sizeof(*L));
+    memset(R, 0, sizeof(*R));
+    L->x = 0;
+    R->x = A.bw > 0 ? A.bw - WLRAIL_W : 0;
+    L->y0 = R->y0 = 0;
+    L->y1 = R->y1 = A.bh > 0 ? A.bh : 400;
+    L->n = 6;
+    for (int i = 0; i < 6; i++)
+        L->it[i] = (struct wlrail_item){ .tip = ltips[i], .text = i == 3 ? "Cl" : NULL, .icon = licons[i], .base = lbase[i], .lite = llite[i], .show = true,
+                                         .idle = i == 1 && !A.t.sel_active, .gap = i == 1 || i == 3 || i == 5 };
+    snprintf(zbuf, sizeof(zbuf), "%d", A.zoom);
+    const char *rtext[4] = { "A+", zbuf, "A-", "1:1" };
+    R->n = 4;
+    for (int i = 0; i < 4; i++)
+        R->it[i] = (struct wlrail_item){ .tip = rtips[i], .text = rtext[i], .base = rbase[i], .lite = rlite[i], .show = true, .lit = i == 1 && A.menu_open,
+                                         .bottom = i == 3 };
+}
+
+static int rb_hover(bool right)
+{
+    const int *ids = right ? rb_right : rb_left;
+    for (int k = 0; k < (right ? 4 : 6); k++)
+        if (A.hover == ids[k])
+            return k;
+    return -1;
+}
+
+/* The rails are painted with the wlwin_* calls on a stand-in window that points at this buffer. */
+static void draw_rail(uint32_t *px)
+{
+    struct wlwin sh;
+    memset(&sh, 0, sizeof(sh));
+    sh.pixels = px;
+    sh.pw = A.pw;
+    sh.ph = A.ph;
+    sh.scale = A.k;
+    sh.bw = A.bw;
+    sh.bh = A.bh;
+    struct wlrail L, R;
+    term_rail(&L, &R);
+    int64_t now = wlrail_now();
+    wlrail_paint(&sh, &L, &A.ran[0], rb_hover(false), now, BAR_BG, BAR_BG, lm_theme.accent, BAR_FG);
+    wlrail_paint(&sh, &R, &A.ran[1], rb_hover(true), now, BAR_BG, BAR_BG, lm_theme.accent, BAR_FG);
+}
+
 static void draw_bar(uint32_t *px)
 {
+    if (g_rail) {
+        draw_rail(px);
+        return;
+    }
     fill_box(px, 0, 0, A.bw, BAR_H, BAR_BG);
     for (int i = 0; i < N_BTNS; i++) {
         int bx, by, bw, bh;
@@ -998,7 +1085,7 @@ static void draw_bar(uint32_t *px)
             continue;
         uint32_t base, hover;
         btn_colors(i, &base, &hover);
-        round_box(px, bx, by, bw, bh, lm_button_radius(bh / 2), (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? hover : base);
+        drop_box(px, bx, by, bw, bh, lm_button_radius(bh / 2), (A.menu_open && i == BTN_ZOOM_ID) || A.hover == i ? hover : base);
         const char *t = btn_text(i, tmp, sizeof(tmp));
         int w = i == BTN_ZOOM_ID ? ZOOM_BTN_CHARS * LM_FONT_W : (int)strlen(t) * LM_FONT_W;
         int tx = bx + 8 + (i == BTN_ZOOM_ID ? w - (int)strlen(t) * LM_FONT_W : 0), ty = by + (bh - LM_FONT_H) / 2;
@@ -1018,6 +1105,17 @@ static void draw_bar(uint32_t *px)
 static void menu_rect(int *x, int *y, int *w, int *h)
 {
     int bx, by, bw, bh;
+    if (g_rail) {                                               /* to the left of the size drop of the right rail */
+        struct wlrail L, R;
+        int ys[WLRAIL_MAX];
+        term_rail(&L, &R);
+        wlrail_layout(&R, ys);
+        *w = ZOOM_BTN_CHARS * LM_FONT_W + 16 + ARROW_W;
+        *x = A.bw - RAILR - 4 - *w;
+        *h = N_ZOOM * MENU_ROW_H + 4;
+        *y = LM_CLAMP(ys[1] >= 0 ? ys[1] : 0, 0, LM_MAX(A.bh - *h, 0));
+        return;
+    }
     btn_rect(BTN_ZOOM_ID, &bx, &by, &bw, &bh);
     *x = bx;
     *y = BAR_H;
@@ -1076,7 +1174,7 @@ static void sb_thumb(int *ty, int *th)
 
 static void draw_scrollbar(uint32_t *px)
 {
-    int w = sb_w(), x0 = A.bw - w;
+    int w = sb_w(), x0 = A.bw - RAILR - w;
     if (x0 < 0 || A.bh <= BAR_H)
         return;
     fill_box(px, x0, BAR_H, w, A.bh - BAR_H, lm_theme.bar);
@@ -1086,7 +1184,7 @@ static void draw_scrollbar(uint32_t *px)
     sb_thumb(&ty, &th);
     bool hot = A.sb_drag || (A.px >= x0 && A.py >= ty && A.py < ty + th);
     uint32_t col = hot ? lm_theme.button_hover : lm_theme.control;
-    fill_box(px, x0 + 2, ty + 1, A.bw - 2 - (x0 + 2), th - 2, col);
+    fill_box(px, x0 + 2, ty + 1, w - 4, th - 2, col);
 }
 
 static void sb_drag_to(double py)
@@ -1103,7 +1201,7 @@ static void sb_drag_to(double py)
 static void render(void)
 {
     struct term *t = &A.t;
-    int need_w = t->cols * CELL_W + 2 * PAD + sb_w(), need_h = t->rows * CELL_H + 2 * PAD + BAR_H;
+    int need_w = t->cols * CELL_W + 2 * PAD + sb_w() + RAILX + RAILR, need_h = t->rows * CELL_H + 2 * PAD + BAR_H;
     bool rescaled = A.k != want_k();
     if (!A.pixels || A.bw != need_w || A.bh != need_h || rescaled) {
         /* (re)create pool and buffers */
@@ -1172,7 +1270,7 @@ static void render(void)
                 bg = tmp;
             }
             int k = A.k, cw = CELL_W * k, ch = CELL_H * k;           /* the grid is exact in the buffer's own pixels */
-            int x0 = (PAD + col * CELL_W) * k, y0 = (BAR_H + PAD + row * CELL_H) * k;
+            int x0 = (RAILX + PAD + col * CELL_W) * k, y0 = (BAR_H + PAD + row * CELL_H) * k;
             const uint8_t *g = lm_font_cell_styled(c->cp, cw, ch, (c->attr & ATTR_BOLD) != 0);    /* drawn at the cell's own size, whatever the zoom */
             for (int r = 0; r < ch; r++) {
                 uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.pw + (size_t)x0;
@@ -1751,9 +1849,88 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     }
 }
 
+/* ---- the rail's actions ---------------------------------------------------------------------------------------------------- */
+
+static int rb_hover_of(int id)                                  /* the item's place in its rail */
+{
+    const int *ids = id >= RB_BIGGER ? rb_right : rb_left;
+    for (int k = 0; k < (id >= RB_BIGGER ? 4 : 6); k++)
+        if (ids[k] == id)
+            return k;
+    return -1;
+}
+
+/* Starts a program that has nothing to do with this window (a double fork: nobody has to wait for it, and it keeps none of our files). */
+static void spawn_detached(char *const argv[])
+{
+    pid_t p = fork();
+    if (p == 0) {
+        if (fork() == 0) {
+            setsid();
+            signal(SIGCHLD, SIG_DFL);
+            close_range(3, ~0U, 0);
+            execvp(argv[0], argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (p > 0)
+        waitpid(p, NULL, 0);
+}
+
+static void sibling_path(const char *name, char *out, size_t n)
+{
+    char self[512];
+    ssize_t k = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    snprintf(out, n, "%s", name);
+    if (k > 0) {
+        self[k] = 0;
+        char *sl = strrchr(self, '/');
+        if (sl) {
+            snprintf(sl + 1, sizeof(self) - (size_t)(sl + 1 - self), "%s", name);
+            if (access(self, X_OK) == 0)
+                snprintf(out, n, "%s", self);
+        }
+    }
+}
+
+static void new_terminal(void)
+{
+    char self[512];
+    ssize_t k = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (k <= 0)
+        return;
+    self[k] = 0;
+    char *argv[] = { self, NULL };
+    spawn_detached(argv);
+}
+
+static void files_here(void)
+{
+    char link[64], dir[PATH_MAX], prog[600];
+    snprintf(link, sizeof(link), "/proc/%d/cwd", (int)A.child);
+    ssize_t k = A.child > 0 ? readlink(link, dir, sizeof(dir) - 1) : -1;
+    if (k <= 0) {
+        snprintf(dir, sizeof(dir), "%s", getenv("HOME") ? getenv("HOME") : "/");
+        k = (ssize_t)strlen(dir);
+    }
+    dir[k] = 0;
+    sibling_path("mellagui-files", prog, sizeof(prog));
+    char *argv[] = { prog, dir, NULL };
+    spawn_detached(argv);
+}
+
+/* Clear: the scrollback goes (ESC [ 3 J) and the shell is told to redraw its prompt on an empty screen (Ctrl+L). */
+static void clear_screen(void)
+{
+    term_feed(&A.t, (const unsigned char *)"\033[3J", 4);
+    send_str("\f");
+    A.dirty = true;
+}
+
 static void cell_from_pointer(int *col, int *row)
 {
-    *col = LM_CLAMP((int)(A.px - PAD) / CELL_W, 0, A.t.cols - 1);
+    *col = LM_CLAMP((int)(A.px - PAD - RAILX) / CELL_W, 0, A.t.cols - 1);
     *row = LM_CLAMP((int)(A.py - BAR_H - PAD) / CELL_H, 0, A.t.rows - 1);
 }
 
@@ -1767,6 +1944,8 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         A.py = lm_fixed_to_double(args[3].f);
         break;
     case LM_WL_POINTER_EVT_LEAVE:
+        wlrail_release(&A.ran[0]);
+        wlrail_release(&A.ran[1]);
         if (A.sb_hot) {
             A.sb_hot = false;
             A.dirty = true;
@@ -1795,7 +1974,7 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
             sb_drag_to(A.py);
             break;
         }
-        bool over_sb = sb_active() && A.px >= A.bw - sb_w();
+        bool over_sb = sb_active() && A.px >= A.bw - RAILR - sb_w() && A.px < A.bw - RAILR;
         if (over_sb != A.sb_hot) {                      /* (the thumb lights up under the pointer) */
             A.sb_hot = over_sb;
             A.dirty = true;
@@ -1807,7 +1986,7 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         A.last_serial = args[0].u;
-        if (args[2].u == 273 && args[3].u == 1 && !A.menu_open && A.py >= BAR_H && A.menu) {       /* BTN_RIGHT: Copy / Paste, drawn by the compositor */
+        if (args[2].u == 273 && args[3].u == 1 && !A.menu_open && A.py >= BAR_H && A.px >= RAILX && A.px < A.bw - RAILR && A.menu) {       /* BTN_RIGHT: Copy / Paste, drawn by the compositor */
             WLC_SEND(A.c, A.menu, LM_MELLAGUI_MENU_V1_REQ_POPUP, { .s = t->sel_active ? "Copy\nPaste" : "~Copy\nPaste" });
             break;
         }
@@ -1828,7 +2007,12 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
             A.dirty = true;
             break;
         }
-        if (args[2].u == BTN_LEFT && args[3].u == 1 && A.py >= BAR_H && A.px >= A.bw - sb_w() && !t->sel_dragging) {
+        if (args[2].u == BTN_LEFT && args[3].u == 0 && g_rail) {
+            wlrail_release(&A.ran[0]);                           /* (the drops spring back) */
+            wlrail_release(&A.ran[1]);
+            A.dirty = true;
+        }
+        if (args[2].u == BTN_LEFT && args[3].u == 1 && A.py >= BAR_H && A.px >= A.bw - RAILR - sb_w() && A.px < A.bw - RAILR && !t->sel_dragging) {
             if (sb_active()) {                          /* the scroll bar: drag the thumb, or a click beside it pages */
                 int ty, th;
                 sb_thumb(&ty, &th);
@@ -1843,9 +2027,29 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
             }
             break;
         }
-        if (args[2].u == BTN_LEFT && A.py < BAR_H && !t->sel_dragging) {
-            if (args[3].u == 1) {
-                switch (btn_at(A.px, A.py)) {
+        if (args[2].u == BTN_LEFT && (g_rail ? (A.px < RAILX || A.px >= A.bw - RAILR) : A.py < BAR_H) && !t->sel_dragging) {
+            if (args[3].u == 1 && g_rail) {
+                int bi = btn_at(A.px, A.py);
+                if (bi >= 0) {
+                    bool right = bi >= RB_BIGGER;
+                    wlrail_press(&A.ran[right ? 1 : 0], rb_hover_of(bi), wlrail_now());
+                    A.dirty = true;
+                }
+                switch (bi) {
+                case RB_NEW: new_terminal(); break;
+                case RB_COPY: copy_selection(); break;
+                case RB_PASTE: paste(); break;
+                case RB_CLEAR: clear_screen(); break;
+                case RB_BOTTOM: t->view_off = 0; A.dirty = true; break;
+                case RB_FILES: files_here(); break;
+                case RB_BIGGER: set_zoom(1); break;
+                case RB_ZOOM: menu_set(true); break;
+                case RB_SMALLER: set_zoom(-1); break;
+                case RB_RESET: set_zoom(0); break;
+                }
+            } else if (args[3].u == 1) {
+                int bi = btn_at(A.px, A.py);
+                switch (bi) {
                 case BTN_PASTE_ID: paste(); break;
                 case BTN_SMALLER_ID: set_zoom(-1); break;
                 case BTN_ZOOM_ID: menu_set(true); break;
@@ -1897,7 +2101,7 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
 
 static void apply_size(int w, int h)
 {
-    int cols = (w - 2 * PAD - sb_w()) / CELL_W, rows = (h - 2 * PAD - BAR_H) / CELL_H;
+    int cols = (w - 2 * PAD - sb_w() - RAILX - RAILR) / CELL_W, rows = (h - 2 * PAD - BAR_H) / CELL_H;
     cols = LM_CLAMP(cols, 8, 500);
     rows = LM_CLAMP(rows, 2, 200);
     if (cols != A.t.cols || rows != A.t.rows) {
@@ -2010,6 +2214,9 @@ int main(int argc, char **argv)
         }
     }
     A.running = true;
+    g_rail = wlrail_wanted("MELLAGUI_TERM_RAIL");
+    wlrail_init(&A.ran[0]);
+    wlrail_init(&A.ran[1]);
     A.hover = -1;
     A.zoom = ZOOM_DEFAULT;
     build_zoom_tables();
@@ -2068,7 +2275,18 @@ int main(int argc, char **argv)
             { .fd = A.pty, .events = POLLIN },
             { .fd = A.repeat_fd, .events = POLLIN },
         };
-        int r = poll(pf, 3, A.dirty && A.frame_cb ? 50 : A.conf_dirty ? 200 : 1000);
+        int to = A.dirty && A.frame_cb ? 50 : A.conf_dirty ? 200 : 1000;
+        if (g_rail) {                                            /* the drops of the rails are moving: a frame every 16 ms */
+            struct wlrail L, R;
+            term_rail(&L, &R);
+            int64_t now = wlrail_now();
+            bool m0 = wlrail_step(&A.ran[0], &L, rb_hover(false), now), m1 = wlrail_step(&A.ran[1], &R, rb_hover(true), now);
+            if (m0 || m1) {
+                A.dirty = true;
+                to = LM_MIN(to, 16);
+            }
+        }
+        int r = poll(pf, 3, to);
         if (r < 0 && errno != EINTR)
             break;
         if (r > 0 && (pf[0].revents & (POLLIN | POLLHUP | POLLERR))) {

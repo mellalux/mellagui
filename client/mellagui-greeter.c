@@ -539,7 +539,7 @@ static void paint_splash(struct app *a)
     if (a->demo && a->demo_over) {
         text_c(w, lm_rect_make(card.x + 16, ay + d + 40, card.w - 32, LM_FONT_H), "This was only the demo: no session was started.", 1, lm_theme.text_dim, false);
         bool hot = in_rect(back, a->px, a->py);
-        wlwin_round_fill(w, back.x, back.y, back.w, back.h, lm_button_radius(back.h / 2), hot ? lm_theme.btn_blue_lit : lm_theme.btn_blue);
+        wlwin_drop(w, back.x, back.y, back.w, back.h, lm_button_radius(back.h / 2), hot ? lm_theme.btn_blue_lit : lm_theme.btn_blue);
         text_c(w, back, "Back to the login screen", 1, lm_theme.on_colour, true);
         return;
     }
@@ -647,7 +647,7 @@ static void paint(struct wlwin *w)
     paint_field(a, L.pass, a->focus == F_PASS && !busy, a->prompt[0] ? a->prompt : "Password", NULL, true, a->pwn);
     /* the button */
     bool hot = in_rect(L.login, a->px, a->py) && !busy;
-    wlwin_round_fill(w, L.login.x, L.login.y, L.login.w, L.login.h, lm_button_radius(L.login.h / 2), busy ? lm_theme.control_idle : hot ? lm_theme.btn_blue_lit : lm_theme.btn_blue);
+    wlwin_drop(w, L.login.x, L.login.y, L.login.w, L.login.h, lm_button_radius(L.login.h / 2), busy ? lm_theme.control_idle : hot ? lm_theme.btn_blue_lit : lm_theme.btn_blue);
     text_c(w, L.login, a->phase == PH_ANSWER ? "Answer" : busy ? "..." : "Log in", 1, busy ? lm_theme.title_text_idle : lm_theme.on_colour, true);
     if (a->msg[0]) {
         char fit[200];
@@ -672,7 +672,7 @@ static void paint(struct wlwin *w)
         bool armed = a->armed == i + 1;
         bool h = in_rect(L.power[i], a->px, a->py);
         uint32_t col = armed ? lm_theme.btn_red : h ? lm_theme.button_hover : lm_theme.button;
-        wlwin_round_fill(w, L.power[i].x, L.power[i].y, L.power[i].w, L.power[i].h, lm_button_radius(L.power[i].h / 2), col);
+        wlwin_drop(w, L.power[i].x, L.power[i].y, L.power[i].w, L.power[i].h, lm_button_radius(L.power[i].h / 2), col);
         text_c(w, L.power[i], armed ? "Sure?" : names[i], 1, armed ? lm_theme.on_colour : lm_theme.text, false);
     }
     wlwin_text(w, 14, w->bh - 36, a->host, 1, lm_theme.text_dim, w->bw / 3);

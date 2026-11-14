@@ -24,6 +24,7 @@
 #include "theme.h"
 #include "util.h"
 #include "wlc.h"
+#include "uikit.h"
 #include "wlwin.h"
 
 #define PAD 12
@@ -181,7 +182,7 @@ static void text_center(struct wlwin *w, int cx, int y, const char *s, int scale
 
 static void button(struct app *a, int x, int y, int w, const char *label, bool hover)
 {
-    wlwin_fill(&a->win, x, y, w, BTN_H, hover ? lm_theme.button_hover : lm_theme.button);
+    wlwin_drop(&a->win, x, y, w, BTN_H, lm_button_radius(BTN_H / 2), hover ? lm_theme.button_hover : lm_theme.button);
     text_center(&a->win, x + w / 2, y + (BTN_H - LM_FONT_H) / 2, label, 1, lm_theme.text);
 }
 

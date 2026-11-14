@@ -109,6 +109,8 @@ struct app {
     int hover;                          /* button under the pointer, -1 = none */
     /* the rail's buttons are drops of water: springs for the swelling / squashing, and a ripple after a press */
     struct wlrail_anim ran[2];          /* the springs of the left and the right rail */
+    bool zmenu_open;                    /* the list of text sizes (the size drop's drop-down) is showing */
+    int zmenu_hover;                    /* its highlighted entry (index into LM_ZOOM_LEVELS) */
     int follow;                         /* a text size button of the right rail was pressed: the pointer follows it when the window has grown (its item, -1 = none) */
     int follow_w;                       /* the window's width when it was pressed */
     int64_t follow_ms;
@@ -1222,11 +1224,11 @@ static void preview_dump(struct app *a)
     rename(tmpn, path);
 }
 
-enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_CUT, B_COPY, B_PASTE, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, B_VIEW, N_BTNS };
+enum { B_NEW, B_OPEN, B_SAVE, B_SAVEAS, B_CUT, B_COPY, B_PASTE, B_FIND, B_SMALLER, B_ZOOM, B_BIGGER, B_HELP, B_VIEW, B_RESET, N_BTNS };
 
 static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
 {
-    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Cut", "Copy", "Paste", "Find", "A-", "", "A+", "Help", "" };
+    static const char *const l[N_BTNS] = { "New", "Open", "Save", "Save as", "Cut", "Copy", "Paste", "Find", "A-", "", "A+", "Help", "", "" };
     if (i == B_ZOOM) {
         snprintf(buf, n, "%d%%", a->zoom);
         return buf;
@@ -1240,7 +1242,7 @@ static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
  * window shows the first buttons whole and never draws over the edge: its width is 0 then. */
 static void fill_round(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb);
 static void edit_rails(const struct app *a, struct wlrail *L, struct wlrail *R);
-static const int rail_right_ids[5];
+static const int rail_right_ids[6];
 
 static void btn_rect(const struct app *a, int i, int *x, int *w)
 {
@@ -1256,6 +1258,8 @@ static void btn_rect(const struct app *a, int i, int *x, int *w)
     if (a->win.bw > 0 && bx + *w + 6 > a->win.bw)
         *w = 0;
     if (i == B_VIEW && (g_note || !is_md_path(a->path)))                /* only a Markdown file has the button */
+        *w = 0;
+    if (i == B_RESET)                                                   /* (the rail's: the bar's size button goes back to 100 % itself) */
         *w = 0;
 }
 
@@ -1283,16 +1287,16 @@ static int btn_at(const struct app *a, double px, double py)
 
 /* The rails (wlrail.h): the file and edit buttons at the left, the page / text size buttons and Help at the right. A rail's item number is its position in it:
  * the left one is B_NEW..B_FIND, the right one is rail_right_ids. */
-static const int rail_right_ids[5] = { B_VIEW, B_BIGGER, B_ZOOM, B_SMALLER, B_HELP };
+static const int rail_right_ids[6] = { B_VIEW, B_BIGGER, B_ZOOM, B_SMALLER, B_HELP, B_RESET };
 
 static void edit_rails(const struct app *a, struct wlrail *L, struct wlrail *R)
 {
     static const char *const tips[N_BTNS] = { "New  Ctrl+N", "Open  Ctrl+O", "Save  Ctrl+S", "Save as  Ctrl+Shift+S", "Cut  Ctrl+X", "Copy  Ctrl+C", "Paste  Ctrl+V",
-                                              "Find  Ctrl+F", "Smaller text  Ctrl+-", "Text size: click for 100 %", "Bigger text  Ctrl++", "Keys  F1", "" };
+                                              "Find  Ctrl+F", "Smaller text  Ctrl+-", "Text size: a list of sizes", "Bigger text  Ctrl++", "Keys  F1", "", "Normal size  Ctrl+0" };
     static void (*const icons[8])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_new, wlrail_ic_open, wlrail_ic_save, wlrail_ic_saveas, wlrail_ic_cut,
                                                                                      wlrail_ic_copy, wlrail_ic_paste, wlrail_ic_find };
-    const uint32_t base[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_rust, lm_theme.btn_sky, lm_theme.btn_lime, lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_grey, lm_theme.btn_slate, lm_theme.btn_rose, lm_theme.btn_orange };
-    const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit, lm_theme.btn_orange_lit };
+    const uint32_t base[N_BTNS] = { lm_theme.btn_green, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_rust, lm_theme.btn_sky, lm_theme.btn_lime, lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_grey, lm_theme.btn_slate, lm_theme.btn_rose, lm_theme.btn_orange, lm_theme.btn_amber };
+    const uint32_t lite[N_BTNS] = { lm_theme.btn_green_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_rust_lit, lm_theme.btn_sky_lit, lm_theme.btn_lime_lit, lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_grey_lit, lm_theme.btn_slate_lit, lm_theme.btn_rose_lit, lm_theme.btn_orange_lit, lm_theme.btn_amber_lit };
     static char zbuf[8];
     memset(L, 0, sizeof(*L));
     memset(R, 0, sizeof(*R));
@@ -1305,14 +1309,14 @@ static void edit_rails(const struct app *a, struct wlrail *L, struct wlrail *R)
     for (int i = 0; i < 8; i++)
         L->it[i] = (struct wlrail_item){ .tip = tips[i], .icon = icons[i], .base = base[i], .lite = lite[i], .show = true,
                                          .idle = (i == B_CUT || i == B_COPY) && !has_sel(a), .lit = i == B_SAVE && a->modified, .gap = i == B_CUT };
-    R->n = 5;
+    R->n = 6;
     snprintf(zbuf, sizeof(zbuf), "%d", a->zoom);
-    for (int j = 0; j < 5; j++) {
+    for (int j = 0; j < 6; j++) {
         int id = rail_right_ids[j];
-        const char *text = id == B_VIEW ? (a->preview ? "Ed" : "Md") : id == B_BIGGER ? "A+" : id == B_ZOOM ? zbuf : id == B_SMALLER ? "A-" : "?";
+        const char *text = id == B_VIEW ? (a->preview ? "Ed" : "Md") : id == B_BIGGER ? "A+" : id == B_ZOOM ? zbuf : id == B_SMALLER ? "A-" : id == B_RESET ? "1:1" : "?";
         const char *tip = id == B_VIEW ? (a->preview ? "Edit the text  Ctrl+M" : "Show the page  Ctrl+M") : tips[id];
         R->it[j] = (struct wlrail_item){ .tip = tip, .text = text, .base = base[id], .lite = lite[id], .show = id != B_VIEW || (!g_note && is_md_path(a->path)),
-                                         .bottom = id == B_HELP };
+                                         .bottom = id == B_HELP || id == B_RESET, .lit = id == B_ZOOM && a->zmenu_open };
     }
 }
 
@@ -1320,10 +1324,66 @@ static int rail_hover(const struct app *a, bool right)
 {
     if (!right)
         return a->hover >= 0 && a->hover <= B_FIND ? a->hover : -1;
-    for (int j = 0; j < 5; j++)
+    for (int j = 0; j < 6; j++)
         if (a->hover == rail_right_ids[j])
             return j;
     return -1;
+}
+
+/* ---- the list of text sizes (the size drop of the right rail, like the terminal's) ----------------------------------------------------------------- */
+
+#define ZMENU_ROW_H (LM_FONT_H + 4)
+#define ZMENU_CHARS 4
+
+static void zmenu_rect(const struct app *a, int *x, int *y, int *w, int *h)
+{
+    struct wlrail L, R;
+    int ys[WLRAIL_MAX];
+    edit_rails(a, &L, &R);
+    wlrail_layout(&R, ys);
+    *w = ZMENU_CHARS * LM_FONT_W + 16 + 12;
+    *h = LM_N_ZOOM * ZMENU_ROW_H + 4;
+    *x = a->win.bw - RIGHT_W - 4 - *w;
+    *y = LM_CLAMP(ys[2] >= 0 ? ys[2] : 0, 0, LM_MAX(a->win.bh - *h, 0));
+}
+
+static int zmenu_row_at(const struct app *a, double px, double py)           /* index into LM_ZOOM_LEVELS or -1 */
+{
+    int x, y, w, h;
+    zmenu_rect(a, &x, &y, &w, &h);
+    if (px < x || px >= x + w || py < y + 2 || py >= y + h - 2)
+        return -1;
+    return LM_MIN((int)(py - y - 2) / ZMENU_ROW_H, LM_N_ZOOM - 1);
+}
+
+static void zmenu_set(struct app *a, bool open)
+{
+    a->zmenu_open = open;
+    if (open)
+        for (int i = 0; i < LM_N_ZOOM; i++)
+            if (LM_ZOOM_LEVELS[i] == a->zoom)
+                a->zmenu_hover = i;
+    a->win.redraw = true;
+}
+
+static void paint_zmenu(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int x, y, mw, mh;
+    zmenu_rect(a, &x, &y, &mw, &mh);
+    wlwin_round_fill(w, x - 1, y - 1, mw + 2, mh + 2, 9, lm_theme.menu_border);
+    wlwin_round_fill(w, x, y, mw, mh, 8, COL_BAR);
+    for (int i = 0; i < LM_N_ZOOM; i++) {
+        int ry = y + 2 + i * ZMENU_ROW_H;
+        bool cur = LM_ZOOM_LEVELS[i] == a->zoom;
+        if (i == a->zmenu_hover)
+            wlwin_round_fill(w, x + 3, ry, mw - 6, ZMENU_ROW_H, ZMENU_ROW_H / 2, lm_theme.terminal_button_on);
+        char t[16];
+        snprintf(t, sizeof(t), "%d%%", LM_ZOOM_LEVELS[i]);
+        wlwin_text(w, x + 8 + (ZMENU_CHARS - (int)strlen(t)) * LM_FONT_W, ry + 2, t, 1, cur ? lm_theme.menu_current : lm_theme.bar_text_bright, 0);
+        if (cur)
+            wlwin_fill(w, x + mw - 12, ry + ZMENU_ROW_H / 2 - 2, 4, 4, lm_theme.menu_current);           /* a dot marks the active size */
+    }
 }
 
 static void paint_rail(struct app *a)
@@ -1364,7 +1424,13 @@ static void do_button(struct app *a, int i)
     case B_PASTE: cmd_paste(a); set_title(a); break;
     case B_FIND: cmd_find(a); break;
     case B_SMALLER: set_zoom(a, -1); break;
-    case B_ZOOM: set_zoom(a, 0); break;                                 /* the size shown: a click goes back to 100 % */
+    case B_ZOOM:
+        if (g_rail && !g_note)
+            zmenu_set(a, !a->zmenu_open);                               /* the rail: the list of sizes */
+        else
+            set_zoom(a, 0);                                             /* the bar: the size shown, a click goes back to 100 % */
+        break;
+    case B_RESET: set_zoom(a, 0); break;
     case B_BIGGER: set_zoom(a, 1); break;
     case B_HELP: a->help = true; break;
     case B_VIEW: preview_set(a, !a->preview); break;
@@ -1998,6 +2064,18 @@ static void handle_key(struct app *a, uint32_t code, uint32_t ks)
             a->help = false;
         return;
     }
+    if (a->zmenu_open) {                                                /* the list of text sizes: Up / Down / Enter / Esc */
+        if (ks == LM_KS_Escape) {
+            zmenu_set(a, false);
+        } else if (ks == LM_KS_Up || ks == LM_KS_Down) {
+            a->zmenu_hover = LM_CLAMP(a->zmenu_hover + (ks == LM_KS_Up ? -1 : 1), 0, LM_N_ZOOM - 1);
+            a->win.redraw = true;
+        } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+            set_zoom_pct(a, LM_ZOOM_LEVELS[a->zmenu_hover]);
+            zmenu_set(a, false);
+        }
+        return;
+    }
     if (a->prompt != P_NONE) {
         edit_prompt(a, ks, plain);
         return;
@@ -2398,6 +2476,8 @@ status:;
     }
     if (a->help)
         paint_help(w);
+    if (a->zmenu_open && g_rail && !g_note)
+        paint_zmenu(a);
     if (card_on(a))
         paint_card(a);
     preview_dump(a);
@@ -2470,6 +2550,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->hover = btn_at(a, a->px, a->py);
             w->redraw = true;
         }
+        if (a->zmenu_open) {
+            int row = zmenu_row_at(a, a->px, a->py);
+            if (row >= 0 && row != a->zmenu_hover) {
+                a->zmenu_hover = row;
+                w->redraw = true;
+            }
+            break;
+        }
         if (a->preview && a->md) {
             int cx;
             pv_col(a, &cx);
@@ -2499,6 +2587,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
+        if (a->zmenu_open && args[3].u == 1) {                          /* any press: pick a size, or just close the list */
+            int row = zmenu_row_at(a, a->px, a->py);
+            if (row >= 0 && args[2].u == 272)
+                set_zoom_pct(a, LM_ZOOM_LEVELS[row]);
+            zmenu_set(a, false);
+            break;
+        }
         if (args[2].u == 272 && args[3].u == 0)
             rails_release(a);                                           /* (the drop springs back) */
         if (args[2].u == 273 && args[3].u == 1) {                        /* BTN_RIGHT: the field's menu, or the text's */
@@ -2545,7 +2640,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                     wlrail_press(&a->ran[0], b, now_ms());
                 } else {
                     wlrail_press(&a->ran[1], rail_hover(a, true), now_ms());
-                    if (b == B_BIGGER || b == B_ZOOM || b == B_SMALLER) {      /* the window grows or shrinks: the pointer goes along with the button */
+                    if (b == B_BIGGER || b == B_RESET || b == B_SMALLER) {      /* the window grows or shrinks: the pointer goes along with the button */
                         a->follow = rail_hover(a, true);
                         a->follow_w = a->win.w;
                         a->follow_ms = now_ms();

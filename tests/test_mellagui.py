@@ -3846,11 +3846,76 @@ class TestClients(Base):
         ctl.tap(57)                                            # Space marks p.ppm, too
         ctl.tap(self.FKEYS[6])
         ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), b'already here\n', 'nothing happens before the question is answered')
+        self.assertTrue(os.path.exists(os.path.join(d, 'p.ppm')))
+        ctl.tap(KEY_S)                                         # S: skip the one that exists, move the rest
         time.sleep(0.5)
-        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), b'already here\n', 'an existing file is never replaced')
+        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), b'already here\n', 'a skipped file is not replaced')
         self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'the one that could not be moved stays')
         self.assertTrue(os.path.exists(os.path.join(sub, 'p.ppm')))
         self.assertFalse(os.path.exists(os.path.join(d, 'p.ppm')))
+
+    def test_files_remembers_its_folders_and_the_preview(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        d = tempfile.mkdtemp(prefix='files-state-', dir=tmp)
+        cfg = tempfile.mkdtemp(prefix='cfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        os.mkdir(os.path.join(d, 'sub'))
+        with open(os.path.join(d, 'sub', 'in.txt'), 'w') as f:
+            f.write('inside\n')
+        env = dict(os.environ, XDG_CONFIG_HOME=cfg, XDG_DATA_HOME=os.path.join(d, '.xdg'), HOME=d)
+        p = subprocess.Popen([exe, d], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.files'))
+        time.sleep(0.5)
+        ctl.tap(KEY_ENTER)                                     # the left pane goes into sub
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(61)                                            # F3: the other pane previews
+        time.sleep(0.6)
+        conf = os.path.join(cfg, 'mellagui', 'files.conf')
+        with open(conf) as f:
+            lines = f.read().split('\n')
+        self.assertIn('left=' + os.path.join(d, 'sub'), lines)
+        self.assertIn('right=' + d, lines)
+        self.assertIn('preview=1', lines)
+        ctl.tap(68)                                            # F10 quits
+        self.assertEqual(p.wait(timeout=5), 0)
+        p2 = subprocess.Popen([exe], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)   # no folder asked for: it comes back as it was
+        self.addCleanup(lambda: (p2.poll() is None) and (p2.kill(), p2.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.files'))
+        self.wait_title('mellagui.files', 'sub - Files')
+        with open(conf) as f:
+            self.assertIn('preview=1', f.read().split('\n'))
+
+    def test_files_an_existing_file_is_replaced_only_after_the_question(self):
+        p, d = self.files_start()
+        sub = os.path.join(d, 'sub')
+        mine = self.read_file(os.path.join(d, 'a.txt'))
+        with open(os.path.join(sub, 'a.txt'), 'wb') as f:
+            f.write(b'already here\n')
+        ctl.tap(self.K_TAB)
+        ctl.tap(KEY_ENTER)                                     # right pane: sub
+        self.wait_title('mellagui.files', 'sub - Files')
+        ctl.tap(self.K_TAB)
+        ctl.tap(self.K_DOWN)                                   # a.txt
+        ctl.tap(self.FKEYS[5])                                 # F5: copy to the other pane's folder
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        ctl.tap(KEY_ESC)                                       # Esc: the question is withdrawn, nothing is touched
+        time.sleep(0.3)
+        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), b'already here\n')
+        ctl.tap(self.FKEYS[5])
+        ctl.tap(KEY_ENTER)
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)                                     # Enter: replace it
+        time.sleep(0.6)
+        self.assertEqual(self.read_file(os.path.join(sub, 'a.txt')), mine, 'the file was replaced after the answer')
+        self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'a copy leaves the original')
+        self.assertEqual([n for n in os.listdir(sub) if n.endswith('.mellagui-new')], [], 'no temporary file is left')
 
     def test_files_rename(self):
         p, d = self.files_start()
@@ -3875,7 +3940,9 @@ class TestClients(Base):
         for name, text in (('a.txt', b'remote a\n'), ('with space.txt', b'remote spaced\n'), ('sub/inner.txt', b'remote inner\n')):
             with open(os.path.join(share, name), 'wb') as f:
                 f.write(text)
-        conf, cache = os.path.join(root, 'conf'), os.path.join(root, 'cache')
+        conf = tempfile.mkdtemp(prefix='cfg-', dir=tmp)             # (outside the fake server's root: the browser writes files.conf there at once, and a folder there would be a share)
+        self.addCleanup(shutil.rmtree, conf, ignore_errors=True)
+        cache = os.path.join(root, 'cache')
         log = os.path.join(root, 'smb.log')
         env = {'MELLAGUI_SMBCLIENT': os.path.join(ROOT, 'tests', 'fake_smbclient.py'), 'FAKE_SMB_ROOT': root, 'FAKE_SMB_LOG': log,
                'XDG_CONFIG_HOME': conf, 'XDG_CACHE_HOME': cache, 'MELLAGUI_SMB_GATEWAY': 'none'}

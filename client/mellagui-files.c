@@ -8,7 +8,8 @@
  *                                 without a choice. The settings panel's Desktop page starts it from its "Browse..." button.
  *   mellagui-files --selftest     listing, sorting, classification, copy / move / delete and the preview without a display
  *
- * Each pane lists a folder: folders first, then files, sorted by name without regard to case; ".." goes up. The pane with the
+ * Each pane lists a folder: folders first, then files, sorted by name without regard to case (click the Name / Size / Modified label in the pane's
+ * header, or Ctrl+1 / Ctrl+2 / Ctrl+3, to sort by that column; the same again turns the order round); ".." goes up. The pane with the
  * highlighted bar is the active one. One of the two panes can show a preview of the file under the cursor of the other (F3, Ctrl+Q or
  * the Preview button): text, a hex dump of binary files, a picture, or the inside of a folder.
  *
@@ -17,7 +18,7 @@
  * Insert or Space marks the file and moves down; F1 help, F2 rename, F3 preview, F4 edit, F5 copy, F6 move, F7 new folder,
  * F8 (or Delete) delete into the trash (Shift+F8 / Shift+Delete: for good; Ctrl+B opens the trash, Ctrl+Z puts the marked files in it back, Ctrl+E empties it), F9 terminal here, F10 quit; copy / move / delete work on the marked
  * files, else on the one under the cursor, copy and move go to the folder shown in the other pane (editable first, Tab completes names) and
- * never replace an existing file, delete asks first. They run in a thread: the window stays alive, the status line shows the progress and Esc
+ * ask before they replace an existing file (Enter replaces, S skips the ones that exist, Esc cancels; folders are never replaced), delete asks first. They run in a thread: the window stays alive, the status line shows the progress and Esc
  * cancels.
  * Network drives: the Network button / Ctrl+N shows "smb://" (the servers you connected to, the router when there is one, and
  * "Connect to a server..."; Ctrl+K asks for a name, user@name or "name legacy"). A server's shares are folders, and everything works there as on
@@ -107,9 +108,13 @@ struct entry {
     time_t mtime;
 };
 
+enum sortkey { SORT_NAME, SORT_SIZE, SORT_TIME };
+
 /* One folder listing with its cursor. */
 struct pane {
     char cwd[PATH_MAX];
+    int sort;                           /* enum sortkey: the column the list is sorted by ... */
+    bool sort_desc;                     /* ... and the order is turned round */
     struct entry *e;
     int n, cap;
     int sel, top;
@@ -145,13 +150,21 @@ struct preview {
 static bool g_rails = true;
 static bool g_card = true;
 #define RAILS_W (g_rails ? WLRAIL_W : 0)
-enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY, P_CONNECT, P_NETUSER, P_NETPASS };
+enum prompt { P_NONE, P_GOTO, P_COPY, P_MOVE, P_MKDIR, P_RENAME, P_DELETE, P_DELETE_HARD, P_EMPTY, P_CONNECT, P_NETUSER, P_NETPASS, P_REPLACE };
+enum replace_mode { REP_ASK, REP_REPLACE, REP_SKIP };                  /* what a copy / move does with files that exist at the destination */
+
+/* The prompts that are a yes / no question (no text field). */
+static bool prompt_is_question(enum prompt k)
+{
+    return k == P_DELETE || k == P_DELETE_HARD || k == P_EMPTY || k == P_REPLACE;
+}
 
 enum job_kind { J_COPY, J_MOVE, J_DELETE, J_TRASH, J_RESTORE };
 
 struct job_item {
     char src[PATH_MAX];
     char dst[PATH_MAX];                 /* copy / move: where it goes */
+    bool replace;                       /* copy / move: dst is a file that exists and the user said it may be replaced */
 };
 
 /* A copy, move or delete that runs in its own thread while the window keeps going. The thread works through `items`; the window
@@ -205,6 +218,11 @@ struct app {
     bool dual;                          /* two panes (always, except for --choose) */
     bool preview;                       /* the pane that is not active shows a preview */
     bool show_hidden;
+    int rep_mode;                       /* enum replace_mode: do_copy_move asks (REP_ASK) when files exist, else does what the answer said */
+    bool rep_move;                      /* the copy / move that is waiting for the answer of P_REPLACE ... */
+    char rep_where[PATH_MAX];           /* ... its destination ... */
+    int rep_count;                      /* ... how many files exist there ... */
+    char rep_first[NAME_MAX + 1];       /* ... and the first one's name */
     bool help;
     enum prompt prompt;
     int menu_kind;                      /* the right-click menu that is showing: 0 none / the prompt's field, 1 a file's, 2 an empty place's, 3 a Markdown page's */
@@ -256,13 +274,41 @@ static void entries_free(struct pane *p)
     p->n = 0;
 }
 
+static int g_sort_key = SORT_NAME;              /* what entry_cmp sorts by (set around a qsort by entries_sort) */
+static bool g_sort_desc;
+
+static int name_cmp(const struct entry *x, const struct entry *y)
+{
+    int c = strcasecmp(x->name, y->name);
+    return c ? c : strcmp(x->name, y->name);
+}
+
+/* Folders always come first. Within a group the column decides (a folder has no size: folders go by name then), the name breaks ties;
+ * "turned round" reverses the column's order only, not the folders-first rule. */
 static int entry_cmp(const void *pa, const void *pb)
 {
     const struct entry *x = pa, *y = pb;
     if (x->dir != y->dir)
         return x->dir ? -1 : 1;
-    int c = strcasecmp(x->name, y->name);
-    return c ? c : strcmp(x->name, y->name);
+    int c = 0;
+    if (g_sort_key == SORT_SIZE && !x->dir)
+        c = x->size < y->size ? -1 : x->size > y->size;
+    else if (g_sort_key == SORT_TIME)
+        c = x->mtime < y->mtime ? -1 : x->mtime > y->mtime;
+    if (g_sort_key == SORT_NAME)
+        return g_sort_desc ? name_cmp(y, x) : name_cmp(x, y);
+    if (c)
+        return g_sort_desc ? -c : c;
+    return name_cmp(x, y);
+}
+
+static void entries_sort(struct entry *e, int n, int key, bool desc)
+{
+    g_sort_key = key;
+    g_sort_desc = desc;
+    qsort(e, (size_t)n, sizeof(e[0]), entry_cmp);
+    g_sort_key = SORT_NAME;
+    g_sort_desc = false;
 }
 
 static bool add_entry(struct pane *p, const char *name, bool dir, bool broken, bool exec, off_t size, time_t mtime)
@@ -315,7 +361,7 @@ static int list_dir(struct pane *p, const char *dir, bool hidden, char *err, siz
         add_entry(&tmp, de->d_name, isdir, broken, !isdir && !broken && (st.st_mode & 0111), st.st_size, st.st_mtime);
     }
     closedir(d);
-    qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
+    entries_sort(tmp.e, tmp.n, p->sort, p->sort_desc);
     entries_free(p);
     free(p->e);
     p->e = tmp.e;
@@ -616,6 +662,49 @@ static int copy_file(const char *src, const char *dst, const struct stat *st, ch
     if (rc)
         unlink(dst);
     return rc;
+}
+
+static int remove_tree(const char *path, int depth, char *err, size_t errsz);
+
+/* May `dst` (which exists) be replaced by `src`? Only a file or a link by a file or a link, on this computer, and not by itself under another name. */
+static bool replaceable(const char *src, const char *dst)
+{
+    struct stat s, d;
+    if (is_net(src) || is_net(dst) || lstat(src, &s) < 0 || lstat(dst, &d) < 0)
+        return false;
+    if (S_ISDIR(s.st_mode) || S_ISDIR(d.st_mode))
+        return false;
+    return !(s.st_dev == d.st_dev && s.st_ino == d.st_ino);
+}
+
+/* Puts `src` in the place of the file `dst`: a copy next to it that is renamed over it when it is whole (a failure leaves the old file), a move is
+ * a rename when it can be. */
+static int replace_node(const char *src, const char *dst, bool move, char *err, size_t errsz)
+{
+    if (move) {
+        if (rename(src, dst) == 0)
+            return 0;
+        if (errno != EXDEV) {
+            snprintf(err, errsz, "cannot move %s: %s", src, strerror(errno));
+            return -1;
+        }
+    }
+    char tmp[PATH_MAX + 24];
+    if (snprintf(tmp, sizeof(tmp), "%s.mellagui-new", dst) >= (int)sizeof(tmp) - 1) {
+        snprintf(err, errsz, "the name %s is too long", dst);
+        return -1;
+    }
+    unlink(tmp);
+    if (copy_node(src, tmp, 0, err, errsz) < 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, dst) < 0) {
+        snprintf(err, errsz, "cannot replace %s: %s", dst, strerror(errno));
+        unlink(tmp);
+        return -1;
+    }
+    return move ? remove_tree(src, 0, err, errsz) : 0;
 }
 
 /* Copies a file, a link or a whole folder tree to `dst`, which must not exist. Links are copied as links. */
@@ -1512,7 +1601,7 @@ static int net_list(struct pane *p, const char *dir, bool hidden, char *err, siz
             free(it);
         }
         net_conn_used(&np);
-        qsort(tmp.e, (size_t)tmp.n, sizeof(tmp.e[0]), entry_cmp);
+        entries_sort(tmp.e, tmp.n, p->sort, p->sort_desc);
     }
     entries_free(p);
     free(p->e);
@@ -1902,8 +1991,14 @@ static void job_execute(struct job *j)
         long long before = atomic_load(&j->done);
         int rc;
         switch (j->kind) {
-        case J_COPY: rc = is_net(src) || is_net(dst) ? net_copy_node(src, dst, false, err, sizeof(err)) : copy_node(src, dst, 0, err, sizeof(err)); break;
-        case J_MOVE: rc = is_net(src) || is_net(dst) ? net_copy_node(src, dst, true, err, sizeof(err)) : move_node(src, dst, err, sizeof(err)); break;
+        case J_COPY:
+            rc = j->items[i].replace ? replace_node(src, dst, false, err, sizeof(err)) :
+                 is_net(src) || is_net(dst) ? net_copy_node(src, dst, false, err, sizeof(err)) : copy_node(src, dst, 0, err, sizeof(err));
+            break;
+        case J_MOVE:
+            rc = j->items[i].replace ? replace_node(src, dst, true, err, sizeof(err)) :
+                 is_net(src) || is_net(dst) ? net_copy_node(src, dst, true, err, sizeof(err)) : move_node(src, dst, err, sizeof(err));
+            break;
         case J_TRASH: rc = trash_item(j->trash, src, err, sizeof(err)); break;
         case J_RESTORE: rc = restore_item(src, dst, err, sizeof(err)); break;
         default: rc = is_net(src) ? net_remove_node(src, err, sizeof(err)) : remove_tree(src, 0, err, sizeof(err)); break;
@@ -2312,6 +2407,8 @@ static void reread_pane(struct app *a, struct pane *p)
     free(marked);
 }
 
+static void sort_by(struct app *a, struct pane *p, int key);
+
 static void reread(struct app *a)
 {
     reread_pane(a, cur(a));
@@ -2624,7 +2721,9 @@ static bool job_busy(struct app *a)
     return true;
 }
 
-/* Copy or move to `where` (a folder, or a new name when only one thing is moved or copied). Nothing is ever replaced. */
+/* Copy or move to `where` (a folder, or a new name when only one thing is moved or copied). A file that exists there is replaced only when the user
+ * said so: the first pass (rep_mode REP_ASK) finds them and asks (P_REPLACE); the answer runs this again with REP_REPLACE or REP_SKIP.
+ * Folders are never replaced or merged. */
 static void do_copy_move(struct app *a, const char *where, bool move)
 {
     char **names;
@@ -2658,6 +2757,8 @@ static void do_copy_move(struct app *a, const char *where, bool move)
     j->pane = a->act;
     j->requested = n;
     snprintf(j->target, sizeof(j->target), "%s", target);
+    int nrepl = 0;
+    char first_repl[NAME_MAX + 1] = "";
     for (int i = 0; i < n; i++) {
         struct job_item *it = &j->items[j->n];
         char err[PATH_MAX + 120] = "";
@@ -2670,9 +2771,21 @@ static void do_copy_move(struct app *a, const char *where, bool move)
             snprintf(err, sizeof(err), "%s is already there", names[i]);
         else if (path_inside(it->dst, it->src))
             snprintf(err, sizeof(err), "cannot put %s into itself", names[i]);
-        else if (exists_net_or_local(it->dst))
+        else if (exists_net_or_local(it->dst)) {
+            if (replaceable(it->src, it->dst)) {
+                if (a->rep_mode == REP_REPLACE) {
+                    it->replace = true;
+                    j->n++;
+                    continue;
+                }
+                if (a->rep_mode == REP_ASK) {
+                    nrepl++;
+                    if (!first_repl[0])
+                        snprintf(first_repl, sizeof(first_repl), "%s", names[i]);
+                }
+            }
             snprintf(err, sizeof(err), "%s already exists: not replaced", it->dst);
-        else {
+        } else {
             j->n++;
             continue;
         }
@@ -2681,6 +2794,15 @@ static void do_copy_move(struct app *a, const char *where, bool move)
             snprintf(j->first_skip, sizeof(j->first_skip), "%s", err);
     }
     free_names(names, n);
+    if (nrepl > 0) {                                                    /* some files are there already: ask before anything is done */
+        job_free(j);
+        a->rep_move = move;
+        a->rep_count = nrepl;
+        snprintf(a->rep_where, sizeof(a->rep_where), "%s", where);
+        snprintf(a->rep_first, sizeof(a->rep_first), "%s", first_repl);
+        prompt_start(a, P_REPLACE, "");
+        return;
+    }
     if (j->n == 0) {                                                    /* nothing left to do: say why */
         char why[sizeof(j->first_skip)];
         snprintf(why, sizeof(why), "%s", j->first_skip);
@@ -3299,6 +3421,7 @@ static void prompt_accept(struct app *a)
     case P_DELETE: do_delete(a, false); return;
     case P_DELETE_HARD: do_delete(a, true); return;
     case P_EMPTY: do_empty_trash(a); return;
+    case P_REPLACE: a->rep_mode = REP_REPLACE; do_copy_move(a, a->rep_where, a->rep_move); a->rep_mode = REP_ASK; return;
     case P_COPY: if (text[0]) do_copy_move(a, text, false); return;
     case P_MOVE: if (text[0]) do_copy_move(a, text, true); return;
     case P_MKDIR: if (text[0]) do_mkdir(a, text); return;
@@ -3359,6 +3482,7 @@ static const char *prompt_label(enum prompt k)
     case P_NETPASS: return "Password: ";
     case P_DELETE:
     case P_DELETE_HARD:
+    case P_REPLACE:
     case P_EMPTY: return "";
     default: return "";
     }
@@ -3449,8 +3573,13 @@ static void handle_key(struct app *a, uint32_t ks)
             if (a->prompt == P_NETPASS)
                 explicit_bzero(a->pbuf, sizeof(a->pbuf));
             a->prompt = P_NONE;
-        } else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY) {
-            /* a question: only Enter and Esc answer it */
+        } else if (a->prompt == P_REPLACE && (ks == 's' || ks == 'S')) {          /* S: copy / move only what does not exist yet */
+            a->prompt = P_NONE;
+            a->rep_mode = REP_SKIP;
+            do_copy_move(a, a->rep_where, a->rep_move);
+            a->rep_mode = REP_ASK;
+        } else if (prompt_is_question(a->prompt)) {
+            /* a question: only Enter and Esc answer it (and S the question of existing files) */
         } else if (ks == LM_KS_Tab) {                                   /* complete a name (not for the new folder / rename fields) */
             if ((a->prompt == P_GOTO || a->prompt == P_COPY || a->prompt == P_MOVE) && !is_net(cur(a)->cwd) && !is_net(a->pbuf)) {
                 char list[200];
@@ -3472,6 +3601,9 @@ static void handle_key(struct app *a, uint32_t ks)
     if (tl == 1 && ctrl && !alt && !super) {
         switch (txt[0] | 0x20) {
         case 'h': toggle_hidden(a); return;
+        case '1': sort_by(a, cur(a), SORT_NAME); return;                 /* Ctrl+1 / 2 / 3: sort the pane by name / size / date */
+        case '2': sort_by(a, cur(a), SORT_SIZE); return;
+        case '3': sort_by(a, cur(a), SORT_TIME); return;
         case 'r': reread(a); return;
         case 't': start_terminal(a); return;
         case 'q': toggle_preview(a); return;
@@ -3603,26 +3735,69 @@ static int split_x(const struct app *a)
     return LM_CLAMP(x, l + SPLIT_MIN, r - SPLIT_MIN);
 }
 
-/* files.conf keeps where the divider was left (`split=PER MILLE`, 150..850). */
-static int split_conf_load(void)
+/* files.conf keeps what the program looked like when it was left: where the divider was (`split=PER MILLE`, 150..850), the folder of each pane
+ * (`left=` / `right=`, only folders on this computer), which pane was active, whether the preview was on, the hidden files shown, and each
+ * pane's sort column (`sort0=` / `sort1=`: 0 name, 1 size, 2 date; `desc0=` / `desc1=`). A start without a folder on the command line comes back
+ * to it; `mellagui-files DIR` shows DIR but remembers what it looks like afterwards just the same. The picture chooser (--choose) keeps none of it. */
+struct fstate {
+    int split, act, preview, hidden;
+    char dir[2][PATH_MAX];
+    int sort[2], desc[2];
+};
+
+static void state_load(struct fstate *st)
 {
-    char path[1024], line[128];
-    int v = 0;
+    char path[1024], line[PATH_MAX + 16];
+    memset(st, 0, sizeof(*st));
     if (!lm_zoom_conf_path("files", path, sizeof(path)))
-        return 0;
+        return;
     FILE *f = fopen(path, "r");
     if (!f)
-        return 0;
+        return;
     while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = 0;
         int n;
         if (sscanf(line, "split=%d", &n) == 1 && n >= 150 && n <= 850)
-            v = n;
+            st->split = n;
+        else if (!strncmp(line, "left=/", 6))
+            snprintf(st->dir[0], sizeof(st->dir[0]), "%.*s", (int)sizeof(st->dir[0]) - 1, line + 5);
+        else if (!strncmp(line, "right=/", 7))
+            snprintf(st->dir[1], sizeof(st->dir[1]), "%.*s", (int)sizeof(st->dir[1]) - 1, line + 6);
+        else if (sscanf(line, "active=%d", &n) == 1)
+            st->act = n == 1;
+        else if (sscanf(line, "preview=%d", &n) == 1)
+            st->preview = n == 1;
+        else if (sscanf(line, "hidden=%d", &n) == 1)
+            st->hidden = n == 1;
+        else if (sscanf(line, "sort0=%d", &n) == 1 && n >= 0 && n <= SORT_TIME)
+            st->sort[0] = n;
+        else if (sscanf(line, "sort1=%d", &n) == 1 && n >= 0 && n <= SORT_TIME)
+            st->sort[1] = n;
+        else if (sscanf(line, "desc0=%d", &n) == 1)
+            st->desc[0] = n == 1;
+        else if (sscanf(line, "desc1=%d", &n) == 1)
+            st->desc[1] = n == 1;
     }
     fclose(f);
-    return v;
 }
 
-static void split_conf_save(int v)
+/* The file's text for the program's state now. */
+static void state_text(const struct app *a, char *out, size_t n)
+{
+    int k = snprintf(out, n, "# mellagui-files: written by the program itself\n");
+    if (a->split > 0 && (size_t)k < n)
+        k += snprintf(out + k, n - (size_t)k, "split=%d\n", a->split);
+    if (!a->dual)
+        return;
+    for (int i = 0; i < 2 && (size_t)k < n; i++)
+        if (!is_net(a->pane[i].cwd))
+            k += snprintf(out + k, n - (size_t)k, "%s=%s\n", i == 0 ? "left" : "right", a->pane[i].cwd);
+    if ((size_t)k < n)
+        snprintf(out + k, n - (size_t)k, "active=%d\npreview=%d\nhidden=%d\nsort0=%d\ndesc0=%d\nsort1=%d\ndesc1=%d\n", a->act, a->preview ? 1 : 0,
+                 a->show_hidden ? 1 : 0, a->pane[0].sort, a->pane[0].sort_desc ? 1 : 0, a->pane[1].sort, a->pane[1].sort_desc ? 1 : 0);
+}
+
+static void state_write(const char *text)
 {
     char path[1024], tmp[1100];
     if (!lm_zoom_conf_path("files", path, sizeof(path)))
@@ -3638,9 +3813,23 @@ static void split_conf_save(int v)
     FILE *f = fopen(tmp, "w");
     if (!f)
         return;
-    fprintf(f, "# mellagui-files: written by the program itself\nsplit=%d\n", v);
+    fputs(text, f);
     if (fclose(f) != 0 || rename(tmp, path) < 0)
         unlink(tmp);
+}
+
+static char g_state_last[2 * PATH_MAX + 512];                            /* what the file holds now: it is written again only when this changes */
+
+static void state_save(const struct app *a)
+{
+    if (a->choose_key)
+        return;
+    char text[sizeof(g_state_last)];
+    state_text(a, text, sizeof(text));
+    if (!strcmp(text, g_state_last))
+        return;
+    state_write(text);
+    snprintf(g_state_last, sizeof(g_state_last), "%s", text);
 }
 
 static void pane_rect(const struct app *a, int i, int *x, int *w)
@@ -3683,6 +3872,80 @@ static void scrollbar_drag(struct app *a, struct pane *p, double py)
     p->top = LM_CLAMP(pos * LM_MAX(total - a->rows_visible, 0) / room, 0, LM_MAX(total - a->rows_visible, 0));
 }
 
+/* ---- sorting by a column ------------------------------------------------------------------------------------------------- */
+
+/* Sorts the pane's list again by its own key; the cursor stays on the same file (marks live in the entries and move with them). */
+static void pane_resort(struct pane *p)
+{
+    char keep[NAME_MAX + 1];
+    snprintf(keep, sizeof(keep), "%s", row_name(p, p->sel));
+    entries_sort(p->e, p->n, p->sort, p->sort_desc);
+    for (int r = 0; r < rows(p); r++)
+        if (!strcmp(row_name(p, r), keep)) {
+            p->sel = r;
+            break;
+        }
+}
+
+/* A click on a column's name: that column, biggest / newest first (name: A to Z first); the same again turns the order round. */
+static void sort_by(struct app *a, struct pane *p, int key)
+{
+    if (p->sort == key) {
+        p->sort_desc = !p->sort_desc;
+    } else {
+        p->sort = key;
+        p->sort_desc = key != SORT_NAME;
+    }
+    pane_resort(p);
+    msg(a, "Sorted by %s, %s", key == SORT_NAME ? "name" : key == SORT_SIZE ? "size" : "date",
+        key == SORT_NAME ? (p->sort_desc ? "Z to A" : "A to Z") : key == SORT_SIZE ? (p->sort_desc ? "biggest first" : "smallest first") :
+                                                                            (p->sort_desc ? "newest first" : "oldest first"));
+    a->win.redraw = true;
+}
+
+/* Where the header row's column labels are (pane_rect's x0, pw): the same columns the rows use. cols = 1..3 as in paint_pane. */
+struct colhead {
+    int cols, right, name_x, size_x, time_x;
+};
+
+static struct colhead colhead_of(const struct pane *p, int x0, int pw, bool scrollbar)
+{
+    struct colhead h;
+    h.right = x0 + pw - (scrollbar ? lm_metrics.scrollbar_width : 0);
+    h.cols = pw >= 440 ? 3 : pw >= 260 ? 2 : 1;
+    h.time_x = h.right - 140;
+    h.size_x = h.cols == 3 ? h.right - 250 : h.right - 86;
+    h.name_x = h.size_x - 12 - lm_font_text_width("Name") - 14;      /* (room for the arrow) */
+    (void)p;
+    return h;
+}
+
+/* A column's label, and when it is the one sorted by, a small triangle after it: up = smallest / oldest / A first, down = the other way round. */
+static void paint_sort_label(struct wlwin *w, const struct pane *p, int key, int x, int y, uint32_t col)
+{
+    static const char *const names[3] = { "Name", "Size", "Modified" };
+    wlwin_text(w, x, y, names[key], 1, col, 0);
+    if (p->sort != key)
+        return;
+    int ax = x + lm_font_text_width(names[key]) + 5, ay = y + (LM_FONT_H - 4) / 2;
+    for (int r = 0; r < 4; r++)                                         /* rows 1, 3, 5 and 7 px wide */
+        wlwin_fill(w, ax + (p->sort_desc ? r : 3 - r), ay + (p->sort_desc ? r : r), p->sort_desc ? 7 - 2 * r : 1 + 2 * r, 1, col);
+}
+
+/* Which column label (SORT_*) is at x in the header row, -1 for none. */
+static int colhead_at(const struct pane *p, const struct colhead *h, int x)
+{
+    if (h->cols < 2 || is_net(p->cwd))
+        return -1;
+    if (x >= h->name_x && x < h->size_x - 6)
+        return SORT_NAME;
+    if (x >= h->size_x - 6 && x < (h->cols == 3 ? h->time_x - 6 : h->right))
+        return SORT_SIZE;
+    if (h->cols == 3 && x >= h->time_x - 6 && x < h->right)
+        return SORT_TIME;
+    return -1;
+}
+
 /* ---- drawing ------------------------------------------------------------------------------------------------------------- */
 
 static uint32_t entry_color(const struct entry *e)
@@ -3710,11 +3973,21 @@ static void paint_pane(struct wlwin *w, struct app *a, int idx)
     bool bar = total > a->rows_visible;
     int right = x0 + pw - (bar ? sbw : 0);                                    /* the list ends where the scroll bar begins */
 
-    int hy = TOOL_H;                                                          /* the header: the path, lit when the pane is active */
-    wlwin_fill(w, x0, hy, pw, HEAD_H, active && a->dual ? COL_SEL : COL_BG);
-    wlwin_text(w, x0 + 8, hy + 3, p->cwd, 1, active && a->dual ? lm_theme.text_bright : COL_DIM, pw - 16 - (count_marked(p) ? 80 : 0));
+    int hy = TOOL_H;                                                          /* the header: the path, lit when the pane is active, and the column labels */
+    struct colhead ch = colhead_of(p, x0, pw, bar);
+    bool labels = ch.cols > 1 && !is_net(p->cwd);
     int nm = count_marked(p);
-    if (nm) {
+    wlwin_fill(w, x0, hy, pw, HEAD_H, active && a->dual ? COL_SEL : COL_BG);
+    wlwin_text(w, x0 + 8, hy + 3, p->cwd, 1, active && a->dual ? lm_theme.text_bright : COL_DIM,
+               (labels ? ch.name_x - x0 - 8 : pw - 16) - (count_marked(p) && !labels ? 80 : 0));
+    if (labels) {
+        uint32_t on = active ? lm_theme.text_bright : COL_FG;
+        paint_sort_label(w, p, SORT_NAME, ch.name_x, hy + 3, p->sort == SORT_NAME ? on : COL_DIM);
+        paint_sort_label(w, p, SORT_SIZE, ch.size_x, hy + 3, p->sort == SORT_SIZE ? on : COL_DIM);
+        if (ch.cols == 3)
+            paint_sort_label(w, p, SORT_TIME, ch.time_x, hy + 3, p->sort == SORT_TIME ? on : COL_DIM);
+    }
+    if (nm && !labels) {
         char mk[32];
         snprintf(mk, sizeof(mk), "%d marked", nm);
         wlwin_text(w, x0 + pw - 8 - lm_font_text_width(mk), hy + 3, mk, 1, COL_MARK, 0);
@@ -4409,7 +4682,7 @@ static void paint_help(struct wlwin *w)
         "F10               quit",
         "",
         "Copy, move and delete take the marked files, else the one under the cursor.",
-        "Nothing that exists is ever replaced. They run in the background: Esc cancels.",
+        "A file that exists is only replaced after asking (Enter replaces, S skips, Esc cancels). They run in the background: Esc cancels.",
         "In the question of F5 / F6 / Ctrl+L, Tab completes the names.",
         "Ctrl+H hidden files   Ctrl+R reread   Ctrl+L type a path",
         "Ctrl+N / Network  network drives (smb:// and sftp://); Ctrl+K connect to a server",
@@ -4447,6 +4720,7 @@ static const char *card_title(enum prompt k)
     case P_DELETE: return "Move to the trash";
     case P_DELETE_HARD: return "Delete for good";
     case P_EMPTY: return "Empty the trash";
+    case P_REPLACE: return "Replace files";
     case P_CONNECT: return "Connect to a server";
     case P_NETUSER: return "User name";
     case P_NETPASS: return "Password";
@@ -4456,7 +4730,14 @@ static const char *card_title(enum prompt k)
 
 static bool card_question(const struct app *a)
 {
-    return a->prompt == P_DELETE || a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY;
+    return prompt_is_question(a->prompt);
+}
+
+/* The question of P_REPLACE (the card and the line say the same). */
+static void replace_text(const struct app *a, char *out, size_t n)
+{
+    snprintf(out, n, "%d file%s exist%s already (%.24s%s). Enter replaces, S skips, Esc cancels", a->rep_count, a->rep_count == 1 ? "" : "s",
+             a->rep_count == 1 ? "s" : "", a->rep_first, a->rep_count > 1 ? ", ..." : "");
 }
 
 /* What the card says above its field: the hint of the field, or the question itself. */
@@ -4473,6 +4754,8 @@ static void card_text(struct app *a, char *out, size_t n)
     else if (a->prompt == P_DELETE || a->prompt == P_DELETE_HARD)
         snprintf(out, n, "%s %d item%s%s%s%s%s", a->prompt == P_DELETE_HARD ? "Delete" : "Move", cnt, cnt == 1 ? "" : "s", cnt == 1 ? " (" : "",
                  cnt == 1 ? names[0] : "", cnt == 1 ? ")" : "", a->prompt == P_DELETE_HARD ? " for good? This cannot be undone." : " to the trash?");
+    else if (a->prompt == P_REPLACE)
+        replace_text(a, out, n);
     else if (a->prompt == P_EMPTY) {
         char t[PATH_MAX];
         int k = trash_files_dir(t, sizeof(t)) ? count_dir(t) : 0;
@@ -4512,6 +4795,7 @@ static void card_buttons(const struct app *a, const char **labels, uint32_t *col
     case P_DELETE: labels[1] = "Trash"; cols[1] = lm_theme.btn_orange; break;
     case P_DELETE_HARD: labels[1] = "Delete"; cols[1] = lm_theme.btn_red; break;
     case P_EMPTY: labels[1] = "Empty"; cols[1] = lm_theme.btn_red; break;
+    case P_REPLACE: labels[1] = "Replace"; cols[1] = lm_theme.btn_orange; break;
     case P_CONNECT: labels[1] = "Connect"; cols[1] = lm_theme.btn_blue; break;
     case P_NETUSER: labels[1] = "Next"; cols[1] = lm_theme.btn_blue; break;
     case P_NETPASS: labels[1] = "Log in"; cols[1] = lm_theme.btn_green; break;
@@ -4529,7 +4813,7 @@ static void paint_card(struct wlwin *w, struct app *a)
     char line[PATH_MAX + 120];
     card_text(a, line, sizeof(line));
     if (card_question(a)) {
-        wlwin_text(w, tx, ty, line, 1, a->prompt == P_DELETE ? COL_WARN : COL_ERR, fw);
+        wlwin_text(w, tx, ty, line, 1, a->prompt == P_DELETE || a->prompt == P_REPLACE ? COL_WARN : COL_ERR, fw);
     } else {
         if (line[0])
             wlwin_text(w, tx, ty, line, 1, COL_DIM, fw);
@@ -4671,6 +4955,8 @@ static void paint(struct wlwin *w)
                      n == 1 ? names[0] : "", n == 1 ? ")" : "",
                      hard ? "for good? This cannot be undone: Enter deletes, Esc cancels" : "to the trash? Enter moves, Esc cancels");
             free_names(names, n);
+        } else if (a->prompt == P_REPLACE) {
+            replace_text(a, line, sizeof(line));
         } else if (a->prompt == P_EMPTY) {
             char t[PATH_MAX];
             int n = trash_files_dir(t, sizeof(t)) ? count_dir(t) : 0;
@@ -4679,7 +4965,7 @@ static void paint(struct wlwin *w)
         } else {
             line[0] = 0;
         }
-        if (a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {          /* the label, then the field with its caret and selection */
+        if (!prompt_is_question(a->prompt)) {          /* the label, then the field with its caret and selection */
             const char *label = prompt_label(a->prompt);
             wlwin_text(w, 6, py + 2, label, 1, COL_FG, w->bw - 12);
             int lw = lm_font_text_width(label);
@@ -4696,7 +4982,7 @@ static void paint(struct wlwin *w)
                 wltext_paint(w, 6 + lw, py + 2, w->bw - 12 - lw, a->pbuf, true, COL_FG, lm_theme.button_hover, COL_FG);
             }
         } else {
-            wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY ? COL_ERR : a->prompt == P_DELETE ? COL_WARN : COL_FG, w->bw - 12);
+            wlwin_text(w, 6, py + 2, line, 1, a->prompt == P_DELETE_HARD || a->prompt == P_EMPTY ? COL_ERR : a->prompt == P_DELETE || a->prompt == P_REPLACE ? COL_WARN : COL_FG, w->bw - 12);
         }
     }
     if (a->dual) {
@@ -4793,7 +5079,7 @@ static void click(struct app *a, uint32_t time_ms)
         if (time_ms - a->div_click_ms < (uint32_t)lm_metrics.double_click_ms) {
             a->split = 500;
             a->div_click_ms = 0;
-            split_conf_save(a->split);
+            state_save(a);
         } else {
             a->div_click_ms = time_ms;
             a->split_drag = true;
@@ -4815,8 +5101,15 @@ static void click(struct app *a, uint32_t time_ms)
     int px0, pw;
     pane_rect(a, idx, &px0, &pw);
     int list_y = list_top();
-    if (y < list_y)
+    if (y < list_y) {
+        if (y >= TOOL_H && y < TOOL_H + HEAD_H) {                       /* a column's name in the header: sort by it */
+            struct colhead ch = colhead_of(p, px0, pw, rows(p) > a->rows_visible);
+            int key = colhead_at(p, &ch, x);
+            if (key >= 0)
+                sort_by(a, p, key);
+        }
         return;
+    }
     if (rows(p) > a->rows_visible && x >= px0 + pw - lm_metrics.scrollbar_width) {       /* the scroll bar */
         int ty, th;
         scrollbar_thumb(a, p, &ty, &th);
@@ -4908,7 +5201,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
         if (args[2].u == 273 && args[3].u == 1) {                       /* BTN_RIGHT while a text prompt is asking: Cut / Copy / Paste / Clear */
-            if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY && a->prompt != P_NETPASS) {
+            if (a->prompt != P_NONE && !prompt_is_question(a->prompt) && a->prompt != P_NETPASS) {
                 a->menu_kind = 0;
                 wlwin_menu(w, wltext_menu(a->pbuf));
             } else if (a->prompt == P_NONE && !a->help && a->pv.kind == PV_MARKDOWN && a->pv.md && a->dual && pane_is_preview(a, pane_at(a, (int)a->px)) &&
@@ -4957,7 +5250,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             wlrail_release(&a->ran[0]);
             if (a->split_drag) {
                 a->split_drag = false;
-                split_conf_save(a->split > 0 ? a->split : 500);
+                state_save(a);
             }
         }
         w->redraw = true;
@@ -5005,7 +5298,7 @@ static void menu_event(struct wlwin *w, int index)
             press_fkey(a, F_TERM);
         else
             reread(a);
-    } else if (a->prompt != P_NONE && a->prompt != P_DELETE && a->prompt != P_DELETE_HARD && a->prompt != P_EMPTY) {
+    } else if (a->prompt != P_NONE && !prompt_is_question(a->prompt)) {
         wltext_menu_do(&a->clip, a->pbuf, sizeof(a->pbuf), index);
     }
     w->redraw = true;
@@ -5186,6 +5479,21 @@ static int selftest(void)
     CHECK(lp.n >= 2 && lp.e[0].dir && lp.e[1].dir && !lp.e[2].dir, "folders first");
     CHECK(list_dir(&lp, dir, true, err, sizeof(err)) == 0 && lp.n == 8 && !strcmp(lp.e[2].name, ".secret"), "hidden files listed and sorted");
     CHECK(list_dir(&lp, "/nonexistent-dir", true, err, sizeof(err)) < 0 && lp.n == 8, "a failed listing keeps the old one");
+    lp.sort = SORT_SIZE;                                                /* by size, biggest first: the folders stay in front */
+    lp.sort_desc = true;
+    pane_resort(&lp);
+    CHECK(lp.e[0].dir && lp.e[1].dir && !lp.e[2].dir && lp.e[2].size >= lp.e[3].size && lp.e[3].size >= lp.e[4].size && !strcmp(lp.e[3].name, "beta.txt"),
+          "sorted by size, biggest first (got %s, %s)", lp.e[2].name, lp.e[3].name);
+    lp.sort_desc = false;
+    pane_resort(&lp);
+    CHECK(lp.e[0].dir && !lp.e[2].dir && lp.e[2].size <= lp.e[3].size && lp.e[6].size >= lp.e[5].size, "sorted by size, smallest first");
+    lp.sort = SORT_NAME;
+    lp.sort_desc = true;
+    pane_resort(&lp);
+    CHECK(lp.e[0].dir && lp.e[1].dir && lp.e[0].name[0] == 'z' && !lp.e[2].dir && !strcmp(lp.e[2].name, "pic.PNG"), "sorted by name, Z to A (got %s)", lp.e[2].name);
+    lp.sort = SORT_NAME;
+    lp.sort_desc = false;
+    CHECK(list_dir(&lp, dir, true, err, sizeof(err)) == 0 && lp.n == 8, "listed again");
 
     snprintf(p, sizeof(p), "%s/beta.txt", dir);
     CHECK(classify(p) == K_TEXT, "text");
@@ -5269,8 +5577,27 @@ static int selftest(void)
     CHECK(file_is(p, "one\n"), "copied: %s", a.msg);
     CHECK(a.pane[1].n == 1, "the right pane was reread: %d", a.pane[1].n);
     write_file(p, "changed", 7);
-    do_copy_move(&a, dst, false);                                         /* the same copy again: nothing is replaced */
-    CHECK(file_is(p, "changed") && strstr(a.msg, "not replaced"), "an existing file stays: %s", a.msg);
+    do_copy_move(&a, dst, false);                                         /* the same copy again: it asks before it replaces anything */
+    CHECK(a.prompt == P_REPLACE && a.rep_count == 1 && !strcmp(a.rep_first, "one.txt") && file_is(p, "changed"), "an existing file is asked about first: prompt %d", a.prompt);
+    a.prompt = P_NONE;
+    a.rep_mode = REP_SKIP;                                                /* S: skipped */
+    do_copy_move(&a, a.rep_where, a.rep_move);
+    a.rep_mode = REP_ASK;
+    CHECK(file_is(p, "changed") && strstr(a.msg, "not replaced"), "an existing file stays when skipped: %s", a.msg);
+    a.rep_mode = REP_REPLACE;                                             /* Enter: replaced (the old one is gone, no temporary file is left) */
+    do_copy_move(&a, dst, false);
+    a.rep_mode = REP_ASK;
+    char tmpn[PATH_MAX + 32];
+    snprintf(tmpn, sizeof(tmpn), "%s.mellagui-new", p);
+    CHECK(file_is(p, "one\n") && access(tmpn, F_OK) != 0, "an existing file is replaced after the answer: %s", a.msg);
+    write_file(p, "changed", 7);
+    a.pane[0].sel = r_one;
+    a.rep_mode = REP_REPLACE;                                             /* a move replaces, too, and the source goes */
+    do_copy_move(&a, dst, true);
+    a.rep_mode = REP_ASK;
+    CHECK(file_is(p, "one\n") && access(tmpn, F_OK) != 0, "a move replaces: %s", a.msg);
+    touch(src, "one.txt", "one\n", 4);
+    go_to(&a, &a.pane[0], src, NULL);
     struct entry *e;
     for (int i = 0; i < a.pane[0].n; i++) {                              /* mark the tree and the link: copy both */
         e = &a.pane[0].e[i];
@@ -5523,7 +5850,9 @@ int main(int argc, char **argv)
     a.dual = choose == NULL;
     if (choose)                                                         /* (the picture chooser has no rails) */
         g_rails = g_card = false;
-    a.split = split_conf_load();
+    struct fstate fs;
+    state_load(&fs);
+    a.split = fs.split;
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     a.choose_key = choose;
     if (wlwin_connect(&a.win, "mellagui-files", &ops, &a) < 0)
@@ -5546,12 +5875,31 @@ int main(int argc, char **argv)
     } else {
         normalize(home && *home ? home : "/", start, sizeof(start));
     }
+    bool restore = argc < 2 && !choose;                                 /* no folder asked for: the panes come back as they were left */
+    if (restore) {
+        a.act = fs.act;
+        a.preview = fs.preview;
+        a.show_hidden = fs.hidden;
+        for (int i = 0; i < 2; i++) {
+            a.pane[i].sort = fs.sort[i];
+            a.pane[i].sort_desc = fs.desc[i];
+        }
+    }
+    struct stat sst;
+    if (restore && fs.dir[0][0] && stat(fs.dir[0], &sst) == 0 && S_ISDIR(sst.st_mode))
+        snprintf(start, sizeof(start), "%s", fs.dir[0]);
     if (!go_to(&a, &a.pane[0], start, NULL) && !go_to(&a, &a.pane[0], "/", NULL)) {
         fprintf(stderr, "mellagui-files: cannot list %s\n", start);
         return 1;
     }
-    if (a.dual && !go_to(&a, &a.pane[1], a.pane[0].cwd, NULL))
-        return 1;
+    if (a.dual) {
+        const char *second = a.pane[0].cwd;
+        if (restore && fs.dir[1][0] && stat(fs.dir[1], &sst) == 0 && S_ISDIR(sst.st_mode))
+            second = fs.dir[1];
+        if (!go_to(&a, &a.pane[1], second, NULL) && !go_to(&a, &a.pane[1], a.pane[0].cwd, NULL))
+            return 1;
+    }
+    state_save(&a);                                                     /* (what the file holds now: it is only written when this changes) */
     if (strcmp(a.pane[0].cwd, start) != 0)
         msg(&a, "Could not open %s", start);
     else if (choose)
@@ -5604,7 +5952,9 @@ int main(int argc, char **argv)
             a.msg[0] = 0;
             a.win.redraw = true;
         }
+        state_save(&a);                                                 /* a folder, the preview, a sort ... changed: it is remembered */
     }
+    state_save(&a);
     if (a.job) {                                                        /* the window is going: stop the work and wait for it */
         atomic_store(&a.job->cancel, true);
         if (a.job->threaded)

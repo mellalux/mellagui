@@ -38,6 +38,17 @@ int lm_cvt_rb(int width, int height, int refresh, struct lm_cvt *out)
     return 1;
 }
 
+int lm_cvt_rb_fit_range(int width, int height, int max_hz, uint32_t max_clock_khz, int vmin, int vmax, struct lm_cvt *out)
+{
+    if (vmin <= 0 || vmax < vmin)
+        return lm_cvt_rb_fit(width, height, max_hz, max_clock_khz, out);
+    int top = vmax < max_hz ? vmax : max_hz, bottom = vmin > 24 ? vmin : 24;
+    for (int hz = top; hz >= bottom; hz--)
+        if (lm_cvt_rb(width, height, hz, out) && out->clock_khz <= max_clock_khz)
+            return 1;
+    return 0;
+}
+
 int lm_cvt_rb_fit(int width, int height, int max_hz, uint32_t max_clock_khz, struct lm_cvt *out)
 {
     static const int rates[] = { 60, 59, 50, 48, 30, 25, 24 };          /* rates a monitor is likely to accept, not 52 */

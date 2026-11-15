@@ -461,11 +461,9 @@ static drmModeModeInfo preferred_mode(const drmModeConnector *conn)
 }
 
 /* A generated CVT reduced-blanking mode; false for sizes cvt.c refuses. */
-static bool cvt_mode(int w, int h, int hz, drmModeModeInfo *m)
+static void cvt_fill(const struct lm_cvt *cv, drmModeModeInfo *m)
 {
-    struct lm_cvt c;
-    if (!lm_cvt_rb(w, h, hz, &c))
-        return false;
+    const struct lm_cvt c = *cv;
     memset(m, 0, sizeof(*m));
     m->clock = c.clock_khz;
     m->hdisplay = c.hdisplay; m->hsync_start = c.hsync_start; m->hsync_end = c.hsync_end; m->htotal = c.htotal;
@@ -474,6 +472,14 @@ static bool cvt_mode(int w, int h, int hz, drmModeModeInfo *m)
     m->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC;
     m->type = DRM_MODE_TYPE_USERDEF;
     snprintf(m->name, sizeof(m->name), "%dx%d", c.hdisplay, c.vdisplay);
+}
+
+static bool cvt_mode(int w, int h, int hz, drmModeModeInfo *m)
+{
+    struct lm_cvt c;
+    if (!lm_cvt_rb(w, h, hz, &c))
+        return false;
+    cvt_fill(&c, m);
     return true;
 }
 
@@ -590,12 +596,14 @@ static drmModeModeInfo pick_mode(const struct lm_config *cfg, const drmModeConne
         for (int i = 0; i < conn->count_modes; i++)
             if (conn->modes[i].clock > max_clock)
                 max_clock = conn->modes[i].clock;
-        if (h > 0 && cvt_mode(w, h, hz, &g) && g.clock <= max_clock) {
+        struct lm_cvt fit;                                            /* the highest rate the link takes (and the monitor's declared range allows) */
+        if (h > 0 && lm_cvt_rb_fit_range(w, h, hz, max_clock, nat->vmin, nat->vmax, &fit)) {
+            cvt_fill(&fit, &g);
             if (log) {
                 lm_info("drm: the monitor's native mode is %dx%d (%.2f:1) but only %ux%u (%.2f:1) is offered and would be "
-                        "stretched; using generated %dx%d (CVT-RB, %u kHz). Use --mode preferred to turn this off",
+                        "stretched; using generated %dx%d at %u Hz (CVT-RB, %u kHz). Use --mode preferred to turn this off",
                         nat->w, nat->h, (double)nat->w / nat->h, m.hdisplay, m.vdisplay, (double)m.hdisplay / m.vdisplay,
-                        g.hdisplay, g.vdisplay, g.clock);
+                        g.hdisplay, g.vdisplay, g.vrefresh, g.clock);
             }
             return g;
         }
@@ -1339,7 +1347,7 @@ static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int
             if (conn->modes[i].clock > max_clock)
                 max_clock = conn->modes[i].clock;
         struct lm_cvt cv;
-        if (!known && lm_cvt_rb_fit(nat.w, nat.h, 60, max_clock, &cv))
+        if (!known && lm_cvt_rb_fit_range(nat.w, nat.h, 60, max_clock, nat.vmin, nat.vmax, &cv))
             modes[n++] = (struct lm_mode_info){ cv.hdisplay, cv.vdisplay, cv.refresh, false, true, false, false, 0, 0 };
     }
     {                                                                   /* a slow rate (30 Hz) for every size, made up when the monitor lists none */

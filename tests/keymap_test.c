@@ -161,6 +161,11 @@ int main(void)
     /* the 21:9 panel behind an HDMI link that takes 156.75 MHz (its largest listed mode, 2048x1152@60): 2560x1080 only at 50 Hz */
     CHECK(lm_cvt_rb_fit(2560, 1080, 60, 156750, &c) && c.refresh == 50 && c.clock_khz == 150250, "fit 2560x1080: %u Hz %u kHz", c.refresh, c.clock_khz);
     CHECK(lm_cvt_rb_fit(2560, 1080, 60, 200000, &c) && c.refresh == 60, "a faster link keeps 60 Hz");
+    CHECK(lm_cvt_rb_fit_range(2560, 1080, 60, 162000, 48, 120, &c) && c.refresh == 53 && c.clock_khz <= 162000,
+          "fit in the monitor's declared range: any whole rate, the highest that fits (%u Hz %u kHz)", c.refresh, c.clock_khz);
+    CHECK(lm_cvt_rb_fit_range(2560, 1080, 60, 162000, 0, 0, &c) && c.refresh == 50, "no declared range: the usual rates only");
+    CHECK(!lm_cvt_rb_fit_range(2560, 1080, 60, 162000, 58, 120, &c), "nothing fits when the monitor's lowest rate is above what the link carries");
+    CHECK(lm_cvt_rb_fit_range(2560, 1080, 60, 200000, 48, 120, &c) && c.refresh == 60, "a faster link keeps 60 Hz inside the range");
     CHECK(!lm_cvt_rb_fit(2560, 1080, 60, 50000, &c), "nothing fits a 50 MHz link");
 
     /* EDID: native shape vs the mode the kernel offers (first 128 bytes of a real 21:9 monitor, serial number removed) */
@@ -222,12 +227,13 @@ int main(void)
     CHECK(!lm_edid_vrange((const uint8_t *)"not an edid block", 18, &vmin, &vmax), "edid range: not EDID");
     CHECK(lm_edid_native(edid_21x9, sizeof(edid_21x9), &nat) && nat.w == 2560 && nat.h == 1080 && nat.mm_w == 929 && nat.mm_h == 392,
           "edid native: %dx%d %dx%d mm", nat.w, nat.h, nat.mm_w, nat.mm_h);
+    CHECK(nat.vmin == 48 && nat.vmax == 120, "edid native carries the range limits: %d-%d Hz", nat.vmin, nat.vmax);
     CHECK(lm_edid_fix_height(2048, 1152, &nat, 930, 390) == 864, "21:9 panel offered 16:9 2048x1152 -> 2048x864 (%d)",
           lm_edid_fix_height(2048, 1152, &nat, 930, 390));
     CHECK(lm_edid_fix_height(1920, 1080, &nat, 0, 0) == 810, "same without physical size -> 1920x810");
     CHECK(lm_edid_fix_height(2560, 1080, &nat, 930, 390) == 0, "the native mode itself: untouched");
     CHECK(lm_edid_fix_height(2560, 1100, &nat, 930, 390) == 0, "within 8 percent of the native shape: untouched");
-    struct lm_edid_native bare = { 2560, 1080, 0, 0 };
+    struct lm_edid_native bare = { 2560, 1080, 0, 0, 0, 0 };
     CHECK(lm_edid_fix_height(2048, 1152, &bare, 930, 390) == 864, "native timing without its own size: the connector's size agrees");
     CHECK(lm_edid_fix_height(2048, 1152, &bare, 160, 90) == 0, "physical size contradicts the native timing (a broken EDID): untouched");
     CHECK(lm_edid_fix_height(2048, 1152, NULL, 930, 390) == 0, "no native timing: untouched");

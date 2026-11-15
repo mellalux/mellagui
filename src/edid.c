@@ -16,6 +16,8 @@ bool lm_edid_native(const uint8_t *e, size_t len, struct lm_edid_native *out)
     out->h = b[5] | ((b[7] & 0xf0) << 4);
     out->mm_w = b[12] | ((b[14] & 0xf0) << 4);
     out->mm_h = b[13] | ((b[14] & 0x0f) << 8);
+    if (!lm_edid_vrange(e, len, &out->vmin, &out->vmax))
+        out->vmin = out->vmax = 0;
     return out->w >= 320 && out->h >= 200;
 }
 

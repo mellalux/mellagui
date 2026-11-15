@@ -17,6 +17,7 @@
 struct lm_edid_native {
     int w, h;                   /* first detailed timing: active pixels */
     int mm_w, mm_h;             /* its image size in mm (0 when not given) */
+    int vmin, vmax;             /* the vertical refresh range of the "range limits" descriptor in Hz (0, 0 = it says nothing) */
 };
 
 /* Parses the base block. False for a block that is not EDID (header) or whose first descriptor is not a timing. */

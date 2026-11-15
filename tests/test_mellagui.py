@@ -58,6 +58,8 @@ def setUpModule():
     os.environ['MELLAGUI_EDIT_RAIL'] = '0'
     os.environ['MELLAGUI_TERM_STATUS'] = '0'                          # (the terminal's status bar changes its height; TestTerminalTabs turns it on)
     os.environ['MELLAGUI_FONT'] = 'bitmap'                           # the pixel tests know the built-in 8x16 font (TestFont picks others)
+    for leaked in ('MELLAGUI_FONT_UI', 'MELLAGUI_CONFIG'):           # the tests may run inside a MellaGUI session, which exports its own choices to every program it starts:
+        os.environ.pop(leaked, None)                                  # (the labels' font would win over a test's `ui = mono`, and a program started by hand would read the real config)
     os.environ['MELLAGUI_ICON_PATH'] = os.path.join(tmp, 'no-icons')  # the dock finds no icons of programs installed on this machine
     os.environ['MELLAGUI_APPS_DIRS'] = os.path.join(tmp, 'no-apps')    # the launcher's search finds none of the programs and files of this machine
     os.environ['MELLAGUI_SEARCH_ROOT'] = os.path.join(tmp, 'no-home')
@@ -14618,7 +14620,7 @@ class TestOutputLayout(Base):
         c.cmd('dump %s 1' % os.path.join(tmp, 'lay5-1.ppm'))
         ppm1 = Ppm(os.path.join(tmp, 'lay5-1.ppm'))
         self.assertEqual((ppm1.w, ppm1.h), (400, 300))
-        self.assertEqual(ppm1.px(170, 14), ppm1.px(171, 14))                # a panel row (not the wallpaper gradient)
+        self.assertEqual(ppm1.px(228, 14), ppm1.px(230, 14))                # a panel row (not the wallpaper gradient; between the Sticky button and the clock, which the crowded 400 px bar leaves empty)
         self.assertNotEqual(ppm1.px(2, 250), ppm1.px(2, 5))                 # the wallpaper below the panel differs from the panel
         c.cmd('gadget-rect')
         gx = int(c.last.split()[1])

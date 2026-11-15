@@ -3319,6 +3319,65 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
         self.assertEqual(head['kind'], 'hex')
 
+    def test_files_previews_an_apple_numbers_file_as_a_table(self):
+        # NO real Numbers file was available: tests/numbers_writer.py writes the author's understanding of the format, so this checks that the reader and
+        # the writer agree (and the parts that do not depend on the schema: the container, Snappy, the tiles, the fallbacks), not that Numbers agrees.
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+        import io
+        import zipfile
+        import numbers_writer as w
+        from PIL import Image
+        d = tempfile.mkdtemp(prefix='files-num-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        rows = [['Name', 'Qty', 'Date', 'Ok', 'Price'], ['Ada & Bob', 12, ('t', 700000000.0), True, 3.14], ['Lääne', -7, None, False, 0.1],
+                [None, 1234567.891, ('d', 2.5), 'Ada & Bob', 'x']]
+        sheets = [{'name': 'Sheet1', 'tables': [{'name': 'Table1', 'rows': rows}]}, {'name': 'Two', 'tables': [{'name': 'A', 'rows': [['x']]}, {'name': 'B', 'rows': [['y', 1]]}]}]
+        w.write(os.path.join(d, 'a_book.numbers'), sheets)
+        w.write(os.path.join(d, 'b_unit1.numbers'), sheets[:1], offset_unit=1)
+        w.write(os.path.join(d, 'c_big.numbers'), [{'name': 'Big', 'tables': [{'name': 'T', 'rows': [['row %d' % i, i] for i in range(700)]}]}])      # three tiles
+        buf = io.BytesIO()
+        Image.new('RGB', (32, 20), (200, 30, 30)).save(buf, 'JPEG')
+        with zipfile.ZipFile(os.path.join(d, 'd_broken.numbers'), 'w') as z:                   # the tables cannot be made out: the document's own picture
+            z.writestr('Index/Document.iwa', b'\x00\x05\x00\x00' + bytes(5))
+            z.writestr('preview.jpg', buf.getvalue())
+        with zipfile.ZipFile(os.path.join(d, 'e_nothing.numbers'), 'w') as z:                  # a ZIP with no Numbers parts: hex
+            z.writestr('hello.txt', 'hi' * 20)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_book.numbers)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['db']['tables'], extra['db']['tab'], extra['db']['name']), ('3', '0', 'Sheet1'))     # a sheet with two tables is two tabs
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('6', '4'))
+        v = [extra['row%d' % i]['v'] for i in range(1, 5)]
+        for want in ('1', 'Name', 'Qty', 'Price'):
+            self.assertIn(want, v[0])
+        for want in ('2', 'Ada_&_Bob', '12', '2023-03-08_20:26:40', 'TRUE', '3.14'):
+            self.assertIn(want, v[1])
+        for want in ('3', 'Lääne', '-7', 'FALSE', '0.1'):
+            self.assertIn(want, v[2])
+        for want in ('4', '1234567.891', '2.5', 'Ada_&_Bob', 'x'):
+            self.assertIn(want, v[3])
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(self.K_RIGHT)                                                          # Ctrl+Right: the next tab
+        ctl.key(KEY_LEFTCTRL, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '1')
+        self.assertEqual((extra['db']['name'], extra['table']['cols'], extra['table']['rows']), ('Two', '2', '1'))                  # (the tab is called "Two / A"; the dump stops at the blank)
+        ctl.tap(self.K_DOWN)                                                           # b_unit1: the offsets count bytes, not groups of four
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('b_unit1.numbers'))
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('6', '4'))
+        self.assertIn('1234567.891', extra['row4']['v'])
+        ctl.tap(self.K_DOWN)                                                           # c_big: rows of three tiles
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('c_big.numbers'))
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('3', '700'))   # the limit is 2000, the file has 700
+        self.assertIn('row_0', extra['row1']['v'])
+        ctl.tap(self.K_DOWN)                                                           # d_broken
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'image' and o[0].get('want', '').endswith('d_broken.numbers'))
+        self.assertEqual(head['kind'], 'image')
+        ctl.tap(self.K_DOWN)                                                           # e_nothing
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
+        self.assertEqual(head['kind'], 'hex')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

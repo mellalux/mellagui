@@ -1,6 +1,7 @@
 #include "xlsxread.h"
 
 #include "../src/img.h"
+#include "parquet.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -2382,6 +2383,914 @@ done:
     return result;
 }
 
+/* ======================================================================================================================================================
+ * Apple Numbers (.numbers, 2013 and later): a ZIP whose Index/ *.iwa parts are Snappy-compressed streams of protobuf messages ("objects" with an
+ * identifier, a type number and a list of the identifiers they refer to). Apple publishes no description of it; this reader works from what is known of the
+ * format and checks what it finds by SHAPE as much as by field number (a string list is a message with repeated entries that have a number and a string,
+ * a tile is a message with rows that carry two byte strings ...), and `--numbers-dump` of mellagui-files prints the whole structure of a file for work on
+ * a real one. Not read: Numbers '09 (index.xml), rich text cells, cell formats (a percentage shows as its number), formulas (their cached values show).
+ * ====================================================================================================================================================== */
+
+#define NB_MAX_OBJECTS 600000
+#define NB_PART_MAX (128u << 20)
+#define NB_TOTAL_MAX (320u << 20)
+#define NB_TILE_ROWS 256                        /* rows in one tile */
+
+struct pbr {
+    const uint8_t *p, *end;
+};
+
+struct pbf {
+    uint32_t num;
+    int wt;
+    uint64_t iv;
+    const uint8_t *d;
+    size_t dl;
+};
+
+static bool pb_varint(struct pbr *r, uint64_t *v)
+{
+    uint64_t x = 0;
+    for (int sh = 0; r->p < r->end && sh < 70; sh += 7) {
+        uint8_t b = *r->p++;
+        x |= (uint64_t)(b & 0x7f) << sh;
+        if (!(b & 0x80)) {
+            *v = x;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool pb_next(struct pbr *r, struct pbf *f)
+{
+    uint64_t key;
+    if (r->p >= r->end || !pb_varint(r, &key))
+        return false;
+    f->num = (uint32_t)(key >> 3);
+    f->wt = (int)(key & 7);
+    f->iv = 0;
+    f->d = NULL;
+    f->dl = 0;
+    switch (f->wt) {
+    case 0:
+        return pb_varint(r, &f->iv);
+    case 1:
+        if (r->end - r->p < 8)
+            return false;
+        memcpy(&f->iv, r->p, 8);
+        r->p += 8;
+        return true;
+    case 5: {
+        if (r->end - r->p < 4)
+            return false;
+        uint32_t v;
+        memcpy(&v, r->p, 4);
+        f->iv = v;
+        r->p += 4;
+        return true;
+    }
+    case 2: {
+        uint64_t l;
+        if (!pb_varint(r, &l) || l > (uint64_t)(r->end - r->p))
+            return false;
+        f->d = r->p;
+        f->dl = (size_t)l;
+        r->p += l;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+struct nobj {
+    uint64_t id;
+    uint32_t type;
+    const uint8_t *msg;
+    size_t len;
+    uint64_t *refs;
+    uint32_t nrefs;
+};
+
+struct nbook {
+    struct nobj *o;
+    int n, cap;
+    uint8_t **bufs;                     /* the decoded streams the objects point into */
+    int nbuf;
+    size_t total;
+    int *idx;                           /* the objects by identifier */
+    bool truncated;
+};
+
+/* An .iwa part: chunks of a 0 byte, a 3 byte length and raw Snappy data, one after the other. Returns the concatenated plain bytes. */
+static uint8_t *iwa_decode(const uint8_t *in, size_t n, size_t *outn)
+{
+    size_t cap = 1 << 16, o = 0;
+    uint8_t *out = malloc(cap);
+    size_t i = 0;
+    while (out && i + 4 <= n && in[i] == 0) {
+        size_t len = in[i + 1] | (size_t)in[i + 2] << 8 | (size_t)in[i + 3] << 16;
+        i += 4;
+        if (len > n - i || len == 0)
+            break;
+        struct pbr vr = { in + i, in + i + len };
+        uint64_t ulen;
+        if (!pb_varint(&vr, &ulen) || ulen > (1u << 24) || o + ulen > NB_PART_MAX)
+            break;
+        if (o + ulen + 1 > cap) {
+            while (o + ulen + 1 > cap)
+                cap *= 2;
+            uint8_t *t = realloc(out, cap);
+            if (!t)
+                break;
+            out = t;
+        }
+        if (pq_snappy(in + i, len, out + o, (size_t)ulen) < 0)
+            break;
+        o += (size_t)ulen;
+        i += len;
+    }
+    if (!out)
+        return NULL;
+    *outn = o;
+    return out;
+}
+
+static void nb_add(struct nbook *nb, uint64_t id, uint32_t type, const uint8_t *msg, size_t len, uint64_t *refs, uint32_t nrefs)
+{
+    if (nb->n >= NB_MAX_OBJECTS) {
+        free(refs);
+        nb->truncated = true;
+        return;
+    }
+    if (nb->n == nb->cap) {
+        nb->cap = nb->cap ? nb->cap * 2 : 1024;
+        nb->o = realloc(nb->o, (size_t)nb->cap * sizeof(*nb->o));
+    }
+    nb->o[nb->n++] = (struct nobj){ id, type, msg, len, refs, nrefs };
+}
+
+/* The objects of a decoded stream: a varint length, an ArchiveInfo (identifier, MessageInfos with type, length and the identifiers referred to), then the
+ * messages themselves one after another. */
+static void nb_stream(struct nbook *nb, const uint8_t *s, size_t n)
+{
+    struct pbr r = { s, s + n };
+    while (r.p < r.end) {
+        uint64_t alen;
+        if (!pb_varint(&r, &alen) || alen > (uint64_t)(r.end - r.p))
+            return;
+        struct pbr ar = { r.p, r.p + alen };
+        r.p += alen;
+        uint64_t id = 0;
+        struct { uint32_t type; uint64_t len; uint64_t *refs; uint32_t nrefs, caprefs; } mi[8];
+        int nmi = 0;
+        struct pbf f;
+        while (pb_next(&ar, &f)) {
+            if (f.num == 1 && f.wt == 0) {
+                id = f.iv;
+            } else if (f.num == 2 && f.wt == 2 && nmi < 8) {
+                memset(&mi[nmi], 0, sizeof(mi[0]));
+                struct pbr mr = { f.d, f.d + f.dl };
+                struct pbf g;
+                while (pb_next(&mr, &g)) {
+                    if (g.num == 1 && g.wt == 0) {
+                        mi[nmi].type = (uint32_t)g.iv;
+                    } else if (g.num == 3 && g.wt == 0) {
+                        mi[nmi].len = g.iv;
+                    } else if (g.num == 5) {
+                        struct pbr pr = { g.wt == 2 ? g.d : NULL, g.wt == 2 ? g.d + g.dl : NULL };
+                        uint64_t v = g.iv;
+                        bool more = g.wt == 2;
+                        while (true) {
+                            if (more && !pb_varint(&pr, &v))
+                                break;
+                            if (mi[nmi].nrefs == mi[nmi].caprefs) {
+                                mi[nmi].caprefs = mi[nmi].caprefs ? mi[nmi].caprefs * 2 : 8;
+                                mi[nmi].refs = realloc(mi[nmi].refs, mi[nmi].caprefs * sizeof(uint64_t));
+                            }
+                            mi[nmi].refs[mi[nmi].nrefs++] = v;
+                            if (!more)
+                                break;
+                        }
+                    }
+                }
+                nmi++;
+            }
+        }
+        for (int k = 0; k < nmi; k++) {
+            if (mi[k].len > (uint64_t)(r.end - r.p)) {
+                for (int j = k; j < nmi; j++)
+                    free(mi[j].refs);
+                return;
+            }
+            nb_add(nb, id, mi[k].type, r.p, (size_t)mi[k].len, mi[k].refs, mi[k].nrefs);
+            r.p += mi[k].len;
+        }
+    }
+}
+
+static int nb_cmp(const void *a, const void *b, void *ctx)
+{
+    const struct nobj *o = ctx;
+    const struct nobj *x = &o[*(const int *)a], *y = &o[*(const int *)b];
+    return x->id < y->id ? -1 : x->id > y->id ? 1 : *(const int *)a - *(const int *)b;
+}
+
+static const struct nobj *nb_find(const struct nbook *nb, uint64_t id)
+{
+    int lo = 0, hi = nb->n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        uint64_t v = nb->o[nb->idx[mid]].id;
+        if (v < id)
+            lo = mid + 1;
+        else if (v > id)
+            hi = mid - 1;
+        else {
+            while (mid > 0 && nb->o[nb->idx[mid - 1]].id == id)
+                mid--;
+            return &nb->o[nb->idx[mid]];
+        }
+    }
+    return NULL;
+}
+
+static void nb_free(struct nbook *nb)
+{
+    for (int i = 0; i < nb->n; i++)
+        free(nb->o[i].refs);
+    free(nb->o);
+    for (int i = 0; i < nb->nbuf; i++)
+        free(nb->bufs[i]);
+    free(nb->bufs);
+    free(nb->idx);
+    memset(nb, 0, sizeof(*nb));
+}
+
+/* Reads every .iwa part under Index/ of the package. 0 = ok. */
+static int nb_load(struct nbook *nb, const struct zip *z)
+{
+    for (int i = 0; i < z->n; i++) {
+        const char *nm = z->e[i].name;
+        size_t l = strlen(nm);
+        if (l < 4 || strcmp(nm + l - 4, ".iwa") || strncmp(nm, "Index/", 6))
+            continue;
+        size_t len;
+        const char *why;
+        char *raw = zip_read(z, nm, NB_PART_MAX, &len, &why);
+        if (!raw)
+            continue;
+        size_t pn = 0;
+        uint8_t *plain = iwa_decode((const uint8_t *)raw, len, &pn);
+        free(raw);
+        if (!plain)
+            continue;
+        nb->total += pn;
+        nb->bufs = realloc(nb->bufs, (size_t)(nb->nbuf + 1) * sizeof(uint8_t *));
+        nb->bufs[nb->nbuf++] = plain;
+        nb_stream(nb, plain, pn);
+        if (nb->total > NB_TOTAL_MAX) {
+            nb->truncated = true;
+            break;
+        }
+    }
+    if (nb->n == 0)
+        return -1;
+    nb->idx = malloc((size_t)nb->n * sizeof(int));
+    for (int i = 0; i < nb->n; i++)
+        nb->idx[i] = i;
+    qsort_r(nb->idx, (size_t)nb->n, sizeof(int), nb_cmp, nb->o);
+    return 0;
+}
+
+/* ---- looking into messages ---- */
+static bool utf8_text(const uint8_t *p, size_t n)
+{
+    if (n == 0 || n > 400)
+        return false;
+    for (size_t i = 0; i < n;) {
+        uint8_t c = p[i];
+        size_t k = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        if (!k || i + k > n || (k == 1 && c < 0x20))
+            return false;
+        for (size_t j = 1; j < k; j++)
+            if ((p[i + j] & 0xc0) != 0x80)
+                return false;
+        i += k;
+    }
+    return true;
+}
+
+static bool looks_like_uuid(const uint8_t *p, size_t n)
+{
+    if (n != 36)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (i == 8 || i == 13 || i == 18 || i == 23 ? p[i] != '-' : !((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f') || (p[i] >= 'A' && p[i] <= 'F')))
+            return false;
+    return true;
+}
+
+/* The name in a message: the string of field `prefer` when it reads as text, else the first text field that is no UUID. */
+static char *nb_name(const struct nobj *o, uint32_t prefer)
+{
+    struct pbr r = { o->msg, o->msg + o->len };
+    struct pbf f;
+    const uint8_t *best = NULL;
+    size_t bl = 0;
+    while (pb_next(&r, &f)) {
+        if (f.wt != 2 || !utf8_text(f.d, f.dl) || looks_like_uuid(f.d, f.dl))
+            continue;
+        if (f.num == prefer) {
+            best = f.d;
+            bl = f.dl;
+            break;
+        }
+        if (!best) {
+            best = f.d;
+            bl = f.dl;
+        }
+    }
+    if (!best)
+        return NULL;
+    char *s = strndup((const char *)best, bl);
+    char *c = s ? cell_text(s) : NULL;
+    free(s);
+    return c;
+}
+
+/* A string list (a TableDataList): repeated entries with a key (field 1) and a string (field 3). Returns the strings by key, or NULL. */
+static char **nb_string_list(const struct nobj *o, uint32_t *nkeys, int *listtype)
+{
+    struct pbr r = { o->msg, o->msg + o->len };
+    struct pbf f;
+    uint64_t maxkey = 0;
+    int count = 0;
+    *listtype = 0;
+    while (pb_next(&r, &f)) {
+        if (f.num == 1 && f.wt == 0)
+            *listtype = (int)f.iv;
+        if (f.num != 3 || f.wt != 2)
+            continue;
+        struct pbr er = { f.d, f.d + f.dl };
+        struct pbf g;
+        uint64_t key = 0;
+        bool has_key = false, has_str = false;
+        while (pb_next(&er, &g)) {
+            if (g.num == 1 && g.wt == 0) {
+                key = g.iv;
+                has_key = true;
+            } else if (g.num == 3 && g.wt == 2) {
+                has_str = true;
+            }
+        }
+        if (has_key && has_str) {
+            count++;
+            if (key > maxkey)
+                maxkey = key;
+        }
+    }
+    if (!count || maxkey > 4000000)
+        return NULL;
+    char **tab = calloc((size_t)maxkey + 1, sizeof(char *));
+    r = (struct pbr){ o->msg, o->msg + o->len };
+    while (pb_next(&r, &f)) {
+        if (f.num != 3 || f.wt != 2)
+            continue;
+        struct pbr er = { f.d, f.d + f.dl };
+        struct pbf g;
+        uint64_t key = 0;
+        const uint8_t *sp = NULL;
+        size_t sl = 0;
+        while (pb_next(&er, &g)) {
+            if (g.num == 1 && g.wt == 0) {
+                key = g.iv;
+            } else if (g.num == 3 && g.wt == 2) {
+                sp = g.d;
+                sl = g.dl;
+            }
+        }
+        if (sp && key <= maxkey && !tab[key]) {
+            char *s = strndup((const char *)sp, sl);
+            tab[key] = s ? cell_text(s) : NULL;
+            free(s);
+        }
+    }
+    *nkeys = (uint32_t)maxkey + 1;
+    return tab;
+}
+
+/* A tile: a message that has rows (sub-messages with a number and two byte strings). */
+static bool nb_is_tile(const struct nobj *o)
+{
+    struct pbr r = { o->msg, o->msg + o->len };
+    struct pbf f;
+    while (pb_next(&r, &f)) {
+        if (f.wt != 2 || f.dl < 4)
+            continue;
+        struct pbr er = { f.d, f.d + f.dl };
+        struct pbf g;
+        int bytes = 0, varints = 0;
+        while (pb_next(&er, &g)) {
+            bytes += g.wt == 2;
+            varints += g.wt == 0;
+        }
+        if (bytes >= 2 && varints >= 1)
+            return true;
+    }
+    return false;
+}
+
+/* Which tile number each tile object has: somewhere in the table's message there are entries {number (field 1), a reference (field 2: its field 1 is the
+ * identifier of the tile)}. */
+#define NB_MAX_TILES 512
+struct tilemap {
+    uint64_t id[NB_MAX_TILES];
+    uint32_t num[NB_MAX_TILES];
+    int n;
+};
+
+static void nb_tile_numbers(const struct nbook *nb, const uint8_t *msg, size_t len, int depth, struct tilemap *m)
+{
+    struct pbr r = { msg, msg + len };
+    struct pbf f;
+    uint64_t first = 0;
+    bool have_first = false;
+    while (pb_next(&r, &f)) {
+        if (f.num == 1 && f.wt == 0) {
+            first = f.iv;
+            have_first = true;
+        } else if (f.wt == 2 && f.dl > 0) {
+            if (f.num == 2 && have_first && m->n < NB_MAX_TILES) {
+                struct pbr er = { f.d, f.d + f.dl };
+                struct pbf g;
+                if (pb_next(&er, &g) && g.num == 1 && g.wt == 0) {
+                    const struct nobj *t = nb_find(nb, g.iv);
+                    if (t && nb_is_tile(t)) {
+                        m->id[m->n] = g.iv;
+                        m->num[m->n++] = (uint32_t)first;
+                    }
+                }
+            }
+            if (depth < 5)
+                nb_tile_numbers(nb, f.d, f.dl, depth + 1, m);
+        }
+    }
+}
+
+/* ---- the cells of a tile ---- */
+static double decimal128(const uint8_t *b)
+{
+    int exp = ((b[15] & 0x7f) << 7 | b[14] >> 1) - 0x1820;
+    long double m = b[14] & 1;
+    for (int i = 13; i >= 0; i--)
+        m = m * 256 + b[i];
+    long double v = m * powl(10.0L, (long double)exp);
+    return (double)((b[15] & 0x80) ? -v : v);
+}
+
+struct nrowinfo {
+    uint32_t row;
+    const uint8_t *buf, *offs;
+    size_t blen, olen;
+};
+
+static int nb_rowinfo_cmp(const void *a, const void *b)
+{
+    const struct nrowinfo *x = a, *y = b;
+    return x->row < y->row ? -1 : x->row > y->row;
+}
+
+/* Cell number `col` of a row: its start in the buffer, or -1 for none. `mult` is the unit of the offsets. */
+static long cell_start(const struct nrowinfo *ri, size_t col, unsigned mult)
+{
+    if (col * 2 + 2 > ri->olen)
+        return -1;
+    unsigned off = u16(ri->offs + col * 2);
+    if (off == 0xffff)
+        return -1;
+    size_t s = (size_t)off * mult;
+    return s + 12 <= ri->blen ? (long)s : -1;
+}
+
+/* How the offsets count: the unit (4 or 1 byte) for which most cells start inside the buffer with a storage version byte of 3..5. */
+static unsigned nb_offset_unit(const struct nrowinfo *ri, size_t n)
+{
+    static const unsigned units[2] = { 4, 1 };
+    unsigned best = 4;
+    int bestscore = -1;
+    for (int ui = 0; ui < 2; ui++) {
+        unsigned mult = units[ui];
+        int ok = 0, all = 0;
+        for (size_t i = 0; i < n; i++)
+            for (size_t c = 0; c * 2 + 2 <= ri[i].olen && c < 64; c++) {
+                if (u16(ri[i].offs + c * 2) == 0xffff)
+                    continue;
+                all++;                                                  /* a cell that starts outside the buffer counts against this unit */
+                long st = cell_start(&ri[i], c, mult);
+                ok += st >= 0 && ri[i].buf[st] >= 3 && ri[i].buf[st] <= 5;
+            }
+        int score = all ? ok * 100 / all : 0;
+        if (score > bestscore) {
+            bestscore = score;
+            best = mult;
+        }
+    }
+    return best;
+}
+
+static void nb_date_text(double secs, char *o, size_t n)
+{
+    double days = floor(secs / 86400);
+    long sod = (long)floor(secs - days * 86400 + 0.5);
+    if (sod >= 86400) {
+        sod -= 86400;
+        days += 1;
+    }
+    int y, m, d;
+    civil_from_days((long)days + 11323, &y, &m, &d);                    /* Apple counts seconds from 2001-01-01 */
+    if (sod == 0)
+        snprintf(o, n, "%04d-%02d-%02d", y, m, d);
+    else
+        snprintf(o, n, "%04d-%02d-%02d %02d:%02d:%02d", y, m, d, (int)(sod / 3600), (int)(sod / 60 % 60), (int)(sod % 60));
+}
+
+static char *nb_cell_text(const uint8_t *c, size_t avail, char **strings, uint32_t nstr)
+{
+    unsigned type = c[1];
+    uint32_t flags = u32(c + 8);
+    size_t p = 12;
+    char out[96] = "";
+    bool have = false;
+    double num = 0;
+    if (flags & 0x1) {
+        if (p + 16 > avail)
+            return NULL;
+        num = decimal128(c + p);
+        p += 16;
+        have = true;
+    }
+    if (flags & 0x2) {
+        if (p + 8 > avail)
+            return NULL;
+        memcpy(&num, c + p, 8);
+        p += 8;
+        have = true;
+    }
+    if (flags & 0x4) {
+        if (p + 8 > avail)
+            return NULL;
+        double secs;
+        memcpy(&secs, c + p, 8);
+        p += 8;
+        nb_date_text(secs, out, sizeof(out));
+        return cell_text(out);
+    }
+    if (flags & 0x8) {
+        if (p + 4 > avail)
+            return NULL;
+        uint32_t id = u32(c + p);
+        return id < nstr && strings[id] ? strdup(strings[id]) : strdup("");
+    }
+    if (flags & 0x10)
+        return strdup("(rich text)");
+    if (!have)
+        return NULL;
+    if (type == 6 && (num == 0 || num == 1))
+        return strdup(num ? "TRUE" : "FALSE");
+    fmt_double(num, K_PLAIN, false, out, sizeof(out));
+    return cell_text(out);
+}
+
+/* All the cells of one table into the grid. */
+static bool nb_table(const struct nbook *nb, const struct nobj *model, int max_rows, int max_cols, struct grid *g)
+{
+    char **strings = NULL;
+    uint32_t nstr = 0;
+    int best_type = -1;
+    struct tilemap tm = { .n = 0 };
+    const struct nobj *tiles[NB_MAX_TILES];
+    int ntiles = 0;
+    for (uint32_t i = 0; i < model->nrefs; i++) {
+        const struct nobj *t = nb_find(nb, model->refs[i]);
+        if (!t)
+            continue;
+        if (nb_is_tile(t)) {
+            if (ntiles < NB_MAX_TILES)
+                tiles[ntiles++] = t;
+            continue;
+        }
+        uint32_t nk = 0;
+        int lt = 0;
+        char **tab = nb_string_list(t, &nk, &lt);
+        if (tab && (!strings || (lt == 1 && best_type != 1))) {          /* the list of strings; one marked as the strings' own wins */
+            if (strings)
+                for (uint32_t k = 0; k < nstr; k++)
+                    free(strings[k]);
+            free(strings);
+            strings = tab;
+            nstr = nk;
+            best_type = lt;
+        } else if (tab) {
+            for (uint32_t k = 0; k < nk; k++)
+                free(tab[k]);
+            free(tab);
+        }
+    }
+    nb_tile_numbers(nb, model->msg, model->len, 0, &tm);
+    struct gb b = { .g = g, .max_rows = max_rows, .max_cols = max_cols };
+    g->maxsst = -1;
+    g->maxcol = -1;
+    /* tiles in the order of their numbers */
+    int order[NB_MAX_TILES];
+    uint32_t tnum[NB_MAX_TILES];
+    for (int i = 0; i < ntiles; i++) {
+        order[i] = i;
+        tnum[i] = (uint32_t)i;
+        for (int k = 0; k < tm.n; k++)
+            if (tm.id[k] == tiles[i]->id)
+                tnum[i] = tm.num[k];
+    }
+    for (int i = 1; i < ntiles; i++)
+        for (int j = i; j > 0 && tnum[order[j]] < tnum[order[j - 1]]; j--) {
+            int t = order[j];
+            order[j] = order[j - 1];
+            order[j - 1] = t;
+        }
+    bool any = false;
+    for (int ti = 0; ti < ntiles && !b.stop; ti++) {
+        const struct nobj *tile = tiles[order[ti]];
+        struct nrowinfo *rows = NULL;
+        size_t nrows = 0, caprows = 0;
+        struct pbr r = { tile->msg, tile->msg + tile->len };
+        struct pbf f;
+        while (pb_next(&r, &f)) {
+            if (f.wt != 2)
+                continue;
+            struct pbr er = { f.d, f.d + f.dl };
+            struct pbf h;
+            struct nrowinfo ri = { 0 };
+            const uint8_t *bytes[4] = { 0 };
+            size_t blens[4] = { 0 };
+            int nbytes = 0;
+            bool has_row = false;
+            while (pb_next(&er, &h)) {
+                if (h.num == 1 && h.wt == 0 && !has_row) {
+                    ri.row = (uint32_t)h.iv;
+                    has_row = true;
+                } else if (h.wt == 2 && nbytes < 4 && (h.num == 3 || h.num == 4 || nbytes < 2)) {
+                    bytes[nbytes] = h.d;
+                    blens[nbytes++] = h.dl;
+                }
+            }
+            if (!has_row || nbytes < 2)
+                continue;
+            ri.buf = bytes[0];                                          /* the cell buffer (field 3) and the offsets (field 4) */
+            ri.blen = blens[0];
+            ri.offs = bytes[1];
+            ri.olen = blens[1];
+            if (ri.olen % 2 || (ri.blen % 2 == 0 && ri.blen < ri.olen)) {         /* the other way round: the shorter, even one is the offsets */
+                ri.buf = bytes[1];
+                ri.blen = blens[1];
+                ri.offs = bytes[0];
+                ri.olen = blens[0];
+            }
+            if (nrows == caprows) {
+                caprows = caprows ? caprows * 2 : 64;
+                rows = realloc(rows, caprows * sizeof(*rows));
+            }
+            rows[nrows++] = ri;
+        }
+        if (nrows) {
+            qsort(rows, nrows, sizeof(*rows), nb_rowinfo_cmp);
+            unsigned mult = nb_offset_unit(rows, nrows);
+            for (size_t i = 0; i < nrows && !b.stop; i++) {
+                for (size_t c = 0; c * 2 + 2 <= rows[i].olen && c < 1024 && !b.stop; c++) {
+                    long st = cell_start(&rows[i], c, mult);
+                    if (st < 0 || rows[i].buf[st] < 3 || rows[i].buf[st] > 5)
+                        continue;
+                    char *t = nb_cell_text(rows[i].buf + st, rows[i].blen - (size_t)st, strings, nstr);
+                    if (t && t[0])
+                        any = true;
+                    {
+                        uint64_t rn = (uint64_t)tnum[order[ti]] * NB_TILE_ROWS + rows[i].row + 1;
+                        gb_cell(&b, rn > 0x3fffffff ? 0x3fffffff : (int)rn, (int)c, t, -1);
+                    }
+                }
+            }
+        }
+        free(rows);
+    }
+    gb_flush(&b);
+    if (b.have)
+        row_free(&b.cur);
+    if (strings)
+        for (uint32_t k = 0; k < nstr; k++)
+            free(strings[k]);
+    free(strings);
+    return any || ntiles > 0;
+}
+
+static void nb_add_tab(char ***names, const struct nobj ***models, int *n, int *cap, char *name, const struct nobj *model)
+{
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *names = realloc(*names, (size_t)*cap * sizeof(char *));
+        *models = realloc(*models, (size_t)*cap * sizeof(**models));
+    }
+    (*names)[*n] = name;
+    (*models)[*n] = model;
+    (*n)++;
+}
+
+static int numbers_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
+{
+    memset(b, 0, sizeof(*b));
+    struct zip z;
+    int zr = zip_open(&z, path, err, errn);
+    if (zr < 0)
+        return zr;
+    bool iwa = false;
+    for (int i = 0; i < z.n; i++)
+        if (!strncmp(z.e[i].name, "Index/", 6) && strstr(z.e[i].name, ".iwa"))
+            iwa = true;
+    if (!iwa) {
+        zip_close(&z);
+        return -1;
+    }
+    struct nbook nb = { 0 };
+    char **names = NULL;
+    const struct nobj **models = NULL;
+    int ntab = 0, captab = 0, result = -2;
+    if (nb_load(&nb, &z) < 0) {
+        seterr(err, errn, "A Numbers file whose parts could not be unpacked.");
+        goto done;
+    }
+    const struct nobj *doc = NULL;
+    for (int i = 0; i < nb.n && !doc; i++)
+        if (nb.o[i].type == 1)
+            doc = &nb.o[i];
+    const struct nobj **sheets = calloc((size_t)(nb.n + 1), sizeof(*sheets));
+    int nsheets = 0;
+    if (doc)
+        for (uint32_t i = 0; i < doc->nrefs; i++) {
+            const struct nobj *s = nb_find(&nb, doc->refs[i]);
+            bool dup = false;
+            for (int k = 0; k < nsheets; k++)
+                dup |= sheets[k] == s;
+            if (s && s->type == 2 && !dup)
+                sheets[nsheets++] = s;
+        }
+    if (!nsheets)
+        for (int i = 0; i < nb.n; i++)
+            if (nb.o[i].type == 2)
+                sheets[nsheets++] = &nb.o[i];
+    for (int si = 0; si < nsheets; si++) {
+        const struct nobj *models_here[16];
+        int nm = 0;
+        for (uint32_t i = 0; i < sheets[si]->nrefs && nm < 16; i++) {
+            const struct nobj *t = nb_find(&nb, sheets[si]->refs[i]);
+            if (!t)
+                continue;
+            if (t->type == 6001) {
+                models_here[nm++] = t;
+            } else if (t->type == 6000) {
+                for (uint32_t k = 0; k < t->nrefs && nm < 16; k++) {
+                    const struct nobj *m = nb_find(&nb, t->refs[k]);
+                    if (m && m->type == 6001)
+                        models_here[nm++] = m;
+                }
+            }
+        }
+        char *sname = nb_name(sheets[si], 1);
+        for (int k = 0; k < nm; k++) {
+            char label[260];
+            char *tname = nm > 1 ? nb_name(models_here[k], 4) : NULL;
+            snprintf(label, sizeof(label), "%s%s%s", sname ? sname : "Sheet", tname ? " / " : "", tname ? tname : "");
+            free(tname);
+            nb_add_tab(&names, &models, &ntab, &captab, cell_text(label), models_here[k]);
+        }
+        free(sname);
+    }
+    free(sheets);
+    if (!ntab)                                                          /* the links were not understood: every table there is */
+        for (int i = 0; i < nb.n; i++)
+            if (nb.o[i].type == 6001) {
+                char *tn = nb_name(&nb.o[i], 4);
+                char label[64];
+                snprintf(label, sizeof(label), "Table %d", ntab + 1);
+                nb_add_tab(&names, &models, &ntab, &captab, tn ? tn : cell_text(label), &nb.o[i]);
+            }
+    if (!ntab) {
+        char msg[200];
+        snprintf(msg, sizeof(msg), "A Numbers file in which no table was recognised (%d objects).", nb.n);
+        seterr(err, errn, msg);
+        goto done;
+    }
+    b->kind = "Numbers";
+    b->nsheets = ntab;
+    b->sheet_name = names;
+    names = NULL;
+    b->sheet = sheet < 0 ? 0 : sheet >= ntab ? ntab - 1 : sheet;
+    struct grid g = { 0 };
+    nb_table(&nb, models[b->sheet], max_rows, max_cols, &g);
+    b->more_rows = g.more_rows;
+    b->more_cols = g.more_cols;
+    fill_book(b, &g, NULL);
+    for (int r = 0; r < g.nrow; r++)
+        row_free(&g.row[r]);
+    free(g.row);
+    result = 0;
+done:
+    if (names)
+        for (int i = 0; i < ntab; i++)
+            free(names[i]);
+    free(names);
+    free(models);
+    if (result != 0)
+        xl_free(b);
+    nb_free(&nb);
+    zip_close(&z);
+    return result;
+}
+
+/* The picture the package carries of itself (Numbers writes a JPEG of the first sheet): the bytes, or NULL. */
+unsigned char *xl_thumbnail(const char *path, size_t *len)
+{
+    struct zip z;
+    if (zip_open(&z, path, NULL, 0) < 0)
+        return NULL;
+    static const char *const names[] = { "preview.jpg", "QuickLook/Thumbnail.jpg", "preview-web.jpg", "preview-micro.jpg", "QuickLook/Thumbnail.png" };
+    unsigned char *out = NULL;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]) && !out; i++) {
+        const char *why;
+        out = (unsigned char *)zip_read(&z, names[i], 8u << 20, len, &why);
+    }
+    zip_close(&z);
+    return out;
+}
+
+/* ---- --numbers-dump: the structure of a file as text, for work on a real one ---- */
+static void nb_dump_msg(const uint8_t *msg, size_t len, int depth, int maxdepth)
+{
+    struct pbr r = { msg, msg + len };
+    struct pbf f;
+    while (pb_next(&r, &f)) {
+        printf("%*s%u:", depth * 2 + 4, "", f.num);
+        if (f.wt == 0) {
+            printf(" %llu\n", (unsigned long long)f.iv);
+        } else if (f.wt == 1 || f.wt == 5) {
+            printf(" fixed%d 0x%llx\n", f.wt == 1 ? 64 : 32, (unsigned long long)f.iv);
+        } else if (utf8_text(f.d, f.dl) && f.dl < 120) {
+            printf(" \"%.*s\"\n", (int)f.dl, f.d);
+        } else {
+            struct pbr t = { f.d, f.d + f.dl };
+            struct pbf g;
+            bool msgish = f.dl > 1 && pb_next(&t, &g) && g.num > 0 && g.num < 64;
+            if (msgish && depth < maxdepth) {
+                printf(" {%zu bytes}\n", f.dl);
+                nb_dump_msg(f.d, f.dl, depth + 1, maxdepth);
+            } else {
+                printf(" bytes[%zu]", f.dl);
+                for (size_t i = 0; i < f.dl && i < 16; i++)
+                    printf(" %02x", f.d[i]);
+                printf("%s\n", f.dl > 16 ? " ..." : "");
+            }
+        }
+    }
+}
+
+int xl_numbers_dump(const char *path)
+{
+    struct zip z;
+    if (zip_open(&z, path, NULL, 0) < 0) {
+        fprintf(stderr, "not a ZIP file\n");
+        return 1;
+    }
+    for (int i = 0; i < z.n; i++)
+        printf("part %s (method %u, %u -> %u bytes)\n", z.e[i].name, z.e[i].method, z.e[i].csize, z.e[i].usize);
+    struct nbook nb = { 0 };
+    if (nb_load(&nb, &z) < 0) {
+        printf("no objects\n");
+        zip_close(&z);
+        return 1;
+    }
+    printf("%d objects\n", nb.n);
+    for (int i = 0; i < nb.n; i++) {
+        const struct nobj *o = &nb.o[i];
+        printf("object id=%llu type=%u len=%zu refs=", (unsigned long long)o->id, o->type, o->len);
+        for (uint32_t k = 0; k < o->nrefs && k < 12; k++)
+            printf("%s%llu", k ? "," : "", (unsigned long long)o->refs[k]);
+        printf("%s\n", o->nrefs > 12 ? ",..." : "");
+        if (o->type == 1 || o->type == 2 || o->type == 6000 || o->type == 6001 || nb_is_tile(o) || i < 0)
+            nb_dump_msg(o->msg, o->len > 4000 ? 4000 : o->len, 0, 4);
+    }
+    nb_free(&nb);
+    zip_close(&z);
+    return 0;
+}
+
 int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
 {
     uint8_t magic[8] = { 0 };
@@ -2397,6 +3306,8 @@ int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_b
         r = xlsx_read(path, sheet, max_rows, max_cols, b, err, errn);
         if (r == -1)
             r = ods_read(path, sheet, max_rows, max_cols, b, err, errn);          /* a ZIP with no xl/workbook.xml: maybe an OpenDocument sheet */
+        if (r == -1)
+            r = numbers_read(path, sheet, max_rows, max_cols, b, err, errn);      /* ... or an Apple Numbers package */
     }
     if (r == 0)
         b->kind = b->kind ? b->kind : "Excel";

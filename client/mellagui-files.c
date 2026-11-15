@@ -2644,6 +2644,16 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
     pv->dbkind = 1;
     pv->top = pv->left = 0;
     if (r < 0) {
+        size_t tl = 0;
+        unsigned char *thumb = ext_is(path, "numbers") ? xl_thumbnail(path, &tl) : NULL;
+        char ierr[100];
+        if (thumb && lm_img_decode(thumb, tl, &pv->img, ierr, sizeof(ierr)) == 0) {       /* a Numbers file that could not be read: its own picture of the first sheet */
+            free(thumb);
+            pv->kind = PV_IMAGE;
+            snprintf(pv->info, sizeof(pv->info), "Numbers: the table could not be read (%s) - the document's own picture, %dx%d", err, pv->img.w, pv->img.h);
+            return true;
+        }
+        free(thumb);
         pv->kind = PV_ERROR;
         pv_linef(pv, &cap, "A workbook that cannot be shown:");
         pv_linef(pv, &cap, "%s", err);
@@ -3010,8 +3020,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
     } else if (n >= 12 && !memcmp(buf, "PAR1", 4) && (pv_parquet(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* a Parquet file: its first rows as a table */
     } else if (n >= 30 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8)) &&
-               (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots")) &&
-               (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
+               (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots") || ext_is(path, "numbers")) &&
+               (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR || pv->kind == PV_IMAGE)) {
         /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
     } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
@@ -6889,6 +6899,8 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */
+        return xl_numbers_dump(argv[2]);
     const char *rail_env = getenv("MELLAGUI_FILES_RAIL"), *card_env = getenv("MELLAGUI_FILES_CARD");
     if (rail_env && !strcmp(rail_env, "0"))
         g_rails = false;

@@ -1996,7 +1996,7 @@ static void paint_overview_ui(const struct paint_ctx *c, const struct lm_overvie
     for (int i = 0; i < LM_NUM_WORKSPACES; i++) {
         const struct lm_rect *r = &ov->ws[i].rect;
         fill_round(c, r, 10, ov->ws[i].active ? ALPHA(0xf0, lm_theme.accent) : ov->ws[i].hover ? ALPHA(0xc0, lm_theme.button_hover) : ALPHA(0x90, lm_theme.button));
-        char num[8];
+        char num[16];
         snprintf(num, sizeof(num), "%d", i + 1);
         uint32_t fg = ov->ws[i].active ? lm_theme.background : lm_theme.text;
         draw_text_centered(c, r, num, fg);

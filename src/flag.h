@@ -1,7 +1,7 @@
 /* flag.h - the flags of the keyboard layouts' countries, as a few coloured rectangles in a 22 x 14 box (shared by the compositor's panel and the settings
  * panel, which both fill rectangles). The colours are literals on purpose: a flag is a flag in every theme. Header only. */
-#ifndef LM_FLAG_H
-#define LM_FLAG_H
+#ifndef LM_FLAG_HEADER_H
+#define LM_FLAG_HEADER_H
 
 #include <stdint.h>
 #include <string.h>

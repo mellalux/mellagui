@@ -719,8 +719,8 @@ static char *pe_json(struct file *f, char *info, size_t infon)
         jb_key(&b, &first, "sections");
         jb_add(&b, "[", 1);
         for (unsigned i = 0; i < ns; i++) {
-            char t[200];
-            snprintf(t, sizeof(t), "%s virtual size %u at 0x%x, file size %u%s%s%s", secs[i].name, secs[i].vsize, secs[i].vaddr, secs[i].rawsize, secs[i].chars & 0x20000000 ? " exec" : "",
+            char t[256];
+            snprintf(t, sizeof(t), "%.8s virtual size %u at 0x%x, file size %u%s%s%s", secs[i].name, secs[i].vsize, secs[i].vaddr, secs[i].rawsize, secs[i].chars & 0x20000000 ? " exec" : "",
                      secs[i].chars & 0x40000000 ? " read" : "", secs[i].chars & 0x80000000u ? " write" : "");
             if (i)
                 jb_add(&b, ",", 1);

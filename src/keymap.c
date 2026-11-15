@@ -303,7 +303,7 @@ void lm_keymap_client_load(int fd, uint32_t size)
             int ng = 0;
             int map[LM_KBD_MAX_LAYOUTS] = { 0 };
             for (int g = 1; g <= LM_KBD_MAX_LAYOUTS; g++) {
-                char key[24];
+                char key[40];
                 snprintf(key, sizeof(key), "name[Group%d] = \"", g);
                 const char *p = strstr(text, key);
                 if (!p)

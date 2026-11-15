@@ -122,7 +122,7 @@ void lm_audio_list_alsa(char *out, size_t n)
         if (!lm_audio_name_ok(dname))
             continue;
         bool hdmi = strcasestr(name, "HDMI") || strcasestr(name, "DisplayPort") || strstr(name, " DP");
-        snprintf(desc, sizeof(desc), "%s - %s%s", c ? c->label : "card", name, hdmi ? " (HDMI)" : "");
+        snprintf(desc, sizeof(desc), "%.40s - %.60s%s", c ? c->label : "card", name, hdmi ? " (HDMI)" : "");
         add_entry(out, n, dname, desc);
     }
     fclose(f);

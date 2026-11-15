@@ -18,6 +18,7 @@
  */
 #include <dirent.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -195,6 +196,22 @@ static void stem_of(const char *path, char *out, size_t cap)
         snprintf(out, cap, "archive");
 }
 
+/* snprintf for a path: false (and an empty string) when it did not fit, so a too long name is an error and never a different, cut-off path. */
+static bool fmt_path(char *out, size_t cap, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static bool fmt_path(char *out, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) {
+        if (cap)
+            out[0] = 0;
+        return false;
+    }
+    return true;
+}
+
 static void default_dest(const struct app *a, char *out, size_t cap)
 {
     char dir[PATH_MAX_LEN], stem[256];
@@ -205,7 +222,7 @@ static void default_dest(const struct app *a, char *out, size_t cap)
     else
         snprintf(dir, sizeof(dir), ".");
     stem_of(a->arc_path, stem, sizeof(stem));
-    snprintf(out, cap, "%s/%s", dir, stem);
+    fmt_path(out, cap, "%s/%s", dir, stem);                                 /* too long: empty, the card then asks for a name */
 }
 
 static void set_title(struct app *a)
@@ -705,7 +722,7 @@ static void job_finish(struct app *a)
     } else if (a->job_rc < 0) {
         set_status(a, true, "%s", a->job_err[0] ? a->job_err : "It did not work.");
     } else if (kind == J_CREATE) {
-        char b2[300];
+        char b2[PATH_MAX_LEN];
         snprintf(b2, sizeof(b2), "%s", a->job_out);
         if (r->failed)
             set_status(a, false, "Made %s: %d files, %d folders, %d links. %d problems: %s", base_of(b2), r->extracted, r->dirs, r->links, r->failed, r->err[0]);
@@ -761,7 +778,8 @@ static int *selection_entries(struct app *a, int *count)
             continue;
         }
         char prefix[PATH_MAX_LEN];
-        snprintf(prefix, sizeof(prefix), "%s%s/", a->cwd, row->name);
+        if (!fmt_path(prefix, sizeof(prefix), "%s%s/", a->cwd, row->name))
+            continue;
         size_t pl = strlen(prefix);
         for (int i = 0; i < a->arc->n; i++) {
             const char *p = norm_path(a->arc->e[i].path ? a->arc->e[i].path : "");
@@ -856,9 +874,15 @@ static void open_entry(struct app *a, const struct row *r)
     if (!(cache && cache[0]) && getenv("HOME"))
         snprintf(root, sizeof(root), "%s/.cache/mellagui", getenv("HOME"));
     mkdir(root, 0700);
-    snprintf(dir, sizeof(dir), "%s/archive", root);
+    if (!fmt_path(dir, sizeof(dir), "%s/archive", root)) {
+        set_status(a, true, "The cache folder's name is too long.");
+        return;
+    }
     mkdir(dir, 0700);
-    snprintf(dir, sizeof(dir), "%s/archive/%d", root, (int)getpid());
+    if (!fmt_path(dir, sizeof(dir), "%s/archive/%d", root, (int)getpid())) {
+        set_status(a, true, "The cache folder's name is too long.");
+        return;
+    }
     struct aio_opts o = { .overwrite = true };
     int sel[1] = { r->idx };
     struct aio_report rep;
@@ -869,7 +893,10 @@ static void open_entry(struct app *a, const struct row *r)
         return;
     }
     char rel[PATH_MAX_LEN];
-    snprintf(rel, sizeof(rel), "%s/%s", dir, norm_path(a->arc->e[r->idx].path));
+    if (!fmt_path(rel, sizeof(rel), "%s/%s", dir, norm_path(a->arc->e[r->idx].path))) {
+        set_status(a, true, "That name is too long to open.");
+        return;
+    }
     const char *opener = getenv("MELLAGUI_XDG_OPEN");
     if (!opener || !opener[0])
         opener = "xdg-open";
@@ -952,7 +979,7 @@ static void paint_rows(struct app *a)
     bool wide = w->bw >= 560, mid = w->bw >= 420;
     /* the header: the path (lit), the column labels */
     wlwin_fill(w, 0, 0, w->bw, HEAD_H, lm_theme.button_hover);
-    char head[PATH_MAX_LEN + 80];
+    char head[2 * PATH_MAX_LEN + 128];
     if (a->newmode)
         snprintf(head, sizeof(head), "New archive: %d item%s", a->nitems, a->nitems == 1 ? "" : "s");
     else if (a->arc)
@@ -1229,8 +1256,8 @@ static void activate_row(struct app *a, int i)
     struct row *r = &a->rows[i];
     if (r->dir) {
         char t[PATH_MAX_LEN];
-        snprintf(t, sizeof(t), "%s%s/", a->cwd, r->name);
-        go_folder(a, t);
+        if (fmt_path(t, sizeof(t), "%s%s/", a->cwd, r->name))
+            go_folder(a, t);
     } else
         open_entry(a, r);
 }
@@ -1302,8 +1329,8 @@ static void do_button(struct app *a, int id)
             char stem[256];
             stem_of(a->items[0], stem, sizeof(stem));
             static const char *const ext[] = { ".zip", ".tar", ".tar.gz" };
-            snprintf(d, sizeof(d), "%s/%s%s", dir, a->nitems == 1 ? stem : "archive", ext[a->fmt]);
-            open_prompt(a, P_CREATE, d);
+            if (fmt_path(d, sizeof(d), "%s/%s%s", dir, a->nitems == 1 ? stem : "archive", ext[a->fmt]))
+                open_prompt(a, P_CREATE, d);
         }
         break;
     case B_CLOSE:
@@ -1342,15 +1369,15 @@ static void prompt_accept(struct app *a)
         if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {                  /* Enter on a folder looks inside it */
             size_t l = strlen(text);
             char t2[PATH_MAX_LEN];
-            snprintf(t2, sizeof(t2), "%s%s", text, text[l - 1] == '/' ? "" : "/");
-            open_prompt(a, P_OPEN, t2);
+            if (fmt_path(t2, sizeof(t2), "%s%s", text, text[l - 1] == '/' ? "" : "/"))
+                open_prompt(a, P_OPEN, t2);
             return;
         }
         if (!open_archive(a, full)) {                                       /* it is no archive: the card stays, with the reason */
             char why[300];
             snprintf(why, sizeof(why), "%.200s", a->status);
             open_prompt(a, P_OPEN, text);
-            snprintf(a->cmsg, sizeof(a->cmsg), "%s", why);
+            snprintf(a->cmsg, sizeof(a->cmsg), "%.199s", why);
         }
     }
     else if (p == P_EXTRACT)

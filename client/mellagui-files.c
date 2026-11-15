@@ -3201,7 +3201,7 @@ static bool pv_font(struct preview *pv, const char *path)
         }
         pv->imgrows = (fi.h / 2 + LM_FONT_H - 1) / LM_FONT_H + 1;
         for (int i = 0; i < pv->imgrows; i++)
-            pv_linef(pv, &cap, "");
+            pv_linef(pv, &cap, "%s", "");
     }
     char name[300];
     snprintf(name, sizeof(name), "%s%s%s", fi.family, fi.style[0] ? " " : "", fi.style);
@@ -3221,7 +3221,7 @@ static bool pv_font(struct preview *pv, const char *path)
     pv_field(pv, &cap, "License: ", fi.license);
     pv_field(pv, &cap, "License URL: ", fi.license_url);
     pv_field(pv, &cap, "About: ", fi.description);
-    snprintf(pv->info, sizeof(pv->info), "Font%s, %s, %d glyphs", fi.woff ? " (WOFF)" : "", name[0] ? name : "unnamed", fi.glyphs);
+    snprintf(pv->info, sizeof(pv->info), "Font%s, %.100s, %d glyphs", fi.woff ? " (WOFF)" : "", name[0] ? name : "unnamed", fi.glyphs);
     font_free(&fi);
     return true;
 }
@@ -3254,7 +3254,7 @@ static bool pv_pdf(struct preview *pv, const char *path)
     if (pi.producer[0])
         pv_linef(pv, &cap, "Made by:  %s", pi.producer);
     pv_linef(pv, &cap, "Pages:    %d%s", pi.pages, pi.pages_read < pi.pages ? " (the text of the first ones follows)" : "");
-    pv_linef(pv, &cap, "");
+    pv_linef(pv, &cap, "%s", "");
     for (const char *p = text; *p;) {
         const char *e = strchr(p, '\n');
         size_t l = e ? (size_t)(e - p) : strlen(p);
@@ -5622,7 +5622,7 @@ static void paint_audio(struct wlwin *w, struct app *a, int x0, int pw, int list
     if (pv->ai.title[0]) {
         snprintf(title, sizeof(title), "%s", pv->ai.title);
     } else {
-        snprintf(title, sizeof(title), "%s", pv->title);
+        snprintf(title, sizeof(title), "%.199s", pv->title);
         char *dot = strrchr(title, '.');
         if (dot)
             *dot = 0;
@@ -7132,7 +7132,7 @@ static int selftest(void)
     a.rep_mode = REP_REPLACE;                                             /* Enter: replaced (the old one is gone, no temporary file is left) */
     do_copy_move(&a, dst, false);
     a.rep_mode = REP_ASK;
-    char tmpn[PATH_MAX + 32];
+    char tmpn[PATH_MAX + 64];
     snprintf(tmpn, sizeof(tmpn), "%s.mellagui-new", p);
     CHECK(file_is(p, "one\n") && access(tmpn, F_OK) != 0, "an existing file is replaced after the answer: %s", a.msg);
     write_file(p, "changed", 7);

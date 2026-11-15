@@ -59,9 +59,9 @@ static bool in_snaps(const char *name, char *path, size_t n)
 static bool find_one(const char *name, char *path, size_t n)
 {
     const char *env = getenv("MELLAGUI_ICON_PATH");
-    char roots[1024];
+    char roots[2 * PATH_MAX + 256];
     if (env) {
-        snprintf(roots, sizeof(roots), "%s", env);
+        snprintf(roots, sizeof(roots), "%.*s", (int)sizeof(roots) - 1, env);
     } else {
         const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
         char user[PATH_MAX] = "", flat[PATH_MAX] = "";

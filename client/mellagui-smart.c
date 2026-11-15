@@ -1143,7 +1143,7 @@ static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out,
     sched_time_text(r, at, sizeof(at));
     int due;
     if (r->sun && sched_minute(r, time(NULL), &due)) {          /* a sun rule says what time that makes today */
-        char tail[16];
+        char tail[32];
         snprintf(tail, sizeof(tail), " (%02d:%02d)", due / 60, due % 60);
         if (strlen(at) + strlen(tail) < sizeof(at))
             strcat(at, tail);

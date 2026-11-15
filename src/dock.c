@@ -426,7 +426,7 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
 static void resolve_list(struct applist *L, bool launcher_only)
 {
     free_items(L);
-    for (int i = 0; i < L->raw_n; i++) {
+    for (int i = 0; i < L->raw_n && L->item_n < LM_DOCK_MAX; i++) {
         struct app_item *it = &L->items[L->item_n];
         if (launcher_only)                                      /* a name the dock has is the dock's: it shows in the launcher through it */
             for (int d = 0; d < DOCK_LIST->item_n; d++)
@@ -438,7 +438,11 @@ static void resolve_list(struct applist *L, bool launcher_only)
         }
         memset(&it->img, 0, sizeof(it->img));
         it->has_img = false;
-        snprintf(it->name, sizeof(it->name), "%.*s", LM_DOCK_NAME_MAX - 1, L->raw[i].name);
+        {
+            size_t nl = strnlen(L->raw[i].name, LM_DOCK_NAME_MAX - 1);
+            memmove(it->name, L->raw[i].name, nl);
+            it->name[nl] = 0;
+        }
         program_key(it->cmd, it->match, sizeof(it->match));
         it->pub.name = it->name;
         it->pub.cmd = it->cmd;

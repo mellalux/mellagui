@@ -77,14 +77,14 @@ static bool find_render_node(const struct lm_server *srv, dev_t *out)
     while ((e = readdir(d))) {
         if (strncmp(e->d_name, "renderD", 7) || strlen(e->d_name) >= 32)
             continue;
-        char path[64];
+        char path[320];
         snprintf(path, sizeof(path), "/dev/dri/%s", e->d_name);
         if (access(path, R_OK | W_OK) != 0)
             continue;
         if (!first[0] || strcmp(e->d_name, first) < 0)
-            snprintf(first, sizeof(first), "%s", e->d_name);
+            snprintf(first, sizeof(first), "%.31s", e->d_name);
         if (card[0] && same_gpu(card, e->d_name))
-            snprintf(match, sizeof(match), "%s", e->d_name);
+            snprintf(match, sizeof(match), "%.31s", e->d_name);
     }
     closedir(d);
     const char *pick = match[0] ? match : first;

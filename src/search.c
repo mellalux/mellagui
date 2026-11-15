@@ -306,7 +306,7 @@ static void read_desktop(const char *path, const char *id)
         return;
     struct app *a = &g_apps[g_napps];
     memset(a, 0, sizeof(*a));
-    snprintf(a->id, sizeof(a->id), "%s", id);
+    snprintf(a->id, sizeof(a->id), "%.*s", (int)sizeof(a->id) - 1, id);
     bool in_entry = false, hidden = false, is_app = false;
     char line[1024];
     while (fgets(line, sizeof(line), f)) {

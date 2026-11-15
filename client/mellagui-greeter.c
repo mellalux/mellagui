@@ -226,7 +226,7 @@ static void handle_line(struct app *a, char *l)
             struct guser *u = &a->users[a->nusers++];
             if (tab) *tab = 0;
             snprintf(u->name, sizeof(u->name), "%s", l + 5);
-            snprintf(u->display, sizeof(u->display), "%s", u->name);
+            snprintf(u->display, sizeof(u->display), "%s", l + 5);
             if (tab) {
                 char *t2 = strchr(tab + 1, '\t');
                 if (t2) *t2 = 0;
@@ -240,7 +240,7 @@ static void handle_line(struct app *a, char *l)
             struct gsess *s = &a->sess[a->nsess++];
             if (tab) *tab = 0;
             snprintf(s->id, sizeof(s->id), "%s", l + 8);
-            snprintf(s->name, sizeof(s->name), "%s", s->id);
+            snprintf(s->name, sizeof(s->name), "%s", l + 8);
             if (tab) {
                 char *t2 = strchr(tab + 1, '\t');
                 if (t2) *t2 = 0;

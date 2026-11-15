@@ -3723,6 +3723,14 @@ class TestClients(Base):
         r = subprocess.run([exe, '--font-info', os.path.join(d, 'c_sans.woff2')], capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
         self.assertIn('WOFF 2', r.stderr)
+        fa = '/var/www/sites/word/wp-content/themes/Divi/core/admin/fonts/fontawesome/fa-solid-900'
+        if os.path.exists(fa + '.woff2') and os.path.exists(fa + '.ttf'):                   # a real WOFF 2 next to the TTF it was made from: the same font
+            shutil.copy(fa + '.woff2', os.path.join(d, 'e_icons.woff2'))
+            shutil.copy(fa + '.ttf', os.path.join(d, 'f_icons.ttf'))
+            w2, t2 = info('e_icons.woff2'), info('f_icons.ttf')
+            self.assertEqual(w2['woff'], '2')
+            for k in ('family', 'style', 'glyphs', 'units', 'sample'):
+                self.assertEqual(w2[k], t2[k], k)
         dump = os.path.join(d, 'files.dump')
         p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_sans.ttf)
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'font')

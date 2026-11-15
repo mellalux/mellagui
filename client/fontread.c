@@ -3,6 +3,7 @@
 #include "../src/img.h"
 #include "../src/ttf.h"
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -81,6 +82,488 @@ static uint8_t *woff_to_sfnt(const uint8_t *in, size_t n, size_t *outn)
         pos += (olen + 3u) & ~3u;
     }
     *outn = total;
+    return out;
+}
+
+/* ---- WOFF 2: Brotli (the system's libbrotlidec) and the transformed glyf / loca / hmtx tables, rebuilt into an ordinary font file ---- */
+struct w2buf {
+    uint8_t *p;
+    size_t n, cap;
+    bool bad;
+};
+
+static void w2_put(struct w2buf *b, const void *d, size_t n)
+{
+    if (b->n + n > FONT_MAX) {
+        b->bad = true;
+        return;
+    }
+    if (b->n + n > b->cap) {
+        b->cap = (b->n + n) * 2;
+        uint8_t *t = realloc(b->p, b->cap);
+        if (!t) {
+            b->bad = true;
+            return;
+        }
+        b->p = t;
+    }
+    memcpy(b->p + b->n, d, n);
+    b->n += n;
+}
+
+static void w2_u16(struct w2buf *b, unsigned v)
+{
+    uint8_t t[2] = { (uint8_t)(v >> 8), (uint8_t)v };
+    w2_put(b, t, 2);
+}
+
+static void w2_u32(struct w2buf *b, uint32_t v)
+{
+    uint8_t t[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v };
+    w2_put(b, t, 4);
+}
+
+struct cur {
+    const uint8_t *p, *end;
+    bool bad;
+};
+
+static unsigned cur_u8(struct cur *c)
+{
+    if (c->p >= c->end) {
+        c->bad = true;
+        return 0;
+    }
+    return *c->p++;
+}
+
+static unsigned cur_u16(struct cur *c)
+{
+    unsigned a = cur_u8(c);
+    return a << 8 | cur_u8(c);
+}
+
+static unsigned cur_255(struct cur *c)                                  /* 255UInt16 */
+{
+    unsigned b = cur_u8(c);
+    if (b == 253)
+        return cur_u16(c);
+    if (b == 255)
+        return 253 + cur_u8(c);
+    if (b == 254)
+        return 506 + cur_u8(c);
+    return b;
+}
+
+static uint32_t cur_base128(struct cur *c)                              /* UIntBase128 */
+{
+    uint32_t v = 0;
+    for (int i = 0; i < 5; i++) {
+        unsigned b = cur_u8(c);
+        if (c->bad || (i == 0 && b == 0x80) || (v & 0xfe000000u))
+            return c->bad = true, 0;
+        v = v << 7 | (b & 0x7f);
+        if (!(b & 0x80))
+            return v;
+    }
+    c->bad = true;
+    return 0;
+}
+
+static const char *const k_w2tags[63] = {
+    "cmap", "head", "hhea", "hmtx", "maxp", "name", "OS/2", "post", "cvt ", "fpgm", "glyf", "loca", "prep", "CFF ", "VORG", "EBDT", "EBLC", "gasp", "hdmx", "kern",
+    "LTSH", "PCLT", "VDMX", "vhea", "vmtx", "BASE", "GDEF", "GPOS", "GSUB", "EBSC", "JSTF", "MATH", "CBDT", "CBLC", "COLR", "CPAL", "SVG ", "sbix", "acnt", "avar",
+    "bdat", "bloc", "bsln", "cvar", "fdsc", "feat", "fmtx", "fvar", "gvar", "hsty", "just", "lcar", "mort", "morx", "opbd", "prop", "trak", "Zapf", "Silf", "Glat",
+    "Gloc", "Feat", "Sill",
+};
+
+struct w2table {
+    char tag[4];
+    uint32_t orig, len;                 /* the length it has after the transform is undone / in the compressed stream */
+    bool transformed;
+    const uint8_t *data;                /* in the unpacked stream */
+    uint8_t *out;                       /* rebuilt tables */
+    size_t outn;
+};
+
+static int32_t with_sign(unsigned flag, int base)
+{
+    return (flag & 1) ? base : -base;
+}
+
+/* The transformed glyf table -> a glyf table and a loca table (long offsets). Returns false for damaged data. `xmin` gets each glyph's xMin for the hmtx rebuild. */
+static bool w2_glyf(const uint8_t *d, size_t n, struct w2buf *glyf, struct w2buf *loca, int16_t **xmin_out, unsigned *nglyphs_out, unsigned *index_fmt)
+{
+    if (n < 36)
+        return false;
+    struct cur h = { d, d + n, false };
+    cur_u16(&h);
+    cur_u16(&h);                                                        /* version, option flags */
+    unsigned ng = cur_u16(&h), idxfmt = cur_u16(&h);
+    uint32_t sz[7];
+    for (int i = 0; i < 7; i++) {
+        unsigned a = cur_u16(&h);
+        sz[i] = a << 16 | cur_u16(&h);
+    }
+    if (h.bad || ng == 0)
+        return false;
+    size_t total = 36;
+    for (int i = 0; i < 7; i++) {
+        if (sz[i] > n)
+            return false;
+        total += sz[i];
+    }
+    if (total > n)
+        return false;
+    const uint8_t *s0 = d + 36;
+    struct cur ncont = { s0, s0 + sz[0], false }, npts = { s0 + sz[0], s0 + sz[0] + sz[1], false };
+    const uint8_t *fl = s0 + sz[0] + sz[1], *flend = fl + sz[2];
+    struct cur glyph = { flend, flend + sz[3], false };
+    const uint8_t *cmp = flend + sz[3];
+    struct cur comp = { cmp, cmp + sz[4], false };
+    const uint8_t *bb = cmp + sz[4];
+    struct cur bbox = { bb, bb + sz[5], false };
+    const uint8_t *ins = bb + sz[5];
+    struct cur instr = { ins, ins + sz[6], false };
+    size_t bitmap = ((ng + 31) / 32) * 4;
+    if (bitmap > sz[5])
+        return false;
+    const uint8_t *bbmap = bbox.p;
+    bbox.p += bitmap;
+    int16_t *xmin = calloc(ng, sizeof(int16_t));
+    if (!xmin)
+        return false;
+    for (unsigned g = 0; g < ng; g++) {
+        w2_u32(loca, (uint32_t)glyf->n);
+        int nc = (int16_t)cur_u16(&ncont);
+        if (ncont.bad || glyf->bad)
+            goto fail;
+        if (nc == 0)
+            continue;
+        size_t start = glyf->n;
+        bool explicit_bbox = (bbmap[g >> 3] & (0x80 >> (g & 7))) != 0;
+        if (nc > 0) {
+            unsigned ends[1024], total_pts = 0;
+            if (nc > 1024)
+                goto fail;
+            for (int c = 0; c < nc; c++) {
+                total_pts += cur_255(&npts);
+                ends[c] = total_pts - 1;
+            }
+            if (npts.bad || total_pts > 65535 || (size_t)(flend - fl) < total_pts)
+                goto fail;
+            int32_t *xs = malloc(sizeof(int32_t) * (total_pts + 1)), *ys = malloc(sizeof(int32_t) * (total_pts + 1));
+            uint8_t *onc = malloc(total_pts + 1);
+            if (!xs || !ys || !onc) {
+                free(xs); free(ys); free(onc);
+                goto fail;
+            }
+            int32_t x = 0, y = 0, minx = 32767, maxx = -32768, miny = 32767, maxy = -32768;
+            for (unsigned i = 0; i < total_pts; i++) {
+                unsigned flag = *fl++;
+                onc[i] = !(flag & 0x80);
+                flag &= 0x7f;
+                int32_t dx, dy;
+                size_t nb = flag < 84 ? 1 : flag < 120 ? 2 : flag < 124 ? 3 : 4;
+                if ((size_t)(glyph.end - glyph.p) < nb) {
+                    free(xs); free(ys); free(onc);
+                    goto fail;
+                }
+                const uint8_t *in = glyph.p;
+                if (flag < 10) {
+                    dx = 0;
+                    dy = with_sign(flag, ((flag & 14) << 7) + in[0]);
+                } else if (flag < 20) {
+                    dx = with_sign(flag, (((flag - 10) & 14) << 7) + in[0]);
+                    dy = 0;
+                } else if (flag < 84) {
+                    int b0 = (int)flag - 20, b1 = in[0];
+                    dx = with_sign(flag, 1 + (b0 & 0x30) + (b1 >> 4));
+                    dy = with_sign(flag >> 1, 1 + ((b0 & 0x0c) << 2) + (b1 & 0x0f));
+                } else if (flag < 120) {
+                    int b0 = (int)flag - 84;
+                    dx = with_sign(flag, 1 + ((b0 / 12) << 8) + in[0]);
+                    dy = with_sign(flag >> 1, 1 + (((b0 % 12) >> 2) << 8) + in[1]);
+                } else if (flag < 124) {
+                    int b2 = in[1];
+                    dx = with_sign(flag, (in[0] << 4) + (b2 >> 4));
+                    dy = with_sign(flag >> 1, ((b2 & 0x0f) << 8) + in[2]);
+                } else {
+                    dx = with_sign(flag, (in[0] << 8) + in[1]);
+                    dy = with_sign(flag >> 1, (in[2] << 8) + in[3]);
+                }
+                glyph.p += nb;
+                x += dx;
+                y += dy;
+                xs[i] = x;
+                ys[i] = y;
+                minx = x < minx ? x : minx; maxx = x > maxx ? x : maxx; miny = y < miny ? y : miny; maxy = y > maxy ? y : maxy;
+            }
+            unsigned ilen = cur_255(&glyph);
+            if (glyph.bad || ilen > (size_t)(instr.end - instr.p)) {
+                free(xs); free(ys); free(onc);
+                goto fail;
+            }
+            w2_u16(glyf, (unsigned)nc);
+            if (explicit_bbox) {
+                for (int i = 0; i < 4; i++)
+                    w2_u16(glyf, cur_u16(&bbox));
+                xmin[g] = (int16_t)((glyf->p[glyf->n - 8] << 8) | glyf->p[glyf->n - 7]);
+            } else {
+                w2_u16(glyf, (unsigned)minx & 0xffff);
+                w2_u16(glyf, (unsigned)miny & 0xffff);
+                w2_u16(glyf, (unsigned)maxx & 0xffff);
+                w2_u16(glyf, (unsigned)maxy & 0xffff);
+                xmin[g] = (int16_t)minx;
+            }
+            for (int c = 0; c < nc; c++)
+                w2_u16(glyf, ends[c]);
+            w2_u16(glyf, ilen);
+            w2_put(glyf, instr.p, ilen);
+            instr.p += ilen;
+            int32_t px = 0, py = 0;
+            for (unsigned i = 0; i < total_pts; i++) {                  /* flags: on curve only, no short vectors: the coordinates follow as 16 bit deltas */
+                uint8_t f = onc[i] ? 1 : 0;
+                w2_put(glyf, &f, 1);
+            }
+            for (unsigned i = 0; i < total_pts; i++) {
+                w2_u16(glyf, (unsigned)(xs[i] - px) & 0xffff);
+                px = xs[i];
+            }
+            for (unsigned i = 0; i < total_pts; i++) {
+                w2_u16(glyf, (unsigned)(ys[i] - py) & 0xffff);
+                py = ys[i];
+            }
+            free(xs); free(ys); free(onc);
+        } else {                                                        /* composite: the components are copied as they are */
+            w2_u16(glyf, 0xffff);
+            for (int i = 0; i < 4; i++)
+                w2_u16(glyf, cur_u16(&bbox));
+            xmin[g] = (int16_t)((glyf->p[glyf->n - 8] << 8) | glyf->p[glyf->n - 7]);
+            unsigned flags;
+            bool have_instr = false;
+            do {
+                flags = cur_u16(&comp);
+                w2_u16(glyf, flags);
+                size_t arg = (flags & 1) ? 4 : 2, extra = (flags & 8) ? 2 : (flags & 0x40) ? 4 : (flags & 0x80) ? 8 : 0;
+                w2_u16(glyf, cur_u16(&comp));                           /* the component's glyph */
+                if (comp.bad || (size_t)(comp.end - comp.p) < arg + extra)
+                    goto fail;
+                w2_put(glyf, comp.p, arg + extra);
+                comp.p += arg + extra;
+                have_instr |= (flags & 0x100) != 0;
+            } while ((flags & 0x20) && !comp.bad);
+            if (have_instr) {
+                unsigned ilen = cur_255(&glyph);
+                if (glyph.bad || ilen > (size_t)(instr.end - instr.p))
+                    goto fail;
+                w2_u16(glyf, ilen);
+                w2_put(glyf, instr.p, ilen);
+                instr.p += ilen;
+            }
+        }
+        while ((glyf->n - start) & 3) {                                 /* each glyph on a multiple of four bytes */
+            uint8_t z = 0;
+            w2_put(glyf, &z, 1);
+        }
+        if (glyf->bad || comp.bad || bbox.bad || glyph.bad)
+            goto fail;
+    }
+    w2_u32(loca, (uint32_t)glyf->n);
+    *xmin_out = xmin;
+    *nglyphs_out = ng;
+    *index_fmt = idxfmt;
+    return !glyf->bad && !loca->bad;
+fail:
+    free(xmin);
+    return false;
+}
+
+static int w2_cmp(const void *a, const void *b)
+{
+    return memcmp(((const struct w2table *)a)->tag, ((const struct w2table *)b)->tag, 4);
+}
+
+typedef int (*brotli_fn)(size_t, const uint8_t *, size_t *, uint8_t *);
+
+static uint8_t *woff2_to_sfnt(const uint8_t *in, size_t n, size_t *outn, char *err, size_t errn)
+{
+    if (n < 48) {
+        seterr(err, errn, "A damaged WOFF 2 font.");
+        return NULL;
+    }
+    uint32_t flavor = be32(in + 4), nt = be16(in + 12), comp_size = be32(in + 20);
+    if (flavor == 0x74746366 || nt == 0 || nt > 128) {
+        seterr(err, errn, "A WOFF 2 font collection: not read.");
+        return NULL;
+    }
+    struct cur c = { in + 48, in + n, false };
+    struct w2table *tb = calloc(nt, sizeof(*tb));
+    if (!tb)
+        return NULL;
+    size_t unpacked = 0;
+    for (uint32_t i = 0; i < nt && !c.bad; i++) {
+        unsigned flags = cur_u8(&c), idx = flags & 63, ver = flags >> 6;
+        if (idx == 63) {
+            for (int k = 0; k < 4; k++)
+                tb[i].tag[k] = (char)cur_u8(&c);
+        } else {
+            memcpy(tb[i].tag, k_w2tags[idx], 4);
+        }
+        tb[i].orig = cur_base128(&c);
+        bool glyfloca = !memcmp(tb[i].tag, "glyf", 4) || !memcmp(tb[i].tag, "loca", 4);
+        tb[i].transformed = glyfloca ? ver == 0 : ver != 0;
+        tb[i].len = tb[i].transformed ? cur_base128(&c) : tb[i].orig;
+        unpacked += tb[i].len;
+        if (unpacked > FONT_MAX) {
+            c.bad = true;
+        }
+    }
+    if (c.bad || (size_t)(in + n - c.p) < comp_size) {
+        free(tb);
+        seterr(err, errn, "A damaged WOFF 2 font (its table directory).");
+        return NULL;
+    }
+    static void *lib;
+    static brotli_fn brotli;
+    if (!lib) {
+        lib = dlopen("libbrotlidec.so.1", RTLD_NOW);
+        if (lib)
+            brotli = (brotli_fn)dlsym(lib, "BrotliDecoderDecompress");
+    }
+    if (!brotli) {
+        free(tb);
+        seterr(err, errn, "A WOFF 2 font needs the system's libbrotlidec, which is not installed.");
+        return NULL;
+    }
+    uint8_t *raw = malloc(unpacked ? unpacked : 1);
+    size_t rawn = unpacked;
+    if (!raw || brotli(comp_size, c.p, &rawn, raw) != 1 || rawn != unpacked) {
+        free(raw);
+        free(tb);
+        seterr(err, errn, "A WOFF 2 font whose data does not unpack.");
+        return NULL;
+    }
+    size_t pos = 0;
+    for (uint32_t i = 0; i < nt; i++) {
+        tb[i].data = raw + pos;
+        pos += tb[i].len;
+    }
+    struct w2buf glyf = { 0 }, loca = { 0 }, hm = { 0 };
+    int16_t *xmin = NULL;
+    uint8_t *head_copy = NULL;
+    unsigned ng = 0, idxfmt = 0;
+    int gi = -1, li = -1, hi = -1, hhi = -1;
+    for (uint32_t i = 0; i < nt; i++) {
+        if (!memcmp(tb[i].tag, "glyf", 4)) gi = (int)i;
+        else if (!memcmp(tb[i].tag, "loca", 4)) li = (int)i;
+        else if (!memcmp(tb[i].tag, "hmtx", 4)) hi = (int)i;
+        else if (!memcmp(tb[i].tag, "hhea", 4)) hhi = (int)i;
+    }
+    bool ok = true;
+    if (gi >= 0 && tb[gi].transformed) {
+        ok = li >= 0 && w2_glyf(tb[gi].data, tb[gi].len, &glyf, &loca, &xmin, &ng, &idxfmt);
+        if (ok) {                                                       /* loca stays long (the rebuilt glyphs are bigger than the original's: short offsets might not reach) */
+            tb[gi].out = glyf.p;
+            tb[gi].outn = glyf.n;
+            tb[li].out = loca.p;
+            tb[li].outn = loca.n;
+            for (uint32_t i = 0; i < nt; i++)
+                if (!memcmp(tb[i].tag, "head", 4) && !tb[i].transformed && tb[i].len >= 54) {      /* ... so head must say so: indexToLocFormat = 1 */
+                    tb[i].out = malloc(tb[i].len);
+                    if (tb[i].out) {
+                        memcpy(tb[i].out, tb[i].data, tb[i].len);
+                        tb[i].out[50] = 0;
+                        tb[i].out[51] = 1;
+                        tb[i].outn = tb[i].len;
+                        head_copy = tb[i].out;
+                    }
+                }
+        }
+    }
+    if (ok && hi >= 0 && tb[hi].transformed && hhi >= 0) {              /* hmtx without the left side bearings: they are the glyphs' xMin */
+        const uint8_t *d = tb[hi].data;
+        size_t dn = tb[hi].len;
+        unsigned nm = tb[hhi].len >= 36 && !tb[hhi].transformed ? be16(tb[hhi].data + 34) : 0;
+        if (dn < 1 || !xmin || nm == 0 || nm > ng) {
+            ok = false;
+        } else {
+            unsigned f = d[0];
+            size_t p = 1;
+            if (p + (size_t)nm * 2 > dn) {
+                ok = false;
+            } else {
+                const uint8_t *adv = d + p;
+                p += (size_t)nm * 2;
+                const uint8_t *lsb = (f & 1) ? NULL : d + p;
+                if (lsb)
+                    p += (size_t)nm * 2;
+                const uint8_t *lsb2 = (f & 2) ? NULL : d + p;
+                if (lsb2)
+                    p += (size_t)(ng - nm) * 2;
+                if (p > dn || (lsb && !lsb) )
+                    ok = false;
+                for (unsigned g = 0; ok && g < ng; g++) {
+                    if (g < nm) {
+                        w2_put(&hm, adv + 2 * g, 2);
+                        w2_u16(&hm, lsb ? be16(lsb + 2 * g) : (unsigned)(uint16_t)xmin[g]);
+                    } else {
+                        w2_u16(&hm, lsb2 ? be16(lsb2 + 2 * (g - nm)) : (unsigned)(uint16_t)xmin[g]);
+                    }
+                }
+                if (ok) {
+                    tb[hi].out = hm.p;
+                    tb[hi].outn = hm.n;
+                }
+            }
+        }
+    }
+    uint8_t *out = NULL;
+    if (ok) {
+        qsort(tb, nt, sizeof(*tb), w2_cmp);
+        size_t total = 12 + (size_t)nt * 16;
+        for (uint32_t i = 0; i < nt; i++)
+            total += ((tb[i].out ? tb[i].outn : tb[i].orig) + 3u) & ~3u;
+        if (total > FONT_MAX) {
+            ok = false;
+        } else {
+            out = calloc(1, total);
+        }
+        if (out) {
+            uint32_t pow2 = 1, lg = 0;
+            while (pow2 * 2 <= nt) {
+                pow2 *= 2;
+                lg++;
+            }
+            out[0] = (uint8_t)(flavor >> 24); out[1] = (uint8_t)(flavor >> 16); out[2] = (uint8_t)(flavor >> 8); out[3] = (uint8_t)flavor;
+            out[4] = (uint8_t)(nt >> 8); out[5] = (uint8_t)nt;
+            uint32_t sr = pow2 * 16, rs = nt * 16 - sr;
+            out[6] = (uint8_t)(sr >> 8); out[7] = (uint8_t)sr; out[8] = (uint8_t)(lg >> 8); out[9] = (uint8_t)lg; out[10] = (uint8_t)(rs >> 8); out[11] = (uint8_t)rs;
+            size_t at = 12 + (size_t)nt * 16;
+            for (uint32_t i = 0; i < nt; i++) {
+                const uint8_t *src = tb[i].out ? tb[i].out : tb[i].data;
+                size_t len = tb[i].out ? tb[i].outn : tb[i].orig;
+                if (!tb[i].out && tb[i].len < len)
+                    len = tb[i].len;
+                memcpy(out + at, src, len);
+                uint8_t *e = out + 12 + (size_t)i * 16;
+                memcpy(e, tb[i].tag, 4);
+                e[8] = (uint8_t)(at >> 24); e[9] = (uint8_t)(at >> 16); e[10] = (uint8_t)(at >> 8); e[11] = (uint8_t)at;
+                e[12] = (uint8_t)(len >> 24); e[13] = (uint8_t)(len >> 16); e[14] = (uint8_t)(len >> 8); e[15] = (uint8_t)len;
+                at += (len + 3u) & ~3u;
+            }
+            *outn = total;
+        }
+    }
+    if (!out)
+        seterr(err, errn, "A damaged WOFF 2 font (its glyph data).");
+    free(raw);
+    free(glyf.p);
+    free(loca.p);
+    free(head_copy);
+    free(hm.p);
+    free(xmin);
+    free(tb);
     return out;
 }
 
@@ -287,9 +770,15 @@ int font_read(const char *path, struct font_info *fi, char *err, size_t errn)
     }
     uint32_t magic = be32(d);
     if (magic == 0x774f4632) {                                          /* "wOF2" */
+        size_t sn = 0;
+        uint8_t *sf = woff2_to_sfnt(d, n, &sn, err, errn);
         free(d);
-        seterr(err, errn, "A WOFF 2 font (Brotli and a transformed glyph table): not read.");
-        return -2;
+        if (!sf)
+            return -2;
+        d = sf;
+        n = sn;
+        fi->woff = 2;
+        magic = be32(d);
     }
     if (magic == 0x774f4646) {                                          /* "wOFF" */
         size_t sn = 0;

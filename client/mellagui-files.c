@@ -63,6 +63,7 @@
 #include "wlc.h"
 #include "util.h"
 #include "archread.h"
+#include "certread.h"
 #include "initree.h"
 #include "json.h"
 #include "parquet.h"
@@ -3029,6 +3030,37 @@ static bool is_xml_path(const char *p)
     return false;
 }
 
+/* ---- certificates, requests, revocation lists and keys: described as JSON text and shown in the tree ---- */
+static bool is_cert_path(const char *path)
+{
+    static const char *const exts[] = { "pem", "crt", "cer", "der", "csr", "crl", "key", "pub" };
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
+        if (ext_is(path, exts[i]))
+            return true;
+    return false;
+}
+
+static bool pv_cert(struct preview *pv, const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    enum { CERT_MAX = 4 << 20 };
+    unsigned char *buf = malloc(CERT_MAX + 1);
+    ssize_t n = buf ? read(fd, buf, CERT_MAX) : -1;
+    close(fd);
+    char info[160] = "";
+    char *js = n > 0 ? cert_json(buf, (size_t)n, info, sizeof(info)) : NULL;
+    free(buf);
+    if (!js)
+        return false;
+    bool ok = pv_json(pv, (const unsigned char *)js, strlen(js), FMT_JSON);
+    free(js);
+    if (ok)
+        snprintf(pv->info, sizeof(pv->info), "%s", info);
+    return ok;
+}
+
 static void preview_load(struct preview *pv, const char *path, bool hidden)
 {
     preview_clear(pv);
@@ -3127,6 +3159,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
                (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots") || ext_is(path, "numbers")) &&
                (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR || pv->kind == PV_IMAGE)) {
         /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
+    } else if ((is_cert_path(path) || (n >= 11 && !memcmp(buf, "-----BEGIN ", 11))) && pv_cert(pv, path)) {
+        pv->kind = PV_JSON;                                              /* a certificate, a key ...: its facts as a tree */
     } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
         /* a Word / OpenDocument text or a presentation: its text as a page */
     } else if (((n >= 4 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "PK\5\6", 4))) || (n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) ||
@@ -7020,6 +7054,23 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s\n", info);
         fwrite(md, 1, mn, stdout);
         free(md);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--cert-json")) {                  /* a certificate / key file as the JSON the preview shows (tests) */
+        FILE *cf = fopen(argv[2], "rb");
+        if (!cf)
+            return 1;
+        unsigned char *cb = malloc((4 << 20) + 1);
+        size_t cn = cb ? fread(cb, 1, 4 << 20, cf) : 0;
+        fclose(cf);
+        char info[160] = "";
+        char *js = cert_json(cb, cn, info, sizeof(info));
+        free(cb);
+        if (!js)
+            return 1;
+        fprintf(stderr, "%s\n", info);
+        puts(js);
+        free(js);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

@@ -3554,6 +3554,107 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'markdown' and o[0].get('want', '').endswith('b.odt'))
         self.assertEqual(extra['md']['headings'], '1')
 
+    def test_files_previews_certificates_and_keys_as_a_tree(self):
+        import json
+        if not shutil.which('openssl'):
+            self.skipTest('openssl is needed to make the test files')
+        d = tempfile.mkdtemp(prefix='files-cert-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        def ssl(*args):
+            r = subprocess.run(['openssl'] + list(args), capture_output=True, cwd=d, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        ssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'k_rsa.pem', '-out', 'a_cert.pem', '-days', '365', '-subj', '/C=EE/O=Test Org/CN=example.test',
+            '-addext', 'subjectAltName=DNS:example.test,DNS:*.example.test,IP:127.0.0.1,IP:::1,email:me@example.test', '-addext', 'extendedKeyUsage=serverAuth,clientAuth',
+            '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:2', '-addext', 'keyUsage=critical,digitalSignature,keyCertSign')
+        ssl('ecparam', '-genkey', '-name', 'prime256v1', '-noout', '-out', 'l_ec.key')
+        ssl('req', '-x509', '-key', 'l_ec.key', '-out', 'b_ec.crt', '-days', '30', '-subj', '/CN=EC test')
+        ssl('x509', '-in', 'a_cert.pem', '-outform', 'DER', '-out', 'c_cert.der')
+        ssl('req', '-new', '-key', 'k_rsa.pem', '-out', 'e_req.csr', '-subj', '/CN=requested.test/O=Req')
+        ssl('genpkey', '-algorithm', 'ed25519', '-out', 'm_ed.key')
+        ssl('genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-aes256', '-pass', 'pass:secret', '-out', 'n_enc.key')
+        ssl('pkey', '-in', 'k_rsa.pem', '-pubout', '-out', 'o_pub.pem')
+        with open(os.path.join(d, 'f_chain.pem'), 'wb') as f:
+            f.write(open(os.path.join(d, 'a_cert.pem'), 'rb').read() + open(os.path.join(d, 'b_ec.crt'), 'rb').read())
+        with open(os.path.join(d, 'p_text.pem'), 'w') as f:
+            f.write('just some text with the name of a certificate\n')
+        def cj(name):
+            r = subprocess.run([exe, '--cert-json', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, name + r.stderr)
+            return json.loads(r.stdout), r.stderr.strip()
+        c, info = cj('a_cert.pem')
+        self.assertEqual((c['type'], c['subject'], c['issuer']), ('Certificate', 'C=EE, O=Test Org, CN=example.test', 'C=EE, O=Test Org, CN=example.test'))
+        self.assertEqual(c['publicKey'], 'RSA, 2048 bit')
+        self.assertEqual(c['subjectAltName'], 'DNS:example.test, DNS:*.example.test, IP:127.0.0.1, IP:0:0:0:0:0:0:0:1, email:me@example.test')
+        self.assertEqual(c['extensions']['basicConstraints (critical)'], 'CA:TRUE, pathlen:2')
+        self.assertEqual(c['extensions']['keyUsage (critical)'], ['digitalSignature', 'keyCertSign'])
+        self.assertEqual(c['extensions']['extendedKeyUsage'], ['serverAuth', 'clientAuth'])
+        self.assertTrue(c['status'].startswith('valid, 36') and 'days left' in c['status'], c['status'])
+        self.assertEqual(c['selfSigned'], 'yes (subject = issuer)')
+        want_fp = subprocess.run(['openssl', 'x509', '-in', os.path.join(d, 'a_cert.pem'), '-noout', '-fingerprint', '-sha256'], capture_output=True, text=True).stdout.split('=')[1].strip()
+        self.assertEqual(c['fingerprintSHA256'], want_fp)                                  # the same as openssl's
+        want_serial = subprocess.run(['openssl', 'x509', '-in', os.path.join(d, 'a_cert.pem'), '-noout', '-serial'], capture_output=True, text=True).stdout.split('=')[1].strip()
+        self.assertEqual(c['serial'].replace(':', '').lstrip('0'), want_serial.lstrip('0'))
+        self.assertTrue(info.startswith('Certificate, example.test, valid'), info)
+        c, _ = cj('b_ec.crt')
+        self.assertEqual((c['subject'], c['publicKey']), ('CN=EC test', 'EC, prime256v1 (P-256)'))
+        c, _ = cj('c_cert.der')                                                              # the same certificate as bare DER
+        self.assertEqual(c['subject'], 'C=EE, O=Test Org, CN=example.test')
+        c, _ = cj('e_req.csr')
+        self.assertEqual((c['type'], c['subject'], c['publicKey']), ('Certificate request', 'CN=requested.test, O=Req', 'RSA, 2048 bit'))
+        c, _ = cj('f_chain.pem')                                                             # two certificates: an array
+        self.assertEqual([x['subject'] for x in c], ['C=EE, O=Test Org, CN=example.test', 'CN=EC test'])
+        for name, kind, size in (('k_rsa.pem', 'Private key', 'RSA, 2048 bit'), ('l_ec.key', 'Private key', 'EC, prime256v1 (P-256)'), ('m_ed.key', 'Private key', 'Ed25519'),
+                                 ('o_pub.pem', 'Public key', 'RSA, 2048 bit')):
+            r = subprocess.run([exe, '--cert-json', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            k = json.loads(r.stdout)
+            self.assertEqual((k['type'], k['key']), (kind, size), name)
+            if kind == 'Private key':
+                self.assertEqual(k['note'], 'the key itself is not shown')
+                secret = open(os.path.join(d, name)).read().split('\n')[1][:30]               # a piece of the key material: it must not be in the output
+                self.assertNotIn(secret, r.stdout)
+        c, _ = cj('n_enc.key')
+        self.assertEqual(c['type'], 'Private key (encrypted)')
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            import datetime
+            key = ec.generate_private_key(ec.SECP256R1())
+            name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, 'Old CA')])
+            now = datetime.datetime(2024, 1, 1)
+            old = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(77)
+                   .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=10)).sign(key, hashes.SHA256()))
+            open(os.path.join(d, 'g_old.crt'), 'wb').write(old.public_bytes(serialization.Encoding.PEM))
+            crl = (x509.CertificateRevocationListBuilder().issuer_name(name).last_update(now).next_update(now + datetime.timedelta(days=7))
+                   .add_revoked_certificate(x509.RevokedCertificateBuilder().serial_number(5).revocation_date(now).build())
+                   .add_revoked_certificate(x509.RevokedCertificateBuilder().serial_number(6).revocation_date(now).build()).sign(key, hashes.SHA256()))
+            open(os.path.join(d, 'h_list.crl'), 'wb').write(crl.public_bytes(serialization.Encoding.PEM))
+            c, info = cj('g_old.crt')
+            self.assertTrue(c['status'].startswith('EXPIRED '), c['status'])
+            self.assertEqual(c['serial'], '4D')
+            c, _ = cj('h_list.crl')
+            self.assertEqual((c['type'], c['issuer'], c['revokedCertificates'], c['thisUpdate']), ('Certificate revocation list', 'CN=Old CA', '2', '2024-01-01 00:00:00 UTC'))
+        except ImportError:
+            pass
+        # the preview itself: a tree
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_cert.pem)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json')
+        self.assertEqual(head['kind'], 'json')
+        self.assertGreaterEqual(int(extra['json']['nodes']), 14)
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_DOWN)                                                           # b_ec.crt
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'json' and o[0].get('want', '').endswith('b_ec.crt'))
+        self.assertEqual(head['kind'], 'json')
+        for _ in range(len([n for n in os.listdir(d) if n < 'p_text.pem' and n > 'b_ec.crt' and not n.startswith('.')])):
+            ctl.tap(self.K_DOWN)
+        ctl.tap(self.K_DOWN)                                                           # p_text.pem: no certificate in it: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text' and o[0].get('want', '').endswith('p_text.pem'))
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

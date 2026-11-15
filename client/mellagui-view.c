@@ -14,7 +14,7 @@
  * of a video (and its info line to stdout) for the file manager's preview.
  *
  * Keys (images): Left/Right (PgUp/PgDn, Backspace/Space) previous / next, Home/End first / last, + - zoom, 0 or 1 = 100 %,
- * F = fit, R = rescan the directory, Esc or Q = quit. Mouse: wheel zooms around the pointer, drag pans, double click
+ * F = fit, I = the picture's EXIF data (camera, exposure, time, place) over the corner, R = rescan the directory, Esc or Q = quit. Mouse: wheel zooms around the pointer, drag pans, double click
  * toggles fit / 100 %.
  */
 #include <dirent.h>
@@ -34,6 +34,7 @@
 #include "ffpipe.h"
 #include "h264dec.h"
 #include "img.h"
+#include "../src/exif.h"
 #include "../src/svg.h"
 #include "keymap.h"
 #include "loop.h"
@@ -60,6 +61,9 @@
 
 struct app {
     struct wlwin win;
+    char exif[8][200];                  /* the lines of the picture's EXIF data */
+    int nexif;
+    bool show_info;                     /* I: show them */
     char dir[PATH_MAX];
     char **names;
     int n, cur;
@@ -718,6 +722,7 @@ static void load_current(struct app *a)
     a->playing = false;
     a->vframe = 0;
     a->pos_ms = 0;
+    a->nexif = 0;
     if (a->n) {
         char path[PATH_MAX + 300];
         snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[a->cur]);
@@ -817,6 +822,10 @@ static void load_current(struct app *a)
             }
         } else if (lm_img_load(path, &a->img, a->err, sizeof(a->err)) < 0) {
             a->img.px = NULL;
+        } else {
+            struct lm_exif ex;
+            if (lm_exif_read_file(path, &ex))
+                a->nexif = lm_exif_lines(&ex, a->exif, 8);
         }
     }
     a->fit = true;
@@ -1014,6 +1023,16 @@ static void paint(struct wlwin *w)
                 memcpy(dst + oxp + x0, srcp + (size_t)y * (size_t)stridep + (size_t)x0, (size_t)(x1 - x0) * 4);
             }
         }
+        if (a->show_info && a->nexif && !a->vmode) {                      /* the EXIF lines in a dark box over the corner */
+            int bw = 0;
+            for (int i = 0; i < a->nexif; i++)
+                bw = LM_MAX(bw, lm_font_text_width(a->exif[i]));
+            bw = LM_MIN(bw + 24, vw - 16);
+            int bh = a->nexif * (LM_FONT_H + 2) + 16;
+            wlwin_round_fill(w, 8, 8, bw, bh, 10, lm_theme.ink);
+            for (int i = 0; i < a->nexif; i++)
+                wlwin_text(w, 20, 16 + i * (LM_FONT_H + 2), a->exif[i], 1, lm_theme.text_bright, bw - 24);
+        }
         if (a->vmode) {
             char t1[16], t2[16];
             fmt_time(t1, sizeof(t1), video_pos(a));
@@ -1032,8 +1051,8 @@ static void paint(struct wlwin *w)
                      a->vmode == 2 ? a->th : a->img.h, t1, t2, a->playing ? "playing" : "paused",
                      sndtxt, (int)(zs * 100 + 0.5), a->cur + 1, a->n);
         } else {
-            snprintf(status, sizeof(status), "%s   %dx%d   %d%%%s   %d/%d", a->names[a->cur], a->img.w, a->img.h,
-                     (int)(z * 100 + 0.5), a->fit ? " (fit)" : "", a->cur + 1, a->n);
+            snprintf(status, sizeof(status), "%s   %dx%d   %d%%%s   %d/%d%s", a->names[a->cur], a->img.w, a->img.h,
+                     (int)(z * 100 + 0.5), a->fit ? " (fit)" : "", a->cur + 1, a->n, a->nexif ? "   I: EXIF data" : "");
         }
     } else if (a->n) {
         snprintf(status, sizeof(status), "%s: %s   %d/%d", a->names[a->cur], a->err, a->cur + 1, a->n);
@@ -1175,6 +1194,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     }
     if (ks == LM_KS_Escape || c == 'q' || c == 'Q') {
         w->running = false;
+    } else if (!a->vmode && (c == 'i' || c == 'I')) {
+        a->show_info = !a->show_info;
+        w->redraw = true;
     } else if (a->vmode && c == ' ') {
         video_toggle(a);
     } else if (a->vmode && a->has_audio && (c == '[' || c == ']')) {      /* the sound comes earlier / later: 50 ms a step */

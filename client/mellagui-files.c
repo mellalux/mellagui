@@ -66,6 +66,7 @@
 #include "certread.h"
 #include "elfread.h"
 #include "dataread.h"
+#include "../src/exif.h"
 #include "fontread.h"
 #include "pdfread.h"
 #include "initree.h"
@@ -176,6 +177,8 @@ struct preview {
     int top;                            /* first visible line (PV_MARKDOWN: pixels scrolled down) */
     struct md_doc *md;                  /* PV_MARKDOWN: the page */
     struct ffaudio_info ai;             /* PV_AUDIO: what the file says (its picture is `img`) */
+    char exif[8][200];                  /* PV_IMAGE: the lines of the picture's EXIF data (camera, exposure, time, place) shown under it */
+    int nexif;
     struct lm_image img;                /* PV_IMAGE: the decoded picture ... */
     uint32_t *scaled;                   /* ... and a copy that fits the pane (rebuilt when the pane size changes) */
     int sw, sh;                         /* its size in the buffer's own pixels, made for the buffer scale scale_k */
@@ -2126,6 +2129,7 @@ static void preview_clear(struct preview *pv)
     pv->lang = NULL;
     pv->tcols = pv->trows = 0;
     pv->imgrows = 0;
+    pv->nexif = 0;
     pv->left = 0;
     json_free(pv->jroot);
     pv->jroot = NULL;
@@ -3345,6 +3349,9 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         }
         pv->kind = PV_IMAGE;
         snprintf(pv->info, sizeof(pv->info), "%s, %dx%d", sz, pv->img.w, pv->img.h);
+        struct lm_exif ex;
+        if (lm_exif_read_file(path, &ex))
+            pv->nexif = lm_exif_lines(&ex, pv->exif, 8);
         return;
     }
     if (ffaudio_name_is_audio(path)) {                                   /* a sound file: its picture and tags, and a way to play it (paint_audio) */
@@ -6013,13 +6020,16 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
     }
     if (pv->kind == PV_IMAGE || pv->kind == PV_VIDEO) {
         int k = wlwin_scale(w);                                              /* the picture is made for the buffer's own pixels */
-        int aw = pw - 16, ah = body_h - 16 - (pv->kind == PV_VIDEO ? LM_FONT_H + 6 : 0);
+        int exif_h = pv->kind == PV_IMAGE && pv->nexif ? pv->nexif * (LM_FONT_H + 1) + 10 : 0;       /* the EXIF lines under the picture */
+        int aw = pw - 16, ah = body_h - 16 - exif_h - (pv->kind == PV_VIDEO ? LM_FONT_H + 6 : 0);
         if (!pv->scaled || pv->sw > aw * k || pv->sh > ah * k || (pv->sw < aw * k && pv->sh < ah * k && pv->sw < pv->img.w * 8) || pv->scale_k != k)
             preview_scale(pv, aw * k, ah * k, k);
         if (pv->scaled) {
             int lw = (pv->sw + k - 1) / k, lh = (pv->sh + k - 1) / k;         /* its logical size */
-            int ox = x0 + (pw - lw) / 2, oy = list_y + (body_h - lh) / 2;
+            int ox = x0 + (pw - lw) / 2, oy = list_y + (body_h - exif_h - lh) / 2;
             wlwin_blit_px(w, ox, oy, pv->scaled, pv->sw, pv->sh, pv->sw, x0, list_y, pw, body_h);
+            for (int i = 0; i < pv->nexif; i++)
+                wlwin_text(w, x0 + 8, list_y + body_h - exif_h + 4 + i * (LM_FONT_H + 1), pv->exif[i], 1, COL_DIM, pw - 16);
             if (pv->kind == PV_VIDEO) {                                          /* a play mark on the picture and a hint under it */
                 int cx = ox + lw / 2, cy = oy + lh / 2, r = LM_CLAMP(LM_MIN(lw, lh) / 7, 10, 28);
                 wlwin_round_fill(w, cx - r, cy - r, 2 * r, 2 * r, r, 0x202020);
@@ -7443,6 +7453,16 @@ int main(int argc, char **argv)
         for (int i = 0; i < al.n; i++)
             printf("%s\t%lld\t%s\n", al.name[i], al.size[i], al.mtime[i]);
         arc_free(&al);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--exif")) {                       /* the EXIF lines the preview shows for a picture (tests) */
+        struct lm_exif ex;
+        if (!lm_exif_read_file(argv[2], &ex))
+            return 1;
+        char el[12][200];
+        int en = lm_exif_lines(&ex, el, 12);
+        for (int i = 0; i < en; i++)
+            puts(el[i]);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

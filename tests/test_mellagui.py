@@ -4244,6 +4244,58 @@ class TestClients(Base):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith('/' + name) and o[0].get('loaded') == '1')
             self.assertEqual(head['kind'], kind, (name, head))
 
+    def test_exif_data_is_read_shown_under_the_preview_and_over_the_viewers_picture(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow makes the test pictures')
+        d = tempfile.mkdtemp(prefix='exif-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        from PIL.TiffImagePlugin import IFDRational as R
+        exif = Image.Exif()
+        exif[0x010F], exif[0x0110], exif[0x0131], exif[0x013B], exif[0x8298], exif[0x010E] = 'Canon', 'Canon EOS R5', 'Firmware 1.2', 'Mella', '(c) 2023', 'A harbour'
+        exif[0x8769] = {0x829A: R(1, 250), 0x829D: R(28, 10), 0x8827: 200, 0x9003: '2023:03:14 12:30:05', 0x920A: R(85, 1), 0xA405: 135, 0xA434: 'RF85mm F2', 0x9209: 1}
+        exif[0x8825] = {1: 'N', 2: (R(59, 1), R(26, 1), R(1500, 100)), 3: 'W', 4: (R(24, 1), R(44, 1), R(3000, 100)), 5: 0, 6: R(120, 1)}
+        for name, fmt in (('a.jpg', 'JPEG'), ('b.png', 'PNG'), ('c.webp', 'WEBP')):
+            Image.new('RGB', (40, 30), (200, 100, 50)).save(os.path.join(d, name), fmt, exif=exif)
+            r = subprocess.run([exe, '--exif', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, name + r.stderr)
+            lines = r.stdout.splitlines()
+            self.assertEqual(lines[0], 'Camera: Canon EOS R5', name)                                              # (the make is not said twice)
+            self.assertEqual(lines[1], 'Lens: RF85mm F2')
+            self.assertEqual(lines[2], 'Exposure: 1/250 s  f/2.8  ISO 200  85 mm (135 mm in 35 mm)  flash')
+            self.assertEqual(lines[3], 'Taken: 2023-03-14 12:30:05')
+            self.assertEqual(lines[4], 'Place: 59.43750\u00b0 N, 24.74167\u00b0 W  120 m')
+            self.assertIn('About: A harbour', lines)
+            self.assertIn('By: Mella  (c) 2023', lines)
+        Image.new('RGB', (10, 10)).save(os.path.join(d, 'none.jpg'), 'JPEG')
+        self.assertEqual(subprocess.run([exe, '--exif', os.path.join(d, 'none.jpg')], capture_output=True).returncode, 1)
+        open(os.path.join(d, 'cut.jpg'), 'wb').write(open(os.path.join(d, 'a.jpg'), 'rb').read()[:60])
+        self.assertIn(subprocess.run([exe, '--exif', os.path.join(d, 'cut.jpg')], capture_output=True).returncode, (0, 1))
+        # the viewer: I puts the lines in a dark box over the corner
+        viewer = os.path.join(ROOT, 'build', 'mellagui-view')
+        if not os.path.exists(viewer):
+            self.skipTest('mellagui-view not built')
+        p = subprocess.Popen([viewer, os.path.join(d, 'a.jpg')], env=dict(os.environ, MELLAGUI_FONT='bitmap'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.view')
+        self.assertIsNotNone(win, 'the viewer did not appear')
+        time.sleep(0.5)
+        before = ctl.dump(os.path.join(tmp, 'exif-a.ppm'))
+        ctl.tap(23)                                                                                               # I
+        time.sleep(0.4)
+        after = ctl.dump(os.path.join(tmp, 'exif-b.ppm'))
+        x, y = win['x'] + 14, win['y'] + 14
+        self.assertNotEqual(before.px(x, y), after.px(x, y), 'the box with the EXIF lines should cover the corner')
+        self.assertEqual(after.px(x, y), (0x0b, 0x0d, 0x12))
+        ctl.tap(23)
+        time.sleep(0.3)
+        again = ctl.dump(os.path.join(tmp, 'exif-c.ppm'))
+        self.assertEqual(again.px(x, y), before.px(x, y), 'I again takes it away')
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib

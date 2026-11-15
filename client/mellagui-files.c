@@ -65,6 +65,7 @@
 #include "initree.h"
 #include "json.h"
 #include "parquet.h"
+#include "zstddec.h"
 #include "sqliteread.h"
 #include "syntax.h"
 #include "tomltree.h"
@@ -6503,10 +6504,19 @@ static int selftest(void)
         static const unsigned char sn[] = { 12, 0x0c, 'a', 'b', 'c', 'd', 0x11, 0x04 };
         unsigned char o[16] = { 0 };
         CHECK(pq_snappy(sn, sizeof(sn), o, sizeof(o)) == 12 && !memcmp(o, "abcdabcdabcd", 12), "snappy copy: '%.12s'", o);
-        static const unsigned char bad[] = { 12, 0x0c, 'a', 'b', 'c', 'd', 0x11, 0x09 };       /* an offset beyond what is there */
-        CHECK(pq_snappy(bad, sizeof(bad), o, sizeof(o)) < 0, "snappy: a copy from before the start is refused");
+        static const unsigned char beyond[] = { 12, 0x0c, 'a', 'b', 'c', 'd', 0x11, 0x09 };       /* an offset beyond what is there */
+        CHECK(pq_snappy(beyond, sizeof(beyond), o, sizeof(o)) < 0, "snappy: a copy from before the start is refused");
     }
-    touch(dir, "notpq.parquet", "PAR1 just text that only starts like one", 41);
+    {   /* a zstd frame made by the zstd program: a raw literal section, one sequence with predefined tables */
+        static const unsigned char zf[] = { 0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x1d, 0x8d, 0x00, 0x00, 0x58, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c,
+                                            0x64, 0x01, 0x00, 0xf1, 0x4a, 0x11, 0xd7, 0x5f, 0x93, 0xd4 };
+        unsigned char o[64] = { 0 };
+        CHECK(lm_zstd_decompress(zf, sizeof(zf), o, sizeof(o)) == 29 && !memcmp(o, "hello hello hello hello world", 29), "zstd frame: '%.29s'", o);
+        unsigned char cut[sizeof(zf) - 6];
+        memcpy(cut, zf, sizeof(cut));
+        CHECK(lm_zstd_decompress(cut, sizeof(cut), o, sizeof(o)) < 0, "zstd: a cut frame is refused");
+    }
+    touch(dir, "notpq.parquet", "PAR1 just text that only starts like one", 40);
     snprintf(p, sizeof(p), "%s/notpq.parquet", dir);
     preview_load(&pv, p, false);
     CHECK(pv.kind == PV_TEXT, "a text that starts with PAR1 is not a Parquet file (%d)", pv.kind);

@@ -1,7 +1,9 @@
 #include "parquet.h"
 
 #include "../src/img.h"
+#include "zstddec.h"
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -122,10 +124,10 @@ static void tr_skip(struct tr *t, int ty, int depth)
 /* ---- the file's metadata ---- */
 
 enum { T_BOOL, T_I32, T_I64, T_I96, T_FLOAT, T_DOUBLE, T_BYTES, T_FIXED };
-enum { L_NONE, L_STRING, L_DATE, L_TS_MS, L_TS_US, L_TS_NS };
+enum { L_NONE, L_STRING, L_DATE, L_TS_MS, L_TS_US, L_TS_NS, L_DECIMAL, L_TIME_MS, L_TIME_US, L_TIME_NS, L_UUID };
 
 struct se {                             /* a schema element */
-    int type, tlen, rep, nchild, conv, logical;
+    int type, tlen, rep, nchild, conv, logical, scale, precision;
     char name[96];
 };
 
@@ -141,7 +143,7 @@ struct rg {
 };
 
 struct leaf {
-    int se, max_def, max_rep;
+    int se, max_def, max_rep, rdef;
     char name[160];
 };
 
@@ -149,8 +151,31 @@ static void parse_logical(struct tr *t, struct se *s)
 {
     int last = 0, id, ty;
     while (tr_field(t, &last, &id, &ty)) {
-        if (id == 1) s->logical = L_STRING;
-        else if (id == 6) s->logical = L_DATE;
+        if (id == 1 || id == 6 || id == 13) {                           /* STRING, DATE, UUID: empty structs, still to be stepped over */
+            s->logical = id == 1 ? L_STRING : id == 6 ? L_DATE : L_UUID;
+            tr_skip(t, ty, 0);
+        } else if (id == 5 && ty == 12) {                                 /* DECIMAL { scale, precision } */
+            s->logical = L_DECIMAL;
+            int l2 = 0, i2, t2;
+            while (tr_field(t, &l2, &i2, &t2)) {
+                if (i2 == 1) s->scale = (int)tr_zz(t);
+                else if (i2 == 2) s->precision = (int)tr_zz(t);
+                else tr_skip(t, t2, 0);
+            }
+        } else if (id == 7 && ty == 12) {                               /* TIME { isAdjustedToUTC, unit } */
+            int l2 = 0, i2, t2;
+            while (tr_field(t, &l2, &i2, &t2)) {
+                if (i2 == 2 && t2 == 12) {
+                    int l3 = 0, i3, t3;
+                    while (tr_field(t, &l3, &i3, &t3)) {
+                        s->logical = i3 == 1 ? L_TIME_MS : i3 == 2 ? L_TIME_US : L_TIME_NS;
+                        tr_skip(t, t3, 0);
+                    }
+                } else {
+                    tr_skip(t, t2, 0);
+                }
+            }
+        }
         else if (id == 8 && ty == 12) {                                 /* TIMESTAMP { isAdjustedToUTC, unit } */
             int l2 = 0, i2, t2;
             while (tr_field(t, &l2, &i2, &t2)) {
@@ -181,6 +206,8 @@ static void parse_schema_el(struct tr *t, struct se *s)
         case 4: { size_t n; const uint8_t *b = tr_bin(t, &n); if (b) snprintf(s->name, sizeof(s->name), "%.*s", (int)(n < sizeof(s->name) - 1 ? n : sizeof(s->name) - 1), b); break; }
         case 5: s->nchild = (int)tr_zz(t); break;
         case 6: s->conv = (int)tr_zz(t); break;
+        case 7: s->scale = (int)tr_zz(t); break;
+        case 8: s->precision = (int)tr_zz(t); break;
         case 10: if (ty == 12) parse_logical(t, s); else tr_skip(t, ty, 0); break;
         default: tr_skip(t, ty, 0);
         }
@@ -281,6 +308,81 @@ long pq_snappy(const unsigned char *in, size_t inlen, unsigned char *out, size_t
     return o == want ? (long)o : -1;
 }
 
+/* ---- LZ4 and Brotli ---- */
+
+/* An LZ4 block into out (at most `cap` bytes); the number of bytes made, -1 on damage. */
+static long lz4_block(const uint8_t *in, size_t inlen, uint8_t *out, size_t cap)
+{
+    const uint8_t *p = in, *e = in + inlen;
+    size_t o = 0;
+    while (p < e) {
+        unsigned tok = *p++;
+        size_t ll = tok >> 4;
+        if (ll == 15) {
+            unsigned b;
+            do { if (p >= e) return -1; b = *p++; ll += b; } while (b == 255 && ll < (1u << 30));
+        }
+        if (ll > (size_t)(e - p) || o + ll > cap) return -1;
+        memcpy(out + o, p, ll);
+        p += ll;
+        o += ll;
+        if (p >= e) break;                                              /* the last sequence has literals only */
+        if (e - p < 2) return -1;
+        size_t off = p[0] | ((size_t)p[1] << 8);
+        p += 2;
+        size_t ml = tok & 15;
+        if (ml == 15) {
+            unsigned b;
+            do { if (p >= e) return -1; b = *p++; ml += b; } while (b == 255 && ml < (1u << 30));
+        }
+        ml += 4;
+        if (off == 0 || off > o || o + ml > cap) return -1;
+        for (size_t k = 0; k < ml; k++, o++)
+            out[o] = out[o - off];
+    }
+    return (long)o;
+}
+
+/* Parquet's old "LZ4" codec is Hadoop's: blocks of [raw size BE][compressed size BE][data]; some writers wrote a plain block instead. */
+static bool lz4_hadoop(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen)
+{
+    size_t o = 0, i = 0;
+    while (o < outlen) {
+        if (inlen - i < 8) return false;
+        uint32_t raw = (uint32_t)in[i] << 24 | (uint32_t)in[i + 1] << 16 | (uint32_t)in[i + 2] << 8 | in[i + 3];
+        i += 4;
+        size_t made = 0;
+        while (made < raw) {
+            if (inlen - i < 4) return false;
+            uint32_t cs = (uint32_t)in[i] << 24 | (uint32_t)in[i + 1] << 16 | (uint32_t)in[i + 2] << 8 | in[i + 3];
+            i += 4;
+            if (cs > inlen - i || raw - made > outlen - o) return false;
+            long r = lz4_block(in + i, cs, out + o + made, raw - made);
+            if (r < 0) return false;
+            made += (size_t)r;
+            i += cs;
+        }
+        o += raw;
+    }
+    return o == outlen;
+}
+
+/* Brotli needs a 122 KB dictionary that is not worth carrying here: the system's libbrotlidec is used when it is there. */
+static bool brotli_decompress(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen)
+{
+    typedef int (*fn_t)(size_t, const uint8_t *, size_t *, uint8_t *);
+    static fn_t fn;
+    static bool tried;
+    if (!tried) {
+        tried = true;
+        void *h = dlopen("libbrotlidec.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (h) fn = (fn_t)dlsym(h, "BrotliDecoderDecompress");
+    }
+    if (!fn) return false;
+    size_t n = outlen;
+    return fn(inlen, in, &n, out) == 1 && n == outlen;
+}
+
 /* A page body made whole: `out` of exactly `outlen` bytes. */
 static uint8_t *decompress(int codec, const uint8_t *in, size_t inlen, size_t outlen)
 {
@@ -304,6 +406,22 @@ static uint8_t *decompress(int codec, const uint8_t *in, size_t inlen, size_t ou
         if (flg & 16) { while (i < inlen && in[i]) i++; i++; }
         if (flg & 2) i += 2;
         if (i >= inlen || lm_inflate_raw(in + i, inlen - i, out, outlen) < 0) { free(out); return NULL; }
+        return out;
+    }
+    if (codec == 6) {                                                   /* zstd */
+        if (lm_zstd_decompress(in, inlen, out, outlen) != (long)outlen) { free(out); return NULL; }
+        return out;
+    }
+    if (codec == 7) {                                                   /* a plain LZ4 block */
+        if (lz4_block(in, inlen, out, outlen) != (long)outlen) { free(out); return NULL; }
+        return out;
+    }
+    if (codec == 5) {
+        if (!lz4_hadoop(in, inlen, out, outlen) && lz4_block(in, inlen, out, outlen) != (long)outlen) { free(out); return NULL; }
+        return out;
+    }
+    if (codec == 4) {
+        if (!brotli_decompress(in, inlen, out, outlen)) { free(out); return NULL; }
         return out;
     }
     free(out);
@@ -371,6 +489,82 @@ static char *fmt_text(const uint8_t *p, size_t n, bool as_text)
     return s;
 }
 
+/* A number with `scale` digits after the decimal point. */
+static char *fmt_decimal(__int128 v, int scale)
+{
+    char d[64];
+    int n = 0;
+    bool neg = v < 0;
+    unsigned __int128 u = neg ? (unsigned __int128)0 - (unsigned __int128)v : (unsigned __int128)v;
+    do { d[n++] = (char)('0' + (int)(u % 10)); u /= 10; } while (u && n < 60);
+    if (scale < 0) scale = 0;
+    while (n <= scale && n < 60) d[n++] = '0';
+    char b[96];
+    size_t o = 0;
+    if (neg) b[o++] = '-';
+    for (int i = n - 1; i >= 0; i--) {
+        b[o++] = d[i];
+        if (i == scale && scale > 0) b[o++] = '.';
+    }
+    b[o] = 0;
+    return strdup(b);
+}
+
+static char *fmt_time(int64_t v, int unit)                              /* unit: 3 millis, 6 micros, 9 nanos */
+{
+    int64_t per = unit == 3 ? 1000 : unit == 6 ? 1000000 : 1000000000, sec = v / per, frac = v % per;
+    char b[48];
+    int n = snprintf(b, sizeof(b), "%02d:%02d:%02d", (int)(sec / 3600 % 100), (int)(sec % 3600 / 60), (int)(sec % 60));
+    if (frac) snprintf(b + n, sizeof(b) - (size_t)n, ".%0*lld", unit, (long long)frac);
+    return strdup(b);
+}
+
+/* An integer column's value (INT32 / INT64, also what the delta encodings give). */
+static char *fmt_int(const struct se *s, int type, int64_t v)
+{
+    char b[64];
+    if (type == T_I32) {
+        if (s->logical == L_DATE || s->conv == 6) return fmt_date((int32_t)v);
+        if (s->logical == L_DECIMAL || s->conv == 5) return fmt_decimal((int32_t)v, s->scale);
+        if (s->logical == L_TIME_MS || s->conv == 7) return fmt_time((int32_t)v, 3);
+        if (s->conv >= 11 && s->conv <= 13) snprintf(b, sizeof(b), "%u", (uint32_t)v);
+        else snprintf(b, sizeof(b), "%d", (int32_t)v);
+        return strdup(b);
+    }
+    if (s->logical == L_TS_MS || s->conv == 9) return fmt_ts(v >= 0 ? v / 1000 : -((-v + 999) / 1000), ((v % 1000) + 1000) % 1000, 3);
+    if (s->logical == L_TS_US || s->conv == 10) return fmt_ts(v >= 0 ? v / 1000000 : -((-v + 999999) / 1000000), ((v % 1000000) + 1000000) % 1000000, 6);
+    if (s->logical == L_TS_NS) return fmt_ts(v >= 0 ? v / 1000000000 : -((-v + 999999999) / 1000000000), ((v % 1000000000) + 1000000000) % 1000000000, 9);
+    if (s->logical == L_DECIMAL || s->conv == 5) return fmt_decimal(v, s->scale);
+    if (s->logical == L_TIME_US || s->conv == 8) return fmt_time(v, 6);
+    if (s->logical == L_TIME_NS) return fmt_time(v, 9);
+    if (s->conv == 14) snprintf(b, sizeof(b), "%llu", (unsigned long long)v);
+    else snprintf(b, sizeof(b), "%lld", (long long)v);
+    return strdup(b);
+}
+
+/* BYTE_ARRAY / FIXED_LEN_BYTE_ARRAY bytes: a big endian decimal, a UUID, text, or hex. */
+static char *fmt_bytes(const struct se *s, int type, const uint8_t *p, size_t n)
+{
+    if ((s->logical == L_DECIMAL || s->conv == 5) && n >= 1 && n <= 16) {
+        __int128 v = (int8_t)p[0] < 0 ? -1 : 0;                         /* two's complement, sign extended */
+        for (size_t i = 0; i < n; i++)
+            v = (__int128)((unsigned __int128)v << 8 | p[i]);
+        return fmt_decimal(v, s->scale);
+    }
+    if (s->logical == L_UUID && n == 16) {
+        char b[40];
+        snprintf(b, sizeof(b), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9],
+                 p[10], p[11], p[12], p[13], p[14], p[15]);
+        return strdup(b);
+    }
+    if (type == T_BYTES)
+        return fmt_text(p, n, s->logical == L_STRING || s->conv == 0 || s->conv == 4 || s->conv == 19);
+    char hex[2 * 24 + 8];
+    size_t k = n < 24 ? n : 24, o = 0;
+    for (size_t i = 0; i < k; i++) o += (size_t)snprintf(hex + o, sizeof(hex) - o, "%02x", p[i]);
+    return strdup(hex);
+}
+
 /* One PLAIN value of the column's type at p (len bytes left): the text, and how many bytes it took (0: the data is short). */
 static char *plain_value(const struct se *s, int type, const uint8_t *p, size_t len, size_t *used)
 {
@@ -380,21 +574,11 @@ static char *plain_value(const struct se *s, int type, const uint8_t *p, size_t 
     case T_I32:
         if (len < 4) return NULL;
         *used = 4;
-        if (s->logical == L_DATE || s->conv == 6) return fmt_date((int32_t)le32(p));
-        if (s->conv >= 11 && s->conv <= 13) snprintf(b, sizeof(b), "%u", le32(p));
-        else snprintf(b, sizeof(b), "%d", (int32_t)le32(p));
-        return strdup(b);
-    case T_I64: {
+        return fmt_int(s, type, (int32_t)le32(p));
+    case T_I64:
         if (len < 8) return NULL;
         *used = 8;
-        int64_t v = (int64_t)le64(p);
-        if (s->logical == L_TS_MS || s->conv == 9) return fmt_ts(v >= 0 ? v / 1000 : -((-v + 999) / 1000), ((v % 1000) + 1000) % 1000, 3);
-        if (s->logical == L_TS_US || s->conv == 10) return fmt_ts(v >= 0 ? v / 1000000 : -((-v + 999999) / 1000000), ((v % 1000000) + 1000000) % 1000000, 6);
-        if (s->logical == L_TS_NS) return fmt_ts(v >= 0 ? v / 1000000000 : -((-v + 999999999) / 1000000000), ((v % 1000000000) + 1000000000) % 1000000000, 9);
-        if (s->conv == 14) snprintf(b, sizeof(b), "%llu", (unsigned long long)v);
-        else snprintf(b, sizeof(b), "%lld", (long long)v);
-        return strdup(b);
-    }
+        return fmt_int(s, type, (int64_t)le64(p));
     case T_I96: {                                                       /* nanoseconds in the day, the Julian day */
         if (len < 12) return NULL;
         *used = 12;
@@ -424,16 +608,13 @@ static char *plain_value(const struct se *s, int type, const uint8_t *p, size_t 
         uint32_t n = le32(p);
         if (n > len - 4) return NULL;
         *used = 4 + (size_t)n;
-        return fmt_text(p + 4, n, s->logical == L_STRING || s->conv == 0 || s->conv == 4 || s->conv == 19);
+        return fmt_bytes(s, type, p + 4, n);
     }
     case T_FIXED: {
         size_t n = (size_t)s->tlen;
         if (n == 0 || n > len) return NULL;
         *used = n;
-        char hex[2 * 24 + 8];
-        size_t k = n < 24 ? n : 24, o = 0;
-        for (size_t i = 0; i < k; i++) o += (size_t)snprintf(hex + o, sizeof(hex) - o, "%02x", p[i]);
-        return strdup(hex);
+        return fmt_bytes(s, type, p, n);
     }
     default: return NULL;
     }
@@ -503,6 +684,10 @@ struct cc {
     size_t ndict;
     char **out;                         /* the cells of this column for the rows wanted */
     int need, filled;
+    char *acc;                          /* a list column: the row being put together */
+    size_t acc_n, acc_cap;
+    int acc_items;
+    bool acc_open, acc_cut;
     char err[120];
 };
 
@@ -514,28 +699,114 @@ static uint8_t *read_at(int fd, long long off, size_t n)
     return b;
 }
 
+/* DELTA_BINARY_PACKED: the integers into out (at most `count` are kept); the bytes used, -1 on damage. */
+static long delta_bp(const uint8_t *p, size_t len, size_t count, int64_t *out)
+{
+    struct tr t = { p, p + len, false };
+    uint64_t block = tr_varint(&t), mini = tr_varint(&t), total = tr_varint(&t);
+    int64_t cur = tr_zz(&t);
+    if (t.bad || mini == 0 || mini > 64 || block == 0 || block % mini || (block / mini) % 8 || block > (1u << 20) || total < count || total > (1u << 28))
+        return -1;
+    size_t per = (size_t)(block / mini), n = 0;
+    if (count) out[n++] = cur;
+    uint64_t done = 0, want = total ? total - 1 : 0;                    /* the deltas after the first value */
+    while (done < want) {
+        int64_t md = tr_zz(&t);
+        if (t.bad || (size_t)(t.e - t.p) < mini) return -1;
+        const uint8_t *bw = t.p;
+        t.p += mini;
+        for (uint64_t m = 0; m < mini && done < want; m++) {
+            int w = bw[m];
+            if (w > 64) return -1;
+            size_t bytes = per * (size_t)w / 8;
+            if (bytes > (size_t)(t.e - t.p)) return -1;
+            size_t take = (uint64_t)per < want - done ? per : (size_t)(want - done);
+            for (size_t k = 0; k < take; k++) {
+                uint64_t v = 0;
+                for (int b = 0; b < w; b++) {
+                    size_t bit = k * (size_t)w + (size_t)b;
+                    v |= (uint64_t)((t.p[bit >> 3] >> (bit & 7)) & 1) << b;
+                }
+                cur = (int64_t)((uint64_t)cur + (uint64_t)md + v);
+                if (n < count) out[n++] = cur;
+            }
+            done += take;
+            t.p += bytes;
+        }
+    }
+    return (long)(t.p - p);
+}
+
+/* The cells of a list column's row: "[a, b, c]", cut when it gets long. */
+static void acc_begin(struct cc *c)
+{
+    c->acc_n = 0;
+    c->acc_open = true;
+    c->acc_cut = false;
+    c->acc_items = 0;
+}
+
+static void acc_add(struct cc *c, const char *text)
+{
+    if (c->acc_cut) return;
+    size_t tl = strlen(text);
+    if (c->acc_n + tl + 4 > 400) {
+        c->acc_cut = true;
+        tl = 0;
+    }
+    if (c->acc_n + tl + 8 > c->acc_cap) {
+        c->acc_cap = (c->acc_n + tl + 8) * 2;
+        c->acc = realloc(c->acc, c->acc_cap);
+    }
+    if (!c->acc) return;
+    if (c->acc_items++) { memcpy(c->acc + c->acc_n, ", ", 2); c->acc_n += 2; }
+    if (c->acc_cut) { memcpy(c->acc + c->acc_n, "...", 3); c->acc_n += 3; return; }
+    memcpy(c->acc + c->acc_n, text, tl);
+    c->acc_n += tl;
+}
+
+static void acc_finish(struct cc *c)
+{
+    if (!c->acc_open) return;
+    c->acc_open = false;
+    if (c->filled >= c->need) return;
+    char *r = malloc(c->acc_n + 3);
+    if (!r) return;
+    r[0] = '[';
+    if (c->acc_n) memcpy(r + 1, c->acc, c->acc_n);
+    r[1 + c->acc_n] = ']';
+    r[2 + c->acc_n] = 0;
+    c->out[c->filled++] = r;
+}
+
 /* The values of one data page into the column's cells. */
 static bool data_page(struct cc *c, const uint8_t *body, size_t blen, int nvals, int enc, bool v2, long rep_len, long def_len)
 {
     const struct leaf *L = c->lf;
     const uint8_t *p = body, *e = body + blen;
-    uint32_t *def = NULL;
+    uint32_t *def = NULL, *rep = NULL;
     bool ok = false;
     char **vals = NULL;
     size_t nn = 0;
     if (nvals < 0 || nvals > (1 << 26)) return false;
-    if (!v2) {
-        if (L->max_rep > 0) {
-            if (e - p < 4) return false;
+    def = calloc((size_t)nvals + 1, sizeof(uint32_t));
+    rep = calloc((size_t)nvals + 1, sizeof(uint32_t));
+    if (!def || !rep) goto done;
+    if (L->max_rep > 0) {                                               /* where the rows begin */
+        if (!v2) {
+            if (e - p < 4) goto done;
             size_t l = le32(p);
-            if (l > (size_t)(e - p - 4)) return false;
+            if (l > (size_t)(e - p - 4)) goto done;
+            if (rle_hybrid(p + 4, l, bits_for(L->max_rep), (size_t)nvals, rep) < 0) goto done;
             p += 4 + l;
+        } else {
+            if (rep_len < 0 || rep_len > e - p) goto done;
+            if (rle_hybrid(p, (size_t)rep_len, bits_for(L->max_rep), (size_t)nvals, rep) < 0) goto done;
+            p += rep_len;
         }
-    } else {
+    } else if (v2) {
         p += rep_len;
     }
-    def = calloc((size_t)nvals + 1, sizeof(uint32_t));
-    if (!def) return false;
     if (L->max_def > 0) {
         if (!v2) {
             if (e - p < 4) goto done;
@@ -555,6 +826,7 @@ static bool data_page(struct cc *c, const uint8_t *body, size_t blen, int nvals,
     size_t left = (size_t)(e - p);
     vals = calloc(nn ? nn : 1, sizeof(char *));
     if (!vals) goto done;
+    int ty = c->ch->type;
     if (enc == 2 || enc == 8) {                                         /* dictionary indices */
         if (!c->dict || left < 1) goto done;
         int bw = *p++;
@@ -566,20 +838,20 @@ static bool data_page(struct cc *c, const uint8_t *body, size_t blen, int nvals,
             vals[i] = idx[i] < c->ndict && c->dict[idx[i]] ? strdup(c->dict[idx[i]]) : strdup("?");
         free(idx);
     } else if (enc == 0) {                                              /* PLAIN */
-        if (c->ch->type == T_BOOL) {
+        if (ty == T_BOOL) {
             if (nn / 8 > left + 1) goto done;
             for (size_t i = 0; i < nn; i++)
                 vals[i] = strdup(((p[i / 8] >> (i % 8)) & 1) ? "true" : "false");
         } else {
             for (size_t i = 0; i < nn; i++) {
                 size_t used;
-                vals[i] = plain_value(c->se, c->ch->type, p, left, &used);
+                vals[i] = plain_value(c->se, ty, p, left, &used);
                 if (!vals[i]) goto done;
                 p += used;
                 left -= used;
             }
         }
-    } else if (enc == 3 && c->ch->type == T_BOOL) {                     /* RLE booleans: a length, then the hybrid */
+    } else if (enc == 3 && ty == T_BOOL) {                              /* RLE booleans: a length, then the hybrid */
         if (left < 4) goto done;
         size_t l = le32(p);
         if (l > left - 4) goto done;
@@ -588,20 +860,81 @@ static bool data_page(struct cc *c, const uint8_t *body, size_t blen, int nvals,
         if (rle_hybrid(p + 4, l, 1, nn, bv) < 0) { free(bv); goto done; }
         for (size_t i = 0; i < nn; i++) vals[i] = strdup(bv[i] ? "true" : "false");
         free(bv);
+    } else if (enc == 5 && (ty == T_I32 || ty == T_I64)) {              /* DELTA_BINARY_PACKED */
+        int64_t *iv = malloc((nn ? nn : 1) * sizeof(int64_t));
+        if (!iv) goto done;
+        if (delta_bp(p, left, nn, iv) < 0) { free(iv); goto done; }
+        for (size_t i = 0; i < nn; i++) vals[i] = fmt_int(c->se, ty, iv[i]);
+        free(iv);
+    } else if ((enc == 6 || enc == 7) && (ty == T_BYTES || ty == T_FIXED)) {   /* DELTA_LENGTH_BYTE_ARRAY / DELTA_BYTE_ARRAY */
+        int64_t *pre = calloc(nn ? nn : 1, sizeof(int64_t)), *len = calloc(nn ? nn : 1, sizeof(int64_t));
+        char *prev = NULL;
+        size_t prev_n = 0;
+        bool okd = pre && len;
+        if (okd && enc == 7) {
+            long u = delta_bp(p, left, nn, pre);
+            if (u < 0) okd = false; else { p += u; left -= (size_t)u; }
+        }
+        if (okd) {
+            long u = delta_bp(p, left, nn, len);
+            if (u < 0) okd = false; else { p += u; left -= (size_t)u; }
+        }
+        for (size_t i = 0; okd && i < nn; i++) {
+            if (len[i] < 0 || (uint64_t)len[i] > left || pre[i] < 0 || (size_t)pre[i] > prev_n || (size_t)len[i] + (size_t)pre[i] > (1u << 20)) { okd = false; break; }
+            size_t tot = (size_t)pre[i] + (size_t)len[i];
+            char *cur = malloc(tot ? tot : 1);
+            if (!cur) { okd = false; break; }
+            if (pre[i]) memcpy(cur, prev, (size_t)pre[i]);
+            memcpy(cur + pre[i], p, (size_t)len[i]);
+            p += len[i];
+            left -= (size_t)len[i];
+            vals[i] = fmt_bytes(c->se, ty, (const uint8_t *)cur, tot);
+            free(prev);
+            prev = cur;
+            prev_n = tot;
+        }
+        free(prev);
+        free(pre);
+        free(len);
+        if (!okd) goto done;
+    } else if (enc == 9 && ty != T_BOOL && ty != T_BYTES) {             /* BYTE_STREAM_SPLIT */
+        size_t w = ty == T_I32 || ty == T_FLOAT ? 4 : ty == T_I64 || ty == T_DOUBLE ? 8 : ty == T_I96 ? 12 : (size_t)c->se->tlen;
+        if (w == 0 || w > 64 || nn * w > left) goto done;
+        for (size_t i = 0; i < nn; i++) {
+            uint8_t item[64];
+            for (size_t k = 0; k < w; k++) item[k] = p[k * nn + i];
+            size_t used;
+            vals[i] = plain_value(c->se, ty, item, w, &used);
+            if (!vals[i]) goto done;
+        }
     } else {
         snprintf(c->err, sizeof(c->err), "an encoding (%d) that is not read", enc);
         goto done;
     }
     size_t k = 0;
-    for (int i = 0; i < nvals && c->filled < c->need; i++) {
-        bool present = L->max_def == 0 || def[i] == (uint32_t)L->max_def;
-        c->out[c->filled++] = present ? vals[k++] : strdup("");
-        if (present) vals[k - 1] = NULL;
+    if (L->max_rep == 0) {
+        for (int i = 0; i < nvals && c->filled < c->need; i++) {
+            bool present = L->max_def == 0 || def[i] == (uint32_t)L->max_def;
+            c->out[c->filled++] = present ? vals[k++] : strdup("");
+            if (present) vals[k - 1] = NULL;
+        }
+    } else {                                                            /* lists: a new row starts where the repetition level is 0 */
+        for (int i = 0; i < nvals; i++) {
+            if (rep[i] == 0 || !c->acc_open) {
+                acc_finish(c);
+                if (c->filled >= c->need) break;
+                acc_begin(c);
+            }
+            bool present = L->max_def == 0 || def[i] == (uint32_t)L->max_def;
+            if (present) acc_add(c, vals[k++]);
+            else if (def[i] >= (uint32_t)L->rdef) acc_add(c, "null");     /* an element that is null (below this level the list is empty or null) */
+        }
     }
     ok = true;
 done:
     if (vals) free_strs(vals, nn);
     free(def);
+    free(rep);
     return ok;
 }
 
@@ -609,9 +942,8 @@ done:
 static const char *read_chunk(struct cc *c)
 {
     const struct chunk *ch = c->ch;
-    if (ch->codec != 0 && ch->codec != 1 && ch->codec != 2) {
-        static const char *const names[] = { "", "", "", "LZO", "Brotli", "LZ4", "ZSTD", "LZ4" };
-        snprintf(c->err, sizeof(c->err), "compressed with %s: not read", ch->codec >= 0 && ch->codec < 8 ? names[ch->codec] : "an unknown codec");
+    if (ch->codec < 0 || ch->codec > 7 || ch->codec == 3) {
+        snprintf(c->err, sizeof(c->err), "compressed with %s: not read", ch->codec == 3 ? "LZO" : "an unknown codec");
         return c->err;
     }
     long long off = ch->dict_off > 0 && ch->dict_off < ch->data_off ? ch->dict_off : ch->data_off;
@@ -709,12 +1041,13 @@ static const char *read_chunk(struct cc *c)
             free(raw);                                                  /* an index page: nothing */
         }
     }
+    acc_finish(c);                                                      /* the last row of a list column */
     return NULL;
 }
 
 /* ---- the whole file ---- */
 
-static int walk(const struct se *s, int n, int i, int def, int rep, const char *path, struct leaf *lv, int *nl)
+static int walk(const struct se *s, int n, int i, int def, int rep, int rdef, const char *path, struct leaf *lv, int *nl)
 {
     if (i >= n) return n;
     const struct se *e = &s[i];
@@ -723,16 +1056,16 @@ static int walk(const struct se *s, int n, int i, int def, int rep, const char *
     else snprintf(p, sizeof(p), "%s%s%s", path, path[0] ? "." : "", e->name);
     if (i > 0) {
         if (e->rep == 1) def++;
-        else if (e->rep == 2) { def++; rep++; }
+        else if (e->rep == 2) { def++; rep++; if (!rdef) rdef = def; }
     }
     if (e->nchild > 0) {
         int j = i + 1;
         for (int k = 0; k < e->nchild && j < n; k++)
-            j = walk(s, n, j, def, rep, p, lv, nl);
+            j = walk(s, n, j, def, rep, rdef, p, lv, nl);
         return j;
     }
     if (*nl < MAX_COLS) {
-        lv[*nl] = (struct leaf){ i, def, rep, "" };
+        lv[*nl] = (struct leaf){ i, def, rep, rdef, "" };
         snprintf(lv[*nl].name, sizeof(lv[*nl].name), "%s", p);
         (*nl)++;
     }
@@ -796,7 +1129,7 @@ int pq_read(const char *path, int max_rows, struct pq_table *t, char *err, size_
             } else tr_skip(&tr, ty, 0);
         }
         if (tr.bad || nschema < 2) { snprintf(err, errn, "the metadata of the file is damaged"); goto out; }
-        walk(schema, nschema, 0, 0, 0, "", leaves, &nl);
+        walk(schema, nschema, 0, 0, 0, 0, "", leaves, &nl);
         t->total_rows = total;
         t->row_groups = rg_n;
         t->ncols = nl;
@@ -814,15 +1147,12 @@ int pq_read(const char *path, int max_rows, struct pq_table *t, char *err, size_
             const char *why = NULL;
             for (int c = 0; c < nl && !why; c++) {
                 cols[c] = calloc((size_t)take, sizeof(char *));
-                if (leaves[c].max_rep > 0) {                            /* a list or a map: not unfolded */
-                    for (int r = 0; r < take; r++) cols[c][r] = strdup("<list>");
-                    continue;
-                }
-                struct cc cc = { fd, fsz, &rgs->col[c], &schema[leaves[c].se], &leaves[c], NULL, 0, cols[c], take, 0, "" };
+                struct cc cc = { .fd = fd, .fsize = fsz, .ch = &rgs->col[c], .se = &schema[leaves[c].se], .lf = &leaves[c], .out = cols[c], .need = take };
                 why = read_chunk(&cc);
                 if (!why && cc.filled < take) why = "fewer values than rows";
                 if (why) snprintf(err, errn, "column %s: %s", leaves[c].name, why);
                 if (cc.dict) free_strs(cc.dict, cc.ndict);
+                free(cc.acc);
             }
             if (why) {
                 for (int c = 0; c < nl; c++) if (cols[c]) free_strs(cols[c], (size_t)take);

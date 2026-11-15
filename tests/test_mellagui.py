@@ -106,6 +106,15 @@ def alive():
     return proc.poll() is None
 
 
+def _lib_present(name):
+    import ctypes
+    try:
+        ctypes.CDLL(name)
+        return True
+    except OSError:
+        return False
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.clients = []
@@ -3025,6 +3034,7 @@ class TestClients(Base):
 
     def test_files_previews_parquet_files_as_tables(self):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+        import ctypes
         import parquet_writer as w
         d = tempfile.mkdtemp(prefix='files-pq-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -3034,22 +3044,50 @@ class TestClients(Base):
                     'score': [None if i % 5 == 2 else i / 4 for i in range(n0, n0 + n)], 'day': [19000 + i for i in range(n0, n0 + n)],
                     'ts': [1700000000000 + i * 1001 for i in range(n0, n0 + n)]}
         groups = [group(0, 5), group(5, 4)]
-        w.write(os.path.join(d, 'a_plain.parquet'), cols, groups)
-        w.write(os.path.join(d, 'b_snappy_dict.parquet'), cols, groups, codec=1, dictionary=('name',))
-        w.write(os.path.join(d, 'c_gzip_v2.parquet'), cols, groups, codec=2, v2=True, dictionary=('name', 'score'))
-        w.write(os.path.join(d, 'd_zstd.parquet'), cols, groups, codec=6)
+        want = []                                                       # (file, columns, rows, text the first data row must have)
+        first = ['Ada', '2022-01-08', '2023-11-14_22:13:20.000']
+        def add(name, codec=0, **kw):
+            if not w.have_codec(codec):
+                return
+            w.write(os.path.join(d, name + '.parquet'), cols, groups, codec=codec, **kw)
+            want.append((name, '5', '9', first))
+        add('a_plain')
+        add('b_snappy_dict', codec=1, dictionary=('name',))
+        add('c_gzip_v2', codec=2, v2=True, dictionary=('name', 'score'))
+        add('d_zstd', codec=6)                                           # a real zstd frame (libzstd made it): our own decoder reads it
+        add('e_zstd_v2_dict', codec=6, v2=True, dictionary=('name',))
+        add('f_lz4_raw', codec=7)
+        add('g_lz4_hadoop', codec=5)
+        if _lib_present('libbrotlidec.so.1'):
+            add('h_brotli', codec=4)                                     # the system's libbrotlidec, when there is one
+        wide = [('id', w.I32, False, None), ('name', w.BYTES, True, 0), ('score', w.DOUBLE, True, None), ('big', w.I64, True, None)]
+        rows = {'id': [i * 3 - 7 for i in range(60)], 'name': [None if i % 4 == 3 else ['Ada', 'Adam', 'Adelaide', 'Bob'][i % 4] + str(i) for i in range(60)],
+                'score': [None if i % 5 == 2 else i / 4 for i in range(60)], 'big': [None if i % 3 else 2 ** 40 + i * i for i in range(60)]}
+        w.write(os.path.join(d, 'i_delta_bss.parquet'), wide, [rows], encodings={'id': 'delta', 'big': 'delta', 'name': 'dlba', 'score': 'bss'})
+        want.append(('i_delta_bss', '4', '60', ['-7', 'Ada0', '1099511627776']))
+        w.write(os.path.join(d, 'j_delta_byte_array.parquet'), wide, [rows], v2=True, encodings={'id': 'delta', 'name': 'dba'})
+        want.append(('j_delta_byte_array', '4', '60', ['-7', 'Ada0']))
+        lc = [('id', w.I32, False, None), ('tags', w.BYTES, True, 0, {'list': True}), ('nums', w.I32, True, None, {'list': True}),
+              ('price', w.I32, False, 5, {'scale': 2, 'precision': 9}), ('dec', w.FIXED, False, 5, {'scale': 3, 'precision': 20, 'tlen': 8}),
+              ('t', w.I64, False, 8), ('uid', w.FIXED, False, None, {'tlen': 16, 'uuid': True})]
+        n = 5
+        lrows = {'id': list(range(n)), 'tags': [['a%d' % i, 'b'] * (i % 3 + 1) for i in range(n)], 'nums': [[1, None, 3] if i % 2 else [i] for i in range(n)],
+                 'price': [12345 - i * 10000 for i in range(n)], 'dec': [(1234567 - i * 2000000).to_bytes(8, 'big', signed=True) for i in range(n)],
+                 't': [(3600 * 13 + 60 * 5 + 7) * 1000000 + i for i in range(n)], 'uid': [bytes(range(i, i + 16)) for i in range(n)]}
+        w.write(os.path.join(d, 'k_lists_decimals.parquet'), lc, [lrows])
+        want.append(('k_lists_decimals', '7', '5', ['[a0,_b]', '[0]', '123.45', '1234.567', '13:05:07', '00010203-0405-0607-08']))
+        w.write(os.path.join(d, 'l_unknown_codec.parquet'), cols, groups, codec=3)           # LZO: said, not guessed
         dump = os.path.join(d, 'files.dump')
-        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_plain.parquet)
-        for k in range(3):
-            head, extra = self.files_dump(dump, want=lambda o, k=k: o[0].get('kind') == 'table' and o[0].get('want', '').endswith(('a_plain', 'b_snappy_dict', 'c_gzip_v2')[k] + '.parquet'))
-            self.assertEqual(head['kind'], 'table', 'file %d' % k)
-            self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('5', '9'), 'file %d: the two row groups come together' % k)
-            self.assertIn('Ada', extra['row1']['v'], 'file %d' % k)
-            self.assertIn('2022-01-08', extra['row1']['v'], 'file %d: a date' % k)
-            self.assertIn('2023-11-14_22:13:20.000', extra['row1']['v'], 'file %d: a timestamp' % k)
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on the first file)
+        for k, (name, ncols, nrows, cells) in enumerate(want):
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('kind') == 'table' and o[0].get('want', '').endswith(name + '.parquet'))
+            self.assertEqual(head['kind'], 'table', name)
+            self.assertEqual((extra['table']['cols'], extra['table']['rows']), (ncols, nrows), 'file ' + name)
+            for c in cells:
+                self.assertIn(c, extra['row1']['v'], '%s: %s' % (name, c))
             ctl.tap(self.K_DOWN)
-        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('d_zstd.parquet'))
-        self.assertEqual(head['kind'], 'error')                                        # a codec this reader does not have: said, not guessed
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('l_unknown_codec.parquet'))
+        self.assertEqual(head['kind'], 'error')
 
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)

@@ -3863,6 +3863,111 @@ class TestClients(Base):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith(name) and o[0].get('loaded') == '1')
             self.assertEqual(head['kind'], 'text' if name == 'h_text.bin' else 'json', name)
 
+    def test_files_previews_plists_torrents_notebooks_and_epub_books(self):
+        import datetime
+        import hashlib
+        import json
+        import plistlib
+        import zipfile
+        d = tempfile.mkdtemp(prefix='files-data-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        def run(path, flag='--data-json'):
+            r = subprocess.run([exe, flag, path], capture_output=True, text=True, timeout=30)
+            return r.returncode, r.stdout, r.stderr.strip()
+        # a binary property list, compared with Python's plistlib
+        v = {'name': 'Tere ööbik', 'n': -5, 'big': 2 ** 40, 'pi': 3.25, 'yes': True, 'when': datetime.datetime(2020, 2, 29, 12, 30, 5), 'blob': b'\x01\x02\x03',
+             'list': [1, 'a', [2, 3], {'k': 'v'}], 'emoji': 'x \U0001F600 y', 'empty': {}}
+        pp = os.path.join(d, 'a.plist')
+        open(pp, 'wb').write(plistlib.dumps(v, fmt=plistlib.FMT_BINARY))
+        rc, out, line = run(pp)
+        self.assertEqual(rc, 0, line)
+        j = json.loads(out)
+        self.assertEqual((j['name'], j['n'], j['big'], j['pi'], j['yes'], j['when'], j['list'], j['emoji'], j['empty']),
+                         ('Tere ööbik', -5, 2 ** 40, 3.25, True, '2020-02-29 12:30:05 UTC', [1, 'a', [2, 3], {'k': 'v'}], 'x \U0001F600 y', {}))
+        self.assertTrue(j['blob'].startswith('<data, 3 bytes: 01 02 03'))
+        self.assertIn('Binary property list', line)
+        open(os.path.join(d, 'b.plist'), 'wb').write(b'bplist00' + bytes(100))
+        self.assertEqual(run(os.path.join(d, 'b.plist'))[0], 1)
+        # a torrent file: the info hash is the SHA-1 of the bencoded info dictionary
+        def be(x):
+            if isinstance(x, int):
+                return b'i%de' % x
+            if isinstance(x, bytes):
+                return b'%d:' % len(x) + x
+            if isinstance(x, str):
+                return be(x.encode())
+            if isinstance(x, list):
+                return b'l' + b''.join(map(be, x)) + b'e'
+            return b'd' + b''.join(be(k) + be(x[k]) for k in sorted(x, key=lambda k: k.encode())) + b'e'
+        info = {'name': 'Näide', 'piece length': 262144, 'pieces': bytes(60), 'files': [{'length': 1000, 'path': ['a', 'x.bin']}, {'length': 2 ** 31, 'path': ['y.bin']}], 'private': 1}
+        top = {'announce': 'http://t.example/a?x=1', 'announce-list': [['http://t.example/a?x=1'], ['udp://u.example:80']], 'created by': 'test', 'creation date': 1700000000, 'info': info}
+        tp = os.path.join(d, 'c.torrent')
+        open(tp, 'wb').write(be(top))
+        rc, out, line = run(tp)
+        self.assertEqual(rc, 0, line)
+        j = json.loads(out)
+        h = hashlib.sha1(be(info)).hexdigest()
+        self.assertEqual((j['name'], j['info hash'], j['files'], j['private'], j['trackers'], j['created']), ('Näide', h, 2, 'yes', ['http://t.example/a?x=1', 'udp://u.example:80'], '2023-11-14 22:13:20 UTC'))
+        self.assertIn('urn:btih:' + h, j['magnet link'])
+        self.assertTrue(j['size'].startswith('2.0 GiB'), j['size'])
+        self.assertEqual(j['file list'][0], 'a/x.bin  (1000 B)')
+        open(os.path.join(d, 'd.torrent'), 'wb').write(b'd4:spami1ee')
+        self.assertEqual(run(os.path.join(d, 'd.torrent'))[0], 1)
+        # a Jupyter notebook: a Markdown page of the cells
+        nb = {'nbformat': 4, 'nbformat_minor': 5, 'metadata': {'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'}},
+              'cells': [{'cell_type': 'markdown', 'metadata': {}, 'source': ['# Title\n', 'some *text*']},
+                        {'cell_type': 'code', 'metadata': {}, 'execution_count': 1, 'source': 'print("hi")\n1+1',
+                         'outputs': [{'output_type': 'stream', 'name': 'stdout', 'text': ['hi\n']}, {'output_type': 'execute_result', 'execution_count': 1, 'metadata': {}, 'data': {'text/plain': '2', 'image/png': 'AAAA'}},
+                                     {'output_type': 'error', 'ename': 'ValueError', 'evalue': 'bad', 'traceback': ['\x1b[0;31mValueError\x1b[0m']}]}]}
+        npth = os.path.join(d, 'e.ipynb')
+        open(npth, 'w').write(json.dumps(nb))
+        rc, out, line = run(npth)
+        self.assertEqual(rc, 0, line)
+        self.assertIn('# Title\nsome *text*', out)
+        self.assertIn('```python\nprint("hi")\n1+1\n```', out)
+        self.assertIn('```text\nhi\n```', out)
+        self.assertIn('```text\n2\n```', out)
+        self.assertIn('ValueError: bad', out)
+        self.assertIn('Python 3, 2 cells, 1 code', line)
+        open(os.path.join(d, 'f.ipynb'), 'w').write('{"not": "a notebook"}')
+        self.assertEqual(run(os.path.join(d, 'f.ipynb'))[0], 1)
+        # an EPUB book: the spine's chapters in reading order
+        ep = os.path.join(d, 'g.epub')
+        with zipfile.ZipFile(ep, 'w') as z:
+            z.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+            z.writestr('META-INF/container.xml', '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+            z.writestr('OEBPS/content.opf', '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Raamat</dc:title><dc:creator>Autor A</dc:creator></metadata>'
+                       '<manifest><item id="c2" href="text/two%20b.xhtml" media-type="application/xhtml+xml"/><item id="c1" href="text/one.xhtml" media-type="application/xhtml+xml"/><item id="css" href="s.css" media-type="text/css"/></manifest>'
+                       '<spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>')
+            z.writestr('OEBPS/text/one.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>x</title><style>p{}</style></head><body><h1>Peatükk 1</h1><p>Esimene <b>paks</b> ja <i>kaldu</i> lõik.</p>'
+                       '<ul><li>punkt üks</li><li>punkt kaks</li></ul><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table></body></html>')
+            z.writestr('OEBPS/text/two b.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body><h2>Peatükk 2</h2><p>Teine&#160;lõik &amp; veel.</p><script>var x=1;</script></body></html>')
+        rc, out, line = run(ep, '--document-md')
+        self.assertEqual(rc, 0, line)
+        self.assertLess(out.index('Peatükk 1'), out.index('Peatükk 2'))
+        for want in ('# Peatükk 1', 'Esimene **paks** ja *kaldu* lõik.', '- punkt üks', '| A | B |', '| 1 | 2 |', '## Peatükk 2', '& veel.'):
+            self.assertIn(want, out)
+        self.assertNotIn('var x', out)
+        self.assertIn('EPUB book, Raamat - Autor A, 2 chapters', line)
+        # in the pane: a torrent shows as a tree and a notebook as a page
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_HOME)
+        time.sleep(0.3)
+        for name, kind in (('a.plist', 'json'), ('c.torrent', 'json'), ('e.ipynb', 'markdown'), ('g.epub', 'markdown')):
+            for _ in range(40):
+                head, extra = self.files_dump(dump)
+                if head.get('want', '').endswith(name):
+                    break
+                ctl.tap(self.K_DOWN)
+                time.sleep(0.3)
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith(name) and o[0].get('loaded') == '1')
+            self.assertEqual(head['kind'], kind, (name, head))
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib

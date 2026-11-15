@@ -3,6 +3,7 @@
 #include "../src/img.h"
 #include "parquet.h"
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <math.h>
 #include <stdbool.h>
@@ -3992,6 +3993,225 @@ static int cmp_slide(const void *a, const void *b)
     return slide_num(*(char *const *)a) - slide_num(*(char *const *)b);
 }
 
+/* ---- EPUB: the spine's XHTML files in reading order ---- */
+static bool ci_name(const struct xev *e, const char *n)
+{
+    return is(e, n);
+}
+
+static void epub_convert(struct docb *db, const char *buf, size_t len)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf tx = { 0 }, tmp = { 0 }, a = { 0 };
+    tx.limit = 1u << 20;
+    tmp.limit = 1u << 20;
+    int skip = 0, bold = 0, ital = 0, ldepth = 0, heading = 0, in_li = 0;
+    bool last_space = true;
+    bool ordered[16] = { false };
+    while (!db->full && xml_next(&x, &e) != XE_END) {
+        bool open = e.kind == XE_OPEN || e.kind == XE_SELF;
+        if (e.kind == XE_TEXT) {
+            if (skip)
+                continue;
+            xb_reset(&tmp);
+            xb_add_xml(&tmp, e.text, e.tlen);
+            xb_reset(&tx);
+            for (size_t i = 0; i < tmp.n; i++) {
+                char c = tmp.s[i];
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                    if (!last_space)
+                        xb_add(&tx, " ", 1);
+                    last_space = true;
+                } else {
+                    xb_add(&tx, &c, 1);
+                    last_space = false;
+                }
+            }
+            db_run(db, xb_str(&tx), tx.n, bold > 0, ital > 0);
+            continue;
+        }
+        if (ci_name(&e, "head") || ci_name(&e, "script") || ci_name(&e, "style") || ci_name(&e, "svg") || ci_name(&e, "math")) {
+            if (e.kind == XE_OPEN)
+                skip++;
+            else if (e.kind == XE_CLOSE && skip)
+                skip--;
+            continue;
+        }
+        if (skip)
+            continue;
+        int hl = e.nlen == 2 && (e.name[0] == 'h' || e.name[0] == 'H') && e.name[1] >= '1' && e.name[1] <= '6' ? e.name[1] - '0' : 0;
+        bool list_tag = ci_name(&e, "ul") || ci_name(&e, "ol");
+        bool block = hl || list_tag || ci_name(&e, "p") || ci_name(&e, "div") || ci_name(&e, "li") || ci_name(&e, "blockquote") || ci_name(&e, "pre")
+                     || ci_name(&e, "section") || ci_name(&e, "article") || ci_name(&e, "aside") || ci_name(&e, "header") || ci_name(&e, "footer")
+                     || ci_name(&e, "figure") || ci_name(&e, "figcaption") || ci_name(&e, "dt") || ci_name(&e, "dd") || ci_name(&e, "dl");
+        if (block) {                                                    /* every block tag ends the paragraph before it */
+            if (db->nruns)
+                db_para(db, heading, in_li && ldepth > 0 ? ldepth - 1 : -1, ldepth > 0 && !ordered[ldepth - 1 < 15 ? ldepth - 1 : 15]);
+            last_space = true;
+            if (hl) {
+                heading = e.kind == XE_OPEN ? hl : 0;
+            } else if (list_tag) {
+                if (e.kind == XE_OPEN && ldepth < 15)
+                    ordered[ldepth++] = ci_name(&e, "ol");
+                else if (e.kind == XE_CLOSE && ldepth > 0)
+                    ldepth--;
+            } else if (ci_name(&e, "li")) {
+                in_li = e.kind == XE_OPEN ? 1 : 0;
+            }
+            continue;
+        }
+        if (ci_name(&e, "b") || ci_name(&e, "strong")) {
+            if (e.kind == XE_OPEN) bold++; else if (e.kind == XE_CLOSE && bold) bold--;
+        } else if (ci_name(&e, "i") || ci_name(&e, "em") || ci_name(&e, "cite") || ci_name(&e, "var")) {
+            if (e.kind == XE_OPEN) ital++; else if (e.kind == XE_CLOSE && ital) ital--;
+        } else if (ci_name(&e, "br") && open) {
+            db_run(db, " ", 1, false, false);
+            last_space = true;
+        } else if (ci_name(&e, "hr") && open) {
+            if (db->nruns)
+                db_para(db, heading, -1, true);
+            db_outs(db, "\n---\n");
+        } else if (ci_name(&e, "img") && open) {
+            if (xattr(&e, "alt", &a) && a.n) {
+                xb_reset(&tx);
+                xb_add(&tx, "[", 1);
+                xb_add(&tx, xb_str(&a), a.n);
+                xb_add(&tx, "]", 1);
+                db_run(db, xb_str(&tx), tx.n, false, false);
+                last_space = false;
+            }
+        } else if (ci_name(&e, "table")) {
+            if (db->nruns)
+                db_para(db, heading, -1, true);
+            if (e.kind == XE_OPEN) db_table_begin(db); else if (e.kind == XE_CLOSE) db_table_end(db);
+            last_space = true;
+        } else if (ci_name(&e, "tr")) {
+            if (db->nruns)
+                db_para(db, heading, -1, true);
+            if (e.kind == XE_OPEN) db_row_begin(db); else if (e.kind == XE_CLOSE) db_row_end(db);
+            last_space = true;
+        } else if (ci_name(&e, "td") || ci_name(&e, "th")) {
+            if (db->nruns)
+                db_para(db, heading, -1, true);
+            if (e.kind == XE_OPEN) db_cell_begin(db);
+            else if (e.kind == XE_CLOSE) db_cell_end(db);
+            else if (e.kind == XE_SELF && db->tdepth == 1) { db_cell_begin(db); db_cell_end(db); }
+            last_space = true;
+        }
+    }
+    if (db->nruns)
+        db_para(db, heading, -1, true);
+    free(tx.s);
+    free(tmp.s);
+    free(a.s);
+}
+
+static void url_decode(char *s)
+{
+    char *w = s;
+    for (const char *r = s; *r; r++) {
+        if (*r == '%' && isxdigit((unsigned char)r[1]) && isxdigit((unsigned char)r[2])) {
+            char t[3] = { r[1], r[2], 0 };
+            *w++ = (char)strtol(t, NULL, 16);
+            r += 2;
+        } else if (*r == '#') {
+            break;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = 0;
+}
+
+/* The chapters of an EPUB in reading order; returns 0 and fills the title / author, or -1 when it is no EPUB. */
+static int epub_convert_book(const struct zip *z, struct docb *db, char *title, size_t tn, char *author, size_t an, int *chapters, const char **why)
+{
+    size_t len;
+    char *cx = zip_read(z, "META-INF/container.xml", PART_SMALL, &len, why);
+    if (!cx)
+        return -1;
+    char opf[512] = "";
+    {
+        struct xml x = { cx, cx + len };
+        struct xev e;
+        struct xbuf a = { 0 };
+        while (xml_next(&x, &e) != XE_END)
+            if (is(&e, "rootfile") && (e.kind == XE_OPEN || e.kind == XE_SELF) && xattr(&e, "full-path", &a)) {
+                snprintf(opf, sizeof(opf), "%s", xb_str(&a));
+                break;
+            }
+        free(a.s);
+    }
+    free(cx);
+    if (!opf[0])
+        return -1;
+    char *ox = zip_read(z, opf, PART_SMALL, &len, why);
+    if (!ox)
+        return -1;
+    char dir[512] = "";
+    {
+        char *sl = strrchr(opf, '/');
+        if (sl)
+            snprintf(dir, sizeof(dir), "%.*s", (int)(sl - opf + 1), opf);
+    }
+    struct item { char id[96]; char href[400]; char type[64]; } *items = calloc(2000, sizeof(struct item));
+    int nitems = 0;
+    char **spine = calloc(1000, sizeof(char *));
+    int nspine = 0;
+    struct xml x = { ox, ox + len };
+    struct xev e;
+    struct xbuf a = { 0 }, t = { 0 };
+    bool in_title = false, in_author = false;
+    title[0] = author[0] = 0;
+    while (xml_next(&x, &e) != XE_END) {
+        if (e.kind == XE_TEXT) {
+            if ((in_title && !title[0]) || (in_author && !author[0])) {
+                xb_reset(&t);
+                xb_add_xml(&t, e.text, e.tlen);
+                snprintf(in_title ? title : author, in_title ? tn : an, "%s", xb_str(&t));
+            }
+            continue;
+        }
+        if (is(&e, "title")) in_title = e.kind == XE_OPEN;
+        else if (is(&e, "creator")) in_author = e.kind == XE_OPEN;
+        else if (is(&e, "item") && (e.kind == XE_OPEN || e.kind == XE_SELF) && nitems < 2000) {
+            struct item *it = &items[nitems];
+            if (xattr(&e, "id", &a)) snprintf(it->id, sizeof(it->id), "%s", xb_str(&a));
+            if (xattr(&e, "href", &a)) snprintf(it->href, sizeof(it->href), "%s", xb_str(&a));
+            if (xattr(&e, "media-type", &a)) snprintf(it->type, sizeof(it->type), "%s", xb_str(&a));
+            nitems++;
+        } else if (is(&e, "itemref") && (e.kind == XE_OPEN || e.kind == XE_SELF) && nspine < 1000 && xattr(&e, "idref", &a))
+            spine[nspine++] = strdup(xb_str(&a));
+    }
+    free(ox);
+    int done = 0;
+    for (int i = 0; i < nspine && !db->full && done < 300; i++) {
+        for (int k = 0; k < nitems; k++) {
+            if (strcmp(items[k].id, spine[i]) || !strstr(items[k].type, "html"))
+                continue;
+            char name[1024];
+            snprintf(name, sizeof(name), "%s%s", dir, items[k].href);
+            url_decode(name);
+            char *hx = zip_read(z, name, PART_BIG, &len, why);
+            if (hx) {
+                epub_convert(db, hx, len);
+                free(hx);
+                done++;
+            }
+            break;
+        }
+    }
+    for (int i = 0; i < nspine; i++)
+        free(spine[i]);
+    free(spine);
+    free(items);
+    free(a.s);
+    free(t.s);
+    *chapters = done;
+    return 0;
+}
+
 /* 0 = the document as Markdown in *md (malloc'd, `info` says what it was); -1 = not a document of these kinds; -2 = one that cannot be read (err). */
 int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t infon, char *err, size_t errn)
 {
@@ -4006,6 +4226,8 @@ int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t i
     char *mt = zip_read(&z, "mimetype", 256, &len, &why);
     bool odt = mt && strstr(mt, "opendocument.text");
     bool odp = mt && strstr(mt, "opendocument.presentation");
+    bool mt_epub = mt && strstr(mt, "epub+zip");
+    char epubinfo[320] = "";
     free(mt);
     const char *what = NULL;
     if (zip_find(&z, "word/document.xml")) {
@@ -4061,6 +4283,17 @@ int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t i
         }
         free(names);
         result = 0;
+    } else if (zip_find(&z, "META-INF/container.xml") && mt_epub) {
+        char title[200], author[120];
+        int ch = 0;
+        what = "EPUB book";
+        if (epub_convert_book(&z, &db, title, sizeof(title), author, sizeof(author), &ch, &why) < 0) {
+            seterr(err, errn, why ? why : "An EPUB whose reading order cannot be found.");
+            result = -2;
+            goto done;
+        }
+        snprintf(epubinfo, sizeof(epubinfo), "EPUB book%s%.80s%s%.60s, %d chapter%s", title[0] ? ", " : "", title, author[0] ? " - " : "", author, ch, ch == 1 ? "" : "s");
+        result = 0;
     } else if ((odt || odp) && zip_find(&z, "content.xml")) {
         what = odp ? "Presentation" : "Text document";
         char *cx = zip_read(&z, "content.xml", PART_BIG, &len, &why);
@@ -4079,7 +4312,9 @@ int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t i
         *md = db.out.s ? db.out.s : strdup("");
         *mdlen = db.out.n;
         db.out.s = NULL;
-        if (db.slides)
+        if (epubinfo[0])
+            snprintf(info, infon, "%s", epubinfo);
+        else if (db.slides)
             snprintf(info, infon, "%s, %d slide%s", what, db.slides, db.slides == 1 ? "" : "s");
         else
             snprintf(info, infon, "%s, %d paragraph%s, %d table%s", what, db.paragraphs, db.paragraphs == 1 ? "" : "s", db.tables, db.tables == 1 ? "" : "s");

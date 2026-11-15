@@ -65,6 +65,7 @@
 #include "archread.h"
 #include "certread.h"
 #include "elfread.h"
+#include "dataread.h"
 #include "fontread.h"
 #include "pdfread.h"
 #include "initree.h"
@@ -2725,7 +2726,7 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
 /* ---- a word processor document or a presentation: its text as a Markdown page ---- */
 static bool is_office_doc_path(const char *path)
 {
-    static const char *const exts[] = { "docx", "docm", "dotx", "dotm", "odt", "ott", "pptx", "pptm", "potx", "ppsx", "odp", "otp" };
+    static const char *const exts[] = { "docx", "docm", "dotx", "dotm", "odt", "ott", "pptx", "pptm", "potx", "ppsx", "odp", "otp", "epub" };
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
         if (ext_is(path, exts[i]))
             return true;
@@ -3090,6 +3091,42 @@ static bool pv_exe(struct preview *pv, const char *path)
     return ok;
 }
 
+/* ---- a binary property list, a torrent file, a Jupyter notebook ---- */
+static bool pv_data(struct preview *pv, const char *path, int what)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    enum { DATA_MAX = 16 << 20 };
+    unsigned char *buf = malloc(DATA_MAX + 1);
+    ssize_t n = buf ? read(fd, buf, DATA_MAX) : -1;
+    close(fd);
+    char info[200] = "";
+    bool ok = false;
+    if (n > 0 && what == 2) {
+        size_t ml = 0;
+        char *md = ipynb_markdown((const char *)buf, (size_t)n, &ml, info, sizeof(info));
+        if (md) {
+            pv->kind = PV_MARKDOWN;
+            pv->md = md_parse(md, ml);
+            pv->top = 0;
+            snprintf(pv->info, sizeof(pv->info), "%s", info);
+            free(md);
+            ok = true;
+        }
+    } else if (n > 0) {
+        char *js = what == 0 ? bplist_json(buf, (size_t)n, info, sizeof(info)) : torrent_json(buf, (size_t)n, info, sizeof(info));
+        if (js) {
+            ok = pv_json(pv, (const unsigned char *)js, strlen(js), FMT_JSON);
+            if (ok)
+                snprintf(pv->info, sizeof(pv->info), "%s", info);
+            free(js);
+        }
+    }
+    free(buf);
+    return ok;
+}
+
 /* ---- a font: a sample of text in the font itself, and what the file says about it ---- */
 static void pv_field(struct preview *pv, int *cap, const char *label, const char *text)
 {
@@ -3341,6 +3378,12 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         pv->kind = PV_JSON;                                              /* a certificate, a key ...: its facts as a tree */
     } else if (n >= 64 && ((!memcmp(buf, "\x7f" "ELF", 4)) || (buf[0] == 'M' && buf[1] == 'Z')) && pv_exe(pv, path)) {
         pv->kind = PV_JSON;                                              /* an ELF or PE file: its facts as a tree */
+    } else if (n >= 40 && !memcmp(buf, "bplist", 6) && pv_data(pv, path, 0)) {
+        pv->kind = PV_JSON;                                              /* a binary property list: as a tree */
+    } else if (ext_is(path, "torrent") && n >= 20 && buf[0] == 'd' && pv_data(pv, path, 1)) {
+        pv->kind = PV_JSON;                                              /* a torrent file: name, size, files, trackers, info hash */
+    } else if (ext_is(path, "ipynb") && pv_data(pv, path, 2)) {
+        /* a Jupyter notebook: the cells as a page */
     } else if ((ext_is(path, "ttf") || ext_is(path, "otf") || ext_is(path, "ttc") || ext_is(path, "woff") || ext_is(path, "woff2")) && (pv_font(pv, path), pv->kind == PV_FONT || pv->kind == PV_ERROR)) {
         /* a font: a sample in the font itself and its facts */
     } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
@@ -7295,6 +7338,25 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s\n", einfo);
         puts(ej);
         free(ej);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--data-json")) {                  /* a binary plist / torrent as JSON, a notebook as Markdown (tests) */
+        FILE *df = fopen(argv[2], "rb");
+        if (!df)
+            return 1;
+        size_t cap = 16u << 20, dn;
+        unsigned char *db = malloc(cap + 1);
+        dn = db ? fread(db, 1, cap, df) : 0;
+        fclose(df);
+        char dinfo[200] = "";
+        size_t ml = 0;
+        char *o = !db ? NULL : dn >= 6 && !memcmp(db, "bplist", 6) ? bplist_json(db, dn, dinfo, sizeof(dinfo)) : dn && db[0] == 'd' ? torrent_json(db, dn, dinfo, sizeof(dinfo)) : ipynb_markdown((char *)db, dn, &ml, dinfo, sizeof(dinfo));
+        free(db);
+        if (!o)
+            return 1;
+        fprintf(stderr, "%s\n", dinfo);
+        puts(o);
+        free(o);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

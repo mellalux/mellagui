@@ -3666,10 +3666,12 @@ class TestClients(Base):
         for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm'):
             im.save(os.path.join(d, name))
         open(os.path.join(d, 'e.pnm'), 'w').write('P2\n3 2\n15\n0 5 10\n15 10 5\n')
+        for name in ('g.webp', 'h.tif', 'i.tga'):
+            im.save(os.path.join(d, name))
         open(os.path.join(d, 'f.svg'), 'w').write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#c33"/></svg>')
         dump = os.path.join(d, 'files.dump')
         p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.bmp)
-        for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm', 'e.pnm', 'f.svg'):
+        for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm', 'e.pnm', 'f.svg', 'g.webp', 'h.tif', 'i.tga'):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('kind') == 'image' and o[0].get('want', '').endswith(name))
             self.assertEqual(head['kind'], 'image', name)
             ctl.abs(win['x'] + 700, win['y'] + 250)
@@ -10756,7 +10758,22 @@ class TestImages(unittest.TestCase):
                         b = io.BytesIO()
                         i2.save(b, 'TGA', compression='tga_rle' if rle else None, orientation=orient)
                         compare(b.getvalue(), 'g%dx%d_%s_%s_%d.tga' % (w, h, mode, rle, orient))
-        for bad in (b'GIF89a', b'GIF89a\x02\x00\x02\x00\x80\x00\x00', b'BM' + bytes(40), b'\x00\x00\x01\x00\x05\x00', b'P5\n9999999 9999999\n255\n', b'II*\x00\x08\x00\x00\x00' + bytes(30), b'MM\x00*\x00\x00\x00\x08\x00\x01' + bytes(20)):    # damaged: an error, no crash
+        for (w, h) in ((1, 1), (17, 9), (130, 47)):                                         # WebP: lossy (with and without alpha) and lossless
+            im = noise(w, h)
+            for mode in ('RGB', 'RGBA'):
+                i2 = im.convert(mode)
+                for q in (10, 80):
+                    b = io.BytesIO()
+                    i2.save(b, 'WEBP', quality=q, method=2)
+                    compare(b.getvalue(), 'w%dx%d_%s_q%d.webp' % (w, h, mode, q))
+                b = io.BytesIO()
+                i2.save(b, 'WEBP', lossless=True, exact=True)
+                compare(b.getvalue(), 'w%dx%d_%s_ll.webp' % (w, h, mode))
+        frames = [im.convert('RGBA'), im.convert('RGBA').rotate(90)]
+        b = io.BytesIO()
+        frames[0].save(b, 'WEBP', save_all=True, append_images=frames[1:], duration=50)                   # an animation: its first frame
+        compare(b.getvalue(), 'anim.webp')
+        for bad in (b'GIF89a', b'GIF89a\x02\x00\x02\x00\x80\x00\x00', b'BM' + bytes(40), b'\x00\x00\x01\x00\x05\x00', b'P5\n9999999 9999999\n255\n', b'II*\x00\x08\x00\x00\x00' + bytes(30), b'MM\x00*\x00\x00\x00\x08\x00\x01' + bytes(20), b'RIFF\x20\x00\x00\x00WEBPVP8 \x14\x00\x00\x00' + bytes(20), b'RIFF\x20\x00\x00\x00WEBPVP8L\x14\x00\x00\x00/' + bytes(19)):    # damaged: an error, no crash
             r, _ = self.decode(bad, 'x.bin')
             self.assertNotIn('Sanitizer', r.stderr)
             self.assertIn(r.returncode, (0, 1))

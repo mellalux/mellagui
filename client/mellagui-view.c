@@ -122,7 +122,7 @@ static bool is_audio_name(const char *n)
 static bool is_image_name(const char *n)
 {
     size_t l = strlen(n);
-    static const char *const exts[] = { ".png", ".ppm", ".pgm", ".pbm", ".pnm", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".cur", ".svg", ".tif", ".tiff", ".tga" };
+    static const char *const exts[] = { ".png", ".ppm", ".pgm", ".pbm", ".pnm", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".cur", ".svg", ".tif", ".tiff", ".tga", ".webp" };
     if (n[0] == '.' || l < 5)
         return false;
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {

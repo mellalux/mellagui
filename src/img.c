@@ -1,4 +1,5 @@
 #include "img.h"
+#include "webp.h"
 #include "svg.h"
 
 #include <stdbool.h>
@@ -1586,6 +1587,23 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
     }
     if (tga_plausible(data, len))
         return decode_tga(data, len, img, err, errsz);
+    if (lm_webp_sniff(data, len)) {
+        int ww = 0, wh = 0;
+        uint8_t *rgba = lm_webp_decode(data, len, &ww, &wh, err, errsz);
+        if (!rgba)
+            return -1;
+        if (!img_alloc(img, (uint32_t)ww, (uint32_t)wh, err, errsz)) {
+            free(rgba);
+            return -1;
+        }
+        for (int y = 0; y < wh; y++)
+            for (int x = 0; x < ww; x++) {
+                const uint8_t *p = rgba + ((size_t)y * ww + x) * 4;
+                img->px[(size_t)y * ww + x] = over_checker(x, y, p[0], p[1], p[2], p[3]);
+            }
+        free(rgba);
+        return 0;
+    }
     if (lm_svg_sniff(data, len)) {                                      /* SVG: drawn by svg.c (the checker shows through the transparent parts unless the alpha is kept) */
         int rc = lm_svg_render(data, len, img, err, errsz);
         if (rc == 0 && !g_keep_alpha)
@@ -1596,7 +1614,7 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
                 }
         return rc;
     }
-    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO, PNM, TIFF, TGA or SVG image");
+    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO, PNM, TIFF, TGA, WebP or SVG image");
     return -1;
 }
 

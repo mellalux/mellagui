@@ -590,18 +590,24 @@ void lm_mixer_toggle_stream_mute(struct lm_mixer *m, int index)
     queue_cmd(m, key, argv);
 }
 
-void lm_mixer_next_output(struct lm_mixer *m)
+void lm_mixer_set_output(struct lm_mixer *m, int index)
 {
     m->gen++;
     struct lm_mixer_state *st = &m->st;
-    if (st->backend != LM_MIXER_PULSE || st->nsinks < 2)
+    if (st->backend != LM_MIXER_PULSE || index < 0 || index >= st->nsinks || index == st->cur)
         return;
-    int next = (st->cur + 1) % st->nsinks;
-    st->cur = next;                                             /* shown at once; the refresh confirms it */
-    st->volume = st->sinks[next].volume;
-    st->mute = st->sinks[next].mute;
-    snprintf(st->output, sizeof(st->output), "%s", st->sinks[next].desc[0] ? st->sinks[next].desc : st->sinks[next].name);
+    st->cur = index;                                            /* shown at once; the refresh confirms it */
+    st->volume = st->sinks[index].volume;
+    st->mute = st->sinks[index].mute;
+    snprintf(st->output, sizeof(st->output), "%s", st->sinks[index].desc[0] ? st->sinks[index].desc : st->sinks[index].name);
     notify(m);
-    const char *argv[] = { "pactl", "set-default-sink", st->sinks[next].name, NULL };
+    const char *argv[] = { "pactl", "set-default-sink", st->sinks[index].name, NULL };
     queue_cmd(m, "default-sink", argv);
+}
+
+void lm_mixer_next_output(struct lm_mixer *m)
+{
+    const struct lm_mixer_state *st = &m->st;
+    if (st->nsinks >= 2)
+        lm_mixer_set_output(m, (st->cur + 1) % st->nsinks);
 }

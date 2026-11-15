@@ -8181,7 +8181,9 @@ class TestMixer(Base):
         c.cmd('mixer')
         head, _, output = c.last[3:].partition(' output=')                     # the output name has spaces: it comes last
         info = dict(kv.split('=', 1) for kv in head.split())
+        output, _, zoom = output.rpartition(' zoom=')                          # (the output name has spaces: the zoom follows it)
         info['output'] = output
+        info['zoom'] = zoom
         return info
 
     @staticmethod
@@ -8202,6 +8204,22 @@ class TestMixer(Base):
         g['streams'] = [((x + self.PAD + 22 + 10, srow + 36 * i + 26, w - 2 * self.PAD - 32 - 46),
                          (x + self.PAD + 11, srow + 36 * i + 26)) for i in range(2)]   # (slider left/y/width, mute centre)
         return g
+
+    @staticmethod
+    def menu_entries(c, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            lines = c.cmd('dockmenu')
+            if lines and 'open=1' in lines[0]:
+                out = []
+                for ln in lines:
+                    if ln.startswith('entry '):
+                        label = ln.split('"')[1]
+                        kv = dict(x.split('=') for x in ln.split('"')[2].split())
+                        out.append((label, int(kv['x']) + int(kv['w']) // 2, int(kv['y']) + int(kv['h']) // 2))
+                return out
+            time.sleep(0.05)
+        raise AssertionError('no menu opened')
 
     def wait_for(self, pred, what, timeout=3.0):
         end = time.time() + timeout
@@ -8235,7 +8253,6 @@ class TestMixer(Base):
         self.wait_for(lambda: 88 <= self.state(pj)['sinks'][0]['vol'] <= 92, 'sink volume about 90 after the drag')
         sets = [l for l in self.state(pj)['log'] if l.startswith('set-sink-volume')]
         self.assertLess(len(sets), 41, 'slider drag commands were not coalesced: %d' % len(sets))
-        info['zoom'] = zoom
         # mute button
         c.click(*g['mute'])
         self.wait_for(lambda: self.state(pj)['sinks'][0]['mute'] is True, 'muted')
@@ -8249,8 +8266,18 @@ class TestMixer(Base):
         c.click(mx, my)
         self.wait_for(lambda: self.state(pj)['inputs'][1]['mute'] is True, 'stream muted')
         self.assertFalse(self.state(pj)['inputs'][0]['mute'])
-        # the output button makes the next sink (HDMI) the default one
+        # the output row opens a menu of every output (the one in use marked); a choice makes it the default one
         c.click(*g['output'])
+        ents = self.menu_entries(c)
+        self.assertEqual(len(ents), len(self.state(pj)['sinks']))
+        self.assertTrue(ents[0][0].startswith('* '), ents[0][0])
+        self.assertTrue(ents[1][0].startswith('  '), ents[1][0])
+        c.tap(1)                                                                   # Esc: closed, nothing changed
+        time.sleep(0.3)
+        self.assertEqual(self.state(pj)['default'], self.state(pj)['sinks'][0]['name'])
+        c.click(*g['output'])
+        ents = self.menu_entries(c)
+        c.click(ents[1][1], ents[1][2])
         self.wait_for(lambda: self.state(pj)['default'] == 'alsa_output.hdmi-stereo', 'default sink changed')
         self.wait_for(lambda: 'HDMI' in self.mixer_info(c)['output'], 'output text shows HDMI')
         self.assertEqual(self.mixer_info(c)['volume'], '100')                  # the HDMI sink's own level

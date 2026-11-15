@@ -77,6 +77,7 @@ struct app {
     /* mixer */
     struct lm_mixer *mixer;
     enum lm_mixer_part drag_part;
+    int menu_kind;                      /* the open menu: 0 = zoom, 1 = the mixer's outputs (entries = the mixer's sinks, in order) */
     int smart_drag;                 /* the smart card: the blind whose slider is being dragged, -1 = none */
     int smart_need;                 /* ... and the height that showed every row last time (the card grows when it gets more) */
     int drag_index;
@@ -567,6 +568,25 @@ static void mixer_slide(struct app *a, enum lm_mixer_part part, int idx, double 
         lm_mixer_set_stream(a->mixer, idx, lm_mixer_slider_value(l.stream[idx].slider.x, l.stream[idx].slider.w, x));
 }
 
+/* A click on the output row: a menu of every output, the one in use marked; without a menu service the next one is taken. */
+static void mixer_output_menu(struct app *a)
+{
+    const struct lm_mixer_state *st = lm_mixer_state(a->mixer);
+    if (st->nsinks < 2)
+        return;
+    char entries[LM_MIXER_MAX_SINKS * 100];
+    size_t n = 0;
+    for (int i = 0; i < st->nsinks; i++) {
+        const struct lm_mixer_sink *s = &st->sinks[i];
+        n += (size_t)snprintf(entries + n, sizeof(entries) - n, "%s%s%s", i ? "\n" : "", i == st->cur ? "* " : "  ", s->desc[0] ? s->desc : s->name);
+    }
+    a->menu_kind = 1;
+    if (!wlwin_menu(&a->win, entries)) {
+        a->menu_kind = 0;
+        lm_mixer_next_output(a->mixer);
+    }
+}
+
 static bool mixer_press(struct app *a)
 {
     struct lm_mixer_layout l;
@@ -575,7 +595,7 @@ static bool mixer_press(struct app *a)
     enum lm_mixer_part part = lm_mixer_hit(&l, (int)a->px, (int)a->py, &idx);
     switch (part) {
     case LM_MIXER_MASTER_MUTE: lm_mixer_toggle_master_mute(a->mixer); return true;
-    case LM_MIXER_OUTPUT: lm_mixer_next_output(a->mixer); return true;
+    case LM_MIXER_OUTPUT: mixer_output_menu(a); return true;
     case LM_MIXER_STREAM_MUTE: lm_mixer_toggle_stream_mute(a->mixer, idx); return true;
     case LM_MIXER_MASTER_SLIDER:
     case LM_MIXER_STREAM_SLIDER:
@@ -617,7 +637,7 @@ static void paint_mixer(struct app *a)
     if (pulse) {
         rr(w, l.output, 7, veil_mix(0x1a));
         char label[96];
-        snprintf(label, sizeof(label), "%s%s", st->output, st->nsinks > 1 ? "   >" : "");
+        snprintf(label, sizeof(label), "%s%s", st->output, st->nsinks > 1 ? "   v" : "");
         text(w, l.output.x + 10, l.output.y + (l.output.h - LM_FONT_H) / 2, label, lm_theme.text);
     }
     for (int i = 0; i < l.nstreams; i++) {
@@ -1172,6 +1192,13 @@ static bool zoom_press(struct app *a)
 static void menu_event(struct wlwin *w, int index)
 {
     struct app *a = w->data;
+    int kind = a->menu_kind;
+    a->menu_kind = 0;
+    if (kind == 1) {                                                /* the outputs */
+        if (index >= 0)
+            lm_mixer_set_output(a->mixer, index);
+        return;
+    }
     if (index == 0)
         zoom_step(a, 1);
     else if (index == 1)
@@ -1229,8 +1256,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         clip_clamp(a);
         w->redraw = true;
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 273) {
-        if (args[3].u == 1)
+        if (args[3].u == 1) {
+            a->menu_kind = 0;
             wlwin_menu(w, a->zoom >= ZOOM_MAX ? "~Bigger\nSmaller\nNormal size (100 %)" : a->zoom <= ZOOM_MIN ? "Bigger\n~Smaller\nNormal size (100 %)" : "Bigger\nSmaller\nNormal size (100 %)");
+        }
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272) {
         if (args[3].u == 0) {                                       /* released */
             a->drag_part = LM_MIXER_NOTHING;

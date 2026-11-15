@@ -96,5 +96,6 @@ void lm_mixer_toggle_master_mute(struct lm_mixer *m);
 void lm_mixer_set_stream(struct lm_mixer *m, int index, int percent);
 void lm_mixer_toggle_stream_mute(struct lm_mixer *m, int index);
 void lm_mixer_next_output(struct lm_mixer *m);          /* PulseAudio: make the next sink the default one */
+void lm_mixer_set_output(struct lm_mixer *m, int index);   /* PulseAudio: make sinks[index] the default one (the gadget's menu of outputs) */
 
 #endif

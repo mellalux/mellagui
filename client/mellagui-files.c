@@ -62,6 +62,7 @@
 #include "uikit.h"
 #include "wlc.h"
 #include "util.h"
+#include "archread.h"
 #include "initree.h"
 #include "json.h"
 #include "parquet.h"
@@ -2202,6 +2203,7 @@ static char csv_delim(const unsigned char *buf, size_t n)
 #define CSV_MAX_COLS 40
 #define CSV_MAX_ROWS 20000
 #define CSV_CELL_MAX 24                                                  /* a column is at most this many characters wide */
+static int g_cell_max = CSV_CELL_MAX;                                    /* ... or this many while an archive's list is built (names are long) */
 
 struct csv {
     char ***row;                        /* row[r][c] */
@@ -2355,7 +2357,7 @@ static bool pv_table_build(struct preview *pv, const struct csv *tp, int min_col
         num[c] = t.nrow > 1;
         for (int r = 0; r < t.nrow; r++) {
             const char *cell = c < t.ncol[r] ? t.row[r][c] : "";
-            w[c] = LM_MAX(w[c], LM_MIN(utf8_len(cell), CSV_CELL_MAX));
+            w[c] = LM_MAX(w[c], LM_MIN(utf8_len(cell), g_cell_max));
             if (r > 0 && cell[0] && !csv_is_number(cell))
                 num[c] = false;
         }
@@ -2704,6 +2706,76 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
     return true;
 }
 
+/* ---- an archive: the entries as a table (names, sizes, times; never the contents) ---- */
+#define ARC_MAX_ENTRIES 5000
+
+static bool pv_archive(struct preview *pv, const char *path)
+{
+    struct arc_list a;
+    char err[160] = "";
+    int r = arc_read(path, ARC_MAX_ENTRIES, &a, err, sizeof(err));
+    if (r == -1)
+        return false;
+    int cap = 0;
+    if (r < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "An archive that cannot be listed:");
+        pv_linef(pv, &cap, "%s", err);
+        return true;
+    }
+    bool times = false;
+    for (int i = 0; i < a.n; i++)
+        times |= a.mtime[i][0] != 0;
+    int nc = 2 + (a.has_packed ? 1 : 0) + (times ? 1 : 0);
+    struct csv t = { 0 };
+    char **hdr = calloc((size_t)nc, sizeof(char *));
+    int c = 0;
+    hdr[c++] = strdup("Name");
+    hdr[c++] = strdup("Size");
+    if (a.has_packed)
+        hdr[c++] = strdup("Packed");
+    if (times)
+        hdr[c++] = strdup("Modified");
+    csv_push(&t, hdr, nc);
+    for (int i = 0; i < a.n; i++) {
+        char **row = calloc((size_t)nc, sizeof(char *));
+        char num[32];
+        c = 0;
+        row[c++] = strdup(a.name[i]);
+        snprintf(num, sizeof(num), a.size[i] >= 0 ? "%lld" : "", a.size[i]);
+        row[c++] = strdup(num);
+        if (a.has_packed) {
+            snprintf(num, sizeof(num), a.packed[i] >= 0 ? "%lld" : "", a.packed[i]);
+            row[c++] = strdup(num);
+        }
+        if (times)
+            row[c++] = strdup(a.mtime[i]);
+        csv_push(&t, row, nc);
+    }
+    pv->kind = PV_TABLE;
+    pv->top = pv->left = 0;
+    g_cell_max = 48;
+    if (!pv_table_build(pv, &t, 1, &cap))
+        pv_linef(pv, &cap, "(no entries)");
+    g_cell_max = CSV_CELL_MAX;
+    if (a.total == 0)
+        pv_linef(pv, &cap, "(an empty archive)");
+    else if (a.total > a.n)
+        pv_linef(pv, &cap, "... the first %d of %lld entries", a.n, a.total);
+    if (a.note[0])
+        pv_linef(pv, &cap, "%s", a.note);
+    char us[32], ps[32];
+    human_size((off_t)a.total_size, us, sizeof(us));
+    human_size((off_t)a.total_packed, ps, sizeof(ps));
+    if (a.has_packed)
+        snprintf(pv->info, sizeof(pv->info), "%s, %lld entr%s, %s unpacked, %s packed", a.kind, a.total, a.total == 1 ? "y" : "ies", us, ps);
+    else
+        snprintf(pv->info, sizeof(pv->info), "%s, %lld entr%s, %s unpacked", a.kind, a.total, a.total == 1 ? "y" : "ies", us);
+    csv_free(&t);
+    arc_free(&a);
+    return true;
+}
+
 /* ---- Parquet: the first rows as a table ---- */
 #define PQ_MAX_ROWS 2000
 
@@ -3023,6 +3095,10 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
                (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots") || ext_is(path, "numbers")) &&
                (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR || pv->kind == PV_IMAGE)) {
         /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
+    } else if (((n >= 4 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "PK\5\6", 4))) || (n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) ||
+                (n >= 512 && (!memcmp(buf + 257, "ustar", 5) || ext_is(path, "tar")))) &&
+               (pv_archive(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
+        /* an archive (ZIP and its relatives, TAR, gzip): the list of what is in it */
     } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);

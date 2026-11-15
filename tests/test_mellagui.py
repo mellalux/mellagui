@@ -3168,9 +3168,10 @@ class TestClients(Base):
         ctl.tap(self.K_DOWN)                                                           # c_not: text with an xlsx name stays text
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
         self.assertEqual(head['kind'], 'text')
-        ctl.tap(self.K_DOWN)                                                           # d_nobook: a ZIP, so not a workbook: hex
-        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
-        self.assertEqual(head['kind'], 'hex')
+        ctl.tap(self.K_DOWN)                                                           # d_nobook: a ZIP, so not a workbook: the list of what is in it
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('d_nobook.xlsx'))
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('4', '1'))
+        self.assertIn('hello.txt', extra['row1']['v'])
 
     def test_files_previews_an_old_xls_workbook_as_a_table(self):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -3315,9 +3316,9 @@ class TestClients(Base):
         ctl.click(win['x'] + 466 + 8 + 20, win['y'] + 30 + 22 + 8)                     # a click on the first name of the strip: Data again
         head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '0')
         self.assertEqual(extra['db']['name'], 'Data')
-        ctl.tap(self.K_DOWN)                                                           # b_text: a ZIP that is no spreadsheet: hex
-        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
-        self.assertEqual(head['kind'], 'hex')
+        ctl.tap(self.K_DOWN)                                                           # b_text: a ZIP that is no spreadsheet: the list of what is in it
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('b_text.ods'))
+        self.assertIn('mimetype', extra['row1']['v'])
 
     def test_files_previews_an_apple_numbers_file_as_a_table(self):
         # NO real Numbers file was available: tests/numbers_writer.py writes the author's understanding of the format, so this checks that the reader and
@@ -3340,7 +3341,7 @@ class TestClients(Base):
         with zipfile.ZipFile(os.path.join(d, 'd_broken.numbers'), 'w') as z:                   # the tables cannot be made out: the document's own picture
             z.writestr('Index/Document.iwa', b'\x00\x05\x00\x00' + bytes(5))
             z.writestr('preview.jpg', buf.getvalue())
-        with zipfile.ZipFile(os.path.join(d, 'e_nothing.numbers'), 'w') as z:                  # a ZIP with no Numbers parts: hex
+        with zipfile.ZipFile(os.path.join(d, 'e_nothing.numbers'), 'w') as z:                  # a ZIP with no Numbers parts: listed as an archive
             z.writestr('hello.txt', 'hi' * 20)
         dump = os.path.join(d, 'files.dump')
         p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_book.numbers)
@@ -3374,9 +3375,88 @@ class TestClients(Base):
         ctl.tap(self.K_DOWN)                                                           # d_broken
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'image' and o[0].get('want', '').endswith('d_broken.numbers'))
         self.assertEqual(head['kind'], 'image')
-        ctl.tap(self.K_DOWN)                                                           # e_nothing
-        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
-        self.assertEqual(head['kind'], 'hex')
+        ctl.tap(self.K_DOWN)                                                           # e_nothing: a ZIP with no Numbers parts: the list of what is in it
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('e_nothing.numbers'))
+        self.assertIn('hello.txt', extra['row1']['v'])
+
+    def test_files_previews_an_archive_as_a_list_of_its_entries(self):
+        import gzip
+        import io
+        import tarfile
+        import zipfile
+        d = tempfile.mkdtemp(prefix='files-arc-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with zipfile.ZipFile(os.path.join(d, 'a_basic.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr(zipfile.ZipInfo('dir/', (2023, 3, 15, 18, 30, 0)), '')
+            z.writestr(zipfile.ZipInfo('dir/hello.txt', (2023, 3, 15, 18, 31, 0)), 'hello' * 100)
+            z.writestr(zipfile.ZipInfo('café.txt', (2024, 1, 2, 3, 4, 0)), 'x' * 7)
+            zi = zipfile.ZipInfo('stored.bin', (2020, 12, 31, 23, 59, 58))
+            zi.compress_type = zipfile.ZIP_STORED
+            z.writestr(zi, bytes(range(256)) + b'abc')
+        with zipfile.ZipFile(os.path.join(d, 'b_cp437.zip'), 'w') as z:                 # a name in the DOS code page: the byte 0x82 is e-acute there
+            z.writestr('cafX.txt', 'data')
+        raw = open(os.path.join(d, 'b_cp437.zip'), 'rb').read().replace(b'cafX', b'caf\x82')
+        open(os.path.join(d, 'b_cp437.zip'), 'wb').write(raw)
+        zipfile.ZipFile(os.path.join(d, 'c_empty.zip'), 'w').close()
+        with zipfile.ZipFile(os.path.join(d, 'd_docs.docx'), 'w', zipfile.ZIP_DEFLATED) as z:    # a document is a ZIP too
+            z.writestr('[Content_Types].xml', '<Types/>')
+            z.writestr('word/document.xml', '<w:document/>' * 20)
+        def tar(path, mode, fmt):
+            with tarfile.open(path, mode, format=fmt) as t:
+                def add(name, data=b'', typ=tarfile.REGTYPE, link=''):
+                    ti = tarfile.TarInfo(name)
+                    ti.size = len(data) if typ == tarfile.REGTYPE else 0
+                    ti.type = typ
+                    ti.mtime = 1700000000
+                    ti.linkname = link
+                    ti.mode = 0o755 if typ == tarfile.DIRTYPE else 0o644
+                    t.addfile(ti, io.BytesIO(data) if typ == tarfile.REGTYPE else None)
+                add('a.txt', b'abc')
+                add('sub', typ=tarfile.DIRTYPE)
+                add('sub/b.txt', b'z' * 1000)
+                add('deep/' + 'long_directory_name_' * 6 + '/file.txt', b'q' * 5)          # over 100 characters: a pax or GNU long name
+                add('ln', typ=tarfile.SYMTYPE, link='a.txt')
+        tar(os.path.join(d, 'e_pax.tar'), 'w', tarfile.PAX_FORMAT)
+        tar(os.path.join(d, 'f_gnu.tar'), 'w', tarfile.GNU_FORMAT)
+        tar(os.path.join(d, 'g_tree.tar.gz'), 'w:gz', tarfile.PAX_FORMAT)
+        with open(os.path.join(d, 'h_log.gz'), 'wb') as f:
+            with gzip.GzipFile(filename='data.log', mode='wb', fileobj=f) as g:
+                g.write(b'line of a log\n' * 100)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_basic.zip)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('4', '4'))            # Name, Size, Packed, Modified
+        v = [extra['row%d' % i]['v'] for i in range(1, 5)]
+        self.assertIn('dir/', v[0]); self.assertIn('2023-03-15_18:30', v[0])
+        for want in ('dir/hello.txt', '500', '2023-03-15_18:31'):
+            self.assertIn(want, v[1])
+        for want in ('café.txt', '7', '2024-01-02_03:04'):
+            self.assertIn(want, v[2])
+        for want in ('stored.bin', '259_│_259', '2020-12-31_23:59'):                               # stored: packed = unpacked
+            self.assertIn(want, v[3])
+        def check(name, kind, cols, rows, first=(), second=(), third=(), fourth=(), fifth=()):
+            head, ex = self.files_dump(dump, want=lambda o: o[0].get('kind') == kind and o[0].get('want', '').endswith(name))
+            self.assertEqual(head['kind'], kind, name)
+            if kind == 'table':
+                self.assertEqual((ex['table']['cols'], ex['table']['rows']), (cols, rows), name)
+                for k, want in enumerate((first, second, third, fourth, fifth)):
+                    for w_ in want:
+                        self.assertIn(w_, ex['row%d' % (k + 1)]['v'], '%s row %d: %s' % (name, k + 1, w_))
+            return ex
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_DOWN)
+        check('b_cp437.zip', 'table', '4', '1', first=('café.txt',))
+        ctl.tap(self.K_DOWN)
+        check('c_empty.zip', 'table', '3', '0')                                           # (no times: no Modified column)
+        ctl.tap(self.K_DOWN)
+        check('d_docs.docx', 'table', '4', '2', first=('[Content_Types].xml', '8'), second=('word/document.xml', '260'))
+        for name in ('e_pax.tar', 'f_gnu.tar', 'g_tree.tar.gz'):
+            ctl.tap(self.K_DOWN)
+            ex = check(name, 'table', '3', '5', first=('a.txt', '3', '2023-11-14_22:13'), second=('sub/',), third=('sub/b.txt', '1000'), fourth=('deep/long_directory_name_',),
+                       fifth=('ln_->_a.txt',))
+        ctl.tap(self.K_DOWN)
+        check('h_log.gz', 'table', '3', '1', first=('data.log', '1400'))
 
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)

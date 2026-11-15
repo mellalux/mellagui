@@ -17,6 +17,7 @@ struct istate {
     size_t outlen, outcnt;
     const uint8_t *in;
     size_t inlen, incnt;
+    int partial, full;                  /* lm_inflate_prefix: a full output ends the stream instead of failing */
     uint32_t bitbuf;
     int bitcnt;
 };
@@ -98,8 +99,10 @@ static int codes(struct istate *s, const struct huffman *lencode, const struct h
         if (symbol < 0)
             return -1;
         if (symbol < 256) {
-            if (s->outcnt == s->outlen)
-                return -1;
+            if (s->outcnt == s->outlen) {
+                s->full = s->partial;
+                return s->partial ? 0 : -1;
+            }
             s->out[s->outcnt++] = (uint8_t)symbol;
         } else if (symbol > 256) {
             symbol -= 257;
@@ -116,8 +119,14 @@ static int codes(struct istate *s, const struct huffman *lencode, const struct h
             if (e < 0)
                 return -1;
             size_t dist = (size_t)(dists[symbol] + e);
-            if (dist > s->outcnt || s->outcnt + (size_t)len > s->outlen)
+            if (dist > s->outcnt)
                 return -1;
+            if (s->outcnt + (size_t)len > s->outlen) {
+                if (!s->partial)
+                    return -1;
+                len = (int)(s->outlen - s->outcnt);
+                s->full = 1;
+            }
             while (len--) {
                 s->out[s->outcnt] = s->out[s->outcnt - dist];
                 s->outcnt++;
@@ -136,8 +145,14 @@ static int stored_block(struct istate *s)
     unsigned len = s->in[s->incnt] | (unsigned)s->in[s->incnt + 1] << 8;
     unsigned nlen = s->in[s->incnt + 2] | (unsigned)s->in[s->incnt + 3] << 8;
     s->incnt += 4;
-    if (len != (~nlen & 0xffff) || s->incnt + len > s->inlen || s->outcnt + len > s->outlen)
+    if (len != (~nlen & 0xffff) || s->incnt + len > s->inlen)
         return -1;
+    if (s->outcnt + len > s->outlen) {
+        if (!s->partial)
+            return -1;
+        len = (unsigned)(s->outlen - s->outcnt);
+        s->full = 1;
+    }
     memcpy(s->out + s->outcnt, s->in + s->incnt, len);
     s->incnt += len;
     s->outcnt += len;
@@ -260,6 +275,26 @@ int lm_inflate_raw(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen)
             return -1;
     } while (!last);
     return s.outcnt == outlen ? 0 : -1;
+}
+
+/* The first bytes of a raw deflate stream: up to `outcap` of them, then it stops (a big spreadsheet's first rows need not the whole sheet inflated).
+ * Returns how many bytes were made (the whole stream when it is shorter; a stream cut or broken later keeps what came before), or -1 when none. */
+long lm_inflate_prefix(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap)
+{
+    struct istate s = { .out = out, .outlen = outcap, .in = in, .inlen = inlen, .partial = 1 };
+    int last;
+    do {
+        last = bits(&s, 1);
+        int type = bits(&s, 2);
+        if (last < 0 || type < 0)
+            break;
+        int err = type == 0 ? stored_block(&s) : type == 1 ? fixed_block(&s) : type == 2 ? dynamic_block(&s) : -1;
+        if (err)
+            break;
+    } while (!last && !s.full);
+    if (!s.full && !last)                       /* the input ended or broke in the middle: what came before is still good */
+        return s.outcnt ? (long)s.outcnt : -1;
+    return (long)s.outcnt;
 }
 
 /* ---- PNG ---------------------------------------------------------------------------------------------------------------- */

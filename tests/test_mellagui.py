@@ -3089,6 +3089,89 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('l_unknown_codec.parquet'))
         self.assertEqual(head['kind'], 'error')
 
+    def test_files_previews_an_excel_workbook_as_a_table(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='files-xl-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+        rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+        hdr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        sst = ['Name', 'Qty', 'Date', 'Rate', 'Ok', 'Note', 'Ada &amp; Bob', 'Zoë', 'with <rPh sb="0" eb="1"><t>ignored</t></rPh>']
+        sst_xml = hdr + '<sst xmlns="%s" count="9" uniqueCount="9">' % main + ''.join(
+            '<si><t xml:space="preserve">%s</t></si>' % t if '<rPh' not in t else '<si><r><t>with </t></r>%s</si>' % t[5:] for t in sst) + '</sst>'
+        styles = hdr + ('<styleSheet xmlns="%s"><numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy\\-mm\\-dd\\ hh:mm"/><numFmt numFmtId="165" formatCode="0.00&quot; kr&quot;"/></numFmts>'
+                        '<cellStyleXfs count="1"><xf numFmtId="14"/></cellStyleXfs>'
+                        '<cellXfs count="5"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="10"/><xf numFmtId="164"/><xf numFmtId="165"/></cellXfs></styleSheet>') % main
+        def c(ref, v=None, t=None, s=None, f=None, inline=None):
+            t = 'inlineStr' if inline is not None else t
+            a = ' r="%s"' % ref + (' t="%s"' % t if t else '') + (' s="%d"' % s if s is not None else '')
+            if inline is not None:
+                return '<c%s><is>%s</is></c>' % (a, inline)
+            return '<c%s>%s%s</c>' % (a, '<f>%s</f>' % f if f else '', '<v>%s</v>' % v if v is not None else '')
+        rows = [
+            '<row r="1">' + ''.join(c('%s1' % 'ABCDEF'[i], i, 's') for i in range(6)) + '</row>',
+            '<row r="2">' + c('A2', 6, 's') + c('B2', 12) + c('C2', 45000, s=1) + c('D2', '0.255', s=2) + c('E2', 1, 'b')
+            + c('F2', inline='<r><t>ri</t></r><r><t>ch</t></r>') + '</row>',
+            '<row r="3"><c r="A3" s="1"/><c r="B3"/></row>',                                   # only styled blanks: not shown
+            '<row r="4">' + c('A4', 7, 's') + c('B4', '0.1') + c('C4', '45000.75', s=3) + c('D4', f='SUM(B2:B4)') + c('E4', '#DIV/0!', 'e') + c('F4', 'x_x0041_y', 'str') + '</row>',
+            '<row r="6">' + c('C6', '0.5', s=1) + c('B6', '1234567.891', s=4) + c('A6', 8, 's') + '</row>',
+        ]
+        sheet1 = hdr + '<worksheet xmlns="%s" xmlns:r="%s"><dimension ref="A1:F6"/><sheetData>%s</sheetData></worksheet>' % (main, rel, ''.join(rows))
+        big = hdr + '<worksheet xmlns="%s"><dimension ref="A1:B2500"/><sheetData>%s</sheetData></worksheet>' % (
+            main, ''.join('<row r="%d">%s%s</row>' % (i, c('A%d' % i, i), c('B%d' % i, inline='<t>r%d</t>' % i)) for i in range(1, 2501)))
+        def book(path, with_rels=True, d1904=False):
+            wb = hdr + ('<workbook xmlns="%s" xmlns:r="%s"><workbookPr%s/><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Hid" sheetId="2" state="hidden" r:id="rId2"/>'
+                        '<sheet name="Big&amp;Long" sheetId="3" r:id="rId3"/></sheets></workbook>') % (main, rel, ' date1904="1"' if d1904 else '')
+            rels = hdr + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + ''.join(
+                '<Relationship Id="rId%d" Type="%s/worksheet" Target="%s"/>' % (i, rel, t) for i, t in
+                [(1, 'worksheets/sheet1.xml'), (2, '/xl/worksheets/sheet2.xml'), (3, 'worksheets/../worksheets/sheet3.xml')]) + '</Relationships>'
+            with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+                z.writestr('[Content_Types].xml', hdr + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+                z.writestr('xl/workbook.xml', wb)
+                z.writestr('xl/_rels/workbook.xml.rels', rels)
+                z.writestr('xl/styles.xml', styles)
+                z.writestr('xl/sharedStrings.xml', sst_xml)
+                z.writestr('xl/worksheets/sheet1.xml', sheet1, compress_type=zipfile.ZIP_STORED)           # one stored, the others deflated
+                z.writestr('xl/worksheets/sheet2.xml', sheet1.replace('Zo', 'Zo'))
+                z.writestr('xl/worksheets/sheet3.xml', big)
+        book(os.path.join(d, 'a_book.xlsx'))
+        book(os.path.join(d, 'b_1904.xlsx'), d1904=True)
+        with open(os.path.join(d, 'c_not.xlsx'), 'w') as f:
+            f.write('just some text with an xlsx name\n' * 3)
+        with zipfile.ZipFile(os.path.join(d, 'd_nobook.xlsx'), 'w') as z:                      # a ZIP with no workbook in it
+            z.writestr('hello.txt', 'hi' * 20)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_book.xlsx)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['db']['tables'], extra['db']['tab'], extra['db']['name']), ('2', '0', 'Data'))   # the hidden sheet is not listed
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('7', '4'))        # the row numbers and A..F; 4 rows with something in them (3 is only styled blanks, 5 is missing)
+        r1, r2, r3 = extra['row1']['v'], extra['row2']['v'], extra['row3']['v']
+        for want in ('1', 'Name', 'Qty', 'Note'):
+            self.assertIn(want, r1)
+        for want in ('2', 'Ada_&_Bob', '12', '2023-03-15', '25.50%', 'TRUE', 'rich'):
+            self.assertIn(want, r2)
+        for want in ('4', 'Zoë', '0.1', '2023-03-15_18:00', '=SUM(B2:B4)', '#DIV/0!', 'xAy'):
+            self.assertIn(want, r3)
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(self.K_RIGHT)                                                          # Ctrl+Right: the next sheet
+        ctl.key(KEY_LEFTCTRL, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '1')
+        self.assertEqual((extra['db']['name'], extra['table']['cols'], extra['table']['rows']), ('Big&Long', '3', '2000'))   # the limit of rows
+        ctl.click(win['x'] + 466 + 8 + 20, win['y'] + 30 + 22 + 8)                     # a click on the first name of the strip: Data again
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '0')
+        self.assertEqual(extra['db']['name'], 'Data')
+        ctl.tap(self.K_DOWN)                                                           # b_1904: the same cells, the dates in the other date system
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('b_1904.xlsx'))
+        self.assertIn('2027-03-16', extra['row2']['v'])                                # 45000 days after 1904-01-01
+        ctl.tap(self.K_DOWN)                                                           # c_not: text with an xlsx name stays text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text')
+        self.assertEqual(head['kind'], 'text')
+        ctl.tap(self.K_DOWN)                                                           # d_nobook: a ZIP, so not a workbook: hex
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
+        self.assertEqual(head['kind'], 'hex')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

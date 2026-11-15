@@ -69,6 +69,7 @@
 #include "sqliteread.h"
 #include "syntax.h"
 #include "tomltree.h"
+#include "xlsxread.h"
 #include "xmltree.h"
 #include "yamltree.h"
 #include "wlcard.h"
@@ -156,6 +157,7 @@ struct preview {
     uint32_t *dbroot;
     char **dbsql;
     int ndb, dbtab, tabrows;
+    int dbkind;                         /* what the strip names: 0 the tables of a SQLite file, 1 the sheets of an Excel workbook */
     struct json *jroot;                 /* PV_JSON: the tree, its nodes in document order (`jr`) and the rows shown (`jvis`: indexes into `jr`, one per line) */
     struct jrow *jr;
     int njr;
@@ -2569,6 +2571,7 @@ static bool pv_sqlite(struct preview *pv, const char *path, int tab)
     free(pv->lines);
     pv->lines = NULL;
     db_forget(pv);
+    pv->dbkind = 0;
     pv->top = pv->left = 0;
     if (r == -2) {
         pv->kind = PV_ERROR;
@@ -2616,6 +2619,78 @@ static bool pv_sqlite(struct preview *pv, const char *path, int tab)
     }
     csv_free(&t);
     snprintf(pv->info, sizeof(pv->info), "SQLite, %d table%s, table %d: %s", pv->ndb, pv->ndb == 1 ? "" : "s", pv->dbtab + 1, pv->dbname[pv->dbtab]);
+    return true;
+}
+
+/* ---- an Excel workbook: its sheets, the first rows of one as a table ---- */
+#define XL_MAX_ROWS 2000
+
+/* A workbook (.xlsx / .xlsm / .xltx / .xltm): the strip of sheet names and the first rows of sheet `sheet`, the row numbers in the first column and the
+ * letters A, B, C ... as the header. True when the file was a workbook (then `kind` is a table, or an error line for one that cannot be read). */
+static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
+{
+    struct xl_book b;
+    char err[200] = "";
+    int r = xl_read(path, sheet, XL_MAX_ROWS, CSV_MAX_COLS - 1, &b, err, sizeof(err));
+    if (r == -1)
+        return false;
+    int cap = 0;
+    for (int i = 0; i < pv->nlines; i++)
+        free(pv->lines[i]);
+    pv->nlines = 0;
+    free(pv->lines);
+    pv->lines = NULL;
+    db_forget(pv);
+    pv->dbkind = 1;
+    pv->top = pv->left = 0;
+    if (r < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "An Excel workbook that cannot be shown:");
+        pv_linef(pv, &cap, "%s", err);
+        return true;
+    }
+    pv->ndb = b.nsheets;
+    pv->dbname = calloc((size_t)b.nsheets, sizeof(char *));
+    pv->dbsql = calloc((size_t)b.nsheets, sizeof(char *));
+    pv->dbroot = calloc((size_t)b.nsheets, sizeof(uint32_t));
+    pv->dbtab = b.sheet;
+    struct str_buf strip = { 0 };
+    for (int i = 0; i < b.nsheets; i++) {
+        pv->dbname[i] = strdup(b.sheet_name[i]);
+        sb_add(&strip, " ", 1);
+        sb_add(&strip, b.sheet_name[i], strlen(b.sheet_name[i]));
+        sb_add(&strip, " ", 1);
+    }
+    pv_line(pv, &cap, strip.s ? strip.s : "", strip.n);
+    free(strip.s);
+    pv->tabrows = 1;
+    pv->kind = PV_TABLE;
+    struct csv t = { 0 };
+    if (b.nrows > 0) {
+        char **hdr = calloc((size_t)b.ncols, sizeof(char *));
+        for (int c = 0; c < b.ncols; c++)
+            hdr[c] = strdup(b.head[c]);
+        csv_push(&t, hdr, b.ncols);
+        for (int i = 0; i < b.nrows; i++)
+            csv_push(&t, b.cell[i], b.ncols);                          /* the cells change hands */
+        int nrows = b.nrows;
+        b.nrows = 0;                                                    /* (the rows now belong to `t`) */
+        if (!pv_table_build(pv, &t, 1, &cap))
+            pv_linef(pv, &cap, "(no columns)");
+        else if (b.more_rows && b.last_row > 0)
+            pv_linef(pv, &cap, "... the first %d rows (the sheet goes down to row %d)", nrows, b.last_row);
+        else if (b.more_rows)
+            pv_linef(pv, &cap, "... the first %d rows", nrows);
+        if (b.more_cols)
+            pv_linef(pv, &cap, "... the first %d columns", CSV_MAX_COLS - 1);
+        snprintf(pv->info, sizeof(pv->info), "Excel, %d sheet%s, sheet %d: %s, %d row%s", b.nsheets, b.nsheets == 1 ? "" : "s", b.sheet + 1,
+                 pv->dbname[pv->dbtab], nrows, nrows == 1 ? "" : "s");
+    } else {
+        pv_linef(pv, &cap, "(an empty sheet)");
+        snprintf(pv->info, sizeof(pv->info), "Excel, %d sheet%s, sheet %d: %s, empty", b.nsheets, b.nsheets == 1 ? "" : "s", b.sheet + 1, pv->dbname[pv->dbtab]);
+    }
+    csv_free(&t);
+    xl_free(&b);
     return true;
 }
 
@@ -2934,6 +3009,9 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         /* a SQLite database: the strip of tables and the rows of the first one */
     } else if (n >= 12 && !memcmp(buf, "PAR1", 4) && (pv_parquet(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* a Parquet file: its first rows as a table */
+    } else if (n >= 30 && !memcmp(buf, "PK\3\4", 4) && (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm")) &&
+               (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
+        /* an Excel workbook: the strip of sheets and the rows of the first one */
     } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);
@@ -4275,7 +4353,10 @@ static void db_switch_to(struct app *a, int tab)
     struct preview *pv = &a->pv;
     if (tab < 0 || tab >= pv->ndb || tab == pv->dbtab)
         return;
-    pv_sqlite(pv, pv->want, tab);
+    if (pv->dbkind == 1)
+        pv_xlsx(pv, pv->want, tab);
+    else
+        pv_sqlite(pv, pv->want, tab);
     a->win.redraw = true;
 }
 
@@ -5312,7 +5393,7 @@ static void files_dump(struct app *a)
     }
     if (pv->kind == PV_TABLE)
         fprintf(f, "table cols=%d rows=%d left=%d\n", pv->tcols, pv->trows, pv->left);
-    for (int k = 0; k < 2 && pv->kind == PV_TABLE && pv->tabrows + 2 + k < pv->nlines; k++) {      /* the first data rows, blanks as _ (tests) */
+    for (int k = 0; k < 3 && pv->kind == PV_TABLE && pv->tabrows + 2 + k < pv->nlines; k++) {      /* the first data rows, blanks as _ (tests) */
         char sq[400];
         size_t o = 0;
         for (const char *c = pv->lines[pv->tabrows + 2 + k]; *c && o < sizeof(sq) - 2; c++)

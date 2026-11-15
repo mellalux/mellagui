@@ -26,5 +26,7 @@ void lm_img_free(struct lm_image *img);
 
 /* A raw deflate stream (no zlib or gzip wrapper) into exactly `outlen` bytes; 0 = ok. */
 int lm_inflate_raw(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen);
+/* The first up to `outcap` bytes of a raw deflate stream (stops when the buffer is full); returns the count, or -1 for a broken stream. */
+long lm_inflate_prefix(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap);
 
 #endif

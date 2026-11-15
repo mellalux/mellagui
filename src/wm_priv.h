@@ -250,6 +250,7 @@ struct lm_wm {
     struct wm_bubble bubble;
     uint32_t snap_zone;                 /* while a window is dragged to an edge: the zone it would be tiled to when let go (0 = none, LM_EDGE_TOP = maximize) */
     struct lm_rect snap_rect;           /* ... where that is, and its picture (LM_SCENE_GHOST) */
+    struct lm_rect snap_view;           /* where the picture is painted: snap_rect, or the whole usable area while a grid cell is shown (with the grid lines) */
     struct lm_ghost snap_ghost;
     struct lm_timer *anim_timer;
     struct lm_window *glide_win;        /* a window that glides to glide_tx / glide_ty (dragged, or let go a moment ago) */

@@ -600,11 +600,11 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             return;
     }
 
-    if (wm->snap_ghost.px && (!clip || lm_rect_overlaps(&wm->snap_rect, clip))) {          /* where the dragged window would go */
+    if (wm->snap_ghost.px && (!clip || lm_rect_overlaps(&wm->snap_view, clip))) {          /* where the dragged window would go */
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_GHOST;
         it.u.ghost.ghost = &wm->snap_ghost;
-        it.u.ghost.dst = wm->snap_rect;
+        it.u.ghost.dst = wm->snap_view;
         it.u.ghost.alpha = 255;
         if (!fn(&it, data))
             return;

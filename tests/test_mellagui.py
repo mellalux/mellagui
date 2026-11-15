@@ -550,13 +550,23 @@ class TestWindows(Base):
         ctl.button(BTN_LEFT, True)
         ctl.abs(500, 300)
         self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')                    # no Shift: away from the edges nothing shows
+        ppm = ctl.dump(os.path.join(tmp, 'grid-off.ppm'))
+        self.assertEqual(ppm.px(341, 450), ppm.px(300, 450))                      # (the wallpaper: no lines)
+        ctl.abs(502, 302)
+        ctl.key(KEY_LEFTSHIFT, True)                                              # Shift pressed with the pointer standing still: the preview shows at once
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=grid-3x2-2.1 x=341 y=32 w=341 h=284')   # (the cell under the pointer: middle column, upper row)
+        ppm = ctl.dump(os.path.join(tmp, 'grid-on.ppm'))
+        self.assertNotEqual(ppm.px(341, 450), ppm.px(300, 450))                   # the grid's lines are over the whole screen, not only the cell
+        self.assertNotEqual(ppm.px(682, 450), ppm.px(600, 450))
+        self.assertNotEqual(ppm.px(500, 316), ppm.px(500, 330))                   # ... also the one between the rows
+        ctl.key(KEY_LEFTSHIFT, False)                                             # let go of Shift: it goes at once, too
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')
         ctl.key(KEY_LEFTSHIFT, True)
-        ctl.abs(502, 302)                                                         # Shift: the cell under the pointer (3 x 2: middle column, upper row)
-        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=grid-3x2-2.1 x=341 y=32 w=341 h=284')
+        ctl.abs(502, 302)
         ctl.abs(900, 500)
         self.assertEqual(ctl.cmd('snap')[0], 'snap zone=grid-3x2-3.2 x=682 y=316 w=342 h=284')
+        ctl.button(BTN_LEFT, False)                                               # let go (with Shift still down): tiled to that cell
         ctl.key(KEY_LEFTSHIFT, False)
-        ctl.button(BTN_LEFT, False)                                               # let go: tiled to that cell
         self.tiled(c, w, 'grid-3x2-3.2', (686, 344), (334, 252))
 
     def test_dragging_a_window_to_an_edge_or_a_corner_shows_where_it_goes_and_tiles_it_when_let_go(self):

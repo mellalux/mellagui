@@ -140,29 +140,50 @@ static uint32_t zone_at(struct lm_wm *wm, double x, double y, struct lm_rect *ua
     return t ? LM_EDGE_TOP : 0;
 }
 
-/* The picture of the preview: the accent colour, see-through, with a stronger rim and round corners. Premultiplied ARGB. */
-static bool make_ghost(struct lm_wm *wm, int w, int h)
+/* The picture of the preview: the accent colour, see-through, with a stronger rim and round corners. Premultiplied ARGB. Normally it is the zone itself
+ * (w x h); for a grid cell it is the whole usable area (w x h) with the grid's lines (cols x rows) and the cell (cx, cy, cw, ch) filled in. */
+static bool make_ghost(struct lm_wm *wm, int w, int h, int cx, int cy, int cw, int ch, int cols, int rows)
 {
     if (w < 8 || h < 8 || (int64_t)w * h > 16 * 1024 * 1024)
         return false;
-    uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+    uint32_t *px = calloc((size_t)w * (size_t)h, 4);
     if (!px)
         return false;
     uint32_t rgb = lm_theme.accent;
     int cr = (int)((rgb >> 16) & 255), cg = (int)((rgb >> 8) & 255), cb = (int)(rgb & 255);
     const float R = 12.0f, RIM = 3.0f, FILL = 64.0f, EDGE = 200.0f;
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float qx = fabsf((float)x + 0.5f - (float)w / 2.0f) - ((float)w / 2.0f - R), qy = fabsf((float)y + 0.5f - (float)h / 2.0f) - ((float)h / 2.0f - R);
+#define PUT(X, Y, A) do { \
+        uint32_t ai_ = (uint32_t)(A); \
+        uint32_t old_ = px[(size_t)(Y) * (size_t)w + (size_t)(X)] >> 24; \
+        if (ai_ > old_) \
+            px[(size_t)(Y) * (size_t)w + (size_t)(X)] = (ai_ << 24) | ((uint32_t)(cr * (int)ai_ / 255) << 16) | ((uint32_t)(cg * (int)ai_ / 255) << 8) | \
+                                                          (uint32_t)(cb * (int)ai_ / 255); \
+    } while (0)
+    for (int i = 1; i < cols; i++) {                                                     /* the grid: a thin line at every cell border */
+        int lx = (int)((int64_t)w * i / cols);
+        for (int y = 0; y < h; y++)
+            for (int x = lx - 1; x < lx + 1; x++)
+                if (x >= 0 && x < w)
+                    PUT(x, y, 110);
+    }
+    for (int j = 1; j < rows; j++) {
+        int ly = (int)((int64_t)h * j / rows);
+        for (int y = ly - 1; y < ly + 1; y++)
+            for (int x = 0; x < w; x++)
+                if (y >= 0 && y < h)
+                    PUT(x, y, 110);
+    }
+    for (int y = cy; y < cy + ch; y++)
+        for (int x = cx; x < cx + cw; x++) {
+            float qx = fabsf((float)(x - cx) + 0.5f - (float)cw / 2.0f) - ((float)cw / 2.0f - R), qy = fabsf((float)(y - cy) + 0.5f - (float)ch / 2.0f) - ((float)ch / 2.0f - R);
             float ox = fmaxf(qx, 0.0f), oy = fmaxf(qy, 0.0f);
             float d = sqrtf(ox * ox + oy * oy) + fminf(fmaxf(qx, qy), 0.0f) - R;           /* < 0 inside */
             float cov = fminf(fmaxf(0.5f - d, 0.0f), 1.0f);
             float rim = fminf(fmaxf(d + RIM + 0.5f, 0.0f), 1.0f);                           /* 1 on the rim, 0 inside it */
             float a = cov * (FILL + (EDGE - FILL) * rim);
-            uint32_t ai = (uint32_t)(a + 0.5f);
-            px[(size_t)y * (size_t)w + (size_t)x] = (ai << 24) | ((uint32_t)(cr * (int)ai / 255) << 16) | ((uint32_t)(cg * (int)ai / 255) << 8) |
-                                                   (uint32_t)(cb * (int)ai / 255);
+            PUT(x, y, (uint32_t)(a + 0.5f));
         }
+#undef PUT
     wm->snap_ghost.px = px;
     wm->snap_ghost.w = w;
     wm->snap_ghost.h = h;
@@ -179,7 +200,7 @@ void snap_clear(struct lm_wm *wm)
 {
     if (!wm->snap_zone && !wm->snap_ghost.px)
         return;
-    struct lm_rect old = wm->snap_rect;
+    struct lm_rect old = wm->snap_view;
     snap_free(wm);
     wm->snap_zone = 0;
     damage_rect(wm, &old);
@@ -197,10 +218,17 @@ void snap_update(struct lm_wm *wm, double x, double y)
     snap_zone_rect(&ua, zone, &r);
     if (zone == wm->snap_zone && lm_rect_equal(&r, &wm->snap_rect) && wm->snap_ghost.px)
         return;
-    struct lm_rect old = wm->snap_rect;
-    bool had = wm->snap_ghost.px != NULL;
+    struct lm_rect old = wm->snap_view, view = r;
+    bool had = wm->snap_ghost.px != NULL, ok;
     snap_free(wm);
-    if (!make_ghost(wm, r.w, r.h)) {
+    int cols, rows, c0, c1, r0, r1;
+    if (grid_decode(zone, &cols, &rows, &c0, &c1, &r0, &r1)) {                  /* a grid cell: the whole grid is shown, the cell lit */
+        view = ua;
+        ok = make_ghost(wm, ua.w, ua.h, r.x - ua.x, r.y - ua.y, r.w, r.h, cols, rows);
+    } else {
+        ok = make_ghost(wm, r.w, r.h, 0, 0, r.w, r.h, 1, 1);
+    }
+    if (!ok) {
         wm->snap_zone = 0;
         if (had)
             damage_rect(wm, &old);
@@ -208,9 +236,10 @@ void snap_update(struct lm_wm *wm, double x, double y)
     }
     wm->snap_zone = zone;
     wm->snap_rect = r;
+    wm->snap_view = view;
     if (had)
         damage_rect(wm, &old);
-    damage_rect(wm, &r);
+    damage_rect(wm, &view);
 }
 
 size_t lm_wm_snap_describe(struct lm_wm *wm, char *buf, size_t size)

@@ -2074,6 +2074,11 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
         wm->osk_phys[code / 32] ^= 1u << (code % 32);           /* the on-screen keyboard shows what is held on the real one */
         if (wm->osk_open)
             osk_damage(wm);
+        if ((code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) && wm->grab_kind == GRAB_MOVE && wm->grab_win && !win_is_gadget(wm->grab_win) && wm->srv->seat) {
+            double px, py;                                      /* Shift pressed or let go while a window is dragged: the preview changes at once (grid cell / edge zone) */
+            lm_seat_pointer_position(wm->srv->seat, &px, &py);
+            snap_update(wm, px, py);
+        }
     }
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
     if (wm->capture_release && code == wm->capture_release && !pressed) {

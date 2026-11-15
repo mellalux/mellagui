@@ -664,8 +664,14 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
         int count = lo ? lm_output_list_modes(lo, modes, LM_MAX_MODES) : 0;
         for (int i = 0; i < count; i++) {
             size_t len = strlen(out);
-            snprintf(out + len, n - len, "%s%dx%d@%d|%s", i ? ";" : "", modes[i].w, modes[i].h, modes[i].hz,
-                     modes[i].generated ? "panel shape" : modes[i].preferred ? "preferred" : "");
+            if (len + 48 > n)
+                break;                                                  /* (a value is one wire message: the rest of a very long list is left out) */
+            char note[48] = "";
+            if (modes[i].made_up_rate && modes[i].vmin > modes[i].hz)           /* a rate the monitor itself says it does not take */
+                snprintf(note, sizeof(note), "generated, monitor: %d-%d Hz", modes[i].vmin, modes[i].vmax);
+            else
+                snprintf(note, sizeof(note), "%s", modes[i].made_up_rate ? "generated" : modes[i].generated ? "panel shape" : modes[i].preferred ? "preferred" : modes[i].interlaced ? "interlaced" : "");
+            snprintf(out + len, n - len, "%s%dx%d@%d|%s", i ? ";" : "", modes[i].w, modes[i].h, modes[i].hz, note);
         }
         break;
     }

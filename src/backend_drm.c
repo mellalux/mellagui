@@ -539,12 +539,24 @@ static drmModeModeInfo pick_mode(const struct lm_config *cfg, const drmModeConne
     drmModeModeInfo m = *preferred;
     if (cfg->drm_mode_w > 0) {
         bool found = false;
-        for (int i = 0; i < conn->count_modes && !found; i++)
-            if (conn->modes[i].hdisplay == cfg->drm_mode_w && conn->modes[i].vdisplay == cfg->drm_mode_h &&
-                (int)conn->modes[i].vrefresh == cfg->drm_mode_hz) {
-                m = conn->modes[i];
+        for (int pass = 0; pass < 2 && !found; pass++)                    /* the same rate; progressive before interlaced */
+            for (int i = 0; i < conn->count_modes && !found; i++)
+                if (conn->modes[i].hdisplay == cfg->drm_mode_w && conn->modes[i].vdisplay == cfg->drm_mode_h &&
+                    (int)conn->modes[i].vrefresh == cfg->drm_mode_hz && (pass == 1 || !(conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE))) {
+                    m = conn->modes[i];
+                    found = true;
+                }
+        if (!found && cfg->drm_mode_hz >= 24 && cfg->drm_mode_hz <= 30) {      /* a slow rate the monitor does not list: made up (the panel's own safety timer undoes a refusal) */
+            bool size_listed = false;
+            for (int i = 0; i < conn->count_modes; i++)
+                size_listed = size_listed || (conn->modes[i].hdisplay == cfg->drm_mode_w && conn->modes[i].vdisplay == cfg->drm_mode_h);
+            if (size_listed && cvt_mode(cfg->drm_mode_w, cfg->drm_mode_h, cfg->drm_mode_hz, &m)) {
+                if (log)
+                    lm_info("drm: %dx%d at %d Hz is not in the monitor's list: using generated CVT-RB timings (%u kHz)", cfg->drm_mode_w,
+                            cfg->drm_mode_h, cfg->drm_mode_hz, m.clock);
                 found = true;
             }
+        }
         for (int i = 0; i < conn->count_modes && !found; i++)             /* same size, other refresh rate */
             if (conn->modes[i].hdisplay == cfg->drm_mode_w && conn->modes[i].vdisplay == cfg->drm_mode_h) {
                 m = conn->modes[i];
@@ -1291,21 +1303,21 @@ static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int
     }
     drmModeModeInfo pref = preferred_mode(conn);
     int n = 0;
-    for (int i = 0; i < conn->count_modes && n < max; i++) {            /* one entry per size: the fastest refresh rate */
+    for (int i = 0; i < conn->count_modes && n < max; i++) {            /* one entry per size AND refresh rate, the slow ones too */
         const drmModeModeInfo *m = &conn->modes[i];
-        int at = -1;
+        bool il = (m->flags & DRM_MODE_FLAG_INTERLACE) != 0;
+        int hz = (int)m->vrefresh, at = -1;
         for (int j = 0; j < n; j++)
-            if (modes[j].w == m->hdisplay && modes[j].h == m->vdisplay)
+            if (modes[j].w == m->hdisplay && modes[j].h == m->vdisplay && modes[j].hz == hz)
                 at = j;
-        int hz = (int)m->vrefresh;
-        if (at >= 0) {
-            if (hz > modes[at].hz)
-                modes[at].hz = hz;
+        if (at >= 0) {                                                  /* the same size and rate again (another timing, or interlaced) */
+            if (modes[at].interlaced && !il)
+                modes[at].interlaced = false;                           /* a progressive one hides the interlaced one */
             if (same_timing(m, &pref))
                 modes[at].preferred = true;
             continue;
         }
-        modes[n++] = (struct lm_mode_info){ m->hdisplay, m->vdisplay, hz, same_timing(m, &pref), false };
+        modes[n++] = (struct lm_mode_info){ m->hdisplay, m->vdisplay, hz, same_timing(m, &pref), false, il, false, 0, 0 };
     }
     struct lm_config none = { 0 };                                      /* what "automatic" would generate */
     struct lm_edid_native nat;
@@ -1316,7 +1328,7 @@ static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int
         for (int j = 0; j < n; j++)
             known = known || (modes[j].w == au.hdisplay && modes[j].h == au.vdisplay);
         if (!known && n < max)
-            modes[n++] = (struct lm_mode_info){ au.hdisplay, au.vdisplay, (int)au.vrefresh, false, true };
+            modes[n++] = (struct lm_mode_info){ au.hdisplay, au.vdisplay, (int)au.vrefresh, false, true, false, false, 0, 0 };
     }
     if (have_nat && n < max) {                                          /* the panel's own size, if the link can carry it at some rate */
         bool known = false;
@@ -1328,13 +1340,30 @@ static int drm_list_modes(struct lm_output *out, struct lm_mode_info *modes, int
                 max_clock = conn->modes[i].clock;
         struct lm_cvt cv;
         if (!known && lm_cvt_rb_fit(nat.w, nat.h, 60, max_clock, &cv))
-            modes[n++] = (struct lm_mode_info){ cv.hdisplay, cv.vdisplay, cv.refresh, false, true };
+            modes[n++] = (struct lm_mode_info){ cv.hdisplay, cv.vdisplay, cv.refresh, false, true, false, false, 0, 0 };
+    }
+    {                                                                   /* a slow rate (30 Hz) for every size, made up when the monitor lists none */
+        int sizes = n, vmin = 0, vmax = 0;
+        drmModePropertyBlobPtr blob = conn_edid_blob(o->d->fd, conn);
+        if (blob) {
+            if (!lm_edid_vrange(blob->data, blob->length, &vmin, &vmax))
+                vmin = vmax = 0;
+            drmModeFreePropertyBlob(blob);
+        }
+        for (int i = 0; i < sizes && n < max; i++) {
+            bool have = false;
+            for (int j = 0; j < n; j++)
+                have = have || (modes[j].w == modes[i].w && modes[j].h == modes[i].h && modes[j].hz == 30);
+            struct lm_cvt slow;
+            if (!have && lm_cvt_rb(modes[i].w, modes[i].h, 30, &slow))
+                modes[n++] = (struct lm_mode_info){ slow.hdisplay, slow.vdisplay, 30, false, true, false, true, vmin, vmax };
+        }
     }
     drmModeFreeConnector(conn);
-    for (int i = 1; i < n; i++) {                                       /* biggest area first */
+    for (int i = 1; i < n; i++) {                                       /* biggest area first, the fastest rate first within a size */
         struct lm_mode_info t = modes[i];
         int j = i;
-        while (j > 0 && modes[j - 1].w * modes[j - 1].h < t.w * t.h) {
+        while (j > 0 && (modes[j - 1].w * modes[j - 1].h < t.w * t.h || (modes[j - 1].w * modes[j - 1].h == t.w * t.h && modes[j - 1].hz < t.hz))) {
             modes[j] = modes[j - 1];
             j--;
         }

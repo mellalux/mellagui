@@ -217,6 +217,9 @@ int main(void)
           "edid info: '%s' '%s' product %x year %d %dx%d mm", einfo.vendor, einfo.name, einfo.product, einfo.year, einfo.mm_w, einfo.mm_h);
     CHECK(!strcmp(lm_edid_vendor_name("DEL"), "Dell") && !strcmp(lm_edid_vendor_name("ZZZ"), "ZZZ"), "edid vendor names");
     CHECK(!lm_edid_info((const uint8_t *)"not an edid block", 18, &einfo), "edid info: not EDID");
+    int vmin = 0, vmax = 0;
+    CHECK(lm_edid_vrange(edid_21x9, sizeof(edid_21x9), &vmin, &vmax) && vmin == 48 && vmax == 120, "edid range limits of the U4025QW: %d-%d Hz", vmin, vmax);
+    CHECK(!lm_edid_vrange((const uint8_t *)"not an edid block", 18, &vmin, &vmax), "edid range: not EDID");
     CHECK(lm_edid_native(edid_21x9, sizeof(edid_21x9), &nat) && nat.w == 2560 && nat.h == 1080 && nat.mm_w == 929 && nat.mm_h == 392,
           "edid native: %dx%d %dx%d mm", nat.w, nat.h, nat.mm_w, nat.mm_h);
     CHECK(lm_edid_fix_height(2048, 1152, &nat, 930, 390) == 864, "21:9 panel offered 16:9 2048x1152 -> 2048x864 (%d)",

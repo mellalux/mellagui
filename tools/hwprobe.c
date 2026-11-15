@@ -90,8 +90,9 @@ int main(int argc, char **argv)
                 drmModeFreeProperty(pr);
         }
         printf("\n");
-        for (int m = 0; m < c->count_modes && m < 6; m++)
-            printf("    mode %s %uHz%s\n", c->modes[m].name, c->modes[m].vrefresh, (c->modes[m].type & DRM_MODE_TYPE_PREFERRED) ? " (preferred)" : "");
+        for (int m = 0; m < c->count_modes; m++)                    /* every mode the monitor (its EDID) offers, as the kernel lists them */
+            printf("    mode %s %uHz clock=%ukHz%s%s\n", c->modes[m].name, c->modes[m].vrefresh, c->modes[m].clock,
+                   (c->modes[m].flags & DRM_MODE_FLAG_INTERLACE) ? " interlaced" : "", (c->modes[m].type & DRM_MODE_TYPE_PREFERRED) ? " (preferred)" : "");
         drmModeFreeConnector(c);
     }
     for (int i = 0; i < res->count_crtcs; i++) {

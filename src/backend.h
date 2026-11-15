@@ -114,13 +114,17 @@ struct lm_backend_listener {
     void (*session_active)(void *data, bool active);
 };
 
-/* One selectable video mode of an output (settings panel). hz is the rounded refresh rate. */
+/* One selectable video mode of an output (settings panel): every size at every refresh rate the monitor lists, also the slow ones. hz is the
+ * rounded refresh rate. */
 struct lm_mode_info {
     int w, h, hz;
     bool preferred;                 /* the monitor's own preferred mode */
     bool generated;                 /* not offered by the monitor: CVT timings made up for the panel's shape */
+    bool interlaced;                /* only offered interlaced (a progressive mode of the same size and rate wins and hides it) */
+    bool made_up_rate;              /* the size is the monitor's but the rate is not in its list: CVT timings at a slow rate (30 Hz) generated for it */
+    int vmin, vmax;                 /* made_up_rate: the vertical range the monitor declares (0 = it says nothing); a rate below vmin is outside it */
 };
-#define LM_MAX_MODES 24
+#define LM_MAX_MODES 96
 
 struct lm_backend_ops {
     const char *name;

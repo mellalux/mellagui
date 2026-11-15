@@ -911,10 +911,18 @@ static int hl_list_modes(struct lm_output *out, struct lm_mode_info *modes, int 
     static const int sizes[][2] = { { 1920, 1080 }, { 1280, 720 }, { 1024, 768 }, { 800, 600 }, { 2048, 858 } };
     int n = 0;
     if (n < max)
-        modes[n++] = (struct lm_mode_info){ h->init_w, h->init_h, 60, true, false };
+        modes[n++] = (struct lm_mode_info){ h->init_w, h->init_h, 60, true, false, false, false, 0, 0 };
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]) && n < max; i++)
         if (sizes[i][0] != h->init_w || sizes[i][1] != h->init_h)
-            modes[n++] = (struct lm_mode_info){ sizes[i][0], sizes[i][1], 60, false, i == 4 };
+            modes[n++] = (struct lm_mode_info){ sizes[i][0], sizes[i][1], 60, false, i == 4, false, false, 0, 0 };
+    if (getenv("MELLAGUI_HL_MORE_MODES")) {                             /* tests: the same sizes at slower rates, as a real monitor lists them */
+        static const int rates[] = { 50, 30, 25, 24 };
+        int base = n;
+        for (int i = 0; i < base && n < max; i++)
+            for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]) && n < max; r++)
+                if (!modes[i].generated)
+                    modes[n++] = (struct lm_mode_info){ modes[i].w, modes[i].h, rates[r], false, rates[r] == 30, r == 3, rates[r] == 30, rates[r] == 30 ? 48 : 0, rates[r] == 30 ? 120 : 0 };
+    }
     return n;
 }
 

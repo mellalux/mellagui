@@ -48,6 +48,22 @@ bool lm_edid_info(const uint8_t *e, size_t len, struct lm_edid_info *out)
     return true;
 }
 
+bool lm_edid_vrange(const uint8_t *e, size_t len, int *vmin, int *vmax)
+{
+    if (!e || len < 128)
+        return false;
+    for (int d = 0; d < 4; d++) {
+        const uint8_t *b = e + 54 + 18 * d;
+        if (b[0] || b[1] || b[2] || b[3] != 0xfd)
+            continue;
+        int flags = b[4] & 3;                               /* 2: the maximum is 255 more, 3: both are */
+        *vmin = b[5] + (flags == 3 ? 255 : 0);
+        *vmax = b[6] + (flags >= 2 ? 255 : 0);
+        return *vmin > 0 && *vmax >= *vmin;
+    }
+    return false;
+}
+
 const char *lm_edid_vendor_name(const char *pnp)
 {
     static const struct { const char *id, *name; } t[] = {

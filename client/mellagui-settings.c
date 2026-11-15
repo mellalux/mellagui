@@ -396,6 +396,7 @@ struct app {
     int input_tab;                      /* the Input page's part: 0 the keyboard, 1 the mouse and touchpad */
     int theme_tab;                      /* the Themes page's part: 0 the theme and its colours, 1 the buttons, 2 the sizes, 3 the font */
     int fpage;                          /* the Font part: which page of the list of fonts */
+    int rpage;                          /* the Display page: which page of the list of resolutions */
     int display_tab;                    /* the Display page's part: 0 the resolution, 1 the scale */
     int sec_minutes;                    /* idle minutes (0 = never) */
     int sec_blank;                      /* minutes locked before the monitors go to standby (0 = never) */
@@ -843,12 +844,30 @@ static void build_display_resolution(struct app *a, int x, int y, int w)
     y += ROW_H;
     const char *list = kv_get(a, "resolutions");
     char name[64], note[96], label[96];
-    int shown = 0;
-    while (shown < (nout >= 2 ? 3 : 7) && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
+    int total = 0;
+    for (const char *p = list; next_entry(&p, name, sizeof(name), note, sizeof(note));)
+        total++;
+    int per = nout >= 2 ? 3 : 7;
+    if (total > per)
+        per--;                                                  /* a row for the pager */
+    int pages = LM_MAX(1, (total + per - 1) / per);
+    a->rpage = LM_CLAMP(a->rpage, 0, pages - 1);
+    int shown = 0, idx = 0;
+    while (shown < per && next_entry(&list, name, sizeof(name), note, sizeof(note))) {
+        if (idx++ < a->rpage * per)
+            continue;
         mode_label(name, note, label, sizeof(label));
         add_radio(a, x, y, w, label, "resolution", name, !strcmp(cur, name));
         y += ROW_H;
         shown++;
+    }
+    if (pages > 1) {                                            /* every size at every rate the monitor lists: a page at a time */
+        add_button(a, x, y + 2, 40, "<", "res-prev");
+        add_button(a, x + 48, y + 2, 40, ">", "res-next");
+        char pg[64];
+        snprintf(pg, sizeof(pg), "%d-%d of %d", a->rpage * per + 1, LM_MIN(total, (a->rpage + 1) * per), total);
+        add(a, W_LABEL, (struct rect){ x + 100, y, w - 100, ROW_H }, pg);
+        y += ROW_H;
     }
     /* below the resolutions: the monitor's own settings (brightness, volume, input ...) are a program of their own */
     struct widget *mb = add(a, W_BUTTON, (struct rect){ x, y + 10, 260, ROW_H - 4 }, "Monitor settings...");
@@ -2473,6 +2492,10 @@ static void activate(struct app *a, int idx)
             a->win.redraw = true;
         } else if (!strcmp(w->key, "theme-tab")) {
             a->theme_tab = (LM_CLAMP(atoi(w->arg), 0, 3) + 3) % 4;       /* the buttons are Font, Colours, Buttons, Sizes */
+            a->focus = -1;
+            a->win.redraw = true;
+        } else if (!strcmp(w->key, "res-prev") || !strcmp(w->key, "res-next")) {
+            a->rpage += !strcmp(w->key, "res-next") ? 1 : -1;
             a->focus = -1;
             a->win.redraw = true;
         } else if (!strcmp(w->key, "font-prev") || !strcmp(w->key, "font-next")) {

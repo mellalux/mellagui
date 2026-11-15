@@ -7674,6 +7674,33 @@ esac
         mon = self.wait_window(c, 'mellagui.monitor')
         self.assertIsNotNone(mon, 'the "Monitor settings..." button did not open the monitor panel')
 
+    def test_the_resolution_list_has_every_refresh_rate_and_the_panel_pages_through_it(self):
+        exe = self.exe()
+        p, c, stop = self.private_compositor('mellagui-mon2', env={'MELLAGUI_HL_MORE_MODES': '1'})
+        modes = self.get_setting(c, 'resolutions').split(';')
+        names = [m.split('|')[0] for m in modes]
+        self.assertEqual(len(names), len(set(names)))
+        for want in ('800x500@60', '1280x720@60', '1280x720@50', '1280x720@30', '1280x720@25', '1280x720@24'):
+            self.assertIn(want, names)
+        self.assertIn('1280x720@24|interlaced', modes)                           # (an interlaced one says so)
+        self.assertIn('1280x720@30|generated, monitor: 48-120 Hz', modes)         # (a rate the monitor does not list, made up for its size, says so and what the monitor takes)
+        self.assertGreater(len(names), 7)
+        panel = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-mon2'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (panel.poll() is None) and (panel.kill(), panel.wait()))
+        win = self.wait_window(c, 'mellagui.settings')
+        x0, y0 = win['x'], win['y']
+        time.sleep(0.3)
+        c.click(x0 + 70, y0 + 12 + 3 * 32 + 14)                               # Display page
+        time.sleep(0.4)
+        # six modes a page (one row goes to the pager); the first mode row is at 104 + 2 * 28, the pager below the sixth
+        c.click(x0 + 160 + 48 + 20, y0 + 104 + 8 * 28 + 2 + 12)                # >
+        time.sleep(0.3)
+        c.click(x0 + 300, y0 + 104 + 2 * 28 + 14)                              # the first row of page 2 = the seventh mode
+        deadline = time.time() + 3
+        while time.time() < deadline and self.get_setting(c, 'resolution') != names[6]:
+            time.sleep(0.05)
+        self.assertEqual(self.get_setting(c, 'resolution'), names[6])
+
     def test_panel_display_and_sound_pages(self):
         exe = self.exe()
         state, env = self.audio_env()

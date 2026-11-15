@@ -33,6 +33,8 @@ struct lm_edid_info {
 
 /* False for a block that is not EDID. */
 bool lm_edid_info(const uint8_t *edid, size_t len, struct lm_edid_info *out);
+/* The vertical refresh range the monitor declares in its "range limits" descriptor (0xfd), in Hz; false when there is none. */
+bool lm_edid_vrange(const uint8_t *edid, size_t len, int *vmin, int *vmax);
 /* Readable manufacturer for a PNP id ("DEL" -> "Dell"); the id itself when it is not in the small table. */
 const char *lm_edid_vendor_name(const char *pnp);
 

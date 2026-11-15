@@ -3,12 +3,13 @@
 
 /*
  * A read-only reader of Excel workbooks for the file manager's preview, with no library: the .xlsx family (.xlsx .xlsm .xltx .xltm: Office Open XML) and the
- * old .xls (Excel 97-2003: BIFF8 records in an OLE2 compound file; see the end of xlsxread.c). An .xlsx workbook is a ZIP
+ * old .xls (Excel 97-2003: BIFF8 records in an OLE2 compound file) and the OpenDocument .ods / .ots (ZIP with content.xml); see the end of xlsxread.c.
+ * An .xlsx workbook is a ZIP
  * file of XML parts, so this reads the ZIP's central directory (stored and deflated entries; no ZIP64, no encryption), the sheet list (xl/workbook.xml and
  * its relationships), the styles (only to tell dates and percentages from plain numbers), the shared strings and one sheet's cells. Shown: text (shared,
  * inline, formula results), numbers (shortest form that keeps 15 digits), booleans, errors, dates and times (by the cell's number format and the workbook's
  * date system), percentages; a formula with no stored result shows as `=formula`. The first rows of a sheet are all that is read: its XML is inflated only
- * as far as `max_rows` rows need, so a sheet of a million rows costs the same as one of a thousand. NOT understood: Excel 5 / 95 (BIFF5) and password protected .xls files (an error line says so), .xlsb, number
+ * as far as `max_rows` rows need, so a sheet of a million rows costs the same as one of a thousand. NOT understood: Excel 5 / 95 (BIFF5) and password protected .xls files (an error line says so), .xlsb, flat .fods, number
  * formats other than date / time / percent (a currency shows as the plain number), merged cells, hidden rows and columns, charts, pictures. Every length that
  * comes from the file is checked and the sizes are capped, so a damaged file gives an error, not a crash.
  */
@@ -16,6 +17,7 @@
 #include <stddef.h>
 
 struct xl_book {
+    const char *kind;                   /* "Excel" or "OpenDocument" */
     int nsheets;
     char **sheet_name;                  /* the visible worksheets, in the workbook's order */
     int sheet;                          /* the one in `cell` */

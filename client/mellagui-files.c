@@ -2622,7 +2622,7 @@ static bool pv_sqlite(struct preview *pv, const char *path, int tab)
     return true;
 }
 
-/* ---- an Excel workbook: its sheets, the first rows of one as a table ---- */
+/* ---- a spreadsheet (Excel, OpenDocument): its sheets, the first rows of one as a table ---- */
 #define XL_MAX_ROWS 2000
 
 /* A workbook (.xlsx / .xlsm / .xltx / .xltm): the strip of sheet names and the first rows of sheet `sheet`, the row numbers in the first column and the
@@ -2645,7 +2645,7 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
     pv->top = pv->left = 0;
     if (r < 0) {
         pv->kind = PV_ERROR;
-        pv_linef(pv, &cap, "An Excel workbook that cannot be shown:");
+        pv_linef(pv, &cap, "A workbook that cannot be shown:");
         pv_linef(pv, &cap, "%s", err);
         return true;
     }
@@ -2683,11 +2683,11 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
             pv_linef(pv, &cap, "... the first %d rows", nrows);
         if (b.more_cols)
             pv_linef(pv, &cap, "... the first %d columns", CSV_MAX_COLS - 1);
-        snprintf(pv->info, sizeof(pv->info), "Excel, %d sheet%s, sheet %d: %s, %d row%s", b.nsheets, b.nsheets == 1 ? "" : "s", b.sheet + 1,
+        snprintf(pv->info, sizeof(pv->info), "%s, %d sheet%s, sheet %d: %s, %d row%s", b.kind ? b.kind : "Excel", b.nsheets, b.nsheets == 1 ? "" : "s", b.sheet + 1,
                  pv->dbname[pv->dbtab], nrows, nrows == 1 ? "" : "s");
     } else {
         pv_linef(pv, &cap, "(an empty sheet)");
-        snprintf(pv->info, sizeof(pv->info), "Excel, %d sheet%s, sheet %d: %s, empty", b.nsheets, b.nsheets == 1 ? "" : "s", b.sheet + 1, pv->dbname[pv->dbtab]);
+        snprintf(pv->info, sizeof(pv->info), "%s, %d sheet%s, sheet %d: %s, empty", b.kind ? b.kind : "Excel", b.nsheets, b.nsheets == 1 ? "" : "s", b.sheet + 1, pv->dbname[pv->dbtab]);
     }
     csv_free(&t);
     xl_free(&b);
@@ -3010,9 +3010,9 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
     } else if (n >= 12 && !memcmp(buf, "PAR1", 4) && (pv_parquet(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* a Parquet file: its first rows as a table */
     } else if (n >= 30 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8)) &&
-               (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt")) &&
+               (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots")) &&
                (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
-        /* an Excel workbook (.xlsx and the old binary .xls): the strip of sheets and the rows of the first one */
+        /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
     } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);
@@ -5394,7 +5394,7 @@ static void files_dump(struct app *a)
     }
     if (pv->kind == PV_TABLE)
         fprintf(f, "table cols=%d rows=%d left=%d\n", pv->tcols, pv->trows, pv->left);
-    for (int k = 0; k < 3 && pv->kind == PV_TABLE && pv->tabrows + 2 + k < pv->nlines; k++) {      /* the first data rows, blanks as _ (tests) */
+    for (int k = 0; k < 5 && pv->kind == PV_TABLE && pv->tabrows + 2 + k < pv->nlines; k++) {      /* the first data rows, blanks as _ (tests) */
         char sq[400];
         size_t o = 0;
         for (const char *c = pv->lines[pv->tabrows + 2 + k]; *c && o < sizeof(sq) - 2; c++)

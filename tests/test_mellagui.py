@@ -3242,6 +3242,83 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
         self.assertEqual(head['kind'], 'hex')
 
+    def test_files_previews_an_ods_spreadsheet_as_a_table(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='files-ods-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ns = ('xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+              'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" '
+              'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"')
+        def cell(text=None, vt=None, **attrs):
+            a = (' office:value-type="%s"' % vt if vt else '') + ''.join(' %s="%s"' % (k.replace('_', ':', 1).replace('__', '-'), v) for k, v in attrs.items())
+            return '<table:table-cell%s>%s</table:table-cell>' % (a, text if text is not None else '') if text is not None else '<table:table-cell%s/>' % a
+        def s_(t):
+            return cell('<text:p>%s</text:p>' % t, 'string')
+        rows = [
+            '<table:table-row>' + ''.join(s_(t) for t in ['Name', 'Qty', 'Date', 'Rate', 'Ok']) + '</table:table-row>',
+            '<table:table-row>' + cell('<text:p>Ada<text:s text:c="2"/><text:span>&amp; Bob</text:span></text:p><text:p>second</text:p>', 'string')
+            + cell('<text:p>12</text:p>', 'float', office_value='12') + cell('<text:p>15.03.2023</text:p>', 'date', office_date__value='2023-03-15')
+            + cell('<text:p>25.5%</text:p>', 'percentage', office_value='0.255') + cell('<text:p>TRUE</text:p>', 'boolean', office_boolean__value='true') + '</table:table-row>',
+            '<table:table-row>' + cell('<office:annotation><text:p>secret note</text:p></office:annotation><text:p>seen</text:p>', 'string')
+            + cell(None, 'float', office_value='3.5') + cell(None, 'date', office_date__value='2023-03-15T00:00:00')
+            + cell(None, 'percentage', office_value='0.5') + cell(None, 'boolean', office_boolean__value='false')
+            + cell(None, 'time', office_time__value='PT12H30M05S') + '<table:table-cell table:number-columns-repeated="1000"/></table:table-row>',
+            '<table:table-row table:number-rows-repeated="1"/>',
+            '<table:table-row>' + cell('<text:p>x</text:p>', 'string', table_number__columns__repeated='3') + '<table:covered-table-cell/>'
+            + '<table:table-cell table:formula="of:=SUM([.A1:.A3])"/>' + '</table:table-row>',
+            '<table:table-row table:number-rows-repeated="3">' + s_('rep') + '</table:table-row>',
+            '<table:table-row table:number-rows-repeated="1048000"><table:table-cell table:number-columns-repeated="16384"/></table:table-row>',
+        ]
+        def content(sheets):
+            return ('<?xml version="1.0" encoding="UTF-8"?><office:document-content %s><office:automatic-styles>'
+                    '<style:style style:name="ta1" style:family="table"><style:table-properties table:display="true"/></style:style>'
+                    '<style:style style:name="ta2" style:family="table"><style:table-properties table:display="false"/></style:style>'
+                    '</office:automatic-styles><office:body><office:spreadsheet>%s</office:spreadsheet></office:body></office:document-content>') % (ns, sheets)
+        sheets = ('<table:table table:name="Data" table:style-name="ta1">%s</table:table><table:table table:name="Hid" table:style-name="ta2"><table:table-row>%s</table:table-row></table:table>'
+                  '<table:table table:name="Big&amp;Long" table:style-name="ta1"><table:table-row table:number-rows-repeated="2500">%s%s</table:table-row></table:table>'
+                  '<table:table table:name="Empty" table:style-name="ta1"/>') % (''.join(rows), s_('secret'), s_('v'), cell(None, 'float', office_value='7'))
+        def ods(path, mimetype='application/vnd.oasis.opendocument.spreadsheet'):
+            with zipfile.ZipFile(path, 'w') as z:
+                z.writestr('mimetype', mimetype, compress_type=zipfile.ZIP_STORED)
+                z.writestr('content.xml', content(sheets), compress_type=zipfile.ZIP_DEFLATED)
+        ods(os.path.join(d, 'a_book.ods'))
+        ods(os.path.join(d, 'b_text.ods'), 'application/vnd.oasis.opendocument.text')                 # an ODT: no spreadsheet in it
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_book.ods)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['db']['tables'], extra['db']['tab'], extra['db']['name']), ('3', '0', 'Data'))      # Data, Big&Long, Empty (Hid is hidden)
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('7', '7'))      # row numbers + A..F; rows 1 2 3 5 6 7 8
+        v = [extra['row%d' % i]['v'] for i in range(1, 6)]
+        for want in ('1', 'Name', 'Qty', 'Ok'):
+            self.assertIn(want, v[0])
+        for want in ('2', 'Ada_&_Bob_second', '12', '15.03.2023', '25.5%', 'TRUE'):               # the text as displayed (the dump folds blanks)
+            self.assertIn(want, v[1])
+        self.assertNotIn('secret', v[2])                                                          # a comment is not the cell
+        for want in ('3', 'seen', '3.5', '2023-03-15', '50%', 'FALSE', '12:30:05'):                 # values with no stored text
+            self.assertIn(want, v[2])
+        for want in ('5', 'x_', '=SUM([.A1:.A3])'):                                              # repeated columns, a covered cell, a formula
+            self.assertIn(want, v[3])
+        self.assertIn('6', v[4])
+        self.assertIn('rep', v[4])
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(self.K_RIGHT)                                                          # Ctrl+Right: the next sheet (the hidden one is not there)
+        ctl.key(KEY_LEFTCTRL, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '1')
+        self.assertEqual((extra['db']['name'], extra['table']['cols'], extra['table']['rows']), ('Big&Long', '3', '2000'))    # a row repeated 2500 times, cut
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(self.K_RIGHT)
+        ctl.key(KEY_LEFTCTRL, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '2')
+        self.assertEqual(extra['db']['name'], 'Empty')
+        ctl.click(win['x'] + 466 + 8 + 20, win['y'] + 30 + 22 + 8)                     # a click on the first name of the strip: Data again
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '0')
+        self.assertEqual(extra['db']['name'], 'Data')
+        ctl.tap(self.K_DOWN)                                                           # b_text: a ZIP that is no spreadsheet: hex
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
+        self.assertEqual(head['kind'], 'hex')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

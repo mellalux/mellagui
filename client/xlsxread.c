@@ -2001,6 +2001,387 @@ done:
     return result;
 }
 
+/* ======================================================================================================================================================
+ * OpenDocument spreadsheets: .ods / .ots = a ZIP with content.xml (all sheets in one XML part).
+ * ====================================================================================================================================================== */
+
+#define PART_HUGE (128u << 20)                  /* content.xml: as much as this when the first parts did not reach the wanted sheet */
+#define ODS_MAX_REPEAT 16384                    /* a cell repeated more often than this is cut */
+#define ODS_STYLES 32
+
+struct ods_out {
+    char *name[MAX_SHEETS];
+    bool hidden[MAX_SHEETS];
+    int nt;                             /* the tables (sheets) seen */
+    int vis;                            /* how many of them are eligible (visible, or all) */
+    bool sel_found, sel_done;
+    struct grid g;
+};
+
+static void ods_out_free(struct ods_out *o)
+{
+    for (int i = 0; i < o->nt; i++)
+        free(o->name[i]);
+    for (int r = 0; r < o->g.nrow; r++)
+        row_free(&o->g.row[r]);
+    free(o->g.row);
+    memset(o, 0, sizeof(*o));
+}
+
+/* Text of a cell: whitespace runs of the XML are one blank (text:s adds real ones). */
+static void ods_text(struct xbuf *b, struct xbuf *tmp, const char *p, size_t n)
+{
+    xb_reset(tmp);
+    xb_add_xml(tmp, p, n);
+    for (size_t i = 0; i < tmp->n; i++) {
+        char c = tmp->s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (b->n && b->s[b->n - 1] != ' ')
+                xb_add(b, " ", 1);
+        } else {
+            xb_add(b, &c, 1);
+        }
+    }
+}
+
+/* What a cell shows when the file stored no text for it (a library wrote it): from the typed value. */
+static char *ods_fallback(const char *vtype, const char *val, const char *date, const char *tim, const char *boolv, const char *str, const char *formula)
+{
+    char out[160] = "";
+    if (!strcmp(vtype, "float") || !strcmp(vtype, "currency")) {
+        if (val[0])
+            fmt_number(val, K_PLAIN, false, out, sizeof(out));
+    } else if (!strcmp(vtype, "percentage")) {
+        char *endp;
+        double v = strtod(val, &endp);
+        if (val[0] && !*endp) {
+            fmt_plain(v * 100, out, sizeof(out) - 2);
+            strcat(out, "%");
+        }
+    } else if (!strcmp(vtype, "date")) {
+        snprintf(out, sizeof(out), "%s", date);
+        char *t = strchr(out, 'T');
+        if (t) {
+            if (!strcmp(t, "T00:00:00") || !strncmp(t, "T00:00:00.", 10))
+                *t = 0;
+            else
+                *t = ' ';
+        }
+    } else if (!strcmp(vtype, "time")) {
+        int h = 0, m = 0;
+        double sec = 0;
+        if (sscanf(tim, "PT%dH%dM%lfS", &h, &m, &sec) == 3)
+            snprintf(out, sizeof(out), "%02d:%02d:%02d", h, m, (int)sec);
+        else
+            snprintf(out, sizeof(out), "%s", tim);
+    } else if (!strcmp(vtype, "boolean")) {
+        snprintf(out, sizeof(out), "%s", !strcmp(boolv, "true") ? "TRUE" : boolv[0] ? "FALSE" : "");
+    } else if (!strcmp(vtype, "string")) {
+        snprintf(out, sizeof(out), "%s", str);
+    }
+    if (!out[0] && formula[0])
+        snprintf(out, sizeof(out), "=%.100s", strncmp(formula, "of:=", 4) ? (formula[0] == '=' ? formula + 1 : formula) : formula + 4);
+    return cell_text(out);
+}
+
+static void ods_parse(const char *buf, size_t len, int sel, bool allow_hidden, int max_rows, int max_cols, struct ods_out *o)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf a = { 0 }, text = { 0 }, tmp = { 0 }, vt = { 0 }, val = { 0 }, date = { 0 }, tim = { 0 }, boolv = { 0 }, str = { 0 }, formula = { 0 };
+    char hid_style[ODS_STYLES][48];
+    int nhid = 0;
+    char cur_tstyle[48] = "";
+    int depth_t = 0, skip = 0;
+    bool in_sel = false, in_row = false, in_cell = false, in_p = false, fast = false;
+    int row = 1, nrr = 1, col = 0, nrep = 1;
+    bool covered = false;
+    struct { int col; char *s; } *rc = NULL;
+    int nrc = 0, caprc = 0;
+    struct grid *g = &o->g;
+    struct gb gb = { .g = g, .max_rows = max_rows, .max_cols = max_cols };
+    g->maxsst = -1;
+    g->maxcol = -1;
+    while (true) {
+        if (fast) {                                                     /* the wanted sheet is done: only the names of the later sheets are wanted */
+            const char *q = memmem(x.p, (size_t)(x.end - x.p), "<table:table ", 13);
+            if (!q)
+                break;
+            x.p = q;
+        }
+        if (xml_next(&x, &e) == XE_END)
+            break;
+        bool open = e.kind == XE_OPEN || e.kind == XE_SELF;
+        if (e.kind == XE_TEXT) {
+            if (in_cell && in_p && !skip)
+                ods_text(&text, &tmp, e.text, e.tlen);
+            continue;
+        }
+        if (is(&e, "annotation") || is(&e, "frame") || is(&e, "note")) {          /* a comment, a picture, a footnote: not the cell's text */
+            if (e.kind == XE_OPEN)
+                skip++;
+            else if (e.kind == XE_CLOSE && skip)
+                skip--;
+            continue;
+        }
+        if (skip)
+            continue;
+        if (is(&e, "style") && open) {                                  /* automatic styles: which table style hides a sheet */
+            cur_tstyle[0] = 0;
+            if (e.kind == XE_OPEN && xattr(&e, "family", &a) && !strcmp(xb_str(&a), "table") && xattr(&e, "name", &a))
+                snprintf(cur_tstyle, sizeof(cur_tstyle), "%s", xb_str(&a));
+        } else if (is(&e, "style") && e.kind == XE_CLOSE) {
+            cur_tstyle[0] = 0;
+        } else if (is(&e, "table-properties") && open && cur_tstyle[0] && nhid < ODS_STYLES) {
+            if (xattr(&e, "display", &a) && !strcmp(xb_str(&a), "false"))
+                snprintf(hid_style[nhid++], sizeof(hid_style[0]), "%s", cur_tstyle);
+        } else if (is(&e, "table")) {
+            if (e.kind == XE_CLOSE) {
+                if (depth_t > 0 && --depth_t == 0 && in_sel) {
+                    in_sel = false;
+                    o->sel_done = true;
+                    fast = true;
+                }
+                continue;
+            }
+            if (depth_t > 0) {                                          /* a table inside a table: not a sheet */
+                if (e.kind == XE_OPEN)
+                    depth_t++;
+                continue;
+            }
+            if (o->nt < MAX_SHEETS) {
+                bool hidden = false;
+                if (xattr(&e, "style-name", &a))
+                    for (int i = 0; i < nhid; i++)
+                        if (!strcmp(hid_style[i], xb_str(&a)))
+                            hidden = true;
+                o->name[o->nt] = xattr(&e, "name", &a) ? cell_text(xb_str(&a)) : strdup("");
+                o->hidden[o->nt] = hidden;
+                o->nt++;
+                if (!hidden || allow_hidden) {
+                    if (o->vis == sel && !o->sel_found && !o->sel_done) {
+                        o->sel_found = true;
+                        in_sel = e.kind == XE_OPEN;
+                        row = 1;
+                        if (e.kind == XE_SELF) {
+                            o->sel_done = true;
+                            fast = true;
+                        }
+                    }
+                    o->vis++;
+                }
+            }
+            if (e.kind == XE_OPEN)
+                depth_t = fast ? 0 : 1;                                 /* (in the names-only mode no closing tags are looked at) */
+        } else if (!in_sel) {
+            continue;
+        } else if (is(&e, "table-row")) {
+            if (open) {
+                nrr = xattr(&e, "number-rows-repeated", &a) ? atoi(xb_str(&a)) : 1;
+                nrr = nrr < 1 ? 1 : nrr > 1048576 ? 1048576 : nrr;
+                for (int i = 0; i < nrc; i++)
+                    free(rc[i].s);                              /* a row that was never closed */
+                in_row = true;
+                col = 0;
+                nrc = 0;
+            }
+            if (e.kind == XE_CLOSE || e.kind == XE_SELF) {
+                if (in_row && nrc > 0) {
+                    for (int k = 0; k < nrr && !gb.stop; k++)
+                        for (int i = 0; i < nrc; i++)
+                            gb_cell(&gb, row + k, rc[i].col, strdup(rc[i].s), -1);
+                }
+                for (int i = 0; i < nrc; i++)
+                    free(rc[i].s);
+                nrc = 0;
+                if (in_row)
+                    row += nrr;
+                in_row = false;
+                if (gb.stop) {                                          /* enough rows: the rest of the file only has names to give */
+                    in_sel = false;
+                    o->sel_done = true;
+                    fast = true;
+                    depth_t = 0;
+                }
+            }
+        } else if ((is(&e, "table-cell") || is(&e, "covered-table-cell")) && in_row) {
+            if (open) {
+                covered = is(&e, "covered-table-cell");
+                nrep = xattr(&e, "number-columns-repeated", &a) ? atoi(xb_str(&a)) : 1;
+                nrep = nrep < 1 ? 1 : nrep > ODS_MAX_REPEAT ? ODS_MAX_REPEAT : nrep;
+                xb_reset(&vt);
+                xb_reset(&val);
+                xb_reset(&date);
+                xb_reset(&tim);
+                xb_reset(&boolv);
+                xb_reset(&str);
+                xb_reset(&formula);
+                xb_reset(&text);
+                if (!covered) {
+                    if (xattr(&e, "value-type", &a))
+                        xb_add(&vt, xb_str(&a), a.n);
+                    if (xattr(&e, "value", &a))
+                        xb_add(&val, xb_str(&a), a.n);
+                    if (xattr(&e, "date-value", &a))
+                        xb_add(&date, xb_str(&a), a.n);
+                    if (xattr(&e, "time-value", &a))
+                        xb_add(&tim, xb_str(&a), a.n);
+                    if (xattr(&e, "boolean-value", &a))
+                        xb_add(&boolv, xb_str(&a), a.n);
+                    if (xattr(&e, "string-value", &a))
+                        xb_add(&str, xb_str(&a), a.n);
+                    if (xattr(&e, "formula", &a))
+                        xb_add(&formula, xb_str(&a), a.n);
+                }
+                in_cell = e.kind == XE_OPEN;
+                in_p = false;
+            }
+            if (e.kind == XE_CLOSE || e.kind == XE_SELF) {
+                char *shown = NULL;
+                if (!covered) {
+                    if (text.n)
+                        shown = cell_text(xb_str(&text));
+                    else
+                        shown = ods_fallback(xb_str(&vt), xb_str(&val), xb_str(&date), xb_str(&tim), xb_str(&boolv), xb_str(&str), xb_str(&formula));
+                }
+                if (shown && shown[0]) {
+                    for (int k = 0; k < nrep; k++) {
+                        if (col + k >= max_cols) {
+                            g->more_cols = true;
+                            break;
+                        }
+                        if (nrc == caprc) {
+                            caprc = caprc ? caprc * 2 : 16;
+                            rc = realloc(rc, (size_t)caprc * sizeof(*rc));
+                        }
+                        rc[nrc].col = col + k;
+                        rc[nrc++].s = strdup(shown);
+                    }
+                }
+                free(shown);
+                col += nrep;
+                in_cell = in_p = false;
+            }
+        } else if (in_cell) {
+            if (is(&e, "p") || is(&e, "h")) {
+                if (e.kind == XE_OPEN) {
+                    if (text.n && text.s[text.n - 1] != ' ')
+                        xb_add(&text, " ", 1);
+                    in_p = true;
+                } else {
+                    in_p = false;
+                }
+            } else if (in_p && is(&e, "s") && open) {
+                int n = xattr(&e, "c", &a) ? atoi(xb_str(&a)) : 1;
+                for (int k = 0; k < n && k < 64; k++)
+                    xb_add(&text, " ", 1);
+            } else if (in_p && (is(&e, "tab") || is(&e, "line-break")) && open) {
+                xb_add(&text, " ", 1);
+            }
+        }
+    }
+    gb_flush(&gb);
+    if (gb.have)
+        row_free(&gb.cur);
+    for (int i = 0; i < nrc; i++)
+        free(rc[i].s);
+    free(rc);
+    free(a.s);
+    free(text.s);
+    free(tmp.s);
+    free(vt.s);
+    free(val.s);
+    free(date.s);
+    free(tim.s);
+    free(boolv.s);
+    free(str.s);
+    free(formula.s);
+}
+
+/* The content.xml read in stages (2 MB, 32 MB, 128 MB of it): enough when the wanted sheet is done and the part was read whole, or 32 MB were looked at. */
+static int ods_scan(const struct zip *z, int sel, bool allow_hidden, int max_rows, int max_cols, struct ods_out *o, const char **why)
+{
+    for (size_t cap = PART_FIRST;; cap = cap == PART_FIRST ? PART_BIG : PART_HUGE) {
+        size_t len;
+        char *c = zip_read(z, "content.xml", cap, &len, why);
+        if (!c)
+            return -1;
+        ods_parse(c, len, sel, allow_hidden, max_rows, max_cols, o);
+        free(c);
+        if (len < cap || (o->sel_done && cap >= PART_BIG) || cap >= PART_HUGE)
+            return 0;
+        ods_out_free(o);
+    }
+}
+
+static int ods_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
+{
+    memset(b, 0, sizeof(*b));
+    struct zip z;
+    int zr = zip_open(&z, path, err, errn);
+    if (zr < 0)
+        return zr;
+    size_t len;
+    const char *why = NULL;
+    int result = -2;
+    struct ods_out o = { 0 };
+    char *mt = zip_read(&z, "mimetype", 256, &len, &why);
+    bool ok = mt && strstr(mt, "opendocument.spreadsheet");
+    bool has_mt = mt != NULL;
+    free(mt);
+    if (!has_mt && zip_find(&z, "content.xml")) {                       /* no mimetype part: look at the content */
+        char *c = zip_read(&z, "content.xml", 4096, &len, &why);
+        ok = c && strstr(c, "office:spreadsheet");
+        free(c);
+    }
+    if (!ok) {                                                          /* a text document, a presentation, or no OpenDocument file */
+        zip_close(&z);
+        return -1;
+    }
+    bool all = false;
+    int sel = sheet < 0 ? 0 : sheet;
+    if (ods_scan(&z, sel, false, max_rows, max_cols, &o, &why) < 0) {
+        seterr(err, errn, why ? why : "The spreadsheet has no content.xml.");
+        goto done;
+    }
+    int nvis = 0;
+    for (int i = 0; i < o.nt; i++)
+        nvis += !o.hidden[i];
+    if (nvis == 0 && o.nt > 0) {                                        /* only hidden sheets: show them */
+        all = true;
+        ods_out_free(&o);
+        if (ods_scan(&z, sel, true, max_rows, max_cols, &o, &why) < 0)
+            goto done;
+        nvis = o.nt;
+    } else if (!o.sel_found && nvis > 0) {                              /* a sheet number past the last one: the last */
+        sel = nvis - 1;
+        ods_out_free(&o);
+        if (ods_scan(&z, sel, false, max_rows, max_cols, &o, &why) < 0)
+            goto done;
+    }
+    if (o.nt == 0) {
+        seterr(err, errn, "A spreadsheet with no sheets.");
+        goto done;
+    }
+    b->kind = "OpenDocument";
+    b->nsheets = nvis;
+    b->sheet_name = calloc((size_t)nvis, sizeof(char *));
+    for (int i = 0, k = 0; i < o.nt && k < nvis; i++)
+        if (all || !o.hidden[i])
+            b->sheet_name[k++] = strdup(o.name[i]);
+    b->sheet = sel < nvis ? sel : nvis - 1;
+    b->more_rows = o.g.more_rows;
+    b->more_cols = o.g.more_cols;
+    fill_book(b, &o.g, NULL);
+    result = 0;
+done:
+    if (result != 0)
+        xl_free(b);
+    ods_out_free(&o);
+    zip_close(&z);
+    return result;
+}
+
 int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
 {
     uint8_t magic[8] = { 0 };
@@ -2009,5 +2390,15 @@ int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_b
         return -1;
     bool ole = pread_all(fd, magic, 8, 0) && !memcmp(magic, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8);
     close(fd);
-    return ole ? xls_read(path, sheet, max_rows, max_cols, b, err, errn) : xlsx_read(path, sheet, max_rows, max_cols, b, err, errn);
+    int r;
+    if (ole) {
+        r = xls_read(path, sheet, max_rows, max_cols, b, err, errn);
+    } else {
+        r = xlsx_read(path, sheet, max_rows, max_cols, b, err, errn);
+        if (r == -1)
+            r = ods_read(path, sheet, max_rows, max_cols, b, err, errn);          /* a ZIP with no xl/workbook.xml: maybe an OpenDocument sheet */
+    }
+    if (r == 0)
+        b->kind = b->kind ? b->kind : "Excel";
+    return r;
 }

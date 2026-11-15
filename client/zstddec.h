@@ -13,5 +13,7 @@
 
 /* Returns the number of bytes written to `out` (at most `outcap`), -1 on error. */
 long lm_zstd_decompress(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap);
+/* Like it, but a stream that is cut, damaged or longer than `outcap` gives what was decoded before (*complete = 0); -1 only when nothing was. */
+long lm_zstd_prefix(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap, int *complete);
 
 #endif

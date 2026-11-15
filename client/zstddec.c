@@ -446,33 +446,40 @@ static bool block(struct zctx *z, const uint8_t *p, size_t len, uint8_t *out, si
     return true;
 }
 
-long lm_zstd_decompress(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap)
+static long zfail(bool prefix, size_t op, int *complete)
+{
+    if (complete)
+        *complete = 0;
+    return prefix && op ? (long)op : -1;
+}
+
+static long zstd_run(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap, bool prefix, int *complete)
 {
     const uint8_t *p = in, *end = in + inlen;
     size_t op = 0;
     static struct zctx z;
     while (p < end) {
-        if (end - p < 4) return -1;
+        if (end - p < 4) return zfail(prefix, op, complete);
         uint32_t magic = p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
         p += 4;
         if ((magic & 0xfffffff0u) == 0x184d2a50u) {                     /* a skippable frame */
-            if (end - p < 4) return -1;
+            if (end - p < 4) return zfail(prefix, op, complete);
             uint32_t sz = p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
             p += 4;
-            if (sz > (size_t)(end - p)) return -1;
+            if (sz > (size_t)(end - p)) return zfail(prefix, op, complete);
             p += sz;
             continue;
         }
-        if (magic != 0xfd2fb528u || p >= end) return -1;
+        if (magic != 0xfd2fb528u || p >= end) return zfail(prefix, op, complete);
         unsigned fhd = *p++;
         int fcs_flag = fhd >> 6, single = (fhd >> 5) & 1, checksum = (fhd >> 2) & 1, dict = fhd & 3;
-        if (fhd & 8) return -1;
-        if (!single) { if (p >= end) return -1; p++; }                  /* the window descriptor: the output buffer is the window */
+        if (fhd & 8) return zfail(prefix, op, complete);
+        if (!single) { if (p >= end) return zfail(prefix, op, complete); p++; }                  /* the window descriptor: the output buffer is the window */
         size_t dsz = dict == 0 ? 0 : dict == 1 ? 1 : dict == 2 ? 2 : 4;
         size_t fsz = fcs_flag == 0 ? (single ? 1 : 0) : fcs_flag == 1 ? 2 : fcs_flag == 2 ? 4 : 8;
-        if ((size_t)(end - p) < dsz + fsz) return -1;
+        if ((size_t)(end - p) < dsz + fsz) return zfail(prefix, op, complete);
         for (size_t i = 0; i < dsz; i++)
-            if (p[i]) return -1;                                        /* a dictionary: not supported */
+            if (p[i]) return zfail(prefix, op, complete);                                        /* a dictionary: not supported */
         p += dsz + fsz;
         memset(&z, 0, sizeof(z));
         z.rep[0] = 1;
@@ -480,34 +487,46 @@ long lm_zstd_decompress(const uint8_t *in, size_t inlen, uint8_t *out, size_t ou
         z.rep[2] = 8;
         size_t base = op;
         for (;;) {
-            if (end - p < 3) return -1;
+            if (end - p < 3) return zfail(prefix, op, complete);
             uint32_t bh = p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16;
             p += 3;
             int last = bh & 1, type = (bh >> 1) & 3;
             size_t bs = bh >> 3;
-            if (type == 3 || bs > MAX_BLOCK) return -1;
+            if (type == 3 || bs > MAX_BLOCK) return zfail(prefix, op, complete);
             if (type == 1) {
-                if (p >= end || op + bs > outcap) return -1;
+                if (p >= end || op + bs > outcap) return zfail(prefix, op, complete);
                 memset(out + op, p[0], bs);
                 op += bs;
                 p++;
             } else {
-                if (bs > (size_t)(end - p)) return -1;
+                if (bs > (size_t)(end - p)) return zfail(prefix, op, complete);
                 if (type == 0) {
-                    if (op + bs > outcap) return -1;
+                    if (op + bs > outcap) return zfail(prefix, op, complete);
                     memcpy(out + op, p, bs);
                     op += bs;
                 } else if (!block(&z, p, bs, out, outcap, &op, base)) {
-                    return -1;
+                    return zfail(prefix, op, complete);
                 }
                 p += bs;
             }
             if (last) break;
         }
         if (checksum) {
-            if (end - p < 4) return -1;
+            if (end - p < 4) return zfail(prefix, op, complete);
             p += 4;
         }
     }
+    if (complete)
+        *complete = 1;
     return (long)op;
+}
+
+long lm_zstd_decompress(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap)
+{
+    return zstd_run(in, inlen, out, outcap, false, NULL);
+}
+
+long lm_zstd_prefix(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap, int *complete)
+{
+    return zstd_run(in, inlen, out, outcap, true, complete);
 }

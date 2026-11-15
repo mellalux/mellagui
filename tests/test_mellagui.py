@@ -3968,6 +3968,116 @@ class TestClients(Base):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith(name) and o[0].get('loaded') == '1')
             self.assertEqual(head['kind'], kind, (name, head))
 
+    def test_files_previews_xz_bzip2_zstd_deb_rpm_and_7z_archives(self):
+        import gzip
+        import struct
+        sys.path.insert(0, os.path.join(ROOT, 'tests'))
+        import sevenz_writer
+        d = tempfile.mkdtemp(prefix='files-arc2-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        def listing(path):
+            r = subprocess.run([exe, '--arc-list', path], capture_output=True, text=True, timeout=60)
+            if r.returncode:
+                return r.returncode, None, r.stderr.strip()
+            lines = r.stdout.splitlines()
+            return 0, lines[0], [tuple(l.split('\t')) for l in lines[1:]]
+        src = os.path.join(d, 'src')
+        os.makedirs(os.path.join(src, 'a', 'b'))
+        open(os.path.join(src, 'a', 'one.txt'), 'w').write('one\n' * 300)
+        open(os.path.join(src, 'a', 'b', 'two.bin'), 'wb').write(bytes(range(256)) * 50)
+        open(os.path.join(src, 'empty'), 'w').close()
+        tar = os.path.join(d, 'x.tar')
+        subprocess.run(['tar', '-C', src, '-cf', tar, '.'], check=True)
+        want = {'a/': -1, 'a/b/': -1, 'a/one.txt': 1200, 'a/b/two.bin': 12800, 'empty': 0}
+        def check_names(entries):
+            got = {n.lstrip('./'): int(sz) for n, sz, t in entries if n not in ('./', '.')}
+            self.assertEqual(got, want)
+        for tool, ext, args in (('xz', 'xz', ['-c']), ('bzip2', 'bz2', ['-c']), ('zstd', 'zst', ['-q', '-c'])):
+            if not shutil.which(tool):
+                continue
+            data = subprocess.run([tool] + args + [tar], capture_output=True).stdout
+            path = os.path.join(d, 'x.tar.' + ext)
+            open(path, 'wb').write(data)
+            rc, head, entries = listing(path)
+            self.assertEqual(rc, 0, (ext, entries))
+            self.assertTrue(head.startswith('kind=TAR.' + ext.upper()), head)
+            check_names(entries)
+            single = os.path.join(d, 'one.txt.' + ext)                           # a single compressed file: its name and unpacked size
+            open(os.path.join(d, 'one.txt'), 'w').write('hello\n' * 1000)
+            open(single, 'wb').write(subprocess.run([tool] + args + [os.path.join(d, 'one.txt')], capture_output=True).stdout)
+            rc, head, entries = listing(single)
+            self.assertEqual((rc, entries[0][:2]), (0, ('one.txt', '6000')), (ext, entries))
+            open(path + '.cut', 'wb').write(data[:len(data) // 2])                # cut in the middle: an error or a partial list, never a crash
+            r = subprocess.run([exe, '--arc-list', path + '.cut'], capture_output=True, text=True, timeout=60)
+            self.assertIn(r.returncode, (0, 2), r.stderr)
+        if shutil.which('dpkg-deb'):                                            # a Debian package in the four compressions
+            pkg = os.path.join(d, 'pkg')
+            os.makedirs(os.path.join(pkg, 'DEBIAN'))
+            os.makedirs(os.path.join(pkg, 'usr', 'bin'))
+            open(os.path.join(pkg, 'DEBIAN', 'control'), 'w').write('Package: x\nVersion: 1\nArchitecture: all\nMaintainer: t\nDescription: t\n')
+            open(os.path.join(pkg, 'usr', 'bin', 'x'), 'w').write('#!/bin/sh\necho hi\n')
+            for comp in ('gzip', 'xz', 'zstd', 'none'):
+                deb = os.path.join(d, 'x_%s.deb' % comp)
+                if subprocess.run(['dpkg-deb', '-Z' + comp, '--root-owner-group', '-b', pkg, deb], capture_output=True).returncode:
+                    continue
+                rc, head, entries = listing(deb)
+                self.assertEqual(rc, 0, (comp, entries))
+                self.assertTrue(head.startswith('kind=DEB'), head)
+                self.assertIn(('usr/bin/x', '18'), [(n.lstrip('./'), sz) for n, sz, t in entries])
+        if shutil.which('ar'):
+            subprocess.run(['ar', 'rcs', os.path.join(d, 'libx.a'), os.path.join(src, 'a', 'one.txt'), os.path.join(src, 'empty')], check=True)
+            rc, head, entries = listing(os.path.join(d, 'libx.a'))
+            self.assertEqual((rc, [(n, sz) for n, sz, t in entries]), (0, [('one.txt', '1200'), ('empty', '0')]))
+        # an RPM made by hand: lead, empty signature header, a header with name / version / release / arch, a cpio payload (gzip and xz)
+        if shutil.which('cpio'):
+            files = subprocess.run(['find', '.'], cwd=src, capture_output=True, text=True).stdout
+            cpio = subprocess.run(['cpio', '-o', '-H', 'newc', '--quiet', '-D', src], input=files.encode(), capture_output=True).stdout
+            def rpm(payload):
+                store = b''
+                index = b''
+                for tag, val in ((1000, 'demo'), (1001, '1.2'), (1002, '3.el9'), (1022, 'noarch')):
+                    index += struct.pack('>IIII', tag, 6, len(store), 1)
+                    store += val.encode() + b'\0'
+                return b'\xed\xab\xee\xdb\x03\x00' + bytes(90) + b'\x8e\xad\xe8\x01' + bytes(4) + struct.pack('>II', 0, 0) + b'\x8e\xad\xe8\x01' + bytes(4) + struct.pack('>II', 4, len(store)) + index + store + payload
+            import lzma
+            for name, payload in (('d.rpm', gzip.compress(cpio)), ('e.rpm', lzma.compress(cpio, format=lzma.FORMAT_XZ)), ('f.rpm', cpio)):
+                open(os.path.join(d, name), 'wb').write(rpm(payload))
+                rc, head, entries = listing(os.path.join(d, name))
+                self.assertEqual(rc, 0, (name, entries))
+                self.assertIn('Package demo 1.2-3.el9 noarch', head, head)
+                got = {n.lstrip('./'): int(sz) for n, sz, t in entries}
+                self.assertEqual((got.get('a/one.txt'), got.get('a/b/two.bin'), got.get('empty')), (1200, 12800, 0), name)
+        # a 7z archive, with the header packed (what 7-Zip does) and plain
+        for enc in (True, False):
+            path = os.path.join(d, 'g%d.7z' % enc)
+            sevenz_writer.write(path, [('docs', None, 1700000000), ('docs/a.txt', b'hello ' * 100, 1700000100), ('docs/empty.txt', b'', 1700000200), ('b.bin', bytes(range(256)) * 10, 1700000300),
+                                       ('Tere \u00f6\u00f6bik.txt', b'x', 1700000400)], enc)
+            rc, head, entries = listing(path)
+            self.assertEqual(rc, 0, entries)
+            self.assertEqual([(n, sz) for n, sz, t in entries], [('docs/', '-1'), ('docs/a.txt', '600'), ('docs/empty.txt', '0'), ('b.bin', '2560'), ('Tere \u00f6\u00f6bik.txt', '1')])
+            self.assertEqual(entries[1][2], '2023-11-14 22:15')
+        open(os.path.join(d, 'h.7z'), 'wb').write(open(os.path.join(d, 'g1.7z'), 'rb').read()[:60])
+        self.assertIn(subprocess.run([exe, '--arc-list', os.path.join(d, 'h.7z')], capture_output=True).returncode, (1, 2))
+        # in the pane they are tables
+        dump = os.path.join(d, 'files.dump')
+        names = [n for n in ('x.tar.xz', 'x.tar.bz2', 'x_zstd.deb', 'd.rpm', 'g1.7z') if os.path.exists(os.path.join(d, n))]
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_HOME)
+        time.sleep(0.3)
+        for name in names:
+            for _ in range(60):
+                head, extra = self.files_dump(dump)
+                if head.get('want', '').endswith('/' + name):
+                    break
+                ctl.tap(self.K_DOWN)
+                time.sleep(0.3)
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith('/' + name) and o[0].get('loaded') == '1')
+            self.assertEqual(head['kind'], 'table', (name, head))
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib

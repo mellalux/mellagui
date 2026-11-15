@@ -1,6 +1,8 @@
 #include "archread.h"
 
 #include "../src/img.h"
+#include "decomp.h"
+#include "zstddec.h"
 
 #include <fcntl.h>
 #include <stdbool.h>
@@ -530,6 +532,915 @@ static int gz_list(int fd, uint64_t fsize, const char *path, int max, struct arc
     return 0;
 }
 
+
+/* ---- xz, bzip2, zstd (a single file, or a TAR inside), and the formats that carry such streams: ar / .deb, .rpm (cpio), 7z ---- */
+static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+enum { CK_NONE, CK_GZ, CK_XZ, CK_BZ2, CK_ZST };
+
+static int comp_kind(const uint8_t *p, size_t n)
+{
+    if (n >= 2 && p[0] == 0x1f && p[1] == 0x8b)
+        return CK_GZ;
+    if (n >= 6 && !memcmp(p, "\xfd" "7zXZ\0", 6))
+        return CK_XZ;
+    if (n >= 10 && !memcmp(p, "BZh", 3) && p[3] >= '1' && p[3] <= '9' && ((!memcmp(p + 4, "\x31\x41\x59\x26\x53\x59", 6)) || !memcmp(p + 4, "\x17\x72\x45\x38\x50\x90", 6)))
+        return CK_BZ2;
+    if (n >= 4 && !memcmp(p, "\x28\xb5\x2f\xfd", 4))
+        return CK_ZST;
+    return CK_NONE;
+}
+
+static const char *const comp_names[] = { "", "GZIP", "XZ", "BZIP2", "ZSTD" };
+static const char *const tar_names[] = { "TAR", "TAR.GZ", "TAR.XZ", "TAR.BZ2", "TAR.ZST" };
+
+/* The first `cap` bytes of a compressed stream in memory (malloc'd, *got = the count; NULL on failure); *complete: the whole stream is in it. */
+static uint8_t *unpack_mem(const uint8_t *in, size_t n, int kind, size_t cap, long *got, int *complete, const char **why)
+{
+    uint8_t *out = malloc(cap + 1);
+    if (!out)
+        return NULL;
+    long r = -1;
+    *complete = 0;
+    if (kind == CK_XZ) {
+        r = lm_xz_prefix(in, n, out, cap, complete, why);
+    } else if (kind == CK_BZ2) {
+        r = lm_bzip2_prefix(in, n, out, cap, complete);
+    } else if (kind == CK_ZST) {
+        r = lm_zstd_prefix(in, n, out, cap, complete);
+    } else if (kind == CK_GZ && n >= 18 && in[2] == 8) {
+        unsigned flg = in[3];
+        size_t p = 10;
+        if ((flg & 4) && p + 2 <= n)
+            p += 2 + u16(in + p);
+        if (flg & 8) {
+            while (p < n && in[p])
+                p++;
+            p++;
+        }
+        if (flg & 16) {
+            while (p < n && in[p])
+                p++;
+            p++;
+        }
+        if (flg & 2)
+            p += 2;
+        if (p < n) {
+            r = lm_inflate_prefix(in + p, n - p, out, cap);
+            *complete = r >= 0 && (size_t)r < cap;
+        }
+    }
+    if (r < 0) {
+        free(out);
+        return NULL;
+    }
+    *got = r;
+    return out;
+}
+
+/* A compressed file: what is inside is a TAR (listed) or one file (its name is the file's without the compressor's extension). */
+static int stream_list(int fd, uint64_t fsize, const char *path, int kind, int max, struct arc_list *a, char *err, size_t errn)
+{
+    size_t rn = fsize < GZ_CAP ? (size_t)fsize : GZ_CAP;
+    uint8_t *in = malloc(rn + 1);
+    if (!in || !pread_all(fd, in, rn, 0)) {
+        free(in);
+        seterr(err, errn, "A file that cannot be read.");
+        return -2;
+    }
+    long got = 0;
+    int complete = 0;
+    const char *why = NULL;
+    uint8_t *out = unpack_mem(in, rn, kind, GZ_CAP, &got, &complete, &why);
+    free(in);
+    if (!out) {
+        seterr(err, errn, why ? why : "A compressed file that does not unpack.");
+        return -2;
+    }
+    if (got >= 512 && tar_header_ok(out)) {
+        snprintf(a->kind, sizeof(a->kind), "%s", tar_names[kind]);
+        struct tarsrc s = { .fd = -1, .mem = out, .size = (uint64_t)got };
+        tar_list(&s, max, a, !complete && (size_t)got >= GZ_CAP);
+    } else {
+        snprintf(a->kind, sizeof(a->kind), "%s", comp_names[kind]);
+        a->has_packed = 1;
+        char base[256];
+        const char *slash = strrchr(path, '/');
+        snprintf(base, sizeof(base), "%s", slash ? slash + 1 : path);
+        size_t bl = strlen(base);
+        static const char *const exts[] = { "", ".gz", ".xz", ".bz2", ".zst" };
+        size_t el = strlen(exts[kind]);
+        if (bl > el && !strcmp(base + bl - el, exts[kind]))
+            base[bl - el] = 0;
+        arc_add(a, max, strdup(base), NULL, complete ? got : -1, (long long)fsize);
+        if (!complete)
+            snprintf(a->note, sizeof(a->note), "Unpacked only as far as the first 64 MB: the real size is bigger.");
+    }
+    free(out);
+    return 0;
+}
+
+/* ---- ar (and .deb) ---- */
+static long long dec_field(const uint8_t *p, size_t n)
+{
+    long long v = 0;
+    size_t i = 0;
+    while (i < n && p[i] == ' ')
+        i++;
+    for (; i < n && p[i] >= '0' && p[i] <= '9'; i++)
+        v = v * 10 + (p[i] - '0');
+    return v;
+}
+
+static int ar_list(int fd, uint64_t fsize, int max, struct arc_list *a, char *err, size_t errn)
+{
+    uint64_t off = 8;
+    char *longnames = NULL;
+    size_t longn = 0;
+    bool deb = false;
+    uint64_t data_off = 0, data_size = 0;
+    char data_name[96] = "";
+    int members = 0;
+    for (int guard = 0; guard < 2000000 && off + 60 <= fsize; guard++) {
+        uint8_t h[60];
+        if (!pread_all(fd, h, 60, off) || h[58] != '`' || h[59] != '\n')
+            break;
+        long long sz = dec_field(h + 48, 10);
+        if (sz < 0 || (uint64_t)sz > fsize - off - 60)
+            sz = (long long)(fsize - off - 60);
+        char name[260];
+        size_t nl = 16;
+        memcpy(name, h, 16);
+        while (nl > 0 && name[nl - 1] == ' ')
+            nl--;
+        name[nl] = 0;
+        uint64_t body = off + 60;
+        long long fsz = sz;
+        if (!strcmp(name, "/") || !strcmp(name, "/SYM64/") || !strcmp(name, "__.SYMDEF") || !strcmp(name, "__.SYMDEF SORTED")) {
+            off = body + (uint64_t)sz + ((uint64_t)sz & 1);
+            continue;
+        }
+        if (!strcmp(name, "//")) {                                           /* the table of long names */
+            if (sz > 0 && sz < (4 << 20)) {
+                longnames = malloc((size_t)sz + 1);
+                if (longnames && pread_all(fd, longnames, (size_t)sz, body)) {
+                    longn = (size_t)sz;
+                    longnames[longn] = 0;
+                } else {
+                    free(longnames);
+                    longnames = NULL;
+                }
+            }
+            off = body + (uint64_t)sz + ((uint64_t)sz & 1);
+            continue;
+        }
+        char shown[300];
+        if (name[0] == '/' && name[1] >= '0' && name[1] <= '9' && longnames) {   /* GNU: "/NN" is an offset into the table */
+            size_t o = (size_t)atol(name + 1);
+            size_t e = o;
+            while (e < longn && longnames[e] != '/' && longnames[e] != '\n')
+                e++;
+            snprintf(shown, sizeof(shown), "%.*s", (int)(e > o ? e - o : 0), longnames + (o < longn ? o : longn));
+        } else if (!strncmp(name, "#1/", 3)) {                               /* BSD: the name comes first in the data */
+            size_t k = (size_t)atol(name + 3);
+            if (k > 255 || (long long)k > sz)
+                k = 0;
+            char t[256] = "";
+            if (k && pread_all(fd, t, k, body))
+                t[k] = 0;
+            snprintf(shown, sizeof(shown), "%s", t);
+            body += k;
+            fsz -= (long long)k;
+        } else {
+            if (nl > 0 && name[nl - 1] == '/')
+                name[nl - 1] = 0;
+            snprintf(shown, sizeof(shown), "%s", name);
+        }
+        members++;
+        if (members == 1 && !strcmp(shown, "debian-binary"))
+            deb = true;
+        if (deb && !strncmp(shown, "data.tar", 8)) {
+            data_off = body;
+            data_size = (uint64_t)fsz;
+            snprintf(data_name, sizeof(data_name), "%s", shown);
+        }
+        if (!deb) {
+            int64_t mt = (int64_t)dec_field(h + 16, 12);
+            arc_add(a, max, clean_name((const uint8_t *)shown, strlen(shown), false), mt > 0 ? unix_time_text(mt) : NULL, fsz, -1);
+        }
+        off = off + 60 + (uint64_t)sz + ((uint64_t)sz & 1);
+    }
+    free(longnames);
+    if (!deb) {
+        snprintf(a->kind, sizeof(a->kind), "AR");
+        return 0;
+    }
+    /* a Debian package: list what the data archive holds */
+    snprintf(a->kind, sizeof(a->kind), "DEB");
+    if (!data_off) {
+        seterr(err, errn, "A Debian package without a data archive.");
+        return -2;
+    }
+    size_t rn = data_size < GZ_CAP ? (size_t)data_size : GZ_CAP;
+    uint8_t *in = malloc(rn + 1);
+    if (!in || !pread_all(fd, in, rn, data_off)) {
+        free(in);
+        seterr(err, errn, "A Debian package whose data cannot be read.");
+        return -2;
+    }
+    int kind = comp_kind(in, rn);
+    long got = 0;
+    int complete = 0;
+    const char *why = NULL;
+    uint8_t *out;
+    if (kind == CK_NONE) {
+        out = in;
+        got = (long)rn;
+        complete = rn == data_size;
+        in = NULL;
+    } else {
+        out = unpack_mem(in, rn, kind, GZ_CAP, &got, &complete, &why);
+        free(in);
+    }
+    if (!out || got < 512 || !tar_header_ok(out)) {
+        free(out);
+        seterr(err, errn, why ? why : "A Debian package whose data archive cannot be read.");
+        return -2;
+    }
+    struct tarsrc s = { .fd = -1, .mem = out, .size = (uint64_t)got };
+    tar_list(&s, max, a, !complete);
+    snprintf(a->kind, sizeof(a->kind), "DEB");
+    if (!a->note[0])
+        snprintf(a->note, sizeof(a->note), "The files of %s inside the package.", data_name);
+    free(out);
+    return 0;
+}
+
+/* ---- RPM: the headers (name, version), then a cpio archive (compressed) ---- */
+static int cpio_list(const uint8_t *d, size_t n, int max, struct arc_list *a)
+{
+    size_t p = 0;
+    for (int guard = 0; guard < 3000000 && p + 110 <= n; guard++) {
+        if (memcmp(d + p, "070701", 6) && memcmp(d + p, "070702", 6)) {
+            snprintf(a->note, sizeof(a->note), "The cpio archive is in a form that is not read (large file format).");
+            return 0;
+        }
+        uint32_t f[13];
+        for (int i = 0; i < 13; i++) {
+            char t[9];
+            memcpy(t, d + p + 6 + 8 * i, 8);
+            t[8] = 0;
+            char *e;
+            f[i] = (uint32_t)strtoul(t, &e, 16);
+            if (*e)
+                return 0;
+        }
+        uint32_t mode = f[1], mtime = f[5], fsz = f[6], nsz = f[11];
+        if (nsz == 0 || nsz > 4096 || p + 110 + nsz > n)
+            return 0;
+        const uint8_t *nm = d + p + 110;
+        size_t body = (p + 110 + nsz + 3) & ~(size_t)3;
+        if (nsz == 11 && !memcmp(nm, "TRAILER!!!", 10))
+            return 0;
+        size_t nl = nsz - 1;
+        const uint8_t *np = nm;
+        if (nl >= 2 && np[0] == '.' && np[1] == '/') {
+            np += 2;
+            nl -= 2;
+        } else if (nl >= 1 && np[0] == '/') {
+            np++;
+            nl--;
+        }
+        char *name = clean_name(np, nl, false);
+        unsigned type = mode & 0170000;
+        if (type == 0040000) {
+            size_t l = strlen(name);
+            name = realloc(name, l + 2);
+            name[l] = '/';
+            name[l + 1] = 0;
+            arc_add(a, max, name, mtime ? unix_time_text(mtime) : NULL, -1, -1);
+        } else if (type == 0120000 && body + fsz <= n) {
+            char *t = clean_name(d + body, fsz, false);
+            char *both = malloc(strlen(name) + strlen(t) + 5);
+            sprintf(both, "%s -> %s", name, t);
+            free(name);
+            free(t);
+            arc_add(a, max, both, mtime ? unix_time_text(mtime) : NULL, fsz, -1);
+        } else {
+            arc_add(a, max, name, mtime ? unix_time_text(mtime) : NULL, fsz, -1);
+        }
+        p = (body + fsz + 3) & ~(size_t)3;
+    }
+    return 0;
+}
+
+static int rpm_list(int fd, uint64_t fsize, int max, struct arc_list *a, char *err, size_t errn)
+{
+    uint8_t h[16];
+    uint64_t off = 96;
+    char pkg[160] = "";
+    for (int hdr = 0; hdr < 2; hdr++) {
+        if (!pread_all(fd, h, 16, off) || memcmp(h, "\x8e\xad\xe8\x01", 4)) {
+            seterr(err, errn, "A damaged RPM header.");
+            return -2;
+        }
+        uint32_t ni = be32(h + 8), hs = be32(h + 12);
+        if (ni > 100000 || hs > (64u << 20) || off + 16 + (uint64_t)ni * 16 + hs > fsize) {
+            seterr(err, errn, "A damaged RPM header.");
+            return -2;
+        }
+        if (hdr == 1) {
+            uint8_t *ix = malloc((size_t)ni * 16 + hs + 1);
+            if (ix && pread_all(fd, ix, (size_t)ni * 16 + hs, off + 16)) {
+                const uint8_t *store = ix + (size_t)ni * 16;
+                char nm[64] = "", ver[48] = "", rel[48] = "", arch[24] = "";
+                for (uint32_t i = 0; i < ni; i++) {
+                    const uint8_t *e = ix + (size_t)i * 16;
+                    uint32_t tag = be32(e), type = be32(e + 4), o = be32(e + 8);
+                    if (type != 6 || o >= hs)
+                        continue;
+                    size_t l = strnlen((const char *)store + o, hs - o);
+                    char *dst = tag == 1000 ? nm : tag == 1001 ? ver : tag == 1002 ? rel : tag == 1022 ? arch : NULL;
+                    size_t cap = tag == 1000 ? sizeof(nm) : tag == 1001 || tag == 1002 ? sizeof(ver) : sizeof(arch);
+                    if (dst)
+                        snprintf(dst, cap, "%.*s", (int)l, (const char *)store + o);
+                }
+                snprintf(pkg, sizeof(pkg), "%s %s-%s %s", nm, ver, rel, arch);
+            }
+            free(ix);
+        }
+        off += 16 + (uint64_t)ni * 16 + hs;
+        if (hdr == 0)
+            off = (off + 7) & ~(uint64_t)7;                                   /* the signature header is padded to 8 bytes */
+    }
+    if (off >= fsize) {
+        seterr(err, errn, "An RPM without a payload.");
+        return -2;
+    }
+    size_t rn = fsize - off < GZ_CAP ? (size_t)(fsize - off) : GZ_CAP;
+    uint8_t *in = malloc(rn + 1);
+    if (!in || !pread_all(fd, in, rn, off)) {
+        free(in);
+        seterr(err, errn, "An RPM whose payload cannot be read.");
+        return -2;
+    }
+    int kind = comp_kind(in, rn);
+    long got = 0;
+    int complete = 0;
+    const char *why = NULL;
+    uint8_t *out;
+    if (kind == CK_NONE) {
+        out = in;
+        got = (long)rn;
+        in = NULL;
+    } else {
+        out = unpack_mem(in, rn, kind, GZ_CAP, &got, &complete, &why);
+        free(in);
+    }
+    if (!out || got < 110) {
+        free(out);
+        seterr(err, errn, why ? why : "An RPM whose payload does not unpack.");
+        return -2;
+    }
+    snprintf(a->kind, sizeof(a->kind), "RPM");
+    cpio_list(out, (size_t)got, max, a);
+    if (!a->note[0])
+        snprintf(a->note, sizeof(a->note), "Package %s%s", pkg, kind == CK_NONE || complete ? "" : " (the listing stops at the first 64 MB of the payload)");
+    free(out);
+    return 0;
+}
+
+/* ---- 7z: the (maybe compressed) header lists the files; the contents are never unpacked ---- */
+struct sz_rd {
+    const uint8_t *p;
+    size_t n, pos;
+    bool bad;
+};
+
+static uint64_t sz_num(struct sz_rd *r)
+{
+    if (r->pos >= r->n) {
+        r->bad = true;
+        return 0;
+    }
+    uint8_t first = r->p[r->pos++], mask = 0x80;
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!(first & mask)) {
+            uint64_t high = first & (mask - 1u);
+            return v | high << (8 * i);
+        }
+        if (r->pos >= r->n) {
+            r->bad = true;
+            return 0;
+        }
+        v |= (uint64_t)r->p[r->pos++] << (8 * i);
+        mask >>= 1;
+    }
+    return v;
+}
+
+static uint8_t sz_byte(struct sz_rd *r)
+{
+    if (r->pos >= r->n) {
+        r->bad = true;
+        return 0;
+    }
+    return r->p[r->pos++];
+}
+
+static void sz_skip(struct sz_rd *r, uint64_t n)
+{
+    if (n > r->n - r->pos) {
+        r->bad = true;
+        r->pos = r->n;
+    } else
+        r->pos += (size_t)n;
+}
+
+/* A bit vector of n bits; *all = 1 when "all defined" was said (then none is read). Returns a malloc'd array of n bytes (0 / 1). */
+static uint8_t *sz_bits(struct sz_rd *r, uint64_t n, bool with_all_flag)
+{
+    uint8_t *v = calloc((size_t)n + 1, 1);
+    if (!v)
+        return NULL;
+    if (with_all_flag && sz_byte(r)) {
+        memset(v, 1, (size_t)n);
+        return v;
+    }
+    uint8_t cur = 0, mask = 0;
+    for (uint64_t i = 0; i < n && !r->bad; i++) {
+        if (!mask) {
+            cur = sz_byte(r);
+            mask = 0x80;
+        }
+        v[i] = (cur & mask) != 0;
+        mask >>= 1;
+    }
+    return v;
+}
+
+struct sz_coder {
+    uint8_t id[8];
+    int idlen;
+    int nin, nout;
+    uint8_t props[16];
+    int nprops;
+};
+
+struct sz_folder {
+    struct sz_coder coder[8];
+    int ncoders;
+    int nbind;
+    uint32_t bind_in[8], bind_out[8];
+    int totalout;
+    uint64_t unpack[8];                 /* per out stream */
+    uint64_t final_size;                /* the folder's result */
+    int nsub;
+    bool crc_def;                       /* the folder's own CRC was given (then a single substream needs none) */
+    uint64_t pack_size_index;
+};
+
+struct sz_info {
+    uint64_t pack_pos;
+    int npack;
+    uint64_t *pack_size;
+    int nfolders;
+    struct sz_folder *folder;
+    uint64_t *sub_size;                 /* sizes of all substreams, in order */
+    uint64_t nsub_total;
+};
+
+static void sz_info_free(struct sz_info *si)
+{
+    free(si->pack_size);
+    free(si->folder);
+    free(si->sub_size);
+    memset(si, 0, sizeof(*si));
+}
+
+static bool sz_streams(struct sz_rd *r, struct sz_info *si)
+{
+    memset(si, 0, sizeof(*si));
+    for (;;) {
+        uint8_t id = sz_byte(r);
+        if (r->bad)
+            return false;
+        if (id == 0)
+            return true;
+        if (id == 6) {                                                       /* PackInfo */
+            si->pack_pos = sz_num(r);
+            uint64_t np = sz_num(r);
+            if (np > 100000) return false;
+            si->npack = (int)np;
+            si->pack_size = calloc((size_t)np + 1, sizeof(uint64_t));
+            for (;;) {
+                uint8_t t = sz_byte(r);
+                if (r->bad) return false;
+                if (t == 0) break;
+                if (t == 9) {
+                    for (uint64_t i = 0; i < np; i++)
+                        si->pack_size[i] = sz_num(r);
+                } else if (t == 10) {
+                    uint8_t *d = sz_bits(r, np, true);
+                    uint64_t nd = 0;
+                    for (uint64_t i = 0; d && i < np; i++) nd += d[i];
+                    free(d);
+                    sz_skip(r, nd * 4);
+                } else
+                    return false;
+            }
+        } else if (id == 7) {                                                /* UnpackInfo: the folders */
+            if (sz_byte(r) != 0x0b)
+                return false;
+            uint64_t nf = sz_num(r);
+            if (sz_byte(r) != 0 || nf > 100000)
+                return false;
+            si->nfolders = (int)nf;
+            si->folder = calloc((size_t)nf + 1, sizeof(struct sz_folder));
+            for (uint64_t k = 0; k < nf; k++) {
+                struct sz_folder *f = &si->folder[k];
+                uint64_t nc = sz_num(r);
+                if (nc < 1 || nc > 8 || r->bad)
+                    return false;
+                f->ncoders = (int)nc;
+                int totin = 0;
+                for (int c = 0; c < f->ncoders; c++) {
+                    uint8_t fl = sz_byte(r);
+                    struct sz_coder *cd = &f->coder[c];
+                    cd->idlen = fl & 15;
+                    if (cd->idlen > 8 || (fl & 0x80))
+                        return false;
+                    for (int i = 0; i < cd->idlen; i++)
+                        cd->id[i] = sz_byte(r);
+                    cd->nin = cd->nout = 1;
+                    if (fl & 0x10) {
+                        cd->nin = (int)sz_num(r);
+                        cd->nout = (int)sz_num(r);
+                        if (cd->nin < 1 || cd->nin > 8 || cd->nout != 1)
+                            return false;
+                    }
+                    if (fl & 0x20) {
+                        uint64_t pl = sz_num(r);
+                        if (pl > 1000 || r->bad)
+                            return false;
+                        for (uint64_t i = 0; i < pl; i++) {
+                            uint8_t b = sz_byte(r);
+                            if (i < sizeof(cd->props))
+                                cd->props[i] = b;
+                        }
+                        cd->nprops = pl < sizeof(cd->props) ? (int)pl : (int)sizeof(cd->props);
+                    }
+                    totin += cd->nin;
+                    f->totalout += cd->nout;
+                }
+                f->nbind = f->totalout - 1;
+                for (int b = 0; b < f->nbind; b++) {
+                    f->bind_in[b] = (uint32_t)sz_num(r);
+                    f->bind_out[b] = (uint32_t)sz_num(r);
+                }
+                int npk = totin - f->nbind;
+                if (npk > 1)
+                    for (int i = 0; i < npk; i++)
+                        sz_num(r);
+                if (r->bad)
+                    return false;
+            }
+            if (sz_byte(r) != 0x0c)
+                return false;
+            for (int k = 0; k < si->nfolders; k++) {
+                struct sz_folder *f = &si->folder[k];
+                for (int o = 0; o < f->totalout; o++)
+                    f->unpack[o] = sz_num(r);
+                int fin = 0;
+                for (int o = 0; o < f->totalout; o++) {                      /* the out stream that no bind pair consumes is the result */
+                    bool used = false;
+                    for (int b = 0; b < f->nbind; b++)
+                        used |= f->bind_out[b] == (uint32_t)o;
+                    if (!used)
+                        fin = o;
+                }
+                f->final_size = f->unpack[fin];
+            }
+            for (;;) {
+                uint8_t t = sz_byte(r);
+                if (r->bad) return false;
+                if (t == 0) break;
+                if (t == 10) {
+                    uint8_t *d = sz_bits(r, (uint64_t)si->nfolders, true);
+                    uint64_t nd = 0;
+                    for (int i = 0; d && i < si->nfolders; i++) {
+                        nd += d[i];
+                        si->folder[i].crc_def = d[i] != 0;
+                    }
+                    free(d);
+                    sz_skip(r, nd * 4);
+                } else
+                    return false;
+            }
+        } else if (id == 8) {                                                /* SubStreamsInfo */
+            for (int k = 0; k < si->nfolders; k++)
+                si->folder[k].nsub = 1;
+            uint8_t t = sz_byte(r);
+            if (t == 0x0d) {
+                for (int k = 0; k < si->nfolders; k++) {
+                    uint64_t ns = sz_num(r);
+                    if (ns > 10000000) return false;
+                    si->folder[k].nsub = (int)ns;
+                }
+                t = sz_byte(r);
+            }
+            uint64_t total = 0;
+            for (int k = 0; k < si->nfolders; k++)
+                total += (uint64_t)si->folder[k].nsub;
+            if (total > 20000000) return false;
+            si->nsub_total = total;
+            si->sub_size = calloc((size_t)total + 1, sizeof(uint64_t));
+            if (!si->sub_size) return false;
+            uint64_t at = 0;
+            if (t == 9) {
+                for (int k = 0; k < si->nfolders; k++) {
+                    uint64_t sum = 0;
+                    int ns = si->folder[k].nsub;
+                    for (int i = 0; i < ns; i++) {
+                        if (i == ns - 1) {
+                            si->sub_size[at++] = si->folder[k].final_size >= sum ? si->folder[k].final_size - sum : 0;
+                        } else {
+                            uint64_t v = sz_num(r);
+                            si->sub_size[at++] = v;
+                            sum += v;
+                        }
+                    }
+                }
+                t = sz_byte(r);
+            } else {
+                for (int k = 0; k < si->nfolders; k++) {
+                    int ns = si->folder[k].nsub;
+                    for (int i = 0; i < ns; i++)
+                        si->sub_size[at++] = i == 0 ? si->folder[k].final_size : 0;
+                }
+            }
+            while (t != 0 && !r->bad) {                                      /* digests */
+                if (t != 10)
+                    return false;
+                uint64_t need = 0;
+                for (int k = 0; k < si->nfolders; k++)
+                    if (!(si->folder[k].nsub == 1 && si->folder[k].crc_def))
+                        need += (uint64_t)si->folder[k].nsub;
+                uint8_t *d = sz_bits(r, need, true);
+                uint64_t nd = 0;
+                for (uint64_t i = 0; d && i < need; i++) nd += d[i];
+                free(d);
+                sz_skip(r, nd * 4);
+                t = sz_byte(r);
+            }
+            if (r->bad) return false;
+        } else {
+            return false;
+        }
+    }
+}
+
+/* The folder's unpacked bytes for a header (a single LZMA / LZMA2 / copy coder only). */
+static uint8_t *sz_unpack_header(int fd, uint64_t fsize, const struct sz_info *si, size_t *outn)
+{
+    if (si->nfolders < 1 || si->npack < 1)
+        return NULL;
+    const struct sz_folder *f = &si->folder[0];
+    if (f->ncoders != 1 || f->final_size > (64u << 20) || si->pack_size[0] > (64u << 20))
+        return NULL;
+    uint64_t at = 32 + si->pack_pos;
+    if (at + si->pack_size[0] > fsize)
+        return NULL;
+    uint8_t *in = malloc((size_t)si->pack_size[0] + 1);
+    uint8_t *out = malloc((size_t)f->final_size + 1);
+    long r = -1;
+    if (in && out && pread_all(fd, in, (size_t)si->pack_size[0], at)) {
+        const struct sz_coder *c = &f->coder[0];
+        int complete;
+        if (c->idlen == 3 && !memcmp(c->id, "\x03\x01\x01", 3) && c->nprops >= 5)
+            r = lm_lzma_raw(in, (size_t)si->pack_size[0], c->props, out, (size_t)f->final_size);
+        else if (c->idlen == 1 && c->id[0] == 0x21)
+            r = lm_lzma2_raw(in, (size_t)si->pack_size[0], out, (size_t)f->final_size, &complete);
+        else if (c->idlen == 1 && c->id[0] == 0 && si->pack_size[0] >= f->final_size) {
+            memcpy(out, in, (size_t)f->final_size);
+            r = (long)f->final_size;
+        }
+    }
+    free(in);
+    if (r < 0 || (uint64_t)r != f->final_size) {
+        free(out);
+        return NULL;
+    }
+    *outn = (size_t)r;
+    return out;
+}
+
+static int sz_list(int fd, uint64_t fsize, int max, struct arc_list *a, char *err, size_t errn)
+{
+    uint8_t sh[32];
+    if (!pread_all(fd, sh, 32, 0)) {
+        seterr(err, errn, "A damaged 7z file.");
+        return -2;
+    }
+    uint64_t noff = u64(sh + 12), nsz = u64(sh + 20);
+    if (nsz == 0) {
+        snprintf(a->kind, sizeof(a->kind), "7Z");
+        return 0;                                                            /* an empty archive */
+    }
+    if (noff > fsize || nsz > fsize || 32 + noff + nsz > fsize || nsz > (64u << 20)) {
+        seterr(err, errn, "A 7z file that is cut off or damaged.");
+        return -2;
+    }
+    uint8_t *hdr = malloc((size_t)nsz + 1);
+    if (!hdr || !pread_all(fd, hdr, (size_t)nsz, 32 + noff)) {
+        free(hdr);
+        seterr(err, errn, "A 7z header that cannot be read.");
+        return -2;
+    }
+    size_t hn = (size_t)nsz;
+    for (int depth = 0; depth < 4 && hn > 0 && hdr[0] == 0x17; depth++) {      /* an encoded header: unpack it */
+        struct sz_rd r = { hdr, hn, 1, false };
+        struct sz_info si;
+        bool ok = sz_streams(&r, &si);
+        size_t un = 0;
+        uint8_t *nh = ok ? sz_unpack_header(fd, fsize, &si, &un) : NULL;
+        sz_info_free(&si);
+        free(hdr);
+        if (!nh) {
+            seterr(err, errn, "A 7z archive whose header is encrypted or packed in a way that is not read.");
+            return -2;
+        }
+        hdr = nh;
+        hn = un;
+    }
+    if (hn == 0 || hdr[0] != 0x01) {
+        free(hdr);
+        seterr(err, errn, "A damaged 7z header.");
+        return -2;
+    }
+    struct sz_rd r = { hdr, hn, 1, false };
+    struct sz_info si = { 0 };
+    uint64_t nfiles = 0;
+    uint8_t *empty_stream = NULL, *empty_file = NULL, *mt_def = NULL;
+    uint64_t *mtimes = NULL;
+    char **names = NULL;
+    uint32_t *attr = NULL;
+    uint8_t *attr_def = NULL;
+    bool ok = true;
+    for (;;) {
+        uint8_t id = sz_byte(&r);
+        if (r.bad) { ok = false; break; }
+        if (id == 0)
+            break;
+        if (id == 2) {                                                       /* archive properties: skip */
+            for (;;) {
+                uint8_t t = sz_byte(&r);
+                if (r.bad || t == 0) break;
+                sz_skip(&r, sz_num(&r));
+            }
+        } else if (id == 3) {                                                /* additional streams: skip */
+            struct sz_info tmp;
+            ok = sz_streams(&r, &tmp);
+            sz_info_free(&tmp);
+            if (!ok) break;
+        } else if (id == 4) {
+            ok = sz_streams(&r, &si);
+            if (!ok) break;
+        } else if (id == 5) {
+            nfiles = sz_num(&r);
+            if (nfiles > 10000000 || r.bad) { ok = false; break; }
+            names = calloc((size_t)nfiles + 1, sizeof(char *));
+            mtimes = calloc((size_t)nfiles + 1, sizeof(uint64_t));
+            attr = calloc((size_t)nfiles + 1, sizeof(uint32_t));
+            for (;;) {
+                uint8_t t = sz_byte(&r);
+                if (r.bad) { ok = false; break; }
+                if (t == 0)
+                    break;
+                uint64_t psz = sz_num(&r);
+                if (psz > r.n - r.pos) { ok = false; break; }
+                size_t pend = r.pos + (size_t)psz;
+                struct sz_rd pr = { hdr, pend, r.pos, false };
+                if (t == 0x0e) {
+                    free(empty_stream);
+                    empty_stream = sz_bits(&pr, nfiles, false);
+                } else if (t == 0x0f) {
+                    uint64_t ne = 0;
+                    for (uint64_t i = 0; empty_stream && i < nfiles; i++) ne += empty_stream[i];
+                    free(empty_file);
+                    empty_file = sz_bits(&pr, ne, false);
+                } else if (t == 0x11) {
+                    if (sz_byte(&pr) == 0) {
+                        for (uint64_t i = 0; i < nfiles && !pr.bad; i++) {
+                            size_t st = pr.pos;
+                            while (pr.pos + 1 < pend && (pr.p[pr.pos] || pr.p[pr.pos + 1]))
+                                pr.pos += 2;
+                            if (pr.pos + 1 >= pend) { pr.bad = true; break; }
+                            size_t units = (pr.pos - st) / 2;
+                            char *buf = malloc(units * 4 + 1);
+                            size_t bn = 0;
+                            for (size_t u = 0; buf && u < units; u++) {
+                                unsigned cp = pr.p[st + 2 * u] | (unsigned)pr.p[st + 2 * u + 1] << 8;
+                                if (cp >= 0xd800 && cp < 0xdc00 && u + 1 < units) {
+                                    unsigned lo = pr.p[st + 2 * u + 2] | (unsigned)pr.p[st + 2 * u + 3] << 8;
+                                    if (lo >= 0xdc00 && lo < 0xe000) {
+                                        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                                        u++;
+                                    }
+                                }
+                                put_utf8(buf, &bn, units * 4, cp);
+                            }
+                            if (buf) buf[bn] = 0;
+                            names[i] = buf ? clean_name((const uint8_t *)buf, bn, false) : strdup("");
+                            free(buf);
+                            pr.pos += 2;
+                        }
+                    }
+                } else if (t == 0x14) {
+                    free(mt_def);
+                    mt_def = sz_bits(&pr, nfiles, true);
+                    if (sz_byte(&pr) == 0)
+                        for (uint64_t i = 0; mt_def && i < nfiles && !pr.bad; i++)
+                            if (mt_def[i]) {
+                                if (pr.pos + 8 > pend) { pr.bad = true; break; }
+                                mtimes[i] = u64(pr.p + pr.pos);
+                                pr.pos += 8;
+                            }
+                } else if (t == 0x15) {
+                    free(attr_def);
+                    attr_def = sz_bits(&pr, nfiles, true);
+                    if (sz_byte(&pr) == 0)
+                        for (uint64_t i = 0; attr_def && i < nfiles && !pr.bad; i++)
+                            if (attr_def[i]) {
+                                if (pr.pos + 4 > pend) { pr.bad = true; break; }
+                                attr[i] = u32(pr.p + pr.pos);
+                                pr.pos += 4;
+                            }
+                }
+                r.pos = pend;
+            }
+            if (!ok)
+                break;
+        } else {
+            ok = false;
+            break;
+        }
+    }
+    int rc = 0;
+    if (!ok || r.bad) {
+        seterr(err, errn, "A damaged 7z header.");
+        rc = -2;
+    } else {
+        snprintf(a->kind, sizeof(a->kind), "7Z");
+        uint64_t sub = 0, ei = 0;
+        for (uint64_t i = 0; i < nfiles; i++) {
+            bool is_empty = empty_stream && empty_stream[i];
+            bool dir = false;
+            long long size = 0;
+            if (is_empty) {
+                bool ef = empty_file && empty_file[ei];
+                ei++;
+                dir = !ef;
+            } else {
+                size = sub < si.nsub_total ? (long long)si.sub_size[sub] : -1;
+                sub++;
+            }
+            if (attr && attr_def && attr_def[i] && (attr[i] & 0x10))
+                dir = true;
+            char *nm = names[i] ? names[i] : strdup("");
+            names[i] = NULL;
+            if (dir) {
+                size_t l = strlen(nm);
+                nm = realloc(nm, l + 2);
+                nm[l] = '/';
+                nm[l + 1] = 0;
+            }
+            char *mt = NULL;
+            if (mt_def && mt_def[i] && mtimes[i] >= 116444736000000000ull)
+                mt = unix_time_text((int64_t)(mtimes[i] / 10000000ull) - 11644473600ll);
+            arc_add(a, max, nm, mt, dir ? -1 : size, -1);
+        }
+        uint64_t packed = 0;
+        for (int i = 0; i < si.npack; i++)
+            packed += si.pack_size[i];
+        if (nfiles && packed)
+            snprintf(a->note, sizeof(a->note), "Packed size in all: %llu bytes (the format packs files together, so there is none per file).", (unsigned long long)packed);
+    }
+    for (uint64_t i = 0; names && i < nfiles; i++)
+        free(names[i]);
+    free(names);
+    free(mtimes);
+    free(attr);
+    free(attr_def);
+    free(empty_stream);
+    free(empty_file);
+    free(mt_def);
+    sz_info_free(&si);
+    free(hdr);
+    return rc;
+}
+
 int arc_read(const char *path, int max_entries, struct arc_list *a, char *err, size_t errn)
 {
     memset(a, 0, sizeof(*a));
@@ -553,6 +1464,14 @@ int arc_read(const char *path, int max_entries, struct arc_list *a, char *err, s
         r = zip_list(fd, fsize, max_entries, a, err, errn);
     } else if (hn >= 2 && h[0] == 0x1f && h[1] == 0x8b) {
         r = gz_list(fd, fsize, path, max_entries, a, err, errn);
+    } else if (hn >= 10 && comp_kind(h, hn) >= CK_XZ) {
+        r = stream_list(fd, fsize, path, comp_kind(h, hn), max_entries, a, err, errn);
+    } else if (hn >= 8 && !memcmp(h, "!<arch>\n", 8)) {
+        r = ar_list(fd, fsize, max_entries, a, err, errn);
+    } else if (hn >= 4 && !memcmp(h, "\xed\xab\xee\xdb", 4) && fsize > 200) {
+        r = rpm_list(fd, fsize, max_entries, a, err, errn);
+    } else if (hn >= 32 && !memcmp(h, "7z\xbc\xaf\x27\x1c", 6)) {
+        r = sz_list(fd, fsize, max_entries, a, err, errn);
     } else if (hn == 512 && tar_header_ok(h)) {
         snprintf(a->kind, sizeof(a->kind), "TAR");
         struct tarsrc s = { .fd = fd, .mem = NULL, .size = fsize };

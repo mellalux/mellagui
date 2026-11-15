@@ -3389,6 +3389,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
     } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
         /* a Word / OpenDocument text or a presentation: its text as a page */
     } else if (((n >= 4 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "PK\5\6", 4))) || (n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) ||
+                (n >= 6 && !memcmp(buf, "\xfd" "7zXZ\0", 6)) || (n >= 10 && !memcmp(buf, "BZh", 3) && buf[3] >= '1' && buf[3] <= '9' && (!memcmp(buf + 4, "\x31\x41\x59\x26\x53\x59", 6) || !memcmp(buf + 4, "\x17\x72\x45\x38\x50\x90", 6))) ||
+                (n >= 4 && !memcmp(buf, "\x28\xb5\x2f\xfd", 4)) || (n >= 8 && !memcmp(buf, "!<arch>\n", 8)) || (n >= 4 && !memcmp(buf, "\xed\xab\xee\xdb", 4)) || (n >= 6 && !memcmp(buf, "7z\xbc\xaf\x27\x1c", 6)) ||
                 (n >= 512 && (!memcmp(buf + 257, "ustar", 5) || ext_is(path, "tar")))) &&
                (pv_archive(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* an archive (ZIP and its relatives, TAR, gzip): the list of what is in it */
@@ -7357,6 +7359,20 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s\n", dinfo);
         puts(o);
         free(o);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--arc-list")) {                   /* the entries the preview lists for an archive: kind, note, then name TAB size TAB time (tests) */
+        struct arc_list al;
+        char aerr[160] = "";
+        int ar = arc_read(argv[2], 100000, &al, aerr, sizeof(aerr));
+        if (ar < 0) {
+            fprintf(stderr, "%s\n", ar == -1 ? "not an archive" : aerr);
+            return ar == -1 ? 1 : 2;
+        }
+        printf("kind=%s total=%lld note=%s\n", al.kind, al.total, al.note);
+        for (int i = 0; i < al.n; i++)
+            printf("%s\t%lld\t%s\n", al.name[i], al.size[i], al.mtime[i]);
+        arc_free(&al);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

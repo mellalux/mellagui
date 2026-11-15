@@ -541,6 +541,529 @@ static int decode_ppm(const uint8_t *d, size_t len, struct lm_image *img, char *
     return 0;
 }
 
+/* ---- GIF (the first picture), BMP, ICO / CUR, PNM P1..P5 ------------------------------------------------------------------ */
+
+#define IMG_MAX_PIXELS (100u * 1000 * 1000)
+
+static bool img_alloc(struct lm_image *img, uint32_t w, uint32_t h, char *err, size_t errsz)
+{
+    if (w < 1 || h < 1 || w > 65535 || h > 65535 || (uint64_t)w * h > IMG_MAX_PIXELS) {
+        fail(err, errsz, "the picture has a size that is not supported");
+        return false;
+    }
+    img->px = calloc((size_t)w * h, sizeof(uint32_t));
+    if (!img->px) {
+        fail(err, errsz, "out of memory");
+        return false;
+    }
+    img->w = (int)w;
+    img->h = (int)h;
+    return true;
+}
+
+static uint32_t le16(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8; }
+static uint32_t le32(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+/* GIF: the first picture on the logical screen (later pictures of an animation are not decoded); the colour of the transparent index shows as the checker. */
+static int decode_gif(const uint8_t *d, size_t len, struct lm_image *img, char *err, size_t errsz)
+{
+    if (len < 13) {
+        fail(err, errsz, "GIF: too short");
+        return -1;
+    }
+    uint32_t sw = le16(d + 6), sh = le16(d + 8);
+    unsigned flags = d[10];
+    size_t p = 13;
+    uint8_t gct[768];
+    int gn = 0;
+    if (flags & 0x80) {
+        gn = 2 << (flags & 7);
+        if (p + (size_t)gn * 3 > len) {
+            fail(err, errsz, "GIF: the colour table is cut off");
+            return -1;
+        }
+        memcpy(gct, d + p, (size_t)gn * 3);
+        p += (size_t)gn * 3;
+    }
+    int transparent = -1;
+    while (p < len) {
+        uint8_t b = d[p++];
+        if (b == 0x21) {                                                /* an extension */
+            if (p >= len)
+                break;
+            uint8_t label = d[p++];
+            if (label == 0xf9 && p + 5 < len && d[p] >= 4 && (d[p + 1] & 1))
+                transparent = d[p + 4];
+            while (p < len && d[p]) {                                   /* its sub-blocks */
+                p += (size_t)d[p] + 1;
+            }
+            p++;
+        } else if (b == 0x2c) {                                         /* the picture */
+            if (p + 9 > len)
+                break;
+            uint32_t left = le16(d + p), top = le16(d + p + 2), iw = le16(d + p + 4), ih = le16(d + p + 6);
+            unsigned f = d[p + 8];
+            p += 9;
+            uint8_t lct[768];
+            const uint8_t *pal = gct;
+            int pn = gn;
+            if (f & 0x80) {
+                pn = 2 << (f & 7);
+                if (p + (size_t)pn * 3 > len) {
+                    fail(err, errsz, "GIF: the colour table is cut off");
+                    return -1;
+                }
+                memcpy(lct, d + p, (size_t)pn * 3);
+                pal = lct;
+                p += (size_t)pn * 3;
+            }
+            if (!pn || p >= len) {
+                fail(err, errsz, "GIF: no colours");
+                return -1;
+            }
+            if (sw == 0 || sh == 0) {
+                sw = left + iw;
+                sh = top + ih;
+            }
+            if (!img_alloc(img, sw, sh, err, errsz))
+                return -1;
+            for (uint32_t y = 0; y < sh; y++)
+                for (uint32_t x = 0; x < sw; x++)
+                    img->px[(size_t)y * sw + x] = over_checker((int)x, (int)y, 0, 0, 0, 0);       /* outside the picture: transparent */
+            int minbits = d[p++];
+            if (minbits < 1 || minbits > 11) {
+                lm_img_free(img);
+                fail(err, errsz, "GIF: bad code size");
+                return -1;
+            }
+            /* the sub-blocks -> one buffer */
+            size_t cap = 0, dn = 0;
+            uint8_t *data = NULL;
+            while (p < len && d[p]) {
+                size_t bl = d[p++];
+                if (p + bl > len)
+                    bl = len - p;
+                if (dn + bl > cap) {
+                    cap = (dn + bl) * 2;
+                    data = realloc(data, cap);
+                }
+                memcpy(data + dn, d + p, bl);
+                dn += bl;
+                p += bl;
+            }
+            uint16_t *prefix = malloc(4096 * sizeof(uint16_t));
+            uint8_t *suffix = malloc(4096), *stack = malloc(4097);
+            if (!data || !prefix || !suffix || !stack) {
+                free(data); free(prefix); free(suffix); free(stack);
+                lm_img_free(img);
+                fail(err, errsz, "out of memory");
+                return -1;
+            }
+            int clear = 1 << minbits, eoi = clear + 1, next = clear + 2, size = minbits + 1, old = -1;
+            uint8_t first = 0;
+            uint32_t acc = 0;
+            int nb = 0;
+            size_t ip = 0;
+            uint64_t pixel = 0, total = (uint64_t)iw * ih;
+            int pass = 0, row = 0, step = 8;
+            uint32_t x = 0;
+            while (pixel < total) {
+                while (nb < size && ip < dn) {
+                    acc |= (uint32_t)data[ip++] << nb;
+                    nb += 8;
+                }
+                if (nb < size)
+                    break;
+                int code = (int)(acc & ((1u << size) - 1));
+                acc >>= size;
+                nb -= size;
+                if (code == clear) {
+                    next = clear + 2;
+                    size = minbits + 1;
+                    old = -1;
+                    continue;
+                }
+                if (code == eoi)
+                    break;
+                int sp = 0, cur = code;
+                if (old < 0) {
+                    if (code >= clear)
+                        break;
+                    stack[sp++] = (uint8_t)code;
+                    first = (uint8_t)code;
+                } else {
+                    if (code > next || (code == next && next >= 4096))
+                        break;
+                    if (code == next) {
+                        stack[sp++] = first;
+                        cur = old;
+                    }
+                    while (cur >= clear) {
+                        if (sp >= 4096 || cur >= 4096)
+                            break;
+                        stack[sp++] = suffix[cur];
+                        cur = prefix[cur];
+                    }
+                    stack[sp++] = (uint8_t)cur;
+                    first = (uint8_t)cur;
+                    if (next < 4096) {
+                        prefix[next] = (uint16_t)old;
+                        suffix[next] = first;
+                        next++;
+                        if (next == (1 << size) && size < 12)
+                            size++;
+                    }
+                }
+                old = code;
+                while (sp > 0 && pixel < total) {
+                    int idx = stack[--sp];
+                    uint32_t yy = (uint32_t)row + top, xx = x + left;
+                    if (yy < sh && xx < sw) {
+                        uint32_t col;
+                        if (idx == transparent || idx >= pn)
+                            col = over_checker((int)xx, (int)yy, 0, 0, 0, 0);
+                        else
+                            col = over_checker((int)xx, (int)yy, pal[idx * 3], pal[idx * 3 + 1], pal[idx * 3 + 2], 255);
+                        img->px[(size_t)yy * sw + xx] = col;
+                    }
+                    pixel++;
+                    if (++x == iw) {
+                        x = 0;
+                        if (f & 0x40) {                                 /* interlaced: rows 0, 8, 16 ... then 4, 12 ... then 2, 6 ... then 1, 3 ... */
+                            row += step;
+                            while ((uint32_t)row >= ih && pass < 3) {
+                                pass++;
+                                row = pass == 1 ? 4 : pass == 2 ? 2 : 1;
+                                step = pass == 1 ? 8 : pass == 2 ? 4 : 2;
+                            }
+                        } else {
+                            row++;
+                        }
+                    }
+                }
+            }
+            free(data); free(prefix); free(suffix); free(stack);
+            return 0;
+        } else if (b == 0x3b) {
+            break;
+        } else {
+            break;
+        }
+    }
+    fail(err, errsz, "GIF: no picture in the file");
+    return -1;
+}
+
+/* A BMP / DIB: `d` points at the info header (the file header, if any, is the caller's), `data` at the pixels. `ico`: the height counts the XOR picture and the AND mask. */
+static int decode_dib(const uint8_t *d, size_t len, size_t data_off, bool ico, struct lm_image *img, char *err, size_t errsz)
+{
+    if (len < 12) {
+        fail(err, errsz, "BMP: too short");
+        return -1;
+    }
+    uint32_t hs = le32(d);
+    int32_t w, h;
+    unsigned bpp, comp = 0, used = 0;
+    size_t pal_entry = 4;
+    if (hs == 12) {                                                     /* OS/2 */
+        w = (int16_t)le16(d + 4);
+        h = (int16_t)le16(d + 6);
+        bpp = le16(d + 10);
+        pal_entry = 3;
+    } else if (hs >= 40 && hs <= 256 && len >= hs) {
+        w = (int32_t)le32(d + 4);
+        h = (int32_t)le32(d + 8);
+        bpp = le16(d + 14);
+        comp = le32(d + 16);
+        used = le32(d + 32);
+    } else {
+        fail(err, errsz, "BMP: an unknown header");
+        return -1;
+    }
+    bool topdown = h < 0;
+    uint32_t aw = (uint32_t)(w < 0 ? -w : w), ah = (uint32_t)(h < 0 ? -h : h);
+    if (ico)
+        ah /= 2;
+    if (aw == 0 || ah == 0 || aw > 65535 || ah > 65535 || (uint64_t)aw * ah > IMG_MAX_PIXELS) {
+        fail(err, errsz, "BMP: a size that is not supported");
+        return -1;
+    }
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) {
+        fail(err, errsz, "BMP: a colour depth that is not supported");
+        return -1;
+    }
+    if (comp > 3 && comp != 6) {
+        fail(err, errsz, "BMP: a compression that is not supported (JPEG / PNG inside)");
+        return -1;
+    }
+    uint32_t masks[4] = { 0, 0, 0, 0 };
+    size_t pal_off = hs;
+    if (comp == 3 || comp == 6) {
+        if (hs >= 52) {
+            for (int i = 0; i < 3; i++)
+                masks[i] = le32(d + 40 + 4 * i);
+            if (hs >= 56)
+                masks[3] = le32(d + 52);
+        } else if (len >= hs + 12) {
+            for (int i = 0; i < 3; i++)
+                masks[i] = le32(d + hs + 4 * i);
+            pal_off = hs + 12;
+        }
+    } else if (bpp == 16) {
+        masks[0] = 0x7c00; masks[1] = 0x3e0; masks[2] = 0x1f;
+    } else if (bpp == 32) {
+        masks[0] = 0xff0000; masks[1] = 0xff00; masks[2] = 0xff;
+    }
+    uint32_t ncol = bpp <= 8 ? (used ? used : 1u << bpp) : 0;
+    if (ncol > 256)
+        ncol = 256;
+    uint32_t pal[256];
+    for (uint32_t i = 0; i < ncol; i++) {
+        size_t o = pal_off + i * pal_entry;
+        pal[i] = o + 3 <= len ? (uint32_t)d[o + 2] << 16 | (uint32_t)d[o + 1] << 8 | d[o] : 0;
+    }
+    if (data_off == 0)
+        data_off = pal_off + ncol * pal_entry;                          /* (a DIB in an ICO: the pixels follow the palette) */
+    if (data_off > len) {
+        fail(err, errsz, "BMP: the pixels are missing");
+        return -1;
+    }
+    const uint8_t *px = d + data_off;
+    size_t pxlen = len - data_off;
+    if (!img_alloc(img, aw, ah, err, errsz))
+        return -1;
+    uint8_t *idxbuf = NULL;                                             /* RLE: the indices, row by row */
+    if (comp == 1 || comp == 2) {
+        idxbuf = calloc((size_t)aw, ah);
+        if (!idxbuf) {
+            lm_img_free(img);
+            fail(err, errsz, "out of memory");
+            return -1;
+        }
+        size_t i = 0;
+        uint32_t x = 0, y = 0;                                          /* y counts from the bottom of a bottom-up picture */
+        while (i + 1 < pxlen && y < ah) {
+            unsigned n = px[i++], v = px[i++];
+            if (n) {
+                for (unsigned k = 0; k < n && x < aw; k++, x++)
+                    idxbuf[(size_t)y * aw + x] = (uint8_t)(comp == 1 ? v : (k & 1 ? v & 15 : v >> 4));
+            } else if (v == 0) {
+                x = 0;
+                y++;
+            } else if (v == 1) {
+                break;
+            } else if (v == 2) {
+                if (i + 1 >= pxlen)
+                    break;
+                x += px[i++];
+                y += px[i++];
+            } else {
+                unsigned cnt = v;
+                size_t bytes = comp == 1 ? cnt : (cnt + 1) / 2;
+                for (unsigned k = 0; k < cnt && i + (comp == 1 ? k : k / 2) < pxlen && x < aw; k++, x++) {
+                    unsigned b = px[i + (comp == 1 ? k : k / 2)];
+                    idxbuf[(size_t)y * aw + x] = (uint8_t)(comp == 1 ? b : (k & 1 ? b & 15 : b >> 4));
+                }
+                i += (bytes + 1) & ~1u;
+            }
+        }
+    }
+    size_t stride = ((size_t)aw * bpp + 31) / 32 * 4;
+    int sh[4] = { 0 }, nbits[4] = { 8, 8, 8, 0 };
+    for (int c = 0; c < 4; c++) {
+        uint32_t m = masks[c];
+        if (m) {
+            while (!(m & 1)) {
+                m >>= 1;
+                sh[c]++;
+            }
+            nbits[c] = 0;
+            while (m & 1) {
+                m >>= 1;
+                nbits[c]++;
+            }
+        }
+    }
+    bool has_alpha = masks[3] != 0;
+    for (uint32_t y = 0; y < ah; y++) {
+        uint32_t sy = topdown ? y : ah - 1 - y;
+        const uint8_t *row = px + (size_t)sy * stride;
+        bool in = comp == 1 || comp == 2 ? true : (size_t)(sy + 1) * stride <= pxlen;
+        for (uint32_t x = 0; x < aw; x++) {
+            int r = 0, g = 0, b = 0, a = 255;
+            if (comp == 1 || comp == 2) {
+                uint32_t c = pal[idxbuf[(size_t)(topdown ? ah - 1 - y : sy) * aw + x] % (ncol ? ncol : 1)];
+                r = (int)(c >> 16) & 255;
+                g = (int)(c >> 8) & 255;
+                b = (int)c & 255;
+            } else if (!in) {
+                r = g = b = 0;
+            } else if (bpp <= 8) {
+                unsigned idx = bpp == 8 ? row[x] : bpp == 4 ? (row[x / 2] >> (x & 1 ? 0 : 4)) & 15 : (row[x / 8] >> (7 - (x & 7))) & 1;
+                uint32_t c = idx < ncol ? pal[idx] : 0;
+                r = (int)(c >> 16) & 255;
+                g = (int)(c >> 8) & 255;
+                b = (int)c & 255;
+            } else if (bpp == 24) {
+                b = row[x * 3];
+                g = row[x * 3 + 1];
+                r = row[x * 3 + 2];
+            } else {
+                uint32_t v = bpp == 16 ? le16(row + x * 2) : le32(row + x * 4);
+                uint32_t comps[4];
+                for (int c = 0; c < 4; c++) {
+                    if (!masks[c]) {
+                        comps[c] = c == 3 ? 255 : 0;
+                        continue;
+                    }
+                    uint32_t m = (v >> sh[c]) & ((1u << nbits[c]) - 1);
+                    comps[c] = nbits[c] >= 8 ? m >> (nbits[c] - 8) : m * 255 / ((1u << nbits[c]) - 1);
+                }
+                r = (int)comps[0];
+                g = (int)comps[1];
+                b = (int)comps[2];
+                a = has_alpha ? (int)comps[3] : 255;
+            }
+            img->px[(size_t)y * aw + x] = over_checker((int)x, (int)y, r, g, b, a);
+        }
+    }
+    free(idxbuf);
+    if (ico) {                                                          /* transparency of an icon: the alpha bytes of a 32 bit picture, else the AND mask (1 = transparent) */
+        size_t mstride = ((size_t)aw + 31) / 32 * 4, moff = data_off + stride * ah;
+        bool have_mask = moff + mstride * ah <= len;
+        bool alpha32 = false;
+        if (bpp == 32 && comp == 0)
+            for (uint32_t y = 0; y < ah && !alpha32; y++)
+                for (uint32_t x = 0; x < aw; x++)
+                    if (data_off + (size_t)y * stride + x * 4 + 3 < len && d[data_off + (size_t)y * stride + x * 4 + 3]) {
+                        alpha32 = true;
+                        break;
+                    }
+        for (uint32_t y = 0; y < ah; y++) {
+            uint32_t sy = topdown ? y : ah - 1 - y;
+            for (uint32_t x = 0; x < aw; x++) {
+                if (alpha32) {
+                    const uint8_t *q = d + data_off + (size_t)sy * stride + x * 4;
+                    if (q + 4 <= d + len)
+                        img->px[(size_t)y * aw + x] = over_checker((int)x, (int)y, q[2], q[1], q[0], q[3]);
+                } else if (have_mask && !(has_alpha) && ((d[moff + sy * mstride + x / 8] >> (7 - (x & 7))) & 1)) {
+                    img->px[(size_t)y * aw + x] = over_checker((int)x, (int)y, 0, 0, 0, 0);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int decode_bmp(const uint8_t *d, size_t len, struct lm_image *img, char *err, size_t errsz)
+{
+    if (len < 26) {
+        fail(err, errsz, "BMP: too short");
+        return -1;
+    }
+    size_t off = le32(d + 10);
+    return decode_dib(d + 14, len - 14, off >= 14 && off <= len ? off - 14 : 0, false, img, err, errsz);
+}
+
+/* ICO / CUR: the biggest picture of the file (PNG or DIB inside). */
+static int decode_ico(const uint8_t *d, size_t len, struct lm_image *img, char *err, size_t errsz)
+{
+    unsigned count = len >= 6 ? le16(d + 4) : 0;
+    if (count == 0 || 6 + (size_t)count * 16 > len) {
+        fail(err, errsz, "ICO: no pictures");
+        return -1;
+    }
+    int best = -1;
+    uint64_t bestscore = 0;
+    for (unsigned i = 0; i < count; i++) {
+        const uint8_t *e = d + 6 + i * 16;
+        uint32_t w = e[0] ? e[0] : 256, h = e[1] ? e[1] : 256, size = le32(e + 8), off = le32(e + 12);
+        if (off >= len || size > len - off || size < 8)
+            continue;
+        uint64_t score = (uint64_t)w * h * 64 + (d[0] == 0 ? le16(e + 6) : 0);
+        if (best < 0 || score > bestscore) {
+            best = (int)i;
+            bestscore = score;
+        }
+    }
+    if (best < 0) {
+        fail(err, errsz, "ICO: damaged");
+        return -1;
+    }
+    const uint8_t *e = d + 6 + best * 16;
+    uint32_t size = le32(e + 8), off = le32(e + 12);
+    if (size >= 8 && !memcmp(d + off, "\x89PNG\r\n\x1a\n", 8))
+        return decode_png(d + off, size, img, err, errsz);
+    return decode_dib(d + off, size, 0, true, img, err, errsz);
+}
+
+/* PNM P1..P5 (bits / grey, text or binary); P6 is decode_ppm's. */
+static int decode_pnm(const uint8_t *d, size_t len, struct lm_image *img, char *err, size_t errsz)
+{
+    int kind = d[1] - '0';
+    size_t p = 2;
+    long vals[3];
+    for (int i = 0; i < (kind == 1 || kind == 4 ? 2 : 3); i++) {
+        while (p < len && (d[p] == ' ' || d[p] == '\t' || d[p] == '\n' || d[p] == '\r' || d[p] == '#')) {
+            if (d[p] == '#')
+                while (p < len && d[p] != '\n')
+                    p++;
+            else
+                p++;
+        }
+        long v = 0;
+        size_t q = p;
+        while (p < len && d[p] >= '0' && d[p] <= '9' && v < 100000000)
+            v = v * 10 + (d[p++] - '0');
+        if (q == p) {
+            fail(err, errsz, "PNM: a bad header");
+            return -1;
+        }
+        vals[i] = v;
+    }
+    uint32_t w = (uint32_t)vals[0], h = (uint32_t)vals[1];
+    long maxv = kind == 1 || kind == 4 ? 1 : vals[2];
+    if (maxv < 1 || maxv > 65535 || !img_alloc(img, w, h, err, errsz))
+        return -1;
+    if (kind == 4 || kind == 5)
+        p++;                                                            /* one blank after the header */
+    size_t bytes_per = maxv > 255 ? 2 : 1;
+    size_t bstride = (w + 7) / 8;
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            long v = 0;
+            if (kind == 4) {
+                size_t o = p + (size_t)y * bstride + x / 8;
+                v = o < len ? !((d[o] >> (7 - (x & 7))) & 1) : 1;      /* 1 = black */
+                v *= 255;
+            } else if (kind == 5) {
+                size_t o = p + ((size_t)y * w + x) * bytes_per;
+                if (o + bytes_per <= len)
+                    v = bytes_per == 2 ? (long)(d[o] << 8 | d[o + 1]) * 255 / maxv : d[o] * 255 / maxv;
+            } else {                                                    /* text */
+                while (p < len && (d[p] == ' ' || d[p] == '\t' || d[p] == '\n' || d[p] == '\r'))
+                    p++;
+                long n = 0;
+                bool got = false;
+                while (p < len && d[p] >= '0' && d[p] <= '9') {
+                    if (kind == 1) {                                    /* P1: the digits need no blanks between them */
+                        n = d[p++] - '0';
+                        got = true;
+                        break;
+                    }
+                    n = n * 10 + (d[p++] - '0');
+                    got = true;
+                }
+                if (!got)
+                    n = 0;
+                v = kind == 1 ? (n ? 0 : 255) : n * 255 / maxv;
+            }
+            v = v < 0 ? 0 : v > 255 ? 255 : v;
+            img->px[(size_t)y * w + x] = (uint32_t)v << 16 | (uint32_t)v << 8 | (uint32_t)v;
+        }
+    return 0;
+}
+
 int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz)
 {
     img->px = NULL;
@@ -550,7 +1073,15 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
         return lm_jpeg_decode(data, len, img, err, errsz);
     if (len >= 2 && data[0] == 'P' && data[1] == '6')
         return decode_ppm(data, len, img, err, errsz);
-    fail(err, errsz, "not a PNG, JPEG or PPM image");
+    if (len >= 3 && data[0] == 'P' && data[1] >= '1' && data[1] <= '5' && (data[2] == ' ' || data[2] == '\n' || data[2] == '\r' || data[2] == '\t' || data[2] == '#'))
+        return decode_pnm(data, len, img, err, errsz);
+    if (len >= 6 && !memcmp(data, "GIF8", 4) && (data[4] == '7' || data[4] == '9') && data[5] == 'a')
+        return decode_gif(data, len, img, err, errsz);
+    if (len >= 26 && data[0] == 'B' && data[1] == 'M')
+        return decode_bmp(data, len, img, err, errsz);
+    if (len >= 22 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 2) && data[3] == 0)
+        return decode_ico(data, len, img, err, errsz);
+    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO or PNM image");
     return -1;
 }
 

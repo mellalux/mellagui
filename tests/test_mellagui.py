@@ -3655,6 +3655,25 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text' and o[0].get('want', '').endswith('p_text.pem'))
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_gif_bmp_ico_and_pnm_pictures(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow makes the test pictures')
+        d = tempfile.mkdtemp(prefix='files-pic-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        im = Image.new('RGB', (40, 24), (30, 120, 200))
+        for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm'):
+            im.save(os.path.join(d, name))
+        open(os.path.join(d, 'e.pnm'), 'w').write('P2\n3 2\n15\n0 5 10\n15 10 5\n')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.bmp)
+        for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm', 'e.pnm'):
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('kind') == 'image' and o[0].get('want', '').endswith(name))
+            self.assertEqual(head['kind'], 'image', name)
+            ctl.abs(win['x'] + 700, win['y'] + 250)
+            ctl.tap(self.K_DOWN)
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib
@@ -10222,6 +10241,95 @@ class TestImages(unittest.TestCase):
             f.write(data)
         r = subprocess.run([self.VIEW, '--decode', src, dst], capture_output=True, text=True, timeout=20)
         return r, dst
+
+    def test_gif_bmp_ico_and_pnm_pictures_match_pillow(self):
+        import random
+        import struct
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow is the reference')
+        rnd = random.Random(4)
+        def noise(w, h):
+            im = Image.new('RGB', (w, h))
+            px = im.load()
+            for y in range(h):
+                for x in range(w):
+                    px[x, y] = (rnd.randrange(256), (x * 7) % 256, (y * 5) % 256)
+            return im
+        def compare(data, name):
+            r, dst = self.decode(data, name)
+            self.assertEqual(r.returncode, 0, name + r.stderr + r.stdout)
+            raw = open(dst, 'rb').read().split(b'\n', 3)
+            w, h = map(int, raw[1].split())
+            rgb = raw[3]
+            im = Image.open(io.BytesIO(data)).convert('RGBA')
+            self.assertEqual(im.size, (w, h), name)
+            px = im.load()
+            for y in range(h):
+                for x in range(w):
+                    rr, g, b, a = px[x, y]
+                    o = rgb[(y * w + x) * 3:(y * w + x) * 3 + 3]
+                    if a == 255:
+                        self.assertEqual(tuple(o), (rr, g, b), '%s at %d,%d' % (name, x, y))
+                    elif a == 0:                                                           # transparent: the checker of the viewer
+                        self.assertTrue(o[0] == o[1] == o[2] and o[0] in (0x44, 0x66), '%s at %d,%d' % (name, x, y))
+                    else:
+                        bg = 0x66 if ((x >> 3) ^ (y >> 3)) & 1 else 0x44
+                        for i, c in enumerate((rr, g, b)):
+                            self.assertLessEqual(abs(o[i] - (c * a + bg * (255 - a)) // 255), 1, '%s at %d,%d' % (name, x, y))
+        import io
+        for (w, h) in ((1, 1), (7, 5), (33, 17), (100, 3)):
+            im = noise(w, h)
+            for fmt, mode in (('BMP', 'RGB'), ('BMP', 'L'), ('BMP', '1'), ('BMP', 'P'), ('BMP', 'RGBA'), ('GIF', 'P')):
+                i2 = im.quantize(64) if mode == 'P' else im.convert(mode)
+                b = io.BytesIO()
+                try:
+                    i2.save(b, fmt)
+                except Exception:
+                    continue
+                compare(b.getvalue(), 'a%dx%d_%s.%s' % (w, h, mode, fmt.lower()))
+        for (w, h) in ((20, 13), (64, 64)):                                                  # GIF: interlaced and with a transparent colour
+            q = noise(w, h).quantize(32)
+            for kw, nm in (({'interlace': True}, 'interlaced'), ({'transparency': 3}, 'transparent')):
+                b = io.BytesIO()
+                q.save(b, 'GIF', **kw)
+                compare(b.getvalue(), 'g_%s_%dx%d.gif' % (nm, w, h))
+        for fmtb in ('png', 'bmp'):                                                         # ICO: the biggest of three, PNG or DIB entries, with alpha
+            im = Image.new('RGBA', (48, 48))
+            px = im.load()
+            for y in range(48):
+                for x in range(48):
+                    px[x, y] = (x * 5 % 256, y * 5 % 256, (x + y) * 3 % 256, 255 if (x + y) % 7 else (0 if x % 2 else 128))
+            b = io.BytesIO()
+            im.save(b, 'ICO', sizes=[(16, 16), (32, 32), (48, 48)], bitmap_format=fmtb)
+            compare(b.getvalue(), 'i_%s.ico' % fmtb)
+        def bmp(w, h, bpp, comp, pal, pix, hs=40, masks=None, topdown=False):
+            ph = struct.pack('<IiiHHIIiiII', hs, w, -h if topdown else h, 1, bpp, comp, len(pix), 2835, 2835, len(pal) // 4, 0)
+            if masks:
+                ph += b''.join(struct.pack('<I', m) for m in masks)
+            off = 14 + len(ph) + len(pal)
+            return b'BM' + struct.pack('<IHHI', off + len(pix), 0, 0, off) + ph + pal + pix
+        pal16 = b''.join(bytes([i * 16, 255 - i * 16, (i * 37) % 256, 0]) for i in range(16))
+        pal256 = b''.join(bytes([i, (i * 3) % 256, 255 - i, 0]) for i in range(256))
+        compare(bmp(5, 4, 4, 0, pal16, b''.join(bytes(rnd.randrange(256) for _ in range(3)) + b'\0' for _ in range(4))), 'h_4bpp.bmp')
+        compare(bmp(8, 3, 4, 2, pal16, b'\x04\x12' + b'\x00\x04\x12\x34' + b'\x00\x00' + b'\x06\x5a\x02\x07' + b'\x00\x00' + b'\x08\x3c' + b'\x00\x01'), 'h_rle4.bmp')
+        compare(bmp(8, 3, 8, 1, pal256, b'\x04\x10' + b'\x00\x04\x01\x02\x03\x04' + b'\x00\x00' + b'\x03\x20\x05\x30' + b'\x00\x00' + b'\x08\x77\x00\x01'), 'h_rle8.bmp')
+        rows565 = b''.join(b''.join(struct.pack('<H', rnd.randrange(65536)) for _ in range(5)) + b'\0\0' for _ in range(3))
+        compare(bmp(5, 3, 16, 3, b'', rows565, masks=(0xF800, 0x07E0, 0x001F)), 'h_565.bmp')
+        compare(bmp(5, 3, 16, 0, b'', rows565), 'h_555.bmp')
+        compare(bmp(4, 3, 32, 3, b'', b''.join(struct.pack('<I', rnd.randrange(1 << 24)) for _ in range(12)), masks=(0xff0000, 0xff00, 0xff)), 'h_32mask.bmp')
+        compare(bmp(5, 4, 24, 0, b'', b''.join(bytes(rnd.randrange(256) for _ in range(15)) + b'\0' for _ in range(4)), topdown=True), 'h_24top.bmp')
+        core_pal = b''.join(bytes([i, 255 - i, (i * 5) % 256]) for i in range(256))                   # OS/2: a 12 byte header and 3 byte palette entries
+        core_pix = b''.join(bytes(rnd.randrange(256) for _ in range(6)) + b'\0\0' for _ in range(3))
+        off = 14 + 12 + len(core_pal)
+        compare(b'BM' + struct.pack('<IHHI', off + len(core_pix), 0, 0, off) + struct.pack('<IHHHH', 12, 6, 3, 1, 8) + core_pal + core_pix, 'h_os2.bmp')
+        compare(b'P2\n# comment\n4 2\n15\n0 5 10 15\n15 10 5 0\n', 'p2.pnm')                          # text PNM (Pillow's own writer only does binary)
+        compare(b'P1\n5 3\n0 1 0 1 0\n1 1 1 1 1\n10101\n', 'p1.pnm')
+        for bad in (b'GIF89a', b'GIF89a\x02\x00\x02\x00\x80\x00\x00', b'BM' + bytes(40), b'\x00\x00\x01\x00\x05\x00', b'P5\n9999999 9999999\n255\n'):    # damaged: an error, no crash
+            r, _ = self.decode(bad, 'x.bin')
+            self.assertNotIn('Sanitizer', r.stderr)
+            self.assertIn(r.returncode, (0, 1))
 
     def test_selftest(self):
         r = subprocess.run([self.VIEW, '--selftest'], capture_output=True, text=True, timeout=10)

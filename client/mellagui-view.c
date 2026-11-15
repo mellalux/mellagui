@@ -120,8 +120,15 @@ static bool is_audio_name(const char *n)
 static bool is_image_name(const char *n)
 {
     size_t l = strlen(n);
-    return n[0] != '.' && l > 4 && (!strcasecmp(n + l - 4, ".png") || !strcasecmp(n + l - 4, ".ppm") || !strcasecmp(n + l - 4, ".jpg") ||
-                                    (l > 5 && !strcasecmp(n + l - 5, ".jpeg")) || is_video_name(n) || is_audio_name(n));
+    static const char *const exts[] = { ".png", ".ppm", ".pgm", ".pbm", ".pnm", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".cur" };
+    if (n[0] == '.' || l < 5)
+        return false;
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+        size_t el = strlen(exts[i]);
+        if (l > el && !strcasecmp(n + l - el, exts[i]))
+            return true;
+    }
+    return is_video_name(n) || is_audio_name(n);
 }
 
 static int cmp_names(const void *a, const void *b)

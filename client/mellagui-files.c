@@ -496,11 +496,21 @@ static bool ext_is(const char *name, const char *ext)
     return dot && dot != name && !strcasecmp(dot + 1, ext);
 }
 
+/* The picture formats lm_img_load reads (PNG, JPEG, PPM / PNM, GIF (the first picture), BMP, ICO / CUR). */
+static bool is_picture_name(const char *name)
+{
+    static const char *const exts[] = { "png", "jpg", "jpeg", "ppm", "pgm", "pbm", "pnm", "gif", "bmp", "ico", "cur" };
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
+        if (ext_is(name, exts[i]))
+            return true;
+    return false;
+}
+
 /* Images and videos by extension; everything else by looking at the first 4 KB: an ELF file that may be executed is a program, a NUL
  * byte means binary (an executable script stays text: it opens in the editor). */
 static enum kind classify(const char *path)
 {
-    if (ext_is(path, "png") || ext_is(path, "ppm") || ext_is(path, "jpg") || ext_is(path, "jpeg"))
+    if (is_picture_name(path))
         return K_IMAGE;
     if (ext_is(path, "mp4") || ext_is(path, "m4v"))
         return K_VIDEO;
@@ -5045,8 +5055,7 @@ static uint32_t entry_color(const struct entry *e)
         return COL_MARK;
     if (e->broken)
         return COL_DIM;
-    if (ext_is(e->name, "png") || ext_is(e->name, "jpg") || ext_is(e->name, "jpeg") || ext_is(e->name, "ppm") || ext_is(e->name, "mp4") ||
-        ext_is(e->name, "m4v"))
+    if (is_picture_name(e->name) || ext_is(e->name, "mp4") || ext_is(e->name, "m4v"))
         return COL_PIC;
     return e->exec ? COL_EXEC : COL_FG;
 }
@@ -5270,7 +5279,7 @@ static void preview_update(struct app *a)
             snd_stop(a);                                                 /* the cursor moved on: the sound of the other file ends */
         snprintf(pv->want, sizeof(pv->want), "%s", want);
         pv->loaded = false;
-        bool pic = want[0] && (ext_is(want, "png") || ext_is(want, "jpg") || ext_is(want, "jpeg") || ext_is(want, "ppm") || ffaudio_name_is_audio(want));
+        bool pic = want[0] && (is_picture_name(want) || ffaudio_name_is_audio(want));
         pv->due = now_ms() + (pic ? 150 : 0);
     }
     if (!pv->loaded && now_ms() >= pv->due) {

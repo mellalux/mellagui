@@ -1601,6 +1601,34 @@ static int sz_open_aio(struct aio *a, char *err, size_t errn)
     return rc;
 }
 
+/* RAR: listed through the lister of archread.c; nothing can be extracted. */
+static int rar_open_aio(struct aio *a, const char *path, char *err, size_t errn)
+{
+    struct arc_list al;
+    char e2[160] = "";
+    int r = arc_read(path, 2000000, &al, e2, sizeof(e2));
+    if (r < 0) {
+        seterr(err, errn, r == -1 ? "Not an archive." : e2);
+        return r;
+    }
+    snprintf(a->kind, sizeof(a->kind), "%s", al.kind);
+    int cap = 0;
+    for (int i = 0; i < al.n; i++) {
+        struct aio_entry *e = add_entry(a, &cap);
+        if (!e)
+            break;
+        e->path = strdup(al.name[i]);
+        size_t l = strlen(e->path);
+        e->type = l && e->path[l - 1] == '/' ? AIO_DIR : AIO_FILE;
+        e->size = al.size[i];
+        e->packed = al.packed[i];
+    }
+    a->extractable = 0;
+    snprintf(a->why_not, sizeof(a->why_not), "Extracting RAR archives is not supported: they can only be looked at.");
+    arc_free(&al);
+    return 0;
+}
+
 int aio_open(const char *path, struct aio **out, char *err, size_t errn)
 {
     *out = NULL;
@@ -1636,6 +1664,8 @@ int aio_open(const char *path, struct aio **out, char *err, size_t errn)
         rc = zip_open_aio(a, err, errn);
     } else if (hn >= 32 && !memcmp(h, "7z\xbc\xaf\x27\x1c", 6)) {
         rc = sz_open_aio(a, err, errn);
+    } else if (hn >= 8 && !memcmp(h, "Rar!\x1a\x07", 6)) {
+        rc = rar_open_aio(a, path, err, errn);
     } else if (hn == 512 && tar_header_ok(h)) {
         snprintf(a->kind, sizeof(a->kind), "TAR");
         a->mode = 1;

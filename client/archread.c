@@ -1460,6 +1460,232 @@ static int sz_list(int fd, uint64_t fsize, int max, struct arc_list *a, char *er
     return rc;
 }
 
+/* ---- RAR (listing only: the names, sizes and times of RAR 3 / 4 and RAR 5 archives; nothing is unpacked) ---- */
+static bool rar_vint(const uint8_t *p, size_t n, size_t *pos, uint64_t *v)
+{
+    *v = 0;
+    for (int i = 0; i < 10 && *pos < n; i++) {
+        uint8_t b = p[(*pos)++];
+        *v |= (uint64_t)(b & 0x7f) << (7 * i);
+        if (!(b & 0x80))
+            return true;
+    }
+    return false;
+}
+
+static int rar_list(int fd, uint64_t fsize, int max, struct arc_list *a, char *err, size_t errn)
+{
+    uint8_t sig[8];
+    if (!pread_all(fd, sig, 8, 0)) {
+        seterr(err, errn, "A RAR file that cannot be read.");
+        return -2;
+    }
+    bool v5 = sig[6] == 1 && sig[7] == 0;
+    uint64_t off = v5 ? 8 : 7;
+    snprintf(a->kind, sizeof(a->kind), v5 ? "RAR5" : "RAR");
+    a->has_packed = 1;
+    if (sig[6] > 1) {
+        seterr(err, errn, "A RAR format that is newer than this program knows.");
+        return -2;
+    }
+    int blocks = 0;
+    for (long guard = 0; guard < 4000000 && off + 7 <= fsize; guard++) {
+        uint8_t h[4096];
+        if (v5) {
+            size_t hn = fsize - off < sizeof(h) ? (size_t)(fsize - off) : sizeof(h);
+            if (hn < 8 || !pread_all(fd, h, hn, off))
+                break;
+            size_t pos = 4;
+            uint64_t hsize, type, flags, extra = 0, data = 0;
+            if (!rar_vint(h, hn, &pos, &hsize) || hsize == 0 || hsize > 1u << 20)
+                break;
+            size_t hstart = pos;
+            if (!rar_vint(h, hn, &pos, &type) || !rar_vint(h, hn, &pos, &flags))
+                break;
+            if ((flags & 1) && !rar_vint(h, hn, &pos, &extra))
+                break;
+            if ((flags & 2) && !rar_vint(h, hn, &pos, &data))
+                break;
+            (void)extra;
+            if (type == 4) {
+                seterr(err, errn, "The headers of this RAR archive are encrypted: nothing can be listed without the password.");
+                return -2;
+            }
+            if (type == 2 && hstart + hsize <= hn) {                         /* a file or a folder */
+                size_t q = pos;
+                uint64_t ff, usize, attr, cinfo, host, nlen;
+                bool ok = rar_vint(h, hn, &q, &ff) && rar_vint(h, hn, &q, &usize) && rar_vint(h, hn, &q, &attr);
+                int64_t mtime = 0;
+                if (ok && (ff & 2) && q + 4 <= hn) {
+                    mtime = (int64_t)u32(h + q);
+                    q += 4;
+                }
+                if (ok && (ff & 4) && q + 4 <= hn)
+                    q += 4;
+                ok = ok && rar_vint(h, hn, &q, &cinfo) && rar_vint(h, hn, &q, &host) && rar_vint(h, hn, &q, &nlen);
+                if (ok && nlen > 0 && q + nlen <= hn) {
+                    char *name = clean_name(h + q, (size_t)nlen, false);
+                    bool dir = (ff & 1) != 0;
+                    if (name && dir) {
+                        size_t l = strlen(name);
+                        name = realloc(name, l + 2);
+                        name[l] = '/';
+                        name[l + 1] = 0;
+                    }
+                    if (!mtime && (flags & 1) && extra && extra < hsize) {              /* the time lives in the extra area (record 3) */
+                        size_t xe = hstart + (size_t)hsize, xp = xe - (size_t)extra;
+                        while (xp < xe && xe <= hn) {
+                            uint64_t rl, rt, rf;
+                            size_t rs = xp;
+                            if (!rar_vint(h, hn, &rs, &rl) || rl == 0 || rs + rl > xe)
+                                break;
+                            size_t re = rs + (size_t)rl, rp = rs;
+                            if (rar_vint(h, hn, &rp, &rt) && rt == 3 && rar_vint(h, hn, &rp, &rf) && (rf & 2)) {
+                                if ((rf & 1) && rp + 4 <= re)
+                                    mtime = (int64_t)u32(h + rp);
+                                else if (!(rf & 1) && rp + 8 <= re) {
+                                    uint64_t ft = u64(h + rp);
+                                    if (ft >= 116444736000000000ull)
+                                        mtime = (int64_t)(ft / 10000000ull) - 11644473600ll;
+                                }
+                            }
+                            xp = re;
+                        }
+                    }
+                    arc_add(a, max, name, mtime ? unix_time_text(mtime) : NULL, dir || (ff & 8) ? -1 : (long long)usize, dir ? -1 : (long long)data);
+                    blocks++;
+                }
+            }
+            if (type == 5)
+                break;
+            off += 4 + (hstart - 4) + hsize + data;
+        } else {
+            if (!pread_all(fd, h, 7, off))
+                break;
+            unsigned type = h[2], flags = u16(h + 3), hsize = u16(h + 5);
+            if (hsize < 7 || off + hsize > fsize)
+                break;
+            uint64_t add = 0;
+            if (type == 0x73 && (flags & 0x80)) {
+                seterr(err, errn, "The headers of this RAR archive are encrypted: nothing can be listed without the password.");
+                return -2;
+            }
+            if (type == 0x74) {                                              /* a file header */
+                size_t want = hsize < sizeof(h) ? hsize : sizeof(h);
+                if (want < 32 || !pread_all(fd, h, want, off))
+                    break;
+                uint64_t pack = u32(h + 7), unp = u32(h + 11);
+                unsigned nlen = u16(h + 26);
+                uint32_t ftime = u32(h + 20), attr = u32(h + 28);
+                size_t np = 32;
+                if (flags & 0x100) {
+                    if (want < 40)
+                        break;
+                    pack |= (uint64_t)u32(h + 32) << 32;
+                    unp |= (uint64_t)u32(h + 36) << 32;
+                    np = 40;
+                }
+                (void)attr;
+                bool dir = (flags & 0xe0) == 0xe0;
+                if (np + nlen <= want) {
+                    char *name;
+                    if (flags & 0x200) {                                     /* an OEM name, a NUL, then the same name encoded in Unicode */
+                        const uint8_t *nm = h + np;
+                        size_t z = 0;
+                        while (z < nlen && nm[z])
+                            z++;
+                        if (z + 1 < nlen) {
+                            const uint8_t *enc = nm + z + 1;
+                            size_t encn = nlen - z - 1, ep = 0, dp = 0, fb = 0;
+                            uint32_t *dec = calloc(nlen + 2, sizeof(uint32_t));
+                            unsigned hb = enc[ep++], fl = 0;
+                            while (dec && ep < encn && dp < nlen) {
+                                if (fb == 0) {
+                                    fl = enc[ep++];
+                                    fb = 8;
+                                }
+                                if (ep > encn)
+                                    break;
+                                switch (fl >> 6) {
+                                case 0: dec[dp++] = enc[ep++]; break;
+                                case 1: dec[dp++] = enc[ep++] + (hb << 8); break;
+                                case 2:
+                                    if (ep + 1 < encn) dec[dp++] = enc[ep] | (uint32_t)enc[ep + 1] << 8;
+                                    ep += 2;
+                                    break;
+                                default: {
+                                    if (ep >= encn) break;
+                                    unsigned ln = enc[ep++];
+                                    if (ln & 0x80) {
+                                        unsigned corr = ep < encn ? enc[ep++] : 0;
+                                        for (ln = (ln & 0x7f) + 2; ln > 0 && dp < nlen; ln--, dp++)
+                                            dec[dp] = ((nm[dp < z ? dp : 0] + corr) & 0xff) + (hb << 8);
+                                    } else
+                                        for (ln += 2; ln > 0 && dp < nlen; ln--, dp++)
+                                            dec[dp] = nm[dp < z ? dp : 0];
+                                }
+                                }
+                                fl = (fl << 2) & 0xff;
+                                fb -= 2;
+                            }
+                            char *u8 = malloc(dp * 4 + 1);
+                            size_t o8 = 0;
+                            for (size_t k = 0; u8 && k < dp; k++) {
+                                uint32_t cp = dec[k];
+                                if (cp >= 0xd800 && cp < 0xdc00 && k + 1 < dp && dec[k + 1] >= 0xdc00 && dec[k + 1] < 0xe000) {
+                                    cp = 0x10000 + ((cp - 0xd800) << 10) + (dec[k + 1] - 0xdc00);
+                                    k++;
+                                }
+                                put_utf8(u8, &o8, dp * 4, cp);
+                            }
+                            if (u8)
+                                u8[o8] = 0;
+                            free(dec);
+                            name = u8 ? clean_name((const uint8_t *)u8, o8, false) : NULL;
+                            free(u8);
+                        } else
+                            name = clean_name(nm, z, false);
+                    } else
+                        name = clean_name(h + np, nlen, false);
+                    for (char *c = name; c && *c; c++)
+                        if (*c == '\\')
+                            *c = '/';
+                    if (name && dir) {
+                        size_t l = strlen(name);
+                        name = realloc(name, l + 2);
+                        name[l] = '/';
+                        name[l + 1] = 0;
+                    }
+                    char *tm = NULL;
+                    if (ftime && ((ftime >> 21) & 15) >= 1 && ((ftime >> 21) & 15) <= 12 && ((ftime >> 16) & 31) >= 1) {
+                        int sec = (int)(ftime & 31) * 2, mi = (int)(ftime >> 5 & 63), hr = (int)(ftime >> 11 & 31), dd = (int)(ftime >> 16 & 31), mo = (int)(ftime >> 21 & 15), yr = (int)(ftime >> 25) + 1980;
+                        (void)sec;
+                        char t2[32];
+                        snprintf(t2, sizeof(t2), "%04d-%02d-%02d %02d:%02d", yr, mo, dd, hr, mi);
+                        tm = strdup(t2);
+                    }
+                    arc_add(a, max, name, tm, dir ? -1 : (long long)unp, dir ? -1 : (long long)pack);
+                    blocks++;
+                }
+                add = pack;
+            } else if (flags & 0x8000) {
+                uint8_t ad[4];
+                if (pread_all(fd, ad, 4, off + 7))
+                    add = u32(ad);
+            }
+            if (type == 0x7b)
+                break;
+            off += hsize + add;
+        }
+    }
+    if (blocks == 0 && a->n == 0) {
+        seterr(err, errn, "No files could be read from this RAR archive.");
+        return -2;
+    }
+    snprintf(a->note, sizeof(a->note), "RAR archives are only listed: this program does not unpack them.");
+    return 0;
+}
+
 int arc_read(const char *path, int max_entries, struct arc_list *a, char *err, size_t errn)
 {
     memset(a, 0, sizeof(*a));
@@ -1489,6 +1715,8 @@ int arc_read(const char *path, int max_entries, struct arc_list *a, char *err, s
         r = ar_list(fd, fsize, max_entries, a, err, errn);
     } else if (hn >= 4 && !memcmp(h, "\xed\xab\xee\xdb", 4) && fsize > 200) {
         r = rpm_list(fd, fsize, max_entries, a, err, errn);
+    } else if (hn >= 8 && !memcmp(h, "Rar!\x1a\x07", 6)) {
+        r = rar_list(fd, fsize, max_entries, a, err, errn);
     } else if (hn >= 32 && !memcmp(h, "7z\xbc\xaf\x27\x1c", 6)) {
         r = sz_list(fd, fsize, max_entries, a, err, errn);
     } else if (hn == 512 && tar_header_ok(h)) {

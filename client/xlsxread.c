@@ -4,6 +4,7 @@
 #include "parquet.h"
 
 #include <ctype.h>
+#include "cptables.h"
 #include <fcntl.h>
 #include <math.h>
 #include <stdbool.h>
@@ -4212,9 +4213,748 @@ static int epub_convert_book(const struct zip *z, struct docb *db, char *title, 
     return 0;
 }
 
+/* ---- the old binary Word (.doc) and PowerPoint (.ppt): streams of an OLE2 compound file ---- */
+static int cfs_find_stream(const struct cfs *f, const char *want, uint32_t *start, uint64_t *size, uint32_t *rstart, uint64_t *rsize)
+{
+    uint32_t nd = 0;
+    uint32_t *ds = chain_of(f->fat, f->nfat, f->dirstart, OLE_DIR_MAX < f->nsect ? OLE_DIR_MAX : f->nsect, &nd);
+    uint8_t *sec = malloc(f->ssz);
+    int found = 0;
+    *rstart = 0xfffffffeu;
+    *rsize = 0;
+    for (uint32_t i = 0; sec && i < nd; i++) {
+        if (!sector_read(f, ds[i], sec))
+            break;
+        for (uint32_t e = 0; e + 128 <= f->ssz; e += 128) {
+            const uint8_t *d = sec + e;
+            unsigned type = d[66], nlen = u16(d + 64);
+            if (type == 5) {
+                *rstart = u32(d + 116);
+                *rsize = u32(d + 120);
+            }
+            if (type != 2 || nlen < 2 || nlen > 64)
+                continue;
+            char name[33];
+            unsigned k = 0;
+            for (; k + 1 < nlen / 2 && k < 32; k++)
+                name[k] = d[2 * k + 1] ? '?' : (char)d[2 * k];
+            name[k] = 0;
+            if (!strcmp(name, want)) {
+                *start = u32(d + 116);
+                *size = u32(d + 120);
+                found = 1;
+            }
+        }
+    }
+    free(sec);
+    free(ds);
+    return found;
+}
+
+/* A whole stream by name (malloc'd, *n bytes, at most `cap`); NULL when it is missing. */
+static uint8_t *ole_stream(const struct cfs *f, const char *name, size_t cap, size_t *n)
+{
+    uint32_t start, rstart;
+    uint64_t size, rsize;
+    if (!cfs_find_stream(f, name, &start, &size, &rstart, &rsize) || size > cap)
+        return NULL;
+    struct cstream cs;
+    if (cstream_open(&cs, f, start, size, rstart, rsize) != 0) {
+        cstream_close(&cs);                                                  /* (a failed open can still hold a buffer) */
+        return NULL;
+    }
+    uint8_t *buf = malloc((size_t)cs.size + 1);
+    size_t got = buf ? cstream_read(&cs, 0, buf, (size_t)cs.size) : 0;
+    cstream_close(&cs);
+    if (!buf)
+        return NULL;
+    buf[got] = 0;
+    *n = got;
+    return buf;
+}
+
+static unsigned cp1252_char(unsigned b)
+{
+    static const uint16_t hi[32] = { 0x20ac, 0x81, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x8d, 0x017d, 0x8f,
+                                     0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x9d, 0x017e, 0x0178 };
+    return b >= 0x80 && b < 0xa0 ? hi[b - 0x80] : b;
+}
+
+/* The code page the document's SummaryInformation property set declares (PID_CODEPAGE), 0 when there is none or it is Unicode. */
+static int ole_summary_codepage(const struct cfs *f)
+{
+    size_t n = 0;
+    uint8_t *b = ole_stream(f, "\x05SummaryInformation", 1u << 20, &n);
+    int cp = 0;
+    if (b && n >= 48) {
+        uint32_t off = u32(b + 44);
+        if ((uint64_t)off + 8 <= n) {
+            uint32_t np = u32(b + off + 4);
+            for (uint32_t i = 0; i < np && i < 64 && (uint64_t)off + 8 + 8 * (i + 1) <= n; i++) {
+                uint32_t id = u32(b + off + 8 + 8 * i), po = u32(b + off + 12 + 8 * i);
+                if (id == 1 && (uint64_t)off + po + 8 <= n && u16(b + off + po) == 2)
+                    cp = (int)(uint16_t)u16(b + off + po + 4);
+            }
+        }
+    }
+    free(b);
+    return cp >= 1250 && cp <= 1258 ? cp : 0;
+}
+
+/* The Windows code page of a Word 6 / 95 document's language (its FIB's lid): the upper half of the byte text. NULL = Western (cp1252). */
+static const uint16_t *lid_codepage(unsigned lid)
+{
+    switch (lid & 0x3ff) {
+    case 0x02: case 0x19: case 0x22: case 0x23: case 0x2f: case 0x44: case 0x3f:
+        return k_cp1251;                                                    /* Bulgarian, Russian, Ukrainian, Belarusian, Macedonian, Tatar, Kazakh */
+    case 0x05: case 0x0e: case 0x15: case 0x18: case 0x1b: case 0x24: case 0x1a: case 0x1c:
+        return k_cp1250;                                                    /* Czech, Hungarian, Polish, Romanian, Slovak, Slovenian, Croatian / Serbian, Albanian */
+    case 0x25: case 0x26: case 0x27:
+        return k_cp1257;                                                    /* Estonian, Latvian, Lithuanian */
+    case 0x08:
+        return k_cp1253;                                                    /* Greek */
+    case 0x1f:
+        return k_cp1254;                                                    /* Turkish */
+    default:
+        return NULL;
+    }
+}
+
+struct docstate {
+    struct docb *db;
+    int field_depth;
+    uint32_t field_state[16];           /* per depth: 1 = in the code (skipped), 2 = in the result */
+    bool in_table, cell_empty;
+    int cells_in_row;
+    struct xbuf tx;
+    uint32_t total;
+};
+
+/* One character of the main text of a .doc: fields, paragraph ends, table cell marks, placeholders. */
+static void doc_char(struct docstate *s, unsigned ch)
+{
+    struct docb *db = s->db;
+    s->total++;
+    if (ch == 0x13) {
+        if (s->field_depth < 15)
+            s->field_state[++s->field_depth] = 1;
+        return;
+    }
+    if (ch == 0x14) {
+        if (s->field_depth > 0)
+            s->field_state[s->field_depth] = 2;
+        return;
+    }
+    if (ch == 0x15) {
+        if (s->field_depth > 0)
+            s->field_depth--;
+        return;
+    }
+    if (s->field_depth > 0 && s->field_state[s->field_depth] == 1)          /* a field's code */
+        return;
+    if (ch == 0x0d) {                                                       /* the end of a paragraph */
+        if (s->in_table) {
+            db_table_end(db);
+            s->in_table = false;
+            s->cells_in_row = 0;
+        }
+        db_para(db, 0, -1, true);
+        return;
+    }
+    if (ch == 0x07) {                                                       /* the end of a table cell, or (an empty one) of the row */
+        if (!s->in_table) {
+            db_table_begin(db);
+            db_row_begin(db);
+            s->in_table = true;
+            s->cells_in_row = 0;
+        }
+        if (s->cell_empty && s->cells_in_row > 0 && db->nruns == 0) {
+            db_row_end(db);
+            db_row_begin(db);
+            s->cells_in_row = 0;
+        } else {
+            db_para(db, 0, -1, true);
+            db_cell_end(db);
+            s->cells_in_row++;
+        }
+        s->cell_empty = true;
+        return;
+    }
+    if (ch < 0x20 && ch != 0x09 && ch != 0x0b && ch != 0x0c)
+        return;                                                             /* pictures, footnote marks and other placeholders */
+    if (ch == 0x0b || ch == 0x0c || ch == 0x09)
+        ch = ' ';
+    else if (ch == 0x1e)
+        ch = '-';
+    xb_reset(&s->tx);
+    xb_utf8(&s->tx, ch);
+    db_run(db, xb_str(&s->tx), s->tx.n, false, false);
+    s->cell_empty = false;
+}
+
+static void doc_finish(struct docstate *s)
+{
+    if (s->in_table)
+        db_table_end(s->db);
+    db_para(s->db, 0, -1, true);
+    free(s->tx.s);
+}
+
+/* The main text of a .doc: Word 97 and later through the piece table (the CLX of the table stream), Word 6 / 95 as the plain bytes from fcMin to fcMac. */
+static bool doc_convert(struct docb *db, const uint8_t *wd, size_t wdn, const uint8_t *tbl, size_t tbn, int sumcp, char *err, size_t errn)
+{
+    if (wdn < 0x40 || u16(wd) != 0xa5ec) {
+        if (wdn >= 0x40 && (u16(wd) == 0xa5db || u16(wd) == 0xa5dc || (u16(wd) >= 0x0200 && u16(wd) <= 0x0300 && false))) {
+            /* Word 6 / 95: fall through to the plain text below */
+        } else if (wdn >= 0x40 && u16(wd + 2) < 0xc1 && u16(wd) >= 0xa500) {
+        } else
+            return false;
+    }
+    struct docstate st;
+    memset(&st, 0, sizeof(st));
+    st.db = db;
+    st.tx.limit = 1u << 20;
+    st.cell_empty = true;
+    unsigned nfib = u16(wd + 2);
+    if (nfib < 0xc1 || !tbl) {                                              /* Word 6 / 95 */
+        uint32_t fmin = u32(wd + 0x18), fmac = u32(wd + 0x1c);
+        if (fmin < 0x40 || fmac > wdn || fmac <= fmin) {
+            seterr(err, errn, "The text of this old Word document cannot be found.");
+            return false;
+        }
+        const uint16_t *cpt = sumcp == 1250 ? k_cp1250 : sumcp == 1251 ? k_cp1251 : sumcp == 1253 ? k_cp1253 : sumcp == 1254 ? k_cp1254 : sumcp == 1257 ? k_cp1257 : sumcp == 1252 ? NULL : lid_codepage(u16(wd + 6));
+        for (uint32_t i = fmin; i < fmac && !db->full; i++) {
+            unsigned b = wd[i];
+            doc_char(&st, b >= 0x80 && cpt && cpt[b - 0x80] ? cpt[b - 0x80] : cp1252_char(b));
+        }
+        doc_finish(&st);
+        return st.total > 0;
+    }
+    if (wdn < 0x1a8)
+        return false;
+    unsigned csw = u16(wd + 32);
+    size_t o = 34 + (size_t)csw * 2;
+    if (o + 2 > wdn)
+        return false;
+    unsigned cslw = u16(wd + o);
+    size_t lw = o + 2;
+    if (lw + (size_t)cslw * 4 > wdn || cslw < 4)
+        return false;
+    uint32_t ccp = u32(wd + lw + 12);
+    size_t fcl = lw + (size_t)cslw * 4;
+    if (fcl + 2 > wdn)
+        return false;
+    unsigned cb = u16(wd + fcl);
+    if (cb < 34 || fcl + 2 + 34 * 8 > wdn)
+        return false;
+    uint32_t fc_clx = u32(wd + fcl + 2 + 33 * 8), lcb_clx = u32(wd + fcl + 2 + 33 * 8 + 4);
+    if ((u16(wd + 10) & 0x0100)) {
+        seterr(err, errn, "The document is encrypted.");
+        return false;
+    }
+    if ((uint64_t)fc_clx + lcb_clx > tbn || lcb_clx < 5) {
+        seterr(err, errn, "The text table of the document is missing.");
+        return false;
+    }
+    const uint8_t *clx = tbl + fc_clx;
+    size_t cl = lcb_clx, p = 0;
+    while (p < cl && clx[p] == 1) {                                          /* Prc: skipped */
+        if (p + 3 > cl)
+            return false;
+        p += 3 + u16(clx + p + 1);
+    }
+    if (p + 5 > cl || clx[p] != 2)
+        return false;
+    uint32_t plc = u32(clx + p + 1);
+    p += 5;
+    if (p + plc > cl || plc < 4)
+        return false;
+    int n = (int)((plc - 4) / 12);
+    if (n < 1 || n > 200000)
+        return false;
+    const uint8_t *cps = clx + p, *pcd = cps + 4 * (size_t)(n + 1);
+    for (int i = 0; i < n && !db->full; i++) {
+        uint32_t c0 = u32(cps + 4 * i), c1 = u32(cps + 4 * (i + 1));
+        if (c0 >= ccp)
+            break;
+        if (c1 > ccp)
+            c1 = ccp;
+        if (c1 <= c0)
+            continue;
+        uint32_t fc = u32(pcd + 8 * (size_t)i + 2);
+        bool bytes = (fc & 0x40000000u) != 0;
+        uint64_t off = bytes ? (uint64_t)(fc & 0x3fffffffu) / 2 : fc;
+        uint32_t len = c1 - c0;
+        if (off + (uint64_t)len * (bytes ? 1 : 2) > wdn)
+            len = (uint32_t)((wdn > off ? wdn - off : 0) / (bytes ? 1 : 2));
+        for (uint32_t k = 0; k < len && !db->full; k++) {
+            unsigned ch = bytes ? cp1252_char(wd[off + k]) : u16(wd + off + 2 * k);
+            if (!bytes && ch >= 0xd800 && ch < 0xdc00 && k + 1 < len) {
+                unsigned lo = u16(wd + off + 2 * (k + 1));
+                if (lo >= 0xdc00 && lo < 0xe000) {
+                    ch = 0x10000 + ((ch - 0xd800) << 10) + (lo - 0xdc00);
+                    k++;
+                }
+            }
+            doc_char(&st, ch);
+        }
+    }
+    doc_finish(&st);
+    return st.total > 0;
+}
+
+/* One slide's text of a .ppt: the text atoms between two SlidePersistAtoms of the slide list. */
+static void ppt_text_atom(struct docb *db, const uint8_t *d, size_t n, bool wide, int text_type)
+{
+    struct xbuf line = { 0 };
+    line.limit = 1u << 20;
+    size_t units = wide ? n / 2 : n;
+    for (size_t i = 0; i <= units && !db->full; i++) {
+        unsigned ch = i == units ? '\r' : wide ? u16(d + 2 * i) : cp1252_char(d[i]);
+        if (wide && ch >= 0xd800 && ch < 0xdc00 && i + 1 < units) {
+            unsigned lo = u16(d + 2 * (i + 1));
+            if (lo >= 0xdc00 && lo < 0xe000) {
+                ch = 0x10000 + ((ch - 0xd800) << 10) + (lo - 0xdc00);
+                i++;
+            }
+        }
+        if (ch == '\r' || ch == '\n' || ch == 0x0b) {
+            if (ch == 0x0b) {
+                db_run(db, " ", 1, false, false);
+                continue;
+            }
+            bool title = text_type == 0 || text_type == 6;
+            db_para(db, title ? 3 : 0, title ? -1 : 0, true);
+            continue;
+        }
+        if (ch < 0x20 || ch == 0x7f)
+            continue;
+        xb_reset(&line);
+        xb_utf8(&line, ch);
+        db_run(db, xb_str(&line), line.n, false, false);
+    }
+    free(line.s);
+}
+
+static void ppt_walk(struct docb *db, const uint8_t *d, size_t n, int depth, bool *in_slides, int *text_type)
+{
+    size_t p = 0;
+    while (p + 8 <= n && !db->full) {
+        unsigned ver = d[p] & 15, inst = (u16(d + p) >> 4), type = u16(d + p + 2);
+        size_t len = u32(d + p + 4);
+        if (len > n - p - 8)
+            len = n - p - 8;
+        const uint8_t *body = d + p + 8;
+        if (type == 0x0ff0 && ver == 0xf && depth < 6) {                     /* SlideListWithText: instance 0 = the slides (1 masters, 2 notes) */
+            if (inst == 0) {
+                bool was = *in_slides;
+                *in_slides = true;
+                ppt_walk(db, body, len, depth + 1, in_slides, text_type);
+                *in_slides = was;
+            }
+        } else if (type == 0x03f3 && *in_slides) {                           /* SlidePersistAtom: the next slide starts */
+            db_slide(db, db->slides + 1);
+            *text_type = 1;
+        } else if (type == 0x0f9f && *in_slides && len >= 4) {               /* TextHeaderAtom: what kind of text follows */
+            *text_type = (int)u32(body);
+        } else if ((type == 0x0fa0 || type == 0x0fa8) && *in_slides) {
+            ppt_text_atom(db, body, len, type == 0x0fa0, *text_type);
+        } else if (ver == 0xf && depth < 6 && type != 0x0ff0 && len) {       /* other containers (the document) are looked into */
+            ppt_walk(db, body, len, depth + 1, in_slides, text_type);
+        }
+        p += 8 + len;
+    }
+}
+
+/* .doc / .ppt: 0 = converted; -1 = an OLE2 file that is neither; -2 = unreadable. */
+static int ole_document(const char *path, struct docb *db, char *what, size_t whatn, char *err, size_t errn)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    struct cfs f;
+    int r = cfs_open(&f, fd, err, errn);
+    if (r < 0) {
+        close(fd);
+        return r;
+    }
+    int result = -1;
+    size_t wn = 0, tn = 0, pn = 0;
+    uint8_t *wd = ole_stream(&f, "WordDocument", 64u << 20, &wn);
+    if (wd) {
+        snprintf(what, whatn, "Word document (97-2003)");
+        bool second = wn > 11 && (u16(wd + 10) & 0x0200);
+        uint8_t *tbl = ole_stream(&f, second ? "1Table" : "0Table", 64u << 20, &tn);
+        if (doc_convert(db, wd, wn, tbl, tn, ole_summary_codepage(&f), err, errn))
+            result = 0;
+        else {
+            if (!err[0])
+                seterr(err, errn, "The text of the document cannot be read.");
+            result = -2;
+        }
+        free(tbl);
+        free(wd);
+    } else {
+        uint8_t *pp = ole_stream(&f, "PowerPoint Document", 128u << 20, &pn);
+        if (pp) {
+            snprintf(what, whatn, "Presentation (97-2003)");
+            bool in_slides = false;
+            int tt = 1;
+            /* a presentation saved again and again keeps its older documents in the stream: the LAST DocumentContainer is the present one */
+            size_t q = 0, last_off = 0, last_len = 0;
+            bool have = false;
+            while (q + 8 <= pn) {
+                unsigned ty = u16(pp + q + 2);
+                size_t ln = u32(pp + q + 4);
+                if (ln > pn - q - 8)
+                    ln = pn - q - 8;
+                if (ty == 0x03e8) {
+                    last_off = q + 8;
+                    last_len = ln;
+                    have = true;
+                }
+                q += 8 + ln;
+            }
+            if (have)
+                ppt_walk(db, pp + last_off, last_len, 0, &in_slides, &tt);
+            else
+                ppt_walk(db, pp, pn, 0, &in_slides, &tt);
+            result = 0;
+            free(pp);
+        }
+    }
+    cfs_close(&f);
+    close(fd);
+    return result;
+}
+
+/* ---- RTF ---- */
+struct rtfstate {
+    bool skip;                          /* inside a destination that shows nothing */
+    bool bold, ital;
+    int uc;                             /* the characters a \u escape is followed by in a fallback */
+    int font;                           /* \fN: the font in use (its charset says how \'hh bytes are read) */
+};
+
+struct rtfctx {
+    struct docb *db;
+    const uint16_t *cp;                 /* the code page's upper half, NULL = Latin-1 / cp1252 */
+    int style_head[256];                /* \sN -> heading level (0 = none) */
+    bool in_style_table;
+    int style_depth;
+    int cur_style_def;                  /* the style being defined in the stylesheet */
+    char style_name[64];
+    int para_style;
+    bool in_list;
+    bool in_table, row_pending_end;
+    int cells;
+    int skip_chars;                     /* the fallback characters after \uN */
+    uint8_t font_charset[8192];          /* \fcharsetN of each font of the font table (0 = default) */
+    bool in_fonttbl;
+    int fonttbl_depth, cur_font_def;
+};
+
+static void rtf_put(struct rtfctx *c, const struct rtfstate *st, unsigned cp)
+{
+    if (c->skip_chars > 0) {
+        c->skip_chars--;
+        return;
+    }
+    if (c->in_style_table) {
+        if (cp == ';') {
+            if (c->cur_style_def >= 0 && c->cur_style_def < 256) {
+                int lvl = 0;
+                if (!strncasecmp(c->style_name, "heading ", 8))
+                    lvl = atoi(c->style_name + 8);
+                else if (!strcasecmp(c->style_name, "title"))
+                    lvl = 1;
+                c->style_head[c->cur_style_def] = lvl > 6 ? 6 : lvl;
+            }
+            c->style_name[0] = 0;
+        } else if (strlen(c->style_name) < sizeof(c->style_name) - 5) {
+            struct xbuf t = { 0 };
+            t.limit = 16;
+            xb_utf8(&t, cp);
+            strncat(c->style_name, xb_str(&t), 4);
+            free(t.s);
+        }
+        return;
+    }
+    if (st->skip)
+        return;
+    if (c->row_pending_end && c->in_table && cp != ' ') {                    /* text after the last row: the table is over */
+        db_table_end(c->db);
+        c->in_table = c->row_pending_end = false;
+    }
+    struct xbuf t = { 0 };
+    t.limit = 16;
+    xb_utf8(&t, cp);
+    db_run(c->db, xb_str(&t), t.n, st->bold, st->ital);
+    free(t.s);
+}
+
+static void rtf_end_para(struct rtfctx *c)
+{
+    if (c->in_table && c->row_pending_end) {
+        db_table_end(c->db);
+        c->in_table = c->row_pending_end = false;
+    }
+    int head = c->para_style >= 0 && c->para_style < 256 ? c->style_head[c->para_style] : 0;
+    db_para(c->db, head, !c->in_table && !head && c->in_list ? 0 : -1, true);
+}
+
+static void rtf_convert(struct docb *db, const char *buf, size_t len)
+{
+    struct rtfctx c;
+    memset(&c, 0, sizeof(c));
+    c.db = db;
+    c.cur_style_def = -1;
+    c.para_style = -1;
+    struct rtfstate stack[64];
+    int sp = 0;
+    stack[0] = (struct rtfstate){ false, false, false, 1, -1 };
+    for (size_t i = 0; i < len && !db->full; i++) {
+        char ch = buf[i];
+        struct rtfstate *st = &stack[sp];
+        if (ch == '{') {
+            if (sp < 63) {
+                stack[sp + 1] = *st;
+                sp++;
+                if (c.in_style_table)
+                    c.style_depth++;
+                if (c.in_fonttbl)
+                    c.fonttbl_depth++;
+            }
+        } else if (ch == '}') {
+            if (c.in_style_table) {
+                if (c.style_depth > 0)
+                    c.style_depth--;
+                if (c.style_depth == 0 && sp > 0)
+                    c.in_style_table = false;
+            }
+            if (c.in_fonttbl) {
+                if (c.fonttbl_depth > 0)
+                    c.fonttbl_depth--;
+                if (c.fonttbl_depth == 0)
+                    c.in_fonttbl = false;
+            }
+            if (sp > 0)
+                sp--;
+        } else if (ch == '\\' && i + 1 < len) {
+            char n = buf[i + 1];
+            if (n == '\\' || n == '{' || n == '}') {
+                rtf_put(&c, st, (unsigned char)n);
+                i++;
+            } else if (n == '\'') {                                          /* \'hh: a character of the code page */
+                if (i + 3 < len + 0 && isxdigit((unsigned char)buf[i + 2]) && isxdigit((unsigned char)buf[i + 3])) {
+                    char hx[3] = { buf[i + 2], buf[i + 3], 0 };
+                    unsigned b = (unsigned)strtoul(hx, NULL, 16), cp = b;
+                    if (b >= 0x80) {
+                        const uint16_t *tab = c.cp;
+                        int cs = st->font >= 0 && st->font < 8192 ? c.font_charset[st->font] : 0;
+                        if (cs == 204 || cs == 238 || cs == 186 || cs == 161 || cs == 162)
+                            tab = cs == 204 ? k_cp1251 : cs == 238 ? k_cp1250 : cs == 186 ? k_cp1257 : cs == 161 ? k_cp1253 : k_cp1254;
+                        cp = tab && tab[b - 0x80] ? tab[b - 0x80] : cp1252_char(b);
+                    }
+                    rtf_put(&c, st, cp);
+                    i += 3;
+                } else
+                    i++;
+            } else if (n == '~') {
+                rtf_put(&c, st, 0xa0);
+                i++;
+            } else if (n == '-' || n == '_') {
+                if (n == '_')
+                    rtf_put(&c, st, 0x2011);
+                i++;
+            } else if (n == '*') {                                           /* an ignorable destination: the group is skipped */
+                st->skip = true;
+                i++;
+            } else if (isalpha((unsigned char)n)) {
+                size_t k = i + 1;
+                char word[32];
+                size_t wl = 0;
+                while (k < len && isalpha((unsigned char)buf[k]) && wl < sizeof(word) - 1)
+                    word[wl++] = buf[k++];
+                word[wl] = 0;
+                bool has_num = false, neg = false;
+                long num = 0;
+                if (k < len && buf[k] == '-') {
+                    neg = true;
+                    k++;
+                }
+                while (k < len && isdigit((unsigned char)buf[k])) {
+                    has_num = true;
+                    if (num < 100000000)
+                        num = num * 10 + (buf[k] - '0');
+                    k++;
+                }
+                if (neg)
+                    num = -num;
+                if (k < len && buf[k] == ' ')
+                    k++;                                                     /* the delimiter */
+                i = k - 1;
+                if (!strcmp(word, "par") || !strcmp(word, "sect") || !strcmp(word, "page")) {
+                    if (!st->skip) {
+                        rtf_end_para(&c);
+                        c.skip_chars = 0;
+                    }
+                } else if (!strcmp(word, "pard")) {
+                    c.para_style = -1;
+                    c.in_list = false;
+                    if (c.in_table && c.row_pending_end) {
+                        db_table_end(db);
+                        c.in_table = c.row_pending_end = false;
+                    }
+                } else if (!strcmp(word, "s") && has_num) {
+                    if (c.in_style_table)
+                        c.cur_style_def = (int)num;
+                    else
+                        c.para_style = (int)num;
+                } else if (!strcmp(word, "ls") || !strcmp(word, "pnlvl")) {
+                    c.in_list = true;
+                } else if (!strcmp(word, "line")) {
+                    rtf_put(&c, st, ' ');
+                } else if (!strcmp(word, "tab")) {
+                    rtf_put(&c, st, ' ');
+                } else if (!strcmp(word, "emdash")) {
+                    rtf_put(&c, st, 0x2014);
+                } else if (!strcmp(word, "endash")) {
+                    rtf_put(&c, st, 0x2013);
+                } else if (!strcmp(word, "bullet")) {
+                    rtf_put(&c, st, 0x2022);
+                } else if (!strcmp(word, "lquote")) {
+                    rtf_put(&c, st, 0x2018);
+                } else if (!strcmp(word, "rquote")) {
+                    rtf_put(&c, st, 0x2019);
+                } else if (!strcmp(word, "ldblquote")) {
+                    rtf_put(&c, st, 0x201c);
+                } else if (!strcmp(word, "rdblquote")) {
+                    rtf_put(&c, st, 0x201d);
+                } else if (!strcmp(word, "b")) {
+                    st->bold = !has_num || num != 0;
+                } else if (!strcmp(word, "i")) {
+                    st->ital = !has_num || num != 0;
+                } else if (!strcmp(word, "plain")) {
+                    st->bold = st->ital = false;
+                } else if (!strcmp(word, "uc") && has_num) {
+                    st->uc = (int)num;
+                } else if (!strcmp(word, "u") && has_num) {
+                    unsigned cp = (unsigned)(num < 0 ? num + 65536 : num);
+                    if (cp >= 0xd800 && cp < 0xe000)
+                        cp = '?';
+                    rtf_put(&c, st, cp);
+                    if (!st->skip && !c.in_style_table)
+                        c.skip_chars = st->uc;
+                } else if (!strcmp(word, "ansicpg") && has_num) {
+                    c.cp = num == 1250 ? k_cp1250 : num == 1251 ? k_cp1251 : num == 1253 ? k_cp1253 : num == 1254 ? k_cp1254 : num == 1257 ? k_cp1257 : NULL;
+                } else if (!strcmp(word, "trowd")) {
+                    if (!c.in_table) {
+                        db_table_begin(db);
+                        c.in_table = true;
+                    }
+                    c.row_pending_end = false;
+                    db_row_begin(db);
+                } else if (!strcmp(word, "cell")) {
+                    if (c.in_table) {
+                        db_para(db, 0, -1, true);
+                        db_cell_end(db);
+                        db_cell_begin(db);
+                    }
+                } else if (!strcmp(word, "row")) {
+                    if (c.in_table) {
+                        db_row_end(db);
+                        c.row_pending_end = true;
+                    }
+                } else if (!strcmp(word, "f") && has_num) {
+                    if (c.in_fonttbl)
+                        c.cur_font_def = (int)num;
+                    else
+                        st->font = (int)num;
+                } else if (!strcmp(word, "fcharset") && has_num) {
+                    if (c.in_fonttbl && c.cur_font_def >= 0 && c.cur_font_def < 8192)
+                        c.font_charset[c.cur_font_def] = (uint8_t)(num & 255);
+                } else if (!strcmp(word, "fonttbl")) {
+                    c.in_fonttbl = true;
+                    c.fonttbl_depth = 1;
+                    c.cur_font_def = -1;
+                    st->skip = true;
+                } else if (!strcmp(word, "stylesheet")) {
+                    c.in_style_table = true;
+                    c.style_depth = 1;
+                } else if (!strcmp(word, "colortbl") || !strcmp(word, "info") || !strcmp(word, "pict") || !strcmp(word, "header") ||
+                           !strcmp(word, "footer") || !strcmp(word, "headerl") || !strcmp(word, "headerr") || !strcmp(word, "footerl") || !strcmp(word, "footerr") ||
+                           !strcmp(word, "listtable") || !strcmp(word, "listoverridetable") || !strcmp(word, "themedata") || !strcmp(word, "colorschememapping") ||
+                           !strcmp(word, "latentstyles") || !strcmp(word, "datastore") || !strcmp(word, "rsidtbl") || !strcmp(word, "generator") ||
+                           !strcmp(word, "fldinst") || !strcmp(word, "xmlnstbl") || !strcmp(word, "pgptbl") || !strcmp(word, "private") || !strcmp(word, "object") ||
+                           !strcmp(word, "footnote") || !strcmp(word, "stylerestrictions") || !strcmp(word, "mmathPr") || !strcmp(word, "wgrffmtfilter")) {
+                    st->skip = true;
+                }
+            } else {                                                         /* another control symbol */
+                i++;
+            }
+        } else if (ch == '\r' || ch == '\n') {
+            /* line breaks in the file mean nothing */
+        } else {
+            unsigned cp = (unsigned char)ch;
+            if (cp >= 0x80)
+                cp = c.cp && c.cp[cp - 0x80] ? c.cp[cp - 0x80] : cp1252_char(cp);
+            rtf_put(&c, st, cp);
+        }
+    }
+    if (c.in_table)
+        db_table_end(db);
+    db_para(db, 0, -1, true);
+}
+
 /* 0 = the document as Markdown in *md (malloc'd, `info` says what it was); -1 = not a document of these kinds; -2 = one that cannot be read (err). */
 int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t infon, char *err, size_t errn)
 {
+    {                                                                       /* the old formats first: OLE2 (.doc, .ppt) and RTF */
+        int ofd = open(path, O_RDONLY | O_CLOEXEC);
+        uint8_t mg[8] = { 0 };
+        bool got = ofd >= 0 && pread_all(ofd, mg, 8, 0);
+        bool ole = got && !memcmp(mg, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8), rtf = got && !memcmp(mg, "{\\rtf", 5);
+        if (ofd >= 0)
+            close(ofd);
+        if (ole || rtf) {
+            struct docb ob = { 0 };
+            char what2[64] = "";
+            int res = -1;
+            if (ole)
+                res = ole_document(path, &ob, what2, sizeof(what2), err, errn);
+            else {
+                int fd2 = open(path, O_RDONLY | O_CLOEXEC);
+                struct stat st2;
+                if (fd2 >= 0 && fstat(fd2, &st2) == 0 && st2.st_size > 0 && st2.st_size <= (64 << 20)) {
+                    char *rb = malloc((size_t)st2.st_size + 1);
+                    if (rb && pread_all(fd2, rb, (size_t)st2.st_size, 0)) {
+                        rb[st2.st_size] = 0;
+                        rtf_convert(&ob, rb, (size_t)st2.st_size);
+                        snprintf(what2, sizeof(what2), "Rich Text document");
+                        res = 0;
+                    }
+                    free(rb);
+                }
+                if (fd2 >= 0)
+                    close(fd2);
+            }
+            if (res == 0) {
+                if (ob.full)
+                    db_outs(&ob, "\n*(the rest of the document is not shown)*\n");
+                *md = ob.out.s ? ob.out.s : strdup("");
+                *mdlen = ob.out.n;
+                ob.out.s = NULL;
+                if (ob.slides)
+                    snprintf(info, infon, "%s, %d slide%s", what2, ob.slides, ob.slides == 1 ? "" : "s");
+                else
+                    snprintf(info, infon, "%s, %d paragraph%s, %d table%s", what2, ob.paragraphs, ob.paragraphs == 1 ? "" : "s", ob.tables, ob.tables == 1 ? "" : "s");
+            }
+            db_free(&ob);
+            if (res != -1 || rtf)
+                return res;
+        }
+    }
     struct zip z;
     int zr = zip_open(&z, path, err, errn);
     if (zr < 0)

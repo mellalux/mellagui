@@ -512,7 +512,7 @@ static bool is_picture_name(const char *name)
 /* The archives the archiver (mellagui-archive) opens: they open there on Enter. */
 static bool is_archive_name(const char *name)
 {
-    static const char *const exts[] = { "zip", "tar", "tgz", "gz", "xz", "txz", "bz2", "tbz2", "zst", "7z", "deb", "rpm", "a" };
+    static const char *const exts[] = { "zip", "tar", "tgz", "gz", "xz", "txz", "bz2", "tbz2", "zst", "7z", "rar", "deb", "rpm", "a" };
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
         if (ext_is(name, exts[i]))
             return true;
@@ -2738,7 +2738,7 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
 /* ---- a word processor document or a presentation: its text as a Markdown page ---- */
 static bool is_office_doc_path(const char *path)
 {
-    static const char *const exts[] = { "docx", "docm", "dotx", "dotm", "odt", "ott", "pptx", "pptm", "potx", "ppsx", "odp", "otp", "epub" };
+    static const char *const exts[] = { "docx", "docm", "dotx", "dotm", "odt", "ott", "pptx", "pptm", "potx", "ppsx", "odp", "otp", "epub", "doc", "dot", "ppt", "pps", "pot", "rtf" };
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
         if (ext_is(path, exts[i]))
             return true;
@@ -3398,11 +3398,12 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         /* a Jupyter notebook: the cells as a page */
     } else if ((ext_is(path, "ttf") || ext_is(path, "otf") || ext_is(path, "ttc") || ext_is(path, "woff") || ext_is(path, "woff2")) && (pv_font(pv, path), pv->kind == PV_FONT || pv->kind == PV_ERROR)) {
         /* a font: a sample in the font itself and its facts */
-    } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
+    } else if (n >= 8 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8) || !memcmp(buf, "{\\rtf", 5)) && is_office_doc_path(path) &&
+               (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
         /* a Word / OpenDocument text or a presentation: its text as a page */
     } else if (((n >= 4 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "PK\5\6", 4))) || (n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) ||
                 (n >= 6 && !memcmp(buf, "\xfd" "7zXZ\0", 6)) || (n >= 10 && !memcmp(buf, "BZh", 3) && buf[3] >= '1' && buf[3] <= '9' && (!memcmp(buf + 4, "\x31\x41\x59\x26\x53\x59", 6) || !memcmp(buf + 4, "\x17\x72\x45\x38\x50\x90", 6))) ||
-                (n >= 4 && !memcmp(buf, "\x28\xb5\x2f\xfd", 4)) || (n >= 8 && !memcmp(buf, "!<arch>\n", 8)) || (n >= 4 && !memcmp(buf, "\xed\xab\xee\xdb", 4)) || (n >= 6 && !memcmp(buf, "7z\xbc\xaf\x27\x1c", 6)) ||
+                (n >= 4 && !memcmp(buf, "\x28\xb5\x2f\xfd", 4)) || (n >= 8 && !memcmp(buf, "!<arch>\n", 8)) || (n >= 4 && !memcmp(buf, "\xed\xab\xee\xdb", 4)) || (n >= 6 && !memcmp(buf, "7z\xbc\xaf\x27\x1c", 6)) || (n >= 8 && !memcmp(buf, "Rar!\x1a\x07", 6)) ||
                 (n >= 512 && (!memcmp(buf + 257, "ustar", 5) || ext_is(path, "tar")))) &&
                (pv_archive(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* an archive (ZIP and its relatives, TAR, gzip): the list of what is in it */

@@ -4141,6 +4141,109 @@ class TestClients(Base):
         while time.time() < end and wait_for_window('mellagui.archive', 0.1):
             time.sleep(0.1)
 
+    def test_files_previews_old_word_powerpoint_rtf_and_rar(self):
+        import struct
+        sys.path.insert(0, os.path.join(ROOT, 'tests'))
+        import oldoffice_writer
+        d = tempfile.mkdtemp(prefix='files-old-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        def md(path, flag='--document-md'):
+            r = subprocess.run([exe, flag, path], capture_output=True, text=True, timeout=30)
+            return r.returncode, r.stdout, r.stderr.strip()
+        # Word 97: a compressed piece, a UTF-16 piece, a table (cell marks 0x07, an empty cell mark ends the row), a field whose code is left out
+        oldoffice_writer.doc(os.path.join(d, 'a.doc'), [('Hello ', False), ('W\u00f5rld \u2014 \u65e5\u672c\r', True), ('Cell A\x07Cell B\x07\x07After \x13 HYPERLINK "x" \x14the link\x15 table\r', False)])
+        rc, out, info = md(os.path.join(d, 'a.doc'))
+        self.assertEqual(rc, 0, info)
+        self.assertIn('Hello W\u00f5rld \u2014 \u65e5\u672c', out)
+        self.assertIn('| Cell A | Cell B |', out)
+        self.assertIn('After the link table', out)
+        self.assertNotIn('HYPERLINK', out)
+        self.assertTrue(info.startswith('Word document (97-2003)') and '1 table' in info, info)
+        open(os.path.join(d, 'bad.doc'), 'wb').write(open(os.path.join(d, 'a.doc'), 'rb').read()[:700])
+        self.assertIn(md(os.path.join(d, 'bad.doc'))[0], (1, 2))
+        # PowerPoint 97: slides with a title and a body; an older edit of the document and the notes are left out
+        oldoffice_writer.ppt(os.path.join(d, 'a.ppt'), [[(0, 'Title one', False), (1, 'first point\rsecond \u00f5', True)], [(6, 'Second', False)]])
+        rc, out, info = md(os.path.join(d, 'a.ppt'))
+        self.assertEqual(rc, 0, info)
+        self.assertEqual(out.strip().split('\n\n'), ['## Slide 1', '### Title one', '- first point\n- second \u00f5', '## Slide 2', '### Second'])
+        self.assertNotIn('OLD VERSION', out)
+        self.assertEqual(info, 'Presentation (97-2003), 2 slides')
+        # RTF: bold / italic, \u escapes, a code page by the font's charset, a heading style, a list, a table, a skipped destination
+        rtf = (r"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fcharset0 Arial;}{\f1\fcharset204 Arial Cyr;}}{\colortbl;\red0\green0\blue0;}"
+               r"{\stylesheet{\s0 Normal;}{\s1 heading 1;}}{\*\generator Test;}"
+               r"\pard\s1 Title here\par \pard Plain \b bold\b0  and \i italic\i0 , \u8364? euro, caf\'e9\par "
+               r"\pard\f1 \'cf\'f0\'e8\'e2\'e5\'f2\f0\par \pard\ls1 item one\par \pard\ls1 item two\par "
+               r"\trowd\cellx1000\cellx2000 \intbl A1\cell B1\cell \row \trowd\cellx1000\cellx2000 \intbl A2\cell B2\cell \row \pard After\par}")
+        open(os.path.join(d, 'a.rtf'), 'w').write(rtf)
+        rc, out, info = md(os.path.join(d, 'a.rtf'))
+        self.assertEqual(rc, 0, info)
+        for want in ('# Title here', 'Plain **bold** and *italic*, \u20ac euro, caf\u00e9', '\u041f\u0440\u0438\u0432\u0435\u0442', '- item one', '- item two', '| A1 | B1 |', '| A2 | B2 |', 'After'):
+            self.assertIn(want, out)
+        self.assertNotIn('Test', out)                                                                      # the generator group
+        self.assertNotIn('Arial', out)                                                                     # the font table
+        self.assertTrue(info.startswith('Rich Text document'), info)
+        # RAR: listed (RAR 3 / 4 and RAR 5), never unpacked
+        def v(n):
+            out = bytearray()
+            while True:
+                b = n & 0x7f
+                n >>= 7
+                out.append(b | (0x80 if n else 0))
+                if not n:
+                    return bytes(out)
+        def blk5(typ, flags, body, data=b''):
+            hdr = v(typ) + v(flags | (2 if data else 0)) + (v(len(data)) if data else b'') + body
+            return b'\0\0\0\0' + v(len(hdr)) + hdr + data
+        def file5(name, data, mtime, dirflag=False):
+            body = v((1 if dirflag else 0) | 2 | 4) + v(len(data)) + v(0o644) + struct.pack('<I', mtime) + struct.pack('<I', 0) + v(0) + v(1) + v(len(name.encode())) + name.encode()
+            return blk5(2, 0, body, data)
+        rar5 = b'Rar!\x1a\x07\x01\x00' + blk5(1, 0, v(0)) + file5('dir', b'', 1300000000, True) + file5('dir/T\u00e4ht.txt', b'12345', 1300000000) + blk5(5, 0, v(0))
+        open(os.path.join(d, 'a5.rar'), 'wb').write(rar5)
+        def file4(name, data, dos_time, directory=False):
+            nb = name.encode('cp1252')
+            flags = 0x8000 | (0xe0 if directory else 0)
+            head = struct.pack('<IIBIIBBHI', len(data), len(data), 2, 0, dos_time, 29, 0x30, len(nb), 0x20) + nb
+            return struct.pack('<HBHH', 0, 0x74, flags, 7 + len(head)) + head + data
+        dos = ((2011 - 1980) << 25) | (6 << 21) | (12 << 16) | (9 << 11) | (53 << 5)
+        rar4 = b'Rar!\x1a\x07\x00' + struct.pack('<HBHH', 0, 0x73, 0, 13) + bytes(6) + file4('a.txt', b'abc', dos) + file4('sub', b'', dos, True) + struct.pack('<HBHH', 0, 0x7b, 0, 7)
+        open(os.path.join(d, 'a4.rar'), 'wb').write(rar4)
+        for name, kind in (('a5.rar', 'RAR5'), ('a4.rar', 'RAR')):
+            r = subprocess.run([exe, '--arc-list', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(r.stdout.startswith('kind=' + kind), r.stdout[:40])
+        r5 = subprocess.run([exe, '--arc-list', os.path.join(d, 'a5.rar')], capture_output=True, text=True).stdout.splitlines()
+        self.assertEqual(r5[1].split('\t')[:2], ['dir/', '-1'])
+        self.assertEqual(r5[2].split('\t')[:2], ['dir/T\u00e4ht.txt', '5'])
+        self.assertTrue(r5[2].split('\t')[2].startswith('2011-03-'), r5[2])
+        r4 = subprocess.run([exe, '--arc-list', os.path.join(d, 'a4.rar')], capture_output=True, text=True).stdout.splitlines()
+        self.assertEqual(r4[1].split('\t'), ['a.txt', '3', '2011-06-12 09:53'])
+        self.assertEqual(r4[2].split('\t')[:2], ['sub/', '-1'])
+        arc = os.environ.get('MELLAGUI_ARCHIVE_BIN', os.path.join(ROOT, 'build', 'mellagui-archive'))
+        if os.path.exists(arc):                                                                              # the archiver shows it and says it cannot unpack it
+            r = subprocess.run([arc, '--extract', os.path.join(d, 'a5.rar'), os.path.join(d, 'o')], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn('RAR', r.stderr)
+        for junk in ('bad.doc', 'o'):                                                                        # (what the pane must not meet)
+            shutil.rmtree(os.path.join(d, junk), ignore_errors=True) if junk == 'o' else os.remove(os.path.join(d, junk))
+        dump = os.path.join(d, 'files.dump')                                                                 # in the pane: pages and a table
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_HOME)
+        time.sleep(0.3)
+        for name, kind in (('a.doc', 'markdown'), ('a.ppt', 'markdown'), ('a.rtf', 'markdown'), ('a4.rar', 'table'), ('a5.rar', 'table')):
+            for _ in range(30):
+                head, extra = self.files_dump(dump)
+                if head.get('want', '').endswith('/' + name):
+                    break
+                prev = head.get('want')
+                ctl.tap(self.K_DOWN)
+                self.files_dump(dump, want=lambda o, prev=prev: o[0].get('want') != prev and o[0].get('loaded') == '1')
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith('/' + name) and o[0].get('loaded') == '1')
+            self.assertEqual(head['kind'], kind, (name, head))
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib
@@ -8080,6 +8183,7 @@ class TestMixer(Base):
         self.wait_for(lambda: 88 <= self.state(pj)['sinks'][0]['vol'] <= 92, 'sink volume about 90 after the drag')
         sets = [l for l in self.state(pj)['log'] if l.startswith('set-sink-volume')]
         self.assertLess(len(sets), 41, 'slider drag commands were not coalesced: %d' % len(sets))
+        info['zoom'] = zoom
         # mute button
         c.click(*g['mute'])
         self.wait_for(lambda: self.state(pj)['sinks'][0]['mute'] is True, 'muted')

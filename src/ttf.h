@@ -21,6 +21,9 @@ struct lm_ttf;
 /* Opens a font file (read whole into memory). NULL when it cannot be read or is not a TrueType font;
  * `why`, when not NULL, then points at a static text. */
 struct lm_ttf *lm_ttf_open(const char *path, const char **why);
+/* The same from bytes in memory (copied). `lenient`: a font with CFF outlines (or none) opens too, for its character map and metrics: lm_ttf_glyph and the
+ * metrics work, lm_ttf_render paints nothing. */
+struct lm_ttf *lm_ttf_open_mem(const uint8_t *data, size_t len, const char **why, bool lenient);
 void lm_ttf_close(struct lm_ttf *f);
 
 /* Glyph index of a code point, 0 = the font has none. */

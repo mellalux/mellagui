@@ -92,6 +92,8 @@ static void pick_cmap(struct lm_ttf *f)
     }
 }
 
+static struct lm_ttf *open_data(struct lm_ttf *f, const char **why, bool lenient);
+
 struct lm_ttf *lm_ttf_open(const char *path, const char **why)
 {
     const char *dummy;
@@ -114,25 +116,56 @@ struct lm_ttf *lm_ttf_open(const char *path, const char **why)
         goto fail;
     f->n = (size_t)size;
     fclose(fp);
-    fp = NULL;
+    return open_data(f, why, false);
 
+fail:
+    fclose(fp);
+    lm_ttf_close(f);
+    return NULL;
+}
+
+struct lm_ttf *lm_ttf_open_mem(const uint8_t *data, size_t len, const char **why, bool lenient)
+{
+    const char *dummy;
+    if (!why)
+        why = &dummy;
+    *why = "cannot be read";
+    if (len < 12 || len > MAX_FILE)
+        return NULL;
+    struct lm_ttf *f = calloc(1, sizeof(*f));
+    if (!f)
+        return NULL;
+    f->d = malloc(len);
+    if (!f->d) {
+        free(f);
+        return NULL;
+    }
+    memcpy(f->d, data, len);
+    f->n = len;
+    return open_data(f, why, lenient);
+}
+
+/* `f` holds the file's bytes; on a failure it is freed and NULL returned. `lenient`: a font with CFF outlines (or none) is accepted too, for its character map and
+ * metrics only - nothing can be painted from it. */
+static struct lm_ttf *open_data(struct lm_ttf *f, const char **why, bool lenient)
+{
     uint32_t base = 0;
     if (!memcmp(f->d, "ttcf", 4))                       /* a collection: its first font */
         base = u32(f, 12);
     uint32_t ver = u32(f, base);
-    if (ver == 0x4f54544f) {                            /* "OTTO" */
+    if (ver == 0x4f54544f && !lenient) {                /* "OTTO" */
         *why = "has CFF outlines (.otf), only TrueType outlines are read";
         goto fail;
     }
-    if (ver != 0x00010000 && ver != 0x74727565) {       /* 1.0 or "true" */
+    if (ver != 0x00010000 && ver != 0x74727565 && !(lenient && ver == 0x4f54544f)) {       /* 1.0 or "true" */
         *why = "is not a TrueType font";
         goto fail;
     }
     *why = "lacks a table a TrueType font needs";
+    bool outlines = find_table(f, base, "loca", &f->loca) && find_table(f, base, "glyf", &f->glyf);
     if (!find_table(f, base, "head", &f->head) || !find_table(f, base, "maxp", &f->maxp) ||
         !find_table(f, base, "hhea", &f->hhea) || !find_table(f, base, "hmtx", &f->hmtx) ||
-        !find_table(f, base, "loca", &f->loca) || !find_table(f, base, "glyf", &f->glyf) ||
-        !find_table(f, base, "cmap", &f->cmap))
+        !find_table(f, base, "cmap", &f->cmap) || (!outlines && !lenient))
         goto fail;
     f->units = (int)u16(f, (uint64_t)f->head.off + 18);
     f->loca_long = s16(f, (uint64_t)f->head.off + 50) != 0;
@@ -158,8 +191,6 @@ struct lm_ttf *lm_ttf_open(const char *path, const char **why)
     return f;
 
 fail:
-    if (fp)
-        fclose(fp);
     lm_ttf_close(f);
     return NULL;
 }

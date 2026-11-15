@@ -3655,6 +3655,70 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text' and o[0].get('want', '').endswith('p_text.pem'))
         self.assertEqual(head['kind'], 'text')
 
+    def test_files_previews_fonts_with_a_sample_in_the_font(self):
+        import struct
+        import zlib
+        src = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+        if not os.path.exists(src):
+            self.skipTest('DejaVu Sans is needed as a sample font')
+        d = tempfile.mkdtemp(prefix='files-font-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        shutil.copy(src, os.path.join(d, 'a_sans.ttf'))
+        data = open(src, 'rb').read()
+        nt = struct.unpack('>H', data[4:6])[0]
+        tables = []
+        for i in range(nt):
+            tag, csum, off, ln = struct.unpack('>4sIII', data[12 + 16 * i:28 + 16 * i])
+            tables.append((tag, csum, data[off:off + ln]))
+        body = b''
+        entries = b''
+        pos = 44 + 20 * nt
+        for tag, csum, tdata in tables:                                      # WOFF 1: every table zlib compressed (when that is smaller)
+            comp = zlib.compress(tdata)
+            if len(comp) >= len(tdata):
+                comp = tdata
+            entries += struct.pack('>4sIIII', tag, pos + len(body), len(comp), len(tdata), csum)
+            body += comp + bytes(-len(comp) % 4)
+        woff = struct.pack('>4sIIHHIHHIIIII', b'wOFF', 0x00010000, 44 + 20 * nt + len(body), nt, 0, len(data), 1, 0, 0, 0, 0, 0, 0) + entries + body
+        open(os.path.join(d, 'b_sans.woff'), 'wb').write(woff)
+        open(os.path.join(d, 'c_sans.woff2'), 'wb').write(b'wOF2' + bytes(60))        # said, not read
+        open(os.path.join(d, 'd_text.ttf'), 'w').write('this is no font\n' * 5)
+        def info(name):
+            r = subprocess.run([exe, '--font-info', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, name + r.stderr)
+            return dict(l.split('=', 1) for l in r.stdout.splitlines())
+        a = info('a_sans.ttf')
+        self.assertEqual((a['family'], a['style'], a['woff'], a['cff'], a['mono']), ('DejaVu Sans', 'Book', '0', '0', '0'))
+        self.assertGreater(int(a['glyphs']), 3000)
+        self.assertEqual(a['units'], '2048')
+        for want in ('Latin', 'Estonian', 'Cyrillic', 'Greek', 'Symbols'):
+            self.assertIn(want, a['scripts'])
+        self.assertTrue(a['sample'].startswith('880x'), a['sample'])
+        b = info('b_sans.woff')                                                 # the same font through WOFF
+        for k in ('family', 'style', 'glyphs', 'scripts', 'sample'):
+            self.assertEqual(b[k], a[k], k)
+        self.assertEqual(b['woff'], '1')
+        r = subprocess.run([exe, '--font-info', os.path.join(d, 'c_sans.woff2')], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('WOFF 2', r.stderr)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_sans.ttf)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'font')
+        self.assertEqual(head['kind'], 'font')
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_DOWN)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'font' and o[0].get('want', '').endswith('b_sans.woff'))
+        self.assertEqual(head['kind'], 'font')
+        ctl.tap(self.K_DOWN)                                                           # c_sans.woff2: an error line
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('c_sans.woff2'))
+        self.assertEqual(head['kind'], 'error')
+        ctl.tap(self.K_DOWN)                                                           # d_text.ttf: no font: plain text
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text' and o[0].get('want', '').endswith('d_text.ttf'))
+        self.assertEqual(head['kind'], 'text')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

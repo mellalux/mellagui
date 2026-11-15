@@ -163,7 +163,7 @@ $(BUILD)/mellagui-settings: $(BUILD)/client/mellagui-settings.o $(BUILD)/client/
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/client/json.o $(BUILD)/client/yamltree.o $(BUILD)/client/xmltree.o $(BUILD)/client/tomltree.o $(BUILD)/client/initree.o $(BUILD)/client/sqliteread.o $(BUILD)/client/parquet.o $(BUILD)/client/zstddec.o $(BUILD)/client/xlsxread.o $(BUILD)/client/archread.o $(BUILD)/client/certread.o $(BUILD)/src/sha256.o $(BUILD)/client/syntax.o $(BUILD)/client/mdview.o $(BUILD)/client/ffaudio.o $(BUILD)/client/ffpipe.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/smb.o $(BUILD)/client/sftp.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-files: $(BUILD)/client/mellagui-files.o $(BUILD)/client/json.o $(BUILD)/client/yamltree.o $(BUILD)/client/xmltree.o $(BUILD)/client/tomltree.o $(BUILD)/client/initree.o $(BUILD)/client/sqliteread.o $(BUILD)/client/parquet.o $(BUILD)/client/zstddec.o $(BUILD)/client/xlsxread.o $(BUILD)/client/archread.o $(BUILD)/client/certread.o $(BUILD)/client/fontread.o $(BUILD)/src/sha256.o $(BUILD)/client/syntax.o $(BUILD)/client/mdview.o $(BUILD)/client/ffaudio.o $(BUILD)/client/ffpipe.o $(BUILD)/src/img.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/smb.o $(BUILD)/client/sftp.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

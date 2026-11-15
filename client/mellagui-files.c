@@ -64,6 +64,7 @@
 #include "util.h"
 #include "archread.h"
 #include "certread.h"
+#include "fontread.h"
 #include "initree.h"
 #include "json.h"
 #include "parquet.h"
@@ -136,7 +137,7 @@ struct pane {
     int last_click_row;
 };
 
-enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO, PV_TABLE, PV_JSON };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
+enum pv_kind { PV_NONE, PV_TEXT, PV_HEX, PV_IMAGE, PV_DIR, PV_ERROR, PV_VIDEO_WAIT, PV_VIDEO, PV_MARKDOWN, PV_AUDIO, PV_TABLE, PV_JSON, PV_FONT };     /* PV_VIDEO: a picture out of a video (img), PV_VIDEO_WAIT: it is on its way */
 
 /* One node of a JSON tree, flat in document order: `end` = the index after its last descendant, `open` = its children are shown. */
 struct jrow {
@@ -153,7 +154,8 @@ struct preview {
     enum pv_kind kind;
     char title[NAME_MAX + 1];
     char info[160];
-    char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR */
+    char **lines;                       /* PV_TEXT / PV_HEX / PV_DIR / PV_ERROR / PV_FONT */
+    int imgrows;                        /* PV_FONT: the first lines are blank: the sample picture (`img`) lies over them */
     int nlines;
     char **dbname;                      /* PV_TABLE of a SQLite file: the tables, the one shown (`dbtab`), and the strip of names above it (`tabrows` lines) */
     uint32_t *dbroot;
@@ -2098,6 +2100,7 @@ static void preview_clear(struct preview *pv)
     pv->hl_st = NULL;
     pv->lang = NULL;
     pv->tcols = pv->trows = 0;
+    pv->imgrows = 0;
     pv->left = 0;
     json_free(pv->jroot);
     pv->jroot = NULL;
@@ -3061,6 +3064,89 @@ static bool pv_cert(struct preview *pv, const char *path)
     return ok;
 }
 
+/* ---- a font: a sample of text in the font itself, and what the file says about it ---- */
+static void pv_field(struct preview *pv, int *cap, const char *label, const char *text)
+{
+    if (!text[0])
+        return;
+    size_t ll = strlen(label), width = 60, n = strlen(text), i = 0;
+    int lines = 0;
+    while (i < n && lines < 8) {
+        size_t take = n - i < width - ll ? n - i : width - ll;
+        if (i + take < n) {                                             /* cut at a blank when there is one */
+            size_t k = take;
+            while (k > 10 && text[i + k] != ' ')
+                k--;
+            if (k > 10)
+                take = k;
+        }
+        pv_linef(pv, cap, "%s%.*s", lines ? "" : label, (int)take, text + i);
+        if (lines == 0 && ll > 0) {
+            /* the next lines are indented under the text */
+        }
+        i += take;
+        while (i < n && text[i] == ' ')
+            i++;
+        lines++;
+        if (lines == 1)
+            label = "";
+    }
+}
+
+static bool pv_font(struct preview *pv, const char *path)
+{
+    struct font_info fi;
+    char err[160] = "";
+    int r = font_read(path, &fi, err, sizeof(err));
+    if (r == -1)
+        return false;
+    int cap = 0;
+    if (r < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "A font that cannot be shown:");
+        pv_linef(pv, &cap, "%s", err);
+        return true;
+    }
+    pv->kind = PV_FONT;
+    pv->top = 0;
+    if (fi.alpha && fi.w > 0 && fi.h > 0) {                             /* the coverage -> pixels: the text colour over the pane's own */
+        uint32_t fg = COL_FG, bg = COL_BG;
+        pv->img.w = fi.w;
+        pv->img.h = fi.h;
+        pv->img.px = malloc((size_t)fi.w * (size_t)fi.h * sizeof(uint32_t));
+        for (size_t i = 0; pv->img.px && i < (size_t)fi.w * (size_t)fi.h; i++) {
+            unsigned a = fi.alpha[i], ia = 255 - a;
+            uint32_t rr = (((fg >> 16) & 255) * a + ((bg >> 16) & 255) * ia) / 255, gg = (((fg >> 8) & 255) * a + ((bg >> 8) & 255) * ia) / 255,
+                     bb = ((fg & 255) * a + (bg & 255) * ia) / 255;
+            pv->img.px[i] = rr << 16 | gg << 8 | bb;
+        }
+        pv->imgrows = (fi.h / 2 + LM_FONT_H - 1) / LM_FONT_H + 1;
+        for (int i = 0; i < pv->imgrows; i++)
+            pv_linef(pv, &cap, "");
+    }
+    char name[300];
+    snprintf(name, sizeof(name), "%s%s%s", fi.family, fi.style[0] ? " " : "", fi.style);
+    pv_field(pv, &cap, "Name: ", fi.full[0] ? fi.full : name);
+    pv_field(pv, &cap, "Family: ", fi.family);
+    pv_field(pv, &cap, "Style: ", fi.style);
+    pv_field(pv, &cap, "Version: ", fi.version);
+    pv_field(pv, &cap, "PostScript: ", fi.psname);
+    char t[200];
+    snprintf(t, sizeof(t), "%d glyphs, %d units per em, weight %d%s%s%s", fi.glyphs, fi.units, fi.weight, fi.italic ? ", italic" : "", fi.monospace ? ", monospaced" : "",
+             fi.cff ? ", CFF outlines (no sample: only TrueType outlines are drawn)" : "");
+    pv_field(pv, &cap, "Glyphs: ", t);
+    pv_field(pv, &cap, "Scripts: ", fi.scripts);
+    pv_field(pv, &cap, "Designer: ", fi.designer);
+    pv_field(pv, &cap, "Made by: ", fi.manufacturer);
+    pv_field(pv, &cap, "Copyright: ", fi.copyright);
+    pv_field(pv, &cap, "License: ", fi.license);
+    pv_field(pv, &cap, "License URL: ", fi.license_url);
+    pv_field(pv, &cap, "About: ", fi.description);
+    snprintf(pv->info, sizeof(pv->info), "Font%s, %s, %d glyphs", fi.woff ? " (WOFF)" : "", name[0] ? name : "unnamed", fi.glyphs);
+    font_free(&fi);
+    return true;
+}
+
 static void preview_load(struct preview *pv, const char *path, bool hidden)
 {
     preview_clear(pv);
@@ -3161,6 +3247,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
     } else if ((is_cert_path(path) || (n >= 11 && !memcmp(buf, "-----BEGIN ", 11))) && pv_cert(pv, path)) {
         pv->kind = PV_JSON;                                              /* a certificate, a key ...: its facts as a tree */
+    } else if ((ext_is(path, "ttf") || ext_is(path, "otf") || ext_is(path, "ttc") || ext_is(path, "woff") || ext_is(path, "woff2")) && (pv_font(pv, path), pv->kind == PV_FONT || pv->kind == PV_ERROR)) {
+        /* a font: a sample in the font itself and its facts */
     } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
         /* a Word / OpenDocument text or a presentation: its text as a page */
     } else if (((n >= 4 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "PK\5\6", 4))) || (n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) ||
@@ -3209,7 +3297,7 @@ static void preview_scale(struct preview *pv, int w, int h, int k)
     free(pv->scaled);
     pv->scaled = NULL;
     pv->sw = pv->sh = 0;
-    if ((pv->kind != PV_IMAGE && pv->kind != PV_VIDEO && pv->kind != PV_AUDIO) || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
+    if ((pv->kind != PV_IMAGE && pv->kind != PV_VIDEO && pv->kind != PV_AUDIO && pv->kind != PV_FONT) || w < 4 || h < 4 || pv->img.w < 1 || pv->img.h < 1)
         return;
     double s = LM_MIN((double)w / pv->img.w, (double)h / pv->img.h);
     if (s > 8.0)
@@ -4441,7 +4529,7 @@ static bool pv_scrolls(const struct app *a, int body_h, int *total, int *view, i
     if (pv->kind == PV_MARKDOWN && pv->md) {
         *total = md_height(pv->md);
         *view = body_h;
-    } else if (pv->kind == PV_TEXT || pv->kind == PV_TABLE || pv->kind == PV_JSON || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR) {
+    } else if (pv->kind == PV_TEXT || pv->kind == PV_TABLE || pv->kind == PV_JSON || pv->kind == PV_HEX || pv->kind == PV_DIR || pv->kind == PV_ERROR || pv->kind == PV_FONT) {
         *total = pv->nlines;
         *view = LM_MAX(body_h / LM_FONT_H, 1);
     } else {
@@ -5524,7 +5612,7 @@ static void files_dump(struct app *a)
     if (!f)
         return;
     struct preview *pv = &a->pv;
-    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio", "table", "json" };
+    static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio", "table", "json", "font" };
     int body_h = a->win.bh - list_top() - bottom_h(a);
     int total, view, pos;
     fprintf(f, "kind=%s loaded=%d top=%d body=%d split=%d want=%s\n", a->preview ? names[pv->kind] : "none", pv->loaded ? 1 : 0, pv->top, body_h, split_x(a), pv->want);
@@ -5794,6 +5882,13 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
     pv->top = LM_CLAMP(pv->top, 0, LM_MAX(pv->nlines - rowsv, 0));
     pv_scrollbar(w, a, x0, pw, list_y, body_h);
     pw -= sbw;                                                          /* (the text ends where the bar begins) */
+    if (pv->kind == PV_FONT && pv->img.px && pv->top < pv->imgrows) {       /* the sample picture lies over the blank first lines and scrolls with them */
+        int k = wlwin_scale(w), aw = pw - 16, ah = pv->imgrows * LM_FONT_H;
+        if (!pv->scaled || pv->sw > aw * k || pv->sh > ah * k || (pv->sw < aw * k && pv->sh < ah * k && pv->sw < pv->img.w * 8) || pv->scale_k != k)
+            preview_scale(pv, aw * k, ah * k, k);
+        if (pv->scaled)
+            wlwin_blit_px(w, x0 + 8, list_y + 2 - pv->top * LM_FONT_H, pv->scaled, pv->sw, pv->sh, pv->sw, x0, list_y, pw, body_h);
+    }
     for (int r = 0; r < rowsv && pv->top + r < pv->nlines; r++) {
         uint32_t col = pv->kind == PV_ERROR ? COL_ERR : pv->kind == PV_DIR ? COL_DIR : pv->kind == PV_HEX ? COL_DIM : COL_FG;
         const char *s = pv->lines[pv->top + r];
@@ -7071,6 +7166,19 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s\n", info);
         puts(js);
         free(js);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--font-info")) {                  /* what the font preview knows of a file (tests) */
+        struct font_info fi;
+        char ferr[160] = "";
+        int fr = font_read(argv[2], &fi, ferr, sizeof(ferr));
+        if (fr != 0) {
+            fprintf(stderr, "%s\n", fr == -1 ? "not a font" : ferr);
+            return 1;
+        }
+        printf("family=%s\nstyle=%s\nfull=%s\nversion=%s\npsname=%s\nglyphs=%d\nunits=%d\nweight=%d\nitalic=%d\nmono=%d\ncff=%d\nwoff=%d\nscripts=%s\nsample=%dx%d\n",
+               fi.family, fi.style, fi.full, fi.version, fi.psname, fi.glyphs, fi.units, fi.weight, fi.italic, fi.monospace, fi.cff, fi.woff, fi.scripts, fi.alpha ? fi.w : 0, fi.alpha ? fi.h : 0);
+        font_free(&fi);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

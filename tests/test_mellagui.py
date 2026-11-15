@@ -3666,9 +3666,10 @@ class TestClients(Base):
         for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm'):
             im.save(os.path.join(d, name))
         open(os.path.join(d, 'e.pnm'), 'w').write('P2\n3 2\n15\n0 5 10\n15 10 5\n')
+        open(os.path.join(d, 'f.svg'), 'w').write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#c33"/></svg>')
         dump = os.path.join(d, 'files.dump')
         p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.bmp)
-        for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm', 'e.pnm'):
+        for name in ('a.bmp', 'b.gif', 'c.ico', 'd.ppm', 'e.pnm', 'f.svg'):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('kind') == 'image' and o[0].get('want', '').endswith(name))
             self.assertEqual(head['kind'], 'image', name)
             ctl.abs(win['x'] + 700, win['y'] + 250)

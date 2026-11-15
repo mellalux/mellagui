@@ -1,4 +1,5 @@
 #include "img.h"
+#include "svg.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -1081,7 +1082,17 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
         return decode_bmp(data, len, img, err, errsz);
     if (len >= 22 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 2) && data[3] == 0)
         return decode_ico(data, len, img, err, errsz);
-    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO or PNM image");
+    if (lm_svg_sniff(data, len)) {                                      /* SVG: drawn by svg.c (the checker shows through the transparent parts unless the alpha is kept) */
+        int rc = lm_svg_render(data, len, img, err, errsz);
+        if (rc == 0 && !g_keep_alpha)
+            for (int y = 0; y < img->h; y++)
+                for (int x = 0; x < img->w; x++) {
+                    uint32_t p = img->px[(size_t)y * (size_t)img->w + (size_t)x];
+                    img->px[(size_t)y * (size_t)img->w + (size_t)x] = over_checker(x, y, (int)((p >> 16) & 255), (int)((p >> 8) & 255), (int)(p & 255), (int)(p >> 24));
+                }
+        return rc;
+    }
+    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO, PNM or SVG image");
     return -1;
 }
 

@@ -19,6 +19,7 @@
  */
 #include <dirent.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,7 @@
 #include "ffpipe.h"
 #include "h264dec.h"
 #include "img.h"
+#include "../src/svg.h"
 #include "keymap.h"
 #include "loop.h"
 #include "metrics.h"
@@ -120,7 +122,7 @@ static bool is_audio_name(const char *n)
 static bool is_image_name(const char *n)
 {
     size_t l = strlen(n);
-    static const char *const exts[] = { ".png", ".ppm", ".pgm", ".pbm", ".pnm", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".cur" };
+    static const char *const exts[] = { ".png", ".ppm", ".pgm", ".pbm", ".pnm", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".cur", ".svg" };
     if (n[0] == '.' || l < 5)
         return false;
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
@@ -1228,6 +1230,117 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 
 /* ---- main ----------------------------------------------------------------------------------------------------------- */
 
+
+/* The SVG renderer's arithmetic: shapes whose coverage is known exactly (a 512 x 512 picture at scale 1: pixel centres on the grid). */
+static int svg_selftest(void)
+{
+    int bad = 0;
+    char err[160];
+    struct lm_image im;
+#define SVG(body) "<svg xmlns='http://www.w3.org/2000/svg' width='512' height='512' viewBox='0 0 512 512'>" body "</svg>"
+#define RENDER(s) (lm_svg_render((const uint8_t *)(s), strlen(s), &im, err, sizeof(err)) == 0 && im.w == 512 && im.h == 512)
+#define A(x, y) ((im.px[(size_t)(y) * 512 + (x)] >> 24) & 255)
+#define R(x, y) ((im.px[(size_t)(y) * 512 + (x)] >> 16) & 255)
+#define G(x, y) ((im.px[(size_t)(y) * 512 + (x)] >> 8) & 255)
+#define B(x, y) (im.px[(size_t)(y) * 512 + (x)] & 255)
+    const char *rect = SVG("<rect x='100' y='100' width='100' height='50' fill='#102030'/>");
+    if (!RENDER(rect) || A(100, 100) != 255 || A(199, 149) != 255 || A(99, 100) != 0 || A(200, 120) != 0 || A(150, 99) != 0 || A(150, 150) != 0 || R(150, 120) != 0x10 || G(150, 120) != 0x20 || B(150, 120) != 0x30) {
+        fprintf(stderr, "svg selftest: a rectangle on whole pixels is not exact\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *half = SVG("<rect x='100.5' y='100' width='100' height='50' fill='black'/>");
+    if (!RENDER(half) || A(100, 120) < 126 || A(100, 120) > 129 || A(200, 120) < 126 || A(200, 120) > 129 || A(150, 120) != 255) {
+        fprintf(stderr, "svg selftest: half covered edge pixels are not half\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *circle = SVG("<circle cx='256' cy='256' r='100' fill='red'/>");
+    if (RENDER(circle)) {
+        double area = 0;
+        for (int i = 0; i < 512 * 512; i++)
+            area += (im.px[i] >> 24) / 255.0;
+        if (fabs(area - M_PI * 100 * 100) > M_PI * 100 * 100 * 0.003) {
+            fprintf(stderr, "svg selftest: a circle's area is %.1f, not %.1f\n", area, M_PI * 100 * 100);
+            bad++;
+        }
+    } else {
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *line = SVG("<path d='M50 100 H450' stroke='black' stroke-width='10' fill='none'/>");
+    if (!RENDER(line) || A(200, 94) != 0 || A(200, 95) != 255 || A(200, 104) != 255 || A(200, 105) != 0 || A(49, 100) != 0 || A(50, 100) != 255 || A(449, 100) != 255 || A(450, 100) != 0) {
+        fprintf(stderr, "svg selftest: a butt-capped stroke has the wrong extent\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *square = SVG("<path d='M50 100 H450' stroke='black' stroke-width='10' stroke-linecap='square' fill='none'/>");
+    if (!RENDER(square) || A(45, 100) != 255 || A(44, 100) != 0 || A(454, 100) != 255 || A(455, 100) != 0) {
+        fprintf(stderr, "svg selftest: a square cap does not reach half a width\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *star = SVG("<path d='M256 40 L330 450 L40 190 L472 190 L182 450 Z' fill='blue' fill-rule='evenodd'/>");
+    const char *star_nz = SVG("<path d='M256 40 L330 450 L40 190 L472 190 L182 450 Z' fill='blue'/>");
+    int centre_eo = 0, centre_nz = 0;
+    if (RENDER(star)) {
+        centre_eo = (int)A(256, 250);
+        lm_img_free(&im);
+    } else {
+        bad++;
+    }
+    if (RENDER(star_nz)) {
+        centre_nz = (int)A(256, 250);
+        lm_img_free(&im);
+    } else {
+        bad++;
+    }
+    if (centre_eo != 0 || centre_nz != 255) {
+        fprintf(stderr, "svg selftest: the pentagram's middle: evenodd %d (0), nonzero %d (255)\n", centre_eo, centre_nz);
+        bad++;
+    }
+    const char *op = SVG("<rect width='512' height='512' fill='white' fill-opacity='0.5'/><rect width='256' height='512' fill='#ff0000' opacity='0.5'/>");
+    if (!RENDER(op) || A(400, 10) < 127 || A(400, 10) > 129 || A(100, 10) < 190 || A(100, 10) > 193 || R(100, 10) < 253) {
+        fprintf(stderr, "svg selftest: opacities do not add up (%u %u)\n", A(400, 10), A(100, 10));
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *grad = SVG("<defs><linearGradient id='g'><stop offset='0' stop-color='#000000'/><stop offset='1' stop-color='#ff0000'/></linearGradient></defs><rect width='512' height='100' fill='url(#g)'/>");
+    if (!RENDER(grad) || R(0, 50) > 1 || R(511, 50) < 254 || R(256, 50) < 126 || R(256, 50) > 129 || G(256, 50) != 0) {
+        fprintf(stderr, "svg selftest: a gradient is not linear\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *clip = SVG("<defs><clipPath id='c'><rect x='0' y='0' width='256' height='512'/></clipPath></defs><rect width='512' height='512' fill='green' clip-path='url(#c)'/>");
+    if (!RENDER(clip) || A(255, 300) != 255 || A(256, 300) != 0) {
+        fprintf(stderr, "svg selftest: a clip does not cut at its edge\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *tf = SVG("<g transform='translate(100 0) rotate(90)'><rect x='0' y='0' width='50' height='20' fill='black'/></g>");
+    if (!RENDER(tf) || A(99, 10) != 255 || A(80, 10) != 255 || A(81, 49) != 255 || A(80, 50) != 0 || A(100, 10) != 0) {          /* x -> down, y -> left: a 20 wide, 50 tall bar */
+        fprintf(stderr, "svg selftest: a rotated rectangle is in the wrong place\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *css = SVG("<style>.a{fill:#00ff00}#b{fill:#0000ff}rect{fill:#ff0000}</style><rect class='a' width='10' height='10'/><rect id='b' x='20' width='10' height='10'/><rect x='40' width='10' height='10'/>");
+    if (!RENDER(css) || G(5, 5) != 255 || B(25, 5) != 255 || R(45, 5) != 255) {
+        fprintf(stderr, "svg selftest: CSS rules do not apply by specificity\n");
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *big = "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><rect width='24' height='24' fill='black'/></svg>";      /* a small icon is made about 512 pixels big */
+    if (lm_svg_render((const uint8_t *)big, strlen(big), &im, err, sizeof(err)) != 0 || im.w < 500 || im.w > 520 || im.w != im.h) {
+        fprintf(stderr, "svg selftest: a 24 pixel icon came out %dx%d\n", im.w, im.h);
+        bad++;
+    }
+    lm_img_free(&im);
+    const char *junk = "<svg><path d='M 10 10 L L L 1e999 1e999 A 0 0 0 0 0 5 5 C Z z z M'/><rect width='-5' height='3e9'/><circle r='1e30'/></svg>";
+    if (lm_svg_render((const uint8_t *)junk, strlen(junk), &im, err, sizeof(err)) == 0)         /* nonsense in, a picture or an error out, no crash */
+        lm_img_free(&im);
+    return bad;
+}
+
 static int selftest(void)
 {
     int bad = 0;
@@ -1252,6 +1365,7 @@ static int selftest(void)
         fprintf(stderr, "selftest: junk accepted\n");
         bad++;
     }
+    bad += svg_selftest();
     puts(bad ? "selftest FAILED" : "selftest ok");
     return bad ? 1 : 0;
 }

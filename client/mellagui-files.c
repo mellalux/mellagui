@@ -499,7 +499,7 @@ static bool ext_is(const char *name, const char *ext)
 /* The picture formats lm_img_load reads (PNG, JPEG, PPM / PNM, GIF (the first picture), BMP, ICO / CUR). */
 static bool is_picture_name(const char *name)
 {
-    static const char *const exts[] = { "png", "jpg", "jpeg", "ppm", "pgm", "pbm", "pnm", "gif", "bmp", "ico", "cur" };
+    static const char *const exts[] = { "png", "jpg", "jpeg", "ppm", "pgm", "pbm", "pnm", "gif", "bmp", "ico", "cur", "svg" };
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
         if (ext_is(name, exts[i]))
             return true;

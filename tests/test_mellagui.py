@@ -3398,7 +3398,7 @@ class TestClients(Base):
         raw = open(os.path.join(d, 'b_cp437.zip'), 'rb').read().replace(b'cafX', b'caf\x82')
         open(os.path.join(d, 'b_cp437.zip'), 'wb').write(raw)
         zipfile.ZipFile(os.path.join(d, 'c_empty.zip'), 'w').close()
-        with zipfile.ZipFile(os.path.join(d, 'd_docs.docx'), 'w', zipfile.ZIP_DEFLATED) as z:    # a document is a ZIP too
+        with zipfile.ZipFile(os.path.join(d, 'd_docs.jar'), 'w', zipfile.ZIP_DEFLATED) as z:    # a jar (any other ZIP) is listed
             z.writestr('[Content_Types].xml', '<Types/>')
             z.writestr('word/document.xml', '<w:document/>' * 20)
         def tar(path, mode, fmt):
@@ -3450,13 +3450,109 @@ class TestClients(Base):
         ctl.tap(self.K_DOWN)
         check('c_empty.zip', 'table', '3', '0')                                           # (no times: no Modified column)
         ctl.tap(self.K_DOWN)
-        check('d_docs.docx', 'table', '4', '2', first=('[Content_Types].xml', '8'), second=('word/document.xml', '260'))
+        check('d_docs.jar', 'table', '4', '2', first=('[Content_Types].xml', '8'), second=('word/document.xml', '260'))
         for name in ('e_pax.tar', 'f_gnu.tar', 'g_tree.tar.gz'):
             ctl.tap(self.K_DOWN)
             ex = check(name, 'table', '3', '5', first=('a.txt', '3', '2023-11-14_22:13'), second=('sub/',), third=('sub/b.txt', '1000'), fourth=('deep/long_directory_name_',),
                        fifth=('ln_->_a.txt',))
         ctl.tap(self.K_DOWN)
         check('h_log.gz', 'table', '3', '1', first=('data.log', '1400'))
+
+    def test_files_previews_documents_and_presentations_as_a_page(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='files-doc-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+        def wp(text='', style=None, num=None, runs=None):
+            ppr = ''
+            if style or num:
+                ppr = '<w:pPr>%s%s<w:rPr><w:b/></w:rPr></w:pPr>' % ('<w:pStyle w:val="%s"/>' % style if style else '',
+                                                                   '<w:numPr><w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr>' % (num[1], num[0]) if num else '')
+            body = runs if runs is not None else '<w:r><w:t xml:space="preserve">%s</w:t></w:r>' % text
+            return '<w:p>%s%s</w:p>' % (ppr, body)
+        def run(t, b=False, i=False):
+            return '<w:r><w:rPr>%s%s</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>' % ('<w:b/>' if b else '', '<w:i/>' if i else '', t)
+        def cell(t):
+            return '<w:tc>%s</w:tc>' % wp(t)
+        body = ''.join([
+            wp('My Title', 'Title'), wp('Intro', 'Kop1'),
+            wp(runs=run('Hello ') + run('world', b=True) + run(' again', i=True) + run(' a*b_c [x] #1 | y')),
+            wp('item one', num=(1, 0)), wp('item two', num=(1, 1)), wp('first', num=(2, 0)), wp('second', num=(2, 0)),
+            wp(runs='<w:r><w:t>keep</w:t></w:r><w:r><w:delText>deleted</w:delText></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:tab/><w:t>tab</w:t></w:r>'
+                    '<w:r><w:drawing><w:t>picture text</w:t></w:drawing></w:r><mc:AlternateContent><mc:Choice><w:r><w:t>choice</w:t></w:r></mc:Choice>'
+                    '<mc:Fallback><w:r><w:t>fallback</w:t></w:r></mc:Fallback></mc:AlternateContent>'),
+            '<w:tbl><w:tr>%s%s</w:tr><w:tr>%s%s</w:tr></w:tbl>' % (cell('A'), cell('B'), cell('1'), cell('2 & 3')), wp('after the table'),
+        ])
+        styles = ('<w:styles %s><w:style w:type="paragraph" w:styleId="Kop1"><w:name w:val="heading 1"/></w:style>'
+                  '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style></w:styles>') % W
+        numbering = ('<w:numbering %s><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>'
+                     '<w:abstractNum w:abstractNumId="8"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum>'
+                     '<w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="8"/></w:num></w:numbering>') % W
+        with zipfile.ZipFile(os.path.join(d, 'a.docx'), 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('word/document.xml', '<w:document %s><w:body>%s</w:body></w:document>' % (W, body))
+            z.writestr('word/styles.xml', styles)
+            z.writestr('word/numbering.xml', numbering)
+        O = ('xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+             'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" '
+             'xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" '
+             'xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"')
+        def odf(path, mime, body):
+            with zipfile.ZipFile(path, 'w') as z:
+                z.writestr('mimetype', mime, compress_type=zipfile.ZIP_STORED)
+                z.writestr('content.xml', '<office:document-content %s><office:automatic-styles><style:style style:name="T1" style:family="text">'
+                           '<style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="T2" style:family="text">'
+                           '<style:text-properties fo:font-style="italic"/></style:style></office:automatic-styles><office:body>%s</office:body></office:document-content>' % (O, body))
+        odf(os.path.join(d, 'b.odt'), 'application/vnd.oasis.opendocument.text', '<office:text><text:h text:outline-level="2">Chapter</text:h>'
+            '<text:p>Plain <text:span text:style-name="T1">bold</text:span><text:s text:c="3"/><text:span text:style-name="T2">slanted</text:span>'
+            '<office:annotation><text:p>a comment</text:p></office:annotation> end</text:p><text:list><text:list-item><text:p>one</text:p>'
+            '<text:list><text:list-item><text:p>nested</text:p></text:list-item></text:list></text:list-item></text:list>'
+            '<table:table><table:table-row><table:table-cell><text:p>H1</text:p></table:table-cell><table:table-cell><text:p>H2</text:p></table:table-cell></table:table-row>'
+            '<table:table-row><table:table-cell><text:p>x</text:p></table:table-cell><table:table-cell/></table:table-row></table:table>'
+            '<text:p><draw:frame><draw:text-box><text:p>in a frame</text:p></draw:text-box></draw:frame>tail</text:p></office:text>')
+        A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+        def shape(ph, paras):
+            return '<p:sp><p:nvSpPr><p:nvPr>%s</p:nvPr></p:nvSpPr><p:txBody>%s</p:txBody></p:sp>' % ('<p:ph type="%s"/>' % ph if ph else '', paras)
+        def ap(t, lvl=0, b=False):
+            return '<a:p><a:pPr lvl="%d"/><a:r><a:rPr b="%d"/><a:t>%s</a:t></a:r></a:p>' % (lvl, 1 if b else 0, t)
+        s1 = '<p:sld %s><p:cSld><p:spTree>%s%s%s</p:spTree></p:cSld></p:sld>' % (A, shape('title', ap('Slide one')), shape(None, ap('first point') + ap('sub point', 1) + ap('bold point', b=True)), shape('sldNum', ap('1')))
+        tbl = '<a:tbl><a:tr><a:tc><a:txBody>%s</a:txBody></a:tc><a:tc><a:txBody>%s</a:txBody></a:tc></a:tr></a:tbl>' % (ap('T1'), ap('T2'))
+        s2 = '<p:sld %s><p:cSld><p:spTree>%s<p:graphicFrame>%s</p:graphicFrame></p:spTree></p:cSld></p:sld>' % (A, shape('ctrTitle', ap('Second')), tbl)
+        with zipfile.ZipFile(os.path.join(d, 'c.pptx'), 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('ppt/slides/slide2.xml', s2)                 # (stored out of order: the slides are sorted by number)
+            z.writestr('ppt/slides/slide1.xml', s1)
+            z.writestr('ppt/slides/slide10.xml', '<p:sld %s><p:cSld><p:spTree>%s</p:spTree></p:cSld></p:sld>' % (A, shape('title', ap('Tenth'))))
+        odf(os.path.join(d, 'd.odp'), 'application/vnd.oasis.opendocument.presentation', '<office:presentation><draw:page><draw:frame presentation:class="title"><draw:text-box>'
+            '<text:p>Opening</text:p></draw:text-box></draw:frame><draw:frame><draw:text-box><text:list><text:list-item><text:p>a point</text:p></text:list-item></text:list></draw:text-box></draw:frame></draw:page>'
+            '<draw:page><draw:frame><draw:text-box><text:p>just text</text:p></draw:text-box></draw:frame></draw:page></office:presentation>')
+        def md(name):
+            r = subprocess.run([exe, '--document-md', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout, r.stderr.strip()
+        out, info = md('a.docx')
+        self.assertEqual(out, '\n# My Title\n\n# Intro\n\nHello **world** *again* a\\*b\\_c \\[x\\] \\#1 \\| y\n\n- item one\n  - item two\n\n1. first\n1. second\n\n'
+                              'keep tabchoice\n\n| A | B |\n| --- | --- |\n| 1 | 2 & 3 |\n\nafter the table\n')
+        self.assertEqual(info, 'Word document, 13 paragraphs, 1 table')
+        out, info = md('b.odt')
+        self.assertEqual(out, '\n## Chapter\n\nPlain **bold** *slanted* end\n\n- one\n  - nested\n\n| H1 | H2 |\n| --- | --- |\n| x |   |\n\ntail\n')
+        self.assertEqual(info, 'Text document, 8 paragraphs, 1 table')
+        out, info = md('c.pptx')
+        self.assertEqual(out, '\n## Slide 1\n\n### Slide one\n\n- first point\n  - sub point\n- **bold point**\n\n## Slide 2\n\n### Second\n\n| T1 | T2 |\n| --- | --- |\n\n## Slide 10\n\n### Tenth\n')
+        self.assertEqual(info, 'Presentation, 10 slides')
+        out, info = md('d.odp')
+        self.assertEqual(out, '\n## Slide 1\n\n### Opening\n\n- a point\n\n## Slide 2\n\njust text\n')
+        # and the preview shows them as pages
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.docx)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'markdown')
+        self.assertEqual(head['kind'], 'markdown')
+        self.assertEqual(extra['md']['headings'], '2')
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_DOWN)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'markdown' and o[0].get('want', '').endswith('b.odt'))
+        self.assertEqual(extra['md']['headings'], '1')
 
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)

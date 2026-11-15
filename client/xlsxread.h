@@ -3,7 +3,7 @@
 
 /*
  * A read-only reader of Excel workbooks for the file manager's preview, with no library: the .xlsx family (.xlsx .xlsm .xltx .xltm: Office Open XML) and the
- * old .xls (Excel 97-2003: BIFF8 records in an OLE2 compound file) the OpenDocument .ods / .ots (ZIP with content.xml) and Apple Numbers (.numbers); see the end of xlsxread.c.
+ * old .xls (Excel 97-2003: BIFF8 records in an OLE2 compound file) the OpenDocument .ods / .ots (ZIP with content.xml) and Apple Numbers (.numbers), plus word processor documents and presentations as Markdown (xl_document); see the end of xlsxread.c.
  * An .xlsx workbook is a ZIP
  * file of XML parts, so this reads the ZIP's central directory (stored and deflated entries; no ZIP64, no encryption), the sheet list (xl/workbook.xml and
  * its relationships), the styles (only to tell dates and percentages from plain numbers), the shared strings and one sheet's cells. Shown: text (shared,
@@ -33,6 +33,10 @@ struct xl_book {
  * cannot read (the reason in err). */
 int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn);
 void xl_free(struct xl_book *b);
+
+/* A word processor document or a presentation (.docx .odt .pptx .odp and their templates) as Markdown: headings, paragraphs, bold and emphasis, lists, tables,
+ * slides ("## Slide N"). 0 = ok (*md is malloc'd, `info` says what it was); -1 = not one of these; -2 = one that cannot be read (err). */
+int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t infon, char *err, size_t errn);
 
 /* The picture a Numbers package carries of itself (malloc'd JPEG / PNG bytes), or NULL. */
 unsigned char *xl_thumbnail(const char *path, size_t *len);

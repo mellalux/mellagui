@@ -34,12 +34,14 @@ static void seterr(char *err, size_t n, const char *s)
 struct xbuf {
     char *s;
     size_t n, cap;
+    size_t limit;                       /* 0 = BUF_LIMIT */
 };
 
 static void xb_add(struct xbuf *b, const char *p, size_t n)
 {
-    if (b->n + n > BUF_LIMIT)
-        n = b->n < BUF_LIMIT ? BUF_LIMIT - b->n : 0;
+    size_t lim = b->limit ? b->limit : BUF_LIMIT;
+    if (b->n + n > lim)
+        n = b->n < lim ? lim - b->n : 0;
     if (!n)
         return;
     if (b->n + n + 1 > b->cap) {
@@ -3289,6 +3291,803 @@ int xl_numbers_dump(const char *path)
     nb_free(&nb);
     zip_close(&z);
     return 0;
+}
+
+/* ======================================================================================================================================================
+ * Documents and presentations (.docx, .odt, .pptx, .odp and their templates) as Markdown text: headings, paragraphs, bold and emphasis, lists, tables, slides.
+ * ====================================================================================================================================================== */
+
+#define DOC_OUT_MAX (2u << 20)                  /* the Markdown made, at most */
+#define DOC_PARA_MAX (64u << 10)                /* one paragraph, at most */
+
+struct mdb {
+    char *s;
+    size_t n, cap;
+};
+
+static void mdb_add(struct mdb *b, const char *p, size_t n)
+{
+    if (b->n + n + 1 > b->cap) {
+        b->cap = (b->n + n + 1) * 2;
+        char *t = realloc(b->s, b->cap);
+        if (!t)
+            return;
+        b->s = t;
+    }
+    memcpy(b->s + b->n, p, n);
+    b->n += n;
+    b->s[b->n] = 0;
+}
+
+struct drun {
+    char *t;
+    size_t n;
+    bool b, i;
+};
+
+struct docb {
+    struct mdb out;
+    struct drun *runs;
+    int nruns, caprun;
+    size_t ptext;
+    bool list_prev, list_bullet;
+    int paragraphs, tables, slides;
+    int tdepth;                         /* table nesting: only the outermost one makes rows and cells */
+    struct mdb cell;
+    char **cells;
+    int ncells, capcells;
+    bool first_row;
+    bool full;                          /* the output limit was reached */
+};
+
+static void db_free(struct docb *db)
+{
+    for (int i = 0; i < db->nruns; i++)
+        free(db->runs[i].t);
+    free(db->runs);
+    free(db->out.s);
+    free(db->cell.s);
+    for (int i = 0; i < db->ncells; i++)
+        free(db->cells[i]);
+    free(db->cells);
+}
+
+static void db_out(struct docb *db, const char *p, size_t n)
+{
+    if (db->out.n + n > DOC_OUT_MAX) {
+        db->full = true;
+        return;
+    }
+    mdb_add(&db->out, p, n);
+}
+
+static void db_outs(struct docb *db, const char *s)
+{
+    db_out(db, s, strlen(s));
+}
+
+/* A piece of the paragraph being read, with its emphasis; neighbours with the same emphasis are one piece. */
+static void db_run(struct docb *db, const char *p, size_t n, bool b, bool i)
+{
+    if (!n || db->ptext > DOC_PARA_MAX)
+        return;
+    db->ptext += n;
+    if (db->nruns > 0 && db->runs[db->nruns - 1].b == b && db->runs[db->nruns - 1].i == i) {
+        struct drun *r = &db->runs[db->nruns - 1];
+        r->t = realloc(r->t, r->n + n + 1);
+        memcpy(r->t + r->n, p, n);
+        r->n += n;
+        r->t[r->n] = 0;
+        return;
+    }
+    if (db->nruns == db->caprun) {
+        db->caprun = db->caprun ? db->caprun * 2 : 16;
+        db->runs = realloc(db->runs, (size_t)db->caprun * sizeof(*db->runs));
+    }
+    struct drun *r = &db->runs[db->nruns++];
+    r->t = malloc(n + 1);
+    memcpy(r->t, p, n);
+    r->t[n] = 0;
+    r->n = n;
+    r->b = b;
+    r->i = i;
+}
+
+/* The paragraph as Markdown text into `o`: emphasis marks round the words (the blanks stay outside), characters that Markdown reads as marks escaped. */
+static void db_compose(struct docb *db, struct mdb *o)
+{
+    for (int k = 0; k < db->nruns; k++) {
+        const struct drun *r = &db->runs[k];
+        size_t a = 0, e = r->n;
+        while (a < e && (r->t[a] == ' ' || r->t[a] == '\t' || r->t[a] == '\n'))
+            a++;
+        while (e > a && (r->t[e - 1] == ' ' || r->t[e - 1] == '\t' || r->t[e - 1] == '\n'))
+            e--;
+        if (a > 0 && o->n && o->s[o->n - 1] != ' ')
+            mdb_add(o, " ", 1);
+        if (a < e) {
+            if (r->b)
+                mdb_add(o, "**", 2);
+            else if (r->i)
+                mdb_add(o, "*", 1);
+            if (r->b && r->i)
+                mdb_add(o, "*", 1);
+            for (size_t j = a; j < e; j++) {
+                unsigned char c = (unsigned char)r->t[j];
+                if (c == '\n' || c == '\t' || c == '\r')
+                    c = ' ';
+                if (strchr("\\`*_[]<>|~#", c))
+                    mdb_add(o, "\\", 1);
+                mdb_add(o, (char *)&c, 1);
+            }
+            if (r->b && r->i)
+                mdb_add(o, "*", 1);
+            if (r->b)
+                mdb_add(o, "**", 2);
+            else if (r->i)
+                mdb_add(o, "*", 1);
+        }
+        if (e < r->n && a <= e)
+            mdb_add(o, " ", 1);
+    }
+    for (int k = 0; k < db->nruns; k++)
+        free(db->runs[k].t);
+    db->nruns = 0;
+    db->ptext = 0;
+}
+
+/* A paragraph that is not wanted (a slide number): forgotten. */
+static void db_discard(struct docb *db)
+{
+    for (int k = 0; k < db->nruns; k++)
+        free(db->runs[k].t);
+    db->nruns = 0;
+    db->ptext = 0;
+}
+
+/* The paragraph ends: a heading (level 1..6), a list item (depth >= 0), or a plain paragraph; in a table it goes to the cell. */
+static void db_para(struct docb *db, int heading, int list_depth, bool bullet)
+{
+    struct mdb t = { 0 };
+    db_compose(db, &t);
+    size_t a = 0;
+    while (a < t.n && t.s[a] == ' ')
+        a++;
+    if (a >= t.n) {
+        free(t.s);
+        return;
+    }
+    db->paragraphs++;
+    if (db->tdepth > 0) {
+        if (db->cell.n)
+            mdb_add(&db->cell, " ", 1);
+        mdb_add(&db->cell, t.s + a, t.n - a);
+    } else if (heading > 0) {
+        db_outs(db, "\n");
+        for (int k = 0; k < heading && k < 6; k++)
+            db_outs(db, "#");
+        db_outs(db, " ");
+        db_out(db, t.s + a, t.n - a);
+        db_outs(db, "\n");
+        db->list_prev = false;
+    } else if (list_depth >= 0) {
+        if (!db->list_prev || db->list_bullet != bullet)             /* a list of the other kind is another list */
+            db_outs(db, "\n");
+        db->list_bullet = bullet;
+        for (int k = 0; k < list_depth && k < 6; k++)
+            db_outs(db, "  ");
+        db_outs(db, bullet ? "- " : "1. ");
+        db_out(db, t.s + a, t.n - a);
+        db_outs(db, "\n");
+        db->list_prev = true;
+    } else {
+        db_outs(db, "\n");
+        db_out(db, t.s + a, t.n - a);
+        db_outs(db, "\n");
+        db->list_prev = false;
+    }
+    free(t.s);
+}
+
+static void db_table_begin(struct docb *db)
+{
+    if (db->tdepth++ == 0) {
+        db->first_row = true;
+        for (int i = 0; i < db->ncells; i++)
+            free(db->cells[i]);
+        db->ncells = 0;
+        db->tables++;
+        db_outs(db, "\n");
+        db->list_prev = false;
+    }
+}
+
+static void db_table_end(struct docb *db)
+{
+    if (db->tdepth > 0)
+        db->tdepth--;
+}
+
+static void db_row_begin(struct docb *db)
+{
+    if (db->tdepth == 1) {
+        for (int i = 0; i < db->ncells; i++)
+            free(db->cells[i]);
+        db->ncells = 0;
+    }
+}
+
+static void db_cell_begin(struct docb *db)
+{
+    if (db->tdepth == 1) {
+        db->cell.n = 0;
+        if (db->cell.s)
+            db->cell.s[0] = 0;
+    }
+}
+
+static void db_cell_end(struct docb *db)
+{
+    if (db->tdepth != 1)
+        return;
+    if (db->ncells == db->capcells) {
+        db->capcells = db->capcells ? db->capcells * 2 : 8;
+        db->cells = realloc(db->cells, (size_t)db->capcells * sizeof(char *));
+    }
+    db->cells[db->ncells++] = strdup(db->cell.s ? db->cell.s : "");
+    db->cell.n = 0;
+    if (db->cell.s)
+        db->cell.s[0] = 0;
+}
+
+static void db_row_end(struct docb *db)
+{
+    if (db->tdepth != 1 || db->ncells == 0)
+        return;
+    db_outs(db, "|");
+    for (int i = 0; i < db->ncells; i++) {
+        db_outs(db, " ");
+        db_outs(db, db->cells[i][0] ? db->cells[i] : " ");
+        db_outs(db, " |");
+    }
+    db_outs(db, "\n");
+    if (db->first_row) {
+        db_outs(db, "|");
+        for (int i = 0; i < db->ncells; i++)
+            db_outs(db, " --- |");
+        db_outs(db, "\n");
+        db->first_row = false;
+    }
+}
+
+static void db_slide(struct docb *db, int n)
+{
+    char t[40];
+    snprintf(t, sizeof(t), "\n## Slide %d\n", n);
+    db_outs(db, t);
+    db->slides = n;
+    db->list_prev = false;
+}
+
+/* ---- DOCX ---- */
+struct dstyle {
+    char id[64];
+    int level;                          /* a heading level, 0 for none */
+};
+
+struct dnum {
+    int num_abs[256];                   /* numId -> index of its abstract numbering, -1 */
+    int nabs;
+    int abs_id[64];
+    unsigned char bullet[64][9];        /* per abstract numbering and level: 1 = a bullet, 0 = a number */
+};
+
+static int style_level(const char *name)
+{
+    char l[64];
+    size_t n = 0;
+    for (; name[n] && n < sizeof(l) - 1; n++)
+        l[n] = (char)(name[n] >= 'A' && name[n] <= 'Z' ? name[n] + 32 : name[n]);
+    l[n] = 0;
+    if (!strcmp(l, "title"))
+        return 1;
+    if (!strncmp(l, "heading ", 8) && l[8] >= '1' && l[8] <= '9')
+        return l[8] - '0';
+    return 0;
+}
+
+static int parse_dstyles(const char *buf, size_t len, struct dstyle *st, int max)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf a = { 0 };
+    int n = 0;
+    char cur[64] = "";
+    while (xml_next(&x, &e) != XE_END) {
+        if (e.kind == XE_OPEN && is(&e, "style") && xattr(&e, "styleId", &a)) {
+            snprintf(cur, sizeof(cur), "%s", xb_str(&a));
+        } else if ((e.kind == XE_OPEN || e.kind == XE_SELF) && is(&e, "name") && cur[0] && n < max && xattr(&e, "val", &a)) {
+            int lv = style_level(xb_str(&a));
+            if (lv) {
+                snprintf(st[n].id, sizeof(st[n].id), "%s", cur);
+                st[n++].level = lv;
+            }
+            cur[0] = 0;
+        } else if (e.kind == XE_CLOSE && is(&e, "style")) {
+            cur[0] = 0;
+        }
+    }
+    free(a.s);
+    return n;
+}
+
+static void parse_dnum(const char *buf, size_t len, struct dnum *dn)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf a = { 0 };
+    int cur_abs = -1, cur_lvl = -1, cur_num = -1;
+    for (int i = 0; i < 256; i++)
+        dn->num_abs[i] = -1;
+    memset(dn->bullet, 1, sizeof(dn->bullet));
+    while (xml_next(&x, &e) != XE_END) {
+        bool open = e.kind == XE_OPEN || e.kind == XE_SELF;
+        if (open && is(&e, "abstractNum") && xattr(&e, "abstractNumId", &a) && dn->nabs < 64) {
+            cur_abs = dn->nabs;
+            dn->abs_id[dn->nabs++] = atoi(xb_str(&a));
+            cur_lvl = -1;
+        } else if (open && is(&e, "lvl") && xattr(&e, "ilvl", &a)) {
+            cur_lvl = atoi(xb_str(&a));
+        } else if (open && is(&e, "numFmt") && cur_abs >= 0 && cur_lvl >= 0 && cur_lvl < 9 && xattr(&e, "val", &a)) {
+            dn->bullet[cur_abs][cur_lvl] = !strcmp(xb_str(&a), "bullet") || !strcmp(xb_str(&a), "none");
+        } else if (e.kind == XE_OPEN && is(&e, "num") && xattr(&e, "numId", &a)) {
+            cur_num = atoi(xb_str(&a));
+        } else if (open && is(&e, "abstractNumId") && cur_num >= 0 && cur_num < 256 && xattr(&e, "val", &a)) {
+            int id = atoi(xb_str(&a));
+            for (int i = 0; i < dn->nabs; i++)
+                if (dn->abs_id[i] == id)
+                    dn->num_abs[cur_num] = i;
+        } else if (e.kind == XE_CLOSE && is(&e, "abstractNum")) {
+            cur_abs = -1;
+        } else if (e.kind == XE_CLOSE && is(&e, "num")) {
+            cur_num = -1;
+        }
+    }
+    free(a.s);
+}
+
+static bool val_off(struct xev *e, struct xbuf *a)
+{
+    if (!xattr(e, "val", a))
+        return false;
+    const char *v = xb_str(a);
+    return !strcmp(v, "0") || !strcmp(v, "false") || !strcmp(v, "off") || !strcmp(v, "none");
+}
+
+static void docx_convert(struct docb *db, const char *buf, size_t len, const struct dstyle *st, int nst, const struct dnum *dn)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf a = { 0 }, tx = { 0 };
+    tx.limit = 1u << 20;
+    int skip = 0;
+    bool in_ppr = false, in_rpr = false, in_t = false, rb = false, ri = false;
+    char pstyle[64] = "";
+    int numid = -1, ilvl = 0;
+    while (!db->full && xml_next(&x, &e) != XE_END) {
+        if (e.kind == XE_TEXT) {
+            if (in_t && !skip) {
+                xb_reset(&tx);
+                xb_add_xml(&tx, e.text, e.tlen);
+                db_run(db, xb_str(&tx), tx.n, rb, ri);
+            }
+            continue;
+        }
+        bool open = e.kind == XE_OPEN || e.kind == XE_SELF;
+        if (is(&e, "drawing") || is(&e, "pict") || is(&e, "Fallback") || is(&e, "object") || is(&e, "instrText") || is(&e, "footnoteReference")) {
+            if (e.kind == XE_OPEN)
+                skip++;
+            else if (e.kind == XE_CLOSE && skip)
+                skip--;
+            continue;
+        }
+        if (skip)
+            continue;
+        if (is(&e, "p")) {
+            if (e.kind == XE_OPEN || e.kind == XE_SELF) {
+                pstyle[0] = 0;
+                numid = -1;
+                ilvl = 0;
+            }
+            if (e.kind == XE_CLOSE || e.kind == XE_SELF) {
+                int level = 0;
+                for (int i = 0; i < nst && pstyle[0]; i++)
+                    if (!strcmp(st[i].id, pstyle))
+                        level = st[i].level;
+                if (!level && pstyle[0] && !strncmp(pstyle, "Heading", 7) && pstyle[7] >= '1' && pstyle[7] <= '9')
+                    level = pstyle[7] - '0';                    /* no styles part: the usual style ids */
+                if (!level && !strcmp(pstyle, "Title"))
+                    level = 1;
+                int ni = numid >= 0 && numid < 256 ? dn->num_abs[numid] : -1;
+                bool bullet = ni >= 0 && ilvl >= 0 && ilvl < 9 ? dn->bullet[ni][ilvl] : true;
+                db_para(db, level, numid > 0 ? (ilvl < 0 ? 0 : ilvl) : -1, bullet);
+            }
+        } else if (is(&e, "pPr")) {
+            in_ppr = e.kind == XE_OPEN;
+        } else if (is(&e, "pStyle") && open && xattr(&e, "val", &a)) {
+            snprintf(pstyle, sizeof(pstyle), "%s", xb_str(&a));
+        } else if (is(&e, "numId") && open && in_ppr && xattr(&e, "val", &a)) {
+            numid = atoi(xb_str(&a));
+        } else if (is(&e, "ilvl") && open && in_ppr && xattr(&e, "val", &a)) {
+            ilvl = atoi(xb_str(&a));
+        } else if (is(&e, "r") && e.kind == XE_OPEN) {
+            rb = ri = false;
+        } else if (is(&e, "rPr")) {
+            in_rpr = e.kind == XE_OPEN && !in_ppr;
+        } else if (is(&e, "b") && open && in_rpr) {
+            rb = !val_off(&e, &a);
+        } else if (is(&e, "i") && open && in_rpr) {
+            ri = !val_off(&e, &a);
+        } else if (is(&e, "t")) {
+            in_t = e.kind == XE_OPEN;
+        } else if (open && (is(&e, "tab") || is(&e, "br") || is(&e, "cr"))) {
+            db_run(db, " ", 1, rb, ri);
+        } else if (open && is(&e, "noBreakHyphen")) {
+            db_run(db, "-", 1, rb, ri);
+        } else if (is(&e, "tbl")) {
+            if (e.kind == XE_OPEN)
+                db_table_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_table_end(db);
+        } else if (is(&e, "tr")) {
+            if (e.kind == XE_OPEN)
+                db_row_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_row_end(db);
+        } else if (is(&e, "tc")) {
+            if (e.kind == XE_OPEN)
+                db_cell_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_cell_end(db);
+        }
+    }
+    free(a.s);
+    free(tx.s);
+}
+
+/* ---- OpenDocument text and presentations ---- */
+struct ostyle {
+    char name[48];
+    bool b, i;
+};
+
+static void odf_convert(struct docb *db, const char *buf, size_t len, bool presentation)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf a = { 0 }, tx = { 0 }, tmp = { 0 };
+    tx.limit = 1u << 20;
+    tmp.limit = 1u << 20;
+    struct ostyle *os = NULL;
+    int nos = 0, capos = 0;
+    char cur_style[48] = "";
+    bool stack_b[16] = { false }, stack_i[16] = { false };
+    int sp = 0, skip = 0, ldepth = 0, heading = 0, frame_title_depth = 0, fdepth = 0;
+    bool in_para = false, last_space = true;
+    while (!db->full && xml_next(&x, &e) != XE_END) {
+        bool open = e.kind == XE_OPEN || e.kind == XE_SELF;
+        if (e.kind == XE_TEXT) {
+            if (in_para && !skip) {
+                xb_reset(&tmp);
+                xb_add_xml(&tmp, e.text, e.tlen);
+                xb_reset(&tx);
+                for (size_t i = 0; i < tmp.n; i++) {                      /* white space of the XML is one blank, counted over the whole paragraph */
+                    char c = tmp.s[i];
+                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                        if (!last_space)
+                            xb_add(&tx, " ", 1);
+                        last_space = true;
+                    } else {
+                        xb_add(&tx, &c, 1);
+                        last_space = false;
+                    }
+                }
+                db_run(db, xb_str(&tx), tx.n, stack_b[sp], stack_i[sp]);
+            }
+            continue;
+        }
+        if (is(&e, "annotation") || is(&e, "note") || is(&e, "object") || is(&e, "plugin") || (!presentation && is(&e, "frame"))) {
+            if (e.kind == XE_OPEN)
+                skip++;
+            else if (e.kind == XE_CLOSE && skip)
+                skip--;
+            continue;
+        }
+        if (skip)
+            continue;
+        if (is(&e, "style") && open) {                                  /* automatic styles: which text styles are bold or emphasised */
+            cur_style[0] = 0;
+            if (e.kind == XE_OPEN && xattr(&e, "name", &a))
+                snprintf(cur_style, sizeof(cur_style), "%s", xb_str(&a));
+        } else if (is(&e, "style") && e.kind == XE_CLOSE) {
+            cur_style[0] = 0;
+        } else if (is(&e, "text-properties") && open && cur_style[0]) {
+            bool b = xattr(&e, "font-weight", &a) && !strcmp(xb_str(&a), "bold");
+            bool i = xattr(&e, "font-style", &a) && !strcmp(xb_str(&a), "italic");
+            if ((b || i) && nos < 4096) {
+                if (nos == capos) {
+                    capos = capos ? capos * 2 : 32;
+                    os = realloc(os, (size_t)capos * sizeof(*os));
+                }
+                snprintf(os[nos].name, sizeof(os[nos].name), "%s", cur_style);
+                os[nos].b = b;
+                os[nos++].i = i;
+            }
+        } else if (is(&e, "page") && presentation && e.kind == XE_OPEN) {
+            db_slide(db, db->slides + 1);
+        } else if (is(&e, "frame") && presentation) {
+            if (e.kind == XE_OPEN) {
+                fdepth++;
+                if (!frame_title_depth && xattr(&e, "class", &a) && !strcmp(xb_str(&a), "title"))
+                    frame_title_depth = fdepth;
+            } else if (e.kind == XE_CLOSE) {
+                if (frame_title_depth == fdepth)
+                    frame_title_depth = 0;
+                if (fdepth > 0)
+                    fdepth--;
+            }
+        } else if ((is(&e, "p") || is(&e, "h")) && !in_para && e.kind == XE_OPEN) {
+            in_para = true;
+            heading = 0;
+            if (is(&e, "h")) {
+                heading = xattr(&e, "outline-level", &a) ? atoi(xb_str(&a)) : 1;
+                heading = heading < 1 ? 1 : heading > 6 ? 6 : heading;
+            }
+            sp = 0;
+            stack_b[0] = stack_i[0] = false;
+            last_space = true;
+        } else if ((is(&e, "p") || is(&e, "h")) && e.kind == XE_CLOSE && in_para) {
+            in_para = false;
+            db_para(db, heading ? heading : frame_title_depth ? 3 : 0, !heading && !frame_title_depth && ldepth > 0 ? ldepth - 1 : -1, true);
+        } else if (in_para && is(&e, "span")) {
+            if (e.kind == XE_OPEN && sp < 15) {
+                bool b = stack_b[sp], i = stack_i[sp];
+                if (xattr(&e, "style-name", &a))
+                    for (int k = 0; k < nos; k++)
+                        if (!strcmp(os[k].name, xb_str(&a))) {
+                            b |= os[k].b;
+                            i |= os[k].i;
+                        }
+                sp++;
+                stack_b[sp] = b;
+                stack_i[sp] = i;
+            } else if (e.kind == XE_CLOSE && sp > 0) {
+                sp--;
+            }
+        } else if (in_para && is(&e, "s") && open) {
+            db_run(db, " ", 1, stack_b[sp], stack_i[sp]);
+            last_space = true;
+        } else if (in_para && (is(&e, "tab") || is(&e, "line-break")) && open) {
+            db_run(db, " ", 1, stack_b[sp], stack_i[sp]);
+            last_space = true;
+        } else if (is(&e, "list")) {
+            if (e.kind == XE_OPEN)
+                ldepth++;
+            else if (e.kind == XE_CLOSE && ldepth > 0)
+                ldepth--;
+        } else if (is(&e, "table")) {
+            if (e.kind == XE_OPEN)
+                db_table_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_table_end(db);
+        } else if (is(&e, "table-row")) {
+            if (e.kind == XE_OPEN)
+                db_row_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_row_end(db);
+        } else if (is(&e, "table-cell")) {
+            if (e.kind == XE_OPEN)
+                db_cell_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_cell_end(db);
+            else if (e.kind == XE_SELF && db->tdepth == 1) {
+                db_cell_begin(db);
+                db_cell_end(db);
+            }
+        }
+    }
+    free(os);
+    free(a.s);
+    free(tx.s);
+    free(tmp.s);
+}
+
+/* ---- PPTX ---- */
+static void pptx_convert(struct docb *db, const char *buf, size_t len)
+{
+    struct xml x = { buf, buf + len };
+    struct xev e;
+    struct xbuf a = { 0 }, tx = { 0 };
+    tx.limit = 1u << 20;
+    bool in_t = false, title = false, nobullet = false, rb = false, ri = false, junk = false;
+    int lvl = 0, skip = 0;
+    while (!db->full && xml_next(&x, &e) != XE_END) {
+        if (e.kind == XE_TEXT) {
+            if (in_t && !skip) {
+                xb_reset(&tx);
+                xb_add_xml(&tx, e.text, e.tlen);
+                db_run(db, xb_str(&tx), tx.n, rb, ri);
+            }
+            continue;
+        }
+        bool open = e.kind == XE_OPEN || e.kind == XE_SELF;
+        if (is(&e, "Fallback") || is(&e, "pic") || is(&e, "extLst")) {
+            if (e.kind == XE_OPEN)
+                skip++;
+            else if (e.kind == XE_CLOSE && skip)
+                skip--;
+            continue;
+        }
+        if (skip)
+            continue;
+        if (is(&e, "sp") && e.kind == XE_OPEN) {
+            title = junk = false;
+        } else if (is(&e, "ph") && open) {
+            if (xattr(&e, "type", &a) && (!strcmp(xb_str(&a), "title") || !strcmp(xb_str(&a), "ctrTitle")))
+                title = true;
+            if (xattr(&e, "type", &a) && (!strcmp(xb_str(&a), "sldNum") || !strcmp(xb_str(&a), "ftr") || !strcmp(xb_str(&a), "dt") || !strcmp(xb_str(&a), "hdr")))
+                junk = true;                                    /* the slide number, the footer, the date: not the slide's text */
+        } else if (is(&e, "p")) {
+            if (e.kind == XE_OPEN) {
+                lvl = 0;
+                nobullet = false;
+            } else if (e.kind == XE_CLOSE) {
+                if (junk)
+                    db_discard(db);
+                else
+                    db_para(db, title && db->tdepth == 0 ? 3 : 0, !title && !nobullet && db->tdepth == 0 ? lvl : -1, true);
+            }
+        } else if (is(&e, "pPr") && open && xattr(&e, "lvl", &a)) {
+            lvl = atoi(xb_str(&a));
+            lvl = lvl < 0 ? 0 : lvl > 5 ? 5 : lvl;
+        } else if (is(&e, "buNone") && open) {
+            nobullet = true;
+        } else if (is(&e, "r") && e.kind == XE_OPEN) {
+            rb = ri = false;
+        } else if (is(&e, "rPr") && open) {
+            rb = xattr(&e, "b", &a) && !strcmp(xb_str(&a), "1");
+            ri = xattr(&e, "i", &a) && !strcmp(xb_str(&a), "1");
+        } else if (is(&e, "t")) {
+            in_t = e.kind == XE_OPEN;
+        } else if (is(&e, "br") && open) {
+            db_run(db, " ", 1, rb, ri);
+        } else if (is(&e, "tbl")) {
+            if (e.kind == XE_OPEN)
+                db_table_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_table_end(db);
+        } else if (is(&e, "tr")) {
+            if (e.kind == XE_OPEN)
+                db_row_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_row_end(db);
+        } else if (is(&e, "tc")) {
+            if (e.kind == XE_OPEN)
+                db_cell_begin(db);
+            else if (e.kind == XE_CLOSE)
+                db_cell_end(db);
+        }
+    }
+    free(a.s);
+    free(tx.s);
+}
+
+static int slide_num(const char *name)
+{
+    return atoi(name + strlen("ppt/slides/slide"));
+}
+
+static int cmp_slide(const void *a, const void *b)
+{
+    return slide_num(*(char *const *)a) - slide_num(*(char *const *)b);
+}
+
+/* 0 = the document as Markdown in *md (malloc'd, `info` says what it was); -1 = not a document of these kinds; -2 = one that cannot be read (err). */
+int xl_document(const char *path, char **md, size_t *mdlen, char *info, size_t infon, char *err, size_t errn)
+{
+    struct zip z;
+    int zr = zip_open(&z, path, err, errn);
+    if (zr < 0)
+        return zr;
+    size_t len;
+    const char *why = NULL;
+    struct docb db = { 0 };
+    int result = -1;
+    char *mt = zip_read(&z, "mimetype", 256, &len, &why);
+    bool odt = mt && strstr(mt, "opendocument.text");
+    bool odp = mt && strstr(mt, "opendocument.presentation");
+    free(mt);
+    const char *what = NULL;
+    if (zip_find(&z, "word/document.xml")) {
+        what = "Word document";
+        char *dx = zip_read(&z, "word/document.xml", PART_BIG, &len, &why);
+        if (!dx) {
+            seterr(err, errn, why ? why : "The document part cannot be read.");
+            result = -2;
+            goto done;
+        }
+        struct dstyle *st = calloc(512, sizeof(*st));
+        int nst = 0;
+        struct dnum *dn = calloc(1, sizeof(*dn));
+        for (int i = 0; i < 256; i++)
+            dn->num_abs[i] = -1;
+        memset(dn->bullet, 1, sizeof(dn->bullet));
+        size_t sl;
+        char *sx = zip_read(&z, "word/styles.xml", PART_SMALL, &sl, &why);
+        if (sx) {
+            nst = parse_dstyles(sx, sl, st, 512);
+            free(sx);
+        }
+        char *nx = zip_read(&z, "word/numbering.xml", PART_SMALL, &sl, &why);
+        if (nx) {
+            parse_dnum(nx, sl, dn);
+            free(nx);
+        }
+        docx_convert(&db, dx, len, st, nst, dn);
+        free(dx);
+        free(st);
+        free(dn);
+        result = 0;
+    } else if (zip_find(&z, "ppt/slides/slide1.xml")) {
+        what = "Presentation";
+        char **names = NULL;
+        int nn = 0;
+        for (int i = 0; i < z.n && nn < 500; i++) {
+            const char *nm = z.e[i].name;
+            size_t l = strlen(nm);
+            if (!strncmp(nm, "ppt/slides/slide", 16) && l > 20 && !strcmp(nm + l - 4, ".xml") && nm[16] >= '0' && nm[16] <= '9') {
+                names = realloc(names, (size_t)(nn + 1) * sizeof(char *));
+                names[nn++] = z.e[i].name;
+            }
+        }
+        qsort(names, (size_t)nn, sizeof(char *), cmp_slide);
+        for (int i = 0; i < nn && !db.full; i++) {
+            char *sx = zip_read(&z, names[i], PART_BIG, &len, &why);
+            if (!sx)
+                continue;
+            db_slide(&db, slide_num(names[i]));
+            pptx_convert(&db, sx, len);
+            free(sx);
+        }
+        free(names);
+        result = 0;
+    } else if ((odt || odp) && zip_find(&z, "content.xml")) {
+        what = odp ? "Presentation" : "Text document";
+        char *cx = zip_read(&z, "content.xml", PART_BIG, &len, &why);
+        if (!cx) {
+            seterr(err, errn, why ? why : "The document part cannot be read.");
+            result = -2;
+            goto done;
+        }
+        odf_convert(&db, cx, len, odp);
+        free(cx);
+        result = 0;
+    }
+    if (result == 0) {
+        if (db.full)
+            db_outs(&db, "\n*(the rest of the document is not shown)*\n");
+        *md = db.out.s ? db.out.s : strdup("");
+        *mdlen = db.out.n;
+        db.out.s = NULL;
+        if (db.slides)
+            snprintf(info, infon, "%s, %d slide%s", what, db.slides, db.slides == 1 ? "" : "s");
+        else
+            snprintf(info, infon, "%s, %d paragraph%s, %d table%s", what, db.paragraphs, db.paragraphs == 1 ? "" : "s", db.tables, db.tables == 1 ? "" : "s");
+    }
+done:
+    db_free(&db);
+    zip_close(&z);
+    return result;
 }
 
 int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)

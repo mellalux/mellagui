@@ -2706,6 +2706,38 @@ static bool pv_xlsx(struct preview *pv, const char *path, int sheet)
     return true;
 }
 
+/* ---- a word processor document or a presentation: its text as a Markdown page ---- */
+static bool is_office_doc_path(const char *path)
+{
+    static const char *const exts[] = { "docx", "docm", "dotx", "dotm", "odt", "ott", "pptx", "pptm", "potx", "ppsx", "odp", "otp" };
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
+        if (ext_is(path, exts[i]))
+            return true;
+    return false;
+}
+
+static bool pv_document(struct preview *pv, const char *path)
+{
+    char *md = NULL, info[120] = "", err[160] = "";
+    size_t mn = 0;
+    int r = xl_document(path, &md, &mn, info, sizeof(info), err, sizeof(err));
+    if (r == -1)
+        return false;
+    int cap = 0;
+    if (r < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "A document that cannot be shown:");
+        pv_linef(pv, &cap, "%s", err);
+        return true;
+    }
+    pv->kind = PV_MARKDOWN;
+    pv->md = md_parse(md, mn);
+    pv->top = 0;
+    snprintf(pv->info, sizeof(pv->info), "%s", info);
+    free(md);
+    return true;
+}
+
 /* ---- an archive: the entries as a table (names, sizes, times; never the contents) ---- */
 #define ARC_MAX_ENTRIES 5000
 
@@ -3095,6 +3127,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
                (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots") || ext_is(path, "numbers")) &&
                (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR || pv->kind == PV_IMAGE)) {
         /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
+    } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
+        /* a Word / OpenDocument text or a presentation: its text as a page */
     } else if (((n >= 4 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "PK\5\6", 4))) || (n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) ||
                 (n >= 512 && (!memcmp(buf + 257, "ustar", 5) || ext_is(path, "tar")))) &&
                (pv_archive(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
@@ -6975,6 +7009,19 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
+    if (argc > 2 && !strcmp(argv[1], "--document-md")) {                /* a document / presentation as the Markdown the preview shows (tests, work on the converter) */
+        char *md = NULL, info[120] = "", err[160] = "";
+        size_t mn = 0;
+        int r = xl_document(argv[2], &md, &mn, info, sizeof(info), err, sizeof(err));
+        if (r != 0) {
+            fprintf(stderr, "%s\n", r == -1 ? "not a document" : err);
+            return 1;
+        }
+        fprintf(stderr, "%s\n", info);
+        fwrite(md, 1, mn, stdout);
+        free(md);
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */
         return xl_numbers_dump(argv[2]);
     const char *rail_env = getenv("MELLAGUI_FILES_RAIL"), *card_env = getenv("MELLAGUI_FILES_CARD");

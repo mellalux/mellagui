@@ -1065,6 +1065,502 @@ static int decode_pnm(const uint8_t *d, size_t len, struct lm_image *img, char *
     return 0;
 }
 
+
+/* ---- TIFF (the first picture: strips or tiles; none, LZW, Deflate, PackBits; 1 .. 16 bits; grey, palette, RGB, alpha) and TGA ----------------------------- */
+
+struct tiff {
+    const uint8_t *d;
+    size_t len;
+    bool big;
+};
+
+static uint32_t tf16(const struct tiff *t, const uint8_t *p)
+{
+    return t->big ? (uint32_t)(p[0] << 8 | p[1]) : (uint32_t)(p[0] | p[1] << 8);
+}
+
+static uint32_t tf32(const struct tiff *t, const uint8_t *p)
+{
+    return t->big ? (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3] : le32(p);
+}
+
+/* The values of a tag of the IFD: up to `max` numbers into out; returns the count (0 when absent). */
+static unsigned tiff_tag(const struct tiff *t, uint32_t ifd, unsigned tag, uint32_t *out, unsigned max)
+{
+    if (ifd + 2 > t->len)
+        return 0;
+    unsigned n = tf16(t, t->d + ifd);
+    for (unsigned i = 0; i < n; i++) {
+        size_t e = (size_t)ifd + 2 + (size_t)i * 12;
+        if (e + 12 > t->len)
+            return 0;
+        if (tf16(t, t->d + e) != tag)
+            continue;
+        unsigned type = tf16(t, t->d + e + 2), cnt = tf32(t, t->d + e + 4);
+        size_t tsz = type == 3 ? 2 : type == 4 ? 4 : type == 1 || type == 2 || type == 6 || type == 7 ? 1 : type == 8 ? 2 : type == 9 ? 4 : 0;
+        if (!tsz)
+            return 0;
+        const uint8_t *v = t->d + e + 8;
+        if ((uint64_t)cnt * tsz > 4) {
+            uint32_t off = tf32(t, v);
+            if ((uint64_t)off + (uint64_t)cnt * tsz > t->len)
+                return 0;
+            v = t->d + off;
+        }
+        unsigned m = cnt < max ? cnt : max;
+        for (unsigned k = 0; k < m; k++)
+            out[k] = tsz == 1 ? v[k] : tsz == 2 ? tf16(t, v + 2 * k) : tf32(t, v + 4 * k);
+        return m;
+    }
+    return 0;
+}
+
+/* TIFF's LZW: codes of 9 to 12 bits, most significant bit first, the width grows one code early. */
+static long tiff_lzw(const uint8_t *in, size_t n, uint8_t *out, size_t outlen)
+{
+    uint16_t *prefix = malloc(4096 * sizeof(uint16_t));
+    uint8_t *suffix = malloc(4096), *stack = malloc(4097);
+    if (!prefix || !suffix || !stack) {
+        free(prefix); free(suffix); free(stack);
+        return -1;
+    }
+    size_t w = 0, ip = 0;
+    int next = 258, bits = 9, old = -1;
+    uint32_t acc = 0;
+    int nb = 0;
+    while (true) {
+        while (nb < bits && ip < n) {
+            acc = (acc << 8) | in[ip++];
+            nb += 8;
+        }
+        if (nb < bits)
+            break;
+        int code = (int)((acc >> (nb - bits)) & ((1u << bits) - 1));
+        nb -= bits;
+        if (code == 257)
+            break;
+        if (code == 256) {
+            next = 258;
+            bits = 9;
+            old = -1;
+            continue;
+        }
+        int sp = 0, cur = code;
+        uint8_t first;
+        if (old < 0) {
+            if (code > 255)
+                break;
+            stack[sp++] = (uint8_t)code;
+            first = (uint8_t)code;
+        } else {
+            if (code > next)
+                break;
+            if (code == next) {
+                cur = old;
+                int sp0 = 0;
+                uint8_t tmp[4097];
+                while (cur > 255 && sp0 < 4096) {
+                    tmp[sp0++] = suffix[cur];
+                    cur = prefix[cur];
+                }
+                first = (uint8_t)cur;
+                uint8_t *o = out + w;
+                if (w + (size_t)sp0 + 2 > outlen) {
+                    if (w < outlen) {
+                        size_t room = outlen - w, k = 0;
+                        if (k < room) o[k++] = first;
+                        for (int j = sp0 - 1; j >= 0 && k < room; j--) o[k++] = tmp[j];
+                        if (k < room) o[k++] = first;
+                        w += k;
+                    }
+                    break;
+                }
+                *o++ = first;
+                for (int j = sp0 - 1; j >= 0; j--)
+                    *o++ = tmp[j];
+                *o++ = first;
+                w = (size_t)(o - out);
+                if (next < 4096) {
+                    prefix[next] = (uint16_t)old;
+                    suffix[next] = first;
+                    next++;
+                }
+                old = code;
+                if (next + 1 >= (1 << bits) && bits < 12)
+                    bits++;
+                continue;
+            }
+            while (cur > 255 && sp < 4096) {
+                stack[sp++] = suffix[cur];
+                cur = prefix[cur];
+            }
+            stack[sp++] = (uint8_t)cur;
+            first = (uint8_t)cur;
+            if (next < 4096) {
+                prefix[next] = (uint16_t)old;
+                suffix[next] = first;
+                next++;
+            }
+        }
+        if (w + (size_t)sp > outlen) {
+            while (sp > 0 && w < outlen)
+                out[w++] = stack[--sp];
+            break;
+        }
+        while (sp > 0)
+            out[w++] = stack[--sp];
+        old = code;
+        if (next + 1 >= (1 << bits) && bits < 12)
+            bits++;
+    }
+    free(prefix);
+    free(suffix);
+    free(stack);
+    return (long)w;
+}
+
+static long packbits(const uint8_t *in, size_t n, uint8_t *out, size_t outlen)
+{
+    size_t w = 0;
+    for (size_t i = 0; i < n && w < outlen;) {
+        int l = (int8_t)in[i++];
+        if (l >= 0) {
+            size_t c = (size_t)l + 1;
+            if (c > n - i)
+                c = n - i;
+            if (c > outlen - w)
+                c = outlen - w;
+            memcpy(out + w, in + i, c);
+            w += c;
+            i += (size_t)l + 1 > n - i ? n - i : (size_t)l + 1;
+        } else if (l != -128 && i < n) {
+            size_t c = (size_t)(1 - l);
+            if (c > outlen - w)
+                c = outlen - w;
+            memset(out + w, in[i++], c);
+            w += c;
+        }
+    }
+    return (long)w;
+}
+
+static int decode_tiff(const uint8_t *d, size_t len, struct lm_image *img, char *err, size_t errsz)
+{
+    struct tiff t = { d, len, d[0] == 'M' };
+    if (len < 8) {
+        fail(err, errsz, "TIFF: too short");
+        return -1;
+    }
+    uint32_t ifd = tf32(&t, d + 4), v[4], w = 0, h = 0, comp = 1, photo = 1, spp = 1, planar = 1, pred = 1, rps = 0xffffffffu, fill = 1, tw = 0, tl = 0;
+    uint32_t bps[8] = { 1 }, extra[4] = { 0 };
+    if (!tiff_tag(&t, ifd, 256, v, 1)) {
+        fail(err, errsz, "TIFF: no width");
+        return -1;
+    }
+    w = v[0];
+    if (!tiff_tag(&t, ifd, 257, v, 1)) {
+        fail(err, errsz, "TIFF: no height");
+        return -1;
+    }
+    h = v[0];
+    unsigned nbps = tiff_tag(&t, ifd, 258, bps, 8);
+    if (!nbps) {
+        nbps = 1;
+        bps[0] = 1;
+    }
+    if (tiff_tag(&t, ifd, 259, v, 1)) comp = v[0];
+    if (tiff_tag(&t, ifd, 262, v, 1)) photo = v[0];
+    if (tiff_tag(&t, ifd, 277, v, 1)) spp = v[0];
+    if (tiff_tag(&t, ifd, 284, v, 1)) planar = v[0];
+    if (tiff_tag(&t, ifd, 317, v, 1)) pred = v[0];
+    if (tiff_tag(&t, ifd, 278, v, 1)) rps = v[0];
+    if (tiff_tag(&t, ifd, 266, v, 1)) fill = v[0];
+    (void)fill;
+    unsigned nextra = tiff_tag(&t, ifd, 338, extra, 4);
+    bool tiled = tiff_tag(&t, ifd, 322, v, 1) && (tw = v[0]) && tiff_tag(&t, ifd, 323, v, 1) && (tl = v[0]);
+    unsigned bpc = bps[0];
+    for (unsigned i = 1; i < nbps && i < spp; i++)
+        if (bps[i] != bpc) {
+            fail(err, errsz, "TIFF: samples of different sizes are not supported");
+            return -1;
+        }
+    if (planar != 1 || spp < 1 || spp > 4 || (bpc != 1 && bpc != 2 && bpc != 4 && bpc != 8 && bpc != 16) || (photo > 3 && photo != 2) || photo == 4 || (photo == 3 && spp != 1)) {
+        fail(err, errsz, "TIFF: a colour layout that is not supported");
+        return -1;
+    }
+    if (comp != 1 && comp != 5 && comp != 8 && comp != 32946 && comp != 32773) {
+        fail(err, errsz, "TIFF: a compression that is not supported (JPEG, CCITT ...)");
+        return -1;
+    }
+    if (w < 1 || h < 1 || w > 65535 || h > 65535 || (uint64_t)w * h > IMG_MAX_PIXELS || (photo == 2 && spp < 3)) {
+        fail(err, errsz, "TIFF: a size that is not supported");
+        return -1;
+    }
+    size_t rowbits = (size_t)w * spp * bpc, rowb = (rowbits + 7) / 8;
+    uint8_t *raw = calloc(rowb * h + 1, 1);
+    if (!raw) {
+        fail(err, errsz, "out of memory");
+        return -1;
+    }
+    uint32_t *offs = NULL, *cnts = NULL;
+    unsigned nstrip = 0;
+    uint32_t tpr = 0, tpc = 0;
+    if (tiled) {
+        tpr = (w + tw - 1) / tw;
+        tpc = (h + tl - 1) / tl;
+        nstrip = tpr * tpc;
+    } else {
+        if (rps == 0 || rps > h)
+            rps = h;
+        nstrip = (h + rps - 1) / rps;
+    }
+    if (nstrip == 0 || nstrip > 1000000) {
+        free(raw);
+        fail(err, errsz, "TIFF: no strips");
+        return -1;
+    }
+    offs = calloc(nstrip, sizeof(uint32_t));
+    cnts = calloc(nstrip, sizeof(uint32_t));
+    unsigned no = tiff_tag(&t, ifd, tiled ? 324 : 273, offs, nstrip), nc = tiff_tag(&t, ifd, tiled ? 325 : 279, cnts, nstrip);
+    int rc = 0;
+    if (no != nstrip) {
+        rc = -1;
+        fail(err, errsz, "TIFF: the strip offsets are missing");
+    }
+    for (unsigned i = 0; rc == 0 && i < nstrip; i++) {
+        size_t off = offs[i], cnt = i < nc ? cnts[i] : (len > off ? len - off : 0);
+        if (off > len || cnt > len - off)
+            cnt = off > len ? 0 : len - off;
+        uint32_t rows, cols_bytes;
+        size_t y0, x0b = 0;
+        if (tiled) {
+            rows = tl;
+            cols_bytes = (uint32_t)(((size_t)tw * spp * bpc + 7) / 8);
+            y0 = (size_t)(i / tpr) * tl;
+            x0b = (size_t)(i % tpr) * (((size_t)tw * spp * bpc + 7) / 8);
+        } else {
+            y0 = (size_t)i * rps;
+            rows = (uint32_t)(y0 + rps <= h ? rps : h - y0);
+            cols_bytes = (uint32_t)rowb;
+        }
+        size_t need = (size_t)rows * cols_bytes;
+        uint8_t *buf = malloc(need + 1);
+        if (!buf) {
+            rc = -1;
+            break;
+        }
+        long got = 0;
+        if (comp == 1) {
+            got = (long)(cnt < need ? cnt : need);
+            memcpy(buf, d + off, (size_t)got);
+        } else if (comp == 5) {
+            got = tiff_lzw(d + off, cnt, buf, need);
+        } else if (comp == 32773) {
+            got = packbits(d + off, cnt, buf, need);
+        } else {
+            got = zlib_inflate(d + off, cnt, buf, need) == 0 ? (long)need : -1;
+        }
+        if (got < 0) {
+            free(buf);
+            rc = -1;
+            fail(err, errsz, "TIFF: a strip does not unpack");
+            break;
+        }
+        if ((size_t)got < need)
+            memset(buf + got, 0, need - (size_t)got);
+        if (pred == 2 && (bpc == 8 || bpc == 16))                       /* horizontal differencing */
+            for (uint32_t r = 0; r < rows; r++) {
+                uint8_t *row = buf + (size_t)r * cols_bytes;
+                size_t bytes = bpc == 8 ? 1 : 2;
+                size_t pixels = cols_bytes / (spp * bytes);
+                for (size_t x = 1; x < pixels; x++)
+                    for (unsigned c = 0; c < spp; c++) {
+                        uint8_t *p = row + (x * spp + c) * bytes, *q = row + ((x - 1) * spp + c) * bytes;
+                        if (bytes == 1)
+                            p[0] = (uint8_t)(p[0] + q[0]);
+                        else {
+                            unsigned s = t.big ? (unsigned)(p[0] << 8 | p[1]) + (unsigned)(q[0] << 8 | q[1]) : (unsigned)(p[0] | p[1] << 8) + (unsigned)(q[0] | q[1] << 8);
+                            if (t.big) { p[0] = (uint8_t)(s >> 8); p[1] = (uint8_t)s; } else { p[0] = (uint8_t)s; p[1] = (uint8_t)(s >> 8); }
+                        }
+                    }
+            }
+        for (uint32_t r = 0; r < rows && y0 + r < h; r++) {
+            size_t take = tiled ? (x0b + cols_bytes <= rowb ? cols_bytes : (rowb > x0b ? rowb - x0b : 0)) : rowb;
+            memcpy(raw + (y0 + r) * rowb + x0b, buf + (size_t)r * cols_bytes, take);
+        }
+        free(buf);
+    }
+    free(offs);
+    free(cnts);
+    if (rc) {
+        free(raw);
+        return -1;
+    }
+    uint32_t cmap[3 * 256], ncmap = 0;
+    uint32_t *cm = NULL;
+    if (photo == 3) {
+        size_t cn = (size_t)3 << bpc;
+        cm = calloc(cn, sizeof(uint32_t));
+        if (cm)
+            ncmap = tiff_tag(&t, ifd, 320, cm, (unsigned)cn);
+        (void)cmap;
+    }
+    if (!img_alloc(img, w, h, err, errsz)) {
+        free(raw);
+        free(cm);
+        return -1;
+    }
+    bool alpha = (spp == 2 && photo != 2 && photo != 3) || (spp == 4 && photo == 2) || (spp == 2 && photo == 3) || (nextra > 0 && spp > (photo == 2 ? 3u : 1u));
+    bool assoc = nextra > 0 && extra[0] == 1;
+    unsigned maxv = (1u << (bpc > 8 ? 8 : bpc)) - 1;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *row = raw + (size_t)y * rowb;
+        for (uint32_t x = 0; x < w; x++) {
+            unsigned s[4] = { 0 };
+            for (unsigned c = 0; c < spp; c++) {
+                size_t idx = (size_t)x * spp + c;
+                if (bpc == 8) s[c] = row[idx];
+                else if (bpc == 16) s[c] = t.big ? row[idx * 2] : row[idx * 2 + 1];
+                else {
+                    size_t bit = idx * bpc;
+                    s[c] = (row[bit / 8] >> (8 - bpc - bit % 8)) & maxv;
+                }
+            }
+            int r, g, b, a = 255;
+            if (photo == 2) {
+                r = (int)s[0]; g = (int)s[1]; b = (int)s[2];
+                if (alpha && spp >= 4) a = (int)s[3];
+            } else if (photo == 3) {
+                unsigned idx = s[0];
+                size_t cn = (size_t)1 << bpc;
+                r = ncmap >= 3 * cn ? (int)(cm[idx] >> 8) : (int)idx;
+                g = ncmap >= 3 * cn ? (int)(cm[cn + idx] >> 8) : (int)idx;
+                b = ncmap >= 3 * cn ? (int)(cm[2 * cn + idx] >> 8) : (int)idx;
+            } else {
+                unsigned gv = s[0];
+                if (photo == 0)
+                    gv = maxv - gv;
+                r = g = b = bpc >= 8 ? (int)gv : (int)(gv * 255 / maxv);
+                if (alpha && spp >= 2) a = (int)s[1];
+            }
+            if (bpc < 8 && photo == 2) {
+                r = r * 255 / (int)maxv; g = g * 255 / (int)maxv; b = b * 255 / (int)maxv;
+            }
+            if (a < 255 && assoc && a > 0) {
+                r = r * 255 / a > 255 ? 255 : r * 255 / a;
+                g = g * 255 / a > 255 ? 255 : g * 255 / a;
+                b = b * 255 / a > 255 ? 255 : b * 255 / a;
+            }
+            img->px[(size_t)y * w + x] = over_checker((int)x, (int)y, r, g, b, a);
+        }
+    }
+    free(raw);
+    free(cm);
+    return 0;
+}
+
+/* TGA: has no magic number, so the header has to make sense and (for the uncompressed kinds) the size has to fit. */
+static bool tga_plausible(const uint8_t *d, size_t len)
+{
+    if (len < 18 + 1)
+        return false;
+    unsigned idlen = d[0], cmt = d[1], it = d[2], cmlen = le16(d + 5), cmbits = d[7], w = le16(d + 12), h = le16(d + 14), bpp = d[16];
+    if (cmt > 1 || !(it == 1 || it == 2 || it == 3 || it == 9 || it == 10 || it == 11) || w == 0 || h == 0 || (d[17] & 0xc0))
+        return false;
+    if (!(bpp == 8 || bpp == 15 || bpp == 16 || bpp == 24 || bpp == 32))
+        return false;
+    if ((it == 1 || it == 9) != (cmt == 1) && !(cmt == 1 && (it == 2 || it == 3 || it == 10 || it == 11)))
+        return false;
+    if (cmt == 1 && !(cmbits == 15 || cmbits == 16 || cmbits == 24 || cmbits == 32))
+        return false;
+    size_t cmsz = cmt ? (size_t)cmlen * ((cmbits + 7) / 8) : 0, hdr = 18 + idlen + cmsz;
+    if (hdr > len)
+        return false;
+    bool footer = len >= 26 && !memcmp(d + len - 18, "TRUEVISION-XFILE", 16);
+    if (it == 1 || it == 2 || it == 3) {
+        size_t data = (size_t)w * h * ((bpp + 7) / 8);
+        return hdr + data <= len && (footer || len - hdr - data <= 2048);
+    }
+    return footer || len > hdr + 16;
+}
+
+static int decode_tga(const uint8_t *d, size_t len, struct lm_image *img, char *err, size_t errsz)
+{
+    unsigned idlen = d[0], cmt = d[1], it = d[2], cmstart = le16(d + 3), cmlen = le16(d + 5), cmbits = d[7], w = le16(d + 12), h = le16(d + 14), bpp = d[16], desc = d[17];
+    bool rle = it >= 9, gray = (it & 7) == 3, mapped = (it & 7) == 1;
+    size_t cmbytes = (cmbits + 7) / 8, pos = 18 + idlen;
+    uint32_t pal[256] = { 0 };
+    if (cmt) {
+        for (unsigned i = 0; i < cmlen; i++) {
+            size_t o = pos + (size_t)i * cmbytes;
+            if (o + cmbytes > len)
+                break;
+            uint32_t c;
+            if (cmbytes == 2) {
+                unsigned v = le16(d + o);
+                c = ((v >> 10 & 31) * 255 / 31) << 16 | ((v >> 5 & 31) * 255 / 31) << 8 | ((v & 31) * 255 / 31);
+            } else {
+                c = (uint32_t)d[o + 2] << 16 | (uint32_t)d[o + 1] << 8 | d[o];
+            }
+            if (cmstart + i < 256)
+                pal[cmstart + i] = c;
+        }
+        pos += (size_t)cmlen * cmbytes;
+    }
+    if (!img_alloc(img, w, h, err, errsz))
+        return -1;
+    size_t px_bytes = (bpp + 7) / 8, total = (size_t)w * h;
+    bool alpha_bits = (desc & 15) > 0 && bpp == 32;
+    size_t n = 0;
+    uint32_t run_px[1];
+    (void)run_px;
+    while (n < total && pos < len) {
+        size_t count = 1;
+        bool run = false;
+        if (rle) {
+            unsigned hdr = d[pos++];
+            count = (hdr & 127) + 1;
+            run = hdr & 128;
+        }
+        const uint8_t *first = d + pos;
+        if (pos + px_bytes > len)
+            break;
+        for (size_t k = 0; k < count && n < total; k++) {
+            const uint8_t *p = run ? first : d + pos + k * px_bytes;
+            if (!run && p + px_bytes > d + len)
+                goto done;
+            int r, g, b, a = 255;
+            if (mapped) {
+                uint32_t c = pal[p[0]];
+                r = (int)(c >> 16 & 255); g = (int)(c >> 8 & 255); b = (int)(c & 255);
+            } else if (gray) {
+                r = g = b = p[0];
+                if (bpp == 16)
+                    a = p[1];
+            } else if (bpp == 15 || bpp == 16) {
+                unsigned v = le16(p);
+                r = (int)((v >> 10 & 31) * 255 / 31);
+                g = (int)((v >> 5 & 31) * 255 / 31);
+                b = (int)((v & 31) * 255 / 31);
+            } else {
+                b = p[0]; g = p[1]; r = p[2];
+                if (bpp == 32 && alpha_bits)
+                    a = p[3];
+            }
+            size_t idx = n++;
+            uint32_t x = (uint32_t)(idx % w), y = (uint32_t)(idx / w);
+            if (!(desc & 0x20))
+                y = h - 1 - y;
+            if (desc & 0x10)
+                x = w - 1 - x;
+            img->px[(size_t)y * w + x] = over_checker((int)x, (int)y, r, g, b, a);
+        }
+        pos += run ? px_bytes : count * px_bytes;
+    }
+done:
+    return 0;
+}
+
 int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *err, size_t errsz)
 {
     img->px = NULL;
@@ -1080,8 +1576,16 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
         return decode_gif(data, len, img, err, errsz);
     if (len >= 26 && data[0] == 'B' && data[1] == 'M')
         return decode_bmp(data, len, img, err, errsz);
-    if (len >= 22 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 2) && data[3] == 0)
+    if (len >= 22 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 2) && data[3] == 0 && !tga_plausible(data, len))      /* (a TGA of type 2 starts the same way) */
         return decode_ico(data, len, img, err, errsz);
+    if (len >= 8 && ((data[0] == 'I' && data[1] == 'I' && data[2] == 42 && data[3] == 0) || (data[0] == 'M' && data[1] == 'M' && data[2] == 0 && data[3] == 42)))
+        return decode_tiff(data, len, img, err, errsz);
+    if (len >= 8 && ((data[0] == 'I' && data[1] == 'I' && data[2] == 43) || (data[0] == 'M' && data[1] == 'M' && data[3] == 43))) {
+        fail(err, errsz, "BigTIFF: not supported");
+        return -1;
+    }
+    if (tga_plausible(data, len))
+        return decode_tga(data, len, img, err, errsz);
     if (lm_svg_sniff(data, len)) {                                      /* SVG: drawn by svg.c (the checker shows through the transparent parts unless the alpha is kept) */
         int rc = lm_svg_render(data, len, img, err, errsz);
         if (rc == 0 && !g_keep_alpha)
@@ -1092,7 +1596,7 @@ int lm_img_decode(const uint8_t *data, size_t len, struct lm_image *img, char *e
                 }
         return rc;
     }
-    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO, PNM or SVG image");
+    fail(err, errsz, "not a PNG, JPEG, GIF, BMP, ICO, PNM, TIFF, TGA or SVG image");
     return -1;
 }
 

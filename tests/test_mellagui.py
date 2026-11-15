@@ -10523,7 +10523,25 @@ class TestImages(unittest.TestCase):
         compare(b'BM' + struct.pack('<IHHI', off + len(core_pix), 0, 0, off) + struct.pack('<IHHHH', 12, 6, 3, 1, 8) + core_pal + core_pix, 'h_os2.bmp')
         compare(b'P2\n# comment\n4 2\n15\n0 5 10 15\n15 10 5 0\n', 'p2.pnm')                          # text PNM (Pillow's own writer only does binary)
         compare(b'P1\n5 3\n0 1 0 1 0\n1 1 1 1 1\n10101\n', 'p1.pnm')
-        for bad in (b'GIF89a', b'GIF89a\x02\x00\x02\x00\x80\x00\x00', b'BM' + bytes(40), b'\x00\x00\x01\x00\x05\x00', b'P5\n9999999 9999999\n255\n'):    # damaged: an error, no crash
+        for (w, h) in ((1, 1), (7, 5), (130, 70)):                                           # TIFF (every compression) and TGA (RLE, both origins)
+            im = noise(w, h)
+            for mode in ('1', 'L', 'P', 'RGB', 'RGBA', 'LA'):
+                i2 = im.quantize(32) if mode == 'P' else im.convert(mode)
+                for comp in (None, 'tiff_lzw', 'tiff_adobe_deflate', 'packbits'):
+                    b = io.BytesIO()
+                    try:
+                        i2.save(b, 'TIFF', **({'compression': comp} if comp else {}))
+                    except Exception:
+                        continue
+                    compare(b.getvalue(), 't%dx%d_%s_%s.tif' % (w, h, mode, comp))
+            for mode in ('L', 'P', 'RGB', 'RGBA'):
+                i2 = im.quantize(32) if mode == 'P' else im.convert(mode)
+                for rle in (False, True):
+                    for orient in (1, -1):
+                        b = io.BytesIO()
+                        i2.save(b, 'TGA', compression='tga_rle' if rle else None, orientation=orient)
+                        compare(b.getvalue(), 'g%dx%d_%s_%s_%d.tga' % (w, h, mode, rle, orient))
+        for bad in (b'GIF89a', b'GIF89a\x02\x00\x02\x00\x80\x00\x00', b'BM' + bytes(40), b'\x00\x00\x01\x00\x05\x00', b'P5\n9999999 9999999\n255\n', b'II*\x00\x08\x00\x00\x00' + bytes(30), b'MM\x00*\x00\x00\x00\x08\x00\x01' + bytes(20)):    # damaged: an error, no crash
             r, _ = self.decode(bad, 'x.bin')
             self.assertNotIn('Sanitizer', r.stderr)
             self.assertIn(r.returncode, (0, 1))

@@ -45,6 +45,15 @@
     "Super+Ctrl+Right  = tile-top-right\n" \
     "Super+Ctrl+Shift+Left  = tile-bottom-left\n" \
     "Super+Ctrl+Shift+Right = tile-bottom-right\n" \
+    "Super+Alt+Left    = tile-third 1\n" \
+    "Super+Alt+Down    = tile-third 2\n" \
+    "Super+Alt+Right   = tile-third 3\n" \
+    "Super+Alt+Shift+Left  = tile-twothirds 1\n" \
+    "Super+Alt+Shift+Right = tile-twothirds 2\n" \
+    "Super+Ctrl+Alt+Left   = tile-grid-move left\n" \
+    "Super+Ctrl+Alt+Right  = tile-grid-move right\n" \
+    "Super+Ctrl+Alt+Up     = tile-grid-move up\n" \
+    "Super+Ctrl+Alt+Down   = tile-grid-move down\n" \
     "Super+Up          = maximize\n" \
     "Super+Down        = restore\n" \
     "Super+Shift+E     = quit\n" \
@@ -146,7 +155,7 @@ static bool parse_combo(const char *text, uint32_t *mods, uint32_t *code)
 
 /* ---- actions ------------------------------------------------------------------------------------------------------ */
 
-enum arg_kind { ARG_NONE, ARG_WORKSPACE, ARG_COMMAND };
+enum arg_kind { ARG_NONE, ARG_WORKSPACE, ARG_COMMAND, ARG_THIRD, ARG_TWOTHIRDS, ARG_DIRECTION };
 struct action_def { const char *name; enum lm_action act; enum arg_kind arg; };
 static const struct action_def actions[] = {
     { "none", LM_ACT_NONE, ARG_NONE },
@@ -165,6 +174,8 @@ static const struct action_def actions[] = {
     { "tile-bottom-left", LM_ACT_TILE_BOTTOM_LEFT, ARG_NONE }, { "tile-bottom-right", LM_ACT_TILE_BOTTOM_RIGHT, ARG_NONE },
     { "reload-config", LM_ACT_RELOAD_CONFIG, ARG_NONE }, { "launcher", LM_ACT_LAUNCHER, ARG_NONE }, { "osk", LM_ACT_OSK, ARG_NONE }, { "quick-settings", LM_ACT_QUICK, ARG_NONE }, { "magnify-in", LM_ACT_MAGNIFY_IN, ARG_NONE }, { "magnify-out", LM_ACT_MAGNIFY_OUT, ARG_NONE }, { "overview", LM_ACT_OVERVIEW, ARG_NONE },
     { "night-light", LM_ACT_NIGHT_LIGHT, ARG_NONE }, { "dnd", LM_ACT_DND, ARG_NONE },
+    { "tile-third", LM_ACT_TILE_THIRD, ARG_THIRD }, { "tile-twothirds", LM_ACT_TILE_TWOTHIRDS, ARG_TWOTHIRDS },
+    { "tile-grid-move", LM_ACT_TILE_GRID_MOVE, ARG_DIRECTION },
 };
 
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
@@ -209,6 +220,22 @@ static bool parse_action(const char *value, struct lm_keybind *nb)
         if (end == arg || *end || n < 1 || n > 4)      /* LM_NUM_WORKSPACES */
             return false;
         nb->num = (int)n - 1;
+    }
+    if (def->arg == ARG_THIRD || def->arg == ARG_TWOTHIRDS) {
+        char *end;
+        long n = strtol(arg, &end, 10);
+        if (end == arg || *end || n < 1 || n > (def->arg == ARG_THIRD ? 3 : 2))
+            return false;
+        nb->num = (int)n - 1;
+    }
+    if (def->arg == ARG_DIRECTION) {
+        static const char *const dirs[4] = { "left", "right", "up", "down" };
+        int d = 0;
+        while (d < 4 && strcmp(arg, dirs[d]))
+            d++;
+        if (d == 4)
+            return false;
+        nb->num = d;
     }
     if (def->arg == ARG_COMMAND) {
         if (!*arg || strlen(arg) >= LM_KEYBIND_ARG)
@@ -264,7 +291,7 @@ bool lm_keys_same_combo(const char *a, const char *b)
 
 const char *lm_keys_action_names(void)
 {
-    static char text[512];
+    static char text[768];
     if (!text[0]) {
         size_t o = 0;
         for (size_t i = 1; i < sizeof(actions) / sizeof(actions[0]); i++)          /* [0] is "none" */
@@ -323,8 +350,10 @@ void lm_keys_action_text(const struct lm_keybind *b, char *out, size_t n)
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++)
         if (actions[i].act == b->action)
             act = actions[i].name;
-    if (b->action == LM_ACT_WORKSPACE || b->action == LM_ACT_MOVE_TO_WORKSPACE)
+    if (b->action == LM_ACT_WORKSPACE || b->action == LM_ACT_MOVE_TO_WORKSPACE || b->action == LM_ACT_TILE_THIRD || b->action == LM_ACT_TILE_TWOTHIRDS)
         snprintf(out, n, "%s %d", act, b->num + 1);
+    else if (b->action == LM_ACT_TILE_GRID_MOVE)
+        snprintf(out, n, "%s %s", act, (const char *[]){ "left", "right", "up", "down" }[b->num & 3]);
     else if (b->action == LM_ACT_EXEC || b->action == LM_ACT_GADGET_TOGGLE)
         snprintf(out, n, "%s %s", act, b->arg);
     else

@@ -24,6 +24,8 @@
  *   close fullscreen maximize-toggle  the focused window               maximize / restore   (Super+Up / Super+Down)
  *   tile-left tile-right             half of the screen                workspace N          switch (1..4)
  *   tile-top-left tile-top-right tile-bottom-left tile-bottom-right   a quarter of the screen (Super+Ctrl+Left / Right, with Shift: the lower ones)
+ *   tile-third 1|2|3   the left, middle or right third (full height);  tile-twothirds 1|2   the left or the right two thirds
+ *   tile-grid-move left|right|up|down   into the cell of the window grid ([windows] grid-columns x grid-rows) the window is in, then one cell on
  *   move-to-workspace N              move the focused window           focus-next focus-prev  cycle the windows
  *   layout-next layout-prev          keyboard layout                   lock                 lock the screen
  *   gadget-clipboard gadget-mixer gadget-system gadget-smart   show / hide a gadget   clipboard-pick     choose from the history with the arrows
@@ -51,6 +53,7 @@ enum lm_action {
     LM_ACT_TILE_TOP_LEFT, LM_ACT_TILE_TOP_RIGHT, LM_ACT_TILE_BOTTOM_LEFT, LM_ACT_TILE_BOTTOM_RIGHT,
     LM_ACT_RELOAD_CONFIG, LM_ACT_LAUNCHER, LM_ACT_OSK, LM_ACT_QUICK, LM_ACT_MAGNIFY_IN, LM_ACT_MAGNIFY_OUT, LM_ACT_OVERVIEW, LM_ACT_NIGHT_LIGHT, LM_ACT_DND,
     LM_ACT_GADGET_TOGGLE,
+    LM_ACT_TILE_THIRD, LM_ACT_TILE_TWOTHIRDS, LM_ACT_TILE_GRID_MOVE,
 };
 
 #define LM_KEYBIND_ARG 256
@@ -61,7 +64,7 @@ struct lm_keybind {
     uint32_t mods;                  /* LM_MOD_SHIFT | LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER */
     uint32_t code;                  /* evdev KEY_* */
     enum lm_action action;
-    int num;                        /* workspace actions: 0-based */
+    int num;                        /* workspace actions: 0-based; tile-third / tile-twothirds: 0-based place; tile-grid-move: 0 left, 1 right, 2 up, 3 down */
     char arg[LM_KEYBIND_ARG];       /* exec: the command */
 };
 

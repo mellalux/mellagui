@@ -462,7 +462,17 @@ void wobble_start(struct lm_wm *wm, struct lm_window *w, double px, double py);
 void wobble_stop(struct lm_wm *wm);
 
 /* wm_snap.c: tiling zones and the snap preview while a window is dragged to an edge */
-bool snap_zone_valid(uint32_t zone);                                                        /* a half, a quarter or none */
+/* A zone is either a set of LM_EDGE_* (a half or a quarter) or, with LM_ZONE_GRID set, a block of cells of a grid: the screen is cut into `cols` x `rows`
+ * equal parts and the zone covers columns c0..c1-1 and rows r0..r1-1 (a third = 3 x 1, cell 0..1; two thirds = 3 x 1, cells 0..2). Four bits a field. */
+#define LM_ZONE_GRID 0x80000000u
+#define LM_ZONE_MAXGRID 8
+static inline uint32_t snap_grid_zone(int cols, int rows, int c0, int c1, int r0, int r1)
+{
+    return LM_ZONE_GRID | (uint32_t)cols | (uint32_t)rows << 4 | (uint32_t)c0 << 8 | (uint32_t)c1 << 12 | (uint32_t)r0 << 16 | (uint32_t)r1 << 20;
+}
+bool osk_phys_down(const struct lm_wm *wm, uint32_t code);                                   /* is this real key held down? (wm_osk.c) */
+bool snap_zone_valid(uint32_t zone);                                                        /* a half, a quarter, a block of grid cells or none */
+void snap_key(struct lm_wm *wm, struct lm_window *w, enum lm_action action, int num);        /* the tile-third / tile-twothirds / tile-grid-move shortcuts */
 void snap_zone_rect(const struct lm_rect *usable, uint32_t zone, struct lm_rect *out);       /* where a zone is in the usable area */
 const char *snap_zone_name(uint32_t zone);                                                   /* "left", "topright" ... */
 void snap_update(struct lm_wm *wm, double x, double y);                                      /* the pointer moved while dragging: show / move / drop the preview */

@@ -489,6 +489,74 @@ class TestWindows(Base):
         cfg = w.handle_configure()
         self.assertEqual((cfg[0], cfg[1]), (504, 536))
 
+    def chord(self, code, *mods):
+        for m in mods:
+            ctl.key(m, True)
+        ctl.tap(code)
+        for m in reversed(mods):
+            ctl.key(m, False)
+
+    def tiled(self, c, w, name, geometry, size):
+        cfg = w.handle_configure()
+        self.assertEqual((cfg[0], cfg[1]), size, name)
+        c.wl.roundtrip()
+        r = ctl.windows()['windows'][0]
+        self.assertIn('tiled-' + name, r['flags'])
+        self.assertEqual((r['x'], r['y'], r['w'], r['h']), geometry + size, name)
+
+    def test_thirds_and_two_thirds_by_keys(self):
+        c, w = self.window(300, 200)
+        M, A, S = KEY_LEFTMETA, KEY_LEFTALT, KEY_LEFTSHIFT
+        # the usable area is 1024 x 568 at (0, 32): thirds are cut at 341 and 682, so they touch
+        self.chord(KEY_LEFT, M, A)
+        self.tiled(c, w, 'third-left', (4, 60), (333, 536))
+        self.chord(KEY_DOWN, M, A)
+        self.tiled(c, w, 'third-middle', (345, 60), (333, 536))
+        self.chord(KEY_RIGHT, M, A)
+        self.tiled(c, w, 'third-right', (686, 60), (334, 536))
+        self.chord(KEY_LEFT, M, A, S)
+        self.tiled(c, w, 'twothirds-left', (4, 60), (674, 536))
+        self.chord(KEY_RIGHT, M, A, S)
+        self.tiled(c, w, 'twothirds-right', (345, 60), (675, 536))
+        self.super_key(KEY_DOWN)                                                  # restore: back to the size it had before the first tile
+        cfg = w.handle_configure()
+        self.assertEqual((cfg[0], cfg[1]), (300, 200))
+
+    def test_the_window_grid_by_keys_goes_cell_by_cell_and_stops_at_the_edge(self):
+        c, w = self.window(300, 200)
+        M, A, C = KEY_LEFTMETA, KEY_LEFTALT, KEY_LEFTCTRL
+        self.chord(KEY_LEFT, M, A)                                                # the left third: not a cell of the 3 x 2 grid
+        self.tiled(c, w, 'third-left', (4, 60), (333, 536))
+        self.chord(KEY_RIGHT, M, C, A)                                            # first press: into the cell the window is in (left, lower)
+        self.tiled(c, w, 'grid-3x2-1.2', (4, 344), (333, 252))
+        self.chord(KEY_RIGHT, M, C, A)
+        self.tiled(c, w, 'grid-3x2-2.2', (345, 344), (333, 252))
+        self.chord(KEY_RIGHT, M, C, A)
+        self.tiled(c, w, 'grid-3x2-3.2', (686, 344), (334, 252))
+        self.chord(KEY_RIGHT, M, C, A)                                            # the edge: it stays (nothing is sent)
+        c.wl.roundtrip()
+        self.assertIn('tiled-grid-3x2-3.2', ctl.windows()['windows'][0]['flags'])
+        self.chord(KEY_UP, M, C, A)
+        self.tiled(c, w, 'grid-3x2-3.1', (686, 60), (334, 252))
+        self.chord(KEY_LEFT, M, C, A)
+        self.tiled(c, w, 'grid-3x2-2.1', (345, 60), (333, 252))
+
+    def test_the_grid_size_is_a_setting_and_a_shift_drag_shows_the_cell_under_the_pointer(self):
+        c, w = self.window(300, 200)
+        r = ctl.windows()['windows'][0]
+        ctl.abs(r['x'] + 100, r['y'] - 14)
+        ctl.button(BTN_LEFT, True)
+        ctl.abs(500, 300)
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')                    # no Shift: away from the edges nothing shows
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.abs(502, 302)                                                         # Shift: the cell under the pointer (3 x 2: middle column, upper row)
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=grid-3x2-2.1 x=341 y=32 w=341 h=284')
+        ctl.abs(900, 500)
+        self.assertEqual(ctl.cmd('snap')[0], 'snap zone=grid-3x2-3.2 x=682 y=316 w=342 h=284')
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.button(BTN_LEFT, False)                                               # let go: tiled to that cell
+        self.tiled(c, w, 'grid-3x2-3.2', (686, 344), (334, 252))
+
     def test_dragging_a_window_to_an_edge_or_a_corner_shows_where_it_goes_and_tiles_it_when_let_go(self):
         c, w = self.window(300, 200)
         self.assertEqual(ctl.cmd('snap')[0], 'snap zone=none')
@@ -14766,7 +14834,7 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 46)
+        self.assertEqual(len(t), 55)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -14811,7 +14879,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 47)
+        self.assertEqual(len(t), 56)
         self.assertTrue(alive_p(p))
 
 
@@ -17745,14 +17813,15 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '46')
+        self.assertEqual(self.get(c, 'keys-count'), '55')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
         self.assertEqual(len(self.rows(c, 3)), 10)
-        self.assertEqual(len(self.rows(c, 4)), 6)
-        self.assertEqual(self.rows(c, 99), self.rows(c, 4))                   # a page past the end is the last one
+        self.assertEqual(len(self.rows(c, 4)), 10)
+        self.assertEqual(len(self.rows(c, 5)), 5)
+        self.assertEqual(self.rows(c, 99), self.rows(c, 5))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
 
@@ -17775,13 +17844,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '46')
+        self.assertEqual(self.get(c, 'keys-count'), '55')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '47')
+        self.assertEqual(self.get(c, 'keys-count'), '56')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -18043,7 +18112,7 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 28)
+        self.assertEqual(len(m), 30)
         self.assertEqual(m['panel.height'], (36, 20, 64, 32))
         self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))
@@ -21027,6 +21096,43 @@ class TestFont(Base):
         c.click(x0 + 160 + 230 + 30, top + 28 + 4 + 14)                   # Labels: Monospace
         wait_for('ui = mono')
         self.assertEqual(self.labels(c), 'mono')
+
+    def test_the_font_part_has_a_size_row_that_is_the_scale(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-settings')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-settings not built')
+        fonts = os.path.join(tmp, 'font8-fonts')
+        shutil.rmtree(fonts, ignore_errors=True)
+        os.makedirs(fonts)
+        c = self.start('mellagui-font8', '')
+        pr = subprocess.Popen([exe], env=dict(os.environ, WAYLAND_DISPLAY='mellagui-font8', MELLAGUI_FONT_DIRS=fonts),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = None
+        for _ in range(100):
+            ws = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.settings']
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(win)
+        time.sleep(0.4)
+        x0, y0 = win['x'], win['y']
+        c.click(x0 + 70, y0 + 12 + 9 * 32 + 14)                          # the Themes tab
+        time.sleep(0.3)
+        c.click(x0 + win['w'] - 296, y0 + 14 + 13)                        # its Font part
+        time.sleep(0.3)
+        top = y0 + 14 + 28 + 28 + 28 + 4                                  # the row of Automatic / Built-in pixel font
+        c.cmd('setting scale')
+        self.assertEqual(c.last[3:], '100')
+        # no font in the folder: "No monospace TrueType font" takes the list's row, then the Size row, 100 / 125 / 150 / 200 %
+        c.click(x0 + 160 + 70 + 2 * 90 + 30, top + 2 * (28 + 4) + 28 + 8 + 14)
+        for _ in range(60):
+            c.cmd('setting scale')
+            if c.last[3:] == '150':
+                break
+            time.sleep(0.05)
+        self.assertEqual(c.last[3:], '150')
 
     @staticmethod
     def conf(name, text):

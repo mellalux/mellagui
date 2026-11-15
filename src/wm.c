@@ -2038,6 +2038,9 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
             lm_wm_window_request_tile(f, (kb->action == LM_ACT_TILE_TOP_LEFT || kb->action == LM_ACT_TILE_TOP_RIGHT ? LM_EDGE_TOP : LM_EDGE_BOTTOM) |
                                              (kb->action == LM_ACT_TILE_TOP_LEFT || kb->action == LM_ACT_TILE_BOTTOM_LEFT ? LM_EDGE_LEFT : LM_EDGE_RIGHT));
         break;
+    case LM_ACT_TILE_THIRD: case LM_ACT_TILE_TWOTHIRDS: case LM_ACT_TILE_GRID_MOVE:
+        if (f) snap_key(wm, f, kb->action, kb->num);
+        break;
     case LM_ACT_QUIT: request_quit(wm); break;
     case LM_ACT_RELOAD_CONFIG:
         if (wm->srv->reload_config)

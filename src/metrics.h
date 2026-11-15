@@ -32,6 +32,8 @@
     X("windows", "scrollbar-width", scrollbar_width, 14, 4, 40, "width of the scroll bars of MellaGUI's own programs (the file browser)") \
     X("windows", "button-roundness", button_roundness, 100, 0, 100, "how round the dock and launcher icons and the programs' coloured buttons are (100 = circles and pills, 0 = squares; running programs keep theirs)") \
     X("windows", "animation-ms", animation_ms, 300, 0, 1000, "how long a window takes to open, close, minimize and come back, and how slowly a dragged window catches up with the pointer, in ms (0 = no animations)") \
+    X("windows", "grid-columns", grid_columns, 3, 1, 8, "columns of the window grid (a window dragged with Shift held, or moved by tile-grid-move, goes to one cell of it; 3 x 1 = thirds)") \
+    X("windows", "grid-rows", grid_rows, 2, 1, 8, "rows of the window grid") \
     X("panel", "height", panel_height, 32, 20, 64, "height of the top panel") \
     X("panel", "workspace-width", panel_ws_width, 24, 16, 80, "one workspace cell") \
     X("panel", "layout-width", panel_layout_width, 36, 24, 100, "the keyboard layout indicator") \

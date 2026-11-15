@@ -372,8 +372,8 @@ static void room_free(struct room *rm)
 struct cam;
 static struct cam cam_at(float t);
 
-/* Does Tom meow now? The moment his head turns to the camera (the eyes begin to glow), not more often than every 25 seconds, and then only about half the times, so
- * that it is a surprise and not a habit. Deterministic from the time (and the count of meows). */
+/* Does Tom meow now? Every time his eyes begin to glow, i.e. the moment his head turns to the camera. Only a guard of 1.5 s keeps two meows from
+ * overlapping when the glow wavers around its threshold. Deterministic from the time (and the count of meows). */
 static bool meow_due(struct room *rm)
 {
     if (!rm->meow || rm->no_cat)
@@ -384,13 +384,7 @@ static bool meow_due(struct room *rm)
     mcat_pose(&ct, rm->t, co, rm->catg, MCAT_GLYPHS, ld, lc, 0.0f);
     bool rising = ct.glow > 0.6f && rm->glow_prev <= 0.6f;
     rm->glow_prev = ct.glow;
-    if (!rising || rm->t - rm->meow_last < 25.0f)
-        return false;
-    uint32_t h = (uint32_t)(rm->t * 10.0f) * 2654435761u + rm->meows * 40503u;
-    h ^= h >> 15;
-    h *= 0x2c1b3c6du;
-    h ^= h >> 12;
-    if ((h & 0xffu) > 140u)                                              /* (a little over half the times) */
+    if (!rising || rm->t - rm->meow_last < 1.5f)
         return false;
     rm->meow_last = rm->t;
     return true;
@@ -1428,19 +1422,27 @@ static int selftest(void)
                 CHECK(n1 > LM_MEOW_RATE / 2 && n1 < LM_MEOW_MAX && n2 > LM_MEOW_RATE / 2 && n2 < LM_MEOW_MAX);        /* a meow is a little over half a second */
                 CHECK(peak > 3000 && peak < 20000 && abs(m1[0]) < 200 && abs(m1[n1 - 1]) < 200);                     /* heard, not loud, starts and ends softly */
                 CHECK(diff > (int)n1 / 2);                                                                              /* another seed, another meow */
-                int count = 0;
-                float last = -100.0f;
+                int count = 0, edges = 0;
+                float last = -100.0f, gprev = 0.0f;
                 rm.meow = true;
                 rm.glow_prev = 0.0f;
+                rm.meow_last = -100.0f;
                 for (float t = 0.0f; t < 3.0f * 360.0f; t += 0.1f) {
                     rm.t = t;
+                    struct cam c3 = cam_at(t);
+                    float co3[3] = { c3.ox, c3.oy, c3.oz };
+                    struct mcat g3;
+                    mcat_pose(&g3, t, co3, rm.catg, MCAT_GLYPHS, ld, lc, 0.0f);
+                    if (g3.glow > 0.6f && gprev <= 0.6f && t - last >= 1.5f)
+                        edges++;                                                                                        /* every look at the camera... */
+                    gprev = g3.glow;
                     if (meow_due(&rm)) {
-                        CHECK(t - last >= 24.9f);                                                                      /* never closer than 25 s */
+                        CHECK(t - last >= 1.4f);                                                                       /* ...no two meows on top of each other */
                         last = t;
                         count++;
                     }
                 }
-                CHECK(count >= 3 && count <= 43);
+                CHECK(count >= 3 && count == edges);                                                                   /* ...is a meow */
                 rm.meow = false;
                 rm.meow_last = -100.0f;
                 for (float t = 0.0f; t < 400.0f; t += 0.1f) {

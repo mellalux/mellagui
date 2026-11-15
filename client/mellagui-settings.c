@@ -1627,7 +1627,7 @@ static void build_buttons(struct app *a, int x, int y, int w)
 /* ---- the Font part of the Themes page ------------------------------------------------------------------------------------ */
 
 #define FONTS_MAX 64
-#define FONTS_ROWS 5
+#define FONTS_ROWS 4
 
 static char g_fonts[FONTS_MAX][LM_FONT_PATH_MAX];       /* the monospace fonts found, looked for once (-1 = not yet) */
 static int g_nfonts = -1;
@@ -1677,8 +1677,10 @@ static void build_font(struct app *a, int x, int y, int w)
     y += ROW_H + 4;
     int pages = LM_MAX(1, (g_nfonts + FONTS_ROWS - 1) / FONTS_ROWS);
     a->fpage = LM_CLAMP(a->fpage, 0, pages - 1);
-    if (g_nfonts == 0)
+    if (g_nfonts == 0) {
         add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "No monospace TrueType font is installed.");
+        y += ROW_H;
+    }
     for (int i = a->fpage * FONTS_ROWS; i < LM_MIN(g_nfonts, (a->fpage + 1) * FONTS_ROWS); i++, y += ROW_H) {
         char idx[16];
         snprintf(idx, sizeof(idx), "#%d", i);
@@ -1691,6 +1693,18 @@ static void build_font(struct app *a, int x, int y, int w)
         add_button(a, x + 48, y, 40, ">", "font-next");
         snprintf(line, sizeof(line), "%d-%d of %d", a->fpage * FONTS_ROWS + 1, LM_MIN(g_nfonts, (a->fpage + 1) * FONTS_ROWS), g_nfonts);
         add(a, W_LABEL, (struct rect){ x + 100, y, w - 100, ROW_H }, line);
+    }
+    y += pages > 1 ? ROW_H + 8 : 8;
+    if (*kv_get(a, "scale")) {                               /* the size of the text = the scale of the shell (Display > Scale): every layout is in pixels around the line */
+        int sc = atoi(kv_get(a, "scale"));
+        static const int steps[] = { 100, 125, 150, 200 };
+        add(a, W_LABEL, (struct rect){ x, y, 70, ROW_H }, "Size");
+        for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+            char nm[8], lab[16];
+            snprintf(nm, sizeof(nm), "%d", steps[i]);
+            snprintf(lab, sizeof(lab), "%d %%", steps[i]);
+            add_radio(a, x + 70 + (int)i * 90, y, 86, lab, "scale", nm, sc == steps[i]);
+        }
     }
 }
 

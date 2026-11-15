@@ -3,7 +3,7 @@
 
 /* ---- the on-screen keyboard ------------------------------------------------------------------------------------------------- */
 
-static bool osk_phys_down(const struct lm_wm *wm, uint32_t code)
+bool osk_phys_down(const struct lm_wm *wm, uint32_t code)
 {
     return code < 24 * 32 && ((wm->osk_phys[code / 32] >> (code % 32)) & 1u);
 }

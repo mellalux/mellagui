@@ -491,7 +491,7 @@ static void join_path(const char *dir, const char *name, char *out, size_t outsz
 
 /* ---- what a file is ------------------------------------------------------------------------------------------------------- */
 
-enum kind { K_IMAGE, K_VIDEO, K_AUDIO, K_PROGRAM, K_TEXT, K_BINARY, K_UNREADABLE };
+enum kind { K_IMAGE, K_VIDEO, K_AUDIO, K_ARCHIVE, K_PROGRAM, K_TEXT, K_BINARY, K_UNREADABLE };
 
 static bool ext_is(const char *name, const char *ext)
 {
@@ -509,6 +509,16 @@ static bool is_picture_name(const char *name)
     return false;
 }
 
+/* The archives the archiver (mellagui-archive) opens: they open there on Enter. */
+static bool is_archive_name(const char *name)
+{
+    static const char *const exts[] = { "zip", "tar", "tgz", "gz", "xz", "txz", "bz2", "tbz2", "zst", "7z", "deb", "rpm", "a" };
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
+        if (ext_is(name, exts[i]))
+            return true;
+    return false;
+}
+
 /* Images and videos by extension; everything else by looking at the first 4 KB: an ELF file that may be executed is a program, a NUL
  * byte means binary (an executable script stays text: it opens in the editor). */
 static enum kind classify(const char *path)
@@ -519,6 +529,8 @@ static enum kind classify(const char *path)
         return K_VIDEO;
     if (ffaudio_name_is_audio(path))
         return K_AUDIO;
+    if (is_archive_name(path))
+        return K_ARCHIVE;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return K_UNREADABLE;
@@ -3674,6 +3686,10 @@ static void open_path(struct app *a, const char *path)
         if (!launch("mellagui-view", path, workdir(a), err, sizeof(err)))
             msg(a, "%s", err);
         break;
+    case K_ARCHIVE:
+        if (!launch("mellagui-archive", path, workdir(a), err, sizeof(err)))
+            msg(a, "%s", err);
+        break;
     case K_PROGRAM: {
         char full[PATH_MAX];
         join_path(cur(a)->cwd, path, full, sizeof(full));
@@ -6604,8 +6620,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 if (e) {
                     select_row(a, row);
                     a->menu_kind = 1;
-                    wlwin_menu(w, e->dir ? "Open\n~Edit\nRename...\nCopy...\nMove...\nDelete...\nNew folder...\nTerminal here" :
-                                                "Open\nEdit\nRename...\nCopy...\nMove...\nDelete...\nNew folder...\nTerminal here");
+                    wlwin_menu(w, e->dir ? "Open\n~Edit\nRename...\nCopy...\nMove...\nDelete...\nNew folder...\nTerminal here\nCompress..." :
+                                                "Open\nEdit\nRename...\nCopy...\nMove...\nDelete...\nNew folder...\nTerminal here\nCompress...");
                 } else if (in_list) {
                     a->menu_kind = 2;
                     wlwin_menu(w, "New folder...\nTerminal here\nRead the folder again");
@@ -6665,6 +6681,57 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
 }
 
+/* "Compress...": the archiver in its new-archive mode with the marked files (else the file under the cursor). */
+static void compress_selected(struct app *a)
+{
+    struct pane *p = cur(a);
+    if (is_net(p->cwd)) {
+        msg(a, "Compress works on files of this computer");
+        return;
+    }
+    char **argv = calloc((size_t)p->n + 4, sizeof(char *));
+    char prog[PATH_MAX];
+    if (!argv)
+        return;
+    sibling("mellagui-archive", prog, sizeof(prog));
+    int n = 0;
+    argv[n++] = prog;
+    argv[n++] = "--new";
+    int first = n;
+    for (int i = 0; i < p->n; i++)
+        if (p->e[i].marked) {
+            char full[PATH_MAX];
+            join_path(p->cwd, p->e[i].name, full, sizeof(full));
+            argv[n++] = strdup(full);
+        }
+    if (n == first) {
+        const struct entry *e = row_entry(p, p->sel);
+        if (e) {
+            char full[PATH_MAX];
+            join_path(p->cwd, e->name, full, sizeof(full));
+            argv[n++] = strdup(full);
+        }
+    }
+    if (n > first) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            int nul = open("/dev/null", O_RDWR);
+            if (nul >= 0) {
+                dup2(nul, 0);
+                dup2(nul, 1);
+                dup2(nul, 2);
+            }
+            execvp(prog, argv);
+            _exit(127);
+        }
+        msg(a, pid > 0 ? "Opened the archiver with %d item%s" : "cannot start the archiver", n - first, n - first == 1 ? "" : "s");
+    }
+    for (int i = first; i < n; i++)
+        free(argv[i]);
+    free(argv);
+}
+
 static void menu_event(struct wlwin *w, int index)
 {
     struct app *a = w->data;
@@ -6676,6 +6743,8 @@ static void menu_event(struct wlwin *w, int index)
         static const int fkey[8] = { -1, F_EDIT, F_RENAME, F_COPY, F_MOVE, F_DELETE, F_MKDIR, F_TERM };
         if (index == 0)
             open_selected(a);
+        else if (index == 8)
+            compress_selected(a);
         else if (index < 8)
             press_fkey(a, fkey[index]);
     } else if (kind == 3 && a->pv.md) {

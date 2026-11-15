@@ -933,7 +933,8 @@ static const struct cell *cell_at_view(const struct term *t, int row, int col)
 
 static bool selected(const struct term *t, int row, int col)
 {
-    if (!t->sel_active)
+    bool moving = t->sel_dragging && (t->sel_x0 != t->sel_x1 || t->sel_y0 != t->sel_y1);       /* the selection shows while the button is still down */
+    if (!t->sel_active && !moving)
         return false;
     int y0 = t->sel_y0, x0 = t->sel_x0, y1 = t->sel_y1, x1 = t->sel_x1;
     if (y0 > y1 || (y0 == y1 && x0 > x1)) {

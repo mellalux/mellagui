@@ -32,6 +32,7 @@ enum lm_dockicon {
     LM_DOCKICON_TIMER,          /* the timer: a stopwatch */
     LM_DOCKICON_NOTE,           /* the sticky notes: a sheet with lines */
     LM_DOCKICON_HOME,           /* the smart home program: a house */
+    LM_DOCKICON_ARCHIVE,        /* the archiver: a box with a lid and a slot */
     LM_DOCKICON_COUNT
 };
 

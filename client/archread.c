@@ -116,6 +116,12 @@ static char *clean_name(const uint8_t *p, size_t n, bool dos)
     return s;
 }
 
+/* The name as text a person can read (a ZIP name in the old DOS code page 437 becomes UTF-8; control characters become ?). Malloc'd. */
+char *arc_clean_name(const unsigned char *p, size_t n, int dos)
+{
+    return clean_name(p, n, dos);
+}
+
 static void civil_from_days(long z, int *y, int *m, int *d)
 {
     z += 719468;
@@ -598,6 +604,16 @@ static uint8_t *unpack_mem(const uint8_t *in, size_t n, int kind, size_t cap, lo
     return out;
 }
 
+/* The first `cap` bytes of a compressed stream (gzip, xz, bzip2, zstd by its first bytes) in memory: malloc'd, *got = the count, *complete = whole stream;
+ * NULL when it is none of those or cannot be decoded. */
+uint8_t *arc_unpack(const uint8_t *in, size_t n, size_t cap, long *got, int *complete, const char **why)
+{
+    int kind = comp_kind(in, n);
+    if (kind == CK_NONE)
+        return NULL;
+    return unpack_mem(in, n, kind, cap, got, complete, why);
+}
+
 /* A compressed file: what is inside is a TAR (listed) or one file (its name is the file's without the compressor's extension). */
 static int stream_list(int fd, uint64_t fsize, const char *path, int kind, int max, struct arc_list *a, char *err, size_t errn)
 {
@@ -1033,6 +1049,7 @@ static bool sz_streams(struct sz_rd *r, struct sz_info *si)
             uint64_t np = sz_num(r);
             if (np > 100000) return false;
             si->npack = (int)np;
+            free(si->pack_size);                                             /* (a second PackInfo replaces the first) */
             si->pack_size = calloc((size_t)np + 1, sizeof(uint64_t));
             for (;;) {
                 uint8_t t = sz_byte(r);
@@ -1057,6 +1074,7 @@ static bool sz_streams(struct sz_rd *r, struct sz_info *si)
             if (sz_byte(r) != 0 || nf > 100000)
                 return false;
             si->nfolders = (int)nf;
+            free(si->folder);
             si->folder = calloc((size_t)nf + 1, sizeof(struct sz_folder));
             for (uint64_t k = 0; k < nf; k++) {
                 struct sz_folder *f = &si->folder[k];
@@ -1155,6 +1173,7 @@ static bool sz_streams(struct sz_rd *r, struct sz_info *si)
                 total += (uint64_t)si->folder[k].nsub;
             if (total > 20000000) return false;
             si->nsub_total = total;
+            free(si->sub_size);
             si->sub_size = calloc((size_t)total + 1, sizeof(uint64_t));
             if (!si->sub_size) return false;
             uint64_t at = 0;

@@ -119,6 +119,7 @@
     X("icon-bluetooth",       icon_bluetooth,    0x1c7ed6) \
     X("icon-shot",            icon_shot,         0xae3ec9) \
     X("icon-disk",            icon_disk,         0x66a80f) \
+    X("icon-archive",         icon_archive,      0xa8743c) /* the archiver */ \
     X("icon-timer",           icon_timer,        0xe8590c) \
     X("icon-note",            icon_note,         0xf2b705) \
     X("icon-home",            icon_home,         0x0ca678) \

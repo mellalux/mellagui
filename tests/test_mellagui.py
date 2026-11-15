@@ -4080,6 +4080,67 @@ class TestClients(Base):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith('/' + name) and o[0].get('loaded') == '1')
             self.assertEqual(head['kind'], 'table', (name, head))
 
+    def test_files_opens_an_archive_in_the_archiver_and_compresses_marked_files(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='files-arc-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-archive')):
+            self.skipTest('mellagui-archive not built')
+        with zipfile.ZipFile(os.path.join(d, 'a.zip'), 'w') as z:
+            z.writestr('inside.txt', 'in')
+        open(os.path.join(d, 'b.txt'), 'w').write('bee')
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump, 'MELLAGUI_ARCHIVE_DUMP': os.path.join(d, 'arc.dump'), 'HOME': d})      # (the cursor is on a.zip)
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.tap(self.K_HOME)
+        time.sleep(0.4)
+        for _ in range(10):
+            head, extra = self.files_dump(dump)
+            if head.get('want', '').endswith('a.zip'):
+                break
+            prev = head.get('want')
+            ctl.tap(self.K_DOWN)
+            self.files_dump(dump, want=lambda o, prev=prev: o[0].get('want') != prev and o[0].get('loaded') == '1')
+        self.assertTrue(head.get('want', '').endswith('a.zip'), head)
+        ctl.tap(KEY_ENTER)                                                   # Enter: the archiver opens it
+        arc = wait_for_window('mellagui.archive')
+        self.assertIsNotNone(arc, 'the archiver did not open: %r %r' % (self.files_dump(dump), [w['app_id'] for w in ctl.windows()['windows']]))
+        end = time.time() + 6
+        text = ''
+        while time.time() < end and 'kind=ZIP' not in text:
+            time.sleep(0.1)
+            text = open(os.path.join(d, 'arc.dump')).read() if os.path.exists(os.path.join(d, 'arc.dump')) else ''
+        self.assertIn('kind=ZIP', text)
+        ctl.tap(KEY_ESC)                                                     # Esc closes the archiver (it has the keyboard)
+        end = time.time() + 6
+        while time.time() < end and wait_for_window('mellagui.archive', 0.1):
+            time.sleep(0.1)
+        self.assertIsNone(wait_for_window('mellagui.archive', 0.2))
+        # "Compress..." in the menu of a file: the archiver in its new-archive mode with that file
+        os.remove(os.path.join(d, 'arc.dump'))
+        fw = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        for y in range(fw['y'] + 40, fw['y'] + 150, 6):
+            self.right_click(fw['x'] + 100, y)
+            m = self.menu_state()
+            if m['open'] and len(m['entries']) == 9 and m['entries'][1]['enabled'] == 1:
+                break
+            if m['open']:
+                ctl.tap(KEY_ESC)
+        self.assertEqual(m['entries'][8]['label'], 'Compress...')
+        ctl.click(m['entries'][8]['x'], m['entries'][8]['y'])
+        self.assertIsNotNone(wait_for_window('mellagui.archive'), 'the archiver did not open from the menu')
+        end = time.time() + 6
+        text = ''
+        while time.time() < end and 'mode=new' not in text:
+            time.sleep(0.1)
+            text = open(os.path.join(d, 'arc.dump')).read() if os.path.exists(os.path.join(d, 'arc.dump')) else ''
+        self.assertIn('mode=new', text)
+        self.assertIn('items=1', text)
+        ctl.tap(KEY_ESC)
+        end = time.time() + 6
+        while time.time() < end and wait_for_window('mellagui.archive', 0.1):
+            time.sleep(0.1)
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib
@@ -4879,6 +4940,34 @@ class TestClients(Base):
         ctl.tap(KEY_ENTER)
         self.assertIsNotNone(wait_for_window('mellagui.calc'), 'Enter on a program did not start it')
 
+    def test_files_double_click_starts_a_program(self):
+        calc = os.path.join(ROOT, 'build', 'mellagui-calc')
+        if not os.path.exists(calc):
+            self.skipTest('mellagui-calc not built')
+        for rails in ('0', '1'):                                                               # with the old tool bar (30 px) and with the side rail
+            p, d = self.files_start(env={'MELLAGUI_FILES_RAIL': rails, 'MELLAGUI_RAILS': rails})
+            win = wait_for_window('mellagui.files')
+            shutil.copy(calc, os.path.join(d, 'zcalc'))
+            ctl.key(KEY_LEFTCTRL, True); ctl.tap(19); ctl.key(KEY_LEFTCTRL, False)             # read the folder again
+            time.sleep(0.5)
+            y = win['y'] + (30 if rails == '0' else 0) + 22 + 5 * 18 + 9                       # rows ../ sub/ a.txt blob.bin p.ppm zcalc, under the header (22)
+            ctl.click(win['x'] + 120, y)
+            time.sleep(0.1)
+            ctl.click(win['x'] + 120, y)                                                       # a double click
+            started = wait_for_window('mellagui.calc')
+            self.assertIsNotNone(started, 'a double click on a program did not start it (rails %s)' % rails)
+            ctl.cmd('windows')
+            for w in ctl.windows()['windows']:                                                 # close what was started, and the browser, before the next round
+                ctl.abs(w['x'] + 5, w['y'] + 5)
+            p.kill()
+            p.wait()
+            for _ in range(40):
+                if not [w for w in ctl.windows()['windows'] if w['app_id'] in ('mellagui.files',)]:
+                    break
+                time.sleep(0.1)
+            subprocess.run(['pkill', '-f', os.path.join(d, 'zcalc')])
+            time.sleep(0.3)
+
     FKEYS = {3: 61, 5: 63, 6: 64, 7: 65, 8: 66, 10: 68}
     K_TAB, K_INS = 15, 110
 
@@ -5030,13 +5119,13 @@ class TestClients(Base):
         for y in range(win['y'] + 40, win['y'] + 150, 6):                # find the row of a.txt: its menu has an enabled Edit
             self.right_click(win['x'] + 100, y)
             m = self.menu_state()
-            if m['open'] and len(m['entries']) == 8 and m['entries'][1]['enabled'] == 1:
+            if m['open'] and len(m['entries']) == 9 and m['entries'][1]['enabled'] == 1:
                 break
             if m['open']:
                 ctl.tap(KEY_ESC)
         m = self.menu_state()
         self.assertEqual((m['open'], [e['label'] for e in m['entries']]),
-                         (1, ['Open', 'Edit', 'Rename...', 'Copy...', 'Move...', 'Delete...', 'New folder...', 'Terminal here']))
+                         (1, ['Open', 'Edit', 'Rename...', 'Copy...', 'Move...', 'Delete...', 'New folder...', 'Terminal here', 'Compress...']))
         ctl.click(m['entries'][2]['x'], m['entries'][2]['y'])            # Rename...: the prompt starts with the name of the file under the pointer
         time.sleep(0.2)
         for _ in range(12):
@@ -5921,6 +6010,34 @@ class TestClients(Base):
                 break
             time.sleep(0.05)
         self.assertEqual(self.fake_values(path, 'DP-1')['62'], 40)
+
+    def test_terminal_selection_shows_while_the_button_is_still_down(self):
+        script = os.path.join(tmp, 'sel.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nfor i in 1 2 3 4 5 6 7 8; do echo "line $i of text to select with the mouse"; done\nsleep 30\n')
+        os.chmod(script, 0o755)
+        self.spawn('mellagui-term', SHELL=script)
+        win = wait_for_window('mellagui.term')
+        self.assertIsNotNone(win, 'terminal window did not appear')
+        time.sleep(0.8)
+        ctl.abs(win['x'] + 300, win['y'] + win['h'] - 40)
+        time.sleep(0.2)
+        before = ctl.dump(os.path.join(tmp, 'term-sel-a.ppm'))
+        def differing(a, b):
+            n = 0
+            for y in range(win['y'] + 30, win['y'] + win['h'] - 60, 2):
+                for x in range(win['x'] + 70, win['x'] + win['w'] - 70, 2):
+                    n += a.px(x, y) != b.px(x, y)
+            return n
+        ctl.abs(win['x'] + 90, win['y'] + 50)
+        ctl.button(272, True)
+        for k in range(1, 8):                                                              # drag over several lines, the button stays down
+            ctl.abs(win['x'] + 90 + k * 30, win['y'] + 50 + k * 12)
+            time.sleep(0.03)
+        time.sleep(0.3)
+        during = ctl.dump(os.path.join(tmp, 'term-sel-b.ppm'))
+        ctl.button(272, False)
+        self.assertGreater(differing(before, during) * 4, 1500, 'the selected text must be drawn inverted while the button is held')
 
     def test_terminal_paste_button(self):
         out = os.path.join(tmp, 'term-paste.txt')
@@ -21250,6 +21367,422 @@ class TestSmartGadget(Base):
         head, _, items = self.items(c2)
         self.assertIn('n=0', head)
         self.assertIn('Nothing', head)
+
+
+class TestArchive(Base):
+    """mellagui-archive: the engine (client/arcio.c) through its command line, and the window."""
+    ARC = os.environ.get('MELLAGUI_ARCHIVE_BIN', os.path.join(ROOT, 'build', 'mellagui-archive'))
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.ARC):
+            self.skipTest('mellagui-archive not built')
+
+    def run_arc(self, *args, check=None):
+        r = subprocess.run([self.ARC] + list(args), capture_output=True, text=True, timeout=120, env=dict(os.environ, MELLAGUI_FONT='bitmap'))
+        if check is not None:
+            self.assertEqual(r.returncode, check, (args, r.stdout, r.stderr))
+        return r
+
+    def tree(self, root):
+        import hashlib
+        out = {}
+        for d, ds, fs in os.walk(root):
+            for n in ds + fs:
+                p = os.path.join(d, n)
+                rel = os.path.relpath(p, root)
+                if os.path.islink(p):
+                    out[rel] = ('L', os.readlink(p))
+                elif os.path.isdir(p):
+                    out[rel] = ('D',)
+                else:
+                    out[rel] = ('F', hashlib.sha1(open(p, 'rb').read()).hexdigest(), os.stat(p).st_mode & 0o777)
+        return out
+
+    def make_tree(self, d):
+        src = os.path.join(d, 'src')
+        os.makedirs(os.path.join(src, 'a', 'b'))
+        os.makedirs(os.path.join(src, 'empty'))
+        rnd = random.Random(5)
+        for i in range(12):
+            with open(os.path.join(src, 'a', 'b', 'f%d.dat' % i), 'wb') as f:
+                f.write(bytes(rnd.randrange(256) for _ in range(rnd.randrange(0, 20000))) if i % 3 else b'text ' * rnd.randrange(1, 4000))
+        with open(os.path.join(src, 'a', 'run.sh'), 'w') as f:
+            f.write('#!/bin/sh\necho hi\n')
+        os.chmod(os.path.join(src, 'a', 'run.sh'), 0o755)
+        os.utime(os.path.join(src, 'a', 'run.sh'), (1500000000, 1500000000))
+        open(os.path.join(src, 'T\u00e4ht \u00f6\u00f6.txt'), 'w').write('x' * 100)
+        deep = os.path.join(src, 'a', *(['d' * 40] * 4))
+        os.makedirs(deep)
+        open(os.path.join(deep, 'f' * 60 + '.txt'), 'w').write('long')
+        os.symlink('a/run.sh', os.path.join(src, 'lnk'))
+        open(os.path.join(src, 'zero'), 'w').close()
+        return src
+
+    def test_selftest(self):
+        self.assertEqual(self.run_arc('--selftest').returncode, 0)
+
+    def test_it_makes_archives_that_other_programs_read_and_reads_its_own(self):
+        import tarfile
+        import zipfile
+        d = tempfile.mkdtemp(prefix='arc-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        src = self.make_tree(d)
+        want = self.tree(src)
+        for name in ('o.zip', 'o.tar', 'o.tar.gz', 'o.tgz'):
+            self.run_arc('--create', os.path.join(d, name), src, check=0)
+        self.assertEqual(self.run_arc('--create', os.path.join(d, 'o.zip'), src).returncode, 2)                  # never over a file
+        self.assertEqual(self.run_arc('--create', os.path.join(d, 'o.txt'), src).returncode, 1)                  # no such format
+        z = zipfile.ZipFile(os.path.join(d, 'o.zip'))
+        self.assertIsNone(z.testzip())
+        self.assertEqual({i.compress_type for i in z.infolist()}, {0, 8})                                         # deflated and stored entries
+        self.assertEqual((z.getinfo('src/a/run.sh').external_attr >> 16) & 0o777, 0o755)
+        self.assertEqual(z.read('src/lnk'), b'a/run.sh')
+        self.assertIn('src/T\u00e4ht \u00f6\u00f6.txt', z.namelist())
+        for name in ('o.tar', 'o.tar.gz', 'o.tgz'):
+            t = tarfile.open(os.path.join(d, name))
+            ms = {m.name: m for m in t.getmembers()}
+            self.assertEqual((ms['src/a/run.sh'].mode, ms['src/a/run.sh'].mtime), (0o755, 1500000000), name)
+            self.assertTrue(ms['src/lnk'].issym() and ms['src/lnk'].linkname == 'a/run.sh', name)
+            self.assertEqual(len([m for m in ms if len(m) > 100]), 3, name)                                         # the long names (pax records)
+            out = os.path.join(d, 'py_' + name)
+            os.makedirs(out)
+            t.extractall(out, filter='fully_trusted')
+            self.assertEqual(self.tree(os.path.join(out, 'src')), want, name)
+        if shutil.which('unzip'):
+            self.assertIn('No errors', subprocess.run(['unzip', '-tq', os.path.join(d, 'o.zip')], capture_output=True, text=True).stdout)
+        if shutil.which('gzip'):
+            self.assertEqual(subprocess.run(['gzip', '-t', os.path.join(d, 'o.tar.gz')]).returncode, 0)
+        for name in ('o.zip', 'o.tar', 'o.tar.gz'):                                                              # and read its own
+            out = os.path.join(d, 'x_' + name)
+            r = self.run_arc('--extract', os.path.join(d, name), out, check=0)
+            self.assertIn('0 problems', r.stdout)
+            self.assertEqual(self.tree(os.path.join(out, 'src')), want, name)
+        r = self.run_arc('--list', os.path.join(d, 'o.zip'), check=0)
+        self.assertTrue(r.stdout.startswith('kind=ZIP'), r.stdout[:80])
+        self.assertIn('\tsrc/a/run.sh\t', r.stdout)
+
+    def test_it_reads_archives_of_other_programs_and_refuses_what_leads_out(self):
+        import io
+        import tarfile
+        import zipfile
+        d = tempfile.mkdtemp(prefix='arc2-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        pz = os.path.join(d, 'p.zip')
+        with zipfile.ZipFile(pz, 'w') as zf:
+            zf.writestr('plain.txt', 'hello' * 50, zipfile.ZIP_DEFLATED)
+            zf.writestr('stored.txt', 'abc')
+            zf.writestr('dir/', '')
+            zf.writestr('dir/in.txt', 'inside', zipfile.ZIP_DEFLATED)
+            zi = zipfile.ZipInfo('link')
+            zi.external_attr = 0o120777 << 16
+            zi.create_system = 3
+            zf.writestr(zi, 'plain.txt')
+            with zf.open('forced64.bin', 'w', force_zip64=True) as f:
+                f.write(b'z64' * 1000)
+            zf.writestr('../evil.txt', 'EVIL')
+            zf.writestr('/abs/path.txt', 'ABS')
+            zf.writestr('a/../../evil2.txt', 'EVIL2')
+            zf.writestr('Ünïcödé.txt', 'u')
+        out = os.path.join(d, 'out', 'x')
+        r = self.run_arc('--extract', pz, out)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)                                                   # problems: the two names that lead out
+        self.assertIn('2 problems', r.stdout)
+        self.assertEqual(open(os.path.join(out, 'plain.txt')).read(), 'hello' * 50)
+        self.assertEqual(open(os.path.join(out, 'forced64.bin'), 'rb').read(), b'z64' * 1000)
+        self.assertEqual(os.readlink(os.path.join(out, 'link')), 'plain.txt')
+        self.assertTrue(os.path.exists(os.path.join(out, 'abs', 'path.txt')))                                    # a leading / is dropped
+        self.assertTrue(os.path.exists(os.path.join(out, 'Ünïcödé.txt')))
+        self.assertFalse(os.path.exists(os.path.join(d, 'out', 'evil.txt')) or os.path.exists(os.path.join(d, 'evil2.txt')) or os.path.exists(os.path.join(d, 'out', 'evil2.txt')))
+        open(os.path.join(out, 'plain.txt'), 'w').write('MINE')                                                  # what exists is kept ...
+        r = self.run_arc('--extract', pz, out)
+        self.assertEqual(open(os.path.join(out, 'plain.txt')).read(), 'MINE')
+        self.assertRegex(r.stdout, r'[1-9]\d* kept')
+        self.run_arc('--extract', pz, out, '--overwrite')                                                         # ... unless asked
+        self.assertEqual(open(os.path.join(out, 'plain.txt')).read(), 'hello' * 50)
+        tz = os.path.join(d, 'trap.tar')                                                                         # a link of the archive cannot redirect a later file
+        outside = os.path.join(d, 'outside')
+        os.makedirs(outside)
+        with tarfile.open(tz, 'w') as t:
+            ti = tarfile.TarInfo('lnk')
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = outside
+            t.addfile(ti)
+            ti = tarfile.TarInfo('lnk/pwn.txt')
+            ti.size = 7
+            t.addfile(ti, io.BytesIO(b'ESCAPED'))
+        r = self.run_arc('--extract', tz, os.path.join(d, 'x_trap'))
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(outside, 'pwn.txt')))
+        # damaged data is found by the test
+        with zipfile.ZipFile(os.path.join(d, 'c.zip'), 'w') as z:
+            z.writestr('stored.bin', bytes(random.Random(1).randrange(256) for _ in range(5000)), zipfile.ZIP_STORED)
+            z.writestr('def.txt', 'compress me ' * 3000, zipfile.ZIP_DEFLATED)
+        raw = bytearray(open(os.path.join(d, 'c.zip'), 'rb').read())
+        self.run_arc('--test', os.path.join(d, 'c.zip'), check=0)
+        for off in (100, 5095):
+            r2 = bytearray(raw)
+            r2[off] ^= 0x55
+            open(os.path.join(d, 'c2.zip'), 'wb').write(r2)
+            r = self.run_arc('--test', os.path.join(d, 'c2.zip'))
+            self.assertEqual(r.returncode, 1, (off, r.stdout, r.stderr))
+
+    def test_it_opens_tarballs_packages_and_one_compressed_file(self):
+        d = tempfile.mkdtemp(prefix='arc3-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'src', 'sub'))
+        open(os.path.join(d, 'src', 'sub', 'f.txt'), 'w').write('data ' * 1000)
+        open(os.path.join(d, 'one.txt'), 'w').write('one ' * 100)
+        subprocess.run(['tar', '-C', d, '-cf', os.path.join(d, 's.tar'), 'src'], check=True)
+        n = 0
+        for tool, ext, args in (('xz', 'xz', ['-c']), ('bzip2', 'bz2', ['-c']), ('zstd', 'zst', ['-q', '-c']), ('gzip', 'gz', ['-c'])):
+            if not shutil.which(tool):
+                continue
+            n += 1
+            open(os.path.join(d, 's.tar.' + ext), 'wb').write(subprocess.run([tool] + args + [os.path.join(d, 's.tar')], capture_output=True).stdout)
+            self.run_arc('--extract', os.path.join(d, 's.tar.' + ext), os.path.join(d, 'o_' + ext), check=0)
+            self.assertEqual(open(os.path.join(d, 'o_' + ext, 'src', 'sub', 'f.txt')).read(), 'data ' * 1000, ext)
+            open(os.path.join(d, 'one.txt.' + ext), 'wb').write(subprocess.run([tool] + args + [os.path.join(d, 'one.txt')], capture_output=True).stdout)
+            self.run_arc('--extract', os.path.join(d, 'one.txt.' + ext), os.path.join(d, 's_' + ext), check=0)
+            self.assertEqual(open(os.path.join(d, 's_' + ext, 'one.txt')).read(), 'one ' * 100, ext)
+        self.assertGreater(n, 0)
+        if shutil.which('dpkg-deb'):
+            os.makedirs(os.path.join(d, 'pkg', 'DEBIAN'))
+            os.makedirs(os.path.join(d, 'pkg', 'usr', 'bin'))
+            open(os.path.join(d, 'pkg', 'DEBIAN', 'control'), 'w').write('Package: x\nVersion: 1\nArchitecture: all\nMaintainer: t\nDescription: t\n')
+            open(os.path.join(d, 'pkg', 'usr', 'bin', 'x'), 'w').write('#!/bin/sh\n')
+            os.chmod(os.path.join(d, 'pkg', 'usr', 'bin', 'x'), 0o755)
+            for comp in ('gzip', 'xz', 'zstd'):
+                deb = os.path.join(d, 'p_%s.deb' % comp)
+                if subprocess.run(['dpkg-deb', '-Z' + comp, '--root-owner-group', '-b', os.path.join(d, 'pkg'), deb], capture_output=True).returncode:
+                    continue
+                self.run_arc('--extract', deb, os.path.join(d, 'deb_' + comp), check=0)
+                self.assertTrue(os.access(os.path.join(d, 'deb_' + comp, 'usr', 'bin', 'x'), os.X_OK), comp)
+        if shutil.which('ar'):
+            subprocess.run(['ar', 'rcs', os.path.join(d, 'l.a'), os.path.join(d, 'one.txt')], check=True)
+            self.run_arc('--extract', os.path.join(d, 'l.a'), os.path.join(d, 'ar'), check=0)
+            self.assertEqual(open(os.path.join(d, 'ar', 'one.txt')).read(), 'one ' * 100)
+        sys.path.insert(0, os.path.join(ROOT, 'tests'))
+        import sevenz_writer
+        sevenz_writer.write(os.path.join(d, 'w.7z'), [('d', None, 1700000000), ('d/a', b'hello ' * 100, 1700000100)], True)
+        r = self.run_arc('--list', os.path.join(d, 'w.7z'), check=0)                                              # 7z: listed and extracted (every file is checked against its CRC)
+        self.assertIn('extractable=1', r.stdout)
+        out7 = os.path.join(d, 'o7')
+        self.run_arc('--extract', os.path.join(d, 'w.7z'), out7, check=0)
+        self.assertEqual(open(os.path.join(out7, 'd', 'a')).read(), 'hello ' * 100)
+        for enc in (False, True):
+            sevenz_writer.write(os.path.join(d, 'm%d.7z' % enc), [('x', b'unique-looking data ' * 300, 1700000000), ('y', bytes(range(256)) * 20, 1700000100), ('e', b'', 1700000200)], enc)
+        raw = bytearray(open(os.path.join(d, 'm0.7z'), 'rb').read())
+        self.run_arc('--test', os.path.join(d, 'm0.7z'), check=0)
+        for off in (40, 80):                                                                                      # damaged packed data: found by the CRC (or the decoder)
+            r2 = bytearray(raw)
+            r2[off] ^= 0x44
+            open(os.path.join(d, 'bad.7z'), 'wb').write(r2)
+            self.assertNotEqual(self.run_arc('--test', os.path.join(d, 'bad.7z')).returncode, 0, off)
+        open(os.path.join(d, 'junk.zip'), 'wb').write(b'not an archive' * 10)
+        self.assertEqual(self.run_arc('--list', os.path.join(d, 'junk.zip')).returncode, 1)
+
+    def dump(self, path, want=None, wait=6.0):
+        end = time.time() + wait
+        out = None
+        while time.time() < end:
+            try:
+                lines = open(path).read().splitlines()
+            except OSError:
+                lines = []
+            if lines and lines[-1] == 'ok':
+                head = dict(kv.split('=', 1) for kv in lines[0].split(' ') if '=' in kv)
+                btns = {}
+                rows = []
+                rects = {}
+                extra = {}
+                for l in lines[1:-1]:
+                    w = l.split(' ')
+                    if w[0] == 'btn':
+                        btns[int(w[1])] = tuple(int(v) for v in w[2:7])
+                    elif w[0] == 'row':
+                        rows.append(l)
+                    elif w[0] == 'rect':
+                        rects[w[1]] = tuple(int(v) for v in w[2:6])
+                    elif w[0] == 'cbtn':
+                        extra['cbtn%s' % w[1]] = tuple(int(v) for v in w[2:6])
+                    elif w[0] == 'status':
+                        extra['status'] = l.split(' ', 2)[2] if len(w) > 2 else ''
+                out = (head, btns, rows, rects, extra)
+                if want is None or want(out):
+                    return out
+            time.sleep(0.05)
+        self.fail('the window did not reach the wanted state: %r' % (out and out[0],))
+
+    def start_window(self, d, args):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.archive', 'a window of an earlier test is still open')
+        dump = os.path.join(d, 'arc.dump')
+        p = subprocess.Popen([self.ARC] + args, env=dict(os.environ, MELLAGUI_ARCHIVE_DUMP=dump, MELLAGUI_FONT='bitmap', HOME=d, MELLAGUI_XDG_OPEN='none', XDG_CACHE_HOME=os.path.join(d, 'cache')),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.archive')
+        self.assertIsNotNone(win, 'the window did not appear')
+        time.sleep(0.3)
+        return p, win, dump
+
+    def test_the_window_lists_folders_selects_and_extracts(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='arc4-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with zipfile.ZipFile(os.path.join(d, 'demo.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('docs/a.txt', 'hello\n')
+            z.writestr('docs/sub/b.txt', 'bee\n' * 50)
+            z.writestr('top.txt', 'top\n')
+        p, win, dump = self.start_window(d, [os.path.join(d, 'demo.zip')])
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('mode') == 'view')
+        self.assertEqual((head['kind'], head['cwd'], head['rows']), ('ZIP', '', '2'))                              # the folder docs and the file top.txt
+        self.assertIn('name=docs', rows[0])
+        self.assertIn('name=top.txt', rows[1])
+        lx, ly, lw, lh = rects['list']
+        def row_xy(i):
+            return win['x'] + 160, win['y'] + ly + i * 18 + 9
+        ctl.abs(*row_xy(0))
+        ctl.button(272, True); ctl.button(272, False)                                                            # a click moves the cursor ...
+        self.dump(dump, lambda o: o[0].get('cur') == '0')
+        time.sleep(0.1)
+        ctl.button(272, True); ctl.button(272, False)                                                            # ... the second one in time goes in
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('cwd') == 'docs/')
+        self.assertEqual(head['rows'], '2')                                                                      # sub and a.txt
+        self.assertIn('name=sub', rows[0])
+        ctl.tap(14)                                                                                              # Backspace goes up
+        self.dump(dump, lambda o: o[0].get('cwd') == '')
+        ctl.click(*row_xy(0))
+        self.dump(dump, lambda o: o[0].get('cur') == '0')
+        ctl.tap(18)                                                                                              # E: extract the marked rows, else the row under the cursor (the folder docs)
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('prompt') == '2')
+        out = os.path.join(d, 'got')
+        ctl.tap(KEY_ENTER)
+        self.dump(dump, lambda o: o[0].get('prompt') == '0')
+        end = time.time() + 8
+        while time.time() < end and not os.path.exists(os.path.join(d, 'demo', 'docs', 'sub', 'b.txt')):
+            time.sleep(0.1)
+        self.assertEqual(open(os.path.join(d, 'demo', 'docs', 'sub', 'b.txt')).read(), 'bee\n' * 50)              # the default folder is named like the archive
+        self.assertEqual(open(os.path.join(d, 'demo', 'docs', 'a.txt')).read(), 'hello\n')
+        self.assertFalse(os.path.exists(os.path.join(d, 'demo', 'top.txt')))                                     # only what was selected
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: 'Extracted' in o[4].get('status', ''))
+        self.assertIn('Extracted 2 files', extra['status'])
+        ctl.tap(20)                                                                                              # T tests everything
+        self.dump(dump, lambda o: 'fine' in o[4].get('status', ''))
+        ctl.tap(KEY_ESC)                                                                                         # Esc closes the window
+        for _ in range(60):
+            if p.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(p.poll(), 'Esc did not close the window')
+
+    def test_the_open_card_lists_the_folder_and_filters_while_typing(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='arc6-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'sub'))
+        for name in ('a.zip', 'b.zip', os.path.join('sub', 'c.zip')):
+            with zipfile.ZipFile(os.path.join(d, name), 'w') as z:
+                z.writestr('from-' + name.replace(os.sep, '-') + '.txt', 'x')
+        open(os.path.join(d, 'notes.txt'), 'w').write('not an archive')
+        p, win, dump = self.start_window(d, [os.path.join(d, 'a.zip')])
+        self.dump(dump, lambda o: o[0].get('mode') == 'view')
+        ctl.key(KEY_LEFTCTRL, True); ctl.tap(24); ctl.key(KEY_LEFTCTRL, False)                                 # Ctrl+O: the card with the folder of the archive
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('prompt') == '1' and 'clist' in open(dump).read())
+        names = lambda: [l.split('name=', 1)[1] for l in open(dump).read().splitlines() if l.startswith('crow ')]
+        self.assertEqual(names(), ['..', 'sub', 'a.zip', 'arc.dump', 'b.zip', 'notes.txt'])                       # folders first (arc.dump is the test's own file)
+        ctl.tap(KEYCODES['b'])                                                                                   # typing filters the list (and hides "..")
+        self.dump(dump, lambda o: names() == ['b.zip'])
+        ctl.tap(14)                                                                                              # BackSpace: the whole folder again
+        self.dump(dump, lambda o: len(names()) == 6)
+        ctl.tap(108)                                                                                             # Down, Down: the row "sub", Enter goes in
+        ctl.tap(108)
+        ctl.tap(KEY_ENTER)
+        self.dump(dump, lambda o: names() == ['..', 'c.zip'])
+        ctl.tap(108)                                                                                             # Down, Down: c.zip, Enter opens it
+        ctl.tap(108)
+        ctl.tap(KEY_ENTER)
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('prompt') == '0' and o[0].get('path', '').endswith('sub/c.zip'))
+        self.assertIn('name=from-sub-c.zip.txt', rows[0])
+        ctl.key(KEY_LEFTCTRL, True); ctl.tap(24); ctl.key(KEY_LEFTCTRL, False)                                 # a file that is no archive keeps the card open with the reason
+        self.dump(dump, lambda o: o[0].get('prompt') == '1')
+        ctl.tap(14)
+        for ch in 'notes.txt':
+            ctl.tap(KEYCODES.get(ch, 52) if ch != '.' else 52)
+        ctl.tap(KEY_ENTER)
+        self.dump(dump, lambda o: o[0].get('prompt') == '1' and 'not an archive' in o[4].get('status', 'not an archive') or o[0].get('prompt') == '1')
+        ctl.tap(KEY_ESC)
+        ctl.tap(KEY_ESC)
+
+    def test_the_open_cards_scroll_bar_scrolls_and_opens_nothing(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='arc7-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for i in range(30):
+            os.makedirs(os.path.join(d, 'folder%02d' % i))
+        with zipfile.ZipFile(os.path.join(d, 'a.zip'), 'w') as z:
+            z.writestr('x.txt', 'x')
+        p, win, dump = self.start_window(d, [os.path.join(d, 'a.zip')])
+        self.dump(dump, lambda o: o[0].get('mode') == 'view')
+        ctl.key(KEY_LEFTCTRL, True); ctl.tap(24); ctl.key(KEY_LEFTCTRL, False)
+        self.dump(dump, lambda o: o[0].get('prompt') == '1' and 'clist' in open(dump).read())
+        def card():
+            lines = open(dump).read().splitlines()
+            cl = [l for l in lines if l.startswith('clist ')][0].split()
+            crows = [int(l.split()[1]) for l in lines if l.startswith('crow ')]
+            field = [l for l in lines if l.startswith('field ')][0]
+            return tuple(int(v) for v in cl[1:5]), crows, field
+        (cx, cy, cw, ch), crows, field = card()
+        self.assertEqual(crows[0], 0)
+        ctl.click(win['x'] + cx + cw - 6, win['y'] + cy + ch - 8)                                                  # the track below the thumb: one page down
+        self.dump(dump, lambda o: card()[1][0] > 0)
+        (cx, cy, cw, ch), crows, field2 = card()
+        self.assertEqual(field2, field, 'a click on the scroll bar must not choose the row under it')
+        self.assertEqual(self.dump(dump)[0]['prompt'], '1')
+        top = crows[0]
+        n = int([l for l in open(dump).read().splitlines() if l.startswith('clist ')][0].split('count=')[1])
+        th = max(ch * len(crows) // n, 20)
+        ty = (ch - th) * top // max(n - len(crows), 1)
+        ctl.abs(win['x'] + cx + cw - 6, win['y'] + cy + ty + 4)                                                    # press the thumb and drag it to the bottom
+        ctl.button(272, True)
+        for dy in range(0, ch, 6):
+            ctl.abs(win['x'] + cx + cw - 6, win['y'] + cy + ty + 4 + dy)
+        ctl.button(272, False)
+        self.dump(dump, lambda o: card()[1][0] > top)
+        self.assertEqual(card()[2], field)
+        self.assertEqual(self.dump(dump)[0]['prompt'], '1')
+
+    def test_the_window_makes_a_new_archive(self):
+        import zipfile
+        d = tempfile.mkdtemp(prefix='arc5-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'stuff', 'inner'))
+        open(os.path.join(d, 'stuff', 'inner', 'x.txt'), 'w').write('x' * 3000)
+        open(os.path.join(d, 'single.txt'), 'w').write('s' * 100)
+        p, win, dump = self.start_window(d, ['--new', os.path.join(d, 'stuff'), os.path.join(d, 'single.txt')])
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('mode') == 'new')
+        self.assertEqual(head['items'], '2')
+        self.assertEqual(len(rows), 2)
+        bx, by, bw, bh, en = btns[8]                                                                               # Format: ZIP -> TAR -> TAR.GZ -> ZIP
+        ctl.click(win['x'] + bx + 10, win['y'] + by + 10)
+        self.dump(dump, lambda o: o[0].get('fmt') == '1')
+        ctl.click(win['x'] + bx + 10, win['y'] + by + 10)
+        ctl.click(win['x'] + bx + 10, win['y'] + by + 10)
+        self.dump(dump, lambda o: o[0].get('fmt') == '0')
+        bx, by, bw, bh, en = btns[9]                                                                               # Create...
+        ctl.click(win['x'] + bx + 10, win['y'] + by + 10)
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('prompt') == '4')
+        ctl.tap(KEY_ENTER)                                                                                         # the suggested name
+        end = time.time() + 10
+        made = os.path.join(d, 'archive.zip')
+        while time.time() < end and not os.path.exists(made):
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(made), 'the archive was not made')
+        head, btns, rows, rects, extra = self.dump(dump, lambda o: o[0].get('mode') == 'view' and o[0].get('job') == '0')
+        self.assertEqual(head['kind'], 'ZIP')                                                                      # it shows what it made
+        names = sorted(zipfile.ZipFile(made).namelist())
+        self.assertEqual(names, ['single.txt', 'stuff/', 'stuff/inner/', 'stuff/inner/x.txt'])
+        self.assertIn('Made archive.zip', extra['status'])
 
 
 if __name__ == '__main__':

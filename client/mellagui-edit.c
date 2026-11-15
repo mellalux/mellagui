@@ -157,6 +157,7 @@ struct app {
     /* the card of the prototype (Open / Save as / Find / Go to line): the folder's entries, the highlighted row, how far the list is scrolled */
     struct centry { char name[256]; bool dir; } *cent;
     int cn, ccap, csel, ctop, cbtn_down;
+    int csb_drag;                       /* the card list's scroll bar thumb is held: the offset of the press inside it, -1 = no */
     char cdir[PATH_MAX];
     uint32_t cclick_ms;
     int zoom;                           /* text size in percent (LM_ZOOM_LEVELS); the button bar, status line and prompts keep their size */
@@ -2194,7 +2195,17 @@ static void card_press(struct app *a, uint32_t time_ms)
     }
     if (rows && px >= fx && px < fx + fw && py >= ly + 4 && py < ly + 4 + rows * CARD_ROW_H) {
         int idx[4001];
-        int n = card_rows(a, idx, 4000), row = a->ctop + (py - ly - 4) / CARD_ROW_H;
+        int n = card_rows(a, idx, 4000);
+        int sbw = lm_metrics.scrollbar_width;
+        if (n > rows && px >= fx + fw - sbw - 4) {                      /* the scroll bar: the thumb is dragged, the track pages (it is no row) */
+            int th = LM_MAX((rows * CARD_ROW_H) * rows / n, 20), ty = ly + 4 + (rows * CARD_ROW_H - th) * a->ctop / LM_MAX(n - rows, 1);
+            if (py >= ty && py < ty + th)
+                a->csb_drag = py - ty;
+            else
+                a->ctop = LM_CLAMP(a->ctop + (py < ty ? -rows : rows), 0, n - rows);
+            return;
+        }
+        int row = a->ctop + (py - ly - 4) / CARD_ROW_H;
         if (row < n) {
             bool dbl = time_ms - a->cclick_ms < (uint32_t)lm_metrics.double_click_ms;
             a->cclick_ms = time_ms;
@@ -3061,6 +3072,16 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->hover = btn_at(a, a->px, a->py);
             w->redraw = true;
         }
+        if (a->csb_drag >= 0 && card_on(a) && card_files(a)) {          /* the card list's scroll bar thumb in the hand */
+            struct wlcard c;
+            int fx, fy, fw, ly, rows, idx[4001];
+            card_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
+            int n = card_rows(a, idx, 4000), th = LM_MAX((rows * CARD_ROW_H) * rows / LM_MAX(n, 1), 20);
+            if (n > rows)
+                a->ctop = LM_CLAMP((int)((a->py - ly - 4 - a->csb_drag) * (n - rows) / LM_MAX(rows * CARD_ROW_H - th, 1)), 0, n - rows);
+            w->redraw = true;
+            break;
+        }
         if (a->tdrag.active) {                                          /* a tab in the hand: along the bar it changes places, away from it it leaves */
             int from = a->tdrag.idx, to = wltabs_motion(&a->tdrag, a->px, a->py, tabs_x(), BTN_H, tabs_w(w), a->ntabs);
             if (to >= 0)
@@ -3172,8 +3193,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (args[2].u == 272) {
                 if (args[3].u == 1)
                     card_press(a, args[1].u);
-                else
+                else {
                     a->cbtn_down = -1;
+                    a->csb_drag = -1;
+                }
             }
             w->redraw = true;
             break;
@@ -3643,6 +3666,7 @@ int main(int argc, char **argv)
     a.final_nl = true;
     a.hover = -1;
     a.cbtn_down = -1;
+    a.csb_drag = -1;
     a.csel = -1;
     wlrail_init(&a.ran[0]);
     wlrail_init(&a.ran[1]);

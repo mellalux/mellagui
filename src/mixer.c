@@ -265,6 +265,8 @@ struct lm_mixer {
     struct cmd queue[QUEUE_MAX];
     int nqueue;
     bool cmd_in_flight;
+    void (*applied)(void *);            /* called when the queued commands have all been carried out */
+    void *applied_data;
     bool dirty;                         /* refresh wanted again once the current one ends */
 };
 
@@ -294,6 +296,8 @@ static void cmd_done(void *data, const char *out)
         run_next_cmd(m);
         return;
     }
+    if (m->applied)
+        m->applied(m->applied_data);
     start_refresh(m);                                           /* show what the system really did */
 }
 
@@ -603,6 +607,25 @@ void lm_mixer_set_output(struct lm_mixer *m, int index)
     notify(m);
     const char *argv[] = { "pactl", "set-default-sink", st->sinks[index].name, NULL };
     queue_cmd(m, "default-sink", argv);
+}
+
+bool lm_mixer_busy(const struct lm_mixer *m)
+{
+    return m && (m->nqueue > 0 || m->cmd_in_flight);
+}
+
+void lm_mixer_on_applied(struct lm_mixer *m, void (*cb)(void *), void *data)
+{
+    if (m) {
+        m->applied = cb;
+        m->applied_data = data;
+    }
+}
+
+void lm_mixer_refresh(struct lm_mixer *m)
+{
+    if (m && m->active)
+        start_refresh(m);                                       /* (one that is running is followed by another) */
 }
 
 void lm_mixer_next_output(struct lm_mixer *m)

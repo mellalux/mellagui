@@ -77,7 +77,12 @@ struct app {
     /* mixer */
     struct lm_mixer *mixer;
     enum lm_mixer_part drag_part;
-    int menu_kind;                      /* the open menu: 0 = zoom, 1 = the mixer's outputs (entries = the mixer's sinks, in order) */
+    int menu_kind;                      /* the open menu: 0 = zoom, 1 = the mixer's outputs (entries = the mixer's sinks in order, then the card profiles in prof_ids) */
+    char profiles[1536];                /* the compositor's `audio-profiles` ("id|Card - Output;id|...") and `audio-profile` (the active id): the other outputs of the sound card */
+    char profile[64];
+    char prof_ids[4][64];               /* the profiles of the open outputs menu after the sinks */
+    int nprof_ids, menu_nsinks;
+    bool beep_wanted;                   /* a tick is due as soon as the new master volume is really set (the volume slider makes a sound) */
     int smart_drag;                 /* the smart card: the blind whose slider is being dragged, -1 = none */
     int smart_need;                 /* ... and the height that showed every row last time (the card grows when it gets more) */
     int drag_index;
@@ -320,7 +325,8 @@ static void slider(struct wlwin *w, struct lm_rect s, int value, bool muted)
     int fw = s.w * LM_CLAMP(value, 0, 100) / 100;
     if (fw > 0)
         rr(w, lm_rect_make(s.x, ty, fw, 6), 3, muted ? lm_theme.text_dim : lm_theme.accent);
-    rr(w, lm_rect_make(s.x + fw - 6, s.y + s.h / 2 - 7, 14, 14), 7, muted ? lm_theme.muted : lm_theme.text);
+    int kx = LM_CLAMP(s.x + fw - 7, s.x, s.x + s.w - 14);          /* (the knob stays inside the track: at 100 % it used to reach into the percentage) */
+    rr(w, lm_rect_make(kx, s.y + s.h / 2 - 7, 14, 14), 7, muted ? lm_theme.muted : lm_theme.text);
     char t[12];
     snprintf(t, sizeof(t), "%d%%", value);
     text(w, s.x + s.w + 8, s.y + (s.h - LM_FONT_H) / 2, t, muted ? lm_theme.text_dim : lm_theme.text);
@@ -558,6 +564,24 @@ static void mixer_layout(struct app *a, struct lm_mixer_layout *l)
     lm_mixer_layout(&card, TITLE_H, st->nstreams, st->backend == LM_MIXER_PULSE, l);
 }
 
+/* The tick of the volume slider: the compositor plays it through the default output, so it must come AFTER pactl has set the level. */
+static void mixer_beep_when_set(struct app *a)
+{
+    if (lm_mixer_busy(a->mixer))
+        a->beep_wanted = true;
+    else
+        send_set(a, "sink-beep", "1");
+}
+
+static void mixer_applied(void *data)
+{
+    struct app *a = data;
+    if (a->beep_wanted) {
+        a->beep_wanted = false;
+        send_set(a, "sink-beep", "1");
+    }
+}
+
 static void mixer_slide(struct app *a, enum lm_mixer_part part, int idx, double x)
 {
     struct lm_mixer_layout l;
@@ -568,23 +592,80 @@ static void mixer_slide(struct app *a, enum lm_mixer_part part, int idx, double 
         lm_mixer_set_stream(a->mixer, idx, lm_mixer_slider_value(l.stream[idx].slider.x, l.stream[idx].slider.w, x));
 }
 
-/* A click on the output row: a menu of every output, the one in use marked; without a menu service the next one is taken. */
+/* The sound card's other outputs (analog, HDMI, S/PDIF ...): a PipeWire card offers one output at a time, so the sound server lists
+ * only one sink and the others are card profiles. `ids` gets the profile ids (not the active one), `desc` their texts. */
+static int mixer_profiles(const struct app *a, char ids[][64], char desc[][96], int max)
+{
+    int n = 0;
+    const char *p = a->profiles;
+    while (*p && n < max) {
+        const char *end = strchr(p, ';');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        const char *bar = memchr(p, '|', len);
+        if (bar) {
+            snprintf(ids[n], 64, "%.*s", (int)(bar - p), p);
+            snprintf(desc[n], 96, "%.*s", (int)(len - (size_t)(bar - p) - 1), bar + 1);
+            size_t dl = strlen(desc[n]);
+            if (dl > 7 && !strcmp(desc[n] + dl - 7, " Output"))
+                desc[n][dl - 7] = 0;                                /* (the menu is narrow: "Digital Stereo (HDMI)" says it) */
+            if (strcmp(ids[n], a->profile))
+                n++;
+        }
+        p = end ? end + 1 : p + len;
+    }
+    return n;
+}
+
+static int mixer_choices(const struct app *a)
+{
+    char ids[4][64], desc[4][96];
+    const struct lm_mixer_state *st = lm_mixer_state(a->mixer);
+    return (st->nsinks > 1 ? st->nsinks : 0) + mixer_profiles(a, ids, desc, 4);
+}
+
+/* A click on the output row: a menu of every output - the sinks of the sound server (the one in use marked), then the other outputs
+ * of the sound card, which are chosen by switching the card's profile. Without a menu service the next sink is taken. */
 static void mixer_output_menu(struct app *a)
 {
     const struct lm_mixer_state *st = lm_mixer_state(a->mixer);
-    if (st->nsinks < 2)
+    send_set(a, "audio-rescan", "1");                               /* (the next click sees what changed, e.g. an HDMI cable plugged in) */
+    char pdesc[4][96];
+    a->nprof_ids = mixer_profiles(a, a->prof_ids, pdesc, 4);
+    a->menu_nsinks = st->nsinks;
+    if (st->nsinks < 2 && a->nprof_ids == 0)
         return;
-    char entries[LM_MIXER_MAX_SINKS * 100];
+    char entries[(LM_MIXER_MAX_SINKS + 4) * 128];
     size_t n = 0;
     for (int i = 0; i < st->nsinks; i++) {
         const struct lm_mixer_sink *s = &st->sinks[i];
-        n += (size_t)snprintf(entries + n, sizeof(entries) - n, "%s%s%s", i ? "\n" : "", i == st->cur ? "* " : "  ", s->desc[0] ? s->desc : s->name);
+        n += (size_t)snprintf(entries + n, sizeof(entries) - n, "%s%s%s", n ? "\n" : "", i == st->cur ? "* " : "  ", s->desc[0] ? s->desc : s->name);
     }
+    for (int i = 0; i < a->nprof_ids; i++)
+        n += (size_t)snprintf(entries + n, sizeof(entries) - n, "%s  %s", n ? "\n" : "", pdesc[i]);
     a->menu_kind = 1;
     if (!wlwin_menu(&a->win, entries)) {
         a->menu_kind = 0;
         lm_mixer_next_output(a->mixer);
     }
+}
+
+/* The wheel over a volume row (the slider, its speaker or its percentage; the row of an application likewise) moves it 5 % a notch. */
+static void mixer_wheel(struct app *a, double v)
+{
+    if (v == 0 || a->drag_part != LM_MIXER_NOTHING)
+        return;
+    const struct lm_mixer_state *st = lm_mixer_state(a->mixer);
+    struct lm_mixer_layout l;
+    mixer_layout(a, &l);
+    int step = v < 0 ? 5 : -5;                                      /* (scrolling up is a negative value) */
+    int y = (int)a->py;
+    if (y >= l.master_mute.y - 4 && y < l.master_mute.y + l.master_mute.h + 4) {
+        lm_mixer_set_master(a->mixer, LM_CLAMP(st->volume + step, 0, 100));
+        mixer_beep_when_set(a);
+    }
+    for (int i = 0; i < l.nstreams && i < st->nstreams; i++)
+        if (y >= l.stream[i].label.y && y < l.stream[i].slider.y + l.stream[i].slider.h + 6)
+            lm_mixer_set_stream(a->mixer, i, LM_CLAMP(st->streams[i].volume + step, 0, 100));
 }
 
 static bool mixer_press(struct app *a)
@@ -600,6 +681,8 @@ static bool mixer_press(struct app *a)
     case LM_MIXER_MASTER_SLIDER:
     case LM_MIXER_STREAM_SLIDER:
         mixer_slide(a, part, idx, a->px);
+        if (part == LM_MIXER_MASTER_SLIDER)
+            mixer_beep_when_set(a);
         a->drag_part = part;
         a->drag_index = idx;
         return true;
@@ -637,7 +720,7 @@ static void paint_mixer(struct app *a)
     if (pulse) {
         rr(w, l.output, 7, veil_mix(0x1a));
         char label[96];
-        snprintf(label, sizeof(label), "%s%s", st->output, st->nsinks > 1 ? "   v" : "");
+        snprintf(label, sizeof(label), "%s%s", st->output, mixer_choices(a) ? "   v" : "");
         text(w, l.output.x + 10, l.output.y + (l.output.h - LM_FONT_H) / 2, label, lm_theme.text);
     }
     for (int i = 0; i < l.nstreams; i++) {
@@ -1062,6 +1145,16 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         snprintf(a->zoom_text, sizeof(a->zoom_text), "%s", args[1].s);
         return;
     }
+    if (!strcmp(k, "audio-profiles")) {
+        snprintf(a->profiles, sizeof(a->profiles), "%s", args[1].s);
+        a->win.redraw = true;
+        return;
+    }
+    if (!strcmp(k, "audio-profile")) {
+        snprintf(a->profile, sizeof(a->profile), "%s", args[1].s);
+        a->win.redraw = true;
+        return;
+    }
     if (!strncmp(k, "clip-", 5) && k[5] >= '0' && k[5] <= '4' && !k[6])
         snprintf(a->chunk[k[5] - '0'], sizeof(a->chunk[0]), "%s", args[1].s);
 }
@@ -1195,8 +1288,12 @@ static void menu_event(struct wlwin *w, int index)
     int kind = a->menu_kind;
     a->menu_kind = 0;
     if (kind == 1) {                                                /* the outputs */
-        if (index >= 0)
+        if (index >= 0 && index < a->menu_nsinks)
             lm_mixer_set_output(a->mixer, index);
+        else if (index >= a->menu_nsinks && index - a->menu_nsinks < a->nprof_ids) {
+            send_set(a, "audio-profile", a->prof_ids[index - a->menu_nsinks]);     /* the card switches its output; the new sink shows up in a moment */
+            lm_mixer_refresh(a->mixer);
+        }
         return;
     }
     if (index == 0)
@@ -1255,6 +1352,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->top += v > 0 ? 1 : v < 0 ? -1 : 0;
         clip_clamp(a);
         w->redraw = true;
+    } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0 && a->kind == G_MIXER) {
+        mixer_wheel(a, lm_fixed_to_double(args[2].f));
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 273) {
         if (args[3].u == 1) {
             a->menu_kind = 0;
@@ -1262,6 +1361,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
     } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272) {
         if (args[3].u == 0) {                                       /* released */
+            if (a->kind == G_MIXER && a->drag_part == LM_MIXER_MASTER_SLIDER)
+                mixer_beep_when_set(a);                             /* ... and the level where the drag ended */
             a->drag_part = LM_MIXER_NOTHING;
             if (a->kind == G_SMART && a->smart_drag >= 0) {
                 struct lm_smart_layout l;
@@ -1432,6 +1533,7 @@ int main(int argc, char **argv)
     }
     if (kind == G_MIXER) {
         a->mixer = lm_mixer_create(a->loop, changed, a);
+        lm_mixer_on_applied(a->mixer, mixer_applied, a);
         lm_mixer_set_active(a->mixer, true);
     } else if (kind == G_SYS) {
         a->sys = lm_sysinfo_create(a->loop, changed, a);

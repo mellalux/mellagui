@@ -8287,6 +8287,44 @@ class TestMixer(Base):
         json.dump(st, open(pj, 'w'))
         self.wait_for(lambda: self.mixer_info(c)['volume'] == '33', 'polled volume', timeout=5.0)
 
+    def test_the_wheel_moves_a_volume_and_the_output_menu_has_the_cards_other_outputs(self):
+        env, d = self.mixer_env('wheel')
+        env['MELLAGUI_FAKE_PW'] = os.path.join(d, 'pw.json')
+        if os.path.exists(env['MELLAGUI_FAKE_PW']):
+            os.unlink(env['MELLAGUI_FAKE_PW'])
+        c = self.start('mellagui-mix-wheel', env)
+        pj = os.path.join(d, 'pactl.json')
+        g = self.geometry(c)
+        sx, sy, sw = g['slider']
+        # a click on the volume slider makes a sound, and only once the new level is set
+        n0 = int(re.search(r'n=(\d+)', c.cmd('sound')[0])[1])
+        c.click(sx + sw // 4, sy)
+        self.wait_for(lambda: self.state(pj)['sinks'][0]['vol'] == 25, 'sink volume 25')
+        def beeps():
+            line = c.cmd('sound')[0]
+            return int(re.search(r'n=(\d+)', line)[1]) - n0 if 'last=volume' in line else 0
+        self.wait_for(lambda: beeps() >= 1, 'the slider click made a sound')
+        c.abs(sx + sw // 2, sy)
+        c.cmd('axis v -1 -1')                                                      # a notch up: +5 %
+        self.wait_for(lambda: self.state(pj)['sinks'][0]['vol'] == 30, 'the wheel raised the volume to 30')
+        c.cmd('axis v 1 1')
+        c.cmd('axis v 1 1')
+        self.wait_for(lambda: self.state(pj)['sinks'][0]['vol'] == 20, 'two notches down')
+        (ax, ay, aw), _ = g['streams'][1]
+        c.abs(ax + aw // 2, ay)
+        c.cmd('axis v -1 -1')
+        self.wait_for(lambda: self.state(pj)['inputs'][1]['vol'] == 35, 'an application row has its own wheel')
+        # the card's other outputs (profiles) follow the sinks in the output menu; a choice switches the card
+        c.cmd('settings audio-rescan 1')
+        time.sleep(1.5)                                                            # (the card has the profiles after its next burst of settings)
+        c.click(*g['output'])
+        ents = self.menu_entries(c)
+        sinks = len(self.state(pj)['sinks'])
+        self.assertGreater(len(ents), sinks)
+        self.assertNotIn('Output', ents[sinks][0][-7:])
+        c.click(ents[sinks][1], ents[sinks][2])
+        self.wait_for(lambda: any(l.startswith('set-param') for l in self.state(env['MELLAGUI_FAKE_PW'])['log']), 'the card profile was switched')
+
     def test_mixer_screen_has_the_card_docked_below_the_clipboard(self):
         env, d = self.mixer_env('dock')
         c = self.start('mellagui-mix2', env, '--size', '1024x800')

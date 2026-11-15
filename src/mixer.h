@@ -95,6 +95,9 @@ void lm_mixer_set_master(struct lm_mixer *m, int percent);
 void lm_mixer_toggle_master_mute(struct lm_mixer *m);
 void lm_mixer_set_stream(struct lm_mixer *m, int index, int percent);
 void lm_mixer_toggle_stream_mute(struct lm_mixer *m, int index);
+bool lm_mixer_busy(const struct lm_mixer *m);            /* commands are queued or running */
+void lm_mixer_on_applied(struct lm_mixer *m, void (*cb)(void *), void *data);   /* `cb` runs each time the queue has been carried out (the volume is really set) */
+void lm_mixer_refresh(struct lm_mixer *m);              /* read the state again now (after something outside changed it, e.g. the card's profile) */
 void lm_mixer_next_output(struct lm_mixer *m);          /* PulseAudio: make the next sink the default one */
 void lm_mixer_set_output(struct lm_mixer *m, int index);   /* PulseAudio: make sinks[index] the default one (the gadget's menu of outputs) */
 

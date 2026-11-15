@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -709,6 +710,8 @@ static void fmt_plain(double v, char *o, size_t n)
         snprintf(o, n, "%.15g", v);
 }
 
+static void fmt_double(double v, int kind, bool d1904, char *o, size_t n);
+
 static void fmt_number(const char *text, int kind, bool d1904, char *o, size_t n)
 {
     char *endp;
@@ -717,6 +720,15 @@ static void fmt_number(const char *text, int kind, bool d1904, char *o, size_t n
         endp++;
     if (!*text || *endp || v != v || fabs(v) > 1e300) {
         snprintf(o, n, "%s", text);
+        return;
+    }
+    fmt_double(v, kind, d1904, o, n);
+}
+
+static void fmt_double(double v, int kind, bool d1904, char *o, size_t n)
+{
+    if (v != v || fabs(v) > 1e300) {
+        snprintf(o, n, "%g", v);
         return;
     }
     if ((kind & 15) == K_DATE && v >= 0 && v < 2958466) {
@@ -992,7 +1004,36 @@ void xl_free(struct xl_book *b)
     memset(b, 0, sizeof(*b));
 }
 
-int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
+/* The grid as the book's table: the row number in column 0, the letters as the header, shared strings looked up (and copied: two cells may share one). */
+static void fill_book(struct xl_book *b, const struct grid *g, char **sst)
+{
+    b->nrows = g->nrow;
+    b->ncols = g->nrow ? g->maxcol + 2 : 0;
+    if (!b->ncols)
+        return;
+    b->head = calloc((size_t)b->ncols, sizeof(char *));
+    b->head[0] = strdup("");
+    for (int c = 1; c < b->ncols; c++)
+        b->head[c] = letters(c - 1);
+    b->cell = calloc((size_t)g->nrow, sizeof(char **));
+    for (int r = 0; r < g->nrow; r++) {
+        b->cell[r] = calloc((size_t)b->ncols, sizeof(char *));
+        char num[16];
+        snprintf(num, sizeof(num), "%d", g->row[r].num);
+        b->cell[r][0] = strdup(num);
+        for (int i = 0; i < g->row[r].n; i++) {
+            const struct xcell *c = &g->row[r].c[i];
+            const char *text = c->sst >= 0 ? (sst && sst[c->sst] ? sst[c->sst] : "") : c->s;
+            free(b->cell[r][1 + c->col]);                               /* a column twice in one row: the later wins */
+            b->cell[r][1 + c->col] = strdup(text);
+        }
+        for (int c = 1; c < b->ncols; c++)
+            if (!b->cell[r][c])
+                b->cell[r][c] = strdup("");
+    }
+}
+
+static int xlsx_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
 {
     memset(b, 0, sizeof(*b));
     struct zip z;
@@ -1094,30 +1135,7 @@ int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_b
         }
     }
 
-    b->nrows = g.nrow;
-    b->ncols = g.nrow ? g.maxcol + 2 : 0;
-    if (b->ncols) {
-        b->head = calloc((size_t)b->ncols, sizeof(char *));
-        b->head[0] = strdup("");
-        for (int c = 1; c < b->ncols; c++)
-            b->head[c] = letters(c - 1);
-        b->cell = calloc((size_t)g.nrow, sizeof(char **));
-        for (int r = 0; r < g.nrow; r++) {
-            b->cell[r] = calloc((size_t)b->ncols, sizeof(char *));
-            char num[16];
-            snprintf(num, sizeof(num), "%d", g.row[r].num);
-            b->cell[r][0] = strdup(num);
-            for (int i = 0; i < g.row[r].n; i++) {
-                const struct xcell *c = &g.row[r].c[i];
-                const char *text = c->sst >= 0 ? (sst[c->sst] ? sst[c->sst] : "") : c->s;
-                free(b->cell[r][1 + c->col]);                           /* a column twice in one row: the later wins */
-                b->cell[r][1 + c->col] = strdup(text);
-            }
-            for (int c = 1; c < b->ncols; c++)
-                if (!b->cell[r][c])
-                    b->cell[r][c] = strdup("");
-        }
-    }
+    fill_book(b, &g, sst);
     result = 0;
 done:
     for (int r = 0; r < g.nrow; r++)
@@ -1143,4 +1161,853 @@ done:
     }
     zip_close(&z);
     return result;
+}
+
+/* ======================================================================================================================================================
+ * The old binary format: .xls = BIFF8 records in the "Workbook" stream of an OLE2 compound file (Excel 97 .. 2003).
+ * ====================================================================================================================================================== */
+
+#define OLE_MAXREG 0xfffffffau                  /* sector numbers from here up are FREE / END / FAT / DIFAT marks */
+#define OLE_DIR_MAX 8192                        /* sectors of the directory at most */
+#define MINI_MAX (32u << 20)                    /* the mini stream (the small streams' container) at most this big */
+
+struct cfs {
+    int fd;
+    uint64_t fsize;
+    uint32_t ssz, nsect;
+    uint32_t *fat;
+    uint32_t nfat;
+    uint32_t dirstart, cutoff, mfstart, nmf;
+};
+
+struct cstream {
+    const struct cfs *f;
+    uint64_t size;
+    uint32_t *sec;                      /* the sectors of a stream in the FAT ... */
+    uint32_t nsec;
+    uint8_t *mem;                       /* ... or the whole of a small one */
+};
+
+static void cfs_close(struct cfs *f)
+{
+    free(f->fat);
+    f->fat = NULL;
+}
+
+static bool sector_read(const struct cfs *f, uint32_t id, void *buf)
+{
+    return id < f->nsect && pread_all(f->fd, buf, f->ssz, ((uint64_t)id + 1) * f->ssz);
+}
+
+/* The sectors of a chain: at most `maxn`, so a loop in a damaged file ends. */
+static uint32_t *chain_of(const uint32_t *fat, uint32_t nfat, uint32_t start, uint32_t maxn, uint32_t *np)
+{
+    uint32_t *o = NULL, n = 0, cap = 0, s = start;
+    while (s < OLE_MAXREG && s < nfat && n < maxn) {
+        if (n == cap) {
+            cap = cap ? cap * 2 : 64;
+            uint32_t *t = realloc(o, cap * sizeof(uint32_t));
+            if (!t) {
+                free(o);
+                *np = 0;
+                return NULL;
+            }
+            o = t;
+        }
+        o[n++] = s;
+        s = fat[s];
+    }
+    *np = n;
+    return o;
+}
+
+/* 0 = opened; -1 = not an OLE2 file; -2 = damaged (err). */
+static int cfs_open(struct cfs *f, int fd, char *err, size_t errn)
+{
+    memset(f, 0, sizeof(*f));
+    f->fd = fd;
+    struct stat st;
+    uint8_t h[512];
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 1024 || !pread_all(fd, h, 512, 0) || memcmp(h, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8))
+        return -1;
+    f->fsize = (uint64_t)st.st_size;
+    unsigned shift = u16(h + 30), mshift = u16(h + 32);
+    if ((shift != 9 && shift != 12) || mshift != 6) {
+        seterr(err, errn, "A damaged compound file (sector sizes).");
+        return -2;
+    }
+    f->ssz = 1u << shift;
+    f->nsect = (uint32_t)((f->fsize - f->ssz) / f->ssz);
+    uint32_t nfatsec = u32(h + 44), difstart = u32(h + 68), ndif = u32(h + 72);
+    f->dirstart = u32(h + 48);
+    f->cutoff = u32(h + 56);
+    f->mfstart = u32(h + 60);
+    f->nmf = u32(h + 64);
+    if (nfatsec == 0 || nfatsec > f->nsect || ndif > f->nsect) {
+        seterr(err, errn, "A damaged compound file (the sector table).");
+        return -2;
+    }
+    uint32_t *ids = malloc((size_t)nfatsec * sizeof(uint32_t));
+    uint8_t *sec = malloc(f->ssz);
+    if (!ids || !sec) {
+        free(ids);
+        free(sec);
+        return -2;
+    }
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < 109 && got < nfatsec; i++)
+        ids[got++] = u32(h + 76 + 4 * i);
+    for (uint32_t s = difstart, k = 0; k < ndif && got < nfatsec && s < OLE_MAXREG; k++) {
+        if (!sector_read(f, s, sec))
+            break;
+        for (uint32_t i = 0; i < f->ssz / 4 - 1 && got < nfatsec; i++)
+            ids[got++] = u32(sec + 4 * i);
+        s = u32(sec + f->ssz - 4);
+    }
+    f->nfat = nfatsec * (f->ssz / 4);
+    f->fat = calloc(f->nfat, sizeof(uint32_t));
+    bool ok = f->fat != NULL;
+    for (uint32_t i = 0; ok && i < got; i++) {
+        if (!sector_read(f, ids[i], sec)) {
+            for (uint32_t k = 0; k < f->ssz / 4; k++)
+                f->fat[i * (f->ssz / 4) + k] = 0xffffffffu;          /* a FAT sector that cannot be read: its sectors are free */
+            continue;
+        }
+        for (uint32_t k = 0; k < f->ssz / 4; k++)
+            f->fat[i * (f->ssz / 4) + k] = u32(sec + 4 * k);
+    }
+    for (uint32_t i = got * (f->ssz / 4); ok && i < f->nfat; i++)
+        f->fat[i] = 0xffffffffu;
+    free(ids);
+    free(sec);
+    if (!ok) {
+        cfs_close(f);
+        return -2;
+    }
+    return 0;
+}
+
+/* Finds the workbook's stream in the directory; 1 = found (`biff5` when it is the old name "Book"), 0 = no. */
+static int cfs_find_workbook(const struct cfs *f, uint32_t *start, uint64_t *size, bool *biff5, uint32_t *rstart, uint64_t *rsize)
+{
+    uint32_t nd = 0;
+    uint32_t *ds = chain_of(f->fat, f->nfat, f->dirstart, OLE_DIR_MAX < f->nsect ? OLE_DIR_MAX : f->nsect, &nd);
+    uint8_t *sec = malloc(f->ssz);
+    int found = 0;
+    *rstart = 0xfffffffeu;
+    *rsize = 0;
+    for (uint32_t i = 0; sec && i < nd; i++) {
+        if (!sector_read(f, ds[i], sec))
+            break;
+        for (uint32_t e = 0; e + 128 <= f->ssz; e += 128) {
+            const uint8_t *d = sec + e;
+            unsigned type = d[66], nlen = u16(d + 64);
+            if (type == 5) {
+                *rstart = u32(d + 116);
+                *rsize = u32(d + 120);
+            }
+            if (type != 2 || nlen < 2 || nlen > 64)
+                continue;
+            char name[33];
+            unsigned k = 0;
+            for (; k + 1 < nlen / 2 && k < 32; k++)
+                name[k] = d[2 * k + 1] ? '?' : (char)d[2 * k];
+            name[k] = 0;
+            bool wb = !strcasecmp(name, "Workbook"), bk = !strcasecmp(name, "Book");
+            if (wb || (bk && !found)) {                                 /* "Workbook" wins over the old name "Book" */
+                *start = u32(d + 116);
+                *size = u32(d + 120);
+                *biff5 = !wb;
+                found = 1;
+            }
+        }
+    }
+    free(sec);
+    free(ds);
+    return found;
+}
+
+/* A stream: its sector list (the usual) or, when it is under the cutoff, copied out of the mini stream. 0 = ok. */
+static int cstream_open(struct cstream *s, const struct cfs *f, uint32_t start, uint64_t size, uint32_t rstart, uint64_t rsize)
+{
+    memset(s, 0, sizeof(*s));
+    s->f = f;
+    if (size >= f->cutoff) {
+        uint32_t want = (uint32_t)((size + f->ssz - 1) / f->ssz);
+        s->sec = chain_of(f->fat, f->nfat, start, want < f->nsect ? want : f->nsect, &s->nsec);
+        s->size = (uint64_t)s->nsec * f->ssz < size ? (uint64_t)s->nsec * f->ssz : size;
+        return s->nsec ? 0 : -1;
+    }
+    if (rsize > MINI_MAX || size > rsize)
+        return -1;
+    uint32_t nr = 0, nm = 0, nmf = 0;
+    uint32_t *rs = chain_of(f->fat, f->nfat, rstart, (uint32_t)((rsize + f->ssz - 1) / f->ssz), &nr);
+    uint32_t *ms = chain_of(f->fat, f->nfat, f->mfstart, f->nmf < f->nsect ? f->nmf : f->nsect, &nmf);
+    uint8_t *mini = calloc(1, (size_t)nr * f->ssz + 1), *sec = malloc(f->ssz);
+    uint32_t *mfat = calloc(1, ((size_t)nmf * (f->ssz / 4) + 1) * sizeof(uint32_t));
+    int rv = -1;
+    if (mini && sec && mfat && rs && ms) {
+        for (uint32_t i = 0; i < nr; i++)
+            if (sector_read(f, rs[i], sec))
+                memcpy(mini + (size_t)i * f->ssz, sec, f->ssz);
+        for (uint32_t i = 0; i < nmf; i++)
+            if (sector_read(f, ms[i], sec))
+                for (uint32_t k = 0; k < f->ssz / 4; k++)
+                    mfat[(size_t)i * (f->ssz / 4) + k] = u32(sec + 4 * k);
+        uint32_t *mc = chain_of(mfat, (uint32_t)nmf * (f->ssz / 4), start, (uint32_t)((size + 63) / 64), &nm);
+        s->mem = calloc(1, (size_t)nm * 64 + 1);
+        if (s->mem && mc) {
+            uint32_t good = 0;
+            for (; good < nm; good++) {
+                if ((uint64_t)mc[good] * 64 + 64 > (uint64_t)nr * f->ssz)
+                    break;
+                memcpy(s->mem + (size_t)good * 64, mini + (size_t)mc[good] * 64, 64);
+            }
+            s->size = (uint64_t)good * 64 < size ? (uint64_t)good * 64 : size;
+            rv = good ? 0 : -1;
+        }
+        free(mc);
+    }
+    free(mini);
+    free(sec);
+    free(mfat);
+    free(rs);
+    free(ms);
+    return rv;
+}
+
+static void cstream_close(struct cstream *s)
+{
+    free(s->sec);
+    free(s->mem);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Up to n bytes at `off`; runs of neighbouring sectors are read with one call. Returns how many. */
+static size_t cstream_read(const struct cstream *s, uint64_t off, uint8_t *buf, size_t n)
+{
+    if (off >= s->size)
+        return 0;
+    if (n > s->size - off)
+        n = (size_t)(s->size - off);
+    if (s->mem) {
+        memcpy(buf, s->mem + off, n);
+        return n;
+    }
+    size_t done = 0;
+    uint32_t ssz = s->f->ssz;
+    while (done < n) {
+        uint64_t at = off + done;
+        uint32_t i = (uint32_t)(at / ssz), within = (uint32_t)(at % ssz), run = 1;
+        if (i >= s->nsec || s->sec[i] >= s->f->nsect)
+            break;
+        while (i + run < s->nsec && s->sec[i + run] == s->sec[i] + run && (uint64_t)run * ssz < n - done + within && s->sec[i + run] < s->f->nsect)
+            run++;
+        size_t chunk = (size_t)run * ssz - within;
+        if (chunk > n - done)
+            chunk = n - done;
+        if (!pread_all(s->f->fd, buf + done, chunk, ((uint64_t)s->sec[i] + 1) * ssz + within))
+            break;
+        done += chunk;
+    }
+    return done;
+}
+
+/* ---- a reader of BIFF records: id, length, body, with a buffer so that the small records do not cost a call each ---- */
+#define RR_BUF (64u << 10)
+#define REC_MAX 8224
+
+struct rr {
+    const struct cstream *s;
+    uint64_t pos;                       /* the stream offset of the next record */
+    uint8_t *buf;
+    uint64_t bpos;
+    size_t blen;
+};
+
+static bool rr_open(struct rr *r, const struct cstream *s, uint64_t pos)
+{
+    r->s = s;
+    r->pos = pos;
+    r->bpos = 0;
+    r->blen = 0;
+    r->buf = malloc(RR_BUF + REC_MAX + 8);
+    return r->buf != NULL;
+}
+
+static bool rr_have(struct rr *r, uint64_t off, size_t n)
+{
+    if (off >= r->bpos && off + n <= r->bpos + r->blen)
+        return true;
+    r->bpos = off;
+    r->blen = cstream_read(r->s, off, r->buf, RR_BUF + REC_MAX);
+    return r->blen >= n;
+}
+
+static bool rr_next(struct rr *r, unsigned *id, unsigned *len, const uint8_t **data)
+{
+    if (!rr_have(r, r->pos, 4))
+        return false;
+    const uint8_t *h = r->buf + (r->pos - r->bpos);
+    *id = u16(h);
+    *len = u16(h + 2);
+    if (*len > REC_MAX || !rr_have(r, r->pos, 4 + (size_t)*len))
+        return false;
+    *data = r->buf + (r->pos - r->bpos) + 4;
+    r->pos += 4 + (uint64_t)*len;
+    return true;
+}
+
+/* ---- strings ---- */
+/* Letters of a string, one byte or one UTF-16 unit each, as UTF-8. `hi` (or NULL) carries a high surrogate whose partner is in the next piece. */
+static void xb_units(struct xbuf *b, const uint8_t *p, size_t units, bool wide, unsigned *hi)
+{
+    for (size_t i = 0; i < units; i++) {
+        unsigned cp = wide ? u16(p + 2 * i) : p[i];
+        if (hi && *hi) {
+            if (wide && cp >= 0xdc00 && cp < 0xe000) {
+                xb_utf8(b, 0x10000 + ((*hi - 0xd800) << 10) + (cp - 0xdc00));
+                *hi = 0;
+                continue;
+            }
+            xb_utf8(b, 0xfffd);
+            *hi = 0;
+        }
+        if (wide && cp >= 0xd800 && cp < 0xdc00) {
+            if (i + 1 < units && u16(p + 2 * i + 2) >= 0xdc00 && u16(p + 2 * i + 2) < 0xe000) {
+                cp = 0x10000 + ((cp - 0xd800) << 10) + (u16(p + 2 * i + 2) - 0xdc00);
+                i++;
+            } else if (hi && i + 1 == units) {
+                *hi = cp;
+                continue;
+            } else {
+                cp = 0xfffd;
+            }
+        } else if (cp >= 0xd800 && cp < 0xe000) {
+            cp = 0xfffd;
+        }
+        xb_utf8(b, cp ? cp : ' ');
+    }
+}
+
+/* An XLUnicodeString (a u16 length) or ShortXLUnicodeString (a u8 one) in a record: flags byte, then the letters, one or two bytes each. Returns the
+ * bytes it used, or -1 when it does not fit. */
+static int xls_string(const uint8_t *p, size_t avail, bool short_cch, struct xbuf *b)
+{
+    size_t hs = short_cch ? 2 : 3;
+    if (avail < hs)
+        return -1;
+    size_t cch = short_cch ? p[0] : u16(p);
+    bool wide = p[hs - 1] & 1;
+    size_t need = cch * (wide ? 2 : 1);
+    if (avail < hs + need)
+        return -1;
+    xb_units(b, p + hs, cch, wide, NULL);
+    return (int)(hs + need);
+}
+
+/* ---- the workbook's globals ---- */
+struct xls {
+    bool d1904;
+    int *xfi;                           /* the number format of each XF */
+    int nxf;
+    struct { int id, kind; } custom[512];
+    int ncustom;
+    struct {
+        uint32_t pos;
+        char *name;
+        bool hidden;
+    } sh[MAX_SHEETS];
+    int nsh;
+    uint64_t sstpos;
+    bool have_sst, encrypted;
+    unsigned vers;
+};
+
+static int xls_kind(const struct xls *x, int ixfe)
+{
+    if (ixfe < 0 || ixfe >= x->nxf)
+        return K_PLAIN;
+    int id = x->xfi[ixfe];
+    for (int i = 0; i < x->ncustom; i++)
+        if (x->custom[i].id == id)
+            return x->custom[i].kind;
+    return builtin_format(id);
+}
+
+static void xls_globals(const struct cstream *s, struct xls *x)
+{
+    struct rr r;
+    if (!rr_open(&r, s, 0))
+        return;
+    unsigned id, len, depth = 0;
+    const uint8_t *d;
+    struct xbuf t = { 0 };
+    bool first = true;
+    while (true) {
+        uint64_t at = r.pos;
+        if (!rr_next(&r, &id, &len, &d))
+            break;
+        if (first) {
+            if (id != 0x0809 || len < 4)
+                break;
+            x->vers = u16(d);
+            first = false;
+            depth = 1;
+            continue;
+        }
+        if (id == 0x0809) {
+            depth++;
+        } else if (id == 0x000a) {
+            if (--depth == 0)
+                break;
+        } else if (depth != 1) {
+            continue;
+        } else if (id == 0x0022 && len >= 2) {
+            x->d1904 = u16(d) != 0;
+        } else if (id == 0x002f) {
+            x->encrypted = true;
+        } else if (id == 0x041e && len >= 5 && x->ncustom < 512) {
+            xb_reset(&t);
+            if (xls_string(d + 2, len - 2, false, &t) > 0) {
+                x->custom[x->ncustom].id = u16(d);
+                x->custom[x->ncustom++].kind = classify_format(xb_str(&t));
+            }
+        } else if (id == 0x00e0 && len >= 4 && x->nxf < MAX_XF) {
+            x->xfi = realloc(x->xfi, (size_t)(x->nxf + 1) * sizeof(int));
+            x->xfi[x->nxf++] = (int)u16(d + 2);
+        } else if (id == 0x0085 && len >= 8 && x->nsh < MAX_SHEETS) {
+            xb_reset(&t);
+            if (d[5] == 0 && xls_string(d + 6, len - 6, true, &t) > 0) {          /* dt 0 = a worksheet (not a chart or a macro sheet) */
+                x->sh[x->nsh].pos = u32(d);
+                x->sh[x->nsh].hidden = (d[4] & 3) != 0;
+                x->sh[x->nsh++].name = strdup(xb_str(&t));
+            }
+        } else if (id == 0x00fc && !x->have_sst) {
+            x->sstpos = at;
+            x->have_sst = true;
+        }
+    }
+    free(t.s);
+    free(r.buf);
+}
+
+/* ---- one sheet's cells ---- */
+struct gb {
+    struct grid *g;
+    struct xrow cur;
+    bool have, stop;
+    int max_rows, max_cols;
+};
+
+static void gb_flush(struct gb *b)
+{
+    if (!b->have)
+        return;
+    bool any = false;
+    for (int i = 0; i < b->cur.n; i++)
+        if (b->cur.c[i].sst >= 0 || b->cur.c[i].s[0])
+            any = true;
+    if (any) {
+        struct grid *g = b->g;
+        if (g->nrow == g->cap) {
+            g->cap = g->cap ? g->cap * 2 : 64;
+            g->row = realloc(g->row, (size_t)g->cap * sizeof(*g->row));
+        }
+        g->row[g->nrow++] = b->cur;
+    } else {
+        row_free(&b->cur);
+    }
+    memset(&b->cur, 0, sizeof(b->cur));
+    b->have = false;
+}
+
+/* A cell: the text (taken over) or a shared string number; `row` counts from 1, `col` from 0. */
+static void gb_cell(struct gb *b, int row, int col, char *text, long sst)
+{
+    if (b->stop || (!text && sst < 0)) {
+        free(text);
+        return;
+    }
+    if (col >= b->max_cols) {
+        b->g->more_cols = true;
+        free(text);
+        return;
+    }
+    if (!b->have || b->cur.num != row) {
+        gb_flush(b);
+        if (b->g->nrow >= b->max_rows) {
+            b->g->more_rows = true;
+            b->stop = true;
+            free(text);
+            return;
+        }
+        b->cur.num = row;
+        b->have = true;
+    }
+    if (b->cur.n == b->cur.cap) {
+        b->cur.cap = b->cur.cap ? b->cur.cap * 2 : 8;
+        b->cur.c = realloc(b->cur.c, (size_t)b->cur.cap * sizeof(*b->cur.c));
+    }
+    b->cur.c[b->cur.n].col = col;
+    b->cur.c[b->cur.n].sst = sst;
+    b->cur.c[b->cur.n].s = sst >= 0 ? strdup("") : text;
+    b->cur.n++;
+    if (col > b->g->maxcol)
+        b->g->maxcol = col;
+    if (sst > b->g->maxsst)
+        b->g->maxsst = sst;
+}
+
+static double rk_value(uint32_t rk)
+{
+    double v;
+    if (rk & 2) {
+        v = (double)((int32_t)rk >> 2);
+    } else {
+        uint64_t bits = (uint64_t)(rk & 0xfffffffcu) << 32;
+        memcpy(&v, &bits, sizeof(v));
+    }
+    return rk & 1 ? v / 100 : v;
+}
+
+static const char *biff_error(unsigned code)
+{
+    switch (code) {
+    case 0x00: return "#NULL!";
+    case 0x07: return "#DIV/0!";
+    case 0x0f: return "#VALUE!";
+    case 0x17: return "#REF!";
+    case 0x1d: return "#NAME?";
+    case 0x24: return "#NUM!";
+    case 0x2a: return "#N/A";
+    default: return "#ERR!";
+    }
+}
+
+static void xls_number(struct gb *b, const struct xls *x, int row, int col, int ixfe, double v)
+{
+    char num[64];
+    fmt_double(v, xls_kind(x, ixfe), x->d1904, num, sizeof(num));
+    gb_cell(b, row, col, cell_text(num), -1);
+}
+
+static void xls_sheet(const struct cstream *s, uint32_t pos, const struct xls *x, int max_rows, int max_cols, struct grid *g)
+{
+    struct rr r;
+    if (!rr_open(&r, s, pos))
+        return;
+    struct gb b = { .g = g, .max_rows = max_rows, .max_cols = max_cols };
+    struct xbuf t = { 0 };
+    unsigned id, len, depth = 0;
+    const uint8_t *d;
+    bool first = true, pend = false;
+    int prow = 0, pcol = 0;
+    g->maxsst = -1;
+    g->maxcol = -1;
+    while (!b.stop && rr_next(&r, &id, &len, &d)) {
+        if (first) {
+            if (id != 0x0809)
+                break;
+            first = false;
+            depth = 1;
+            continue;
+        }
+        if (id == 0x0809) {
+            depth++;
+            continue;
+        }
+        if (id == 0x000a) {
+            if (--depth == 0)
+                break;
+            continue;
+        }
+        if (depth != 1)
+            continue;
+        if (id != 0x0207 && id != 0x0006)
+            pend = pend && (id == 0x04bc || id == 0x0221 || id == 0x0236);          /* a formula's string follows it (maybe after its shared / array formula) */
+        switch (id) {
+        case 0x0200:                                                    /* DIMENSION */
+            if (len >= 10)
+                g->last_row = (int)u32(d + 4);
+            break;
+        case 0x00fd:                                                    /* LABELSST */
+            if (len >= 10) {
+                uint32_t k = u32(d + 6);
+                if (k < MAX_SST)
+                    gb_cell(&b, (int)u16(d) + 1, (int)u16(d + 2), NULL, (long)k);
+                else
+                    gb_cell(&b, (int)u16(d) + 1, (int)u16(d + 2), strdup(""), -1);
+            }
+            break;
+        case 0x0203:                                                    /* NUMBER */
+            if (len >= 14) {
+                double v;
+                memcpy(&v, d + 6, 8);
+                xls_number(&b, x, (int)u16(d) + 1, (int)u16(d + 2), (int)u16(d + 4), v);
+            }
+            break;
+        case 0x027e:                                                    /* RK */
+            if (len >= 10)
+                xls_number(&b, x, (int)u16(d) + 1, (int)u16(d + 2), (int)u16(d + 4), rk_value(u32(d + 6)));
+            break;
+        case 0x00bd:                                                    /* MULRK: a run of RK numbers */
+            for (unsigned k = 0; len >= 6 && 4 + 6 * (k + 1) + 2 <= len; k++)
+                xls_number(&b, x, (int)u16(d) + 1, (int)u16(d + 2) + (int)k, (int)u16(d + 4 + 6 * k), rk_value(u32(d + 6 + 6 * k)));
+            break;
+        case 0x0204:                                                    /* LABEL, RSTRING */
+        case 0x00d6:
+            if (len >= 9) {
+                xb_reset(&t);
+                if (xls_string(d + 6, len - 6, false, &t) >= 0)
+                    gb_cell(&b, (int)u16(d) + 1, (int)u16(d + 2), cell_text(xb_str(&t)), -1);
+            }
+            break;
+        case 0x0205:                                                    /* BOOLERR */
+            if (len >= 8)
+                gb_cell(&b, (int)u16(d) + 1, (int)u16(d + 2), strdup(d[7] ? biff_error(d[6]) : d[6] ? "TRUE" : "FALSE"), -1);
+            break;
+        case 0x0006:                                                    /* FORMULA: the value Excel stored with it */
+            pend = false;
+            if (len >= 20) {
+                int row = (int)u16(d) + 1, col = (int)u16(d + 2);
+                const uint8_t *res = d + 6;
+                if (res[6] == 0xff && res[7] == 0xff) {
+                    if (res[0] == 0) {
+                        pend = true;
+                        prow = row;
+                        pcol = col;
+                    } else if (res[0] == 1) {
+                        gb_cell(&b, row, col, strdup(res[2] ? "TRUE" : "FALSE"), -1);
+                    } else if (res[0] == 2) {
+                        gb_cell(&b, row, col, strdup(biff_error(res[2])), -1);
+                    }
+                } else {
+                    double v;
+                    memcpy(&v, res, 8);
+                    xls_number(&b, x, row, col, (int)u16(d + 4), v);
+                }
+            }
+            break;
+        case 0x0207:                                                    /* STRING: the text result of the formula before */
+            if (pend) {
+                xb_reset(&t);
+                if (xls_string(d, len, false, &t) >= 0)
+                    gb_cell(&b, prow, pcol, cell_text(xb_str(&t)), -1);
+                pend = false;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    gb_flush(&b);
+    if (b.have)
+        row_free(&b.cur);
+    free(t.s);
+    free(r.buf);
+}
+
+/* The shared strings the cells use (a string runs over CONTINUE records, and each such piece starts with its own flags byte). */
+struct sc {
+    struct rr r;
+    const uint8_t *p, *end;
+};
+
+static bool sc_more(struct sc *c)
+{
+    unsigned id, len;
+    const uint8_t *d;
+    if (!rr_next(&c->r, &id, &len, &d) || id != 0x003c)
+        return false;
+    c->p = d;
+    c->end = d + len;
+    return true;
+}
+
+static bool sc_skip(struct sc *c, size_t n)
+{
+    while (n) {
+        size_t avail = (size_t)(c->end - c->p), take = avail < n ? avail : n;
+        c->p += take;
+        n -= take;
+        if (n && !sc_more(c))
+            return false;
+    }
+    return true;
+}
+
+static void xls_sst(const struct cstream *s, uint64_t at, char **sst, const uint8_t *need, long count)
+{
+    struct sc c;
+    if (!rr_open(&c.r, s, at))
+        return;
+    unsigned id, len;
+    const uint8_t *d;
+    struct xbuf t = { 0 };
+    if (rr_next(&c.r, &id, &len, &d) && id == 0x00fc && len >= 8) {
+        uint32_t unique = u32(d + 4);
+        c.p = d + 8;
+        c.end = d + len;
+        for (long i = 0; i < count && i < (long)unique; i++) {
+            if (c.p >= c.end && !sc_more(&c))
+                break;
+            if (c.end - c.p < 3)
+                break;
+            size_t cch = u16(c.p);
+            unsigned flags = c.p[2];
+            c.p += 3;
+            size_t runs = 0, ext = 0;
+            if (flags & 8) {
+                if (c.end - c.p < 2)
+                    break;
+                runs = u16(c.p);
+                c.p += 2;
+            }
+            if (flags & 4) {
+                if (c.end - c.p < 4)
+                    break;
+                ext = u32(c.p);
+                c.p += 4;
+            }
+            bool wide = flags & 1, bad = false;
+            unsigned hi = 0;
+            xb_reset(&t);
+            for (size_t left = cch; left > 0;) {
+                size_t unit = wide ? 2 : 1, take = (size_t)(c.end - c.p) / unit;
+                if (take > left)
+                    take = left;
+                if (need[i])
+                    xb_units(&t, c.p, take, wide, &hi);
+                c.p += take * unit;
+                left -= take;
+                if (left > 0) {
+                    if (!sc_more(&c) || c.p >= c.end) {
+                        bad = true;
+                        break;
+                    }
+                    wide = *c.p & 1;                                    /* a new piece: its first byte says how the letters are written */
+                    c.p++;
+                }
+            }
+            if (hi && need[i])
+                xb_utf8(&t, 0xfffd);
+            if (bad || !sc_skip(&c, runs * 4 + ext))
+                break;
+            if (need[i])
+                sst[i] = cell_text(xb_str(&t));
+        }
+    }
+    free(t.s);
+    free(c.r.buf);
+}
+
+static int xls_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
+{
+    memset(b, 0, sizeof(*b));
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    struct cfs f;
+    int r = cfs_open(&f, fd, err, errn);
+    if (r < 0) {
+        close(fd);
+        return r;
+    }
+    uint32_t wstart = 0, rstart = 0;
+    uint64_t wsize = 0, rsize = 0;
+    bool biff5 = false;
+    struct cstream s = { 0 };
+    struct xls x = { 0 };
+    struct grid g = { 0 };
+    char **sst = NULL;
+    uint8_t *need = NULL;
+    int *shown = NULL;
+    int result = -2;
+    if (!cfs_find_workbook(&f, &wstart, &wsize, &biff5, &rstart, &rsize)) {
+        result = -1;                                                    /* an OLE2 file with no workbook (a .doc, a .ppt) */
+        goto done;
+    }
+    if (biff5) {
+        seterr(err, errn, "An old Excel file (Excel 5 / 95, \"BIFF5\"): not read.");
+        goto done;
+    }
+    if (cstream_open(&s, &f, wstart, wsize, rstart, rsize) < 0) {
+        seterr(err, errn, "A damaged workbook (its stream cannot be read).");
+        goto done;
+    }
+    xls_globals(&s, &x);
+    if (x.encrypted) {
+        seterr(err, errn, "The workbook is password protected.");
+        goto done;
+    }
+    if (x.vers != 0x0600) {
+        seterr(err, errn, "An Excel file older than Excel 97: not read.");
+        goto done;
+    }
+    shown = calloc((size_t)(x.nsh ? x.nsh : 1), sizeof(int));
+    int nshown = 0;
+    for (int pass = 0; pass < 2 && nshown == 0; pass++)
+        for (int i = 0; i < x.nsh; i++)
+            if (pass == 1 || !x.sh[i].hidden)
+                shown[nshown++] = i;
+    if (nshown == 0) {
+        seterr(err, errn, "A workbook with no worksheets.");
+        goto done;
+    }
+    b->nsheets = nshown;
+    b->sheet_name = calloc((size_t)nshown, sizeof(char *));
+    for (int i = 0; i < nshown; i++)
+        b->sheet_name[i] = cell_text(x.sh[shown[i]].name);
+    b->sheet = sheet < 0 ? 0 : sheet >= nshown ? nshown - 1 : sheet;
+    if (x.sh[shown[b->sheet]].pos >= s.size) {
+        seterr(err, errn, "The worksheet lies beyond the part of the file that was read.");
+        goto done;
+    }
+    xls_sheet(&s, x.sh[shown[b->sheet]].pos, &x, max_rows, max_cols, &g);
+    b->last_row = g.last_row;
+    b->more_rows = g.more_rows;
+    b->more_cols = g.more_cols;
+    if (g.maxsst >= 0 && x.have_sst) {
+        long count = g.maxsst + 1;
+        sst = calloc((size_t)count, sizeof(char *));
+        need = calloc((size_t)count, 1);
+        for (int rr = 0; rr < g.nrow; rr++)
+            for (int i = 0; i < g.row[rr].n; i++)
+                if (g.row[rr].c[i].sst >= 0)
+                    need[g.row[rr].c[i].sst] = 1;
+        xls_sst(&s, x.sstpos, sst, need, count);
+    }
+    fill_book(b, &g, sst);
+    result = 0;
+done:
+    for (int rr = 0; rr < g.nrow; rr++)
+        row_free(&g.row[rr]);
+    free(g.row);
+    if (result != 0)
+        xl_free(b);
+    if (sst)
+        for (long i = 0; i < g.maxsst + 1; i++)
+            free(sst[i]);
+    free(sst);
+    free(need);
+    free(shown);
+    for (int i = 0; i < x.nsh; i++)
+        free(x.sh[i].name);
+    free(x.xfi);
+    cstream_close(&s);
+    cfs_close(&f);
+    close(fd);
+    return result;
+}
+
+int xl_read(const char *path, int sheet, int max_rows, int max_cols, struct xl_book *b, char *err, size_t errn)
+{
+    uint8_t magic[8] = { 0 };
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    bool ole = pread_all(fd, magic, 8, 0) && !memcmp(magic, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8);
+    close(fd);
+    return ole ? xls_read(path, sheet, max_rows, max_cols, b, err, errn) : xlsx_read(path, sheet, max_rows, max_cols, b, err, errn);
 }

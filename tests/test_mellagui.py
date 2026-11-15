@@ -3172,6 +3172,76 @@ class TestClients(Base):
         head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
         self.assertEqual(head['kind'], 'hex')
 
+    def test_files_previews_an_old_xls_workbook_as_a_table(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+        import xls_writer as w
+        d = tempfile.mkdtemp(prefix='files-xls-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        cells = {}
+        for i, t in enumerate(['Name', 'Qty', 'Date', 'Rate', 'Ok', 'Note']):
+            cells[(0, i)] = ('s', t)
+        cells.update({(1, 0): ('s', 'Ada & Bob and a rather long name to make the shared strings run over several records'), (1, 1): ('rk', 12),
+                      (1, 2): ('rk', 45000, w.XF_DATE), (1, 3): ('rk', 0.25, w.XF_PERCENT), (1, 4): ('b', True), (1, 5): ('l', 'label')})
+        cells.update({(3, 0): ('s', 'Zoë Ωmega', 'rich'), (3, 1): ('n', 0.1), (3, 2): ('n', 45000.75, w.XF_DATETIME), (3, 3): ('fs', 'fml text'),
+                      (3, 4): ('e', 7), (3, 5): ('s', 'phon', 'ext'), (4, 0): ('blank',), (4, 1): ('blank',)})
+        cells.update({(5, 2): ('n', 0.5, w.XF_DATE), (5, 1): ('n', 1234567.891, w.XF_KR), (5, 0): ('fb', True), (5, 3): ('f', 3.5), (5, 4): ('fe', 0x2A)})
+        big = {}
+        for i in range(2500):
+            big[(i, 0)] = ('n', float(i + 1))
+            big[(i, 1)] = ('l', 'r%d' % (i + 1))
+        sheets = [{'name': 'Data', 'cells': cells}, {'name': 'Hid', 'hidden': True, 'cells': {(0, 0): ('s', 'secret')}}, {'name': 'Big&Long', 'cells': big}]
+        w.write(os.path.join(d, 'a_book.xls'), sheets, sst_limit=45)                   # the strings are cut into many CONTINUE records
+        w.write(os.path.join(d, 'b_1904.xls'), sheets, date1904=True)
+        w.write(os.path.join(d, 'c_mini.xls'), [{'name': 'Tiny', 'cells': {(0, 0): ('s', 'Hello'), (0, 1): ('n', 2.5), (1, 0): ('s', 'World'), (1, 1): ('rk', 7)}}])   # in the mini stream
+        w.write(os.path.join(d, 'd_v4.xls'), sheets[:1], shift=12)                      # 4096-byte sectors
+        w.write(os.path.join(d, 'e_locked.xls'), sheets[:1], encrypted=True)
+        w.write(os.path.join(d, 'f_biff5.xls'), sheets[:1], stream_name='Book', vers=0x0500)
+        with open(os.path.join(d, 'g_noworkbook.xls'), 'wb') as f:                      # an OLE2 file that is no workbook (a Word file with an .xls name)
+            f.write(w.ole2({'WordDocument': bytes(range(256)) * 20}))
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_book.xls)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table')
+        self.assertEqual(head['kind'], 'table')
+        self.assertEqual((extra['db']['tables'], extra['db']['tab'], extra['db']['name']), ('2', '0', 'Data'))
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('7', '4'))
+        r1, r2, r3 = extra['row1']['v'], extra['row2']['v'], extra['row3']['v']
+        for want in ('1', 'Name', 'Qty', 'Note'):
+            self.assertIn(want, r1)
+        for want in ('2', 'Ada_&_Bob_and_a_rather_…', '12', '2023-03-15', '25.00%', 'TRUE', 'label'):
+            self.assertIn(want, r2)
+        for want in ('4', 'Zoë_Ωmega', '0.1', '2023-03-15_18:00', 'fml_text', '#DIV/0!', 'phon'):
+            self.assertIn(want, r3)
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.tap(self.K_RIGHT)                                                          # Ctrl+Right: the next sheet (the hidden one is not there)
+        ctl.key(KEY_LEFTCTRL, False)
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '1')
+        self.assertEqual((extra['db']['name'], extra['table']['cols'], extra['table']['rows']), ('Big&Long', '3', '2000'))
+        ctl.click(win['x'] + 466 + 8 + 20, win['y'] + 30 + 22 + 8)                     # a click on the first name of the strip: Data again
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('db', {}).get('tab') == '0')
+        self.assertEqual(extra['db']['name'], 'Data')
+        ctl.tap(self.K_DOWN)                                                           # b_1904: the dates in the other date system
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('b_1904.xls'))
+        self.assertIn('2027-03-16', extra['row2']['v'])
+        ctl.tap(self.K_DOWN)                                                           # c_mini
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('c_mini.xls'))
+        self.assertEqual((extra['table']['cols'], extra['table']['rows']), ('3', '2'))
+        self.assertIn('Hello', extra['row1']['v'])
+        self.assertIn('2.5', extra['row1']['v'])
+        self.assertIn('World', extra['row2']['v'])
+        ctl.tap(self.K_DOWN)                                                           # d_v4: the same workbook in bigger sectors
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'table' and o[0].get('want', '').endswith('d_v4.xls'))
+        self.assertIn('2023-03-15', extra['row2']['v'])
+        ctl.tap(self.K_DOWN)                                                           # e_locked
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('e_locked.xls'))
+        self.assertEqual(head['kind'], 'error')
+        ctl.tap(self.K_DOWN)                                                           # f_biff5: said, not guessed
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'error' and o[0].get('want', '').endswith('f_biff5.xls'))
+        self.assertEqual(head['kind'], 'error')
+        ctl.tap(self.K_DOWN)                                                           # g_noworkbook: no workbook in it: hex
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'hex')
+        self.assertEqual(head['kind'], 'hex')
+
     def test_files_divider_between_the_panes_can_be_dragged_and_is_remembered(self):
         d = tempfile.mkdtemp(prefix='files-div-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

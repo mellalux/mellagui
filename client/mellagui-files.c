@@ -3009,9 +3009,10 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         /* a SQLite database: the strip of tables and the rows of the first one */
     } else if (n >= 12 && !memcmp(buf, "PAR1", 4) && (pv_parquet(pv, path), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
         /* a Parquet file: its first rows as a table */
-    } else if (n >= 30 && !memcmp(buf, "PK\3\4", 4) && (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm")) &&
+    } else if (n >= 30 && (!memcmp(buf, "PK\3\4", 4) || !memcmp(buf, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8)) &&
+               (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt")) &&
                (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR)) {
-        /* an Excel workbook: the strip of sheets and the rows of the first one */
+        /* an Excel workbook (.xlsx and the old binary .xls): the strip of sheets and the rows of the first one */
     } else if (memchr(buf, 0, (size_t)n < 4096 ? (size_t)n : 4096)) {
         pv->kind = PV_HEX;
         pv_hex(pv, buf, (size_t)n < HEX_BYTES ? (size_t)n : HEX_BYTES);

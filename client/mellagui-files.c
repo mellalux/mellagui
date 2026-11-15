@@ -64,6 +64,7 @@
 #include "util.h"
 #include "archread.h"
 #include "certread.h"
+#include "elfread.h"
 #include "fontread.h"
 #include "pdfread.h"
 #include "initree.h"
@@ -3075,6 +3076,20 @@ static bool pv_cert(struct preview *pv, const char *path)
     return ok;
 }
 
+/* ---- an executable, a library, an object file: what the file says about itself, as a JSON tree ---- */
+static bool pv_exe(struct preview *pv, const char *path)
+{
+    char info[200] = "";
+    char *js = exe_json(path, info, sizeof(info));
+    if (!js)
+        return false;
+    bool ok = pv_json(pv, (const unsigned char *)js, strlen(js), FMT_JSON);
+    free(js);
+    if (ok)
+        snprintf(pv->info, sizeof(pv->info), "%s", info);
+    return ok;
+}
+
 /* ---- a font: a sample of text in the font itself, and what the file says about it ---- */
 static void pv_field(struct preview *pv, int *cap, const char *label, const char *text)
 {
@@ -3324,6 +3339,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
         /* a PDF: the text of its first pages */
     } else if ((is_cert_path(path) || (n >= 11 && !memcmp(buf, "-----BEGIN ", 11))) && pv_cert(pv, path)) {
         pv->kind = PV_JSON;                                              /* a certificate, a key ...: its facts as a tree */
+    } else if (n >= 64 && ((!memcmp(buf, "\x7f" "ELF", 4)) || (buf[0] == 'M' && buf[1] == 'Z')) && pv_exe(pv, path)) {
+        pv->kind = PV_JSON;                                              /* an ELF or PE file: its facts as a tree */
     } else if ((ext_is(path, "ttf") || ext_is(path, "otf") || ext_is(path, "ttc") || ext_is(path, "woff") || ext_is(path, "woff2")) && (pv_font(pv, path), pv->kind == PV_FONT || pv->kind == PV_ERROR)) {
         /* a font: a sample in the font itself and its facts */
     } else if (n >= 4 && !memcmp(buf, "PK\3\4", 4) && is_office_doc_path(path) && (pv_document(pv, path), pv->kind == PV_MARKDOWN || pv->kind == PV_ERROR)) {
@@ -7268,6 +7285,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "pages=%d title=%s author=%s created=%s\n", pi.pages, pi.title, pi.author, pi.created);
         fputs(pt, stdout);
         free(pt);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--exe-json")) {                   /* what the preview shows of an ELF / PE file, as JSON (tests) */
+        char einfo[200] = "";
+        char *ej = exe_json(argv[2], einfo, sizeof(einfo));
+        if (!ej)
+            return 1;
+        fprintf(stderr, "%s\n", einfo);
+        puts(ej);
+        free(ej);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

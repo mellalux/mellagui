@@ -3767,6 +3767,102 @@ class TestClients(Base):
             head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith(name) and o[0].get('kind') == kind)
             self.assertEqual(head['kind'], kind, name)
 
+    def test_files_previews_executables_and_libraries_as_a_tree(self):
+        import json
+        import struct
+        d = tempfile.mkdtemp(prefix='files-exe-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        def info(path):
+            r = subprocess.run([exe, '--exe-json', path], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, path + r.stderr)
+            return json.loads(r.stdout), r.stderr.strip()
+        if shutil.which('gcc') and shutil.which('strip'):
+            src = os.path.join(d, 'a.c')
+            open(src, 'w').write('#include <stdio.h>\n#include <string.h>\nint main(int c, char **v) { char b[64]; strcpy(b, v[0]); printf("%s\\n", b); return 0; }\n')
+            def cc(out, *flags):
+                r = subprocess.run(['gcc', src, '-o', os.path.join(d, out)] + list(flags), capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+            cc('a_hard', '-O2', '-fPIE', '-pie', '-fstack-protector-all', '-D_FORTIFY_SOURCE=2', '-Wl,-z,relro,-z,now', '-g')
+            cc('b_soft', '-O0', '-fno-pie', '-no-pie', '-fno-stack-protector', '-U_FORTIFY_SOURCE', '-Wl,-z,norelro', '-Wl,-z,execstack')
+            cc('c_static', '-O2', '-static')
+            subprocess.run(['gcc', '-shared', '-fPIC', '-x', 'c', os.path.join(d, 'a.c'), '-o', os.path.join(d, 'd_lib.so'), '-Wl,-soname,libtest.so.7', '-Wl,-rpath,/opt/test'], check=True,
+                           capture_output=True)
+            subprocess.run(['gcc', '-c', src, '-o', os.path.join(d, 'e_obj.o')], check=True, capture_output=True)
+            shutil.copy(os.path.join(d, 'a_hard'), os.path.join(d, 'f_stripped'))
+            subprocess.run(['strip', os.path.join(d, 'f_stripped')], check=True)
+            j, line = info(os.path.join(d, 'a_hard'))
+            self.assertEqual((j['type'], j['machine'], j['stripped'][:2], j['debug information']), ('position independent executable (PIE)', 'x86-64' if os.uname().machine == 'x86_64' else j['machine'], 'no', 'yes'))
+            self.assertIn('libc.so.6', j['needs'])
+            self.assertTrue(j['interpreter'].startswith('/lib'))
+            self.assertEqual((j['hardening']['PIE'], j['hardening']['RELRO'], j['hardening']['BIND_NOW'], j['hardening']['non-executable stack'], j['hardening']['stack protector'], j['hardening']['FORTIFY']),
+                             ('yes', 'full', 'yes', 'yes', 'yes', 'yes'))
+            self.assertRegex(j['build id'], r'^[0-9a-f]{40}$')
+            self.assertTrue(any(x.startswith('.text ') for x in j['sections']))
+            self.assertTrue(line.startswith('ELF 64-bit') and 'PIE executable' in line, line)
+            j, _ = info(os.path.join(d, 'b_soft'))
+            self.assertEqual((j['type'], j['hardening']['PIE'], j['hardening']['RELRO'], j['hardening']['non-executable stack'], j['hardening']['stack protector']),
+                             ('executable', 'no', 'no', 'no', 'no'))
+            j, line = info(os.path.join(d, 'c_static'))
+            self.assertNotIn('interpreter', j)
+            self.assertNotIn('needs', j)
+            self.assertIn('static', line)
+            j, _ = info(os.path.join(d, 'd_lib.so'))
+            self.assertEqual((j['type'], j['soname'], j['runpath'] if 'runpath' in j else j['rpath']), ('shared library', 'libtest.so.7', '/opt/test'))
+            j, _ = info(os.path.join(d, 'e_obj.o'))
+            self.assertEqual(j['type'], 'relocatable object')
+            self.assertNotIn('hardening', j)
+            j, _ = info(os.path.join(d, 'f_stripped'))
+            self.assertTrue(j['stripped'].startswith('yes'))
+            self.assertEqual(j['debug information'], 'no')
+        # a PE file written by hand: PE32+, a console program importing two DLLs
+        text = b'\xc3' * 16
+        idata = bytearray(0x100)
+        names = [b'KERNEL32.dll\0', b'msvcrt.dll\0']
+        base = 0x2000
+        nameoff = 0x60
+        entries = []
+        for nm in names:
+            idata[nameoff:nameoff + len(nm)] = nm
+            entries.append(base + nameoff)
+            nameoff += len(nm) + 2
+        for i, rva in enumerate(entries):
+            idata[i * 20 + 12:i * 20 + 16] = struct.pack('<I', rva)
+            idata[i * 20:i * 20 + 4] = struct.pack('<I', base + 0x80)             # (a non-zero first field: not the end marker)
+        dos = b'MZ' + bytes(58) + struct.pack('<I', 0x80)
+        opt = struct.pack('<HBBIIIIIQIIHHHHHHIIIIHHQQQQII', 0x20b, 14, 0, 16, 0, 0, 0x1000, 0x1000, 0x140000000, 0x1000, 0x200, 6, 0, 0, 0, 6, 0, 0, 0x4000, 0x200, 0, 3, 0x8160, 0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
+        dirs = bytearray(16 * 8)
+        dirs[8:12] = struct.pack('<I', base)
+        dirs[12:16] = struct.pack('<I', 40)
+        coff = struct.pack('<HHIIIHH', 0x8664, 2, 1700000000, 0, 0, len(opt) + len(dirs), 0x22)
+        def sec(name, vsize, vaddr, raw, ptr, ch):
+            return struct.pack('<8sIIIIIIHHI', name, vsize, vaddr, raw, ptr, 0, 0, 0, 0, ch)
+        pe = dos.ljust(0x80, b'\0') + b'PE\0\0' + coff + opt + bytes(dirs)
+        pe += sec(b'.text', 16, 0x1000, 0x200, 0x400, 0x60000020) + sec(b'.idata', 0x100, base, 0x200, 0x600, 0xc0000040)
+        pe = pe.ljust(0x400, b'\0') + text.ljust(0x200, b'\0') + bytes(idata).ljust(0x200, b'\0')
+        open(os.path.join(d, 'g_win.exe'), 'wb').write(pe)
+        j, line = info(os.path.join(d, 'g_win.exe'))
+        self.assertEqual((j['format'], j['type'], j['machine'], j['subsystem'], j['linked']), ('PE (PE32+)', 'executable', 'x86-64', 'Windows console', '2023-11-14 22:13:20 UTC'))
+        self.assertEqual(j['imports'], ['KERNEL32.dll', 'msvcrt.dll'])
+        self.assertEqual(len(j['sections']), 2)
+        open(os.path.join(d, 'h_text.bin'), 'w').write('MZ not really a program\n' * 20)
+        r = subprocess.run([exe, '--exe-json', os.path.join(d, 'h_text.bin')], capture_output=True)
+        self.assertEqual(r.returncode, 1)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a.c)
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        for name in ('a_hard', 'g_win.exe', 'h_text.bin'):
+            while True:
+                head, extra = self.files_dump(dump)
+                if head.get('want', '').endswith(name):
+                    break
+                ctl.tap(self.K_DOWN)
+                time.sleep(0.3)
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith(name) and o[0].get('loaded') == '1')
+            self.assertEqual(head['kind'], 'text' if name == 'h_text.bin' else 'json', name)
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib

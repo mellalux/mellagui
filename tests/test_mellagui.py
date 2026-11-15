@@ -2788,7 +2788,7 @@ class TestClients(Base):
         return out
 
     def files_start_preview(self, d, env):
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
             self.skipTest('mellagui-files not built')
         p = subprocess.Popen([exe, d], env=dict(os.environ, XDG_DATA_HOME=os.path.join(d, '.xdg'), XDG_CONFIG_HOME=os.path.join(d, '.cfg'), **env),
@@ -3462,7 +3462,7 @@ class TestClients(Base):
         import zipfile
         d = tempfile.mkdtemp(prefix='files-doc-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
             self.skipTest('mellagui-files not built')
         W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
@@ -3560,7 +3560,7 @@ class TestClients(Base):
             self.skipTest('openssl is needed to make the test files')
         d = tempfile.mkdtemp(prefix='files-cert-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
             self.skipTest('mellagui-files not built')
         def ssl(*args):
@@ -3675,6 +3675,98 @@ class TestClients(Base):
             ctl.abs(win['x'] + 700, win['y'] + 250)
             ctl.tap(self.K_DOWN)
 
+    def test_files_previews_a_pdf_as_its_text(self):
+        import zlib
+        d = tempfile.mkdtemp(prefix='files-pdf-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        def pdf(objs, trailer_extra='', root=1):
+            out = bytearray(b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\n')
+            offs = {}
+            for num in sorted(objs):
+                offs[num] = len(out)
+                body = objs[num]
+                out += b'%d 0 obj\n' % num + (body if isinstance(body, bytes) else body.encode('latin-1')) + b'\nendobj\n'
+            xr = len(out)
+            n = max(objs) + 1
+            out += b'xref\n0 %d\n0000000000 65535 f \n' % n
+            for i in range(1, n):
+                out += (b'%010d 00000 n \n' % offs[i]) if i in offs else b'0000000000 65535 f \n'
+            out += b'trailer\n<< /Size %d /Root %d 0 R /Info 20 0 R %s >>\nstartxref\n%d\n%%%%EOF\n' % (n, root, trailer_extra.encode(), xr)
+            return bytes(out)
+        def stream(data, flate=False, extra=''):
+            raw = zlib.compress(data) if flate else data
+            return b'<< /Length %d %s%s >>\nstream\n' % (len(raw), b'/Filter /FlateDecode ' if flate else b'', extra.encode()) + raw + b'\nendstream'
+        font = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'
+        info = '<< /Title <FEFF004D00FC00FC0074> /Author (Ada) /Producer (test) /CreationDate (D:20240102030405+02\'00\') >>'
+        base = {1: '<< /Type /Catalog /Pages 2 0 R >>', 2: '<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources << /Font << /F1 5 0 R >> >> >>',
+                3: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>', 5: font, 20: info}
+        text = (b'BT /F1 12 Tf 14 TL 72 720 Td (Hello World) Tj 0 -14 Td (Caf\\351 \\344\\366\\365\\374) Tj 0 -14 Td [(Wor)-20(d)-300(gap)] TJ 0 -14 Td (x) Tj 100 0 Td (right) Tj '
+                b'0 -14 Td (esc \\(paren\\) \\101) Tj T* (and ) \' ET')
+        o = dict(base)
+        o[4] = stream(text)
+        open(os.path.join(d, 'a_plain.pdf'), 'wb').write(pdf(o))
+        o = dict(base)                                                                   # two pages, Flate, a content stream in two pieces, resources inherited from /Pages
+        o[2] = '<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /Resources << /Font << /F1 5 0 R >> >> >>'
+        o[3] = '<< /Type /Page /Parent 2 0 R /Contents [4 0 R 7 0 R] >>'
+        o[4] = stream(b'BT /F1 12 Tf 72 720 Td (Split ', flate=True)
+        o[7] = stream(b'line) Tj ET', flate=True)
+        o[6] = '<< /Type /Page /Parent 2 0 R /Contents 8 0 R >>'
+        o[8] = stream(b'BT /F1 12 Tf 72 700 Td (Second page) Tj ET', flate=True)
+        open(os.path.join(d, 'b_flate.pdf'), 'wb').write(pdf(o))
+        o = dict(base)                                                                   # a Type0 font with a ToUnicode map, a Differences encoding, a form XObject
+        cmap = (b'/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /X def 1 begincodespacerange <0000> <FFFF> endcodespacerange '
+                b'3 beginbfchar <0001> <00C4> <0002> <0062> <0003> <0063> endbfchar 1 beginbfrange <0004> <0006> <0078> endbfrange endcmap')
+        o[5] = '<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [9 0 R] /ToUnicode 10 0 R >>'
+        o[9] = '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X /DW 500 >>'
+        o[10] = stream(cmap)
+        o[11] = '<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding << /Type /Encoding /Differences [65 /Euro /eacute /odieresis] >> >>'
+        o[12] = stream(b'BT /F2 10 Tf 0 0 Td (AB) Tj ET', extra='/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F2 11 0 R >> >>')
+        o[2] = '<< /Type /Pages /Kids [3 0 R] /Count 1 >>'
+        o[3] = '<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R /F2 11 0 R >> /XObject << /Fm1 12 0 R >> >> /Contents 4 0 R >>'
+        o[4] = stream(b'BT /F1 12 Tf 72 720 Td <00010002000300040005> Tj ET q 1 0 0 1 0 -30 cm /Fm1 Do Q')
+        open(os.path.join(d, 'c_cid.pdf'), 'wb').write(pdf(o))
+        o = dict(base)
+        o[4] = stream(text)
+        open(os.path.join(d, 'd_locked.pdf'), 'wb').write(pdf(o, trailer_extra='/Encrypt 30 0 R'))
+        o = dict(base)
+        o[4] = stream(b'0 0 100 100 re f')
+        open(os.path.join(d, 'e_picture.pdf'), 'wb').write(pdf(o))
+        open(os.path.join(d, 'f_not.pdf'), 'w').write('this is no pdf at all\n')
+        def txt(name):
+            r = subprocess.run([exe, '--pdf-text', os.path.join(d, name)], capture_output=True, text=True, timeout=30)
+            return r.returncode, r.stdout, r.stderr.strip()
+        rc, out, info = txt('a_plain.pdf')
+        self.assertEqual(rc, 0, info)
+        self.assertEqual(out, '=== Page 1 ===\nHello World\nCafé äöõü\nWord gap\nx right\nesc (paren) A\nand\n')
+        self.assertIn('title=Müüt author=Ada created=2024-01-02 03:04', info)
+        rc, out, info = txt('b_flate.pdf')
+        self.assertEqual(rc, 0, info)
+        self.assertEqual(out, '=== Page 1 ===\nSplit line\n\n=== Page 2 ===\nSecond page\n')
+        self.assertIn('pages=2', info)
+        rc, out, info = txt('c_cid.pdf')
+        self.assertEqual(rc, 0, info)
+        self.assertEqual(out, '=== Page 1 ===\nÄbcxy\n€é\n')                   # <0005> = y; the form's text "AB" through Differences
+        rc, out, info = txt('d_locked.pdf')
+        self.assertEqual(rc, 1)
+        self.assertIn('encrypted', info)
+        rc, out, info = txt('e_picture.pdf')
+        self.assertEqual(rc, 0, info)
+        self.assertIn('(no text on this page)', out)
+        rc, out, info = txt('f_not.pdf')
+        self.assertEqual(rc, 1)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump})            # (the cursor is on a_plain.pdf)
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'text' and o[0].get('want', '').endswith('a_plain.pdf'))
+        self.assertEqual(head['kind'], 'text')
+        ctl.abs(win['x'] + 700, win['y'] + 250)
+        for name, kind in (('b_flate.pdf', 'text'), ('c_cid.pdf', 'text'), ('d_locked.pdf', 'error'), ('e_picture.pdf', 'text'), ('f_not.pdf', 'text')):
+            ctl.tap(self.K_DOWN)
+            head, extra = self.files_dump(dump, want=lambda o, name=name: o[0].get('want', '').endswith(name) and o[0].get('kind') == kind)
+            self.assertEqual(head['kind'], kind, name)
+
     def test_files_previews_fonts_with_a_sample_in_the_font(self):
         import struct
         import zlib
@@ -3683,7 +3775,7 @@ class TestClients(Base):
             self.skipTest('DejaVu Sans is needed as a sample font')
         d = tempfile.mkdtemp(prefix='files-font-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
             self.skipTest('mellagui-files not built')
         shutil.copy(src, os.path.join(d, 'a_sans.ttf'))
@@ -4289,7 +4381,7 @@ class TestClients(Base):
 
     def files_start(self, *args, app_id='mellagui.files', extra_files=0, env=None):
         """A folder with sub/, a.txt, p.ppm (a 1x1 image), .hidden and the browser on it. Returns (process, folder)."""
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
             self.skipTest('mellagui-files not built')
         d = tempfile.mkdtemp(prefix='files-', dir=tmp)
@@ -4789,7 +4881,7 @@ class TestClients(Base):
         self.assertFalse(os.path.exists(os.path.join(d, 'p.ppm')))
 
     def test_files_remembers_its_folders_and_the_preview(self):
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
             self.skipTest('mellagui-files not built')
         d = tempfile.mkdtemp(prefix='files-state-', dir=tmp)
@@ -13548,7 +13640,7 @@ class TestDoubleClickTime(Base):
 
     def files_double_click(self, ms, gap):
         """The file manager started with that time; a.txt double clicked with `gap` seconds between the clicks: did the editor open?"""
-        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe) or not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-edit')):
             self.skipTest('mellagui-files / mellagui-edit not built')
         d = tempfile.mkdtemp(prefix='files-dc-', dir=tmp)

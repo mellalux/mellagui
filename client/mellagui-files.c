@@ -65,6 +65,7 @@
 #include "archread.h"
 #include "certread.h"
 #include "fontread.h"
+#include "pdfread.h"
 #include "initree.h"
 #include "json.h"
 #include "parquet.h"
@@ -3157,6 +3158,70 @@ static bool pv_font(struct preview *pv, const char *path)
     return true;
 }
 
+/* ---- a PDF: its text (and what it says about itself) as plain lines ---- */
+static bool pv_pdf(struct preview *pv, const char *path)
+{
+    struct pdf_info pi;
+    char *text = NULL, err[160] = "";
+    int r = pdf_text(path, 40, 150000, &pi, &text, err, sizeof(err));
+    if (r == -1)
+        return false;
+    int cap = 0;
+    if (r < 0) {
+        pv->kind = PV_ERROR;
+        pv_linef(pv, &cap, "A PDF whose text cannot be shown:");
+        pv_linef(pv, &cap, "%s", err);
+        return true;
+    }
+    pv->kind = PV_TEXT;
+    pv->top = 0;
+    if (pi.title[0])
+        pv_linef(pv, &cap, "Title:    %s", pi.title);
+    if (pi.author[0])
+        pv_linef(pv, &cap, "Author:   %s", pi.author);
+    if (pi.subject[0])
+        pv_linef(pv, &cap, "Subject:  %s", pi.subject);
+    if (pi.created[0])
+        pv_linef(pv, &cap, "Created:  %s", pi.created);
+    if (pi.producer[0])
+        pv_linef(pv, &cap, "Made by:  %s", pi.producer);
+    pv_linef(pv, &cap, "Pages:    %d%s", pi.pages, pi.pages_read < pi.pages ? " (the text of the first ones follows)" : "");
+    pv_linef(pv, &cap, "");
+    for (const char *p = text; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (l == 0)
+            pv_line(pv, &cap, "", 0);
+        while (l > 0) {                                                 /* long lines are broken at a blank, about 60 characters in */
+            size_t cut = 0, chars = 0, lastsp = 0;
+            while (cut < l && chars < 60) {
+                if (p[cut] == ' ')
+                    lastsp = cut;
+                cut++;
+                while (cut < l && ((unsigned char)p[cut] & 0xc0) == 0x80)
+                    cut++;
+                chars++;
+            }
+            if (cut < l && lastsp > 20)
+                cut = lastsp;
+            size_t ll = cut;
+            while (ll > 0 && p[ll - 1] == ' ')
+                ll--;
+            pv_line(pv, &cap, p, ll);
+            p += cut;
+            l -= cut;
+            while (l > 0 && *p == ' ') {
+                p++;
+                l--;
+            }
+        }
+        p += (e ? 1 : 0);
+    }
+    snprintf(pv->info, sizeof(pv->info), "PDF %s, %d page%s%s%s", pi.version, pi.pages, pi.pages == 1 ? "" : "s", pi.producer[0] ? ", " : "", pi.producer);
+    free(text);
+    return true;
+}
+
 static void preview_load(struct preview *pv, const char *path, bool hidden)
 {
     preview_clear(pv);
@@ -3255,6 +3320,8 @@ static void preview_load(struct preview *pv, const char *path, bool hidden)
                (ext_is(path, "xlsx") || ext_is(path, "xlsm") || ext_is(path, "xltx") || ext_is(path, "xltm") || ext_is(path, "xls") || ext_is(path, "xlt") || ext_is(path, "ods") || ext_is(path, "ots") || ext_is(path, "numbers")) &&
                (pv_xlsx(pv, path, 0), pv->kind == PV_TABLE || pv->kind == PV_ERROR || pv->kind == PV_IMAGE)) {
         /* a workbook (Excel .xlsx / .xls, OpenDocument .ods): the strip of sheets and the rows of the first one */
+    } else if ((ext_is(path, "pdf") || (n >= 5 && !memcmp(buf, "%PDF-", 5))) && (pv_pdf(pv, path), pv->kind == PV_TEXT || pv->kind == PV_ERROR)) {
+        /* a PDF: the text of its first pages */
     } else if ((is_cert_path(path) || (n >= 11 && !memcmp(buf, "-----BEGIN ", 11))) && pv_cert(pv, path)) {
         pv->kind = PV_JSON;                                              /* a certificate, a key ...: its facts as a tree */
     } else if ((ext_is(path, "ttf") || ext_is(path, "otf") || ext_is(path, "ttc") || ext_is(path, "woff") || ext_is(path, "woff2")) && (pv_font(pv, path), pv->kind == PV_FONT || pv->kind == PV_ERROR)) {
@@ -7188,6 +7255,19 @@ int main(int argc, char **argv)
         printf("family=%s\nstyle=%s\nfull=%s\nversion=%s\npsname=%s\nglyphs=%d\nunits=%d\nweight=%d\nitalic=%d\nmono=%d\ncff=%d\nwoff=%d\nscripts=%s\nsample=%dx%d\n",
                fi.family, fi.style, fi.full, fi.version, fi.psname, fi.glyphs, fi.units, fi.weight, fi.italic, fi.monospace, fi.cff, fi.woff, fi.scripts, fi.alpha ? fi.w : 0, fi.alpha ? fi.h : 0);
         font_free(&fi);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--pdf-text")) {                   /* the text of a PDF as the preview shows it (tests) */
+        struct pdf_info pi;
+        char *pt = NULL, perr[160] = "";
+        int pr = pdf_text(argv[2], 40, 150000, &pi, &pt, perr, sizeof(perr));
+        if (pr != 0) {
+            fprintf(stderr, "%s\n", pr == -1 ? "not a PDF" : perr);
+            return 1;
+        }
+        fprintf(stderr, "pages=%d title=%s author=%s created=%s\n", pi.pages, pi.title, pi.author, pi.created);
+        fputs(pt, stdout);
+        free(pt);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[1], "--numbers-dump"))                 /* the structure of a Numbers file as text (work on the reader) */

@@ -70,6 +70,7 @@
 #include "png.h"
 #include "protocol.h"
 #include "sndconf.h"
+#include "thumbbox.h"
 #include "theme.h"
 #include "uikit.h"
 #include "util.h"
@@ -1292,27 +1293,10 @@ static int grid_hit(const struct app *a, double px, double py)
     return -1;
 }
 
-/* d = the source squeezed into dw x dh by averaging blocks. */
+/* d = the source squeezed into dw x dh by averaging blocks (client/thumbbox.h). */
 static void thumb_box(const uint32_t *s, int sw, int sh, uint32_t *d, int dw, int dh)
 {
-    for (int y = 0; y < dh; y++) {
-        int y0 = (int)((int64_t)y * sh / dh), y1 = (int)((int64_t)(y + 1) * sh / dh);
-        y1 = LM_MIN(LM_MAX(y1, y0 + 1), sh);
-        for (int x = 0; x < dw; x++) {
-            int x0 = (int)((int64_t)x * sw / dw), x1 = (int)((int64_t)(x + 1) * sw / dw);
-            x1 = LM_MIN(LM_MAX(x1, x0 + 1), sw);
-            unsigned r = 0, g = 0, b = 0, n = 0;
-            for (int yy = y0; yy < y1; yy++)
-                for (int xx = x0; xx < x1; xx++) {
-                    uint32_t p = s[(size_t)yy * (size_t)sw + (size_t)xx];
-                    r += (p >> 16) & 255;
-                    g += (p >> 8) & 255;
-                    b += p & 255;
-                    n++;
-                }
-            d[(size_t)y * (size_t)dw + (size_t)x] = 0xff000000u | (r / n) << 16 | (g / n) << 8 | (b / n);
-        }
-    }
+    lm_thumb_box(s, sw, sh, d, dw, dh);
 }
 
 static void paint_grid(struct app *a)

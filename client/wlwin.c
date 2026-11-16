@@ -232,6 +232,13 @@ void wlwin_warp_pointer(struct wlwin *w, int x, int y)
     WLC_SEND(w->c, w->menu, LM_MELLAGUI_MENU_V1_REQ_WARP, { .i = (int32_t)lround(x * z) }, { .i = (int32_t)lround(y * z) });
 }
 
+void wlwin_raise(struct wlwin *w)
+{
+    if (!w->menu || !w->surface)
+        return;
+    WLC_SEND(w->c, w->menu, LM_MELLAGUI_MENU_V1_REQ_RAISE, { .o = w->surface });
+}
+
 bool wlwin_menu(struct wlwin *w, const char *entries)
 {
     if (!w->menu)

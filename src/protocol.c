@@ -535,6 +535,7 @@ static const struct lm_message mellagui_menu_requests[] = {
     MSG("destroy", "", 1, NULL),
     MSG("popup", "s", 1, NULL),
     MSG("warp", "ii", 1, NULL),
+    MSG("raise", "o", 1, TY(&lm_wl_surface_interface)),
 };
 static const struct lm_message mellagui_menu_events[] = {
     MSG("chosen", "i", 1, NULL),

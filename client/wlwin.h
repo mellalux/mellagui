@@ -105,6 +105,9 @@ bool wlwin_menu(struct wlwin *w, const char *entries);
  * that was pressed (a text size button at the window's edge) takes the pointer along. Send it after the commit of the new size. Needs the compositor's
  * mellagui_menu_v1 (silently nothing without it). */
 void wlwin_warp_pointer(struct wlwin *w, int x, int y);
+/* Bring this window forward (to the top, to the current workspace, out of the minimized state) and give it the focus. Needs the compositor's mellagui_menu_v1
+ * (silently nothing without it): for a program that was asked by another one to show something. */
+void wlwin_raise(struct wlwin *w);
 
 /* The content of the window is drawn `percent` per cent as big as it is laid out (a gadget card whose contents can be made bigger or smaller):
  * a program still lays out in bw x bh and draws with the wlwin_* calls, but bw x bh is now the window's size divided by the zoom, and the pointer

@@ -11800,15 +11800,13 @@ class TestCamera(Base):
         self.assertEqual(white(before), 0)
         self.assertGreater(white(counting), 100, 'no number over the picture')
         flashed = False
-        end = time.time() + 4
-        while time.time() < end and not self.pngs(d):
-            time.sleep(0.03)
-        for _ in range(8):                                                                # the screen goes white for a moment
-            st, _ = state()
-            if st['flash'] == '1':
+        end, after = time.time() + 4, None                                                # (the flash is looked for all the time, not only after the file shows up: the dump is written by a paint)
+        while time.time() < end and (after is None or time.time() < after):
+            if state()[0]['flash'] == '1':
                 flashed = True
-                break
-            time.sleep(0.03)
+            if after is None and self.pngs(d):
+                after = time.time() + 0.5
+            time.sleep(0.02)
         self.assertEqual(len(self.pngs(d)), 1)
         self.assertTrue(flashed, 'no flash after the picture')
         time.sleep(0.6)
@@ -12186,7 +12184,10 @@ class TestCamera(Base):
         self.assertIn('size = 320x240', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
         p.kill()
         p.wait()
-        time.sleep(0.3)
+        for _ in range(100):                                                                  # (the compositor has dropped its window: the next start finds only its own)
+            if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam']:
+                break
+            time.sleep(0.05)
         p2, win2, d2, state2 = self.booth(XDG_CONFIG_HOME=cfg)                                # another start: the same resolution
         time.sleep(0.5)
         ctl.tap(57)
@@ -13817,10 +13818,23 @@ class TestViewer(Base):
     def solid(self, rgb, w=60, h=40):
         return make_png(w, h, 2, 8, [[rgb] * w for _ in range(h)])
 
-    def start(self, directory, *args, env=None):
+    def start(self, directory, *args, env=None, strip=False, single=False):
+        """A viewer. By default as the old tests want it: no strip of small pictures (its pictures would be counted with the big one) and a window of its own
+        (a viewer that is still there from another test would take the path). strip=True / single=True switch the new behaviour on."""
         if not os.path.exists(self.VIEW):
             self.skipTest('mellagui-view not built')
-        p = subprocess.Popen([self.VIEW] + list(args or [directory]), env=dict(os.environ, HOME=directory, **(env or {})),
+        env = dict(env or {})
+        if 'XDG_CONFIG_HOME' not in env:
+            cfg = tempfile.mkdtemp(prefix='mellagui-viewcfg-', dir=tmp)
+            self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+            if not strip:
+                os.makedirs(os.path.join(cfg, 'mellagui'))
+                with open(os.path.join(cfg, 'mellagui', 'viewer.conf'), 'w') as f:
+                    f.write('thumbs = 0\n')
+            env['XDG_CONFIG_HOME'] = cfg
+        if not single:
+            env.setdefault('MELLAGUI_VIEW_SINGLE', '0')
+        p = subprocess.Popen([self.VIEW] + list(args or [directory]), env=dict(os.environ, HOME=directory, **env),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.view')
@@ -13929,6 +13943,246 @@ class TestViewer(Base):
         ctl.tap(107)
         time.sleep(0.2)
         self.assertIsNone(p.poll())
+
+    # ---- the strip of small pictures, one window, the Open card ------------------------------------------------------------------
+
+    def vstart(self, directory, *args, env=None, single=False):
+        """The viewer with the strip and a dump; returns (process, window, state()). state() = (the state line as a dict, the boxes, the items {index: (name, x, y, w, h, loaded)}, the rows of the card)."""
+        dump = os.path.join(tmp, 'view-%d.dump' % time.time_ns())
+        p, win = self.start(directory, *args, env=dict(env or {}, MELLAGUI_VIEW_DUMP=dump), strip=True, single=single)
+        for _ in range(60):
+            if os.path.exists(dump):
+                break
+            time.sleep(0.05)
+        time.sleep(0.5)
+
+        def state():
+            lines = open(dump).read().splitlines()
+            st = dict(kv.split('=', 1) for kv in lines[0].split()[1:])
+            boxes, items, rows = {}, {}, []
+            for l in lines[1:]:
+                f = l.split()
+                if f[0] in ('open', 'view'):
+                    boxes[f[0]] = tuple(int(v) for v in f[1:5])
+                elif f[0] == 'item':
+                    items[int(f[1])] = (f[2],) + tuple(int(v) for v in f[3:8])
+                elif f[0] == 'card':
+                    boxes['card'] = tuple(int(v) for v in f[1:5])
+                    st['field'] = l.split('field=', 1)[1].rsplit(' err=', 1)[0]
+                    st['err'] = l.rsplit(' err=', 1)[1]
+                elif f[0] == 'cbtn':
+                    boxes['cbtn ' + f[1]] = tuple(int(v) for v in f[2:6])
+                elif f[0] == 'crow':
+                    rows.append((f[3][4:], int(f[2][2:]), f[4][5:]))                  # (dir?, y, name)
+                elif f[0] == 'clist':
+                    boxes['clist'] = tuple(int(v) for v in f[1:5])
+            return st, boxes, items, rows
+        return p, win, state
+
+    def pngs_in(self, d, n, prefix='p', size=(60, 40)):
+        for i in range(n):
+            with open(os.path.join(d, '%s%02d.png' % (prefix, i)), 'wb') as f:
+                f.write(self.solid((i * 6 % 256, 100, 200 - i * 3 % 150), *size))
+
+    def tmpdir(self):
+        d = tempfile.mkdtemp(prefix='mellagui-viewer-')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_the_strip_has_a_small_picture_of_every_file_the_viewer_can_show(self):
+        self.own_compositor()
+        d = self.tmpdir()
+        self.pngs_in(d, 5)
+        for n in ('clip.mp4', 'song.wav'):                                            # (not real: only their names and their tiles matter here)
+            with open(os.path.join(d, n), 'wb') as f:
+                f.write(b'not a real file')
+        with open(os.path.join(d, 'notes.txt'), 'w') as f:
+            f.write('text')
+        p, win, state = self.vstart(d, os.path.join(d, 'p01.png'))
+        time.sleep(0.8)
+        st, boxes, items, _ = state()
+        self.assertEqual((st['n'], st['strip'], st['cur']), ('7', '1', '2'))          # the txt file is not in it; clip, p00..p04, song
+        self.assertEqual([items[i][0] for i in sorted(items)], ['clip.mp4', 'p00.png', 'p01.png', 'p02.png', 'p03.png', 'p04.png', 'song.wav'])
+        self.assertEqual(st['loaded'], '5')                                            # the five pictures have a small copy, the video and the sound a tile
+        view = boxes['view']
+        self.assertTrue(all(items[i][2] >= view[1] + view[3] for i in items), 'the strip is over the picture')
+        ppm = self.shot('view-strip.ppm')                                              # the current one is framed in the accent colour, the others are not
+        x, y, w, h = items[2][1:5]
+        self.assertEqual(ppm.px(win['x'] + x - 2, win['y'] + y + h // 2), (0x6f, 0xa8, 0xff))
+        self.assertNotEqual(ppm.px(win['x'] + items[3][1] - 2, win['y'] + items[3][2] + h // 2), (0x6f, 0xa8, 0xff))
+        x, y, w, h = items[4][1:5]
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                          # a click shows that file
+        self.assertTrue(self.wait_title('p03.png - Images'))
+        x, y, w, h = items[0][1:5]
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                          # (a video that cannot be played: an error line, no crash)
+        self.assertTrue(self.wait_title('clip.mp4 - Images'))
+        time.sleep(0.3)
+        self.assertIsNone(p.poll())
+
+    # (the helper `shot` of this class)
+    def shot(self, name):
+        return ctl.dump(os.path.join(tmp, name))
+
+    def test_t_hides_the_strip_and_the_choice_is_remembered(self):
+        self.own_compositor()
+        d = self.tmpdir()
+        self.pngs_in(d, 4)
+        cfg = tempfile.mkdtemp(prefix='mellagui-viewcfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, win, state = self.vstart(d, env={'XDG_CONFIG_HOME': cfg})
+        st, boxes, items, _ = state()
+        self.assertEqual(st['strip'], '1')
+        h_with = boxes['view'][3]
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        ctl.tap(20)                                                                   # T
+        time.sleep(0.5)
+        st, boxes, items, _ = state()
+        self.assertEqual(st['strip'], '0')
+        self.assertEqual(items, {})
+        self.assertEqual(boxes['view'][3], h_with + 80)                               # the picture has the room of the strip
+        self.assertIn('thumbs = 0', open(os.path.join(cfg, 'mellagui', 'viewer.conf')).read())
+        p.kill()
+        p.wait()
+        time.sleep(0.3)
+        p2, win2, state2 = self.vstart(d, env={'XDG_CONFIG_HOME': cfg})               # the next start has no strip either
+        self.assertEqual(state2()[0]['strip'], '0')
+        ctl.abs(win2['x'] + 300, win2['y'] + 200)
+        ctl.tap(20)
+        time.sleep(0.4)
+        self.assertEqual(state2()[0]['strip'], '1')
+
+    def test_the_strip_scrolls_with_the_wheel_and_keeps_the_current_picture_in_view(self):
+        self.own_compositor()
+        d = self.tmpdir()
+        self.pngs_in(d, 40)
+        p, win, state = self.vstart(d, os.path.join(d, 'p00.png'))
+        st, boxes, items, _ = state()
+        self.assertEqual((st['cur'], st['sx']), ('0', '0'))
+        self.assertLess(len(items), 40)                                               # only what is in view is in the dump
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        ctl.tap(107)                                                                  # End: the last picture; the strip follows it
+        time.sleep(0.6)
+        st, boxes, items, _ = state()
+        self.assertEqual(st['cur'], '39')
+        self.assertGreater(int(st['sx']), 1000)
+        self.assertIn(39, items)
+        self.assertLessEqual(items[39][1] + 64, win['w'])
+        ctl.tap(102)                                                                  # Home
+        time.sleep(0.5)
+        self.assertEqual(state()[0]['sx'], '0')
+        sy = state()[2][0][2]
+        ctl.abs(win['x'] + 400, win['y'] + sy + 20)                                   # the wheel over the strip scrolls it (not zoom the picture)
+        time.sleep(0.2)
+        for _ in range(2):
+            ctl.cmd('axis v 15 1')
+            time.sleep(0.15)
+        time.sleep(0.4)
+        st, boxes, items, _ = state()
+        self.assertEqual(st['sx'], str(2 * 3 * 72))                                   # three pictures a notch
+        self.assertEqual(st['cur'], '0')
+        for _ in range(40):
+            ctl.cmd('axis v -15 1')
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['sx'], '0')
+
+    def test_a_second_start_hands_its_path_to_the_first_viewer_and_ends(self):
+        self.own_compositor()
+        d1, d2, d3 = self.tmpdir(), self.tmpdir(), self.tmpdir()
+        self.pngs_in(d1, 3)
+        self.pngs_in(d2, 4, prefix='z')
+        self.pngs_in(d3, 2, prefix='o')
+        p, win, state = self.vstart(d1, os.path.join(d1, 'p00.png'), single=True)
+        views = lambda: [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view']
+        self.assertEqual(len(views()), 1)
+        # another viewer window of its own (it takes the focus), so that the first one has to come forward
+        other = subprocess.Popen([self.VIEW, d3], env=dict(os.environ, HOME=d3, MELLAGUI_VIEW_SINGLE='0', XDG_CONFIG_HOME=os.path.join(tmp, 'x-nocfg')), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (other.poll() is None) and (other.kill(), other.wait()))
+        for _ in range(100):
+            if len(views()) == 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(views()), 2)
+        time.sleep(0.5)
+        first = [w for w in views() if w['title'] == 'p00.png - Images'][0]
+        t0 = time.time()
+        r = subprocess.run([self.VIEW, os.path.join(d2, 'z02.png')], env=dict(os.environ, HOME=d2), capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.time() - t0, 3.0)                                        # it handed the path over and ended at once
+        time.sleep(0.6)
+        self.assertEqual(len(views()), 2, 'the second start made a window of its own')
+        st, boxes, items, _ = state()
+        self.assertEqual((st['dir'], st['name']), (d2, 'z02.png'))                    # the first viewer shows it, with the pictures of its folder
+        self.assertEqual(st['n'], '4')
+        mine = [w for w in views() if w['id'] == first['id']][0]
+        self.assertIn('focused', mine['flags'])                                       # ... and came forward
+        r = subprocess.run([self.VIEW, d1], env=dict(os.environ, HOME=d1), capture_output=True, text=True, timeout=10)      # a folder: its newest picture
+        self.assertEqual(r.returncode, 0)
+        time.sleep(0.5)
+        st = state()[0]
+        self.assertEqual((st['dir'], st['name']), (d1, 'p02.png'))
+        p.kill()                                                                      # a killed viewer leaves nothing: the next start is the viewer again
+        p.wait()
+        time.sleep(0.3)
+        p2, win2, state2 = self.vstart(d2, single=True)
+        self.assertEqual(state2()[0]['ipc'], '1')
+        r = subprocess.run([self.VIEW, os.path.join(d1, 'p00.png')], env=dict(os.environ, HOME=d1), capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        time.sleep(0.5)
+        self.assertEqual(state2()[0]['name'], 'p00.png')
+
+    def test_the_open_card_chooses_another_folder(self):
+        self.own_compositor()
+        root = self.tmpdir()
+        for sub, n in (('a', 2), ('b', 3), ('c', 0)):
+            os.makedirs(os.path.join(root, sub))
+            self.pngs_in(os.path.join(root, sub), n, prefix=sub)
+        p, win, state = self.vstart(os.path.join(root, 'a'), os.path.join(root, 'a', 'a00.png'))
+        ctl.abs(win['x'] + 300, win['y'] + 200)
+        ctl.tap(24)                                                                   # O: the card
+        time.sleep(0.5)
+        st, boxes, items, rows = state()
+        self.assertEqual(st['card'], '1')
+        self.assertEqual(st['field'], os.path.join(root, 'a') + '/')
+        self.assertEqual([r[2] for r in rows], ['..', 'a00.png', 'a01.png'])
+        ctl.tap(KEY_ESC)                                                              # Esc closes it, the viewer is still on its folder
+        time.sleep(0.3)
+        st = state()[0]
+        self.assertEqual((st['card'], st['dir']), ('0', os.path.join(root, 'a')))
+        self.assertIsNone(p.poll())
+        x, y, w, h = state()[1]['open']                                               # the Open... button of the strip
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        time.sleep(0.4)
+        st, boxes, items, rows = state()
+        self.assertEqual(st['card'], '1')
+
+        def click_row(name):
+            st, boxes, items, rows = state()
+            row = [r for r in rows if r[2] == name][0]
+            ctl.click(win['x'] + boxes['clist'][0] + 40, win['y'] + row[1] + 10)
+            time.sleep(0.4)
+            return state()
+        st, boxes, items, rows = click_row('..')                                      # up: the list of the folders next to a
+        self.assertEqual(st['field'], root + '/')
+        self.assertEqual([r[2] for r in rows], ['..', 'a', 'b', 'c'])
+        st, boxes, items, rows = click_row('b')                                       # into b
+        self.assertEqual(st['field'], os.path.join(root, 'b') + '/')
+        x, y, w, h = boxes['cbtn open']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                       # Open: b is the viewer's folder
+        time.sleep(0.6)
+        st, boxes, items, rows = state()
+        self.assertEqual((st['card'], st['dir'], st['n']), ('0', os.path.join(root, 'b'), '3'))
+        self.assertEqual(st['name'], 'b02.png')                                       # a folder shows its newest picture
+        self.assertTrue(self.wait_title('b02.png - Images'))
+        ctl.tap(24)                                                                   # O again, a picture is taken at once by a double click
+        time.sleep(0.4)
+        st, boxes, items, rows = state()
+        row = [r for r in rows if r[2] == 'b00.png'][0]
+        ctl.click(win['x'] + boxes['clist'][0] + 40, win['y'] + row[1] + 10)
+        time.sleep(0.05)
+        ctl.click(win['x'] + boxes['clist'][0] + 40, win['y'] + row[1] + 10)
+        time.sleep(0.6)
+        st = state()[0]
+        self.assertEqual((st['card'], st['name']), ('0', 'b00.png'))
 
     # ---- videos -----------------------------------------------------------------------------------------------------------
 

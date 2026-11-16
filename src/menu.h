@@ -10,6 +10,8 @@
  *   warp(x, y)       move the pointer to (x, y) of the surface it is over (surface pixels; only while that surface is this program's own): a program
  *                    whose window grows under the button that was pressed (a text size button at the window's edge) takes the pointer along, so the
  *                    button can be pressed again where it now is
+ *   raise(surface)   bring the window of one of this program's own surfaces forward (its workspace is switched to, a minimized window comes back):
+ *                    the single `mellagui-view` window, asked by a second start to show another picture, comes up without an xdg-activation token
  *   closed()         the menu went away without a choice (a click elsewhere, Esc, another menu, the screen was locked)
  *
  * One menu at a time; a new popup closes the old one (which gets `closed`). Served only to MellaGUI's own programs (lm_settings_client_allowed);

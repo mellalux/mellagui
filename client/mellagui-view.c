@@ -16,15 +16,32 @@
  * Keys (images): Left/Right (PgUp/PgDn, Backspace/Space) previous / next, Home/End first / last, + - zoom, 0 or 1 = 100 %,
  * F = fit, I = the picture's EXIF data (camera, exposure, time, place) over the corner, R = rescan the directory, Esc or Q = quit. Mouse: wheel zooms around the pointer, drag pans, double click
  * toggles fit / 100 %.
+ *
+ * Under the picture is a STRIP of small pictures of every file of the directory the viewer can show (pictures, videos, sound files; the ones that are not
+ * pictures have a tile with a mark): a click shows one, the wheel over the strip scrolls it, the current one is kept in view; T hides / shows it (kept in
+ * viewer.conf). The "Open..." button at its left end (or O / Ctrl+O) opens a card with the folder list of the shared Open dialog (client/wlpicker.h): a
+ * folder chosen there becomes the viewer's directory, a file is shown.
+ *
+ * ONE window per Wayland display: a second `mellagui-view PATH` (the camera's strip, the file manager's Enter, Print's card ...) hands PATH to the
+ * first through an abstract unix socket (named after the runtime directory and the display) and ends; the first shows it and brings its window forward
+ * (wlwin_raise). $MELLAGUI_VIEW_SINGLE=0 makes every start a window of its own. $MELLAGUI_VIEW_DUMP=FILE writes the state, the strip's places and the
+ * card after every paint (tests).
  */
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stddef.h>
 #include <limits.h>
 #include <math.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "theme.h"
@@ -44,6 +61,10 @@
 #include "protocol.h"
 #include "util.h"
 #include "uikit.h"
+#include "thumbbox.h"
+#include "wlcard.h"
+#include "wlclip.h"
+#include "wlpicker.h"
 #include "wlwin.h"
 
 #define BAR_H 24
@@ -56,8 +77,21 @@
 #define N_VBTN 4
 #define AUDIO_LEAD_MS 190               /* the sound needs this long from the start of its process to the speaker (ffmpeg ~90 ms, the player ~100 ms): it starts this far ahead */
 #define FF_FPS 30                       /* ffmpeg plays at a constant 30 pictures a second */
+#define STRIP_H 80                      /* the strip of small pictures under the picture */
+#define TS_W 64                         /* a small picture's room: 64 x 48 */
+#define TS_H 48
+#define TS_PITCH 72
+#define TS_X0 88                        /* where the pictures start: the Open button is before them */
+#define TH_KEEP_W 128                   /* a small picture is kept at up to 128 x 96 and squeezed to the buffer's pixels when it is painted */
+#define TH_KEEP_H 96
 #define ZMIN 0.05
 #define ZMAX 32.0
+
+struct vthumb {                         /* the small copy of one file of the directory */
+    uint32_t *px;                       /* NULL: not made yet, or the file is no picture (a video, a sound file) or cannot be read */
+    int w, h;
+    bool tried;
+};
 
 struct app {
     struct wlwin win;
@@ -108,6 +142,20 @@ struct app {
     int vhover, vpress;                 /* the video button under the pointer / pressed: 0 none, else index + 1 */
     uint64_t pos_ms;                    /* where the video is (paused), or where it was when playing (re)started */
     uint64_t play_t0;                   /* lm_now_ms() when it (re)started */
+    struct vthumb *thm;                 /* the small pictures, one per name */
+    int thn;
+    bool thumbs_on;                     /* T: the strip shows */
+    double strip_x;                     /* how far the strip is scrolled (pixels) */
+    int th_hover;                       /* the picture under the pointer (-1 none) */
+    bool open_hover;                    /* the pointer is on the Open button */
+    int ipc;                            /* the socket the other starts hand their paths to (-1 none) */
+    bool card;                          /* the Open card (folder list) shows */
+    char pbuf[PATH_MAX];                /* its field */
+    char perr[160];
+    struct wlpicker pk;
+    struct wlclip clip;
+    int c_hover, c_down;                /* the card's buttons: under the pointer / pressed (-1 none) */
+    char dump[PATH_MAX];                /* $MELLAGUI_VIEW_DUMP */
 };
 
 /* ---- directory ---------------------------------------------------------------------------------------------------- */
@@ -151,6 +199,16 @@ static void free_names(struct app *a)
     a->n = 0;
 }
 
+static void th_reset(struct app *a)                             /* the names changed: the small pictures are made again, as they come into view */
+{
+    for (int i = 0; i < a->thn; i++)
+        free(a->thm[i].px);
+    free(a->thm);
+    a->thm = a->n ? calloc((size_t)a->n, sizeof(*a->thm)) : NULL;
+    a->thn = a->thm ? a->n : 0;
+    a->strip_x = 0;
+}
+
 static void scan_dir(struct app *a, const char *keep)           /* keep: name to stay on, else the last image */
 {
     free_names(a);
@@ -175,12 +233,123 @@ static void scan_dir(struct app *a, const char *keep)           /* keep: name to
     for (int i = 0; keep && i < a->n; i++)
         if (!strcmp(a->names[i], keep))
             a->cur = i;
+    th_reset(a);
 }
 
 /* ---- image, zoom ---------------------------------------------------------------------------------------------------- */
 
+/* The window, top to bottom: the picture, the strip of small pictures (when it is on and the window has room), the status bar. */
+static int strip_h(const struct app *a) { return a->thumbs_on && a->win.bw >= 260 && a->win.bh >= 300 ? STRIP_H : 0; }
+static int bar_y(const struct app *a) { return a->win.bh > BAR_H ? a->win.bh - BAR_H : 0; }
 static int view_w(const struct app *a) { return a->win.bw; }
-static int view_h(const struct app *a) { return a->win.bh > BAR_H ? a->win.bh - BAR_H : 1; }
+static int view_h(const struct app *a) { int h = a->win.bh - BAR_H - strip_h(a); return h > 0 ? h : 1; }
+
+/* ---- the strip of small pictures -------------------------------------------------------------------------------------------------- */
+
+static int strip_y(const struct app *a) { return view_h(a); }
+static int strip_vis_w(const struct app *a) { return a->win.bw - TS_X0 - 8; }
+
+static double strip_max(const struct app *a)
+{
+    double m = (double)a->n * TS_PITCH - strip_vis_w(a);
+    return m > 0 ? m : 0;
+}
+
+static void strip_clamp(struct app *a)
+{
+    a->strip_x = LM_CLAMP(a->strip_x, 0.0, strip_max(a));
+}
+
+/* The current picture is kept in view (centred when it was out of it). */
+static void strip_show(struct app *a)
+{
+    if (!strip_h(a) || !a->n)
+        return;
+    double x = (double)a->cur * TS_PITCH, vis = strip_vis_w(a);
+    if (x < a->strip_x || x + TS_PITCH > a->strip_x + vis)
+        a->strip_x = x - (vis - TS_PITCH) / 2;
+    strip_clamp(a);
+}
+
+static bool open_btn_rect(const struct app *a, int *x, int *y, int *w, int *h)
+{
+    if (!strip_h(a))
+        return false;
+    *x = 8;
+    *w = 68;
+    *h = 28;
+    *y = strip_y(a) + (STRIP_H - *h) / 2;
+    return true;
+}
+
+static bool open_btn_at(const struct app *a, double px, double py)
+{
+    int x, y, w, h;
+    return open_btn_rect(a, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h;
+}
+
+static int item_x(const struct app *a, int i) { return TS_X0 + i * TS_PITCH - (int)a->strip_x; }
+
+/* The picture of the strip under a point of the window, -1 none. */
+static int strip_item_at(const struct app *a, double px, double py)
+{
+    if (!strip_h(a) || py < strip_y(a) || py >= strip_y(a) + STRIP_H || px < TS_X0 - 4)
+        return -1;
+    int i = (int)((px - TS_X0 + a->strip_x) / TS_PITCH);
+    return i >= 0 && i < a->n && px - item_x(a, i) < TS_W + 4 ? i : -1;
+}
+
+/* The small copy of picture i from a decoded picture. */
+static void th_from_image(struct app *a, int i, const struct lm_image *im)
+{
+    if (i < 0 || i >= a->thn || a->thm[i].px || !im->px || im->w < 1 || im->h < 1)
+        return;
+    double sc = LM_MIN((double)TH_KEEP_W / im->w, (double)TH_KEEP_H / im->h);
+    if (sc > 1.0)
+        sc = 1.0;
+    int tw = LM_MAX((int)(im->w * sc), 1), th = LM_MAX((int)(im->h * sc), 1);
+    uint32_t *px = malloc((size_t)tw * (size_t)th * 4);
+    if (!px)
+        return;
+    lm_thumb_box(im->px, im->w, im->h, px, tw, th);
+    a->thm[i].px = px;
+    a->thm[i].w = tw;
+    a->thm[i].h = th;
+}
+
+/* Makes the small copy of one file by reading it (a picture; a video or a sound file keeps a tile with a mark). */
+static void th_make(struct app *a, int i)
+{
+    a->thm[i].tried = true;
+    if (is_video_name(a->names[i]) || is_audio_name(a->names[i]))
+        return;
+    char path[PATH_MAX + 300], err[120];
+    struct lm_image im = { 0 };
+    snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[i]);
+    if (lm_img_load(path, &im, err, sizeof(err)) == 0)
+        th_from_image(a, i, &im);
+    lm_img_free(&im);
+}
+
+/* One small picture of the ones in view per turn of the loop (a big JPEG takes a moment): true while there may be more. */
+static bool th_lazy(struct app *a)
+{
+    if (!strip_h(a) || !a->thm)
+        return false;
+    int first = LM_MAX((int)(a->strip_x / TS_PITCH), 0), last = LM_MIN((int)((a->strip_x + strip_vis_w(a)) / TS_PITCH) + 1, a->thn - 1);
+    if (a->cur >= 0 && a->cur < a->thn && !a->thm[a->cur].tried) {
+        th_make(a, a->cur);
+        a->win.redraw = true;
+        return true;
+    }
+    for (int i = first; i <= last; i++)
+        if (!a->thm[i].tried) {
+            th_make(a, i);
+            a->win.redraw = true;
+            return true;
+        }
+    return false;
+}
 
 static double fit_zoom(const struct app *a)
 {
@@ -382,11 +551,13 @@ static int audio_lead(struct app *a)
     return a->aud_lead;
 }
 
-static void audio_lead_save(const struct app *a)
+/* viewer.conf: the sound's lead and whether the strip shows. */
+static void conf_save(struct app *a)
 {
     char path[PATH_MAX], dir[PATH_MAX];
     if (!lead_conf_path(path, sizeof(path)))
         return;
+    int lead = audio_lead(a);
     snprintf(dir, sizeof(dir), "%s", path);
     *strrchr(dir, '/') = 0;
     for (char *p = dir + 1; *p; p++)                            /* mkdir -p */
@@ -399,8 +570,24 @@ static void audio_lead_save(const struct app *a)
     FILE *f = fopen(path, "w");
     if (!f)
         return;
-    fprintf(f, "# mellagui-view: how many ms ahead of the picture the sound starts ([ = earlier, ] = later)\naudio-lead-ms = %d\n", a->aud_lead);
+    fprintf(f, "# mellagui-view: how many ms ahead of the picture the sound starts ([ = earlier, ] = later); whether the strip of small pictures shows (T)\naudio-lead-ms = %d\nthumbs = %d\n",
+            lead, a->thumbs_on ? 1 : 0);
     fclose(f);
+}
+
+static void conf_load_thumbs(struct app *a)
+{
+    char path[PATH_MAX], line[120];
+    int v;
+    a->thumbs_on = true;
+    if (!lead_conf_path(path, sizeof(path)))
+        return;
+    FILE *f = fopen(path, "r");
+    while (f && fgets(line, sizeof(line), f))
+        if (sscanf(line, " thumbs = %d", &v) == 1)
+            a->thumbs_on = v != 0;
+    if (f)
+        fclose(f);
 }
 
 static void audio_kill(struct app *a)
@@ -637,7 +824,7 @@ static int vbtn_x(int i) { return 6 + i * (VBTN_W + VBTN_GAP); }
 /* The video button at the point of the window (0..3), or -1. */
 static int vbtn_at(const struct app *a, double x, double y)
 {
-    int top = view_h(a) + 5;
+    int top = bar_y(a) + 5;
     if (!a->vmode || y < top || y >= top + VBTN_H)
         return -1;
     for (int i = 0; i < N_VBTN; i++)
@@ -832,6 +1019,11 @@ static void load_current(struct app *a)
     a->zoom = fit_zoom(a);
     a->win.redraw = true;
     set_title(a);
+    if (!a->vmode && a->img.px)                                 /* the picture is decoded already: its small copy costs nothing */
+        th_from_image(a, a->cur, &a->img);
+    if (a->cur >= 0 && a->cur < a->thn)
+        a->thm[a->cur].tried = true;
+    strip_show(a);
 }
 
 static double cur_zoom(const struct app *a) { return a->fit ? fit_zoom(a) : a->zoom; }
@@ -977,6 +1169,292 @@ static void paint_audio(struct app *a, struct wlwin *w, int vw, int vh, char *st
     snprintf(status, status_n, "%s   %s / %s   %s%s   %d/%d", a->names[a->cur], t1, t2, a->playing ? "playing" : "paused", snd, a->cur + 1, a->n);
 }
 
+/* ---- what is shown: a file (its folder, starting at it) or a folder (its newest picture) ---------------------------------------------------- */
+
+static void set_target(struct app *a, const char *arg, bool load)
+{
+    struct stat st;
+    char base[256] = "";
+    const char *keep = NULL;
+    if (stat(arg, &st) == 0 && !S_ISDIR(st.st_mode)) {
+        const char *slash = strrchr(arg, '/');
+        snprintf(a->dir, sizeof(a->dir), "%.*s", slash ? (int)(slash - arg) : 1, slash ? arg : ".");
+        if (slash && slash == arg)
+            snprintf(a->dir, sizeof(a->dir), "/");
+        snprintf(base, sizeof(base), "%.255s", slash ? slash + 1 : arg);
+        keep = base;
+    } else {
+        snprintf(a->dir, sizeof(a->dir), "%s", arg);
+        size_t l = strlen(a->dir);
+        while (l > 1 && a->dir[l - 1] == '/')                   /* ("/home/me/Pictures/" is the folder "/home/me/Pictures") */
+            a->dir[--l] = 0;
+    }
+    scan_dir(a, keep);
+    if (load)
+        load_current(a);
+}
+
+/* ---- the Open card: the folder list of the shared Open dialog (wlpicker.h) --------------------------------------------------------------- */
+
+static int card_rows(const struct app *a) { return wlpicker_fit(a->win.bh, 170); }
+
+static void card_rect(const struct app *a, struct wlcard *c)
+{
+    int rows = card_rows(a);
+    c->w = LM_MIN(560, a->win.bw - 16);
+    c->h = LM_MIN(rows ? 170 + rows * WLPICKER_ROW_H : 150, a->win.bh - 16);
+    c->x = (a->win.bw - c->w) / 2;
+    c->y = (a->win.bh - c->h) / 2;
+}
+
+static int card_field_y(const struct wlcard *c) { return c->y + 42 + LM_FONT_H + 8; }
+static int card_list_y(const struct wlcard *c) { return card_field_y(c) + 30; }
+
+static void card_base(const struct app *a, char *base, size_t n)   /* what a relative path means: the folder that is shown */
+{
+    snprintf(base, n, "%s%s", a->dir[0] ? a->dir : ".", a->dir[0] && a->dir[strlen(a->dir) - 1] == '/' ? "" : "/");
+}
+
+static bool card_want(const char *name) { return is_image_name(name); }
+
+static void card_open(struct app *a)
+{
+    char base[PATH_MAX];
+    card_base(a, base, sizeof(base));
+    a->card = true;
+    snprintf(a->pbuf, sizeof(a->pbuf), "%s", base);
+    a->perr[0] = 0;
+    a->c_hover = a->c_down = -1;
+    wlpicker_reset(&a->pk);
+    wltext_end(a->pbuf);
+    a->win.redraw = true;
+}
+
+static void card_close(struct app *a)
+{
+    a->card = false;
+    a->win.redraw = true;
+}
+
+/* Open: the path in the field is a folder (it becomes the viewer's folder) or a file (it is shown, with its folder). */
+static void card_accept(struct app *a)
+{
+    char base[PATH_MAX], path[PATH_MAX];
+    card_base(a, base, sizeof(base));
+    if (!a->pbuf[0]) {
+        snprintf(a->perr, sizeof(a->perr), "Type a folder or a picture");
+        return;
+    }
+    lm_resolve_path(base, a->pbuf, path, sizeof(path));
+    struct stat st;
+    if (stat(path, &st) < 0) {
+        snprintf(a->perr, sizeof(a->perr), "No such folder or file");
+        return;
+    }
+    set_target(a, path, true);
+    card_close(a);
+}
+
+static void card_key(struct app *a, uint32_t ks)
+{
+    char base[PATH_MAX];
+    card_base(a, base, sizeof(base));
+    int rows = card_rows(a);
+    if (ks == LM_KS_Escape) {
+        card_close(a);
+    } else if (rows && (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down ||
+                        ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0))) {
+        if (wlpicker_key(&a->pk, base, a->pbuf, sizeof(a->pbuf), rows, ks) == WLPICKER_OPEN)
+            card_accept(a);                                     /* a folder was entered, a picture is taken */
+        a->perr[0] = 0;
+    } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+        card_accept(a);
+    } else if (ks == LM_KS_Tab) {
+        char list[512];
+        int n = lm_complete_path(base, a->pbuf, sizeof(a->pbuf), true, list, sizeof(list));
+        if (n > 1)
+            snprintf(a->perr, sizeof(a->perr), "%s", list);
+        else
+            a->perr[0] = 0;
+        wltext_end(a->pbuf);
+        wlpicker_typed(&a->pk);
+    } else if (wltext_edit(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods)) {
+        a->perr[0] = 0;
+        wlpicker_typed(&a->pk);                                 /* (the list follows what is typed) */
+    }
+    a->win.redraw = true;
+}
+
+static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+    struct wlcard c;
+    card_rect(a, &c);
+    char base[PATH_MAX];
+    card_base(a, base, sizeof(base));
+    int rows = card_rows(a), fx = c.x + WLCARD_PAD, fw = c.w - 2 * WLCARD_PAD, ly = card_list_y(&c);
+    if (op == LM_WL_POINTER_EVT_MOTION) {
+        a->c_hover = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+        if (rows)
+            wlpicker_motion(&a->pk, base, a->pbuf, ly, rows, a->py);      /* (the scroll bar's thumb is dragged) */
+        a->win.redraw = true;
+        return;
+    }
+    if (op == LM_WL_POINTER_EVT_AXIS) {
+        if (rows && args[1].u == 0)
+            wlpicker_wheel(&a->pk, args[2].f > 0 ? 1 : -1);
+        a->win.redraw = true;
+        return;
+    }
+    if (op != LM_WL_POINTER_EVT_BUTTON)
+        return;
+    a->clip.serial = args[0].u;
+    int k = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+    if (args[3].u != 1) {
+        wlpicker_release(&a->pk);
+        if (a->c_down >= 0 && a->c_down == k) {                 /* a button is done when it is let go on */
+            a->c_down = -1;
+            if (k == 0)
+                card_close(a);
+            else
+                card_accept(a);
+        }
+        a->c_down = -1;
+        a->win.redraw = true;
+        return;
+    }
+    if (args[2].u != 272)
+        return;
+    if (k >= 0) {
+        a->c_down = k;
+    } else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
+        card_close(a);                                          /* a click outside the card cancels */
+        return;
+    } else if (a->py >= card_field_y(&c) && a->py < card_field_y(&c) + 26) {
+        wltext_click(a->pbuf, (int)a->px - (c.x + WLCARD_PAD + 8), (a->win.mods & LM_MOD_SHIFT) != 0);
+    } else if (rows) {
+        if (wlpicker_press(&a->pk, base, a->pbuf, sizeof(a->pbuf), fx, ly, fw, rows, a->px, a->py, args[1].u, (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
+            card_accept(a);
+        a->perr[0] = 0;
+    }
+    a->win.redraw = true;
+}
+
+static void paint_card(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    struct wlcard c;
+    card_rect(a, &c);
+    wlcard_frame(w, &c, c.w, c.h, "Open a folder or a picture", lm_theme.accent, BG, lm_theme.text_bright);
+    wlwin_text(w, c.x + WLCARD_PAD, c.y + 42, "Pick a folder below (Open shows it) or a picture, or type a path (Tab completes)", 1, lm_theme.text_dim, c.w - 2 * WLCARD_PAD);
+    int fy = card_field_y(&c), rows = card_rows(a);
+    wlwin_round_fill(w, c.x + WLCARD_PAD, fy, c.w - 2 * WLCARD_PAD, 26, 8, lm_theme.field);
+    wltext_paint(w, c.x + WLCARD_PAD + 8, fy + 5, c.w - 2 * WLCARD_PAD - 16, a->pbuf, true, lm_theme.text_soft, lm_theme.button_hover, lm_theme.accent);
+    char base[PATH_MAX];
+    card_base(a, base, sizeof(base));
+    if (rows)
+        wlpicker_paint(w, &a->pk, base, a->pbuf, c.x + WLCARD_PAD, card_list_y(&c), c.w - 2 * WLCARD_PAD, rows, a->px, a->py, a->has_pointer);
+    if (a->perr[0])
+        wlwin_text(w, c.x + WLCARD_PAD, c.y + c.h - WLCARD_PAD - WLCARD_BTN_H - 22, a->perr, 1, lm_theme.error, c.w - 2 * WLCARD_PAD);
+    const char *labels[2] = { "Cancel", "Open" };
+    const uint32_t cols[2] = { lm_theme.btn_grey, lm_theme.btn_blue };
+    wlcard_buttons(w, &c, labels, 2, cols, a->c_hover, a->c_down, lm_theme.on_colour);
+}
+
+/* ---- the strip, painted ---------------------------------------------------------------------------------------------------------------------- */
+
+static void paint_strip(struct app *a, struct wlwin *w)
+{
+    int sh = strip_h(a);
+    if (!sh)
+        return;
+    strip_clamp(a);
+    int sy = strip_y(a), k = wlwin_scale(w);
+    wlwin_fill(w, 0, sy, w->bw, sh, lm_theme.bar);
+    wlwin_fill(w, 0, sy, w->bw, 1, lm_theme.border);
+    int bx, by, bw, bh;
+    if (open_btn_rect(a, &bx, &by, &bw, &bh)) {
+        wlwin_drop(w, bx, by, bw, bh, lm_button_radius(bh / 2), a->open_hover ? lm_theme.btn_teal_lit : lm_theme.btn_teal);
+        wlwin_text(w, bx + (bw - lm_font_text_width("Open...")) / 2, by + (bh - LM_FONT_H) / 2, "Open...", 1, lm_theme.on_colour, 0);
+    }
+    int clip_x = TS_X0 - 4, clip_w = w->bw - clip_x;
+    for (int i = LM_MAX((int)(a->strip_x / TS_PITCH), 0); i < a->n; i++) {
+        int x = item_x(a, i), y = sy + (sh - TS_H) / 2;
+        if (x >= w->bw)
+            break;
+        if (x + TS_W < clip_x)
+            continue;
+        bool whole = x >= clip_x + 3 && x + TS_W + 3 <= w->bw;                    /* a partly hidden one has no frame (a frame cannot be cut) */
+        const struct vthumb *t = i < a->thn ? &a->thm[i] : NULL;
+        if (whole)
+            wlwin_round_fill(w, x - 3, y - 3, TS_W + 6, TS_H + 6, 6, i == a->cur ? lm_theme.accent : i == a->th_hover ? lm_theme.text_soft : lm_theme.border);
+        if (t && t->px) {
+            double sc = LM_MIN((double)TS_W / t->w, (double)TS_H / t->h);
+            int dw = LM_MAX((int)(t->w * sc), 1), dh = LM_MAX((int)(t->h * sc), 1);
+            if (sc > 1.0 && t->w < TS_W && t->h < TS_H) {                                       /* a small picture is not enlarged */
+                dw = t->w;
+                dh = t->h;
+            }
+            int pw = dw * k, ph = dh * k;
+            uint32_t *buf = malloc((size_t)pw * (size_t)ph * 4);
+            if (buf) {
+                lm_thumb_box(t->px, t->w, t->h, buf, pw, ph);
+                wlwin_blit_px(w, x + (TS_W - dw) / 2, y + (TS_H - dh) / 2, buf, pw, ph, pw, clip_x, sy, clip_w, sh);
+                free(buf);
+            }
+        } else if (whole) {                                                                     /* a tile: not made yet, a video, a sound file */
+            wlwin_round_fill(w, x, y, TS_W, TS_H, 4, lm_theme.control);
+            int cx = x + TS_W / 2, cy = y + TS_H / 2;
+            if (is_video_name(a->names[i]))
+                vtri(w, cx, cy, 15, 11, 1, lm_theme.text_dim);
+            else if (is_audio_name(a->names[i]))
+                for (int b = 0; b < 5; b++)                                                     /* the bars of a sound */
+                    wlwin_fill(w, cx - 12 + b * 5, cy + 7 - (4 + (b * 7 + 3) % 5 * 3), 3, 4 + (b * 7 + 3) % 5 * 3, lm_theme.text_dim);
+        }
+    }
+}
+
+/* $MELLAGUI_VIEW_DUMP: the state, the places in the strip and the card (window pixels), for the tests. */
+static void write_dump(struct app *a)
+{
+    if (!a->dump[0])
+        return;
+    char tmp[PATH_MAX + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", a->dump);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    int loaded = 0;
+    for (int i = 0; i < a->thn; i++)
+        loaded += a->thm[i].px != NULL;
+    fprintf(f, "state dir=%s n=%d cur=%d name=%s strip=%d sx=%d loaded=%d vmode=%d card=%d ipc=%d hover=%d\n", a->dir, a->n, a->cur, a->n ? a->names[a->cur] : "-", strip_h(a) ? 1 : 0,
+            (int)a->strip_x, loaded, a->vmode, a->card, a->ipc >= 0, a->th_hover);
+    fprintf(f, "view %d %d %d %d\n", 0, 0, view_w(a), view_h(a));
+    int bx, by, bw, bh;
+    if (open_btn_rect(a, &bx, &by, &bw, &bh))
+        fprintf(f, "open %d %d %d %d\n", bx, by, bw, bh);
+    for (int i = 0; strip_h(a) && i < a->n; i++) {
+        int x = item_x(a, i), y = strip_y(a) + (STRIP_H - TS_H) / 2;
+        if (x + TS_W > TS_X0 && x < a->win.bw)
+            fprintf(f, "item %d %s %d %d %d %d %d\n", i, a->names[i], x, y, TS_W, TS_H, i < a->thn && a->thm[i].px != NULL);
+    }
+    if (a->card) {
+        struct wlcard c;
+        card_rect(a, &c);
+        char base[PATH_MAX];
+        card_base(a, base, sizeof(base));
+        fprintf(f, "card %d %d %d %d field=%s err=%s\n", c.x, c.y, c.w, c.h, a->pbuf, a->perr);
+        for (int k = 0; k < 2; k++) {
+            int x, y, w, h;
+            wlcard_button_rect(&c, k, 2, &x, &y, &w, &h);
+            fprintf(f, "cbtn %s %d %d %d %d\n", k ? "open" : "cancel", x, y, w, h);
+        }
+        if (card_rows(a))
+            wlpicker_dump(f, &a->pk, base, a->pbuf, c.x + WLCARD_PAD, card_list_y(&c), c.w - 2 * WLCARD_PAD, card_rows(a), 0);
+    }
+    if (fclose(f) != 0 || rename(tmp, a->dump) < 0)
+        unlink(tmp);
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
@@ -1061,17 +1539,22 @@ static void paint(struct wlwin *w)
         snprintf(status, sizeof(status), "no images in %.300s", a->dir);
         wlwin_text(w, 16, 16, "No images or videos here. Press Print to take a screenshot, R to look again.", 1, BAR_FG, vw - 32);
     }
-    wlwin_fill(w, 0, vh, w->bw, w->bh - vh, BAR_BG);
+    paint_strip(a, w);
+    int by = bar_y(a);
+    wlwin_fill(w, 0, by, w->bw, w->bh - by, BAR_BG);
     if (a->vmode && video_len(a)) {                              /* the progress: a strip along the top of the bar */
-        wlwin_fill(w, 0, vh, w->bw, 4, lm_theme.divider);
-        wlwin_fill(w, 0, vh, (int)((uint64_t)w->bw * video_pos(a) / video_len(a)), 4, lm_theme.accent);
+        wlwin_fill(w, 0, by, w->bw, 4, lm_theme.divider);
+        wlwin_fill(w, 0, by, (int)((uint64_t)w->bw * video_pos(a) / video_len(a)), 4, lm_theme.accent);
     }
     int tx = 8;
     if (a->vmode) {
-        paint_vbuttons(a, w, vh);
+        paint_vbuttons(a, w, by);
         tx = vbtn_x(N_VBTN) + 4;
     }
-    wlwin_text(w, tx, vh + (BAR_H - LM_FONT_H) / 2 + 2, status, 1, BAR_FG, w->bw - tx - 8);
+    wlwin_text(w, tx, by + (BAR_H - LM_FONT_H) / 2 + 2, status, 1, BAR_FG, w->bw - tx - 8);
+    if (a->card)
+        paint_card(a);
+    write_dump(a);
 }
 
 /* ---- input ---------------------------------------------------------------------------------------------------------- */
@@ -1079,6 +1562,14 @@ static void paint(struct wlwin *w)
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
+    if (a->card && op != LM_WL_POINTER_EVT_ENTER && op != LM_WL_POINTER_EVT_LEAVE) {       /* the Open card is modal */
+        if (op == LM_WL_POINTER_EVT_MOTION) {
+            a->px = lm_fixed_to_double(args[1].f);
+            a->py = lm_fixed_to_double(args[2].f);
+        }
+        card_pointer(a, op, args);
+        return;
+    }
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
         a->has_pointer = true;
@@ -1094,6 +1585,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_MOTION: {
         double x = lm_fixed_to_double(args[1].f), y = lm_fixed_to_double(args[2].f);
+        int th = strip_item_at(a, x, y);
+        bool oh = open_btn_at(a, x, y);
+        if (th != a->th_hover || oh != a->open_hover) {
+            a->th_hover = th;
+            a->open_hover = oh;
+            w->redraw = true;
+        }
         if (a->vmode) {
             int hb = vbtn_at(a, x, y) + 1;
             if (hb != a->vhover) {
@@ -1124,8 +1622,17 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     }
     case LM_WL_POINTER_EVT_BUTTON:
+        a->clip.serial = args[0].u;
         if (args[2].u != 272)                           /* BTN_LEFT */
             break;
+        if (args[3].u == 1 && strip_h(a) && a->py >= strip_y(a) && a->py < strip_y(a) + STRIP_H) {     /* the strip: a picture is shown, Open asks for a folder */
+            int i = strip_item_at(a, a->px, a->py);
+            if (open_btn_at(a, a->px, a->py))
+                card_open(a);
+            else if (i >= 0)
+                go(a, i);
+            break;
+        }
         if (args[3].u == 1 && a->vmode && vbtn_at(a, a->px, a->py) >= 0) {    /* a button of the bar: done when it is let go on it */
             a->vpress = vbtn_at(a, a->px, a->py) + 1;
             w->redraw = true;
@@ -1139,7 +1646,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             w->redraw = true;
             break;
         }
-        if (args[3].u == 1 && a->vmode && a->py >= view_h(a)) {  /* a click on the bar of a video seeks */
+        if (args[3].u == 1 && a->vmode && a->py >= bar_y(a)) {   /* a click on the bar of a video seeks */
             a->seeking = true;
             video_seek(a, (int64_t)(LM_CLAMP(a->px / (double)w->bw, 0.0, 1.0) * (double)video_len(a)));
             break;
@@ -1169,6 +1676,15 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
         break;
     case LM_WL_POINTER_EVT_AXIS:
+        if (strip_h(a) && a->py >= strip_y(a) && a->py < strip_y(a) + STRIP_H) {      /* over the strip the wheel scrolls it */
+            double v = lm_fixed_to_double(args[2].f);
+            if (v != 0) {
+                a->strip_x += (v > 0 ? 1 : -1) * TS_PITCH * 3;
+                strip_clamp(a);
+                w->redraw = true;
+            }
+            break;
+        }
         if (args[1].u == 0) {                           /* vertical: up (negative) zooms in */
             double v = lm_fixed_to_double(args[2].f);
             if (v != 0)
@@ -1183,7 +1699,12 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     struct app *a = w->data;
     if (op != LM_WL_KEYBOARD_EVT_KEY || args[3].u == 0)
         return;
+    a->clip.serial = args[0].u;
     uint32_t ks = lm_keymap_keysym(args[2].u, a->win.mods);
+    if (a->card) {                                               /* the Open card is modal: it takes every key */
+        card_key(a, ks);
+        return;
+    }
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);
     char c = (tl == 1 && !(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT | LM_MOD_SUPER))) ? txt[0] : 0;
@@ -1194,6 +1715,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     }
     if (ks == LM_KS_Escape || c == 'q' || c == 'Q') {
         w->running = false;
+    } else if (c == 'o' || c == 'O' || ((a->win.mods & LM_MOD_CTRL) && (ks == 'o' || ks == 'O'))) {
+        card_open(a);                                            /* another folder */
+    } else if (c == 't' || c == 'T') {                           /* the strip of small pictures */
+        a->thumbs_on = !a->thumbs_on;
+        conf_save(a);
+        strip_show(a);
+        w->redraw = true;
     } else if (!a->vmode && (c == 'i' || c == 'I')) {
         a->show_info = !a->show_info;
         w->redraw = true;
@@ -1201,7 +1729,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         video_toggle(a);
     } else if (a->vmode && a->has_audio && (c == '[' || c == ']')) {      /* the sound comes earlier / later: 50 ms a step */
         a->aud_lead = LM_CLAMP(audio_lead(a) + (c == '[' ? 50 : -50), -2000, 2000);
-        audio_lead_save(a);
+        conf_save(a);
         audio_reset(a);
         w->redraw = true;
     } else if (a->vmode && (c == 'm' || c == 'M')) {
@@ -1538,10 +2066,99 @@ static int decode_cmd(const char *in, const char *out, int frame)
 
 /* ---- idle inhibitor: the screen must not go to sleep or lock while a video plays ----------------------------------------- */
 
+/* ---- one window per Wayland display ----------------------------------------------------------------------------------------------------------- */
+
+/* The name of this display's viewer socket (an ABSTRACT unix socket: no file to clean up, a killed viewer leaves nothing, and the name has no length limit
+ * problem; it is made of a hash of the runtime directory and the display, so the displays of the tests and of a real session never meet) and the lock file;
+ * false = no single window ($MELLAGUI_VIEW_SINGLE=0, no runtime directory). */
+static bool ipc_names(struct sockaddr_un *sa, socklen_t *len, char *lock, size_t ln)
+{
+    const char *rt = getenv("XDG_RUNTIME_DIR"), *wd = getenv("WAYLAND_DISPLAY"), *off = getenv("MELLAGUI_VIEW_SINGLE");
+    if (!rt || !*rt || (off && !strcmp(off, "0")))
+        return false;
+    uint64_t h = 1469598103934665603ull;                        /* FNV-1a */
+    for (const char *p = rt; *p; p++)
+        h = (h ^ (uint8_t)*p) * 1099511628211ull;
+    h = (h ^ '|') * 1099511628211ull;
+    for (const char *p = wd && *wd ? wd : "default"; *p; p++)
+        h = (h ^ (uint8_t)*p) * 1099511628211ull;
+    char name[48];
+    int n = snprintf(name, sizeof(name), "mellagui-view-%016llx", (unsigned long long)h);
+    memset(sa, 0, sizeof(*sa));
+    sa->sun_family = AF_UNIX;
+    memcpy(sa->sun_path + 1, name, (size_t)n);                   /* sun_path[0] = 0: the abstract namespace */
+    *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + (size_t)n);
+    int w = snprintf(lock, ln, "%s/mellagui-view-%016llx.lock", rt, (unsigned long long)h);
+    return w > 0 && (size_t)w < ln;
+}
+
+/* Called before anything else is made. 1 = another viewer of this display has the path now (it showed it and brought its window forward): end. 0 = this one
+ * is the viewer (a->ipc is the socket the later starts will use, or -1 when there is none). */
+static int single_start(struct app *a, const char *target)
+{
+    struct sockaddr_un sa;
+    socklen_t salen;
+    char lock[PATH_MAX];
+    a->ipc = -1;
+    if (!ipc_names(&sa, &salen, lock, sizeof(lock)))
+        return 0;
+    int lk = open(lock, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (lk >= 0)
+        flock(lk, LOCK_EX);                                     /* (two starts at the same time: one becomes the viewer, the other hands over) */
+    int rc = 0;
+    int c = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (c >= 0 && connect(c, (struct sockaddr *)&sa, salen) == 0) {
+        char abs[PATH_MAX], msg[PATH_MAX + 16];
+        snprintf(msg, sizeof(msg), "open\t%s\n", realpath(target, abs) ? abs : target);
+        struct pollfd pf = { .fd = c, .events = POLLIN };
+        char reply[8];
+        if (write(c, msg, strlen(msg)) == (ssize_t)strlen(msg) && poll(&pf, 1, 2000) > 0 && read(c, reply, sizeof(reply)) > 0)
+            rc = 1;                                             /* (a viewer that does not answer is left alone: this one runs without a socket) */
+    } else {
+        int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (s >= 0 && bind(s, (struct sockaddr *)&sa, salen) == 0 && listen(s, 8) == 0)
+            a->ipc = s;
+        else if (s >= 0)
+            close(s);
+    }
+    if (c >= 0)
+        close(c);
+    if (lk >= 0) {
+        flock(lk, LOCK_UN);
+        close(lk);
+    }
+    return rc;
+}
+
+/* Another start handed over a path: show it and come forward. */
+static void ipc_serve(struct app *a)
+{
+    int c = accept4(a->ipc, NULL, NULL, SOCK_CLOEXEC);
+    if (c < 0)
+        return;
+    char buf[PATH_MAX + 16];
+    struct pollfd pf = { .fd = c, .events = POLLIN };
+    ssize_t n = poll(&pf, 1, 300) > 0 ? read(c, buf, sizeof(buf) - 1) : 0;
+    if (n > 5) {
+        buf[n] = 0;
+        char *nl = strchr(buf, '\n');
+        if (nl)
+            *nl = 0;
+        if (!strncmp(buf, "open\t", 5) && buf[5]) {
+            a->card = false;
+            set_target(a, buf + 5, true);
+            wlwin_raise(&a->win);
+            if (write(c, "ok\n", 3) < 0)
+                n = 0;
+        }
+    }
+    close(c);
+}
+
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    (void)ver;
     struct app *a = w->data;
+    wlclip_global(&a->clip, w, name, iface, ver);
     if (!strcmp(iface, "zwp_idle_inhibit_manager_v1"))
         a->idle_mgr = wlc_bind(w->c, w->registry, name, &lm_zwp_idle_inhibit_manager_v1_interface, 1, NULL, a);
 }
@@ -1574,34 +2191,36 @@ int main(int argc, char **argv)
         return poster_cmd(argv[2], argv[3]);
 
     struct app a = { 0 };
-    const char *arg = argc > 1 ? argv[1] : NULL, *keep = NULL;
-    char tmp[PATH_MAX], base[256] = "";
+    a.ipc = -1;
+    a.th_hover = -1;
+    a.c_hover = a.c_down = -1;
+    const char *arg = argc > 1 ? argv[1] : NULL;
+    char tmp[PATH_MAX];
     if (!arg) {
         const char *home = getenv("HOME");
         snprintf(tmp, sizeof(tmp), "%s/Pictures", home && *home ? home : ".");
         struct stat st;
         arg = stat(tmp, &st) == 0 && S_ISDIR(st.st_mode) ? tmp : ".";
     }
-    struct stat st;
-    if (stat(arg, &st) == 0 && !S_ISDIR(st.st_mode)) {
-        const char *slash = strrchr(arg, '/');
-        snprintf(a.dir, sizeof(a.dir), "%.*s", slash ? (int)(slash - arg) : 1, slash ? arg : ".");
-        if (slash && slash == arg)
-            snprintf(a.dir, sizeof(a.dir), "/");
-        snprintf(base, sizeof(base), "%.255s", slash ? slash + 1 : arg);
-        keep = base;
-    } else {
-        snprintf(a.dir, sizeof(a.dir), "%s", arg);
-    }
-    scan_dir(&a, keep);
+    if (single_start(&a, arg) == 1)                             /* another viewer has it (and is in front now) */
+        return 0;
+    conf_load_thumbs(&a);
+    const char *dumpf = getenv("MELLAGUI_VIEW_DUMP");
+    if (dumpf && *dumpf)
+        snprintf(a.dump, sizeof(a.dump), "%s", dumpf);
+    wlpicker_init(&a.pk, card_want);
+    set_target(&a, arg, false);
 
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event };
     if (wlwin_connect(&a.win, "mellagui-view", &ops, &a) < 0)
         return 1;
     if (wlwin_open(&a.win, "Images", "mellagui.view", 860, 520, 240, 160) < 0)
         return 1;
+    wlclip_attach(&a.clip, &a.win);
     load_current(&a);
-    while (wlwin_step(&a.win, video_timeout(&a))) {
+    while (a.win.running) {
+        if (!wlwin_step(&a.win, 0))
+            break;
         video_tick(&a);
         if (a.next_track) {                                     /* a track is over: the next sound file of the folder (the player stops after the last) */
             a.next_track = false;
@@ -1612,7 +2231,18 @@ int main(int argc, char **argv)
                 }
         }
         sync_inhibitor(&a);
+        int timeout = video_timeout(&a);
+        if (th_lazy(&a))                                         /* the small pictures of the strip are made one by one between the events */
+            timeout = timeout < 0 ? 2 : LM_MIN(timeout, 2);
+        if (a.win.redraw && a.win.configured && !a.win.buffer_busy)
+            timeout = 0;
+        struct pollfd pf[2] = { { .fd = wlc_fd(a.win.c), .events = POLLIN }, { .fd = a.ipc, .events = POLLIN } };
+        int pn = poll(pf, a.ipc >= 0 ? 2 : 1, timeout);
+        if (pn > 0 && a.ipc >= 0 && (pf[1].revents & POLLIN))
+            ipc_serve(&a);
     }
+    if (a.ipc >= 0)
+        close(a.ipc);
     wlwin_destroy(&a.win);
     lm_img_free(&a.cover);
     lm_mp4r_close(a.vid);
@@ -1622,6 +2252,9 @@ int main(int argc, char **argv)
     free(a.fbuf);
     lm_img_free(&a.img);
     free(a.scaled);
+    th_reset(&a);
+    free(a.thm);
     free_names(&a);
+    wlpicker_free(&a.pk);
     return 0;
 }

@@ -9,6 +9,7 @@
 #include "protocol.h"
 #include "seat.h"
 #include "settings.h"
+#include "surface.h"
 #include "wm.h"
 
 struct mbind {
@@ -84,10 +85,22 @@ static void req_warp(struct lm_resource *res, const union lm_arg *args)
     lm_seat_pointer_warp_local(b->menu->srv->seat, res->client, args[0].i, args[1].i);
 }
 
+/* A program that is asked to show something by another one (the second `mellagui-view PATH` hands the path to the first and ends) brings its own window
+ * forward: no token is needed, only MellaGUI's own programs may, and only for their own surface. */
+static void req_raise(struct lm_resource *res, const union lm_arg *args)
+{
+    struct mbind *b = res->data;
+    struct lm_surface *s = args[0].r ? lm_surface_from_resource(args[0].r) : NULL;
+    if (!b || !b->allowed || !b->menu || !s || !b->menu->srv->wm || args[0].r->client != res->client)
+        return;
+    lm_wm_activate_surface(b->menu->srv->wm, s);
+}
+
 static const lm_request_fn handlers[] = {
     [LM_MELLAGUI_MENU_V1_REQ_DESTROY] = req_destroy,
     [LM_MELLAGUI_MENU_V1_REQ_POPUP] = req_popup,
     [LM_MELLAGUI_MENU_V1_REQ_WARP] = req_warp,
+    [LM_MELLAGUI_MENU_V1_REQ_RAISE] = req_raise,
 };
 
 static void menu_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)

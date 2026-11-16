@@ -1257,6 +1257,10 @@ static pid_t spawn_impl(struct lm_server *srv, const char *cmd, int err_fd)
         lm_error("lm_server_spawn: not listening yet");
         return -1;
     }
+    if (getenv("MELLAGUI_NO_SPAWN")) {                  /* (the fuzzer: a program started by a shortcut would connect to it as a client) */
+        lm_debug("spawn refused (MELLAGUI_NO_SPAWN): %s", cmd);
+        return -1;
+    }
     pid_t pid = fork();
     if (pid < 0) {
         lm_error("fork: %s", strerror(errno));

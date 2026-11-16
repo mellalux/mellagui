@@ -109,6 +109,8 @@ static void setup(void)
     setenv("XDG_RUNTIME_DIR", dir, 1);
     setenv("PATH", "/nonexistent", 1);                      /* nothing the compositor spawns may find a program */
     setenv("MELLAGUI_NO_GADGET_PROCS", "1", 1);             /* the gadget switches must not start programs that connect to the server */
+    setenv("MELLAGUI_NO_SPAWN", "1", 1);                    /* nor may a shortcut: Super+/ starts mellagui-keys from next to this binary (PATH does not matter), which then
+                                                               stays connected and trips the "client still connected after it hung up" check */
     setenv("MELLAGUI_LOCK_ITER", "1000", 1);
     setenv("MELLAGUI_LOCK_UNIT_MS", "60000", 1);
     signal(SIGPIPE, SIG_IGN);
@@ -855,6 +857,21 @@ static void run_input(const uint8_t *data, size_t len)
         pump(2);
     if (!lm_list_empty(&srv->clients)) {
         fprintf(stderr, "fuzz-server: a client is still connected after it hung up\n");
+        struct lm_client *c2;
+        lm_list_for_each(c2, &srv->clients, link) {                                              /* who is it? (a program the compositor started?) */
+            char path[64], cmd[200] = "?";
+            snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)c2->pid);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
+                cmd[n] = 0;
+                for (size_t i = 0; i < n; i++)
+                    if (!cmd[i])
+                        cmd[i] = ' ';
+                fclose(f);
+            }
+            fprintf(stderr, "  client pid %d dying=%d command: %s\n", (int)c2->pid, (int)c2->dying, cmd);
+        }
         abort();
     }
     /* reset the session so that runs do not depend on each other */

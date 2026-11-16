@@ -4,7 +4,10 @@ Every Wayland client is untrusted input, and the request handlers (`server.c`, `
 `settings.c` ...) are hand-written C. `tests/fuzz_server.c` hunts for memory errors, undefined behaviour and leaks of descriptors in
 them. A plain `make` builds `build/fuzz-server` too (so `TestFuzz` in the suite runs for 20 s instead of being skipped).
 The harness sets `MELLAGUI_NO_GADGET_PROCS=1`: the settings `gadget` / `mixer` / `sysinfo` would otherwise start `mellagui-gadget`, which connects
-to the fuzz server as a client.
+to the fuzz server as a client. It also sets `MELLAGUI_NO_SPAWN=1` (`spawn_impl` in `server.c` then starts nothing and returns -1): the fuzzer
+presses Super + random keys, and a shortcut such as Super+/ started the real `mellagui-keys` from next to the binary (an emptied `PATH` does not
+stop that), which stayed connected and now and then tripped the check "a client is still connected after it hung up" (one run in four, after
+1000-2500 executions). When that check fails it prints the pid and command line of the clients that are left.
 
     make fuzz-run                         # 60 s (FUZZ_TIME=600 for longer); the corpus is kept in build/fuzz/corpus
     build/fuzz-server -t 300 -s 7 -c DIR  # seed 7, corpus DIR

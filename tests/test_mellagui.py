@@ -15506,7 +15506,7 @@ class TestDefaultConfigHasEveryProgram(Base):
         both = '\n'.join(sections['dock-apps'] + sections['launcher-apps'])
         for prog in ('mellagui-files', 'mellagui-edit', 'mellagui-calc', 'mellagui-cam', 'mellagui-record', 'mellagui-top', 'mellagui-du', 'mellagui-monitor',
                      'mellagui-keys', 'mellagui-notes', 'mellagui-bluetooth', 'mellagui-shot', 'mellagui-timer', 'mellagui-smart', 'mellagui-archive',
-                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', '@terminal', '@view', '@run', '@settings'):
+                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', 'mellagui-chess', '@terminal', '@view', '@run', '@settings'):
             self.assertIn(prog, both, prog + ' is in neither list')
 
 
@@ -16247,6 +16247,411 @@ class TestTetris(Base):
         self.wait(lambda s: s['state']['prompt'] == 3)
         ctl.tap(KEY_ESC)
         self.wait(lambda s: s['state']['prompt'] == 0)
+
+
+class TestChess(Base):
+    """client/mellagui-chess.c: the chess window (rules chess.c, search chessai.c, pieces chessart.h). The window through its dump
+    (MELLAGUI_CHESS_DUMP: the state, the FEN, the legal moves, the move list, the buttons); the pieces and the geometry through --selftest."""
+    EXE = os.path.join(ROOT, 'build', 'mellagui-chess')
+    K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_SPACE, K_ESC = 103, 108, 105, 106, 28, 57, 1
+    K = dict(n=49, u=22, h=35, f=33, l=38, q=16, r=19, b=48, w=17, z=44, **{str(i): 2 + i - 1 for i in range(1, 10)}, **{'0': 11})
+    START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-chess not built')
+
+    def start(self, *args, cfg=None, size='900x430'):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.chess', 'a window of an earlier test is still open')
+        self.dump = os.path.join(tmp, 'chess-%d.dump' % int(time.time() * 1000))
+        self.cfg = cfg or tempfile.mkdtemp(prefix='chess-cfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, self.cfg, ignore_errors=True)
+        p = subprocess.Popen([self.EXE, '--size', size, '--delay', '0'] + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, MELLAGUI_CHESS_DUMP=self.dump, XDG_CONFIG_HOME=self.cfg))
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.win = wait_for_window('mellagui.chess')
+        self.assertIsNotNone(self.win, 'the window did not appear')
+        self.wait(lambda s: 'state' in s)
+        ctl.abs(300, 300)
+        time.sleep(0.15)
+        self.proc = p
+        return p
+
+    def read_dump(self):
+        st = {'rank': {}, 'san': [], 'cbtn': {}, 'btn': {}}
+        try:
+            with open(self.dump) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return {}
+        for l in lines:
+            f = l.split()
+            if not f:
+                continue
+            if f[0] == 'state':
+                st['state'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'fen':
+                st['fen'] = ' '.join(f[1:])
+            elif f[0] == 'lay':
+                st['lay'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
+            elif f[0] == 'rank':
+                st['rank'][int(f[1])] = f[2]
+            elif f[0] == 'legal':
+                st['legal'] = f[1:]
+            elif f[0] == 'san':
+                st['san'].append(f[2])
+            elif f[0] == 'cbtn':
+                st['cbtn'][int(f[1])] = tuple(int(v) for v in f[2:6])
+            elif f[0] == 'btn':
+                kv = dict(x.split('=') for x in f[2:])
+                st['btn'][f[1]] = tuple(int(kv[k]) for k in ('x', 'y', 'w', 'h'))
+        return st
+
+    def state(self):
+        for _ in range(10):
+            st = self.read_dump()
+            if st.get('state') and st.get('fen') and st.get('legal') is not None:
+                return st
+            time.sleep(0.02)
+        return {}
+
+    def wait(self, pred, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            st = self.state()
+            try:
+                if st and pred(st):
+                    return st
+            except (KeyError, ValueError, IndexError):
+                pass
+            time.sleep(0.03)
+        self.fail('the state never became right: %r' % self.state())
+
+    def at(self, x, y):
+        w = [x_ for x_ in ctl.windows()['windows'] if x_['app_id'] == 'mellagui.chess'][0]
+        return w['x'] + x, w['y'] + y
+
+    def sq(self, name, st=None):
+        """The window coordinates of the middle of a square, from the dump (the board may be turned round)."""
+        st = st or self.state()
+        lay, flipped = st['lay'], st['state']['flipped'] == '1'
+        f, r = ord(name[0]) - 97, int(name[1]) - 1
+        col, row = (7 - f, r) if flipped else (f, 7 - r)
+        return lay['bx'] + col * lay['cs'] + lay['cs'] // 2, lay['by'] + row * lay['cs'] + lay['cs'] // 2
+
+    def click_sq(self, name):
+        x, y = self.at(*self.sq(name))
+        ctl.click(x, y)
+        time.sleep(0.08)
+
+    def move(self, a, b):
+        self.click_sq(a)
+        self.click_sq(b)
+
+    def drag(self, a, b):
+        x0, y0 = self.at(*self.sq(a))
+        x1, y1 = self.at(*self.sq(b))
+        ctl.abs(x0, y0)
+        time.sleep(0.05)
+        ctl.button(272, True)
+        time.sleep(0.05)
+        for k in range(1, 6):
+            ctl.abs(x0 + (x1 - x0) * k // 5, y0 + (y1 - y0) * k // 5)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        time.sleep(0.1)
+
+    def click(self, x, y):
+        ctl.click(*self.at(x, y))
+        time.sleep(0.08)
+
+    def key(self, code):
+        ctl.tap(code)
+        time.sleep(0.07)
+
+    def button(self, name):
+        st = self.state()
+        x, y, w, h = st['btn'][name]
+        self.click(x + w // 2, y + h // 2)
+
+    def test_selftest(self):
+        r = subprocess.run([self.EXE, '--selftest'], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('selftest ok', r.stdout)
+
+    def test_a_sheet_of_the_pieces_can_be_written(self):
+        path = os.path.join(tmp, 'chess-sheet.ppm')
+        r = subprocess.run([self.EXE, '--sheet', path, '80'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        img = Ppm(path)
+        self.assertEqual((img.w, img.h), (480, 160))
+        board = img.count((0xee, 0xee, 0xd2)) + img.count((0x76, 0x96, 0x56))
+        self.assertGreater(board, img.w * img.h // 2)                                        # the board
+        self.assertLess(board, img.w * img.h * 9 // 10)                                      # and the pieces on it
+
+    def test_the_window_opens_with_the_start_position(self):
+        self.start('--level', '0')
+        st = self.state()
+        self.assertEqual(st['fen'], self.START_FEN)
+        self.assertEqual(st['rank'][1], 'RNBQKBNR')
+        self.assertEqual(st['rank'][8], 'rnbqkbnr')
+        self.assertEqual(len(st['legal']), 20)
+        self.assertEqual((st['state']['turn'], st['state']['level'], st['state']['human'], st['state']['status']), ('w', '0', '-', 'ongoing'))
+        self.assertEqual(sorted(st['btn']), ['Flip', 'Help', 'Hint', 'Level', 'New', 'Undo'])
+        self.assertTrue(st['lay']['cs'] >= 40)
+
+    def test_a_click_on_a_piece_and_a_click_on_a_square_moves_it(self):
+        self.start('--level', '0')
+        self.click_sq('e2')
+        st = self.wait(lambda s: s['state']['sel'] == 'e2')
+        self.assertEqual(sorted(m for m in st['legal'] if m.startswith('e2')), ['e2e3', 'e2e4'])
+        self.click_sq('e4')
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['fen'], 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1')
+        self.assertEqual((st['state']['turn'], st['state']['last'], st['state']['sel']), ('b', 'e2e4', '-'))
+        self.assertEqual(st['san'], ['e4'])
+        self.move('e7', 'e5')
+        st = self.wait(lambda s: s['state']['plies'] == '2')
+        self.assertEqual(st['san'], ['e4', 'e5'])
+
+    def test_a_piece_is_picked_up_put_down_and_another_one_chosen(self):
+        self.start('--level', '0')
+        self.click_sq('g1')
+        self.wait(lambda s: s['state']['sel'] == 'g1')
+        self.click_sq('g1')                                                                  # the same piece again: let go
+        self.wait(lambda s: s['state']['sel'] == '-')
+        self.click_sq('g1')
+        self.click_sq('b1')                                                                  # another piece of the same colour: the choice moves
+        self.wait(lambda s: s['state']['sel'] == 'b1')
+        self.click_sq('e5')                                                                  # a square it cannot go to: nothing is chosen
+        st = self.wait(lambda s: s['state']['sel'] == '-')
+        self.assertEqual((st['state']['plies'], st['fen']), ('0', self.START_FEN))
+        self.click_sq('e7')                                                                  # the other side's piece cannot be picked up
+        time.sleep(0.1)
+        self.assertEqual(self.state()['state']['sel'], '-')
+
+    def test_a_piece_can_be_dragged_and_a_bad_drop_changes_nothing(self):
+        self.start('--level', '0')
+        self.drag('e2', 'e5')                                                                # a pawn cannot go three squares
+        time.sleep(0.15)
+        st = self.state()
+        self.assertEqual((st['state']['plies'], st['fen']), ('0', self.START_FEN))
+        self.drag('g1', 'f3')
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['san'], ['Nf3'])
+        self.assertEqual(st['state']['dragging'], '0')
+
+    def test_the_arrow_keys_and_enter_play_a_move(self):
+        self.start('--level', '0')
+        self.key(self.K_RIGHT)                                                               # the frame starts on e2 and goes to f2
+        st = self.wait(lambda s: s['state']['kb'] == 'f2')
+        self.key(self.K_ENTER)
+        st = self.wait(lambda s: s['state']['sel'] == 'f2')
+        self.key(self.K_UP)
+        self.key(self.K_UP)
+        self.wait(lambda s: s['state']['kb'] == 'f4')
+        self.key(self.K_ENTER)
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['san'], ['f4'])
+
+    def test_a_pawn_on_the_last_rank_asks_what_it_becomes(self):
+        self.start('--level', '0', '--fen', '7k/P7/8/8/8/8/6p1/K7 w - - 0 1')       # (a bare knight would end the game: nobody could mate)
+        self.move('a7', 'a8')
+        st = self.wait(lambda s: s['state']['prompt'] == '2')
+        self.assertEqual(len(st['cbtn']), 4)
+        self.assertEqual(st['state']['plies'], '0')
+        x, y, w, h = st['cbtn'][0]                                                           # Knight
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['rank'][8], 'N......k')
+        self.assertEqual(st['san'], ['a8=N'])
+        # and with the letter
+        self.key(self.K['u'])
+        self.wait(lambda s: s['state']['plies'] == '0')
+        self.move('a7', 'a8')
+        self.wait(lambda s: s['state']['prompt'] == '2')
+        self.key(self.K['r'])
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['rank'][8], 'R......k')
+
+    def test_undo_takes_a_move_back_and_the_button_is_dim_at_the_start(self):
+        self.start('--level', '0')
+        self.move('e2', 'e4')
+        self.move('e7', 'e5')
+        self.wait(lambda s: s['state']['plies'] == '2')
+        self.button('Undo')
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['fen'], 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1')
+        self.key(self.K['u'])
+        st = self.wait(lambda s: s['state']['plies'] == '0')
+        self.assertEqual(st['fen'], self.START_FEN)
+
+    def test_the_board_can_be_turned_round(self):
+        self.start('--level', '0')
+        before = self.sq('e2')
+        self.key(self.K['f'])
+        st = self.wait(lambda s: s['state']['flipped'] == '1')
+        self.assertNotEqual(self.sq('e2', st), before)
+        self.move('e2', 'e4')                                                                # the clicks follow the board
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['san'], ['e4'])
+        self.button('Flip')
+        self.wait(lambda s: s['state']['flipped'] == '0')
+
+    def test_fools_mate_ends_the_game_with_a_card(self):
+        self.start('--level', '0')
+        for a, b in (('f2', 'f3'), ('e7', 'e5'), ('g2', 'g4'), ('d8', 'h4')):
+            self.move(a, b)
+        st = self.wait(lambda s: s['state']['status'] == 'checkmate')
+        self.assertEqual((st['state']['prompt'], st['state']['turn'], st['state']['check']), ('3', 'w', '1'))
+        self.assertEqual(st['san'][-1], 'Qh4#')
+        self.assertEqual(st['state']['played'], '0')                                         # two players: no result is counted
+        self.assertEqual(len(st['cbtn']), 2)
+        x, y, w, h = st['cbtn'][0]                                                           # Close
+        self.click(x + w // 2, y + h // 2)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.move('a2', 'a3')                                                                # a finished game takes no more moves
+        time.sleep(0.15)
+        self.assertEqual(self.state()['state']['plies'], '4')
+
+    def test_the_computer_answers_a_move(self):
+        self.start('--level', '1')
+        self.move('e2', 'e4')
+        st = self.wait(lambda s: s['state']['plies'] == '2' and s['state']['turn'] == 'w' and s['state']['thinking'] == '0')
+        self.assertEqual(st['san'][0], 'e4')
+        self.assertEqual(st['state']['human'], 'w')
+        # the answer is a legal black move: the FEN was accepted again by the program that wrote the position
+        self.assertEqual(st['fen'].split()[1], 'w')
+        self.move('d2', 'd4')
+        self.wait(lambda s: s['state']['plies'] == '4')
+
+    def test_the_computer_with_white_moves_first_and_undo_takes_back_both(self):
+        self.start('--level', '1', '--black')
+        st = self.wait(lambda s: s['state']['plies'] == '1' and s['state']['turn'] == 'b')
+        self.assertEqual((st['state']['human'], st['state']['flipped']), ('b', '1'))
+        first = st['san'][0]
+        self.assertIn(first, ['a3', 'a4', 'b3', 'b4', 'c3', 'c4', 'd3', 'd4', 'e3', 'e4', 'f3', 'f4', 'g3', 'g4', 'h3', 'h4', 'Na3', 'Nc3', 'Nf3', 'Nh3'])
+        self.move('e7', 'e5')
+        self.wait(lambda s: s['state']['plies'] == '3' and s['state']['turn'] == 'b')
+        self.key(self.K['u'])
+        st = self.wait(lambda s: s['state']['plies'] == '1' and s['state']['turn'] == 'b')
+        self.assertEqual(st['san'], [first])                                                 # the computer's first move stays
+
+    def test_a_hint_is_a_legal_move_and_goes_away_with_the_next_move(self):
+        self.start('--level', '0')
+        self.key(self.K['h'])
+        st = self.wait(lambda s: s['state']['hint'] != '-', timeout=6.0)
+        self.assertIn(st['state']['hint'], st['legal'])
+        self.move('e2', 'e4')
+        self.wait(lambda s: s['state']['hint'] == '-' and s['state']['plies'] == '1')
+
+    def test_a_win_against_the_computer_is_counted_and_saved(self):
+        cfg = tempfile.mkdtemp(prefix='chess-cfg-', dir=tmp)
+        self.start('--level', '2', '--fen', '6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1', cfg=cfg)
+        self.move('a1', 'a8')
+        st = self.wait(lambda s: s['state']['status'] == 'checkmate')
+        self.assertEqual((st['state']['won'], st['state']['played'], st['state']['lost']), ('1', '1', '0'))
+        self.assertEqual(st['state']['prompt'], '3')
+        conf = open(os.path.join(cfg, 'mellagui', 'chess.conf')).read()
+        self.assertIn('won = 1', conf)
+        self.assertIn('played = 1', conf)
+        self.assertIn('level = 2', conf)
+
+    def test_the_level_keys_and_the_button_change_the_level_and_it_is_remembered(self):
+        cfg = tempfile.mkdtemp(prefix='chess-cfg-', dir=tmp)
+        self.start('--level', '0', cfg=cfg)
+        self.key(self.K['5'])
+        self.wait(lambda s: s['state']['level'] == '5')
+        self.button('Level')
+        self.wait(lambda s: s['state']['level'] == '6')
+        self.key(self.K['0'])
+        self.wait(lambda s: s['state']['level'] == '0' and s['state']['human'] == '-')
+        self.key(self.K['3'])
+        self.wait(lambda s: s['state']['level'] == '3' and s['state']['human'] == 'w')
+        time.sleep(0.2)
+        self.assertIn('level = 3', open(os.path.join(cfg, 'mellagui', 'chess.conf')).read())
+
+    def test_the_new_game_card_chooses_the_side(self):
+        self.start('--level', '1')
+        self.move('e2', 'e4')
+        self.wait(lambda s: s['state']['plies'] == '2')
+        self.key(self.K['n'])
+        st = self.wait(lambda s: s['state']['prompt'] == '1')
+        self.assertEqual(len(st['cbtn']), 3)
+        x, y, w, h = st['cbtn'][1]                                                           # As Black
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['human'] == 'b' and s['state']['plies'] == '1' and s['state']['turn'] == 'b')
+        self.assertEqual(st['state']['flipped'], '1')
+        self.key(self.K['n'])
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.key(self.K['w'])                                                                # W = as White
+        st = self.wait(lambda s: s['state']['human'] == 'w' and s['state']['plies'] == '0')
+        self.assertEqual((st['state']['flipped'], st['fen']), ('0', self.START_FEN))
+        self.key(self.K['n'])
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.key(self.K_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
+    def test_the_last_move_the_check_and_the_legal_moves_are_painted(self):
+        self.start('--level', '0')
+        st = self.state()
+        cs = st['lay']['cs']
+
+        def corner(name, img):                                                              # the top left corner of a square (no piece reaches it)
+            x, y = self.sq(name, st)
+            w = [x_ for x_ in ctl.windows()['windows'] if x_['app_id'] == 'mellagui.chess'][0]
+            return img.px(w['x'] + x - cs // 2 + 3, w['y'] + y - cs // 2 + 3)
+
+        img = ctl.dump(os.path.join(tmp, 'chess-a.ppm'))
+        light, dark = (0xee, 0xee, 0xd2), (0x76, 0x96, 0x56)
+        self.assertEqual(corner('a8', img), light)
+        self.assertEqual(corner('a1', img), dark)
+        self.click_sq('e2')                                                                  # the dots: e3 and e4 are darker in the middle
+        self.wait(lambda s: s['state']['sel'] == 'e2')
+        img = ctl.dump(os.path.join(tmp, 'chess-b.ppm'))
+        x, y = self.sq('e4', st)
+        w = [x_ for x_ in ctl.windows()['windows'] if x_['app_id'] == 'mellagui.chess'][0]
+        mid = img.px(w['x'] + x, w['y'] + y)
+        self.assertLess(sum(mid), sum(corner('e4', img)), 'no dot on e4')
+        self.assertEqual(corner('e2', img), (0xf7, 0xf2, 0x6a))                              # the chosen square is yellow
+        self.click_sq('e4')
+        self.wait(lambda s: s['state']['plies'] == '1')
+        img = ctl.dump(os.path.join(tmp, 'chess-c.ppm'))
+        self.assertEqual(corner('e4', img), (0xf0, 0xe6, 0x8c))                              # the last move
+        self.assertEqual(corner('e2', img), (0xf0, 0xe6, 0x8c))
+        for a, b in (('f7', 'f6'), ('d1', 'h5'), ('g7', 'g6'), ('h5', 'g6')):               # Qxg6+: the king is in check
+            self.move(a, b)
+        st = self.wait(lambda s: s['state']['check'] == '1')
+        img = ctl.dump(os.path.join(tmp, 'chess-d.ppm'))
+        r, g, b = corner('e8', img)
+        self.assertGreater(r, g + 40, 'the king in check is not red: %r' % ((r, g, b),))
+
+    def test_the_move_list_and_the_help_card(self):
+        self.start('--level', '0')
+        for a, b in (('e2', 'e4'), ('e7', 'e5'), ('g1', 'f3')):
+            self.move(a, b)
+        st = self.wait(lambda s: s['state']['plies'] == '3')
+        self.assertEqual(st['san'], ['e4', 'e5', 'Nf3'])
+        self.key(0x3b)                                                                       # F1
+        self.wait(lambda s: s['state']['prompt'] == '4')
+        self.key(self.K_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
+    def test_closing_the_window_while_the_computer_thinks_ends_the_program(self):
+        self.start('--level', '9')
+        self.move('e2', 'e4')
+        self.wait(lambda s: s['state']['thinking'] == '1')
+        ctl.key(29, True)                                                                    # Ctrl+Q
+        ctl.tap(self.K['q'])
+        ctl.key(29, False)
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(self.proc.poll(), 'the program did not end')
+        self.assertEqual(self.proc.poll(), 0)
 
 
 class TestChessRules(unittest.TestCase):

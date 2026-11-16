@@ -61,7 +61,6 @@ bool lm_output_set_scale(struct lm_output *out, int32_t milli);
 /* The scale new outputs get (setting `scale`, [display] scale); lm_output_set_scale() is applied to the existing ones
  * by the caller. */
 void lm_output_default_scale_set(int32_t milli);
-int32_t lm_output_default_scale(void);
 static inline double lm_output_scalef(const struct lm_output *o)
 {
     return o->scale_milli >= LM_SCALE_MIN ? o->scale_milli / 1000.0 : 1.0;

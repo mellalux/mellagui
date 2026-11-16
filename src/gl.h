@@ -97,7 +97,6 @@ void lm_gl_draw_tex(struct lm_gl *gl, unsigned tex, int x, int y, int w, int h, 
 /* Premultiplied colour rectangle. */
 void lm_gl_draw_rect(struct lm_gl *gl, int x, int y, int w, int h, float r, float g, float b, float a);
 void lm_gl_scissor(struct lm_gl *gl, bool on, int x, int y, int w, int h);   /* y from the top, like everything else */
-void lm_gl_flush(struct lm_gl *gl);                           /* glFlush */
 void lm_gl_finish(struct lm_gl *gl);                          /* glFinish */
 
 #endif

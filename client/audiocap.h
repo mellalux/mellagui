@@ -29,7 +29,6 @@ uint64_t audiocap_first_ms(const struct audiocap *a);
 /* Up to `max_frames` frames of the mix (interleaved stereo), never waiting. 0 when nothing new has arrived. */
 size_t audiocap_read(struct audiocap *a, int16_t *out, size_t max_frames);
 /* Is some source still delivering? (false once every parec has ended: the sound server went away) */
-bool audiocap_alive(const struct audiocap *a);
 void audiocap_stop(struct audiocap *a);
 
 #endif

@@ -418,8 +418,6 @@ void overview_click(struct lm_wm *wm, const struct lm_pick *pick, uint32_t butto
 }
 
 void lm_wm_overview_set(struct lm_wm *wm, bool open) { overview_set(wm, open); }
-bool lm_wm_overview_is_open(const struct lm_wm *wm) { return wm->ov.open; }
-
 size_t lm_wm_overview_describe(struct lm_wm *wm, char *buf, size_t size)
 {
     const struct wm_overview *ov = &wm->ov;

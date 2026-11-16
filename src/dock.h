@@ -83,14 +83,12 @@ int lm_dock_count(void);
 const struct lm_dock_item *lm_dock_item(int i);          /* NULL out of range */
 
 /* The entries as the file (or the built-in default) defines them, before anything is expanded or dropped; for the settings panel. */
-int lm_dock_raw_count(void);
 bool lm_dock_raw_entry(int i, const char **name, const char **icon, const char **cmd);
 /* Is this command the Launcher button's (`@launcher`)? That button is always in the dock: lm_dock_resolve() puts it at the front when the file has none, and
  * the settings refuse to remove it or to give it another command. */
 bool lm_dock_cmd_is_launcher(const char *cmd);
 /* The built-in launcher buttons (the launcher shows them while the file has no [launcher-apps]; lm_settings_launcher_add_defaults() adds the missing ones to a
  * file that has its own list). */
-int lm_launchapps_default_count(void);
 bool lm_launchapps_default(int i, const char **name, const char **icon, const char **cmd);
 
 /* The launcher dialog's own buttons, [launcher-apps] (the same "Name = [icon] command" lines, at most LM_LAUNCHER_APPS_MAX): what the launcher shows

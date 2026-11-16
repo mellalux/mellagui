@@ -149,20 +149,6 @@ static void insert_text(struct state *s, char *buf, size_t max, const char *text
     s->len = len + n;
 }
 
-void wltext_append(char *buf, size_t max, const char *text, size_t n)
-{
-    size_t len = strlen(buf);
-    if (len + 1 >= max)
-        return;
-    if (len + n + 1 > max) {
-        n = max - len - 1;
-        while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80)      /* not in the middle of a character */
-            n--;
-    }
-    memcpy(buf + len, text, n);
-    buf[len + n] = 0;
-}
-
 /* ---- the clipboard ------------------------------------------------------------------------------------------------------ */
 
 char *wltext_paste_text(struct wlclip *clip, size_t *len)
@@ -232,11 +218,6 @@ static int clip_kind(uint32_t ks, uint32_t mods)
     if ((ctrl && !shift && (ks == 'x' || ks == 'X')) || (shift && !ctrl && ks == LM_KS_Delete))
         return 3;
     return 0;
-}
-
-bool wltext_is_clipkey(uint32_t ks, uint32_t mods)
-{
-    return clip_kind(ks, mods) != 0;
 }
 
 /* ---- editing ------------------------------------------------------------------------------------------------------------ */
@@ -313,11 +294,6 @@ void wltext_end(char *buf)
 {
     struct state *s = get(buf);
     s->cur = s->anchor = strlen(buf);
-}
-
-bool wltext_selection(const char *buf, size_t *a, size_t *b)
-{
-    return sel_range(get(buf), a, b);
 }
 
 size_t wltext_cursor(const char *buf)
@@ -440,11 +416,4 @@ void wltext_menu_do(struct wlclip *clip, char *buf, size_t max, int index)
         s->cur = s->anchor = s->len = 0;
         break;
     }
-}
-
-bool wltext_key(struct wlclip *clip, char *buf, size_t max, uint32_t ks, uint32_t mods)
-{
-    if (!clip_kind(ks, mods))
-        return false;
-    return wltext_edit(clip, buf, max, ks, mods);
 }

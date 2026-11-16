@@ -30,7 +30,6 @@ void lm_bw_put(struct lm_bw *b, uint32_t value, int nbits);      /* nbits 0..32 
 void lm_bw_ue(struct lm_bw *b, uint32_t v);
 void lm_bw_se(struct lm_bw *b, int32_t v);
 void lm_bw_trailing(struct lm_bw *b);                            /* the stop bit and zeros up to a byte boundary */
-size_t lm_bw_bits(const struct lm_bw *b);
 void lm_bw_free(struct lm_bw *b);
 
 struct lm_br {

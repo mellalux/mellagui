@@ -783,5 +783,4 @@ void lm_gl_draw_rect(struct lm_gl *l, int x, int y, int w, int h, float r, float
     quad(l, x, y, w, h, 0, 0, 1, 1);
 }
 
-void lm_gl_flush(struct lm_gl *l) { l->gl.Flush(); }
 void lm_gl_finish(struct lm_gl *l) { l->gl.Finish(); }

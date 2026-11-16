@@ -17,7 +17,6 @@
 
 struct ffaudio {
     pid_t ff, player;
-    bool stopped;
     bool reaped_player;
     int64_t t0;
 };
@@ -188,27 +187,6 @@ int ffaudio_alive(struct ffaudio *a, bool *quick)
     if (quick)
         *quick = now_ms() - a->t0 < 2000 && !(r > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);      /* gave up at once: no sound server */
     return 0;
-}
-
-void ffaudio_stop(struct ffaudio *a)
-{
-    if (a && !a->stopped) {
-        kill(-a->ff, SIGSTOP);
-        a->stopped = true;
-    }
-}
-
-void ffaudio_cont(struct ffaudio *a)
-{
-    if (a && a->stopped) {
-        kill(-a->ff, SIGCONT);
-        a->stopped = false;
-    }
-}
-
-bool ffaudio_is_stopped(const struct ffaudio *a)
-{
-    return a && a->stopped;
 }
 
 void ffaudio_close(struct ffaudio *a)

@@ -55,11 +55,6 @@ void lm_bw_trailing(struct lm_bw *b)
         lm_bw_put(b, 0, 8 - b->nacc);
 }
 
-size_t lm_bw_bits(const struct lm_bw *b)
-{
-    return b->n * 8 + (size_t)b->nacc;
-}
-
 void lm_bw_free(struct lm_bw *b)
 {
     free(b->p);

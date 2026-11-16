@@ -147,7 +147,6 @@ void lm_settings_changed(struct lm_settings *s);
  *   dock_reorder                 move button `from` so that it ends up at `to`
  *   launcher_to_dock             a launcher button joins the dock, before dock raw index `at` (-1 = at the end), and leaves the launcher list
  *   dock_to_launcher             a dock button leaves the dock and goes to the launcher list */
-bool lm_settings_dock_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd);
 bool lm_settings_dock_del(struct lm_server *srv, int raw_index);
 /* Change one entry of [dock-apps] / [launcher-apps] in place (the launcher dialog's edit form); false when the text is not allowed, another entry
  * has that name or there is no config file. */
@@ -158,7 +157,6 @@ int lm_settings_launcher_add_defaults(struct lm_server *srv);   /* the built-in 
 bool lm_settings_launcher_del(struct lm_server *srv, int raw_index);
 bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to);
 /* The same in the launcher's own list [launcher-apps]: entry `from` ends up at place `to`. */
-bool lm_settings_launcher_reorder(struct lm_server *srv, int from, int to);
 
 /* Writes `[launcher] order = ...` (names separated by " | "; "" removes the line) and reloads. False without a config file. */
 bool lm_settings_launcher_set_order(struct lm_server *srv, const char *order);

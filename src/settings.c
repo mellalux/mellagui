@@ -1535,11 +1535,6 @@ static bool apps_del(struct lm_server *srv, bool launcher, int raw)
     return dock_commit(srv, &l, launcher ? "launcher-apps" : "dock-apps");
 }
 
-bool lm_settings_dock_put(struct lm_server *srv, const char *name, const char *icon, const char *cmd)
-{
-    return apps_put(srv, false, name, icon, cmd, -1);
-}
-
 bool lm_settings_dock_del(struct lm_server *srv, int raw_index) { return apps_del(srv, false, raw_index); }
 bool lm_settings_dock_replace(struct lm_server *srv, int raw_index, const char *name, const char *icon, const char *cmd)
 {
@@ -1585,17 +1580,6 @@ bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to)
     if (from != to)
         apps_move_entry(&l, from, to);
     return dock_commit(srv, &l, "dock-apps");
-}
-
-bool lm_settings_launcher_reorder(struct lm_server *srv, int from, int to)
-{
-    static struct dock_list l;
-    apps_load(&l, true);
-    if (from < 0 || to < 0 || from >= l.n || to >= l.n)
-        return false;
-    if (from != to)
-        apps_move_entry(&l, from, to);
-    return dock_commit(srv, &l, "launcher-apps");
 }
 
 static bool order_same(const char *existing, void *ud) { return !strcmp(existing, ud); }

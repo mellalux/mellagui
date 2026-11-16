@@ -59,11 +59,6 @@ void lm_output_default_scale_set(int32_t milli)
     g_default_scale = LM_CLAMP(milli, LM_SCALE_MIN, LM_SCALE_MAX);
 }
 
-int32_t lm_output_default_scale(void)
-{
-    return g_default_scale;
-}
-
 /* Recomputes the logical size from the mode and the (already clamped) scale. */
 static bool apply_scale(struct lm_output *out)
 {

@@ -69,7 +69,6 @@ bool lm_metrics_entry(int i, const char **section, const char **name, int *value
 /* What a size is for ("height of the top panel"), by section and name; NULL when unknown. */
 const char *lm_metrics_what(const char *section, const char *name);
 /* Set one value by section and name; false when unknown or out of range. */
-bool lm_metrics_set(const char *section, const char *name, int value);
 
 /* Back to the built-in sizes. */
 void lm_metrics_reset(void);

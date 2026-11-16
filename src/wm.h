@@ -788,7 +788,6 @@ void lm_wm_about_set(struct lm_wm *wm, bool open);
 /* The desktop overview (key action `overview`, control socket `overview`): the windows of this workspace as pictures in a grid with the
  * workspaces above them; click / Enter goes to a window, Esc closes. */
 void lm_wm_overview_set(struct lm_wm *wm, bool open);
-bool lm_wm_overview_is_open(const struct lm_wm *wm);
 size_t lm_wm_overview_describe(struct lm_wm *wm, char *buf, size_t size);   /* "overview open=0|1 closing= n= sel=" and an `item` line each */
 bool lm_wm_about_is_open(const struct lm_wm *wm);
 size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* the lines of the control socket `about` while it is open */

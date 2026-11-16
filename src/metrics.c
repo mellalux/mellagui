@@ -53,20 +53,6 @@ const char *lm_metrics_what(const char *section, const char *name)
     return NULL;
 }
 
-bool lm_metrics_set(const char *section, const char *name, int value)
-{
-#define X(sec, nm, field, def, lo, hi, what) \
-    if (!strcmp(section, sec) && !strcmp(name, nm)) { \
-        if (value < (lo) || value > (hi)) \
-            return false; \
-        lm_metrics.field = value; \
-        return true; \
-    }
-    LM_METRICS(X)
-#undef X
-    return false;
-}
-
 bool lm_metrics_section(const char *s)
 {
     return !strcmp(s, "windows") || !strcmp(s, "panel") || !strcmp(s, "gadgets") || !strcmp(s, "notifications");

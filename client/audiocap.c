@@ -239,20 +239,6 @@ size_t audiocap_read(struct audiocap *a, int16_t *out, size_t max_frames)
     return n;
 }
 
-bool audiocap_alive(const struct audiocap *a)
-{
-    if (!a)
-        return false;
-    struct audiocap *w = (struct audiocap *)a;
-    pthread_mutex_lock(&w->lock);
-    bool alive = false;
-    for (int i = 0; i < a->n; i++)
-        if (!a->src[i].dead || a->src[i].count > 0)
-            alive = true;
-    pthread_mutex_unlock(&w->lock);
-    return alive;
-}
-
 void audiocap_stop(struct audiocap *a)
 {
     if (!a)

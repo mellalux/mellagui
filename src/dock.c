@@ -240,7 +240,6 @@ bool lm_dock_check(const char *key, const char *value, bool *builtin)
     return ok;
 }
 
-int lm_dock_raw_count(void) { return DOCK_LIST->raw_n; }
 int lm_launchapps_raw_count(void) { return LAUNCH_LIST->raw_n; }
 
 static bool raw_entry(const struct applist *L, int i, const char **name, const char **icon, const char **cmd)
@@ -620,12 +619,6 @@ static void load_default_launcher(void)
         return;
     default_launcher_n = 0;
     lm_conf_parse(DEFAULT_LAUNCHER, "<built-in launcher>", default_launcher_conf, NULL);
-}
-
-int lm_launchapps_default_count(void)
-{
-    load_default_launcher();
-    return default_launcher_n;
 }
 
 bool lm_launchapps_default(int i, const char **name, const char **icon, const char **cmd)

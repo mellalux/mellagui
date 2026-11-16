@@ -22,6 +22,8 @@ while i < len(args):
     elif a == '-o':
         opts.append(args[i + 1])
         i += 2
+    elif a == '--':
+        i += 1
     elif a == '-P':
         port = args[i + 1]
         i += 2

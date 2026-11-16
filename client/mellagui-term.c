@@ -910,6 +910,9 @@ static void set_title(const char *s)             /* the program (g_feed) set its
 {
     struct tab *tb = g_feed ? g_feed : CUR;
     snprintf(tb->title, sizeof(tb->title), "%s", s);
+    for (char *p = tb->title; *p; p++)                        /* what the program sends must not carry control characters on */
+        if ((unsigned char)*p < 0x20 || *p == 0x7f)
+            *p = ' ';
     tb->title_set = true;
     if (tb == CUR)
         send_window_title();

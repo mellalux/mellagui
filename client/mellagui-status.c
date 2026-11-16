@@ -446,6 +446,10 @@ static void read_net(struct netinfo *ni)
 static bool connect_with_password(const char *ssid, const char *password, char *msg, size_t n)
 {
     msg[0] = 0;
+    if (ssid[0] == '-') {                                       /* (a network's name from the air must not be read as an option by nmcli) */
+        copy(msg, n, "a network name that starts with a dash is not used");
+        return false;
+    }
     int master = posix_openpt(O_RDWR | O_NOCTTY);
     if (master < 0 || grantpt(master) < 0 || unlockpt(master) < 0) {
         copy(msg, n, "no terminal available");
@@ -1249,6 +1253,11 @@ static void do_action(struct app *a, int idx)
     const char *ssid = a->menu_act[idx].ssid;
     char out[512];
     int rc;
+    int act = a->menu_act[idx].action;
+    if (ssid[0] == '-' && (act == ACT_CONNECT_KNOWN || act == ACT_CONNECT_OPEN || act == ACT_CONNECT_PASSWORD)) {
+        notify(a, "Wi-Fi", "A network name that starts with a dash is not used", 6000);   /* (nmcli could read it as an option) */
+        return;
+    }
     switch (a->menu_act[idx].action) {
     case ACT_BT_DEVICES:
         start_sibling(a, "mellagui-bluetooth");

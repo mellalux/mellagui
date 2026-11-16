@@ -350,9 +350,14 @@ static void last_write(const char *user, const char *sess)
     char path[PATH_MAX], tmp[PATH_MAX + 8];
     state_path(path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    FILE *f = fopen(tmp, "w");
-    if (!f)
+    unlink(tmp);                                                  /* root writes here: never through a link that somebody left */
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
+    if (!f) {
+        if (fd >= 0)
+            close(fd);
         return;
+    }
     fprintf(f, "%s\t%s\n", user, sess);
     fclose(f);
     rename(tmp, path);

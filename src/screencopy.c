@@ -13,6 +13,7 @@
 #include "protocol.h"
 #include "render.h"
 #include "server.h"
+#include "settings.h"
 #include "shm.h"
 
 #define SEEN_MAX 16
@@ -320,7 +321,11 @@ static const lm_request_fn mgr_handlers[] = {
 
 static void mgr_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)
 {
-    lm_resource_create(client, id, &lm_zwlr_screencopy_manager_v1_interface, version, mgr_handlers, data, NULL);
+    struct lm_screencopy *sc = data;
+    bool allowed = sc->srv->config.screencopy_access != 0 || lm_settings_client_allowed(sc->srv, client);
+    if (!allowed)
+        lm_warn("screencopy: client pid %d is not one of MellaGUI's programs, its frames will fail", (int)client->pid);
+    lm_resource_create(client, id, &lm_zwlr_screencopy_manager_v1_interface, version, mgr_handlers, allowed ? sc : NULL, NULL);
 }
 
 struct lm_screencopy *lm_screencopy_create(struct lm_server *srv)

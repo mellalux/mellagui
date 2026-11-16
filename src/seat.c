@@ -1552,7 +1552,8 @@ static void clip_save(struct lm_seat *seat)
             return;
         *p = '/';
     }
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    unlink(tmp);                                        /* (a stale or planted file / link of that name never gets written through) */
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
     if (!f) {
         if (fd >= 0)

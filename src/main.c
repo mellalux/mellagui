@@ -86,6 +86,8 @@ static const char *usage_text =
     "  --settings-access any|own  who may read and change the settings through the private mellagui_settings_v1 interface: \"own\" =\n"
     "                           only MellaGUI's own programs (mellagui-settings ... next to the compositor binary), \"any\" = every client\n"
     "                           of the session (default: own on drm, any on headless, which the tests need)\n"
+    "  --screencopy any|own|off who may take pictures of the screen through wlr-screencopy (grim, OBS): any client of the session\n"
+    "                           (default), only MellaGUI's own programs, or nobody (the interface is not offered)\n"
     "  --lock-file FILE         where the screen lock keeps its salted password / PIN hash (mode 0600); \"none\" = in memory only\n"
     "                           (default drm: $XDG_CONFIG_HOME/mellagui/lock.conf, headless: none)\n"
     "  --renderer software|auto|gl  how the picture is composed: gl (OpenGL ES through EGL: the GPU composites the windows, GPU clients'\n"
@@ -250,6 +252,17 @@ static bool conf_line(void *ud, const char *section, const char *key, const char
         return lm_metrics_conf(ud, section, key, value);
     if (!strcmp(section, "font"))
         return lm_font_conf(ud, section, key, value);
+    if (!strcmp(section, "clipboard")) {            /* [clipboard] history = on|off: off keeps the copied texts (passwords too) off the disk */
+        if (!strcmp(key, "history") && (!strcmp(value, "on") || !strcmp(value, "off") || !strcmp(value, "yes") || !strcmp(value, "no"))) {
+            struct lm_config *cfg = ud;
+            if ((!strcmp(value, "off") || !strcmp(value, "no")) && cfg->clip_path) {
+                unlink(cfg->clip_path);             /* what an earlier run left behind goes too */
+                cfg->clip_path = NULL;
+            }
+            return true;
+        }
+        return false;
+    }
     if (!strcmp(section, "keys"))
         return lm_keys_conf(&((struct lm_config *)ud)->keys, section, key, value);
     return false;
@@ -315,7 +328,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE, OPT_KIOSK };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENCOPY, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE, OPT_KIOSK };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0, cli_scale_pct = 0;
     static const struct option opts[] = {
@@ -344,6 +357,7 @@ int main(int argc, char **argv)
         { "renderer", required_argument, 0, OPT_RENDERER },
         { "output", required_argument, 0, OPT_OUTPUT },
         { "settings-access", required_argument, 0, OPT_SETTINGS_ACCESS },
+        { "screencopy", required_argument, 0, OPT_SCREENCOPY },
         { "layouts", required_argument, 0, OPT_LAYOUTS },
         { "sticky", no_argument, 0, OPT_STICKY },
         { "no-gadget", no_argument, 0, OPT_NO_GADGET },
@@ -514,6 +528,12 @@ int main(int argc, char **argv)
         case OPT_CLIPBOARD_FILE: cfg.clip_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_GADGETS_FILE: cfg.gadgets_path = strcmp(optarg, "none") ? optarg : NULL; break;
         case OPT_WINDOWS_FILE: cfg.windows_path = strcmp(optarg, "none") ? optarg : NULL; break;
+        case OPT_SCREENCOPY:
+            if (!strcmp(optarg, "any")) cfg.screencopy_access = 1;
+            else if (!strcmp(optarg, "own")) cfg.screencopy_access = 0;
+            else if (!strcmp(optarg, "off")) cfg.screencopy_access = -1;
+            else { fprintf(stderr, "mellagui: --screencopy wants any, own or off, not '%s'\n", optarg); return 2; }
+            break;
         case OPT_SETTINGS_ACCESS:
             if (!strcmp(optarg, "any")) cfg.settings_access = 1;
             else if (!strcmp(optarg, "own")) cfg.settings_access = 0;
@@ -661,7 +681,7 @@ int main(int argc, char **argv)
         !(srv->idle_inhibit = lm_idle_inhibit_create(srv)) ||
         !(srv->activation = lm_activation_create(srv)) ||
         !(srv->pconstraints = lm_pconstraints_create(srv)) ||
-        (!cfg.kiosk && !(srv->screencopy = lm_screencopy_create(srv))) ||
+        (!cfg.kiosk && cfg.screencopy_access >= 0 && !(srv->screencopy = lm_screencopy_create(srv))) ||
         !(srv->menu = lm_menu_create(srv)) ||
         !(srv->tray = lm_tray_create(srv))) {
         lm_error("module initialisation failed");

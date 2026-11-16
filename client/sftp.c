@@ -48,6 +48,23 @@ bool sftp_name_ok(const char *path)
     return true;
 }
 
+/* A user and a host may become the target argument of sftp: one that starts with a dash would be read as an option
+ * (-oProxyCommand=... runs a shell command), so it is refused, as is anything that is no plain name. */
+static bool plain_name(const char *s)
+{
+    for (; *s; s++)
+        if ((unsigned char)*s <= ' ' || *s == '@' || *s == '"' || *s == '\\' || *s == ';' || *s == 0x7f)
+            return false;
+    return true;
+}
+
+bool sftp_target_ok(const char *user, const char *host)
+{
+    if (!host || !*host || host[0] == '-' || (user && user[0] == '-'))
+        return false;
+    return plain_name(host) && plain_name(user ? user : "");
+}
+
 int sftp_askpass_main(void)
 {
     const char *p = getenv("MELLAGUI_SFTP_PASS");
@@ -192,6 +209,10 @@ static int batch(const struct smb_conn *c, const char *commands, int timeout_ms,
     char *argv[24];
     int n = 1;
     char port[16], target[200];
+    if (!sftp_target_ok(c->user, c->host)) {
+        snprintf(err, errsz, "That is not a usable server or user name");
+        return -1;
+    }
     argv[n++] = "-b";
     argv[n++] = "-";
     argv[n++] = "-o";
@@ -216,6 +237,7 @@ static int batch(const struct smb_conn *c, const char *commands, int timeout_ms,
         snprintf(target, sizeof(target), "%s@%s", c->user, c->host);
     else
         snprintf(target, sizeof(target), "%s", c->host);
+    argv[n++] = "--";                                                   /* (what follows is never an option) */
     argv[n++] = target;
     argv[n] = NULL;
     const char *env[5];
@@ -467,6 +489,8 @@ int sftp_selftest(void)
     CHECK(strstr(why, "Cannot find"));
     sftp_explain("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@", why, sizeof(why), &nl);
     CHECK(strstr(why, "key has changed"));
+    CHECK(sftp_target_ok("me", "nas.local") && sftp_target_ok("", "10.0.0.2") && !sftp_target_ok("", "-oProxyCommand=x") &&
+          !sftp_target_ok("-oProxyCommand=x", "host") && !sftp_target_ok("a b", "h") && !sftp_target_ok("", "h@h") && !sftp_target_ok("", ""));
     CHECK(sftp_name_ok("/a b/c.txt") && !sftp_name_ok("/a\"b") && !sftp_name_ok("/a\\b") && !sftp_name_ok("/a\nb"));
     return bad ? 1 : 0;
 }

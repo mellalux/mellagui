@@ -185,6 +185,8 @@ struct lm_config {
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */
     const char *clip_path;      /* file the clipboard history is kept in (--clipboard-file); NULL = not saved */
     const char *gadgets_path;   /* file the gadgets' places and sizes are kept in (--gadgets-file); NULL = not saved */
+    int screencopy_access;      /* who may take pictures of the screen through wlr-screencopy: 1 = any client (default), 0 = only MellaGUI's own
+                                   programs (the others get frames that fail), -1 = the global is not offered at all */
     int settings_access;        /* who may use mellagui_settings_v1: 1 = any client of the session, 0 = only MellaGUI's own programs
                                  * (an executable called mellagui-* in the compositor's directory), -1 (default) = 0 on drm, 1 on headless */
     const char *screenshot_dir; /* where Print / Alt+Print save PNGs (--screenshot-dir); NULL = the clipboard only */
@@ -231,6 +233,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .terminal_cmd = "mellagui-term",
         .settings_cmd = "mellagui-settings",
         .kbd_active = -1,
+        .screencopy_access = 1,
         .settings_access = -1,
         .log_level = 2, /* LM_LOG_INFO */
         .repeat_delay_ms = 400,

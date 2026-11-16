@@ -1150,6 +1150,8 @@ static struct netconn *net_find(const char *name)                       /* a Win
 static struct netconn *net_add_sftp(const char *host, const char *user, int port)
 {
     char name[48];
+    if (!sftp_target_ok(user, host))
+        return NULL;
     if (port > 0 && port != 22)
         snprintf(name, sizeof(name), "%.40s:%d", host, port);
     else
@@ -4545,6 +4547,10 @@ static void net_connect(struct app *a, const char *text)
         }
     }
     if (!host[0] || strchr(host, '/') || strchr(host, '\\') || !smb_name_ok(host)) {
+        msg(a, "That is not a server name");
+        return;
+    }
+    if (sftp && !sftp_target_ok(user, host)) {
         msg(a, "That is not a server name");
         return;
     }

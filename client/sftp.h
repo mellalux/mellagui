@@ -34,6 +34,7 @@ int sftp_del(const struct smb_conn *c, const char *remote, bool dir, char *err, 
 int sftp_mkdir(const struct smb_conn *c, const char *remote, char *err, size_t errsz, smb_poll_fn poll, void *pd);
 int sftp_rename(const struct smb_conn *c, const char *from, const char *to, char *err, size_t errsz, smb_poll_fn poll, void *pd);
 
+bool sftp_target_ok(const char *user, const char *host);          /* no leading dash, no blanks / quotes: safe as the target argument */
 bool sftp_name_ok(const char *path);                            /* every part of the path may go into a command */
 
 /* ---- no program needed (also for the selftest) ---- */

@@ -4403,6 +4403,11 @@ static void cmd_edit(struct app *a)
         snprintf(path, sizeof(path), "%s", local);
         msg(a, "Editing a copy of %s: it is not sent back, copy it over with F5", e->name);
     }
+    if (is_picture_name(e->name)) {                                     /* a picture: the picture editor (Enter still opens the viewer) */
+        if (!launch("mellagui-paint", path, workdir(a), err, sizeof(err)))
+            msg(a, "%s", err);
+        return;
+    }
     if (classify(path) != K_TEXT) {
         msg(a, "%s is not a text file (Enter opens pictures)", e->name);
         return;

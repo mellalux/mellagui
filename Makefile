@@ -13,6 +13,7 @@
 #   make mellagui-notes    build/mellagui-notes (client/mellagui-notes.c, the history of notifications)
 #   make mellagui-archive  build/mellagui-archive (client/mellagui-archive.c, the archiver: open, extract and make archives)
 #   make mellagui-shot     build/mellagui-shot (client/mellagui-shot.c, a screenshot of an area with marks)
+#   make mellagui-paint    build/mellagui-paint (client/mellagui-paint.c, a simple picture editor)
 #   make mellagui-smart  build/mellagui-smart (client/mellagui-smart.c, the devices of a Smart Life / Tuya account)
 #   make mellagui-bluetooth  build/mellagui-bluetooth (client/mellagui-bluetooth.c, the Bluetooth devices window)
 #   make mellagui-calendar build/mellagui-calendar (client/mellagui-calendar.c, the calendar of the panel's clock)
@@ -51,9 +52,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-archive $(BUILD)/mellagui-shot $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget $(BUILD)/fuzz-server $(BUILD)/hwprobe $(BUILD)/mellagui-greetd $(BUILD)/mellagui-greeter
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-archive $(BUILD)/mellagui-shot $(BUILD)/mellagui-paint $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget $(BUILD)/fuzz-server $(BUILD)/hwprobe $(BUILD)/mellagui-greetd $(BUILD)/mellagui-greeter
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-archive mellagui-shot mellagui-bluetooth mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run hwprobe
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-archive mellagui-shot mellagui-paint mellagui-bluetooth mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run hwprobe
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -133,6 +134,10 @@ $(BUILD)/mellagui-gadget: $(BUILD)/client/mellagui-gadget.o $(BUILD)/src/mixer.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/mellagui-shot: $(BUILD)/client/mellagui-shot.o $(BUILD)/src/png.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/mellagui-paint: $(BUILD)/client/mellagui-paint.o $(BUILD)/client/deflate.o $(BUILD)/src/jpegenc.o $(BUILD)/src/img.o $(BUILD)/src/svg.o $(BUILD)/src/webp.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/client/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

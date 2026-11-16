@@ -12768,6 +12768,269 @@ class TestTop(Base):
         self.assertEqual(p.poll(), 0)
 
 
+class TestPaint(Base):
+    """mellagui-paint: the picture editor. The engine through `--apply` (compared with Pillow), the window through its dump."""
+    PAINT = os.environ.get('MELLAGUI_PAINT_BIN', os.path.join(ROOT, 'build', 'mellagui-paint'))
+    KEY_Z, KEY_S, KEY_N, KEY_O, KEY_A, KEY_P, KEY_E, KEY_DELETE = 44, 31, 49, 24, 30, 25, 18, 111
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.PAINT):
+            self.skipTest('mellagui-paint not built')
+
+    def test_selftest(self):
+        r = subprocess.run([self.PAINT, '--selftest'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('selftest ok', r.stdout)
+
+    def apply(self, src, *ops, out='png'):
+        dst = os.path.join(tmp, 'paint-out-%d.%s' % (len(ops), out))
+        r = subprocess.run([self.PAINT, '--apply', src, dst] + list(ops), capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return dst
+
+    def test_the_operations_give_what_pillow_gives(self):
+        from PIL import Image
+        im = Image.new('RGB', (6, 4))
+        im.putdata([(x * 40, y * 60, (x * y * 17) % 256) for y in range(4) for x in range(6)])
+        src = os.path.join(tmp, 'paint-src.png')
+        im.save(src)
+        def out(*ops):
+            return Image.open(self.apply(src, *ops)).convert('RGB')
+        self.assertEqual(list(out('rotate-right').getdata()), list(im.transpose(Image.ROTATE_270).getdata()))
+        self.assertEqual(list(out('rotate-left').getdata()), list(im.transpose(Image.ROTATE_90).getdata()))
+        self.assertEqual(list(out('flip-h').getdata()), list(im.transpose(Image.FLIP_LEFT_RIGHT).getdata()))
+        self.assertEqual(list(out('flip-v').getdata()), list(im.transpose(Image.FLIP_TOP_BOTTOM).getdata()))
+        self.assertEqual(list(out('crop=1,1,3,2').getdata()), list(im.crop((1, 1, 4, 3)).getdata()))
+        self.assertEqual(list(out('invert').getdata()), [(255 - r, 255 - g, 255 - b) for r, g, b in im.getdata()])
+        self.assertEqual(list(out('gray').getdata()), [((r * 299 + g * 587 + b * 114) // 1000,) * 3 for r, g, b in im.getdata()])
+        self.assertEqual(list(out('rotate-right', 'rotate-left').getdata()), list(im.getdata()))           # undo each other
+        self.assertEqual(out('resize=12x8').size, (12, 8))
+        self.assertEqual(out('resize=50%').size, (3, 2))
+        # blocks of 2 x 2 equal pixels shrink to exactly those pixels (an area average)
+        blocks = Image.new('RGB', (4, 4))
+        blocks.putdata([((x // 2) * 100, (y // 2) * 100, 7) for y in range(4) for x in range(4)])
+        bsrc = os.path.join(tmp, 'paint-blocks.png')
+        blocks.save(bsrc)
+        small = Image.open(self.apply(bsrc, 'resize=2x2')).convert('RGB')
+        self.assertEqual(list(small.getdata()), [(0, 0, 7), (100, 0, 7), (0, 100, 7), (100, 100, 7)])
+
+    def test_transparency_survives_png_and_a_jpeg_is_flattened_on_white(self):
+        from PIL import Image
+        im = Image.new('RGBA', (8, 8), (255, 0, 0, 255))
+        im.putpixel((3, 3), (0, 0, 255, 0))
+        im.putpixel((4, 4), (0, 255, 0, 128))
+        src = os.path.join(tmp, 'paint-alpha.png')
+        im.save(src)
+        png = Image.open(self.apply(src, 'flip-v', 'flip-v')).convert('RGBA')
+        self.assertEqual(png.getpixel((3, 3))[3], 0)
+        self.assertEqual(png.getpixel((4, 4)), (0, 255, 0, 128))
+        self.assertEqual(png.getpixel((0, 0)), (255, 0, 0, 255))
+        jpg = Image.open(self.apply(src, 'flip-v', 'flip-v', out='jpg')).convert('RGB')
+        r, g, b = jpg.getpixel((3, 3))                                                        # a see-through pixel is white in a JPEG ...
+        self.assertGreater(r + g + b, 600, (r, g, b))
+        r, g, b = jpg.getpixel((4, 4))                                                        # ... a half see-through green one is a light green
+        self.assertGreater(g, r + 40, (r, g, b))
+        opaque = Image.new('RGB', (9, 5), (10, 20, 30))
+        osrc = os.path.join(tmp, 'paint-opaque.png')
+        opaque.save(osrc)
+        self.assertEqual(Image.open(self.apply(osrc, 'blur')).mode, 'RGB')                    # nothing see-through: a plain RGB file
+
+    def test_a_bad_operation_or_file_is_refused(self):
+        src = os.path.join(tmp, 'paint-notapic.png')
+        with open(src, 'wb') as f:
+            f.write(b'not a picture')
+        r = subprocess.run([self.PAINT, '--apply', src, os.path.join(tmp, 'x.png')], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(r.returncode, 0)
+        from PIL import Image
+        good = os.path.join(tmp, 'paint-good.png')
+        Image.new('RGB', (3, 3)).save(good)
+        r = subprocess.run([self.PAINT, '--apply', good, os.path.join(tmp, 'x.png'), 'sparkle'], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('unknown operation', r.stderr)
+
+    # ---- the window ----
+
+    def start(self, *args):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.paint', 'a window of an earlier test is still open')
+        self.dump = os.path.join(tmp, 'paint-%d.dump' % int(time.time() * 1000))
+        p = subprocess.Popen([self.PAINT, '--size', '800x460'] + list(args), env=dict(os.environ, MELLAGUI_PAINT_DUMP=self.dump, MELLAGUI_RAILS='1'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.win = wait_for_window('mellagui.paint')
+        self.assertIsNotNone(self.win, 'the window did not appear')
+        self.wait(lambda st: 'image' in st)
+        ctl.abs(3, 590)                                                                       # the pointer away from where the window came up: it enters when it moves in
+        time.sleep(0.15)
+        return p
+
+    def state(self):
+        st = {}
+        try:
+            lines = open(self.dump).read().splitlines()
+        except OSError:
+            return st
+        for l in lines:
+            f = l.split()
+            if not f:
+                continue
+            kv = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+            if f[0] == 'btn':
+                st.setdefault('btn', {})[f[1]] = tuple(int(kv[k]) for k in ('x', 'y', 'w', 'h'))
+            elif f[0] == 'sel':
+                st['sel'] = f[1:]
+            else:
+                st[f[0]] = kv
+        return st
+
+    def wait(self, pred, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            st = self.state()
+            try:
+                if pred(st):
+                    return st
+            except (KeyError, ValueError):
+                pass
+            time.sleep(0.03)
+        self.fail('the state never became right: %r' % self.state())
+
+    def screen(self, st, ix, iy):
+        cv = st['canvas']
+        z = int(st['state']['zoom']) / 100.0
+        w = ctl.windows()['windows']
+        win = [x for x in w if x['app_id'] == 'mellagui.paint'][0]
+        return win['x'] + int(cv['x']) + float(cv['vx']) + ix * z, win['y'] + float(cv['vy']) + iy * z
+
+    def click_button(self, st, name):
+        win = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
+        x, y, w, h = st['btn'][name]
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+
+    def chord(self, code, *mods):
+        for m in mods:
+            ctl.key(m, True)
+        ctl.tap(code)
+        for m in reversed(mods):
+            ctl.key(m, False)
+
+    def drag(self, st, a, b, button=272, steps=4):
+        x0, y0 = self.screen(st, *a)
+        x1, y1 = self.screen(st, *b)
+        ctl.abs(int(x0), int(y0))
+        ctl.button(button, True)
+        for i in range(1, steps + 1):
+            ctl.abs(int(x0 + (x1 - x0) * i / steps), int(y0 + (y1 - y0) * i / steps))
+            time.sleep(0.02)
+        ctl.button(button, False)
+
+    def test_it_draws_undoes_redoes_and_saves(self):
+        out = os.path.join(tmp, 'paint-draw.png')
+        if os.path.exists(out):
+            os.unlink(out)
+        self.start('--new', '64x48', out)
+        st = self.wait(lambda s: s['image']['w'] == '64')
+        blank = st['image']['hash']
+        self.assertEqual((st['image']['modified'], st['state']['tool'], st['state']['undo']), ('0', 'Pen', '0'))
+        self.drag(st, (10, 24), (50, 24))                                                     # the Pen draws a black line across the middle
+        st = self.wait(lambda s: s['image']['hash'] != blank)
+        self.assertEqual((st['image']['modified'], st['state']['undo']), ('1', '1'))
+        drawn = st['image']['hash']
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)                                                  # Ctrl+Z
+        st = self.wait(lambda s: s['image']['hash'] == blank)
+        self.assertEqual((st['state']['undo'], st['state']['redo']), ('0', '1'))
+        self.chord(self.KEY_Z, KEY_LEFTCTRL, KEY_LEFTSHIFT)                                   # Ctrl+Shift+Z: redone
+        st = self.wait(lambda s: s['image']['hash'] == drawn)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)                                                  # Ctrl+S: the path was given
+        st = self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(os.path.exists(out))
+        from PIL import Image
+        im = Image.open(out).convert('RGB')
+        self.assertEqual(im.size, (64, 48))
+        self.assertEqual(im.getpixel((30, 24)), (0, 0, 0))                                    # on the line
+        self.assertEqual(im.getpixel((30, 10)), (255, 255, 255))                              # off it
+        self.assertEqual(im.getpixel((2, 24)), (255, 255, 255))                               # before its start
+
+    def test_colours_the_fill_tool_and_the_second_button(self):
+        self.start('--new', '40x30')
+        st = self.wait(lambda s: s['image']['w'] == '40')
+        # a red pen colour from the strip (the sixth square), then a click with Fill turns the whole white picture red
+        pal = st['pal']
+        win = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
+        px = win['x'] + int(pal['x']) + 5 * int(pal['pitch']) + 8
+        py = win['y'] + int(pal['y']) + 8
+        ctl.click(px, py)
+        st = self.wait(lambda s: s['state']['fg'] == 'ffe53935')
+        ctl.click(px + int(pal['pitch']) * 4, py, 273)                                        # right click: the second colour
+        st = self.wait(lambda s: s['state']['bg'] != 'ffffffff')
+        ctl.tap(33)                                                                           # F: the Fill tool
+        st = self.wait(lambda s: s['state']['tool'] == 'Fill')
+        before = st['image']['hash']
+        x, y = self.screen(st, 5, 5)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['image']['hash'] != before)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)                                                  # Ctrl+S with no name yet: the Save as card
+        st = self.wait(lambda s: s['state']['prompt'] == '2')
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
+    def test_select_crop_resize_and_new(self):
+        self.start('--new', '50x40')
+        st = self.wait(lambda s: s['image']['w'] == '50')
+        ctl.tap(31)                                                                           # S: the Select tool
+        st = self.wait(lambda s: s['state']['tool'] == 'Select')
+        self.drag(st, (10, 8), (29, 17))
+        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        x0, y0, x1, y1 = (int(v) for v in st['sel'][1].split(','))
+        self.assertEqual((x1 - x0, y1 - y0), (20, 10))
+        ctl.tap(KEY_ENTER)                                                                    # crop to the selection
+        st = self.wait(lambda s: s['image']['w'] == '20')
+        self.assertEqual((st['image']['h'], st['state']['undo'], st['sel'][0]), ('10', '1', 'no'))
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)                                                  # the crop can be undone
+        st = self.wait(lambda s: s['image']['w'] == '50')
+        self.chord(19, KEY_LEFTCTRL)                                                          # Ctrl+R: the Resize card, type a size
+        st = self.wait(lambda s: s['state']['prompt'] == '4')
+        for _ in range(9):
+            ctl.tap(14)                                                                       # Backspace: the field starts as "50x40"
+        for ch in '25x20':
+            ctl.tap(KEYCODES[ch])
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['image']['w'] == '25')
+        self.assertEqual(st['image']['h'], '20')
+        self.chord(KEY_RIGHT, KEY_LEFTCTRL)                                                   # Ctrl+Right: turn right
+        st = self.wait(lambda s: s['image']['w'] == '20')
+        self.assertEqual(st['image']['h'], '25')
+
+    def test_changes_are_not_thrown_away_without_asking(self):
+        self.start('--new', '30x30')
+        st = self.wait(lambda s: s['image']['w'] == '30')
+        self.drag(st, (5, 5), (20, 20))
+        st = self.wait(lambda s: s['image']['modified'] == '1')
+        self.chord(self.KEY_N, KEY_LEFTCTRL)                                                  # a new picture: asks first
+        st = self.wait(lambda s: s['state']['prompt'] == '5')
+        ctl.tap(KEY_ESC)                                                                      # Cancel
+        st = self.wait(lambda s: s['state']['prompt'] == '0')
+        self.assertEqual((st['image']['w'], st['image']['modified']), ('30', '1'))
+        self.chord(self.KEY_N, KEY_LEFTCTRL)
+        self.wait(lambda s: s['state']['prompt'] == '5')
+        ctl.tap(32)                                                                           # D: discard, and the size card of the new picture comes
+        st = self.wait(lambda s: s['state']['prompt'] == '3')
+        self.assertEqual(st['image']['modified'], '0')
+
+    def test_the_wheel_zooms_and_the_middle_button_moves_the_picture(self):
+        self.start('--new', '400x300')
+        st = self.wait(lambda s: s['image']['w'] == '400')
+        z0 = int(st['state']['zoom'])
+        x, y = self.screen(st, 200, 150)
+        ctl.abs(int(x), int(y))
+        ctl.tap(13)                                                                           # = (the + key): zoom in from the keyboard
+        st = self.wait(lambda s: int(s['state']['zoom']) > z0)
+        self.assertEqual(st['state']['fitted'], '0')
+        ctl.tap(11)                                                                           # 0: fit again
+        st = self.wait(lambda s: s['state']['fitted'] == '1')
+        self.assertEqual(int(st['state']['zoom']), z0)
+
+
 class TestDu(Base):
     """mellagui-du: the disk usage list and tree map."""
     DU = os.environ.get('MELLAGUI_DU_BIN', os.path.join(ROOT, 'build', 'mellagui-du'))

@@ -68,6 +68,10 @@
     X("glass-hint",           glass_hint,        0xe6edf7) \
     X("glass-error",          glass_error,       0xffb4a8) \
     X("glass-shadow",         glass_shadow,      0x0b1220) /* the 1 px shadow under the glass texts */ \
+    X("launcher-body",        launcher_body,     0xf1f3f8) /* the launcher card: a light frosted body ... */ \
+    X("launcher-text",        launcher_text,     0x1a2030) /* ... with dark names, titles and marks */ \
+    X("launcher-hint",        launcher_hint,     0x5d667d) /* the hint lines of the launcher */ \
+    X("launcher-error",       launcher_error,    0xc0392b) /* a mistake of its form */ \
     X("key-modifier",         key_modifier,      0x6b7a99) /* Shift, Ctrl ... on the on-screen keyboard */ \
     X("bar-deep",             bar_deep,          0x0e1118) /* the viewer's bottom bar */ \
     X("bar-text",             bar_text,          0xd8dde8) \

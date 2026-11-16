@@ -561,6 +561,11 @@ struct lm_launcher_info {
      * others have no box and are not painted; a row of dots under the grid (and an arrow at each side) turns the pages */
     int pages, page, per_page, first, last;
     int cells;                      /* the icons and the "+" tile (whichever page they are on) */
+    int real_pages;                 /* the pages that hold cells; edit mode adds one empty page after them (`pages` = real_pages + 1), to drop an icon on */
+    bool extra_page;                /* the page showing is that empty one */
+    struct lm_rect grid;            /* where the cells of a page lie (the empty page's drop area) */
+    int drop_cell;                  /* while an icon is dragged: the cell it is over (an icon index, n = the "+" tile), -1 none */
+    bool drop_end;                  /* ... or it is over the empty page: it would go to the end */
     struct lm_rect dot[LM_LAUNCHER_PAGES_MAX];   /* the hit boxes of the dots, pages of them (none when there is one page) */
     struct lm_rect arrow[2];        /* previous / next page, empty at the ends */
     struct {

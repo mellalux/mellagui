@@ -1376,13 +1376,9 @@ static void fit_text(char *out, size_t n, const char *text, int maxw, bool tail)
     snprintf(out + len, n - len, "..");
 }
 
-/* Text on the light glass of the launcher: a one pixel dark shadow keeps it readable over any wallpaper. */
+/* Text on the launcher card (a light frosted body, dark text). */
 static void lc_text(const struct paint_ctx *c, const struct lm_rect *area, int x, int y, const char *text, uint32_t color)
 {
-    struct lm_rect sh = *area;
-    sh.x++;
-    sh.y++;
-    draw_text(c, &sh, x + 1, y + 1, text, lm_theme.glass_shadow);
     draw_text(c, area, x, y, text, color);
 }
 
@@ -1395,13 +1391,13 @@ static void lc_text_centered(const struct paint_ctx *c, const struct lm_rect *ar
 static void paint_launcher_button(const struct paint_ctx *c, const struct lm_rect *r, const char *text, bool hot, bool on)
 {
     int rad = btn_radius(LM_MIN(r->w, r->h) / 2);
-    fill_round(c, r, rad, hot ? (0xf0000000u | COL_PANEL_ACCENT) : on ? ALPHA(0x70u, lm_theme.glass) : ALPHA(0x48u, lm_theme.glass));
-    stroke_round(c, r, rad, ALPHA(0x80u, lm_theme.glass));
-    paint_glint(c, r, rad, hot ? 255 : 200);
+    fill_round(c, r, rad, hot ? (0xf0000000u | COL_PANEL_ACCENT) : on ? ALPHA(0x44u, lm_theme.launcher_text) : ALPHA(0x22u, lm_theme.launcher_text));
+    stroke_round(c, r, rad, ALPHA(0x58u, lm_theme.launcher_text));
+    paint_glint(c, r, rad, hot ? 255 : 120);
     if (hot)
         draw_text_centered(c, r, text, COL_PANEL);
     else
-        lc_text_centered(c, r, text, lm_theme.glass_text);
+        lc_text_centered(c, r, text, lm_theme.launcher_text);
 }
 
 /* The launcher dialog: the output dimmed a little, a big light translucent card with the dock's icons as large round buttons, a "+" tile and (edit mode)
@@ -1412,15 +1408,14 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         fill_round(c, &li->rect, 0, (uint32_t)(0x40 * LM_CLAMP(li->veil, 0.0f, 1.0f)) << 24);
     if (li->veil_only)
         return;
-    fill_round(c, &li->card, 18, ALPHA(0xb8u, lm_theme.ink));                                    /* a dark body, so that the white names read on any wallpaper ... */
-    fill_round(c, &li->card, 18, ALPHA(0x30u, lm_theme.glass));                                  /* ... and a light glass veil over it */
-    stroke_round(c, &li->card, 18, ALPHA(0x8cu, lm_theme.glass));
+    fill_round(c, &li->card, 18, ALPHA(0xd2u, lm_theme.launcher_body));                          /* a light frosted body: most of it, the wallpaper only tints it */
+    stroke_round(c, &li->card, 18, ALPHA(0xe0u, lm_theme.launcher_body));
     if (li->searching) {
         char st[64];
         snprintf(st, sizeof(st), "Search: %s_", li->search);
-        lc_text_centered(c, &li->title, st, lm_theme.glass_text);
+        lc_text_centered(c, &li->title, st, lm_theme.launcher_text);
     } else {
-        lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", lm_theme.glass_text);
+        lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", lm_theme.launcher_text);
     }
     if (!li->form) {
         for (int g = li->first; g < li->last && g < li->n; g++) {       /* (the icons of the other pages are not painted) */
@@ -1430,15 +1425,15 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
                 struct lm_rect hl = li->icon[g].hit;
                 hl.x += 4;
                 hl.w -= 8;
-                fill_round(c, &hl, 12, ALPHA(0x48u, lm_theme.glass));
+                fill_round(c, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
             }
             paint_dock_icon(c, b, li->icon[g].item, sel ? 1.0f : 0.0f);
             char fit[LM_DOCK_NAME_MAX + 4];
             fit_text(fit, sizeof(fit), li->icon[g].item->name, LM_LAUNCHER_CELL_W - 12, false);
             struct lm_rect label = lm_rect_make(li->icon[g].hit.x, b->y + b->h + 10, li->icon[g].hit.w, LM_FONT_H);
-            lc_text_centered(c, &label, fit, lm_theme.glass_text);
+            lc_text_centered(c, &label, fit, lm_theme.launcher_text);
             if (li->icon[g].running)
-                paint_shape(c, (float)(b->x + b->w / 2), (float)(label.y + LM_FONT_H + 4), 2.2f, SHAPE_DISC, COL_PANEL_TEXT, 0xdd);
+                paint_shape(c, (float)(b->x + b->w / 2), (float)(label.y + LM_FONT_H + 4), 2.2f, SHAPE_DISC, lm_theme.launcher_text, 0xdd);
             if (li->edit) {
                 const struct lm_rect *x = &li->icon[g].remove;
                 float xc = (float)x->x + (float)x->w / 2.0f, yc = (float)x->y + (float)x->h / 2.0f;
@@ -1454,46 +1449,53 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
                 struct lm_rect hl = li->add;
                 hl.x += 4;
                 hl.w -= 8;
-                fill_round(c, &hl, 12, ALPHA(0x48u, lm_theme.glass));
+                fill_round(c, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
             }
-            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON / 2.0f, SHAPE_DISC, sel ? COL_PANEL_ACCENT : lm_theme.glass, sel ? 0xff : 0x70);
-            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, sel ? COL_PANEL : lm_theme.glass, 0xff);
+            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON / 2.0f, SHAPE_DISC, sel ? COL_PANEL_ACCENT : lm_theme.launcher_text, sel ? 0xff : 0x30);
+            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, sel ? COL_PANEL : lm_theme.launcher_text, sel ? 0xff : 0xb0);
             struct lm_rect label = lm_rect_make(li->add.x, (int)cy + LM_LAUNCHER_ICON / 2 + 10, li->add.w, LM_FONT_H);
-            lc_text_centered(c, &label, "Add", lm_theme.glass_text);
+            lc_text_centered(c, &label, "Add", lm_theme.launcher_text);
         }
         if (li->pages > 1) {                                                /* page dots, and an arrow at each side while there is a page that way */
             for (int i = 0; i < li->pages; i++) {
                 const struct lm_rect *d = &li->dot[i];
                 bool cur = i == li->page;
-                paint_shape(c, (float)d->x + (float)d->w / 2.0f, (float)d->y + (float)d->h / 2.0f, cur ? 4.6f : 3.6f, SHAPE_DISC, lm_theme.glass_text, cur ? 0xf0 : 0x66);
+                paint_shape(c, (float)d->x + (float)d->w / 2.0f, (float)d->y + (float)d->h / 2.0f, cur ? 4.6f : 3.6f, SHAPE_DISC, lm_theme.launcher_text, cur ? 0xe0 : 0x50);
             }
             for (int k = 0; k < 2; k++) {
                 const struct lm_rect *a = &li->arrow[k];
                 if (a->w <= 0)
                     continue;
                 float cx = (float)a->x + (float)a->w / 2.0f, cy = (float)a->y + (float)a->h / 2.0f;
-                paint_shape(c, cx, cy, 13.0f, SHAPE_DISC, lm_theme.glass, 0x70);
+                paint_shape(c, cx, cy, 13.0f, SHAPE_DISC, lm_theme.launcher_text, 0x30);
                 struct lm_rect lab = lm_rect_make(a->x, a->y + (a->h - LM_FONT_H) / 2, a->w, LM_FONT_H);
-                lc_text_centered(c, &lab, k ? ">" : "<", lm_theme.glass_text);
+                lc_text_centered(c, &lab, k ? ">" : "<", lm_theme.launcher_text);
             }
         }
-        if (li->n == 0 && li->add.w <= 0) {
+        if (li->extra_page) {                                                /* edit mode's empty page: a drop area for the end of the list */
+            struct lm_rect area = li->grid;
+            fill_round(c, &area, 16, ALPHA(li->drop_end ? 0x34u : 0x14u, lm_theme.launcher_text));
+            stroke_round(c, &area, 16, li->drop_end ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x50u, lm_theme.launcher_text));
+            struct lm_rect t = lm_rect_make(area.x, area.y + area.h / 2 - LM_FONT_H, area.w, LM_FONT_H);
+            lc_text_centered(c, &t, "Drop an icon here to move it to the end", lm_theme.launcher_hint);
+        }
+        if (li->n == 0 && li->add.w <= 0 && !li->extra_page) {
             struct lm_rect none = lm_rect_make(li->card.x, li->card.y + li->card.h / 2, li->card.w, LM_FONT_H);
-            lc_text_centered(c, &none, li->searching ? "Nothing found" : "Nothing here", lm_theme.glass_text);
+            lc_text_centered(c, &none, li->searching ? "Nothing found" : "Nothing here", lm_theme.launcher_text);
         }
     } else {
         for (int i = 0; i < 3; i++) {
             const struct lm_rect *f = &li->field[i];
             struct lm_rect lab = lm_rect_make(f->x, f->y - LM_FONT_H - 4, f->w, LM_FONT_H);
-            lc_text(c, &lab, lab.x, lab.y, li->field_label[i], lm_theme.glass_text);
-            fill_round(c, f, 8, 0x58000000u);
-            stroke_round(c, f, 8, li->focus == i ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x90u, lm_theme.glass));
+            lc_text(c, &lab, lab.x, lab.y, li->field_label[i], lm_theme.launcher_text);
+            fill_round(c, f, 8, 0xe8ffffffu);
+            stroke_round(c, f, 8, li->focus == i ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x70u, lm_theme.launcher_text));
             char fit[LM_DOCK_CMD_MAX];
             int vs, ve, avail = f->w - 20 - LM_LAUNCHER_HELP_D - 8;           /* room for the "?" at the end */
             lm_launcher_field_view(li->field_text[i], li->caret[i], avail, &vs, &ve);
             snprintf(fit, sizeof(fit), "%.*s", ve - vs, li->field_text[i] + vs);
             int ty = f->y + (f->h - LM_FONT_H) / 2;
-            draw_text(c, f, f->x + 10, ty, fit, COL_PANEL_TEXT);
+            draw_text(c, f, f->x + 10, ty, fit, lm_theme.launcher_text);
             if (li->focus == i) {
                 char before[LM_DOCK_CMD_MAX];
                 snprintf(before, sizeof(before), "%.*s", li->caret[i] - vs, li->field_text[i] + vs);
@@ -1502,19 +1504,19 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             }
             const struct lm_rect *hb = &li->help_btn[i];                     /* the small "?" circle */
             float hx = (float)hb->x + (float)hb->w / 2.0f, hy = (float)hb->y + (float)hb->h / 2.0f;
-            paint_shape(c, hx, hy, (float)hb->w / 2.0f, SHAPE_DISC, li->help == i + 1 ? COL_PANEL_ACCENT : lm_theme.glass, li->help == i + 1 ? 0xff : 0x90);
-            draw_text_centered(c, hb, "?", li->help == i + 1 ? COL_PANEL : COL_PANEL_TEXT);
+            paint_shape(c, hx, hy, (float)hb->w / 2.0f, SHAPE_DISC, li->help == i + 1 ? COL_PANEL_ACCENT : lm_theme.launcher_text, li->help == i + 1 ? 0xff : 0x30);
+            draw_text_centered(c, hb, "?", li->help == i + 1 ? COL_PANEL : lm_theme.launcher_text);
         }
         struct lm_rect kl = lm_rect_make(li->card.x + 28, li->kind_box[0].y - LM_FONT_H - 6, li->card.w - 56, LM_FONT_H);
         char lab[64];
         snprintf(lab, sizeof(lab), "Built-in icons   (%s)", li->kind_name);
-        lc_text(c, &kl, kl.x, kl.y, lab, lm_theme.glass_text);
+        lc_text(c, &kl, kl.x, kl.y, lab, lm_theme.launcher_text);
         for (int i = 0; i < LM_LAUNCHER_KIND_N; i++) {
             const struct lm_rect *b = &li->kind_box[i];
             bool on = li->kind == i - 1;
             float cx = (float)b->x + (float)b->w / 2.0f, cy = (float)b->y + (float)b->h / 2.0f, R = (float)b->w / 2.0f - 2.0f;
             if (on)
-                paint_shape(c, cx, cy, R + 3.0f, SHAPE_DISC, li->focus == 3 ? COL_PANEL_ACCENT : lm_theme.glass, 0xd0);
+                paint_shape(c, cx, cy, R + 3.0f, SHAPE_DISC, li->focus == 3 ? COL_PANEL_ACCENT : lm_theme.launcher_text, 0xd0);
             if (i == 0) {
                 paint_shape(c, cx, cy, R, SHAPE_DISC, COL_PANEL_BTN, 0xc0);
                 draw_text_centered(c, b, "auto", COL_PANEL_TEXT);
@@ -1528,15 +1530,15 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             struct lm_rect m = lm_rect_make(li->card.x + 12, li->card.y + 342, li->card.w - 24, LM_FONT_H);
             char fit[160];
             fit_text(fit, sizeof(fit), li->message, m.w, false);
-            lc_text_centered(c, &m, fit, lm_theme.glass_error);
+            lc_text_centered(c, &m, fit, lm_theme.launcher_error);
         }
     }
     if (li->form) {                                                     /* the form: its hint and its two buttons at the bottom */
         struct lm_rect hint = lm_rect_make(li->card.x, li->button[0].y - LM_FONT_H - 12, li->card.w, LM_FONT_H);
-        lc_text_centered(c, &hint, li->hint, lm_theme.glass_hint);
+        lc_text_centered(c, &hint, li->hint, lm_theme.launcher_hint);
     } else if (li->edit) {                                              /* edit mode: the hint appears at the bottom with it */
         struct lm_rect hint = lm_rect_make(li->card.x, li->card.y + li->card.h - 16 - LM_FONT_H, li->card.w, LM_FONT_H);
-        lc_text_centered(c, &hint, li->hint, lm_theme.glass_hint);
+        lc_text_centered(c, &hint, li->hint, lm_theme.launcher_hint);
     }
     for (int i = 0; i < 2; i++)
         if (li->button[i].w > 0)
@@ -1572,17 +1574,29 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
                 p++;
             ly += LM_FONT_H + 3;
         }
-        paint_launcher_button(c, &li->help_close, "Close", false, false);
+        {                                                               /* (the help card is dark: its Close is a light pill) */
+            const struct lm_rect *hc = &li->help_close;
+            int hr = btn_radius(LM_MIN(hc->w, hc->h) / 2);
+            fill_round(c, hc, hr, ALPHA(0x48u, lm_theme.glass));
+            stroke_round(c, hc, hr, ALPHA(0x80u, lm_theme.glass));
+            lc_text_centered(c, hc, "Close", lm_theme.glass_text);
+        }
     }
     if (li->drag >= 0 && li->icon[li->drag].item) {                     /* an icon in the hand: the dock lights up as the place to drop it */
         if (li->drop.w > 0) {
             bool hot = li->drop_pos >= 0;
-            fill_round(c, &li->drop, 22, hot ? ALPHA(0x40u, lm_theme.glass) : ALPHA(0x1cu, lm_theme.glass));
-            stroke_round(c, &li->drop, 22, hot ? ALPHA(0xc0u, lm_theme.glass) : ALPHA(0x60u, lm_theme.glass));
+            fill_round(c, &li->drop, 22, hot ? ALPHA(0xe8u, lm_theme.launcher_body) : ALPHA(0xb4u, lm_theme.launcher_body));      /* (a light pill, the dock's icons are in front of it) */
+            stroke_round(c, &li->drop, 22, hot ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x80u, lm_theme.launcher_text));
             struct lm_rect tl = lm_rect_make(li->drop.x, li->drop.y + 8, li->drop.w, LM_FONT_H);
-            lc_text_centered(c, &tl, "Drop it on the dock", lm_theme.glass_text);
+            lc_text_centered(c, &tl, "Drop it on the dock", lm_theme.launcher_text);
             if (hot)
                 fill_round(c, &li->marker, 1, 0xf0000000u | COL_PANEL_ACCENT);
+        }
+        if (li->drop_cell >= 0) {                                         /* the cell it is over: it would take that place */
+            struct lm_rect tc = li->drop_cell == li->n ? li->add : li->icon[li->drop_cell].hit;
+            tc.x += 4;
+            tc.w -= 8;
+            stroke_round(c, &tc, 12, 0xff000000u | COL_PANEL_ACCENT);
         }
         struct lm_rect hl = li->icon[li->drag].hit;
         hl.x += 4;

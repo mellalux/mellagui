@@ -411,7 +411,7 @@ bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_r
 
 void launcher_drag_motion(struct lm_wm *wm)
 {
-    if (wm->press_panel_kind != LM_PICK_LAUNCHER_ITEM || !wm->srv->seat || wm->launcher_form || wm->launcher_edit)
+    if (wm->press_panel_kind != LM_PICK_LAUNCHER_ITEM || !wm->srv->seat || wm->launcher_form || launcher_searching_now())
         return;
     double x, y;
     lm_seat_pointer_position(wm->srv->seat, &x, &y);
@@ -440,22 +440,57 @@ void launcher_drag_motion(struct lm_wm *wm)
     launcher_damage(wm);
 }
 
+/* An icon of the grid was let go over another cell, or over the empty page of edit mode: it takes that place (or the end) in its own list - the dock's buttons among
+ * the dock's, the launcher's own among theirs. */
+static void launcher_reorder(struct lm_wm *wm, int g, int target_cell, bool to_end)
+{
+    int n = launcher_count();
+    const struct lm_dock_item *it = launcher_item(g, NULL);
+    if (!it || lm_search_owns(it))
+        return;
+    const struct lm_dock_item *t = !to_end && target_cell >= 0 && target_cell < n ? launcher_item(target_cell, NULL) : NULL;
+    if (t && t == it)
+        return;
+    if (t && t->launcher_only != it->launcher_only) {
+        lm_wm_notify(wm, "Launcher", "The dock's buttons and the launcher's own ones keep to their own groups", 4000);
+        return;
+    }
+    bool ok;
+    if (it->launcher_only) {
+        int to = t ? t->raw : lm_launchapps_raw_count() - 1;
+        if (to == it->raw)
+            return;
+        ok = lm_settings_launcher_reorder(wm->srv, it->raw, to);
+    } else {
+        int to = t ? t->raw : lm_dock_raw_count() - 1;
+        if (to == it->raw)
+            return;
+        ok = lm_settings_dock_reorder(wm->srv, it->raw, to);
+    }
+    if (!ok)
+        lm_wm_notify(wm, "Launcher", "Could not move it: there is no config file", 4000);
+}
+
 void launcher_drag_finish(struct lm_wm *wm)
 {
     struct lm_output *o = launcher_output(wm);
-    struct lm_rect zone = { 0 }, marker = { 0 };
-    int pos = -1;
-    if (o)
-        launcher_drop_zone(wm, o, &zone, &marker, &pos);
+    struct lm_launcher_info *li = o ? malloc(sizeof(*li)) : NULL;
+    if (li)
+        launcher_info(wm, o, li);                                   /* (where the icon is: over the dock, over a cell, over the empty page) */
     int g = wm->launcher_drag_g;
     wm->launcher_drag = false;
     launcher_damage(wm);
     const struct lm_dock_item *it = launcher_item(g, NULL);
-    if (!it || pos < 0 || !it->launcher_only)                       /* (a button that is in the dock already stays where it is) */
-        return;
-    const struct lm_dock_item *before = pos < lm_dock_count() ? lm_dock_item(pos) : NULL;
-    if (!lm_settings_launcher_to_dock(wm->srv, it->raw, before ? before->raw : -1))
-        lm_wm_notify(wm, "Launcher", "Could not add it to the dock: it is full, the name is in use, or there is no config file", 5000);
+    if (it && li && li->drop_pos >= 0) {
+        if (it->launcher_only) {                                    /* (a button that is in the dock already stays where it is) */
+            const struct lm_dock_item *before = li->drop_pos < lm_dock_count() ? lm_dock_item(li->drop_pos) : NULL;
+            if (!lm_settings_launcher_to_dock(wm->srv, it->raw, before ? before->raw : -1))
+                lm_wm_notify(wm, "Launcher", "Could not add it to the dock: it is full, the name is in use, or there is no config file", 5000);
+        }
+    } else if (it && li && (li->drop_cell >= 0 || li->drop_end)) {
+        launcher_reorder(wm, g, li->drop_cell, li->drop_end);
+    }
+    free(li);
 }
 
 /* The autohide dock is to be shown / hidden: with animations on it rises or melts over a few seconds (dock_vis follows, dock_anim_tick steps it), else at once. */

@@ -522,6 +522,7 @@ bool dock_shown(const struct lm_wm *wm);
 int dock_window_count(const struct lm_wm *wm, const struct lm_dock_item *it);
 bool drag_far_enough(const struct lm_wm *wm, double x, double y);
 void launcher_drag_finish(struct lm_wm *wm);
+bool launcher_searching_now(void);                      /* the launcher's search is on (icons cannot be moved then) */
 void launcher_drag_motion(struct lm_wm *wm);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);

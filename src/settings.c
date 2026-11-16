@@ -1587,6 +1587,17 @@ bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to)
     return dock_commit(srv, &l, "dock-apps");
 }
 
+bool lm_settings_launcher_reorder(struct lm_server *srv, int from, int to)
+{
+    static struct dock_list l;
+    apps_load(&l, true);
+    if (from < 0 || to < 0 || from >= l.n || to >= l.n)
+        return false;
+    if (from != to)
+        apps_move_entry(&l, from, to);
+    return dock_commit(srv, &l, "launcher-apps");
+}
+
 bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at)
 {
     const char *nm, *ic, *cm;

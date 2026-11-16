@@ -20922,6 +20922,12 @@ class TestLauncherPages(Base):
             m = re.match(r'card x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
             if m:
                 d['card'] = tuple(int(v) for v in m.groups())
+            m = re.match(r'button (\d) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) "(.*)"', l)
+            if m:
+                d.setdefault('buttons', {})[int(m[1])] = (tuple(int(v) for v in m.groups()[1:5]), m[6])
+            m = re.match(r'launcher open=(\d) edit=(\d)', l)
+            if m:
+                d['edit'] = int(m[2])
         return d
 
     @staticmethod
@@ -21025,6 +21031,129 @@ class TestLauncherPages(Base):
             time.sleep(0.05)
         self.assertEqual(self.info(c)['page'], 1)
         c.button(272, False)
+
+
+class TestLauncherMoving(Base):
+    """Icons of the launcher are dragged to new places; edit mode has one more, empty page to drop them on."""
+
+    def start(self, name, n=8):
+        self.path = os.path.join(tmp, name + '.conf')
+        apps = ''.join('App%02d = [files] true\n' % i for i in range(1, n))
+        with open(self.path, 'w') as f:
+            f.write('[dock-apps]\nLauncher = [launcher] @launcher\nTerm = [terminal] true\n[launcher-apps]\n' + apps)
+        p, c, stop = self.private_compositor(name, '--config', self.path, '--size', '1100x760')
+        c.sync()
+        c.cmd('launcher open')
+        time.sleep(1.3)
+        return c
+
+    info = staticmethod(TestLauncherPages.info)
+    centre = staticmethod(TestLauncherPages.centre)
+
+    def order(self):
+        names, on = [], False
+        for l in open(self.path).read().splitlines():
+            if l.startswith('['):
+                on = l == '[launcher-apps]'
+            elif on and '=' in l:
+                names.append(l.split('=')[0].strip())
+        return names
+
+    def drag(self, c, a, b, steps=6, hold=0.0):
+        x0, y0 = a
+        x1, y1 = b
+        c.abs(x0, y0)
+        c.button(272, True)
+        for i in range(1, steps + 1):
+            c.abs(x0 + (x1 - x0) * i // steps, y0 + (y1 - y0) * i // steps)
+            time.sleep(0.03)
+        time.sleep(hold)
+
+    def test_an_icon_dragged_over_another_takes_its_place(self):
+        c = self.start('mellagui-lm1')
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        self.assertEqual(self.order(), ['App%02d' % i for i in range(1, 8)])
+        self.drag(c, self.centre(ic['App02']), self.centre(ic['App05']))
+        c.button(272, False)
+        for _ in range(40):
+            if self.order()[0:3] != ['App01', 'App02', 'App03']:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.order(), ['App01', 'App03', 'App04', 'App05', 'App02', 'App06', 'App07'])
+        names = [i[1] for i in self.info(c)['icons']]
+        self.assertEqual(names[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])        # the grid follows
+
+    def test_a_plain_click_still_starts_the_program_and_a_drag_over_nothing_changes_nothing(self):
+        c = self.start('mellagui-lm2')
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        before = self.order()
+        card = d['card']
+        self.drag(c, self.centre(ic['App02']), (card[0] + card[2] // 2, card[1] + 28))               # over the title: no cell
+        c.button(272, False)
+        time.sleep(0.4)
+        self.assertEqual(self.order(), before)
+
+    def test_a_dock_button_does_not_move_among_the_launchers_own(self):
+        c = self.start('mellagui-lm3')
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        before = open(self.path).read()
+        self.drag(c, self.centre(ic['Term']), self.centre(ic['App03']))                            # the dock's Term onto a launcher-only icon
+        c.button(272, False)
+        time.sleep(0.5)
+        self.assertEqual(open(self.path).read(), before)
+
+    def test_edit_mode_adds_an_empty_page_that_goes_away_with_it(self):
+        c = self.start('mellagui-lm4')
+        d = self.info(c)
+        self.assertEqual((d['pages'], len(d['dots'])), (1, 0))
+        c.click(*self.centre(d['buttons'][0][0]))                                                  # Edit
+        time.sleep(0.2)
+        d = self.info(c)
+        self.assertEqual(d['edit'], 1)
+        self.assertEqual((d['pages'], len(d['dots'])), (2, 2))                                     # the page of icons and the empty one
+        c.click(*self.centre(d['dots'][1]))
+        d = self.info(c)
+        self.assertEqual((d['page'], d['icons']), (1, []))                                         # nothing on it
+        c.click(*self.centre(d['buttons'][0][0]))                                                  # Done
+        time.sleep(0.2)
+        d = self.info(c)
+        self.assertEqual((d['pages'], d['page'], len(d['dots'])), (1, 0, 0))
+
+    def test_an_icon_is_carried_to_the_empty_page_and_goes_to_the_end(self):
+        c = self.start('mellagui-lm5', n=30)
+        d = self.info(c)
+        c.click(*self.centre(d['buttons'][0][0]))                                                  # Edit: the third page is the empty one
+        time.sleep(0.2)
+        d = self.info(c)
+        self.assertEqual(d['pages'], 3)
+        ic = {i[1]: i[2] for i in d['icons']}
+        card = d['card']
+        x0, y0 = self.centre(ic['App02'])
+        c.abs(x0, y0)
+        c.button(272, True)
+        for i in range(1, 6):
+            c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0)
+            time.sleep(0.03)
+        for _ in range(80):                                                                       # held at the edge, it turns the pages (twice, 0.6 s apart)
+            c.abs(card[0] + card[2] - 20, y0 + (_ % 2))
+            if self.info(c)['page'] == 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.info(c)['page'], 2)
+        g = self.info(c)['card']
+        c.abs(g[0] + g[2] // 2, g[1] + g[3] // 2)                                                 # into the middle of the empty page
+        time.sleep(0.1)
+        c.button(272, False)
+        for _ in range(40):
+            if self.order()[-1] == 'App02':
+                break
+            time.sleep(0.05)
+        order = self.order()
+        self.assertEqual(order[-1], 'App02')
+        self.assertEqual(len(order), 29)
 
 
 class TestLauncher(Base):
@@ -21371,7 +21500,7 @@ class TestLauncher(Base):
         c.sync()
         self.assertEqual(self.info(c)['n'], 12)
 
-    def test_the_dialog_is_a_dark_glass_that_hides_most_of_what_is_behind_it(self):
+    def test_the_dialog_is_a_light_frosted_card_that_hides_most_of_what_is_behind_it(self):
         c = self.start('mellagui-lc9')
         before = c.dump(os.path.join(tmp, 'lc9a.ppm'))
         self.super_a(c)
@@ -21380,8 +21509,8 @@ class TestLauncher(Base):
         cx, cy, cw, ch = d['card']
         top, bottom = (cx + 10, cy + 10), (cx + 10, cy + ch - 10)                          # two corners inside the card, no text
         a1, a2, b1, b2 = before.px(*top), before.px(*bottom), after.px(*top), after.px(*bottom)
-        self.assertNotEqual(a1, b1)
-        self.assertTrue(all(v < 255 for v in b1), b1)                                      # not opaque white
+        self.assertTrue(all(v > 170 for v in b1), 'the card is not light: %r' % (b1,))      # a light tone ...
+        self.assertTrue(all(v < 255 for v in b1), b1)                                      # ... but not a white sheet
         spread = lambda p, q: sum(abs(x - y) for x, y in zip(p, q))
         self.assertLess(spread(b1, b2), 0.5 * spread(a1, a2), 'the wallpaper shows through too much: %r %r -> %r %r' % (a1, a2, b1, b2))
 

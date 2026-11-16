@@ -157,6 +157,8 @@ bool lm_settings_launcher_put(struct lm_server *srv, const char *name, const cha
 int lm_settings_launcher_add_defaults(struct lm_server *srv);   /* the built-in launcher buttons the file lacks are written to [launcher-apps]; returns how many, -1 = no file */
 bool lm_settings_launcher_del(struct lm_server *srv, int raw_index);
 bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to);
+/* The same in the launcher's own list [launcher-apps]: entry `from` ends up at place `to`. */
+bool lm_settings_launcher_reorder(struct lm_server *srv, int from, int to);
 bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at);
 bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index);
 

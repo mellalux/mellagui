@@ -11509,7 +11509,13 @@ class TestCamera(Base):
             self.skipTest('mellagui-cam not built')
         super().setUp()
 
+    def cfgdir(self):
+        d = tempfile.mkdtemp(prefix='mellagui-camcfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
     def run_cam(self, *args, **env):
+        env.setdefault('XDG_CONFIG_HOME', self.cfgdir())
         return subprocess.run([self.CAM] + list(args), env=dict(os.environ, MELLAGUI_CAM_FAKE='1', **env), capture_output=True, text=True, timeout=20)
 
     @staticmethod
@@ -11523,7 +11529,7 @@ class TestCamera(Base):
         d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # (no countdown unless a test asks for one: a picture is taken at once, as it always was)
-        p = subprocess.Popen([self.CAM, *env.pop('args', [])], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d, **{'MELLAGUI_CAM_TIMER': '0', 'MELLAGUI_CAM_PLAYER': 'none', **env}),
+        p = subprocess.Popen([self.CAM, *env.pop('args', [])], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d, **{'MELLAGUI_CAM_TIMER': '0', 'MELLAGUI_CAM_PLAYER': 'none', 'XDG_CONFIG_HOME': self.cfgdir(), **env}),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.cam')
@@ -11541,24 +11547,23 @@ class TestCamera(Base):
     def shot(self, name):
         return ctl.dump(os.path.join(tmp, name))
 
-    def test_the_buttons_are_a_rail_of_round_drops_at_the_left(self):
-        p, win, d = self.start(MELLAGUI_RAILS='1')
-        for _ in range(20):                                          # (the first picture)
+    def test_the_rail_has_only_what_is_about_the_camera_and_the_picture_starts_right_of_it(self):
+        p, win, d, state = self.booth()
+        for _ in range(10):
             time.sleep(0.1)
-        ctl.click(win['x'] + 26, win['y'] + 6 + 16)                  # the first drop: Snapshot (36 px between the drops)
-        for _ in range(60):
-            if any(n.endswith('.png') for n in os.listdir(d)):
-                break
-            time.sleep(0.1)
-        self.assertTrue(any(n.endswith('.png') for n in os.listdir(d)), 'the Snapshot drop of the rail saved a picture')
+        self.assertEqual(state()[0]['mirror'], '1')
+        ctl.click(win['x'] + 26, win['y'] + 6 + 16)                  # the first drop is Mirror now (Snapshot and Record are gone: the shutter is under the picture)
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['mirror'], '0')
+        self.assertEqual(self.pngs(d), [])
         ppm = self.shot('cam-rail.ppm')                              # the picture starts right of the rail, which has the bar's colour
-        self.assertEqual(ppm.px(win['x'] + 10, win['y'] + 300), ppm.px(win['x'] + 40, win['y'] + 400))
+        self.assertEqual(ppm.px(win['x'] + 10, win['y'] + 300), ppm.px(win['x'] + 40, win['y'] + 350))
 
     def test_the_size_drop_opens_a_list_of_sizes_and_a_click_chooses_one(self):
         p, win, d = self.start(MELLAGUI_RAILS='1')
         for _ in range(20):                                          # (the first picture)
             time.sleep(0.1)
-        y_size = win['y'] + 6 + 3 * 36 + 10 + 2 * 36                 # the Size drop: Snapshot, Record, Mic, a gap, Mirror, Pause, Size (36 px apart)
+        y_size = win['y'] + 6 + 2 * 36                               # the Size drop: Mirror, Pause, Size (36 px apart)
         ctl.click(win['x'] + 26, y_size + 16)                        # it opens a list beside the rail (no more cycling through the sizes)
         time.sleep(0.4)
         ctl.click(win['x'] + 52 + 4 + 30, y_size + 2 + 10)           # the first entry, the smallest size
@@ -11721,7 +11726,7 @@ class TestCamera(Base):
         time.sleep(0.4)
         st, boxes = state()
         self.assertEqual((st['fx'], st['open'], st['fourup'], st['timer']), ('normal', '0', '0', '0'))
-        self.assertEqual(sorted(k for k in boxes if k.startswith('ctl')), ['ctl folder', 'ctl fx', 'ctl mode', 'ctl shutter', 'ctl timer'])
+        self.assertEqual(sorted(k for k in boxes if k.startswith('ctl')), ['ctl folder', 'ctl fx', 'ctl kind', 'ctl mode', 'ctl shutter', 'ctl timer'])
         x, y, w, h = boxes['ctl fx']
         ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                           # Effects: the grid of nine live previews
         time.sleep(0.5)
@@ -11782,15 +11787,15 @@ class TestCamera(Base):
         self.assertEqual((st['phase'], st['digits']), ('1', '1'))                         # counting
         self.assertEqual(self.pngs(d), [], 'a picture before the countdown has run out')
         counting = self.shot('cam-count.ppm')                                             # the big white seconds: look at the lower part of the digit, where the bars are silver
-        vh = win['h'] - 44                                                                # (no rail here: the bar under the picture is 44 px)
+        vh = win['h'] - 94                                                                # (the picture's height: the row of controls (70) and the status line (24) are under it)
         sc = max(3, min(16, vh // 40))
         ty = (vh - 16 * sc) // 2 - 20
-        pw = win['w'] - 84                                                                # (the strip's column is 84 px wide)
+        pw = win['w'] - 52 - 84                                                           # (the rail is 52 px, the strip's column 84)
         pic_h = 480 * min(pw / 640, vh / 480)
         bars_end = int((vh - pic_h) / 2 + pic_h * 2 / 3)
         y0, y1 = ty + 9 * sc, min(ty + 16 * sc, bars_end - 2)
         self.assertGreater(y1 - y0, 10)
-        cx0 = win['x'] + pw // 2 - 4 * sc
+        cx0 = win['x'] + 52 + pw // 2 - 4 * sc
         white = lambda ppm: ppm.count((255, 255, 255), cx0, win['y'] + y0, cx0 + 8 * sc, win['y'] + y1)
         self.assertEqual(white(before), 0)
         self.assertGreater(white(counting), 100, 'no number over the picture')
@@ -11902,7 +11907,11 @@ class TestCamera(Base):
         self.assertEqual([k for k in boxes if k.startswith('tile')], ['tile 0 sunset', 'tile 1 space', 'tile 2 neon', 'tile 3 ghost'])
         ppm = self.shot('cam-backdrops.ppm')                                              # the little previews: the picture in an oval on the backdrop (no empty scene yet)
         x, y, w, h = boxes['tile 0 sunset']
-        sky, sea = ppm.px(win['x'] + x + w // 2 - 40, win['y'] + y + 4 + 6), ppm.px(win['x'] + x + w // 2 - 40, win['y'] + y + 4 + 74)
+        iw, ih = w - 8, h - (16 + 6) - 4                                                  # the picture inside the tile (4 px round it, the name under it)
+        sc = min(iw / 640, ih / 480)
+        dw, dh = int(640 * sc), int(480 * sc)
+        left, top = x + 4 + (iw - dw) // 2, y + 4 + (ih - dh) // 2
+        sky, sea = ppm.px(win['x'] + left + 5, win['y'] + top + 3), ppm.px(win['x'] + left + 5, win['y'] + top + dh - 4)
         self.assertNotEqual(sky, sea)                                                     # (left of the oval) sky above, sea below
         ctl.tap(2)                                                                        # 1: Sunset
         time.sleep(0.4)
@@ -11992,7 +12001,7 @@ class TestCamera(Base):
         lines = open(dump).read().splitlines()
         self.assertIn('strip=8', lines[0])                                                # all the camera pictures of the folder are known, not only six
         thumbs = [l.split() for l in lines if l.startswith('thumb')]
-        vh = win['h'] - 44                                                                # (no rail: the bar under the picture is 44 px)
+        vh = win['h'] - 94                                                                # (the row of controls and the status line are under the picture)
         self.assertEqual(len(thumbs), (vh - 44 - 8) // 56)                                # as many as fit in the column
         pic = [int(v) for v in [l for l in lines if l.startswith('pic ')][0].split()[1:]]
         self.assertLess(pic[0] + pic[2], min(int(t[-4]) for t in thumbs) - 3, 'the strip covers the live picture')
@@ -12120,6 +12129,77 @@ class TestCamera(Base):
         for bad in ('2,0.5', '0.5', 'a,b', '0.5,0.5,0.5'):
             self.assertEqual(self.run_cam('--snapshot', os.path.join(d, 'x.png'), '--focus', bad).returncode, 2, bad)
 
+    def test_the_controls_are_in_a_row_under_the_picture_with_a_photo_and_video_switch(self):
+        cfg = self.cfgdir()
+        vd = tempfile.mkdtemp(prefix='mellagui-vid-', dir=tmp)
+        self.addCleanup(shutil.rmtree, vd, ignore_errors=True)
+        p, win, d, state = self.booth(XDG_CONFIG_HOME=cfg, MELLAGUI_CAM_VIDEO_DIR=vd, MELLAGUI_FFMPEG='none', MELLAGUI_RECORD_MIC_SRC='none')
+        time.sleep(0.4)
+        st, boxes = state()
+        pic = boxes['pic']
+        for k in ('ctl fx', 'ctl kind', 'ctl shutter', 'ctl mode', 'ctl timer'):              # none of them is on the picture
+            self.assertGreaterEqual(boxes[k][1], pic[1] + pic[3], k + ' is over the picture')
+        self.assertNotIn('ctl mic', boxes)                                                   # the microphone belongs to a video
+        self.assertEqual(st['video'], '0')
+        x, y, w, h = boxes['ctl kind']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                              # Photo -> Video
+        time.sleep(0.4)
+        st, boxes = state()
+        self.assertEqual(st['video'], '1')
+        self.assertIn('ctl mic', boxes)
+        self.assertNotIn('ctl mode', boxes)
+        self.assertNotIn('ctl timer', boxes)
+        self.assertIn('video = 1', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
+        x, y, w, h = boxes['ctl mic']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                              # the microphone switch is down here too (and A still works)
+        time.sleep(0.4)
+        self.assertIn('microphone = 0', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
+        ctl.tap(KEY_SPACE)                                                                    # the shutter records in video mode
+        time.sleep(1.5)
+        self.assertEqual(state()[0]['clip'], '1')
+        self.assertEqual(self.pngs(d), [])
+        ctl.tap(KEY_SPACE)
+        for _ in range(60):
+            if [n for n in os.listdir(vd) if n.endswith('.mp4')]:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len([n for n in os.listdir(vd) if n.endswith('.mp4')]), 1)
+        self.assertEqual(self.pngs(d), [])
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['clip'], '0')
+        ctl.tap(47)                                                                           # V: back to photo
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['video'], '0')
+        ctl.tap(KEY_SPACE)
+        self.assertEqual(len(self.wait_png(d)), 1)
+
+    def test_the_resolution_is_remembered(self):
+        cfg = self.cfgdir()
+        p, win, d, state = self.booth(XDG_CONFIG_HOME=cfg)
+        time.sleep(0.4)
+        ctl.tap(31)                                                                           # S: the list; Up to the smallest size; Enter
+        time.sleep(0.4)
+        for _ in range(6):
+            ctl.tap(103)
+        ctl.tap(28)
+        time.sleep(0.8)
+        self.assertIn('size = 320x240', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
+        p.kill()
+        p.wait()
+        time.sleep(0.3)
+        p2, win2, d2, state2 = self.booth(XDG_CONFIG_HOME=cfg)                                # another start: the same resolution
+        time.sleep(0.5)
+        ctl.tap(57)
+        files = self.wait_png(d2)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(self.png_size(os.path.join(d2, files[0])), (320, 240))
+        self.assertEqual(state2()[0]['ref'], '0')
+        p2.kill()
+        p2.wait()
+        r = self.run_cam('--snapshot', os.path.join(d2, 'cli.png'), XDG_CONFIG_HOME=cfg)       # (the command line has its own size: the default 640 x 480)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.png_size(os.path.join(d2, 'cli.png')), (640, 480))
+
     def test_selftest(self):
         r = self.run_cam('--selftest')
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -12143,18 +12223,20 @@ class TestCamera(Base):
         self.assertIn('cannot write', r.stderr)
 
     def test_window_shows_a_moving_mirrored_picture_and_pauses(self):
-        p, win, d = self.start()
+        p, win, d, state = self.booth()
+        time.sleep(0.4)
         x0, y0 = win['x'], win['y']
+        pic = state()[1]['pic']                                               # where the picture lies in the window
         a = self.shot('cam_a.ppm')
-        self.assertEqual(a.px(x0 + 30, y0 + 60), (0, 0, 192))                # mirrored: the last bar (blue) is on the left (the picture is 4 : 3 in what the strip's column leaves)
-        box = lambda ppm: ppm.count((255, 255, 255), x0, y0, x0 + 680, y0 + 400)
+        self.assertEqual(a.px(x0 + pic[0] + 30, y0 + pic[1] + 60), (0, 0, 192))   # mirrored: the last bar (blue) is on the left
+        box = lambda ppm: ppm.count((255, 255, 255), x0 + pic[0], y0 + pic[1], x0 + pic[0] + pic[2], y0 + pic[1] + pic[3])
         self.assertGreater(box(a), 1000)                                      # the white square
         time.sleep(0.5)
         b = self.shot('cam_b.ppm')
         self.assertNotEqual(a.data, b.data, 'the picture does not move')
         ctl.tap(50)                                                           # M: no mirror, silver on the left
         time.sleep(0.4)
-        self.assertEqual(self.shot("cam_c.ppm").px(x0 + 30, y0 + 60), (192, 192, 192))
+        self.assertEqual(self.shot("cam_c.ppm").px(x0 + pic[0] + 30, y0 + pic[1] + 60), (192, 192, 192))
         ctl.tap(25)                                                           # P: pause
         time.sleep(0.4)
         c1 = self.shot('cam_d.ppm')
@@ -12173,24 +12255,18 @@ class TestCamera(Base):
         self.assertEqual(p.returncode, 0)
 
     def test_snapshot_by_key_and_by_button_and_size_change(self):
-        p, win, d = self.start()
+        p, win, d, state = self.booth()
+        time.sleep(0.4)
         ctl.tap(57)                                                           # Space
         time.sleep(0.5)
         files = sorted(os.listdir(d))
         self.assertEqual(len(files), 1)
         self.assertRegex(files[0], r'^camera-\d{8}-\d{6}\.png$')
         self.assertEqual(self.png_size(os.path.join(d, files[0])), (640, 480))
-        if win['x'] + 30 > 150:                                               # the dock floats over the bottom of the screen from x ~ 197 on and
-            ctl.abs(win['x'] + 200, win['y'] - 12)                            # (the window's place depends on the tests before) would take the click:
-            ctl.button(BTN_LEFT, True)                                        # drag the window to the left edge first
-            ctl.abs(win['x'] + 200 - (win['x'] - 40), win['y'] - 12)
-            ctl.button(BTN_LEFT, False)
-            time.sleep(0.2)
-            win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
-            self.assertLess(win['x'], 100)
-        ctl.click(win['x'] + 30, win['y'] + win['h'] - 22)                    # the Snapshot button (left end of the bar)
+        x, y, w, h = state()[1]['ctl shutter']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                # the red shutter under the picture
         time.sleep(0.5)
-        files = sorted(os.listdir(d))
+        files = sorted(n for n in os.listdir(d) if n.endswith('.png'))
         self.assertEqual(len(files), 2, files)                                # the same second: "-1" is added, nothing is overwritten
         ctl.tap(31)                                                           # S: the list of sizes opens (a drop-down like the terminal's)
         time.sleep(0.4)
@@ -12200,7 +12276,7 @@ class TestCamera(Base):
         time.sleep(0.8)
         ctl.tap(28)                                                           # Enter: a snapshot at the new size
         time.sleep(0.5)
-        sizes = sorted(self.png_size(os.path.join(d, f)) for f in os.listdir(d))
+        sizes = sorted(self.png_size(os.path.join(d, f)) for f in os.listdir(d) if f.endswith('.png'))
         self.assertEqual(sizes[0], (320, 240), sizes)                         # the smallest size of the list
         self.assertEqual(len(sizes), 3)
         self.assertTrue(alive_p(p))

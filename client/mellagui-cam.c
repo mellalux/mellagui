@@ -9,10 +9,12 @@
  *   mellagui-cam --snapshot FILE.png --effect ID [--focus X,Y]   ... with an effect on the picture (also for --clip)
  *   mellagui-cam --selftest
  *
- * Like Apple's Photo Booth: a big red shutter under the picture takes a picture after a countdown of 3 (or 10) seconds - the seconds are shown big
- * over the picture, the screen flashes white when it is taken - and "Four-up" takes four pictures one after the other into ONE picture of four
- * (2 x 2); "Effects" replaces the picture by a grid of 3 x 3 live previews of the effects (client/camfx.c: black & white, sepia, pencil, comic book,
- * pop art, thermal, x-ray, glow, vintage, mirror, kaleidoscope, light tunnel, squeeze, stretch, bulge, dent, twirl), two pages; a click chooses one.
+ * Like Apple's Photo Booth: under the picture is a row of controls (never over it): Effects, a Photo / Video switch, a big red shutter and, for a
+ * photo, "1-up / 4-up" and the countdown, for a video the microphone. The shutter takes a picture after a countdown of 3 (or 10) seconds - the seconds are
+ * shown big over the picture, the screen flashes white when it is taken - and "4-up" takes four pictures one after the other into ONE picture of four
+ * (2 x 2); in Video mode the shutter starts and stops a clip. "Effects" replaces the picture by a grid of 3 x 3 live previews of the effects
+ * (client/camfx.c: black & white, sepia, pencil, comic book, pop art, thermal, x-ray, glow, vintage, mirror, kaleidoscope, light tunnel, squeeze, stretch,
+ * bulge, dent, twirl), pages of nine; a click chooses one. The rail at the left has the camera's own things: mirror, pause, size, which camera.
  * The effect is in the live picture, the snapshots and the clips. The last page of the grid has BACKDROPS (sunset, space, neon, ghost): choosing one
  * asks you to step out of the picture, takes the empty scene after the countdown (the key B takes it again) and then keeps only what differs from it
  * - you - on the made-up backdrop. The countdown ticks (a higher tick for the last second) and the shutter clicks, sounds made in code
@@ -21,7 +23,7 @@
  * The effects of the second page of the grid (mirror, kaleidoscope, tunnel, squeeze, stretch, bulge, dent, twirl, vintage) have a point you move with
  * the mouse on the live picture (press or drag; --focus X,Y on the command line).
  *
- * Keys: Space / Enter = the shutter (again = cancel the countdown), E = the effects, 4 = one picture / four-up, T = the countdown (none / 3 s / 10 s),
+ * Keys: Space / Enter = the shutter (again = cancel the countdown; a clip in video mode), V = photo / video, E = the effects, 4 = one picture / four-up, T = the countdown (none / 3 s / 10 s),
  * B = take the background again (backdrop effects), O = sound on / off,
  * R = record a clip (again = stop), A = the microphone in the clip on / off, M = mirror the preview, P = pause,
  * S = next picture size, C = next camera, Esc / Q = quit. In the grid: arrows / Enter / 1..9 choose, PgUp / PgDn the page, Esc closes it.
@@ -32,7 +34,7 @@
  * (client/ffpipe.c: sent as they come, never waiting - a picture that x264 is too slow for is dropped) and, when the microphone switch is on, the default
  * microphone (ffmpeg reads it itself, so sound and picture share one clock). Without ffmpeg the clip is Motion JPEG with the microphone as a PCM sound
  * track (parec; src/jpegenc.c, src/mp4.c, client/audiocap.c): bigger files, played by ffmpeg / mpv / VLC but not by browsers. The picture is not
- * mirrored. The switches are kept in camera.conf (microphone = 1, on by default; timer = 3 seconds; four-up = 0). $MELLAGUI_CAM_TIMER (seconds)
+ * mirrored. The switches are kept in camera.conf (microphone = 1, on by default; timer = 3 seconds; four-up = 0; sound; video = 0; size = WxH, the resolution last chosen). $MELLAGUI_CAM_TIMER (seconds)
  * replaces the timer for one run (the tests use 0). $MELLAGUI_CAM_WINDOW=WxH is the window's first size. $MELLAGUI_CAM_DUMP=FILE writes the state and the places of the controls after every paint.
  *
  * Formats: MJPEG (preferred: a webcam on a shared USB hub often cannot carry raw video) decoded by src/jpeg.c, whose
@@ -77,11 +79,11 @@
 #define NBUF 4
 #define MAX_SIZES 24
 #define MAX_DEVS 16
-/* The buttons are a rail of round drops at the left (wlrail.h; MELLAGUI_CAM_RAIL=0 or MELLAGUI_RAILS=0 bring back the bar under the picture); the strip under
- * the picture then only has the status line. */
-static bool g_rail;
-#define BAR_H (g_rail ? 24 : 44)
-#define BTN_H 28
+/* The window: the live picture (with the strip column at its right), under it a row of controls (never over the picture), at the bottom a status line;
+ * at the left a rail of round drops (wlrail.h) for the things that are about the camera: mirror, pause, size, which camera. */
+#define STATUS_H 24
+#define CTRL_H 70
+#define BAR_H STATUS_H                  /* (the old name: the height of the status line) */
 #define WARMUP_FRAMES 8
 
 struct size { int w, h; };
@@ -114,10 +116,10 @@ struct thumb {
     char path[PATH_MAX + 300];
 };
 
-enum { B_SNAP, B_REC, B_MIC, B_MIRROR, B_PAUSE, B_SIZE, B_CAM, N_B };
+enum { B_MIRROR, B_PAUSE, B_SIZE, B_CAM, N_B };                /* the rail */
 
 /* The controls over the bottom of the picture, like Photo Booth's: the effects, the shutter, one picture / four, the countdown. */
-enum { O_FX, O_SHUTTER, O_MODE, O_TIMER, N_O };
+enum { O_FX, O_KIND, O_SHUTTER, O_MODE, O_TIMER, O_MIC, N_O };       /* photo: fx kind shutter mode timer; video: fx kind shutter mic */
 enum { PH_IDLE, PH_WAIT };                                  /* the shutter: nothing going on / waiting for the moment of the next picture */
 #define FX_PER_PAGE 9
 #define FX_PAGES ((CAMFX_COUNT + FX_PER_PAGE - 1) / FX_PER_PAGE)
@@ -152,6 +154,8 @@ struct app {
     int fx_page, fx_hover;              /* its page, and the tile the pointer / the keys are on (-1 = none) */
     int ohover;                         /* the control under the pointer (O_*), -1 none */
     bool fourup;                        /* the shutter takes four pictures into one */
+    bool video;                         /* the shutter records a clip (else it takes a picture) */
+    struct size saved_size;             /* the resolution the user chose last: kept in camera.conf (size = WxH) */
     int timer_s;                        /* the countdown before a picture: 0, 3 or 10 seconds */
     int phase;                          /* PH_IDLE / PH_WAIT */
     uint64_t t_shot;                    /* the moment of the next picture */
@@ -852,9 +856,6 @@ static bool clip_stop(struct clip *c, const struct lm_image *last, uint32_t *fra
 static const char *btn_label(const struct app *a, int i, char *buf, size_t n)
 {
     switch (i) {
-    case B_SNAP: return "Snapshot";
-    case B_REC: return a->clip ? "Stop" : "Record";
-    case B_MIC: return a->mic ? "Mic on" : "Mic off";
     case B_MIRROR: return "Mirror";
     case B_PAUSE: return a->paused ? "Resume" : "Pause";
     case B_SIZE: snprintf(buf, n, "%dx%d", a->src.w ? a->src.w : 0, a->src.h ? a->src.h : 0); return buf;
@@ -871,59 +872,31 @@ static bool btn_visible(const struct app *a, int i)
     return true;
 }
 
-static bool btn_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
-{
-    int bx = 10;
-    char tmp[40];
-    for (int k = 0; k < N_B; k++) {
-        if (!btn_visible(a, k))
-            continue;
-        int bw = (int)strlen(btn_label(a, k, tmp, sizeof(tmp))) * LM_FONT_W + 28;
-        if (k == i) {
-            *x = bx;
-            *y = a->win.bh - BAR_H + (BAR_H - BTN_H) / 2;
-            *w = bw;
-            *h = BTN_H;
-            return true;
-        }
-        bx += bw + 6;
-    }
-    return false;
-}
-
 static void cam_rail(const struct app *a, struct wlrail *L)
 {
-    static void (*const icons[N_B])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_camera, wlrail_ic_rec, wlrail_ic_mic, wlrail_ic_mirror, wlrail_ic_pause,
-                                                                                       wlrail_ic_size, wlrail_ic_swap };
-    const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_red, lm_theme.btn_slate, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_purple };
-    const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_red_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit,
-                                 lm_theme.btn_purple_lit };
+    static void (*const icons[N_B])(struct wlwin *, int, int, uint32_t, uint32_t) = { wlrail_ic_mirror, wlrail_ic_pause, wlrail_ic_size, wlrail_ic_swap };
+    const uint32_t base[N_B] = { lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_purple };
+    const uint32_t lite[N_B] = { lm_theme.btn_blue_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
     static char tips[N_B][40];
     memset(L, 0, sizeof(*L));
     L->y0 = 0;
-    L->y1 = a->win.bh > 0 ? a->win.bh - BAR_H : 400;
+    L->y1 = a->win.bh > 0 ? a->win.bh - STATUS_H : 400;
     L->n = N_B;
     for (int i = 0; i < N_B; i++) {
         char tmp[40];
         snprintf(tips[i], sizeof(tips[i]), "%s", btn_label(a, i, tmp, sizeof(tmp)));
-        bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused) || (i == B_REC && a->clip) || (i == B_MIC && a->mic);
-        L->it[i] = (struct wlrail_item){ .tip = tips[i], .icon = icons[i], .base = base[i], .lite = lite[i], .show = btn_visible(a, i), .lit = on, .gap = i == B_MIRROR };
+        bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused);
+        L->it[i] = (struct wlrail_item){ .tip = tips[i], .icon = icons[i], .base = base[i], .lite = lite[i], .show = btn_visible(a, i), .lit = on };
     }
 }
 
 static int btn_at(const struct app *a, double px, double py)
 {
-    if (g_rail) {
-        struct wlrail L;
-        cam_rail(a, &L);
-        return wlrail_at(&L, a->win.rpx, a->win.rpy);
-    }
-    for (int i = 0; i < N_B; i++) {
-        int x, y, w, h;
-        if (btn_rect(a, i, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h)
-            return i;
-    }
-    return -1;
+    (void)px;
+    (void)py;
+    struct wlrail L;
+    cam_rail(a, &L);
+    return wlrail_at(&L, a->win.rpx, a->win.rpy);
 }
 
 /* ---- the Size button's drop-down: a list of the sizes the camera can deliver ----------------------------------------------------------------------- */
@@ -943,7 +916,7 @@ static int menu_rows_fit(const struct app *a)
     return LM_CLAMP((a->win.bh - 12) / MENU_ROW_H, 1, MAX_SIZES);
 }
 
-/* The list's place in the drawing area (the window beyond the rail): beside the Size drop of the rail, or above the Size button of the bar. */
+/* The list's place in the drawing area (the window beyond the rail): beside the Size drop of the rail. */
 static void menu_rect(const struct app *a, int *x, int *y, int *w, int *h)
 {
     char tmp[24];
@@ -954,18 +927,12 @@ static void menu_rect(const struct app *a, int *x, int *y, int *w, int *h)
     }
     *w = tw * LM_FONT_W + 32;
     *h = rows * MENU_ROW_H + 4;
-    int bx = 4, by = 4;
-    if (g_rail) {
-        struct wlrail L;
-        int ys[WLRAIL_MAX];
-        cam_rail(a, &L);
-        wlrail_layout(&L, ys);
-        by = ys[B_SIZE] >= 0 ? ys[B_SIZE] : 4;
-    } else {
-        int bw, bh;
-        if (btn_rect(a, B_SIZE, &bx, &by, &bw, &bh))
-            by = by - *h - 4;
-    }
+    int bx = 4, by;
+    struct wlrail L;
+    int ys[WLRAIL_MAX];
+    cam_rail(a, &L);
+    wlrail_layout(&L, ys);
+    by = ys[B_SIZE] >= 0 ? ys[B_SIZE] : 4;
     *x = bx;
     *y = LM_CLAMP(by, 0, LM_MAX(a->win.bh - *h, 0));
 }
@@ -1003,10 +970,14 @@ static void menu_set(struct app *a, bool open)
 
 static void start_stream(struct app *a);
 
+static void conf_save(const struct app *a);
+
 static void menu_pick(struct app *a, int i)
 {
     if (i >= 0 && i < a->src.nsizes && a->src.on && !a->clip) {
         a->want = a->src.sizes[i];
+        a->saved_size = a->want;                                /* the next start has this resolution again */
+        conf_save(a);
         start_stream(a);
     }
     menu_set(a, false);
@@ -1086,9 +1057,9 @@ static void paint_picture(struct app *a, int vw, int vh)
 #define NAV_PREV 100
 #define NAV_NEXT 101
 
-static int picture_h(const struct app *a)
+static int picture_h(const struct app *a)                       /* the height of the live picture: the controls and the status line are under it */
 {
-    return a->win.bh > BAR_H ? a->win.bh - BAR_H : 1;
+    return a->win.bh > STATUS_H + CTRL_H ? a->win.bh - STATUS_H - CTRL_H : 1;
 }
 
 /* The strip of the last pictures has a column of its own at the right of the picture (not on a narrow or low window, not while the grid is open). */
@@ -1112,7 +1083,9 @@ static const char *ctl_label(const struct app *a, int i, char *buf, size_t n)
 {
     switch (i) {
     case O_FX: return "Effects";
+    case O_KIND: return a->video ? "Video" : "Photo";
     case O_MODE: return a->fourup ? "4-up" : "1-up";
+    case O_MIC: return a->mic ? "Mic on" : "Mic off";
     case O_TIMER:
         if (!a->timer_s)
             return "No timer";
@@ -1124,7 +1097,7 @@ static const char *ctl_label(const struct app *a, int i, char *buf, size_t n)
 
 static const char *ctl_name(int i)
 {
-    static const char *const names[N_O] = { "fx", "shutter", "mode", "timer" };
+    static const char *const names[N_O] = { "fx", "kind", "shutter", "mode", "timer", "mic" };
     return i >= 0 && i < N_O ? names[i] : "?";
 }
 
@@ -1134,23 +1107,39 @@ static int ctl_width(const struct app *a, int i)
     return i == O_SHUTTER ? CTL_D : (int)strlen(ctl_label(a, i, tmp, sizeof(tmp))) * LM_FONT_W + 20;
 }
 
-/* The place of a control in the picture's area (logical pixels): effects, shutter, one / four pictures, the countdown, side by side at the bottom. */
+/* The controls that show, left to right: a photo has a choice of one or four pictures and a countdown, a video the microphone. */
+static int ctl_list(const struct app *a, int *ids)
+{
+    int n = 0;
+    ids[n++] = O_FX;
+    ids[n++] = O_KIND;
+    ids[n++] = O_SHUTTER;
+    if (a->video) {
+        ids[n++] = O_MIC;
+    } else {
+        ids[n++] = O_MODE;
+        ids[n++] = O_TIMER;
+    }
+    return n;
+}
+
+/* The place of a control in the window's drawing area (logical pixels): a row under the picture, in the middle. */
 static bool ctl_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
 {
-    int vw = pic_w(a), vh = picture_h(a);
-    if (vw < 200 || vh < CTL_D + 40)
+    int ids[N_O], n = ctl_list(a, ids), vw = a->win.bw, top = picture_h(a) + (CTRL_H - CTL_D) / 2;
+    int total = CTL_GAP * (n - 1);
+    for (int k = 0; k < n; k++)
+        total += ctl_width(a, ids[k]);
+    int bx = (vw - total) / 2;
+    if (vw < 200)
         return false;
-    int total = CTL_GAP * (N_O - 1);
-    for (int k = 0; k < N_O; k++)
-        total += ctl_width(a, k);
-    int bx = (vw - total) / 2, top = vh - CTL_D - 14;
-    for (int k = 0; k < N_O; k++) {
-        int bw = ctl_width(a, k);
-        if (k == i) {
+    for (int k = 0; k < n; k++) {
+        int bw = ctl_width(a, ids[k]);
+        if (ids[k] == i) {
             *x = bx;
             *w = bw;
-            *y = k == O_SHUTTER ? top : top + (CTL_D - CTL_BH) / 2;
-            *h = k == O_SHUTTER ? CTL_D : CTL_BH;
+            *y = i == O_SHUTTER ? top : top + (CTL_D - CTL_BH) / 2;
+            *h = i == O_SHUTTER ? CTL_D : CTL_BH;
             return true;
         }
         bx += bw + CTL_GAP;
@@ -1160,8 +1149,6 @@ static bool ctl_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
 
 static int ctl_at(const struct app *a, double px, double py)
 {
-    if (a->fx_open)
-        return -1;
     for (int i = 0; i < N_O; i++) {
         int x, y, w, h;
         if (ctl_rect(a, i, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h)
@@ -1170,27 +1157,28 @@ static int ctl_at(const struct app *a, double px, double py)
     return -1;
 }
 
+/* The row of controls under the picture. */
 static void paint_controls(struct app *a)
 {
     struct wlwin *w = &a->win;
-    int fx, fy, fw, fh, tx, ty, tw, th;
-    if (!ctl_rect(a, O_FX, &fx, &fy, &fw, &fh) || !ctl_rect(a, O_TIMER, &tx, &ty, &tw, &th))
-        return;
-    int vh = picture_h(a), px0 = fx - CTL_PAD, px1 = tx + tw + CTL_PAD, ph = CTL_D + 12;
-    wlwin_round_fill(w, px0, vh - ph - 8, px1 - px0, ph, ph / 2, lm_theme.bar);
-    const uint32_t base[N_O] = { lm_theme.btn_purple, lm_theme.btn_red, lm_theme.btn_teal, lm_theme.btn_amber };
-    const uint32_t lite[N_O] = { lm_theme.btn_purple_lit, lm_theme.btn_red_lit, lm_theme.btn_teal_lit, lm_theme.btn_amber_lit };
+    int vh = picture_h(a);
+    wlwin_fill(w, 0, vh, w->bw, CTRL_H, lm_theme.bar);
+    wlwin_fill(w, 0, vh, w->bw, 1, lm_theme.border);
+    const uint32_t base[N_O] = { lm_theme.btn_purple, lm_theme.btn_slate, lm_theme.btn_red, lm_theme.btn_teal, lm_theme.btn_amber, lm_theme.btn_slate };
+    const uint32_t lite[N_O] = { lm_theme.btn_purple_lit, lm_theme.btn_slate_lit, lm_theme.btn_red_lit, lm_theme.btn_teal_lit, lm_theme.btn_amber_lit, lm_theme.btn_slate_lit };
     for (int i = 0; i < N_O; i++) {
         int x, y, bw, bh;
         char tmp[16];
         if (!ctl_rect(a, i, &x, &y, &bw, &bh))
             continue;
-        bool on = (i == O_FX && a->fx != CAMFX_NORMAL) || (i == O_MODE && a->fourup) || (i == O_TIMER && a->timer_s);
+        bool on = (i == O_FX && a->fx != CAMFX_NORMAL) || (i == O_MODE && a->fourup) || (i == O_TIMER && a->timer_s) || (i == O_MIC && a->mic) || (i == O_KIND && a->video);
         if (i == O_SHUTTER) {
             wlwin_round_fill(w, x, y, bw, bh, bh / 2, lm_theme.on_colour);                          /* the white ring of a shutter button */
             wlwin_drop(w, x + 5, y + 5, bw - 10, bh - 10, (bh - 10) / 2, a->ohover == i ? lm_theme.btn_red_lit : lm_theme.btn_red);
-            if (a->phase == PH_WAIT)                                                                /* a square: press to cancel */
+            if (a->phase == PH_WAIT || a->clip)                                                     /* a square: press to cancel / stop */
                 wlwin_round_fill(w, x + bw / 2 - 8, y + bh / 2 - 8, 16, 16, 3, lm_theme.on_colour);
+            else if (a->video)                                                                      /* a video: the dot of a recorder */
+                wlwin_round_fill(w, x + bw / 2 - 6, y + bh / 2 - 6, 12, 12, 6, lm_theme.on_colour);
             continue;
         }
         if (on)
@@ -1578,13 +1566,13 @@ static void write_dump(const struct app *a)
     if (!f)
         return;
     const struct lm_image *im = shown(a);
-    fprintf(f, "state fx=%s page=%d open=%d hover=%d fourup=%d timer=%d phase=%d shot=%d digits=%d flash=%d have=%d mirror=%d clip=%d ref=%d bgwait=%d sound=%d strip=%d top=%d focusx=%.3f focusy=%.3f\n",
+    fprintf(f, "state fx=%s page=%d open=%d hover=%d fourup=%d timer=%d phase=%d shot=%d digits=%d flash=%d have=%d mirror=%d clip=%d ref=%d bgwait=%d sound=%d strip=%d top=%d video=%d focusx=%.3f focusy=%.3f\n",
             camfx_id(a->fx), a->fx_page, a->fx_open, a->fx_hover, a->fourup, a->timer_s, a->phase, a->shot_n, a->digits, a->flash_t0 != 0, a->have, a->mirror,
-            a->clip != NULL, a->have_ref, a->bg_until != 0, a->sound, a->nstrip, a->strip_top, a->focus_x, a->focus_y);
+            a->clip != NULL, a->have_ref, a->bg_until != 0, a->sound, a->nstrip, a->strip_top, a->video, a->focus_x, a->focus_y);
     fprintf(f, "image %d %d\n", a->have ? im->w : 0, a->have ? im->h : 0);
     for (int i = 0; i < N_O; i++) {
         int x, y, w, h;
-        if (!a->fx_open && ctl_rect(a, i, &x, &y, &w, &h))
+        if (ctl_rect(a, i, &x, &y, &w, &h))
             fprintf(f, "ctl %s %d %d %d %d\n", ctl_name(i), x + a->win.inx, y, w, h);
     }
     double px0, py0, pw0, ph0;
@@ -1621,7 +1609,7 @@ static void write_dump(const struct app *a)
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
-    int vw = pic_w(a), vh = w->bh > BAR_H ? w->bh - BAR_H : 1;
+    int vw = pic_w(a), vh = picture_h(a);
     wlwin_fill(w, 0, 0, w->bw, w->bh, BG);
     if (a->fx_open) {
         paint_grid(a);
@@ -1630,31 +1618,14 @@ static void paint(struct wlwin *w)
             paint_picture(a, vw, vh);
         else
             wlwin_text(w, 16, 16, a->msg[0] ? a->msg : "Waiting for the camera...", 1, lm_theme.text_soft, vw - 32);
-        paint_controls(a);
         paint_strip(a);
         paint_focus(a);
         paint_countdown(a);
         paint_bgwait(a);
     }
     paint_flash(a);
-    wlwin_fill(w, 0, vh, w->bw, w->bh - vh, lm_theme.bar);
-    for (int i = 0; i < N_B && !g_rail; i++) {
-        int x, y, bw, bh;
-        char tmp[40];
-        if (!btn_rect(a, i, &x, &y, &bw, &bh))
-            continue;
-        bool on = (i == B_MIRROR && a->mirror) || (i == B_PAUSE && a->paused) || (i == B_REC && a->clip) || (i == B_MIC && a->mic);
-        /* round colourful buttons like the terminal's and the editor's: lighter under the pointer, a switch that is on gets a white rim */
-        const uint32_t base[N_B] = { lm_theme.btn_green, lm_theme.btn_red, lm_theme.btn_slate, lm_theme.btn_blue, lm_theme.btn_amber, lm_theme.btn_teal,
-                                     lm_theme.btn_purple };
-        const uint32_t lite[N_B] = { lm_theme.btn_green_lit, lm_theme.btn_red_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit, lm_theme.btn_amber_lit,
-                                     lm_theme.btn_teal_lit, lm_theme.btn_purple_lit };
-        if (on)
-            wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
-        wlwin_drop(w, x, y, bw, bh, lm_button_radius(bh / 2), on || a->hover == i ? lite[i] : base[i]);
-        const char *t = btn_label(a, i, tmp, sizeof(tmp));
-        wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
-    }
+    wlwin_fill(w, 0, vh, w->bw, w->bh - vh, lm_theme.bar);                 /* under the picture: the controls, then the status line */
+    paint_controls(a);
     char st[240];
     if (a->clip) {
         uint64_t ms = now_ms() - a->clip->t0, s = ms / 1000;
@@ -1673,9 +1644,9 @@ static void paint(struct wlwin *w)
                  a->paused ? 0 : a->fps, a->paused ? "  paused" : "");
     else
         st[0] = 0;
-    if (g_rail) {
-        /* The status bar (the rail has the buttons): what is happening at the left (a clip being recorded, what was saved, else the camera), how the camera
-         * delivers at the right: size, format, pictures a second and the switches that are on. */
+    {
+        /* The status line: what is happening at the left (a clip being recorded, what was saved, else the camera), how the camera delivers at the right:
+         * size, format, pictures a second and the switches that are on. */
         char left[240], right[200];
         uint32_t lcol = lm_theme.text_soft;
         if (a->clip) {
@@ -1693,30 +1664,20 @@ static void paint(struct wlwin *w)
         right[0] = 0;
         if (a->src.on) {
             snprintf(right, sizeof(right), "%dx%d %s  %d fps%s%s%s%s%s", a->src.w, a->src.h, a->src.fake ? "test" : fourcc_name(a->src.fourcc), a->paused ? 0 : a->fps,
-                     a->mirror ? "  mirrored" : "", a->paused ? "  paused" : "", a->mic ? "  mic" : "", a->fx != CAMFX_NORMAL ? "  " : "",
+                     a->mirror ? "  mirrored" : "", a->paused ? "  paused" : "", a->mic && a->video ? "  mic" : "", a->fx != CAMFX_NORMAL ? "  " : "",
                      a->fx != CAMFX_NORMAL ? camfx_name(a->fx) : "");
             if (!a->sound && strlen(right) + 10 < sizeof(right))
                 strcat(right, "  silent");
         }
-        int rw = (int)strlen(right) * LM_FONT_W, ty = vh + (BAR_H - LM_FONT_H) / 2;
-        wlwin_fill(w, 0, vh, w->bw, 1, lm_theme.border);
+        int rw = (int)strlen(right) * LM_FONT_W, sy = w->bh - STATUS_H, ty = sy + (STATUS_H - LM_FONT_H) / 2;
+        wlwin_fill(w, 0, sy, w->bw, 1, lm_theme.border);
         wlwin_text(w, 10, ty, left, 1, lcol, LM_MAX(w->bw - rw - 36, 40));
         if (rw && rw + 20 < w->bw)
             wlwin_text(w, w->bw - rw - 10, ty, right, 1, lm_theme.muted, 0);
-    } else {
-        int last = 0;
-        for (int i = 0; i < N_B; i++) {
-            int x, y, bw, bh;
-            if (btn_rect(a, i, &x, &y, &bw, &bh))
-                last = x + bw;
-        }
-        int tw = (int)strlen(st) * LM_FONT_W;
-        if (last + 16 + tw <= w->bw)
-            wlwin_text(w, w->bw - tw - 10, vh + (BAR_H - LM_FONT_H) / 2, st, 1, lm_theme.muted, 0);
     }
     if (a->menu_open)
         paint_menu(a);
-    if (g_rail) {
+    {
         struct wlrail L;
         cam_rail(a, &L);
         wlrail_paint(w, &L, &a->ran, a->hover, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);
@@ -1745,8 +1706,11 @@ static void do_snapshot(struct app *a)
 
 static void conf_save(const struct app *a)
 {
-    char extra[64];
-    snprintf(extra, sizeof(extra), "timer = %d\nfour-up = %d\nsound = %d\n", a->timer_s, a->fourup ? 1 : 0, a->sound ? 1 : 0);
+    char extra[160];
+    char size[40] = "";
+    if (a->saved_size.w > 0)
+        snprintf(size, sizeof(size), "size = %dx%d\n", a->saved_size.w, a->saved_size.h);
+    snprintf(extra, sizeof(extra), "timer = %d\nfour-up = %d\nsound = %d\nvideo = %d\n%s", a->timer_s, a->fourup ? 1 : 0, a->sound ? 1 : 0, a->video ? 1 : 0, size);
     lm_snd_conf_save_x("camera", false, a->mic, extra);
 }
 
@@ -1758,17 +1722,23 @@ static void conf_load(struct app *a)
     if (lm_snd_conf_path("camera", path, sizeof(path))) {
         FILE *f = fopen(path, "r");
         while (f && fgets(line, sizeof(line), f)) {
-            int v;
+            int v, sw, sh;
             if (sscanf(line, "timer = %d", &v) == 1)
                 a->timer_s = LM_CLAMP(v, 0, 60);
             else if (sscanf(line, "four-up = %d", &v) == 1)
                 a->fourup = v != 0;
             else if (sscanf(line, "sound = %d", &v) == 1)
                 a->sound = v != 0;
+            else if (sscanf(line, "video = %d", &v) == 1)
+                a->video = v != 0;
+            else if (sscanf(line, "size = %dx%d", &sw, &sh) == 2 && sw >= 16 && sh >= 16 && sw <= 8192 && sh <= 8192)
+                a->saved_size = (struct size){ sw, sh };
         }
         if (f)
             fclose(f);
     }
+    if (!a->want.w && a->saved_size.w > 0)                      /* no --size: the resolution of last time (the nearest the camera has) */
+        a->want = a->saved_size;
     const char *env = getenv("MELLAGUI_CAM_TIMER");
     if (env && *env)
         a->timer_s = LM_CLAMP(atoi(env), 0, 60);
@@ -1967,11 +1937,30 @@ static void booth_tick(struct app *a, uint64_t t)
     }
 }
 
+static void do_record(struct app *a);
+
 static void press_ctl(struct app *a, int i)
 {
     switch (i) {
     case O_FX: grid_set(a, !a->fx_open); break;
-    case O_SHUTTER: shutter(a); break;
+    case O_KIND:                                                /* photo <-> video (not while a clip is being made or a picture is coming) */
+        if (!a->clip && a->phase == PH_IDLE && !a->bg_until) {
+            a->video = !a->video;
+            conf_save(a);
+        }
+        break;
+    case O_SHUTTER:
+        if (a->video)
+            do_record(a);
+        else
+            shutter(a);
+        break;
+    case O_MIC:
+        if (!a->clip) {                                         /* (a clip that runs keeps what it started with) */
+            a->mic = !a->mic;
+            conf_save(a);
+        }
+        break;
     case O_MODE:
         if (a->phase == PH_IDLE) {
             a->fourup = !a->fourup;
@@ -2067,17 +2056,10 @@ static void next_camera(struct app *a)
     open_camera(a, a->want_dev);
 }
 
+/* The rail's drops. */
 static void press(struct app *a, int b)
 {
     switch (b) {
-    case B_SNAP: shutter(a); break;
-    case B_REC: do_record(a); break;
-    case B_MIC:
-        if (!a->clip) {                                         /* (a clip that runs keeps what it started with) */
-            a->mic = !a->mic;
-            conf_save(a);
-        }
-        break;
     case B_MIRROR: a->mirror = !a->mirror; break;
     case B_PAUSE:
         if (!a->clip)                                           /* a clip is made of the live pictures */
@@ -2160,6 +2142,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
         if (args[2].u == 272 && args[3].u == 1) {               /* BTN_LEFT pressed */
             int b = btn_at(a, a->px, a->py);
+            int o = b < 0 ? ctl_at(a, a->px, a->py) : -1;
+            if (o >= 0) {                                       /* the row of controls under the picture (also while the grid shows) */
+                press_ctl(a, o);
+                break;
+            }
             if (b < 0 && a->fx_open) {                          /* the grid of effects: a tile chooses, the arrows turn the page, anywhere else closes it */
                 int g = grid_hit(a, a->px, a->py);
                 if (g >= 0 && g < FX_PER_PAGE) {
@@ -2172,11 +2159,6 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                     grid_set(a, false);
                 }
                 w->redraw = true;
-                break;
-            }
-            int o = b < 0 ? ctl_at(a, a->px, a->py) : -1;
-            if (o >= 0) {
-                press_ctl(a, o);
                 break;
             }
             int sp = b < 0 ? strip_at(a, a->px, a->py) : -1;
@@ -2195,8 +2177,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 break;
             }
             if (b >= 0) {
-                if (g_rail)
-                    wlrail_press(&a->ran, b, wlrail_now());
+                wlrail_press(&a->ran, b, wlrail_now());
                 press(a, b);
             }
         } else if (args[2].u == 272) {
@@ -2261,9 +2242,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         w->running = false;
     else if (c == 'e' || c == 'E')
         press_ctl(a, O_FX);
-    else if (c == '4')
+    else if (c == '4' && !a->video)
         press_ctl(a, O_MODE);
-    else if (c == 't' || c == 'T')
+    else if ((c == 't' || c == 'T') && !a->video)
         press_ctl(a, O_TIMER);
     else if (c == 'b' || c == 'B') {
         if (camfx_is_backdrop(a->fx) && a->phase == PH_IDLE)
@@ -2276,11 +2257,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         set_note(a, "%s", a->sound ? "Sound on" : "Sound off");
     }
     else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || c == ' ')
-        press(a, B_SNAP);
+        press_ctl(a, O_SHUTTER);                                /* a picture or, in video mode, start / stop the clip */
+    else if (c == 'v' || c == 'V')
+        press_ctl(a, O_KIND);
     else if (c == 'r' || c == 'R')
-        press(a, B_REC);
+        do_record(a);
     else if (c == 'a' || c == 'A')
-        press(a, B_MIC);
+        press_ctl(a, O_MIC);
     else if (c == 'm' || c == 'M')
         press(a, B_MIRROR);
     else if (c == 'p' || c == 'P')
@@ -2337,10 +2320,8 @@ static int run_window(struct app *a)
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
     if (wlwin_connect(&a->win, "mellagui-cam", &ops, a) < 0)
         return 1;
-    g_rail = wlrail_wanted("MELLAGUI_CAM_RAIL");
     wlrail_init(&a->ran);
-    if (g_rail)
-        wlwin_set_inset(&a->win, WLRAIL_W);                     /* (after the connect, which clears the window; before the open: it makes room) */
+    wlwin_set_inset(&a->win, WLRAIL_W);                     /* (after the connect, which clears the window; before the open: it makes room) */
     int ww = 680, wh = 560;
     const char *wenv = getenv("MELLAGUI_CAM_WINDOW");                   /* the window's first size (the tests keep it clear of the dock) */
     if (wenv && sscanf(wenv, "%dx%d", &ww, &wh) == 2) {
@@ -2391,7 +2372,7 @@ static int run_window(struct app *a)
         }
         if (strip_lazy(a))                                       /* a picture of the folder came into view: its small copy, then the next */
             timeout = LM_MIN(timeout, 10);
-        if (g_rail) {                                            /* the drops of the rail are moving: a frame every 16 ms */
+        {                                                        /* the drops of the rail are moving: a frame every 16 ms */
             struct wlrail L;
             cam_rail(a, &L);
             timeout = wlrail_loop(&a->win, &a->ran, &L, a->hover, timeout);

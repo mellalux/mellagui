@@ -21347,6 +21347,43 @@ class TestLauncherMoving(Base):
         self.assertEqual(order.index('App02'), len(order) - 1)                                   # at the end of the list = of this last page
         self.assertIn('App02', [i[1] for i in self.info(c)['icons']])
 
+    def test_an_icon_dropped_on_the_empty_page_stays_on_a_page_of_its_own(self):
+        for edit in (False, True):
+            c = self.start('mellagui-lmA%d' % edit, n=8)
+            d = self.info(c)
+            if edit:
+                c.click(*self.centre(d['buttons'][0][0]))                                          # Edit mode
+                time.sleep(0.2)
+                d = self.info(c)
+            ic = {i[1]: i[2] for i in d['icons']}
+            card = d['card']
+            x0, y0 = self.centre(ic['App02'])
+            c.abs(x0, y0)
+            c.button(272, True)
+            for i in range(1, 6):
+                c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0 + 5 * i)
+                time.sleep(0.03)
+            for k in range(80):                                                                     # to the temporary page at the end
+                c.abs(card[0] + card[2] - 20, y0 + 25 + (k % 2))
+                d = self.info(c)
+                if d['page'] == d['pages'] - 1 and d['pages'] > 1 and not d['icons']:
+                    break
+                time.sleep(0.05)
+            self.assertFalse(d['icons'], 'the last page is the empty one')
+            g = d['card']
+            c.abs(g[0] + g[2] // 2, g[1] + g[3] // 2)
+            time.sleep(0.2)
+            c.button(272, False)
+            order = self.wait_order(lambda o: '-' in o)
+            self.assertIn('-', order)                                                              # empty cells keep it off the first page
+            self.assertEqual(order[-1], 'App02')
+            time.sleep(0.4)
+            d = self.info(c)
+            self.assertGreater(d['page'], 0)
+            self.assertEqual([i[1] for i in d['icons']], ['App02'])                                # alone on its page
+            self.assertGreaterEqual(d['pages'], 2)
+            c.cmd('launcher close')
+
     def test_a_next_page_appears_while_an_icon_is_carried_and_goes_with_the_drag(self):
         c = self.start('mellagui-lm7')
         d = self.info(c)
@@ -21446,7 +21483,7 @@ class TestLauncherMoving(Base):
         c.button(272, False)
         order = self.wait_order(lambda o: o and o[-1] == 'App02')
         self.assertEqual(order[-1], 'App02')
-        self.assertEqual(len(order), 30)
+        self.assertEqual(len([x for x in order if x != '-']), 30)                              # every button once; empty cells keep App02 on a page of its own
 
 
 class TestLauncher(Base):

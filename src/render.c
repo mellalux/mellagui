@@ -1519,7 +1519,7 @@ static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launc
     }
     if (!li->form) {
         for (int g = li->first; g < li->last && g < li->n; g++) {       /* (the icons of the other pages are not painted) */
-            if (li->drag >= 0 && g == li->drag_slot)                    /* the place of the icon in the hand: empty */
+            if ((li->drag >= 0 && g == li->drag_slot) || li->icon[g].item->spacer)      /* the place of the icon in the hand, or an empty cell: nothing is painted */
                 continue;
             const struct lm_rect *b = &li->icon[g].box;
             bool sel = dyn && li->drag < 0 && li->sel == g;
@@ -1747,9 +1747,11 @@ static bool lov_sel_rect(const struct lm_launcher_info *li, struct lm_rect *r)
 {
     if (li->form || li->sel < 0 || li->drag >= 0)
         return false;
-    if (li->sel < li->n && li->sel >= li->first && li->sel < li->last)
+    if (li->sel < li->n && li->sel >= li->first && li->sel < li->last) {
+        if (li->icon[li->sel].item && li->icon[li->sel].item->spacer)
+            return false;
         *r = li->icon[li->sel].hit;
-    else if (li->sel == li->n && li->add.w > 0)
+    } else if (li->sel == li->n && li->add.w > 0)
         *r = li->add;
     else
         return false;

@@ -62,6 +62,7 @@ struct lm_dock_item {
     bool launcher_only;                 /* from [launcher-apps] (lm_launchapps_item), not in the dock */
     bool round;                         /* a picture that fills its square: cut to the icon's shape (circle / rounded square, [windows] button-roundness) when painted */
     bool plate;                         /* a picture whose corners are transparent (a logo): it is painted on a round plate (see icon_bg) */
+    bool spacer;                        /* not a button: an empty cell of the launcher grid (`-` in [launcher] order) that keeps an icon on a later page */
 };
 
 /* Fills `pub` (kind, img, plate, round) from an icon text the way the entries of [dock-apps] are: a built-in icon name, theme:NAME, the name of an installed

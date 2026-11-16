@@ -64,7 +64,9 @@ static void search_sync(void)
 
 /* The buttons the dialog shows (the dock's, then the launcher's own, the ones the typed text lets through), put in the order of `[launcher] order`: the names
  * listed there first, in that order, then the rest as they were. The permutation is kept while nothing it depends on changes. */
-#define LB_MAX (LM_DOCK_MAX + LM_LAUNCHER_APPS_MAX)
+#define LB_MAX (LM_DOCK_MAX + LM_LAUNCHER_APPS_MAX + LM_LAUNCHER_GAPS_MAX)
+
+static const struct lm_dock_item g_gap = { .name = "", .cmd = "", .match = "", .raw = -1, .spacer = true };       /* an empty cell: `-` in [launcher] order */
 
 struct lbase {
     int n;
@@ -120,6 +122,7 @@ static void launcher_base(struct lbase *b)
     }
     for (const char *c = lm_launcher_order(); *c; c++)
         sig = (sig ^ (unsigned char)*c) * 1099511628211ull;
+    sig = (sig ^ (launcher_filter[0] ? 1u : 0u)) * 1099511628211ull;
     if (cache_ok && sig == cache_sig) {
         *b = cache;
         return;
@@ -129,14 +132,24 @@ static void launcher_base(struct lbase *b)
     launcher_order_names(lm_launcher_order(), names, &nn, LB_MAX);
     bool used[LB_MAX] = { false };
     b->n = 0;
-    for (int k = 0; k < nn; k++)
-        for (int i = 0; i < rn; i++)
+    int gaps = 0;
+    for (int k = 0; k < nn; k++) {
+        if (!strcmp(names[k], "-")) {                               /* an empty cell (not while the text typed filters the buttons) */
+            if (!launcher_filter[0] && gaps < LM_LAUNCHER_GAPS_MAX && b->n < LB_MAX) {
+                gaps++;
+                b->item[b->n] = &g_gap;
+                b->dock[b->n++] = -1;
+            }
+            continue;
+        }
+        for (int i = 0; i < rn && b->n < LB_MAX; i++)
             if (!used[i] && !strcasecmp(raw[i]->name, names[k])) {
                 used[i] = true;
                 b->item[b->n] = raw[i];
                 b->dock[b->n++] = rdock[i];
                 break;
             }
+    }
     for (int i = 0; i < rn; i++)
         if (!used[i]) {
             b->item[b->n] = raw[i];
@@ -149,16 +162,21 @@ static void launcher_base(struct lbase *b)
 
 int launcher_count(void)
 {
-    int n = 0;
-    for (int i = 0; i < lm_dock_count(); i++)
-        if (launcher_shown(lm_dock_item(i)))
-            n++;
-    for (int i = 0; i < lm_launchapps_count(); i++)
-        if (launcher_shown(lm_launchapps_item(i)))
-            n++;
-    n = LM_MIN(n, LB_MAX);
+    struct lbase b;
+    launcher_base(&b);
     search_sync();
-    return n + search_n;
+    return b.n + search_n;
+}
+
+/* How many empty cells (spacers) the grid has. */
+int launcher_gap_count(void)
+{
+    struct lbase b;
+    launcher_base(&b);
+    int n = 0;
+    for (int i = 0; i < b.n; i++)
+        n += b.item[i]->spacer;
+    return n;
 }
 
 /* The g-th button of the launcher; *dock_index is its index in the dock, -1 for one that is only in the launcher. NULL when there is none. */
@@ -344,7 +362,14 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         int rows_fit = LM_CLAMP(room / LC_CELL_H, 1, LC_MAX_ROWS);
         int rows, dots_h = 0;
         bool extra = (li->edit || wm->launcher_drag) && !li->searching;     /* edit mode, or while an icon is carried: one more, empty page at the end, to drop it on */
-        if (!extra && (total_rows <= rows_fit || (room < 2 * LC_CELL_H && total_rows * (LC_ICON + 8 + LM_FONT_H + 6) <= room))) {      /* everything fits on one page */
+        bool holes = !li->searching && launcher_gap_count() > 0;                 /* empty cells keep icons on later pages: always the paged layout, all pages as high as the screen allows */
+        {
+            int rf = LM_CLAMP((room - LC_DOTS) / LC_CELL_H, 1, LC_MAX_ROWS);
+            if (rf < 2 && (room - LC_DOTS) / (LC_ICON + 8 + LM_FONT_H + 6) >= 2)
+                rf = 2;
+            li->full_pp = li->cols * rf;
+        }
+        if (!extra && !holes && (total_rows <= rows_fit || (room < 2 * LC_CELL_H && total_rows * (LC_ICON + 8 + LM_FONT_H + 6) <= room))) {      /* everything fits on one page */
             rows = total_rows;
             li->pages = li->real_pages = 1;
             li->per_page = LM_MAX(cells, 1);
@@ -353,7 +378,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
             rows_fit = LM_CLAMP((room - dots_h) / LC_CELL_H, 1, LC_MAX_ROWS);
             if (rows_fit < 2 && (room - dots_h) / (LC_ICON + 8 + LM_FONT_H + 6) >= 2)
                 rows_fit = 2;                                           /* a low screen: two rows, closer together */
-            rows = LM_MIN(rows_fit, total_rows);
+            rows = holes ? rows_fit : LM_MIN(rows_fit, total_rows);
             li->per_page = li->cols * rows;
             li->real_pages = LM_MAX((cells + li->per_page - 1) / li->per_page, 1);
             li->pages = LM_MIN(li->real_pages + (extra ? 1 : 0), LM_LAUNCHER_PAGES_MAX);
@@ -383,7 +408,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
             li->icon[g].hit = cell;
             li->icon[g].remove = on_page ? lm_rect_make(box.x - 8, box.y - 8, 24, 24) : (struct lm_rect){ 0, 0, 0, 0 };
             li->icon[g].item = launcher_item(g, NULL);
-            li->icon[g].running = on_page && li->icon[g].item && !lm_search_owns(li->icon[g].item) && dock_window_count(wm, li->icon[g].item) > 0;
+            li->icon[g].running = on_page && li->icon[g].item && !li->icon[g].item->spacer && !lm_search_owns(li->icon[g].item) && dock_window_count(wm, li->icon[g].item) > 0;
         }
         if (li->pages > 1) {                                            /* the dots, centred under the grid, and an arrow at each side of it */
             int dy = y0 + rows * cell_h + 4, pitch = 20, dx = li->rect.x + li->rect.w / 2 - li->pages * pitch / 2;
@@ -440,7 +465,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
                 if (src == k)
                     continue;
                 li->icon[k].item = launcher_item(src, NULL);
-                li->icon[k].running = li->icon[k].item && !lm_search_owns(li->icon[k].item) && dock_window_count(wm, li->icon[k].item) > 0;
+                li->icon[k].running = li->icon[k].item && !li->icon[k].item->spacer && !lm_search_owns(li->icon[k].item) && dock_window_count(wm, li->icon[k].item) > 0;
             }
     }
     li->title = lm_rect_make(li->card.x, li->card.y + 18, li->card.w, LM_FONT_H);
@@ -711,6 +736,8 @@ bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
             return true;
         }
     for (int g = 0; g < li.n; g++) {
+        if (li.icon[g].item && li.icon[g].item->spacer)               /* an empty cell is nothing to click */
+            continue;
         if (li.edit && lm_rect_contains(&li.icon[g].remove, ix, iy)) {
             out->kind = LM_PICK_LAUNCHER_REMOVE;
             out->index = g;
@@ -718,7 +745,7 @@ bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
         }
     }
     for (int g = 0; g < li.n; g++)
-        if (lm_rect_contains(&li.icon[g].hit, ix, iy)) {
+        if (!(li.icon[g].item && li.icon[g].item->spacer) && lm_rect_contains(&li.icon[g].hit, ix, iy)) {
             out->kind = LM_PICK_LAUNCHER_ITEM;
             out->index = g;
             return true;
@@ -750,7 +777,7 @@ void launcher_open_change(struct lm_wm *wm, int g)
 {
     const struct lm_dock_item *it = launcher_item(g, NULL);
     const char *nm, *ic, *cm;
-    if (!it || !(it->launcher_only ? lm_launchapps_raw_entry(it->raw, &nm, &ic, &cm) : lm_dock_raw_entry(it->raw, &nm, &ic, &cm)))
+    if (!it || it->spacer || !(it->launcher_only ? lm_launchapps_raw_entry(it->raw, &nm, &ic, &cm) : lm_dock_raw_entry(it->raw, &nm, &ic, &cm)))
         return;
     wm->launcher_form = true;
     wm->launcher_editing = true;
@@ -770,7 +797,7 @@ void launcher_open_change(struct lm_wm *wm, int g)
 static void launcher_remove(struct lm_wm *wm, int g)
 {
     const struct lm_dock_item *it = launcher_item(g, NULL);
-    if (!it || lm_search_owns(it))
+    if (!it || it->spacer || lm_search_owns(it))
         return;
     if (!(it->launcher_only ? lm_settings_launcher_del(wm->srv, it->raw) : lm_settings_dock_del(wm->srv, it->raw)))
         lm_wm_notify(wm, "Launcher", "Could not remove it: there is no config file to write", 5000);
@@ -852,7 +879,7 @@ void launcher_activate(struct lm_wm *wm, int kind, int index)
     case LM_PICK_LAUNCHER_ITEM: {
         int di;
         const struct lm_dock_item *it = launcher_item(index, &di);
-        if (!it)
+        if (!it || it->spacer)
             break;
         if (lm_search_owns(it)) {                                     /* a result of the search */
             if (wm->launcher_edit)

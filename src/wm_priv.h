@@ -537,6 +537,7 @@ void gadgets_save(struct lm_wm *wm);
 bool dock_special(const struct lm_dock_item *it);
 void launcher_activate(struct lm_wm *wm, int kind, int index);
 int launcher_count(void);
+int launcher_gap_count(void);                                       /* empty cells (spacers) in the grid */
 void launcher_damage(struct lm_wm *wm);
 void launcher_damage_hover(struct lm_wm *wm, int old_sel, int old_btn);
 void launcher_field_clip(struct lm_wm *wm, int what);

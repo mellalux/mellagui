@@ -542,7 +542,8 @@ struct lm_about_info {
 #define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
 /* The most icons the launcher dialog shows: the dock's buttons and the launcher's own lists. */
 #define LM_LAUNCHER_PAGES_MAX 24                                           /* page dots: a page holds at least one row of cells */
-#define LM_LAUNCHER_MAX (LM_DOCK_MAX + LM_LAUNCHER_APPS_MAX + 24)         /* the buttons and the results of the search (search.h: LM_SEARCH_MAX) */
+#define LM_LAUNCHER_GAPS_MAX 64                                            /* empty cells (spacers) that keep icons on later pages */
+#define LM_LAUNCHER_MAX (LM_DOCK_MAX + LM_LAUNCHER_APPS_MAX + LM_LAUNCHER_GAPS_MAX + 24)   /* the buttons, the gaps and the results of the search (search.h: LM_SEARCH_MAX) */
 struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
     float veil;                     /* how strong the dimming is, 0..1 (the open / close animation fades it) */
@@ -578,6 +579,7 @@ struct lm_launcher_info {
     struct lm_rect add;             /* the "+" tile (box == hit), empty when the list is full */
     int drag;                       /* an icon is being dragged (icon index), -1 none */
     const struct lm_dock_item *drag_item;   /* the button in the hand (icon[drag].item is what the cell shows now, after the others made room) */
+    int full_pp;                    /* cells a page holds in the paged layout (columns x rows that fit), what the order is padded to when an icon is dropped on a new page */
     int drag_slot;                  /* ... and the cell its place is shown in: the cell it is over, the others have moved up or down to make room (-1 none) */
     struct lm_rect drag_box;        /* the icon under the pointer */
     struct lm_rect drop;            /* while dragging: where it can be dropped (the dock's place), empty when the dock is off */

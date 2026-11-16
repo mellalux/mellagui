@@ -442,31 +442,23 @@ bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_r
 #define FLIP_DWELL_MS 500                                   /* a carried icon waits this long at the edge before the page turns ... */
 #define FLIP_AGAIN_MS 1500                                  /* ... and this long, still there, before it turns the next one (leaving the zone starts over) */
 
-#define SWIPE_PX 70                                                     /* how far a press on the card moves sideways before the page turns */
-
-/* A press on the card that is not on an icon, moved sideways with the button down, turns the pages: to the left for the next one, to the right for the one before;
- * going on another SWIPE_PX turns the next. */
+/* A press on the card that is not on an icon and is moved sideways with the button down DRAGS the pages: they follow the pointer (the grid reads the pointer's place, see
+ * launcher_info) and the button's release settles them (launcher_swipe_end). Here the motion only has to repaint the grid. */
 void launcher_swipe_motion(struct lm_wm *wm)
 {
-    if (!wm->launcher_swipe || !wm->srv->seat || wm->launcher_form)
-        return;
-    double x, y;
-    lm_seat_pointer_position(wm->srv->seat, &x, &y);
-    int dx = (int)x - wm->launcher_swipe_x;
-    if (dx > -SWIPE_PX && dx < SWIPE_PX)
+    if (!wm->launcher_swipe || wm->launcher_form)
         return;
     struct lm_output *o = launcher_output(wm);
     if (!o)
         return;
-    struct lm_launcher_info li;
-    launcher_info(wm, o, &li);
-    int dir = dx < 0 ? 1 : -1;
-    if (li.page + dir >= 0 && li.page + dir < li.pages) {
-        wm->launcher_page = li.page + dir;
-        wm->launcher_sel = -1;
-        launcher_damage(wm);
-    }
-    wm->launcher_swipe_x = (int)x;
+    struct lm_launcher_info *li = malloc(sizeof(*li));
+    if (!li)
+        return;
+    launcher_info(wm, o, li);
+    struct lm_rect r = li->grid;
+    free(li);
+    if (r.w > 0)
+        damage_rect(wm, &r);
 }
 
 void launcher_edge_tick(void *data)

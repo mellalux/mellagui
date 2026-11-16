@@ -582,6 +582,8 @@ struct lm_launcher_info {
     int gx0, gy0, gcell_h, grid_cells;  /* the grid's cell geometry on the page shown: where cell p lies (columns x rows of cells, empty ones too) */
     struct lm_rect slot_rect;       /* the place the icon in the hand will take (empty rect: none on this page) */
     int drag_hide;                  /* the cell whose icon is not painted while one is carried (its place is empty, or it is the slot the hand holds) */
+    float view;                     /* the pages lie side by side and the grid looks at position `view` (a page number, fractional while a page is dragged or slides) */
+    bool moving;                    /* `view` is not `page` right now: the two pages in view are painted at their offsets */
     int full_pp;                    /* cells a page holds in the paged layout (columns x rows that fit), what the order is padded to when an icon is dropped on a new page */
     int drag_slot;                  /* ... and the cell its place is shown in: the cell it is over, the others have moved up or down to make room (-1 none) */
     struct lm_rect drag_box;        /* the icon under the pointer */

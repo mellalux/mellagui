@@ -512,6 +512,25 @@ size_t lm_wm_anim_describe(struct lm_wm *wm, char *buf, size_t size)
     return n < size ? n : size - 1;
 }
 
+/* The dock (false = the consumer stopped). It lies under the dialogs - except the launcher: the dock icons are what an icon of the Launchpad is carried to, so they
+ * are painted over its dimming and its drop mark. */
+static bool scene_dock(struct lm_wm *wm, const struct lm_rect *clip, lm_scene_fn fn, void *data)
+{
+    struct lm_output *dock_out = dock_output(wm);
+    if (!dock_out || !dock_shown(wm))
+        return true;
+    struct dock_geo g;
+    dock_geometry(dock_out, &g);
+    if (lm_rect_is_empty(&g.bounds))
+        return true;
+    struct lm_scene_item it;
+    memset(&it, 0, sizeof(it));
+    it.kind = LM_SCENE_DOCK;
+    it.output = dock_out;
+    dock_info(wm, dock_out, &it.u.dock);
+    return !((!clip || lm_rect_overlaps(&it.u.dock.rect, clip)) && !fn(&it, data));
+}
+
 void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene_fn fn, void *data)
 {
     struct lm_scene_item it;
@@ -747,19 +766,9 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
     }
 
-    struct lm_output *dock_out = dock_output(wm);
-    if (dock_out && dock_shown(wm)) {
-        struct dock_geo g;
-        dock_geometry(dock_out, &g);
-        if (!lm_rect_is_empty(&g.bounds)) {
-            memset(&it, 0, sizeof(it));
-            it.kind = LM_SCENE_DOCK;
-            it.output = dock_out;
-            dock_info(wm, dock_out, &it.u.dock);
-            if ((!clip || lm_rect_overlaps(&it.u.dock.rect, clip)) && !fn(&it, data))
-                return;
-        }
-    }
+    bool launcher_shown_now = wm->launcher_open && !(wm->bubble.active && !wm->bubble.closing);        /* (the dock goes over the launcher dialog, below) */
+    if (!launcher_shown_now && !scene_dock(wm, clip, fn, data))
+        return;
     struct lm_popup *p;
     lm_list_for_each(p, &wm->popups, link) {
         if (!popup_visible(wm, p, 0))
@@ -874,10 +883,18 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 it.kind = LM_SCENE_LAUNCHER;
                 it.output = lo;
                 launcher_info(wm, lo, &it.u.launcher);
+                if (!it.u.launcher.form) {
+                    bool before = wm->launcher_sliding;
+                    launcher_slide_track(wm, it.u.launcher.page);
+                    if (wm->launcher_sliding != before)
+                        launcher_info(wm, lo, &it.u.launcher);      /* (again, now that it slides) */
+                }
                 if (!fn(&it, data))
                     return;
             }
         }
+        if (!scene_dock(wm, clip, fn, data))                     /* the dock over the dialog: not dimmed, and the carried icon goes onto it */
+            return;
     }
 
     if (wm->menu_open && !lm_lock_active(wm->srv->lock) && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {    /* a menu: above the dialogs */

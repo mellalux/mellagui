@@ -35,6 +35,7 @@ struct gl_out {
     struct gl_chrome frame[GL_MAX_FRAMES];
     struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview;
     struct gl_chrome notify[LM_NOTIFY_MAX];
+    struct gl_chrome lpage[4];          /* the launcher's pages: the icons of a page without the card, so a page can slide over the card (slot = page % 4) */
     struct gl_chrome lov[5];            /* the launcher's small pieces: the lit cell, the drop pill, the cell outline, the origin's dimming, the icon in the hand */
     uint32_t card_gen;
     uint32_t theme_gen;                 /* the palette, the font and the scale the chromes below were painted with */
@@ -78,6 +79,8 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->overview);
     for (int i = 0; i < 5; i++)
         gl_chrome_free(r, &go->lov[i]);
+    for (int i = 0; i < 4; i++)
+        gl_chrome_free(r, &go->lpage[i]);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
@@ -95,6 +98,8 @@ static void gl_chromes_free(struct lm_renderer *r, struct gl_out *go)
         gl_chrome_free(r, all[i]);
     for (int i = 0; i < 5; i++)
         gl_chrome_free(r, &go->lov[i]);
+    for (int i = 0; i < 4; i++)
+        gl_chrome_free(r, &go->lpage[i]);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
 }
@@ -208,7 +213,9 @@ static void gl_do_frame(const struct paint_ctx *c, const void *it) { paint_frame
 static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel(c, it); }
 static void gl_do_shadow(const struct paint_ctx *c, const void *it) { paint_panel_shadow(c, it); }
 static void gl_do_about(const struct paint_ctx *c, const void *it) { paint_about(c, it); }
-static void gl_do_launcher(const struct paint_ctx *c, const void *it) { paint_launcher_body(c, it, false); }
+static void gl_do_launcher(const struct paint_ctx *c, const void *it) { paint_launcher_body(c, it, false, LP_FRAME); }
+struct gl_lpage { const struct lm_launcher_info *li; int page; };
+static void gl_do_lpage(const struct paint_ctx *c, const void *it) { const struct gl_lpage *lp = it; paint_launcher_page(c, lp->li, lp->page, 0, false); }
 static void gl_do_lov_sel(const struct paint_ctx *c, const void *it) { lov_sel(c, it); }
 static void gl_do_lov_drop(const struct paint_ctx *c, const void *it) { lov_drop(c, it); }
 static void gl_do_lov_slot(const struct paint_ctx *c, const void *it) { lov_slot(c, it); }
@@ -358,6 +365,56 @@ static uint64_t fnv(uint64_t h, const void *data, size_t n)
         h = (h ^ p[i]) * 1099511628211ull;
     return h;
 }
+
+/* What a page of the launcher shows, as one number: where the grid lies, which cells are on it and what is in them. */
+static uint64_t gl_lpage_hash(const struct lm_launcher_info *li, int page)
+{
+    uint64_t h = fnv(1469598103934665603ull, &li->grid, sizeof(li->grid));
+    h = fnv(h, &page, sizeof(page));
+    h = fnv(h, &li->cols, sizeof(li->cols));
+    h = fnv(h, &li->per_page, sizeof(li->per_page));
+    h = fnv(h, &li->n, sizeof(li->n));
+    h = fnv(h, &li->edit, sizeof(li->edit));
+    h = fnv(h, &li->drag, sizeof(li->drag));
+    h = fnv(h, &li->drag_hide, sizeof(li->drag_hide));
+    h = fnv(h, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
+    h = fnv(h, &lm_dock.icon_bg_rgb, sizeof(lm_dock.icon_bg_rgb));
+    h = fnv(h, &lm_metrics.button_roundness, sizeof(lm_metrics.button_roundness));
+    int first = page * li->per_page, last = LM_MIN(first + li->per_page, li->cells);
+    for (int g = first; g < last && g < li->n; g++) {
+        const struct lm_dock_item *it = li->icon[g].item;
+        if (!it)
+            continue;
+        h = fnv(h, it->name, strlen(it->name) + 1);
+        h = fnv(h, &it->kind, sizeof(int));
+        h = fnv(h, &it->img, sizeof(void *));
+        h = fnv(h, &it->spacer, sizeof(bool));
+        h = fnv(h, &li->icon[g].running, sizeof(bool));
+    }
+    return h;
+}
+
+/* A page of the launcher: a texture of the grid with its icons (made once, kept in a slot), drawn `dx` px to the side and cut to the grid, so it can slide over the
+ * card. */
+static void gl_lpage_draw(struct gl_pass *p, const struct lm_launcher_info *li, int page, int dx, int slot)
+{
+    struct gl_chrome *ch = &p->go->lpage[slot & 3];
+    uint64_t h = gl_lpage_hash(li, page);
+    if (!ch->tex || ch->hash != h || ch->w != li->grid.w || ch->h != li->grid.h) {
+        struct gl_lpage lp = { li, page };
+        gl_scratch_alpha(p->r, p->st, ch, &li->grid, gl_do_lpage, &lp);
+        ch->hash = h;
+    }
+    if (!ch->tex)
+        return;
+    struct lm_rect whole = lm_rect_make(li->grid.x + dx, li->grid.y, li->grid.w, li->grid.h), vis;
+    if (!lm_rect_intersect(&whole, &li->grid, &vis))
+        return;
+    struct lm_rect pr = gl_pr(p, &vis);
+    float u0 = (float)(vis.x - whole.x) / (float)whole.w, u1 = (float)(vis.x + vis.w - whole.x) / (float)whole.w;
+    lm_gl_draw_tex(p->r->gl, ch->tex, pr.x, pr.y, pr.w, pr.h, u0, 0.0f, u1, 1.0f, 1.0f, false);
+}
+
 
 static uint64_t hash_frame(const struct lm_frame_info *f)
 {
@@ -658,19 +715,23 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             if (li->form)
                 for (int i = 0; i < 3; i++)                      /* name, command and icon text: a changed one is redrawn */
                     h = fnv(h, li->field_text[i], strlen(li->field_text[i]) + 1);
-            else
-                for (int i = 0; i < li->n; i++) {
-                    h = fnv(h, li->icon[i].item->name, strlen(li->icon[i].item->name) + 1);
-                    h = fnv(h, &li->icon[i].item->kind, sizeof(int));
-                    h = fnv(h, &li->icon[i].item->img, sizeof(void *));
-                    h = fnv(h, &li->icon[i].running, sizeof(bool));
-                }
+            h = fnv(h, &li->page, sizeof(li->page));
             if (!ch->tex || ch->hash != h || ch->w != base.w || ch->h != base.h) {
                 gl_scratch_alpha(p->r, p->st, ch, &base, gl_do_launcher, li);
                 ch->hash = h;
             }
             if (ch->tex)
                 gl_tex_at(p, ch->tex, &base, false);
+            if (!li->form && li->grid.w > 0) {                   /* the icons of the page; while the page changes, the old one slides out and the new one in */
+                if (li->moving) {                                // the two pages the view is between, each at its offset
+                    int i0 = (int)floorf(li->view);
+                    for (int i = i0; i <= i0 + 1; i++)
+                        if (i >= 0 && i < li->pages)
+                            gl_lpage_draw(p, li, i, (int)lroundf(((float)i - li->view) * (float)li->grid.w), i);
+                } else {
+                    gl_lpage_draw(p, li, li->page, 0, li->page);
+                }
+            }
             struct lm_rect r;
             if (lov_sel_rect(li, &r)) {                          /* the lit cell */
                 r = (struct lm_rect){ r.x - 3, r.y - 3, r.w + 6, r.h + 6 };

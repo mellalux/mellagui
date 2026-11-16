@@ -1529,7 +1529,10 @@ static bool paint_launcher_frost(const struct paint_ctx *c, const struct lm_laun
  * blended twice. */
 static bool g_icon_solid_only;
 
-static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launcher_info *li, bool dyn);
+#define LP_FRAME 1                                                      /* the card, its title, dots, arrows, buttons ... */
+#define LP_PAGES 2                                                      /* the icons of the page */
+static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launcher_info *li, bool dyn, int parts);
+static void paint_launcher_page(const struct paint_ctx *c, const struct lm_launcher_info *li, int page, int dx, bool dyn);
 static void paint_launcher_drag(const struct paint_ctx *c, const struct lm_launcher_info *li);
 
 static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_info *li)
@@ -1538,13 +1541,74 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         fill_round(c, &li->rect, 0, (uint32_t)(0x40 * LM_CLAMP(li->veil, 0.0f, 1.0f)) << 24);
     if (li->veil_only)
         return;
-    paint_launcher_body(c, li, true);
+    paint_launcher_body(c, li, true, LP_FRAME | LP_PAGES);
+}
+
+/* The icons of page `page` (the cells of the grid, the "+" tile where it falls), `dx` px to the side: what slides while the pages change. Clipped to the grid. */
+static void paint_launcher_page(const struct paint_ctx *c, const struct lm_launcher_info *li, int page, int dx, bool dyn)
+{
+    if (li->form || li->cols <= 0 || li->per_page <= 0)
+        return;
+    struct paint_ctx pc = *c;
+    struct lm_rect vis;
+    if (!lm_rect_intersect(&li->grid, &c->clip, &vis))
+        return;
+    pc.clip = vis;
+    int first = page * li->per_page, last = LM_MIN(first + li->per_page, li->cells);
+    for (int g = first; g < last; g++) {
+        int p = g - first;
+        struct lm_rect cell = lm_rect_make(li->gx0 + (p % li->cols) * LM_LAUNCHER_CELL_W + dx, li->gy0 + (p / li->cols) * li->gcell_h, LM_LAUNCHER_CELL_W, li->gcell_h);
+        struct lm_rect box = lm_rect_make(cell.x + (LM_LAUNCHER_CELL_W - LM_LAUNCHER_ICON) / 2, cell.y + 6, LM_LAUNCHER_ICON, LM_LAUNCHER_ICON);
+        if (g == li->n) {                                               /* the "+" tile (edit mode) */
+            bool sel = dyn && li->drag < 0 && li->sel == li->n;
+            float cx = (float)cell.x + (float)cell.w / 2.0f, cy = (float)cell.y + 6.0f + (float)LM_LAUNCHER_ICON / 2.0f;
+            if (sel) {
+                struct lm_rect hl = cell;
+                hl.x += 4;
+                hl.w -= 8;
+                fill_round(&pc, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
+            }
+            paint_shape(&pc, cx, cy, (float)LM_LAUNCHER_ICON / 2.0f, SHAPE_DISC, sel ? COL_PANEL_ACCENT : lm_theme.launcher_text, sel ? 0xff : 0x30);
+            paint_shape(&pc, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, sel ? COL_PANEL : lm_theme.launcher_text, sel ? 0xff : 0xb0);
+            struct lm_rect label = lm_rect_make(cell.x, (int)cy + LM_LAUNCHER_ICON / 2 + 10, cell.w, LM_FONT_H);
+            lc_text_centered(&pc, &label, "Add", lm_theme.launcher_text);
+            continue;
+        }
+        if (g > li->n || !li->icon[g].item || li->icon[g].item->spacer || (li->drag >= 0 && g == li->drag_hide))      /* an empty cell, or the place of the icon in the hand */
+            continue;
+        bool sel = dyn && li->drag < 0 && li->sel == g;
+        if (sel) {
+            struct lm_rect hl = cell;
+            hl.x += 4;
+            hl.w -= 8;
+            fill_round(&pc, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
+        }
+        paint_dock_icon(&pc, &box, li->icon[g].item, sel ? 1.0f : 0.0f);
+        char fit[LM_DOCK_NAME_MAX + 4];
+        fit_text(fit, sizeof(fit), li->icon[g].item->name, LM_LAUNCHER_CELL_W - 12, false);
+        struct lm_rect label = lm_rect_make(cell.x, box.y + box.h + 10, cell.w, LM_FONT_H);
+        lc_text_centered(&pc, &label, fit, lm_theme.launcher_text);
+        if (li->icon[g].running)
+            paint_shape(&pc, (float)(box.x + box.w / 2), (float)(label.y + LM_FONT_H + 4), 2.2f, SHAPE_DISC, lm_theme.launcher_text, 0xdd);
+        if (li->edit) {
+            struct lm_rect x = lm_rect_make(box.x - 8, box.y - 8, 24, 24);
+            float xc = (float)x.x + (float)x.w / 2.0f, yc = (float)x.y + (float)x.h / 2.0f;
+            paint_shape(&pc, xc, yc, 10.5f, SHAPE_DISC, COL_PANEL, 0xff);
+            paint_shape(&pc, xc, yc, 9.0f, SHAPE_DISC, COL_PANEL_DANGER, 0xff);
+            paint_shape(&pc, xc, yc, 5.5f, SHAPE_CROSS, lm_theme.on_colour, 0xff);
+        }
+    }
 }
 
 /* The card and everything on it. `dyn` false leaves out what changes with the pointer (the lit cell, an icon in the hand, the drop marks): the GL renderer
  * keeps the rest as a texture and draws those as small pieces of their own (lov_* below), so a hover does not repaint the whole card. */
-static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launcher_info *li, bool dyn)
+static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launcher_info *li, bool dyn, int parts)
 {
+    if (!(parts & LP_FRAME)) {                                          /* only the icons (a GL page texture draws them without the card) */
+        if (parts & LP_PAGES)
+            paint_launcher_page(c, li, li->page, 0, dyn);
+        return;
+    }
     bool frosted = paint_launcher_frost(c, li, 18);
     fill_round(c, &li->card, 18, ALPHA(frosted ? LAUNCHER_FROST_ALPHA : 0xd2u, lm_theme.launcher_body));        /* a light frosted body: the blurred wallpaper shows through it */
     stroke_round(c, &li->card, 18, ALPHA(0xe0u, lm_theme.launcher_body));
@@ -1556,45 +1620,15 @@ static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launc
         lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", lm_theme.launcher_text);
     }
     if (!li->form) {
-        for (int g = li->first; g < li->last && g < li->n; g++) {       /* (the icons of the other pages are not painted) */
-            if ((li->drag >= 0 && g == li->drag_hide) || li->icon[g].item->spacer)      /* the place of the icon in the hand, or an empty cell: nothing is painted */
-                continue;
-            const struct lm_rect *b = &li->icon[g].box;
-            bool sel = dyn && li->drag < 0 && li->sel == g;
-            if (sel) {
-                struct lm_rect hl = li->icon[g].hit;
-                hl.x += 4;
-                hl.w -= 8;
-                fill_round(c, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
+        if (parts & LP_PAGES) {                                         /* the icons of the page (while the page changes: the old one slides out, the new one in) */
+            if (li->moving) {                                           /* the pages lie side by side: the two the view is between, each at its offset */
+                int i0 = (int)floorf(li->view);
+                for (int i = i0; i <= i0 + 1; i++)
+                    if (i >= 0 && i < li->pages)
+                        paint_launcher_page(c, li, i, (int)lroundf(((float)i - li->view) * (float)li->grid.w), false);
+            } else {
+                paint_launcher_page(c, li, li->page, 0, dyn);
             }
-            paint_dock_icon(c, b, li->icon[g].item, sel ? 1.0f : 0.0f);
-            char fit[LM_DOCK_NAME_MAX + 4];
-            fit_text(fit, sizeof(fit), li->icon[g].item->name, LM_LAUNCHER_CELL_W - 12, false);
-            struct lm_rect label = lm_rect_make(li->icon[g].hit.x, b->y + b->h + 10, li->icon[g].hit.w, LM_FONT_H);
-            lc_text_centered(c, &label, fit, lm_theme.launcher_text);
-            if (li->icon[g].running)
-                paint_shape(c, (float)(b->x + b->w / 2), (float)(label.y + LM_FONT_H + 4), 2.2f, SHAPE_DISC, lm_theme.launcher_text, 0xdd);
-            if (li->edit) {
-                const struct lm_rect *x = &li->icon[g].remove;
-                float xc = (float)x->x + (float)x->w / 2.0f, yc = (float)x->y + (float)x->h / 2.0f;
-                paint_shape(c, xc, yc, 10.5f, SHAPE_DISC, COL_PANEL, 0xff);
-                paint_shape(c, xc, yc, 9.0f, SHAPE_DISC, COL_PANEL_DANGER, 0xff);
-                paint_shape(c, xc, yc, 5.5f, SHAPE_CROSS, lm_theme.on_colour, 0xff);
-            }
-        }
-        if (li->add.w > 0) {
-            bool sel = dyn && li->drag < 0 && li->sel == li->n;
-            float cx = (float)li->add.x + (float)li->add.w / 2.0f, cy = (float)li->add.y + 6.0f + (float)LM_LAUNCHER_ICON / 2.0f;
-            if (sel) {
-                struct lm_rect hl = li->add;
-                hl.x += 4;
-                hl.w -= 8;
-                fill_round(c, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
-            }
-            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON / 2.0f, SHAPE_DISC, sel ? COL_PANEL_ACCENT : lm_theme.launcher_text, sel ? 0xff : 0x30);
-            paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, sel ? COL_PANEL : lm_theme.launcher_text, sel ? 0xff : 0xb0);
-            struct lm_rect label = lm_rect_make(li->add.x, (int)cy + LM_LAUNCHER_ICON / 2 + 10, li->add.w, LM_FONT_H);
-            lc_text_centered(c, &label, "Add", lm_theme.launcher_text);
         }
         if (li->pages > 1) {                                                /* page dots, and an arrow at each side while there is a page that way */
             for (int i = 0; i < li->pages; i++) {
@@ -1782,7 +1816,7 @@ static void paint_launcher_drag(const struct paint_ctx *c, const struct lm_launc
  * a small texture in GL. The label stays as the card has it. */
 static bool lov_sel_rect(const struct lm_launcher_info *li, struct lm_rect *r)
 {
-    if (li->form || li->sel < 0 || li->drag >= 0)
+    if (li->form || li->sel < 0 || li->drag >= 0 || li->moving)
         return false;
     if (li->sel < li->n && li->sel >= li->first && li->sel < li->last) {
         if (li->icon[li->sel].item && li->icon[li->sel].item->spacer)

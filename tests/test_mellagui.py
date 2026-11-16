@@ -21579,25 +21579,63 @@ class TestLauncherMoving(Base):
         d = self.info(c)
         self.assertEqual((d['pages'], len(d['dots'])), (1, 0))                                     # gone with the drag
 
-    def test_a_sideways_drag_on_the_card_turns_the_pages(self):
+    def test_the_pages_slide_when_the_page_changes(self):
+        self.path = os.path.join(tmp, 'mellagui-lmH.conf')
+        with open(self.path, 'w') as f:
+            f.write('[dock-apps]\nLauncher = [launcher] @launcher\n[launcher-apps]\n' + ''.join('App%02d = [files] true\n' % i for i in range(1, 40)))
+        p, c, stop = self.private_compositor('mellagui-lmH', '--config', self.path, '--size', '1100x760', env={'MELLAGUI_ANIMATIONS': '1500'})
+        c.sync()
+        c.cmd('launcher open')
+        time.sleep(2.5)                                                                               # (the bubble has risen)
+        d = self.info(c)
+        c.abs(5, 5)
+        grid = d['card']
+        c.click(*self.centre(d['dots'][1]))
+        c.abs(5, 5)
+        time.sleep(0.3)
+        mid = c.dump(os.path.join(tmp, 'lmH-mid.ppm'))                                                # while it slides
+        time.sleep(2.5)
+        end = c.dump(os.path.join(tmp, 'lmH-end.ppm'))
+        self.assertEqual(self.info(c)['page'], 1)
+        pts = [(grid[0] + 40 + i * 9, grid[1] + 60 + j * 9) for i in range((grid[2] - 80) // 9) for j in range(40)]
+        differs = sum(1 for (x, y) in pts if mid.px(x, y) != end.px(x, y))
+        self.assertGreater(differs, len(pts) // 10, 'the grid is still moving a moment after the click')
+        again = c.dump(os.path.join(tmp, 'lmH-end2.ppm'))
+        self.assertEqual(sum(1 for (x, y) in pts if again.px(x, y) != end.px(x, y)), 0)               # and at rest it does not change
+
+    def test_the_pages_follow_the_pointer_while_it_is_dragged_and_settle_when_it_is_let_go(self):
         c = self.start('mellagui-lmF', n=40)
         d = self.info(c)
         card = d['card']
         self.assertEqual(d['page'], 0)
         y = card[1] + 30                                                                           # the card's top strip: no icon there
         x = card[0] + card[2] // 2
+        before = c.dump(os.path.join(tmp, 'lmF-0.ppm'))
         c.abs(x, y)
         c.button(272, True)
-        for i in range(1, 8):
-            c.abs(x - 20 * i, y)                                                                   # to the left, 140 px: the next page
+        for i in range(1, 11):
+            c.abs(x - 30 * i, y)                                                                   # 300 px to the left, button down
+            time.sleep(0.02)
+        time.sleep(0.2)
+        self.assertEqual(self.info(c)['page'], 0)                                                  # still page 0: the pages only follow the pointer
+        mid = c.dump(os.path.join(tmp, 'lmF-1.ppm'))
+        pts = [(card[0] + 40 + i * 9, card[1] + 70 + j * 9) for i in range((card[2] - 80) // 9) for j in range(30)]
+        self.assertGreater(sum(1 for (px, py) in pts if mid.px(px, py) != before.px(px, py)), len(pts) // 10)   # the grid has moved with it
+        c.button(272, False)
+        time.sleep(0.2)
+        self.assertEqual(self.info(c)['page'], 1)                                                  # more than a quarter of the way: the next page
+        c.abs(x, y)
+        c.button(272, True)
+        for i in range(1, 4):
+            c.abs(x + 20 * i, y)                                                                   # 60 px to the right: not far enough
             time.sleep(0.02)
         c.button(272, False)
         time.sleep(0.2)
-        self.assertEqual(self.info(c)['page'], 1)
+        self.assertEqual(self.info(c)['page'], 1)                                                  # it springs back
         c.abs(x, y)
         c.button(272, True)
-        for i in range(1, 8):
-            c.abs(x + 20 * i, y)                                                                   # to the right: back
+        for i in range(1, 11):
+            c.abs(x + 30 * i, y)                                                                   # 300 px to the right: the page before
             time.sleep(0.02)
         c.button(272, False)
         time.sleep(0.2)

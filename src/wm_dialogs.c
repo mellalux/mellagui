@@ -407,6 +407,16 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
                 double px = 0, py = 0;
                 if (wm->srv->seat)
                     lm_seat_pointer_position(wm->srv->seat, &px, &py);
+                struct lm_output *lo = launcher_output(wm);
+                if (lo) {
+                    struct lm_launcher_info *li = malloc(sizeof(*li));
+                    if (li) {
+                        launcher_info(wm, lo, li);
+                        wm->launcher_swipe_view0 = li->page;
+                        free(li);
+                    }
+                }
+                wm->launcher_sliding = false;                       /* (a slide in progress stops where the page is shown) */
                 wm->launcher_swipe = true;
                 wm->launcher_swipe_x = (int)px;
             } else if (pick->kind != LM_PICK_LAUNCHER_CARD && button == BTN_LEFT) {
@@ -423,7 +433,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             }
         } else {
             wm->press_panel_kind = 0;
-            wm->launcher_swipe = false;
+            launcher_swipe_end(wm);
             if (wm->launcher_drag)
                 launcher_drag_finish(wm);                       /* a drag ends with the button: dropped on the dock or not */
             else if (pk == (int)pick->kind && pi == pick->index && button == BTN_LEFT)

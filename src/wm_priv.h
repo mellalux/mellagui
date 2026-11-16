@@ -326,6 +326,12 @@ struct lm_wm {
     int launcher_sel, launcher_hover_btn, launcher_focus;
     int launcher_page;          /* the page of icons showing (0 = the first); the grid shows as many as fit, the rest are on more pages */
     int64_t launcher_flip_ms;   /* when a dragged icon last turned a page at the edge */
+    int launcher_shown_page;    /* the page the dialog last showed (-1 = not tracked): when the page changes the grid slides from it to the new one */
+    bool launcher_sliding;      /* the grid is sliding to its page (a click on a dot, a key ...), or settling after a swipe */
+    float launcher_slide_view0; /* ... from this position (a page number) */
+    int64_t launcher_slide_ms, launcher_slide_dur;
+    int launcher_swipe_view0;   /* the page that was shown when a swipe began */
+    struct lm_timer *launcher_slide_timer;      /* 16 ms while it slides */
     bool launcher_swipe;        /* a press on the card (not on an icon) that is moved sideways turns the pages (like a swipe)  */
     int launcher_swipe_x;       /* ... from where the pointer was when it started / last turned one */
     int launcher_edge;          /* the edge zone the carried icon is in: -1 left, 1 right, 0 none */
@@ -533,6 +539,10 @@ void launcher_drag_finish(struct lm_wm *wm);
 bool launcher_searching_now(void);                      /* the launcher's search is on (icons cannot be moved then) */
 void launcher_drag_motion(struct lm_wm *wm);
 void launcher_swipe_motion(struct lm_wm *wm);
+void launcher_slide_track(struct lm_wm *wm, int page);
+void launcher_swipe_end(struct lm_wm *wm);
+void launcher_slide_tick(void *data);
+#define LAUNCHER_SLIDE_MS 260                                       /* the pages slide over this long (animation-ms scales it: it is the 300 ms default * 0.87) */
 void launcher_edge_tick(void *data);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);

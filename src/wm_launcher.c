@@ -445,6 +445,27 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     /* The grid keeps its place whether the footer is there or not: the card is as high as it needs to be, its top stays where it is when edit mode adds the hint. */
     int card_h = !li->form && !li->edit ? ch - (LC_FOOT - LC_FOOT_SLIM) : ch;
     li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->grid.w > 0 && !li->form ? li->grid.y - LC_HEAD : li->rect.y + (li->rect.h - ch) / 2, cw, card_h);
+    li->view = (float)li->page;
+    if (!li->form && li->grid.w > 0) {                                  /* a page dragged with the pointer follows it; one that slides runs from where it was to its place */
+        float w = (float)li->grid.w;
+        if (wm->launcher_swipe && wm->srv->seat) {
+            double px, py;
+            lm_seat_pointer_position(wm->srv->seat, &px, &py);
+            float v = (float)wm->launcher_swipe_view0 - ((float)px - (float)wm->launcher_swipe_x) / w, last = (float)(li->pages - 1);
+            if (v < 0.0f)
+                v *= 0.35f;                                             /* nothing before the first page / after the last: it gives, but only a little */
+            else if (v > last)
+                v = last + (v - last) * 0.35f;
+            li->view = v;
+            li->moving = true;
+        } else if (wm->launcher_sliding) {
+            float t = (float)((int64_t)lm_now_ms() - wm->launcher_slide_ms) / (float)LM_MAX(wm->launcher_slide_dur, 1);
+            if (t < 1.0f) {
+                li->view = wm->launcher_slide_view0 + ((float)li->page - wm->launcher_slide_view0) * ease_smooth(LM_CLAMP(t, 0.0f, 1.0f));
+                li->moving = true;
+            }
+        }
+    }
     li->drag = -1;
     li->drag_slot = -1;
     li->drag_hide = -1;
@@ -610,6 +631,88 @@ void launcher_damage_hover(struct lm_wm *wm, int old_sel, int old_btn)
     free(li);
 }
 
+/* Called by the scene with the page the dialog shows now: when it is another one than last time (a dot, an arrow, a key, the wheel, a swipe, the edge of a carried icon)
+ * the old page slides out and the new one in over LAUNCHER_SLIDE_MS (the animation time scales it; no animations, no slide). */
+void launcher_slide_track(struct lm_wm *wm, int page)
+{
+    if (wm->launcher_shown_page < 0 || wm->launcher_shown_page == page) {
+        wm->launcher_shown_page = page;
+        return;
+    }
+    if (anim_duration(wm) > 0 && !wm->launcher_form) {
+        wm->launcher_sliding = true;
+        wm->launcher_slide_view0 = (float)wm->launcher_shown_page;
+        wm->launcher_slide_ms = (int64_t)lm_now_ms();
+        wm->launcher_slide_dur = (int64_t)anim_duration(wm) * LAUNCHER_SLIDE_MS / 300;
+        if (wm->launcher_slide_timer)
+            lm_timer_arm_ms(wm->launcher_slide_timer, 16, 16);
+    }
+    wm->launcher_shown_page = page;
+}
+
+/* The button of a swipe was let go: the page that was dragged more than a quarter of the way over is the new one, else the old one comes back; the grid settles from where
+ * it is. */
+void launcher_swipe_end(struct lm_wm *wm)
+{
+    if (!wm->launcher_swipe)
+        return;
+    struct lm_output *o = launcher_output(wm);
+    struct lm_launcher_info *li = o ? malloc(sizeof(*li)) : NULL;
+    if (li)
+        launcher_info(wm, o, li);                                       /* (still swiping: `view` is where the page was dragged to) */
+    wm->launcher_swipe = false;
+    if (!li)
+        return;
+    float v = li->view;
+    int target = li->page;
+    if (v - (float)li->page > 0.25f)
+        target = li->page + 1;
+    else if ((float)li->page - v > 0.25f)
+        target = li->page - 1;
+    target = LM_CLAMP(target, 0, LM_MAX(li->pages - 1, 0));
+    wm->launcher_page = target;
+    wm->launcher_shown_page = target;                                   /* (settled here, not a change for launcher_slide_track) */
+    if (anim_duration(wm) > 0 && fabsf(v - (float)target) > 0.002f) {
+        wm->launcher_sliding = true;
+        wm->launcher_slide_view0 = v;
+        wm->launcher_slide_ms = (int64_t)lm_now_ms();
+        wm->launcher_slide_dur = (int64_t)((float)anim_duration(wm) * (float)LAUNCHER_SLIDE_MS / 300.0f * LM_CLAMP(fabsf(v - (float)target), 0.25f, 1.0f));
+        if (wm->launcher_slide_timer)
+            lm_timer_arm_ms(wm->launcher_slide_timer, 16, 16);
+    } else {
+        wm->launcher_sliding = false;
+    }
+    wm->launcher_sel = -1;
+    free(li);
+    launcher_damage(wm);
+}
+
+void launcher_slide_tick(void *data)
+{
+    struct lm_wm *wm = data;
+    struct lm_output *o = launcher_output(wm);
+    bool done = !o || !wm->launcher_sliding || (int64_t)lm_now_ms() - wm->launcher_slide_ms >= wm->launcher_slide_dur;
+    if (o) {
+        struct lm_launcher_info *li = malloc(sizeof(*li));
+        if (li) {
+            launcher_info(wm, o, li);
+            struct lm_rect r = li->grid;
+            if (r.w > 0)
+                damage_rect(wm, &r);
+            free(li);
+        } else {
+            launcher_damage(wm);
+        }
+    }
+    if (done) {
+        wm->launcher_sliding = false;
+        if (wm->launcher_slide_timer)
+            lm_timer_arm_ms(wm->launcher_slide_timer, 0, 0);
+        if (o)
+            launcher_damage(wm);                                    /* (the last frame: the page where it belongs, the lit cell back) */
+    }
+}
+
 void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
 {
     if (open)
@@ -635,6 +738,8 @@ void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
         wm->launcher_wheel = 0.0;
         wm->launcher_hover_btn = -1;
         wm->launcher_msg[0] = 0;
+        wm->launcher_shown_page = -1;                                 /* (it opens on its page, nothing slides) */
+        wm->launcher_sliding = wm->launcher_swipe = false;
         launcher_damage(wm);
         if (wm->bubble.active && wm->bubble.closing)
             wm->bubble.closing = false;                          /* it was on its way back to the button: turns round */

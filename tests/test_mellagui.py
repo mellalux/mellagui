@@ -4587,6 +4587,50 @@ class TestClients(Base):
         time.sleep(0.6)
         self.assertEqual(TestViewer.procs_of(self, p.pid, 'fakeplayer'), [])
 
+    def test_files_plays_a_video_in_the_preview_pane(self):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg not installed')
+        d = tempfile.mkdtemp(prefix='files-vid-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=6:size=320x240:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', os.path.join(d, 'a.mp4')], check=True, timeout=60)
+        with open(os.path.join(d, 'b.txt'), 'w') as f:
+            f.write('after\n')
+        got = os.path.join(d, 'pcm.raw')
+        player = os.path.join(d, 'fakeplayer')
+        with open(player, 'w') as f:
+            f.write('#!/usr/bin/env python3\nimport sys, time\nout = open("%s", "wb")\nwhile True:\n    b = sys.stdin.buffer.read(19200)\n    if not b:\n        break\n    out.write(b)\n    out.flush()\n    time.sleep(0.1)\n' % got)
+        os.chmod(player, 0o755)
+        dump = os.path.join(d, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump, 'MELLAGUI_AUDIO_PLAYER': player})
+        head, extra = self.files_dump(dump, want=lambda o: o[0].get('kind') == 'video')
+        self.assertEqual(head['kind'], 'video')
+        self.assertEqual((extra['video']['playing'], extra['video']['shown']), ('0', '0'))
+        self.assertAlmostEqual(int(extra['video']['len']), 6000, delta=300)
+        px, py, pw, ph = extra['play']
+        ctl.click(win['x'] + px + pw // 2, win['y'] + py + ph // 2)       # Play
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('video', {}).get('playing') == '1' and o[1]['video'].get('shown') == '1')
+        self.assertEqual((extra['video']['playing'], extra['video']['shown']), ('1', '1'))
+        f1 = int(extra['video']['frames'])
+        time.sleep(0.8)
+        head, extra = self.files_dump(dump, want=lambda o: int(o[1].get('video', {}).get('frames', 0)) > f1 + 3)
+        self.assertGreater(int(extra['video']['frames']), f1 + 3, 'the pictures do not move')
+        self.assertTrue(os.path.exists(got) and os.path.getsize(got) > 10000, 'no sound was sent to the player')
+        bx, by, bw, bh = extra['bar']
+        ctl.click(win['x'] + bx + bw * 3 // 4, win['y'] + by + bh // 2)   # the bar: three quarters in
+        head, extra = self.files_dump(dump, want=lambda o: int(o[1].get('video', {}).get('pos', 0)) > 4000)
+        self.assertGreater(int(extra['video']['pos']), 4000)
+        self.chord(self.CTRL, 25)                                         # Ctrl+P: pause
+        head, extra = self.files_dump(dump, want=lambda o: o[1].get('video', {}).get('playing') == '0')
+        self.assertEqual(extra['video']['playing'], '0')
+        self.assertEqual(extra['video']['shown'], '1')                    # the last picture stays
+        self.assertEqual(TestViewer.procs_of(self, p.pid, 'fakeplayer'), [])
+        ctl.tap(self.K_DOWN)                                              # the cursor moves on: all ends
+        time.sleep(0.6)
+        self.assertEqual(TestViewer.procs_of(self, p.pid, 'fakeplayer'), [])
+        self.assertEqual(TestViewer.procs_of(self, p.pid, 'ffmpeg'), [])
+
     def test_edit_types_and_saves(self):
         p, path = self.edit_start(b'hello\nworld\n')
         ctl.tap(self.K_END)                                    # the cursor starts at the top of the file

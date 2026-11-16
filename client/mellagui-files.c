@@ -46,6 +46,7 @@
 
 #include "img.h"
 #include "ffaudio.h"
+#include "ffdec.h"
 #include "mdview.h"
 #include "sftp.h"
 #include "smb.h"
@@ -173,6 +174,8 @@ struct preview {
     int top;                            /* first visible line (PV_MARKDOWN: pixels scrolled down) */
     struct md_doc *md;                  /* PV_MARKDOWN: the page */
     struct ffaudio_info ai;             /* PV_AUDIO: what the file says (its picture is `img`) */
+    uint64_t vdur;                      /* PV_VIDEO: its length in ms (0 = unknown) and whether it has a sound track */
+    bool vaudio;
     char exif[8][200];                  /* PV_IMAGE: the lines of the picture's EXIF data (camera, exposure, time, place) shown under it */
     int nexif;
     struct lm_image img;                /* PV_IMAGE: the decoded picture ... */
@@ -229,8 +232,23 @@ struct job {
     bool threaded;
 };
 
+/* A video that plays in the preview pane: ffmpeg delivers pictures of the size the pane shows (`fd`), the clock is the sound file's (`snd_*` of struct app). */
+struct vplay {
+    struct ffdec *fd;
+    uint32_t *fbuf;                     /* the picture being collected (fw x fh) */
+    uint32_t *cur;                      /* the picture shown (cw x ch); `shown` says it belongs to the playing video */
+    int fw, fh, cw, ch;
+    int tw, th;                         /* the size the pane wants, in the buffer's own pixels (set by painting) */
+    size_t fhave;
+    bool fready, wait_first, shown;     /* wait_first: the clock stands still until the first picture is there */
+    uint64_t fbase, fidx;               /* the picture number fidx is due at fbase + fidx * 1000 / VP_FPS ms */
+    int64_t started, last_clock;
+    char err[120];
+};
+
 struct app {
     struct wlwin win;
+    struct vplay vp;
     int split;                          /* per mille of the width the left pane has (the divider can be dragged) */
     bool split_drag;
     uint32_t div_click_ms;              /* the last press on the divider (a double click resets it) */
@@ -4658,6 +4676,9 @@ static bool md_copy_selection(struct app *a);
 static void files_rail(const struct app *a, struct wlrail *L);
 static void snd_toggle(struct app *a);
 static void snd_stop(struct app *a);
+static void vp_free(struct app *a);
+static void vp_restart(struct app *a, uint64_t ms);
+static void vid_play(struct app *a, uint64_t ms);
 
 /* The part of a preview that scrolls: how much there is, how much shows, where it is (lines; pixels for a Markdown page). */
 static bool pv_scrolls(const struct app *a, int body_h, int *total, int *view, int *pos)
@@ -5364,6 +5385,8 @@ static bool video_poll(struct preview *pv)
                 else if (ms)
                     snprintf(dur, sizeof(dur), ", %d:%02d", secs / 60, secs % 60);
                 snprintf(pv->info, sizeof(pv->info), "%s, %dx%d%s, %s%s", sz, w, h, dur, codec, audio ? ", sound" : "");
+                pv->vdur = ms;
+                pv->vaudio = audio != 0;
                 pv->img = img;
                 pv->kind = PV_VIDEO;
             } else {
@@ -5427,6 +5450,7 @@ static void snd_stop(struct app *a)
     a->snd_path[0] = 0;
     a->snd_pos = 0;
     a->snd_dead = false;
+    vp_free(a);
 }
 
 static uint64_t snd_pos(const struct app *a)
@@ -5456,8 +5480,10 @@ static void snd_start_at(struct app *a, const char *path, uint64_t len, uint64_t
 static void snd_toggle(struct app *a)
 {
     struct preview *pv = &a->pv;
-    if (pv->kind != PV_AUDIO || !pv->loaded)
+    if ((pv->kind != PV_AUDIO && pv->kind != PV_VIDEO) || !pv->loaded)
         return;
+    bool vid = pv->kind == PV_VIDEO;
+    uint64_t dur = vid ? pv->vdur : pv->ai.duration_ms;
     if (a->snd_playing && !strcmp(a->snd_path, pv->want)) {              /* a pause is silence at once; on again the sound starts afresh where it was */
         a->snd_pos = snd_pos(a);
         a->snd_playing = false;
@@ -5467,9 +5493,12 @@ static void snd_toggle(struct app *a)
         }
     } else {
         uint64_t at = !strcmp(a->snd_path, pv->want) ? a->snd_pos : 0;
-        if (pv->ai.duration_ms && at >= pv->ai.duration_ms)
+        if (dur && at >= dur)
             at = 0;
-        snd_start_at(a, pv->want, pv->ai.duration_ms, at);
+        if (vid)
+            vid_play(a, at);
+        else
+            snd_start_at(a, pv->want, dur, at);
     }
     a->win.redraw = true;
 }
@@ -5477,17 +5506,24 @@ static void snd_toggle(struct app *a)
 static void snd_seek(struct app *a, uint64_t ms)
 {
     struct preview *pv = &a->pv;
-    if (pv->kind != PV_AUDIO || !pv->loaded)
+    if ((pv->kind != PV_AUDIO && pv->kind != PV_VIDEO) || !pv->loaded)
         return;
+    bool vid = pv->kind == PV_VIDEO;
+    uint64_t dur = vid ? pv->vdur : pv->ai.duration_ms;
     if (strcmp(a->snd_path, pv->want) != 0 || !a->snd_playing) {         /* not playing: only the place changes, the next Play starts there */
         snprintf(a->snd_path, sizeof(a->snd_path), "%s", pv->want);
-        a->snd_len = pv->ai.duration_ms;
+        a->snd_len = dur;
         a->snd_pos = ms;
         a->snd_playing = false;
+        if (vid)
+            vp_restart(a, ms);                                           /* the picture of that place shows */
         a->win.redraw = true;
         return;
     }
-    snd_start_at(a, pv->want, pv->ai.duration_ms, ms);
+    if (vid)
+        vid_play(a, ms);
+    else
+        snd_start_at(a, pv->want, dur, ms);
 }
 
 /* Every loop turn: the clock moves, a track that is over stops, a player that cannot reach a sound server gives way to the next one. */
@@ -5508,15 +5544,191 @@ static void snd_tick(struct app *a)
             }
         }
     }
-    if (a->snd_len && snd_pos(a) >= a->snd_len) {                       /* the end */
+    if (a->snd_len && snd_pos(a) >= a->snd_len) {                       /* the end: a video goes back to its first picture */
         a->snd_pos = 0;
         a->snd_playing = false;
         if (a->snd) {
             ffaudio_close(a->snd);
             a->snd = NULL;
         }
+        vp_free(a);
+        a->win.redraw = true;
     }
+    if (a->pv.kind != PV_VIDEO || now_ms() - a->vp.last_clock >= 250) {  /* (a video repaints when a picture comes; the clock needs only a few a second) */
+        a->vp.last_clock = now_ms();
+        a->win.redraw = true;
+    }
+}
+
+/* ---- a video that plays in the preview ---------------------------------------------------------------------------------------- */
+
+#define VP_FPS 30
+#define VP_LEAD_MS 190                  /* the sound is started this much early: ffmpeg and the player need that long to be heard */
+
+static void vp_free(struct app *a)
+{
+    struct vplay *v = &a->vp;
+    ffdec_close(v->fd);
+    v->fd = NULL;
+    free(v->fbuf);
+    free(v->cur);
+    v->fbuf = v->cur = NULL;
+    v->fw = v->fh = v->cw = v->ch = 0;
+    v->fhave = 0;
+    v->fready = v->wait_first = v->shown = false;
+    v->err[0] = 0;
+}
+
+/* (Re)starts the pictures at `ms`; the first one shows even while paused. */
+static bool vp_start(struct app *a, uint64_t ms)
+{
+    struct vplay *v = &a->vp;
+    ffdec_close(v->fd);
+    v->fd = NULL;
+    int w = LM_MAX(v->tw, 16), h = LM_MAX(v->th, 16);
+    if (w != v->fw || h != v->fh) {
+        free(v->fbuf);
+        v->fbuf = malloc((size_t)w * (size_t)h * 4);
+        v->fw = w;
+        v->fh = h;
+    }
+    if (!v->fbuf) {
+        v->fw = v->fh = 0;
+        snprintf(v->err, sizeof(v->err), "out of memory");
+        return false;
+    }
+    v->err[0] = 0;
+    v->fd = ffdec_open(a->pv.want, w, h, 0, 0, VP_FPS, ms, v->err, sizeof(v->err));
+    v->started = now_ms();
+    v->fbase = ms;
+    v->fidx = 0;
+    v->fhave = 0;
+    v->fready = false;
+    v->wait_first = v->fd != NULL;
+    return v->fd != NULL;
+}
+
+/* The sound of the video, from `at` (called when the first picture is there, so that both start together). */
+static void vp_audio(struct app *a, uint64_t at)
+{
+    if (a->snd) {
+        ffaudio_close(a->snd);
+        a->snd = NULL;
+    }
+    if (!a->pv.vaudio || a->snd_dead || ffaudio_players() == 0)
+        return;
+    char err[120];
+    a->snd = ffaudio_start(a->snd_path, at + VP_LEAD_MS, a->snd_player, err, sizeof(err));
+    if (!a->snd)
+        a->snd_dead = true;
+}
+
+/* Pictures (and, if it plays, the sound) from `ms` again, e.g. after a seek or when the pane changed size. */
+static void vp_restart(struct app *a, uint64_t ms)
+{
+    if (a->snd) {
+        ffaudio_close(a->snd);
+        a->snd = NULL;
+    }
+    a->snd_pos = ms;
+    a->snd_t0 = (uint64_t)now_ms();
+    if (!vp_start(a, ms))
+        a->snd_playing = false;
+}
+
+static void vid_play(struct app *a, uint64_t ms)
+{
+    struct preview *pv = &a->pv;
+    if (a->snd) {
+        ffaudio_close(a->snd);
+        a->snd = NULL;
+    }
+    snprintf(a->snd_path, sizeof(a->snd_path), "%s", pv->want);
+    a->snd_len = pv->vdur;
+    a->snd_playing = true;
+    vp_restart(a, ms);                                                   /* (the clock starts with the first picture; vp_tick) */
     a->win.redraw = true;
+}
+
+/* Every loop turn while a video is open: takes ffmpeg's pictures, the one that is due is shown and late ones are dropped. */
+static void vp_tick(struct app *a)
+{
+    struct vplay *v = &a->vp;
+    if (!v->fd || a->pv.kind != PV_VIDEO || strcmp(a->snd_path, a->pv.want) != 0)
+        return;
+    if (!a->snd_playing && !v->wait_first)
+        return;
+    if (v->wait_first && a->snd_playing)
+        a->snd_t0 = (uint64_t)now_ms();                                  /* the clock stands still until there is a picture */
+    if ((abs(v->tw - v->fw) > 8 || abs(v->th - v->fh) > 8) && now_ms() - v->started > 400) {      /* the pane changed size: pictures of the new size */
+        bool pl = a->snd_playing;
+        vp_restart(a, v->wait_first ? v->fbase : snd_pos(a));
+        a->snd_playing = pl && v->fd;
+        return;
+    }
+    uint64_t pos = v->wait_first ? v->fbase : snd_pos(a);
+    for (int guard = 0; guard < 4; guard++) {
+        if (!v->fready) {
+            int r, waits = 0;
+            for (;;) {                                                   /* a picture that is nearly due is waited for on the pipe */
+                r = ffdec_read(v->fd, v->fbuf, &v->fhave);
+                if (r != 0)
+                    break;
+                uint64_t due_now = v->fbase + v->fidx * 1000 / VP_FPS;
+                if (!(v->wait_first || pos + 20 >= due_now) || waits++ >= 6)
+                    break;
+                ffdec_wait(v->fd, 5);
+            }
+            if (r < 0) {                                                 /* ffmpeg has no more: the end (or it could not read the place) */
+                bool none = !v->shown;
+                if (none && !v->err[0])
+                    snprintf(v->err, sizeof(v->err), "ffmpeg could not decode it");
+                ffdec_close(v->fd);
+                v->fd = NULL;
+                v->wait_first = false;
+                if (a->snd_playing) {
+                    a->snd_playing = false;
+                    a->snd_pos = 0;
+                    if (a->snd) {
+                        ffaudio_close(a->snd);
+                        a->snd = NULL;
+                    }
+                    v->shown = false;
+                }
+                a->win.redraw = true;
+                return;
+            }
+            if (r == 0)
+                return;
+            v->fready = true;
+        }
+        uint64_t due = v->fbase + v->fidx * 1000 / VP_FPS;
+        if (!v->wait_first && pos < due)
+            return;                                                      /* not yet */
+        if (v->cw != v->fw || v->ch != v->fh) {
+            free(v->cur);
+            v->cur = malloc((size_t)v->fw * (size_t)v->fh * 4);
+            v->cw = v->cur ? v->fw : 0;
+            v->ch = v->cur ? v->fh : 0;
+        }
+        if (v->cur)
+            memcpy(v->cur, v->fbuf, (size_t)v->fw * (size_t)v->fh * 4);
+        v->shown = v->cur != NULL;
+        v->fidx++;
+        v->fready = false;
+        a->win.redraw = true;
+        if (v->wait_first) {                                             /* the clock begins here, together with the sound */
+            v->wait_first = false;
+            if (a->snd_playing) {
+                a->snd_pos = due;
+                a->snd_t0 = (uint64_t)now_ms();
+                vp_audio(a, due);
+            }
+            return;
+        }
+        if (pos < v->fbase + v->fidx * 1000 / VP_FPS)                    /* the next one is not due: this one stays */
+            return;
+    }
 }
 
 struct snd_ui {
@@ -5562,6 +5774,25 @@ static void fmt_clock(char *out, size_t n, uint64_t ms)
         snprintf(out, n, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
     else
         snprintf(out, n, "%u:%02u", s / 60, s % 60);
+}
+
+/* The Play / Pause button, the clock and the bar of a sound file's or a video's preview. */
+static void paint_transport(struct wlwin *w, struct app *a, int x0, int pw, struct lm_rect play, struct lm_rect bar, int time_y, bool mine, uint64_t len)
+{
+    (void)x0;
+    bool playing = mine && a->snd_playing;
+    wlwin_drop(w, play.x, play.y, play.w, play.h, lm_button_radius(play.h / 2), playing ? lm_theme.btn_amber : lm_theme.btn_green);
+    const char *lab = playing ? "Pause" : "Play";
+    wlwin_text(w, play.x + (play.w - lm_font_text_width(lab)) / 2, play.y + (play.h - LM_FONT_H) / 2, lab, 1, lm_theme.on_colour, 0);
+    uint64_t pos = mine ? snd_pos(a) : 0;
+    char t1[16], t2[16], clk[80];
+    fmt_clock(t1, sizeof(t1), pos);
+    fmt_clock(t2, sizeof(t2), len);
+    snprintf(clk, sizeof(clk), "%s / %s%s", t1, t2, playing && (a->snd_dead || ffaudio_players() == 0) ? "   (no sound player)" : "");
+    wlwin_text(w, play.x + play.w + 12, time_y, clk, 1, COL_FG, pw - play.w - 40);
+    wlwin_round_fill(w, bar.x, bar.y, bar.w, bar.h, bar.h / 2, lm_theme.divider);
+    if (len && pos)
+        wlwin_round_fill(w, bar.x, bar.y, LM_MAX((int)((uint64_t)bar.w * pos / len), bar.h), bar.h, bar.h / 2, lm_theme.accent);
 }
 
 static void paint_audio(struct wlwin *w, struct app *a, int x0, int pw, int list_y, int body_h)
@@ -5615,23 +5846,60 @@ static void paint_audio(struct wlwin *w, struct app *a, int x0, int pw, int list
     snprintf(tech, sizeof(tech), "%s%s%s%s", pv->ai.codec, rate, ch, kb);
     snd_text_c(w, x0, pw, u.tech_y, tech, false, COL_DIM);
     bool mine = !strcmp(a->snd_path, pv->want);
-    bool playing = mine && a->snd_playing;
-    wlwin_drop(w, u.play.x, u.play.y, u.play.w, u.play.h, lm_button_radius(u.play.h / 2), playing ? lm_theme.btn_amber : lm_theme.btn_green);
-    const char *lab = playing ? "Pause" : "Play";
-    wlwin_text(w, u.play.x + (u.play.w - lm_font_text_width(lab)) / 2, u.play.y + (u.play.h - LM_FONT_H) / 2, lab, 1, lm_theme.on_colour, 0);
-    uint64_t pos = mine ? snd_pos(a) : 0, len = pv->ai.duration_ms;
-    char t1[16], t2[16], clk[80];
-    fmt_clock(t1, sizeof(t1), pos);
-    fmt_clock(t2, sizeof(t2), len);
-    snprintf(clk, sizeof(clk), "%s / %s%s", t1, t2, playing && (a->snd_dead || ffaudio_players() == 0) ? "   (no sound player)" : "");
-    wlwin_text(w, u.play.x + u.play.w + 12, u.time_y, clk, 1, COL_FG, pw - u.play.w - 40);
-    wlwin_round_fill(w, u.bar.x, u.bar.y, u.bar.w, u.bar.h, u.bar.h / 2, lm_theme.divider);
-    if (len && pos)
-        wlwin_round_fill(w, u.bar.x, u.bar.y, LM_MAX((int)((uint64_t)u.bar.w * pos / len), u.bar.h), u.bar.h, u.bar.h / 2, lm_theme.accent);
+    paint_transport(w, a, x0, pw, u.play, u.bar, u.time_y, mine, pv->ai.duration_ms);
     if (ffaudio_players() == 0)
         wlwin_text(w, x0 + 14, u.bar.y + 22, "No sound player found (pw-cat, paplay or aplay) or no ffmpeg", 1, COL_DIM, pw - 28);
     else
-        wlwin_text(w, x0 + 14, u.bar.y + 22, "Ctrl+P plays and pauses, a click on the bar seeks, Enter opens the player", 1, COL_DIM, pw - 28);
+        wlwin_text(w, x0 + 14, u.bar.y + 22, "Click the cover or Ctrl+P to play, click the bar to seek, Enter opens the player", 1, COL_DIM, pw - 28);
+}
+
+struct vid_ui {
+    int px, py, pw, ph;                 /* where the picture goes */
+    int hint_y, time_y;
+    struct lm_rect play, bar;
+};
+
+static void vid_layout(int x0, int pw, int y0, int bh, struct vid_ui *u)
+{
+    u->hint_y = y0 + bh - LM_FONT_H - 4;
+    u->bar = lm_rect_make(x0 + 14, u->hint_y - 8 - 10, pw - 28, 10);
+    u->play = lm_rect_make(x0 + 14, u->bar.y - 8 - 28, 78, 28);
+    u->time_y = u->play.y + (28 - LM_FONT_H) / 2;
+    u->px = x0 + 8;
+    u->py = y0 + 8;
+    u->pw = pw - 16;
+    u->ph = LM_MAX(u->play.y - 8 - u->py, 16);
+}
+
+/* The picture of a video (the first one, or what plays) with Play / Pause, the clock and a bar to seek under it. */
+static void paint_video(struct wlwin *w, struct app *a, int x0, int pw, int list_y, int body_h)
+{
+    struct preview *pv = &a->pv;
+    struct vplay *v = &a->vp;
+    struct vid_ui u;
+    vid_layout(x0, pw, list_y, body_h, &u);
+    int k = wlwin_scale(w);
+    bool mine = !strcmp(a->snd_path, pv->want);
+    int aw = u.pw * k, ah = u.ph * k;
+    double z = LM_MIN((double)aw / LM_MAX(pv->img.w, 1), (double)ah / LM_MAX(pv->img.h, 1));
+    v->tw = LM_MAX((int)(pv->img.w * z + 0.5), 16);                       /* the size ffmpeg is asked for: the picture fits the pane exactly */
+    v->th = LM_MAX((int)(pv->img.h * z + 0.5), 16);
+    if (mine && v->shown && v->cur) {
+        int lw = (v->cw + k - 1) / k, lh = (v->ch + k - 1) / k;
+        wlwin_blit_px(w, u.px + (u.pw - lw) / 2, u.py + (u.ph - lh) / 2, v->cur, v->cw, v->ch, v->cw, u.px, u.py, u.pw, u.ph);
+    } else {
+        if (!pv->scaled || pv->sw > aw || pv->sh > ah || (pv->sw < aw && pv->sh < ah && pv->sw < pv->img.w * 8) || pv->scale_k != k)
+            preview_scale(pv, aw, ah, k);
+        if (pv->scaled) {
+            int lw = (pv->sw + k - 1) / k, lh = (pv->sh + k - 1) / k;
+            wlwin_blit_px(w, u.px + (u.pw - lw) / 2, u.py + (u.ph - lh) / 2, pv->scaled, pv->sw, pv->sh, pv->sw, u.px, u.py, u.pw, u.ph);
+        }
+    }
+    paint_transport(w, a, x0, pw, u.play, u.bar, u.time_y, mine, pv->vdur);
+    if (mine && v->err[0] && !a->snd_playing)
+        wlwin_text(w, x0 + 14, u.hint_y, v->err, 1, COL_ERR, pw - 28);
+    else
+        wlwin_text(w, x0 + 14, u.hint_y, "Click the picture or Ctrl+P to play, click the bar to seek, Enter opens the viewer", 1, COL_DIM, pw - 28);
 }
 
 /* Where the Markdown page of the preview pane starts: page position = window position - (ox, oy). */
@@ -5707,11 +5975,26 @@ static void preview_click(struct app *a, int idx, int x, int y, uint32_t time_ms
         a->win.redraw = true;
         return;
     }
+    if (pv->kind == PV_VIDEO && pv->loaded) {                                  /* Play / Pause, the bar, or the picture itself */
+        struct vid_ui vu;
+        vid_layout(x0, pw, list_top(), a->win.bh - list_top() - bottom_h(a), &vu);
+        if (x >= vu.play.x && x < vu.play.x + vu.play.w && y >= vu.play.y && y < vu.play.y + vu.play.h) {
+            snd_toggle(a);
+        } else if (x >= vu.bar.x - 4 && x < vu.bar.x + vu.bar.w + 4 && y >= vu.bar.y - 8 && y < vu.bar.y + vu.bar.h + 8 && pv->vdur) {
+            double f = LM_CLAMP((double)(x - vu.bar.x) / vu.bar.w, 0.0, 1.0);
+            snd_seek(a, (uint64_t)(f * (double)pv->vdur));
+        } else if (x >= vu.px && x < vu.px + vu.pw && y >= vu.py && y < vu.py + vu.ph) {
+            snd_toggle(a);
+        }
+        return;
+    }
     if (pv->kind != PV_AUDIO || !pv->loaded)
         return;
     struct snd_ui u;
     snd_layout(x0, pw, list_top(), a->win.bh - list_top() - bottom_h(a), &u);
     if (x >= u.play.x && x < u.play.x + u.play.w && y >= u.play.y && y < u.play.y + u.play.h) {
+        snd_toggle(a);
+    } else if (x >= u.cover_x && x < u.cover_x + u.side && y >= u.cover_y && y < u.cover_y + u.side) {      /* the cover: like a video's picture */
         snd_toggle(a);
     } else if (x >= u.bar.x - 4 && x < u.bar.x + u.bar.w + 4 && y >= u.bar.y - 8 && y < u.bar.y + u.bar.h + 8 && pv->ai.duration_ms) {
         double f = LM_CLAMP((double)(x - u.bar.x) / u.bar.w, 0.0, 1.0);
@@ -5780,6 +6063,21 @@ static void files_dump(struct app *a)
         fprintf(f, "db tables=%d tab=%d name=%s\n", pv->ndb, pv->dbtab, pv->dbname[pv->dbtab]);
     if (pv->kind == PV_MARKDOWN && pv->md)
         fprintf(f, "md height=%d width=%d headings=%d links=%d\n", md_height(pv->md), md_width(pv->md), md_count(pv->md, MD_N_HEADINGS), md_count(pv->md, MD_N_LINKS));
+    if (pv->kind == PV_VIDEO) {
+        bool mine = !strcmp(a->snd_path, pv->want);
+        fprintf(f, "video playing=%d pos=%llu len=%llu shown=%d frames=%llu size=%dx%d\n", mine && a->snd_playing ? 1 : 0, mine ? (unsigned long long)snd_pos(a) : 0ull,
+                (unsigned long long)pv->vdur, mine && a->vp.shown ? 1 : 0, (unsigned long long)a->vp.fidx, a->vp.cw, a->vp.ch);
+        for (int i = 0; i < 2; i++)
+            if (pane_is_preview(a, i)) {
+                int x0, pw;
+                pane_rect(a, i, &x0, &pw);
+                struct vid_ui vu;
+                vid_layout(x0, pw, list_top(), body_h, &vu);
+                fprintf(f, "rect play %d %d %d %d\n", vu.play.x, vu.play.y, vu.play.w, vu.play.h);
+                fprintf(f, "rect bar %d %d %d %d\n", vu.bar.x, vu.bar.y, vu.bar.w, vu.bar.h);
+                fprintf(f, "rect pic %d %d %d %d\n", vu.px, vu.py, vu.pw, vu.ph);
+            }
+    }
     if (pv->kind == PV_AUDIO) {
         bool mine = !strcmp(a->snd_path, pv->want);
         char ti[96], ar[96];
@@ -5988,10 +6286,14 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
         paint_markdown(w, a, x0, pw, list_y, body_h);
         return;
     }
-    if (pv->kind == PV_IMAGE || pv->kind == PV_VIDEO) {
+    if (pv->kind == PV_VIDEO) {
+        paint_video(w, a, x0, pw, list_y, body_h);
+        return;
+    }
+    if (pv->kind == PV_IMAGE) {
         int k = wlwin_scale(w);                                              /* the picture is made for the buffer's own pixels */
         int exif_h = pv->kind == PV_IMAGE && pv->nexif ? pv->nexif * (LM_FONT_H + 1) + 10 : 0;       /* the EXIF lines under the picture */
-        int aw = pw - 16, ah = body_h - 16 - exif_h - (pv->kind == PV_VIDEO ? LM_FONT_H + 6 : 0);
+        int aw = pw - 16, ah = body_h - 16 - exif_h;
         if (!pv->scaled || pv->sw > aw * k || pv->sh > ah * k || (pv->sw < aw * k && pv->sh < ah * k && pv->sw < pv->img.w * 8) || pv->scale_k != k)
             preview_scale(pv, aw * k, ah * k, k);
         if (pv->scaled) {
@@ -6000,16 +6302,6 @@ static void paint_preview(struct wlwin *w, struct app *a, int idx)
             wlwin_blit_px(w, ox, oy, pv->scaled, pv->sw, pv->sh, pv->sw, x0, list_y, pw, body_h);
             for (int i = 0; i < pv->nexif; i++)
                 wlwin_text(w, x0 + 8, list_y + body_h - exif_h + 4 + i * (LM_FONT_H + 1), pv->exif[i], 1, COL_DIM, pw - 16);
-            if (pv->kind == PV_VIDEO) {                                          /* a play mark on the picture and a hint under it */
-                int cx = ox + lw / 2, cy = oy + lh / 2, r = LM_CLAMP(LM_MIN(lw, lh) / 7, 10, 28);
-                wlwin_round_fill(w, cx - r, cy - r, 2 * r, 2 * r, r, 0x202020);
-                for (int y = -r / 2; y <= r / 2; y++) {                          /* the triangle, one row at a time */
-                    int x0t = -r / 3 + abs(y) / 2, x1t = r / 2 - abs(y) * 10 / 7;
-                    if (x1t > x0t)
-                        wlwin_fill(w, cx + x0t, cy + y, x1t - x0t + 1, 1, 0xffffff);
-                }
-                wlwin_text(w, x0 + 8, list_y + body_h - LM_FONT_H - 4, "Enter plays it in the viewer", 1, COL_DIM, pw - 16);
-            }
         }
         return;
     }
@@ -7523,6 +7815,8 @@ int main(int argc, char **argv)
             timeout = LM_MIN(timeout, 250);
         if (a.preview && a.pv.kind == PV_VIDEO_WAIT)                    /* a video's picture is on its way */
             timeout = LM_MIN(timeout, 80);
+        if (a.vp.fd && (a.snd_playing || a.vp.wait_first))              /* a video plays: pictures every 33 ms */
+            timeout = LM_MIN(timeout, 8);
         if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
             int64_t wait = a.pv.due - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, timeout);
@@ -7542,6 +7836,7 @@ int main(int argc, char **argv)
             a.win.redraw = true;
         if (a.preview && a.pv.kind == PV_VIDEO_WAIT)                    /* (preview_update collects the picture when it is painted) */
             a.win.redraw = true;
+        vp_tick(&a);
         snd_tick(&a);
         if (a.job) {
             a.win.redraw = true;

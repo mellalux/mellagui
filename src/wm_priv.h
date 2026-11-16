@@ -324,6 +324,9 @@ struct lm_wm {
     int launcher_sel, launcher_hover_btn, launcher_focus;
     int launcher_page;          /* the page of icons showing (0 = the first); the grid shows as many as fit, the rest are on more pages */
     int64_t launcher_flip_ms;   /* when a dragged icon last turned a page at the edge */
+    int launcher_edge;          /* the edge zone the carried icon is in: -1 left, 1 right, 0 none */
+    int64_t launcher_edge_ms;   /* since when it has been there (or since the last turn) */
+    bool launcher_edge_flipped; /* it has turned a page during this visit: the next turn waits longer */
     double launcher_wheel;      /* smooth scrolling that has not turned a page yet */
     int64_t settings_spawn_ms;  /* when the settings panel was last started (its window may not be there yet) */
     int launcher_caret[3];      /* the text cursor of the form's name / command / icon field (a byte offset; -1 = the end) */
@@ -349,6 +352,7 @@ struct lm_wm {
     int64_t dock_launch_ms[LM_DOCK_MAX];
     int dock_launch_base[LM_DOCK_MAX];
     struct lm_timer *dock_anim;
+    struct lm_timer *launcher_edge_timer;   /* while an icon is carried at the edge: looks again every 100 ms, so a hand that does not move still turns the page */
     struct lm_idle *refit;      /* after an output went away: fit the maximized / fullscreen windows to what is left, once the output is out of the list */
     /* Alt+Tab: the list is open while Alt is held; windows most recently used first */
     bool sw_open;
@@ -524,6 +528,7 @@ bool drag_far_enough(const struct lm_wm *wm, double x, double y);
 void launcher_drag_finish(struct lm_wm *wm);
 bool launcher_searching_now(void);                      /* the launcher's search is on (icons cannot be moved then) */
 void launcher_drag_motion(struct lm_wm *wm);
+void launcher_edge_tick(void *data);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);
 void damage_panels(struct lm_wm *wm);

@@ -439,6 +439,20 @@ bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_r
     return true;
 }
 
+#define FLIP_DWELL_MS 500                                   /* a carried icon waits this long at the edge before the page turns ... */
+#define FLIP_AGAIN_MS 1500                                  /* ... and this long, still there, before it turns the next one (leaving the zone starts over) */
+
+void launcher_edge_tick(void *data)
+{
+    struct lm_wm *wm = data;
+    if (!wm->launcher_drag || !wm->launcher_edge) {                     /* nothing carried, or it left the edge: stop looking */
+        if (wm->launcher_edge_timer)
+            lm_timer_arm_ms(wm->launcher_edge_timer, 0, 0);
+        return;
+    }
+    launcher_drag_motion(wm);
+}
+
 void launcher_drag_motion(struct lm_wm *wm)
 {
     if (wm->press_panel_kind != LM_PICK_LAUNCHER_ITEM || !wm->srv->seat || wm->launcher_form || launcher_searching_now())
@@ -453,19 +467,34 @@ void launcher_drag_motion(struct lm_wm *wm)
             return;
         wm->launcher_drag = true;
         wm->launcher_drag_g = wm->press_panel_ws;
+        wm->launcher_edge = 0;
+        wm->launcher_edge_flipped = false;
     }
     wm->drag_x = x;
     wm->drag_y = y;
-    struct lm_output *o = launcher_output(wm);                      /* an icon held near the left / right edge of the card turns the page (not more than twice a second) */
+    /* An icon held near the left / right edge of the card turns the page - once it has stayed there for FLIP_DWELL_MS, and then only once per visit: the pointer has
+     * to leave the zone and come back (or stay FLIP_AGAIN_MS) before the next page turns, or a hand that rests at the edge runs over every page, including the empty
+     * one at the end. */
+    struct lm_output *o = launcher_output(wm);
     int64_t now = (int64_t)lm_now_ms();
-    if (o && now - wm->launcher_flip_ms > 600) {
+    if (o) {
         struct lm_launcher_info li;
         launcher_info(wm, o, &li);
         int dir = x < li.card.x + 36 ? -1 : x > li.card.x + li.card.w - 36 ? 1 : 0;
-        if (dir && li.pages > 1 && li.page + dir >= 0 && li.page + dir < li.pages) {
-            wm->launcher_page = li.page + dir;
-            wm->launcher_flip_ms = now;
+        if (dir != wm->launcher_edge) {                                 /* entered (or left) a zone: the clock starts again */
+            wm->launcher_edge = dir;
+            wm->launcher_edge_ms = now;
+            wm->launcher_edge_flipped = false;
+        } else if (dir && li.pages > 1 && li.page + dir >= 0 && li.page + dir < li.pages) {
+            if (now - wm->launcher_edge_ms >= (wm->launcher_edge_flipped ? FLIP_AGAIN_MS : FLIP_DWELL_MS)) {
+                wm->launcher_page = li.page + dir;
+                wm->launcher_flip_ms = now;
+                wm->launcher_edge_ms = now;
+                wm->launcher_edge_flipped = true;
+            }
         }
+        if (dir && wm->launcher_edge_timer && !lm_timer_is_armed(wm->launcher_edge_timer))      /* (a hand that rests still sends no motion) */
+            lm_timer_arm_ms(wm->launcher_edge_timer, 100, 100);
     }
     launcher_damage(wm);
 }
@@ -482,15 +511,26 @@ static int launcher_reorder(struct lm_wm *wm, int g, int target_cell, bool to_ne
     const struct lm_dock_item *it = launcher_item(g, NULL);
     if (!it || it->spacer || lm_search_owns(it) || g < 0 || g >= n || n > LM_LAUNCHER_MAX)
         return -1;
-    const struct lm_dock_item *list[LM_LAUNCHER_MAX];
+    const struct lm_dock_item *list[LM_LAUNCHER_MAX] = { NULL };
     for (int i = 0; i < n; i++)
         list[i] = launcher_item(i, NULL);
     const struct lm_dock_item *moved = list[g];
     int m = n;
     int t;
     if (to_new_page) {
-        memmove(&list[g], &list[g + 1], (size_t)(n - 1 - g) * sizeof(list[0]));      /* take it out, then ... */
-        m = n - 1;
+        bool paged = false;                                                           /* the grid already has pages of its own (empty cells)? */
+        for (int i = 0; i < n; i++)
+            paged = paged || list[i]->spacer;
+        int pg = LM_MAX(full_pp, 1);
+        if (paged) {                                                                  /* take it out of ITS page only: the later pages keep their icons where they are */
+            int end = LM_MIN((g / pg + 1) * pg, n);
+            memmove(&list[g], &list[g + 1], (size_t)(end - 1 - g) * sizeof(list[0]));
+            list[end - 1] = &k_gap;
+            m = n;
+        } else {
+            memmove(&list[g], &list[g + 1], (size_t)(n - 1 - g) * sizeof(list[0]));  /* take it out, the rest closes up, then ... */
+            m = n - 1;
+        }
         while (m > 0 && list[m - 1]->spacer)                                          /* (empty cells at the end do not count) */
             m--;
         int pp = LM_MAX(full_pp, 1), idx = (m + pp - 1) / pp * pp;                    /* ... the first cell of the page after the last one that is used */

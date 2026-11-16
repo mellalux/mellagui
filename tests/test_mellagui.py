@@ -21322,7 +21322,7 @@ class TestLauncherMoving(Base):
         self.assertIn('App02', [i[1] for i in d['icons']])                                       # ... and it is there
 
     def test_dropped_on_the_empty_part_of_a_short_page_it_goes_to_the_end_of_that_page(self):
-        c = self.start('mellagui-lm9', n=22)
+        c = self.start('mellagui-lm9', n=36)
         d = self.info(c)
         ic = {i[1]: i[2] for i in d['icons']}
         card = d['card']
@@ -21348,7 +21348,7 @@ class TestLauncherMoving(Base):
         self.assertIn('App02', [i[1] for i in self.info(c)['icons']])
 
     def test_an_icon_dropped_on_the_empty_page_stays_on_a_page_of_its_own(self):
-        for edit in (False, True):
+        for edit in (True,):
             c = self.start('mellagui-lmA%d' % edit, n=8)
             d = self.info(c)
             if edit:
@@ -21384,20 +21384,84 @@ class TestLauncherMoving(Base):
             self.assertGreaterEqual(d['pages'], 2)
             c.cmd('launcher close')
 
-    def test_a_next_page_appears_while_an_icon_is_carried_and_goes_with_the_drag(self):
-        c = self.start('mellagui-lm7')
+    def carry_to_the_empty_page(self, c, name):
+        """Edit mode (it has the empty last page), then carries `name` to the right edge, waits for the pages to turn up to the last (the empty) one, one visit at a time, and lets go in the middle of it."""
         d = self.info(c)
-        self.assertEqual((d['pages'], d['edit']), (1, 0))                                          # not in edit mode, one page of icons
+        if not d['edit']:
+            c.click(*self.centre(d['buttons'][0][0]))
+            time.sleep(0.2)
+            d = self.info(c)
         ic = {i[1]: i[2] for i in d['icons']}
-        self.drag(c, self.centre(ic['App02']), self.centre(ic['App04']), hold=0.2)
-        d = self.info(c)
-        self.assertEqual((d['pages'], len(d['dots'])), (2, 2))                                     # the empty page to drop it on
         card = d['card']
-        c.abs(card[0] + card[2] // 2, card[1] + 28)                                                # over the title: nothing to drop on
-        c.button(272, False)
-        time.sleep(0.3)
+        x0, y0 = self.centre(ic[name])
+        c.abs(x0, y0)
+        c.button(272, True)
+        for i in range(1, 6):
+            c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0 + 5 * i)
+            time.sleep(0.03)
+        end = time.time() + 10
+        while time.time() < end:
+            d = self.info(c)
+            if d['pages'] > 1 and d['page'] == d['pages'] - 1 and not d['icons']:
+                break
+            side = card[0] + card[2] - 20 if (int(time.time() * 4) % 14) < 12 else card[0] + card[2] // 2        # (every so often out of the zone and back in)
+            c.abs(side, y0 + 25 + int(time.time() * 20) % 2)
+            time.sleep(0.05)
         d = self.info(c)
-        self.assertEqual((d['pages'], len(d['dots'])), (1, 0))                                     # gone again
+        self.assertTrue(d['page'] == d['pages'] - 1 and not d['icons'], 'on the empty page')
+        g = d['card']
+        c.abs(g[0] + g[2] // 2, g[1] + g[3] // 2)
+        time.sleep(0.2)
+        c.button(272, False)
+        time.sleep(0.5)
+
+    def test_the_page_turns_once_a_visit_and_a_second_icon_does_not_move_the_first(self):
+        c = self.start('mellagui-lmB', n=8)
+        self.carry_to_the_empty_page(c, 'App02')
+        d = self.info(c)
+        first_page = d['page']
+        self.assertGreater(first_page, 0)
+        self.assertEqual([i[1] for i in d['icons']], ['App02'])
+        c.click(*self.centre(d['dots'][0]))                                                         # back to the first page
+        time.sleep(0.2)
+        c.abs(5, 5)
+        # holding one icon still at the edge turns one page, not all of them
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        card = d['card']
+        x0, y0 = self.centre(ic['App03'])
+        c.abs(x0, y0)
+        c.button(272, True)
+        for i in range(1, 6):
+            c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0 + 5 * i)
+            time.sleep(0.03)
+        pages = set()
+        t_end = time.time() + 1.4
+        while time.time() < t_end:
+            c.abs(card[0] + card[2] - 20, y0 + 25 + int(time.time() * 20) % 2)
+            pages.add(self.info(c)['page'])
+            time.sleep(0.05)
+        self.assertEqual(max(pages), 1)                                                             # one turn in 1.4 s at the edge, not a run over the last page
+        c.abs(card[0] + card[2] // 2, card[1] + card[3] // 2)
+        time.sleep(0.1)
+        c.button(272, False)
+        time.sleep(0.4)
+        c.cmd('launcher close')
+
+    def test_a_second_icon_on_the_empty_page_leaves_the_first_on_its_own_page(self):
+        c = self.start('mellagui-lmC', n=8)
+        self.carry_to_the_empty_page(c, 'App02')
+        d = self.info(c)
+        c.click(*self.centre(d['dots'][0]))
+        time.sleep(0.2)
+        self.carry_to_the_empty_page(c, 'App03')
+        d = self.info(c)
+        self.assertEqual([i[1] for i in d['icons'] if i[1]], ['App03'])                              # on a page of its own (the rest of its page is empty cells)
+        c.click(*self.centre(d['dots'][d['page'] - 1]))
+        time.sleep(0.2)
+        d = self.info(c)
+        self.assertEqual([i[1] for i in d['icons'] if i[1]], ['App02'])                              # the page before still holds the first one, alone
+        c.cmd('launcher close')
 
     def test_the_icons_below_make_room_while_it_is_carried(self):
         c = self.start('mellagui-lm6')

@@ -361,7 +361,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         int room = li->rect.h - 20 - LC_HEAD - LC_FOOT;
         int rows_fit = LM_CLAMP(room / LC_CELL_H, 1, LC_MAX_ROWS);
         int rows, dots_h = 0;
-        bool extra = (li->edit || wm->launcher_drag) && !li->searching;     /* edit mode, or while an icon is carried: one more, empty page at the end, to drop it on */
+        bool extra = li->edit && !li->searching;                            /* edit mode: one more, empty page at the end, to drop an icon on */
         bool holes = !li->searching && launcher_gap_count() > 0;                 /* empty cells keep icons on later pages: always the paged layout, all pages as high as the screen allows */
         {
             int rf = LM_CLAMP((room - LC_DOTS) / LC_CELL_H, 1, LC_MAX_ROWS);

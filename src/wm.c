@@ -575,6 +575,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->note_timer = lm_loop_add_timer(srv->loop, note_tick, wm);
     wm->dock_timer = lm_loop_add_timer(srv->loop, dock_hide_tick, wm);
     wm->dock_anim = lm_loop_add_timer(srv->loop, dock_anim_tick, wm);
+    wm->launcher_edge_timer = lm_loop_add_timer(srv->loop, launcher_edge_tick, wm);
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     wm->anim_timer = lm_loop_add_timer(srv->loop, anim_tick, wm);
     wm->refit = lm_loop_add_idle(srv->loop, refit_idle, wm);
@@ -596,6 +597,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_timer_destroy(wm->dock_timer);
     if (wm->dock_anim)
         lm_timer_destroy(wm->dock_anim);
+    if (wm->launcher_edge_timer)
+        lm_timer_destroy(wm->launcher_edge_timer);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
     for (int i = 0; i < ANIM_MAX; i++)

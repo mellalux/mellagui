@@ -6,7 +6,7 @@
  * open). Pure reading of /proc, uname and the server's own state; no side effects.
  */
 
-#define LM_ABOUT_ROWS 12
+#define LM_ABOUT_ROWS 15
 #define LM_ABOUT_LABEL 12
 #define LM_ABOUT_VALUE 64
 

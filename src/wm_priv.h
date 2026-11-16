@@ -538,6 +538,7 @@ bool dock_special(const struct lm_dock_item *it);
 void launcher_activate(struct lm_wm *wm, int kind, int index);
 int launcher_count(void);
 void launcher_damage(struct lm_wm *wm);
+void launcher_damage_hover(struct lm_wm *wm, int old_sel, int old_btn);
 void launcher_field_clip(struct lm_wm *wm, int what);
 char *launcher_field_text(struct lm_wm *wm, size_t *max);
 void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launcher_info *li);

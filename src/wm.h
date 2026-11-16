@@ -577,6 +577,8 @@ struct lm_launcher_info {
     } icon[LM_LAUNCHER_MAX];
     struct lm_rect add;             /* the "+" tile (box == hit), empty when the list is full */
     int drag;                       /* an icon is being dragged (icon index), -1 none */
+    const struct lm_dock_item *drag_item;   /* the button in the hand (icon[drag].item is what the cell shows now, after the others made room) */
+    int drag_slot;                  /* ... and the cell its place is shown in: the cell it is over, the others have moved up or down to make room (-1 none) */
     struct lm_rect drag_box;        /* the icon under the pointer */
     struct lm_rect drop;            /* while dragging: where it can be dropped (the dock's place), empty when the dock is off */
     int drop_pos;                   /* ... the pointer is on it: the place the icon would take in the dock, -1 not on it */

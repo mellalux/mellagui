@@ -37,7 +37,7 @@ CFLAGS  ?= $(OPT)
 override CFLAGS := $(CSTD) $(WARN) $(CFLAGS)
 PKG_CONFIG ?= pkg-config
 LIBDRM_INC ?= /usr/include/libdrm
-CPPFLAGS += -D_GNU_SOURCE -Isrc -Iclient $(shell $(PKG_CONFIG) --cflags libdrm 2>/dev/null || echo -I$(LIBDRM_INC)) -MMD -MP
+CPPFLAGS += -D_GNU_SOURCE -Isrc -Iclient -I$(BUILD) $(shell $(PKG_CONFIG) --cflags libdrm 2>/dev/null || echo -I$(LIBDRM_INC)) -MMD -MP
 
 # The one thing a build needs from outside the libc is libdrm's headers: say so plainly, with the package names, instead of "drm.h: No such file".
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
@@ -220,6 +220,16 @@ $(BUILD)/mellagui-monitor: $(BUILD)/client/mellagui-monitor.o $(BUILD)/src/wlc.o
 $(BUILD)/mellagui-term: $(BUILD)/client/mellagui-term.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# ---- version (the About dialog) -------------------------------------------------------
+# build/version.h is made again on every make, but replaced only when its text changed, so only about.c is compiled again after a commit or a pull.
+VERSION_H := $(BUILD)/version.h
+$(VERSION_H): FORCE
+	@mkdir -p $(BUILD)
+	@tools/gen_version.sh > $@.tmp && { cmp -s $@.tmp $@ || mv $@.tmp $@; }; rm -f $@.tmp
+.PHONY: FORCE
+FORCE:
+$(BUILD)/src/about.o $(BUILD)/asan/about.o $(BUILD)/fuzz/obj/about.o: $(VERSION_H)
 
 # ---- compile rules ---------------------------------------------------------------
 $(BUILD)/src/%.o: src/%.c

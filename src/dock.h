@@ -94,6 +94,10 @@ bool lm_launchapps_default(int i, const char **name, const char **icon, const ch
 /* The launcher dialog's own buttons, [launcher-apps] (the same "Name = [icon] command" lines, at most LM_LAUNCHER_APPS_MAX): what the launcher shows
  * besides the dock's buttons; one whose name the dock has is not listed again (the dock's wins). Resolved like the dock's. */
 int lm_launchapps_count(void);
+
+/* [launcher] order = Name | Name | ...: how the launcher's grid is ordered (dock buttons and the launcher's own mixed; names it does not know are ignored, buttons
+ * it does not list come after the listed ones in their usual order). "" = the usual order: the dock's buttons, then [launcher-apps]. */
+const char *lm_launcher_order(void);
 const struct lm_dock_item *lm_launchapps_item(int i);
 int lm_launchapps_raw_count(void);
 bool lm_launchapps_raw_entry(int i, const char **name, const char **icon, const char **cmd);

@@ -35,6 +35,7 @@ struct gl_out {
     struct gl_chrome frame[GL_MAX_FRAMES];
     struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview;
     struct gl_chrome notify[LM_NOTIFY_MAX];
+    struct gl_chrome lov[5];            /* the launcher's small pieces: the lit cell, the drop pill, the cell outline, the origin's dimming, the icon in the hand */
     uint32_t card_gen;
     uint32_t theme_gen;                 /* the palette, the font and the scale the chromes below were painted with */
     struct lm_gl_target mag;            /* the scene before the magnifier zooms it (made when it is first needed) */
@@ -75,6 +76,8 @@ static void gl_out_free(struct lm_renderer *r, struct out_state *st)
     gl_chrome_free(r, &go->menu);
     gl_chrome_free(r, &go->osk);
     gl_chrome_free(r, &go->overview);
+    for (int i = 0; i < 5; i++)
+        gl_chrome_free(r, &go->lov[i]);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
     free(go);
@@ -90,6 +93,8 @@ static void gl_chromes_free(struct lm_renderer *r, struct gl_out *go)
                                 &go->dock, &go->menu, &go->osk, &go->overview };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         gl_chrome_free(r, all[i]);
+    for (int i = 0; i < 5; i++)
+        gl_chrome_free(r, &go->lov[i]);
     for (int i = 0; i < LM_NOTIFY_MAX; i++)
         gl_chrome_free(r, &go->notify[i]);
 }
@@ -203,7 +208,11 @@ static void gl_do_frame(const struct paint_ctx *c, const void *it) { paint_frame
 static void gl_do_panel(const struct paint_ctx *c, const void *it) { paint_panel(c, it); }
 static void gl_do_shadow(const struct paint_ctx *c, const void *it) { paint_panel_shadow(c, it); }
 static void gl_do_about(const struct paint_ctx *c, const void *it) { paint_about(c, it); }
-static void gl_do_launcher(const struct paint_ctx *c, const void *it) { paint_launcher(c, it); }
+static void gl_do_launcher(const struct paint_ctx *c, const void *it) { paint_launcher_body(c, it, false); }
+static void gl_do_lov_sel(const struct paint_ctx *c, const void *it) { lov_sel(c, it); }
+static void gl_do_lov_drop(const struct paint_ctx *c, const void *it) { lov_drop(c, it); }
+static void gl_do_lov_slot(const struct paint_ctx *c, const void *it) { lov_slot(c, it); }
+static void gl_do_lov_hand(const struct paint_ctx *c, const void *it) { lov_hand(c, it); }
 static void gl_do_lock(const struct paint_ctx *c, const void *it) { paint_lock(c, it); }
 static void gl_do_switcher(const struct paint_ctx *c, const void *it) { paint_switcher(c, it); }
 static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power(c, it); }
@@ -320,6 +329,17 @@ static void gl_tex_at(struct gl_pass *p, unsigned tex, const struct lm_rect *rec
 {
     struct lm_rect pr = gl_pr(p, rect);
     lm_gl_draw_tex(p->r->gl, tex, pr.x, pr.y, pr.w, pr.h, 0, 0, 1, 1, 1.0f, opaque);
+}
+
+/* One small piece of the launcher: a texture of its own, remade only when `h` (what it shows and where) changes, then drawn at `rect`. */
+static void gl_lov(struct gl_pass *p, struct gl_chrome *ch, const struct lm_rect *rect, gl_paint_fn fn, const void *li, uint64_t h)
+{
+    if (!ch->tex || ch->hash != h || ch->w != rect->w || ch->h != rect->h) {
+        gl_scratch_alpha(p->r, p->st, ch, rect, fn, li);
+        ch->hash = h;
+    }
+    if (ch->tex)
+        gl_tex_at(p, ch->tex, rect, false);
 }
 
 static void gl_solid(struct gl_pass *p, const struct lm_rect *rect, uint32_t rgb)
@@ -592,23 +612,39 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
         }
         break;
     case LM_SCENE_LAUNCHER:
-        if (item->output == p->st->out) {               /* translucent like the About dialog: redrawn only when it changes */
+        if (item->output == p->st->out) {
+            /* The dimming is a plain translucent quad (it changes while the bubble rises). The card, which only changes when its content does, is one
+             * texture of the card's size; what the pointer moves (the lit cell, the icon in the hand, the drop marks) is a few small textures of their own,
+             * so a hover costs a few thousand pixels, not a full screen of them. */
             const struct lm_launcher_info *li = &item->u.launcher;
+            if (li->veil > 0.0f) {
+                struct lm_rect pr = gl_pr(p, &li->rect);
+                lm_gl_draw_rect(p->r->gl, pr.x, pr.y, pr.w, pr.h, 0.0f, 0.0f, 0.0f, 0.25098f * LM_CLAMP(li->veil, 0.0f, 1.0f));
+            }
+            if (li->veil_only)
+                break;
             struct gl_chrome *ch = &p->go->launcher;
-            uint64_t h = fnv(1469598103934665603ull, &li->card, sizeof(li->card));
-            h = fnv(h, &li->veil, sizeof(li->veil));
-            h = fnv(h, &li->veil_only, sizeof(li->veil_only));
+            struct lm_rect base = li->card;
+            for (int i = 0; i < 2; i++)
+                if (li->button[i].w > 0)
+                    base = lm_rect_union(&base, &li->button[i]);
+            for (int i = 0; i < 2; i++)
+                if (li->arrow[i].w > 0)
+                    base = lm_rect_union(&base, &li->arrow[i]);
+            uint64_t h = fnv(1469598103934665603ull, &base, sizeof(base));
+            h = fnv(h, &li->rect, sizeof(li->rect));
+            h = fnv(h, &p->r->wall.gen, sizeof(p->r->wall.gen));
             h = fnv(h, &li->form, sizeof(li->form));
             h = fnv(h, &li->edit, sizeof(li->edit));
             h = fnv(h, &li->n, sizeof(li->n));
             h = fnv(h, &li->page, sizeof(li->page));
             h = fnv(h, &li->pages, sizeof(li->pages));
-            h = fnv(h, &li->sel, sizeof(li->sel));
             h = fnv(h, &li->hover_button, sizeof(li->hover_button));
             h = fnv(h, &li->focus, sizeof(li->focus));
+            h = fnv(h, &li->extra_page, sizeof(li->extra_page));
+            h = fnv(h, &li->drop_end, sizeof(li->drop_end));
+            h = fnv(h, &li->drag_slot, sizeof(li->drag_slot));
             h = fnv(h, &li->drag, sizeof(li->drag));
-            h = fnv(h, &li->drag_box, sizeof(li->drag_box));
-            h = fnv(h, &li->drop_pos, sizeof(li->drop_pos));
             h = fnv(h, &li->kind, sizeof(li->kind));
             h = fnv(h, li->caret, sizeof(li->caret));
             h = fnv(h, &li->help, sizeof(li->help));
@@ -629,12 +665,50 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
                     h = fnv(h, &li->icon[i].item->img, sizeof(void *));
                     h = fnv(h, &li->icon[i].running, sizeof(bool));
                 }
-            if (!ch->tex || ch->hash != h || ch->w != li->rect.w || ch->h != li->rect.h) {
-                gl_scratch_alpha(p->r, p->st, ch, &li->rect, gl_do_launcher, li);
+            if (!ch->tex || ch->hash != h || ch->w != base.w || ch->h != base.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &base, gl_do_launcher, li);
                 ch->hash = h;
             }
             if (ch->tex)
-                gl_tex_at(p, ch->tex, &li->rect, false);
+                gl_tex_at(p, ch->tex, &base, false);
+            struct lm_rect r;
+            if (lov_sel_rect(li, &r)) {                          /* the lit cell */
+                r = (struct lm_rect){ r.x - 3, r.y - 3, r.w + 6, r.h + 6 };
+                uint64_t hs = fnv(1469598103934665603ull, &r, sizeof(r));
+                hs = fnv(hs, &li->sel, sizeof(li->sel));
+                hs = fnv(hs, &li->edit, sizeof(li->edit));
+                hs = fnv(hs, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
+                hs = fnv(hs, &lm_metrics.button_roundness, sizeof(lm_metrics.button_roundness));
+                if (li->sel < li->n) {
+                    hs = fnv(hs, &li->icon[li->sel].item->kind, sizeof(int));
+                    hs = fnv(hs, &li->icon[li->sel].item->img, sizeof(void *));
+                }
+                gl_lov(p, &p->go->lov[0], &r, gl_do_lov_sel, li, hs);
+            }
+            if (lov_dragging(li)) {
+                if (li->drop.w > 0) {                            /* the pill over the dock (and the marker, which is inside it or on the dock) */
+                    struct lm_rect d = li->drop_pos >= 0 ? lm_rect_union(&li->drop, &li->marker) : li->drop;
+                    d = (struct lm_rect){ d.x - 3, d.y - 3, d.w + 6, d.h + 6 };
+                    uint64_t hd = fnv(1469598103934665603ull, &d, sizeof(d));
+                    hd = fnv(hd, &li->drop_pos, sizeof(li->drop_pos));
+                    hd = fnv(hd, &li->marker, sizeof(li->marker));
+                    gl_lov(p, &p->go->lov[1], &d, gl_do_lov_drop, li, hd);
+                }
+                struct lm_rect sl;
+                if (lov_slot_rect(li, &sl)) {                    /* the empty place: it moves as the icon crosses cells */
+                    sl = (struct lm_rect){ sl.x - 3, sl.y - 3, sl.w + 6, sl.h + 6 };
+                    uint64_t hs2 = fnv(1469598103934665603ull, &sl, sizeof(sl));
+                    hs2 = fnv(hs2, &li->drop_cell, sizeof(li->drop_cell));
+                    gl_lov(p, &p->go->lov[2], &sl, gl_do_lov_slot, li, hs2);
+                }
+                struct lm_rect hd = li->drag_box;                /* the icon in the hand, with room for its shadow */
+                hd = (struct lm_rect){ hd.x - 8, hd.y - 8, hd.w + 16, hd.h + 20 };
+                uint64_t hh = fnv(1469598103934665603ull, &hd, sizeof(hd));
+                hh = fnv(hh, &li->drag_item->kind, sizeof(int));
+                hh = fnv(hh, &li->drag_item->img, sizeof(void *));
+                hh = fnv(hh, &lm_dock.icon_bg, sizeof(lm_dock.icon_bg));
+                gl_lov(p, &p->go->lov[4], &hd, gl_do_lov_hand, li, hh);
+            }
         }
         break;
     case LM_SCENE_NOTIFY: {                             /* a texture per card, kept while its content (hashed) stays the same */

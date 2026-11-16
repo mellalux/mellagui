@@ -109,6 +109,9 @@ struct shot_fx {
 struct lm_renderer {
     struct shot_fx shot;
     struct wallpaper wall;
+    uint32_t *frost_px;                 /* the wallpaper blurred (a small picture, frost_w x frost_h) for the launcher's frosted glass; made for one output size */
+    int frost_w, frost_h, frost_ow, frost_oh;
+    uint32_t frost_gen, frost_theme;
     struct lm_gl *gl;                   /* the GL renderer; NULL = software (render_gl.inc) */
     bool gl_owned;                      /* we made it (headless); the DRM backend owns its own */
     unsigned sprite_tex[LM_CURSOR_POINTER + 1];
@@ -821,27 +824,9 @@ enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CR
 static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha);
 
 /* The lock screen: a dark screen with the time, a box with the dots of what was typed and the last message. */
-/* The lock screen's backdrop: the wallpaper (cropped to fill) shrunk to about 1/8, blurred with two box passes and dimmed towards the theme's ink, kept per
- * output; it is scaled back up with a bilinear filter, which blurs it further. false = no wallpaper (or no picture): the caller paints plain ink. */
-static bool paint_lock_backdrop(const struct paint_ctx *c)
+/* The wallpaper cropped to fill a tw x th picture and blurred with two box passes (radius 2); `tmp` is scratch of the same size. */
+static void wall_blur_small(const struct lm_image *img, uint32_t *px, uint32_t *tmp, int tw, int th)
 {
-    const struct lm_image *img = &c->r->wall.img;
-    struct out_state *st = img->px ? state_of(c->out) : NULL;
-    if (!st)
-        return false;
-    int W = lm_output_pw(c->out), H = lm_output_ph(c->out);
-    if (W <= 0 || H <= 0)
-        return false;
-    if (!st->lock_px || st->lock_gen != c->r->wall.gen || st->lock_ink != lm_theme.ink || st->lock_pw != W || st->lock_ph != H) {
-        free(st->lock_px);
-        int tw = LM_MAX(W / 8, 16), th = LM_MAX(H / 8, 9);
-        uint32_t *px = malloc((size_t)tw * (size_t)th * 4), *tmp = malloc((size_t)tw * (size_t)th * 4);
-        st->lock_px = NULL;
-        if (!px || !tmp) {
-            free(px);
-            free(tmp);
-            return false;
-        }
         double iw = img->w, ih = img->h, sc = LM_MAX((double)tw / iw, (double)th / ih), sw = tw / sc, sh = th / sc;
         wall_scale(img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, px, tw, th);
         for (int pass = 0; pass < 2; pass++) {                  /* box blur, radius 2, horizontal then vertical */
@@ -863,6 +848,30 @@ static bool paint_lock_backdrop(const struct paint_ctx *c)
                     }
             }
         }
+}
+
+/* The lock screen's backdrop: the wallpaper (cropped to fill) shrunk to about 1/8, blurred with two box passes and dimmed towards the theme's ink, kept per
+ * output; it is scaled back up with a bilinear filter, which blurs it further. false = no wallpaper (or no picture): the caller paints plain ink. */
+static bool paint_lock_backdrop(const struct paint_ctx *c)
+{
+    const struct lm_image *img = &c->r->wall.img;
+    struct out_state *st = img->px ? state_of(c->out) : NULL;
+    if (!st)
+        return false;
+    int W = lm_output_pw(c->out), H = lm_output_ph(c->out);
+    if (W <= 0 || H <= 0)
+        return false;
+    if (!st->lock_px || st->lock_gen != c->r->wall.gen || st->lock_ink != lm_theme.ink || st->lock_pw != W || st->lock_ph != H) {
+        free(st->lock_px);
+        int tw = LM_MAX(W / 8, 16), th = LM_MAX(H / 8, 9);
+        uint32_t *px = malloc((size_t)tw * (size_t)th * 4), *tmp = malloc((size_t)tw * (size_t)th * 4);
+        st->lock_px = NULL;
+        if (!px || !tmp) {
+            free(px);
+            free(tmp);
+            return false;
+        }
+        wall_blur_small(img, px, tmp, tw, th);
         for (size_t i = 0; i < (size_t)tw * (size_t)th; i++)    /* dimmed: 62 % of the theme's dark colour over it */
             px[i] = 0xff000000u | mix_rgb(px[i] & 0xffffffu, lm_theme.ink, 158);
         free(tmp);
@@ -1400,15 +1409,106 @@ static void paint_launcher_button(const struct paint_ctx *c, const struct lm_rec
         lc_text_centered(c, r, text, lm_theme.launcher_text);
 }
 
+/* The launcher card's frosted glass: the blurred wallpaper (made once per wallpaper and output size, a small picture) under the card's light body, so
+ * the picture shows through as colour but not as detail. Round corners by the signed distance of the corner arc. false = no wallpaper: the caller
+ * paints a more solid body instead. Works in the card's own proportions, so a snapshot (the bubble) and the screen give the same picture. */
+#define LAUNCHER_FROST_ALPHA 0x26u                              /* the body over the blurred wallpaper: 15 % (a see-through card: 85 %) */
+#define LAUNCHER_FROST_LIGHTEN 120                              /* ... the blurred wallpaper itself is lightened towards the body colour by this much (of 255) so dark text stays readable */
+
+static bool paint_launcher_frost(const struct paint_ctx *c, const struct lm_launcher_info *li, int radius)
+{
+    struct lm_renderer *r = c->r;
+    const struct lm_image *img = &r->wall.img;
+    if (!img->px || li->rect.w <= 0 || li->rect.h <= 0 || li->card.w <= 0 || li->card.h <= 0)
+        return false;
+    if (!r->frost_px || r->frost_gen != r->wall.gen || r->frost_theme != lm_theme_generation() || r->frost_ow != li->rect.w || r->frost_oh != li->rect.h) {
+        int tw = LM_MAX(li->rect.w / 8, 16), th = LM_MAX(li->rect.h / 8, 9);
+        uint32_t *px = malloc((size_t)tw * (size_t)th * 4), *tmp = malloc((size_t)tw * (size_t)th * 4);
+        if (!px || !tmp) {
+            free(px);
+            free(tmp);
+            return false;
+        }
+        wall_blur_small(img, px, tmp, tw, th);
+        for (size_t i = 0; i < (size_t)tw * (size_t)th; i++)
+            px[i] = 0xff000000u | mix_rgb(px[i] & 0xffffffu, lm_theme.launcher_body & 0xffffffu, LAUNCHER_FROST_LIGHTEN);
+        free(tmp);
+        free(r->frost_px);
+        r->frost_px = px;
+        r->frost_w = tw;
+        r->frost_h = th;
+        r->frost_ow = li->rect.w;
+        r->frost_oh = li->rect.h;
+        r->frost_gen = r->wall.gen;
+        r->frost_theme = lm_theme_generation();
+    }
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pcard = prect(c, &li->card), box;
+    if (pcard.w <= 0 || pcard.h <= 0 || !lm_rect_intersect(&pcard, &pc.clip, &box))
+        return true;
+    int fw = r->frost_w, fh = r->frost_h;
+    double sx0 = (double)(li->card.x - li->rect.x) / (double)li->rect.w * fw, sy0 = (double)(li->card.y - li->rect.y) / (double)li->rect.h * fh;
+    double sw = (double)li->card.w / (double)li->rect.w * fw, sh = (double)li->card.h / (double)li->rect.h * fh;
+    double R = (double)plen(c, radius);
+    for (int y = box.y; y < box.y + box.h; y++) {
+        uint32_t *row = fb_row(&pc, y);
+        double v = ((double)(y - pcard.y) + 0.5) / (double)pcard.h, fy = sy0 + v * sh - 0.5;
+        int y0 = (int)floor(fy);
+        double ty = fy - (double)y0;
+        int ya = LM_CLAMP(y0, 0, fh - 1), yb = LM_CLAMP(y0 + 1, 0, fh - 1);
+        double dy = LM_MAX(LM_MAX(R - ((double)(y - pcard.y) + 0.5), ((double)(y - pcard.y) + 0.5) - ((double)pcard.h - R)), 0.0);
+        for (int x = box.x; x < box.x + box.w; x++) {
+            double dx = LM_MAX(LM_MAX(R - ((double)(x - pcard.x) + 0.5), ((double)(x - pcard.x) + 0.5) - ((double)pcard.w - R)), 0.0);
+            int cov = 255;
+            if (dx > 0.0 && dy > 0.0) {                                   /* in a corner's square: the arc decides */
+                double d = sqrt(dx * dx + dy * dy) - R;
+                cov = d >= 0.5 ? 0 : d <= -0.5 ? 255 : (int)((0.5 - d) * 255.0);
+                if (cov <= 0)
+                    continue;
+            }
+            double u = ((double)(x - pcard.x) + 0.5) / (double)pcard.w, fx = sx0 + u * sw - 0.5;
+            int x0 = (int)floor(fx);
+            double tx = fx - (double)x0;
+            int xa = LM_CLAMP(x0, 0, fw - 1), xb = LM_CLAMP(x0 + 1, 0, fw - 1);
+            uint32_t p00 = r->frost_px[(size_t)ya * (size_t)fw + (size_t)xa], p10 = r->frost_px[(size_t)ya * (size_t)fw + (size_t)xb];
+            uint32_t p01 = r->frost_px[(size_t)yb * (size_t)fw + (size_t)xa], p11 = r->frost_px[(size_t)yb * (size_t)fw + (size_t)xb];
+            uint32_t out = 0;
+            for (int sh2 = 16; sh2 >= 0; sh2 -= 8) {
+                double a = (double)((p00 >> sh2) & 255) * (1.0 - tx) + (double)((p10 >> sh2) & 255) * tx;
+                double b = (double)((p01 >> sh2) & 255) * (1.0 - tx) + (double)((p11 >> sh2) & 255) * tx;
+                out |= (uint32_t)(a * (1.0 - ty) + b * ty + 0.5) << sh2;
+            }
+            row[x] = cov >= 255 ? out : blend_px(fade_px(0xff000000u | out, cov), row[x]);
+        }
+    }
+    return true;
+}
+
 /* The launcher dialog: the output dimmed a little, a big light translucent card with the dock's icons as large round buttons, a "+" tile and (edit mode)
  * a red x on every icon; the add form replaces the icons. */
+/* Set while an icon is painted OVER the same icon (the GL launcher's lit cell): only its solid pixels are put down, so its shadow and soft edge are not
+ * blended twice. */
+static bool g_icon_solid_only;
+
+static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launcher_info *li, bool dyn);
+static void paint_launcher_drag(const struct paint_ctx *c, const struct lm_launcher_info *li);
+
 static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_info *li)
 {
     if (li->veil > 0.0f)
         fill_round(c, &li->rect, 0, (uint32_t)(0x40 * LM_CLAMP(li->veil, 0.0f, 1.0f)) << 24);
     if (li->veil_only)
         return;
-    fill_round(c, &li->card, 18, ALPHA(0xd2u, lm_theme.launcher_body));                          /* a light frosted body: most of it, the wallpaper only tints it */
+    paint_launcher_body(c, li, true);
+}
+
+/* The card and everything on it. `dyn` false leaves out what changes with the pointer (the lit cell, an icon in the hand, the drop marks): the GL renderer
+ * keeps the rest as a texture and draws those as small pieces of their own (lov_* below), so a hover does not repaint the whole card. */
+static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launcher_info *li, bool dyn)
+{
+    bool frosted = paint_launcher_frost(c, li, 18);
+    fill_round(c, &li->card, 18, ALPHA(frosted ? LAUNCHER_FROST_ALPHA : 0xd2u, lm_theme.launcher_body));        /* a light frosted body: the blurred wallpaper shows through it */
     stroke_round(c, &li->card, 18, ALPHA(0xe0u, lm_theme.launcher_body));
     if (li->searching) {
         char st[64];
@@ -1419,8 +1519,10 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
     }
     if (!li->form) {
         for (int g = li->first; g < li->last && g < li->n; g++) {       /* (the icons of the other pages are not painted) */
+            if (li->drag >= 0 && g == li->drag_slot)                    /* the place of the icon in the hand: empty */
+                continue;
             const struct lm_rect *b = &li->icon[g].box;
-            bool sel = li->sel == g;
+            bool sel = dyn && li->drag < 0 && li->sel == g;
             if (sel) {
                 struct lm_rect hl = li->icon[g].hit;
                 hl.x += 4;
@@ -1443,7 +1545,7 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             }
         }
         if (li->add.w > 0) {
-            bool sel = li->sel == li->n;
+            bool sel = dyn && li->drag < 0 && li->sel == li->n;
             float cx = (float)li->add.x + (float)li->add.w / 2.0f, cy = (float)li->add.y + 6.0f + (float)LM_LAUNCHER_ICON / 2.0f;
             if (sel) {
                 struct lm_rect hl = li->add;
@@ -1582,27 +1684,101 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             lc_text_centered(c, hc, "Close", lm_theme.glass_text);
         }
     }
-    if (li->drag >= 0 && li->icon[li->drag].item) {                     /* an icon in the hand: the dock lights up as the place to drop it */
-        if (li->drop.w > 0) {
-            bool hot = li->drop_pos >= 0;
-            fill_round(c, &li->drop, 22, hot ? ALPHA(0xe8u, lm_theme.launcher_body) : ALPHA(0xb4u, lm_theme.launcher_body));      /* (a light pill, the dock's icons are in front of it) */
-            stroke_round(c, &li->drop, 22, hot ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x80u, lm_theme.launcher_text));
-            struct lm_rect tl = lm_rect_make(li->drop.x, li->drop.y + 8, li->drop.w, LM_FONT_H);
-            lc_text_centered(c, &tl, "Drop it on the dock", lm_theme.launcher_text);
-            if (hot)
-                fill_round(c, &li->marker, 1, 0xf0000000u | COL_PANEL_ACCENT);
+    if (dyn)
+        paint_launcher_drag(c, li);
+}
+
+/* An icon in the hand: the dock lights up as the place to drop it, the cell it is over is outlined, its own place dims. Four pieces; the GL renderer
+ * draws each as a small texture of its own (lov_*), the software one all of them. */
+static bool lov_dragging(const struct lm_launcher_info *li)
+{
+    return li->drag >= 0 && li->drag_item;
+}
+
+static void lov_drop(const struct paint_ctx *c, const struct lm_launcher_info *li)               /* the pill over the dock */
+{
+    if (!lov_dragging(li) || li->drop.w <= 0)
+        return;
+    bool hot = li->drop_pos >= 0;
+    fill_round(c, &li->drop, 22, hot ? ALPHA(0xe8u, lm_theme.launcher_body) : ALPHA(0xb4u, lm_theme.launcher_body));      /* (a light pill, the dock's icons are in front of it) */
+    stroke_round(c, &li->drop, 22, hot ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x80u, lm_theme.launcher_text));
+    struct lm_rect tl = lm_rect_make(li->drop.x, li->drop.y + 8, li->drop.w, LM_FONT_H);
+    lc_text_centered(c, &tl, "Drop it on the dock", lm_theme.launcher_text);
+    if (hot)
+        fill_round(c, &li->marker, 1, 0xf0000000u | COL_PANEL_ACCENT);
+}
+
+/* The empty place the icon in the hand will take (the cell it is over, or its own): a faint plate with an outline. */
+static bool lov_slot_rect(const struct lm_launcher_info *li, struct lm_rect *r)
+{
+    if (!lov_dragging(li) || li->drag_slot < 0 || li->drag_slot >= li->n || li->drag_slot < li->first || li->drag_slot >= li->last)
+        return false;
+    *r = li->icon[li->drag_slot].hit;
+    r->x += 4;
+    r->w -= 8;
+    return r->w > 0;
+}
+
+static void lov_slot(const struct paint_ctx *c, const struct lm_launcher_info *li)
+{
+    struct lm_rect r;
+    if (!lov_slot_rect(li, &r))
+        return;
+    fill_round(c, &r, 12, ALPHA(0x22u, lm_theme.launcher_text));
+    stroke_round(c, &r, 12, li->drop_cell >= 0 ? (0xff000000u | COL_PANEL_ACCENT) : ALPHA(0x50u, lm_theme.launcher_text));
+}
+
+static void lov_hand(const struct paint_ctx *c, const struct lm_launcher_info *li)               /* the icon itself */
+{
+    if (lov_dragging(li))
+        paint_dock_icon(c, &li->drag_box, li->drag_item, 1.0f);
+}
+
+static void paint_launcher_drag(const struct paint_ctx *c, const struct lm_launcher_info *li)
+{
+    lov_drop(c, li);
+    lov_slot(c, li);
+    lov_hand(c, li);
+}
+
+/* The lit cell (the pointer or the keyboard is on it): its highlight and the brightened icon, or the "+" tile in the accent colour. Small, so a hover costs
+ * a small texture in GL. The label stays as the card has it. */
+static bool lov_sel_rect(const struct lm_launcher_info *li, struct lm_rect *r)
+{
+    if (li->form || li->sel < 0 || li->drag >= 0)
+        return false;
+    if (li->sel < li->n && li->sel >= li->first && li->sel < li->last)
+        *r = li->icon[li->sel].hit;
+    else if (li->sel == li->n && li->add.w > 0)
+        *r = li->add;
+    else
+        return false;
+    return true;
+}
+
+static void lov_sel(const struct paint_ctx *c, const struct lm_launcher_info *li)
+{
+    struct lm_rect hl;
+    if (!lov_sel_rect(li, &hl))
+        return;
+    hl.x += 4;
+    hl.w -= 8;
+    fill_round(c, &hl, 12, ALPHA(0x2cu, lm_theme.launcher_text));
+    if (li->sel < li->n) {
+        g_icon_solid_only = true;
+        paint_dock_icon(c, &li->icon[li->sel].box, li->icon[li->sel].item, 1.0f);
+        g_icon_solid_only = false;
+        if (li->edit) {
+            const struct lm_rect *x = &li->icon[li->sel].remove;
+            float xc = (float)x->x + (float)x->w / 2.0f, yc = (float)x->y + (float)x->h / 2.0f;
+            paint_shape(c, xc, yc, 10.5f, SHAPE_DISC, COL_PANEL, 0xff);
+            paint_shape(c, xc, yc, 9.0f, SHAPE_DISC, COL_PANEL_DANGER, 0xff);
+            paint_shape(c, xc, yc, 5.5f, SHAPE_CROSS, lm_theme.on_colour, 0xff);
         }
-        if (li->drop_cell >= 0) {                                         /* the cell it is over: it would take that place */
-            struct lm_rect tc = li->drop_cell == li->n ? li->add : li->icon[li->drop_cell].hit;
-            tc.x += 4;
-            tc.w -= 8;
-            stroke_round(c, &tc, 12, 0xff000000u | COL_PANEL_ACCENT);
-        }
-        struct lm_rect hl = li->icon[li->drag].hit;
-        hl.x += 4;
-        hl.w -= 8;
-        fill_round(c, &hl, 12, 0x30000000u);                              /* the place it came from dims */
-        paint_dock_icon(c, &li->drag_box, li->icon[li->drag].item, 1.0f);
+    } else {
+        float cx = (float)li->add.x + (float)li->add.w / 2.0f, cy = (float)li->add.y + 6.0f + (float)LM_LAUNCHER_ICON / 2.0f;
+        paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON / 2.0f, SHAPE_DISC, COL_PANEL_ACCENT, 0xff);
+        paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, COL_PANEL, 0xff);
     }
 }
 
@@ -1658,7 +1834,7 @@ static void paint_dock_icon_px(const struct paint_ctx *c, const struct lm_rect *
                 px = lm_dockicon_plate_pixel((uint32_t)plate, (float)x + 0.5f - cx, dy, R, lift);
                 if (alpha < 255)
                     px = fade_px(px, alpha);
-                if (px >> 24)
+                if ((px >> 24) && !(g_icon_solid_only && (px >> 24) != 255))
                     row[x] = blend_px(px, row[x]);
                 px = dock_image_px(it->img, &logo, x, y);
             } else {
@@ -1668,7 +1844,7 @@ static void paint_dock_icon_px(const struct paint_ctx *c, const struct lm_rect *
             }
             if (alpha < 255)
                 px = fade_px(px, alpha);
-            if (px >> 24)
+            if ((px >> 24) && !(g_icon_solid_only && (px >> 24) != 255))
                 row[x] = blend_px(px, row[x]);
         }
     }
@@ -3058,6 +3234,7 @@ void lm_render_destroy(struct lm_renderer *r)
     if (r->shot.timer)
         lm_timer_destroy(r->shot.timer);
     free(r->shot.thumb);
+    free(r->frost_px);
     lm_img_free(&r->wall.img);
     if (r->gl) {
         lm_gl_make_current(r->gl);

@@ -12,6 +12,7 @@
 #include "output.h"
 #include "render.h"
 #include "server.h"
+#include "version.h"
 
 static void add(struct lm_about_row *rows, int *n, int max, const char *label, const char *fmt, ...) __attribute__((format(printf, 5, 6)));
 
@@ -112,6 +113,13 @@ int lm_about_collect(struct lm_server *srv, struct lm_about_row *rows, int max)
     const char *conf = srv->config.conf_path;
     if (!fixed)
         add(rows, &n, max, "Config", "%.56s", conf && *conf && strcmp(conf, "none") ? conf : "(none, built-in defaults)");
+    if (!fixed) {                                                /* which commit this is, and when the repository was last pulled (tools/gen_version.sh, at build time) */
+        add(rows, &n, max, "Version", "build %s, %s", LM_VERSION_COUNT, LM_VERSION_HASH);
+        if (LM_VERSION_COMMIT_DATE[0])
+            add(rows, &n, max, "Commit", "%s", LM_VERSION_COMMIT_DATE);
+        if (LM_VERSION_PULL[0])
+            add(rows, &n, max, "Last pull", "%s", LM_VERSION_PULL);
+    }
     add(rows, &n, max, "Build", "%s", __DATE__);
     return n;
 }

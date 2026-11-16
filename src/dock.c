@@ -98,7 +98,7 @@ static int list_cap(const struct applist *L) { return L == &lists[0] ? LM_DOCK_M
 
 bool lm_dock_section(const char *section)
 {
-    return !strcmp(section, "dock") || !strcmp(section, "dock-apps") || !strcmp(section, "launcher-apps");
+    return !strcmp(section, "dock") || !strcmp(section, "dock-apps") || !strcmp(section, "launcher-apps") || !strcmp(section, "launcher");
 }
 
 bool lm_dock_split(const char *value, char *icon, size_t icon_n, char *cmd, size_t cmd_n)
@@ -149,9 +149,19 @@ static bool parse_int(const char *v, int lo, int hi, int *out)
     return true;
 }
 
+static char g_launcher_order[2048];                      /* [launcher] order = Name | Name | ...: the order of the grid (the dock's buttons and the launcher's own mixed) */
+
+const char *lm_launcher_order(void) { return g_launcher_order; }
+
 bool lm_dock_conf(void *ud, const char *section, const char *key, const char *value)
 {
     (void)ud;
+    if (!strcmp(section, "launcher")) {
+        if (strcmp(key, "order") || strlen(value) >= sizeof(g_launcher_order))
+            return false;
+        strcpy(g_launcher_order, value);
+        return true;
+    }
     if (!strcmp(section, "dock")) {
         if (!strcmp(key, "enabled")) return parse_bool(value, &lm_dock.enabled);
         if (!strcmp(key, "autohide")) return parse_bool(value, &lm_dock.autohide);
@@ -217,6 +227,7 @@ void lm_dock_reset(void)
 {
     lm_dock = BUILTIN_SETTINGS;
     lists[0].raw_n = lists[1].raw_n = 0;
+    g_launcher_order[0] = 0;
 }
 
 bool lm_dock_check(const char *key, const char *value, bool *builtin)

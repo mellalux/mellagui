@@ -440,34 +440,36 @@ void launcher_drag_motion(struct lm_wm *wm)
     launcher_damage(wm);
 }
 
-/* An icon of the grid was let go over another cell, or over the empty page of edit mode: it takes that place (or the end) in its own list - the dock's buttons among
- * the dock's, the launcher's own among theirs. */
+/* An icon of the grid was let go over another cell, or over the empty page of edit mode: it takes that place (or the end) in the grid. The grid's order is its own
+ * (`[launcher] order`), so the dock's buttons and the launcher's own mix freely and nothing changes lists. */
 static void launcher_reorder(struct lm_wm *wm, int g, int target_cell, bool to_end)
 {
     int n = launcher_count();
     const struct lm_dock_item *it = launcher_item(g, NULL);
-    if (!it || lm_search_owns(it))
+    if (!it || lm_search_owns(it) || g < 0 || g >= n)
         return;
-    const struct lm_dock_item *t = !to_end && target_cell >= 0 && target_cell < n ? launcher_item(target_cell, NULL) : NULL;
-    if (t && t == it)
+    int t = to_end || target_cell >= n ? n - 1 : target_cell;
+    if (t < 0 || t == g)
         return;
-    if (t && t->launcher_only != it->launcher_only) {
-        lm_wm_notify(wm, "Launcher", "The dock's buttons and the launcher's own ones keep to their own groups", 4000);
-        return;
-    }
-    bool ok;
-    if (it->launcher_only) {
-        int to = t ? t->raw : lm_launchapps_raw_count() - 1;
-        if (to == it->raw)
+    const struct lm_dock_item *list[LM_LAUNCHER_MAX];
+    for (int i = 0; i < n && i < LM_LAUNCHER_MAX; i++)
+        list[i] = launcher_item(i, NULL);
+    const struct lm_dock_item *moved = list[g];
+    if (t > g)
+        memmove(&list[g], &list[g + 1], (size_t)(t - g) * sizeof(list[0]));
+    else
+        memmove(&list[t + 1], &list[t], (size_t)(g - t) * sizeof(list[0]));
+    list[t] = moved;
+    char order[2000];
+    size_t o = 0;
+    for (int i = 0; i < n; i++) {
+        if (!list[i] || strstr(list[i]->name, " | ") || o + strlen(list[i]->name) + 4 >= sizeof(order)) {
+            lm_wm_notify(wm, "Launcher", "Could not move it: the names are too long to keep the order", 4000);
             return;
-        ok = lm_settings_launcher_reorder(wm->srv, it->raw, to);
-    } else {
-        int to = t ? t->raw : lm_dock_raw_count() - 1;
-        if (to == it->raw)
-            return;
-        ok = lm_settings_dock_reorder(wm->srv, it->raw, to);
+        }
+        o += (size_t)snprintf(order + o, sizeof(order) - o, "%s%s", i ? " | " : "", list[i]->name);
     }
-    if (!ok)
+    if (!lm_settings_launcher_set_order(wm->srv, order))
         lm_wm_notify(wm, "Launcher", "Could not move it: there is no config file", 4000);
 }
 

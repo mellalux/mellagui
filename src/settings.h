@@ -159,6 +159,9 @@ bool lm_settings_launcher_del(struct lm_server *srv, int raw_index);
 bool lm_settings_dock_reorder(struct lm_server *srv, int from, int to);
 /* The same in the launcher's own list [launcher-apps]: entry `from` ends up at place `to`. */
 bool lm_settings_launcher_reorder(struct lm_server *srv, int from, int to);
+
+/* Writes `[launcher] order = ...` (names separated by " | "; "" removes the line) and reloads. False without a config file. */
+bool lm_settings_launcher_set_order(struct lm_server *srv, const char *order);
 bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at);
 bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index);
 

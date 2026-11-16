@@ -62,6 +62,91 @@ static void search_sync(void)
     }
 }
 
+/* The buttons the dialog shows (the dock's, then the launcher's own, the ones the typed text lets through), put in the order of `[launcher] order`: the names
+ * listed there first, in that order, then the rest as they were. The permutation is kept while nothing it depends on changes. */
+#define LB_MAX (LM_DOCK_MAX + LM_LAUNCHER_APPS_MAX)
+
+struct lbase {
+    int n;
+    const struct lm_dock_item *item[LB_MAX];
+    int dock[LB_MAX];                                               /* index in the dock, -1 only in the launcher */
+};
+
+static void launcher_order_names(const char *order, char names[][LM_DOCK_NAME_MAX], int *n, int max)
+{
+    *n = 0;
+    for (const char *p = order; *p && *n < max;) {
+        const char *e = strstr(p, " | ");
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        while (len > 0 && p[len - 1] == ' ')
+            len--;
+        while (len > 0 && *p == ' ') {
+            p++;
+            len--;
+        }
+        if (len > 0 && len < LM_DOCK_NAME_MAX) {
+            memcpy(names[*n], p, len);
+            names[*n][len] = 0;
+            (*n)++;
+        }
+        if (!e)
+            break;
+        p = e + 3;
+    }
+}
+
+static void launcher_base(struct lbase *b)
+{
+    const struct lm_dock_item *raw[LB_MAX];
+    int rdock[LB_MAX], rn = 0;
+    for (int i = 0; i < lm_dock_count() && rn < LB_MAX; i++)
+        if (launcher_shown(lm_dock_item(i))) {
+            raw[rn] = lm_dock_item(i);
+            rdock[rn++] = i;
+        }
+    for (int i = 0; i < lm_launchapps_count() && rn < LB_MAX; i++)
+        if (launcher_shown(lm_launchapps_item(i))) {
+            raw[rn] = lm_launchapps_item(i);
+            rdock[rn++] = -1;
+        }
+    static struct lbase cache;                                      /* (the order is worked out again only when the buttons, their order or the filter change) */
+    static uint64_t cache_sig;
+    static bool cache_ok;
+    uint64_t sig = 1469598103934665603ull;
+    for (int i = 0; i < rn; i++) {
+        sig = (sig ^ (uint64_t)(uintptr_t)raw[i]) * 1099511628211ull;
+        for (const char *c = raw[i]->name; *c; c++)
+            sig = (sig ^ (unsigned char)*c) * 1099511628211ull;
+    }
+    for (const char *c = lm_launcher_order(); *c; c++)
+        sig = (sig ^ (unsigned char)*c) * 1099511628211ull;
+    if (cache_ok && sig == cache_sig) {
+        *b = cache;
+        return;
+    }
+    static char names[LB_MAX][LM_DOCK_NAME_MAX];
+    int nn;
+    launcher_order_names(lm_launcher_order(), names, &nn, LB_MAX);
+    bool used[LB_MAX] = { false };
+    b->n = 0;
+    for (int k = 0; k < nn; k++)
+        for (int i = 0; i < rn; i++)
+            if (!used[i] && !strcasecmp(raw[i]->name, names[k])) {
+                used[i] = true;
+                b->item[b->n] = raw[i];
+                b->dock[b->n++] = rdock[i];
+                break;
+            }
+    for (int i = 0; i < rn; i++)
+        if (!used[i]) {
+            b->item[b->n] = raw[i];
+            b->dock[b->n++] = rdock[i];
+        }
+    cache = *b;
+    cache_sig = sig;
+    cache_ok = true;
+}
+
 int launcher_count(void)
 {
     int n = 0;
@@ -71,6 +156,7 @@ int launcher_count(void)
     for (int i = 0; i < lm_launchapps_count(); i++)
         if (launcher_shown(lm_launchapps_item(i)))
             n++;
+    n = LM_MIN(n, LB_MAX);
     search_sync();
     return n + search_n;
 }
@@ -80,15 +166,14 @@ const struct lm_dock_item *launcher_item(int g, int *dock_index)
 {
     if (dock_index)
         *dock_index = -1;
-    for (int i = 0; i < lm_dock_count(); i++)
-        if (launcher_shown(lm_dock_item(i)) && g-- == 0) {
-            if (dock_index)
-                *dock_index = i;
-            return lm_dock_item(i);
-        }
-    for (int i = 0; i < lm_launchapps_count(); i++)
-        if (launcher_shown(lm_launchapps_item(i)) && g-- == 0)
-            return lm_launchapps_item(i);
+    struct lbase b;
+    launcher_base(&b);
+    if (g >= 0 && g < b.n) {
+        if (dock_index)
+            *dock_index = b.dock[g];
+        return b.item[g];
+    }
+    g -= b.n;
     search_sync();
     return g >= 0 && g < search_n ? lm_search_item(g) : NULL;           /* what the search found comes after the buttons */
 }
@@ -315,10 +400,12 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     int card_h = !li->form && !li->edit ? ch - (LC_FOOT - LC_FOOT_SLIM) : ch;
     li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, card_h);
     li->drag = -1;
+    li->drag_slot = -1;
     li->drop_pos = -1;
     li->drop_cell = -1;
     if (wm->launcher_drag && !li->form && wm->launcher_drag_g < n) {
         li->drag = wm->launcher_drag_g;
+        li->drag_item = li->icon[li->drag].item;
         li->drag_box = lm_rect_make((int)wm->drag_x - 28, (int)wm->drag_y - 28, 56, 56);
         launcher_drop_zone(wm, o, &li->drop, &li->marker, &li->drop_pos);
         if (li->drop_pos < 0) {                                         /* not over the dock: over a cell of the grid, or the empty page (the end of the list) */
@@ -328,13 +415,31 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
             } else {
                 for (int g = li->first; g < li->last; g++) {
                     const struct lm_rect *r = g == n ? &li->add : &li->icon[g].hit;
-                    if (g != li->drag && lm_rect_contains(r, px, py)) {
+                    if (lm_rect_contains(r, px, py)) {
                         li->drop_cell = g;
                         break;
                     }
                 }
             }
         }
+        /* The cells make room: with the icon over cell t, those between its own place and t move one cell towards it (the way the list will be after the drop),
+         * and cell t shows a gap. Over nothing, its own place stays empty. */
+        int d = li->drag, t = li->drop_cell >= 0 ? LM_MIN(li->drop_cell, n - 1) : -1;
+        li->drag_slot = t >= 0 ? t : d;
+        if (t >= 0 && t != d)
+            for (int k = li->first; k < li->last && k < n; k++) {
+                int src = k;
+                if (k == t)
+                    src = d;
+                else if (t > d && k >= d && k < t)
+                    src = k + 1;
+                else if (t < d && k > t && k <= d)
+                    src = k - 1;
+                if (src == k)
+                    continue;
+                li->icon[k].item = launcher_item(src, NULL);
+                li->icon[k].running = li->icon[k].item && !lm_search_owns(li->icon[k].item) && dock_window_count(wm, li->icon[k].item) > 0;
+            }
     }
     li->title = lm_rect_make(li->card.x, li->card.y + 18, li->card.w, LM_FONT_H);
     int by = li->card.y + li->card.h - 16 - LC_BTN_H, bx = li->card.x + li->card.w / 2;
@@ -411,6 +516,49 @@ void launcher_damage(struct lm_wm *wm)
         struct lm_rect r = lm_output_rect(o);
         damage_rect(wm, &r);
     }
+}
+
+/* The pointer moved the highlight (a cell or a button): only those places are painted again, not the whole output - the grid, its icons and the frosted
+ * body are the same. `old_sel` / `old_btn` are what was lit before; the new ones are in `wm`. */
+void launcher_damage_hover(struct lm_wm *wm, int old_sel, int old_btn)
+{
+    struct lm_output *o = launcher_output(wm);
+    if (!o)
+        return;
+    struct lm_launcher_info *li = malloc(sizeof(*li));
+    if (!li) {
+        launcher_damage(wm);
+        return;
+    }
+    launcher_info(wm, o, li);
+    if (li->form) {                                                 /* the form's buttons only */
+        for (int i = 0; i < 2; i++)
+            if (li->button[i].w > 0 && (i == old_btn || i == wm->launcher_hover_btn)) {
+                struct lm_rect r = lm_rect_make(li->button[i].x - 6, li->button[i].y - 6, li->button[i].w + 12, li->button[i].h + 12);
+                damage_rect(wm, &r);
+            }
+        free(li);
+        return;
+    }
+    int sels[2] = { old_sel, wm->launcher_sel };
+    for (int k = 0; k < 2; k++) {
+        int g = sels[k];
+        struct lm_rect r = { 0, 0, 0, 0 };
+        if (g >= li->first && g < li->last && g < li->n)
+            r = li->icon[g].hit;
+        else if (g == li->n && li->add.w > 0)
+            r = li->add;
+        if (r.w > 0) {
+            r = lm_rect_make(r.x - 6, r.y - 6, r.w + 12, r.h + 12);   /* (a little room: the icons' shadows) */
+            damage_rect(wm, &r);
+        }
+    }
+    for (int i = 0; i < 2; i++)
+        if (li->button[i].w > 0 && (i == old_btn || i == wm->launcher_hover_btn)) {
+            struct lm_rect r = lm_rect_make(li->button[i].x - 6, li->button[i].y - 6, li->button[i].w + 12, li->button[i].h + 12);
+            damage_rect(wm, &r);
+        }
+    free(li);
 }
 
 void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)

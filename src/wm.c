@@ -1540,9 +1540,13 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         else if (pick->kind == LM_PICK_LAUNCHER_BACKDROP || pick->kind == LM_PICK_LAUNCHER_CARD)
             sel = wm->launcher_form ? sel : -1;
         if (hb != wm->launcher_hover_btn || sel != wm->launcher_sel) {
+            int old_sel = wm->launcher_sel, old_hb = wm->launcher_hover_btn;
             wm->launcher_hover_btn = hb;
             wm->launcher_sel = sel;
-            launcher_damage(wm);
+            if (wm->launcher_drag)
+                launcher_damage(wm);
+            else
+                launcher_damage_hover(wm, old_sel, old_hb);
         }
     }
     if (wm->osk_open) {                                         /* the key under the pointer lights up */

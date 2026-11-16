@@ -63,6 +63,8 @@ struct headless {
     struct lm_framebuffer fb;
     struct hl_extra extra[3];
     int nextra;
+    uint64_t damage_area;           /* the pixels of the damage rectangles presented since `damage reset` (a test of how much a change repaints) */
+    int damage_frames;
     uint64_t frames;
     struct lm_timer *ready_timer;
     int ctl_fd;
@@ -100,8 +102,9 @@ static struct lm_framebuffer *hl_get_framebuffer(struct lm_output *out)
 static int hl_present(struct lm_output *out, const struct lm_rect *damage, int n)
 {
     struct headless *h = HL(out->backend);
-    (void)damage;
-    (void)n;
+    for (int i = 0; i < n; i++)
+        h->damage_area += (uint64_t)damage[i].w * (uint64_t)damage[i].h;
+    h->damage_frames++;
     h->frames++;
     lm_timer_arm_ms(h->ready_timer, 16, 0);
     return 0;
@@ -362,6 +365,11 @@ static void ctl_command(struct ctl_client *c, char *line)
             lm_timer_arm_ms(h->ready_timer, 1, 0);
         }
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "damage")) {
+        /* damage [reset] -> "damage area=<pixels> frames=<n>": what the renderer reported as repainted since the last reset */
+        if (a1 && !strcmp(a1, "reset"))
+            h->damage_area = 0, h->damage_frames = 0;
+        ctl_reply(c, "damage area=%llu frames=%d\nok\n", (unsigned long long)h->damage_area, h->damage_frames);
     } else if (!strcmp(cmd, "loop")) {
         /* loop -> "loop stalls=<n> worst_ms=<n> threshold=<ms> worker=<jobs not finished>" (the stall meter, loop.h; worker.h), then "ok";
          * `loop stall MS` blocks the loop for that long (a test of the meter), `loop reset` forgets the counts */

@@ -989,6 +989,17 @@ class TestWindows(Base):
                 rows.append(tuple(l[4:].split('|', 1)))
         return is_open, info, rows
 
+    def test_the_about_dialog_shows_the_version_and_the_time_of_the_last_pull(self):
+        p, c, stop = self.private_compositor('mellagui-about-ver')
+        c.sync()
+        c.cmd('about open')
+        rows = dict(self.about(c)[2])
+        self.assertRegex(rows['Version'], r'^build (\d+|unknown), \S+$')
+        if 'Commit' in rows:
+            self.assertRegex(rows['Commit'], r'^\d{4}-\d\d-\d\d \d\d:\d\d$')
+        if 'Last pull' in rows:                                   # (a checkout that was never fetched has none)
+            self.assertRegex(rows['Last pull'], r'^\d{4}-\d\d-\d\d \d\d:\d\d$')
+
     def test_the_logo_button_opens_the_about_dialog(self):
         ctl.abs(900, 500)
         ctl.sync()
@@ -21145,6 +21156,60 @@ class TestLauncherPages(Base):
         c.button(272, False)
 
 
+class TestLauncherFrost(Base):
+    """The launcher card is frosted glass: the (blurred) wallpaper shows through its light body; a hover repaints a few cells, not the whole screen."""
+
+    def start(self, name, wall=None):
+        self.path = os.path.join(tmp, name + '.conf')
+        with open(self.path, 'w') as f:
+            f.write('[dock-apps]\nLauncher = [launcher] @launcher\n[launcher-apps]\nA = [files] true\nB = [editor] true\n')
+        p, c, stop = self.private_compositor(name, '--config', self.path, '--size', '1000x640')
+        c.sync()
+        if wall:
+            c.cmd('settings wallpaper-mode stretch')
+            c.cmd('settings wallpaper ' + wall)
+        c.cmd('launcher open')
+        time.sleep(1.3)
+        c.abs(5, 300)
+        c.sync()
+        time.sleep(0.2)
+        return c
+
+    def png(self, name, color):
+        path = os.path.join(tmp, name)
+        with open(path, 'wb') as f:
+            f.write(make_png(40, 30, 2, 8, [[color] * 40 for _ in range(30)]))
+        return path
+
+    def card_px(self, c, tag):
+        m = [re.search(r'^card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', l) for l in c.cmd('launcher')]
+        x, y, w, h = map(int, [g for g in m if g][0].groups())
+        d = c.dump(os.path.join(tmp, 'frost-%s.ppm' % tag))
+        return d.px(x + 40, y + h // 2)                               # inside the card, at its left edge between the icons
+
+    def test_the_wallpaper_shows_through_the_card_as_colour(self):
+        red = self.card_px(self.start('mellagui-frost1', self.png('frost-r.png', (230, 20, 20))), 'red')
+        blue = self.card_px(self.start('mellagui-frost2', self.png('frost-b.png', (20, 20, 230))), 'blue')
+        self.assertGreater(red[0] - red[2], 12, red)                   # warmer over a red wallpaper ...
+        self.assertGreater(blue[2] - blue[0], 12, blue)                # ... cooler over a blue one
+        self.assertGreater(sum(red), 450, red)                         # and still a light card for dark text
+
+    def test_a_hover_damages_only_the_cells_that_changed(self):
+        if os.environ.get('MELLAGUI_RENDERER') == 'gl':
+            self.skipTest('the GL renderer draws the whole output every frame; its hover cost is in the textures (see the benchmark in CLAUDE.md)')
+        c = self.start('mellagui-frost3')
+        icons = [l for l in c.cmd('launcher') if l.startswith('icon')]
+        m = re.search(r'x=(\d+) y=(\d+) w=(\d+) h=(\d+)', icons[0])
+        x, y, w, h = map(int, m.groups())
+        c.cmd('damage reset')
+        c.abs(x + w // 2, y + h // 2)
+        c.sync()
+        time.sleep(0.2)
+        area = int(re.search(r'area=(\d+)', [l for l in c.cmd('damage') if l.startswith('damage')][0]).group(1))
+        self.assertGreater(area, 0)
+        self.assertLess(area, 200 * 200, area)                          # one cell and its margin, not the 1000 x 640 screen
+
+
 class TestLauncherMoving(Base):
     """Icons of the launcher are dragged to new places; edit mode has one more, empty page to drop them on."""
 
@@ -21163,13 +21228,21 @@ class TestLauncherMoving(Base):
     centre = staticmethod(TestLauncherPages.centre)
 
     def order(self):
-        names, on = [], False
+        """The grid's order as the file keeps it: `[launcher] order = A | B | ...` ([] while there is none)."""
+        on = False
         for l in open(self.path).read().splitlines():
             if l.startswith('['):
-                on = l == '[launcher-apps]'
-            elif on and '=' in l:
-                names.append(l.split('=')[0].strip())
-        return names
+                on = l == '[launcher]'
+            elif on and l.startswith('order'):
+                return [x.strip() for x in l.split('=', 1)[1].split(' | ')]
+        return []
+
+    def wait_order(self, check):
+        for _ in range(60):
+            if check(self.order()):
+                break
+            time.sleep(0.05)
+        return self.order()
 
     def drag(self, c, a, b, steps=6, hold=0.0):
         x0, y0 = a
@@ -21185,16 +21258,29 @@ class TestLauncherMoving(Base):
         c = self.start('mellagui-lm1')
         d = self.info(c)
         ic = {i[1]: i[2] for i in d['icons']}
-        self.assertEqual(self.order(), ['App%02d' % i for i in range(1, 8)])
+        self.assertEqual(self.order(), [])
         self.drag(c, self.centre(ic['App02']), self.centre(ic['App05']))
         c.button(272, False)
-        for _ in range(40):
-            if self.order()[0:3] != ['App01', 'App02', 'App03']:
-                break
-            time.sleep(0.05)
-        self.assertEqual(self.order(), ['App01', 'App03', 'App04', 'App05', 'App02', 'App06', 'App07'])
+        order = self.wait_order(lambda o: o)
+        self.assertEqual(order[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])
         names = [i[1] for i in self.info(c)['icons']]
         self.assertEqual(names[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])        # the grid follows
+
+    def test_the_icons_below_make_room_while_it_is_carried(self):
+        c = self.start('mellagui-lm6')
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        self.drag(c, self.centre(ic['App02']), self.centre(ic['App05']), hold=0.3)                 # still held over App05's cell
+        names = [i[1] for i in self.info(c)['icons']]
+        self.assertEqual(names[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])   # App03..App05 moved up, its slot is at App05's cell
+        slot = self.info(c)['icons'][5]
+        self.assertEqual(slot[1], 'App02')
+        self.drag(c, self.centre(ic['App05']), self.centre(ic['App01']), hold=0.3)                 # on over App01's cell: the others move the other way
+        names = [i[1] for i in self.info(c)['icons']]
+        self.assertEqual(names[:7], ['Term', 'App02', 'App01', 'App03', 'App04', 'App05', 'App06'])
+        c.button(272, False)
+        order = self.wait_order(lambda o: o)
+        self.assertEqual(order[:4], ['Term', 'App02', 'App01', 'App03'])
 
     def test_a_plain_click_still_starts_the_program_and_a_drag_over_nothing_changes_nothing(self):
         c = self.start('mellagui-lm2')
@@ -21207,15 +21293,18 @@ class TestLauncherMoving(Base):
         time.sleep(0.4)
         self.assertEqual(self.order(), before)
 
-    def test_a_dock_button_does_not_move_among_the_launchers_own(self):
+    def test_a_dock_button_moves_among_the_launchers_own_without_leaving_the_dock(self):
         c = self.start('mellagui-lm3')
         d = self.info(c)
         ic = {i[1]: i[2] for i in d['icons']}
         before = open(self.path).read()
         self.drag(c, self.centre(ic['Term']), self.centre(ic['App03']))                            # the dock's Term onto a launcher-only icon
         c.button(272, False)
-        time.sleep(0.5)
-        self.assertEqual(open(self.path).read(), before)
+        order = self.wait_order(lambda o: o)
+        self.assertEqual(order[:4], ['App01', 'App02', 'App03', 'Term'])
+        text = open(self.path).read()
+        self.assertEqual(text.split('\n[launcher]\n')[0].strip(), before.strip())                                      # the dock's and the launcher's own lists are as they were
+        self.assertIn('Term = [terminal] true', text.split('[launcher-apps]')[0])
 
     def test_edit_mode_adds_an_empty_page_that_goes_away_with_it(self):
         c = self.start('mellagui-lm4')
@@ -21259,13 +21348,9 @@ class TestLauncherMoving(Base):
         c.abs(g[0] + g[2] // 2, g[1] + g[3] // 2)                                                 # into the middle of the empty page
         time.sleep(0.1)
         c.button(272, False)
-        for _ in range(40):
-            if self.order()[-1] == 'App02':
-                break
-            time.sleep(0.05)
-        order = self.order()
+        order = self.wait_order(lambda o: o and o[-1] == 'App02')
         self.assertEqual(order[-1], 'App02')
-        self.assertEqual(len(order), 29)
+        self.assertEqual(len(order), 30)
 
 
 class TestLauncher(Base):

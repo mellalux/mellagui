@@ -1598,6 +1598,19 @@ bool lm_settings_launcher_reorder(struct lm_server *srv, int from, int to)
     return dock_commit(srv, &l, "launcher-apps");
 }
 
+static bool order_same(const char *existing, void *ud) { return !strcmp(existing, ud); }
+
+bool lm_settings_launcher_set_order(struct lm_server *srv, const char *order)
+{
+    const char *path = srv->config.conf_path;
+    if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
+        return false;
+    if (!lm_confedit_set_key(path, "launcher", order_same, "order", "order", order && *order ? order : NULL))
+        return false;
+    srv->reload_config(srv, true);
+    return true;
+}
+
 bool lm_settings_launcher_to_dock(struct lm_server *srv, int raw_index, int at)
 {
     const char *nm, *ic, *cm;

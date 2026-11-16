@@ -343,7 +343,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         int room = li->rect.h - 20 - LC_HEAD - LC_FOOT;
         int rows_fit = LM_CLAMP(room / LC_CELL_H, 1, LC_MAX_ROWS);
         int rows, dots_h = 0;
-        bool extra = li->edit && !li->searching;                       /* edit mode: one more, empty page at the end, to drop an icon on */
+        bool extra = (li->edit || wm->launcher_drag) && !li->searching;     /* edit mode, or while an icon is carried: one more, empty page at the end, to drop it on */
         if (!extra && (total_rows <= rows_fit || (room < 2 * LC_CELL_H && total_rows * (LC_ICON + 8 + LM_FONT_H + 6) <= room))) {      /* everything fits on one page */
             rows = total_rows;
             li->pages = li->real_pages = 1;

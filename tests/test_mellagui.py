@@ -21266,6 +21266,21 @@ class TestLauncherMoving(Base):
         names = [i[1] for i in self.info(c)['icons']]
         self.assertEqual(names[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])        # the grid follows
 
+    def test_a_next_page_appears_while_an_icon_is_carried_and_goes_with_the_drag(self):
+        c = self.start('mellagui-lm7')
+        d = self.info(c)
+        self.assertEqual((d['pages'], d['edit']), (1, 0))                                          # not in edit mode, one page of icons
+        ic = {i[1]: i[2] for i in d['icons']}
+        self.drag(c, self.centre(ic['App02']), self.centre(ic['App04']), hold=0.2)
+        d = self.info(c)
+        self.assertEqual((d['pages'], len(d['dots'])), (2, 2))                                     # the empty page to drop it on
+        card = d['card']
+        c.abs(card[0] + card[2] // 2, card[1] + 28)                                                # over the title: nothing to drop on
+        c.button(272, False)
+        time.sleep(0.3)
+        d = self.info(c)
+        self.assertEqual((d['pages'], len(d['dots'])), (1, 0))                                     # gone again
+
     def test_the_icons_below_make_room_while_it_is_carried(self):
         c = self.start('mellagui-lm6')
         d = self.info(c)

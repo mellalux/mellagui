@@ -491,6 +491,10 @@ void launcher_drag_finish(struct lm_wm *wm)
         }
     } else if (it && li && (li->drop_cell >= 0 || li->drop_end)) {
         launcher_reorder(wm, g, li->drop_cell, li->drop_end);
+        if (li->per_page > 0) {                                     /* the page it landed on shows (the temporary last page is gone with the drag unless edit mode keeps it) */
+            int n = launcher_count(), t = li->drop_end ? n - 1 : LM_MIN(li->drop_cell, n - 1);
+            wm->launcher_page = LM_CLAMP(t / li->per_page, 0, LM_MAX(li->real_pages - 1, 0));
+        }
     }
     free(li);
 }

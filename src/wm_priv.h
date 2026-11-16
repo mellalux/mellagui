@@ -322,6 +322,9 @@ struct lm_wm {
     int launcher_edit_raw;
     char launcher_icon[LM_DOCK_ICON_MAX];           /* the form's icon text: empty (guess), a built-in name, theme:NAME or a picture file */
     int launcher_sel, launcher_hover_btn, launcher_focus;
+    int launcher_page;          /* the page of icons showing (0 = the first); the grid shows as many as fit, the rest are on more pages */
+    int64_t launcher_flip_ms;   /* when a dragged icon last turned a page at the edge */
+    double launcher_wheel;      /* smooth scrolling that has not turned a page yet */
     int64_t settings_spawn_ms;  /* when the settings panel was last started (its window may not be there yet) */
     int launcher_caret[3];      /* the text cursor of the form's name / command / icon field (a byte offset; -1 = the end) */
     int launcher_help;          /* 0 none, else the form field (+ 1) whose help card is open */

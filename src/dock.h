@@ -30,6 +30,7 @@
 #include "img.h"
 
 #define LM_DOCK_MAX 16
+#define LM_LAUNCHER_APPS_MAX 32                         /* [launcher-apps] may be longer than the dock: MellaGUI's own programs alone are 14 and they keep coming */
 #define LM_DOCK_NAME_MAX 64
 #define LM_DOCK_ICON_MAX 256
 #define LM_DOCK_CMD_MAX 1024
@@ -90,7 +91,7 @@ bool lm_dock_cmd_is_launcher(const char *cmd);
 int lm_launchapps_default_count(void);
 bool lm_launchapps_default(int i, const char **name, const char **icon, const char **cmd);
 
-/* The launcher dialog's own buttons, [launcher-apps] (the same "Name = [icon] command" lines, at most LM_DOCK_MAX): what the launcher shows
+/* The launcher dialog's own buttons, [launcher-apps] (the same "Name = [icon] command" lines, at most LM_LAUNCHER_APPS_MAX): what the launcher shows
  * besides the dock's buttons; one whose name the dock has is not listed again (the dock's wins). Resolved like the dock's. */
 int lm_launchapps_count(void);
 const struct lm_dock_item *lm_launchapps_item(int i);

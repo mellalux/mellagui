@@ -87,14 +87,16 @@ struct app_item {
 };
 /* Two lists of buttons: [dock-apps] (the dock) and [launcher-apps] (the launcher dialog's own ones). */
 struct applist {
-    struct raw_item raw[LM_DOCK_MAX];
+    struct raw_item raw[LM_LAUNCHER_APPS_MAX];
     int raw_n;
-    struct app_item items[LM_DOCK_MAX];
+    struct app_item items[LM_LAUNCHER_APPS_MAX];
     int item_n;
 };
 static struct applist lists[2];
 #define DOCK_LIST (&lists[0])
 #define LAUNCH_LIST (&lists[1])
+/* how many entries a list holds: the dock's row is 16 at most, the launcher's own list is longer */
+static int list_cap(const struct applist *L) { return L == &lists[0] ? LM_DOCK_MAX : LM_LAUNCHER_APPS_MAX; }
 
 bool lm_dock_section(const char *section)
 {
@@ -177,8 +179,8 @@ bool lm_dock_conf(void *ud, const char *section, const char *key, const char *va
     }
     if (!strcmp(section, "dock-apps") || !strcmp(section, "launcher-apps")) {
         struct applist *L = strcmp(section, "dock-apps") ? LAUNCH_LIST : DOCK_LIST;
-        if (L->raw_n >= LM_DOCK_MAX) {
-            lm_warn("%s: at most %d entries, '%s' ignored", section, LM_DOCK_MAX, key);
+        if (L->raw_n >= list_cap(L)) {
+            lm_warn("%s: at most %d entries, '%s' ignored", section, list_cap(L), key);
             return true;
         }
         struct raw_item *r = &L->raw[L->raw_n];
@@ -434,7 +436,7 @@ static void load_icon(struct app_item *it, const char *name, const char *spec)
 static void resolve_list(struct applist *L, bool launcher_only)
 {
     free_items(L);
-    for (int i = 0; i < L->raw_n && L->item_n < LM_DOCK_MAX; i++) {
+    for (int i = 0; i < L->raw_n && L->item_n < list_cap(L); i++) {
         struct app_item *it = &L->items[L->item_n];
         if (launcher_only)                                      /* a name the dock has is the dock's: it shows in the launcher through it */
             for (int d = 0; d < DOCK_LIST->item_n; d++)
@@ -499,14 +501,14 @@ static void ensure_launcher(void)
 }
 
 /* The built-in launcher buttons as (name, icon, command): parsed once from DEFAULT_LAUNCHER. */
-static struct raw_item default_launcher[LM_DOCK_MAX];
+static struct raw_item default_launcher[LM_LAUNCHER_APPS_MAX];
 static int default_launcher_n = -1;
 
 static bool default_launcher_conf(void *ud, const char *section, const char *key, const char *value)
 {
     (void)ud;
     struct raw_item *r = &default_launcher[default_launcher_n];
-    if (strcmp(section, "launcher-apps") || default_launcher_n >= LM_DOCK_MAX || !lm_dock_split(value, r->icon, sizeof(r->icon), r->cmd, sizeof(r->cmd)))
+    if (strcmp(section, "launcher-apps") || default_launcher_n >= LM_LAUNCHER_APPS_MAX || !lm_dock_split(value, r->icon, sizeof(r->icon), r->cmd, sizeof(r->cmd)))
         return false;
     snprintf(r->name, sizeof(r->name), "%s", key);
     default_launcher_n++;

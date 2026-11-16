@@ -1412,7 +1412,8 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         fill_round(c, &li->rect, 0, (uint32_t)(0x40 * LM_CLAMP(li->veil, 0.0f, 1.0f)) << 24);
     if (li->veil_only)
         return;
-    fill_round(c, &li->card, 18, ALPHA(0x3cu, lm_theme.glass));                                  /* light glass: a white veil over the wallpaper */
+    fill_round(c, &li->card, 18, ALPHA(0xb8u, lm_theme.ink));                                    /* a dark body, so that the white names read on any wallpaper ... */
+    fill_round(c, &li->card, 18, ALPHA(0x30u, lm_theme.glass));                                  /* ... and a light glass veil over it */
     stroke_round(c, &li->card, 18, ALPHA(0x8cu, lm_theme.glass));
     if (li->searching) {
         char st[64];
@@ -1422,7 +1423,7 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
         lc_text_centered(c, &li->title, li->form ? (li->editing ? "Change an application" : "Add an application") : "Applications", lm_theme.glass_text);
     }
     if (!li->form) {
-        for (int g = 0; g < li->n; g++) {
+        for (int g = li->first; g < li->last && g < li->n; g++) {       /* (the icons of the other pages are not painted) */
             const struct lm_rect *b = &li->icon[g].box;
             bool sel = li->sel == g;
             if (sel) {
@@ -1459,6 +1460,22 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             paint_shape(c, cx, cy, (float)LM_LAUNCHER_ICON * 0.27f, SHAPE_PLUS, sel ? COL_PANEL : lm_theme.glass, 0xff);
             struct lm_rect label = lm_rect_make(li->add.x, (int)cy + LM_LAUNCHER_ICON / 2 + 10, li->add.w, LM_FONT_H);
             lc_text_centered(c, &label, "Add", lm_theme.glass_text);
+        }
+        if (li->pages > 1) {                                                /* page dots, and an arrow at each side while there is a page that way */
+            for (int i = 0; i < li->pages; i++) {
+                const struct lm_rect *d = &li->dot[i];
+                bool cur = i == li->page;
+                paint_shape(c, (float)d->x + (float)d->w / 2.0f, (float)d->y + (float)d->h / 2.0f, cur ? 4.6f : 3.6f, SHAPE_DISC, lm_theme.glass_text, cur ? 0xf0 : 0x66);
+            }
+            for (int k = 0; k < 2; k++) {
+                const struct lm_rect *a = &li->arrow[k];
+                if (a->w <= 0)
+                    continue;
+                float cx = (float)a->x + (float)a->w / 2.0f, cy = (float)a->y + (float)a->h / 2.0f;
+                paint_shape(c, cx, cy, 13.0f, SHAPE_DISC, lm_theme.glass, 0x70);
+                struct lm_rect lab = lm_rect_make(a->x, a->y + (a->h - LM_FONT_H) / 2, a->w, LM_FONT_H);
+                lc_text_centered(c, &lab, k ? ">" : "<", lm_theme.glass_text);
+            }
         }
         if (li->n == 0 && li->add.w <= 0) {
             struct lm_rect none = lm_rect_make(li->card.x, li->card.y + li->card.h / 2, li->card.w, LM_FONT_H);
@@ -1514,10 +1531,16 @@ static void paint_launcher(const struct paint_ctx *c, const struct lm_launcher_i
             lc_text_centered(c, &m, fit, lm_theme.glass_error);
         }
     }
-    struct lm_rect hint = lm_rect_make(li->card.x, li->button[0].y - LM_FONT_H - 12, li->card.w, LM_FONT_H);
-    lc_text_centered(c, &hint, li->hint, lm_theme.glass_hint);
+    if (li->form) {                                                     /* the form: its hint and its two buttons at the bottom */
+        struct lm_rect hint = lm_rect_make(li->card.x, li->button[0].y - LM_FONT_H - 12, li->card.w, LM_FONT_H);
+        lc_text_centered(c, &hint, li->hint, lm_theme.glass_hint);
+    } else if (li->edit) {                                              /* edit mode: the hint appears at the bottom with it */
+        struct lm_rect hint = lm_rect_make(li->card.x, li->card.y + li->card.h - 16 - LM_FONT_H, li->card.w, LM_FONT_H);
+        lc_text_centered(c, &hint, li->hint, lm_theme.glass_hint);
+    }
     for (int i = 0; i < 2; i++)
-        paint_launcher_button(c, &li->button[i], li->button_text[i], li->hover_button == i, i == 0 && li->edit);
+        if (li->button[i].w > 0)
+            paint_launcher_button(c, &li->button[i], li->button_text[i], li->hover_button == i, i == 0 && li->edit);
     if (li->form && li->help) {                                         /* a help card above the form: the card is veiled, the help in front of it */
         fill_round(c, &li->card, 20, 0xa0000000u);
         fill_round(c, &li->help_card, 14, (0xf0000000u | lm_theme.help_card));

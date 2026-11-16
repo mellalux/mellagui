@@ -54,10 +54,21 @@ static const struct note k_dock[] = { { 1047, 40 }, { 1568, 110 }, { 0, 0 } };
 static const struct note k_volume[] = { { 784, 140 }, { 0, 0 } };
 static const struct note k_timer[] = { { 880, 130 }, { 1109, 130 }, { 1319, 300 }, { 0, 220 }, { 880, 130 }, { 1109, 130 }, { 1319, 420 }, { 0, 0 } };
 
+static const struct note k_card_win[] = { { 523, 90 }, { 659, 90 }, { 784, 90 }, { 1047, 90 }, { 784, 70 }, { 1047, 70 }, { 1319, 420 }, { 0, 0 } };
+static const struct note k_card_no[] = { { 233, 80 }, { 175, 170 }, { 0, 0 } };
+
+/* the card sounds, one function with a number for each variant */
+static size_t gen_draw(int variant, int16_t *buf, size_t cap);
+static size_t gen_place(int variant, int16_t *buf, size_t cap);
+static size_t gen_shuffle(int variant, int16_t *buf, size_t cap);
+#define GEN(fn, v) static size_t fn##v(int16_t *buf, size_t cap) { return gen_##fn(v, buf, cap); }
+GEN(draw, 0) GEN(draw, 1) GEN(draw, 2) GEN(draw, 3) GEN(place, 0) GEN(place, 1) GEN(place, 2) GEN(shuffle, 0) GEN(shuffle, 1)
+
 static const struct {
     const char *name;
     const struct note *notes;
     bool pluck;                             /* plucked: a sharp start and an exponential decay instead of a flat tone */
+    size_t (*gen)(int16_t *buf, size_t cap);        /* made from noise instead of notes (the card sounds) */
 } k_sounds[LM_SOUND_COUNT] = {
     [LM_SOUND_STICKY_ON] = { "sticky-on", k_on },
     [LM_SOUND_STICKY_OFF] = { "sticky-off", k_off },
@@ -68,6 +79,17 @@ static const struct {
     [LM_SOUND_DOCK] = { "dock", k_dock, true },
     [LM_SOUND_VOLUME] = { "volume", k_volume, true },
     [LM_SOUND_TIMER] = { "timer", k_timer, true },
+    [LM_SOUND_CARD_DRAW] = { "card-draw", NULL, false, draw0 },
+    [LM_SOUND_CARD_DRAW2] = { "card-draw2", NULL, false, draw1 },
+    [LM_SOUND_CARD_DRAW3] = { "card-draw3", NULL, false, draw2 },
+    [LM_SOUND_CARD_DRAW4] = { "card-draw4", NULL, false, draw3 },
+    [LM_SOUND_CARD_PLACE] = { "card-place", NULL, false, place0 },
+    [LM_SOUND_CARD_PLACE2] = { "card-place2", NULL, false, place1 },
+    [LM_SOUND_CARD_PLACE3] = { "card-place3", NULL, false, place2 },
+    [LM_SOUND_CARD_SHUFFLE] = { "card-shuffle", NULL, false, shuffle0 },
+    [LM_SOUND_CARD_SHUFFLE2] = { "card-shuffle2", NULL, false, shuffle1 },
+    [LM_SOUND_CARD_WIN] = { "card-win", k_card_win, true },
+    [LM_SOUND_CARD_NO] = { "card-no", k_card_no, true },
 };
 
 const char *lm_sound_name(enum lm_sound s)
@@ -103,6 +125,171 @@ static size_t synth(const struct note *n, int16_t *buf, size_t cap, bool pluck)
         pos += len;
     }
     return pos;
+}
+
+/* ---- the card sounds: shaped noise, no files ---- */
+
+static uint32_t noise_next(uint32_t *s)
+{
+    uint32_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *s = x;
+    return x;
+}
+
+static double noise_f(uint32_t *s) { return (double)noise_next(s) / 2147483648.0 - 1.0; }
+
+/* One rustle: noise through a band-pass filter whose middle slides from f0 to f1 (a card sliding over cards), under a bump that peaks `peak` of the way
+ * through, with `flutter` of crackle (the card's edge catching the others) and a small tap at the end where it lands. Added into acc[] (doubles, at `at`). */
+struct rustle {
+    double ms, f0, f1, q, flutter, peak, tap, gain;
+    uint32_t seed;
+};
+
+static double g_acc[RATE * 2];
+
+static void add_rustle(const struct rustle *r, size_t at, size_t cap)
+{
+    size_t len = (size_t)(r->ms * RATE / 1000.0);
+    if (at + len > cap)
+        len = cap - at;
+    uint32_t seed = r->seed;
+    double low = 0, band = 0, crackle = 0, flick = 0;
+    double k = log(0.5) / log(r->peak);                              /* the bump's peak at `peak` of the length */
+    double q = 1.0 / r->q;
+    for (size_t i = 0; i < len; i++) {
+        double u = (double)i / (double)len, t = (double)i / RATE;
+        double fc = r->f0 * pow(r->f1 / r->f0, u), f = 2.0 * sin(M_PI * fc / RATE);
+        double x = noise_f(&seed);
+        low += f * band;
+        double high = x - low - q * band;
+        band += f * high;
+        crackle += 0.18 * (noise_f(&seed) - crackle);                 /* slow noise: the loose, irregular part */
+        if ((noise_next(&seed) & 1023) < 9)                           /* now and then a flick: a card edge letting go */
+            flick = 1.0;
+        flick *= 0.9985;
+        double mod = 1.0 - r->flutter * (0.55 + 0.45 * crackle * 3.0) * 0.5 + r->flutter * 0.9 * flick;
+        double bump = pow(sin(M_PI * pow(u, k)), 2.0);
+        g_acc[at + i] += band * mod * bump * r->gain;
+        (void)t;
+    }
+    if (r->tap > 0.0) {                                               /* the landing: a tiny filtered click */
+        double lp = 0;
+        size_t tl = (size_t)RATE * 14 / 1000;
+        for (size_t i = 0; i < tl && at + len + i < cap; i++) {
+            double t = (double)i / RATE, x = noise_f(&seed);
+            lp += 0.45 * (x - lp);
+            g_acc[at + len + i] += (x - lp) * exp(-t / 0.0035) * r->tap * r->gain * 0.8;
+        }
+    }
+}
+
+/* one thump on the table: a low note that falls a little and a filtered click, at `at` */
+static void add_tap(size_t at, size_t cap, double hz, double amp, double click, uint32_t seed)
+{
+    double lp = 0;
+    size_t tl = (size_t)RATE * 70 / 1000;
+    for (size_t i = 0; i < tl && at + i < cap; i++) {
+        double t = (double)i / RATE, x = noise_f(&seed);
+        lp += 0.35 * (x - lp);
+        double thump = sin(2.0 * M_PI * (hz + 70.0 * exp(-t / 0.008)) * t) * exp(-t / 0.022);
+        g_acc[at + i] += amp * thump * 9000.0 + click * (x - lp) * exp(-t / 0.0028) * 9000.0;
+    }
+}
+
+/* the doubles to 16 bit samples, the loudest at `peak` (and a short fade at both ends); returns len */
+static size_t finish_acc(int16_t *buf, size_t len, double peak)
+{
+    double top = 1e-9;
+    for (size_t i = 0; i < len; i++)
+        if (fabs(g_acc[i]) > top)
+            top = fabs(g_acc[i]);
+    double g = peak / top;
+    size_t fade = (size_t)RATE * 3 / 1000;
+    for (size_t i = 0; i < len; i++) {
+        double e = i < fade ? (double)i / (double)fade : len - i < fade ? (double)(len - i) / (double)fade : 1.0;
+        buf[i] = (int16_t)(g_acc[i] * g * e);
+    }
+    return len;
+}
+
+/* A card pulled from the pile and turned: a rustle of its own kind each time. */
+static size_t gen_draw(int variant, int16_t *buf, size_t cap)
+{
+    static const struct rustle v[4] = {
+        { 150, 1800, 4300, 1.3, 0.55, 0.42, 0.30, 1.0, 0x1234abcdu },    /* a soft "fwsh" that brightens */
+        { 200, 2600, 1300, 0.9, 0.70, 0.35, 0.18, 1.0, 0x9e3779b1u },    /* a longer slide that darkens */
+        { 105, 3600, 6200, 1.6, 0.35, 0.50, 0.40, 1.0, 0x2545f491u },    /* a quick bright flick */
+        { 240, 1200, 2700, 0.7, 0.85, 0.50, 0.22, 1.0, 0x6c8e9cf5u },    /* a breathy, loose one */
+    };
+    size_t len = (size_t)(v[variant].ms * RATE / 1000.0) + (size_t)RATE * 14 / 1000;
+    if (len > cap)
+        len = cap;
+    memset(g_acc, 0, len * sizeof(double));
+    add_rustle(&v[variant], 0, len);
+    return finish_acc(buf, len, 11500.0 - 800.0 * variant);
+}
+
+/* A card laid down: it slides the last bit, then taps the table. */
+static size_t gen_place(int variant, int16_t *buf, size_t cap)
+{
+    static const struct rustle slide[3] = {
+        { 62, 2400, 1700, 1.2, 0.5, 0.6, 0.0, 0.55, 0x51ed270bu },
+        { 78, 1900, 1300, 1.0, 0.6, 0.5, 0.0, 0.45, 0x7f4a7c15u },
+        { 45, 3200, 2200, 1.5, 0.4, 0.6, 0.0, 0.5, 0x3c6ef372u },
+    };
+    static const struct { double hz, amp, click; } tap[3] = { { 160, 0.9, 0.7 }, { 125, 1.0, 0.45 }, { 190, 0.7, 0.9 } };
+    size_t slide_len = (size_t)(slide[variant].ms * RATE / 1000.0), len = slide_len + (size_t)RATE * 80 / 1000;
+    if (len > cap)
+        len = cap;
+    memset(g_acc, 0, len * sizeof(double));
+    add_rustle(&slide[variant], 0, len);
+    add_tap(slide_len, len, tap[variant].hz, tap[variant].amp, tap[variant].click, 0xabcd1234u + (uint32_t)variant);
+    return finish_acc(buf, len, 13000.0);
+}
+
+/* The deck riffled: a rustle with many small flicks that come faster, and the two halves meeting. */
+static size_t gen_shuffle(int variant, int16_t *buf, size_t cap)
+{
+    size_t len = (size_t)RATE * (variant ? 1250 : 900) / 1000;
+    if (len > cap)
+        len = cap;
+    memset(g_acc, 0, len * sizeof(double));
+    uint32_t seed = 0x2545f491u + (uint32_t)variant * 77u;
+    int parts = variant ? 2 : 1;
+    for (int p = 0; p < parts; p++) {
+        double ms = variant ? 480.0 : 760.0;
+        size_t at = (size_t)(p * (variant ? 600.0 : 0.0) * RATE / 1000.0), plen = (size_t)(ms * RATE / 1000.0);
+        struct rustle bed = { ms, 1500.0 + 300.0 * p, 3600.0 + 500.0 * p, 0.8, 0.9, 0.55, 0.0, 0.8, seed + (uint32_t)p };
+        add_rustle(&bed, at, len);
+        double t = 0.0, gap = 0.032;
+        while (t < ms / 1000.0 - 0.02) {                              /* the flicks: a card each, closer and closer together */
+            size_t pos = at + (size_t)(t * RATE);
+            double amp = 0.35 + 0.55 * (noise_f(&seed) * 0.5 + 0.5), lp = 0;
+            for (size_t i = 0; i < (size_t)RATE * 9 / 1000 && pos + i < len; i++) {
+                double tt = (double)i / RATE, x = noise_f(&seed);
+                lp += 0.55 * (x - lp);
+                g_acc[pos + i] += (x - lp) * exp(-tt / 0.0022) * amp * 7000.0;
+            }
+            gap = gap > 0.007 ? gap * 0.955 : gap;
+            t += gap * (0.8 + 0.4 * (noise_f(&seed) * 0.5 + 0.5));
+        }
+        if (at + plen + 100 < len)                                    /* the halves meet: a soft tap */
+            add_tap(at + plen, len, 140.0, 0.45, 0.5, seed + 99u);
+        (void)plen;
+    }
+    return finish_acc(buf, len, 12500.0);
+}
+
+size_t lm_sound_render(enum lm_sound s, int16_t *buf, size_t cap)
+{
+    if ((unsigned)s >= LM_SOUND_COUNT)
+        return 0;
+    if (k_sounds[s].gen)
+        return k_sounds[s].gen(buf, cap);
+    return synth(k_sounds[s].notes, buf, cap, k_sounds[s].pluck);
 }
 
 static char g_device[64] = "default";
@@ -288,10 +475,21 @@ static void play_now(enum lm_sound s, const char *g_device)
     if (pad > (size_t)RATE * 5)
         pad = (size_t)RATE * 5;
     memset(buf, 0, pad * sizeof(int16_t));
-    size_t n = synth(k_sounds[s].notes, buf + pad, MAX_SAMPLES, k_sounds[s].pluck);
+    size_t n = lm_sound_render(s, buf + pad, MAX_SAMPLES);
     if (!n)
         return;
     n += pad;
+    const char *rawdir = getenv("MELLAGUI_SOUND_RAW_DIR");
+    if (rawdir && *rawdir) {                            /* tests: the samples (S16_LE, 44.1 kHz, mono, without the lead-in) go to <dir>/<name>.s16 instead of a player */
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s.s16", rawdir, k_sounds[s].name);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fwrite(buf + pad, sizeof(int16_t), n - pad, f);
+            fclose(f);
+        }
+        return;
+    }
 
     /* The picture goes through a memfd, not a pipe: a pipe holds 64 KiB, which is less than a lead-in of silence and a beep, and a write that does not
      * fit would be lost; nothing here can block or raise SIGPIPE. */

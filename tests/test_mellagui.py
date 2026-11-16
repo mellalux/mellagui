@@ -14541,6 +14541,72 @@ class TestDefaultConfigHasEveryProgram(Base):
             self.assertIn(prog, both, prog + ' is in neither list')
 
 
+class TestCardSounds(Base):
+    """src/sound.c: the card sounds (rustles and taps made from noise, no files; several variants of each). MELLAGUI_SOUND_RAW_DIR writes their samples where the test can look at them."""
+
+    NAMES = ['draw1', 'draw2', 'draw3', 'draw4', 'place1', 'place2', 'place3', 'shuffle1', 'shuffle2', 'win', 'no']
+    FILES = ['draw', 'draw2', 'draw3', 'draw4', 'place', 'place2', 'place3', 'shuffle', 'shuffle2', 'win', 'no']      # (the first variant has no number in its name)
+
+    def test_each_card_sound_is_a_clean_sound_of_the_right_kind(self):
+        import array
+        d = tempfile.mkdtemp(prefix='cardsnd-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p, c, stop = self.private_compositor('mellagui-cs1', '--config', 'none', env={'MELLAGUI_SOUND_RAW_DIR': d, 'MELLAGUI_SOUND_FORCE': '1'})
+        c.sync()
+        for name in self.NAMES:
+            c.cmd('settings card-sound ' + name)
+        c.cmd('settings card-sound draw')                                                # the family name picks a variant by itself
+        for bad in ('nonsense', 'draw5', 'win2', 'place4'):
+            with self.assertRaises(RuntimeError):
+                c.cmd('settings card-sound ' + bad)
+        snd = {}
+        for name in self.FILES:
+            path = os.path.join(d, 'card-%s.s16' % name)
+            for _ in range(200):
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(path), name)
+            time.sleep(0.05)
+            a = array.array('h')
+            with open(path, 'rb') as f:
+                a.frombytes(f.read())
+            snd[name] = a
+
+        def peak(a): return max(abs(v) for v in a)
+
+        def energy(a, win=44):                                                           # 1 ms windows
+            return [sum(v * v for v in a[i:i + win]) / win for i in range(0, len(a) - win, win)]
+
+        for name, a in snd.items():
+            self.assertGreater(peak(a), 2500, name + ' is too quiet')
+            self.assertLess(peak(a), 30000, name + ' clips')
+            self.assertLess(peak(a[-20:]), 1500, name + ' ends with a click')
+        for name in ('draw', 'draw2', 'draw3', 'draw4'):                                 # a rustle: 0.1 .. 0.3 s, and more like noise than a note
+            self.assertTrue(0.09 * 44100 < len(snd[name]) < 0.3 * 44100, name)
+        for name in ('place', 'place2', 'place3'):
+            self.assertTrue(0.08 * 44100 < len(snd[name]) < 0.25 * 44100, name)
+        for name in ('shuffle', 'shuffle2'):
+            self.assertTrue(0.7 * 44100 < len(snd[name]) < 1.5 * 44100, name)
+        self.assertTrue(0.7 * 44100 < len(snd['win']) < 1.5 * 44100)
+        # the variants are different sounds
+        for fam in (('draw', 'draw2', 'draw3', 'draw4'), ('place', 'place2', 'place3'), ('shuffle', 'shuffle2')):
+            seen = {bytes(snd[n]) for n in fam}
+            self.assertEqual(len(seen), len(fam), 'two variants of %r are the same sound' % (fam,))
+        # a rustle is irregular: its loudness moves a lot from one millisecond to the next; a note's does not
+        for name in ('draw', 'draw2', 'draw3', 'draw4', 'shuffle'):
+            e = energy(snd[name])
+            top = max(e)
+            mid = [v for v in e if v > top * 0.02]
+            swings = sum(1 for k in range(1, len(mid)) if mid[k] > mid[k - 1] * 1.6 or mid[k] < mid[k - 1] / 1.6)
+            self.assertGreater(swings, len(mid) * 0.12, name + ' is too smooth to be a rustle')
+        # a riffle has many flicks on top of its rustle
+        e = energy(snd['shuffle'])
+        med = sorted(e)[len(e) // 2]
+        flicks = sum(1 for k in range(1, len(e)) if e[k] > med * 3.0 and e[k] > e[k - 1])
+        self.assertGreater(flicks, 20, 'a riffle is many flicks')
+
+
 class TestSolitaire(Base):
     """client/mellagui-solitaire.c: Klondike. The rules through --selftest, the window through its dump."""
     EXE = os.path.join(ROOT, 'build', 'mellagui-solitaire')
@@ -14595,6 +14661,8 @@ class TestSolitaire(Base):
                 st.setdefault('btn', {})[f[1]] = tuple(int(kv[k]) for k in ('x', 'y', 'w', 'h'))
             elif f[0] == 'cbtn':
                 st.setdefault('cbtn', {})[int(f[1])] = tuple(int(v) for v in f[2:6])
+            elif f[0] == 'hand':
+                st['hand'] = kv
         return st
 
     def wait(self, pred, timeout=4.0):
@@ -14637,6 +14705,213 @@ class TestSolitaire(Base):
         r = subprocess.run([self.EXE, '--selftest'], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('selftest ok', r.stdout)
+
+    def sheet(self, w=200):
+        out = os.path.join(tmp, 'cards-%d.ppm' % w)
+        r = subprocess.run([self.EXE, '--sheet', out, str(w)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(out, 'rb') as f:
+            data = f.read()
+        parts = data.split(b'\n', 3)
+        W, H = map(int, parts[1].split())
+        return W, H, parts[3]
+
+    def test_the_cards_have_as_many_marks_as_their_number(self):
+        """cardart.h: a 2 .. 10 has that many suit marks (counted as separate blobs of ink on the sheet), the Ace one big mark, the court cards a face."""
+        w = 200
+        W, H, px = self.sheet(w)
+        h = w * 7 // 5
+        gap = 8
+
+        def rgb(x, y):
+            o = (y * W + x) * 3
+            return px[o], px[o + 1], px[o + 2]
+
+        def blobs(mask, mw, mh, minarea):
+            seen = bytearray(mw * mh)
+            areas = []
+            for sy in range(mh):
+                for sx in range(mw):
+                    i = sy * mw + sx
+                    if mask[i] and not seen[i]:
+                        seen[i] = 1
+                        stack, a = [i], 0
+                        while stack:
+                            j = stack.pop()
+                            a += 1
+                            x, y = j % mw, j // mw
+                            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                                if 0 <= nx < mw and 0 <= ny < mh:
+                                    k = ny * mw + nx
+                                    if mask[k] and not seen[k]:
+                                        seen[k] = 1
+                                        stack.append(k)
+                        if a >= minarea:
+                            areas.append(a)
+            return areas
+
+        for suit in range(4):
+            red = suit in (1, 2)
+            for rank in range(1, 14):
+                ox, oy = gap + (rank - 1) * (w + gap), gap + suit * (h + gap)
+                x0, x1, y0, y1 = int(0.21 * w), int(0.79 * w), int(0.12 * w), int(1.28 * w)
+                mask = bytearray()
+                skin = 0
+                for y in range(y0, y1):
+                    for x in range(x0, x1):
+                        r, g, b = rgb(ox + x, oy + y)
+                        mask.append(1 if (r > 150 and g < 90 and b < 90) or (not red and r < 90 and g < 90 and b < 90) else 0)
+                        skin += abs(r - 0xf2) < 6 and abs(g - 0xcf) < 6 and abs(b - 0xae) < 6
+                areas = blobs(mask, x1 - x0, y1 - y0, 150)
+                where = 'rank %d suit %d' % (rank, suit)
+                if 2 <= rank <= 10:
+                    self.assertEqual(len(areas), rank, where + ': marks %r' % areas)
+                    self.assertEqual(skin, 0, where)
+                elif rank == 1:
+                    self.assertGreater(max(areas), 0.04 * w * w, where + ': the Ace has one big mark')
+                    self.assertEqual(skin, 0, where)
+                else:
+                    self.assertGreater(skin, 150, where + ': a court card has a face (twice)')
+
+    def test_the_four_suits_and_the_back_differ(self):
+        W, H, px = self.sheet(120)
+        h = 120 * 7 // 5
+        def cell(rank, suit):
+            ox, oy = 8 + (rank - 1) * 128, 8 + suit * (h + 8)
+            return b''.join(px[((oy + y) * W + ox) * 3:((oy + y) * W + ox + 120) * 3] for y in range(h))
+        marks = {cell(1, s) for s in range(4)}
+        self.assertEqual(len(marks), 4)
+        back = cell(1, 4)                                                                        # (row 4 starts with the back)
+        self.assertNotIn(back, marks)
+
+    def test_the_top_of_the_stock_is_dragged_off_and_the_card_under_it_shows(self):
+        self.start('--seed', '5', '--draw', '1')
+        st = self.wait(lambda s: s['state']['seed'] == 5 and s['state']['draw'] == 1)
+        sx, sy, sw, sh = st['slot_stock']
+        wx, wy, ww, wh = st['slot_waste']
+        x0, y0 = self.at(sx + sw // 2, sy + sh // 2)
+        ctl.abs(x0, y0)
+        ctl.button(272, True)
+        for i in range(1, 5):                                                                  # towards the waste, with the button held
+            ctl.abs(x0 + (wx - sx) * i // 4, y0 + (wy - sy) * i // 4)
+            time.sleep(0.02)
+        st = self.wait(lambda s: s.get('hand', {}).get('from') == 'stock')
+        self.assertEqual((st['hand']['n'], st['hand']['under']), ('1', 'back'))                # the card under the one in the hand is there
+        self.assertEqual(st['state']['waste'], 0)                                              # nothing is drawn until it is let go
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['state']['waste'] == 1 and 'hand' not in s)
+        self.assertEqual((st['state']['stock'], st['state']['moves']), (23, 1))
+        # let go over the table: nothing is drawn
+        x0, y0 = self.at(sx + sw // 2, sy + sh // 2)
+        ctl.abs(x0, y0)
+        ctl.button(272, True)
+        tx, ty = self.at(st['tab'][3]['x'] + 30, st['tab'][3]['ys'][-1] + 40)
+        for i in range(1, 5):
+            ctl.abs(x0 + (tx - x0) * i // 4, y0 + (ty - y0) * i // 4)
+            time.sleep(0.02)
+        ctl.button(272, False)
+        time.sleep(0.3)
+        st = self.state()
+        self.assertEqual((st['state']['stock'], st['state']['waste'], st['state']['moves']), (23, 1, 1))
+
+    def test_a_drag_of_three_comes_off_the_stock_with_turn_three(self):
+        self.start('--seed', '5', '--draw', '3')
+        st = self.wait(lambda s: s['state']['seed'] == 5 and s['state']['draw'] == 3)
+        sx, sy, sw, sh = st['slot_stock']
+        wx, wy, ww, wh = st['slot_waste']
+        x0, y0 = self.at(sx + sw // 2, sy + sh // 2)
+        ctl.abs(x0, y0)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(x0 + (wx - sx) * i // 4, y0 + (wy - sy) * i // 4)
+            time.sleep(0.02)
+        st = self.wait(lambda s: s.get('hand', {}).get('from') == 'stock')
+        self.assertEqual(st['hand']['n'], '3')
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['state']['waste'] == 3)
+        self.assertEqual(st['state']['stock'], 21)
+
+    def test_a_card_lifted_off_the_waste_shows_the_one_under_it(self):
+        self.start('--seed', '5', '--draw', '1')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        sx, sy, sw, sh = st['slot_stock']
+        for _ in range(2):
+            self.click(sx + sw // 2, sy + sh // 2)
+            time.sleep(0.1)
+        st = self.wait(lambda s: s['state']['waste'] == 2)
+        under = st['waste'][0]
+        wx, wy, ww, wh = st['slot_waste']
+        x0, y0 = self.at(wx + ww // 2, wy + wh // 2)
+        ctl.abs(x0, y0)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(x0 + 10 * i, y0 + 30 * i)
+            time.sleep(0.02)
+        st = self.wait(lambda s: s.get('hand', {}).get('from') == 'waste')
+        self.assertEqual(st['hand']['under'], under)
+        ctl.button(272, False)
+        st = self.wait(lambda s: 'hand' not in s)
+        self.assertEqual(st['state']['waste'], 2)                                              # it did not go anywhere: it is back
+
+    def sound_state(self):
+        ctl.cmd('sound')
+        d = dict(kv.split('=', 1) for kv in ctl.cmd('sound')[0].split()[1:] if '=' in kv)
+        return d.get('last'), int(d.get('n', 0))
+
+    def test_the_game_asks_for_its_sounds(self):
+        self.start('--seed', '5', '--draw', '1')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        sx, sy, sw, sh = st['slot_stock']
+        self.click(sx + sw // 2, sy + sh // 2)                                                 # the stock: a card is turned
+        for _ in range(60):
+            if (self.sound_state()[0] or '').startswith('card-draw'):
+                break
+            time.sleep(0.05)
+        self.assertTrue((self.sound_state()[0] or '').startswith('card-draw'), self.sound_state())
+        self.key(22)                                                                           # U: taken back, the same brush
+        time.sleep(0.2)
+        a = self.state()['tab'][0]
+        time.sleep(0.15)
+        self.click(a['x'] + 30, a['ys'][-1] + 40)
+        self.click(a['x'] + 30, a['ys'][-1] + 40)                                              # a card goes up: laid down
+        for _ in range(60):
+            if (self.sound_state()[0] or '').startswith('card-place'):
+                break
+            time.sleep(0.05)
+        self.assertTrue((self.sound_state()[0] or '').startswith('card-place'), self.sound_state())
+        time.sleep(0.2)
+        t = self.state()['tab'][3]                                                             # a card that does not go there
+        q = self.state()['tab'][6]
+        self.drag((t['x'] + 30, t['ys'][-1] + 40), (q['x'] + 40, q['ys'][-1] + 40))
+        for _ in range(60):
+            if (self.sound_state()[0] or '').startswith('card-no'):
+                break
+            time.sleep(0.05)
+        self.assertTrue((self.sound_state()[0] or '').startswith('card-no'), self.sound_state())
+        time.sleep(0.2)
+        self.key(49)                                                                           # N, Enter: a new deal is shuffled
+        self.wait(lambda s: s['state']['prompt'] == 1)
+        ctl.tap(KEY_ENTER)
+        for _ in range(60):
+            if (self.sound_state()[0] or '').startswith('card-shuffle'):
+                break
+            time.sleep(0.05)
+        self.assertTrue((self.sound_state()[0] or '').startswith('card-shuffle'), self.sound_state())
+
+    def test_a_win_has_a_sound(self):
+        self.start('--setup', 'almost')
+        self.wait(lambda s: s['state']['won'] == 0)
+        for col in range(4):
+            a = self.state()['tab'][col]
+            self.click(a['x'] + 30, a['ys'][-1] + 40)
+            self.click(a['x'] + 30, a['ys'][-1] + 40)
+            time.sleep(0.2)
+        self.wait(lambda s: s['state']['won'] == 1)
+        for _ in range(60):
+            if (self.sound_state()[0] or '').startswith('card-win'):
+                break
+            time.sleep(0.05)
+        self.assertTrue((self.sound_state()[0] or '').startswith('card-win'), self.sound_state())
 
     def test_a_seed_is_a_deal_with_the_shape_of_a_game(self):
         self.start('--seed', '5')
@@ -17574,8 +17849,16 @@ class TestLauncherDefaults(Base):
 
     @staticmethod
     def names(c):
+        """Every icon of the launcher, page by page (the grid shows as many as fit)."""
         c.cmd('launcher open')
-        out = [re.match(r'icon \d+ "(.*?)"', l)[1] for l in c.cmd('launcher') if l.startswith('icon ')]
+        out = []
+        for _ in range(8):
+            lines = c.cmd('launcher')
+            out += [re.match(r'icon \d+ "(.*?)"', l)[1] for l in lines if l.startswith('icon ')]
+            m = [re.match(r'pages n=(\d+) page=(\d+)', l) for l in lines if l.startswith('pages ')]
+            if not m or int(m[0][2]) + 1 >= int(m[0][1]):
+                break
+            c.cmd('axis v 15 1')                                                      # the next page
         c.cmd('launcher close')
         return out
 
@@ -17611,13 +17894,24 @@ class TestLauncherDefaults(Base):
     def test_the_new_buttons_start_the_programs_and_have_their_own_icons(self):
         c = self.start('mellagui-ld4')
         c.cmd('launcher open')
-        icons = {re.match(r'icon \d+ "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)[1]: [int(v) for v in re.match(r'icon \d+ "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l).groups()[1:]]
-                 for l in c.cmd('launcher') if l.startswith('icon ')}
-        ppm = c.dump(os.path.join(tmp, 'ld4.ppm'))
-        for n in self.DEFAULTS:
-            x, y, w, h = icons[n]
-            white = sum(1 for yy in range(y + 8, y + h - 8) for xx in range(x + 8, x + w - 8) if min(ppm.px(xx, yy)) > 200)
-            self.assertGreater(white, 30, n)                                            # a white glyph on the coloured disc, not an empty circle
+        found = set()
+        for page in range(8):                                                           # (the grid has pages: look at each one)
+            lines = c.cmd('launcher')
+            icons = {re.match(r'icon \d+ "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)[1]: [int(v) for v in re.match(r'icon \d+ "(.*?)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l).groups()[1:]]
+                     for l in lines if l.startswith('icon ')}
+            ppm = c.dump(os.path.join(tmp, 'ld4-%d.ppm' % page))
+            for n in self.DEFAULTS:
+                if n not in icons:
+                    continue
+                found.add(n)
+                x, y, w, h = icons[n]
+                white = sum(1 for yy in range(y + 8, y + h - 8) for xx in range(x + 8, x + w - 8) if min(ppm.px(xx, yy)) > 200)
+                self.assertGreater(white, 30, n)                                        # a white glyph on the coloured disc, not an empty circle
+            m = [re.match(r'pages n=(\d+) page=(\d+)', l) for l in lines if l.startswith('pages ')]
+            if not m or int(m[0][2]) + 1 >= int(m[0][1]):
+                break
+            c.cmd('axis v 15 1')
+        self.assertEqual(found, set(self.DEFAULTS))
         c.cmd('launcher close')
 
     def test_the_settings_panel_has_a_button_for_it(self):
@@ -20589,6 +20883,150 @@ class TestLauncherSearch(Base):
             self.assertIsNone(calc(text), text)
 
 
+class TestLauncherPages(Base):
+    """The launcher dialog has pages like the macOS Launchpad: as many rows as fit, page dots, arrows, the wheel, the keys, a drag to the edge."""
+
+    def start(self, name, n=30, mark=None):
+        self.mark = mark or os.path.join(tmp, name + '.mark')
+        if os.path.exists(self.mark):
+            os.unlink(self.mark)
+        self.path = os.path.join(tmp, name + '.conf')
+        apps = ''.join('App%02d = [files] true\n' % i for i in range(1, n))
+        with open(self.path, 'w') as f:
+            f.write('[dock-apps]\nLauncher = [launcher] @launcher\nTerm = [terminal] true\n[launcher-apps]\n' + apps + 'Last = [editor] touch %s\n' % self.mark)
+        p, c, stop = self.private_compositor(name, '--config', self.path, '--size', '1100x760')
+        c.sync()
+        c.cmd('launcher open')
+        time.sleep(1.3)
+        return c
+
+    @staticmethod
+    def info(c):
+        d = dict(icons=[], dots=[], add=None)
+        for l in c.cmd('launcher'):
+            m = re.match(r'launcher open=(\d) edit=(\d) form=(\d) n=(\d+) sel=(-?\d+)', l)
+            if m:
+                d.update(open=int(m[1]), n=int(m[4]), sel=int(m[5]))
+            m = re.match(r'pages n=(\d+) page=(\d+) per=(\d+) cols=(\d+) first=(\d+) last=(\d+)', l)
+            if m:
+                d.update(pages=int(m[1]), page=int(m[2]), per=int(m[3]), cols=int(m[4]), first=int(m[5]), last=int(m[6]))
+            m = re.match(r'dot (\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['dots'].append(tuple(int(v) for v in m.groups()[1:]))
+            m = re.match(r'icon (\d+) "(.*)" x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['icons'].append((int(m[1]), m[2], tuple(int(v) for v in m.groups()[2:6])))
+            m = re.match(r'add x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['add'] = tuple(int(v) for v in m.groups())
+            m = re.match(r'card x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)', l)
+            if m:
+                d['card'] = tuple(int(v) for v in m.groups())
+        return d
+
+    @staticmethod
+    def centre(r):
+        return r[0] + r[2] // 2, r[1] + r[3] // 2
+
+    def test_more_icons_than_fit_make_pages_and_few_make_none(self):
+        c = self.start('mellagui-lp1')
+        d = self.info(c)
+        self.assertEqual((d['n'], d['pages'], d['page']), (31, 2, 0))                         # Term + 29 + Last
+        self.assertEqual((d['first'], d['last']), (0, d['per']))
+        self.assertEqual(len(d['icons']), d['per'])                                          # only the icons of the page have a place
+        self.assertEqual(len(d['dots']), 2)
+        self.assertIsNone(d['add'])                                                          # the "+" tile is the very last cell
+        e = self.start('mellagui-lp2', n=4)
+        d = self.info(e)
+        self.assertEqual((d['pages'], d['per'], len(d['dots'])), (1, d['n'] + 1, 0))         # a short list is one page, no dots
+
+    def test_a_dot_and_the_arrows_turn_the_page(self):
+        c = self.start('mellagui-lp3')
+        d = self.info(c)
+        per = d['per']
+        c.click(*self.centre(d['dots'][1]))
+        d = self.info(c)
+        self.assertEqual((d['page'], d['first']), (1, per))
+        self.assertEqual([i[0] for i in d['icons']], list(range(per, d['n'])))              # what is left of the icons
+        self.assertIsNotNone(d['add'])                                                       # the "+" tile is on the last page
+        c.click(*self.centre(d['dots'][0]))
+        self.assertEqual(self.info(c)['page'], 0)
+
+    def test_the_wheel_and_the_keys_turn_pages(self):
+        c = self.start('mellagui-lp4')
+        per = self.info(c)['per']
+        c.cmd('axis v 15 1')                                                                 # a notch down: the next page
+        self.assertEqual(self.info(c)['page'], 1)
+        c.cmd('axis v -15 -1')
+        self.assertEqual(self.info(c)['page'], 0)
+        c.cmd('axis v -15 -1')                                                               # (nothing before the first page)
+        self.assertEqual(self.info(c)['page'], 0)
+        c.tap(109)                                                                           # Page Down
+        d = self.info(c)
+        self.assertEqual((d['page'], d['sel']), (1, per))
+        c.tap(104)                                                                           # Page Up
+        d = self.info(c)
+        self.assertEqual((d['page'], d['sel']), (0, 0))
+        c.tap(107)                                                                           # End: the last cell, on the last page
+        d = self.info(c)
+        self.assertEqual((d['page'], d['sel']), (1, d['n']))
+        c.tap(102)                                                                           # Home
+        d = self.info(c)
+        self.assertEqual((d['page'], d['sel']), (0, 0))
+        for _ in range(per - 1):                                                             # Right along the whole first page and over its edge
+            c.tap(106)
+        self.assertEqual(self.info(c)['page'], 0)
+        c.tap(106)
+        d = self.info(c)
+        self.assertEqual((d['page'], d['sel']), (1, per))
+
+    def test_an_icon_on_a_later_page_starts_its_program(self):
+        c = self.start('mellagui-lp5')
+        d = self.info(c)
+        c.click(*self.centre(d['dots'][1]))
+        d = self.info(c)
+        last = [i for i in d['icons'] if i[1] == 'Last'][0]
+        c.click(*self.centre(last[2]))
+        for _ in range(60):
+            if os.path.exists(self.mark):
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(self.mark), 'the icon of the second page did not start its program')
+
+    def test_searching_goes_back_to_the_first_page_and_filters_across_pages(self):
+        c = self.start('mellagui-lp6')
+        c.cmd('axis v 15 1')
+        self.assertEqual(self.info(c)['page'], 1)
+        c.tap(25)                                                                            # "p" starts the search: page 0, only what matches (every App)
+        d = self.info(c)
+        self.assertEqual((d['page'], d['n']), (0, 29))
+        c.tap(25)
+        c.tap(2)                                                                             # "pp1": App10 .. App19 are one page
+        d = self.info(c)
+        self.assertEqual((d['n'], d['pages']), (10, 1))
+        ctl_icons = [i[1] for i in d['icons']]
+        self.assertEqual(ctl_icons[0], 'App10')
+
+    def test_an_icon_dragged_to_the_edge_turns_the_page(self):
+        c = self.start('mellagui-lp7')
+        d = self.info(c)
+        card = d['card']
+        icon = d['icons'][3][2]
+        x0, y0 = self.centre(icon)
+        c.abs(x0, y0)
+        c.button(272, True)
+        time.sleep(0.3)                                                                     # (a press that is held, then moved)
+        for i in range(1, 6):
+            c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0)
+            time.sleep(0.03)
+        for _ in range(40):
+            if self.info(c)['page'] == 1:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.info(c)['page'], 1)
+        c.button(272, False)
+
+
 class TestLauncher(Base):
     """The launcher dialog (Super+A, the dock's Launcher button): every dock button as a big icon, add and remove."""
 
@@ -20933,17 +21371,19 @@ class TestLauncher(Base):
         c.sync()
         self.assertEqual(self.info(c)['n'], 12)
 
-    def test_the_dialog_is_painted_translucent(self):
+    def test_the_dialog_is_a_dark_glass_that_hides_most_of_what_is_behind_it(self):
         c = self.start('mellagui-lc9')
         before = c.dump(os.path.join(tmp, 'lc9a.ppm'))
         self.super_a(c)
         d = self.info(c)
         after = c.dump(os.path.join(tmp, 'lc9b.ppm'))
-        x, y = d['card'][0] + 10, d['card'][1] + 10                                        # a corner area inside the card, no text
-        a, b = before.px(x, y), after.px(x, y)
-        self.assertNotEqual(a, b)
-        self.assertTrue(all(bc > ac for ac, bc in zip(a, b)), (a, b))                      # a light veil: every channel brighter
-        self.assertTrue(all(bc < 255 for bc in b), b)                                      # but not opaque white
+        cx, cy, cw, ch = d['card']
+        top, bottom = (cx + 10, cy + 10), (cx + 10, cy + ch - 10)                          # two corners inside the card, no text
+        a1, a2, b1, b2 = before.px(*top), before.px(*bottom), after.px(*top), after.px(*bottom)
+        self.assertNotEqual(a1, b1)
+        self.assertTrue(all(v < 255 for v in b1), b1)                                      # not opaque white
+        spread = lambda p, q: sum(abs(x - y) for x, y in zip(p, q))
+        self.assertLess(spread(b1, b2), 0.5 * spread(a1, a2), 'the wallpaper shows through too much: %r %r -> %r %r' % (a1, a2, b1, b2))
 
     # ---- changing a button that is there -------------------------------------------------------------------------------------
 

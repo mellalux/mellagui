@@ -8,7 +8,12 @@
 #define LC_ICON LM_LAUNCHER_ICON
 #define LC_PAD 28
 #define LC_HEAD 56
-#define LC_FOOT 84
+#define LC_FOOT 84                  /* below the grid in edit mode: the hint; the form has its buttons there */
+#define LC_FOOT_SLIM 22             /* below the grid otherwise: nothing but a margin (the Edit button is in the corner) */
+#define LC_EDIT_W 72                /* the Edit / Done button in the corner of the card */
+#define LC_EDIT_H 26
+#define LC_DOTS 26                  /* the row of page dots under the grid */
+#define LC_MAX_ROWS 5               /* the most rows a page has */
 #define LC_BTN_W 110
 #define LC_BTN_H 28
 #define LC_KIND 36                  /* the icon choices of the form */
@@ -102,7 +107,7 @@ static bool launcher_name_taken(const char *name)
 
 static bool launcher_can_add(void)
 {
-    return lm_launchapps_raw_count() < LM_DOCK_MAX;
+    return lm_launchapps_raw_count() < LM_LAUNCHER_APPS_MAX;
 }
 
 
@@ -237,6 +242,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     li->kind = launcher_kind_of(wm);
     li->kind_name = li->kind >= 0 ? lm_dockicon_name(li->kind) : li->kind == -2 ? "yours" : "auto";
     int n = launcher_count(), cells = n + (launcher_can_add() && !launcher_searching ? 1 : 0);
+    li->cells = cells;
     li->search = launcher_filter;
     li->searching = launcher_searching && !li->form;
     li->n = n;
@@ -248,29 +254,62 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     } else {
         int maxcols = LM_CLAMP((li->rect.w - 60) / LC_CELL_W, 1, 6);
         li->cols = LM_MIN(maxcols, LM_MAX(cells, 1));
-        int rows = LM_MAX((cells + li->cols - 1) / li->cols, 1);
+        int total_rows = LM_MAX((cells + li->cols - 1) / li->cols, 1);
+        int room = li->rect.h - 20 - LC_HEAD - LC_FOOT;
+        int rows_fit = LM_CLAMP(room / LC_CELL_H, 1, LC_MAX_ROWS);
+        int rows, dots_h = 0;
+        if (total_rows <= rows_fit || (room < 2 * LC_CELL_H && total_rows * (LC_ICON + 8 + LM_FONT_H + 6) <= room)) {      /* everything fits on one page */
+            rows = total_rows;
+            li->pages = 1;
+            li->per_page = LM_MAX(cells, 1);
+        } else {                                                        /* pages: as many rows as fit, a row of dots under them */
+            dots_h = LC_DOTS;
+            rows_fit = LM_CLAMP((room - dots_h) / LC_CELL_H, 1, LC_MAX_ROWS);
+            if (rows_fit < 2 && (room - dots_h) / (LC_ICON + 8 + LM_FONT_H + 6) >= 2)
+                rows_fit = 2;                                           /* a low screen: two rows, closer together */
+            rows = LM_MIN(rows_fit, total_rows);
+            li->per_page = li->cols * rows;
+            li->pages = LM_MIN((cells + li->per_page - 1) / li->per_page, LM_LAUNCHER_PAGES_MAX);
+        }
+        li->page = LM_CLAMP(wm->launcher_page, 0, li->pages - 1);
+        li->first = li->page * li->per_page;
+        li->last = LM_MIN(cells, li->first + li->per_page);
         int cell_h = LC_CELL_H;
-        if (LC_HEAD + rows * cell_h + LC_FOOT > li->rect.h - 20)       /* a low screen: the rows get closer */
-            cell_h = LM_MAX((li->rect.h - 20 - LC_HEAD - LC_FOOT) / rows, LC_ICON + 8 + LM_FONT_H + 6);
+        if (LC_HEAD + rows * cell_h + dots_h + LC_FOOT > li->rect.h - 20)       /* a low screen: the rows get closer */
+            cell_h = LM_MAX((li->rect.h - 20 - LC_HEAD - LC_FOOT - dots_h) / rows, LC_ICON + 8 + LM_FONT_H + 6);
         cw = LM_MAX(li->cols * LC_CELL_W + 2 * LC_PAD, 2 * LC_BTN_W + 56);
-        ch = LC_HEAD + rows * cell_h + LC_FOOT;
+        ch = LC_HEAD + rows * cell_h + dots_h + LC_FOOT;
         int x0 = li->rect.x + (li->rect.w - cw) / 2 + (cw - li->cols * LC_CELL_W) / 2;
         int y0 = li->rect.y + (li->rect.h - ch) / 2 + LC_HEAD;
         for (int g = 0; g < cells; g++) {
-            struct lm_rect cell = lm_rect_make(x0 + (g % li->cols) * LC_CELL_W, y0 + (g / li->cols) * cell_h, LC_CELL_W, cell_h);
-            struct lm_rect box = lm_rect_make(cell.x + (LC_CELL_W - LC_ICON) / 2, cell.y + 6, LC_ICON, LC_ICON);
+            bool on_page = g >= li->first && g < li->last;
+            int p = g - li->first;
+            struct lm_rect cell = on_page ? lm_rect_make(x0 + (p % li->cols) * LC_CELL_W, y0 + (p / li->cols) * cell_h, LC_CELL_W, cell_h) : (struct lm_rect){ 0, 0, 0, 0 };
+            struct lm_rect box = on_page ? lm_rect_make(cell.x + (LC_CELL_W - LC_ICON) / 2, cell.y + 6, LC_ICON, LC_ICON) : (struct lm_rect){ 0, 0, 0, 0 };
             if (g == n) {
                 li->add = cell;
                 continue;
             }
             li->icon[g].box = box;
             li->icon[g].hit = cell;
-            li->icon[g].remove = lm_rect_make(box.x - 8, box.y - 8, 24, 24);
+            li->icon[g].remove = on_page ? lm_rect_make(box.x - 8, box.y - 8, 24, 24) : (struct lm_rect){ 0, 0, 0, 0 };
             li->icon[g].item = launcher_item(g, NULL);
-            li->icon[g].running = li->icon[g].item && !lm_search_owns(li->icon[g].item) && dock_window_count(wm, li->icon[g].item) > 0;
+            li->icon[g].running = on_page && li->icon[g].item && !lm_search_owns(li->icon[g].item) && dock_window_count(wm, li->icon[g].item) > 0;
+        }
+        if (li->pages > 1) {                                            /* the dots, centred under the grid, and an arrow at each side of it */
+            int dy = y0 + rows * cell_h + 4, pitch = 20, dx = li->rect.x + li->rect.w / 2 - li->pages * pitch / 2;
+            for (int i = 0; i < li->pages; i++)
+                li->dot[i] = lm_rect_make(dx + i * pitch, dy, pitch, 20);
+            int ay = y0 + (rows * cell_h) / 2 - 24, cx0 = li->rect.x + (li->rect.w - cw) / 2;
+            if (li->page > 0)
+                li->arrow[0] = lm_rect_make(cx0 + 2, ay, 30, 48);
+            if (li->page < li->pages - 1)
+                li->arrow[1] = lm_rect_make(cx0 + cw - 32, ay, 30, 48);
         }
     }
-    li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, ch);
+    /* The grid keeps its place whether the footer is there or not: the card is as high as it needs to be, its top stays where it is when edit mode adds the hint. */
+    int card_h = !li->form && !li->edit ? ch - (LC_FOOT - LC_FOOT_SLIM) : ch;
+    li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, card_h);
     li->drag = -1;
     li->drop_pos = -1;
     if (wm->launcher_drag && !li->form && wm->launcher_drag_g < n) {
@@ -280,10 +319,15 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     }
     li->title = lm_rect_make(li->card.x, li->card.y + 18, li->card.w, LM_FONT_H);
     int by = li->card.y + li->card.h - 16 - LC_BTN_H, bx = li->card.x + li->card.w / 2;
-    li->button[0] = lm_rect_make(bx - LC_BTN_W - 8, by, LC_BTN_W, LC_BTN_H);
-    li->button[1] = lm_rect_make(bx + 8, by, LC_BTN_W, LC_BTN_H);
+    if (li->form) {                                                     /* the form has its two buttons at the bottom */
+        li->button[0] = lm_rect_make(bx - LC_BTN_W - 8, by, LC_BTN_W, LC_BTN_H);
+        li->button[1] = lm_rect_make(bx + 8, by, LC_BTN_W, LC_BTN_H);
+    } else {                                                            /* the grid: one small button at the top corner that switches edit mode on and off; no row of buttons */
+        li->button[0] = lm_rect_make(li->card.x + li->card.w - 16 - LC_EDIT_W, li->card.y + 13, LC_EDIT_W, LC_EDIT_H);
+        li->button[1] = (struct lm_rect){ 0, 0, 0, 0 };
+    }
     li->button_text[0] = li->form ? (li->editing ? "Save" : "Add") : li->edit ? "Done" : "Edit";
-    li->button_text[1] = li->form ? "Cancel" : "Close";
+    li->button_text[1] = li->form ? "Cancel" : "";
     static const char hint_grid[] = "Enter starts   E edit   A add   Type to search   Esc closes", hint_edit[] = "Click an icon to change it   red x removes   E or Done ends   Esc closes",
                       hint_form[] = "Tab next field   Left / Right cursor (or icon)   Enter adds   Esc back",
                       hint_change[] = "Tab next field   Left / Right cursor (or icon)   Enter saves   Esc back";
@@ -371,6 +415,8 @@ void launcher_set(struct lm_wm *wm, bool open, struct lm_output *o)
         wm->launcher_open = true;
         wm->launcher_edit = wm->launcher_form = false;
         wm->launcher_sel = -1;
+        wm->launcher_page = 0;
+        wm->launcher_wheel = 0.0;
         wm->launcher_hover_btn = -1;
         wm->launcher_msg[0] = 0;
         launcher_damage(wm);
@@ -408,10 +454,14 @@ size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size)
         return n;
 #define LCR(r) (r).x, (r).y, (r).w, (r).h
     n += (size_t)snprintf(buf + n, size - n, "card x=%d y=%d w=%d h=%d\n", LCR(li.card));
+    if (!li.form)
+        n += (size_t)snprintf(buf + n, size - n, "pages n=%d page=%d per=%d cols=%d first=%d last=%d\n", li.pages, li.page, li.per_page, li.cols, li.first, li.last);
+    for (int i = 0; i < li.pages && li.pages > 1 && !li.form; i++)
+        n += (size_t)snprintf(buf + n, size - n, "dot %d x=%d y=%d w=%d h=%d\n", i, LCR(li.dot[i]));
     if (li.drag >= 0 && li.drop.w > 0)
         n += (size_t)snprintf(buf + n, size - n, "drop x=%d y=%d w=%d h=%d\n", LCR(li.drop));
     if (!li.form) {
-        for (int g = 0; g < li.n && n < size; g++) {
+        for (int g = li.first; g < li.last && g < li.n && n < size; g++) {
             n += (size_t)snprintf(buf + n, size - n, "icon %d \"%s\" x=%d y=%d w=%d h=%d", g, li.icon[g].item->name, LCR(li.icon[g].box));
             if (li.edit)
                 n += (size_t)snprintf(buf + n, size - n, " remove=%d,%d,%d,%d", LCR(li.icon[g].remove));
@@ -479,6 +529,18 @@ bool launcher_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out)
             }
         return true;
     }
+    for (int i = 0; i < li.pages && li.pages > 1; i++)               /* a page dot */
+        if (lm_rect_contains(&li.dot[i], ix, iy)) {
+            out->kind = LM_PICK_LAUNCHER_PAGE;
+            out->index = i;
+            return true;
+        }
+    for (int k = 0; k < 2; k++)                                       /* an arrow at the side: the page before / after */
+        if (li.arrow[k].w > 0 && lm_rect_contains(&li.arrow[k], ix, iy)) {
+            out->kind = LM_PICK_LAUNCHER_PAGE;
+            out->index = li.page + (k ? 1 : -1);
+            return true;
+        }
     for (int g = 0; g < li.n; g++) {
         if (li.edit && lm_rect_contains(&li.icon[g].remove, ix, iy)) {
             out->kind = LM_PICK_LAUNCHER_REMOVE;
@@ -648,6 +710,11 @@ void launcher_activate(struct lm_wm *wm, int kind, int index)
         dock_launch(wm, it, di, true);
         break;
     }
+    case LM_PICK_LAUNCHER_PAGE:
+        wm->launcher_page = index;
+        wm->launcher_sel = -1;
+        launcher_damage(wm);
+        break;
     case LM_PICK_LAUNCHER_REMOVE: launcher_remove(wm, index); break;
     case LM_PICK_LAUNCHER_ADD: launcher_open_form(wm); break;
     case LM_PICK_LAUNCHER_FIELD: {                                    /* the caret goes where the pointer is */
@@ -799,9 +866,9 @@ void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods)
         }
         return;
     }
-    bool arrow = code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN;
+    bool arrow = code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN || code == KEY_PAGEUP || code == KEY_PAGEDOWN;
     if (!wm->launcher_form) {
-        int cells = li.n + (li.add.w > 0 ? 1 : 0);
+        int cells = li.cells;                                           /* (the "+" tile has a place only on the last page: li.add is empty on the others) */
         keymap_sync(wm);
         uint32_t sks = lm_keymap_keysym(code, mods);
         char stxt[8];
@@ -839,6 +906,7 @@ void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods)
         }
         if (changed) {
             wm->launcher_sel = launcher_count() > 0 ? 0 : -1;
+            wm->launcher_page = 0;
             launcher_damage(wm);
             return;
         }
@@ -849,17 +917,27 @@ void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods)
         } else if (arrow || code == KEY_HOME || code == KEY_END) {
             if (cells == 0)
                 return;
-            int cur = li.sel < 0 ? (code == KEY_LEFT || code == KEY_UP || code == KEY_END ? cells - 1 : 0) : li.sel;
-            if (li.sel >= 0) {
-                int cols = LM_MAX(li.cols, 1);
-                cur = code == KEY_LEFT ? cur - 1 : code == KEY_RIGHT ? cur + 1 : code == KEY_UP ? cur - cols :
-                      code == KEY_DOWN ? cur + cols : code == KEY_HOME ? 0 : cells - 1;
-                if (code == KEY_DOWN && cur >= cells && li.sel < cells - 1)
-                    cur = cells - 1;                                    /* the last, shorter row */
+            int pp = LM_MAX(li.per_page, 1);
+            int cur = li.sel < 0 ? (code == KEY_LEFT || code == KEY_UP || code == KEY_END ? cells - 1 : li.first) : li.sel;
+            if (li.sel >= 0 || code == KEY_PAGEUP || code == KEY_PAGEDOWN) {
+                int cols = LM_MAX(li.cols, 1), base = li.sel >= 0 ? li.sel : li.first;
+                cur = base;
+                if (code == KEY_LEFT) cur = base - 1;                   /* (Left and Right go on to the next page) */
+                else if (code == KEY_RIGHT) cur = base + 1;
+                else if (code == KEY_UP) cur = base - cols >= li.first ? base - cols : base;           /* (Up and Down stay on the page) */
+                else if (code == KEY_DOWN) {
+                    cur = base + cols < li.last ? base + cols : base;
+                    if (cur == base && base < li.last - 1 && (base - li.first) / cols < (li.last - 1 - li.first) / cols)
+                        cur = li.last - 1;                              /* the last, shorter row */
+                } else if (code == KEY_HOME) cur = 0;
+                else if (code == KEY_END) cur = cells - 1;
+                else if (code == KEY_PAGEUP) cur = LM_MAX(li.page - 1, 0) * pp;
+                else if (code == KEY_PAGEDOWN) cur = LM_MIN(li.page + 1, LM_MAX(li.pages - 1, 0)) * pp;
             }
             cur = LM_CLAMP(cur, 0, cells - 1);
-            if (cur != wm->launcher_sel) {
+            if (cur != wm->launcher_sel || cur / pp != wm->launcher_page) {
                 wm->launcher_sel = cur;
+                wm->launcher_page = cur / pp;                           /* the page that has the highlighted cell shows */
                 launcher_damage(wm);
             }
         } else if (code == KEY_ENTER || code == KEY_KPENTER || code == KEY_SPACE) {
@@ -967,4 +1045,39 @@ void launcher_key(struct lm_wm *wm, uint32_t code, bool repeat, uint32_t mods)
     wm->launcher_caret[f] = caret;
     wm->launcher_msg[0] = 0;
     launcher_damage(wm);
+}
+
+/* The wheel (or a two finger scroll) over the open launcher turns the pages. Returns true when the launcher took the event. */
+bool lm_wm_launcher_scroll(struct lm_wm *wm, double value, int32_t discrete)
+{
+    if (!wm->launcher_open || wm->launcher_form)
+        return false;
+    struct lm_output *o = launcher_output(wm);
+    if (!o)
+        return true;
+    struct lm_launcher_info li;
+    launcher_info(wm, o, &li);
+    if (li.pages <= 1)
+        return true;
+    int dir = 0;
+    if (discrete) {
+        dir = discrete > 0 ? 1 : -1;
+        wm->launcher_wheel = 0.0;
+    } else {
+        wm->launcher_wheel += value;
+        if (wm->launcher_wheel > 40.0) {
+            dir = 1;
+            wm->launcher_wheel = 0.0;
+        } else if (wm->launcher_wheel < -40.0) {
+            dir = -1;
+            wm->launcher_wheel = 0.0;
+        }
+    }
+    int np = LM_CLAMP(li.page + dir, 0, li.pages - 1);
+    if (dir && np != li.page) {
+        wm->launcher_page = np;
+        wm->launcher_sel = -1;
+        launcher_damage(wm);
+    }
+    return true;
 }

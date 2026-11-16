@@ -1480,7 +1480,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_ABOUT_BUTTON: about_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_DOCK_ITEM: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_LAUNCHER_ITEM: case LM_PICK_LAUNCHER_REMOVE: case LM_PICK_LAUNCHER_ADD: case LM_PICK_LAUNCHER_BUTTON:
-    case LM_PICK_LAUNCHER_KIND: case LM_PICK_LAUNCHER_HELP: case LM_PICK_LAUNCHER_HELPCLOSE: shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_LAUNCHER_KIND: case LM_PICK_LAUNCHER_HELP: case LM_PICK_LAUNCHER_HELPCLOSE: case LM_PICK_LAUNCHER_PAGE: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_CLOCK: shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_POWER: power_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_POWER_BUTTON: power_item = pick->index; shape = LM_CURSOR_POINTER; break;

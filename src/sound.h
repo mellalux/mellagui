@@ -6,6 +6,9 @@
 #ifndef MELLAGUI_SOUND_H
 #define MELLAGUI_SOUND_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 enum lm_sound {
     LM_SOUND_STICKY_ON,     /* sticky keys switched on: rising three-note run */
     LM_SOUND_STICKY_OFF,    /* sticky keys switched off: falling three-note run */
@@ -16,9 +19,22 @@ enum lm_sound {
     LM_SOUND_DOCK,          /* a click on a dock icon: a soft rising "pok-pling" (plucked, with a round decay) */
     LM_SOUND_VOLUME,        /* the volume was set from the quick settings card: a short plucked tick, so that the new level can be heard */
     LM_SOUND_TIMER,         /* a timer or a pomodoro phase ended: a bright rising three-note call, twice */
+    LM_SOUND_CARD_DRAW,     /* a card turned over / taken from the stock: a rustle, a card sliding on cards (four of them, each a little different) */
+    LM_SOUND_CARD_DRAW2,
+    LM_SOUND_CARD_DRAW3,
+    LM_SOUND_CARD_DRAW4,
+    LM_SOUND_CARD_PLACE,    /* a card laid down: it slides the last bit and taps the table (three of them) */
+    LM_SOUND_CARD_PLACE2,
+    LM_SOUND_CARD_PLACE3,
+    LM_SOUND_CARD_SHUFFLE,  /* a new deal: the deck riffled, a rustle with flicks that come faster (two of them) */
+    LM_SOUND_CARD_SHUFFLE2,
+    LM_SOUND_CARD_WIN,      /* the game was won: a bright plucked run up */
+    LM_SOUND_CARD_NO,       /* a card does not go there: two low plucked notes down */
     LM_SOUND_COUNT
 };
 
+/* The samples of `s` (S16_LE mono 44.1 kHz) into buf, at most cap; returns how many. What lm_sound_play hands to the player; also for the tests. */
+size_t lm_sound_render(enum lm_sound s, int16_t *buf, size_t cap);
 const char *lm_sound_name(enum lm_sound s);     /* "latch", "lock", ... */
 /* ALSA device the beeps go to (aplay -D): "default" or a name accepted by lm_audio_name_ok(). */
 void lm_sound_set_device(const char *name);

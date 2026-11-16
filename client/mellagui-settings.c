@@ -1062,7 +1062,6 @@ static void build_dock(struct app *a, int x, int y, int w)
         }
         y += 8;
         add_button(a, x, y, 220, "Restore the built-in dock", "dock-reset")->r.h = MENU_ROW_H - 2;
-        add_button(a, x + 230, y, LM_MIN(w - 230, 330), "Add all MellaGUI programs to the launcher", "launcher-defaults")->r.h = MENU_ROW_H - 2;
         add(a, W_LABEL, (struct rect){ x, y + MENU_ROW_H + 4, w, 24 }, "Applied when you let go of a slider.");
         return;
     }
@@ -1115,6 +1114,8 @@ static void build_dock(struct app *a, int x, int y, int w)
     y += 32;
     const char *hint = a->dock_err[0] ? a->dock_err : n >= DOCK_MAX ? "The dock is full (16 buttons)." : "Click a name to edit it. An empty icon is guessed.";
     add(a, W_LABEL, (struct rect){ x, y - 1, w, 24 }, hint);
+    y += 26;
+    add_button(a, x, y, LM_MIN(w, 330), "Add all MellaGUI programs to the launcher", "launcher-defaults")->r.h = MENU_ROW_H - 2;     /* (it belongs with the lists of buttons, not with the look) */
 }
 
 /* ---- Saver page: the screensaver (mellagui-matrix, started by the compositor when nothing has been touched for a while) ---------- */

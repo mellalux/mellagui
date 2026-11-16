@@ -426,6 +426,17 @@ void launcher_drag_motion(struct lm_wm *wm)
     }
     wm->drag_x = x;
     wm->drag_y = y;
+    struct lm_output *o = launcher_output(wm);                      /* an icon held near the left / right edge of the card turns the page (not more than twice a second) */
+    int64_t now = (int64_t)lm_now_ms();
+    if (o && now - wm->launcher_flip_ms > 600) {
+        struct lm_launcher_info li;
+        launcher_info(wm, o, &li);
+        int dir = x < li.card.x + 36 ? -1 : x > li.card.x + li.card.w - 36 ? 1 : 0;
+        if (dir && li.pages > 1 && li.page + dir >= 0 && li.page + dir < li.pages) {
+            wm->launcher_page = li.page + dir;
+            wm->launcher_flip_ms = now;
+        }
+    }
     launcher_damage(wm);
 }
 

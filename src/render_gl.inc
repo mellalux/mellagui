@@ -601,6 +601,8 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, &li->form, sizeof(li->form));
             h = fnv(h, &li->edit, sizeof(li->edit));
             h = fnv(h, &li->n, sizeof(li->n));
+            h = fnv(h, &li->page, sizeof(li->page));
+            h = fnv(h, &li->pages, sizeof(li->pages));
             h = fnv(h, &li->sel, sizeof(li->sel));
             h = fnv(h, &li->hover_button, sizeof(li->hover_button));
             h = fnv(h, &li->focus, sizeof(li->focus));

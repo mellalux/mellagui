@@ -50,7 +50,7 @@ enum key_id {
     K_LAYOUTS, K_LAYOUT, K_STICKY, K_REPEAT_DELAY, K_REPEAT_RATE, K_POINTER_SPEED, K_NATURAL_SCROLL, K_SOUND,
     K_GADGET, K_MIXER, K_SYSINFO, K_SMART, K_RESOLUTION, K_AUDIO_OUT, K_WALLPAPER, K_WALLPAPER_MODE, K_OUTPUT_ORDER, K_SAVER, K_SAVER_MINUTES, K_SAVER_LOCK, K_SAVER_BLANK, K_SAVER_STYLE, K_SAVER_CAT, K_SAVER_MEOW, K_MAGNIFIER, K_MAGNIFIER_ZOOM, K_OSK_AVOID, K_LAYOUT_BADGES, K_LAYOUT_LABEL, K_LOCK_WALLPAPER, K_SCALE,
     K_CLOCK_HOURS, K_CLOCK_SECONDS, K_CLOCK_DATE, K_CLOCK_WEEKDAY, K_DATE_FORMAT, K_CAL_ENABLED, K_CAL_WEEK_START, K_CAL_WEEKS, K_AUDIO_PROFILE_KEEP, K_NIGHT_LIGHT, K_NIGHT_TEMP, K_NIGHT_FROM, K_NIGHT_TO, K_NIGHT_SUN, K_DND, K_STARTUP_SOUND, K_FILE,
-    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_SOURCES, K_SOURCE, K_SOURCE_VOLUME, K_SOURCE_MUTE, K_SINK_VOLUME, K_SINK_MUTE, K_SINK_BEEP, K_TIMER_BEEP, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
+    K_RESOLUTIONS, K_RESOLUTION_NOW, K_MONITOR, K_RESOLUTION_CONFIRM, K_AUDIO_OUTS, K_SINKS, K_SINK, K_SINKS_STATUS, K_SOURCES, K_SOURCE, K_SOURCE_VOLUME, K_SOURCE_MUTE, K_SINK_VOLUME, K_SINK_MUTE, K_SINK_BEEP, K_TIMER_BEEP, K_CARD_SOUND, K_AUDIO_PROFILES, K_AUDIO_PROFILE, K_AUDIO_RESCAN, K_WALLPAPER_STATUS, K_OUTPUTS,
     K_LOCK_KIND, K_LOCK_TIMEOUT, K_LOCK_START, K_LOCK_BLANK, K_LOCK_VT, K_LOCK_STATUS, K_LOCK_SET, K_LOCK_NOW, K_LOCKED, K_NOTIFY, K_CONFIG_FILE, K_CONFIG_STATUS, K_CONFIG_RELOAD, K_CONFIG_CREATE, K_SAVER_NOW, K_NIGHT_SUN_INFO,
     K_KEYS_HELP_0, K_KEYS_HELP_LAST = K_KEYS_HELP_0 + KEYS_HELP_CHUNKS - 1,
     K_KEYS_COUNT, K_KEYS_PAGE, K_KEYS_ROW_0, K_KEYS_ROW_LAST = K_KEYS_ROW_0 + KEYS_PAGE_ROWS - 1, K_KEYS_ACTIONS, K_KEYS_CAPTURE,
@@ -71,7 +71,7 @@ static const char *const key_names[K_COUNT] = {
     [K_CLOCK_HOURS] = "clock-hours", [K_CLOCK_SECONDS] = "clock-seconds", [K_CLOCK_DATE] = "clock-date", [K_CLOCK_WEEKDAY] = "clock-weekday",
     [K_DATE_FORMAT] = "date-format", [K_CAL_ENABLED] = "cal-enabled", [K_CAL_WEEK_START] = "cal-week-start", [K_CAL_WEEKS] = "cal-weeks", [K_AUDIO_PROFILE_KEEP] = "audio-profile-keep", [K_NIGHT_LIGHT] = "night-light", [K_NIGHT_TEMP] = "night-temp", [K_NIGHT_FROM] = "night-from", [K_NIGHT_TO] = "night-to", [K_NIGHT_SUN] = "night-sun", [K_DND] = "dnd", [K_STARTUP_SOUND] = "startup-sound", [K_FILE] = "file",
     [K_RESOLUTIONS] = "resolutions", [K_RESOLUTION_NOW] = "resolution-now", [K_MONITOR] = "monitor", [K_RESOLUTION_CONFIRM] = "resolution-confirm",
-    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_SOURCES] = "sources", [K_SOURCE] = "source", [K_SOURCE_VOLUME] = "source-volume", [K_SOURCE_MUTE] = "source-mute", [K_SINK_VOLUME] = "sink-volume", [K_SINK_MUTE] = "sink-mute", [K_SINK_BEEP] = "sink-beep", [K_TIMER_BEEP] = "timer-beep", [K_AUDIO_PROFILES] = "audio-profiles",
+    [K_AUDIO_OUTS] = "audio-outs", [K_SINKS] = "sinks", [K_SINK] = "sink", [K_SINKS_STATUS] = "sinks-status", [K_SOURCES] = "sources", [K_SOURCE] = "source", [K_SOURCE_VOLUME] = "source-volume", [K_SOURCE_MUTE] = "source-mute", [K_SINK_VOLUME] = "sink-volume", [K_SINK_MUTE] = "sink-mute", [K_SINK_BEEP] = "sink-beep", [K_TIMER_BEEP] = "timer-beep", [K_CARD_SOUND] = "card-sound", [K_AUDIO_PROFILES] = "audio-profiles",
     [K_AUDIO_PROFILE] = "audio-profile", [K_AUDIO_RESCAN] = "audio-rescan", [K_WALLPAPER_STATUS] = "wallpaper-status", [K_OUTPUTS] = "outputs",
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
@@ -703,6 +703,7 @@ static void get_value(struct lm_settings *s, int k, char *out, size_t n)
     case K_SINK_MUTE: snprintf(out, n, "%d", s->sink_mute ? 1 : 0); break;
     case K_SINK_BEEP: snprintf(out, n, "0"); break;                    /* write only */
     case K_TIMER_BEEP: snprintf(out, n, "0"); break;
+    case K_CARD_SOUND: snprintf(out, n, "-"); break;                  /* write only */
     case K_AUDIO_PROFILES: snprintf(out, n, "%s", s->profiles); break;
     case K_AUDIO_PROFILE: snprintf(out, n, "%s", s->profile); break;
     case K_AUDIO_RESCAN: snprintf(out, n, "0"); break;
@@ -1293,10 +1294,10 @@ static bool dock_name_ok(const char *s)
 
 /* ---- the [dock] and [dock-apps] sections, edited from the panel's Dock page ------------------------------------------------- */
 
-struct dock_list {
-    char name[LM_DOCK_MAX][LM_DOCK_NAME_MAX];
-    char icon[LM_DOCK_MAX][LM_DOCK_ICON_MAX];
-    char cmd[LM_DOCK_MAX][LM_DOCK_CMD_MAX];
+struct dock_list {                                      /* the dock's list (16 at most) or the launcher's (LM_LAUNCHER_APPS_MAX) */
+    char name[LM_LAUNCHER_APPS_MAX][LM_DOCK_NAME_MAX];
+    char icon[LM_LAUNCHER_APPS_MAX][LM_DOCK_ICON_MAX];
+    char cmd[LM_LAUNCHER_APPS_MAX][LM_DOCK_CMD_MAX];
     int n;
 };
 
@@ -1328,7 +1329,7 @@ static bool dock_commit(struct lm_server *srv, const struct dock_list *l, const 
     const char *path = srv->config.conf_path;
     if (!path || !*path || !strcmp(path, "none") || !srv->reload_config)
         return false;
-    size_t cap = (size_t)LM_DOCK_MAX * (LM_DOCK_NAME_MAX + LM_DOCK_ICON_MAX + LM_DOCK_CMD_MAX + 16) + 1;
+    size_t cap = (size_t)LM_LAUNCHER_APPS_MAX * (LM_DOCK_NAME_MAX + LM_DOCK_ICON_MAX + LM_DOCK_CMD_MAX + 16) + 1;
     char *body = malloc(cap);
     if (!body)
         return false;
@@ -1446,7 +1447,7 @@ static void apps_load(struct dock_list *l, bool launcher)
 {
     const char *nm, *ic, *cm;
     l->n = 0;
-    while (l->n < LM_DOCK_MAX && (launcher ? lm_launchapps_raw_entry(l->n, &nm, &ic, &cm) : lm_dock_raw_entry(l->n, &nm, &ic, &cm))) {
+    while (l->n < (launcher ? LM_LAUNCHER_APPS_MAX : LM_DOCK_MAX) && (launcher ? lm_launchapps_raw_entry(l->n, &nm, &ic, &cm) : lm_dock_raw_entry(l->n, &nm, &ic, &cm))) {
         snprintf(l->name[l->n], sizeof(l->name[0]), "%s", nm);
         snprintf(l->icon[l->n], sizeof(l->icon[0]), "%s", ic);
         snprintf(l->cmd[l->n], sizeof(l->cmd[0]), "%s", cm);
@@ -1481,7 +1482,7 @@ static bool apps_put(struct lm_server *srv, bool launcher, const char *name, con
     static struct dock_list l;
     apps_load(&l, launcher);
     if (!dock_name_ok(name) || strlen(name) >= LM_DOCK_NAME_MAX || !dock_text_ok(icon, LM_DOCK_ICON_MAX, true) || strchr(icon, ']') ||
-        icon[0] == '[' || !dock_text_ok(cmd, LM_DOCK_CMD_MAX, false) || l.n >= LM_DOCK_MAX)
+        icon[0] == '[' || !dock_text_ok(cmd, LM_DOCK_CMD_MAX, false) || l.n >= (launcher ? LM_LAUNCHER_APPS_MAX : LM_DOCK_MAX))
         return false;
     for (int i = 0; i < l.n; i++)
         if (!strcasecmp(l.name[i], name))
@@ -2018,6 +2019,36 @@ static bool apply(struct lm_settings *s, const char *key, const char *val)
                 lm_sound_play(LM_SOUND_TIMER);
         }
         return true;
+    case K_CARD_SOUND: {                                /* a card game asks for its sounds by name: draw place shuffle win no (they follow the "Sound feedback" check) */
+        /* a family name ("draw") picks one of its variants at random, never the one before it; "draw2" asks for one by name (tests) */
+        static const struct { const char *name; enum lm_sound first; int variants; } fam[] = {
+            { "draw", LM_SOUND_CARD_DRAW, 4 }, { "place", LM_SOUND_CARD_PLACE, 3 }, { "shuffle", LM_SOUND_CARD_SHUFFLE, 2 },
+            { "win", LM_SOUND_CARD_WIN, 1 }, { "no", LM_SOUND_CARD_NO, 1 } };
+        static int last_variant[5];
+        static uint32_t rnd = 0x9e3779b9u;
+        for (size_t i = 0; i < sizeof(fam) / sizeof(fam[0]); i++) {
+            size_t nl = strlen(fam[i].name);
+            int pick = -1;
+            if (!strcmp(val, fam[i].name)) {
+                rnd ^= rnd << 13; rnd ^= rnd >> 17; rnd ^= rnd << 5;
+                rnd += (uint32_t)lm_now_msec32();
+                pick = fam[i].variants > 1 ? (int)(rnd % (uint32_t)fam[i].variants) : 0;
+                if (fam[i].variants > 1 && pick == last_variant[i])
+                    pick = (pick + 1 + (int)((rnd >> 8) % (uint32_t)(fam[i].variants - 1))) % fam[i].variants;
+            } else if (!strncmp(val, fam[i].name, nl) && val[nl] >= '1' && val[nl] <= '9' && !val[nl + 1] && val[nl] - '1' < fam[i].variants) {
+                pick = val[nl] - '1';
+            }
+            if (pick < 0)
+                continue;
+            last_variant[i] = pick;
+            enum lm_sound snd = (enum lm_sound)(fam[i].first + pick);
+            lm_sound_note(snd);
+            if (cfg->sound && !s->sink_mute && (strcmp(cfg->backend, "headless") != 0 || getenv("MELLAGUI_SOUND_FORCE")))
+                lm_sound_play(snd);
+            return true;
+        }
+        return false;
+    }
     case K_SINK_BEEP:                                   /* "1": a short tick through the default output, to hear the level that was just set */
         if (!parse_bool(val, &b)) return false;
         if (b) {

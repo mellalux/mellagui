@@ -472,6 +472,31 @@ void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, i
     }
 }
 
+void wlwin_blit_px_over(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride)
+{
+    x += w->inx;
+    int s = w->scale > 1 ? w->scale : 1;
+    int x0 = LM_MAX(x * s, 0), x1 = LM_MIN(x * s + sw, w->pw);
+    int y0 = LM_MAX(y * s, 0), y1 = LM_MIN(y * s + sh, w->ph);
+    for (int py = y0; py < y1; py++) {
+        const uint32_t *srow = src + (size_t)(py - y * s) * (size_t)stride - (size_t)(x * s);
+        uint32_t *drow = w->pixels + (size_t)py * (size_t)w->pw;
+        for (int px = x0; px < x1; px++) {
+            uint32_t sp = srow[px], a = sp >> 24;
+            if (a == 255) {
+                drow[px] = sp;
+            } else if (a) {
+                uint32_t d = drow[px];
+                uint32_t ia = 255 - a;
+                uint32_t r = (((sp >> 16) & 255) * a + ((d >> 16) & 255) * ia + 127) / 255;
+                uint32_t g = (((sp >> 8) & 255) * a + ((d >> 8) & 255) * ia + 127) / 255;
+                uint32_t b = ((sp & 255) * a + (d & 255) * ia + 127) / 255;
+                drow[px] = 0xff000000u | r << 16 | g << 8 | b;
+            }
+        }
+    }
+}
+
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb)
 {
     if (scale < 1)

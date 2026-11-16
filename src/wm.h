@@ -281,6 +281,7 @@ enum lm_pick_kind {
     LM_PICK_LAUNCHER_KIND,  /* an icon choice of the add form (`index` = enum lm_dockicon, or -1 = "guess from the name") */
     LM_PICK_LAUNCHER_HELP,  /* the small "?" at the end of a form field (`index` 0 = name, 1 = command, 2 = icon): opens its help card */
     LM_PICK_LAUNCHER_HELPCLOSE, /* while a help card is open: its Close button, or anything outside the card */
+    LM_PICK_LAUNCHER_PAGE,  /* a page dot (or an arrow) of the launcher: `index` = the page it shows */
     LM_PICK_LAUNCHER_CARD,  /* the launcher's card (between its items) */
     LM_PICK_LAUNCHER_BACKDROP, /* anything else while the launcher is open: a click closes it, nothing below gets it */
     LM_PICK_PANEL_CLOCK,    /* the clock: shows / hides the calendar (`rect` = the clock) */
@@ -540,7 +541,8 @@ struct lm_about_info {
 #define LM_LAUNCHER_HELP_D 18                          /* the "?" circle of a form field */
 #define LM_LAUNCHER_KIND_N (LM_DOCKICON_COUNT + 1)      /* the icon choices of the form: "auto" and the built-in ones */
 /* The most icons the launcher dialog shows: the dock's buttons and the launcher's own lists. */
-#define LM_LAUNCHER_MAX (2 * LM_DOCK_MAX + 24)         /* the buttons and the results of the search (search.h: LM_SEARCH_MAX) */
+#define LM_LAUNCHER_PAGES_MAX 24                                           /* page dots: a page holds at least one row of cells */
+#define LM_LAUNCHER_MAX (LM_DOCK_MAX + LM_LAUNCHER_APPS_MAX + 24)         /* the buttons and the results of the search (search.h: LM_SEARCH_MAX) */
 struct lm_launcher_info {
     struct lm_rect rect;            /* the whole output (dimmed) */
     float veil;                     /* how strong the dimming is, 0..1 (the open / close animation fades it) */
@@ -555,6 +557,12 @@ struct lm_launcher_info {
     int n;                          /* icons */
     int cols;                       /* icons per row (the "+" tile counts as one) */
     int sel;                        /* highlighted: an icon index, n = the "+" tile, -1 none */
+    /* pages (like the macOS Launchpad): the grid shows `per_page` cells (icons and the "+" tile, numbered from 0) from `first` to `last` (exclusive); the
+     * others have no box and are not painted; a row of dots under the grid (and an arrow at each side) turns the pages */
+    int pages, page, per_page, first, last;
+    int cells;                      /* the icons and the "+" tile (whichever page they are on) */
+    struct lm_rect dot[LM_LAUNCHER_PAGES_MAX];   /* the hit boxes of the dots, pages of them (none when there is one page) */
+    struct lm_rect arrow[2];        /* previous / next page, empty at the ends */
     struct {
         struct lm_rect box;         /* the round icon */
         struct lm_rect hit;         /* icon and name below it */
@@ -774,6 +782,8 @@ size_t lm_wm_about_describe(struct lm_wm *wm, char *buf, size_t size);      /* t
 /* The launcher dialog (Super+A, the dock's Launcher button, control socket `launcher`). */
 void lm_wm_launcher_set(struct lm_wm *wm, bool open);
 bool lm_wm_launcher_is_open(const struct lm_wm *wm);
+/* The wheel over the open launcher turns its pages (true = taken, the event goes no further). `discrete` = notches (0 for smooth scrolling, then `value` adds up). */
+bool lm_wm_launcher_scroll(struct lm_wm *wm, double value, int32_t discrete);
 /* Control socket `launcher`: "launcher open=<0|1> edit=<0|1> form=<0|1> n=<icons> sel=<i>" and, while open, "card x= y= w= h=", one
  * "icon <i> "<name>" x= y= w= h= remove=x,y add=x,y,w,h"-style line each (see the function), then the buttons. */
 size_t lm_wm_launcher_describe(struct lm_wm *wm, char *buf, size_t size);

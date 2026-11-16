@@ -25,6 +25,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "cardart.h"
 #include "font.h"
 #include "keymap.h"
 #include "metrics.h"
@@ -369,6 +370,12 @@ struct app {
     int64_t msg_ms;
     struct stats st;
     bool counted;                                           /* this game is in `played` */
+    /* the cards as pictures (cardart.h), made when first needed at the size of the screen's own pixels */
+    uint32_t *face[52], *back, *suit[4];
+    int spw, sph, ssz;                                      /* the size they were made at */
+    uint32_t settings;                                      /* mellagui_settings_v1: the compositor plays the sounds (`card-sound`) */
+    int64_t last_sound_ms;
+    bool drag_stock;                                        /* the cards in the hand come off the stock */
 };
 
 static const char *g_dump;
@@ -399,6 +406,18 @@ static void say(struct app *a, const char *fmt, ...)
     va_end(ap);
     a->msg_ms = now_ms();
     a->win.redraw = true;
+}
+
+/* The compositor plays them (write-only setting card-sound: draw place shuffle win no), so they follow Settings > Sound > Sound feedback and the chosen output.
+ * Never more than about ten a second: the finish moves a card every 70 ms and each sound is a player of its own. */
+static void sound(struct app *a, const char *name)
+{
+    int64_t now = now_ms();
+    if (!a->settings || !a->win.c || (now - a->last_sound_ms < 90 && strcmp(name, "win") && strcmp(name, "shuffle")))
+        return;
+    a->last_sound_ms = now;
+    WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = "card-sound" }, { .s = name });
+    wlc_flush(a->win.c);
 }
 
 /* ---- the file with the wins ---- */
@@ -512,13 +531,17 @@ static void check_won(struct app *a)
     stats_save(&a->st);
     a->prompt = P_WON;
     a->pc_hover = a->pc_down = -1;
+    sound(a, "win");
 }
 
 static void new_game(struct app *a, uint32_t seed, int draw)
 {
+    bool first = a->nundo == 0 && a->g.seed == 0;                     /* (the deal when the window opens is silent) */
     game_deal(&a->g, seed, draw);
+    if (!first && a->settings)
+        sound(a, "shuffle");
     a->nundo = 0;
-    a->press = a->dragging = false;
+    a->press = a->dragging = a->drag_stock = false;
     a->timing = a->won = a->finishing = a->counted = false;
     a->elapsed_ms = 0;
     a->hint.kind = 0;
@@ -555,6 +578,8 @@ static bool do_move(struct app *a, struct loc from, struct loc to)
     a->g = after;
     clock_start(a);
     after_move(a);
+    if (!a->won)
+        sound(a, "place");
     return true;
 }
 
@@ -571,6 +596,7 @@ static void do_draw(struct app *a)
     a->g = after;
     clock_start(a);
     after_move(a);
+    sound(a, "draw");
 }
 
 static void do_undo(struct app *a)
@@ -587,6 +613,7 @@ static void do_undo(struct app *a)
     }
     a->g = a->undo[--a->nundo];
     a->finishing = false;
+    sound(a, "draw");
     a->hint.kind = 0;
     a->win.redraw = true;
 }
@@ -628,8 +655,9 @@ static void layout(const struct app *a, struct lay *L)
     int avail_h = a->win.bh - STAT_H - 16;
     int cw_h = (avail_h - 20) * 100 / (140 * 2 + 40);       /* two card heights and the fan have to fit in the height too */
     cw = LM_CLAMP(LM_MIN(cw, LM_MAX(cw_h, 56)), 56, 120);
+    cw -= cw % 5;                                           /* 5 : 7, so a picture of the card has no rounding in it */
     L->cw = cw;
-    L->ch = cw * 140 / 100;
+    L->ch = cw * 7 / 5;
     int total = 7 * cw + 6 * gap;
     int start = ox + (aw - total) / 2;
     for (int i = 0; i < 7; i++)
@@ -730,93 +758,69 @@ static struct loc drop_target(const struct app *a, double x, double y)
 
 /* ---- painting the cards ---- */
 
-static bool suit_in(int suit, double u, double v)             /* u, v in -1..1, v down */
+/* ---- the cards as pictures ---- */
+
+static void sprites_free(struct app *a)
 {
-    switch (suit) {
-    case HE: {
-        double x = u * 1.1, y = -v * 1.1 + 0.12, t = x * x + y * y - 1;
-        return t * t * t - x * x * y * y * y <= 0;
+    for (int i = 0; i < 52; i++) {
+        free(a->face[i]);
+        a->face[i] = NULL;
     }
-    case DI: return fabs(u) / 0.64 + fabs(v) / 0.95 <= 1;
-    case SP: {
-        double x = u * 1.1, y = v * 1.1 - 0.12, t = x * x + y * y - 1;
-        if (t * t * t - x * x * y * y * y <= 0 && v < 0.55)
-            return true;
-        return v >= 0.45 && v <= 0.95 && fabs(u) <= 0.10 + 0.30 * (v - 0.45) / 0.5;
-    }
-    default: {
-        static const double cx[3] = { 0, -0.44, 0.44 }, cy[3] = { -0.42, 0.12, 0.12 };
-        for (int k = 0; k < 3; k++)
-            if ((u - cx[k]) * (u - cx[k]) + (v - cy[k]) * (v - cy[k]) <= 0.36 * 0.36)
-                return true;
-        return v >= 0.1 && v <= 0.95 && fabs(u) <= 0.08 + 0.30 * (v - 0.1) / 0.85;
-    }
+    free(a->back);
+    a->back = NULL;
+    for (int i = 0; i < 4; i++) {
+        free(a->suit[i]);
+        a->suit[i] = NULL;
     }
 }
 
-/* A suit, `size` pixels square with its top left at (x, y), drawn as runs of one row each. */
-static void draw_suit(struct wlwin *w, int x, int y, int size, int suit, uint32_t rgb)
+/* The pictures are made at the buffer's own pixels, so they are sharp on a scaled screen; a new size starts them again. */
+static void sprites_check(struct app *a, const struct lay *L)
 {
-    for (int r = 0; r < size; r++) {
-        int run = -1;
-        for (int c = 0; c <= size; c++) {
-            bool in = c < size && suit_in(suit, (c + 0.5) / size * 2 - 1, (r + 0.5) / size * 2 - 1);
-            if (in && run < 0)
-                run = c;
-            if (!in && run >= 0) {
-                wlwin_fill(w, x + run, y + r, c - run, 1, rgb);
-                run = -1;
-            }
-        }
+    int sc = wlwin_scale(&a->win), pw = L->cw * sc, ph = L->ch * sc, ssz = L->cw / 3 * sc;
+    if (pw != a->spw || ph != a->sph || ssz != a->ssz) {
+        sprites_free(a);
+        a->spw = pw;
+        a->sph = ph;
+        a->ssz = ssz;
     }
 }
 
-static const char *rank_text(int rank, char *buf)
+static const uint32_t *face_sprite(struct app *a, const struct card *c)
 {
-    static const char *const names[] = { "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K" };
-    snprintf(buf, 4, "%s", names[rank - 1]);
-    return buf;
+    int i = c->suit * 13 + c->rank - 1;
+    if (!a->face[i])
+        a->face[i] = cardart_face(c->rank, c->suit, a->spw, a->sph);
+    return a->face[i];
 }
 
-static void draw_card_back(struct wlwin *w, int x, int y, int cw, int ch)
+static void draw_card_face(struct app *a, int x, int y, const struct card *c)
 {
-    wlwin_round_fill(w, x, y, cw, ch, 7, CARD_EDGE);
-    wlwin_round_fill(w, x + 1, y + 1, cw - 2, ch - 2, 6, CARD_FACE);
-    wlwin_round_fill(w, x + 4, y + 4, cw - 8, ch - 8, 4, CARD_BACK);
-    int ix = x + 9, iy = y + 9, iw = cw - 18, ih = ch - 18;
-    wlwin_round_fill(w, ix, iy, iw, ih, 3, CARD_BACK_LIGHT);
-    wlwin_round_fill(w, ix + 2, iy + 2, iw - 4, ih - 4, 2, CARD_BACK);
-    int cxm = x + cw / 2, cym = y + ch / 2, r = LM_MIN(iw, ih) / 4;      /* a diamond in the middle */
-    for (int dy = -r; dy <= r; dy++)
-        wlwin_fill(w, cxm - (r - abs(dy)), cym + dy, 2 * (r - abs(dy)) + 1, 1, CARD_BACK_LIGHT);
+    const uint32_t *px = face_sprite(a, c);
+    if (px)
+        wlwin_blit_px_over(&a->win, x, y, px, a->spw, a->sph, a->spw);
 }
 
-static void draw_card_face(struct wlwin *w, int x, int y, int cw, int ch, const struct card *c)
+static void draw_card_back(struct app *a, int x, int y)
 {
-    uint32_t ink = is_red(c) ? CARD_RED : CARD_BLACK;
-    wlwin_round_fill(w, x, y, cw, ch, 7, CARD_EDGE);
-    wlwin_round_fill(w, x + 1, y + 1, cw - 2, ch - 2, 6, CARD_FACE);
-    char t[4];
-    rank_text(c->rank, t);
-    int tw = lm_font_text_width(t);
-    wlwin_text_bold(w, x + 6, y + 4, t, 1, ink, 0);
-    draw_suit(w, x + 6 + tw + 3, y + 7, 12, c->suit, ink);
-    int big = LM_CLAMP(cw / 2, 20, 48);
-    if (c->rank >= 11) {                                    /* a court card: its letter large, with the suit under it */
-        const char *letter = c->rank == 11 ? "J" : c->rank == 12 ? "Q" : "K";
-        wlwin_text_bold(w, x + (cw - lm_font_text_width(letter) * 2) / 2, y + ch / 2 - LM_FONT_H - 4, letter, 2, ink, 0);
-        draw_suit(w, x + (cw - big / 2) / 2, y + ch / 2 + 6, big / 2, c->suit, ink);
-    } else {
-        draw_suit(w, x + (cw - big) / 2, y + (ch - big) / 2 + 6, big, c->suit, ink);
-    }
+    if (!a->back)
+        a->back = cardart_back(a->spw, a->sph);
+    if (a->back)
+        wlwin_blit_px_over(&a->win, x, y, a->back, a->spw, a->sph, a->spw);
 }
 
-static void draw_slot(struct wlwin *w, int x, int y, int cw, int ch, int suit, bool recycle)
+static void draw_slot(struct app *a, int x, int y, int cw, int ch, int suit, bool recycle)
 {
+    struct wlwin *w = &a->win;
     wlwin_round_fill(w, x, y, cw, ch, 7, FELT_LIGHT);
     wlwin_round_fill(w, x + 2, y + 2, cw - 4, ch - 4, 6, FELT);
-    if (suit >= 0)
-        draw_suit(w, x + cw / 2 - cw / 6, y + ch / 2 - cw / 6, cw / 3, suit, FELT_LIGHT);
+    if (suit >= 0) {                                        /* the suit of the foundation, faint */
+        if (!a->suit[suit])
+            a->suit[suit] = cardart_suit(suit, a->ssz, FELT_LIGHT);
+        int sz = a->ssz / wlwin_scale(w);
+        if (a->suit[suit])
+            wlwin_blit_px_over(w, x + (cw - sz) / 2, y + (ch - sz) / 2, a->suit[suit], a->ssz, a->ssz, a->ssz);
+    }
     if (recycle) {                                          /* a ring: the stock is empty, a click turns the waste over */
         int r = cw / 5, cx = x + cw / 2, cy = y + ch / 2;
         for (int dy = -r; dy <= r; dy++) {
@@ -858,46 +862,53 @@ static void paint_table(struct app *a)
     struct wlwin *w = &a->win;
     struct lay L;
     layout(a, &L);
+    sprites_check(a, &L);
     const struct game *g = &a->g;
     wlwin_fill(w, WLRAIL_W, 0, w->bw - WLRAIL_W, w->bh, FELT);
     wlwin_fill(w, WLRAIL_W, 0, 3, w->bh, FELT_DARK);
-    /* stock */
-    if (g->nstock)
-        draw_card_back(w, L.x[0], L.top_y, L.cw, L.ch);
-    else
-        draw_slot(w, L.x[0], L.top_y, L.cw, L.ch, -1, g->nwaste > 0);
+    /* stock: a pile with some thickness; the cards in the hand are not in it, the one under them shows */
+    int in_pile = g->nstock - (a->dragging && a->drag_stock ? a->ndrag : 0);
+    if (in_pile > 0) {
+        int layers = LM_MIN(3, (in_pile + 7) / 8);
+        for (int k = layers - 1; k >= 0; k--)
+            draw_card_back(a, L.x[0] + k * 2, L.top_y + k * 2);
+    } else {
+        draw_slot(a, L.x[0], L.top_y, L.cw, L.ch, -1, g->nwaste > 0);
+    }
     /* waste */
     int shown = waste_shown(a);
-    if (!shown)
-        draw_slot(w, L.x[1], L.top_y, L.cw, L.ch, -1, false);
+    if (!shown || (a->dragging && a->pressed.kind == L_WASTE && shown == 1 && g->nwaste == 1))
+        draw_slot(a, L.x[1], L.top_y, L.cw, L.ch, -1, false);
+    if (a->dragging && a->pressed.kind == L_WASTE && g->draw == 1 && g->nwaste >= 2)        /* the card under the one in the hand */
+        draw_card_face(a, L.x[1], L.top_y, &g->waste[g->nwaste - 2]);
     for (int k = 0; k < shown; k++) {
         int idx = g->nwaste - shown + k;
         if (hidden_by_drag(a, L_WASTE, 0, idx))
             continue;
-        draw_card_face(w, waste_x(a, &L, k, shown), L.top_y, L.cw, L.ch, &g->waste[idx]);
+        draw_card_face(a, waste_x(a, &L, k, shown), L.top_y, &g->waste[idx]);
     }
     /* foundations */
     for (int s = 0; s < 4; s++) {
         int n = g->nfound[s];
-        draw_slot(w, L.x[3 + s], L.top_y, L.cw, L.ch, s, false);
+        draw_slot(a, L.x[3 + s], L.top_y, L.cw, L.ch, s, false);
         if (n && !hidden_by_drag(a, L_FOUND, s, n - 1))
-            draw_card_face(w, L.x[3 + s], L.top_y, L.cw, L.ch, &g->found[s][n - 1]);
+            draw_card_face(a, L.x[3 + s], L.top_y, &g->found[s][n - 1]);
         else if (n > 1)
-            draw_card_face(w, L.x[3 + s], L.top_y, L.cw, L.ch, &g->found[s][n - 2]);
+            draw_card_face(a, L.x[3 + s], L.top_y, &g->found[s][n - 2]);
     }
     /* the table */
     for (int col = 0; col < 7; col++) {
         int ys[20], n = g->ntab[col];
         col_ys(a, &L, col, ys);
         if (n == 0)
-            draw_slot(w, L.x[col], L.tab_y, L.cw, L.ch, -1, false);
+            draw_slot(a, L.x[col], L.tab_y, L.cw, L.ch, -1, false);
         for (int j = 0; j < n; j++) {
             if (hidden_by_drag(a, L_TAB, col, j))
                 break;
             if (g->tab[col][j].up)
-                draw_card_face(w, L.x[col], ys[j], L.cw, L.ch, &g->tab[col][j]);
+                draw_card_face(a, L.x[col], ys[j], &g->tab[col][j]);
             else
-                draw_card_back(w, L.x[col], ys[j], L.cw, L.ch);
+                draw_card_back(a, L.x[col], ys[j]);
         }
     }
     /* the hint: a frame round what to move and where to */
@@ -927,8 +938,11 @@ static void paint_table(struct app *a)
     if (a->dragging) {
         int n = a->ndrag;
         for (int k = 0; k < n; k++) {
-            int x = (int)(a->px - a->dox), y = (int)(a->py - a->doy) + k * LM_MAX(24, L.ch / 4);
-            draw_card_face(w, x, y, L.cw, L.ch, &a->drag[k]);
+            int x = (int)(a->px - a->dox) + (a->drag_stock ? k * 6 : 0), y = (int)(a->py - a->doy) + (a->drag_stock ? 0 : k * LM_MAX(24, L.ch / 4));
+            if (a->drag[k].up)
+                draw_card_face(a, x, y, &a->drag[k]);
+            else
+                draw_card_back(a, x, y);
         }
     }
 }
@@ -1121,6 +1135,20 @@ static void write_dump(struct app *a)
         }
         fprintf(f, "\n");
     }
+    if (a->dragging) {                                                  /* the cards in the hand: where they came from, and what shows where they were */
+        const char *from = a->drag_stock ? "stock" : a->pressed.kind == L_WASTE ? "waste" : a->pressed.kind == L_FOUND ? "found" : "tab";
+        char under[8] = "none";
+        const struct loc p = a->pressed;
+        if (a->drag_stock)
+            snprintf(under, sizeof(under), "%s", g->nstock - a->ndrag > 0 ? "back" : "empty");
+        else if (p.kind == L_WASTE && g->draw == 1 && g->nwaste >= 2)
+            snprintf(under, sizeof(under), "%c%c", "A23456789TJQK"[g->waste[g->nwaste - 2].rank - 1], "SHDC"[g->waste[g->nwaste - 2].suit]);
+        else if (p.kind == L_FOUND && g->nfound[p.i] >= 2)
+            snprintf(under, sizeof(under), "%c%c", "A23456789TJQK"[g->found[p.i][g->nfound[p.i] - 2].rank - 1], "SHDC"[p.i]);
+        else if (p.kind == L_TAB && p.j > 0)
+            snprintf(under, sizeof(under), "%s", g->tab[p.i][p.j - 1].up ? "face" : "back");
+        fprintf(f, "hand from=%s n=%d under=%s\n", from, a->ndrag, under);
+    }
     struct hint h = game_hint((struct game *)g);
     if (h.kind == 1)
         fprintf(f, "hint move from=%d,%d,%d to=%d,%d,%d\n", h.from.kind, h.from.i, h.from.j, h.to.kind, h.to.i, h.to.j);
@@ -1201,7 +1229,7 @@ static void send_up(struct app *a, struct loc from)
     if (auto_target(&a->g, from, true, &to))
         do_move(a, from, to);
     else
-        say(a, "That card has nowhere to go");
+        say(a, "That card has nowhere to go"), sound(a, "no");
 }
 
 static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
@@ -1264,7 +1292,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (a->press && !a->dragging && (fabs(a->px - a->press_x) > 5 || fabs(a->py - a->press_y) > 5) && a->press_button == 272) {
             struct loc p = a->pressed;
             struct card *first = loc_card(&a->g, p);
-            if (first && first->up && p.kind != L_STOCK) {              /* the cards leave their pile and follow the pointer */
+            if (p.kind == L_STOCK && a->g.nstock > 0) {                 /* the top of the stock comes off (three with Turn 3), the card under it shows */
+                a->ndrag = LM_MIN(a->g.draw, a->g.nstock);
+                for (int k = 0; k < a->ndrag; k++)
+                    a->drag[k] = a->g.stock[a->g.nstock - 1 - k];
+                a->dragging = a->drag_stock = true;
+                a->hint.kind = 0;
+            } else if (first && first->up && p.kind != L_STOCK) {              /* the cards leave their pile and follow the pointer */
                 struct lay Ly;
                 layout(a, &Ly);
                 a->ndrag = loc_count(&a->g, p);
@@ -1286,13 +1320,20 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     uint32_t button = args[2].u, state = args[3].u, t = args[1].u;
     if (state != 1) {
         wlrail_release(&a->ran);
-        if (a->dragging && button == 272) {
+        if (a->dragging && a->drag_stock && button == 272) {            /* the stock's cards are let go over the waste (anywhere on the top row between): drawn */
+            struct lay Ly;
+            layout(a, &Ly);
+            double cx = a->px - a->dox + Ly.cw / 2.0, cy = a->py - a->doy + Ly.ch / 2.0;
+            a->dragging = a->drag_stock = a->press = false;
+            if (cy < Ly.tab_y && cx > Ly.x[0] + Ly.cw * 0.75 && cx < Ly.x[3])
+                do_draw(a);
+        } else if (a->dragging && button == 272) {
             struct loc to = drop_target(a, a->px, a->py);
             struct loc from = a->pressed;
             a->dragging = false;
             a->press = false;
             if (to.kind != L_NONE && !do_move(a, from, to))
-                say(a, "That card does not go there");
+                say(a, "That card does not go there"), sound(a, "no");
         } else if (a->press && button == (uint32_t)a->press_button) {
             struct loc p = a->pressed;
             a->press = false;
@@ -1394,6 +1435,14 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         if (d != a->g.draw)
             press_button(a, B_DRAW);
     }
+}
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t version)
+{
+    struct app *a = w->data;
+    (void)version;
+    if (!strcmp(iface, "mellagui_settings_v1"))
+        a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, NULL, a);
 }
 
 static bool close_event(struct wlwin *w)
@@ -1514,6 +1563,46 @@ static int selftest(void)
     return bad ? 1 : 0;
 }
 
+/* --sheet FILE.ppm [W]: all 52 cards (a row a suit, Ace to King) and the back on the felt, W pixels wide each (the tests count the marks on them) */
+static int write_sheet(const char *path, int w)
+{
+    int h = w * 7 / 5, gap = 8, cols = 13, rows = 5, W = cols * (w + gap) + gap, H = rows * (h + gap) + gap;
+    uint8_t *img = malloc((size_t)W * (size_t)H * 3);
+    if (!img)
+        return 1;
+    for (int i = 0; i < W * H; i++) {
+        img[3 * i] = (FELT >> 16) & 255;
+        img[3 * i + 1] = (FELT >> 8) & 255;
+        img[3 * i + 2] = FELT & 255;
+    }
+    for (int k = 0; k < 53; k++) {
+        uint32_t *c = k < 52 ? cardart_face(k % 13 + 1, k / 13, w, h) : cardart_back(w, h);
+        if (!c)
+            return 1;
+        int ox = gap + (k % 13) * (w + gap), oy = gap + (k / 13) * (h + gap);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                uint32_t p = c[(size_t)y * (size_t)w + (size_t)x], a = p >> 24;
+                uint8_t *d = img + 3 * ((size_t)(oy + y) * (size_t)W + (size_t)(ox + x));
+                d[0] = (uint8_t)((((p >> 16) & 255) * a + d[0] * (255 - a)) / 255);
+                d[1] = (uint8_t)((((p >> 8) & 255) * a + d[1] * (255 - a)) / 255);
+                d[2] = (uint8_t)(((p & 255) * a + d[2] * (255 - a)) / 255);
+            }
+        }
+        free(c);
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(img);
+        return 1;
+    }
+    fprintf(f, "P6\n%d %d\n255\n", W, H);
+    fwrite(img, 3, (size_t)W * (size_t)H, f);
+    fclose(f);
+    free(img);
+    return 0;
+}
+
 /* ---- main ---- */
 
 int main(int argc, char **argv)
@@ -1527,6 +1616,8 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
             return selftest();
+        if (!strcmp(argv[i], "--sheet") && i + 1 < argc)
+            return write_sheet(argv[i + 1], i + 2 < argc ? LM_CLAMP(atoi(argv[i + 2]), 40, 400) : 106);
         if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             seed = (uint32_t)strtoul(argv[++i], NULL, 10);
         } else if (!strcmp(argv[i], "--draw") && i + 1 < argc) {
@@ -1548,7 +1639,7 @@ int main(int argc, char **argv)
             }
             almost = true;
         } else {
-            fprintf(stderr, "usage: mellagui-solitaire [--seed N] [--draw 1|3] [--size WxH] | --selftest\n");
+            fprintf(stderr, "usage: mellagui-solitaire [--seed N] [--draw 1|3] [--size WxH] | --selftest | --sheet FILE.ppm [W]\n");
             return 2;
         }
     }
@@ -1561,7 +1652,7 @@ int main(int argc, char **argv)
     a.hover = -1;
     a.pc_hover = a.pc_down = -1;
     wlrail_init(&a.ran);
-    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event, .close = close_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .close = close_event };
     if (wlwin_connect(&a.win, "mellagui-solitaire", &ops, &a) < 0)
         return 1;
     if (wlwin_open(&a.win, "Solitaire", "mellagui.solitaire", win_w, win_h, 640, 520) < 0)

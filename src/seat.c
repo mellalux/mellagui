@@ -709,6 +709,8 @@ static void pointer_axis(struct lm_seat *seat, uint32_t time_ms, int orientation
             g->ops->axis(g, time_ms, orientation, value, discrete);
         return;
     }
+    if (seat->srv->wm && lm_wm_launcher_is_open(seat->srv->wm) && lm_wm_launcher_scroll(seat->srv->wm, value, discrete))
+        return;                                         /* the launcher's pages */
     if (seat->n_fwd == 0)
         pointer_refocus(seat, time_ms);
     lm_seat_pointer_send_axis(seat, time_ms, orientation, value, discrete);

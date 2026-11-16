@@ -139,6 +139,8 @@ void wlwin_cell(struct wlwin *w, int x, int y, uint32_t cp, int cw, int ch, uint
 /* An opaque picture of sw x sh PHYSICAL pixels (stride in pixels) with its top left corner at the logical position (x, y), clipped to the rectangle
  * (cx, cy, cw, ch) (logical). */
 void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride, int cx, int cy, int cw, int ch);
+/* The same for a picture with an alpha channel (straight ARGB, made at the buffer's own size): it is laid over what is there (cards with round corners, soft shadows). */
+void wlwin_blit_px_over(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride);
 void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint32_t *src, int sw, int sh, int stride);
 /* One glyph scaled up by `scale` (>= 1). */
 void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t rgb);

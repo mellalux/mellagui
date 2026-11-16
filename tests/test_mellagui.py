@@ -14418,7 +14418,13 @@ class TestViewer(Base):
         p.kill()
         p.wait()
         time.sleep(0.4)
-        left = [pid for pid in os.listdir('/proc') if pid.isdigit() and b'fakeplayer' in open('/proc/%s/cmdline' % pid, 'rb').read()]
+        def cmdline(pid):                                                     # (a process may end between the listing and the read)
+            try:
+                with open('/proc/%s/cmdline' % pid, 'rb') as f:
+                    return f.read()
+            except OSError:
+                return b''
+        left = [pid for pid in os.listdir('/proc') if pid.isdigit() and b'fakeplayer' in cmdline(pid)]
         self.assertEqual(left, [], 'the player outlived the viewer')
 
     def test_the_next_sound_file_starts_when_a_track_ends(self):

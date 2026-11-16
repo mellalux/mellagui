@@ -21579,6 +21579,48 @@ class TestLauncherMoving(Base):
         d = self.info(c)
         self.assertEqual((d['pages'], len(d['dots'])), (1, 0))                                     # gone with the drag
 
+    def test_a_sideways_drag_on_the_card_turns_the_pages(self):
+        c = self.start('mellagui-lmF', n=40)
+        d = self.info(c)
+        card = d['card']
+        self.assertEqual(d['page'], 0)
+        y = card[1] + 30                                                                           # the card's top strip: no icon there
+        x = card[0] + card[2] // 2
+        c.abs(x, y)
+        c.button(272, True)
+        for i in range(1, 8):
+            c.abs(x - 20 * i, y)                                                                   # to the left, 140 px: the next page
+            time.sleep(0.02)
+        c.button(272, False)
+        time.sleep(0.2)
+        self.assertEqual(self.info(c)['page'], 1)
+        c.abs(x, y)
+        c.button(272, True)
+        for i in range(1, 8):
+            c.abs(x + 20 * i, y)                                                                   # to the right: back
+            time.sleep(0.02)
+        c.button(272, False)
+        time.sleep(0.2)
+        self.assertEqual(self.info(c)['page'], 0)
+
+    def test_a_hidden_dock_comes_up_while_an_icon_is_carried_to_it(self):
+        self.path = os.path.join(tmp, 'mellagui-lmG.conf')
+        with open(self.path, 'w') as f:
+            f.write('[dock]\nautohide = yes\n[dock-apps]\nLauncher = [launcher] @launcher\nTerm = [terminal] true\n[launcher-apps]\n'
+                    + ''.join('App%02d = [files] true\n' % i for i in range(1, 8)))
+        p, c, stop = self.private_compositor('mellagui-lmG', '--config', self.path, '--size', '1100x760')
+        c.sync()
+        c.cmd('launcher open')
+        time.sleep(1.3)
+        self.assertIn('shown=0', c.cmd('dock')[0])                                                 # hidden
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        self.drag(c, self.centre(ic['App02']), self.centre(ic['App04']), hold=0.2)
+        self.assertIn('shown=1', c.cmd('dock')[0])                                                 # an icon is in the hand: the dock is there
+        c.abs(5, 5)
+        c.button(272, False)
+        time.sleep(0.3)
+
     def test_the_icons_below_make_room_while_it_is_carried(self):
         c = self.start('mellagui-lm6')
         d = self.info(c)

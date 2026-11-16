@@ -1461,6 +1461,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     osk_drag_motion(wm);
     dock_drag_motion(wm);
     launcher_drag_motion(wm);
+    launcher_swipe_motion(wm);
     overview_drag_motion(wm);
     struct lm_window *hw = NULL;
     uint32_t bits = 0;

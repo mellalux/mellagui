@@ -820,7 +820,7 @@ static void draw_text_scaled(const struct paint_ctx *c, int x, int y, const char
     }
 }
 
-enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT, SHAPE_MOON, SHAPE_RESTART };
+enum shape { SHAPE_DISC, SHAPE_POWER, SHAPE_LOCK, SHAPE_UP, SHAPE_DOWN, SHAPE_CROSS, SHAPE_TRASH, SHAPE_PLUS, SHAPE_LEFT, SHAPE_RIGHT, SHAPE_MOON, SHAPE_RESTART, SHAPE_ARROW_LEFT, SHAPE_ARROW_RIGHT };
 static void paint_shape(const struct paint_ctx *c, float cx, float cy, float R, enum shape s, uint32_t rgb, uint32_t alpha);
 
 /* The lock screen: a dark screen with the time, a box with the dots of what was typed and the last message. */
@@ -1076,6 +1076,17 @@ static float shape_cov(enum shape s, float dx, float dy, float R)
         float d1 = seg_dist(dx, dy, -R * 0.62f, sy * R * 0.28f, 0.0f, -sy * R * 0.30f);
         float d2 = seg_dist(dx, dy, R * 0.62f, sy * R * 0.28f, 0.0f, -sy * R * 0.30f);
         float d = d1 < d2 ? d1 : d2;
+        return cov01(t * 0.5f - d + 0.5f);
+    }
+    case SHAPE_ARROW_RIGHT:                             /* an arrow: a shaft and a two stroke head */
+    case SHAPE_ARROW_LEFT: {
+        float x = s == SHAPE_ARROW_RIGHT ? dx : -dx;
+        float t = R * 0.24f < 1.3f ? 1.3f : R * 0.24f;
+        float d = seg_dist(x, dy, -R * 0.72f, 0.0f, R * 0.72f, 0.0f);
+        float d2 = seg_dist(x, dy, R * 0.72f, 0.0f, R * 0.18f, -R * 0.54f);
+        float d3 = seg_dist(x, dy, R * 0.72f, 0.0f, R * 0.18f, R * 0.54f);
+        d = d2 < d ? d2 : d;
+        d = d3 < d ? d3 : d;
         return cov01(t * 0.5f - d + 0.5f);
     }
     case SHAPE_LEFT:                                    /* the chevron turned a quarter */
@@ -1596,9 +1607,8 @@ static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launc
                 if (a->w <= 0)
                     continue;
                 float cx = (float)a->x + (float)a->w / 2.0f, cy = (float)a->y + (float)a->h / 2.0f;
-                paint_shape(c, cx, cy, 13.0f, SHAPE_DISC, lm_theme.launcher_text, 0x30);
-                struct lm_rect lab = lm_rect_make(a->x, a->y + (a->h - LM_FONT_H) / 2, a->w, LM_FONT_H);
-                lc_text_centered(c, &lab, k ? ">" : "<", lm_theme.launcher_text);
+                paint_shape(c, cx, cy, 14.0f, SHAPE_DISC, lm_theme.launcher_text, 0x30);
+                paint_shape(c, cx, cy, 9.5f, k ? SHAPE_ARROW_RIGHT : SHAPE_ARROW_LEFT, lm_theme.launcher_text, 0xf0);       /* a drawn arrow (shaft and head), not a character */
             }
         }
         if (li->extra_page) {                                                /* edit mode's empty page: a drop area for the end of the list */

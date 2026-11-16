@@ -326,6 +326,8 @@ struct lm_wm {
     int launcher_sel, launcher_hover_btn, launcher_focus;
     int launcher_page;          /* the page of icons showing (0 = the first); the grid shows as many as fit, the rest are on more pages */
     int64_t launcher_flip_ms;   /* when a dragged icon last turned a page at the edge */
+    bool launcher_swipe;        /* a press on the card (not on an icon) that is moved sideways turns the pages (like a swipe)  */
+    int launcher_swipe_x;       /* ... from where the pointer was when it started / last turned one */
     int launcher_edge;          /* the edge zone the carried icon is in: -1 left, 1 right, 0 none */
     int64_t launcher_edge_ms;   /* since when it has been there (or since the last turn) */
     bool launcher_edge_flipped; /* it has turned a page during this visit: the next turn waits longer */
@@ -530,6 +532,7 @@ bool drag_far_enough(const struct lm_wm *wm, double x, double y);
 void launcher_drag_finish(struct lm_wm *wm);
 bool launcher_searching_now(void);                      /* the launcher's search is on (icons cannot be moved then) */
 void launcher_drag_motion(struct lm_wm *wm);
+void launcher_swipe_motion(struct lm_wm *wm);
 void launcher_edge_tick(void *data);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);

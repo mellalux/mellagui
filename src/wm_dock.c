@@ -264,7 +264,7 @@ static void dock_set_shown(struct lm_wm *wm, bool shown);
 void dock_hide_tick(void *data)
 {
     struct lm_wm *wm = data;
-    if (wm->dock_shown && !wm->dock_active) {
+    if (wm->dock_shown && !wm->dock_active && !wm->launcher_drag) {      /* (an icon carried to it keeps it there) */
         dock_damage(wm);
         dock_set_shown(wm, false);
     }
@@ -442,6 +442,33 @@ bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_r
 #define FLIP_DWELL_MS 500                                   /* a carried icon waits this long at the edge before the page turns ... */
 #define FLIP_AGAIN_MS 1500                                  /* ... and this long, still there, before it turns the next one (leaving the zone starts over) */
 
+#define SWIPE_PX 70                                                     /* how far a press on the card moves sideways before the page turns */
+
+/* A press on the card that is not on an icon, moved sideways with the button down, turns the pages: to the left for the next one, to the right for the one before;
+ * going on another SWIPE_PX turns the next. */
+void launcher_swipe_motion(struct lm_wm *wm)
+{
+    if (!wm->launcher_swipe || !wm->srv->seat || wm->launcher_form)
+        return;
+    double x, y;
+    lm_seat_pointer_position(wm->srv->seat, &x, &y);
+    int dx = (int)x - wm->launcher_swipe_x;
+    if (dx > -SWIPE_PX && dx < SWIPE_PX)
+        return;
+    struct lm_output *o = launcher_output(wm);
+    if (!o)
+        return;
+    struct lm_launcher_info li;
+    launcher_info(wm, o, &li);
+    int dir = dx < 0 ? 1 : -1;
+    if (li.page + dir >= 0 && li.page + dir < li.pages) {
+        wm->launcher_page = li.page + dir;
+        wm->launcher_sel = -1;
+        launcher_damage(wm);
+    }
+    wm->launcher_swipe_x = (int)x;
+}
+
 void launcher_edge_tick(void *data)
 {
     struct lm_wm *wm = data;
@@ -469,6 +496,11 @@ void launcher_drag_motion(struct lm_wm *wm)
         wm->launcher_drag_g = wm->press_panel_ws;
         wm->launcher_edge = 0;
         wm->launcher_edge_flipped = false;
+    }
+    if (lm_dock.autohide && wm->dock_timer) {                           /* an icon on its way to the dock: a hidden dock comes up and stays while it is carried */
+        lm_timer_arm_ms(wm->dock_timer, 0, 0);
+        if (!wm->dock_shown)
+            dock_set_shown(wm, true);
     }
     wm->drag_x = x;
     wm->drag_y = y;
@@ -576,6 +608,8 @@ void launcher_drag_finish(struct lm_wm *wm)
         launcher_info(wm, o, li);                                   /* (where the icon is: over the dock, over a cell, over the empty page) */
     int g = wm->launcher_drag_g;
     wm->launcher_drag = false;
+    if (lm_dock.autohide && wm->dock_shown && wm->dock_timer && !wm->dock_active)    /* let go: it goes away again after its usual wait */
+        lm_timer_arm_ms(wm->dock_timer, DOCK_HIDE_MS, 0);
     launcher_damage(wm);
     const struct lm_dock_item *it = launcher_item(g, NULL);
     if (it && li && li->drop_pos >= 0) {

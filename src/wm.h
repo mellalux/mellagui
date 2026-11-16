@@ -831,6 +831,10 @@ size_t lm_wm_quick_describe(struct lm_wm *wm, char *buf, size_t size);
 bool lm_wm_calendar_toggle(struct lm_wm *wm, const struct lm_rect *clock);
 /* The window of this surface (or of the root it belongs to) is mapped, not minimized and on the current workspace. */
 bool lm_wm_surface_visible(const struct lm_wm *wm, struct lm_surface *s);
+/* xdg-activation: brings the window of this surface forward (workspace, un-minimize, raise, focus). False when it has none or it is a shell part. */
+bool lm_wm_activate_surface(struct lm_wm *wm, struct lm_surface *s);
+/* The window of this surface has the keyboard focus. */
+bool lm_wm_surface_focused(const struct lm_wm *wm, struct lm_surface *s);
 
 /* Text snapshot of the dock for tests (control socket `dock`): "dock shown=<0|1> hover=<i> n=<buttons>" then one line per button
  * "icon <i> "<name>" x= y= w= h= running=<0|1> launching=<0|1> cmd=<command>". Returns the length. */

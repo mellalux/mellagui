@@ -31,7 +31,10 @@
 #include "capture.h"
 #include "tray.h"
 #include "menu.h"
+#include "activation.h"
 #include "idleinhibit.h"
+#include "pointerconstraints.h"
+#include "screencopy.h"
 #include "lock.h"
 #include "nightlight.h"
 #include "notifylog.h"
@@ -156,6 +159,8 @@ static void on_output_changed(void *data, struct lm_output *out)
 static void on_output_removed(void *data, struct lm_output *out)
 {
     struct lm_server *srv = data;
+    if (srv->screencopy)
+        lm_screencopy_output_removed(srv->screencopy, out);
     if (srv->wm)
         lm_wm_output_removed(srv->wm, out);
     if (srv->render)
@@ -646,6 +651,9 @@ int main(int argc, char **argv)
         !(srv->settings = lm_settings_create(srv)) ||
         !(srv->capture = lm_capture_create(srv)) ||
         !(srv->idle_inhibit = lm_idle_inhibit_create(srv)) ||
+        !(srv->activation = lm_activation_create(srv)) ||
+        !(srv->pconstraints = lm_pconstraints_create(srv)) ||
+        (!cfg.kiosk && !(srv->screencopy = lm_screencopy_create(srv))) ||
         !(srv->menu = lm_menu_create(srv)) ||
         !(srv->tray = lm_tray_create(srv))) {
         lm_error("module initialisation failed");
@@ -735,6 +743,12 @@ out:
     srv->screenoff = NULL;
     if (srv->idle_inhibit) lm_idle_inhibit_destroy(srv->idle_inhibit);
     srv->idle_inhibit = NULL;
+    if (srv->screencopy) lm_screencopy_destroy(srv->screencopy);
+    srv->screencopy = NULL;
+    if (srv->activation) lm_activation_destroy(srv->activation);
+    srv->activation = NULL;
+    if (srv->pconstraints) lm_pconstraints_destroy(srv->pconstraints);
+    srv->pconstraints = NULL;
     if (srv->menu) lm_menu_destroy(srv->menu);
     srv->menu = NULL;
     if (srv->tray) lm_tray_destroy(srv->tray);

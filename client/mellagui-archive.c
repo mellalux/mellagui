@@ -42,6 +42,7 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlcard.h"
+#include "wlpicker.h"
 #include "wlclip.h"
 #include "wlrail.h"
 #include "wltext.h"
@@ -67,11 +68,6 @@ enum { J_NONE, J_EXTRACT, J_TEST, J_CREATE };
 enum { SORT_NAME, SORT_SIZE, SORT_TIME };
 
 
-struct centry {
-    char name[256];
-    bool dir;
-};
-
 struct app {
     struct wlwin win;
     struct wlclip clip;
@@ -91,11 +87,7 @@ struct app {
     int fmt;
     /* the question card; for "Open" it has a list of the folder that filters while you type (like the editor's) */
     int prompt;
-    struct centry *cent;
-    int cn, ccap, csel, ctop;
-    char cdir[PATH_MAX_LEN];
-    uint32_t cclick_ms;
-    int csb_drag;                       /* the list's scroll bar thumb is held: the offset inside it, -1 = no */
+    struct wlpicker pk;                 /* the folder list of the Open card (wlpicker.h, the same in every program) */
     char cmsg[200];
     char field[PATH_MAX_LEN];
     /* the job */
@@ -501,14 +493,11 @@ static const char *prompt_go(const struct app *a)
     }
 }
 
-#define CARD_ROW_H 22
-#define CARD_MAX_ROWS 10
-
 static void card_layout(struct app *a, struct wlcard *c, int *fx, int *fy, int *fw, int *ly, int *rows)
 {
-    *rows = a->prompt == P_OPEN ? LM_CLAMP((a->win.bh - 16 - 200) / CARD_ROW_H, 3, CARD_MAX_ROWS) : 0;
+    *rows = a->prompt == P_OPEN ? wlpicker_fit(a->win.bh, 200) : 0;
     int cw = LM_CLAMP(a->win.bw - 16, 260, 560);
-    int ch = WLCARD_PAD + 24 + 34 + (*rows ? *rows * CARD_ROW_H + 12 : 0) + 20 + WLCARD_BTN_H + WLCARD_PAD;
+    int ch = WLCARD_PAD + 24 + 34 + (*rows ? *rows * WLPICKER_ROW_H + 12 : 0) + 20 + WLCARD_BTN_H + WLCARD_PAD;
     c->w = LM_MIN(cw, a->win.bw - 16);
     c->h = LM_MIN(ch, a->win.bh - 16);
     c->x = (a->win.bw - c->w) / 2;
@@ -535,146 +524,12 @@ static void card_base(const struct app *a, char *out, size_t n)
         snprintf(out, n, "/");
 }
 
-/* The folder part of the field ("~/a/" of "~/a/b.zip") and the rest, which filters the list. */
-static void card_split(const struct app *a, char *dirtext, size_t n, const char **filter)
-{
-    const char *sl = strrchr(a->field, '/');
-    size_t len = sl ? (size_t)(sl - a->field) + 1 : 0;
-    snprintf(dirtext, n, "%.*s", (int)LM_MIN(len, n - 1), a->field);
-    *filter = a->field + len;
-}
-
-static int centry_cmp(const void *x, const void *y)
-{
-    const struct centry *p = x, *q = y;
-    if (p->dir != q->dir)
-        return p->dir ? -1 : 1;
-    return strcasecmp(p->name, q->name);
-}
-
-static void card_load(struct app *a, const char *dirtext)
-{
-    char base[PATH_MAX_LEN], full[PATH_MAX_LEN];
-    card_base(a, base, sizeof(base));
-    lm_resolve_path(base, dirtext[0] ? dirtext : ".", full, sizeof(full));
-    if (!strcmp(full, a->cdir) && a->cent)
-        return;
-    snprintf(a->cdir, sizeof(a->cdir), "%s", full);
-    a->cn = 0;
-    DIR *d = opendir(full);
-    if (!d)
-        return;
-    struct dirent *e;
-    while ((e = readdir(d)) && a->cn < 4000) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || strlen(e->d_name) >= sizeof(a->cent[0].name))
-            continue;
-        if (a->cn == a->ccap) {
-            a->ccap = a->ccap ? a->ccap * 2 : 128;
-            a->cent = realloc(a->cent, (size_t)a->ccap * sizeof(a->cent[0]));
-        }
-        struct centry *c = &a->cent[a->cn++];
-        snprintf(c->name, sizeof(c->name), "%s", e->d_name);
-        char path[PATH_MAX_LEN + 260];
-        struct stat st;
-        snprintf(path, sizeof(path), "%.*s/%s", (int)LM_MIN(strlen(full), (size_t)PATH_MAX_LEN - 1), full, e->d_name);
-        c->dir = e->d_type == DT_DIR || (e->d_type == DT_LNK && stat(path, &st) == 0 && S_ISDIR(st.st_mode));
-    }
-    closedir(d);
-    if (a->cn > 1)
-        qsort(a->cent, (size_t)a->cn, sizeof(a->cent[0]), centry_cmp);
-}
-
-/* The rows that show: ".." first (not at the root, nor while a name is being typed), then what starts with the typed name. idx[k] = -1 is "..". */
-static int card_rows(struct app *a, int *idx, int max)
-{
-    char dirtext[PATH_MAX_LEN];
-    const char *filter;
-    card_split(a, dirtext, sizeof(dirtext), &filter);
-    card_load(a, dirtext);
-    int n = 0;
-    size_t fl = strlen(filter);
-    for (int i = 0; i < a->cn && fl; i++)                                   /* a name typed out in full (a file just picked): the whole folder shows */
-        if (!strcmp(a->cent[i].name, filter))
-            fl = 0;
-    if (strcmp(a->cdir, "/") && n < max && fl == 0)
-        idx[n++] = -1;
-    for (int i = 0; i < a->cn && n < max; i++) {
-        if (a->cent[i].name[0] == '.' && filter[0] != '.')
-            continue;
-        if (fl && strncasecmp(a->cent[i].name, filter, fl))
-            continue;
-        idx[n++] = i;
-    }
-    return n;
-}
-
-static int card_visible_rows(const struct app *a)
-{
-    return LM_CLAMP((a->win.bh - 16 - 200) / CARD_ROW_H, 3, CARD_MAX_ROWS);
-}
-
-/* The field with the entry's name in place of the part after the last slash; a folder gets its slash. */
-static void card_put(struct app *a, int row_idx)
-{
-    char dirtext[PATH_MAX_LEN], next[PATH_MAX_LEN + 260];
-    const char *filter;
-    card_split(a, dirtext, sizeof(dirtext), &filter);
-    if (row_idx < 0) {                                                      /* ".." */
-        size_t n = strlen(dirtext);
-        if (n == 0)
-            snprintf(next, sizeof(next), "../");
-        else {
-            const char *last = n >= 2 ? (const char *)memrchr(dirtext, '/', n - 1) : NULL;
-            const char *comp = last ? last + 1 : dirtext;
-            if (!strncmp(comp, "../", 3) || !strcmp(dirtext, "/") || !strcmp(dirtext, "~/"))
-                snprintf(next, sizeof(next), "%s../", dirtext);
-            else
-                snprintf(next, sizeof(next), "%.*s", (int)(last ? last - dirtext + 1 : 0), dirtext);
-        }
-    } else {
-        snprintf(next, sizeof(next), "%s%s%s", dirtext, a->cent[row_idx].name, a->cent[row_idx].dir ? "/" : "");
-    }
-    snprintf(a->field, sizeof(a->field), "%.4000s", next);
-    wltext_end(a->field);
-    a->csel = -1;
-    a->ctop = 0;
-    a->win.redraw = true;
-}
-
-static void prompt_accept(struct app *a);
-
-static void card_choose(struct app *a, int row, bool accept)
-{
-    int idx[4001];
-    int n = card_rows(a, idx, 4000);
-    if (row < 0 || row >= n)
-        return;
-    int e = idx[row];
-    card_put(a, e);
-    if (accept && e >= 0 && !a->cent[e].dir)
-        prompt_accept(a);
-}
-
-static void card_move(struct app *a, int delta)
-{
-    int idx[4001];
-    int n = card_rows(a, idx, 4000), rows = card_visible_rows(a);
-    if (n == 0)
-        return;
-    a->csel = LM_CLAMP(a->csel < 0 ? (delta > 0 ? 0 : n - 1) : a->csel + delta, 0, n - 1);
-    if (a->csel < a->ctop)
-        a->ctop = a->csel;
-    if (a->csel >= a->ctop + rows)
-        a->ctop = a->csel - rows + 1;
-}
 static void open_prompt(struct app *a, int prompt, const char *initial)
 {
     a->prompt = prompt;
     snprintf(a->field, sizeof(a->field), "%s", initial);
     wltext_end(a->field);
-    a->csel = -1;
-    a->ctop = 0;
-    a->cdir[0] = 0;                                                         /* (the folder list is read again) */
+    wlpicker_reset(&a->pk);                                                 /* (the folder list is read again) */
     a->cmsg[0] = 0;
     a->win.redraw = true;
 }
@@ -1089,37 +944,9 @@ static void paint_card(struct app *a)
     wlwin_round_fill(w, fx, fy, fw, 28, 14, lm_theme.background);           /* the field */
     wltext_paint(w, fx + 12, fy + 6, fw - 24, a->field, true, lm_theme.text_soft, lm_theme.button_hover, lm_theme.text_soft);
     if (rows) {
-        int idx[4001];
-        int n = card_rows(a, idx, 4000);
-        a->ctop = LM_CLAMP(a->ctop, 0, LM_MAX(n - rows, 0));
-        wlwin_round_fill(w, fx, ly, fw, rows * CARD_ROW_H + 8, 10, lm_theme.background);
-        if (n == 0)
-            wlwin_text(w, fx + 12, ly + 8, "Nothing here starts like that", 1, lm_theme.text_dim, fw - 24);
-        for (int r = 0; r < rows && a->ctop + r < n; r++) {
-            int k = a->ctop + r, e = idx[k], ry = ly + 4 + r * CARD_ROW_H;
-            bool dir = e < 0 || a->cent[e].dir;
-            bool over = a->px >= fx && a->px < fx + fw - 10 && a->py >= ry && a->py < ry + CARD_ROW_H;
-            const char *tail = strrchr(a->field, '/');
-            bool named = e >= 0 && !strcmp(a->cent[e].name, tail ? tail + 1 : a->field);          /* the file in the field */
-            if (k == a->csel || named || over)
-                wlwin_round_fill(w, fx + 4, ry, fw - 8 - (n > rows ? lm_metrics.scrollbar_width : 0), CARD_ROW_H, 11,
-                                 k == a->csel || named ? lm_theme.button_hover : lm_theme.panel_line);
-            int ix = fx + 14, iy = ry + 4;
-            if (dir) {                                                      /* a folder: a tab and a body */
-                wlwin_fill(w, ix, iy + 1, 6, 3, lm_theme.btn_amber);
-                wlwin_round_fill(w, ix, iy + 3, 14, 10, 3, lm_theme.btn_amber_lit);
-            } else {
-                wlwin_round_fill(w, ix + 2, iy, 10, 14, 2, lm_theme.btn_sky);
-                wlwin_fill(w, ix + 4, iy + 5, 6, 1, lm_theme.bar);
-                wlwin_fill(w, ix + 4, iy + 8, 6, 1, lm_theme.bar);
-            }
-            wlwin_text(w, ix + 24, ry + (CARD_ROW_H - LM_FONT_H) / 2, e < 0 ? ".." : a->cent[e].name, 1, dir ? lm_theme.accent : lm_theme.text_soft, fw - 60);
-        }
-        if (n > rows) {                                                     /* a thin scroll bar */
-            int sbw = lm_metrics.scrollbar_width, th = LM_MAX((rows * CARD_ROW_H) * rows / n, 20);
-            int ty = ly + 4 + (rows * CARD_ROW_H - th) * a->ctop / LM_MAX(n - rows, 1);
-            wlwin_round_fill(w, fx + fw - sbw - 2, ty, sbw - 4, th, (sbw - 4) / 2, lm_theme.control);
-        }
+        char base[PATH_MAX_LEN];
+        card_base(a, base, sizeof(base));
+        wlpicker_paint(w, &a->pk, base, a->field, fx, ly, fw, rows, a->px, a->py, true);
     } else {
         const char *hint = a->prompt == P_EXTRACT ? "A folder that does not exist is made. Files that exist are kept unless Replace is on."
                            : a->prompt == P_ADD    ? "The path of a file or a folder (~ means your home folder)."
@@ -1170,11 +997,9 @@ static void write_dump(struct app *a)
         card_layout(a, &c, &fx, &fy, &fw, &ly, &crows);
         fprintf(f, "card %d %d %d %d\n", c.x + WLRAIL_W, c.y, c.w, c.h);
         if (crows) {
-            int idx[4001];
-            int cn = card_rows(a, idx, 4000);
-            fprintf(f, "clist %d %d %d %d csel=%d count=%d\n", fx + WLRAIL_W, ly + 4, fw, crows * CARD_ROW_H, a->csel, cn);
-            for (int k = a->ctop; k < cn && k < a->ctop + crows; k++)
-                fprintf(f, "crow %d y=%d dir=%d name=%s\n", k, ly + 4 + (k - a->ctop) * CARD_ROW_H, idx[k] < 0 || a->cent[idx[k]].dir, idx[k] < 0 ? ".." : a->cent[idx[k]].name);
+            char base[PATH_MAX_LEN];
+            card_base(a, base, sizeof(base));
+            wlpicker_dump(f, &a->pk, base, a->field, fx, ly, fw, crows, WLRAIL_W);
         }
         for (int k = 0; k < 2; k++) {
             int x, y, bw, bh;
@@ -1414,11 +1239,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     bool ctrl = (w->mods & LM_MOD_CTRL) != 0, shift = (w->mods & LM_MOD_SHIFT) != 0;
     if (a->prompt) {
         bool list = a->prompt == P_OPEN;
-        if (list && (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down))
-            card_move(a, ks == LM_KS_Up ? -1 : ks == LM_KS_Down ? 1 : ks == LM_KS_Page_Up ? -8 : 8);
-        else if (list && (ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->csel >= 0)
-            card_choose(a, a->csel, true);
-        else if (ks == LM_KS_Escape)
+        char pbase[PATH_MAX_LEN];
+        card_base(a, pbase, sizeof(pbase));
+        if (list && (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down ||
+                     ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0))) {
+            if (wlpicker_key(&a->pk, pbase, a->field, sizeof(a->field), wlpicker_fit(a->win.bh, 200), ks) == WLPICKER_OPEN)
+                prompt_accept(a);
+        } else if (ks == LM_KS_Escape)
             a->prompt = 0;
         else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter)
             prompt_accept(a);
@@ -1433,11 +1260,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             else
                 a->cmsg[0] = 0;
             wltext_end(a->field);
-            a->csel = -1;
-            a->ctop = 0;
+            wlpicker_typed(&a->pk);
         } else if (wltext_edit(&a->clip, a->field, sizeof(a->field), ks, w->mods)) {
-            a->csel = -1;                                                   /* (the list follows what is typed) */
-            a->ctop = 0;
+            wlpicker_typed(&a->pk);                                         /* (the list follows what is typed) */
             a->cmsg[0] = 0;
         }
         w->redraw = true;
@@ -1545,13 +1370,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->hover_card = hc;
             w->redraw = true;
         }
-        if (a->csb_drag >= 0 && a->prompt == P_OPEN) {
+        if (a->pk.sb_drag >= 0 && a->prompt == P_OPEN) {
             struct wlcard c;
-            int fx, fy, fw, ly, crows, idx[4001];
+            int fx, fy, fw, ly, crows;
+            char base[PATH_MAX_LEN];
             card_layout(a, &c, &fx, &fy, &fw, &ly, &crows);
-            int n = card_rows(a, idx, 4000), th = LM_MAX((crows * CARD_ROW_H) * crows / LM_MAX(n, 1), 20);
-            if (n > crows)
-                a->ctop = LM_CLAMP((int)((a->py - ly - 4 - a->csb_drag) * (n - crows) / LM_MAX(crows * CARD_ROW_H - th, 1)), 0, n - crows);
+            card_base(a, base, sizeof(base));
+            wlpicker_motion(&a->pk, base, a->field, ly, crows, a->py);
             w->redraw = true;
         }
         if (a->drag_bar >= 0) {
@@ -1562,7 +1387,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
     } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0 && a->prompt) {
         if (a->prompt == P_OPEN)
-            a->ctop = LM_MAX(a->ctop + (args[2].f > 0 ? 3 : -3), 0);
+            wlpicker_wheel(&a->pk, args[2].f > 0 ? 1 : -1);
         w->redraw = true;
     } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
         double v = lm_fixed_to_double(args[2].f);
@@ -1574,7 +1399,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         uint32_t t = args[1].u, button = args[2].u, state = args[3].u;
         if (state == 0) {
             a->drag_bar = -1;
-            a->csb_drag = -1;
+            wlpicker_release(&a->pk);
             wlrail_release(&a->ran);
             w->redraw = true;
             return;
@@ -1592,27 +1417,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 wltext_click(a->field, (int)a->px - (fx + 12), (w->mods & LM_MOD_SHIFT) != 0);
             else if (button == 273 && inside(a->px, a->py, fx, fy, fw, 28))
                 wlwin_menu(w, wltext_menu(a->field));
-            else if (button == 272 && crows && inside(a->px, a->py, fx, ly + 4, fw, crows * CARD_ROW_H)) {
-                int idx[4001];
-                int n = card_rows(a, idx, 4000), row = a->ctop + ((int)a->py - ly - 4) / CARD_ROW_H;
-                int sbw = lm_metrics.scrollbar_width;
-                if (n > crows && a->px >= fx + fw - sbw - 4) {                   /* the scroll bar: the thumb is dragged, the track pages (it is no row) */
-                    int th = LM_MAX((crows * CARD_ROW_H) * crows / n, 20), ty = ly + 4 + (crows * CARD_ROW_H - th) * a->ctop / LM_MAX(n - crows, 1);
-                    if (a->py >= ty && a->py < ty + th)
-                        a->csb_drag = (int)a->py - ty;
-                    else
-                        a->ctop = LM_CLAMP(a->ctop + (a->py < ty ? -crows : crows), 0, n - crows);
-                } else if (row < n) {
-                    bool dbl = t - a->cclick_ms < (uint32_t)lm_metrics.double_click_ms;
-                    a->cclick_ms = t;
-                    bool file = idx[row] >= 0 && !a->cent[idx[row]].dir, was = a->csel == row;
-                    card_put(a, idx[row]);
-                    if (file) {
-                        a->csel = row;                                      /* (the list stays: the field has the whole name now) */
-                        if (dbl && was)
-                            prompt_accept(a);
-                    }
-                }
+            else if (button == 272 && crows && wlpicker_inside(fx, ly, fw, crows, a->px, a->py)) {
+                char base[PATH_MAX_LEN];
+                card_base(a, base, sizeof(base));
+                if (wlpicker_press(&a->pk, base, a->field, sizeof(a->field), fx, ly, fw, crows, a->px, a->py, t, (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
+                    prompt_accept(a);
             } else if (button == 272 && !wlcard_has(&c, (int)a->px, (int)a->py))
                 a->prompt = 0;
             w->redraw = true;
@@ -1863,7 +1672,7 @@ int main(int argc, char **argv)
     a->hover_card = -1;
     a->drag_bar = -1;
     a->last_click_row = -1;
-    a->csb_drag = -1;
+    wlpicker_init(&a->pk, NULL);
     a->dump = getenv("MELLAGUI_ARCHIVE_DUMP");
     aio_progress_init(&a->prog);
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };

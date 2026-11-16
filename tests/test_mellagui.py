@@ -5905,63 +5905,6 @@ class TestClients(Base):
         with open(n['conf']) as f:
             self.assertNotIn('fakehost', f.read())
 
-    def test_files_choose_sets_the_wallpaper(self):
-        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
-        ctl.cmd('settings wallpaper ""')
-        p, d = self.files_start('--choose', 'wallpaper', app_id='mellagui.files.choose')
-        self.assertEqual(self.window_title('mellagui.files.choose'), os.path.basename(d) + ' - Choose a picture')
-        ctl.tap(self.K_DOWN)                                   # a.txt (sub is selected first): not a picture, nothing happens
-        ctl.tap(KEY_ENTER)
-        time.sleep(0.3)
-        ctl.cmd('setting wallpaper')
-        self.assertEqual(ctl.last, 'ok ')
-        self.assertIsNone(p.poll())
-        ctl.tap(self.K_DOWN)                                   # blob.bin
-        ctl.tap(self.K_DOWN)                                   # p.ppm
-        ctl.tap(KEY_ENTER)
-        for _ in range(100):
-            if p.poll() is not None:
-                break
-            time.sleep(0.05)
-        self.assertEqual(p.poll(), 0, 'the chooser should end after the choice')
-        ctl.cmd('setting wallpaper')
-        self.assertEqual(ctl.last, 'ok ' + os.path.join(d, 'p.ppm'))
-
-    def test_files_choose_accepts_a_jpeg(self):
-        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
-        ctl.cmd('settings wallpaper ""')
-        p, d = self.files_start('--choose', 'wallpaper', app_id='mellagui.files.choose')
-        with open(os.path.join(d, 'z.JPG'), 'wb') as f:                   # sorts last; the extension is matched without case
-            f.write(JPEG_RED_BLUE)
-        ctl.tap(63)                                                       # F5: read the folder again
-        time.sleep(0.3)
-        ctl.tap(self.K_END)
-        ctl.tap(KEY_ENTER)
-        for _ in range(100):
-            if p.poll() is not None:
-                break
-            time.sleep(0.05)
-        self.assertEqual(p.poll(), 0)
-        ctl.cmd('setting wallpaper')
-        self.assertEqual(ctl.last, 'ok ' + os.path.join(d, 'z.JPG'))
-        ctl.cmd('setting wallpaper-status')
-        self.assertEqual(ctl.last, 'ok ok')
-
-    def test_files_choose_escape_cancels_and_only_wallpaper_is_allowed(self):
-        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
-        ctl.cmd('settings wallpaper ""')
-        p, d = self.files_start('--choose', 'wallpaper', app_id='mellagui.files.choose')
-        ctl.tap(KEY_ESC)
-        for _ in range(100):
-            if p.poll() is not None:
-                break
-            time.sleep(0.05)
-        self.assertEqual(p.poll(), 0)
-        ctl.cmd('setting wallpaper')
-        self.assertEqual(ctl.last, 'ok ')
-        r = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-files'), '--choose', 'lock-now'], capture_output=True, text=True, timeout=10)
-        self.assertEqual(r.returncode, 2)
-
     def test_files_hidden_toggle_and_letter_jump(self):
         p, d = self.files_start()
         ctl.tap(self.K_END)                                    # last entry: p.ppm; the letter "a" wraps around to a.txt
@@ -8054,23 +7997,71 @@ esac
         time.sleep(0.3)
         self.assertEqual(settings()['sysinfo'], '0')
 
-    def test_panel_wallpaper_browse_button_opens_the_picture_chooser(self):
-        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-files')):
-            self.skipTest('mellagui-files not built')
-        p, win = self.open_panel()
+    def test_panel_wallpaper_browse_button_opens_the_open_dialog_every_program_has(self):
+        """The Browse... button of the Desktop page: wlpicker.h's list in a card over the panel (it used to start the file manager)."""
+        from PIL import Image
+        self.addCleanup(lambda: ctl.cmd('settings wallpaper ""'))
+        ctl.cmd('settings wallpaper ""')
+        d = tempfile.mkdtemp(prefix='wallpick-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'sub'))
+        Image.new('RGB', (16, 9), (10, 200, 30)).save(os.path.join(d, 'a.png'))
+        Image.new('RGB', (16, 9), (10, 30, 200)).save(os.path.join(d, 'b.jpg'))
+        open(os.path.join(d, 'notes.txt'), 'w').write('not a picture')
+        dump = os.path.join(d, 'settings.dump')
+        p = subprocess.Popen([self.exe()], env=dict(os.environ, HOME=d, MELLAGUI_SETTINGS_DUMP=dump), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.settings')
+        self.assertIsNotNone(win)
+        time.sleep(0.3)
         x0, y0 = win['x'], win['y']
         ctl.click(x0 + 70, y0 + 12 + 2 * 32 + 14)                   # "Desktop" tab
         time.sleep(0.2)
-        ctl.click(x0 + 460, y0 + 319)                           # "Browse..."
-        chooser = wait_for_window('mellagui.files.choose')
-        self.assertIsNotNone(chooser, 'the picture chooser did not open')
-        self.assertIn('Choose a picture', chooser['title'])
-        time.sleep(0.3)
-        ctl.tap(KEY_ESC)                                        # Esc cancels it
-        for _ in range(100):
-            if wait_for_window('mellagui.files.choose', 0.05) is None:
+        ctl.click(x0 + 460, y0 + 319)                               # "Browse..."
+
+        def state(pred=lambda t: True, timeout=3.0):
+            end = time.time() + timeout
+            while time.time() < end:
+                try:
+                    t = open(dump).read()
+                except OSError:
+                    t = ''
+                if t.startswith('pick') and pred(t):
+                    return t
+                time.sleep(0.03)
+            self.fail('the picker never looked right: %r' % t)
+        names = lambda t: [l.split('name=', 1)[1] for l in t.splitlines() if l.startswith('crow ')]
+        t = state()
+        self.assertEqual(names(t), ['..', 'sub', 'a.png', 'b.jpg'])        # folders first, pictures only (notes.txt is none)
+        ctl.tap(KEYCODES['b'])                                             # typing filters the list
+        state(lambda t: names(t) == ['b.jpg'])
+        ctl.tap(14)
+        ctl.tap(KEYCODES['a'])
+        state(lambda t: names(t) == ['a.png'])
+        ctl.tap(108)                                                       # Down, Enter: take it
+        ctl.tap(KEY_ENTER)
+        for _ in range(60):
+            ctl.cmd('setting wallpaper')
+            if ctl.last != 'ok ':
                 break
-        self.assertIsNone(wait_for_window('mellagui.files.choose', 0.3))
+            time.sleep(0.05)
+        self.assertEqual(ctl.last, 'ok ' + os.path.join(d, 'a.png'))
+        ctl.cmd('setting wallpaper-status')
+        self.assertEqual(ctl.last, 'ok ok')
+        # Esc closes the card, not the panel; a second Esc closes the panel
+        ctl.click(x0 + 460, y0 + 319)
+        state()
+        ctl.tap(KEY_ESC)
+        time.sleep(0.3)
+        self.assertIsNone(p.poll(), 'Esc closed the whole panel')
+        ctl.tap(KEY_ESC)
+        for _ in range(60):
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(p.poll())
+        r = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-files'), '--choose', 'wallpaper'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 2)                                  # (the file manager has no chooser mode any more)
 
     def test_panel_wallpaper_page_field_radios_and_buttons(self):
         self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
@@ -12951,6 +12942,45 @@ class TestPaint(Base):
         self.assertEqual(im.getpixel((30, 10)), (255, 255, 255))                              # off it
         self.assertEqual(im.getpixel((2, 24)), (255, 255, 255))                               # before its start
 
+    def test_the_open_card_lists_the_folder_like_the_other_programs_do(self):
+        """wlpicker.h: the folder list of the Open / Save as cards, the same in the archiver, the editor and here."""
+        from PIL import Image
+        d = tempfile.mkdtemp(prefix='paint-open-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.makedirs(os.path.join(d, 'sub'))
+        for name in ('a.png', 'b.png', os.path.join('sub', 'c.png')):
+            Image.new('RGB', (10, 7) if name != 'b.png' else (12, 9), (200, 30, 30)).save(os.path.join(d, name))
+        open(os.path.join(d, 'notes.txt'), 'w').write('not a picture')
+        self.start(os.path.join(d, 'a.png'))
+        self.wait(lambda s: s['image']['w'] == '10')
+        names = lambda: [l.split('name=', 1)[1] for l in open(self.dump).read().splitlines() if l.startswith('crow ')]
+        self.chord(24, KEY_LEFTCTRL)                                                          # Ctrl+O: the card, with the folder of the picture
+        self.wait(lambda s: 'clist' in s)
+        self.assertEqual(names(), ['..', 'sub', 'a.png', 'b.png'])                            # folders first, only pictures (notes.txt is no picture)
+        ctl.tap(KEYCODES['b'])                                                                # typing filters the list (and hides "..")
+        self.wait(lambda s: names() == ['b.png'])
+        ctl.tap(14)                                                                           # BackSpace: the whole folder again
+        self.wait(lambda s: len(names()) == 4)
+        ctl.tap(108)                                                                          # Down, Down: the row "sub"; Enter goes in
+        ctl.tap(108)
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: names() == ['..', 'c.png'])
+        ctl.tap(108)                                                                          # Down, Down: c.png; Enter opens it
+        ctl.tap(108)
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['image']['path'].endswith('sub/c.png'))
+        self.assertEqual((st['image']['w'], st['image']['h']), ('10', '7'))
+        # a double click on a row of the list takes it, too
+        self.chord(24, KEY_LEFTCTRL)
+        self.wait(lambda s: 'clist' in s)
+        self.assertEqual(names(), ['..', 'c.png'])
+        win = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
+        ctl.abs(win['x'] + 100, win['y'] + 100)                                               # (somewhere that is not the list: nothing happens to the picture)
+        lst = self.state()['clist']
+        self.assertEqual(int(lst['count']), 2)
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
     def test_colours_the_fill_tool_and_the_second_button(self):
         self.start('--new', '40x30')
         st = self.wait(lambda s: s['image']['w'] == '40')
@@ -13838,6 +13868,653 @@ class TestIdleInhibit(Base):
             time.sleep(0.05)
         else:
             self.fail('the screensaver never started after the inhibitor was gone')
+
+
+class TestXdgOutput(Base):
+    """src/output.c: zxdg_output_manager_v1 (logical position and size, name, description) for programs such as grim and wlr-randr."""
+
+    def start(self, name, *args):
+        p, c, stop = self.private_compositor(name, '--config', 'none', *args)
+        c.sync()
+        cl = Client(name)
+        self.clients.append(cl)
+        return c, cl
+
+    @staticmethod
+    def xdg(cl, out, ver=3):
+        mgr = cl.wl.bind('zxdg_output_manager_v1', ver)
+        xo = cl.wl.new_id('zxdg_output_v1')
+        cl.wl.request(mgr, 'get_xdg_output', xo, out)
+        cl.wl.roundtrip()
+        return xo
+
+    def test_it_is_offered_and_tells_the_logical_geometry_the_name_and_a_description(self):
+        c, cl = self.start('mellagui-xo1', '--output', '400x300')
+        self.assertEqual(cl.wl.globals['zxdg_output_manager_v1'][1], 3)
+        outs = cl.wl.bind_all('wl_output', 3)
+        self.assertEqual(len(outs), 2)
+        cl.wl.roundtrip()
+        xos = [self.xdg(cl, o) for o in outs]
+        got = {}
+        for xo in xos:
+            evs = {e.name: e.args for e in cl.wl.queue if e.obj == xo}
+            self.assertIn('done', [e.name for e in cl.wl.queue if e.obj == xo] + ['done'])        # (version 3: wl_output.done ends it, xdg_output.done is not sent)
+            self.assertNotIn('done', evs)
+            got[evs['name'][0]] = (evs['logical_position'], evs['logical_size'], evs['description'][0])
+        self.assertEqual(sorted(got), ['headless-0', 'headless-1'])
+        self.assertEqual(got['headless-0'][:2], ([0, 0], [800, 500]))
+        self.assertEqual(got['headless-1'][:2], ([800, 0], [400, 300]))
+        self.assertIn('headless-1', got['headless-1'][2])
+
+    def test_version_one_gets_its_own_done_event(self):
+        c, cl = self.start('mellagui-xo2')
+        out = cl.wl.bind('wl_output', 3)
+        cl.wl.roundtrip()
+        mgr = cl.wl.bind('zxdg_output_manager_v1', 1)
+        xo = cl.wl.new_id('zxdg_output_v1')
+        cl.wl.request(mgr, 'get_xdg_output', xo, out)
+        cl.wl.roundtrip()
+        names = [e.name for e in cl.wl.queue if e.obj == xo]
+        self.assertEqual(names, ['logical_position', 'logical_size', 'done'])          # (name and description are version 2)
+
+    def test_a_scale_and_a_new_layout_are_followed(self):
+        c, cl = self.start('mellagui-xo3', '--output', '400x300')
+        out = cl.wl.bind_all('wl_output', 3)[0]
+        cl.wl.roundtrip()
+        xo = self.xdg(cl, out)
+        cl.wl.queue = []
+        c.cmd('settings scale 125')                                   # the logical size is the mode over the scale (never under 640 x 360)
+        cl.wl.roundtrip()
+        size = [e.args for e in cl.wl.queue if e.obj == xo and e.name == 'logical_size']
+        self.assertEqual(size[-1], [640, 400])
+        self.assertTrue([e for e in cl.wl.queue if e.obj == out and e.name == 'done'])         # the wl_output.done that ends the update
+        cl.wl.queue = []
+        c.cmd('settings output-order headless-1,headless-0')          # the first output moves right of the second one
+        cl.wl.roundtrip()
+        pos = [e.args for e in cl.wl.queue if e.obj == xo and e.name == 'logical_position']
+        self.assertTrue(pos and pos[-1][0] > 0, pos)
+
+    def test_an_output_that_goes_away_leaves_an_inert_object(self):
+        c, cl = self.start('mellagui-xo4', '--output', '400x300')
+        out = cl.wl.bind('wl_output', 3)
+        cl.wl.roundtrip()
+        xo = self.xdg(cl, out)
+        cl.wl.request(xo, 'destroy')
+        xo2 = self.xdg(cl, out)
+        c.cmd('unplug')
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertIsNone(cl.wl.error)
+        cl.wl.request(xo2, 'destroy')
+        cl.wl.roundtrip()
+        self.assertIsNone(cl.wl.error)
+
+
+class TestActivation(Base):
+    """src/activation.c: xdg_activation_v1 - a token from a program with a real input serial lets another program's window come forward."""
+
+    def start(self, name):
+        p, c, stop = self.private_compositor(name, '--config', 'none')
+        c.sync()
+        a, b = Client(name), Client(name)
+        self.clients.extend([a, b])
+        return c, a, b
+
+    @staticmethod
+    def activation(cl):
+        return cl.wl.bind('xdg_activation_v1', 1)
+
+    @staticmethod
+    def token(cl, act, serial=None, seat=None, surface=None):
+        t = cl.wl.new_id('xdg_activation_token_v1')
+        cl.wl.request(act, 'get_activation_token', t)
+        if serial is not None:
+            cl.wl.request(t, 'set_serial', serial, seat)
+        if surface is not None:
+            cl.wl.request(t, 'set_surface', surface)
+        cl.wl.request(t, 'set_app_id', 'mellagui.test')
+        cl.wl.request(t, 'commit')
+        ev = cl.wl.wait_for(lambda e: e.obj == t and e.name == 'done', 2.0)
+        return t, ev.args[0] if ev else None
+
+    @staticmethod
+    def counts(c):
+        return dict(kv.split('=') for kv in c.cmd('activation')[0].split()[1:])
+
+    def focused_title(self, c):
+        for w in c.windows()['windows']:
+            if 'focused' in w['flags'] or 'activated' in w['flags']:
+                return w['title']
+        return None
+
+    def test_a_token_with_an_input_serial_brings_a_window_forward(self):
+        c, a, b = self.start('mellagui-act1')
+        wa = Window(a, 300, 200, title='A', app_id='act.a')
+        wb = Window(b, 300, 200, title='B', app_id='act.b')
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        wa.wait_configure()
+        wb.wait_configure()
+        seat = a.wl.bind('wl_seat', 5)
+        ptr = a.wl.new_id('wl_pointer')
+        a.wl.request(seat, 'get_pointer', ptr)
+        a.wl.roundtrip()
+        ra = [w for w in c.windows()['windows'] if w['title'] == 'A'][0]
+        c.click(ra['x'] + 10, ra['y'] + 10)                           # (outside the window on top of it) A gets the click, so A's window has the focus and A has a button serial
+        c.sync()
+        press = a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'button' and e.args[3] == 1, 2.0)
+        self.assertIsNotNone(press)
+        self.assertEqual(self.focused_title(c), 'A')
+        act_a, act_b = self.activation(a), self.activation(b)
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        _, token = self.token(a, act_a, press.args[0], seat, wa.surface)
+        self.assertTrue(token and token.startswith('mellagui-'), token)
+        self.assertEqual(self.counts(c)['pending'], '1')
+        b.wl.request(act_b, 'activate', token, wb.surface)
+        b.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.focused_title(c), 'B')
+        self.assertEqual(self.counts(c), {'pending': '0', 'done': '1', 'refused': '0'})
+        b.wl.request(act_b, 'activate', token, wa.surface)            # a token works once
+        b.wl.roundtrip()
+        self.assertEqual(self.focused_title(c), 'B')
+        self.assertEqual(self.counts(c)['refused'], '1')
+
+    def test_a_token_without_input_behind_it_changes_nothing(self):
+        c, a, b = self.start('mellagui-act2')
+        wa = Window(a, 300, 200, title='A', app_id='act.a')
+        wb = Window(b, 300, 200, title='B', app_id='act.b')
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        wa.wait_configure()
+        wb.wait_configure()
+        c.sync()
+        self.assertEqual(self.focused_title(c), 'B')                  # the newest window has the focus
+        act_a, act_b = self.activation(a), self.activation(b)
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        seat = a.wl.bind('wl_seat', 5)
+        a.wl.roundtrip()
+        for serial in (None, 12345):                                   # no serial, and one the seat never gave
+            _, token = self.token(a, act_a, serial, seat, wa.surface)
+            self.assertTrue(token)
+            b.wl.request(act_b, 'activate', token, wa.surface)
+            b.wl.roundtrip()
+            c.sync()
+            self.assertEqual(self.focused_title(c), 'B', 'focus was stolen')
+        self.assertEqual(self.counts(c)['done'], '0')
+        self.assertEqual(self.counts(c)['refused'], '2')
+        b.wl.request(act_b, 'activate', 'not-a-token', wa.surface)
+        b.wl.roundtrip()
+        self.assertIsNone(b.wl.error)
+        self.assertEqual(self.counts(c)['refused'], '3')
+
+    def test_the_window_that_has_the_focus_may_ask_for_a_token_without_a_serial(self):
+        c, a, b = self.start('mellagui-act3')
+        wb = Window(b, 300, 200, title='B', app_id='act.b')
+        wa = Window(a, 300, 200, title='A', app_id='act.a')
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        wa.wait_configure()
+        wb.wait_configure()
+        c.sync()
+        self.assertEqual(self.focused_title(c), 'A')
+        act_a, act_b = self.activation(a), self.activation(b)
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        _, token = self.token(a, act_a, None, None, wa.surface)       # A has the focus: it may hand the focus on
+        b.wl.request(act_b, 'activate', token, wb.surface)
+        b.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.focused_title(c), 'B')
+
+    def test_a_token_object_is_used_once_and_a_minimized_window_comes_back(self):
+        c, a, b = self.start('mellagui-act4')
+        wa = Window(a, 300, 200, title='A', app_id='act.a')
+        wb = Window(b, 300, 200, title='B', app_id='act.b')
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        wa.wait_configure()
+        wb.wait_configure()
+        act_a, act_b = self.activation(a), self.activation(b)
+        a.wl.roundtrip()
+        b.wl.roundtrip()
+        t, token = self.token(b, act_b, None, None, wb.surface)       # B has the focus
+        a.wl.request(act_a, 'activate', token, wa.surface)
+        a.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.focused_title(c), 'A')
+        a.wl.request(wa.toplevel, 'set_minimized')
+        a.wl.roundtrip()
+        c.sync()
+        t2, token2 = self.token(b, act_b, None, None, wb.surface)
+        a.wl.request(act_a, 'activate', token2, wa.surface)           # (B has the focus again after A went away)
+        a.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.focused_title(c), 'A')
+        self.assertNotIn('minimized', [w for w in c.windows()['windows'] if w['title'] == 'A'][0]['flags'])
+        b.wl.request(t, 'set_app_id', 'again')                         # the committed token cannot be changed
+        b.wl.roundtrip()
+        self.assertIsNotNone(b.wl.error)
+
+
+class TestScreencopy(Base):
+    """src/screencopy.c: zwlr_screencopy_manager_v1 - an output or a part of it into a wl_shm buffer (grim, wf-recorder, OBS)."""
+    COLOR = 0xff336699
+
+    def start(self, name, *args):
+        p, c, stop = self.private_compositor(name, '--config', 'none', *args)
+        c.sync()
+        cl = Client(name)
+        cl.name = name
+        self.clients.append(cl)
+        cl.mgr = cl.wl.bind('zwlr_screencopy_manager_v1', 3)
+        cl.out = cl.wl.bind('wl_output', 3)
+        cl.wl.roundtrip()
+        return c, cl
+
+    @staticmethod
+    def frame(cl, cursor=0, region=None, out=None):
+        f = cl.wl.new_id('zwlr_screencopy_frame_v1')
+        o = out or cl.out
+        if region:
+            cl.wl.request(cl.mgr, 'capture_output_region', f, I(cursor), o, I(region[0]), I(region[1]), I(region[2]), I(region[3]))
+        else:
+            cl.wl.request(cl.mgr, 'capture_output', f, I(cursor), o)
+        return f
+
+    @staticmethod
+    def wait(cl, f, name, timeout=2.0):
+        return cl.wl.wait_for(lambda e: e.obj == f and e.name == name, timeout)
+
+    def shot(self, cl, f, damage=False, timeout=2.0):
+        """Waits for the buffer event, gives a buffer of exactly that size, copies; returns (ready event or None, the pixels, w, h)."""
+        b = self.wait(cl, f, 'buffer')
+        self.assertIsNotNone(b, 'no buffer event')
+        fmt, w, h, stride = b.args
+        self.assertIsNotNone(self.wait(cl, f, 'buffer_done'))
+        shm = Shm(cl.wl, stride * h + 4096)
+        buf = shm.buffer(w, h, argb=0, fill=False)
+        cl.wl.request(f, 'copy_with_damage' if damage else 'copy', buf)
+        ev = cl.wl.wait_for(lambda e: e.obj == f and e.name in ('ready', 'failed'), timeout)
+        return ev, shm.map, (fmt, w, h, stride)
+
+    @staticmethod
+    def pixel(data, stride, x, y):
+        v = struct.unpack_from('<I', data, y * stride + x * 4)[0]
+        return v & 0xffffff
+
+    def window(self, c, cl):
+        cw = Client(cl.name)
+        self.clients.append(cw)
+        w = Window(cw, 300, 200, color=self.COLOR)
+        cw.wl.roundtrip()
+        w.wait_configure()
+        cw.wl.roundtrip()
+        c.sync()
+        return w, c.windows()['windows'][0]
+
+    def test_the_whole_output_comes_back_as_its_picture(self):
+        c, cl = self.start('mellagui-sc-a')
+        w, win = self.window(c, cl)
+        f = self.frame(cl)
+        ev, data, (fmt, bw, bh, stride) = self.shot(cl, f)
+        self.assertEqual((fmt, bw, bh, stride), (1, 800, 500, 3200))
+        self.assertEqual(ev.name, 'ready', 'the frame failed')
+        self.assertEqual(self.pixel(data, stride, win['x'] + 20, win['y'] + 20), self.COLOR & 0xffffff)
+        ppm = c.dump(os.path.join(tmp, 'sc-a.ppm'))                    # the same as the screen's own picture (without the pointer)
+        self.assertEqual(self.pixel(data, stride, 400, 300), (lambda p: p[0] << 16 | p[1] << 8 | p[2])(ppm.px(400, 300)))
+        flags = [e for e in cl.wl.queue if e.obj == f and e.name == 'flags']
+        self.assertIsNotNone(flags)
+        stats = dict(kv.split('=') for kv in c.cmd('screencopy')[0].split()[1:])
+        self.assertEqual((stats['global'], stats['delivered']), ('1', '1'))
+
+    def test_a_region_is_a_picture_of_just_that_part(self):
+        c, cl = self.start('mellagui-sc-b')
+        w, win = self.window(c, cl)
+        f = self.frame(cl, region=(win['x'] + 10, win['y'] + 10, 40, 24))
+        ev, data, (fmt, bw, bh, stride) = self.shot(cl, f)
+        self.assertEqual((bw, bh, stride), (40, 24, 160))
+        self.assertEqual(ev.name, 'ready')
+        for x, y in ((0, 0), (39, 23), (20, 12)):
+            self.assertEqual(self.pixel(data, stride, x, y), self.COLOR & 0xffffff)
+        f2 = self.frame(cl, region=(win['x'] - 10, win['y'] - 10, 20, 20))      # half of it is outside the window, still inside the output
+        ev2, data2, (_, w2, h2, stride2) = self.shot(cl, f2)
+        self.assertEqual((w2, h2), (20, 20))
+        self.assertEqual(self.pixel(data2, stride2, 15, 15), self.COLOR & 0xffffff)
+        self.assertNotEqual(self.pixel(data2, stride2, 2, 2), self.COLOR & 0xffffff)
+
+    def test_a_region_is_clipped_to_the_output_and_one_outside_it_fails(self):
+        c, cl = self.start('mellagui-sc-c')
+        f = self.frame(cl, region=(780, 480, 100, 100))
+        b = self.wait(cl, f, 'buffer')
+        self.assertEqual(b.args[1:3], [20, 20])                         # what is inside the output
+        for region in ((900, 10, 50, 50), (10, 10, 0, 20), (10, 10, -5, 20)):
+            f = self.frame(cl, region=region)
+            self.assertIsNotNone(self.wait(cl, f, 'failed'), region)
+        self.assertIsNone(cl.wl.error)
+
+    def test_a_scaled_output_gives_the_screens_own_pixels(self):
+        c, cl = self.start('mellagui-sc-d', '--size', '1600x900', '--scale', '2')
+        f = self.frame(cl)
+        b = self.wait(cl, f, 'buffer')
+        self.assertEqual(b.args[1:3], [1600, 900])                      # 800 x 450 logical
+        f = self.frame(cl, region=(100, 50, 100, 50))                   # logical
+        b = self.wait(cl, f, 'buffer')
+        self.assertEqual(b.args[1:4], [200, 100, 800])
+        f = self.frame(cl, region=(700, 400, 500, 500))                  # clipped to the output first: 100 x 50 logical
+        b = self.wait(cl, f, 'buffer')
+        self.assertEqual(b.args[1:3], [200, 100])
+
+    def test_a_wrong_buffer_is_a_protocol_error_and_a_frame_is_copied_once(self):
+        c, cl = self.start('mellagui-sc-e')
+        f = self.frame(cl)
+        self.assertIsNotNone(self.wait(cl, f, 'buffer'))
+        shm = Shm(cl.wl, 1 << 20)
+        cl.wl.request(f, 'copy', shm.buffer(100, 100, fill=False))
+        cl.wl.roundtrip()
+        self.assertIsNotNone(cl.wl.error)
+        self.assertEqual(cl.wl.error.code, 1)                           # invalid_buffer
+        c2, cl2 = self.start('mellagui-sc-e2')
+        f = self.frame(cl2)
+        ev, data, info = self.shot(cl2, f)
+        self.assertEqual(ev.name, 'ready')
+        shm = Shm(cl2.wl, 4 << 20)
+        cl2.wl.request(f, 'copy', shm.buffer(800, 500, fill=False))
+        cl2.wl.roundtrip()
+        self.assertIsNotNone(cl2.wl.error)
+        self.assertEqual(cl2.wl.error.code, 0)                          # already_used
+
+    def test_copy_with_damage_waits_for_a_change(self):
+        c, cl = self.start('mellagui-sc-f')
+        f1 = self.frame(cl)
+        ev, data, info = self.shot(cl, f1, damage=True)                 # the first one is answered at once
+        self.assertEqual(ev.name, 'ready')
+        dmg = [e for e in cl.wl.queue if e.obj == f1 and e.name == 'damage']
+        self.assertEqual(dmg[-1].args if dmg else None, [0, 0, 800, 500])
+        f2 = self.frame(cl)
+        b = self.wait(cl, f2, 'buffer')
+        shm = Shm(cl.wl, 800 * 500 * 4 + 4096)
+        cl.wl.request(f2, 'copy_with_damage', shm.buffer(800, 500, fill=False))
+        self.assertIsNone(cl.wl.wait_for(lambda e: e.obj == f2 and e.name in ('ready', 'failed'), 0.4), 'answered with nothing changed')
+        c.abs(100, 100)                                                 # the pointer moves: the screen changed
+        c.abs(120, 130)
+        ev2 = cl.wl.wait_for(lambda e: e.obj == f2 and e.name in ('ready', 'failed'), 2.0)
+        self.assertIsNotNone(ev2)
+        self.assertEqual(ev2.name, 'ready')
+
+    def test_a_plain_copy_does_not_wait(self):
+        c, cl = self.start('mellagui-sc-g')
+        for _ in range(3):
+            ev, data, info = self.shot(cl, self.frame(cl))
+            self.assertEqual(ev.name, 'ready')
+
+    def test_the_pointer_is_in_the_picture_only_when_asked_for(self):
+        c, cl = self.start('mellagui-sc-h')
+        c.abs(300, 200)
+        ev, plain, (_, w, h, stride) = self.shot(cl, self.frame(cl, cursor=0))
+        ev, withc, _ = self.shot(cl, self.frame(cl, cursor=1))
+        diff = sum(1 for y in range(190, 230) for x in range(295, 330) if self.pixel(plain, stride, x, y) != self.pixel(withc, stride, x, y))
+        self.assertGreater(diff, 20)
+        ppm = c.dump(os.path.join(tmp, 'sc-h.ppm'))
+
+    def test_a_locked_screen_fails_the_frame(self):
+        c, cl = self.start('mellagui-sc-i')
+        c.cmd('lock set - pin 1357')
+        c.cmd('lock now')
+        c.sync()
+        ev, data, info = self.shot(cl, self.frame(cl))
+        self.assertEqual(ev.name, 'failed')
+        self.assertIsNone(cl.wl.error)
+
+    def test_frames_that_are_not_finished_do_not_hurt(self):
+        c, cl = self.start('mellagui-sc-j')
+        f = self.frame(cl)
+        b = self.wait(cl, f, 'buffer')
+        shm = Shm(cl.wl, 800 * 500 * 4 + 4096)
+        cl.wl.request(f, 'copy_with_damage', shm.buffer(800, 500, fill=False))
+        cl.wl.request(f, 'destroy')                                      # gone while it waits
+        cl.wl.roundtrip()
+        f = self.frame(cl)
+        cl.wl.request(cl.mgr, 'destroy')                                 # the manager may go before its frames
+        cl.wl.roundtrip()
+        self.assertIsNone(cl.wl.error)
+        self.assertIsNotNone(self.wait(cl, f, 'buffer'))
+        c.cmd('unplug')
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertIsNone(cl.wl.error)
+
+
+class TestPointerConstraints(Base):
+    """src/pointerconstraints.c: zwp_pointer_constraints_v1 (lock, confine) and zwp_relative_pointer_manager_v1."""
+
+    def start(self, name):
+        p, c, stop = self.private_compositor(name, '--config', 'none')
+        c.sync()
+        cl = Client(name)
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        cl.ptr = cl.wl.new_id('wl_pointer')
+        cl.wl.request(seat, 'get_pointer', cl.ptr)
+        cl.pcs = cl.wl.bind('zwp_pointer_constraints_v1', 1)
+        cl.rmgr = cl.wl.bind('zwp_relative_pointer_manager_v1', 1)
+        win = Window(cl, 300, 200, title='G', app_id='pc.g')
+        cl.wl.roundtrip()
+        win.wait_configure()
+        cl.wl.roundtrip()
+        c.sync()
+        r = [w for w in c.windows()['windows'] if w['title'] == 'G'][0]
+        c.abs(r['x'] + 100, r['y'] + 100)                                # inside the window: it has the pointer focus (and the keyboard focus)
+        c.sync()
+        cl.wl.roundtrip()
+        return c, cl, win, r
+
+    @staticmethod
+    def pointer(c):
+        return c.windows()['pointer']
+
+    @staticmethod
+    def state(c):
+        return dict(kv.split('=') for kv in c.cmd('pconstraint')[0].split()[1:])
+
+    @staticmethod
+    def lock(cl, win, lifetime=2, region=0):
+        lk = cl.wl.new_id('zwp_locked_pointer_v1')
+        cl.wl.request(cl.pcs, 'lock_pointer', lk, win.surface, cl.ptr, region, lifetime)
+        cl.wl.roundtrip()
+        return lk
+
+    @staticmethod
+    def confine(cl, win, lifetime=2, region=0):
+        cf = cl.wl.new_id('zwp_confined_pointer_v1')
+        cl.wl.request(cl.pcs, 'confine_pointer', cf, win.surface, cl.ptr, region, lifetime)
+        cl.wl.roundtrip()
+        return cf
+
+    @staticmethod
+    def rel(cl):
+        rp = cl.wl.new_id('zwp_relative_pointer_v1')
+        cl.wl.request(cl.rmgr, 'get_relative_pointer', rp, cl.ptr)
+        cl.wl.roundtrip()
+        return rp
+
+    @staticmethod
+    def events(cl, obj, name):
+        return [e for e in cl.wl.queue if e.obj == obj and e.name == name]
+
+    def test_a_lock_holds_the_pointer_and_the_program_gets_relative_motion(self):
+        c, cl, win, r = self.start('mellagui-pc1')
+        rp = self.rel(cl)
+        before = self.pointer(c)
+        lk = self.lock(cl, win)
+        self.assertEqual(len(self.events(cl, lk, 'locked')), 1)
+        self.assertEqual(self.state(c)['active'], 'locked')
+        cl.wl.queue = []
+        c.cmd('motion 30 -10')
+        c.cmd('motion 5 7')
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(self.pointer(c), before)                         # the pointer did not move
+        ms = self.events(cl, rp, 'relative_motion')
+        self.assertEqual(len(ms), 2)
+        self.assertEqual([round(m.args[2]) for m in ms], [30, 5])
+        self.assertEqual([round(m.args[3]) for m in ms], [-10, 7])
+        self.assertEqual([round(m.args[4]) for m in ms], [30, 5])
+        self.assertEqual(self.events(cl, cl.ptr, 'motion'), [])           # (no wl_pointer.motion for a locked pointer)
+        cl.wl.request(lk, 'destroy')                                      # let go: the pointer moves again
+        cl.wl.roundtrip()
+        self.assertEqual(self.state(c)['active'], 'none')
+        c.cmd('motion 10 10')
+        self.assertEqual(self.pointer(c), (before[0] + 10, before[1] + 10))
+
+    def test_relative_motion_comes_without_a_constraint_too(self):
+        c, cl, win, r = self.start('mellagui-pc2')
+        rp = self.rel(cl)
+        cl.wl.queue = []
+        before = self.pointer(c)
+        c.cmd('motion 12 -4')
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(self.pointer(c), (before[0] + 12, before[1] - 4))
+        ms = self.events(cl, rp, 'relative_motion')
+        self.assertEqual([(round(m.args[2]), round(m.args[3])) for m in ms], [(12, -4)])
+        cl.wl.request(rp, 'destroy')
+        cl.wl.roundtrip()
+        cl.wl.queue = []
+        c.cmd('motion 1 1')
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(self.events(cl, rp, 'relative_motion'), [])
+
+    def test_a_confined_pointer_stops_at_the_edge_of_the_surface(self):
+        c, cl, win, r = self.start('mellagui-pc3')
+        cf = self.confine(cl, win)
+        self.assertEqual(len(self.events(cl, cf, 'confined')), 1)
+        for _ in range(8):
+            c.cmd('motion 100 0')
+        x, y = self.pointer(c)
+        self.assertLess(x, r['x'] + r['w'])                                # still inside the window
+        self.assertGreaterEqual(x, r['x'] + r['w'] - 2)
+        for _ in range(8):
+            c.cmd('motion 0 -100')
+        x2, y2 = self.pointer(c)
+        self.assertEqual(x2, x)                                            # it slides along the edge
+        self.assertGreaterEqual(y2, r['y'])
+        self.assertLess(y2, r['y'] + 3)
+        cl.wl.request(cf, 'destroy')
+        cl.wl.roundtrip()
+        c.cmd('motion 100 0')
+        self.assertGreater(self.pointer(c)[0], r['x'] + r['w'])
+
+    def test_a_confining_region_is_a_part_of_the_surface(self):
+        c, cl, win, r = self.start('mellagui-pc4')
+        comp = cl.compositor
+        reg = cl.wl.new_id('wl_region')
+        cl.wl.request(comp, 'create_region', reg)
+        cl.wl.request(reg, 'add', I(60), I(60), I(100), I(60))              # x 60..160, y 60..120 of the surface
+        cf = self.confine(cl, win, region=reg)
+        self.assertEqual(len(self.events(cl, cf, 'confined')), 1)
+        for _ in range(10):
+            c.cmd('motion 100 100')
+        x, y = self.pointer(c)
+        self.assertLess(x, r['x'] + 160)
+        self.assertLess(y, r['y'] + 120)
+        for _ in range(10):
+            c.cmd('motion -100 -100')
+        x, y = self.pointer(c)
+        self.assertGreaterEqual(x, r['x'] + 60)
+        self.assertGreaterEqual(y, r['y'] + 60)
+
+    def test_a_region_set_later_works_from_the_next_commit(self):
+        c, cl, win, r = self.start('mellagui-pc5')
+        cf = self.confine(cl, win)
+        reg = cl.wl.new_id('wl_region')
+        cl.wl.request(cl.compositor, 'create_region', reg)
+        cl.wl.request(reg, 'add', I(0), I(0), I(120), I(120))
+        cl.wl.request(cf, 'set_region', reg)
+        cl.wl.roundtrip()
+        for _ in range(6):
+            c.cmd('motion 100 0')
+        self.assertGreater(self.pointer(c)[0], r['x'] + 200)                # not yet: the old region (the whole surface) holds until the commit
+        cl.wl.request(win.surface, 'commit')
+        cl.wl.roundtrip()
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(len(self.events(cl, cf, 'unconfined')), 1)         # the pointer is outside the new region: not confined
+        self.assertEqual(self.state(c)['active'], 'none')
+
+    def test_the_constraint_follows_the_focus(self):
+        c, cl, win, r = self.start('mellagui-pc6')
+        lk = self.lock(cl, win, lifetime=2)
+        self.assertEqual(self.state(c)['active'], 'locked')
+        cl.wl.queue = []
+        other = Client('mellagui-pc6')                                      # a second window takes the focus
+        self.clients.append(other)
+        Window(other, 200, 120, title='O', app_id='pc.o').wait_configure()
+        other.wl.roundtrip()
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(len(self.events(cl, lk, 'unlocked')), 1)           # the keyboard focus went to the other program
+        self.assertEqual(self.state(c)['active'], 'none')
+        # a persistent lock is active again when the focus comes back
+        cl.wl.queue = []
+        c.click(r['x'] + 285, r['y'] + 185)                                 # (a corner the other window does not cover)
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(len(self.events(cl, lk, 'locked')), 1)
+        self.assertEqual(self.state(c)['active'], 'locked')
+
+    def test_a_oneshot_lock_is_spent_when_it_ends(self):
+        c, cl, win, r = self.start('mellagui-pc7')
+        lk = self.lock(cl, win, lifetime=1)
+        self.assertEqual(self.state(c)['active'], 'locked')
+        other = Client('mellagui-pc7')
+        self.clients.append(other)
+        Window(other, 200, 120, title='O', app_id='pc.o').wait_configure()
+        other.wl.roundtrip()
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(len(self.events(cl, lk, 'unlocked')), 1)
+        cl.wl.queue = []
+        c.click(r['x'] + 285, r['y'] + 185)                                 # the focus is back, the lock is not
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(self.events(cl, lk, 'locked'), [])
+        self.assertEqual(self.state(c)['active'], 'none')
+
+    def test_one_constraint_a_surface_and_a_bad_lifetime(self):
+        c, cl, win, r = self.start('mellagui-pc8')
+        self.lock(cl, win)
+        cl.wl.queue = []
+        self.confine(cl, win)                                               # already_constrained
+        self.assertIsNotNone(cl.wl.error)
+        self.assertEqual(cl.wl.error.code, 1)
+
+    def test_the_cursor_position_hint_moves_the_pointer_when_the_lock_ends(self):
+        c, cl, win, r = self.start('mellagui-pc9')
+        lk = self.lock(cl, win)
+        cl.wl.request(lk, 'set_cursor_position_hint', I(40 * 256), I(25 * 256))
+        cl.wl.request(lk, 'destroy')
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.pointer(c), (r['x'] + 40, r['y'] + 25))
+
+    def test_a_surface_that_goes_ends_its_constraint(self):
+        c, cl, win, r = self.start('mellagui-pc10')
+        lk = self.lock(cl, win)
+        self.assertEqual(self.state(c)['active'], 'locked')
+        cl.wl.request(win.toplevel, 'destroy')
+        cl.wl.request(win.xdg, 'destroy')
+        cl.wl.request(win.surface, 'destroy')
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(self.state(c)['active'], 'none')
+        cl.wl.request(lk, 'destroy')
+        cl.wl.roundtrip()
+        self.assertIsNone(cl.wl.error)
+        c.cmd('motion 5 5')                                                  # the pointer is free
 
 
 class TestCalendar(Base):

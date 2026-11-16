@@ -80,8 +80,8 @@ static const struct entry table[] = {
       "15 seconds while it is shown, and a click sends the command at once." },
     { "@Wallpaper", NULL, "Wallpaper", "The picture behind the windows." },
     { "wallpaper", NULL, "Wallpaper file",
-      "The path of a PNG, JPEG or PPM picture (~/ is your home folder). Enter or Apply shows it at once; 'Browse...' lets you pick one in the file "
-      "manager; 'No picture' goes back to the plain colours." },
+      "The path of a PNG, JPEG or PPM picture (~/ is your home folder). Enter or Apply shows it at once; 'Browse...' lets you pick one from a list of "
+      "your folders (the same list as every Open dialog); 'No picture' goes back to the plain colours." },
     { "wallpaper-mode", NULL, "How the picture fits",
       "Fill covers the whole screen and cuts what does not fit; Fit shows the whole picture with bars where it is smaller; Stretch squeezes it to the "
       "screen's shape; Center shows it at its own size in the middle." },

@@ -367,6 +367,122 @@ static const struct lm_message idle_inhibitor_requests[] = {
 };
 DEFINE_IFACE_REQ(lm_zwp_idle_inhibitor_v1_interface, "zwp_idle_inhibitor_v1", 1, idle_inhibitor_requests);
 
+/* ---- zxdg_output_manager_v1 / zxdg_output_v1 ---------------------------------------------------- */
+static const struct lm_message zxdg_output_manager_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("get_xdg_output", "no", 1, TY(&lm_zxdg_output_v1_interface, &lm_wl_output_interface)),
+};
+DEFINE_IFACE_REQ(lm_zxdg_output_manager_v1_interface, "zxdg_output_manager_v1", 3, zxdg_output_manager_requests);
+
+static const struct lm_message zxdg_output_requests[] = {
+    MSG("destroy", "", 1, NULL),
+};
+static const struct lm_message zxdg_output_events[] = {
+    MSG("logical_position", "ii", 1, NULL),
+    MSG("logical_size", "ii", 1, NULL),
+    MSG("done", "", 1, NULL),
+    MSG("name", "s", 2, NULL),
+    MSG("description", "s", 2, NULL),
+};
+DEFINE_IFACE(lm_zxdg_output_v1_interface, "zxdg_output_v1", 3, zxdg_output_requests, zxdg_output_events);
+
+/* ---- xdg_activation_v1 / xdg_activation_token_v1 ---------------------------------------------- */
+static const struct lm_message xdg_activation_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("get_activation_token", "n", 1, TY(&lm_xdg_activation_token_v1_interface)),
+    MSG("activate", "so", 1, TY(NULL, &lm_wl_surface_interface)),
+};
+DEFINE_IFACE_REQ(lm_xdg_activation_v1_interface, "xdg_activation_v1", 1, xdg_activation_requests);
+
+static const struct lm_message xdg_activation_token_requests[] = {
+    MSG("set_serial", "uo", 1, TY(NULL, &lm_wl_seat_interface)),
+    MSG("set_app_id", "s", 1, NULL),
+    MSG("set_surface", "o", 1, TY(&lm_wl_surface_interface)),
+    MSG("commit", "", 1, NULL),
+    MSG("destroy", "", 1, NULL),
+};
+static const struct lm_message xdg_activation_token_events[] = {
+    MSG("done", "s", 1, NULL),
+};
+DEFINE_IFACE(lm_xdg_activation_token_v1_interface, "xdg_activation_token_v1", 1,
+             xdg_activation_token_requests, xdg_activation_token_events);
+
+/* ---- zwlr_screencopy_manager_v1 / zwlr_screencopy_frame_v1 -------------------------------------- */
+static const struct lm_message zwlr_screencopy_manager_requests[] = {
+    MSG("capture_output", "nio", 1, TY(&lm_zwlr_screencopy_frame_v1_interface, NULL, &lm_wl_output_interface)),
+    MSG("capture_output_region", "nioiiii", 1,
+        TY(&lm_zwlr_screencopy_frame_v1_interface, NULL, &lm_wl_output_interface, NULL, NULL, NULL, NULL)),
+    MSG("destroy", "", 1, NULL),
+};
+DEFINE_IFACE_REQ(lm_zwlr_screencopy_manager_v1_interface, "zwlr_screencopy_manager_v1", 3, zwlr_screencopy_manager_requests);
+
+static const struct lm_message zwlr_screencopy_frame_requests[] = {
+    MSG("copy", "o", 1, TY(&lm_wl_buffer_interface)),
+    MSG("destroy", "", 1, NULL),
+    MSG("copy_with_damage", "o", 2, TY(&lm_wl_buffer_interface)),
+};
+static const struct lm_message zwlr_screencopy_frame_events[] = {
+    MSG("buffer", "uiiu", 1, NULL),
+    MSG("flags", "u", 1, NULL),
+    MSG("ready", "uuu", 1, NULL),
+    MSG("failed", "", 1, NULL),
+    MSG("damage", "uuuu", 2, NULL),
+    MSG("linux_dmabuf", "uuu", 3, NULL),
+    MSG("buffer_done", "", 3, NULL),
+};
+DEFINE_IFACE(lm_zwlr_screencopy_frame_v1_interface, "zwlr_screencopy_frame_v1", 3,
+             zwlr_screencopy_frame_requests, zwlr_screencopy_frame_events);
+
+/* ---- zwp_relative_pointer_manager_v1 / zwp_relative_pointer_v1 ------------------------------------ */
+static const struct lm_message zwp_relative_pointer_manager_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("get_relative_pointer", "no", 1, TY(&lm_zwp_relative_pointer_v1_interface, &lm_wl_pointer_interface)),
+};
+DEFINE_IFACE_REQ(lm_zwp_relative_pointer_manager_v1_interface, "zwp_relative_pointer_manager_v1", 1,
+                 zwp_relative_pointer_manager_requests);
+
+static const struct lm_message zwp_relative_pointer_requests[] = {
+    MSG("destroy", "", 1, NULL),
+};
+static const struct lm_message zwp_relative_pointer_events[] = {
+    MSG("relative_motion", "uuffff", 1, NULL),
+};
+DEFINE_IFACE(lm_zwp_relative_pointer_v1_interface, "zwp_relative_pointer_v1", 1,
+             zwp_relative_pointer_requests, zwp_relative_pointer_events);
+
+/* ---- zwp_pointer_constraints_v1 / zwp_locked_pointer_v1 / zwp_confined_pointer_v1 -------------------- */
+static const struct lm_message zwp_pointer_constraints_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("lock_pointer", "noo?ou", 1,
+        TY(&lm_zwp_locked_pointer_v1_interface, &lm_wl_surface_interface, &lm_wl_pointer_interface, &lm_wl_region_interface, NULL)),
+    MSG("confine_pointer", "noo?ou", 1,
+        TY(&lm_zwp_confined_pointer_v1_interface, &lm_wl_surface_interface, &lm_wl_pointer_interface, &lm_wl_region_interface, NULL)),
+};
+DEFINE_IFACE_REQ(lm_zwp_pointer_constraints_v1_interface, "zwp_pointer_constraints_v1", 1, zwp_pointer_constraints_requests);
+
+static const struct lm_message zwp_locked_pointer_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("set_cursor_position_hint", "ff", 1, NULL),
+    MSG("set_region", "?o", 1, TY(&lm_wl_region_interface)),
+};
+static const struct lm_message zwp_locked_pointer_events[] = {
+    MSG("locked", "", 1, NULL),
+    MSG("unlocked", "", 1, NULL),
+};
+DEFINE_IFACE(lm_zwp_locked_pointer_v1_interface, "zwp_locked_pointer_v1", 1,
+             zwp_locked_pointer_requests, zwp_locked_pointer_events);
+
+static const struct lm_message zwp_confined_pointer_requests[] = {
+    MSG("destroy", "", 1, NULL),
+    MSG("set_region", "?o", 1, TY(&lm_wl_region_interface)),
+};
+static const struct lm_message zwp_confined_pointer_events[] = {
+    MSG("confined", "", 1, NULL),
+    MSG("unconfined", "", 1, NULL),
+};
+DEFINE_IFACE(lm_zwp_confined_pointer_v1_interface, "zwp_confined_pointer_v1", 1,
+             zwp_confined_pointer_requests, zwp_confined_pointer_events);
+
 /* ---- zxdg_decoration_manager_v1 / zxdg_toplevel_decoration_v1 -------------------- */
 static const struct lm_message zxdg_decoration_manager_requests[] = {
     MSG("destroy", "", 1, NULL),

@@ -54,6 +54,7 @@
 #include "wlc.h"
 #include "wlclip.h"
 #include "wlcard.h"
+#include "wlpicker.h"
 #include "wlrail.h"
 #include "wltext.h"
 #include "wlwin.h"
@@ -1020,6 +1021,7 @@ struct app {
     char pbuf[PATH_MAX];                        /* the text field of a prompt */
     char perr[160];                             /* what was wrong with the last answer */
     int pcard_hover, pcard_down;
+    struct wlpicker pk;                         /* the folder list of the Open / Save as card (wlpicker.h, the same in every program) */
     int menu_kind;                              /* the menu that is open: 0 none, 1 effects, 2 transform */
 
     char msg[160];
@@ -1351,6 +1353,7 @@ static void prompt_open(struct app *a, enum prompt p, const char *initial)
     snprintf(a->pbuf, sizeof(a->pbuf), "%s", initial ? initial : "");
     a->perr[0] = 0;
     a->pcard_hover = a->pcard_down = -1;
+    wlpicker_reset(&a->pk);                                                     /* (the folder list is read again) */
     wltext_end(a->pbuf);
     a->win.redraw = true;
 }
@@ -1376,6 +1379,48 @@ static void default_dir(const struct app *a, char *out, size_t n)
     else
         snprintf(out, n, "%.*s/", (int)n - 2, home && *home ? home : (g_startdir[0] ? g_startdir : "/"));
 }
+
+static const char *const HELP_LINES[] = {
+    "Tools  S select  P pen  L line  B box  C circle  F fill  E eraser  I picker",
+    "Left button draws with the pen colour, the right button with the second one.",
+    "Shift keeps a line at 45 degrees and a box or circle square.",
+    "X swaps the two colours.  [ and ] change the brush size.",
+    "Ctrl+O open   Ctrl+N new   Ctrl+S save   Ctrl+Shift+S save as",
+    "Ctrl+Z undo   Ctrl+Y or Ctrl+Shift+Z redo",
+    "Enter crops to the selection, Delete clears it, Ctrl+A selects all, Esc drops it.",
+    "Wheel zooms, middle button drags the picture, + - zoom, 0 fits, 1 real size.",
+    "Effects (right rail) work on the selection, or on the whole picture.",
+    ".png keeps transparency, .jpg is laid on white.",
+};
+
+static void prompt_accept(struct app *a);
+
+#define card_name_ok wlpicker_picture
+
+/* How many rows the list has (0 = no list: another card, or a window too low for one). */
+static int card_list_rows(const struct app *a)
+{
+    return a->prompt == P_OPEN || a->prompt == P_SAVEAS ? wlpicker_fit(a->win.bh, 170) : 0;
+}
+
+/* The card's place and height (what wlcard_frame will make of it). */
+static void card_rect(const struct app *a, struct wlcard *c, int *nb)
+{
+    int ch = a->prompt == P_HELP ? 56 + (int)(sizeof(HELP_LINES) / sizeof(HELP_LINES[0])) * (LM_FONT_H + 4) + WLCARD_BTN_H
+             : (a->prompt == P_DISCARD || a->prompt == P_REPLACE) ? 130 : 150;
+    int rows = card_list_rows(a);
+    if (rows)
+        ch = 170 + rows * WLPICKER_ROW_H;
+    *nb = a->prompt == P_DISCARD ? 3 : a->prompt == P_HELP ? 1 : 2;
+    c->w = LM_MIN(a->prompt == P_HELP ? 620 : 560, a->win.bw - 16);
+    c->h = LM_MIN(ch, a->win.bh - 16);
+    c->x = (a->win.bw - c->w) / 2;
+    c->y = (a->win.bh - c->h) / 2;
+}
+
+/* The text field's top, and the list's. */
+static int card_field_y(const struct wlcard *c) { return c->y + 42 + LM_FONT_H + 8; }
+static int card_list_y(const struct wlcard *c) { return card_field_y(c) + 30; }
 
 static void ask_open(struct app *a)
 {
@@ -1925,18 +1970,6 @@ static void paint_status(struct app *a)
     wlwin_text(w, w->bw - rw - 10, stat_y(a) + (STAT_H - LM_FONT_H) / 2, right, 1, COL_TEXT, 0);
 }
 
-static const char *const HELP_LINES[] = {
-    "Tools  S select  P pen  L line  B box  C circle  F fill  E eraser  I picker",
-    "Left button draws with the pen colour, the right button with the second one.",
-    "Shift keeps a line at 45 degrees and a box or circle square.",
-    "X swaps the two colours.  [ and ] change the brush size.",
-    "Ctrl+O open   Ctrl+N new   Ctrl+S save   Ctrl+Shift+S save as",
-    "Ctrl+Z undo   Ctrl+Y or Ctrl+Shift+Z redo",
-    "Enter crops to the selection, Delete clears it, Ctrl+A selects all, Esc drops it.",
-    "Wheel zooms, middle button drags the picture, + - zoom, 0 fits, 1 real size.",
-    "Effects (right rail) work on the selection, or on the whole picture.",
-    ".png keeps transparency, .jpg is laid on white.",
-};
 
 static void paint_card(struct app *a)
 {
@@ -1949,8 +1982,8 @@ static void paint_card(struct app *a)
     int nb = 2, ch = 150;
     bool field = true;
     switch (a->prompt) {
-    case P_OPEN: snprintf(title, sizeof(title), "Open a picture"); line = "The path of a PNG, JPEG, GIF, BMP, WebP or SVG file (Tab completes)"; labels[1] = "Open"; break;
-    case P_SAVEAS: snprintf(title, sizeof(title), "Save as"); line = ".png keeps transparency, .jpg is laid on white (Tab completes)"; labels[1] = "Save"; cols[1] = lm_theme.btn_amber; break;
+    case P_OPEN: snprintf(title, sizeof(title), "Open a picture"); line = "Pick a picture below or type its path (Tab completes)"; labels[1] = "Open"; break;
+    case P_SAVEAS: snprintf(title, sizeof(title), "Save as"); line = "A name ending in .png (keeps transparency) or .jpg (laid on white)"; labels[1] = "Save"; cols[1] = lm_theme.btn_amber; break;
     case P_NEW: snprintf(title, sizeof(title), "New picture"); line = "The size in pixels, like 800x600"; labels[1] = "Create"; cols[1] = lm_theme.btn_green; break;
     case P_RESIZE: snprintf(title, sizeof(title), "Resize"); line = "A size (800x600), a width (800) or a percentage (50%)"; labels[1] = "Resize"; cols[1] = lm_theme.btn_purple; break;
     case P_DISCARD:
@@ -1984,7 +2017,11 @@ static void paint_card(struct app *a)
         break;
     default: return;
     }
+    struct wlcard geo;
+    int nbg;
+    card_rect(a, &geo, &nbg);
     int cw = a->prompt == P_HELP ? 620 : 560;
+    ch = geo.h;
     wlcard_frame(w, &c, cw, ch, title, COL_ACCENT, COL_BG, lm_theme.text_bright);
     if (a->prompt == P_HELP) {
         for (size_t i = 0; i < sizeof(HELP_LINES) / sizeof(HELP_LINES[0]); i++)
@@ -1998,7 +2035,15 @@ static void paint_card(struct app *a)
         int fy = c.y + 42 + LM_FONT_H + 8;
         wlwin_round_fill(w, c.x + WLCARD_PAD, fy, c.w - 2 * WLCARD_PAD, 26, 8, COL_FIELD);
         wltext_paint(w, c.x + WLCARD_PAD + 8, fy + 5, c.w - 2 * WLCARD_PAD - 16, a->pbuf, true, COL_TEXT, lm_theme.button_hover, COL_ACCENT);
-        if (a->perr[0])
+        int rows = card_list_rows(a);
+        if (rows) {
+            char base[PATH_MAX];
+            default_dir(a, base, sizeof(base));
+            int fx = c.x + WLCARD_PAD, fw = c.w - 2 * WLCARD_PAD;
+            wlpicker_paint(w, &a->pk, base, a->pbuf, fx, card_list_y(&c), fw, rows, a->px, a->py, a->has_pointer);
+            if (a->perr[0])
+                wlwin_text(w, fx, c.y + c.h - WLCARD_PAD - WLCARD_BTN_H - 22, a->perr, 1, lm_theme.error, fw);
+        } else if (a->perr[0])
             wlwin_text(w, c.x + WLCARD_PAD, fy + 32, a->perr, 1, lm_theme.error, c.w - 2 * WLCARD_PAD);
     } else if (a->perr[0] && a->prompt != P_HELP) {
         wlwin_text(w, c.x + WLCARD_PAD, c.y + c.h - WLCARD_PAD - WLCARD_BTN_H - LM_FONT_H - 6, a->perr, 1, lm_theme.error, c.w - 2 * WLCARD_PAD);
@@ -2066,6 +2111,15 @@ static void write_dump(struct app *a)
     fprintf(f, "pal x=%d y=%d side=%d pitch=%d\n", s.pal_x, s.pal_y, s.pal_s, s.pal_s + 3);
     fprintf(f, "sizes x=%d y=%d pitch=%d\n", s.size_x, s.size_y, s.size_pitch);
     fprintf(f, "filled x=%d y=%d w=%d h=%d\n", s.fill_x, s.fill_y, s.fill_w, s.fill_h);
+    if (card_list_rows(a)) {                                                    /* the Open / Save as card: where the list is and what it shows */
+        struct wlcard c;
+        int nb;
+        char base[PATH_MAX];
+        card_rect(a, &c, &nb);
+        default_dir(a, base, sizeof(base));
+        fprintf(f, "card x=%d y=%d w=%d h=%d field=%s\n", c.x, c.y, c.w, c.h, a->pbuf);
+        wlpicker_dump(f, &a->pk, base, a->pbuf, c.x + WLCARD_PAD, card_list_y(&c), c.w - 2 * WLCARD_PAD, card_list_rows(a), 0);
+    }
     fclose(f);
 }
 
@@ -2272,17 +2326,25 @@ static void menu_event(struct wlwin *w, int index)
 static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 {
     struct wlcard c;
-    int ch = a->prompt == P_HELP ? 56 + (int)(sizeof(HELP_LINES) / sizeof(HELP_LINES[0])) * (LM_FONT_H + 4) + WLCARD_BTN_H : (a->prompt == P_DISCARD || a->prompt == P_REPLACE) ? 130 : 150;
-    int nb = a->prompt == P_DISCARD ? 3 : a->prompt == P_HELP ? 1 : 2;
-    c.w = LM_MIN(a->prompt == P_HELP ? 620 : 560, a->win.bw - 16);
-    c.h = LM_MIN(ch, a->win.bh - 16);
-    c.x = (a->win.bw - c.w) / 2;
-    c.y = (a->win.bh - c.h) / 2;
+    int nb;
+    card_rect(a, &c, &nb);
+    int crows = card_list_rows(a), fx = c.x + WLCARD_PAD, fw = c.w - 2 * WLCARD_PAD, ly = card_list_y(&c);
     bool field = a->prompt == P_OPEN || a->prompt == P_SAVEAS || a->prompt == P_NEW || a->prompt == P_RESIZE;
     if (op == LM_WL_POINTER_EVT_MOTION) {
         int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
-        if (k != a->pcard_hover) {
+        if (k != a->pcard_hover)
             a->pcard_hover = k;
+        if (crows) {
+            char base[PATH_MAX];
+            default_dir(a, base, sizeof(base));
+            wlpicker_motion(&a->pk, base, a->pbuf, ly, crows, a->py);               /* (the scroll bar's thumb is dragged) */
+        }
+        a->win.redraw = true;                                                   /* (the list rows light under the pointer) */
+        return;
+    }
+    if (op == LM_WL_POINTER_EVT_AXIS) {
+        if (crows && args[1].u == 0) {
+            wlpicker_wheel(&a->pk, args[2].f > 0 ? 1 : -1);
             a->win.redraw = true;
         }
         return;
@@ -2292,6 +2354,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     a->clip.serial = args[0].u;
     int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
     if (args[3].u != 1) {
+        wlpicker_release(&a->pk);
         if (a->pcard_down >= 0 && a->pcard_down == k) {                                        /* a button is done when it is let go on */
             int which = k;
             a->pcard_down = -1;
@@ -2317,6 +2380,13 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             int fy = c.y + 42 + LM_FONT_H + 8;
             if (a->py >= fy && a->py < fy + 26)
                 wltext_click(a->pbuf, (int)a->px - (c.x + WLCARD_PAD + 8), (a->win.mods & LM_MOD_SHIFT) != 0);
+            else if (crows) {
+                char base[PATH_MAX];
+                default_dir(a, base, sizeof(base));
+                if (wlpicker_press(&a->pk, base, a->pbuf, sizeof(a->pbuf), fx, ly, fw, crows, a->px, a->py, args[1].u, (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
+                    prompt_accept(a);
+                a->perr[0] = 0;
+            }
         }
         a->win.redraw = true;
     } else if (args[2].u == 273 && field && a->py >= c.y + 42 + LM_FONT_H + 8 && a->py < c.y + 42 + LM_FONT_H + 34) {
@@ -2489,6 +2559,13 @@ static void prompt_key(struct app *a, uint32_t ks)
     if (ks == LM_KS_Escape) {
         a->prompt = P_NONE;
         a->after = AF_NONE;
+    } else if (card_list_rows(a) && (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down ||
+                                     ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0))) {
+        char base[PATH_MAX];
+        default_dir(a, base, sizeof(base));
+        if (wlpicker_key(&a->pk, base, a->pbuf, sizeof(a->pbuf), card_list_rows(a), ks) == WLPICKER_OPEN)
+            prompt_accept(a);                                                   /* a folder was entered, a picture is taken */
+        a->perr[0] = 0;
     } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
         prompt_accept(a);
     } else if (ks == LM_KS_Tab && (a->prompt == P_OPEN || a->prompt == P_SAVEAS)) {
@@ -2500,8 +2577,10 @@ static void prompt_key(struct app *a, uint32_t ks)
         else
             a->perr[0] = 0;
         wltext_end(a->pbuf);
+        wlpicker_typed(&a->pk);
     } else if (wltext_edit(&a->clip, a->pbuf, sizeof(a->pbuf), ks, a->win.mods)) {
         a->perr[0] = 0;
+        wlpicker_typed(&a->pk);                                                 /* (the list follows what is typed) */
     }
 }
 
@@ -2617,6 +2696,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--apply"))
         return apply_cmd(argc - 2, argv + 2);
     static struct app a;
+    wlpicker_init(&a.pk, card_name_ok);
     int nw = 0, nh = 0, win_w = 1000, win_h = 680;
     const char *file = NULL;
     for (int i = 1; i < argc; i++) {

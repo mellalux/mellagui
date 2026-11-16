@@ -37,6 +37,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_NOTE] = { "note", 0 },
     [LM_DOCKICON_HOME] = { "home", 0 },
     [LM_DOCKICON_ARCHIVE] = { "archive", 0 },
+    [LM_DOCKICON_PAINT] = { "paint", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -66,6 +67,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_NOTE: return lm_theme.icon_note;
     case LM_DOCKICON_HOME: return lm_theme.icon_home;
     case LM_DOCKICON_ARCHIVE: return lm_theme.icon_archive;
+    case LM_DOCKICON_PAINT: return lm_theme.icon_paint;
     default: return lm_theme.icon_generic;
     }
 }
@@ -86,7 +88,7 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
-        { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
+        { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
         { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK }, { "timer", LM_DOCKICON_TIMER }, { "pomodoro", LM_DOCKICON_TIMER }, { "stopwatch", LM_DOCKICON_TIMER }, { "sticky", LM_DOCKICON_NOTE }, { "memo", LM_DOCKICON_NOTE },
         { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
@@ -282,6 +284,13 @@ static float glyph(int kind, float u, float v)
         float d = sd_box(u, v, 0, -0.17f, 0.32f, 0.085f, 0.02f);
         d = fminf2(d, sd_box(u, v, 0, 0.12f, 0.26f, 0.19f, 0.02f));
         return sd_sub(d, sd_box(u, v, 0, 0.0f, 0.08f, 0.02f, 0.012f));
+    }
+    case LM_DOCKICON_PAINT: {                           /* a painter's palette: a disc with a thumb hole and three dabs of paint */
+        float d = sd_circle(u, v, 0, 0, 0.36f);
+        d = sd_sub(d, sd_circle(u, v, 0.13f, 0.24f, 0.095f));
+        d = sd_sub(d, sd_circle(u, v, -0.17f, -0.07f, 0.06f));
+        d = sd_sub(d, sd_circle(u, v, -0.03f, -0.21f, 0.06f));
+        return sd_sub(d, sd_circle(u, v, 0.17f, -0.08f, 0.06f));
     }
     case LM_DOCKICON_NOTE: {                            /* a sheet with lines of writing and a folded corner */
         float d = sd_box(u, v, 0, 0, 0.26f, 0.30f, 0.03f);

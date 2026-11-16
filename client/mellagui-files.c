@@ -2,10 +2,6 @@
  * mellagui-files - a two-pane file manager for MellaGUI, in the spirit of Norton / Midnight Commander.
  *
  *   mellagui-files [DIR]          two panes, both starting in DIR (default: the home directory)
- *   mellagui-files --choose KEY [DIR]
- *                                 pick a picture instead of opening files: one pane, Enter or a double click on a png / jpg / ppm sets
- *                                 the compositor setting KEY (only "wallpaper") to its full path and the program ends; Esc ends it
- *                                 without a choice. The settings panel's Desktop page starts it from its "Browse..." button.
  *   mellagui-files --selftest     listing, sorting, classification, copy / move / delete and the preview without a display
  *
  * Each pane lists a folder: folders first, then files, sorted by name without regard to case (click the Name / Size / Modified label in the pane's
@@ -251,11 +247,9 @@ struct app {
     uint64_t snd_len, snd_pos, snd_t0;  /* ms: its length, where it is (paused) or was (playing), when it (re)started */
     bool snd_playing, snd_dead;
     int snd_player;                     /* an index of ffaudio_player_name */
-    const char *choose_key;             /* --choose: the setting a picked picture is written to (NULL = the two-pane manager) */
-    uint32_t settings;                  /* mellagui_settings_v1 (only bound with --choose) */
     struct pane pane[2];
     int act;                            /* the active pane */
-    bool dual;                          /* two panes (always, except for --choose) */
+    bool dual;                          /* two panes (always) */
     bool preview;                       /* the pane that is not active shows a preview */
     bool show_hidden;
     int rep_mode;                       /* enum replace_mode: do_copy_move asks (REP_ASK) when files exist, else does what the answer said */
@@ -3510,7 +3504,7 @@ static void set_title(struct app *a)
     struct netpath tnp;
     if (!*base && net_parse(dir, &tnp) && tnp.sftp)                     /* "sftp://nas/": the server's name */
         base = tnp.conn;
-    snprintf(t, sizeof(t), "%s - %s", !strcmp(dir, NET_PREFIX) ? "Network" : *base ? base : "/", a->choose_key ? "Choose a picture" : "Files");
+    snprintf(t, sizeof(t), "%s - %s", !strcmp(dir, NET_PREFIX) ? "Network" : *base ? base : "/", "Files");
     WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
 }
 
@@ -3613,30 +3607,10 @@ static void go_up(struct app *a)
     go_to(a, p, parent, from);
 }
 
-static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
-{
-    (void)c; (void)id; (void)op; (void)args; (void)data;            /* the value bursts are of no interest here */
-}
-
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
     struct app *a = w->data;
-    if (a->choose_key && !strcmp(iface, "mellagui_settings_v1"))
-        a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
-    else
-        wlclip_global(&a->clip, w, name, iface, ver);
-}
-
-/* --choose: hand the picture to the compositor and end. */
-static void choose_path(struct app *a, const char *path)
-{
-    if (!a->settings) {
-        msg(a, "The compositor does not serve settings to this program");
-        return;
-    }
-    WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = a->choose_key }, { .s = path });
-    wlc_roundtrip(a->win.c);
-    a->win.running = false;
+    wlclip_global(&a->clip, w, name, iface, ver);
 }
 
 /* Where a started program runs: the folder of the pane, or the home folder when that is a network place. */
@@ -3660,8 +3634,6 @@ static void open_path(struct app *a, const char *path)
             msg(a, "%s", err);
         } else if (isdir) {
             go_to(a, cur(a), path, NULL);
-        } else if (a->choose_key) {
-            msg(a, "Choose a picture from this computer");
         } else if (net_fetch(path, local, sizeof(local), err, sizeof(err))) {
             open_path(a, local);
             if (a->msg[0] == 0)
@@ -3680,13 +3652,6 @@ static void open_path(struct app *a, const char *path)
         return;
     }
     char err[PATH_MAX + 80];
-    if (a->choose_key) {
-        if (classify(path) == K_IMAGE)
-            choose_path(a, path);
-        else
-            msg(a, "Choose a picture (png, jpg or ppm)");
-        return;
-    }
     switch (classify(path)) {
     case K_IMAGE:
     case K_VIDEO:
@@ -4426,7 +4391,7 @@ struct rbtn {
 
 enum { B_UP, B_HOME, B_HIDDEN, B_TERM, B_PREVIEW, B_TRASH, B_RESTORE, B_EMPTY, B_NET, N_TOOL };
 
-/* The buttons that belong to the two-pane manager (the picture chooser has neither). */
+/* The buttons of the two-pane manager. */
 static bool tool_visible(const struct app *a, int i)
 {
     if (i == B_RESTORE)                                                 /* only inside the trashed files */
@@ -4937,7 +4902,7 @@ static void handle_key(struct app *a, uint32_t ks)
     case LM_KS_F1 + 1: if (a->dual) cmd_rename(a); return;
     case LM_KS_F1 + 2: if (a->dual) toggle_preview(a); return;
     case LM_KS_F1 + 3: if (a->dual) cmd_edit(a); return;
-    case LM_KS_F1 + 4:                                                  /* F5: copy (the chooser has no files to copy: it rereads) */
+    case LM_KS_F1 + 4:                                                  /* F5: copy */
         if (a->dual)
             cmd_copy_move(a, false);
         else
@@ -4949,10 +4914,6 @@ static void handle_key(struct app *a, uint32_t ks)
     case LM_KS_F1 + 8: if (a->dual) start_terminal(a); return;
     case LM_KS_F1 + 9: if (a->dual) a->win.running = false; return;
     case LM_KS_Escape:
-        if (a->choose_key) {
-            a->win.running = false;
-            return;
-        }
         a->msg[0] = 0;
         a->win.redraw = true;
         return;
@@ -4995,7 +4956,7 @@ static int split_x(const struct app *a)
 /* files.conf keeps what the program looked like when it was left: where the divider was (`split=PER MILLE`, 150..850), the folder of each pane
  * (`left=` / `right=`, only folders on this computer), which pane was active, whether the preview was on, the hidden files shown, and each
  * pane's sort column (`sort0=` / `sort1=`: 0 name, 1 size, 2 date; `desc0=` / `desc1=`). A start without a folder on the command line comes back
- * to it; `mellagui-files DIR` shows DIR but remembers what it looks like afterwards just the same. The picture chooser (--choose) keeps none of it. */
+ * to it; `mellagui-files DIR` shows DIR but remembers what it looks like afterwards just the same. */
 struct fstate {
     int split, act, preview, hidden;
     char dir[2][PATH_MAX];
@@ -5079,8 +5040,6 @@ static char g_state_last[2 * PATH_MAX + 512];                            /* what
 
 static void state_save(const struct app *a)
 {
-    if (a->choose_key)
-        return;
     char text[sizeof(g_state_last)];
     state_text(a, text, sizeof(text));
     if (!strcmp(text, g_state_last))
@@ -7486,18 +7445,8 @@ int main(int argc, char **argv)
         argv++;
         argc--;
     }
-    const char *choose = NULL;
-    if (argc >= 3 && !strcmp(argv[1], "--choose")) {
-        if (strcmp(argv[2], "wallpaper")) {                             /* the only setting a file may be chosen for */
-            fprintf(stderr, "mellagui-files: --choose knows only 'wallpaper'\n");
-            return 2;
-        }
-        choose = argv[2];
-        argv += 2;
-        argc -= 2;
-    }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-files [--bars] [DIR | --selftest | --choose wallpaper [DIR]]\n");
+        fprintf(stderr, "usage: mellagui-files [--bars] [DIR | --selftest]\n");
         return 2;
     }
     signal(SIGCHLD, SIG_IGN);                                           /* the programs we start are nobody's business afterwards */
@@ -7508,18 +7457,14 @@ int main(int argc, char **argv)
     a.hover = -1;
     a.cbtn_down = -1;
     wlrail_init(&a.ran[0]);
-    a.dual = choose == NULL;
-    if (choose)                                                         /* (the picture chooser has no rails) */
-        g_rails = g_card = false;
+    a.dual = true;
     struct fstate fs;
     state_load(&fs);
     a.split = fs.split;
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
-    a.choose_key = choose;
     if (wlwin_connect(&a.win, "mellagui-files", &ops, &a) < 0)
         return 1;
-    if (wlwin_open(&a.win, choose ? "Choose a picture" : "Files", choose ? "mellagui.files.choose" : "mellagui.files",
-                   choose ? 640 : 880, choose ? 460 : 460, choose ? 360 : 640, choose ? 160 : 240) < 0)
+    if (wlwin_open(&a.win, "Files", "mellagui.files", 880, 460, 640, 240) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
     char start[PATH_MAX], cwd[PATH_MAX];
@@ -7528,15 +7473,10 @@ int main(int argc, char **argv)
         if (!getcwd(cwd, sizeof(cwd)))
             snprintf(cwd, sizeof(cwd), "/");
         join_path(cwd, argv[1], start, sizeof(start));
-    } else if (choose && home && *home) {                               /* pictures usually live in ~/Pictures */
-        char pics[PATH_MAX];
-        snprintf(pics, sizeof(pics), "%s/Pictures", home);
-        struct stat st;
-        normalize(stat(pics, &st) == 0 && S_ISDIR(st.st_mode) ? pics : home, start, sizeof(start));
     } else {
         normalize(home && *home ? home : "/", start, sizeof(start));
     }
-    bool restore = argc < 2 && !choose;                                 /* no folder asked for: the panes come back as they were left */
+    bool restore = argc < 2;                                 /* no folder asked for: the panes come back as they were left */
     if (restore) {
         a.act = fs.act;
         a.preview = fs.preview;
@@ -7563,8 +7503,6 @@ int main(int argc, char **argv)
     state_save(&a);                                                     /* (what the file holds now: it is only written when this changes) */
     if (strcmp(a.pane[0].cwd, start) != 0)
         msg(&a, "Could not open %s", start);
-    else if (choose)
-        msg(&a, "Choose a picture: Enter or double click (Esc cancels)");
     else
         msg(&a, "F1 shows the keys: Tab switches panes, F3 previews, F5 copies, F6 moves, F8 deletes");
     while (a.win.running) {

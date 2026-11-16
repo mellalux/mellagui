@@ -26,6 +26,7 @@
 #include "log.h"
 #include "lock.h"
 #include "output.h"
+#include "screencopy.h"
 #include "seat.h"
 #include "surface.h"
 #include "wm.h"
@@ -59,6 +60,7 @@
 
 struct out_state {
     struct lm_output *out;
+    uint64_t dmg_serial;                /* counts the damage that reached this output (screencopy asks whether the picture changed) */
     struct lm_region pending;           /* global coordinates */
     struct lm_region hist[HIST];        /* damage of the last HIST presented frames */
     bool ready;                         /* backend allows drawing */
@@ -3097,10 +3099,14 @@ void lm_render_damage(struct lm_renderer *r, const struct lm_rect *rect)
     lm_list_for_each(o, &b->outputs, link) {
         struct out_state *st = state_of(o);
         struct lm_rect orect = lm_output_rect(o), x;
-        if (st && lm_rect_intersect(&in, &orect, &x))
+        if (st && lm_rect_intersect(&in, &orect, &x)) {
             lm_region_add_rect(&st->pending, &x);
+            st->dmg_serial++;
+        }
     }
     lm_idle_schedule(r->idle);
+    if (r->srv->screencopy)
+        lm_screencopy_damaged(r->srv->screencopy);
 }
 
 void lm_render_damage_all(struct lm_renderer *r)
@@ -3111,10 +3117,34 @@ void lm_render_damage_all(struct lm_renderer *r)
     struct lm_output *o;
     lm_list_for_each(o, &b->outputs, link) {
         struct out_state *st = state_of(o);
-        if (st)
+        if (st) {
             st->full = true;
+            st->dmg_serial++;
+        }
     }
     lm_idle_schedule(r->idle);
+    if (r->srv->screencopy)
+        lm_screencopy_damaged(r->srv->screencopy);
+}
+
+uint64_t lm_render_damage_serial(const struct lm_renderer *r, const struct lm_output *out)
+{
+    (void)r;
+    const struct out_state *st = state_of((struct lm_output *)out);
+    return st ? st->dmg_serial : 0;
+}
+
+bool lm_render_capture_extent(const struct lm_output *out, const struct lm_rect *rect, struct lm_rect *clip, int *w, int *h)
+{
+    struct lm_rect orect = lm_output_rect(out);
+    if (lm_rect_is_empty(rect) || !lm_rect_intersect(rect, &orect, clip))
+        return false;
+    struct lm_rect pc = out_prect(out, clip);
+    if (pc.w <= 0 || pc.h <= 0)
+        return false;
+    *w = pc.w;
+    *h = pc.h;
+    return true;
 }
 
 void lm_render_cursor_changed(struct lm_renderer *r)

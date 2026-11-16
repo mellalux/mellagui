@@ -95,6 +95,17 @@ extern const struct lm_interface lm_zxdg_decoration_manager_v1_interface;
 extern const struct lm_interface lm_zxdg_toplevel_decoration_v1_interface;
 extern const struct lm_interface lm_zwp_idle_inhibit_manager_v1_interface;   /* idleinhibit.c */
 extern const struct lm_interface lm_zwp_idle_inhibitor_v1_interface;
+extern const struct lm_interface lm_zxdg_output_manager_v1_interface;  /* output.c */
+extern const struct lm_interface lm_zxdg_output_v1_interface;
+extern const struct lm_interface lm_xdg_activation_v1_interface;       /* activation.c */
+extern const struct lm_interface lm_xdg_activation_token_v1_interface;
+extern const struct lm_interface lm_zwlr_screencopy_manager_v1_interface;   /* screencopy.c */
+extern const struct lm_interface lm_zwlr_screencopy_frame_v1_interface;
+extern const struct lm_interface lm_zwp_relative_pointer_manager_v1_interface;   /* pointerconstraints.c */
+extern const struct lm_interface lm_zwp_relative_pointer_v1_interface;
+extern const struct lm_interface lm_zwp_pointer_constraints_v1_interface;
+extern const struct lm_interface lm_zwp_locked_pointer_v1_interface;
+extern const struct lm_interface lm_zwp_confined_pointer_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_v1_interface;     /* dmabuf.c */
 extern const struct lm_interface lm_zwp_linux_buffer_params_v1_interface;
 extern const struct lm_interface lm_zwp_linux_dmabuf_feedback_v1_interface;
@@ -116,6 +127,11 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
  *   zxdg_decoration_manager_v1    1    xdg.c      (always answers server_side)
  *   zwp_linux_dmabuf_v1           4    dmabuf.c   (linear ARGB8888 / XRGB8888 only; the pixels are read with mmap)
  *   zwp_idle_inhibit_manager_v1   1    idleinhibit.c (a visible surface keeps the screensaver and the auto lock away)
+ *   zxdg_output_manager_v1        3    output.c   (logical position / size, name, description; wl_output.done ends an update from version 3)
+ *   xdg_activation_v1             1    activation.c (a token from a program with a recent input serial lets another program's window come forward)
+ *   zwlr_screencopy_manager_v1    3    screencopy.c (grim, OBS: an output or a part of it into a wl_shm buffer; no dmabuf)
+ *   zwp_relative_pointer_manager_v1 1  pointerconstraints.c
+ *   zwp_pointer_constraints_v1    1    pointerconstraints.c (lock / confine the pointer to a surface)
  *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
  *   mellagui_capture_v1              1    capture.c  (MellaGUI private: the screen into a wl_shm buffer, for mellagui-record)
  *   mellagui_tray_v1                 1    tray.c     (MellaGUI private: icons / buttons of programs in the top bar)
@@ -131,6 +147,11 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 #define LM_ZXDG_DECORATION_MANAGER_V1_VERSION 1
 #define LM_ZWP_LINUX_DMABUF_V1_VERSION      4
 #define LM_ZWP_IDLE_INHIBIT_MANAGER_V1_VERSION 1
+#define LM_ZXDG_OUTPUT_MANAGER_V1_VERSION   3
+#define LM_XDG_ACTIVATION_V1_VERSION        1
+#define LM_ZWLR_SCREENCOPY_MANAGER_V1_VERSION 3
+#define LM_ZWP_RELATIVE_POINTER_MANAGER_V1_VERSION 1
+#define LM_ZWP_POINTER_CONSTRAINTS_V1_VERSION 1
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
 #define LM_MELLAGUI_TRAY_V1_VERSION            1
@@ -506,6 +527,79 @@ enum {
     LM_ZWP_IDLE_INHIBIT_MANAGER_V1_REQ_CREATE_INHIBITOR = 1,  /* "no" id, surface(wl_surface) */
     LM_ZWP_IDLE_INHIBITOR_V1_REQ_DESTROY = 0,                 /* "" */
 };
+
+/* ---- zxdg_output_manager_v1 / zxdg_output_v1 (xdg-output-unstable-v1, version 3) ---------------------------- */
+enum {
+    LM_ZXDG_OUTPUT_MANAGER_V1_REQ_DESTROY = 0,         /* "" */
+    LM_ZXDG_OUTPUT_MANAGER_V1_REQ_GET_XDG_OUTPUT = 1,  /* "no" id, output(wl_output) */
+    LM_ZXDG_OUTPUT_V1_REQ_DESTROY = 0,                 /* "" */
+    LM_ZXDG_OUTPUT_V1_EVT_LOGICAL_POSITION = 0,        /* "ii" x, y */
+    LM_ZXDG_OUTPUT_V1_EVT_LOGICAL_SIZE = 1,            /* "ii" width, height (logical) */
+    LM_ZXDG_OUTPUT_V1_EVT_DONE = 2,                    /* "" (versions 1 and 2 only; from 3 on wl_output.done ends the update) */
+    LM_ZXDG_OUTPUT_V1_EVT_NAME = 3,                    /* "s" since 2 */
+    LM_ZXDG_OUTPUT_V1_EVT_DESCRIPTION = 4,             /* "s" since 2 */
+};
+
+/* ---- xdg_activation_v1 / xdg_activation_token_v1 -------------------------------------------------------------- */
+enum {
+    LM_XDG_ACTIVATION_V1_REQ_DESTROY = 0,              /* "" */
+    LM_XDG_ACTIVATION_V1_REQ_GET_ACTIVATION_TOKEN = 1, /* "n" id(xdg_activation_token_v1) */
+    LM_XDG_ACTIVATION_V1_REQ_ACTIVATE = 2,             /* "so" token, surface */
+    LM_XDG_ACTIVATION_TOKEN_V1_REQ_SET_SERIAL = 0,     /* "uo" serial, seat(wl_seat) */
+    LM_XDG_ACTIVATION_TOKEN_V1_REQ_SET_APP_ID = 1,     /* "s" */
+    LM_XDG_ACTIVATION_TOKEN_V1_REQ_SET_SURFACE = 2,    /* "o" surface */
+    LM_XDG_ACTIVATION_TOKEN_V1_REQ_COMMIT = 3,         /* "" the answer is `done` */
+    LM_XDG_ACTIVATION_TOKEN_V1_REQ_DESTROY = 4,        /* "" */
+    LM_XDG_ACTIVATION_TOKEN_V1_EVT_DONE = 0,           /* "s" the token */
+};
+enum { LM_XDG_ACTIVATION_TOKEN_ERR_ALREADY_USED = 0 };
+
+/* ---- zwlr_screencopy_manager_v1 / zwlr_screencopy_frame_v1 (wlr-screencopy-unstable-v1, version 3) ------------ */
+enum {
+    LM_ZWLR_SCREENCOPY_MANAGER_V1_REQ_CAPTURE_OUTPUT = 0,         /* "nio" frame, overlay_cursor, output */
+    LM_ZWLR_SCREENCOPY_MANAGER_V1_REQ_CAPTURE_OUTPUT_REGION = 1,  /* "nioiiii" frame, overlay_cursor, output, x, y, width, height (logical) */
+    LM_ZWLR_SCREENCOPY_MANAGER_V1_REQ_DESTROY = 2,                /* "" */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_REQ_COPY = 0,                     /* "o" buffer */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_REQ_DESTROY = 1,                  /* "" */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_REQ_COPY_WITH_DAMAGE = 2,         /* "o" buffer; since 2 */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_BUFFER = 0,                   /* "uiiu" format, width, height, stride */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_FLAGS = 1,                    /* "u" */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_READY = 2,                    /* "uuu" tv_sec_hi, tv_sec_lo, tv_nsec */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_FAILED = 3,                   /* "" */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_DAMAGE = 4,                   /* "uuuu" x, y, width, height; since 2 */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_LINUX_DMABUF = 5,             /* "uuu" format, width, height; since 3 (never sent) */
+    LM_ZWLR_SCREENCOPY_FRAME_V1_EVT_BUFFER_DONE = 6,              /* "" since 3 */
+};
+enum {
+    LM_ZWLR_SCREENCOPY_FRAME_ERR_ALREADY_USED = 0,
+    LM_ZWLR_SCREENCOPY_FRAME_ERR_INVALID_BUFFER = 1,
+};
+
+/* ---- zwp_relative_pointer_manager_v1 / zwp_relative_pointer_v1 ------------------------------------------------ */
+enum {
+    LM_ZWP_RELATIVE_POINTER_MANAGER_V1_REQ_DESTROY = 0,           /* "" */
+    LM_ZWP_RELATIVE_POINTER_MANAGER_V1_REQ_GET_RELATIVE_POINTER = 1, /* "no" id, pointer(wl_pointer) */
+    LM_ZWP_RELATIVE_POINTER_V1_REQ_DESTROY = 0,                   /* "" */
+    LM_ZWP_RELATIVE_POINTER_V1_EVT_RELATIVE_MOTION = 0,           /* "uuffff" utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel */
+};
+
+/* ---- zwp_pointer_constraints_v1 / zwp_locked_pointer_v1 / zwp_confined_pointer_v1 ----------------------------- */
+enum {
+    LM_ZWP_POINTER_CONSTRAINTS_V1_REQ_DESTROY = 0,                /* "" */
+    LM_ZWP_POINTER_CONSTRAINTS_V1_REQ_LOCK_POINTER = 1,           /* "noo?ou" id, surface, pointer, region, lifetime */
+    LM_ZWP_POINTER_CONSTRAINTS_V1_REQ_CONFINE_POINTER = 2,        /* "noo?ou" id, surface, pointer, region, lifetime */
+    LM_ZWP_LOCKED_POINTER_V1_REQ_DESTROY = 0,                     /* "" */
+    LM_ZWP_LOCKED_POINTER_V1_REQ_SET_CURSOR_POSITION_HINT = 1,    /* "ff" surface_x, surface_y */
+    LM_ZWP_LOCKED_POINTER_V1_REQ_SET_REGION = 2,                  /* "?o" */
+    LM_ZWP_LOCKED_POINTER_V1_EVT_LOCKED = 0,                      /* "" */
+    LM_ZWP_LOCKED_POINTER_V1_EVT_UNLOCKED = 1,                    /* "" */
+    LM_ZWP_CONFINED_POINTER_V1_REQ_DESTROY = 0,                   /* "" */
+    LM_ZWP_CONFINED_POINTER_V1_REQ_SET_REGION = 1,                /* "?o" */
+    LM_ZWP_CONFINED_POINTER_V1_EVT_CONFINED = 0,                  /* "" */
+    LM_ZWP_CONFINED_POINTER_V1_EVT_UNCONFINED = 1,                /* "" */
+};
+enum { LM_ZWP_POINTER_CONSTRAINTS_ERR_ALREADY_CONSTRAINED = 1 };
+enum { LM_ZWP_POINTER_CONSTRAINTS_LIFETIME_ONESHOT = 1, LM_ZWP_POINTER_CONSTRAINTS_LIFETIME_PERSISTENT = 2 };
 
 /* ---- zxdg_decoration_manager_v1 / zxdg_toplevel_decoration_v1 ------------------ */
 enum {

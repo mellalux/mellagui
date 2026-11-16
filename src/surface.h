@@ -110,6 +110,8 @@ void lm_compositor_destroy(struct lm_compositor *comp);
 
 /* wl_surface resource -> surface (resource->data), NULL if not a wl_surface. */
 struct lm_surface *lm_surface_from_resource(struct lm_resource *res);
+/* The rectangles of a wl_region resource (surface-local, as the client built them), or NULL. Valid until the client changes the region. */
+const struct lm_region *lm_region_from_resource(struct lm_resource *res);
 
 /* ---- roles ------------------------------------------------------------------------ */
 

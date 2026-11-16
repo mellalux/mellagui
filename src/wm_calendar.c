@@ -196,6 +196,30 @@ bool lm_wm_surface_visible(const struct lm_wm *wm, struct lm_surface *s)
     return false;
 }
 
+bool lm_wm_surface_focused(const struct lm_wm *wm, struct lm_surface *s)
+{
+    if (!wm || !s || !wm->focused)
+        return false;
+    return wm->focused->surface == lm_surface_root(s);
+}
+
+bool lm_wm_activate_surface(struct lm_wm *wm, struct lm_surface *s)
+{
+    if (!wm || !s)
+        return false;
+    struct lm_surface *root = lm_surface_root(s);
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (w->surface != root)
+            continue;
+        if (win_is_aux(w))                                      /* a gadget, the calendar, quick settings ...: their own places */
+            return false;
+        lm_wm_focus_window(wm, w);
+        return true;
+    }
+    return false;
+}
+
 size_t lm_wm_dock_describe(struct lm_wm *wm, char *buf, size_t size)
 {
     size_t o = 0;

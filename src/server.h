@@ -84,6 +84,9 @@ struct lm_capture;
 struct lm_tray;
 struct lm_menu;
 struct lm_idle_inhibit;
+struct lm_screencopy;
+struct lm_activation;
+struct lm_pconstraints;
 struct lm_dmabuf;
 
 typedef void (*lm_request_fn)(struct lm_resource *res, const union lm_arg *args);
@@ -294,6 +297,9 @@ struct lm_server {
     struct lm_settings *settings;       /* mellagui_settings_v1 + settings file */
     struct lm_capture *capture;         /* mellagui_capture_v1: the screen for mellagui-record (capture.h) */
     struct lm_idle_inhibit *idle_inhibit; /* zwp_idle_inhibit_manager_v1 (idleinhibit.h) */
+    struct lm_screencopy *screencopy;   /* zwlr_screencopy_manager_v1 (screencopy.h); NULL in kiosk mode */
+    struct lm_activation *activation;   /* xdg_activation_v1 (activation.h) */
+    struct lm_pconstraints *pconstraints; /* zwp_pointer_constraints_v1 + zwp_relative_pointer_manager_v1 (pointerconstraints.h) */
     struct lm_menu *menu;               /* mellagui_menu_v1: a menu at the pointer for programs (menu.h) */
     struct lm_tray *tray;               /* mellagui_tray_v1: programs' icons in the top bar (tray.h) */
     bool reloaded;                      /* a reload happened; reload_result = rejected lines of the last one, -1 = no readable file */

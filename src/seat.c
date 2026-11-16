@@ -32,6 +32,7 @@
 #include "saver.h"
 #include "screenoff.h"
 #include "seat.h"
+#include "pointerconstraints.h"
 #include "settings.h"
 #include "lock.h"
 #include "server.h"
@@ -467,6 +468,7 @@ void lm_seat_pointer_set_focus(struct lm_seat *seat, struct lm_surface *s, doubl
     if (seat->cursor_client && seat->cursor_client != surface_client(s))
         cursor_drop(seat);
     cursor_changed(seat);
+    lm_pconstraints_changed(seat->srv->pconstraints);               /* a lock / confine follows the pointer focus */
 }
 
 void lm_seat_pointer_send_motion(struct lm_seat *seat, uint32_t time_ms)
@@ -744,6 +746,15 @@ void lm_seat_pointer_ungrab(struct lm_seat *seat, struct lm_pointer_grab *grab)
         pointer_refocus(seat, lm_now_msec32());
 }
 
+bool lm_seat_pointer_surface_pos(const struct lm_seat *seat, double *sx, double *sy)
+{
+    if (!seat || !seat->pfocus)
+        return false;
+    *sx = seat->px - seat->pox;
+    *sy = seat->py - seat->poy;
+    return true;
+}
+
 bool lm_seat_pointer_has_grab(const struct lm_seat *seat)
 {
     return seat && seat->grab != NULL;
@@ -804,6 +815,7 @@ void lm_seat_set_keyboard_focus(struct lm_seat *seat, struct lm_surface *s)
             keyboard_send_enter(seat, k, serial);
     }
     selection_update_focus(seat);
+    lm_pconstraints_changed(seat->srv->pconstraints);               /* a lock / confine needs the program's keyboard focus */
 }
 
 static void keyboard_send_modifiers(struct lm_seat *seat)
@@ -2085,7 +2097,14 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
              * movement covers the same distance on the screen, so it is that many logical pixels fewer */
             struct lm_output *po = lm_output_nearest(seat->srv, seat->px, seat->py);
             double sc = po ? lm_output_scalef(po) : 1.0;
-            pointer_set_position(seat, seat->px + ev->u.motion.dx / sc, seat->py + ev->u.motion.dy / sc, ev->time_ms);
+            double dx = ev->u.motion.dx / sc, dy = ev->u.motion.dy / sc;
+            lm_pconstraints_relative(seat->srv->pconstraints, ev->time_ms, dx, dy, ev->u.motion.dx, ev->u.motion.dy);
+            if (lm_pconstraints_locked(seat->srv->pconstraints))
+                break;                                              /* a locked pointer stays where it is: the program has the relative motion */
+            double tx = seat->px + dx, ty = seat->py + dy;
+            lm_pconstraints_confine(seat->srv->pconstraints, seat->px, seat->py, &tx, &ty);
+            pointer_set_position(seat, tx, ty, ev->time_ms);
+            lm_pconstraints_changed(seat->srv->pconstraints);       /* it may have come into (or left) a region */
         }
         break;
     case LM_INPUT_POINTER_MOTION_ABS: {

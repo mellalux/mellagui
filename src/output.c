@@ -7,6 +7,7 @@
  */
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,6 +20,7 @@
 struct lm_output_mgr {
     struct lm_server *srv;
     struct lm_list globals;             /* struct out_global.link */
+    struct lm_global *xdg_global;       /* zxdg_output_manager_v1 */
 };
 
 /* Per-output state, hung off lm_output.output_data. */
@@ -27,10 +29,17 @@ struct out_global {
     struct lm_output *out;
     struct lm_global *global;
     struct lm_list bound;               /* struct out_bound.link */
+    struct lm_list xdg;                 /* struct xdg_bound.link: the zxdg_output_v1 objects of this output */
 };
 
 struct out_bound {
     struct lm_list link;                /* in out_global.bound */
+    struct lm_resource *res;
+};
+
+/* One zxdg_output_v1: it follows its output (logical position and size) until either goes away. */
+struct xdg_bound {
+    struct lm_list link;                /* in out_global.xdg */
     struct lm_resource *res;
 };
 
@@ -110,11 +119,29 @@ static void send_description(struct lm_resource *res, const struct lm_output *ou
     lm_resource_post(res, LM_WL_OUTPUT_EVT_DONE);
 }
 
+/* The logical part of an output (zxdg_output_v1). From version 3 on wl_output.done ends the update, before that xdg_output.done does. */
+static void send_xdg(struct lm_resource *res, const struct lm_output *out, bool first)
+{
+    lm_resource_post(res, LM_ZXDG_OUTPUT_V1_EVT_LOGICAL_POSITION, out->x, out->y);
+    lm_resource_post(res, LM_ZXDG_OUTPUT_V1_EVT_LOGICAL_SIZE, out->width, out->height);
+    if (first) {
+        char desc[128];
+        lm_resource_post(res, LM_ZXDG_OUTPUT_V1_EVT_NAME, out->name);
+        snprintf(desc, sizeof(desc), "%s %s (%s)", out->make[0] ? out->make : "Unknown", out->model[0] ? out->model : "output", out->name);
+        lm_resource_post(res, LM_ZXDG_OUTPUT_V1_EVT_DESCRIPTION, desc);
+    }
+    if (res->version < 3)
+        lm_resource_post(res, LM_ZXDG_OUTPUT_V1_EVT_DONE);
+}
+
 static void announce(struct lm_output *out)
 {
     struct out_global *og = og_of(out);
     if (!og)
         return;
+    struct xdg_bound *x;
+    lm_list_for_each(x, &og->xdg, link)
+        send_xdg(x->res, out, false);                   /* before the wl_output.done that follows, which ends the update for version 3 */
     struct out_bound *b;
     lm_list_for_each(b, &og->bound, link)
         send_description(b->res, out);
@@ -239,6 +266,70 @@ static void output_bind(struct lm_client *client, void *data, uint32_t version, 
     send_description(res, out);
 }
 
+/* ---- zxdg_output_manager_v1 ------------------------------------------------------------------ */
+
+static void xdg_output_res_destroy(struct lm_resource *res)
+{
+    struct lm_output *out = res->data;
+    struct out_global *og = og_of(out);
+    if (!og)
+        return;                                         /* the output is gone: its list was released */
+    struct xdg_bound *x, *tmp;
+    lm_list_for_each_safe(x, tmp, &og->xdg, link) {
+        if (x->res == res) {
+            lm_list_remove(&x->link);
+            free(x);
+            return;
+        }
+    }
+}
+
+static void xdg_output_req_destroy(struct lm_resource *res, const union lm_arg *args)
+{
+    (void)args;
+    lm_resource_destroy(res);
+}
+
+static const lm_request_fn xdg_output_handlers[] = {
+    [LM_ZXDG_OUTPUT_V1_REQ_DESTROY] = xdg_output_req_destroy,
+};
+
+static void xdg_mgr_req_destroy(struct lm_resource *res, const union lm_arg *args)
+{
+    (void)args;
+    lm_resource_destroy(res);
+}
+
+static void xdg_mgr_req_get_xdg_output(struct lm_resource *res, const union lm_arg *args)
+{
+    struct lm_output *out = args[1].r ? args[1].r->data : NULL;
+    struct out_global *og = og_of(out);
+    struct lm_resource *x = lm_resource_create(res->client, args[0].n, &lm_zxdg_output_v1_interface, res->version, xdg_output_handlers,
+                                               og ? out : NULL, xdg_output_res_destroy);
+    if (!x || !og)
+        return;                                         /* an output that is gone: an inert object */
+    struct xdg_bound *b = calloc(1, sizeof(*b));
+    if (!b) {
+        lm_resource_post_no_memory(x);
+        return;
+    }
+    b->res = x;
+    lm_list_append(&og->xdg, &b->link);
+    send_xdg(x, out, true);
+    if (x->version >= 3 && args[1].r && args[1].r->version >= 2)
+        lm_resource_post(args[1].r, LM_WL_OUTPUT_EVT_DONE);     /* the update is whole: the names and the logical size came after the output's own events */
+}
+
+static const lm_request_fn xdg_mgr_handlers[] = {
+    [LM_ZXDG_OUTPUT_MANAGER_V1_REQ_DESTROY] = xdg_mgr_req_destroy,
+    [LM_ZXDG_OUTPUT_MANAGER_V1_REQ_GET_XDG_OUTPUT] = xdg_mgr_req_get_xdg_output,
+};
+
+static void xdg_mgr_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)
+{
+    lm_resource_create(client, id, &lm_zxdg_output_manager_v1_interface, version, xdg_mgr_handlers, data, NULL);
+}
+
 /* ---- manager ---------------------------------------------------------------------------- */
 
 struct lm_output_mgr *lm_output_mgr_create(struct lm_server *srv)
@@ -248,6 +339,7 @@ struct lm_output_mgr *lm_output_mgr_create(struct lm_server *srv)
         return NULL;
     mgr->srv = srv;
     lm_list_init(&mgr->globals);
+    mgr->xdg_global = lm_global_create(srv, &lm_zxdg_output_manager_v1_interface, LM_ZXDG_OUTPUT_MANAGER_V1_VERSION, xdg_mgr_bind, mgr);
     return mgr;
 }
 
@@ -258,6 +350,12 @@ static void og_release(struct out_global *og)
         b->res->data = NULL;
         lm_list_remove(&b->link);
         free(b);
+    }
+    struct xdg_bound *x, *xtmp;
+    lm_list_for_each_safe(x, xtmp, &og->xdg, link) {
+        x->res->data = NULL;
+        lm_list_remove(&x->link);
+        free(x);
     }
     if (og->global)
         lm_global_destroy(og->global);
@@ -274,6 +372,8 @@ void lm_output_mgr_destroy(struct lm_output_mgr *mgr)
     struct out_global *og, *tmp;
     lm_list_for_each_safe(og, tmp, &mgr->globals, link)
         og_release(og);
+    if (mgr->xdg_global)
+        lm_global_destroy(mgr->xdg_global);
     free(mgr);
 }
 
@@ -288,6 +388,7 @@ void lm_output_mgr_add(struct lm_output_mgr *mgr, struct lm_output *out)
     }
     og->out = out;
     lm_list_init(&og->bound);
+    lm_list_init(&og->xdg);
     lm_list_append(&mgr->globals, &og->link);
     out->output_data = og;
 

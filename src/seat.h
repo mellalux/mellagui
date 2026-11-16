@@ -66,6 +66,8 @@ void lm_seat_pointer_warp(struct lm_seat *seat, double x, double y);
  * pointer inside its own window). */
 bool lm_seat_pointer_warp_local(struct lm_seat *seat, struct lm_client *client, int x, int y);
 struct lm_surface *lm_seat_pointer_focus(const struct lm_seat *seat);
+/* The pointer's place in the coordinates of the surface that has the pointer focus (false without one). */
+bool lm_seat_pointer_surface_pos(const struct lm_seat *seat, double *sx, double *sy);
 
 /*
  * Primitive operations, used by seat.c's default behaviour and by grab

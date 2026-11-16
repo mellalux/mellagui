@@ -106,6 +106,11 @@ void lm_render_flush(struct lm_renderer *r);
 uint32_t *lm_render_capture(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h);
 /* The same with the pointer painted in when `cursor` is set and `rect` is a whole output (the screen recorder; screenshots leave it out). */
 uint32_t *lm_render_capture_cursor(struct lm_renderer *r, const struct lm_rect *rect, int *w, int *h, bool cursor);
+/* How big a capture of `rect` (global, logical) is on `out`: `clip` = the part of it inside the output (logical), *w x *h its pixels (physical).
+ * False when nothing of it is inside. (wlr-screencopy has to say the size before it paints.) */
+bool lm_render_capture_extent(const struct lm_output *out, const struct lm_rect *rect, struct lm_rect *clip, int *w, int *h);
+/* Counts the damage that reached `out`: changes whenever something on it may have changed. */
+uint64_t lm_render_damage_serial(const struct lm_renderer *r, const struct lm_output *out);
 
 /*
  * Feedback for a screenshot of `where` (global): a short white flash over it and, for MELLAGUI_TOAST_MS (default 8 s), a

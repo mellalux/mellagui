@@ -969,6 +969,12 @@ void lm_surface_reset_content(struct lm_surface *s)
         report_damage(s, &ext);
 }
 
+const struct lm_region *lm_region_from_resource(struct lm_resource *res)
+{
+    struct region *r = res ? res->data : NULL;
+    return r ? &r->r : NULL;
+}
+
 /* ---- wl_region -------------------------------------------------------------------------- */
 
 static void region_resource_destroy(struct lm_resource *res)

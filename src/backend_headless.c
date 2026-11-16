@@ -18,7 +18,10 @@
 #include "keys.h"
 #include "backend.h"
 #include "font.h"
+#include "activation.h"
 #include "idleinhibit.h"
+#include "pointerconstraints.h"
+#include "screencopy.h"
 #include "saver.h"
 #include "screenoff.h"
 #include "search.h"
@@ -390,6 +393,18 @@ static void ctl_command(struct ctl_client *c, char *line)
     } else if (!strcmp(cmd, "idle")) {
         /* idle -> "idle inhibitors=<n> inhibited=<0|1>" (zwp_idle_inhibit_manager_v1), then "ok" */
         ctl_reply(c, "idle inhibitors=%d inhibited=%d\nok\n", lm_idle_inhibit_count(srv->idle_inhibit), lm_idle_inhibited(srv->idle_inhibit));
+    } else if (!strcmp(cmd, "screencopy")) {
+        /* screencopy -> "screencopy global=<0|1> pending=<n> delivered=<n> failed=<n>" (zwlr_screencopy_manager_v1), then "ok" */
+        ctl_reply(c, "screencopy global=%d pending=%d delivered=%d failed=%d\nok\n", srv->screencopy != NULL, lm_screencopy_pending(srv->screencopy),
+                  lm_screencopy_delivered(srv->screencopy), lm_screencopy_failed(srv->screencopy));
+    } else if (!strcmp(cmd, "activation")) {
+        /* activation -> "activation pending=<tokens waiting> done=<n> refused=<n>" (xdg_activation_v1), then "ok" */
+        ctl_reply(c, "activation pending=%d done=%d refused=%d\nok\n", lm_activation_pending(srv->activation), lm_activation_done(srv->activation),
+                  lm_activation_refused(srv->activation));
+    } else if (!strcmp(cmd, "pconstraint")) {
+        /* pconstraint -> "pconstraint constraints=<n> active=none|locked|confined relatives=<n>" (zwp_pointer_constraints_v1), then "ok" */
+        ctl_reply(c, "pconstraint constraints=%d active=%s relatives=%d\nok\n", lm_pconstraints_count(srv->pconstraints),
+                  lm_pconstraints_active(srv->pconstraints), lm_pconstraints_relatives(srv->pconstraints));
     } else if (!strcmp(cmd, "saver")) {
         /* saver [start|stop] -> "saver running=<0|1> enabled=<0|1> minutes=<n> lock=<n> shield=<0|1> style=room|flat cat=<0|1>" after the optional change, then "ok" (the screensaver) */
         if (srv->saver && a1 && !strcmp(a1, "start"))

@@ -36,6 +36,7 @@
 #include "uikit.h"
 #include "util.h"
 #include "wlclip.h"
+#include "wlpicker.h"
 #include "wltext.h"
 #include "wlwin.h"
 
@@ -407,7 +408,18 @@ struct app {
     char help_title[96];
     char help_text[1200];
     int help_scroll;                    /* first visible line when the text is longer than the card */
+    /* the wallpaper picker (Browse...): the Open dialog every program has (wlpicker.h), a modal card over the panel */
+    bool pick_open;
+    char pick_buf[PATH_MAX];            /* its text field */
+    char pick_err[120];
+    struct wlpicker pick;
+    int pick_hover, pick_down;          /* the button under the pointer / held: 0 Cancel, 1 Choose */
 };
+
+static void pick_begin(struct app *a);
+static void paint_pick(struct app *a);
+static void pick_pointer(struct app *a, uint32_t op, const union lm_arg *args);
+static void pick_key(struct app *a, uint32_t ks);
 
 static const char *kv_get(const struct app *a, const char *k)
 {
@@ -2211,6 +2223,218 @@ static void help_key_event(struct app *a, uint32_t ks)
     a->win.redraw = true;
 }
 
+/* ---- the wallpaper picker: the Open dialog of every program (wlpicker.h) as a card over the panel ------------------------------------------------ */
+
+struct pick_geom {
+    struct rect card, cancel, ok;
+    int fx, fy, fw, ly, rows;
+};
+
+static void pick_geom(const struct app *a, struct pick_geom *g)
+{
+    int cw = LM_MIN(a->win.bw - 40, 560);
+    g->rows = wlpicker_fit(a->win.bh, 170);
+    int ch = g->rows ? 170 + g->rows * WLPICKER_ROW_H : 130;
+    ch = LM_MIN(ch, a->win.bh - 16);
+    g->card = (struct rect){ (a->win.bw - cw) / 2, (a->win.bh - ch) / 2, cw, ch };
+    g->fx = g->card.x + 16;
+    g->fw = cw - 32;
+    g->fy = g->card.y + 66;
+    g->ly = g->fy + 30;
+    int by = g->card.y + ch - 16 - 28;
+    g->ok = (struct rect){ g->card.x + cw - 16 - 88, by, 88, 28 };
+    g->cancel = (struct rect){ g->ok.x - 8 - 88, by, 88, 28 };
+}
+
+static bool in_rect(const struct rect *r, double x, double y)
+{
+    return x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h;
+}
+
+/* A relative path means the home folder here. */
+static void pick_base(char *out, size_t n)
+{
+    const char *home = getenv("HOME");
+    snprintf(out, n, "%s", home && *home ? home : "/");
+}
+
+static void pick_begin(struct app *a)
+{
+    const char *cur = kv_get(a, "wallpaper");
+    char start[PATH_MAX] = "";
+    if (*cur && strcmp(cur, "-")) {                                     /* the folder of the picture in use */
+        snprintf(start, sizeof(start), "%s", cur);
+        char *sl = strrchr(start, '/');
+        if (sl)
+            sl[1] = 0;
+        else
+            start[0] = 0;
+    }
+    if (!start[0]) {
+        const char *pics = getenv("XDG_PICTURES_DIR"), *home = getenv("HOME");
+        char d[PATH_MAX];
+        struct stat st;
+        snprintf(d, sizeof(d), "%s", pics && *pics ? pics : home && *home ? "~/Pictures" : "/");
+        char full[PATH_MAX], hb[PATH_MAX];
+        pick_base(hb, sizeof(hb));
+        lm_resolve_path(hb, d, full, sizeof(full));
+        snprintf(start, sizeof(start), "%s", stat(full, &st) == 0 && S_ISDIR(st.st_mode) ? d : "~/");
+        size_t l = strlen(start);
+        if (l && start[l - 1] != '/' && l + 1 < sizeof(start))
+            strcat(start, "/");
+    }
+    snprintf(a->pick_buf, sizeof(a->pick_buf), "%s", start);
+    wltext_end(a->pick_buf);
+    a->pick_err[0] = 0;
+    a->pick_hover = a->pick_down = -1;
+    wlpicker_reset(&a->pick);
+    a->pick_open = true;
+    a->win.redraw = true;
+}
+
+static void pick_close(struct app *a)
+{
+    a->pick_open = false;
+    a->win.redraw = true;
+}
+
+static void pick_accept(struct app *a)
+{
+    char base[PATH_MAX], full[PATH_MAX];
+    struct stat st;
+    pick_base(base, sizeof(base));
+    if (!a->pick_buf[0] || a->pick_buf[strlen(a->pick_buf) - 1] == '/') {
+        snprintf(a->pick_err, sizeof(a->pick_err), "Pick a picture from the list, or type its name");
+        return;
+    }
+    lm_resolve_path(base, a->pick_buf, full, sizeof(full));
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+        snprintf(a->pick_err, sizeof(a->pick_err), "There is no such file");
+        return;
+    }
+    send_set(a, "wallpaper", full);                                     /* the same setting the field and Apply write */
+    pick_close(a);
+}
+
+static void paint_pick(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    struct pick_geom g;
+    pick_geom(a, &g);
+    wlwin_dim(w, 0.6);
+    const struct rect *c = &g.card;
+    wlwin_round_fill(w, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
+    wlwin_round_fill(w, c->x, c->y, c->w, c->h, 10, COL_BG);
+    draw_text(a, c->x + 16, c->y + 14, "Choose a wallpaper", COL_TEXT, c->w - 32);
+    draw_text(a, c->x + 16, c->y + 40, "Pick a picture below or type its path (Tab completes)", COL_DIM, c->w - 32);
+    wlwin_round_fill(w, g.fx, g.fy, g.fw, 26, 8, COL_FIELD);
+    wltext_paint(w, g.fx + 8, g.fy + 5, g.fw - 16, a->pick_buf, true, COL_TEXT, COL_HOVER, COL_ACCENT);
+    char base[PATH_MAX];
+    pick_base(base, sizeof(base));
+    if (g.rows)
+        wlpicker_paint(w, &a->pick, base, a->pick_buf, g.fx, g.ly, g.fw, g.rows, a->px, a->py, true);
+    if (a->pick_err[0])
+        draw_text(a, g.fx, g.cancel.y - 22, a->pick_err, lm_theme.error, g.fw);
+    static const char *dump;
+    if (!dump)
+        dump = getenv("MELLAGUI_SETTINGS_DUMP") ? getenv("MELLAGUI_SETTINGS_DUMP") : "";
+    if (*dump) {                                                        /* the picker's state for the tests: where the card, its list and its buttons are */
+        FILE *f = fopen(dump, "w");
+        if (f) {
+            fprintf(f, "pick field=%s err=%s\n", a->pick_buf, a->pick_err);
+            fprintf(f, "card %d %d %d %d\n", c->x, c->y, c->w, c->h);
+            if (g.rows)
+                wlpicker_dump(f, &a->pick, base, a->pick_buf, g.fx, g.ly, g.fw, g.rows, 0);
+            fprintf(f, "cbtn 0 %d %d %d %d\ncbtn 1 %d %d %d %d\n", g.cancel.x, g.cancel.y, g.cancel.w, g.cancel.h, g.ok.x, g.ok.y, g.ok.w, g.ok.h);
+            fclose(f);
+        }
+    }
+    const struct rect *bs[2] = { &g.cancel, &g.ok };
+    static const char *const names[2] = { "Cancel", "Choose" };
+    for (int i = 0; i < 2; i++) {
+        bool hot = in_rect(bs[i], a->px, a->py);
+        wlwin_round_fill(w, bs[i]->x, bs[i]->y, bs[i]->w, bs[i]->h, 14, a->pick_down == i ? COL_DOWN : hot || a->pick_hover == i ? COL_HOVER : COL_KEY);
+        draw_text(a, bs[i]->x + (bs[i]->w - lm_font_text_width(names[i])) / 2, bs[i]->y + (bs[i]->h - LM_FONT_H) / 2, names[i], COL_TEXT, 0);
+    }
+}
+
+static void pick_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+    struct pick_geom g;
+    pick_geom(a, &g);
+    char base[PATH_MAX];
+    pick_base(base, sizeof(base));
+    if (op == LM_WL_POINTER_EVT_MOTION) {
+        a->px = lm_fixed_to_double(args[1].f);
+        a->py = lm_fixed_to_double(args[2].f);
+        wlpicker_motion(&a->pick, base, a->pick_buf, g.ly, g.rows, a->py);
+        a->win.redraw = true;
+    } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
+        if (g.rows)
+            wlpicker_wheel(&a->pick, args[2].f > 0 ? 1 : -1);
+        a->win.redraw = true;
+    } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272) {
+        a->clip.serial = args[0].u;
+        if (args[3].u == 1) {
+            if (in_rect(&g.cancel, a->px, a->py))
+                a->pick_down = 0;
+            else if (in_rect(&g.ok, a->px, a->py))
+                a->pick_down = 1;
+            else if (!in_rect(&g.card, a->px, a->py))
+                pick_close(a);                                          /* a click outside the card cancels */
+            else if (a->py >= g.fy && a->py < g.fy + 26)
+                wltext_click(a->pick_buf, (int)a->px - (g.fx + 8), (a->win.mods & LM_MOD_SHIFT) != 0);
+            else if (g.rows && wlpicker_press(&a->pick, base, a->pick_buf, sizeof(a->pick_buf), g.fx, g.ly, g.fw, g.rows, a->px, a->py, args[1].u,
+                                              (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
+                pick_accept(a);
+            a->pick_err[0] = 0;
+        } else {
+            int down = a->pick_down;
+            a->pick_down = -1;
+            wlpicker_release(&a->pick);
+            if (down == 0 && in_rect(&g.cancel, a->px, a->py))
+                pick_close(a);
+            else if (down == 1 && in_rect(&g.ok, a->px, a->py))
+                pick_accept(a);
+        }
+        a->win.redraw = true;
+    }
+}
+
+static void pick_key(struct app *a, uint32_t ks)
+{
+    struct pick_geom g;
+    pick_geom(a, &g);
+    char base[PATH_MAX];
+    pick_base(base, sizeof(base));
+    if (ks == LM_KS_Escape) {
+        pick_close(a);
+        return;
+    }
+    if (g.rows && (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pick.sel >= 0))) {
+        if (wlpicker_key(&a->pick, base, a->pick_buf, sizeof(a->pick_buf), g.rows, ks) == WLPICKER_OPEN)
+            pick_accept(a);
+        a->pick_err[0] = 0;
+    } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+        pick_accept(a);
+    } else if (ks == LM_KS_Tab) {
+        char list[160];
+        int n = lm_complete_path(base, a->pick_buf, sizeof(a->pick_buf), true, list, sizeof(list));
+        if (n == 0)
+            snprintf(a->pick_err, sizeof(a->pick_err), "Nothing here starts like that");
+        else if (n > 1)
+            snprintf(a->pick_err, sizeof(a->pick_err), "%d matches", n);
+        else
+            a->pick_err[0] = 0;
+        wltext_end(a->pick_buf);
+        wlpicker_typed(&a->pick);
+    } else if (wltext_edit(&a->clip, a->pick_buf, sizeof(a->pick_buf), ks, a->win.mods)) {
+        a->pick_err[0] = 0;
+        wlpicker_typed(&a->pick);
+    }
+    a->win.redraw = true;
+}
+
 /* ---- actions ------------------------------------------------------------------------------------------------ */
 
 /* A slider changed: the Security form keeps its value until "Apply", the others go to the compositor at once. */
@@ -2526,7 +2750,7 @@ static void activate(struct app *a, int idx)
         } else if (!strcmp(w->key, "config-edit")) {
             launch_sibling("mellagui-edit", w->arg, NULL);
         } else if (!strcmp(w->key, "wall-browse")) {
-            launch_sibling("mellagui-files", "--choose", "wallpaper");
+            pick_begin(a);
         } else if (!strcmp(w->key, "config-reload") || !strcmp(w->key, "config-create") || !strcmp(w->key, "saver-now") || !strcmp(w->key, "startup-sound-play")) {
             send_set(a, w->key, "1");
         } else if (!strcmp(w->key, "out-left") || !strcmp(w->key, "out-right")) {
@@ -2819,6 +3043,8 @@ static void paint(struct wlwin *w)
     }
     if (a->help_title[0])
         paint_help(a);
+    if (a->pick_open)
+        paint_pick(a);
 }
 
 /* ---- protocol events -------------------------------------------------------------------------------------- */
@@ -2877,6 +3103,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     build(a);
     if (a->help_title[0] && op != LM_WL_POINTER_EVT_ENTER && op != LM_WL_POINTER_EVT_LEAVE) {      /* the help card is modal */
         help_pointer(a, op, args);
+        return;
+    }
+    if (a->pick_open && op != LM_WL_POINTER_EVT_ENTER && op != LM_WL_POINTER_EVT_LEAVE) {          /* so is the wallpaper picker */
+        pick_pointer(a, op, args);
         return;
     }
     switch (op) {
@@ -3033,6 +3263,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         uint32_t ks = lm_keymap_keysym(args[2].u, a->win.mods);
         if (a->help_title[0]) {                                 /* the help card is modal: Esc / Enter / Space close it (not the panel) */
             help_key_event(a, ks);
+            break;
+        }
+        if (a->pick_open) {                                     /* the wallpaper picker: the keys of every Open dialog */
+            pick_key(a, ks);
             break;
         }
         struct widget *f = a->focus >= 0 ? &a->wd[a->focus] : NULL;
@@ -3237,6 +3471,7 @@ int main(int argc, char **argv)
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event,
                                           .keyboard = keyboard_event, .menu = menu_event };
     struct app a = { .press = -1, .drag = -1, .hover = -1, .focus = -1, .csel = -1, .mpend = -1, .dock_sel = -1, .menu_widget = -1, .sel_widget = -1 };
+    wlpicker_init(&a.pick, wlpicker_picture);
     if (wlwin_connect(&a.win, "mellagui-settings", &ops, &a) < 0)
         return 1;
     if (a.settings && wlc_roundtrip(a.win.c) < 0)       /* the value burst that follows the bind */

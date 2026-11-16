@@ -38,6 +38,18 @@ EVENTS = {
     'mellagui_settings_v1': {0: ('value', 'ss'), 1: ('done', '')},
     'zwp_idle_inhibit_manager_v1': {},
     'zwp_idle_inhibitor_v1': {},
+    'zxdg_output_manager_v1': {},
+    'zxdg_output_v1': {0: ('logical_position', 'ii'), 1: ('logical_size', 'ii'), 2: ('done', ''), 3: ('name', 's'), 4: ('description', 's')},
+    'xdg_activation_v1': {},
+    'xdg_activation_token_v1': {0: ('done', 's')},
+    'zwlr_screencopy_manager_v1': {},
+    'zwlr_screencopy_frame_v1': {0: ('buffer', 'uiiu'), 1: ('flags', 'u'), 2: ('ready', 'uuu'), 3: ('failed', ''), 4: ('damage', 'uuuu'),
+                                 5: ('linux_dmabuf', 'uuu'), 6: ('buffer_done', '')},
+    'zwp_relative_pointer_manager_v1': {},
+    'zwp_relative_pointer_v1': {0: ('relative_motion', 'uuffff')},
+    'zwp_pointer_constraints_v1': {},
+    'zwp_locked_pointer_v1': {0: ('locked', ''), 1: ('unlocked', '')},
+    'zwp_confined_pointer_v1': {0: ('confined', ''), 1: ('unconfined', '')},
     'mellagui_tray_v1': {},
     'mellagui_tray_item_v1': {0: ('size', 'i'), 1: ('clicked', 'u')},
     'mellagui_capture_v1': {0: ('output', 'isiiii'), 1: ('done', ''), 2: ('ready', 'iii'), 3: ('failed', 'is')},
@@ -87,6 +99,17 @@ REQ = {
     'mellagui_capture_v1': {'destroy': 0, 'list': 1, 'grab': 2},
     'zwp_idle_inhibit_manager_v1': {'destroy': 0, 'create_inhibitor': 1},
     'zwp_idle_inhibitor_v1': {'destroy': 0},
+    'zxdg_output_manager_v1': {'destroy': 0, 'get_xdg_output': 1},
+    'zxdg_output_v1': {'destroy': 0},
+    'xdg_activation_v1': {'destroy': 0, 'get_activation_token': 1, 'activate': 2},
+    'xdg_activation_token_v1': {'set_serial': 0, 'set_app_id': 1, 'set_surface': 2, 'commit': 3, 'destroy': 4},
+    'zwlr_screencopy_manager_v1': {'capture_output': 0, 'capture_output_region': 1, 'destroy': 2},
+    'zwlr_screencopy_frame_v1': {'copy': 0, 'destroy': 1, 'copy_with_damage': 2},
+    'zwp_relative_pointer_manager_v1': {'destroy': 0, 'get_relative_pointer': 1},
+    'zwp_relative_pointer_v1': {'destroy': 0},
+    'zwp_pointer_constraints_v1': {'destroy': 0, 'lock_pointer': 1, 'confine_pointer': 2},
+    'zwp_locked_pointer_v1': {'destroy': 0, 'set_cursor_position_hint': 1, 'set_region': 2},
+    'zwp_confined_pointer_v1': {'destroy': 0, 'set_region': 1},
     'mellagui_tray_v1': {'destroy': 0, 'create_item': 1},
     'mellagui_tray_item_v1': {'destroy': 0, 'set_icon': 1, 'set_text': 2},
     'zwp_linux_dmabuf_v1': {'destroy': 0, 'create_params': 1, 'get_default_feedback': 2, 'get_surface_feedback': 3},
@@ -127,7 +150,8 @@ class Wl:
         self.objs = {1: 'wl_display'}
         self.next_id = 2
         self.queue = []          # events not yet consumed
-        self.globals = {}        # interface -> (name, version)
+        self.globals = {}        # interface -> (name, version) (the last one when there are several)
+        self.global_list = []    # (interface, name, version) of every global, in the order announced
         self.error = None
         self.closed = False
         self.deleted = set()
@@ -296,6 +320,7 @@ class Wl:
         for ev in list(self.queue):
             if ev.obj == reg and ev.name == 'global':
                 self.globals[ev.args[1]] = (ev.args[0], ev.args[2])
+                self.global_list.append((ev.args[1], ev.args[0], ev.args[2]))
         self.queue = [e for e in self.queue if not (e.obj == reg and e.name == 'global')]
         self.registry = reg
         return reg
@@ -307,6 +332,18 @@ class Wl:
         self.request_raw(self.registry, 0, struct.pack('<I', name) + self.pack_string(iface) +
                          struct.pack('<II', v, oid))
         return oid
+
+    def bind_all(self, iface, version=None):
+        """Binds every global of that interface (one wl_output per monitor): the list of object ids, in the order announced."""
+        ids = []
+        for i, name, maxv in self.global_list:
+            if i != iface:
+                continue
+            oid = self.new_id(iface)
+            self.request_raw(self.registry, 0, struct.pack('<I', name) + self.pack_string(iface) +
+                             struct.pack('<II', min(version or maxv, maxv), oid))
+            ids.append(oid)
+        return ids
 
     # ---- helpers ----------------------------------------------------------------------
     def close(self):

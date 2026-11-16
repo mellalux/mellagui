@@ -579,6 +579,9 @@ struct lm_launcher_info {
     struct lm_rect add;             /* the "+" tile (box == hit), empty when the list is full */
     int drag;                       /* an icon is being dragged (icon index), -1 none */
     const struct lm_dock_item *drag_item;   /* the button in the hand (icon[drag].item is what the cell shows now, after the others made room) */
+    int gx0, gy0, gcell_h, grid_cells;  /* the grid's cell geometry on the page shown: where cell p lies (columns x rows of cells, empty ones too) */
+    struct lm_rect slot_rect;       /* the place the icon in the hand will take (empty rect: none on this page) */
+    int drag_hide;                  /* the cell whose icon is not painted while one is carried (its place is empty, or it is the slot the hand holds) */
     int full_pp;                    /* cells a page holds in the paged layout (columns x rows that fit), what the order is padded to when an icon is dropped on a new page */
     int drag_slot;                  /* ... and the cell its place is shown in: the cell it is over, the others have moved up or down to make room (-1 none) */
     struct lm_rect drag_box;        /* the icon under the pointer */
@@ -816,6 +819,10 @@ size_t lm_wm_clock_describe(struct lm_wm *wm, char *buf, size_t size);
 
 /* The on-screen keyboard (panel button, key action `osk`, control socket `osk`). */
 void lm_wm_osk_set(struct lm_wm *wm, bool open);
+/* The lock screen's keyboard: the corner button shows / hides it (a number pad for a PIN, the whole keyboard for a password); the lock screen's pointer and touch
+ * input (`what`: 0 moved, 1 pressed, 2 let go, global logical coordinates) comes through lm_wm_lock_pointer. */
+void lm_wm_lock_osk_toggle(struct lm_wm *wm);
+void lm_wm_lock_pointer(struct lm_wm *wm, double x, double y, int what);
 bool lm_wm_osk_is_open(const struct lm_wm *wm);
 /* Back to the default place and size (a double click on its margin, control socket `osk reset`); the saved place is forgotten. The place
  * the user gave it is kept in the gadgets file (`keyboard x y w kh`, --gadgets-file). */

@@ -643,7 +643,7 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             h = fnv(h, &li->focus, sizeof(li->focus));
             h = fnv(h, &li->extra_page, sizeof(li->extra_page));
             h = fnv(h, &li->drop_end, sizeof(li->drop_end));
-            h = fnv(h, &li->drag_slot, sizeof(li->drag_slot));
+            h = fnv(h, &li->drag_hide, sizeof(li->drag_hide));
             h = fnv(h, &li->drag, sizeof(li->drag));
             h = fnv(h, &li->kind, sizeof(li->kind));
             h = fnv(h, li->caret, sizeof(li->caret));

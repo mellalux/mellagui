@@ -1888,6 +1888,11 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
 {
     if (!wm)
         return;
+    if (wm->osk_open || wm->osk_pin) {                          /* the keyboard of the session does not go over the lock screen, the lock screen's does not stay after it */
+        osk_set(wm, false);
+        wm->osk_pin = false;
+    }
+    wm->lock_kbd_hover = false;
     if (locked) {
         overview_finish(wm);
         menu_set(wm, false);

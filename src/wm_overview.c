@@ -539,6 +539,25 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
                 it.kind = LM_SCENE_LOCK;
                 it.output = o;
                 lm_lock_info(wm->srv->lock, o, &it.u.lock);
+                if (o == lm_output_primary(wm->srv)) {                   /* the keyboard button (and, below, the keyboard) is on the primary output */
+                    it.u.lock.kbd = lm_lock_kbd_button(&orect);
+                    it.u.lock.kbd_on = wm->osk_open;
+                    it.u.lock.kbd_hover = wm->lock_kbd_hover;
+                    struct lm_osk_geo kg;
+                    if (wm->osk_open && osk_geo(wm, &kg))
+                        it.u.lock.kbd_top = kg.card.y;
+                }
+                if (!fn(&it, data))
+                    return;
+            }
+        }
+        if (wm->osk_open && !shield) {
+            struct lm_osk_geo og;
+            if (osk_geo(wm, &og) && (!clip || lm_rect_overlaps(&og.card, clip))) {
+                memset(&it, 0, sizeof(it));
+                it.kind = LM_SCENE_OSK;
+                it.output = lm_output_primary(wm->srv);
+                osk_info(wm, &og, &it.u.osk);
                 if (!fn(&it, data))
                     return;
             }

@@ -50,6 +50,9 @@ struct lm_lock {
     enum kind kind;
     uint32_t iter;
     uint8_t salt[SALT_LEN], hash[HASH_LEN];
+    uint64_t eat_enter_until;        /* after an unlock by length (no Enter pressed): an Enter pressed out of habit within this time is eaten, it must not reach the window under the lock */
+    uint32_t eating;                 /* the Enter being eaten (its release is eaten too) */
+    int secret_len;                  /* characters (code points) the secret has, 0 = not known yet: typing that many tries it without Enter (learnt at the first unlock of an old file) */
     int timeout_min;
     bool lock_on_start;
     int blank_min;                   /* monitors go to standby this long after the last input while locked, 0 = never */
@@ -200,7 +203,7 @@ static bool load(struct lm_lock *l)
     uint32_t iter = 0;
     uint8_t salt[SALT_LEN], hash[HASH_LEN];
     bool have_salt = false, have_hash = false;
-    int timeout = 0, blank = DEFAULT_BLANK_MIN;
+    int timeout = 0, blank = DEFAULT_BLANK_MIN, slen = 0;
     bool start = false, vt = true;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -226,6 +229,8 @@ static bool load(struct lm_lock *l)
             blank = atoi(val);
         else if (!strcmp(line, "vt"))
             vt = atoi(val) != 0;
+        else if (!strcmp(line, "len"))
+            slen = atoi(val);
     }
     fclose(f);
     if (kind == KIND_NONE || !have_salt || !have_hash || iter < MIN_ITER || iter > MAX_ITER) {
@@ -240,6 +245,7 @@ static bool load(struct lm_lock *l)
     l->lock_on_start = start;
     l->blank_min = blank < 0 ? 0 : blank > MAX_BLANK_MIN ? MAX_BLANK_MIN : blank;
     l->vt_switch = vt;
+    l->secret_len = slen >= 1 && slen <= LM_LOCK_MAX_SECRET ? slen : 0;
     return true;
 }
 
@@ -272,9 +278,10 @@ static bool save(const struct lm_lock *l)
     int n = snprintf(text, sizeof(text),
                      "# MellaGUI screen lock (written by the settings panel). Only a salted PBKDF2-HMAC-SHA256 hash is kept.\n"
                      "# Forgot the secret? Delete this file from another login (ssh / another VT) and restart MellaGUI.\n"
-                     "kind=%s\niter=%u\nsalt=%s\nhash=%s\ntimeout=%d\nstart=%d\nblank=%d\nvt=%d\n",
+                     "# len = how many characters the secret has: typing that many tries it at once, without Enter.\n"
+                     "kind=%s\niter=%u\nsalt=%s\nhash=%s\ntimeout=%d\nstart=%d\nblank=%d\nvt=%d\nlen=%d\n",
                      l->kind == KIND_PIN ? "pin" : "password", (unsigned)l->iter, salt, hash, l->timeout_min,
-                     l->lock_on_start ? 1 : 0, l->blank_min, l->vt_switch ? 1 : 0);
+                     l->lock_on_start ? 1 : 0, l->blank_min, l->vt_switch ? 1 : 0, l->secret_len);
     bool ok = n > 0 && n < (int)sizeof(text) && write(fd, text, (size_t)n) == n;
     if (ok && fsync(fd) < 0)
         ok = false;
@@ -390,6 +397,21 @@ bool lm_lock_request_quit(struct lm_lock *l)
 }
 const char *lm_lock_status(const struct lm_lock *l) { return l ? l->status : ""; }
 
+bool lm_lock_eat_key(struct lm_lock *l, uint32_t code, bool pressed)
+{
+    if (!l || l->locked || (code != KEY_ENTER && code != KEY_KPENTER))
+        return false;
+    if (pressed && lm_now_ms() < l->eat_enter_until) {
+        l->eating = code;
+        return true;
+    }
+    if (!pressed && l->eating == code) {
+        l->eating = 0;
+        return true;
+    }
+    return false;
+}
+
 bool lm_lock_activity(struct lm_lock *l)
 {
     if (!l)
@@ -426,9 +448,14 @@ static void try_unlock(struct lm_lock *l)
     }
     if (l->len == 0)
         return;
+    int typed = l->nchars;
     bool ok = verify(l, l->input, l->len);
     wipe_input(l);
     if (ok) {
+        if (l->secret_len != typed && typed >= 1 && typed <= LM_LOCK_MAX_SECRET) {           /* an old lock file: now the length is known, and the next time it needs no Enter */
+            l->secret_len = typed;
+            save(l);
+        }
         int act = l->pending_act;
         if (act == LM_LOCK_ACT_SUSPEND) {                       /* it stays locked: after the wake-up the secret is asked again */
             l->pending_act = 0;
@@ -533,6 +560,13 @@ void lm_lock_key(struct lm_lock *l, uint32_t code, uint32_t mods, uint32_t group
         l->len += (size_t)k;
         l->input[l->len] = 0;
         l->nchars++;
+        repaint(l);
+        if (l->secret_len > 0 && l->nchars >= l->secret_len) {   /* as long as the secret: try it, no Enter needed */
+            try_unlock(l);
+            if (!l->locked)
+                l->eat_enter_until = lm_now_ms() + 1500;
+        }
+        return;
     }
     repaint(l);
 }
@@ -680,6 +714,10 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
             goto done;
         }
         hash_secret(&next, secret, strlen(secret), next.hash);
+        int cps = 0;
+        for (const char *q = secret; *q; q++)
+            cps += ((unsigned char)*q & 0xc0) != 0x80;                 /* code points, as the lock screen counts what is typed */
+        next.secret_len = cps;
     }
     if (!save(&next)) {
         set_status(l, "error");
@@ -693,6 +731,7 @@ bool lm_lock_apply(struct lm_lock *l, const char *old, const char *kind, const c
     l->lock_on_start = next.lock_on_start;
     l->blank_min = next.blank_min;
     l->vt_switch = next.vt_switch;
+    l->secret_len = next.secret_len;
     l->last_activity = lm_now_ms();
     set_status(l, "ok");
     ok = true;
@@ -788,10 +827,10 @@ void lm_lock_describe(const struct lm_lock *l, char *out, size_t n)
     }
     struct lm_lock_info info;
     lm_lock_info(l, NULL, &info);
-    snprintf(out, n, "kind=%s locked=%d timeout=%d start=%d blank=%d blanked=%d vt=%d quit=%d action=%d typed=%d fails=%d wait=%d status=%s message=%s",
+    snprintf(out, n, "kind=%s locked=%d timeout=%d start=%d blank=%d blanked=%d vt=%d quit=%d action=%d typed=%d len=%d fails=%d wait=%d status=%s message=%s",
              lm_lock_kind(l), l->locked ? 1 : 0, l->timeout_min, l->lock_on_start ? 1 : 0, l->blank_min, l->blanked ? 1 : 0,
              l->vt_switch ? 1 : 0, l->pending_act == LM_LOCK_ACT_QUIT ? 1 : 0, l->pending_act,
-             l->nchars, l->fails,
+             l->nchars, l->secret_len, l->fails,
              wait_seconds(l), l->status[0] ? l->status : "-", info.message[0] ? info.message : "-");
 }
 

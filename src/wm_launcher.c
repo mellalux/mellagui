@@ -344,7 +344,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     li->focus = wm->launcher_focus;
     li->kind = launcher_kind_of(wm);
     li->kind_name = li->kind >= 0 ? lm_dockicon_name(li->kind) : li->kind == -2 ? "yours" : "auto";
-    int n = launcher_count(), cells = n + (launcher_can_add() && !launcher_searching ? 1 : 0);
+    int n = launcher_count(), cells = n + (launcher_can_add() && !launcher_searching && wm->launcher_edit ? 1 : 0);
     li->cells = cells;
     li->search = launcher_filter;
     li->searching = launcher_searching && !li->form;
@@ -356,13 +356,14 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         ch = LC_FORM_H;
     } else {
         int maxcols = LM_CLAMP((li->rect.w - 60) / LC_CELL_W, 1, 6);
-        li->cols = LM_MIN(maxcols, LM_MAX(cells, 1));
+        bool extra = li->edit && !li->searching;                            /* edit mode: one more, empty page at the end, to drop an icon on */
+        bool holes = !li->searching && launcher_gap_count() > 0;                 /* empty cells keep icons where they were dropped */
+        bool fixed = extra || holes;                                        /* a grid of its own: every page is as wide and as high as the screen allows, so a cell is the same cell before and after a drop */
+        li->cols = fixed ? maxcols : LM_MIN(maxcols, LM_MAX(cells, 1));
         int total_rows = LM_MAX((cells + li->cols - 1) / li->cols, 1);
         int room = li->rect.h - 20 - LC_HEAD - LC_FOOT;
         int rows_fit = LM_CLAMP(room / LC_CELL_H, 1, LC_MAX_ROWS);
         int rows, dots_h = 0;
-        bool extra = li->edit && !li->searching;                            /* edit mode: one more, empty page at the end, to drop an icon on */
-        bool holes = !li->searching && launcher_gap_count() > 0;                 /* empty cells keep icons on later pages: always the paged layout, all pages as high as the screen allows */
         {
             int rf = LM_CLAMP((room - LC_DOTS) / LC_CELL_H, 1, LC_MAX_ROWS);
             if (rf < 2 && (room - LC_DOTS) / (LC_ICON + 8 + LM_FONT_H + 6) >= 2)
@@ -378,7 +379,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
             rows_fit = LM_CLAMP((room - dots_h) / LC_CELL_H, 1, LC_MAX_ROWS);
             if (rows_fit < 2 && (room - dots_h) / (LC_ICON + 8 + LM_FONT_H + 6) >= 2)
                 rows_fit = 2;                                           /* a low screen: two rows, closer together */
-            rows = holes ? rows_fit : LM_MIN(rows_fit, total_rows);
+            rows = fixed ? rows_fit : LM_MIN(rows_fit, total_rows);
             li->per_page = li->cols * rows;
             li->real_pages = LM_MAX((cells + li->per_page - 1) / li->per_page, 1);
             li->pages = LM_MIN(li->real_pages + (extra ? 1 : 0), LM_LAUNCHER_PAGES_MAX);
@@ -395,6 +396,10 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         int x0 = li->rect.x + (li->rect.w - cw) / 2 + (cw - li->cols * LC_CELL_W) / 2;
         int y0 = li->rect.y + (li->rect.h - ch) / 2 + LC_HEAD;
         li->grid = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2 + LC_PAD, y0, cw - 2 * LC_PAD, rows * cell_h);
+        li->gx0 = x0;
+        li->gy0 = y0;
+        li->gcell_h = cell_h;
+        li->grid_cells = li->cols * rows;
         for (int g = 0; g < cells; g++) {
             bool on_page = g >= li->first && g < li->last;
             int p = g - li->first;
@@ -426,6 +431,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, card_h);
     li->drag = -1;
     li->drag_slot = -1;
+    li->drag_hide = -1;
     li->drop_pos = -1;
     li->drop_cell = -1;
     if (wm->launcher_drag && !li->form && wm->launcher_drag_g < n) {
@@ -433,27 +439,27 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         li->drag_item = li->icon[li->drag].item;
         li->drag_box = lm_rect_make((int)wm->drag_x - 28, (int)wm->drag_y - 28, 56, 56);
         launcher_drop_zone(wm, o, &li->drop, &li->marker, &li->drop_pos);
-        if (li->drop_pos < 0) {                                         /* not over the dock: over a cell of the grid, or the empty page (the end of the list) */
-            int px = (int)wm->drag_x, py = (int)wm->drag_y;
-            if (li->extra_page) {
-                li->drop_end = lm_rect_contains(&li->grid, px, py);
-            } else {
-                for (int g = li->first; g < li->last; g++) {
-                    const struct lm_rect *r = g == n ? &li->add : &li->icon[g].hit;
-                    if (lm_rect_contains(r, px, py)) {
-                        li->drop_cell = g;
-                        break;
-                    }
-                }
-                if (li->drop_cell < 0 && li->last > li->first && lm_rect_contains(&li->grid, px, py))
-                    li->drop_cell = LM_MIN(li->last - 1, n - 1);        /* over the page but between its cells (the empty part of a short page): the end of what is on this page */
+        if (li->drop_pos < 0 && li->cols > 0) {                         /* not over the dock: over a cell of the grid - an icon's, an empty one, one of the empty page: the cell it is over is where it goes */
+            int px = (int)wm->drag_x - li->gx0, py = (int)wm->drag_y - li->gy0;
+            if (px >= 0 && py >= 0 && px < li->cols * LC_CELL_W && li->gcell_h > 0) {
+                int p = (py / li->gcell_h) * li->cols + px / LC_CELL_W;
+                if (p < li->grid_cells)
+                    li->drop_cell = li->page * li->per_page + p;           /* (not li->first: that stops at the end of the list, the empty page goes on counting) */
             }
         }
-        /* The cells make room: with the icon over cell t, those between its own place and t move one cell towards it (the way the list will be after the drop),
-         * and cell t shows a gap. Over nothing, its own place stays empty. */
-        int d = li->drag, t = li->drop_cell >= 0 ? LM_MIN(li->drop_cell, n - 1) : -1;
+        li->drop_end = li->extra_page && li->drop_cell >= 0;
+        /* Over an icon the cells make room: those between its own place and that cell move one cell towards it (the way the list will be after the drop) and the cell is
+         * the slot the hand holds. Over an empty cell nothing moves: its own place is empty and the cell it is over is the slot. */
+        int d = li->drag, t = li->drop_cell;
+        bool occupied = t >= 0 && t < n && t != d && li->icon[t].item && !li->icon[t].item->spacer;
+        li->drag_hide = occupied ? t : d;
         li->drag_slot = t >= 0 ? t : d;
-        if (t >= 0 && t != d)
+        int cell0 = li->page * li->per_page;
+        if (li->drag_slot >= cell0 && li->drag_slot - cell0 < li->grid_cells) {
+            int p = li->drag_slot - cell0;
+            li->slot_rect = lm_rect_make(li->gx0 + (p % li->cols) * LC_CELL_W, li->gy0 + (p / li->cols) * li->gcell_h, LC_CELL_W, li->gcell_h);
+        }
+        if (occupied)
             for (int k = li->first; k < li->last && k < n; k++) {
                 int src = k;
                 if (k == t)

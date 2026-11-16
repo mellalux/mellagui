@@ -54,6 +54,9 @@ struct lm_osk_geo {
 /* Lays the keys out inside `out` (the output's rectangle) at `place` (NULL = the default); the result is kept inside the output and
  * its size within sane limits. */
 void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place, struct lm_osk_geo *g);
+/* The number pad of the lock screen (a PIN): 1 2 3 / 4 5 6 / 7 8 9 / Bksp 0 Enter, centred above the bottom of `out`; the keys are the number row's evdev codes
+ * (so the labels follow the layout like the big keyboard's) and `row` 0..3 picks the colours. */
+void lm_osk_pin_geometry(const struct lm_rect *out, struct lm_osk_geo *g);
 /* The card's height for a key height, and the other way round (for resizing with the mouse). */
 int lm_osk_card_h(int kh);
 int lm_osk_kh_for_h(int h);

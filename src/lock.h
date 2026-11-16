@@ -38,6 +38,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "server.h"
+#include "util.h"
 
 struct lm_output;
 
@@ -58,7 +59,17 @@ struct lm_lock_info {
     char date[32];              /* "DD.MM.YYYY" (the date-format setting) */
     char layout[8];             /* "US", "EE" ... */
     bool wallpaper;             /* paint the wallpaper (blurred, dimmed) behind it: setting lock-wallpaper */
+    struct lm_rect kbd;         /* the round keyboard button in the corner (empty = none on this output) */
+    bool kbd_on;                /* the on-screen keyboard is showing */
+    bool kbd_hover;             /* the pointer is on the button */
+    int kbd_top;                /* the y of the keyboard's top edge while it shows (the clock and the input move up out of its way), 0 = not showing */
 };
+
+/* Where the lock screen's keyboard button is on an output of rectangle `out`: the top right corner (the keyboard itself lies along the bottom). */
+static inline struct lm_rect lm_lock_kbd_button(const struct lm_rect *out)
+{
+    return lm_rect_make(out->x + out->w - 20 - 44, out->y + 20, 44, 44);
+}
 
 struct lm_lock;
 
@@ -101,6 +112,9 @@ bool lm_lock_request_action(struct lm_lock *l, int action);
  * drops it (the first key press or click after a standby is not typing).
  */
 bool lm_lock_activity(struct lm_lock *l);
+/* A key event while the screen is NOT locked: true = eat it. The secret is tried as soon as it is typed in full, so an Enter pressed out of habit right after it
+ * (within 1.5 s) would land in the window that has the focus again: that Enter (and its release) is dropped. */
+bool lm_lock_eat_key(struct lm_lock *l, uint32_t code, bool pressed);
 /*
  * A key was pressed while locked (seat.c): `mods` = LM_MOD_* (depressed | latched | locked), `group` = active layout.
  * Typing, Backspace, Escape (clears), Enter (tries the secret), Ctrl+Alt+Fn, Super+Space.

@@ -122,7 +122,10 @@ bool osk_geo(const struct lm_wm *wm, struct lm_osk_geo *g)
     if (!o)
         return false;
     struct lm_rect r = lm_output_rect(o);
-    lm_osk_geometry(&r, &wm->osk_pl, g);
+    if (wm->osk_pin)
+        lm_osk_pin_geometry(&r, g);                              /* the lock screen asks for a PIN: a number pad */
+    else
+        lm_osk_geometry(&r, &wm->osk_pl, g);
     return true;
 }
 
@@ -210,7 +213,10 @@ void osk_set(struct lm_wm *wm, bool open)
         wm->osk_drag = 0;
     }
     osk_damage(wm);
-    lm_wm_osk_layout_changed(wm);                               /* the windows make room for it / come back */
+    if (lm_lock_active(wm->srv->lock))
+        damage_all(wm);                                         /* (the lock screen: no windows to move, the button changes) */
+    else
+        lm_wm_osk_layout_changed(wm);                           /* the windows make room for it / come back */
 }
 
 /* A press on key `i`: modifiers latch for the next key, Hide closes, anything else is typed (pressed now, released with the pointer). */
@@ -327,6 +333,58 @@ void lm_wm_osk_reset(struct lm_wm *wm)
 }
 
 void lm_wm_osk_set(struct lm_wm *wm, bool open) { osk_set(wm, open); }
+
+/* ---- the keyboard on the lock screen ------------------------------------------------------------------------------------------ */
+
+/* The round button in the corner of the lock screen: the number pad for a PIN, the whole keyboard for a password. */
+void lm_wm_lock_osk_toggle(struct lm_wm *wm)
+{
+    if (!lm_lock_active(wm->srv->lock))
+        return;
+    if (wm->osk_open) {
+        osk_set(wm, false);
+        wm->osk_pin = false;
+    } else {
+        wm->osk_pin = !strcmp(lm_lock_kind(wm->srv->lock), "pin");
+        osk_set(wm, true);
+    }
+    damage_all(wm);
+}
+
+/* The lock screen has no windows to pick from, so its pointer (and touch) input comes here from the seat: `what` 0 = moved, 1 = pressed, 2 = let go. It
+ * lights the keyboard button / key under the pointer, a press on the button shows / hides the keyboard, a press on a key types it. */
+void lm_wm_lock_pointer(struct lm_wm *wm, double x, double y, int what)
+{
+    struct lm_output *o = lm_output_primary(wm->srv);
+    if (!lm_lock_active(wm->srv->lock) || !o)
+        return;
+    struct lm_rect orect = lm_output_rect(o), kb = lm_lock_kbd_button(&orect);
+    int ix = (int)floor(x), iy = (int)floor(y);
+    bool shielded = wm->srv->saver && lm_saver_shields(wm->srv->saver);               /* the screensaver covers the lock card: no button there */
+    bool over_btn = !shielded && lm_rect_contains(&kb, ix, iy);
+    int hk = -1;
+    struct lm_osk_geo g;
+    if (!shielded && osk_geo(wm, &g))
+        for (int i = 0; i < g.n; i++)
+            if (lm_rect_contains(&g.key[i].rect, ix, iy))
+                hk = i;
+    if (over_btn != wm->lock_kbd_hover) {
+        wm->lock_kbd_hover = over_btn;
+        damage_all(wm);
+    }
+    if (hk != wm->osk_hover) {
+        wm->osk_hover = hk;
+        osk_damage(wm);
+    }
+    if (what == 1) {
+        if (over_btn)
+            lm_wm_lock_osk_toggle(wm);
+        else if (hk >= 0)
+            osk_press(wm, hk);
+    } else if (what == 2) {
+        osk_release(wm);
+    }
+}
 bool lm_wm_osk_is_open(const struct lm_wm *wm) { return wm->osk_open; }
 
 void lm_wm_tray_changed(struct lm_wm *wm)

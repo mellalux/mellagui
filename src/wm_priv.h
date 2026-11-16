@@ -284,6 +284,8 @@ struct lm_wm {
     bool hover_launcher;
     bool hover_power, hover_layout, hover_sticky, hover_osk, hover_quick;
     int hover_tray;             /* id of the tray item under the pointer, 0 = none */
+    bool osk_pin;               /* the keyboard is the number pad of the lock screen (a PIN) */
+    bool lock_kbd_hover;        /* the pointer is on the lock screen's keyboard button */
     bool osk_open;              /* the on-screen keyboard is showing on the primary output */
     uint32_t osk_latched;       /* LM_MOD_* its own Shift / Ctrl / Alt / AltGr keys hold for the next key */
     int osk_hover, osk_down;    /* the key under the pointer / held by it (index into the geometry), -1 = none */

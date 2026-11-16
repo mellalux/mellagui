@@ -368,8 +368,8 @@ void lm_seat_get_cursor(const struct lm_seat *seat, struct lm_cursor *out)
     out->shape = LM_CURSOR_DEFAULT;
     if (!seat)
         return;
-    if (seat->locked) {
-        out->shape = LM_CURSOR_HIDDEN;
+    if (seat->locked) {                                     /* the lock screen has a keyboard button and a keyboard to click */
+        out->shape = LM_CURSOR_DEFAULT;
         return;
     }
     if (seat->override != LM_CURSOR_NONE) {
@@ -2022,11 +2022,59 @@ static void ddm_bind(struct lm_client *client, void *data, uint32_t version, uin
  * Screen lock: keys go to the lock screen (and nowhere else, the wm's shortcuts included), everything else is dropped. The
  * bookkeeping of pressed keys stays right so that a key released after the unlock does not confuse the clients.
  */
+/* The lock screen's pointer: the cursor moves (and is drawn), a left click or a touch goes to the wm's lock keyboard (the button in the corner, the keys); nothing
+ * reaches a client. */
+static void locked_pointer_to(struct lm_seat *seat, double x, double y)
+{
+    lm_output_clamp_point(seat->srv, &x, &y);
+    seat->px = x;
+    seat->py = y;
+    seat->pos_valid = true;
+    cursor_changed(seat);
+    if (seat->srv->wm)
+        lm_wm_lock_pointer(seat->srv->wm, x, y, 0);
+}
+
 static void handle_locked_input(struct lm_seat *seat, const struct lm_input_event *ev)
 {
-    if (ev->type == LM_INPUT_MODS) {
+    struct lm_wm *wm = seat->srv->wm;
+    switch (ev->type) {
+    case LM_INPUT_MODS:
         keyboard_set_state(seat, ev->u.mods.depressed, ev->u.mods.latched, ev->u.mods.locked, ev->u.mods.group);
         return;
+    case LM_INPUT_POINTER_MOTION: {
+        if (!seat->pos_valid || !isfinite(ev->u.motion.dx) || !isfinite(ev->u.motion.dy))
+            return;
+        struct lm_output *po = lm_output_nearest(seat->srv, seat->px, seat->py);
+        double sc = po ? lm_output_scalef(po) : 1.0;
+        locked_pointer_to(seat, seat->px + ev->u.motion.dx / sc, seat->py + ev->u.motion.dy / sc);
+        return;
+    }
+    case LM_INPUT_POINTER_MOTION_ABS: {
+        double gx, gy;
+        if (touch_global_pos(seat, ev->u.motion_abs.x, ev->u.motion_abs.y, &gx, &gy))
+            locked_pointer_to(seat, gx, gy);
+        return;
+    }
+    case LM_INPUT_POINTER_BUTTON:
+        if (wm && ev->u.button.code == BTN_LEFT)
+            lm_wm_lock_pointer(wm, seat->px, seat->py, ev->u.button.pressed ? 1 : 2);
+        return;
+    case LM_INPUT_TOUCH_DOWN:
+    case LM_INPUT_TOUCH_UP: {
+        double gx, gy;
+        if (wm && touch_global_pos(seat, ev->u.touch.x, ev->u.touch.y, &gx, &gy)) {
+            if (ev->type == LM_INPUT_TOUCH_DOWN) {
+                locked_pointer_to(seat, gx, gy);
+                lm_wm_lock_pointer(wm, gx, gy, 1);
+            } else {
+                lm_wm_lock_pointer(wm, seat->px, seat->py, 2);
+            }
+        }
+        return;
+    }
+    default:
+        break;
     }
     if (ev->type != LM_INPUT_KEY)
         return;
@@ -2080,6 +2128,10 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
     if (seat->locked) {
         handle_locked_input(seat, ev);
         return;
+    }
+    if (ev->type == LM_INPUT_KEY && !ev->u.key.repeat && seat->srv->lock && lm_lock_eat_key(seat->srv->lock, ev->u.key.code, ev->u.key.pressed)) {
+        keyboard_set_state(seat, ev->u.key.mods_depressed, ev->u.key.mods_latched, ev->u.key.mods_locked, ev->u.key.group);
+        return;                                                     /* (the Enter that followed an unlock by length) */
     }
 
     switch (ev->type) {

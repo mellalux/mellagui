@@ -9657,7 +9657,7 @@ class TestLock(Base):
         self.assertEqual([e.name for e in cl.wl.queue if e.obj == kb and e.name in ('key', 'enter')], [])
         self.assertEqual(self.state(c)['locked'], '1')
         # wrong secret, then the right one
-        self.type(c, 'nottherightone')
+        self.type(c, 'wrongwor', enter=False)                                                # (with the 'a' typed before: as long as the secret, so tried without Enter)
         st = self.state(c)
         self.assertEqual((st['locked'], st['fails']), ('1', '1'))
         self.assertEqual(st['message'], 'Wrong password.')
@@ -9681,15 +9681,14 @@ class TestLock(Base):
         p, c, stop = self.start()
         c.cmd('lock set - password hunter22x')
         c.cmd('lock now')
-        self.type(c, 'hunter22xy', enter=False)
-        self.assertEqual(self.state(c)['typed'], '10')
+        self.type(c, 'hunter22', enter=False)                              # (one less than the secret: it is tried as soon as it is as long as the secret)
+        self.assertEqual(self.state(c)['typed'], '8')
         c.tap(14)                                                           # Backspace
-        self.assertEqual(self.state(c)['typed'], '9')
+        self.assertEqual(self.state(c)['typed'], '7')
         c.tap(KEY_ESC)
         self.assertEqual(self.state(c)['typed'], '0')
-        self.type(c, 'hunter22xy', enter=False)
-        c.tap(14)
-        c.tap(KEY_ENTER)
+        self.type(c, 'hunter22', enter=False)
+        c.tap(45)                                                           # X, the last character: unlocked at once, no Enter
         c.sync()
         self.assertEqual(self.state(c)['locked'], '0')
 
@@ -9902,6 +9901,88 @@ class TestLock(Base):
         got = burst()                                                       # not even with the right secret: no changes behind a locked screen
         self.assertEqual((got['lock-kind'], got['locked'], got['lock-status']), ('password', '1', 'locked'))
 
+
+    def test_the_secret_is_tried_when_it_is_as_long_as_the_secret_and_a_wrong_one_counts(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - password hunter22x')
+        self.assertEqual(self.state(c)['len'], '9')
+        c.cmd('lock now')
+        self.type(c, 'hunter22', enter=False)
+        self.assertEqual((self.state(c)['locked'], self.state(c)['typed']), ('1', '8'))             # not yet: one short
+        c.tap(45)                                                                                   # x: the ninth character
+        c.sync()
+        self.assertEqual(self.state(c)['locked'], '0')                                              # no Enter
+        c.cmd('lock now')
+        self.type(c, 'hunter22q', enter=False)                                                      # as long as it, but wrong
+        st = self.state(c)
+        self.assertEqual((st['locked'], st['fails'], st['typed']), ('1', '1', '0'))
+        self.assertEqual(st['message'], 'Wrong password.')
+
+    def test_a_pin_is_tried_at_its_length_too(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 4821')
+        self.assertEqual(self.state(c)['len'], '4')
+        c.cmd('lock now')
+        for ch in '482':
+            c.tap(KEYCODES[ch])
+        c.sync()
+        self.assertEqual(self.state(c)['locked'], '1')
+        c.tap(KEYCODES['1'])
+        c.sync()
+        self.assertEqual(self.state(c)['locked'], '0')
+
+    def test_an_old_lock_file_learns_the_length_at_the_first_unlock(self):
+        path = os.path.join(tmp, 'lock-old.conf')
+        p, c, stop = self.start('lock-old', file=path)
+        c.cmd('lock set - password hunter22x')
+        text = [l for l in open(path).read().splitlines() if not l.startswith('len=')]
+        open(path, 'w').write('\n'.join(text) + '\n')                                             # a file from before: no length
+        stop()
+        p, c, stop = self.start('lock-old2', file=path)
+        self.assertEqual(self.state(c)['len'], '0')
+        c.cmd('lock now')
+        self.type(c, 'hunter22x')                                                                   # (Enter: the length is not known yet)
+        self.assertEqual(self.state(c)['locked'], '0')
+        self.assertEqual(self.state(c)['len'], '9')
+        self.assertIn('len=9', open(path).read())
+
+    def test_the_lock_screen_has_a_keyboard_button_with_a_number_pad_for_a_pin(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - pin 4821')
+        c.cmd('lock now')
+        c.sync()
+        self.assertIn('open=0', c.cmd('osk')[0])
+        ppm = c.dump(os.path.join(tmp, 'lock-kbd.ppm'))
+        w = 800
+        self.assertNotEqual(ppm.px(w - 42, 42), (0x0b, 0x0d, 0x12))                                 # the round button in the top right corner
+        c.click(w - 42, 42)                                                                         # press it
+        c.sync()
+        self.assertIn('open=1', c.cmd('osk')[0])
+        card = [l for l in c.cmd('osk') if l.startswith('card')][0]
+        keys = [l for l in c.cmd('osk') if l.startswith('key')]
+        self.assertEqual(len(keys), 12)                                                             # 1..9, Bksp, 0, Enter
+        m = re.match(r'card x=(\d+) y=(\d+) w=(\d+) h=(\d+)', card)
+        self.assertLess(int(m[3]), 400)                                                             # a number pad, not the whole keyboard
+        for ch in '4821':                                                                           # tap its keys
+            key = [k for k in keys if ' code=%d ' % KEYCODES[ch] in k + ' '][0]
+            kk = re.search(r'x=(\d+) y=(\d+) w=(\d+) h=(\d+)', key)
+            c.click(int(kk[1]) + int(kk[3]) // 2, int(kk[2]) + int(kk[4]) // 2)
+            c.sync()
+        self.assertEqual(self.state(c)['locked'], '0')                                              # the PIN, typed on the pad, unlocked it (no Enter)
+        self.assertIn('open=0', c.cmd('osk')[0])                                                    # and the keyboard is gone with the lock
+
+    def test_a_password_gets_the_whole_keyboard_on_the_lock_screen(self):
+        p, c, stop = self.start()
+        c.cmd('lock set - password hunter22x')
+        c.cmd('lock now')
+        c.sync()
+        c.click(800 - 42, 42)
+        c.sync()
+        keys = [l for l in c.cmd('osk') if l.startswith('key')]
+        self.assertGreater(len(keys), 60)
+        c.click(800 - 42, 42)                                                                       # the button again hides it
+        c.sync()
+        self.assertIn('open=0', c.cmd('osk')[0])
 
 class TestAccess(Base):
     """Who may talk to the compositor: the socket is 0600, and with --settings-access own only MellaGUI's programs get the settings."""
@@ -21094,7 +21175,7 @@ class TestLauncherPages(Base):
         self.assertIsNone(d['add'])                                                          # the "+" tile is the very last cell
         e = self.start('mellagui-lp2', n=4)
         d = self.info(e)
-        self.assertEqual((d['pages'], d['per'], len(d['dots'])), (1, d['n'] + 1, 0))         # a short list is one page, no dots
+        self.assertEqual((d['pages'], d['per'], len(d['dots'])), (1, d['n'], 0))             # a short list is one page, no dots
 
     def test_a_dot_and_the_arrows_turn_the_page(self):
         c = self.start('mellagui-lp3')
@@ -21104,7 +21185,7 @@ class TestLauncherPages(Base):
         d = self.info(c)
         self.assertEqual((d['page'], d['first']), (1, per))
         self.assertEqual([i[0] for i in d['icons']], list(range(per, d['n'])))              # what is left of the icons
-        self.assertIsNotNone(d['add'])                                                       # the "+" tile is on the last page
+        self.assertIsNone(d['add'])                                                          # no "+" tile outside edit mode
         c.click(*self.centre(d['dots'][0]))
         self.assertEqual(self.info(c)['page'], 0)
 
@@ -21125,7 +21206,7 @@ class TestLauncherPages(Base):
         self.assertEqual((d['page'], d['sel']), (0, 0))
         c.tap(107)                                                                           # End: the last cell, on the last page
         d = self.info(c)
-        self.assertEqual((d['page'], d['sel']), (1, d['n']))
+        self.assertEqual((d['page'], d['sel']), (1, d['n'] - 1))
         c.tap(102)                                                                           # Home
         d = self.info(c)
         self.assertEqual((d['page'], d['sel']), (0, 0))
@@ -21294,7 +21375,7 @@ class TestLauncherMoving(Base):
         self.assertEqual(names[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])        # the grid follows
 
     def test_an_icon_carried_to_a_cell_of_another_page_stays_on_that_page(self):
-        c = self.start('mellagui-lm8', n=30)
+        c = self.start('mellagui-lm8', n=40)
         d = self.info(c)
         ic = {i[1]: i[2] for i in d['icons']}
         card = d['card']
@@ -21380,7 +21461,7 @@ class TestLauncherMoving(Base):
             time.sleep(0.4)
             d = self.info(c)
             self.assertGreater(d['page'], 0)
-            self.assertEqual([i[1] for i in d['icons']], ['App02'])                                # alone on its page
+            self.assertEqual([i[1] for i in d['icons'] if i[1]], ['App02'])                                # alone on its page (the other cells of it are empty)
             self.assertGreaterEqual(d['pages'], 2)
             c.cmd('launcher close')
 
@@ -21421,7 +21502,7 @@ class TestLauncherMoving(Base):
         d = self.info(c)
         first_page = d['page']
         self.assertGreater(first_page, 0)
-        self.assertEqual([i[1] for i in d['icons']], ['App02'])
+        self.assertEqual([i[1] for i in d['icons'] if i[1]], ['App02'])
         c.click(*self.centre(d['dots'][0]))                                                         # back to the first page
         time.sleep(0.2)
         c.abs(5, 5)
@@ -21462,6 +21543,27 @@ class TestLauncherMoving(Base):
         d = self.info(c)
         self.assertEqual([i[1] for i in d['icons'] if i[1]], ['App02'])                              # the page before still holds the first one, alone
         c.cmd('launcher close')
+
+    def test_an_icon_stays_in_the_empty_cell_it_is_dropped_on(self):
+        c = self.start('mellagui-lmD', n=8)
+        d = self.info(c)
+        c.click(*self.centre(d['buttons'][0][0]))                                                    # edit mode: the whole grid, empty cells too
+        time.sleep(0.2)
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        before = {k: v for k, v in ic.items() if k != 'App02'}
+        a = ic['App07']
+        target = (a[0] + a[2] // 2 + 2 * 124, a[1] + a[3] // 2 + 116)                                # two cells to the right and a row down: nothing is there
+        self.drag(c, self.centre(ic['App02']), target, hold=0.2)
+        c.button(272, False)
+        self.wait_order(lambda o: o)
+        time.sleep(0.4)
+        d = self.info(c)
+        got = {i[1]: i[2] for i in d['icons'] if i[1]}
+        box = got['App02']
+        self.assertTrue(box[0] <= target[0] <= box[0] + box[2] and box[1] <= target[1] <= box[1] + box[3] + 40, (box, target))   # in the cell it was let go over
+        for k, v in before.items():                                                                  # and nobody else moved
+            self.assertEqual(got[k], v, k)
 
     def test_the_icons_below_make_room_while_it_is_carried(self):
         c = self.start('mellagui-lm6')
@@ -21610,6 +21712,13 @@ class TestLauncher(Base):
     def centre(r):
         return r[0] + r[2] // 2, r[1] + r[3] // 2
 
+    def add_tile(self, c):
+        """The "+" tile's box: it exists in edit mode only, so switch that on (E) when it is off."""
+        if not self.info(c)['edit']:
+            c.tap(self.KEY_E)
+            c.sync()
+        return self.info(c)['add']
+
     def type_text(self, c, text):
         for ch in text:
             c.tap(KEYCODES[ch])
@@ -21632,7 +21741,7 @@ class TestLauncher(Base):
         d = self.info(c)
         self.assertEqual((d['open'], d['edit'], d['form'], d['n']), (1, 0, 0, 3))
         self.assertEqual([i['name'] for i in d['icons']], ['Alpha', 'Beta', 'Gamma'])      # the Launcher button is not listed
-        self.assertIsNotNone(d['add'])
+        self.assertIsNone(d['add'])                                                        # the "+" tile is for edit mode
         self.assertEqual(d['buttons'][0][1], 'Edit')
         card = d['card']
         for i in d['icons']:                                                               # big round icons inside the card
@@ -21711,7 +21820,7 @@ class TestLauncher(Base):
     def test_the_plus_tile_opens_a_form_that_adds_a_button(self):
         c = self.start('mellagui-lc6')
         self.super_a(c)
-        c.click(*self.centre(self.info(c)['add']))
+        c.click(*self.centre(self.add_tile(c)))
         c.sync()
         d = self.info(c)
         self.assertEqual(d['form'], 1)
@@ -21937,7 +22046,7 @@ class TestLauncher(Base):
     def test_the_form_fields_have_a_caret_that_arrows_home_end_and_the_mouse_move(self):
         c = self.start('mellagui-lc40')
         self.super_a(c)
-        c.click(*self.centre(self.info(c)['add']))
+        c.click(*self.centre(self.add_tile(c)))
         self.type_text(c, 'abcd')
         self.assertEqual(self.info(c)['fields'][0][1], 'abcd')
         c.tap(self.KEY_LEFT)
@@ -21969,7 +22078,7 @@ class TestLauncher(Base):
     def test_the_form_fields_have_a_question_mark_with_help(self):
         c = self.start('mellagui-lc41')
         self.super_a(c)
-        c.click(*self.centre(self.info(c)['add']))
+        c.click(*self.centre(self.add_tile(c)))
         d = self.info(c)
         for i, title in ((0, 'Name'), (1, 'Command'), (2, 'Icon')):
             hx, hy, hw, hh = d['helps'][i]
@@ -22100,7 +22209,7 @@ class TestLauncher(Base):
         c = self.start('mellagui-lc35')
         self.super_a(c)
         d = self.info(c)
-        c.click(*self.centre(d['add']))
+        c.click(*self.centre(self.add_tile(c)))
         d = self.info(c)
         self.assertEqual(sorted(d['fields']), [0, 1, 2], 'the form has no icon field')
         self.type_text(c, 'web')                                                 # the name
@@ -22115,7 +22224,7 @@ class TestLauncher(Base):
     def test_a_built_in_icon_chosen_below_fills_the_field_and_typing_a_name_picks_it(self):
         c = self.start('mellagui-lc36')
         self.super_a(c)
-        c.click(*self.centre(self.info(c)['add']))
+        c.click(*self.centre(self.add_tile(c)))
         d = self.info(c)
         c.click(*self.centre(d['kinds'][3]))                                     # "files"
         self.assertEqual(self.info(c)['fields'][2][1], 'files')
@@ -22142,7 +22251,7 @@ class TestLauncher(Base):
     def test_tab_visits_name_command_icon_field_and_the_icon_row(self):
         c = self.start('mellagui-lc38')
         self.super_a(c)
-        c.click(*self.centre(self.info(c)['add']))
+        c.click(*self.centre(self.add_tile(c)))
         seen = []
         for _ in range(5):
             seen.append(int(self.focus_line(c).split()[1]))
@@ -22161,7 +22270,7 @@ class TestLauncher(Base):
                 continue
             c.sync()
             self.super_a(c)
-            c.click(*self.centre(self.info(c)['add']))
+            c.click(*self.centre(self.add_tile(c)))
             d = self.info(c)
             for i in range(3):
                 x, y, w, h = d['fields'][i][0]
@@ -22193,7 +22302,7 @@ class TestLauncher(Base):
     def test_the_forms_fields_paste_and_have_a_right_click_menu(self):
         c = self.start('mellagui-lc40')
         self.super_a(c)
-        c.click(*self.centre(self.info(c)['add']))
+        c.click(*self.centre(self.add_tile(c)))
         d = self.info(c)
         c.cmd('clip add my app')
         c.key(29, True)

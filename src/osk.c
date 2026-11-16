@@ -98,6 +98,33 @@ void lm_osk_geometry(const struct lm_rect *out, const struct lm_osk_place *place
     }
 }
 
+void lm_osk_pin_geometry(const struct lm_rect *out, struct lm_osk_geo *g)
+{
+    static const uint32_t codes[4][3] = { { KEY_1, KEY_2, KEY_3 }, { KEY_4, KEY_5, KEY_6 }, { KEY_7, KEY_8, KEY_9 }, { KEY_BACKSPACE, KEY_0, KEY_ENTER } };
+    memset(g, 0, sizeof(*g));
+    int kh = LM_CLAMP(out->h / 11, 40, 64), kw = kh * 3 / 2;
+    int inner_w = 3 * kw + 2 * GAP, w = inner_w + 2 * PAD, h = 4 * kh + 3 * GAP + TOP_PAD + PAD;
+    if (h > out->h) {                                   /* a small output: the keys get less tall */
+        kh = LM_MAX((out->h - 3 * GAP - TOP_PAD - PAD) / 4, 20);
+        kw = kh * 3 / 2;
+        inner_w = 3 * kw + 2 * GAP;
+        w = inner_w + 2 * PAD;
+        h = 4 * kh + 3 * GAP + TOP_PAD + PAD;
+    }
+    int x = LM_CLAMP(out->x + (out->w - w) / 2, out->x, LM_MAX(out->x + out->w - w, out->x));
+    int y = LM_CLAMP(out->y + out->h - h - 24, out->y, LM_MAX(out->y + out->h - h, out->y));
+    g->card = lm_rect_make(x, y, w, h);
+    g->kh = kh;
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 3 && g->n < LM_OSK_MAX_KEYS; c++) {
+            struct lm_osk_key *k = &g->key[g->n++];
+            k->code = codes[r][c];
+            k->row = r;
+            k->kind = LM_OSK_KEY;
+            k->rect = lm_rect_make(x + PAD + c * (kw + GAP), y + TOP_PAD + r * (kh + GAP), kw, kh);
+        }
+}
+
 uint32_t lm_osk_kind_mod(enum lm_osk_kind kind)
 {
     switch (kind) {

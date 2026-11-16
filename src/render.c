@@ -896,9 +896,18 @@ static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
     if (!li->wallpaper || !paint_lock_backdrop(c))
         fill_rect(c, &o, lm_theme.ink);
     int cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    if (li->kbd_top > 0) {                              /* the keyboard shows: the clock and the input go up until the message under the input is clear of it */
+        int need = cy + 64 - li->kbd_top;
+        if (need > 0)
+            cy -= need;
+    }
 
     int scale = o.w >= 1600 ? 8 : o.w >= 900 ? 6 : 3;
     int clock_h = LM_FONT_H * scale, top = cy - clock_h - 70;
+    if (li->kbd_top > 0 && top < 8) {                  /* (a low screen: the clock stays on it) */
+        cy += 8 - top;
+        top = 8;
+    }
     int tw = lm_font_text_width(li->clock) * scale;
     draw_text_scaled(c, cx - tw / 2, top, li->clock, scale, COL_PANEL_TEXT);
     struct lm_rect line = lm_rect_make(o.x, top + clock_h + 8, o.w, 20);
@@ -918,7 +927,7 @@ static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
     fill_round(c, &inner, inner.h / 2, 0xff000000u | fieldc);
     paint_shape(c, (float)box.x + 32.0f, (float)box.y + (float)bh / 2.0f, 10.0f, SHAPE_LOCK,
                 li->nchars || li->blocked ? ring : COL_PANEL_DIM, 255);       /* the padlock lights up while something is typed */
-    struct lm_rect text_area = lm_rect_make(box.x + 48, box.y, box.w - 48 - 24, box.h);
+    struct lm_rect text_area = lm_rect_make(box.x + 48, box.y, box.w - 96, box.h);      /* (the same room on both sides: what is typed is in the middle of the pill, the padlock only has its corner) */
     if (li->nchars == 0 && !li->blocked) {
         draw_text_centered(c, &text_area, li->pin ? "Enter PIN" : "Enter password", COL_PANEL_DIM);
     } else {
@@ -937,6 +946,24 @@ static void paint_lock(const struct paint_ctx *c, const struct lm_lock_info *li)
     char tail[64];
     snprintf(tail, sizeof(tail), "MellaGUI is locked%s%s", li->layout[0] ? "   Layout: " : "", li->layout);
     draw_text_centered(c, &foot, tail, COL_PANEL_DIM);
+    if (li->kbd.w > 0) {                                /* the keyboard button in the corner (the number pad for a PIN, the whole keyboard for a password): teal like the panel's, white while it shows */
+        uint32_t obg = li->kbd_on ? lm_theme.on_colour : li->kbd_hover ? mix_rgb(lm_theme.hue_5, 0xffffffu, 55) : lm_theme.hue_5;
+        uint32_t ofg = li->kbd_on ? lm_theme.hue_5 : lm_theme.on_colour;
+        paint_drop(c, &li->kbd, btn_radius(LM_MIN(li->kbd.w, li->kbd.h) / 2), obg);
+        int cx = li->kbd.x + li->kbd.w / 2, cy = li->kbd.y + li->kbd.h / 2, bx = cx - 11, by = cy - 6;
+        struct lm_rect body = lm_rect_make(bx, by, 22, 12);
+        fill_round(c, &body, 3, 0xff000000u | ofg);
+        for (int i = 0; i < 5; i++) {
+            struct lm_rect k = lm_rect_make(bx + 3 + i * 4, by + 2, 2, 2);
+            fill_rect(c, &k, obg);
+        }
+        for (int i = 0; i < 4; i++) {
+            struct lm_rect k = lm_rect_make(bx + 5 + i * 4, by + 5, 2, 2);
+            fill_rect(c, &k, obg);
+        }
+        struct lm_rect bar = lm_rect_make(bx + 6, by + 8, 10, 2);
+        fill_rect(c, &bar, obg);
+    }
 }
 
 
@@ -1519,7 +1546,7 @@ static void paint_launcher_body(const struct paint_ctx *c, const struct lm_launc
     }
     if (!li->form) {
         for (int g = li->first; g < li->last && g < li->n; g++) {       /* (the icons of the other pages are not painted) */
-            if ((li->drag >= 0 && g == li->drag_slot) || li->icon[g].item->spacer)      /* the place of the icon in the hand, or an empty cell: nothing is painted */
+            if ((li->drag >= 0 && g == li->drag_hide) || li->icon[g].item->spacer)      /* the place of the icon in the hand, or an empty cell: nothing is painted */
                 continue;
             const struct lm_rect *b = &li->icon[g].box;
             bool sel = dyn && li->drag < 0 && li->sel == g;
@@ -1711,9 +1738,9 @@ static void lov_drop(const struct paint_ctx *c, const struct lm_launcher_info *l
 /* The empty place the icon in the hand will take (the cell it is over, or its own): a faint plate with an outline. */
 static bool lov_slot_rect(const struct lm_launcher_info *li, struct lm_rect *r)
 {
-    if (!lov_dragging(li) || li->drag_slot < 0 || li->drag_slot >= li->n || li->drag_slot < li->first || li->drag_slot >= li->last)
+    if (!lov_dragging(li) || li->slot_rect.w <= 0)
         return false;
-    *r = li->icon[li->drag_slot].hit;
+    *r = li->slot_rect;
     r->x += 4;
     r->w -= 8;
     return r->w > 0;

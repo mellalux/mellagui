@@ -499,59 +499,42 @@ void launcher_drag_motion(struct lm_wm *wm)
     launcher_damage(wm);
 }
 
+
+/* An icon of the grid was let go over cell `t` (any cell of the page shown - an icon's, an empty one, one of the empty page of edit mode): that is where it stays.
+ * The grid is a grid, there is no first or last place. Over an empty cell the two just swap (its old cell is empty now, nothing else moves); over an icon the cells
+ * between make room by one (as the preview showed); beyond the end of the list the cells before it are padded with empty cells (`-` in `[launcher] order`, `full_pp`
+ * cells a page). Pages that hold only empty cells, and empty cells at the end, are dropped again. Returns the cell it ended in, -1 when nothing was changed. */
 static const struct lm_dock_item k_gap = { .name = "", .spacer = true };      /* an empty cell of the order */
 
-/* An icon of the grid was let go over another cell, or over the empty page: it takes that place in the grid. The grid's order is its own (`[launcher] order`), so the
- * dock's buttons and the launcher's own mix freely and nothing changes lists. Over the EMPTY page (`to_new_page`) the cells before it are padded with empty cells
- * (`-` in the order, `full_pp` cells a page) so that the icon is the first one of a page of its own; pages that hold only empty cells, and empty cells at the end,
- * are dropped again. Returns the cell the icon ended in, -1 when nothing was changed. */
-static int launcher_reorder(struct lm_wm *wm, int g, int target_cell, bool to_new_page, int full_pp)
+static int launcher_reorder(struct lm_wm *wm, int g, int t, int full_pp)
 {
     int n = launcher_count();
     const struct lm_dock_item *it = launcher_item(g, NULL);
-    if (!it || it->spacer || lm_search_owns(it) || g < 0 || g >= n || n > LM_LAUNCHER_MAX)
+    if (!it || it->spacer || lm_search_owns(it) || g < 0 || g >= n || n > LM_LAUNCHER_MAX || t < 0 || t == g || t >= LM_LAUNCHER_MAX - 1)
         return -1;
     const struct lm_dock_item *list[LM_LAUNCHER_MAX] = { NULL };
     for (int i = 0; i < n; i++)
         list[i] = launcher_item(i, NULL);
     const struct lm_dock_item *moved = list[g];
-    int m = n;
-    int t;
-    if (to_new_page) {
-        bool paged = false;                                                           /* the grid already has pages of its own (empty cells)? */
-        for (int i = 0; i < n; i++)
-            paged = paged || list[i]->spacer;
-        int pg = LM_MAX(full_pp, 1);
-        if (paged) {                                                                  /* take it out of ITS page only: the later pages keep their icons where they are */
-            int end = LM_MIN((g / pg + 1) * pg, n);
-            memmove(&list[g], &list[g + 1], (size_t)(end - 1 - g) * sizeof(list[0]));
-            list[end - 1] = &k_gap;
-            m = n;
-        } else {
-            memmove(&list[g], &list[g + 1], (size_t)(n - 1 - g) * sizeof(list[0]));  /* take it out, the rest closes up, then ... */
-            m = n - 1;
-        }
-        while (m > 0 && list[m - 1]->spacer)                                          /* (empty cells at the end do not count) */
-            m--;
-        int pp = LM_MAX(full_pp, 1), idx = (m + pp - 1) / pp * pp;                    /* ... the first cell of the page after the last one that is used */
-        if (idx + 1 > LM_LAUNCHER_MAX || idx - m > LM_LAUNCHER_GAPS_MAX)
+    if (t >= n) {                                                         /* an empty cell beyond the list */
+        if (t - n > LM_LAUNCHER_GAPS_MAX)
             return -1;
-        for (int i = m; i < idx; i++)
+        list[g] = &k_gap;
+        for (int i = n; i < t; i++)
             list[i] = &k_gap;
-        list[idx] = moved;
-        n = idx + 1;
-        t = idx;
-    } else {
-        t = target_cell >= n ? n - 1 : target_cell;
-        if (t < 0 || t == g)
-            return -1;
+        list[t] = moved;
+        n = t + 1;
+    } else if (list[t]->spacer) {                                         /* an empty cell inside the list: swap */
+        list[t] = moved;
+        list[g] = &k_gap;
+    } else {                                                              /* an icon: the ones between make room */
         if (t > g)
             memmove(&list[g], &list[g + 1], (size_t)(t - g) * sizeof(list[0]));
         else
             memmove(&list[t + 1], &list[t], (size_t)(g - t) * sizeof(list[0]));
         list[t] = moved;
     }
-    int pp = LM_MAX(full_pp, 1);                                                       /* a page of nothing but empty cells goes, and so do trailing ones */
+    int pp = LM_MAX(full_pp, 1);                                          /* a page of nothing but empty cells goes, and so do trailing ones */
     for (int p = 0; p * pp < n;) {
         int end = LM_MIN((p + 1) * pp, n), all = 1;
         for (int i = p * pp; i < end; i++)
@@ -601,11 +584,11 @@ void launcher_drag_finish(struct lm_wm *wm)
             if (!lm_settings_launcher_to_dock(wm->srv, it->raw, before ? before->raw : -1))
                 lm_wm_notify(wm, "Launcher", "Could not add it to the dock: it is full, the name is in use, or there is no config file", 5000);
         }
-    } else if (it && li && (li->drop_cell >= 0 || li->drop_end)) {
-        int at = launcher_reorder(wm, g, li->drop_cell, li->drop_end, li->full_pp);
-        if (at >= 0) {                                              /* the page it landed on shows (a temporary last page is gone with the drag unless edit mode keeps it) */
+    } else if (it && li && li->drop_cell >= 0) {
+        int at = launcher_reorder(wm, g, li->drop_cell, li->full_pp);
+        if (at >= 0) {                                              /* the page it landed on shows */
             bool gaps = launcher_gap_count() > 0;                    /* (the order was just rewritten and the config reloaded) */
-            int pp = gaps ? li->full_pp : li->per_page;
+            int pp = gaps || wm->launcher_edit ? li->full_pp : li->per_page;
             if (pp > 0)
                 wm->launcher_page = at / pp;
         }

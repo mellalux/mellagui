@@ -35,7 +35,18 @@ WARN    := -Wall -Wextra
 OPT     := -O2 -g
 CFLAGS  ?= $(OPT)
 override CFLAGS := $(CSTD) $(WARN) $(CFLAGS)
-CPPFLAGS += -D_GNU_SOURCE -Isrc -Iclient $(shell pkg-config --cflags libdrm 2>/dev/null || echo -I/usr/include/libdrm) -MMD -MP
+PKG_CONFIG ?= pkg-config
+LIBDRM_INC ?= /usr/include/libdrm
+CPPFLAGS += -D_GNU_SOURCE -Isrc -Iclient $(shell $(PKG_CONFIG) --cflags libdrm 2>/dev/null || echo -I$(LIBDRM_INC)) -MMD -MP
+
+# The one thing a build needs from outside the libc is libdrm's headers: say so plainly, with the package names, instead of "drm.h: No such file".
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+ifeq ($(shell $(PKG_CONFIG) --exists libdrm 2>/dev/null && echo yes),)
+ifeq ($(wildcard $(LIBDRM_INC)/drm.h),)
+$(error The libdrm development headers are missing (drm.h was not found). Install them and run make again -- Debian / Ubuntu: sudo apt install build-essential pkg-config libdrm-dev   Fedora: sudo dnf install gcc make pkgconf-pkg-config libdrm-devel   Arch: sudo pacman -S base-devel libdrm   openSUSE: sudo zypper install gcc make pkg-config libdrm-devel)
+endif
+endif
+endif
 LDLIBS  := -ldrm -lm -ldl
 
 ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined

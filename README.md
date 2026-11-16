@@ -51,7 +51,7 @@ Included programs:
 
 ## Build
 
-Requires gcc, make, pkg-config and the libdrm headers (`libdrm-dev`).
+Requires gcc, make, pkg-config and the libdrm headers: `sudo apt install build-essential pkg-config libdrm-dev` (Debian / Ubuntu), `sudo dnf install gcc make pkgconf-pkg-config libdrm-devel` (Fedora), `sudo pacman -S base-devel libdrm` (Arch). Without them `make` stops at once and says so.
 
     make            # build/mellagui, build/mellagui-term, build/mellagui-calc
     make asan       # build/mellagui-asan with AddressSanitizer + UBSan

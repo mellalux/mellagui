@@ -2037,6 +2037,12 @@ class TestGadget(Base):
         return None
 
     def test_cards_glued_together_are_zoomed_together(self):
+        def forget_mixer_zoom():                                                        # (the mixer keeps its zoom in the config folder; the cleanup below resets only the clipboard card,
+            try:                                                                        # so a 110 % mixer would be the starting size of every later mixer test)
+                os.remove(os.path.join(os.environ['XDG_CONFIG_HOME'], 'mellagui', 'gadget-mixer.conf'))
+            except OSError:
+                pass
+        self.addCleanup(forget_mixer_zoom)
         ctl.cmd('gadget mixer 1')
         self.addCleanup(lambda: ctl.cmd('gadget mixer 0'))
         self.addCleanup(lambda: (ctl.click(*self.title_point()), ctl.click(*self.title_point())))
@@ -4852,7 +4858,9 @@ class TestClients(Base):
         self.assertEqual(self.read_file(other), b'qsecond\n')
 
     def test_edit_buttons_are_in_rails_at_both_sides(self):
-        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1'})
+        cfg = tempfile.mkdtemp(prefix='cfg-', dir=tmp)                       # (A+ below saves the text size: not into the shared config folder, or the next editor test starts with big text)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, path = self.edit_start(b'one\n', env={'MELLAGUI_EDIT_RAIL': '1', 'XDG_CONFIG_HOME': cfg})
         d = os.path.dirname(path)
         win = self.edit_window()
         def left(i, gap=0):                                      # the left rail: round buttons 36 px apart from y = 6 (the edit group has 10 px more)
@@ -7959,8 +7967,9 @@ esac
         self.assertEqual(settings()['night-sun'], '1')
         ctl.abs(x0 + 20, y0 + 420)
         shot = ctl.dump(os.path.join(tmp, 'night-sun.ppm'))
-        row = [shot.px(x0 + 204 + i, y0 + 224 + dy) for i in range(330) for dy in range(0, 16)]      # the "Today: sunset ..." line under the radios
-        self.assertGreater(len(set(row)), 6, 'no "Today: sunset ..." line')
+        row = [shot.px(x0 + 204 + i, y0 + 200 + dy) for i in range(330) for dy in range(0, 16)]      # the "Today: sunset ..." line under the radios
+        bg = max(set(row), key=row.count)                                        # (the bitmap font has two colours only: the ground and the letters)
+        self.assertGreater(sum(1 for q in row if q != bg), 100, 'no "Today: sunset ..." line')
         ctl.click(x0 + 154 + 40, y0 + 168 + 14)                                 # "At set times" again
         time.sleep(0.3)
         self.assertEqual(settings()['night-sun'], '0')
@@ -8359,9 +8368,15 @@ class TestMixer(Base):
         return g
 
     @staticmethod
-    def menu_entries(c, timeout=3.0):
+    def menu_entries(c, timeout=3.0, again=None):
+        """The open menu's entries. `again` = a point to click once more when nothing opened within a second (a click that lands while the card is laid out again is lost)."""
         end = time.time() + timeout
+        retry_at = time.time() + 1.0
         while time.time() < end:
+            if again and time.time() >= retry_at:
+                c.click(*again)
+                retry_at = time.time() + 1.0
+                again = again if time.time() + 1.0 < end else None
             lines = c.cmd('dockmenu')
             if lines and 'open=1' in lines[0]:
                 out = []
@@ -8421,7 +8436,7 @@ class TestMixer(Base):
         self.assertFalse(self.state(pj)['inputs'][0]['mute'])
         # the output row opens a menu of every output (the one in use marked); a choice makes it the default one
         c.click(*g['output'])
-        ents = self.menu_entries(c)
+        ents = self.menu_entries(c, again=g['output'])
         self.assertEqual(len(ents), len(self.state(pj)['sinks']))
         self.assertTrue(ents[0][0].startswith('* '), ents[0][0])
         self.assertTrue(ents[1][0].startswith('  '), ents[1][0])
@@ -8429,7 +8444,7 @@ class TestMixer(Base):
         time.sleep(0.3)
         self.assertEqual(self.state(pj)['default'], self.state(pj)['sinks'][0]['name'])
         c.click(*g['output'])
-        ents = self.menu_entries(c)
+        ents = self.menu_entries(c, again=g['output'])
         c.click(ents[1][1], ents[1][2])
         self.wait_for(lambda: self.state(pj)['default'] == 'alsa_output.hdmi-stereo', 'default sink changed')
         self.wait_for(lambda: 'HDMI' in self.mixer_info(c)['output'], 'output text shows HDMI')
@@ -8471,7 +8486,7 @@ class TestMixer(Base):
         c.cmd('settings audio-rescan 1')
         time.sleep(1.5)                                                            # (the card has the profiles after its next burst of settings)
         c.click(*g['output'])
-        ents = self.menu_entries(c)
+        ents = self.menu_entries(c, again=g['output'])
         sinks = len(self.state(pj)['sinks'])
         self.assertGreater(len(ents), sinks)
         self.assertNotIn('Output', ents[sinks][0][-7:])
@@ -17274,7 +17289,8 @@ class TestDoubleClickTime(Base):
         def box_is_green():
             ppm = c.dump(os.path.join(tmp, 'dc-panel.ppm'))
             self.last_px = ppm.px(x0 + 200, y0 + 200)             # (away from the text and the pointer)
-            return self.last_px == (0x5a, 0xc8, 0x8c)
+            r, g, b = self.last_px                                # (the button is a drop of water now: the green is lit up in places, so "green" = clearly more green than red and blue)
+            return g - r > 40 and g - b > 20
 
         def two_clicks(gap):
             c.abs(x0 + 330, y0 + 190)

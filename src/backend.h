@@ -203,6 +203,9 @@ struct lm_backend *lm_backend_drm_create(struct lm_server *srv);
 
 /* Offscreen backend with one w x h output named "headless-0". */
 struct lm_backend *lm_backend_headless_create(struct lm_server *srv, int w, int h);
+
+/* Nested backend (backend_wayland.c): a w x h window of the host Wayland compositor named by $WAYLAND_DISPLAY at this moment; needs no /dev/dri, no /dev/input. */
+struct lm_backend *lm_backend_wayland_create(struct lm_server *srv, int w, int h);
 /* Write output 0's last drawn frame to `path` as P6 PPM. Returns 0 or -1. */
 int lm_backend_headless_dump(struct lm_backend *b, const char *path);
 /* The same for output `index` (0 = the first, 1.. the --output ones). -1 when there is no such output. */

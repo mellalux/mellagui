@@ -31,8 +31,6 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Camera     = [camera] mellagui-cam\n" \
     "Record     = [record] mellagui-record\n" \
     "Processes  = [monitor] mellagui-top\n" \
-    "Code       = [theme:vscode|code] ~/VSCode/code " LM_CODE_FLAGS " || /snap/code/current/usr/share/code/code " LM_CODE_FLAGS "\n" \
-    "Firefox    = [theme:firefox] " LM_FF_ENV " /snap/bin/firefox || " LM_FF_ENV " /usr/bin/firefox\n" \
     "Settings   = [settings] @settings\n"
 
 /* The launcher's own buttons: every MellaGUI program that the dock does not have. Used while mellagui.conf has no [launcher-apps] at all; a file that has its

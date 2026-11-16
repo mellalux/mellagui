@@ -55,8 +55,9 @@
 
 static const char *usage_text =
     "Usage: mellagui [options]\n"
-    "  --backend drm|headless   display backend (default: drm)\n"
-    "  --size WxH               headless output size (default 1280x720)\n"
+    "  --backend auto|drm|wayland|headless   display backend (default auto: a window of the host compositor when WAYLAND_DISPLAY\n"
+    "                           names one - WSLg, GNOME, KDE, Sway ... -, else the screen itself through DRM)\n"
+    "  --size WxH               headless / nested window size (default 1280x720)\n"
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
     "  --kiosk                  the login screen's mode: no shortcuts (but Ctrl+Alt+Fn), no dock, no gadgets and helpers, no screensaver\n"
@@ -450,7 +451,7 @@ int main(int argc, char **argv)
     while ((c = getopt_long(argc, argv, "h", opts, NULL)) != -1) {
         switch (c) {
         case 'b':
-            if (strcmp(optarg, "drm") && strcmp(optarg, "headless")) {
+            if (strcmp(optarg, "auto") && strcmp(optarg, "drm") && strcmp(optarg, "wayland") && strcmp(optarg, "headless")) {
                 fprintf(stderr, "mellagui: unknown backend '%s'\n", optarg);
                 return 2;
             }
@@ -612,8 +613,14 @@ int main(int argc, char **argv)
     lm_loop_add_signal(loop, SIGUSR2, sig_reload, srv);
     srv->reload_config = reload_config;
 
+    if (!strcmp(cfg.backend, "auto")) {                         /* a host compositor to nest in, else the screen */
+        const char *host = getenv("WAYLAND_DISPLAY");
+        cfg.backend = host && *host ? "wayland" : "drm";
+        lm_info("backend %s (%s)", cfg.backend, host && *host ? "WAYLAND_DISPLAY is set" : "no WAYLAND_DISPLAY: the screen through DRM");
+    }
     bool headless = !strcmp(cfg.backend, "headless");
-    if (!headless && cfg.logind > 0) {
+    bool nested = !strcmp(cfg.backend, "wayland");              /* a window of another compositor: no logind, no /dev/dri, no /dev/input */
+    if (!headless && !nested && cfg.logind > 0) {
         char why[200];
         srv->logind = lm_logind_open(loop, why, sizeof(why));
         if (!srv->logind) {
@@ -625,7 +632,8 @@ int main(int argc, char **argv)
         }
     }
     srv->backend = headless ? lm_backend_headless_create(srv, cfg.headless_width, cfg.headless_height)
-                            : lm_backend_drm_create(srv);
+                 : nested ? lm_backend_wayland_create(srv, cfg.headless_width, cfg.headless_height)
+                          : lm_backend_drm_create(srv);
     if (!srv->backend) {
         lm_error("cannot create %s backend", cfg.backend);
         goto out;
@@ -671,7 +679,7 @@ int main(int argc, char **argv)
         lm_dock.enabled = false;
     }
     srv->night = lm_night_create(srv);
-    if (!headless && lm_input_count_keyboards(srv->input) == 0) {
+    if (!headless && !nested && lm_input_count_keyboards(srv->input) == 0) {
         /* Without a keyboard the user could not even switch VT: refuse to take over the screen. */
         lm_error("no keyboard could be opened, refusing to start (the screen would be unusable). "
                  "Fix the permissions on /dev/input/event*: sudo usermod -aG input $USER, then log in again.");

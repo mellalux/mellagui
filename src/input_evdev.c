@@ -77,6 +77,7 @@ struct lm_input {
     struct lm_timer *repeat_timer;
     bool active;
     bool headless;
+    bool no_devices;                /* no /dev/input: headless, or nested in another compositor */
     bool warned_eacces;
     bool hotplug_scan;          /* scanning because /dev/input changed: a fresh node may not have its ACL yet (udev) */
     uint16_t key_count[KEY_MAX + 1];
@@ -770,6 +771,7 @@ struct lm_input *lm_input_create(struct lm_server *srv)
     in->repeat_code = -1;
     lm_list_init(&in->devices);
     in->headless = srv->config.backend && !strcmp(srv->config.backend, "headless");
+    in->no_devices = in->headless || (srv->config.backend && !strcmp(srv->config.backend, "wayland"));      /* (the nested backend brings its host's events by lm_input_inject) */
     in->nlayouts = srv->config.kbd_nlayouts > 0 ? srv->config.kbd_nlayouts : 1;
     for (int i = 0; i < in->nlayouts; i++)
         in->layouts[i] = srv->config.kbd_nlayouts > 0 ? srv->config.kbd_layouts[i] : 0;
@@ -779,7 +781,7 @@ struct lm_input *lm_input_create(struct lm_server *srv)
             in->slot = s;
     in->sticky = srv->config.sticky_keys;
     in->repeat_timer = lm_loop_add_timer(srv->loop, repeat_timer_fn, in);
-    if (!in->headless) {
+    if (!in->no_devices) {
         scan_devices(in);
         in->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
         if (in->inotify_fd >= 0 &&
@@ -837,7 +839,7 @@ void lm_input_set_active(struct lm_input *in, bool active)
             emit_mods(in);
         }
         close_all_devices(in);
-    } else if (!in->headless) {
+    } else if (!in->no_devices) {
         scan_devices(in);
     }
 }

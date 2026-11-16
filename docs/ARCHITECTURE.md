@@ -2,7 +2,7 @@
 
 > **Implementation status.** All modules described here exist. Differences from the original design:
 > logind `TakeDevice` is implemented by `src/logind.c` (with a fallback to opening the device files, which needs the
-> `video` and `input` groups); `client/wlc.[ch]` is a small client library shared by the
+> `video` and `input` groups); `src/wlc.[ch]` is a small client library shared by the
 > clients; `src/font.c` is generated from a Terminus PSF font by `tools/gen_font.py`;
 > `backend_drm.c` has not been exercised on real hardware.
 

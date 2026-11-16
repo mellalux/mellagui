@@ -15043,6 +15043,118 @@ class TestSolitaire(Base):
         self.wait(lambda s: s['state']['prompt'] == 0)
 
 
+class TestNested(Base):
+    """src/backend_wayland.c: `--backend wayland`, MellaGUI as a window of another compositor (WSLg ...): here the host is a headless MellaGUI."""
+
+    def start(self, name, size='640x400'):
+        p, outer, stop = self.private_compositor(name + '-host', '--config', 'none')
+        outer.sync()
+        inner_name = name + '-guest'
+        env = dict(os.environ, WAYLAND_DISPLAY=name + '-host', MELLAGUI_NO_GADGET_PROCS='1')
+        env.pop('MELLAGUI_RENDERER', None)
+        proc = subprocess.Popen([BIN, '--backend', 'wayland', '--size', size, '--socket', inner_name, '--config', 'none', '--settings', 'none',
+                                 '--terminal', 'true'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (proc.poll() is None) and (proc.terminate(), proc.wait(timeout=5)))
+        for _ in range(100):
+            if os.path.exists(os.path.join(tmp, inner_name)):
+                break
+            if proc.poll() is not None:
+                self.fail('the nested compositor ended: %s' % proc.stdout.read().decode())
+            time.sleep(0.05)
+        time.sleep(0.5)
+        return outer, inner_name, proc
+
+    def host_window(self, outer):
+        for _ in range(60):
+            w = [x for x in outer.windows()['windows'] if x['app_id'] == 'mellagui.nested']
+            if w:
+                return w[0]
+            time.sleep(0.05)
+        self.fail('the host shows no window of the nested compositor')
+
+    def test_the_compositor_is_one_window_of_the_host_and_its_output_is_the_window(self):
+        outer, inner, proc = self.start('mellagui-nst1', '640x400')
+        w = self.host_window(outer)
+        self.assertEqual((w['title'], w['w'], w['h']), ('MellaGUI', 640, 400))
+        cl = Client(inner)
+        self.clients.append(cl)
+        out = cl.wl.bind('wl_output', 3)
+        cl.wl.roundtrip()
+        mode = [e for e in cl.wl.queue if e.obj == out and e.name == 'mode'][0]
+        self.assertEqual((mode.args[1], mode.args[2]), (640, 400))
+
+    def test_what_it_draws_is_in_the_hosts_window(self):
+        outer, inner, proc = self.start('mellagui-nst2')
+        w = self.host_window(outer)
+        time.sleep(0.8)
+        ppm = outer.dump(os.path.join(tmp, 'nst2.ppm'))
+        panel = ppm.px(w['x'] + 250, w['y'] + 3)                                             # the guest's top bar, a dark strip
+        below = ppm.px(w['x'] + 330, w['y'] + 200)                                           # its desktop under it
+        self.assertLess(sum(panel), 110, panel)
+        self.assertGreater(sum(below), sum(panel) + 40, (panel, below))
+
+    def test_the_hosts_mouse_wheel_and_keys_reach_the_guests_seat(self):
+        outer, inner, proc = self.start('mellagui-nst3')
+        w = self.host_window(outer)
+        cl = Client(inner)
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        ptr = cl.wl.new_id('wl_pointer')
+        kbd = cl.wl.new_id('wl_keyboard')
+        cl.wl.request(seat, 'get_pointer', ptr)
+        cl.wl.request(seat, 'get_keyboard', kbd)
+        win = Window(cl, 300, 200, title='G', app_id='nest.g', show=True)
+        cl.wl.roundtrip()
+        win.wait_configure()
+        cl.wl.request(win.toplevel, 'set_fullscreen', 0)                                      # the whole output: the pointer's place is the host window's
+        cl.wl.roundtrip()
+        self.assertIsNotNone(win.handle_configure())                                         # a buffer of the size it was given
+        cl.wl.roundtrip()
+        time.sleep(0.3)
+        outer.abs(w['x'] + 5, w['y'] + 5)                                                    # (away, then in: the guest's pointer enters its window)
+        outer.abs(w['x'] + 321, w['y'] + 203)
+        outer.sync()
+        enter = cl.wl.wait_for(lambda e: e.obj == ptr and e.name in ('enter', 'motion'), 3.0)
+        self.assertIsNotNone(enter)
+        ev = enter
+        for _ in range(10):
+            more = cl.wl.wait_for(lambda e: e.obj == ptr and e.name == 'motion', 0.2)
+            if more:
+                ev = more
+        x, y = ev.args[-2], ev.args[-1]
+        self.assertAlmostEqual(x, 321, delta=2)
+        self.assertAlmostEqual(y, 203, delta=2)
+        outer.button(272, True)
+        outer.button(272, False)
+        press = cl.wl.wait_for(lambda e: e.obj == ptr and e.name == 'button' and e.args[3] == 1, 3.0)
+        self.assertIsNotNone(press)
+        self.assertEqual(press.args[2], 272)
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == ptr and e.name == 'button' and e.args[3] == 0, 3.0))
+        outer.cmd('axis v 15 1')
+        self.assertIsNotNone(cl.wl.wait_for(lambda e: e.obj == ptr and e.name == 'axis', 3.0))
+        outer.key(KEY_LEFTSHIFT, True)
+        outer.tap(KEY_A)
+        outer.key(KEY_LEFTSHIFT, False)
+        keys = []
+        mods = []
+        end = time.time() + 3
+        while time.time() < end and len(keys) < 4:
+            e = cl.wl.wait_for(lambda e: e.obj == kbd and e.name in ('key', 'modifiers'), 0.3)
+            if e and e.name == 'key':
+                keys.append((e.args[2], e.args[3]))
+            elif e:
+                mods.append(e.args[1])
+        self.assertIn((KEY_A, 1), keys)
+        self.assertIn((KEY_A, 0), keys)
+        self.assertTrue(any(m & 1 for m in mods), 'Shift reached the guest: %r' % mods)               # (LM_MOD_SHIFT = 1)
+
+    def test_without_a_host_it_says_so(self):
+        env = dict(os.environ, WAYLAND_DISPLAY='mellagui-no-such-host')
+        r = subprocess.run([BIN, '--backend', 'wayland', '--config', 'none', '--settings', 'none', '--socket', 'mellagui-nst5'], env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('cannot connect to the host compositor', r.stdout + r.stderr)
+
+
 class TestCalendar(Base):
     """The clock settings (src/clockfmt.c), the panel's clock and mellagui-calendar, which a click on the clock shows."""
     CAL = os.path.join(ROOT, 'build', 'mellagui-calendar')
@@ -18916,11 +19028,11 @@ class TestDock(Base):
             self.assertFalse(close(mid(i), (200, 0, 0)) or close(mid(i), (0, 0, 200)) or close(mid(i), (200, 200, 0)))
         self.assertTrue(alive())
 
-    def test_the_default_dock_asks_for_the_icons_of_firefox_and_code(self):
-        p, c, stop = self.private_compositor('mellagui-dk19', '--config', 'none')
+    def test_the_default_dock_has_no_other_programs_than_mellaguis_own(self):
+        """The built-in dock lists MellaGUI's own programs only: no Firefox, no VS Code, no paths of somebody's machine (those are the user's lines)."""
         text = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10).stdout
-        self.assertIn('Firefox    = [theme:firefox]', text)
-        self.assertIn('Code       = [theme:vscode|code]', text)
+        for word in ('Firefox', 'firefox', 'Code ', 'vscode', 'VSCode', '/snap/', 'MOZ_'):
+            self.assertNotIn(word, text, word)
 
     # ---- the right-click menu of a dock icon -------------------------------------------------------------------------------
 
@@ -21493,12 +21605,12 @@ class TestLauncher(Base):
         c.sync()
         self.super_a(c)
         d = self.info(c)
-        self.assertEqual((d['open'], d['n']), (1, 12))                                    # the built-in dock (with the Overview, Camera and Record buttons), without its Launcher button
+        self.assertEqual((d['open'], d['n']), (1, 10))                                    # the built-in dock (Overview ... Settings: MellaGUI's own programs only), without its Launcher button
         c.tap(self.KEY_E)
         c.sync()
         c.click(*self.centre(self.info(c)['icons'][0]['remove']))
         c.sync()
-        self.assertEqual(self.info(c)['n'], 12)
+        self.assertEqual(self.info(c)['n'], 10)
 
     def test_the_dialog_is_a_light_frosted_card_that_hides_most_of_what_is_behind_it(self):
         c = self.start('mellagui-lc9')

@@ -96,6 +96,16 @@ Everything at once:
 The sound server must run in the user's session (`systemctl --user enable --now pipewire pipewire-pulse wireplumber`), and
 `bluetooth` / `NetworkManager` as system services (`sudo systemctl enable --now bluetooth NetworkManager`).
 
+## In a window of another desktop (WSL / WSLg, GNOME, KDE, Sway ...)
+
+Where there is no screen to take over (WSL has no `/dev/dri` and no `/dev/input`) MellaGUI runs as one window of the host's Wayland compositor:
+
+    build/mellagui --backend wayland --size 1280x720     # or just build/mellagui: with WAYLAND_DISPLAY set, `auto` chooses this
+
+The mouse and keyboard of the host window go to MellaGUI like a real keyboard; resize the window and the screen follows. On WSL you need WSLg (Windows 11,
+or a current Windows 10 with `wsl --update`); `echo $WAYLAND_DISPLAY` should print `wayland-0`. No pointer lock, no clipboard sharing with the host, no
+sound / power / resolution settings of a real screen.
+
 ## Run on a real console (first time)
 
 1. One-time: give your user access to the GPU and input devices, then log out and in again:
@@ -154,7 +164,7 @@ The Super+... shortcuts below are the defaults. Change them in the `[keys]` sect
 | Super+Shift+E               | quit MellaGUI                              |
 | Ctrl+Alt+F1..F12            | switch virtual console                  |
 
-Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, Editor, Files, if found (`~/VSCode/code` or the snap's binary) Code, if found (`/snap/bin/firefox` or `/usr/bin/firefox`; started with native Wayland and GPU rendering) Firefox, and Settings; Esc or an outside click closes it;
+Panel: *MellaGUI* (app menu: Terminal, Calculator, Images, Editor, Files and Settings; Esc or an outside click closes it;
 change it in `~/.config/mellagui/mellagui.conf` (`[menu]`, `Name = command`; `mellagui --print-config` shows the defaults) or add entries with `--app "Name=command"`, repeatable; colours: `[theme]`, shortcuts: `[keys]`, sizes of panel / frames / menu / gadgets: `[panel]`, `[windows]`, `[gadgets]` in the same file; **Super+Shift+R**, `kill -USR2` or the control socket's `reload` read it again without a restart; the settings panel's *Config* page creates, opens and reloads the file, its *Menu* page edits the app menu and its *Keys* page the shortcuts (press the keys to record them), its *Colours* page the palette (hex field and sliders), its *Sizes* page the sizes of panel, frames, menu and gadgets: add, change, remove, restore defaults), workspace cells, taskbar, then on the right the layout indicator, *Sticky*, and *Run* (run dialog), the clock and, in the top right corner, the round
 *power button*: it opens the session dialog (the screen is dimmed, a card with two round buttons, *Lock* and *Exit*; click a button, or Left / Right / Tab then Enter, or press L / E; Esc, a click outside the card or the
 power button again closes it; the dialog is modal, nothing below it gets keys or clicks).

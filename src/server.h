@@ -140,7 +140,7 @@ struct lm_global {
 /* ---- configuration (filled by main.c from argv/env) ------------------------- */
 
 struct lm_config {
-    const char *backend;        /* "drm" | "headless" */
+    const char *backend;        /* "auto" (settled in main: "wayland" when $WAYLAND_DISPLAY names a host compositor, else "drm") | "drm" | "wayland" | "headless" */
     int headless_width;         /* --size WxH (default 1280x720) */
     int headless_height;
     int headless_extra[3][2];   /* --output WxH (repeatable): more headless outputs, to the right of the first one */
@@ -224,7 +224,7 @@ struct lm_config {
 static inline void lm_config_defaults(struct lm_config *c)
 {
     *c = (struct lm_config){
-        .backend = "drm",
+        .backend = "auto",
         .headless_width = 1280,
         .headless_height = 720,
         .run_cmd = "mellagui-run",

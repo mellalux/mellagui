@@ -33,12 +33,6 @@
 
 struct lm_config;
 
-/* Pieces of the built-in Code / Firefox commands of the default dock. VS Code: ~/VSCode/code (tarball), else the Electron binary inside the snap;
- * /snap/bin/code is deliberately not used: its launcher appends --ozone-platform=x11 after our flags and there is no X11. Firefox: native Wayland,
- * WebRender on the GPU; the snap is confined: it may only connect to sockets named wayland-N, which is what MellaGUI picks by default. */
-#define LM_CODE_FLAGS "--ozone-platform=wayland --disable-gpu --no-sandbox --password-store=basic"
-#define LM_FF_ENV "env MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_WEBRENDER=1"
-
 /* Config-file callback (lm_conf_fn) for the section [commands]; `ud` is the struct lm_config. */
 bool lm_launch_conf(void *ud, const char *section, const char *key, const char *value);
 

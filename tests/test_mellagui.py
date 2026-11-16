@@ -15441,7 +15441,7 @@ class TestDefaultConfigHasEveryProgram(Base):
         both = '\n'.join(sections['dock-apps'] + sections['launcher-apps'])
         for prog in ('mellagui-files', 'mellagui-edit', 'mellagui-calc', 'mellagui-cam', 'mellagui-record', 'mellagui-top', 'mellagui-du', 'mellagui-monitor',
                      'mellagui-keys', 'mellagui-notes', 'mellagui-bluetooth', 'mellagui-shot', 'mellagui-timer', 'mellagui-smart', 'mellagui-archive',
-                     'mellagui-paint', 'mellagui-solitaire', '@terminal', '@view', '@run', '@settings'):
+                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', '@terminal', '@view', '@run', '@settings'):
             self.assertIn(prog, both, prog + ' is in neither list')
 
 
@@ -15943,6 +15943,243 @@ class TestSolitaire(Base):
         x, y, w, h = st['btn']['Help']
         self.click(x + w // 2, y + h // 2)
         st = self.wait(lambda s: s['state']['prompt'] == 3)
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == 0)
+
+
+class TestTetris(Base):
+    """client/mellagui-tetris.c: Tetris. The rules through --selftest, the window through its dump (--still = the pieces do not fall by themselves)."""
+    EXE = os.path.join(ROOT, 'build', 'mellagui-tetris')
+    K_LEFT, K_RIGHT, K_DOWN, K_UP, K_SPACE = 105, 106, 108, 103, 57
+    K_P, K_C, K_N, K_G, K_Z, K_X, K_ENTER, K_Q = 25, 46, 49, 34, 44, 45, 28, 16
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-tetris not built')
+
+    def start(self, *args, cfg=None):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.tetris', 'a window of an earlier test is still open')
+        self.dump = os.path.join(tmp, 'tet-%d.dump' % int(time.time() * 1000))
+        self.cfg = cfg or tempfile.mkdtemp(prefix='tet-cfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, self.cfg, ignore_errors=True)
+        p = subprocess.Popen([self.EXE, '--size', '780x600'] + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, MELLAGUI_TETRIS_DUMP=self.dump, XDG_CONFIG_HOME=self.cfg))
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.win = wait_for_window('mellagui.tetris')
+        self.assertIsNotNone(self.win, 'the window did not appear')
+        self.wait(lambda s: 'state' in s)
+        ctl.abs(300, 300)                                                                     # the pointer enters the window when it moves in
+        time.sleep(0.15)
+        self.proc = p
+        return p
+
+    def state(self):
+        for _ in range(10):                                                                   # (the program rewrites the file: a read between may find it empty)
+            st = self.read_dump()
+            if st.get('state'):
+                return st
+            time.sleep(0.02)
+        return {}
+
+    def read_dump(self):
+        st = {'rows': {}}
+        try:
+            with open(self.dump) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return {}
+        for l in lines:
+            f = l.split()
+            if not f:
+                continue
+            kv = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+            if f[0] == 'state':
+                st['state'] = {k: (int(v) if v.lstrip('-').isdigit() else v) for k, v in kv.items()}
+            elif f[0] == 'next':
+                st['next'] = f[1:]
+            elif f[0] == 'row':
+                st['rows'][int(f[1])] = f[2]
+            elif f[0] == 'btn':
+                st.setdefault('btn', {})[f[1]] = tuple(int(kv[k]) for k in ('x', 'y', 'w', 'h'))
+            elif f[0] == 'cbtn':
+                st.setdefault('cbtn', {})[int(f[1])] = tuple(int(v) for v in f[2:6])
+        return st
+
+    def wait(self, pred, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            st = self.state()
+            try:
+                if st and pred(st):
+                    return st
+            except (KeyError, ValueError, IndexError):
+                pass
+            time.sleep(0.03)
+        self.fail('the state never became right: %r' % self.state())
+
+    def at(self, x, y):
+        w = [x_ for x_ in ctl.windows()['windows'] if x_['app_id'] == 'mellagui.tetris'][0]
+        return w['x'] + x, w['y'] + y
+
+    def click(self, x, y):
+        ctl.click(*self.at(x, y))
+
+    def key(self, code):
+        ctl.tap(code)
+        time.sleep(0.06)
+
+    def test_selftest(self):
+        r = subprocess.run([self.EXE, '--selftest'], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('selftest ok', r.stdout)
+
+    def test_the_window_opens_with_a_piece_and_the_three_next_ones(self):
+        self.start('--seed', '7', '--piece', 'I', '--still')
+        st = self.wait(lambda s: s['state']['cur'] == 'I')
+        self.assertEqual((st['state']['x'], st['state']['y'], st['state']['rot']), (3, 1, 0))
+        self.assertEqual((st['state']['score'], st['state']['lines'], st['state']['level'], st['state']['hold']), (0, 0, 1, '-'))
+        self.assertEqual(len(st['next']), 3)
+        self.assertEqual(len(st['rows']), 20)
+        self.assertTrue(all(r == '.' * 10 for r in st['rows'].values()))
+        self.assertEqual(sorted(st['btn']), ['Ghost', 'Help', 'Level', 'New', 'Pause'])
+
+    def test_the_arrow_keys_move_and_the_letters_turn_the_piece(self):
+        self.start('--piece', 'T', '--still')
+        self.wait(lambda s: s['state']['cur'] == 'T')
+        self.key(self.K_LEFT)
+        st = self.wait(lambda s: s['state']['x'] == 2)
+        self.key(self.K_RIGHT)
+        self.key(self.K_RIGHT)
+        st = self.wait(lambda s: s['state']['x'] == 4)
+        self.key(self.K_UP)
+        st = self.wait(lambda s: s['state']['rot'] == 1)
+        self.key(self.K_Z)
+        st = self.wait(lambda s: s['state']['rot'] == 0)
+        self.key(self.K_X)
+        st = self.wait(lambda s: s['state']['rot'] == 1)
+        y = st['state']['y']
+        self.key(self.K_DOWN)                                                                 # a soft drop is a row and a point
+        st = self.wait(lambda s: s['state']['y'] == y + 1)
+        self.assertEqual(st['state']['score'], 1)
+
+    def test_a_held_arrow_key_repeats(self):
+        self.start('--piece', 'O', '--still')
+        self.wait(lambda s: s['state']['cur'] == 'O')
+        ctl.key(self.K_RIGHT, True)
+        try:
+            st = self.wait(lambda s: s['state']['x'] == 8, timeout=3.0)                       # 4 -> 8 is the right wall of the 2 wide O
+        finally:
+            ctl.key(self.K_RIGHT, False)
+        self.assertEqual(st['state']['x'], 8)
+        time.sleep(0.3)
+        self.assertEqual(self.state()['state']['x'], 8)                                       # let go: it stays
+
+    def test_space_drops_the_piece_to_the_floor_and_the_next_one_comes(self):
+        self.start('--piece', 'O', '--still')
+        st = self.wait(lambda s: s['state']['cur'] == 'O')
+        nxt = st['next'][0]
+        self.assertEqual(st['state']['ghosty'], 20)                                           # where the ghost says it lands
+        self.key(self.K_SPACE)
+        st = self.wait(lambda s: s['state']['pieces'] == 1)
+        self.assertEqual(st['state']['cur'], nxt)
+        self.assertEqual(st['state']['score'], 2 * 19)                                        # two points a row, nineteen rows
+        self.assertEqual(st['rows'][19][4:6], 'OO')
+        self.assertEqual(st['rows'][18][4:6], 'OO')
+
+    def test_an_upright_i_in_the_gap_makes_four_lines(self):
+        cfg = tempfile.mkdtemp(prefix='tet-win-', dir=tmp)
+        self.start('--setup', 'almost', '--piece', 'I', '--still', cfg=cfg)
+        st = self.wait(lambda s: s['state']['cur'] == 'I')
+        self.assertEqual([st['rows'][y][:9].count('.') for y in (16, 17, 18, 19)], [0] * 4)           # full but for the last column
+        self.assertEqual([st['rows'][y][9] for y in (16, 17, 18, 19)], ['.'] * 4)
+        self.key(self.K_UP)
+        for _ in range(4):
+            self.key(self.K_RIGHT)
+        self.key(self.K_SPACE)
+        st = self.wait(lambda s: s['state']['lines'] == 4)
+        self.assertGreaterEqual(st['state']['score'], 800)
+        st = self.wait(lambda s: s['state']['clearing'] == 0 and all(r == '.' * 10 for r in s['rows'].values()))       # the rows flash, then go
+        self.assertEqual(st['state']['b2b'], 1)
+        ctl.key(29, True)                                                                     # Ctrl+Q ends it and the best score is saved
+        ctl.tap(self.K_Q)
+        ctl.key(29, False)
+        self.proc.wait(timeout=5)
+        conf = open(os.path.join(cfg, 'mellagui', 'tetris.conf')).read()
+        self.assertRegex(conf, r'best = [89]\d\d')
+        self.assertIn('lines = 4', conf)
+        self.assertIn('played = 1', conf)
+
+    def test_the_held_piece_swaps_once_for_each_piece(self):
+        self.start('--piece', 'L', '--still')
+        st = self.wait(lambda s: s['state']['cur'] == 'L')
+        nxt = st['next'][0]
+        self.key(self.K_C)
+        st = self.wait(lambda s: s['state']['hold'] == 'L')
+        self.assertEqual(st['state']['cur'], nxt)
+        self.key(self.K_C)                                                                    # no second swap for this piece
+        time.sleep(0.2)
+        st = self.state()
+        self.assertEqual((st['state']['hold'], st['state']['cur']), ('L', nxt))
+        self.key(self.K_SPACE)
+        self.wait(lambda s: s['state']['pieces'] == 1)
+        self.key(self.K_C)
+        st = self.wait(lambda s: s['state']['cur'] == 'L')
+        self.assertNotEqual(st['state']['hold'], 'L')
+
+    def test_pause_stops_the_keys_and_p_goes_on(self):
+        self.start('--piece', 'T', '--still')
+        self.wait(lambda s: s['state']['cur'] == 'T')
+        self.key(self.K_P)
+        st = self.wait(lambda s: s['state']['paused'] == 1)
+        x = st['state']['x']
+        self.key(self.K_LEFT)
+        time.sleep(0.2)
+        self.assertEqual(self.state()['state']['x'], x)
+        self.key(self.K_P)
+        self.wait(lambda s: s['state']['paused'] == 0)
+        self.key(self.K_LEFT)
+        self.wait(lambda s: s['state']['x'] == x - 1)
+
+    def test_the_piece_falls_by_itself_and_a_new_game_asks_first(self):
+        self.start('--seed', '3', '--piece', 'O')
+        st = self.wait(lambda s: s['state']['cur'] == 'O')
+        self.wait(lambda s: s['state']['y'] >= 2, timeout=3.0)                                # a row a second at level 1
+        self.key(self.K_SPACE)
+        self.wait(lambda s: s['state']['pieces'] == 1)
+        self.key(self.K_N)
+        st = self.wait(lambda s: s['state']['prompt'] == 1)                                   # a game is going: it asks
+        x, y, w, h = st['cbtn'][1]
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['prompt'] == 0 and s['state']['pieces'] == 0)
+        self.assertNotEqual(st['state']['seed'], 3)
+
+    def test_a_full_board_ends_the_game_with_a_card(self):
+        self.start('--setup', 'top')
+        st = self.wait(lambda s: s['state']['over'] == 1)
+        self.assertEqual(st['state']['prompt'], 2)
+        self.assertEqual(sorted(st['cbtn']), [0, 1])
+        self.key(self.K_ENTER)                                                                # Enter = New game
+        st = self.wait(lambda s: s['state']['prompt'] == 0 and s['state']['over'] == 0)
+        self.assertTrue(all(r == '.' * 10 for r in st['rows'].values()))
+
+    def test_the_ghost_and_the_level_buttons_are_saved(self):
+        cfg = tempfile.mkdtemp(prefix='tet-set-', dir=tmp)
+        self.start('--still', cfg=cfg)
+        st = self.wait(lambda s: s['state']['ghost'] == 1)
+        x, y, w, h = st['btn']['Ghost']
+        self.click(x + w // 2, y + h // 2)
+        self.wait(lambda s: s['state']['ghost'] == 0)
+        x, y, w, h = st['btn']['Level']
+        self.click(x + w // 2, y + h // 2)                                                    # nothing played yet: a new game at level 2
+        st = self.wait(lambda s: s['state']['level'] == 2 and s['state']['startlevel'] == 2)
+        conf = open(os.path.join(cfg, 'mellagui', 'tetris.conf')).read()
+        self.assertIn('ghost = 0', conf)
+        self.assertIn('level = 2', conf)
+        x, y, w, h = st['btn']['Help']
+        self.click(x + w // 2, y + h // 2)
+        self.wait(lambda s: s['state']['prompt'] == 3)
         ctl.tap(KEY_ESC)
         self.wait(lambda s: s['state']['prompt'] == 0)
 

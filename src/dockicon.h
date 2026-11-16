@@ -36,6 +36,7 @@ enum lm_dockicon {
     LM_DOCKICON_PAINT,          /* the picture editor: a painter's palette */
     LM_DOCKICON_CARDS,          /* the solitaire game: a playing card with a diamond */
     LM_DOCKICON_DISPLAY,        /* the monitor settings: a screen on a stand with a sun in it (brightness) */
+    LM_DOCKICON_BLOCKS,         /* the tetris game: four blocks in a T */
     LM_DOCKICON_COUNT
 };
 

@@ -16249,6 +16249,30 @@ class TestTetris(Base):
         self.wait(lambda s: s['state']['prompt'] == 0)
 
 
+class TestChessRules(unittest.TestCase):
+    """client/chess.c, the rules of the chess game, through build/chess-test (no compositor needed): perft against the published
+    numbers (the six well known positions and the special cases), FEN / SAN / UCI round trips, make / unmake and the hash on
+    random games, the draw rules."""
+    EXE = os.path.join(ROOT, 'build', 'chess-test')
+
+    def setUp(self):
+        if not os.path.exists(self.EXE):
+            self.skipTest('chess-test not built')
+
+    def test_the_rules_engine_selftest(self):
+        r = subprocess.run([self.EXE], capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertIn('chess-test: ok', r.stdout)
+        self.assertIn('0 failed', r.stdout)
+
+    def test_divide_prints_the_count_below_each_move(self):
+        r = subprocess.run([self.EXE, '--divide', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', '2'],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('e2e4: 20', r.stdout)
+        self.assertIn('nodes 400', r.stdout)
+
+
 class TestNested(Base):
     """src/backend_wayland.c: `--backend wayland`, MellaGUI as a window of another compositor (WSLg ...): here the host is a headless MellaGUI."""
 

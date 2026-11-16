@@ -54,7 +54,8 @@ extern struct lm_dock_settings lm_dock;                  /* starts as the built-
 struct lm_dock_item {
     const char *name;
     const char *cmd;                    /* expanded, ready for lm_server_spawn */
-    const char *match;                  /* lower-case program name: a window whose app id (dots -> dashes) is this belongs to the button */
+    const char *match;                  /* lower-case program name: a window whose app id (dots -> dashes) is this belongs to the button;
+                                         * a browser in app mode (--app=URL, --app-id=ID) has a pattern with "*" at the ends instead */
     int kind;                           /* enum lm_dockicon, when there is no picture */
     const struct lm_image *img;         /* premultiplied ARGB, at most the zoomed icon size, or NULL for a built-in icon */
     int raw;                            /* index of the entry in the file's list (lm_dock_raw_entry / lm_launchapps_raw_entry): entries that were left out leave gaps */

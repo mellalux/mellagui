@@ -18867,6 +18867,33 @@ class TestDock(Base):
             time.sleep(0.05)
         self.assertEqual(self.dock(c)[1][0]['running'], 0)
 
+    def test_a_browser_in_app_mode_is_matched_by_its_page_not_by_the_browsers_name(self):
+        # Chromium names the window of `--app=URL` "<chrome|chromium>-<host>_<path>-<profile>" (slashes -> underscores) and
+        # of an installed web app "<chrome|chromium>-<id>-<profile>": the button of a page must light up for that window only
+        wid = 'abcdefghijklmnopabcdefghijklmnop'
+        c = self.start('mellagui-dk30', '[dock]\nicon-size = 40\n[dock-apps]\n'
+                       'Synth = true --ozone-platform=wayland --app=https://synthai.ee/\n'
+                       'Deep = true --app=http://Example.org:8080/app/x?q=1\n'
+                       'Web = true --app-id=%s --profile-directory=Default\n'
+                       'Plain = true\n' % wid)
+        cl = Client('mellagui-dk30')
+        self.clients.append(cl)
+        running = lambda: {i['name']: i['running'] for i in self.dock(c)[1]}
+        self.assertEqual(running(), {'Synth': 0, 'Deep': 0, 'Web': 0, 'Plain': 0})
+        wins = [Window(cl, 200, 100, app_id='chrome-synthai.ee__-Default', title='s')]
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(running(), {'Synth': 1, 'Deep': 0, 'Web': 0, 'Plain': 0})
+        wins.append(Window(cl, 200, 100, app_id='chromium-example.org__app_x-Profile 1', title='d'))     # another browser, another profile
+        wins.append(Window(cl, 200, 100, app_id='chrome-' + wid + '-Default', title='w'))
+        wins.append(Window(cl, 200, 100, app_id='chrome-synthai.ee__other-Default', title='o'))          # another page of the same host
+        wins.append(Window(cl, 200, 100, app_id='chrome', title='the browser itself'))                   # the browser's own window
+        cl.wl.roundtrip()
+        c.sync()
+        self.assertEqual(running(), {'Synth': 1, 'Deep': 1, 'Web': 1, 'Plain': 0})
+        cl.wl.close()
+        self.clients.remove(cl)
+
     def test_an_icon_zooms_in_and_out_while_its_program_starts_and_stops_when_the_window_is_there(self):
         c = self.start('mellagui-dk15', '[dock]\nicon-size = 40\n[dock-apps]\nSlow = sleep 30\n', )
         base = self.dock(c)[1][0]
@@ -21265,6 +21292,60 @@ class TestLauncherMoving(Base):
         self.assertEqual(order[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])
         names = [i[1] for i in self.info(c)['icons']]
         self.assertEqual(names[:7], ['Term', 'App01', 'App03', 'App04', 'App05', 'App02', 'App06'])        # the grid follows
+
+    def test_an_icon_carried_to_a_cell_of_another_page_stays_on_that_page(self):
+        c = self.start('mellagui-lm8', n=30)
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        card = d['card']
+        x0, y0 = self.centre(ic['App02'])
+        c.abs(x0, y0)
+        c.button(272, True)
+        for i in range(1, 6):
+            c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0)
+            time.sleep(0.03)
+        for k in range(80):                                                                       # held at the edge it turns to page 1
+            c.abs(card[0] + card[2] - 20, y0 + (k % 2))
+            if self.info(c)['page'] == 1:
+                break
+            time.sleep(0.05)
+        d = self.info(c)
+        self.assertEqual(d['page'], 1)
+        target = d['icons'][3]
+        c.abs(*self.centre(target[2]))
+        time.sleep(0.2)
+        c.button(272, False)
+        order = self.wait_order(lambda o: o)
+        self.assertIn('App02', order)
+        d = self.info(c)
+        self.assertEqual(d['page'], 1)                                                           # still on the page it was dropped on
+        self.assertIn('App02', [i[1] for i in d['icons']])                                       # ... and it is there
+
+    def test_dropped_on_the_empty_part_of_a_short_page_it_goes_to_the_end_of_that_page(self):
+        c = self.start('mellagui-lm9', n=22)
+        d = self.info(c)
+        ic = {i[1]: i[2] for i in d['icons']}
+        card = d['card']
+        x0, y0 = self.centre(ic['App02'])
+        c.abs(x0, y0)
+        c.button(272, True)
+        for i in range(1, 6):
+            c.abs(x0 + (card[0] + card[2] - 20 - x0) * i // 5, y0)
+            time.sleep(0.03)
+        for k in range(80):
+            c.abs(card[0] + card[2] - 20, y0 + (k % 2))
+            if self.info(c)['page'] == 1:
+                break
+            time.sleep(0.05)
+        d = self.info(c)
+        self.assertEqual(d['page'], 1)
+        g = d['card']
+        c.abs(g[0] + g[2] // 2, g[1] + g[3] // 2)                                                 # the middle of the page: nothing is there
+        time.sleep(0.2)
+        c.button(272, False)
+        order = self.wait_order(lambda o: o)
+        self.assertEqual(order.index('App02'), len(order) - 1)                                   # at the end of the list = of this last page
+        self.assertIn('App02', [i[1] for i in self.info(c)['icons']])
 
     def test_a_next_page_appears_while_an_icon_is_carried_and_goes_with_the_drag(self):
         c = self.start('mellagui-lm7')

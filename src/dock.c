@@ -79,7 +79,7 @@ const char *lm_dock_default_conf(void) { return default_text; }
 struct raw_item { char name[LM_DOCK_NAME_MAX], icon[LM_DOCK_ICON_MAX], cmd[LM_DOCK_CMD_MAX]; };
 struct app_item {
     struct lm_dock_item pub;
-    char name[LM_DOCK_NAME_MAX], cmd[LM_DOCK_CMD_MAX], match[64];
+    char name[LM_DOCK_NAME_MAX], cmd[LM_DOCK_CMD_MAX], match[192];
     struct lm_image img;
     bool has_img;
 };
@@ -280,11 +280,99 @@ const struct lm_dock_item *lm_launchapps_item(int i)
     return i >= 0 && i < LAUNCH_LIST->item_n ? &LAUNCH_LIST->items[i].pub : NULL;
 }
 
+/* A Chromium based browser in app mode (a web page as a window: `--app=URL`, or an installed web app: `--app-id=ID`) names its
+ * windows "<chrome|chromium|...>-<host>_<path>-<profile>" (the slashes of the path become underscores, so https://synthai.ee/ is
+ * "chrome-synthai.ee__-Default") or "<chrome|chromium|...>-<id>-<profile>". The program's name says nothing about which page it is, so
+ * such a button matches that shape with "*" at both ends (dock_app_matches; dots are dashes and letters lower case on both sides).
+ * Returns true when the command is in app mode - `out` is then the pattern, or empty when it does not fit (no match at all, never
+ * the bare program name: that would claim every window of the browser). */
+static bool app_mode_key(const char *cmd, char *out, size_t n)
+{
+    const char *val = NULL;
+    bool is_id = false;
+    for (const char *w = cmd; *w;) {
+        while (isspace((unsigned char)*w))
+            w++;
+        if (*w == '\'' || *w == '"')
+            w++;
+        if (!strncmp(w, "--app=", 6)) {
+            val = w + 6;
+            break;
+        }
+        if (!strncmp(w, "--app-id=", 9)) {
+            val = w + 9;
+            is_id = true;
+            break;
+        }
+        while (*w && !isspace((unsigned char)*w))
+            w++;
+    }
+    if (!val)
+        return false;
+    out[0] = 0;
+    char name[160];
+    size_t o = 0;
+    bool open_end = false;                  /* the path had a character we do not map: match its start only */
+    if (is_id) {
+        for (; *val && o + 1 < sizeof(name) && isalnum((unsigned char)*val); val++)
+            name[o++] = (char)tolower((unsigned char)*val);
+        if (*val && !isspace((unsigned char)*val) && *val != '\'' && *val != '"')
+            return true;
+    } else {
+        const char *p = strstr(val, "://");
+        if (!p)
+            return true;
+        p += 3;
+        const char *at = p;
+        while (*at && !strchr("/?#'\" \t", *at))    /* user@ in front of the host: not part of the name */
+            at++;
+        for (const char *q = p; q < at; q++)
+            if (*q == '@')
+                p = q + 1;
+        const char *host_end = p;
+        while (*host_end && !strchr("/:?#'\" \t", *host_end))
+            host_end++;
+        for (const char *q = p; q < host_end && o + 1 < sizeof(name); q++)
+            name[o++] = (char)tolower((unsigned char)*q);
+        const char *path = host_end;
+        while (*path && *path != '/' && !strchr("?#'\" \t", *path))      /* skip ":port" */
+            path++;
+        if (o + 1 < sizeof(name))
+            name[o++] = '_';
+        if (*path != '/') {
+            if (o + 1 < sizeof(name))
+                name[o++] = '_';                                         /* no path = "/" */
+        } else {
+            for (; *path && !strchr("?#'\" \t", *path) && o + 1 < sizeof(name); path++) {
+                unsigned char c = (unsigned char)*path;
+                if (c == '/')
+                    name[o++] = '_';
+                else if (isalnum(c) || c == '.' || c == '_' || c == '-' || c == '~')
+                    name[o++] = (char)tolower(c);
+                else {
+                    open_end = true;
+                    break;
+                }
+            }
+        }
+    }
+    name[o] = 0;
+    for (size_t i = 0; i < o; i++)
+        if (name[i] == '.')
+            name[i] = '-';
+    if (o == 0 || strlen(name) + 5 >= n)
+        return true;
+    snprintf(out, n, "*-%s%s", name, open_end ? "*" : "-*");
+    return true;
+}
+
 /* The program of a command line, lower case without its directory and a trailing ".sh"/".exe": what a window's app id is compared with.
- * `env` and VAR=value words in front are skipped. */
+ * `env` and VAR=value words in front are skipped. A browser in app mode is matched by its page instead (app_mode_key). */
 static void program_key(const char *cmd, char *out, size_t n)
 {
     out[0] = 0;
+    if (app_mode_key(cmd, out, n))
+        return;
     for (;;) {
         while (isspace((unsigned char)*cmd))
             cmd++;

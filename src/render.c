@@ -1412,7 +1412,7 @@ static void paint_launcher_button(const struct paint_ctx *c, const struct lm_rec
 /* The launcher card's frosted glass: the blurred wallpaper (made once per wallpaper and output size, a small picture) under the card's light body, so
  * the picture shows through as colour but not as detail. Round corners by the signed distance of the corner arc. false = no wallpaper: the caller
  * paints a more solid body instead. Works in the card's own proportions, so a snapshot (the bubble) and the screen give the same picture. */
-#define LAUNCHER_FROST_ALPHA 0x26u                              /* the body over the blurred wallpaper: 15 % (a see-through card: 85 %) */
+#define LAUNCHER_FROST_ALPHA 0x40u                              /* the body over the blurred wallpaper: 25 % (a card that is 75 % see-through) */
 #define LAUNCHER_FROST_LIGHTEN 120                              /* ... the blurred wallpaper itself is lightened towards the body colour by this much (of 255) so dark text stays readable */
 
 static bool paint_launcher_frost(const struct paint_ctx *c, const struct lm_launcher_info *li, int radius)

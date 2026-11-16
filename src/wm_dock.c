@@ -59,6 +59,36 @@ bool dock_app_matches(const char *match, const char *app_id)
 {
     if (!*match)
         return false;
+    if (strchr(match, '*')) {
+        /* a pattern ("*-synthai-ee__-*", see app_mode_key in dock.c): "*" stands for any run of characters; the app id is
+         * compared in the same normal form (lower case, dots -> dashes) */
+        char norm[256];
+        size_t n = 0;
+        for (; app_id[n]; n++) {
+            if (n + 1 >= sizeof(norm))
+                return false;
+            norm[n] = app_id[n] == '.' ? '-' : (char)tolower((unsigned char)app_id[n]);
+        }
+        norm[n] = 0;
+        const char *p = match, *s = norm, *star = NULL, *back = NULL;
+        while (*s) {
+            if (*p == '*') {
+                star = p++;
+                back = s;
+            } else if (*p == *s) {
+                p++;
+                s++;
+            } else if (star) {
+                p = star + 1;
+                s = ++back;
+            } else {
+                return false;
+            }
+        }
+        while (*p == '*')
+            p++;
+        return !*p;
+    }
     size_t i = 0;
     for (; match[i] && app_id[i]; i++) {
         char c = app_id[i] == '.' ? '-' : (char)tolower((unsigned char)app_id[i]);

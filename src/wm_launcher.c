@@ -420,6 +420,8 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
                         break;
                     }
                 }
+                if (li->drop_cell < 0 && li->last > li->first && lm_rect_contains(&li->grid, px, py))
+                    li->drop_cell = LM_MIN(li->last - 1, n - 1);        /* over the page but between its cells (the empty part of a short page): the end of what is on this page */
             }
         }
         /* The cells make room: with the icon over cell t, those between its own place and t move one cell towards it (the way the list will be after the drop),

@@ -16254,7 +16254,7 @@ class TestChess(Base):
     (MELLAGUI_CHESS_DUMP: the state, the FEN, the legal moves, the move list, the buttons); the pieces and the geometry through --selftest."""
     EXE = os.path.join(ROOT, 'build', 'mellagui-chess')
     K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_SPACE, K_ESC = 103, 108, 105, 106, 28, 57, 1
-    K = dict(n=49, u=22, h=35, f=33, l=38, q=16, r=19, b=48, w=17, z=44, **{str(i): 2 + i - 1 for i in range(1, 10)}, **{'0': 11})
+    K = dict(n=49, u=22, h=35, f=33, l=38, c=46, q=16, r=19, b=48, w=17, z=44, **{str(i): 2 + i - 1 for i in range(1, 10)}, **{'0': 11})
     START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
     def setUp(self):
@@ -16294,6 +16294,8 @@ class TestChess(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'fen':
                 st['fen'] = ' '.join(f[1:])
+            elif f[0] == 'clock':
+                st['clock'] = {k: (v if k == 'running' else int(v)) for k, v in (x.split('=') for x in f[1:])}
             elif f[0] == 'lay':
                 st['lay'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
             elif f[0] == 'rank':
@@ -16399,7 +16401,8 @@ class TestChess(Base):
         self.assertEqual(st['rank'][8], 'rnbqkbnr')
         self.assertEqual(len(st['legal']), 20)
         self.assertEqual((st['state']['turn'], st['state']['level'], st['state']['human'], st['state']['status']), ('w', '0', '-', 'ongoing'))
-        self.assertEqual(sorted(st['btn']), ['Flip', 'Help', 'Hint', 'Level', 'New', 'Undo'])
+        self.assertEqual(sorted(st['btn']), ['Clock', 'Flip', 'Help', 'Hint', 'Level', 'New', 'Undo'])
+        self.assertEqual(st['clock']['on'], 0)                                               # no clock unless asked for
         self.assertTrue(st['lay']['cs'] >= 40)
 
     def test_a_click_on_a_piece_and_a_click_on_a_square_moves_it(self):
@@ -16627,6 +16630,104 @@ class TestChess(Base):
         img = ctl.dump(os.path.join(tmp, 'chess-d.ppm'))
         r, g, b = corner('e8', img)
         self.assertGreater(r, g + 40, 'the king in check is not red: %r' % ((r, g, b),))
+
+    def test_the_clock_starts_after_both_sides_have_moved(self):
+        self.start('--level', '0', '--clock-seconds', '60+0')
+        st = self.state()
+        self.assertEqual((st['clock']['on'], st['clock']['white'], st['clock']['black'], st['clock']['running']), (1, 60000, 60000, '-'))
+        self.move('e2', 'e4')
+        self.move('e7', 'e5')
+        self.wait(lambda s: s['state']['plies'] == '2')
+        time.sleep(0.7)
+        st = self.state()
+        self.assertEqual(st['clock']['running'], 'w')                                        # White's clock runs, Black's stands
+        self.assertTrue(59000 < st['clock']['white'] < 59600, st['clock'])
+        self.assertEqual(st['clock']['black'], 60000)
+        self.move('g1', 'f3')
+        time.sleep(0.6)
+        st = self.wait(lambda s: s['clock']['running'] == 'b')
+        self.assertTrue(st['clock']['black'] < 59700 and st['clock']['white'] > 58800, st['clock'])
+        self.assertTrue(st['clock']['white'] <= 60000, 'no increment was asked for')
+
+    def test_the_increment_is_added_for_every_move_after_the_second(self):
+        self.start('--level', '0', '--clock-seconds', '30+5')
+        for a, b in (('e2', 'e4'), ('e7', 'e5'), ('g1', 'f3')):
+            self.move(a, b)
+        st = self.wait(lambda s: s['state']['plies'] == '3')
+        self.assertTrue(34000 < st['clock']['white'] <= 35000, st['clock'])                  # 30 s, the time of the move, and 5 s
+        self.assertEqual(st['clock']['inc'], 5000)
+        self.assertTrue(29000 < st['clock']['black'] <= 30000, st['clock'])                  # Black's clock has only just started
+
+    def test_a_side_that_runs_out_of_time_loses(self):
+        self.start('--level', '0', '--clock-seconds', '2+0')
+        self.move('e2', 'e4')
+        self.move('e7', 'e5')
+        st = self.wait(lambda s: s['state']['status'] == 'timeout', timeout=6.0)
+        self.assertEqual((st['state']['prompt'], st['clock']['white'], st['clock']['running']), ('3', 0, '-'))
+        self.assertEqual(st['state']['played'], '0')                                         # two players: nothing is counted
+        self.move('g1', 'f3')                                                                # the card is up, and the game is over
+        x, y, w, h = st['cbtn'][0]
+        self.click(x + w // 2, y + h // 2)
+        self.move('g1', 'f3')
+        time.sleep(0.2)
+        self.assertEqual(self.state()['state']['plies'], '2')
+
+    def test_a_flag_against_the_computer_is_a_loss_that_is_counted(self):
+        cfg = tempfile.mkdtemp(prefix='chess-cfg-', dir=tmp)
+        self.start('--level', '1', '--clock-seconds', '2+0', cfg=cfg)
+        self.move('e2', 'e4')
+        self.wait(lambda s: s['state']['plies'] == '2')                                      # the computer answers; now the person's clock runs
+        st = self.wait(lambda s: s['state']['status'] == 'timeout', timeout=6.0)
+        self.assertEqual((st['state']['lost'], st['state']['played'], st['state']['won']), ('1', '1', '0'))
+        self.assertIn('lost = 1', open(os.path.join(cfg, 'mellagui', 'chess.conf')).read())
+
+    def test_a_flag_is_a_draw_when_the_other_side_could_not_have_mated(self):
+        self.start('--level', '0', '--clock-seconds', '2+0', '--fen', '8/8/4k3/8/8/3K4/6p1/7B b - - 0 1')
+        self.move('e6', 'e5')
+        self.move('d3', 'c3')
+        st = self.wait(lambda s: s['state']['status'] == 'timeout-draw', timeout=6.0)        # Black runs out; White has only a bishop
+        self.assertEqual((st['state']['prompt'], st['clock']['black']), ('3', 0))
+
+    def test_undo_gives_the_clocks_back(self):
+        self.start('--level', '0', '--clock-seconds', '60+0')
+        for a, b in (('e2', 'e4'), ('e7', 'e5'), ('g1', 'f3')):
+            self.move(a, b)
+        self.wait(lambda s: s['state']['plies'] == '3')
+        time.sleep(0.5)
+        self.button('Undo')
+        st = self.wait(lambda s: s['state']['plies'] == '2')
+        # White's clock is back where it was before the move that was taken back (it was ~59.4 s without that) and runs again from there
+        self.assertTrue(59800 < st['clock']['white'] <= 60000, st['clock'])
+        self.assertEqual(st['clock']['black'], 60000)
+
+    def test_the_clock_button_and_key_step_through_the_presets_and_it_is_remembered(self):
+        cfg = tempfile.mkdtemp(prefix='chess-cfg-', dir=tmp)
+        self.start('--level', '0', cfg=cfg)
+        self.key(self.K['c'])                                                                # before the first move it is the clock of this game, too
+        st = self.wait(lambda s: s['clock']['on'] == 1)
+        self.assertEqual((st['clock']['white'], st['clock']['preset']), (60000, 1))
+        self.button('Clock')
+        st = self.wait(lambda s: s['clock']['preset'] == 2)
+        self.assertEqual(st['clock']['white'], 180000)
+        self.move('e2', 'e4')
+        self.wait(lambda s: s['state']['plies'] == '1')
+        self.key(self.K['c'])                                                                # in a game it is the clock of the next one
+        st = self.wait(lambda s: s['clock']['preset'] == 3)
+        self.assertEqual((st['clock']['white'], st['clock']['inc']), (180000, 0))
+        time.sleep(0.2)
+        self.assertIn('clock = 3', open(os.path.join(cfg, 'mellagui', 'chess.conf')).read())
+        self.key(self.K['n'])                                                                # the new game takes the new clock
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.key(self.K['w'])
+        st = self.wait(lambda s: s['state']['plies'] == '0' and s['state']['prompt'] == '0')
+        self.assertEqual((st['clock']['white'], st['clock']['inc']), (180000, 2000))
+
+    def test_the_computer_plans_by_the_time_it_has(self):
+        self.start('--level', '9', '--clock-seconds', '20+0')                               # level 9 would think for 8 s
+        t0 = time.time()
+        self.move('e2', 'e4')
+        self.wait(lambda s: s['state']['plies'] == '2', timeout=4.0)
+        self.assertLess(time.time() - t0, 3.0)
 
     def test_the_move_list_and_the_help_card(self):
         self.start('--level', '0')

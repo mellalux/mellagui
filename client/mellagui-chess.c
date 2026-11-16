@@ -3,12 +3,14 @@
  * The rules are client/chess.[ch], the search client/chessai.[ch], the pieces client/chessart.h (drawn from distance functions: no fonts, no files).
  * This file is the window: the board, the pointer and the keys, the engine in a thread of its own, the cards, the best results, the test dump.
  *
- *   mellagui-chess [--level 0..9] [--black] [--fen FEN] [--size WxH] [--delay MS]
+ *   mellagui-chess [--level 0..9] [--black] [--fen FEN] [--clock-seconds BASE+INC] [--size WxH] [--delay MS]
  *   mellagui-chess --selftest | --sheet FILE.ppm [SIZE]      (the pieces on a board, to look at)
  *
  * Level 0 = two players on one screen, 1..9 = the engine (chai_level).  Move a piece by dragging it or by a click on it and a click on where it goes;
  * the arrow keys and Enter do the same; N new game, U / Backspace take a move back, H asks the engine for a hint, F turns the board, 0..9 the level.
  * The engine thinks in a thread (it never stops the window) and answers after at least --delay ms, so a move can be seen.
+ * The clock (C steps through the presets): it starts when both sides have made their first move, the move that is made adds the increment,
+ * the side whose time runs out loses (a draw when the other side could not mate anyway), the engine plans its thinking by the time it has.
  */
 #include <errno.h>
 #include <limits.h>
@@ -57,13 +59,31 @@
 #define SQ_HINT_D 0x5f9bd6u
 #define SQ_CHECK 0xe84a4au
 
+/* the end of a game by the clock, beside the values of ch_status */
+#define ST_FLAG 100                                         /* the side whose clock ran out has lost */
+#define ST_FLAG_DRAW 101                                    /* ... but the other side could not have mated */
+
+static const struct { int base_s, inc_s; const char *name; } k_clocks[] = {
+    { 0, 0, "No clock" }, { 60, 0, "1 min" }, { 180, 0, "3 min" }, { 180, 2, "3 min + 2 s" }, { 300, 0, "5 min" },
+    { 300, 3, "5 min + 3 s" }, { 600, 0, "10 min" }, { 900, 10, "15 min + 10 s" }, { 1800, 0, "30 min" },
+};
+#define N_CLOCKS ((int)(sizeof(k_clocks) / sizeof(k_clocks[0])))
+
 enum prompt { P_NONE, P_NEW, P_PROMO, P_OVER, P_HELP };
-enum { B_NEW, B_UNDO, B_HINT, B_FLIP, B_LEVEL, B_HELP, B_COUNT };
+enum { B_NEW, B_UNDO, B_HINT, B_FLIP, B_CLOCK, B_LEVEL, B_HELP, B_COUNT };
 
 struct stats {
     int played, won, drawn, lost;
     int level;                                              /* 0 = two players */
     int human;                                              /* the side the person plays: CH_WHITE or CH_BLACK */
+    int clock;                                              /* the preset of k_clocks that a new game starts with */
+};
+
+struct clk {
+    bool on;
+    int64_t left[2];                                        /* ms left for White and Black */
+    int64_t inc_ms;
+    int64_t last;                                           /* when the time was last counted */
 };
 
 /* The engine's thread: it gets a copy of the position and the keys of the game, and says when it is done. */
@@ -104,6 +124,12 @@ struct app {
     int promo_from, promo_to;
     struct think tk;
     int ticket;
+    struct clk clk;
+    int64_t (*snap)[2];                                     /* the clocks after 0, 1, 2 ... plies: what undo puts back */
+    int snapcap;
+    int cli_base, cli_inc;                                  /* --clock-seconds, -1 = not given */
+    int timeout;                                            /* the side that lost on time, -1 none */
+    bool timeout_draw;
     ch_move hint;
     int64_t hint_ms;
     int delay_ms;
@@ -178,6 +204,7 @@ static void stats_load(struct stats *s)
         else if (sscanf(line, "lost = %d", &v) == 1) s->lost = v;
         else if (sscanf(line, "level = %d", &v) == 1) s->level = LM_CLAMP(v, 0, chai_level_count());
         else if (sscanf(line, "side = %d", &v) == 1) s->human = v == 1 ? CH_BLACK : CH_WHITE;
+        else if (sscanf(line, "clock = %d", &v) == 1) s->clock = LM_CLAMP(v, 0, N_CLOCKS - 1);
     }
     fclose(f);
 }
@@ -202,8 +229,8 @@ static void stats_save(const struct stats *s)
     FILE *f = fopen(path, "w");
     if (!f)
         return;
-    fprintf(f, "played = %d\nwon = %d\ndrawn = %d\nlost = %d\nlevel = %d\nside = %d\n", s->played, s->won, s->drawn, s->lost, s->level,
-            s->human == CH_BLACK ? 1 : 0);
+    fprintf(f, "played = %d\nwon = %d\ndrawn = %d\nlost = %d\nlevel = %d\nside = %d\nclock = %d\n", s->played, s->won, s->drawn, s->lost, s->level,
+            s->human == CH_BLACK ? 1 : 0, s->clock);
     fclose(f);
 }
 
@@ -266,8 +293,10 @@ static bool human_turn(const struct app *a)
     return a->human < 0 || a->g.pos.side == a->human;
 }
 
-static enum ch_status status(const struct app *a)
+static int status(const struct app *a)
 {
+    if (a->timeout >= 0)
+        return a->timeout_draw ? ST_FLAG_DRAW : ST_FLAG;
     return ch_game_status(&a->g);
 }
 
@@ -364,6 +393,14 @@ static void think_start(struct app *a, int mode)
         if (t->lim.noise == 0)
             t->lim.noise = 4;                               /* so that the strong levels do not play the same game every time */
         t->lim.seed = (uint32_t)(a->g.n * 2654435761u) ^ (uint32_t)a->g.hist[a->g.n];
+        if (a->clk.on) {                                    /* it plans by the time it has: a 25th of it and most of the increment, never a third */
+            int64_t left = a->clk.left[a->g.pos.side], budget = left / 25 + a->clk.inc_ms * 3 / 4;
+            if (left < 3000)
+                budget = left / 15;
+            budget = LM_CLAMP(budget, 20, LM_MAX(20, left / 3));
+            if (t->lim.time_ms == 0 || budget < t->lim.time_ms)
+                t->lim.time_ms = (int)budget;
+        }
     }
     struct think_job *j = malloc(sizeof(*j));
     if (!j) {
@@ -397,14 +434,15 @@ static void deselect(struct app *a)
     a->pressed = a->dragging = false;
 }
 
-static void bank(struct app *a, enum ch_status s)
+static void bank(struct app *a, int s)
 {
     if (a->banked || a->level == 0 || a->human < 0)
         return;
     a->banked = true;
     a->st.played++;
-    if (s == CH_CHECKMATE) {
-        if (a->g.pos.side == a->human)
+    int loser = s == CH_CHECKMATE ? a->g.pos.side : s == ST_FLAG ? a->timeout : -1;
+    if (loser >= 0) {
+        if (loser == a->human)
             a->st.lost++;
         else
             a->st.won++;
@@ -414,7 +452,7 @@ static void bank(struct app *a, enum ch_status s)
     stats_save(&a->st);
 }
 
-static const char *result_text(const struct app *a, enum ch_status s)
+static const char *result_text(const struct app *a, int s)
 {
     if (s == CH_CHECKMATE) {
         bool human_lost = a->human >= 0 && a->g.pos.side == a->human;
@@ -422,9 +460,31 @@ static const char *result_text(const struct app *a, enum ch_status s)
             return a->g.pos.side == CH_WHITE ? "Checkmate - Black wins" : "Checkmate - White wins";
         return human_lost ? "Checkmate - the computer wins" : "Checkmate - you win!";
     }
+    if (s == ST_FLAG) {
+        if (a->human < 0)
+            return a->timeout == CH_WHITE ? "White's time is up - Black wins" : "Black's time is up - White wins";
+        return a->timeout == a->human ? "Your time is up - the computer wins" : "The computer's time is up - you win!";
+    }
+    if (s == ST_FLAG_DRAW)
+        return "Time is up - a draw: the other side could not have mated";
     if (s == CH_STALEMATE)
         return "Stalemate - a draw";
     return s == CH_DRAW_MATERIAL ? "A draw: neither side can mate" : s == CH_DRAW_REPETITION ? "A draw by repetition" : "A draw by the fifty move rule";
+}
+
+/* the game is over (a mate, a draw, a flag): the card, the result counted, a sound */
+static void finish(struct app *a, int s)
+{
+    think_cancel(a);
+    bank(a, s);
+    a->prompt = P_OVER;
+    a->pc_hover = a->pc_down = -1;
+    a->hint = 0;
+    deselect(a);
+    bool human_lost = s == CH_CHECKMATE ? a->g.pos.side == a->human : s == ST_FLAG ? a->timeout == a->human : false;
+    bool decisive = s == CH_CHECKMATE || s == ST_FLAG;
+    sound(a, !decisive ? "draw" : (a->human < 0 || !human_lost) ? "win" : "no");
+    a->win.redraw = true;
 }
 
 /* what happened after a move: the sounds, the end of the game, the engine's turn */
@@ -432,19 +492,116 @@ static void after_move(struct app *a, bool capture)
 {
     refresh_legal(a);
     a->hint = 0;
-    enum ch_status s = status(a);
+    int s = status(a);
     a->win.redraw = true;
     if (s != CH_ONGOING) {
-        bank(a, s);
-        a->prompt = P_OVER;
-        a->pc_hover = a->pc_down = -1;
-        bool human_won = s == CH_CHECKMATE && a->human >= 0 && a->g.pos.side != a->human;
-        sound(a, s == CH_CHECKMATE ? (human_won || a->human < 0 ? "win" : "no") : "draw");
+        finish(a, s);
         return;
     }
     sound(a, capture ? "draw" : "place");
     if (ch_in_check(&a->g.pos))
         say(a, "Check!");
+}
+
+/* ---- the clock ---- */
+
+/* The clock runs for the side to move once both sides have made their first move (those two are not timed and earn no increment); it stands
+ * while the new-game or key card is open and after the end of the game. Time is counted in steps (the loop turns): a step longer than 2 s
+ * (the process was stopped) counts as 2 s. */
+static bool clock_running(const struct app *a)
+{
+    return a->clk.on && a->g.n >= 2 && status(a) == CH_ONGOING && a->prompt != P_NEW && a->prompt != P_HELP;
+}
+
+static void clock_advance(struct app *a, int64_t now)
+{
+    int64_t dt = now - a->clk.last;
+    a->clk.last = now;
+    if (dt <= 0 || !clock_running(a))
+        return;
+    if (dt > 2000)
+        dt = 2000;
+    a->clk.left[a->g.pos.side] -= dt;
+}
+
+/* can this side mate at all (with the help of the other)?  A bare king, a king and one minor piece, or bishops all on one colour cannot. */
+static bool could_mate(const struct ch_pos *p, int side)
+{
+    int minors = 0, knights = 0, light = 0, dark = 0;
+    for (int s = 0; s < 64; s++) {
+        uint8_t pc = p->sq[s];
+        if (!pc || CH_COLOR(pc) != side)
+            continue;
+        int t = CH_TYPE(pc);
+        if (t == CH_PAWN || t == CH_ROOK || t == CH_QUEEN)
+            return true;
+        if (t == CH_KNIGHT) {
+            knights++;
+            minors++;
+        } else if (t == CH_BISHOP) {
+            minors++;
+            if (((s & 7) + (s >> 3)) & 1)
+                light++;
+            else
+                dark++;
+        }
+    }
+    if (minors <= 1)
+        return false;
+    return !(knights == 0 && (light == 0 || dark == 0));
+}
+
+static void clock_check_flag(struct app *a)
+{
+    if (!clock_running(a))
+        return;
+    int side = a->g.pos.side;
+    if (a->clk.left[side] > 0)
+        return;
+    a->clk.left[side] = 0;
+    a->timeout = side;
+    a->timeout_draw = !could_mate(&a->g.pos, side ^ 1);
+    finish(a, status(a));
+}
+
+static void snap_set(struct app *a, int n)
+{
+    if (n + 1 > a->snapcap) {
+        int cap = LM_MAX(n + 1, a->snapcap * 2 + 64);
+        int64_t (*p)[2] = realloc(a->snap, (size_t)cap * sizeof(*p));
+        if (!p)
+            return;
+        a->snap = p;
+        a->snapcap = cap;
+    }
+    a->snap[n][0] = a->clk.left[0];
+    a->snap[n][1] = a->clk.left[1];
+}
+
+static void clock_reset(struct app *a)
+{
+    int base = a->cli_base >= 0 ? a->cli_base : k_clocks[a->st.clock].base_s;
+    int inc = a->cli_base >= 0 ? a->cli_inc : k_clocks[a->st.clock].inc_s;
+    a->clk.on = base > 0;
+    a->clk.left[0] = a->clk.left[1] = (int64_t)base * 1000;
+    a->clk.inc_ms = (int64_t)inc * 1000;
+    a->clk.last = now_ms();
+    a->timeout = -1;
+    a->timeout_draw = false;
+    snap_set(a, 0);
+}
+
+/* "4:59", "12:03", "1:02:03", and tenths when it gets short: "9.4" */
+static void fmt_clock(int64_t ms, char *out, size_t n)
+{
+    if (ms < 0)
+        ms = 0;
+    if (ms < 20000)
+        snprintf(out, n, "%d.%d", (int)(ms / 1000), (int)(ms % 1000 / 100));
+    else if (ms >= 3600000)
+        snprintf(out, n, "%d:%02d:%02d", (int)(ms / 3600000), (int)(ms / 60000 % 60), (int)(ms / 1000 % 60));
+    else
+        snprintf(out, n, "%d:%02d", (int)(ms / 60000), (int)(ms / 1000 % 60));
 }
 
 static bool play(struct app *a, ch_move m)
@@ -454,8 +611,15 @@ static bool play(struct app *a, ch_move m)
     bool capture = ch_move_is_capture(&a->g.pos, m);
     if (a->tk.started && a->tk.mode == 1)
         think_cancel(a);                                    /* a hint for a position that is gone */
+    int mover = a->g.pos.side;
+    clock_advance(a, now_ms());                             /* (the time of this move goes to the mover first) */
     if (ch_game_play(&a->g, m) < 0)
         return false;
+    if (a->clk.on) {
+        if (a->g.n >= 3)
+            a->clk.left[mover] += a->clk.inc_ms;
+        snap_set(a, a->g.n);
+    }
     deselect(a);
     a->msg[0] = 0;
     after_move(a, capture);
@@ -480,6 +644,7 @@ static void new_game(struct app *a, int human)
     a->hint = 0;
     a->msg[0] = 0;
     a->kb = -1;
+    clock_reset(a);
     deselect(a);
     refresh_legal(a);
     stats_save(&a->st);
@@ -516,6 +681,15 @@ static void undo(struct app *a)
         back = 2;                                           /* the computer's answer and the person's move */
     for (int i = 0; i < back; i++)
         ch_game_undo(&a->g);
+    if (a->timeout >= 0) {                                  /* a game lost on time is taken up again */
+        a->timeout = -1;
+        a->timeout_draw = false;
+    }
+    if (a->clk.on && a->snap && a->g.n < a->snapcap) {
+        a->clk.left[0] = a->snap[a->g.n][0];
+        a->clk.left[1] = a->snap[a->g.n][1];
+        a->clk.last = now_ms();
+    }
     a->prompt = P_NONE;
     a->banked = false;
     a->hint = 0;
@@ -700,6 +874,19 @@ static void side_line(struct wlwin *w, int x, int y, int pw, int colour, const c
     }
 }
 
+/* one side's clock: a bar with the time, lit while it runs, red when it is nearly gone */
+static void paint_clock(struct app *a, int x, int y, int pw, int side)
+{
+    struct wlwin *w = &a->win;
+    bool running = clock_running(a) && a->g.pos.side == side, low = a->clk.left[side] < 10000;
+    char t[24];
+    fmt_clock(a->clk.left[side], t, sizeof(t));
+    uint32_t bg = running ? (low ? 0xb03030u : COL_ACCENT) : COL_BAR;
+    wlwin_round_fill(w, x, y, pw, 30, 10, bg);
+    uint32_t ink = running ? lm_theme.on_colour : (low && a->clk.on ? 0xff8a80u : lm_theme.text_bright);
+    wlwin_text_bold(w, x + pw - 12 - lm_font_text_width_bold(t) * 2, y + (30 - 2 * LM_FONT_H) / 2, t, 2, ink, 0);
+}
+
 static void paint_panel(struct app *a, const struct lay *L)
 {
     if (!L->panel)
@@ -708,6 +895,7 @@ static void paint_panel(struct app *a, const struct lay *L)
     int x = L->px, pw = L->pw, y0 = L->by, h = 8 * L->cs;
     int top_side = a->flipped ? CH_WHITE : CH_BLACK, bot_side = top_side ^ 1;
     int diff = material(&a->g.pos, CH_WHITE) - material(&a->g.pos, CH_BLACK);
+    int clk_h = a->clk.on ? 36 : 0;
     char who[48];
     for (int k = 0; k < 2; k++) {
         int side = k == 0 ? top_side : bot_side;
@@ -719,9 +907,11 @@ static void paint_panel(struct app *a, const struct lay *L)
             snprintf(who, sizeof(who), "%s  (%s)", side == CH_WHITE ? "White" : "Black", level_name(a->level));
         int plus = side == CH_WHITE ? diff : -diff;
         side_line(w, x, k == 0 ? y0 : y0 + h - LM_FONT_H - 2, pw, side, who, plus);
+        if (a->clk.on)
+            paint_clock(a, x, k == 0 ? y0 + LM_FONT_H + 6 : y0 + h - LM_FONT_H - 2 - 36, pw, side);
     }
     /* the moves */
-    int ly = y0 + LM_FONT_H + 10, lh = h - 2 * (LM_FONT_H + 10);
+    int ly = y0 + LM_FONT_H + 10 + clk_h, lh = h - 2 * (LM_FONT_H + 10) - 2 * clk_h;
     wlwin_round_fill(w, x, ly, pw, lh, 10, COL_BAR);
     int rowh = LM_FONT_H + 4, rows = (lh - 12) / rowh;
     int total = (a->g.n + (a->g.start.side == CH_BLACK ? 1 : 0) + 1) / 2;
@@ -749,7 +939,7 @@ static void paint_status(struct app *a)
     int y = w->bh - STAT_H;
     wlwin_fill(w, 0, y, w->bw, STAT_H, COL_BAR);
     char line[200];
-    enum ch_status s = status(a);
+    int s = status(a);
     if (s != CH_ONGOING)
         snprintf(line, sizeof(line), "%s", result_text(a, s));
     else if (a->tk.started && a->tk.mode == 0)
@@ -759,8 +949,17 @@ static void paint_status(struct app *a)
     else
         snprintf(line, sizeof(line), "%s%s", human_turn(a) ? "Your move" : "The computer's move", ch_in_check(&a->g.pos) ? " - check" : "");
     wlwin_text(w, WLRAIL_W + 12, y + (STAT_H - LM_FONT_H) / 2, line, 1, COL_TEXT, w->bw - WLRAIL_W - 24);
-    char right[100];
-    snprintf(right, sizeof(right), "Level %s   Won %d  Drawn %d  Lost %d", level_name(a->level), a->st.won, a->st.drawn, a->st.lost);
+    char right[120];
+    struct lay Lay;
+    layout(a, &Lay);
+    if (a->clk.on && !Lay.panel) {                          /* no room for the clocks beside the board: they go here */
+        char tw[24], tb[24];
+        fmt_clock(a->clk.left[CH_WHITE], tw, sizeof(tw));
+        fmt_clock(a->clk.left[CH_BLACK], tb, sizeof(tb));
+        snprintf(right, sizeof(right), "White %s   Black %s", tw, tb);
+    } else {
+        snprintf(right, sizeof(right), "Level %s   Won %d  Drawn %d  Lost %d", level_name(a->level), a->st.won, a->st.drawn, a->st.lost);
+    }
     int rw = lm_font_text_width(right);
     if (a->msg[0] && now_ms() - a->msg_ms < 6000)
         wlwin_text_bold(w, WLRAIL_W + 12, y - 24, a->msg, 1, 0xfff3bfu, w->bw - WLRAIL_W - 24);
@@ -789,12 +988,22 @@ static void ic_flip(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
     wlwin_fill(w, cx + 3, cy - 7, 3, 10, c);
 }
 
+static void ic_clock(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    wlwin_round_fill(w, cx - 7, cy - 7, 14, 14, 7, c);          /* a ring with two hands */
+    wlwin_round_fill(w, cx - 5, cy - 5, 10, 10, 5, bg);
+    wlwin_fill(w, cx, cy - 4, 1, 5, c);
+    wlwin_fill(w, cx, cy, 4, 1, c);
+}
+
 static void rails(const struct app *a, struct wlrail *L)
 {
-    static const char *const tips[B_COUNT] = { "New game  N", "Take a move back  U", "A hint  H", "Turn the board  F", "Level  L (or 0 .. 9)", "Keys  F1" };
-    static void (*const icons[B_COUNT])(struct wlwin *, int, int, uint32_t, uint32_t) = { NULL, ic_undo, NULL, ic_flip, NULL, NULL };
-    const uint32_t base[B_COUNT] = { lm_theme.btn_green, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_slate, lm_theme.btn_purple, lm_theme.btn_rose };
-    const uint32_t lite[B_COUNT] = { lm_theme.btn_green_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_slate_lit, lm_theme.btn_purple_lit, lm_theme.btn_rose_lit };
+    static char clock_tip[64];
+    snprintf(clock_tip, sizeof(clock_tip), "Clock: %s  C", a->cli_base >= 0 ? "set on the command line" : k_clocks[a->st.clock].name);
+    const char *tips[B_COUNT] = { "New game  N", "Take a move back  U", "A hint  H", "Turn the board  F", clock_tip, "Level  L (or 0 .. 9)", "Keys  F1" };
+    static void (*const icons[B_COUNT])(struct wlwin *, int, int, uint32_t, uint32_t) = { NULL, ic_undo, NULL, ic_flip, ic_clock, NULL, NULL };
+    const uint32_t base[B_COUNT] = { lm_theme.btn_green, lm_theme.btn_amber, lm_theme.btn_teal, lm_theme.btn_slate, lm_theme.btn_blue, lm_theme.btn_purple, lm_theme.btn_rose };
+    const uint32_t lite[B_COUNT] = { lm_theme.btn_green_lit, lm_theme.btn_amber_lit, lm_theme.btn_teal_lit, lm_theme.btn_slate_lit, lm_theme.btn_blue_lit, lm_theme.btn_purple_lit, lm_theme.btn_rose_lit };
     static char lv[4];
     if (a->level == 0)
         snprintf(lv, sizeof(lv), "2P");
@@ -808,12 +1017,30 @@ static void rails(const struct app *a, struct wlrail *L)
     for (int i = 0; i < B_COUNT; i++) {
         bool idle = (i == B_UNDO && a->g.n == 0) || (i == B_HINT && (status(a) != CH_ONGOING || !human_turn(a)));
         L->it[i] = (struct wlrail_item){ .tip = tips[i], .icon = icons[i], .text = i == B_NEW ? "N" : i == B_HINT ? "H" : i == B_LEVEL ? lv : i == B_HELP ? "?" : NULL,
-                                         .base = base[i], .lite = lite[i], .show = true, .idle = idle, .lit = i == B_FLIP && a->flipped,
+                                         .base = base[i], .lite = lite[i], .show = true, .idle = idle, .lit = (i == B_FLIP && a->flipped) || (i == B_CLOCK && a->clk.on),
                                          .gap = i == B_FLIP || i == B_LEVEL, .bottom = i == B_HELP };
     }
 }
 
 static void press_button(struct app *a, int i);
+
+/* the clock for the next game; before the first move it is the clock of this game too */
+static void step_clock(struct app *a)
+{
+    if (a->cli_base >= 0) {
+        say(a, "The clock was set on the command line (--clock-seconds)");
+        return;
+    }
+    a->st.clock = (a->st.clock + 1) % N_CLOCKS;
+    stats_save(&a->st);
+    if (a->g.n == 0 && a->timeout < 0) {
+        clock_reset(a);
+        say(a, "Clock: %s", k_clocks[a->st.clock].name);
+    } else {
+        say(a, "Clock: %s, from the next game", k_clocks[a->st.clock].name);
+    }
+    a->win.redraw = true;
+}
 
 /* ---- the cards ---- */
 
@@ -823,7 +1050,7 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
     case P_NEW: *nb = 3; c->h = 150; c->w = 440; break;
     case P_PROMO: *nb = 4; c->h = 130; c->w = 440; break;
     case P_OVER: *nb = 2; c->h = 150; c->w = 440; break;
-    default: *nb = 1; c->h = 330; c->w = 560; break;
+    default: *nb = 1; c->h = 350; c->w = 560; break;
     }
     c->w = LM_MIN(c->w, a->win.bw - 16);
     c->h = LM_MIN(c->h, a->win.bh - 16);
@@ -838,7 +1065,8 @@ static const char *const HELP_LINES[] = {
     "piece and puts it down.  Esc lets go.",
     "N new game (and the side you play), U or Backspace takes a move back,",
     "H asks for a hint, F turns the board round, L steps through the levels,",
-    "0 is two players and 1 .. 9 the computer at that level.",
+    "0 is two players and 1 .. 9 the computer at that level. C steps the clock",
+    "(it starts after both sides have moved once; the side that runs out loses).",
     "A pawn that reaches the far side becomes a Queen, Rook, Bishop or Knight",
     "(Q R B N). The computer thinks while you can still look around.",
 };
@@ -858,7 +1086,7 @@ static void paint_card(struct app *a)
         snprintf(line, sizeof(line), "Start a new game against level %d (%s)?", a->level, level_name(a->level));
         if (a->level == 0)
             snprintf(line, sizeof(line), "Start a new game for two players?");
-        snprintf(line2, sizeof(line2), "The side you play is chosen with the button.");
+        snprintf(line2, sizeof(line2), "Clock: %s.  The side you play is chosen with the button.", a->cli_base >= 0 ? "as set on the command line" : k_clocks[a->st.clock].name);
         labels[0] = "Cancel";
         labels[1] = "As Black";
         labels[2] = "As White";
@@ -924,15 +1152,17 @@ static void card_accept(struct app *a, int which)
 
 /* ---- paint and the dump ---- */
 
-static const char *status_word(enum ch_status s)
+static const char *status_word(int s)
 {
-    switch (s) {
+    switch ((int)s) {
     case CH_ONGOING: return "ongoing";
     case CH_CHECKMATE: return "checkmate";
     case CH_STALEMATE: return "stalemate";
     case CH_DRAW_MATERIAL: return "material";
     case CH_DRAW_REPETITION: return "repetition";
     case CH_DRAW_FIFTY: return "fifty";
+    case ST_FLAG: return "timeout";
+    case ST_FLAG_DRAW: return "timeout-draw";
     }
     return "?";
 }
@@ -961,6 +1191,8 @@ static void write_dump(struct app *a)
             a->tk.started && a->tk.mode == 0, a->g.n, status_word(status(a)), (int)a->prompt, a->dragging, hint, last, a->st.played, a->st.won,
             a->st.drawn, a->st.lost, ch_in_check(&a->g.pos), a->tk.depth);
     fprintf(f, "fen %s\n", fen);
+    fprintf(f, "clock on=%d white=%lld black=%lld inc=%lld running=%c preset=%d\n", a->clk.on, (long long)a->clk.left[CH_WHITE],
+            (long long)a->clk.left[CH_BLACK], (long long)a->clk.inc_ms, clock_running(a) ? (a->g.pos.side == CH_WHITE ? 'w' : 'b') : '-', a->st.clock);
     struct lay L;
     layout(a, &L);
     fprintf(f, "lay cs=%d bx=%d by=%d panel=%d\n", L.cs, L.bx, L.by, L.panel);
@@ -996,7 +1228,7 @@ static void write_dump(struct app *a)
     rails(a, &R);
     int ys[WLRAIL_MAX];
     wlrail_layout(&R, ys);
-    static const char *const names[B_COUNT] = { "New", "Undo", "Hint", "Flip", "Level", "Help" };
+    static const char *const names[B_COUNT] = { "New", "Undo", "Hint", "Flip", "Clock", "Level", "Help" };
     for (int i = 0; i < R.n; i++)
         if (ys[i] >= 0)
             fprintf(f, "btn %s x=%d y=%d w=%d h=%d idle=%d\n", names[i], R.x + (WLRAIL_W - WLRAIL_D) / 2, ys[i], WLRAIL_D, WLRAIL_D, R.it[i].idle);
@@ -1037,6 +1269,9 @@ static void press_button(struct app *a, int i)
         break;
     case B_FLIP:
         a->flipped = !a->flipped;
+        break;
+    case B_CLOCK:
+        step_clock(a);
         break;
     case B_LEVEL:
         set_level(a, a->level == chai_level_count() ? 0 : a->level + 1);       /* 1 .. 9, then two players, then 1 again */
@@ -1275,6 +1510,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     if (c == 'h') { ask_hint(a); return; }
     if (c == 'f') { a->flipped = !a->flipped; return; }
     if (c == 'l') { press_button(a, B_LEVEL); return; }
+    if (c == 'c') { press_button(a, B_CLOCK); return; }
     if (c >= '0' && c <= '9') { set_level(a, c - '0'); return; }
     if (ks == LM_KS_Left) { move_kb(a, -1, 0); return; }
     if (ks == LM_KS_Right) { move_kb(a, 1, 0); return; }
@@ -1432,6 +1668,7 @@ static int selftest(void)
         a.level = 1;
         a.human = CH_WHITE;
         a.sel = a.kb = -1;
+        a.timeout = -1;
         ch_game_init(&a.g, NULL, NULL);
         refresh_legal(&a);
         CHECK(a.nlegal == 20, "twenty moves at the start");
@@ -1464,6 +1701,76 @@ static int selftest(void)
         ch_game_free(&a.g);
         chai_free(a.ai);
     }
+
+    /* the clock: how it is written, who could have mated, and how the time is counted */
+    {
+        char t[24];
+        static const struct { int64_t ms; const char *want; } fm[] = {
+            { 300000, "5:00" }, { 59000, "0:59" }, { 19900, "19.9" }, { 20000, "0:20" }, { 3723000, "1:02:03" }, { -5, "0.0" }, { 9400, "9.4" } };
+        for (size_t i = 0; i < sizeof(fm) / sizeof(fm[0]); i++) {
+            fmt_clock(fm[i].ms, t, sizeof(t));
+            CHECK(!strcmp(t, fm[i].want), "fmt_clock(%lld) = %s, wanted %s", (long long)fm[i].ms, t, fm[i].want);
+        }
+        static const struct { const char *fen; bool white_mates; } mate[] = {
+            { "4k3/8/8/8/8/8/8/4K3 w - - 0 1", false }, { "4k3/8/8/8/8/8/8/3BK3 w - - 0 1", false }, { "4k3/8/8/8/8/8/8/3NK3 w - - 0 1", false },
+            { "4k3/8/8/8/8/8/8/2NNK3 w - - 0 1", true }, { "4k3/8/8/8/8/8/8/2BBK3 w - - 0 1", true }, { "4k3/8/8/8/8/8/8/B1B1K3 w - - 0 1", false },
+            { "4k3/8/8/8/8/8/P7/4K3 w - - 0 1", true }, { "4k3/8/8/8/8/8/8/R3K3 w - - 0 1", true } };
+        for (size_t i = 0; i < sizeof(mate) / sizeof(mate[0]); i++) {
+            struct ch_pos p;
+            CHECK(ch_pos_set_fen(&p, mate[i].fen, NULL) == 0, "FEN %s", mate[i].fen);
+            CHECK(could_mate(&p, CH_WHITE) == mate[i].white_mates, "could_mate(%s) is not %d", mate[i].fen, mate[i].white_mates);
+        }
+        struct app a;
+        memset(&a, 0, sizeof(a));
+        a.ai = chai_new(1);
+        a.level = 0;
+        a.human = -1;
+        a.sel = a.kb = -1;
+        a.timeout = -1;
+        a.cli_base = 60;
+        a.cli_inc = 2;
+        ch_game_init(&a.g, NULL, NULL);
+        clock_reset(&a);
+        refresh_legal(&a);
+        CHECK(a.clk.on && a.clk.left[0] == 60000 && a.clk.inc_ms == 2000, "the clock starts with 60 s and 2 s");
+        a.clk.last -= 3000;
+        clock_advance(&a, now_ms());
+        CHECK(a.clk.left[0] == 60000 && !clock_running(&a), "nothing runs before a move");
+        play(&a, ch_move_from_uci(&a.g.pos, "e2e4"));
+        play(&a, ch_move_from_uci(&a.g.pos, "e7e5"));
+        CHECK(a.clk.left[0] == 60000 && a.clk.left[1] == 60000 && clock_running(&a), "the first two moves are free and then White's clock runs");
+        a.clk.last = now_ms() - 1500;
+        clock_advance(&a, now_ms());
+        CHECK(a.clk.left[0] >= 58000 && a.clk.left[0] <= 58600 && a.clk.left[1] == 60000, "White's clock ran: %lld / %lld", (long long)a.clk.left[0], (long long)a.clk.left[1]);
+        a.clk.last = now_ms() - 5000;                          /* a step of 5 s (the process was stopped) counts as 2 */
+        int64_t before = a.clk.left[0];
+        clock_advance(&a, now_ms());
+        CHECK(before - a.clk.left[0] >= 1990 && before - a.clk.left[0] <= 2100, "a long step counts as 2 s: %lld", (long long)(before - a.clk.left[0]));
+        play(&a, ch_move_from_uci(&a.g.pos, "g1f3"));
+        CHECK(a.clk.left[0] > 58000 && a.clk.left[0] < 59000 && a.clk.left[1] == 60000, "the increment is added after the third move (60 - 1.5 - 2 + 2 s): %lld", (long long)a.clk.left[0]);
+        CHECK(a.g.pos.side == CH_BLACK && clock_running(&a), "now Black's clock");
+        undo(&a);
+        CHECK(a.g.n == 2 && a.clk.left[0] == 60000 && a.clk.left[1] == 60000, "undo gives the clocks back: %lld / %lld", (long long)a.clk.left[0], (long long)a.clk.left[1]);
+        a.clk.left[CH_WHITE] = 0;
+        clock_check_flag(&a);
+        CHECK(a.timeout == CH_WHITE && status(&a) == ST_FLAG && a.prompt == P_OVER, "White's time ran out");
+        undo(&a);
+        CHECK(a.timeout == -1 && status(&a) == CH_ONGOING, "undo takes a lost game up again");
+        ch_game_free(&a.g);
+        /* time out against a side that could not have mated is a draw */
+        ch_game_init(&a.g, "8/8/4k3/8/8/3K4/6p1/7B b - - 0 1", NULL);
+        a.timeout = -1;
+        a.prompt = P_NONE;
+        a.clk.left[CH_BLACK] = 0;
+        play(&a, ch_move_from_uci(&a.g.pos, "e6e5"));
+        play(&a, ch_move_from_uci(&a.g.pos, "d3c3"));
+        a.clk.left[CH_BLACK] = 0;
+        clock_check_flag(&a);
+        CHECK(status(&a) == ST_FLAG_DRAW && a.timeout == CH_BLACK, "a bare bishop cannot mate: a draw (%d)", status(&a));
+        ch_game_free(&a.g);
+        free(a.snap);
+        chai_free(a.ai);
+    }
     if (!bad)
         printf("selftest ok\n");
     return bad ? 1 : 0;
@@ -1477,7 +1784,7 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     signal(SIGPIPE, SIG_IGN);
     int level = -1, win_w = 900, win_h = 680, delay = 350;
-    int side_arg = -1;
+    int side_arg = -1, cli_base = -1, cli_inc = 0;
     const char *fen = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
@@ -1505,6 +1812,16 @@ int main(int argc, char **argv)
                 fprintf(stderr, "mellagui-chess: bad FEN: %s\n", err);
                 return 2;
             }
+        } else if (!strcmp(argv[i], "--clock-seconds") && i + 1 < argc) {
+            int base, inc = 0;
+            char junk;
+            const char *v = argv[++i];
+            if ((sscanf(v, "%d+%d%c", &base, &inc, &junk) != 2 && sscanf(v, "%d%c", &base, &junk) != 1) || base < 1 || base > 36000 || inc < 0 || inc > 3600) {
+                fprintf(stderr, "mellagui-chess: --clock-seconds wants BASE+INCREMENT in seconds, like 300+3 (or 60)\n");
+                return 2;
+            }
+            cli_base = base;
+            cli_inc = inc;
         } else if (!strcmp(argv[i], "--delay") && i + 1 < argc) {
             delay = atoi(argv[++i]);                         /* (not inside LM_CLAMP: a macro that evaluates its argument three times) */
             delay = LM_CLAMP(delay, 0, 5000);
@@ -1515,7 +1832,7 @@ int main(int argc, char **argv)
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: mellagui-chess [--level 0..%d] [--black] [--fen FEN] [--size WxH] [--delay MS] | --selftest | --sheet FILE.ppm [SIZE]\n",
+            fprintf(stderr, "usage: mellagui-chess [--level 0..%d] [--black] [--fen FEN] [--clock-seconds BASE+INC] [--size WxH] [--delay MS] | --selftest | --sheet FILE.ppm [SIZE]\n",
                     chai_level_count());
             return 2;
         }
@@ -1527,6 +1844,9 @@ int main(int argc, char **argv)
         a.st.level = level;
     a.level = a.st.level;
     a.delay_ms = delay;
+    a.cli_base = cli_base;
+    a.cli_inc = cli_inc;
+    a.timeout = -1;
     a.start_fen = fen;
     a.hover = -1;
     a.sel = a.kb = -1;
@@ -1553,11 +1873,23 @@ int main(int argc, char **argv)
             if (timeout < 0 || t < timeout)
                 timeout = t;
         }
+        if (clock_running(&a)) {                                        /* the clock: ten looks a second when it is short, five otherwise */
+            int t = LM_MIN(a.clk.left[CH_WHITE], a.clk.left[CH_BLACK]) < 20000 ? 100 : 200;
+            if (timeout < 0 || t < timeout)
+                timeout = t;
+        }
         if (a.msg[0] && (timeout < 0 || timeout > 500))
             timeout = 500;
         if (!wlwin_step(&a.win, timeout))
             break;
         now = now_ms();
+        if (a.clk.on) {
+            bool was = clock_running(&a);
+            clock_advance(&a, now);
+            clock_check_flag(&a);
+            if (was)
+                a.win.redraw = true;
+        }
         think_collect(&a, now);
         if (a.tk.started) {
             int d = __atomic_load_n(&a.tk.depth, __ATOMIC_RELAXED);
@@ -1578,6 +1910,7 @@ int main(int argc, char **argv)
     }
     think_cancel(&a);
     stats_save(&a.st);
+    free(a.snap);
     sprites_free(&a);
     ch_game_free(&a.g);
     chai_free(a.ai);

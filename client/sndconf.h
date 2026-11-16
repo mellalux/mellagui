@@ -47,7 +47,8 @@ static inline void lm_snd_conf_load(const char *name, bool *system, bool *mic)
     fclose(f);
 }
 
-static inline void lm_snd_conf_save(const char *name, bool system, bool mic)
+/* `extra` = more lines for the program's own settings ("timer = 3\n"), written after the two switches; NULL = none. */
+static inline void lm_snd_conf_save_x(const char *name, bool system, bool mic, const char *extra)
 {
     char path[1024], tmp[1100];
     if (!lm_snd_conf_path(name, path, sizeof(path)))
@@ -63,9 +64,14 @@ static inline void lm_snd_conf_save(const char *name, bool system, bool mic)
     FILE *f = fopen(tmp, "w");
     if (!f)
         return;
-    fprintf(f, "# mellagui-%s: written by the program itself\nsystem-sound = %d\nmicrophone = %d\n", name, system ? 1 : 0, mic ? 1 : 0);
+    fprintf(f, "# mellagui-%s: written by the program itself\nsystem-sound = %d\nmicrophone = %d\n%s", name, system ? 1 : 0, mic ? 1 : 0, extra ? extra : "");
     if (fclose(f) != 0 || rename(tmp, path) < 0)
         unlink(tmp);
+}
+
+static inline void lm_snd_conf_save(const char *name, bool system, bool mic)
+{
+    lm_snd_conf_save_x(name, system, mic, NULL);
 }
 
 #endif

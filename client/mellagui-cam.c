@@ -5,10 +5,26 @@
  *   mellagui-cam --list                                   one line per camera: DEVICE|name|formats|sizes
  *   mellagui-cam --snapshot FILE.png [--device D] [--size WxH]   take one picture without a window (after a short warm-up)
  *   mellagui-cam --clip FILE.mp4 [--seconds N] [--mic|--no-mic] [--device D] [--size WxH]   record a clip without a window
+ *   mellagui-cam --effects                                the effects, one id a line
+ *   mellagui-cam --snapshot FILE.png --effect ID [--focus X,Y]   ... with an effect on the picture (also for --clip)
  *   mellagui-cam --selftest
  *
- * Keys: Space / Enter = snapshot, R = record a clip (again = stop), A = the microphone in the clip on / off, M = mirror the preview, P = pause,
- * S = next picture size, C = next camera, Esc / Q = quit.
+ * Like Apple's Photo Booth: a big red shutter under the picture takes a picture after a countdown of 3 (or 10) seconds - the seconds are shown big
+ * over the picture, the screen flashes white when it is taken - and "Four-up" takes four pictures one after the other into ONE picture of four
+ * (2 x 2); "Effects" replaces the picture by a grid of 3 x 3 live previews of the effects (client/camfx.c: black & white, sepia, pencil, comic book,
+ * pop art, thermal, x-ray, glow, vintage, mirror, kaleidoscope, light tunnel, squeeze, stretch, bulge, dent, twirl), two pages; a click chooses one.
+ * The effect is in the live picture, the snapshots and the clips. The last page of the grid has BACKDROPS (sunset, space, neon, ghost): choosing one
+ * asks you to step out of the picture, takes the empty scene after the countdown (the key B takes it again) and then keeps only what differs from it
+ * - you - on the made-up backdrop. The countdown ticks (a higher tick for the last second) and the shutter clicks, sounds made in code
+ * (client/camsound.c; O = sound on / off). The pictures are a column of small ones at the right of the picture (beside it, not over it; as many as fit,
+ * the wheel shows the older ones; the ones already in the folder too): a click opens one in mellagui-view, the Folder button the folder in mellagui-files.
+ * The effects of the second page of the grid (mirror, kaleidoscope, tunnel, squeeze, stretch, bulge, dent, twirl, vintage) have a point you move with
+ * the mouse on the live picture (press or drag; --focus X,Y on the command line).
+ *
+ * Keys: Space / Enter = the shutter (again = cancel the countdown), E = the effects, 4 = one picture / four-up, T = the countdown (none / 3 s / 10 s),
+ * B = take the background again (backdrop effects), O = sound on / off,
+ * R = record a clip (again = stop), A = the microphone in the clip on / off, M = mirror the preview, P = pause,
+ * S = next picture size, C = next camera, Esc / Q = quit. In the grid: arrows / Enter / 1..9 choose, PgUp / PgDn the page, Esc closes it.
  * Snapshots go to $MELLAGUI_CAM_DIR (default ~/Pictures) as camera-YYYYMMDD-HHMMSS.png, the picture as the camera sees it
  * (not mirrored); mellagui-view finds them there.
  *
@@ -16,7 +32,8 @@
  * (client/ffpipe.c: sent as they come, never waiting - a picture that x264 is too slow for is dropped) and, when the microphone switch is on, the default
  * microphone (ffmpeg reads it itself, so sound and picture share one clock). Without ffmpeg the clip is Motion JPEG with the microphone as a PCM sound
  * track (parec; src/jpegenc.c, src/mp4.c, client/audiocap.c): bigger files, played by ffmpeg / mpv / VLC but not by browsers. The picture is not
- * mirrored. The switch is kept in camera.conf (microphone = 1; on by default).
+ * mirrored. The switches are kept in camera.conf (microphone = 1, on by default; timer = 3 seconds; four-up = 0). $MELLAGUI_CAM_TIMER (seconds)
+ * replaces the timer for one run (the tests use 0). $MELLAGUI_CAM_WINDOW=WxH is the window's first size. $MELLAGUI_CAM_DUMP=FILE writes the state and the places of the controls after every paint.
  *
  * Formats: MJPEG (preferred: a webcam on a shared USB hub often cannot carry raw video) decoded by src/jpeg.c, whose
  * standard Huffman tables serve the frames a camera sends without a DHT segment, and YUYV. The camera is looked for again
@@ -35,11 +52,14 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "font.h"
 #include "audiocap.h"
+#include "camfx.h"
+#include "camsound.h"
 #include "ffpipe.h"
 #include "img.h"
 #include "jpegenc.h"
@@ -82,7 +102,27 @@ struct source {
     uint64_t fake_n;
 };
 
+#define STRIP_MAX 200                   /* the pictures the strip knows (the newest ones of the folder) */
+#define STRIP_H 96                      /* the height they are kept at (they are shown at most 48 high, squeezed to the buffer's pixels) */
+#define STRIP_TW 64                     /* the room of a picture in the strip: 64 x 48 */
+#define STRIP_TH 48
+#define STRIP_COL 84                    /* the width of the column the strip has at the right of the picture */
+
+struct thumb {
+    struct lm_image img;                /* the small copy; px NULL until it was made (the ones of the folder are read when they come into view) */
+    bool tried;                         /* it was read (or failed) */
+    char path[PATH_MAX + 300];
+};
+
 enum { B_SNAP, B_REC, B_MIC, B_MIRROR, B_PAUSE, B_SIZE, B_CAM, N_B };
+
+/* The controls over the bottom of the picture, like Photo Booth's: the effects, the shutter, one picture / four, the countdown. */
+enum { O_FX, O_SHUTTER, O_MODE, O_TIMER, N_O };
+enum { PH_IDLE, PH_WAIT };                                  /* the shutter: nothing going on / waiting for the moment of the next picture */
+#define FX_PER_PAGE 9
+#define FX_PAGES ((CAMFX_COUNT + FX_PER_PAGE - 1) / FX_PER_PAGE)
+#define FLASH_MS 380
+#define FOURUP_GAP_MS 1100
 
 struct app {
     struct wlwin win;
@@ -105,6 +145,32 @@ struct app {
     char videodir[PATH_MAX];            /* where clips go */
     bool mic;                           /* the next clip has the microphone in it */
     struct clip *clip;                  /* the clip being recorded, NULL = none */
+    /* Photo Booth */
+    int fx;                             /* the effect in use (CAMFX_*) */
+    struct lm_image fxi;                /* the newest picture with the effect on it (used while fx is not normal) */
+    bool fx_open;                       /* the grid of effects is showing instead of the picture */
+    int fx_page, fx_hover;              /* its page, and the tile the pointer / the keys are on (-1 = none) */
+    int ohover;                         /* the control under the pointer (O_*), -1 none */
+    bool fourup;                        /* the shutter takes four pictures into one */
+    int timer_s;                        /* the countdown before a picture: 0, 3 or 10 seconds */
+    int phase;                          /* PH_IDLE / PH_WAIT */
+    uint64_t t_shot;                    /* the moment of the next picture */
+    bool digits;                        /* the wait is the countdown (the seconds are shown), not the pause between the four pictures */
+    int shot_n;                         /* pictures of the four-up taken so far */
+    struct lm_image quad[4];            /* ... each at half size */
+    uint64_t flash_t0;                  /* the white flash of a picture that was just taken (0 = none) */
+    char dump[PATH_MAX];                /* $MELLAGUI_CAM_DUMP */
+    struct lm_image ref;                /* the empty scene of the backdrop effects */
+    bool have_ref;
+    uint64_t bg_until;                  /* "step out of the picture": the moment the empty scene is taken (0 = not waiting) */
+    bool sound;                         /* the countdown ticks and the shutter clicks */
+    int last_tick;                      /* the second of the countdown that was last ticked */
+    struct thumb strip[STRIP_MAX];      /* the newest picture first */
+    int nstrip, strip_top, shover;      /* how many, the first one in view, and the one under the pointer (-1 none) */
+    bool fhover;                        /* the pointer is on the strip's folder button */
+    float focus_x, focus_y;             /* the point the effect works round (0..1 of the picture; the effect's own space, before the mirror) */
+    bool focus_drag;                    /* the button is down on the picture: the point follows the pointer */
+    bool pin;                           /* the pointer is in the window */
 };
 
 static uint64_t now_ms(void)
@@ -449,6 +515,116 @@ static int scan_devices(char devs[][64], int max)
     return n;
 }
 
+/* ---- the effect ------------------------------------------------------------------------------------------------------------ */
+
+/* What is shown, saved and recorded: the camera's picture, with the effect on it unless that is Normal. */
+static const struct lm_image *shown(const struct app *a)
+{
+    if (a->bg_until)                                            /* waiting for the empty scene: the picture as it is */
+        return &a->img;
+    return a->fx != CAMFX_NORMAL && a->fxi.px ? &a->fxi : &a->img;
+}
+
+/* Makes the picture with the effect from the newest camera picture (once per picture, not once per paint). */
+static void fx_update(struct app *a)
+{
+    if (a->fx == CAMFX_NORMAL || !a->have || !a->img.px || a->bg_until || !image_size(&a->fxi, a->img.w, a->img.h))
+        return;
+    const uint32_t *ref = a->have_ref && a->ref.px && a->ref.w == a->img.w && a->ref.h == a->img.h ? a->ref.px : NULL;
+    camfx_apply_at(a->fx, a->img.px, ref, a->img.w, a->img.h, a->fxi.px, a->focus_x, a->focus_y);
+}
+
+static void thumb_box(const uint32_t *s, int sw, int sh, uint32_t *d, int dw, int dh);
+
+/* The picture that was just saved goes first into the strip (a small copy; the file's name is kept to open it). */
+static void strip_push(struct app *a, const char *path, const struct lm_image *img)
+{
+    if (!img || !img->px || img->w < 2 || img->h < 2)
+        return;
+    int tw = LM_CLAMP(img->w * STRIP_H / img->h, 16, 256);
+    uint32_t *px = malloc((size_t)tw * STRIP_H * 4);
+    if (!px)
+        return;
+    thumb_box(img->px, img->w, img->h, px, tw, STRIP_H);
+    if (a->nstrip == STRIP_MAX)
+        free(a->strip[STRIP_MAX - 1].img.px);
+    memmove(&a->strip[1], &a->strip[0], sizeof(a->strip[0]) * (STRIP_MAX - 1));
+    memset(&a->strip[0], 0, sizeof(a->strip[0]));
+    a->strip[0].img = (struct lm_image){ tw, STRIP_H, px };
+    a->strip[0].tried = true;
+    snprintf(a->strip[0].path, sizeof(a->strip[0].path), "%s", path);
+    if (a->nstrip < STRIP_MAX)
+        a->nstrip++;
+    a->strip_top = 0;                                           /* the new one is in view */
+}
+
+static int cam_png_filter(const struct dirent *e)
+{
+    size_t n = strlen(e->d_name);
+    return !strncmp(e->d_name, "camera-", 7) && n > 11 && !strcmp(e->d_name + n - 4, ".png");
+}
+
+static int name_desc(const struct dirent **x, const struct dirent **y)
+{
+    return strcmp((*y)->d_name, (*x)->d_name);
+}
+
+/* At the start: the names of the newest pictures that are in the folder already (they are read when they come into view: `strip_lazy`). */
+static void strip_load(struct app *a)
+{
+    struct dirent **list = NULL;
+    int n = scandir(a->outdir, &list, cam_png_filter, name_desc);
+    for (int i = 0; i < n && a->nstrip < STRIP_MAX; i++) {
+        memset(&a->strip[a->nstrip], 0, sizeof(a->strip[0]));
+        snprintf(a->strip[a->nstrip].path, sizeof(a->strip[0].path), "%s/%s", a->outdir, list[i]->d_name);
+        a->nstrip++;
+    }
+    for (int i = 0; i < n; i++)
+        free(list[i]);
+    free(list);
+}
+
+/* Starts `sibling arg` in a detached child: the program next to this one (else in PATH); $envvar names another program, "none" = nothing. */
+static void spawn_detached(const char *envvar, const char *sibling, const char *arg)
+{
+    const char *v = getenv(envvar);
+    if (v && !strcmp(v, "none"))
+        return;
+    pid_t mid = fork();
+    if (mid < 0)
+        return;
+    if (mid > 0) {
+        int st;
+        waitpid(mid, &st, 0);
+        return;
+    }
+    if (fork() != 0)
+        _exit(0);
+    setsid();
+    char prog[PATH_MAX];
+    snprintf(prog, sizeof(prog), "%s", sibling);
+    if (v && *v) {
+        snprintf(prog, sizeof(prog), "%s", v);
+    } else {
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 40);
+        char *slash = n > 0 ? (exe[n] = 0, strrchr(exe, '/')) : NULL;
+        if (slash) {
+            snprintf(slash + 1, 32, "%s", sibling);
+            if (access(exe, X_OK) == 0)
+                snprintf(prog, sizeof(prog), "%s", exe);
+        }
+    }
+    int nul = open("/dev/null", O_RDWR);
+    if (nul >= 0) {
+        dup2(nul, 0);
+        dup2(nul, 1);
+        dup2(nul, 2);
+    }
+    execlp(prog, prog, arg, (char *)NULL);
+    _exit(127);
+}
+
 /* ---- snapshots --------------------------------------------------------------------------------------------------------- */
 
 static bool write_png(const char *path, const struct lm_image *img, bool excl)
@@ -473,9 +649,9 @@ static bool write_png(const char *path, const struct lm_image *img, bool excl)
 }
 
 /* camera-YYYYMMDD-HHMMSS[-n].png in outdir; the name (without the directory) goes to name. */
-static bool save_snapshot(struct app *a, char *name, size_t nsz)
+static bool save_snapshot(struct app *a, const struct lm_image *img, char *name, size_t nsz)
 {
-    if (!a->have || !a->img.px)
+    if (!img || !img->px)
         return false;
     if (mkdir(a->outdir, 0755) < 0 && errno != EEXIST)
         return false;
@@ -492,7 +668,10 @@ static bool save_snapshot(struct app *a, char *name, size_t nsz)
         snprintf(path, sizeof(path), "%s/%s", a->outdir, name);
         if (access(path, F_OK) == 0)
             continue;
-        return write_png(path, &a->img, true);
+        if (!write_png(path, img, true))
+            return false;
+        strip_push(a, path, img);
+        return true;
     }
     return false;
 }
@@ -856,12 +1035,12 @@ static void paint_menu(struct app *a)
 static void paint_picture(struct app *a, int vw, int vh)
 {
     struct wlwin *w = &a->win;
-    const struct lm_image *im = &a->img;
+    const struct lm_image *im = shown(a);
     int k = wlwin_scale(w);                                          /* the picture is made for the buffer's own pixels: sharp at any scale */
     int pvw = vw * k, pvh = vh * k;
     double s = LM_MIN((double)pvw / im->w, (double)pvh / im->h);
     int dw = LM_MAX((int)(im->w * s), 1), dh = LM_MAX((int)(im->h * s), 1);
-    int ox = (pvw - dw) / 2, oy = (pvh - dh) / 2;
+    int ox = w->inx * k + (pvw - dw) / 2, oy = (pvh - dh) / 2;       /* (right of the rail) */
     int *xi = malloc((size_t)dw * 2 * sizeof(int));                  /* per column: left source pixel and weight (0..256) */
     if (!xi)
         return;
@@ -894,15 +1073,570 @@ static void paint_picture(struct app *a, int vw, int vh)
     free(xi);
 }
 
+/* ---- Photo Booth: the controls over the picture, the grid of effects ------------------------------------------------------------- */
+
+#define CTL_D 54                        /* the shutter */
+#define CTL_BH 28
+#define CTL_GAP 8
+#define CTL_PAD 8
+#define GRID_M 14
+#define GRID_G 10
+#define GRID_NAV_H 36
+#define GRID_LAB_H (LM_FONT_H + 6)
+#define NAV_PREV 100
+#define NAV_NEXT 101
+
+static int picture_h(const struct app *a)
+{
+    return a->win.bh > BAR_H ? a->win.bh - BAR_H : 1;
+}
+
+/* The strip of the last pictures has a column of its own at the right of the picture (not on a narrow or low window, not while the grid is open). */
+static bool strip_on(const struct app *a)
+{
+    return !a->fx_open && a->win.bw >= 420 && picture_h(a) >= 160;
+}
+
+/* The width the live picture (and its controls) has. */
+static int pic_w(const struct app *a)
+{
+    return a->win.bw - (strip_on(a) ? STRIP_COL : 0);
+}
+
+static int strip_fit(const struct app *a)                       /* how many pictures the column shows at once */
+{
+    return LM_MAX((picture_h(a) - 44 - 8) / (STRIP_TH + 8), 0);
+}
+
+static const char *ctl_label(const struct app *a, int i, char *buf, size_t n)
+{
+    switch (i) {
+    case O_FX: return "Effects";
+    case O_MODE: return a->fourup ? "4-up" : "1-up";
+    case O_TIMER:
+        if (!a->timer_s)
+            return "No timer";
+        snprintf(buf, n, "%d sec", a->timer_s);
+        return buf;
+    default: return "";
+    }
+}
+
+static const char *ctl_name(int i)
+{
+    static const char *const names[N_O] = { "fx", "shutter", "mode", "timer" };
+    return i >= 0 && i < N_O ? names[i] : "?";
+}
+
+static int ctl_width(const struct app *a, int i)
+{
+    char tmp[16];
+    return i == O_SHUTTER ? CTL_D : (int)strlen(ctl_label(a, i, tmp, sizeof(tmp))) * LM_FONT_W + 20;
+}
+
+/* The place of a control in the picture's area (logical pixels): effects, shutter, one / four pictures, the countdown, side by side at the bottom. */
+static bool ctl_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
+{
+    int vw = pic_w(a), vh = picture_h(a);
+    if (vw < 200 || vh < CTL_D + 40)
+        return false;
+    int total = CTL_GAP * (N_O - 1);
+    for (int k = 0; k < N_O; k++)
+        total += ctl_width(a, k);
+    int bx = (vw - total) / 2, top = vh - CTL_D - 14;
+    for (int k = 0; k < N_O; k++) {
+        int bw = ctl_width(a, k);
+        if (k == i) {
+            *x = bx;
+            *w = bw;
+            *y = k == O_SHUTTER ? top : top + (CTL_D - CTL_BH) / 2;
+            *h = k == O_SHUTTER ? CTL_D : CTL_BH;
+            return true;
+        }
+        bx += bw + CTL_GAP;
+    }
+    return false;
+}
+
+static int ctl_at(const struct app *a, double px, double py)
+{
+    if (a->fx_open)
+        return -1;
+    for (int i = 0; i < N_O; i++) {
+        int x, y, w, h;
+        if (ctl_rect(a, i, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h)
+            return i;
+    }
+    return -1;
+}
+
+static void paint_controls(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int fx, fy, fw, fh, tx, ty, tw, th;
+    if (!ctl_rect(a, O_FX, &fx, &fy, &fw, &fh) || !ctl_rect(a, O_TIMER, &tx, &ty, &tw, &th))
+        return;
+    int vh = picture_h(a), px0 = fx - CTL_PAD, px1 = tx + tw + CTL_PAD, ph = CTL_D + 12;
+    wlwin_round_fill(w, px0, vh - ph - 8, px1 - px0, ph, ph / 2, lm_theme.bar);
+    const uint32_t base[N_O] = { lm_theme.btn_purple, lm_theme.btn_red, lm_theme.btn_teal, lm_theme.btn_amber };
+    const uint32_t lite[N_O] = { lm_theme.btn_purple_lit, lm_theme.btn_red_lit, lm_theme.btn_teal_lit, lm_theme.btn_amber_lit };
+    for (int i = 0; i < N_O; i++) {
+        int x, y, bw, bh;
+        char tmp[16];
+        if (!ctl_rect(a, i, &x, &y, &bw, &bh))
+            continue;
+        bool on = (i == O_FX && a->fx != CAMFX_NORMAL) || (i == O_MODE && a->fourup) || (i == O_TIMER && a->timer_s);
+        if (i == O_SHUTTER) {
+            wlwin_round_fill(w, x, y, bw, bh, bh / 2, lm_theme.on_colour);                          /* the white ring of a shutter button */
+            wlwin_drop(w, x + 5, y + 5, bw - 10, bh - 10, (bh - 10) / 2, a->ohover == i ? lm_theme.btn_red_lit : lm_theme.btn_red);
+            if (a->phase == PH_WAIT)                                                                /* a square: press to cancel */
+                wlwin_round_fill(w, x + bw / 2 - 8, y + bh / 2 - 8, 16, 16, 3, lm_theme.on_colour);
+            continue;
+        }
+        if (on)
+            wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius((bh + 2) / 2), lm_theme.on_colour);
+        wlwin_drop(w, x, y, bw, bh, lm_button_radius(bh / 2), on || a->ohover == i ? lite[i] : base[i]);
+        const char *t = ctl_label(a, i, tmp, sizeof(tmp));
+        wlwin_text(w, x + (bw - (int)strlen(t) * LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
+    }
+}
+
+/* The seconds, huge, in the middle of the picture. */
+static void paint_digits(struct app *a, int secs)
+{
+    int vw = pic_w(a), vh = picture_h(a), sc = LM_CLAMP(vh / 40, 3, 16);
+    char txt[16];
+    snprintf(txt, sizeof(txt), "%d", secs);
+    int tw = (int)strlen(txt) * LM_FONT_W * sc, tx = (vw - tw) / 2, ty = (vh - LM_FONT_H * sc) / 2 - 20;
+    wlwin_text(&a->win, tx + 3, ty + 3, txt, sc, 0x000000, 0);
+    wlwin_text(&a->win, tx, ty, txt, sc, 0xffffff, 0);
+}
+
+/* "Step out of the picture": the countdown to the empty scene of a backdrop effect. */
+static void paint_bgwait(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    if (!a->bg_until)
+        return;
+    uint64_t t = now_ms();
+    paint_digits(a, t >= a->bg_until ? 1 : (int)((a->bg_until - t + 999) / 1000));
+    const char *msg = "Step out of the picture";
+    int tw = (int)strlen(msg) * LM_FONT_W;
+    wlwin_round_fill(w, (pic_w(a) - tw) / 2 - 14, 10, tw + 28, 28, 14, 0x000000);
+    wlwin_text(w, (pic_w(a) - tw) / 2, 16, msg, 1, 0xffffff, 0);
+}
+
+/* The countdown over the picture (big seconds), and for four pictures which one comes. */
+static void paint_countdown(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    if (a->phase != PH_WAIT)
+        return;
+    int vw = pic_w(a);
+    uint64_t t = now_ms();
+    if (a->digits)
+        paint_digits(a, t >= a->t_shot ? 1 : (int)((a->t_shot - t + 999) / 1000));
+    if (a->fourup) {
+        char tag[32];
+        snprintf(tag, sizeof(tag), "Photo %d of 4", a->shot_n + 1);
+        int tw = (int)strlen(tag) * LM_FONT_W;
+        wlwin_round_fill(w, vw - tw - 32, 8, tw + 24, 24, 12, 0x000000);
+        wlwin_text(w, vw - tw - 20, 12, tag, 1, 0xffffff, 0);
+    }
+}
+
+/* The white flash of a picture that was taken: the picture area goes white and fades out in FLASH_MS. */
+static void paint_flash(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    uint64_t t = now_ms();
+    if (!a->flash_t0 || t - a->flash_t0 >= FLASH_MS)
+        return;
+    double f = 1.0 - (double)(t - a->flash_t0) / FLASH_MS;
+    f *= f;
+    int k = wlwin_scale(w), x0 = w->inx * k, x1 = LM_MIN((w->inx + pic_w(a)) * k, w->pw), y1 = LM_MIN(picture_h(a) * k, w->ph);
+    for (int y = 0; y < y1; y++) {
+        uint32_t *row = w->pixels + (size_t)y * (size_t)w->pw;
+        for (int x = x0; x < x1; x++)
+            row[x] = lm_mix_rgb(row[x], 0xffffff, f);
+    }
+}
+
+/* The grid of effects: tile i (0..8) of the page, the cell with its name under it. */
+static bool grid_tile(const struct app *a, int i, int *x, int *y, int *w, int *h)
+{
+    int vw = a->win.bw, vh = picture_h(a);
+    int cw = (vw - 2 * GRID_M - 2 * GRID_G) / 3, ch = (vh - GRID_M - GRID_NAV_H - 2 * GRID_G) / 3;
+    if (cw < 48 || ch < GRID_LAB_H + 24 || i < 0 || i >= FX_PER_PAGE)
+        return false;
+    *x = GRID_M + (i % 3) * (cw + GRID_G);
+    *y = GRID_M + (i / 3) * (ch + GRID_G);
+    *w = cw;
+    *h = ch;
+    return true;
+}
+
+static bool grid_nav(const struct app *a, int which, int *x, int *y, int *w, int *h)
+{
+    int vw = a->win.bw, vh = picture_h(a);
+    if (vw < 120 || vh < 120)
+        return false;
+    *w = 34;
+    *h = 26;
+    *y = vh - GRID_NAV_H + 4;
+    *x = which == NAV_PREV ? vw / 2 - 70 : vw / 2 + 36;
+    return true;
+}
+
+/* A tile 0..8 (only the ones that have an effect), NAV_PREV / NAV_NEXT, or -1. */
+static int grid_hit(const struct app *a, double px, double py)
+{
+    for (int i = 0; i < FX_PER_PAGE; i++) {
+        int x, y, w, h;
+        if (a->fx_page * FX_PER_PAGE + i < CAMFX_COUNT && grid_tile(a, i, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h)
+            return i;
+    }
+    for (int n = NAV_PREV; n <= NAV_NEXT; n++) {
+        int x, y, w, h;
+        if (grid_nav(a, n, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h)
+            return n;
+    }
+    return -1;
+}
+
+/* d = the source squeezed into dw x dh by averaging blocks. */
+static void thumb_box(const uint32_t *s, int sw, int sh, uint32_t *d, int dw, int dh)
+{
+    for (int y = 0; y < dh; y++) {
+        int y0 = (int)((int64_t)y * sh / dh), y1 = (int)((int64_t)(y + 1) * sh / dh);
+        y1 = LM_MIN(LM_MAX(y1, y0 + 1), sh);
+        for (int x = 0; x < dw; x++) {
+            int x0 = (int)((int64_t)x * sw / dw), x1 = (int)((int64_t)(x + 1) * sw / dw);
+            x1 = LM_MIN(LM_MAX(x1, x0 + 1), sw);
+            unsigned r = 0, g = 0, b = 0, n = 0;
+            for (int yy = y0; yy < y1; yy++)
+                for (int xx = x0; xx < x1; xx++) {
+                    uint32_t p = s[(size_t)yy * (size_t)sw + (size_t)xx];
+                    r += (p >> 16) & 255;
+                    g += (p >> 8) & 255;
+                    b += p & 255;
+                    n++;
+                }
+            d[(size_t)y * (size_t)dw + (size_t)x] = 0xff000000u | (r / n) << 16 | (g / n) << 8 | (b / n);
+        }
+    }
+}
+
+static void paint_grid(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int k = wlwin_scale(w);
+    for (int i = 0; i < FX_PER_PAGE; i++) {
+        int fxn = a->fx_page * FX_PER_PAGE + i, x, y, cw, ch;
+        if (fxn >= CAMFX_COUNT || !grid_tile(a, i, &x, &y, &cw, &ch))
+            continue;
+        bool sel = fxn == a->fx, hov = i == a->fx_hover;
+        if (sel || hov)
+            wlwin_round_fill(w, x - 3, y - 3, cw + 6, ch + 6, 11, sel ? lm_theme.accent : lm_theme.text_soft);
+        wlwin_round_fill(w, x, y, cw, ch, 8, lm_theme.bar);
+        int ih = ch - GRID_LAB_H - 4, iw = cw - 8;
+        if (a->have && a->img.px && ih > 8 && iw > 8) {
+            double sc = LM_MIN((double)iw / a->img.w, (double)ih / a->img.h);
+            int dw = LM_MAX((int)(a->img.w * sc), 1), dh = LM_MAX((int)(a->img.h * sc), 1);
+            int pw = dw * k, ph = dh * k;
+            bool useref = camfx_is_backdrop(fxn) && a->have_ref && a->ref.px && a->ref.w == a->img.w && a->ref.h == a->img.h;
+            uint32_t *src = malloc((size_t)pw * (size_t)ph * 12);
+            if (src) {
+                uint32_t *dst = src + (size_t)pw * (size_t)ph, *rt = dst + (size_t)pw * (size_t)ph;
+                thumb_box(a->img.px, a->img.w, a->img.h, src, pw, ph);
+                if (useref)
+                    thumb_box(a->ref.px, a->ref.w, a->ref.h, rt, pw, ph);
+                camfx_apply_at(fxn, src, useref ? rt : NULL, pw, ph, dst, a->focus_x, a->focus_y);
+                if (a->mirror)                                                  /* as the big picture: the effect first, then the mirror */
+                    for (int yy = 0; yy < ph; yy++) {
+                        uint32_t *row = dst + (size_t)yy * (size_t)pw;
+                        for (int xx = 0; xx < pw / 2; xx++) {
+                            uint32_t t = row[xx];
+                            row[xx] = row[pw - 1 - xx];
+                            row[pw - 1 - xx] = t;
+                        }
+                    }
+                wlwin_blit_px(w, x + 4 + (iw - dw) / 2, y + 4 + (ih - dh) / 2, dst, pw, ph, pw, 0, 0, w->bw, w->bh);
+                free(src);
+            }
+        }
+        const char *nm = camfx_name(fxn);
+        int tw = (int)strlen(nm) * LM_FONT_W;
+        wlwin_text(w, x + (cw - tw) / 2, y + ch - GRID_LAB_H + 1, nm, 1, sel ? lm_theme.accent : lm_theme.bar_text_bright, cw - 4);
+    }
+    for (int n = NAV_PREV; n <= NAV_NEXT; n++) {
+        int x, y, bw, bh;
+        if (!grid_nav(a, n, &x, &y, &bw, &bh))
+            continue;
+        bool off = n == NAV_PREV ? a->fx_page <= 0 : a->fx_page >= FX_PAGES - 1;
+        wlwin_drop(w, x, y, bw, bh, lm_button_radius(bh / 2), off ? lm_theme.btn_slate : lm_theme.btn_blue);
+        wlwin_text(w, x + (bw - LM_FONT_W) / 2, y + (bh - LM_FONT_H) / 2, n == NAV_PREV ? "<" : ">", 1, lm_theme.on_colour, 0);
+    }
+    char pg[16];
+    snprintf(pg, sizeof(pg), "%d / %d", a->fx_page + 1, FX_PAGES);
+    wlwin_text(w, a->win.bw / 2 - (int)strlen(pg) * LM_FONT_W / 2, picture_h(a) - GRID_NAV_H + 4 + (26 - LM_FONT_H) / 2, pg, 1, lm_theme.text_soft, 0);
+}
+
+/* ---- the strip of the last pictures: a column at the right of the picture --------------------------------------------------------- */
+
+static void strip_clamp(struct app *a)
+{
+    a->strip_top = LM_CLAMP(a->strip_top, 0, LM_MAX(a->nstrip - strip_fit(a), 0));
+}
+
+static bool folder_rect(const struct app *a, int *x, int *y, int *w, int *h)
+{
+    if (!strip_on(a))
+        return false;
+    *w = STRIP_TW;
+    *h = 26;
+    *x = a->win.bw - STRIP_COL + (STRIP_COL - STRIP_TW) / 2;
+    *y = 8;
+    return true;
+}
+
+static bool folder_at(const struct app *a, double px, double py)
+{
+    int x, y, w, h;
+    return folder_rect(a, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h;
+}
+
+/* The place of picture i (an index into the strip) if it is in view: its slot of 64 x 48 in the column, the picture fitted into it (a slot with no
+ * small copy yet is the whole slot). */
+static bool strip_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
+{
+    int slot = i - a->strip_top;
+    if (!strip_on(a) || i < 0 || i >= a->nstrip || slot < 0 || slot >= strip_fit(a))
+        return false;
+    int sx = a->win.bw - STRIP_COL + (STRIP_COL - STRIP_TW) / 2, sy = 44 + slot * (STRIP_TH + 8);
+    const struct lm_image *t = &a->strip[i].img;
+    *w = STRIP_TW;
+    *h = STRIP_TH;
+    if (t->px && t->w > 0 && t->h > 0) {
+        double sc = LM_MIN((double)STRIP_TW / t->w, (double)STRIP_TH / t->h);
+        *w = LM_MAX((int)(t->w * sc), 1);
+        *h = LM_MAX((int)(t->h * sc), 1);
+    }
+    *x = sx + (STRIP_TW - *w) / 2;
+    *y = sy + (STRIP_TH - *h) / 2;
+    return true;
+}
+
+static int strip_at(const struct app *a, double px, double py)
+{
+    for (int i = a->strip_top; i < a->nstrip; i++) {
+        int x, y, w, h;
+        if (!strip_rect(a, i, &x, &y, &w, &h))
+            break;
+        if (px >= x - 3 && px < x + w + 3 && py >= y - 3 && py < y + h + 3)
+            return i;
+    }
+    return -1;
+}
+
+/* Makes the small copy of one picture of the folder that is in view and has none yet (one a call: a big PNG takes a moment). True when it did one,
+ * so the loop comes back soon for the next. */
+static bool strip_lazy(struct app *a)
+{
+    if (!strip_on(a))
+        return false;
+    for (int i = a->strip_top; i < a->nstrip && i < a->strip_top + strip_fit(a); i++) {
+        struct thumb *t = &a->strip[i];
+        if (t->img.px || t->tried)
+            continue;
+        t->tried = true;
+        struct lm_image im = { 0 };
+        char err[120];
+        if (lm_img_load(t->path, &im, err, sizeof(err)) == 0) {
+            int tw = LM_CLAMP(im.w * STRIP_H / im.h, 16, 256);
+            uint32_t *px = malloc((size_t)tw * STRIP_H * 4);
+            if (px) {
+                thumb_box(im.px, im.w, im.h, px, tw, STRIP_H);
+                t->img = (struct lm_image){ tw, STRIP_H, px };
+            }
+            lm_img_free(&im);
+        }
+        a->win.redraw = true;
+        return true;
+    }
+    return false;
+}
+
+static void paint_strip(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    if (!strip_on(a))
+        return;
+    strip_clamp(a);
+    int k = wlwin_scale(w), vh = picture_h(a), x0 = w->bw - STRIP_COL, fit = strip_fit(a);
+    wlwin_fill(w, x0, 0, STRIP_COL, vh, lm_theme.bar);
+    wlwin_fill(w, x0, 0, 1, vh, lm_theme.border);
+    int fx, fy, fw, fh;
+    if (folder_rect(a, &fx, &fy, &fw, &fh)) {
+        wlwin_drop(w, fx, fy, fw, fh, lm_button_radius(fh / 2), a->fhover ? lm_theme.btn_teal_lit : lm_theme.btn_teal);
+        wlwin_text(w, fx + (fw - 6 * LM_FONT_W) / 2, fy + (fh - LM_FONT_H) / 2, "Folder", 1, lm_theme.on_colour, 0);
+    }
+    for (int i = a->strip_top; i < a->nstrip; i++) {
+        int x, y, tw, th;
+        if (!strip_rect(a, i, &x, &y, &tw, &th))
+            break;
+        if (!a->strip[i].img.px) {                                                                       /* not read yet (or not a picture) */
+            wlwin_round_fill(w, x, y, tw, th, 4, lm_theme.border);
+            continue;
+        }
+        wlwin_round_fill(w, x - 3, y - 3, tw + 6, th + 6, 5, a->shover == i ? lm_theme.accent : lm_theme.on_colour);        /* a print with a white border */
+        int pw = tw * k, ph = th * k;
+        uint32_t *buf = malloc((size_t)pw * (size_t)ph * 4);
+        if (!buf)
+            continue;
+        thumb_box(a->strip[i].img.px, a->strip[i].img.w, a->strip[i].img.h, buf, pw, ph);
+        wlwin_blit_px(w, x, y, buf, pw, ph, pw, 0, 0, w->bw, w->bh);
+        free(buf);
+    }
+    if (a->nstrip > fit && fit > 0) {                                                                    /* more than fit: a thumb for the wheel */
+        int track = fit * (STRIP_TH + 8) - 8, th = LM_MAX(track * fit / a->nstrip, 12), room = a->nstrip - fit;
+        wlwin_fill(w, x0 + 3, 44, 3, track, lm_theme.border);
+        wlwin_fill(w, x0 + 3, 44 + (track - th) * a->strip_top / room, 3, th, lm_theme.text_soft);
+    }
+}
+
+/* ---- the focus of the effects of the second page ------------------------------------------------------------------------------------ */
+
+/* The picture as it lies in the picture's area (logical pixels). */
+static bool pic_rect(const struct app *a, double *x, double *y, double *w, double *h)
+{
+    const struct lm_image *im = shown(a);
+    if (!a->have || !im->px || im->w < 1 || im->h < 1)
+        return false;
+    int vw = pic_w(a), vh = picture_h(a);
+    double s = LM_MIN((double)vw / im->w, (double)vh / im->h);
+    *w = im->w * s;
+    *h = im->h * s;
+    *x = (vw - *w) / 2;
+    *y = (vh - *h) / 2;
+    return true;
+}
+
+/* The mouse works the effect when it has a point (mirror, kaleidoscope, tunnel, lens effects, twirl, vintage) and nothing else is going on. */
+static bool focus_active(const struct app *a)
+{
+    return camfx_has_focus(a->fx) && !a->fx_open && !a->bg_until && a->have;
+}
+
+static bool pic_hit(const struct app *a, double px, double py)
+{
+    double x, y, w, h;
+    return pic_rect(a, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h;
+}
+
+/* The point under the pointer is the effect's focus. The picture is shown mirrored, the effect works in the camera's own space: the x is turned. */
+static void focus_from(struct app *a, double px, double py)
+{
+    double x, y, w, h;
+    if (!pic_rect(a, &x, &y, &w, &h))
+        return;
+    double u = LM_CLAMP((px - x) / w, 0.0, 1.0), v = LM_CLAMP((py - y) / h, 0.0, 1.0);
+    a->focus_x = (float)(a->mirror ? 1.0 - u : u);
+    a->focus_y = (float)v;
+    fx_update(a);
+    a->win.redraw = true;
+}
+
+/* A small crosshair at the focus (not in the saved pictures) while the pointer is on the picture or the point is being moved. */
+static void paint_focus(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    double x, y, pw, ph;
+    if (!focus_active(a) || !pic_rect(a, &x, &y, &pw, &ph))
+        return;
+    if (!a->focus_drag && !(a->pin && pic_hit(a, a->px, a->py) && a->ohover < 0 && a->shover < 0))
+        return;
+    int cx = (int)(x + (a->mirror ? 1.0f - a->focus_x : a->focus_x) * pw), cy = (int)(y + a->focus_y * ph);
+    for (int pass = 0; pass < 2; pass++) {                                                               /* a shadow, then white */
+        int o = pass == 0 ? 1 : 0;
+        uint32_t col = pass == 0 ? 0x000000 : 0xffffff;
+        wlwin_fill(w, cx - 15 + o, cy - 1 + o, 10, 2, col);
+        wlwin_fill(w, cx + 6 + o, cy - 1 + o, 10, 2, col);
+        wlwin_fill(w, cx - 1 + o, cy - 15 + o, 2, 10, col);
+        wlwin_fill(w, cx - 1 + o, cy + 6 + o, 2, 10, col);
+    }
+}
+
+/* $MELLAGUI_CAM_DUMP: the state and the places of the controls (window pixels), for the tests. */
+static void write_dump(const struct app *a)
+{
+    if (!a->dump[0])
+        return;
+    char tmp[PATH_MAX + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", a->dump);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    const struct lm_image *im = shown(a);
+    fprintf(f, "state fx=%s page=%d open=%d hover=%d fourup=%d timer=%d phase=%d shot=%d digits=%d flash=%d have=%d mirror=%d clip=%d ref=%d bgwait=%d sound=%d strip=%d top=%d focusx=%.3f focusy=%.3f\n",
+            camfx_id(a->fx), a->fx_page, a->fx_open, a->fx_hover, a->fourup, a->timer_s, a->phase, a->shot_n, a->digits, a->flash_t0 != 0, a->have, a->mirror,
+            a->clip != NULL, a->have_ref, a->bg_until != 0, a->sound, a->nstrip, a->strip_top, a->focus_x, a->focus_y);
+    fprintf(f, "image %d %d\n", a->have ? im->w : 0, a->have ? im->h : 0);
+    for (int i = 0; i < N_O; i++) {
+        int x, y, w, h;
+        if (!a->fx_open && ctl_rect(a, i, &x, &y, &w, &h))
+            fprintf(f, "ctl %s %d %d %d %d\n", ctl_name(i), x + a->win.inx, y, w, h);
+    }
+    double px0, py0, pw0, ph0;
+    if (!a->fx_open && pic_rect(a, &px0, &py0, &pw0, &ph0))
+        fprintf(f, "pic %d %d %d %d\n", (int)px0 + a->win.inx, (int)py0, (int)pw0, (int)ph0);
+    {
+        int x, y, w, h;
+        if (folder_rect(a, &x, &y, &w, &h))
+            fprintf(f, "ctl folder %d %d %d %d\n", x + a->win.inx, y, w, h);
+    }
+    for (int i = 0; i < a->nstrip; i++) {
+        int x, y, w, h;
+        if (strip_rect(a, i, &x, &y, &w, &h)) {
+            const char *base = strrchr(a->strip[i].path, '/');
+            fprintf(f, "thumb %d %s %d %d %d %d\n", i, base ? base + 1 : a->strip[i].path, x + a->win.inx, y, w, h);
+        }
+    }
+    if (a->fx_open) {
+        for (int i = 0; i < FX_PER_PAGE; i++) {
+            int x, y, w, h;
+            if (a->fx_page * FX_PER_PAGE + i < CAMFX_COUNT && grid_tile(a, i, &x, &y, &w, &h))
+                fprintf(f, "tile %d %s %d %d %d %d\n", i, camfx_id(a->fx_page * FX_PER_PAGE + i), x + a->win.inx, y, w, h);
+        }
+        for (int n = NAV_PREV; n <= NAV_NEXT; n++) {
+            int x, y, w, h;
+            if (grid_nav(a, n, &x, &y, &w, &h))
+                fprintf(f, "nav %s %d %d %d %d\n", n == NAV_PREV ? "prev" : "next", x + a->win.inx, y, w, h);
+        }
+    }
+    if (fclose(f) != 0 || rename(tmp, a->dump) < 0)
+        unlink(tmp);
+}
+
 static void paint(struct wlwin *w)
 {
     struct app *a = w->data;
-    int vw = w->bw, vh = w->bh > BAR_H ? w->bh - BAR_H : 1;
+    int vw = pic_w(a), vh = w->bh > BAR_H ? w->bh - BAR_H : 1;
     wlwin_fill(w, 0, 0, w->bw, w->bh, BG);
-    if (a->have && a->img.px)
-        paint_picture(a, vw, vh);
-    else
-        wlwin_text(w, 16, 16, a->msg[0] ? a->msg : "Waiting for the camera...", 1, lm_theme.text_soft, vw - 32);
+    if (a->fx_open) {
+        paint_grid(a);
+    } else {
+        if (a->have && a->img.px)
+            paint_picture(a, vw, vh);
+        else
+            wlwin_text(w, 16, 16, a->msg[0] ? a->msg : "Waiting for the camera...", 1, lm_theme.text_soft, vw - 32);
+        paint_controls(a);
+        paint_strip(a);
+        paint_focus(a);
+        paint_countdown(a);
+        paint_bgwait(a);
+    }
+    paint_flash(a);
     wlwin_fill(w, 0, vh, w->bw, w->bh - vh, lm_theme.bar);
     for (int i = 0; i < N_B && !g_rail; i++) {
         int x, y, bw, bh;
@@ -957,9 +1691,13 @@ static void paint(struct wlwin *w)
             lcol = lm_theme.muted;
         }
         right[0] = 0;
-        if (a->src.on)
-            snprintf(right, sizeof(right), "%dx%d %s  %d fps%s%s%s", a->src.w, a->src.h, a->src.fake ? "test" : fourcc_name(a->src.fourcc), a->paused ? 0 : a->fps,
-                     a->mirror ? "  mirrored" : "", a->paused ? "  paused" : "", a->mic ? "  mic" : "");
+        if (a->src.on) {
+            snprintf(right, sizeof(right), "%dx%d %s  %d fps%s%s%s%s%s", a->src.w, a->src.h, a->src.fake ? "test" : fourcc_name(a->src.fourcc), a->paused ? 0 : a->fps,
+                     a->mirror ? "  mirrored" : "", a->paused ? "  paused" : "", a->mic ? "  mic" : "", a->fx != CAMFX_NORMAL ? "  " : "",
+                     a->fx != CAMFX_NORMAL ? camfx_name(a->fx) : "");
+            if (!a->sound && strlen(right) + 10 < sizeof(right))
+                strcat(right, "  silent");
+        }
         int rw = (int)strlen(right) * LM_FONT_W, ty = vh + (BAR_H - LM_FONT_H) / 2;
         wlwin_fill(w, 0, vh, w->bw, 1, lm_theme.border);
         wlwin_text(w, 10, ty, left, 1, lcol, LM_MAX(w->bw - rw - 36, 40));
@@ -984,6 +1722,7 @@ static void paint(struct wlwin *w)
         wlrail_paint(w, &L, &a->ran, a->hover, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);
         wlrail_foot(w, &L, lm_theme.bar);
     }
+    write_dump(a);
 }
 
 static void set_note(struct app *a, const char *fmt, const char *arg)
@@ -996,10 +1735,257 @@ static void set_note(struct app *a, const char *fmt, const char *arg)
 static void do_snapshot(struct app *a)
 {
     char name[96];
-    if (save_snapshot(a, name, sizeof(name)))
+    if (a->have && save_snapshot(a, shown(a), name, sizeof(name)))
         set_note(a, "Saved %s", name);
     else
         set_note(a, "Cannot save a picture (%s)", a->have ? "see the folder" : "no picture yet");
+}
+
+/* ---- Photo Booth: effects, countdown, flash, four pictures in one -------------------------------------------------------------- */
+
+static void conf_save(const struct app *a)
+{
+    char extra[64];
+    snprintf(extra, sizeof(extra), "timer = %d\nfour-up = %d\nsound = %d\n", a->timer_s, a->fourup ? 1 : 0, a->sound ? 1 : 0);
+    lm_snd_conf_save_x("camera", false, a->mic, extra);
+}
+
+static void conf_load(struct app *a)
+{
+    char path[1024], line[128];
+    a->timer_s = 3;                                             /* Photo Booth counts three seconds */
+    a->sound = true;
+    if (lm_snd_conf_path("camera", path, sizeof(path))) {
+        FILE *f = fopen(path, "r");
+        while (f && fgets(line, sizeof(line), f)) {
+            int v;
+            if (sscanf(line, "timer = %d", &v) == 1)
+                a->timer_s = LM_CLAMP(v, 0, 60);
+            else if (sscanf(line, "four-up = %d", &v) == 1)
+                a->fourup = v != 0;
+            else if (sscanf(line, "sound = %d", &v) == 1)
+                a->sound = v != 0;
+        }
+        if (f)
+            fclose(f);
+    }
+    const char *env = getenv("MELLAGUI_CAM_TIMER");
+    if (env && *env)
+        a->timer_s = LM_CLAMP(atoi(env), 0, 60);
+}
+
+static void snd(const struct app *a, int kind)
+{
+    if (a->sound)
+        camsound_play(kind);
+}
+
+/* A backdrop effect needs the scene with nobody in it: wait (the countdown of the shutter, else 3 s; $MELLAGUI_CAM_BG_MS) for the person to step out. */
+static void bg_start(struct app *a)
+{
+    if (!a->have || !a->img.px) {
+        set_note(a, "%s", "No picture to take the background from yet");
+        return;
+    }
+    const char *e = getenv("MELLAGUI_CAM_BG_MS");
+    a->bg_until = now_ms() + (e && *e ? (uint64_t)atoll(e) : (uint64_t)(a->timer_s > 0 ? a->timer_s : 3) * 1000);
+    a->last_tick = 0;
+    a->phase = PH_IDLE;
+    a->shot_n = 0;
+    set_note(a, "%s", "Step out of the picture...");
+}
+
+static void set_fx(struct app *a, int fx)
+{
+    a->fx = LM_CLAMP(fx, 0, CAMFX_COUNT - 1);
+    a->bg_until = 0;
+    a->focus_x = a->focus_y = 0.5f;
+    fx_update(a);
+    if (camfx_is_backdrop(a->fx))
+        bg_start(a);
+    else if (camfx_has_focus(a->fx))
+        set_note(a, "%s", "Drag on the picture to move the effect");
+    a->win.redraw = true;
+}
+
+static void grid_set(struct app *a, bool open)
+{
+    a->fx_open = open;
+    if (open) {
+        a->fx_page = a->fx / FX_PER_PAGE;
+        a->fx_hover = a->fx % FX_PER_PAGE;                       /* the keys start on the effect in use */
+    }
+    a->ohover = -1;
+    a->win.redraw = true;
+}
+
+static void save_fourup(struct app *a)
+{
+    int w2 = a->quad[0].w, h2 = a->quad[0].h;
+    struct lm_image out = { 0 };
+    for (int i = 0; i < 4; i++)
+        if (!a->quad[i].px || a->quad[i].w != w2 || a->quad[i].h != h2) {
+            set_note(a, "%s", "The four pictures do not fit together");
+            return;
+        }
+    out.w = w2 * 2;
+    out.h = h2 * 2;
+    out.px = calloc((size_t)out.w * (size_t)out.h, 4);
+    if (!out.px) {
+        set_note(a, "%s", "Out of memory");
+        return;
+    }
+    for (int i = 0; i < 4; i++)
+        for (int y = 0; y < h2; y++)
+            memcpy(out.px + (size_t)((i / 2) * h2 + y) * (size_t)out.w + (size_t)((i % 2) * w2), a->quad[i].px + (size_t)y * (size_t)w2, (size_t)w2 * 4);
+    char name[96];
+    if (save_snapshot(a, &out, name, sizeof(name)))
+        set_note(a, "Saved %s", name);
+    else
+        set_note(a, "%s", "Cannot save the picture (see the folder)");
+    free(out.px);
+}
+
+/* The moment has come: one picture - or the next of four. */
+static void take_shot(struct app *a)
+{
+    snd(a, CAMSOUND_SHUTTER);
+    a->flash_t0 = now_ms();
+    a->win.redraw = true;
+    if (!a->fourup) {
+        a->phase = PH_IDLE;
+        do_snapshot(a);
+        return;
+    }
+    const struct lm_image *im = shown(a);
+    struct lm_image *q = &a->quad[a->shot_n];
+    int w2 = im->w / 2, h2 = im->h / 2;
+    if (w2 < 1 || h2 < 1 || !image_size(q, w2, h2)) {
+        a->phase = PH_IDLE;
+        a->shot_n = 0;
+        set_note(a, "%s", "Cannot take the pictures");
+        return;
+    }
+    for (int y = 0; y < h2; y++)
+        for (int x = 0; x < w2; x++) {
+            const uint32_t *p0 = im->px + (size_t)(2 * y) * (size_t)im->w + (size_t)(2 * x), *p1 = p0 + im->w;
+            unsigned c0 = p0[0], c1 = p0[1], c2 = p1[0], c3 = p1[1], out = 0xff000000u;
+            for (int sh = 0; sh <= 16; sh += 8)
+                out |= ((((c0 >> sh) & 255) + ((c1 >> sh) & 255) + ((c2 >> sh) & 255) + ((c3 >> sh) & 255) + 2) / 4) << sh;
+            q->px[(size_t)y * (size_t)w2 + (size_t)x] = out;
+        }
+    if (++a->shot_n < 4) {
+        a->phase = PH_WAIT;
+        a->digits = false;
+        a->t_shot = now_ms() + FOURUP_GAP_MS;
+        return;
+    }
+    a->phase = PH_IDLE;
+    a->shot_n = 0;
+    save_fourup(a);
+}
+
+/* The shutter: a picture now (no countdown), or the countdown; pressed during a countdown it cancels. */
+static void shutter(struct app *a)
+{
+    if (a->phase != PH_IDLE) {
+        a->phase = PH_IDLE;
+        a->shot_n = 0;
+        set_note(a, "%s", "Cancelled");
+        return;
+    }
+    if (!a->have || !a->img.px) {
+        set_note(a, "%s", "No picture to take yet");
+        return;
+    }
+    if (a->bg_until) {
+        set_note(a, "%s", "Step out of the picture first: the empty scene is being taken");
+        return;
+    }
+    if (a->fx_open)
+        grid_set(a, false);
+    a->shot_n = 0;
+    a->last_tick = 0;
+    if (a->timer_s <= 0) {
+        take_shot(a);
+        return;
+    }
+    a->phase = PH_WAIT;
+    a->digits = true;
+    a->t_shot = now_ms() + (uint64_t)a->timer_s * 1000;
+    a->win.redraw = true;
+}
+
+/* Once per turn of the loop: the countdown runs down, the flash fades. */
+static void booth_tick(struct app *a, uint64_t t)
+{
+    if (a->bg_until) {
+        a->win.redraw = true;
+        if (!a->have || !a->img.px) {
+            a->bg_until = 0;
+        } else if (t >= a->bg_until) {                           /* the empty scene: this picture */
+            if (image_size(&a->ref, a->img.w, a->img.h)) {
+                memcpy(a->ref.px, a->img.px, (size_t)a->img.w * (size_t)a->img.h * 4);
+                a->have_ref = true;
+            }
+            a->bg_until = 0;
+            snd(a, CAMSOUND_SHUTTER);
+            a->flash_t0 = t;
+            fx_update(a);
+            set_note(a, "%s", a->have_ref ? "Background taken (B takes it again)" : "Cannot take the background");
+        } else {
+            int secs = (int)((a->bg_until - t + 999) / 1000);
+            if (secs != a->last_tick && secs <= 10) {
+                a->last_tick = secs;
+                snd(a, secs <= 1 ? CAMSOUND_TOCK : CAMSOUND_TICK);
+            }
+        }
+    }
+    if (a->phase == PH_WAIT) {
+        a->win.redraw = true;
+        if (a->digits && t < a->t_shot) {
+            int secs = (int)((a->t_shot - t + 999) / 1000);
+            if (secs != a->last_tick) {
+                a->last_tick = secs;
+                snd(a, secs <= 1 ? CAMSOUND_TOCK : CAMSOUND_TICK);
+            }
+        }
+        if (t >= a->t_shot) {
+            if (!a->have || !a->img.px) {                       /* the camera went away meanwhile */
+                a->phase = PH_IDLE;
+                a->shot_n = 0;
+                set_note(a, "%s", "The camera went away");
+            } else {
+                take_shot(a);
+            }
+        }
+    }
+    if (a->flash_t0) {
+        a->win.redraw = true;
+        if (t - a->flash_t0 >= FLASH_MS)
+            a->flash_t0 = 0;
+    }
+}
+
+static void press_ctl(struct app *a, int i)
+{
+    switch (i) {
+    case O_FX: grid_set(a, !a->fx_open); break;
+    case O_SHUTTER: shutter(a); break;
+    case O_MODE:
+        if (a->phase == PH_IDLE) {
+            a->fourup = !a->fourup;
+            conf_save(a);
+        }
+        break;
+    case O_TIMER:
+        if (a->phase == PH_IDLE) {
+            a->timer_s = a->timer_s == 0 ? 3 : a->timer_s == 3 ? 10 : 0;
+            conf_save(a);
+        }
+        break;
+    }
+    a->win.redraw = true;
 }
 
 static void do_record(struct app *a)
@@ -1008,7 +1994,7 @@ static void do_record(struct app *a)
         uint32_t frames = 0;
         char path[sizeof(a->clip->path)];
         snprintf(path, sizeof(path), "%s", a->clip->path);
-        bool ok = clip_stop(a->clip, a->have ? &a->img : NULL, &frames);
+        bool ok = clip_stop(a->clip, a->have ? shown(a) : NULL, &frames);
         free(a->clip);
         a->clip = NULL;
         if (ok) {
@@ -1025,7 +2011,7 @@ static void do_record(struct app *a)
         set_note(a, "%s", "No picture to record yet");
         return;
     }
-    a->clip = clip_start(&a->img, a->videodir, NULL, a->mic, err, sizeof(err));
+    a->clip = clip_start(shown(a), a->videodir, NULL, a->mic, err, sizeof(err));
     if (!a->clip)
         set_note(a, "%s", err);
     else
@@ -1042,6 +2028,8 @@ static void start_stream(struct app *a)
     } else {
         a->msg[0] = 0;
         a->have = false;
+        a->have_ref = false;                                    /* (the empty scene was taken with another camera / size) */
+        a->bg_until = 0;
         a->frames = 0;
         a->fps_t = now_ms();
         a->next_fake = 0;
@@ -1082,13 +2070,12 @@ static void next_camera(struct app *a)
 static void press(struct app *a, int b)
 {
     switch (b) {
-    case B_SNAP: do_snapshot(a); break;
+    case B_SNAP: shutter(a); break;
     case B_REC: do_record(a); break;
     case B_MIC:
         if (!a->clip) {                                         /* (a clip that runs keeps what it started with) */
             a->mic = !a->mic;
-            bool sys = false;
-            lm_snd_conf_save("camera", sys, a->mic);
+            conf_save(a);
         }
         break;
     case B_MIRROR: a->mirror = !a->mirror; break;
@@ -1096,8 +2083,8 @@ static void press(struct app *a, int b)
         if (!a->clip)                                           /* a clip is made of the live pictures */
             a->paused = !a->paused;
         break;
-    case B_SIZE: if (!a->clip) menu_set(a, !a->menu_open); break;
-    case B_CAM: if (!a->clip) next_camera(a); break;
+    case B_SIZE: if (!a->clip && a->phase == PH_IDLE) menu_set(a, !a->menu_open); break;
+    case B_CAM: if (!a->clip && a->phase == PH_IDLE) next_camera(a); break;
     }
     a->win.redraw = true;
 }
@@ -1105,21 +2092,44 @@ static void press(struct app *a, int b)
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
-    int old = a->hover;
+    int old = a->hover, old_o = a->ohover, old_g = a->fx_hover, old_s = a->shover;
+    bool old_f = a->fhover;
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
         a->px = lm_fixed_to_double(args[2].f);
         a->py = lm_fixed_to_double(args[3].f);
         a->hover = btn_at(a, a->px, a->py);
+        a->ohover = ctl_at(a, a->px, a->py);
+        a->shover = a->fx_open ? -1 : strip_at(a, a->px, a->py);
+        a->fhover = folder_at(a, a->px, a->py);
+        a->pin = true;
         break;
     case LM_WL_POINTER_EVT_LEAVE:
         a->hover = -1;
+        a->ohover = -1;
+        a->shover = -1;
+        a->fhover = false;
+        a->pin = false;
+        a->focus_drag = false;
         wlrail_release(&a->ran);
         break;
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
         a->hover = btn_at(a, a->px, a->py);
+        a->ohover = ctl_at(a, a->px, a->py);
+        a->shover = a->fx_open ? -1 : strip_at(a, a->px, a->py);
+        a->fhover = folder_at(a, a->px, a->py);
+        a->pin = true;
+        if (a->focus_drag && focus_active(a))
+            focus_from(a, a->px, a->py);
+        else if (focus_active(a) && pic_hit(a, a->px, a->py))
+            w->redraw = true;                                   /* (the crosshair follows the pointer) */
+        if (a->fx_open) {
+            int g = grid_hit(a, a->px, a->py);
+            if (g >= 0 && g < FX_PER_PAGE)
+                a->fx_hover = g;
+        }
         if (a->menu_open) {
             int row = menu_row_at(a, a->px, a->py);
             if (row >= 0 && row != a->menu_hover) {
@@ -1131,6 +2141,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_AXIS:
         if (a->menu_open && args[1].u == 0) {                   /* the wheel scrolls a long list */
             a->menu_top = LM_CLAMP(a->menu_top + (args[2].f > 0 ? 1 : -1) * 2, 0, LM_MAX(a->src.nsizes - menu_rows_fit(a), 0));
+            w->redraw = true;
+        } else if (args[1].u == 0 && strip_on(a) && a->px >= a->win.bw - STRIP_COL) {         /* ... and the strip's column: more pictures */
+            a->strip_top += args[2].f > 0 ? 1 : -1;
+            strip_clamp(a);
+            a->shover = strip_at(a, a->px, a->py);
             w->redraw = true;
         }
         break;
@@ -1145,6 +2160,40 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
         if (args[2].u == 272 && args[3].u == 1) {               /* BTN_LEFT pressed */
             int b = btn_at(a, a->px, a->py);
+            if (b < 0 && a->fx_open) {                          /* the grid of effects: a tile chooses, the arrows turn the page, anywhere else closes it */
+                int g = grid_hit(a, a->px, a->py);
+                if (g >= 0 && g < FX_PER_PAGE) {
+                    set_fx(a, a->fx_page * FX_PER_PAGE + g);
+                    grid_set(a, false);
+                } else if (g == NAV_PREV || g == NAV_NEXT) {
+                    a->fx_page = LM_CLAMP(a->fx_page + (g == NAV_PREV ? -1 : 1), 0, FX_PAGES - 1);
+                    a->fx_hover = -1;
+                } else {
+                    grid_set(a, false);
+                }
+                w->redraw = true;
+                break;
+            }
+            int o = b < 0 ? ctl_at(a, a->px, a->py) : -1;
+            if (o >= 0) {
+                press_ctl(a, o);
+                break;
+            }
+            int sp = b < 0 ? strip_at(a, a->px, a->py) : -1;
+            if (sp >= 0) {                                      /* a picture of the strip: look at it */
+                spawn_detached("MELLAGUI_CAM_VIEWER", "mellagui-view", a->strip[sp].path);
+                break;
+            }
+            if (b < 0 && folder_at(a, a->px, a->py)) {          /* the folder of the pictures in the file manager */
+                mkdir(a->outdir, 0755);
+                spawn_detached("MELLAGUI_CAM_FILES", "mellagui-files", a->outdir);
+                break;
+            }
+            if (b < 0 && focus_active(a) && pic_hit(a, a->px, a->py)) {         /* the effect's point: where the button went down, then dragged */
+                a->focus_drag = true;
+                focus_from(a, a->px, a->py);
+                break;
+            }
             if (b >= 0) {
                 if (g_rail)
                     wlrail_press(&a->ran, b, wlrail_now());
@@ -1152,11 +2201,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             }
         } else if (args[2].u == 272) {
             wlrail_release(&a->ran);                            /* (the drop springs back) */
+            a->focus_drag = false;
             w->redraw = true;
         }
         break;
     }
-    if (a->hover != old)
+    if (a->hover != old || a->ohover != old_o || a->fx_hover != old_g || a->shover != old_s || a->fhover != old_f)
         w->redraw = true;
 }
 
@@ -1182,8 +2232,49 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         }
         return;
     }
+    if (a->fx_open) {                                           /* the grid of effects */
+        int n_on_page = LM_MIN(CAMFX_COUNT - a->fx_page * FX_PER_PAGE, FX_PER_PAGE);
+        int step = ks == LM_KS_Left ? -1 : ks == LM_KS_Right ? 1 : ks == LM_KS_Up ? -3 : ks == LM_KS_Down ? 3 : 0;
+        if (ks == LM_KS_Escape || c == 'e' || c == 'E') {
+            grid_set(a, false);
+            return;
+        } else if (step) {
+            a->fx_hover = LM_CLAMP((a->fx_hover < 0 ? 0 : a->fx_hover) + step, 0, n_on_page - 1);
+            w->redraw = true;
+            return;
+        } else if (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || c == ',' || c == '.') {
+            a->fx_page = LM_CLAMP(a->fx_page + (ks == LM_KS_Page_Up || c == ',' ? -1 : 1), 0, FX_PAGES - 1);
+            a->fx_hover = 0;
+            w->redraw = true;
+            return;
+        } else if ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->fx_hover >= 0 && a->fx_hover < n_on_page) {
+            set_fx(a, a->fx_page * FX_PER_PAGE + a->fx_hover);
+            grid_set(a, false);
+            return;
+        } else if (c >= '1' && c <= '9' && c - '1' < n_on_page) {
+            set_fx(a, a->fx_page * FX_PER_PAGE + (c - '1'));
+            grid_set(a, false);
+            return;
+        }
+    }
     if (ks == LM_KS_Escape || c == 'q' || c == 'Q')
         w->running = false;
+    else if (c == 'e' || c == 'E')
+        press_ctl(a, O_FX);
+    else if (c == '4')
+        press_ctl(a, O_MODE);
+    else if (c == 't' || c == 'T')
+        press_ctl(a, O_TIMER);
+    else if (c == 'b' || c == 'B') {
+        if (camfx_is_backdrop(a->fx) && a->phase == PH_IDLE)
+            bg_start(a);
+        else
+            set_note(a, "%s", "B takes the background again: choose a backdrop effect first (Effects, last page)");
+    } else if (c == 'o' || c == 'O') {
+        a->sound = !a->sound;
+        conf_save(a);
+        set_note(a, "%s", a->sound ? "Sound on" : "Sound off");
+    }
     else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || c == ' ')
         press(a, B_SNAP);
     else if (c == 'r' || c == 'R')
@@ -1233,7 +2324,8 @@ static void pull_frames(struct app *a)
         a->have = true;
         a->frames++;
         a->win.redraw = true;
-        if (a->clip && !clip_frame(a->clip, &a->img)) {         /* ffmpeg died: say so and end the clip */
+        fx_update(a);
+        if (a->clip && !clip_frame(a->clip, shown(a))) {         /* ffmpeg died: say so and end the clip */
             do_record(a);
             set_note(a, "%s", "ffmpeg stopped: the clip is lost (is the sound server running? try Mic off)");
         }
@@ -1249,10 +2341,23 @@ static int run_window(struct app *a)
     wlrail_init(&a->ran);
     if (g_rail)
         wlwin_set_inset(&a->win, WLRAIL_W);                     /* (after the connect, which clears the window; before the open: it makes room) */
-    if (wlwin_open(&a->win, "Camera", "mellagui.cam", 680, 560, 360, 240) < 0)
+    int ww = 680, wh = 560;
+    const char *wenv = getenv("MELLAGUI_CAM_WINDOW");                   /* the window's first size (the tests keep it clear of the dock) */
+    if (wenv && sscanf(wenv, "%dx%d", &ww, &wh) == 2) {
+        ww = LM_CLAMP(ww, 360, 4000);
+        wh = LM_CLAMP(wh, 240, 4000);
+    } else {
+        ww = 680;
+        wh = 560;
+    }
+    if (wlwin_open(&a->win, "Camera", "mellagui.cam", ww, wh, 360, 240) < 0)
         return 1;
     a->mirror = true;
     a->hover = -1;
+    a->ohover = -1;
+    a->fx_hover = -1;
+    a->shover = -1;
+    strip_load(a);
     find_camera(a);
     while (a->win.running) {
         if (!wlwin_step(&a->win, 0))
@@ -1268,7 +2373,8 @@ static int run_window(struct app *a)
             a->note[0] = 0;
             a->win.redraw = true;
         }
-        int timeout = 250;
+        booth_tick(a, t);
+        int timeout = a->phase != PH_IDLE || a->flash_t0 ? 33 : 250;                 /* (the seconds and the flash need frames of their own) */
         if (!a->src.on) {
             if (t >= a->next_scan) {
                 find_camera(a);
@@ -1283,6 +2389,8 @@ static int run_window(struct app *a)
             }
             timeout = (int)LM_MIN(a->next_fake - t, 250);
         }
+        if (strip_lazy(a))                                       /* a picture of the folder came into view: its small copy, then the next */
+            timeout = LM_MIN(timeout, 10);
         if (g_rail) {                                            /* the drops of the rail are moving: a frame every 16 ms */
             struct wlrail L;
             cam_rail(a, &L);
@@ -1299,6 +2407,12 @@ static int run_window(struct app *a)
         do_record(a);                                           /* the window was closed while recording: the file is finished */
     src_close(&a->src);
     wlwin_destroy(&a->win);
+    free(a->fxi.px);
+    free(a->ref.px);
+    for (int i = 0; i < 4; i++)
+        free(a->quad[i].px);
+    for (int i = 0; i < a->nstrip; i++)
+        free(a->strip[i].img.px);
     return 0;
 }
 
@@ -1332,9 +2446,11 @@ static int cmd_list(void)
     return 0;
 }
 
-static int cmd_snapshot(const char *file, const char *dev, struct size want)
+static int cmd_snapshot(const char *file, const char *dev, struct size want, int fx, float fx_x, float fx_y)
 {
     struct app a = { 0 };
+    a.focus_x = fx_x;
+    a.focus_y = fx_y;
     char err[200] = "";
     char devs[MAX_DEVS][64];
     if (!dev) {
@@ -1364,18 +2480,26 @@ static int cmd_snapshot(const char *file, const char *dev, struct size want)
         fprintf(stderr, "mellagui-cam: no picture from %s\n", dev);
         return 1;
     }
-    if (!write_png(file, &a.img, false)) {
+    a.fx = fx;
+    a.have = true;
+    fx_update(&a);
+    if (!write_png(file, shown(&a), false)) {
         fprintf(stderr, "mellagui-cam: cannot write %s: %s\n", file, strerror(errno));
         return 1;
     }
     free(a.img.px);
+    free(a.fxi.px);
     return 0;
 }
 
 /* A clip without a window: `seconds` of the camera into `file`. */
-static int cmd_clip(const char *file, const char *dev, struct size want, double seconds, bool mic)
+static int cmd_clip(const char *file, const char *dev, struct size want, double seconds, bool mic, int fx, float fx_x, float fx_y)
 {
     struct app a = { 0 };
+    a.focus_x = fx_x;
+    a.focus_y = fx_y;
+    a.fx = fx;
+    a.have = true;
     char err[200] = "";
     char devs[MAX_DEVS][64];
     if (!dev) {
@@ -1405,7 +2529,8 @@ static int cmd_clip(const char *file, const char *dev, struct size want, double 
         src_close(&a.src);
         return 1;
     }
-    struct clip *c = clip_start(&a.img, NULL, file, mic, err, sizeof(err));
+    fx_update(&a);
+    struct clip *c = clip_start(shown(&a), NULL, file, mic, err, sizeof(err));
     if (!c) {
         fprintf(stderr, "mellagui-cam: %s\n", err);
         src_close(&a.src);
@@ -1423,15 +2548,18 @@ static int cmd_clip(const char *file, const char *dev, struct size want, double 
         int r = src_frame(&a.src, &a.img, true);
         if (r < 0)
             break;
-        if (r > 0)
-            alive = clip_frame(c, &a.img);
+        if (r > 0) {
+            fx_update(&a);
+            alive = clip_frame(c, shown(&a));
+        }
         clip_pump(c);
     }
     uint32_t frames = 0;
-    bool ok = clip_stop(c, &a.img, &frames);
+    bool ok = clip_stop(c, shown(&a), &frames);
     free(c);
     src_close(&a.src);
     free(a.img.px);
+    free(a.fxi.px);
     if (!ok) {
         fprintf(stderr, "mellagui-cam: the clip could not be saved\n");
         return 1;
@@ -1470,6 +2598,147 @@ static int selftest(void)
         fprintf(stderr, "selftest: size parsing\n");
         bad++;
     }
+    /* the effects: names, ids, no crash at any size, grey stays grey, the mirror is symmetric, same picture same result, the distortions leave the corners */
+    for (int i = 0; i < CAMFX_COUNT; i++)
+        if (!camfx_name(i) || !camfx_id(i) || camfx_by_id(camfx_id(i)) != i) {
+            fprintf(stderr, "selftest: effect %d has no name or id\n", i);
+            bad++;
+        }
+    if (camfx_by_id("nonsense") != -1 || camfx_by_id("SEPIA") != CAMFX_SEPIA || camfx_by_id(NULL) != -1) {
+        fprintf(stderr, "selftest: effect lookup\n");
+        bad++;
+    }
+    static const int sizes[][2] = { { 1, 1 }, { 2, 2 }, { 3, 5 }, { 17, 9 }, { 64, 48 } };
+    for (int fx = 0; fx < CAMFX_COUNT; fx++)
+        for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+            int w = sizes[k][0], h = sizes[k][1];
+            uint32_t *in = malloc((size_t)w * (size_t)h * 4), *o1 = malloc((size_t)w * (size_t)h * 4), *o2 = malloc((size_t)w * (size_t)h * 4);
+            for (int i = 0; i < w * h; i++)
+                in[i] = 0xff000000u | (uint32_t)(i * 2654435761u >> 8);
+            camfx_apply(fx, in, w, h, o1);
+            camfx_apply(fx, in, w, h, o2);
+            bool opaque = true;
+            for (int i = 0; i < w * h; i++)
+                opaque = opaque && (o1[i] >> 24) == 0xff;
+            if (memcmp(o1, o2, (size_t)w * (size_t)h * 4) || !opaque) {
+                fprintf(stderr, "selftest: effect %s at %dx%d is %s\n", camfx_id(fx), w, h, opaque ? "not repeatable" : "not opaque");
+                bad++;
+            }
+            free(in);
+            free(o1);
+            free(o2);
+        }
+    {
+        struct lm_image src = { 0 }, dst = { 0 };
+        image_size(&src, 64, 48);
+        image_size(&dst, 64, 48);
+        fake_frame(&src, 64, 48, 3);
+        camfx_apply(CAMFX_BW, src.px, 64, 48, dst.px);
+        bool grey = true;
+        for (int i = 0; i < 64 * 48; i++)
+            grey = grey && ((dst.px[i] >> 16) & 255) == ((dst.px[i] >> 8) & 255) && ((dst.px[i] >> 8) & 255) == (dst.px[i] & 255);
+        if (!grey) {
+            fprintf(stderr, "selftest: black & white has colour in it\n");
+            bad++;
+        }
+        camfx_apply(CAMFX_SEPIA, src.px, 64, 48, dst.px);
+        int warm = 0;
+        for (int i = 0; i < 64 * 48; i++)
+            warm += ((dst.px[i] >> 16) & 255) >= ((dst.px[i] >> 8) & 255) && ((dst.px[i] >> 8) & 255) >= (dst.px[i] & 255);
+        if (warm != 64 * 48) {
+            fprintf(stderr, "selftest: sepia is not warm everywhere (%d of %d)\n", warm, 64 * 48);
+            bad++;
+        }
+        {                                                                          /* the focus: the mirror's axis moves, the lens effects follow it */
+            struct lm_image f2 = { 0 };
+            image_size(&f2, 64, 48);
+            camfx_apply_at(CAMFX_MIRROR, src.px, NULL, 64, 48, dst.px, 16.0f / 63.0f, 0.5f);          /* the axis at column 16 */
+            bool axis = true;
+            for (int y = 0; y < 48; y++)
+                axis = axis && dst.px[y * 64 + 10] == src.px[y * 64 + 10] && dst.px[y * 64 + 20] == src.px[y * 64 + 12];
+            if (!axis) {
+                fprintf(stderr, "selftest: the mirror does not reflect about the focus\n");
+                bad++;
+            }
+            for (int fx = CAMFX_KALEIDO; fx <= CAMFX_TWIRL; fx++) {
+                camfx_apply_at(fx, src.px, NULL, 64, 48, dst.px, 0.5f, 0.5f);
+                camfx_apply_at(fx, src.px, NULL, 64, 48, f2.px, 0.25f, 0.7f);
+                if (!memcmp(dst.px, f2.px, 64 * 48 * 4)) {
+                    fprintf(stderr, "selftest: %s ignores its focus\n", camfx_id(fx));
+                    bad++;
+                }
+            }
+            camfx_apply_at(CAMFX_BW, src.px, NULL, 64, 48, f2.px, 0.1f, 0.9f);                         /* the others do not look at it */
+            camfx_apply(CAMFX_BW, src.px, 64, 48, dst.px);
+            if (memcmp(dst.px, f2.px, 64 * 48 * 4) || !camfx_has_focus(CAMFX_MIRROR) || !camfx_has_focus(CAMFX_VINTAGE) || camfx_has_focus(CAMFX_GLOW) ||
+                camfx_has_focus(CAMFX_SUNSET)) {
+                fprintf(stderr, "selftest: which effects have a focus\n");
+                bad++;
+            }
+            free(f2.px);
+        }
+        camfx_apply(CAMFX_MIRROR, src.px, 64, 48, dst.px);
+        bool sym = true;
+        for (int y = 0; y < 48; y++)
+            for (int x = 0; x < 32; x++)
+                sym = sym && dst.px[y * 64 + x] == dst.px[y * 64 + 63 - x] && dst.px[y * 64 + x] == src.px[y * 64 + x];
+        if (!sym) {
+            fprintf(stderr, "selftest: the mirror is not symmetric (or the left half changed)\n");
+            bad++;
+        }
+        for (int fx = CAMFX_SQUEEZE; fx <= CAMFX_DENT; fx++) {                       /* the corners are outside the ellipse: untouched */
+            camfx_apply(fx, src.px, 64, 48, dst.px);
+            if (dst.px[0] != src.px[0] || dst.px[63] != src.px[63] || dst.px[47 * 64] != src.px[47 * 64] || dst.px[47 * 64 + 63] != src.px[47 * 64 + 63]) {
+                fprintf(stderr, "selftest: %s changed a corner\n", camfx_id(fx));
+                bad++;
+            }
+        }
+        /* the backdrops: where nothing differs from the reference the backdrop shows and the picture does not; where all differs the picture is there */
+        struct lm_image src2 = { 0 }, o1 = { 0 }, o2 = { 0 };
+        image_size(&src2, 64, 48);
+        image_size(&o1, 64, 48);
+        image_size(&o2, 64, 48);
+        fake_frame(&src2, 64, 48, 40);
+        for (int fx = CAMFX_SUNSET; fx <= CAMFX_NEON; fx++) {
+            camfx_apply_ref(fx, src.px, src.px, 64, 48, o1.px);                    /* nobody in it: the same backdrop whatever the picture */
+            camfx_apply_ref(fx, src2.px, src2.px, 64, 48, o2.px);
+            if (memcmp(o1.px, o2.px, 64 * 48 * 4)) {
+                fprintf(stderr, "selftest: %s shows the picture where nothing differs from the reference\n", camfx_id(fx));
+                bad++;
+            }
+            uint32_t black[64 * 48];
+            memset(black, 0, sizeof(black));
+            camfx_apply_ref(fx, src.px, black, 64, 48, o2.px);                     /* everything differs: the picture stays, the backdrop is hidden */
+            int kept = 0;
+            for (int i = 0; i < 64 * 48; i++)
+                kept += o2.px[i] == src.px[i];
+            if (kept < 64 * 48 * 9 / 10 || !memcmp(o1.px, o2.px, 64 * 48 * 4)) {
+                fprintf(stderr, "selftest: %s lost the picture where all differs from the reference (%d kept)\n", camfx_id(fx), kept);
+                bad++;
+            }
+        }
+        camfx_apply(CAMFX_SUNSET, src.px, 64, 48, o1.px);                          /* no reference: an oval keeps the picture in the middle, the corners are the backdrop */
+        if (o1.px[24 * 64 + 32] != src.px[24 * 64 + 32] || o1.px[0] == src.px[0]) {
+            fprintf(stderr, "selftest: the oval of a backdrop without a reference\n");
+            bad++;
+        }
+        free(src2.px);
+        free(o1.px);
+        free(o2.px);
+        free(src.px);
+        free(dst.px);
+    }
+    for (int k = 0; k < CAMSOUND_COUNT; k++) {                                      /* the sounds: a short clip, not silent, not clipped to a square wave */
+        static int16_t pcm[CAMSOUND_MAX];
+        size_t n = camsound_render(k, pcm, CAMSOUND_MAX);
+        int peak = 0;
+        for (size_t i = 0; i < n; i++)
+            peak = LM_MAX(peak, abs(pcm[i]));
+        if (n < 1000 || n > CAMSOUND_MAX || peak < 3000 || peak > 32000 || !camsound_name(k)) {
+            fprintf(stderr, "selftest: sound %d has %zu samples, peak %d\n", k, n, peak);
+            bad++;
+        }
+    }
     free(a.px);
     free(b.px);
     puts(bad ? "selftest FAILED" : "selftest ok");
@@ -1483,7 +2752,9 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     const char *dev = NULL, *snap = NULL, *clip = NULL;
     struct size want = { 0, 0 };
-    bool list = false, mic = true, sys_unused = false;
+    bool list = false, list_fx = false, mic = true, sys_unused = false;
+    int fx = CAMFX_NORMAL;
+    float fx_x = 0.5f, fx_y = 0.5f;
     double seconds = 5;
     lm_snd_conf_load("camera", &sys_unused, &mic);
     for (int i = 1; i < argc; i++) {
@@ -1491,6 +2762,21 @@ int main(int argc, char **argv)
             return selftest();
         else if (!strcmp(argv[i], "--list"))
             list = true;
+        else if (!strcmp(argv[i], "--effects"))
+            list_fx = true;
+        else if (!strcmp(argv[i], "--focus") && i + 1 < argc) {
+            char junk;
+            if (sscanf(argv[++i], "%f,%f%c", &fx_x, &fx_y, &junk) != 2 || fx_x < 0 || fx_x > 1 || fx_y < 0 || fx_y > 1) {
+                fprintf(stderr, "mellagui-cam: --focus wants X,Y between 0 and 1 (for example 0.3,0.5)\n");
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--effect") && i + 1 < argc) {
+            fx = camfx_by_id(argv[++i]);
+            if (fx < 0) {
+                fprintf(stderr, "mellagui-cam: unknown effect \"%s\" (mellagui-cam --effects lists them)\n", argv[i]);
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--device") && i + 1 < argc)
             dev = argv[++i];
         else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc)
@@ -1509,20 +2795,32 @@ int main(int argc, char **argv)
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: mellagui-cam [--device /dev/videoN] [--size WxH] [--mic|--no-mic] | --list | --snapshot FILE.png | --clip FILE.mp4 [--seconds N] | --selftest\n");
+            fprintf(stderr, "usage: mellagui-cam [--device /dev/videoN] [--size WxH] [--mic|--no-mic] [--effect ID] [--focus X,Y] | --list | --effects | --snapshot FILE.png | --clip FILE.mp4 [--seconds N] | --selftest\n");
             return 2;
         }
     }
     if (list)
         return cmd_list();
+    if (list_fx) {
+        for (int i = 0; i < CAMFX_COUNT; i++)
+            printf("%s|%s\n", camfx_id(i), camfx_name(i));
+        return 0;
+    }
     if (snap)
-        return cmd_snapshot(snap, dev, want);
+        return cmd_snapshot(snap, dev, want, fx, fx_x, fx_y);
     if (clip)
-        return cmd_clip(clip, dev, want, seconds, mic);
+        return cmd_clip(clip, dev, want, seconds, mic, fx, fx_x, fx_y);
 
     static struct app a;                                         /* zero initialised */
     a.want = want;
     a.mic = mic;
+    a.fx = fx;
+    a.focus_x = fx_x;
+    a.focus_y = fx_y;
+    conf_load(&a);
+    const char *dump = getenv("MELLAGUI_CAM_DUMP");
+    if (dump && *dump)
+        snprintf(a.dump, sizeof(a.dump), "%s", dump);
     if (dev) {
         snprintf(a.want_dev, sizeof(a.want_dev), "%s", dev);
         a.fixed_dev = true;

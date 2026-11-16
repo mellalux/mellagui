@@ -11522,7 +11522,8 @@ class TestCamera(Base):
     def start(self, **env):
         d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        p = subprocess.Popen([self.CAM, *env.pop('args', [])], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d, **env),
+        # (no countdown unless a test asks for one: a picture is taken at once, as it always was)
+        p = subprocess.Popen([self.CAM, *env.pop('args', [])], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d, **{'MELLAGUI_CAM_TIMER': '0', 'MELLAGUI_CAM_PLAYER': 'none', **env}),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.cam')
@@ -11638,6 +11639,487 @@ class TestCamera(Base):
         time.sleep(0.4)
         self.assertIn('microphone = 0', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
 
+    # ---- Photo Booth: effects, countdown, flash, four in one --------------------------------------------------------------------
+
+    def booth(self, **env):
+        """The window with a dump file; returns (process, window, picture folder, a function that reads the dump)."""
+        dump = os.path.join(tmp, 'cam-%d.dump' % time.time_ns())
+        # (a window of 700 x 420 stays clear of the dock that floats over the bottom of the 1024 x 600 test screen)
+        p, win, d = self.start(**{'MELLAGUI_CAM_DUMP': dump, 'MELLAGUI_CAM_WINDOW': '700x420', **env})
+        for _ in range(60):
+            if os.path.exists(dump):
+                break
+            time.sleep(0.05)
+
+        def state():
+            lines = open(dump).read().splitlines()
+            st = dict(kv.split('=') for kv in lines[0].split()[1:])
+            boxes = {}
+            for l in lines[1:]:
+                f = l.split()
+                if f[0] in ('ctl', 'nav', 'thumb'):
+                    boxes[f[0] + ' ' + f[1]] = tuple(int(v) for v in f[-4:])
+                elif f[0] == 'tile':                                                      # tile INDEX ID x y w h
+                    boxes['tile %s %s' % (f[1], f[2])] = tuple(int(v) for v in f[-4:])
+                elif f[0] == 'pic':                                                       # where the live picture lies in the window
+                    boxes['pic'] = tuple(int(v) for v in f[1:5])
+            return st, boxes
+        return p, win, d, state
+
+    def pngs(self, d):
+        return sorted(n for n in os.listdir(d) if n.endswith('.png'))
+
+    def wait_png(self, d, n=1, secs=6.0):
+        end = time.time() + secs
+        while time.time() < end and len(self.pngs(d)) < n:
+            time.sleep(0.05)
+        return self.pngs(d)
+
+    def test_the_effects_are_listed_and_a_bad_one_is_refused(self):
+        r = self.run_cam('--effects')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 22)
+        self.assertEqual(lines[0], 'normal|Normal')
+        self.assertIn('bw|Black & White', lines)
+        r = self.run_cam('--snapshot', os.path.join(tmp, 'never.png'), '--effect', 'nonsense')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('unknown effect', r.stderr)
+
+    def test_a_snapshot_with_an_effect_has_the_effect_in_it(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+
+        def snap(fx):
+            out = os.path.join(d, fx + '.png')
+            r = self.run_cam('--snapshot', out, '--size', '320x240', '--effect', fx)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return Image.open(out).convert('RGB')
+        normal, bw, sepia, mirror, thermal = snap('normal'), snap('bw'), snap('sepia'), snap('mirror'), snap('thermal')
+        self.assertEqual(normal.size, (320, 240))
+        self.assertEqual(normal.getpixel((10, 10)), (192, 192, 192))                      # the test pattern: silver bar first
+        self.assertTrue(all(r == g == b for r, g, b in bw.getdata()), 'black & white has colour in it')
+        self.assertTrue(all(r >= g >= b for r, g, b in sepia.getdata()), 'sepia is not warm')
+        self.assertNotEqual(normal.getpixel((100, 20)), sepia.getpixel((100, 20)))
+        for x in (3, 40, 100, 150):                                                       # the left half is reflected on the right
+            self.assertEqual(mirror.getpixel((x, 20)), mirror.getpixel((319 - x, 20)))
+            self.assertEqual(mirror.getpixel((x, 20)), normal.getpixel((x, 20)))
+        self.assertNotEqual(thermal.getpixel((10, 10)), normal.getpixel((10, 10)))
+        for fx in ('pencil', 'comic', 'pop', 'xray', 'glow', 'kaleidoscope', 'tunnel', 'squeeze', 'stretch', 'bulge', 'dent', 'twirl', 'vintage', 'sunset', 'space', 'neon', 'ghost'):
+            self.assertNotEqual(snap(fx).tobytes(), normal.tobytes(), fx + ' changes nothing')
+
+    def test_the_grid_of_effects_chooses_an_effect_for_the_picture_and_the_snapshot(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        p, win, d, state = self.booth(MELLAGUI_RAILS='1')
+        time.sleep(0.4)
+        st, boxes = state()
+        self.assertEqual((st['fx'], st['open'], st['fourup'], st['timer']), ('normal', '0', '0', '0'))
+        self.assertEqual(sorted(k for k in boxes if k.startswith('ctl')), ['ctl folder', 'ctl fx', 'ctl mode', 'ctl shutter', 'ctl timer'])
+        x, y, w, h = boxes['ctl fx']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                           # Effects: the grid of nine live previews
+        time.sleep(0.5)
+        st, boxes = state()
+        self.assertEqual((st['open'], st['page']), ('1', '0'))
+        self.assertEqual([k for k in boxes if k.startswith('tile')][:3], ['tile 0 normal', 'tile 1 bw', 'tile 2 sepia'])
+        self.assertEqual(len([k for k in boxes if k.startswith('tile')]), 9)
+        ppm = self.shot('cam-grid.ppm')                                                   # live: the Black & White tile has no colour in it, the Normal one has
+
+        def colours(bx):                                                                  # the pixels of the 4 : 3 picture inside a tile (the cell has 4 px round it and a name under it)
+            x, y, w, h = bx
+            iw, ih = w - 8, h - (16 + 6) - 4
+            sc = min(iw / 640, ih / 480)
+            dw, dh = int(640 * sc), int(480 * sc)
+            left, top = x + 4 + (iw - dw) // 2, y + 4 + (ih - dh) // 2
+            return {ppm.px(win['x'] + left + dx, win['y'] + top + dy) for dx in range(6, dw - 6, 8) for dy in range(6, dh - 6, 8)}
+        grey = lambda c: c[0] == c[1] == c[2]
+        self.assertTrue(any(not grey(c) for c in colours(boxes['tile 0 normal'])), 'the Normal tile has no picture')
+        self.assertTrue(all(grey(c) for c in colours(boxes['tile 1 bw'])), 'the Black & White tile has colour in it')
+        nx, ny, nw, nh = boxes['nav next']                                                 # the second page
+        ctl.click(win['x'] + nx + 5, win['y'] + ny + 5)
+        time.sleep(0.4)
+        st, boxes = state()
+        self.assertEqual(st['page'], '1')
+        self.assertEqual([k for k in boxes if k.startswith('tile')][0], 'tile 0 mirror')
+        self.assertEqual(len([k for k in boxes if k.startswith('tile')]), 9)              # 22 effects: nine, nine and four
+        ctl.tap(KEY_ESC)                                                                  # Esc closes the grid, not the window
+        time.sleep(0.3)
+        st, boxes = state()
+        self.assertEqual(st['open'], '0')
+        self.assertTrue(alive_p(p))
+        ctl.tap(18)                                                                       # E: the grid again, on the page of the effect in use
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['open'], '1')
+        ctl.tap(KEY_2)                                                                    # 2: the second tile = Black & White
+        time.sleep(0.4)
+        st, boxes = state()
+        self.assertEqual((st['fx'], st['open']), ('bw', '0'))
+        ctl.tap(KEY_SPACE)                                                                # a picture with the effect (no countdown: timer 0)
+        files = self.wait_png(d)
+        self.assertEqual(len(files), 1, files)
+        im = Image.open(os.path.join(d, files[0])).convert('RGB')
+        self.assertTrue(all(r == g == b for r, g, b in im.getdata()), 'the snapshot has no effect on it')
+        ctl.tap(18)                                                                       # a click on the Normal tile goes back
+        time.sleep(0.4)
+        tx, ty, tw, th = state()[1]['tile 0 normal']
+        ctl.click(win['x'] + tx + tw // 2, win['y'] + ty + th // 2)
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['fx'], 'normal')
+
+    def test_the_countdown_shows_the_seconds_takes_the_picture_and_flashes(self):
+        p, win, d, state = self.booth(MELLAGUI_CAM_TIMER='2')
+        time.sleep(0.4)
+        before = self.shot('cam-before.ppm')
+        ctl.tap(KEY_SPACE)
+        time.sleep(0.5)
+        st, boxes = state()
+        self.assertEqual((st['phase'], st['digits']), ('1', '1'))                         # counting
+        self.assertEqual(self.pngs(d), [], 'a picture before the countdown has run out')
+        counting = self.shot('cam-count.ppm')                                             # the big white seconds: look at the lower part of the digit, where the bars are silver
+        vh = win['h'] - 44                                                                # (no rail here: the bar under the picture is 44 px)
+        sc = max(3, min(16, vh // 40))
+        ty = (vh - 16 * sc) // 2 - 20
+        pw = win['w'] - 84                                                                # (the strip's column is 84 px wide)
+        pic_h = 480 * min(pw / 640, vh / 480)
+        bars_end = int((vh - pic_h) / 2 + pic_h * 2 / 3)
+        y0, y1 = ty + 9 * sc, min(ty + 16 * sc, bars_end - 2)
+        self.assertGreater(y1 - y0, 10)
+        cx0 = win['x'] + pw // 2 - 4 * sc
+        white = lambda ppm: ppm.count((255, 255, 255), cx0, win['y'] + y0, cx0 + 8 * sc, win['y'] + y1)
+        self.assertEqual(white(before), 0)
+        self.assertGreater(white(counting), 100, 'no number over the picture')
+        flashed = False
+        end = time.time() + 4
+        while time.time() < end and not self.pngs(d):
+            time.sleep(0.03)
+        for _ in range(8):                                                                # the screen goes white for a moment
+            st, _ = state()
+            if st['flash'] == '1':
+                flashed = True
+                break
+            time.sleep(0.03)
+        self.assertEqual(len(self.pngs(d)), 1)
+        self.assertTrue(flashed, 'no flash after the picture')
+        time.sleep(0.6)
+        st, _ = state()
+        self.assertEqual((st['phase'], st['flash']), ('0', '0'))
+        ctl.tap(KEY_SPACE)                                                                # a second press during a countdown cancels it
+        time.sleep(0.5)
+        self.assertEqual(state()[0]['phase'], '1')
+        ctl.tap(KEY_SPACE)
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['phase'], '0')
+        time.sleep(2.2)
+        self.assertEqual(len(self.pngs(d)), 1, 'a cancelled countdown took a picture')
+
+    def test_four_up_takes_four_pictures_into_one(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        cfg = tempfile.mkdtemp(prefix='mellagui-camcfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, win, d, state = self.booth(XDG_CONFIG_HOME=cfg)
+        time.sleep(0.4)
+        ctl.tap(5)                                                                        # 4: four pictures
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['fourup'], '1')
+        ctl.tap(KEY_SPACE)
+        time.sleep(0.6)
+        st, _ = state()
+        self.assertEqual((st['phase'], st['shot']), ('1', '1'))                           # the first is taken at once (timer 0), three to go (every 1.1 s)
+        self.assertEqual(self.pngs(d), [])
+        files = self.wait_png(d, 1, 6.0)
+        self.assertEqual(len(files), 1, files)                                            # ONE file for the four
+        im = Image.open(os.path.join(d, files[0])).convert('RGB')
+        self.assertEqual(im.size, (640, 480))
+        quarters = [im.crop((x, y, x + 320, y + 240)).tobytes() for y in (0, 240) for x in (0, 320)]
+        self.assertEqual(len(set(quarters)), 4, 'the four pictures are not four different moments')
+        for q in range(4):
+            c = im.crop(((q % 2) * 320, (q // 2) * 240, (q % 2) * 320 + 320, (q // 2) * 240 + 240))
+            self.assertEqual(c.getpixel((10, 10)), (192, 192, 192))                       # each one is the whole picture, the silver bar first
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['phase'], '0')
+        conf = open(os.path.join(cfg, 'mellagui', 'camera.conf')).read()                   # kept for the next time
+        self.assertIn('four-up = 1', conf)
+        self.assertIn('microphone = ', conf)
+        ctl.tap(20)                                                                       # T: the countdown: none -> 3 -> 10 -> none
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['timer'], '3')
+        ctl.tap(20)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['timer'], '10')
+        ctl.tap(20)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['timer'], '0')
+        ctl.tap(20)
+        time.sleep(0.3)
+        self.assertIn('timer = 3', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
+
+    def test_the_shutter_button_and_the_other_controls_work_with_the_mouse(self):
+        p, win, d, state = self.booth()
+        time.sleep(0.4)
+        st, boxes = state()
+        x, y, w, h = boxes['ctl mode']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['fourup'], '1')
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['fourup'], '0')
+        x, y, w, h = boxes['ctl timer']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['timer'], '3')
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['timer'], '0')
+        x, y, w, h = boxes['ctl shutter']
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                          # the big red button: a picture
+        self.assertEqual(len(self.wait_png(d)), 1)
+
+    def test_a_backdrop_asks_you_to_step_out_takes_the_empty_scene_and_keeps_what_differs(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        p, win, d, state = self.booth(MELLAGUI_CAM_BG_MS='1500')
+        time.sleep(0.4)
+        ctl.tap(18)                                                                       # E: the grid; the arrows go to the last page (the backdrops)
+        time.sleep(0.3)
+        ctl.tap(109)                                                                      # Page Down, twice
+        ctl.tap(109)
+        time.sleep(0.4)
+        st, boxes = state()
+        self.assertEqual(st['page'], '2')
+        self.assertEqual([k for k in boxes if k.startswith('tile')], ['tile 0 sunset', 'tile 1 space', 'tile 2 neon', 'tile 3 ghost'])
+        ppm = self.shot('cam-backdrops.ppm')                                              # the little previews: the picture in an oval on the backdrop (no empty scene yet)
+        x, y, w, h = boxes['tile 0 sunset']
+        sky, sea = ppm.px(win['x'] + x + w // 2 - 40, win['y'] + y + 4 + 6), ppm.px(win['x'] + x + w // 2 - 40, win['y'] + y + 4 + 74)
+        self.assertNotEqual(sky, sea)                                                     # (left of the oval) sky above, sea below
+        ctl.tap(2)                                                                        # 1: Sunset
+        time.sleep(0.4)
+        st, _ = state()
+        self.assertEqual((st['fx'], st['bgwait'], st['ref'], st['open']), ('sunset', '1', '0', '0'))
+        ctl.tap(KEY_SPACE)                                                                # no picture while waiting for the empty scene
+        time.sleep(0.2)
+        self.assertEqual(self.pngs(d), [])
+        end = time.time() + 4
+        while time.time() < end and state()[0]['bgwait'] == '1':
+            time.sleep(0.05)
+        st, _ = state()
+        self.assertEqual((st['bgwait'], st['ref']), ('0', '1'))                           # the empty scene is taken
+        ctl.tap(KEY_SPACE)
+        files = self.wait_png(d)
+        self.assertEqual(len(files), 1, files)
+        im = Image.open(os.path.join(d, files[0])).convert('RGB')
+        self.assertEqual(im.size, (640, 480))
+        # the test pattern moves a white square along the bars: what differs from the empty scene is that square, the rest is the sunset (no silver bars)
+        silver = sum(1 for px in im.getdata() if px == (192, 192, 192))
+        self.assertLess(silver, 5000, 'the bars of the camera are still there: the backdrop did not replace them')      # (the silver bar alone is 29000 pixels)
+        self.assertNotEqual(im.getpixel((5, 5)), (192, 192, 192))
+        self.assertGreater(len({im.getpixel((x, 20)) for x in range(0, 640, 8)}), 1)        # a gradient sky, not one colour
+        ctl.tap(48)                                                                       # B: the empty scene again
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['bgwait'], '1')
+        ctl.tap(18)                                                                       # a normal effect cancels the wait
+        time.sleep(0.3)
+        ctl.tap(104)                                                                      # Page Up, twice: the first page, 1 = Normal
+        ctl.tap(104)
+        time.sleep(0.2)
+        ctl.tap(KEY_1)
+        time.sleep(0.4)
+        st, _ = state()
+        self.assertEqual((st['fx'], st['bgwait']), ('normal', '0'))
+
+    def test_the_countdown_ticks_and_the_shutter_clicks_and_O_switches_the_sound(self):
+        log = os.path.join(tmp, 'cam-sound-%d.log' % time.time_ns())
+        cfg = tempfile.mkdtemp(prefix='mellagui-camcfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, win, d, state = self.booth(MELLAGUI_CAM_TIMER='3', MELLAGUI_CAM_SOUND_LOG=log, XDG_CONFIG_HOME=cfg)
+        time.sleep(0.4)
+        ctl.tap(KEY_SPACE)
+        self.assertEqual(len(self.wait_png(d, 1, 7.0)), 1)
+        time.sleep(0.3)
+        self.assertEqual(open(log).read().split(), ['tick', 'tick', 'tock', 'shutter'])     # 3, 2, then the higher one for the last second, then the click
+        ctl.tap(24)                                                                       # O: the sound off (remembered)
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['sound'], '0')
+        self.assertIn('sound = 0', open(os.path.join(cfg, 'mellagui', 'camera.conf')).read())
+        ctl.tap(20)                                                                       # T: 3 -> 10 -> none; the shutter is silent now
+        ctl.tap(20)
+        time.sleep(0.3)
+        self.assertEqual(state()[0]['timer'], '0')
+        ctl.tap(KEY_SPACE)
+        self.wait_png(d, 2, 3.0)
+        time.sleep(0.3)
+        self.assertEqual(open(log).read().split(), ['tick', 'tick', 'tock', 'shutter'])
+
+    def test_the_strip_is_a_column_beside_the_picture_with_all_the_pictures_to_scroll_through_and_a_folder_button(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        d0 = tempfile.mkdtemp(prefix='mellagui-camstrip-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d0, ignore_errors=True)
+        for n in range(8):                                                                # eight pictures in the folder already: the six newest show
+            Image.new('RGB', (64, 48), (n * 30, 100, 200)).save(os.path.join(d0, 'camera-20260101-0000%02d.png' % n))
+        Image.new('RGB', (8, 8)).save(os.path.join(d0, 'holiday.png'))                    # (not a camera picture)
+        viewer = os.path.join(d0, 'viewer.sh')
+        logf = os.path.join(d0, 'viewer.log')
+        files = os.path.join(d0, 'files.sh')
+        flog = os.path.join(d0, 'files.log')
+        for script, log in ((viewer, logf), (files, flog)):
+            with open(script, 'w') as f:
+                f.write('#!/bin/sh\necho "$1" >> %s\n' % log)
+            os.chmod(script, 0o755)
+        dump = os.path.join(tmp, 'cam-%d.dump' % time.time_ns())
+        pr = subprocess.Popen([self.CAM], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d0, MELLAGUI_CAM_TIMER='0', MELLAGUI_CAM_PLAYER='none', MELLAGUI_CAM_DUMP=dump,
+                                                    MELLAGUI_CAM_WINDOW='700x420', MELLAGUI_CAM_VIEWER=viewer, MELLAGUI_CAM_FILES=files), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = wait_for_window('mellagui.cam')
+        self.assertIsNotNone(win)
+        time.sleep(1.0)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        lines = open(dump).read().splitlines()
+        self.assertIn('strip=8', lines[0])                                                # all the camera pictures of the folder are known, not only six
+        thumbs = [l.split() for l in lines if l.startswith('thumb')]
+        vh = win['h'] - 44                                                                # (no rail: the bar under the picture is 44 px)
+        self.assertEqual(len(thumbs), (vh - 44 - 8) // 56)                                # as many as fit in the column
+        pic = [int(v) for v in [l for l in lines if l.startswith('pic ')][0].split()[1:]]
+        self.assertLess(pic[0] + pic[2], min(int(t[-4]) for t in thumbs) - 3, 'the strip covers the live picture')
+        self.assertGreater(pic[2], 400)
+        self.assertEqual(thumbs[0][2], 'camera-20260101-000007.png')                      # the newest first
+        ctl.tap(KEY_SPACE)                                                                # a new picture goes to the top, the oldest of the six drops out
+        for _ in range(60):
+            if len([n for n in os.listdir(d0) if n.startswith('camera-') and n.endswith('.png')]) == 9:
+                break
+            time.sleep(0.05)
+        time.sleep(0.4)
+        thumbs = [l.split() for l in open(dump).read().splitlines() if l.startswith('thumb')]
+        self.assertNotEqual(thumbs[0][2], 'camera-20260101-000007.png')
+        self.assertEqual(thumbs[1][2], 'camera-20260101-000007.png')
+        x, y, w, h = (int(v) for v in thumbs[1][-4:])
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)                           # a click on a print: mellagui-view gets the file
+        for _ in range(60):
+            if os.path.exists(logf):
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(logf).read().strip(), os.path.join(d0, 'camera-20260101-000007.png'))
+        lines = open(dump).read().splitlines()
+        fx_, fy_, fw_, fh_ = (int(v) for v in [l for l in lines if l.startswith('ctl folder')][0].split()[-4:])
+        ctl.click(win['x'] + fx_ + fw_ // 2, win['y'] + fy_ + fh_ // 2)                  # the Folder button: the file manager gets the folder
+        for _ in range(60):
+            if os.path.exists(flog):
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(flog).read().strip(), d0)
+        self.assertIn('top=0', lines[0])
+        ctl.abs(win['x'] + x + w // 2, win['y'] + y + h // 2)                            # the wheel over the column shows the older pictures
+        time.sleep(0.2)
+        for _ in range(2):
+            ctl.cmd('axis v 15 1')
+            time.sleep(0.15)
+        time.sleep(0.4)
+        lines = open(dump).read().splitlines()
+        self.assertIn('top=2', lines[0])
+        thumbs = [l.split() for l in lines if l.startswith('thumb')]
+        self.assertEqual(thumbs[0][1], '2')                                               # the third picture is at the top of the column now
+        for _ in range(10):                                                               # ... and the end of the list is the end
+            ctl.cmd('axis v 15 1')
+            time.sleep(0.05)
+        time.sleep(0.3)
+        n = int(re.search(r'strip=(\d+)', open(dump).read()).group(1))
+        self.assertIn('top=%d' % (n - len(thumbs)), open(dump).read().splitlines()[0])
+
+    def test_the_effects_of_the_second_page_have_a_focus_the_mouse_moves(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        p, win, d, state = self.booth()
+        time.sleep(0.4)
+        ctl.tap(18)                                                                       # E, Page Down: the second page; 6: Bulge
+        time.sleep(0.3)
+        ctl.tap(109)
+        time.sleep(0.3)
+        ctl.tap(7)
+        time.sleep(0.5)
+        st, boxes = state()
+        self.assertEqual((st['fx'], st['open']), ('bulge', '0'))
+        self.assertEqual((st['focusx'], st['focusy']), ('0.500', '0.500'))
+        pic = boxes['pic']
+        px, py = win['x'] + pic[0] + pic[2] * 3 // 4, win['y'] + pic[1] + pic[3] * 2 // 3
+        ctl.abs(px, py)
+        time.sleep(0.2)
+        ctl.button(BTN_LEFT, True)                                                        # the press puts the point there ...
+        time.sleep(0.3)
+        st, _ = state()
+        self.assertAlmostEqual(float(st['focusx']), 0.25, delta=0.03)                     # (the picture is mirrored: the camera's own x is turned round)
+        self.assertAlmostEqual(float(st['focusy']), 2 / 3, delta=0.03)
+        ctl.abs(win['x'] + pic[0] + pic[2] // 5, win['y'] + pic[1] + pic[3] // 3)         # ... and the drag moves it
+        time.sleep(0.3)
+        st, _ = state()
+        self.assertAlmostEqual(float(st['focusx']), 0.8, delta=0.03)
+        self.assertAlmostEqual(float(st['focusy']), 1 / 3, delta=0.03)
+        ctl.button(BTN_LEFT, False)
+        time.sleep(0.2)
+        ctl.abs(win['x'] + pic[0] + pic[2] // 2, win['y'] + pic[1] + pic[3] // 2)         # moving without the button does nothing
+        time.sleep(0.3)
+        self.assertAlmostEqual(float(state()[0]['focusx']), 0.8, delta=0.03)
+        ctl.tap(KEY_SPACE)                                                                # the picture has the lens where the point is: it differs from one with the lens in the middle
+        files = self.wait_png(d)
+        self.assertEqual(len(files), 1)
+        a = Image.open(os.path.join(d, files[0])).convert('RGB')
+        r = self.run_cam('--snapshot', os.path.join(d, 'mid.png'), '--effect', 'bulge')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(a.crop((0, 300, 640, 480)).tobytes(), Image.open(os.path.join(d, 'mid.png')).convert('RGB').crop((0, 300, 640, 480)).tobytes())
+        ctl.tap(18)                                                                       # a new effect starts in the middle again; a normal one has no point to move
+        time.sleep(0.3)
+        ctl.tap(104)
+        time.sleep(0.2)
+        ctl.tap(KEY_1)
+        time.sleep(0.4)
+        self.assertEqual(state()[0]['fx'], 'normal')
+        ctl.abs(px, py)
+        ctl.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        ctl.button(BTN_LEFT, False)
+        time.sleep(0.2)
+        self.assertEqual(state()[0]['focusx'], '0.500')
+
+    def test_the_focus_of_an_effect_can_be_given_on_the_command_line(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        d = tempfile.mkdtemp(prefix='mellagui-cam-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+
+        def snap(name, *args):
+            out = os.path.join(d, name + '.png')
+            r = self.run_cam('--snapshot', out, '--size', '320x240', *args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return Image.open(out).convert('RGB')
+        normal = snap('n', '--effect', 'normal')
+        m = snap('m', '--effect', 'mirror', '--focus', '%.7f,0.5' % (80 / 319))             # the axis at column 80
+        for x in (10, 40, 79):
+            self.assertEqual(m.getpixel((x, 100)), normal.getpixel((x, 100)))
+        for x in (85, 100, 150):
+            self.assertEqual(m.getpixel((x, 100)), normal.getpixel((160 - x, 100)))
+        self.assertNotEqual(snap('b1', '--effect', 'twirl').tobytes(), snap('b2', '--effect', 'twirl', '--focus', '0.2,0.3').tobytes())
+        self.assertEqual(snap('c1', '--effect', 'sepia').tobytes(), snap('c2', '--effect', 'sepia', '--focus', '0.2,0.3').tobytes())   # (no point to move)
+        for bad in ('2,0.5', '0.5', 'a,b', '0.5,0.5,0.5'):
+            self.assertEqual(self.run_cam('--snapshot', os.path.join(d, 'x.png'), '--focus', bad).returncode, 2, bad)
+
     def test_selftest(self):
         r = self.run_cam('--selftest')
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -11664,7 +12146,7 @@ class TestCamera(Base):
         p, win, d = self.start()
         x0, y0 = win['x'], win['y']
         a = self.shot('cam_a.ppm')
-        self.assertEqual(a.px(x0 + 30, y0 + 8), (0, 0, 192))                 # mirrored: the last bar (blue) is on the left
+        self.assertEqual(a.px(x0 + 30, y0 + 60), (0, 0, 192))                # mirrored: the last bar (blue) is on the left (the picture is 4 : 3 in what the strip's column leaves)
         box = lambda ppm: ppm.count((255, 255, 255), x0, y0, x0 + 680, y0 + 400)
         self.assertGreater(box(a), 1000)                                      # the white square
         time.sleep(0.5)
@@ -11672,7 +12154,7 @@ class TestCamera(Base):
         self.assertNotEqual(a.data, b.data, 'the picture does not move')
         ctl.tap(50)                                                           # M: no mirror, silver on the left
         time.sleep(0.4)
-        self.assertEqual(self.shot("cam_c.ppm").px(x0 + 30, y0 + 8), (192, 192, 192))
+        self.assertEqual(self.shot("cam_c.ppm").px(x0 + 30, y0 + 60), (192, 192, 192))
         ctl.tap(25)                                                           # P: pause
         time.sleep(0.4)
         c1 = self.shot('cam_d.ppm')

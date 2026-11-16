@@ -14517,6 +14517,257 @@ class TestPointerConstraints(Base):
         c.cmd('motion 5 5')                                                  # the pointer is free
 
 
+class TestDefaultConfigHasEveryProgram(Base):
+    """The file a new user gets (--print-config, "Create it with the defaults") names every MellaGUI program: in [dock-apps] or [launcher-apps]."""
+
+    def test_print_config_lists_every_program_of_the_desktop(self):
+        r = subprocess.run([BIN, '--print-config'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        text = r.stdout
+        self.assertIn('[launcher-apps]', text)
+        sections = {}
+        cur = None
+        for line in text.splitlines():
+            m = re.match(r'\[(.+)\]$', line.strip())
+            if m:
+                cur = m[1]
+                sections[cur] = []
+            elif cur and '=' in line and not line.lstrip().startswith('#'):
+                sections[cur].append(line)
+        both = '\n'.join(sections['dock-apps'] + sections['launcher-apps'])
+        for prog in ('mellagui-files', 'mellagui-edit', 'mellagui-calc', 'mellagui-cam', 'mellagui-record', 'mellagui-top', 'mellagui-du', 'mellagui-monitor',
+                     'mellagui-keys', 'mellagui-notes', 'mellagui-bluetooth', 'mellagui-shot', 'mellagui-timer', 'mellagui-smart', 'mellagui-archive',
+                     'mellagui-paint', 'mellagui-solitaire', '@terminal', '@view', '@run', '@settings'):
+            self.assertIn(prog, both, prog + ' is in neither list')
+
+
+class TestSolitaire(Base):
+    """client/mellagui-solitaire.c: Klondike. The rules through --selftest, the window through its dump."""
+    EXE = os.path.join(ROOT, 'build', 'mellagui-solitaire')
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-solitaire not built')
+
+    def start(self, *args, cfg=None):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.solitaire', 'a window of an earlier test is still open')
+        self.dump = os.path.join(tmp, 'sol-%d.dump' % int(time.time() * 1000))
+        self.cfg = cfg or tempfile.mkdtemp(prefix='sol-cfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, self.cfg, ignore_errors=True)
+        p = subprocess.Popen([self.EXE, '--size', '900x620'] + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, MELLAGUI_SOLITAIRE_DUMP=self.dump, XDG_CONFIG_HOME=self.cfg))
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.win = wait_for_window('mellagui.solitaire')
+        self.assertIsNotNone(self.win, 'the window did not appear')
+        self.wait(lambda s: 'state' in s)
+        ctl.abs(3, 590)                                                                       # the pointer enters the window when it moves in
+        time.sleep(0.15)
+        return p
+
+    def state(self):
+        st = {'tab': {}, 'found': {}}
+        try:
+            lines = open(self.dump).read().splitlines()
+        except OSError:
+            return {}
+        for l in lines:
+            f = l.split()
+            if not f:
+                continue
+            kv = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+            if f[0] == 'state':
+                st['state'] = {k: int(v) for k, v in kv.items()}
+            elif f[0] == 'tab':
+                cards = f[f.index('cards') + 1:]
+                st['tab'][int(f[1])] = dict(x=int(kv['x']), y=int(kv['y']), w=int(kv['w']), h=int(kv['h']), cards=[c.split('@')[0] for c in cards],
+                                            ys=[int(c.split('@')[1]) for c in cards])
+            elif f[0] == 'found':
+                st['found'][int(f[1])] = dict(n=int(kv['n']), x=int(kv['x']), y=int(kv['y']), w=int(kv['w']), h=int(kv['h']))
+            elif f[0] == 'slot':
+                st['slot_' + f[1]] = tuple(int(v) for v in f[2:6])
+            elif f[0] == 'waste':
+                st['waste'] = f[1:]
+            elif f[0] == 'hint':
+                st['hint'] = ' '.join(f[1:])
+            elif f[0] == 'btn':
+                st.setdefault('btn', {})[f[1]] = tuple(int(kv[k]) for k in ('x', 'y', 'w', 'h'))
+            elif f[0] == 'cbtn':
+                st.setdefault('cbtn', {})[int(f[1])] = tuple(int(v) for v in f[2:6])
+        return st
+
+    def wait(self, pred, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            st = self.state()
+            try:
+                if st and pred(st):
+                    return st
+            except (KeyError, ValueError, IndexError):
+                pass
+            time.sleep(0.03)
+        self.fail('the state never became right: %r' % self.state())
+
+    def at(self, x, y):
+        w = [x_ for x_ in ctl.windows()['windows'] if x_['app_id'] == 'mellagui.solitaire'][0]
+        return w['x'] + x, w['y'] + y
+
+    def click(self, x, y, button=272):
+        ctl.click(*self.at(x, y), code=button)
+
+    def drag(self, a, b, steps=5):
+        x0, y0 = self.at(*a)
+        x1, y1 = self.at(*b)
+        ctl.abs(x0, y0)
+        ctl.button(272, True)
+        for i in range(1, steps + 1):
+            ctl.abs(int(x0 + (x1 - x0) * i / steps), int(y0 + (y1 - y0) * i / steps))
+            time.sleep(0.02)
+        ctl.button(272, False)
+
+    def key(self, code, *mods):
+        for m in mods:
+            ctl.key(m, True)
+        ctl.tap(code)
+        for m in reversed(mods):
+            ctl.key(m, False)
+
+    def test_selftest(self):
+        r = subprocess.run([self.EXE, '--selftest'], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('selftest ok', r.stdout)
+
+    def test_a_seed_is_a_deal_with_the_shape_of_a_game(self):
+        self.start('--seed', '5')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        self.assertEqual((st['state']['stock'], st['state']['waste'], st['state']['moves']), (24, 0, 0))
+        for col in range(7):
+            cards = st['tab'][col]['cards']
+            self.assertEqual(len(cards), col + 1)
+            self.assertEqual(cards[:-1], ['??'] * col)                                         # only the top card of a column is face up
+            self.assertNotEqual(cards[-1], '??')
+        self.assertEqual([st['tab'][c]['cards'][-1] for c in range(7)], ['AD', '2S', '9C', '6S', '2D', '4D', 'QH'])      # the same seed is always the same deal
+
+    def test_the_stock_draws_one_card_and_undo_takes_it_back(self):
+        self.start('--seed', '5', '--draw', '1')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        x, y, w, h = st['slot_stock']
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['waste'] == 1)
+        self.assertEqual((st['state']['stock'], st['state']['moves'], len(st['waste'])), (23, 1, 1))
+        self.key(22)                                                                           # U
+        st = self.wait(lambda s: s['state']['waste'] == 0)
+        self.assertEqual((st['state']['stock'], st['state']['moves']), (24, 0))
+
+    def test_three_cards_at_a_time_and_the_waste_goes_back(self):
+        self.start('--seed', '5', '--draw', '3')
+        st = self.wait(lambda s: s['state']['seed'] == 5 and s['state']['draw'] == 3)
+        x, y, w, h = st['slot_stock']
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['waste'] == 3)
+        self.assertEqual(st['state']['stock'], 21)
+        for _ in range(7):
+            self.key(57)                                                                       # Space draws
+        st = self.wait(lambda s: s['state']['waste'] == 24)
+        self.assertEqual(st['state']['stock'], 0)
+        self.key(57)                                                                           # one more: the waste turns over into the stock
+        st = self.wait(lambda s: s['state']['stock'] == 24)
+        self.assertEqual(st['state']['waste'], 0)
+
+    def test_a_card_is_dragged_to_a_foundation_and_a_wrong_drop_changes_nothing(self):
+        self.start('--seed', '5')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        self.assertTrue(st['hint'].startswith('move'), st['hint'])
+        t = st['tab'][3]                                                                       # the 6 of spades: nothing may go on the Queen of hearts
+        top = t['ys'][-1]
+        self.drag((t['x'] + 30, top + 40), (st['tab'][6]['x'] + 40, st['tab'][6]['ys'][-1] + 40))
+        time.sleep(0.3)
+        st2 = self.state()
+        self.assertEqual(st2['state']['moves'], 0)
+        self.assertEqual(len(st2['tab'][3]['cards']), 4)
+        a = st['tab'][0]                                                                       # the Ace of diamonds is what the hint wants: the foundation of diamonds
+        self.assertEqual(a['cards'], ['AD'])
+        fd = st['found'][2]
+        self.drag((a['x'] + 30, a['ys'][-1] + 40), (fd['x'] + 40, fd['y'] + 50))
+        st = self.wait(lambda s: s['state']['moves'] == 1)
+        self.assertEqual((st['found'][2]['n'], len(st['tab'][0]['cards'])), (1, 0))
+
+    def test_a_double_click_and_the_right_button_send_a_card_up(self):
+        self.start('--seed', '5')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        a = st['tab'][0]
+        self.click(a['x'] + 30, a['ys'][-1] + 40)
+        self.click(a['x'] + 30, a['ys'][-1] + 40)                                              # double click: the Ace goes up
+        st = self.wait(lambda s: s['state']['moves'] == 1)
+        self.assertEqual(st['found'][2]['n'], 1)
+        self.key(22)                                                                           # U
+        st = self.wait(lambda s: s['state']['moves'] == 0)
+        self.assertEqual(st['found'][2]['n'], 0)
+        a = st['tab'][0]
+        self.click(a['x'] + 30, a['ys'][-1] + 40, button=273)                                  # the right button does the same
+        st = self.wait(lambda s: s['state']['moves'] == 1)
+        self.assertEqual(st['found'][2]['n'], 1)
+
+    def test_the_hint_button_and_the_new_game_question(self):
+        self.start('--seed', '5')
+        st = self.wait(lambda s: s['state']['seed'] == 5)
+        x, y, w, h = st['slot_stock']
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['moves'] == 1)
+        self.key(49)                                                                           # N: a game is under way, so it asks
+        st = self.wait(lambda s: s['state']['prompt'] == 1)
+        ctl.tap(KEY_ESC)                                                                       # Esc keeps it
+        st = self.wait(lambda s: s['state']['prompt'] == 0)
+        self.assertEqual((st['state']['seed'], st['state']['moves']), (5, 1))
+        self.key(49)
+        self.wait(lambda s: s['state']['prompt'] == 1)
+        ctl.tap(KEY_ENTER)                                                                     # Enter: a new game
+        st = self.wait(lambda s: s['state']['prompt'] == 0 and s['state']['moves'] == 0)
+        self.assertNotEqual(st['state']['seed'], 5)
+        self.assertEqual(st['state']['stock'], 24)
+
+    def test_a_won_game_is_counted_and_the_finish_does_the_last_moves(self):
+        cfg = tempfile.mkdtemp(prefix='sol-win-', dir=tmp)
+        self.start('--setup', 'almost', cfg=cfg)
+        st = self.wait(lambda s: s['state']['won'] == 0)
+        for col in range(4):                                                                   # each King goes up with a double click
+            a = self.state()['tab'][col]
+            self.click(a['x'] + 30, a['ys'][-1] + 40)
+            self.click(a['x'] + 30, a['ys'][-1] + 40)
+            time.sleep(0.1)
+        st = self.wait(lambda s: s['state']['won'] == 1)
+        self.assertEqual((st['state']['prompt'], st['state']['moves']), (2, 4))
+        self.assertEqual([st['found'][i]['n'] for i in range(4)], [13] * 4)
+        conf = open(os.path.join(cfg, 'mellagui', 'solitaire.conf')).read()
+        self.assertIn('won = 1', conf)
+        self.assertIn('played = 1', conf)
+        x, y, w, h = st['cbtn'][1]                                                             # "New game"
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['prompt'] == 0 and s['state']['won'] == 0)
+        self.assertEqual(st['state']['moves'], 0)
+
+    def test_finish_moves_the_rest_up_by_itself(self):
+        self.start('--setup', 'almost')
+        st = self.wait(lambda s: s['state']['won'] == 0)
+        self.key(33)                                                                           # F
+        st = self.wait(lambda s: s['state']['won'] == 1, timeout=5.0)
+        self.assertEqual([st['found'][i]['n'] for i in range(4)], [13] * 4)
+
+    def test_the_rail_has_new_undo_hint_draw_finish_and_help(self):
+        self.start('--seed', '9')
+        st = self.wait(lambda s: s['state']['seed'] == 9)
+        self.assertEqual(sorted(st['btn']), ['Draw', 'Finish', 'Help', 'Hint', 'New', 'Undo'])
+        x, y, w, h = st['btn']['Draw']
+        self.click(x + w // 2, y + h // 2)                                                     # nothing played yet: Turn 3 starts a new game
+        st = self.wait(lambda s: s['state']['draw'] == 3)
+        x, y, w, h = st['btn']['Help']
+        self.click(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['prompt'] == 3)
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == 0)
+
+
 class TestCalendar(Base):
     """The clock settings (src/clockfmt.c), the panel's clock and mellagui-calendar, which a click on the clock shows."""
     CAL = os.path.join(ROOT, 'build', 'mellagui-calendar')

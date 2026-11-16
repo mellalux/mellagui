@@ -38,6 +38,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_HOME] = { "home", 0 },
     [LM_DOCKICON_ARCHIVE] = { "archive", 0 },
     [LM_DOCKICON_PAINT] = { "paint", 0 },
+    [LM_DOCKICON_CARDS] = { "cards", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -68,6 +69,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_HOME: return lm_theme.icon_home;
     case LM_DOCKICON_ARCHIVE: return lm_theme.icon_archive;
     case LM_DOCKICON_PAINT: return lm_theme.icon_paint;
+    case LM_DOCKICON_CARDS: return lm_theme.icon_cards;
     default: return lm_theme.icon_generic;
     }
 }
@@ -88,7 +90,7 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
-        { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
+        { "solitaire", LM_DOCKICON_CARDS }, { "cards", LM_DOCKICON_CARDS }, { "game", LM_DOCKICON_CARDS }, { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
         { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK }, { "timer", LM_DOCKICON_TIMER }, { "pomodoro", LM_DOCKICON_TIMER }, { "stopwatch", LM_DOCKICON_TIMER }, { "sticky", LM_DOCKICON_NOTE }, { "memo", LM_DOCKICON_NOTE },
         { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
@@ -284,6 +286,12 @@ static float glyph(int kind, float u, float v)
         float d = sd_box(u, v, 0, -0.17f, 0.32f, 0.085f, 0.02f);
         d = fminf2(d, sd_box(u, v, 0, 0.12f, 0.26f, 0.19f, 0.02f));
         return sd_sub(d, sd_box(u, v, 0, 0.0f, 0.08f, 0.02f, 0.012f));
+    }
+    case LM_DOCKICON_CARDS: {                           /* a playing card with a diamond in the middle */
+        float d = sd_box(u, v, 0, 0, 0.27f, 0.36f, 0.05f);
+        d = sd_sub(d, fminf2(sd_tri(u, v, 0.0f, -0.17f, -0.1f, 0.0f, 0.1f, 0.0f), sd_tri(u, v, 0.0f, 0.17f, -0.1f, 0.0f, 0.1f, 0.0f)));
+        d = sd_sub(d, sd_box(u, v, -0.17f, -0.25f, 0.03f, 0.04f, 0.01f));
+        return sd_sub(d, sd_box(u, v, 0.17f, 0.25f, 0.03f, 0.04f, 0.01f));
     }
     case LM_DOCKICON_PAINT: {                           /* a painter's palette: a disc with a thumb hole and three dabs of paint */
         float d = sd_circle(u, v, 0, 0, 0.36f);

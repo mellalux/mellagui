@@ -121,6 +121,7 @@
     X("icon-disk",            icon_disk,         0x66a80f) \
     X("icon-archive",         icon_archive,      0xa8743c) /* the archiver */ \
     X("icon-paint",           icon_paint,        0xd6336c) /* the picture editor */ \
+    X("icon-cards",           icon_cards,        0x2b8a3e) /* the solitaire game */ \
     X("icon-timer",           icon_timer,        0xe8590c) \
     X("icon-note",            icon_note,         0xf2b705) \
     X("icon-home",            icon_home,         0x0ca678) \

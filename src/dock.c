@@ -52,7 +52,8 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Timer         = [timer] mellagui-timer\n" \
     "Smart home    = [home] mellagui-smart\n" \
     "Archiver      = [archive] mellagui-archive\n" \
-    "Paint         = [paint] mellagui-paint\n"
+    "Paint         = [paint] mellagui-paint\n" \
+    "Solitaire     = [cards] mellagui-solitaire\n"
 
 #define DEFAULT_SETTINGS \
     "[dock]\n" \
@@ -66,7 +67,13 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "# The plate under the logos of installed programs: light, dark, none or a colour like #ffffff.\n" \
     "icon-background = light\n"
 
-static const char default_text[] = DEFAULT_SETTINGS "\n" DEFAULT_APPS;
+/* The file a new user gets (--print-config, the settings panel's "Create it with the defaults"): the dock AND the launcher, so every MellaGUI program is
+ * written down, in [dock-apps] or in [launcher-apps] (the Launchpad lists both and a name the dock has is not shown twice). */
+#define DEFAULT_LAUNCHER_NOTE \
+    "# The Launchpad (Super+A) shows the buttons of the dock and these. Together they hold every MellaGUI program; add your own lines here\n" \
+    "# (Name = [icon] command) or use the Launchpad's + tile. Programs of later versions are added by Settings > Dock > Add all MellaGUI programs.\n"
+
+static const char default_text[] = DEFAULT_SETTINGS "\n" DEFAULT_APPS "\n" DEFAULT_LAUNCHER_NOTE DEFAULT_LAUNCHER;
 const char *lm_dock_default_conf(void) { return default_text; }
 
 /* ---- what the file said ------------------------------------------------------------------------------------------- */

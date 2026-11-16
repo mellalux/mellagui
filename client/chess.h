@@ -77,6 +77,10 @@ int         ch_gen_pseudo(const struct ch_pos *p, ch_move *out, int captures_onl
 int         ch_gen_legal(const struct ch_pos *p, ch_move *out);
 void        ch_make(struct ch_pos *p, ch_move m, struct ch_undo *u);     /* m must be at least pseudo legal */
 void        ch_unmake(struct ch_pos *p, ch_move m, const struct ch_undo *u);
+/* A null move for the search: the side to move passes (the en passant right goes).  Not a legal move: only for a
+ * search that is not in check.  Undone with ch_unmake_null. */
+void        ch_make_null(struct ch_pos *p, struct ch_undo *u);
+void        ch_unmake_null(struct ch_pos *p, const struct ch_undo *u);
 /* the legal move that goes from -> to (promo = 0 or a piece type), or 0.  For a click in the window. */
 ch_move     ch_move_find(const struct ch_pos *p, int from, int to, int promo);
 int         ch_move_is_capture(const struct ch_pos *p, ch_move m);

@@ -540,6 +540,33 @@ void ch_unmake(struct ch_pos *p, ch_move m, const struct ch_undo *u)
 	p->key = u->key;
 }
 
+void ch_make_null(struct ch_pos *p, struct ch_undo *u)
+{
+	u->move = 0;
+	u->captured = 0;
+	u->castle = p->castle;
+	u->ep = p->ep;
+	u->half = p->half;
+	u->key = p->key;
+	p->key ^= ep_key(p) ^ z_side;
+	p->ep = -1;
+	p->half++;
+	if (p->side == CH_BLACK)
+		p->full++;
+	p->side ^= 1;
+}
+
+void ch_unmake_null(struct ch_pos *p, const struct ch_undo *u)
+{
+	p->side ^= 1;
+	if (p->side == CH_BLACK)
+		p->full--;
+	p->castle = u->castle;
+	p->ep = u->ep;
+	p->half = u->half;
+	p->key = u->key;
+}
+
 int ch_gen_legal(const struct ch_pos *p, ch_move *out)
 {
 	struct ch_pos c = *p;

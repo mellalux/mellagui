@@ -16273,6 +16273,29 @@ class TestChessRules(unittest.TestCase):
         self.assertIn('nodes 400', r.stdout)
 
 
+class TestChessAI(unittest.TestCase):
+    """client/chessai.c, the search and the evaluation of the chess game, through build/chessai-test (no compositor needed): the
+    evaluation of a position and its mirror image, the plain search against a separately written minimax, mates found in random
+    endings and checked by a brute force mate finder, a stop from another thread, the time limit, the fifty move rule."""
+    EXE = os.path.join(ROOT, 'build', 'chessai-test')
+
+    def setUp(self):
+        if not os.path.exists(self.EXE):
+            self.skipTest('chessai-test not built')
+
+    def test_the_search_and_the_evaluation(self):
+        r = subprocess.run([self.EXE], capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertIn('chessai-test: ok', r.stdout)
+        self.assertIn('0 failed', r.stdout)
+
+    def test_a_short_match_ends_with_a_result(self):
+        r = subprocess.run([self.EXE, '--match', 'd1', 'd2', '2'], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr)
+        self.assertIn('d1 against d2', r.stdout)
+        self.assertNotIn('no legal move', r.stdout)
+
+
 class TestNested(Base):
     """src/backend_wayland.c: `--backend wayland`, MellaGUI as a window of another compositor (WSLg ...): here the host is a headless MellaGUI."""
 

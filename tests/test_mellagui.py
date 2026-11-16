@@ -21565,6 +21565,20 @@ class TestLauncherMoving(Base):
         for k, v in before.items():                                                                  # and nobody else moved
             self.assertEqual(got[k], v, k)
 
+    def test_a_next_page_appears_while_an_icon_is_carried_outside_edit_mode_too(self):
+        c = self.start('mellagui-lmE', n=8)
+        d = self.info(c)
+        self.assertEqual((d['pages'], d['edit']), (1, 0))                                          # one page, not in edit mode
+        ic = {i[1]: i[2] for i in d['icons']}
+        self.drag(c, self.centre(ic['App02']), self.centre(ic['App04']), hold=0.2)
+        d = self.info(c)
+        self.assertEqual((d['pages'], len(d['dots'])), (2, 2))                                     # the empty page to drop it on
+        c.abs(5, 5)                                                                                # nowhere
+        c.button(272, False)
+        time.sleep(0.4)
+        d = self.info(c)
+        self.assertEqual((d['pages'], len(d['dots'])), (1, 0))                                     # gone with the drag
+
     def test_the_icons_below_make_room_while_it_is_carried(self):
         c = self.start('mellagui-lm6')
         d = self.info(c)

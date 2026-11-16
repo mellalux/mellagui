@@ -38,6 +38,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_HOME] = { "home", 0 },
     [LM_DOCKICON_ARCHIVE] = { "archive", 0 },
     [LM_DOCKICON_PAINT] = { "paint", 0 },
+    [LM_DOCKICON_DISPLAY] = { "display", 0 },
     [LM_DOCKICON_CARDS] = { "cards", 0 },
 };
 
@@ -70,6 +71,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_ARCHIVE: return lm_theme.icon_archive;
     case LM_DOCKICON_PAINT: return lm_theme.icon_paint;
     case LM_DOCKICON_CARDS: return lm_theme.icon_cards;
+    case LM_DOCKICON_DISPLAY: return lm_theme.icon_display;
     default: return lm_theme.icon_generic;
     }
 }
@@ -92,7 +94,7 @@ int lm_dockicon_guess(const char *entry_name)
     static const struct { const char *part; int kind; } hints[] = {
         { "solitaire", LM_DOCKICON_CARDS }, { "cards", LM_DOCKICON_CARDS }, { "game", LM_DOCKICON_CARDS }, { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
         { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK }, { "timer", LM_DOCKICON_TIMER }, { "pomodoro", LM_DOCKICON_TIMER }, { "stopwatch", LM_DOCKICON_TIMER }, { "sticky", LM_DOCKICON_NOTE }, { "memo", LM_DOCKICON_NOTE },
-        { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
+        { "display", LM_DOCKICON_DISPLAY }, { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
         { "term", LM_DOCKICON_TERMINAL }, { "console", LM_DOCKICON_TERMINAL }, { "shell", LM_DOCKICON_TERMINAL },
         { "calc", LM_DOCKICON_CALCULATOR }, { "file", LM_DOCKICON_FILES }, { "folder", LM_DOCKICON_FILES },
@@ -292,6 +294,17 @@ static float glyph(int kind, float u, float v)
         d = sd_sub(d, fminf2(sd_tri(u, v, 0.0f, -0.17f, -0.1f, 0.0f, 0.1f, 0.0f), sd_tri(u, v, 0.0f, 0.17f, -0.1f, 0.0f, 0.1f, 0.0f)));
         d = sd_sub(d, sd_box(u, v, -0.17f, -0.25f, 0.03f, 0.04f, 0.01f));
         return sd_sub(d, sd_box(u, v, 0.17f, 0.25f, 0.03f, 0.04f, 0.01f));
+    }
+    case LM_DOCKICON_DISPLAY: {                         /* a screen on a stand with a sun in it: the display (brightness, resolution), not the process monitor's bars */
+        float d = sd_sub(sd_box(u, v, 0, -0.06f, 0.46f, 0.31f, 0.06f), sd_box(u, v, 0, -0.06f, 0.385f, 0.235f, 0.03f));
+        d = fminf2(d, sd_box(u, v, 0, 0.29f, 0.045f, 0.075f, 0.01f));
+        d = fminf2(d, sd_box(u, v, 0, 0.385f, 0.19f, 0.04f, 0.02f));
+        d = fminf2(d, sd_circle(u, v, 0, -0.06f, 0.095f));
+        for (int k = 0; k < 8; k++) {
+            float a = (float)k * 0.7853982f, ca = cosf(a), sa = sinf(a);
+            d = fminf2(d, sd_line(u, v, ca * 0.145f, -0.06f + sa * 0.145f, ca * 0.2f, -0.06f + sa * 0.2f, 0.024f));
+        }
+        return d;
     }
     case LM_DOCKICON_PAINT: {                           /* a painter's palette: a disc with a thumb hole and three dabs of paint */
         float d = sd_circle(u, v, 0, 0, 0.36f);

@@ -123,6 +123,7 @@
     X("icon-bluetooth",       icon_bluetooth,    0x1c7ed6) \
     X("icon-shot",            icon_shot,         0xae3ec9) \
     X("icon-disk",            icon_disk,         0x66a80f) \
+    X("icon-display",         icon_display,      0x7048e8) \
     X("icon-archive",         icon_archive,      0xa8743c) /* the archiver */ \
     X("icon-paint",           icon_paint,        0xd6336c) /* the picture editor */ \
     X("icon-cards",           icon_cards,        0x2b8a3e) /* the solitaire game */ \

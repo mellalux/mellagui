@@ -40,7 +40,7 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "[launcher-apps]\n" \
     "Run           = [run] @run\n" \
     "Disk usage    = [disk] mellagui-du\n" \
-    "Display       = [monitor] mellagui-monitor\n" \
+    "Display       = [display] mellagui-monitor\n" \
     "Shortcuts     = [keyboard] mellagui-keys\n" \
     "Notifications = [bell] mellagui-notes\n" \
     "Bluetooth     = [bluetooth] mellagui-bluetooth\n" \
@@ -473,6 +473,8 @@ void lm_dock_icon_load(struct lm_dock_item *pub, struct lm_image *img, const cha
         return;
     }
     int k = lm_dockicon_by_name(spec);
+    if (k == LM_DOCKICON_MONITOR && strcasestr(name, "display"))         /* a file from before the Display icon existed: "Display = [monitor] mellagui-monitor" */
+        k = LM_DOCKICON_DISPLAY;
     if (k >= 0) {
         pub->kind = k;
         return;

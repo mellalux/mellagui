@@ -356,7 +356,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         ch = LC_FORM_H;
     } else {
         int maxcols = LM_CLAMP((li->rect.w - 60) / LC_CELL_W, 1, 6);
-        bool extra = li->edit && !li->searching;                            /* edit mode: one more, empty page at the end, to drop an icon on */
+        bool extra = (li->edit || wm->launcher_drag) && !li->searching;     /* edit mode, or while an icon is carried: one more, empty page at the end, to drop an icon on */
         bool holes = !li->searching && launcher_gap_count() > 0;                 /* empty cells keep icons where they were dropped */
         bool fixed = extra || holes;                                        /* a grid of its own: every page is as wide and as high as the screen allows, so a cell is the same cell before and after a drop */
         li->cols = fixed ? maxcols : LM_MIN(maxcols, LM_MAX(cells, 1));
@@ -394,7 +394,23 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
         cw = LM_MAX(li->cols * LC_CELL_W + 2 * LC_PAD, 2 * LC_BTN_W + 56);
         ch = LC_HEAD + rows * cell_h + dots_h + LC_FOOT;
         int x0 = li->rect.x + (li->rect.w - cw) / 2 + (cw - li->cols * LC_CELL_W) / 2;
-        int y0 = li->rect.y + (li->rect.h - ch) / 2 + LC_HEAD;
+        int ch_anchor = ch;                                             /* the card's height whose centre the grid hangs from */
+        if (wm->launcher_drag && !li->edit && !holes) {                 /* a drag in normal mode adds the empty page, which makes the grid full height: the icons must not jump, so the grid stays where the plain layout had it and the card grows downwards */
+            int rf_plain = LM_CLAMP(room / LC_CELL_H, 1, LC_MAX_ROWS);
+            int cols_plain = LM_MIN(maxcols, LM_MAX(n, 1)), rows_plain_total = LM_MAX((n + cols_plain - 1) / cols_plain, 1);
+            int dots_plain = 0, rows_plain;
+            if (rows_plain_total <= rf_plain) {
+                rows_plain = rows_plain_total;
+            } else {
+                dots_plain = LC_DOTS;
+                rows_plain = LM_MIN(LM_CLAMP((room - dots_plain) / LC_CELL_H, 1, LC_MAX_ROWS), rows_plain_total);
+            }
+            int cell_plain = LC_CELL_H;
+            if (LC_HEAD + rows_plain * cell_plain + dots_plain + LC_FOOT > li->rect.h - 20)
+                cell_plain = LM_MAX((li->rect.h - 20 - LC_HEAD - LC_FOOT - dots_plain) / rows_plain, LC_ICON + 8 + LM_FONT_H + 6);
+            ch_anchor = LC_HEAD + rows_plain * cell_plain + dots_plain + LC_FOOT;
+        }
+        int y0 = li->rect.y + (li->rect.h - ch_anchor) / 2 + LC_HEAD;
         li->grid = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2 + LC_PAD, y0, cw - 2 * LC_PAD, rows * cell_h);
         li->gx0 = x0;
         li->gy0 = y0;
@@ -428,7 +444,7 @@ void launcher_info(const struct lm_wm *wm, struct lm_output *o, struct lm_launch
     }
     /* The grid keeps its place whether the footer is there or not: the card is as high as it needs to be, its top stays where it is when edit mode adds the hint. */
     int card_h = !li->form && !li->edit ? ch - (LC_FOOT - LC_FOOT_SLIM) : ch;
-    li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->rect.y + (li->rect.h - ch) / 2, cw, card_h);
+    li->card = lm_rect_make(li->rect.x + (li->rect.w - cw) / 2, li->grid.w > 0 && !li->form ? li->grid.y - LC_HEAD : li->rect.y + (li->rect.h - ch) / 2, cw, card_h);
     li->drag = -1;
     li->drag_slot = -1;
     li->drag_hide = -1;

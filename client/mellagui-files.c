@@ -76,6 +76,7 @@
 #include "xlsxread.h"
 #include "xmltree.h"
 #include "yamltree.h"
+#include "mediakeys.h"
 #include "wlcard.h"
 #include "wlrail.h"
 #include "wlclip.h"
@@ -264,6 +265,7 @@ struct app {
     char snd_path[PATH_MAX];            /* the file it belongs to ("" = none) */
     uint64_t snd_len, snd_pos, snd_t0;  /* ms: its length, where it is (paused) or was (playing), when it (re)started */
     bool snd_playing, snd_dead;
+    bool snd_chain;                     /* a player key moved the cursor while a sound played: the next sound file starts when its preview is there */
     int snd_player;                     /* an index of ffaudio_player_name */
     struct pane pane[2];
     int act;                            /* the active pane */
@@ -5436,6 +5438,9 @@ static void preview_update(struct app *a)
         else
             preview_clear(pv);
         pv->loaded = true;
+        if (a->snd_chain && (pv->kind == PV_AUDIO || pv->kind == PV_VIDEO))
+            snd_toggle(a);                                               /* a next / previous key while a sound played: this one goes on */
+        a->snd_chain = false;
     }
     video_poll(pv);
 }
@@ -7151,6 +7156,21 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             if (a->rep_code == code)
                 a->rep_code = 0;
             break;
+        }
+        switch (code) {                                                  /* the player keys of a multimedia keyboard */
+        case MK_PLAYPAUSE: case MK_PLAYCD:
+            snd_toggle(a);
+            w->redraw = true;
+            return;
+        case MK_STOPCD: case MK_STOP:
+            snd_stop(a);
+            w->redraw = true;
+            return;
+        case MK_NEXTSONG: case MK_PREVSONG:
+            a->snd_chain = a->snd_playing;                               /* what plays goes on with the neighbour file */
+            handle_key(a, code == MK_NEXTSONG ? LM_KS_Down : LM_KS_Up);
+            w->redraw = true;
+            return;
         }
         uint32_t ks = lm_keymap_keysym(code, w->mods);
         handle_key(a, ks);

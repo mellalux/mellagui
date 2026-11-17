@@ -68,6 +68,7 @@
 #include "wlclip.h"
 #include "wlpicker.h"
 #include "wlwin.h"
+#include "mediakeys.h"
 
 #define BAR_H 24
 #define BG (lm_theme.card)
@@ -1792,6 +1793,24 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     if (a->card) {                                               /* the Open card is modal: it takes every key */
         card_key(a, ks);
         return;
+    }
+    switch (args[2].u) {                                         /* the player keys of a multimedia keyboard */
+    case MK_PLAYPAUSE: case MK_PLAYCD:
+        video_toggle(a);
+        return;
+    case MK_STOPCD: case MK_STOP:
+        video_stop(a);
+        return;
+    case MK_NEXTSONG: case MK_PREVSONG: {
+        int dir = args[2].u == MK_NEXTSONG ? 1 : -1;
+        bool snd = a->vmode == 4;                                /* from a sound file on to the next sound file, else the next picture */
+        for (int i = a->cur + dir; i >= 0 && i < a->n; i += dir)
+            if (!snd || is_audio_name(a->names[i])) {
+                go(a, i);
+                break;
+            }
+        return;
+    }
     }
     char txt[8];
     int tl = lm_keysym_to_utf8(ks, txt);

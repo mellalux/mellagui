@@ -1943,6 +1943,8 @@ static void take_screenshot(struct lm_wm *wm, bool window, bool to_file)
 static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pressed, bool repeat)
 {
     struct lm_window *f = wm->focused;
+    if (kb->action == LM_ACT_MEDIA && f && (!strcmp(f->app_id, "mellagui.view") || !strcmp(f->app_id, "mellagui.files")))
+        return false;                                                   /* these play sound themselves: the key (press and release) goes to the window */
     if (!pressed)
         return true;
     if (repeat && kb->action != LM_ACT_FOCUS_NEXT && kb->action != LM_ACT_FOCUS_PREV &&

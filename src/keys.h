@@ -16,7 +16,9 @@
  *
  * Combination: modifiers Super (Win, Mod4, Meta), Ctrl (Control), Alt, Shift, joined with '+', then one key: A..Z, 0..9, F1..F24,
  * Enter (Return), Tab, Space, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, Left, Right, Up, Down, Minus, Equal,
- * Comma, Period, Slash, Semicolon, Apostrophe, Grave, Backslash, LeftBrace, RightBrace. Case does not matter. The modifiers
+ * Comma, Period, Slash, Semicolon, Apostrophe, Grave, Backslash, LeftBrace, RightBrace, and the extra keys of a multimedia keyboard:
+ * VolumeUp, VolumeDown, VolumeMute, MicMute, PlayPause, Play, NextTrack, PrevTrack, StopMedia, Eject, Calculator, Mail, Browser (HomePage),
+ * WWW, Search, Files, Favorites (Bookmarks), Config, Sleep, Phone, Player, BrightnessUp, BrightnessDown. Case does not matter. The modifiers
  * must match exactly (Super+Q does not fire for Super+Shift+Q).
  *
  * Actions (ARG = number / command):
@@ -34,6 +36,8 @@
  *   osk                              the on-screen keyboard: show / hide (Super+K, the panel button)
  *   overview                         the desktop overview: all windows of this workspace as pictures (Super+W)
  *   reload-config                    read mellagui.conf again (theme, sizes, shortcuts, dock; see config.reload)
+ *   volume-up volume-down volume-mute  the default output's volume (5 % a step, repeats while held) and mute
+ *   media play-pause|play|pause|next|previous|stop   the music / video player that speaks MPRIS (a browser, Spotify, mpv ...), through busctl
  *
  * Not configurable (modal or hardware-level): Ctrl+Alt+F1..F12, Alt+Tab, Print / Alt+Print / Ctrl+Print, Esc in dialogs.
  */
@@ -54,6 +58,7 @@ enum lm_action {
     LM_ACT_RELOAD_CONFIG, LM_ACT_LAUNCHER, LM_ACT_OSK, LM_ACT_QUICK, LM_ACT_MAGNIFY_IN, LM_ACT_MAGNIFY_OUT, LM_ACT_OVERVIEW, LM_ACT_NIGHT_LIGHT, LM_ACT_DND,
     LM_ACT_GADGET_TOGGLE,
     LM_ACT_TILE_THIRD, LM_ACT_TILE_TWOTHIRDS, LM_ACT_TILE_GRID_MOVE,
+    LM_ACT_VOLUME_UP, LM_ACT_VOLUME_DOWN, LM_ACT_VOLUME_MUTE, LM_ACT_MEDIA,
 };
 
 #define LM_KEYBIND_ARG 256
@@ -72,6 +77,9 @@ struct lm_keybinds {
     struct lm_keybind b[LM_MAX_KEYBINDS];
     int n;
 };
+
+/* The MPRIS method ("PlayPause") of a `media` action's word ("play-pause"), NULL when the word is not one. */
+const char *lm_media_method(const char *arg);
 
 /* "Super+Shift+1" for a combination (canonical spelling); false when the key has no name in the table above. */
 bool lm_keys_combo_text(uint32_t mods, uint32_t code, char *out, size_t n);

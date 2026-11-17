@@ -69,7 +69,16 @@
     "Super+Ctrl+N      = exec mellagui-notes\n" \
     "Super+Shift+R     = reload-config\n" \
     "Super+Slash       = exec mellagui-keys\n" \
-    "Ctrl+Shift+Escape = exec mellagui-top\n"
+    "Ctrl+Shift+Escape = exec mellagui-top\n" \
+    "VolumeUp          = volume-up\n" \
+    "VolumeDown        = volume-down\n" \
+    "VolumeMute        = volume-mute\n" \
+    "PlayPause         = media play-pause\n" \
+    "NextTrack         = media next\n" \
+    "PrevTrack         = media previous\n" \
+    "StopMedia         = media stop\n" \
+    "Calculator        = exec mellagui-calc\n" \
+    "Files             = exec mellagui-files\n"
 
 const char *lm_keys_default_conf(void)
 {
@@ -97,6 +106,13 @@ static const struct keyname key_names[] = {
     { "Minus", KEY_MINUS }, { "Equal", KEY_EQUAL }, { "Comma", KEY_COMMA }, { "Period", KEY_DOT },
     { "Slash", KEY_SLASH }, { "Semicolon", KEY_SEMICOLON }, { "Apostrophe", KEY_APOSTROPHE }, { "Grave", KEY_GRAVE },
     { "Backslash", KEY_BACKSLASH }, { "LeftBrace", KEY_LEFTBRACE }, { "RightBrace", KEY_RIGHTBRACE },
+    /* the extra keys of a multimedia keyboard (the first name of a code is the one the panel shows) */
+    { "VolumeUp", KEY_VOLUMEUP }, { "VolumeDown", KEY_VOLUMEDOWN }, { "VolumeMute", KEY_MUTE }, { "MicMute", KEY_MICMUTE },
+    { "PlayPause", KEY_PLAYPAUSE }, { "Play", KEY_PLAYCD }, { "NextTrack", KEY_NEXTSONG }, { "PrevTrack", KEY_PREVIOUSSONG },
+    { "StopMedia", KEY_STOPCD }, { "Stop", KEY_STOP }, { "Eject", KEY_EJECTCD }, { "Calculator", KEY_CALC }, { "Mail", KEY_MAIL },
+    { "Browser", KEY_HOMEPAGE }, { "HomePage", KEY_HOMEPAGE }, { "WWW", KEY_WWW }, { "Search", KEY_SEARCH }, { "Files", KEY_FILE },
+    { "Favorites", KEY_BOOKMARKS }, { "Bookmarks", KEY_BOOKMARKS }, { "Config", KEY_CONFIG }, { "Sleep", KEY_SLEEP },
+    { "Phone", KEY_PHONE }, { "Player", KEY_PLAYER }, { "BrightnessUp", KEY_BRIGHTNESSUP }, { "BrightnessDown", KEY_BRIGHTNESSDOWN },
 };
 #undef L
 #undef D
@@ -176,6 +192,8 @@ static const struct action_def actions[] = {
     { "night-light", LM_ACT_NIGHT_LIGHT, ARG_NONE }, { "dnd", LM_ACT_DND, ARG_NONE },
     { "tile-third", LM_ACT_TILE_THIRD, ARG_THIRD }, { "tile-twothirds", LM_ACT_TILE_TWOTHIRDS, ARG_TWOTHIRDS },
     { "tile-grid-move", LM_ACT_TILE_GRID_MOVE, ARG_DIRECTION },
+    { "volume-up", LM_ACT_VOLUME_UP, ARG_NONE }, { "volume-down", LM_ACT_VOLUME_DOWN, ARG_NONE },
+    { "volume-mute", LM_ACT_VOLUME_MUTE, ARG_NONE }, { "media", LM_ACT_MEDIA, ARG_COMMAND },
 };
 
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
@@ -186,6 +204,19 @@ static int find_index(const struct lm_keybinds *k, uint32_t mods, uint32_t code)
         if (k->b[i].code == code && k->b[i].mods == mods)
             return i;
     return -1;
+}
+
+/* The MPRIS method of a `media` argument, NULL for a word that is none. */
+const char *lm_media_method(const char *arg)
+{
+    static const struct { const char *word, *method; } t[] = {
+        { "play-pause", "PlayPause" }, { "play", "Play" }, { "pause", "Pause" },
+        { "next", "Next" }, { "previous", "Previous" }, { "stop", "Stop" },
+    };
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+        if (!strcmp(arg, t[i].word))
+            return t[i].method;
+    return NULL;
 }
 
 /* "close" / "workspace 3" / "exec CMD" -> the action fields of nb. */
@@ -241,6 +272,8 @@ static bool parse_action(const char *value, struct lm_keybind *nb)
         if (!*arg || strlen(arg) >= LM_KEYBIND_ARG)
             return false;
         strcpy(nb->arg, arg);
+        if (def->act == LM_ACT_MEDIA && !lm_media_method(arg))
+            return false;
     }
     return true;
 }
@@ -354,7 +387,7 @@ void lm_keys_action_text(const struct lm_keybind *b, char *out, size_t n)
         snprintf(out, n, "%s %d", act, b->num + 1);
     else if (b->action == LM_ACT_TILE_GRID_MOVE)
         snprintf(out, n, "%s %s", act, (const char *[]){ "left", "right", "up", "down" }[b->num & 3]);
-    else if (b->action == LM_ACT_EXEC || b->action == LM_ACT_GADGET_TOGGLE)
+    else if (b->action == LM_ACT_EXEC || b->action == LM_ACT_GADGET_TOGGLE || b->action == LM_ACT_MEDIA)
         snprintf(out, n, "%s %s", act, b->arg);
     else
         snprintf(out, n, "%s", act);

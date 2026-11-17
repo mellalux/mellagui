@@ -2287,6 +2287,24 @@ bool lm_settings_set(struct lm_settings *s, const char *key, const char *value)
     return ok;
 }
 
+void lm_settings_volume_key(struct lm_settings *s, int step)
+{
+    if (!s)
+        return;
+    if (step == 0) {                                    /* the mute key */
+        lm_settings_set(s, "sink-mute", s->sink_mute ? "0" : "1");
+        return;
+    }
+    int v = s->sink_vol + step;
+    v = v < 0 ? 0 : v > 100 ? 100 : v;
+    if (s->sink_mute && step > 0)                       /* a louder key lets the sound back, like a keyboard's */
+        lm_settings_set(s, "sink-mute", "0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", v);
+    lm_settings_set(s, "sink-volume", buf);
+    lm_settings_set(s, "sink-beep", "1");
+}
+
 /* ---- the global --------------------------------------------------------------------------------------- */
 
 static void req_destroy(struct lm_resource *res, const union lm_arg *args)

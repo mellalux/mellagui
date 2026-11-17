@@ -167,6 +167,8 @@ bool lm_settings_dock_to_launcher(struct lm_server *srv, int raw_index);
 bool lm_settings_get(struct lm_settings *s, const char *key, char *out, size_t n);
 /* Same as a `set` request (validates, applies, saves, announces). */
 bool lm_settings_set(struct lm_settings *s, const char *key, const char *value);
+/* The volume keys of a keyboard: step > 0 louder, < 0 quieter (percent points of the default output), 0 = toggle mute. */
+void lm_settings_volume_key(struct lm_settings *s, int step);
 /* Applies config.scale_pct to every output (output.h) and tells the wm and the clients. */
 void lm_settings_apply_scale(struct lm_server *srv);
 /* "key=value key=value ..." for the control socket. */

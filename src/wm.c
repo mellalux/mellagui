@@ -1945,7 +1945,8 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     struct lm_window *f = wm->focused;
     if (!pressed)
         return true;
-    if (repeat && kb->action != LM_ACT_FOCUS_NEXT && kb->action != LM_ACT_FOCUS_PREV)
+    if (repeat && kb->action != LM_ACT_FOCUS_NEXT && kb->action != LM_ACT_FOCUS_PREV &&
+        kb->action != LM_ACT_VOLUME_UP && kb->action != LM_ACT_VOLUME_DOWN)     /* a held volume key goes on */
         return true;
     switch (kb->action) {
     case LM_ACT_TERMINAL: launch_terminal(wm); break;
@@ -1990,6 +1991,22 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_EXEC: {
         char cmd[2048];
         lm_launch_expand(kb->arg, cmd, sizeof(cmd));
+        lm_server_spawn(wm->srv, cmd);
+        break;
+    }
+    case LM_ACT_VOLUME_UP: lm_settings_volume_key(wm->srv->settings, 5); break;
+    case LM_ACT_VOLUME_DOWN: lm_settings_volume_key(wm->srv->settings, -5); break;
+    case LM_ACT_VOLUME_MUTE: lm_settings_volume_key(wm->srv->settings, 0); break;
+    case LM_ACT_MEDIA: {                                                /* media play-pause|next|...: the player that is playing, else the first one that speaks MPRIS */
+        const char *method = lm_media_method(kb->arg);
+        if (!method)
+            break;
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd),
+                 "p=; for n in $(busctl --user list --no-legend 2>/dev/null | cut -d' ' -f1 | grep '^org.mpris.MediaPlayer2\\.'); do "
+                 "[ -z \"$p\" ] && p=$n; "
+                 "busctl --user get-property \"$n\" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player PlaybackStatus 2>/dev/null | grep -q Playing && { p=$n; break; }; "
+                 "done; [ -n \"$p\" ] && busctl --user call \"$p\" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player %s", method);
         lm_server_spawn(wm->srv, cmd);
         break;
     }

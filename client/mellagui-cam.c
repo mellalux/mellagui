@@ -1121,7 +1121,7 @@ static const char *ctl_label(const struct app *a, int i, char *buf, size_t n)
 {
     switch (i) {
     case O_FX: return "Effects";
-    case O_KIND: return a->video ? "Video" : "Photo";
+    case O_KIND: return a->video ? "Photo" : "Video";          /* the mode a press switches TO (the shutter's dot shows the one in use) */
     case O_MODE: return a->fourup ? "4-up" : "1-up";
     case O_MIC: return a->mic ? "Mic on" : "Mic off";
     case O_TIMER:
@@ -1209,7 +1209,7 @@ static void paint_controls(struct app *a)
         char tmp[16];
         if (!ctl_rect(a, i, &x, &y, &bw, &bh))
             continue;
-        bool on = (i == O_FX && a->fx != CAMFX_NORMAL) || (i == O_MODE && a->fourup) || (i == O_TIMER && a->timer_s) || (i == O_MIC && a->mic) || (i == O_KIND && a->video);
+        bool on = (i == O_FX && a->fx != CAMFX_NORMAL) || (i == O_MODE && a->fourup) || (i == O_TIMER && a->timer_s) || (i == O_MIC && a->mic);
         if (i == O_SHUTTER) {
             wlwin_round_fill(w, x, y, bw, bh, bh / 2, lm_theme.on_colour);                          /* the white ring of a shutter button */
             wlwin_drop(w, x + 5, y + 5, bw - 10, bh - 10, (bh - 10) / 2, a->ohover == i ? lm_theme.btn_red_lit : lm_theme.btn_red);

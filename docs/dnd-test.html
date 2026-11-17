@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MellaGUI: drag and browse test</title>
+<!-- Open this page in the browser (file:///.../docs/dnd-test.html), then drag a file from MellaGUI Files onto the box, and use "Browse".
+     It shows what the browser really got: the name, the type and whether the content could be read. -->
+<body style="font:18px sans-serif;max-width:46em;margin:1em">
+<h3>Drag and browse test</h3>
+<p>1. <input type="file" id="f" multiple> (Browse)</p>
+<div id="drop" style="height:140px;border:4px dashed #08f;background:#eef;padding:8px">2. Drag files here from MellaGUI Files</div>
+<pre id="out" style="font-size:16px;white-space:pre-wrap">nothing yet</pre>
+<div id="pv"></div>
+<script>
+const out = document.getElementById('out'), pv = document.getElementById('pv');
+async function show(tag, files, types) {
+  let s = tag + ': ' + files.length + ' file(s)' + (types ? ', drag types = ' + [...types].join(', ') : '') + '\n';
+  pv.textContent = '';
+  for (const x of files) {
+    try {
+      const b = await x.arrayBuffer();
+      s += '  ' + x.name + '  type=' + (x.type || '(none)') + '  size=' + x.size + '  read=' + b.byteLength + '\n';
+      if (x.type.startsWith('image/')) { const i = new Image(); i.src = URL.createObjectURL(x); i.width = 120; pv.appendChild(i); }
+    } catch (e) { s += '  ' + x.name + '  COULD NOT READ: ' + e + '\n'; }
+  }
+  out.textContent = s;
+}
+document.getElementById('f').onchange = e => show('CHOSEN', e.target.files);
+const d = document.getElementById('drop');
+d.ondragenter = () => { d.style.background = '#cfc'; };
+d.ondragleave = () => { d.style.background = '#eef'; };
+d.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; };
+d.ondrop = e => { e.preventDefault(); d.style.background = '#eef'; show('DROPPED', e.dataTransfer.files, e.dataTransfer.types); };
+</script>

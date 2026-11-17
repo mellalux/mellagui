@@ -2,8 +2,8 @@
 #define MELLAGUI_SEAT_H
 
 /*
- * wl_seat (v5: pointer, keyboard, touch), wl_data_device_manager (text
- * clipboard between clients; drag-and-drop is accepted but not performed),
+ * wl_seat (v5: pointer, keyboard, touch), wl_data_device_manager (the clipboard between clients and drag-and-drop:
+ * start_drag, enter / motion / leave / drop with action negotiation, finish, the drag icon; see "drag and drop" in seat.c),
  * pointer cursor handling, and the pointer-grab mechanism.
  * Owner: seat.c (and keymap.c).
  *

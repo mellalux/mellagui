@@ -83,6 +83,13 @@ struct data_source {
     char *mimes[MAX_MIMES];
     int n_mimes;
     struct lm_list offers;              /* struct data_offer.src_link */
+    /* drag-and-drop */
+    uint32_t dnd_actions;               /* wl_data_source.set_actions (valid when dnd_actions_set; else COPY) */
+    bool dnd_actions_set;
+    uint32_t action;                    /* the action chosen for the target now (0 = none) */
+    bool accepted;                      /* the target accepted a mime type of this source */
+    bool dnd_dropped;                   /* the drop happened: wl_data_offer.finish is due */
+    bool dnd_finished;
 };
 
 struct data_offer {
@@ -91,6 +98,8 @@ struct data_offer {
     struct lm_seat *seat;
     struct data_source *source;         /* NULL once the source is destroyed */
     struct lm_resource *res;
+    bool dnd;                           /* an offer made for a drag (not for the selection) */
+    uint32_t actions, preferred;        /* wl_data_offer.set_actions of the target */
 };
 
 struct data_device {
@@ -175,6 +184,18 @@ struct lm_seat {
     /* touch */
     bool has_touch;
     struct touch_point points[MAX_TOUCH];
+
+    /* drag-and-drop: wl_data_device.start_drag until the button is let go (the clients see no pointer events meanwhile) */
+    struct {
+        bool active;
+        struct data_source *source;     /* may be NULL (a drag inside one client) */
+        struct lm_surface *origin;
+        struct lm_surface *icon;        /* has role "dnd icon"; drawn instead of the pointer */
+        struct lm_surface *focus;       /* the surface under the pointer that was sent wl_data_device.enter */
+        struct data_offer *offer;       /* the offer made for `focus` (NULL: none, or the source is NULL) */
+        uint32_t button;
+        struct lm_listener origin_destroy, icon_destroy, focus_destroy;
+    } dnd;
 
     /* clipboard */
     struct data_source *selection;
@@ -340,6 +361,17 @@ static const struct lm_surface_role cursor_role = {
     .damage = cursor_role_damage,
 };
 
+/* The drag icon (wl_data_device.start_drag): a surface of the dragging client that follows the pointer. */
+static const struct lm_surface_role dnd_icon_role = {
+    .name = "dnd icon",
+    .commit = cursor_role_commit,
+    .damage = cursor_role_damage,
+};
+
+static void dnd_motion(struct lm_seat *seat, uint32_t time_ms, const struct lm_pick *pick);
+static void dnd_button(struct lm_seat *seat, uint32_t time_ms, uint32_t button, bool pressed);
+static void dnd_cancel(struct lm_seat *seat);
+
 static void cursor_surface_destroyed(struct lm_listener *l, void *data)
 {
     (void)data;
@@ -376,6 +408,13 @@ void lm_seat_get_cursor(const struct lm_seat *seat, struct lm_cursor *out)
         out->shape = seat->override;
         return;
     }
+    if (seat->dnd.active) {                                 /* the drag icon takes the pointer's place */
+        if (seat->dnd.icon && seat->dnd.icon->has_content) {
+            out->shape = LM_CURSOR_SURFACE;
+            out->surface = seat->dnd.icon;
+        }
+        return;
+    }
     if (seat->pfocus && seat->cursor_client == surface_client(seat->pfocus)) {
         if (seat->cursor_surface && seat->cursor_surface->has_content) {
             out->shape = LM_CURSOR_SURFACE;
@@ -400,6 +439,8 @@ void lm_seat_send_frame_done(struct lm_seat *seat, uint32_t time_ms)
 {
     if (seat && seat->cursor_surface)
         lm_surface_send_frame_done(seat->cursor_surface, time_ms);
+    if (seat && seat->dnd.active && seat->dnd.icon)
+        lm_surface_send_frame_done(seat->dnd.icon, time_ms);
 }
 
 /* ---- wl_pointer events ---------------------------------------------------------------------------- */
@@ -587,7 +628,7 @@ static bool focus_from_pick(struct lm_seat *seat, const struct lm_pick *pick)
 
 static void pointer_refocus(struct lm_seat *seat, uint32_t time_ms)
 {
-    if (seat->grab || seat->srv->wm == NULL)
+    if (seat->grab || seat->srv->wm == NULL || seat->dnd.active)
         return;
     struct lm_pick pick;
     pick_at(seat, &pick);
@@ -606,6 +647,12 @@ static void refocus_idle_cb(void *data)
 static void pointer_moved(struct lm_seat *seat, uint32_t time_ms)
 {
     cursor_changed(seat);
+    if (seat->dnd.active) {                         /* a drag: the clients get wl_data_device events, no pointer events */
+        struct lm_pick pick;
+        pick_at(seat, &pick);
+        dnd_motion(seat, time_ms, &pick);
+        return;
+    }
     if (seat->grab) {
         struct lm_pointer_grab *g = seat->grab;
         if (g->ops && g->ops->motion)
@@ -667,6 +714,10 @@ bool lm_seat_pointer_warp_local(struct lm_seat *seat, struct lm_client *client, 
 
 static void pointer_button(struct lm_seat *seat, uint32_t time_ms, uint32_t button, bool pressed)
 {
+    if (seat->dnd.active) {
+        dnd_button(seat, time_ms, button, pressed);
+        return;
+    }
     if (seat->grab) {
         struct lm_pointer_grab *g = seat->grab;
         if (g->ops && g->ops->button)
@@ -703,6 +754,8 @@ static void pointer_button(struct lm_seat *seat, uint32_t time_ms, uint32_t butt
 static void pointer_axis(struct lm_seat *seat, uint32_t time_ms, int orientation, double value,
                          int32_t discrete)
 {
+    if (seat->dnd.active)
+        return;
     if (seat->grab) {
         struct lm_pointer_grab *g = seat->grab;
         if (g->ops && g->ops->axis)
@@ -1382,9 +1435,49 @@ static struct data_source *source_of(struct lm_resource *res)
     return res ? res->data : NULL;
 }
 
+/* The action a drop would do now: what the source allows and the target asked for (its preferred one when both allow it, else
+ * copy, move, ask). Tells the target and the source when it changed. */
+static void dnd_update_action(struct lm_seat *seat)
+{
+    struct data_source *s = seat->dnd.source;
+    struct data_offer *o = seat->dnd.offer;
+    if (!s)
+        return;
+    uint32_t act = 0;
+    if (o) {
+        uint32_t avail = (s->dnd_actions_set ? s->dnd_actions : (uint32_t)LM_DND_ACTION_COPY) & o->actions;
+        if (o->preferred && (avail & o->preferred))
+            act = o->preferred;
+        else if (avail & LM_DND_ACTION_COPY)
+            act = LM_DND_ACTION_COPY;
+        else if (avail & LM_DND_ACTION_MOVE)
+            act = LM_DND_ACTION_MOVE;
+        else if (avail & LM_DND_ACTION_ASK)
+            act = LM_DND_ACTION_ASK;
+    }
+    if (act == s->action)
+        return;
+    s->action = act;
+    if (o && o->res->version >= 3)
+        lm_resource_post(o->res, LM_WL_DATA_OFFER_EVT_ACTION, act);
+    if (s->res && s->res->version >= 3)
+        lm_resource_post(s->res, LM_WL_DATA_SOURCE_EVT_ACTION, act);
+}
+
 static void offer_res_destroy(struct lm_resource *res)
 {
     struct data_offer *o = res->data;
+    struct lm_seat *seat = o->seat;
+    /* an offer let go of before finish: the drop is over for the source, it has to forget the data (a v3 source is told) */
+    if (o->dnd && o->source && o->source->dnd_dropped && !o->source->dnd_finished && o->source->res) {
+        o->source->dnd_finished = true;
+        lm_resource_post(o->source->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+    }
+    if (seat && seat->dnd.offer == o) {
+        seat->dnd.offer = NULL;
+        if (seat->dnd.source)
+            seat->dnd.source->accepted = false;
+    }
     lm_list_remove(&o->link);
     lm_list_remove(&o->src_link);
     free(o);
@@ -1393,8 +1486,18 @@ static void offer_res_destroy(struct lm_resource *res)
 static void offer_accept(struct lm_resource *res, const union lm_arg *args)
 {
     struct data_offer *o = res->data;
-    (void)args;
-    (void)o; /* drag-and-drop is not performed: nothing to negotiate */
+    struct lm_seat *seat = o->seat;
+    if (!o->dnd || !seat->dnd.active || seat->dnd.offer != o || !o->source)
+        return;                                         /* only the offer of the drag that is going on is listened to */
+    const char *mime = args[1].s;
+    lm_debug("dnd: offer.accept %s", mime ? mime : "(none)");
+    bool known = false;
+    for (int i = 0; mime && i < o->source->n_mimes; i++)
+        if (!strcmp(o->source->mimes[i], mime))
+            known = true;
+    o->source->accepted = known;
+    if (o->source->res)
+        lm_resource_post(o->source->res, LM_WL_DATA_SOURCE_EVT_TARGET, known ? mime : (const char *)NULL);
 }
 
 /* Our own big data (a screenshot, MBs) must not block the single-threaded loop on a slow reader: a short-lived child
@@ -1428,6 +1531,8 @@ static void offer_receive(struct lm_resource *res, const union lm_arg *args)
 {
     struct data_offer *o = res->data;
     const char *mime = args[0].s;
+    if (o->dnd)
+        lm_debug("dnd: offer.receive %s (source %s)", mime ? mime : "(none)", o->source ? "alive" : "gone");
     if (!o->source || !mime)
         return;
     for (int i = 0; i < o->source->n_mimes; i++) {
@@ -1458,12 +1563,23 @@ static void offer_receive(struct lm_resource *res, const union lm_arg *args)
 static void offer_finish(struct lm_resource *res, const union lm_arg *args)
 {
     (void)args;
-    lm_resource_post_error(res, LM_WL_DATA_OFFER_ERR_INVALID_FINISH,
-                           "wl_data_offer.finish on a selection offer");
+    struct data_offer *o = res->data;
+    struct data_source *s = o->source;
+    if (!o->dnd || !s || !s->dnd_dropped) {
+        lm_resource_post_error(res, LM_WL_DATA_OFFER_ERR_INVALID_FINISH,
+                               "wl_data_offer.finish before a drop was performed");
+        return;
+    }
+    if (s->dnd_finished)
+        return;
+    s->dnd_finished = true;
+    if (s->res && s->res->version >= 3)
+        lm_resource_post(s->res, LM_WL_DATA_SOURCE_EVT_DND_FINISHED);
 }
 
 static void offer_set_actions(struct lm_resource *res, const union lm_arg *args)
 {
+    struct data_offer *o = res->data;
     uint32_t actions = args[0].u, preferred = args[1].u;
     if (actions & ~7u) {
         lm_resource_post_error(res, LM_WL_DATA_OFFER_ERR_INVALID_ACTION_MASK,
@@ -1473,7 +1589,15 @@ static void offer_set_actions(struct lm_resource *res, const union lm_arg *args)
     if (preferred != 0 && (preferred & (preferred - 1)) != 0) {
         lm_resource_post_error(res, LM_WL_DATA_OFFER_ERR_INVALID_ACTION,
                                "invalid preferred action %u", preferred);
+        return;
     }
+    if (!o->dnd)
+        return;
+    lm_debug("dnd: offer.set_actions actions=%u preferred=%u", actions, preferred);
+    o->actions = actions;
+    o->preferred = preferred;
+    if (o->seat->dnd.active && o->seat->dnd.offer == o)
+        dnd_update_action(o->seat);
 }
 
 static const lm_request_fn offer_handlers[] = {
@@ -1524,6 +1648,202 @@ static void selection_update_focus(struct lm_seat *seat)
     struct data_device *d;
     FOR_CLIENT_OBJECTS(d, &seat->devices, cl)
         device_send_selection(seat, d);
+}
+
+/* ---- drag and drop ----------------------------------------------------------------------------------------------------
+ * wl_data_device.start_drag begins it (a button of this client is held); until that button is let go the clients get no pointer
+ * events: the surface under the pointer gets wl_data_device.enter / motion / leave with an offer of the source's types, and the
+ * release is the drop (when the target accepted a type and an action was agreed on) or the end of the drag (the source is
+ * cancelled). Esc calls it off. The icon surface takes the pointer's place. */
+
+static void dnd_focus_destroyed(struct lm_listener *l, void *data)
+{
+    (void)data;
+    struct lm_seat *seat = lm_container_of(l, struct lm_seat, dnd.focus_destroy);
+    lm_listener_remove(l);
+    seat->dnd.focus = NULL;
+    seat->dnd.offer = NULL;                             /* (the client's surface is gone, and so is its offer in a moment) */
+    if (seat->dnd.source) {
+        seat->dnd.source->accepted = false;
+        seat->dnd.source->action = 0;
+    }
+}
+
+static void dnd_origin_destroyed(struct lm_listener *l, void *data)
+{
+    (void)data;
+    struct lm_seat *seat = lm_container_of(l, struct lm_seat, dnd.origin_destroy);
+    lm_listener_remove(l);
+    seat->dnd.origin = NULL;
+    dnd_cancel(seat);
+}
+
+static void dnd_icon_destroyed(struct lm_listener *l, void *data)
+{
+    (void)data;
+    struct lm_seat *seat = lm_container_of(l, struct lm_seat, dnd.icon_destroy);
+    lm_listener_remove(l);
+    seat->dnd.icon = NULL;
+    cursor_changed(seat);
+}
+
+/* wl_data_device.leave to the surface that has the drag now (and the source learns that nothing is under it). */
+static void dnd_leave(struct lm_seat *seat)
+{
+    struct lm_surface *f = seat->dnd.focus;
+    if (!f)
+        return;
+    struct lm_client *cl = surface_client(f);
+    struct data_device *d;
+    lm_debug("dnd: leave pid %d", cl ? (int)cl->pid : -1);
+    FOR_CLIENT_OBJECTS(d, &seat->devices, cl)
+        lm_resource_post(d->res, LM_WL_DATA_DEVICE_EVT_LEAVE);
+    lm_listener_remove(&seat->dnd.focus_destroy);
+    seat->dnd.focus = NULL;
+    seat->dnd.offer = NULL;
+    struct data_source *s = seat->dnd.source;
+    if (s) {
+        bool was_accepted = s->accepted;
+        s->accepted = false;
+        if (s->res && was_accepted)
+            lm_resource_post(s->res, LM_WL_DATA_SOURCE_EVT_TARGET, (const char *)NULL);
+        s->action = 0;
+    }
+}
+
+/* wl_data_device.enter with a new offer to the first data device of the client of `surface`. */
+static void dnd_enter(struct lm_seat *seat, struct lm_surface *surface, double sx, double sy)
+{
+    struct lm_client *cl = surface_client(surface);
+    struct data_device *dev = NULL, *d;
+    FOR_CLIENT_OBJECTS(d, &seat->devices, cl) {
+        dev = d;
+        break;
+    }
+    if (!dev) {
+        lm_debug("dnd: the program under the pointer (pid %d) has no wl_data_device: it cannot take a drop", cl ? (int)cl->pid : -1);
+        return;                                         /* a client that cannot take drops: nothing happens over it */
+    }
+    struct data_source *src = seat->dnd.source;
+    struct data_offer *o = NULL;
+    if (src) {
+        o = calloc(1, sizeof(*o));
+        if (!o) {
+            lm_resource_post_no_memory(dev->res);
+            return;
+        }
+        o->seat = seat;
+        o->source = src;
+        o->dnd = true;
+        o->actions = dev->res->version >= 3 ? 0 : (uint32_t)LM_DND_ACTION_COPY;    /* an old client knows only a copy */
+        lm_list_init(&o->link);
+        lm_list_init(&o->src_link);
+        o->res = lm_resource_create_server(cl, &lm_wl_data_offer_interface, dev->res->version, offer_handlers, o, offer_res_destroy);
+        if (!o->res) {
+            free(o);
+            return;
+        }
+        lm_list_append(&seat->offers, &o->link);
+        lm_list_append(&src->offers, &o->src_link);
+        lm_resource_post(dev->res, LM_WL_DATA_DEVICE_EVT_DATA_OFFER, o->res);
+        for (int i = 0; i < src->n_mimes; i++)
+            lm_resource_post(o->res, LM_WL_DATA_OFFER_EVT_OFFER, src->mimes[i]);
+        if (o->res->version >= 3)
+            lm_resource_post(o->res, LM_WL_DATA_OFFER_EVT_SOURCE_ACTIONS,
+                             src->dnd_actions_set ? src->dnd_actions : (uint32_t)LM_DND_ACTION_COPY);
+    }
+    lm_debug("dnd: enter pid %d (%s, offer %s)", cl ? (int)cl->pid : -1, o ? "with" : "no source:", o ? "made" : "none");
+    seat->dnd.focus = surface;
+    seat->dnd.focus_destroy.notify = dnd_focus_destroyed;
+    lm_signal_add(&surface->destroy_signal, &seat->dnd.focus_destroy);
+    seat->dnd.offer = o;
+    if (src) {
+        src->accepted = false;
+        src->action = 0;
+    }
+    uint32_t serial = next_serial(seat);
+    lm_resource_post(dev->res, LM_WL_DATA_DEVICE_EVT_ENTER, serial, surface->resource, lm_fixed_from_double(sx),
+                     lm_fixed_from_double(sy), o ? o->res : (struct lm_resource *)NULL);
+}
+
+static void dnd_motion(struct lm_seat *seat, uint32_t time_ms, const struct lm_pick *pick)
+{
+    struct lm_surface *target = pick_is_surface(pick) && pick->surface != seat->dnd.icon ? pick->surface : NULL;
+    if (target != seat->dnd.focus) {
+        dnd_leave(seat);
+        if (target)
+            dnd_enter(seat, target, pick->sx, pick->sy);
+    }
+    if (seat->dnd.focus && seat->dnd.focus == target) {
+        struct lm_client *cl = surface_client(target);
+        struct data_device *d;
+        FOR_CLIENT_OBJECTS(d, &seat->devices, cl) {
+            lm_resource_post(d->res, LM_WL_DATA_DEVICE_EVT_MOTION, time_ms, lm_fixed_from_double(pick->sx),
+                             lm_fixed_from_double(pick->sy));
+            break;                                      /* (the device that got the enter) */
+        }
+    }
+}
+
+/* The drag is over: let go of the surfaces; the pointer finds what is under it again. */
+static void dnd_end(struct lm_seat *seat)
+{
+    lm_listener_remove(&seat->dnd.focus_destroy);
+    lm_listener_remove(&seat->dnd.origin_destroy);
+    lm_listener_remove(&seat->dnd.icon_destroy);
+    struct lm_surface *icon = seat->dnd.icon;
+    memset(&seat->dnd, 0, sizeof(seat->dnd));
+    lm_list_init(&seat->dnd.origin_destroy.link);       /* (a zeroed listener must not be removed) */
+    lm_list_init(&seat->dnd.icon_destroy.link);
+    lm_list_init(&seat->dnd.focus_destroy.link);
+    if (icon && icon->role == &dnd_icon_role && icon->role_data)
+        lm_surface_clear_role(icon);
+    cursor_changed(seat);
+    if (!seat->dying && seat->refocus_idle)
+        lm_idle_schedule(seat->refocus_idle);
+}
+
+static void dnd_cancel(struct lm_seat *seat)
+{
+    if (!seat->dnd.active)
+        return;
+    struct data_source *s = seat->dnd.source;
+    lm_debug("dnd: cancelled");
+    dnd_leave(seat);
+    if (s && s->res)
+        lm_resource_post(s->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+    dnd_end(seat);
+}
+
+static void dnd_button(struct lm_seat *seat, uint32_t time_ms, uint32_t button, bool pressed)
+{
+    (void)time_ms;
+    if (pressed || button != seat->dnd.button)
+        return;                                         /* the button that began the drag ends it; others are nobody's */
+    struct data_source *s = seat->dnd.source;
+    struct data_offer *o = seat->dnd.offer;
+    lm_debug("dnd: button released: focus=%d offer=%d accepted=%d action=%u", seat->dnd.focus != NULL, o != NULL, s ? s->accepted : -1,
+             s ? s->action : 0);
+    if (seat->dnd.focus && o && s && s->accepted && s->action != 0) {
+        struct lm_client *cl = surface_client(seat->dnd.focus);
+        struct data_device *d;
+        FOR_CLIENT_OBJECTS(d, &seat->devices, cl) {
+            lm_resource_post(d->res, LM_WL_DATA_DEVICE_EVT_DROP);
+            break;
+        }
+        lm_debug("dnd: drop sent");
+        s->dnd_dropped = true;
+        if (s->res && s->res->version >= 3)
+            lm_resource_post(s->res, LM_WL_DATA_SOURCE_EVT_DND_DROP_PERFORMED);
+        else
+            s->dnd_finished = true;
+        lm_listener_remove(&seat->dnd.focus_destroy);   /* the target keeps its offer: it reads the data and says finish */
+        seat->dnd.focus = NULL;
+        seat->dnd.offer = NULL;
+        dnd_end(seat);
+        return;
+    }
+    dnd_cancel(seat);
 }
 
 /* ---- clipboard history (gadget) ---------------------------------------------------------------------------------- */
@@ -1878,6 +2198,11 @@ static void source_res_destroy(struct lm_resource *res)
 {
     struct data_source *src = res->data;
     struct lm_seat *seat = src->seat;
+    if (seat->dnd.active && seat->dnd.source == src) {
+        src->res = NULL;                                /* (nobody to tell: the resource is going) */
+        seat->dnd.source = NULL;
+        dnd_cancel(seat);
+    }
     struct data_offer *o, *tmp;
     lm_list_for_each_safe(o, tmp, &src->offers, src_link) {
         o->source = NULL;
@@ -1910,14 +2235,18 @@ static void source_offer(struct lm_resource *res, const union lm_arg *args)
     src->mimes[src->n_mimes++] = copy;
 }
 
-/* Drag-and-drop is not supported: the mask is only validated. */
 static void source_set_actions(struct lm_resource *res, const union lm_arg *args)
 {
+    struct data_source *src = res->data;
     if (args[0].u & ~7u) {
         lm_resource_post_error(res, LM_WL_DATA_SOURCE_ERR_INVALID_ACTION_MASK,
                                "invalid action mask %u", args[0].u);
         return;
     }
+    src->dnd_actions = args[0].u;
+    src->dnd_actions_set = true;
+    if (src->seat->dnd.active && src->seat->dnd.source == src)
+        dnd_update_action(src->seat);
 }
 
 static const lm_request_fn source_handlers[] = {
@@ -1935,11 +2264,50 @@ static void device_res_destroy(struct lm_resource *res)
 
 static void device_start_drag(struct lm_resource *res, const union lm_arg *args)
 {
-    (void)res;
-    /* Drag-and-drop is not performed; refuse politely so the client resets its state. */
+    struct data_device *d = res->data;
+    struct lm_seat *seat = d->seat;
     struct data_source *src = source_of(args[0].r);
-    if (src)
-        lm_resource_post(src->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+    struct lm_surface *origin = args[1].r ? lm_surface_from_resource(args[1].r) : NULL;
+    struct lm_surface *icon = args[2].r ? lm_surface_from_resource(args[2].r) : NULL;
+    uint32_t serial = args[3].u;
+    /* A drag starts from a button press of this client that is still held, and only one at a time. */
+    bool ok = origin && !seat->dnd.active && !seat->locked && seat->pfocus && surface_client(seat->pfocus) == res->client &&
+              surface_client(origin) == res->client && seat->n_fwd > 0 && lm_seat_serial_valid(seat, res->client, serial) &&
+              (!src || (src->res && src->res->client == res->client && !src->dnd_dropped));
+    lm_debug("dnd: start_drag from pid %d: %s (origin=%d active=%d locked=%d pointer-focus-is-this-client=%d button-held=%d serial-valid=%d source=%d icon=%d)",
+             res->client ? (int)res->client->pid : -1, ok ? "accepted" : "REFUSED", origin != NULL, seat->dnd.active, seat->locked,
+             seat->pfocus && surface_client(seat->pfocus) == res->client, seat->n_fwd > 0, lm_seat_serial_valid(seat, res->client, serial),
+             src != NULL, icon != NULL);
+    if (icon && (!ok || (icon->role && icon->role != &dnd_icon_role) || lm_surface_set_role(icon, &dnd_icon_role, seat) < 0))
+        icon = NULL;                                    /* a surface with another role cannot be the icon: the drag goes without */
+    if (!ok) {
+        if (src && src->res)
+            lm_resource_post(src->res, LM_WL_DATA_SOURCE_EVT_CANCELLED);
+        return;
+    }
+    uint32_t button = seat->fwd_buttons[0];
+    seat->n_fwd = 0;                                    /* the client's implicit grab ends: it sees no more pointer events */
+    lm_seat_pointer_set_focus(seat, NULL, 0, 0);
+    seat->dnd.active = true;
+    seat->dnd.source = src;
+    seat->dnd.origin = origin;
+    seat->dnd.icon = icon;
+    seat->dnd.button = button;
+    seat->dnd.origin_destroy.notify = dnd_origin_destroyed;
+    lm_signal_add(&origin->destroy_signal, &seat->dnd.origin_destroy);
+    if (icon) {
+        seat->dnd.icon_destroy.notify = dnd_icon_destroyed;
+        lm_signal_add(&icon->destroy_signal, &seat->dnd.icon_destroy);
+    }
+    if (src) {
+        src->accepted = false;
+        src->action = 0;
+        src->dnd_dropped = src->dnd_finished = false;
+    }
+    cursor_changed(seat);
+    struct lm_pick pick;
+    pick_at(seat, &pick);
+    dnd_motion(seat, lm_now_msec32(), &pick);           /* it is over the origin's own surface at first: that one gets the enter */
 }
 
 static void device_set_selection(struct lm_resource *res, const union lm_arg *args)
@@ -2100,6 +2468,7 @@ void lm_seat_set_locked(struct lm_seat *seat, bool locked)
         return;
     seat->locked = locked;
     if (locked) {
+        dnd_cancel(seat);
         if (seat->grab) {
             struct lm_pointer_grab *g = seat->grab;
             seat->grab = NULL;
@@ -2137,6 +2506,13 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
 
     switch (ev->type) {
     case LM_INPUT_KEY:
+        if (seat->dnd.active && ev->u.key.code == 1 /* KEY_ESC */ && !ev->u.key.repeat) {
+            if (ev->u.key.pressed) {                    /* Esc calls a drag off; the press and its release are nobody's */
+                dnd_cancel(seat);
+                code_add(seat->swallowed, &seat->n_swallowed, MAX_KEYS, ev->u.key.code);
+                break;
+            }
+        }
         handle_key(seat, ev);
         break;
     case LM_INPUT_MODS:
@@ -2223,6 +2599,9 @@ struct lm_seat *lm_seat_create(struct lm_server *srv)
     lm_list_init(&seat->clients);
     lm_list_init(&seat->pfocus_destroy.link);
     lm_list_init(&seat->kfocus_destroy.link);
+    lm_list_init(&seat->dnd.origin_destroy.link);
+    lm_list_init(&seat->dnd.icon_destroy.link);
+    lm_list_init(&seat->dnd.focus_destroy.link);
     lm_list_init(&seat->cursor_destroy.link);
     for (int i = 0; i < MAX_TOUCH; i++)
         lm_list_init(&seat->points[i].destroy.link);
@@ -2252,6 +2631,7 @@ void lm_seat_destroy(struct lm_seat *seat)
     if (!seat)
         return;
     seat->dying = true;
+    dnd_cancel(seat);
 
     if (seat->grab) {
         struct lm_pointer_grab *g = seat->grab;

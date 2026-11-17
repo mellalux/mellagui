@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -16,6 +17,7 @@ struct ffpipe {
     uint8_t *pend;                      /* ffpipe_offer: the rest of a picture the pipe did not take yet */
     size_t pend_len, pend_cap;
     bool nonblock;
+    char path[PATH_MAX];                /* the file being written: made a plain MP4 when it ends well (see remux_plain) */
 };
 
 static char g_ffmpeg[PATH_MAX];
@@ -240,6 +242,7 @@ struct ffpipe *ffpipe_start(const char *path, int width, int height, int crf, co
         snprintf(err, errsz, "out of memory");
         return NULL;
     }
+    snprintf(p->path, sizeof(p->path), "%s", path);
     p->pid = pid;
     p->fd = in[1];
     signal(SIGPIPE, SIG_IGN);                            /* a dead ffmpeg is an error code, not a signal */
@@ -330,6 +333,54 @@ int ffpipe_offer(struct ffpipe *p, const void *px, size_t bytes)
     return 0;
 }
 
+/* A recording is written as a fragmented MP4 so that one cut short still plays, but Facebook, Instagram and many other sites refuse such a file ("invalid
+ * file format"), and some players cannot seek in it. When it ended well, copy it (no new coding: a second or so) into an ordinary MP4 with the index at the
+ * front and put that in its place; any failure leaves the fragmented file as it is. `$MELLAGUI_RECORD_FRAGMENTED=1` keeps the fragmented form. */
+static void remux_plain(const char *path)
+{
+    const char *ff = ffpipe_ffmpeg_path();
+    const char *keep = getenv("MELLAGUI_RECORD_FRAGMENTED");
+    if (!ff || (keep && *keep == '1'))
+        return;
+    char tmp[PATH_MAX + 32];
+    if (snprintf(tmp, sizeof(tmp), "%s.plain-%d.mp4", path, (int)getpid()) >= (int)sizeof(tmp))
+        return;
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0)
+        return;
+    pid_t pid = fork();
+    if (pid < 0)
+        return;
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(nul, 2);
+        }
+        umask(077);
+        execl(ff, ff, "-y", "-v", "error", "-nostdin", "-i", path, "-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp, (char *)NULL);
+        _exit(127);
+    }
+    int stt = 0;
+    pid_t r = 0;
+    for (int i = 0; i < 1200 && (r = waitpid(pid, &stt, WNOHANG)) == 0; i++)         /* up to a minute (it only copies) */
+        usleep(50000);
+    if (r == 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &stt, 0);
+        unlink(tmp);
+        return;
+    }
+    struct stat ns;
+    if (!WIFEXITED(stt) || WEXITSTATUS(stt) != 0 || stat(tmp, &ns) != 0 || ns.st_size == 0) {
+        unlink(tmp);
+        return;
+    }
+    if (chmod(tmp, st.st_mode & 07777) != 0 || rename(tmp, path) != 0)
+        unlink(tmp);
+}
+
 int ffpipe_finish(struct ffpipe *p)
 {
     if (!p)
@@ -359,6 +410,8 @@ int ffpipe_finish(struct ffpipe *p)
     } else if (r == p->pid) {
         rc = WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
     }
+    if (rc == 0)
+        remux_plain(p->path);
     free(p);
     return rc;
 }

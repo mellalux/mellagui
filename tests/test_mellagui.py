@@ -1532,6 +1532,237 @@ class TestClipboard(Base):
         self.assertIsNotNone(sel, 'no selection event for the focused client')
 
 
+class TestDragAndDrop(Base):
+    """Dragging between windows (wl_data_device.start_drag): enter / motion / leave / drop, actions, finish, cancel, the icon."""
+    URI = b'file:///tmp/picture.jpg\r\n'
+
+    def setUp(self):
+        super().setUp()
+        self.a = self.client()                                      # the source
+        seat = self.a.wl.bind('wl_seat', 5)
+        self.a.ptr = self.a.wl.new_id('wl_pointer')
+        self.a.wl.request(seat, 'get_pointer', self.a.ptr)
+        self.a.mgr = self.a.wl.bind('wl_data_device_manager', 3)
+        self.a.dev = self.a.wl.new_id('wl_data_device')
+        self.a.wl.request(self.a.mgr, 'get_data_device', self.a.dev, seat)
+        self.wa = Window(self.a, 200, 150, title='A')
+        self.b = self.client()                                      # the target
+        seat_b = self.b.wl.bind('wl_seat', 5)
+        self.b.ptr = self.b.wl.new_id('wl_pointer')
+        self.b.wl.request(seat_b, 'get_pointer', self.b.ptr)
+        self.b.mgr = self.b.wl.bind('wl_data_device_manager', 3)
+        self.b.dev = self.b.wl.new_id('wl_data_device')
+        self.b.wl.request(self.b.mgr, 'get_data_device', self.b.dev, seat_b)
+        self.wb = Window(self.b, 200, 150, title='B')
+        self.a.wl.roundtrip()
+        self.b.wl.roundtrip()
+        ws = {w['title']: w for w in ctl.windows()['windows']}
+        ra, rb = ws['A'], ws['B']
+        self.pa = (ra['x'] + 6, ra['y'] + 6)                        # a point only A covers (B is on top and set off to the lower right)
+        self.pb = (rb['x'] + rb['w'] - 20, rb['y'] + rb['h'] - 20)  # a point of B
+
+    def begin(self, actions=3, mimes=('text/uri-list',), icon=False):
+        """Press the button over A and start a drag from it; returns the source's id."""
+        a = self.a
+        ctl.abs(*self.pa)
+        ctl.sync()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == a.ptr and e.name == 'enter', 2.0), 'A has no pointer focus')
+        ctl.button(BTN_LEFT, True)
+        press = a.wl.wait_for(lambda e: e.obj == a.ptr and e.name == 'button' and e.args[3] == 1, 2.0)
+        self.assertIsNotNone(press)
+        src = a.wl.new_id('wl_data_source')
+        a.wl.request(a.mgr, 'create_data_source', src)
+        for m in mimes:
+            a.wl.request(src, 'offer', m)
+        a.wl.request(src, 'set_actions', actions)
+        icon_surface = 0
+        if icon:
+            icon_surface = a.wl.new_id('wl_surface')
+            a.wl.request(a.compositor, 'create_surface', icon_surface)
+            shm = Shm(a.wl, 64 * 64 * 4)
+            buf = shm.buffer(32, 32, 0xffff0000)
+            a.wl.request(icon_surface, 'attach', buf, I(0), I(0))
+            a.wl.request(icon_surface, 'damage', I(0), I(0), I(32), I(32))
+            a.wl.request(icon_surface, 'commit')
+            self.icon_shm = shm
+        a.wl.request(a.dev, 'start_drag', src, self.wa.surface, icon_surface, press.args[0])
+        a.wl.roundtrip()
+        return src
+
+    def over_b(self):
+        """Move the pointer onto B: B gets the offer. Returns (enter event, offer id)."""
+        ctl.abs(*self.pb)
+        ctl.sync()
+        enter = self.b.wl.wait_for(lambda e: e.obj == self.b.dev and e.name == 'enter', 2.0)
+        self.assertIsNotNone(enter, 'B got no wl_data_device.enter')
+        return enter, enter.args[4]
+
+    def test_a_drag_is_offered_to_the_window_under_the_pointer_and_dropped(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == a.ptr and e.name == 'leave', 1.0), 'the origin keeps its pointer focus')
+        enter, offer = self.over_b()
+        self.assertNotEqual(offer, 0)
+        mimes = [e.args[0] for e in b.wl.queue if e.obj == offer and e.name == 'offer']
+        self.assertEqual(mimes, ['text/uri-list'])
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == offer and e.name == 'source_actions' and e.args[0] == 3, 1.0))
+        self.assertIsNone(b.wl.wait_for(lambda e: e.obj == b.ptr and e.name == 'enter', 0.2), 'a pointer enter during a drag')
+        ctl.cmd('motion 3 2')                                       # motion events follow
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'motion', 2.0))
+        b.wl.request(offer, 'set_actions', 1 | 2, 1)
+        b.wl.request(offer, 'accept', enter.args[0], 'text/uri-list')
+        b.wl.roundtrip()
+        a.wl.roundtrip()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'target' and e.args[0] == 'text/uri-list', 1.0))
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'action' and e.args[0] == 1, 1.0), 'the copy action was not chosen')
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == offer and e.name == 'action' and e.args[0] == 1, 1.0))
+        ctl.button(BTN_LEFT, False)
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'drop', 2.0), 'no drop')
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'dnd_drop_performed', 2.0))
+        r, w = os.pipe()                                            # the data goes through a pipe, as for a paste
+        b.wl.request(offer, 'receive', 'text/uri-list', fds=(w,))
+        os.close(w)
+        send = a.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 2.0)
+        self.assertIsNotNone(send)
+        os.write(send.fds[0], self.URI)
+        os.close(send.fds[0])
+        self.assertEqual(os.read(r, 4096), self.URI)
+        os.close(r)
+        b.wl.request(offer, 'finish')
+        b.wl.roundtrip()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'dnd_finished', 2.0))
+        self.assertIsNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 0.2))
+        ctl.abs(*self.pa)                                           # the pointer works again
+        ctl.sync()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == a.ptr and e.name == 'enter', 2.0))
+
+    def test_a_drop_nobody_accepted_cancels_the_source(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        enter, offer = self.over_b()
+        ctl.button(BTN_LEFT, False)                                 # B never accepted anything
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'leave', 2.0))
+        self.assertIsNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'drop', 0.2))
+
+    def test_accepting_without_a_common_action_gives_no_drop(self):
+        a, b = self.a, self.b
+        src = self.begin(actions=2)                                 # the source can only move
+        enter, offer = self.over_b()
+        b.wl.request(offer, 'set_actions', 1, 1)                    # the target can only copy
+        b.wl.request(offer, 'accept', enter.args[0], 'text/uri-list')
+        b.wl.roundtrip()
+        ctl.button(BTN_LEFT, False)
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+        self.assertIsNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'drop', 0.2))
+
+    def test_a_type_the_source_does_not_have_is_not_accepted(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        enter, offer = self.over_b()
+        b.wl.request(offer, 'set_actions', 1, 1)
+        b.wl.request(offer, 'accept', enter.args[0], 'image/png')
+        b.wl.roundtrip()
+        ctl.button(BTN_LEFT, False)
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+
+    def test_esc_calls_the_drag_off(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        enter, offer = self.over_b()
+        b.wl.request(offer, 'set_actions', 1, 1)
+        b.wl.request(offer, 'accept', enter.args[0], 'text/uri-list')
+        b.wl.roundtrip()
+        ctl.tap(KEY_ESC)
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'leave', 2.0))
+        ctl.button(BTN_LEFT, False)                                 # the release after it is no drop
+        ctl.sync()
+        self.assertIsNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'drop', 0.3))
+        ctl.abs(*self.pb)                                           # the pointer is B's again
+        ctl.sync()
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.ptr and e.name == 'enter', 2.0))
+
+    def test_leaving_the_target_sends_leave_and_target_none(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        enter, offer = self.over_b()
+        b.wl.request(offer, 'set_actions', 1, 1)
+        b.wl.request(offer, 'accept', enter.args[0], 'text/uri-list')
+        b.wl.roundtrip()
+        a.wl.roundtrip()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'target' and e.args[0] == 'text/uri-list', 1.0))
+        ctl.abs(900, 500)                                           # onto the desktop
+        ctl.sync()
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'leave', 2.0))
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'target' and e.args[0] is None, 2.0))
+        ctl.button(BTN_LEFT, False)
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+
+    def test_a_drag_needs_a_held_button_and_a_good_serial(self):
+        a = self.a
+        ctl.abs(*self.pa)
+        ctl.sync()
+        src = a.wl.new_id('wl_data_source')
+        a.wl.request(a.mgr, 'create_data_source', src)
+        a.wl.request(src, 'offer', 'text/uri-list')
+        a.wl.request(a.dev, 'start_drag', src, self.wa.surface, 0, 12345)       # no button is down
+        a.wl.roundtrip()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 1.0))
+        ctl.button(BTN_LEFT, True)
+        ctl.button(BTN_LEFT, False)
+        press = a.wl.wait_for(lambda e: e.obj == a.ptr and e.name == 'button' and e.args[3] == 1, 2.0)
+        src2 = a.wl.new_id('wl_data_source')
+        a.wl.request(a.mgr, 'create_data_source', src2)
+        a.wl.request(a.dev, 'start_drag', src2, self.wa.surface, 0, press.args[0])    # the button is up again
+        a.wl.roundtrip()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src2 and e.name == 'cancelled', 1.0))
+
+    def test_the_source_going_away_ends_the_drag(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        enter, offer = self.over_b()
+        a.wl.request(src, 'destroy')
+        a.wl.roundtrip()
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == b.dev and e.name == 'leave', 2.0))
+        ctl.button(BTN_LEFT, False)
+        ctl.abs(*self.pa)
+        ctl.sync()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == a.ptr and e.name == 'enter', 2.0))
+
+    def test_the_target_closing_during_the_drag_is_harmless(self):
+        a, b = self.a, self.b
+        src = self.begin()
+        enter, offer = self.over_b()
+        b.wl.close()
+        time.sleep(0.2)
+        ctl.sync()
+        ctl.button(BTN_LEFT, False)
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+
+    def shape(self):
+        ctl.cmd('cursor')
+        return int(ctl.last.split('shape=')[1])
+
+    def test_the_icon_is_the_pointer_while_it_is_dragged(self):
+        ctl.cmd('abs 900 500')
+        ctl.sync()
+        self.assertEqual(self.shape(), 1)                           # LM_CURSOR_DEFAULT
+        self.begin(icon=True)
+        self.assertEqual(self.shape(), 3)                           # LM_CURSOR_SURFACE: the icon takes the pointer's place
+        ctl.button(BTN_LEFT, False)
+        ctl.sync()
+        self.assertEqual(self.shape(), 1)
+
+    def test_a_drag_over_its_own_window_works_too(self):
+        a = self.a
+        src = self.begin()
+        enter = a.wl.wait_for(lambda e: e.obj == a.dev and e.name == 'enter', 2.0)
+        self.assertIsNotNone(enter, 'the origin window gets the enter of its own drag')
+        ctl.button(BTN_LEFT, False)                                 # nobody accepted
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'cancelled', 2.0))
+
+
 class TestGadget(Base):
     """The desktop gadget: the clipboard history in a card of its own program (mellagui-gadget clipboard), a frameless window."""
     def rect(self, wait=3.0):
@@ -5579,6 +5810,137 @@ class TestClients(Base):
         self.assertTrue(os.path.exists(os.path.join(d, 'a.txt')), 'the one that could not be moved stays')
         self.assertTrue(os.path.exists(os.path.join(sub, 'p.ppm')))
         self.assertFalse(os.path.exists(os.path.join(d, 'p.ppm')))
+
+    def drag_target(self, w=200, h=120):
+        """A client with a window that accepts a text/uri-list drop (copy). Returns an object with .c .dev .win and .offers."""
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        c.ptr = c.wl.new_id('wl_pointer')
+        c.wl.request(seat, 'get_pointer', c.ptr)
+        mgr = c.wl.bind('wl_data_device_manager', 3)
+        c.dev = c.wl.new_id('wl_data_device')
+        c.wl.request(mgr, 'get_data_device', c.dev, seat)
+        c.win = Window(c, w, h, title='drop here')
+        c.wl.roundtrip()
+        return c
+
+    def files_drag_out(self, mark=()):
+        """Press the file manager's a.txt row (after marking the rows `mark` with Space), drag it onto another program and take the drop. Returns (folder, uri-list)."""
+        p, d = self.files_start()
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        t = self.drag_target(1000, 60)                          # (wide: pressing in the file manager raises it, the drop has to be on a part that sticks out)
+        tw = [w for w in ctl.windows()['windows'] if w['title'] == 'drop here'][0]
+        row_y = win['y'] + 52 + 18 * 2 + 9                      # the rows: .., sub, a.txt, blob.bin, p.ppm (the bars are above the panes: MELLAGUI_FILES_RAIL=0)
+        px = win['x'] + 6
+        drop = (tw['x'] + tw['w'] - 12, tw['y'] + 30)
+        self.assertGreater(drop[0], win['x'] + win['w'] + 6, 'no part of the target sticks out: %r %r' % (win, tw))
+        if mark:
+            ctl.click(px, row_y)                                # (the cursor on a.txt, then Space marks and goes on down)
+            for _ in range(mark[0]):
+                ctl.tap(KEY_SPACE)
+        ctl.abs(px, row_y)
+        ctl.sync()
+        ctl.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        ctl.cmd('motion 4 0')                                   # not yet a drag
+        ctl.cmd('motion 4 0')                                   # now it is (6 pixels or more)
+        time.sleep(0.4)                                         # (the file manager starts the drag when it sees the second motion)
+        ctl.cmd('abs %d %d' % drop)                             # over the other window
+        ctl.sync()
+        enter = t.wl.wait_for(lambda e: e.obj == t.dev and e.name == 'enter', 3.0)
+        self.assertIsNotNone(enter, 'the other program got no drag from the file manager')
+        offer = enter.args[4]
+        mimes = [e.args[0] for e in t.wl.queue if e.obj == offer and e.name == 'offer']
+        self.assertIn('text/uri-list', mimes)
+        self.assertIn('text/plain', mimes)
+        t.wl.request(offer, 'set_actions', 1, 1)
+        t.wl.request(offer, 'accept', enter.args[0], 'text/uri-list')
+        t.wl.roundtrip()
+        ctl.button(BTN_LEFT, False)
+        self.assertIsNotNone(t.wl.wait_for(lambda e: e.obj == t.dev and e.name == 'drop', 3.0), 'no drop')
+        r, wfd = os.pipe()
+        t.wl.request(offer, 'receive', 'text/uri-list', fds=(wfd,))
+        os.close(wfd)
+        data = b''
+        end = time.time() + 3.0
+        import select
+        while time.time() < end:
+            ready = select.select([r], [], [], 0.2)[0]
+            if ready:
+                chunk = os.read(r, 4096)
+                if not chunk:
+                    break
+                data += chunk
+        os.close(r)
+        t.wl.request(offer, 'finish')
+        t.wl.roundtrip()
+        return d, data
+
+    def test_files_drags_a_file_out_to_another_program(self):
+        d, data = self.files_drag_out()
+        self.assertEqual(data, ('file://%s/a.txt\r\n' % d).encode())
+
+    def test_files_drags_the_marked_files_when_a_marked_one_is_pressed(self):
+        d, data = self.files_drag_out(mark=(2,))                # a.txt and blob.bin marked, the press on a.txt
+        self.assertEqual(data, ('file://%s/a.txt\r\nfile://%s/blob.bin\r\n' % (d, d)).encode())
+
+    def test_files_register_desktop_makes_it_the_folder_program_and_keeps_a_choice(self):
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        h = tempfile.mkdtemp(prefix='files-reg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, h, ignore_errors=True)
+        env = dict(os.environ, HOME=h, XDG_DATA_HOME=os.path.join(h, 'data'), XDG_CONFIG_HOME=os.path.join(h, 'conf'))
+        self.assertEqual(subprocess.run([exe, '--register-desktop'], env=env, capture_output=True).returncode, 0)
+        desk = open(os.path.join(h, 'data', 'applications', 'mellagui-files.desktop')).read()
+        self.assertIn('MimeType=inode/directory;', desk)
+        self.assertIn('Exec=%s %%u' % os.path.realpath(exe), desk)
+        lst = os.path.join(h, 'conf', 'mimeapps.list')
+        self.assertIn('inode/directory=mellagui-files.desktop', open(lst).read())
+        subprocess.run([exe, '--register-desktop'], env=env, capture_output=True)       # twice: still one line
+        self.assertEqual(open(lst).read().count('inode/directory='), 1)
+        with open(lst, 'w') as f:                                                       # somebody else's choice stays
+            f.write('[Default Applications]\ntext/plain=gedit.desktop\ninode/directory=nautilus.desktop\n')
+        subprocess.run([exe, '--register-desktop'], env=env, capture_output=True)
+        self.assertIn('inode/directory=nautilus.desktop', open(lst).read())
+        self.assertNotIn('mellagui-files', open(lst).read())
+
+    def test_files_opens_the_folder_of_a_file_uri_with_the_file_chosen(self):
+        exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
+        edit = os.path.join(ROOT, 'build', 'mellagui-edit')
+        if not os.path.exists(exe) or not os.path.exists(edit):
+            self.skipTest('mellagui-files / mellagui-edit not built')
+        d = tempfile.mkdtemp(prefix='files uri-', dir=tmp)                              # (a blank in the name: it comes as %20)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for n in ('a.txt', 'b.txt'):
+            with open(os.path.join(d, n), 'w') as f:
+                f.write('x\n')
+        cfg = tempfile.mkdtemp(prefix='cfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        env = dict(os.environ, XDG_CONFIG_HOME=cfg, XDG_DATA_HOME=os.path.join(d, '.xdg'), HOME=d)
+        uri = 'file://' + os.path.join(d, 'b.txt').replace(' ', '%20')
+        p = subprocess.Popen([exe, uri], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        def cleanup():
+            for pid in os.listdir('/proc'):                                             # the editor it started is its child
+                if pid.isdigit():
+                    try:
+                        with open('/proc/%s/stat' % pid) as f:
+                            if int(f.read().rsplit(')', 1)[1].split()[1]) == p.pid:
+                                os.kill(int(pid), 9)
+                    except (OSError, ValueError, IndexError):
+                        pass
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+            time.sleep(0.2)
+        self.addCleanup(cleanup)
+        self.assertIsNotNone(wait_for_window('mellagui.files'))
+        self.wait_title('mellagui.files', os.path.basename(d) + ' - Files')
+        time.sleep(0.4)
+        ctl.tap(KEY_ENTER)                                                              # Enter on the chosen file opens it in the editor
+        win = wait_for_window('mellagui.edit', 6.0)
+        self.assertIsNotNone(win, 'b.txt was not the chosen file')
+        self.assertIn('b.txt', win['title'])
 
     def test_files_remembers_its_folders_and_the_preview(self):
         exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
@@ -12775,6 +13137,49 @@ class TestRecord(Base):
         w = [x for x in ctl.windows()['windows'] if x['title'] == 'test'][0]
         p = Image.open(png).convert('RGB').getpixel((w['x'] + w['w'] // 2, w['y'] + w['h'] // 2))
         self.assertTrue(p[0] > 200 and p[1] < 60 and p[2] > 200, 'the window is not in the last picture: %r' % (p,))
+
+    @staticmethod
+    def mp4_boxes(path):
+        """The top-level boxes of an MP4 file, in order."""
+        import struct
+        size = os.path.getsize(path)
+        boxes, pos = [], 0
+        with open(path, 'rb') as f:
+            while pos + 8 <= size:
+                f.seek(pos)
+                sz, t = struct.unpack('>I4s', f.read(8))
+                if sz == 1:
+                    sz = struct.unpack('>Q', f.read(8))[0]
+                if sz == 0:
+                    sz = size - pos
+                boxes.append(t.decode('latin1'))
+                if sz < 8:
+                    break
+                pos += sz
+        return boxes
+
+    def test_a_finished_recording_is_an_ordinary_mp4_that_websites_accept(self):
+        """Facebook says "invalid file format" to a fragmented MP4: when ffmpeg has finished the file it is copied into a plain one (index at the front)."""
+        if not self.have_x264():
+            self.skipTest('ffmpeg with libx264 not installed')
+        d = self.outdir()
+        r = subprocess.run([self.REC, '--start', '--duration', '2', '--dir', d, '--codec', 'ffmpeg', '--sound', 'none'], capture_output=True, text=True, timeout=40)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = r.stdout.strip()
+        boxes = self.mp4_boxes(path)
+        self.assertNotIn('moof', boxes, boxes)
+        self.assertEqual(boxes[:2], ['ftyp', 'moov'], boxes)                  # faststart: the index comes before the pictures
+        self.assertIn('mdat', boxes)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual([f for f in os.listdir(d)], [os.path.basename(path)], 'a temporary file was left behind')
+        info = self.probe(path)
+        self.assertEqual(info['codec_name'], 'h264')
+        self.assertTrue(1.2 <= float(info['duration']) <= 3.5, info)
+        d2 = self.outdir()                                                      # the old form can be asked for
+        r = subprocess.run([self.REC, '--start', '--duration', '2', '--dir', d2, '--codec', 'ffmpeg', '--sound', 'none'], capture_output=True, text=True, timeout=40,
+                           env=dict(os.environ, MELLAGUI_RECORD_FRAGMENTED='1'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('moof', self.mp4_boxes(r.stdout.strip()))
 
     def sound_rec(self, d, sound, **env):
         e = dict(os.environ, **env)

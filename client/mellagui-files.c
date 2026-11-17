@@ -282,7 +282,9 @@ struct app {
     char net_pending[PATH_MAX];         /* the network place that wants a login (P_NETUSER / P_NETPASS) ... */
     char net_user[64];                  /* ... the user name typed so far ... */
     int net_pane;                       /* ... and the pane that asked */
-    struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu) */
+    struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu), and the drag of files out */
+    bool drag_armed;                    /* a button went down on a file row: moving 6 pixels with it held starts a drag of the files ... */
+    int drag_pane, drag_row, drag_x, drag_y;    /* ... of this pane's row, pressed at this place */
     char msg[300];
     int64_t msg_until;
     int rows_visible;
@@ -6806,6 +6808,13 @@ static void click(struct app *a, uint32_t time_ms)
     p->last_click_ms = time_ms;
     p->last_click_row = row;
     select_row(a, row);
+    if (!is_net(p->cwd) && row_entry(p, row)) {                          /* a file or folder of this computer can be dragged out to another program */
+        a->drag_armed = true;
+        a->drag_pane = idx;
+        a->drag_row = row;
+        a->drag_x = x;
+        a->drag_y = y;
+    }
     if (dbl) {
         p->last_click_row = -1;
         open_selected(a);
@@ -6838,6 +6847,87 @@ static int row_under_pointer(struct app *a, bool *in_list)
     return row;
 }
 
+/* Appends `path` as a file: URI (percent-encoded) and a CR LF to `*buf`. */
+static bool uri_append(char **buf, size_t *len, size_t *cap, const char *path)
+{
+    size_t need = *len + 7 + strlen(path) * 3 + 3;
+    if (need > *cap) {
+        size_t ncap = LM_MAX(need, *cap * 2);
+        char *nb = realloc(*buf, ncap);
+        if (!nb)
+            return false;
+        *buf = nb;
+        *cap = ncap;
+    }
+    char *o = *buf + *len;
+    memcpy(o, "file://", 7);
+    o += 7;
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        if (isalnum(*p) || strchr("/-_.~", *p))
+            *o++ = (char)*p;
+        else
+            o += sprintf(o, "%%%02X", *p);
+    }
+    *o++ = '\r';
+    *o++ = '\n';
+    *len = (size_t)(o - *buf);
+    return true;
+}
+
+/* A file row was pressed and the pointer moved on with the button held: drag the marked files (if the pressed one is marked) or that one file out of the
+ * window - a browser's upload page, another file manager - as a text/uri-list. The compositor ends it with the button. */
+static void start_file_drag(struct app *a)
+{
+    a->drag_armed = false;
+    if (a->prompt != P_NONE || a->job || a->help || a->drag_pane < 0 || a->drag_pane > 1)
+        return;
+    struct pane *p = &a->pane[a->drag_pane];
+    const struct entry *pressed = row_entry(p, a->drag_row);
+    if (!pressed || is_net(p->cwd))
+        return;
+    char *uris = NULL, *text = NULL;
+    size_t ulen = 0, ucap = 0, tlen = 0, tcap = 0;
+    int count = 0;
+    const char *first = NULL;
+    bool take_marked = pressed->marked;
+    for (int i = 0; i < p->n && count < 500; i++) {
+        const struct entry *e = &p->e[i];
+        if (take_marked ? !e->marked : e != pressed)
+            continue;
+        char full[PATH_MAX];
+        join_path(p->cwd, e->name, full, sizeof(full));
+        if (!uri_append(&uris, &ulen, &ucap, full))
+            break;
+        size_t fl = strlen(full);
+        if (tlen + fl + 2 > tcap) {
+            size_t ncap = LM_MAX(tlen + fl + 2, tcap * 2);
+            char *nt = realloc(text, ncap);
+            if (!nt)
+                break;
+            text = nt;
+            tcap = ncap;
+        }
+        memcpy(text + tlen, full, fl);
+        tlen += fl;
+        text[tlen++] = '\n';
+        text[tlen] = 0;
+        if (!count)
+            first = e->name;
+        count++;
+    }
+    if (count > 0 && uris) {
+        char label[96];
+        if (count == 1)
+            snprintf(label, sizeof(label), "%s", first);
+        else
+            snprintf(label, sizeof(label), "%d files", count);
+        if (!wlclip_drag_files(&a->clip, uris, text, label))
+            msg(a, "This screen cannot drag files");
+    }
+    free(uris);
+    free(text);
+}
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -6849,6 +6939,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         break;
     case LM_WL_POINTER_EVT_LEAVE:
+        a->drag_armed = false;
         wlrail_release(&a->ran[0]);
         a->hover = -1;
         w->redraw = true;
@@ -6857,6 +6948,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
         a->hover = hover_at(a, a->px, a->py);
+        if (a->drag_armed) {
+            double dx = a->px - a->drag_x, dy = a->py - a->drag_y;
+            if (dx * dx + dy * dy >= 36.0) {
+                start_file_drag(a);
+                w->redraw = true;
+                break;
+            }
+        }
         for (int i = 0; i < 2; i++)
             if (a->pane[i].sb_drag)
                 scrollbar_drag(a, &a->pane[i], a->py);
@@ -6877,6 +6976,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         break;
     case LM_WL_POINTER_EVT_BUTTON:
         a->clip.serial = args[0].u;
+        a->clip.ptr_serial = args[0].u;
+        if (args[2].u == 272 && args[3].u == 0)
+            a->drag_armed = false;
         if (args[2].u == 273 && args[3].u == 1) {                       /* BTN_RIGHT while a text prompt is asking: Cut / Copy / Paste / Clear */
             if (a->prompt != P_NONE && !prompt_is_question(a->prompt) && a->prompt != P_NETPASS) {
                 a->menu_kind = 0;
@@ -7610,12 +7712,129 @@ static int selftest(void)
 
 /* ---- main ----------------------------------------------------------------------------------------------------------------- */
 
+/* "file:///a%20b/c" -> "/a b/c" (a plain path is copied as it is). */
+static void uri_to_path(const char *in, char *out, size_t n)
+{
+    if (strncmp(in, "file://", 7) != 0) {
+        snprintf(out, n, "%s", in);
+        return;
+    }
+    in += 7;
+    while (*in && *in != '/')                                           /* a host name ("localhost") */
+        in++;
+    size_t o = 0;
+    for (; *in && o + 1 < n; in++) {
+        if (in[0] == '%' && isxdigit((unsigned char)in[1]) && isxdigit((unsigned char)in[2])) {
+            char hex[3] = { in[1], in[2], 0 };
+            out[o++] = (char)strtol(hex, NULL, 16);
+            in += 2;
+        } else {
+            out[o++] = *in;
+        }
+    }
+    out[o] = 0;
+}
+
+/* --register-desktop: makes this the program that opens folders for the other programs (a browser's "Show in folder", xdg-open):
+ * a .desktop file in the user's applications folder and the default for inode/directory in mimeapps.list (an existing choice is kept). */
+static int register_desktop(void)
+{
+    char exe[PATH_MAX];
+    ssize_t k = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (k <= 0) {
+        fprintf(stderr, "mellagui-files: cannot tell where this program is\n");
+        return 1;
+    }
+    exe[k] = 0;
+    const char *home = getenv("HOME");
+    char data[PATH_MAX], conf[PATH_MAX], path[PATH_MAX + 64];
+    const char *xd = getenv("XDG_DATA_HOME"), *xc = getenv("XDG_CONFIG_HOME");
+    if (xd && *xd)
+        snprintf(data, sizeof(data), "%s", xd);
+    else
+        snprintf(data, sizeof(data), "%s/.local/share", home ? home : "");
+    if (xc && *xc)
+        snprintf(conf, sizeof(conf), "%s", xc);
+    else
+        snprintf(conf, sizeof(conf), "%s/.config", home ? home : "");
+    snprintf(path, sizeof(path), "%s/applications", data);
+    mkdir(data, 0700);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/applications/mellagui-files.desktop", data);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "mellagui-files: cannot write %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    fprintf(f, "[Desktop Entry]\nType=Application\nName=MellaGUI Files\nComment=Browse folders and files\nExec=%s %%u\nIcon=system-file-manager\n"
+               "Terminal=false\nCategories=System;FileManager;\nMimeType=inode/directory;\n", exe);
+    fclose(f);
+    printf("wrote %s\n", path);
+    mkdir(conf, 0700);
+    char list[PATH_MAX + 32];
+    snprintf(list, sizeof(list), "%s/mimeapps.list", conf);
+    char *old = NULL;
+    size_t olen = 0;
+    FILE *r = fopen(list, "r");
+    if (r) {
+        fseek(r, 0, SEEK_END);
+        long sz = ftell(r);
+        fseek(r, 0, SEEK_SET);
+        if (sz > 0 && sz < (1 << 20) && (old = malloc((size_t)sz + 1))) {
+            olen = fread(old, 1, (size_t)sz, r);
+            old[olen] = 0;
+        }
+        fclose(r);
+    }
+    if (old && strstr(old, "\ninode/directory=") ) {
+        printf("%s already names a folder program: left as it is\n", list);
+        free(old);
+        return 0;
+    }
+    char *out = malloc(olen + 128);
+    if (!out) {
+        free(old);
+        return 1;
+    }
+    out[0] = 0;
+    const char *hdr = old ? strstr(old, "[Default Applications]\n") : NULL;
+    const char *entry = "inode/directory=mellagui-files.desktop\n";
+    if (hdr) {                                                          /* put the line right under the section's header */
+        size_t upto = (size_t)(hdr - old) + strlen("[Default Applications]\n");
+        memcpy(out, old, upto);
+        strcpy(out + upto, entry);
+        strcat(out, old + upto);
+    } else {
+        if (old)
+            strcpy(out, old);
+        if (olen && old[olen - 1] != '\n')
+            strcat(out, "\n");
+        strcat(out, "[Default Applications]\n");
+        strcat(out, entry);
+    }
+    FILE *w = fopen(list, "w");
+    if (!w) {
+        fprintf(stderr, "mellagui-files: cannot write %s: %s\n", list, strerror(errno));
+        free(old);
+        free(out);
+        return 1;
+    }
+    fputs(out, w);
+    fclose(w);
+    printf("%s: inode/directory now opens in MellaGUI Files\n", list);
+    free(old);
+    free(out);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     if (getenv("MELLAGUI_ASKPASS"))                                     /* ssh asks for a password through SSH_ASKPASS, which names this program (sftp.h) */
         return sftp_askpass_main();
     lm_theme_load_env();
+    if (argc > 1 && !strcmp(argv[1], "--register-desktop"))
+        return register_desktop();
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     if (argc > 2 && !strcmp(argv[1], "--document-md")) {                /* a document / presentation as the Markdown the preview shows (tests, work on the converter) */
@@ -7744,7 +7963,7 @@ int main(int argc, char **argv)
         argc--;
     }
     if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
-        fprintf(stderr, "usage: mellagui-files [--bars] [DIR | --selftest]\n");
+        fprintf(stderr, "usage: mellagui-files [--bars] [DIR | FILE | file:///URI | --selftest | --register-desktop]\n");
         return 2;
     }
     signal(SIGCHLD, SIG_IGN);                                           /* the programs we start are nobody's business afterwards */
@@ -7767,10 +7986,24 @@ int main(int argc, char **argv)
     wlclip_attach(&a.clip, &a.win);
     char start[PATH_MAX], cwd[PATH_MAX];
     const char *home = getenv("HOME");
+    char select_name[NAME_MAX + 1] = "";
     if (argc == 2) {
         if (!getcwd(cwd, sizeof(cwd)))
             snprintf(cwd, sizeof(cwd), "/");
-        join_path(cwd, argv[1], start, sizeof(start));
+        char arg[PATH_MAX];
+        uri_to_path(argv[1], arg, sizeof(arg));                         /* (a browser's "Show in folder" hands over a file: URI) */
+        join_path(cwd, arg, start, sizeof(start));
+        struct stat ast;
+        if (!is_net(start) && stat(start, &ast) == 0 && !S_ISDIR(ast.st_mode)) {       /* a file: its folder, with the file chosen */
+            char *slash = strrchr(start, '/');
+            if (slash) {
+                snprintf(select_name, sizeof(select_name), "%s", slash + 1);
+                if (slash == start)
+                    slash[1] = 0;
+                else
+                    *slash = 0;
+            }
+        }
     } else {
         normalize(home && *home ? home : "/", start, sizeof(start));
     }
@@ -7787,7 +8020,7 @@ int main(int argc, char **argv)
     struct stat sst;
     if (restore && fs.dir[0][0] && stat(fs.dir[0], &sst) == 0 && S_ISDIR(sst.st_mode))
         snprintf(start, sizeof(start), "%s", fs.dir[0]);
-    if (!go_to(&a, &a.pane[0], start, NULL) && !go_to(&a, &a.pane[0], "/", NULL)) {
+    if (!go_to(&a, &a.pane[0], start, select_name[0] ? select_name : NULL) && !go_to(&a, &a.pane[0], "/", NULL)) {
         fprintf(stderr, "mellagui-files: cannot list %s\n", start);
         return 1;
     }

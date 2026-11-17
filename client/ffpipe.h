@@ -7,8 +7,9 @@
  * encoders.
  *
  * The pictures are written as they change (XRGB8888 = ffmpeg's "bgr0"); ffmpeg stamps each with the time it was read
- * (-use_wallclock_as_timestamps), so the file has a variable frame rate and a still screen costs nothing. The output is a fragmented
- * MP4 (a recording that is cut short, even by a crash, still plays), H.264 yuv420p tagged BT.709, which browsers play.
+ * (-use_wallclock_as_timestamps), so the file has a variable frame rate and a still screen costs nothing. While recording the output is a fragmented
+ * MP4 (a recording that is cut short, even by a crash, still plays); when it ends well ffpipe_finish copies it into an ordinary MP4 with the index
+ * at the front ("faststart", no new coding), because sites such as Facebook refuse a fragmented one ("invalid file format"). H.264 yuv420p tagged BT.709, which browsers play.
  *
  * Sound: ffmpeg itself opens the sound sources (`-f pulse`, which the PipeWire pulse server serves too), so the sound is stamped by the same wall clock
  * as the pictures and stays in step with them. Up to two sources (the computer's own sound = the monitor of the default output, and the microphone) are

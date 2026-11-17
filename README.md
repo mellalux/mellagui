@@ -81,7 +81,7 @@ program of the distribution and stay empty, dimmed or silent without it. Package
 | Network drives in the file manager (`smb://`) | `smbclient` | `smbclient` | an error message when connecting |
 | SSH servers in the file manager (`sftp://`) | `openssh-client` | `sftp` | an error message when connecting |
 | Smart home (Smart Life / Tuya) | `curl` | `curl` | no login, no devices |
-| Opening found files of unknown types (launcher search) | `xdg-utils` | `xdg-open` | nothing happens |
+| **Opening folders, links and files for other programs**: a browser's "Show in folder" after a download (snap Firefox / Chromium go through snapd's `xdg-open` to the host's), links and files opened from MellaGUI's editor / viewer / archiver, files found by the launcher search | `xdg-utils` (then run `mellagui-files --register-desktop` once, see below); for snap browsers also `zenity` | `xdg-open`, `zenity` | nothing happens |
 | Monitor settings (brightness, input ... over DDC/CI) | kernel module `i2c-dev`, access to `/dev/i2c-*` (group `i2c`) | | only a laptop's backlight |
 | Camera | - (V4L2, `/dev/video*`, group `video`) | | |
 | Tests | `python3`; some need `ffmpeg`, `curl`, `python3-cryptography`, `python3-pil` | | those tests are skipped |
@@ -92,6 +92,18 @@ Everything at once:
                      bluez libspa-0.2-bluetooth network-manager \
                      libegl1 libgles2 libgbm1 libgl1-mesa-dri \
                      ffmpeg smbclient openssh-client curl xdg-utils fonts-dejavu-core
+
+`xdg-utils` is the one that is easy to miss (a minimal Ubuntu install does not have it): without it a browser's **"Show in folder"** /
+"Open containing folder" and every link or file MellaGUI's own programs hand to `xdg-open` silently do nothing. After installing it, make
+MellaGUI Files the program that opens folders (once per user, writes only `~/.local/share/applications/mellagui-files.desktop` and, when
+no choice is made yet, `inode/directory` in `~/.config/mimeapps.list`):
+
+    sudo apt install xdg-utils zenity
+    build/mellagui-files --register-desktop
+
+`zenity` is for the **snap** browsers (Ubuntu's default Firefox and Chromium): snapd asks "Allow this snap to open ...?" before it lets a
+snap open a file or folder on the host, and without `zenity` (or `kdialog`) it cannot show that question and fails with
+`user-open error: cannot create a UI: please install zenity or kdialog`. With it, "Show in folder" shows that question once per click.
 
 The sound server must run in the user's session (`systemctl --user enable --now pipewire pipewire-pulse wireplumber`), and
 `bluetooth` / `NetworkManager` as system services (`sudo systemctl enable --now bluetooth NetworkManager`).
@@ -286,6 +298,7 @@ The control socket takes one line per command (`dump <file.ppm>`, `windows`, `ke
   same width and the native shape (CVT reduced blanking, e.g. 2048x864) and logs it; if the kernel refuses it, the preferred mode is
   used. `--mode WxH[@Hz]` forces a size, `--mode preferred` turns the correction off; the Display page of the settings panel changes it
   while running.
+* A browser's "Show in folder" (after a download) or a link in MellaGUI's own programs does nothing – `xdg-utils` is missing (`which xdg-open`): `sudo apt install xdg-utils zenity`, then `build/mellagui-files --register-desktop` so that folders open in MellaGUI Files. Snap browsers (check with `snap run --shell chromium -c 'xdg-open /home'`: `cannot create a UI: please install zenity or kdialog` means `sudo apt install zenity`) (Ubuntu's default Firefox, Chromium) cannot call a file manager themselves; they go through snapd to the host's `xdg-open`.
 * Graphics-accelerated apps show nothing – they need `linux-dmabuf` (offered when a render node `/dev/dri/renderD*` exists; `--no-dmabuf` turns it off) or a software renderer; see Status.
 
 Architecture notes for developers: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [CLAUDE.md](CLAUDE.md).

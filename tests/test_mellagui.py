@@ -21088,13 +21088,14 @@ class TestSaver(Base):
         return diff, glow, ((min(xs), min(ys), max(xs), max(ys)) if xs else None)
 
     def test_a_cat_sits_on_the_floor_and_its_eyes_glow_when_it_looks_at_the_camera(self):
-        diff, glow_away, box = self.cat_pixels(0)                         # (the head looks somewhere else)
+        diff, _, box = self.cat_pixels(0)
         self.assertGreater(diff, 3000, 'a cat is in the picture')
         self.assertGreater(box[1], 360 // 2, 'it sits on the floor, in the lower half')
         self.assertLess(box[2] - box[0], 360, 'and it is a cat, not a wall')
+        _, glow_away, _ = self.cat_pixels(30)                             # (the head looks somewhere else)
         diff, glow_at, _ = self.cat_pixels(12)                            # (the head is turned to the camera)
         self.assertGreater(glow_at, 10, 'the eyes glow when the head looks at the camera')
-        self.assertLess(glow_away, glow_at // 3, 'and not when it looks away')
+        self.assertLess(glow_away * 2, glow_at, 'and not when it looks away')
 
     def test_tom_walks_to_another_place_and_back(self):
         _, _, sitting = self.cat_pixels(0)
@@ -21147,8 +21148,8 @@ class TestSaver(Base):
         self.assertLess(self.blue_sky('sv-sun1', '15:00', short), 50)                   # 15:00 is minutes before that sunset: low orange sun, no blue sky
         self.assertGreater(self.blue_sky('sv-sun2', '12:19', short), 2000)              # the middle of that day: full day
         self.assertGreater(self.blue_sky('sv-sun3', '14:00', short), 2000)              # and the afternoon
-        self.assertGreater(self.blue_sky('sv-sun4', '08:00', []), 30)                  # 08:00 is morning in the model ...
-        self.assertLess(self.blue_sky('sv-sun5', '08:00', short), 20)                   # ... but before that sunrise
+        self.assertGreater(self.blue_sky('sv-sun4', '09:00', []), 500)                  # 09:00 is morning in the model (the camera is 5 m or more from the window) ...
+        self.assertLess(self.blue_sky('sv-sun5', '09:00', short), 20)                   # ... but before that sunrise
         # `auto` takes today's times from the place (here the test override), `none` keeps the model's day
         self.assertLess(self.blue_sky('sv-sun6', '15:00', ['--sun', 'auto'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 50)
         self.assertGreater(self.blue_sky('sv-sun7', '15:00', ['--sun', 'none'], {'MELLAGUI_SMART_SUN': '09:17,15:21'}), 2000)

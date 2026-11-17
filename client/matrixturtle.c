@@ -107,12 +107,12 @@ void mturtle_set_seed(uint32_t seed)
 static void swim_base(float t, float p[3])
 {
     phases();
-    float th = 0.19f * t + 0.5f * sinf(0.071f * t + g_ph[0]);
+    float th = 0.09f * t + 0.25f * sinf(0.037f * t + g_ph[0]);
     float rr = 1.0f + 0.15f * sinf(2.0f * th + g_ph[1]) + 0.06f * sinf(3.0f * th + g_ph[2]);
     float a = g_dir * th + g_ph[3];
-    float cx = 0.40f * sinf(0.043f * t + g_ph[4]), cz = 3.65f + 0.30f * sinf(0.031f * t + g_ph[5]);
-    p[0] = cx + 1.60f * rr * cosf(a);
-    p[2] = cz + 1.00f * rr * sinf(a);
+    float cx = 0.50f * sinf(0.043f * t + g_ph[4]), cz = 0.10f + 0.45f * sinf(0.031f * t + g_ph[5]);
+    p[0] = cx + 2.40f * rr * cosf(a);
+    p[2] = cz + 3.60f * rr * sinf(a);                                    /* the loop reaches the whole length of the room */
     p[1] = 1.68f + 0.26f * sinf(0.17f * t + g_ph[6]) + 0.09f * sinf(0.43f * t + g_ph[7]);
 }
 
@@ -153,10 +153,10 @@ static void slot_make(int k, struct slot *s)
             n = 220;
         for (int i = 0; i < n; i++)
             mturtle_tom_centre(s->w0 + 0.25f * (float)i, tx[i]);
-        uint32_t start = hk % 28u;
-        for (uint32_t c = 0; c < 28u; c++) {
-            uint32_t idx = (start + c * 11u) % 28u;
-            float x = -2.1f + 0.7f * (float)(idx % 7u), z = 3.2f + 0.633f * (float)(idx / 7u);
+        uint32_t start = hk % 72u;
+        for (uint32_t c = 0; c < 72u; c++) {
+            uint32_t idx = (start + c * 11u) % 72u;
+            float x = -3.0f + 0.75f * (float)(idx % 9u), z = -4.6f + 1.4f * (float)(idx / 9u);          /* (the whole floor) */
             bool ok = true;
             for (int i = 0; i < n && ok; i++) {                          /* the whole way down, the rest and the way up stay clear of Tom (the swim loop is a pure function too) */
                 float ti = s->w0 + 0.25f * (float)i, u = ti - s->w0, r = u < DESC ? sat(u / DESC) : u < DESC + s->d ? 1.0f : 1.0f - sat((u - DESC - s->d) / ASC);
@@ -275,9 +275,9 @@ void mturtle_where(float t, float out[3])
     float lie = sstep(0.9f, 1.0f, rs.active ? rs.r : 0.0f);               /* lying: not pushed about by Tom (the spot was chosen to be far from him) */
     for (int i = 0; i < 3; i++)
         p[i] = mixf(p[i], q[i], lie);
-    out[0] = clampf(p[0], -2.40f, 2.40f);
+    out[0] = clampf(p[0], -3.40f, 3.40f);
     out[1] = clampf(p[1], rs.active ? 0.05f : 1.00f, 2.55f);
-    out[2] = clampf(p[2], 1.95f, 5.25f);
+    out[2] = clampf(p[2], -5.0f, 5.25f);
 }
 
 /* ---- building the turtle ------------------------------------------------------------------------------------------------------- */
@@ -555,19 +555,50 @@ static int shell_map(float x, float z)
     return fabsf(fmodf(d1, 0.24f) - 0.12f) < 0.030f && d1 > 0.12f ? 2 : 0;
 }
 
-/* The plastron's dark seams. */
-static bool plastron_seam(float x, float z)
+/* The plastron's dark pattern (drawn from the exact point, so thin lines stay thin inside the letters), as a map turtle has it: the plastron is cream-yellow and the dark pigment follows the SEAMS between its shields - a thin line along
+ * each seam (the midline, and the transverse ones between gulars / humerals / pectorals / abdominals / femorals / anals, which wander a little), with fingers and
+ * smudges that thin out away from the line - and a dark spot at every seam of the small marginal shields at the rim. (x, z) is the point in the turtle's
+ * frame. Returns 0 = cream, 1 = dark. */
+static float hash01(uint32_t a, uint32_t b) { return (float)(h32(a * 2246822519u + b * 3266489917u + 0x9e3779b9u) & 1023u) / 1023.0f; }
+
+static int plastron_dark(float x, float z)
 {
-    float u = x / SHELL_A, v = z / SHELL_B;
-    if (u * u + v * v > 0.86f)
-        return true;
-    if (fabsf(u) < 0.07f && fabsf(v) < 0.80f)
-        return true;
-    static const float zs[4] = { 0.50f, 0.18f, -0.14f, -0.46f };
-    for (int i = 0; i < 4; i++)
-        if (fabsf(v - zs[i]) < 0.05f)
-            return true;
-    return false;
+    float u = x / SHELL_A, v = z / SHELL_B, rho = sqrtf(u * u + v * v), au = fabsf(u);
+    if (rho > 0.97f)
+        return 0;                                                        /* the very edge is pale */
+    if (rho > 0.86f) {                                                   /* the marginals seen from below: a small dark spot at each seam between two of them */
+        float ang = atan2f(au, -v) * (12.0f / 3.14159265f);
+        return fabsf(ang - floorf(ang + 0.5f)) < 0.13f && rho > 0.88f && rho < 0.945f;
+    }
+    /* the midline between the left and the right shields: thin, wandering, with short fingers running out sideways */
+    if (fabsf(v) < 0.80f) {
+        float wander = 0.030f * sinf(v * 11.0f + 0.6f) + 0.018f * sinf(v * 29.0f + 1.0f);
+        if (fabsf(u - wander) < 0.016f + 0.008f * sinf(v * 37.0f))
+            return 1;
+        float cell = floorf(v / 0.07f), c = (cell + 0.5f) * 0.07f;
+        float len = (hash01((uint32_t)(int)cell, 7u) < 0.7f) ? 0.04f + 0.16f * hash01((uint32_t)(int)cell, 8u) : 0.0f;
+        float du = fabsf(u - wander), slope = hash01((uint32_t)(int)cell, 9u) * 0.9f - 0.45f;
+        if (du < len && fabsf(v - c - slope * du) < 0.012f * (1.0f - du / len) + 0.003f)      /* (a finger slants and tapers) */
+            return 1;
+    }
+    /* the transverse seams: each one a thin zigzag across, with fingers running forwards and back off it */
+    static const float zs[5] = { 0.60f, 0.36f, 0.02f, -0.34f, -0.60f };
+    for (int i = 0; i < 5; i++) {
+        float len = i == 2 ? 0.88f : 0.74f;
+        if (au > len)
+            continue;
+        float vz = zs[i] + 0.06f * au + 0.022f * sinf(au * 23.0f + (float)i * 1.9f) + 0.012f * sinf(au * 51.0f + (float)i);
+        if (fabsf(v - vz) < 0.014f + 0.008f * sinf(au * 41.0f + (float)i))
+            return 1;
+        float cell = floorf(au / 0.075f), c = (cell + 0.5f) * 0.075f;
+        float r = hash01((uint32_t)(int)cell + 31u * (uint32_t)i, 3u);
+        float fl = r < 0.65f ? 0.03f + 0.15f * hash01((uint32_t)(int)cell + 31u * (uint32_t)i, 4u) : 0.0f;
+        float dir = hash01((uint32_t)(int)cell + 31u * (uint32_t)i, 5u) < 0.5f ? -1.0f : 1.0f;
+        float dv = (v - vz) * dir, slope = hash01((uint32_t)(int)cell + 31u * (uint32_t)i, 6u) * 1.2f - 0.6f;
+        if (dv > 0.0f && dv < fl && fabsf(au - c - slope * dv) < 0.012f * (1.0f - dv / fl) + 0.003f)
+            return 1;
+    }
+    return 0;
 }
 
 /* The colour of a point of the turtle (letters, light): `part` it is on, qu the point on the unit sphere of its ellipsoid, nw the normal in the world, pt the point in
@@ -604,8 +635,8 @@ static void shade_hit(const struct mturtle *m, int part, int pi, const float qu[
         break;
     }
     case P_PLASTRON:
-        if (plastron_seam(cx, cz)) { col[0] = 0.40f; col[1] = 0.24f; col[2] = 0.07f; }
-        else { col[0] = 0.98f; col[1] = 0.86f; col[2] = 0.44f; gain = 1.05f; }
+        if (plastron_dark(pt[0], pt[2])) { col[0] = 0.34f; col[1] = 0.22f; col[2] = 0.06f; gain = 0.95f; }
+        else { col[0] = 0.98f; col[1] = 0.88f; col[2] = 0.48f; gain = 1.05f; }
         break;
     case P_KNOB:
         col[0] = mixf(0.18f, 0.62f, sat(qu[1] * 1.6f)); col[1] = mixf(0.14f, 0.52f, sat(qu[1] * 1.6f)); col[2] = 0.06f; gain = 0.8f;

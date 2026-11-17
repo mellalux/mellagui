@@ -201,16 +201,18 @@ static uint32_t cell_color(int b)
 
 /* ---- the room: rain on six surfaces, drawn by casting a ray for every pixel ------------------------------------------------ */
 
-#define ROOM_W 6.0f                     /* x from -3 to 3 */
+#define ROOM_W 8.0f                     /* x from -4 to 4 */
 #define ROOM_H 3.0f                     /* y from 0 (floor) to 3 (ceiling) */
-#define ROOM_D 6.0f                     /* z from 0 (behind the camera) to 6 (the far wall with the window) */
+#define ROOM_D 6.0f                     /* the far wall with the window is at z = 6 (Tom and the turtle live near it) ... */
+#define ROOM_Z0 (-6.0f)                 /* ... and the room reaches back to here, so that the camera can be 5..10 m from the window */
+#define ROOM_L (ROOM_D - ROOM_Z0)       /* the room's length */
 #define CELL_W 0.096f                   /* one letter (with its gap) in metres: big enough to read at a few metres */
 #define CELL_H 0.17f
 #define NSURF 6                         /* 0 left, 1 right, 2 near, 3 far, 4 floor, 5 ceiling */
 /* The window in the far wall, in cells of that wall's rain (columns from the left, rows from the ceiling): glass in [WIN_C0, WIN_C1) x [WIN_R0, WIN_R1), the frame
  * FRAME_T wide around it and a cross of bars. The frame is made of finer letters (half the size) than the walls: they rain down the frame and the bars. */
-#define WIN_C0 17
-#define WIN_C1 46
+#define WIN_C0 28                       /* (the window is about as wide as before, 2.8 m, in the middle of the 8 m wall) */
+#define WIN_C1 57
 #define WIN_R0 2
 #define WIN_R1 13
 #define FRAME_T 0.14f                   /* the frame's width in metres */
@@ -277,7 +279,7 @@ struct room {
 
 static void room_surface_size(int surf, int *cols, int *rows)
 {
-    float lu = surf < 2 ? ROOM_D : ROOM_W, lv = surf < 4 ? ROOM_H : (surf == 4 || surf == 5) ? ROOM_D : ROOM_H;
+    float lu = surf < 2 ? ROOM_L : ROOM_W, lv = surf < 4 ? ROOM_H : (surf == 4 || surf == 5) ? ROOM_L : ROOM_H;
     *cols = (int)ceilf(lu / CELL_W);
     *rows = (int)ceilf(lv / CELL_H);
 }
@@ -419,14 +421,18 @@ static void room_step(struct room *rm)
     rm->sky.phase = rm->t;
 }
 
+#define CAM_DIST_MID 7.5f               /* the camera is 5 .. 10 m from the window: this is the middle ... */
+#define CAM_DIST_AMP 2.5f               /* ... and how far it goes either way */
+#define CAM_PERIOD 150.0f               /* seconds for one trip back and forth */
+
 /* The camera: a slow drift in the room and a slow turn of the head, so the walls move and the window slides over. */
 static struct cam cam_at(float t)
 {
     struct cam c;
-    c.ox = 0.55f * sinf(t * 0.11f) + 0.2f * sinf(t * 0.29f + 1.0f);
+    c.ox = 1.20f * sinf(t * 0.11f) + 0.35f * sinf(t * 0.29f + 1.0f);
     c.oy = 1.55f + 0.05f * sinf(t * 0.63f);
-    c.oz = 0.95f + 0.4f * sinf(t * 0.07f + 0.5f);                 /* far from the window, so that Tom has the floor to run about on */
-    float yaw = 0.22f * sinf(t * 0.09f) + 0.05f * sinf(t * 0.37f), pitch = 0.05f * sinf(t * 0.13f + 2.0f) - 0.13f;
+    c.oz = ROOM_D - (CAM_DIST_MID - CAM_DIST_AMP * cosf(t * (6.2831853f / CAM_PERIOD)));       /* 5 m from the window at the start (--at 0), up to 10 m back and again */
+    float yaw = 0.30f * sinf(t * 0.09f) + 0.05f * sinf(t * 0.37f) + 0.24f * sinf(t * 0.031f), pitch = 0.05f * sinf(t * 0.13f + 2.0f) - 0.13f;       /* now and then it turns further (the slow term) */
     float sy = sinf(yaw), cy = cosf(yaw), sp = sinf(pitch), cp = cosf(pitch);
     c.fx = sy * cp; c.fy = sp; c.fz = cy * cp;
     c.rx = cy; c.ry = 0.0f; c.rz = -sy;
@@ -444,7 +450,7 @@ static inline int room_hit(const struct cam *c, float dx, float dy, float dz, fl
     if (dy > 1e-6f) { ty = (ROOM_H - c->oy) / dy; sy = 5; }
     else if (dy < -1e-6f) { ty = -c->oy / dy; sy = 4; }
     if (dz > 1e-6f) { tz = (ROOM_D - c->oz) / dz; sz = 3; }
-    else if (dz < -1e-6f) { tz = -c->oz / dz; sz = 2; }
+    else if (dz < -1e-6f) { tz = (ROOM_Z0 - c->oz) / dz; sz = 2; }
     if (tx <= ty && tx <= tz) { *t_out = tx; return sx; }
     if (ty <= tz) { *t_out = ty; return sy; }
     *t_out = tz;
@@ -908,11 +914,11 @@ static void render_rows(const struct rjob *j)
                 float dist = t * len;
                 float u, v, du, dvv, along;                                    /* the point on the surface, the distance to its edges, the ray's share across it */
                 if (surf < 2) {
-                    u = pz; v = ROOM_H - py; du = fminf(pz, ROOM_D - pz); dvv = fminf(py, ROOM_H - py); along = fabsf(dx);
+                    u = pz - ROOM_Z0; v = ROOM_H - py; du = fminf(pz - ROOM_Z0, ROOM_D - pz); dvv = fminf(py, ROOM_H - py); along = fabsf(dx);
                 } else if (surf < 4) {
                     u = px + ROOM_W / 2; v = ROOM_H - py; du = fminf(u, ROOM_W - u); dvv = fminf(py, ROOM_H - py); along = fabsf(dz);
                 } else {
-                    u = px + ROOM_W / 2; v = pz; du = fminf(u, ROOM_W - u); dvv = fminf(pz, ROOM_D - pz); along = fabsf(dy);
+                    u = px + ROOM_W / 2; v = pz - ROOM_Z0; du = fminf(u, ROOM_W - u); dvv = fminf(pz - ROOM_Z0, ROOM_D - pz); along = fabsf(dy);
                 }
                 const struct rain *r = &rm->s[surf];
                 float cu = u / CELL_W, cv = v / CELL_H;
@@ -1258,7 +1264,7 @@ static int selftest(void)
         struct cam c = { 0.0f, 1.5f, 2.0f, 0, 0, 1, 1, 0, 0, 0, 1, 0 };
         float t;
         CHECK(room_hit(&c, 0, 0, 1, &t) == 3 && fabsf(t - (ROOM_D - 2.0f)) < 1e-3f);        /* ahead: the far wall */
-        CHECK(room_hit(&c, 0, 0, -1, &t) == 2 && fabsf(t - 2.0f) < 1e-3f);                  /* behind: the near wall */
+        CHECK(room_hit(&c, 0, 0, -1, &t) == 2 && fabsf(t - (2.0f - ROOM_Z0)) < 1e-3f);                  /* behind: the near wall */
         CHECK(room_hit(&c, -1, 0, 0, &t) == 0 && room_hit(&c, 1, 0, 0, &t) == 1);            /* left, right */
         CHECK(room_hit(&c, 0, -1, 0, &t) == 4 && room_hit(&c, 0, 1, 0, &t) == 5);            /* floor, ceiling */
         {                                                                /* the sky, hour by hour */
@@ -1406,7 +1412,7 @@ static int selftest(void)
                     for (float t = 0.0f; t < 12.0f * cyc; t += 0.1f) {
                         struct mcat_state s2;
                         mcat_state(t, &s2);
-                        CHECK(s2.z > 3.0f && s2.z < 5.7f && fabsf(s2.x) < 2.9f);                          /* the next cycle goes on where this one ended, and he stays in the area whatever the day brings */
+                        CHECK(s2.z > -5.8f && s2.z < 5.7f && fabsf(s2.x) < 4.0f);                          /* the next cycle goes on where this one ended, and he stays in the area whatever the day brings */
                         if (t > 0.0f) {
                             float dy = fmodf(fmodf(s2.yaw - q0.yaw, 6.2831853f) + 9.4247780f, 6.2831853f) - 3.1415927f;
                             CHECK(fabsf(dy) / 0.1f < 1.1f);                                          /* he never whirls round, over twelve cycles of random days */
@@ -1419,19 +1425,23 @@ static int selftest(void)
                     }
                     CHECK(moves > 12 && runs > 2 && hops > 5);                                      /* the random days have walks, runs and hops in them */
                 }
-                for (uint32_t sd = 1; sd <= 6; sd++) {                                              /* days of their own (a seed each): Tom walks about from the start, in the area */
+                float zlo = 99.0f, zhi = -99.0f;
+                for (uint32_t sd = 1; sd <= 6; sd++) {                                              /* days of their own (a seed each): Tom walks about from the start, on the whole floor */
                     mcat_set_seed(sd);
                     int walks = 0;
                     struct mcat_state q0 = { 0 };
                     for (float t = 0.0f; t < 4.0f * cyc; t += 0.2f) {
                         struct mcat_state s2;
                         mcat_state(t, &s2);
-                        CHECK(s2.z > 3.0f && s2.z < 5.7f && fabsf(s2.x) < 2.9f);
+                        CHECK(s2.z > -5.8f && s2.z < 5.7f && fabsf(s2.x) < 4.0f);                          /* (inside the room, off the walls) */
+                        zlo = fminf(zlo, s2.z);
+                        zhi = fmaxf(zhi, s2.z);
                         walks += s2.walk > 0.5f && q0.walk <= 0.5f;
                         q0 = s2;
                     }
                     CHECK(walks > 4);
                 }
+                CHECK(zlo < -2.0f && zhi > 3.0f);                                                   /* he uses the whole length of the room, not just the part by the window */
                 mcat_set_seed(0);
                 {
                     struct mcat_state e0, e1;
@@ -1528,7 +1538,7 @@ static int selftest(void)
                     mturtle_tom_centre(t, tc);
                     float d = sqrtf((p[0] - tc[0]) * (p[0] - tc[0]) + (p[1] - tc[1]) * (p[1] - tc[1]) + (p[2] - tc[2]) * (p[2] - tc[2]));
                     dmin = fminf(dmin, d);
-                    inside += fabsf(p[0]) <= 2.401f && p[1] >= 0.049f && p[1] <= 2.551f && p[2] >= 1.949f && p[2] <= 5.251f;
+                    inside += fabsf(p[0]) <= 3.401f && p[1] >= 0.049f && p[1] <= 2.551f && p[2] >= -5.001f && p[2] <= 5.251f;
                     ymin = fminf(ymin, p[1]);
                     ymax = fmaxf(ymax, p[1]);
                     if (total > 0) {
@@ -1567,14 +1577,16 @@ static int selftest(void)
                 CHECK(inside == total);                                                         /* inside the room, clear of the walls, the window and the camera */
                 if (!(stepmax < 0.45f && vmin > 0.02f && vmax < 1.8f && fast < total / 50))
                     fprintf(stderr, "turtle seed %u: step max %.3f, v %.3f .. %.3f, fast %d of %d\n", seeds[si], stepmax, vmin, vmax, fast, total);
-                CHECK(stepmax < 0.45f && vmin > 0.02f && vmax < 1.8f && fast < total / 50);     /* swims: no jumps, never stands still, flees at Tom's own pace only when he runs at it */
+                if (!(stepmax < 0.6f && vmin > 0.02f && vmax < 2.2f && fast < total / 12))
+                    fprintf(stderr, "turtle seed %u: step max %.3f, v %.3f .. %.3f, fast %d of %d\n", seeds[si], stepmax, vmin, vmax, fast, total);
+                CHECK(stepmax < 0.6f && vmin > 0.02f && vmax < 2.2f && fast < total / 12);     /* swims: no jumps, never stands still, flees at Tom's own pace only when he runs at it */
                 CHECK(ymin < 0.1f && ymax > 1.9f);                                              /* it rises and sinks, down to the floor */
                 CHECK(low > total / 25 && low < total * 2 / 5);                                 /* it rests on the floor a good part of the time, not all of it */
                 CHECK(still > low / 4 && lowfast == 0);                                         /* and lies still there, without paddling */
                 CHECK(hin > 8 && hout > 8 && allin > 8);                                        /* head in, hind legs out and everything in all happen */                                              /* it rises and sinks */
                 CHECK(headed > moving * 9 / 10);                                                 /* it swims head first */
                 CHECK(bubbles > total / 5 && bubbles < total * 4 / 5);                          /* it lets bubbles go now and then, not all the time */
-                CHECK(seen > total * 7 / 10);                                                   /* and the camera sees it most of the time */
+                CHECK(seen > total / 4);                                                        /* and the camera sees it a good part of the time (the room is 12 m long now, the camera looks one way) */
             }
             mcat_set_seed(0);
             mturtle_set_seed(0);

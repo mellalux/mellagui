@@ -34,12 +34,14 @@
 #include <limits.h>
 #include <math.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/file.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -142,6 +144,10 @@ struct app {
     int vhover, vpress;                 /* the video button under the pointer / pressed: 0 none, else index + 1 */
     uint64_t pos_ms;                    /* where the video is (paused), or where it was when playing (re)started */
     uint64_t play_t0;                   /* lm_now_ms() when it (re)started */
+    pid_t pj_pid;                       /* the child that makes the poster of a video of the strip (`mellagui-view --poster`), 0 = none */
+    uint64_t pj_t0;
+    char pj_name[PATH_MAX + 300];       /* the file name (as in names[]) it is for */
+    char pj_out[PATH_MAX];
     struct vthumb *thm;                 /* the small pictures, one per name */
     int thn;
     bool thumbs_on;                     /* T: the strip shows */
@@ -320,8 +326,10 @@ static void th_from_image(struct app *a, int i, const struct lm_image *im)
 /* Makes the small copy of one file by reading it (a picture; a video or a sound file keeps a tile with a mark). */
 static void th_make(struct app *a, int i)
 {
+    if (is_video_name(a->names[i]))                             /* (a video's poster is made by a child: poster_step) */
+        return;
     a->thm[i].tried = true;
-    if (is_video_name(a->names[i]) || is_audio_name(a->names[i]))
+    if (is_audio_name(a->names[i]))
         return;
     char path[PATH_MAX + 300], err[120];
     struct lm_image im = { 0 };
@@ -332,18 +340,93 @@ static void th_make(struct app *a, int i)
 }
 
 /* One small picture of the ones in view per turn of the loop (a big JPEG takes a moment): true while there may be more. */
+/* The poster of a video of the strip: a child process runs `mellagui-view --poster FILE OUT.ppm` (our own readers, else ffmpeg: it takes a moment, so
+ * the loop never waits for it); one at a time, the current file first, then the ones in view. $MELLAGUI_VIEW_POSTER = another program, "none" = no
+ * posters (the strip keeps the tile). True while a child is working. */
+static bool poster_step(struct app *a)
+{
+    if (a->pj_pid) {
+        int st;
+        pid_t r = waitpid(a->pj_pid, &st, WNOHANG);
+        bool done = r == a->pj_pid, dead = r < 0;
+        if (!done && !dead && lm_now_ms() - a->pj_t0 > 12000) {
+            kill(a->pj_pid, SIGKILL);
+            waitpid(a->pj_pid, &st, 0);
+            dead = true;
+        }
+        if (!done && !dead)
+            return true;
+        for (int i = 0; i < a->thn; i++)
+            if (!strcmp(a->names[i], a->pj_name)) {                     /* (the list may have changed meanwhile: then the poster is not wanted) */
+                struct lm_image im = { 0 };
+                char err[120];
+                if (done && WIFEXITED(st) && WEXITSTATUS(st) == 0 && lm_img_load(a->pj_out, &im, err, sizeof(err)) == 0)
+                    th_from_image(a, i, &im);
+                lm_img_free(&im);
+                a->thm[i].tried = true;
+                break;
+            }
+        unlink(a->pj_out);
+        a->pj_pid = 0;
+        a->win.redraw = true;
+        return false;
+    }
+    if (!strip_h(a) || !a->thm)
+        return false;
+    const char *v = getenv("MELLAGUI_VIEW_POSTER");
+    int first = LM_MAX((int)(a->strip_x / TS_PITCH), 0), last = LM_MIN((int)((a->strip_x + strip_vis_w(a)) / TS_PITCH) + 1, a->thn - 1);
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = pass == 0 ? a->cur : first; i >= 0 && i <= (pass == 0 ? a->cur : last) && i < a->thn; i++) {
+            if (a->thm[i].tried || a->thm[i].px || !is_video_name(a->names[i]))
+                continue;
+            if (v && !strcmp(v, "none")) {
+                a->thm[i].tried = true;
+                continue;
+            }
+            char in[PATH_MAX + 300];
+            snprintf(in, sizeof(in), "%s/%s", a->dir, a->names[i]);
+            snprintf(a->pj_name, sizeof(a->pj_name), "%s", a->names[i]);
+            const char *rt = getenv("XDG_RUNTIME_DIR");
+            snprintf(a->pj_out, sizeof(a->pj_out), "%s/mellagui-view-poster-%d.ppm", rt && *rt ? rt : "/tmp", (int)getpid());
+            pid_t pid = fork();
+            if (pid < 0) {
+                a->thm[i].tried = true;
+                continue;
+            }
+            if (pid == 0) {
+                int nul = open("/dev/null", O_RDWR);
+                if (nul >= 0) {
+                    dup2(nul, 0);
+                    dup2(nul, 1);
+                    dup2(nul, 2);
+                }
+                char self[PATH_MAX];
+                ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+                if (n > 0)
+                    self[n] = 0;
+                const char *prog = v && *v ? v : n > 0 ? self : "mellagui-view";
+                execl(prog, prog, "--poster", in, a->pj_out, (char *)NULL);
+                _exit(127);
+            }
+            a->pj_pid = pid;
+            a->pj_t0 = lm_now_ms();
+            return true;
+        }
+    return false;
+}
+
 static bool th_lazy(struct app *a)
 {
     if (!strip_h(a) || !a->thm)
         return false;
     int first = LM_MAX((int)(a->strip_x / TS_PITCH), 0), last = LM_MIN((int)((a->strip_x + strip_vis_w(a)) / TS_PITCH) + 1, a->thn - 1);
-    if (a->cur >= 0 && a->cur < a->thn && !a->thm[a->cur].tried) {
+    if (a->cur >= 0 && a->cur < a->thn && !a->thm[a->cur].tried && !is_video_name(a->names[a->cur])) {
         th_make(a, a->cur);
         a->win.redraw = true;
         return true;
     }
     for (int i = first; i <= last; i++)
-        if (!a->thm[i].tried) {
+        if (!a->thm[i].tried && !is_video_name(a->names[i])) {
             th_make(a, i);
             a->win.redraw = true;
             return true;
@@ -1401,6 +1484,11 @@ static void paint_strip(struct app *a, struct wlwin *w)
                 wlwin_blit_px(w, x + (TS_W - dw) / 2, y + (TS_H - dh) / 2, buf, pw, ph, pw, clip_x, sy, clip_w, sh);
                 free(buf);
             }
+            if (whole && is_video_name(a->names[i])) {                                         /* a poster of a clip: a play mark on it */
+                int cx = x + TS_W / 2, cy = y + TS_H / 2;
+                wlwin_round_fill(w, cx - 12, cy - 12, 24, 24, 12, lm_theme.ink);
+                vtri(w, cx + 1, cy, 13, 9, 1, lm_theme.on_colour);
+            }
         } else if (whole) {                                                                     /* a tile: not made yet, a video, a sound file */
             wlwin_round_fill(w, x, y, TS_W, TS_H, 4, lm_theme.control);
             int cx = x + TS_W / 2, cy = y + TS_H / 2;
@@ -2234,6 +2322,8 @@ int main(int argc, char **argv)
         int timeout = video_timeout(&a);
         if (th_lazy(&a))                                         /* the small pictures of the strip are made one by one between the events */
             timeout = timeout < 0 ? 2 : LM_MIN(timeout, 2);
+        if (poster_step(&a))                                     /* a video's poster is being made by a child */
+            timeout = timeout < 0 ? 50 : LM_MIN(timeout, 50);
         if (a.win.redraw && a.win.configured && !a.win.buffer_busy)
             timeout = 0;
         struct pollfd pf[2] = { { .fd = wlc_fd(a.win.c), .events = POLLIN }, { .fd = a.ipc, .events = POLLIN } };

@@ -63,6 +63,7 @@
 #include "audiocap.h"
 #include "camfx.h"
 #include "camsound.h"
+#include "facedet.h"
 #include "ffpipe.h"
 #include "img.h"
 #include "jpegenc.h"
@@ -153,6 +154,24 @@ struct app {
     /* Photo Booth */
     int fx;                             /* the effect in use (CAMFX_*) */
     struct lm_image fxi;                /* the newest picture with the effect on it (used while fx is not normal) */
+    struct lm_image hring[CAMFX_RING];  /* the camera pictures before the newest, hring[0] the one just before (only while a history effect is on) */
+    int nhring;                         /* how many of them are there */
+    struct lm_image hout;               /* what the effect made of the picture before */
+    bool hout_ok;
+    /* faces (hat, shades, moustache, clown): tracked over the pictures so the hat does not jump */
+    struct camfx_face face_box[4];
+    int face_miss[4], nfaces, face_tick;
+    bool face_stale;                    /* look for faces again at the next step (an effect was just chosen) */
+    /* backdrops that are pictures */
+    struct lm_image bgpic;              /* the picture of the user (camera.conf: backdrop = PATH) */
+    char bgpath[PATH_MAX];
+    struct lm_image room;               /* the newest picture of Tom's room (drawn by mellagui-matrix in a child process) */
+    struct lm_image bgfit;              /* the picture of the effect in use, as big as the camera picture */
+    int bg_gen, bgfit_gen;              /* what changed in the sources / what bgfit was made of */
+    pid_t room_pid;
+    uint64_t room_t0, room_last, room_start;
+    char room_out[PATH_MAX];
+    int menu_target;                    /* the strip picture the right-click menu is about */
     bool fx_open;                       /* the grid of effects is showing instead of the picture */
     int fx_page, fx_hover;              /* its page, and the tile the pointer / the keys are on (-1 = none) */
     int ohover;                         /* the control under the pointer (O_*), -1 none */
@@ -532,13 +551,300 @@ static const struct lm_image *shown(const struct app *a)
     return a->fx != CAMFX_NORMAL && a->fxi.px ? &a->fxi : &a->img;
 }
 
-/* Makes the picture with the effect from the newest camera picture (once per picture, not once per paint). */
-static void fx_update(struct app *a)
+static void fx_step_again(struct app *a);
+static void fx_step(struct app *a, bool fresh);
+
+/* ---- faces: found by client/facedet.c every third picture, kept steady over the pictures -------------------------------------------------- */
+
+static void faces_update(struct app *a)
 {
+    if (!a->have || !a->img.px)
+        return;
+    if (a->face_tick++ % 3 != 0 && a->nfaces && !a->face_stale)         /* (every picture while none is known, else every third) */
+        return;
+    a->face_stale = false;
+    struct camfx_face found[4];
+    int n = facedet_detect(a->img.px, a->img.w, a->img.h, found, 4);
+    bool used[4] = { false, false, false, false };
+    for (int t = 0; t < a->nfaces; t++) {
+        int best = -1;
+        for (int j = 0; j < n; j++)
+            if (!used[j] && facedet_same(&a->face_box[t], &found[j])) {
+                best = j;
+                break;
+            }
+        if (best >= 0) {                                                /* the same face: move the box half way (the hat does not shake) */
+            used[best] = true;
+            struct camfx_face *o = &a->face_box[t], *c = &found[best];
+            *o = (struct camfx_face){ (o->x + c->x) / 2, (o->y + c->y) / 2, (o->w + c->w) / 2, (o->h + c->h) / 2 };
+            a->face_miss[t] = 0;
+        } else {
+            a->face_miss[t]++;
+        }
+    }
+    int k = 0;
+    for (int t = 0; t < a->nfaces; t++)                                 /* a face that was not found five times running is gone */
+        if (a->face_miss[t] <= 5) {
+            a->face_box[k] = a->face_box[t];
+            a->face_miss[k++] = a->face_miss[t];
+        }
+    a->nfaces = k;
+    for (int j = 0; j < n && a->nfaces < 4; j++)
+        if (!used[j]) {
+            a->face_box[a->nfaces] = found[j];
+            a->face_miss[a->nfaces++] = 0;
+        }
+}
+
+/* ---- the pictures behind you: your own, or Tom's room --------------------------------------------------------------------------------------- */
+
+/* src scaled to cover dw x dh (the middle of it when the shapes differ), bilinear. */
+static void cover_fit(const struct lm_image *src, uint32_t *dst, int dw, int dh)
+{
+    if (!src->px || src->w < 1 || src->h < 1 || dw < 1 || dh < 1)
+        return;
+    double sc = LM_MAX((double)dw / src->w, (double)dh / src->h), ox = (src->w - dw / sc) / 2.0, oy = (src->h - dh / sc) / 2.0;
+    for (int y = 0; y < dh; y++) {
+        double sy = LM_CLAMP(oy + (y + 0.5) / sc - 0.5, 0.0, src->h - 1.0);
+        int y0 = (int)sy, y1 = y0 + 1 < src->h ? y0 + 1 : y0, fy = (int)((sy - y0) * 256);
+        for (int x = 0; x < dw; x++) {
+            double sx = LM_CLAMP(ox + (x + 0.5) / sc - 0.5, 0.0, src->w - 1.0);
+            int x0 = (int)sx, x1 = x0 + 1 < src->w ? x0 + 1 : x0, fx = (int)((sx - x0) * 256);
+            const uint32_t *r0 = src->px + (size_t)y0 * (size_t)src->w, *r1 = src->px + (size_t)y1 * (size_t)src->w;
+            uint32_t out = 0xff000000u;
+            for (int sh = 0; sh <= 16; sh += 8) {
+                int p = (int)((r0[x0] >> sh) & 255), q = (int)((r0[x1] >> sh) & 255), r = (int)((r1[x0] >> sh) & 255), t = (int)((r1[x1] >> sh) & 255);
+                int top = p * (256 - fx) + q * fx, bot = r * (256 - fx) + t * fx;
+                out |= (uint32_t)((top * (256 - fy) + bot * fy) >> 16) << sh;
+            }
+            dst[(size_t)y * (size_t)dw + (size_t)x] = out;
+        }
+    }
+}
+
+static const struct lm_image *bg_source(const struct app *a, int fx)
+{
+    return fx == CAMFX_ROOM ? &a->room : &a->bgpic;
+}
+
+/* The picture of the effect in use, made as big as the camera picture (again when the source or the size changed). */
+static void bg_update(struct app *a)
+{
+    const struct lm_image *src = bg_source(a, a->fx);
+    if (!src->px || !a->img.px) {
+        free(a->bgfit.px);
+        a->bgfit = (struct lm_image){ 0 };
+        return;
+    }
+    if (a->bgfit.px && a->bgfit.w == a->img.w && a->bgfit.h == a->img.h && a->bgfit_gen == a->bg_gen)
+        return;
+    if (!image_size(&a->bgfit, a->img.w, a->img.h))
+        return;
+    cover_fit(src, a->bgfit.px, a->img.w, a->img.h);
+    a->bgfit_gen = a->bg_gen;
+}
+
+/* Where a helper program of this one is: $envvar names another program ("none" = false), else the one next to this executable, else in PATH. */
+static bool resolve_prog(const char *envvar, const char *sibling, char *out, size_t n)
+{
+    const char *v = getenv(envvar);
+    if (v && !strcmp(v, "none"))
+        return false;
+    snprintf(out, n, "%s", v && *v ? v : sibling);
+    if (!(v && *v)) {
+        char exe[PATH_MAX];
+        ssize_t k = readlink("/proc/self/exe", exe, sizeof(exe) - 40);
+        char *slash = k > 0 ? (exe[k] = 0, strrchr(exe, '/')) : NULL;
+        if (slash) {
+            snprintf(slash + 1, 40, "%s", sibling);
+            if (access(exe, X_OK) == 0)
+                snprintf(out, n, "%s", exe);
+        }
+    }
+    return true;
+}
+
+/* Starts `mellagui-matrix` drawing one picture of Tom's room (the size of the camera picture, at most 640 wide) at the story's time. */
+static bool room_spawn(struct app *a)
+{
+    char prog[PATH_MAX];
+    if (!a->img.px || !resolve_prog("MELLAGUI_CAM_ROOM", "mellagui-matrix", prog, sizeof(prog)))
+        return false;
+    int bw = LM_MIN(a->img.w, 640) & ~1, bh = (int)((int64_t)bw * a->img.h / a->img.w) & ~1;
+    if (bw < 64 || bh < 64)
+        return false;
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    snprintf(a->room_out, sizeof(a->room_out), "%s/mellagui-cam-room-%d.ppm", rt && *rt ? rt : "/tmp", (int)getpid());
+    char size[32], at[32], clock[16];
+    snprintf(size, sizeof(size), "%dx%d", bw, bh);
+    snprintf(at, sizeof(at), "%d", 4 + (int)((now_ms() - a->room_start) / 1000));
+    time_t tt = time(NULL);
+    struct tm tm;
+    localtime_r(&tt, &tm);
+    strftime(clock, sizeof(clock), "%H:%M", &tm);
+    pid_t pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(nul, 2);
+        }
+        setenv("MELLAGUI_MATRIX_PPM", a->room_out, 1);
+        execlp(prog, prog, "--at", at, "--time", clock, "--sun", "auto", "--bench", size, (char *)NULL);
+        _exit(127);
+    }
+    a->room_pid = pid;
+    a->room_t0 = now_ms();
+    return true;
+}
+
+static void room_done(struct app *a, bool ok)
+{
+    struct lm_image im = { 0 };
+    char err[120];
+    if (ok && lm_img_load(a->room_out, &im, err, sizeof(err)) == 0) {
+        free(a->room.px);
+        a->room = im;
+        a->bg_gen++;
+    }
+    unlink(a->room_out);
+    a->room_pid = 0;
+    a->room_last = now_ms();
+}
+
+/* Called every turn of the loop: collects a finished picture of the room and, while Tom's Room is the effect, asks for the next one (about every
+ * two seconds: the picture is the room at the next moment of its story). True while a child is drawing. */
+static bool room_step(struct app *a)
+{
+    if (a->room_pid) {
+        int st;
+        pid_t r = waitpid(a->room_pid, &st, WNOHANG);
+        if (r == a->room_pid) {
+            room_done(a, WIFEXITED(st) && WEXITSTATUS(st) == 0);
+            if (a->fx == CAMFX_ROOM) {
+                a->win.redraw = true;
+                fx_step_again(a);
+            }
+        } else if (r < 0 || now_ms() - a->room_t0 > 15000) {
+            if (r == 0) {
+                kill(a->room_pid, SIGKILL);
+                waitpid(a->room_pid, &st, 0);
+            }
+            room_done(a, false);
+        }
+        return a->room_pid != 0;
+    }
+    if (a->fx == CAMFX_ROOM && a->have && now_ms() - a->room_last >= 1800 && !room_spawn(a))
+        a->room_last = now_ms() + 60000;                                /* no mellagui-matrix: do not try again for a minute */
+    return a->room_pid != 0;
+}
+
+/* Waits for the picture that was asked for (the command line: there is no loop). */
+static void room_wait(struct app *a)
+{
+    if (!a->room_pid && !room_spawn(a))
+        return;
+    int st;
+    waitpid(a->room_pid, &st, 0);
+    room_done(a, WIFEXITED(st) && WEXITSTATUS(st) == 0);
+}
+
+/* The user's own picture: loaded, kept as the backdrop of the "Your Picture" effect. False with the reason in err. */
+static bool bg_set_path(struct app *a, const char *path, char *err, size_t en)
+{
+    struct lm_image im = { 0 };
+    if (lm_img_load(path, &im, err, en) != 0)
+        return false;
+    free(a->bgpic.px);
+    a->bgpic = im;
+    snprintf(a->bgpath, sizeof(a->bgpath), "%s", path);
+    a->bg_gen++;
+    return true;
+}
+
+/* The pictures the effects of the history kind look at are only kept while such an effect is on. */
+static void hist_free(struct app *a)
+{
+    for (int i = 0; i < CAMFX_RING; i++) {
+        free(a->hring[i].px);
+        a->hring[i] = (struct lm_image){ 0 };
+    }
+    free(a->hout.px);
+    a->hout = (struct lm_image){ 0 };
+    a->nhring = 0;
+    a->hout_ok = false;
+}
+
+/* The picture that was just shown goes into the history (the newest first); the oldest one's buffer is used again. */
+static void hist_push(struct app *a, int keep)
+{
+    struct lm_image last = a->hring[CAMFX_RING - 1];
+    for (int i = CAMFX_RING - 1; i > 0; i--)
+        a->hring[i] = a->hring[i - 1];
+    a->hring[0] = last;
+    if (image_size(&a->hring[0], a->img.w, a->img.h)) {
+        memcpy(a->hring[0].px, a->img.px, (size_t)a->img.w * (size_t)a->img.h * 4);
+        if (a->nhring < keep)
+            a->nhring++;
+    }
+    for (int i = keep; i < CAMFX_RING; i++) {                    /* (only as many as the effect wants: the rest is given back) */
+        free(a->hring[i].px);
+        a->hring[i] = (struct lm_image){ 0 };
+    }
+    if (image_size(&a->hout, a->img.w, a->img.h) && a->fxi.px) {
+        memcpy(a->hout.px, a->fxi.px, (size_t)a->img.w * (size_t)a->img.h * 4);
+        a->hout_ok = true;
+    }
+}
+
+/* Makes the picture with the effect from the newest camera picture. `fresh` = this picture is new (not the same one again: the history moves on). */
+static void fx_step(struct app *a, bool fresh)
+{
+    if (!camfx_needs_history(a->fx) && (a->nhring || a->hout.px))
+        hist_free(a);
+    if (camfx_needs_faces(a->fx) || (a->fx_open && a->fx_page == FX_PAGES - 1))       /* (the grid's last page shows the hats on you, too) */
+        if (fresh || a->face_stale)
+            faces_update(a);
     if (a->fx == CAMFX_NORMAL || !a->have || !a->img.px || a->bg_until || !image_size(&a->fxi, a->img.w, a->img.h))
         return;
     const uint32_t *ref = a->have_ref && a->ref.px && a->ref.w == a->img.w && a->ref.h == a->img.h ? a->ref.px : NULL;
-    camfx_apply_at(a->fx, a->img.px, ref, a->img.w, a->img.h, a->fxi.px, a->focus_x, a->focus_y);
+    struct camfx_hist hs = { 0 };
+    const uint32_t *ptrs[CAMFX_RING];
+    bool hist = camfx_needs_history(a->fx);
+    if (hist) {
+        if (a->nhring && (a->hring[0].w != a->img.w || a->hring[0].h != a->img.h || (a->hout.px && (a->hout.w != a->img.w || a->hout.h != a->img.h))))
+            hist_free(a);                                       /* another camera or size: the old pictures do not fit */
+        for (int i = 0; i < a->nhring; i++)
+            ptrs[i] = a->hring[i].px;
+        hs.prev_src = a->nhring ? a->hring[0].px : NULL;
+        hs.prev_out = a->hout_ok && a->hout.px ? a->hout.px : NULL;
+        hs.ring = ptrs;
+        hs.nring = a->nhring;
+    }
+    if (camfx_needs_faces(a->fx)) {
+        hs.faces = a->face_box;
+        hs.nfaces = a->nfaces;
+    }
+    if (camfx_needs_picture(a->fx)) {
+        bg_update(a);
+        hs.pic = a->bgfit.px && a->bgfit.w == a->img.w && a->bgfit.h == a->img.h ? a->bgfit.px : NULL;
+    }
+    camfx_apply_h(a->fx, a->img.px, ref, &hs, a->img.w, a->img.h, a->fxi.px, a->focus_x, a->focus_y);
+    if (hist && fresh)
+        hist_push(a, a->fx == CAMFX_TIMEWARP ? CAMFX_RING : 1);
+}
+
+static void fx_update(struct app *a)
+{
+    fx_step(a, false);
+}
+
+static void fx_step_again(struct app *a)
+{
+    fx_step(a, false);
 }
 
 static void thumb_box(const uint32_t *s, int sw, int sh, uint32_t *d, int dw, int dh);
@@ -1354,13 +1660,26 @@ static void paint_grid(struct app *a)
             int dw = LM_MAX((int)(a->img.w * sc), 1), dh = LM_MAX((int)(a->img.h * sc), 1);
             int pw = dw * k, ph = dh * k;
             bool useref = camfx_is_backdrop(fxn) && a->have_ref && a->ref.px && a->ref.w == a->img.w && a->ref.h == a->img.h;
-            uint32_t *src = malloc((size_t)pw * (size_t)ph * 12);
+            uint32_t *src = malloc((size_t)pw * (size_t)ph * 16);
             if (src) {
-                uint32_t *dst = src + (size_t)pw * (size_t)ph, *rt = dst + (size_t)pw * (size_t)ph;
+                uint32_t *dst = src + (size_t)pw * (size_t)ph, *rt = dst + (size_t)pw * (size_t)ph, *bgt = rt + (size_t)pw * (size_t)ph;
                 thumb_box(a->img.px, a->img.w, a->img.h, src, pw, ph);
                 if (useref)
                     thumb_box(a->ref.px, a->ref.w, a->ref.h, rt, pw, ph);
-                camfx_apply_at(fxn, src, useref ? rt : NULL, pw, ph, dst, a->focus_x, a->focus_y);
+                struct camfx_hist hs = { 0 };
+                struct camfx_face tf[4];
+                if (camfx_needs_faces(fxn) && a->nfaces) {                      /* the faces found, at the size of the tile */
+                    double kx = (double)pw / a->img.w, ky = (double)ph / a->img.h;
+                    for (int q = 0; q < a->nfaces; q++)
+                        tf[q] = (struct camfx_face){ (float)(a->face_box[q].x * kx), (float)(a->face_box[q].y * ky), (float)(a->face_box[q].w * kx), (float)(a->face_box[q].h * ky) };
+                    hs.faces = tf;
+                    hs.nfaces = a->nfaces;
+                }
+                if (camfx_needs_picture(fxn) && bg_source(a, fxn)->px) {
+                    cover_fit(bg_source(a, fxn), bgt, pw, ph);
+                    hs.pic = bgt;
+                }
+                camfx_apply_h(fxn, src, useref ? rt : NULL, &hs, pw, ph, dst, a->focus_x, a->focus_y);
                 if (a->mirror)                                                  /* as the big picture: the effect first, then the mirror */
                     for (int yy = 0; yy < ph; yy++) {
                         uint32_t *row = dst + (size_t)yy * (size_t)pw;
@@ -1849,17 +2168,19 @@ static void do_snapshot(struct app *a)
 
 static void conf_save(const struct app *a)
 {
-    char extra[160];
-    char size[40] = "";
+    char extra[2 * PATH_MAX + 200];
+    char size[40] = "", bg[PATH_MAX + 20] = "";
     if (a->saved_size.w > 0)
         snprintf(size, sizeof(size), "size = %dx%d\n", a->saved_size.w, a->saved_size.h);
-    snprintf(extra, sizeof(extra), "timer = %d\nfour-up = %d\nsound = %d\nvideo = %d\n%s", a->timer_s, a->fourup ? 1 : 0, a->sound ? 1 : 0, a->video ? 1 : 0, size);
+    if (a->bgpath[0])
+        snprintf(bg, sizeof(bg), "backdrop = %s\n", a->bgpath);
+    snprintf(extra, sizeof(extra), "timer = %d\nfour-up = %d\nsound = %d\nvideo = %d\n%s%s", a->timer_s, a->fourup ? 1 : 0, a->sound ? 1 : 0, a->video ? 1 : 0, size, bg);
     lm_snd_conf_save_x("camera", false, a->mic, extra);
 }
 
 static void conf_load(struct app *a)
 {
-    char path[1024], line[128];
+    char path[1024], line[PATH_MAX + 32];
     a->timer_s = 3;                                             /* Photo Booth counts three seconds */
     a->sound = true;
     if (lm_snd_conf_path("camera", path, sizeof(path))) {
@@ -1874,7 +2195,10 @@ static void conf_load(struct app *a)
                 a->sound = v != 0;
             else if (sscanf(line, "video = %d", &v) == 1)
                 a->video = v != 0;
-            else if (sscanf(line, "size = %dx%d", &sw, &sh) == 2 && sw >= 16 && sh >= 16 && sw <= 8192 && sh <= 8192)
+            else if (!strncmp(line, "backdrop = ", 11)) {
+                line[strcspn(line, "\r\n")] = 0;
+                snprintf(a->bgpath, sizeof(a->bgpath), "%.*s", (int)sizeof(a->bgpath) - 1, line + 11);
+            } else if (sscanf(line, "size = %dx%d", &sw, &sh) == 2 && sw >= 16 && sh >= 16 && sw <= 8192 && sh <= 8192)
                 a->saved_size = (struct size){ sw, sh };
         }
         if (f)
@@ -1885,6 +2209,14 @@ static void conf_load(struct app *a)
     const char *env = getenv("MELLAGUI_CAM_TIMER");
     if (env && *env)
         a->timer_s = LM_CLAMP(atoi(env), 0, 60);
+    env = getenv("MELLAGUI_CAM_BACKDROP");                      /* a picture for the "Your Picture" effect, for this run */
+    if (env && *env)
+        snprintf(a->bgpath, sizeof(a->bgpath), "%s", env);
+    if (a->bgpath[0]) {
+        char err[120];
+        if (!bg_set_path(a, a->bgpath, err, sizeof(err)))
+            fprintf(stderr, "mellagui-cam: backdrop %s: %s\n", a->bgpath, err);
+    }
 }
 
 static void snd(const struct app *a, int kind)
@@ -1913,9 +2245,21 @@ static void set_fx(struct app *a, int fx)
     a->fx = LM_CLAMP(fx, 0, CAMFX_COUNT - 1);
     a->bg_until = 0;
     a->focus_x = a->focus_y = 0.5f;
+    a->face_stale = true;
+    a->nfaces = 0;
+    a->face_tick = 0;
+    a->bg_gen++;
+    if (a->fx == CAMFX_ROOM) {
+        a->room_start = now_ms();
+        a->room_last = 0;
+    }
     fx_update(a);
     if (camfx_is_backdrop(a->fx))
         bg_start(a);
+    if (a->fx == CAMFX_PICTURE && !a->bgpic.px)
+        set_note(a, "%s", "Right-click a picture in the strip: Use as background");
+    else if (camfx_needs_faces(a->fx))
+        set_note(a, "%s", "Look at the camera: it finds your face");
     else if (camfx_has_focus(a->fx))
         set_note(a, "%s", "Drag on the picture to move the effect");
     a->win.redraw = true;
@@ -2277,6 +2621,15 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
         break;
     case LM_WL_POINTER_EVT_BUTTON:
+        if (args[2].u == 273 && args[3].u == 1 && !a->menu_open && !a->fx_open) {          /* BTN_RIGHT on a picture of the strip: Open / Use as background */
+            int sp = strip_at(a, a->px, a->py);
+            if (sp >= 0) {
+                a->menu_target = sp;
+                if (!wlwin_menu(w, a->strip[sp].video ? "Open\n~Use as background\nOpen folder" : "Open\nUse as background\nOpen folder"))
+                    spawn_detached("MELLAGUI_CAM_VIEWER", "mellagui-view", a->strip[sp].path);
+                break;
+            }
+        }
         if (a->menu_open && args[2].u == 272 && args[3].u == 1) {           /* any press: pick an entry, or just close the list */
             int row = menu_row_at(a, a->px, a->py);
             if (row >= 0)
@@ -2452,7 +2805,7 @@ static void pull_frames(struct app *a)
         a->have = true;
         a->frames++;
         a->win.redraw = true;
-        fx_update(a);
+        fx_step(a, true);
         if (a->clip && !clip_frame(a->clip, shown(a))) {         /* ffmpeg died: say so and end the clip */
             do_record(a);
             set_note(a, "%s", "ffmpeg stopped: the clip is lost (is the sound server running? try Mic off)");
@@ -2460,9 +2813,38 @@ static void pull_frames(struct app *a)
     }
 }
 
+/* The right-click menu of a picture of the strip was answered. */
+static void menu_event(struct wlwin *w, int index)
+{
+    struct app *a = w->data;
+    int i = a->menu_target;
+    if (index < 0 || i < 0 || i >= a->nstrip)
+        return;
+    const struct thumb *t = &a->strip[i];
+    char err[120];
+    switch (index) {
+    case 0: spawn_detached("MELLAGUI_CAM_VIEWER", "mellagui-view", t->path); break;
+    case 1:                                                     /* a picture behind you */
+        if (t->video)
+            break;
+        if (bg_set_path(a, t->path, err, sizeof(err))) {
+            conf_save(a);
+            set_fx(a, CAMFX_PICTURE);
+        } else {
+            set_note(a, "%s", err);
+        }
+        break;
+    case 2:
+        mkdir(a->outdir, 0755);
+        spawn_detached("MELLAGUI_CAM_FILES", "mellagui-files", a->outdir);
+        break;
+    }
+    w->redraw = true;
+}
+
 static int run_window(struct app *a)
 {
-    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     if (wlwin_connect(&a->win, "mellagui-cam", &ops, a) < 0)
         return 1;
     wlrail_init(&a->ran);
@@ -2519,6 +2901,10 @@ static int run_window(struct app *a)
             timeout = LM_MIN(timeout, 10);
         if (poster_step(a))                                      /* a clip's poster is being made by a child */
             timeout = LM_MIN(timeout, 60);
+        if (room_step(a))                                        /* Tom's room is being drawn by a child */
+            timeout = LM_MIN(timeout, 60);
+        else if (a->fx == CAMFX_ROOM)
+            timeout = LM_MIN(timeout, 250);
         {                                                        /* the drops of the rail are moving: a frame every 16 ms */
             struct wlrail L;
             cam_rail(a, &L);
@@ -2536,6 +2922,10 @@ static int run_window(struct app *a)
     src_close(&a->src);
     wlwin_destroy(&a->win);
     free(a->fxi.px);
+    hist_free(a);
+    free(a->bgpic.px);
+    free(a->room.px);
+    free(a->bgfit.px);
     free(a->ref.px);
     for (int i = 0; i < 4; i++)
         free(a->quad[i].px);
@@ -2574,42 +2964,67 @@ static int cmd_list(void)
     return 0;
 }
 
+static const char *g_from;                                      /* --from FILE: a picture instead of the camera (command line snapshots) */
+static const char *g_backdrop;                                  /* --backdrop FILE: the picture of the "Your Picture" effect */
+
+/* The backdrop pictures of the command line: the user's file, Tom's room drawn now. */
+static void cli_backdrops(struct app *a)
+{
+    char err[160];
+    if (g_backdrop && !bg_set_path(a, g_backdrop, err, sizeof(err)))
+        fprintf(stderr, "mellagui-cam: --backdrop %s: %s\n", g_backdrop, err);
+    if (a->fx == CAMFX_ROOM) {
+        room_wait(a);
+        if (!a->room.px)
+            fprintf(stderr, "mellagui-cam: Tom's room could not be drawn (is mellagui-matrix next to this program?)\n");
+    }
+    a->face_stale = true;
+}
+
 static int cmd_snapshot(const char *file, const char *dev, struct size want, int fx, float fx_x, float fx_y)
 {
     struct app a = { 0 };
     a.focus_x = fx_x;
     a.focus_y = fx_y;
     char err[200] = "";
-    char devs[MAX_DEVS][64];
-    if (!dev) {
-        if (scan_devices(devs, MAX_DEVS) == 0) {
-            fprintf(stderr, "mellagui-cam: no camera found\n");
+    if (g_from) {
+        if (lm_img_load(g_from, &a.img, err, sizeof(err)) != 0) {
+            fprintf(stderr, "mellagui-cam: %s: %s\n", g_from, err);
             return 1;
         }
-        dev = devs[0];
-    }
-    if (src_open(&a.src, dev, err, sizeof(err)) < 0 || src_start(&a.src, want, err, sizeof(err)) < 0) {
-        fprintf(stderr, "mellagui-cam: %s\n", err);
-        return 1;
-    }
-    int got = 0;
-    uint64_t t0 = now_ms();
-    while (got < (a.src.fake ? 1 : WARMUP_FRAMES) && now_ms() - t0 < 15000) {        /* the first frames are dark: exposure settles */
-        struct pollfd pf = { .fd = a.src.fd, .events = POLLIN };
-        if (!a.src.fake && poll(&pf, 1, 500) <= 0)
-            continue;
-        int r = src_frame(&a.src, &a.img, true);
-        if (r < 0)
-            break;
-        got += r > 0;
-    }
-    src_close(&a.src);
-    if (!got) {
-        fprintf(stderr, "mellagui-cam: no picture from %s\n", dev);
-        return 1;
+    } else {
+        char devs[MAX_DEVS][64];
+        if (!dev) {
+            if (scan_devices(devs, MAX_DEVS) == 0) {
+                fprintf(stderr, "mellagui-cam: no camera found\n");
+                return 1;
+            }
+            dev = devs[0];
+        }
+        if (src_open(&a.src, dev, err, sizeof(err)) < 0 || src_start(&a.src, want, err, sizeof(err)) < 0) {
+            fprintf(stderr, "mellagui-cam: %s\n", err);
+            return 1;
+        }
+        int got = 0;
+        uint64_t t0 = now_ms();
+        while (got < (a.src.fake ? 1 : WARMUP_FRAMES) && now_ms() - t0 < 15000) {        /* the first frames are dark: exposure settles */
+            struct pollfd pf = { .fd = a.src.fd, .events = POLLIN };
+            if (!a.src.fake && poll(&pf, 1, 500) <= 0)
+                continue;
+            int r = src_frame(&a.src, &a.img, true);
+            if (r < 0)
+                break;
+            got += r > 0;
+        }
+        src_close(&a.src);
+        if (!got) {
+            fprintf(stderr, "mellagui-cam: no picture from %s\n", dev);
+            return 1;
+        }
     }
     a.fx = fx;
     a.have = true;
+    cli_backdrops(&a);
     fx_update(&a);
     if (!write_png(file, shown(&a), false)) {
         fprintf(stderr, "mellagui-cam: cannot write %s: %s\n", file, strerror(errno));
@@ -2617,6 +3032,28 @@ static int cmd_snapshot(const char *file, const char *dev, struct size want, int
     }
     free(a.img.px);
     free(a.fxi.px);
+    free(a.bgpic.px);
+    free(a.room.px);
+    free(a.bgfit.px);
+    hist_free(&a);
+    return 0;
+}
+
+/* --faces FILE: the faces facedet finds in a picture, one box a line. */
+static int cmd_faces(const char *file)
+{
+    struct lm_image im = { 0 };
+    char err[160];
+    if (lm_img_load(file, &im, err, sizeof(err)) != 0) {
+        fprintf(stderr, "mellagui-cam: %s: %s\n", file, err);
+        return 1;
+    }
+    struct camfx_face f[8];
+    int n = facedet_detect(im.px, im.w, im.h, f, 8);
+    printf("faces %d  (picture %dx%d)\n", n, im.w, im.h);
+    for (int i = 0; i < n; i++)
+        printf("face %d %d %d %d\n", (int)f[i].x, (int)f[i].y, (int)f[i].w, (int)f[i].h);
+    lm_img_free(&im);
     return 0;
 }
 
@@ -2677,7 +3114,7 @@ static int cmd_clip(const char *file, const char *dev, struct size want, double 
         if (r < 0)
             break;
         if (r > 0) {
-            fx_update(&a);
+            fx_step(&a, true);
             alive = clip_frame(c, shown(&a));
         }
         clip_pump(c);
@@ -2788,7 +3225,9 @@ static int selftest(void)
                 fprintf(stderr, "selftest: the mirror does not reflect about the focus\n");
                 bad++;
             }
-            for (int fx = CAMFX_KALEIDO; fx <= CAMFX_TWIRL; fx++) {
+            for (int fx = CAMFX_KALEIDO; fx < CAMFX_COUNT; fx++) {
+                if (!camfx_has_focus(fx) || fx == CAMFX_VINTAGE)                                   /* (the vintage spot is a faint thing, the others must move) */
+                    continue;
                 camfx_apply_at(fx, src.px, NULL, 64, 48, dst.px, 0.5f, 0.5f);
                 camfx_apply_at(fx, src.px, NULL, 64, 48, f2.px, 0.25f, 0.7f);
                 if (!memcmp(dst.px, f2.px, 64 * 48 * 4)) {
@@ -2827,7 +3266,9 @@ static int selftest(void)
         image_size(&o1, 64, 48);
         image_size(&o2, 64, 48);
         fake_frame(&src2, 64, 48, 40);
-        for (int fx = CAMFX_SUNSET; fx <= CAMFX_NEON; fx++) {
+        for (int fx = 0; fx < CAMFX_COUNT; fx++) {
+            if (!camfx_is_backdrop(fx) || fx == CAMFX_GHOST)
+                continue;
             camfx_apply_ref(fx, src.px, src.px, 64, 48, o1.px);                    /* nobody in it: the same backdrop whatever the picture */
             camfx_apply_ref(fx, src2.px, src2.px, 64, 48, o2.px);
             if (memcmp(o1.px, o2.px, 64 * 48 * 4)) {
@@ -2849,6 +3290,93 @@ static int selftest(void)
         if (o1.px[24 * 64 + 32] != src.px[24 * 64 + 32] || o1.px[0] == src.px[0]) {
             fprintf(stderr, "selftest: the oval of a backdrop without a reference\n");
             bad++;
+        }
+        {                                                                          /* the face effects draw on the faces they are given, and only there */
+            struct camfx_face face = { 20, 14, 24, 24 };
+            struct camfx_hist hs = { .faces = &face, .nfaces = 1 };
+            for (int fx = CAMFX_HAT; fx <= CAMFX_CLOWN; fx++) {
+                camfx_apply_h(fx, src.px, NULL, &hs, 64, 48, o1.px, 0.5f, 0.5f);
+                camfx_apply_h(fx, src.px, NULL, NULL, 64, 48, o2.px, 0.5f, 0.5f);
+                int changed = 0;
+                for (int i = 0; i < 64 * 48; i++)
+                    changed += o1.px[i] != src.px[i];
+                if (changed < 20 || o1.px[0] != src.px[0] || o1.px[47 * 64 + 63] != src.px[47 * 64 + 63] || memcmp(o2.px, src.px, 64 * 48 * 4) ||
+                    !camfx_needs_faces(fx)) {
+                    fprintf(stderr, "selftest: %s changed %d pixels (or touched the corners, or changed a picture with no face)\n", camfx_id(fx), changed);
+                    bad++;
+                }
+            }
+            uint32_t bg[64 * 48];
+            for (int i = 0; i < 64 * 48; i++)
+                bg[i] = 0xff123456u;
+            for (int fx = CAMFX_PICTURE; fx <= CAMFX_ROOM; fx++) {
+                camfx_apply_ref(fx, src.px, src.px, 64, 48, o2.px);                                                    /* (no picture: some wall, not the camera) */
+                camfx_apply_h(fx, src.px, src.px, &(struct camfx_hist){ .pic = bg }, 64, 48, o1.px, 0.5f, 0.5f);       /* nobody in it: the picture is the whole picture */
+                bool ok = !memcmp(o1.px, bg, sizeof(bg)) && memcmp(o2.px, src.px, 64 * 48 * 4) && camfx_needs_picture(fx) && camfx_is_backdrop(fx);
+                uint32_t black[64 * 48];
+                memset(black, 0, sizeof(black));
+                camfx_apply_h(fx, src.px, black, &(struct camfx_hist){ .pic = bg }, 64, 48, o2.px, 0.5f, 0.5f);       /* all differs: you stay */
+                int kept = 0;
+                for (int i = 0; i < 64 * 48; i++)
+                    kept += o2.px[i] == src.px[i];
+                if (!ok || kept < 64 * 48 * 9 / 10) {
+                    fprintf(stderr, "selftest: %s (%d, kept %d)\n", camfx_id(fx), ok, kept);
+                    bad++;
+                }
+            }
+        }
+        {                                                                          /* the effects of the history kind */
+            struct camfx_hist none = { 0 };
+            uint32_t black[64 * 48], white[64 * 48];
+            for (int i = 0; i < 64 * 48; i++)
+                black[i] = 0xff000000u, white[i] = 0xffffffffu;
+            camfx_apply_h(CAMFX_TRAILS, black, NULL, &(struct camfx_hist){ .prev_out = white }, 64, 48, o1.px, 0.5f, 0.5f);       /* a white picture before: a dim trail */
+            bool trail = (o1.px[100] & 255) > 200 && (o1.px[100] & 255) < 255;
+            camfx_apply_h(CAMFX_TRAILS, white, NULL, &(struct camfx_hist){ .prev_out = black }, 64, 48, o1.px, 0.5f, 0.5f);       /* a new bright thing shows at once */
+            trail = trail && o1.px[100] == 0xffffffffu;
+            camfx_apply_h(CAMFX_ECHO, white, NULL, &(struct camfx_hist){ .prev_out = black }, 64, 48, o1.px, 0.5f, 0.5f);         /* the average moves a part of the way */
+            bool echo = (o1.px[100] & 255) > 40 && (o1.px[100] & 255) < 120;
+            uint32_t cur[64 * 48];
+            memcpy(cur, white, sizeof(cur));
+            for (int k = 0; k < 40; k++) {                                                                                         /* ... and gets there in the end */
+                camfx_apply_h(CAMFX_ECHO, white, NULL, &(struct camfx_hist){ .prev_out = cur }, 64, 48, o2.px, 0.5f, 0.5f);
+                memcpy(cur, o2.px, sizeof(cur));
+            }
+            echo = echo && o2.px[100] == 0xffffffffu;
+            camfx_apply_h(CAMFX_MOTION, src.px, NULL, &(struct camfx_hist){ .prev_src = src.px }, 64, 48, o1.px, 0.5f, 0.5f);    /* nothing moved: all grey */
+            bool still = true;
+            for (int i = 0; i < 64 * 48; i++)
+                still = still && ((o1.px[i] >> 16) & 255) == ((o1.px[i] >> 8) & 255) && ((o1.px[i] >> 8) & 255) == (o1.px[i] & 255);
+            camfx_apply_h(CAMFX_MOTION, white, NULL, &(struct camfx_hist){ .prev_src = black }, 64, 48, o1.px, 0.5f, 0.5f);       /* it got brighter: cyan, no red */
+            camfx_apply_h(CAMFX_MOTION, black, NULL, &(struct camfx_hist){ .prev_src = white }, 64, 48, o2.px, 0.5f, 0.5f);       /* it got darker: magenta, no green */
+            bool motion = still && ((o1.px[100] >> 16) & 255) == 63 && (o1.px[100] & 255) > 200 && ((o2.px[100] >> 8) & 255) == 0 && ((o2.px[100] >> 16) & 255) > 200;
+            const uint32_t *ring[3] = { black, white, black };
+            camfx_apply_h(CAMFX_TIMEWARP, src.px, NULL, &(struct camfx_hist){ .ring = ring, .nring = 3 }, 64, 48, o1.px, 0.5f, 0.5f);
+            bool warp = o1.px[0] == src.px[0] && o1.px[47 * 64] == black[0] && o1.px[24 * 64] == white[0];                   /* now at the top, the oldest at the bottom */
+            camfx_apply_h(CAMFX_TIMEWARP, src.px, NULL, &none, 64, 48, o2.px, 0.5f, 0.5f);
+            warp = warp && !memcmp(o2.px, src.px, 64 * 48 * 4);                                                              /* no history: the picture */
+            if (!trail || !echo || !motion || !warp || !camfx_needs_history(CAMFX_TRAILS) || camfx_needs_history(CAMFX_BW)) {
+                fprintf(stderr, "selftest: the effects of the history kind (trails %d echo %d motion %d warp %d)\n", trail, echo, motion, warp);
+                bad++;
+            }
+            camfx_apply(CAMFX_NEGATIVE, src.px, 64, 48, o1.px);                                                              /* the colour effects that are easy to check */
+            camfx_apply(CAMFX_NEGATIVE, o1.px, 64, 48, o2.px);
+            bool neg = !memcmp(o2.px, src.px, 64 * 48 * 4);
+            camfx_apply(CAMFX_PIXEL, src.px, 64, 48, o1.px);
+            neg = neg && o1.px[0] == o1.px[1] && o1.px[0] == o1.px[64 + 3];                                                  /* one colour in a block (4 x 4 here) */
+            camfx_apply(CAMFX_ASCII, white, 64, 48, o1.px);
+            int lit = 0;
+            for (int i = 0; i < 64 * 48; i++)
+                lit += ((o1.px[i] >> 8) & 255) > 100;
+            neg = neg && lit > 100 && lit < 64 * 48;                                                                         /* letters on a dark ground, not a white wall */
+            camfx_apply(CAMFX_NIGHT, src.px, 64, 48, o1.px);
+            bool green = true;
+            for (int i = 0; i < 64 * 48; i++)
+                green = green && ((o1.px[i] >> 8) & 255) >= ((o1.px[i] >> 16) & 255);
+            if (!neg || !green) {
+                fprintf(stderr, "selftest: negative / pixel / ascii / night (%d %d)\n", neg, green);
+                bad++;
+            }
         }
         free(src2.px);
         free(o1.px);
@@ -2907,6 +3435,12 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--device") && i + 1 < argc)
             dev = argv[++i];
+        else if (!strcmp(argv[i], "--from") && i + 1 < argc)
+            g_from = argv[++i];
+        else if (!strcmp(argv[i], "--backdrop") && i + 1 < argc)
+            g_backdrop = argv[++i];
+        else if (!strcmp(argv[i], "--faces") && i + 1 < argc)
+            return cmd_faces(argv[++i]);
         else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc)
             snap = argv[++i];
         else if (!strcmp(argv[i], "--clip") && i + 1 < argc)
@@ -2923,7 +3457,7 @@ int main(int argc, char **argv)
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: mellagui-cam [--device /dev/videoN] [--size WxH] [--mic|--no-mic] [--effect ID] [--focus X,Y] | --list | --effects | --snapshot FILE.png | --clip FILE.mp4 [--seconds N] | --selftest\n");
+            fprintf(stderr, "usage: mellagui-cam [--device /dev/videoN] [--size WxH] [--mic|--no-mic] [--effect ID] [--focus X,Y] | --list | --effects | --snapshot FILE.png [--from PICTURE] [--backdrop PICTURE] | --clip FILE.mp4 [--seconds N] | --faces PICTURE | --selftest\n");
             return 2;
         }
     }

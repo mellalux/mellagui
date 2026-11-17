@@ -12105,8 +12105,10 @@ class TestCamera(Base):
         r = self.run_cam('--effects')
         self.assertEqual(r.returncode, 0, r.stderr)
         lines = r.stdout.splitlines()
-        self.assertEqual(len(lines), 22)
+        self.assertEqual(len(lines), 50)
         self.assertEqual(lines[0], 'normal|Normal')
+        for fx in ('negative', 'halftone', 'ascii', 'tiltshift', 'echo', 'rain', 'matrix', 'timewarp', 'picture', 'room', 'hat', 'shades', 'moustache', 'clown'):
+            self.assertTrue(any(l.startswith(fx + '|') for l in lines), fx)
         self.assertIn('bw|Black & White', lines)
         r = self.run_cam('--snapshot', os.path.join(tmp, 'never.png'), '--effect', 'nonsense')
         self.assertEqual(r.returncode, 2)
@@ -12137,6 +12139,24 @@ class TestCamera(Base):
         self.assertNotEqual(thermal.getpixel((10, 10)), normal.getpixel((10, 10)))
         for fx in ('pencil', 'comic', 'pop', 'xray', 'glow', 'kaleidoscope', 'tunnel', 'squeeze', 'stretch', 'bulge', 'dent', 'twirl', 'vintage', 'sunset', 'space', 'neon', 'ghost'):
             self.assertNotEqual(snap(fx).tobytes(), normal.tobytes(), fx + ' changes nothing')
+        for fx in ('negative', 'solarize', 'duotone', 'emboss', 'night', 'pixel', 'halftone', 'glitch', 'ascii', 'triple', 'mandala', 'fisheye', 'ripple', 'water',
+                   'tiltshift', 'motion', 'rain', 'sky', 'matrix', 'picture', 'room'):          # (trails, echo and timewarp are the plain picture without pictures before it)
+            self.assertNotEqual(snap(fx).tobytes(), normal.tobytes(), fx + ' changes nothing')
+        for fx in ('trails', 'echo', 'timewarp'):
+            self.assertEqual(snap(fx).tobytes(), normal.tobytes(), fx + ' needs a history')
+        for fx in ('hat', 'shades', 'moustache', 'clown'):                                # (no face in the test pattern: nothing to draw on)
+            self.assertEqual(snap(fx).tobytes(), normal.tobytes(), fx + ' drew on something that is no face')
+        neg = snap('negative')
+        for x, y in ((10, 10), (100, 20), (300, 200)):
+            self.assertEqual(neg.getpixel((x, y)), tuple(255 - v for v in normal.getpixel((x, y))))
+        night = snap('night')
+        self.assertTrue(all(g >= r and g >= b for r, g, b in night.getdata()), 'night vision is not green')
+        asc = snap('ascii')
+        self.assertTrue(all(g >= r and g >= b for r, g, b in asc.getdata()), 'the letters are not green')
+        self.assertGreater(len(set(asc.getdata())), 20)
+        wat = snap('water')                                                               # the upper half is as it was, the lower is a reflection
+        self.assertEqual(wat.crop((0, 0, 320, 100)).tobytes(), normal.crop((0, 0, 320, 100)).tobytes())
+        self.assertNotEqual(wat.crop((0, 140, 320, 240)).tobytes(), normal.crop((0, 140, 320, 240)).tobytes())
 
     def test_the_grid_of_effects_chooses_an_effect_for_the_picture_and_the_snapshot(self):
         try:
@@ -12173,7 +12193,7 @@ class TestCamera(Base):
         st, boxes = state()
         self.assertEqual(st['page'], '1')
         self.assertEqual([k for k in boxes if k.startswith('tile')][0], 'tile 0 mirror')
-        self.assertEqual(len([k for k in boxes if k.startswith('tile')]), 9)              # 22 effects: nine, nine and four
+        self.assertEqual(len([k for k in boxes if k.startswith('tile')]), 9)              # 44 effects: nine to a page, five pages
         ctl.tap(KEY_ESC)                                                                  # Esc closes the grid, not the window
         time.sleep(0.3)
         st, boxes = state()
@@ -12318,12 +12338,12 @@ class TestCamera(Base):
         time.sleep(0.4)
         ctl.tap(18)                                                                       # E: the grid; the arrows go to the last page (the backdrops)
         time.sleep(0.3)
-        ctl.tap(109)                                                                      # Page Down, twice
-        ctl.tap(109)
+        for _ in range(4):                                                                # Page Down, four times (the page after it has the face effects)
+            ctl.tap(109)
         time.sleep(0.4)
         st, boxes = state()
-        self.assertEqual(st['page'], '2')
-        self.assertEqual([k for k in boxes if k.startswith('tile')], ['tile 0 sunset', 'tile 1 space', 'tile 2 neon', 'tile 3 ghost'])
+        self.assertEqual(st['page'], '4')
+        self.assertEqual([k for k in boxes if k.startswith('tile')], ['tile 0 sunset', 'tile 1 space', 'tile 2 neon', 'tile 3 ghost', 'tile 4 rain', 'tile 5 sky', 'tile 6 matrix', 'tile 7 picture', 'tile 8 room'])
         ppm = self.shot('cam-backdrops.ppm')                                              # the little previews: the picture in an oval on the backdrop (no empty scene yet)
         x, y, w, h = boxes['tile 0 sunset']
         iw, ih = w - 8, h - (16 + 6) - 4                                                  # the picture inside the tile (4 px round it, the name under it)
@@ -12359,13 +12379,100 @@ class TestCamera(Base):
         self.assertEqual(state()[0]['bgwait'], '1')
         ctl.tap(18)                                                                       # a normal effect cancels the wait
         time.sleep(0.3)
-        ctl.tap(104)                                                                      # Page Up, twice: the first page, 1 = Normal
-        ctl.tap(104)
+        for _ in range(4):                                                                # Page Up, four times: the first page, 1 = Normal
+            ctl.tap(104)
         time.sleep(0.2)
         ctl.tap(KEY_1)
         time.sleep(0.4)
         st, _ = state()
         self.assertEqual((st['fx'], st['bgwait']), ('normal', '0'))
+
+    def test_the_effects_that_need_the_pictures_before_work_on_the_live_picture(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        p, win, d, state = self.booth()
+        time.sleep(0.4)
+        ctl.tap(18)                                                                       # E, then the fourth page (Page Down three times): trails echo motion are the last three tiles
+        time.sleep(0.3)
+        for _ in range(3):
+            ctl.tap(109)
+        time.sleep(0.4)
+        st, boxes = state()
+        self.assertEqual(st['page'], '3')
+        self.assertEqual([k.split()[2] for k in boxes if k.startswith('tile')][-3:], ['trails', 'echo', 'motion'])
+        ctl.tap(10)                                                                       # 9: Motion
+        time.sleep(1.0)                                                                   # (the test pattern's white square moves every frame)
+        self.assertEqual(state()[0]['fx'], 'motion')
+        ctl.tap(KEY_SPACE)
+        files = self.wait_png(d)
+        self.assertEqual(len(files), 1, files)
+        im = Image.open(os.path.join(d, files[0])).convert('RGB')
+        cyan = sum(1 for r, g, b in im.getdata() if g > 150 and b > 150 and r < 100)
+        magenta = sum(1 for r, g, b in im.getdata() if r > 150 and b > 120 and g < 100)
+        self.assertGreater(cyan + magenta, 20, 'nothing was marked as moved')
+        self.assertLess(cyan + magenta, 640 * 480 // 4)                                   # (a dark picture with the moving part lit, not everything)
+        ctl.tap(18)                                                                       # Light Trails: the picture keeps a fading trail of the moving square
+        time.sleep(0.3)
+        ctl.tap(8)                                                                        # 7: Trails (the grid opens on the page of the effect in use)
+        time.sleep(1.2)
+        self.assertEqual(state()[0]['fx'], 'trails')
+        ctl.tap(KEY_SPACE)
+        files = self.wait_png(d, 2)
+        self.assertEqual(len(files), 2, files)
+        newest = max(files, key=lambda f: os.path.getmtime(os.path.join(d, f)))
+        im = Image.open(os.path.join(d, newest)).convert('RGB')
+        self.assertGreater(sum(1 for r, g, b in im.getdata() if r > 230 and g > 230 and b > 230), 2 * 24 * 24, 'the square left no trail')   # (a square is 24 x 24: more than one square is white)
+
+    def test_your_own_picture_and_tom_s_room_go_behind_you_and_a_face_gets_a_hat(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        d = tempfile.mkdtemp(prefix='mellagui-camfx-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        bg = os.path.join(d, 'bg.png')
+        Image.new('RGB', (200, 100), (200, 30, 40)).save(bg)
+        out = os.path.join(d, 'pic.png')
+        r = self.run_cam('--snapshot', out, '--size', '320x240', '--effect', 'picture', '--backdrop', bg)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        im = Image.open(out).convert('RGB')                                               # the corners (outside the oval that stands in for you) are the picture
+        for xy in ((2, 2), (317, 2), (2, 237), (317, 237)):
+            self.assertEqual(im.getpixel(xy), (200, 30, 40))
+        fake = os.path.join(d, 'room.sh')                                                 # Tom's room is drawn by mellagui-matrix: a stand-in writes a blue picture
+        with open(fake, 'w') as f:
+            f.write('#!/bin/sh\nprintf "P6\\n4 4\\n255\\n" > "$MELLAGUI_MATRIX_PPM"\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do printf "\\000\\000\\200" >> "$MELLAGUI_MATRIX_PPM"; done\n')
+        os.chmod(fake, 0o755)
+        out = os.path.join(d, 'room.png')
+        r = self.run_cam('--snapshot', out, '--size', '320x240', '--effect', 'room', MELLAGUI_CAM_ROOM=fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Image.open(out).convert('RGB').getpixel((2, 2)), (0, 0, 128))
+        zf = '/var/www/html/opencv/opencv-4.x.zip'                                        # a real face: OpenCV's own sample picture, if this machine has it
+        if not os.path.exists(zf):
+            return
+        import zipfile
+        with zipfile.ZipFile(zf) as z:
+            face = os.path.join(d, 'face.jpg')
+            with open(face, 'wb') as f:
+                f.write(z.read('opencv-4.x/samples/data/lena.jpg'))
+        r = self.run_cam('--faces', face)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('faces 1', r.stdout)
+        x, y, w, h = (int(v) for v in r.stdout.split('face ')[1].split()[:4])
+        self.assertTrue(150 < x < 280 and 150 < y < 280 and 100 < w < 260, r.stdout)      # (her face is about 220..380 across, 210..370 down)
+        nout = os.path.join(d, 'normal.png')                                              # (our own decoder's picture: the one PIL makes differs a little)
+        self.assertEqual(self.run_cam('--snapshot', nout, '--from', face, '--effect', 'normal').returncode, 0)
+        base = Image.open(nout).convert('RGB')
+        for fx in ('hat', 'shades', 'moustache', 'clown'):
+            out = os.path.join(d, fx + '.png')
+            r = self.run_cam('--snapshot', out, '--from', face, '--effect', fx)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            im = Image.open(out).convert('RGB')
+            self.assertEqual(im.size, base.size)
+            changed = [(i % im.width, i // im.width) for i, (a, b) in enumerate(zip(im.getdata(), base.getdata())) if a != b]
+            self.assertGreater(len(changed), 300, fx)
+            self.assertTrue(all(x - 0.7 * w < cx < x + 1.7 * w and y - 0.9 * h < cy < y + 1.2 * h for cx, cy in changed), fx + ' drew away from the face')
 
     def test_the_countdown_ticks_and_the_shutter_clicks_and_O_switches_the_sound(self):
         log = os.path.join(tmp, 'cam-sound-%d.log' % time.time_ns())
@@ -14549,6 +14656,28 @@ class TestViewer(Base):
         self.assertTrue(self.wait_title('clip.mp4 - Images'))
         time.sleep(0.3)
         self.assertIsNone(p.poll())
+
+    def test_a_video_in_the_strip_gets_a_small_picture_from_its_poster(self):
+        self.own_compositor()
+        d = self.tmpdir()
+        self.pngs_in(d, 2)
+        with open(os.path.join(d, 'clip.mp4'), 'wb') as f:                            # (not a real clip: the poster program is a stand-in that writes a grey picture)
+            f.write(b'not a real clip')
+        fake = os.path.join(d, 'poster.sh')
+        plog = os.path.join(d, 'poster.log')
+        with open(fake, 'w') as f:
+            f.write('#!/bin/sh\necho "$2" >> %s\nprintf "P6\\n64 48\\n255\\n" > "$3"\nhead -c 9216 /dev/zero | tr "\\000" "\\200" >> "$3"\n' % plog)
+        os.chmod(fake, 0o755)
+        p, win, state = self.vstart(d, os.path.join(d, 'p00.png'), env={'MELLAGUI_VIEW_POSTER': fake})
+        time.sleep(1.0)
+        st, boxes, items, _ = state()
+        self.assertEqual(st['loaded'], '3')                                            # the two pictures AND the clip's poster
+        self.assertEqual(open(plog).read().split(), [os.path.join(d, 'clip.mp4')])     # asked once
+        clip = [v for v in items.values() if v[0] == 'clip.mp4'][0]
+        self.assertEqual(clip[5], 1)
+        ppm = self.shot('view-poster.ppm')                                             # the poster is grey (128); the play mark is on it
+        x, y, w, h = clip[1:5]
+        self.assertEqual(ppm.px(win['x'] + x + 6, win['y'] + y + 4), (0x80, 0x80, 0x80))
 
     # (the helper `shot` of this class)
     def shot(self, name):

@@ -1,7 +1,10 @@
 /* camfx - picture effects for mellagui-cam. See camfx.h. All integer arithmetic where it counts; floats only for the geometry of the distortions. */
 #include "camfx.h"
 
+#include "font.h"
+
 #include <ctype.h>
+#include <stdbool.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,18 +16,42 @@
 #define CB(p) ((p) & 255)
 #define PI_F 3.14159265f
 
-static const struct { const char *id, *name; } k_fx[CAMFX_COUNT] = {
-    [CAMFX_NORMAL] = { "normal", "Normal" },       [CAMFX_BW] = { "bw", "Black & White" },       [CAMFX_SEPIA] = { "sepia", "Sepia" },
-    [CAMFX_PENCIL] = { "pencil", "Pencil" },       [CAMFX_COMIC] = { "comic", "Comic Book" },    [CAMFX_POP] = { "pop", "Pop Art" },
-    [CAMFX_THERMAL] = { "thermal", "Thermal" },    [CAMFX_XRAY] = { "xray", "X-Ray" },           [CAMFX_GLOW] = { "glow", "Glow" },
-    [CAMFX_MIRROR] = { "mirror", "Mirror" },       [CAMFX_KALEIDO] = { "kaleidoscope", "Kaleidoscope" }, [CAMFX_TUNNEL] = { "tunnel", "Light Tunnel" },
-    [CAMFX_SQUEEZE] = { "squeeze", "Squeeze" },    [CAMFX_STRETCH] = { "stretch", "Stretch" },   [CAMFX_BULGE] = { "bulge", "Bulge" },
-    [CAMFX_DENT] = { "dent", "Dent" },             [CAMFX_TWIRL] = { "twirl", "Twirl" },         [CAMFX_VINTAGE] = { "vintage", "Vintage" },
-    [CAMFX_SUNSET] = { "sunset", "Sunset" },       [CAMFX_SPACE] = { "space", "Space" },         [CAMFX_NEON] = { "neon", "Neon" },
-    [CAMFX_GHOST] = { "ghost", "Ghost" },
+static uint32_t hash2(int x, int y);
+static inline int lerp_i(int a, int b, float t);
+
+#define F_FOCUS 1                                       /* works round a point the user can move */
+#define F_BACKDROP 2                                    /* wants the reference picture */
+#define F_HIST 4                                        /* wants the pictures before */
+#define F_FACE 8                                        /* wants the faces */
+#define F_PIC 16                                        /* wants a backdrop picture */
+
+static const struct { const char *id, *name; int flags; } k_fx[CAMFX_COUNT] = {
+    [CAMFX_NORMAL] = { "normal", "Normal", 0 },       [CAMFX_BW] = { "bw", "Black & White", 0 },       [CAMFX_SEPIA] = { "sepia", "Sepia", 0 },
+    [CAMFX_PENCIL] = { "pencil", "Pencil", 0 },       [CAMFX_COMIC] = { "comic", "Comic Book", 0 },    [CAMFX_POP] = { "pop", "Pop Art", 0 },
+    [CAMFX_THERMAL] = { "thermal", "Thermal", 0 },    [CAMFX_XRAY] = { "xray", "X-Ray", 0 },           [CAMFX_GLOW] = { "glow", "Glow", 0 },
+    [CAMFX_MIRROR] = { "mirror", "Mirror", F_FOCUS }, [CAMFX_KALEIDO] = { "kaleidoscope", "Kaleidoscope", F_FOCUS },
+    [CAMFX_TUNNEL] = { "tunnel", "Light Tunnel", F_FOCUS },
+    [CAMFX_SQUEEZE] = { "squeeze", "Squeeze", F_FOCUS }, [CAMFX_STRETCH] = { "stretch", "Stretch", F_FOCUS }, [CAMFX_BULGE] = { "bulge", "Bulge", F_FOCUS },
+    [CAMFX_DENT] = { "dent", "Dent", F_FOCUS },       [CAMFX_TWIRL] = { "twirl", "Twirl", F_FOCUS },   [CAMFX_VINTAGE] = { "vintage", "Vintage", F_FOCUS },
+    [CAMFX_NEGATIVE] = { "negative", "Negative", 0 }, [CAMFX_SOLARIZE] = { "solarize", "Solarize", 0 }, [CAMFX_DUOTONE] = { "duotone", "Duotone", 0 },
+    [CAMFX_EMBOSS] = { "emboss", "Emboss", 0 },       [CAMFX_NIGHT] = { "night", "Night Vision", 0 },  [CAMFX_PIXEL] = { "pixel", "Pixels", 0 },
+    [CAMFX_HALFTONE] = { "halftone", "Halftone", 0 }, [CAMFX_GLITCH] = { "glitch", "Glitch", 0 },      [CAMFX_ASCII] = { "ascii", "ASCII", 0 },
+    [CAMFX_TRIPLE] = { "triple", "Triple", F_FOCUS }, [CAMFX_MANDALA] = { "mandala", "Mandala", F_FOCUS }, [CAMFX_FISHEYE] = { "fisheye", "Fisheye", F_FOCUS },
+    [CAMFX_RIPPLE] = { "ripple", "Ripple", F_FOCUS }, [CAMFX_WATER] = { "water", "Water", F_FOCUS },   [CAMFX_TILTSHIFT] = { "tiltshift", "Tilt Shift", F_FOCUS },
+    [CAMFX_TRAILS] = { "trails", "Light Trails", F_HIST }, [CAMFX_ECHO] = { "echo", "Echo", F_HIST },  [CAMFX_MOTION] = { "motion", "Motion", F_HIST },
+    [CAMFX_SUNSET] = { "sunset", "Sunset", F_BACKDROP }, [CAMFX_SPACE] = { "space", "Space", F_BACKDROP }, [CAMFX_NEON] = { "neon", "Neon", F_BACKDROP },
+    [CAMFX_GHOST] = { "ghost", "Ghost", F_BACKDROP }, [CAMFX_RAIN] = { "rain", "Rainy Window", F_BACKDROP }, [CAMFX_SKY] = { "sky", "Blue Sky", F_BACKDROP },
+    [CAMFX_MATRIX] = { "matrix", "Matrix", F_BACKDROP }, [CAMFX_TIMEWARP] = { "timewarp", "Time Warp", F_HIST },
+    [CAMFX_PICTURE] = { "picture", "Your Picture", F_BACKDROP | F_PIC }, [CAMFX_ROOM] = { "room", "Tom's Room", F_BACKDROP | F_PIC },
+    [CAMFX_HAT] = { "hat", "Top Hat", F_FACE }, [CAMFX_SHADES] = { "shades", "Sunglasses", F_FACE }, [CAMFX_MOUSTACHE] = { "moustache", "Moustache", F_FACE },
+    [CAMFX_CLOWN] = { "clown", "Clown", F_FACE },
 };
 
-int camfx_is_backdrop(int fx) { return fx >= CAMFX_SUNSET && fx <= CAMFX_GHOST; }
+int camfx_is_backdrop(int fx) { return fx >= 0 && fx < CAMFX_COUNT && (k_fx[fx].flags & F_BACKDROP) != 0; }
+int camfx_has_focus(int fx) { return fx >= 0 && fx < CAMFX_COUNT && (k_fx[fx].flags & F_FOCUS) != 0; }
+int camfx_needs_history(int fx) { return fx >= 0 && fx < CAMFX_COUNT && (k_fx[fx].flags & F_HIST) != 0; }
+int camfx_needs_faces(int fx) { return fx >= 0 && fx < CAMFX_COUNT && (k_fx[fx].flags & F_FACE) != 0; }
+int camfx_needs_picture(int fx) { return fx >= 0 && fx < CAMFX_COUNT && (k_fx[fx].flags & F_PIC) != 0; }
 
 const char *camfx_name(int fx) { return fx >= 0 && fx < CAMFX_COUNT ? k_fx[fx].name : NULL; }
 const char *camfx_id(int fx) { return fx >= 0 && fx < CAMFX_COUNT ? k_fx[fx].id : NULL; }
@@ -109,7 +136,7 @@ static void sobel(const uint8_t *g, int w, int h, uint8_t *m)
 static void fx_pencil(const uint32_t *s, int w, int h, uint32_t *d)
 {
     int n = w * h;
-    uint8_t *g = malloc((size_t)n * 2);
+    uint8_t *g = calloc((size_t)n, 2);
     if (!g) {
         memcpy(d, s, (size_t)n * 4);
         return;
@@ -134,7 +161,7 @@ static int post4(int c)                                             /* 0..255 ->
 static void fx_comic(const uint32_t *s, int w, int h, uint32_t *d)
 {
     int n = w * h;
-    uint8_t *g = malloc((size_t)n * 2);
+    uint8_t *g = calloc((size_t)n, 2);
     if (!g) {
         memcpy(d, s, (size_t)n * 4);
         return;
@@ -284,6 +311,306 @@ static void fx_vintage(const uint32_t *s, int w, int h, uint32_t *d, float fcx, 
         }
 }
 
+/* ---- more colour effects ------------------------------------------------------------------------------------------------------ */
+
+static void fx_negative(const uint32_t *s, int n, uint32_t *d)
+{
+    for (int i = 0; i < n; i++)
+        d[i] = rgb(255 - (int)CR(s[i]), 255 - (int)CG(s[i]), 255 - (int)CB(s[i]));
+}
+
+static void fx_solarize(const uint32_t *s, int n, uint32_t *d)
+{
+    for (int i = 0; i < n; i++) {
+        int r = (int)CR(s[i]), g = (int)CG(s[i]), b = (int)CB(s[i]);
+        r = (r < 128 ? r : 255 - r) * 2;                                 /* the tent: the bright half is folded back */
+        g = (g < 128 ? g : 255 - g) * 2;
+        b = (b < 128 ? b : 255 - b) * 2;
+        d[i] = rgb(r, g, b);
+    }
+}
+
+static void fx_duotone(const uint32_t *s, int n, uint32_t *d)             /* navy -> magenta -> peach by brightness */
+{
+    for (int i = 0; i < n; i++) {
+        int l = lum(s[i]);
+        if (l < 128) {
+            float t = (float)l / 127.0f;
+            d[i] = rgb(lerp_i(25, 225, t), lerp_i(12, 40, t), lerp_i(80, 140, t));
+        } else {
+            float t = (float)(l - 128) / 127.0f;
+            d[i] = rgb(lerp_i(225, 255, t), lerp_i(40, 205, t), lerp_i(140, 120, t));
+        }
+    }
+}
+
+static void fx_emboss(const uint32_t *s, int w, int h, uint32_t *d)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int x0 = x > 0 ? x - 1 : 0, x1 = x + 1 < w ? x + 1 : w - 1, y0 = y > 0 ? y - 1 : 0, y1 = y + 1 < h ? y + 1 : h - 1;
+            int v = 128 + (lum(s[(size_t)y1 * (size_t)w + (size_t)x1]) - lum(s[(size_t)y0 * (size_t)w + (size_t)x0])) * 2;
+            v = CL(v);
+            d[(size_t)y * (size_t)w + (size_t)x] = rgb(v, v, v);
+        }
+}
+
+/* Night vision: brightened, green, noisy, with scan lines and a dark ring round the edge of the goggles. */
+static void fx_night(const uint32_t *s, int w, int h, uint32_t *d)
+{
+    float cx = (float)w / 2.0f, cy = (float)h / 2.0f, rmax = sqrtf(cx * cx + cy * cy);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int v = lum(s[(size_t)y * (size_t)w + (size_t)x]) * 3 / 2 + 40;
+            v = CL(v + (int)(hash2(x, y) & 31) - 16);
+            float rr = sqrtf(((float)x - cx) * ((float)x - cx) + ((float)y - cy) * ((float)y - cy)) / rmax;
+            float t = rr < 0.55f ? 0.0f : (rr - 0.55f) / 0.45f;
+            v = v * (256 - (int)(t * t * 230.0f)) / 256;
+            if (y % 3 == 0)
+                v = v * 80 / 100;
+            d[(size_t)y * (size_t)w + (size_t)x] = rgb(v * 18 / 100, v, v * 30 / 100);
+        }
+}
+
+/* Big blocks of one colour in an 8 bit palette (3 bits red, 3 green, 2 blue). */
+static void fx_pixel(const uint32_t *s, int w, int h, uint32_t *d)
+{
+    int bs = w / 64 < 4 ? 4 : w / 64;
+    for (int by = 0; by < h; by += bs)
+        for (int bx = 0; bx < w; bx += bs) {
+            int x1 = bx + bs < w ? bx + bs : w, y1 = by + bs < h ? by + bs : h, n = 0;
+            long sr = 0, sg = 0, sb = 0;
+            for (int y = by; y < y1; y++)
+                for (int x = bx; x < x1; x++, n++) {
+                    uint32_t p = s[(size_t)y * (size_t)w + (size_t)x];
+                    sr += CR(p), sg += CG(p), sb += CB(p);
+                }
+            int r = (int)(sr / n) >> 5, g = (int)(sg / n) >> 5, b = (int)(sb / n) >> 6;
+            uint32_t c = rgb(r * 255 / 7, g * 255 / 7, b * 255 / 3);
+            for (int y = by; y < y1; y++)
+                for (int x = bx; x < x1; x++)
+                    d[(size_t)y * (size_t)w + (size_t)x] = c;
+        }
+}
+
+/* Dots of ink on cream paper, on a grid turned 45 degrees; the dot is bigger where the picture is darker. */
+static void fx_halftone(const uint32_t *s, int w, int h, uint32_t *d)
+{
+    float cs = (float)w / 80.0f < 5.0f ? 5.0f : (float)w / 80.0f, c = 0.70710678f, sn = 0.70710678f;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float u = ((float)x * c + (float)y * sn) / cs, v = (-(float)x * sn + (float)y * c) / cs;
+            float cu = floorf(u) + 0.5f, cv = floorf(v) + 0.5f;
+            float px = (cu * c - cv * sn) * cs, py = (cu * sn + cv * c) * cs;                    /* the dot's centre, back in the picture */
+            float l = (float)lum(sample(s, w, h, px, py)) / 255.0f, rad = sqrtf(1.0f - l) * 0.72f;
+            float dist = sqrtf((u - cu) * (u - cu) + (v - cv) * (v - cv)), cov = (rad - dist) * cs + 0.5f;
+            cov = cov < 0 ? 0 : cov > 1 ? 1 : cov;
+            int k = (int)(cov * 256.0f);
+            d[(size_t)y * (size_t)w + (size_t)x] = rgb((244 * (256 - k) + 28 * k) / 256, (238 * (256 - k) + 24 * k) / 256, (222 * (256 - k) + 30 * k) / 256);
+        }
+}
+
+/* A broken signal: bands of rows slide sideways, the colours are pulled apart, now and then a band is inverted, scan lines. */
+static void fx_glitch(const uint32_t *s, int w, int h, uint32_t *d)
+{
+    int bandh = h / 36 < 3 ? 3 : h / 36, split = w / 110 < 2 ? 2 : w / 110;
+    for (int y = 0; y < h; y++) {
+        uint32_t hb = hash2(y / bandh, 91);
+        int shift = hb % 4 == 0 ? ((int)((hb >> 8) % 61) - 30) * w / 320 : 0, ss = split + shift / 4;
+        bool inv = hb % 29 == 0;
+        const uint32_t *row = s + (size_t)y * (size_t)w;
+        for (int x = 0; x < w; x++) {
+            int xr = x + shift + ss, xg = x + shift, xb = x + shift - ss;
+            xr = xr < 0 ? 0 : xr > w - 1 ? w - 1 : xr;
+            xg = xg < 0 ? 0 : xg > w - 1 ? w - 1 : xg;
+            xb = xb < 0 ? 0 : xb > w - 1 ? w - 1 : xb;
+            int r = (int)CR(row[xr]), g = (int)CG(row[xg]), b = (int)CB(row[xb]);
+            if (inv)
+                r = 255 - r, g = 255 - g, b = 255 - b;
+            if (y & 1)
+                r = r * 88 / 100, g = g * 88 / 100, b = b * 88 / 100;
+            d[(size_t)y * (size_t)w + (size_t)x] = rgb(r, g, b);
+        }
+    }
+}
+
+/* The picture as letters of the built-in font: each cell shows a character chosen by its brightness, in green with a little of the picture's colour. */
+static void fx_ascii(const uint32_t *s, int w, int h, uint32_t *d)
+{
+    static const char ramp[] = " .:-=+*#%@";
+    int cw = w / 96 < 6 ? 6 : w / 96, ch = cw * 2;
+    for (int cy = 0; cy < h; cy += ch)
+        for (int cx = 0; cx < w; cx += cw) {
+            long sr = 0, sg = 0, sb = 0;
+            int n = 0;
+            for (int j = 0; j < 3; j++)
+                for (int i = 0; i < 3; i++, n++) {
+                    int x = cx + (2 * i + 1) * cw / 6, y = cy + (2 * j + 1) * ch / 6;
+                    uint32_t p = s[(size_t)(y < h ? y : h - 1) * (size_t)w + (size_t)(x < w ? x : w - 1)];
+                    sr += CR(p), sg += CG(p), sb += CB(p);
+                }
+            int ar = (int)(sr / n), ag = (int)(sg / n), ab = (int)(sb / n);
+            uint32_t avg = rgb(ar, ag, ab);
+            int l = lum(avg);
+            const uint8_t *gl = lm_font_glyph((uint32_t)(unsigned char)ramp[l * 9 / 255]);
+            int bright = 70 + l * 185 / 255;
+            uint32_t on = rgb(bright * (10 + ar * 40 / 255) / 100, bright, bright * (10 + ab * 40 / 255) / 100), off = rgb(0, l / 14, 0);
+            for (int py = 0; py < ch && cy + py < h; py++)
+                for (int px = 0; px < cw && cx + px < w; px++) {
+                    int gx = px * 8 / cw, gy = py * 16 / ch;
+                    d[(size_t)(cy + py) * (size_t)w + (size_t)(cx + px)] = ((gl[gy] >> (7 - gx)) & 1) ? on : off;
+                }
+        }
+}
+
+/* ---- more lenses (they work round the focus point) ---------------------------------------------------------------------------- */
+
+/* A lens over the whole picture: the middle is magnified, the corners stay where they are. */
+static void fx_fisheye(const uint32_t *s, int w, int h, uint32_t *d, float fcx, float fcy)
+{
+    float cx = fcx * (float)(w - 1), cy = fcy * (float)(h - 1);
+    float mx = cx > (float)(w - 1) - cx ? cx : (float)(w - 1) - cx, my = cy > (float)(h - 1) - cy ? cy : (float)(h - 1) - cy, rmax = sqrtf(mx * mx + my * my);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float dx = (float)x - cx, dy = (float)y - cy, rr = sqrtf(dx * dx + dy * dy) / (rmax > 1 ? rmax : 1.0f), f = 0.55f + 0.45f * rr * rr;
+            d[(size_t)y * (size_t)w + (size_t)x] = sample(s, w, h, cx + dx * f, cy + dy * f);
+        }
+}
+
+/* Rings that run out from the point, like a stone in a pond. */
+static void fx_ripple(const uint32_t *s, int w, int h, uint32_t *d, float fcx, float fcy)
+{
+    float cx = fcx * (float)(w - 1), cy = fcy * (float)(h - 1), amp0 = (float)h / 55.0f, lam = (float)h / 28.0f;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float dx = (float)x - cx, dy = (float)y - cy, r = sqrtf(dx * dx + dy * dy), sx = (float)x, sy = (float)y;
+            if (r > 0.5f) {
+                float off = amp0 * expf(-r / ((float)h * 0.9f)) * sinf(r / lam * 1.5f);
+                sx += dx / r * off;
+                sy += dy / r * off;
+            }
+            d[(size_t)y * (size_t)w + (size_t)x] = sample(s, w, h, sx, sy);
+        }
+}
+
+/* The picture above the horizon (at the point's height) is as it is, below it is its wavy, blue reflection. */
+static void fx_water(const uint32_t *s, int w, int h, uint32_t *d, float fcy)
+{
+    float y0 = fcy * (float)(h - 1), span = (float)h - y0 + 1.0f;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            if ((float)y <= y0) {
+                d[i] = s[i];
+                continue;
+            }
+            float dd = (float)y - y0, amp = 1.5f + dd * 0.04f, sx = (float)x + amp * sinf(dd * 0.45f + (float)x * 0.02f);
+            uint32_t p = sample(s, w, h, sx, y0 - dd);
+            int k = (int)((0.15f + 0.35f * dd / span) * 256.0f);
+            d[i] = rgb(((int)CR(p) * (256 - k) + 20 * k) / 256, ((int)CG(p) * (256 - k) + 60 * k) / 256, ((int)CB(p) * (256 - k) + 110 * k) / 256);
+        }
+}
+
+/* The picture is sharp in a band at the point's height and blurred above and below, a little more colourful: a miniature. */
+static void fx_tiltshift(const uint32_t *s, int w, int h, uint32_t *d, float fcy)
+{
+    int sw = (w + 3) / 4, sh = (h + 3) / 4;                                 /* the blur is made on a quarter-size copy (a big radius on a big picture is slow) */
+    uint32_t *sm = malloc((size_t)sw * (size_t)sh * 8);
+    if (!sm) {
+        memcpy(d, s, (size_t)w * (size_t)h * 4);
+        return;
+    }
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++) {
+            int r = 0, g = 0, b = 0, n = 0;
+            for (int j = 0; j < 4 && y * 4 + j < h; j++)
+                for (int i = 0; i < 4 && x * 4 + i < w; i++, n++) {
+                    uint32_t p = s[(size_t)(y * 4 + j) * (size_t)w + (size_t)(x * 4 + i)];
+                    r += (int)CR(p), g += (int)CG(p), b += (int)CB(p);
+                }
+            sm[(size_t)y * (size_t)sw + (size_t)x] = rgb(r / n, g / n, b / n);
+        }
+    int rad = sh / 40 < 2 ? 2 : sh / 40;
+    box_blur(sm, sm + (size_t)sw * (size_t)sh, sw, sh, rad);
+    box_blur(sm, sm + (size_t)sw * (size_t)sh, sw, sh, rad);
+    float cy = fcy * (float)(h - 1), band = (float)h * 0.12f, ramp = (float)h * 0.28f;
+    for (int y = 0; y < h; y++) {
+        float t = (fabsf((float)y - cy) - band) / ramp;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        t = t * t * (3.0f - 2.0f * t);
+        int k = (int)(t * 256.0f);
+        for (int x = 0; x < w; x++) {
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            uint32_t bl = k ? sample(sm, sw, sh, ((float)x - 1.5f) / 4.0f, ((float)y - 1.5f) / 4.0f) : s[i];
+            int r0 = ((int)CR(s[i]) * (256 - k) + (int)CR(bl) * k) / 256, g0 = ((int)CG(s[i]) * (256 - k) + (int)CG(bl) * k) / 256;
+            int b0 = ((int)CB(s[i]) * (256 - k) + (int)CB(bl) * k) / 256, l = (r0 * 77 + g0 * 150 + b0 * 29) >> 8;
+            d[i] = rgb(l + (r0 - l) * 5 / 4, l + (g0 - l) * 5 / 4, l + (b0 - l) * 5 / 4);
+        }
+    }
+    free(sm);
+}
+
+/* ---- effects that use the pictures before ------------------------------------------------------------------------------------- */
+
+/* Bright things leave a trail that fades: each pixel is the brighter of the new picture and the last result, a little dimmer. */
+static void fx_trails(const uint32_t *s, int n, uint32_t *d, const struct camfx_hist *hs)
+{
+    const uint32_t *po = hs ? hs->prev_out : NULL;
+    for (int i = 0; i < n; i++) {
+        if (!po) {
+            d[i] = s[i];
+            continue;
+        }
+        int r = (int)CR(po[i]) * 237 / 256, g = (int)CG(po[i]) * 237 / 256, b = (int)CB(po[i]) * 237 / 256;
+        d[i] = rgb((int)CR(s[i]) > r ? (int)CR(s[i]) : r, (int)CG(s[i]) > g ? (int)CG(s[i]) : g, (int)CB(s[i]) > b ? (int)CB(s[i]) : b);
+    }
+}
+
+/* A slow average: what moves is smeared into a ghost, what stands still stays sharp. */
+static void fx_echo(const uint32_t *s, int n, uint32_t *d, const struct camfx_hist *hs)
+{
+    const uint32_t *po = hs ? hs->prev_out : NULL;
+    for (int i = 0; i < n; i++) {
+        if (!po) {
+            d[i] = s[i];
+            continue;
+        }
+        int c[3];
+        for (int k = 0; k < 3; k++) {
+            int sh = 16 - 8 * k, pv = (int)((po[i] >> sh) & 255), sv = (int)((s[i] >> sh) & 255), df = sv - pv;
+            c[k] = pv + (df * 77 + (df > 0 ? 255 : -255)) / 256;
+        }
+        d[i] = rgb(c[0], c[1], c[2]);
+    }
+}
+
+/* What changed since the picture before on a dark grey picture: cyan where it got brighter, magenta where it got darker. */
+static void fx_motion(const uint32_t *s, int n, uint32_t *d, const struct camfx_hist *hs)
+{
+    const uint32_t *ps = hs ? hs->prev_src : NULL;
+    for (int i = 0; i < n; i++) {
+        int base = lum(s[i]) / 4, a = 0, up = 1;
+        if (ps) {
+            int dl = lum(s[i]) - lum(ps[i]);
+            up = dl > 0;
+            a = dl < 0 ? -dl : dl;
+            a = a < 6 ? 0 : CL((a - 5) * 5);
+        }
+        d[i] = up ? rgb(base, base + a, base + a) : rgb(base + a, base, base + a * 4 / 5);
+    }
+}
+
+/* A slit scan: the top row is the picture now, the rows below are older and older pictures (up to CAMFX_RING of them). */
+static void fx_timewarp(const uint32_t *s, int w, int h, uint32_t *d, const struct camfx_hist *hs)
+{
+    int nr = hs && hs->ring ? hs->nring : 0;
+    for (int y = 0; y < h; y++) {
+        int k = nr > 0 ? y * (nr + 1) / h : 0;
+        const uint32_t *row = (k == 0 || !hs->ring[k - 1] ? s : hs->ring[k - 1]) + (size_t)y * (size_t)w;
+        memcpy(d + (size_t)y * (size_t)w, row, (size_t)w * 4);
+    }
+}
+
 /* ---- mirrors and distortions: every output pixel looks up a place in the source ---------------------------------------------- */
 
 /* The left of the axis is reflected on the right of it (the axis at fcx of the width: the middle unless the user moved it). */
@@ -298,12 +625,12 @@ static void fx_mirror(const uint32_t *s, int w, int h, uint32_t *d, float fcx)
         }
 }
 
-static void fx_kaleido(const uint32_t *s, int w, int h, uint32_t *d, float fcx, float fcy)
+static void fx_kaleido(const uint32_t *s, int w, int h, uint32_t *d, float fcx, float fcy, int nseg)
 {
-    float cx = fcx * (float)(w - 1), cy = fcy * (float)(h - 1), seg = 2.0f * PI_F / 6.0f;
+    float cx = fcx * (float)(w - 1), cy = fcy * (float)(h - 1), seg = 2.0f * PI_F / (float)nseg;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            float dx = (float)x - cx, dy = (float)y - cy, r = sqrtf(dx * dx + dy * dy) * 0.8f;
+            float dx = (float)x - cx, dy = (float)y - cy, r = sqrtf(dx * dx + dy * dy) * (nseg > 6 ? 0.55f : 0.8f);
             float a = atan2f(dy, dx) + PI_F;
             a = fmodf(a, seg);
             if (a > seg / 2.0f)
@@ -425,7 +752,10 @@ static uint32_t hash2(int x, int y)
     return h ^ (h >> 16);
 }
 
-static inline int lerp_i(int a, int b, float t) { return a + (int)((float)(b - a) * t); }
+static inline int lerp_i(int a, int b, float t)
+{
+    return a + (int)((float)(b - a) * t);
+}
 
 static uint32_t bd_sunset(int x, int y, int w, int h)
 {
@@ -484,6 +814,15 @@ static uint32_t bd_space(int x, int y, int w, int h)
     return rgb(r, g, b);
 }
 
+/* No picture chosen yet: a soft grey-blue wall. */
+static uint32_t bd_plain(int x, int y, int w, int h)
+{
+    (void)x;
+    (void)w;
+    float v = (float)y / (float)h;
+    return rgb(lerp_i(70, 30, v), lerp_i(80, 38, v), lerp_i(100, 55, v));
+}
+
 static uint32_t bd_neon(int x, int y, int w, int h)
 {
     float u = (float)x / (float)w, v = (float)y / (float)h, hor = 0.55f;
@@ -512,7 +851,223 @@ static uint32_t bd_neon(int x, int y, int w, int h)
     return rgb(r, g, b);
 }
 
-static void fx_backdrop(int fx, const uint32_t *src, const uint32_t *ref, int w, int h, uint32_t *d)
+static float smooth01(float t)
+{
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float vnoise(float x, float y)                                                  /* value noise, 0..1 */
+{
+    int xi = (int)floorf(x), yi = (int)floorf(y);
+    float fx = smooth01(x - (float)xi), fy = smooth01(y - (float)yi);
+    float a = (float)(hash2(xi, yi) & 0xffff), b = (float)(hash2(xi + 1, yi) & 0xffff), c = (float)(hash2(xi, yi + 1) & 0xffff), e = (float)(hash2(xi + 1, yi + 1) & 0xffff);
+    return ((a + (b - a) * fx) * (1.0f - fy) + (c + (e - c) * fx) * fy) / 65535.0f;
+}
+
+static float fbm(float x, float y)
+{
+    float v = 0, amp = 0.5f;
+    for (int o = 0; o < 4; o++, amp *= 0.5f, x *= 2.03f, y *= 2.03f)
+        v += amp * vnoise(x, y);
+    return v;
+}
+
+/* A wet window on a city at night: soft discs of coloured light, streaks and beads of rain. The same picture at any size. */
+static uint32_t bd_rain(int x, int y, int w, int h)
+{
+    float fx = (float)x * 640.0f / (float)w, fy = (float)y * 480.0f / (float)h, v = fy / 480.0f;
+    float r = 10.0f + 14.0f * v, g = 14.0f + 8.0f * v, b = 30.0f + 16.0f * v;
+    static const float pal[4][3] = { { 255, 190, 90 }, { 255, 90, 90 }, { 110, 170, 255 }, { 255, 120, 200 } };
+    int ci0 = (int)floorf(fx / 48.0f), cj0 = (int)floorf(fy / 48.0f);
+    for (int cj = cj0 - 1; cj <= cj0 + 1; cj++)
+        for (int ci = ci0 - 1; ci <= ci0 + 1; ci++) {
+            uint32_t hs = hash2(ci, cj);
+            if ((hs & 7) >= 4)
+                continue;
+            float px = (float)ci * 48.0f + (float)((hs >> 3) % 48), py = (float)cj * 48.0f + (float)((hs >> 9) % 48), rad = 10.0f + (float)((hs >> 15) % 18);
+            float dd = sqrtf((fx - px) * (fx - px) + (fy - py) * (fy - py));
+            if (dd >= rad)
+                continue;
+            float al = 0.14f + 0.16f * smooth01((dd - rad * 0.55f) / (rad * 0.45f)) * (1.0f - smooth01((dd - rad * 0.95f) / (rad * 0.05f)));
+            const float *c = pal[(hs >> 20) % 4];
+            r += c[0] * al, g += c[1] * al, b += c[2] * al;
+        }
+    float u = fx - fy * 0.06f;                                                          /* streaks run down a little slanted */
+    int col = (int)floorf(u / 6.0f);
+    uint32_t hc = hash2(col, 77);
+    if (fabsf(u - ((float)col * 6.0f + (float)(hc % 6))) < 0.8f) {
+        float period = 230.0f + (float)(hc % 140), ph = fmodf(fy + (float)((hc >> 8) % 400), period), len = 30.0f + (float)((hc >> 16) % 60);
+        if (ph < len) {
+            float k = 0.25f + 0.5f * (1.0f - ph / len);
+            r += 190 * k, g += 210 * k, b += 255 * k;
+        }
+    }
+    int bi = (int)floorf(fx / 40.0f), bj = (int)floorf(fy / 40.0f);                      /* a bead of water in some cells, lit at its upper left */
+    uint32_t hb = hash2(bi, bj + 5000);
+    if ((hb & 3) == 0) {
+        float px = (float)bi * 40.0f + 8.0f + (float)((hb >> 4) % 24), py = (float)bj * 40.0f + 8.0f + (float)((hb >> 10) % 24), rad = 2.5f + (float)((hb >> 16) % 3);
+        float dd = sqrtf((fx - px) * (fx - px) + (fy - py) * (fy - py));
+        if (dd < rad) {
+            float hl = 1.0f - sqrtf((fx - (px - rad * 0.35f)) * (fx - (px - rad * 0.35f)) + (fy - (py - rad * 0.35f)) * (fy - (py - rad * 0.35f))) / rad;
+            hl = hl < 0 ? 0 : hl;
+            r += 40 + 150 * hl, g += 50 + 150 * hl, b += 70 + 150 * hl;
+        }
+    }
+    return rgb((int)r, (int)g, (int)b);
+}
+
+/* A blue sky with clouds over a meadow. */
+static uint32_t bd_sky(int x, int y, int w, int h)
+{
+    float fx = (float)x * 640.0f / (float)w, fy = (float)y * 480.0f / (float)h, u = fx / 640.0f, v = fy / 480.0f;
+    float hor = 0.78f + 0.025f * sinf(u * 5.0f + 1.0f) + 0.012f * sinf(u * 13.0f);
+    if (v < hor) {
+        float t = v / 0.78f;
+        float r = (float)lerp_i(40, 180, t), g = (float)lerp_i(110, 215, t), b = (float)lerp_i(215, 248, t);
+        float n = fbm(fx / 150.0f + 3.7f, fy / 75.0f + 1.3f), c = smooth01((n - 0.47f) / 0.28f);
+        if (c > 0) {                                                                    /* (the sky between the clouds costs one noise, not two) */
+            float sh = fbm(fx / 150.0f + 3.7f, fy / 75.0f + 1.55f), shade = c * smooth01((n - sh) * 6.0f + 0.2f) * 38.0f;
+            r += (250.0f - r) * c - shade, g += (252.0f - g) * c - shade, b += (255.0f - b) * c - shade * 0.6f;
+        }
+        return rgb((int)r, (int)g, (int)b);
+    }
+    float k = (v - hor) / (1.0f - hor + 0.001f), stripe = 0.93f + 0.07f * sinf(k * 40.0f + sinf(u * 6.0f) * 2.0f);
+    return rgb((int)((float)lerp_i(100, 45, k) * stripe), (int)((float)lerp_i(175, 120, k) * stripe), (int)((float)lerp_i(65, 35, k) * stripe));
+}
+
+/* Letters falling down green columns, the head white. A cell is 10 x 16 of a 640 x 480 picture. */
+static uint32_t bd_matrix(int x, int y, int w, int h)
+{
+    float fx = (float)x * 640.0f / (float)w, fy = (float)y * 480.0f / (float)h;
+    int col = (int)(fx / 10.0f), row = (int)(fy / 16.0f);
+    float b = 0;
+    bool head = false;
+    for (int st = 0; st < 2; st++) {
+        uint32_t hs = hash2(col, 1 + st);
+        int len = 10 + (int)((hs >> 12) % 14), hd = (int)(hs % 54) - 8, dist = hd - row;
+        if (st == 1)
+            hd = (int)((hs >> 4) % 54) - 8, dist = hd - row;
+        if (dist >= 0 && dist < len) {
+            float k = 1.0f - (float)dist / (float)len;
+            if (k > b)
+                b = k;
+            if (dist == 0)
+                head = true;
+        }
+    }
+    if (b <= 0)
+        return rgb(0, 5, 2);
+    const uint8_t *gl = lm_font_glyph(33 + hash2(col, row + 300) % 94);
+    int px = (int)(fmodf(fx, 10.0f) * 0.8f), py = (int)fmodf(fy, 16.0f);
+    bool on = (gl[py] >> (7 - px)) & 1;
+    if (!on)
+        return rgb(0, (int)(8 + b * 26), (int)(3 + b * 8));
+    if (head)
+        return rgb(200, 255, 210);
+    return rgb((int)(b * 40), (int)(70 + b * 185), (int)(30 + b * 60));
+}
+
+/* ---- effects drawn on the faces the program found ----------------------------------------------------------------------------- */
+
+/* Blends the colour (col0 at the top of the shape, col1 at the bottom) over a rounded box or an ellipse, turned by `rot`, with a soft edge.
+ * (cx, cy) the middle, (hw, hh) the half sizes, rad the corner radius (an ellipse: rad < 0), alpha 0..1. */
+static void paint_shape(uint32_t *d, int w, int h, float cx, float cy, float hw, float hh, float rad, float rot, uint32_t col0, uint32_t col1, float alpha)
+{
+    float R = (hw > hh ? hw : hh) + 2.0f, cs = cosf(rot), sn = sinf(rot);
+    int x0 = (int)floorf(cx - R), x1 = (int)ceilf(cx + R), y0 = (int)floorf(cy - R), y1 = (int)ceilf(cy + R);
+    x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0, x1 = x1 > w - 1 ? w - 1 : x1, y1 = y1 > h - 1 ? h - 1 : y1;
+    if (hw < 0.5f || hh < 0.5f)
+        return;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            float dx = (float)x + 0.5f - cx, dy = (float)y + 0.5f - cy, u = dx * cs + dy * sn, v = -dx * sn + dy * cs, dist;
+            if (rad < 0) {                                                       /* an ellipse: the distance estimated by the gradient of its equation */
+                float k0 = sqrtf(u * u / (hw * hw) + v * v / (hh * hh)), k1 = sqrtf(u * u / (hw * hw * hw * hw) + v * v / (hh * hh * hh * hh));
+                dist = k1 > 1e-9f ? k0 * (k0 - 1.0f) / k1 : -(hw < hh ? hw : hh);
+            } else {                                                             /* a rounded box */
+                float qx = fabsf(u) - (hw - rad), qy = fabsf(v) - (hh - rad);
+                float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
+                dist = sqrtf(ox * ox + oy * oy) + (qx > qy ? (qx < 0 ? qx : 0) : (qy < 0 ? qy : 0)) - rad;
+            }
+            float cov = 0.5f - dist;
+            if (cov <= 0)
+                continue;
+            cov = (cov > 1 ? 1 : cov) * alpha;
+            float t = (v + hh) / (2.0f * hh);
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            int r = lerp_i((int)CR(col0), (int)CR(col1), t), g = lerp_i((int)CG(col0), (int)CG(col1), t), b = lerp_i((int)CB(col0), (int)CB(col1), t);
+            uint32_t *p = &d[(size_t)y * (size_t)w + (size_t)x];
+            int k = (int)(cov * 256.0f);
+            *p = rgb(((int)CR(*p) * (256 - k) + r * k) / 256, ((int)CG(*p) * (256 - k) + g * k) / 256, ((int)CB(*p) * (256 - k) + b * k) / 256);
+        }
+}
+
+static void face_hat(uint32_t *d, int w, int h, const struct camfx_face *f)
+{
+    float cx = f->x + f->w / 2, by = f->y + 0.02f * f->h;                       /* the brim sits on the forehead, its middle at by */
+    paint_shape(d, w, h, cx, by - 0.30f * f->h, 0.37f * f->w, 0.33f * f->h, 0.03f * f->h, 0, 0x2a2a30, 0x0e0e12, 1.0f);                 /* the crown */
+    paint_shape(d, w, h, cx - 0.22f * f->w, by - 0.30f * f->h, 0.025f * f->w, 0.28f * f->h, 0.02f * f->w, 0, 0x6a6a74, 0x30303a, 0.55f); /* a light stripe */
+    paint_shape(d, w, h, cx, by - 0.07f * f->h, 0.375f * f->w, 0.055f * f->h, 0.01f * f->h, 0, 0xb01a2c, 0x7a0f1d, 1.0f);              /* the red band */
+    paint_shape(d, w, h, cx, by + 0.012f * f->h, 0.64f * f->w, 0.072f * f->h, -1, 0, 0x08080a, 0x08080a, 0.45f);                        /* the brim's shadow */
+    paint_shape(d, w, h, cx, by, 0.64f * f->w, 0.07f * f->h, -1, 0, 0x2c2c32, 0x0a0a0d, 1.0f);                                          /* the brim */
+}
+
+static void face_shades(uint32_t *d, int w, int h, const struct camfx_face *f)
+{
+    float cx = f->x + f->w / 2, ey = f->y + 0.37f * f->h, dx = 0.215f * f->w, lw = 0.175f * f->w, lh = 0.105f * f->h;
+    paint_shape(d, w, h, cx, ey, 0.07f * f->w, 0.016f * f->h, 0.008f * f->h, 0, 0x101012, 0x101012, 1.0f);                              /* the bridge */
+    for (int k = -1; k <= 1; k += 2) {
+        float ex = cx + (float)k * dx;
+        paint_shape(d, w, h, cx + (float)k * 0.43f * f->w, ey - 0.005f * f->h, 0.075f * f->w, 0.013f * f->h, 0.006f * f->h, 0, 0x101012, 0x101012, 1.0f);  /* the temple */
+        paint_shape(d, w, h, ex, ey, lw + 0.012f * f->w, lh + 0.012f * f->h, 0.06f * f->h, 0, 0x0c0c0e, 0x0c0c0e, 1.0f);                /* the frame */
+        paint_shape(d, w, h, ex, ey, lw, lh, 0.055f * f->h, 0, 0x34343c, 0x040406, 0.94f);                                              /* the lens */
+        paint_shape(d, w, h, ex - 0.06f * f->w, ey - 0.03f * f->h, 0.03f * f->w, 0.012f * f->h, 0.01f * f->h, -0.5f, 0xffffff, 0xffffff, 0.35f);   /* a glare */
+    }
+}
+
+static void face_moustache(uint32_t *d, int w, int h, const struct camfx_face *f)
+{
+    float cx = f->x + f->w / 2, my = f->y + 0.745f * f->h;
+    for (int k = -1; k <= 1; k += 2) {
+        float s = (float)k;
+        paint_shape(d, w, h, cx + s * 0.135f * f->w, my, 0.17f * f->w, 0.052f * f->h, -1, s * 0.22f, 0x4a2c1a, 0x1c0e06, 1.0f);       /* the lobe, drooping outwards */
+        paint_shape(d, w, h, cx + s * 0.30f * f->w, my - 0.03f * f->h, 0.05f * f->w, 0.042f * f->h, -1, -s * 0.5f, 0x3a2012, 0x1c0e06, 1.0f);   /* the curl */
+    }
+    paint_shape(d, w, h, cx, my - 0.012f * f->h, 0.08f * f->w, 0.04f * f->h, -1, 0, 0x4a2c1a, 0x28160a, 1.0f);
+}
+
+static void face_clown(uint32_t *d, int w, int h, const struct camfx_face *f)
+{
+    static const uint32_t wig[6] = { 0xff7a14, 0xffd21e, 0x32be3c, 0x1ec8e6, 0xc83cc8, 0xe62828 };
+    float cx = f->x + f->w / 2, cy = f->y + 0.40f * f->h;
+    for (int i = 0; i < 11; i++) {                                              /* an arc of curls over the head and down the sides */
+        float a = 3.14159265f * (0.88f + 1.24f * (float)i / 10.0f);              /* from the left side over the top to the right side */
+        float px = cx + cosf(a) * 0.64f * f->w, py = cy + sinf(a) * 0.56f * f->h;
+        paint_shape(d, w, h, px, py, 0.21f * f->w, 0.21f * f->w, -1, 0, wig[i % 6], wig[i % 6] - ((wig[i % 6] >> 2) & 0x3f3f3f), 1.0f);
+    }
+    float nx = cx, ny = f->y + 0.62f * f->h, r = 0.085f * f->w;
+    paint_shape(d, w, h, nx, ny, r, r, -1, 0, 0xff4a52, 0xb80f1c, 1.0f);                                               /* the nose */
+    paint_shape(d, w, h, nx - r * 0.35f, ny - r * 0.35f, r * 0.28f, r * 0.2f, -1, -0.6f, 0xffffff, 0xffffff, 0.55f);   /* its shine */
+}
+
+static void fx_faces(int fx, const uint32_t *s, int w, int h, uint32_t *d, const struct camfx_hist *hs)
+{
+    memcpy(d, s, (size_t)w * (size_t)h * 4);
+    for (int i = 0; hs && hs->faces && i < hs->nfaces; i++) {
+        const struct camfx_face *f = &hs->faces[i];
+        if (!(f->w >= 8.0f && f->h >= 8.0f))
+            continue;
+        switch (fx) {
+        case CAMFX_HAT: face_hat(d, w, h, f); break;
+        case CAMFX_SHADES: face_shades(d, w, h, f); break;
+        case CAMFX_MOUSTACHE: face_moustache(d, w, h, f); break;
+        default: face_clown(d, w, h, f); break;
+        }
+    }
+}
+
+static void fx_backdrop(int fx, const uint32_t *src, const uint32_t *ref, const struct camfx_hist *hs, int w, int h, uint32_t *d)
 {
     int n = w * h;
     uint8_t *m = malloc((size_t)n * 2);
@@ -531,7 +1086,16 @@ static void fx_backdrop(int fx, const uint32_t *src, const uint32_t *ref, int w,
                 fg = rgb((int)CR(fg) * 3 / 4 + 55, (int)CG(fg) * 3 / 4 + 60, (int)CB(fg) * 3 / 4 + 64);   /* a pale, cold figure */
                 a = a * 6 / 10;
             } else {
-                bg = fx == CAMFX_SUNSET ? bd_sunset(x, y, w, h) : fx == CAMFX_SPACE ? bd_space(x, y, w, h) : bd_neon(x, y, w, h);
+                switch (fx) {
+                case CAMFX_SUNSET: bg = bd_sunset(x, y, w, h); break;
+                case CAMFX_SPACE: bg = bd_space(x, y, w, h); break;
+                case CAMFX_RAIN: bg = bd_rain(x, y, w, h); break;
+                case CAMFX_SKY: bg = bd_sky(x, y, w, h); break;
+                case CAMFX_MATRIX: bg = bd_matrix(x, y, w, h); break;
+                case CAMFX_PICTURE: bg = hs && hs->pic ? (hs->pic[i] | 0xff000000u) : bd_plain(x, y, w, h); break;
+                case CAMFX_ROOM: bg = hs && hs->pic ? (hs->pic[i] | 0xff000000u) : bd_matrix(x, y, w, h); break;
+                default: bg = bd_neon(x, y, w, h); break;
+                }
             }
             d[i] = rgb(((int)CR(fg) * a + (int)CR(bg) * (255 - a)) / 255, ((int)CG(fg) * a + (int)CG(bg) * (255 - a)) / 255,
                        ((int)CB(fg) * a + (int)CB(bg) * (255 - a)) / 255);
@@ -541,17 +1105,20 @@ static void fx_backdrop(int fx, const uint32_t *src, const uint32_t *ref, int w,
 
 void camfx_apply(int fx, const uint32_t *src, int w, int h, uint32_t *dst)
 {
-    camfx_apply_ref(fx, src, NULL, w, h, dst);
+    camfx_apply_h(fx, src, NULL, NULL, w, h, dst, 0.5f, 0.5f);
 }
-
-int camfx_has_focus(int fx) { return fx >= CAMFX_MIRROR && fx <= CAMFX_VINTAGE; }
 
 void camfx_apply_ref(int fx, const uint32_t *src, const uint32_t *ref, int w, int h, uint32_t *dst)
 {
-    camfx_apply_at(fx, src, ref, w, h, dst, 0.5f, 0.5f);
+    camfx_apply_h(fx, src, ref, NULL, w, h, dst, 0.5f, 0.5f);
 }
 
 void camfx_apply_at(int fx, const uint32_t *src, const uint32_t *ref, int w, int h, uint32_t *dst, float fcx, float fcy)
+{
+    camfx_apply_h(fx, src, ref, NULL, w, h, dst, fcx, fcy);
+}
+
+void camfx_apply_h(int fx, const uint32_t *src, const uint32_t *ref, const struct camfx_hist *hist, int w, int h, uint32_t *dst, float fcx, float fcy)
 {
     fcx = fcx < 0 ? 0 : fcx > 1 ? 1 : fcx;
     fcy = fcy < 0 ? 0 : fcy > 1 ? 1 : fcy;
@@ -573,9 +1140,31 @@ void camfx_apply_at(int fx, const uint32_t *src, const uint32_t *ref, int w, int
     case CAMFX_GLOW: fx_glow(src, w, h, dst); break;
     case CAMFX_VINTAGE: fx_vintage(src, w, h, dst, fcx, fcy); break;
     case CAMFX_MIRROR: fx_mirror(src, w, h, dst, fcx); break;
-    case CAMFX_KALEIDO: fx_kaleido(src, w, h, dst, fcx, fcy); break;
+    case CAMFX_KALEIDO: fx_kaleido(src, w, h, dst, fcx, fcy, 6); break;
+    case CAMFX_TRIPLE: fx_kaleido(src, w, h, dst, fcx, fcy, 3); break;
+    case CAMFX_MANDALA: fx_kaleido(src, w, h, dst, fcx, fcy, 10); break;
     case CAMFX_TUNNEL: fx_tunnel(src, w, h, dst, fcx, fcy); break;
-    case CAMFX_SUNSET: case CAMFX_SPACE: case CAMFX_NEON: case CAMFX_GHOST: fx_backdrop(fx, src, ref, w, h, dst); break;
+    case CAMFX_NEGATIVE: fx_negative(src, n, dst); break;
+    case CAMFX_SOLARIZE: fx_solarize(src, n, dst); break;
+    case CAMFX_DUOTONE: fx_duotone(src, n, dst); break;
+    case CAMFX_EMBOSS: fx_emboss(src, w, h, dst); break;
+    case CAMFX_NIGHT: fx_night(src, w, h, dst); break;
+    case CAMFX_PIXEL: fx_pixel(src, w, h, dst); break;
+    case CAMFX_HALFTONE: fx_halftone(src, w, h, dst); break;
+    case CAMFX_GLITCH: fx_glitch(src, w, h, dst); break;
+    case CAMFX_ASCII: fx_ascii(src, w, h, dst); break;
+    case CAMFX_FISHEYE: fx_fisheye(src, w, h, dst, fcx, fcy); break;
+    case CAMFX_RIPPLE: fx_ripple(src, w, h, dst, fcx, fcy); break;
+    case CAMFX_WATER: fx_water(src, w, h, dst, fcy); break;
+    case CAMFX_TILTSHIFT: fx_tiltshift(src, w, h, dst, fcy); break;
+    case CAMFX_TRAILS: fx_trails(src, n, dst, hist); break;
+    case CAMFX_ECHO: fx_echo(src, n, dst, hist); break;
+    case CAMFX_MOTION: fx_motion(src, n, dst, hist); break;
+    case CAMFX_TIMEWARP: fx_timewarp(src, w, h, dst, hist); break;
+    case CAMFX_SUNSET: case CAMFX_SPACE: case CAMFX_NEON: case CAMFX_GHOST: case CAMFX_RAIN: case CAMFX_SKY: case CAMFX_MATRIX: case CAMFX_PICTURE: case CAMFX_ROOM:
+        fx_backdrop(fx, src, ref, hist, w, h, dst);
+        break;
+    case CAMFX_HAT: case CAMFX_SHADES: case CAMFX_MOUSTACHE: case CAMFX_CLOWN: fx_faces(fx, src, w, h, dst, hist); break;
     default: fx_lens(fx, src, w, h, dst, fcx, fcy); break;
     }
 }

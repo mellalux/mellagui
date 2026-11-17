@@ -225,7 +225,7 @@ $(BUILD)/mellagui-view: $(BUILD)/client/mellagui-view.o $(BUILD)/client/wlclip.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/client/camfx.o $(BUILD)/client/camsound.o $(BUILD)/client/audiocap.o $(BUILD)/src/jpegenc.o $(BUILD)/src/mp4.o $(BUILD)/src/img.o $(BUILD)/src/svg.o $(BUILD)/src/webp.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/client/ffpipe.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-cam: $(BUILD)/client/mellagui-cam.o $(BUILD)/client/camfx.o $(BUILD)/client/facedet.o $(BUILD)/client/camsound.o $(BUILD)/client/audiocap.o $(BUILD)/src/jpegenc.o $(BUILD)/src/mp4.o $(BUILD)/src/img.o $(BUILD)/src/svg.o $(BUILD)/src/webp.o $(BUILD)/src/jpeg.o $(BUILD)/src/png.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(BUILD)/client/ffpipe.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

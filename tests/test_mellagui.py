@@ -20541,7 +20541,7 @@ class TestSaver(Base):
 
     def test_defaults(self):
         p, c = self.start('mellagui-sv1', '--config', 'none')
-        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0'})        # (blank is 15 by default; the harness switches the monitor's sleep off)
+        self.assertEqual(self.saver(c), {'running': '0', 'enabled': '1', 'minutes': '10', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0', 'turtle': '1'})        # (blank is 15 by default; the harness switches the monitor's sleep off)
 
     def test_it_starts_after_the_idle_time_full_screen_and_the_first_input_ends_it(self):
         p, c = self.start('mellagui-sv2', '--config', 'none')
@@ -20857,7 +20857,7 @@ class TestSaver(Base):
         c.cmd('quit')
         p.wait(timeout=5)
         p2, c2 = self.start('mellagui-sv8b', '--config', 'none', '--settings', conf)
-        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0'})
+        self.assertEqual(self.saver(c2), {'running': '0', 'enabled': '0', 'minutes': '25', 'lock': '1', 'blank': '0', 'shield': '0', 'style': 'room', 'cat': '1', 'meow': '0', 'turtle': '1'})
 
     def test_a_preview_started_by_hand_survives_the_click_and_a_shaking_hand(self):
         p, c = self.start('mellagui-sv14', '--config', 'none', '--size', '800x500')
@@ -20979,6 +20979,18 @@ class TestSaver(Base):
         with self.assertRaises(RuntimeError):
             c.cmd('settings saver-cat maybe')
         c.cmd('settings saver-cat 1')
+        self.assertEqual(self.saver(c)['turtle'], '1')                      # Filip, the turtle, is there by default
+        c.cmd('settings saver-turtle 0')
+        self.assertEqual(self.saver(c)['turtle'], '0')
+        os.unlink(log)
+        c.cmd('saver stop')
+        time.sleep(0.3)
+        c.cmd('saver start')
+        self.wait(lambda: os.path.exists(log), 'started without the turtle')
+        self.assertEqual(open(log).read().strip(), '--no-turtle')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings saver-turtle maybe')
+        c.cmd('settings saver-turtle 1')
         c.cmd('settings saver-style flat')
         time.sleep(0.6)
         c.cmd('quit')
@@ -21121,7 +21133,7 @@ class TestSaver(Base):
         if not os.path.exists(exe):
             raise unittest.SkipTest('mellagui-matrix not built')
         path = os.path.join(tmp, name + '.ppm')
-        r = subprocess.run([exe, '--bench', '640x360', '--time', time_of_day, '--seed', '3'] + sun_args, capture_output=True, text=True, timeout=60,
+        r = subprocess.run([exe, '--bench', '640x360', '--time', time_of_day, '--seed', '3', '--no-turtle'] + sun_args, capture_output=True, text=True, timeout=60,
                            env=dict(os.environ, MELLAGUI_MATRIX_PPM=path, **(env or {})))
         assert r.returncode == 0, r.stderr
         d = open(path, 'rb').read().split(b'\n', 3)

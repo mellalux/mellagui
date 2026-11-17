@@ -322,7 +322,7 @@ static int selftest(void)
 #define DEFAULT_H 440
 #define SIDE_W 140
 #define MAX_WIDGETS 180
-#define MAX_KV 160
+#define MAX_KV 220
 #define VALUE_MAX 3300          /* longest value (the lists of resolutions / sound outputs) */
 
 enum page { PAGE_INPUT, PAGE_ACCESS, PAGE_DESKTOP, PAGE_DISPLAY, PAGE_SOUND, PAGE_SECURITY, PAGE_SAVER, PAGE_CONFIG, PAGE_KEYS, PAGE_COLOURS, PAGE_DOCK, PAGE_CLOCK, PAGE_NIGHT, N_PAGES };

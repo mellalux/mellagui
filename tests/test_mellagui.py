@@ -12425,6 +12425,50 @@ class TestCamera(Base):
         im = Image.open(os.path.join(d, newest)).convert('RGB')
         self.assertGreater(sum(1 for r, g, b in im.getdata() if r > 230 and g > 230 and b > 230), 2 * 24 * 24, 'the square left no trail')   # (a square is 24 x 24: more than one square is white)
 
+    def test_the_strip_has_a_scroll_bar_to_drag_and_to_click_beside(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow reads the pictures')
+        d0 = tempfile.mkdtemp(prefix='mellagui-camsbar-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d0, ignore_errors=True)
+        for n in range(30):
+            Image.new('RGB', (64, 48), (n * 8, 100, 200)).save(os.path.join(d0, 'camera-20260101-0000%02d.png' % n))
+        dump = os.path.join(tmp, 'cam-%d.dump' % time.time_ns())
+        pr = subprocess.Popen([self.CAM], env=dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_DIR=d0, MELLAGUI_CAM_TIMER='0', MELLAGUI_CAM_PLAYER='none', MELLAGUI_CAM_DUMP=dump,
+                                                    MELLAGUI_CAM_WINDOW='700x420', XDG_CONFIG_HOME=self.cfgdir()), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.assertIsNotNone(wait_for_window('mellagui.cam'))
+        time.sleep(1.0)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+
+        def bar():
+            lines = open(dump).read().splitlines()
+            top = int(re.search(r'top=(\d+)', lines[0]).group(1))
+            return top, [int(v) for v in [l for l in lines if l.startswith('sbar ')][0].split()[1:]]
+        time.sleep(0.3)
+        top, (x, y, w, track, thy, thh) = bar()
+        self.assertEqual(top, 0)
+        self.assertEqual(thy, y)                                                          # the thumb is at the top of the track
+        self.assertLess(thh, track)
+        ctl.click(win['x'] + x + w // 2, win['y'] + y + track - 4)                        # a click on the track below the thumb: a page down
+        time.sleep(0.4)
+        top2, (_, _, _, _, thy2, _) = bar()
+        self.assertGreater(top2, 0)
+        self.assertGreater(thy2, thy)
+        cx, cy = win['x'] + x + w // 2, win['y'] + thy2 + thh // 2                        # drag the thumb to the bottom of the track
+        ctl.abs(cx, cy)
+        ctl.button(272, True)
+        ctl.abs(cx, win['y'] + y + track + 30)
+        ctl.button(272, False)
+        time.sleep(0.4)
+        top3, (_, _, _, _, thy3, _) = bar()
+        n = int(re.search(r'strip=(\d+)', open(dump).read()).group(1))
+        thumbs = [l for l in open(dump).read().splitlines() if l.startswith('thumb')]
+        self.assertEqual(top3, n - len(thumbs))                                           # the end of the list
+        self.assertEqual(thy3 + thh, y + track)
+
     def test_your_own_picture_and_tom_s_room_go_behind_you_and_a_face_gets_a_hat(self):
         try:
             from PIL import Image

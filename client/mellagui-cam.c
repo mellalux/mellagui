@@ -111,7 +111,8 @@ struct source {
 #define STRIP_H 96                      /* the height they are kept at (they are shown at most 48 high, squeezed to the buffer's pixels) */
 #define STRIP_TW 64                     /* the room of a picture in the strip: 64 x 48 */
 #define STRIP_TH 48
-#define STRIP_COL 84                    /* the width of the column the strip has at the right of the picture */
+#define STRIP_BASE 84                   /* the width of the column's pictures; the scroll bar ([windows] scrollbar-width, as the editor's) is beside them */
+#define STRIP_COL (STRIP_BASE + lm_metrics.scrollbar_width)   /* the width of the whole column the strip has at the right of the picture */
 
 struct thumb {
     struct lm_image img;                /* the small copy; px NULL until it was made (the ones of the folder are read when they come into view) */
@@ -194,6 +195,8 @@ struct app {
     struct thumb strip[STRIP_MAX];      /* the newest picture first */
     int nstrip, strip_top, shover;      /* how many, the first one in view, and the one under the pointer (-1 none) */
     bool fhover;                        /* the pointer is on the strip's folder button */
+    bool sbar_drag;                     /* the strip's scroll bar thumb is being dragged ... */
+    int sbar_off;                       /* ... this far below the thumb's top edge */
     float focus_x, focus_y;             /* the point the effect works round (0..1 of the picture; the effect's own space, before the mirror) */
     bool focus_drag;                    /* the button is down on the picture: the point follows the pointer */
     bool pin;                           /* the pointer is in the window */
@@ -1723,7 +1726,7 @@ static bool folder_rect(const struct app *a, int *x, int *y, int *w, int *h)
         return false;
     *w = STRIP_TW;
     *h = 26;
-    *x = a->win.bw - STRIP_COL + (STRIP_COL - STRIP_TW) / 2;
+    *x = a->win.bw - STRIP_COL + (STRIP_BASE - STRIP_TW) / 2;
     *y = 8;
     return true;
 }
@@ -1734,6 +1737,33 @@ static bool folder_at(const struct app *a, double px, double py)
     return folder_rect(a, &x, &y, &w, &h) && px >= x && px < x + w && py >= y && py < y + h;
 }
 
+/* The strip's scroll bar, the editor's kind: `[windows] scrollbar-width` wide, at the right edge of the column over the whole height of the picture's
+ * area; the thumb is the part of the list in view. x / y / w / track = the bar, thy / thh = the thumb (window pixels). False while every picture fits. */
+static bool strip_bar(const struct app *a, int *x, int *y, int *w, int *track, int *thy, int *thh)
+{
+    int fit = strip_fit(a);
+    if (!strip_on(a) || fit <= 0 || a->nstrip <= fit)
+        return false;
+    *w = lm_metrics.scrollbar_width;
+    *x = a->win.bw - *w;
+    *y = 0;
+    *track = picture_h(a);
+    *thh = LM_CLAMP(*track * fit / a->nstrip, LM_MIN(28, *track), *track);
+    *thy = (*track - *thh) * LM_CLAMP(a->strip_top, 0, a->nstrip - fit) / (a->nstrip - fit);
+    return true;
+}
+
+/* A drag of the thumb: the pointer at py puts the first picture of the view where it belongs. */
+static void strip_bar_drag(struct app *a, double py)
+{
+    int x, y, w, track, thy, thh, fit = strip_fit(a);
+    if (!strip_bar(a, &x, &y, &w, &track, &thy, &thh) || track <= thh)
+        return;
+    double f = (py - a->sbar_off - y) / (double)(track - thh);
+    a->strip_top = LM_CLAMP((int)(f * (a->nstrip - fit) + 0.5), 0, a->nstrip - fit);
+    a->win.redraw = true;
+}
+
 /* The place of picture i (an index into the strip) if it is in view: its slot of 64 x 48 in the column, the picture fitted into it (a slot with no
  * small copy yet is the whole slot). */
 static bool strip_rect(const struct app *a, int i, int *x, int *y, int *w, int *h)
@@ -1741,7 +1771,7 @@ static bool strip_rect(const struct app *a, int i, int *x, int *y, int *w, int *
     int slot = i - a->strip_top;
     if (!strip_on(a) || i < 0 || i >= a->nstrip || slot < 0 || slot >= strip_fit(a))
         return false;
-    int sx = a->win.bw - STRIP_COL + (STRIP_COL - STRIP_TW) / 2, sy = 44 + slot * (STRIP_TH + 8);
+    int sx = a->win.bw - STRIP_COL + (STRIP_BASE - STRIP_TW) / 2, sy = 44 + slot * (STRIP_TH + 8);
     const struct lm_image *t = &a->strip[i].img;
     *w = STRIP_TW;
     *h = STRIP_TH;
@@ -1919,7 +1949,7 @@ static void paint_strip(struct app *a)
     if (!strip_on(a))
         return;
     strip_clamp(a);
-    int k = wlwin_scale(w), vh = picture_h(a), x0 = w->bw - STRIP_COL, fit = strip_fit(a);
+    int k = wlwin_scale(w), vh = picture_h(a), x0 = w->bw - STRIP_COL;
     wlwin_fill(w, x0, 0, STRIP_COL, vh, lm_theme.bar);
     wlwin_fill(w, x0, 0, 1, vh, lm_theme.border);
     int fx, fy, fw, fh;
@@ -1948,10 +1978,10 @@ static void paint_strip(struct app *a)
         if (a->strip[i].video)
             paint_play_mark(w, x, y, tw, th);
     }
-    if (a->nstrip > fit && fit > 0) {                                                                    /* more than fit: a thumb for the wheel */
-        int track = fit * (STRIP_TH + 8) - 8, th = LM_MAX(track * fit / a->nstrip, 12), room = a->nstrip - fit;
-        wlwin_fill(w, x0 + 3, 44, 3, track, lm_theme.border);
-        wlwin_fill(w, x0 + 3, 44 + (track - th) * a->strip_top / room, 3, th, lm_theme.text_soft);
+    int bx, by, bw, btrack, thy, thh;
+    if (strip_on(a) && strip_bar(a, &bx, &by, &bw, &btrack, &thy, &thh)) {                                /* the thumb, as the editor's: inset by 2 px, lit under the pointer */
+        bool hot = a->sbar_drag || (a->px >= bx && a->py >= thy && a->py < thy + thh);
+        wlwin_fill(w, bx + 2, thy + 1, bw - 4, thh - 2, hot ? lm_theme.control_hot : lm_theme.control);
     }
 }
 
@@ -2044,6 +2074,11 @@ static void write_dump(const struct app *a)
         int x, y, w, h;
         if (folder_rect(a, &x, &y, &w, &h))
             fprintf(f, "ctl folder %d %d %d %d\n", x + a->win.inx, y, w, h);
+    }
+    {
+        int x, y, w, track, thy, thh;
+        if (strip_bar(a, &x, &y, &w, &track, &thy, &thh))
+            fprintf(f, "sbar %d %d %d %d %d %d\n", x + a->win.inx, y, w, track, thy, thh);
     }
     for (int i = 0; i < a->nstrip; i++) {
         int x, y, w, h;
@@ -2592,6 +2627,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->shover = a->fx_open ? -1 : strip_at(a, a->px, a->py);
         a->fhover = folder_at(a, a->px, a->py);
         a->pin = true;
+        if (a->sbar_drag)
+            strip_bar_drag(a, a->py);
         if (a->focus_drag && focus_active(a))
             focus_from(a, a->px, a->py);
         else if (focus_active(a) && pic_hit(a, a->px, a->py))
@@ -2659,6 +2696,18 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 w->redraw = true;
                 break;
             }
+            int sbx, sby, sbw, sbt, sthy, sthh;
+            if (b < 0 && !a->fx_open && strip_bar(a, &sbx, &sby, &sbw, &sbt, &sthy, &sthh) && a->px >= sbx && a->px < sbx + sbw && a->py >= sby && a->py < sby + sbt) {
+                if (a->py >= sthy && a->py < sthy + sthh) {     /* the thumb: drag it */
+                    a->sbar_drag = true;
+                    a->sbar_off = (int)(a->py - sthy);
+                } else {                                        /* the track beside it: a page up or down */
+                    a->strip_top += (a->py < sthy ? -1 : 1) * strip_fit(a);
+                    strip_clamp(a);
+                }
+                w->redraw = true;
+                break;
+            }
             int sp = b < 0 ? strip_at(a, a->px, a->py) : -1;
             if (sp >= 0) {                                      /* a picture of the strip: look at it */
                 spawn_detached("MELLAGUI_CAM_VIEWER", "mellagui-view", a->strip[sp].path);
@@ -2681,6 +2730,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         } else if (args[2].u == 272) {
             wlrail_release(&a->ran);                            /* (the drop springs back) */
             a->focus_drag = false;
+            a->sbar_drag = false;
             w->redraw = true;
         }
         break;

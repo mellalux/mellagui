@@ -99,7 +99,7 @@ $(BUILD)/keymap-test: $(BUILD)/tests/keymap_test.o $(BUILD)/src/keymap.o $(BUILD
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/chess-test: $(BUILD)/tests/chess_test.o $(BUILD)/client/chess.o
+$(BUILD)/chess-test: $(BUILD)/tests/chess_test.o $(BUILD)/client/chess.o $(BUILD)/client/chessbook.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -169,7 +169,7 @@ $(BUILD)/mellagui-tetris: $(BUILD)/client/mellagui-tetris.o $(BUILD)/src/wlc.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-chess: $(BUILD)/client/mellagui-chess.o $(BUILD)/client/chess.o $(BUILD)/client/chessai.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-chess: $(BUILD)/client/mellagui-chess.o $(BUILD)/client/chess.o $(BUILD)/client/chessai.o $(BUILD)/client/chessbook.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

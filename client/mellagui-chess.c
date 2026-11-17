@@ -3,12 +3,13 @@
  * The rules are client/chess.[ch], the search client/chessai.[ch], the pieces client/chessart.h (drawn from distance functions: no fonts, no files).
  * This file is the window: the board, the pointer and the keys, the engine in a thread of its own, the cards, the best results, the test dump.
  *
- *   mellagui-chess [--level 0..9] [--black] [--fen FEN] [--clock-seconds BASE+INC] [--size WxH] [--delay MS]
+ *   mellagui-chess [--level 0..9] [--black] [--fen FEN] [--clock-seconds BASE+INC] [--no-book] [--seed N] [--size WxH] [--delay MS]
  *   mellagui-chess --selftest | --sheet FILE.ppm [SIZE]      (the pieces on a board, to look at)
  *
  * Level 0 = two players on one screen, 1..9 = the engine (chai_level).  Move a piece by dragging it or by a click on it and a click on where it goes;
  * the arrow keys and Enter do the same; N new game, U / Backspace take a move back, H asks the engine for a hint, F turns the board, 0..9 the level.
  * The engine thinks in a thread (it never stops the window) and answers after at least --delay ms, so a move can be seen.
+ * The opening book (chessbook.c) is played from level 3 on, as deep as the level allows; its name shows beside the moves.
  * The clock (C steps through the presets): it starts when both sides have made their first move, the move that is made adds the increment,
  * the side whose time runs out loses (a draw when the other side could not mate anyway), the engine plans its thinking by the time it has.
  */
@@ -29,6 +30,7 @@
 #include "chess.h"
 #include "chessai.h"
 #include "chessart.h"
+#include "chessbook.h"
 #include "font.h"
 #include "keymap.h"
 #include "metrics.h"
@@ -128,6 +130,14 @@ struct app {
     int64_t (*snap)[2];                                     /* the clocks after 0, 1, 2 ... plies: what undo puts back */
     int snapcap;
     int cli_base, cli_inc;                                  /* --clock-seconds, -1 = not given */
+    struct chbook *book;                                    /* NULL = --no-book */
+    uint32_t seed, cli_seed;                                /* the game's seed (book choice); --seed makes it the same every run */
+    int games;
+    ch_move bk_move;                                        /* a book move waiting for its delay */
+    int64_t bk_t0;
+    int bk_ticket;
+    bool last_book;                                         /* the computer's last move was a book move */
+    char opening[96];
     int timeout;                                            /* the side that lost on time, -1 none */
     bool timeout_draw;
     ch_move hint;
@@ -358,6 +368,7 @@ static void *think_thread(void *arg)
 static void think_cancel(struct app *a)
 {
     struct think *t = &a->tk;
+    a->bk_move = 0;
     if (!t->started)
         return;
     chai_stop(a->ai);
@@ -426,6 +437,47 @@ static bool engine_to_move(const struct app *a)
     return a->level > 0 && a->human >= 0 && a->g.pos.side != a->human && status(a) == CH_ONGOING;
 }
 
+/* ---- the opening book ---- */
+
+/* how deep (in plies) the book is used at a level: the weakest levels know no theory */
+static int book_depth(int level)
+{
+    return level <= 2 ? 0 : level == 3 ? 4 : level == 4 ? 8 : level == 5 ? 12 : 40;
+}
+
+static ch_move book_move(const struct app *a, int max_ply)
+{
+    if (!a->book)
+        return 0;
+    return chbook_pick(a->book, &a->g.pos, a->seed * 2654435761u + (uint32_t)a->g.n, max_ply);
+}
+
+/* the opening's name: the last named position of the game (the name stays after the game leaves the book) */
+static void update_opening(struct app *a, bool announce)
+{
+    char name[96] = "";
+    if (a->book)
+        for (int i = a->g.n; i >= 0; i--) {
+            const char *nm = chbook_name(a->book, a->g.hist[i]);
+            if (nm) {
+                snprintf(name, sizeof(name), "%s", nm);
+                break;
+            }
+        }
+    if (strcmp(name, a->opening)) {
+        snprintf(a->opening, sizeof(a->opening), "%s", name);
+        if (announce && name[0])
+            say(a, "%s", name);
+    }
+}
+
+static uint32_t fresh_seed(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint32_t)(ts.tv_nsec ^ (uint32_t)ts.tv_sec * 2654435761u ^ (uint32_t)getpid() << 7) % 1000000u + 1u;
+}
+
 /* ---- moves ---- */
 
 static void deselect(struct app *a)
@@ -492,6 +544,7 @@ static void after_move(struct app *a, bool capture)
 {
     refresh_legal(a);
     a->hint = 0;
+    update_opening(a, true);
     int s = status(a);
     a->win.redraw = true;
     if (s != CH_ONGOING) {
@@ -645,6 +698,10 @@ static void new_game(struct app *a, int human)
     a->msg[0] = 0;
     a->kb = -1;
     clock_reset(a);
+    a->games++;
+    a->seed = a->cli_seed ? a->cli_seed + (uint32_t)a->games - 1 : fresh_seed();
+    a->last_book = false;
+    a->opening[0] = 0;
     deselect(a);
     refresh_legal(a);
     stats_save(&a->st);
@@ -695,6 +752,7 @@ static void undo(struct app *a)
     a->hint = 0;
     deselect(a);
     refresh_legal(a);
+    update_opening(a, false);
     say(a, back == 2 ? "Two moves taken back" : "One move taken back");
     sound(a, "place");
     a->win.redraw = true;
@@ -706,6 +764,15 @@ static void ask_hint(struct app *a)
         return;
     if (!human_turn(a)) {
         say(a, "Wait for the computer");
+        return;
+    }
+    ch_move bm = book_move(a, 40);
+    if (bm) {                                               /* a book move is a good one, and it costs no time */
+        char san[16];
+        a->hint = bm;
+        a->hint_ms = now_ms();
+        ch_move_san(&a->g.pos, bm, san);
+        say(a, "Hint: %s  (the book)", san);
         return;
     }
     say(a, "Looking for a good move ...");
@@ -737,8 +804,37 @@ static void think_collect(struct app *a, int64_t now)
         a->win.redraw = true;
         return;
     }
-    if (t->res.best && engine_to_move(a))
+    if (t->res.best && engine_to_move(a)) {
+        a->last_book = false;
         play(a, t->res.best);
+    }
+}
+
+/* a book move is played after the same short wait as a searched one */
+static void book_collect(struct app *a, int64_t now)
+{
+    if (!a->bk_move || now - a->bk_t0 < a->delay_ms)
+        return;
+    ch_move m = a->bk_move;
+    a->bk_move = 0;
+    if (a->bk_ticket != a->ticket || !engine_to_move(a))
+        return;
+    a->last_book = true;
+    play(a, m);
+}
+
+/* the computer's turn: from the book while there is one, else a search */
+static void engine_start(struct app *a, int64_t now)
+{
+    ch_move bm = book_move(a, book_depth(a->level));
+    if (bm) {
+        a->bk_move = bm;
+        a->bk_t0 = now;
+        a->bk_ticket = a->ticket;
+        a->win.redraw = true;
+        return;
+    }
+    think_start(a, 0);
 }
 
 /* ---- the sprites ---- */
@@ -913,17 +1009,36 @@ static void paint_panel(struct app *a, const struct lay *L)
     /* the moves */
     int ly = y0 + LM_FONT_H + 10 + clk_h, lh = h - 2 * (LM_FONT_H + 10) - 2 * clk_h;
     wlwin_round_fill(w, x, ly, pw, lh, 10, COL_BAR);
-    int rowh = LM_FONT_H + 4, rows = (lh - 12) / rowh;
+    int rowh = LM_FONT_H + 4;
+    int name_rows = 0;
+    if (a->opening[0]) {                                    /* the opening's name, split at the colon: the opening and its variation */
+        char l1[96], l2[96] = "";
+        snprintf(l1, sizeof(l1), "%s", a->opening);
+        char *colon = strstr(l1, ": ");
+        if (colon) {
+            snprintf(l2, sizeof(l2), "%s", colon + 2);
+            *colon = 0;
+        }
+        wlwin_text_bold(w, x + 12, ly + 8, l1, 1, COL_ACCENT, pw - 20);
+        name_rows = 1;
+        if (l2[0]) {
+            wlwin_text(w, x + 12, ly + 8 + rowh, l2, 1, COL_ACCENT, pw - 20);
+            name_rows = 2;
+        }
+        wlwin_fill(w, x + 12, ly + 8 + name_rows * rowh, pw - 24, 1, lm_mix_rgb(COL_BAR, 0xffffff, 0.12));
+        name_rows++;
+    }
+    int rows = (lh - 12) / rowh - name_rows;
     int total = (a->g.n + (a->g.start.side == CH_BLACK ? 1 : 0) + 1) / 2;
     int first = LM_MAX(0, total - rows);
     for (int r = first; r < total; r++) {
         char line[64];
         format_moves(a, r, line, sizeof(line));
         bool newest = r == total - 1;
-        wlwin_text(w, x + 12, ly + 8 + (r - first) * rowh, line, 1, newest ? lm_theme.text_bright : COL_TEXT, pw - 20);
+        wlwin_text(w, x + 12, ly + 8 + (name_rows + r - first) * rowh, line, 1, newest ? lm_theme.text_bright : COL_TEXT, pw - 20);
     }
     if (a->g.n == 0)
-        wlwin_text(w, x + 12, ly + 8, "The moves will be here", 1, COL_DIM, pw - 20);
+        wlwin_text(w, x + 12, ly + 8 + name_rows * rowh, "The moves will be here", 1, COL_DIM, pw - 20);
     /* what the computer is doing */
     if (a->tk.started) {
         char t[64];
@@ -942,7 +1057,7 @@ static void paint_status(struct app *a)
     int s = status(a);
     if (s != CH_ONGOING)
         snprintf(line, sizeof(line), "%s", result_text(a, s));
-    else if (a->tk.started && a->tk.mode == 0)
+    else if ((a->tk.started && a->tk.mode == 0) || a->bk_move)
         snprintf(line, sizeof(line), "The computer is thinking ...");
     else if (a->human < 0)
         snprintf(line, sizeof(line), "%s to move%s", a->g.pos.side == CH_WHITE ? "White" : "Black", ch_in_check(&a->g.pos) ? " - check" : "");
@@ -1186,10 +1301,11 @@ static void write_dump(struct app *a)
     if (a->kb >= 0)
         sq_name(a->kb, kb);
     fprintf(f, "state turn=%c human=%c level=%d flipped=%d sel=%s kb=%s thinking=%d plies=%d status=%s prompt=%d dragging=%d hint=%s last=%s "
-               "played=%d won=%d drawn=%d lost=%d check=%d depth=%d\n",
+               "played=%d won=%d drawn=%d lost=%d check=%d depth=%d book=%d\n",
             a->g.pos.side == CH_WHITE ? 'w' : 'b', a->human < 0 ? '-' : a->human == CH_WHITE ? 'w' : 'b', a->level, a->flipped, sel, kb,
             a->tk.started && a->tk.mode == 0, a->g.n, status_word(status(a)), (int)a->prompt, a->dragging, hint, last, a->st.played, a->st.won,
-            a->st.drawn, a->st.lost, ch_in_check(&a->g.pos), a->tk.depth);
+            a->st.drawn, a->st.lost, ch_in_check(&a->g.pos), a->tk.depth, a->last_book);
+    fprintf(f, "opening %s\n", a->opening[0] ? a->opening : "-");
     fprintf(f, "fen %s\n", fen);
     fprintf(f, "clock on=%d white=%lld black=%lld inc=%lld running=%c preset=%d\n", a->clk.on, (long long)a->clk.left[CH_WHITE],
             (long long)a->clk.left[CH_BLACK], (long long)a->clk.inc_ms, clock_running(a) ? (a->g.pos.side == CH_WHITE ? 'w' : 'b') : '-', a->st.clock);
@@ -1771,6 +1887,44 @@ static int selftest(void)
         free(a.snap);
         chai_free(a.ai);
     }
+    /* the book in the window: the depth by level, a book move at the start, the opening's name and its undo */
+    {
+        CHECK(book_depth(1) == 0 && book_depth(2) == 0 && book_depth(3) > 0, "the weakest levels know no theory");
+        for (int l = 2; l <= 9; l++)
+            CHECK(book_depth(l) >= book_depth(l - 1), "the book's depth does not grow with the level (%d)", l);
+        struct app a;
+        memset(&a, 0, sizeof(a));
+        a.ai = chai_new(1);
+        a.book = chbook_new();
+        CHECK(a.book != NULL && chbook_errors(a.book) == 0, "the book");
+        a.level = 6;
+        a.human = CH_BLACK;
+        a.sel = a.kb = -1;
+        a.timeout = -1;
+        a.seed = 5;
+        ch_game_init(&a.g, NULL, NULL);
+        refresh_legal(&a);
+        ch_move bm = book_move(&a, book_depth(a.level));
+        CHECK(bm != 0 && ch_move_find(&a.g.pos, CH_FROM(bm), CH_TO(bm), 0) == bm, "a book move at the start");
+        CHECK(book_move(&a, book_depth(2)) == 0, "level 2 plays no book");
+        const char *line[] = { "e4", "e5", "Nf3", "Nc6", "Bb5" };
+        a.human = CH_WHITE;
+        for (int i = 0; i < 5; i++)
+            CHECK(play(&a, ch_move_from_san(&a.g.pos, line[i])), "%s was refused", line[i]);
+        CHECK(!strcmp(a.opening, "Ruy Lopez"), "the opening is \"%s\"", a.opening);
+        a.level = 0;                                        /* two players: an undo takes one move */
+        a.human = -1;
+        for (int i = 0; i < 4; i++)
+            undo(&a);
+        CHECK(a.g.n == 1 && !strcmp(a.opening, "King's Pawn Opening"), "after undo: %d plies, \"%s\"", a.g.n, a.opening);
+        play(&a, ch_move_from_san(&a.g.pos, "a6"));
+        play(&a, ch_move_from_san(&a.g.pos, "a3"));
+        CHECK(!strcmp(a.opening, "King's Pawn Opening") && book_move(&a, 40) == 0, "off the book the name stays and there is no book move");
+        ch_game_free(&a.g);
+        chbook_free(a.book);
+        free(a.snap);
+        chai_free(a.ai);
+    }
     if (!bad)
         printf("selftest ok\n");
     return bad ? 1 : 0;
@@ -1785,6 +1939,8 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     int level = -1, win_w = 900, win_h = 680, delay = 350;
     int side_arg = -1, cli_base = -1, cli_inc = 0;
+    bool no_book = false;
+    uint32_t cli_seed = 0;
     const char *fen = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
@@ -1822,6 +1978,10 @@ int main(int argc, char **argv)
             }
             cli_base = base;
             cli_inc = inc;
+        } else if (!strcmp(argv[i], "--no-book")) {
+            no_book = true;
+        } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
+            cli_seed = (uint32_t)strtoul(argv[++i], NULL, 10);
         } else if (!strcmp(argv[i], "--delay") && i + 1 < argc) {
             delay = atoi(argv[++i]);                         /* (not inside LM_CLAMP: a macro that evaluates its argument three times) */
             delay = LM_CLAMP(delay, 0, 5000);
@@ -1832,7 +1992,7 @@ int main(int argc, char **argv)
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: mellagui-chess [--level 0..%d] [--black] [--fen FEN] [--clock-seconds BASE+INC] [--size WxH] [--delay MS] | --selftest | --sheet FILE.ppm [SIZE]\n",
+            fprintf(stderr, "usage: mellagui-chess [--level 0..%d] [--black] [--fen FEN] [--clock-seconds BASE+INC] [--no-book] [--seed N] [--size WxH] [--delay MS] | --selftest | --sheet FILE.ppm [SIZE]\n",
                     chai_level_count());
             return 2;
         }
@@ -1846,7 +2006,9 @@ int main(int argc, char **argv)
     a.delay_ms = delay;
     a.cli_base = cli_base;
     a.cli_inc = cli_inc;
+    a.cli_seed = cli_seed;
     a.timeout = -1;
+    a.book = no_book ? NULL : chbook_new();
     a.start_fen = fen;
     a.hover = -1;
     a.sel = a.kb = -1;
@@ -1866,8 +2028,13 @@ int main(int argc, char **argv)
         rails(&a, &L);
         int timeout = wlrail_loop(&a.win, &a.ran, &L, a.hover, -1);
         int64_t now = now_ms();
-        if (engine_to_move(&a) && !a.tk.started && a.prompt != P_PROMO)
-            think_start(&a, 0);
+        if (engine_to_move(&a) && !a.tk.started && !a.bk_move && a.prompt != P_PROMO)
+            engine_start(&a, now);
+        if (a.bk_move) {                                                /* a book move waits for its delay */
+            int t = LM_MAX(1, a.delay_ms - (int)(now - a.bk_t0));
+            if (timeout < 0 || t < timeout)
+                timeout = t;
+        }
         if (a.tk.started) {
             int t = 25;                                                 /* look at the thread often while it works */
             if (timeout < 0 || t < timeout)
@@ -1891,6 +2058,7 @@ int main(int argc, char **argv)
                 a.win.redraw = true;
         }
         think_collect(&a, now);
+        book_collect(&a, now);
         if (a.tk.started) {
             int d = __atomic_load_n(&a.tk.depth, __ATOMIC_RELAXED);
             static int shown_depth = -1;
@@ -1911,6 +2079,7 @@ int main(int argc, char **argv)
     think_cancel(&a);
     stats_save(&a.st);
     free(a.snap);
+    chbook_free(a.book);
     sprites_free(&a);
     ch_game_free(&a.g);
     chai_free(a.ai);

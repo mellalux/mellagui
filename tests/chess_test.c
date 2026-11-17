@@ -9,6 +9,7 @@
  * Exit 0 = everything held.
  */
 #include "chess.h"
+#include "chessbook.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -523,6 +524,118 @@ static void test_games(void)
 	CHECK(ch_game_init(&g, "8/8/8/8/8/8/8/8 w - - 0 1", &err) < 0 && err, "no kings");
 }
 
+/* ---- the opening book -------------------------------------------------------------------------------------------- */
+
+static void test_book(void)
+{
+	struct chbook *b = chbook_new();
+	CHECK(b != NULL, "the book was not made");
+	if (!b)
+		return;
+	/* every move of every line is legal (a typo in a line shows here: the rest of that line is dropped) */
+	CHECK(chbook_errors(b) == 0, "%d lines hold a move that is not legal; the first: %s", chbook_errors(b), chbook_error_text(b));
+	printf("book: %d lines, %d positions\n", chbook_lines(b), chbook_positions(b));
+	CHECK(chbook_lines(b) >= 60 && chbook_positions(b) >= 500, "the book is small: %d lines, %d positions", chbook_lines(b), chbook_positions(b));
+
+	struct ch_pos p;
+	ch_pos_start(&p);
+	ch_move mv[10];
+	unsigned w[10];
+	int n = chbook_moves(b, &p, mv, w, 10);
+	CHECK(n >= 5, "the first moves of the book: %d", n);
+	unsigned we4 = 0, wd4 = 0, wb3 = 0, total = 0;
+	for (int i = 0; i < n; i++) {
+		char u[8];
+		ch_move_uci(mv[i], u);
+		we4 += !strcmp(u, "e2e4") ? w[i] : 0;
+		wd4 += !strcmp(u, "d2d4") ? w[i] : 0;
+		wb3 += !strcmp(u, "b2b3") ? w[i] : 0;
+		total += w[i];
+	}
+	CHECK(we4 > 0 && wd4 > 0 && wb3 > 0 && we4 > wb3 * 3 && wd4 > wb3 * 3, "e4 %u, d4 %u, b3 %u", we4, wd4, wb3);
+
+	/* the moves chosen are the book's, by weight, and the same for the same seed */
+	int seen_e4 = 0, seen_d4 = 0, other = 0;
+	for (uint32_t seed = 1; seed <= 600; seed++) {
+		ch_move m = chbook_pick(b, &p, seed, 40);
+		CHECK(m != 0 && ch_move_find(&p, CH_FROM(m), CH_TO(m), 0) == m, "a book move that is not legal");
+		CHECK(chbook_pick(b, &p, seed, 40) == m, "the same seed gives another move");
+		char u[8];
+		ch_move_uci(m, u);
+		seen_e4 += !strcmp(u, "e2e4");
+		seen_d4 += !strcmp(u, "d2d4");
+		other += strcmp(u, "e2e4") && strcmp(u, "d2d4");
+	}
+	CHECK(seen_e4 > 150 && seen_d4 > 100 && other > 30, "the choice by weight: e4 %d, d4 %d, other %d of 600", seen_e4, seen_d4, other);
+	CHECK(chbook_pick(b, &p, 1, 0) == 0, "max_ply 0: no book");
+
+	/* names: the opening is named from the move that makes it, and deeper lines have more specific names */
+	static const struct { const char *san, *name; } names[] = {
+		{ "e4", "King's Pawn Opening" },
+		{ "e4 c5", "Sicilian Defence" },
+		{ "e4 e5 Nf3 Nc6 Bb5", "Ruy Lopez" },
+		{ "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7", "Ruy Lopez" },
+		{ "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6", "Sicilian Defence: Najdorf Variation" },
+		{ "d4 Nf6 c4 e6 Nc3 Bb4", "Nimzo-Indian Defence" },
+		{ "e4 e6 d4 d5 Nc3 Bb4", "French Defence: Winawer Variation" },
+		{ "d4 d5 c4 e6", "Queen's Gambit Declined" },
+	};
+	for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+		struct ch_pos q;
+		ch_pos_start(&q);
+		char line[160];
+		snprintf(line, sizeof line, "%s", names[i].san);
+		for (char *save = NULL, *tok = strtok_r(line, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
+			struct ch_undo u;
+			ch_move m = ch_move_from_san(&q, tok);
+			CHECK(m != 0, "%s: %s is not legal", names[i].san, tok);
+			if (!m)
+				break;
+			ch_make(&q, m, &u);
+		}
+		const char *got = chbook_name(b, q.key);
+		CHECK(got && !strcmp(got, names[i].name), "the name after \"%s\" is \"%s\", expected \"%s\"", names[i].san, got ? got : "(none)", names[i].name);
+	}
+
+	/* a transposition meets in one position: 1.d4 Nf6 2.c4 e6 and 1.c4 e6 2.d4 Nf6 */
+	struct ch_pos a, c;
+	ch_pos_start(&a);
+	ch_pos_start(&c);
+	const char *oa[] = { "d4", "Nf6", "c4", "e6" }, *oc[] = { "c4", "e6", "d4", "Nf6" };
+	for (int i = 0; i < 4; i++) {
+		struct ch_undo u;
+		ch_make(&a, ch_move_from_san(&a, oa[i]), &u);
+		ch_make(&c, ch_move_from_san(&c, oc[i]), &u);
+	}
+	CHECK(a.key == c.key, "the transposition has another hash");
+	CHECK(chbook_pick(b, &a, 3, 40) != 0, "the transposition is in the book");
+
+	/* a position that is no opening: nothing, and no name */
+	CHECK(set(&p, "4k3/8/8/8/8/8/8/4K3 w - - 0 1") == 0 && chbook_pick(b, &p, 1, 40) == 0 && chbook_name(b, p.key) == NULL, "an endgame is in the book");
+	set(&p, "rnbqkbnr/pppppppp/8/8/8/5P2/PPPPP1PP/RNBQKBNR b KQkq - 0 1");
+	CHECK(chbook_pick(b, &p, 1, 40) == 0, "1.f3 is not in the book");
+
+	/* every position of every line: the book has a legal move there (until the end of a line) */
+	long visited = 0, bad = 0;
+	for (int round = 0; round < 6; round++) {
+		struct ch_pos q;
+		ch_pos_start(&q);
+		for (int ply = 0; ply < 30; ply++) {
+			ch_move m = chbook_pick(b, &q, (uint32_t)(round * 7 + ply * 31 + 1), 40);
+			if (!m)
+				break;
+			visited++;
+			if (ch_move_find(&q, CH_FROM(m), CH_TO(m), CH_PROMO(m)) != m)
+				bad++;
+			struct ch_undo u;
+			ch_make(&q, m, &u);
+		}
+	}
+	CHECK(bad == 0 && visited > 40, "walking the book: %ld bad moves in %ld", bad, visited);
+	printf("book: six walks through the book made %ld moves\n", visited);
+	chbook_free(b);
+}
+
 /* ---- main ---------------------------------------------------------------------------------------------------------------------- */
 
 static void divide_line(ch_move m, uint64_t n, void *ud)
@@ -550,6 +663,7 @@ int main(int argc, char **argv)
 	test_special_rules();
 	test_san();
 	test_games();
+	test_book();
 	test_random_games();
 	test_perft(deep, all);
 

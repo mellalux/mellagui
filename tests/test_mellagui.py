@@ -16294,6 +16294,8 @@ class TestChess(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'fen':
                 st['fen'] = ' '.join(f[1:])
+            elif f[0] == 'opening':
+                st['opening'] = ' '.join(f[1:])
             elif f[0] == 'clock':
                 st['clock'] = {k: (v if k == 'running' else int(v)) for k, v in (x.split('=') for x in f[1:])}
             elif f[0] == 'lay':
@@ -16723,11 +16725,80 @@ class TestChess(Base):
         self.assertEqual((st['clock']['white'], st['clock']['inc']), (180000, 2000))
 
     def test_the_computer_plans_by_the_time_it_has(self):
-        self.start('--level', '9', '--clock-seconds', '20+0')                               # level 9 would think for 8 s
+        self.start('--level', '9', '--clock-seconds', '20+0', '--no-book')                    # level 9 would think for 8 s (and the book would answer at once)
         t0 = time.time()
         self.move('e2', 'e4')
         self.wait(lambda s: s['state']['plies'] == '2', timeout=4.0)
         self.assertLess(time.time() - t0, 3.0)
+
+    def test_the_computer_plays_its_first_move_from_the_book(self):
+        self.start('--level', '6', '--black', '--seed', '3')
+        st = self.wait(lambda s: s['state']['plies'] == '1', timeout=3.0)
+        self.assertEqual(st['state']['book'], '1')
+        self.assertIn(st['san'][0], ['e4', 'd4', 'c4', 'Nf3', 'f4', 'b3'])
+        self.assertNotEqual(st['opening'], '-')                                              # and the opening has a name
+
+    def test_the_weakest_levels_and_no_book_play_no_theory(self):
+        self.start('--level', '1', '--black')
+        st = self.wait(lambda s: s['state']['plies'] == '1')
+        self.assertEqual(st['state']['book'], '0')
+        self.proc.kill()
+        self.proc.wait()
+        time.sleep(0.3)
+        self.start('--level', '9', '--black', '--no-book', '--delay', '0')
+        st = self.wait(lambda s: s['state']['plies'] == '1', timeout=12.0)
+        self.assertEqual(st['state']['book'], '0')
+
+    def test_the_book_follows_the_person_and_the_computer_leaves_it_when_the_person_does(self):
+        self.start('--level', '6', '--seed', '1')
+        self.move('e2', 'e4')
+        st = self.wait(lambda s: s['state']['plies'] == '2')
+        self.assertEqual(st['state']['book'], '1')                                           # 1.e4 is in the book: the answer is from it
+        self.move('a2', 'a3')                                                                # 2.a3 is nothing the book knows
+        st = self.wait(lambda s: s['state']['plies'] == '4', timeout=4.0)
+        self.assertEqual(st['state']['book'], '0')
+
+    def test_the_openings_name_is_shown_and_follows_undo(self):
+        self.start('--level', '0')
+        self.assertEqual(self.state()['opening'], '-')
+        for a, b in (('e2', 'e4'), ('e7', 'e5'), ('g1', 'f3'), ('b8', 'c6'), ('f1', 'b5')):
+            self.move(a, b)
+        st = self.wait(lambda s: s['state']['plies'] == '5')
+        self.assertEqual(st['opening'], 'Ruy Lopez')
+        self.move('a7', 'a6')
+        self.move('b5', 'a4')
+        st = self.wait(lambda s: s['state']['plies'] == '7')
+        self.assertEqual(st['opening'], 'Ruy Lopez')                                          # the name stays while the game follows it
+        for _ in range(5):
+            self.key(self.K['u'])
+        st = self.wait(lambda s: s['state']['plies'] == '2')
+        self.assertEqual(st['opening'], 'Open Game')
+        self.key(self.K['n'])
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.key(self.K['w'])
+        st = self.wait(lambda s: s['state']['plies'] == '0' and s['state']['prompt'] == '0')
+        self.assertEqual(st['opening'], '-')
+
+    def test_a_hint_in_the_book_comes_at_once(self):
+        self.start('--level', '0')
+        self.key(self.K['h'])
+        st = self.wait(lambda s: s['state']['hint'] != '-', timeout=0.6)                     # a search takes 1.2 s
+        self.assertIn(st['state']['hint'], st['legal'])
+        self.assertEqual(st['state']['thinking'], '0')
+
+    def test_the_seed_decides_the_computers_choice_and_it_varies(self):
+        firsts = []
+        for seed in ('1', '2', '3', '4', '5', '6'):
+            self.start('--level', '6', '--black', '--seed', seed)
+            st = self.wait(lambda s: s['state']['plies'] == '1', timeout=3.0)
+            firsts.append(st['san'][0])
+            self.proc.kill()
+            self.proc.wait()
+            for _ in range(40):
+                if not [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.chess']:
+                    break
+                time.sleep(0.05)
+        self.assertGreaterEqual(len(set(firsts)), 2, 'six seeds gave one first move: %r' % firsts)
 
     def test_the_move_list_and_the_help_card(self):
         self.start('--level', '0')
@@ -16741,7 +16812,7 @@ class TestChess(Base):
         self.wait(lambda s: s['state']['prompt'] == '0')
 
     def test_closing_the_window_while_the_computer_thinks_ends_the_program(self):
-        self.start('--level', '9')
+        self.start('--level', '9', '--no-book')                                              # (1.e4 would be answered from the book, which needs no thinking)
         self.move('e2', 'e4')
         self.wait(lambda s: s['state']['thinking'] == '1')
         ctl.key(29, True)                                                                    # Ctrl+Q

@@ -99,6 +99,11 @@ bool lm_saver_start(struct lm_saver *s)
         snprintf(styled, sizeof(styled), "%s --no-cat", cmd);                  /* (the room without its cat) */
         cmd = styled;
     }
+    char turtled[1100];
+    if (!s->srv->config.saver_turtle && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--no-turtle")) {
+        snprintf(turtled, sizeof(turtled), "%s --no-turtle", cmd);             /* (the room without its turtle) */
+        cmd = turtled;
+    }
     char meowed[1100];
     if (s->srv->config.saver_cat && s->srv->config.saver_meow && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--meow")) {
         snprintf(meowed, sizeof(meowed), "%s --meow", cmd);                    /* (Tom meows when he looks at the camera) */

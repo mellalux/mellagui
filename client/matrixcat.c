@@ -154,12 +154,16 @@ static float g_acc;                     /* the time of the cycle being built so 
 static int g_built = -1;                /* the cycle in g_seg */
 static struct pt g_end;                 /* where it ended */
 static uint32_t g_seed;                 /* 0 = the first cycle is the script (tests, --at); else every day is its own, from this seed */
+#define MAX_CYCLES 4096                 /* where each cycle ended (a cycle starts where the one before ended): asking for an earlier cycle again needs no rebuild from 0 */
+static struct pt g_ends[MAX_CYCLES];
+static int g_known = -1;                /* g_ends[0 .. g_known] are valid */
 
 void mcat_set_seed(uint32_t seed)
 {
     if (seed != g_seed) {
         g_seed = seed;
         g_built = -1;
+        g_known = -1;
     }
 }
 
@@ -358,15 +362,26 @@ static void build_cycle(int c)
         put(K_SIT, cur, cur, CYCLE_LEN - g_acc, -1);
     g_end = cur;
     g_built = c;
+    if (c < MAX_CYCLES) {
+        g_ends[c] = cur;
+        if (c == g_known + 1)
+            g_known = c;
+    }
 }
 
 static void ensure_cycle(int c)
 {
     if (c == g_built)
         return;
+    if (c < MAX_CYCLES && c <= g_known + 1) {                           /* the start of this cycle is known: build just it (the turtle asks for a time a little ahead of the cat's) */
+        g_end = c == 0 ? k_home : g_ends[c - 1];
+        build_cycle(c);
+        return;
+    }
     if (c < g_built || g_built < 0) {
         g_end = k_home;
         g_built = -1;
+        g_known = -1;
     }
     for (int k = g_built + 1; k <= c; k++)
         build_cycle(k);

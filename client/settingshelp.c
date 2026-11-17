@@ -169,6 +169,9 @@ static const struct entry table[] = {
     { "saver-cat", NULL, "A cat in the room",
       "A cat sits on the floor of the room, now and then turns its head, lies down for a while, and its eyes glow when it looks at you. Switch it off "
       "for the plain room. It applies the next time the screensaver starts; the flat style has no cat." },
+    { "saver-turtle", NULL, "A turtle in the room (Filip)",
+      "Filip, a map turtle, swims slowly through the air of the room as if it were water, lets a few bubbles go now and then, and keeps well away from Tom. "
+      "Switch it off for the room without it. It applies the next time the screensaver starts; the flat style has no turtle." },
     { "saver-meow", NULL, "Tom meows",
       "When Tom turns his head to look at you, he now and then meows - a sound made by the computer, played through the default sound output at the "
       "volume that is set there. At most once in 25 seconds and not every time he looks. Off by default, because a screensaver that makes a noise is a "

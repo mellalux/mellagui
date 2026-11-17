@@ -6,6 +6,7 @@
  *   mellagui-matrix --flat          the classic flat rain instead of the room
  *   mellagui-matrix --at SECONDS   starts the camera's drift and the cat's story at that moment (to look at a certain pose, and the tests)
  *   mellagui-matrix --no-cat        the room without Tom, the cat that lives on its floor (client/matrixcat.c)
+ *   mellagui-matrix --no-turtle     the room without Filip, the map turtle that swims through its air (client/matrixturtle.c)
  *   mellagui-matrix --meow          Tom meows (a sound made in code, client/meow.c) now and then, the moment he turns his head to the camera
  *   mellagui-matrix --meow-wav FILE writes one meow (--seed N picks which) as a WAV file and ends
  *   mellagui-matrix --density PCT   how crowded the rain is, 50..300 (default 260)
@@ -39,6 +40,7 @@
 #include "font.h"
 #include "keymap.h"
 #include "matrixcat.h"
+#include "matrixturtle.h"
 #include "meow.h"
 #include "smartsun.h"
 #include "theme.h"
@@ -264,6 +266,7 @@ struct room {
     bool ready;
     float t;                            /* seconds of the camera's drift */
     bool no_cat;                        /* --no-cat */
+    bool no_turtle;                     /* --no-turtle */
     bool meow;                          /* --meow: Tom meows when he looks at the camera (a sound) */
     float glow_prev, meow_last;         /* the eyes' glow at the tick before, the time of the last meow */
     unsigned meows;                     /* how many meows so far (the seed of the next) */
@@ -454,8 +457,10 @@ struct rjob {
     const struct room *rm;
     const struct cam *cam;
     const struct mcat *cat;             /* NULL = no cat */
+    const struct mturtle *turtle;       /* NULL = no turtle */
     int cx0, cx1, cy0, cy1;             /* the part of the picture the cat (and its glow) can be in ... */
-    const uint8_t *cmask;               /* ... and which 8 x 8 pixel tiles of it (the spheres of its parts, projected), `ctw` tiles a row */
+    int tx0, tx1, ty0, ty1;             /* ... and the turtle (with its bubbles) */
+    const uint8_t *cmask;               /* ... and which 8 x 8 pixel tiles of it (the spheres of its parts, projected: bit 0 the cat, bit 1 the turtle), `ctw` tiles a row */
     int ctw;
     uint32_t *dst;
     int w, h, stride, y0, y1, ystep;    /* the rows y0, y0 + ystep, ... below y1: the threads take every n-th row, so that a busy part of the picture is shared */
@@ -923,14 +928,35 @@ static void render_rows(const struct rjob *j)
                             rgb[q] = rgb[q] * (1.0f + 1.3f * sl) + rm->sky.light_col[q] * 0.50f * lit;
                     }
                 }
+                if (surf == 4 && j->turtle) {                                  /* Filip's, when he swims low or lies on the floor */
+                    float sh = mturtle_floor_shade(j->turtle, px, pz);
+                    rgb[0] *= sh; rgb[1] *= sh; rgb[2] *= sh;
+                }
                 if (surf == 4 && j->cat) {                                     /* Tom's shadow on the floor (after the sun's patch: the light is what he blocks) */
                     float sh = mcat_floor_shade(j->cat, px, pz);
                     rgb[0] *= sh; rgb[1] *= sh; rgb[2] *= sh;
                 }
             }
-            if (j->cat && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1 && j->cmask[(y >> 3) * j->ctw + (x >> 3)]) {   /* the cat, if it is nearer than what the ray met */
-                float o3[3] = { c->ox, c->oy, c->oz }, dn[3] = { dx / len, dy / len, dz / len };
-                mcat_shade(j->cat, o3, dn, (win ? (ZF - c->oz) / dz : t) * len, inv_f, rgb);
+            if ((j->cat || j->turtle) && j->cmask[(y >> 3) * j->ctw + (x >> 3)]) {   /* the cat and the turtle, if they are nearer than what the ray met (the farther one first, so the nearer lies over it) */
+                float o3[3] = { c->ox, c->oy, c->oz }, dn[3] = { dx / len, dy / len, dz / len }, tmax = (win ? (ZF - c->oz) / dz : t) * len;
+                uint8_t mk = j->cmask[(y >> 3) * j->ctw + (x >> 3)];
+                bool do_cat = j->cat && (mk & 1) && x >= j->cx0 && x <= j->cx1 && y >= j->cy0 && y <= j->cy1;
+                bool do_tur = j->turtle && (mk & 2) && x >= j->tx0 && x <= j->tx1 && y >= j->ty0 && y <= j->ty1;
+                if (do_cat && do_tur) {
+                    float dc = (j->cat->centre[0] - o3[0]) * dn[0] + (j->cat->centre[1] - o3[1]) * dn[1] + (j->cat->centre[2] - o3[2]) * dn[2];
+                    float dt = (j->turtle->centre[0] - o3[0]) * dn[0] + (j->turtle->centre[1] - o3[1]) * dn[1] + (j->turtle->centre[2] - o3[2]) * dn[2];
+                    if (dc > dt) {
+                        mcat_shade(j->cat, o3, dn, tmax, inv_f, rgb);
+                        mturtle_shade(j->turtle, o3, dn, tmax, inv_f, rgb);
+                    } else {
+                        mturtle_shade(j->turtle, o3, dn, tmax, inv_f, rgb);
+                        mcat_shade(j->cat, o3, dn, tmax, inv_f, rgb);
+                    }
+                } else if (do_cat) {
+                    mcat_shade(j->cat, o3, dn, tmax, inv_f, rgb);
+                } else if (do_tur) {
+                    mturtle_shade(j->turtle, o3, dn, tmax, inv_f, rgb);
+                }
             }
             int r8 = (int)rgb[0], g8 = (int)rgb[1], b8 = (int)rgb[2];
             row[x] = 0xff000000u | ((uint32_t)(r8 > 255 ? 255 : r8) << 16) | ((uint32_t)(g8 > 255 ? 255 : g8) << 8) | (uint32_t)(b8 > 255 ? 255 : b8);
@@ -966,28 +992,60 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
             cy0 = (int)fmaxf(my - rpx, 0.0f); cy1 = (int)fminf(my + rpx, (float)(h - 1));
         }
     }
-    int ctw = (w + 7) / 8, cth = (h + 7) / 8;
-    uint8_t *cmask = NULL;
-    if (!rm->no_cat) {                                                  /* which 8 x 8 tiles the parts of the cat can be in: the spheres of its parts, projected */
-        cmask = calloc((size_t)ctw * (size_t)cth, 1);
-        float sp[48][4];
-        int ns = cmask ? mcat_spheres(&cat, sp, 48) : 0;
-        for (int i = 0; i < ns; i++) {
-            float vx = sp[i][0] - c.ox, vy = sp[i][1] - c.oy, vz = sp[i][2] - c.oz;
-            float zc = vx * c.fx + vy * c.fy + vz * c.fz, xc = vx * c.rx + vy * c.ry + vz * c.rz, yc = vx * c.ux + vy * c.uy + vz * c.uz;
-            if (zc <= sp[i][3] * 1.2f) {                                /* too close to project: the whole picture */
-                memset(cmask, 1, (size_t)ctw * (size_t)cth);
+    struct mturtle tur;
+    memset(&tur, 0, sizeof(tur));
+    int tx0 = 0, tx1 = w - 1, ty0 = 0, ty1 = h - 1;
+    if (!rm->no_turtle) {
+        mturtle_pose(&tur, rm->t, rm->catg, MCAT_GLYPHS, rm->sky.light_dir, rm->sky.light_col, rm->sky.light_str);
+        float vx = tur.centre[0] - c.ox, vy = tur.centre[1] - c.oy, vz = tur.centre[2] - c.oz;      /* its sphere's rectangle, as for the cat (the bubbles are in the mask's tiles) */
+        float zc = vx * c.fx + vy * c.fy + vz * c.fz, xc = vx * c.rx + vy * c.ry + vz * c.rz, yc = vx * c.ux + vy * c.uy + vz * c.uz;
+        float rr = tur.radius;
+        if (zc > rr * 1.2f) {
+            float rpx = f * rr / sqrtf(zc * zc - rr * rr) + 4.0f, mx = (float)w * 0.5f + f * xc / zc, my = (float)h * 0.5f - f * yc / zc;
+            tx0 = (int)fmaxf(mx - rpx, 0.0f); tx1 = (int)fminf(mx + rpx, (float)(w - 1));
+            ty0 = (int)fmaxf(my - rpx, 0.0f); ty1 = (int)fminf(my + rpx, (float)(h - 1));
+        }
+        for (int i = 0; i < tur.nbub; i++) {                            /* the bubbles rise out of that rectangle: widen it to hold them (a rectangle in the picture, so the mask's tiles do the work) */
+            float bx = tur.bub[i].c[0] - c.ox, by = tur.bub[i].c[1] - c.oy, bz = tur.bub[i].c[2] - c.oz;
+            float bzc = bx * c.fx + by * c.fy + bz * c.fz;
+            if (bzc <= 0.3f) {
+                tx0 = 0; tx1 = w - 1; ty0 = 0; ty1 = h - 1;
                 break;
             }
-            float rpx = f * sp[i][3] / sqrtf(zc * zc - sp[i][3] * sp[i][3]) + 3.0f, mx = (float)w * 0.5f + f * xc / zc, my = (float)h * 0.5f - f * yc / zc;
-            int tx0 = (int)fmaxf((mx - rpx) / 8.0f, 0.0f), tx1 = (int)fminf((mx + rpx) / 8.0f, (float)(ctw - 1));
-            int ty0 = (int)fmaxf((my - rpx) / 8.0f, 0.0f), ty1 = (int)fminf((my + rpx) / 8.0f, (float)(cth - 1));
-            for (int ty = ty0; ty <= ty1; ty++)
-                for (int tx = tx0; tx <= tx1; tx++) {
-                    float ddx = ((float)tx + 0.5f) * 8.0f - mx, ddy = ((float)ty + 0.5f) * 8.0f - my, lim = rpx + 6.0f;
-                    if (ddx * ddx + ddy * ddy <= lim * lim)
-                        cmask[ty * ctw + tx] = 1;
+            float bxc = bx * c.rx + by * c.ry + bz * c.rz, byc = bx * c.ux + by * c.uy + bz * c.uz, rp = f * tur.bub[i].r / bzc + 4.0f;
+            float mx = (float)w * 0.5f + f * bxc / bzc, my = (float)h * 0.5f - f * byc / bzc;
+            tx0 = (int)fminf((float)tx0, fmaxf(mx - rp, 0.0f)); tx1 = (int)fmaxf((float)tx1, fminf(mx + rp, (float)(w - 1)));
+            ty0 = (int)fminf((float)ty0, fmaxf(my - rp, 0.0f)); ty1 = (int)fmaxf((float)ty1, fminf(my + rp, (float)(h - 1)));
+        }
+    }
+    int ctw = (w + 7) / 8, cth = (h + 7) / 8;
+    uint8_t *cmask = NULL;
+    if (!rm->no_cat || !rm->no_turtle) {                                /* which 8 x 8 tiles the parts of the cat (bit 0) and of the turtle (bit 1) can be in: the spheres of its parts, projected */
+        cmask = calloc((size_t)ctw * (size_t)cth, 1);
+        for (int who = 0; who < 2 && cmask; who++) {
+            if (who == 0 ? rm->no_cat : rm->no_turtle)
+                continue;
+            float sp[64][4];
+            int ns = who == 0 ? mcat_spheres(&cat, sp, 48) : mturtle_spheres(&tur, sp, 64);
+            uint8_t bit = (uint8_t)(1u << who);
+            for (int i = 0; i < ns; i++) {
+                float vx = sp[i][0] - c.ox, vy = sp[i][1] - c.oy, vz = sp[i][2] - c.oz;
+                float zc = vx * c.fx + vy * c.fy + vz * c.fz, xc = vx * c.rx + vy * c.ry + vz * c.rz, yc = vx * c.ux + vy * c.uy + vz * c.uz;
+                if (zc <= sp[i][3] * 1.2f) {                            /* too close to project: the whole picture */
+                    for (size_t q = 0; q < (size_t)ctw * (size_t)cth; q++)
+                        cmask[q] |= bit;
+                    break;
                 }
+                float rpx = f * sp[i][3] / sqrtf(zc * zc - sp[i][3] * sp[i][3]) + 3.0f, mx = (float)w * 0.5f + f * xc / zc, my = (float)h * 0.5f - f * yc / zc;
+                int ax0 = (int)fmaxf((mx - rpx) / 8.0f, 0.0f), ax1 = (int)fminf((mx + rpx) / 8.0f, (float)(ctw - 1));
+                int ay0 = (int)fmaxf((my - rpx) / 8.0f, 0.0f), ay1 = (int)fminf((my + rpx) / 8.0f, (float)(cth - 1));
+                for (int ty = ay0; ty <= ay1; ty++)
+                    for (int tx = ax0; tx <= ax1; tx++) {
+                        float ddx = ((float)tx + 0.5f) * 8.0f - mx, ddy = ((float)ty + 0.5f) * 8.0f - my, lim = rpx + 6.0f;
+                        if (ddx * ddx + ddy * ddy <= lim * lim)
+                            cmask[ty * ctw + tx] |= bit;
+                    }
+            }
         }
     }
     threads = LM_CLAMP(threads, 1, 8);
@@ -995,7 +1053,7 @@ static void room_render(const struct room *rm, uint32_t *dst, int w, int h, int 
     pthread_t th[8];
     bool started[8] = { false };
     for (int i = 0; i < threads; i++) {
-        jobs[i] = (struct rjob){ rm, &c, cmask ? &cat : NULL, cx0, cx1, cy0, cy1, cmask, ctw, dst, w, h, stride, i, h, threads, f };
+        jobs[i] = (struct rjob){ rm, &c, cmask && !rm->no_cat ? &cat : NULL, cmask && !rm->no_turtle ? &tur : NULL, cx0, cx1, cy0, cy1, tx0, tx1, ty0, ty1, cmask, ctw, dst, w, h, stride, i, h, threads, f };
         if (i > 0)
             started[i] = pthread_create(&th[i], NULL, render_thread, &jobs[i]) == 0;
     }
@@ -1270,7 +1328,7 @@ static int selftest(void)
         }
         struct cam c0 = cam_at(0.0f), c1 = cam_at(20.0f);
         CHECK(c0.fz > 0.9f && (fabsf(c0.ox - c1.ox) > 0.05f || fabsf(c0.oz - c1.oz) > 0.05f));    /* it looks into the room and it drifts */
-        struct room rm;
+        struct room rm = { 0 };
         CHECK(room_init(&rm, 3, 100, 220));
         for (int i = 0; i < 40; i++)
             room_step(&rm);
@@ -1456,6 +1514,91 @@ static int selftest(void)
             mcat_pose(&c2, 12.0f, cam, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
             CHECK(c2.glow == ct.glow && c2.head_yaw == ct.head_yaw);                  /* the same time, the same pose */
         }
+        {                                                                /* the turtle: always at a safe distance from Tom, inside the room, swimming smoothly, heading where it goes */
+            float ld[3] = { 0.0f, 0.7f, 0.7f }, lc[3] = { 255.0f, 230.0f, 180.0f };
+            static const uint32_t seeds[4] = { 0u, 1u, 7u, 12345u };
+            for (int si = 0; si < 4; si++) {
+                mcat_set_seed(seeds[si]);
+                mturtle_set_seed(seeds[si]);
+                float dmin = 1e9f, stepmax = 0.0f, vmin = 1e9f, vmax = 0.0f, prev[3] = { 0 }, prev2[3] = { 0 }, ymin = 9.0f, ymax = -9.0f;
+                int inside = 0, total = 0, headed = 0, bubbles = 0, seen = 0, fast = 0, low = 0, still = 0, hin = 0, hout = 0, allin = 0, lowfast = 0, moving = 0;
+                for (float t = 0.0f; t < 4.0f * 360.0f; t += 0.25f) {
+                    float p[3], tc[3];
+                    mturtle_where(t, p);
+                    mturtle_tom_centre(t, tc);
+                    float d = sqrtf((p[0] - tc[0]) * (p[0] - tc[0]) + (p[1] - tc[1]) * (p[1] - tc[1]) + (p[2] - tc[2]) * (p[2] - tc[2]));
+                    dmin = fminf(dmin, d);
+                    inside += fabsf(p[0]) <= 2.401f && p[1] >= 0.049f && p[1] <= 2.551f && p[2] >= 1.949f && p[2] <= 5.251f;
+                    ymin = fminf(ymin, p[1]);
+                    ymax = fmaxf(ymax, p[1]);
+                    if (total > 0) {
+                        float st = sqrtf((p[0] - prev[0]) * (p[0] - prev[0]) + (p[1] - prev[1]) * (p[1] - prev[1]) + (p[2] - prev[2]) * (p[2] - prev[2]));
+                        stepmax = fmaxf(stepmax, st);
+                        if (p[1] > 0.2f && prev[1] > 0.2f)
+                            vmin = fminf(vmin, st / 0.25f);                              /* (it lies still on the floor) */
+                        vmax = fmaxf(vmax, st / 0.25f);
+                        fast += st / 0.25f > 0.8f;
+                    }
+                    memcpy(prev2, prev, sizeof(prev2));
+                    memcpy(prev, p, sizeof(prev));
+                    total++;
+                    struct mturtle tu;
+                    mturtle_pose(&tu, t, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+                    bubbles += tu.nbub > 0;
+                    low += p[1] < 0.2f;
+                    still += p[1] < 0.1f && total > 1 && sqrtf((p[0] - prev2[0]) * (p[0] - prev2[0]) + (p[2] - prev2[2]) * (p[2] - prev2[2])) < 0.002f;
+                    hin += tu.head_in > 0.95f;
+                    hout += tu.hind_in < -0.95f;
+                    allin += tu.head_in > 0.95f && tu.fore_in > 0.95f && tu.hind_in > 0.95f;
+                    lowfast += p[1] < 0.1f && tu.stroke > 0.05f;
+                    float v[3], q[3];
+                    mturtle_where(t + 0.4f, q);
+                    v[0] = q[0] - p[0]; v[2] = q[2] - p[2];
+                    float vl = sqrtf(v[0] * v[0] + v[2] * v[2]), fx = tu.m[2], fz = tu.m[8], fl = sqrtf(fx * fx + fz * fz);
+                    moving += vl > 0.02f;
+                    headed += vl > 0.02f && fl > 0.1f && (v[0] * fx + v[2] * fz) / (vl * fl) > 0.9f;
+                    struct cam cm = cam_at(t);                                                /* is it in the picture (a 62 degree view, 16 : 9)? */
+                    float vx = p[0] - cm.ox, vy = p[1] - cm.oy, vz = p[2] - cm.oz;
+                    float zc = vx * cm.fx + vy * cm.fy + vz * cm.fz, xc = vx * cm.rx + vz * cm.rz, yc = vx * cm.ux + vy * cm.uy + vz * cm.uz;
+                    float th = tanf(0.5f * 62.0f * 3.14159265f / 180.0f);
+                    seen += zc > 0.5f && fabsf(yc / zc) < th * 0.92f && fabsf(xc / zc) < th * 16.0f / 9.0f * 0.92f;
+                }
+                CHECK(dmin >= MTURTLE_SAFE - 0.02f);                                           /* never nearer to Tom than the safe distance */
+                CHECK(inside == total);                                                         /* inside the room, clear of the walls, the window and the camera */
+                if (!(stepmax < 0.45f && vmin > 0.02f && vmax < 1.8f && fast < total / 50))
+                    fprintf(stderr, "turtle seed %u: step max %.3f, v %.3f .. %.3f, fast %d of %d\n", seeds[si], stepmax, vmin, vmax, fast, total);
+                CHECK(stepmax < 0.45f && vmin > 0.02f && vmax < 1.8f && fast < total / 50);     /* swims: no jumps, never stands still, flees at Tom's own pace only when he runs at it */
+                CHECK(ymin < 0.1f && ymax > 1.9f);                                              /* it rises and sinks, down to the floor */
+                CHECK(low > total / 25 && low < total * 2 / 5);                                 /* it rests on the floor a good part of the time, not all of it */
+                CHECK(still > low / 4 && lowfast == 0);                                         /* and lies still there, without paddling */
+                CHECK(hin > 8 && hout > 8 && allin > 8);                                        /* head in, hind legs out and everything in all happen */                                              /* it rises and sinks */
+                CHECK(headed > moving * 9 / 10);                                                 /* it swims head first */
+                CHECK(bubbles > total / 5 && bubbles < total * 4 / 5);                          /* it lets bubbles go now and then, not all the time */
+                CHECK(seen > total * 7 / 10);                                                   /* and the camera sees it most of the time */
+            }
+            mcat_set_seed(0);
+            mturtle_set_seed(0);
+            struct mturtle a1, a2;
+            mturtle_pose(&a1, 30.0f, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+            mturtle_pose(&a2, 30.0f, rm.catg, MCAT_GLYPHS, ld, lc, 1.0f);
+            CHECK(a1.n == a2.n && a1.yaw == a2.yaw && a1.pos[0] == a2.pos[0] && a1.prim[5].c[1] == a2.prim[5].c[1]);   /* the same time, the same pose */
+            CHECK(a1.n > 20 && a1.n <= MTURTLE_PRIMS);
+            float o[3] = { 0.0f, 1.55f, 0.9f }, dn[3] = { a1.centre[0] - o[0], a1.centre[1] - o[1], a1.centre[2] - o[2] }, rgb[3] = { 12.0f, 34.0f, 56.0f };
+            float dl = sqrtf(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
+            dn[0] /= dl; dn[1] /= dl; dn[2] /= dl;
+            CHECK(mturtle_shade(&a1, o, dn, 30.0f, 0.001f, rgb) && (rgb[0] != 12.0f || rgb[1] != 34.0f));       /* a ray at its middle meets it */
+            rgb[0] = 12.0f; rgb[1] = 34.0f; rgb[2] = 56.0f;
+            CHECK(!mturtle_shade(&a1, o, dn, dl - 1.0f, 0.001f, rgb) && rgb[1] == 34.0f);                       /* ... not when something nearer was hit first */
+            float up[3] = { 0.0f, 1.0f, 0.0f };
+            CHECK(!mturtle_shade(&a1, (float[3]){ 0.0f, 2.9f, 5.0f }, up, 30.0f, 0.001f, rgb));              /* ... and a ray along the ceiling misses it */
+            for (int i = 0; i < 9; i++) {                                                           /* the axes of its frame are a rotation */
+                float dot = 0.0f;
+                int ci = i / 3, cj = i % 3;
+                for (int k = 0; k < 3; k++)
+                    dot += a1.m[k * 3 + ci] * a1.m[k * 3 + cj];
+                CHECK(fabsf(dot - (ci == cj ? 1.0f : 0.0f)) < 1e-3f);
+            }
+        }
         room_free(&rm);
     }
     free(r.glyph); free(r.bright); free(r.col);
@@ -1495,6 +1638,8 @@ int main(int argc, char **argv)
             at_given = true;
         } else if (!strcmp(argv[i], "--no-cat")) {
             a.room.no_cat = true;
+        } else if (!strcmp(argv[i], "--no-turtle")) {
+            a.room.no_turtle = true;
         } else if (!strcmp(argv[i], "--meow")) {
             a.room.meow = true;
         } else if (!strcmp(argv[i], "--meow-wav") && i + 1 < argc) {          /* writes one meow (seed from --seed) as a WAV file and ends: to listen to it, and the tests */
@@ -1538,7 +1683,7 @@ int main(int argc, char **argv)
             a.rain.rng = (uint64_t)atoll(argv[++i]) * 2654435761u + 1;
             seed_given = true;
         } else {
-            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--meow] [--meow-wav FILE] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--sun HH:MM,HH:MM|auto|none] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
+            fprintf(stderr, "usage: mellagui-matrix [--windowed] [--flat] [--no-cat] [--no-turtle] [--meow] [--meow-wav FILE] [--at SECONDS] [--density PERCENT] [--time HH:MM] [--sun HH:MM,HH:MM|auto|none] [--clock-speed MIN_PER_S] [--speed PERCENT] [--seed N] [--bench WxH] [--selftest]\n");
             return 2;
         }
     }
@@ -1546,6 +1691,7 @@ int main(int argc, char **argv)
         bool fixed_day = bench || selftest_only || at_given;
         uint32_t cs = (uint32_t)(a.rain.rng >> 8) ^ (seed_given ? 0u : (uint32_t)time(NULL) * 2654435761u ^ (uint32_t)getpid());
         mcat_set_seed(fixed_day ? 0u : (cs ? cs : 1u));
+        mturtle_set_seed(fixed_day ? 0u : (cs ? (cs ^ 0x5bd1e995u) : 3u));
     }
     if (meow_wav)
         return lm_meow_write_wav(meow_wav, seed_given ? (uint32_t)(a.rain.rng >> 8) : 1u) ? 0 : 1;

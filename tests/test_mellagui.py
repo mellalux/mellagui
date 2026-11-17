@@ -14160,6 +14160,46 @@ class TestPaint(Base):
         opaque.save(osrc)
         self.assertEqual(Image.open(self.apply(osrc, 'blur')).mode, 'RGB')                    # nothing see-through: a plain RGB file
 
+    def test_every_file_format_we_write_is_read_back_by_pillow_and_by_the_program_itself(self):
+        """PNG, BMP, TGA, TIFF, WebP (lossless), PPM, JPEG and GIF made by the program's own encoders: what Pillow reads is what was written."""
+        from PIL import Image
+        im = Image.new('RGBA', (31, 19))
+        im.putdata([(0, 0, 0, 0) if (x + y) % 6 == 0 else ((x * 8) % 256, (y * 13) % 256, ((x ^ y) * 9) % 256, 128 if x % 4 == 0 else 255) for y in range(19) for x in range(31)])
+        src = os.path.join(tmp, 'paint-fmt-src.png')
+        im.save(src)
+        few = Image.new('RGB', (40, 30))
+        few.putdata([[(255, 0, 0), (0, 255, 0), (0, 0, 255), (250, 250, 20)][(x // 5 + y // 3) % 4] for y in range(30) for x in range(40)])
+        fsrc = os.path.join(tmp, 'paint-fmt-few.png')
+        few.save(fsrc)
+        for ext in ('png', 'bmp', 'tga', 'tif', 'webp'):
+            out = os.path.join(tmp, 'paint-fmt.' + ext)
+            subprocess.run([self.PAINT, '--apply', src, out], check=True, capture_output=True, timeout=30)
+            got = Image.open(out).convert('RGBA')
+            for g, e in zip(got.getdata(), im.getdata()):
+                self.assertTrue(g == e or (g[3] == 0 and e[3] == 0), (ext, g, e))             # (a fully see-through pixel may forget its colour)
+            back = os.path.join(tmp, 'paint-fmt-back-%s.png' % ext)                           # and the program reads its own files
+            subprocess.run([self.PAINT, '--apply', out, back], check=True, capture_output=True, timeout=30)
+            again = Image.open(back).convert('RGBA')
+            for g, e in zip(again.getdata(), got.getdata()):
+                self.assertTrue(g == e or (g[3] == 0 and e[3] == 0), (ext, 'own decoder', g, e))
+        out = os.path.join(tmp, 'paint-fmt-few.gif')                                          # a few colours: a GIF with exactly those
+        subprocess.run([self.PAINT, '--apply', fsrc, out], check=True, capture_output=True, timeout=30)
+        self.assertEqual(list(Image.open(out).convert('RGB').getdata()), list(few.getdata()))
+        out = os.path.join(tmp, 'paint-fmt-all.gif')                                          # many colours: cut down to 255 and a transparent one
+        subprocess.run([self.PAINT, '--apply', src, out], check=True, capture_output=True, timeout=30)
+        g = Image.open(out).convert('RGBA')
+        self.assertEqual(g.getpixel((0, 0))[3], 0)
+        self.assertEqual(g.getpixel((1, 0))[3], 255)
+        out = os.path.join(tmp, 'paint-fmt.ppm')
+        subprocess.run([self.PAINT, '--apply', src, out], check=True, capture_output=True, timeout=30)
+        self.assertEqual(Image.open(out).size, (31, 19))
+        self.assertEqual(Image.open(out).getpixel((0, 0)), (255, 255, 255))                   # see-through is laid on white
+        out = os.path.join(tmp, 'paint-fmt.jpg')
+        subprocess.run([self.PAINT, '--apply', src, out], check=True, capture_output=True, timeout=30)
+        self.assertEqual(Image.open(out).format, 'JPEG')
+        self.assertEqual(Image.open(os.path.join(tmp, 'paint-fmt.webp')).format, 'WEBP')
+        self.assertEqual(Image.open(os.path.join(tmp, 'paint-fmt.tif')).format, 'TIFF')
+
     def test_a_bad_operation_or_file_is_refused(self):
         src = os.path.join(tmp, 'paint-notapic.png')
         with open(src, 'wb') as f:
@@ -14179,7 +14219,9 @@ class TestPaint(Base):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.paint', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'paint-%d.dump' % int(time.time() * 1000))
-        p = subprocess.Popen([self.PAINT, '--size', '800x460'] + list(args), env=dict(os.environ, MELLAGUI_PAINT_DUMP=self.dump, MELLAGUI_RAILS='1'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cfg = tempfile.mkdtemp(prefix='paint-cfg-', dir=tmp)                                  # the program keeps its colours and sliders in paint.conf: a folder of its own
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p = subprocess.Popen([self.PAINT, '--size', '800x460'] + list(args), env=dict(os.environ, MELLAGUI_PAINT_DUMP=self.dump, MELLAGUI_RAILS='1', XDG_CONFIG_HOME=cfg), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         self.win = wait_for_window('mellagui.paint')
         self.assertIsNotNone(self.win, 'the window did not appear')
@@ -14314,18 +14356,122 @@ class TestPaint(Base):
         ctl.tap(KEY_ESC)
         self.wait(lambda s: s['state']['prompt'] == '0')
 
+    # ---- helpers of the newer tests ----
+
+    def rows(self, prefix):
+        """The dump's lines that start with `prefix`, each as a dict of its key=value fields (the first word after the prefix as 'id')."""
+        out = []
+        for l in open(self.dump).read().splitlines():
+            f = l.split()
+            if f and f[0] == prefix:
+                kv = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+                kv['id'] = f[1] if len(f) > 1 and '=' not in f[1] else ''
+                out.append(kv)
+        return out
+
+    def row(self, prefix, ident=None):
+        for r in self.rows(prefix):
+            if ident is None or r['id'] == ident:
+                return r
+        self.fail('no %s %s line in %r' % (prefix, ident, open(self.dump).read()))
+
+    def win_xy(self):
+        w = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
+        return w['x'], w['y']
+
+    def click_at(self, x, y, button=272):
+        wx, wy = self.win_xy()
+        ctl.click(wx + int(x), wy + int(y), button)
+
+    def click_box(self, kv):
+        self.click_at(int(kv['x']) + int(kv['w']) // 2, int(kv['y']) + int(kv['h']) // 2)
+
+    def set_slider(self, name, frac):
+        """Clicks a slider of the strip at a fraction (0..1) of its track."""
+        r = self.row('slider', name)
+        self.click_at(int(r['tx']) + int(int(r['tw']) * frac), int(r['ty']))
+
+    def type_text(self, text):
+        plain = {'/': 53, '.': 52, '-': 12, ',': 51}
+        for ch in text:
+            if ch == '#':
+                ctl.key(KEY_LEFTSHIFT, True)
+                ctl.tap(KEYCODES['3'])
+                ctl.key(KEY_LEFTSHIFT, False)
+            elif ch in plain:
+                ctl.tap(plain[ch])
+            elif ch == '_':
+                ctl.key(KEY_LEFTSHIFT, True)
+                ctl.tap(12)
+                ctl.key(KEY_LEFTSHIFT, False)
+            elif ch.isupper():
+                ctl.key(KEY_LEFTSHIFT, True)
+                ctl.tap(KEYCODES[ch.lower()])
+                ctl.key(KEY_LEFTSHIFT, False)
+            else:
+                ctl.tap(KEYCODES[ch])
+
+    def choose_colour(self, which, hexcolour):
+        """Opens the colour card of the pen colour ('fgbox') or the second colour ('bgbox'), types a hex colour, OK."""
+        self.click_box(self.row(which))
+        self.wait(lambda s: s['state']['prompt'] == '8')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(hexcolour)
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
+    def flat_pixel(self, path, x, y):
+        from PIL import Image
+        return Image.open(path).convert('RGBA').getpixel((x, y))
+
+    def save_as(self, path):
+        self.chord(self.KEY_S, KEY_LEFTCTRL, KEY_LEFTSHIFT)
+        self.wait(lambda s: s['state']['prompt'] == '2')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(path)
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: s['state']['prompt'] == '0' and s['image']['path'] == path)
+
+    def test_the_colour_card_has_a_hex_field_quick_colours_and_cancels(self):
+        self.start('--new', '40x30')
+        st = self.wait(lambda s: s['image']['w'] == '40')
+        self.click_box(self.row('fgbox'))                                                     # the pen colour square opens the card
+        st = self.wait(lambda s: s['state']['prompt'] == '8')
+        self.assertEqual(self.row('colour')['hex'], '#000000')
+        q = self.row('cpquick')                                                               # a quick colour: the first of the second row is red
+        self.click_at(int(q['x']) + 5, int(q['y']) + int(q['pitch']) + 5)
+        st = self.wait(lambda s: s['state']['fg'] == 'ffe53935')
+        ctl.tap(KEY_ESC)                                                                      # Esc: the colour is what it was
+        st = self.wait(lambda s: s['state']['prompt'] == '0')
+        self.assertEqual(st['state']['fg'], 'ff000000')
+        self.choose_colour('fgbox', '#3366cc')                                                # a typed hex colour, Enter
+        st = self.wait(lambda s: s['state']['fg'] == 'ff3366cc')
+        self.choose_colour('bgbox', '#11223380')                                              # with an alpha byte: a half see-through second colour
+        st = self.wait(lambda s: s['state']['bg'] == '80112233')
+        rec = self.row('recent')
+        self.assertEqual(rec['n'], '2')                                                       # both colours are in the list of colours used lately
+        # the square: a click sets saturation and brightness, the hue bar the hue
+        self.click_box(self.row('fgbox'))
+        self.wait(lambda s: s['state']['prompt'] == '8')
+        hue = self.row('cphue')
+        self.click_at(int(hue['x']) + 10, int(hue['y']) + int(hue['h']) // 3)                 # a third of the way down the hue bar: 120 degrees (green)
+        self.wait(lambda s: 115 < float(self.row('colour')['h']) < 125)
+        sq = self.row('cpsq')
+        self.click_at(int(sq['x']) + int(sq['w']) - 2, int(sq['y']) + 2)                      # the top right corner: full saturation and brightness
+        self.wait(lambda s: float(self.row('colour')['s']) > 0.98 and float(self.row('colour')['v']) > 0.98)
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['state']['prompt'] == '0')
+        fg = int(st['state']['fg'], 16)
+        self.assertTrue(((fg >> 8) & 255) > 240 and ((fg >> 16) & 255) < 16 and (fg & 255) < 16, st['state']['fg'])      # green (a click lands within a degree or two)
+
     def test_colours_the_fill_tool_and_the_second_button(self):
         self.start('--new', '40x30')
         st = self.wait(lambda s: s['image']['w'] == '40')
-        # a red pen colour from the strip (the sixth square), then a click with Fill turns the whole white picture red
-        pal = st['pal']
-        win = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
-        px = win['x'] + int(pal['x']) + 5 * int(pal['pitch']) + 8
-        py = win['y'] + int(pal['y']) + 8
-        ctl.click(px, py)
+        self.choose_colour('fgbox', '#e53935')
         st = self.wait(lambda s: s['state']['fg'] == 'ffe53935')
-        ctl.click(px + int(pal['pitch']) * 4, py, 273)                                        # right click: the second colour
-        st = self.wait(lambda s: s['state']['bg'] != 'ffffffff')
+        rec = self.row('recent')                                                              # the colour used lately: a right click makes it the second colour
+        self.click_at(int(rec['x']) + 5, int(rec['y']) + 5, 273)
+        st = self.wait(lambda s: s['state']['bg'] == 'ffe53935')
         ctl.tap(33)                                                                           # F: the Fill tool
         st = self.wait(lambda s: s['state']['tool'] == 'Fill')
         before = st['image']['hash']
@@ -14336,6 +14482,354 @@ class TestPaint(Base):
         st = self.wait(lambda s: s['state']['prompt'] == '2')
         ctl.tap(KEY_ESC)
         self.wait(lambda s: s['state']['prompt'] == '0')
+
+    def test_the_sliders_set_the_size_and_the_opacity_of_what_is_drawn(self):
+        out = os.path.join(tmp, 'paint-slider.png')
+        self.start('--new', '80x40')
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        self.assertEqual([r['id'] for r in self.rows('slider')], ['Size', 'Opacity', 'Hardness'])      # the Pen's sliders
+        self.set_slider('Size', 0.0)
+        st = self.wait(lambda s: s['state']['size'] == '1')
+        self.set_slider('Size', 1.0)
+        st = self.wait(lambda s: s['state']['size'] == '200')
+        self.set_slider('Size', 0.06)                                                         # about 12 pixels
+        st = self.wait(lambda s: 8 <= int(s['state']['size']) <= 16)
+        size = int(st['state']['size'])
+        self.set_slider('Opacity', 0.5)
+        st = self.wait(lambda s: 45 <= int(s['state']['opacity']) <= 55)
+        self.drag(st, (10, 20), (70, 20))                                                     # black at about half opacity across white
+        st = self.wait(lambda s: s['image']['modified'] == '1')
+        self.save_as(out)
+        r, g, b, a = self.flat_pixel(out, 40, 20)
+        self.assertTrue(110 < r < 145 and r == g == b, (r, g, b))                             # a grey: about half way
+        self.assertEqual(self.flat_pixel(out, 40, 2)[:3], (255, 255, 255))                    # nothing outside the stroke
+        self.assertTrue(self.flat_pixel(out, 40, 20 - size // 2 + 1)[0] < 200)                # and the stroke is as thick as the Size says
+        self.assertTrue(self.flat_pixel(out, 40, 20 - size // 2 - 3)[0] > 250)
+        ctl.tap(27)                                                                           # ] makes the brush bigger
+        self.wait(lambda s: int(s['state']['size']) > size)
+
+    def test_a_soft_brush_fades_and_the_eraser_takes_the_layer_away(self):
+        out = os.path.join(tmp, 'paint-soft.png')
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        self.set_slider('Size', 0.1)                                                          # a thick brush
+        self.set_slider('Hardness', 0.0)                                                      # with no hard edge at all
+        st = self.wait(lambda s: s['state']['hardness'] == '0')
+        self.drag(st, (30, 20), (30, 20))
+        self.save_as(out)
+        mid, edge = self.flat_pixel(out, 30, 20)[0], self.flat_pixel(out, 30 + int(st['state']['size']) // 2 - 3, 20)[0]
+        self.assertTrue(mid < 60 and 60 < edge < 250, (mid, edge))                            # dark in the middle, fading out to white
+        ctl.tap(KEYCODES['e'])                                                                # the Eraser: it takes the colour away, the checkerboard shows
+        st = self.wait(lambda s: s['state']['tool'] == 'Eraser')
+        self.set_slider('Hardness', 1.0)
+        self.drag(st, (20, 20), (40, 20))
+        self.save_as(out)
+        self.assertEqual(self.flat_pixel(out, 30, 20), (255, 255, 255, 255))                   # the layer is clear there, and the paper (white) shows through
+
+    def test_a_new_picture_is_an_empty_layer_on_white_paper(self):
+        out = os.path.join(tmp, 'paint-paper.png')
+        self.start('--new', '30x20')
+        st = self.wait(lambda s: s['image']['w'] == '30')
+        self.assertEqual((st['image']['paper'], st['image']['layers']), ('ffffffff', '1'))
+        empty = self.rows('layer')[0]['hash']
+        self.drag(st, (5, 10), (25, 10))
+        st = self.wait(lambda s: self.rows('layer')[0]['hash'] != empty)
+        ctl.tap(111)                                                                          # Delete clears the layer: it is empty again, the paper is still there
+        st = self.wait(lambda s: self.rows('layer')[0]['hash'] == empty)
+        self.assertEqual(st['image']['paper'], 'ffffffff')
+        self.save_as(out)
+        self.assertEqual(self.flat_pixel(out, 15, 10), (255, 255, 255, 255))
+
+    def test_layers_are_added_hidden_mixed_merged_and_undone(self):
+        out = os.path.join(tmp, 'paint-layers.png')
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        self.assertEqual((st['image']['layers'], st['image']['cur']), ('1', '0'))
+        self.click_box(self.row('lbtn', 'New'))                                               # a new layer above, which is the one drawn on
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.assertEqual(st['image']['cur'], '1')
+        base = st['image']['hash']
+        self.drag(st, (5, 20), (55, 20))
+        st = self.wait(lambda s: s['image']['hash'] != base)
+        layers = self.rows('layer')
+        self.assertEqual(layers[0]['hash'], self.rows('layer')[0]['hash'])
+        self.assertNotEqual(layers[0]['hash'], layers[1]['hash'])                             # the line is on the upper layer only
+        drawn = st['image']['hash']
+        eye = [int(v) for v in self.row('lrow', '1')['eye'].split(',')]                       # the eye of the upper layer hides it
+        self.click_at(*eye)
+        st = self.wait(lambda s: s['image']['hash'] == base)
+        self.assertEqual(self.rows('layer')[1]['visible'], '0')
+        self.click_at(*eye)
+        st = self.wait(lambda s: s['image']['hash'] == drawn)
+        o = self.row('lopacity')                                                              # the layer's opacity slider
+        self.click_at(int(o['tx']) + int(int(o['tw']) * 0.5), int(o['ty']))
+        self.wait(lambda s: 45 <= int(self.rows('layer')[1]['opacity']) <= 55)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)                                                  # undo takes the opacity back
+        self.wait(lambda s: self.rows('layer')[1]['opacity'] == '100')
+        self.click_box(self.row('lbtn', 'Copy'))                                              # a copy of the layer
+        st = self.wait(lambda s: s['image']['layers'] == '3')
+        self.assertEqual(self.rows('layer')[2]['hash'], self.rows('layer')[1]['hash'])
+        self.click_box(self.row('lbtn', 'Delete'))
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)                                                  # the delete is undone: the layer comes back with its pixels
+        st = self.wait(lambda s: s['image']['layers'] == '3')
+        self.assertEqual(self.rows('layer')[2]['hash'], self.rows('layer')[1]['hash'])
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)                                                  # and the copy goes
+        self.wait(lambda s: s['image']['layers'] == '2')
+        self.click_box(self.row('lbtn', 'Merge'))
+        st = self.wait(lambda s: s['image']['layers'] == '1')
+        self.assertEqual(st['image']['hash'], drawn)                                          # merging changes nothing about how it looks
+        self.save_as(out)
+        self.assertEqual(self.flat_pixel(out, 30, 20)[:3], (0, 0, 0))
+
+    def test_ora_keeps_the_layers_and_opens_again(self):
+        import zipfile
+        out = os.path.join(tmp, 'paint-layers.ora')
+        self.start('--new', '30x20')
+        st = self.wait(lambda s: s['image']['w'] == '30')
+        self.click_box(self.row('lbtn', 'New'))
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.drag(st, (3, 10), (25, 10))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        o = self.row('lopacity')
+        self.click_at(int(o['tx']) + int(int(o['tw']) * 0.25), int(o['ty']))
+        self.wait(lambda s: 20 <= int(self.rows('layer')[1]['opacity']) <= 30)
+        opacity = int(self.rows('layer')[1]['opacity'])
+        self.save_as(out)
+        z = zipfile.ZipFile(out)                                                              # a real OpenRaster file
+        self.assertEqual(z.namelist()[0], 'mimetype')
+        self.assertEqual(z.read('mimetype'), b'image/openraster')
+        stack = z.read('stack.xml').decode()
+        self.assertEqual(stack.count('<layer '), 2)
+        self.assertIn('opacity="0.%02d"' % opacity, stack)
+        from PIL import Image
+        import io
+        top = Image.open(io.BytesIO(z.read('data/layer1.png'))).convert('RGBA')
+        self.assertEqual(top.getpixel((10, 10)), (0, 0, 0, 255))
+        self.assertEqual(top.getpixel((10, 2))[3], 0)                                         # the new layer was empty round the line
+        self.assertEqual(Image.open(io.BytesIO(z.read('mergedimage.png'))).size, (30, 20))
+        hashes = [r['hash'] for r in self.rows('layer')]
+        # open it again: the layers, their opacity and their pixels are all there
+        self.chord(self.KEY_N, KEY_LEFTCTRL)                                                  # (a new picture so that Open below is a real change)
+        self.wait(lambda s: s['state']['prompt'] in ('3', '5'))
+        if self.state()['state']['prompt'] == '5':
+            ctl.tap(32)
+        self.wait(lambda s: s['state']['prompt'] == '3')
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.chord(24, KEY_LEFTCTRL)                                                          # Ctrl+O, type the path
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(out)
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['image']['layers'] == '2' and s['image']['path'] == out)
+        self.assertEqual([r['hash'] for r in self.rows('layer')], hashes)
+        self.assertEqual(self.rows('layer')[1]['opacity'], str(opacity))
+
+    def test_text_is_typed_on_the_picture_and_put_down(self):
+        self.start('--new', '120x60')
+        st = self.wait(lambda s: s['image']['w'] == '120')
+        base = st['image']['hash']
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text')
+        x, y = self.screen(st, 10, 10)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['text']['on'] == '1')
+        self.type_text('Hi')
+        st = self.wait(lambda s: s['text']['len'] == '2')
+        st = self.wait(lambda s: s['image']['hash'] != base)                                  # the text shows while it is typed
+        ctl.tap(14)                                                                           # BackSpace takes a letter back
+        st = self.wait(lambda s: s['text']['len'] == '1')
+        ctl.tap(KEY_ESC)                                                                      # Esc: the text goes and the picture is as it was
+        st = self.wait(lambda s: s['text']['on'] == '0')
+        self.assertEqual(st['image']['hash'], base)
+        self.assertEqual(st['state']['undo'], '0')
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['text']['on'] == '1')
+        self.type_text('Hi')
+        self.wait(lambda s: s['text']['len'] == '2')
+        self.chord(KEY_ENTER, KEY_LEFTCTRL)                                                   # Ctrl+Enter puts it down: one undo step
+        st = self.wait(lambda s: s['text']['on'] == '0')
+        put = st['image']['hash']
+        self.assertNotEqual(put, base)
+        self.assertEqual(st['state']['undo'], '1')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['image']['hash'] == base)
+
+    def test_the_save_as_card_has_a_chip_for_every_format(self):
+        from PIL import Image
+        base = os.path.join(tmp, 'paint-chips')
+        self.start('--new', '24x16')
+        st = self.wait(lambda s: s['image']['w'] == '24')
+        self.drag(st, (3, 8), (20, 8))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        self.chord(self.KEY_S, KEY_LEFTCTRL, KEY_LEFTSHIFT)
+        st = self.wait(lambda s: s['state']['prompt'] == '2')
+        names = [r['id'] for r in self.rows('fmt')]
+        self.assertEqual(names, ['ORA', 'PNG', 'JPG', 'WEBP', 'GIF', 'BMP', 'TGA', 'TIFF', 'PPM'])
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(base + '.png')
+        for label, want in (('WEBP', 'WEBP'), ('GIF', 'GIF'), ('BMP', 'BMP'), ('TIFF', 'TIFF'), ('JPG', 'JPEG'), ('PNG', 'PNG')):
+            self.click_box(self.row('fmt', label))                                            # the chip changes the extension of the name in the field
+            self.wait(lambda s, l=label: self.row('fmt', l)['on'] == '1' and self.row('card')['field'].lower().endswith(('.tif' if l == 'TIFF' else '.' + l.lower())))
+            ctl.tap(KEY_ENTER)
+            st = self.wait(lambda s: s['state']['prompt'] == '0')
+            path = self.state()['image']['path']
+            self.assertEqual(Image.open(path).format, want, path)                             # and the file is of that format
+            self.assertTrue(path.startswith(base + '.'), path)
+            self.chord(self.KEY_S, KEY_LEFTCTRL, KEY_LEFTSHIFT)
+            st = self.wait(lambda s: s['state']['prompt'] in ('2', '6'))
+            if st['state']['prompt'] == '2':
+                pass
+            if self.state()['state']['prompt'] == '6':                                        # (the same name again: asked before it is replaced - not here, it is the file's own name)
+                ctl.tap(KEY_ENTER)
+                self.wait(lambda s: s['state']['prompt'] == '2')
+        ctl.tap(KEY_ESC)
+
+    def test_a_name_given_on_the_command_line_decides_the_format(self):
+        from PIL import Image
+        out = os.path.join(tmp, 'paint-cli-format.bmp')
+        if os.path.exists(out):
+            os.unlink(out)
+        self.start('--new', '24x16', out)
+        st = self.wait(lambda s: s['image']['w'] == '24')
+        self.drag(st, (3, 8), (20, 8))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertEqual(Image.open(out).format, 'BMP')
+
+    def test_the_canvas_card_grows_the_sheet_round_the_picture(self):
+        out = os.path.join(tmp, 'paint-canvas.png')
+        self.start('--new', '20x10')
+        st = self.wait(lambda s: s['image']['w'] == '20')
+        self.chord(KEYCODES['c'], KEY_LEFTCTRL, KEY_LEFTALT)                                  # Ctrl+Alt+C
+        st = self.wait(lambda s: s['state']['prompt'] == '9')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text('40x30')
+        self.click_box(self.row('canchor', '0'))                                              # the picture sits in the top left corner
+        self.wait(lambda s: self.row('canvascard')['anchor'] == '0,0')
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['image']['w'] == '40')
+        self.assertEqual(st['image']['h'], '30')
+        self.save_as(out)
+        self.assertEqual(self.flat_pixel(out, 5, 5)[:4], (255, 255, 255, 255))                # the old picture is where it was ...
+        self.assertEqual(self.flat_pixel(out, 30, 20)[:4], (255, 255, 255, 255))              # ... and the new room is paper too
+        self.assertEqual(self.rows('layer')[0]['hash'] != '', True)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['image']['w'] == '20')
+
+    def test_selections_select_move_copy_and_paste(self):
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        ctl.tap(KEYCODES['f'])                                                                # the layer is empty: fill it first, so that there is something to cut a hole in
+        st = self.wait(lambda s: s['state']['tool'] == 'Fill')
+        x, y = self.screen(st, 2, 2)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['state']['undo'] == '1')
+        ctl.tap(KEYCODES['o'])                                                                # the ellipse selection
+        st = self.wait(lambda s: s['state']['tool'] == 'EllipseSelect')
+        self.drag(st, (10, 5), (40, 35))
+        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        self.assertIn('mask=1', st['sel'])                                                    # a mask, not a rectangle
+        ctl.tap(111)                                                                          # Delete clears the inside: transparent
+        st = self.wait(lambda s: s['state']['undo'] == '2')
+        self.chord(KEYCODES['d'], KEY_LEFTCTRL)                                               # Ctrl+D: no selection
+        st = self.wait(lambda s: s['sel'][0] == 'no')
+        ctl.tap(KEYCODES['w'])                                                                # the magic wand on the cleared part
+        st = self.wait(lambda s: s['state']['tool'] == 'Wand')
+        x, y = self.screen(st, 25, 20)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        x0, y0, x1, y1 = (int(v) for v in st['sel'][1].split(','))
+        self.assertTrue(abs((x1 - x0) - 30) <= 2 and abs((y1 - y0) - 30) <= 2, st['sel'])     # the wand found the ellipse's hole
+        self.chord(KEYCODES['i'], KEY_LEFTCTRL)                                               # Ctrl+I: the rest of the picture
+        st = self.wait(lambda s: s['sel'][1] == '0,0,60,40')
+        self.chord(KEYCODES['c'], KEY_LEFTCTRL)                                               # copy, paste: a new layer
+        self.chord(KEYCODES['v'], KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.assertEqual(st['state']['tool'], 'Move')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['layers'] == '1')
+
+    def test_the_move_tool_carries_a_selection_or_the_whole_layer(self):
+        out = os.path.join(tmp, 'paint-move.png')
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        self.drag(st, (10, 10), (10, 10))                                                     # a black dot
+        st = self.wait(lambda s: s['image']['modified'] == '1')
+        ctl.tap(KEYCODES['m'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Move')
+        self.drag(st, (20, 20), (40, 30))                                                     # no selection: the whole layer moves by (20, 10)
+        st = self.wait(lambda s: s['state']['undo'] == '2')
+        self.save_as(out)
+        self.assertEqual(self.flat_pixel(out, 30, 20), (0, 0, 0, 255))                        # the drawing moved ...
+        self.assertEqual(self.flat_pixel(out, 10, 10), (255, 255, 255, 255))                  # ... and the white stayed: it is the paper, not part of the layer
+        self.assertEqual(self.flat_pixel(out, 59, 39), (255, 255, 255, 255))                  # (also at the edge the drawing moved away from)
+        self.assertEqual(st['image']['paper'], 'ffffffff')
+
+    def test_every_tool_draws_and_one_undo_takes_it_back(self):
+        self.start('--new', '90x60')
+        st = self.wait(lambda s: s['image']['w'] == '90')
+        base = st['image']['hash']
+        for key, name in (('l', 'Line'), ('b', 'Box'), ('c', 'Circle'), ('n', 'Shape'), ('g', 'Gradient'), ('a', 'Airbrush')):
+            ctl.tap(KEYCODES[key])
+            st = self.wait(lambda s, n=name: s['state']['tool'] == n)
+            before = st['image']['hash']
+            n_undo = int(st['state']['undo'])
+            self.drag(st, (15, 10), (70, 45))
+            st = self.wait(lambda s, b=before: s['image']['hash'] != b)
+            self.assertEqual(int(st['state']['undo']), n_undo + 1, name)
+            self.chord(self.KEY_Z, KEY_LEFTCTRL)
+            st = self.wait(lambda s, b=before: s['image']['hash'] == b)
+
+    def test_the_pointer_has_a_shape_for_every_tool(self):
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        x, y = self.screen(st, 30, 20)
+        ctl.abs(int(x), int(y))
+        kinds = {}
+        for key, name in (('p', 'Pen'), ('e', 'Eraser'), ('f', 'Fill'), ('i', 'Picker'), ('t', 'Text'), ('m', 'Move'), ('s', 'Select'), ('w', 'Wand'), ('q', 'Lasso'), ('c', 'Circle')):
+            ctl.tap(KEYCODES[key])
+            st = self.wait(lambda s, n=name: s['state']['tool'] == n)
+            st = self.wait(lambda s: s['cursor']['kind'] != '0')                                 # (the arrow is what it shows until the pointer is on the picture)
+            kinds[name] = st['cursor']['kind']
+            for _ in range(60):
+                ctl.cmd('cursor')
+                if ctl.last == 'ok shape=3':
+                    break
+                time.sleep(0.05)
+            self.assertEqual(ctl.last, 'ok shape=3')                                          # the compositor shows the program's own picture
+        self.assertEqual(len(set(kinds.values())) >= 8, True, kinds)                          # (a few tools share a crosshair, most have a shape of their own)
+        self.assertNotEqual(kinds['Pen'], kinds['Eraser'])
+        self.assertNotEqual(kinds['Fill'], kinds['Picker'])
+        wx, wy = self.win_xy()
+        ctl.abs(wx + 20, wy + 60)                                                             # over the rail it is the arrow again
+        st = self.wait(lambda s: s['cursor']['kind'] == '0')
+
+    def test_the_pointer_comes_back_after_it_left_the_window(self):
+        """The compositor empties the cursor surface when the pointer goes to another window (or a menu); the program has to put the picture there again."""
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        x, y = self.screen(st, 30, 20)
+        def shape():
+            for _ in range(60):
+                ctl.cmd('cursor')
+                if ctl.last == 'ok shape=3':
+                    return True
+                time.sleep(0.05)
+            return False
+        ctl.abs(int(x), int(y))
+        self.assertTrue(shape())
+        ctl.abs(300, 8)                                                                       # up on the panel: another surface has the pointer, the program's cursor surface is dropped
+        time.sleep(0.2)
+        ctl.cmd('cursor')
+        self.assertNotEqual(ctl.last, 'ok shape=3')
+        for _ in range(3):
+            ctl.abs(int(x), int(y))                                                           # back on the picture: the pencil is there again (not an empty surface = no cursor)
+            self.assertTrue(shape(), 'the cursor is gone after the pointer came back')
+            ctl.abs(300, 8)
+            time.sleep(0.15)
 
     def test_select_crop_resize_and_new(self):
         self.start('--new', '50x40')

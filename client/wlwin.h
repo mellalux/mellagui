@@ -63,6 +63,12 @@ struct wlwin {
     bool want_fullscreen;           /* set before wlwin_open: the toplevel asks for full screen before its first commit */
     double zoom;                    /* the content's scale (wlwin_set_zoom; 0 or 1 = none): bw x bh is the window size divided by it */
     const char *name;               /* program name for messages, e.g. "mellagui-calc" */
+    uint32_t cur_surface;           /* wlwin_cursor(): the cursor's own surface, the serial of the last pointer enter, the hotspot, and whether one is set */
+    uint32_t cur_serial;
+    int cur_hx, cur_hy;
+    bool cur_set;
+    uint32_t *cur_px;               /* the cursor's picture, premultiplied: it is put on the surface again at every enter (the compositor empties the surface when the pointer leaves) */
+    int cur_w, cur_h;
 };
 
 /*
@@ -104,6 +110,9 @@ bool wlwin_menu(struct wlwin *w, const char *entries);
 /* Move the pointer to (x, y) of this window (window pixels, as the rails count them), when it is over the window: a program whose window grows under the button
  * that was pressed (a text size button at the window's edge) takes the pointer along. Send it after the commit of the new size. Needs the compositor's
  * mellagui_menu_v1 (silently nothing without it). */
+/* The pointer looks like this picture (straight ARGB, `cw` x `ch` logical pixels, hotspot hx, hy) while it is over the window; it is sent again at every enter.
+ * Without a call the compositor's own arrow shows. Needs the window's pointer (an ops->pointer). */
+void wlwin_cursor(struct wlwin *w, const uint32_t *argb, int cw, int ch, int hx, int hy);
 void wlwin_warp_pointer(struct wlwin *w, int x, int y);
 /* Bring this window forward (to the top, to the current workspace, out of the minimized state) and give it the focus. Needs the compositor's mellagui_menu_v1
  * (silently nothing without it): for a program that was asked by another one to show something. */

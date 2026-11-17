@@ -166,11 +166,91 @@ static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     }
 }
 
+static void cursor_buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)args;
+    (void)data;
+    if (op != LM_WL_BUFFER_EVT_RELEASE)
+        return;
+    WLC_SEND0(c, id, LM_WL_BUFFER_REQ_DESTROY);
+    wlc_forget(c, id);
+}
+
+/* The stored picture on the cursor surface (a new buffer, attached and committed): a surface the compositor took the role of the cursor from has no content. */
+static void cursor_upload(struct wlwin *w)
+{
+    if (!w->cur_px || !w->cur_surface)
+        return;
+    size_t size = (size_t)w->cur_w * (size_t)w->cur_h * 4;
+    int fd = memfd_create("cursor", MFD_CLOEXEC);
+    if (fd < 0 || ftruncate(fd, (off_t)size) < 0) {
+        if (fd >= 0)
+            close(fd);
+        return;
+    }
+    uint32_t *px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (px == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+    memcpy(px, w->cur_px, size);
+    munmap(px, size);
+    uint32_t pool = wlc_alloc(w->c, &lm_wl_shm_pool_interface, NULL, NULL);
+    WLC_SEND(w->c, w->shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = pool }, { .h = fd }, { .i = (int32_t)size });
+    close(fd);
+    uint32_t buf = wlc_alloc(w->c, &lm_wl_buffer_interface, cursor_buffer_event, w);
+    WLC_SEND(w->c, pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = buf }, { .i = 0 }, { .i = w->cur_w }, { .i = w->cur_h }, { .i = w->cur_w * 4 }, { .u = LM_WL_SHM_FORMAT_ARGB8888 });
+    WLC_SEND0(w->c, pool, LM_WL_SHM_POOL_REQ_DESTROY);
+    wlc_forget(w->c, pool);
+    WLC_SEND(w->c, w->cur_surface, LM_WL_SURFACE_REQ_ATTACH, { .o = buf }, { .i = 0 }, { .i = 0 });
+    WLC_SEND(w->c, w->cur_surface, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = w->cur_w }, { .i = w->cur_h });
+    WLC_SEND0(w->c, w->cur_surface, LM_WL_SURFACE_REQ_COMMIT);
+}
+
+/* set_cursor with the serial of the last enter; the picture goes up first (the surface may be empty again). */
+static void send_cursor(struct wlwin *w)
+{
+    if (!w->cur_set || !w->cur_serial || !w->cur_surface || !w->pointer)
+        return;
+    cursor_upload(w);
+    WLC_SEND(w->c, w->pointer, LM_WL_POINTER_REQ_SET_CURSOR, { .u = w->cur_serial }, { .o = w->cur_surface }, { .i = w->cur_hx }, { .i = w->cur_hy });
+}
+
+void wlwin_cursor(struct wlwin *w, const uint32_t *argb, int cw, int ch, int hx, int hy)
+{
+    if (!w->compositor || !w->shm || !w->pointer || cw < 1 || ch < 1 || cw > 256 || ch > 256)
+        return;
+    if (!w->cur_surface) {
+        w->cur_surface = wlc_alloc(w->c, &lm_wl_surface_interface, NULL, NULL);
+        WLC_SEND(w->c, w->compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = w->cur_surface });
+    }
+    uint32_t *copy = malloc((size_t)cw * (size_t)ch * 4);
+    if (!copy)
+        return;
+    for (size_t i = 0; i < (size_t)cw * (size_t)ch; i++) {                  /* the protocol wants premultiplied colour */
+        uint32_t c = argb[i], a = c >> 24;
+        copy[i] = (a << 24) | ((((c >> 16) & 255) * a / 255) << 16) | ((((c >> 8) & 255) * a / 255) << 8) | ((c & 255) * a / 255);
+    }
+    free(w->cur_px);
+    w->cur_px = copy;
+    w->cur_w = cw;
+    w->cur_h = ch;
+    w->cur_hx = hx;
+    w->cur_hy = hy;
+    w->cur_set = true;
+    if (w->cur_serial)
+        send_cursor(w);
+}
+
 static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)c; (void)id;
     struct wlwin *w = data;
     double z = zoom_of(w);
+    if (op == LM_WL_POINTER_EVT_ENTER) {
+        w->cur_serial = args[0].u;
+        send_cursor(w);
+    }
     if (op == LM_WL_POINTER_EVT_ENTER || op == LM_WL_POINTER_EVT_MOTION) {   /* the pointer is in window pixels: the program thinks in content pixels */
         union lm_arg *m = (union lm_arg *)args;
         int a = op == LM_WL_POINTER_EVT_ENTER ? 2 : 1;                  /* (enter: serial, surface, x, y; motion: time, x, y) */
@@ -379,6 +459,8 @@ bool wlwin_request_size(struct wlwin *w, int width, int height)
 
 void wlwin_destroy(struct wlwin *w)
 {
+    free(w->cur_px);
+    w->cur_px = NULL;
     wlc_destroy(w->c);
     w->c = NULL;
 }

@@ -12468,6 +12468,73 @@ class TestCamera(Base):
         n = int(re.search(r'strip=(\d+)', open(dump).read()).group(1))
         self.assertIn('top=%d' % (n - len(thumbs)), open(dump).read().splitlines()[0])
 
+    def test_the_strip_has_the_clips_too_and_the_default_folder_is_camera_in_the_home_folder(self):
+        d0 = tempfile.mkdtemp(prefix='mellagui-camclips-', dir=tmp)
+        home = tempfile.mkdtemp(prefix='mellagui-camhome-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d0, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        with open(os.path.join(d0, 'camera-20260101-000001.mp4'), 'wb') as f:                # an old clip: its poster comes from the poster program
+            f.write(b'not a real clip')
+        with open(os.path.join(d0, 'camera-20260101-000002.png'), 'wb') as f:
+            f.write(b'')
+        poster = os.path.join(d0, 'poster.sh')
+        plog = os.path.join(d0, 'poster.log')
+        with open(poster, 'w') as f:
+            f.write('#!/bin/sh\necho "$2" >> %s\nprintf "P6\\n4 4\\n255\\n" > "$3"\nhead -c 48 /dev/zero >> "$3"\n' % plog)
+        os.chmod(poster, 0o755)
+        dump = os.path.join(tmp, 'cam-%d.dump' % time.time_ns())
+        env = dict(os.environ, MELLAGUI_CAM_FAKE='1', MELLAGUI_CAM_TIMER='0', MELLAGUI_CAM_PLAYER='none', MELLAGUI_CAM_DUMP=dump, MELLAGUI_CAM_WINDOW='700x420',
+                   MELLAGUI_CAM_POSTER=poster, MELLAGUI_FFMPEG='none', MELLAGUI_RECORD_MIC_SRC='none', XDG_CONFIG_HOME=self.cfgdir(), HOME=home)
+        env.pop('MELLAGUI_CAM_DIR', None)
+        env.pop('MELLAGUI_CAM_VIDEO_DIR', None)
+        # 1) the folder of the strip is where the pictures go: a first run with a folder that has a clip and a picture
+        pr = subprocess.Popen([self.CAM], env=dict(env, MELLAGUI_CAM_DIR=d0), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = wait_for_window('mellagui.cam')
+        self.assertIsNotNone(win)
+        time.sleep(1.0)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        for _ in range(60):
+            if os.path.exists(plog):
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(plog).read().strip(), os.path.join(d0, 'camera-20260101-000001.mp4'))
+        thumbs = [l.split() for l in open(dump).read().splitlines() if l.startswith('thumb')]
+        self.assertEqual([t[2] for t in thumbs], ['camera-20260101-000002.png', 'camera-20260101-000001.mp4'])   # the clip is among the pictures, by its time
+        ctl.tap(19)                                                                          # R: a clip (our own writer: no ffmpeg), then it is the newest in the strip
+        time.sleep(1.2)
+        ctl.tap(19)
+        for _ in range(100):
+            if len([n for n in os.listdir(d0) if n.endswith('.mp4')]) == 2:
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)
+        thumbs = [l.split() for l in open(dump).read().splitlines() if l.startswith('thumb')]
+        self.assertEqual(len(thumbs), 3)
+        self.assertTrue(thumbs[0][2].endswith('.mp4') and thumbs[0][2] > 'camera-2026010', thumbs)
+        pr.kill()
+        pr.wait()
+        # 2) no folder given: ~/Camera (made when the first picture is taken), clips go there too
+        pr = subprocess.Popen([self.CAM], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        win = wait_for_window('mellagui.cam')
+        self.assertIsNotNone(win)
+        time.sleep(1.0)
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cam'][0]
+        ctl.abs(win['x'] + 100, win['y'] + 100)
+        ctl.tap(KEY_SPACE)
+        ctl.tap(19)
+        time.sleep(1.2)
+        ctl.tap(19)
+        for _ in range(100):
+            names = os.listdir(os.path.join(home, 'Camera')) if os.path.isdir(os.path.join(home, 'Camera')) else []
+            if any(n.endswith('.png') for n in names) and any(n.endswith('.mp4') for n in names):
+                break
+            time.sleep(0.1)
+        self.assertTrue(any(n.endswith('.png') for n in names) and any(n.endswith('.mp4') for n in names), names)
+        self.assertFalse(os.path.exists(os.path.join(home, 'Pictures')) or os.path.exists(os.path.join(home, 'Videos')))
+
     def test_the_effects_of_the_second_page_have_a_focus_the_mouse_moves(self):
         try:
             from PIL import Image

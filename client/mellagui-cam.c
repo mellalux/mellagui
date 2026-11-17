@@ -27,10 +27,10 @@
  * B = take the background again (backdrop effects), O = sound on / off,
  * R = record a clip (again = stop), A = the microphone in the clip on / off, M = mirror the preview, P = pause,
  * S = next picture size, C = next camera, Esc / Q = quit. In the grid: arrows / Enter / 1..9 choose, PgUp / PgDn the page, Esc closes it.
- * Snapshots go to $MELLAGUI_CAM_DIR (default ~/Pictures) as camera-YYYYMMDD-HHMMSS.png, the picture as the camera sees it
+ * Snapshots go to $MELLAGUI_CAM_DIR (default ~/Camera) as camera-YYYYMMDD-HHMMSS.png, the picture as the camera sees it
  * (not mirrored); mellagui-view finds them there.
  *
- * Clips: H.264 + AAC in an MP4 (`camera-YYYYMMDD-HHMMSS.mp4` in $MELLAGUI_CAM_VIDEO_DIR, default ~/Videos, mode 0600), made by ffmpeg from the pictures
+ * Clips: H.264 + AAC in an MP4 (`camera-YYYYMMDD-HHMMSS.mp4` in $MELLAGUI_CAM_VIDEO_DIR, default the same folder as the pictures, mode 0600), made by ffmpeg from the pictures
  * (client/ffpipe.c: sent as they come, never waiting - a picture that x264 is too slow for is dropped) and, when the microphone switch is on, the default
  * microphone (ffmpeg reads it itself, so sound and picture share one clock). Without ffmpeg the clip is Motion JPEG with the microphone as a PCM sound
  * track (parec; src/jpegenc.c, src/mp4.c, client/audiocap.c): bigger files, played by ffmpeg / mpv / VLC but not by browsers. The picture is not
@@ -48,6 +48,7 @@
 #include <limits.h>
 #include <linux/videodev2.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,6 +115,7 @@ struct source {
 struct thumb {
     struct lm_image img;                /* the small copy; px NULL until it was made (the ones of the folder are read when they come into view) */
     bool tried;                         /* it was read (or failed) */
+    bool video;                         /* a clip (camera-*.mp4): its picture is a poster made by `mellagui-view --poster` */
     char path[PATH_MAX + 300];
 };
 
@@ -541,6 +543,12 @@ static void fx_update(struct app *a)
 
 static void thumb_box(const uint32_t *s, int sw, int sh, uint32_t *d, int dw, int dh);
 
+static bool is_clip_name(const char *path)
+{
+    size_t n = strlen(path);
+    return n > 4 && !strcmp(path + n - 4, ".mp4");
+}
+
 /* The picture that was just saved goes first into the strip (a small copy; the file's name is kept to open it). */
 static void strip_push(struct app *a, const char *path, const struct lm_image *img)
 {
@@ -558,35 +566,64 @@ static void strip_push(struct app *a, const char *path, const struct lm_image *i
     a->strip[0].img = (struct lm_image){ tw, STRIP_H, px };
     a->strip[0].tried = true;
     snprintf(a->strip[0].path, sizeof(a->strip[0].path), "%s", path);
+    a->strip[0].video = is_clip_name(path);
     if (a->nstrip < STRIP_MAX)
         a->nstrip++;
     a->strip_top = 0;                                           /* the new one is in view */
 }
 
-static int cam_png_filter(const struct dirent *e)
+static int cam_media_filter(const struct dirent *e)
 {
     size_t n = strlen(e->d_name);
-    return !strncmp(e->d_name, "camera-", 7) && n > 11 && !strcmp(e->d_name + n - 4, ".png");
+    return !strncmp(e->d_name, "camera-", 7) && n > 11 && (!strcmp(e->d_name + n - 4, ".png") || !strcmp(e->d_name + n - 4, ".mp4"));
 }
 
-static int name_desc(const struct dirent **x, const struct dirent **y)
+struct strip_name {
+    char name[256];
+    char dir[PATH_MAX];
+};
+
+static int strip_name_desc(const void *x, const void *y)
 {
-    return strcmp((*y)->d_name, (*x)->d_name);
+    return strcmp(((const struct strip_name *)y)->name, ((const struct strip_name *)x)->name);
 }
 
-/* At the start: the names of the newest pictures that are in the folder already (they are read when they come into view: `strip_lazy`). */
+/* At the start: the names of the newest pictures AND clips that are in the folder(s) already, the newest first (the names are time stamps, so the
+ * two kinds mix right); the pictures are read when they come into view: `strip_lazy`, the clips' posters `poster_step`. */
 static void strip_load(struct app *a)
 {
-    struct dirent **list = NULL;
-    int n = scandir(a->outdir, &list, cam_png_filter, name_desc);
-    for (int i = 0; i < n && a->nstrip < STRIP_MAX; i++) {
+    const char *dirs[2] = { a->outdir, strcmp(a->videodir, a->outdir) ? a->videodir : NULL };
+    struct strip_name *all = NULL;
+    size_t nall = 0, cap = 0;
+    for (int d = 0; d < 2; d++) {
+        if (!dirs[d])
+            continue;
+        struct dirent **list = NULL;
+        int n = scandir(dirs[d], &list, cam_media_filter, NULL);
+        for (int i = 0; i < n; i++) {
+            if (nall == cap) {
+                struct strip_name *g = realloc(all, (cap = cap ? cap * 2 : 64) * sizeof(*all));
+                if (!g)
+                    break;
+                all = g;
+            }
+            snprintf(all[nall].name, sizeof(all[nall].name), "%s", list[i]->d_name);
+            snprintf(all[nall].dir, sizeof(all[nall].dir), "%s", dirs[d]);
+            nall++;
+        }
+        for (int i = 0; i < n; i++)
+            free(list[i]);
+        free(list);
+    }
+    if (all)
+        qsort(all, nall, sizeof(*all), strip_name_desc);
+    for (size_t i = 0; i < nall && a->nstrip < STRIP_MAX; i++) {
         memset(&a->strip[a->nstrip], 0, sizeof(a->strip[0]));
-        snprintf(a->strip[a->nstrip].path, sizeof(a->strip[0].path), "%s/%s", a->outdir, list[i]->d_name);
+        snprintf(a->strip[a->nstrip].path, sizeof(a->strip[0].path), "%s/%s", all[i].dir, all[i].name);
+        a->strip[a->nstrip].video = is_clip_name(all[i].name);
         a->nstrip++;
     }
-    for (int i = 0; i < n; i++)
-        free(list[i]);
-    free(list);
+    free(all);
 }
 
 /* Starts `sibling arg` in a detached child: the program next to this one (else in PATH); $envvar names another program, "none" = nothing. */
@@ -1419,7 +1456,7 @@ static bool strip_lazy(struct app *a)
         return false;
     for (int i = a->strip_top; i < a->nstrip && i < a->strip_top + strip_fit(a); i++) {
         struct thumb *t = &a->strip[i];
-        if (t->img.px || t->tried)
+        if (t->img.px || t->tried || t->video)
             continue;
         t->tried = true;
         struct lm_image im = { 0 };
@@ -1437,6 +1474,124 @@ static bool strip_lazy(struct app *a)
         return true;
     }
     return false;
+}
+
+/* The poster of a clip of the folder: `mellagui-view --poster FILE OUT.ppm` in a child (ffmpeg may be needed and takes a moment, so the loop never
+ * waits for it); one at a time, for the clips that are in view. $MELLAGUI_CAM_POSTER = another program, "none" = no posters (the strip shows a tile). */
+static struct {
+    pid_t pid;
+    uint64_t t0;
+    char clip[PATH_MAX + 300];
+    char out[PATH_MAX];
+} g_poster;
+
+static void poster_finish(struct app *a, bool ok)
+{
+    for (int i = 0; i < a->nstrip; i++) {
+        struct thumb *t = &a->strip[i];
+        if (strcmp(t->path, g_poster.clip))
+            continue;
+        t->tried = true;
+        struct lm_image im = { 0 };
+        char err[120];
+        if (ok && lm_img_load(g_poster.out, &im, err, sizeof(err)) == 0) {
+            int tw = LM_CLAMP(im.w * STRIP_H / im.h, 16, 256);
+            uint32_t *px = malloc((size_t)tw * STRIP_H * 4);
+            if (px) {
+                thumb_box(im.px, im.w, im.h, px, tw, STRIP_H);
+                free(t->img.px);
+                t->img = (struct lm_image){ tw, STRIP_H, px };
+            }
+            lm_img_free(&im);
+        }
+        break;
+    }
+    unlink(g_poster.out);
+    g_poster.pid = 0;
+    a->win.redraw = true;
+}
+
+static void poster_start(struct app *a, struct thumb *t)
+{
+    const char *v = getenv("MELLAGUI_CAM_POSTER");
+    if (v && !strcmp(v, "none")) {
+        t->tried = true;
+        return;
+    }
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    snprintf(g_poster.out, sizeof(g_poster.out), "%s/mellagui-cam-poster-%d.ppm", rt && *rt ? rt : "/tmp", (int)getpid());
+    snprintf(g_poster.clip, sizeof(g_poster.clip), "%s", t->path);
+    pid_t pid = fork();
+    if (pid < 0) {
+        t->tried = true;
+        return;
+    }
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(nul, 2);
+        }
+        char prog[PATH_MAX] = "mellagui-view";
+        if (v && *v) {
+            snprintf(prog, sizeof(prog), "%s", v);
+        } else {
+            char exe[PATH_MAX];
+            ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 40);
+            char *slash = n > 0 ? (exe[n] = 0, strrchr(exe, '/')) : NULL;
+            if (slash) {
+                snprintf(slash + 1, 32, "mellagui-view");
+                if (access(exe, X_OK) == 0)
+                    snprintf(prog, sizeof(prog), "%s", exe);
+            }
+        }
+        execlp(prog, prog, "--poster", g_poster.clip, g_poster.out, (char *)NULL);
+        _exit(127);
+    }
+    g_poster.pid = pid;
+    g_poster.t0 = now_ms();
+    (void)a;
+}
+
+/* Called every turn of the loop: collects a finished poster, starts the next one. True while a child is working (the loop comes back soon). */
+static bool poster_step(struct app *a)
+{
+    if (g_poster.pid) {
+        int st;
+        pid_t r = waitpid(g_poster.pid, &st, WNOHANG);
+        if (r == g_poster.pid) {
+            poster_finish(a, WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        } else if (r < 0) {
+            poster_finish(a, false);
+        } else if (now_ms() - g_poster.t0 > 12000) {
+            kill(g_poster.pid, SIGKILL);
+            waitpid(g_poster.pid, &st, 0);
+            poster_finish(a, false);
+        }
+        return g_poster.pid != 0;
+    }
+    if (!strip_on(a))
+        return false;
+    for (int i = a->strip_top; i < a->nstrip && i < a->strip_top + strip_fit(a); i++) {
+        struct thumb *t = &a->strip[i];
+        if (!t->video || t->img.px || t->tried)
+            continue;
+        poster_start(a, t);
+        return g_poster.pid != 0;
+    }
+    return false;
+}
+
+/* A small play mark in the middle of a clip's picture (the box x, y, w, h in logical pixels). */
+static void paint_play_mark(struct wlwin *w, int x, int y, int tw, int th)
+{
+    int s = LM_CLAMP(LM_MIN(tw, th) / 2, 8, 20), cx = x + tw / 2 - s / 4, cy = y + th / 2;
+    wlwin_round_fill(w, x + tw / 2 - s / 2 - 3, cy - s / 2 - 3, s + 6, s + 6, (s + 6) / 2, lm_theme.ink);
+    for (int r = 0; r < s; r++) {
+        int dist = abs(2 * r + 1 - s);                                  /* 0 in the middle row .. s at the ends */
+        wlwin_fill(w, cx - s / 4, cy - s / 2 + r, (s - dist) * 2 / 3 + 1, 1, lm_theme.on_colour);
+    }
 }
 
 static void paint_strip(struct app *a)
@@ -1459,6 +1614,8 @@ static void paint_strip(struct app *a)
             break;
         if (!a->strip[i].img.px) {                                                                       /* not read yet (or not a picture) */
             wlwin_round_fill(w, x, y, tw, th, 4, lm_theme.border);
+            if (a->strip[i].video)
+                paint_play_mark(w, x, y, tw, th);
             continue;
         }
         wlwin_round_fill(w, x - 3, y - 3, tw + 6, th + 6, 5, a->shover == i ? lm_theme.accent : lm_theme.on_colour);        /* a print with a white border */
@@ -1469,6 +1626,8 @@ static void paint_strip(struct app *a)
         thumb_box(a->strip[i].img.px, a->strip[i].img.w, a->strip[i].img.h, buf, pw, ph);
         wlwin_blit_px(w, x, y, buf, pw, ph, pw, 0, 0, w->bw, w->bh);
         free(buf);
+        if (a->strip[i].video)
+            paint_play_mark(w, x, y, tw, th);
     }
     if (a->nstrip > fit && fit > 0) {                                                                    /* more than fit: a thumb for the wheel */
         int track = fit * (STRIP_TH + 8) - 8, th = LM_MAX(track * fit / a->nstrip, 12), room = a->nstrip - fit;
@@ -1972,6 +2131,8 @@ static void do_record(struct app *a)
         a->clip = NULL;
         if (ok) {
             const char *base = strrchr(path, '/');
+            if (a->have)
+                strip_push(a, path, shown(a));                  /* the clip goes into the strip with the newest picture as its poster */
             set_note(a, "Saved %s", base ? base + 1 : path);
             fprintf(stderr, "mellagui-cam: saved %s (%u pictures)\n", path, frames);
         } else {
@@ -2356,6 +2517,8 @@ static int run_window(struct app *a)
         }
         if (strip_lazy(a))                                       /* a picture of the folder came into view: its small copy, then the next */
             timeout = LM_MIN(timeout, 10);
+        if (poster_step(a))                                      /* a clip's poster is being made by a child */
+            timeout = LM_MIN(timeout, 60);
         {                                                        /* the drops of the rail are moving: a frame every 16 ms */
             struct wlrail L;
             cam_rail(a, &L);
@@ -2794,12 +2957,12 @@ int main(int argc, char **argv)
     if (dir && *dir)
         snprintf(a.outdir, sizeof(a.outdir), "%s", dir);
     else
-        snprintf(a.outdir, sizeof(a.outdir), "%s/Pictures", home && *home ? home : ".");
+        snprintf(a.outdir, sizeof(a.outdir), "%s/Camera", home && *home ? home : ".");
     const char *vdir = getenv("MELLAGUI_CAM_VIDEO_DIR");
     if (vdir && *vdir)
         snprintf(a.videodir, sizeof(a.videodir), "%s", vdir);
     else
-        snprintf(a.videodir, sizeof(a.videodir), "%s/Videos", home && *home ? home : ".");
+        snprintf(a.videodir, sizeof(a.videodir), "%s", a.outdir);          /* (clips next to the pictures) */
     a.src.fd = -1;
     int rc = run_window(&a);
     free(a.img.px);

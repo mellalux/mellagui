@@ -110,9 +110,9 @@ static void swim_base(float t, float p[3])
     float th = 0.09f * t + 0.25f * sinf(0.037f * t + g_ph[0]);
     float rr = 1.0f + 0.15f * sinf(2.0f * th + g_ph[1]) + 0.06f * sinf(3.0f * th + g_ph[2]);
     float a = g_dir * th + g_ph[3];
-    float cx = 0.50f * sinf(0.043f * t + g_ph[4]), cz = 0.10f + 0.45f * sinf(0.031f * t + g_ph[5]);
+    float cx = 0.50f * sinf(0.043f * t + g_ph[4]), cz = 1.20f + 0.45f * sinf(0.031f * t + g_ph[5]);
     p[0] = cx + 2.40f * rr * cosf(a);
-    p[2] = cz + 3.60f * rr * sinf(a);                                    /* the loop reaches the whole length of the room */
+    p[2] = cz + 3.20f * rr * sinf(a);                                    /* the loop reaches the whole length of the room */
     p[1] = 1.68f + 0.26f * sinf(0.17f * t + g_ph[6]) + 0.09f * sinf(0.43f * t + g_ph[7]);
 }
 
@@ -156,7 +156,7 @@ static void slot_make(int k, struct slot *s)
         uint32_t start = hk % 72u;
         for (uint32_t c = 0; c < 72u; c++) {
             uint32_t idx = (start + c * 11u) % 72u;
-            float x = -3.0f + 0.75f * (float)(idx % 9u), z = -4.6f + 1.4f * (float)(idx / 9u);          /* (the whole floor) */
+            float x = -3.0f + 0.75f * (float)(idx % 9u), z = -4.2f + 1.35f * (float)(idx / 9u);          /* (the whole floor) */
             bool ok = true;
             for (int i = 0; i < n && ok; i++) {                          /* the whole way down, the rest and the way up stay clear of Tom (the swim loop is a pure function too) */
                 float ti = s->w0 + 0.25f * (float)i, u = ti - s->w0, r = u < DESC ? sat(u / DESC) : u < DESC + s->d ? 1.0f : 1.0f - sat((u - DESC - s->d) / ASC);
@@ -275,9 +275,9 @@ void mturtle_where(float t, float out[3])
     float lie = sstep(0.9f, 1.0f, rs.active ? rs.r : 0.0f);               /* lying: not pushed about by Tom (the spot was chosen to be far from him) */
     for (int i = 0; i < 3; i++)
         p[i] = mixf(p[i], q[i], lie);
-    out[0] = clampf(p[0], -3.40f, 3.40f);
+    out[0] = clampf(p[0], -3.50f, 3.50f);
     out[1] = clampf(p[1], rs.active ? 0.05f : 1.00f, 2.55f);
-    out[2] = clampf(p[2], -5.0f, 5.25f);
+    out[2] = clampf(p[2], -4.65f, 5.25f);
 }
 
 /* ---- building the turtle ------------------------------------------------------------------------------------------------------- */

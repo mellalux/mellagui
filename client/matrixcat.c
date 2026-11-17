@@ -102,7 +102,7 @@ static const struct legdef k_hind = { true,
 
 /* The day is made of CYCLES of CYCLE_LEN seconds. The first one is a script (sit, walk, hop twice, lie down); every other is made of random EPISODES (a stroll, a run,
  * hops, a long lie, a long walk) that start where the one before ended, picked by a hash of the cycle's number, so everything is deterministic from the time. He
- * moves over the floor of an AREA (in_area: the whole floor of the room, which reaches 12 m back from the window) and never turns on the spot: a path leaves a place in the direction he faces
+ * moves over the floor of an AREA (in_area: 8 x 10 m of the room, which reaches 12 m back from the window) and never turns on the spot: a path leaves a place in the direction he faces
  * there and arrives in the direction he faces at the other one, so the turning is the path's, while he walks. */
 
 enum { K_SIT, K_STAND, K_WALK, K_SITDOWN, K_LIE, K_RUN, K_JUMP };
@@ -112,9 +112,9 @@ struct seg { int kind; struct pt a, b; float dur; int path; };         /* a = wh
 #define CYCLE_LEN 360.0f
 #define MAX_SEG 128
 #define MAX_PATH 48
-#define AREA_Z0 (-5.3f)                 /* the area: the whole floor of the room, z from here (the near wall is at -6) ... */
-#define AREA_Z1 5.35f                   /* ... to here (the far wall with the window is at 6) */
-#define AREA_X 3.6f                     /* ... and |x| up to this (the side walls are at 4) */
+#define AREA_Z0 (-4.65f)                /* the area, 8 x 10 m: z from here (the camera never goes further back than z = -4, so he is seldom behind it) ... */
+#define AREA_Z1 5.35f                   /* ... to here (the far wall with the window is at 6) ... */
+#define AREA_X 3.7f                     /* ... and |x| up to this (the side walls are at 4, a cat is not a point) */
 
 static const struct pt k_home = { 1.20f, 4.70f, 3.167f }, k_there = { -1.20f, 4.75f, 3.163f };      /* the first cycle's two places (facing the camera: where the paths need the least turning) */
 
@@ -177,7 +177,7 @@ static void path_build(struct pathtab *pt, const struct pt *a, const struct pt *
         pt->u[i] = (float)i / (float)PT_N;
         bez_point(a, b, pt->u[i], &x, &z, &dx, &dz);
         psi[i] = atan2f(dx, dz);
-        if (z < AREA_Z0 - 0.4f || z > AREA_Z1 + 0.35f || fabsf(x) > AREA_X + 0.4f)
+        if (z < AREA_Z0 - 0.15f || z > AREA_Z1 + 0.35f || fabsf(x) > AREA_X + 0.2f)
             pt->ok = false;
         if (i && fabsf(fmodf(psi[i] - psi[i - 1] + 9.4247780f, 6.2831853f) - 3.1415927f) > 0.3f)
             pt->ok = false;
@@ -241,7 +241,7 @@ static bool pick_target(struct pt P, float dmin, float dmax, float maxturn, uint
         float yaw_in = P.yaw + 2.0f * dl;
         if (!in_area(x + 1.0f * sinf(yaw_in), z + 1.0f * cosf(yaw_in)))        /* never end up facing a wall: he could not go on without turning on the spot */
             continue;
-        float score = frand(k + 3u) - 0.12f * hypotf(x * 0.5f, (z - 0.0f) * 0.4f) - 0.25f * fabsf(dl);     /* (a little for the middle: the whole floor is his) */
+        float score = frand(k + 3u) - 0.30f * hypotf(x * 0.5f, (z - 2.5f) * 0.5f) - 0.25f * fabsf(dl);     /* (a little for the middle: the whole floor is his) */
         if (score > best) {
             best = score;
             *Q = (struct pt){ x, z, fmodf(P.yaw + 2.0f * dl + (frand(k + 4u) - 0.5f) * 0.4f + 9.4247780f, 6.2831853f) - 3.1415927f };
@@ -320,7 +320,7 @@ static void build_cycle(int c)
         uint32_t h = h32(g_seed * 2246822519u + 5u);
         cur = k_home;
         for (uint32_t k = 0; k < 40; k++) {                             /* (facing into the area, with room to walk: not a wall) */
-            float z = -4.6f + 9.4f * frand(h + k * 11u + 1u), lim = 3.4f, x = (frand(h + k * 11u + 2u) * 2.0f - 1.0f) * lim;
+            float z = -4.3f + 9.0f * frand(h + k * 11u + 1u), lim = 3.5f, x = (frand(h + k * 11u + 2u) * 2.0f - 1.0f) * lim;
             float yaw = frand(h + k * 11u + 3u) * 6.2831853f - 3.1415927f;
             if (in_area(x + 1.0f * sinf(yaw), z + 1.0f * cosf(yaw))) {
                 cur = (struct pt){ x, z, yaw };

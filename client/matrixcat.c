@@ -112,9 +112,9 @@ struct seg { int kind; struct pt a, b; float dur; int path; };         /* a = wh
 #define CYCLE_LEN 360.0f
 #define MAX_SEG 128
 #define MAX_PATH 48
-#define AREA_Z0 (-4.65f)                /* the area, 8 x 10 m: z from here (the camera never goes further back than z = -4, so he is seldom behind it) ... */
-#define AREA_Z1 5.35f                   /* ... to here (the far wall with the window is at 6) ... */
-#define AREA_X 3.7f                     /* ... and |x| up to this (the side walls are at 4, a cat is not a point) */
+#define AREA_Z0 MCAT_AREA_Z0                /* the area, 8 x 10 m: z from here (the camera never goes further back than z = -4, so he is seldom behind it) ... */
+#define AREA_Z1 MCAT_AREA_Z1                   /* ... to here (the far wall with the window is at 6) ... */
+#define AREA_X MCAT_AREA_X                     /* ... and |x| up to this (the side walls are at 4, a cat is not a point) */
 
 static const struct pt k_home = { 1.20f, 4.70f, 3.167f }, k_there = { -1.20f, 4.75f, 3.163f };      /* the first cycle's two places (facing the camera: where the paths need the least turning) */
 
@@ -512,14 +512,21 @@ static float ear_flick(float t, float period, float phase)
 
 void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr)
 {
+    struct mcat_state st = state_at(t);
+    mcat_pose_state(c, t, &st, cam, glyph, nglyph, ldir, lcol, lstr);
+}
+
+void mcat_pose_state(struct mcat *c, float t, const struct mcat_state *stp, const float cam[3], const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr)
+{
     c->enabled = true;
+    c->att_k = 0.018f;
     c->t = t;
     c->pos[0] = 0.55f; c->pos[1] = 0.0f; c->pos[2] = 4.85f;
     c->yaw = 3.14159265f + 0.35f;                                        /* sits facing the room, a little towards the left */
     c->scale = 1.25f;
     c->cy = cosf(c->yaw);
     c->sy = sinf(c->yaw);
-    struct mcat_state st = state_at(t);
+    struct mcat_state st = *stp;
     float run = st.run, stride = STRIDE * (1.0f + 0.78f * run);                          /* a run has longer strides */
     float flight = 0.05f * run * st.walk * fmaxf(0.0f, sinf(6.2831853f * 2.0f * (st.dist / (stride * c->scale)) + 1.0f));   /* (a trot leaves the ground twice a stride) */
     c->air = st.air + flight;
@@ -763,7 +770,7 @@ static void shade_hit(const struct mcat *c, const float o[3], const float dn[3],
     float cellb = 0.62f + 0.38f * frand(hc >> 3);
     float sparkle = ((hg >> 8) & 31) == 0 ? 1.0f : 0.0f;               /* now and then a letter of the rain lights up in the fur */
 
-    float att = 1.0f / (1.0f + 0.018f * bt * bt);
+    float att = 1.0f / (1.0f + c->att_k * bt * bt);
     float L = 0.30f + 0.62f * ndv;                                   /* the room's own glow, from the front */
     float key = c->lstr > 0.0f ? sat(nw[0] * c->ldir[0] + nw[1] * c->ldir[1] + nw[2] * c->ldir[2]) * c->lstr : 0.0f;
     L += 0.55f * key;
@@ -826,7 +833,7 @@ static bool fuzz_letter(const struct mcat *c, float bt, float inv_f, int frame, 
     int gx = (int)(fu * 9.0f), gy = (int)(fv * 16.0f);
     if (!(g && gx < 8 && gy < 16 && ((g[gy] >> gx) & 1)))
         return false;
-    float att = 1.0f / (1.0f + 0.018f * bt * bt), k = 0.80f * att * (0.55f + 0.45f * frand(hc >> 3));
+    float att = 1.0f / (1.0f + c->att_k * bt * bt), k = 0.80f * att * (0.55f + 0.45f * frand(hc >> 3));
     (void)inv_f;
     rgb[0] = mixf(rgb[0], 255.0f * 0.97f * (0.45f + k), 0.75f);
     rgb[1] = mixf(rgb[1], 255.0f * 0.85f * (0.45f + k), 0.75f);
@@ -1033,7 +1040,7 @@ bool mcat_shade(const struct mcat *c, const float o[3], const float dn[3], float
             if (head) {                                                 /* the whiskers, in front of whatever is behind them */
                 float wt = 0.0f, cov = whiskers(oh, dh, surface ? bt : tmax, inv_f, inv, &wt);
                 if (cov > 0.02f) {
-                    float att = 1.0f / (1.0f + 0.018f * wt * wt), k = cov * 0.9f;
+                    float att = 1.0f / (1.0f + c->att_k * wt * wt), k = cov * 0.9f;
                     rgb[0] = mixf(rgb[0], 250.0f * (0.35f + 0.65f * att), k);
                     rgb[1] = mixf(rgb[1], 240.0f * (0.35f + 0.65f * att), k);
                     rgb[2] = mixf(rgb[2], 190.0f * (0.35f + 0.65f * att), k);

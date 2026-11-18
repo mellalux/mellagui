@@ -11,6 +11,7 @@
  */
 #include "blocks.h"
 #include "blocksview.h"
+#include "blockspets.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1276,6 +1277,454 @@ static void test_render(void)
 	bl_world_free(w);
 }
 
+
+/* ---- Tom and Filip ------------------------------------------------------------------------------------------------------- */
+
+static uint8_t g_glyph[MCAT_GLYPHS][16];
+static const uint8_t *g_glyph_ptr[MCAT_GLYPHS];
+
+static void glyphs_make(void)             /* a made up alphabet: dense noise, enough for the fur's shape, shade and place */
+{
+	for (int i = 0; i < MCAT_GLYPHS; i++) {
+		for (int r = 0; r < 16; r++)
+			g_glyph[i][r] = (uint8_t)(rnd() | rnd());
+		g_glyph_ptr[i] = g_glyph[i];
+	}
+}
+
+/* the same measure as the module's, written again: twice the spread of the heights + 1.5 for every column that is water or has a tree on it */
+static float ref_patch(const struct bl_world *w, int x0, int z0, int *wet_or_tree)
+{
+	int lo = 999, hi = -1, bad = 0;
+	for (int z = z0; z <= z0 + 11; z++)
+		for (int x = x0; x <= x0 + 8; x++) {
+			int top = bl_top(w, x, z), hy = w->hi[z * w->w + x];
+			int b = w->b[bl_index(w, x, hy, z)];
+			if (bl_water(b))
+				bad += 2;
+			else if (b == BL_LEAVES || b == BL_LOG || hy > top)
+				bad += 1;
+			if (top < lo) lo = top;
+			if (top > hi) hi = top;
+		}
+	*wet_or_tree = bad;
+	return 2.0f * (float)(hi - lo) + 1.5f * (float)bad;
+}
+
+#define T_HW 0.26f                                  /* the boxes of the pets (blockspets.c) */
+#define T_H 0.70f
+
+static bool box_in_solid(const struct bl_world *w, float x, float y, float z, float hw, float h)
+{
+	for (int yy = (int)floorf(y + 1e-3f); yy <= (int)floorf(y + h - 1e-3f); yy++)
+		for (int zz = (int)floorf(z - hw + 1e-3f); zz <= (int)floorf(z + hw - 1e-3f); zz++)
+			for (int xx = (int)floorf(x - hw + 1e-3f); xx <= (int)floorf(x + hw - 1e-3f); xx++)
+				if (bl_solid(bl_get(w, xx, yy, zz)))
+					return true;
+	return false;
+}
+
+static bool wet(const struct bl_world *w, float x, float y, float z)
+{
+	return bl_water(bl_get(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)));
+}
+
+static void run_pets(struct bl_pets *p, struct bl_world *w, float secs)
+{
+	int n = (int)(secs * 30.0f);
+	for (int i = 0; i < n; i++)
+		bl_pets_step(p, w, 1.0f / 30.0f);
+}
+
+/* a flat world with a yard and a pond dug next to it */
+static struct bl_world *pets_flat(struct bl_pets *p)
+{
+	struct bl_world *w = bl_world_flat(64, 64, 64, 20);
+	bl_pets_init(p, 0, g_glyph_ptr, MCAT_GLYPHS);
+	float near[3] = { 32.5f, 20.0f, 32.5f };
+	bl_pets_place(p, w, near);
+	return w;
+}
+
+static void test_pets(void)
+{
+	glyphs_make();
+	/* the room's area: Tom stays inside it for his whole scripted day, whatever the seed (the yard is made to this size) */
+	static const uint32_t seeds[4] = { 0u, 1u, 7u, 12345u };
+	int out_cat = 0;
+	for (int si = 0; si < 4; si++) {
+		mcat_set_seed(seeds[si]);
+		for (float t = 0.0f; t < 1500.0f; t += 0.7f) {
+			struct mcat_state st;
+			mcat_state(t, &st);
+			if (st.z < MCAT_AREA_Z0 - 0.3f || st.z > MCAT_AREA_Z1 + 0.3f || fabsf(st.x) > MCAT_AREA_X + 0.3f)
+				out_cat++;
+		}
+	}
+	CHECK(out_cat == 0, "the scripted Tom stays in the area: %d samples outside it", out_cat);
+
+	/* the yard: on dry ground that is flat, not under the player, inside the world; a tiny world has none */
+	struct bl_pets pets;
+	bl_pets_init(&pets, 0, g_glyph_ptr, MCAT_GLYPHS);
+	struct bl_world *w = bl_world_new(9, 256, 256, 64), *w2 = bl_world_new(9, 256, 256, 64);
+	float near[3];
+	bl_spawn(w, near);
+	CHECK(bl_pets_place(&pets, w, near), "a yard is found in a world made from a seed");
+	float dist = hypotf(pets.yard[0] - near[0], pets.yard[2] - near[2]);
+	CHECK(dist >= 9.99f && dist <= 60.0f, "the yard is 10 to 48 blocks from the player (%.1f)", dist);
+	bool inside = near[0] > pets.yard[0] - 4.3f && near[0] < pets.yard[0] + 4.3f && near[2] > pets.yard[2] - 5.0f && near[2] < pets.yard[2] + 5.7f;
+	CHECK(!inside, "the player is not in the yard");
+	int x0 = (int)floorf(pets.yard[0] - MCAT_AREA_X - 0.3f), z0 = (int)floorf(pets.yard[2] + MCAT_AREA_Z0 - 0.3f), bad;
+	float chosen = ref_patch(w2, x0, z0, &bad);                  /* (measured on a copy: the pond that was dug is not in it) */
+	int worse = 0;
+	for (int i = 0; i < 60; i++) {
+		int rx = 4 + (int)(rnd() % 230), rz = 4 + (int)(rnd() % 230), b2;
+		if (ref_patch(w2, rx, rz, &b2) < chosen - 2.0f)
+			worse++;
+	}
+	CHECK(worse <= 4, "the yard is among the best patches: %d of 60 random ones are clearly better (score %.1f)", worse, chosen);
+	struct bl_pets_info in;
+	bl_pets_info(&pets, &in);
+	CHECK(in.filip_in_water, "Filip starts in water (a lake or the sea near the player, or the pond that was dug)");
+	CHECK(fabsf(in.tom[0] - pets.yard[0]) < 0.01f && in.tom_mode == 0, "Tom starts in the middle of his yard, sitting");
+	struct bl_pets again;
+	bl_pets_init(&again, 0, g_glyph_ptr, MCAT_GLYPHS);
+	bl_pets_place(&again, w2, near);
+	CHECK(again.yard[0] == pets.yard[0] && again.yard[2] == pets.yard[2] && again.pond[0] == pets.pond[0], "the same world and place give the same yard and water");
+	bl_world_free(w);
+	bl_world_free(w2);
+	struct bl_world *tiny = bl_world_new(1, 16, 16, 64);
+	CHECK(!bl_pets_place(&pets, tiny, (float[3]){ 8, 30, 8 }), "a world of 16 x 16 has no room for the yard");
+	bl_world_free(tiny);
+
+	/* a flat world has no water: a pond is dug next to the yard, level with the ground, and Filip is in it */
+	struct bl_world *flat = pets_flat(&pets);
+	CHECK(fabsf(pets.yard[0] - 42.5f) < 0.01f && fabsf(pets.yard[2] - 32.5f) < 0.01f && pets.yard[1] == 20.0f && pets.made_pond,
+	      "on a flat world the yard is the nearest one allowed and the pond is dug (%.1f %.1f %.1f)", pets.yard[0], pets.yard[1], pets.yard[2]);
+	long water = 0;
+	for (size_t i = 0; i < (size_t)64 * 64 * 64; i++)
+		water += bl_water(flat->b[i]);
+	CHECK(water > 60 && water < 120, "a pond of about 30 columns, three deep (%ld cells)", water);
+	CHECK(wet(flat, pets.pond[0], 19.5f, pets.pond[2]) && !wet(flat, pets.yard[0], 19.5f, pets.yard[2]), "the pond is where it says and the yard is dry");
+	bl_pets_info(&pets, &in);
+	CHECK(in.filip_in_water && in.filip[1] > 17.2f && in.filip[1] < 20.0f, "Filip is in the pond (y %.2f)", in.filip[1]);
+
+	/* an hour... of Tom, 15 minutes of it, in steps of 1/30 s: on the ground, never in a block or in water, near his yard, and he does things */
+	{
+		unsigned modes = 0;
+		float path = 0, maxd = 0, px = in.tom[0], pz = in.tom[2];
+		int in_block = 0, in_water = 0, off_ground = 0;
+		for (int i = 0; i < 27000; i++) {
+			bl_pets_step(&pets, flat, 1.0f / 30.0f);
+			bl_pets_info(&pets, &in);
+			modes |= 1u << in.tom_mode;
+			path += hypotf(in.tom[0] - px, in.tom[2] - pz);
+			px = in.tom[0];
+			pz = in.tom[2];
+			float dy = hypotf(in.tom[0] - pets.yard[0], in.tom[2] - pets.yard[2]);
+			maxd = dy > maxd ? dy : maxd;
+			in_block += box_in_solid(flat, in.tom[0], in.tom[1], in.tom[2], T_HW, T_H);
+			in_water += wet(flat, in.tom[0], in.tom[1] + 0.1f, in.tom[2]);
+			off_ground += in.tom[1] < 19.99f || in.tom[1] > 21.2f;
+		}
+		int kinds = 0;
+		for (int k = 0; k < 7; k++)
+			kinds += (modes >> k) & 1u;
+		CHECK(in_block == 0 && in_water == 0 && off_ground == 0, "Tom: in a block %d, in water %d, off the ground %d steps of 27000", in_block, in_water, off_ground);
+		CHECK(path > 30.0f && maxd < 11.0f && maxd > 3.0f, "he walks %.0f m and gets as far as %.1f m from his yard", path, maxd);
+		CHECK(kinds >= 4, "he sits, rises, walks, settles, lies or hops (%d kinds of doing: mask %x)", kinds, modes);
+	}
+	bl_world_free(flat);
+
+	/* a wall of two blocks stops him, one is climbed */
+	flat = pets_flat(&pets);
+	for (int x = 20; x < 60; x++)
+		for (int y = 20; y < 22; y++)
+			bl_set(flat, x, y, 36, BL_STONE);
+	bl_pets_tom_go(&pets, 42.5f, 41.0f, false);
+	run_pets(&pets, &*flat, 25.0f);
+	bl_pets_info(&pets, &in);
+	CHECK(in.tom[2] < 36.0f - T_HW + 0.05f && in.tom[1] < 20.2f, "a wall of two blocks stops him (z %.2f y %.2f)", in.tom[2], in.tom[1]);
+	for (int x = 20; x < 60; x++)
+		bl_set(flat, x, 21, 36, BL_AIR);
+	bl_pets_tom_go(&pets, 42.5f, 41.0f, false);
+	float zmax = 0, ytop = 0;
+	for (int i = 0; i < 20 * 30; i++) {
+		bl_pets_step(&pets, flat, 1.0f / 30.0f);
+		bl_pets_info(&pets, &in);
+		zmax = in.tom[2] > zmax ? in.tom[2] : zmax;
+		ytop = in.tom[1] > ytop ? in.tom[1] : ytop;
+		CHECK(!box_in_solid(flat, in.tom[0], in.tom[1], in.tom[2], T_HW, T_H), "Tom is inside the wall at step %d (%.2f %.2f %.2f)", i, in.tom[0], in.tom[1], in.tom[2]);
+	}
+	CHECK(zmax > 39.5f && ytop > 20.9f, "a wall of one block is climbed and left behind (z %.2f, highest %.2f)", zmax, ytop);
+	bl_world_free(flat);
+
+	/* the ground goes: he falls and lands; a trench three deep across his way is not crossed */
+	flat = pets_flat(&pets);
+	for (int z = 30; z <= 34; z++)
+		for (int x = 40; x <= 44; x++)
+			for (int y = 17; y < 20; y++)
+				bl_set(flat, x, y, z, BL_AIR);
+	run_pets(&pets, flat, 1.5f);
+	bl_pets_info(&pets, &in);
+	CHECK(fabsf(in.tom[1] - 17.0f) < 0.02f && !box_in_solid(flat, in.tom[0], in.tom[1], in.tom[2], T_HW, T_H), "the ground goes and he falls three blocks and lands (y %.3f)", in.tom[1]);
+	bl_world_free(flat);
+	flat = pets_flat(&pets);
+	for (int x = 20; x < 60; x++)
+		for (int z = 36; z <= 37; z++)
+			for (int y = 17; y < 20; y++)
+				bl_set(flat, x, y, z, BL_AIR);
+	bl_pets_tom_go(&pets, 42.5f, 41.0f, false);
+	run_pets(&pets, flat, 25.0f);
+	bl_pets_info(&pets, &in);
+	CHECK(in.tom[2] < 36.05f && in.tom[1] > 19.99f, "a trench is not crossed and not fallen into (z %.2f, y %.2f)", in.tom[2], in.tom[1]);
+	bl_world_free(flat);
+
+	/* water: he is sent into the pond and never gets wet */
+	flat = pets_flat(&pets);
+	bl_pets_tom_go(&pets, pets.pond[0], pets.pond[2], true);
+	int wetn = 0;
+	float nearest = 99;
+	for (int i = 0; i < 30 * 40; i++) {
+		bl_pets_step(&pets, flat, 1.0f / 30.0f);
+		bl_pets_info(&pets, &in);
+		wetn += wet(flat, in.tom[0], in.tom[1] + 0.1f, in.tom[2]);
+		float d = hypotf(in.tom[0] - pets.pond[0], in.tom[2] - pets.pond[2]);
+		nearest = d < nearest ? d : nearest;
+	}
+	CHECK(wetn == 0 && nearest < 6.0f, "sent into the pond he gets to its edge (%.1f m) and no further (wet %d steps)", nearest, wetn);
+	bl_world_free(flat);
+
+	/* the same world, the same day */
+	struct bl_pets pa, pb;
+	struct bl_world *wa = pets_flat(&pa), *wb = pets_flat(&pb);
+	run_pets(&pa, wa, 120.0f);
+	run_pets(&pb, wb, 120.0f);
+	CHECK(pa.tom.x == pb.tom.x && pa.tom.z == pb.tom.z && pa.tom.mode == pb.tom.mode && pa.filip.x == pb.filip.x && pa.filip.y == pb.filip.y && pa.filip.z == pb.filip.z,
+	      "the same world and seed give the same two minutes");
+	bl_world_free(wa);
+	bl_world_free(wb);
+
+	/* bodies: pushed away by the player, lifted onto, not built into */
+	flat = pets_flat(&pets);
+	bl_pets_info(&pets, &in);
+	struct bl_player pl;
+	bl_player_init(&pl, flat);
+	pl.x = in.tom[0] + 0.3f;
+	pl.z = in.tom[2];
+	pl.y = 20.0f;
+	float tx0 = in.tom[0];
+	bl_pets_push_player(&pets, flat, &pl);
+	bl_pets_info(&pets, &in);
+	CHECK(fabsf(pl.x - in.tom[0]) >= 0.3f + T_HW - 0.02f && in.tom[0] < tx0, "the player walking into Tom pushes him away (%.3f apart, Tom moved %.3f)", fabsf(pl.x - in.tom[0]), tx0 - in.tom[0]);
+	pl.x = in.tom[0];
+	pl.z = in.tom[2];
+	pl.y = in.tom[1] + T_H - 0.1f;
+	pl.vy = -2.0f;
+	bl_pets_push_player(&pets, flat, &pl);
+	CHECK(fabsf(pl.y - (in.tom[1] + T_H)) < 0.01f && pl.on_ground, "a player that comes down on him stands on him");
+	/* a wall right behind him: he cannot give way, so the player steps back */
+	for (int z = 28; z <= 36; z++)
+		for (int y = 20; y < 22; y++)
+			bl_set(flat, 40, y, z, BL_STONE);
+	pets.tom.x = 41.0f + T_HW + 0.002f;
+	pets.tom.z = 32.5f;
+	pets.tom.y = 20.0f;
+	pl.x = pets.tom.x + 0.3f;
+	pl.z = pets.tom.z;
+	pl.y = 20.0f;
+	pl.vy = 0.0f;
+	bl_pets_push_player(&pets, flat, &pl);
+	bl_pets_info(&pets, &in);
+	CHECK(fabsf(pl.x - in.tom[0]) >= 0.3f + T_HW - 0.02f && in.tom[0] > 41.0f + T_HW - 0.01f && !box_in_solid(flat, in.tom[0], in.tom[1], in.tom[2], T_HW, T_H),
+	      "with a wall behind him the player steps back instead (%.3f apart, Tom at %.3f)", fabsf(pl.x - in.tom[0]), in.tom[0]);
+	CHECK(bl_pets_hit_cell(&pets, (int)floorf(in.tom[0]), 20, (int)floorf(in.tom[2])) && !bl_pets_hit_cell(&pets, (int)floorf(in.tom[0]) + 3, 20, (int)floorf(in.tom[2])),
+	      "a block cannot be put where he is, one beside him can");
+	CHECK(bl_pets_hit_cell(&pets, (int)floorf(in.filip[0]), (int)floorf(in.filip[1]), (int)floorf(in.filip[2])), "nor where Filip is");
+	pets.on = false;
+	CHECK(!bl_pets_hit_cell(&pets, (int)floorf(in.tom[0]), 20, (int)floorf(in.tom[2])), "pets that are switched off are no bodies");
+	bl_world_free(flat);
+
+	/* Filip: 15 minutes in the pond: in the water all the time, between the surface and the bottom, rests on the bottom, lets bubbles go */
+	flat = pets_flat(&pets);
+	{
+		int dry = 0, out = 0, bubbles = 0;
+		float rest_max = 0, rest_y_err = 0, ylo = 99, yhi = -99;
+		for (int i = 0; i < 27000; i++) {
+			bl_pets_step(&pets, flat, 1.0f / 30.0f);
+			bl_pets_info(&pets, &in);
+			dry += !in.filip_in_water;
+			float d = hypotf(in.filip[0] - pets.pond[0], in.filip[2] - pets.pond[2]);
+			out += d > 3.6f || in.filip[1] > pets.pond[1] || in.filip[1] < pets.pond[1] - 3.0f;
+			bubbles |= pets.filip.nbub > 0;
+			ylo = in.filip[1] < ylo ? in.filip[1] : ylo;
+			yhi = in.filip[1] > yhi ? in.filip[1] : yhi;
+			if (in.filip_rest > rest_max)
+				rest_max = in.filip_rest;
+			if (in.filip_rest > 0.999f) {
+				float e = fabsf(in.filip[1] - (pets.pond[1] - 3.0f + 0.065f));
+				rest_y_err = e > rest_y_err ? e : rest_y_err;
+			}
+		}
+		CHECK(dry == 0 && out == 0, "Filip never leaves the water: %d steps dry, %d outside the pond", dry, out);
+		CHECK(rest_max > 0.999f && rest_y_err < 0.03f, "he rests on the bottom, the middle of his shell %.3f off where it should be", rest_y_err);
+		CHECK(bubbles, "he lets bubbles go");
+		CHECK(yhi - ylo > 0.7f, "and swims at different depths (%.2f to %.2f)", ylo, yhi);
+	}
+	/* the water goes: he sinks to what is under him and stays */
+	for (int z = 28; z <= 38; z++)
+		for (int x = 30; x <= 42; x++)
+			for (int y = 17; y <= 19; y++)
+				if (wet(flat, (float)x, (float)y, (float)z))
+					bl_set(flat, x, y, z, BL_AIR);
+	run_pets(&pets, flat, 6.0f);
+	bl_pets_info(&pets, &in);
+	float y1 = in.filip[1];
+	run_pets(&pets, flat, 2.0f);
+	bl_pets_info(&pets, &in);
+	CHECK(!in.filip_in_water && fabsf(in.filip[1] - y1) < 0.01f && in.filip[1] < 17.6f && in.filip_rest > 0.99f, "without water he lies on the floor of the pit (y %.2f)", in.filip[1]);
+	bl_world_free(flat);
+
+	/* water that was there: the sea of a world made from a seed, near the player */
+	struct bl_world *sea = bl_world_new(31, 96, 96, 64);
+	float snear[3];
+	bl_spawn(sea, snear);
+	bl_pets_init(&pets, 31, g_glyph_ptr, MCAT_GLYPHS);
+	CHECK(bl_pets_place(&pets, sea, snear), "pets in a world with a sea");
+	int sdry = 0;
+	for (int i = 0; i < 9000; i++) {
+		bl_pets_step(&pets, sea, 1.0f / 30.0f);
+		bl_pets_info(&pets, &in);
+		sdry += !in.filip_in_water;
+		if (box_in_solid(sea, in.tom[0], in.tom[1], in.tom[2], T_HW, T_H))
+			sdry += 1000;
+	}
+	CHECK(sdry == 0, "five minutes in a world with a sea: Filip in water all the time, Tom in no block (%d)", sdry);
+	bl_world_free(sea);
+}
+
+static void test_pets_render(void)
+{
+	enum { W = 160, H = 100 };
+	static uint32_t a[W * H], b[W * H], c[W * H];
+	struct bl_pets pets;
+	struct bl_world *w = pets_flat(&pets);
+	run_pets(&pets, w, 1.0f);
+	struct bl_pets_info in;
+	bl_pets_info(&pets, &in);
+	float cam0[3] = { in.tom[0] - 4.0f, 21.62f, in.tom[2] - 5.0f };
+	bl_pets_pose(&pets, w, 1.0f, 0.016f, cam0, 12.0f);
+	/* aim the camera at the middle of Tom */
+	float tx = in.tom[0] - cam0[0], ty = in.tom[1] + 0.3f - cam0[1], tz = in.tom[2] - cam0[2];
+	struct bl_camera cam = { cam0[0], cam0[1], cam0[2], atan2f(tx, tz), atan2f(ty, hypotf(tx, tz)), 0.8f };
+	struct bl_view v;
+	bl_view_init(&v);
+	bl_render(w, &cam, &v, a, W, H, W, 1);
+	v.pets = &pets;
+	bl_render(w, &cam, &v, b, W, H, W, 1);
+	int changed = 0, cream = 0;
+	for (int i = 0; i < W * H; i++)
+		if (a[i] != b[i]) {
+			changed++;
+			int r = (int)((b[i] >> 16) & 255), g = (int)((b[i] >> 8) & 255), bl = (int)(b[i] & 255);
+			cream += r > bl + 25 && g > bl + 5 && r > 90;
+		}
+	CHECK(changed > 150, "Tom is in the picture (%d pixels differ)", changed);
+	CHECK(cream > changed / 5, "and he is cream-coloured: %d of %d changed pixels", cream, changed);
+	int mid_changed = 0;
+	for (int y = H / 2 - 4; y < H / 2 + 4; y++)
+		for (int x = W / 2 - 4; x < W / 2 + 4; x++)
+			mid_changed += a[y * W + x] != b[y * W + x];
+	CHECK(mid_changed > 40, "in the middle, where the camera looks at him (%d of 64)", mid_changed);
+	bl_render(w, &cam, &v, c, W, H, W, 4);
+	CHECK(memcmp(b, c, sizeof b) == 0, "four threads draw the pets as one thread does");
+	pets.on = false;
+	bl_render(w, &cam, &v, c, W, H, W, 1);
+	CHECK(memcmp(a, c, sizeof a) == 0, "with the pets switched off the picture is the one without them");
+	pets.on = true;
+
+	/* the ids hook: Tom where he is, a wall in front of him hides him, a wall behind him does not */
+	struct bl_view iv = v;
+	iv.ids = true;
+	uint32_t px;
+	struct bl_camera one = cam;
+	bl_render(w, &one, &iv, &px, 1, 1, 1, 1);
+	CHECK(px == 0xff0000feu, "the ray at Tom meets Tom (%08x)", px);
+	float wallz = cam0[2] + (in.tom[2] - cam0[2]) * 0.5f;
+	for (int y = 20; y < 27; y++)
+		for (int x = (int)(in.tom[0] - 6); x < (int)(in.tom[0] + 3); x++)
+			bl_set(w, x, y, (int)wallz, BL_STONE);
+	bl_render(w, &one, &iv, &px, 1, 1, 1, 1);
+	CHECK(px == (0xff000000u | (uint32_t)BL_STONE << 8 | (uint32_t)BL_NZ) && px != 0xff0000feu, "a wall in front of him is what is met, and he is hidden (%08x)", px);
+	for (int y = 20; y < 27; y++)
+		for (int x = (int)(in.tom[0] - 6); x < (int)(in.tom[0] + 3); x++)
+			bl_set(w, x, y, (int)wallz, BL_AIR);
+	for (int y = 20; y < 27; y++)
+		for (int x = (int)(in.tom[0] - 3); x < (int)(in.tom[0] + 4); x++)
+			bl_set(w, x, y, (int)(in.tom[2] + 2.0f), BL_STONE);
+	bl_render(w, &one, &iv, &px, 1, 1, 1, 1);
+	CHECK(px == 0xff0000feu, "a wall behind him leaves him in front of it (%08x)", px);
+	for (int y = 20; y < 27; y++)
+		for (int x = (int)(in.tom[0] - 3); x < (int)(in.tom[0] + 4); x++)
+			bl_set(w, x, y, (int)(in.tom[2] + 2.0f), BL_AIR);
+
+	/* Filip is in the pond, seen through the water: the ray at him meets him, and his colour is tinted blue by the water in front of him */
+	struct bl_camera fc = { in.pond[0] + 3.0f, in.pond[1] + 3.0f, in.pond[2] - 3.5f, 0, 0, 0.8f };
+	float fx = in.filip[0] - fc.x, fy = in.filip[1] - fc.y, fz = in.filip[2] - fc.z;
+	fc.yaw = atan2f(fx, fz);
+	fc.pitch = atan2f(fy, hypotf(fx, fz));
+	float eye[3] = { fc.x, fc.y, fc.z };
+	bl_pets_pose(&pets, w, 1.0f, 0.016f, eye, 12.0f);
+	bl_render(w, &fc, &iv, &px, 1, 1, 1, 1);
+	CHECK(px == 0xff0000fdu, "the ray at Filip meets Filip (%08x)", px);
+	struct bl_view fv = v;
+	bl_render(w, &fc, &fv, a, W, H, W, 1);
+	fv.pets = NULL;
+	bl_render(w, &fc, &fv, b, W, H, W, 1);
+	int fch = 0;
+	for (int i = 0; i < W * H; i++)
+		fch += a[i] != b[i];
+	CHECK(fch > 20, "Filip is in the picture (%d pixels)", fch);
+	float ray[3] = { sinf(fc.yaw) * cosf(fc.pitch), sinf(fc.pitch), cosf(fc.yaw) * cosf(fc.pitch) };
+	struct bl_pet_event ev[2];
+	int nev = bl_pets_events(&pets, eye, ray, 50.0f, 0.001f, ev);
+	uint32_t mid = a[(H / 2) * W + W / 2];
+	if (nev > 0 && ev[0].a > 0.9f) {
+		float raw_br = ev[0].c[2] * 255.0f - ev[0].c[0] * 255.0f, seen_br = (float)(mid & 255) - (float)((mid >> 16) & 255);
+		CHECK(seen_br > raw_br + 8.0f, "seen through the water he is bluer than he is (%.0f against %.0f)", seen_br, raw_br);
+	} else {
+		CHECK(nev > 0, "the ray at Filip has an event (%d)", nev);
+	}
+
+	/* the light: no light at six (the sun is on the horizon), the sun at three in the afternoon lights Tom from the side, the moon at midnight a little (the sky's sun is
+	 * always to the +z side, so at noon he is lit from behind, which his front does not show) */
+	float tray[3] = { sinf(cam.yaw) * cosf(cam.pitch), sinf(cam.pitch), cosf(cam.yaw) * cosf(cam.pitch) }, sum[3] = { 0, 0, 0 };
+	static const float hours[3] = { 6.0f, 15.0f, 0.0f };
+	for (int k = 0; k < 3; k++) {
+		bl_pets_pose(&pets, w, 1.0f, 0.016f, cam0, hours[k]);
+		struct bl_pet_event e2[2];
+		int n2 = bl_pets_events(&pets, cam0, tray, 50.0f, 0.001f, e2);
+		sum[k] = n2 > 0 ? (e2[0].c[0] + e2[0].c[1] + e2[0].c[2]) * 255.0f : 0.0f;
+	}
+	CHECK(sum[0] > 60.0f && sum[1] > sum[0] + 20.0f && sum[2] > sum[0] + 5.0f, "the sun and the moon light him (%.0f without light, %.0f by the sun, %.0f by the moon)", sum[0], sum[1], sum[2]);
+
+	/* any camera, anywhere, with the pets in the world: no crash, and the pictures are opaque */
+	bl_pets_pose(&pets, w, 700.0f, 0.016f, cam0, 7.0f);
+	static uint32_t small[40 * 24];
+	int odd = 0;
+	for (int i = 0; i < 800; i++) {
+		struct bl_camera cm = { rndr(20, 70), rndr(15, 40), rndr(15, 55), rndr(-10, 10), rndr(-1.6f, 1.6f), rndr(0.3f, 2.5f) };
+		struct bl_view vv = v;
+		vv.dist = rndr(16, 200);
+		vv.ids = i % 5 == 0;
+		bl_render(w, &cm, &vv, small, 40, 24, 40, 1 + (int)(rnd() % 3));
+		for (int k = 0; k < 40 * 24; k++)
+			odd += !vv.ids && (small[k] >> 24) != 255;
+	}
+	CHECK(odd == 0, "%d pixels that are not opaque", odd);
+	bl_world_free(w);
+}
+
 /* ---- the command line: bench, shot, info ------------------------------------------------------------------------------- */
 
 static void write_ppm(const char *path, const uint32_t *px, int w, int h)
@@ -1345,6 +1794,38 @@ static int run_bench(int argc, char **argv)
 		}
 	}
 	printf("%dx%d on %d threads: %.1f ms a frame on average, %.0f frames a second\n", w, h, threads, total / 5.0 * 1000.0, 5.0 / total);
+	{                                                          /* Tom and Filip: far away (a few pixels), near (a big part of the picture), and the same views without them */
+		glyphs_make();
+		struct bl_pets pets;
+		bl_pets_init(&pets, 0, g_glyph_ptr, MCAT_GLYPHS);
+		bl_pets_place(&pets, world, s);
+		struct bl_pets_info in;
+		float eye[3] = { s[0], s[1] + BL_EYE, s[2] };
+		bl_pets_pose(&pets, world, 1.0f, 0.016f, eye, 12.0f);
+		bl_pets_info(&pets, &in);
+		static const float back[3] = { 12.0f, 1.2f, 3.0f };
+		for (int near = 0; near < 2; near++) {
+			float d = near ? 1.4f : 1.0f;
+			struct bl_camera cam = { in.tom[0] - (near ? 1.3f : back[0]), in.tom[1] + (near ? 0.7f : back[1] + 0.4f), in.tom[2] - (near ? 1.3f : back[2] * 0.0f + 3.0f), 0, 0, 1.2f };
+			float dx = in.tom[0] - cam.x, dy = in.tom[1] + 0.3f - cam.y, dz = in.tom[2] - cam.z;
+			cam.yaw = atan2f(dx, dz);
+			cam.pitch = atan2f(dy, hypotf(dx, dz));
+			(void)d;
+			for (int with = 0; with < 2; with++) {
+				bl_pets_pose(&pets, world, 1.0f, 0.016f, (float[3]){ cam.x, cam.y, cam.z }, 12.0f);
+				struct bl_view pv = v;
+				pv.pets = with ? &pets : NULL;
+				bl_render(world, &cam, &pv, px, w, h, w, threads);
+				double sum = 0;
+				for (int k = 0; k < 8; k++) {
+					double a = now_s();
+					bl_render(world, &cam, &pv, px, w, h, w, threads);
+					sum += now_s() - a;
+				}
+				printf("%-34s %7.1f ms\n", near ? (with ? "Tom close, with the pets" : "Tom close, without") : (with ? "Tom 12 blocks away, with the pets" : "Tom 12 blocks away, without"), sum / 8.0 * 1000.0);
+			}
+		}
+	}
 	free(px);
 	bl_world_free(world);
 	return 0;
@@ -1367,7 +1848,8 @@ static int run_shot(int argc, char **argv)
 	struct bl_view v;
 	bl_view_init(&v);
 	bool target = false;
-	int scene = 0;
+	int scene = 0, pets_on = 0, look = 0;
+	float pt = 1.0f;
 	for (int i = 2; i < argc; i++) {
 		char *eq = strchr(argv[i], '=');
 		if (!eq) {
@@ -1390,6 +1872,9 @@ static int run_shot(int argc, char **argv)
 		else if (!strcmp(k, "threads")) threads = atoi(val);
 		else if (!strcmp(k, "target")) target = atoi(val) != 0;
 		else if (!strcmp(k, "scene")) scene = atoi(val);
+		else if (!strcmp(k, "pets")) pets_on = atoi(val);
+		else if (!strcmp(k, "pt")) pt = (float)atof(val);
+		else if (!strcmp(k, "look")) look = !strcmp(val, "filip") ? 2 : 1;
 		else {
 			printf("unknown key %s\n", k);
 			return 2;
@@ -1429,6 +1914,37 @@ static int run_shot(int argc, char **argv)
 			v.ty = hit.y;
 			v.tz = hit.z;
 		}
+	}
+	struct bl_pets pets;
+	if (pets_on) {                               /* Tom and Filip in a yard near the spawn, at `pt` seconds of their day */
+		glyphs_make();
+		bl_pets_init(&pets, seed == 2024 ? 0 : seed, g_glyph_ptr, MCAT_GLYPHS);
+		if (!bl_pets_place(&pets, world, s)) {
+			printf("no yard\n");
+			return 1;
+		}
+		float eye[3] = { cam.x, cam.y, cam.z };
+		for (int i = 0; i < (int)(pt * 30.0f); i++)
+			bl_pets_step(&pets, world, 1.0f / 30.0f);
+		bl_pets_pose(&pets, world, pt, 0.016f, eye, v.time_h);
+		struct bl_pets_info in;
+		bl_pets_info(&pets, &in);
+		if (look) {
+			const float *at = look == 2 ? in.filip : in.tom;
+			cam.x = at[0] - 3.0f;
+			cam.y = at[1] + 1.6f;
+			cam.z = at[2] - 5.0f;
+			float dx = at[0] - cam.x, dy = at[1] + (look == 2 ? 0.0f : 0.3f) - cam.y, dz = at[2] - cam.z;
+			cam.yaw = atan2f(dx, dz);
+			cam.pitch = atan2f(dy, hypotf(dx, dz));
+			eye[0] = cam.x;
+			eye[1] = cam.y;
+			eye[2] = cam.z;
+			bl_pets_pose(&pets, world, pt, 0.016f, eye, v.time_h);
+		}
+		v.pets = &pets;
+		printf("Tom at %.1f %.1f %.1f (stands %.2f, lies %.2f), Filip at %.1f %.1f %.1f, yard %.1f %.1f\n", in.tom[0], in.tom[1], in.tom[2], in.tom_stand, in.tom_lie,
+		       in.filip[0], in.filip[1], in.filip[2], in.yard[0], in.yard[2]);
 	}
 	uint32_t *px = malloc((size_t)w * (size_t)h * 4);
 	double t0 = now_s();
@@ -1510,6 +2026,9 @@ int main(int argc, char **argv)
 	test_textures();
 	printf("the picture\n");
 	test_render();
+	printf("Tom and Filip\n");
+	test_pets();
+	test_pets_render();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

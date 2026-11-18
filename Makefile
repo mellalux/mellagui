@@ -109,7 +109,7 @@ $(BUILD)/chessai-test: $(BUILD)/tests/chessai_test.o $(BUILD)/client/chessai.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
-$(BUILD)/blocks-test: $(BUILD)/tests/blocks_test.o $(BUILD)/client/blocks.o $(BUILD)/client/blocksview.o
+$(BUILD)/blocks-test: $(BUILD)/tests/blocks_test.o $(BUILD)/client/blocks.o $(BUILD)/client/blocksview.o $(BUILD)/client/blockspets.o $(BUILD)/client/matrixcat.o $(BUILD)/client/matrixturtle.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
@@ -175,7 +175,7 @@ $(BUILD)/mellagui-tetris: $(BUILD)/client/mellagui-tetris.o $(BUILD)/src/wlc.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-blocks: $(BUILD)/client/mellagui-blocks.o $(BUILD)/client/blocks.o $(BUILD)/client/blocksview.o $(BUILD)/src/smartsun.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-blocks: $(BUILD)/client/mellagui-blocks.o $(BUILD)/client/blocks.o $(BUILD)/client/blocksview.o $(BUILD)/client/blockspets.o $(BUILD)/client/matrixcat.o $(BUILD)/client/matrixturtle.o $(BUILD)/src/smartsun.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

@@ -58,6 +58,7 @@ struct mturtle {
     const uint8_t *const *glyph;        /* the room's alphabet (16 rows of 8 pixels) */
     int nglyph;
     float ldir[3], lcol[3], lstr;       /* the key light: direction towards it, colour, strength (0 = none) */
+    float att_k;                        /* how fast the glow fades with the distance: 1 / (1 + att_k d^2); 0.018 in the room (set by mturtle_pose) */
 };
 
 /* Which day the turtle lives: 0 = the same every time (tests, --at), any other number = a day of its own. (The path's phases come from it.) */
@@ -70,8 +71,18 @@ void mturtle_tom_centre(float t, float out[3]);
 /* How much of the floor's light is left at (x, z): his soft shadow under him (strong when he lies on the floor, faint when he swims high), 1 = none. */
 float mturtle_floor_shade(const struct mturtle *m, float x, float z);
 
+/* The turtle's state when something else moves it (a game): `pos` the middle of the shell, `yaw` the way it heads (before the sway of the strokes), `pitch` the climb
+ * (-0.45 .. 0.45), `speed` m/s, `yaw_rate` rad/s (the head leads into a turn, the body banks), `rest` 0 swimming .. 1 lying on the bottom, and what the resting turtle does
+ * (head_in 0..1, fore_in 0..1, hind_in -1 stretched back .. 1 pulled in: `mturtle_rest_params`). */
+struct mturtle_state { float pos[3], yaw, pitch, speed, yaw_rate, rest, head_in, fore_in, hind_in; };
+
+/* What a turtle that has been resting `tau` seconds of a rest of `duration` does, and the seed `hk` of that rest (any number: it picks the order of the postures). */
+void mturtle_rest_params(float tau, float duration, uint32_t hk, float *head, float *fore, float *hind);
+
 /* Poses the turtle for time `t` (seconds). */
 void mturtle_pose(struct mturtle *m, float t, const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr);
+/* The same from a state of the caller's own; no bubbles (m->nbub = 0: the caller may fill `bub`). `t` still drives the strokes and the looking about. */
+void mturtle_pose_state(struct mturtle *m, float t, const struct mturtle_state *st, const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr);
 
 /* The turtle (and its bubbles) along the ray from `o` in the unit direction `dn`, if nearer than `tmax` (metres): paints rgb (0..255 per channel) and returns true.
  * `inv_f` = metres a pixel covers at a distance of one metre. */

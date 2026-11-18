@@ -5,6 +5,7 @@ Environment:
     MELLAGUI_BIN   compositor binary (default build/mellagui; use build/mellagui-asan for sanitizers)
 """
 import base64
+import math
 import io
 import random
 import re
@@ -19457,7 +19458,7 @@ class TestBlocks(Base):
     compositor's zwp_pointer_constraints_v1 / zwp_relative_pointer_v1). Through MELLAGUI_BLOCKS_DUMP: where the player is, what he aims at, the hand, the number of
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
-    K = dict(esc=1, enter=28, e=18, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
+    K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
              f1=59, f3=61, lbrace=26, rbrace=27, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
@@ -19465,7 +19466,7 @@ class TestBlocks(Base):
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19474,6 +19475,8 @@ class TestBlocks(Base):
         argv = [self.EXE, '--size', size, '--render', render, '--threads', '2', '--no-clock', '--time', '12']
         if flat:
             argv += ['--seed', '11', '--flat']
+        if not pets:
+            argv += ['--no-pets']                            # (a yard and a pond dug beside the player are for the tests of the pets only)
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data, **(env or {})))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -19506,6 +19509,8 @@ class TestBlocks(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'aim':
                 st['aim'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] in ('pets', 'tom', 'filip'):
+                st[f[0]] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'hist':
                 st['hist'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
             elif f[0] == 'hotbar':
@@ -20103,6 +20108,160 @@ class TestBlocks(Base):
         self.wait(lambda s: s['state']['rev'] == '1')
         self.assertEqual(self.S()['sound'], '0')
         self.assertEqual(self.S()['sounds'], '0', '--no-sound sends nothing')
+
+    def test_tom_sits_in_his_yard_and_filip_swims_in_a_pond_and_their_day_runs_with_the_game(self):
+        self.start(pets=True)
+        st = self.state()
+        self.assertEqual(st['pets']['on'], '1')
+        yx, yy, yz = (float(v) for v in st['pets']['yard'].split(','))
+        self.assertAlmostEqual(yx, 138.5, places=1, msg='10 blocks from the spawn, the nearest the search allows on a flat world')
+        self.assertAlmostEqual(yz, 128.5, places=1)
+        tom = {k: float(v) for k, v in st['tom'].items()}
+        self.assertAlmostEqual(tom['x'], yx, delta=0.05, msg='Tom starts in the middle of his yard')
+        self.assertAlmostEqual(tom['z'], yz, delta=0.05)
+        self.assertAlmostEqual(tom['y'], 20.0, delta=0.05)
+        self.assertEqual(int(tom['mode']), 0, 'sitting')
+        self.assertEqual(st['pets']['t'], '0.00', 'their day does not run before the game does')
+        filip = dict(st['filip'])
+        self.assertEqual(filip['inwater'], '1', 'Filip is in water: a pond is dug beside the yard on a flat world')
+        px, py, pz = (float(v) for v in filip['pond'].split(','))
+        self.assertAlmostEqual(px, 132.5, delta=0.6)
+        self.assertEqual(py, 20.0, 'level with the ground')
+        self.assertGreater(st['hist']['water'], 60, 'the pond is in the world')
+        self.assertTrue(17.0 < float(filip['y']) < 20.0, 'under the surface')
+        self.play()
+        time.sleep(1.5)
+        t1 = float(self.state()['pets']['t'])
+        self.assertGreater(t1, 1.0, 'it runs while the game is played')
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '0')
+        t2 = float(self.state()['pets']['t'])
+        a = self.state()
+        time.sleep(0.6)
+        b = self.state()
+        self.assertEqual(float(b['pets']['t']), t2, 'and stands while it is paused')
+        self.assertEqual((a['filip']['x'], a['tom']['x']), (b['filip']['x'], b['tom']['x']), 'and so do they')
+
+    def test_tom_and_filip_live_their_lives_inside_their_places(self):
+        self.start(pets=True)
+        st = self.state()
+        yx, yy, yz = (float(v) for v in st['pets']['yard'].split(','))
+        px, py, pz = (float(v) for v in st['filip']['pond'].split(','))
+        self.play()
+        modes, filip_xy, tom_xy = set(), set(), set()
+        t0 = time.time()
+        while time.time() - t0 < 30.0:
+            st = self.state()
+            tom = {k: float(v) for k, v in st['tom'].items()}
+            filip = {k: float(v) for k, v in st['filip'].items() if k not in ('pond',)}
+            modes.add(int(tom['mode']))
+            tom_xy.add((round(tom['x'], 1), round(tom['z'], 1)))
+            filip_xy.add((round(filip['x'], 1), round(filip['z'], 1)))
+            self.assertTrue(math.hypot(tom['x'] - yx, tom['z'] - yz) <= 10.5 and 19.99 <= tom['y'] <= 21.3, 'Tom stays near his yard, on the ground: %s' % (tom,))
+            self.assertEqual(int(filip['inwater']), 1, 'Filip is in the water all the time: %s' % (filip,))
+            self.assertTrue(math.hypot(filip['x'] - px, filip['z'] - pz) <= 3.6 and 17.0 <= filip['y'] <= 20.0, 'and inside the pond: %s' % (filip,))
+            time.sleep(0.25)
+        self.assertGreater(len(modes), 1, 'Tom does something after sitting for a while (modes %s)' % (modes,))
+        self.assertGreater(len(filip_xy), 5, 'Filip swims')
+
+    def test_the_player_cannot_walk_through_tom_and_pushes_him(self):
+        self.start('--yaw', '90', '--pitch', '0', pets=True)            # towards the yard (+x): the pond, then Tom sitting in its middle
+        self.play()
+        ctl.key(self.K['ctrl'], True)
+        ctl.key(self.K['w'], True)
+        ctl.key(self.K['space'], True)                      # (the pond is a pit three deep: swim up and hop out of it)
+        inside = 0
+        tom0 = float(self.state()['tom']['x'])
+        t0 = time.time()
+        while time.time() - t0 < 8.0:
+            st = self.state()
+            pl = {k: float(st['state'][k]) for k in ('x', 'y', 'z')}
+            tom = {k: float(v) for k, v in st['tom'].items()}
+            if abs(pl['x'] - tom['x']) < 0.5 and abs(pl['z'] - tom['z']) < 0.5 and pl['y'] < tom['y'] + 0.6 and pl['y'] + 1.8 > tom['y']:
+                inside += 1
+            time.sleep(0.05)
+        ctl.key(self.K['space'], False)
+        ctl.key(self.K['w'], False)
+        ctl.key(self.K['ctrl'], False)
+        time.sleep(0.2)
+        self.assertEqual(inside, 0, 'the player is never inside Tom')
+        st = self.state()
+        self.assertGreater(float(st['state']['x']), 136.0, 'he got to Tom (through the pond)')
+
+    def test_the_pets_can_be_left_out_and_p_brings_them_back(self):
+        self.start()                                          # (--no-pets: no yard, no pond: the world is as it was)
+        st = self.state()
+        self.assertEqual(st['pets']['on'], '0')
+        self.assertNotIn('tom', st)
+        self.assertEqual(st['hist']['water'], 0, 'nothing was dug')
+        self.assertEqual(st['state']['rev'], '0')
+        self.play()
+        self.tap('p')
+        st = self.wait(lambda s: s['pets']['on'] == '1' and 'tom' in s)
+        self.assertEqual(st['filip']['inwater'], '1', 'a yard near the player, a pond dug beside it, Filip in it')
+        self.assertGreater(st['hist']['water'], 60)
+        self.tap('p')
+        self.assertEqual(self.state()['pets']['on'], '0')
+
+    def test_tom_is_in_the_picture_and_not_without_him(self):
+        # the player looks at the place where Tom sits (the yard is at +10 in x, Tom in the middle of it), with a narrow view
+        def cream(pic, x0, y0, x1, y1):
+            n = 0
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    r, g, b = pic.px(x, y)
+                    if r > g + 5 and r > b + 50 and r > 120:
+                        n += 1
+            return n
+        counts = []
+        for extra in ([], ['--no-pets']):
+            for w in ctl.windows()['windows']:
+                if w['app_id'] == 'mellagui.blocks':
+                    self.proc.kill()
+                    self.proc.wait()
+                    time.sleep(0.3)
+            self.start('--yaw', '90', '--pitch', '-7.5', '--fov', '40', *extra, render='480x300', pets=not extra)
+            self.play()
+            time.sleep(0.4)
+            out = os.path.join(tmp, 'blocks-pets.ppm')
+            self.addCleanup(lambda: os.path.exists(out) and os.unlink(out))
+            pic = ctl.dump(out)
+            wx, wy, ww, wh = self.win['x'], self.win['y'], self.win['w'], self.win['h']
+            counts.append(cream(pic, wx + ww // 2 - 60, wy + wh // 2 - 60, wx + ww // 2 + 60, wy + wh // 2 + 60))
+        self.assertGreater(counts[0], 40, 'a cream-coloured cat in the middle of the picture (%d pixels)' % counts[0])
+        self.assertEqual(counts[1], 0, 'and none without the pets')
+
+    def test_the_yard_the_water_and_the_places_of_the_pets_are_saved(self):
+        self.start('--save', pets=True)
+        self.play()
+        time.sleep(14.0)                                      # Tom has had time to get up and do something
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '0')
+        st = self.state()
+        yard, tom, filip = st['pets']['yard'], dict(st['tom']), dict(st['filip'])
+        water = st['hist']['water']
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.proc.poll(), 0)
+        self.proc = None
+        for w in range(40):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        self.start(flat=False, data=self.data, pets=True)
+        st = self.state()
+        self.assertEqual(st['pets']['yard'], yard, 'the yard stays where it was')
+        self.assertEqual(st['hist']['water'], water, 'the pond that was dug was saved with the world and not dug again')
+        self.assertAlmostEqual(float(st['tom']['x']), float(tom['x']), delta=0.05, msg='Tom is where he was')
+        self.assertAlmostEqual(float(st['tom']['z']), float(tom['z']), delta=0.05)
+        self.assertAlmostEqual(float(st['filip']['x']), float(filip['x']), delta=0.05, msg='and Filip')
+        self.assertAlmostEqual(float(st['filip']['y']), float(filip['y']), delta=0.05)
+        self.assertEqual(st['filip']['inwater'], '1')
 
     def test_a_bad_command_line_is_refused(self):
         for args in (['--render', 'big'], ['--world-size', '3'], ['--time', '30'], ['--fov', '5'], ['--bogus']):

@@ -1,5 +1,6 @@
 /* blocksview.c - the picture of a block world. See blocksview.h. */
 #include "blocksview.h"
+#include "blockspets.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -251,6 +252,9 @@ struct frame {
 	bool target;
 	int tx, ty, tz;
 	bool ids;
+	const struct bl_pets *pets;
+	float inv_f;              /* metres a pixel covers at a distance of one metre */
+	float petmax;             /* the pets are drawn up to here (beyond it the fog has them) */
 	bool start_water;
 	const float *nx, *ny;
 };
@@ -338,6 +342,13 @@ static int torch_hit(const struct frame *F, int ix, int iy, int iz, float dx, fl
 	return axis == 0 ? (dx > 0 ? BL_NX : BL_PX) : axis == 1 ? (dy > 0 ? BL_NY : BL_PY) : (dz > 0 ? BL_NZ : BL_PZ);
 }
 
+/* 0 for none, 1 for Tom, 2 for Filip: which of them a ray meets nearer than `tmax` (the test hook) */
+static int pets_probe(const struct frame *F, float dx, float dy, float dz, float tmax)
+{
+	float o[3] = { F->ox, F->oy, F->oz }, d[3] = { dx, dy, dz };
+	return bl_pets_probe(F->pets, o, d, tmax < F->petmax ? tmax : F->petmax, F->inv_f);
+}
+
 static const float k_face_shade[6] = { 0.62f, 0.62f, 1.0f, 0.5f, 0.8f, 0.8f };
 
 static inline void slab(const struct frame *F, float *acc, float *trans, float dist)
@@ -347,6 +358,19 @@ static inline void slab(const struct frame *F, float *acc, float *trans, float d
 		acc[i] += *trans * F->wcol[i] * a;
 	*trans *= 1.0f - a;
 }
+
+/* a creature at the distance of its middle: laid over what is nearer, inside the water's volume if the ray is in it (the volume is cut there) */
+static inline void pet_insert(const struct frame *F, float *acc, float *trans, bool in_water, float *wt0, const struct bl_pet_event *e)
+{
+	if (in_water && e->tp > *wt0) {
+		slab(F, acc, trans, e->tp - *wt0);
+		*wt0 = e->tp;
+	}
+	for (int i = 0; i < 3; i++)
+		acc[i] += *trans * e->c[i];
+	*trans *= 1.0f - e->a;
+}
+
 
 static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 {
@@ -358,6 +382,12 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 	bool in_water = F->start_water;
 	float wt0 = 0.0f;
 	const float maxd = F->maxd;
+	struct bl_pet_event pev[2];                       /* Tom and Filip along this ray: laid over what is nearer when the ray gets to their distance */
+	int npev = 0, ipev = 0;
+	if (F->pets && !F->ids) {
+		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz };
+		npev = bl_pets_events(F->pets, po, pd, F->petmax, F->inv_f, pev);
+	}
 	const int W = F->W, D = F->D, H = F->H, ytop = F->ytop;
 
 	int ix, iy, iz;
@@ -445,6 +475,10 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				end = END_FAR;
 				break;
 			}
+			while (ipev < npev && pev[ipev].tp <= t) {
+				pet_insert(F, acc, &trans, in_water, &wt0, &pev[ipev]);
+				ipev++;
+			}
 			const int blk = F->b[idx];
 			if (blk == BL_AIR) {
 				if (in_water) {
@@ -505,6 +539,11 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 			if (F->ids) {
 				if (bl_water(blk))
 					continue;                            /* the test hook sees through water like `bl_pick` */
+				if (F->pets) {
+					int pk = pets_probe(F, dx, dy, dz, t);
+					if (pk)
+						return pk == 1 ? 0xff0000feu : 0xff0000fdu;
+				}
 				return 0xff000000u | (uint32_t)blk << 8 | (uint32_t)face;
 			}
 			if (bl_water(blk) && bl_water(pb)) {
@@ -616,6 +655,12 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 			}
 			for (int i = 0; i < 3; i++)
 				col[i] *= sh * mult[i];
+			if (F->pets && face == BL_PY) {                  /* the shadow of Tom and of Filip on the top of a block at their feet */
+				float fs = bl_pets_floor_shade(F->pets, hpx, (float)(iy + 1), hpz);
+				if (fs < 1.0f)
+					for (int i = 0; i < 3; i++)
+						col[i] *= fs;
+			}
 			if (F->target && ix == F->tx && iy == F->ty && iz == F->tz) {
 				const float e = 0.03f;
 				if (u < e || u > 1.0f - e || v < e || v > 1.0f - e)
@@ -655,9 +700,19 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 	}
 
 finish:
-	if (F->ids)
+	if (F->ids) {
+		if (F->pets) {
+			int pk = pets_probe(F, dx, dy, dz, F->maxd);
+			if (pk)
+				return pk == 1 ? 0xff0000feu : 0xff0000fdu;
+		}
 		return 0xff0000ffu;
+	}
 	if (trans > 0.0f) {
+		while (ipev < npev) {                        /* the ray got to the end without meeting an opaque block: what is left is in front of the sky or the fog */
+			pet_insert(F, acc, &trans, in_water, &wt0, &pev[ipev]);
+			ipev++;
+		}
 		if (in_water)
 			slab(F, acc, &trans, t - wt0);
 		if (trans > 0.0f) {
@@ -792,6 +847,8 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.ty = v->ty;
 	F.tz = v->tz;
 	F.ids = v->ids;
+	F.pets = v->pets;
+	F.petmax = 0.7f * F.maxd;
 
 	int ex = (int)floorf(c->x), ey = (int)floorf(c->y), ez = (int)floorf(c->z);
 	F.start_water = bl_water(bl_get(w, ex, ey, ez));
@@ -800,6 +857,7 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 
 	float fov = c->fov < 0.2f ? 0.2f : c->fov > 2.8f ? 2.8f : c->fov;
 	float th = tanf(fov * 0.5f), aspect = (float)width / (float)height;
+	F.inv_f = 2.0f * th / (float)height;
 	float *nx = malloc(((size_t)width + (size_t)height) * sizeof *nx);
 	if (!nx) {
 		free(cmax);

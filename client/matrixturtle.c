@@ -362,18 +362,21 @@ static void paddle(struct mturtle *m, float sgn, const float sh0[3], float l1, f
         add_seg(m, P_PADDLE, e, w, up, w2, 0.012f, 1.12f);
 }
 
+void mturtle_rest_params(float tau, float duration, uint32_t hk, float *head, float *fore, float *hind)
+{
+    struct rest r;
+    memset(&r, 0, sizeof r);
+    r.active = true;
+    r.tau = tau;
+    r.d = duration;
+    r.hk = hk;
+    rest_params(&r, head, fore, hind);
+}
+
+static void bubbles_at(struct mturtle *m, float t);
+
 void mturtle_pose(struct mturtle *m, float t, const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr)
 {
-    memset(m->prim, 0, sizeof(m->prim));
-    m->n = 0;
-    m->enabled = true;
-    m->t = t;
-    m->glyph = glyph;
-    m->nglyph = nglyph;
-    memcpy(m->ldir, ldir, sizeof(m->ldir));
-    memcpy(m->lcol, lcol, sizeof(m->lcol));
-    m->lstr = lstr;
-
     const float h = 0.4f;
     float pm[3], p0[3], pp[3];
     mturtle_where(t - h, pm);
@@ -383,10 +386,12 @@ void mturtle_pose(struct mturtle *m, float t, const uint8_t *const *glyph, int n
     float v2[3] = { (pp[0] - p0[0]) / h, (pp[1] - p0[1]) / h, (pp[2] - p0[2]) / h };
     float v[3] = { 0.5f * (v1[0] + v2[0]), 0.5f * (v1[1] + v2[1]), 0.5f * (v1[2] + v2[2]) };
     float hs = sqrtf(v[0] * v[0] + v[2] * v[2]);
-    m->speed = vlen(v);
+    struct mturtle_state st;
+    memset(&st, 0, sizeof st);
+    st.speed = vlen(v);
     float yaw1 = atan2f(v1[0], v1[2]), yaw2 = atan2f(v2[0], v2[2]);
     float dyaw = fmodf(yaw2 - yaw1 + 9.4247780f, 6.2831853f) - 3.1415927f;
-    float yaw_rate = dyaw / h;
+    st.yaw_rate = dyaw / h;
     struct rest rs;
     rest_at(t, &rs);
     float down = rs.active ? sstep(0.7f, 1.0f, rs.r) : 0.0f;              /* how far it has settled on the floor: no swimming left in it */
@@ -395,20 +400,43 @@ void mturtle_pose(struct mturtle *m, float t, const uint8_t *const *glyph, int n
         float dy = fmodf(rs.yaw - yaw_swim + 9.4247780f, 6.2831853f) - 3.1415927f;
         yaw_swim += dy * down;
     }
-    m->yaw = yaw_swim;
-    m->pitch = clampf(0.9f * atan2f(v[1], fmaxf(hs, 0.05f)), -0.45f, 0.45f) * (1.0f - down);
+    st.yaw = yaw_swim;
+    st.pitch = clampf(0.9f * atan2f(v[1], fmaxf(hs, 0.05f)), -0.45f, 0.45f);
+    st.pos[0] = p0[0]; st.pos[1] = p0[1]; st.pos[2] = p0[2];
+    if (rs.active && rs.r >= 1.0f - 1e-6f)
+        rest_params(&rs, &st.head_in, &st.fore_in, &st.hind_in);
+    else if (rs.active && rs.tau > 0.0f)                                  /* (rising: the params of the end of the rest, fading with the rise) */
+        rest_params(&rs, &st.head_in, &st.fore_in, &st.hind_in);
+    st.rest = rs.active ? rs.r : 0.0f;
+    mturtle_pose_state(m, t, &st, glyph, nglyph, ldir, lcol, lstr);
+    bubbles_at(m, t);
+}
+
+void mturtle_pose_state(struct mturtle *m, float t, const struct mturtle_state *st, const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr)
+{
+    memset(m->prim, 0, sizeof(m->prim));
+    m->n = 0;
+    m->enabled = true;
+    m->att_k = 0.018f;
+    m->t = t;
+    m->glyph = glyph;
+    m->nglyph = nglyph;
+    memcpy(m->ldir, ldir, sizeof(m->ldir));
+    memcpy(m->lcol, lcol, sizeof(m->lcol));
+    m->lstr = lstr;
+
+    float down = sstep(0.7f, 1.0f, st->rest), yaw_rate = st->yaw_rate;
+    float head_in = st->head_in, fore_in = st->fore_in, hind_in = st->hind_in;
+    m->speed = st->speed;
+    m->yaw = st->yaw;
+    m->pitch = st->pitch * (1.0f - down);
     float swing = 0.045f * sinf(6.2831853f * t / STROKE_T) * (1.0f - down);    /* the body sways with the strokes */
     m->yaw += swing;
     m->roll = (clampf(1.4f * yaw_rate, -0.35f, 0.35f) + 0.04f * cosf(6.2831853f * t / STROKE_T)) * (1.0f - down);
-    m->pos[0] = p0[0]; m->pos[1] = p0[1]; m->pos[2] = p0[2];
-    m->stroke = (0.35f + 0.65f * sat((m->speed - 0.12f) / 0.25f)) * (1.0f - sstep(0.5f, 0.95f, rs.active ? rs.r : 0.0f));
-    float head_in = 0.0f, fore_in = 0.0f, hind_in = 0.0f;
-    if (rs.active && rs.r >= 1.0f - 1e-6f)
-        rest_params(&rs, &head_in, &fore_in, &hind_in);
-    else if (rs.active && rs.tau > 0.0f)                                  /* (rising: the params of the end of the rest, fading with the rise) */
-        rest_params(&rs, &head_in, &fore_in, &hind_in);
+    m->pos[0] = st->pos[0]; m->pos[1] = st->pos[1]; m->pos[2] = st->pos[2];
+    m->stroke = (0.35f + 0.65f * sat((m->speed - 0.12f) / 0.25f)) * (1.0f - sstep(0.5f, 0.95f, st->rest));
     m->head_in = head_in; m->fore_in = fore_in; m->hind_in = hind_in;
-    m->rest = rs.active ? rs.r : 0.0f;
+    m->rest = st->rest;
 
     float f[3] = { sinf(m->yaw) * cosf(m->pitch), sinf(m->pitch), cosf(m->yaw) * cosf(m->pitch) };
     float r[3] = { cosf(m->yaw), 0.0f, -sinf(m->yaw) }, up[3];
@@ -485,6 +513,12 @@ void mturtle_pose(struct mturtle *m, float t, const uint8_t *const *glyph, int n
         m->centre[i] += m->pos[i];
     m->radius = 0.62f;
 
+    m->nbub = 0;                                                       /* (the bubbles are made by bubbles_at from the time, or by the caller) */
+    memset(m->bub, 0, sizeof(m->bub));
+}
+
+static void bubbles_at(struct mturtle *m, float t)
+{
     m->nbub = 0;
     memset(m->bub, 0, sizeof(m->bub));
     int k1 = (int)floorf(t / BUBBLE_PERIOD);
@@ -669,7 +703,7 @@ static void shade_hit(const struct mturtle *m, int part, int pi, const float qu[
     }
     }
 
-    float att = 1.0f / (1.0f + 0.018f * bt * bt);
+    float att = 1.0f / (1.0f + m->att_k * bt * bt);
     float L = 0.30f + 0.62f * ndv;
     float key = m->lstr > 0.0f ? sat(nw[0] * m->ldir[0] + nw[1] * m->ldir[1] + nw[2] * m->ldir[2]) * m->lstr : 0.0f;
     L += 0.55f * key;
@@ -740,7 +774,7 @@ bool mturtle_shade(const struct mturtle *m, const float o[3], const float dn[3],
             continue;
         float nx = (o[0] + t * dn[0] - b->c[0]) / b->r, ny = (o[1] + t * dn[1] - b->c[1]) / b->r, nz = (o[2] + t * dn[2] - b->c[2]) / b->r;
         float ndv = sat(-(nx * dn[0] + ny * dn[1] + nz * dn[2])), rim = 1.0f - ndv;
-        float att = 1.0f / (1.0f + 0.018f * t * t), al = sat(0.22f + 0.70f * rim * rim);
+        float att = 1.0f / (1.0f + m->att_k * t * t), al = sat(0.22f + 0.70f * rim * rim);
         float hl = sat((nx * -0.5f + ny * 0.7f + nz * -0.5f) * 3.0f - 2.0f);   /* a bright spot where the room's glow hits it */
         al = fmaxf(al, hl);
         float k = al * (0.5f + 0.5f * att);

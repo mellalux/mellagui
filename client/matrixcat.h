@@ -21,6 +21,11 @@
 #include <stdint.h>
 
 #define MCAT_GLYPHS 64                  /* the glyphs the fur picks from */
+
+/* The area Tom roams (metres, in the room's frame; the turtle's clamp is a little smaller): a block world puts a yard of this size on the ground. */
+#define MCAT_AREA_Z0 (-4.65f)
+#define MCAT_AREA_Z1 5.35f
+#define MCAT_AREA_X 3.7f
 #define MCAT_PRIMS 48
 
 struct mcat_prim {
@@ -66,6 +71,7 @@ struct mcat {
     const uint8_t *const *glyph;        /* MCAT_GLYPHS glyph bitmaps (16 rows of 8 pixels) */
     int nglyph;
     float ldir[3], lcol[3], lstr;       /* the room's key light: direction towards it, colour, strength (0 = none) */
+    float att_k;                        /* how fast the room's glow fades with the distance: 1 / (1 + att_k d^2); 0.018 in the room (set by mcat_pose), a world in the open makes it smaller after the pose */
     float sh_w, sh_l, sh_h;             /* the shadow: half width and half length in the body's units, the height in metres */
 };
 
@@ -80,6 +86,10 @@ void mcat_set_seed(uint32_t seed);
 
 /* Poses the cat for time `t` (seconds) with the camera at `cam`. */
 void mcat_pose(struct mcat *c, float t, const float cam[3], const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr);
+/* The same from a state of the caller's own (a game that moves him itself): where he is (x, z in the frame the camera is in, the floor at y = 0), the way he faces, how far
+ * he stands up / lies, the stride (`walk` 0..1 and `dist` = the distance walked so far, which the paws go by), a run, a hop (`air` metres off the floor, `crouch` / `tuck` /
+ * `stretch` 0..1 shape it). `t` still drives what has no state: the head's script, the blinks, the breathing, the tail. */
+void mcat_pose_state(struct mcat *c, float t, const struct mcat_state *st, const float cam[3], const uint8_t *const *glyph, int nglyph, const float ldir[3], const float lcol[3], float lstr);
 
 /* The cat along the ray from `o` in the unit direction `dn`, if it is nearer than `tmax` (metres): replaces rgb (0..255 per channel) with its colour and returns true;
  * the eyes' halo is added to rgb as well when it is in front of whatever is behind. `inv_f` = metres a pixel covers at a distance of one metre. */

@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "blocks.h"
+#include "blockspets.h"
 #include "blocksview.h"
 #include "font.h"
 #include "keymap.h"
@@ -56,7 +57,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+	K_E = 18, K_F = 33, K_P = 25, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
 };
 
 #define SLOTS 9
@@ -108,6 +109,16 @@ struct app {
 	int64_t last_sound_ms;
 	int nsounds;
 	float water_acc;                                        /* time since the water was last looked at */
+	struct bl_pets pets;                                    /* Tom and Filip (the Matrix room's cat and turtle) in a yard on the ground */
+	bool pets_on;
+	float pet_t;                                            /* seconds of their day: it runs while the game is played */
+	int64_t pose_ms;
+	float pet_start;
+	bool have_yard;                                         /* player.conf had the yard: it stays where it was */
+	float yard_x, yard_z;
+	bool have_tom, have_filip;                              /* ... and where they were */
+	float tom_pos[3], filip_pos[3];
+	const uint8_t *glyph[MCAT_GLYPHS];                      /* the fur's letters: a spread over the Matrix rain's alphabet */
 	int pal_hover;
 
 	struct bl_hit aim;
@@ -289,6 +300,23 @@ static void conf_load(struct app *a, bool with_player)
 			a->clockm = (int)d;
 		else if (!strcmp(k, "sound") && (d == 0 || d == 1))
 			a->sound_on = d != 0;
+		else if (!strcmp(k, "pets") && (d == 0 || d == 1))
+			a->pets_on = d != 0;
+		else if (with_player && !strcmp(k, "pet_t") && d >= 0 && d < 1e7)
+			a->pet_t = (float)d;
+		else if (with_player && !strcmp(k, "yard_x") && d > 0 && d < 5000) {
+			a->yard_x = (float)d;
+			a->have_yard = a->yard_z > 0;
+		} else if (with_player && !strcmp(k, "yard_z") && d > 0 && d < 5000) {
+			a->yard_z = (float)d;
+			a->have_yard = a->yard_x > 0;
+		} else if (with_player && !strncmp(k, "tom_", 4) && k[4] >= 'x' && k[4] <= 'z' && !k[5]) {
+			a->tom_pos[k[4] - 'x'] = (float)d;
+			a->have_tom = true;
+		} else if (with_player && !strncmp(k, "filip_", 6) && k[6] >= 'x' && k[6] <= 'z' && !k[7]) {
+			a->filip_pos[k[6] - 'x'] = (float)d;
+			a->have_filip = true;
+		}
 		else if (!strcmp(k, "slot") && d >= 1 && d <= SLOTS)
 			a->slot = (int)d - 1;
 		else if (!strcmp(k, "hotbar")) {
@@ -325,8 +353,11 @@ static void conf_save(const struct app *a)
 	FILE *f = fopen(tmp, "w");
 	if (!f)
 		return;
-	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
-	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on);
+	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\npets = %d\npet_t = %.2f\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
+	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on, a->pets_on, a->pet_t);
+	if (a->pets.placed)
+		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
+		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
 	fprintf(f, "hotbar = ");
 	for (int i = 0; i < SLOTS; i++)
 		fprintf(f, "%s%d", i ? "," : "", a->hotbar[i]);
@@ -420,6 +451,42 @@ static void real_clock_update(struct app *a, int64_t now)
 	a->time_h = solar_hours(min, rise, set);
 }
 
+/* The Matrix rain's alphabet (digits, capitals, signs, accented letters, box drawing) and the 64 letters of the fur picked from it the way the screensaver does. */
+static int fur_alphabet(const uint8_t **out)
+{
+	uint32_t set[160];
+	int n = 0;
+	for (uint32_t c = '0'; c <= '9'; c++)
+		set[n++] = c;
+	for (uint32_t c = 'A'; c <= 'Z'; c++)
+		set[n++] = c;
+	for (const char *q = ":.=*+-<>|\"'~^?!#$%&@"; *q; q++)
+		set[n++] = (uint32_t)(unsigned char)*q;
+	for (uint32_t c = 0xc0; c <= 0xff && n < 150; c++)
+		if (c != 0xd7 && c != 0xf7)
+			set[n++] = c;
+	for (uint32_t c = 0x2550; c <= 0x256c && n < 158; c += 3)
+		set[n++] = c;
+	for (int i = 0; i < MCAT_GLYPHS; i++)
+		out[i] = lm_font_glyph(set[(i * 7) % n]);
+	return MCAT_GLYPHS;
+}
+
+/* Tom and Filip: a new day for the world's seed (0 = the script of the screensaver) and a yard near the player (or where player.conf had it) */
+static void pets_setup(struct app *a, const float near[3], bool keep_yard)
+{
+	fur_alphabet(a->glyph);
+	bl_pets_init(&a->pets, a->world->seed, a->glyph, MCAT_GLYPHS);
+	a->pets.on = a->pets_on;
+	if (keep_yard && a->have_yard)
+		bl_pets_set_yard(&a->pets, a->world, a->yard_x, a->yard_z, NULL);
+	else
+		bl_pets_place(&a->pets, a->world, near);
+	if (keep_yard && a->pets.placed)
+		bl_pets_restore(&a->pets, a->world, a->have_tom ? a->tom_pos : NULL, a->have_filip ? a->filip_pos : NULL);
+	a->pose_ms = 0;
+}
+
 /* ================================================================ the world ================================================================ */
 
 static uint32_t fresh_seed(void)
@@ -460,6 +527,13 @@ static void new_world(struct app *a)
 	}
 	a->nosave = false;
 	a->time_h = 9.0f;
+	a->pet_t = 0.0f;
+	a->have_yard = false;
+	a->have_tom = a->have_filip = false;
+	{
+		float near[3] = { a->pl.x, a->pl.y, a->pl.z };
+		pets_setup(a, near, false);
+	}
 	say(a, "A new world (seed %u)", a->world->seed);
 }
 
@@ -605,6 +679,10 @@ static void do_place(struct app *a)
 {
 	if (!a->aimed)
 		return;
+	if (bl_pets_hit_cell(&a->pets, a->aim.px, a->aim.py, a->aim.pz) && bl_solid(hand_block(a))) {   /* a block cannot be put into Tom or Filip */
+		sound(a, "no");
+		return;
+	}
 	if (bl_place(a->world, &a->aim, hand_block(a), &a->pl)) {
 		sound(a, "place");
 		aim_update(a);
@@ -649,6 +727,10 @@ static void advance(struct app *a, int64_t now, float dt)
 		                       .jump = a->k_jump || a->jump_latch, .sneak = a->k_sneak, .sprint = a->k_ctrl && a->k_fwd };
 		bl_player_step(a->world, &a->pl, &in, dt);
 		a->jump_latch = false;
+		if (a->pets_on && a->pets.placed) {
+			bl_pets_step(&a->pets, a->world, dt);
+			bl_pets_push_player(&a->pets, a->world, &a->pl);
+		}
 		aim_update(a);
 		if (a->b_break && now >= a->next_break) {
 			do_break(a);
@@ -665,6 +747,7 @@ static void advance(struct app *a, int64_t now, float dt)
 		} else if (a->clockm == 2) {
 			real_clock_update(a, now);
 		}
+		a->pet_t += dt;
 		a->water_acc += dt;                                  /* the water flows four times a second */
 		if (a->water_acc >= 0.25f) {
 			a->water_acc = 0;
@@ -767,6 +850,7 @@ static const char *const HELP_LINES[] = {
 	"1 to 9 or the wheel choose the block in the hand, E opens the palette of every block.",
 	"Torches and lamps give light. Water put by hand is a source and flows.",
 	"[ and ] move the clock an hour, T: the clock stands, runs, follows the real sun.",
+	"P shows or hides Tom the cat and Filip the turtle (they live in a yard near where you start).",
 	"F3 shows the numbers. Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits.",
 };
 
@@ -780,7 +864,7 @@ static int pal_cell(const struct app *a)                   /* the size of a squa
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
 	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
-	int ch = a->prompt == P_HELP ? 320 : a->prompt == P_PAUSE ? 200 : 130;
+	int ch = a->prompt == P_HELP ? 345 : a->prompt == P_PAUSE ? 200 : 130;
 	int cw = a->prompt == P_HELP ? 600 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
@@ -897,6 +981,16 @@ static void write_dump(struct app *a)
 	if (a->aimed)
 		fprintf(f, "aim x=%d y=%d z=%d face=%d px=%d py=%d pz=%d t=%.3f block=%s\n", a->aim.x, a->aim.y, a->aim.z, a->aim.face, a->aim.px, a->aim.py, a->aim.pz,
 		        a->aim.t, bl_block_name(bl_get(w, a->aim.x, a->aim.y, a->aim.z)));
+	if (!a->pets.placed)
+		fprintf(f, "pets on=%d placed=0\n", a->pets_on);
+	if (a->pets.placed) {
+		struct bl_pets_info pi;
+		bl_pets_info(&a->pets, &pi);
+		fprintf(f, "pets on=%d yard=%.2f,%.2f,%.2f t=%.2f\n", a->pets_on, pi.yard[0], pi.yard[1], pi.yard[2], a->pet_t);
+		fprintf(f, "tom x=%.3f y=%.3f z=%.3f yaw=%.3f stand=%.3f lie=%.3f walk=%.3f air=%.3f mode=%d\n", pi.tom[0], pi.tom[1], pi.tom[2], pi.tom_yaw, pi.tom_stand, pi.tom_lie, pi.tom_walk,
+		        pi.tom_air, pi.tom_mode);
+		fprintf(f, "filip x=%.3f y=%.3f z=%.3f rest=%.3f inwater=%d pond=%.2f,%.2f,%.2f\n", pi.filip[0], pi.filip[1], pi.filip[2], pi.filip_rest, pi.filip_in_water, pi.pond[0], pi.pond[1], pi.pond[2]);
+	}
 	fprintf(f, "hist");
 	for (int b = 0; b < BL_COUNT; b++)
 		fprintf(f, " %s=%ld", bl_block_name(b), a->hist[b]);
@@ -957,6 +1051,12 @@ static void paint(struct wlwin *w)
 	bl_view_init(&v);
 	v.time_h = a->time_h;
 	v.dist = 96.0f;
+	if (a->pets_on && a->pets.placed) {
+		float dtp = a->pose_ms ? (float)(t0 - a->pose_ms) / 1000.0f : 0.0f;
+		a->pose_ms = t0;
+		bl_pets_pose(&a->pets, a->world, a->pet_t, dtp, eye, a->time_h);
+		v.pets = &a->pets;
+	}
 	if (a->aimed && a->playing) {
 		v.target = true;
 		v.tx = a->aim.x;
@@ -1243,6 +1343,16 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		pause_game(a, P_PALETTE);
 		return;
 	}
+	if (code == K_P && a->playing) {
+		a->pets_on = !a->pets_on;
+		a->pets.on = a->pets_on;
+		if (a->pets_on && !a->pets.placed) {                /* the first time: a yard near where the player is now (and a pond if there is no water) */
+			float near[3] = { a->pl.x, a->pl.y, a->pl.z };
+			pets_setup(a, near, false);
+		}
+		say(a, a->pets_on ? "Tom and Filip are here" : "Tom and Filip have gone");
+		return;
+	}
 	if (code >= K_1 && code <= K_9) {
 		choose_slot(a, (int)(code - K_1));
 		return;
@@ -1431,6 +1541,37 @@ static int selftest(void)
 	}
 	CHECK(!hand_ok(BL_AIR) && !hand_ok(BL_BEDROCK) && !hand_ok(BL_FLOW4) && hand_ok(BL_WATER) && hand_ok(BL_TORCH) && hand_ok(BL_LAMP), "what may be in the hand");
 
+	/* Tom and Filip: the fur has its 64 letters, a yard is found at least 10 blocks away, and the one the conf had is kept */
+	{
+		const uint8_t *tab[MCAT_GLYPHS];
+		CHECK(fur_alphabet(tab) == MCAT_GLYPHS, "64 letters for the fur");
+		int missing = 0;
+		for (int i = 0; i < MCAT_GLYPHS; i++)
+			missing += tab[i] == NULL;
+		CHECK(missing == 0, "%d letters of the fur have no picture", missing);
+		static struct app pa;
+		memset(&pa, 0, sizeof pa);
+		pa.world = bl_world_flat(64, 64, 64, 20);
+		pa.pets_on = true;
+		float near[3] = { 32.5f, 20.0f, 32.5f };
+		pets_setup(&pa, near, false);
+		CHECK(pa.pets.placed && hypotf(pa.pets.yard[0] - near[0], pa.pets.yard[2] - near[2]) >= 9.99f, "a yard 10 blocks from the player");
+		CHECK(pa.pets.made_pond && pa.pets.filip.swimming, "and Filip is in a pond that was dug beside it");
+		pa.have_yard = true;
+		pa.yard_x = 20.0f;
+		pa.yard_z = 40.0f;
+		pa.have_tom = true;
+		pa.tom_pos[0] = 21.0f;
+		pa.tom_pos[1] = 20.0f;
+		pa.tom_pos[2] = 41.0f;
+		pets_setup(&pa, near, true);
+		CHECK(pa.pets.yard[0] == 20.0f && pa.pets.yard[2] == 40.0f, "the yard of the conf is kept");
+		CHECK(fabsf(pa.pets.tom.x - 21.0f) < 0.001f && fabsf(pa.pets.tom.z - 41.0f) < 0.001f, "and so is where Tom was");
+		pets_setup(&pa, near, false);
+		CHECK(pa.pets.yard[0] != 20.0f, "a new world finds its own");
+		bl_world_free(pa.world);
+	}
+
 	/* the hand: slots wrap round */
 	memset(&a, 0, sizeof a);
 	a.slot = 0;
@@ -1460,7 +1601,10 @@ int main(int argc, char **argv)
 	a.clockm = 1;
 	a.sound_on = true;
 	a.pal_hover = -1;
+	a.pets_on = true;
 	int clock_cli = -1;
+	bool no_pets = false;
+	float pet_at = -1.0f;
 	a.day_minutes = 20.0f;
 	a.threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
 	if (a.threads < 1)
@@ -1512,6 +1656,10 @@ int main(int argc, char **argv)
 			clock_cli = 0;
 		} else if (!strcmp(argv[i], "--real-clock")) {
 			clock_cli = 2;
+		} else if (!strcmp(argv[i], "--no-pets")) {
+			no_pets = true;
+		} else if (!strcmp(argv[i], "--pet-at") && i + 1 < argc) {
+			pet_at = (float)atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--no-sound")) {
 			a.sound_on = false;
 			no_sound = true;
@@ -1531,7 +1679,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --real-clock] [--no-sound] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --real-clock] [--no-sound] [--no-pets] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -1574,7 +1722,16 @@ int main(int argc, char **argv)
 		a.clockm = clock_cli;
 	if (no_sound)
 		a.sound_on = false;
+	if (no_pets)
+		a.pets_on = false;
+	if (pet_at >= 0.0f)
+		a.pet_t = pet_at;
 	settle_player(&a);
+	if (a.pets_on) {                                        /* (without them no yard is looked for and no pond is dug: the world is left as it is) */
+		float near[3];
+		bl_spawn(a.world, near);
+		pets_setup(&a, near, true);
+	}
 	if (!isnan(yaw))
 		a.pl.yaw = yaw;
 	if (!isnan(pitch))

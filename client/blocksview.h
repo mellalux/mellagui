@@ -15,6 +15,8 @@
 
 #include "blocks.h"
 
+struct bl_pets;                                       /* Tom and Filip (blockspets.h) */
+
 struct bl_camera {
 	float x, y, z;          /* the eye */
 	float yaw, pitch;       /* as in blocks.h */
@@ -26,8 +28,9 @@ struct bl_view {
 	float dist;             /* how far to look, in blocks (16 .. 256) */
 	bool target;            /* outline the block (tx, ty, tz) */
 	int tx, ty, tz;
+	const struct bl_pets *pets;  /* Tom and the turtle, posed for this frame (bl_pets_pose), or NULL: drawn over the blocks behind them and hidden by the ones in front */
 	bool ids;               /* a hook for the tests: a pixel is 0xFF000000 | block << 8 | face of the first block a ray could aim at
-	                         * (what `bl_pick` finds), 0xFF0000FF for none; no shading, no sky */
+	                         * (what `bl_pick` finds), 0xFF0000FF for none (0xFF0000FE when Tom is nearer than that, 0xFF0000FD for Filip); no shading, no sky */
 };
 
 void bl_view_init(struct bl_view *v);                 /* noon, 96 blocks, no target */

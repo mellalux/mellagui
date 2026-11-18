@@ -12,6 +12,7 @@
 #include "blocks.h"
 #include "blocksview.h"
 #include "blockspets.h"
+#include "blocksmobs.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1725,6 +1726,531 @@ static void test_pets_render(void)
 	bl_world_free(w);
 }
 
+/* ---- the goblins -------------------------------------------------------------------------------------------------------- */
+
+struct mrun {
+	float damage;
+	int hits, born, burned;
+	float first_hit, last_hit, min_gap, t;
+	float min_dist;
+};
+
+/* step the mobs for `secs` with the player standing at `pl`; collects what happened and checks that no mob is ever in a block */
+static int run_mobs(struct bl_mobs *M, const struct bl_world *w, const float pl[3], bool alive, float hour, float secs, struct mrun *r)
+{
+	int in_block = 0;
+	int n = (int)(secs * 30.0f);
+	for (int i = 0; i < n; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(M, w, pl, alive, hour, 1.0f / 30.0f, &R);
+		if (r) {
+			r->t += 1.0f / 30.0f;
+			r->damage += R.damage;
+			r->born += R.born;
+			r->burned += R.burned;
+			if (R.hits) {
+				if (r->hits == 0)
+					r->first_hit = r->t;
+				else if (r->t - r->last_hit < r->min_gap)
+					r->min_gap = r->t - r->last_hit;
+				r->last_hit = r->t;
+				r->hits += R.hits;
+			}
+		}
+		for (int k = 0; k < BL_MOBS_MAX; k++)
+			if (M->mob[k].alive) {
+				in_block += box_in_solid(w, M->mob[k].x, M->mob[k].y, M->mob[k].z, BL_GOBLIN_HW, BL_GOBLIN_H);
+				if (r) {
+					float d = hypotf(M->mob[k].x - pl[0], M->mob[k].z - pl[2]);
+					if (d < r->min_dist)
+						r->min_dist = d;
+				}
+			}
+	}
+	return in_block;
+}
+
+static void mrun_init(struct mrun *r)
+{
+	memset(r, 0, sizeof *r);
+	r->min_gap = 99.0f;
+	r->min_dist = 99.0f;
+}
+
+static const struct bl_mob *first_mob(const struct bl_mobs *M)
+{
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		if (M->mob[i].alive)
+			return &M->mob[i];
+	return NULL;
+}
+
+static void test_mobs(void)
+{
+	const float night = 0.0f, noon = 12.0f;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 7);
+	const float pl[3] = { 64.5f, 20.0f, 64.5f };
+	CHECK(bl_mobs_count(&M) == 0 && M.enabled && M.cap == 6, "a new set of mobs is empty, on, with room for six");
+
+	/* the places a goblin can be put */
+	CHECK(bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 50.5f), "a goblin on the floor");
+	CHECK(!bl_mobs_add(&M, w, BL_MOB_GOBLIN, 51.5f, 19.5f, 50.5f), "not in the ground");
+	CHECK(!bl_mobs_add(&M, w, BL_MOB_GOBLIN, -3.0f, 20.0f, 50.5f), "not outside the world");
+	CHECK(bl_mobs_hit_cell(&M, 50, 20, 50) && bl_mobs_hit_cell(&M, 50, 21, 50) && !bl_mobs_hit_cell(&M, 50, 22, 50) && !bl_mobs_hit_cell(&M, 53, 20, 50), "a block cannot be put where it stands");
+	bl_mobs_clear(&M);
+	CHECK(bl_mobs_count(&M) == 0, "clear");
+
+	/* night: they appear, 14 to 26 blocks away, on the ground, never more than the cap; by day nothing appears */
+	{
+		struct mrun r;
+		mrun_init(&r);
+		int bad = 0;
+		for (int i = 0; i < 30 * 8 && !bl_mobs_count(&M); i++)
+			bad += run_mobs(&M, w, pl, true, night, 1.0f / 30.0f, &r);
+		CHECK(bl_mobs_count(&M) == 1 && r.born == 1, "a goblin appears in the first seconds of the night");
+		const struct bl_mob *g = first_mob(&M);
+		float d = g ? hypotf(g->x - pl[0], g->z - pl[2]) : 0;
+		CHECK(g && d >= 13.9f && d <= 27.0f && fabsf(g->y - 20.0f) < 0.05f, "14 to 26 blocks from the player, on the floor (%.1f, y %.2f)", d, g ? g->y : 0);
+		int maxn = 0;
+		for (int i = 0; i < 30 * 120; i++) {
+			bad += run_mobs(&M, w, (float[3]){ 64.5f, 20.0f, 64.5f }, true, night, 1.0f / 30.0f, NULL);
+			int c = bl_mobs_count(&M);
+			maxn = c > maxn ? c : maxn;
+		}
+		CHECK(bad == 0, "no goblin is ever in a block (%d steps)", bad);
+		CHECK(maxn == 6 && M.spawned >= 6, "two minutes of night: up to the cap of six (%d at most, %d appeared)", maxn, M.spawned);
+		M.cap = 2;
+		bl_mobs_clear(&M);
+		maxn = 0;
+		for (int i = 0; i < 30 * 60; i++) {
+			run_mobs(&M, w, pl, true, night, 1.0f / 30.0f, NULL);
+			maxn = bl_mobs_count(&M) > maxn ? bl_mobs_count(&M) : maxn;
+		}
+		CHECK(maxn == 2, "a cap of two is two (%d)", maxn);
+		M.cap = 6;
+		bl_mobs_clear(&M);
+		int born = 0;
+		for (int i = 0; i < 30 * 120; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, pl, true, noon, 1.0f / 30.0f, &R);
+			born += R.born;
+		}
+		CHECK(born == 0 && bl_mobs_count(&M) == 0, "by day nothing appears (%d)", born);
+		M.enabled = false;
+		bl_mobs_clear(&M);
+		for (int i = 0; i < 30 * 60; i++)
+			bl_mobs_step(&M, w, pl, true, night, 1.0f / 30.0f, NULL);
+		CHECK(bl_mobs_count(&M) == 0, "switched off, none appear");
+		M.enabled = true;
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 60.5f, 20.0f, 60.5f);
+		M.enabled = false;
+		bl_mobs_step(&M, w, pl, true, night, 0.1f, NULL);
+		CHECK(bl_mobs_count(&M) == 0, "and the ones there are go when it is switched off");
+		M.enabled = true;
+	}
+
+	/* the hunt: it comes, stops next to him, hits every second, and the blow pushes him away from it */
+	{
+		bl_mobs_clear(&M);
+		M.spawn_t = 1e9f;
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 64.5f, 20.0f, 54.5f);
+		struct mrun r;
+		mrun_init(&r);
+		float kbz = 0;
+		int bad = 0;
+		for (int i = 0; i < 30 * 14; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, pl, true, night, 1.0f / 30.0f, &R);
+			r.t += 1.0f / 30.0f;
+			if (R.hits) {
+				kbz = R.kbz;
+				if (r.hits == 0)
+					r.first_hit = r.t;
+				else if (r.t - r.last_hit < r.min_gap)
+					r.min_gap = r.t - r.last_hit;
+				r.last_hit = r.t;
+				r.hits += R.hits;
+				r.damage += R.damage;
+			}
+			const struct bl_mob *g = first_mob(&M);
+			if (g) {
+				float d = hypotf(g->x - pl[0], g->z - pl[2]);
+				r.min_dist = d < r.min_dist ? d : r.min_dist;
+				bad += box_in_solid(w, g->x, g->y, g->z, BL_GOBLIN_HW, BL_GOBLIN_H);
+			}
+		}
+		CHECK(r.first_hit > 2.5f && r.first_hit < 6.5f, "10 blocks away it is on him in a few seconds (the first blow at %.1f s)", r.first_hit);
+		CHECK(r.hits >= 7 && r.hits <= 11 && r.min_gap >= 0.95f, "then a blow a second: %d blows, never closer than %.2f s", r.hits, r.min_gap);
+		CHECK(fabsf(r.damage - 3.0f * (float)r.hits) < 0.01f, "three hit points a blow (%.1f)", r.damage);
+		CHECK(kbz > 4.0f, "and the blow pushes him away from it, along +z (%.1f)", kbz);
+		CHECK(r.min_dist > 0.8f && bad == 0, "it does not walk into him (%.2f m) or into a block", r.min_dist);
+		/* a player who is not there is not hunted, a hunted one that goes far is not followed beyond 26 blocks */
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 64.5f, 20.0f, 54.5f);
+		struct mrun q;
+		mrun_init(&q);
+		run_mobs(&M, w, pl, false, night, 12.0f, &q);
+		CHECK(q.hits == 0 && q.damage == 0.0f, "nobody to hit: no blows");
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 64.5f, 20.0f, 30.0f);
+		const struct bl_mob *g = first_mob(&M);
+		float z0 = g->z;
+		run_mobs(&M, w, pl, true, night, 1.5f, NULL);
+		g = first_mob(&M);
+		CHECK(g && fabsf(g->z - z0) < 3.0f, "a goblin 34 blocks away has not seen him");
+	}
+
+	/* a wall of two blocks stops it, a wall of one is climbed */
+	{
+		struct bl_world *w2 = bl_world_flat(128, 128, 64, 20);
+		for (int x = 0; x < 128; x++)
+			for (int y = 20; y < 22; y++)
+				bl_set(w2, x, y, 58, BL_STONE);
+		bl_mobs_clear(&M);
+		M.spawn_t = 1e9f;
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 64.5f, 20.0f, 50.5f);
+		int bad = run_mobs(&M, w2, pl, true, night, 25.0f, NULL);
+		const struct bl_mob *g = first_mob(&M);
+		CHECK(g && g->z < 58.0f - BL_GOBLIN_HW + 0.05f && g->y < 20.2f && bad == 0, "a wall two blocks high stops it (z %.2f)", g ? g->z : 0);
+		for (int x = 0; x < 128; x++)
+			bl_set(w2, x, 21, 58, BL_AIR);
+		struct mrun r;
+		mrun_init(&r);
+		bad = run_mobs(&M, w2, pl, true, night, 14.0f, &r);
+		g = first_mob(&M);
+		CHECK(g && g->z > 58.5f && r.hits >= 2 && bad == 0, "one block high it climbs and gets him (z %.2f, %d blows)", g ? g->z : 0, r.hits);
+		bl_world_free(w2);
+	}
+
+	/* a hole: a chasing goblin falls into it and lands; a wandering one does not walk off an edge */
+	{
+		struct bl_world *w2 = bl_world_flat(128, 128, 64, 20);
+		for (int z = 40; z < 80; z++)
+			for (int x = 30; x < 98; x++)
+				for (int y = 14; y < 20; y++)
+					if (!(x >= 60 && x <= 68 && z >= 48 && z <= 56))        /* a pit six deep with an island of nine by nine in it */
+						bl_set(w2, x, y, z, BL_AIR);
+		bl_mobs_clear(&M);
+		M.spawn_t = 1e9f;
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 64.5f, 20.0f, 52.5f);            /* wandering: nobody to hunt */
+		int bad = run_mobs(&M, w2, (float[3]){ 64.5f, 20.0f, 70.0f }, false, night, 40.0f, NULL);
+		const struct bl_mob *g = first_mob(&M);
+		CHECK(g && g->y > 19.99f && bad == 0, "a goblin that is only wandering does not walk off the edge (y %.2f)", g ? g->y : 0);
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 64.5f, 20.0f, 52.5f);
+		bad = run_mobs(&M, w2, (float[3]){ 64.5f, 14.0f, 70.0f }, true, night, 5.0f, NULL);       /* he stands on the floor of the pit */
+		g = first_mob(&M);
+		CHECK(g && bad == 0 && g->y < 14.05f, "a chasing one goes after him into the pit and lands (y %.2f)", g ? g->y : 0);
+		bl_world_free(w2);
+	}
+
+	/* water: it floats */
+	{
+		struct bl_world *w2 = bl_world_flat(128, 128, 64, 20);
+		for (int z = 50; z <= 56; z++)
+			for (int x = 60; x <= 68; x++)
+				for (int y = 16; y < 20; y++)
+					bl_set(w2, x, y, z, BL_WATER);
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 64.5f, 17.0f, 53.5f);
+		int bad = run_mobs(&M, w2, (float[3]){ 64.5f, 20.0f, 90.0f }, false, night, 6.0f, NULL);
+		const struct bl_mob *g = first_mob(&M);
+		CHECK(g && bad == 0 && g->y > 18.2f, "dropped into water it floats up (y %.2f)", g ? g->y : 0);
+		bl_world_free(w2);
+	}
+
+	/* the sun burns it in the open, not under a roof and not in the water */
+	{
+		struct bl_world *w2 = bl_world_flat(128, 128, 64, 20);
+		for (int z = 50; z <= 56; z++)
+			for (int x = 70; x <= 76; x++)
+				bl_set(w2, x, 24, z, BL_STONE);                  /* a roof */
+		for (int z = 50; z <= 56; z++)
+			for (int x = 52; x <= 58; x++)
+				for (int y = 16; y < 20; y++)
+					bl_set(w2, x, y, z, BL_WATER);
+		bl_mobs_clear(&M);
+		M.spawn_t = 1e9f;
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 64.5f, 20.0f, 58.5f);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 73.5f, 20.0f, 53.5f);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 55.5f, 17.0f, 53.5f);
+		struct mrun r;
+		mrun_init(&r);
+		run_mobs(&M, w2, (float[3]){ 64.5f, 20.0f, 53.5f }, false, noon, 8.0f, &r);
+		int alive_roof = 0, alive_open = 0, alive_water = 0;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (M.mob[i].alive) {
+				if (M.mob[i].x > 69.5f)
+					alive_roof++;
+				else if (M.mob[i].x < 59.5f)
+					alive_water++;
+				else
+					alive_open++;
+			}
+		CHECK(alive_open == 0 && r.burned >= 1, "in the open the sun kills it in 8 s (burned %d)", r.burned);
+		CHECK(alive_roof == 1 && alive_water == 1, "under a roof and in water it lives (%d, %d)", alive_roof, alive_water);
+		bl_world_free(w2);
+	}
+
+	/* far away they are gone; by day the ones that are not near go */
+	{
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 5.5f, 20.0f, 5.5f);
+		run_mobs(&M, w, pl, true, night, 1.0f, NULL);
+		CHECK(bl_mobs_count(&M) == 0, "60 blocks away it is not kept");
+	}
+
+	/* the sword */
+	{
+		bl_mobs_clear(&M);
+		M.spawn_t = 1e9f;
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 64.5f, 20.0f, 67.5f);
+		float eye[3] = { 64.5f, 21.62f, 64.5f }, look[3] = { 0, 0, 1 }, t = 0;
+		int id = bl_mobs_pick(&M, eye, look, BL_SWORD_REACH, &t);
+		CHECK(id >= 0 && fabsf(t - (3.0f - BL_GOBLIN_HW - 0.05f)) < 0.01f, "the sword finds it 3 m ahead (%d at %.2f)", id, t);
+		float side[3] = { 0.3f, 0, 1 };
+		CHECK(bl_mobs_pick(&M, eye, side, BL_SWORD_REACH, &t) < 0, "a sword aimed a metre beside it misses");
+		float high[3] = { 0, 0.5f, 1 };
+		CHECK(bl_mobs_pick(&M, eye, high, BL_SWORD_REACH, &t) < 0, "and one aimed over its head");
+		eye[2] = 60.0f;
+		CHECK(bl_mobs_pick(&M, eye, look, BL_SWORD_REACH, &t) < 0, "6 m is beyond the reach");
+		eye[2] = 64.5f;
+		float zero[3] = { 0, 0, 0 };
+		CHECK(bl_mobs_pick(&M, eye, zero, BL_SWORD_REACH, &t) < 0, "no direction, no hit");
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 64.5f, 20.0f, 66.0f);
+		int near_id = bl_mobs_pick(&M, eye, look, BL_SWORD_REACH, &t);
+		CHECK(near_id >= 0 && fabsf(M.mob[near_id].z - 66.0f) < 0.01f, "with two in a line the nearer is hit");
+		/* the blows: three of four hit points take ten away, the third kills; the blow throws it back */
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 64.5f, 20.0f, 67.5f);
+		float z0 = M.mob[0].z;
+		CHECK(!bl_mobs_hurt(&M, 0, BL_SWORD_DAMAGE, 0, 1) && M.mob[0].hp == 6.0f && M.mob[0].hurt > 0.3f, "the first blow: 6 left and the flash of red");
+		run_mobs(&M, w, (float[3]){ 100, 20, 100 }, false, night, 0.5f, NULL);
+		CHECK(M.mob[0].z > z0 + 0.5f, "thrown back along the blow (%.2f m)", M.mob[0].z - z0);
+		CHECK(!bl_mobs_hurt(&M, 0, BL_SWORD_DAMAGE, 0, 1) && M.mob[0].hp == 2.0f, "the second: 2 left");
+		CHECK(bl_mobs_hurt(&M, 0, BL_SWORD_DAMAGE, 0, 1) && !M.mob[0].alive && M.kills == 1, "the third kills it and is counted");
+		CHECK(!bl_mobs_hurt(&M, 0, BL_SWORD_DAMAGE, 0, 1) && !bl_mobs_hurt(&M, -1, 1, 0, 1) && !bl_mobs_hurt(&M, 99, 1, 0, 1), "a dead one, and numbers that are no mobs, are not hurt");
+	}
+
+	/* the same world and seed give the same goblins */
+	{
+		struct bl_mobs A, B;
+		bl_mobs_init(&A, 99);
+		bl_mobs_init(&B, 99);
+		float p2[3] = { 64.5f, 20.0f, 64.5f };
+		run_mobs(&A, w, p2, true, night, 90.0f, NULL);
+		run_mobs(&B, w, p2, true, night, 90.0f, NULL);
+		bool same = true;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			same &= A.mob[i].alive == B.mob[i].alive && A.mob[i].x == B.mob[i].x && A.mob[i].z == B.mob[i].z && A.mob[i].hp == B.mob[i].hp;
+		CHECK(same && bl_mobs_count(&A) > 0, "the same seed gives the same goblins for 90 s (%d of them)", bl_mobs_count(&A));
+	}
+
+	/* stress: random players and random steps, odd times: never a goblin in a block, never a number that is not one */
+	{
+		struct bl_world *wt = bl_world_new(5, 128, 128, 64);
+		struct bl_mobs S;
+		bl_mobs_init(&S, 3);
+		S.cap = 12;
+		int bad = 0, nan = 0;
+		float p3[3];
+		bl_spawn(wt, p3);
+		for (int i = 0; i < 40000; i++) {
+			if (i % 500 == 0) {
+				p3[0] = rndr(6, 120);
+				p3[2] = rndr(6, 120);
+				p3[1] = (float)bl_top(wt, (int)p3[0], (int)p3[2]) + 1.0f;
+			}
+			float dt = i % 97 == 0 ? rndr(0.0f, 0.6f) : i % 211 == 0 ? NAN : rndr(0.0f, 0.05f);
+			float hour = (float)(i / 600 % 24);
+			bl_mobs_step(&S, wt, p3, i % 1300 > 20, hour, dt, NULL);
+			if (i % 40 == 0)
+				for (int k = 0; k < BL_MOBS_MAX; k++)
+					if (S.mob[k].alive) {
+						bad += box_in_solid(wt, S.mob[k].x, S.mob[k].y, S.mob[k].z, BL_GOBLIN_HW, BL_GOBLIN_H);
+						nan += !isfinite(S.mob[k].x + S.mob[k].y + S.mob[k].z + S.mob[k].hp);
+					}
+			if (i % 1000 == 0) {                                        /* the world changes under them */
+				int x = (int)rndr(10, 110), z = (int)rndr(10, 110), y = (int)p3[1] + (int)rndr(-1, 3);
+				bl_set(wt, x, y, z, i % 2000 ? BL_STONE : BL_AIR);
+			}
+		}
+		CHECK(bad == 0 && nan == 0, "40000 odd steps on real terrain: %d samples in a block, %d not numbers", bad, nan);
+		CHECK(S.spawned > 3, "and they did appear (%d)", S.spawned);
+		bl_world_free(wt);
+	}
+	bl_world_free(w);
+}
+
+static void test_mobs_render(void)
+{
+	enum { W = 160, H = 100 };
+	static uint32_t a[W * H], b[W * H], c[W * H];
+	struct bl_world *w = bl_world_flat(64, 64, 64, 20);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 1);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 32.5f, 20.0f, 36.5f);
+	M.mob[0].yaw = 3.14159265f;                                       /* facing the camera */
+	M.mob[0].ycos = cosf(M.mob[0].yaw);
+	M.mob[0].ysin = sinf(M.mob[0].yaw);
+	struct bl_camera cam = { 32.5f, 21.4f, 32.5f, 0.0f, -0.05f, 0.8f };
+	struct bl_view v;
+	bl_view_init(&v);
+	v.time_h = 12.0f;
+	bl_mobs_light(&M, w, v.time_h);
+	bl_render(w, &cam, &v, a, W, H, W, 1);
+	v.mobs = &M;
+	bl_render(w, &cam, &v, b, W, H, W, 1);
+	int changed = 0, green = 0, red = 0;
+	for (int i = 0; i < W * H; i++)
+		if (a[i] != b[i]) {
+			changed++;
+			int r = (int)((b[i] >> 16) & 255), g = (int)((b[i] >> 8) & 255), bl = (int)(b[i] & 255);
+			green += g > r + 15 && g > bl + 40;
+			red += r > 200 && g < 90 && bl < 90;
+		}
+	CHECK(changed > 600, "a goblin 4 m away is in the picture (%d pixels differ)", changed);
+	CHECK(green > changed / 3, "and it is green: %d of %d changed pixels", green, changed);
+	CHECK(red >= 2, "with red eyes (%d pixels)", red);
+	bl_render(w, &cam, &v, c, W, H, W, 4);
+	CHECK(memcmp(b, c, sizeof b) == 0, "four threads draw it as one thread does");
+	v.mobs = NULL;
+	bl_render(w, &cam, &v, c, W, H, W, 1);
+	CHECK(memcmp(a, c, sizeof a) == 0, "without the mobs the picture is the one without them");
+
+	/* the hook: the ray at its middle says goblin; a wall in front hides it, a wall behind does not */
+	struct bl_view iv = v;
+	iv.ids = true;
+	iv.mobs = &M;
+	uint32_t px;
+	struct bl_camera one = { 32.5f, 21.0f, 32.5f, 0.0f, 0.0f, 0.8f };
+	bl_render(w, &one, &iv, &px, 1, 1, 1, 1);
+	CHECK(px == 0xff0000fcu, "the ray at it meets a goblin (%08x)", px);
+	for (int x = 30; x <= 35; x++)
+		for (int y = 20; y < 24; y++)
+			bl_set(w, x, y, 34, BL_STONE);
+	bl_render(w, &one, &iv, &px, 1, 1, 1, 1);
+	CHECK(px != 0xff0000fcu && (px & 0xff) == BL_NZ, "a wall in front of it hides it (%08x)", px);
+	bl_render(w, &cam, &(struct bl_view){ .time_h = 12.0f, .dist = 96.0f, .mobs = &M }, c, W, H, W, 1);
+	int hidden = 0;
+	for (int i = 0; i < W * H; i++)
+		hidden += c[i] != a[i];
+	bl_render(w, &cam, &v, b, W, H, W, 1);
+	for (int x = 30; x <= 35; x++)
+		for (int y = 20; y < 24; y++)
+			bl_set(w, x, y, 34, BL_AIR);
+	for (int x = 28; x <= 38; x++)
+		for (int y = 20; y < 26; y++)
+			bl_set(w, x, y, 38, BL_STONE);
+	bl_render(w, &one, &iv, &px, 1, 1, 1, 1);
+	CHECK(px == 0xff0000fcu, "a wall behind it leaves it in front of the wall (%08x)", px);
+	for (int x = 28; x <= 38; x++)
+		for (int y = 20; y < 26; y++)
+			bl_set(w, x, y, 38, BL_AIR);
+
+	/* night: darker, the eyes still shine; torch light brightens it; a hurt one is redder */
+	bl_mobs_light(&M, w, 12.0f);
+	float day_lit = M.mob[0].lit[1];
+	bl_mobs_light(&M, w, 0.0f);
+	float night_lit = M.mob[0].lit[1];
+	CHECK(night_lit < day_lit * 0.6f && night_lit > 0.1f, "at night it is lit less than by day (%.2f against %.2f) but not black", night_lit, day_lit);
+	bl_set(w, 33, 20, 35, BL_TORCH);
+	bl_mobs_light(&M, w, 0.0f);
+	CHECK(M.mob[0].lit[0] > night_lit * 1.4f && M.mob[0].lit[0] > M.mob[0].lit[2], "a torch beside it lights it, warm (%.2f %.2f)", M.mob[0].lit[0], M.mob[0].lit[2]);
+	bl_set(w, 33, 20, 35, BL_AIR);
+	v.mobs = &M;
+	v.time_h = 12.0f;
+	bl_mobs_light(&M, w, 12.0f);
+	bl_render(w, &cam, &v, a, W, H, W, 1);
+	M.mob[0].hurt = 0.35f;
+	bl_render(w, &cam, &v, b, W, H, W, 1);
+	long ra = 0, rb = 0, ga = 0, gb = 0;
+	for (int i = 0; i < W * H; i++) {
+		ra += (a[i] >> 16) & 255;
+		rb += (b[i] >> 16) & 255;
+		ga += (a[i] >> 8) & 255;
+		gb += (b[i] >> 8) & 255;
+	}
+	CHECK(rb > ra && gb < ga, "a goblin that was just hit is redder (red %ld -> %ld, green %ld -> %ld)", ra, rb, ga, gb);
+	M.mob[0].hurt = 0;
+
+	/* the walk: the legs and the arms move with the phase (the picture changes) */
+	M.mob[0].speed = 2.7f;
+	M.mob[0].phase = 0.25f;
+	bl_render(w, &cam, &v, a, W, H, W, 1);
+	M.mob[0].phase = 0.75f;
+	bl_render(w, &cam, &v, b, W, H, W, 1);
+	int moved = 0;
+	for (int i = 0; i < W * H; i++)
+		moved += a[i] != b[i];
+	CHECK(moved > 40, "half a stride later the limbs are elsewhere (%d pixels)", moved);
+	M.mob[0].speed = 0;
+
+	/* in the water a goblin is seen through it: bluer and dimmer than the same goblin in the air */
+	{
+		struct bl_world *wp = bl_world_flat(64, 64, 64, 20);
+		for (int z = 30; z <= 40; z++)
+			for (int x = 28; x <= 38; x++)
+				for (int y = 17; y < 20; y++)
+					bl_set(wp, x, y, z, BL_WATER);
+		struct bl_mobs Mw;
+		bl_mobs_init(&Mw, 1);
+		bl_mobs_add(&Mw, wp, BL_MOB_GOBLIN, 32.5f, 17.0f, 35.5f);
+		struct bl_camera above = { 32.5f, 22.0f, 31.0f, 0.0f, -0.35f, 0.8f };
+		struct bl_view vw;
+		bl_view_init(&vw);
+		bl_mobs_light(&Mw, wp, vw.time_h);
+		vw.mobs = &Mw;
+		bl_render(wp, &above, &vw, a, W, H, W, 1);
+		struct bl_world *wd = bl_world_flat(64, 64, 64, 20);
+		struct bl_mobs Md;
+		bl_mobs_init(&Md, 1);
+		bl_mobs_add(&Md, wd, BL_MOB_GOBLIN, 32.5f, 17.0f, 35.5f);
+		for (int z = 30; z <= 40; z++)
+			for (int x = 28; x <= 38; x++)
+				for (int y = 17; y < 20; y++)
+					bl_set(wd, x, y, z, BL_AIR);
+		bl_mobs_light(&Md, wd, vw.time_h);
+		vw.mobs = &Md;
+		bl_render(wd, &above, &vw, b, W, H, W, 1);
+		long sr = 0, sb = 0, dr = 0, db = 0;
+		for (int i = 0; i < W * H; i++) {
+			sr += (a[i] >> 16) & 255;
+			sb += a[i] & 255;
+			dr += (b[i] >> 16) & 255;
+			db += b[i] & 255;
+		}
+		CHECK((double)sb / (double)(sr + 1) > (double)db / (double)(dr + 1) * 1.3 || sr < dr, "seen through the water it is not the colour it is in the air (blue/red %.2f against %.2f)",
+		      (double)sb / (double)(sr + 1), (double)db / (double)(dr + 1));
+		bl_world_free(wp);
+		bl_world_free(wd);
+	}
+
+	/* any camera, mobs everywhere: no crash, opaque pictures */
+	bl_mobs_clear(&M);
+	for (int i = 0; i < 8; i++)
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, rndr(10, 50), 20.0f, rndr(10, 50));
+	bl_mobs_light(&M, w, 20.0f);
+	static uint32_t small[40 * 24];
+	int odd = 0;
+	for (int i = 0; i < 800; i++) {
+		struct bl_camera cm = { rndr(5, 58), rndr(18, 40), rndr(5, 58), rndr(-10, 10), rndr(-1.6f, 1.6f), rndr(0.3f, 2.5f) };
+		struct bl_view vv = v;
+		vv.dist = rndr(16, 200);
+		vv.time_h = rndr(0, 24);
+		vv.ids = i % 5 == 0;
+		bl_render(w, &cm, &vv, small, 40, 24, 40, 1 + (int)(rnd() % 3));
+		for (int k = 0; k < 40 * 24; k++)
+			odd += !vv.ids && (small[k] >> 24) != 255;
+	}
+	CHECK(odd == 0, "%d pixels that are not opaque", odd);
+	(void)hidden;
+	bl_world_free(w);
+}
+
 /* ---- the command line: bench, shot, info ------------------------------------------------------------------------------- */
 
 static void write_ppm(const char *path, const uint32_t *px, int w, int h)
@@ -1848,7 +2374,7 @@ static int run_shot(int argc, char **argv)
 	struct bl_view v;
 	bl_view_init(&v);
 	bool target = false;
-	int scene = 0, pets_on = 0, look = 0;
+	int scene = 0, pets_on = 0, look = 0, mobs_n = 0;
 	float pt = 1.0f;
 	for (int i = 2; i < argc; i++) {
 		char *eq = strchr(argv[i], '=');
@@ -1873,6 +2399,7 @@ static int run_shot(int argc, char **argv)
 		else if (!strcmp(k, "target")) target = atoi(val) != 0;
 		else if (!strcmp(k, "scene")) scene = atoi(val);
 		else if (!strcmp(k, "pets")) pets_on = atoi(val);
+		else if (!strcmp(k, "mobs")) mobs_n = atoi(val);
 		else if (!strcmp(k, "pt")) pt = (float)atof(val);
 		else if (!strcmp(k, "look")) look = !strcmp(val, "filip") ? 2 : 1;
 		else {
@@ -1945,6 +2472,27 @@ static int run_shot(int argc, char **argv)
 		v.pets = &pets;
 		printf("Tom at %.1f %.1f %.1f (stands %.2f, lies %.2f), Filip at %.1f %.1f %.1f, yard %.1f %.1f\n", in.tom[0], in.tom[1], in.tom[2], in.tom_stand, in.tom_lie,
 		       in.filip[0], in.filip[1], in.filip[2], in.yard[0], in.yard[2]);
+	}
+	struct bl_mobs mobs;
+	if (mobs_n > 0) {                            /* goblins in a fan in front of the camera, 3 to 9 m away, some walking, some blow-flashed */
+		bl_mobs_init(&mobs, 1);
+		for (int i = 0; i < mobs_n && i < BL_MOBS_MAX; i++) {
+			float a = cam.yaw + ((float)i - (float)(mobs_n - 1) * 0.5f) * 0.5f, d = 3.0f + 1.8f * (float)i;
+			float x = cam.x + sinf(a) * d, z = cam.z + cosf(a) * d;
+			int top = bl_top(world, (int)floorf(x), (int)floorf(z));
+			if (top < 0 || !bl_mobs_add(&mobs, world, BL_MOB_GOBLIN, x, (float)top + 1.0f, z))
+				continue;
+			struct bl_mob *g = &mobs.mob[bl_mobs_count(&mobs) - 1];
+			g->yaw = cam.yaw + 3.14159265f + 0.3f * (float)i;
+			g->ycos = cosf(g->yaw);
+			g->ysin = sinf(g->yaw);
+			g->speed = i % 2 ? 2.7f : 0.0f;
+			g->phase = 0.2f * (float)i;
+			g->swing = i == 1 ? 1.0f : 0.0f;
+			g->hurt = i == 2 ? 0.3f : 0.0f;
+		}
+		bl_mobs_light(&mobs, world, v.time_h);
+		v.mobs = &mobs;
 	}
 	uint32_t *px = malloc((size_t)w * (size_t)h * 4);
 	double t0 = now_s();
@@ -2029,6 +2577,9 @@ int main(int argc, char **argv)
 	printf("Tom and Filip\n");
 	test_pets();
 	test_pets_render();
+	printf("goblins\n");
+	test_mobs();
+	test_mobs_render();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

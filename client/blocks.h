@@ -175,6 +175,17 @@ bool bl_player_overlaps(const struct bl_player *p, int x, int y, int z);   /* do
  * bedrock, flowing water), the player stands in that cell, or it is a torch with nothing solid under it. Water put by hand is a source. */
 bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struct bl_player *p);
 
+/* ---- bodies that are not the player (Tom, Filip, the mobs): one box, the same collision as the player's ------------------ */
+
+/* does the box (hw half width, h height, feet at (x, y, z)) touch a solid block? */
+bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h);
+/* The top of the highest solid block under the feet (the middle of the box and four points inside its corners) within `down` below them: its height, -1e9 when
+ * there is none. */
+float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down);
+/* Move the box along one axis (0 x, 1 y, 2 z) by d, a quarter block at a time, and snap it to the face it meets (a 0.001 margin): true when it was stopped. A box
+ * that already is inside a block is left where it is when the step would not free it. */
+bool bl_box_move(const struct bl_world *w, float *x, float *y, float *z, int axis, float d, float hw, float h);
+
 /* ---- saving ------------------------------------------------------------------------------------------------------- */
 
 /* Writes the seed, the size and every cell that differs from the world the seed makes (file mode 0600, written to a temporary

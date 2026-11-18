@@ -37,6 +37,7 @@
 
 #include "blocks.h"
 #include "blockspets.h"
+#include "blocksmobs.h"
 #include "blocksview.h"
 #include "font.h"
 #include "keymap.h"
@@ -57,7 +58,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
 };
 
 #define SLOTS 9
@@ -66,9 +67,11 @@ enum {
 #define LOOK_RATE 1.7f                                      /* radians a second with the arrow keys */
 #define MIN_BUDGET 40000                                    /* the least pixels the picture is made of, and the most it is asked to take (ms) */
 #define SLOW_MS 27.0
+#define MAX_HP 20.0f                                        /* ten hearts, two hit points each */
+#define SWORD_MS 400                                        /* the least time between two blows */
 #define FAST_MS 15.0
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD };
 
 struct app {
 	struct wlwin win;
@@ -120,6 +123,16 @@ struct app {
 	float tom_pos[3], filip_pos[3];
 	const uint8_t *glyph[MCAT_GLYPHS];                      /* the fur's letters: a spread over the Matrix rain's alphabet */
 	int pal_hover;
+
+	struct bl_mobs mobs;                                    /* the goblins: they come out at night */
+	bool mobs_on;
+	float hp;                                               /* the player's: MAX_HP, 0 = dead */
+	float hurt_t;                                           /* seconds of the red flash that are left */
+	float hit_t;                                            /* seconds the crosshair stays red after a blow that landed */
+	float regen_t;                                          /* seconds since the last time he was hurt */
+	int64_t next_sword;
+	int kills;                                              /* goblins killed since the world started (this run) */
+	bool warned;                                            /* "a goblin is coming" was said tonight */
 
 	struct bl_hit aim;
 	bool aimed;
@@ -302,6 +315,8 @@ static void conf_load(struct app *a, bool with_player)
 			a->sound_on = d != 0;
 		else if (!strcmp(k, "pets") && (d == 0 || d == 1))
 			a->pets_on = d != 0;
+		else if (!strcmp(k, "mobs") && (d == 0 || d == 1))
+			a->mobs_on = d != 0;
 		else if (with_player && !strcmp(k, "pet_t") && d >= 0 && d < 1e7)
 			a->pet_t = (float)d;
 		else if (with_player && !strcmp(k, "yard_x") && d > 0 && d < 5000) {
@@ -353,8 +368,8 @@ static void conf_save(const struct app *a)
 	FILE *f = fopen(tmp, "w");
 	if (!f)
 		return;
-	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\npets = %d\npet_t = %.2f\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
-	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on, a->pets_on, a->pet_t);
+	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\npets = %d\npet_t = %.2f\nmobs = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
+	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on, a->pets_on, a->pet_t, a->mobs_on);
 	if (a->pets.placed)
 		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
 		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
@@ -487,6 +502,17 @@ static void pets_setup(struct app *a, const float near[3], bool keep_yard)
 	a->pose_ms = 0;
 }
 
+/* the goblins: none yet, a fresh sequence from the world's seed, full health */
+static void mobs_setup(struct app *a)
+{
+	bl_mobs_init(&a->mobs, a->world->seed);
+	a->mobs.enabled = a->mobs_on;
+	a->hp = MAX_HP;
+	a->hurt_t = a->hit_t = 0.0f;
+	a->regen_t = 0.0f;
+	a->warned = false;
+}
+
 /* ================================================================ the world ================================================================ */
 
 static uint32_t fresh_seed(void)
@@ -530,6 +556,8 @@ static void new_world(struct app *a)
 	a->pet_t = 0.0f;
 	a->have_yard = false;
 	a->have_tom = a->have_filip = false;
+	mobs_setup(a);
+	a->kills = 0;
 	{
 		float near[3] = { a->pl.x, a->pl.y, a->pl.z };
 		pets_setup(a, near, false);
@@ -667,8 +695,36 @@ static void aim_update(struct app *a)
 	a->aimed = bl_pick(a->world, eye, look, BL_REACH, &a->aim);
 }
 
-static void do_break(struct app *a)
+/* the sword: a goblin the player aims at, nearer than the block he aims at, takes the blow (and nothing is broken behind it) */
+static bool sword_swing(struct app *a, int64_t now)
 {
+	if (!a->mobs_on)
+		return false;
+	float eye[3], look[3], t = 0.0f;
+	bl_player_eye(&a->pl, eye);
+	bl_player_look(&a->pl, look);
+	int id = bl_mobs_pick(&a->mobs, eye, look, BL_SWORD_REACH, &t);
+	if (id < 0 || (a->aimed && a->aim.t < t))
+		return false;
+	if (now < a->next_sword)
+		return true;                                         /* too soon for another blow, and the block behind it is not touched */
+	a->next_sword = now + SWORD_MS;
+	bool dead = bl_mobs_hurt(&a->mobs, id, BL_SWORD_DAMAGE, look[0], look[2]);
+	a->hit_t = 0.18f;
+	if (dead) {
+		a->kills++;
+		sound(a, "win");
+		say(a, "Goblin down (%d)", a->kills);
+	} else {
+		sound(a, "draw");
+	}
+	return true;
+}
+
+static void do_break(struct app *a, int64_t now)
+{
+	if (sword_swing(a, now))
+		return;
 	if (a->aimed && bl_break(a->world, &a->aim)) {
 		sound(a, "draw");
 		aim_update(a);
@@ -679,7 +735,8 @@ static void do_place(struct app *a)
 {
 	if (!a->aimed)
 		return;
-	if (bl_pets_hit_cell(&a->pets, a->aim.px, a->aim.py, a->aim.pz) && bl_solid(hand_block(a))) {   /* a block cannot be put into Tom or Filip */
+	if ((bl_pets_hit_cell(&a->pets, a->aim.px, a->aim.py, a->aim.pz) || (a->mobs_on && bl_mobs_hit_cell(&a->mobs, a->aim.px, a->aim.py, a->aim.pz))) &&
+	    bl_solid(hand_block(a))) {                              /* a block cannot be put into Tom, Filip or a goblin */
 		sound(a, "no");
 		return;
 	}
@@ -718,6 +775,54 @@ static void look_by(struct app *a, double dyaw, double dpitch)
 	a->pl.pitch = p < -1.553f ? -1.553f : p > 1.553f ? 1.553f : p;
 }
 
+/* The goblins move; their blows take hit points and push the player; he mends slowly when nobody has hit him for a while; no hit points left = dead (a card). */
+static void mobs_advance(struct app *a, float dt)
+{
+	float feet[3] = { a->pl.x, a->pl.y, a->pl.z };
+	struct bl_mobs_result R;
+	int before = bl_mobs_count(&a->mobs);
+	bl_mobs_step(&a->mobs, a->world, feet, a->hp > 0.0f, a->time_h, dt, &R);
+	if (R.born && !a->warned && before == 0) {
+		a->warned = true;
+		say(a, "A goblin! The left button is the sword");
+	}
+	if (bl_mobs_count(&a->mobs) == 0 && bl_daylight(a->time_h) > 0.6f)
+		a->warned = false;
+	if (R.damage > 0.0f) {
+		a->hp -= R.damage;
+		a->hurt_t = 0.45f;
+		a->regen_t = 0.0f;
+		a->pl.vx += R.kbx;
+		a->pl.vz += R.kbz;
+		if (a->pl.on_ground && !a->pl.flying) {
+			a->pl.vy = 4.5f;
+			a->pl.on_ground = false;
+		}
+		sound(a, "no");
+		if (a->hp <= 0.0f) {
+			a->hp = 0.0f;
+			pause_game(a, P_DEAD);
+			say(a, "A goblin got you");
+		}
+	} else if (a->hp < MAX_HP) {
+		a->regen_t += dt;
+		if (a->regen_t > 6.0f)
+			a->hp = fminf(MAX_HP, a->hp + dt / 3.0f);       /* a hit point every three seconds */
+	}
+}
+
+static void respawn(struct app *a)
+{
+	bl_player_init(&a->pl, a->world);
+	settle_player(a);
+	a->hp = MAX_HP;
+	a->hurt_t = a->hit_t = 0.0f;
+	a->regen_t = 0.0f;
+	bl_mobs_clear(&a->mobs);
+	a->mobs.spawn_t = 8.0f;                                    /* a breather before the next one */
+	say(a, "Back at the start");
+}
+
 static void advance(struct app *a, int64_t now, float dt)
 {
 	if (a->playing) {
@@ -731,9 +836,14 @@ static void advance(struct app *a, int64_t now, float dt)
 			bl_pets_step(&a->pets, a->world, dt);
 			bl_pets_push_player(&a->pets, a->world, &a->pl);
 		}
-		aim_update(a);
+		if (a->mobs_on)
+			mobs_advance(a, dt);
+		a->hurt_t = fmaxf(0.0f, a->hurt_t - dt);
+		a->hit_t = fmaxf(0.0f, a->hit_t - dt);
+		if (a->playing)                                      /* (he may have died in that step) */
+			aim_update(a);
 		if (a->b_break && now >= a->next_break) {
-			do_break(a);
+			do_break(a, now);
 			a->next_break = now + REPEAT_MS;
 		}
 		if (a->b_place && now >= a->next_place) {
@@ -779,13 +889,59 @@ static void shadow_text(struct wlwin *w, int x, int y, const char *s, uint32_t r
 	wlwin_text(w, x, y, s, 1, rgb, 0);
 }
 
-static void paint_crosshair(struct wlwin *w)
+static void paint_crosshair(struct wlwin *w, bool hit)
 {
 	int cx = w->bw / 2, cy = w->bh / 2;
+	uint32_t c = hit ? 0xff4a3au : 0xf4f4f4u;
 	wlwin_fill(w, cx - 10, cy - 2, 21, 4, 0x101010u);
 	wlwin_fill(w, cx - 2, cy - 10, 4, 21, 0x101010u);
-	wlwin_fill(w, cx - 9, cy - 1, 19, 2, 0xf4f4f4u);
-	wlwin_fill(w, cx - 1, cy - 9, 2, 19, 0xf4f4f4u);
+	wlwin_fill(w, cx - 9, cy - 1, 19, 2, c);
+	wlwin_fill(w, cx - 1, cy - 9, 2, 19, c);
+}
+
+/* a blow: the picture goes red, most at its edges (a dead player's picture stays red) */
+static void red_flash(struct app *a)
+{
+	float k = a->hp <= 0.0f ? 0.8f : a->hurt_t / 0.45f;
+	if (k <= 0.0f)
+		return;
+	int W = a->rw, H = a->rh;
+	for (int y = 0; y < H; y++) {
+		float fy = ((float)y + 0.5f) / (float)H * 2.0f - 1.0f;
+		for (int x = 0; x < W; x++) {
+			float fx = ((float)x + 0.5f) / (float)W * 2.0f - 1.0f, e = fx * fx + fy * fy;
+			float f = k * (0.22f + 0.45f * (e > 1.0f ? 1.0f : e));
+			uint32_t c = a->frame[y * W + x];
+			int r = (int)((c >> 16) & 255), g = (int)((c >> 8) & 255), b = (int)(c & 255);
+			r = (int)((float)r * (1.0f - f) + 230.0f * f);
+			g = (int)((float)g * (1.0f - f) + 20.0f * f);
+			b = (int)((float)b * (1.0f - f) + 20.0f * f);
+			a->frame[y * W + x] = 0xff000000u | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+		}
+	}
+}
+
+/* ten hearts over the left end of the hotbar: two hit points each, a half heart is half red */
+static void paint_hearts(struct app *a, const struct lay *L)
+{
+	static const char *const k_heart[6] = { ".##.##.", "#######", "#######", ".#####.", "..###..", "...#..." };
+	struct wlwin *w = &a->win;
+	int sc = L->slot >= 36 ? 3 : 2, hw = 7 * sc, hh = 6 * sc, gap = sc + 1;
+	int y0 = L->y0 - 12 - hh - 6;
+	for (int i = 0; i < 10; i++) {
+		int x0 = L->x0 + i * (hw + gap);
+		float fill = (a->hp - (float)i * 2.0f) / 2.0f;                     /* 1 = full, 0.5 = half, 0 = empty */
+		fill = fill < 0 ? 0 : fill > 1 ? 1 : fill;
+		for (int r = 0; r < 6; r++)
+			for (int c = 0; c < 7; c++) {
+				if (k_heart[r][c] != '#')
+					continue;
+				uint32_t col = 0x3a1014u;
+				if (fill >= 1.0f || (fill >= 0.5f && c < 4))
+					col = r == 0 || (r == 1 && c < 3) ? 0xff6a6au : 0xe02a2au;
+				wlwin_fill(w, x0 + c * sc, y0 + r * sc, sc, sc, col);
+			}
+	}
 }
 
 static void paint_hotbar(struct app *a, const struct lay *L)
@@ -851,6 +1007,7 @@ static const char *const HELP_LINES[] = {
 	"Torches and lamps give light. Water put by hand is a source and flows.",
 	"[ and ] move the clock an hour, T: the clock stands, runs, follows the real sun.",
 	"P shows or hides Tom the cat and Filip the turtle (they live in a yard near where you start).",
+	"At night goblins come: the left button is the sword (three blows). Ten hearts, M switches them off.",
 	"F3 shows the numbers. Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits.",
 };
 
@@ -864,7 +1021,7 @@ static int pal_cell(const struct app *a)                   /* the size of a squa
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
 	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
-	int ch = a->prompt == P_HELP ? 345 : a->prompt == P_PAUSE ? 200 : 130;
+	int ch = a->prompt == P_HELP ? 370 : a->prompt == P_PAUSE ? 200 : a->prompt == P_DEAD ? 150 : 130;
 	int cw = a->prompt == P_HELP ? 600 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
@@ -904,7 +1061,7 @@ static void paint_card(struct app *a)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
-	const char *title = a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
+	const char *title = a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	const char *labels[4] = { "Cancel", "OK" };
 	uint32_t cols[4] = { lm_theme.btn_grey, lm_theme.btn_blue };
@@ -922,6 +1079,13 @@ static void paint_card(struct app *a)
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, "W A S D walk, Space jumps, Shift sneaks, Ctrl runs, F flies.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Left button breaks, right button puts a block, 1 to 9 choose it.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 3 * (LM_FONT_H + 5), "Esc pauses. F1 lists every key.", 1, lm_theme.text_dim, tw);
+	} else if (a->prompt == P_DEAD) {
+		labels[0] = "Respawn";
+		cols[0] = lm_theme.btn_green;
+		char l[120];
+		wlwin_text(w, tx, ty, "A goblin got you. Your world is as you left it.", 1, lm_theme.text, tw);
+		snprintf(l, sizeof l, "Goblins killed: %d", a->kills);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_PALETTE) {
 		labels[0] = "Close";
 		cols[0] = lm_theme.btn_green;
@@ -981,6 +1145,13 @@ static void write_dump(struct app *a)
 	if (a->aimed)
 		fprintf(f, "aim x=%d y=%d z=%d face=%d px=%d py=%d pz=%d t=%.3f block=%s\n", a->aim.x, a->aim.y, a->aim.z, a->aim.face, a->aim.px, a->aim.py, a->aim.pz,
 		        a->aim.t, bl_block_name(bl_get(w, a->aim.x, a->aim.y, a->aim.z)));
+	fprintf(f, "player hp=%.2f dead=%d kills=%d hurt=%.2f hit=%.2f mobs=%d goblins=%d spawned=%d burned=%d\n", a->hp, a->prompt == P_DEAD, a->kills, a->hurt_t, a->hit_t, a->mobs_on,
+	        bl_mobs_count(&a->mobs), a->mobs.spawned, a->mobs.burned);
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		if (a->mobs.mob[i].alive) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			fprintf(f, "mob %d x=%.3f y=%.3f z=%.3f hp=%.1f yaw=%.3f hurt=%.2f dist=%.2f\n", i, m->x, m->y, m->z, m->hp, m->yaw, m->hurt, hypotf(m->x - a->pl.x, m->z - a->pl.z));
+		}
 	if (!a->pets.placed)
 		fprintf(f, "pets on=%d placed=0\n", a->pets_on);
 	if (a->pets.placed) {
@@ -1057,6 +1228,10 @@ static void paint(struct wlwin *w)
 		bl_pets_pose(&a->pets, a->world, a->pet_t, dtp, eye, a->time_h);
 		v.pets = &a->pets;
 	}
+	if (a->mobs_on && bl_mobs_count(&a->mobs) > 0) {
+		bl_mobs_light(&a->mobs, a->world, a->time_h);
+		v.mobs = &a->mobs;
+	}
 	if (a->aimed && a->playing) {
 		v.target = true;
 		v.tx = a->aim.x;
@@ -1064,6 +1239,8 @@ static void paint(struct wlwin *w)
 		v.tz = a->aim.z;
 	}
 	bl_render(a->world, &cam, &v, a->frame, a->rw, a->rh, a->rw, a->threads);
+	if (a->hurt_t > 0.0f || a->hp <= 0.0f)
+		red_flash(a);
 	int64_t t1 = now_ms();
 	a->ms_render = (double)(t1 - t0);
 	if (a->fix_w <= 0 && a->prompt == P_NONE)
@@ -1073,8 +1250,9 @@ static void paint(struct wlwin *w)
 	struct lay L;
 	layout(a, &L);
 	paint_hotbar(a, &L);
+	paint_hearts(a, &L);
 	if (a->prompt == P_NONE)
-		paint_crosshair(w);
+		paint_crosshair(w, a->hit_t > 0.0f);
 	if (a->debug)
 		paint_debug(a);
 	if (a->msg[0]) {
@@ -1097,6 +1275,11 @@ static void paint(struct wlwin *w)
 
 static void card_action(struct app *a, int which)
 {
+	if (a->prompt == P_DEAD) {
+		respawn(a);
+		resume_game(a);
+		return;
+	}
 	if (a->prompt == P_PALETTE) {
 		resume_game(a);
 		return;
@@ -1159,7 +1342,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		else if (a->prompt == P_PAUSE) {                     /* a click anywhere else goes on playing */
 			resume_game(a);
 			a->ignore_release = true;
-		} else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
+		} else if (!wlcard_has(&c, (int)a->px, (int)a->py) && a->prompt != P_DEAD) {
 			card_action(a, 0);
 		}
 	} else {
@@ -1212,7 +1395,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 		if (button == 272) {
 			a->b_break = state == 1;
 			if (state == 1) {
-				do_break(a);
+				do_break(a, now);
 				a->next_break = now + REPEAT_MS;
 			}
 		} else if (button == 273) {
@@ -1314,6 +1497,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			choose_slot(a, (int)(code - K_1));
 		return;
 	}
+	if (a->prompt == P_DEAD) {                                  /* the only way on is back to the start */
+		if (code == K_ENTER || code == K_SPACE || code == K_ESC)
+			card_action(a, 0);
+		return;
+	}
 	if (a->prompt != P_NONE) {
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
@@ -1341,6 +1529,14 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	}
 	if (code == K_E) {
 		pause_game(a, P_PALETTE);
+		return;
+	}
+	if (code == K_M && a->playing) {
+		a->mobs_on = !a->mobs_on;
+		a->mobs.enabled = a->mobs_on;
+		if (!a->mobs_on)
+			bl_mobs_clear(&a->mobs);
+		say(a, a->mobs_on ? "The goblins come out at night" : "No goblins");
 		return;
 	}
 	if (code == K_P && a->playing) {
@@ -1572,6 +1768,62 @@ static int selftest(void)
 		bl_world_free(pa.world);
 	}
 
+	/* the goblins: a blow takes hit points and pushes, hit points come back slowly, no hit points is a death card, respawn puts him back */
+	{
+		static struct app ma;
+		memset(&ma, 0, sizeof ma);
+		ma.world = bl_world_flat(64, 64, 64, 20);
+		ma.mobs_on = true;
+		ma.sound_on = false;
+		ma.time_h = 0.0f;
+		bl_player_init(&ma.pl, ma.world);
+		settle_player(&ma);
+		mobs_setup(&ma);
+		CHECK(ma.hp == MAX_HP && ma.mobs.enabled && bl_mobs_count(&ma.mobs) == 0, "ten hearts and no goblins at the start");
+		ma.mobs.spawn_t = 1e9f;
+		bl_mobs_add(&ma.mobs, ma.world, BL_MOB_GOBLIN, ma.pl.x, ma.pl.y, ma.pl.z - 3.0f);
+		float hp0 = ma.hp;
+		int guard = 0;
+		while (ma.hp >= hp0 && guard++ < 600)
+			mobs_advance(&ma, 1.0f / 30.0f);
+		CHECK(ma.hp == hp0 - BL_GOBLIN_HIT && ma.hurt_t > 0.3f, "a goblin that gets to him takes three hit points (%.1f) and the picture goes red", ma.hp);
+		CHECK(ma.pl.vz > 3.0f && !ma.pl.on_ground, "and the blow throws him back, into the air (vz %.1f)", ma.pl.vz);
+		bl_mobs_clear(&ma.mobs);
+		ma.mobs.spawn_t = 1e9f;
+		float hp1 = ma.hp;
+		for (int i = 0; i < 30 * 5; i++)
+			mobs_advance(&ma, 1.0f / 30.0f);
+		CHECK(ma.hp == hp1, "five seconds on, nothing has mended yet");
+		for (int i = 0; i < 30 * 10; i++)
+			mobs_advance(&ma, 1.0f / 30.0f);
+		CHECK(ma.hp > hp1 + 1.0f && ma.hp <= MAX_HP, "then a hit point every three seconds (%.1f)", ma.hp);
+		ma.hp = 2.0f;
+		bl_mobs_add(&ma.mobs, ma.world, BL_MOB_GOBLIN, ma.pl.x, ma.pl.y, ma.pl.z - 1.0f);
+		ma.prompt = P_NONE;
+		ma.playing = true;
+		for (int i = 0; i < 90 && ma.hp > 0.0f; i++)
+			mobs_advance(&ma, 1.0f / 30.0f);
+		CHECK(ma.hp == 0.0f && ma.prompt == P_DEAD && !ma.playing, "no hit points left: the death card");
+		respawn(&ma);
+		CHECK(ma.hp == MAX_HP && bl_mobs_count(&ma.mobs) == 0 && ma.pl.on_ground, "respawn: full hearts, no goblins, on the ground");
+		/* the sword: a goblin in front takes the blow and the block behind it does not break; too soon is no blow */
+		bl_mobs_add(&ma.mobs, ma.world, BL_MOB_GOBLIN, ma.pl.x, ma.pl.y, ma.pl.z + 2.0f);
+		ma.pl.yaw = 0.0f;
+		ma.pl.pitch = 0.0f;
+		ma.hp = MAX_HP;
+		aim_update(&ma);
+		float gh = ma.mobs.mob[0].hp;
+		CHECK(sword_swing(&ma, 1000) && ma.mobs.mob[0].hp == gh - BL_SWORD_DAMAGE && ma.hit_t > 0.0f, "a blow at a goblin 2 m ahead hurts it");
+		CHECK(sword_swing(&ma, 1100) && ma.mobs.mob[0].hp == gh - BL_SWORD_DAMAGE, "a second blow 0.1 s later is too soon, and still no block is broken");
+		CHECK(sword_swing(&ma, 1000 + SWORD_MS) && ma.mobs.mob[0].hp == gh - 2.0f * BL_SWORD_DAMAGE, "and one a moment later lands");
+		CHECK(sword_swing(&ma, 5000) && !ma.mobs.mob[0].alive && ma.kills == 1, "the third kills (a kill is counted)");
+		CHECK(!sword_swing(&ma, 9000), "with no goblin in front the button breaks blocks as before");
+		ma.mobs_on = false;
+		bl_mobs_add(&ma.mobs, ma.world, BL_MOB_GOBLIN, ma.pl.x, ma.pl.y, ma.pl.z + 2.0f);
+		CHECK(!sword_swing(&ma, 20000), "with the goblins switched off there is no sword");
+		bl_world_free(ma.world);
+	}
+
 	/* the hand: slots wrap round */
 	memset(&a, 0, sizeof a);
 	a.slot = 0;
@@ -1602,8 +1854,11 @@ int main(int argc, char **argv)
 	a.sound_on = true;
 	a.pal_hover = -1;
 	a.pets_on = true;
+	a.mobs_on = true;
 	int clock_cli = -1;
-	bool no_pets = false;
+	bool no_pets = false, no_mobs = false;
+	int ngob = 0;
+	float gob[4][2] = { { 0 } };
 	float pet_at = -1.0f;
 	a.day_minutes = 20.0f;
 	a.threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
@@ -1658,6 +1913,14 @@ int main(int argc, char **argv)
 			clock_cli = 2;
 		} else if (!strcmp(argv[i], "--no-pets")) {
 			no_pets = true;
+		} else if (!strcmp(argv[i], "--no-mobs")) {
+			no_mobs = true;
+		} else if (!strcmp(argv[i], "--goblin") && i + 1 < argc) {                 /* a goblin at DX,DZ blocks from where the player starts (for the tests) */
+			if (ngob >= 4 || sscanf(argv[++i], "%f,%f%c", &gob[ngob][0], &gob[ngob][1], &junk) != 2) {
+				fprintf(stderr, "mellagui-blocks: --goblin wants DX,DZ (at most four)\n");
+				return 2;
+			}
+			ngob++;
 		} else if (!strcmp(argv[i], "--pet-at") && i + 1 < argc) {
 			pet_at = (float)atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--no-sound")) {
@@ -1679,7 +1942,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --real-clock] [--no-sound] [--no-pets] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -1724,6 +1987,8 @@ int main(int argc, char **argv)
 		a.sound_on = false;
 	if (no_pets)
 		a.pets_on = false;
+	if (no_mobs)
+		a.mobs_on = false;
 	if (pet_at >= 0.0f)
 		a.pet_t = pet_at;
 	settle_player(&a);
@@ -1731,6 +1996,13 @@ int main(int argc, char **argv)
 		float near[3];
 		bl_spawn(a.world, near);
 		pets_setup(&a, near, true);
+	}
+	mobs_setup(&a);
+	for (int i = 0; i < ngob && a.mobs_on; i++) {
+		int gx = (int)floorf(a.pl.x + gob[i][0]), gz = (int)floorf(a.pl.z + gob[i][1]);
+		int top = bl_top(a.world, gx, gz);
+		if (top >= 0)
+			bl_mobs_add(&a.mobs, a.world, BL_MOB_GOBLIN, (float)gx + 0.5f, (float)(top + 1), (float)gz + 0.5f);
 	}
 	if (!isnan(yaw))
 		a.pl.yaw = yaw;

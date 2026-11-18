@@ -70,28 +70,9 @@ static float sstep(float a, float b, float v)
 
 /* ---- the world as a body meets it -------------------------------------------------------------------------------------- */
 
-static bool box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h)
-{
-	int x0 = (int)floorf(x - hw), x1 = (int)ceilf(x + hw) - 1, y0 = (int)floorf(y), y1 = (int)ceilf(y + h) - 1, z0 = (int)floorf(z - hw), z1 = (int)ceilf(z + hw) - 1;
-	for (int yy = y0; yy <= y1; yy++)
-		for (int zz = z0; zz <= z1; zz++)
-			for (int xx = x0; xx <= x1; xx++)
-				if (bl_solid(bl_get(w, xx, yy, zz)))
-					return true;
-	return false;
-}
-
-/* The top of the highest solid block under the box between y (the feet) and `down` below it, at its middle or its corners: its height, or -1e9 when there is none. */
-static float support_y(const struct bl_world *w, float x, float y, float z, float hw, float down)
-{
-	static const float k[5][2] = { { 0, 0 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } };
-	int ytop = (int)floorf(y + 0.05f), ybot = (int)floorf(y - down);
-	for (int yy = ytop; yy >= ybot; yy--)
-		for (int i = 0; i < 5; i++)
-			if (bl_solid(bl_get(w, (int)floorf(x + k[i][0] * hw * 0.8f), yy, (int)floorf(z + k[i][1] * hw * 0.8f))))
-				return (float)(yy + 1);
-	return -1e9f;
-}
+#define box_hits bl_box_hits
+#define support_y bl_box_support
+#define body_axis bl_box_move
 
 static bool wet_at(const struct bl_world *w, float x, float y, float z, float hw)
 {
@@ -99,30 +80,6 @@ static bool wet_at(const struct bl_world *w, float x, float y, float z, float hw
 	for (int i = 0; i < 5; i++)
 		if (bl_water(bl_get(w, (int)floorf(x + k[i][0] * hw), (int)floorf(y + 0.1f), (int)floorf(z + k[i][1] * hw))))
 			return true;
-	return false;
-}
-
-/* One axis at a time, a quarter block at most, snapped to the face it meets (the same way the player's box is). True when it was stopped. */
-static bool body_axis(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
-{
-	float *c = axis == 0 ? px : axis == 1 ? py : pz;
-	while (d != 0.0f) {
-		float s = d > 0.25f ? 0.25f : d < -0.25f ? -0.25f : d, old = *c;
-		d -= s;
-		*c = old + s;
-		if (!box_hits(w, *px, *py, *pz, hw, h))
-			continue;
-		float n = *c;
-		if (axis == 1) {
-			n = s > 0 ? (float)(int)floorf(n + h) - h - 0.001f : (float)(int)floorf(n) + 1.0f;
-		} else {
-			n = s > 0 ? (float)(int)floorf(n + hw) - hw - 0.001f : (float)(int)floorf(n - hw) + 1.0f + hw + 0.001f;
-		}
-		*c = n;
-		if (box_hits(w, *px, *py, *pz, hw, h))
-			*c = old;
-		return true;
-	}
 	return false;
 }
 

@@ -1213,3 +1213,51 @@ out:
 		*err = e ? e : "the file is damaged";
 	return res;
 }
+
+
+/* ---- bodies that are not the player ------------------------------------------------------------------------------------ */
+
+bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h)
+{
+	int x0 = (int)floorf(x - hw), x1 = (int)ceilf(x + hw) - 1, y0 = (int)floorf(y), y1 = (int)ceilf(y + h) - 1, z0 = (int)floorf(z - hw), z1 = (int)ceilf(z + hw) - 1;
+	for (int yy = y0; yy <= y1; yy++)
+		for (int zz = z0; zz <= z1; zz++)
+			for (int xx = x0; xx <= x1; xx++)
+				if (bl_solid(bl_get(w, xx, yy, zz)))
+					return true;
+	return false;
+}
+
+float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down)
+{
+	static const float k[5][2] = { { 0, 0 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } };
+	int ytop = (int)floorf(y + 0.05f), ybot = (int)floorf(y - down);
+	for (int yy = ytop; yy >= ybot; yy--)
+		for (int i = 0; i < 5; i++)
+			if (bl_solid(bl_get(w, (int)floorf(x + k[i][0] * hw * 0.8f), yy, (int)floorf(z + k[i][1] * hw * 0.8f))))
+				return (float)(yy + 1);
+	return -1e9f;
+}
+
+bool bl_box_move(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
+{
+	float *c = axis == 0 ? px : axis == 1 ? py : pz;
+	while (d != 0.0f) {
+		float s = d > 0.25f ? 0.25f : d < -0.25f ? -0.25f : d, old = *c;
+		d -= s;
+		*c = old + s;
+		if (!bl_box_hits(w, *px, *py, *pz, hw, h))
+			continue;
+		float n = *c;
+		if (axis == 1) {
+			n = s > 0 ? (float)(int)floorf(n + h) - h - 0.001f : (float)(int)floorf(n) + 1.0f;
+		} else {
+			n = s > 0 ? (float)(int)floorf(n + hw) - hw - 0.001f : (float)(int)floorf(n - hw) + 1.0f + hw + 0.001f;
+		}
+		*c = n;
+		if (bl_box_hits(w, *px, *py, *pz, hw, h))
+			*c = old;
+		return true;
+	}
+	return false;
+}

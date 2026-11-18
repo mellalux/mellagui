@@ -19459,14 +19459,14 @@ class TestBlocks(Base):
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
     K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
-             f1=59, f3=61, lbrace=26, rbrace=27, **{str(i): 1 + i for i in range(1, 10)})
+             f1=59, f3=61, lbrace=26, rbrace=27, m=50, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
         super().setUp()
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19477,6 +19477,8 @@ class TestBlocks(Base):
             argv += ['--seed', '11', '--flat']
         if not pets:
             argv += ['--no-pets']                            # (a yard and a pond dug beside the player are for the tests of the pets only)
+        if not mobs:
+            argv += ['--no-mobs']                            # (the goblins have tests of their own: at night they would come to every test)
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data, **(env or {})))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -19495,7 +19497,7 @@ class TestBlocks(Base):
         return p
 
     def read_dump(self):
-        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': [], 'pal': {}}
+        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': [], 'pal': {}, 'mobs': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -19509,8 +19511,10 @@ class TestBlocks(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'aim':
                 st['aim'] = dict(x.split('=', 1) for x in f[1:])
-            elif f[0] in ('pets', 'tom', 'filip'):
+            elif f[0] in ('pets', 'tom', 'filip', 'player'):
                 st[f[0]] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'mob':
+                st['mobs'][int(f[1])] = {k: float(v) for k, v in (x.split('=', 1) for x in f[2:])}
             elif f[0] == 'hist':
                 st['hist'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
             elif f[0] == 'hotbar':
@@ -20230,6 +20234,129 @@ class TestBlocks(Base):
             counts.append(cream(pic, wx + ww // 2 - 60, wy + wh // 2 - 60, wx + ww // 2 + 60, wy + wh // 2 + 60))
         self.assertGreater(counts[0], 40, 'a cream-coloured cat in the middle of the picture (%d pixels)' % counts[0])
         self.assertEqual(counts[1], 0, 'and none without the pets')
+
+    def click(self, button=272, secs=0.06):
+        ctl.button(button, True)
+        time.sleep(secs)
+        ctl.button(button, False)
+
+    def test_a_goblin_comes_for_the_player_hits_him_and_the_death_card_sends_him_back(self):
+        self.start('--time', '0', '--goblin', '0,10', mobs=True)
+        st = self.state()
+        self.assertEqual(st['player']['goblins'], '1')
+        self.assertEqual(st['player']['hp'], '20.00', 'ten hearts')
+        self.assertAlmostEqual(st['mobs'][0]['dist'], 10.0, delta=0.6)
+        self.play()
+        st = self.wait(lambda s: s['mobs'] and min(m['dist'] for m in s['mobs'].values()) < 1.3, timeout=8.0)
+        self.assertLess(min(m['dist'] for m in st['mobs'].values()), 1.3, 'it came to him in a few seconds')
+        st = self.wait(lambda s: float(s['player']['hp']) < 20.0, timeout=4.0)
+        self.assertLessEqual(float(st['player']['hp']), 17.0, 'a blow takes three hit points')
+        seen_flash = False
+        end = time.time() + 40.0
+        while time.time() < end:                              # (he stands still: they hit him every second)
+            st = self.state()
+            seen_flash |= float(st['player']['hurt']) > 0.0
+            if st['state']['prompt'] == '5':
+                break
+            time.sleep(0.05)
+        self.assertEqual(st['state']['prompt'], '5', 'a goblin got him: the death card')
+        self.assertEqual(st['player']['dead'], '1')
+        self.assertEqual(st['player']['hp'], '0.00')
+        self.assertTrue(seen_flash, 'the picture went red when he was hit')
+        self.assertEqual(st['state']['playing'], '0')
+        self.assertEqual(len(st['cbtn']), 1, 'one button: Respawn')
+        self.tap('enter')
+        st = self.wait(lambda s: s['state']['playing'] == '1' and s['player']['dead'] == '0')
+        self.assertEqual(st['player']['hp'], '20.00', 'full hearts again')
+        self.assertEqual(st['player']['goblins'], '0', 'and nobody near him')
+        self.assertAlmostEqual(float(st['state']['x']), 128.5, delta=1.0, msg='back at the start')
+
+    def test_the_sword_takes_three_blows_and_breaks_no_block_behind_a_goblin(self):
+        self.start('--time', '17.9', '--goblin', '0,3', mobs=True)   # (dusk: the sun does not burn it any more and none appear yet: daylight 0.3 .. 0.55)
+        self.play()
+        rev0 = self.S()['rev']
+        hps = []
+        kills = 0
+        end = time.time() + 8.0
+        while time.time() < end and kills == 0:
+            st = self.state()
+            if st['mobs']:
+                m = list(st['mobs'].values())[0]
+                if m['dist'] < 2.6 and abs(m['x'] - float(st['state']['x'])) < 0.25:
+                    hps.append(m['hp'])
+                    self.click()
+                    time.sleep(0.45)
+            kills = int(self.state()['player']['kills'])
+            time.sleep(0.03)
+        st = self.state()
+        self.assertEqual(st['player']['kills'], '1', 'three blows killed it (hit points seen %s)' % hps)
+        self.assertEqual(st['player']['goblins'], '0')
+        self.assertIn(6.0, hps[1:] + [m['hp'] for m in (st['mobs'] or {}).values()] if len(hps) < 2 else hps[1:], 'a blow takes four of its ten')
+        self.assertEqual(self.S()['rev'], rev0, 'the blows broke no block behind it')
+        self.assertGreaterEqual(self.S()['sounds'] and int(self.S()['sounds']), 1, 'the blows make a sound')
+
+    def test_the_sun_burns_a_goblin_that_is_out_in_the_open(self):
+        self.start('--goblin', '0,12', mobs=True)             # (noon)
+        self.play()
+        st = self.wait(lambda s: s['player']['burned'] == '1' or s['player']['goblins'] == '0', timeout=10.0)
+        self.assertEqual(st['player']['goblins'], '0')
+        self.assertEqual(st['player']['burned'], '1', 'the sun killed it')
+        self.assertEqual(st['player']['kills'], '0', 'nobody was hit')
+
+    def test_m_switches_the_goblins_off_and_on_and_they_come_out_at_night(self):
+        self.start('--time', '0', '--goblin', '0,15', mobs=True)
+        self.play()
+        self.assertEqual(self.state()['player']['goblins'], '1')
+        self.tap('m')
+        st = self.state()
+        self.assertEqual((st['player']['mobs'], st['player']['goblins']), ('0', '0'), 'M: no goblins')
+        time.sleep(4.0)
+        self.assertEqual(self.state()['player']['goblins'], '0', 'and none appear')
+        self.tap('m')
+        st = self.wait(lambda s: s['player']['mobs'] == '1' and int(s['player']['spawned']) >= 1, timeout=12.0)
+        self.assertEqual(st['player']['mobs'], '1')
+        self.assertGreaterEqual(int(st['player']['goblins']), 1, 'at night they come out again')
+        for m in st['mobs'].values():
+            self.assertTrue(abs(m['y'] - 20.0) < 0.1, 'on the floor')
+
+    def test_a_goblin_is_in_the_picture_and_not_when_they_are_off(self):
+        pics = []
+        for extra in ([], ['--no-mobs']):
+            for w in ctl.windows()['windows']:
+                if w['app_id'] == 'mellagui.blocks':
+                    self.proc.kill()
+                    self.proc.wait()
+                    time.sleep(0.3)
+            # (a goblin stands still for no one: no sword, no step: it is drawn behind the card too, but the card hides the middle, so he plays)
+            self.start('--goblin', '0,5', '--fov', '60', '--time', '12', *extra, render='480x300', mobs=not extra)
+            self.play()
+            time.sleep(0.25)
+            out = os.path.join(tmp, 'blocks-goblin-%d.ppm' % len(pics))
+            self.addCleanup(lambda out=out: os.path.exists(out) and os.unlink(out))
+            pics.append((ctl.dump(out), (self.win['x'], self.win['y'], self.win['w'], self.win['h'])))
+        (p0, (wx, wy, ww, wh)), (p1, _) = pics
+        diff = green = 0
+        for y in range(wy + wh // 2 - 90, wy + wh // 2 + 70):
+            for x in range(wx + ww // 2 - 90, wx + ww // 2 + 90):
+                a, b = p0.px(x, y), p1.px(x, y)
+                if sum(abs(i - j) for i, j in zip(a, b)) > 60:
+                    diff += 1
+                    green += a[1] > a[0] and a[1] > a[2]
+        self.assertGreater(diff, 500, 'a goblin in front of him changes the picture (%d pixels)' % diff)
+        self.assertGreater(green, diff // 4, 'and a good part of what changed is green (%d of %d)' % (green, diff))
+
+    def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
+        p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--goblin wants', p.stderr)
+        self.start('--time', '0', '--save', mobs=True)
+        self.play()
+        self.tap('m')                                         # off ...
+        self.ctrl_tap('s')                                    # ... saved
+        self.wait(lambda s: s['state']['saved'] == '1')
+        with open(os.path.join(self.data, 'player.conf')) as f:
+            conf = f.read()
+        self.assertIn('mobs = 0', conf, 'the choice is kept in player.conf')
 
     def test_the_yard_the_water_and_the_places_of_the_pets_are_saved(self):
         self.start('--save', pets=True)

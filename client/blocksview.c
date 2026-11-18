@@ -1,6 +1,7 @@
 /* blocksview.c - the picture of a block world. See blocksview.h. */
 #include "blocksview.h"
 #include "blockspets.h"
+#include "blocksmobs.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -253,6 +254,7 @@ struct frame {
 	int tx, ty, tz;
 	bool ids;
 	const struct bl_pets *pets;
+	const struct bl_mobs *mobs;
 	float inv_f;              /* metres a pixel covers at a distance of one metre */
 	float petmax;             /* the pets are drawn up to here (beyond it the fog has them) */
 	bool start_water;
@@ -342,11 +344,22 @@ static int torch_hit(const struct frame *F, int ix, int iy, int iz, float dx, fl
 	return axis == 0 ? (dx > 0 ? BL_NX : BL_PX) : axis == 1 ? (dy > 0 ? BL_NY : BL_PY) : (dz > 0 ? BL_NZ : BL_PZ);
 }
 
-/* 0 for none, 1 for Tom, 2 for Filip: which of them a ray meets nearer than `tmax` (the test hook) */
+/* 0 for none, 1 for Tom, 2 for Filip, 3 for a goblin: which of them a ray meets nearer than `tmax` (the test hook) */
 static int pets_probe(const struct frame *F, float dx, float dy, float dz, float tmax)
 {
 	float o[3] = { F->ox, F->oy, F->oz }, d[3] = { dx, dy, dz };
-	return bl_pets_probe(F->pets, o, d, tmax < F->petmax ? tmax : F->petmax, F->inv_f);
+	int pk = 0;
+	float tp = tmax;
+	if (F->pets) {
+		pk = bl_pets_probe(F->pets, o, d, tmax < F->petmax ? tmax : F->petmax, F->inv_f);
+		(void)tp;
+	}
+	if (F->mobs && !pk) {
+		struct bl_mob_hit mh;
+		if (bl_mobs_ray(F->mobs, o, d, tmax, &mh))
+			pk = 3;
+	}
+	return pk;
 }
 
 static const float k_face_shade[6] = { 0.62f, 0.62f, 1.0f, 0.5f, 0.8f, 0.8f };
@@ -382,11 +395,31 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 	bool in_water = F->start_water;
 	float wt0 = 0.0f;
 	const float maxd = F->maxd;
-	struct bl_pet_event pev[2];                       /* Tom and Filip along this ray: laid over what is nearer when the ray gets to their distance */
+	struct bl_pet_event pev[3];                       /* Tom, Filip and a goblin along this ray: laid over what is nearer when the ray gets to their distance */
 	int npev = 0, ipev = 0;
 	if (F->pets && !F->ids) {
 		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz };
 		npev = bl_pets_events(F->pets, po, pd, F->petmax, F->inv_f, pev);
+	}
+	if (F->mobs && !F->ids) {
+		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz };
+		struct bl_mob_hit mh;
+		if (bl_mobs_ray(F->mobs, po, pd, F->maxd, &mh)) {
+			float fog = mh.t > 0.6f * F->maxd ? (mh.t - 0.6f * F->maxd) / (0.4f * F->maxd) : 0.0f;
+			if (fog > 1.0f)
+				fog = 1.0f;
+			for (int i = 0; i < 3; i++)
+				pev[npev].c[i] = mh.rgb[i] * (1.0f - fog) + F->hor[i] * fog;
+			pev[npev].a = 1.0f;
+			pev[npev].tp = mh.t;
+			int k = npev++;
+			while (k > 0 && pev[k - 1].tp > pev[k].tp) {       /* in order of distance */
+				struct bl_pet_event sw = pev[k - 1];
+				pev[k - 1] = pev[k];
+				pev[k] = sw;
+				k--;
+			}
+		}
 	}
 	const int W = F->W, D = F->D, H = F->H, ytop = F->ytop;
 
@@ -479,6 +512,8 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				pet_insert(F, acc, &trans, in_water, &wt0, &pev[ipev]);
 				ipev++;
 			}
+			if (trans <= 0.0f)                                 /* something solid, a goblin, is in front of everything that follows */
+				goto finish;
 			const int blk = F->b[idx];
 			if (blk == BL_AIR) {
 				if (in_water) {
@@ -539,10 +574,10 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 			if (F->ids) {
 				if (bl_water(blk))
 					continue;                            /* the test hook sees through water like `bl_pick` */
-				if (F->pets) {
+				if (F->pets || F->mobs) {
 					int pk = pets_probe(F, dx, dy, dz, t);
 					if (pk)
-						return pk == 1 ? 0xff0000feu : 0xff0000fdu;
+						return pk == 1 ? 0xff0000feu : pk == 2 ? 0xff0000fdu : 0xff0000fcu;
 				}
 				return 0xff000000u | (uint32_t)blk << 8 | (uint32_t)face;
 			}
@@ -701,10 +736,10 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 
 finish:
 	if (F->ids) {
-		if (F->pets) {
+		if (F->pets || F->mobs) {
 			int pk = pets_probe(F, dx, dy, dz, F->maxd);
 			if (pk)
-				return pk == 1 ? 0xff0000feu : 0xff0000fdu;
+				return pk == 1 ? 0xff0000feu : pk == 2 ? 0xff0000fdu : 0xff0000fcu;
 		}
 		return 0xff0000ffu;
 	}
@@ -848,6 +883,7 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.tz = v->tz;
 	F.ids = v->ids;
 	F.pets = v->pets;
+	F.mobs = v->mobs;
 	F.petmax = 0.7f * F.maxd;
 
 	int ex = (int)floorf(c->x), ey = (int)floorf(c->y), ez = (int)floorf(c->z);

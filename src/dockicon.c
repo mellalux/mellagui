@@ -42,6 +42,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_CARDS] = { "cards", 0 },
     [LM_DOCKICON_BLOCKS] = { "blocks", 0 },
     [LM_DOCKICON_CHESS] = { "chess", 0 },
+    [LM_DOCKICON_CUBE] = { "cube", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -76,6 +77,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_DISPLAY: return lm_theme.icon_display;
     case LM_DOCKICON_BLOCKS: return lm_theme.icon_blocks;
     case LM_DOCKICON_CHESS: return lm_theme.icon_chess;
+    case LM_DOCKICON_CUBE: return lm_theme.icon_cube;
     default: return lm_theme.icon_generic;
     }
 }
@@ -96,7 +98,7 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
-        { "chess", LM_DOCKICON_CHESS }, { "tetris", LM_DOCKICON_BLOCKS }, { "blocks", LM_DOCKICON_BLOCKS }, { "solitaire", LM_DOCKICON_CARDS }, { "cards", LM_DOCKICON_CARDS }, { "game", LM_DOCKICON_CARDS }, { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
+        { "chess", LM_DOCKICON_CHESS }, { "voxel", LM_DOCKICON_CUBE }, { "cube", LM_DOCKICON_CUBE }, { "sandbox", LM_DOCKICON_CUBE }, { "tetris", LM_DOCKICON_BLOCKS }, { "blocks", LM_DOCKICON_BLOCKS }, { "solitaire", LM_DOCKICON_CARDS }, { "cards", LM_DOCKICON_CARDS }, { "game", LM_DOCKICON_CARDS }, { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
         { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK }, { "timer", LM_DOCKICON_TIMER }, { "pomodoro", LM_DOCKICON_TIMER }, { "stopwatch", LM_DOCKICON_TIMER }, { "sticky", LM_DOCKICON_NOTE }, { "memo", LM_DOCKICON_NOTE },
         { "display", LM_DOCKICON_DISPLAY }, { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
@@ -142,6 +144,8 @@ static float sd_line(float u, float v, float ax, float ay, float bx, float by, f
     return hypotf(u - (ax + t * vx), v - (ay + t * vy)) - h;
 }
 
+static float sd_tri(float u, float v, float ax, float ay, float bx, float by, float cx, float cy);
+static float sd_face(float u, float v, const float p[8]);
 static float sd_tri(float u, float v, float ax, float ay, float bx, float by, float cx, float cy)
 {
     float ex[3] = { bx - ax, cx - bx, ax - cx }, ey[3] = { by - ay, cy - by, ay - cy };
@@ -155,6 +159,17 @@ static float sd_tri(float u, float v, float ax, float ay, float bx, float by, fl
         s += cr > 0.0f ? 1.0f : -1.0f;
     }
     return (fabsf(s) == 3.0f ? -1.0f : 1.0f) * sqrtf(d);
+}
+
+/* A four cornered face (x, y of each corner), pulled in a little round its middle so that neighbouring faces leave a gap. */
+static float sd_face(float u, float v, const float p[8])
+{
+    float cx = (p[0] + p[2] + p[4] + p[6]) * 0.25f, cy = (p[1] + p[3] + p[5] + p[7]) * 0.25f, q[8];
+    for (int i = 0; i < 4; i++) {
+        q[2 * i] = cx + (p[2 * i] - cx) * 0.88f;
+        q[2 * i + 1] = cy + (p[2 * i + 1] - cy) * 0.88f;
+    }
+    return fminf2(sd_tri(u, v, q[0], q[1], q[2], q[3], q[4], q[5]), sd_tri(u, v, q[0], q[1], q[4], q[5], q[6], q[7]));
 }
 
 static float sd_sub(float a, float b) { return fmaxf2(a, -b); }       /* a without b */
@@ -304,6 +319,13 @@ static float glyph(int kind, float u, float v)
         d = fminf2(d, sd_box(u, v, 0.0f, -0.16f, 0.105f, 0.105f, 0.02f));
         d = fminf2(d, sd_box(u, v, 0.24f, -0.16f, 0.105f, 0.105f, 0.02f));
         return fminf2(d, sd_box(u, v, 0.0f, 0.10f, 0.105f, 0.105f, 0.02f));
+    }
+    case LM_DOCKICON_CUBE: {                            /* a cube seen from a corner: top, left and right face, a thin gap between them (the blocks game) */
+        const float s = 0.37f, hx = 0.866f * s;
+        const float top[8] = { 0, -s, hx, -0.5f * s, 0, 0, -hx, -0.5f * s };
+        const float left[8] = { -hx, -0.5f * s, 0, 0, 0, s, -hx, 0.5f * s };
+        const float right[8] = { 0, 0, hx, -0.5f * s, hx, 0.5f * s, 0, s };
+        return fminf2(sd_face(u, v, top), fminf2(sd_face(u, v, left), sd_face(u, v, right)));
     }
     case LM_DOCKICON_CHESS: {                           /* a pawn: a ball, a collar, a cone and a foot (the chess game) */
         float d = sd_circle(u, v, 0.0f, -0.215f, 0.115f);

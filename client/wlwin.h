@@ -36,6 +36,12 @@ struct wlwin_ops {
     bool (*close)(struct wlwin *w);
     /* Optional: the menu of wlwin_menu() was answered: the entry chosen, or -1 when it closed without a choice. */
     void (*menu)(struct wlwin *w, int index);
+    /* Optional: the pointer lock asked for with wlwin_lock_pointer began (true) or ended (false: the window lost the focus, Alt+Tab, a dialog of the
+     * shell ...; a lock that was asked for comes back by itself when the conditions do). */
+    void (*lock)(struct wlwin *w, bool locked);
+    /* Optional: the pointer moved by (dx, dy) logical pixels. Sent while a lock was asked for (wlwin_lock_pointer), also while the lock is not active;
+     * while it is active this is the only motion there is (the pointer stays where it was, there are no wl_pointer motion events). */
+    void (*relative)(struct wlwin *w, double dx, double dy);
 };
 
 struct wlwin {
@@ -43,6 +49,8 @@ struct wlwin {
     const struct wlwin_ops *ops;
     void *data;                     /* for the ops callbacks */
     uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard, menu;       /* menu: mellagui_menu_v1, 0 without it */
+    uint32_t pconstraints, relmgr, lockobj, relobj;          /* zwp_pointer_constraints_v1, zwp_relative_pointer_manager_v1 (0 without them), the locked pointer and the relative pointer of wlwin_lock_pointer */
+    bool locked;                    /* the pointer lock is active right now (the compositor said `locked`) */
     uint32_t surface, xsurface, toplevel, pool, buffer;
     int w, h;                       /* size the compositor asked for (clamped to the minimum) */
     int bw, bh;                     /* the window's drawing area in LOGICAL pixels (what a program lays out in) */
@@ -118,6 +126,13 @@ bool wlwin_menu(struct wlwin *w, const char *entries);
  * Without a call the compositor's own arrow shows. Needs the window's pointer (an ops->pointer). */
 void wlwin_cursor(struct wlwin *w, const uint32_t *argb, int cw, int ch, int hx, int hy);
 void wlwin_warp_pointer(struct wlwin *w, int x, int y);
+/* Lock the pointer to this window (a game: mouse look; a viewer that pans): it stays where it is and ops->relative gets its motion. The lock is PERSISTENT: it
+ * starts when the window has both the pointer and the keyboard focus, ops->lock tells when, it ends by itself when the focus goes (the compositor's way out of a
+ * program that grabbed the pointer) and comes back with it. `false` ends it for good. Returns false when the compositor has no pointer constraints or the window
+ * has no pointer yet (the program then does without mouse look). */
+bool wlwin_lock_pointer(struct wlwin *w, bool on);
+/* Hide the pointer's picture (true: a locked pointer has nothing to show) or show it again (the picture of wlwin_cursor, else the compositor's own at the next enter). */
+void wlwin_hide_cursor(struct wlwin *w, bool hide);
 /* Bring this window forward (to the top, to the current workspace, out of the minimized state) and give it the focus. Needs the compositor's mellagui_menu_v1
  * (silently nothing without it): for a program that was asked by another one to show something. */
 void wlwin_raise(struct wlwin *w);

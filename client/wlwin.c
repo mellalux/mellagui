@@ -267,6 +267,69 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
     w->ops->pointer(w, op, args);
 }
 
+/* ---- the pointer lock ---- */
+
+static void locked_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id; (void)args;
+    struct wlwin *w = data;
+    if (op != LM_ZWP_LOCKED_POINTER_V1_EVT_LOCKED && op != LM_ZWP_LOCKED_POINTER_V1_EVT_UNLOCKED)
+        return;
+    w->locked = op == LM_ZWP_LOCKED_POINTER_V1_EVT_LOCKED;
+    if (w->ops->lock)
+        w->ops->lock(w, w->locked);
+}
+
+static void relative_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id;
+    struct wlwin *w = data;
+    if (op != LM_ZWP_RELATIVE_POINTER_V1_EVT_RELATIVE_MOTION || !w->ops->relative)
+        return;
+    double z = zoom_of(w);
+    w->ops->relative(w, lm_fixed_to_double(args[2].f) / z, lm_fixed_to_double(args[3].f) / z);
+}
+
+bool wlwin_lock_pointer(struct wlwin *w, bool on)
+{
+    if (!on) {
+        if (w->lockobj) {
+            WLC_SEND0(w->c, w->lockobj, LM_ZWP_LOCKED_POINTER_V1_REQ_DESTROY);
+            wlc_forget(w->c, w->lockobj);
+            w->lockobj = 0;
+        }
+        if (w->relobj) {
+            WLC_SEND0(w->c, w->relobj, LM_ZWP_RELATIVE_POINTER_V1_REQ_DESTROY);
+            wlc_forget(w->c, w->relobj);
+            w->relobj = 0;
+        }
+        w->locked = false;
+        return true;
+    }
+    if (!w->pconstraints || !w->pointer || !w->surface)
+        return false;
+    if (w->lockobj)
+        return true;
+    w->lockobj = wlc_alloc(w->c, &lm_zwp_locked_pointer_v1_interface, locked_event, w);
+    WLC_SEND(w->c, w->pconstraints, LM_ZWP_POINTER_CONSTRAINTS_V1_REQ_LOCK_POINTER, { .n = w->lockobj }, { .o = w->surface }, { .o = w->pointer },
+             { .o = 0 }, { .u = LM_ZWP_POINTER_CONSTRAINTS_LIFETIME_PERSISTENT });
+    if (w->relmgr && !w->relobj) {
+        w->relobj = wlc_alloc(w->c, &lm_zwp_relative_pointer_v1_interface, relative_event, w);
+        WLC_SEND(w->c, w->relmgr, LM_ZWP_RELATIVE_POINTER_MANAGER_V1_REQ_GET_RELATIVE_POINTER, { .n = w->relobj }, { .o = w->pointer });
+    }
+    return true;
+}
+
+void wlwin_hide_cursor(struct wlwin *w, bool hide)
+{
+    if (!w->pointer || !w->cur_serial)
+        return;
+    if (hide)
+        WLC_SEND(w->c, w->pointer, LM_WL_POINTER_REQ_SET_CURSOR, { .u = w->cur_serial }, { .o = 0 }, { .i = 0 }, { .i = 0 });
+    else
+        send_cursor(w);
+}
+
 static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)c; (void)id;
@@ -391,6 +454,10 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         w->out_scale[w->nout++] = 1;
     } else if (!strcmp(iface, "mellagui_menu_v1"))
         w->menu = wlc_bind(c, w->registry, name, &lm_mellagui_menu_v1_interface, 1, menu_event, w);
+    else if (!strcmp(iface, "zwp_pointer_constraints_v1"))
+        w->pconstraints = wlc_bind(c, w->registry, name, &lm_zwp_pointer_constraints_v1_interface, 1, NULL, w);
+    else if (!strcmp(iface, "zwp_relative_pointer_manager_v1"))
+        w->relmgr = wlc_bind(c, w->registry, name, &lm_zwp_relative_pointer_manager_v1_interface, 1, NULL, w);
     else if (w->ops->global)
         w->ops->global(w, name, iface, ver);
 }

@@ -53,7 +53,8 @@ struct lm_dock_settings lm_dock = { .enabled = true, .icon_size = 48, .zoom = 16
     "Paint         = [paint] mellagui-paint\n" \
     "Solitaire     = [cards] mellagui-solitaire\n" \
     "Tetris        = [blocks] mellagui-tetris\n" \
-    "Chess         = [chess] mellagui-chess\n"
+    "Chess         = [chess] mellagui-chess\n" \
+    "Blocks        = [cube] mellagui-blocks\n"
 
 #define DEFAULT_SETTINGS \
     "[dock]\n" \

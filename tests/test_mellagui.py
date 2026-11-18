@@ -18132,7 +18132,7 @@ class TestDefaultConfigHasEveryProgram(Base):
         both = '\n'.join(sections['dock-apps'] + sections['launcher-apps'])
         for prog in ('mellagui-files', 'mellagui-edit', 'mellagui-calc', 'mellagui-cam', 'mellagui-record', 'mellagui-top', 'mellagui-du', 'mellagui-monitor',
                      'mellagui-keys', 'mellagui-notes', 'mellagui-bluetooth', 'mellagui-shot', 'mellagui-timer', 'mellagui-smart', 'mellagui-archive',
-                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', 'mellagui-chess', '@terminal', '@view', '@run', '@settings'):
+                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', 'mellagui-chess', 'mellagui-blocks', '@terminal', '@view', '@run', '@settings'):
             self.assertIn(prog, both, prog + ' is in neither list')
 
 
@@ -19450,6 +19450,510 @@ class TestChess(Base):
             time.sleep(0.05)
         self.assertIsNotNone(self.proc.poll(), 'the program did not end')
         self.assertEqual(self.proc.poll(), 0)
+
+
+class TestBlocks(Base):
+    """client/mellagui-blocks.c: the block game window (the world blocks.c, the picture blocksview.c) and the pointer lock of wlwin (wlwin_lock_pointer, the
+    compositor's zwp_pointer_constraints_v1 / zwp_relative_pointer_v1). Through MELLAGUI_BLOCKS_DUMP: where the player is, what he aims at, the hand, the number of
+    blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
+    EXE = os.path.join(ROOT, 'build', 'mellagui-blocks')
+    K = dict(esc=1, enter=28, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
+             f1=59, f3=61, lbrace=26, rbrace=27, **{str(i): 1 + i for i in range(1, 10)})
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-blocks not built')
+
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100'):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
+        self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
+        self.data = data or tempfile.mkdtemp(prefix='blocks-data-', dir=tmp)
+        self.addCleanup(shutil.rmtree, self.data, ignore_errors=True)
+        argv = [self.EXE, '--size', size, '--render', render, '--threads', '2', '--no-clock', '--time', '12']
+        if flat:
+            argv += ['--seed', '11', '--flat']
+        p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data))
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.proc = p
+        self.win = wait_for_window('mellagui.blocks')
+        self.assertIsNotNone(self.win, 'the window did not appear')
+        end = time.time() + 5.0
+        while time.time() < end and not (self.win['w'] > 0 and self.win['h'] > 0):      # (it is listed before it has a size)
+            time.sleep(0.05)
+            self.win = wait_for_window('mellagui.blocks')
+        self.assertGreater(self.win['w'], 0, 'the window got a size')
+        self.wait(lambda s: 'state' in s)
+        self.cx, self.cy = self.win['x'] + self.win['w'] // 2, self.win['y'] + self.win['h'] // 2
+        ctl.abs(self.cx, self.cy)
+        time.sleep(0.2)
+        return p
+
+    def read_dump(self):
+        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': []}
+        try:
+            with open(self.dump) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return {}
+        for l in lines:
+            f = l.split()
+            if not f:
+                continue
+            if f[0] == 'state':
+                st['state'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'aim':
+                st['aim'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'hist':
+                st['hist'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
+            elif f[0] == 'hotbar':
+                st['hotbar'] = f[1:]
+            elif f[0] == 'slot':
+                st['slot'][int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
+            elif f[0] == 'cbtn':
+                st['cbtn'][int(f[1])] = tuple(int(v) for v in f[2:6])
+        return st
+
+    def state(self):
+        for _ in range(20):
+            st = self.read_dump()
+            if st.get('state') and st.get('hist'):
+                return st
+            time.sleep(0.02)
+        return {}
+
+    def wait(self, pred, timeout=5.0):
+        end = time.time() + timeout
+        st = {}
+        while time.time() < end:
+            st = self.state()
+            if st and pred(st):
+                return st
+            time.sleep(0.03)
+        self.fail('the state did not come: %s' % (st.get('state') if st else st))
+
+    def S(self):
+        return self.state()['state']
+
+    def F(self, key):
+        return float(self.S()[key])
+
+    def play(self):
+        """Click in the window: the game starts and the pointer is locked to it."""
+        ctl.abs(self.cx, self.cy + 150)                      # (outside the card, which is in the middle)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        try:
+            self.wait(lambda s: s['state']['playing'] == '1' and s['state']['locked'] == '1', timeout=3.0)
+        except AssertionError:
+            self.fail('the click did not start the game: pointer %s, window %s, %s' % (ctl.windows()['pointer'], self.win, self.pconstraint()))
+
+    def hold(self, name, secs):
+        ctl.key(self.K[name], True)
+        time.sleep(secs)
+        ctl.key(self.K[name], False)
+        time.sleep(0.12)
+
+    def tap(self, name):
+        ctl.tap(self.K[name])
+        time.sleep(0.12)
+
+    def ctrl_tap(self, name):
+        ctl.key(self.K['ctrl'], True)
+        ctl.tap(self.K[name])
+        ctl.key(self.K['ctrl'], False)
+        time.sleep(0.12)
+
+    def pconstraint(self):
+        return dict(kv.split('=') for kv in ctl.cmd('pconstraint')[0].split()[1:])
+
+    def test_the_window_opens_with_a_card_and_a_world(self):
+        self.start()
+        s = self.S()
+        self.assertEqual(s['prompt'], '1', 'the card that says how to start')
+        self.assertEqual(s['playing'], '0')
+        self.assertEqual(s['kind'], '1')
+        self.assertEqual(s['size'], '256x256x64')
+        st = self.state()
+        self.assertEqual(st['hist']['grass'], 256 * 256)
+        self.assertEqual(st['hist']['bedrock'], 256 * 256)
+        self.assertEqual(st['hotbar'], ['stone', 'dirt', 'grass', 'cobble', 'planks', 'log', 'brick', 'sand', 'glass'])
+        self.assertEqual(s['ground'], '1')
+        self.assertAlmostEqual(self.F('y'), 20.0, places=2)
+        self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free while the card is up')
+        self.assertEqual(len(st['cbtn']), 4, 'Quit, Save, New world, Play')
+
+    def test_a_click_starts_the_game_and_locks_the_pointer(self):
+        self.start()
+        before = ctl.windows()['pointer']
+        self.play()
+        self.assertEqual(self.pconstraint()['active'], 'locked')
+        self.assertEqual(self.S()['prompt'], '0')
+        self.assertEqual(self.S()['lockok'], '1')
+        self.assertEqual(self.S()['rev'], '0', 'the click that started the game did not break a block')
+        self.assertEqual(ctl.windows()['pointer'], (self.cx, self.cy + 150), 'the pointer is where it was')
+        self.assertNotEqual(before, None)
+
+    def test_the_mouse_turns_the_head_while_the_pointer_is_locked(self):
+        self.start()
+        self.play()
+        y0, p0 = self.F('yaw'), self.F('pitch')
+        ptr = ctl.windows()['pointer']
+        ctl.cmd('motion 100 0')
+        ctl.cmd('motion 0 40')
+        s = self.wait(lambda st: abs(float(st['state']['yaw']) - y0) > 0.2)['state']
+        self.assertAlmostEqual(float(s['yaw']) - y0, 0.25, places=2, msg='100 pixels at 0.0025 radians')
+        self.assertAlmostEqual(float(s['pitch']) - p0, -0.10, places=2, msg='moving the mouse down looks down')
+        self.assertEqual(ctl.windows()['pointer'], ptr, 'a locked pointer does not move')
+        for _ in range(30):
+            ctl.cmd('motion 0 -500')
+        s = self.wait(lambda st: float(st['state']['pitch']) > 1.5)['state']
+        self.assertLessEqual(float(s['pitch']), 1.5531, 'the head stops looking straight up')
+
+    def test_esc_pauses_and_frees_the_pointer_and_esc_again_goes_on(self):
+        self.start()
+        self.play()
+        self.tap('esc')
+        s = self.wait(lambda st: st['state']['playing'] == '0')['state']
+        self.assertEqual(s['prompt'], '1')
+        self.assertEqual(self.pconstraint()['active'], 'none')
+        y0 = self.F('yaw')
+        ctl.cmd('motion 80 0')
+        time.sleep(0.2)
+        self.assertAlmostEqual(self.F('yaw'), y0, places=4, msg='a paused game does not turn')
+        self.tap('esc')
+        self.wait(lambda st: st['state']['playing'] == '1' and st['state']['locked'] == '1')
+        self.assertEqual(self.pconstraint()['active'], 'locked')
+
+    def test_the_card_has_buttons_that_go_on_save_and_quit(self):
+        self.start()
+        st = self.state()
+        bx, by, bw, bh = st['cbtn'][3]                       # Play
+        ctl.abs(self.win['x'] + bx + bw // 2, self.win['y'] + by + bh // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['playing'] == '1')
+        self.tap('esc')
+        st = self.wait(lambda s: s['state']['playing'] == '0')
+        bx, by, bw, bh = st['cbtn'][0]                       # Quit
+        ctl.abs(self.win['x'] + bx + bw // 2, self.win['y'] + by + bh // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.proc.poll(), 0, 'Quit ends the program')
+
+    def test_keys_walk_sneak_and_jump(self):
+        self.start()
+        self.play()
+        z0, x0 = self.F('z'), self.F('x')
+        self.hold('w', 0.5)
+        z1 = self.F('z')
+        self.assertTrue(1.0 < z1 - z0 < 2.8, 'half a second of W goes %.2f blocks forward (+z at yaw 0)' % (z1 - z0))
+        self.assertAlmostEqual(self.F('x'), x0, places=2)
+        self.hold('s', 0.5)
+        self.assertLess(self.F('z'), z1 - 0.8, 'S walks back')
+        x1 = self.F('x')
+        self.hold('d', 0.5)
+        self.assertGreater(self.F('x') - x1, 1.0, 'D goes right (+x at yaw 0)')
+        self.hold('a', 0.5)
+        self.assertLess(self.F('x'), x1 + 1.0, 'A goes left')
+        # sneaking is slow
+        z2 = self.F('z')
+        ctl.key(self.K['shift'], True)
+        ctl.key(self.K['w'], True)
+        time.sleep(0.5)
+        ctl.key(self.K['w'], False)
+        ctl.key(self.K['shift'], False)
+        time.sleep(0.12)
+        self.assertTrue(0.2 < self.F('z') - z2 < 1.0, 'sneaking is slower (%.2f blocks)' % (self.F('z') - z2))
+        # a jump goes up about 1.27 blocks and comes down again
+        top = 20.0
+        ctl.key(self.K['space'], True)
+        ctl.key(self.K['space'], False)
+        t0 = time.time()
+        while time.time() - t0 < 0.4:
+            top = max(top, self.F('y'))
+            time.sleep(0.01)
+        self.assertTrue(top > 20.5, 'Space jumps (reached %.2f)' % top)
+        time.sleep(0.6)
+        s = self.S()
+        self.assertEqual(s['ground'], '1')
+        self.assertAlmostEqual(float(s['y']), 20.0, places=1)
+
+    def test_the_arrow_keys_look_round(self):
+        self.start()
+        self.play()
+        y0 = self.F('yaw')
+        self.hold('right', 0.4)
+        self.assertGreater(self.F('yaw') - y0, 0.4, 'Right turns to the right')
+        self.hold('left', 0.8)
+        self.assertLess(self.F('yaw'), y0 - 0.1, 'Left turns back and further')
+        self.hold('up', 0.3)
+        self.assertGreater(self.F('pitch'), 0.3)
+
+    def test_a_block_is_broken_and_put_back_and_taken_into_the_hand(self):
+        self.start('--pitch', '-45')                         # the grass two blocks ahead (z 130), not the one he stands on
+        st = self.state()
+        self.assertEqual(st['aim']['block'], 'grass')
+        self.assertEqual(st['aim']['face'], '2', 'the top of the grass')
+        self.assertEqual((st['aim']['y'], st['aim']['z']), ('19', '130'))
+        self.play()
+        grass = self.state()['hist']['grass']
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['state']['rev'] == '1')
+        self.assertEqual(st['hist']['grass'], grass - 1)
+        self.assertEqual(st['aim']['block'], 'grass', 'the ray goes on and meets the next block')
+        self.assertEqual(st['aim']['z'], '131')
+        self.assertEqual((st['aim']['pz'], st['aim']['py']), ('130', '19'), 'the cell in front of it is the hole')
+        # the hand holds stone (slot 1): the right button puts it in the hole
+        stone = st['hist']['stone']
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['state']['rev'] == '2')
+        self.assertEqual(st['hist']['stone'], stone + 1)
+        self.assertEqual(st['aim']['block'], 'stone', 'and the stone is what is aimed at again')
+        # another block in the hand: planks instead of the stone
+        self.tap('5')
+        self.assertEqual(self.S()['hand'], 'planks')
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['rev'] == '3')
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['state']['rev'] == '4')
+        self.assertEqual(st['hist']['planks'], 1)
+        self.assertEqual(st['aim']['block'], 'planks')
+        # the middle button takes the aimed block into the hand: the hotbar has planks in slot 5, so it goes there
+        self.tap('1')
+        self.assertEqual(self.S()['hand'], 'stone')
+        ctl.button(274, True)
+        ctl.button(274, False)
+        self.wait(lambda s: s['state']['slot'] == '5')
+        # a block the hotbar does not have takes the place of the one in the hand
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['rev'] == '5')
+        ctl.button(273, True)
+        ctl.button(273, False)
+        self.wait(lambda s: s['state']['rev'] == '6')                     # planks again, in the hole
+        self.assertEqual(self.state()['hist']['planks'], 1)
+
+    def test_a_held_button_breaks_again_and_again(self):
+        self.start('--pitch', '-85')
+        self.play()
+        ctl.button(272, True)
+        time.sleep(1.0)
+        ctl.button(272, False)
+        time.sleep(0.15)
+        self.assertGreaterEqual(int(self.S()['rev']), 3, 'holding the left button goes on breaking')
+
+    def test_a_block_cannot_be_put_where_the_player_stands(self):
+        self.start('--pitch', '-85')
+        self.play()
+        self.tap('5')
+        # the aimed face is the top of the grass under his feet: the cell in front of it is the one he stands in
+        rev = self.S()['rev']
+        ctl.button(273, True)
+        ctl.button(273, False)
+        time.sleep(0.2)
+        self.assertEqual(self.S()['rev'], rev, 'nothing is put into the player')
+
+    def test_the_hotbar_follows_the_number_keys_and_the_wheel(self):
+        self.start()
+        self.play()
+        self.assertEqual(self.S()['slot'], '1')
+        self.tap('3')
+        self.assertEqual(self.S()['hand'], 'grass')
+        ctl.cmd('axis v 15 1')
+        time.sleep(0.15)
+        self.assertEqual(self.S()['slot'], '4')
+        ctl.cmd('axis v -15 -1')
+        ctl.cmd('axis v -15 -1')
+        ctl.cmd('axis v -15 -1')
+        ctl.cmd('axis v -15 -1')
+        time.sleep(0.15)
+        self.assertEqual(self.S()['slot'], '9', 'the wheel goes round')
+        self.tap('9')
+        self.assertEqual(self.S()['hand'], 'glass')
+
+    def test_f_flies_and_f3_shows_the_numbers_and_the_clock_keys_work(self):
+        self.start()
+        self.play()
+        self.tap('f')
+        self.assertEqual(self.S()['fly'], '1')
+        y0 = self.F('y')
+        self.hold('space', 0.6)
+        self.assertGreater(self.F('y') - y0, 2.0, 'flying up')
+        time.sleep(0.8)                                      # (the upward speed dies away first)
+        h = self.F('y')
+        time.sleep(0.5)
+        self.assertAlmostEqual(self.F('y'), h, places=1, msg='a flying player does not fall')
+        self.hold('shift', 0.4)
+        self.assertLess(self.F('y'), h - 1.0, 'and goes down')
+        self.tap('f')
+        self.assertEqual(self.S()['fly'], '0')
+        self.assertEqual(self.S()['debug'], '0')
+        self.tap('f3')
+        self.assertEqual(self.S()['debug'], '1')
+        t0 = self.F('time')
+        self.tap('rbrace')
+        self.assertAlmostEqual(self.F('time'), t0 + 1.0, places=2)
+        self.tap('lbrace')
+        self.tap('lbrace')
+        self.assertAlmostEqual(self.F('time'), t0 - 1.0, places=2)
+        self.assertEqual(self.S()['clock'], '0')
+        self.tap('t')
+        self.assertEqual(self.S()['clock'], '1')
+
+    def test_f1_lists_the_keys_and_ctrl_n_asks_before_a_new_world(self):
+        self.start()
+        self.play()
+        self.tap('f1')
+        s = self.wait(lambda st: st['state']['prompt'] == '3')['state']
+        self.assertEqual(s['playing'], '0')
+        self.assertEqual(self.pconstraint()['active'], 'none')
+        self.tap('esc')
+        self.wait(lambda st: st['state']['prompt'] == '1')
+        self.tap('enter')
+        self.wait(lambda st: st['state']['playing'] == '1')
+        self.assertEqual(self.S()['kind'], '1')
+        self.ctrl_tap('n')
+        self.wait(lambda st: st['state']['prompt'] == '2')
+        self.tap('esc')
+        self.wait(lambda st: st['state']['prompt'] == '1')
+        self.assertEqual(self.S()['kind'], '1', 'Esc cancelled: the same world')
+        self.ctrl_tap('n')
+        self.wait(lambda st: st['state']['prompt'] == '2')
+        self.tap('enter')
+        s = self.wait(lambda st: st['state']['playing'] == '1')['state']
+        self.assertEqual(s['kind'], '0', 'a new world is made from a seed, not flat')
+        self.assertNotEqual(s['seed'], '0')
+
+    def test_a_world_started_by_seed_is_not_saved_unless_asked(self):
+        self.start()
+        self.play()
+        self.assertEqual(self.S()['nosave'], '1')
+        self.ctrl_tap('s')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.proc.poll(), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.data, 'world.bl')), 'a look at a seed does not replace the player\'s world')
+
+    def test_the_world_and_the_player_are_saved_and_come_back(self):
+        self.start('--save', '--pitch', '-85')
+        self.play()
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['rev'] == '1')
+        self.tap('6')
+        self.hold('w', 0.4)
+        s1 = self.S()
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.proc.poll(), 0)
+        path = os.path.join(self.data, 'world.bl')
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(os.stat(path).st_mode & 0o077, 0, 'private')
+        self.assertLess(os.path.getsize(path), 200, 'only the edit is in the file')
+        self.assertTrue(os.path.exists(os.path.join(self.data, 'player.conf')))
+        # started again with no world asked for: the saved one
+        self.proc = None
+        for w in range(40):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        self.start(flat=False, data=self.data)
+        st = self.state()
+        s = st['state']
+        self.assertEqual(s['kind'], '1', 'the same (flat) world')
+        self.assertEqual(st['hist']['grass'], 256 * 256 - 1, 'with the block that was broken still gone')
+        self.assertAlmostEqual(float(s['x']), float(s1['x']), places=1)
+        self.assertAlmostEqual(float(s['z']), float(s1['z']), places=1)
+        self.assertEqual(s['slot'], '6', 'and the hand')
+        self.assertEqual(s['nosave'], '0')
+
+    def test_the_picture_has_sky_ground_a_crosshair_and_a_hotbar(self):
+        self.start()
+        self.play()
+        st = self.state()
+        out = os.path.join(tmp, 'blocks-shot.ppm')
+        self.addCleanup(lambda: os.path.exists(out) and os.unlink(out))
+        time.sleep(0.2)
+        pic = ctl.dump(out)
+        wx, wy, ww, wh = self.win['x'], self.win['y'], self.win['w'], self.win['h']
+        top = pic.px(wx + ww // 2, wy + 6)
+        self.assertGreater(top[2], top[0] + 40, 'sky at the top: %s' % (top,))
+        low = pic.px(wx + 20, wy + wh - 4)
+        self.assertTrue(low[1] > low[2] and low[1] > 60, 'grass at the bottom: %s' % (low,))
+        self.assertEqual(pic.px(wx + ww // 2, wy + wh // 2), (244, 244, 244), 'the crosshair')
+        s1 = st['slot'][1]
+        self.assertEqual(pic.px(wx + s1['x'] - 2, wy + s1['y'] + s1['h'] // 2), (240, 240, 240), 'the chosen slot has a frame')
+        mid = pic.px(wx + s1['x'] + s1['w'] // 2, wy + s1['y'] + s1['h'] // 2)
+        self.assertNotEqual(mid, (43, 48, 57), 'a block in the slot: %s' % (mid,))
+        # with the card up the picture is dimmed
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '0')
+        time.sleep(0.2)
+        pic = ctl.dump(out)
+        dim = pic.px(wx + ww // 2, wy + 6)
+        self.assertLess(dim[2], top[2] - 40, 'dimmed behind the card')
+
+    def test_the_picture_follows_the_time_of_day(self):
+        self.start('--time', '0')
+        self.play()
+        out = os.path.join(tmp, 'blocks-night.ppm')
+        self.addCleanup(lambda: os.path.exists(out) and os.unlink(out))
+        time.sleep(0.2)
+        pic = ctl.dump(out)
+        wx, wy, ww, wh = self.win['x'], self.win['y'], self.win['w'], self.win['h']
+        top = pic.px(wx + ww // 2, wy + 6)
+        self.assertLess(sum(top), 200, 'a dark sky at midnight: %s' % (top,))
+
+    def test_the_render_size_follows_the_window_when_it_is_not_fixed(self):
+        self.start(render='0x0') if False else None
+        # the adaptive budget: no --render, so the size is a part of the window's pixels in its shape
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.blocks')
+        self.dump = os.path.join(tmp, 'blocks-adapt-%d.dump' % int(time.time() * 1000))
+        data = tempfile.mkdtemp(prefix='blocks-data-', dir=tmp)
+        self.addCleanup(shutil.rmtree, data, ignore_errors=True)
+        p = subprocess.Popen([self.EXE, '--size', '800x480', '--threads', '2', '--seed', '3', '--flat', '--no-clock'], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=data))
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.proc = p
+        self.win = wait_for_window('mellagui.blocks')
+        self.assertIsNotNone(self.win)
+        self.wait(lambda s: 'state' in s)
+        s = self.S()
+        rw, rh = int(s['rw']), int(s['rh'])
+        self.assertTrue(rw * rh <= 800 * 480 and rw * rh >= 64 * 36, 'a picture of %d x %d for a window of 800 x 480' % (rw, rh))
+        self.assertAlmostEqual(rw / rh, 800 / 480, delta=0.1, msg='in the shape of the window')
+
+    def test_a_bad_command_line_is_refused(self):
+        for args in (['--render', 'big'], ['--world-size', '3'], ['--time', '30'], ['--fov', '5'], ['--bogus']):
+            r = subprocess.run([self.EXE] + args, capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.returncode, 2, args)
+
+    def test_the_selftest(self):
+        r = subprocess.run([self.EXE, '--selftest'], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('selftest: ok', r.stdout)
 
 
 class TestChessRules(unittest.TestCase):

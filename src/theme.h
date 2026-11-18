@@ -129,6 +129,7 @@
     X("icon-cards",           icon_cards,        0x2b8a3e) /* the solitaire game */ \
     X("icon-blocks",          icon_blocks,       0x1c8fd6) /* the tetris game */ \
     X("icon-chess",           icon_chess,        0x6d4c9f) /* the chess game */ \
+    X("icon-cube",            icon_cube,         0x4c9a2a) /* the blocks game */ \
     X("icon-timer",           icon_timer,        0xe8590c) \
     X("icon-note",            icon_note,         0xf2b705) \
     X("icon-home",            icon_home,         0x0ca678) \

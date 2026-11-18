@@ -1,0 +1,1377 @@
+/*
+ * mellagui-blocks - a world of blocks for MellaGUI (a Minecraft-style game; the name leaves the trademark out on purpose).
+ *
+ *   mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock]
+ *                   [--yaw DEG] [--pitch DEG] [--fov DEG] [--save | --no-save]
+ *   mellagui-blocks --selftest
+ *
+ * The world (client/blocks.c) is made from a seed: hills, a sea, tunnels, trees. You walk in it, break blocks and put them back; it is a creative
+ * game (no hurt, no mobs). The picture (client/blocksview.c) is a ray for every pixel in software, so the window draws it at a smaller size and
+ * scales it up: the size follows the time a frame takes (`--render WxH` fixes it).
+ *
+ * Click in the window to play: the pointer is locked to it (the compositor's zwp_pointer_constraints, wlwin_lock_pointer) and its motion turns
+ * the head. Esc lets it go again (and pauses); so does Alt+Tab, a dialog of the shell or any other change of the keyboard focus, and the game
+ * waits. Without a pointer lock (a compositor that has none) the arrow keys look round.
+ * Keys (the PLACE of a key counts, not its letter): W A S D walk, Space jumps (up while flying, in water), Shift sneaks (down while flying) and does not walk
+ * off an edge, Ctrl runs, F flies, the arrow keys look, 1 .. 9 or the wheel choose the block in the hand, the left button breaks (hold it to go on), the
+ * right one puts the block in the hand against the face you aim at, the middle one takes the block you aim at into the hand, [ and ] move the clock by an hour,
+ * T stops and starts it, F3 shows the numbers, F1 the keys, Ctrl+S saves, Ctrl+N a new world, Ctrl+Q quits (it saves).
+ *
+ * The world is kept as the edits to what its seed makes (`bl_save`) in $MELLAGUI_BLOCKS_DIR (default $XDG_DATA_HOME/mellagui/blocks) as world.bl, with
+ * where you stand, the hand and the settings in player.conf. It is saved a minute after a change, when you pause, and when the window closes. `--seed` and
+ * `--flat` make a new world that is NOT saved (so a look at a seed never replaces yours) unless `--save` is given.
+ *
+ * $MELLAGUI_BLOCKS_DUMP=FILE writes the state after every paint for the tests: where the player is, where he looks, the block aimed at, the hand, the
+ * render size, the number of blocks of each kind, the boxes of the hotbar and of the buttons of a card.
+ */
+#include <errno.h>
+#include <math.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "blocks.h"
+#include "blocksview.h"
+#include "font.h"
+#include "keymap.h"
+#include "metrics.h"
+#include "protocol.h"
+#include "theme.h"
+#include "uikit.h"
+#include "util.h"
+#include "wlc.h"
+#include "wlcard.h"
+#include "wlwin.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+/* evdev key codes: the place of a key, not the letter it makes */
+enum {
+	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
+	K_F = 33, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+};
+
+#define SLOTS 9
+#define REPEAT_MS 250                                       /* a held button breaks / places again after this */
+#define AUTOSAVE_MS 60000
+#define LOOK_RATE 1.7f                                      /* radians a second with the arrow keys */
+#define MIN_BUDGET 40000                                    /* the least pixels the picture is made of, and the most it is asked to take (ms) */
+#define SLOW_MS 27.0
+#define FAST_MS 15.0
+
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP };
+
+struct app {
+	struct wlwin win;
+	struct bl_world *world;
+	struct bl_player pl;
+	char dir[512];
+	bool nosave, force_save;
+	uint32_t saved_rev;
+	int64_t last_save_ms;
+	uint32_t seed_given;
+	bool have_seed, flat;
+	int world_size;
+
+	bool playing;                                           /* the pointer is the player's: false while a card is up */
+	bool lock_ok;                                           /* wlwin_lock_pointer was accepted */
+	enum prompt prompt;
+	bool first;                                             /* the card is the first one: it says how to start */
+	int pc_hover, pc_down;
+	bool ignore_release;                                    /* the click that started the game must not break a block */
+	double px, py;
+	bool has_pointer;
+
+	bool k_fwd, k_back, k_left, k_right, k_jump, k_sneak, k_ctrl, k_lk, k_rk, k_uk, k_dk;
+	bool jump_latch;                                        /* Space was pressed since the last step: a tap shorter than a frame still jumps */
+	bool b_break, b_place;
+	int64_t next_break, next_place;
+	double wheel;
+	int slot;
+	int hotbar[SLOTS];
+	int64_t name_until;
+	float sens, fov;
+	float time_h;
+	bool clock_run;
+	float day_minutes;
+
+	struct bl_hit aim;
+	bool aimed;
+
+	uint32_t *frame;
+	size_t frame_cap;
+	int rw, rh;
+	int fix_w, fix_h;
+	double budget;
+	double ms_render;
+	int threads;
+	int64_t fps_t0;
+	int fps_n, fps;
+	bool debug;
+
+	uint32_t *icon[BL_COUNT];
+	int icon_s;
+
+	char msg[160];
+	int64_t msg_ms;
+	long hist[BL_COUNT];
+	uint32_t hist_rev;
+	bool hist_ok;
+};
+
+static const char *g_dump;
+
+static int64_t now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void say(struct app *a, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(a->msg, sizeof a->msg, fmt, ap);
+	va_end(ap);
+	a->msg_ms = now_ms();
+	a->win.redraw = true;
+}
+
+/* ================================================================ the hand and the clock ================================================================ */
+
+static const int k_default_hotbar[SLOTS] = { BL_STONE, BL_DIRT, BL_GRASS, BL_COBBLE, BL_PLANKS, BL_LOG, BL_BRICK, BL_SAND, BL_GLASS };
+
+static int hand_block(const struct app *a)
+{
+	return a->hotbar[a->slot];
+}
+
+static void choose_slot(struct app *a, int slot)
+{
+	if (slot < 0)
+		slot = SLOTS - 1;
+	if (slot >= SLOTS)
+		slot = 0;
+	a->slot = slot;
+	a->name_until = now_ms() + 1800;
+	a->win.redraw = true;
+}
+
+/* the render size for a window of pw x ph pixels and a budget of pixels: the window's shape, at least 64 x 36, at most the window */
+static void render_size(int pw, int ph, double budget, int *rw, int *rh)
+{
+	if (pw < 1)
+		pw = 1;
+	if (ph < 1)
+		ph = 1;
+	double b = budget;
+	if (b > (double)pw * ph)
+		b = (double)pw * ph;
+	double aspect = (double)pw / (double)ph;
+	int h = (int)floor(sqrt(b / aspect));
+	int w = (int)floor((double)h * aspect);
+	if (h < 36)
+		h = 36;
+	if (w < 64)
+		w = 64;
+	if (w > pw && pw >= 64)
+		w = pw;
+	if (h > ph && ph >= 36)
+		h = ph;
+	*rw = w;
+	*rh = h;
+}
+
+/* the budget follows the time the last frame took: too slow -> fewer pixels, quick -> more, between MIN_BUDGET and the whole window */
+static double budget_next(double budget, double ms, double max_px)
+{
+	if (ms > SLOW_MS)
+		budget *= ms > 2.0 * SLOW_MS ? 0.75 : 0.92;
+	else if (ms < FAST_MS)
+		budget *= 1.06;
+	if (budget < MIN_BUDGET)
+		budget = MIN_BUDGET;
+	if (budget > max_px)
+		budget = max_px;
+	return budget;
+}
+
+/* ================================================================ the files ================================================================ */
+
+static int mkdirs(const char *path)
+{
+	char tmp[512];
+	snprintf(tmp, sizeof tmp, "%s", path);
+	for (char *p = tmp + 1; *p; p++)
+		if (*p == '/') {
+			*p = 0;
+			if (mkdir(tmp, 0700) != 0 && errno != EEXIST)
+				return -1;
+			*p = '/';
+		}
+	return mkdir(tmp, 0700) != 0 && errno != EEXIST ? -1 : 0;
+}
+
+static void data_dir(char *out, size_t n)
+{
+	const char *d = getenv("MELLAGUI_BLOCKS_DIR"), *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
+	if (d && *d)
+		snprintf(out, n, "%s", d);
+	else if (x && *x)
+		snprintf(out, n, "%s/mellagui/blocks", x);
+	else
+		snprintf(out, n, "%s/.local/share/mellagui/blocks", h && *h ? h : "/tmp");
+}
+
+static void world_path(const struct app *a, char *out, size_t n)
+{
+	snprintf(out, n, "%.500s/world.bl", a->dir);
+}
+
+static void conf_path(const struct app *a, char *out, size_t n)
+{
+	snprintf(out, n, "%.500s/player.conf", a->dir);
+}
+
+/* x y z yaw pitch time slot hotbar fov sens flying */
+static void conf_load(struct app *a, bool with_player)
+{
+	char path[600];
+	conf_path(a, path, sizeof path);
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char line[256];
+	while (fgets(line, sizeof line, f)) {
+		char *eq = strchr(line, '=');
+		if (!eq)
+			continue;
+		*eq = 0;
+		char *k = line, *v = eq + 1;
+		while (*k == ' ')
+			k++;
+		for (char *e = k + strlen(k); e > k && (e[-1] == ' ' || e[-1] == '\t'); )
+			*--e = 0;
+		while (*v == ' ')
+			v++;
+		double d = strtod(v, NULL);
+		if (!strcmp(k, "fov") && d >= 40 && d <= 120)
+			a->fov = (float)(d * M_PI / 180.0);
+		else if (!strcmp(k, "sensitivity") && d >= 0.0005 && d <= 0.02)
+			a->sens = (float)d;
+		else if (!strcmp(k, "slot") && d >= 1 && d <= SLOTS)
+			a->slot = (int)d - 1;
+		else if (!strcmp(k, "hotbar")) {
+			int n = 0;
+			for (char *p = v; *p && n < SLOTS;) {
+				char *end;
+				long b = strtol(p, &end, 10);
+				if (end == p)
+					break;                                   /* not a number (the end of the line): stop, do not go round for ever */
+				p = end;
+				if (b > BL_AIR && b < BL_COUNT && b != BL_WATER && b != BL_BEDROCK)
+					a->hotbar[n++] = (int)b;
+				while (*p == ',' || *p == ' ')
+					p++;
+			}
+		} else if (with_player) {
+			if (!strcmp(k, "x")) a->pl.x = (float)d;
+			else if (!strcmp(k, "y")) a->pl.y = (float)d;
+			else if (!strcmp(k, "z")) a->pl.z = (float)d;
+			else if (!strcmp(k, "yaw")) a->pl.yaw = (float)d;
+			else if (!strcmp(k, "pitch")) a->pl.pitch = (float)d;
+			else if (!strcmp(k, "time") && d >= 0 && d < 24) a->time_h = (float)d;
+			else if (!strcmp(k, "flying")) a->pl.flying = d != 0;
+		}
+	}
+	fclose(f);
+}
+
+static void conf_save(const struct app *a)
+{
+	char path[600], tmp[620];
+	conf_path(a, path, sizeof path);
+	snprintf(tmp, sizeof tmp, "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
+	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1);
+	fprintf(f, "hotbar = ");
+	for (int i = 0; i < SLOTS; i++)
+		fprintf(f, "%s%d", i ? "," : "", a->hotbar[i]);
+	fprintf(f, "\nfov = %.1f\nsensitivity = %.5f\n", a->fov * 180.0 / M_PI, a->sens);
+	fclose(f);
+	if (rename(tmp, path) != 0)
+		unlink(tmp);
+}
+
+static bool save_all(struct app *a, bool say_it)
+{
+	if (a->nosave) {
+		if (say_it)
+			say(a, "This world is not saved (it was started with --seed or --flat)");
+		return false;
+	}
+	if (mkdirs(a->dir) != 0) {
+		say(a, "Cannot make %s", a->dir);
+		return false;
+	}
+	char path[600];
+	world_path(a, path, sizeof path);
+	if (a->world->rev != a->saved_rev || a->force_save) {
+		if (bl_save(a->world, path) != 0) {
+			say(a, "Saving failed");
+			return false;
+		}
+		a->saved_rev = a->world->rev;
+		a->force_save = false;
+	}
+	conf_save(a);
+	a->last_save_ms = now_ms();
+	if (say_it)
+		say(a, "Saved");
+	return true;
+}
+
+/* ================================================================ the world ================================================================ */
+
+static uint32_t fresh_seed(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (uint32_t)(ts.tv_nsec * 2654435761u) ^ (uint32_t)ts.tv_sec ^ ((uint32_t)getpid() << 16);
+}
+
+/* a moment of standing still, so that the player rests on what is under him (on_ground is right from the start) */
+static void settle_player(struct app *a)
+{
+	struct bl_input none = { 0 };
+	for (int i = 0; i < 5; i++)
+		bl_player_step(a->world, &a->pl, &none, 0.02f);
+}
+
+static bool make_world(struct app *a, uint32_t seed, bool flat)
+{
+	struct bl_world *w = flat ? bl_world_flat(a->world_size, a->world_size, 64, 20) : bl_world_new(seed, a->world_size, a->world_size, 64);
+	if (!w)
+		return false;
+	bl_world_free(a->world);
+	a->world = w;
+	bl_player_init(&a->pl, w);
+	settle_player(a);
+	a->saved_rev = w->rev;
+	a->force_save = true;
+	a->hist_ok = false;
+	return true;
+}
+
+static void new_world(struct app *a)
+{
+	if (!make_world(a, fresh_seed(), false)) {
+		say(a, "Cannot make a world");
+		return;
+	}
+	a->nosave = false;
+	a->time_h = 9.0f;
+	say(a, "A new world (seed %u)", a->world->seed);
+}
+
+/* ================================================================ the icons of the hotbar ================================================================ */
+
+/* A block as a cube seen from a corner, S x S pixels, straight ARGB, see-through outside (made once for the size of the buffer). */
+static void icon_build(uint32_t *out, int S, int block)
+{
+	const uint32_t *top = bl_texture(block, BL_FACE_TOP), *side = bl_texture(block, BL_FACE_SIDE);
+	for (int py = 0; py < S; py++)
+		for (int px = 0; px < S; px++) {
+			float x = (((float)px + 0.5f) / (float)S * 2.0f - 1.0f) * 0.866f, y = ((float)py + 0.5f) / (float)S * 2.0f - 1.0f;
+			const uint32_t *tex = NULL;
+			float u = 0, v = 0, shade = 1.0f;
+			float ta = -y + x / 1.732f, tb = -y - x / 1.732f;               /* the top face: C + a * (0.866, -0.5) + b * (-0.866, -0.5) */
+			if (ta >= 0 && ta <= 1 && tb >= 0 && tb <= 1) {
+				tex = top;
+				u = ta;
+				v = tb;
+				shade = 1.0f;
+			} else if (x < 0) {                                              /* the left face */
+				float s = (x + 0.866f) / 0.866f, t = (y + 0.5f) - 0.5f * s;
+				if (s >= 0 && s <= 1 && t >= 0 && t <= 1) {
+					tex = side;
+					u = s;
+					v = t;
+					shade = 0.78f;
+				}
+			} else {                                                         /* the right face */
+				float s = (0.866f - x) / 0.866f, t = (y + 0.5f) - 0.5f * s;
+				if (s >= 0 && s <= 1 && t >= 0 && t <= 1) {
+					tex = side;
+					u = 1.0f - s;
+					v = t;
+					shade = 0.58f;
+				}
+			}
+			uint32_t c = 0;
+			if (tex) {
+				int tu = LM_CLAMP((int)(u * 16.0f), 0, 15), tv = LM_CLAMP((int)(v * 16.0f), 0, 15);
+				uint32_t t = tex[tv * 16 + tu];
+				c = (t & 0xff000000u) | (uint32_t)((float)((t >> 16) & 255) * shade) << 16 | (uint32_t)((float)((t >> 8) & 255) * shade) << 8 |
+				    (uint32_t)((float)(t & 255) * shade);
+			}
+			out[py * S + px] = c;
+		}
+}
+
+static void icons_free(struct app *a)
+{
+	for (int b = 0; b < BL_COUNT; b++) {
+		free(a->icon[b]);
+		a->icon[b] = NULL;
+	}
+}
+
+static void icons_for(struct app *a, int S)
+{
+	if (S == a->icon_s && a->icon[BL_STONE])
+		return;
+	icons_free(a);
+	a->icon_s = S;
+	for (int b = 1; b < BL_COUNT; b++) {
+		if (b == BL_BEDROCK)
+			continue;
+		a->icon[b] = malloc((size_t)S * (size_t)S * 4);
+		if (a->icon[b])
+			icon_build(a->icon[b], S, b);
+	}
+}
+
+/* ================================================================ the cursor and the pointer lock ================================================================ */
+
+static void arrow_cursor(uint32_t *px, int w, int h)
+{
+	memset(px, 0, (size_t)w * (size_t)h * 4);
+	for (int y = 0; y < 17; y++)                                             /* a plain arrow: a triangle with a tail, white with a dark rim */
+		for (int x = 0; x <= y * 11 / 17 + 1 && x < 12; x++)
+			if (x == 0 || x == y * 11 / 17 + 1 || y == 16)
+				px[(y + 1) * w + x + 1] = 0xff101010u;
+			else
+				px[(y + 1) * w + x + 1] = 0xfff8f8f8u;
+	for (int y = 11; y < 20; y++)
+		for (int x = 4; x < 8; x++)
+			px[(y + 1) * w + x + 1] = (x == 4 || x == 7 || y == 19) ? 0xff101010u : 0xfff8f8f8u;
+}
+
+static void pause_game(struct app *a, enum prompt p)
+{
+	a->playing = false;
+	a->prompt = p;
+	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_jump = a->k_sneak = a->k_ctrl = a->k_lk = a->k_rk = a->k_uk = a->k_dk = false;
+	a->b_break = a->b_place = false;
+	a->pc_hover = a->pc_down = -1;
+	wlwin_lock_pointer(&a->win, false);
+	wlwin_hide_cursor(&a->win, false);
+	a->win.redraw = true;
+}
+
+static void resume_game(struct app *a)
+{
+	a->prompt = P_NONE;
+	a->first = false;
+	a->playing = true;
+	a->lock_ok = wlwin_lock_pointer(&a->win, true);
+	wlwin_hide_cursor(&a->win, true);
+	if (!a->lock_ok)
+		say(a, "No pointer lock here: look with the arrow keys");
+	a->win.redraw = true;
+}
+
+/* ================================================================ one step of the game ================================================================ */
+
+static void aim_update(struct app *a)
+{
+	float eye[3], look[3];
+	bl_player_eye(&a->pl, eye);
+	bl_player_look(&a->pl, look);
+	a->aimed = bl_pick(a->world, eye, look, BL_REACH, &a->aim);
+}
+
+static void do_break(struct app *a)
+{
+	if (a->aimed && bl_break(a->world, &a->aim))
+		aim_update(a);
+}
+
+static void do_place(struct app *a)
+{
+	if (a->aimed && bl_place(a->world, &a->aim, hand_block(a), &a->pl))
+		aim_update(a);
+}
+
+static void do_pick(struct app *a)
+{
+	if (!a->aimed)
+		return;
+	int b = bl_get(a->world, a->aim.x, a->aim.y, a->aim.z);
+	if (b <= BL_AIR || b == BL_BEDROCK || b == BL_WATER)
+		return;
+	for (int i = 0; i < SLOTS; i++)
+		if (a->hotbar[i] == b) {
+			choose_slot(a, i);
+			return;
+		}
+	a->hotbar[a->slot] = b;
+	choose_slot(a, a->slot);
+}
+
+static void look_by(struct app *a, double dyaw, double dpitch)
+{
+	a->pl.yaw += (float)dyaw;
+	if (a->pl.yaw > (float)M_PI)
+		a->pl.yaw -= 2.0f * (float)M_PI;
+	if (a->pl.yaw < -(float)M_PI)
+		a->pl.yaw += 2.0f * (float)M_PI;
+	float p = a->pl.pitch + (float)dpitch;
+	a->pl.pitch = p < -1.553f ? -1.553f : p > 1.553f ? 1.553f : p;
+}
+
+static void advance(struct app *a, int64_t now, float dt)
+{
+	if (a->playing) {
+		if (a->k_lk || a->k_rk || a->k_uk || a->k_dk)
+			look_by(a, ((a->k_rk ? 1 : 0) - (a->k_lk ? 1 : 0)) * LOOK_RATE * dt, ((a->k_uk ? 1 : 0) - (a->k_dk ? 1 : 0)) * LOOK_RATE * dt);
+		struct bl_input in = { .fwd = (a->k_fwd ? 1.0f : 0.0f) - (a->k_back ? 1.0f : 0.0f), .strafe = (a->k_right ? 1.0f : 0.0f) - (a->k_left ? 1.0f : 0.0f),
+		                       .jump = a->k_jump || a->jump_latch, .sneak = a->k_sneak, .sprint = a->k_ctrl && a->k_fwd };
+		bl_player_step(a->world, &a->pl, &in, dt);
+		a->jump_latch = false;
+		aim_update(a);
+		if (a->b_break && now >= a->next_break) {
+			do_break(a);
+			a->next_break = now + REPEAT_MS;
+		}
+		if (a->b_place && now >= a->next_place) {
+			do_place(a);
+			a->next_place = now + REPEAT_MS;
+		}
+		if (a->clock_run) {
+			a->time_h += dt * 24.0f / (a->day_minutes * 60.0f);
+			if (a->time_h >= 24.0f)
+				a->time_h -= 24.0f;
+		}
+	}
+	if (!a->nosave && a->world->rev != a->saved_rev && now - a->last_save_ms >= AUTOSAVE_MS)
+		save_all(a, false);
+}
+
+/* ================================================================ the picture ================================================================ */
+
+struct lay {
+	int slot, gap, x0, y0;                                  /* the hotbar: the size of a slot, the gap, the top left of the first */
+};
+
+static void layout(const struct app *a, struct lay *L)
+{
+	L->gap = 4;
+	L->slot = LM_CLAMP((a->win.bw - 24) / SLOTS - L->gap, 28, 48);
+	int total = SLOTS * L->slot + (SLOTS - 1) * L->gap;
+	L->x0 = (a->win.bw - total) / 2;
+	L->y0 = a->win.bh - L->slot - 12;
+}
+
+static void shadow_text(struct wlwin *w, int x, int y, const char *s, uint32_t rgb)
+{
+	wlwin_text(w, x + 1, y + 1, s, 1, 0x101010u, 0);
+	wlwin_text(w, x, y, s, 1, rgb, 0);
+}
+
+static void paint_crosshair(struct wlwin *w)
+{
+	int cx = w->bw / 2, cy = w->bh / 2;
+	wlwin_fill(w, cx - 10, cy - 2, 21, 4, 0x101010u);
+	wlwin_fill(w, cx - 2, cy - 10, 4, 21, 0x101010u);
+	wlwin_fill(w, cx - 9, cy - 1, 19, 2, 0xf4f4f4u);
+	wlwin_fill(w, cx - 1, cy - 9, 2, 19, 0xf4f4f4u);
+}
+
+static void paint_hotbar(struct app *a, const struct lay *L)
+{
+	struct wlwin *w = &a->win;
+	int sc = wlwin_scale(w);
+	int isz = L->slot - 8;
+	icons_for(a, isz * sc);
+	int total = SLOTS * L->slot + (SLOTS - 1) * L->gap;
+	wlwin_round_fill(w, L->x0 - 6, L->y0 - 6, total + 12, L->slot + 12, 8, 0x12151bu);
+	for (int i = 0; i < SLOTS; i++) {
+		int x = L->x0 + i * (L->slot + L->gap), y = L->y0;
+		if (i == a->slot) {
+			wlwin_round_fill(w, x - 3, y - 3, L->slot + 6, L->slot + 6, 6, 0xf0f0f0u);
+			wlwin_round_fill(w, x - 1, y - 1, L->slot + 2, L->slot + 2, 5, 0x2b3039u);
+		} else {
+			wlwin_round_fill(w, x, y, L->slot, L->slot, 5, 0x2b3039u);
+		}
+		const uint32_t *ic = a->icon[a->hotbar[i]];
+		if (ic)
+			wlwin_blit_px_over(w, x + 4, y + 4, ic, isz * sc, isz * sc, isz * sc);
+		char n[2] = { (char)('1' + i), 0 };
+		wlwin_text(w, x + 3, y + 1, n, 1, i == a->slot ? 0xffffffu : 0xa8b0bcu, 0);
+	}
+	if (now_ms() < a->name_until) {
+		const char *nm = bl_block_name(hand_block(a));
+		shadow_text(w, (w->bw - lm_font_text_width(nm)) / 2, L->y0 - 30, nm, 0xffffffu);
+	}
+}
+
+static void paint_debug(struct app *a)
+{
+	struct wlwin *w = &a->win;
+	char l[200];
+	int y = 6;
+	snprintf(l, sizeof l, "x %.2f  y %.2f  z %.2f", a->pl.x, a->pl.y, a->pl.z);
+	shadow_text(w, 8, y, l, 0xffffffu);
+	y += LM_FONT_H + 2;
+	snprintf(l, sizeof l, "looking %.0f / %.0f degrees   %s%s%s", a->pl.yaw * 180.0 / M_PI, a->pl.pitch * 180.0 / M_PI, a->pl.on_ground ? "on the ground" : "in the air",
+	         a->pl.in_water ? ", in water" : "", a->pl.flying ? ", flying" : "");
+	shadow_text(w, 8, y, l, 0xffffffu);
+	y += LM_FONT_H + 2;
+	snprintf(l, sizeof l, "%d frames a second, %dx%d drawn in %.0f ms", a->fps, a->rw, a->rh, a->ms_render);
+	shadow_text(w, 8, y, l, 0xffffffu);
+	y += LM_FONT_H + 2;
+	int h = (int)a->time_h, m = (int)((a->time_h - (float)h) * 60.0f);
+	snprintf(l, sizeof l, "%02d:%02d   seed %u   %d x %d x %d", h, m, a->world->seed, a->world->w, a->world->d, a->world->h);
+	shadow_text(w, 8, y, l, 0xffffffu);
+	y += LM_FONT_H + 2;
+	if (a->aimed)
+		snprintf(l, sizeof l, "aiming at %s (%d %d %d)", bl_block_name(bl_get(a->world, a->aim.x, a->aim.y, a->aim.z)), a->aim.x, a->aim.y, a->aim.z);
+	else
+		snprintf(l, sizeof l, "aiming at nothing");
+	shadow_text(w, 8, y, l, 0xffffffu);
+}
+
+static const char *const HELP_LINES[] = {
+	"W A S D walk, Space jumps (swims up, flies up), Shift sneaks (flies down).",
+	"Ctrl runs. F flies. The arrow keys look round.",
+	"The left button breaks a block (hold it), the right one puts the block in",
+	"your hand against the face you aim at, the middle one takes the block you aim at.",
+	"1 to 9 or the wheel choose the block in the hand.",
+	"[ and ] move the clock an hour, T stops and starts it, F3 shows the numbers.",
+	"Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits (and saves).",
+};
+
+static void card_rect(const struct app *a, struct wlcard *c, int *nb)
+{
+	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
+	int ch = a->prompt == P_HELP ? 290 : a->prompt == P_PAUSE ? 200 : 130;
+	c->w = LM_MIN(a->prompt == P_HELP ? 560 : 470, a->win.bw - 16);
+	c->h = LM_MIN(ch, a->win.bh - 16);
+	wlcard_center(&a->win, c);
+}
+
+static void paint_card(struct app *a)
+{
+	struct wlwin *w = &a->win;
+	struct wlcard c;
+	int nb;
+	card_rect(a, &c, &nb);
+	const char *title = a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->first ? "Blocks" : "Paused";
+	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
+	const char *labels[4] = { "Cancel", "OK" };
+	uint32_t cols[4] = { lm_theme.btn_grey, lm_theme.btn_blue };
+	int tx = c.x + WLCARD_PAD, ty = c.y + 44, tw = c.w - 2 * WLCARD_PAD;
+	if (a->prompt == P_PAUSE) {
+		labels[0] = "Quit";
+		labels[1] = "Save";
+		labels[2] = "New world";
+		labels[3] = "Play";
+		cols[0] = lm_theme.btn_red;
+		cols[1] = lm_theme.btn_blue;
+		cols[2] = lm_theme.btn_amber;
+		cols[3] = lm_theme.btn_green;
+		wlwin_text(w, tx, ty, a->first ? "Click in the window to look around and play." : "Click in the window to go on.", 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, "W A S D walk, Space jumps, Shift sneaks, Ctrl runs, F flies.", 1, lm_theme.text_dim, tw);
+		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Left button breaks, right button puts a block, 1 to 9 choose it.", 1, lm_theme.text_dim, tw);
+		wlwin_text(w, tx, ty + 3 * (LM_FONT_H + 5), "Esc pauses. F1 lists every key.", 1, lm_theme.text_dim, tw);
+	} else if (a->prompt == P_NEW) {
+		wlwin_text(w, tx, ty, "Make a new world? The one you have now is replaced.", 1, lm_theme.text, tw);
+		labels[1] = "New world";
+		cols[1] = lm_theme.btn_amber;
+	} else {
+		labels[0] = "Close";
+		cols[0] = lm_theme.btn_blue;
+		for (size_t i = 0; i < sizeof HELP_LINES / sizeof HELP_LINES[0]; i++)
+			wlwin_text(w, tx, c.y + 40 + (int)i * (LM_FONT_H + 5), HELP_LINES[i], 1, lm_theme.text, tw);
+	}
+	wlcard_buttons(w, &c, labels, nb, cols, a->pc_hover, a->pc_down, lm_theme.on_colour);
+}
+
+static void write_dump(struct app *a)
+{
+	if (!g_dump)
+		return;
+	if (!a->hist_ok || a->hist_rev != a->world->rev) {
+		memset(a->hist, 0, sizeof a->hist);
+		size_t n = (size_t)a->world->w * (size_t)a->world->d * (size_t)a->world->h;
+		for (size_t i = 0; i < n; i++)
+			a->hist[a->world->b[i]]++;
+		a->hist_rev = a->world->rev;
+		a->hist_ok = true;
+	}
+	char tmp[600];
+	snprintf(tmp, sizeof tmp, "%s.new", g_dump);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	const struct bl_world *w = a->world;
+	int under = bl_get(w, (int)floorf(a->pl.x), (int)floorf(a->pl.y - 0.1f), (int)floorf(a->pl.z));
+	fprintf(f, "state seed=%u kind=%d size=%dx%dx%d x=%.3f y=%.3f z=%.3f yaw=%.4f pitch=%.4f ground=%d water=%d fly=%d sneak=%d vy=%.3f playing=%d locked=%d lockok=%d "
+	           "prompt=%d slot=%d hand=%s rev=%u time=%.3f clock=%d aimed=%d rw=%d rh=%d fps=%d budget=%.0f debug=%d under=%s saved=%d nosave=%d\n",
+	        w->seed, w->kind, w->w, w->d, w->h, a->pl.x, a->pl.y, a->pl.z, a->pl.yaw, a->pl.pitch, a->pl.on_ground, a->pl.in_water, a->pl.flying, a->pl.sneaking,
+	        a->pl.vy, a->playing, a->win.locked, a->lock_ok, (int)a->prompt, a->slot + 1, bl_block_name(hand_block(a)), w->rev, a->time_h, a->clock_run, a->aimed,
+	        a->rw, a->rh, a->fps, a->budget, a->debug, bl_block_name(under), w->rev == a->saved_rev, a->nosave);
+	if (a->aimed)
+		fprintf(f, "aim x=%d y=%d z=%d face=%d px=%d py=%d pz=%d t=%.3f block=%s\n", a->aim.x, a->aim.y, a->aim.z, a->aim.face, a->aim.px, a->aim.py, a->aim.pz,
+		        a->aim.t, bl_block_name(bl_get(w, a->aim.x, a->aim.y, a->aim.z)));
+	fprintf(f, "hist");
+	for (int b = 0; b < BL_COUNT; b++)
+		fprintf(f, " %s=%ld", bl_block_name(b), a->hist[b]);
+	fprintf(f, "\nhotbar");
+	for (int i = 0; i < SLOTS; i++)
+		fprintf(f, " %s", bl_block_name(a->hotbar[i]));
+	fprintf(f, "\n");
+	struct lay L;
+	layout(a, &L);
+	for (int i = 0; i < SLOTS; i++)
+		fprintf(f, "slot %d x=%d y=%d w=%d h=%d\n", i + 1, L.x0 + i * (L.slot + L.gap), L.y0, L.slot, L.slot);
+	if (a->prompt != P_NONE) {
+		struct wlcard c;
+		int nb;
+		card_rect(a, &c, &nb);
+		fprintf(f, "card x=%d y=%d w=%d h=%d\n", c.x, c.y, c.w, c.h);
+		for (int k = 0; k < nb; k++) {
+			int x, y, bw, bh;
+			wlcard_button_rect(&c, k, nb, &x, &y, &bw, &bh);
+			fprintf(f, "cbtn %d %d %d %d %d\n", k, x, y, bw, bh);
+		}
+	}
+	fclose(f);
+	rename(tmp, g_dump);
+}
+
+static void paint(struct wlwin *w)
+{
+	struct app *a = w->data;
+	int64_t t0 = now_ms();
+	/* the picture: as many pixels as the last frames allowed, the window's shape */
+	if (a->fix_w > 0) {
+		a->rw = a->fix_w;
+		a->rh = a->fix_h;
+	} else {
+		render_size(w->pw, w->ph, a->budget, &a->rw, &a->rh);
+	}
+	size_t need = (size_t)a->rw * (size_t)a->rh;
+	if (need > a->frame_cap) {
+		free(a->frame);
+		a->frame = malloc(need * 4);
+		a->frame_cap = a->frame ? need : 0;
+	}
+	if (!a->frame) {
+		wlwin_fill(w, 0, 0, w->bw, w->bh, 0x000000u);
+		return;
+	}
+	float eye[3];
+	bl_player_eye(&a->pl, eye);
+	struct bl_camera cam = { eye[0], eye[1], eye[2], a->pl.yaw, a->pl.pitch, a->fov };
+	struct bl_view v;
+	bl_view_init(&v);
+	v.time_h = a->time_h;
+	v.dist = 96.0f;
+	if (a->aimed && a->playing) {
+		v.target = true;
+		v.tx = a->aim.x;
+		v.ty = a->aim.y;
+		v.tz = a->aim.z;
+	}
+	bl_render(a->world, &cam, &v, a->frame, a->rw, a->rh, a->rw, a->threads);
+	int64_t t1 = now_ms();
+	a->ms_render = (double)(t1 - t0);
+	if (a->fix_w <= 0 && a->prompt == P_NONE)
+		a->budget = budget_next(a->budget, a->ms_render, (double)w->pw * (double)w->ph);
+	wlwin_blit(w, 0, 0, w->bw, w->bh, a->frame, a->rw, a->rh, a->rw);
+
+	struct lay L;
+	layout(a, &L);
+	paint_hotbar(a, &L);
+	if (a->prompt == P_NONE)
+		paint_crosshair(w);
+	if (a->debug)
+		paint_debug(a);
+	if (a->msg[0]) {
+		shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, 26, a->msg, 0xffffffu);
+		if (t1 - a->msg_ms > 3000)
+			a->msg[0] = 0;
+	}
+	if (a->prompt != P_NONE)
+		paint_card(a);
+	a->fps_n++;
+	if (t1 - a->fps_t0 >= 1000) {
+		a->fps = (int)((int64_t)a->fps_n * 1000 / (t1 - a->fps_t0));
+		a->fps_n = 0;
+		a->fps_t0 = t1;
+	}
+	write_dump(a);
+}
+
+/* ================================================================ the pointer and the keys ================================================================ */
+
+static void card_action(struct app *a, int which)
+{
+	if (a->prompt == P_PAUSE) {
+		if (which == 0) {
+			save_all(a, false);
+			a->win.running = false;
+		} else if (which == 1) {
+			save_all(a, true);
+		} else if (which == 2) {
+			a->prompt = P_NEW;
+			a->pc_hover = a->pc_down = -1;
+		} else {
+			resume_game(a);
+		}
+		return;
+	}
+	if (a->prompt == P_NEW) {
+		a->prompt = P_PAUSE;
+		a->pc_hover = a->pc_down = -1;
+		if (which == 1) {
+			new_world(a);
+			resume_game(a);
+		}
+		return;
+	}
+	a->prompt = P_PAUSE;                                    /* the keys card closes back to the pause card */
+	a->pc_hover = a->pc_down = -1;
+}
+
+static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+	struct wlcard c;
+	int nb;
+	card_rect(a, &c, &nb);
+	if (op == LM_WL_POINTER_EVT_MOTION) {
+		if (wlcard_drag_motion(&a->win, &c, a->px, a->py))
+			return;
+		a->pc_hover = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
+		a->win.redraw = true;
+		return;
+	}
+	if (op != LM_WL_POINTER_EVT_BUTTON || args[2].u != 272)
+		return;
+	int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
+	if (args[3].u == 1) {
+		if (k >= 0)
+			a->pc_down = k;
+		else if (wlcard_drag_press(&a->win, &c, a->px, a->py))
+			;
+		else if (a->prompt == P_PAUSE) {                     /* a click anywhere else goes on playing */
+			resume_game(a);
+			a->ignore_release = true;
+		} else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
+			card_action(a, 0);
+		}
+	} else {
+		wlcard_drag_release(&a->win);
+		if (a->pc_down >= 0 && a->pc_down == k)
+			card_action(a, k);
+		a->pc_down = -1;
+	}
+	a->win.redraw = true;
+}
+
+static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
+{
+	struct app *a = w->data;
+	switch (op) {
+	case LM_WL_POINTER_EVT_ENTER:
+		a->px = lm_fixed_to_double(args[2].f);
+		a->py = lm_fixed_to_double(args[3].f);
+		a->has_pointer = true;
+		if (a->playing)
+			wlwin_hide_cursor(w, true);
+		w->redraw = true;
+		return;
+	case LM_WL_POINTER_EVT_LEAVE:
+		a->has_pointer = false;
+		a->pc_hover = -1;
+		w->redraw = true;
+		return;
+	case LM_WL_POINTER_EVT_MOTION:
+		a->px = lm_fixed_to_double(args[1].f);
+		a->py = lm_fixed_to_double(args[2].f);
+		a->has_pointer = true;
+		break;
+	default:
+		break;
+	}
+	if (a->prompt != P_NONE) {
+		card_pointer(a, op, args);
+		return;
+	}
+	if (op == LM_WL_POINTER_EVT_BUTTON) {
+		uint32_t button = args[2].u, state = args[3].u;
+		int64_t now = now_ms();
+		if (state == 0 && a->ignore_release && button == 272) {
+			a->ignore_release = false;
+			return;
+		}
+		if (!a->playing)
+			return;
+		if (button == 272) {
+			a->b_break = state == 1;
+			if (state == 1) {
+				do_break(a);
+				a->next_break = now + REPEAT_MS;
+			}
+		} else if (button == 273) {
+			a->b_place = state == 1;
+			if (state == 1) {
+				do_place(a);
+				a->next_place = now + REPEAT_MS;
+			}
+		} else if (button == 274 && state == 1) {
+			do_pick(a);
+		}
+		w->redraw = true;
+	} else if (op == LM_WL_POINTER_EVT_AXIS && a->playing && args[1].u == 0) {
+		a->wheel += lm_fixed_to_double(args[2].f);
+		if (fabs(a->wheel) >= 10.0) {
+			choose_slot(a, a->slot + (a->wheel > 0 ? 1 : -1));
+			a->wheel = 0;
+		}
+	}
+}
+
+static void relative_event(struct wlwin *w, double dx, double dy)
+{
+	struct app *a = w->data;
+	if (!a->playing)
+		return;
+	look_by(a, dx * a->sens, -dy * a->sens);
+	w->redraw = true;
+}
+
+static void lock_event(struct wlwin *w, bool locked)
+{
+	struct app *a = w->data;
+	if (!locked && a->playing)                              /* the focus went elsewhere: the game waits */
+		pause_game(a, P_PAUSE);
+	w->redraw = true;
+}
+
+static void keys_release(struct app *a)
+{
+	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_jump = a->k_sneak = a->k_ctrl = a->k_lk = a->k_rk = a->k_uk = a->k_dk = false;
+	a->b_break = a->b_place = false;
+}
+
+static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
+{
+	struct app *a = w->data;
+	if (op == LM_WL_KEYBOARD_EVT_LEAVE) {
+		keys_release(a);
+		if (a->playing)
+			pause_game(a, P_PAUSE);
+		w->redraw = true;
+		return;
+	}
+	if (op != LM_WL_KEYBOARD_EVT_KEY)
+		return;
+	uint32_t code = args[2].u;
+	bool down = args[3].u != 0;
+	/* keys that are held: they count while the game is on, and are let go whatever happens */
+	switch (code) {
+	case K_W: a->k_fwd = down && a->playing; break;
+	case K_S: a->k_back = down && a->playing; break;
+	case K_A: a->k_left = down && a->playing; break;
+	case K_D: a->k_right = down && a->playing; break;
+	case K_SPACE:
+		a->k_jump = down && a->playing;
+		if (down && a->playing)
+			a->jump_latch = true;
+		break;
+	case K_LSHIFT: case K_RSHIFT: a->k_sneak = down && a->playing; break;
+	case K_LCTRL: case K_RCTRL: a->k_ctrl = down && a->playing; break;
+	case K_LEFT: a->k_lk = down && a->playing; break;
+	case K_RIGHT: a->k_rk = down && a->playing; break;
+	case K_UP: a->k_uk = down && a->playing; break;
+	case K_DOWN: a->k_dk = down && a->playing; break;
+	default: break;
+	}
+	if (!down)
+		return;
+	bool ctrl = (w->mods & LM_MOD_CTRL) != 0;
+	w->redraw = true;
+	if (ctrl) {
+		if (code == K_Q)
+			w->running = false;
+		else if (code == K_S)
+			save_all(a, true);
+		else if (code == K_N) {
+			if (a->playing)
+				pause_game(a, P_NEW);
+			else
+				a->prompt = P_NEW;
+		}
+		return;
+	}
+	if (a->prompt != P_NONE) {
+		if (code == K_ESC) {
+			if (a->prompt == P_PAUSE)
+				resume_game(a);
+			else {
+				a->prompt = P_PAUSE;
+				a->pc_hover = a->pc_down = -1;
+			}
+		} else if (code == K_ENTER) {
+			if (a->prompt == P_PAUSE)
+				resume_game(a);
+			else
+				card_action(a, a->prompt == P_NEW ? 1 : 0);
+		}
+		return;
+	}
+	if (code == K_ESC) {
+		pause_game(a, P_PAUSE);
+		save_all(a, false);
+		return;
+	}
+	if (code == K_F1) {
+		pause_game(a, P_HELP);
+		return;
+	}
+	if (code >= K_1 && code <= K_9) {
+		choose_slot(a, (int)(code - K_1));
+		return;
+	}
+	if (!a->playing)
+		return;
+	if (code == K_F) {
+		a->pl.flying = !a->pl.flying;
+		a->pl.vy = 0;
+		say(a, a->pl.flying ? "Flying" : "Walking");
+	} else if (code == K_F3) {
+		a->debug = !a->debug;
+	} else if (code == K_T) {
+		a->clock_run = !a->clock_run;
+		say(a, a->clock_run ? "The clock runs" : "The clock stands");
+	} else if (code == K_LBRACE || code == K_RBRACE) {
+		a->time_h += code == K_RBRACE ? 1.0f : -1.0f;
+		if (a->time_h < 0)
+			a->time_h += 24.0f;
+		if (a->time_h >= 24.0f)
+			a->time_h -= 24.0f;
+	}
+}
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t version)
+{
+	(void)w; (void)name; (void)iface; (void)version;
+}
+
+static bool close_event(struct wlwin *w)
+{
+	(void)w;
+	return true;
+}
+
+/* ================================================================ the selftest ================================================================ */
+
+static int selftest(void)
+{
+	int bad = 0;
+#define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "selftest: " __VA_ARGS__); fputc('\n', stderr); bad++; } } while (0)
+
+	/* the render size keeps the window's shape and the budget */
+	int rw, rh;
+	render_size(1920, 1080, 300000, &rw, &rh);
+	CHECK(rw * rh <= 300000 && rw * rh > 250000, "300000 pixels came out as %d x %d", rw, rh);
+	CHECK(abs(rw * 1080 - rh * 1920) <= 1920, "the shape of the window is lost: %d x %d", rw, rh);
+	render_size(800, 600, 10000000, &rw, &rh);
+	CHECK(rw == 800 && rh == 600, "a big budget is the whole window: %d x %d", rw, rh);
+	render_size(800, 600, 100, &rw, &rh);
+	CHECK(rw >= 64 && rh >= 36, "a tiny budget is not smaller than 64 x 36: %d x %d", rw, rh);
+	render_size(1, 1, 1000, &rw, &rh);
+	CHECK(rw >= 1 && rh >= 1, "a window of one pixel does not divide by zero");
+
+	/* the budget goes down when frames are slow, up when they are quick, and stays between its limits */
+	double b = 300000;
+	for (int i = 0; i < 40; i++)
+		b = budget_next(b, 60.0, 2000000);
+	CHECK(b == MIN_BUDGET, "slow frames end at the least budget (%.0f)", b);
+	for (int i = 0; i < 200; i++)
+		b = budget_next(b, 5.0, 900000);
+	CHECK(b == 900000, "quick frames end at the whole window (%.0f)", b);
+	double s = budget_next(500000, 20.0, 2000000);
+	CHECK(s == 500000, "a frame of 20 ms keeps the budget");
+
+	/* every block that can be in the hand has an icon: see-through corners, a middle that shows something */
+	enum { S = 64 };
+	static uint32_t px[S * S];
+	for (int blk = 1; blk < BL_COUNT; blk++) {
+		if (blk == BL_BEDROCK)
+			continue;
+		icon_build(px, S, blk);
+		CHECK((px[0] >> 24) == 0 && (px[S - 1] >> 24) == 0 && (px[(S - 1) * S] >> 24) == 0, "the corners of the icon of %s are not see-through", bl_block_name(blk));
+		int solid = 0;
+		for (int i = 0; i < S * S; i++)
+			solid += (px[i] >> 24) > 0;
+		if (blk != BL_GLASS)                                   /* a pane is a frame round a clear middle */
+			CHECK(solid > S * S / 2 && solid < S * S * 9 / 10, "the icon of %s covers %d of %d pixels", bl_block_name(blk), solid, S * S);
+		if (blk != BL_GLASS && blk != BL_WATER)
+			CHECK((px[S / 2 * S + S / 2] >> 24) == 255, "the middle of the icon of %s is not solid", bl_block_name(blk));
+	}
+	icon_build(px, S, BL_GRASS);
+	CHECK((px[8 * S + S / 2] & 0xffffff) != (px[S * 3 / 4 * S + S / 4] & 0xffffff), "the top and the side of the grass icon look alike");
+
+	/* the files: a folder is made, the hand and the player come back */
+	char dir[128];
+	snprintf(dir, sizeof dir, "/tmp/mellagui-blocks-selftest-%d", (int)getpid());
+	static struct app a;
+	memset(&a, 0, sizeof a);
+	snprintf(a.dir, sizeof a.dir, "%s/a/b", dir);
+	CHECK(mkdirs(a.dir) == 0, "mkdirs");
+	struct stat st;
+	CHECK(stat(a.dir, &st) == 0 && S_ISDIR(st.st_mode) && (st.st_mode & 077) == 0, "the folder is made and private");
+	a.world_size = 64;
+	a.fov = 1.2f;
+	a.sens = 0.0025f;
+	memcpy(a.hotbar, k_default_hotbar, sizeof a.hotbar);
+	CHECK(make_world(&a, 5, true), "a flat world");
+	a.pl.x = 12.5f;
+	a.pl.z = 9.25f;
+	a.pl.yaw = 1.25f;
+	a.pl.pitch = -0.5f;
+	a.time_h = 17.5f;
+	a.slot = 3;
+	a.hotbar[2] = BL_LEAVES;
+	a.pl.flying = true;
+	bl_set(a.world, 5, 20, 5, BL_BRICK);
+	CHECK(save_all(&a, false), "saved");
+	char path[600];
+	world_path(&a, path, sizeof path);
+	CHECK(stat(path, &st) == 0, "the world file is there");
+	struct app b2;
+	memset(&b2, 0, sizeof b2);
+	snprintf(b2.dir, sizeof b2.dir, "%s", a.dir);
+	b2.fov = 1.2f;
+	b2.sens = 0.0025f;
+	memcpy(b2.hotbar, k_default_hotbar, sizeof b2.hotbar);
+	conf_load(&b2, true);
+	CHECK(fabsf(b2.pl.x - 12.5f) < 0.01f && fabsf(b2.pl.z - 9.25f) < 0.01f && fabsf(b2.pl.yaw - 1.25f) < 0.001f && fabsf(b2.time_h - 17.5f) < 0.01f,
+	      "where the player stood comes back (%.2f %.2f %.3f %.2f)", b2.pl.x, b2.pl.z, b2.pl.yaw, b2.time_h);
+	CHECK(b2.slot == 3 && b2.hotbar[2] == BL_LEAVES && b2.pl.flying, "the hand comes back");
+	const char *err = NULL;
+	struct bl_world *lw = bl_load(path, &err);
+	CHECK(lw && bl_get(lw, 5, 20, 5) == BL_BRICK, "the edit is in the saved world");
+	bl_world_free(lw);
+	/* a hand with a block that is none is not believed */
+	snprintf(path, sizeof path, "%s/player.conf", a.dir);
+	FILE *f = fopen(path, "w");
+	if (f) {
+		fprintf(f, "hotbar = 1,2,999,0,9,10,4\nfov = 500\nsensitivity = -3\nslot = 99\n");
+		fclose(f);
+	}
+	struct app c2;
+	memset(&c2, 0, sizeof c2);
+	snprintf(c2.dir, sizeof c2.dir, "%s", a.dir);
+	c2.fov = 1.2f;
+	c2.sens = 0.0025f;
+	conf_load(&c2, true);
+	CHECK(c2.fov == 1.2f && c2.sens == 0.0025f, "a field of view of 500 degrees and a negative speed are not taken");
+	CHECK(c2.hotbar[0] == BL_GRASS && c2.hotbar[1] == BL_DIRT && c2.hotbar[2] == BL_SAND, "only real blocks go in the hand (%d %d %d)", c2.hotbar[0], c2.hotbar[1], c2.hotbar[2]);
+	CHECK(c2.slot == 0, "slot 99 is not a slot");
+	bl_world_free(a.world);
+	char cmd[200];
+	snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
+	if (system(cmd) != 0)
+		fprintf(stderr, "(could not remove %s)\n", dir);
+
+	/* the hand: slots wrap round */
+	memset(&a, 0, sizeof a);
+	a.slot = 0;
+	choose_slot(&a, -1);
+	CHECK(a.slot == SLOTS - 1, "slot -1 wraps to the last");
+	choose_slot(&a, SLOTS);
+	CHECK(a.slot == 0, "slot 9 wraps to the first");
+
+	if (!bad)
+		printf("mellagui-blocks selftest: ok\n");
+	return bad ? 1 : 0;
+#undef CHECK
+}
+
+/* ================================================================ main ================================================================ */
+
+int main(int argc, char **argv)
+{
+	wlwin_hidpi();
+	lm_theme_load_env();
+	signal(SIGPIPE, SIG_IGN);
+	static struct app a;
+	a.world_size = 256;
+	a.fov = 70.0f * (float)M_PI / 180.0f;
+	a.sens = 0.0025f;
+	a.time_h = 9.0f;
+	a.clock_run = true;
+	a.day_minutes = 20.0f;
+	a.threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+	if (a.threads < 1)
+		a.threads = 1;
+	if (a.threads > 8)
+		a.threads = 8;
+	a.pc_hover = a.pc_down = -1;
+	a.first = true;
+	a.budget = 300000;
+	memcpy(a.hotbar, k_default_hotbar, sizeof a.hotbar);
+	int win_w = 960, win_h = 600;
+	float yaw = NAN, pitch = NAN;
+	bool want_save = false, no_save = false;
+	for (int i = 1; i < argc; i++) {
+		char junk;
+		if (!strcmp(argv[i], "--selftest")) {
+			return selftest();
+		} else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
+			a.seed_given = (uint32_t)strtoul(argv[++i], NULL, 10);
+			a.have_seed = true;
+		} else if (!strcmp(argv[i], "--flat")) {
+			a.flat = true;
+		} else if (!strcmp(argv[i], "--world-size") && i + 1 < argc) {
+			a.world_size = atoi(argv[++i]);
+			if (a.world_size < BL_MIN_SIZE || a.world_size > BL_MAX_SIZE) {
+				fprintf(stderr, "mellagui-blocks: --world-size wants %d to %d\n", BL_MIN_SIZE, BL_MAX_SIZE);
+				return 2;
+			}
+		} else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
+			if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 320 || win_h < 240) {
+				fprintf(stderr, "mellagui-blocks: --size wants a size like 960x600\n");
+				return 2;
+			}
+		} else if (!strcmp(argv[i], "--render") && i + 1 < argc) {
+			if (sscanf(argv[++i], "%dx%d%c", &a.fix_w, &a.fix_h, &junk) != 2 || a.fix_w < 16 || a.fix_h < 16 || a.fix_w > 4096 || a.fix_h > 4096) {
+				fprintf(stderr, "mellagui-blocks: --render wants a size like 320x200\n");
+				return 2;
+			}
+		} else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
+			int n = atoi(argv[++i]);                           /* (LM_CLAMP evaluates its argument three times: read it first) */
+			a.threads = LM_CLAMP(n, 1, 8);
+		} else if (!strcmp(argv[i], "--time") && i + 1 < argc) {
+			a.time_h = (float)atof(argv[++i]);
+			if (!(a.time_h >= 0 && a.time_h < 24)) {
+				fprintf(stderr, "mellagui-blocks: --time wants an hour from 0 to 24\n");
+				return 2;
+			}
+		} else if (!strcmp(argv[i], "--no-clock")) {
+			a.clock_run = false;
+		} else if (!strcmp(argv[i], "--yaw") && i + 1 < argc) {
+			yaw = (float)(atof(argv[++i]) * M_PI / 180.0);
+		} else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) {
+			pitch = (float)(atof(argv[++i]) * M_PI / 180.0);
+		} else if (!strcmp(argv[i], "--fov") && i + 1 < argc) {
+			double d = atof(argv[++i]);
+			if (d < 40 || d > 120) {
+				fprintf(stderr, "mellagui-blocks: --fov wants 40 to 120 degrees\n");
+				return 2;
+			}
+			a.fov = (float)(d * M_PI / 180.0);
+		} else if (!strcmp(argv[i], "--save")) {
+			want_save = true;
+		} else if (!strcmp(argv[i], "--no-save")) {
+			no_save = true;
+		} else {
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock] [--yaw D] [--pitch D] "
+			                "[--fov D] [--save | --no-save] | --selftest\n");
+			return 2;
+		}
+	}
+	g_dump = getenv("MELLAGUI_BLOCKS_DUMP");
+	data_dir(a.dir, sizeof a.dir);
+
+	/* the world: the saved one, unless a seed or a flat world was asked for */
+	bool fresh = a.have_seed || a.flat;
+	bool from_file = false;
+	if (!fresh) {
+		char path[600];
+		world_path(&a, path, sizeof path);
+		if (access(path, R_OK) == 0) {
+			const char *err = NULL;
+			a.world = bl_load(path, &err);
+			if (a.world) {
+				from_file = true;
+				a.saved_rev = a.world->rev;
+				bl_player_init(&a.pl, a.world);
+				conf_load(&a, true);
+			} else {
+				fprintf(stderr, "mellagui-blocks: %s: %s (the file is left alone and a new world is not saved)\n", path, err ? err : "cannot be read");
+				a.nosave = true;
+			}
+		}
+	}
+	if (!a.world) {
+		if (!make_world(&a, a.have_seed ? a.seed_given : fresh_seed(), a.flat)) {
+			fprintf(stderr, "mellagui-blocks: cannot make a world\n");
+			return 1;
+		}
+		conf_load(&a, false);
+		if (fresh)
+			a.nosave = !want_save;
+	}
+	if (no_save)
+		a.nosave = true;
+	settle_player(&a);
+	if (!isnan(yaw))
+		a.pl.yaw = yaw;
+	if (!isnan(pitch))
+		a.pl.pitch = pitch;
+	(void)from_file;
+	aim_update(&a);
+
+	static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .close = close_event,
+	                                      .lock = lock_event, .relative = relative_event };
+	if (wlwin_connect(&a.win, "mellagui-blocks", &ops, &a) < 0)
+		return 1;
+	if (wlwin_open(&a.win, "Blocks", "mellagui.blocks", win_w, win_h, 480, 320) < 0)
+		return 1;
+	static uint32_t cur[24 * 24];
+	arrow_cursor(cur, 24, 24);
+	wlwin_cursor(&a.win, cur, 24, 24, 1, 1);
+	a.prompt = P_PAUSE;
+	a.last_save_ms = now_ms();
+	a.fps_t0 = now_ms();
+
+	int64_t last = now_ms();
+	while (a.win.running) {
+		int timeout = a.playing ? 1 : (a.msg[0] || (!a.nosave && a.world->rev != a.saved_rev)) ? 500 : -1;
+		if (!wlwin_step(&a.win, timeout))
+			break;
+		int64_t now = now_ms();
+		float dt = (float)(now - last) / 1000.0f;
+		last = now;
+		if (dt > 0.1f)
+			dt = 0.1f;
+		advance(&a, now, dt);
+		if (a.playing || a.msg[0])
+			a.win.redraw = true;
+	}
+	save_all(&a, false);
+	wlwin_lock_pointer(&a.win, false);
+	icons_free(&a);
+	free(a.frame);
+	bl_world_free(a.world);
+	wlwin_destroy(&a.win);
+	return 0;
+}

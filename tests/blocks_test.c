@@ -21,6 +21,8 @@
 #include <unistd.h>
 
 static int g_fail, g_checks;
+static char g_dir[256];
+static void tmpdir(void);
 
 #define CHECK(cond, ...) do { \
 	g_checks++; \
@@ -115,9 +117,13 @@ static void test_world(void)
 	}
 	CHECK(bad == 0, "%d cells hold a number that is no block", bad);
 	for (int k = BL_GRASS; k < BL_COUNT; k++)
-		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK)
+		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && !(k >= BL_FLOW1 && k <= BL_FLOW7))
 			CHECK(count[k] > 0, "the world has no %s", bl_block_name(k));
-	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0, "glass / planks are only for the player to put");
+	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0, "glass / planks / torches / lamps are only for the player to put");
+	long flowing = 0;
+	for (int k = BL_FLOW1; k <= BL_FLOW7; k++)
+		flowing += count[k];
+	CHECK(flowing == 0, "the generated world has no flowing water, only the sea");
 	CHECK((size_t)count[BL_AIR] > n / 4 && (size_t)count[BL_STONE] > n / 4, "a quarter of the world is air and a quarter stone");
 
 	/* the floor: bedrock, everywhere; the rest of the bottom is stone or something carved out of it */
@@ -146,6 +152,7 @@ static void test_world(void)
 					water_hover++;
 			}
 	CHECK(water_high == 0, "%d water cells above the sea level", water_high);
+	CHECK(a->light && bl_light(a, 10, 40, 10) == 0, "no light in a world without lamps");
 	CHECK(water_hover == 0, "%d water cells with air right under them", water_hover);
 
 	/* a tree is a log with something solid under it and leaves near its top */
@@ -194,6 +201,8 @@ static void test_world(void)
 
 /* ---- editing -------------------------------------------------------------------------------------------------------- */
 
+static void check_light(struct bl_world *w, const char *what);
+
 static void test_edit(void)
 {
 	struct bl_world *w = bl_world_new(77, 96, 96, 64);
@@ -213,6 +222,7 @@ static void test_edit(void)
 		bl_set(w, x, y, z, blk);
 	}
 	check_columns(w, "after random edits");
+	check_light(w, "after random edits");
 	CHECK(w->rev > rev, "the edits are counted");
 
 	/* a tower and then glass on top of it: glass is seen but does not shade */
@@ -284,7 +294,7 @@ static void test_pick(void)
 	}
 	/* some glass and water to be looked through, more than the generator has */
 	for (int i = 0; i < 400; i++)
-		bl_set(w, (int)(rnd() % 128), 20 + (int)(rnd() % 20), (int)(rnd() % 128), (rnd() & 1) ? BL_GLASS : BL_WATER);
+		bl_set(w, (int)(rnd() % 128), 20 + (int)(rnd() % 20), (int)(rnd() % 128), (int[]){ BL_GLASS, BL_WATER, BL_TORCH, BL_LAMP, BL_FLOW3 }[rnd() % 5]);
 	int hits = 0, misses = 0, grazes = 0, wrong_hit = 0, missed_block = 0, wrong_face = 0;
 	for (int i = 0; i < 30000; i++) {
 		float o[3] = { rndr(2, 126), rndr(5, 55), rndr(2, 126) };
@@ -370,6 +380,294 @@ static void settle(const struct bl_world *w, struct bl_player *p)
 	struct bl_input in = { 0 };
 	for (int i = 0; i < 200; i++)
 		bl_player_step(w, p, &in, 0.02f);
+}
+
+
+/* ---- light and water that flows ---------------------------------------------------------------------------------------- */
+
+/* the light the incremental updates made equals the light made from the emitters from scratch */
+static void check_light(struct bl_world *w, const char *what)
+{
+	size_t n = (size_t)w->w * w->d * w->h;
+	uint8_t *keep = malloc(n);
+	memcpy(keep, w->light, n);
+	bl_lights_rebuild(w);
+	size_t bad = 0, first = n;
+	for (size_t i = 0; i < n; i++)
+		if (keep[i] != w->light[i]) {
+			bad++;
+			if (first == n)
+				first = i;
+		}
+	CHECK(bad == 0, "%s: %zu cells have light that differs from the light made from scratch (first at index %zu: %d, should be %d)", what, bad, first,
+	      first < n ? keep[first] : 0, first < n ? w->light[first] : 0);
+	free(keep);
+}
+
+static void test_light(void)
+{
+	struct bl_world *w = bl_world_flat(48, 48, 64, 20);
+	CHECK(bl_light(w, 10, 25, 10) == 0 && bl_light(w, -1, 5, 5) == 0 && bl_light(w, 5, 99, 5) == 0, "no light, and none outside the world");
+	/* a torch lights 14 in its cell and one less for every step, in the open as far as the Manhattan distance goes */
+	struct bl_hit floor = { .hit = true, .x = 24, .y = 19, .z = 24, .face = BL_PY, .px = 24, .py = 20, .pz = 24 };
+	CHECK(bl_place(w, &floor, BL_TORCH, NULL), "a torch on the grass");
+	CHECK(bl_light(w, 24, 20, 24) == 14 && bl_light(w, 25, 20, 24) == 13 && bl_light(w, 24, 22, 24) == 12 && bl_light(w, 24 + 7, 20, 24 + 7) == 0,
+	      "14 at the torch, 13 beside it, 12 two up, nothing 14 steps away (%d %d %d %d)", bl_light(w, 24, 20, 24), bl_light(w, 25, 20, 24), bl_light(w, 24, 22, 24),
+	      bl_light(w, 31, 20, 31));
+	CHECK(bl_light(w, 24 + 13, 20, 24) == 1 && bl_light(w, 24 + 14, 20, 24) == 0, "the light reaches 13 cells and no further");
+	CHECK(bl_light(w, 24, 19, 24) == 0, "no light in the ground (a block that is opaque holds none)");
+	check_light(w, "one torch");
+	/* a lamp is 15 and an opaque block that shines */
+	CHECK(bl_set(w, 10, 20, 10, BL_LAMP) && bl_light(w, 10, 20, 10) == 15 && bl_light(w, 11, 20, 10) == 14, "a lamp gives 15 and 14 beside it");
+	/* a wall of stone holds light back and taking it away lets it through again */
+	for (int y = 20; y < 30; y++)
+		for (int z = 20; z < 29; z++)
+			bl_set(w, 27, y, z, BL_STONE);
+	int behind = bl_light(w, 29, 20, 24);
+	CHECK(behind < 10, "behind a wall the light is weaker (%d)", behind);
+	check_light(w, "with a wall");
+	for (int y = 20; y < 30; y++)
+		for (int z = 20; z < 29; z++)
+			bl_set(w, 27, y, z, BL_AIR);
+	CHECK(bl_light(w, 29, 20, 24) == 14 - 5, "without it the light is as before (%d)", bl_light(w, 29, 20, 24));
+	check_light(w, "wall taken away");
+	/* a torch taken away takes its light with it, the lamp's stays */
+	struct bl_hit tor = { .hit = true, .x = 24, .y = 20, .z = 24 };
+	CHECK(bl_break(w, &tor) && bl_light(w, 24, 20, 24) == 0 && bl_light(w, 25, 20, 24) == 0, "no torch, no light");
+	CHECK(bl_light(w, 11, 20, 10) == 14, "the lamp still shines");
+	check_light(w, "torch taken away");
+	/* glass and water let light through, a room closed with stone does not */
+	bl_set(w, 30, 20, 30, BL_TORCH);
+	for (int x = 29; x <= 31; x++)
+		for (int z = 29; z <= 31; z++)
+			for (int y = 20; y <= 22; y++)
+				if (!(x == 30 && z == 30 && y == 20))
+					bl_set(w, x, y, z, y == 22 || x != 30 || z != 30 ? BL_STONE : BL_AIR);
+	CHECK(bl_light(w, 30, 21, 30) == 13 && bl_light(w, 33, 20, 30) == 0, "a closed room: lit inside, dark outside (%d, %d)", bl_light(w, 30, 21, 30), bl_light(w, 33, 20, 30));
+	bl_set(w, 31, 20, 30, BL_GLASS);
+	CHECK(bl_light(w, 32, 20, 30) == 13 - 0 - 1 + 0 && bl_light(w, 33, 20, 30) == 11, "a pane of glass lets it out (%d %d)", bl_light(w, 32, 20, 30), bl_light(w, 33, 20, 30));
+	check_light(w, "room with glass");
+	/* a torch needs a floor and goes when it is taken away */
+	struct bl_hit air = { .hit = true, .x = 5, .y = 30, .z = 5, .face = BL_PY, .px = 5, .py = 31, .pz = 5 };
+	CHECK(!bl_place(w, &air, BL_TORCH, NULL), "a torch is not put in the air");
+	bl_set(w, 40, 20, 40, BL_STONE);
+	struct bl_hit on = { .hit = true, .x = 40, .y = 20, .z = 40, .face = BL_PY, .px = 40, .py = 21, .pz = 40 };
+	CHECK(bl_place(w, &on, BL_TORCH, NULL) && bl_get(w, 40, 21, 40) == BL_TORCH && bl_light(w, 40, 21, 40) == 14, "a torch on a stone");
+	bl_set(w, 40, 20, 40, BL_AIR);
+	CHECK(bl_get(w, 40, 21, 40) == BL_AIR && bl_light(w, 40, 21, 40) == 0, "the torch goes with the block it stood on");
+	check_light(w, "torch without floor");
+	/* a torch can be walked through, aimed at and broken */
+	CHECK(!bl_solid(BL_TORCH) && bl_targetable(BL_TORCH) && !bl_opaque(BL_TORCH) && bl_opaque(BL_LAMP) && bl_solid(BL_LAMP), "what a torch and a lamp are");
+	/* water put into a torch's cell takes it away, water that flows does not */
+	bl_world_free(w);
+
+	/* 600 random edits with lamps, torches, glass, water and stone: the light is always what the emitters make */
+	w = bl_world_new(52, 64, 64, 64);
+	int kinds[] = { BL_TORCH, BL_LAMP, BL_STONE, BL_AIR, BL_AIR, BL_GLASS, BL_WATER, BL_DIRT, BL_LEAVES, BL_FLOW2 };
+	for (int round = 0; round < 6; round++) {
+		for (int i = 0; i < 120; i++)
+			bl_set(w, 20 + (int)(rnd() % 24), 18 + (int)(rnd() % 20), 20 + (int)(rnd() % 24), kinds[rnd() % (sizeof kinds / sizeof kinds[0])]);
+		check_light(w, "random edits");
+		check_columns(w, "random edits with light");
+	}
+	bl_world_free(w);
+}
+
+static int ref_desired(const struct bl_world *w, int x, int y, int z)       /* the rule of the flow, written again from the description in blocks.h */
+{
+	if (bl_water(bl_get(w, x, y + 1, z)))
+		return 1;
+	int best = 8;
+	static const int dx[4] = { 1, -1, 0, 0 }, dz[4] = { 0, 0, 1, -1 };
+	for (int k = 0; k < 4; k++) {
+		int nb = bl_get(w, x + dx[k], y, z + dz[k]);
+		if (!bl_water(nb))
+			continue;
+		int ln = bl_water_level(nb);
+		int below = bl_get(w, x + dx[k], y - 1, z + dz[k]);
+		if (ln >= 7 || (ln > 0 && (below == BL_AIR || bl_water(below))))
+			continue;
+		if (ln + 1 < best)
+			best = ln + 1;
+	}
+	return best <= 7 ? best : 0;
+}
+
+/* every cell of air or flowing water holds what the rule says it should: the flow has settled */
+static long water_unsettled(const struct bl_world *w)
+{
+	long bad = 0;
+	for (int z = 0; z < w->d; z++)
+		for (int x = 0; x < w->w; x++)
+			for (int y = 0; y < w->h; y++) {
+				int b = w->b[bl_index(w, x, y, z)];
+				if (b != BL_AIR && !(b >= BL_FLOW1 && b <= BL_FLOW7))
+					continue;
+				int d = ref_desired(w, x, y, z);
+				if (b != (d ? BL_FLOW1 + d - 1 : BL_AIR))
+					bad++;
+			}
+	return bad;
+}
+
+static int settle_water(struct bl_world *w)
+{
+	int rounds = 0;
+	while (bl_water_pending(w) && rounds < 3000) {
+		bl_world_tick(w, 1 << 20);
+		rounds++;
+	}
+	return rounds;
+}
+
+static long count_water(const struct bl_world *w, long *sources)
+{
+	long n = 0;
+	*sources = 0;
+	size_t cells = (size_t)w->w * w->d * w->h;
+	for (size_t i = 0; i < cells; i++)
+		if (bl_water(w->b[i])) {
+			n++;
+			*sources += w->b[i] == BL_WATER;
+		}
+	return n;
+}
+
+static void test_water(void)
+{
+	struct bl_world *w = bl_world_flat(64, 64, 64, 20);
+	long src;
+	CHECK(bl_world_tick(w, 100) == 0, "a tick with nothing to do changes nothing");
+	/* a source on the floor spreads in a diamond: level = how many steps from it, 7 at the most */
+	bl_set(w, 32, 20, 32, BL_WATER);
+	int rounds = settle_water(w);
+	CHECK(rounds > 4 && rounds < 40, "the flow takes %d ticks to settle", rounds);
+	CHECK(bl_get(w, 33, 20, 32) == BL_FLOW1 && bl_get(w, 34, 20, 32) == BL_FLOW2 && bl_get(w, 33, 20, 33) == BL_FLOW2 && bl_get(w, 32 + 7, 20, 32) == BL_FLOW7 &&
+	      bl_get(w, 32 + 8, 20, 32) == BL_AIR, "levels 1 .. 7 going out from the source");
+	CHECK(count_water(w, &src) == 1 + 4 * 28 && src == 1, "a diamond of 113 cells, one of them a source (%ld)", count_water(w, &src));
+	CHECK(water_unsettled(w) == 0, "and it is settled: every cell holds what the rule asks");
+	/* the source taken away: the flow dries up behind it */
+	bl_set(w, 32, 20, 32, BL_AIR);
+	settle_water(w);
+	CHECK(count_water(w, &src) == 0, "it dries up (%ld cells left)", count_water(w, &src));
+	CHECK(water_unsettled(w) == 0, "settled");
+
+	/* water in the air falls and spreads where it lands */
+	bl_set(w, 20, 26, 20, BL_WATER);
+	settle_water(w);
+	CHECK(bl_get(w, 20, 21, 20) == BL_FLOW1 && bl_get(w, 20, 20, 20) == BL_FLOW1, "a column of falling water down to the floor");
+	/* the four neighbours of the source at its own height have air under them: they fall too, and the pool is spread from their four columns, level 1 at the foot of each */
+	CHECK(bl_get(w, 21, 26, 20) == BL_FLOW1 && bl_get(w, 22, 26, 20) == BL_AIR && bl_get(w, 21, 20, 20) == BL_FLOW1 && bl_get(w, 22, 20, 20) == BL_FLOW2 &&
+	      bl_get(w, 27, 20, 20) == BL_FLOW7 && bl_get(w, 28, 20, 20) == BL_AIR, "a flowing cell with air under it falls and does not spread; a pool where the columns land");
+	CHECK(water_unsettled(w) == 0, "settled, with the waterfalls round the source in the air");
+	bl_set(w, 20, 26, 20, BL_AIR);
+	settle_water(w);
+	CHECK(count_water(w, &src) == 0 && water_unsettled(w) == 0, "all of it dries up when the source goes (%ld)", count_water(w, &src));
+
+	/* a wall holds it, a torch is not washed away, a hole in the floor takes it down */
+	for (int y = 20; y < 24; y++)
+		for (int x = 10; x < 20; x++)
+			bl_set(w, x, y, 40, BL_STONE);
+	bl_set(w, 15, 20, 41, BL_WATER);
+	bl_set(w, 16, 20, 41, BL_TORCH);
+	settle_water(w);
+	CHECK(bl_get(w, 15, 20, 40) == BL_STONE && bl_get(w, 15, 20, 39) == BL_AIR, "the wall stops it");
+	CHECK(bl_get(w, 16, 20, 41) == BL_TORCH && bl_water(bl_get(w, 17, 20, 41)), "a torch is not washed away; the water goes round it by the next row");
+	bl_set(w, 14, 19, 41, BL_AIR);
+	bl_set(w, 14, 18, 41, BL_AIR);
+	settle_water(w);
+	CHECK(bl_water(bl_get(w, 14, 19, 41)) && bl_water(bl_get(w, 14, 18, 41)), "a hole in the floor takes the water down");
+	CHECK(water_unsettled(w) == 0, "settled with a hole and a wall and a torch");
+	bl_world_free(w);
+
+	/* what the player may do with it */
+	w = bl_world_flat(32, 32, 64, 20);
+	struct bl_hit top = { .hit = true, .x = 10, .y = 19, .z = 10, .face = BL_PY, .px = 10, .py = 20, .pz = 10 };
+	CHECK(bl_place(w, &top, BL_WATER, NULL) && bl_get(w, 10, 20, 10) == BL_WATER, "water is put by hand as a source");
+	settle_water(w);
+	CHECK(bl_get(w, 11, 20, 10) == BL_FLOW1, "and it flows");
+	struct bl_hit side = { .hit = true, .x = 10, .y = 19, .z = 10, .face = BL_PY, .px = 11, .py = 20, .pz = 10 };
+	CHECK(bl_place(w, &side, BL_STONE, NULL) && bl_get(w, 11, 20, 10) == BL_STONE, "a block replaces flowing water");
+	settle_water(w);
+	CHECK(water_unsettled(w) == 0, "settled again");
+	CHECK(!bl_place(w, &top, BL_FLOW3, NULL), "flowing water is not something to put");
+	CHECK(bl_water(BL_FLOW4) && !bl_solid(BL_FLOW4) && bl_water_level(BL_FLOW4) == 4 && bl_water_level(BL_WATER) == 0 && !bl_targetable(BL_FLOW7), "what flowing water is");
+	/* the budget: no more cells looked at than asked */
+	bl_set(w, 20, 20, 20, BL_WATER);
+	long before = bl_water_pending(w);
+	int changed = bl_world_tick(w, 1);
+	CHECK(changed <= 1 && bl_water_pending(w) >= (size_t)before - 1, "a tick of budget 1 changes at most one cell (%d changed, %ld waiting before)", changed, before);
+	settle_water(w);
+	CHECK(water_unsettled(w) == 0, "the rest of the queue is looked at later");
+	/* the player in flowing water */
+	struct bl_player p;
+	bl_player_init(&p, w);
+	p.x = 22.5f;
+	p.z = 20.5f;
+	p.y = 20.0f;
+	struct bl_input none = { 0 };
+	bl_player_step(w, &p, &none, 0.05f);
+	CHECK(p.in_water || bl_water(bl_get(w, 22, 20, 20)), "standing in flowing water counts as water");
+	bl_world_free(w);
+
+	/* water flows into a hole dug at the shore of the sea, and the result is settled */
+	w = bl_world_new(31, 96, 96, 64);
+	int sx = -1, hx = -1, hz = -1;
+	static const int dx[4] = { 1, -1, 0, 0 }, dz[4] = { 0, 0, 1, -1 };
+	for (int z = 2; z < 94 && sx < 0; z++)
+		for (int x = 2; x < 94 && sx < 0; x++)
+			if (w->b[bl_index(w, x, w->sea, z)] == BL_WATER)
+				for (int k = 0; k < 4; k++) {
+					int nx = x + dx[k], nz = z + dz[k];
+					int b = w->b[bl_index(w, nx, w->sea, nz)];
+					if (bl_solid(b) && b != BL_BEDROCK && bl_get(w, nx, w->sea + 1, nz) == BL_AIR) {
+						sx = x;
+						hx = nx;
+						hz = nz;
+						break;
+					}
+				}
+	CHECK(sx >= 0, "the sea has a shore");
+	if (sx >= 0) {
+		CHECK(water_unsettled(w) == 0, "the generated sea is settled as it is");
+		bl_set(w, hx, w->sea, hz, BL_AIR);
+		settle_water(w);
+		CHECK(bl_water(bl_get(w, hx, w->sea, hz)), "the sea runs into the hole dug at its shore");
+		CHECK(water_unsettled(w) == 0, "and the whole world is settled again (%ld cells are not)", water_unsettled(w));
+		bl_set(w, hx, w->sea, hz, BL_STONE);
+		settle_water(w);
+		CHECK(water_unsettled(w) == 0, "closing the hole dries what came through");
+	}
+	bl_world_free(w);
+
+	/* a flood and a saved file: flowing water is saved and looked at again when it is loaded (what has lost its source dries up) */
+	tmpdir();
+	char path[400];
+	snprintf(path, sizeof path, "%s/flow.bl", g_dir);
+	w = bl_world_flat(48, 48, 64, 20);
+	bl_set(w, 24, 20, 24, BL_WATER);
+	settle_water(w);
+	uint64_t hash = bl_hash(w);
+	CHECK(bl_save(w, path) == 0, "saved a world with a flood");
+	const char *err = NULL;
+	struct bl_world *r = bl_load(path, &err);
+	CHECK(r && bl_hash(r) == hash && count_water(r, &src) == 113, "the flood comes back");
+	if (r) {
+		settle_water(r);
+		CHECK(bl_hash(r) == hash && water_unsettled(r) == 0, "and stays as it was when looked at again");
+		bl_world_free(r);
+	}
+	bl_set(w, 24, 20, 24, BL_AIR);               /* the source goes and the file is written before the water has had time to dry up */
+	CHECK(w->wq_n > 0, "the water waits to dry");
+	bl_save(w, path);
+	r = bl_load(path, &err);
+	CHECK(r && count_water(r, &src) == 112, "the stale flow is in the file (%ld)", r ? count_water(r, &src) : -1L);
+	if (r) {
+		settle_water(r);
+		CHECK(count_water(r, &src) == 0, "and dries up after the load (%ld)", count_water(r, &src));
+		bl_world_free(r);
+	}
+	bl_world_free(w);
 }
 
 static void test_player(void)
@@ -600,8 +898,6 @@ static void test_player(void)
 
 /* ---- the save file -------------------------------------------------------------------------------------------------- */
 
-static char g_dir[256];
-
 static void tmpdir(void)
 {
 	if (g_dir[0])
@@ -749,8 +1045,10 @@ static void test_textures(void)
 			}
 			if (b == BL_GLASS) {
 				CHECK(clear > 100 && partial + solid > 20, "glass: a clear middle and a frame (%d clear)", clear);
-			} else if (b == BL_WATER) {
+			} else if (bl_water(b)) {
 				CHECK(solid == 0 && clear == 0, "water is see-through everywhere");
+			} else if (b == BL_TORCH) {
+				CHECK(clear > 150 && solid > 8, "a torch is a stick and a flame on a clear background (%d clear, %d solid)", clear, solid);
 			} else {
 				CHECK(solid == 256, "%s has pixels that are not solid", bl_block_name(b));
 				CHECK(nseen >= 4, "%s is one flat colour", bl_block_name(b));
@@ -861,6 +1159,37 @@ static void test_render(void)
 	CHECK(memcmp(a, c, sizeof a) == 0, "an outline round a block nobody sees changes nothing");
 	v.target = false;
 
+	/* a torch at night lights the ground round it, warm, and its flame is seen; a lamp shines in daylight too */
+	{
+		struct bl_world *tw = bl_world_flat(64, 64, 64, 20);
+		struct bl_camera tc = { 32.5f, 21.62f, 30.5f, 0.0f, -0.35f, 1.2f };
+		struct bl_view nv;
+		bl_view_init(&nv);
+		nv.time_h = 0.0f;
+		bl_render(tw, &tc, &nv, a, W, H, W, 1);
+		struct rgb dark = average(a, W, 20, H / 2, W - 40, H / 2 - 4);
+		bl_set(tw, 32, 20, 34, BL_TORCH);
+		bl_render(tw, &tc, &nv, b, W, H, W, 1);
+		struct rgb lit = average(b, W, 20, H / 2, W - 40, H / 2 - 4);
+		CHECK(lit.r + lit.g + lit.b > 1.4f * (dark.r + dark.g + dark.b), "a torch lights the ground at night (%.0f %.0f %.0f -> %.0f %.0f %.0f)", dark.r, dark.g, dark.b, lit.r, lit.g, lit.b);
+		CHECK(lit.r > lit.b + 6.0f && lit.r / (lit.b + 1.0f) > 1.5f * dark.r / (dark.b + 1.0f), "and the light is warm (red against blue: %.1f against %.1f before)", lit.r / (lit.b + 1.0f), dark.r / (dark.b + 1.0f));
+		int flame = 0;
+		for (int i = 0; i < W * H; i++) {
+			int r = (int)((b[i] >> 16) & 255), g = (int)((b[i] >> 8) & 255), bl = (int)(b[i] & 255);
+			flame += r > 220 && g > 140 && bl < 110;
+		}
+		CHECK(flame >= 2, "the flame of the torch is seen (%d pixels)", flame);
+		bl_set(tw, 32, 20, 34, BL_AIR);
+		bl_render(tw, &tc, &nv, c, W, H, W, 1);
+		CHECK(memcmp(a, c, sizeof a) == 0, "a torch taken away leaves the picture as it was");
+		bl_set(tw, 32, 20, 33, BL_LAMP);
+		bl_view_init(&nv);
+		bl_render(tw, &tc, &nv, a, W, H, W, 1);
+		struct rgb lamp = average(a, W, W / 2 - 3, H / 2 - 3, 6, 6);
+		CHECK(lamp.r > 190.0f && lamp.g > 140.0f && lamp.b < lamp.r - 60.0f, "a lamp shines in the day (%.0f %.0f %.0f)", lamp.r, lamp.g, lamp.b);
+		bl_world_free(tw);
+	}
+
 	/* glass: the picture behind a pane shows through, the frame does not */
 	bl_set(w, 32, 21, 33, BL_GLASS);
 	bl_set(w, 32, 21, 34, BL_BRICK);
@@ -896,7 +1225,7 @@ static void test_render(void)
 	/* the picture and the pointing agree: the first block a pixel's ray meets is the one `bl_pick` finds */
 	w = bl_world_new(4242, 128, 128, 64);
 	for (int i = 0; i < 300; i++)
-		bl_set(w, (int)(rnd() % 128), 18 + (int)(rnd() % 24), (int)(rnd() % 128), (rnd() & 1) ? BL_GLASS : BL_WATER);
+		bl_set(w, (int)(rnd() % 128), 18 + (int)(rnd() % 24), (int)(rnd() % 128), (int[]){ BL_GLASS, BL_WATER, BL_TORCH, BL_LAMP, BL_FLOW3 }[rnd() % 5]);
 	int same = 0, diff = 0, sky = 0;
 	struct bl_view idv;
 	bl_view_init(&idv);
@@ -1038,6 +1367,7 @@ static int run_shot(int argc, char **argv)
 	struct bl_view v;
 	bl_view_init(&v);
 	bool target = false;
+	int scene = 0;
 	for (int i = 2; i < argc; i++) {
 		char *eq = strchr(argv[i], '=');
 		if (!eq) {
@@ -1059,6 +1389,7 @@ static int run_shot(int argc, char **argv)
 		else if (!strcmp(k, "fov")) fov = (float)atof(val);
 		else if (!strcmp(k, "threads")) threads = atoi(val);
 		else if (!strcmp(k, "target")) target = atoi(val) != 0;
+		else if (!strcmp(k, "scene")) scene = atoi(val);
 		else {
 			printf("unknown key %s\n", k);
 			return 2;
@@ -1071,6 +1402,20 @@ static int run_shot(int argc, char **argv)
 	}
 	float s[3];
 	bl_spawn(world, s);
+	if (scene) {                                 /* a torch, a lamp tower, a pool and a waterfall round the spawn (for looking at the light and the flow) */
+		int cx = (int)s[0], cy = (int)s[1], cz = (int)s[2];
+		bl_set(world, cx + 2, cy, cz + 4, BL_TORCH);
+		for (int y = 0; y < 3; y++)
+			bl_set(world, cx - 3, cy + y, cz + 5, y == 2 ? BL_LAMP : BL_STONE);
+		for (int x = -2; x <= 2; x++)
+			bl_set(world, cx + x, cy + 3, cz + 9, BL_BRICK);
+		if (scene == 1) {
+			bl_set(world, cx, cy + 6, cz + 9, BL_WATER);
+			bl_set(world, cx + 5, cy, cz + 2, BL_WATER);
+		}
+		for (int i = 0; i < 400 && bl_water_pending(world); i++)
+			bl_world_tick(world, 1 << 20);
+	}
 	struct bl_camera cam = { isnan(ex) ? s[0] : ex, isnan(ey) ? s[1] + BL_EYE : ey, isnan(ez) ? s[2] : ez,
 	                         yaw * (float)M_PI / 180.0f, pitch * (float)M_PI / 180.0f, fov * (float)M_PI / 180.0f };
 	if (target) {
@@ -1153,6 +1498,10 @@ int main(int argc, char **argv)
 	test_edit();
 	printf("pointing\n");
 	test_pick();
+	printf("light\n");
+	test_light();
+	printf("water that flows\n");
+	test_water();
 	printf("the player\n");
 	test_player();
 	printf("the save file\n");

@@ -41,6 +41,7 @@
 #include "keymap.h"
 #include "metrics.h"
 #include "protocol.h"
+#include "smartsun.h"
 #include "theme.h"
 #include "uikit.h"
 #include "util.h"
@@ -55,7 +56,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_F = 33, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+	K_E = 18, K_F = 33, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
 };
 
 #define SLOTS 9
@@ -66,7 +67,7 @@ enum {
 #define SLOW_MS 27.0
 #define FAST_MS 15.0
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE };
 
 struct app {
 	struct wlwin win;
@@ -99,8 +100,15 @@ struct app {
 	int64_t name_until;
 	float sens, fov;
 	float time_h;
-	bool clock_run;
+	int clockm;                                             /* the clock: 0 stands, 1 runs (a day is day_minutes), 2 follows the real sun (smartsun) */
 	float day_minutes;
+	int64_t real_ms;                                        /* when the real clock was read last */
+	uint32_t settings;                                      /* mellagui_settings_v1: the compositor plays the sounds (card-sound) */
+	bool sound_on;
+	int64_t last_sound_ms;
+	int nsounds;
+	float water_acc;                                        /* time since the water was last looked at */
+	int pal_hover;
 
 	struct bl_hit aim;
 	bool aimed;
@@ -148,6 +156,16 @@ static void say(struct app *a, const char *fmt, ...)
 /* ================================================================ the hand and the clock ================================================================ */
 
 static const int k_default_hotbar[SLOTS] = { BL_STONE, BL_DIRT, BL_GRASS, BL_COBBLE, BL_PLANKS, BL_LOG, BL_BRICK, BL_SAND, BL_GLASS };
+
+/* a block that can be in the hand: any but air, bedrock and flowing water (water in the hand is a source) */
+static bool hand_ok(int b)
+{
+	return b > BL_AIR && b < BL_COUNT && b != BL_BEDROCK && !(b >= BL_FLOW1 && b <= BL_FLOW7);
+}
+
+#define PAL_N 14
+#define PAL_COLS 7
+static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP };
 
 static int hand_block(const struct app *a)
 {
@@ -267,6 +285,10 @@ static void conf_load(struct app *a, bool with_player)
 			a->fov = (float)(d * M_PI / 180.0);
 		else if (!strcmp(k, "sensitivity") && d >= 0.0005 && d <= 0.02)
 			a->sens = (float)d;
+		else if (!strcmp(k, "clock") && d >= 0 && d <= 2)
+			a->clockm = (int)d;
+		else if (!strcmp(k, "sound") && (d == 0 || d == 1))
+			a->sound_on = d != 0;
 		else if (!strcmp(k, "slot") && d >= 1 && d <= SLOTS)
 			a->slot = (int)d - 1;
 		else if (!strcmp(k, "hotbar")) {
@@ -277,7 +299,7 @@ static void conf_load(struct app *a, bool with_player)
 				if (end == p)
 					break;                                   /* not a number (the end of the line): stop, do not go round for ever */
 				p = end;
-				if (b > BL_AIR && b < BL_COUNT && b != BL_WATER && b != BL_BEDROCK)
+				if (hand_ok((int)b))
 					a->hotbar[n++] = (int)b;
 				while (*p == ',' || *p == ' ')
 					p++;
@@ -303,8 +325,8 @@ static void conf_save(const struct app *a)
 	FILE *f = fopen(tmp, "w");
 	if (!f)
 		return;
-	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
-	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1);
+	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
+	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on);
 	fprintf(f, "hotbar = ");
 	for (int i = 0; i < SLOTS; i++)
 		fprintf(f, "%s%d", i ? "," : "", a->hotbar[i]);
@@ -340,6 +362,62 @@ static bool save_all(struct app *a, bool say_it)
 	if (say_it)
 		say(a, "Saved");
 	return true;
+}
+
+/* The compositor plays them (write-only setting card-sound: draw place shuffle win no), so they follow Settings > Sound > Sound feedback and the chosen
+ * output. The card game's sounds are borrowed: draw = a block broken, place = a block put, no = a block that could not be put. Never listened to as block sounds. */
+static void sound(struct app *a, const char *name)
+{
+	int64_t now = now_ms();
+	if (!a->sound_on || !a->settings || !a->win.c || now - a->last_sound_ms < 90)
+		return;
+	a->last_sound_ms = now;
+	a->nsounds++;
+	WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = "card-sound" }, { .s = name });
+	wlc_flush(a->win.c);
+}
+
+/* The hour of the model's day (6 sunrise, 18 sunset: what the renderer's sun does) for a moment of the real day, so that the real sunrise is the model's
+ * 6 o'clock and the real sunset its 18: the day and the night are each stretched evenly (as in the Matrix room). Minutes since midnight in, hours out. */
+static float solar_hours(double now_min, int rise, int set)
+{
+	if (rise < 0 || set > 1439 || set - rise < 30 || set - rise > 1410) {
+		rise = 360;
+		set = 1080;
+	}
+	double day = (double)(set - rise), h;
+	if (now_min >= rise && now_min < set) {
+		h = 6.0 + 12.0 * (now_min - rise) / day;
+	} else {
+		double since = now_min - set;
+		if (since < 0)
+			since += 1440.0;
+		h = 18.0 + 12.0 * since / (1440.0 - day);
+	}
+	return (float)fmod(h, 24.0);
+}
+
+/* the real time of day (the clock of the computer; $MELLAGUI_BLOCKS_NOW = HH:MM[:SS] for the tests) and today's sunrise and sunset (smartsun: the place of
+ * the smart home or the time zone's; unknown = 6 and 18) -> the model's hour */
+static void real_clock_update(struct app *a, int64_t now)
+{
+	if (a->real_ms && now - a->real_ms < 900)
+		return;
+	a->real_ms = now;
+	time_t t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	double min = tm.tm_hour * 60.0 + tm.tm_min + tm.tm_sec / 60.0;
+	const char *env = getenv("MELLAGUI_BLOCKS_NOW");
+	int hh, mm, ss = 0;
+	if (env && sscanf(env, "%d:%d:%d", &hh, &mm, &ss) >= 2)
+		min = hh * 60.0 + mm + ss / 60.0;
+	int rise, set;
+	if (!sun_today(t, &rise, &set)) {
+		rise = 360;
+		set = 1080;
+	}
+	a->time_h = solar_hours(min, rise, set);
 }
 
 /* ================================================================ the world ================================================================ */
@@ -396,6 +474,16 @@ static void icon_build(uint32_t *out, int S, int block)
 			float x = (((float)px + 0.5f) / (float)S * 2.0f - 1.0f) * 0.866f, y = ((float)py + 0.5f) / (float)S * 2.0f - 1.0f;
 			const uint32_t *tex = NULL;
 			float u = 0, v = 0, shade = 1.0f;
+			if (block == BL_TORCH) {                                         /* not a cube: a stick with a flame */
+				float fu = ((float)px + 0.5f) / (float)S, fv = ((float)py + 0.5f) / (float)S;
+				uint32_t c = 0;
+				if (fabsf(fu - 0.5f) < 0.075f && fv > 0.40f && fv < 0.92f)
+					c = 0xff000000u | ((uint32_t)(0x7a - (int)(fabsf(fu - 0.5f) * 200)) << 16) | 0x5428u;
+				else if (fv > 0.12f && fv < 0.42f && fabsf(fu - 0.5f) < (fv < 0.22f ? 0.08f + (fv - 0.12f) * 0.8f : 0.16f - (fv - 0.22f) * 0.1f))
+					c = 0xff000000u | (fv < 0.27f ? 0xffe060u : fv < 0.34f ? 0xffb030u : 0xf07818u);
+				out[py * S + px] = c;
+				continue;
+			}
 			float ta = -y + x / 1.732f, tb = -y - x / 1.732f;               /* the top face: C + a * (0.866, -0.5) + b * (-0.866, -0.5) */
 			if (ta >= 0 && ta <= 1 && tb >= 0 && tb <= 1) {
 				tex = top;
@@ -423,6 +511,8 @@ static void icon_build(uint32_t *out, int S, int block)
 			if (tex) {
 				int tu = LM_CLAMP((int)(u * 16.0f), 0, 15), tv = LM_CLAMP((int)(v * 16.0f), 0, 15);
 				uint32_t t = tex[tv * 16 + tu];
+				if (block == BL_WATER)
+					t = (t & 0x00ffffffu) | (215u << 24);               /* water is see-through in the world, a pale cube in the hand */
 				c = (t & 0xff000000u) | (uint32_t)((float)((t >> 16) & 255) * shade) << 16 | (uint32_t)((float)((t >> 8) & 255) * shade) << 8 |
 				    (uint32_t)((float)(t & 255) * shade);
 			}
@@ -445,7 +535,7 @@ static void icons_for(struct app *a, int S)
 	icons_free(a);
 	a->icon_s = S;
 	for (int b = 1; b < BL_COUNT; b++) {
-		if (b == BL_BEDROCK)
+		if (b == BL_BEDROCK || (b >= BL_FLOW1 && b <= BL_FLOW7))
 			continue;
 		a->icon[b] = malloc((size_t)S * (size_t)S * 4);
 		if (a->icon[b])
@@ -475,7 +565,7 @@ static void pause_game(struct app *a, enum prompt p)
 	a->prompt = p;
 	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_jump = a->k_sneak = a->k_ctrl = a->k_lk = a->k_rk = a->k_uk = a->k_dk = false;
 	a->b_break = a->b_place = false;
-	a->pc_hover = a->pc_down = -1;
+	a->pc_hover = a->pc_down = a->pal_hover = -1;
 	wlwin_lock_pointer(&a->win, false);
 	wlwin_hide_cursor(&a->win, false);
 	a->win.redraw = true;
@@ -505,14 +595,22 @@ static void aim_update(struct app *a)
 
 static void do_break(struct app *a)
 {
-	if (a->aimed && bl_break(a->world, &a->aim))
+	if (a->aimed && bl_break(a->world, &a->aim)) {
+		sound(a, "draw");
 		aim_update(a);
+	}
 }
 
 static void do_place(struct app *a)
 {
-	if (a->aimed && bl_place(a->world, &a->aim, hand_block(a), &a->pl))
+	if (!a->aimed)
+		return;
+	if (bl_place(a->world, &a->aim, hand_block(a), &a->pl)) {
+		sound(a, "place");
 		aim_update(a);
+	} else {
+		sound(a, "no");
+	}
 }
 
 static void do_pick(struct app *a)
@@ -520,7 +618,7 @@ static void do_pick(struct app *a)
 	if (!a->aimed)
 		return;
 	int b = bl_get(a->world, a->aim.x, a->aim.y, a->aim.z);
-	if (b <= BL_AIR || b == BL_BEDROCK || b == BL_WATER)
+	if (!hand_ok(b))
 		return;
 	for (int i = 0; i < SLOTS; i++)
 		if (a->hotbar[i] == b) {
@@ -560,10 +658,17 @@ static void advance(struct app *a, int64_t now, float dt)
 			do_place(a);
 			a->next_place = now + REPEAT_MS;
 		}
-		if (a->clock_run) {
+		if (a->clockm == 1) {
 			a->time_h += dt * 24.0f / (a->day_minutes * 60.0f);
 			if (a->time_h >= 24.0f)
 				a->time_h -= 24.0f;
+		} else if (a->clockm == 2) {
+			real_clock_update(a, now);
+		}
+		a->water_acc += dt;                                  /* the water flows four times a second */
+		if (a->water_acc >= 0.25f) {
+			a->water_acc = 0;
+			bl_world_tick(a->world, 3000);
 		}
 	}
 	if (!a->nosave && a->world->rev != a->saved_rev && now - a->last_save_ms >= AUTOSAVE_MS)
@@ -659,18 +764,54 @@ static const char *const HELP_LINES[] = {
 	"Ctrl runs. F flies. The arrow keys look round.",
 	"The left button breaks a block (hold it), the right one puts the block in",
 	"your hand against the face you aim at, the middle one takes the block you aim at.",
-	"1 to 9 or the wheel choose the block in the hand.",
-	"[ and ] move the clock an hour, T stops and starts it, F3 shows the numbers.",
-	"Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits (and saves).",
+	"1 to 9 or the wheel choose the block in the hand, E opens the palette of every block.",
+	"Torches and lamps give light. Water put by hand is a source and flows.",
+	"[ and ] move the clock an hour, T: the clock stands, runs, follows the real sun.",
+	"F3 shows the numbers. Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits.",
 };
+
+static int pal_cell(const struct app *a)                   /* the size of a square of the palette */
+{
+	struct lay L;
+	layout(a, &L);
+	return L.slot + 10;
+}
 
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
 	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
-	int ch = a->prompt == P_HELP ? 290 : a->prompt == P_PAUSE ? 200 : 130;
-	c->w = LM_MIN(a->prompt == P_HELP ? 560 : 470, a->win.bw - 16);
+	int ch = a->prompt == P_HELP ? 320 : a->prompt == P_PAUSE ? 200 : 130;
+	int cw = a->prompt == P_HELP ? 600 : 470;
+	if (a->prompt == P_PALETTE) {
+		int cell = pal_cell(a);
+		cw = PAL_COLS * cell + 2 * WLCARD_PAD;
+		ch = 124 + ((PAL_N + PAL_COLS - 1) / PAL_COLS) * cell;
+	}
+	c->w = LM_MIN(cw, a->win.bw - 16);
 	c->h = LM_MIN(ch, a->win.bh - 16);
 	wlcard_center(&a->win, c);
+}
+
+/* the palette's squares: the top left of the first one, and which one is at a point */
+static void pal_origin(const struct app *a, const struct wlcard *c, int *gx, int *gy)
+{
+	*gx = c->x + (c->w - PAL_COLS * pal_cell(a)) / 2;
+	*gy = c->y + 40;
+}
+
+static int pal_cell_at(const struct app *a, double px, double py)
+{
+	if (a->prompt != P_PALETTE)
+		return -1;
+	struct wlcard c;
+	int nb, gx, gy, cell = pal_cell(a);
+	card_rect(a, &c, &nb);
+	pal_origin(a, &c, &gx, &gy);
+	int col = (int)floor((px - gx) / cell), row = (int)floor((py - gy) / cell);
+	if (px < gx || py < gy || col < 0 || col >= PAL_COLS || row < 0)
+		return -1;
+	int i = row * PAL_COLS + col;
+	return i < PAL_N ? i : -1;
 }
 
 static void paint_card(struct app *a)
@@ -679,7 +820,7 @@ static void paint_card(struct app *a)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
-	const char *title = a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->first ? "Blocks" : "Paused";
+	const char *title = a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	const char *labels[4] = { "Cancel", "OK" };
 	uint32_t cols[4] = { lm_theme.btn_grey, lm_theme.btn_blue };
@@ -697,6 +838,24 @@ static void paint_card(struct app *a)
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, "W A S D walk, Space jumps, Shift sneaks, Ctrl runs, F flies.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Left button breaks, right button puts a block, 1 to 9 choose it.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 3 * (LM_FONT_H + 5), "Esc pauses. F1 lists every key.", 1, lm_theme.text_dim, tw);
+	} else if (a->prompt == P_PALETTE) {
+		labels[0] = "Close";
+		cols[0] = lm_theme.btn_green;
+		int gx, gy, cell = pal_cell(a), isz = cell - 18, sc = wlwin_scale(w);
+		pal_origin(a, &c, &gx, &gy);
+		for (int i = 0; i < PAL_N; i++) {
+			int x = gx + (i % PAL_COLS) * cell, y = gy + (i / PAL_COLS) * cell;
+			bool cur = hand_block(a) == k_palette[i];
+			wlwin_round_fill(w, x + 1, y + 1, cell - 2, cell - 2, 6, cur ? 0xf0f0f0u : a->pal_hover == i ? 0x6a7384u : 0x3a4150u);
+			wlwin_round_fill(w, x + 3, y + 3, cell - 6, cell - 6, 5, 0x20242cu);
+			const uint32_t *ic = a->icon[k_palette[i]];
+			if (ic && a->icon_s == isz * sc)
+				wlwin_blit_px_over(w, x + (cell - isz) / 2, y + (cell - isz) / 2, ic, isz * sc, isz * sc, isz * sc);
+		}
+		char l[120];
+		int shown = a->pal_hover >= 0 ? k_palette[a->pal_hover] : hand_block(a);
+		snprintf(l, sizeof l, "%s - slot %d  (click to put it there; 1-9: other slot)", bl_block_name(shown), a->slot + 1);
+		wlwin_text(w, tx, gy + 2 * cell + 8, l, 1, lm_theme.text, tw);
 	} else if (a->prompt == P_NEW) {
 		wlwin_text(w, tx, ty, "Make a new world? The one you have now is replaced.", 1, lm_theme.text, tw);
 		labels[1] = "New world";
@@ -730,10 +889,11 @@ static void write_dump(struct app *a)
 	const struct bl_world *w = a->world;
 	int under = bl_get(w, (int)floorf(a->pl.x), (int)floorf(a->pl.y - 0.1f), (int)floorf(a->pl.z));
 	fprintf(f, "state seed=%u kind=%d size=%dx%dx%d x=%.3f y=%.3f z=%.3f yaw=%.4f pitch=%.4f ground=%d water=%d fly=%d sneak=%d vy=%.3f playing=%d locked=%d lockok=%d "
-	           "prompt=%d slot=%d hand=%s rev=%u time=%.3f clock=%d aimed=%d rw=%d rh=%d fps=%d budget=%.0f debug=%d under=%s saved=%d nosave=%d\n",
+	           "prompt=%d slot=%d hand=%s rev=%u time=%.3f clock=%d aimed=%d rw=%d rh=%d fps=%d budget=%.0f debug=%d under=%s saved=%d nosave=%d wpend=%zu light=%d sound=%d sounds=%d\n",
 	        w->seed, w->kind, w->w, w->d, w->h, a->pl.x, a->pl.y, a->pl.z, a->pl.yaw, a->pl.pitch, a->pl.on_ground, a->pl.in_water, a->pl.flying, a->pl.sneaking,
-	        a->pl.vy, a->playing, a->win.locked, a->lock_ok, (int)a->prompt, a->slot + 1, bl_block_name(hand_block(a)), w->rev, a->time_h, a->clock_run, a->aimed,
-	        a->rw, a->rh, a->fps, a->budget, a->debug, bl_block_name(under), w->rev == a->saved_rev, a->nosave);
+	        a->pl.vy, a->playing, a->win.locked, a->lock_ok, (int)a->prompt, a->slot + 1, bl_block_name(hand_block(a)), w->rev, a->time_h, a->clockm, a->aimed,
+	        a->rw, a->rh, a->fps, a->budget, a->debug, bl_block_name(under), w->rev == a->saved_rev, a->nosave, bl_water_pending(w),
+	        bl_light(w, (int)floorf(a->pl.x), (int)floorf(a->pl.y + 0.5f), (int)floorf(a->pl.z)), a->sound_on, a->nsounds);
 	if (a->aimed)
 		fprintf(f, "aim x=%d y=%d z=%d face=%d px=%d py=%d pz=%d t=%.3f block=%s\n", a->aim.x, a->aim.y, a->aim.z, a->aim.face, a->aim.px, a->aim.py, a->aim.pz,
 		        a->aim.t, bl_block_name(bl_get(w, a->aim.x, a->aim.y, a->aim.z)));
@@ -753,6 +913,12 @@ static void write_dump(struct app *a)
 		int nb;
 		card_rect(a, &c, &nb);
 		fprintf(f, "card x=%d y=%d w=%d h=%d\n", c.x, c.y, c.w, c.h);
+		if (a->prompt == P_PALETTE) {
+			int gx, gy, cell = pal_cell(a);
+			pal_origin(a, &c, &gx, &gy);
+			for (int i = 0; i < PAL_N; i++)
+				fprintf(f, "pal %d x=%d y=%d w=%d h=%d block=%s\n", i, gx + (i % PAL_COLS) * cell, gy + (i / PAL_COLS) * cell, cell, cell, bl_block_name(k_palette[i]));
+		}
 		for (int k = 0; k < nb; k++) {
 			int x, y, bw, bh;
 			wlcard_button_rect(&c, k, nb, &x, &y, &bw, &bh);
@@ -831,6 +997,10 @@ static void paint(struct wlwin *w)
 
 static void card_action(struct app *a, int which)
 {
+	if (a->prompt == P_PALETTE) {
+		resume_game(a);
+		return;
+	}
 	if (a->prompt == P_PAUSE) {
 		if (which == 0) {
 			save_all(a, false);
@@ -867,6 +1037,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		if (wlcard_drag_motion(&a->win, &c, a->px, a->py))
 			return;
 		a->pc_hover = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
+		a->pal_hover = pal_cell_at(a, a->px, a->py);
 		a->win.redraw = true;
 		return;
 	}
@@ -874,6 +1045,13 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		return;
 	int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
 	if (args[3].u == 1) {
+		int pc = pal_cell_at(a, a->px, a->py);
+		if (pc >= 0) {                                       /* a block of the palette goes into the slot in the hand */
+			a->hotbar[a->slot] = k_palette[pc];
+			a->name_until = now_ms() + 1800;
+			a->win.redraw = true;
+			return;
+		}
 		if (k >= 0)
 			a->pc_down = k;
 		else if (wlcard_drag_press(&a->win, &c, a->px, a->py))
@@ -1029,6 +1207,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		}
 		return;
 	}
+	if (a->prompt == P_PALETTE) {
+		if (code == K_ESC || code == K_E || code == K_ENTER)
+			resume_game(a);
+		else if (code >= K_1 && code <= K_9)
+			choose_slot(a, (int)(code - K_1));
+		return;
+	}
 	if (a->prompt != P_NONE) {
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
@@ -1054,6 +1239,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		pause_game(a, P_HELP);
 		return;
 	}
+	if (code == K_E) {
+		pause_game(a, P_PALETTE);
+		return;
+	}
 	if (code >= K_1 && code <= K_9) {
 		choose_slot(a, (int)(code - K_1));
 		return;
@@ -1067,8 +1256,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	} else if (code == K_F3) {
 		a->debug = !a->debug;
 	} else if (code == K_T) {
-		a->clock_run = !a->clock_run;
-		say(a, a->clock_run ? "The clock runs" : "The clock stands");
+		a->clockm = (a->clockm + 1) % 3;
+		a->real_ms = 0;
+		say(a, a->clockm == 0 ? "The clock stands" : a->clockm == 1 ? "The clock runs" : "The clock follows the sun");
 	} else if (code == K_LBRACE || code == K_RBRACE) {
 		a->time_h += code == K_RBRACE ? 1.0f : -1.0f;
 		if (a->time_h < 0)
@@ -1080,7 +1270,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t version)
 {
-	(void)w; (void)name; (void)iface; (void)version;
+	struct app *a = w->data;
+	(void)version;
+	if (!strcmp(iface, "mellagui_settings_v1"))
+		a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, NULL, a);
 }
 
 static bool close_event(struct wlwin *w)
@@ -1123,17 +1316,26 @@ static int selftest(void)
 	enum { S = 64 };
 	static uint32_t px[S * S];
 	for (int blk = 1; blk < BL_COUNT; blk++) {
-		if (blk == BL_BEDROCK)
+		if (blk == BL_BEDROCK || (blk >= BL_FLOW1 && blk <= BL_FLOW7))
 			continue;
 		icon_build(px, S, blk);
 		CHECK((px[0] >> 24) == 0 && (px[S - 1] >> 24) == 0 && (px[(S - 1) * S] >> 24) == 0, "the corners of the icon of %s are not see-through", bl_block_name(blk));
 		int solid = 0;
 		for (int i = 0; i < S * S; i++)
 			solid += (px[i] >> 24) > 0;
-		if (blk != BL_GLASS)                                   /* a pane is a frame round a clear middle */
+		if (blk != BL_GLASS && blk != BL_TORCH)                /* a pane is a frame round a clear middle, a torch a stick and a flame */
 			CHECK(solid > S * S / 2 && solid < S * S * 9 / 10, "the icon of %s covers %d of %d pixels", bl_block_name(blk), solid, S * S);
 		if (blk != BL_GLASS && blk != BL_WATER)
-			CHECK((px[S / 2 * S + S / 2] >> 24) == 255, "the middle of the icon of %s is not solid", bl_block_name(blk));
+			CHECK((px[S / 2 * S + S / 2] >> 24) == 255 || blk == BL_TORCH, "the middle of the icon of %s is not solid", bl_block_name(blk));
+		if (blk == BL_TORCH) {
+			int stick = 0, flame = 0;
+			for (int i = 0; i < S * S; i++) {
+				uint32_t c = px[i];
+				stick += (c >> 24) && (c & 0xff) < 0x40 && ((c >> 16) & 255) < 0x90;
+				flame += (c >> 24) && ((c >> 16) & 255) > 0xe0 && ((c >> 8) & 255) > 0x70;
+			}
+			CHECK(stick > 40 && flame > 40, "the icon of a torch has a stick and a flame (%d, %d pixels)", stick, flame);
+		}
 	}
 	icon_build(px, S, BL_GRASS);
 	CHECK((px[8 * S + S / 2] & 0xffffff) != (px[S * 3 / 4 * S + S / 4] & 0xffffff), "the top and the side of the grass icon look alike");
@@ -1183,7 +1385,7 @@ static int selftest(void)
 	snprintf(path, sizeof path, "%s/player.conf", a.dir);
 	FILE *f = fopen(path, "w");
 	if (f) {
-		fprintf(f, "hotbar = 1,2,999,0,9,10,4\nfov = 500\nsensitivity = -3\nslot = 99\n");
+		fprintf(f, "hotbar = 1,2,999,0,10,16,4,14,9\nfov = 500\nsensitivity = -3\nslot = 99\nclock = 7\nsound = 5\n");
 		fclose(f);
 	}
 	struct app c2;
@@ -1193,13 +1395,41 @@ static int selftest(void)
 	c2.sens = 0.0025f;
 	conf_load(&c2, true);
 	CHECK(c2.fov == 1.2f && c2.sens == 0.0025f, "a field of view of 500 degrees and a negative speed are not taken");
-	CHECK(c2.hotbar[0] == BL_GRASS && c2.hotbar[1] == BL_DIRT && c2.hotbar[2] == BL_SAND, "only real blocks go in the hand (%d %d %d)", c2.hotbar[0], c2.hotbar[1], c2.hotbar[2]);
+	CHECK(c2.hotbar[0] == BL_GRASS && c2.hotbar[1] == BL_DIRT && c2.hotbar[2] == BL_SAND && c2.hotbar[3] == BL_TORCH && c2.hotbar[4] == BL_WATER,
+	      "only blocks that can be put go in the hand: not air, bedrock, flowing water (%d %d %d %d %d)", c2.hotbar[0], c2.hotbar[1], c2.hotbar[2], c2.hotbar[3], c2.hotbar[4]);
+	CHECK(c2.clockm == 0 && !c2.sound_on, "a clock mode of 7 and a sound setting of 5 are not taken");
 	CHECK(c2.slot == 0, "slot 99 is not a slot");
 	bl_world_free(a.world);
 	char cmd[200];
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
 	if (system(cmd) != 0)
 		fprintf(stderr, "(could not remove %s)\n", dir);
+
+	/* the real clock: the real sunrise is the model's 6, the real sunset its 18, noon between, the night stretched evenly (sunrise 08:00, sunset 16:00) */
+	CHECK(fabsf(solar_hours(480, 480, 960) - 6.0f) < 0.01f && fabsf(solar_hours(720, 480, 960) - 12.0f) < 0.01f && fabsf(solar_hours(960, 480, 960) - 18.0f) < 0.01f,
+	      "sunrise, noon and sunset map to 6, 12, 18 (%.2f %.2f %.2f)", solar_hours(480, 480, 960), solar_hours(720, 480, 960), solar_hours(960, 480, 960));
+	CHECK(fabsf(solar_hours(0, 480, 960) - 0.0f) < 0.01f || fabsf(solar_hours(0, 480, 960) - 24.0f) < 0.01f, "midnight is 0 for a night that is split evenly (%.2f)", solar_hours(0, 480, 960));
+	float prev = solar_hours(0, 450, 1000);
+	int wraps = 0;
+	for (int m = 1; m < 1440; m++) {
+		float h = solar_hours(m, 450, 1000);
+		if (h < prev - 0.001f)
+			wraps++;
+		CHECK(h >= 0.0f && h < 24.0f, "the model's hour is in 0 .. 24 (%.3f at minute %d)", h, m);
+		prev = h;
+	}
+	CHECK(wraps <= 1, "the model's hour only goes forward (and wraps once a day): %d wraps", wraps);
+	CHECK(fabsf(solar_hours(720, -1, 5000) - 12.0f) < 0.01f, "no sun times: the plain 6 and 18");
+	float all = solar_hours(1439.5, 0, 1439);
+	CHECK(all >= 0.0f && all < 24.0f && isfinite(all), "a day that lasts all day does not divide by zero (%.3f)", all);
+
+	/* the palette: every block in it can be in the hand and none is there twice */
+	for (int i = 0; i < PAL_N; i++) {
+		CHECK(hand_ok(k_palette[i]), "palette block %d (%s) cannot be in the hand", i, bl_block_name(k_palette[i]));
+		for (int j = i + 1; j < PAL_N; j++)
+			CHECK(k_palette[i] != k_palette[j], "palette blocks %d and %d are the same", i, j);
+	}
+	CHECK(!hand_ok(BL_AIR) && !hand_ok(BL_BEDROCK) && !hand_ok(BL_FLOW4) && hand_ok(BL_WATER) && hand_ok(BL_TORCH) && hand_ok(BL_LAMP), "what may be in the hand");
 
 	/* the hand: slots wrap round */
 	memset(&a, 0, sizeof a);
@@ -1227,7 +1457,10 @@ int main(int argc, char **argv)
 	a.fov = 70.0f * (float)M_PI / 180.0f;
 	a.sens = 0.0025f;
 	a.time_h = 9.0f;
-	a.clock_run = true;
+	a.clockm = 1;
+	a.sound_on = true;
+	a.pal_hover = -1;
+	int clock_cli = -1;
 	a.day_minutes = 20.0f;
 	a.threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
 	if (a.threads < 1)
@@ -1240,7 +1473,7 @@ int main(int argc, char **argv)
 	memcpy(a.hotbar, k_default_hotbar, sizeof a.hotbar);
 	int win_w = 960, win_h = 600;
 	float yaw = NAN, pitch = NAN;
-	bool want_save = false, no_save = false;
+	bool want_save = false, no_save = false, no_sound = false;
 	for (int i = 1; i < argc; i++) {
 		char junk;
 		if (!strcmp(argv[i], "--selftest")) {
@@ -1276,7 +1509,12 @@ int main(int argc, char **argv)
 				return 2;
 			}
 		} else if (!strcmp(argv[i], "--no-clock")) {
-			a.clock_run = false;
+			clock_cli = 0;
+		} else if (!strcmp(argv[i], "--real-clock")) {
+			clock_cli = 2;
+		} else if (!strcmp(argv[i], "--no-sound")) {
+			a.sound_on = false;
+			no_sound = true;
 		} else if (!strcmp(argv[i], "--yaw") && i + 1 < argc) {
 			yaw = (float)(atof(argv[++i]) * M_PI / 180.0);
 		} else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) {
@@ -1293,7 +1531,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --real-clock] [--no-sound] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -1332,6 +1570,10 @@ int main(int argc, char **argv)
 	}
 	if (no_save)
 		a.nosave = true;
+	if (clock_cli >= 0)
+		a.clockm = clock_cli;
+	if (no_sound)
+		a.sound_on = false;
 	settle_player(&a);
 	if (!isnan(yaw))
 		a.pl.yaw = yaw;

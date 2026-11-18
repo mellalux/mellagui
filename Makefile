@@ -175,7 +175,7 @@ $(BUILD)/mellagui-tetris: $(BUILD)/client/mellagui-tetris.o $(BUILD)/src/wlc.o $
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-blocks: $(BUILD)/client/mellagui-blocks.o $(BUILD)/client/blocks.o $(BUILD)/client/blocksview.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-blocks: $(BUILD)/client/mellagui-blocks.o $(BUILD)/client/blocks.o $(BUILD)/client/blocksview.o $(BUILD)/src/smartsun.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

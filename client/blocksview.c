@@ -111,7 +111,7 @@ static void gen_face(int blk, int fk, uint32_t *px)
 				else
 					c = argb(0, 0, 0, 0);
 				break;
-			case BL_WATER:
+			case BL_WATER: case BL_FLOW1: case BL_FLOW2: case BL_FLOW3: case BL_FLOW4: case BL_FLOW5: case BL_FLOW6: case BL_FLOW7:
 				c = argb(0x3a + tn(x, y, 19, 12), 0x78 + tn(x, y, 20, 12), 0xd0 + tn(x, y, 21, 12), fk == BL_FACE_TOP ? 100 : 55);
 				break;
 			case BL_BEDROCK:
@@ -128,6 +128,17 @@ static void gen_face(int blk, int fk, uint32_t *px)
 			}
 			case BL_SNOW:
 				c = tinted(0xf6f9fc, tn(x, y, 27, 4));
+				break;
+			case BL_TORCH:                               /* a stick with a flame on a clear background (the picture of the block; the renderer draws a thin box) */
+				if ((x == 7 || x == 8) && y >= 6)
+					c = tinted(0x7a5428, tn(x, y, 30, 6));
+				else if (x >= 6 && x <= 9 && y >= 2 && y <= 5 && !((x == 6 || x == 9) && (y == 2 || y == 5)))
+					c = argb(255, y <= 3 ? 0xf0 : 0xb0, y <= 3 ? 0x80 : 0x28, 255);
+				else
+					c = argb(0, 0, 0, 0);
+				break;
+			case BL_LAMP:                                /* a glowing block: bright cells with darker seams */
+				c = (x % 8 == 0 || y % 8 == 0) ? tinted(0xc88a2c, tn(x, y, 31, 6)) : tinted(0xffe8a0, tn(x, y, 32, 10));
 				break;
 			case BL_COBBLE: {
 				int off = ((y / 4) & 1) * 2;
@@ -221,6 +232,8 @@ struct frame {
 	int W, D, H;
 	const uint8_t *b;
 	const int16_t *top;
+	const uint8_t *light;     /* the light of torches and lamps per cell */
+	float blight[16];         /* the brightness of that light by level */
 	const int16_t *cmax;      /* per 8 x 8 columns: the highest block in them; everything above is empty and a ray leaps over it */
 	int W8;
 	float ox, oy, oz;
@@ -288,6 +301,41 @@ static void sky_color(const struct frame *F, float dx, float dy, float dz, float
 			}
 		}
 	}
+}
+
+static const float k_warm[3] = { 1.0f, 0.80f, 0.52f };            /* the colour of torch light */
+
+/* The ray against the box of a torch in the cell (ix, iy, iz): 14 / 16 wide ... the stick is 2 / 16 thick and 10 / 16 high, in the middle of the cell's
+ * floor. Returns the face of the box the ray comes through (BL_PX ...) with the distance in *t, or -1 for a miss (also when the eye is inside the box). */
+static int torch_hit(const struct frame *F, int ix, int iy, int iz, float dx, float dy, float dz, float *t)
+{
+	const float o[3] = { F->ox, F->oy, F->oz }, d[3] = { dx, dy, dz };
+	const float lo[3] = { (float)ix + 0.4375f, (float)iy, (float)iz + 0.4375f }, hi[3] = { (float)ix + 0.5625f, (float)iy + 0.625f, (float)iz + 0.5625f };
+	float tn = -1e30f, tf = 1e30f;
+	int axis = 0;
+	for (int a = 0; a < 3; a++) {
+		if (fabsf(d[a]) < 1e-9f) {
+			if (o[a] < lo[a] || o[a] > hi[a])
+				return -1;
+			continue;
+		}
+		float t0 = (lo[a] - o[a]) / d[a], t1 = (hi[a] - o[a]) / d[a];
+		if (t0 > t1) {
+			float x = t0;
+			t0 = t1;
+			t1 = x;
+		}
+		if (t0 > tn) {
+			tn = t0;
+			axis = a;
+		}
+		if (t1 < tf)
+			tf = t1;
+	}
+	if (tn > tf || tn < 0.0f)
+		return -1;
+	*t = tn;
+	return axis == 0 ? (dx > 0 ? BL_NX : BL_PX) : axis == 1 ? (dy > 0 ? BL_NY : BL_PY) : (dz > 0 ? BL_NZ : BL_PZ);
 }
 
 static const float k_face_shade[6] = { 0.62f, 0.62f, 1.0f, 0.5f, 0.8f, 0.8f };
@@ -455,19 +503,58 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				continue;
 			}
 			if (F->ids) {
-				if (blk == BL_WATER)
+				if (bl_water(blk))
 					continue;                            /* the test hook sees through water like `bl_pick` */
 				return 0xff000000u | (uint32_t)blk << 8 | (uint32_t)face;
 			}
-			if (blk == BL_WATER && pb == BL_WATER) {
+			if (bl_water(blk) && bl_water(pb)) {
 				continue;                                /* inside the water: the volume is dealt with at its ends */
 			}
-			if (blk != BL_WATER && in_water) {
+			if (!bl_water(blk) && in_water) {
 				slab(F, acc, &trans, t - wt0);
 				in_water = false;
 			}
 			if (blk == pb && blk == BL_GLASS) {
 				continue;                                /* the face between two panes of glass */
+			}
+
+			if (blk == BL_TORCH) {
+				/* a thin stick with a flame in the middle of the cell's floor: the ray meets that little box or goes on through the cell */
+				float th;
+				int tf = torch_hit(F, ix, iy, iz, dx, dy, dz, &th);
+				if (F->target && ix == F->tx && iy == F->ty && iz == F->tz) {      /* the aimed cell gets its rim even where the stick is not */
+					float qx = F->ox + dx * t - (float)ix, qy = F->oy + dy * t - (float)iy, qz = F->oz + dz * t - (float)iz, e = 0.03f;
+					float a1 = face <= BL_NX ? qz : qx, a2 = face <= BL_NX ? qy : face <= BL_NY ? qz : qy;       /* the two coordinates along the face the ray came through */
+					if (a1 < e || a1 > 1.0f - e || a2 < e || a2 > 1.0f - e)
+						trans *= 0.45f;
+				}
+				pb = blk;
+				if (tf < 0 || th >= maxd)
+					continue;
+				float hy = F->oy + dy * th - (float)iy;
+				float col[3];
+				if (tf == BL_PY || hy > 0.4375f) {                                    /* the flame: bright whatever the light */
+					col[0] = 1.0f;
+					col[1] = hy > 0.55f ? 0.9f : 0.7f;
+					col[2] = 0.3f;
+				} else {
+					float k = k_face_shade[tf] * 0.55f + 0.35f;
+					col[0] = 0.48f * k;
+					col[1] = 0.33f * k;
+					col[2] = 0.16f * k;
+				}
+				float fg = (th - 0.6f * maxd) / (0.4f * maxd);
+				if (fg > 0.0f) {
+					fg = fg > 1.0f ? 1.0f : fg;
+					fg *= fg;
+					for (int i = 0; i < 3; i++)
+						col[i] = mixf(col[i], F->hor[i], fg);
+				}
+				for (int i = 0; i < 3; i++)
+					acc[i] += trans * col[i];
+				trans = 0.0f;
+				t = th;
+				break;
 			}
 
 			/* the cell the ray came from: its light */
@@ -483,8 +570,18 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 			}
 			float L = lit * F->lightk;
 			if (L < F->minlight)
-				L = F->minlight;                     /* no torches yet: a cave is dim, not black */
-			const float sh = k_face_shade[face] * L;
+				L = F->minlight;                     /* a cave is dim, not black */
+			float bt = 0.0f;                         /* the light of torches and lamps in the cell in front of the face */
+			if ((unsigned)pcx < (unsigned)W && (unsigned)pcz < (unsigned)D && (unsigned)pcy < (unsigned)H)
+				bt = F->blight[F->light[((size_t)pcz * (size_t)W + (size_t)pcx) * (size_t)H + (size_t)pcy]];
+			if (blk == BL_LAMP)
+				bt = 1.0f;                           /* a lamp shines on itself */
+			const float sh = k_face_shade[face];
+			float mult[3];
+			for (int i = 0; i < 3; i++) {            /* sky light and torch light do not add: the brighter one counts, torch light is warm */
+				float sk = L * F->tint[i], tl = bt * k_warm[i];
+				mult[i] = sk > tl ? sk : tl;
+			}
 
 			/* where on the face */
 			float hpx = F->ox + dx * t, hpy = F->oy + dy * t, hpz = F->oz + dz * t;
@@ -518,7 +615,7 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 					col[i] = mixf(col[i], g_avg[blk][fk][i], m);
 			}
 			for (int i = 0; i < 3; i++)
-				col[i] *= sh * F->tint[i];
+				col[i] *= sh * mult[i];
 			if (F->target && ix == F->tx && iy == F->ty && iz == F->tz) {
 				const float e = 0.03f;
 				if (u < e || u > 1.0f - e || v < e || v > 1.0f - e)
@@ -532,7 +629,7 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				for (int i = 0; i < 3; i++)
 					col[i] = mixf(col[i], F->hor[i], fogt);
 			}
-			if (blk == BL_WATER) {
+			if (bl_water(blk)) {
 				/* the surface of water: a little colour and a glint, then the volume starts */
 				float al = (float)ta * (1.0f / 255.0f);
 				for (int i = 0; i < 3; i++)
@@ -626,6 +723,9 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.H = w->h;
 	F.b = w->b;
 	F.top = w->top;
+	F.light = w->light;
+	for (int l = 0; l < 16; l++)
+		F.blight[l] = powf((float)l / 15.0f, 0.85f);
 	F.ox = c->x;
 	F.oy = c->y;
 	F.oz = c->z;
@@ -694,7 +794,7 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.ids = v->ids;
 
 	int ex = (int)floorf(c->x), ey = (int)floorf(c->y), ez = (int)floorf(c->z);
-	F.start_water = bl_get(w, ex, ey, ez) == BL_WATER;
+	F.start_water = bl_water(bl_get(w, ex, ey, ez));
 	if (F.start_water && F.maxd > 48.0f)
 		F.maxd = 48.0f;
 

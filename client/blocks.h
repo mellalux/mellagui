@@ -31,7 +31,11 @@
 
 enum bl_block {
 	BL_AIR = 0, BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS,
-	BL_WATER, BL_BEDROCK, BL_BRICK, BL_SNOW, BL_COBBLE, BL_COUNT
+	BL_WATER, BL_BEDROCK, BL_BRICK, BL_SNOW, BL_COBBLE,
+	BL_TORCH,               /* a stick with a flame: stands on the floor of its cell, light 14, can be walked through */
+	BL_LAMP,                /* a block that shines (light 15) */
+	BL_FLOW1, BL_FLOW2, BL_FLOW3, BL_FLOW4, BL_FLOW5, BL_FLOW6, BL_FLOW7,   /* water that flows: how far it has come from a source (1 = just left it, 7 = the last cell) */
+	BL_COUNT
 };
 
 enum { BL_PX = 0, BL_NX, BL_PY, BL_NY, BL_PZ, BL_NZ };
@@ -41,11 +45,14 @@ extern const int8_t bl_face_n[6][3];                  /* the outward normal of e
 
 const char *bl_block_name(int block);                 /* "grass"; "?" for a number that is no block */
 
-/* what a block is (the table lives in blocks.c; the renderer and the physics both read it) */
-static inline bool bl_solid(int b)       { return b != BL_AIR && b != BL_WATER; }                         /* stops the player */
-static inline bool bl_opaque(int b)      { return b != BL_AIR && b != BL_WATER && b != BL_GLASS; }        /* stops light and sight */
-static inline bool bl_targetable(int b)  { return b != BL_AIR && b != BL_WATER; }                         /* can be aimed at and broken */
-static inline bool bl_blocks_light(int b) { return bl_opaque(b) && b != BL_LEAVES; }                       /* shades the cells below it (leaves let most light through) */
+/* what a block is (the renderer and the physics both read it). WATER is the source (the sea, a block put by hand); FLOW1..7 is water that has flowed. */
+static inline bool bl_water(int b)        { return b == BL_WATER || (b >= BL_FLOW1 && b <= BL_FLOW7); }
+static inline int  bl_water_level(int b)  { return b == BL_WATER ? 0 : b - BL_FLOW1 + 1; }                /* 0 for a source, 1 .. 7 for flowing water (b must be water) */
+static inline bool bl_solid(int b)        { return b != BL_AIR && !bl_water(b) && b != BL_TORCH; }          /* stops the player */
+static inline bool bl_opaque(int b)       { return b != BL_AIR && !bl_water(b) && b != BL_GLASS && b != BL_TORCH; }   /* stops light and sight */
+static inline bool bl_targetable(int b)   { return b != BL_AIR && !bl_water(b); }                           /* can be aimed at and broken */
+static inline bool bl_blocks_light(int b) { return bl_opaque(b) && b != BL_LEAVES; }                       /* shades the cells below it from the sky (leaves let most light through) */
+static inline int  bl_emission(int b)     { return b == BL_LAMP ? 15 : b == BL_TORCH ? 14 : 0; }            /* the light a block gives (0 .. 15) */
 
 #define BL_MIN_SIZE 16
 #define BL_MAX_SIZE 1024
@@ -63,6 +70,9 @@ struct bl_world {
 	int16_t *hi;            /* per column: y of the highest block that is not air, -1 = none (what a ray has to look at) */
 	int maxhi;              /* the biggest `hi`; nothing exists from y = maxhi + 1 up */
 	uint32_t rev;           /* counts changes: a window repaints when it moved */
+	uint8_t *light;         /* per cell: the light of torches and lamps, 0 .. 15 (the sky's light is worked out from `top`, not stored) */
+	uint32_t *wq;           /* cells whose water has to be looked at again (bl_world_tick) */
+	size_t wq_n, wq_cap;
 };
 
 /* A world from a seed (kind 0). NULL when the size is outside BL_MIN_SIZE..BL_MAX_SIZE x BL_MIN_H..BL_MAX_H. */
@@ -102,6 +112,21 @@ int bl_top(const struct bl_world *w, int x, int z);
 void bl_spawn(const struct bl_world *w, float out[3]);
 
 uint64_t bl_hash(const struct bl_world *w);           /* FNV-1a of the size and every cell (tests: same world or not) */
+
+/* The light of torches and lamps in a cell, 0 .. 15 (0 outside the world). Spreads one less for every cell, round corners and through glass, water and air,
+ * not through opaque blocks; `bl_set` keeps it right (a removal takes light away from the cells that had it from there only). */
+static inline int bl_light(const struct bl_world *w, int x, int y, int z)
+{
+	return bl_inside(w, x, y, z) ? w->light[bl_index(w, x, y, z)] : 0;
+}
+void bl_lights_rebuild(struct bl_world *w);           /* all light from the emitters again (after a load; the tests compare it with what the edits made) */
+
+/* Water that flows. Every change of a cell sets its neighbours to be looked at; `bl_world_tick` looks at up to `budget` of them (at most one step of the
+ * flow, so call it a few times a second): a cell of air or flowing water takes the level it is fed with - 1 from water above it (it falls), else 1 + the lowest
+ * level of a side neighbour (a source feeds the sides always, flowing water only when it rests on something that is neither air nor water: over air or water it falls into it) - and becomes air when nothing feeds it (the
+ * flow dries up behind a source that was taken away), nothing goes beyond level 7. Returns how many cells changed. */
+int bl_world_tick(struct bl_world *w, int budget);
+size_t bl_water_pending(const struct bl_world *w);    /* cells waiting to be looked at */
 
 /* ---- pointing at a block ------------------------------------------------------------------------------------------ */
 
@@ -146,8 +171,8 @@ void bl_player_eye(const struct bl_player *p, float out[3]);
 void bl_player_look(const struct bl_player *p, float out[3]);              /* the unit vector the player looks along */
 bool bl_player_overlaps(const struct bl_player *p, int x, int y, int z);   /* does the box touch that cell? */
 
-/* Put `block` in the cell in front of a hit: false when it would be outside the world, the cell is not air or water,
- * the block is not a placeable one (air, water, bedrock) or the player stands in that cell. */
+/* Put `block` in the cell in front of a hit: false when it would be outside the world, the cell is not air or water, the block is not a placeable one (air,
+ * bedrock, flowing water), the player stands in that cell, or it is a torch with nothing solid under it. Water put by hand is a source. */
 bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struct bl_player *p);
 
 /* ---- saving ------------------------------------------------------------------------------------------------------- */

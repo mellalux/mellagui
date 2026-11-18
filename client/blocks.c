@@ -12,7 +12,8 @@
 const int8_t bl_face_n[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
 
 static const char *const k_names[BL_COUNT] = {
-	"air", "grass", "dirt", "stone", "sand", "log", "leaves", "planks", "glass", "water", "bedrock", "brick", "snow", "cobble",
+	"air", "grass", "dirt", "stone", "sand", "log", "leaves", "planks", "glass", "water", "bedrock", "brick", "snow", "cobble", "torch", "lamp",
+	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7",
 };
 
 const char *bl_block_name(int block)
@@ -97,7 +98,8 @@ static struct bl_world *world_alloc(int w, int d, int h)
 	wd->b = calloc((size_t)w * (size_t)d * (size_t)h, 1);
 	wd->top = malloc((size_t)w * (size_t)d * sizeof *wd->top);
 	wd->hi = malloc((size_t)w * (size_t)d * sizeof *wd->hi);
-	if (!wd->b || !wd->top || !wd->hi) {
+	wd->light = calloc((size_t)w * (size_t)d * (size_t)h, 1);
+	if (!wd->b || !wd->top || !wd->hi || !wd->light) {
 		bl_world_free(wd);
 		return NULL;
 	}
@@ -111,6 +113,8 @@ void bl_world_free(struct bl_world *w)
 	free(w->b);
 	free(w->top);
 	free(w->hi);
+	free(w->light);
+	free(w->wq);
 	free(w);
 }
 
@@ -371,6 +375,220 @@ struct bl_world *bl_world_flat(int wd, int dd, int hd, int ground)
 	return w;
 }
 
+/* ---- light ---------------------------------------------------------------------------------------------------------- */
+
+struct vec {
+	uint32_t *p;
+	size_t n, cap;
+};
+
+static void vec_push(struct vec *v, uint32_t x)
+{
+	if (v->n == v->cap) {
+		size_t nc = v->cap ? v->cap * 2 : 256;
+		uint32_t *np = realloc(v->p, nc * sizeof *np);
+		if (!np)
+			return;
+		v->p = np;
+		v->cap = nc;
+	}
+	v->p[v->n++] = x;
+}
+
+static inline void cell_xyz(const struct bl_world *w, uint32_t c, int *x, int *y, int *z)
+{
+	*y = (int)(c % (uint32_t)w->h);
+	uint32_t t = c / (uint32_t)w->h;
+	*x = (int)(t % (uint32_t)w->w);
+	*z = (int)(t / (uint32_t)w->w);
+}
+
+/* the cells in q have just got their light: let it go on to the neighbours, one less each step, not into opaque blocks (q grows while it is walked) */
+static void light_spread(struct bl_world *w, struct vec *q)
+{
+	for (size_t i = 0; i < q->n; i++) {
+		uint32_t c = q->p[i];
+		int L = w->light[c], x, y, z;
+		if (L <= 1)
+			continue;
+		cell_xyz(w, c, &x, &y, &z);
+		for (int d = 0; d < 6; d++) {
+			int nx = x + bl_face_n[d][0], ny = y + bl_face_n[d][1], nz = z + bl_face_n[d][2];
+			if (!bl_inside(w, nx, ny, nz))
+				continue;
+			size_t n = bl_index(w, nx, ny, nz);
+			if (bl_opaque(w->b[n]) || w->light[n] >= L - 1)
+				continue;
+			w->light[n] = (uint8_t)(L - 1);
+			vec_push(q, (uint32_t)n);
+		}
+	}
+}
+
+/* Take away the light that came from `start` (its value is cleared first): every neighbour that has less is cleared too and so on; the cells met that have
+ * as much or more (they have light of their own to give) are collected in `relight`, an emitter met keeps its own light and goes there too. */
+static void light_unlight(struct bl_world *w, uint32_t start, struct vec *relight)
+{
+	struct vec q = { 0 }, lv = { 0 };
+	vec_push(&q, start);
+	vec_push(&lv, w->light[start]);
+	w->light[start] = 0;
+	for (size_t i = 0; i < q.n && i < lv.n; i++) {
+		int L = (int)lv.p[i], x, y, z;
+		cell_xyz(w, q.p[i], &x, &y, &z);
+		for (int d = 0; d < 6; d++) {
+			int nx = x + bl_face_n[d][0], ny = y + bl_face_n[d][1], nz = z + bl_face_n[d][2];
+			if (!bl_inside(w, nx, ny, nz))
+				continue;
+			size_t n = bl_index(w, nx, ny, nz);
+			int ln = w->light[n];
+			if (ln == 0)
+				continue;
+			if (ln < L) {
+				int em = bl_emission(w->b[n]);
+				if (em > 0) {
+					w->light[n] = (uint8_t)em;
+					vec_push(relight, (uint32_t)n);
+				} else {
+					w->light[n] = 0;
+					vec_push(&q, (uint32_t)n);
+					vec_push(&lv, (uint32_t)ln);
+				}
+			} else {
+				vec_push(relight, (uint32_t)n);
+			}
+		}
+	}
+	free(q.p);
+	free(lv.p);
+}
+
+void bl_lights_rebuild(struct bl_world *w)
+{
+	size_t n = (size_t)w->w * (size_t)w->d * (size_t)w->h;
+	memset(w->light, 0, n);
+	struct vec q = { 0 };
+	for (size_t i = 0; i < n; i++) {
+		int em = bl_emission(w->b[i]);
+		if (em > 0) {
+			w->light[i] = (uint8_t)em;
+			vec_push(&q, (uint32_t)i);
+		}
+	}
+	light_spread(w, &q);
+	free(q.p);
+}
+
+/* ---- water that flows ----------------------------------------------------------------------------------------------- */
+
+#define WQ_MAX (1u << 22)
+
+static void water_poke(struct bl_world *w, int x, int y, int z)
+{
+	if (!bl_inside(w, x, y, z) || w->wq_n >= WQ_MAX)
+		return;
+	if (w->wq_n == w->wq_cap) {
+		size_t nc = w->wq_cap ? w->wq_cap * 2 : 256;
+		uint32_t *np = realloc(w->wq, nc * sizeof *np);
+		if (!np)
+			return;
+		w->wq = np;
+		w->wq_cap = nc;
+	}
+	w->wq[w->wq_n++] = (uint32_t)bl_index(w, x, y, z);
+}
+
+/* The cells that depend on this one: itself, its six neighbours, and the four beside the cell above it (a side neighbour spreads sideways only when it has
+ * something under it, which is this cell). */
+static void water_poke_around(struct bl_world *w, int x, int y, int z)
+{
+	water_poke(w, x, y, z);
+	for (int d = 0; d < 6; d++)
+		water_poke(w, x + bl_face_n[d][0], y + bl_face_n[d][1], z + bl_face_n[d][2]);
+	for (int d = 0; d < 6; d++)
+		if (!bl_face_n[d][1])
+			water_poke(w, x + bl_face_n[d][0], y + 1, z + bl_face_n[d][2]);
+}
+
+size_t bl_water_pending(const struct bl_world *w)
+{
+	return w->wq_n;
+}
+
+/* the level a cell of air or flowing water takes: 1 .. 7, or 0 when nothing feeds it */
+static int water_desired(const struct bl_world *w, int x, int y, int z)
+{
+	if (bl_water(bl_get(w, x, y + 1, z)))
+		return 1;                                              /* water above: it falls into this cell at the strongest level */
+	int best = 8;
+	for (int d = 0; d < 6; d++) {
+		if (bl_face_n[d][1])
+			continue;
+		int nx = x + bl_face_n[d][0], nz = z + bl_face_n[d][2];
+		int nb = bl_get(w, nx, y, nz);
+		if (!bl_water(nb))
+			continue;
+		int ln = bl_water_level(nb);
+		if (ln >= 7)
+			continue;
+		if (ln > 0) {
+			int below = bl_get(w, nx, y - 1, nz);
+			if (below == BL_AIR || bl_water(below))
+				continue;                                      /* flowing water over air or over water falls into it and does not spread sideways; a source does both */
+		}
+		if (ln + 1 < best)
+			best = ln + 1;
+	}
+	return best <= 7 ? best : 0;
+}
+
+static int cmp_u32(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+	return x < y ? -1 : x > y;
+}
+
+int bl_world_tick(struct bl_world *w, int budget)
+{
+	if (!w->wq_n || budget <= 0)
+		return 0;
+	size_t n = w->wq_n;
+	uint32_t *cur = malloc(n * sizeof *cur);
+	if (!cur) {
+		w->wq_n = 0;
+		return 0;
+	}
+	memcpy(cur, w->wq, n * sizeof *cur);
+	w->wq_n = 0;
+	qsort(cur, n, sizeof *cur, cmp_u32);
+	size_t m = 0;
+	for (size_t i = 0; i < n; i++)
+		if (i == 0 || cur[i] != cur[i - 1])
+			cur[m++] = cur[i];
+	size_t done = m < (size_t)budget ? m : (size_t)budget;
+	int changed = 0;
+	for (size_t i = 0; i < done; i++) {
+		int x, y, z;
+		cell_xyz(w, cur[i], &x, &y, &z);
+		int b = w->b[cur[i]];
+		if (b != BL_AIR && !(b >= BL_FLOW1 && b <= BL_FLOW7))
+			continue;                                          /* a source, a solid block, a torch: not changed by water */
+		int d = water_desired(w, x, y, z);
+		int nb = d ? BL_FLOW1 + d - 1 : BL_AIR;
+		if (nb != b) {
+			bl_set(w, x, y, z, nb);
+			changed++;
+		}
+	}
+	for (size_t i = done; i < m; i++) {                        /* the ones not reached wait for the next tick */
+		int x, y, z;
+		cell_xyz(w, cur[i], &x, &y, &z);
+		water_poke(w, x, y, z);
+	}
+	free(cur);
+	return changed;
+}
+
 /* ---- editing -------------------------------------------------------------------------------------------------------- */
 
 bool bl_set(struct bl_world *w, int x, int y, int z, int block)
@@ -397,6 +615,36 @@ bool bl_set(struct bl_world *w, int x, int y, int z, int block)
 				m = w->hi[i];
 		w->maxhi = m;
 	}
+
+	/* the light of torches and lamps: what came from this cell goes, what comes into it from the neighbours (or from the block itself) is put in */
+	size_t ci = bl_index(w, x, y, z);
+	struct vec relight = { 0 };
+	if (w->light[ci])
+		light_unlight(w, (uint32_t)ci, &relight);
+	int em = bl_emission(block);
+	if (em > 0) {
+		w->light[ci] = (uint8_t)em;
+		vec_push(&relight, (uint32_t)ci);
+	} else if (!bl_opaque(block)) {
+		int best = 0;
+		for (int d = 0; d < 6; d++) {
+			int l = bl_light(w, x + bl_face_n[d][0], y + bl_face_n[d][1], z + bl_face_n[d][2]);
+			if (l > best)
+				best = l;
+		}
+		if (best > 1) {
+			w->light[ci] = (uint8_t)(best - 1);
+			vec_push(&relight, (uint32_t)ci);
+		}
+	} else {
+		w->light[ci] = 0;
+	}
+	light_spread(w, &relight);
+	free(relight.p);
+
+	water_poke_around(w, x, y, z);
+	if (!bl_solid(block) && bl_get(w, x, y + 1, z) == BL_TORCH)
+		bl_set(w, x, y + 1, z, BL_AIR);                           /* a torch needs something to stand on */
 	return true;
 }
 
@@ -517,15 +765,17 @@ bool bl_break(struct bl_world *w, const struct bl_hit *h)
 
 bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struct bl_player *p)
 {
-	if (!h || !h->hit || block <= BL_AIR || block >= BL_COUNT || block == BL_WATER || block == BL_BEDROCK)
+	if (!h || !h->hit || block <= BL_AIR || block >= BL_COUNT || block == BL_BEDROCK || (block >= BL_FLOW1 && block <= BL_FLOW7))
 		return false;
 	if (!bl_inside(w, h->px, h->py, h->pz))
 		return false;
 	uint8_t cur = w->b[bl_index(w, h->px, h->py, h->pz)];
-	if (cur != BL_AIR && cur != BL_WATER)
+	if (cur != BL_AIR && !bl_water(cur))
 		return false;
-	if (p && bl_player_overlaps(p, h->px, h->py, h->pz))
+	if (p && bl_solid(block) && bl_player_overlaps(p, h->px, h->py, h->pz))
 		return false;
+	if (block == BL_TORCH && !bl_solid(bl_get(w, h->px, h->py - 1, h->pz)))
+		return false;                                              /* a torch stands on the floor of its cell */
 	return bl_set(w, h->px, h->py, h->pz, block);
 }
 
@@ -644,8 +894,8 @@ static void step_once(const struct bl_world *w, struct bl_player *p, const struc
 	float eye[3];
 	p->sneaking = in->sneak && !p->flying;
 	bl_player_eye(p, eye);
-	bool head_water = bl_get(w, (int)floorf(eye[0]), (int)floorf(eye[1]), (int)floorf(eye[2])) == BL_WATER;
-	p->in_water = bl_get(w, (int)floorf(p->x), (int)floorf(p->y + 0.4f), (int)floorf(p->z)) == BL_WATER;
+	bool head_water = bl_water(bl_get(w, (int)floorf(eye[0]), (int)floorf(eye[1]), (int)floorf(eye[2])));
+	p->in_water = bl_water(bl_get(w, (int)floorf(p->x), (int)floorf(p->y + 0.4f), (int)floorf(p->z)));
 
 	/* what the player wants: a direction on the ground plane and a speed */
 	float sy = sinf(p->yaw), cy = cosf(p->yaw);
@@ -947,6 +1197,13 @@ struct bl_world *bl_load(const char *path, const char **err)
 		goto out;
 	}
 	columns_all(w);
+	bl_lights_rebuild(w);
+	for (size_t i = 0; i < cells; i++)                              /* flowing water is looked at again: what has nothing to feed it dries up */
+		if (w->b[i] >= BL_FLOW1 && w->b[i] <= BL_FLOW7) {
+			int x, y, z;
+			cell_xyz(w, (uint32_t)i, &x, &y, &z);
+			water_poke(w, x, y, z);
+		}
 	res = w;
 	w = NULL;
 out:

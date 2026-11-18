@@ -19456,8 +19456,8 @@ class TestBlocks(Base):
     """client/mellagui-blocks.c: the block game window (the world blocks.c, the picture blocksview.c) and the pointer lock of wlwin (wlwin_lock_pointer, the
     compositor's zwp_pointer_constraints_v1 / zwp_relative_pointer_v1). Through MELLAGUI_BLOCKS_DUMP: where the player is, what he aims at, the hand, the number of
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
-    EXE = os.path.join(ROOT, 'build', 'mellagui-blocks')
-    K = dict(esc=1, enter=28, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
+    EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
+    K = dict(esc=1, enter=28, e=18, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
              f1=59, f3=61, lbrace=26, rbrace=27, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
@@ -19465,7 +19465,7 @@ class TestBlocks(Base):
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100'):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19475,7 +19475,7 @@ class TestBlocks(Base):
         if flat:
             argv += ['--seed', '11', '--flat']
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data))
+                             env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data, **(env or {})))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         self.proc = p
         self.win = wait_for_window('mellagui.blocks')
@@ -19492,7 +19492,7 @@ class TestBlocks(Base):
         return p
 
     def read_dump(self):
-        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': []}
+        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': [], 'pal': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -19512,6 +19512,8 @@ class TestBlocks(Base):
                 st['hotbar'] = f[1:]
             elif f[0] == 'slot':
                 st['slot'][int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
+            elif f[0] == 'pal':
+                st['pal'][int(f[1])] = dict((k, v if k == 'block' else int(v)) for k, v in (x.split('=') for x in f[2:]))
             elif f[0] == 'cbtn':
                 st['cbtn'][int(f[1])] = tuple(int(v) for v in f[2:6])
         return st
@@ -19944,6 +19946,163 @@ class TestBlocks(Base):
         rw, rh = int(s['rw']), int(s['rh'])
         self.assertTrue(rw * rh <= 800 * 480 and rw * rh >= 64 * 36, 'a picture of %d x %d for a window of 800 x 480' % (rw, rh))
         self.assertAlmostEqual(rw / rh, 800 / 480, delta=0.1, msg='in the shape of the window')
+
+    def put_in_hand(self, block):
+        """E opens the palette, a click on the block puts it in the slot in the hand, E goes back to the game."""
+        self.tap('e')
+        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 14)
+        cell = [c for c in st['pal'].values() if c['block'] == block][0]
+        ctl.abs(self.win['x'] + cell['x'] + cell['w'] // 2, self.win['y'] + cell['y'] + cell['h'] // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        slot = int(self.S()['slot'])
+        self.wait(lambda s: s['hotbar'][slot - 1] == block)
+        self.tap('e')
+        self.wait(lambda s: s['state']['playing'] == '1' and s['state']['locked'] == '1')
+
+    def test_e_opens_the_palette_and_a_click_puts_a_block_in_the_hand(self):
+        self.start()
+        self.play()
+        self.tap('e')
+        st = self.wait(lambda s: s['state']['prompt'] == '4')
+        self.assertEqual(st['state']['playing'], '0')
+        self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free while the palette is up')
+        self.assertEqual([c['block'] for _, c in sorted(st['pal'].items())],
+                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp'])
+        torch = st['pal'][12]
+        ctl.abs(self.win['x'] + torch['x'] + torch['w'] // 2, self.win['y'] + torch['y'] + torch['h'] // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['hotbar'][0] == 'torch')
+        self.assertEqual(st['state']['hand'], 'torch')
+        self.tap('2')                                       # the number keys choose the slot while the palette is up
+        self.assertEqual(self.S()['slot'], '2')
+        lamp = st['pal'][13]
+        ctl.abs(self.win['x'] + lamp['x'] + lamp['w'] // 2, self.win['y'] + lamp['y'] + lamp['h'] // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['hotbar'][1] == 'lamp')
+        self.assertEqual(st['hotbar'][0], 'torch', 'the first slot was left alone')
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '1' and s['state']['locked'] == '1')
+        self.assertEqual(self.S()['prompt'], '0')
+
+    def test_torches_and_lamps_give_light_and_a_torch_needs_a_floor(self):
+        self.start('--pitch', '-45')                         # the grass two blocks ahead (z 130)
+        self.play()
+        self.put_in_hand('torch')
+        self.assertEqual(self.S()['light'], '0')
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['hist']['torch'] == 1)
+        self.assertEqual(st['state']['light'], '12', 'two blocks from a torch: 14 - 2')
+        self.assertEqual(st['aim']['block'], 'torch', 'the torch can be aimed at')
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['hist']['torch'] == 0)
+        self.assertEqual(st['state']['light'], '0', 'taking it away takes its light')
+        # a lamp: 15 at the lamp, a block that shines
+        self.put_in_hand('lamp')
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['hist']['lamp'] == 1)
+        self.assertEqual(st['state']['light'], '13')
+        # a torch is not put into the air: break the grass under where it would stand, then try
+        self.tap('1')
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['hist']['lamp'] == 0)
+        self.put_in_hand('torch')
+        ctl.button(272, True)                               # the grass at z 130 is aimed at again: break it, the ray goes on to the grass at z 131
+        ctl.button(272, False)
+        self.wait(lambda s: s['hist']['grass'] == 256 * 256 - 1)
+        rev = int(self.S()['rev'])
+        ctl.button(273, True)                               # put into the hole: the dirt under it is solid, so a torch can stand there
+        ctl.button(273, False)
+        self.wait(lambda s: s['hist']['torch'] == 1)
+        self.assertEqual(int(self.S()['rev']), rev + 1)
+
+    def test_water_put_by_hand_flows_and_dries_up_when_a_block_replaces_the_source(self):
+        self.start('--pitch', '-45')
+        self.play()
+        self.put_in_hand('water')
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['hist']['water'] == 1 and s['state']['wpend'] == '0' and sum(v for k, v in s['hist'].items() if k.startswith('flow')) > 60, timeout=20.0)
+        flows = {k: v for k, v in st['hist'].items() if k.startswith('flow')}
+        self.assertGreater(flows['flow1'], 2, 'the first ring')
+        self.assertGreater(int(self.S()['rev']), 50, 'the flow made many changes')
+        # a block put into the source's cell takes its place: what it fed dries up
+        self.tap('2')                                        # dirt (slot 1 holds the water now)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['hist']['water'] == 0 and s['state']['wpend'] == '0' and sum(v for k, v in s['hist'].items() if k.startswith('flow')) == 0, timeout=30.0)
+        self.assertEqual(st['hist']['dirt'], 131072 + 1, 'the dirt went into the source cell')
+
+    def test_the_clock_stands_runs_and_follows_the_real_sun(self):
+        self.start('--no-clock', '--time', '9')
+        self.play()
+        self.assertEqual(self.S()['clock'], '0')
+        self.tap('t')
+        self.assertEqual(self.S()['clock'], '1')
+        self.tap('t')
+        self.assertEqual(self.S()['clock'], '2')
+        self.tap('t')
+        self.assertEqual(self.S()['clock'], '0')
+        for now, want in (('12:00', 12.0), ('08:00', 6.0), ('16:00', 18.0), ('04:00', 3.0)):
+            self.proc.kill()
+            self.proc.wait()
+            for _ in range(60):
+                if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                    break
+                time.sleep(0.05)
+            self.start('--real-clock', env=dict(MELLAGUI_BLOCKS_NOW=now, MELLAGUI_SMART_SUN='08:00,16:00'))
+            self.play()
+            st = self.wait(lambda s: s['state']['clock'] == '2' and abs(float(s['state']['time']) - want) < 0.05)
+            self.assertAlmostEqual(float(st['state']['time']), want, delta=0.05, msg='at %s' % now)
+
+    def test_a_broken_and_a_placed_block_make_a_sound_unless_it_is_switched_off(self):
+        self.start('--pitch', '-45')
+        self.play()
+
+        def last():
+            ctl.cmd('sound')
+            d = dict(kv.split('=', 1) for kv in ctl.cmd('sound')[0].split()[1:] if '=' in kv)
+            return d.get('last') or '', int(d.get('n', 0))
+        n0 = last()[1]
+        ctl.button(272, True)
+        ctl.button(272, False)
+        for _ in range(40):
+            if last()[0].startswith('card-draw'):
+                break
+            time.sleep(0.05)
+        self.assertTrue(last()[0].startswith('card-draw'), 'breaking a block: %s' % (last(),))
+        time.sleep(0.15)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        for _ in range(40):
+            if last()[0].startswith('card-place'):
+                break
+            time.sleep(0.05)
+        self.assertTrue(last()[0].startswith('card-place'), 'putting one back: %s' % (last(),))
+        self.assertEqual(self.S()['sound'], '1')
+        self.wait(lambda s: int(s['state']['sounds']) >= 2)
+        self.proc.kill()
+        self.proc.wait()
+        for _ in range(60):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        self.start('--pitch', '-45', '--no-sound')
+        self.play()
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['rev'] == '1')
+        self.assertEqual(self.S()['sound'], '0')
+        self.assertEqual(self.S()['sounds'], '0', '--no-sound sends nothing')
 
     def test_a_bad_command_line_is_refused(self):
         for args in (['--render', 'big'], ['--world-size', '3'], ['--time', '30'], ['--fov', '5'], ['--bogus']):

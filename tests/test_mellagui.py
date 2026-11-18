@@ -15705,6 +15705,73 @@ class TestPaint(Base):
         self.assertGreater(cols[left] + 4, cols[min(cols, key=lambda c: abs(c - mid))], 'the ends hang lower than the middle: %d against %d' % (cols[left], cols[mid]))
         self.assertGreater(right - left, 20)
 
+    def test_the_help_has_pages_that_scroll_and_a_list_to_choose_from(self):
+        self.start('--new', '100x80')
+        self.wait(lambda s: s['image']['w'] == '100')
+        ctl.tap(59)                                                                           # F1
+        st = self.wait(lambda s: s['state']['prompt'] == '7' and 'help' in s)
+        h = st['help']
+        pages = int(h['pages'])
+        self.assertGreaterEqual(pages, 10)
+        self.assertEqual((h['page'], h['title'], h['top']), ('0', 'Welcome', '0'))
+        self.assertEqual(len(self.rows('hpage')), pages)                                      # a row in the list for each page
+        ctl.tap(KEY_RIGHT)                                                                    # the next page
+        st = self.wait(lambda s: s['help']['page'] == '1')
+        self.assertEqual(st['help']['title'], 'Drawing_and_colours')
+        ctl.tap(KEY_LEFT)
+        self.wait(lambda s: s['help']['page'] == '0')
+        ctl.tap(KEY_LEFT)                                                                     # (before the first there is nothing)
+        time.sleep(0.15)
+        self.assertEqual(self.state()['help']['page'], '0')
+        ctl.tap(KEY_1 + 3)                                                                    # the key 4: the fourth page
+        st = self.wait(lambda s: s['help']['page'] == '3')
+        self.assertEqual(st['help']['title'], 'Retouching')
+        r = self.row('hpage', '6')                                                            # a click on a row of the list
+        self.click_at(int(r['x']) + 20, int(r['y']) + int(r['h']) // 2)
+        st = self.wait(lambda s: s['help']['page'] == '6')
+        self.assertEqual(st['help']['title'], 'Groups_and_masks')
+        b = self.row('hbtn', 'next')                                                          # the buttons
+        self.click_at(int(b['x']) + 20, int(b['y']) + 10)
+        self.wait(lambda s: s['help']['page'] == '7')
+        b = self.row('hbtn', 'back')
+        self.click_at(int(b['x']) + 20, int(b['y']) + 10)
+        self.wait(lambda s: s['help']['page'] == '6')
+        # the last page, the list of keys, is longer than the card: it scrolls, by keys, the wheel and the bar
+        r = self.row('hpage', str(pages - 1))
+        self.click_at(int(r['x']) + 20, int(r['y']) + int(r['h']) // 2)
+        st = self.wait(lambda s: s['help']['page'] == str(pages - 1))
+        height, view = int(st['help']['height']), int(st['help']['view'])
+        self.assertGreater(height, view, 'the list of keys fits the card: it should need scrolling here')
+        ctl.tap(KEY_DOWN)
+        st = self.wait(lambda s: int(s['help']['top']) > 0)
+        ctl.tap(107)                                                                          # End: the last of it
+        st = self.wait(lambda s: int(s['help']['top']) == height - view)
+        ctl.tap(102)                                                                          # Home
+        self.wait(lambda s: s['help']['top'] == '0')
+        wx, wy = self.win_xy()
+        ctl.abs(wx + int(self.row('hpage', '0')['x']) + 400, wy + int(self.row('hpage', '0')['y']) + 100)
+        time.sleep(0.1)
+        ctl.cmd('axis v 15 1')                                                                # the wheel
+        self.wait(lambda s: int(s['help']['top']) > 0)
+        top = int(self.state()['help']['top'])
+        ctl.cmd('axis v -15 -1')
+        self.wait(lambda s: int(s['help']['top']) < top)
+        bar = self.row('hbar')                                                                # the scroll bar: a click low on it takes the text far down
+        self.click_at(int(bar['x']) + 7, int(bar['y']) + int(bar['h']) - 6)
+        st = self.wait(lambda s: int(s['help']['top']) > (height - view) // 2)
+        b = self.row('hbtn', 'next')                                                          # (on the last page Next does nothing)
+        self.click_at(int(b['x']) + 20, int(b['y']) + 10)
+        time.sleep(0.15)
+        self.assertEqual(self.state()['help']['page'], str(pages - 1))
+        ctl.tap(KEY_ESC)                                                                      # Esc closes it; F1 brings it back on the same page
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        ctl.tap(59)
+        st = self.wait(lambda s: s['state']['prompt'] == '7' and 'help' in s)
+        self.assertEqual(st['help']['page'], str(pages - 1))
+        self.assertEqual(st['help']['top'], '0')                                              # (scrolled to the top again)
+        self.click_at(3, 3)                                                                   # a click outside the card closes it too
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
     def test_the_rulers_have_units_and_a_resolution(self):
         self.start('--new', '200x100')
         st = self.wait(lambda s: s['image']['w'] == '200')

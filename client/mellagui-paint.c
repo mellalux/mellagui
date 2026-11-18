@@ -2836,6 +2836,8 @@ struct app {
     char pbuf[PATH_MAX];                        /* the text field of a prompt */
     char perr[160];                             /* what was wrong with the last answer */
     int pcard_hover, pcard_down;
+    int help_page, help_top, help_hover, help_btn;          /* the help card: the page, how far it is scrolled, what the pointer is on */
+    bool help_drag;                             /* its scroll bar's thumb is held */
     struct wlpicker pk;                         /* the folder list of the Open / Save as card (wlpicker.h, the same in every program) */
     int menu_kind;                              /* the menu that is open: 0 none, 1 effects, 2 transform, 3 selects, 4 shapes, 5 blend, 6 layer */
     struct cpick cp;
@@ -6060,26 +6062,436 @@ static void default_dir(const struct app *a, char *out, size_t n)
         snprintf(out, n, "%.*s/", (int)n - 2, home && *home ? home : (g_startdir[0] ? g_startdir : "/"));
 }
 
-static const char *const HELP_LINES[] = {
-    "Tools  S select (O ellipse, Q lasso, W wand)  M move  P pen  A airbrush  E eraser  K clone  R smudge  H blur",
-    "       L line  B box  C circle  N polygon / star  J free polygon  V curve  F fill  G gradient  T text  I picker",
-    "Left button draws with the pen colour, the right button with the second one; X swaps them.",
-    "The squares at the left of the strip open the colour picker; the small ones are the colours used lately.",
-    "The sliders in the strip: Size, Opacity, Hardness ... ([ and ] change the size, the wheel steps a slider).",
-    "Shift keeps a line at 45 degrees and a box or circle square.",
-    "Layers (the panel at the right, Tab hides it): you draw on the chosen one.",
-    "  PageUp / PageDown choose a layer, Ctrl+Shift+N new, Ctrl+J duplicate, Ctrl+E merge down.",
-    "  .ora keeps layers, groups, masks and text; .png / .jpg the flat picture. Right click a layer: groups, masks.",
-    "Ctrl+O open   Ctrl+N new   Ctrl+S save   Ctrl+Shift+S save as   Ctrl+Z undo   Ctrl+Y or Ctrl+Shift+Z redo",
-    "Ctrl+A select all   Ctrl+D select none   Ctrl+I invert   Ctrl+C / X / V copy, cut, paste (+Shift: new picture)",
-    "Delete clears the selection, Backspace fills it, Enter crops to it, Esc drops it.",
-    "Text: click, type; Enter a new line, Ctrl+Enter or a click elsewhere puts it down, Esc cancels.",
-    "Wheel zooms, middle button drags the picture, + - zoom, 0 fits, 1 real size, Ctrl+G a pixel grid.",
-    "Ctrl+L rulers (click the corner for mm, cm, in, pt; right click: dpi): drag out a guide, back to remove. Ctrl+B snaps.",
-    "Transform (right rail): turn, flip, resize, canvas size (Ctrl+Alt+C), place a picture as a layer.",
-    "Effects (right rail): adjust, blur, levels ... and Animation: the layers become the frames of a GIF or WebP.",
+/* ---- the help: pages of text with a list of topics ---------------------------------------------------------------------------------- */
+
+/* A page is a list of lines: "# Heading", "- a bullet", "|keys|what they do" (a row of a table: the keys in an accent colour, the words wrapped beside them),
+ * "" (a gap) and anything else is a paragraph. Single blanks between words only: the lines are wrapped to the window by `help_layout`. */
+static const char *const HP_WELCOME[] = {
+    "Paint draws, edits and layers pictures. What is in the window:",
+    "- The rail at the left holds the tools. A small triangle on a button means a group of tools: click the lit button again, or right click it, to pick another one.",
+    "- The rail at the right: New, Open, Save, Undo, Redo, the Transform and Effects menus, Crop, Fit and this help.",
+    "- The picture in the middle. The layers panel is at its right (Tab hides it).",
+    "- Under the picture: the strip with the colours and the sliders of the tool you are using, and the status line with hints and the place of the pointer.",
+    "# The mouse",
+    "|Left button|Draws with the pen colour.",
+    "|Right button|Draws with the second colour (the small square behind the pen colour).",
+    "|Wheel|Zooms the picture. Over a slider it steps the slider, over the layers panel it scrolls the list, over a layer's Opacity it changes it.",
+    "|Middle button|Drags the picture about.",
+    "# Looking at the picture",
+    "|+ and -|Zoom in and out.",
+    "|0|Fit the picture to the window.",
+    "|1|Show it at its real size (100 %).",
+    "|Arrow keys|Move the picture (with Shift: further).",
+    "|Ctrl+G|A grid of pixels (when you are zoomed in).",
+    "|Tab|Hide or show the layers panel.",
+    "# Good to know",
+    "- Everything can be undone: Ctrl+Z, and Ctrl+Y or Ctrl+Shift+Z to do it again. The last 32 steps are kept.",
+    "- A picture is only written to disk when you save it. Closing the window asks first when there is something unsaved.",
+    "- Your colours, the sliders, the rulers and the panel are remembered in ~/.config/mellagui/paint.conf.",
+    "- The pages of this help: Left and Right (or the list at the left) change the page, Up, Down and the wheel scroll, Esc closes it.",
 };
-#define N_HELP ((int)(sizeof(HELP_LINES) / sizeof(HELP_LINES[0])))
+
+static const char *const HP_DRAWING[] = {
+    "# Tools that draw",
+    "|P|Pen: drag to draw. Size, Opacity and Hardness (how soft the edge is) are in the strip.",
+    "|A|Airbrush: hold the button to spray; Density is in the strip.",
+    "|E|Eraser: takes the colour of the layer away, so the layer (or the paper behind it) shows through.",
+    "|L|Line: drag it (Shift keeps it at 45 degrees). The Arrow switch gives it a head.",
+    "|B|Box: drag it (Shift: a square). Corner rounds it, Filled makes it solid.",
+    "|C|Circle or ellipse: drag it (Shift: a circle). Filled makes it solid.",
+    "|N|Polygon or star: drag it; Sides and Star are in the strip.",
+    "|J|Free polygon: click the corners. Enter, a double click or a click on the first corner closes it, Esc gives it up.",
+    "|V|Curve: drag a line, then drag its two handles to bend it. Enter puts it down.",
+    "|F|Fill: click to colour an area of a similar colour (Tolerance). All of it fills every similar pixel, not only the joined area; Image looks at what you see, not at the layer.",
+    "|G|Gradient: drag from where the colour starts to where it ends. Radial goes round the start, To clear fades to see-through instead of the second colour.",
+    "|I|Picker: click a pixel to take its colour (a right click takes it as the second colour).",
+    "# The brush bar",
+    "Pen, Airbrush, Eraser and Line have a bar above the strip:",
+    "- Smooth steadies the hand: the line follows the pointer on a rubber band.",
+    "- Symmetry (1 to 16) draws turned copies of every stroke round the middle of the picture; Mirror adds a mirror image. The lines the copies come from are shown on the picture.",
+    "- Pixel draws hard squares with no soft edge, for pixel art.",
+    "# Colours",
+    "- The two squares at the left of the strip are the pen colour and the second colour. A click opens the colour card: a square for saturation and brightness, a bar for the hue, a bar for how see-through it is, a field for a code like #ff8800 or #ff880080, and quick colours. Esc puts the old colour back.",
+    "- The small swap button beside them (or the X key) swaps the two colours.",
+    "- The small squares are the colours used lately: a click makes one the pen colour, a right click the second colour.",
+    "# Sliders",
+    "Click or drag a slider, or turn the wheel over it (with Shift in bigger steps). [ and ] make the brush smaller and bigger.",
+};
+
+static const char *const HP_SELECTING[] = {
+    "# Selecting",
+    "|S|Rectangle: drag it. The Ratio switch keeps its shape (1:1, 4:3 ...).",
+    "|O|Ellipse (Shift: a circle).",
+    "|Q|Lasso: drag round what you want; it is selected when you let go.",
+    "|W|Magic wand: click to select the area of a similar colour (Tolerance; All of it selects everywhere in the picture).",
+    "# Adding and taking away",
+    "Hold Shift while you drag to add to the selection, Alt to take away from it, Ctrl to keep only what both have. The Add and Subtract switches in the strip do the same.",
+    "# What a selection does",
+    "- Tools draw only inside it, and effects work only on it.",
+    "|Delete|Clears what is selected (the whole layer when nothing is).",
+    "|Backspace|Fills it with the pen colour.",
+    "|Enter|Crops the picture to it.",
+    "|Esc or Ctrl+D|Drops the selection.",
+    "|Ctrl+A|Selects everything.",
+    "|Ctrl+I|Inverts the selection.",
+    "- Effects > Feather selection softens its edge, Grow or shrink makes it bigger or smaller.",
+    "# Moving and copying",
+    "|M|Move: drag to move what is selected, or the whole layer when nothing is.",
+    "|Ctrl+C and Ctrl+X|Copy or cut the selection (the whole layer when nothing is selected).",
+    "|Ctrl+V|Pastes as a layer of its own and chooses Move, so you can put it in place.",
+    "- Effects > Scale and turn... scales and turns the selection or the layer.",
+};
+
+static const char *const HP_RETOUCH[] = {
+    "The retouching tools are one group on the left rail (the third button from the top, a small triangle in its corner).",
+    "# Clone stamp (K)",
+    "Alt+click (or the right button) takes the spot to copy from. Then paint: the picture round that spot appears where you paint, and keeps moving with you. Take a new spot any time.",
+    "With the Image switch on it copies what you see (all the layers); otherwise only the chosen layer.",
+    "# Smudge (R)",
+    "Drag to smear the colours along, as with a finger in wet paint. Opacity is how strong it is.",
+    "# Blur brush (H)",
+    "Drag to soften what the brush touches. Opacity is how strong it is.",
+    "# Hints",
+    "- Size and Hardness are in the strip as for the pen; the ring on the picture shows how big the brush is.",
+    "- A selection keeps all three inside it.",
+    "- For a blur of the whole layer or the selection use Effects > Blur.",
+};
+
+static const char *const HP_TEXT[] = {
+    "# Writing",
+    "Press T, click where the text starts and type. Enter makes a new line. Ctrl+Enter or a click somewhere else puts the text down, Esc gives it up. Ctrl+V pastes text into it.",
+    "The size is the Size slider in the strip. The text bar above the strip holds the rest:",
+    "- Font: a card with the font families found on the computer, each shown in its own letters (Interface font is the program's own).",
+    "- B, I, U, S: bold, italic, underline, strike. Box puts a box behind the text in the second colour.",
+    "- Left, centre and right alignment.",
+    "- Line is the space between lines, Letters the space between letters.",
+    "- Outline draws a rim in the second colour, Shadow a soft shadow, Angle turns the text.",
+    "- Bend lays the text along an arc: plus arches it over, minus lets it sag, up to 240 degrees.",
+    "# Text on its own layer",
+    "The Layer switch (on by default) puts the text on a layer of its own, named Text: and its first words.",
+    "Click the text with the Text tool again and you can type into it again, with the settings it was made with. Esc leaves it as it was.",
+    "It stays a text only as long as nothing else is done to that layer: painting on it, filtering it, moving it or turning the picture makes it a plain picture, and a click then starts a new text. An .ora file remembers the text.",
+    "With the Layer switch off the text goes straight onto the chosen layer and is picture from then on.",
+};
+
+static const char *const HP_LAYERS[] = {
+    "# The panel",
+    "The layers panel is at the right of the picture. The top of the list is the top of the stack; you draw on the chosen layer.",
+    "|Eye|Shows or hides a layer.",
+    "|Click|Chooses the layer. Double click renames it; right click opens a menu.",
+    "|New|A new empty layer above the chosen one.",
+    "|Copy|Duplicates the layer.",
+    "|Delete|Deletes it (the last layer stays).",
+    "|Up and Down|Move the layer in the stack.",
+    "|Merge|Lays the layer onto the one below it; the two become one.",
+    "|Opacity|How much of the layer shows (0 hides it).",
+    "|Blend|How it mixes with what is below: Normal, Multiply, Screen, Overlay, Darken, Lighten, Difference.",
+    "# The paper",
+    "The sheet behind all the layers is not a layer: a new picture is one empty layer on white paper, so the eraser shows the paper and Move carries only the drawing. Transform > Paper colour = the second colour changes it.",
+    "# Keys",
+    "|PageUp and PageDown|Choose the layer above or below.",
+    "|Ctrl+Shift+N|New layer.",
+    "|Ctrl+J|Duplicate the layer.",
+    "|Ctrl+E|Merge down.",
+    "|Tab|Hide or show the panel.",
+    "# Saving layers",
+    ".ora keeps all the layers (and groups, masks and text). Any other file type gets the flat picture, and the status line says so.",
+};
+
+static const char *const HP_GROUPS[] = {
+    "# Groups",
+    "A group is a folder of layers. Right click a layer and choose Group the layer; the group gets a row of its own with a fold arrow, a folder and an eye.",
+    "- Click the group's row to choose the group. The panel's Opacity, Blend and eye are then the group's, and New, Copy, Delete, Up, Down and Merge work on the whole group (New adds a layer on top inside it, Delete removes the group with its layers, Merge makes it one layer).",
+    "- Click the arrow to fold the group (its layers leave the list); double click the name to rename it.",
+    "- Blend has Pass through (the usual): the layers in the group mix with what is below it as if the group were not there. Any other mode, or an opacity under 100, lays the group over as one picture.",
+    "- Up and Down move a layer or group past the next one on the same level. Right click > Into the group above / below puts it in a group, Take out of the group takes it out.",
+    "- A group can be in a group. Ungroup (in the group's menu) keeps the layers. Ctrl+Alt+G groups the layer, or ungroups the chosen group.",
+    "# Masks",
+    "A mask decides where a layer shows: white shows it, black hides it, grey half. Right click a layer > Add a mask (with a selection, the inside shows and the outside is hidden).",
+    "- The mask's small picture sits beside the layer's in the panel. Click it to paint on the mask instead of the layer (the status line says (mask)); click again to go back.",
+    "- Paint black to hide, white to show; every tool, the fill and the gradient work on it.",
+    "- Apply the mask makes the hidden parts see-through for good, Delete the mask shows the whole layer again.",
+    "- A change of the picture's shape (turn, resize, crop, canvas size) applies masks first.",
+    "- .ora keeps groups and masks.",
+};
+
+static const char *const HP_EFFECTS[] = {
+    "# Effects",
+    "The Effects button (right rail) opens a card of buttons. They work on the chosen layer, or on the selection:",
+    "- Colour: Grayscale, Sepia, Invert, Brighter, Darker, More and Less contrast, Adjust (brightness, contrast, hue, saturation; Ctrl+U), Levels, Replace colour (one colour becomes another), Colour to alpha (a colour becomes see-through).",
+    "- Detail: Blur, Sharpen, Unsharp mask, Mosaic, Pixelate, Noise, Emboss, Edges, Vignette.",
+    "- On a new layer below: Drop shadow and Outline (in the pen colour); the sliders show the result as you move them.",
+    "- Shapes: Scale and turn, Turn picture by any angle, Feather selection, Grow or shrink.",
+    "- Animation: see that page.",
+    "Cards with sliders show the result at once; Cancel puts everything back, Reset sets the sliders to their start, Apply keeps it (one undo step).",
+    "# Size and shape",
+    "|Transform|The button on the right rail: turn left or right, flip, Resize, Canvas size, flip the layer only, Place picture as a layer, the paper colour, Turn by any angle.",
+    "|Ctrl+R|Resize: type 800x600, a width (800) or a percentage (50%).",
+    "|Ctrl+Alt+C|Canvas size: a bigger or smaller sheet with a 3 x 3 anchor for where the picture sits. The new room is transparent or the second colour.",
+    "|Ctrl+Left and Ctrl+Right|Turn the whole picture a quarter.",
+    "|Crop|The button on the right rail (or Enter): crops to the selection.",
+};
+
+static const char *const HP_RULERS[] = {
+    "# Rulers",
+    "Ctrl+L shows rulers along the top and the left of the picture, like Photoshop's: the numbers go on round the picture, below zero and past its far edge, and the part over the picture is a little lighter. The pointer's place is marked on them.",
+    "- Click the square in the corner to change the unit: pixels, millimetres, centimetres, inches, points. The unit's name stands in the corner.",
+    "- Right click a ruler for a menu of the units and the resolution (72, 96, 150 or 300 dpi). A picture has no size of its own, so a millimetre is worked out from the dpi: 96 dpi is 3.78 pixels a millimetre.",
+    "- The status line then also tells the pointer's place in that unit.",
+    "# Guides",
+    "- Drag out of a ruler to make a guide (up to 32). Drag it again to move it. Drag it back onto a ruler, or off the picture, to take it away.",
+    "- Guides are only for the eye and for snapping; they are not saved in the file.",
+    "# Snapping",
+    "Ctrl+B makes the selection, shape, gradient and text tools stick to a guide, to the edges and to the middle of the picture when they come within a few pixels.",
+    "# Grid",
+    "Ctrl+G shows a grid of pixels when you are zoomed in far enough.",
+    "- The ruler, unit, resolution and snapping are remembered next time.",
+};
+
+static const char *const HP_FILES[] = {
+    "# Files",
+    "|Ctrl+O|Open: a list of the folder you type, filtering as you type (Up, Down, Enter; Tab completes the name).",
+    "|Ctrl+S|Save. A picture with no name asks for one.",
+    "|Ctrl+Shift+S|Save as: click a format and the extension in the name changes.",
+    "|Ctrl+N|New picture: type a size, 800x600. White paper or a transparent first layer.",
+    "- .ora (OpenRaster, which GIMP and Krita read) keeps layers, groups, masks and text. .png, .webp, .gif, .tif, .bmp, .tga, .jpg and .ppm get the flat picture; saving layers as one of those says so. See-through is kept by .png, .webp, .gif, .tif, .bmp and .tga; .jpg and .ppm lay the picture on white.",
+    "- Transform > Place picture as a layer puts another picture on a layer of its own.",
+    "# The clipboard",
+    "- Ctrl+C and Ctrl+X put the picture on the computer's clipboard (as a PNG), so other programs can paste it.",
+    "- Ctrl+V pastes a picture from the clipboard (a screenshot, something copied in a browser) as a new layer. Ctrl+Shift+V makes a new picture of it.",
+    "- The screenshot tool (Super+Shift+S) has a Paint button (Ctrl+E): it saves the picture and opens it here.",
+    "# From the command line",
+    "|mellagui-paint FILE|Opens a picture. --new 800x600 [FILE] starts a new one.",
+    "|--apply IN OUT OP...|Does things without a window: rotate-left, flip-h, resize=50%, crop=X,Y,W,H, gray, sepia, invert, blur, sharpen ...",
+    "|--animate OUT.gif FRAME...|Makes an animation out of pictures (see Animations).",
+};
+
+static const char *const HP_ANIM[] = {
+    "# Making an animation",
+    "The layers are the frames. Draw each frame on a layer of its own (bottom layer first), then open Effects > Animation... A group counts as one frame, so a frame can be made of several layers.",
+    "|Delay|How long each frame is shown, in milliseconds.",
+    "|Loops|How many times it plays; 0 is for ever.",
+    "|Background|The first layer stays under every frame instead of being a frame.",
+    "|Ping-pong|After the last frame it goes back again (without showing the ends twice).",
+    "Apply asks where to save: a name ending in .gif or .webp (.gif is suggested). The picture itself stays as it is; the animation is a separate file.",
+    "- A layer or group named like Walk @250 is shown for 250 ms, whatever the Delay says.",
+    "- Hidden layers are left out.",
+    "- GIF frames have a colour table of up to 255 colours each, so very colourful frames lose some colours. WebP is lossless.",
+    "# Opening an animation",
+    "An animated GIF opens with a layer for every frame (named Frame 1 @100 ...), the way a GIF player would show it. Edit them and save again with Effects > Animation... Animated WebP files open as their first picture only.",
+    "# From the command line",
+    "mellagui-paint --animate out.gif a.png b.png c.png --delay 80 --loops 3 [--bg] [--pingpong] makes it without a window (the pictures must have one size; a name like b@250.png gives that frame 250 ms).",
+};
+
+static const char *const HP_KEYS[] = {
+    "# Tools",
+    "|S O Q W|Select: rectangle, ellipse, lasso, magic wand",
+    "|M|Move",
+    "|P A E|Pen, airbrush, eraser",
+    "|K R H|Clone stamp, smudge, blur brush",
+    "|L B C N|Line, box, circle, polygon or star",
+    "|J V|Free polygon, curve",
+    "|F G T I|Fill, gradient, text, picker",
+    "# Picture",
+    "|Ctrl+O N S|Open, new, save (Shift+S: save as)",
+    "|Ctrl+Z Y|Undo, redo (Ctrl+Shift+Z also redoes)",
+    "|Ctrl+C X V|Copy, cut, paste (Ctrl+Shift+V: a new picture from the clipboard)",
+    "|Ctrl+A D I|Select all, select none, invert the selection",
+    "|Delete Backspace Enter|Clear, fill, crop to the selection",
+    "|Ctrl+R|Resize",
+    "|Ctrl+Alt+C|Canvas size",
+    "|Ctrl+U|Adjust brightness, contrast, hue, saturation",
+    "|Ctrl+Left Right|Turn the picture a quarter",
+    "# Looking",
+    "|+ - 0 1|Zoom in, out, fit, real size",
+    "|Arrow keys|Move the picture (Shift: further)",
+    "|Ctrl+G|Pixel grid",
+    "|Ctrl+L|Rulers",
+    "|Ctrl+B|Snap to guides",
+    "|Tab|Hide or show the layers panel",
+    "# Colours and brush",
+    "|X|Swap the pen and the second colour",
+    "|[ ]|Smaller and bigger brush",
+    "# Layers",
+    "|PageUp PageDown|Choose the layer above or below",
+    "|Ctrl+Shift+N|New layer",
+    "|Ctrl+J|Duplicate",
+    "|Ctrl+E|Merge down",
+    "|Ctrl+Alt+G|Group the layer, or ungroup the chosen group",
+    "# Others",
+    "|Esc|Drop the selection; give up a shape or text being made",
+    "|Enter|Close a free polygon, put down a curve; crop to a selection",
+    "|Ctrl+Enter|Put the text down",
+    "|F1|This help",
+    "|Ctrl+Q|Quit (asks about unsaved changes)",
+};
+
+#define HP_N(arr) ((int)(sizeof(arr) / sizeof(arr[0])))
+static const struct hpage {
+    const char *title;
+    const char *const *lines;
+    int n;
+} HP[] = {
+    { "Welcome", HP_WELCOME, HP_N(HP_WELCOME) },
+    { "Drawing and colours", HP_DRAWING, HP_N(HP_DRAWING) },
+    { "Selecting and moving", HP_SELECTING, HP_N(HP_SELECTING) },
+    { "Retouching", HP_RETOUCH, HP_N(HP_RETOUCH) },
+    { "Text", HP_TEXT, HP_N(HP_TEXT) },
+    { "Layers", HP_LAYERS, HP_N(HP_LAYERS) },
+    { "Groups and masks", HP_GROUPS, HP_N(HP_GROUPS) },
+    { "Effects and sizes", HP_EFFECTS, HP_N(HP_EFFECTS) },
+    { "Rulers and guides", HP_RULERS, HP_N(HP_RULERS) },
+    { "Files and clipboard", HP_FILES, HP_N(HP_FILES) },
+    { "Animations", HP_ANIM, HP_N(HP_ANIM) },
+    { "All the keys", HP_KEYS, HP_N(HP_KEYS) },
+};
+#define HP_COUNT ((int)(sizeof(HP) / sizeof(HP[0])))
+
+/* One line of a page as it will be drawn: a piece of a source line (wrapped), where, and what kind. */
+enum { HL_TEXT, HL_HEAD, HL_KEY, HL_DOT };
+struct hl {
+    const char *p;
+    int len, x, y, kind;
+};
+#define HL_MAX 900
+#define HELP_LH (LM_FONT_H + 4)
+static struct hl g_hl[HL_MAX];
+static int g_hl_n, g_hl_h, g_hl_page = -1, g_hl_w = -1;
+static char g_hl_pool[8192];                                            /* text the lines point into that is not a source line (the keys of a table row) */
+static int g_hl_pool_n;
+
+/* How wide a line of this kind is drawn: headings and keys are bold, which is wider. */
+static int hl_text_w(const char *s, int kind)
+{
+    if (kind == HL_HEAD || kind == HL_KEY)
+        return lm_font_ui_cells_get() ? (int)strlen(s) * LM_FONT_W : lm_font_text_width_bold(s);
+    return wlcard_text_w(s);
+}
+
+/* Wraps `s` (single blanks between words) to `width` pixels from `x`, one `struct hl` per line; `*y` moves down. */
+static int hl_wrap(const char *s, int x, int width, int *y, int kind)
+{
+    size_t n = strlen(s), pos = 0;
+    int lines = 0;
+    while (pos < n && g_hl_n < HL_MAX) {
+        size_t end = pos;
+        char buf[600];
+        for (;;) {
+            size_t nx = end;
+            while (nx < n && s[nx] == ' ')
+                nx++;
+            while (nx < n && s[nx] != ' ')
+                nx++;
+            if (nx == end)
+                break;
+            size_t len = nx - pos;
+            if (len >= sizeof(buf))
+                len = sizeof(buf) - 1;
+            memcpy(buf, s + pos, len);
+            buf[len] = 0;
+            if (end > pos && hl_text_w(buf, kind) > width)
+                break;                                                  /* (a word that does not fit starts the next line) */
+            end = nx;
+            if (end >= n)
+                break;
+        }
+        if (end == pos)
+            break;
+        g_hl[g_hl_n++] = (struct hl){ s + pos, (int)(end - pos), x, *y, kind };
+        *y += HELP_LH;
+        lines++;
+        pos = end;
+        while (pos < n && s[pos] == ' ')
+            pos++;
+    }
+    return lines;
+}
+
+/* Sets a page out for a content width; the result is in g_hl and g_hl_h (its height). Kept until the page or the width changes. */
+static void help_layout(int page, int width)
+{
+    if (page == g_hl_page && width == g_hl_w)
+        return;
+    g_hl_page = page;
+    g_hl_w = width;
+    g_hl_n = 0;
+    g_hl_pool_n = 0;
+    int y = 0;
+    const struct hpage *hp = &HP[page];
+    for (int i = 0; i < hp->n; i++) {
+        const char *s = hp->lines[i];
+        if (!*s) {
+            y += 8;
+        } else if (s[0] == '#') {
+            if (y)
+                y += 10;
+            hl_wrap(s + 2, 0, width, &y, HL_HEAD);
+            y += 3;
+        } else if (s[0] == '|') {                                       /* |keys|words: a table row */
+            const char *bar = strchr(s + 1, '|');
+            if (!bar)
+                continue;
+            int kw = LM_MIN(190, width / 3), y0 = y;
+            size_t kl = (size_t)(bar - s - 1);
+            if (g_hl_pool_n + (int)kl + 1 > (int)sizeof(g_hl_pool))
+                continue;
+            char *key = g_hl_pool + g_hl_pool_n;                        /* (the lines keep pointing at it: not a local) */
+            memcpy(key, s + 1, kl);
+            key[kl] = 0;
+            g_hl_pool_n += (int)kl + 1;
+            int kn = hl_wrap(key, 0, kw, &y, HL_KEY);
+            int dn = hl_wrap(bar + 1, kw + 12, width - kw - 12, &y0, HL_TEXT);
+            (void)dn;
+            y = LM_MAX(y, y0) + 4;
+            (void)kn;
+        } else if (s[0] == '-' && s[1] == ' ') {                        /* a bullet */
+            int y0 = y;
+            if (g_hl_n < HL_MAX)
+                g_hl[g_hl_n++] = (struct hl){ "", 0, 4, y0, HL_DOT };
+            hl_wrap(s + 2, 18, width - 18, &y, HL_TEXT);
+            y += 3;
+        } else {
+            hl_wrap(s, 0, width, &y, HL_TEXT);
+            y += 4;
+        }
+    }
+    g_hl_h = y;
+}
+
+/* Where the help's parts lie, from the card. */
+struct hgeo {
+    int sx, sy, sw, rowh;                       /* the list of pages */
+    int cx, cy, cw, ch;                         /* the text */
+    int bx, by, bh;                             /* the scroll bar's track */
+    int py, pw, ph, prev_x, next_x;             /* the footer's buttons */
+};
+
+static void help_geom(const struct wlcard *c, struct hgeo *g)
+{
+    int top = c->y + 40, bot = c->y + c->h - WLCARD_PAD - WLCARD_BTN_H - 12;
+    g->sx = c->x + WLCARD_PAD;
+    g->sy = top;
+    g->sw = 164;
+    g->rowh = LM_CLAMP((bot - top) / HP_COUNT, 18, 28);
+    g->cx = g->sx + g->sw + 16;
+    g->cy = top;
+    g->cw = c->x + c->w - WLCARD_PAD - 12 - g->cx;
+    g->ch = bot - top;
+    g->bx = c->x + c->w - WLCARD_PAD - 6;
+    g->by = top;
+    g->bh = bot - top;
+    g->py = c->y + c->h - WLCARD_PAD - WLCARD_BTN_H;
+    g->pw = 84;
+    g->ph = WLCARD_BTN_H;
+    g->prev_x = g->sx;
+    g->next_x = g->sx + g->pw + 6;
+}
+
+static int help_max_top(const struct hgeo *g)
+{
+    return LM_MAX(g_hl_h - g->ch, 0);
+}
+
 
 static void prompt_accept(struct app *a);
 
@@ -6108,7 +6520,7 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
     int ch = 150, cw = 560;
     switch (a->prompt) {
-    case P_HELP: ch = 56 + N_HELP * (LM_FONT_H + 4) + WLCARD_BTN_H; cw = 760; break;
+    case P_HELP: ch = 600; cw = 940; break;
     case P_DISCARD: case P_REPLACE: ch = 130; break;
     case P_NEW: ch = 178; break;
     case P_CANVAS: ch = 232; break;
@@ -6126,6 +6538,150 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
     c->h = LM_MIN(ch, a->win.bh - 16);
     c->x = (a->win.bw - c->w) / 2;
     c->y = (a->win.bh - c->h) / 2;
+}
+
+static void help_open(struct app *a)
+{
+    a->prompt = P_HELP;
+    a->pcard_hover = a->pcard_down = -1;
+    a->help_hover = -1;                                                 /* (the page it was left on is kept) */
+    a->help_btn = 0;
+    a->help_drag = false;
+    a->help_top = 0;
+    a->win.redraw = true;
+}
+
+static void help_set_page(struct app *a, int page)
+{
+    page = LM_CLAMP(page, 0, HP_COUNT - 1);
+    if (page != a->help_page)
+        a->help_top = 0;
+    a->help_page = page;
+    a->win.redraw = true;
+}
+
+static void help_scroll(struct app *a, int dy)
+{
+    struct wlcard c;
+    int nb;
+    card_rect(a, &c, &nb);
+    struct hgeo g;
+    help_geom(&c, &g);
+    help_layout(a->help_page, g.cw);
+    a->help_top = LM_CLAMP(a->help_top + dy, 0, help_max_top(&g));
+    a->win.redraw = true;
+}
+
+static void paint_help(struct app *a, const struct wlcard *c)
+{
+    struct wlwin *w = &a->win;
+    struct hgeo g;
+    help_geom(c, &g);
+    help_layout(a->help_page, g.cw);
+    a->help_top = LM_CLAMP(a->help_top, 0, help_max_top(&g));
+    for (int i = 0; i < HP_COUNT; i++) {                                /* the pages */
+        int y = g.sy + i * g.rowh;
+        bool cur = i == a->help_page, hot = i == a->help_hover;
+        if (cur)
+            wlwin_round_fill(w, g.sx - 4, y, g.sw + 4, g.rowh - 2, 7, lm_theme.control_hot);
+        else if (hot)
+            wlwin_round_fill(w, g.sx - 4, y, g.sw + 4, g.rowh - 2, 7, lm_theme.control);
+        char t[64];
+        snprintf(t, sizeof(t), "%d  %s", i + 1, HP[i].title);
+        if (cur)
+            wlwin_text_bold(w, g.sx + 2, y + (g.rowh - 2 - LM_FONT_H) / 2, t, 1, lm_theme.text_bright, g.sw - 4);
+        else
+            wlwin_text(w, g.sx + 2, y + (g.rowh - 2 - LM_FONT_H) / 2, t, 1, COL_TEXT, g.sw - 4);
+    }
+    wlwin_fill(w, g.cx - 9, g.cy, 1, g.ch, lm_theme.border);
+    for (int i = 0; i < g_hl_n; i++) {                                  /* the text of the page: only the lines that fit whole */
+        const struct hl *l = &g_hl[i];
+        int y = l->y - a->help_top;
+        if (y < 0 || y + HELP_LH > g.ch)
+            continue;
+        char buf[600];
+        int n = LM_MIN(l->len, (int)sizeof(buf) - 1);
+        memcpy(buf, l->p, (size_t)n);
+        buf[n] = 0;
+        int x = g.cx + l->x, py = g.cy + y;
+        switch (l->kind) {
+        case HL_HEAD: wlwin_text_bold(w, x, py, buf, 1, COL_ACCENT, g.cw - l->x); break;
+        case HL_KEY: wlwin_text_bold(w, x, py, buf, 1, lm_theme.text_bright, g.cw - l->x); break;
+        case HL_DOT: wlwin_round_fill(w, x, py + LM_FONT_H / 2 - 2, 5, 5, 2, COL_ACCENT); break;
+        default: wlwin_text(w, x, py, buf, 1, COL_TEXT, g.cw - l->x); break;
+        }
+    }
+    if (g_hl_h > g.ch) {                                                /* a scroll bar */
+        int th = LM_MAX(g.bh * g.ch / g_hl_h, 24), ty = g.by + (g.bh - th) * a->help_top / LM_MAX(help_max_top(&g), 1);
+        wlwin_round_fill(w, g.bx, g.by, 4, g.bh, 2, lm_theme.control);
+        wlwin_round_fill(w, g.bx, ty, 4, th, 2, a->help_drag ? lm_theme.control_hot : lm_theme.text_bright);
+    }
+    bool can_prev = a->help_page > 0, can_next = a->help_page < HP_COUNT - 1;                    /* the footer */
+    wlcard_drop(w, g.prev_x, g.py, g.pw, g.ph, can_prev ? lm_theme.btn_slate : lm_theme.btn_grey, a->help_btn == 1 && can_prev, false, "< Back", lm_theme.on_colour);
+    wlcard_drop(w, g.next_x, g.py, g.pw, g.ph, can_next ? lm_theme.btn_slate : lm_theme.btn_grey, a->help_btn == 2 && can_next, false, "Next >", lm_theme.on_colour);
+    char pg[48];
+    snprintf(pg, sizeof(pg), "Page %d of %d", a->help_page + 1, HP_COUNT);
+    wlwin_text(w, g.next_x + g.pw + 14, g.py + (g.ph - 2 - LM_FONT_H) / 2, pg, 1, COL_DIM, 0);
+    int hx = g.next_x + g.pw + 14 + wlcard_text_w(pg) + 20, hw = c->x + c->w - WLCARD_PAD - WLCARD_BTN_W - 16 - hx;
+    if (hw > 120)
+        wlwin_text(w, hx, g.py + (g.ph - 2 - LM_FONT_H) / 2, "Left / Right: page   Up / Down / wheel: scroll   Esc: close", 1, COL_DIM, hw);
+}
+
+/* What the pointer is on: 1000 + a page row, 1 Back, 2 Next, 3 the scroll bar, 0 nothing. */
+static int help_hit(const struct app *a, double x, double y)
+{
+    struct wlcard c;
+    int nb;
+    card_rect(a, &c, &nb);
+    struct hgeo g;
+    help_geom(&c, &g);
+    if (x >= g.sx - 4 && x < g.sx + g.sw && y >= g.sy && y < g.sy + HP_COUNT * g.rowh)
+        return 1000 + (int)((y - g.sy) / g.rowh);
+    if (y >= g.py && y < g.py + g.ph) {
+        if (x >= g.prev_x && x < g.prev_x + g.pw)
+            return 1;
+        if (x >= g.next_x && x < g.next_x + g.pw)
+            return 2;
+    }
+    if (x >= g.bx - 6 && x < g.bx + 10 && y >= g.by && y < g.by + g.bh && g_hl_h > g.ch)
+        return 3;
+    return 0;
+}
+
+static void help_bar_to(struct app *a, double y)                       /* the scroll bar's thumb follows the pointer */
+{
+    struct wlcard c;
+    int nb;
+    card_rect(a, &c, &nb);
+    struct hgeo g;
+    help_geom(&c, &g);
+    help_layout(a->help_page, g.cw);
+    int th = LM_MAX(g.bh * g.ch / LM_MAX(g_hl_h, 1), 24), room = LM_MAX(g.bh - th, 1);
+    a->help_top = LM_CLAMP((int)((y - g.by - th / 2.0) * help_max_top(&g) / room), 0, help_max_top(&g));
+    a->win.redraw = true;
+}
+
+static bool help_key(struct app *a, uint32_t ks)
+{
+    switch (ks) {
+    case LM_KS_Escape: case LM_KS_Return: case LM_KS_KP_Enter: case LM_KS_F1:
+        prompt_close(a, false);
+        break;
+    case LM_KS_Left: help_set_page(a, a->help_page - 1); break;
+    case LM_KS_Right: help_set_page(a, a->help_page + 1); break;
+    case LM_KS_Up: help_scroll(a, -HELP_LH * 2); break;
+    case LM_KS_Down: help_scroll(a, HELP_LH * 2); break;
+    case LM_KS_Page_Up: help_scroll(a, -200); break;
+    case LM_KS_Page_Down: case ' ': help_scroll(a, 200); break;
+    case LM_KS_Home: a->help_top = 0; a->win.redraw = true; break;
+    case LM_KS_End: help_scroll(a, 100000); break;
+    default:
+        if (ks >= '1' && ks <= '9')
+            help_set_page(a, (int)(ks - '1'));
+        break;
+    }
+    a->win.redraw = true;
+    return true;
 }
 
 /* The text field's top, and the list's. */
@@ -8432,7 +8988,7 @@ static void paint_card(struct app *a)
         field = false;
         break;
     case P_HELP:
-        snprintf(title, sizeof(title), "Keys");
+        snprintf(title, sizeof(title), "Help: %s", HP[a->help_page].title);
         labels[0] = "Close";
         cols[0] = lm_theme.btn_blue;
         nb = 1;
@@ -8472,8 +9028,7 @@ static void paint_card(struct app *a)
     card_rect(a, &geo, &nbg);
     wlcard_frame(w, &c, geo.w, geo.h, title, COL_ACCENT, COL_BG, lm_theme.text_bright);
     if (a->prompt == P_HELP) {
-        for (int i = 0; i < N_HELP; i++)
-            wlwin_text(w, c.x + WLCARD_PAD, c.y + 40 + i * (LM_FONT_H + 4), HELP_LINES[i], 1, COL_TEXT, c.w - 2 * WLCARD_PAD);
+        paint_help(a, &c);
     } else if (a->prompt == P_COLOUR) {
         struct cp_geo g;
         cp_geom(a, &g);
@@ -8865,6 +9420,21 @@ static void write_dump(struct app *a)
         int nb;
         card_rect(a, &c, &nb);
         fprintf(f, "card x=%d y=%d w=%d h=%d field=%s\n", c.x, c.y, c.w, c.h, a->pbuf);
+        if (a->prompt == P_HELP) {
+            struct hgeo g;
+            help_geom(&c, &g);
+            help_layout(a->help_page, g.cw);
+            char ti[64];
+            snprintf(ti, sizeof(ti), "%s", HP[a->help_page].title);
+            for (char *q = ti; *q; q++)
+                if (*q == ' ')
+                    *q = '_';
+            fprintf(f, "help page=%d pages=%d title=%s top=%d height=%d view=%d lines=%d\n", a->help_page, HP_COUNT, ti, a->help_top, g_hl_h, g.ch, g_hl_n);
+            for (int i = 0; i < HP_COUNT; i++)
+                fprintf(f, "hpage %d x=%d y=%d w=%d h=%d\n", i, g.sx, g.sy + i * g.rowh, g.sw, g.rowh);
+            fprintf(f, "hbtn back x=%d y=%d w=%d h=%d\nhbtn next x=%d y=%d w=%d h=%d\n", g.prev_x, g.py, g.pw, g.ph, g.next_x, g.py, g.pw, g.ph);
+            fprintf(f, "hbar x=%d y=%d w=14 h=%d\n", g.bx - 6, g.by, g.bh);
+        }
         for (int i = 0; i < nb; i++) {
             int x, y, bw, bh;
             wlcard_button_rect(&c, i, nb, &x, &y, &bw, &bh);
@@ -9937,7 +10507,7 @@ static void press_button(struct app *a, int id)
         a->pcard_hover = a->pcard_down = -1;
         break;
     case B_FIT: view_fit(a); break;
-    case B_HELP: a->prompt = P_HELP; a->pcard_hover = a->pcard_down = -1; break;
+    case B_HELP: help_open(a); break;
     default: break;
     }
     a->win.redraw = true;
@@ -10465,6 +11035,33 @@ static int selftest(void)
         T.ruler_unit = RU_PX;
         T.zoom = 1.0;
     }
+    /* the help: every page sets out to a sane height at every width, and no line is wider than its room unless one word is */
+    {
+        for (int p = 0; p < HP_COUNT; p++) {
+            CHECK(HP[p].title && *HP[p].title && HP[p].n > 3, "help page %d has a title and text", p);
+            for (int width = 300; width <= 760; width += 230) {
+                g_hl_page = -1;
+                help_layout(p, width);
+                CHECK(g_hl_n > 3 && g_hl_n < HL_MAX - 20, "help page %d at %d px: %d lines (the table has %d)", p, width, g_hl_n, HL_MAX);
+                CHECK(g_hl_h > 40 && g_hl_h < 12000, "help page %d at %d px is %d px high", p, width, g_hl_h);
+                for (int i = 0; i < g_hl_n; i++) {
+                    char buf[600];
+                    int n = LM_MIN(g_hl[i].len, (int)sizeof(buf) - 1);
+                    memcpy(buf, g_hl[i].p, (size_t)n);
+                    buf[n] = 0;
+                    bool one_word = !strchr(buf, ' ');
+                    CHECK(one_word || g_hl[i].kind == HL_DOT || hl_text_w(buf, g_hl[i].kind) + g_hl[i].x <= width + 2, "help page %d at %d px: a line is %d px wide (%.30s)", p, width, hl_text_w(buf, g_hl[i].kind), buf);
+                    CHECK(g_hl[i].kind == HL_DOT || n > 0, "help page %d has an empty line", p);
+                    for (int k = 0; k < n; k++)
+                        if ((unsigned char)buf[k] < 32 || (unsigned char)buf[k] == 127) {
+                            CHECK(0, "help page %d at %d px: line %d holds a control character (a dangling pointer?)", p, width, i);
+                            break;
+                        }
+                }
+            }
+        }
+        g_hl_page = -1;
+    }
     /* the effects */
     {
         struct pix fxp;
@@ -10648,6 +11245,13 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             default_dir(a, base, sizeof(base));
             wlpicker_motion(&a->pk, base, a->pbuf, ly, crows, a->py);               /* (the scroll bar's thumb is dragged) */
         }
+        if (a->prompt == P_HELP) {
+            int h = help_hit(a, a->px, a->py);
+            a->help_hover = h >= 1000 ? h - 1000 : -1;
+            a->help_btn = h == 1 || h == 2 ? h : 0;
+            if (a->help_drag)
+                help_bar_to(a, a->py);
+        }
         if (a->prompt == P_COLOUR && a->cp.drag)
             cp_drag_to(a, a->px, a->py);
         if (a->prompt == P_ADJUST && a->adj_drag >= 0)
@@ -10656,6 +11260,10 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         return;
     }
     if (op == LM_WL_POINTER_EVT_AXIS) {
+        if (a->prompt == P_HELP && args[1].u == 0) {
+            help_scroll(a, (args[2].f > 0 ? 1 : -1) * HELP_LH * 3);
+            return;
+        }
         if (a->prompt == P_FONT && args[1].u == 0) {
             int fr = font_rows_fit(a), fn = g_nfam + 1;
             a->font_top = LM_CLAMP(a->font_top + (args[2].f > 0 ? 1 : -1), 0, LM_MAX(fn - fr, 0));
@@ -10676,6 +11284,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         wlpicker_release(&a->pk);
         a->cp.drag = 0;
         a->adj_drag = -1;
+        a->help_drag = false;
         if (a->pcard_down >= 0 && a->pcard_down == k) {                                        /* a button is done when it is let go on */
             int which = k;
             a->pcard_down = -1;
@@ -10698,6 +11307,18 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             a->pcard_down = k;
         } else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
             prompt_close(a, false);                                                             /* a click outside the card cancels */
+        } else if (a->prompt == P_HELP) {
+            int h = help_hit(a, a->px, a->py);
+            if (h >= 1000)
+                help_set_page(a, h - 1000);
+            else if (h == 1)
+                help_set_page(a, a->help_page - 1);
+            else if (h == 2)
+                help_set_page(a, a->help_page + 1);
+            else if (h == 3) {
+                a->help_drag = true;
+                help_bar_to(a, a->py);
+            }
         } else if (a->prompt == P_EFFECTS) {
             for (int i = 0; i < N_EFX; i++) {
                 int x, y, bw, bh;
@@ -11186,8 +11807,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 static void prompt_key(struct app *a, uint32_t ks)
 {
     if (a->prompt == P_HELP) {
-        if (ks == LM_KS_Escape || ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == ' ')
-            a->prompt = P_NONE;
+        help_key(a, ks);
         return;
     }
     if (a->prompt == P_DISCARD) {
@@ -11352,7 +11972,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     case LM_KS_Tab: a->show_layers = !a->show_layers; a->fitted ? view_fit(a) : view_clamp(a); a->vdirty = true; break;
     case LM_KS_Page_Up: layer_select(a, a->doc.cur + 1); break;
     case LM_KS_Page_Down: layer_select(a, a->doc.cur - 1); break;
-    case LM_KS_F1: a->prompt = P_HELP; a->pcard_hover = a->pcard_down = -1; break;
+    case LM_KS_F1: help_open(a); break;
     case LM_KS_Left: case LM_KS_Right: case LM_KS_Up: case LM_KS_Down: {
         double step = shift ? 200.0 : 40.0;
         a->vx += ks == LM_KS_Left ? step : ks == LM_KS_Right ? -step : 0.0;

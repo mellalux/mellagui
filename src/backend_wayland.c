@@ -6,6 +6,10 @@
  * on a real keyboard). It needs no /dev/dri and no /dev/input, so it runs where those do not exist (WSL) and is a pleasant way to try MellaGUI on
  * any desktop. `--backend wayland`, or `auto` (the default): the nested one when $WAYLAND_DISPLAY names a host compositor, else DRM.
  *
+ * Full screen: `--fullscreen` asks the host for it before the first picture, and F11 (no modifiers; the key is the backend's and does not reach
+ * the programs) switches it on and off while the window has the keyboard. The host's answer (xdg_toplevel.configure states) is what counts,
+ * so a host that leaves full screen by itself (Win+Down, a title bar button) is followed.
+ *
  * Limits: the pointer is absolute (no pointer lock or relative motion for games), no power / tint / mode setting, the host's clipboard is not shared,
  * and the window's size is the output's: resize it and the output follows.
  */
@@ -46,6 +50,8 @@ struct nested {
     int w, h;                           /* the output's size = the window's */
     int want_w, want_h;                 /* what the host last asked for in xdg_toplevel.configure */
     bool configured, live, waiting, ready_owed;
+    bool f11_held;                      /* F11 went down and was ours: its repeats and its release are not passed on */
+    bool fullscreen;                    /* the host says the window is full screen (the last configure), or what we asked for since */
     int frames;                         /* presented since the buffers were made (the renderer's buffer age) */
     struct nbuf buf[NBUF];
     void *map;
@@ -181,14 +187,41 @@ static void toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op == LM_XDG_TOPLEVEL_EVT_CONFIGURE) {
         n->want_w = args[0].i;                                      /* (0 = "your choice": the size we have) */
         n->want_h = args[1].i;
+        n->fullscreen = false;
+        const uint32_t *st = args[2].a.data;
+        for (uint32_t i = 0; st && i < args[2].a.size / 4; i++)
+            if (st[i] == LM_XDG_TOPLEVEL_STATE_FULLSCREEN)
+                n->fullscreen = true;
     } else if (op == LM_XDG_TOPLEVEL_EVT_CLOSE) {
         lm_info("nested: the window was closed");
         lm_server_quit(n->base.server);
     }
 }
 
+static void set_fullscreen(struct nested *n, bool on)
+{
+    if (!n->toplevel)
+        return;
+    if (on)
+        WLC_SEND(n->c, n->toplevel, LM_XDG_TOPLEVEL_REQ_SET_FULLSCREEN, { .o = 0 });     /* (no output named: the one the window is on) */
+    else
+        WLC_SEND0(n->c, n->toplevel, LM_XDG_TOPLEVEL_REQ_UNSET_FULLSCREEN);
+    n->fullscreen = on;                                             /* (the configure that follows says what the host made of it) */
+    wlc_flush(n->c);
+}
+
+static bool modifier_held(const struct nested *n)
+{
+    static const int mods[] = { KEY_LEFTSHIFT, KEY_RIGHTSHIFT, KEY_LEFTCTRL, KEY_RIGHTCTRL, KEY_LEFTALT, KEY_RIGHTALT, KEY_LEFTMETA, KEY_RIGHTMETA };
+    for (size_t i = 0; i < sizeof(mods) / sizeof(mods[0]); i++)
+        if (n->down[mods[i]])
+            return true;
+    return false;
+}
+
 static void release_keys(struct nested *n)
 {
+    n->f11_held = false;
     for (int k = 0; k <= KEY_MAX; k++) {
         if (!n->down[k])
             continue;
@@ -268,6 +301,12 @@ static void keyboard_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         bool pressed = args[3].u == LM_KEYBOARD_KEY_PRESSED;
         if (code > KEY_MAX || !n->base.server->input)
             break;
+        if (code == KEY_F11 && (n->f11_held || (pressed && !modifier_held(n)))) {
+            if (pressed && !n->f11_held)                            /* (its repeats and its release are swallowed too: the programs never saw the press) */
+                set_fullscreen(n, !n->fullscreen);
+            n->f11_held = pressed;
+            break;
+        }
         n->down[code] = pressed;
         struct lm_input_event ev = { .type = LM_INPUT_KEY, .u.key = { .code = code, .pressed = pressed } };
         lm_input_inject(n->base.server->input, &ev);
@@ -348,6 +387,8 @@ static int nb_init(struct lm_backend *b)
     WLC_SEND(n->c, n->xsurface, LM_XDG_SURFACE_REQ_GET_TOPLEVEL, { .n = n->toplevel });
     WLC_SEND(n->c, n->toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = "MellaGUI" });
     WLC_SEND(n->c, n->toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = "mellagui.nested" });
+    if (n->base.server->config.fullscreen)
+        set_fullscreen(n, true);                                    /* before the first commit: the window never shows small */
     WLC_SEND0(n->c, n->surface, LM_WL_SURFACE_REQ_COMMIT);
     n->src = lm_loop_add_fd(b->server->loop, wlc_fd(n->c), EPOLLIN, host_readable, n);
     for (int i = 0; i < 100 && !n->configured; i++)                 /* the first configure says how big the window is (or leaves it to us) */

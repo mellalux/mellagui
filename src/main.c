@@ -58,6 +58,7 @@ static const char *usage_text =
     "  --backend auto|drm|wayland|headless   display backend (default auto: a window of the host compositor when WAYLAND_DISPLAY\n"
     "                           names one - WSLg, GNOME, KDE, Sway ... -, else the screen itself through DRM)\n"
     "  --size WxH               headless / nested window size (default 1280x720)\n"
+    "  --fullscreen             nested: ask the host for full screen at once (F11 switches it on and off later)\n"
     "  --socket NAME            Wayland socket name (default: first free wayland-N)\n"
     "  --exec CMD               shell command to start once the compositor is up\n"
     "  --kiosk                  the login screen's mode: no shortcuts (but Ctrl+Alt+Fn), no dock, no gadgets and helpers, no screensaver\n"
@@ -328,7 +329,7 @@ int main(int argc, char **argv)
         if (l >= 0) cfg.log_level = l;
     }
 
-    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENCOPY, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE, OPT_KIOSK };
+    enum { OPT_NO_GRAB = 256, OPT_SETTINGS, OPT_TIMEOUT, OPT_RUN, OPT_LAYOUTS, OPT_STICKY, OPT_NO_SOUND, OPT_NO_GADGET, OPT_MODE, OPT_MIXER, OPT_SYSINFO, OPT_NO_DMABUF, OPT_CLIPBOARD_FILE, OPT_GADGETS_FILE, OPT_WINDOWS_FILE, OPT_LOCK_FILE, OPT_SETTINGS_ACCESS, OPT_SCREENCOPY, OPT_SCREENSHOT_DIR, OPT_LOGIND, OPT_RENDERER, OPT_OUTPUT, OPT_CONFIG, OPT_PRINT_CONFIG, OPT_SCALE, OPT_KIOSK, OPT_FULLSCREEN };
     const char *layouts_arg = "us,ee,de,fi";
     int timeout_s = 0, cli_scale_pct = 0;
     static const struct option opts[] = {
@@ -338,6 +339,7 @@ int main(int argc, char **argv)
         { "socket", required_argument, 0, 'S' },
         { "exec", required_argument, 0, 'e' },
         { "kiosk", no_argument, 0, OPT_KIOSK },
+        { "fullscreen", no_argument, 0, OPT_FULLSCREEN },
         { "terminal", required_argument, 0, 't' },
         { "run", required_argument, 0, OPT_RUN },
         { "drm-device", required_argument, 0, 'd' },
@@ -567,6 +569,7 @@ int main(int argc, char **argv)
         case OPT_STICKY: cfg.sticky_keys = true; break;
         case OPT_NO_GADGET: cfg.gadget = false; break;
         case OPT_KIOSK: cfg.kiosk = true; break;
+        case OPT_FULLSCREEN: cfg.fullscreen = true; break;
         case OPT_MIXER: cfg.mixer = true; break;
         case OPT_SYSINFO: cfg.sysinfo = true; break;
         case OPT_NO_DMABUF: cfg.dmabuf = false; break;

@@ -114,7 +114,10 @@ Where there is no screen to take over (WSL has no `/dev/dri` and no `/dev/input`
 
     build/mellagui --backend wayland --size 1280x720     # or just build/mellagui: with WAYLAND_DISPLAY set, `auto` chooses this
 
-The mouse and keyboard of the host window go to MellaGUI like a real keyboard; resize the window and the screen follows. On WSL you need WSLg (Windows 11,
+The mouse and keyboard of the host window go to MellaGUI like a real keyboard; resize the window and the screen follows.
+For the whole Windows / host screen use `--fullscreen` (`build/mellagui --fullscreen`), or press **F11** in the window to switch full screen on and off
+(plain F11 only; it is the nested window's own key and does not reach the programs inside, Shift+F11 and the like do). The host's own ways out
+(a title bar button, Win+Down) are followed, F11 then goes by what the host really shows. On WSL you need WSLg (Windows 11,
 or a current Windows 10 with `wsl --update`); `echo $WAYLAND_DISPLAY` should print `wayland-0`. No pointer lock, no clipboard sharing with the host, no
 sound / power / resolution settings of a real screen.
 

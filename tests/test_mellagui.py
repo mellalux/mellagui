@@ -20360,14 +20360,14 @@ class TestChessAI(unittest.TestCase):
 class TestNested(Base):
     """src/backend_wayland.c: `--backend wayland`, MellaGUI as a window of another compositor (WSLg ...): here the host is a headless MellaGUI."""
 
-    def start(self, name, size='640x400'):
+    def start(self, name, size='640x400', *extra):
         p, outer, stop = self.private_compositor(name + '-host', '--config', 'none')
         outer.sync()
         inner_name = name + '-guest'
         env = dict(os.environ, WAYLAND_DISPLAY=name + '-host', MELLAGUI_NO_GADGET_PROCS='1')
         env.pop('MELLAGUI_RENDERER', None)
         proc = subprocess.Popen([BIN, '--backend', 'wayland', '--size', size, '--socket', inner_name, '--config', 'none', '--settings', 'none',
-                                 '--terminal', 'true'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                 '--terminal', 'true', *extra], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (proc.poll() is None) and (proc.terminate(), proc.wait(timeout=5)))
         for _ in range(100):
             if os.path.exists(os.path.join(tmp, inner_name)):
@@ -20461,6 +20461,58 @@ class TestNested(Base):
         self.assertIn((KEY_A, 1), keys)
         self.assertIn((KEY_A, 0), keys)
         self.assertTrue(any(m & 1 for m in mods), 'Shift reached the guest: %r' % mods)               # (LM_MOD_SHIFT = 1)
+
+    def wait_host_fullscreen(self, outer, want, what):
+        for _ in range(100):                                                                 # (the flag comes with the request, the new size with the next picture)
+            w = self.host_window(outer)
+            if ('fullscreen' in w['flags']) == want and ((w['w'], w['h']) != (640, 400)) == want:
+                return w
+            time.sleep(0.05)
+        self.fail('%s: the host window is %sfull screen (%dx%d)' % (what, 'not ' if want else '', w['w'], w['h']))
+
+    def test_fullscreen_option_asks_the_host_for_full_screen_at_once(self):
+        outer, inner, proc = self.start('mellagui-nst6', '640x400', '--fullscreen')
+        w = self.wait_host_fullscreen(outer, True, '--fullscreen')
+        self.assertGreater(w['w'], 640)                                                      # the host's whole output, not the 640x400 asked for
+        self.assertGreater(w['h'], 400)
+        cl = Client(inner)
+        self.clients.append(cl)
+        out = cl.wl.bind('wl_output', 3)
+        cl.wl.roundtrip()
+        mode = [e for e in cl.wl.queue if e.obj == out and e.name == 'mode'][0]
+        self.assertEqual((mode.args[1], mode.args[2]), (w['w'], w['h']))                     # and the guest's screen is that size
+
+    def test_f11_switches_the_hosts_full_screen_and_is_not_passed_on(self):
+        KEY_F11 = 87
+        outer, inner, proc = self.start('mellagui-nst7', '640x400')
+        w = self.host_window(outer)
+        self.assertNotIn('fullscreen', w['flags'])
+        cl = Client(inner)
+        self.clients.append(cl)
+        seat = cl.wl.bind('wl_seat', 5)
+        kbd = cl.wl.new_id('wl_keyboard')
+        cl.wl.request(seat, 'get_keyboard', kbd)
+        win = Window(cl, 300, 200, title='G', app_id='nest.g', show=True)
+        cl.wl.roundtrip()
+        win.wait_configure()
+        outer.key(KEY_LEFTSHIFT, True)                                                       # Shift+F11 is not ours: it goes to the program
+        outer.tap(KEY_F11)
+        outer.key(KEY_LEFTSHIFT, False)
+        time.sleep(0.4)
+        self.assertNotIn('fullscreen', self.host_window(outer)['flags'])
+        outer.tap(KEY_F11)
+        w = self.wait_host_fullscreen(outer, True, 'F11')
+        self.assertGreater(w['w'], 640)
+        outer.tap(KEY_F11)
+        w = self.wait_host_fullscreen(outer, False, 'F11 again')
+        self.assertEqual((w['w'], w['h']), (640, 400))                                       # back to the window it was
+        keys = []
+        end = time.time() + 1.0
+        while time.time() < end:
+            e = cl.wl.wait_for(lambda e: e.obj == kbd and e.name == 'key', 0.2)
+            if e:
+                keys.append(e.args[2])
+        self.assertEqual(keys.count(KEY_F11), 2, keys)                                       # only the press and the release of Shift+F11
 
     def test_without_a_host_it_says_so(self):
         env = dict(os.environ, WAYLAND_DISPLAY='mellagui-no-such-host')

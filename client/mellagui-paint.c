@@ -68,6 +68,7 @@
 #include "wlclip.h"
 #include "wlcard.h"
 #include "wlpicker.h"
+#include "wlsbar.h"
 #include "wlrail.h"
 #include "wltext.h"
 #include "wlwin.h"
@@ -2585,12 +2586,12 @@ static int apply_cmd(int argc, char **argv)
 
 /* ---- the window ------------------------------------------------------------------------------------------------------------------ */
 
-enum tool { T_SELECT, T_ELLIPSE_SEL, T_LASSO, T_WAND, T_MOVE, T_PEN, T_SPRAY, T_ERASER, T_LINE, T_BOX, T_CIRCLE, T_POLY, T_FILL, T_GRADIENT, T_TEXT, T_PICK, T_FREEPOLY, T_CURVE, T_CLONE, T_SMUDGE, T_BLURBR, T_COUNT };
+enum tool { T_SELECT, T_ELLIPSE_SEL, T_LASSO, T_WAND, T_MOVE, T_PEN, T_SPRAY, T_ERASER, T_LINE, T_BOX, T_CIRCLE, T_POLY, T_FILL, T_GRADIENT, T_TEXT, T_PICK, T_FREEPOLY, T_CURVE, T_CLONE, T_SMUDGE, T_BLURBR, T_HAND, T_COUNT };
 static const char *const TOOL_NAMES[T_COUNT] = { "Select", "EllipseSelect", "Lasso", "Wand", "Move", "Pen", "Airbrush", "Eraser", "Line", "Box", "Circle", "Shape", "Fill",
-                                                 "Gradient", "Text", "Picker", "FreePolygon", "Curve", "Clone", "Smudge", "BlurBrush" };
+                                                 "Gradient", "Text", "Picker", "FreePolygon", "Curve", "Clone", "Smudge", "BlurBrush", "Hand" };
 static const char *const TOOL_TITLES[T_COUNT] = { "Select a rectangle", "Select an ellipse", "Lasso", "Magic wand", "Move", "Pen", "Airbrush", "Eraser", "Line", "Box", "Circle",
-                                                  "Polygon / star", "Fill", "Gradient", "Text", "Picker", "Free polygon", "Curve", "Clone stamp", "Smudge", "Blur brush" };
-static const char TOOL_KEYS[T_COUNT] = { 's', 'o', 'q', 'w', 'm', 'p', 'a', 'e', 'l', 'b', 'c', 'n', 'f', 'g', 't', 'i', 'j', 'v', 'k', 'r', 'h' };
+                                                  "Polygon / star", "Fill", "Gradient", "Text", "Picker", "Free polygon", "Curve", "Clone stamp", "Smudge", "Blur brush", "Hand" };
+static const char TOOL_KEYS[T_COUNT] = { 's', 'o', 'q', 'w', 'm', 'p', 'a', 'e', 'l', 'b', 'c', 'n', 'f', 'g', 't', 'i', 'j', 'v', 'k', 'r', 'h', 'y' };
 static const char *const TOOL_HINTS[T_COUNT] = {
     "Drag a rectangle: Enter crops to it, Delete clears it, Backspace fills it, effects work on it",
     "Drag an ellipse (Shift: a circle) to select it",
@@ -2613,6 +2614,7 @@ static const char *const TOOL_HINTS[T_COUNT] = {
     "Alt+click (or the right button) takes the spot to copy from, then paint: the picture there is painted here",
     "Drag to smudge the colours along (Opacity is the strength)",
     "Drag to blur what the brush touches (Opacity is the strength)",
+    "Drag to move the picture about in the window (any tool does it while Space is held, or with the middle button); the layers stay where they are",
 };
 
 enum slider { S_SIZE, S_OPACITY, S_HARD, S_TOL, S_CORNER, S_SIDES, S_DENSITY, S_LINE, S_LETTER, S_OUTLINE, S_SHADOW, S_ANGLE, S_SMOOTH, S_SYM, S_BEND, S_COUNT };
@@ -2649,6 +2651,7 @@ static const struct { int sl[3], tg[3]; } TOPT[T_COUNT] = {
     [T_CLONE] = { { S_SIZE, S_OPACITY, S_HARD }, { TG_IMAGE, -1, -1 } },
     [T_SMUDGE] = { { S_SIZE, S_OPACITY, S_HARD }, { -1, -1, -1 } },
     [T_BLURBR] = { { S_SIZE, S_OPACITY, S_HARD }, { -1, -1, -1 } },
+    [T_HAND] = { { -1, -1, -1 }, { -1, -1, -1 } },
 };
 
 #define N_RECENT 16
@@ -2672,17 +2675,18 @@ static bool tool_in_select(enum tool t) { return t == T_SELECT || t == T_ELLIPSE
 static bool tool_in_shapes(enum tool t) { return t == T_LINE || t == T_BOX || t == T_CIRCLE || t == T_POLY || t == T_FREEPOLY || t == T_CURVE; }
 
 /* The rail buttons that stand for several tools: the tools of each, and the menu a click on the lit button opens. */
-enum { G_SELECT, G_BRUSH, G_RETOUCH, G_SHAPES, G_COUNT };
-static const int GRP_BTN[G_COUNT] = { B_SELECT, B_PEN, B_RETOUCH, B_SHAPES };
+enum { G_SELECT, G_BRUSH, G_RETOUCH, G_SHAPES, G_MOVE, G_COUNT };
+static const int GRP_BTN[G_COUNT] = { B_SELECT, B_PEN, B_RETOUCH, B_SHAPES, B_MOVE };
 static const enum tool GRP_TOOLS[G_COUNT][6] = {
     { T_SELECT, T_ELLIPSE_SEL, T_LASSO, T_WAND },
     { T_PEN, T_SPRAY },
     { T_CLONE, T_SMUDGE, T_BLURBR },
     { T_LINE, T_BOX, T_CIRCLE, T_POLY, T_FREEPOLY, T_CURVE },
+    { T_MOVE, T_HAND },
 };
-static const int GRP_N[G_COUNT] = { 4, 2, 3, 6 };
+static const int GRP_N[G_COUNT] = { 4, 2, 3, 6, 2 };
 static const char *const GRP_MENU[G_COUNT] = { "Rectangle  S\nEllipse  O\nLasso  Q\nMagic wand  W", "Pen  P\nAirbrush  A", "Clone stamp  K\nSmudge  R\nBlur brush  H",
-                                              "Line  L\nBox  B\nCircle  C\nPolygon / star  N\nFree polygon  J\nCurve  V" };
+                                              "Line  L\nBox  B\nCircle  C\nPolygon / star  N\nFree polygon  J\nCurve  V", "Move the layer or the selection  M\nHand: move the picture in the window  Y" };
 #define MENU_GROUP0 10
 
 static int group_of_button(int id)
@@ -2764,6 +2768,8 @@ struct app {
     char tfont_name[64];                        /* the text's font family, empty = the interface font */
     int talign;                                 /* 0 left, 1 centre, 2 right */
     int font_sel, font_top;                     /* the Font card: the chosen row and the first row shown */
+    int font_grab;                              /* the font card's scroll bar thumb is held (where in it; -1 = not) */
+    bool space_down;                            /* Space is held: the left button moves the picture whatever the tool */
     char font_find[24];                         /* what was typed to jump to a family ("rob" -> Roboto) and when the last letter came */
     int64_t font_find_ms;
     int tb_seen;                                /* the height of the text bar the view was last fitted for */
@@ -2839,7 +2845,9 @@ struct app {
     char perr[160];                             /* what was wrong with the last answer */
     int pcard_hover, pcard_down;
     int help_page, help_top, help_hover, help_btn;          /* the help card: the page, how far it is scrolled, what the pointer is on */
-    bool help_drag;                             /* its scroll bar's thumb is held */
+    bool help_drag;                             /* its scroll bar's thumb is held ... */
+    int help_grab;                              /* ... and where in it */
+    int lay_grab;                               /* the layers panel's scroll bar thumb is held (where in it; -1 = not) */
     struct wlpicker pk;                         /* the folder list of the Open / Save as card (wlpicker.h, the same in every program) */
     int menu_kind;                              /* the menu that is open: 0 none, 1 effects, 2 transform, 3 selects, 4 shapes, 5 blend, 6 layer */
     struct cpick cp;
@@ -6085,14 +6093,16 @@ static const char *const HP_WELCOME[] = {
     "|Left button|Draws with the pen colour.",
     "|Right button|Draws with the second colour (the small square behind the pen colour).",
     "|Wheel|Zooms the picture. Over a slider it steps the slider, over the layers panel it scrolls the list, over a layer's Opacity it changes it.",
-    "|Middle button|Drags the picture about.",
+    "|Middle button|Drags the picture about. So does the left button with the Hand tool (Y) - it shares the Move button: click the lit button again to pick it - or with any tool while Space is held.",
     "# Looking at the picture",
     "|+ and -|Zoom in and out.",
     "|0|Fit the picture to the window.",
     "|1|Show it at its real size (100 %).",
     "|Arrow keys|Move the picture (with Shift: further).",
+    "|Space|Hold it and drag with the left button: the picture moves, whatever the tool.",
     "|Ctrl+G|A grid of pixels (when you are zoomed in).",
     "|Tab|Hide or show the layers panel.",
+    "|Scroll bars|Every list here has the same one, as wide as [windows] scrollbar-width: drag the thumb, click beside it to turn a page.",
     "# Good to know",
     "- Everything can be undone: Ctrl+Z, and Ctrl+Y or Ctrl+Shift+Z to do it again. The last 32 steps are kept.",
     "- A picture is only written to disk when you save it. Closing the window asks first when there is something unsaved.",
@@ -6298,7 +6308,7 @@ static const char *const HP_ANIM[] = {
 static const char *const HP_KEYS[] = {
     "# Tools",
     "|S O Q W|Select: rectangle, ellipse, lasso, magic wand",
-    "|M|Move",
+    "|M Y|Move (the layer or the selection), Hand (the picture in the window)",
     "|P A E|Pen, airbrush, eraser",
     "|K R H|Clone stamp, smudge, blur brush",
     "|L B C N|Line, box, circle, polygon or star",
@@ -6474,7 +6484,7 @@ static void help_layout(int page, int width)
 struct hgeo {
     int sx, sy, sw, rowh;                       /* the list of pages */
     int cx, cy, cw, ch;                         /* the text */
-    int bx, by, bh;                             /* the scroll bar's track */
+    int bx, by, bw, bh;                         /* the scroll bar's track */
     int py, pw, ph, prev_x, next_x;             /* the footer's buttons */
 };
 
@@ -6487,9 +6497,10 @@ static void help_geom(const struct wlcard *c, struct hgeo *g)
     g->rowh = LM_CLAMP((bot - top) / HP_COUNT, 18, 28);
     g->cx = g->sx + g->sw + 16;
     g->cy = top;
-    g->cw = c->x + c->w - WLCARD_PAD - 12 - g->cx;
+    g->cw = c->x + c->w - WLCARD_PAD - wlsbar_w() - 8 - g->cx;                  /* (the text ends where the scroll bar begins) */
     g->ch = bot - top;
-    g->bx = c->x + c->w - WLCARD_PAD - 6;
+    g->bw = wlsbar_w();
+    g->bx = c->x + c->w - WLCARD_PAD - g->bw;
     g->by = top;
     g->bh = bot - top;
     g->py = c->y + c->h - WLCARD_PAD - WLCARD_BTN_H;
@@ -6497,6 +6508,12 @@ static void help_geom(const struct wlcard *c, struct hgeo *g)
     g->ph = WLCARD_BTN_H;
     g->prev_x = g->sx;
     g->next_x = g->sx + g->pw + 6;
+}
+
+/* The help's scroll bar (the pages are measured in pixels: a page is what the text area shows). */
+static struct wlsbar help_sbar(const struct hgeo *g, int top)
+{
+    return (struct wlsbar){ g->bx, g->by, g->bw, g->bh, g_hl_h, g->ch, top };
 }
 
 static int help_max_top(const struct hgeo *g)
@@ -6627,11 +6644,8 @@ static void paint_help(struct app *a, const struct wlcard *c)
         default: wlwin_text(w, x, py, buf, 1, COL_TEXT, g.cw - l->x); break;
         }
     }
-    if (g_hl_h > g.ch) {                                                /* a scroll bar */
-        int th = LM_MAX(g.bh * g.ch / g_hl_h, 24), ty = g.by + (g.bh - th) * a->help_top / LM_MAX(help_max_top(&g), 1);
-        wlwin_round_fill(w, g.bx, g.by, 4, g.bh, 2, lm_theme.control);
-        wlwin_round_fill(w, g.bx, ty, 4, th, 2, a->help_drag ? lm_theme.control_hot : lm_theme.text_bright);
-    }
+    struct wlsbar sb = help_sbar(&g, a->help_top);                      /* the scroll bar */
+    wlsbar_paint(w, &sb, a->help_drag || (a->has_pointer && wlsbar_has(&sb, a->px, a->py)));
     bool can_prev = a->help_page > 0, can_next = a->help_page < HP_COUNT - 1;                    /* the footer */
     wlcard_drop(w, g.prev_x, g.py, g.pw, g.ph, can_prev ? lm_theme.btn_slate : lm_theme.btn_grey, a->help_btn == 1 && can_prev, false, "< Back", lm_theme.on_colour);
     wlcard_drop(w, g.next_x, g.py, g.pw, g.ph, can_next ? lm_theme.btn_slate : lm_theme.btn_grey, a->help_btn == 2 && can_next, false, "Next >", lm_theme.on_colour);
@@ -6659,22 +6673,10 @@ static int help_hit(const struct app *a, double x, double y)
         if (x >= g.next_x && x < g.next_x + g.pw)
             return 2;
     }
-    if (x >= g.bx - 6 && x < g.bx + 10 && y >= g.by && y < g.by + g.bh && g_hl_h > g.ch)
+    struct wlsbar sb = help_sbar(&g, a->help_top);
+    if (wlsbar_has(&sb, x, y))
         return 3;
     return 0;
-}
-
-static void help_bar_to(struct app *a, double y)                       /* the scroll bar's thumb follows the pointer */
-{
-    struct wlcard c;
-    int nb;
-    card_rect(a, &c, &nb);
-    struct hgeo g;
-    help_geom(&c, &g);
-    help_layout(a->help_page, g.cw);
-    int th = LM_MAX(g.bh * g.ch / LM_MAX(g_hl_h, 1), 24), room = LM_MAX(g.bh - th, 1);
-    a->help_top = LM_CLAMP((int)((y - g.by - th / 2.0) * help_max_top(&g) / room), 0, help_max_top(&g));
-    a->win.redraw = true;
 }
 
 static bool help_key(struct app *a, uint32_t ks)
@@ -7386,7 +7388,7 @@ static void ic_poly(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 typedef void (*icon_fn)(struct wlwin *, int, int, uint32_t, uint32_t);
 
 /* The grouped rail buttons (Select, Shapes) show the variant in use with a small triangle in the corner: there is more behind them. */
-static enum tool g_grp_var[G_COUNT] = { T_SELECT, T_PEN, T_CLONE, T_LINE };
+static enum tool g_grp_var[G_COUNT] = { T_SELECT, T_PEN, T_CLONE, T_LINE, T_MOVE };
 static icon_fn tool_icon(enum tool t);
 
 static void group_mark(struct wlwin *w, int cx, int cy, uint32_t c)
@@ -7405,6 +7407,7 @@ static void group_mark(struct wlwin *w, int cx, int cy, uint32_t c)
 GROUP_ICON(ic_grp_select, G_SELECT)
 GROUP_ICON(ic_grp_brush, G_BRUSH)
 GROUP_ICON(ic_grp_retouch, G_RETOUCH)
+GROUP_ICON(ic_grp_move, G_MOVE)
 GROUP_ICON(ic_grp_shapes, G_SHAPES)
 
 static void ic_freepoly(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
@@ -7453,6 +7456,15 @@ static void ic_blurbr(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
     wlwin_round_fill(w, cx - 2, cy - 2, 4, 4, 2, bg);
 }
 
+static void ic_hand(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    (void)bg;
+    wlwin_round_fill(w, cx - 6, cy - 1, 12, 10, 4, c);                  /* the palm */
+    for (int i = 0; i < 4; i++)                                         /* four fingers, the middle ones longest */
+        wlwin_round_fill(w, cx - 6 + i * 3, cy - 8 - (i == 1 || i == 2 ? 2 : 0), 3, 10, 1, c);
+    wlrail_line(w, cx - 6, cy + 4, cx - 9, cy - 1, 3, c);               /* the thumb */
+}
+
 static const int LEFT_IDS[N_LEFT] = { B_SELECT, B_MOVE, B_PEN, B_RETOUCH, B_ERASER, B_SHAPES, B_FILL, B_GRADIENT, B_TEXT, B_PICK };
 static const int RIGHT_IDS[N_RIGHT] = { B_NEW, B_OPEN, B_SAVE, B_UNDO, B_REDO, B_TRANSFORM, B_FX, B_CROP, B_FIT, B_HELP };
 
@@ -7480,6 +7492,7 @@ static icon_fn tool_icon(enum tool t)
     case T_CLONE: return ic_clone;
     case T_SMUDGE: return ic_smudge;
     case T_BLURBR: return ic_blurbr;
+    case T_HAND: return ic_hand;
     default: return ic_pick;
     }
 }
@@ -7518,7 +7531,7 @@ static void rails(const struct app *a, struct wlrail *L, struct wlrail *R)
             tip = tipbuf[id];
             for (int k = 0; k < G_COUNT; k++)
                 g_grp_var[k] = a->grp[k];
-            static const icon_fn gic[G_COUNT] = { ic_grp_select, ic_grp_brush, ic_grp_retouch, ic_grp_shapes };
+            static const icon_fn gic[G_COUNT] = { ic_grp_select, ic_grp_brush, ic_grp_retouch, ic_grp_shapes, ic_grp_move };
             ic = gic[g];
         }
         L->it[i] = (struct wlrail_item){ .tip = tip, .icon = ic, .base = base[id], .lite = lite[id], .show = true, .lit = tool_button(a->tool) == id };
@@ -8130,6 +8143,13 @@ static void canvas_line(struct app *a, double x0, double y0, double x1, double y
     }
 }
 
+/* The font card's scroll bar: the global one, at the right of the rows. */
+static struct wlsbar font_sbar(const struct app *a, const struct wlcard *c)
+{
+    int rows = font_rows_fit(a);
+    return (struct wlsbar){ c->x + c->w - WLCARD_PAD - wlsbar_w(), font_row_y(c, 0), wlsbar_w(), rows * FONT_ROW_H, g_nfam + 1, rows, a->font_top };
+}
+
 static void paint_font_card(struct app *a, const struct wlcard *c)
 {
     struct wlwin *w = &a->win;
@@ -8140,22 +8160,21 @@ static void paint_font_card(struct app *a, const struct wlcard *c)
         int hw = wlcard_text_w(hint);
         wlwin_text(w, c->x + c->w - WLCARD_PAD - hw, c->y + WLCARD_PAD - 2, hint, 1, typed ? COL_ACCENT : COL_DIM, 0);
     }
+    struct wlsbar fb = font_sbar(a, c);
+    int rw = c->w - 2 * WLCARD_PAD - (wlsbar_on(&fb) ? wlsbar_w() + 4 : 0);                // (the rows end where the bar begins)
     for (int r = 0; r < rows && a->font_top + r < n; r++) {
         int it = a->font_top + r, y = font_row_y(c, r);
-        bool hot = a->has_pointer && a->px >= c->x + WLCARD_PAD && a->px < c->x + c->w - WLCARD_PAD && a->py >= y && a->py < y + FONT_ROW_H;
+        bool hot = a->has_pointer && a->px >= c->x + WLCARD_PAD && a->px < c->x + WLCARD_PAD + rw && a->py >= y && a->py < y + FONT_ROW_H;
         if (it == a->font_sel || hot)
-            wlwin_round_fill(w, c->x + WLCARD_PAD, y, c->w - 2 * WLCARD_PAD, FONT_ROW_H - 2, 8, it == a->font_sel ? lm_theme.control_hot : lm_theme.control);
+            wlwin_round_fill(w, c->x + WLCARD_PAD, y, rw, FONT_ROW_H - 2, 8, it == a->font_sel ? lm_theme.control_hot : lm_theme.control);
         if (it == 0)
-            wlwin_text(w, c->x + WLCARD_PAD + 12, y + (FONT_ROW_H - 2 - LM_FONT_H) / 2, "Interface font (the program's own)", 1, lm_theme.text_bright, c->w - 2 * WLCARD_PAD - 40);
+            wlwin_text(w, c->x + WLCARD_PAD + 12, y + (FONT_ROW_H - 2 - LM_FONT_H) / 2, "Interface font (the program's own)", 1, lm_theme.text_bright, rw - 40);
         else
-            font_sample(a, it - 1, g_fam[it - 1].name, c->x + WLCARD_PAD + 12, y + 2, 20, c->w - 2 * WLCARD_PAD - 44, lm_theme.text_bright);
+            font_sample(a, it - 1, g_fam[it - 1].name, c->x + WLCARD_PAD + 12, y + 2, 20, rw - 44, lm_theme.text_bright);
         if (it == cur)
-            wlwin_round_fill(w, c->x + c->w - WLCARD_PAD - 22, y + (FONT_ROW_H - 12) / 2, 10, 10, 5, COL_ACCENT);
+            wlwin_round_fill(w, c->x + WLCARD_PAD + rw - 22, y + (FONT_ROW_H - 12) / 2, 10, 10, 5, COL_ACCENT);
     }
-    if (n > rows) {                                                     /* a scroll bar */
-        int th = LM_MAX(rows * rows * FONT_ROW_H / n, 16), ty = font_row_y(c, 0) + (rows * FONT_ROW_H - th) * a->font_top / LM_MAX(n - rows, 1);
-        wlwin_round_fill(w, c->x + c->w - WLCARD_PAD - 4, ty, 3, th, 1, lm_theme.control_hot);
-    }
+    wlsbar_paint(w, &fb, a->font_grab >= 0 || (a->has_pointer && wlsbar_has(&fb, a->px, a->py)));
 }
 
 /* ---- the layers panel ------------------------------------------------------------------------------------------------------------ */
@@ -8273,7 +8292,13 @@ static void lay_show(struct app *a)
     a->lay_top = LM_CLAMP(a->lay_top, 0, LM_MAX(nr - nv, 0));
 }
 
-enum { LH_NONE, LH_BTN, LH_OPACITY, LH_BLEND, LH_ROW, LH_EYE, LH_MASK, LH_GROUP, LH_GEYE, LH_GFOLD };
+/* The layers panel's scroll bar: the global one, at the right edge of the list (the rows end before it while it is there). */
+static struct wlsbar lp_sbar(const struct lp_g *g, int nr, int top)
+{
+    return (struct wlsbar){ g->x + LP_W - wlsbar_w() - 2, g->ly, wlsbar_w(), g->nvis * LP_ROW_H, nr, g->nvis, top };
+}
+
+enum { LH_NONE, LH_BTN, LH_OPACITY, LH_BLEND, LH_ROW, LH_EYE, LH_MASK, LH_GROUP, LH_GEYE, LH_GFOLD, LH_BAR };
 
 /* What is at a point of the layers panel. */
 static int lp_hit(const struct app *a, double x, double y, int *idx)
@@ -8295,6 +8320,9 @@ static int lp_hit(const struct app *a, double x, double y, int *idx)
     if (y >= g.ly && y < g.ly + g.nvis * LP_ROW_H) {
         struct lrow rows[MAX_LAYERS + MAX_GROUPS];
         int nr = lp_rows(a, rows), i = (int)((y - g.ly) / LP_ROW_H), ri = a->lay_top + i;
+        struct wlsbar sb = lp_sbar(&g, nr, a->lay_top);
+        if (wlsbar_has(&sb, x, y))
+            return LH_BAR;
         if (ri < 0 || ri >= nr)
             return LH_NONE;
         if (rows[ri].layer < 0) {                                       /* a group's row: the eye, the fold arrow, or the row */
@@ -8372,6 +8400,8 @@ static void paint_layers(struct app *a)
     uint32_t *tb = malloc((size_t)tw * s * (size_t)th * s * 4);
     struct lrow rows[MAX_LAYERS + MAX_GROUPS];
     int nr = lp_rows(a, rows);
+    struct wlsbar lsb = lp_sbar(&g, nr, a->lay_top);
+    int rs = wlsbar_on(&lsb) ? wlsbar_w() + 4 : 0;                      /* (the rows end where the scroll bar begins) */
     for (int i = 0; i < g.nvis; i++) {
         int ri = a->lay_top + i;
         if (ri >= nr)
@@ -8381,7 +8411,7 @@ static void paint_layers(struct app *a)
             const struct lgroup *gr = &a->doc.G[rows[ri].group - 1];
             bool is_cur = a->gsel == rows[ri].group;
             if (is_cur)
-                wlwin_round_fill(w, g.x + 4, y + 1, LP_W - 8, LP_ROW_H - 2, 8, lm_theme.control_hot);
+                wlwin_round_fill(w, g.x + 4, y + 1, LP_W - 8 - rs, LP_ROW_H - 2, 8, lm_theme.control_hot);
             int ex = g.x + 10, ey = y + (LP_ROW_H - 16) / 2;
             wlwin_round_fill(w, ex, ey, 16, 16, 5, lm_theme.border);
             wlwin_round_fill(w, ex + 1, ey + 1, 14, 14, 4, COL_FIELD);
@@ -8400,14 +8430,14 @@ static void paint_layers(struct app *a)
             snprintf(nm, sizeof(nm), "%s", gr->name);
             if (gr->opacity < 100 || (gr->blend != BM_PASS))
                 snprintf(nm + strlen(nm), sizeof(nm) - strlen(nm), " (%d%%)", gr->opacity);
-            wlwin_text_bold(w, ax + 38, y + (LP_ROW_H - LM_FONT_H) / 2, nm, 1, gr->visible ? (is_cur ? lm_theme.text_bright : COL_TEXT) : COL_DIM, LP_W - (ax + 38 - g.x) - 6);
+            wlwin_text_bold(w, ax + 38, y + (LP_ROW_H - LM_FONT_H) / 2, nm, 1, gr->visible ? (is_cur ? lm_theme.text_bright : COL_TEXT) : COL_DIM, LP_W - (ax + 38 - g.x) - 6 - rs);
             continue;
         }
         int layer = rows[ri].layer;
         const struct layer *l = &a->doc.L[layer];
         bool is_cur = layer == a->doc.cur && !a->gsel;
         if (is_cur)
-            wlwin_round_fill(w, g.x + 4, y + 1, LP_W - 8, LP_ROW_H - 2, 8, lm_theme.control_hot);
+            wlwin_round_fill(w, g.x + 4, y + 1, LP_W - 8 - rs, LP_ROW_H - 2, 8, lm_theme.control_hot);
         int ex = g.x + 10, ey = y + (LP_ROW_H - 16) / 2;
         wlwin_round_fill(w, ex, ey, 16, 16, 5, lm_theme.border);
         wlwin_round_fill(w, ex + 1, ey + 1, 14, 14, 4, COL_FIELD);
@@ -8438,13 +8468,10 @@ static void paint_layers(struct app *a)
             }
             nx = g.x + 112 + ind;
         }
-        wlwin_text(w, nx, y + (LP_ROW_H - LM_FONT_H) / 2, l->name, 1, l->visible ? (is_cur ? lm_theme.text_bright : COL_TEXT) : COL_DIM, LP_W - (nx - g.x) - 6);
+        wlwin_text(w, nx, y + (LP_ROW_H - LM_FONT_H) / 2, l->name, 1, l->visible ? (is_cur ? lm_theme.text_bright : COL_TEXT) : COL_DIM, LP_W - (nx - g.x) - 6 - rs);
     }
     free(tb);
-    if (nr > g.nvis && g.nvis > 0) {                                    /* a scroll bar */
-        int th2 = LM_MAX(g.nvis * g.lh / nr, 16), ty2 = g.ly + (g.lh - th2) * a->lay_top / LM_MAX(nr - g.nvis, 1);
-        wlwin_round_fill(w, g.x + LP_W - 5, ty2, 3, th2, 1, lm_theme.control);
-    }
+    wlsbar_paint(w, &lsb, a->lay_grab >= 0 || (a->has_pointer && wlsbar_has(&lsb, a->px, a->py)));
 }
 
 /* ---- the status line ------------------------------------------------------------------------------------------------------------- */
@@ -8864,7 +8891,7 @@ static int want_cursor(const struct app *a)
 {
     if (!a->has_pointer || a->prompt != P_NONE)
         return CUR_ARROW;
-    if (a->pan)
+    if (a->pan || (a->space_down && in_canvas(a, a->px, a->py)))
         return CUR_MOVE;
     if (!in_canvas(a, a->px, a->py) && !a->drag)
         return CUR_ARROW;
@@ -8874,7 +8901,7 @@ static int want_cursor(const struct app *a)
     case T_SELECT: case T_ELLIPSE_SEL: return CUR_CROSS;
     case T_LASSO: return CUR_LASSO;
     case T_WAND: return CUR_WAND;
-    case T_MOVE: return CUR_MOVE;
+    case T_MOVE: case T_HAND: return CUR_MOVE;
     case T_PEN: return CUR_PEN;
     case T_SPRAY: return CUR_AIRBRUSH;
     case T_ERASER: return CUR_ERASER;
@@ -9342,6 +9369,13 @@ static void write_dump(struct app *a)
         int fnb;
         card_rect(a, &fc, &fnb);
         fprintf(f, "fontcard rows=%d families=%d sel=%d top=%d\n", font_rows_fit(a), g_nfam, a->font_sel, a->font_top);
+        {
+            struct wlcard fcc;
+            int fnb;
+            card_rect(a, &fcc, &fnb);
+            struct wlsbar fb = font_sbar(a, &fcc);
+            fprintf(f, "fontbar x=%d y=%d w=%d h=%d\n", fb.x, fb.y, fb.w, fb.h);
+        }
         for (int r = 0; r < font_rows_fit(a) && a->font_top + r <= g_nfam; r++)
             fprintf(f, "fontrow %d x=%d y=%d w=%d h=%d name=%s\n", a->font_top + r, fc.x + WLCARD_PAD, font_row_y(&fc, r), fc.w - 2 * WLCARD_PAD, FONT_ROW_H,
                     a->font_top + r == 0 ? "Interface_font" : g_fam[a->font_top + r - 1].name);
@@ -9462,7 +9496,7 @@ static void write_dump(struct app *a)
             for (int i = 0; i < HP_COUNT; i++)
                 fprintf(f, "hpage %d x=%d y=%d w=%d h=%d\n", i, g.sx, g.sy + i * g.rowh, g.sw, g.rowh);
             fprintf(f, "hbtn back x=%d y=%d w=%d h=%d\nhbtn next x=%d y=%d w=%d h=%d\n", g.prev_x, g.py, g.pw, g.ph, g.next_x, g.py, g.pw, g.ph);
-            fprintf(f, "hbar x=%d y=%d w=14 h=%d\n", g.bx - 6, g.by, g.bh);
+            fprintf(f, "hbar x=%d y=%d w=%d h=%d\n", g.bx, g.by, g.bw, g.bh);
         }
         for (int i = 0; i < nb; i++) {
             int x, y, bw, bh;
@@ -10501,6 +10535,7 @@ static void press_button(struct app *a, int id)
     case B_SELECT:
     case B_PEN:
     case B_RETOUCH:
+    case B_MOVE:
     case B_SHAPES: {
         int g = group_of_button(id);
         if (group_of_tool(a->tool) == g) {                              /* the lit one again: the menu of the others */
@@ -10512,7 +10547,6 @@ static void press_button(struct app *a, int id)
             tool_set(a, a->grp[g]);
         break;
     }
-    case B_MOVE: tool_set(a, T_MOVE); break;
     case B_ERASER: tool_set(a, T_ERASER); break;
     case B_FILL: tool_set(a, T_FILL); break;
     case B_GRADIENT: tool_set(a, T_GRADIENT); break;
@@ -11290,11 +11324,23 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             int h = help_hit(a, a->px, a->py);
             a->help_hover = h >= 1000 ? h - 1000 : -1;
             a->help_btn = h == 1 || h == 2 ? h : 0;
-            if (a->help_drag)
-                help_bar_to(a, a->py);
+            if (a->help_drag) {                                 /* the scroll bar's thumb follows the pointer */
+                struct wlcard hc;
+                int hnb;
+                card_rect(a, &hc, &hnb);
+                struct hgeo hg;
+                help_geom(&hc, &hg);
+                help_layout(a->help_page, hg.cw);
+                struct wlsbar sb = help_sbar(&hg, a->help_top);
+                a->help_top = wlsbar_drag(&sb, a->py, a->help_grab);
+            }
         }
         if (a->prompt == P_COLOUR && a->cp.drag)
             cp_drag_to(a, a->px, a->py);
+        if (a->prompt == P_FONT && a->font_grab >= 0) {                         /* the scroll bar's thumb follows the pointer */
+            struct wlsbar fb = font_sbar(a, &c);
+            a->font_top = wlsbar_drag(&fb, a->py, a->font_grab);
+        }
         if (a->prompt == P_ADJUST && a->adj_drag >= 0)
             adj_set_from(a, a->adj_drag, a->px, &c);
         if (a->prompt == P_ADJUST && a->adj_moving) {                           /* the panel follows the pointer by its title */
@@ -11339,6 +11385,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         a->cp.drag = 0;
         a->adj_drag = -1;
         a->help_drag = false;
+        a->font_grab = -1;
         a->adj_moving = false;
         a->pan = false;
         wlcard_drag_release(&a->win);
@@ -11389,9 +11436,16 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
                 help_set_page(a, a->help_page - 1);
             else if (h == 2)
                 help_set_page(a, a->help_page + 1);
-            else if (h == 3) {
-                a->help_drag = true;
-                help_bar_to(a, a->py);
+            else if (h == 3) {                                  /* the scroll bar: the thumb is taken, the track pages */
+                struct hgeo hg;
+                help_geom(&c, &hg);
+                help_layout(a->help_page, hg.cw);
+                struct wlsbar sb = help_sbar(&hg, a->help_top);
+                int grab = 0;
+                if (wlsbar_press(&sb, a->px, a->py, &a->help_top, &grab) == 1) {
+                    a->help_drag = true;
+                    a->help_grab = grab;
+                }
             }
         } else if (a->prompt == P_EFFECTS) {
             for (int i = 0; i < N_EFX; i++) {
@@ -11403,7 +11457,13 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
                 }
             }
         } else if (a->prompt == P_FONT) {
-            int fr = font_rows_fit(a), r = (int)((a->py - font_row_y(&c, 0)) / FONT_ROW_H);
+            struct wlsbar fb = font_sbar(a, &c);
+            int grab = 0, hit = wlsbar_press(&fb, a->px, a->py, &a->font_top, &grab);          /* the scroll bar: the thumb is taken, the track pages */
+            if (hit == 1)
+                a->font_grab = grab;
+            if (hit)
+                a->win.redraw = true;
+            int fr = font_rows_fit(a), r = hit ? -1 : (int)((a->py - font_row_y(&c, 0)) / FONT_ROW_H);
             if (a->py >= font_row_y(&c, 0) && r >= 0 && r < fr && a->font_top + r <= g_nfam && a->px >= c.x + WLCARD_PAD && a->px < c.x + c.w - WLCARD_PAD)
                 font_choose(a, a->font_top + r);
         } else if (a->prompt == P_COLOUR) {
@@ -11485,6 +11545,18 @@ static void layers_press(struct app *a, uint32_t button)
     if (hit != LH_ROW && hit != LH_GROUP)
         a->lay_click_idx = -1;                                           /* (a double click is two clicks in a row on the same row) */
     switch (hit) {
+    case LH_BAR: {                                                       /* the scroll bar: the thumb is taken, the track pages */
+        if (button != 272)
+            break;
+        struct lp_g g;
+        lp_geom(a, &g);
+        struct lrow rows[MAX_LAYERS + MAX_GROUPS];
+        struct wlsbar sb = lp_sbar(&g, lp_rows(a, rows), a->lay_top);
+        int grab = 0;
+        if (wlsbar_press(&sb, a->px, a->py, &a->lay_top, &grab) == 1)
+            a->lay_grab = grab;
+        break;
+    }
     case LH_BTN:
         if (button != 272)
             break;
@@ -11692,6 +11764,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             double ix, iy;
             to_pic(a, a->px, a->py, &ix, &iy);
             a->guide[a->guide_drag].pos = (int)lround(a->guide[a->guide_drag].vert ? ix : iy);
+        } else if (a->lay_grab >= 0) {                                   /* the layers panel's scroll bar thumb follows the pointer */
+            struct lp_g g;
+            lp_geom(a, &g);
+            struct lrow rows[MAX_LAYERS + MAX_GROUPS];
+            struct wlsbar sb = lp_sbar(&g, lp_rows(a, rows), a->lay_top);
+            a->lay_top = wlsbar_drag(&sb, a->py, a->lay_grab);
         } else if (a->sl_drag >= 0)
             slider_drag(a);
         else if (a->pan)
@@ -11717,6 +11795,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (state != 1) {
             wlrail_release(&a->ran[0]);
             wlrail_release(&a->ran[1]);
+            a->lay_grab = -1;
             if (a->sl_drag >= 0) {
                 a->sl_drag = -1;
                 a->modified = a->modified || false;
@@ -11728,7 +11807,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                     a->guide[gi] = a->guide[a->nguides - 1];
                     a->nguides--;
                 }
-            } else if (button == 274)
+            } else if (button == 274 || (button == 272 && a->pan))
                 a->pan = false;
             else if ((int)button == a->drag_button || a->drag)
                 end_drag(a);
@@ -11809,7 +11888,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (ru)
                 break;
         }
-        if (button == 274 && in_canvas(a, a->px, a->py)) {
+        if ((button == 274 || (button == 272 && (a->tool == T_HAND || a->space_down))) && in_canvas(a, a->px, a->py)) {     /* the middle button, the Hand tool, or Space: the picture follows the pointer */
             a->pan = true;
             a->pan_x = a->px;
             a->pan_y = a->py;
@@ -11981,11 +12060,25 @@ static void prompt_key(struct app *a, uint32_t ks)
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
+    if (op == LM_WL_KEYBOARD_EVT_LEAVE && a->space_down) {              /* (Space may come up while another window has the keys) */
+        a->space_down = false;
+        w->redraw = true;
+    }
     if (op != LM_WL_KEYBOARD_EVT_KEY)
         return;
     a->clip.serial = args[0].u;
+    if (args[2].u == 57 && args[3].u == 0 && a->space_down) {           /* Space let go */
+        a->space_down = false;
+        w->redraw = true;
+        return;
+    }
     if (args[3].u == 0)
         return;
+    if (args[2].u == 57 && a->prompt == P_NONE && !a->txt.on && !(w->mods & (LM_MOD_CTRL | LM_MOD_ALT))) {      /* Space held: the picture can be moved with the left button */
+        a->space_down = true;
+        w->redraw = true;
+        return;
+    }
     uint32_t ks = lm_keymap_keysym(args[2].u, w->mods);
     bool ctrl = (w->mods & LM_MOD_CTRL) != 0, shift = (w->mods & LM_MOD_SHIFT) != 0, alt = (w->mods & LM_MOD_ALT) != 0;
     w->redraw = true;
@@ -12382,6 +12475,7 @@ int main(int argc, char **argv)
     a.grp[G_BRUSH] = T_PEN;
     a.grp[G_RETOUCH] = T_CLONE;
     a.grp[G_SHAPES] = T_LINE;
+    a.grp[G_MOVE] = T_MOVE;
     a.tool = T_PEN;
     a.sl_drag = -1;
     a.txt_edit = -1;
@@ -12390,6 +12484,7 @@ int main(int argc, char **argv)
     a.tg[TG_TLAYER] = true;
     a.guide_drag = -1;
     a.adj_drag = -1;
+    a.font_grab = a.lay_grab = -1;
     a.lay_click_idx = -1;
     a.lay_seen = -1;
     a.cur_kind = -1;

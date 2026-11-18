@@ -45,6 +45,7 @@
 #include "wlc.h"
 #include "wlclip.h"
 #include "wlrail.h"
+#include "wlsbar.h"
 #include "wlwin.h"
 
 #define MAX_KIDS 400
@@ -452,6 +453,7 @@ struct app {
     int ntiles;
     struct trect map;                   /* the tree map's area */
     int top;                            /* first row of the list */
+    int sb_grab;                        /* the list's scroll bar thumb is held (where in it; -1 = not) */
     double px, py;
     int hover;                          /* the child under the pointer (tile or row), -1 none */
     int hovertool;
@@ -511,6 +513,13 @@ static int list_rows(const struct app *a)
 static int list_width(const struct app *a)
 {
     return LM_CLAMP(a->win.bw * 2 / 5, 260, 420);
+}
+
+/* The list's scroll bar: the global one ([windows] scrollbar-width), at the right edge of the list; the rows end before it while it is there. */
+static struct wlsbar list_sbar(const struct app *a)
+{
+    int rows = list_rows(a), lw = list_width(a);
+    return (struct wlsbar){ lw - wlsbar_w(), TOOL_H + HEAD_H, wlsbar_w(), rows * ROW_H, a->cur ? a->cur->nkid : 0, rows, a->top };
 }
 
 static void set_title(struct app *a)
@@ -886,7 +895,7 @@ static void paint_list(struct app *a, struct wlwin *w)
     if (!a->cur)
         return;
     long long total = LM_MAX(nsize(a->cur), 1);
-    int namew = lw - PAD - 9 * LM_FONT_W - 4 * LM_FONT_W - 70;
+    int namew = lw - PAD - 9 * LM_FONT_W - 4 * LM_FONT_W - 70 - (a->cur->nkid > rows ? wlsbar_w() : 0);
     for (int r = 0; r < rows && a->top + r < a->cur->nkid; r++) {
         int i = a->top + r;
         const struct node *k = a->cur->kid[i];
@@ -905,12 +914,12 @@ static void paint_list(struct app *a, struct wlwin *w)
         human(nsize(k), sz, sizeof(sz));
         wlwin_text(w, bx + bw + 6, y + 2, sz, 1, COL_TEXT, 0);
         snprintf(pc, sizeof(pc), "%d%%", (int)(100 * nsize(k) / total));
-        wlwin_text(w, lw - 6 - lm_font_text_width(pc), y + 2, pc, 1, COL_DIM, 0);          /* right aligned */
+        wlwin_text(w, lw - 6 - (a->cur->nkid > rows ? wlsbar_w() : 0) - lm_font_text_width(pc), y + 2, pc, 1, COL_DIM, 0);          /* right aligned */
     }
-    if (a->cur->nkid > rows) {                                          /* a thin scroll bar */
-        int th = LM_MAX(rows * ROW_H * rows / a->cur->nkid, 14), ty = y0 + (rows * ROW_H - th) * a->top / LM_MAX(a->cur->nkid - rows, 1);
-        wlwin_fill(w, lw - 4, y0, 4, rows * ROW_H, COL_BAR);
-        wlwin_fill(w, lw - 4, ty, 4, th, lm_theme.button);
+    struct wlsbar sb = list_sbar(a);                                    /* the scroll bar */
+    if (wlsbar_on(&sb)) {
+        wlwin_fill(w, sb.x, sb.y, sb.w, sb.h, COL_BAR);
+        wlsbar_paint(w, &sb, a->sb_grab >= 0 || (a->px >= sb.x && a->px < sb.x + sb.w && a->py >= sb.y && a->py < sb.y + sb.h));
     }
 }
 
@@ -1022,7 +1031,8 @@ static int child_at(const struct app *a, double px, double py)
     if (a->sc || !a->cur)
         return -1;
     int lw = list_width(a), y0 = TOOL_H + HEAD_H;
-    if (px < lw && py >= y0 && py < y0 + list_rows(a) * ROW_H) {
+    struct wlsbar sb = list_sbar(a);
+    if (px < lw && py >= y0 && py < y0 + list_rows(a) * ROW_H && !(wlsbar_on(&sb) && px >= sb.x)) {
         int i = a->top + (int)((py - y0) / ROW_H);
         return i < a->cur->nkid ? i : -1;
     }
@@ -1070,6 +1080,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_MOTION: {
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
+        if (a->sb_grab >= 0) {                                          /* the scroll bar's thumb follows the pointer */
+            struct wlsbar sb = list_sbar(a);
+            a->top = wlsbar_drag(&sb, a->py, a->sb_grab);
+            w->redraw = true;
+            break;
+        }
         int h = button_at(a, a->px, a->py), c = child_at(a, a->px, a->py);
         if (h != a->hovertool || c != a->hover) {
             a->hovertool = h;
@@ -1082,10 +1098,21 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->clip.serial = args[0].u;
         if (args[3].u != 1) {
             wlrail_release(&a->ran);                                    /* (the drop springs back) */
+            a->sb_grab = -1;
             w->redraw = true;
             break;
         }
         a->confirm = C_NONE;
+        if (args[2].u == 272) {                                         /* the list's scroll bar: the thumb is taken, the track pages */
+            struct wlsbar sb = list_sbar(a);
+            int grab = 0, hit = wlsbar_press(&sb, a->px, a->py, &a->top, &grab);
+            if (hit) {
+                if (hit == 1)
+                    a->sb_grab = grab;
+                w->redraw = true;
+                break;
+            }
+        }
         bool left = args[2].u == 272, right = args[2].u == 273;
         int bi = button_at(a, a->px, a->py);
         if (left && bi >= 0) {
@@ -1333,6 +1360,7 @@ int main(int argc, char **argv)
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     static struct app a;
     a.hover = a.hovertool = -1;
+    a.sb_grab = -1;
     a.one_fs = true;
     wlrail_init(&a.ran);
     g_rail = wlrail_wanted("MELLAGUI_DU_RAIL");

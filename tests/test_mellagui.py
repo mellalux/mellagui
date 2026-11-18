@@ -15928,6 +15928,107 @@ class TestPaint(Base):
         self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 24, c['y'] + 12))
         ctl.tap(KEY_ESC)
 
+    def test_the_font_card_has_the_global_scroll_bar_that_pages_and_drags(self):
+        fonts = '/usr/share/fonts/truetype/dejavu'
+        if not os.path.exists(os.path.join(fonts, 'DejaVuSerif.ttf')):
+            self.skipTest('DejaVu fonts not installed')
+        many = tempfile.mkdtemp(prefix='manyfonts-', dir=tmp)                                 # thirty families: copies of DejaVu Sans with another name each
+        self.addCleanup(shutil.rmtree, many, ignore_errors=True)
+        data = open(os.path.join(fonts, 'DejaVuSans.ttf'), 'rb').read()
+        for i in range(30):
+            name = 'Famly%06d' % i                                                            # (as long as "DejaVu Sans", in both name encodings of the name table)
+            blob = data.replace(b'DejaVu Sans', name.encode()).replace('DejaVu Sans'.encode('utf-16-be'), name.encode('utf-16-be'))
+            open(os.path.join(many, 'f%02d.ttf' % i), 'wb').write(blob)
+        self.start('--new', '200x120', env={'MELLAGUI_FONT_DIRS': many})
+        self.wait(lambda s: s['image']['w'] == '200')
+        ctl.tap(KEYCODES['t'])
+        self.wait(lambda s: s['state']['tool'] == 'Text' and 'tfont' in s)
+        self.click_box(self.row('tfont'))
+        st = self.wait(lambda s: s['state']['prompt'] == '13' and 'fontcard' in s)
+        fams, rows = int(st['fontcard']['families']), int(st['fontcard']['rows'])
+        self.assertEqual(fams, 30)
+        self.assertIn('fontbar', st)
+        bar = {k: int(v) for k, v in st['fontbar'].items() if k in 'xywh'}
+        self.assertGreaterEqual(bar['w'], 10)                                                 # as wide as [windows] scrollbar-width (14), not a thin strip
+        self.click_at(bar['x'] + bar['w'] // 2, bar['y'] + bar['h'] - 4)                      # a click low on the track: a page down
+        st = self.wait(lambda s: int(s['fontcard']['top']) > 0)
+        self.assertEqual(int(st['fontcard']['top']), min(rows, fams + 1 - rows))
+        top = int(st['fontcard']['top'])
+        # drag the thumb to the end
+        thumb_y = bar['y'] + int(bar['h'] * top / (fams + 1))
+        wx, wy = self.win_xy()
+        ctl.abs(wx + bar['x'] + bar['w'] // 2, wy + thumb_y + 8)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 7):
+            ctl.abs(wx + bar['x'] + bar['w'] // 2, wy + thumb_y + 8 + (bar['h'] - 10) * i // 6)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        self.wait(lambda s: int(s['fontcard']['top']) == fams + 1 - rows)
+        ctl.tap(KEY_ESC)
+
+    def test_the_hand_tool_and_the_space_key_move_the_picture_in_the_window(self):
+        self.start('--new', '400x300')
+        st = self.wait(lambda s: s['image']['w'] == '400')
+        ctl.abs(*[int(v) for v in self.screen(st, 200, 150)])                                 # zoom in so that there is something to move
+        time.sleep(0.1)
+        for _ in range(4):
+            ctl.cmd('axis v -15 -1')
+            time.sleep(0.05)
+        st = self.wait(lambda s: int(s['state']['zoom']) > 200)
+        base = st['image']['hash']
+        undo = st['state']['undo']
+        ctl.tap(KEYCODES['y'])                                                                # the Hand tool
+        st = self.wait(lambda s: s['state']['tool'] == 'Hand')
+        vx, vy = float(st['canvas']['vx']), float(st['canvas']['vy'])
+        wx, wy = self.win_xy()
+        x0, y0 = wx + int(st['canvas']['x']) + 200, wy + 150
+        ctl.abs(x0, y0)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 6):
+            ctl.abs(x0 - 10 * i, y0 - 6 * i)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        st = self.wait(lambda s: float(s['canvas']['vx']) < vx - 40)
+        self.assertAlmostEqual(float(st['canvas']['vx']), vx - 50, delta=2)
+        self.assertAlmostEqual(float(st['canvas']['vy']), vy - 30, delta=2)
+        self.assertEqual((st['image']['hash'], st['state']['undo']), (base, undo))            # nothing was drawn
+        # Space with another tool: the same, and a drag without Space draws again
+        ctl.tap(KEYCODES['p'])
+        self.wait(lambda s: s['state']['tool'] == 'Pen')
+        vx = float(self.state()['canvas']['vx'])
+        ctl.abs(x0, y0)
+        time.sleep(0.1)
+        ctl.key(57, True)
+        ctl.button(272, True)
+        for i in range(1, 6):
+            ctl.abs(x0 + 8 * i, y0)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        ctl.key(57, False)
+        st = self.wait(lambda s: float(s['canvas']['vx']) > vx + 30)
+        self.assertEqual((st['image']['hash'], st['state']['undo']), (base, undo))            # (the pen drew nothing)
+        ctl.abs(x0, y0)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(x0 + 5 * i, y0)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['undo'] == str(int(undo) + 1))                          # without Space the pen draws
+        # the Hand is a variant of the Move button: the lit button again opens the menu with both
+        self.click_button(self.state(), 'Move')                                               # (the button stands for the variant used last: the Hand)
+        self.wait(lambda s: s['state']['tool'] == 'Hand')
+        self.click_button(self.state(), 'Move')
+        time.sleep(0.2)
+        ents = self.menu_state()['entries']
+        labels = [e['label'] for e in ents]
+        self.assertEqual(len(labels), 2)
+        self.assertTrue(labels[0].startswith('Move') and labels[1].startswith('Hand'))
+        ctl.click(ents[0]['x'], ents[0]['y'])                                                 # the first one: the Move tool again
+        self.wait(lambda s: s['state']['tool'] == 'Move')
+
     def test_typing_in_the_font_card_jumps_to_the_family(self):
         fonts = '/usr/share/fonts/truetype/dejavu'
         if not os.path.exists(os.path.join(fonts, 'DejaVuSerif.ttf')):
@@ -16030,9 +16131,16 @@ class TestPaint(Base):
         top = int(self.state()['help']['top'])
         ctl.cmd('axis v -15 -1')
         self.wait(lambda s: int(s['help']['top']) < top)
-        bar = self.row('hbar')                                                                # the scroll bar: a click low on it takes the text far down
-        self.click_at(int(bar['x']) + 7, int(bar['y']) + int(bar['h']) - 6)
-        st = self.wait(lambda s: int(s['help']['top']) > (height - view) // 2)
+        bar = self.row('hbar')                                                                # the scroll bar: the global one (as wide as [windows] scrollbar-width), a click beside the thumb pages
+        self.assertGreaterEqual(int(bar['w']), 10)
+        ctl.tap(102)                                                                          # Home
+        self.wait(lambda s: s['help']['top'] == '0')
+        self.click_at(int(bar['x']) + int(bar['w']) // 2, int(bar['y']) + int(bar['h']) - 6)
+        st = self.wait(lambda s: int(s['help']['top']) > 0)
+        page = int(st['help']['top'])
+        self.assertLess(page, height - view)                                                  # (one page, not all the way)
+        self.click_at(int(bar['x']) + int(bar['w']) // 2, int(bar['y']) + int(bar['h']) - 6)
+        st = self.wait(lambda s: int(s['help']['top']) > page)
         b = self.row('hbtn', 'next')                                                          # (on the last page Next does nothing)
         self.click_at(int(b['x']) + 20, int(b['y']) + 10)
         time.sleep(0.15)

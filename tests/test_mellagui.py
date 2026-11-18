@@ -19476,6 +19476,42 @@ class TestChessRules(unittest.TestCase):
         self.assertIn('nodes 400', r.stdout)
 
 
+class TestBlocksEngine(unittest.TestCase):
+    """client/blocks.c (the block world: generation, picking, the player's physics, the save file) and client/blocksview.c (its
+    picture), through build/blocks-test (no compositor needed)."""
+    EXE = os.path.join(ROOT, 'build', 'blocks-test')
+
+    def setUp(self):
+        if not os.path.exists(self.EXE):
+            self.skipTest('blocks-test not built')
+
+    def test_the_world_the_player_and_the_picture_selftest(self):
+        r = subprocess.run([self.EXE], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertIn('blocks-test: ok', r.stdout)
+        self.assertIn('0 failed', r.stdout)
+
+    def test_a_shot_is_a_picture_of_the_asked_size_with_sky_above_and_ground_below(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, 'a.ppm')
+            r = subprocess.run([self.EXE, '--shot', out, '64x40', 'seed=3', 'threads=2', 'pitch=50'],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = open(out, 'rb').read()
+            head = b'P6\n64 40\n255\n'
+            self.assertTrue(data.startswith(head))
+            self.assertEqual(len(data), len(head) + 64 * 40 * 3)
+            px = data[len(head):]
+            top = px[(1 * 64 + 32) * 3:(1 * 64 + 32) * 3 + 3]          # the second row, in the middle: sky at noon
+            self.assertGreater(top[2], top[0] + 30, 'the sky is blue')
+
+    def test_a_bad_command_line_is_refused(self):
+        r = subprocess.run([self.EXE, '--shot'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 2)
+        r = subprocess.run([self.EXE, '--shot', '/tmp/x.ppm', '64x40', 'nonsense=1'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 2)
+
+
 class TestChessAI(unittest.TestCase):
     """client/chessai.c, the search and the evaluation of the chess game, through build/chessai-test (no compositor needed): the
     evaluation of a position and its mirror image, the plain search against a separately written minimax, mates found in random

@@ -16,6 +16,7 @@
  *   Colours         the six squares in the tool bar; "Thin / Thick" the line width
  *   Ctrl+Z          undo the last mark          Delete  the last mark, too
  *   Enter or Save   the file in the folder (mode 0600, mellagui-YYYYMMDD-HHMMSS.png) and the clipboard (image/png)
+ *   Ctrl+E or Paint the file and the clipboard, and the picture opens in the picture editor (mellagui-paint)
  *   Ctrl+C or Copy  the clipboard only          Esc or the x  cancel (while typing a text: only the text)
  *   Enter with no area chosen takes the whole screen.
  *
@@ -30,6 +31,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -247,7 +249,7 @@ struct app {
     enum tool tool;
     int color, thick;                   /* PALETTE index, 2 or 5 */
     double px, py;
-    bool done, copy_only, saved_ok;
+    bool done, copy_only, edit_after, saved_ok;
     char dir[512];
     char msg[640];
 };
@@ -492,6 +494,40 @@ static void notify(struct app *a, const char *title, const char *body)
     send_set(a, "notify", msg);
 }
 
+/* Opens the saved picture in the picture editor (the program next to this one, else from PATH; $MELLAGUI_SHOT_PAINT names another program, "none" = none),
+ * detached: it outlives this one. */
+static void launch_paint(const char *file)
+{
+    const char *v = getenv("MELLAGUI_SHOT_PAINT");
+    if (v && !strcmp(v, "none"))
+        return;
+    char exe[1024], path[1100];
+    const char *prog = v && *v ? v : "mellagui-paint";
+    if (!(v && *v)) {
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = 0;
+            char *slash = strrchr(exe, '/');
+            if (slash) {
+                snprintf(path, sizeof(path), "%.*s/mellagui-paint", (int)(slash - exe), exe);
+                if (access(path, X_OK) == 0)
+                    prog = path;
+            }
+        }
+    }
+    pid_t pid = fork();
+    if (pid == 0) {                                     /* twice, so that nobody has to wait for the program */
+        if (fork() == 0) {
+            setsid();
+            execlp(prog, prog, file, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
 /* Enter: file + clipboard; Ctrl+C: the clipboard only (through a file that is only there until the compositor has read it). */
 static bool finish(struct app *a, bool copy_only)
 {
@@ -541,6 +577,8 @@ static bool finish(struct app *a, bool copy_only)
         const char *slash = strrchr(path, '/');
         notify(a, "Screenshot saved", slash ? slash + 1 : path);
         printf("%s\n", path);
+        if (a->edit_after)
+            launch_paint(path);
     }
     wlc_flush(a->win.c);
     a->saved_ok = true;
@@ -549,7 +587,7 @@ static bool finish(struct app *a, bool copy_only)
 
 /* ---- the tool bar ----------------------------------------------------------------------------------------------------------------- */
 
-enum { B_TOOL, B_COLOR, B_THICK, B_UNDO, B_COPY, B_SAVE, B_CLOSE };
+enum { B_TOOL, B_COLOR, B_THICK, B_UNDO, B_COPY, B_PAINT, B_SAVE, B_CLOSE };
 
 struct button {
     int kind, arg;
@@ -585,6 +623,10 @@ static int bar_layout(const struct app *a, struct button *b)
     x += b[n++].w + 9;
     b[n] = (struct button){ .kind = B_COPY, .x = x };
     snprintf(b[n].label, sizeof(b[n].label), "Copy");
+    b[n].w = text_width(b[n].label, 1) + 14;
+    x += b[n++].w + 3;
+    b[n] = (struct button){ .kind = B_PAINT, .x = x };
+    snprintf(b[n].label, sizeof(b[n].label), "Paint");
     b[n].w = text_width(b[n].label, 1) + 14;
     x += b[n++].w + 3;
     b[n] = (struct button){ .kind = B_SAVE, .x = x, .on = true };
@@ -822,6 +864,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             case B_THICK: a->thick = a->thick > 3 ? 2 : 5; break;
             case B_UNDO: undo(a); break;
             case B_COPY: a->copy_only = true; a->done = true; break;
+            case B_PAINT: a->edit_after = true; a->done = true; break;
             case B_SAVE: a->done = true; break;
             case B_CLOSE: a->saved_ok = false; w->running = false; break;
             }
@@ -922,6 +965,9 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         a->done = true;
     } else if (ctrl && (ks == 'c' || ks == 'C')) {
         a->copy_only = true;
+        a->done = true;
+    } else if (ctrl && (ks == 'e' || ks == 'E')) {                 /* save it and open it in the picture editor */
+        a->edit_after = true;
         a->done = true;
     } else if (ctrl && (ks == 'z' || ks == 'Z')) {
         undo(a);
@@ -1093,7 +1139,7 @@ int main(int argc, char **argv)
             text_commit(&a);
             if (finish(&a, a.copy_only))
                 break;
-            a.copy_only = false;
+            a.copy_only = a.edit_after = false;
             fprintf(stderr, "mellagui-shot: %s\n", a.msg);
             a.win.redraw = true;
         }

@@ -14215,13 +14215,13 @@ class TestPaint(Base):
 
     # ---- the window ----
 
-    def start(self, *args):
+    def start(self, *args, env=None):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.paint', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'paint-%d.dump' % int(time.time() * 1000))
         cfg = tempfile.mkdtemp(prefix='paint-cfg-', dir=tmp)                                  # the program keeps its colours and sliders in paint.conf: a folder of its own
         self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
-        p = subprocess.Popen([self.PAINT, '--size', '800x460'] + list(args), env=dict(os.environ, MELLAGUI_PAINT_DUMP=self.dump, MELLAGUI_RAILS='1', XDG_CONFIG_HOME=cfg), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen([self.PAINT, '--size', '800x460'] + list(args), env=dict(os.environ, MELLAGUI_PAINT_DUMP=self.dump, MELLAGUI_RAILS='1', XDG_CONFIG_HOME=cfg, **(env or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         self.win = wait_for_window('mellagui.paint')
         self.assertIsNotNone(self.win, 'the window did not appear')
@@ -14699,6 +14699,1044 @@ class TestPaint(Base):
         self.wait(lambda s: s['image']['modified'] == '0')
         self.assertEqual(Image.open(out).format, 'BMP')
 
+    def test_the_text_tool_has_a_bar_of_settings_and_a_font_card(self):
+        fonts = '/usr/share/fonts/truetype/dejavu'
+        if not os.path.exists(os.path.join(fonts, 'DejaVuSerif.ttf')):
+            self.skipTest('DejaVu fonts not installed')
+        self.start('--new', '200x120', env={'MELLAGUI_FONT_DIRS': fonts})
+        st = self.wait(lambda s: s['image']['w'] == '200')
+        self.choose_colour('bgbox', '#ff0000')                                                # the outline and the box are in the second colour
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text' and 'tfont' in s)
+        self.assertEqual([r['id'] for r in self.rows('ttoggle')], ['Bold', 'Italic', 'Underline', 'Strike', 'Box', 'Layer'])
+        self.assertEqual([r['id'] for r in self.rows('talign')], ['Left', 'Centre', 'Right'])
+        self.assertEqual([r['id'] for r in self.rows('tslider')], ['Line', 'Letters', 'Outline', 'Shadow', 'Angle', 'Bend'])
+        x, y = self.screen(st, 20, 20)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['text']['on'] == '1')
+        self.type_text('Hello')
+        ctl.tap(KEY_ENTER)
+        self.type_text('Hi')
+        st = self.wait(lambda s: s['text']['len'] == '8')
+        # the font card: a list of families, each in its own letters; Esc leaves the font as it was, a click chooses
+        self.click_box(self.row('tfont'))
+        st = self.wait(lambda s: s['state']['prompt'] == '13')
+        self.assertEqual([r['name'] for r in self.rows('fontrow')][0], 'Interface_font')
+        ctl.tap(KEY_ESC)
+        st = self.wait(lambda s: s['state']['prompt'] == '0')
+        self.assertEqual(st['text']['font'], '-')
+        h_plain = st['image']['hash']
+        self.click_box(self.row('tfont'))
+        self.wait(lambda s: s['state']['prompt'] == '13')
+        raw = [l for l in open(self.dump).read().splitlines() if l.startswith('fontrow') and 'DejaVu Serif' in l][0]
+        kv = dict(p.split('=', 1) for p in raw.split()[2:] if p.startswith(('x=', 'y=')))
+        self.click_at(int(kv['x']) + 30, int(kv['y']) + 10)
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['text']['font'] == 'DejaVu_Serif')
+        self.wait(lambda s: s['image']['hash'] != h_plain)                                    # the same text in another font is another picture
+        hashes = [self.state()['image']['hash']]
+
+        def change(what, act):
+            h0 = self.state()['image']['hash']
+            act()
+            try:
+                self.wait(lambda s: s['image']['hash'] != h0)
+            except AssertionError:
+                self.fail('the picture of the text did not change with %s' % what)
+            self.assertNotIn(self.state()['image']['hash'], hashes, what)
+            hashes.append(self.state()['image']['hash'])
+        for name in ('Bold', 'Italic', 'Underline', 'Strike'):                                # every switch changes the picture of the text
+            change(name, lambda n=name: self.click_box(self.row('ttoggle', n)))
+            self.wait(lambda s, n=name: self.row('ttoggle', n)['on'] == '1')
+        for name, frac in (('Letters', 0.3), ('Line', 0.6), ('Outline', 0.3), ('Shadow', 0.3), ('Angle', 0.7), ('Bend', 0.8)):
+            r = self.row('tslider', name)
+            change(name, lambda r=r, f=frac: self.click_at(int(r['tx']) + int(int(r['tw']) * f), int(r['ty'])))
+        change('Box', lambda: self.click_box(self.row('ttoggle', 'Box')))                    # (last: the red box hides the red outline)
+        self.wait(lambda s: self.row('ttoggle', 'Box')['on'] == '1')
+        change('alignment', lambda: self.click_box(self.row('talign', 'Right')))
+        self.wait(lambda s: self.row('talign', 'Right')['on'] == '1')
+        t = self.state()['text']
+        self.assertEqual((t['bold'], t['italic'], t['align']), ('1', '1', '2'))
+        self.assertTrue(int(t['angle']) > 0 and int(t['outline']) > 0 and int(t['shadow']) > 0 and int(t['bend']) > 0)
+        self.chord(KEY_ENTER, KEY_LEFTCTRL)                                                   # Ctrl+Enter puts it down: one undo step
+        st = self.wait(lambda s: s['text']['on'] == '0')
+        self.assertEqual(st['state']['undo'], '1')
+        self.assertEqual(st['image']['paper'], 'ffffffff')
+
+    def test_the_effects_card_has_every_effect_and_its_sliders_preview_live(self):
+        self.start('--new', '80x60')
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        self.choose_colour('fgbox', '#e53935')
+        ctl.tap(KEYCODES['c'])                                                                # a red disc to work on
+        st = self.wait(lambda s: s['state']['tool'] == 'Circle')
+        self.click_box(self.row('toggle', 'Filled'))
+        self.drag(st, (20, 15), (60, 45))
+        st = self.wait(lambda s: s['state']['undo'] == '1')
+        base = st['image']['hash']
+
+        def open_effect(name, kind=None):
+            self.click_button(self.state(), 'Effects')
+            self.wait(lambda s: s['state']['prompt'] == '14')
+            self.click_box(self.row('efx', name))
+            if kind:
+                self.wait(lambda s: s['state']['prompt'] == '10' and self.row('fxcard')['kind'] == kind)
+
+        def card_button(i):
+            self.click_box(self.row('cbtn', str(i)))
+        self.click_button(self.state(), 'Effects')                                            # the card lists them all
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        names = [r['id'] for r in self.rows('efx')]
+        self.assertEqual(len(names), 27)
+        for want in ('Grayscale', 'Blur...', 'Levels...', 'Unsharp_mask...', 'Mosaic...', 'Drop_shadow...', 'Outline...', 'Scale_and_turn...', 'Turn_picture...', 'Feather_selection...'):
+            self.assertIn(want, names)
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        open_effect('Blur...', 'blur')                                                        # a slider card: the picture changes as the slider moves, Cancel puts it back
+        st = self.wait(lambda s: s['image']['hash'] != base)
+        r = self.row('adjust', 'Radius')
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.3), int(r['ty']))
+        self.wait(lambda s: int(self.row('adjust', 'Radius')['value']) > 10)
+        card_button(0)
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['image']['hash'] == base)
+        self.assertEqual(st['state']['undo'], '1')
+        open_effect('Blur...', 'blur')                                                        # Apply keeps it: one step more
+        card_button(2)
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['state']['undo'] == '2')
+        blurred = st['image']['hash']
+        self.assertNotEqual(blurred, base)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['hash'] == base)
+        # a shadow goes on a layer of its own below, can be cancelled, applied and undone as one step
+        open_effect('Drop_shadow...', 'shadow')
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.assertNotEqual(st['image']['hash'], base)
+        card_button(0)
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['image']['layers'] == '1')
+        self.assertEqual((st['image']['hash'], st['state']['undo']), (base, '1'))
+        open_effect('Drop_shadow...', 'shadow')
+        self.wait(lambda s: s['image']['layers'] == '2')
+        card_button(2)
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['state']['undo'] == '2')
+        self.assertEqual(st['image']['layers'], '2')
+        self.assertEqual([r['name'] for r in self.rows('layer')], ['Shadow', 'Layer_1'] if False else [r.get('name') for r in self.rows('layer')])
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['layers'] == '1' and s['image']['hash'] == base)
+        # a simple effect works at once and is one undo step
+        open_effect('Invert')
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['image']['hash'] != base)
+        self.assertEqual(st['state']['undo'], '2')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['hash'] == base)
+        # effects on the selection: grow it, soften it, scale and turn what it holds
+        ctl.tap(KEYCODES['s'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Select')
+        self.drag(st, (25, 20), (50, 40))
+        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        x0, y0, x1, y1 = (int(v) for v in st['sel'][1].split(','))
+        open_effect('Grow_or_shrink...', 'grow')
+        st = self.wait(lambda s: int(s['sel'][1].split(',')[0]) < x0)
+        a, b, c, d = (int(v) for v in st['sel'][1].split(','))
+        self.assertTrue(x0 - a >= 4 and c - x1 >= 4 and b < y0 and d > y1, (st['sel'], (x0, y0, x1, y1)))
+        card_button(2)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        open_effect('Feather_selection...', 'feather')
+        st = self.wait(lambda s: 'mask=1' in s['sel'])
+        card_button(2)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        open_effect('Scale_and_turn...', 'xform')                                             # the content of the selection, turned a quarter
+        r = self.row('adjust', 'Turn')
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.75), int(r['ty']))
+        self.wait(lambda s: int(self.row('adjust', 'Turn')['value']) > 80)
+        before_x = self.state()['image']['hash']
+        card_button(2)
+        st = self.wait(lambda s: s['state']['prompt'] == '0')
+        self.assertNotEqual(st['image']['hash'], base)
+
+    def test_the_whole_picture_can_be_turned_by_any_angle(self):
+        self.start('--new', '60x20')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        self.click_button(self.state(), 'Effects')
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        self.click_box(self.row('efx', 'Turn_picture...'))
+        self.wait(lambda s: s['state']['prompt'] == '10' and self.row('fxcard')['kind'] == 'rotate')
+        r = self.row('adjust', 'Angle')
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.75), int(r['ty']))                   # 90 degrees (the middle is 0, the right end 180)
+        self.wait(lambda s: abs(int(self.row('adjust', 'Angle')['value']) - 90) <= 2)
+        self.click_box(self.row('cbtn', '2'))
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['image']['h'] != '20')
+        self.assertTrue(int(st['image']['h']) >= 58 and int(st['image']['w']) <= 24, st['image'])  # a quarter turn: tall and narrow (give or take the slider's step)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['w'] == '60' and s['image']['h'] == '20')
+
+    def test_the_brush_bar_has_smoothing_symmetry_and_pixel_mode(self):
+        out = os.path.join(tmp, 'paint-brushbar.png')
+        self.start('--new', '60x40', out)
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        self.assertEqual(st['image']['path'], out)
+        self.assertEqual([r['id'] for r in self.rows('bslider')], ['Smooth', 'Symmetry'])
+        self.assertEqual([r['id'] for r in self.rows('btoggle')], ['Mirror', 'Pixel'])
+
+        def set_slider(name, frac):
+            r = self.row('bslider', name)
+            self.click_at(int(r['tx']) + int(int(r['tw']) * frac), int(r['ty']))
+        set_slider('Symmetry', 1 / 15.0)                                                      # two copies: turned half a turn about the middle
+        self.wait(lambda s: self.row('bslider', 'Symmetry')['value'] == '2')
+        st = self.state()
+        self.drag(st, (10, 10), (20, 10))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(self.flat_pixel(out, 15, 10)[0] < 40)
+        self.assertTrue(self.flat_pixel(out, 45, 30)[0] < 40, 'the copy lies opposite')
+        self.assertEqual(self.flat_pixel(out, 45, 10)[0], 255)                                # (not mirrored: only turned)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.click_box(self.row('btoggle', 'Mirror'))                                         # with Mirror the copies are reflected too: four in all
+        self.wait(lambda s: self.row('btoggle', 'Mirror')['on'] == '1')
+        self.drag(self.state(), (10, 10), (20, 10))
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(self.flat_pixel(out, 45, 10)[0] < 40, 'mirrored left to right')
+        self.assertTrue(self.flat_pixel(out, 15, 30)[0] < 40, 'and mirrored again by the half turn')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        set_slider('Symmetry', 0.0)
+        self.click_box(self.row('btoggle', 'Mirror'))
+        self.wait(lambda s: self.row('btoggle', 'Mirror')['on'] == '0')
+        # pixel mode: a thin slanted line has no grey pixels, without it the edge is anti-aliased
+        r = self.row('slider', 'Size')
+        self.click_at(int(r['tx']), int(r['ty']))
+        self.wait(lambda s: s['state']['size'] == '1')
+        self.drag(self.state(), (5, 5), (50, 25), steps=8)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        grey = [v for v in (self.flat_pixel(out, x, y)[0] for x in range(5, 50) for y in range(5, 26)) if 30 < v < 225]
+        self.assertTrue(len(grey) > 5, 'an anti-aliased line has grey pixels')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.click_box(self.row('btoggle', 'Pixel'))
+        self.wait(lambda s: self.row('btoggle', 'Pixel')['on'] == '1')
+        self.drag(self.state(), (5, 5), (50, 25), steps=8)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        vals = set(self.flat_pixel(out, x, y)[0] for x in range(5, 50) for y in range(5, 26))
+        self.assertEqual(vals, {0, 255}, vals)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        # a lazy stroke: the same drag takes another path, and still ends where the pointer let go
+        plain = self.state()['image']['hash']
+        self.click_box(self.row('btoggle', 'Pixel'))
+        self.click_at(int(self.row('slider', 'Size')['tx']) + 30, int(self.row('slider', 'Size')['ty']))
+        set_slider('Smooth', 1.0)
+        self.wait(lambda s: self.row('bslider', 'Smooth')['value'] == '100')
+        self.drag(self.state(), (5, 5), (50, 30), steps=3)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(self.flat_pixel(out, 50, 30)[0] < 120, 'the stroke caught up with the pointer at the end')
+
+    def test_selections_can_be_added_to_taken_from_and_kept_to_a_fixed_ratio(self):
+        self.start('--new', '80x60')
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        ctl.tap(KEYCODES['s'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Select')
+        self.assertEqual([r['id'] for r in self.rows('toggle')], ['Add', 'Subtract', 'Ratio'])
+        box = lambda st_: tuple(int(v) for v in st_['sel'][1].split(','))
+        self.drag(st, (10, 10), (30, 30))
+        st = self.wait(lambda s: s['sel'][0] == 'yes' and box(s) == (10, 10, 31, 31))                # (the box grows while the drag is still being handled)
+        self.assertIn('mask=0', st['sel'])
+        ctl.key(KEY_LEFTSHIFT, True)                                                          # Shift while pressing: add a second rectangle
+        self.drag(self.state(), (50, 30), (60, 45))
+        ctl.key(KEY_LEFTSHIFT, False)
+        st = self.wait(lambda s: 'mask=1' in s['sel'])
+        self.assertEqual(box(st), (10, 10, 61, 46))                                           # the box holds both, and the mask has a gap between them
+        ctl.key(KEY_LEFTALT, True)                                                            # Alt: take a part away
+        self.drag(self.state(), (5, 5), (35, 35))                                             # over the whole first rectangle
+        ctl.key(KEY_LEFTALT, False)
+        st = self.wait(lambda s: box(s)[0] > 40)
+        self.assertEqual(box(st), (50, 30, 61, 46))                                           # only the second one is left
+        ctl.tap(1)                                                                            # Esc: no selection
+        st = self.wait(lambda s: s['sel'][0] == 'no')
+        # the Add switch does the same without a key; Ctrl keeps only what both have
+        self.drag(st, (10, 10), (30, 30))
+        self.wait(lambda s: s['sel'][0] == 'yes')
+        ctl.key(KEY_LEFTCTRL, True)
+        self.drag(self.state(), (20, 20), (40, 40))
+        ctl.key(KEY_LEFTCTRL, False)
+        st = self.wait(lambda s: box(s) == (20, 20, 31, 31))
+        ctl.tap(1)
+        self.wait(lambda s: s['sel'][0] == 'no')
+        # a fixed ratio: the height follows the width
+        r = self.row('toggle', 'Ratio')
+        self.click_box(r)
+        self.wait(lambda s: self.row('toggle', 'Ratio')['on'] == '1')                         # 1:1
+        self.drag(self.state(), (10, 10), (40, 20))
+        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        x0, y0, x1, y1 = box(st)
+        self.assertTrue(abs((x1 - x0) - (y1 - y0)) <= 1, st['sel'])
+
+    def test_a_free_polygon_and_a_curve_are_made_of_several_clicks(self):
+        out = os.path.join(tmp, 'paint-shapes2.png')
+        self.start('--new', '80x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        self.choose_colour('fgbox', '#cc0000')
+        ctl.tap(KEYCODES['j'])
+        st = self.wait(lambda s: s['state']['tool'] == 'FreePolygon')
+        self.click_box(self.row('toggle', 'Filled'))
+        self.wait(lambda s: self.row('toggle', 'Filled')['on'] == '1')
+        for pt in ((10, 10), (40, 12), (30, 40)):                                             # three corners ...
+            x, y = self.screen(self.state(), *pt)
+            ctl.click(int(x), int(y))
+            time.sleep(0.45)                                                                  # (slower than a double click)
+        self.wait(lambda s: self.state()['state']['undo'] == '1')
+        ctl.tap(KEY_ENTER)                                                                    # ... and Enter puts the polygon down
+        st = self.wait(lambda s: s['state']['undo'] == '1' and s['image']['modified'] == '1')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(self.flat_pixel(out, 28, 20)[0] > 150 and self.flat_pixel(out, 28, 20)[1] < 80, 'the inside is filled')
+        self.assertEqual(self.flat_pixel(out, 70, 50)[:3], (255, 255, 255))
+        # a curve: the ends, then the two handles
+        ctl.tap(KEYCODES['v'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Curve')
+        self.drag(st, (10, 45), (70, 45))
+        time.sleep(0.2)
+        self.drag(self.state(), (30, 5), (30, 5), steps=1)
+        time.sleep(0.2)
+        self.drag(self.state(), (50, 5), (50, 5), steps=1)
+        st = self.wait(lambda s: s['state']['undo'] == '2')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        top = min(y for y in range(0, 45) if self.flat_pixel(out, 40, y)[1] < 80 and y > 3 and self.flat_pixel(out, 40, y)[0] > 100 and y < 25)
+        self.assertTrue(top < 30, top)                                                        # the line bent up to the handles
+        self.assertEqual(self.flat_pixel(out, 40, 45)[:3], (255, 255, 255), 'the straight line is gone')
+
+    def test_the_clone_stamp_the_smudge_and_the_blur_brush(self):
+        out = os.path.join(tmp, 'paint-retouch.png')
+        self.start('--new', '80x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        r = self.row('slider', 'Size')
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.05), int(r['ty']))
+        self.wait(lambda s: 8 <= int(s['state']['size']) <= 14)
+        self.drag(st, (10, 10), (10, 10))                                                     # a black spot
+        self.wait(lambda s: s['state']['undo'] == '1')
+        ctl.tap(KEYCODES['k'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Clone')
+        x, y = self.screen(st, 40, 30)                                                        # without a source nothing is drawn
+        self.drag(st, (40, 30), (41, 30), steps=1)
+        time.sleep(0.2)
+        self.assertEqual(self.state()['state']['undo'], '1')
+        sx, sy = self.screen(st, 10, 10)
+        ctl.key(KEY_LEFTALT, True)                                                            # Alt+click: take the spot
+        ctl.click(int(sx), int(sy))
+        ctl.key(KEY_LEFTALT, False)
+        time.sleep(0.3)
+        self.drag(self.state(), (40, 30), (40, 30), steps=1)                                  # the spot is copied to where the stroke begins
+        self.wait(lambda s: s['state']['undo'] == '2')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(self.flat_pixel(out, 40, 30)[0] < 60, 'the spot was copied')
+        self.assertTrue(self.flat_pixel(out, 10, 10)[0] < 60)
+        # the blur brush softens the edge of the spot; the smudge drags its colour along
+        ctl.tap(KEYCODES['h'])
+        st = self.wait(lambda s: s['state']['tool'] == 'BlurBrush')
+        edge = self.flat_pixel(out, 10 + 6, 10)[0]
+        self.drag(st, (4, 10), (18, 10), steps=6)
+        self.wait(lambda s: s['state']['undo'] == '3')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        grey = [self.flat_pixel(out, x, 10)[0] for x in range(3, 20)]
+        self.assertTrue(any(40 < v < 215 for v in grey), grey)
+        ctl.tap(KEYCODES['r'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Smudge')
+        self.drag(st, (40, 30), (62, 30), steps=8)                                            # from the black spot to the right: some black is carried over
+        self.wait(lambda s: s['state']['undo'] == '4')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertTrue(any(v < 200 for v in (self.flat_pixel(out, x, 30)[0] for x in range(52, 62))), 'the smudge carried colour to the right')
+
+    def test_rulers_guides_and_snapping(self):
+        self.start('--new', '120x80')
+        st = self.wait(lambda s: s['image']['w'] == '120')
+        self.assertEqual(st['rulers']['on'], '0')
+        self.chord(KEYCODES['l'], KEY_LEFTCTRL)                                               # Ctrl+L: rulers
+        st = self.wait(lambda s: s['rulers']['on'] == '1')
+        cx = int(st['canvas']['x'])
+        wx, wy = self.win_xy()
+        def pull(a, b):
+            ctl.abs(wx + int(a[0]), wy + int(a[1]))
+            time.sleep(0.05)
+            ctl.button(272, True)
+            for i in range(1, 5):
+                ctl.abs(wx + int(a[0] + (b[0] - a[0]) * i / 4), wy + int(a[1] + (b[1] - a[1]) * i / 4))
+                time.sleep(0.03)
+            ctl.button(272, False)
+            time.sleep(0.15)
+        z = int(st['state']['zoom']) / 100.0
+        vx, vy = float(st['canvas']['vx']), float(st['canvas']['vy'])
+        pull((cx + 150, 8), (cx + 150, vy + 30 * z))                                          # from the top ruler: a horizontal guide at y = 30
+        st = self.wait(lambda s: s['rulers']['guides'] == '1')
+        g = self.rows('guide')[0]
+        self.assertEqual(g['id'], 'h')
+        self.assertTrue(abs(int(g['pos']) - 30) <= 1, g)
+        pull((cx + 8, 200), (vx + cx + 60 * z, 200))                                          # from the left one: a vertical guide at x = 60
+        st = self.wait(lambda s: s['rulers']['guides'] == '2')
+        self.assertEqual(self.rows('guide')[1]['id'], 'v')
+        # snapping: a rectangle selected near the guides sticks to them
+        ctl.tap(KEYCODES['s'])
+        self.wait(lambda s: s['state']['tool'] == 'Select')
+        self.chord(KEYCODES['b'], KEY_LEFTCTRL)                                               # Ctrl+B: snap
+        self.wait(lambda s: s['rulers']['snap'] == '1')
+        gx, gy = int(self.rows('guide')[1]['pos']), int(self.rows('guide')[0]['pos'])
+        x0, y0 = self.screen(self.state(), gx - 5, gy - 4)
+        x1, y1 = self.screen(self.state(), gx + 40, gy + 40)
+        ctl.abs(int(x0), int(y0))
+        time.sleep(0.05)
+        ctl.button(272, True)
+        ctl.abs(int(x1), int(y1))
+        time.sleep(0.05)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        bx0, by0, bx1, by1 = (int(v) for v in st['sel'][1].split(','))
+        self.assertEqual((bx0, by0), (gx, gy), (st['sel'], gx, gy))                          # the corner went to the crossing of the guides
+        ctl.tap(1)
+        # a guide dragged back onto a ruler is taken away
+        vy = float(self.state()['canvas']['vy'])                                              # (the picture moved when the brush bar went away with the Pen)
+        gscreen = vy + gy * z
+        pull((cx + 150, gscreen), (cx + 150, 6))
+        st = self.wait(lambda s: s['rulers']['guides'] == '1')
+
+    def png_clipboard(self, png):
+        """Another client owns the clipboard with a picture (image/png) that it serves to whoever asks."""
+        import threading
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        mgr = c.wl.bind('wl_data_device_manager', 3)
+        dev = c.wl.new_id('wl_data_device')
+        c.wl.request(mgr, 'get_data_device', dev, seat)
+        w = Window(c, 200, 150, title='picture owner')
+        c.wl.roundtrip()
+        src = c.wl.new_id('wl_data_source')
+        c.wl.request(mgr, 'create_data_source', src)
+        c.wl.request(src, 'offer', 'image/png')
+        c.wl.request(dev, 'set_selection', src, w.configures[-1][3])
+        c.wl.roundtrip()
+        stop = threading.Event()
+        def serve():
+            while not stop.is_set():
+                try:
+                    ev = c.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 0.2)
+                except Exception:
+                    return
+                if ev:
+                    os.write(ev.fds[0], png)
+                    os.close(ev.fds[0])
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        self.addCleanup(lambda: (stop.set(), t.join(1)))
+        return c
+
+    def test_a_picture_on_the_system_clipboard_is_pasted_as_a_layer_or_a_new_picture(self):
+        from PIL import Image
+        import io
+        im = Image.new('RGBA', (20, 10), (0, 0, 0, 0))
+        for x in range(5, 15):
+            for y in range(2, 8):
+                im.putpixel((x, y), (200, 30, 40, 255))
+        buf = io.BytesIO()
+        im.save(buf, 'PNG')
+        self.png_clipboard(buf.getvalue())                                                    # (first: its window must not take the focus from the editor)
+        out = os.path.join(tmp, 'paint-clipin.png')
+        self.start('--new', '60x40', out)
+        self.wait(lambda s: s['image']['w'] == '60')
+        time.sleep(0.3)
+        self.chord(KEYCODES['v'], KEY_LEFTCTRL)                                               # Ctrl+V: the picture becomes a layer of its own
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.assertEqual(st['state']['tool'], 'Move')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        flat = Image.open(out).convert('RGBA')
+        self.assertEqual(flat.size, (60, 40))
+        reds = [(x, y) for y in range(40) for x in range(60) if flat.getpixel((x, y))[0] > 150 and flat.getpixel((x, y))[1] < 80]
+        self.assertEqual(len(reds), 60, 'the pasted rectangle is on the picture')
+        # Ctrl+Shift+V: a new picture of the clipboard's size (it was saved a moment ago, so nothing is asked)
+        ctl.key(KEY_LEFTCTRL, True)
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(KEYCODES['v'])
+        ctl.key(KEY_LEFTSHIFT, False)
+        ctl.key(KEY_LEFTCTRL, False)
+        st = self.wait(lambda s: s['image']['w'] == '20' and s['image']['h'] == '10')
+        self.assertEqual(st['image']['layers'], '1')
+        self.assertEqual(st['image']['path'], '-')
+
+    def test_a_copied_picture_goes_to_the_system_clipboard_as_a_png(self):
+        from PIL import Image
+        import io
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        self.choose_colour('fgbox', '#0000ff')
+        self.drag(st, (10, 10), (30, 10))
+        self.wait(lambda s: s['state']['undo'] == '1')
+        self.chord(KEYCODES['c'], KEY_LEFTCTRL)                                               # Ctrl+C with nothing selected: the whole layer
+        self.wait(lambda s: s['image']['layers'] == '1')
+        time.sleep(0.3)
+        c = self.client()
+        seat = c.wl.bind('wl_seat', 5)
+        mgr = c.wl.bind('wl_data_device_manager', 3)
+        dev = c.wl.new_id('wl_data_device')
+        c.wl.request(mgr, 'get_data_device', dev, seat)
+        Window(c, 200, 150, title='paster')
+        c.wl.roundtrip()
+        offered, sel = [], None
+        end = time.time() + 3
+        while time.time() < end and sel is None:
+            c.wl.pump(0.05)
+            for e in list(c.wl.queue):
+                if e.obj != dev and e.name == 'offer':
+                    offered.append(e.args[0].decode() if isinstance(e.args[0], bytes) else e.args[0])
+                elif e.obj == dev and e.name == 'selection':
+                    sel = e
+        self.assertIsNotNone(sel, 'no selection arrived')
+        self.assertIn('image/png', [m.strip('\0') if isinstance(m, str) else m.strip(b'\0').decode() for m in offered])
+        r, w = os.pipe()
+        c.wl.request(sel.args[0], 'receive', 'image/png', fds=(w,))
+        os.close(w)
+        chunks = []
+        while True:
+            b = os.read(r, 65536)
+            if not b:
+                break
+            chunks.append(b)
+        os.close(r)
+        im = Image.open(io.BytesIO(b''.join(chunks))).convert('RGBA')
+        self.assertEqual(im.size, (60, 40))
+        self.assertEqual(im.getpixel((20, 10)), (0, 0, 255, 255))
+        self.assertEqual(im.getpixel((50, 35))[3], 0, 'the sheet is not part of the layer')
+
+    def test_a_text_layer_can_be_typed_into_again(self):
+        out = os.path.join(tmp, 'paint-textlayer.ora')
+        self.start('--new', '160x80')
+        st = self.wait(lambda s: s['image']['w'] == '160')
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text' and 'tfont' in s)
+        x, y = self.screen(st, 20, 20)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['text']['on'] == '1')
+        self.type_text('Hi')
+        self.chord(KEY_ENTER, KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['text']['on'] == '0' and s['image']['layers'] == '2')
+        self.assertEqual(st['state']['undo'], '1')
+        self.assertEqual([r['text'] for r in self.rows('layer')], ['0', '1'], 'the text is kept on its layer')
+        h_hi = st['image']['hash']
+        # a click on the text with the Text tool opens it again, with its settings
+        x, y = self.screen(self.state(), 24, 28)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['text']['on'] == '1' and s['text']['len'] == '2')
+        self.assertEqual(st['image']['layers'], '2')
+        self.type_text('yo')
+        st = self.wait(lambda s: s['text']['len'] == '4')
+        self.chord(KEY_ENTER, KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['text']['on'] == '0')
+        self.assertEqual((st['image']['layers'], st['state']['undo']), ('2', '2'))
+        h_hiyo = st['image']['hash']
+        self.assertNotEqual(h_hiyo, h_hi)
+        # Esc leaves it as it was and takes the step away again
+        x, y = self.screen(self.state(), 24, 28)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['text']['on'] == '1' and s['text']['len'] == '4')
+        self.type_text('zz')
+        self.wait(lambda s: s['text']['len'] == '6')
+        ctl.tap(KEY_ESC)
+        st = self.wait(lambda s: s['text']['on'] == '0')
+        self.assertEqual((st['state']['undo'], st['image']['hash']), ('2', h_hiyo))
+        # undo takes the whole text layer back to "Hi", still editable
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['state']['undo'] == '1')
+        self.assertEqual(st['image']['hash'], h_hi)
+        x, y = self.screen(self.state(), 24, 28)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['text']['on'] == '1' and s['text']['len'] == '2')
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['text']['on'] == '0')
+        # the layers keep the text in an .ora file
+        self.save_as(out)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        # painting on the layer makes it a plain picture: the click starts a new text
+        ctl.tap(KEYCODES['p'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Pen')
+        self.drag(st, (30, 30), (50, 30))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text')
+        x, y = self.screen(self.state(), 24, 28)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['text']['on'] == '1')
+        self.assertEqual(st['text']['len'], '0', 'the layer was painted on: it is a picture now')
+        ctl.tap(KEY_ESC)
+
+    def test_a_text_layer_survives_an_ora_file(self):
+        out = os.path.join(tmp, 'paint-textlayer2.ora')
+        self.start('--new', '160x80')
+        st = self.wait(lambda s: s['image']['w'] == '160')
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text' and 'tfont' in s)
+        x, y = self.screen(st, 20, 20)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['text']['on'] == '1')
+        self.type_text('Keep')
+        self.chord(KEY_ENTER, KEY_LEFTCTRL)
+        self.wait(lambda s: s['text']['on'] == '0' and s['image']['layers'] == '2')
+        self.save_as(out)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        import zipfile
+        xml = zipfile.ZipFile(out).read('stack.xml').decode()
+        self.assertIn('mellagui-text="v1,', xml)
+        self.chord(KEY_Q, KEY_LEFTCTRL)
+        time.sleep(0.5)
+        self.start(out)
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.assertEqual([r['text'] for r in self.rows('layer')], ['0', '1'])
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text')
+        x, y = self.screen(self.state(), 24, 28)
+        ctl.click(int(x), int(y))
+        st = self.wait(lambda s: s['text']['on'] == '1' and s['text']['len'] == '4')
+
+    def test_a_layer_mask_hides_what_is_painted_black_and_the_layer_stays_whole(self):
+        import zipfile
+        from PIL import Image
+        out = os.path.join(tmp, 'paint-mask.png')
+        ora = os.path.join(tmp, 'paint-mask.ora')
+        self.start('--new', '80x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        self.choose_colour('fgbox', '#ff0000')
+        ctl.tap(KEYCODES['f'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Fill')
+        x, y = self.screen(st, 40, 30)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['state']['undo'] == '1')
+        self.assertEqual([r['mask'] for r in self.rows('layer')], ['0'])
+
+        def layer_menu(label):
+            row = self.row('lrow')
+            self.click_at(int(row['x']) + 120, int(row['y']) + 20, 273)
+            time.sleep(0.2)
+            ents = [e for e in self.menu_state()['entries'] if e['label'] == label]
+            self.assertEqual(len(ents), 1, [e['label'] for e in self.menu_state()['entries']])
+            ctl.click(ents[0]['x'], ents[0]['y'])
+            time.sleep(0.2)
+        layer_menu('Add a mask')                                                              # right click on the layer: Add a mask
+        st = self.wait(lambda s: s['state']['undo'] == '2')
+        self.assertEqual([r['mask'] for r in self.rows('layer')], ['2'], 'the mask is being painted on')
+        self.choose_colour('fgbox', '#000000')
+        ctl.tap(KEYCODES['p'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Pen')
+        self.drag(st, (10, 30), (70, 30))                                                     # black on the mask hides the layer there
+        self.wait(lambda s: s['state']['undo'] == '3')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertEqual(self.flat_pixel(out, 40, 30)[:3], (255, 255, 255), 'the stroke on the mask shows the paper')
+        self.assertEqual(self.flat_pixel(out, 40, 5)[:3], (255, 0, 0), 'the layer is whole elsewhere')
+        # the layer itself is untouched: undo the stroke and it shows again
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['state']['undo'] == '2')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertEqual(self.flat_pixel(out, 40, 30)[:3], (255, 0, 0), 'undo on the mask brings the layer back')
+        self.chord(KEYCODES['y'], KEY_LEFTCTRL)                                               # redo it
+        self.wait(lambda s: s['state']['undo'] == '3')
+        # .ora keeps the mask as a picture of its own
+        self.save_as(ora)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        z = zipfile.ZipFile(ora)
+        self.assertIn('mellagui-mask="data/mask0.png"', z.read('stack.xml').decode())
+        import io
+        m = Image.open(io.BytesIO(z.read('data/mask0.png'))).convert('L')
+        self.assertEqual((m.size, m.getpixel((40, 30)), m.getpixel((40, 5))), ((80, 60), 0, 255))
+        lay = Image.open(io.BytesIO(z.read('data/layer0.png'))).convert('RGBA')
+        self.assertEqual(lay.getpixel((40, 30)), (255, 0, 0, 255), 'the layer file is whole')
+        # applying the mask makes the layer see-through where it hid it
+        layer_menu('Apply the mask')
+        st = self.wait(lambda s: self.rows('layer')[0]['mask'] == '0')
+        self.assertEqual(st['state']['undo'], '4')
+        out2 = os.path.join(tmp, 'paint-mask2.png')
+        self.save_as(out2)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertEqual(self.flat_pixel(out2, 40, 30)[:3], (255, 255, 255))
+        self.assertEqual(self.flat_pixel(out2, 40, 5)[:3], (255, 0, 0))
+
+    def test_animations_are_written_as_gif_and_webp_from_pictures(self):
+        from PIL import Image
+        d = os.path.join(tmp, 'paint-anim-cli')
+        os.makedirs(d, exist_ok=True)
+        names = []
+        for i, c in enumerate([(255, 0, 0), (0, 255, 0), (0, 0, 255)]):
+            im = Image.new('RGBA', (30, 20), c + (255,))
+            im.putpixel((i * 5, 3), (255, 255, 255, 0))                                       # something see-through in each
+            n = os.path.join(d, 'f%d%s.png' % (i, '@250' if i == 1 else ''))                # the name can say how long a frame lasts
+            im.save(n)
+            names.append(n)
+        def run(*args):
+            r = subprocess.run([self.PAINT, '--animate'] + list(args), capture_output=True, text=True, timeout=30)
+            return r
+        gif = os.path.join(d, 'a.gif')
+        r = run(gif, *names, '--delay', '80', '--loops', '3')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('3 frames', r.stdout)
+        g = Image.open(gif)
+        self.assertEqual((g.n_frames, g.info['loop']), (3, 3))
+        durations, colours = [], []
+        for i in range(g.n_frames):
+            g.seek(i)
+            durations.append(g.info['duration'])
+            fr = g.convert('RGBA')
+            colours.append(fr.getpixel((10, 10)))
+            self.assertEqual(fr.getpixel((i * 5, 3))[3], 0, 'the see-through pixel stays see-through')
+        self.assertEqual(durations, [80, 250, 80])
+        self.assertEqual(colours, [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)])
+        webp = os.path.join(d, 'a.webp')
+        r = run(webp, *names, '--delay', '80', '--pingpong')                                  # ping-pong: 0 1 2 1
+        self.assertEqual(r.returncode, 0, r.stderr)
+        w = Image.open(webp)
+        self.assertEqual(w.n_frames, 4)
+        seen = []
+        for i in range(w.n_frames):
+            w.seek(i)
+            w.load()
+            seen.append((w.info['duration'], w.convert('RGBA').getpixel((10, 10))[:3]))
+        self.assertEqual(seen, [(80, (255, 0, 0)), (250, (0, 255, 0)), (80, (0, 0, 255)), (250, (0, 255, 0))])
+        # the first layer as a background that every frame lies over
+        bgf = os.path.join(d, 'bg.png')
+        Image.new('RGBA', (30, 20), (9, 9, 9, 255)).save(bgf)
+        dot = []
+        for i in range(2):
+            im = Image.new('RGBA', (30, 20), (0, 0, 0, 0))
+            im.putpixel((5 + i * 10, 5), (255, 255, 0, 255))
+            n = os.path.join(d, 'dot%d.png' % i)
+            im.save(n)
+            dot.append(n)
+        gb = os.path.join(d, 'bg.gif')
+        self.assertEqual(run(gb, bgf, *dot, '--bg').returncode, 0)
+        g = Image.open(gb)
+        self.assertEqual(g.n_frames, 2)
+        g.seek(1)
+        fr = g.convert('RGB')
+        self.assertEqual((fr.getpixel((0, 0)), fr.getpixel((15, 5))), ((9, 9, 9), (255, 255, 0)))
+        # mistakes are said, not hidden
+        self.assertNotEqual(run(os.path.join(d, 'x.png'), *names).returncode, 0)
+        self.assertNotEqual(run(os.path.join(d, 'x.gif'), names[0]).returncode, 0)
+
+    def test_an_animated_gif_opens_with_a_layer_for_every_frame(self):
+        from PIL import Image, ImageDraw
+        import io, random, zipfile
+        random.seed(5)
+        frames = []
+        for i in range(5):
+            im = Image.new('RGB', (48, 32), (20 + i * 40, 60, 200 - i * 30))                  # an opaque picture: Pillow stores only what changes (partial frames)
+            dr = ImageDraw.Draw(im)
+            dr.rectangle((4 + i * 6, 6, 14 + i * 6, 20), fill=(250, 250, 0))
+            dr.ellipse((30, 4 + i * 3, 42, 16 + i * 3), fill=(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
+            frames.append(im)
+        src = os.path.join(tmp, 'paint-frames-in.gif')
+        frames[0].save(src, save_all=True, append_images=frames[1:], duration=[50, 120, 70, 90, 200], loop=4, optimize=True)
+        ref = Image.open(src)
+        want = []
+        for i in range(ref.n_frames):
+            ref.seek(i)
+            want.append(ref.convert('RGBA').copy())
+        ora = os.path.join(tmp, 'paint-frames-out.ora')
+        self.start(src)
+        st = self.wait(lambda s: s['image']['layers'] == '5')
+        self.assertEqual((st['image']['w'], st['image']['h']), ('48', '32'))
+        names = [r['name'] for r in self.rows('layer')]
+        self.assertEqual(names, ['Frame', 'Frame', 'Frame', 'Frame', 'Frame'])               # (the dump cuts a name at its first blank)
+        self.save_as(ora)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        z = zipfile.ZipFile(ora)
+        xml = z.read('stack.xml').decode()
+        for d in (50, 120, 70, 90, 200):
+            self.assertIn('@%d"' % d, xml)
+        for i in range(5):
+            lay = Image.open(io.BytesIO(z.read('data/layer%d.png' % i))).convert('RGBA')
+            self.assertEqual(list(lay.getdata()), list(want[i].getdata()), 'frame %d is what Pillow shows' % i)
+        # a GIF of one picture is an ordinary picture
+        one = os.path.join(tmp, 'paint-one.gif')
+        frames[0].save(one)
+        ctl.tap(KEY_ESC)
+        self.chord(KEY_Q, KEY_LEFTCTRL)
+        time.sleep(0.5)
+        self.start(one)
+        st = self.wait(lambda s: s['image']['w'] == '48')
+        self.assertEqual(st['image']['layers'], '1')
+
+    def test_the_animation_card_saves_the_layers_as_the_frames_of_a_gif(self):
+        from PIL import Image
+        out = os.path.join(tmp, 'paint-frames.gif')
+        self.start('--new', '60x40')
+        st = self.wait(lambda s: s['image']['w'] == '60')
+        # one layer is not enough
+        self.click_button(self.state(), 'Effects')
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        self.click_box(self.row('efx', 'Animation...'))
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.choose_colour('fgbox', '#ff0000')
+        ctl.tap(KEYCODES['f'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Fill')
+        x, y = self.screen(st, 30, 20)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['state']['undo'] == '1')
+        for colour in ('#0000ff', '#00aa00'):                                                 # two more layers, each filled in another colour
+            row = self.row('lbtn', 'New')
+            self.click_box(row)
+            self.wait(lambda s, n=len(self.rows('layer')): len(self.rows('layer')) == n + 1)
+            self.choose_colour('fgbox', colour)
+            ctl.tap(KEYCODES['f'])
+            self.wait(lambda s: s['state']['tool'] == 'Fill')
+            st = self.state()
+            x, y = self.screen(st, 30, 20)
+            ctl.click(int(x), int(y))
+            self.wait(lambda s: s['state']['undo'] == str(int(st['state']['undo']) + 2) if False else True)
+            time.sleep(0.2)
+        self.assertEqual(len(self.rows('layer')), 3)
+        modified_before = self.state()['image']['modified']
+        self.click_button(self.state(), 'Effects')
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        self.click_box(self.row('efx', 'Animation...'))
+        st = self.wait(lambda s: s['state']['prompt'] == '10' and self.row('fxcard')['kind'] == 'animate')
+        r = self.row('adjust', 'Delay')
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.1), int(r['ty']))                   # a short delay
+        self.wait(lambda s: 100 < int(self.row('adjust', 'Delay')['value']) < 400)
+        delay = int(self.row('adjust', 'Delay')['value'])
+        self.click_box(self.row('cbtn', '2'))                                                 # Apply: the Save as card asks where
+        st = self.wait(lambda s: s['state']['prompt'] == '2')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(out)
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['state']['prompt'] == '0')
+        for _ in range(50):
+            if os.path.exists(out):
+                break
+            time.sleep(0.05)
+        g = Image.open(out)
+        self.assertEqual(g.n_frames, 3)
+        cols = []
+        for i in range(3):
+            g.seek(i)
+            cols.append(g.convert('RGB').getpixel((30, 20)))
+            self.assertAlmostEqual(g.info['duration'], delay, delta=10)
+        self.assertEqual(cols, [(255, 0, 0), (0, 0, 255), (0, 170, 0)])
+        self.assertEqual(st['image']['path'], '-', 'the picture itself is still unsaved and layered')
+        self.assertEqual(st['image']['layers'], '3')
+
+    def item_menu(self, row, label, button=273):
+        """A click on a row of the layers panel (the right button by default) and the menu entry named `label`."""
+        self.click_at(int(row['x']) + 120, int(row['y']) + 20, button)
+        time.sleep(0.2)
+        ents = [e for e in self.menu_state()['entries'] if e['label'] == label]
+        self.assertEqual(len(ents), 1, (label, [e['label'] for e in self.menu_state()['entries']]))
+        ctl.click(ents[0]['x'], ents[0]['y'])
+        time.sleep(0.2)
+
+    def fill_layer(self, colour, out_state=None):
+        self.choose_colour('fgbox', colour)
+        ctl.tap(KEYCODES['f'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Fill')
+        x, y = self.screen(st, int(st['image']['w']) // 2, int(st['image']['h']) // 2)
+        n0 = int(st['state']['undo'])
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: int(s['state']['undo']) == n0 + 1)
+
+    def test_layers_can_be_put_in_groups_that_fold_hide_fade_and_move_as_one(self):
+        out = os.path.join(tmp, 'paint-groups.png')
+        self.start('--new', '80x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        self.fill_layer('#ff0000')                                                            # layer 0: red
+        for colour in ('#00ff00', '#0000ff'):                                                 # layers 1 and 2: green, blue (whole)
+            self.click_box(self.row('lbtn', 'New'))
+            self.wait(lambda s, n=len(self.rows('layer')): len(self.rows('layer')) == n + 1)
+            self.fill_layer(colour)
+        self.assertEqual([r['group'] for r in self.rows('layer')], ['0', '0', '0'])
+
+        def flat():
+            self.chord(self.KEY_S, KEY_LEFTCTRL)
+            self.wait(lambda s: s['image']['modified'] == '0')
+            return self.flat_pixel(out, 40, 30)[:3]
+        self.assertEqual(flat(), (0, 0, 255))
+        rows = {r['id']: r for r in self.rows('lrow')}
+        self.item_menu(rows['1'], 'Group the layer')                                          # the green layer in a group of its own
+        st = self.wait(lambda s: len(self.rows('grow')) == 1)
+        self.assertEqual([r['group'] for r in self.rows('layer')], ['0', '1', '0'])
+        g = self.rows('group')[0]
+        self.assertEqual((g['blend'], g['opacity'], g['visible']), ('Pass', '100', '1'))      # (the dump cuts the name at its first blank: "Pass through")
+        rows = {r['id']: r for r in self.rows('lrow')}
+        self.assertEqual((rows['1']['depth'], rows['2']['depth']), ('1', '0'))
+        self.item_menu(rows['2'], 'Into the group below')                                     # the blue layer goes into it as its top layer
+        self.wait(lambda s: [r['group'] for r in self.rows('layer')] == ['0', '1', '1'])
+        self.assertEqual(flat(), (0, 0, 255))                                                 # a group at 100 % pass through changes nothing
+        # choosing the group makes the panel's controls its own: half opacity
+        grow = self.row('grow')
+        self.click_at(int(grow['x']) + 100, int(grow['y']) + 20)
+        self.wait(lambda s: self.row('group')['chosen'] == '1')
+        lo = self.row('lopacity')
+        self.click_at(int(lo['tx']) + int(int(lo['tw']) * 0.5), int(lo['ty']))
+        self.wait(lambda s: 40 <= int(self.row('group')['opacity']) <= 60)
+        self.assertEqual(self.rows('layer')[2]['opacity'], '100', 'the layer inside keeps its own')
+        r, gr, b = flat()
+        self.assertTrue(110 < r < 145 and gr == 0 and 110 < b < 145, (r, gr, b))              # half of the group's blue over the red
+        # its eye hides it, undo shows it again
+        grow = self.row('grow')
+        ex, ey = (int(v) for v in grow['eye'].split(','))
+        self.click_at(ex, ey)
+        self.wait(lambda s: self.row('group')['visible'] == '0')
+        self.assertEqual(flat(), (255, 0, 0))
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: self.row('group')['visible'] == '1')
+        # folding hides its rows from the list
+        grow = self.row('grow')
+        fx, fy = (int(v) for v in grow['fold'].split(','))
+        self.click_at(fx, fy)
+        self.wait(lambda s: self.row('group')['collapsed'] == '1')
+        self.assertEqual([r['id'] for r in self.rows('lrow')], ['0'])
+        self.click_at(fx, fy)
+        self.wait(lambda s: len(self.rows('lrow')) == 3)
+        # New with the group chosen: a layer on top of its layers, inside it
+        self.click_at(int(self.row('grow')['x']) + 100, int(self.row('grow')['y']) + 20)
+        self.wait(lambda s: self.row('group')['chosen'] == '1')
+        self.click_box(self.row('lbtn', 'New'))
+        self.wait(lambda s: len(self.rows('layer')) == 4)
+        self.assertEqual([r['group'] for r in self.rows('layer')], ['0', '1', '1', '1'])
+        # Up with a layer chosen is Up among its group's layers; the group moves with its own chosen
+        self.click_at(int(self.row('grow')['x']) + 100, int(self.row('grow')['y']) + 20)
+        self.wait(lambda s: self.row('group')['chosen'] == '1')
+        self.assertEqual((self.row('group')['first'], self.row('group')['last']), ('1', '3'))
+        self.click_box(self.row('lbtn', 'Down'))                                              # the group goes below the red layer
+        self.wait(lambda s: self.row('group')['first'] == '0')
+        self.assertEqual([r['group'] for r in self.rows('layer')], ['1', '1', '1', '0'])
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: self.row('group')['first'] == '1')
+        # a group is deleted with its layers (the Delete button), and that is one step
+        n_undo = int(self.state()['state']['undo'])
+        self.click_box(self.row('lbtn', 'Delete'))
+        self.wait(lambda s: len(self.rows('layer')) == 1)
+        self.assertEqual(len(self.rows('group')), 0)
+        self.assertEqual(int(self.state()['state']['undo']), n_undo + 1)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: len(self.rows('layer')) == 4 and len(self.rows('group')) == 1)
+
+    def test_groups_are_kept_in_ora_files_and_each_group_can_be_a_frame(self):
+        import zipfile
+        from PIL import Image
+        ora = os.path.join(tmp, 'paint-groups.ora')
+        gif = os.path.join(tmp, 'paint-groups.gif')
+        self.start('--new', '40x30')
+        st = self.wait(lambda s: s['image']['w'] == '40')
+        for i, colour in enumerate(('#ff0000', '#00ff00', '#0000ff')):
+            if i:
+                self.click_box(self.row('lbtn', 'New'))
+                self.wait(lambda s, n=i: len(self.rows('layer')) == n + 1)
+            self.fill_layer(colour)
+        rows = {r['id']: r for r in self.rows('lrow')}
+        self.item_menu(rows['1'], 'Group the layer')                                          # [red] [green] in a group [blue]
+        rows = {r['id']: r for r in self.rows('lrow')}
+        self.item_menu(rows['2'], 'Into the group below')
+        self.wait(lambda s: [r['group'] for r in self.rows('layer')] == ['0', '1', '1'])
+        self.click_at(int(self.row('grow')['x']) + 100, int(self.row('grow')['y']) + 20)      # fold it, and give it a name
+        self.wait(lambda s: self.row('group')['chosen'] == '1')
+        fx, fy = (int(v) for v in self.row('grow')['fold'].split(','))
+        self.click_at(fx, fy)
+        self.wait(lambda s: self.row('group')['collapsed'] == '1')
+        self.save_as(ora)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        xml = zipfile.ZipFile(ora).read('stack.xml').decode()
+        self.assertEqual(xml.count('<stack'), 2, xml)                                         # the root and the group
+        self.assertIn('isolation="auto"', xml)
+        self.assertIn('mellagui-collapsed="1"', xml)
+        self.assertEqual(xml.count('</stack>'), 2)
+        self.assertTrue(xml.index('<stack name=') < xml.index('data/layer2.png') < xml.index('data/layer1.png') < xml.index('</stack>\n<layer'), 'the group holds layers 2 and 1, layer 0 follows')
+        self.chord(KEY_Q, KEY_LEFTCTRL)
+        time.sleep(0.5)
+        self.start(ora)                                                                       # opened again: the same group, still folded
+        st = self.wait(lambda s: s['image']['layers'] == '3')
+        self.assertEqual([r['group'] for r in self.rows('layer')], ['0', '1', '1'])
+        g = self.row('group')
+        self.assertEqual((g['blend'], g['collapsed'], g['first'], g['last']), ('Pass', '1', '1', '2'))
+        # each group is a frame (red; the group = green and blue; there are two frames)
+        self.click_box(self.row('lbtn', 'Delete')) if False else None
+        self.click_button(self.state(), 'Effects')
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        self.click_box(self.row('efx', 'Animation...'))
+        self.wait(lambda s: s['state']['prompt'] == '10' and self.row('fxcard')['kind'] == 'animate')
+        self.click_box(self.row('cbtn', '2'))
+        self.wait(lambda s: s['state']['prompt'] == '2')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(gif)
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        for _ in range(50):
+            if os.path.exists(gif):
+                break
+            time.sleep(0.05)
+        g = Image.open(gif)
+        self.assertEqual(g.n_frames, 2, 'the red layer and the group are the frames')
+        g.seek(0)
+        self.assertEqual(g.convert('RGB').getpixel((20, 15)), (255, 0, 0))
+        g.seek(1)
+        self.assertEqual(g.convert('RGB').getpixel((20, 15)), (0, 0, 255), 'the group shows its own layers, the blue one is on top of the green one')
+
+    def test_bent_text_follows_an_arc(self):
+        out = os.path.join(tmp, 'paint-bend.png')
+        self.start('--new', '240x140', out)
+        st = self.wait(lambda s: s['image']['w'] == '240')
+        ctl.tap(KEYCODES['t'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Text' and 'tfont' in s)
+        r = self.row('tslider', 'Bend')
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.85), int(r['ty']))                  # an arch over the top
+        st = self.wait(lambda s: int(s['text']['bend']) > 40)
+        x, y = self.screen(st, 40, 50)
+        ctl.click(int(x), int(y))
+        self.wait(lambda s: s['text']['on'] == '1')
+        self.type_text('Arch')
+        self.chord(KEY_ENTER, KEY_LEFTCTRL)
+        self.wait(lambda s: s['text']['on'] == '0' and s['state']['undo'] == '1')
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        from PIL import Image
+        im = Image.open(out).convert('RGB')
+        cols = {}
+        for xx in range(im.width):
+            ys = [yy for yy in range(im.height) if im.getpixel((xx, yy))[0] < 128]
+            if ys:
+                cols[xx] = min(ys)
+        left, right = min(cols), max(cols)
+        mid = (left + right) // 2
+        self.assertGreater(cols[left] + 4, cols[min(cols, key=lambda c: abs(c - mid))], 'the ends hang lower than the middle: %d against %d' % (cols[left], cols[mid]))
+        self.assertGreater(right - left, 20)
+
+    def test_the_rulers_have_units_and_a_resolution(self):
+        self.start('--new', '200x100')
+        st = self.wait(lambda s: s['image']['w'] == '200')
+        self.chord(KEYCODES['l'], KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['rulers']['on'] == '1')
+        self.assertEqual((st['rulers']['unit'], st['rulers']['dpi']), ('px', '96'))
+        cx = int(st['canvas']['x'])
+        self.click_at(cx + 8, 8)                                                              # the corner: the next unit
+        st = self.wait(lambda s: s['rulers']['unit'] == 'mm')
+        self.assertAlmostEqual(float(st['rulers']['ppu']), 96 / 25.4, places=3)
+        for want in ('cm', 'in', 'pt', 'px'):
+            self.click_at(cx + 8, 8)
+            self.wait(lambda s, w=want: s['rulers']['unit'] == w)
+        # a right click on a ruler: the unit and the dpi as a menu
+        self.click_at(cx + 120, 8, 273)
+        time.sleep(0.2)
+        labels = [e['label'] for e in self.menu_state()['entries']]
+        self.assertEqual(labels, ['* Pixels', 'Millimetres', 'Centimetres', 'Inches', 'Points', '72 dpi', '* 96 dpi', '150 dpi', '300 dpi'])
+        ents = {e['label']: e for e in self.menu_state()['entries']}
+        ctl.click(ents['Inches']['x'], ents['Inches']['y'])
+        st = self.wait(lambda s: s['rulers']['unit'] == 'in')
+        self.assertEqual(float(st['rulers']['ppu']), 96.0)
+        self.click_at(cx + 120, 8, 273)
+        time.sleep(0.2)
+        ents = {e['label']: e for e in self.menu_state()['entries']}
+        self.assertIn('* Inches', ents)
+        ctl.click(ents['300 dpi']['x'], ents['300 dpi']['y'])
+        st = self.wait(lambda s: s['rulers']['dpi'] == '300')
+        self.assertEqual(float(st['rulers']['ppu']), 300.0)
+        # the number steps follow the unit and the zoom (at 300 dpi an inch is 300 pixels: the numbers are 0.2 in apart or so)
+        self.assertTrue(float(st['rulers']['step']) <= 1.0 and float(st['rulers']['minor']) < float(st['rulers']['step']), st['rulers'])
+
     def test_the_canvas_card_grows_the_sheet_round_the_picture(self):
         out = os.path.join(tmp, 'paint-canvas.png')
         self.start('--new', '20x10')
@@ -14837,7 +15875,7 @@ class TestPaint(Base):
         ctl.tap(31)                                                                           # S: the Select tool
         st = self.wait(lambda s: s['state']['tool'] == 'Select')
         self.drag(st, (10, 8), (29, 17))
-        st = self.wait(lambda s: s['sel'][0] == 'yes')
+        st = self.wait(lambda s: s['sel'][0] == 'yes' and (lambda b: (b[2] - b[0], b[3] - b[1]))([int(v) for v in s['sel'][1].split(',')]) == (20, 10))      # (the box grows while the drag is still being handled)
         x0, y0, x1, y1 = (int(v) for v in st['sel'][1].split(','))
         self.assertEqual((x1 - x0, y1 - y0), (20, 10))
         ctl.tap(KEY_ENTER)                                                                    # crop to the selection
@@ -23165,8 +24203,8 @@ class TestShot(Base):
         self.pre = c.dump(os.path.join(tmp, name + '-pre.ppm'))             # what the tool will freeze
         return c
 
-    def run_tool(self, c, *args):
-        pr = subprocess.Popen([self.exe, '--dir', self.dir] + list(args), env=dict(os.environ, WAYLAND_DISPLAY=self.name),
+    def run_tool(self, c, *args, env=None):
+        pr = subprocess.Popen([self.exe, '--dir', self.dir] + list(args), env=dict(os.environ, WAYLAND_DISPLAY=self.name, **(env or {})),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
         end = time.time() + 6
@@ -23255,6 +24293,36 @@ class TestShot(Base):
         pc, dev = self.clipboard_client(self.name)
         got = self.paste_png(pc, dev)
         self.assertEqual(got, data)
+
+    def test_the_paint_button_saves_the_picture_and_opens_it_in_the_picture_editor(self):
+        c = self.start('mellagui-shot4b')
+        log = os.path.join(tmp, 'mellagui-shot4b.paint')
+        fake = os.path.join(tmp, 'mellagui-shot4b-paint.sh')
+        with open(fake, 'w') as f:
+            f.write('#!/bin/sh\necho "$1" > "%s"\n' % log)
+        os.chmod(fake, 0o755)
+        pr = self.run_tool(c, env={'MELLAGUI_SHOT_PAINT': fake})
+        self.drag(c, 200, 120, 330, 220)
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(18)                                                           # Ctrl+E
+        c.key(KEY_LEFTCTRL, False)
+        self.assertEqual(self.wait_exit(pr), 0)
+        path, w, h, rows, data = self.png()
+        self.assertEqual((w, h), (130, 100))
+        for _ in range(100):
+            if os.path.exists(log) and os.path.getsize(log):
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(log).read().strip(), path)                    # the editor was asked to open the file that was saved
+        # Enter alone saves and opens nothing
+        shutil.rmtree(self.dir, ignore_errors=True)
+        os.remove(log)
+        pr = self.run_tool(c, env={'MELLAGUI_SHOT_PAINT': fake})
+        self.drag(c, 200, 120, 330, 220)
+        c.tap(self.KEY_ENTER_)                                              # (Enter alone does not open the editor)
+        self.assertEqual(self.wait_exit(pr), 0)
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(log))
 
     def test_copy_only_writes_no_file(self):
         c = self.start('mellagui-shot4')

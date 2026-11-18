@@ -360,23 +360,12 @@ struct box {
     uint64_t pop;
 };
 
-uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *out_n)
+/* The colours of a picture as a palette and an index for every pixel: the colours themselves when there are few enough (255, one more for the transparent), else a median
+ * cut over a histogram of 5 bit colours. `*tidx` is the transparent index (= `*npal`). */
+static bool gif_quantize(const uint32_t *px, size_t np, bool transparent, uint8_t *idx, uint32_t *pal, int *npal_out, int *tidx_out)
 {
-    if (w > 65535 || h > 65535)
-        return NULL;
-    size_t np = (size_t)w * (size_t)h;
-    bool transparent = false;
-    for (size_t i = 0; i < np; i++)
-        if ((px[i] >> 24) < 128) {
-            transparent = true;
-            break;
-        }
     int maxcol = transparent ? 255 : 256;
-    uint8_t *idx = malloc(np ? np : 1);
-    if (!idx)
-        return NULL;
-    uint32_t pal[256];
-    int npal = 0;
+    int npal = 0, tidx;
     /* the colours themselves, when there are few enough */
     uint32_t tab[1024] = { 0 };                                         /* 0 = empty, else 0x01000000 | rgb */
     int tabidx[1024];
@@ -398,7 +387,6 @@ uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *out_n)
             pal[npal++] = c & 0xffffffu;
         }
     }
-    int tidx;
     if (exact) {
         tidx = npal;
         for (size_t i = 0; i < np; i++) {
@@ -420,8 +408,7 @@ uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *out_n)
             free(hist);
             free(lut);
             free(bins);
-            free(idx);
-            return NULL;
+            return false;
         }
         for (size_t i = 0; i < np; i++)
             if ((px[i] >> 24) >= 128)
@@ -500,6 +487,31 @@ uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *out_n)
         free(lut);
         free(bins);
     }
+    *npal_out = npal;
+    *tidx_out = tidx;
+    return true;
+}
+
+uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *out_n)
+{
+    if (w > 65535 || h > 65535)
+        return NULL;
+    size_t np = (size_t)w * (size_t)h;
+    bool transparent = false;
+    for (size_t i = 0; i < np; i++)
+        if ((px[i] >> 24) < 128) {
+            transparent = true;
+            break;
+        }
+    uint8_t *idx = malloc(np ? np : 1);
+    if (!idx)
+        return NULL;
+    uint32_t pal[256];
+    int npal = 0, tidx = 0;
+    if (!gif_quantize(px, np, transparent, idx, pal, &npal, &tidx)) {
+        free(idx);
+        return NULL;
+    }
     int ncol = npal + (transparent ? 1 : 0), k = 1;
     while ((1 << k) < ncol)
         k++;
@@ -532,6 +544,75 @@ uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *out_n)
     b16(&b, (unsigned)h);
     b8(&b, 0);
     bool ok = np > 0 && gif_lzw(&b, idx, np, k < 2 ? 2 : k);
+    b8(&b, 0x3b);
+    free(idx);
+    if (!ok) {
+        free(b.p);
+        return NULL;
+    }
+    return finish(&b, out_n);
+}
+
+/* An animated GIF: every frame is a whole picture of w x h pixels with its own palette (and a transparent colour when something in it is see-through, in which case the
+ * frame before is cleared first), `delay_cs[i]` hundredths of a second long; `loops` = how many times it plays (0 = for ever). */
+uint8_t *lm_enc_gif_anim(const uint32_t *const *frames, int n, int w, int h, const int *delay_cs, int loops, size_t *out_n)
+{
+    if (n < 1 || w < 1 || h < 1 || w > 65535 || h > 65535)
+        return NULL;
+    size_t np = (size_t)w * (size_t)h;
+    uint8_t *idx = malloc(np);
+    struct buf b = { 0 };
+    if (!idx)
+        return NULL;
+    bput(&b, "GIF89a", 6);
+    b16(&b, (unsigned)w);
+    b16(&b, (unsigned)h);
+    b8(&b, 0x70);                                                       /* no global colour table: each frame has its own */
+    b8(&b, 0);
+    b8(&b, 0);
+    bput(&b, "\x21\xff\x0b" "NETSCAPE2.0\x03\x01", 16);              /* the loop count */
+    b16(&b, (unsigned)(loops < 0 ? 0 : loops > 65535 ? 65535 : loops));
+    b8(&b, 0);
+    bool ok = true;
+    for (int f = 0; f < n && ok; f++) {
+        const uint32_t *px = frames[f];
+        bool transparent = false;
+        for (size_t i = 0; i < np; i++)
+            if ((px[i] >> 24) < 128) {
+                transparent = true;
+                break;
+            }
+        uint32_t pal[256];
+        int npal = 0, tidx = 0;
+        if (!gif_quantize(px, np, transparent, idx, pal, &npal, &tidx)) {
+            ok = false;
+            break;
+        }
+        int ncol = npal + (transparent ? 1 : 0), k = 1;
+        while ((1 << k) < ncol)
+            k++;
+        int dl = delay_cs ? delay_cs[f] : 10;
+        b8(&b, 0x21);
+        b8(&b, 0xf9);
+        b8(&b, 4);
+        b8(&b, (unsigned)((transparent ? 2 : 1) << 2) | (transparent ? 1u : 0u));   /* dispose: restore the background when there is see-through, else leave */
+        b16(&b, (unsigned)(dl < 0 ? 0 : dl > 65535 ? 65535 : dl));
+        b8(&b, (unsigned)tidx);
+        b8(&b, 0);
+        b8(&b, 0x2c);
+        b16(&b, 0);
+        b16(&b, 0);
+        b16(&b, (unsigned)w);
+        b16(&b, (unsigned)h);
+        b8(&b, 0x80 | (unsigned)(k - 1));                               /* a local colour table */
+        for (int i = 0; i < (1 << k); i++) {
+            uint32_t c = i < npal ? pal[i] : 0;
+            b8(&b, c >> 16);
+            b8(&b, c >> 8);
+            b8(&b, c);
+        }
+        ok = gif_lzw(&b, idx, np, k < 2 ? 2 : k);
+    }
     b8(&b, 0x3b);
     free(idx);
     if (!ok) {
@@ -844,4 +925,67 @@ uint8_t *lm_enc_webp(const uint32_t *px, int w, int h, size_t *out_n)
         b8(&b, 0);
     free(bw.p);
     return finish(&b, out_n);
+}
+
+/* An animated WebP: the frames are lossless pictures of w x h pixels, `delay_ms[i]` long; `loops` = how many times it plays (0 = for ever). Every frame is whole (the one
+ * before is not kept under it: blending off, disposed to the background). */
+uint8_t *lm_enc_webp_anim(const uint32_t *const *frames, int n, int w, int h, const int *delay_ms, int loops, size_t *out_n)
+{
+    if (n < 1 || w < 1 || h < 1 || w > 16384 || h > 16384)
+        return NULL;
+    struct buf b = { 0 };
+    bput(&b, "RIFF", 4);
+    b32(&b, 0);                                                         /* patched at the end */
+    bput(&b, "WEBPVP8X", 8);
+    b32(&b, 10);
+    b8(&b, 0x12);                                                       /* animation + alpha */
+    b8(&b, 0);
+    b8(&b, 0);
+    b8(&b, 0);
+    b8(&b, (unsigned)(w - 1));
+    b8(&b, (unsigned)((w - 1) >> 8));
+    b8(&b, (unsigned)((w - 1) >> 16));
+    b8(&b, (unsigned)(h - 1));
+    b8(&b, (unsigned)((h - 1) >> 8));
+    b8(&b, (unsigned)((h - 1) >> 16));
+    bput(&b, "ANIM", 4);
+    b32(&b, 6);
+    b32(&b, 0x00000000u);                                               /* the background colour */
+    b16(&b, (unsigned)(loops < 0 ? 0 : loops > 65535 ? 65535 : loops));
+    bool ok = true;
+    for (int f = 0; f < n && ok; f++) {
+        size_t fn = 0;
+        uint8_t *file = lm_enc_webp(frames[f], w, h, &fn);               /* a whole file: the VP8L chunk (header and payload) is what a frame holds */
+        if (!file || fn < 20) {
+            free(file);
+            ok = false;
+            break;
+        }
+        size_t chunk = fn - 12;                                         /* after "RIFF" size "WEBP" */
+        int dl = delay_ms ? delay_ms[f] : 100;
+        dl = dl < 0 ? 0 : dl > 0xffffff ? 0xffffff : dl;
+        bput(&b, "ANMF", 4);
+        b32(&b, (uint32_t)(16 + chunk));
+        b8(&b, 0); b8(&b, 0); b8(&b, 0);                                /* x, y (halves of pixels) */
+        b8(&b, 0); b8(&b, 0); b8(&b, 0);
+        b8(&b, (unsigned)(w - 1)); b8(&b, (unsigned)((w - 1) >> 8)); b8(&b, (unsigned)((w - 1) >> 16));
+        b8(&b, (unsigned)(h - 1)); b8(&b, (unsigned)((h - 1) >> 8)); b8(&b, (unsigned)((h - 1) >> 16));
+        b8(&b, (unsigned)dl); b8(&b, (unsigned)(dl >> 8)); b8(&b, (unsigned)(dl >> 16));
+        b8(&b, 0x03);                                                   /* no blending, dispose to the background */
+        bput(&b, file + 12, chunk);
+        free(file);
+    }
+    if (!ok) {
+        free(b.p);
+        return NULL;
+    }
+    uint8_t *out = finish(&b, out_n);
+    if (out) {
+        uint32_t riff = (uint32_t)(*out_n - 8);
+        out[4] = (uint8_t)riff;
+        out[5] = (uint8_t)(riff >> 8);
+        out[6] = (uint8_t)(riff >> 16);
+        out[7] = (uint8_t)(riff >> 24);
+    }
+    return out;
 }

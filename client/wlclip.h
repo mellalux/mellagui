@@ -41,6 +41,10 @@ void wlclip_attach(struct wlclip *c, struct wlwin *w);
 void wlclip_copy(struct wlclip *c, const char *text);
 /* The text of the selection (malloc'd, `*len` bytes, NUL terminated), or NULL when there is none. At most 1 MB. */
 char *wlclip_paste(struct wlclip *c, size_t *len);
+/* Whether the selection offers `mime` (an image/png for instance), and its bytes (malloc'd; NULL when it is not offered, longer than `maxlen`, or the
+ * source does not finish within two seconds of silence). */
+bool wlclip_has_mime(const struct wlclip *c, const char *mime);
+uint8_t *wlclip_paste_mime(struct wlclip *c, const char *mime, size_t maxlen, size_t *len);
 /* Start dragging files: `uris` is the text/uri-list text ("file:///a\r\nfile:///b\r\n"), `text` what a text/plain drop gets (the paths, a line each),
  * `label` the words on the little icon that follows the pointer (a name, "3 files"). The drag ends with the button; a drop is a copy.
  * Returns false when the compositor has no drag-and-drop or one is going on already. */

@@ -23,5 +23,9 @@ uint8_t *lm_enc_tiff(const uint32_t *px, int w, int h, size_t *n);
 uint8_t *lm_enc_ppm(const uint32_t *px, int w, int h, size_t *n);
 uint8_t *lm_enc_gif(const uint32_t *px, int w, int h, size_t *n);
 uint8_t *lm_enc_webp(const uint32_t *px, int w, int h, size_t *n);
+/* Animations: `n` whole pictures of w x h pixels (straight ARGB), each shown `delay_cs` hundredths of a second (GIF) / `delay_ms` milliseconds (WebP); `loops` = how many
+ * times it plays, 0 = for ever. The GIF frames each have their own palette. */
+uint8_t *lm_enc_gif_anim(const uint32_t *const *frames, int n, int w, int h, const int *delay_cs, int loops, size_t *out_n);
+uint8_t *lm_enc_webp_anim(const uint32_t *const *frames, int n, int w, int h, const int *delay_ms, int loops, size_t *out_n);
 
 #endif

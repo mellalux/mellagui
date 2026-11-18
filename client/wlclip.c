@@ -156,6 +156,67 @@ char *wlclip_paste(struct wlclip *c, size_t *len_out)
     return text;
 }
 
+bool wlclip_has_mime(const struct wlclip *c, const char *mime)
+{
+    if (!c->offer)
+        return false;
+    for (int i = 0; i < c->n_offer_mimes; i++)
+        if (!strcmp(c->offer_mimes[i], mime))
+            return true;
+    return false;
+}
+
+uint8_t *wlclip_paste_mime(struct wlclip *c, const char *mime, size_t maxlen, size_t *len_out)
+{
+    if (!wlclip_has_mime(c, mime) || !c->win)
+        return NULL;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) < 0)
+        return NULL;
+    WLC_SEND(c->win->c, c->offer, LM_WL_DATA_OFFER_REQ_RECEIVE, { .s = mime }, { .h = fds[1] });
+    close(fds[1]);
+    wlc_flush(c->win->c);
+    size_t cap = 1 << 16, len = 0;
+    uint8_t *buf = malloc(cap);
+    struct pollfd pf = { .fd = fds[0], .events = POLLIN };
+    bool ok = buf != NULL, done = false;
+    while (ok && !done) {
+        if (len == cap) {
+            if (cap >= maxlen) {                                        /* too big: it is not read */
+                ok = false;
+                break;
+            }
+            size_t ncap = cap * 2 > maxlen ? maxlen : cap * 2;
+            uint8_t *nb = realloc(buf, ncap);
+            if (!nb) {
+                ok = false;
+                break;
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        if (poll(&pf, 1, 2000) <= 0) {
+            ok = false;                                                 /* a source that stops answering: nothing */
+            break;
+        }
+        ssize_t k = read(fds[0], buf + len, cap - len);
+        if (k < 0)
+            ok = false;
+        else if (k == 0)
+            done = true;
+        else
+            len += (size_t)k;
+    }
+    close(fds[0]);
+    if (!ok || !done || len == 0) {
+        free(buf);
+        return NULL;
+    }
+    if (len_out)
+        *len_out = len;
+    return buf;
+}
+
 /* ---- dragging files out ------------------------------------------------------------------------------------------------------------- */
 
 #include <sys/mman.h>

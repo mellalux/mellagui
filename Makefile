@@ -173,7 +173,7 @@ $(BUILD)/mellagui-chess: $(BUILD)/client/mellagui-chess.o $(BUILD)/client/chess.
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
-$(BUILD)/mellagui-paint: $(BUILD)/client/mellagui-paint.o $(BUILD)/client/imgwrite.o $(BUILD)/client/arcio.o $(BUILD)/client/archread.o $(BUILD)/client/decomp.o $(BUILD)/client/zstddec.o $(BUILD)/client/deflate.o $(BUILD)/src/jpegenc.o $(BUILD)/src/img.o $(BUILD)/src/svg.o $(BUILD)/src/webp.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-paint: $(BUILD)/client/mellagui-paint.o $(BUILD)/client/imgwrite.o $(BUILD)/client/gifframes.o $(BUILD)/client/fontread.o $(BUILD)/client/arcio.o $(BUILD)/client/archread.o $(BUILD)/client/decomp.o $(BUILD)/client/zstddec.o $(BUILD)/client/deflate.o $(BUILD)/src/jpegenc.o $(BUILD)/src/img.o $(BUILD)/src/svg.o $(BUILD)/src/webp.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

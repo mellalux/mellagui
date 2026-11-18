@@ -69,6 +69,10 @@ struct wlwin {
     bool cur_set;
     uint32_t *cur_px;               /* the cursor's picture, premultiplied: it is put on the surface again at every enter (the compositor empties the surface when the pointer leaves) */
     int cur_w, cur_h;
+    int card_dx, card_dy;           /* wlcard.h: how far the user moved the dialog card from the middle of the window; back to 0 when no card was painted */
+    bool card_shown;                /* a card was painted since the last paint began (when not, the offset is forgotten: the next card opens in the middle) */
+    bool card_drag;                 /* the card is being dragged by its title */
+    double card_gx, card_gy;        /* where the pointer took hold of it, from the card's corner */
 };
 
 /*

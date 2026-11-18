@@ -749,7 +749,9 @@ static uint8_t *make_sample(struct lm_ttf *f, int *wout, int *hout)
     return pic;
 }
 
-int font_read(const char *path, struct font_info *fi, char *err, size_t errn)
+/* `sample` false leaves out the picture of the font's own letters and the list of scripts - which is nearly all the work: the names alone are for a program
+ * that only lists fonts (Paint's text tool reads a hundred of them at once). */
+static int font_read_impl(const char *path, struct font_info *fi, char *err, size_t errn, bool sample)
 {
     memset(fi, 0, sizeof(*fi));
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -837,7 +839,7 @@ int font_read(const char *path, struct font_info *fi, char *err, size_t errn)
             snprintf(fi->style, sizeof(fi->style), "%s", typo);
     }
     const char *why;
-    struct lm_ttf *f = lm_ttf_open_mem(d, n, &why, true);
+    struct lm_ttf *f = sample ? lm_ttf_open_mem(d, n, &why, true) : NULL;
     if (f) {
         scripts_text(f, fi->scripts, sizeof(fi->scripts));
         if (!fi->cff) {
@@ -850,4 +852,14 @@ int font_read(const char *path, struct font_info *fi, char *err, size_t errn)
     }
     free(d);
     return 0;
+}
+
+int font_read(const char *path, struct font_info *fi, char *err, size_t errn)
+{
+    return font_read_impl(path, fi, err, errn, true);
+}
+
+int font_read_names(const char *path, struct font_info *fi, char *err, size_t errn)
+{
+    return font_read_impl(path, fi, err, errn, false);
 }

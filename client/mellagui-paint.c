@@ -2764,6 +2764,8 @@ struct app {
     char tfont_name[64];                        /* the text's font family, empty = the interface font */
     int talign;                                 /* 0 left, 1 centre, 2 right */
     int font_sel, font_top;                     /* the Font card: the chosen row and the first row shown */
+    char font_find[24];                         /* what was typed to jump to a family ("rob" -> Roboto) and when the last letter came */
+    int64_t font_find_ms;
     int tb_seen;                                /* the height of the text bar the view was last fitted for */
     double smx, smy;                            /* where the smoothed stroke is */
     int ratio;                                  /* the rectangle selection's ratio (RATIO_NAMES) */
@@ -2853,6 +2855,9 @@ struct app {
     bool fx_snap_ok;
     struct irect fx_box;                        /* what the last scale / turn covered */
     int adj_drag;
+    int adj_x, adj_y;                           /* where the user put the effect panel (adj_placed), else it sits at the right */
+    bool adj_placed, adj_moving;                /* it was moved; it is being dragged by its title */
+    double adj_gx, adj_gy;                      /* where the pointer took hold of it (from its corner) */
 
     bool show_layers;
     int lay_seen, lay_n;                        /* the chosen layer and the count the list was last scrolled for */
@@ -4244,8 +4249,8 @@ struct tfam {
     bool tried[4];
 };
 
-static struct tfam g_fam[48];
-static int g_nfam;
+static struct tfam *g_fam;                                              /* (grows: a collection of free fonts has a hundred families and more) */
+static int g_nfam, g_fam_cap;
 static bool g_fam_scanned;
 
 static void fam_add(const char *path, const struct font_info *fi)
@@ -4258,8 +4263,13 @@ static void fam_add(const char *path, const struct font_info *fi)
         if (!strcmp(g_fam[i].name, fi->family))
             at = i;
     if (at < 0) {
-        if (g_nfam >= (int)(sizeof(g_fam) / sizeof(g_fam[0])))
-            return;
+        if (g_nfam >= g_fam_cap) {
+            struct tfam *bigger = realloc(g_fam, (size_t)(g_fam_cap + 64) * sizeof(*g_fam));
+            if (!bigger)
+                return;
+            g_fam = bigger;
+            g_fam_cap += 64;
+        }
         at = g_nfam++;
         memset(&g_fam[at], 0, sizeof(g_fam[at]));
         snprintf(g_fam[at].name, sizeof(g_fam[at].name), "%.63s", fi->family);
@@ -4288,13 +4298,13 @@ static void fonts_scan_dir(const char *dir, int depth, int *budget)
             continue;
         }
         const char *dot = strrchr(e->d_name, '.');
-        if (!dot || strcasecmp(dot, ".ttf") || st.st_size > (16 << 20))
+        if (!dot || strcasecmp(dot, ".ttf") || st.st_size > (24 << 20))
             continue;
         (*budget)--;
         struct font_info fi;
         char err[120];
-        if (font_read(path, &fi, err, sizeof(err)) == 0) {
-            bool ok = !fi.cff && !fi.woff && fi.alpha;                  /* (a sample picture only exists when the outlines can be painted) */
+        if (font_read_names(path, &fi, err, sizeof(err)) == 0) {
+            bool ok = !fi.cff && !fi.woff;                              /* (the outlines have to be TrueType: lm_ttf_open below says whether they can be painted) */
             static const char *const symbol[] = { "cmex", "cmmi", "cmsy", "msam", "msbm", "wasy", "esint", "stmary", "rsfs", "eufm", "dsrom", "lasy" };
             for (size_t k = 0; ok && k < sizeof(symbol) / sizeof(symbol[0]); k++)
                 ok = strncasecmp(fi.family, symbol[k], strlen(symbol[k])) != 0;
@@ -4331,7 +4341,7 @@ static void fonts_scan(void)
     else {
         snprintf(list, sizeof(list), "/usr/share/fonts:/usr/local/share/fonts:%s/.local/share/fonts:%s/.fonts", home ? home : "", home ? home : "");
     }
-    int budget = 400;
+    int budget = 4000;                                                  /* font files looked at in all */
     for (char *save = NULL, *dir = strtok_r(list, ":", &save); dir; dir = strtok_r(NULL, ":", &save))
         if (*dir)
             fonts_scan_dir(dir, 0, &budget);
@@ -5263,8 +5273,7 @@ static void cp_geom(const struct app *a, struct cp_geo *g)
 {
     g->c.w = LM_MIN(CP_W, a->win.bw - 16);
     g->c.h = LM_MIN(CP_H, a->win.bh - 16);
-    g->c.x = (a->win.bw - g->c.w) / 2;
-    g->c.y = (a->win.bh - g->c.h) / 2;
+    wlcard_center(&a->win, &g->c);                                      /* (where the user carried the card, too) */
     g->sqx = g->c.x + 16;
     g->sqy = g->c.y + 42;
     g->sq = LM_CLAMP(g->c.h - 42 - 60 - 34, 90, 190);
@@ -6161,7 +6170,8 @@ static const char *const HP_TEXT[] = {
     "# Writing",
     "Press T, click where the text starts and type. Enter makes a new line. Ctrl+Enter or a click somewhere else puts the text down, Esc gives it up. Ctrl+V pastes text into it.",
     "The size is the Size slider in the strip. The text bar above the strip holds the rest:",
-    "- Font: a card with the font families found on the computer, each shown in its own letters (Interface font is the program's own).",
+    "- Font: a card with the font families found on the computer, each shown in its own letters (Interface font is the program's own). Type a name to jump to it (\"lob\" finds Lobster), or use the arrow keys, the wheel and the bar.",
+    "- More fonts: the script tools/get-google-fonts.sh downloads about ninety of Google's free fonts (Lato, Roboto, Montserrat, Lobster, Pacifico, Fira Code ...) into ~/.local/share/fonts/google; Paint lists them the next time it starts. A font file (.ttf) put in ~/.local/share/fonts is found too. Fonts with PostScript outlines (.otf) are not read.",
     "- B, I, U, S: bold, italic, underline, strike. Box puts a box behind the text in the second colour.",
     "- Left, centre and right alignment.",
     "- Line is the space between lines, Letters the space between letters.",
@@ -6224,6 +6234,8 @@ static const char *const HP_EFFECTS[] = {
     "- Shapes: Scale and turn, Turn picture by any angle, Feather selection, Grow or shrink.",
     "- Animation: see that page.",
     "Cards with sliders show the result at once; Cancel puts everything back, Reset sets the sliders to their start, Apply keeps it (one undo step).",
+    "- The panel floats over the picture and does not darken it: take it by its title (the dots) and put it where it hides nothing; it keeps its place while Paint runs. A click beside it does nothing, the wheel zooms the picture and the middle button moves it, as usual; the keys + - 0 1 zoom too.",
+    "- Every other card (Open, Save as, New, this help ...) can be moved by its title as well.",
     "# Size and shape",
     "|Transform|The button on the right rail: turn left or right, flip, Resize, Canvas size, flip the layer only, Place picture as a layer, the paper colour, Turn by any angle.",
     "|Ctrl+R|Resize: type 800x600, a width (800) or a percentage (50%).",
@@ -6524,7 +6536,7 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
     case P_DISCARD: case P_REPLACE: ch = 130; break;
     case P_NEW: ch = 178; break;
     case P_CANVAS: ch = 232; break;
-    case P_ADJUST: ch = 56 + FXK[a->fxk].n * 38 + 20 + WLCARD_BTN_H; cw = 520; break;
+    case P_ADJUST: ch = 56 + FXK[a->fxk].n * 38 + 20 + WLCARD_BTN_H; cw = 420; break;
     case P_EFFECTS: ch = 42 + ((N_EFX + 3) / 4) * (EFX_H + 6) + 14 + WLCARD_BTN_H + 8; cw = 4 * EFX_W + 3 * 6 + 2 * WLCARD_PAD; break;
     case P_COLOUR: ch = CP_H; cw = CP_W; break;
     case P_FONT: ch = 40 + font_rows_fit(a) * FONT_ROW_H + 16 + WLCARD_BTN_H + 6; cw = 440; break;
@@ -6536,8 +6548,12 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
     *nb = a->prompt == P_DISCARD || a->prompt == P_ADJUST ? 3 : a->prompt == P_HELP || a->prompt == P_FONT || a->prompt == P_EFFECTS ? 1 : 2;
     c->w = LM_MIN(cw, a->win.bw - 16);
     c->h = LM_MIN(ch, a->win.bh - 16);
-    c->x = (a->win.bw - c->w) / 2;
-    c->y = (a->win.bh - c->h) / 2;
+    wlcard_center(&a->win, c);
+    if (a->prompt == P_ADJUST) {                                        /* the effect panel floats: at the right until it is moved, always inside the window */
+        int x = a->adj_placed ? a->adj_x : a->win.bw - WLRAIL_W - c->w - 6, y = a->adj_placed ? a->adj_y : 24;
+        c->x = LM_CLAMP(x, 0, LM_MAX(a->win.bw - c->w, 0));
+        c->y = LM_CLAMP(y, 0, LM_MAX(a->win.bh - c->h, 0));
+    }
 }
 
 static void help_open(struct app *a)
@@ -8040,6 +8056,7 @@ static void font_show(struct app *a)
 static void font_open(struct app *a)
 {
     fonts_scan();
+    a->font_find[0] = 0;
     a->prompt = P_FONT;
     a->perr[0] = 0;
     a->pcard_hover = a->pcard_down = -1;
@@ -8117,6 +8134,12 @@ static void paint_font_card(struct app *a, const struct wlcard *c)
 {
     struct wlwin *w = &a->win;
     int rows = font_rows_fit(a), n = g_nfam + 1, cur = font_current(a);
+    bool typed = a->font_find[0] && now_ms() - a->font_find_ms < 3000;                    /* the title row: what was typed, or how to jump */
+    const char *hint = typed ? a->font_find : n > rows ? "type a name to jump to it" : "";
+    if (*hint) {
+        int hw = wlcard_text_w(hint);
+        wlwin_text(w, c->x + c->w - WLCARD_PAD - hw, c->y + WLCARD_PAD - 2, hint, 1, typed ? COL_ACCENT : COL_DIM, 0);
+    }
     for (int r = 0; r < rows && a->font_top + r < n; r++) {
         int it = a->font_top + r, y = font_row_y(c, r);
         bool hot = a->has_pointer && a->px >= c->x + WLCARD_PAD && a->px < c->x + c->w - WLCARD_PAD && a->py >= y && a->py < y + FONT_ROW_H;
@@ -9026,7 +9049,13 @@ static void paint_card(struct app *a)
     struct wlcard geo;
     int nbg;
     card_rect(a, &geo, &nbg);
-    wlcard_frame(w, &c, geo.w, geo.h, title, COL_ACCENT, COL_BG, lm_theme.text_bright);
+    bool dims = a->prompt != P_ADJUST && a->prompt != P_EFFECTS;        /* (the effect panels leave the picture as it is) */
+    wlcard_frame_at(w, &c, geo.x, geo.y, geo.w, geo.h, title, COL_ACCENT, COL_BG, lm_theme.text_bright, dims);
+    if (a->prompt == P_ADJUST) {                                        /* a grip in the title: it can be dragged */
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 2; j++)
+                wlwin_round_fill(w, c.x + c.w - WLCARD_PAD - 22 + i * 8, c.y + 12 + j * 6, 4, 4, 2, a->adj_moving ? COL_ACCENT : COL_DIM);
+    }
     if (a->prompt == P_HELP) {
         paint_help(a, &c);
     } else if (a->prompt == P_COLOUR) {
@@ -11229,6 +11258,16 @@ static void adj_set_from(struct app *a, int i, double x, const struct wlcard *c)
     a->win.redraw = true;
 }
 
+/* The picture follows the pointer while the middle button pans it. */
+static void pan_motion(struct app *a)
+{
+    a->vx = a->pan_vx + (a->px - a->pan_x);
+    a->vy = a->pan_vy + (a->py - a->pan_y);
+    a->fitted = false;
+    view_clamp(a);
+    a->vdirty = true;
+}
+
 static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 {
     struct wlcard c;
@@ -11237,6 +11276,8 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     int crows = card_list_rows(a), fx = c.x + WLCARD_PAD, fw = c.w - 2 * WLCARD_PAD, ly = card_list_y(&c);
     bool field = a->prompt == P_OPEN || a->prompt == P_SAVEAS || a->prompt == P_NEW || a->prompt == P_RESIZE || a->prompt == P_CANVAS || a->prompt == P_LAYERNAME || a->prompt == P_PLACE;
     if (op == LM_WL_POINTER_EVT_MOTION) {
+        if (a->prompt != P_ADJUST && wlcard_drag_motion(&a->win, &c, a->px, a->py))             /* a card held by its title follows the pointer */
+            return;
         int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
         if (k != a->pcard_hover)
             a->pcard_hover = k;
@@ -11256,10 +11297,23 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             cp_drag_to(a, a->px, a->py);
         if (a->prompt == P_ADJUST && a->adj_drag >= 0)
             adj_set_from(a, a->adj_drag, a->px, &c);
+        if (a->prompt == P_ADJUST && a->adj_moving) {                           /* the panel follows the pointer by its title */
+            a->adj_x = LM_CLAMP((int)(a->px - a->adj_gx), 0, LM_MAX(a->win.bw - c.w, 0));
+            a->adj_y = LM_CLAMP((int)(a->py - a->adj_gy), 0, LM_MAX(a->win.bh - c.h, 0));
+            a->adj_placed = true;
+        }
+        if (a->prompt == P_ADJUST && a->pan)
+            pan_motion(a);
         a->win.redraw = true;                                                   /* (the list rows light under the pointer) */
         return;
     }
     if (op == LM_WL_POINTER_EVT_AXIS) {
+        if (a->prompt == P_ADJUST && args[1].u == 0 && !wlcard_has(&c, (int)a->px, (int)a->py)) {        /* over the picture: the wheel zooms it, as usual */
+            if (args[2].f != 0 && in_canvas(a, a->px, a->py))
+                zoom_to(a, a->zoom * (args[2].f < 0 ? 1.25 : 1.0 / 1.25), a->px - cv_x(a), a->py);
+            a->win.redraw = true;
+            return;
+        }
         if (a->prompt == P_HELP && args[1].u == 0) {
             help_scroll(a, (args[2].f > 0 ? 1 : -1) * HELP_LH * 3);
             return;
@@ -11285,6 +11339,9 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         a->cp.drag = 0;
         a->adj_drag = -1;
         a->help_drag = false;
+        a->adj_moving = false;
+        a->pan = false;
+        wlcard_drag_release(&a->win);
         if (a->pcard_down >= 0 && a->pcard_down == k) {                                        /* a button is done when it is let go on */
             int which = k;
             a->pcard_down = -1;
@@ -11302,11 +11359,28 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         a->win.redraw = true;
         return;
     }
+    if (args[2].u == 274 && a->prompt == P_ADJUST) {                                            /* the middle button pans the picture behind the panel */
+        if (!wlcard_has(&c, (int)a->px, (int)a->py) && in_canvas(a, a->px, a->py)) {
+            a->pan = true;
+            a->pan_x = a->px;
+            a->pan_y = a->py;
+            a->pan_vx = a->vx;
+            a->pan_vy = a->vy;
+        }
+        return;
+    }
     if (args[2].u == 272) {
         if (k >= 0) {
             a->pcard_down = k;
+        } else if (a->prompt != P_ADJUST && wlcard_drag_press(&a->win, &c, a->px, a->py)) {
+            a->win.redraw = true;                                                               /* the title: take hold of the card */
         } else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
-            prompt_close(a, false);                                                             /* a click outside the card cancels */
+            if (a->prompt != P_ADJUST)                                                          /* (an effect panel stays: a stray click must not lose the work) */
+                prompt_close(a, false);                                                         /* a click outside the card cancels */
+        } else if (a->prompt == P_ADJUST && a->py < c.y + 38) {                                 /* the title bar: take hold of the panel */
+            a->adj_moving = true;
+            a->adj_gx = a->px - c.x;
+            a->adj_gy = a->py - c.y;
         } else if (a->prompt == P_HELP) {
             int h = help_hit(a, a->px, a->py);
             if (h >= 1000)
@@ -11620,13 +11694,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->guide[a->guide_drag].pos = (int)lround(a->guide[a->guide_drag].vert ? ix : iy);
         } else if (a->sl_drag >= 0)
             slider_drag(a);
-        else if (a->pan) {
-            a->vx = a->pan_vx + (a->px - a->pan_x);
-            a->vy = a->pan_vy + (a->py - a->pan_y);
-            a->fitted = false;
-            view_clamp(a);
-            a->vdirty = true;
-        } else if (a->drag) {
+        else if (a->pan)
+            pan_motion(a);
+        else if (a->drag) {
             double ix, iy;
             to_pic(a, a->px, a->py, &ix, &iy);
             if (tool_snaps(a->tool))
@@ -11836,7 +11906,25 @@ static void prompt_key(struct app *a, uint32_t ks)
         else if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ks == LM_KS_Home || ks == LM_KS_End) {
             int d = ks == LM_KS_Up ? -1 : ks == LM_KS_Down ? 1 : ks == LM_KS_Page_Up ? -fr : ks == LM_KS_Page_Down ? fr : 0;
             a->font_sel = ks == LM_KS_Home ? 0 : ks == LM_KS_End ? fn - 1 : LM_CLAMP(a->font_sel + d, 0, fn - 1);
+            a->font_find[0] = 0;
             font_show(a);
+        } else if (ks == LM_KS_BackSpace || (ks >= 32 && ks < 127 && !(a->win.mods & (LM_MOD_CTRL | LM_MOD_ALT)))) {                          /* type a name to jump to the family: "lo" finds Lobster, "lob" the same */
+            size_t n = strlen(a->font_find);
+            int64_t now = now_ms();
+            if (now - a->font_find_ms > 1500)
+                n = 0;                                                                          /* (a pause starts a new word) */
+            if (ks == LM_KS_BackSpace)
+                n = n ? n - 1 : 0;
+            else if (n + 1 < sizeof(a->font_find))
+                a->font_find[n++] = (char)ks;
+            a->font_find[n] = 0;
+            a->font_find_ms = now;
+            for (int i = 0; n && i < g_nfam; i++)
+                if (!strncasecmp(g_fam[i].name, a->font_find, n)) {
+                    a->font_sel = i + 1;
+                    font_show(a);
+                    break;
+                }
         }
         return;
     }
@@ -11845,6 +11933,14 @@ static void prompt_key(struct app *a, uint32_t ks)
             prompt_close(a, false);
         else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter)
             prompt_accept(a);
+        else if (ks == '+' || ks == '=')                                                        /* look at the result: zoom keys work meanwhile */
+            zoom_to(a, a->zoom * 1.25, cv_w(a) / 2.0, cv_h(a) / 2.0);
+        else if (ks == '-')
+            zoom_to(a, a->zoom / 1.25, cv_w(a) / 2.0, cv_h(a) / 2.0);
+        else if (ks == '0')
+            view_fit(a);
+        else if (ks == '1')
+            zoom_to(a, 1.0, cv_w(a) / 2.0, cv_h(a) / 2.0);
         return;
     }
     if (ks == LM_KS_Escape) {

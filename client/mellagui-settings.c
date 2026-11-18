@@ -35,6 +35,7 @@
 #include "settingshelp.h"
 #include "uikit.h"
 #include "util.h"
+#include "wlcard.h"
 #include "wlclip.h"
 #include "wlpicker.h"
 #include "wltext.h"
@@ -2137,6 +2138,16 @@ static int help_wrap(const char *text, int cols, char lines[][HELP_COLS + 1], in
     return n;
 }
 
+/* A card of this size in the middle of the window, or where the user moved it (wlcard.h). */
+static struct rect card_place(const struct app *a, int cw, int ch)
+{
+    struct wlcard c = { 0, 0, cw, ch };
+    wlcard_center(&a->win, &c);
+    return (struct rect){ c.x, c.y, cw, ch };
+}
+
+static struct wlcard rect_card(const struct rect *r) { return (struct wlcard){ r->x, r->y, r->w, r->h }; }
+
 struct help_geom {
     struct rect card, close;
     int cols, visible, nlines;
@@ -2152,18 +2163,27 @@ static void help_geom(const struct app *a, struct help_geom *g)
     int max_lines = LM_MAX((a->win.bh - 40 - chrome) / line_h, 3);
     g->visible = LM_MIN(g->nlines, max_lines);
     int ch = chrome + g->visible * line_h;
-    g->card = (struct rect){ (a->win.bw - cw) / 2, (a->win.bh - ch) / 2, cw, ch };
+    g->card = card_place(a, cw, ch);
     g->close = (struct rect){ g->card.x + (cw - 90) / 2, g->card.y + ch - 20 - 28, 90, 28 };
 }
 
 static void paint_help(struct app *a)
 {
     wlwin_dim(&a->win, 0.6);                                    /* the page behind the card is dimmed */
+    a->win.card_shown = true;
     struct help_geom *g = calloc(1, sizeof(*g));
     if (!g)
         return;
     help_geom(a, g);
     const struct rect *c = &g->card;
+    const char *hd = getenv("MELLAGUI_SETTINGS_DUMP");                  /* where the card is, for the tests */
+    if (hd && *hd) {
+        FILE *f = fopen(hd, "w");
+        if (f) {
+            fprintf(f, "helpcard %d %d %d %d\n", c->x, c->y, c->w, c->h);
+            fclose(f);
+        }
+    }
     wlwin_round_fill(&a->win, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
     wlwin_round_fill(&a->win, c->x, c->y, c->w, c->h, 10, COL_BG);
     int hx = c->x + 20, hy = c->y + 20;
@@ -2192,7 +2212,19 @@ static void help_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     if (op == LM_WL_POINTER_EVT_MOTION) {
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
+        if (a->win.card_drag) {                                 /* the card is held by its title: it follows the pointer */
+            struct help_geom *g = calloc(1, sizeof(*g));
+            if (g) {
+                help_geom(a, g);
+                struct wlcard c = rect_card(&g->card);
+                free(g);
+                wlcard_drag_motion(&a->win, &c, a->px, a->py);
+            }
+            return;
+        }
         a->win.redraw = true;
+    } else if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272 && args[3].u == 0) {
+        wlcard_drag_release(&a->win);
     } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
         double v = lm_fixed_to_double(args[2].f);
         a->help_scroll += v > 0 ? 2 : v < 0 ? -2 : 0;
@@ -2204,7 +2236,10 @@ static void help_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         help_geom(a, g);
         bool on_close = a->px >= g->close.x && a->px < g->close.x + g->close.w && a->py >= g->close.y && a->py < g->close.y + g->close.h;
         bool inside = a->px >= g->card.x && a->px < g->card.x + g->card.w && a->py >= g->card.y && a->py < g->card.y + g->card.h;
+        struct wlcard c = rect_card(&g->card);
         free(g);
+        if (!on_close && wlcard_drag_press(&a->win, &c, a->px, a->py))      /* the title: take hold of the card */
+            return;
         if (on_close || !inside)
             help_close(a);
     }
@@ -2239,7 +2274,7 @@ static void pick_geom(const struct app *a, struct pick_geom *g)
     g->rows = wlpicker_fit(a->win.bh, 170);
     int ch = g->rows ? 170 + g->rows * WLPICKER_ROW_H : 130;
     ch = LM_MIN(ch, a->win.bh - 16);
-    g->card = (struct rect){ (a->win.bw - cw) / 2, (a->win.bh - ch) / 2, cw, ch };
+    g->card = card_place(a, cw, ch);
     g->fx = g->card.x + 16;
     g->fw = cw - 32;
     g->fy = g->card.y + 66;
@@ -2325,6 +2360,7 @@ static void paint_pick(struct app *a)
     struct pick_geom g;
     pick_geom(a, &g);
     wlwin_dim(w, 0.6);
+    w->card_shown = true;
     const struct rect *c = &g.card;
     wlwin_round_fill(w, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
     wlwin_round_fill(w, c->x, c->y, c->w, c->h, 10, COL_BG);
@@ -2365,11 +2401,16 @@ static void pick_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 {
     struct pick_geom g;
     pick_geom(a, &g);
+    struct wlcard pc = rect_card(&g.card);
     char base[PATH_MAX];
     pick_base(base, sizeof(base));
     if (op == LM_WL_POINTER_EVT_MOTION) {
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
+        if (a->win.card_drag) {                                         /* the card is held by its title: it follows the pointer */
+            wlcard_drag_motion(&a->win, &pc, a->px, a->py);
+            return;
+        }
         wlpicker_motion(&a->pick, base, a->pick_buf, g.ly, g.rows, a->py);
         a->win.redraw = true;
     } else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
@@ -2383,6 +2424,8 @@ static void pick_pointer(struct app *a, uint32_t op, const union lm_arg *args)
                 a->pick_down = 0;
             else if (in_rect(&g.ok, a->px, a->py))
                 a->pick_down = 1;
+            else if (wlcard_drag_press(&a->win, &pc, a->px, a->py))
+                ;                                                       /* the title: take hold of the card */
             else if (!in_rect(&g.card, a->px, a->py))
                 pick_close(a);                                          /* a click outside the card cancels */
             else if (a->py >= g.fy && a->py < g.fy + 26)
@@ -2394,6 +2437,7 @@ static void pick_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         } else {
             int down = a->pick_down;
             a->pick_down = -1;
+            wlcard_drag_release(&a->win);
             wlpicker_release(&a->pick);
             if (down == 0 && in_rect(&g.cancel, a->px, a->py))
                 pick_close(a);

@@ -1303,8 +1303,10 @@ static void build_layout(struct app *a)
         return;
     }
     bw = a->win.bw;
-    int mw = LM_MIN(bw - 24, 500), room = a->win.bh - 48, first = a->nctl;
-    int mx = (bw - mw) / 2, top = 24, ctop = top + MODAL_HEAD;
+    int mw = LM_MIN(bw - 24, 500), first = a->nctl;
+    int mx = LM_CLAMP((bw - mw) / 2 + a->win.card_dx, 0, LM_MAX(bw - mw, 0));          /* (the user may have moved it by its title: wlwin card_dx / card_dy) */
+    int top = LM_CLAMP(24 + a->win.card_dy, 0, LM_MAX(a->win.bh - 120, 0)), ctop = top + MODAL_HEAD;
+    int room = LM_MAX(a->win.bh - top - 24, 96);
     struct flow f = { .a = a, .dev = (int)(d - a->dev), .modal = true, .x0 = mx + 16, .x1 = mx + mw - 10 - sbar_w(), .cx = mx + 16, .cy = ctop - a->modal_scroll };
     modal_controls(&f);
     a->modal_h = f.cy + a->modal_scroll - ctop + 12;
@@ -1704,6 +1706,7 @@ static void paint_modal(struct app *a)
     if (!d)
         return;
     wlwin_dim(w, 0.6);
+    w->card_shown = true;
     struct box m = a->modal;
     rbox(w, (struct box){ m.x - 1, m.y - 1, m.w + 2, m.h + 2 }, 11, lm_theme.accent);
     rbox(w, m, 10, lm_theme.card);
@@ -2035,6 +2038,12 @@ static void press_devices(struct app *a)
             close_modal(a);
             return;
         }
+        if (a->py < a->modal.y + 34 && a->px < a->modal.x + a->modal.w - 100) {            /* the title strip (not the Close button): take hold of the view */
+            w->card_drag = true;
+            w->card_gx = a->px - a->modal.x;
+            w->card_gy = a->py - a->modal.y;
+            return;
+        }
         if (sbar_press(a, 2))
             return;
         for (int i = 0; i < a->nctl; i++)
@@ -2089,6 +2098,15 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         int base = op == LM_WL_POINTER_EVT_ENTER ? 2 : 1;
         a->px = lm_fixed_to_double(args[base].f);
         a->py = lm_fixed_to_double(args[base + 1].f);
+        if (w->card_drag && a->modal_dev[0]) {                  /* the device view follows the pointer */
+            double nx = a->px - w->card_gx, ny = a->py - w->card_gy;
+            nx = LM_CLAMP(nx, 0.0, (double)LM_MAX(w->bw - a->modal.w, 0));
+            ny = LM_CLAMP(ny, 0.0, (double)LM_MAX(w->bh - a->modal.h, 0));
+            w->card_dx = (int)nx - (w->bw - a->modal.w) / 2;
+            w->card_dy = (int)ny - 24;
+            w->redraw = true;
+            return;
+        }
         if (a->dragging) {
             const struct ctl *c = drag_ctl(a);
             if (c)
@@ -2117,6 +2135,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         return;
     w->redraw = true;
     if (args[3].u == 0) {                                       /* let go: a dragged slider is sent now, a held direction stops */
+        w->card_drag = false;
         if (a->dragging) {
             struct tuya_dev *d = find_dev(a, a->drag_dev);
             struct tuya_dp *dp = d ? tuya_find_dp(d, a->drag_code) : NULL;

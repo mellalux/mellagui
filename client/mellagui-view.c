@@ -1287,8 +1287,7 @@ static void card_rect(const struct app *a, struct wlcard *c)
     int rows = card_rows(a);
     c->w = LM_MIN(560, a->win.bw - 16);
     c->h = LM_MIN(rows ? 170 + rows * WLPICKER_ROW_H : 150, a->win.bh - 16);
-    c->x = (a->win.bw - c->w) / 2;
-    c->y = (a->win.bh - c->h) / 2;
+    wlcard_center(&a->win, c);
 }
 
 static int card_field_y(const struct wlcard *c) { return c->y + 42 + LM_FONT_H + 8; }
@@ -1377,6 +1376,8 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     card_base(a, base, sizeof(base));
     int rows = card_rows(a), fx = c.x + WLCARD_PAD, fw = c.w - 2 * WLCARD_PAD, ly = card_list_y(&c);
     if (op == LM_WL_POINTER_EVT_MOTION) {
+        if (wlcard_drag_motion(&a->win, &c, a->px, a->py))
+            return;                                             /* (the card follows the pointer) */
         a->c_hover = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
         if (rows)
             wlpicker_motion(&a->pk, base, a->pbuf, ly, rows, a->py);      /* (the scroll bar's thumb is dragged) */
@@ -1394,6 +1395,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     a->clip.serial = args[0].u;
     int k = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
     if (args[3].u != 1) {
+        wlcard_drag_release(&a->win);
         wlpicker_release(&a->pk);
         if (a->c_down >= 0 && a->c_down == k) {                 /* a button is done when it is let go on */
             a->c_down = -1;
@@ -1410,6 +1412,9 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         return;
     if (k >= 0) {
         a->c_down = k;
+    } else if (wlcard_drag_press(&a->win, &c, a->px, a->py)) {
+        a->win.redraw = true;                                   /* the title: take hold of the card */
+        return;
     } else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
         card_close(a);                                          /* a click outside the card cancels */
         return;

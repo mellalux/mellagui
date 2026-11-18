@@ -1937,8 +1937,7 @@ static void card_layout(const struct app *a, struct wlcard *c, int *fx, int *fy,
     card_geometry(a, &cw, &ch, rows);
     c->w = LM_MIN(cw, a->win.bw - 16);
     c->h = LM_MIN(ch, a->win.bh - 16);
-    c->x = (a->win.bw - c->w) / 2;
-    c->y = (a->win.bh - c->h) / 2;
+    wlcard_center(&a->win, c);
     *fx = c->x + WLCARD_PAD;
     *fy = c->y + WLCARD_PAD + 24;
     *fw = c->w - 2 * WLCARD_PAD;
@@ -1998,6 +1997,8 @@ static void card_press(struct app *a, uint32_t time_ms)
     int fx, fy, fw, ly, rows;
     card_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
     int px = (int)a->px, py = (int)a->py;
+    if (wlcard_drag_press(&a->win, &c, a->px, a->py))               /* the title: take hold of the card */
+        return;
     if (!wlcard_has(&c, px, py)) {
         a->prompt = P_NONE;
         a->quit_armed = false;
@@ -2882,6 +2883,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->hover = btn_at(a, a->px, a->py);
             w->redraw = true;
         }
+        if (card_on(a) && a->win.card_drag) {                           /* the card is held by its title: it follows the pointer */
+            struct wlcard c;
+            int fx, fy, fw, ly, rows;
+            card_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
+            wlcard_drag_motion(w, &c, a->px, a->py);
+            break;
+        }
         if (a->pk.sb_drag >= 0 && card_on(a) && card_files(a)) {        /* the card list's scroll bar thumb in the hand */
             struct wlcard c;
             int fx, fy, fw, ly, rows;
@@ -3005,6 +3013,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                     card_press(a, args[1].u);
                 else {
                     a->cbtn_down = -1;
+                    wlcard_drag_release(w);
                     wlpicker_release(&a->pk);
                 }
             }

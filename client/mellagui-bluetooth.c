@@ -41,6 +41,7 @@
 #include "uikit.h"
 #include "util.h"
 #include "wlc.h"
+#include "wlcard.h"
 #include "wlwin.h"
 
 #define MAX_DEV 96
@@ -526,7 +527,12 @@ static struct box btn_scan(const struct app *a) { return (struct box){ a->win.bw
 static struct box row_box(const struct app *a, int r) { return (struct box){ 10, HEAD_H + r * ROW_H, a->win.bw - 20, ROW_H - 4 }; }
 static struct box row_act(const struct app *a, int r) { struct box b = row_box(a, r); return (struct box){ b.x + b.w - 130, b.y + 8, 96, 28 }; }
 static struct box row_x(const struct app *a, int r) { struct box b = row_box(a, r); return (struct box){ b.x + b.w - 28, b.y + 8, 22, 28 }; }
-static struct box modal_box(const struct app *a) { return (struct box){ 30, a->win.bh / 2 - 80, a->win.bw - 60, 160 }; }
+static struct box modal_box(const struct app *a)          /* in the middle, or where the user moved it by its top strip (wlcard.h) */
+{
+    struct wlcard c = { 0, 0, a->win.bw - 60, 160 };
+    wlcard_center(&a->win, &c);
+    return (struct box){ c.x, c.y, c.w, c.h };
+}
 static struct box modal_b1(const struct app *a) { struct box m = modal_box(a); return (struct box){ m.x + m.w - 200, m.y + m.h - 44, 90, 30 }; }
 static struct box modal_b2(const struct app *a) { struct box m = modal_box(a); return (struct box){ m.x + m.w - 100, m.y + m.h - 44, 90, 30 }; }
 
@@ -548,6 +554,10 @@ static void dump_state(struct app *a)
         return;
     fprintf(f, "powered=%d discovering=%d have=%d sel=%s modal=%d busy=%s unnamed_hidden=%d show_unnamed=%d\nmsg=%s\nmodal_text=%s\n", a->powered, a->discovering,
             a->have, a->sel, a->modal, a->busy_mac, a->show_unnamed ? 0 : hidden_count(a), a->show_unnamed, a->msg, a->modal_text);
+    if (a->modal != M_NONE) {
+        struct box m = modal_box(a);
+        fprintf(f, "modalbox %d %d %d %d\n", m.x, m.y, m.w, m.h);
+    }
     int idx[MAX_DEV], n = shown(a, idx);
     for (int i = 0; i < n; i++) {
         const struct dev *d = &a->dev[idx[i]];
@@ -617,6 +627,7 @@ static void paint(struct wlwin *w)
     wlwin_text(w, 14, fy + 22, hint, 1, lm_theme.text_dim, w->bw - 28);
     if (a->modal != M_NONE) {
         wlwin_dim(w, 0.5);                                      /* the list dims */
+        w->card_shown = true;
         struct box m = modal_box(a);
         wlwin_fill(w, m.x - 1, m.y - 1, m.w + 2, m.h + 2, lm_theme.accent);
         wlwin_fill(w, m.x, m.y, m.w, m.h, lm_theme.card);
@@ -666,6 +677,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         int base = op == LM_WL_POINTER_EVT_ENTER ? 2 : 1;
         a->px = lm_fixed_to_double(args[base].f);
         a->py = lm_fixed_to_double(args[base + 1].f);
+        if (a->modal != M_NONE && w->card_drag) {                       /* the card is held by its title: it follows the pointer */
+            struct box m = modal_box(a);
+            struct wlcard c = { m.x, m.y, m.w, m.h };
+            wlcard_drag_motion(w, &c, a->px, a->py);
+            return;
+        }
         w->redraw = true;
         return;
     }
@@ -675,10 +692,16 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         return;
     }
+    if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272 && args[3].u == 0)
+        wlcard_drag_release(w);
     if (op != LM_WL_POINTER_EVT_BUTTON || args[2].u != 272 || args[3].u != 1)
         return;
     w->redraw = true;
     if (a->modal != M_NONE) {
+        struct box m = modal_box(a);
+        struct wlcard c = { m.x, m.y, m.w, m.h };
+        if (!in(a->px, a->py, modal_b1(a)) && !in(a->px, a->py, modal_b2(a)) && wlcard_drag_press(w, &c, a->px, a->py))
+            return;                                                     /* the title: take hold of the card */
         if (in(a->px, a->py, modal_b2(a)))
             modal_no(a);
         else if (a->modal != M_SHOW && in(a->px, a->py, modal_b1(a)))

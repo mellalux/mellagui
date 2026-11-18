@@ -31,7 +31,52 @@ static inline int wlcard_text_w(const char *s)
     return lm_font_ui_cells_get() ? (int)strlen(s) * LM_FONT_W : lm_font_text_width(s);
 }
 
-static inline void wlcard_frame(struct wlwin *w, struct wlcard *c, int cw, int ch, const char *title, uint32_t accent, uint32_t body, uint32_t ink)
+/* Dialog cards can be moved: a press on the title strip takes hold of the card, the pointer carries it, the button lets it go. The offset from the middle
+ * of the window lives in the wlwin (card_dx / card_dy), so every program that uses a card gets it the same way and a card that closes is forgotten (wlwin.c
+ * puts the offset back to 0 when a picture was made without a card). A program does three things:
+ *   - its card's rectangle is made with wlcard_center(&a->win, &c) after c->w / c->h are set (not (bw - w) / 2),
+ *   - a button press while a card is open first asks wlcard_drag_press(&a->win, &c, px, py) and ends the event when it says true,
+ *   - a motion first asks wlcard_drag_motion(...) (true = it moved the card: redraw) and a release calls wlcard_drag_release(&a->win). */
+#define WLCARD_TITLE_H 34
+
+/* The card's place from its size: in the middle, plus what the user moved it, kept inside the window. */
+static inline void wlcard_center(const struct wlwin *w, struct wlcard *c)
+{
+    int x = (w->bw - c->w) / 2 + w->card_dx, y = (w->bh - c->h) / 2 + w->card_dy;
+    c->x = x < 0 ? 0 : x > w->bw - c->w ? (w->bw - c->w < 0 ? 0 : w->bw - c->w) : x;
+    c->y = y < 0 ? 0 : y > w->bh - c->h ? (w->bh - c->h < 0 ? 0 : w->bh - c->h) : y;
+}
+
+/* A press on the card's title strip takes hold of it. */
+static inline bool wlcard_drag_press(struct wlwin *w, const struct wlcard *c, double px, double py)
+{
+    if (px < c->x || px >= c->x + c->w || py < c->y || py >= c->y + WLCARD_TITLE_H)
+        return false;
+    w->card_drag = true;
+    w->card_gx = px - c->x;
+    w->card_gy = py - c->y;
+    return true;
+}
+
+/* The pointer moved: while the card is held it follows (true: the program should repaint). */
+static inline bool wlcard_drag_motion(struct wlwin *w, const struct wlcard *c, double px, double py)
+{
+    if (!w->card_drag)
+        return false;
+    double nx = px - w->card_gx, ny = py - w->card_gy, maxx = w->bw - c->w, maxy = w->bh - c->h;
+    nx = nx < 0 ? 0 : nx > maxx ? (maxx < 0 ? 0 : maxx) : nx;
+    ny = ny < 0 ? 0 : ny > maxy ? (maxy < 0 ? 0 : maxy) : ny;
+    w->card_dx = (int)nx - (w->bw - c->w) / 2;
+    w->card_dy = (int)ny - (w->bh - c->h) / 2;
+    w->redraw = true;
+    return true;
+}
+
+static inline void wlcard_drag_release(struct wlwin *w) { w->card_drag = false; }
+
+/* The same at a place of the program's choosing (x, y = the card's top left corner); `dim` false leaves the page behind it as it is (a panel that
+ * floats over the picture it works on and can be moved: it must not darken it). */
+static inline void wlcard_frame_at(struct wlwin *w, struct wlcard *c, int x, int y, int cw, int ch, const char *title, uint32_t accent, uint32_t body, uint32_t ink, bool dim)
 {
     if (cw > w->bw - 16)
         cw = w->bw - 16;
@@ -39,12 +84,25 @@ static inline void wlcard_frame(struct wlwin *w, struct wlcard *c, int cw, int c
         ch = w->bh - 16;
     c->w = cw;
     c->h = ch;
-    c->x = (w->bw - cw) / 2;
-    c->y = (w->bh - ch) / 2;
-    wlwin_dim(w, 0.55);
+    c->x = x;
+    c->y = y;
+    w->card_shown = true;
+    if (dim)
+        wlwin_dim(w, 0.55);
     wlwin_round_fill(w, c->x - 1, c->y - 1, cw + 2, ch + 2, 15, accent);
     wlwin_round_fill(w, c->x, c->y, cw, ch, 14, body);
     wlwin_text(w, c->x + WLCARD_PAD, c->y + WLCARD_PAD - 2, title, 1, ink, cw - 2 * WLCARD_PAD);
+}
+
+static inline void wlcard_frame(struct wlwin *w, struct wlcard *c, int cw, int ch, const char *title, uint32_t accent, uint32_t body, uint32_t ink)
+{
+    if (cw > w->bw - 16)
+        cw = w->bw - 16;
+    if (ch > w->bh - 16)
+        ch = w->bh - 16;
+    struct wlcard at = { 0, 0, cw, ch };
+    wlcard_center(w, &at);
+    wlcard_frame_at(w, c, at.x, at.y, cw, ch, title, accent, body, ink, true);
 }
 
 static inline void wlcard_button_rect(const struct wlcard *c, int k, int n, int *x, int *y, int *bw, int *bh)

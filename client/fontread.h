@@ -23,6 +23,8 @@ struct font_info {
 
 /* 0 = ok; -1 = not a font; -2 = a font that cannot be read (the reason in err). */
 int font_read(const char *path, struct font_info *fi, char *err, size_t errn);
+/* The same without the picture and the scripts (fi->alpha stays NULL, scripts empty): a few milliseconds a font instead of tens, for a list of fonts. */
+int font_read_names(const char *path, struct font_info *fi, char *err, size_t errn);
 void font_free(struct font_info *fi);
 
 #endif

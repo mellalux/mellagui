@@ -1037,8 +1037,7 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
     *nb = a->prompt == P_HELP ? 1 : 2;
     c->w = LM_MIN(a->prompt == P_HELP ? 540 : 440, a->win.bw - 16);
     c->h = LM_MIN(ch, a->win.bh - 16);
-    c->x = (a->win.bw - c->w) / 2;
-    c->y = (a->win.bh - c->h) / 2;
+    wlcard_center(&a->win, c);
 }
 
 static const char *const HELP_LINES[] = {
@@ -1238,6 +1237,8 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     int nb;
     card_rect(a, &c, &nb);
     if (op == LM_WL_POINTER_EVT_MOTION) {
+        if (wlcard_drag_motion(&a->win, &c, a->px, a->py))              /* the card is held by its title */
+            return;
         a->pc_hover = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
         a->win.redraw = true;
         return;
@@ -1248,9 +1249,12 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     if (args[3].u == 1) {
         if (k >= 0)
             a->pc_down = k;
+        else if (wlcard_drag_press(&a->win, &c, a->px, a->py))          /* the title: take hold of the card */
+            ;
         else if (!wlcard_has(&c, (int)a->px, (int)a->py) && a->prompt != P_WON)
             a->prompt = P_NONE;
     } else {
+        wlcard_drag_release(&a->win);
         if (a->pc_down >= 0 && a->pc_down == k)
             card_accept(a, k);
         a->pc_down = -1;

@@ -293,6 +293,9 @@ struct lm_wm {
     uint32_t osk_phys[24];      /* bit set = this evdev key is held down on a keyboard (the on-screen keys light up with them) */
     uint32_t osk_click_ms;      /* when the margin was last pressed (a double click resets the place) */
     int osk_drag;               /* 0 = none, 1 = moving, 2 = resizing the keyboard with the pointer */
+    int dlg_drag;               /* the About (1) or the session (2) dialog is being carried by the pointer */
+    int dlg_dx, dlg_dy;         /* how far the open dialog was moved from the middle of its output (0 when it opens) */
+    int dlg_gx, dlg_gy;         /* where the pointer took hold of it, from the card's corner */
     uint32_t osk_drag_edges;    /* LM_EDGE_RIGHT / LM_EDGE_BOTTOM while resizing */
     int osk_press_x, osk_press_y;
     struct lm_osk_place osk_start;   /* the place when the drag began */
@@ -587,6 +590,8 @@ void keymap_sync(const struct lm_wm *wm);
 void osk_damage(struct lm_wm *wm);
 void osk_drag_begin(struct lm_wm *wm, int kind, uint32_t edges);
 void osk_drag_motion(struct lm_wm *wm);
+void dialog_drag_begin(struct lm_wm *wm, int which);   /* wm_dialogs.c: the pointer took hold of the About (1) / session (2) dialog */
+void dialog_drag_motion(struct lm_wm *wm);
 bool osk_geo(const struct lm_wm *wm, struct lm_osk_geo *g);
 void osk_info(const struct lm_wm *wm, const struct lm_osk_geo *g, struct lm_osk_info *oi);
 bool osk_pick(const struct lm_wm *wm, int ix, int iy, struct lm_pick *out);

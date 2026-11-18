@@ -1463,6 +1463,7 @@ static enum lm_cursor_shape cursor_for_edges(uint32_t e)
 void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
 {
     osk_drag_motion(wm);
+    dialog_drag_motion(wm);
     dock_drag_motion(wm);
     launcher_drag_motion(wm);
     launcher_swipe_motion(wm);

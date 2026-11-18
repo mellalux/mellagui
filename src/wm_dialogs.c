@@ -44,11 +44,19 @@ static int other_sessions(void)
     return n;
 }
 
+/* A dialog card whose middle-of-the-output place is (x, y): moved by what the user carried it, but never off the output. */
+static struct lm_rect dialog_place(const struct lm_wm *wm, struct lm_rect out, int x, int y, int w, int h)
+{
+    int nx = LM_CLAMP(x + wm->dlg_dx, out.x, LM_MAX(out.x + out.w - w, out.x));
+    int ny = LM_CLAMP(y + wm->dlg_dy, out.y, LM_MAX(out.y + out.h - h, out.y));
+    return lm_rect_make(nx, ny, w, h);
+}
+
 void power_info(const struct lm_wm *wm, struct lm_output *o, struct lm_power_info *pi)
 {
     memset(pi, 0, sizeof(*pi));
     pi->rect = lm_output_rect(o);
-    pi->card = lm_rect_make(pi->rect.x + (pi->rect.w - POWER_CARD_W) / 2, pi->rect.y + (pi->rect.h - POWER_ROW1_H) / 2,
+    pi->card = dialog_place(wm, pi->rect, pi->rect.x + (pi->rect.w - POWER_CARD_W) / 2, pi->rect.y + (pi->rect.h - POWER_ROW1_H) / 2,
                             POWER_CARD_W, POWER_CARD_H);
     int gap = 40, total = 2 * POWER_BTN_D + gap;
     int x = pi->card.x + (POWER_CARD_W - total) / 2, y = pi->card.y + 46;
@@ -99,6 +107,8 @@ void power_set(struct lm_wm *wm, bool open, struct lm_output *o)
         launcher_set(wm, false, NULL);
         sw_close(wm);
         snprintf(wm->power_out, sizeof(wm->power_out), "%s", o->name);
+        wm->dlg_dx = wm->dlg_dy = 0;                            /* (it opens in the middle) */
+        wm->dlg_drag = 0;
         wm->power_open = true;
         wm->power_confirm = 0;
         wm->power_sel = -1;
@@ -132,7 +142,7 @@ void about_info(const struct lm_wm *wm, struct lm_output *o, struct lm_about_inf
     ai->rect = lm_output_rect(o);
     int h = 20 + 96 + 12 + LM_FONT_H + 6 + LM_FONT_H + 16 + wm->about_n * ABOUT_ROW_H + 18 + 26 + 18;
     h = LM_MIN(h, ai->rect.h - 8);
-    ai->card = lm_rect_make(ai->rect.x + (ai->rect.w - ABOUT_CARD_W) / 2, ai->rect.y + (ai->rect.h - h) / 2, ABOUT_CARD_W, h);
+    ai->card = dialog_place(wm, ai->rect, ai->rect.x + (ai->rect.w - ABOUT_CARD_W) / 2, ai->rect.y + (ai->rect.h - h) / 2, ABOUT_CARD_W, h);
     ai->logo = lm_rect_make(ai->card.x + (ABOUT_CARD_W - 96) / 2, ai->card.y + 20, 96, 96);
     ai->close = lm_rect_make(ai->card.x + (ABOUT_CARD_W - 90) / 2, ai->card.y + ai->card.h - 18 - 26, 90, 26);
     ai->hover_close = wm->about_hover_close;
@@ -167,6 +177,8 @@ void about_set(struct lm_wm *wm, bool open, struct lm_output *o)
         sw_close(wm);
         wm->about_n = lm_about_collect(wm->srv, wm->about_rows, LM_ABOUT_ROWS);
         snprintf(wm->about_out, sizeof(wm->about_out), "%s", o->name);
+        wm->dlg_dx = wm->dlg_dy = 0;
+        wm->dlg_drag = 0;
         wm->about_open = true;
         wm->about_hover_close = false;
         about_damage(wm);
@@ -296,9 +308,75 @@ void power_activate(struct lm_wm *wm, int which)
     }
 }
 
+/* The pointer took hold of the About (1) or the session (2) dialog's card (anywhere on it that is no button). */
+void dialog_drag_begin(struct lm_wm *wm, int which)
+{
+    if (!wm->srv->seat)
+        return;
+    struct lm_output *o = which == 1 ? about_output(wm) : power_output(wm);
+    if (!o)
+        return;
+    struct lm_rect card;
+    if (which == 1) {
+        struct lm_about_info ai;
+        about_info(wm, o, &ai);
+        card = ai.card;
+    } else {
+        struct lm_power_info pi;
+        power_info(wm, o, &pi);
+        card = pi.card;
+    }
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    wm->dlg_drag = which;
+    wm->dlg_gx = (int)px - card.x;
+    wm->dlg_gy = (int)py - card.y;
+}
+
+/* The pointer moved while a dialog is held: the card follows it, kept on its output. */
+void dialog_drag_motion(struct lm_wm *wm)
+{
+    if (!wm->dlg_drag || !wm->srv->seat)
+        return;
+    struct lm_output *o = wm->dlg_drag == 1 ? about_output(wm) : power_output(wm);
+    if (!o) {
+        wm->dlg_drag = 0;
+        return;
+    }
+    int sdx = wm->dlg_dx, sdy = wm->dlg_dy;
+    wm->dlg_dx = wm->dlg_dy = 0;                                /* (the card as it would stand in the middle) */
+    struct lm_rect mid;
+    if (wm->dlg_drag == 1) {
+        struct lm_about_info ai;
+        about_info(wm, o, &ai);
+        mid = ai.card;
+    } else {
+        struct lm_power_info pi;
+        power_info(wm, o, &pi);
+        mid = pi.card;
+    }
+    double px, py;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    struct lm_rect out = lm_output_rect(o);
+    int nx = LM_CLAMP((int)px - wm->dlg_gx, out.x, LM_MAX(out.x + out.w - mid.w, out.x));
+    int ny = LM_CLAMP((int)py - wm->dlg_gy, out.y, LM_MAX(out.y + out.h - mid.h, out.y));
+    wm->dlg_dx = nx - mid.x;
+    wm->dlg_dy = ny - mid.y;
+    if (wm->dlg_dx != sdx || wm->dlg_dy != sdy) {
+        if (wm->dlg_drag == 1)
+            about_damage(wm);
+        else
+            power_damage(wm);
+    }
+}
+
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (!pressed && wm->dlg_drag && button == BTN_LEFT) {        /* a carried dialog is put down where it is */
+        wm->dlg_drag = 0;
+        return true;
+    }
     if (!pressed && wm->osk_down >= 0 && button == BTN_LEFT) {   /* the held on-screen key comes up wherever the pointer is */
         osk_release(wm);
         return true;
@@ -377,6 +455,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (pressed) {
             if (pick->kind == LM_PICK_POWER_BACKDROP)           /* a click outside the card closes the dialog, nothing below gets it */
                 power_set(wm, false, NULL);
+            else if (pick->kind == LM_PICK_POWER_CARD && button == BTN_LEFT)
+                dialog_drag_begin(wm, 2);                       /* the card (no button): carry it */
             else if (pick->kind == LM_PICK_POWER_BUTTON && button == BTN_LEFT) {
                 wm->press_panel_kind = LM_PICK_POWER_BUTTON;
                 wm->press_panel_ws = pick->index;
@@ -446,6 +526,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         if (pressed) {
             if (pick->kind == LM_PICK_ABOUT_BACKDROP)           /* a click outside the card closes it, nothing below gets it */
                 about_set(wm, false, NULL);
+            else if (pick->kind == LM_PICK_ABOUT_CARD && button == BTN_LEFT)
+                dialog_drag_begin(wm, 1);                       /* the card (no button): carry it */
             else if (pick->kind == LM_PICK_ABOUT_BUTTON && button == BTN_LEFT) {
                 wm->press_panel_kind = LM_PICK_ABOUT_BUTTON;
                 wm->press_win = NULL;

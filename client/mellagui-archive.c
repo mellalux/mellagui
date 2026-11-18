@@ -500,8 +500,7 @@ static void card_layout(struct app *a, struct wlcard *c, int *fx, int *fy, int *
     int ch = WLCARD_PAD + 24 + 34 + (*rows ? *rows * WLPICKER_ROW_H + 12 : 0) + 20 + WLCARD_BTN_H + WLCARD_PAD;
     c->w = LM_MIN(cw, a->win.bw - 16);
     c->h = LM_MIN(ch, a->win.bh - 16);
-    c->x = (a->win.bw - c->w) / 2;
-    c->y = (a->win.bh - c->h) / 2;
+    wlcard_center(&a->win, c);
     *fx = c->x + WLCARD_PAD;
     *fy = c->y + WLCARD_PAD + 24;
     *fw = c->w - 2 * WLCARD_PAD;
@@ -1350,6 +1349,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     if (op == LM_WL_POINTER_EVT_MOTION || op == LM_WL_POINTER_EVT_ENTER) {
         a->px = lm_fixed_to_double(args[op == LM_WL_POINTER_EVT_ENTER ? 2 : 1].f);
         a->py = lm_fixed_to_double(args[op == LM_WL_POINTER_EVT_ENTER ? 3 : 2].f);
+        if (a->prompt && w->card_drag) {                                    /* the card is held by its title: it follows the pointer */
+            struct wlcard c;
+            int fx, fy, fw, ly, crows;
+            card_layout(a, &c, &fx, &fy, &fw, &ly, &crows);
+            wlcard_drag_motion(w, &c, a->px, a->py);
+            return;
+        }
         int hb = 0, hc = -1;
         struct wlrail L;
         files_rail_like(a, &L);
@@ -1399,6 +1405,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         uint32_t t = args[1].u, button = args[2].u, state = args[3].u;
         if (state == 0) {
             a->drag_bar = -1;
+            wlcard_drag_release(w);
             wlpicker_release(&a->pk);
             wlrail_release(&a->ran);
             w->redraw = true;
@@ -1409,6 +1416,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int fx, fy, fw, ly, crows;
             card_layout(a, &c, &fx, &fy, &fw, &ly, &crows);
             int k = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+            if (button == 272 && k < 0 && wlcard_drag_press(w, &c, a->px, a->py)) {         /* the title: take hold of the card */
+                w->redraw = true;
+                return;
+            }
             if (button == 272 && k == 0)
                 a->prompt = 0;
             else if (button == 272 && k == 1)

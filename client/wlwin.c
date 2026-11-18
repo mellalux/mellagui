@@ -118,6 +118,9 @@ static void draw(struct wlwin *w)
     }
     if (w->argb)
         memset(w->pixels, 0, w->map_size);
+    if (!w->card_shown)                                                 /* no dialog card in the last picture: the next one opens in the middle again */
+        w->card_dx = w->card_dy = 0, w->card_drag = false;
+    w->card_shown = false;
     w->ops->paint(w);
     w->buffer = wlc_alloc(w->c, &lm_wl_buffer_interface, buffer_event, w);
     WLC_SEND(w->c, w->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = w->buffer }, { .i = 0 }, { .i = w->pw },

@@ -6459,8 +6459,7 @@ static void card_layout(const struct app *a, struct wlcard *c, int *tx, int *ty,
     c->h = WLCARD_PAD + 24 + 22 + (card_question(a) ? 22 : 38) + 22 + WLCARD_BTN_H + WLCARD_PAD;
     if (c->h > a->win.bh - 16)
         c->h = a->win.bh - 16;
-    c->x = (a->win.bw - c->w) / 2;
-    c->y = (a->win.bh - c->h) / 2;
+    wlcard_center(&a->win, c);
     *tx = c->x + WLCARD_PAD;
     *ty = c->y + WLCARD_PAD + 24;
     *fy = *ty + 24;
@@ -6537,6 +6536,8 @@ static void card_press(struct app *a)
     int tx, ty, fy, fw;
     card_layout(a, &c, &tx, &ty, &fy, &fw);
     int px = (int)a->px, py = (int)a->py;
+    if (wlcard_drag_press(&a->win, &c, a->px, a->py))               /* the title: take hold of the card */
+        return;
     if (!wlcard_has(&c, px, py)) {
         card_cancel(a);
         return;
@@ -6952,6 +6953,13 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
         a->py = lm_fixed_to_double(args[2].f);
+        if (card_on(a) && a->win.card_drag) {                           /* the card is held by its title: it follows the pointer */
+            struct wlcard c;
+            int tx, ty, fy, fw;
+            card_layout(a, &c, &tx, &ty, &fy, &fw);
+            wlcard_drag_motion(w, &c, a->px, a->py);
+            break;
+        }
         a->hover = hover_at(a, a->px, a->py);
         if (a->drag_armed) {
             double dx = a->px - a->drag_x, dy = a->py - a->drag_y;
@@ -7014,8 +7022,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             if (args[2].u == 272) {
                 if (args[3].u == 1)
                     card_press(a);
-                else
+                else {
                     a->cbtn_down = -1;
+                    wlcard_drag_release(w);
+                }
             }
             w->redraw = true;
             break;

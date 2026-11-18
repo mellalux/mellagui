@@ -989,6 +989,55 @@ class TestWindows(Base):
                 rows.append(tuple(l[4:].split('|', 1)))
         return is_open, info, rows
 
+    def test_the_about_dialog_can_be_carried_by_the_pointer_and_opens_in_the_middle_again(self):
+        ctl.abs(900, 500)
+        ctl.sync()
+        ctl.click(16, 14)                                                         # the logo button: the About dialog
+        is_open, info, _ = self.about(ctl)
+        self.assertTrue(is_open)
+        cx, cy, cw, ch = info['card']
+        sx, sy = cx + 12, cy + 12                                                 # a spot on the card that is no button
+        ctl.abs(sx, sy)
+        ctl.button(272, True)
+        for i in range(1, 6):
+            ctl.abs(sx - 20 * i, sy + 5 * i)
+        ctl.button(272, False)
+        ctl.sync()
+        is_open, moved, _ = self.about(ctl)
+        self.assertTrue(is_open, 'carrying the card closed the dialog')
+        self.assertEqual(moved['card'], (cx - 100, cy + 25, cw, ch))
+        self.assertEqual(moved['close'][:2], (info['close'][0] - 100, info['close'][1] + 25))        # (the button goes with the card)
+        ctl.abs(moved['card'][0] + 12, moved['card'][1] + 12)                      # carried far off the output: it stays on it
+        ctl.button(272, True)
+        ctl.abs(3, 3)
+        ctl.button(272, False)
+        ctl.sync()
+        self.assertEqual(self.about(ctl)[1]['card'][:2], (0, 0))
+        ctl.tap(KEY_ESC)
+        ctl.sync()
+        ctl.click(16, 14)                                                         # a new dialog opens in the middle
+        self.assertEqual(self.about(ctl)[1]['card'], info['card'])
+        ctl.tap(KEY_ESC)
+        ctl.sync()
+
+    def test_the_session_dialog_can_be_carried_by_the_pointer(self):
+        ctl.click(*self.POWER_BTN)
+        self.assertEqual(self.disc('pwd0', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.abs(390, 224)                                                         # a corner of the card (264 x 268 at 380, 214), no button
+        ctl.button(272, True)
+        for i in range(1, 6):
+            ctl.abs(390 - 40 * i, 224 - 20 * i)
+        ctl.button(272, False)
+        ctl.sync()
+        self.assertEqual(self.disc('pwd1', (self.LOCK_DISC[0] - 200, self.LOCK_DISC[1] - 100)), self.DISC_IDLE)      # the Lock button went along
+        self.assertNotEqual(self.disc('pwd2', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.tap(KEY_ESC)
+        ctl.sync()
+        ctl.click(*self.POWER_BTN)                                                # and it opens in the middle again
+        self.assertEqual(self.disc('pwd3', self.LOCK_DISC), self.DISC_IDLE)
+        ctl.tap(KEY_ESC)
+        self.assertTrue(alive())
+
     def test_the_about_dialog_shows_the_version_and_the_time_of_the_last_pull(self):
         p, c, stop = self.private_compositor('mellagui-about-ver')
         c.sync()
@@ -8489,6 +8538,101 @@ esac
         r = subprocess.run([os.path.join(ROOT, 'build', 'mellagui-files'), '--choose', 'wallpaper'], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 2)                                  # (the file manager has no chooser mode any more)
 
+    def test_the_help_card_of_the_panel_can_be_carried_by_its_title(self):
+        d = tempfile.mkdtemp(prefix='helpcard-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, 'settings.dump')
+        p = subprocess.Popen([self.exe()], env=dict(os.environ, HOME=d, MELLAGUI_SETTINGS_DUMP=dump), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.settings')
+        self.assertIsNotNone(win)
+        time.sleep(0.3)
+        x0, y0 = win['x'], win['y']
+
+        def card(timeout=3.0):
+            end = time.time() + timeout
+            while time.time() < end:
+                try:
+                    for l in open(dump).read().splitlines():
+                        if l.startswith('helpcard '):
+                            return tuple(int(v) for v in l.split()[1:5])
+                except OSError:
+                    pass
+                time.sleep(0.03)
+            self.fail('no help card in the dump')
+        ctl.abs(x0 + 300, y0 + 400)
+        ctl.click(x0 + 588, y0 + 232)                                                 # the "?" of the sticky keys box
+        cx, cy, cw, ch = card()
+        ctl.abs(x0 + cx + 300, y0 + cy + 14)                                          # the title strip
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(x0 + cx + 300 - 4 * i, y0 + cy + 14 - 3 * i)
+            time.sleep(0.04)
+        ctl.button(272, False)
+        for _ in range(60):
+            if card() != (cx, cy, cw, ch):
+                break
+            time.sleep(0.03)
+        self.assertEqual(card(), (cx - 16, cy - 12, cw, ch))
+        ctl.tap(KEY_ESC)                                                              # the card closes, not the panel
+        time.sleep(0.3)
+        self.assertIsNone(p.poll())
+        os.unlink(dump)
+        ctl.click(x0 + 588, y0 + 232)                                                 # and opens in the middle again
+        self.assertEqual(card(), (cx, cy, cw, ch))
+        ctl.tap(KEY_ESC)
+        time.sleep(0.2)
+        ctl.tap(KEY_ESC)
+
+    def test_the_wallpaper_card_can_be_carried_by_its_title_and_opens_in_the_middle_again(self):
+        d = tempfile.mkdtemp(prefix='wallcard-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        dump = os.path.join(d, 'settings.dump')
+        p = subprocess.Popen([self.exe()], env=dict(os.environ, HOME=d, MELLAGUI_SETTINGS_DUMP=dump), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        win = wait_for_window('mellagui.settings')
+        self.assertIsNotNone(win)
+        time.sleep(0.3)
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 2 * 32 + 14)                   # "Desktop" tab
+        time.sleep(0.2)
+
+        def card(timeout=3.0):
+            end = time.time() + timeout
+            while time.time() < end:
+                try:
+                    for l in open(dump).read().splitlines():
+                        if l.startswith('card '):
+                            return tuple(int(v) for v in l.split()[1:5])
+                except OSError:
+                    pass
+                time.sleep(0.03)
+            self.fail('no card in the dump')
+        ctl.click(x0 + 460, y0 + 319)                               # "Browse..."
+        cx, cy, cw, ch = card()
+        ctl.abs(x0 + cx + 200, y0 + cy + 14)                        # the card's title strip
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(x0 + cx + 200 + 5 * i, y0 + cy + 14 + 2 * i)
+            time.sleep(0.04)
+        ctl.button(272, False)
+        for _ in range(60):
+            if card() != (cx, cy, cw, ch):
+                break
+            time.sleep(0.03)
+        self.assertEqual(card(), (cx + 20, cy + 8, cw, ch))
+        ctl.tap(KEY_ESC)                                            # closed ...
+        time.sleep(0.3)
+        self.assertIsNone(p.poll())
+        os.unlink(dump)
+        ctl.click(x0 + 460, y0 + 319)                               # ... and the next one opens in the middle
+        self.assertEqual(card(), (cx, cy, cw, ch))
+        ctl.tap(KEY_ESC)
+        time.sleep(0.2)
+        ctl.tap(KEY_ESC)
+
     def test_panel_wallpaper_page_field_radios_and_buttons(self):
         self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
         p, win = self.open_panel()
@@ -15705,6 +15849,136 @@ class TestPaint(Base):
         self.assertGreater(cols[left] + 4, cols[min(cols, key=lambda c: abs(c - mid))], 'the ends hang lower than the middle: %d against %d' % (cols[left], cols[mid]))
         self.assertGreater(right - left, 20)
 
+    def test_an_effect_panel_floats_can_be_moved_and_leaves_the_picture_undimmed(self):
+        self.start('--new', '80x60')
+        self.wait(lambda s: s['image']['w'] == '80')
+        wx, wy = self.win_xy()
+        shot = os.path.join(tmp, 'paint-float.ppm')
+        probes = ((70, 120), (26, 250), (150, 60))                                            # the rail and the sheet's surroundings, outside where the panel goes
+        before = [ctl.dump(shot).px(wx + x, wy + y) for x, y in probes]
+        self.click_button(self.state(), 'Effects')
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        self.assertEqual([ctl.dump(shot).px(wx + x, wy + y) for x, y in probes], before, 'the effects list darkens the window')
+        self.click_box(self.row('efx', 'Drop_shadow...'))
+        st = self.wait(lambda s: s['state']['prompt'] == '10' and s['fxcard']['kind'] == 'shadow')
+        self.assertEqual([ctl.dump(shot).px(wx + x, wy + y) for x, y in probes], before, 'the panel darkens the window')
+        c = {k: int(v) for k, v in st['card'].items() if k in 'xywh'}
+        self.assertGreater(c['x'], 300)                                                       # it sits at the right, not over the middle of the picture
+        # take it by its title and move it to the left
+        ctl.abs(wx + c['x'] + 120, wy + c['y'] + 14)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 6):
+            ctl.abs(wx + c['x'] + 120 - 50 * i, wy + c['y'] + 14 + 20 * i)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        st = self.wait(lambda s: int(s['card']['x']) < c['x'] - 200)
+        self.assertEqual(int(st['card']['x']), c['x'] - 250)
+        self.assertEqual(int(st['card']['y']), c['y'] + 100)
+        self.assertEqual(st['state']['prompt'], '10')
+        # a click on the picture or beside the panel does not close it
+        self.click_at(int(st['card']['x']) + c['w'] + 10, 40)
+        time.sleep(0.15)
+        self.assertEqual(self.state()['state']['prompt'], '10')
+        # a slider works where it is now, and the picture can be zoomed and moved while the panel is open
+        r = self.row('adjust', 'Distance')
+        v0 = int(r['value'])
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.9), int(r['ty']))
+        self.wait(lambda s: int(self.row('adjust', 'Distance')['value']) != v0)
+        z0 = int(self.state()['state']['zoom'])
+        ctl.abs(wx + 200, wy + 60)                                                            # (over the picture's area, above the panel)
+        time.sleep(0.1)
+        ctl.cmd('axis v -15 -1')
+        self.wait(lambda s: int(s['state']['zoom']) > z0)
+        vx = float(self.state()['canvas']['vx'])
+        ctl.button(274, True)
+        for i in range(1, 5):
+            ctl.abs(wx + 200 + 10 * i, wy + 60)
+            time.sleep(0.03)
+        ctl.button(274, False)
+        self.wait(lambda s: float(s['canvas']['vx']) != vx)
+        self.assertEqual(self.state()['state']['prompt'], '10')
+        # Esc takes the panel away; the next one opens where the last one was left
+        ctl.tap(KEY_ESC)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.click_button(self.state(), 'Effects')
+        self.wait(lambda s: s['state']['prompt'] == '14')
+        self.click_box(self.row('efx', 'Blur...'))
+        st = self.wait(lambda s: s['state']['prompt'] == '10' and s['fxcard']['kind'] == 'blur')
+        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 250, c['y'] + 100))
+        ctl.tap(KEY_ESC)
+
+    def test_the_colour_card_goes_whole_when_it_is_carried(self):
+        self.start('--new', '100x80')
+        self.wait(lambda s: s['image']['w'] == '100')
+        self.click_box(self.row('fgbox'))
+        st = self.wait(lambda s: s['state']['prompt'] == '8' and 'cpsq' in s and 'card' in s)
+        c = {k: int(v) for k, v in st['card'].items() if k in 'xywh'}
+        sq = {k: int(v) for k, v in st['cpsq'].items() if k in 'xy'}
+        wx, wy = self.win_xy()
+        ctl.abs(wx + c['x'] + 200, wy + c['y'] + 12)                                          # the title strip
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(wx + c['x'] + 200 - 6 * i, wy + c['y'] + 12 + 3 * i)
+            time.sleep(0.04)
+        ctl.button(272, False)
+        st = self.wait(lambda s: int(s['cpsq']['x']) != sq['x'])
+        self.assertEqual((int(st['cpsq']['x']), int(st['cpsq']['y'])), (sq['x'] - 24, sq['y'] + 12))       # (the gauges went with the card)
+        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 24, c['y'] + 12))
+        ctl.tap(KEY_ESC)
+
+    def test_typing_in_the_font_card_jumps_to_the_family(self):
+        fonts = '/usr/share/fonts/truetype/dejavu'
+        if not os.path.exists(os.path.join(fonts, 'DejaVuSerif.ttf')):
+            self.skipTest('DejaVu fonts not installed')
+        self.start('--new', '200x120', env={'MELLAGUI_FONT_DIRS': fonts})
+        self.wait(lambda s: s['image']['w'] == '200')
+        ctl.tap(KEYCODES['t'])
+        self.wait(lambda s: s['state']['tool'] == 'Text' and 'tfont' in s)
+        self.click_box(self.row('tfont'))
+        st = self.wait(lambda s: s['state']['prompt'] == '13' and 'fontcard' in s)
+        names = [l.split('name=', 1)[1] for l in open(self.dump).read().splitlines() if l.startswith('fontrow')]       # (a family name has blanks: the last field)
+        self.assertIn('DejaVu Serif', names)
+        want = names.index('DejaVu Serif')
+        self.assertEqual(st['fontcard']['sel'], '0')
+        for ch in 'dejavu':                                                                   # "dejavu" finds the first DejaVu family ...
+            ctl.tap(KEYCODES[ch])
+        self.wait(lambda s: s['fontcard']['sel'] == str(names.index('DejaVu Sans')))
+        ctl.tap(KEY_SPACE)
+        for ch in 'se':                                                                       # ... and "dejavu se" the serif one
+            ctl.tap(KEYCODES[ch])
+        self.wait(lambda s: s['fontcard']['sel'] == str(want))
+        ctl.tap(14)                                                                           # Backspace takes a letter back: "dejavu s" is the first one again
+        self.wait(lambda s: s['fontcard']['sel'] == str(names.index('DejaVu Sans')))
+        ctl.tap(KEY_ENTER)                                                                    # Enter chooses it
+        self.wait(lambda s: s['state']['prompt'] == '0')
+
+    def test_a_dialog_card_can_be_carried_by_its_title_and_opens_in_the_middle_again(self):
+        self.start('--new', '100x80')
+        self.wait(lambda s: s['image']['w'] == '100')
+        self.chord(KEYCODES['n'], KEY_LEFTCTRL)                                               # the New picture card
+        st = self.wait(lambda s: s['state']['prompt'] == '3' and 'card' in s)
+        c = {k: int(v) for k, v in st['card'].items() if k in 'xywh'}
+        wx, wy = self.win_xy()
+        ctl.abs(wx + c['x'] + 300, wy + c['y'] + 14)                                          # the title strip
+        time.sleep(0.1)
+        ctl.button(272, True)
+        for i in range(1, 6):
+            ctl.abs(wx + c['x'] + 300 - 10 * i, wy + c['y'] + 14 + 6 * i)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        st = self.wait(lambda s: int(s['card']['x']) != c['x'])
+        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 50, c['y'] + 30))
+        self.assertEqual(st['state']['prompt'], '3')                                          # (a press on the title is no click outside the card)
+        r = self.row('cbtn', '0')                                                             # the buttons are where the card is now: Cancel closes it
+        self.click_at(int(r['x']) + int(r['w']) // 2, int(r['y']) + int(r['h']) // 2)
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.chord(KEYCODES['n'], KEY_LEFTCTRL)                                               # a new card opens in the middle again
+        st = self.wait(lambda s: s['state']['prompt'] == '3' and 'card' in s)
+        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'], c['y']))
+        ctl.tap(KEY_ESC)
+
     def test_the_help_has_pages_that_scroll_and_a_list_to_choose_from(self):
         self.start('--new', '100x80')
         self.wait(lambda s: s['image']['w'] == '100')
@@ -21654,6 +21928,34 @@ class TestBluetoothWindow(Base):
         self.c.tap(self.KEY_Y)
         self.wait(lambda: self.dev('AA:BB:CC:DD:EE:0A')['paired'], 'paired')
 
+    def test_the_question_can_be_carried_by_its_top_strip(self):
+        self.start('4')
+        self.run_window()
+        self.wait(lambda: any(d['name'] == 'Phone' for d in self.view()['devs']), 'the phone is found')
+        self.select('Phone')
+        self.c.tap(self.KEY_ENTER_)
+        self.wait(lambda: self.view()['modal'] == '1', 'the question')
+
+        def box():
+            for l in open(self.dump_path).read().split('\n'):
+                if l.startswith('modalbox '):
+                    return tuple(int(v) for v in l.split()[1:5])
+        self.wait(lambda: box() is not None, 'the box in the dump')
+        x, y, w, h = box()
+        win = [q for q in self.c.windows()['windows'] if q['app_id'] == 'mellagui.bluetooth'][0]
+        px, py = win['x'] + x + 60, win['y'] + y + 8                                      # the top strip of the card
+        self.c.abs(px, py)
+        time.sleep(0.1)
+        self.c.button(272, True)
+        for i in range(1, 5):
+            self.c.abs(px + 5 * i, py - 6 * i)
+            time.sleep(0.04)
+        self.c.button(272, False)
+        self.wait(lambda: box() == (x + 20, y - 24, w, h), 'the card moved')
+        self.assertEqual(self.view()['modal'], '1')                                       # (carrying it is no click on a button)
+        self.c.tap(self.KEY_N)                                                            # the question can still be answered
+        self.wait(lambda: self.view()['modal'] == '0', 'answered')
+
     def test_a_pin_is_typed_in_the_window(self):
         self.start('5')
         self.run_window()
@@ -26782,6 +27084,33 @@ class TestSmart(Base):
         r = subprocess.run([self.exe, '--device', 'blind1'], env=dict(os.environ, WAYLAND_DISPLAY=self.name, **self.env), capture_output=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.wait(lambda: self.view()['modal'] == 'blind1', 'the running window shows the blind\'s view')
+
+    def test_the_devices_own_view_can_be_carried_by_its_title(self):
+        c = self.logged_in_window('w6m')
+        self.press(('plug1', '-', 'details'))
+        self.wait(lambda: self.view()['modal'] == 'plug1', 'the view of the plug')
+        before = self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0]
+        close = self.view()['mctl'][('plug1', '-', 'close')][0]                           # (its Close button is in the title strip, at the right)
+        px, py = self.x0 + close[0] - 120, self.y0 + close[1] + 4                         # the strip beside it
+        c.abs(px, py)
+        time.sleep(0.1)
+        c.button(272, True)
+        for i in range(1, 5):
+            c.abs(px - 2 * i, py + 4 * i)                                                 # (the view nearly fills the window: it can only be moved a little)
+            time.sleep(0.04)
+        c.button(272, False)
+        self.wait(lambda: self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0][:2] == (before[0] - 8, before[1] + 16), 'the view moved')
+        after = self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0]
+        self.assertEqual((after[0], after[1]), (before[0] - 8, before[1] + 16))           # (the controls went with it)
+        self.assertEqual(self.view()['modal'], 'plug1')                                   # carrying it is no click beside the view
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20, where='mctl')                  # and the switch works where it is now
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the switch in the moved view works')
+        c.tap(1)                                                                          # Esc closes the view; the next one opens at its place
+        self.wait(lambda: self.view()['modal'] == '-', 'closed')
+        self.press(('plug1', '-', 'details'))
+        self.wait(lambda: self.view()['modal'] == 'plug1', 'the view again')
+        again = self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0]
+        self.assertEqual((again[0], again[1]), (before[0], before[1]))
 
     def test_details_opens_the_devices_own_view(self):
         c = self.logged_in_window('w6')

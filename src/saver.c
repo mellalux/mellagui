@@ -81,6 +81,13 @@ bool lm_saver_shields(const struct lm_saver *s)
     return s && s->pid > 0 && s->shield;
 }
 
+/* CMD with one more option on its end, written into BUF; when it would not fit, CMD as it is (a cut-off option would be a broken command line). */
+static const char *with_option(char *buf, size_t size, const char *cmd, const char *option)
+{
+    int n = snprintf(buf, size, "%s %s", cmd, option);
+    return (n > 0 && (size_t)n < size) ? buf : cmd;
+}
+
 bool lm_saver_start(struct lm_saver *s)
 {
     if (!s)
@@ -93,21 +100,17 @@ bool lm_saver_start(struct lm_saver *s)
         return false;
     char styled[1024];
     if (s->srv->config.saver_style == 1 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--flat")) {      /* the style is for our own program only */
-        snprintf(styled, sizeof(styled), "%s --flat", cmd);
-        cmd = styled;
+        cmd = with_option(styled, sizeof(styled), cmd, "--flat");
     } else if (!s->srv->config.saver_cat && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--no-cat")) {
-        snprintf(styled, sizeof(styled), "%s --no-cat", cmd);                  /* (the room without its cat) */
-        cmd = styled;
+        cmd = with_option(styled, sizeof(styled), cmd, "--no-cat");            /* (the room without its cat) */
     }
     char turtled[1100];
     if (!s->srv->config.saver_turtle && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--no-turtle")) {
-        snprintf(turtled, sizeof(turtled), "%s --no-turtle", cmd);             /* (the room without its turtle) */
-        cmd = turtled;
+        cmd = with_option(turtled, sizeof(turtled), cmd, "--no-turtle");       /* (the room without its turtle) */
     }
     char meowed[1100];
     if (s->srv->config.saver_cat && s->srv->config.saver_meow && s->srv->config.saver_style == 0 && strstr(cmd, "mellagui-matrix") && !strstr(cmd, "--meow")) {
-        snprintf(meowed, sizeof(meowed), "%s --meow", cmd);                    /* (Tom meows when he looks at the camera) */
-        cmd = meowed;
+        cmd = with_option(meowed, sizeof(meowed), cmd, "--meow");              /* (Tom meows when he looks at the camera) */
     }
     pid_t pid = lm_server_spawn(s->srv, cmd);
     if (pid <= 0)

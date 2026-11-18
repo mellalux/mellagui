@@ -202,7 +202,7 @@ uint8_t *lm_enc_tiff(const uint32_t *px, int w, int h, size_t *out_n)
     bool alpha = has_alpha(px, (size_t)w * (size_t)h);
     int spp = alpha ? 4 : 3;
     size_t rawn = (size_t)w * (size_t)h * (size_t)spp, k = 0;
-    uint8_t *raw = malloc(rawn ? rawn : 1);
+    uint8_t *raw = calloc(rawn ? rawn : 1, 1);                         /* (every byte is written below; gcc cannot see that and warned) */
     if (!raw)
         return NULL;
     for (size_t i = 0; i < (size_t)w * (size_t)h; i++) {

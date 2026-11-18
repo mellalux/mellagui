@@ -27,6 +27,9 @@
 #define BL_SWORD_DAMAGE 4.0f
 #define BL_SWORD_REACH 3.6f
 #define BL_GOBLIN_HIT 3.0f              /* hit points of the player's 20 that one blow takes */
+#define BL_GOBLIN_KEEP_HIT 2.0f         /* hit points one blow takes from the keep (the game gives it 60) */
+#define BL_GOBLIN_NEAR 8.0f             /* a goblin this near the player goes for him, not for the keep */
+#define BL_GOBLIN_KEEP_SEE 48.0f        /* how far from the keep a goblin goes for it */
 
 enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN };
 
@@ -55,6 +58,8 @@ struct bl_mobs {
 	struct bl_mob mob[BL_MOBS_MAX];
 	bool enabled;                   /* false: nothing spawns and the ones there are go */
 	int cap;                        /* how many there may be at a time (1 .. BL_MOBS_MAX) */
+	bool keep_on;                   /* there is a keep: the goblins that are not near the player go to it and hit it */
+	float keep[3];                  /* the middle of the bottom of it */
 	uint32_t rng;
 	float spawn_t, acc;
 	int kills, spawned, burned;
@@ -66,10 +71,13 @@ struct bl_mobs_result {
 	float kbx, kbz;                 /* the push the blows gave him (a speed in blocks a second) */
 	int hits;                       /* blows landed */
 	int born, burned;               /* mobs that appeared, mobs that the sun killed */
+	float keep_damage;              /* hit points taken from the keep (BL_GOBLIN_KEEP_HIT a blow) */
+	int keep_hits;
 };
 
 void bl_mobs_init(struct bl_mobs *m, uint32_t seed);
 void bl_mobs_clear(struct bl_mobs *m);                      /* every mob gone (the player died, a new world) */
+void bl_mobs_set_keep(struct bl_mobs *m, bool on, float x, float y, float z);    /* where the keep is (the middle of its bottom), or that there is none */
 int bl_mobs_count(const struct bl_mobs *m);
 
 /* One step of every mob. `player` = the feet of the player; `pl_alive` false = nobody to hunt. `time_h` is the hour of the day (blocksview.h): goblins appear

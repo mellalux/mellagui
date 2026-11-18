@@ -55,6 +55,14 @@ void bl_mobs_init(struct bl_mobs *m, uint32_t seed)
 	m->spawn_t = 3.0f;
 }
 
+void bl_mobs_set_keep(struct bl_mobs *m, bool on, float x, float y, float z)
+{
+	m->keep_on = on;
+	m->keep[0] = x;
+	m->keep[1] = y;
+	m->keep[2] = z;
+}
+
 void bl_mobs_clear(struct bl_mobs *m)
 {
 	for (int i = 0; i < BL_MOBS_MAX; i++)
@@ -198,9 +206,15 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 
 	/* what it wants: to go to the player, or to wander about */
 	float dx = pl[0] - b->x, dz = pl[2] - b->z, d = hypotf(dx, dz);
-	bool chase = pl_alive && d < AGGRO && fabsf(pl[1] - b->y) < 12.0f;
+	float kx = M->keep[0] - b->x, kz = M->keep[2] - b->z, dk = hypotf(kx, kz);
+	bool near_pl = pl_alive && d < BL_GOBLIN_NEAR && fabsf(pl[1] - b->y) < 8.0f;
+	bool to_keep = M->keep_on && !near_pl && dk < BL_GOBLIN_KEEP_SEE && fabsf(M->keep[1] - b->y) < 14.0f;
+	bool chase = !to_keep && pl_alive && d < AGGRO && fabsf(pl[1] - b->y) < 12.0f;
 	float want = b->yaw, vmax = 0.0f;
-	if (chase) {
+	if (to_keep) {                                                              /* the player is not near: the keep is what it came for */
+		want = atan2f(kx, kz);
+		vmax = clampf(3.0f * (dk - 1.0f), 0.0f, CHASE_SPEED);                    /* it stops at the foot of it */
+	} else if (chase) {
 		want = atan2f(dx, dz);
 		vmax = clampf(3.0f * (d - 0.85f), 0.0f, CHASE_SPEED);       /* it slows down as it gets there and stops at arm's length */
 	} else {
@@ -270,7 +284,14 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		b->blocked = 0.0f;
 	}
 
-	/* a blow */
+	/* a blow at the keep */
+	if (to_keep && b->attack_cd <= 0.0f && dk < 1.45f && fabsf(M->keep[1] - b->y) < 2.6f) {
+		b->attack_cd = ATTACK_COOLDOWN;
+		b->swing = 1.0f;
+		R->keep_damage += BL_GOBLIN_KEEP_HIT;
+		R->keep_hits++;
+	}
+	/* a blow at the player */
 	if (chase && b->attack_cd <= 0.0f && d < ATTACK_REACH && pl[1] < b->y + BL_GOBLIN_H && pl[1] + PLAYER_H > b->y) {
 		b->attack_cd = ATTACK_COOLDOWN;
 		b->swing = 1.0f;

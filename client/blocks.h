@@ -35,6 +35,7 @@ enum bl_block {
 	BL_TORCH,               /* a stick with a flame: stands on the floor of its cell, light 14, can be walked through */
 	BL_LAMP,                /* a block that shines (light 15) */
 	BL_FLOW1, BL_FLOW2, BL_FLOW3, BL_FLOW4, BL_FLOW5, BL_FLOW6, BL_FLOW7,   /* water that flows: how far it has come from a source (1 = just left it, 7 = the last cell) */
+	BL_KEEP,                /* the keep: a tower of three of them (made by the game, never put by hand, never broken by the player): what the goblins attack */
 	BL_COUNT
 };
 
@@ -53,6 +54,12 @@ static inline bool bl_opaque(int b)       { return b != BL_AIR && !bl_water(b) &
 static inline bool bl_targetable(int b)   { return b != BL_AIR && !bl_water(b); }                           /* can be aimed at and broken */
 static inline bool bl_blocks_light(int b) { return bl_opaque(b) && b != BL_LEAVES; }                       /* shades the cells below it from the sky (leaves let most light through) */
 static inline int  bl_emission(int b)     { return b == BL_LAMP ? 15 : b == BL_TORCH ? 14 : 0; }            /* the light a block gives (0 .. 15) */
+static inline bool bl_breakable(int b)    { return b != BL_AIR && !bl_water(b) && b != BL_BEDROCK && b != BL_KEEP && b < BL_COUNT; }   /* what the player's hand can take away */
+
+/* How long it takes to break a block by hand, in seconds (survival; creative breaks at once), and what it leaves behind (0 = nothing; grass leaves dirt, stone leaves
+ * cobble, glass and leaves break to nothing). Both 0 for what cannot be broken. */
+float bl_hardness(int block);
+int bl_drop(int block);
 
 #define BL_MIN_SIZE 16
 #define BL_MAX_SIZE 1024

@@ -119,9 +119,9 @@ static void test_world(void)
 	}
 	CHECK(bad == 0, "%d cells hold a number that is no block", bad);
 	for (int k = BL_GRASS; k < BL_COUNT; k++)
-		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && !(k >= BL_FLOW1 && k <= BL_FLOW7))
+		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && !(k >= BL_FLOW1 && k <= BL_FLOW7))
 			CHECK(count[k] > 0, "the world has no %s", bl_block_name(k));
-	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0, "glass / planks / torches / lamps are only for the player to put");
+	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
 	long flowing = 0;
 	for (int k = BL_FLOW1; k <= BL_FLOW7; k++)
 		flowing += count[k];
@@ -2251,6 +2251,208 @@ static void test_mobs_render(void)
 	bl_world_free(w);
 }
 
+/* ---- survival: hardness, drops, the keep -------------------------------------------------------------------------------- */
+
+static void test_keep(void)
+{
+	/* what breaking takes and leaves */
+	int bad_h = 0, bad_d = 0;
+	for (int b = 1; b < BL_COUNT; b++) {
+		float h = bl_hardness(b);
+		int d = bl_drop(b);
+		if (bl_breakable(b)) {
+			bad_h += !(h > 0.02f && h <= 3.0f);
+			bad_d += !(d >= 0 && d < BL_COUNT && (d == BL_AIR || (bl_breakable(d) && d != BL_WATER)));
+		} else {
+			bad_h += h != 0.0f;
+			bad_d += d != 0;
+		}
+	}
+	CHECK(bad_h == 0 && bad_d == 0, "every block that can be broken takes 0.02 to 3 s and leaves a block that can be had, what cannot be broken takes nothing and leaves nothing (%d, %d)", bad_h, bad_d);
+	CHECK(bl_drop(BL_STONE) == BL_COBBLE && bl_drop(BL_GRASS) == BL_DIRT && bl_drop(BL_LEAVES) == BL_AIR && bl_drop(BL_GLASS) == BL_AIR && bl_drop(BL_LOG) == BL_LOG &&
+	      bl_drop(BL_TORCH) == BL_TORCH, "stone leaves cobble, grass dirt, leaves and glass nothing, the rest themselves");
+	CHECK(bl_hardness(BL_LEAVES) < bl_hardness(BL_DIRT) && bl_hardness(BL_DIRT) < bl_hardness(BL_LOG) && bl_hardness(BL_LOG) < bl_hardness(BL_STONE) && bl_hardness(BL_STONE) < bl_hardness(BL_BRICK),
+	      "leaves are quicker than dirt, dirt than wood, wood than stone, stone than brick");
+	CHECK(!bl_breakable(BL_AIR) && !bl_breakable(BL_WATER) && !bl_breakable(BL_FLOW3) && !bl_breakable(BL_BEDROCK) && !bl_breakable(BL_KEEP) && bl_breakable(BL_STONE), "what a hand can break");
+
+	/* the keep: a solid, opaque block that can be aimed at, is not broken by a hand and cannot be put by one */
+	struct bl_world *w = bl_world_flat(64, 64, 64, 20);
+	for (int y = 20; y < 23; y++)
+		bl_set(w, 32, y, 32, BL_KEEP);
+	CHECK(bl_get(w, 32, 21, 32) == BL_KEEP && bl_solid(BL_KEEP) && bl_opaque(BL_KEEP) && bl_targetable(BL_KEEP) && !strcmp(bl_block_name(BL_KEEP), "keep"), "the keep is a block");
+	float o[3] = { 32.5f, 21.5f, 28.5f }, d[3] = { 0, 0, 1 };
+	struct bl_hit h;
+	CHECK(bl_pick(w, o, d, 6.0f, &h) && h.x == 32 && h.y == 21 && h.z == 32 && h.face == BL_NZ, "it is aimed at");
+	CHECK(!bl_break(w, &h) && bl_get(w, 32, 21, 32) == BL_KEEP, "a hand does not break it");
+	struct bl_hit ph = h;
+	ph.px = 32;
+	ph.py = 21;
+	ph.pz = 31;
+	CHECK(!bl_place(w, &ph, BL_KEEP, NULL) && bl_get(w, 32, 21, 31) == BL_AIR, "and does not put one");
+	CHECK(bl_place(w, &ph, BL_STONE, NULL) && bl_break(w, &(struct bl_hit){ .hit = true, .x = 32, .y = 21, .z = 31 }), "(a stone beside it goes and comes as usual)");
+	for (int f = 0; f < BL_FACE_KINDS; f++) {
+		const uint32_t *t = bl_texture(BL_KEEP, f), *br = bl_texture(BL_BRICK, f);
+		int opaque = 0, same = 0;
+		for (int i = 0; i < 256; i++) {
+			opaque += (t[i] >> 24) == 255;
+			same += t[i] == br[i];
+		}
+		CHECK(opaque == 256 && same < 100, "the keep's picture (%d) is opaque and not the brick's (%d of 256 the same)", f, same);
+	}
+	const uint32_t *side = bl_texture(BL_KEEP, BL_FACE_SIDE);
+	int red = 0, gold = 0;
+	for (int i = 0; i < 256; i++) {
+		int r = (int)((side[i] >> 16) & 255), g = (int)((side[i] >> 8) & 255), b = (int)(side[i] & 255);
+		red += r > 140 && g < 70 && b < 70;
+		gold += r > 200 && g > 150 && b < 100;
+	}
+	CHECK(red > 25 && gold > 12, "a red shield with a gold cross on its sides (%d red, %d gold)", red, gold);
+	/* it is saved like any edit */
+	char path[300];
+	snprintf(path, sizeof path, "/tmp/mellagui-keep-test-%d.bl", (int)getpid());
+	CHECK(bl_save(w, path) == 0, "saved");
+	const char *err = NULL;
+	struct bl_world *lw = bl_load(path, &err);
+	CHECK(lw && bl_get(lw, 32, 22, 32) == BL_KEEP, "and it comes back");
+	bl_world_free(lw);
+	unlink(path);
+
+	/* a crack shows on the block that is being broken: the same view with a crack is darker over the aimed block and the same elsewhere */
+	{
+		enum { W = 80, H = 60 };
+		static uint32_t a[W * H], b[W * H];
+		struct bl_camera cam = { 32.5f, 21.6f, 29.0f, 0.0f, -0.02f, 0.8f };
+		struct bl_view v;
+		bl_view_init(&v);
+		v.target = true;
+		v.tx = 32;
+		v.ty = 21;
+		v.tz = 32;
+		bl_render(w, &cam, &v, a, W, H, W, 1);
+		v.crack = 0.9f;
+		bl_render(w, &cam, &v, b, W, H, W, 1);
+		long sa = 0, sb = 0;
+		int diff = 0;
+		for (int i = 0; i < W * H; i++) {
+			if (a[i] != b[i])
+				diff++;
+			sa += ((a[i] >> 16) & 255) + ((a[i] >> 8) & 255) + (a[i] & 255);
+			sb += ((b[i] >> 16) & 255) + ((b[i] >> 8) & 255) + (b[i] & 255);
+		}
+		CHECK(diff > 60 && sb < sa, "a block that is nearly broken shows cracks (%d pixels darker)", diff);
+		v.crack = 0.0f;
+		bl_render(w, &cam, &v, b, W, H, W, 1);
+		CHECK(memcmp(a, b, sizeof a) == 0, "no crack, no change");
+	}
+
+	/* the goblins and the keep */
+	struct bl_mobs M;
+	const float far_pl[3] = { 64.5f, 20.0f, 100.0f };            /* 36 blocks from the goblins: not seen by them, not far enough for them to be dropped */
+	struct bl_world *wk = bl_world_flat(128, 128, 64, 20);
+	for (int y = 20; y < 23; y++)
+		bl_set(wk, 80, y, 64, BL_KEEP);
+	bl_mobs_init(&M, 3);
+	bl_mobs_set_keep(&M, true, 80.5f, 20.0f, 64.5f);
+	M.spawn_t = 1e9f;
+	{
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 58.5f, 20.0f, 64.5f);
+		float dmg = 0, last = 0, t = 0, first = 0, mingap = 99.0f;
+		int hits = 0, bad = 0;
+		for (int i = 0; i < 30 * 40; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, wk, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			t += 1.0f / 30.0f;
+			dmg += R.keep_damage;
+			if (R.keep_hits) {
+				if (!hits)
+					first = t;
+				else
+					mingap = t - last < mingap ? t - last : mingap;
+				last = t;
+				hits += R.keep_hits;
+			}
+			if (R.damage > 0)
+				bad++;
+			const struct bl_mob *g = first_mob(&M);
+			if (g)
+				bad += box_in_solid(wk, g->x, g->y, g->z, BL_GOBLIN_HW, BL_GOBLIN_H);
+		}
+		CHECK(first > 4.0f && first < 14.0f, "a goblin 22 blocks from the keep and far from the player is at the keep in a few seconds (the first blow at %.1f s)", first);
+		CHECK(hits >= 24 && hits <= 38 && mingap >= 0.95f && fabsf(dmg - 2.0f * (float)hits) < 0.01f, "then a blow a second on it, two hit points each (%d blows, %.0f hit points, never closer than %.2f s)", hits, dmg, mingap);
+		CHECK(bad == 0, "and the player, far away, is not touched (%d)", bad);
+		const struct bl_mob *g = first_mob(&M);
+		CHECK(g && hypotf(g->x - 80.5f, g->z - 64.5f) > 0.9f && hypotf(g->x - 80.5f, g->z - 64.5f) < 1.5f, "it stands at the foot of it (%.2f m)", g ? hypotf(g->x - 80.5f, g->z - 64.5f) : 0);
+	}
+	{                                                                       /* two goblins hit twice as much */
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 78.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 82.5f, 20.0f, 64.5f);
+		float dmg = 0;
+		for (int i = 0; i < 30 * 10; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, wk, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			dmg += R.keep_damage;
+		}
+		CHECK(dmg >= 24.0f && dmg <= 40.0f, "two goblins at the keep: about four hit points a second (%.0f in 10 s)", dmg);
+	}
+	{                                                                       /* the player near them: they go for him, not for the keep */
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 78.5f, 20.0f, 64.5f);
+		float near_pl[3] = { 72.5f, 20.0f, 64.5f }, kd = 0, pd = 0;
+		for (int i = 0; i < 30 * 8; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, wk, near_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			kd += R.keep_damage;
+			pd += R.damage;
+		}
+		CHECK(pd >= 9.0f && kd <= 2.0f, "a goblin that has the player within 8 blocks hits him and not the keep (%.0f to him, %.0f to the keep)", pd, kd);
+	}
+	{                                                                       /* no keep: they do not go anywhere in particular; a far keep is not seen */
+		bl_mobs_clear(&M);
+		bl_mobs_set_keep(&M, false, 80.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 79.0f, 20.0f, 64.5f);
+		float dmg = 0;
+		for (int i = 0; i < 30 * 15; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, wk, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			dmg += R.keep_damage;
+		}
+		CHECK(dmg == 0.0f, "with no keep there is nothing to hit");
+		bl_mobs_set_keep(&M, true, 80.5f, 20.0f, 64.5f);
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 20.5f, 20.0f, 100.5f);
+		for (int i = 0; i < 30 * 15; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, wk, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			dmg += R.keep_damage;
+		}
+		CHECK(dmg == 0.0f && first_mob(&M) && first_mob(&M)->x < 40.0f, "a keep 70 blocks away is not seen");
+	}
+	{                                                                       /* a wall round the keep (three high, a ring two blocks out) keeps them off it */
+		for (int dx = -3; dx <= 3; dx++)
+			for (int dz = -3; dz <= 3; dz++)
+				if (abs(dx) == 3 || abs(dz) == 3)
+					for (int y = 20; y < 23; y++)
+						bl_set(wk, 80 + dx, y, 64 + dz, BL_STONE);
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 66.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, wk, BL_MOB_GOBLIN, 94.5f, 20.0f, 70.5f);
+		float dmg = 0;
+		int bad = 0;
+		for (int i = 0; i < 30 * 30; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, wk, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			dmg += R.keep_damage;
+			for (int k = 0; k < BL_MOBS_MAX; k++)
+				if (M.mob[k].alive)
+					bad += box_in_solid(wk, M.mob[k].x, M.mob[k].y, M.mob[k].z, BL_GOBLIN_HW, BL_GOBLIN_H);
+		}
+		CHECK(dmg == 0.0f && bad == 0, "a wall of stone round the keep keeps goblins off it for 30 s (%.0f damage)", dmg);
+	}
+	bl_world_free(wk);
+	bl_world_free(w);
+}
+
 /* ---- the command line: bench, shot, info ------------------------------------------------------------------------------- */
 
 static void write_ppm(const char *path, const uint32_t *px, int w, int h)
@@ -2580,6 +2782,8 @@ int main(int argc, char **argv)
 	printf("goblins\n");
 	test_mobs();
 	test_mobs_render();
+	printf("survival: hardness, drops, the keep\n");
+	test_keep();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

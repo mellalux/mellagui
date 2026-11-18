@@ -29,6 +29,7 @@ struct bl_view {
 	float dist;             /* how far to look, in blocks (16 .. 256) */
 	bool target;            /* outline the block (tx, ty, tz) */
 	int tx, ty, tz;
+	float crack;            /* 0 .. 1: how far the block (tx, ty, tz) is broken: dark cracks over its faces */
 	const struct bl_pets *pets;  /* Tom and the turtle, posed for this frame (bl_pets_pose), or NULL: drawn over the blocks behind them and hidden by the ones in front */
 	const struct bl_mobs *mobs;  /* the goblins, lit for this frame (bl_mobs_light), or NULL: opaque, in front of what is behind them and behind what is in front */
 	bool ids;               /* a hook for the tests: a pixel is 0xFF000000 | block << 8 | face of the first block a ray could aim at

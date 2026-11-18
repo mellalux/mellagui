@@ -58,7 +58,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
 };
 
 #define SLOTS 9
@@ -69,9 +69,11 @@ enum {
 #define SLOW_MS 27.0
 #define MAX_HP 20.0f                                        /* ten hearts, two hit points each */
 #define SWORD_MS 400                                        /* the least time between two blows */
+#define KEEP_HP 60.0f                                       /* what the keep can take: a goblin's blow is 2 */
+#define KEEP_H 3                                            /* it is a tower of three blocks */
 #define FAST_MS 15.0
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST };
 
 struct app {
 	struct wlwin win;
@@ -133,6 +135,19 @@ struct app {
 	int64_t next_sword;
 	int kills;                                              /* goblins killed since the world started (this run) */
 	bool warned;                                            /* "a goblin is coming" was said tonight */
+
+	bool survival;                                          /* breaking takes time and gives what was broken, a block put is used up, the keep is to be defended; false = creative */
+	bool conf_read, conf_mode;                              /* player.conf was there / had a `survival` line (an old file without one is a creative world) */
+	int inv[BL_COUNT];                                      /* what the player has (survival) */
+	bool dig_on;                                            /* a block is being broken: which, and for how long */
+	int dig_x, dig_y, dig_z;
+	float dig_t;
+	bool have_keep;
+	int keep[3];                                            /* the lowest block of the keep */
+	float keep_hp;
+	float keep_msg_t;                                       /* seconds until "the keep is under attack" may be said again */
+	int nights;                                             /* nights survived with the keep standing */
+	bool in_night;
 
 	struct bl_hit aim;
 	bool aimed;
@@ -291,7 +306,8 @@ static void conf_load(struct app *a, bool with_player)
 	FILE *f = fopen(path, "r");
 	if (!f)
 		return;
-	char line[256];
+	a->conf_read = true;
+	char line[2048];
 	while (fgets(line, sizeof line, f)) {
 		char *eq = strchr(line, '=');
 		if (!eq)
@@ -317,6 +333,35 @@ static void conf_load(struct app *a, bool with_player)
 			a->pets_on = d != 0;
 		else if (!strcmp(k, "mobs") && (d == 0 || d == 1))
 			a->mobs_on = d != 0;
+		else if (with_player && !strcmp(k, "survival") && (d == 0 || d == 1)) {
+			a->survival = d != 0;
+			a->conf_mode = true;
+		} else if (with_player && !strcmp(k, "keep_hp") && d >= 0 && d <= KEEP_HP)
+			a->keep_hp = (float)d;
+		else if (with_player && !strncmp(k, "keep_", 5) && k[5] >= 'x' && k[5] <= 'z' && !k[6]) {
+			a->keep[k[5] - 'x'] = (int)d;
+			a->have_keep = true;
+		} else if (with_player && !strcmp(k, "nights") && d >= 0 && d < 100000)
+			a->nights = (int)d;
+		else if (with_player && !strcmp(k, "kills") && d >= 0 && d < 1e6)
+			a->kills = (int)d;
+		else if (with_player && !strcmp(k, "inv")) {
+			for (char *p = v; *p;) {
+				char *end;
+				long b = strtol(p, &end, 10);
+				if (end == p || *end != ':')
+					break;
+				p = end + 1;
+				long n = strtol(p, &end, 10);
+				if (end == p)
+					break;
+				if (b > 0 && b < BL_COUNT && n >= 0 && n <= 99999)
+					a->inv[b] = (int)n;
+				p = end;
+				while (*p == ',' || *p == ' ')
+					p++;
+			}
+		}
 		else if (with_player && !strcmp(k, "pet_t") && d >= 0 && d < 1e7)
 			a->pet_t = (float)d;
 		else if (with_player && !strcmp(k, "yard_x") && d > 0 && d < 5000) {
@@ -373,7 +418,19 @@ static void conf_save(const struct app *a)
 	if (a->pets.placed)
 		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
 		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
-	fprintf(f, "hotbar = ");
+	fprintf(f, "survival = %d\nnights = %d\nkills = %d\n", a->survival, a->nights, a->kills);
+	if (a->have_keep)
+		fprintf(f, "keep_x = %d\nkeep_y = %d\nkeep_z = %d\nkeep_hp = %.1f\n", a->keep[0], a->keep[1], a->keep[2], a->keep_hp);
+	fprintf(f, "inv = ");
+	{
+		bool first = true;
+		for (int b = 1; b < BL_COUNT; b++)
+			if (a->inv[b] > 0) {
+				fprintf(f, "%s%d:%d", first ? "" : ",", b, a->inv[b]);
+				first = false;
+			}
+	}
+	fprintf(f, "\nhotbar = ");
 	for (int i = 0; i < SLOTS; i++)
 		fprintf(f, "%s%d", i ? "," : "", a->hotbar[i]);
 	fprintf(f, "\nfov = %.1f\nsensitivity = %.5f\n", a->fov * 180.0 / M_PI, a->sens);
@@ -513,6 +570,122 @@ static void mobs_setup(struct app *a)
 	a->warned = false;
 }
 
+/* ================================================================ survival: what he has, what he makes, the keep ================================================================ */
+
+/* A block comes into the inventory. One the hotbar does not show yet takes the place of a slot that is empty (the hand's own slot only when it is empty too). */
+static void inv_add(struct app *a, int block, int n)
+{
+	if (block <= BL_AIR || block >= BL_COUNT || n <= 0)
+		return;
+	a->inv[block] += n;
+	if (a->inv[block] > 99999)
+		a->inv[block] = 99999;
+	for (int i = 0; i < SLOTS; i++)
+		if (a->hotbar[i] == block)
+			return;
+	for (int i = 0; i < SLOTS; i++)
+		if (a->inv[a->hotbar[i]] == 0 && hand_ok(block)) {
+			a->hotbar[i] = block;
+			return;
+		}
+}
+
+/* what a block can be made into by hand: one of it gives `n_out` of the other (X) */
+struct recipe {
+	int from, to, n_out;
+};
+static const struct recipe k_recipes[] = {
+	{ BL_LOG, BL_PLANKS, 4 }, { BL_PLANKS, BL_TORCH, 2 }, { BL_SAND, BL_GLASS, 1 }, { BL_COBBLE, BL_STONE, 1 }, { BL_STONE, BL_BRICK, 1 },
+};
+#define N_RECIPES ((int)(sizeof k_recipes / sizeof k_recipes[0]))
+
+static const struct recipe *recipe_for(int block)
+{
+	for (int i = 0; i < N_RECIPES; i++)
+		if (k_recipes[i].from == block)
+			return &k_recipes[i];
+	return NULL;
+}
+
+/* make something of the block in the hand: false (and a message) when there is no way or he has none */
+static bool craft_hand(struct app *a)
+{
+	int b = hand_block(a);
+	const struct recipe *r = recipe_for(b);
+	if (!r) {
+		say(a, "A %s cannot be made into anything", bl_block_name(b));
+		return false;
+	}
+	if (a->inv[b] < 1) {
+		say(a, "You have no %s", bl_block_name(b));
+		return false;
+	}
+	a->inv[b]--;
+	inv_add(a, r->to, r->n_out);
+	say(a, "Made %d %s", r->n_out, bl_block_name(r->to));
+	return true;
+}
+
+/* the keep: three blocks high on open ground 4 to 9 blocks from (cx, cz), the first place found going round from straight ahead (+z) */
+static bool keep_place(struct app *a, float cx, float cz)
+{
+	static const int rings[] = { 6, 7, 5, 8, 9, 4 };
+	struct bl_world *w = a->world;
+	for (size_t ri = 0; ri < sizeof rings / sizeof rings[0]; ri++)
+		for (int k = 0; k < 8; k++) {
+			float ang = (float)k * 0.785398f;
+			int x = (int)floorf(cx + sinf(ang) * (float)rings[ri]), z = (int)floorf(cz + cosf(ang) * (float)rings[ri]);
+			if (x < 3 || z < 3 || x >= w->w - 3 || z >= w->d - 3)
+				continue;
+			int top = bl_top(w, x, z);
+			if (top < 1 || top + KEEP_H + 1 >= w->h)
+				continue;
+			bool ok = !bl_water(bl_get(w, x, top, z));
+			for (int i = 1; i <= KEEP_H && ok; i++)
+				ok = bl_get(w, x, top + i, z) == BL_AIR;
+			if (!ok)
+				continue;
+			for (int i = 1; i <= KEEP_H; i++)
+				bl_set(w, x, top + i, z, BL_KEEP);
+			a->keep[0] = x;
+			a->keep[1] = top + 1;
+			a->keep[2] = z;
+			a->have_keep = true;
+			return true;
+		}
+	return false;
+}
+
+/* the goblins know where the keep is, and only in survival */
+static void keep_sync(struct app *a)
+{
+	bl_mobs_set_keep(&a->mobs, a->survival && a->have_keep, (float)a->keep[0] + 0.5f, (float)a->keep[1], (float)a->keep[2] + 0.5f);
+}
+
+/* In survival there is a keep: the one the world has (its blocks are in the world), else a new one near (cx, cz) with all its hit points. */
+static void ensure_keep(struct app *a, float cx, float cz)
+{
+	if (a->survival && !(a->have_keep && bl_get(a->world, a->keep[0], a->keep[1], a->keep[2]) == BL_KEEP)) {
+		a->have_keep = false;
+		if (keep_place(a, cx, cz))
+			a->keep_hp = KEEP_HP;
+	}
+	keep_sync(a);
+}
+
+/* a new world in survival: nothing in the hands, no nights behind him, a keep near where he starts */
+static void survival_setup(struct app *a, float cx, float cz)
+{
+	memset(a->inv, 0, sizeof a->inv);
+	a->nights = 0;
+	a->in_night = false;
+	a->dig_on = false;
+	a->dig_t = 0.0f;
+	a->have_keep = false;
+	a->keep_hp = KEEP_HP;
+	ensure_keep(a, cx, cz);
+}
+
 /* ================================================================ the world ================================================================ */
 
 static uint32_t fresh_seed(void)
@@ -558,6 +731,7 @@ static void new_world(struct app *a)
 	a->have_tom = a->have_filip = false;
 	mobs_setup(a);
 	a->kills = 0;
+	survival_setup(a, a->pl.x, a->pl.z);
 	{
 		float near[3] = { a->pl.x, a->pl.y, a->pl.z };
 		pets_setup(a, near, false);
@@ -667,6 +841,8 @@ static void pause_game(struct app *a, enum prompt p)
 	a->prompt = p;
 	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_jump = a->k_sneak = a->k_ctrl = a->k_lk = a->k_rk = a->k_uk = a->k_dk = false;
 	a->b_break = a->b_place = false;
+	a->dig_on = false;
+	a->dig_t = 0.0f;
 	a->pc_hover = a->pc_down = a->pal_hover = -1;
 	wlwin_lock_pointer(&a->win, false);
 	wlwin_hide_cursor(&a->win, false);
@@ -731,6 +907,46 @@ static void do_break(struct app *a, int64_t now)
 	}
 }
 
+/* survival: the button is held on a block: the sword first, else the block takes its time (`bl_hardness`) and gives what it leaves (`bl_drop`) */
+static void dig_step(struct app *a, int64_t now, float dt)
+{
+	if (sword_swing(a, now)) {
+		a->dig_on = false;
+		return;
+	}
+	if (!a->aimed) {
+		a->dig_on = false;
+		return;
+	}
+	int b = bl_get(a->world, a->aim.x, a->aim.y, a->aim.z);
+	if (!bl_breakable(b)) {
+		if (b == BL_KEEP && !a->dig_on) {
+			a->dig_on = true;                                       /* (said once while the button is held) */
+			say(a, "The keep cannot be broken");
+		}
+		return;
+	}
+	if (!a->dig_on || a->dig_x != a->aim.x || a->dig_y != a->aim.y || a->dig_z != a->aim.z) {
+		a->dig_on = true;
+		a->dig_x = a->aim.x;
+		a->dig_y = a->aim.y;
+		a->dig_z = a->aim.z;
+		a->dig_t = 0.0f;
+	}
+	a->dig_t += dt;
+	if (a->dig_t >= bl_hardness(b)) {
+		if (bl_break(a->world, &a->aim)) {
+			int d = bl_drop(b);
+			if (d != BL_AIR)
+				inv_add(a, d, 1);
+			sound(a, "draw");
+			aim_update(a);
+		}
+		a->dig_on = false;
+		a->dig_t = 0.0f;
+	}
+}
+
 static void do_place(struct app *a)
 {
 	if (!a->aimed)
@@ -740,7 +956,14 @@ static void do_place(struct app *a)
 		sound(a, "no");
 		return;
 	}
+	if (a->survival && a->inv[hand_block(a)] < 1) {
+		sound(a, "no");
+		say(a, "You have no %s", bl_block_name(hand_block(a)));
+		return;
+	}
 	if (bl_place(a->world, &a->aim, hand_block(a), &a->pl)) {
+		if (a->survival)
+			a->inv[hand_block(a)]--;
 		sound(a, "place");
 		aim_update(a);
 	} else {
@@ -775,6 +998,18 @@ static void look_by(struct app *a, double dyaw, double dpitch)
 	a->pl.pitch = p < -1.553f ? -1.553f : p > 1.553f ? 1.553f : p;
 }
 
+/* the keep has no hit points left: it is gone, and the game with it (a card) */
+static void keep_fall(struct app *a)
+{
+	for (int i = 0; i < KEEP_H; i++)
+		bl_set(a->world, a->keep[0], a->keep[1] + i, a->keep[2], BL_AIR);
+	a->have_keep = false;
+	a->keep_hp = 0.0f;
+	keep_sync(a);
+	pause_game(a, P_LOST);
+	say(a, "The keep has fallen");
+}
+
 /* The goblins move; their blows take hit points and push the player; he mends slowly when nobody has hit him for a while; no hit points left = dead (a card). */
 static void mobs_advance(struct app *a, float dt)
 {
@@ -782,6 +1017,16 @@ static void mobs_advance(struct app *a, float dt)
 	struct bl_mobs_result R;
 	int before = bl_mobs_count(&a->mobs);
 	bl_mobs_step(&a->mobs, a->world, feet, a->hp > 0.0f, a->time_h, dt, &R);
+	if (R.keep_damage > 0.0f && a->survival && a->have_keep) {
+		a->keep_hp -= R.keep_damage;
+		if (a->keep_msg_t <= 0.0f) {
+			say(a, "The keep is under attack!");
+			sound(a, "no");
+			a->keep_msg_t = 8.0f;
+		}
+		if (a->keep_hp <= 0.0f)
+			keep_fall(a);
+	}
 	if (R.born && !a->warned && before == 0) {
 		a->warned = true;
 		say(a, "A goblin! The left button is the sword");
@@ -823,6 +1068,24 @@ static void respawn(struct app *a)
 	say(a, "Back at the start");
 }
 
+/* survival: the keep mends by day, the nights are counted (a night is over when the sun is well up again) */
+static void survival_tick(struct app *a, float dt)
+{
+	a->keep_msg_t = fmaxf(0.0f, a->keep_msg_t - dt);
+	float day = bl_daylight(a->time_h);
+	if (day < 0.3f) {
+		a->in_night = true;
+	} else if (day > 0.6f) {
+		if (a->in_night && a->have_keep) {
+			a->nights++;
+			say(a, "Night %d survived", a->nights);
+		}
+		a->in_night = false;
+		if (a->have_keep && a->keep_hp < KEEP_HP)
+			a->keep_hp = fminf(KEEP_HP, a->keep_hp + 1.5f * dt);
+	}
+}
+
 static void advance(struct app *a, int64_t now, float dt)
 {
 	if (a->playing) {
@@ -842,7 +1105,11 @@ static void advance(struct app *a, int64_t now, float dt)
 		a->hit_t = fmaxf(0.0f, a->hit_t - dt);
 		if (a->playing)                                      /* (he may have died in that step) */
 			aim_update(a);
-		if (a->b_break && now >= a->next_break) {
+		if (a->survival) {
+			if (a->b_break && a->playing)
+				dig_step(a, now, dt);
+			survival_tick(a, dt);
+		} else if (a->b_break && now >= a->next_break) {
 			do_break(a, now);
 			a->next_break = now + REPEAT_MS;
 		}
@@ -965,10 +1232,41 @@ static void paint_hotbar(struct app *a, const struct lay *L)
 			wlwin_blit_px_over(w, x + 4, y + 4, ic, isz * sc, isz * sc, isz * sc);
 		char n[2] = { (char)('1' + i), 0 };
 		wlwin_text(w, x + 3, y + 1, n, 1, i == a->slot ? 0xffffffu : 0xa8b0bcu, 0);
+		if (a->survival) {                                                     /* how many he has: red when none */
+			int have = a->inv[a->hotbar[i]];
+			char cnt[16];
+			snprintf(cnt, sizeof cnt, "%d", have > 999 ? 999 : have);
+			shadow_text(w, x + L->slot - lm_font_text_width(cnt) - 3, y + L->slot - LM_FONT_H - 1, cnt, have > 0 ? 0xffffffu : 0xff6a5au);
+		}
 	}
 	if (now_ms() < a->name_until) {
 		const char *nm = bl_block_name(hand_block(a));
 		shadow_text(w, (w->bw - lm_font_text_width(nm)) / 2, L->y0 - 30, nm, 0xffffffu);
+	}
+}
+
+/* survival: the keep's hit points over the middle of the top, the nights survived, and under the crosshair how far the block is broken */
+static void paint_survival(struct app *a)
+{
+	struct wlwin *w = &a->win;
+	if (a->have_keep) {
+		int bw = LM_CLAMP(w->bw / 3, 140, 260), x = (w->bw - bw) / 2, y = 8;
+		float f = a->keep_hp / KEEP_HP;
+		f = f < 0 ? 0 : f > 1 ? 1 : f;
+		wlwin_round_fill(w, x - 2, y - 2, bw + 4, 16, 6, 0x101216u);
+		wlwin_round_fill(w, x, y, bw, 12, 5, 0x3a2a2au);
+		if (f > 0.0f)
+			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 12, 5, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
+		char l[80];
+		snprintf(l, sizeof l, "Keep %d   Nights %d", (int)ceilf(a->keep_hp), a->nights);
+		shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
+	}
+	if (a->dig_on) {
+		float hd = bl_hardness(bl_get(a->world, a->dig_x, a->dig_y, a->dig_z)), f = hd > 0.0f ? a->dig_t / hd : 0.0f;
+		f = f < 0 ? 0 : f > 1 ? 1 : f;
+		int cx = w->bw / 2, cy = w->bh / 2 + 22;
+		wlwin_fill(w, cx - 24, cy - 1, 48, 7, 0x101010u);
+		wlwin_fill(w, cx - 23, cy, (int)(46.0f * f), 5, 0xf0e8d0u);
 	}
 }
 
@@ -1008,6 +1306,8 @@ static const char *const HELP_LINES[] = {
 	"[ and ] move the clock an hour, T: the clock stands, runs, follows the real sun.",
 	"P shows or hides Tom the cat and Filip the turtle (they live in a yard near where you start).",
 	"At night goblins come: the left button is the sword (three blows). Ten hearts, M switches them off.",
+	"Survival (G switches it and creative): blocks take time, what you break you have, a block put is used up,",
+	"X makes something of the block in your hand (log: planks, planks: torches). Defend the keep, the tower near the start.",
 	"F3 shows the numbers. Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits.",
 };
 
@@ -1021,7 +1321,7 @@ static int pal_cell(const struct app *a)                   /* the size of a squa
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
 	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
-	int ch = a->prompt == P_HELP ? 370 : a->prompt == P_PAUSE ? 200 : a->prompt == P_DEAD ? 150 : 130;
+	int ch = a->prompt == P_HELP ? 420 : a->prompt == P_PAUSE ? 200 : (a->prompt == P_DEAD || a->prompt == P_LOST) ? 150 : 130;
 	int cw = a->prompt == P_HELP ? 600 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
@@ -1061,7 +1361,7 @@ static void paint_card(struct app *a)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
-	const char *title = a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
+	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	const char *labels[4] = { "Cancel", "OK" };
 	uint32_t cols[4] = { lm_theme.btn_grey, lm_theme.btn_blue };
@@ -1079,6 +1379,13 @@ static void paint_card(struct app *a)
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, "W A S D walk, Space jumps, Shift sneaks, Ctrl runs, F flies.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Left button breaks, right button puts a block, 1 to 9 choose it.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 3 * (LM_FONT_H + 5), "Esc pauses. F1 lists every key.", 1, lm_theme.text_dim, tw);
+	} else if (a->prompt == P_LOST) {
+		labels[0] = "New world";
+		cols[0] = lm_theme.btn_amber;
+		char l[120];
+		wlwin_text(w, tx, ty, "The goblins pulled it down. The game is over.", 1, lm_theme.text, tw);
+		snprintf(l, sizeof l, "Nights survived: %d     Goblins killed: %d", a->nights, a->kills);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_DEAD) {
 		labels[0] = "Respawn";
 		cols[0] = lm_theme.btn_green;
@@ -1099,6 +1406,12 @@ static void paint_card(struct app *a)
 			const uint32_t *ic = a->icon[k_palette[i]];
 			if (ic && a->icon_s == isz * sc)
 				wlwin_blit_px_over(w, x + (cell - isz) / 2, y + (cell - isz) / 2, ic, isz * sc, isz * sc, isz * sc);
+			if (a->survival) {
+				int have = a->inv[k_palette[i]];
+				char cnt[16];
+				snprintf(cnt, sizeof cnt, "%d", have > 999 ? 999 : have);
+				shadow_text(w, x + cell - lm_font_text_width(cnt) - 5, y + cell - LM_FONT_H - 3, cnt, have > 0 ? 0xffffffu : 0xff6a5au);
+			}
 		}
 		char l[120];
 		int shown = a->pal_hover >= 0 ? k_palette[a->pal_hover] : hand_block(a);
@@ -1152,6 +1465,13 @@ static void write_dump(struct app *a)
 			const struct bl_mob *m = &a->mobs.mob[i];
 			fprintf(f, "mob %d x=%.3f y=%.3f z=%.3f hp=%.1f yaw=%.3f hurt=%.2f dist=%.2f\n", i, m->x, m->y, m->z, m->hp, m->yaw, m->hurt, hypotf(m->x - a->pl.x, m->z - a->pl.z));
 		}
+	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
+	        a->dig_on ? a->dig_t : -1.0f);
+	fprintf(f, "inv");
+	for (int b = 1; b < BL_COUNT; b++)
+		if (a->inv[b] > 0)
+			fprintf(f, " %s=%d", bl_block_name(b), a->inv[b]);
+	fprintf(f, "\n");
 	if (!a->pets.placed)
 		fprintf(f, "pets on=%d placed=0\n", a->pets_on);
 	if (a->pets.placed) {
@@ -1234,6 +1554,10 @@ static void paint(struct wlwin *w)
 	}
 	if (a->aimed && a->playing) {
 		v.target = true;
+		if (a->survival && a->dig_on && a->dig_x == a->aim.x && a->dig_y == a->aim.y && a->dig_z == a->aim.z) {
+			float hd = bl_hardness(bl_get(a->world, a->dig_x, a->dig_y, a->dig_z));
+			v.crack = hd > 0.0f ? fminf(1.0f, a->dig_t / hd) : 0.0f;
+		}
 		v.tx = a->aim.x;
 		v.ty = a->aim.y;
 		v.tz = a->aim.z;
@@ -1251,12 +1575,14 @@ static void paint(struct wlwin *w)
 	layout(a, &L);
 	paint_hotbar(a, &L);
 	paint_hearts(a, &L);
+	if (a->survival)
+		paint_survival(a);
 	if (a->prompt == P_NONE)
 		paint_crosshair(w, a->hit_t > 0.0f);
 	if (a->debug)
 		paint_debug(a);
 	if (a->msg[0]) {
-		shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, 26, a->msg, 0xffffffu);
+		shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, a->survival ? 52 : 26, a->msg, 0xffffffu);       /* (under the keep's bar in survival) */
 		if (t1 - a->msg_ms > 3000)
 			a->msg[0] = 0;
 	}
@@ -1275,6 +1601,11 @@ static void paint(struct wlwin *w)
 
 static void card_action(struct app *a, int which)
 {
+	if (a->prompt == P_LOST) {                                  /* the game is over: a new world (the old one stays in its file until it is saved over) */
+		new_world(a);
+		resume_game(a);
+		return;
+	}
 	if (a->prompt == P_DEAD) {
 		respawn(a);
 		resume_game(a);
@@ -1329,6 +1660,10 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 	int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
 	if (args[3].u == 1) {
 		int pc = pal_cell_at(a, a->px, a->py);
+		if (pc >= 0 && a->survival && a->inv[k_palette[pc]] < 1) {      /* (in survival only what he has) */
+			sound(a, "no");
+			return;
+		}
 		if (pc >= 0) {                                       /* a block of the palette goes into the slot in the hand */
 			a->hotbar[a->slot] = k_palette[pc];
 			a->name_until = now_ms() + 1800;
@@ -1342,7 +1677,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		else if (a->prompt == P_PAUSE) {                     /* a click anywhere else goes on playing */
 			resume_game(a);
 			a->ignore_release = true;
-		} else if (!wlcard_has(&c, (int)a->px, (int)a->py) && a->prompt != P_DEAD) {
+		} else if (!wlcard_has(&c, (int)a->px, (int)a->py) && a->prompt != P_DEAD && a->prompt != P_LOST) {
 			card_action(a, 0);
 		}
 	} else {
@@ -1395,8 +1730,14 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 		if (button == 272) {
 			a->b_break = state == 1;
 			if (state == 1) {
-				do_break(a, now);
+				if (a->survival)
+					dig_step(a, now, 0.0f);                    /* (the sword at once; a block takes its time) */
+				else
+					do_break(a, now);
 				a->next_break = now + REPEAT_MS;
+			} else {
+				a->dig_on = false;
+				a->dig_t = 0.0f;
 			}
 		} else if (button == 273) {
 			a->b_place = state == 1;
@@ -1502,6 +1843,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			card_action(a, 0);
 		return;
 	}
+	if (a->prompt == P_LOST) {                                  /* (Esc does not start a new world by accident) */
+		if (code == K_ENTER || code == K_SPACE)
+			card_action(a, 0);
+		return;
+	}
 	if (a->prompt != P_NONE) {
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
@@ -1529,6 +1875,24 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	}
 	if (code == K_E) {
 		pause_game(a, P_PALETTE);
+		return;
+	}
+	if (code == K_G && a->playing) {                            /* survival <-> creative */
+		a->survival = !a->survival;
+		a->dig_on = false;
+		a->dig_t = 0.0f;
+		if (a->survival)
+			ensure_keep(a, a->pl.x, a->pl.z);
+		else
+			keep_sync(a);
+		say(a, a->survival ? "Survival: blocks take time and are used up, defend the keep" : "Creative: every block, at once");
+		return;
+	}
+	if (code == K_X && a->playing) {
+		if (a->survival)
+			craft_hand(a);
+		else
+			say(a, "Nothing to make in creative: every block is there");
 		return;
 	}
 	if (code == K_M && a->playing) {
@@ -1824,6 +2188,213 @@ static int selftest(void)
 		bl_world_free(ma.world);
 	}
 
+	/* survival: breaking takes its time and leaves what it leaves, a block put is used up, X makes things, the keep stands near the start, goblins pull it down */
+	{
+		static struct app sa;
+		memset(&sa, 0, sizeof sa);
+		sa.world = bl_world_flat(64, 64, 64, 20);
+		sa.survival = true;
+		sa.mobs_on = true;
+		sa.sound_on = false;
+		sa.time_h = 12.0f;
+		memcpy(sa.hotbar, k_default_hotbar, sizeof sa.hotbar);
+		bl_player_init(&sa.pl, sa.world);
+		settle_player(&sa);
+		mobs_setup(&sa);
+		survival_setup(&sa, sa.pl.x, sa.pl.z);
+		CHECK(sa.have_keep && sa.keep_hp == KEEP_HP, "a keep is made at the start");
+		float kd = hypotf((float)sa.keep[0] + 0.5f - sa.pl.x, (float)sa.keep[2] + 0.5f - sa.pl.z);
+		CHECK(kd >= 3.9f && kd <= 10.0f, "4 to 10 blocks from where he starts (%.1f)", kd);
+		CHECK(bl_get(sa.world, sa.keep[0], sa.keep[1], sa.keep[2]) == BL_KEEP && bl_get(sa.world, sa.keep[0], sa.keep[1] + 2, sa.keep[2]) == BL_KEEP &&
+		      bl_get(sa.world, sa.keep[0], sa.keep[1] + 3, sa.keep[2]) == BL_AIR && bl_get(sa.world, sa.keep[0], sa.keep[1] - 1, sa.keep[2]) != BL_AIR, "three blocks high, on the ground");
+		CHECK(sa.mobs.keep_on && fabsf(sa.mobs.keep[0] - ((float)sa.keep[0] + 0.5f)) < 0.01f, "the goblins know where it is");
+		int ninv = 0;
+		for (int b = 0; b < BL_COUNT; b++)
+			ninv += sa.inv[b];
+		CHECK(ninv == 0, "the pockets are empty");
+		/* collecting: a block he has not seen goes into a slot that is empty */
+		inv_add(&sa, BL_LOG, 3);
+		CHECK(sa.inv[BL_LOG] == 3, "three logs");
+		inv_add(&sa, BL_LEAVES, 1);
+		bool leaves_in_bar = false;
+		for (int i = 0; i < SLOTS; i++)
+			leaves_in_bar |= sa.hotbar[i] == BL_LEAVES;
+		CHECK(leaves_in_bar, "a block that was not in the hotbar takes the place of an empty slot");
+		int slot_log = -1;
+		for (int i = 0; i < SLOTS; i++)
+			if (sa.hotbar[i] == BL_LOG)
+				slot_log = i;
+		inv_add(&sa, BL_LOG, 2);
+		CHECK(slot_log >= 0 && sa.hotbar[slot_log] == BL_LOG && sa.inv[BL_LOG] == 5, "one that is already in it stays where it is");
+		memcpy(sa.hotbar, k_default_hotbar, sizeof sa.hotbar);                 /* (the hotbar as it started: the tests below look for their blocks in it) */
+		sa.inv[BL_LEAVES] = 0;
+		/* making: a log is four planks, nothing is made of what he has not */
+		sa.slot = 0;
+		for (int i = 0; i < SLOTS; i++)
+			if (sa.hotbar[i] == BL_LOG)
+				sa.slot = i;
+		CHECK(craft_hand(&sa) && sa.inv[BL_LOG] == 4 && sa.inv[BL_PLANKS] == 4, "X: a log makes four planks");
+		for (int i = 0; i < SLOTS; i++)
+			if (sa.hotbar[i] == BL_DIRT)
+				sa.slot = i;
+		CHECK(!craft_hand(&sa) && sa.inv[BL_DIRT] == 0, "dirt makes nothing");
+		for (int i = 0; i < SLOTS; i++)
+			if (sa.hotbar[i] == BL_SAND)
+				sa.slot = i;
+		CHECK(!craft_hand(&sa), "and what he has not he cannot make anything of");
+		for (int i = 0; i < N_RECIPES; i++)
+			CHECK(hand_ok(k_recipes[i].from) && hand_ok(k_recipes[i].to) && k_recipes[i].n_out >= 1, "recipe %d is of blocks that can be had", i);
+		/* digging: a block takes `bl_hardness` of held time, not before; what it leaves goes into the pockets; the sword has the first word */
+		sa.pl.pitch = -1.5f;                                                     /* looking down at the ground he stands on */
+		sa.pl.y = 20.0f;
+		aim_update(&sa);
+		CHECK(sa.aimed && bl_get(sa.world, sa.aim.x, sa.aim.y, sa.aim.z) == BL_GRASS, "he aims at the grass under him");
+		uint32_t rev = sa.world->rev;
+		dig_step(&sa, 1000, 0.0f);
+		dig_step(&sa, 1000, 0.3f);
+		CHECK(sa.world->rev == rev && sa.dig_on && fabsf(sa.dig_t - 0.3f) < 0.001f, "0.3 s of 0.6: nothing is broken yet");
+		dig_step(&sa, 1000, 0.31f);
+		CHECK(sa.world->rev != rev && sa.inv[BL_DIRT] == 1 && !sa.dig_on, "0.6 s: the grass is gone and he has a dirt");
+		aim_update(&sa);
+		CHECK(sa.aimed && bl_get(sa.world, sa.aim.x, sa.aim.y, sa.aim.z) == BL_DIRT, "now he aims at dirt");
+		sa.dig_on = false;
+		for (int i = 0; i < 40; i++)                                             /* three blocks down is stone */
+			dig_step(&sa, 1000, 0.1f), aim_update(&sa);
+		CHECK(sa.inv[BL_COBBLE] >= 1 && sa.inv[BL_DIRT] >= 3, "digging down 4 s: cobble from the stone (%d), dirt (%d)", sa.inv[BL_COBBLE], sa.inv[BL_DIRT]);
+		sa.pl.y = 17.0f;                                                         /* (he has gone down the hole: the next blocks are in reach) */
+		aim_update(&sa);
+		/* looking at something else starts again */
+		sa.dig_on = true;
+		sa.dig_x = 0;
+		sa.dig_t = 0.55f;
+		dig_step(&sa, 1000, 0.01f);
+		CHECK(sa.dig_t < 0.1f, "another block: the time starts again");
+		/* putting: used up, and not at all with none */
+		sa.pl.pitch = -1.5f;
+		aim_update(&sa);
+		for (int i = 0; i < SLOTS; i++)
+			if (sa.hotbar[i] == BL_PLANKS)
+				sa.slot = i;
+		CHECK(sa.aimed && sa.inv[BL_PLANKS] >= 4, "planks in the hand and something to put them on");
+		int have = sa.inv[BL_PLANKS];
+		do_place(&sa);
+		CHECK(sa.inv[BL_PLANKS] == have - 1, "a block put is used up (%d -> %d)", have, sa.inv[BL_PLANKS]);
+		sa.inv[BL_PLANKS] = 0;
+		uint32_t rev2 = sa.world->rev;
+		aim_update(&sa);
+		do_place(&sa);
+		CHECK(sa.world->rev == rev2 && sa.inv[BL_PLANKS] == 0, "with none, nothing is put");
+		sa.survival = false;
+		sa.pl.x = 30.5f;
+		sa.pl.z = 30.5f;
+		sa.pl.y = 20.0f;
+		sa.pl.yaw = 0.0f;
+		sa.pl.pitch = -0.6f;
+		aim_update(&sa);
+		do_place(&sa);
+		CHECK(sa.world->rev != rev2 && sa.inv[BL_PLANKS] == 0, "(in creative it is put as before, with nothing in the pockets)");
+		sa.survival = true;
+		/* the keep is not broken, and the goblins' blows wear it down: mended by day, at 0 the tower goes and the game is over */
+		struct bl_hit kh = { .hit = true, .x = sa.keep[0], .y = sa.keep[1], .z = sa.keep[2] };
+		CHECK(!bl_break(sa.world, &kh), "a hand cannot break the keep");
+		sa.keep_hp = 10.0f;
+		sa.time_h = 12.0f;
+		survival_tick(&sa, 2.0f);
+		CHECK(sa.keep_hp > 12.5f && sa.keep_hp < 13.5f, "by day it mends one and a half a second (%.1f)", sa.keep_hp);
+		sa.time_h = 0.0f;
+		float h0 = sa.keep_hp;
+		survival_tick(&sa, 2.0f);
+		CHECK(sa.keep_hp == h0 && sa.in_night, "by night it does not");
+		sa.time_h = 12.0f;
+		int n0 = sa.nights;
+		survival_tick(&sa, 0.1f);
+		CHECK(sa.nights == n0 + 1 && !sa.in_night, "when the sun is up again a night is counted");
+		survival_tick(&sa, 0.1f);
+		CHECK(sa.nights == n0 + 1, "once");
+		sa.prompt = P_NONE;
+		sa.playing = true;
+		sa.keep_hp = 3.0f;
+		bl_mobs_clear(&sa.mobs);
+		sa.mobs.spawn_t = 1e9f;
+		sa.time_h = 0.0f;
+		sa.pl.x = 5.0f;
+		sa.pl.z = 5.0f;
+		sa.pl.y = 20.0f;
+		bl_mobs_add(&sa.mobs, sa.world, BL_MOB_GOBLIN, (float)sa.keep[0] + 3.5f, (float)sa.keep[1], (float)sa.keep[2] + 0.5f);
+		for (int i = 0; i < 30 * 12 && sa.have_keep; i++)
+			mobs_advance(&sa, 1.0f / 30.0f);
+		CHECK(!sa.have_keep && sa.prompt == P_LOST && !sa.playing, "a goblin at the keep pulls it down: the game is over");
+		CHECK(bl_get(sa.world, sa.keep[0], sa.keep[1], sa.keep[2]) == BL_AIR && bl_get(sa.world, sa.keep[0], sa.keep[1] + 2, sa.keep[2]) == BL_AIR && !sa.mobs.keep_on, "its blocks are gone and the goblins have no keep to go to");
+		/* a keep is made again when there is none and he is in survival */
+		ensure_keep(&sa, sa.pl.x, sa.pl.z);
+		CHECK(sa.have_keep && sa.keep_hp == KEEP_HP && sa.mobs.keep_on, "ensure_keep makes a new one");
+		/* creative: the goblins do not know of any */
+		sa.survival = false;
+		keep_sync(&sa);
+		CHECK(!sa.mobs.keep_on, "in creative there is no keep to defend");
+		bl_world_free(sa.world);
+	}
+
+	/* the settings of a survival world are kept: mode, keep, nights, kills and what he has; a bad line is not believed */
+	{
+		char dir2[128];
+		snprintf(dir2, sizeof dir2, "/tmp/mellagui-blocks-selftest2-%d", (int)getpid());
+		static struct app sb, sc;
+		memset(&sb, 0, sizeof sb);
+		snprintf(sb.dir, sizeof sb.dir, "%s/x", dir2);
+		CHECK(mkdirs(sb.dir) == 0, "mkdirs");
+		sb.world_size = 64;
+		sb.fov = 1.2f;
+		sb.sens = 0.0025f;
+		memcpy(sb.hotbar, k_default_hotbar, sizeof sb.hotbar);
+		CHECK(make_world(&sb, 5, true), "a flat world");
+		sb.survival = true;
+		sb.have_keep = true;
+		sb.keep[0] = 40;
+		sb.keep[1] = 21;
+		sb.keep[2] = 33;
+		sb.keep_hp = 41.5f;
+		sb.nights = 4;
+		sb.kills = 9;
+		sb.inv[BL_COBBLE] = 17;
+		sb.inv[BL_LOG] = 3;
+		conf_save(&sb);
+		memset(&sc, 0, sizeof sc);
+		snprintf(sc.dir, sizeof sc.dir, "%s", sb.dir);
+		sc.fov = 1.2f;
+		sc.sens = 0.0025f;
+		memcpy(sc.hotbar, k_default_hotbar, sizeof sc.hotbar);
+		sc.pl.x = 1;
+		conf_load(&sc, true);
+		CHECK(sc.conf_read && sc.conf_mode && sc.survival && sc.have_keep && sc.keep[0] == 40 && sc.keep[1] == 21 && sc.keep[2] == 33 && fabsf(sc.keep_hp - 41.5f) < 0.01f, "the keep and the mode come back");
+		CHECK(sc.nights == 4 && sc.kills == 9 && sc.inv[BL_COBBLE] == 17 && sc.inv[BL_LOG] == 3 && sc.inv[BL_STONE] == 0, "and the nights, the kills and the pockets");
+		char path2[600];
+		snprintf(path2, sizeof path2, "%s/player.conf", sb.dir);
+		FILE *f2 = fopen(path2, "w");
+		if (f2) {
+			fprintf(f2, "survival = 7\nkeep_hp = 900\nnights = -3\ninv = 3:5,999:2,4:-1,6:4\nkeep_x = 5\n");
+			fclose(f2);
+		}
+		memset(&sc, 0, sizeof sc);
+		snprintf(sc.dir, sizeof sc.dir, "%s", sb.dir);
+		conf_load(&sc, true);
+		CHECK(!sc.conf_mode && sc.keep_hp == 0.0f && sc.nights == 0 && sc.inv[3] == 5 && sc.inv[4] == 0 && sc.inv[6] == 4, "a survival of 7, 900 hit points, minus three nights and a block number that is none are not believed");
+		FILE *f3 = fopen(path2, "w");
+		if (f3) {
+			fprintf(f3, "pets = 1\n");
+			fclose(f3);
+		}
+		memset(&sc, 0, sizeof sc);
+		snprintf(sc.dir, sizeof sc.dir, "%s", sb.dir);
+		conf_load(&sc, true);
+		CHECK(sc.conf_read && !sc.conf_mode, "an old file without a mode line says so (the world is then a creative one)");
+		bl_world_free(sb.world);
+		char cmd2[200];
+		snprintf(cmd2, sizeof cmd2, "rm -rf '%s'", dir2);
+		if (system(cmd2) != 0)
+			fprintf(stderr, "(could not remove %s)\n", dir2);
+	}
+
 	/* the hand: slots wrap round */
 	memset(&a, 0, sizeof a);
 	a.slot = 0;
@@ -1855,8 +2426,11 @@ int main(int argc, char **argv)
 	a.pal_hover = -1;
 	a.pets_on = true;
 	a.mobs_on = true;
+	a.survival = true;
 	int clock_cli = -1;
 	bool no_pets = false, no_mobs = false;
+	int mode_cli = -1;                                      /* --survival 1, --creative 0 */
+	char give[256] = "";
 	int ngob = 0;
 	float gob[4][2] = { { 0 } };
 	float pet_at = -1.0f;
@@ -1911,10 +2485,24 @@ int main(int argc, char **argv)
 			clock_cli = 0;
 		} else if (!strcmp(argv[i], "--real-clock")) {
 			clock_cli = 2;
+		} else if (!strcmp(argv[i], "--clock")) {
+			clock_cli = 1;
 		} else if (!strcmp(argv[i], "--no-pets")) {
 			no_pets = true;
 		} else if (!strcmp(argv[i], "--no-mobs")) {
 			no_mobs = true;
+		} else if (!strcmp(argv[i], "--survival")) {
+			mode_cli = 1;
+		} else if (!strcmp(argv[i], "--creative")) {
+			mode_cli = 0;
+		} else if (!strcmp(argv[i], "--give") && i + 1 < argc) {                   /* NAME=N,NAME=N: what is in the pockets at the start (for the tests, and for cheating) */
+			snprintf(give, sizeof give, "%s", argv[++i]);
+		} else if (!strcmp(argv[i], "--day-minutes") && i + 1 < argc) {
+			a.day_minutes = (float)atof(argv[++i]);
+			if (!(a.day_minutes >= 0.05f && a.day_minutes <= 600.0f)) {
+				fprintf(stderr, "mellagui-blocks: --day-minutes wants 0.05 to 600\n");
+				return 2;
+			}
 		} else if (!strcmp(argv[i], "--goblin") && i + 1 < argc) {                 /* a goblin at DX,DZ blocks from where the player starts (for the tests) */
 			if (ngob >= 4 || sscanf(argv[++i], "%f,%f%c", &gob[ngob][0], &gob[ngob][1], &junk) != 2) {
 				fprintf(stderr, "mellagui-blocks: --goblin wants DX,DZ (at most four)\n");
@@ -1942,7 +2530,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -1998,6 +2586,23 @@ int main(int argc, char **argv)
 		pets_setup(&a, near, true);
 	}
 	mobs_setup(&a);
+	if (from_file && a.conf_read && !a.conf_mode && mode_cli < 0)
+		a.survival = false;                                     /* a world saved before survival was a creative world */
+	if (mode_cli >= 0)
+		a.survival = mode_cli != 0;
+	if (from_file)
+		ensure_keep(&a, a.pl.x, a.pl.z);
+	else
+		survival_setup(&a, a.pl.x, a.pl.z);
+	for (char *tok = strtok(give, ","); tok; tok = strtok(NULL, ",")) {
+		char *eq = strchr(tok, '=');
+		int n = eq ? atoi(eq + 1) : 1;
+		if (eq)
+			*eq = 0;
+		for (int b = 1; b < BL_COUNT; b++)
+			if (!strcmp(tok, bl_block_name(b)) && hand_ok(b) && n > 0)
+				inv_add(&a, b, n);
+	}
 	for (int i = 0; i < ngob && a.mobs_on; i++) {
 		int gx = (int)floorf(a.pl.x + gob[i][0]), gz = (int)floorf(a.pl.z + gob[i][1]);
 		int top = bl_top(a.world, gx, gz);

@@ -19459,14 +19459,14 @@ class TestBlocks(Base):
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
     K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
-             f1=59, f3=61, lbrace=26, rbrace=27, m=50, **{str(i): 1 + i for i in range(1, 10)})
+             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
         super().setUp()
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19477,6 +19477,8 @@ class TestBlocks(Base):
             argv += ['--seed', '11', '--flat']
         if not pets:
             argv += ['--no-pets']                            # (a yard and a pond dug beside the player are for the tests of the pets only)
+        if not nomode:
+            argv += ['--survival' if survival else '--creative']    # (the old tests break and put blocks as they please)
         if not mobs:
             argv += ['--no-mobs']                            # (the goblins have tests of their own: at night they would come to every test)
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -19511,12 +19513,14 @@ class TestBlocks(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'aim':
                 st['aim'] = dict(x.split('=', 1) for x in f[1:])
-            elif f[0] in ('pets', 'tom', 'filip', 'player'):
+            elif f[0] in ('pets', 'tom', 'filip', 'player', 'game'):
                 st[f[0]] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'mob':
                 st['mobs'][int(f[1])] = {k: float(v) for k, v in (x.split('=', 1) for x in f[2:])}
             elif f[0] == 'hist':
                 st['hist'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
+            elif f[0] == 'inv':
+                st['inv'] = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
             elif f[0] == 'hotbar':
                 st['hotbar'] = f[1:]
             elif f[0] == 'slot':
@@ -20345,6 +20349,172 @@ class TestBlocks(Base):
         self.assertGreater(diff, 500, 'a goblin in front of him changes the picture (%d pixels)' % diff)
         self.assertGreater(green, diff // 4, 'and a good part of what changed is green (%d of %d)' % (green, diff))
 
+    def game(self):
+        return self.state()['game']
+
+    def test_survival_a_block_takes_its_time_and_leaves_what_it_leaves(self):
+        self.start('--pitch', '-89', survival=True)
+        self.play()
+        st = self.state()
+        self.assertEqual(st['game']['survival'], '1')
+        self.assertEqual(st['inv'] if 'inv' in st else {}, {}, 'the pockets are empty')
+        grass0, rev0 = st['hist']['grass'], self.S()['rev']
+        ctl.button(272, True)
+        time.sleep(0.3)
+        st = self.state()
+        self.assertTrue(0.05 < float(st['game']['dig']) < 0.6, 'the block is being broken (%s)' % st['game']['dig'])
+        self.assertEqual(st['hist']['grass'], grass0, 'not yet')
+        self.assertEqual(st['state']['rev'], rev0)
+        time.sleep(0.7)
+        st = self.state()
+        ctl.button(272, False)
+        self.assertEqual(st['hist']['grass'], grass0 - 1, 'after 0.6 s of holding the grass is gone')
+        self.assertEqual(st['inv'].get('dirt'), 1, 'and grass leaves dirt')
+        self.assertNotIn('grass', st['inv'])
+        time.sleep(0.2)
+        # let go before it is done: the progress is lost
+        st = self.state()
+        ctl.button(272, True)
+        time.sleep(0.3)
+        ctl.button(272, False)
+        time.sleep(0.15)
+        self.assertEqual(float(self.state()['game']['dig']), -1.0, 'let go: nothing is being broken')
+        ctl.button(272, True)
+        time.sleep(0.3)
+        ctl.button(272, False)
+        self.assertEqual(self.state()['hist']['dirt'], st['hist']['dirt'], 'two halves are not a whole')
+
+    def test_survival_stone_leaves_cobble_and_a_block_put_is_used_up(self):
+        self.start('--give', 'dirt=2', '--yaw', '0', '--pitch', '-30', survival=True)
+        self.play()
+        self.tap('2')                                          # the dirt (slot 2 of the hotbar)
+        st = self.state()
+        self.assertEqual(st['inv'].get('dirt'), 2)
+        dirt0, rev0 = st['hist']['dirt'], st['state']['rev']
+        for want in (1, 0):
+            ctl.button(273, True)
+            ctl.button(273, False)
+            time.sleep(0.25)
+            st = self.state()
+            self.assertEqual(st['inv'].get('dirt', 0), want, 'a dirt is used up')
+        self.assertEqual(st['hist']['dirt'], dirt0 + 2)
+        rev1 = st['state']['rev']
+        ctl.button(273, True)
+        ctl.button(273, False)
+        time.sleep(0.3)
+        st = self.state()
+        self.assertEqual(st['state']['rev'], rev1, 'with none, nothing is put')
+        self.assertEqual(st['hist']['dirt'], dirt0 + 2)
+
+    def test_survival_x_makes_planks_of_a_log_and_nothing_of_dirt(self):
+        self.start('--give', 'log=2', survival=True)
+        self.play()
+        self.tap('6')                                          # the log
+        self.tap('x')
+        st = self.state()
+        self.assertEqual((st['inv'].get('log'), st['inv'].get('planks')), (1, 4), 'a log makes four planks')
+        self.tap('2')
+        self.tap('x')
+        self.assertEqual(self.state()['inv'].get('log'), 1, 'dirt makes nothing and costs nothing')
+
+    def test_survival_has_a_keep_that_cannot_be_broken_and_creative_does_not(self):
+        self.start('--pitch', '-6', survival=True)
+        self.play()
+        st = self.state()
+        self.assertEqual(st['game']['have_keep'], '1')
+        kx, ky, kz = (int(v) for v in st['game']['keep'].split(','))
+        sx, sz = float(st['state']['x']), float(st['state']['z'])
+        self.assertTrue(3.9 <= math.hypot(kx + 0.5 - sx, kz + 0.5 - sz) <= 10.0, 'the keep is near where he starts')
+        self.assertEqual(st['hist']['keep'], 3, 'a tower of three')
+        self.assertEqual(float(st['game']['keep_hp']), 60.0)
+        ctl.button(272, True)
+        time.sleep(2.8)
+        ctl.button(272, False)
+        self.assertEqual(self.state()['hist']['keep'], 3, 'a hand cannot break it, however long')
+
+    def test_g_switches_between_creative_and_survival_and_the_keep_comes_with_survival(self):
+        self.start()                                           # creative
+        self.play()
+        st = self.state()
+        self.assertEqual((st['game']['survival'], st['game']['have_keep'], st['hist']['keep']), ('0', '0', 0))
+        self.tap('g')
+        st = self.wait(lambda s: s['game']['survival'] == '1')
+        self.assertEqual((st['game']['have_keep'], st['hist']['keep']), ('1', 3), 'the keep appears')
+        self.tap('g')
+        st = self.wait(lambda s: s['game']['survival'] == '0')
+        self.assertEqual(st['hist']['keep'], 3, 'it stays in the world')
+        # creative breaks at once
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.tap('g')
+        self.assertEqual(self.state()['game']['survival'], '1')
+        self.assertEqual(self.state()['game']['keep'], st['game']['keep'], 'the same keep')
+
+    def test_survival_goblins_pull_the_keep_down_and_the_game_is_over(self):
+        # dusk (no goblins appear, none burn): four goblins beyond the keep, the player 15 blocks behind it
+        self.start('--time', '17.9', '--goblin', '0,30', '--goblin', '3,30', '--goblin', '-3,30', '--goblin', '0,33', survival=True, mobs=True)
+        self.play()
+        self.hold('s', 3.0)                                    # (away from the keep: a goblin that is within 8 blocks of him goes for him)
+        st = self.wait(lambda s: float(s['game']['keep_hp']) < 60.0, timeout=20.0)
+        self.assertLess(float(st['game']['keep_hp']), 60.0, 'the goblins went to the keep and hit it')
+        end = time.time() + 40.0
+        while time.time() < end:
+            st = self.state()
+            if st['state']['prompt'] == '6':
+                break
+            time.sleep(0.1)
+        self.assertEqual(st['state']['prompt'], '6', 'the keep fell: the card')
+        self.assertEqual(st['game']['have_keep'], '0')
+        self.assertEqual(st['hist']['keep'], 0, 'its blocks are gone')
+        self.assertEqual(len(st['cbtn']), 1, 'one button: New world')
+        self.tap('esc')
+        self.assertEqual(self.state()['state']['prompt'], '6', 'Esc does not start a new world by accident')
+        self.tap('enter')
+        st = self.wait(lambda s: s['state']['prompt'] == '0' and s['game']['have_keep'] == '1')
+        self.assertEqual((st['hist']['keep'], float(st['game']['keep_hp']), st['inv'] if 'inv' in st else {}), (3, 60.0, {}), 'a new world: a new keep with full hit points, empty pockets')
+
+    def test_survival_nights_are_counted_when_the_sun_is_up_again(self):
+        self.start('--clock', '--day-minutes', '0.5', '--time', '17.5', survival=True)         # (a day is 30 s)
+        self.play()
+        self.assertEqual(self.state()['game']['nights'], '0')
+        st = self.wait(lambda s: s['game']['nights'] == '1', timeout=45.0)
+        self.assertEqual(st['game']['nights'], '1', 'one night survived')
+
+    def test_survival_what_he_has_the_keep_and_the_mode_are_saved(self):
+        self.start('--save', '--give', 'cobble=7,log=2', survival=True)
+        self.play()
+        before = self.state()
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.proc = None
+        for w in range(40):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        self.start(flat=False, data=self.data, survival=True)
+        st = self.state()
+        self.assertEqual((st['inv'].get('cobble'), st['inv'].get('log')), (7, 2), 'the pockets come back')
+        self.assertEqual(st['game']['keep'], before['game']['keep'], 'and the same keep')
+        self.assertEqual(st['hist']['keep'], 3)
+        for w in ctl.windows()['windows']:
+            if w['app_id'] == 'mellagui.blocks':
+                self.proc.kill()
+                self.proc.wait()
+                time.sleep(0.3)
+        # a file with no mode line (a world from before survival) is a creative world, unless the command line says
+        conf = os.path.join(self.data, 'player.conf')
+        with open(conf) as f:
+            lines = [l for l in f.read().splitlines() if not l.startswith('survival')]
+        with open(conf, 'w') as f:
+            f.write('\n'.join(lines) + '\n')
+        self.start(flat=False, data=self.data, nomode=True)
+        self.assertEqual(self.state()['game']['survival'], '0', 'an old file: creative')
+
     def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
         p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)
         self.assertEqual(p.returncode, 2)
@@ -20353,8 +20523,11 @@ class TestBlocks(Base):
         self.play()
         self.tap('m')                                         # off ...
         self.ctrl_tap('s')                                    # ... saved
-        self.wait(lambda s: s['state']['saved'] == '1')
-        with open(os.path.join(self.data, 'player.conf')) as f:
+        conf_path = os.path.join(self.data, 'player.conf')
+        end = time.time() + 5.0
+        while time.time() < end and not os.path.exists(conf_path):          # ('saved' is true at once when nothing was edited: wait for the file)
+            time.sleep(0.05)
+        with open(conf_path) as f:
             conf = f.read()
         self.assertIn('mobs = 0', conf, 'the choice is kept in player.conf')
 

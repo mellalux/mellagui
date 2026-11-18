@@ -142,6 +142,27 @@ static void gen_face(int blk, int fk, uint32_t *px)
 			case BL_LAMP:                                /* a glowing block: bright cells with darker seams */
 				c = (x % 8 == 0 || y % 8 == 0) ? tinted(0xc88a2c, tn(x, y, 31, 6)) : tinted(0xffe8a0, tn(x, y, 32, 10));
 				break;
+			case BL_KEEP: {                              /* grey bricks, a golden rim, and on the sides a red shield with a gold cross */
+				int row = y / 4;
+				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);
+				c = mortar ? tinted(0x6a6a72, tn(x, y, 40, 4)) : tinted(0x8e8f98, tn((x + (row & 1) * 4) / 8, row, 41, 10) + tn(x, y, 42, 5));
+				if (x == 0 || x == TEX - 1 || y == 0 || y == TEX - 1)
+					c = tinted(0xd9a82c, tn(x, y, 43, 6));
+				if (fk == BL_FACE_SIDE) {
+					int dx = x - 7 > 0 ? x - 7 : 7 - x, dy = y - 8 > 0 ? y - 8 : 8 - y;
+					if (x >= 4 && x <= 11 && y >= 4 && y <= 12 && !(y > 10 && dx < 3 && y > 11 + dx))
+						c = tinted(0xb02020, tn(x, y, 44, 6));
+					if ((x == 7 || x == 8) && y >= 5 && y <= 11)
+						c = tinted(0xf0c040, 0);
+					if ((y == 7 || y == 8) && x >= 5 && x <= 10)
+						c = tinted(0xf0c040, 0);
+					(void)dx;
+					(void)dy;
+				} else if (fk == BL_FACE_TOP && ((x - 8) * (x - 8) + (y - 8) * (y - 8) < 14)) {
+					c = tinted(0xd9a82c, tn(x, y, 45, 8));
+				}
+				break;
+			}
 			case BL_COBBLE: {
 				int off = ((y / 4) & 1) * 2;
 				int sx = (x + off) / 4, sy = y / 4;
@@ -252,6 +273,7 @@ struct frame {
 	float wcol[3];            /* the colour of deep water */
 	bool target;
 	int tx, ty, tz;
+	float crack;
 	bool ids;
 	const struct bl_pets *pets;
 	const struct bl_mobs *mobs;
@@ -701,6 +723,12 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				if (u < e || u > 1.0f - e || v < e || v > 1.0f - e)
 					for (int i = 0; i < 3; i++)
 						col[i] *= 0.3f;
+				if (F->crack > 0.0f) {                       /* a block that is being broken: cracks, more of them as it goes (dark texels from a fixed pattern) */
+					int cu = (int)(u * 16.0f), cv = (int)(v * 16.0f);
+					if ((int)(hxy(cu, cv, 77) % 100U) < (int)(F->crack * 62.0f))
+						for (int i = 0; i < 3; i++)
+							col[i] *= 0.42f;
+				}
 			}
 			float fogt = (t - 0.6f * maxd) / (0.4f * maxd);
 			if (fogt > 0.0f) {
@@ -881,6 +909,7 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.tx = v->tx;
 	F.ty = v->ty;
 	F.tz = v->tz;
+	F.crack = v->crack;
 	F.ids = v->ids;
 	F.pets = v->pets;
 	F.mobs = v->mobs;

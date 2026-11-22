@@ -1,0 +1,9 @@
+#%PAM-1.0
+# /etc/pam.d/mellagui - the password check and the session of a user who logs in through mellagui-greetd (Fedora / RHEL / Arch: system-auth).
+# On Debian / Ubuntu the `@include common-*` variant (contrib/pam.d/mellagui) is used instead; `make install` picks by what /etc/pam.d has.
+auth       requisite    pam_nologin.so
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    required     pam_limits.so
+session    include      system-auth

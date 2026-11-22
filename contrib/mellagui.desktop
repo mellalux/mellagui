@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=MellaGUI
+Comment=MellaGUI - a Wayland compositor and shell without X11
+Exec=mellagui
+Type=Application
+DesktopNames=MellaGUI

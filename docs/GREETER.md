@@ -21,12 +21,16 @@ the greeter user (mode 0600, `SO_PEERCRED` is checked). A greeter that dies is s
 
 ## Setting it up (needs root)
 
-    make
-    sudo install -m755 build/mellagui build/mellagui-* /usr/local/bin/          # the programs (the greeter is found next to them)
-    sudo cp contrib/mellagui-greeter.sysusers /etc/sysusers.d/mellagui-greeter.conf && sudo systemd-sysusers
-    sudo cp contrib/pam.d/mellagui contrib/pam.d/mellagui-greeter /etc/pam.d/
-    sudo cp contrib/mellagui-greetd.service /etc/systemd/system/
-    sudo systemctl disable getty@tty1 gdm lightdm sddm 2>/dev/null; sudo systemctl enable --now mellagui-greetd
+    make install                 # builds as you, then asks for sudo: programs, unit, PAM files, the greeter user, the session entry, docs
+    sudo make enable-greeter     # the login screen takes tty1 from getty / gdm / lightdm / sddm - from the next boot
+
+`make install` puts everything in place but does NOT switch the login screen on (a wrong PAM file can lock a login out: keep a root shell or ssh open
+and read the checklist in `docs/HARDWARE.md`). To try it at once without waiting for a boot: `sudo systemctl start mellagui-greetd`.
+`sudo make disable-greeter` gives tty1 back to getty; `sudo make uninstall` removes the files (the PAM files and the user stay).
+`PREFIX=/usr` changes the place (default `/usr/local`), `DESTDIR=DIR` stages it for a package, `FORCE_PAM=1` replaces PAM files that exist,
+`PAM_STYLE=debian|redhat` picks the variant of `/etc/pam.d/mellagui` (default: by what `/etc/pam.d` has). What goes where is at "install" in the Makefile.
+By hand it is: install the programs, `contrib/mellagui-greeter.sysusers` -> `/etc/sysusers.d/` + `systemd-sysusers`, `contrib/mellagui-greeter.tmpfiles` ->
+`/etc/tmpfiles.d/`, `contrib/pam.d/*` -> `/etc/pam.d/`, `contrib/mellagui-greetd.service` (replace `@BINDIR@`) -> `/etc/systemd/system/`.
 
 Other sessions: a `.desktop` file in `/usr/share/wayland-sessions` (Name, Exec; `NoDisplay` / `Hidden` are left out) is offered in the session
 chooser. The last user and session are remembered in `/var/cache/mellagui-greetd/last`.

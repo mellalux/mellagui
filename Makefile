@@ -34,6 +34,10 @@
 #   make test       build, then run tests/run.sh
 #   make fuzz       build/fuzz-server     (coverage-guided fuzzer of the whole compositor, tests/fuzz_server.c)
 #   make fuzz-run   build it and fuzz for FUZZ_TIME seconds (default 60); the corpus is kept in build/fuzz/corpus
+#   make install    build, then put EVERYTHING in place (asks for sudo for the copying): the programs, the login screen (greetd service, PAM files,
+#                   the greeter user, the session entry) and the docs; PREFIX=/usr/local, DESTDIR= for packagers; see "install" below
+#   make enable-greeter   make the login screen the display manager (takes tty1 from getty / gdm / lightdm / sddm; works from the next boot)
+#   make uninstall  remove what install put in place
 #   make clean
 
 CC      := gcc
@@ -333,6 +337,106 @@ run: all
 
 clean:
 	rm -rf $(BUILD)
+
+# ---- install ------------------------------------------------------------------------
+# make install                  build as you, then copy as root (sudo is asked for); `sudo make install` after a plain `make` works too
+# make install PREFIX=/usr      other place (default /usr/local); DESTDIR=/some/dir stages it for a package (no root, no system changes)
+# make enable-greeter           the login screen on tty1 from the next boot (it is NOT done by install: a wrong PAM file can lock a login out,
+#                               read docs/GREETER.md and docs/HARDWARE.md "Login screen" first); make disable-greeter undoes it
+# make uninstall
+# What goes where: the programs (every mellagui-* program, also mellagui-greetd and mellagui-greeter; not the tests) in BINDIR;
+# the unit mellagui-greetd.service in UNITDIR; /etc/pam.d/mellagui and mellagui-greeter (an existing file is kept, FORCE_PAM=1 replaces it;
+# PAM_STYLE=debian|redhat picks the variant, the default looks at /etc/pam.d); the greeter user (sysusers.d + tmpfiles.d, made at once);
+# the session entry wayland-sessions/mellagui.desktop; the docs in DOCDIR. Debug symbols are kept (the stall meter's addr2line needs them).
+PREFIX     ?= /usr/local
+BINDIR     ?= $(PREFIX)/bin
+DATADIR    ?= $(PREFIX)/share
+DOCDIR     ?= $(DATADIR)/doc/mellagui
+SYSCONFDIR ?= /etc
+UNITDIR    ?= $(SYSCONFDIR)/systemd/system
+PAMDIR     ?= $(SYSCONFDIR)/pam.d
+PAM_STYLE  ?= auto
+INSTALL    ?= install
+
+TEST_TARGETS  := keymap-test logind-test gl-test screenoff-test chess-test chessai-test blocks-test fuzz-server hwprobe
+INSTALL_PROGS := $(filter-out $(addprefix $(BUILD)/,$(TEST_TARGETS)),$(TARGETS))
+INSTALL_DOCS  := README.md docs/ARCHITECTURE.md docs/GADGETS.md docs/GREETER.md docs/HARDWARE.md docs/SERVER.md docs/FUZZING.md
+# the variables sudo would not hand on
+INSTALL_VARS  := PREFIX='$(PREFIX)' BINDIR='$(BINDIR)' DATADIR='$(DATADIR)' DOCDIR='$(DOCDIR)' SYSCONFDIR='$(SYSCONFDIR)' UNITDIR='$(UNITDIR)' \
+                 PAMDIR='$(PAMDIR)' PAM_STYLE='$(PAM_STYLE)' FORCE_PAM='$(FORCE_PAM)'
+
+.PHONY: install install-files uninstall enable-greeter disable-greeter
+
+install:
+ifeq ($(shell id -u),0)
+	@$(MAKE) --no-print-directory install-files
+else ifneq ($(DESTDIR),)
+	@$(MAKE) --no-print-directory $(INSTALL_PROGS)
+	@$(MAKE) --no-print-directory install-files
+else
+	@$(MAKE) --no-print-directory $(INSTALL_PROGS)
+	@echo "Copying the files needs root: sudo asks for the password."
+	sudo $(MAKE) --no-print-directory install-files $(INSTALL_VARS)
+endif
+
+install-files:
+	@for f in $(INSTALL_PROGS); do test -x $$f || { echo "$$f is missing: run 'make' as your own user first, then 'sudo make install'"; exit 1; }; done
+	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(UNITDIR) $(DESTDIR)$(PAMDIR) $(DESTDIR)$(DATADIR)/wayland-sessions $(DESTDIR)$(DOCDIR) \
+	    $(DESTDIR)$(SYSCONFDIR)/sysusers.d $(DESTDIR)$(SYSCONFDIR)/tmpfiles.d
+	$(INSTALL) -m 755 $(INSTALL_PROGS) $(DESTDIR)$(BINDIR)/
+	sed 's|@BINDIR@|$(BINDIR)|g' contrib/mellagui-greetd.service > $(DESTDIR)$(UNITDIR)/mellagui-greetd.service
+	chmod 644 $(DESTDIR)$(UNITDIR)/mellagui-greetd.service
+	$(INSTALL) -m 644 contrib/mellagui-greeter.sysusers $(DESTDIR)$(SYSCONFDIR)/sysusers.d/mellagui-greeter.conf
+	$(INSTALL) -m 644 contrib/mellagui-greeter.tmpfiles $(DESTDIR)$(SYSCONFDIR)/tmpfiles.d/mellagui-greeter.conf
+	sed 's|^Exec=.*|Exec=$(BINDIR)/mellagui|' contrib/mellagui.desktop > $(DESTDIR)$(DATADIR)/wayland-sessions/mellagui.desktop
+	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/mellagui.desktop
+	$(INSTALL) -m 644 $(INSTALL_DOCS) $(DESTDIR)$(DOCDIR)/
+	@style="$(PAM_STYLE)"; \
+	if [ "$$style" = auto ]; then \
+	    if [ -e /etc/pam.d/common-auth ] || [ ! -e /etc/pam.d/system-auth ]; then style=debian; else style=redhat; fi; fi; \
+	src=contrib/pam.d/mellagui; if [ "$$style" = redhat ]; then src=contrib/pam.d/mellagui.system-auth; fi; \
+	for pair in mellagui:$$src mellagui-greeter:contrib/pam.d/mellagui-greeter; do \
+	    name=$${pair%%:*}; file=$${pair#*:}; dest=$(DESTDIR)$(PAMDIR)/$$name; \
+	    if [ -e $$dest ] && [ -z "$(FORCE_PAM)" ]; then echo "kept the existing $$dest (FORCE_PAM=1 replaces it)"; \
+	    else $(INSTALL) -m 644 $$file $$dest && echo "installed $$dest ($$style)"; fi; \
+	done
+ifeq ($(DESTDIR),)
+	@if command -v systemd-sysusers >/dev/null 2>&1; then systemd-sysusers $(SYSCONFDIR)/sysusers.d/mellagui-greeter.conf; \
+	    else echo "systemd-sysusers is missing: make the user by hand (useradd --system mellagui-greeter)"; fi
+	@if command -v systemd-tmpfiles >/dev/null 2>&1; then systemd-tmpfiles --create $(SYSCONFDIR)/tmpfiles.d/mellagui-greeter.conf; fi
+	@if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi
+	@echo
+	@echo "Installed in $(BINDIR). The login screen is in place but NOT switched on: it takes tty1 over from getty / gdm / lightdm / sddm."
+	@echo "Read docs/GREETER.md, keep a root shell or ssh open, then: sudo make enable-greeter   (works from the next boot)"
+	@echo "Or try it at once: sudo systemctl start mellagui-greetd"
+endif
+
+enable-greeter:
+	@if [ "$$(id -u)" != 0 ]; then echo "run as root: sudo make enable-greeter"; exit 1; fi
+	@test -e $(UNITDIR)/mellagui-greetd.service || { echo "run 'make install' first"; exit 1; }
+	-systemctl disable getty@tty1.service gdm.service gdm3.service lightdm.service sddm.service 2>/dev/null
+	systemctl enable mellagui-greetd.service
+	@echo "The login screen replaces the text login on tty1 from the next boot (undo: sudo make disable-greeter)."
+
+disable-greeter:
+	@if [ "$$(id -u)" != 0 ]; then echo "run as root: sudo make disable-greeter"; exit 1; fi
+	-systemctl disable mellagui-greetd.service
+	systemctl enable getty@tty1.service
+	@echo "tty1 has the text login again from the next boot."
+
+# Leaves the PAM files (they are configuration), the user mellagui-greeter and its home folder; stop the service first if it runs.
+uninstall:
+	@if [ -z "$(DESTDIR)" ] && [ "$$(id -u)" != 0 ]; then echo "run as root: sudo make uninstall"; exit 1; fi
+	@if [ -z "$(DESTDIR)" ] && systemctl is-enabled mellagui-greetd.service >/dev/null 2>&1; then \
+	    echo "mellagui-greetd is enabled: run 'sudo make disable-greeter' first, or tty1 is left without a login"; exit 1; fi
+	rm -f $(addprefix $(DESTDIR)$(BINDIR)/,$(notdir $(INSTALL_PROGS)))
+	rm -f $(DESTDIR)$(UNITDIR)/mellagui-greetd.service $(DESTDIR)$(SYSCONFDIR)/sysusers.d/mellagui-greeter.conf \
+	    $(DESTDIR)$(SYSCONFDIR)/tmpfiles.d/mellagui-greeter.conf $(DESTDIR)$(DATADIR)/wayland-sessions/mellagui.desktop
+	rm -rf $(DESTDIR)$(DOCDIR)
+ifeq ($(DESTDIR),)
+	@if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi
+	@echo "Left in place: $(PAMDIR)/mellagui, $(PAMDIR)/mellagui-greeter, the user mellagui-greeter."
+endif
 
 # automatic header dependencies (-MMD -MP)
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)

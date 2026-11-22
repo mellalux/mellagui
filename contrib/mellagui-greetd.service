@@ -1,7 +1,6 @@
 # The login screen: mellagui-greetd on the first text console (docs/GREETER.md).
-#   sudo cp contrib/mellagui-greetd.service /etc/systemd/system/
-#   sudo systemctl disable getty@tty1 lightdm gdm sddm   # whatever else is the display manager
-#   sudo systemctl enable mellagui-greetd.service
+# `make install` puts this file (with @BINDIR@ replaced) in /etc/systemd/system, the rest of the login screen next to it;
+# `make enable-greeter` takes tty1 away from getty and the other display managers and enables this unit.
 [Unit]
 Description=MellaGUI login screen
 After=systemd-user-sessions.service plymouth-quit-wait.service systemd-logind.service getty@tty1.service
@@ -10,7 +9,8 @@ Wants=systemd-logind.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mellagui-greetd --vt 1
+Environment=PATH=@BINDIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=@BINDIR@/mellagui-greetd --vt 1
 Restart=always
 RestartSec=2
 IgnoreSIGPIPE=no

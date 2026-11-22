@@ -57,6 +57,7 @@ Requires gcc, make, pkg-config and the libdrm headers: `sudo apt install build-e
     make asan       # build/mellagui-asan with AddressSanitizer + UBSan
     make run        # build and start MellaGUI (real VT; see below). EXEC=<prog>, TIMEOUT=<s>, HEADLESS=1 are optional
     make test       # end-to-end tests (headless backend, Python 3)
+    make install    # build, then (sudo) put the programs, the login screen and the docs in /usr/local; sudo make enable-greeter switches the login screen on (docs/GREETER.md)
     MELLAGUI_BIN=build/mellagui-asan tests/run.sh   # the same tests under the sanitizers
 
 ## Packages it uses at run time

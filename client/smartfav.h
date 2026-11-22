@@ -18,4 +18,9 @@ int fav_find(char ids[][FAV_ID_MAX], int n, const char *id);    /* index or -1 *
 /* Pins (on = true) or unpins one device and saves; false when the file cannot be written or the list is full. */
 bool fav_set(const char *id, bool on);
 
+/* The order the user put the device cards in (the window's list): one id per line of smart-order.conf beside the favourites file. */
+#define ORDER_MAX 64
+int order_load(char ids[][FAV_ID_MAX], int max);
+bool order_save(char ids[][FAV_ID_MAX], int n);
+
 #endif

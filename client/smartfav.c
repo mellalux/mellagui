@@ -6,24 +6,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static bool fav_path(char *out, size_t n)
+static bool conf_path(const char *name, char *out, size_t n)
 {
     const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
     int w;
     if (xdg && *xdg)
-        w = snprintf(out, n, "%s/mellagui/smart-favourites.conf", xdg);
+        w = snprintf(out, n, "%s/mellagui/%s", xdg, name);
     else if (home && *home)
-        w = snprintf(out, n, "%s/.config/mellagui/smart-favourites.conf", home);
+        w = snprintf(out, n, "%s/.config/mellagui/%s", home, name);
     else
         return false;
     return w > 0 && (size_t)w < n;
 }
 
-int fav_load(char ids[][FAV_ID_MAX], int max)
+static int load_file(const char *name, char ids[][FAV_ID_MAX], int max)
 {
     char path[1024], line[128];
     int n = 0;
-    if (!fav_path(path, sizeof(path)))
+    if (!conf_path(name, path, sizeof(path)))
         return 0;
     FILE *f = fopen(path, "r");
     if (!f)
@@ -38,10 +38,10 @@ int fav_load(char ids[][FAV_ID_MAX], int max)
     return n;
 }
 
-bool fav_save(char ids[][FAV_ID_MAX], int n)
+static bool save_file(const char *name, const char *head, char ids[][FAV_ID_MAX], int n)
 {
     char path[1024], tmp[1100];
-    if (!fav_path(path, sizeof(path)))
+    if (!conf_path(name, path, sizeof(path)))
         return false;
     for (char *p = path + 1; *p; p++) {
         if (*p != '/')
@@ -54,7 +54,7 @@ bool fav_save(char ids[][FAV_ID_MAX], int n)
     FILE *f = fopen(tmp, "w");
     if (!f)
         return false;
-    fprintf(f, "# mellagui-smart: the devices shown on the desktop card (one id a line). Written by the program itself.\n");
+    fprintf(f, "%s\n", head);
     for (int i = 0; i < n; i++)
         fprintf(f, "%s\n", ids[i]);
     bool ok = !ferror(f);
@@ -65,6 +65,26 @@ bool fav_save(char ids[][FAV_ID_MAX], int n)
         return false;
     }
     return true;
+}
+
+int fav_load(char ids[][FAV_ID_MAX], int max)
+{
+    return load_file("smart-favourites.conf", ids, max);
+}
+
+bool fav_save(char ids[][FAV_ID_MAX], int n)
+{
+    return save_file("smart-favourites.conf", "# mellagui-smart: the devices shown on the desktop card (one id a line). Written by the program itself.", ids, n);
+}
+
+int order_load(char ids[][FAV_ID_MAX], int max)
+{
+    return load_file("smart-order.conf", ids, max);
+}
+
+bool order_save(char ids[][FAV_ID_MAX], int n)
+{
+    return save_file("smart-order.conf", "# mellagui-smart: the order of the device cards in the window (one id a line). Written by the program itself.", ids, n);
 }
 
 int fav_find(char ids[][FAV_ID_MAX], int n, const char *id)

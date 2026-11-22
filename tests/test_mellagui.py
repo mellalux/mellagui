@@ -29003,6 +29003,65 @@ class TestSmart(Base):
         self.edit('fav')
         self.wait(lambda: 'plug1' not in open(fav).read().split('\n'), 'the pin is taken away again')
 
+    def cards(self):
+        """The dump's `card ID x y w h` lines, in the order of the list."""
+        out = []
+        for l in open(self.dump_path).read().split('\n'):
+            p = l.split()
+            if p and p[0] == 'card':
+                out.append((p[1],) + tuple(int(v) for v in p[2:6]))
+        return out
+
+    def test_the_cards_go_in_columns_and_can_be_carried_to_another_place(self):
+        c = self.logged_in_window('cols')
+        self.assertEqual(len({x for _, x, _, _, _ in self.cards()}), 1)         # 520 px: one column
+        self.assertEqual([i for i, *_ in self.cards()], ['plug1', 'blind1', 'robot1', 'plug2'])
+        c.key(125, True)                                                        # Super+Up: maximized, the window is wide enough for two columns
+        c.tap(103)
+        c.key(125, False)
+        self.wait(lambda: len({x for _, x, _, _, _ in self.cards()}) == 2, 'two columns when the window is wide')
+        time.sleep(0.4)
+        win = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'][0]
+        self.x0, self.y0 = win['x'], win['y']
+        cards = self.cards()
+        xs = sorted({x for _, x, _, _, _ in cards})
+        w0 = cards[0][3]
+        self.assertTrue(all(abs(cw - w0) <= 1 for _, _, _, cw, _ in cards))     # the columns are equally wide
+        self.assertEqual(cards[0][1], xs[0])                                    # the first card is first on the left, the second beside it
+        self.assertEqual(cards[1][1], xs[1])
+        self.assertEqual(cards[1][2], cards[0][2])
+        # a click on a card still opens its view
+        i, x, y, w, h = cards[0]
+        c.click(self.x0 + x + 100, self.y0 + y + 6)
+        self.wait(lambda: self.view()['modal'] == 'plug1', 'a click on a card opens its view')
+        c.tap(1)
+        self.wait(lambda: self.view()['modal'] == '-', 'Esc closes it')
+        # carry the first card onto the third: it takes the third's place, the ones between move up
+        tx, ty = cards[2][1] + 100, cards[2][2] + 6
+        c.abs(self.x0 + x + 100, self.y0 + y + 6)
+        c.button(272, True)
+        time.sleep(0.2)
+        c.abs(self.x0 + x + 160, self.y0 + y + 60)
+        time.sleep(0.1)
+        c.abs(self.x0 + tx, self.y0 + ty)
+        time.sleep(0.1)
+        c.button(272, False)
+        self.wait(lambda: [i for i, *_ in self.cards()] == ['blind1', 'robot1', 'plug1', 'plug2'], 'the card took the other\'s place')
+        self.assertEqual(self.view()['modal'], '-')                             # carrying a card opens nothing
+        order = open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart-order.conf')).read().split()
+        self.assertEqual([t for t in order if not t.startswith('#') and t not in ('mellagui-smart:',)][-4:], ['blind1', 'robot1', 'plug1', 'plug2'])
+        self.assertNotIn('/commands', self.log())
+
+    def test_the_order_of_the_cards_is_kept_for_the_next_start(self):
+        self.cloud('order')
+        os.makedirs(os.path.join(self.dir, 'cfg', 'mellagui'), exist_ok=True)
+        with open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart-order.conf'), 'w') as f:
+            f.write('# order\nrobot1\nplug2\nnot-a-device\nplug1\n')
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.window('order')
+        self.wait(self.devices_shown, 'the devices')
+        self.assertEqual([i for i, *_ in self.cards()], ['robot1', 'plug2', 'plug1', 'blind1'])    # the saved order, an unknown id skipped, the new one last
+
     def test_the_list_has_a_scroll_bar_when_it_does_not_fit(self):
         many = [dict(self.DEVICES[0], id='plug%d' % i, name='Plug %d' % i) for i in range(1, 10)]
         self.cloud('bar', devices=many)

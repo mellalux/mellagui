@@ -49,6 +49,7 @@
 #include "protocol.h"
 #include "qr.h"
 #include "smartfav.h"
+#include <math.h>
 #include "smartsched.h"
 #include "smartsun.h"
 #include "theme.h"
@@ -155,6 +156,11 @@ struct app {
     bool loaded;
     int scroll, content_h;
     struct box card[TUYA_MAX_DEV];
+    int cols;                           /* the list's columns (build_layout) */
+    int cdrag;                          /* a card is held (its index), -1 = none; moved once the pointer went 6 px: `cmoved` */
+    bool cmoved;
+    double cdx, cdy;                    /* where it was taken */
+    int cdrop;                          /* the card the pointer is over while one is carried (-1 = none) */
     struct tuya_scene scene[TUYA_MAX_SCENE];    /* the app's scenes: a row of buttons above the cards */
     struct box scene_box[TUYA_MAX_SCENE];
     int nscene;
@@ -1269,6 +1275,15 @@ static int sbar_w(void)
     return LM_CLAMP(lm_metrics.scrollbar_width, 6, 30);
 }
 
+#define CARD_MIN_W 300                                          /* a card is never narrower: the window shows as many columns as fit */
+#define CARD_GAP 10
+#define MAX_COLS 8
+
+static int list_cols(int bw)
+{
+    return LM_CLAMP((bw - 2 * PAD + CARD_GAP) / (CARD_MIN_W + CARD_GAP), 1, MAX_COLS);
+}
+
 /* Places every card and its controls for the window's width and the scroll position, and the open device view over them (paint and the pointer both
  * go by it). */
 static void build_layout(struct app *a)
@@ -1288,14 +1303,26 @@ static void build_layout(struct app *a)
         }
         y = cy + ROW + 14;
     }
+    /* The cards in columns: as many as fit at CARD_MIN_W, each card goes (in the order of the list) under the shortest column. */
+    int cols = list_cols(bw), cw = (bw - 2 * PAD - (cols - 1) * CARD_GAP) / cols, ybot[MAX_COLS];
+    for (int c = 0; c < cols; c++)
+        ybot[c] = y;
+    a->cols = cols;
     for (int i = 0; i < a->ndev; i++) {
-        struct flow f = { .a = a, .dev = i, .x0 = PAD + 12, .x1 = bw - PAD - 12, .cx = PAD + 12, .cy = y + 54 };
+        int col = 0;
+        for (int c = 1; c < cols; c++)
+            if (ybot[c] < ybot[col])
+                col = c;
+        int cx = PAD + col * (cw + CARD_GAP), cy = ybot[col];
+        struct flow f = { .a = a, .dev = i, .x0 = cx + 12, .x1 = cx + cw - 12, .cx = cx + 12, .cy = cy + 54 };
         card_controls(&f);
         flow_break(&f);
-        add_ctl(a, C_DETAILS, i, -1, (struct box){ bw - PAD - 12 - 68, y + 8, 68, 22 }, "Details", NULL);
-        a->card[i] = (struct box){ PAD, y, bw - 2 * PAD, f.cy + 6 - y };
-        y = f.cy + 6 + 10;
+        add_ctl(a, C_DETAILS, i, -1, (struct box){ cx + cw - 12 - 68, cy + 8, 68, 22 }, "Details", NULL);
+        a->card[i] = (struct box){ cx, cy, cw, f.cy + 6 - cy };
+        ybot[col] = f.cy + 6 + 10;
     }
+    for (int c = 0; c < cols; c++)
+        y = LM_MAX(y, ybot[c]);
     a->content_h = y + a->scroll - HEAD_H;
     struct tuya_dev *d = a->modal_dev[0] ? find_dev(a, a->modal_dev) : NULL;
     if (!d) {
@@ -1472,6 +1499,9 @@ static void dump_state(struct app *a)
     fprintf(f, "view=%s ndev=%d loaded=%d err=%d lan=%d reads=%d modal=%s\nmsg %s\nqr %s\n", a->view == V_LOGIN ? "login" : a->view == V_QR ? "qr" : "devices", a->ndev,
             a->loaded, a->msg_err, lan_cmds, lan_reads, a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
     if (a->view == V_DEVICES) {
+        fprintf(f, "cols %d\n", a->cols);
+        for (int i = 0; i < a->ndev; i++)
+            fprintf(f, "card %s %d %d %d %d\n", a->dev[i].id, a->card[i].x, a->card[i].y, a->card[i].w, a->card[i].h);
         for (int i = 0; i < a->ndev; i++)
             fprintf(f, "dev %s online=%d local=%d name=%s\n", a->dev[i].id, a->dev[i].online, lan_lookup(a, a->dev[i].id, NULL), a->dev[i].name);
         for (int which = 1; which <= 2; which++) {              /* "bar list|view x y w h thumb_y thumb_h scroll" */
@@ -1689,6 +1719,19 @@ static void paint_devices(struct app *a)
         const struct ctl *c = &a->ctl[i];
         if (!c->modal && c->b.y + c->b.h >= HEAD_H && c->b.y <= w->bh - FOOT_H)
             paint_ctl(a, c, live);
+    }
+    if (a->cdrag >= 0 && a->cmoved && a->cdrag < a->ndev) {     /* a card is carried: the one it would take the place of is framed, a ghost follows the pointer */
+        if (a->cdrop >= 0) {
+            struct box t = a->card[a->cdrop];
+            wlwin_fill(w, t.x - 2, t.y - 2, t.w + 4, 3, lm_theme.accent);
+            wlwin_fill(w, t.x - 2, t.y + t.h - 1, t.w + 4, 3, lm_theme.accent);
+            wlwin_fill(w, t.x - 2, t.y - 2, 3, t.h + 4, lm_theme.accent);
+            wlwin_fill(w, t.x + t.w - 1, t.y - 2, 3, t.h + 4, lm_theme.accent);
+        }
+        struct box src = a->card[a->cdrag], g = { (int)(a->px - (a->cdx - src.x)), (int)(a->py - (a->cdy - src.y)), src.w, 44 };
+        rbox(w, (struct box){ g.x - 1, g.y - 1, g.w + 2, g.h + 2 }, 9, lm_theme.accent);
+        rbox(w, g, 8, lm_theme.card);
+        wlwin_text(w, g.x + 12, g.y + 14, a->dev[a->cdrag].name, 1, lm_theme.text, g.w - 24);
     }
 }
 
@@ -2084,11 +2127,48 @@ static void press_devices(struct app *a)
             press_ctl(a, &a->ctl[i]);
             return;
         }
-    for (int i = 0; i < a->ndev; i++)                           /* the card itself: its view */
+    for (int i = 0; i < a->ndev; i++)                           /* the card itself: a click opens its view, carried it takes another place */
         if (in(a->px, a->py, a->card[i])) {
-            open_modal(a, &a->dev[i]);
+            a->cdrag = i;
+            a->cmoved = false;
+            a->cdx = a->px;
+            a->cdy = a->py;
             return;
         }
+}
+
+/* The card the pointer is over, other than the one in the hand: -1 = none. */
+static int card_under(const struct app *a)
+{
+    for (int i = 0; i < a->ndev; i++)
+        if (i != a->cdrag && in(a->px, a->py, a->card[i]))
+            return i;
+    return -1;
+}
+
+/* The held card is let go: where the pointer is over another card, it takes that place and the cards between move one on. */
+static void card_release(struct app *a)
+{
+    int from = a->cdrag, to = a->cmoved ? card_under(a) : -1;
+    a->cdrag = a->cdrop = -1;
+    if (!a->cmoved) {
+        if (from >= 0 && from < a->ndev && in(a->px, a->py, a->card[from]))
+            open_modal(a, &a->dev[from]);
+        return;
+    }
+    a->cmoved = false;
+    if (from < 0 || to < 0 || from == to)
+        return;
+    struct tuya_dev moved = a->dev[from];
+    if (from < to)
+        memmove(&a->dev[from], &a->dev[from + 1], (size_t)(to - from) * sizeof(*a->dev));
+    else
+        memmove(&a->dev[to + 1], &a->dev[to], (size_t)(from - to) * sizeof(*a->dev));
+    a->dev[to] = moved;
+    char ord[TUYA_MAX_DEV][FAV_ID_MAX];
+    for (int i = 0; i < a->ndev; i++)
+        snprintf(ord[i], FAV_ID_MAX, "%s", a->dev[i].id);
+    order_save(ord, a->ndev);
 }
 
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
@@ -2107,6 +2187,17 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             w->redraw = true;
             return;
         }
+        if (a->cdrag >= 0) {                                    /* a card in the hand: it has moved once the pointer went 6 px */
+            if (!a->cmoved && (fabs(a->px - a->cdx) > 6 || fabs(a->py - a->cdy) > 6))
+                a->cmoved = true;
+            a->cdrop = a->cmoved ? card_under(a) : -1;
+            if (a->cmoved && a->py < HEAD_H + 24)               /* near an edge the list scrolls */
+                a->scroll -= 14;
+            else if (a->cmoved && a->py > w->bh - FOOT_H - 24)
+                a->scroll += 14;
+            w->redraw = true;
+            return;
+        }
         if (a->dragging) {
             const struct ctl *c = drag_ctl(a);
             if (c)
@@ -2121,6 +2212,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
     if (op == LM_WL_POINTER_EVT_LEAVE) {                        /* nothing stays lit when the pointer is gone */
         a->px = a->py = -1;
+        if (a->cdrag >= 0 && !a->cmoved)
+            a->cdrag = a->cdrop = -1;
         w->redraw = true;
         return;
     }
@@ -2136,6 +2229,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     w->redraw = true;
     if (args[3].u == 0) {                                       /* let go: a dragged slider is sent now, a held direction stops */
         w->card_drag = false;
+        if (a->cdrag >= 0)
+            card_release(a);
         if (a->dragging) {
             struct tuya_dev *d = find_dev(a, a->drag_dev);
             struct tuya_dp *dp = d ? tuya_find_dp(d, a->drag_code) : NULL;
@@ -2282,11 +2377,21 @@ static void apply_results(struct app *a)
         a->win.redraw = true;
     }
     if (r.have_devs) {
-        if (!a->dragging && a->view == V_DEVICES) {
+        if (!a->dragging && a->cdrag < 0 && a->view == V_DEVICES) {
             a->ndev = 0;
-            for (int pass = 0; pass < 2; pass++)                /* the ones that answer first, the offline ones after them */
-                for (int i = 0; i < r.ndevs; i++)
-                    if (r.devs[i].online == (pass == 0))
+            char ord[ORDER_MAX][FAV_ID_MAX];
+            int nord = order_load(ord, ORDER_MAX);
+            bool taken[TUYA_MAX_DEV] = { false };
+            for (int k = 0; k < nord; k++)                      /* the user's own order first */
+                for (int i = 0; i < r.ndevs && i < TUYA_MAX_DEV; i++)
+                    if (!taken[i] && !strcmp(r.devs[i].id, ord[k])) {
+                        taken[i] = true;
+                        a->dev[a->ndev++] = r.devs[i];
+                        break;
+                    }
+            for (int pass = 0; pass < 2; pass++)                /* the others (new ones): the ones that answer first, the offline ones after them */
+                for (int i = 0; i < r.ndevs && i < TUYA_MAX_DEV; i++)
+                    if (!taken[i] && r.devs[i].online == (pass == 0))
                         a->dev[a->ndev++] = r.devs[i];
             a->loaded = true;
             lan_values_apply(a);
@@ -2958,6 +3063,7 @@ int main(int argc, char **argv)
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
     static struct app a;
     a.dump = getenv("MELLAGUI_SMART_DUMP");
+    a.cdrag = a.cdrop = -1;
     if (open_id)
         copy(a.want_dev, sizeof(a.want_dev), open_id);
     const char *pm = getenv("MELLAGUI_SMART_POLL_MS");

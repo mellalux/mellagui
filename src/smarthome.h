@@ -69,8 +69,8 @@ void lm_smart_open_card(struct lm_smart *s, int index);
 #define LM_SMART_ROW_H 34
 #define LM_SMART_ROW2_H 58              /* a blind with a slider has two lines: the name, and the slider under it */
 #define LM_SMART_HEAD_H 28              /* the name of a device with several switches, above them */
-#define LM_SMART_CELL_H 46              /* one of its switches: a cell with its label on top and the pill under it; the cells stand side by side, as many in a row as fit */
-#define LM_SMART_CELL_MIN_W 58
+#define LM_SMART_CELL_H 30              /* one of its switches: a cell with a check box and its label beside it; the cells stand side by side, as many in a row as fit */
+#define LM_SMART_CELL_MIN_W 62
 
 enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK, LM_SMART_SLIDER,
                      LM_SMART_CARD /* the rest of a device's row / card: a click there opens the device's own view */ };
@@ -82,10 +82,10 @@ struct lm_smart_layout {
     struct lm_smart_rect row[LM_SMART_MAX];         /* the whole row (its height depends on the kind) */
     struct lm_smart_rect head[LM_SMART_MAX];        /* the name row above a group of switches (only on its first item; w = 0 elsewhere) */
     struct lm_smart_rect group[LM_SMART_MAX];       /* the card of that group: its name row and all its switches (only on its first item) */
-    /* a switch of a group: row[] is its cell (the whole of it is the click area), name[] the label on top, sw[] the pill under it */
+    /* a switch of a group: row[] is its cell (the whole of it is the click area), sw[] the check box (left), name[] the label (right of it) */
     struct lm_smart_rect slider[LM_SMART_MAX];      /* a blind's slider track (with can_pos); the percentage is written right of it */
     struct lm_smart_rect name[LM_SMART_MAX];
-    struct lm_smart_rect sw[LM_SMART_MAX];          /* a switch's pill */
+    struct lm_smart_rect sw[LM_SMART_MAX];          /* a switch's check box (a square a little bigger than the 18 px box drawn in it: its click area) */
     struct lm_smart_rect btn[LM_SMART_MAX][3];      /* a blind's open / stop / close */
     struct lm_smart_rect vac[LM_SMART_MAX][2];      /* a vacuum's start-stop and dock buttons */
 };

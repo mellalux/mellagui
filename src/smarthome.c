@@ -342,8 +342,8 @@ void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_sm
                 int r = i + q, cx = x + 8 + 4 + (q % cols) * cw, cy = ry + LM_SMART_HEAD_H + (q / cols) * LM_SMART_CELL_H;
                 l->rows = r + 1;
                 l->row[r] = (struct lm_smart_rect){ cx, cy, cw, LM_SMART_CELL_H };
-                l->name[r] = (struct lm_smart_rect){ cx, cy + 3, cw, 16 };
-                l->sw[r] = (struct lm_smart_rect){ cx + (cw - 44) / 2, cy + 20, 44, 22 };
+                l->sw[r] = (struct lm_smart_rect){ cx + 2, cy + (LM_SMART_CELL_H - 26) / 2, 26, 26 };
+                l->name[r] = (struct lm_smart_rect){ cx + 32, cy + (LM_SMART_CELL_H - 16) / 2, cw - 34, 16 };
             }
             i += m;
             ry += rh;
@@ -352,7 +352,7 @@ void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_sm
         bool two = it->kind == LM_SMART_BLIND && it->can_pos;
         l->rows = i + 1;
         l->row[i] = (struct lm_smart_rect){ x + 8, ry, w - 16, rh - 4 };
-        l->sw[i] = (struct lm_smart_rect){ x + w - 12 - 44, ry + 6, 44, 22 };
+        l->sw[i] = (struct lm_smart_rect){ x + w - 12 - 26, ry + 4, 26, 26 };
         for (int b = 0; b < 3; b++)
             l->btn[i][b] = (struct lm_smart_rect){ x + w - 12 - 3 * 30 + b * 30, ry + 5, 26, 24 };
         l->vac[i][0] = (struct lm_smart_rect){ x + w - 12 - 90, ry + 5, 46, 24 };

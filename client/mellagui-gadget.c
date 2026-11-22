@@ -926,6 +926,20 @@ static bool smart_press(struct app *a)
     return part != LM_SMART_NOTHING;
 }
 
+/* A check box (18 px, centred in `hit`): green with a tick while the switch is on. */
+static void check_box(struct wlwin *w, struct lm_smart_rect hit, bool on)
+{
+    int x = hit.x + (hit.w - 18) / 2, y = hit.y + (hit.h - 18) / 2;
+    rr(w, lm_rect_make(x - 1, y - 1, 20, 20), 5, on ? lm_theme.ok : lm_theme.border);
+    rr(w, lm_rect_make(x, y, 18, 18), 4, on ? lm_theme.ok : lm_theme.button);
+    if (on) {
+        for (int i = 0; i < 4; i++)
+            wlwin_fill(w, x + 4 + i, y + 8 + i, 2, 2, lm_theme.on_colour);
+        for (int i = 0; i < 7; i++)
+            wlwin_fill(w, x + 7 + i, y + 11 - i, 2, 2, lm_theme.on_colour);
+    }
+}
+
 static void paint_smart(struct app *a)
 {
     struct wlwin *w = &a->win;
@@ -959,14 +973,9 @@ static void paint_smart(struct app *a)
                 wlwin_fill(w, gr.x + 8, l.head[i].y + l.head[i].h - 1, gr.w - 16, 1, veil_mix(0x28));       /* a hairline under the name */
             }
             const char *lab = !strncmp(it->label, "Switch ", 7) ? it->label + 7 : it->label;      /* "Switch 3" -> "3" */
-            int lw = lm_font_text_width(lab);
-            text_fit(w, l.name[i].x + (l.name[i].w - LM_MIN(lw, l.name[i].w - 4)) / 2, l.name[i].y, lab, l.name[i].w - 4, it->online ? lm_theme.text : lm_theme.text_dim);
-            if (it->online) {
-                struct lm_rect tr = lm_rect_make(l.sw[i].x, l.sw[i].y, l.sw[i].w, l.sw[i].h);
-                rr(w, tr, 11, it->on ? lm_theme.ok : lm_theme.button);
-                int kx = it->on ? tr.x + tr.w - 11 : tr.x + 11;
-                rr(w, lm_rect_make(kx - 8, tr.y + tr.h / 2 - 8, 16, 16), 8, lm_theme.text);
-            }
+            text_fit(w, l.name[i].x, l.name[i].y, lab, l.name[i].w, it->online ? lm_theme.text : lm_theme.text_dim);
+            if (it->online)
+                check_box(w, l.sw[i], it->on);
             continue;
         }
         rr(w, row, 7, veil_mix(0x12));
@@ -993,10 +1002,7 @@ static void paint_smart(struct app *a)
             continue;
         }
         if (it->kind == LM_SMART_SWITCH) {
-            struct lm_rect tr = lm_rect_make(l.sw[i].x, l.sw[i].y, l.sw[i].w, l.sw[i].h);
-            rr(w, tr, 11, it->on ? lm_theme.ok : lm_theme.button);
-            int kx = it->on ? tr.x + tr.w - 11 : tr.x + 11;
-            rr(w, lm_rect_make(kx - 8, tr.y + tr.h / 2 - 8, 16, 16), 8, lm_theme.text);
+            check_box(w, l.sw[i], it->on);
         } else if (it->kind == LM_SMART_VACUUM) {                       /* its own buttons: Start / Stop cleaning, and home to the dock */
             struct lm_rect cr = lm_rect_make(l.vac[i][0].x, l.vac[i][0].y, l.vac[i][0].w, l.vac[i][0].h);
             rr(w, cr, 12, it->on ? lm_theme.btn_red : lm_theme.btn_green);

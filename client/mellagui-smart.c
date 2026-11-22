@@ -879,7 +879,7 @@ static void flow_toggle(struct flow *f, int k)
 {
     char label[48];
     pretty(f->a->dev[f->dev].dp[k].code, label, sizeof(label));
-    flow_add(f, C_TOGGLE, k, 44 + 8 + lm_font_text_width(label) + 14, label, NULL);
+    flow_add(f, C_TOGGLE, k, 18 + 8 + lm_font_text_width(label) + 8, label, NULL);
 }
 
 static void flow_slider(struct flow *f, int k)
@@ -1719,10 +1719,17 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
     switch (c->kind) {
     case C_TOGGLE: {
         bool on = dp->has && dp->b;
-        struct box pill = { b.x, b.y + 4, 44, 22 };
-        rbox(w, pill, 11, !d->online ? lm_theme.border : on ? lm_theme.ok : hot ? lm_theme.button_hover : lm_theme.button);
-        rbox(w, (struct box){ on ? pill.x + 24 : pill.x + 2, pill.y + 2, 18, 18 }, 9, d->online ? lm_theme.on_colour : lm_theme.text_dim);
-        wlwin_text(w, b.x + 52, b.y + 7, c->label, 1, fg, 0);
+        struct box box = { b.x, b.y + (b.h - 18) / 2, 18, 18 };              /* a check box: the switch used to be a 44 px pill */
+        uint32_t ink = d->online ? lm_theme.on_colour : lm_theme.text_dim;
+        rbox(w, (struct box){ box.x - 1, box.y - 1, 20, 20 }, 5, on && d->online ? lm_theme.ok : lm_theme.border);
+        rbox(w, box, 4, !d->online ? lm_theme.button : on ? lm_theme.ok : hot ? lm_theme.button_hover : lm_theme.button);
+        if (on) {                                               /* the tick */
+            for (int i = 0; i < 4; i++)
+                wlwin_fill(w, box.x + 4 + i, box.y + 8 + i, 2, 2, ink);
+            for (int i = 0; i < 7; i++)
+                wlwin_fill(w, box.x + 7 + i, box.y + 11 - i, 2, 2, ink);
+        }
+        wlwin_text(w, b.x + 26, b.y + (b.h - LM_FONT_H) / 2, c->label, 1, fg, 0);
         break;
     }
     case C_BUTTON: {

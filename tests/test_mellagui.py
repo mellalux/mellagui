@@ -29823,9 +29823,9 @@ class TestSmartGadget(Base):
         groups = [re.search(r'group=(\d+) label=(.*)$', l).groups() for l in lines if l.startswith('item ')]
         self.assertEqual(groups[:3] + groups[-1:], [('7', 'Switch 1'), ('0', 'Switch 2'), ('0', 'Switch 3'), ('0', '-')])      # (the first row heads a group of 7; the lamp is no group)
         x, y, w, h = self.card(c)
-        cols = (w - 24) // 58                                             # as many side by side as fit: 4 on the card's 290 px, so 7 switches are two lines
+        cols = (w - 24) // 62                                             # as many side by side as fit: 4 on the card's 290 px, so 7 switches are two lines
         self.assertEqual(cols, 4)
-        need = 26 + 4 + 28 + 2 * 46 + 4 + 34                              # title, the strip's name row, its two lines of cells, the gap, the lamp's row
+        need = 26 + 4 + 28 + 2 * 30 + 4 + 34                              # title, the strip's name row, its two lines of cells, the gap, the lamp's row
         end = time.time() + 5
         while time.time() < end and self.card(c)[3] < need:
             time.sleep(0.1)
@@ -29833,13 +29833,13 @@ class TestSmartGadget(Base):
         x, y, w, h = self.card(c)
         cw = (w - 24) // cols
         cell_top = y + 26 + 4 + 28                                        # the first line of cells
-        c.click(x + 12 + 2 * cw + cw // 2, cell_top + 46 + 31)            # the 7th switch: third cell of the second line
+        c.click(x + 12 + 2 * cw + cw // 2, cell_top + 30 + 15)            # the 7th switch: third cell of the second line
         sent = [l for l in self.logged() if l.startswith('strip1 switch_7 ')]
         self.assertEqual(sent, ['strip1 switch_7 true'])                  # (it was off: 6 % 2 = 0)
-        c.click(x + 12 + 3 * cw + cw // 2, cell_top + 46 + 31)            # the empty fourth cell of the second line is nothing
+        c.click(x + 12 + 3 * cw + cw // 2, cell_top + 30 + 15)            # the empty fourth cell of the second line is nothing
         time.sleep(0.3)
         self.assertEqual(len([l for l in self.logged() if l.startswith('strip1 ')]), 1)
-        c.click(x + w - 34, cell_top + 2 * 46 + 4 + 17)                   # the lamp, a plain row under the group
+        c.click(x + w - 34, cell_top + 2 * 30 + 4 + 17)                   # the lamp, a plain row under the group
         end = time.time() + 3
         while time.time() < end and not any(l.startswith('plug1 switch_1 ') for l in self.logged()):
             time.sleep(0.1)

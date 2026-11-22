@@ -51,7 +51,7 @@ static void offer_drop(struct wlc *c, uint32_t *id)
 }
 
 /* "file:///a%20b" -> "/a b" (a host name is skipped; anything that is no local file is left out). */
-static bool uri_to_path(const char *uri, char *out, size_t n)
+bool wlclip_uri_to_path(const char *uri, char *out, size_t n)
 {
     if (strncmp(uri, "file://", 7))
         return false;
@@ -85,26 +85,32 @@ static void drop_receive(struct wlclip *a)
 {
     struct wlc *c = a->win->c;
     uint32_t offer = a->drop_offer;
-    int fds[2];
-    if (pipe2(fds, O_CLOEXEC) < 0) {
-        offer_drop(c, &a->drop_offer);
-        return;
-    }
-    WLC_SEND(c, offer, LM_WL_DATA_OFFER_REQ_RECEIVE, { .s = "text/uri-list" }, { .h = fds[1] });
-    close(fds[1]);
-    wlc_flush(c);
     size_t cap = 1u << 18, len = 0;
-    char *buf = malloc(cap + 1);
-    struct pollfd pf = { .fd = fds[0], .events = POLLIN };
-    while (buf && len < cap && poll(&pf, 1, 2000) > 0) {
-        ssize_t k = read(fds[0], buf + len, cap - len);
-        if (k <= 0)
-            break;
-        len += (size_t)k;
+    char *buf = NULL;
+    if (a->drag_src && a->drag_uris) {                  /* our own drag dropped on our own window: the list is here (the source cannot answer while we wait) */
+        buf = strdup(a->drag_uris);
+        len = buf ? strlen(buf) : 0;
+    } else {
+        int fds[2];
+        if (pipe2(fds, O_CLOEXEC) < 0) {
+            offer_drop(c, &a->drop_offer);
+            return;
+        }
+        WLC_SEND(c, offer, LM_WL_DATA_OFFER_REQ_RECEIVE, { .s = "text/uri-list" }, { .h = fds[1] });
+        close(fds[1]);
+        wlc_flush(c);
+        buf = malloc(cap + 1);
+        struct pollfd pf = { .fd = fds[0], .events = POLLIN };
+        while (buf && len < cap && poll(&pf, 1, 2000) > 0) {
+            ssize_t k = read(fds[0], buf + len, cap - len);
+            if (k <= 0)
+                break;
+            len += (size_t)k;
+        }
+        close(fds[0]);
+        if (buf)
+            buf[len] = 0;
     }
-    close(fds[0]);
-    if (buf)
-        buf[len] = 0;
     WLC_SEND0(c, offer, LM_WL_DATA_OFFER_REQ_FINISH);
     offer_drop(c, &a->drop_offer);
     if (!buf || !len || !a->drop) {
@@ -117,7 +123,7 @@ static void drop_receive(struct wlclip *a)
         if (line[0] == '#')
             continue;
         char path[4096];
-        if (uri_to_path(line, path, sizeof(path)) && (paths[np] = strdup(path)))
+        if (wlclip_uri_to_path(line, path, sizeof(path)) && (paths[np] = strdup(path)))
             np++;
     }
     if (np)
@@ -126,6 +132,11 @@ static void drop_receive(struct wlclip *a)
         free(paths[i]);
     free(paths);
     free(buf);
+}
+
+void wlclip_drag_over(struct wlclip *c, void (*over)(struct wlclip *c, bool inside, double x, double y, void *data))
+{
+    c->drag_over = over;
 }
 
 void wlclip_accept_drops(struct wlclip *c, void (*drop)(struct wlclip *c, char **paths, int n, double x, double y, void *data), void *data)
@@ -169,6 +180,8 @@ static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
                 a->drop_y = lm_fixed_to_double(args[3].f);
                 WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_SET_ACTIONS, { .u = 3 }, { .u = 1 });
                 WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_ACCEPT, { .u = args[0].u }, { .s = "text/uri-list" });
+                if (a->drag_over)
+                    a->drag_over(a, true, a->drop_x, a->drop_y, a->drop_data);
             } else {
                 offer_drop(c, &a->offer_pending);
             }
@@ -176,7 +189,11 @@ static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
     } else if (op == LM_WL_DATA_DEVICE_EVT_MOTION) {
         a->drop_x = lm_fixed_to_double(args[1].f);
         a->drop_y = lm_fixed_to_double(args[2].f);
+        if (a->drop_offer && a->drag_over)
+            a->drag_over(a, true, a->drop_x, a->drop_y, a->drop_data);
     } else if (op == LM_WL_DATA_DEVICE_EVT_LEAVE) {
+        if (a->drop_offer && a->drag_over)
+            a->drag_over(a, false, a->drop_x, a->drop_y, a->drop_data);
         offer_drop(c, &a->drop_offer);
     } else if (op == LM_WL_DATA_DEVICE_EVT_DROP && a->drop_offer) {
         drop_receive(a);

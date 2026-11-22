@@ -675,6 +675,8 @@ void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
     else
         overview_changed(wm);
     desktop_fit(wm);                                            /* the icons cover the output under the panel */
+    if (wm->desk_started)
+        lm_wm_desktops_sync(wm);                                /* a desktop for every output */
     gadgets_redock(wm);                                         /* the cards that nobody moved follow the output's edge */
     damage_all(wm);
 }

@@ -739,6 +739,8 @@ int main(int argc, char **argv)
         lm_wm_calendar_start(srv->wm);
     if (srv->wm && !srv->config.kiosk && cfg.desktop_cmd && *cfg.desktop_cmd && strcmp(cfg.desktop_cmd, "none") && (!headless || getenv("MELLAGUI_DESKTOP_PRELOAD")))
         lm_server_spawn(srv, cfg.desktop_cmd);                             /* the icons of ~/Desktop (tests start it with MELLAGUI_DESKTOP_PRELOAD) */
+    if (srv->wm && !srv->config.kiosk)
+        lm_wm_desktops_sync(srv->wm);                                      /* ... and one for every other monitor */
     if (srv->wm && !srv->config.kiosk && cfg.status_cmd && *cfg.status_cmd && strcmp(cfg.status_cmd, "none") && (!headless || getenv("MELLAGUI_STATUS_PRELOAD")))
         lm_server_spawn(srv, cfg.status_cmd);                              /* the battery and network buttons of the panel (tests start it with MELLAGUI_STATUS_PRELOAD) */
 

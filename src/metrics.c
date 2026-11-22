@@ -55,7 +55,7 @@ const char *lm_metrics_what(const char *section, const char *name)
 
 bool lm_metrics_section(const char *s)
 {
-    return !strcmp(s, "windows") || !strcmp(s, "panel") || !strcmp(s, "gadgets") || !strcmp(s, "notifications");
+    return !strcmp(s, "windows") || !strcmp(s, "panel") || !strcmp(s, "gadgets") || !strcmp(s, "notifications") || !strcmp(s, "desktop");
 }
 
 bool lm_metrics_conf(void *ud, const char *section, const char *key, const char *value)

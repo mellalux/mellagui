@@ -34,6 +34,7 @@ struct wlclip {
     void *drop_data;
     uint32_t drop_offer;
     double drop_x, drop_y;
+    void (*drag_over)(struct wlclip *c, bool inside, double x, double y, void *data);   /* a drag is over the window (wlclip_accept_drops) */
     /* a drag in progress (wlclip_drag_files) */
     uint32_t drag_src, drag_surf, drag_pool, drag_buf;
     char *drag_uris, *drag_text;
@@ -57,6 +58,11 @@ bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, con
 bool wlclip_dragging(const struct wlclip *c);
 /* Take drops of files: a drag of text/uri-list over the window is accepted (copy) and, when it is let go, `drop` gets the local paths (malloc'd, `n` of them,
  * freed by the library) and where the pointer was (surface pixels). Without a call a drag over the window is refused. Needs wlclip_attach to have worked. */
+/* `over` is told while an accepted drag is over the window: inside = true with its place at the enter and at every motion, false when it leaves or ends. Its own
+ * drag (wlclip_drag_files) over its own window counts (the program moves its icons that way); at its drop `drop` gets the paths of that drag. */
+void wlclip_drag_over(struct wlclip *c, void (*over)(struct wlclip *c, bool inside, double x, double y, void *data));
+/* "file:///a%20b" -> "/a b" (a host name is skipped); false for anything that is not a local file. */
+bool wlclip_uri_to_path(const char *uri, char *out, size_t n);
 void wlclip_accept_drops(struct wlclip *c, void (*drop)(struct wlclip *c, char **paths, int n, double x, double y, void *data), void *data);
 
 #endif

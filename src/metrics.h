@@ -49,7 +49,8 @@
     X("gadgets", "margin", gadget_margin, 12, 0, 100, "distance from the screen edge when docked") \
     X("gadgets", "snap", gadget_snap, 14, 0, 60, "a dragged gadget sticks to an edge within this many pixels") \
     X("notifications", "width", note_width, 320, 200, 800, "width of a notification card") \
-    X("notifications", "gap", note_gap, 6, 0, 40, "space between cards")
+    X("notifications", "gap", note_gap, 6, 0, 40, "space between cards") \
+    X("desktop", "icon-size", desktop_icon_size, 48, 32, 128, "size of the icons on the desktop (the files of ~/Desktop); the grid cells and the names follow it")
 
 struct lm_metrics {
 #define X(sec, name, field, def, lo, hi, what) int field;
@@ -59,7 +60,7 @@ struct lm_metrics {
 
 extern struct lm_metrics lm_metrics;      /* starts as the built-in defaults */
 
-/* Config-file callback (lm_conf_fn) for the sections [windows], [panel], [gadgets], [notifications]. False for an unknown key
+/* Config-file callback (lm_conf_fn) for the sections [windows], [panel], [gadgets], [notifications], [desktop]. False for an unknown key
  * or a value that is not a whole number inside the key's range. */
 bool lm_metrics_conf(void *ud, const char *section, const char *key, const char *value);
 

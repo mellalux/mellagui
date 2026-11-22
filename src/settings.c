@@ -1811,8 +1811,8 @@ static bool metrics_op(struct lm_server *srv, int kid, const char *val)
     if (kid == K_METRICS_RESET) {
         if (strcmp(val, "1"))
             return false;
-        static const char *const sections[4] = { "windows", "panel", "gadgets", "notifications" };
-        for (int i = 0; i < 4; i++)
+        static const char *const sections[5] = { "windows", "panel", "gadgets", "notifications", "desktop" };
+        for (int i = 0; i < 5; i++)
             ok = lm_confedit_set_section(path, sections[i], NULL) && ok;
     } else {                                    /* K_METRICS_SET: "section.name<US>value" */
         char buf[96];

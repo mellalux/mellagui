@@ -25631,7 +25631,7 @@ class TestMetricsEdit(Base):
     def test_lists_every_size_with_its_range(self):
         c = self.start('mellagui-me11', '[panel]\nheight = 36\n')
         m = self.metrics(c)
-        self.assertEqual(len(m), 30)
+        self.assertEqual(len(m), 31)
         self.assertEqual(m['panel.height'], (36, 20, 64, 32))
         self.assertEqual(m['windows.scrollbar-width'], (14, 4, 40, 14))
         self.assertEqual(m['windows.border-width'], (4, 1, 16, 4))
@@ -30424,7 +30424,7 @@ class TestDesktop(Base):
     """The icons of the desktop (mellagui-desktop): the folder ~/Desktop as a grid under every window."""
     KEY_F2, KEY_DEL, KEY_BS = 60, 111, 14
 
-    def start(self, tag, files=('notes.txt', 'b.txt', 'c.txt'), folders=('Projects',)):
+    def start(self, tag, files=('notes.txt', 'b.txt', 'c.txt'), folders=('Projects',), places=None, conf=None, outputs=()):
         self.d = os.path.join(tmp, 'desktop-' + tag)
         shutil.rmtree(self.d, ignore_errors=True)
         self.dir = os.path.join(self.d, 'Desktop')
@@ -30435,11 +30435,17 @@ class TestDesktop(Base):
         for f in files:
             with open(os.path.join(self.dir, f), 'w') as fh:
                 fh.write('hello\n')
+        if places:                                                         # where the icons were left the last time
+            os.makedirs(os.path.join(self.d, 'cfg', 'mellagui'))
+            with open(os.path.join(self.d, 'cfg', 'mellagui', 'desktop.conf'), 'w') as f:
+                for name, (cx, cy) in places.items():
+                    f.write('%s\t%d %d\n' % (name, cx, cy))
         self.dump = os.path.join(self.d, 'dump.txt')
         env = {'MELLAGUI_DESKTOP_PRELOAD': '1', 'MELLAGUI_DESKTOP_DIR': self.dir, 'MELLAGUI_DESKTOP_DUMP': self.dump,
                'XDG_CONFIG_HOME': os.path.join(self.d, 'cfg'), 'XDG_DATA_HOME': os.path.join(self.d, 'data')}
         self.name = 'mellagui-desk-' + tag
-        p, c, stop = self.private_compositor(self.name, '--size', '1024x600', env=env)
+        args = (['--config', conf] if conf else []) + [x for o in outputs for x in ('--output', o)]
+        p, c, stop = self.private_compositor(self.name, '--size', '1024x600', *args, env=env)
         self.c = c
         self.state()
         return c
@@ -30574,6 +30580,135 @@ class TestDesktop(Base):
         c.tap(KEY_A)                                                       # a: "ba" - banana
         st, items = self.state(lambda s, i: i['banana.txt']['sel'] == '1')
         self.assertEqual([k for k, v in items.items() if v['sel'] == '1'], ['banana.txt'])
+
+    def ctrl_tap(self, c, code):
+        c.key(KEY_LEFTCTRL, True)
+        c.tap(code)
+        c.key(KEY_LEFTCTRL, False)
+
+    def wait_file(self, path, present=True, wait=4.0):
+        end = time.time() + wait
+        while time.time() < end and os.path.exists(path) != present:
+            time.sleep(0.05)
+        return os.path.exists(path) == present
+
+    def test_copy_cut_and_paste_of_icons(self):
+        c = self.start('clip', files=('a.txt', 'b.txt', 'c.txt'), folders=('Box',))
+        self.state(lambda s, i: len(i) == 4)
+        x, y = self.centre('a.txt')                                        # copy a.txt, paste it into the folder Box
+        c.click(x, y)
+        self.ctrl_tap(c, KEY_C)
+        x, y = self.centre('Box')
+        c.click(x, y)
+        self.ctrl_tap(c, KEY_V)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'Box', 'a.txt')), 'the copy is in the folder')
+        self.assertTrue(os.path.exists(os.path.join(self.dir, 'a.txt')), 'the original stays')
+        x, y = self.centre('b.txt')                                        # cut b.txt, paste it into the folder: it moves
+        c.click(x, y)
+        self.ctrl_tap(c, 45)                                               # X
+        x, y = self.centre('Box')
+        c.click(x, y)
+        self.ctrl_tap(c, KEY_V)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'Box', 'b.txt')))
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'b.txt'), present=False), 'the cut one is gone from the desktop')
+        x, y = self.centre('c.txt')                                        # a copy onto the desktop itself gets "(copy)"
+        c.click(x, y)
+        self.ctrl_tap(c, KEY_C)
+        c.click(850, 520)
+        self.ctrl_tap(c, KEY_V)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'c (copy).txt')))
+
+    def test_icons_can_be_dragged_to_another_program(self):
+        c = self.start('out', files=('photo.txt',), folders=(), places={'photo.txt': (5, 1)})   # (far from where the other window lies)
+        self.state(lambda s, i: len(i) == 1)
+        b = Client(self.name)
+        self.clients.append(b)
+        seat = b.wl.bind('wl_seat', 5)
+        ptr = b.wl.new_id('wl_pointer')
+        b.wl.request(seat, 'get_pointer', ptr)
+        mgr = b.wl.bind('wl_data_device_manager', 3)
+        dev = b.wl.new_id('wl_data_device')
+        b.wl.request(mgr, 'get_data_device', dev, seat)
+        Window(b, 200, 150, title='B')
+        b.wl.roundtrip()
+        r = [w for w in c.windows()['windows'] if w['title'] == 'B'][0]
+        x, y = self.centre('photo.txt')
+        c.abs(x, y)
+        c.button(BTN_LEFT, True)
+        c.abs(x + 20, y + 10)
+        c.abs(r['x'] + 100, r['y'] + 80)                                   # over the other program's window
+        c.sync()
+        enter = b.wl.wait_for(lambda e: e.obj == dev and e.name == 'enter', 3.0)
+        self.assertIsNotNone(enter, 'the other program was offered the drag')
+        offer = enter.args[4]
+        mimes = [e.args[0] for e in b.wl.queue if e.obj == offer and e.name == 'offer']
+        self.assertIn('text/uri-list', mimes)
+        b.wl.request(offer, 'set_actions', 1, 1)
+        b.wl.request(offer, 'accept', enter.args[0], 'text/uri-list')
+        b.wl.roundtrip()
+        c.button(BTN_LEFT, False)
+        self.assertIsNotNone(b.wl.wait_for(lambda e: e.obj == dev and e.name == 'drop', 3.0), 'no drop')
+        rd, wr = os.pipe()
+        b.wl.request(offer, 'receive', 'text/uri-list', fds=(wr,))
+        os.close(wr)
+        import select
+        self.assertTrue(select.select([rd], [], [], 3.0)[0], 'the desktop did not send the list')
+        got = os.read(rd, 4096).decode()
+        os.close(rd)
+        self.assertEqual(got, 'file://' + os.path.join(self.dir, 'photo.txt') + '\r\n')
+        b.wl.request(offer, 'finish')
+        b.wl.roundtrip()
+        st, items = self.state(lambda s, i: s['dragging'] == '0')
+        self.assertEqual(st['dragging'], '0', 'the drag is over')
+        self.assertEqual((items['photo.txt']['cx'], items['photo.txt']['cy']), ('5', '1'), 'the icon did not move')
+
+    def test_the_icon_size_is_a_setting_and_follows_the_file(self):
+        conf = os.path.join(tmp, 'desktop-size.conf')
+        with open(conf, 'w') as f:
+            f.write('[desktop]\nicon-size = 64\n')
+        c = self.start('size', files=('a.txt', 'b.txt'), folders=(), conf=conf)
+        st, items = self.state(lambda s, i: len(i) == 2)
+        self.assertEqual(items['b.txt']['h'], '116')                       # a cell is the icon + 52 high
+        self.assertEqual(items['b.txt']['y'], str(14 + 116))
+        with open(conf, 'w') as f:                                         # the settings panel rewrites the file: the grid follows
+            f.write('[desktop]\nicon-size = 100\n')
+        st, items = self.state(lambda s, i: i['b.txt']['h'] == '152', wait=5.0)
+        self.assertEqual(items['b.txt']['h'], '152')
+        self.assertEqual(items['b.txt']['y'], str(14 + 152))
+        c.cmd('reload')
+        c.cmd('setting metrics')                                           # the compositor lists it for the panel's Sizes page
+        self.assertIn('desktop.icon-size=100:32:128:48', c.last)
+
+    def test_every_monitor_has_its_own_desktop_showing_the_same_folder(self):
+        c = self.start('two', files=('a.txt', 'b.txt'), folders=(), outputs=('800x500',))
+        self.state(lambda s, i: len(i) == 2)
+        second = self.dump + '.1'
+        end = time.time() + 6
+        while time.time() < end and not os.path.exists(second):
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(second), 'the second monitor got no desktop program')
+        with open(second) as f:
+            lines = f.read().splitlines()
+        st = dict(x.split('=', 1) for x in lines[0].split()[1:] if '=' in x)
+        self.assertEqual(st['n'], '2')                                      # the same two files
+        self.assertEqual(st['bw'], '800')                                   # drawn for the second output's size
+        self.assertEqual(st['bh'], str(500 - 32))
+        self.assertEqual(c.windows()['windows'], [])                        # neither is a window of the lists
+        c.cmd('desktop')
+        self.assertEqual(c.last, 'ok 0 32 1024 568')                        # the first output's, as before
+        x, y = self.centre('a.txt')                                         # the first one still takes clicks
+        c.click(x, y)
+        self.state(lambda s, i: i['a.txt']['sel'] == '1')
+        c.click(1024 + 14 + 48, 32 + 14 + 30)                               # a click on the second monitor's first icon
+        end = time.time() + 4
+        sel = None
+        while time.time() < end:
+            with open(second) as f:
+                sel = [ln for ln in f.read().splitlines() if ln.startswith('item ') and 'sel=1' in ln]
+            if sel:
+                break
+            time.sleep(0.05)
+        self.assertTrue(sel, 'a click on the second monitor chose its icon')
 
     def test_files_dragged_from_another_program_are_copied_to_the_desktop(self):
         c = self.start('drop', files=('here.txt',), folders=())

@@ -264,6 +264,8 @@ struct lm_wm {
     uint64_t focus_counter;
     int cascade;
     pid_t cal_pid;                      /* the calendar program we started (0 = none) */
+    pid_t desk_pid[8];                  /* the desktop programs for the other outputs (index 1..7; 0 = none): wm_desktop.c */
+    bool desk_started;                  /* the first desktops_sync ran (the compositor is listening) */
     bool cal_pending;                   /* a click started it: show it when its window appears */
     uint64_t cal_pending_ms;
     struct lm_rect cal_clock;           /* where the clock was clicked (the calendar opens under it) */
@@ -459,7 +461,8 @@ bool win_is_aux(const struct lm_window *w);
 /* The desktop's icons (wm_desktop.c): a window of the program mellagui-desktop (app id "mellagui.desktop") that covers the output under the panel, lies at the
  * very bottom (under the gadgets), has no frame and is on every workspace. */
 bool win_is_desktop(const struct lm_window *w);
-struct lm_window *desktop_window(struct lm_wm *wm);
+struct lm_window *desktop_window(struct lm_wm *wm);     /* the window of the first output (the primary one) */
+void lm_wm_desktops_sync(struct lm_wm *wm);               /* one desktop program per extra output, from the left (`mellagui-desktop --output N`) */
 void desktop_fit(struct lm_wm *wm);
 void desktop_lower(struct lm_wm *wm);
 void desktop_map(struct lm_wm *wm, struct lm_window *w);

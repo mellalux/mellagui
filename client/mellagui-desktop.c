@@ -1,10 +1,12 @@
 /*
- * mellagui-desktop - the icons of the desktop: the folder ~/Desktop shown as a grid of icons under every window.
+ * mellagui-desktop [--output N] - the icons of the desktop: the folder ~/Desktop shown as a grid of icons under every window.
  *
  *   mellagui-desktop             the program the compositor starts with itself ([commands] desktop; `none` = off)
  *   mellagui-desktop --list      print what the folder holds, one `kind<TAB>name` a line
  *   mellagui-desktop --selftest
  *
+ * With several monitors the compositor starts one more program for each, `--output N` (N-th from the left; app id mellagui.desktop.N, places in
+ * desktop-N.conf): every monitor shows the same folder.
  * The window (app id mellagui.desktop) is the wm's business: it covers the output under the panel, lies under the gadgets and every window, is on every
  * workspace and has no frame (wm_desktop.c). The program draws into a transparent buffer, so the wallpaper shows between the icons.
  *
@@ -49,11 +51,11 @@
 #include "wlwin.h"
 
 #define MAX_ITEMS 400
-#define CW 96                           /* a cell of the grid */
-#define CH 100
+#define ISZ (lm_metrics.desktop_icon_size)     /* the icon's size ([desktop] icon-size, 32..128, default 48) */
+#define CW (ISZ + 48)                   /* a cell of the grid: 96 x 100 at the default size */
+#define CH (ISZ + 52)
 #define MARGIN 14
 #define BOTTOM_ROOM 84                  /* the dock lies over the bottom of the screen: no icons there */
-#define ISZ 48                          /* the icon's size */
 #define LABEL_W (CW - 8)
 #define HOLD_PX 6
 
@@ -112,10 +114,15 @@ struct app {
     char msg[200];
     uint32_t msg_until;
     bool dirty_scan;
+    bool self_drag;                     /* the carried icons are a Wayland drag (other programs can take them); the drop on this window moves them */
     int anchor, cur;                    /* Shift picks a range from the anchor to the item last chosen (-1: none) */
     char ta[24];                        /* type-ahead: the letters typed lately jump to a name that starts with them */
     uint32_t ta_ms;
 };
+
+static bool drag_start(struct app *a);
+static void clip_take(struct app *a, bool cut);
+static void clip_paste(struct app *a);
 
 static uint32_t now_ms(void)
 {
@@ -261,13 +268,20 @@ static int cmp_item(const void *pa, const void *pb)
 
 /* ---- where the icons are -------------------------------------------------------------------------------------------------------- */
 
+static int g_output;                    /* --output N: the desktop of the N-th monitor from the left (0 = the first); each has its own places */
+
 static void conf_path(char *out, size_t n)
 {
     const char *x = getenv("XDG_CONFIG_HOME"), *h = getenv("HOME");
-    if (x && *x)
-        snprintf(out, n, "%s/mellagui/desktop.conf", x);
+    char name[40];
+    if (g_output > 0)
+        snprintf(name, sizeof(name), "desktop-%d.conf", g_output);
     else
-        snprintf(out, n, "%s/.config/mellagui/desktop.conf", h && *h ? h : "");
+        snprintf(name, sizeof(name), "desktop.conf");
+    if (x && *x)
+        snprintf(out, n, "%s/mellagui/%s", x, name);
+    else
+        snprintf(out, n, "%s/.config/mellagui/%s", h && *h ? h : "", name);
 }
 
 struct place {
@@ -863,7 +877,13 @@ static void paint(struct wlwin *w)
     }
     if (a->prompt != P_NONE)
         paint_prompt(a, w);
-    const char *dump = getenv("MELLAGUI_DESKTOP_DUMP");
+    const char *dump_env = getenv("MELLAGUI_DESKTOP_DUMP");
+    char dump_name[PATH_MAX];
+    const char *dump = dump_env;
+    if (dump_env && *dump_env && g_output > 0) {                /* (each monitor's program writes its own file: FILE.1, FILE.2 ...) */
+        snprintf(dump_name, sizeof(dump_name), "%s.%d", dump_env, g_output);
+        dump = dump_name;
+    }
     if (dump && *dump) {
         char tmp[PATH_MAX + 8];
         snprintf(tmp, sizeof(tmp), "%s.new", dump);
@@ -1422,6 +1442,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 if (!a->it[a->down_item].sel)
                     select_only(a, a->down_item);
                 a->dragging = true;
+                a->self_drag = drag_start(a);                   /* a Wayland drag when the compositor has one: other programs can take the files */
             } else {
                 a->banding = true;
                 if (!a->band_add)
@@ -1465,6 +1486,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (button == 272 && state == 1) {
             int i = item_under(a, a->px, a->py);
             bool ctrl = (w->mods & LM_MOD_CTRL) != 0;
+            a->clip.ptr_serial = args[0].u;                     /* (a drag starts from the press' serial) */
             a->down = true;
             a->down_item = i;
             a->down_x = a->px;
@@ -1605,6 +1627,12 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         prompt_open(a, P_RENAME, a->it[cur].name);
     } else if (ks == LM_KS_Delete && cur >= 0) {
         trash_selected(a);
+    } else if (ctrl && (ks == 'c' || ks == 'C')) {
+        clip_take(a, false);
+    } else if (ctrl && (ks == 'x' || ks == 'X')) {
+        clip_take(a, true);
+    } else if (ctrl && (ks == 'v' || ks == 'V')) {
+        clip_paste(a);
     } else if (ks == LM_KS_F1 + 4) {
         scan(a);
     } else if (!ctrl && !(w->mods & LM_MOD_ALT) && ((ks > 0x20 && ks < 0x7f) || (ks == 0x20 && a->ta[0]))) {
@@ -1630,12 +1658,200 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     w->redraw = true;
 }
 
+/* ---- copy, cut and paste -------------------------------------------------------------------------------------------------------------- */
+
+static char **g_clip;                   /* what Ctrl+C / Ctrl+X took: full paths */
+static int g_nclip;
+static bool g_cut;
+
+static void clip_clear(void)
+{
+    for (int i = 0; i < g_nclip; i++)
+        free(g_clip[i]);
+    free(g_clip);
+    g_clip = NULL;
+    g_nclip = 0;
+    g_cut = false;
+}
+
+/* "name (copy).ext", "name (copy 2).ext" ... that does not exist in `dir` yet. */
+static void copy_name(const char *dir, const char *base, char *out, size_t n)
+{
+    const char *dot = strrchr(base, '.');
+    int stem = dot && dot != base ? (int)(dot - base) : (int)strlen(base);
+    for (int k = 1; k < 1000; k++) {
+        char tag[24], path[PATH_MAX * 2];
+        if (k == 1)
+            snprintf(tag, sizeof(tag), " (copy)");
+        else
+            snprintf(tag, sizeof(tag), " (copy %d)", k);
+        snprintf(out, n, "%.*s%s%s", stem, base, tag, base + stem);
+        struct stat st;
+        snprintf(path, sizeof(path), "%s/%s", dir, out);
+        if (lstat(path, &st) < 0)
+            return;
+    }
+}
+
+static void clip_take(struct app *a, bool cut)
+{
+    int n = count_sel(a);
+    if (!n)
+        return;
+    clip_clear();
+    g_clip = calloc((size_t)n, sizeof(*g_clip));
+    if (!g_clip)
+        return;
+    char text[8192] = "";
+    for (int i = 0; i < a->n; i++) {
+        if (!a->it[i].sel)
+            continue;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", a->dir, a->it[i].name);
+        g_clip[g_nclip++] = strdup(path);
+        if (strlen(text) + strlen(path) + 2 < sizeof(text))
+            strcat(strcat(text, path), "\n");
+    }
+    g_cut = cut;
+    wlclip_copy(&a->clip, text);                                /* (other programs can paste the paths as text) */
+    say(a, "%s %d item%s", cut ? "Cut" : "Copied", g_nclip, g_nclip == 1 ? "" : "s");
+}
+
+/* Puts `n` paths into `target`: cp (a copy next to the original gets "(copy)" in its name) or mv, in the background. */
+static void paste_paths(struct app *a, char **paths, int n, const char *target, bool move)
+{
+    int done = 0;
+    for (int i = 0; i < n && i < 200; i++) {
+        const char *base = strrchr(paths[i], '/');
+        base = base ? base + 1 : paths[i];
+        char dir[PATH_MAX], name[NAME_MAX + 32], dst[PATH_MAX * 2];
+        snprintf(dir, sizeof(dir), "%s", paths[i]);
+        char *slash = strrchr(dir, '/');
+        if (slash && slash != dir)
+            *slash = 0;
+        bool same = !strcmp(dir, target);
+        if (same && move)
+            continue;                                           /* (it is there already) */
+        if (same)
+            copy_name(target, base, name, sizeof(name));
+        else
+            snprintf(name, sizeof(name), "%s", base);
+        snprintf(dst, sizeof(dst), "%s/%s", target, name);
+        if (move)
+            spawn((char *[]){ "mv", "-n", "--", paths[i], dst, NULL }, NULL);
+        else
+            spawn((char *[]){ "cp", "-a", "-n", "--", paths[i], dst, NULL }, NULL);
+        done++;
+    }
+    if (done)
+        say(a, "%s %d item%s", move ? "Moving" : "Copying", done, done == 1 ? "" : "s");
+}
+
+/* Ctrl+V: into the folder icon that is the only thing chosen, else onto the desktop. What is pasted is what Ctrl+C / Ctrl+X took, else the files another program
+ * put on the clipboard (a text/uri-list). */
+static void clip_paste(struct app *a)
+{
+    char target[PATH_MAX];
+    int cur = first_selected(a);
+    if (cur >= 0 && count_sel(a) == 1 && a->it[cur].kind == K_DIR && !a->it[cur].broken)
+        snprintf(target, sizeof(target), "%s/%s", a->dir, a->it[cur].name);
+    else
+        snprintf(target, sizeof(target), "%s", a->dir);
+    if (g_nclip) {
+        paste_paths(a, g_clip, g_nclip, target, g_cut);
+        if (g_cut)
+            clip_clear();
+        return;
+    }
+    size_t len = 0;
+    uint8_t *raw = wlclip_has_mime(&a->clip, "text/uri-list") ? wlclip_paste_mime(&a->clip, "text/uri-list", 1u << 18, &len) : NULL;
+    if (!raw) {
+        say(a, "There is nothing to paste");
+        return;
+    }
+    char *text = realloc(raw, len + 1);
+    if (!text) {
+        free(raw);
+        return;
+    }
+    text[len] = 0;
+    char **paths = calloc(200, sizeof(*paths));
+    int np = 0;
+    for (char *line = strtok(text, "\r\n"); line && paths && np < 200; line = strtok(NULL, "\r\n")) {
+        char path[PATH_MAX];
+        if (line[0] != '#' && wlclip_uri_to_path(line, path, sizeof(path)) && (paths[np] = strdup(path)))
+            np++;
+    }
+    if (np)
+        paste_paths(a, paths, np, target, false);
+    else
+        say(a, "There is nothing to paste");
+    for (int i = 0; i < np; i++)
+        free(paths[i]);
+    free(paths);
+    free(text);
+}
+
+/* Starts a Wayland drag of the chosen icons: other programs can take them (a browser's page, a mail), and a drop on this window moves the icons. */
+static bool drag_start(struct app *a)
+{
+    size_t cap = 1u << 16;
+    char *uris = calloc(1, cap), *text = calloc(1, cap);
+    if (!uris || !text) {
+        free(uris);
+        free(text);
+        return false;
+    }
+    int n = 0;
+    char label[64] = "";
+    for (int i = 0; i < a->n; i++) {
+        if (!a->it[i].sel)
+            continue;
+        char path[PATH_MAX], enc[PATH_MAX * 3];
+        snprintf(path, sizeof(path), "%s/%s", a->dir, a->it[i].name);
+        url_encode(path, enc, sizeof(enc));
+        if (strlen(uris) + strlen(enc) + 12 >= cap || strlen(text) + strlen(path) + 2 >= cap)
+            break;
+        strcat(strcat(strcat(uris, "file://"), enc), "\r\n");
+        strcat(strcat(text, path), "\n");
+        if (!n)
+            snprintf(label, sizeof(label), "%s", a->it[i].shown);
+        n++;
+    }
+    if (n > 1)
+        snprintf(label, sizeof(label), "%d items", n);
+    bool ok = n > 0 && wlclip_drag_files(&a->clip, uris, text, label);
+    free(uris);
+    free(text);
+    return ok;
+}
+
+/* The drag is over the window: the carried icons follow it (the pointer's own motion events do not come during a drag). */
+static void on_over(struct wlclip *c, bool inside, double x, double y, void *data)
+{
+    (void)c;
+    struct app *a = data;
+    if (inside) {
+        a->px = x;
+        a->py = y;
+    }
+    a->win.redraw = true;
+}
+
 /* Files dragged here from another program (the file manager) are copied into the desktop folder, or into the folder icon they were let go on. A file that is
  * in that folder already is left alone. cp does the work in the background: the folder is watched, the icons appear as the files do. */
 static void on_drop(struct wlclip *c, char **paths, int n, double x, double y, void *data)
 {
     (void)c;
     struct app *a = data;
+    if (a->self_drag) {                                         /* our own icons let go on our own window: they move to the cell (or into the folder) under the pointer */
+        a->self_drag = false;
+        a->px = x;
+        a->py = y;
+        drop_icons(a);
+        a->win.redraw = true;
+        return;
+    }
     char target[PATH_MAX];
     int over = item_under(a, x, y);
     if (over >= 0 && a->it[over].kind == K_DIR && !a->it[over].broken)
@@ -1706,6 +1922,28 @@ static bool watch_changed(struct app *a)
     while ((k = read(a->ino, buf, sizeof(buf))) > 0)
         any = true;
     return any;
+}
+
+/* True when mellagui.conf was written since the last look (its modification time and size): the settings panel and the editor rewrite it in place. */
+static bool conf_changed(void)
+{
+    static struct stat last;
+    static bool known;
+    char path[PATH_MAX];
+    const char *c = getenv("MELLAGUI_CONFIG"), *x = getenv("XDG_CONFIG_HOME"), *h = getenv("HOME");
+    if (c && *c)
+        snprintf(path, sizeof(path), "%s", c);
+    else if (x && *x)
+        snprintf(path, sizeof(path), "%s/mellagui/mellagui.conf", x);
+    else
+        snprintf(path, sizeof(path), "%s/.config/mellagui/mellagui.conf", h && *h ? h : "");
+    struct stat st;
+    if (!strcmp(path, "none") || stat(path, &st) < 0)
+        return false;
+    bool changed = known && (st.st_mtim.tv_sec != last.st_mtim.tv_sec || st.st_mtim.tv_nsec != last.st_mtim.tv_nsec || st.st_size != last.st_size);
+    last = st;
+    known = true;
+    return changed;
 }
 
 /* ---- the program ------------------------------------------------------------------------------------------------------------------------- */
@@ -1783,6 +2021,9 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--selftest"))
         return selftest();
     static struct app a;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--output"))
+            g_output = LM_CLAMP(atoi(argv[i + 1]), 0, 7);
     desktop_dir(a.dir, sizeof(a.dir));
     if (argc > 1 && !strcmp(argv[1], "--list")) {
         static const char *const names[] = { "folder", "image", "video", "audio", "archive", "pdf", "code", "text", "program", "launcher", "file" };
@@ -1820,10 +2061,19 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return 1;
     }
-    if (wlwin_open(&a.win, "Desktop", "mellagui.desktop", 1024, 600, 200, 200) < 0)
+    char app_id[40], title[40];
+    if (g_output > 0) {
+        snprintf(app_id, sizeof(app_id), "mellagui.desktop.%d", g_output);
+        snprintf(title, sizeof(title), "Desktop %d", g_output);
+    } else {
+        snprintf(app_id, sizeof(app_id), "mellagui.desktop");
+        snprintf(title, sizeof(title), "Desktop");
+    }
+    if (wlwin_open(&a.win, title, app_id, 1024, 600, 200, 200) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
     wlclip_accept_drops(&a.clip, on_drop, &a);
+    wlclip_drag_over(&a.clip, on_over);
     places_load();
     a.ino = -1;
     watch_start(&a);
@@ -1831,6 +2081,16 @@ int main(int argc, char **argv)
     while (wlwin_step(&a.win, a.msg[0] && now_ms() < a.msg_until ? 200 : 300)) {
         if (a.msg[0] && now_ms() >= a.msg_until) {
             a.msg[0] = 0;
+            a.win.redraw = true;
+        }
+        if (a.self_drag && !wlclip_dragging(&a.clip)) {         /* the drag ended (dropped elsewhere, refused, Esc): the icons stay where they were */
+            a.self_drag = a.dragging = false;
+            a.win.redraw = true;
+        }
+        if (conf_changed()) {                                   /* the size of the icons was changed in the settings: the grid is laid out again */
+            lm_metrics_reset();
+            lm_theme_load_env();
+            place_items(&a);
             a.win.redraw = true;
         }
         if (watch_changed(&a))

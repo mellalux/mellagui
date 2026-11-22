@@ -670,6 +670,12 @@ static void device_open(struct lm_input *in, const char *path)
             classes |= DEV_DIRECT_ABS;
             if (mt)
                 classes |= DEV_TOUCH_MT;
+        } else if (bit_test(keybits, BTN_LEFT)) {
+            /* An absolute MOUSE: no touch, no pen, no finger, just ABS_X / ABS_Y and buttons. That is what a virtual
+             * machine hands out (VMware's USB tablet and vmmouse, QEMU / VirtualBox / virtio tablets) so that the
+             * host's pointer and the guest's one are the same. Position is absolute, the buttons and the wheel
+             * work as for a mouse. */
+            classes |= DEV_DIRECT_ABS | DEV_POINTER;
         }
     }
     if (!classes) {

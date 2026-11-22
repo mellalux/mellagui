@@ -2453,6 +2453,310 @@ static void test_keep(void)
 	bl_world_free(w);
 }
 
+/* ---- workers ----------------------------------------------------------------------------------------------------------------- */
+
+/* step the mobs, and do what a worker asks: take away the blocks it has finished. Returns how many blocks went. */
+static int work_steps(struct bl_mobs *M, struct bl_world *w, const float pl[3], float secs, float hour, int *in_block, float *first_break_t)
+{
+	int broke = 0;
+	float t = 0.0f;
+	int n = (int)(secs * 30.0f);
+	for (int i = 0; i < n; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(M, w, pl, true, hour, 1.0f / 30.0f, &R);
+		t += 1.0f / 30.0f;
+		for (int k = 0; k < R.nbreak; k++) {
+			bl_set(w, R.brk[k].x, R.brk[k].y, R.brk[k].z, BL_AIR);
+			if (!broke && first_break_t)
+				*first_break_t = t;
+			broke++;
+		}
+		if (in_block)
+			for (int k = 0; k < BL_MOBS_MAX; k++)
+				if (M->mob[k].alive)
+					*in_block += box_in_solid(w, M->mob[k].x, M->mob[k].y, M->mob[k].z, BL_GOBLIN_HW, bl_mob_h(M->mob[k].kind));
+	}
+	return broke;
+}
+
+static void test_workers(void)
+{
+	const float far_pl[3] = { 64.5f, 20.0f, 110.0f };
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 11);
+	M.spawn_t = 1e9f;
+
+	/* putting them, and counting */
+	CHECK(bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 50.5f) && M.mob[0].kind == BL_MOB_WORKER && M.mob[0].hp == BL_WORKER_HP, "a worker, with six hit points");
+	CHECK(!bl_mobs_add(&M, w, BL_MOB_WORKER, 51.5f, 19.5f, 50.5f), "not in the ground");
+	for (int i = 1; i < BL_WORKER_MAX; i++)
+		bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f + (float)i, 20.0f, 50.5f);
+	CHECK(bl_mobs_count_kind(&M, BL_MOB_WORKER) == BL_WORKER_MAX && !bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 53.0f), "eight at most");
+	CHECK(bl_mobs_add(&M, w, BL_MOB_GOBLIN, 70.5f, 20.0f, 70.5f) && bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 1 && bl_mobs_count(&M) == BL_WORKER_MAX + 1, "a goblin still goes in beside them");
+	CHECK(bl_mobs_hit_cell(&M, 50, 20, 50) && bl_mobs_hit_cell(&M, 50, 21, 50) && !bl_mobs_hit_cell(&M, 50, 22, 50), "a block cannot be put where a worker stands (1.56 m)");
+	/* the sword does not find them; the pointer does */
+	float eye[3] = { 50.5f, 21.0f, 47.0f }, look[3] = { 0, 0, 1 }, t = 0;
+	CHECK(bl_mobs_pick(&M, eye, look, BL_SWORD_REACH, &t) < 0, "the sword goes through a worker");
+	float hi[3] = { 50.5f, 40.0f, 47.0f }, down[3] = { 0.0f, -1.0f, 0.2f };
+	CHECK(bl_units_pick(&M, eye, look, 20.0f, &t) == 0 && fabsf(t - (3.5f - BL_GOBLIN_HW - 0.05f)) < 0.01f, "the pointer finds it (%.2f)", t);
+	CHECK(bl_units_pick(&M, hi, down, 60.0f, &t) >= 0, "also from high above (the command view)");
+	float side[3] = { -0.3f, 0, 1 };
+	CHECK(bl_units_pick(&M, eye, side, 20.0f, &t) < 0 && bl_units_pick(&M, (float[3]){ 70.5f, 21.0f, 67.0f }, look, 20.0f, &t) < 0, "a miss is a miss, and a goblin is no worker");
+	bl_mobs_clear_kind(&M, BL_MOB_GOBLIN);
+	CHECK(bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 0 && bl_mobs_count_kind(&M, BL_MOB_WORKER) == BL_WORKER_MAX, "clear_kind takes one kind");
+	bl_mobs_clear(&M);
+
+	/* a move order: it walks there, at no more than 2.2 m/s, and is idle when it has come; a wall of two gives it up after three seconds, one block high it climbs */
+	{
+		bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 50.5f);
+		bl_mobs_order_move(&M, 0, 60.5f, 56.5f);
+		CHECK(M.mob[0].order == BL_ORDER_MOVE, "ordered");
+		float tt = 0, arrived = 0, vmax = 0;
+		int bad = 0;
+		for (int i = 0; i < 30 * 12; i++) {
+			float ox = M.mob[0].x, oz = M.mob[0].z;
+			bl_mobs_step(&M, w, far_pl, true, 12.0f, 1.0f / 30.0f, NULL);
+			tt += 1.0f / 30.0f;
+			float v = hypotf(M.mob[0].x - ox, M.mob[0].z - oz) * 30.0f;
+			vmax = v > vmax ? v : vmax;
+			bad += box_in_solid(w, M.mob[0].x, M.mob[0].y, M.mob[0].z, BL_GOBLIN_HW, BL_WORKER_H);
+			if (!arrived && M.mob[0].order == BL_ORDER_IDLE)
+				arrived = tt;
+		}
+		CHECK(arrived > 3.5f && arrived < 9.0f && hypotf(M.mob[0].x - 60.5f, M.mob[0].z - 56.5f) < 0.7f && bad == 0, "it walks 11.7 m and stops there (%.1f s, %.2f m off)", arrived, hypotf(M.mob[0].x - 60.5f, M.mob[0].z - 56.5f));
+		CHECK(vmax < 2.4f && vmax > 1.5f, "at about 2.2 m/s (%.2f)", vmax);
+		for (int x = 0; x < 128; x++)
+			for (int y = 20; y < 22; y++)
+				bl_set(w, x, y, 62, BL_STONE);
+		bl_mobs_order_move(&M, 0, 60.5f, 70.5f);
+		for (int i = 0; i < 30 * 14; i++)
+			bl_mobs_step(&M, w, far_pl, true, 12.0f, 1.0f / 30.0f, NULL);
+		CHECK(M.mob[0].order == BL_ORDER_IDLE && M.mob[0].z < 62.0f - BL_GOBLIN_HW + 0.05f, "a wall of two blocks: it gives up (z %.2f)", M.mob[0].z);
+		for (int x = 0; x < 128; x++)
+			bl_set(w, x, 21, 62, BL_AIR);
+		bl_mobs_order_move(&M, 0, 60.5f, 70.5f);
+		for (int i = 0; i < 30 * 12; i++)
+			bl_mobs_step(&M, w, far_pl, true, 12.0f, 1.0f / 30.0f, NULL);
+		CHECK(hypotf(M.mob[0].x - 60.5f, M.mob[0].z - 70.5f) < 0.8f, "one block high it climbs and gets there");
+		for (int x = 0; x < 128; x++)
+			bl_set(w, x, 20, 62, BL_AIR);
+		bl_mobs_order_stop(&M, 0);
+		bl_mobs_order_move(&M, 0, 60.5f, 75.5f);
+		bl_mobs_order_stop(&M, 0);
+		CHECK(M.mob[0].order == BL_ORDER_IDLE, "stop");
+		bl_mobs_order_move(&M, 5, 1, 1);
+		bl_mobs_order_move(&M, -1, 1, 1);
+		CHECK(true, "orders to numbers that are no workers do nothing");
+	}
+
+	/* gathering: it stands beside a block, takes 1.5 times the player's time, and goes on to the next of its kind */
+	{
+		bl_mobs_clear(&M);
+		for (int x = 60; x <= 62; x++)
+			bl_set(w, x, 20, 90, BL_STONE);
+		bl_set(w, 60, 20, 95, BL_DIRT);                                       /* another kind, nearby: not touched */
+		bl_mobs_add(&M, w, BL_MOB_WORKER, 55.5f, 20.0f, 90.5f);
+		CHECK(bl_mobs_order_gather(&M, w, 0, 60, 20, 90), "a gather order on a stone");
+		CHECK(!bl_mobs_order_gather(&M, w, 0, 60, 30, 90) && !bl_mobs_order_gather(&M, w, 0, 60, 5, 90) && !bl_mobs_order_gather(&M, w, 0, 60, 22, 90), "not on air, in the ground out of reach or in the air");
+		CHECK(!bl_mobs_order_gather(&M, w, 3, 60, 20, 90) && !bl_mobs_order_gather(&M, w, -1, 60, 20, 90), "not for a number that is no worker");
+		struct bl_world *wb = bl_world_flat(64, 64, 64, 20);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 100.5f, 20.0f, 100.5f);
+		CHECK(!bl_mobs_order_gather(&M, w, 1, 60, 20, 90), "a goblin takes no orders");
+		bl_mobs_clear_kind(&M, BL_MOB_GOBLIN);
+		bl_world_free(wb);
+		struct bl_hit dummy = { .hit = true, .x = 60, .y = 0, .z = 60 };
+		CHECK(!bl_mobs_order_gather(&M, w, 0, 60, 0, 60) && !bl_break(w, &dummy), "bedrock is not gathered");
+		int in_block = 0;
+		float first = 0;
+		int n = work_steps(&M, w, far_pl, 9.0f, 12.0f, &in_block, &first);
+		CHECK(n == 1 && bl_get(w, 60, 20, 90) == BL_AIR && first >= 3.0f && first <= 7.0f, "9 s: one stone is gone, after the walk and 3 s of work (%d, first at %.1f s)", n, first);
+		n += work_steps(&M, w, far_pl, 12.0f, 12.0f, &in_block, NULL);
+		CHECK(n == 3 && bl_get(w, 61, 20, 90) == BL_AIR && bl_get(w, 62, 20, 90) == BL_AIR, "then the next two of its kind");
+		CHECK(bl_get(w, 60, 20, 95) == BL_DIRT, "and not the dirt");
+		work_steps(&M, w, far_pl, 3.0f, 12.0f, &in_block, NULL);
+		CHECK(M.mob[0].order == BL_ORDER_IDLE && in_block == 0, "nothing left: it is idle (and never was in a block)");
+	}
+
+	/* a tree: its foot is taken wherever it was ordered, the whole trunk goes with it and the leaves round its crown; a second tree within 6 blocks after that */
+	{
+		bl_mobs_clear(&M);
+		for (int tx = 80; tx <= 84; tx += 4) {
+			for (int y = 20; y <= 24; y++)
+				bl_set(w, tx, y, 100, BL_LOG);
+			for (int ly = 22; ly <= 25; ly++)
+				for (int dz = -2; dz <= 2; dz++)
+					for (int dx = -2; dx <= 2; dx++)
+						if (bl_get(w, tx + dx, ly, 100 + dz) == BL_AIR)
+							bl_set(w, tx + dx, ly, 100 + dz, BL_LEAVES);
+		}
+		long leaves0 = 0;
+		for (int y = 20; y < 28; y++)
+			for (int z = 95; z < 106; z++)
+				for (int x = 76; x < 90; x++)
+					leaves0 += bl_get(w, x, y, z) == BL_LEAVES;
+		bl_mobs_add(&M, w, BL_MOB_WORKER, 77.5f, 20.0f, 102.5f);
+		CHECK(bl_mobs_order_gather(&M, w, 0, 80, 22, 100) && M.mob[0].gy == 20, "ordered on the middle of the trunk it goes for the foot");
+		int in_block = 0, total = 0;
+		float first = 0;
+		total += work_steps(&M, w, far_pl, 6.0f, 12.0f, &in_block, &first);
+		CHECK(total >= 5 && bl_get(w, 80, 20, 100) == BL_AIR && bl_get(w, 80, 24, 100) == BL_AIR, "the whole trunk goes at once (%d blocks, at %.1f s)", total, first);
+		CHECK(first >= 4.0f && first <= 6.0f, "after 1.8 s and 0.6 s a log more (%.1f s with the walk)", first);
+		long leaves1 = 0;
+		for (int y = 20; y < 28; y++)
+			for (int z = 95; z < 106; z++)
+				for (int x = 76; x < 82; x++)
+					leaves1 += bl_get(w, x, y, z) == BL_LEAVES;
+		CHECK(leaves1 < leaves0 / 2 - 5, "and the leaves of its crown (%ld left of the first tree's)", leaves1);
+		total += work_steps(&M, w, far_pl, 14.0f, 12.0f, &in_block, NULL);
+		CHECK(bl_get(w, 84, 20, 100) == BL_AIR && bl_get(w, 84, 24, 100) == BL_AIR && in_block == 0, "then the second tree, 4 blocks away");
+	}
+
+	/* goblins hunt workers: the nearest within 10 blocks, before the keep; the player within 8 blocks first; a worker dies of two blows and is counted */
+	{
+		struct bl_world *w2 = bl_world_flat(128, 128, 64, 20);
+		bl_mobs_clear(&M);
+		for (int y = 20; y < 23; y++)
+			bl_set(w2, 100, y, 64, BL_KEEP);
+		bl_mobs_set_keep(&M, true, 100.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, w2, BL_MOB_WORKER, 70.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 78.5f, 20.0f, 64.5f);
+		int lost = 0;
+		float kd = 0;
+		float t_dead = 0, tt = 0;
+		for (int i = 0; i < 30 * 15 && !lost; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w2, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			tt += 1.0f / 30.0f;
+			lost += R.workers_lost;
+			kd += R.keep_damage;
+			if (lost && !t_dead)
+				t_dead = tt;
+		}
+		CHECK(lost == 1 && t_dead > 2.0f && t_dead < 10.0f && bl_mobs_count_kind(&M, BL_MOB_WORKER) == 0, "a goblin goes for the worker 8 blocks away, not the keep, and kills it with two blows (%d, %.1f s)", lost, t_dead);
+		CHECK(kd == 0.0f && M.kills == 0, "the keep was not touched and a dead worker is no kill");
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w2, BL_MOB_WORKER, 70.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 74.5f, 20.0f, 64.5f);
+		float near_pl[3] = { 76.5f, 20.0f, 64.5f };
+		float pd = 0;
+		int wl = 0;
+		for (int i = 0; i < 30 * 6; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w2, near_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			pd += R.damage;
+			wl += R.workers_lost;
+		}
+		CHECK(pd >= 3.0f && wl == 0, "with the player within 8 blocks the goblin goes for him (%.0f to him, %d workers lost)", pd, wl);
+		/* a worker far from the goblin is not seen */
+		bl_mobs_clear(&M);
+		bl_mobs_add(&M, w2, BL_MOB_WORKER, 40.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 60.5f, 20.0f, 64.5f);
+		int wl2 = 0;
+		for (int i = 0; i < 30 * 4; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w2, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
+			wl2 += R.workers_lost;
+		}
+		CHECK(wl2 == 0 && bl_mobs_count_kind(&M, BL_MOB_WORKER) == 1, "20 blocks away it is not seen");
+		bl_world_free(w2);
+	}
+
+	/* what does not touch them: M (enabled = false) takes the goblins, not the workers; the sun and the far-away rule are for goblins; they are never burned or dropped */
+	{
+		bl_mobs_clear(&M);
+		M.enabled = false;
+		bl_mobs_add(&M, w, BL_MOB_WORKER, 20.5f, 20.0f, 20.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 22.5f, 20.0f, 22.5f);
+		for (int i = 0; i < 30 * 60; i++)
+			bl_mobs_step(&M, w, far_pl, true, 12.0f, 1.0f / 30.0f, NULL);
+		CHECK(bl_mobs_count_kind(&M, BL_MOB_WORKER) == 1 && bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 0, "a minute at noon, 90 blocks from the player, the goblins switched off: the worker is still there");
+		CHECK(M.mob[0].hp == BL_WORKER_HP || M.mob[1].hp == BL_WORKER_HP, "unburned");
+		M.enabled = true;
+	}
+
+	/* the picture: a worker is a person in blue with a yellow cap; chosen, it is lighter */
+	{
+		enum { W = 160, H = 100 };
+		static uint32_t a[W * H], b[W * H], c[W * H];
+		struct bl_world *wp = bl_world_flat(64, 64, 64, 20);
+		struct bl_mobs P;
+		bl_mobs_init(&P, 1);
+		bl_mobs_add(&P, wp, BL_MOB_WORKER, 32.5f, 20.0f, 36.5f);
+		P.mob[0].yaw = 3.14159265f;
+		P.mob[0].ycos = cosf(P.mob[0].yaw);
+		P.mob[0].ysin = sinf(P.mob[0].yaw);
+		struct bl_camera cam = { 32.5f, 21.4f, 32.5f, 0.0f, -0.05f, 0.8f };
+		struct bl_view v;
+		bl_view_init(&v);
+		v.time_h = 12.0f;
+		bl_mobs_light(&P, wp, v.time_h);
+		bl_render(wp, &cam, &v, a, W, H, W, 1);
+		v.mobs = &P;
+		bl_render(wp, &cam, &v, b, W, H, W, 1);
+		int changed = 0, blue = 0, yellow = 0;
+		for (int i = 0; i < W * H; i++)
+			if (a[i] != b[i]) {
+				changed++;
+				int r = (int)((b[i] >> 16) & 255), g = (int)((b[i] >> 8) & 255), bl = (int)(b[i] & 255);
+				blue += bl > r + 40 && bl > g + 10;
+				yellow += r > 150 && g > 110 && bl < 90 && r > bl + 80;
+			}
+		CHECK(changed > 500 && blue > 60 && yellow > 8, "a worker 4 m away: %d pixels differ, %d blue (the tunic), %d yellow (the cap)", changed, blue, yellow);
+		long sum_a = 0, sum_b = 0;
+		for (int i = 0; i < W * H; i++)
+			sum_a += (long)((b[i] >> 16) & 255) + ((b[i] >> 8) & 255) + (b[i] & 255);
+		P.mob[0].selected = true;
+		bl_render(wp, &cam, &v, c, W, H, W, 1);
+		for (int i = 0; i < W * H; i++)
+			sum_b += (long)((c[i] >> 16) & 255) + ((c[i] >> 8) & 255) + (c[i] & 255);
+		CHECK(sum_b > sum_a + 3000, "chosen it is lighter (%ld against %ld)", sum_b, sum_a);
+		struct bl_view iv = v;
+		iv.ids = true;
+		uint32_t px;
+		struct bl_camera one = { 32.5f, 21.0f, 32.5f, 0.0f, 0.0f, 0.8f };
+		bl_render(wp, &one, &iv, &px, 1, 1, 1, 1);
+		CHECK(px == 0xff0000fcu, "the ray at it meets a creature (%08x)", px);
+		bl_world_free(wp);
+	}
+
+	/* stress: random orders, goblins about, terrain: never in a block, never a number that is not one */
+	{
+		struct bl_world *wt = bl_world_new(8, 128, 128, 64);
+		struct bl_mobs S;
+		bl_mobs_init(&S, 5);
+		float p3[3];
+		bl_spawn(wt, p3);
+		for (int i = 0; i < 5; i++)
+			bl_mobs_add(&S, wt, BL_MOB_WORKER, p3[0] + (float)i, p3[1], p3[2] + 2.0f);
+		int bad = 0, nan = 0, orders = 0;
+		for (int i = 0; i < 30000; i++) {
+			if (i % 120 == 0) {
+				int wi = (int)(rnd() % 8U);
+				int x = (int)(p3[0] + rndr(-9, 9)), z = (int)(p3[2] + rndr(-9, 9)), y = bl_top(wt, x, z);
+				if (rnd() % 2U && y > 0)
+					orders += bl_mobs_order_gather(&S, wt, wi, x, y, z);
+				else
+					bl_mobs_order_move(&S, wi, rndr(10, 118), rndr(10, 118));
+			}
+			struct bl_mobs_result R;
+			float dt = i % 97 == 0 ? rndr(0.0f, 0.5f) : i % 233 == 0 ? NAN : rndr(0.0f, 0.05f);
+			bl_mobs_step(&S, wt, p3, true, (float)(i / 700 % 24), dt, &R);
+			for (int k = 0; k < R.nbreak; k++)
+				bl_set(wt, R.brk[k].x, R.brk[k].y, R.brk[k].z, BL_AIR);
+			if (i % 30 == 0)
+				for (int k = 0; k < BL_MOBS_MAX; k++)
+					if (S.mob[k].alive) {
+						bad += box_in_solid(wt, S.mob[k].x, S.mob[k].y, S.mob[k].z, BL_GOBLIN_HW, bl_mob_h(S.mob[k].kind));
+						nan += !isfinite(S.mob[k].x + S.mob[k].y + S.mob[k].z + S.mob[k].hp);
+					}
+		}
+		CHECK(bad == 0 && nan == 0 && orders > 5, "30000 odd steps with random orders on terrain: %d samples in a block, %d not numbers, %d gather orders taken", bad, nan, orders);
+		bl_world_free(wt);
+	}
+	bl_world_free(w);
+}
+
 /* ---- the command line: bench, shot, info ------------------------------------------------------------------------------- */
 
 static void write_ppm(const char *path, const uint32_t *px, int w, int h)
@@ -2784,6 +3088,8 @@ int main(int argc, char **argv)
 	test_mobs_render();
 	printf("survival: hardness, drops, the keep\n");
 	test_keep();
+	printf("workers\n");
+	test_workers();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

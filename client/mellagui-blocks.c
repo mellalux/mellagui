@@ -58,7 +58,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
 };
 
 #define SLOTS 9
@@ -148,6 +148,18 @@ struct app {
 	float keep_msg_t;                                       /* seconds until "the keep is under attack" may be said again */
 	int nights;                                             /* nights survived with the keep standing */
 	bool in_night;
+
+	bool cmd;                                               /* the command view: the camera is above, the pointer is free, left chooses workers, right orders them */
+	float cam_f[3];                                         /* the point the command camera looks at */
+	float cam_yaw, cam_dist;
+	bool drag_sel;                                          /* a box is being pulled with the left button */
+	double drag_x, drag_y;
+	int order_mode;                                         /* what the right button orders: 0 go there, 1 break that block and its kind */
+	bool hover;                                             /* the pointer is over a block of the world */
+	int hover_b[3];
+	bool workers_saved;                                     /* player.conf had a `workers` line */
+	int nworkers_conf;
+	float worker_conf[BL_WORKER_MAX][3];
 
 	struct bl_hit aim;
 	bool aimed;
@@ -362,7 +374,20 @@ static void conf_load(struct app *a, bool with_player)
 					p++;
 			}
 		}
-		else if (with_player && !strcmp(k, "pet_t") && d >= 0 && d < 1e7)
+		else if (with_player && !strcmp(k, "workers")) {
+			a->workers_saved = true;
+			a->nworkers_conf = 0;
+			for (char *p = v; *p && a->nworkers_conf < BL_WORKER_MAX;) {
+				float c[3];
+				int used = 0;
+				if (sscanf(p, "%f:%f:%f%n", &c[0], &c[1], &c[2], &used) != 3 || used <= 0)
+					break;
+				p += used;
+				memcpy(a->worker_conf[a->nworkers_conf++], c, sizeof c);
+				while (*p == ',' || *p == ' ')
+					p++;
+			}
+		} else if (with_player && !strcmp(k, "pet_t") && d >= 0 && d < 1e7)
 			a->pet_t = (float)d;
 		else if (with_player && !strcmp(k, "yard_x") && d > 0 && d < 5000) {
 			a->yard_x = (float)d;
@@ -421,7 +446,16 @@ static void conf_save(const struct app *a)
 	fprintf(f, "survival = %d\nnights = %d\nkills = %d\n", a->survival, a->nights, a->kills);
 	if (a->have_keep)
 		fprintf(f, "keep_x = %d\nkeep_y = %d\nkeep_z = %d\nkeep_hp = %.1f\n", a->keep[0], a->keep[1], a->keep[2], a->keep_hp);
-	fprintf(f, "inv = ");
+	fprintf(f, "workers = ");
+	{
+		bool first = true;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER) {
+				fprintf(f, "%s%.2f:%.2f:%.2f", first ? "" : ",", a->mobs.mob[i].x, a->mobs.mob[i].y, a->mobs.mob[i].z);
+				first = false;
+			}
+	}
+	fprintf(f, "\ninv = ");
 	{
 		bool first = true;
 		for (int b = 1; b < BL_COUNT; b++)
@@ -673,6 +707,8 @@ static void ensure_keep(struct app *a, float cx, float cz)
 	keep_sync(a);
 }
 
+static void workers_start(struct app *a, int n);
+
 /* a new world in survival: nothing in the hands, no nights behind him, a keep near where he starts */
 static void survival_setup(struct app *a, float cx, float cz)
 {
@@ -684,6 +720,298 @@ static void survival_setup(struct app *a, float cx, float cz)
 	a->have_keep = false;
 	a->keep_hp = KEEP_HP;
 	ensure_keep(a, cx, cz);
+	if (a->have_keep)
+		workers_start(a, 2);
+}
+
+/* ================================================================ workers and the command view ================================================================ */
+
+#define WORKER_COST 8                                           /* planks */
+#define CMD_PITCH (-0.95f)                                      /* the command camera looks down at about 54 degrees */
+
+static int nworkers(const struct app *a)
+{
+	return bl_mobs_count_kind(&a->mobs, BL_MOB_WORKER);
+}
+
+/* a free place on the ground near (cx, cz): three rings of eight round it */
+static bool worker_spot(const struct app *a, float cx, float cz, float r0, float out[3])
+{
+	for (int ri = 0; ri < 3; ri++)
+		for (int k = 0; k < 8; k++) {
+			float ang = (float)k * 0.785398f + 0.3f * (float)ri, r = r0 + 0.8f * (float)ri, x = cx + sinf(ang) * r, z = cz + cosf(ang) * r;
+			int top = bl_top(a->world, (int)floorf(x), (int)floorf(z));
+			if (top < 1)
+				continue;
+			float y = (float)top + 1.0f;
+			if (bl_box_hits(a->world, x, y, z, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(a->world, (int)floorf(x), (int)y, (int)floorf(z))))
+				continue;
+			bool crowded = false;
+			for (int i = 0; i < BL_MOBS_MAX; i++) {
+				const struct bl_mob *m = &a->mobs.mob[i];
+				if (m->alive && fabsf(m->x - x) < 1.0f && fabsf(m->z - z) < 1.0f)
+					crowded = true;
+			}
+			if (crowded)
+				continue;
+			out[0] = x;
+			out[1] = y;
+			out[2] = z;
+			return true;
+		}
+	return false;
+}
+
+/* the middle of what the workers gather round: the keep, else the player */
+static void worker_home(const struct app *a, float *cx, float *cz)
+{
+	*cx = a->have_keep ? (float)a->keep[0] + 0.5f : a->pl.x;
+	*cz = a->have_keep ? (float)a->keep[2] + 0.5f : a->pl.z;
+}
+
+static bool worker_add(struct app *a)
+{
+	float cx, cz, p[3];
+	worker_home(a, &cx, &cz);
+	if (nworkers(a) >= BL_WORKER_MAX || !worker_spot(a, cx, cz, 2.2f, p))
+		return false;
+	return bl_mobs_add(&a->mobs, a->world, BL_MOB_WORKER, p[0], p[1], p[2]);
+}
+
+/* the workers a new survival world starts with (or a creative one is asked for): free */
+static void workers_start(struct app *a, int n)
+{
+	for (int i = 0; i < n; i++)
+		worker_add(a);
+}
+
+/* a saved world: the workers where they were; an older survival world with a keep but no `workers` line gets two */
+static void workers_restore(struct app *a)
+{
+	if (a->workers_saved) {
+		for (int i = 0; i < a->nworkers_conf; i++)
+			bl_mobs_add(&a->mobs, a->world, BL_MOB_WORKER, a->worker_conf[i][0], a->worker_conf[i][1], a->worker_conf[i][2]);
+	} else if (a->survival && a->have_keep) {
+		workers_start(a, 2);
+	}
+}
+
+/* more of them cost planks (a log is four, X makes them); at most eight */
+static bool train_worker(struct app *a)
+{
+	if (nworkers(a) >= BL_WORKER_MAX) {
+		say(a, "You cannot have more than %d workers", BL_WORKER_MAX);
+		return false;
+	}
+	if (a->survival && a->inv[BL_PLANKS] < WORKER_COST) {
+		sound(a, "no");
+		say(a, "A worker costs %d planks (X turns a log into four)", WORKER_COST);
+		return false;
+	}
+	if (!worker_add(a)) {
+		say(a, "There is no room for a worker");
+		return false;
+	}
+	if (a->survival)
+		a->inv[BL_PLANKS] -= WORKER_COST;
+	sound(a, "place");
+	say(a, "A worker joins you (%d)", nworkers(a));
+	return true;
+}
+
+/* what the workers have finished: the blocks go, what they leave goes into the pockets */
+static void apply_breaks(struct app *a, const struct bl_mobs_result *R)
+{
+	for (int k = 0; k < R->nbreak; k++) {
+		int b = bl_get(a->world, R->brk[k].x, R->brk[k].y, R->brk[k].z);
+		if (!bl_breakable(b) || !bl_set(a->world, R->brk[k].x, R->brk[k].y, R->brk[k].z, BL_AIR))
+			continue;
+		int d = bl_drop(b);
+		if (d != BL_AIR)
+			inv_add(a, d, 1);
+	}
+}
+
+/* ---- the command camera: it looks at a point of the ground from `cam_dist` away, down at an angle, turned by `cam_yaw` ---- */
+
+static void cam_basis(const struct bl_camera *c, float f[3], float r[3], float u[3])
+{
+	float cp = cosf(c->pitch), sp = sinf(c->pitch), sy = sinf(c->yaw), cy = cosf(c->yaw);
+	f[0] = cp * sy;
+	f[1] = sp;
+	f[2] = cp * cy;
+	r[0] = cy;
+	r[1] = 0.0f;
+	r[2] = -sy;
+	u[0] = -sp * sy;
+	u[1] = cp;
+	u[2] = -sp * cy;
+}
+
+static void cmd_camera(const struct app *a, struct bl_camera *cam)
+{
+	float cp = cosf(CMD_PITCH), sp = sinf(CMD_PITCH), sy = sinf(a->cam_yaw), cy = cosf(a->cam_yaw);
+	cam->x = a->cam_f[0] - cp * sy * a->cam_dist;
+	cam->y = a->cam_f[1] - sp * a->cam_dist;
+	cam->z = a->cam_f[2] - cp * cy * a->cam_dist;
+	if (cam->y > (float)a->world->h - 1.5f)
+		cam->y = (float)a->world->h - 1.5f;
+	cam->yaw = a->cam_yaw;
+	cam->pitch = CMD_PITCH;
+	cam->fov = a->fov;
+}
+
+/* the unit vector through a point of the window (the picture is the render buffer stretched over the window) */
+static void cmd_ray(const struct app *a, const struct bl_camera *c, double px, double py, float dir[3])
+{
+	float f[3], r[3], u[3];
+	cam_basis(c, f, r, u);
+	float th = tanf(c->fov * 0.5f), aspect = a->rh > 0 ? (float)a->rw / (float)a->rh : (float)a->win.bw / (float)(a->win.bh > 0 ? a->win.bh : 1);
+	float nx = (float)(px / (double)(a->win.bw > 0 ? a->win.bw : 1) * 2.0 - 1.0) * aspect * th, ny = (float)(1.0 - py / (double)(a->win.bh > 0 ? a->win.bh : 1) * 2.0) * th;
+	float d[3] = { f[0] + r[0] * nx + u[0] * ny, f[1] + r[1] * nx + u[1] * ny, f[2] + r[2] * nx + u[2] * ny };
+	float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+	for (int i = 0; i < 3; i++)
+		dir[i] = d[i] / l;
+}
+
+/* where a point of the world is in the window; false when it is behind the camera */
+static bool cmd_project(const struct app *a, const struct bl_camera *c, float x, float y, float z, float *sx, float *sy)
+{
+	float f[3], r[3], u[3];
+	cam_basis(c, f, r, u);
+	float v[3] = { x - c->x, y - c->y, z - c->z };
+	float zc = v[0] * f[0] + v[1] * f[1] + v[2] * f[2];
+	if (zc < 0.2f)
+		return false;
+	float th = tanf(c->fov * 0.5f), aspect = a->rh > 0 ? (float)a->rw / (float)a->rh : (float)a->win.bw / (float)(a->win.bh > 0 ? a->win.bh : 1);
+	float ndx = (v[0] * r[0] + v[1] * r[1] + v[2] * r[2]) / (zc * aspect * th), ndy = (v[0] * u[0] + v[1] * u[1] + v[2] * u[2]) / (zc * th);
+	*sx = (ndx + 1.0f) * 0.5f * (float)a->win.bw;
+	*sy = (1.0f - ndy) * 0.5f * (float)a->win.bh;
+	return true;
+}
+
+static int cmd_selected(const struct app *a)
+{
+	int n = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		n += a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER && a->mobs.mob[i].selected;
+	return n;
+}
+
+static void cmd_select_none(struct app *a)
+{
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		a->mobs.mob[i].selected = false;
+}
+
+/* a click: the worker under the pointer (not one behind a block), else nobody; Shift adds / takes away one */
+static void cmd_select_click(struct app *a, bool add)
+{
+	struct bl_camera cam;
+	cmd_camera(a, &cam);
+	float dir[3], eye[3] = { cam.x, cam.y, cam.z }, tw = 0.0f;
+	cmd_ray(a, &cam, a->px, a->py, dir);
+	int wi = bl_units_pick(&a->mobs, eye, dir, 200.0f, &tw);
+	struct bl_hit h;
+	if (wi >= 0 && bl_pick(a->world, eye, dir, tw, &h))
+		wi = -1;
+	if (wi >= 0) {
+		if (add) {
+			a->mobs.mob[wi].selected = !a->mobs.mob[wi].selected;
+		} else {
+			cmd_select_none(a);
+			a->mobs.mob[wi].selected = true;
+		}
+	} else if (!add) {
+		cmd_select_none(a);
+	}
+}
+
+/* a box pulled over the picture: the workers whose heads are inside it */
+static void cmd_select_box(struct app *a, double x0, double y0, double x1, double y1, bool add)
+{
+	struct bl_camera cam;
+	cmd_camera(a, &cam);
+	double lx = x0 < x1 ? x0 : x1, hx = x0 < x1 ? x1 : x0, ly = y0 < y1 ? y0 : y1, hy = y0 < y1 ? y1 : y0;
+	if (!add)
+		cmd_select_none(a);
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		struct bl_mob *m = &a->mobs.mob[i];
+		float sx, sy;
+		if (m->alive && m->kind == BL_MOB_WORKER && cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy) && sx >= lx && sx <= hx && sy >= ly && sy <= hy)
+			m->selected = true;
+	}
+}
+
+/* the right button: the chosen workers go there, or break the block under the pointer and then the next of its kind */
+static void cmd_order(struct app *a)
+{
+	int n = cmd_selected(a);
+	if (n == 0) {
+		say(a, "Choose workers first: the left button");
+		return;
+	}
+	struct bl_camera cam;
+	cmd_camera(a, &cam);
+	float dir[3], eye[3] = { cam.x, cam.y, cam.z };
+	cmd_ray(a, &cam, a->px, a->py, dir);
+	struct bl_hit h;
+	if (!bl_pick(a->world, eye, dir, 200.0f, &h)) {
+		say(a, "Nothing there");
+		return;
+	}
+	int ok = 0, k = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		struct bl_mob *m = &a->mobs.mob[i];
+		if (!m->alive || m->kind != BL_MOB_WORKER || !m->selected)
+			continue;
+		if (a->order_mode == 1) {
+			ok += bl_mobs_order_gather(&a->mobs, a->world, i, h.x, h.y, h.z);
+		} else {
+			float gx = (h.face == BL_PY ? (float)h.x : (float)h.px) + 0.5f, gz = (h.face == BL_PY ? (float)h.z : (float)h.pz) + 0.5f;
+			bl_mobs_order_move(&a->mobs, i, gx + (float)(k % 3 - 1) * 0.9f, gz + (float)(k / 3) * 0.9f);        /* (spread out, so they do not stand in each other) */
+			ok++;
+		}
+		k++;
+	}
+	if (a->order_mode == 1)
+		say(a, ok ? "%d worker%s: break %s" : "They cannot reach that", ok, ok == 1 ? "" : "s", bl_block_name(bl_get(a->world, h.x, h.y, h.z)));
+	else
+		say(a, "%d worker%s: go there", ok, ok == 1 ? "" : "s");
+	sound(a, ok ? "place" : "no");
+}
+
+static void enter_cmd(struct app *a)
+{
+	if (a->cmd)
+		return;
+	a->cmd = true;
+	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_jump = a->k_sneak = a->k_ctrl = a->k_lk = a->k_rk = a->k_uk = a->k_dk = false;
+	a->b_break = a->b_place = false;
+	a->dig_on = false;
+	a->dig_t = 0.0f;
+	a->cam_f[0] = a->pl.x;
+	a->cam_f[1] = (float)bl_top(a->world, (int)floorf(a->pl.x), (int)floorf(a->pl.z)) + 1.0f;
+	a->cam_f[2] = a->pl.z;
+	a->cam_yaw = a->pl.yaw;
+	if (a->cam_dist < 7.0f)
+		a->cam_dist = 16.0f;
+	wlwin_lock_pointer(&a->win, false);
+	wlwin_hide_cursor(&a->win, false);
+	a->win.redraw = true;
+}
+
+static void leave_cmd(struct app *a)
+{
+	if (!a->cmd)
+		return;
+	a->cmd = false;
+	a->drag_sel = false;
+	a->hover = false;
+	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_lk = a->k_rk = false;
+	a->lock_ok = wlwin_lock_pointer(&a->win, true);
+	wlwin_hide_cursor(&a->win, true);
+	a->win.redraw = true;
 }
 
 /* ================================================================ the world ================================================================ */
@@ -843,6 +1171,8 @@ static void pause_game(struct app *a, enum prompt p)
 	a->b_break = a->b_place = false;
 	a->dig_on = false;
 	a->dig_t = 0.0f;
+	a->cmd = false;
+	a->drag_sel = false;
 	a->pc_hover = a->pc_down = a->pal_hover = -1;
 	wlwin_lock_pointer(&a->win, false);
 	wlwin_hide_cursor(&a->win, false);
@@ -951,7 +1281,7 @@ static void do_place(struct app *a)
 {
 	if (!a->aimed)
 		return;
-	if ((bl_pets_hit_cell(&a->pets, a->aim.px, a->aim.py, a->aim.pz) || (a->mobs_on && bl_mobs_hit_cell(&a->mobs, a->aim.px, a->aim.py, a->aim.pz))) &&
+	if ((bl_pets_hit_cell(&a->pets, a->aim.px, a->aim.py, a->aim.pz) || bl_mobs_hit_cell(&a->mobs, a->aim.px, a->aim.py, a->aim.pz)) &&
 	    bl_solid(hand_block(a))) {                              /* a block cannot be put into Tom, Filip or a goblin */
 		sound(a, "no");
 		return;
@@ -1015,8 +1345,14 @@ static void mobs_advance(struct app *a, float dt)
 {
 	float feet[3] = { a->pl.x, a->pl.y, a->pl.z };
 	struct bl_mobs_result R;
-	int before = bl_mobs_count(&a->mobs);
+	int before = bl_mobs_count_kind(&a->mobs, BL_MOB_GOBLIN);
 	bl_mobs_step(&a->mobs, a->world, feet, a->hp > 0.0f, a->time_h, dt, &R);
+	if (R.nbreak > 0)
+		apply_breaks(a, &R);
+	if (R.workers_lost > 0) {
+		say(a, R.workers_lost == 1 ? "A goblin killed a worker!" : "Goblins killed workers!");
+		sound(a, "no");
+	}
 	if (R.keep_damage > 0.0f && a->survival && a->have_keep) {
 		a->keep_hp -= R.keep_damage;
 		if (a->keep_msg_t <= 0.0f) {
@@ -1031,7 +1367,7 @@ static void mobs_advance(struct app *a, float dt)
 		a->warned = true;
 		say(a, "A goblin! The left button is the sword");
 	}
-	if (bl_mobs_count(&a->mobs) == 0 && bl_daylight(a->time_h) > 0.6f)
+	if (bl_mobs_count_kind(&a->mobs, BL_MOB_GOBLIN) == 0 && bl_daylight(a->time_h) > 0.6f)
 		a->warned = false;
 	if (R.damage > 0.0f) {
 		a->hp -= R.damage;
@@ -1063,7 +1399,7 @@ static void respawn(struct app *a)
 	a->hp = MAX_HP;
 	a->hurt_t = a->hit_t = 0.0f;
 	a->regen_t = 0.0f;
-	bl_mobs_clear(&a->mobs);
+	bl_mobs_clear_kind(&a->mobs, BL_MOB_GOBLIN);
 	a->mobs.spawn_t = 8.0f;                                    /* a breather before the next one */
 	say(a, "Back at the start");
 }
@@ -1086,25 +1422,44 @@ static void survival_tick(struct app *a, float dt)
 	}
 }
 
+/* the command camera: WASD move the point it looks at (in the way it is turned), the arrow keys turn it; the point follows the ground */
+static void cmd_pan(struct app *a, float dt)
+{
+	a->cam_yaw += ((a->k_rk ? 1.0f : 0.0f) - (a->k_lk ? 1.0f : 0.0f)) * 1.6f * dt;
+	float sy = sinf(a->cam_yaw), cy = cosf(a->cam_yaw);
+	float mf = (a->k_fwd ? 1.0f : 0.0f) - (a->k_back ? 1.0f : 0.0f), mr = (a->k_right ? 1.0f : 0.0f) - (a->k_left ? 1.0f : 0.0f);
+	float sp = (6.0f + a->cam_dist * 0.6f) * dt;
+	a->cam_f[0] = LM_CLAMP(a->cam_f[0] + (sy * mf + cy * mr) * sp, 2.0f, (float)a->world->w - 3.0f);
+	a->cam_f[2] = LM_CLAMP(a->cam_f[2] + (cy * mf - sy * mr) * sp, 2.0f, (float)a->world->d - 3.0f);
+	float gy = (float)bl_top(a->world, (int)floorf(a->cam_f[0]), (int)floorf(a->cam_f[2])) + 1.0f;
+	a->cam_f[1] += (gy - a->cam_f[1]) * fminf(1.0f, 6.0f * dt);
+}
+
 static void advance(struct app *a, int64_t now, float dt)
 {
 	if (a->playing) {
-		if (a->k_lk || a->k_rk || a->k_uk || a->k_dk)
-			look_by(a, ((a->k_rk ? 1 : 0) - (a->k_lk ? 1 : 0)) * LOOK_RATE * dt, ((a->k_uk ? 1 : 0) - (a->k_dk ? 1 : 0)) * LOOK_RATE * dt);
-		struct bl_input in = { .fwd = (a->k_fwd ? 1.0f : 0.0f) - (a->k_back ? 1.0f : 0.0f), .strafe = (a->k_right ? 1.0f : 0.0f) - (a->k_left ? 1.0f : 0.0f),
-		                       .jump = a->k_jump || a->jump_latch, .sneak = a->k_sneak, .sprint = a->k_ctrl && a->k_fwd };
+		struct bl_input in = { 0 };
+		if (a->cmd) {                                        /* he stands where he is while the camera is up */
+			cmd_pan(a, dt);
+		} else {
+			if (a->k_lk || a->k_rk || a->k_uk || a->k_dk)
+				look_by(a, ((a->k_rk ? 1 : 0) - (a->k_lk ? 1 : 0)) * LOOK_RATE * dt, ((a->k_uk ? 1 : 0) - (a->k_dk ? 1 : 0)) * LOOK_RATE * dt);
+			in = (struct bl_input){ .fwd = (a->k_fwd ? 1.0f : 0.0f) - (a->k_back ? 1.0f : 0.0f), .strafe = (a->k_right ? 1.0f : 0.0f) - (a->k_left ? 1.0f : 0.0f),
+			                        .jump = a->k_jump || a->jump_latch, .sneak = a->k_sneak, .sprint = a->k_ctrl && a->k_fwd };
+		}
 		bl_player_step(a->world, &a->pl, &in, dt);
 		a->jump_latch = false;
 		if (a->pets_on && a->pets.placed) {
 			bl_pets_step(&a->pets, a->world, dt);
 			bl_pets_push_player(&a->pets, a->world, &a->pl);
 		}
-		if (a->mobs_on)
-			mobs_advance(a, dt);
+		mobs_advance(a, dt);                                 /* (the goblins only when they are on: the workers always) */
 		a->hurt_t = fmaxf(0.0f, a->hurt_t - dt);
 		a->hit_t = fmaxf(0.0f, a->hit_t - dt);
-		if (a->playing)                                      /* (he may have died in that step) */
+		if (a->playing && !a->cmd)                           /* (he may have died in that step) */
 			aim_update(a);
+		else
+			a->aimed = false;
 		if (a->survival) {
 			if (a->b_break && a->playing)
 				dig_step(a, now, dt);
@@ -1258,7 +1613,7 @@ static void paint_survival(struct app *a)
 		if (f > 0.0f)
 			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 12, 5, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
 		char l[80];
-		snprintf(l, sizeof l, "Keep %d   Nights %d", (int)ceilf(a->keep_hp), a->nights);
+		snprintf(l, sizeof l, "Keep %d   Nights %d   Workers %d   (Tab: command view)", (int)ceilf(a->keep_hp), a->nights, nworkers(a));
 		shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
 	}
 	if (a->dig_on) {
@@ -1268,6 +1623,68 @@ static void paint_survival(struct app *a)
 		wlwin_fill(w, cx - 24, cy - 1, 48, 7, 0x101010u);
 		wlwin_fill(w, cx - 23, cy, (int)(46.0f * f), 5, 0xf0e8d0u);
 	}
+}
+
+/* what a worker is doing, in a word */
+static const char *order_text(const struct app *a, const struct bl_mob *m, char *buf, size_t n)
+{
+	if (m->order == BL_ORDER_GATHER) {
+		snprintf(buf, n, "%s %s", m->work > 0.0f ? "breaking" : "going to", bl_block_name(m->gblock));
+		return buf;
+	}
+	(void)a;
+	return m->order == BL_ORDER_MOVE ? "going" : "idle";
+}
+
+/* the command view's overlay: what it is, a marker over every worker (the chosen ones green, with what they do), the box being pulled, and the keys */
+static void paint_cmd(struct app *a, const struct bl_camera *cam)
+{
+	struct wlwin *w = &a->win;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *m = &a->mobs.mob[i];
+		float sx, sy;
+		if (!m->alive || m->kind != BL_MOB_WORKER || !cmd_project(a, cam, m->x, m->y + BL_WORKER_H + 0.35f, m->z, &sx, &sy))
+			continue;
+		int x = (int)sx, y = (int)sy;
+		wlwin_round_fill(w, x - 7, y - 7, 14, 14, 7, m->selected ? 0xffffffu : 0x10141cu);
+		wlwin_round_fill(w, x - 5, y - 5, 10, 10, 5, m->selected ? 0x4cd98cu : 0x4a90e0u);
+		if (m->hp < BL_WORKER_HP) {                                          /* hurt: a small bar */
+			wlwin_fill(w, x - 10, y + 9, 20, 4, 0x101010u);
+			wlwin_fill(w, x - 9, y + 10, (int)(18.0f * m->hp / BL_WORKER_HP), 2, m->hp > 3.0f ? 0x4cb050u : 0xe04030u);
+		}
+		if (m->selected) {
+			char buf[64];
+			const char *t = order_text(a, m, buf, sizeof buf);
+			shadow_text(w, x - lm_font_text_width(t) / 2, y + 14, t, 0xffffffu);
+		}
+	}
+	if (a->drag_sel) {                                                       /* the box */
+		int x0 = (int)fminf((float)a->drag_x, (float)a->px), x1 = (int)fmaxf((float)a->drag_x, (float)a->px);
+		int y0 = (int)fminf((float)a->drag_y, (float)a->py), y1 = (int)fmaxf((float)a->drag_y, (float)a->py);
+		if (x1 - x0 > 6 || y1 - y0 > 6) {
+			wlwin_fill(w, x0, y0, x1 - x0, 2, 0xffffffu);
+			wlwin_fill(w, x0, y1 - 2, x1 - x0, 2, 0xffffffu);
+			wlwin_fill(w, x0, y0, 2, y1 - y0, 0xffffffu);
+			wlwin_fill(w, x1 - 2, y0, 2, y1 - y0, 0xffffffu);
+		}
+	}
+	{                                                                        /* where he stands */
+		float sx, sy;
+		if (cmd_project(a, cam, a->pl.x, a->pl.y + 1.0f, a->pl.z, &sx, &sy)) {
+			wlwin_round_fill(w, (int)sx - 6, (int)sy - 6, 12, 12, 6, 0x10141cu);
+			wlwin_round_fill(w, (int)sx - 4, (int)sy - 4, 8, 8, 4, 0xffd34cu);
+			shadow_text(w, (int)sx - lm_font_text_width("you") / 2, (int)sy + 9, "you", 0xffe080u);
+		}
+	}
+	char l[200];
+	int y0 = a->survival ? 74 : 6;                                           /* (the keep's bar and the message are at the top in survival) */
+	shadow_text(w, 8, y0, "COMMAND VIEW", 0xffe080u);
+	snprintf(l, sizeof l, "Left: choose (drag a box, Shift adds)   Right: %s   1 go there, 2 break blocks", a->order_mode == 1 ? "break that block and the rest of its kind" : "go there");
+	shadow_text(w, 8, y0 + LM_FONT_H + 2, l, 0xffffffu);
+	snprintf(l, sizeof l, "B: a new worker (%d planks)   WASD move, arrows turn, wheel zoom, Home back   Tab or Esc: back to him", WORKER_COST);
+	shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), l, 0xffffffu);
+	snprintf(l, sizeof l, "Workers %d, chosen %d", nworkers(a), cmd_selected(a));
+	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xc8e8ffu);
 }
 
 static void paint_debug(struct app *a)
@@ -1308,6 +1725,8 @@ static const char *const HELP_LINES[] = {
 	"At night goblins come: the left button is the sword (three blows). Ten hearts, M switches them off.",
 	"Survival (G switches it and creative): blocks take time, what you break you have, a block put is used up,",
 	"X makes something of the block in your hand (log: planks, planks: torches). Defend the keep, the tower near the start.",
+	"Tab: the command view from above. Choose workers (left button, drag a box), right button: go there or break",
+	"that block and the rest of its kind (a tree falls whole). B trains a worker (8 planks). Tab or Esc: back.",
 	"F3 shows the numbers. Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits.",
 };
 
@@ -1467,6 +1886,21 @@ static void write_dump(struct app *a)
 		}
 	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
 	        a->dig_on ? a->dig_t : -1.0f);
+	{
+		struct bl_camera cam;
+		cmd_camera(a, &cam);
+		fprintf(f, "cmd on=%d mode=%d sel=%d workers=%d dist=%.1f yaw=%.3f focus=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f\n", a->cmd, a->order_mode, cmd_selected(a), nworkers(a), a->cam_dist, a->cam_yaw,
+		        a->cam_f[0], a->cam_f[1], a->cam_f[2], cam.x, cam.y, cam.z);
+		for (int i = 0; i < BL_MOBS_MAX; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			float sx = -1, sy = -1;
+			if (!m->alive || m->kind != BL_MOB_WORKER)
+				continue;
+			bool vis = cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
+			fprintf(f, "worker %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d sel=%d vis=%d sx=%.1f sy=%.1f gather=%d,%d,%d\n", i, m->x, m->y, m->z, m->hp, m->order, m->selected, vis, sx, sy, m->gx, m->gy,
+			        m->gz);
+		}
+	}
 	fprintf(f, "inv");
 	for (int b = 1; b < BL_COUNT; b++)
 		if (a->inv[b] > 0)
@@ -1538,6 +1972,12 @@ static void paint(struct wlwin *w)
 	float eye[3];
 	bl_player_eye(&a->pl, eye);
 	struct bl_camera cam = { eye[0], eye[1], eye[2], a->pl.yaw, a->pl.pitch, a->fov };
+	if (a->cmd) {                                                          /* the command view: from above */
+		cmd_camera(a, &cam);
+		eye[0] = cam.x;
+		eye[1] = cam.y;
+		eye[2] = cam.z;
+	}
 	struct bl_view v;
 	bl_view_init(&v);
 	v.time_h = a->time_h;
@@ -1548,9 +1988,25 @@ static void paint(struct wlwin *w)
 		bl_pets_pose(&a->pets, a->world, a->pet_t, dtp, eye, a->time_h);
 		v.pets = &a->pets;
 	}
-	if (a->mobs_on && bl_mobs_count(&a->mobs) > 0) {
+	if (bl_mobs_count(&a->mobs) > 0) {
 		bl_mobs_light(&a->mobs, a->world, a->time_h);
 		v.mobs = &a->mobs;
+	}
+	a->hover = false;
+	if (a->cmd && a->has_pointer) {                                        /* the block under the pointer gets the dark rim */
+		float dir[3], ce[3] = { cam.x, cam.y, cam.z };
+		cmd_ray(a, &cam, a->px, a->py, dir);
+		struct bl_hit hh;
+		if (bl_pick(a->world, ce, dir, 200.0f, &hh)) {
+			a->hover = true;
+			a->hover_b[0] = hh.x;
+			a->hover_b[1] = hh.y;
+			a->hover_b[2] = hh.z;
+			v.target = true;
+			v.tx = hh.x;
+			v.ty = hh.y;
+			v.tz = hh.z;
+		}
 	}
 	if (a->aimed && a->playing) {
 		v.target = true;
@@ -1577,7 +2033,9 @@ static void paint(struct wlwin *w)
 	paint_hearts(a, &L);
 	if (a->survival)
 		paint_survival(a);
-	if (a->prompt == P_NONE)
+	if (a->cmd && a->prompt == P_NONE)
+		paint_cmd(a, &cam);
+	if (a->prompt == P_NONE && !a->cmd)
 		paint_crosshair(w, a->hit_t > 0.0f);
 	if (a->debug)
 		paint_debug(a);
@@ -1689,6 +2147,35 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 	a->win.redraw = true;
 }
 
+/* the pointer in the command view: the left button chooses (a click, or a box pulled over the picture), the right button orders, the wheel zooms */
+static void cmd_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+	if (op == LM_WL_POINTER_EVT_BUTTON) {
+		uint32_t button = args[2].u, state = args[3].u;
+		if (button == 272 && state == 1) {
+			a->drag_sel = true;
+			a->drag_x = a->px;
+			a->drag_y = a->py;
+		} else if (button == 272 && state == 0 && a->drag_sel) {
+			a->drag_sel = false;
+			if (fabs(a->px - a->drag_x) < 6.0 && fabs(a->py - a->drag_y) < 6.0)
+				cmd_select_click(a, a->k_sneak);
+			else
+				cmd_select_box(a, a->drag_x, a->drag_y, a->px, a->py, a->k_sneak);
+		} else if (button == 273 && state == 1) {
+			cmd_order(a);
+		}
+	} else if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
+		a->wheel += lm_fixed_to_double(args[2].f);
+		if (fabs(a->wheel) >= 10.0) {
+			a->cam_dist *= a->wheel > 0 ? 1.18f : 1.0f / 1.18f;
+			a->cam_dist = a->cam_dist < 7.0f ? 7.0f : a->cam_dist > 70.0f ? 70.0f : a->cam_dist;
+			a->wheel = 0;
+		}
+	}
+	a->win.redraw = true;
+}
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
 	struct app *a = w->data;
@@ -1697,7 +2184,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 		a->px = lm_fixed_to_double(args[2].f);
 		a->py = lm_fixed_to_double(args[3].f);
 		a->has_pointer = true;
-		if (a->playing)
+		if (a->playing && !a->cmd)
 			wlwin_hide_cursor(w, true);
 		w->redraw = true;
 		return;
@@ -1716,6 +2203,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 	}
 	if (a->prompt != P_NONE) {
 		card_pointer(a, op, args);
+		return;
+	}
+	if (a->cmd) {
+		cmd_pointer(a, op, args);
 		return;
 	}
 	if (op == LM_WL_POINTER_EVT_BUTTON) {
@@ -1761,7 +2252,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 static void relative_event(struct wlwin *w, double dx, double dy)
 {
 	struct app *a = w->data;
-	if (!a->playing)
+	if (!a->playing || a->cmd)
 		return;
 	look_by(a, dx * a->sens, -dy * a->sens);
 	w->redraw = true;
@@ -1770,7 +2261,7 @@ static void relative_event(struct wlwin *w, double dx, double dy)
 static void lock_event(struct wlwin *w, bool locked)
 {
 	struct app *a = w->data;
-	if (!locked && a->playing)                              /* the focus went elsewhere: the game waits */
+	if (!locked && a->playing && !a->cmd)                   /* the focus went elsewhere: the game waits */
 		pause_game(a, P_PAUSE);
 	w->redraw = true;
 }
@@ -1779,6 +2270,45 @@ static void keys_release(struct app *a)
 {
 	a->k_fwd = a->k_back = a->k_left = a->k_right = a->k_jump = a->k_sneak = a->k_ctrl = a->k_lk = a->k_rk = a->k_uk = a->k_dk = false;
 	a->b_break = a->b_place = false;
+}
+
+/* keys of the command view; true = used up here */
+static bool cmd_key(struct app *a, uint32_t code)
+{
+	switch (code) {
+	case K_G: case K_M: case K_P: case K_E: case K_F1: case K_F3: case K_X:
+		return false;
+	case K_TAB: case K_ESC:
+		leave_cmd(a);
+		return true;
+	case K_B:
+		train_worker(a);
+		return true;
+	case K_1:
+		a->order_mode = 0;
+		say(a, "Right button: go there");
+		return true;
+	case K_1 + 1:
+		a->order_mode = 1;
+		say(a, "Right button: break that block and the next of its kind");
+		return true;
+	case K_BACKSPACE:
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER && a->mobs.mob[i].selected)
+				bl_mobs_order_stop(&a->mobs, i);
+		say(a, "Stopped");
+		return true;
+	case K_HOME: {
+		float cx, cz;
+		worker_home(a, &cx, &cz);
+		a->cam_f[0] = cx;
+		a->cam_f[2] = cz;
+		a->cam_f[1] = (float)bl_top(a->world, (int)floorf(cx), (int)floorf(cz)) + 1.0f;
+		return true;
+	}
+	default:
+		return true;
+	}
 }
 
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
@@ -1818,6 +2348,12 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		return;
 	bool ctrl = (w->mods & LM_MOD_CTRL) != 0;
 	w->redraw = true;
+	if (ctrl && code == K_A && a->cmd && a->prompt == P_NONE) {
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER)
+				a->mobs.mob[i].selected = true;
+		return;
+	}
 	if (ctrl) {
 		if (code == K_Q)
 			w->running = false;
@@ -1864,6 +2400,12 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		}
 		return;
 	}
+	if (a->cmd && cmd_key(a, code))
+		return;
+	if (code == K_TAB && a->playing) {
+		enter_cmd(a);
+		return;
+	}
 	if (code == K_ESC) {
 		pause_game(a, P_PAUSE);
 		save_all(a, false);
@@ -1899,7 +2441,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		a->mobs_on = !a->mobs_on;
 		a->mobs.enabled = a->mobs_on;
 		if (!a->mobs_on)
-			bl_mobs_clear(&a->mobs);
+			bl_mobs_clear_kind(&a->mobs, BL_MOB_GOBLIN);
 		say(a, a->mobs_on ? "The goblins come out at night" : "No goblins");
 		return;
 	}
@@ -2395,6 +2937,110 @@ static int selftest(void)
 			fprintf(stderr, "(could not remove %s)\n", dir2);
 	}
 
+	/* workers and the command view */
+	{
+		static struct app wa;
+		memset(&wa, 0, sizeof wa);
+		wa.world_size = 64;
+		wa.fov = 1.2f;
+		wa.sens = 0.0025f;
+		wa.rw = 640;
+		wa.rh = 360;
+		wa.win.bw = 640;
+		wa.win.bh = 360;
+		memcpy(wa.hotbar, k_default_hotbar, sizeof wa.hotbar);
+		snprintf(wa.dir, sizeof wa.dir, "/tmp/mellagui-blocks-selftest3-%d", (int)getpid());
+		CHECK(make_world(&wa, 5, true) && mkdirs(wa.dir) == 0, "a flat world for the workers");
+		mobs_setup(&wa);
+		wa.mobs_on = false;
+		wa.survival = true;
+		survival_setup(&wa, wa.pl.x, wa.pl.z);
+		CHECK(wa.have_keep && nworkers(&wa) == 2, "a new survival world starts with a keep and two workers (%d)", nworkers(&wa));
+		/* the camera: a point of the world seen through the pointer comes back to the same pointer */
+		wa.cam_f[0] = 30.0f;
+		wa.cam_f[1] = 21.0f;
+		wa.cam_f[2] = 30.0f;
+		wa.cam_yaw = 0.7f;
+		wa.cam_dist = 20.0f;
+		struct bl_camera cam;
+		cmd_camera(&wa, &cam);
+		float sx, sy, dir[3];
+		CHECK(cmd_project(&wa, &cam, 30.0f, 21.0f, 30.0f, &sx, &sy) && fabsf(sx - 320.0f) < 1.0f && fabsf(sy - 180.0f) < 1.0f, "the point it looks at is in the middle of the window (%.1f %.1f)", sx, sy);
+		bool rt = true;
+		for (int i = 0; i < 20; i++) {
+			float px = 40.0f + (float)(i * 29 % 560), py = 30.0f + (float)(i * 53 % 300), ox, oy;
+			cmd_ray(&wa, &cam, px, py, dir);
+			float p[3] = { cam.x + dir[0] * 25.0f, cam.y + dir[1] * 25.0f, cam.z + dir[2] * 25.0f };
+			if (!cmd_project(&wa, &cam, p[0], p[1], p[2], &ox, &oy) || fabsf(ox - px) > 0.5f || fabsf(oy - py) > 0.5f)
+				rt = false;
+		}
+		CHECK(rt, "a ray through a pixel and back gives the pixel");
+		/* choosing: a click on a worker and a box */
+		struct bl_mob *w0 = NULL;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (wa.mobs.mob[i].alive && wa.mobs.mob[i].kind == BL_MOB_WORKER) {
+				w0 = &wa.mobs.mob[i];
+				break;
+			}
+		CHECK(w0 != NULL, "a worker to choose");
+		if (w0) {
+			wa.cam_f[0] = w0->x;
+			wa.cam_f[1] = w0->y;
+			wa.cam_f[2] = w0->z;
+			cmd_camera(&wa, &cam);
+			cmd_project(&wa, &cam, w0->x, w0->y + 0.8f, w0->z, &sx, &sy);
+			wa.px = sx;
+			wa.py = sy;
+			float d2[3], e2[3] = { cam.x, cam.y, cam.z }, t2 = -1;
+			cmd_ray(&wa, &cam, sx, sy, d2);
+			int pi = bl_units_pick(&wa.mobs, e2, d2, 200.0f, &t2);
+			cmd_select_click(&wa, false);
+			CHECK(pi >= 0 && wa.mobs.mob[pi].selected && cmd_selected(&wa) == 1, "a click on a worker chooses it");
+			wa.px = 5;
+			wa.py = 5;
+			cmd_select_click(&wa, false);
+			CHECK(cmd_selected(&wa) == 0, "a click on nothing lets go");
+			cmd_select_box(&wa, 0, 0, 640, 360, false);
+			CHECK(cmd_selected(&wa) >= 1, "a box over the picture chooses the workers in it");
+		}
+		/* training costs planks, at most eight */
+		wa.inv[BL_PLANKS] = 20;
+		int n0 = nworkers(&wa);
+		CHECK(train_worker(&wa) && nworkers(&wa) == n0 + 1 && wa.inv[BL_PLANKS] == 12, "a worker costs eight planks");
+		wa.inv[BL_PLANKS] = 5;
+		CHECK(!train_worker(&wa) && nworkers(&wa) == n0 + 1 && wa.inv[BL_PLANKS] == 5, "not with five");
+		wa.inv[BL_PLANKS] = 999;
+		for (int i = 0; i < 12; i++)
+			train_worker(&wa);
+		CHECK(nworkers(&wa) == BL_WORKER_MAX, "no more than %d workers", BL_WORKER_MAX);
+		/* what they break goes into the pockets */
+		wa.inv[BL_LOG] = 0;
+		bl_set(wa.world, 10, 25, 10, BL_LOG);
+		struct bl_mobs_result R;
+		memset(&R, 0, sizeof R);
+		R.nbreak = 1;
+		R.brk[0].x = 10;
+		R.brk[0].y = 25;
+		R.brk[0].z = 10;
+		apply_breaks(&wa, &R);
+		CHECK(bl_get(wa.world, 10, 25, 10) == BL_AIR && wa.inv[BL_LOG] == 1, "a block the workers finished is gone and in the pockets");
+		/* the workers are saved where they stand and come back */
+		conf_save(&wa);
+		static struct app wb;
+		memset(&wb, 0, sizeof wb);
+		memcpy(wb.dir, wa.dir, sizeof wb.dir > sizeof wa.dir ? sizeof wa.dir : sizeof wb.dir);
+		wb.fov = 1.2f;
+		wb.sens = 0.0025f;
+		memcpy(wb.hotbar, k_default_hotbar, sizeof wb.hotbar);
+		conf_load(&wb, true);
+		CHECK(wb.workers_saved && wb.nworkers_conf == BL_WORKER_MAX, "the workers are in the file (%d)", wb.nworkers_conf);
+		bl_world_free(wa.world);
+		char cmd3[600];
+		snprintf(cmd3, sizeof cmd3, "rm -rf '%s'", wa.dir);
+		if (system(cmd3) != 0)
+			fprintf(stderr, "(could not remove %s)\n", wa.dir);
+	}
+
 	/* the hand: slots wrap round */
 	memset(&a, 0, sizeof a);
 	a.slot = 0;
@@ -2429,6 +3075,7 @@ int main(int argc, char **argv)
 	a.survival = true;
 	int clock_cli = -1;
 	bool no_pets = false, no_mobs = false;
+	int workers_cli = -1;                                   /* --workers N */
 	int mode_cli = -1;                                      /* --survival 1, --creative 0 */
 	char give[256] = "";
 	int ngob = 0;
@@ -2495,6 +3142,12 @@ int main(int argc, char **argv)
 			mode_cli = 1;
 		} else if (!strcmp(argv[i], "--creative")) {
 			mode_cli = 0;
+		} else if (!strcmp(argv[i], "--workers") && i + 1 < argc) {
+			workers_cli = atoi(argv[++i]);
+			if (workers_cli < 0 || workers_cli > BL_WORKER_MAX) {
+				fprintf(stderr, "mellagui-blocks: --workers wants 0 to %d\n", BL_WORKER_MAX);
+				return 2;
+			}
 		} else if (!strcmp(argv[i], "--give") && i + 1 < argc) {                   /* NAME=N,NAME=N: what is in the pockets at the start (for the tests, and for cheating) */
 			snprintf(give, sizeof give, "%s", argv[++i]);
 		} else if (!strcmp(argv[i], "--day-minutes") && i + 1 < argc) {
@@ -2530,7 +3183,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -2590,10 +3243,16 @@ int main(int argc, char **argv)
 		a.survival = false;                                     /* a world saved before survival was a creative world */
 	if (mode_cli >= 0)
 		a.survival = mode_cli != 0;
-	if (from_file)
+	if (from_file) {
 		ensure_keep(&a, a.pl.x, a.pl.z);
-	else
+		workers_restore(&a);
+	} else {
 		survival_setup(&a, a.pl.x, a.pl.z);
+	}
+	if (workers_cli >= 0) {                                 /* --workers N: exactly that many, whatever the world had */
+		bl_mobs_clear_kind(&a.mobs, BL_MOB_WORKER);
+		workers_start(&a, workers_cli);
+	}
 	for (char *tok = strtok(give, ","); tok; tok = strtok(NULL, ",")) {
 		char *eq = strchr(tok, '=');
 		int n = eq ? atoi(eq + 1) : 1;

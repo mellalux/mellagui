@@ -19459,7 +19459,7 @@ class TestBlocks(Base):
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
     K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
-             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, **{str(i): 1 + i for i in range(1, 10)})
+             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, backspace=14, home=102, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
         super().setUp()
@@ -19499,7 +19499,7 @@ class TestBlocks(Base):
         return p
 
     def read_dump(self):
-        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': [], 'pal': {}, 'mobs': {}}
+        st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': [], 'pal': {}, 'mobs': {}, 'workers': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -19513,8 +19513,10 @@ class TestBlocks(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'aim':
                 st['aim'] = dict(x.split('=', 1) for x in f[1:])
-            elif f[0] in ('pets', 'tom', 'filip', 'player', 'game'):
+            elif f[0] in ('pets', 'tom', 'filip', 'player', 'game', 'cmd'):
                 st[f[0]] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'worker':
+                st['workers'][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'mob':
                 st['mobs'][int(f[1])] = {k: float(v) for k, v in (x.split('=', 1) for x in f[2:])}
             elif f[0] == 'hist':
@@ -20514,6 +20516,145 @@ class TestBlocks(Base):
             f.write('\n'.join(lines) + '\n')
         self.start(flat=False, data=self.data, nomode=True)
         self.assertEqual(self.state()['game']['survival'], '0', 'an old file: creative')
+
+    # ---- workers and the command view ----
+    def cmd_open(self):
+        self.tap('tab')
+        return self.wait(lambda s: s.get('cmd', {}).get('on') == '1')
+
+    def worker_xy(self, i, st=None):
+        w = (st or self.state())['workers'][i]
+        return self.win['x'] + int(float(w['sx'])), self.win['y'] + int(float(w['sy']))
+
+    def test_a_new_survival_world_has_two_workers_and_tab_opens_the_command_view_and_closes_it(self):
+        self.start(survival=True)
+        self.play()
+        st = self.state()
+        self.assertEqual(st['cmd']['workers'], '2')
+        self.assertEqual(len(st['workers']), 2)
+        self.assertEqual(self.pconstraint()['active'], 'locked')
+        st = self.cmd_open()
+        self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free in the command view')
+        self.assertEqual(st['cmd']['sel'], '0')
+        for w in st['workers'].values():
+            self.assertEqual(w['vis'], '1', 'both workers are in the picture')
+        y0, x0 = self.F('y'), self.F('x')
+        self.hold('w', 0.4)
+        s = self.S()
+        self.assertAlmostEqual(float(s['x']), x0, places=1, msg='the keys move the camera, not the hero')
+        self.tap('tab')
+        self.wait(lambda s: s['cmd']['on'] == '0' and s['state']['locked'] == '1')
+        self.assertEqual(self.pconstraint()['active'], 'locked')
+        self.cmd_open()
+        self.tap('esc')
+        self.wait(lambda s: s['cmd']['on'] == '0' and s['state']['playing'] == '1')
+
+    def test_workers_are_chosen_with_the_pointer_and_told_where_to_go(self):
+        self.start('--workers', '2')                          # (creative: no keep that one of them could stand behind)
+        self.play()
+        st = self.cmd_open()
+        for i in sorted(st['workers']):                       # (one of them may stand behind the keep: a click does not find it there)
+            x, y = self.worker_xy(i, st)
+            ctl.abs(x, y)
+            time.sleep(0.1)
+            ctl.button(272, True)
+            ctl.button(272, False)
+            time.sleep(0.3)
+            st = self.state()
+            if st['cmd']['sel'] != '0':
+                break
+        self.assertEqual(st['cmd']['sel'], '1', 'a click on a worker chooses it (workers %s)' % st['workers'])
+        chosen = [i for i, w in st['workers'].items() if w['sel'] == '1']
+        self.assertEqual(len(chosen), 1)
+        i = chosen[0]
+        before = (float(st['workers'][i]['x']), float(st['workers'][i]['z']))
+        # a click on the ground, a good way off: the right button sends it there
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 40)
+        time.sleep(0.1)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['workers'][i]['order'] == '1')
+        st = self.wait(lambda s: abs(float(s['workers'][i]['x']) - before[0]) + abs(float(s['workers'][i]['z']) - before[1]) > 3.0, timeout=10.0)
+        # a click on nothing lets go of everybody
+        ctl.abs(self.win['x'] + 10, self.win['y'] + self.win['h'] - 10)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['cmd']['sel'] == '0')
+
+    def test_a_box_chooses_the_workers_in_it_and_ctrl_a_all_of_them(self):
+        self.start(survival=True)
+        self.play()
+        st = self.cmd_open()
+        ctl.abs(self.win['x'] + 4, self.win['y'] + 4)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.abs(self.win['x'] + self.win['w'] - 4, self.win['y'] + self.win['h'] - 4)
+        time.sleep(0.1)
+        ctl.button(272, False)
+        self.wait(lambda s: s['cmd']['sel'] == '2')
+        ctl.abs(self.win['x'] + 10, self.win['y'] + self.win['h'] - 10)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['cmd']['sel'] == '0')
+        self.ctrl_tap('a')
+        self.wait(lambda s: s['cmd']['sel'] == '2')
+
+    def test_workers_break_the_block_they_are_sent_to_and_what_it_leaves_is_yours(self):
+        self.start('--workers', '1', survival=True)
+        self.play()
+        self.cmd_open()
+        self.tap('2')                                          # right button: break
+        self.wait(lambda s: s['cmd']['mode'] == '1')
+        self.ctrl_tap('a')
+        self.wait(lambda s: s['cmd']['sel'] == '1')
+        dirt0 = self.state()['inv'].get('dirt', 0)
+        grass0 = self.state()['hist']['grass']
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 120, self.win['y'] + self.win['h'] // 2 + 60)
+        time.sleep(0.1)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['workers'] and list(s['workers'].values())[0]['order'] == '2')
+        st = self.wait(lambda s: s['hist']['grass'] < grass0 and s['inv'].get('dirt', 0) > dirt0, timeout=20.0)
+        self.assertGreaterEqual(st['hist']['grass'], 0)
+
+    def test_b_trains_a_worker_for_eight_planks_and_not_without_them(self):
+        self.start('--give', 'planks=10', '--workers', '1', survival=True)
+        self.play()
+        self.cmd_open()
+        self.tap('b')
+        st = self.wait(lambda s: s['cmd']['workers'] == '2')
+        self.assertEqual(st['inv']['planks'], 2)
+        self.tap('b')
+        time.sleep(0.3)
+        st = self.state()
+        self.assertEqual(st['cmd']['workers'], '2', 'two planks are not enough')
+        self.assertEqual(st['inv']['planks'], 2)
+
+    def test_the_workers_are_saved_and_come_back_and_workers_option_is_checked(self):
+        p = subprocess.run([self.EXE, '--workers', '99'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--workers wants', p.stderr)
+        self.start('--save', '--workers', '3', survival=True)
+        self.play()
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.proc = None
+        for w in range(40):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        conf = os.path.join(self.data, 'player.conf')
+        with open(conf) as f:
+            line = [l for l in f.read().splitlines() if l.startswith('workers')][0]
+        self.assertEqual(len(line.split('=')[1].split(',')), 3)
+        self.start(flat=False, data=self.data, survival=True)
+        self.assertEqual(self.state()['cmd']['workers'], '3', 'the same three, not two new ones')
 
     def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
         p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)

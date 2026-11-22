@@ -1,4 +1,4 @@
-/* blocksmobs.c - goblins in a block world. See blocksmobs.h. */
+/* blocksmobs.c - goblins and workers in a block world. See blocksmobs.h. */
 #include "blocksmobs.h"
 #include "blocksview.h"
 
@@ -18,7 +18,11 @@
 #define SPAWN_MAX 26.0f
 #define DESPAWN_FAR 56.0f
 #define SUN_BURN 2.0f                   /* hit points a second in the sun */
-#define MODEL_SCALE 1.2f                /* the boxes of k_goblin are 1.42 m tall; the goblin is that times this */
+#define GOBLIN_SCALE 1.2f               /* the boxes of k_goblin are 1.42 m tall; the goblin is that times this */
+#define WORKER_SCALE 1.1f
+#define WORKER_SEE 10.0f                /* how far a goblin sees a worker */
+#define GATHER_FACTOR 1.5f              /* a worker takes this many times the player's time */
+#define GATHER_RADIUS 6                 /* it goes on to the next block of the kind within this many blocks */
 
 static float rf(uint32_t *s)
 {
@@ -69,6 +73,13 @@ void bl_mobs_clear(struct bl_mobs *m)
 		m->mob[i].alive = false;
 }
 
+void bl_mobs_clear_kind(struct bl_mobs *m, int kind)
+{
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		if (m->mob[i].kind == kind)
+			m->mob[i].alive = false;
+}
+
 int bl_mobs_count(const struct bl_mobs *m)
 {
 	int n = 0;
@@ -77,11 +88,22 @@ int bl_mobs_count(const struct bl_mobs *m)
 	return n;
 }
 
+int bl_mobs_count_kind(const struct bl_mobs *m, int kind)
+{
+	int n = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		n += m->mob[i].alive && m->mob[i].kind == kind;
+	return n;
+}
+
 /* ---- the body --------------------------------------------------------------------------------------------------------- */
 
 static bool place_mob(struct bl_mobs *M, const struct bl_world *w, int kind, float x, float y, float z)
 {
-	if (!bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) || bl_box_hits(w, x, y, z, BL_GOBLIN_HW, BL_GOBLIN_H))
+	if ((kind != BL_MOB_GOBLIN && kind != BL_MOB_WORKER) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
+	    bl_box_hits(w, x, y, z, BL_GOBLIN_HW, bl_mob_h(kind)))
+		return false;
+	if (kind == BL_MOB_WORKER && bl_mobs_count_kind(M, BL_MOB_WORKER) >= BL_WORKER_MAX)
 		return false;
 	for (int i = 0; i < BL_MOBS_MAX; i++)
 		if (!M->mob[i].alive) {
@@ -92,7 +114,7 @@ static bool place_mob(struct bl_mobs *M, const struct bl_world *w, int kind, flo
 			b->x = x;
 			b->y = y;
 			b->z = z;
-			b->hp = BL_GOBLIN_HP;
+			b->hp = kind == BL_MOB_WORKER ? BL_WORKER_HP : BL_GOBLIN_HP;
 			b->rng = M->rng ^ (uint32_t)(i * 7919 + 13);
 			rf(&M->rng);
 			b->yaw = rf(&b->rng) * 6.2831853f;
@@ -148,19 +170,205 @@ static void mob_kill(struct bl_mob *b)
 	b->alive = false;
 }
 
+/* ---- workers: orders ------------------------------------------------------------------------------------------------------ */
+
+/* A place to stand beside the block (gx, gy, gz) from which its hands can reach it: a free spot 1.15 m from the block's middle on the ground next to it, the nearest to
+ * (fx, fz) of the eight round it; false when there is none. */
+static bool stand_spot(const struct bl_world *w, int gx, int gy, int gz, float fx, float fz, float out[3])
+{
+	float best = 1e9f;
+	bool found = false;
+	for (int k = 0; k < 8; k++) {
+		float ang = (float)k * 0.785398f, cx = (float)gx + 0.5f + sinf(ang) * 1.15f, cz = (float)gz + 0.5f + cosf(ang) * 1.15f;
+		float sy = bl_box_support(w, cx, (float)gy + 1.0f, cz, 0.0f, 4.0f);
+		if (sy < -1e8f || fabsf(sy + 1.0f - ((float)gy + 0.5f)) > 2.1f)           /* nothing to stand on, or the block is out of reach from there */
+			continue;
+		if (bl_box_hits(w, cx, sy + 0.002f, cz, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(w, (int)floorf(cx), (int)floorf(sy), (int)floorf(cz))))
+			continue;
+		float d = hypotf(cx - fx, cz - fz);
+		if (d < best) {
+			best = d;
+			found = true;
+			out[0] = cx;
+			out[1] = sy;
+			out[2] = cz;
+		}
+	}
+	return found;
+}
+
+/* the time a worker needs for the block, and how many blocks of a tree's trunk go with it (1 for anything else) */
+static float gather_time(const struct bl_world *w, int gx, int gy, int gz, int *stack)
+{
+	int b = bl_get(w, gx, gy, gz), n = 1;
+	if (b == BL_LOG) {
+		while (n < 8 && bl_get(w, gx, gy + n, gz) == BL_LOG)
+			n++;
+		*stack = n;
+		return GATHER_FACTOR * 1.2f + 0.6f * (float)(n - 1);
+	}
+	*stack = 1;
+	return GATHER_FACTOR * bl_hardness(b);
+}
+
+bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, int bx, int by, int bz)
+{
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER || !bl_inside(w, bx, by, bz))
+		return false;
+	int blk = w->b[bl_index(w, bx, by, bz)];
+	if (!bl_breakable(blk))
+		return false;
+	if (blk == BL_LOG)
+		while (by > 0 && bl_get(w, bx, by - 1, bz) == BL_LOG)                   /* the foot of the tree */
+			by--;
+	struct bl_mob *b = &m->mob[i];
+	float spot[3];
+	if (!stand_spot(w, bx, by, bz, b->x, b->z, spot))
+		return false;
+	b->order = BL_ORDER_GATHER;
+	b->best_d = 1e9f;
+	b->gx = bx;
+	b->gy = by;
+	b->gz = bz;
+	b->gblock = blk;
+	b->tx = spot[0];
+	b->tz = spot[2];
+	b->work = 0.0f;
+	b->wait = 0.0f;
+	b->stuck = 0.0f;
+	return true;
+}
+
+void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z)
+{
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER)
+		return;
+	struct bl_mob *b = &m->mob[i];
+	b->order = BL_ORDER_MOVE;
+	b->best_d = 1e9f;
+	b->tx = x;
+	b->tz = z;
+	b->work = 0.0f;
+	b->stuck = 0.0f;
+}
+
+void bl_mobs_order_stop(struct bl_mobs *m, int i)
+{
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER)
+		return;
+	m->mob[i].order = BL_ORDER_IDLE;
+	m->mob[i].work = 0.0f;
+}
+
+/* the nearest block of the kind the worker was on within GATHER_RADIUS of it that it can reach; a log is only taken at the foot of its tree */
+static bool next_block(const struct bl_world *w, const struct bl_mob *b, int *ox, int *oy, int *oz)
+{
+	int px = (int)floorf(b->x), py = (int)floorf(b->y), pz = (int)floorf(b->z);
+	float best = 1e9f;
+	bool found = false;
+	for (int dz = -GATHER_RADIUS; dz <= GATHER_RADIUS; dz++)
+		for (int dx = -GATHER_RADIUS; dx <= GATHER_RADIUS; dx++)
+			for (int dy = -4; dy <= 5; dy++) {
+				int x = px + dx, y = py + dy, z = pz + dz;
+				if (bl_get(w, x, y, z) != b->gblock || (b->gblock == BL_LOG && bl_get(w, x, y - 1, z) == BL_LOG))
+					continue;
+				float d = (float)(dx * dx + dz * dz) + 0.5f * (float)(dy * dy);
+				if (d >= best)
+					continue;
+				float spot[3];
+				if (!stand_spot(w, x, y, z, b->x, b->z, spot))
+					continue;
+				best = d;
+				found = true;
+				*ox = x;
+				*oy = y;
+				*oz = z;
+			}
+	return found;
+}
+
+/* what a worker does with the time: nothing, walks to a point, or works on a block. Fills in where it wants to go and how fast; returns the speed it asks for. */
+static float worker_think(struct bl_mob *b, const struct bl_world *w, struct bl_mobs_result *R, float *want)
+{
+	const float dt = STEP;
+	if (b->order == BL_ORDER_MOVE) {
+		float dx = b->tx - b->x, dz = b->tz - b->z, d = hypotf(dx, dz);
+		if (d < 0.4f) {
+			b->order = BL_ORDER_IDLE;
+			return 0.0f;
+		}
+		*want = atan2f(dx, dz);
+		return clampf(3.0f * (d - 0.3f), 0.0f, BL_WORKER_SPEED);
+	}
+	if (b->order != BL_ORDER_GATHER)
+		return 0.0f;
+	b->wait = fmaxf(0.0f, b->wait - dt);
+	if (b->wait > 0.0f)
+		return 0.0f;
+	if (bl_get(w, b->gx, b->gy, b->gz) != b->gblock) {                          /* gone (broken by it, by the player or by another worker): the next one */
+		int x, y, z;
+		float spot[3];
+		if (next_block(w, b, &x, &y, &z) && stand_spot(w, x, y, z, b->x, b->z, spot)) {
+			b->gx = x;
+			b->gy = y;
+			b->gz = z;
+			b->tx = spot[0];
+			b->tz = spot[2];
+			b->work = 0.0f;
+			b->stuck = 0.0f;
+			b->best_d = 1e9f;
+		} else {
+			b->order = BL_ORDER_IDLE;
+			return 0.0f;
+		}
+	}
+	float dx = b->tx - b->x, dz = b->tz - b->z, d = hypotf(dx, dz);
+	if (d > 0.5f) {                                                             /* walk to the place beside it */
+		*want = atan2f(dx, dz);
+		return clampf(3.0f * (d - 0.3f), 0.0f, BL_WORKER_SPEED);
+	}
+	/* there: it works, facing the block */
+	*want = atan2f((float)b->gx + 0.5f - b->x, (float)b->gz + 0.5f - b->z);
+	b->work += dt;
+	if (fmodf(b->work, 0.55f) < dt)
+		b->swing = 1.0f;
+	int stack = 1;
+	if (b->work >= gather_time(w, b->gx, b->gy, b->gz, &stack)) {
+		if (R->nbreak + stack + 40 <= (int)(sizeof R->brk / sizeof R->brk[0])) {
+			for (int k = 0; k < stack; k++)
+				R->brk[R->nbreak++] = (struct bl_break){ b->gx, b->gy + k, b->gz };
+			if (b->gblock == BL_LOG)                                            /* the crown of the tree goes too */
+				for (int ly = b->gy + stack - 3; ly <= b->gy + stack + 1; ly++)
+					for (int lz = b->gz - 2; lz <= b->gz + 2; lz++)
+						for (int lx = b->gx - 2; lx <= b->gx + 2; lx++)
+							if (bl_get(w, lx, ly, lz) == BL_LEAVES && R->nbreak < (int)(sizeof R->brk / sizeof R->brk[0]))
+								R->brk[R->nbreak++] = (struct bl_break){ lx, ly, lz };
+		} else if (R->nbreak < (int)(sizeof R->brk / sizeof R->brk[0])) {
+			R->brk[R->nbreak++] = (struct bl_break){ b->gx, b->gy, b->gz };
+		}
+		b->work = 0.0f;
+		b->wait = 0.4f;                                                         /* (the caller takes the blocks away before it looks for the next) */
+	}
+	return 0.0f;
+}
+
+/* ---- one step --------------------------------------------------------------------------------------------------------- */
+
 static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, const float pl[3], bool pl_alive, float time_h, struct bl_mobs_result *R)
 {
 	const float dt = STEP;
+	const bool goblin = b->kind == BL_MOB_GOBLIN;
+	const float H = bl_mob_h(b->kind);
 	b->age += dt;
 	b->hurt = fmaxf(0.0f, b->hurt - dt);
 	b->attack_cd -= dt;
 	b->swing = fmaxf(0.0f, b->swing - dt * 2.5f);
 	b->jump_cd = fmaxf(0.0f, b->jump_cd - dt);
 
-	if (bl_box_hits(w, b->x, b->y, b->z, BL_GOBLIN_HW, BL_GOBLIN_H)) {          /* inside a block (one was made round it): up through it, or it is gone */
+	if (bl_box_hits(w, b->x, b->y, b->z, BL_GOBLIN_HW, H)) {                    /* inside a block (one was made round it): up through it, or it is gone */
 		bool free = false;
 		for (int i = 1; i <= 8 && !free; i++)
-			if (!bl_box_hits(w, b->x, b->y + 0.25f * (float)i, b->z, BL_GOBLIN_HW, BL_GOBLIN_H)) {
+			if (!bl_box_hits(w, b->x, b->y + 0.25f * (float)i, b->z, BL_GOBLIN_HW, H)) {
 				b->y += 0.25f * (float)i;
 				free = true;
 			}
@@ -179,20 +387,27 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	else
 		b->vy = fmaxf(b->vy - GRAV * dt, -40.0f);
 	float vy0 = b->vy;
-	bool hit = bl_box_move(w, &b->x, &b->y, &b->z, 1, b->vy * dt, BL_GOBLIN_HW, BL_GOBLIN_H);
+	bool hit = bl_box_move(w, &b->x, &b->y, &b->z, 1, b->vy * dt, BL_GOBLIN_HW, H);
 	if (hit) {
 		b->ground = vy0 < 0;
 		b->vy = 0;
 	} else {
 		b->ground = false;
 	}
-	if (!hit && b->vy <= 0 && bl_box_hits(w, b->x, b->y - 0.02f, b->z, BL_GOBLIN_HW, BL_GOBLIN_H))
+	if (!hit && b->vy <= 0 && bl_box_hits(w, b->x, b->y - 0.02f, b->z, BL_GOBLIN_HW, H))
 		b->ground = true;
 
-	/* the sun: a goblin in the open burns, and the ones far away in the day just are not there any more */
-	float day = bl_daylight(time_h);
-	if (day > 0.55f) {
-		if (!b->in_water && bl_top(w, cx, cz) < (int)floorf(b->y)) {
+	/* what it wants */
+	float dx = pl[0] - b->x, dz = pl[2] - b->z, d = hypotf(dx, dz);
+	float kx = M->keep[0] - b->x, kz = M->keep[2] - b->z, dk = hypotf(kx, kz);
+	float want = b->yaw, vmax = 0.0f;
+	bool to_keep = false, to_worker = false, chase = false;
+	int wi = -1;
+	float wdx = 0, wdz = 0, wd = 1e9f;
+	if (goblin) {
+		/* the sun: a goblin in the open burns, and the ones far away in the day just are not there any more */
+		float day = bl_daylight(time_h);
+		if (day > 0.55f && !b->in_water && bl_top(w, cx, cz) < (int)floorf(b->y)) {
 			b->hp -= SUN_BURN * dt;
 			b->hurt = fmaxf(b->hurt, 0.12f);
 			if (b->hp <= 0.0f) {
@@ -202,30 +417,44 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 				return;
 			}
 		}
-	}
-
-	/* what it wants: to go to the player, or to wander about */
-	float dx = pl[0] - b->x, dz = pl[2] - b->z, d = hypotf(dx, dz);
-	float kx = M->keep[0] - b->x, kz = M->keep[2] - b->z, dk = hypotf(kx, kz);
-	bool near_pl = pl_alive && d < BL_GOBLIN_NEAR && fabsf(pl[1] - b->y) < 8.0f;
-	bool to_keep = M->keep_on && !near_pl && dk < BL_GOBLIN_KEEP_SEE && fabsf(M->keep[1] - b->y) < 14.0f;
-	bool chase = !to_keep && pl_alive && d < AGGRO && fabsf(pl[1] - b->y) < 12.0f;
-	float want = b->yaw, vmax = 0.0f;
-	if (to_keep) {                                                              /* the player is not near: the keep is what it came for */
-		want = atan2f(kx, kz);
-		vmax = clampf(3.0f * (dk - 1.0f), 0.0f, CHASE_SPEED);                    /* it stops at the foot of it */
-	} else if (chase) {
-		want = atan2f(dx, dz);
-		vmax = clampf(3.0f * (d - 0.85f), 0.0f, CHASE_SPEED);       /* it slows down as it gets there and stops at arm's length */
-	} else {
-		b->wander_t -= dt;
-		if (b->wander_t <= 0.0f) {
-			b->widle = rf(&b->rng) < 0.4f;
-			b->wyaw = rf(&b->rng) * 6.2831853f;
-			b->wander_t = 2.0f + 3.0f * rf(&b->rng);
+		bool near_pl = pl_alive && d < BL_GOBLIN_NEAR && fabsf(pl[1] - b->y) < 8.0f;
+		if (!near_pl)                                                           /* a worker in sight: the nearest */
+			for (int k = 0; k < BL_MOBS_MAX; k++) {
+				const struct bl_mob *o = &M->mob[k];
+				if (!o->alive || o->kind != BL_MOB_WORKER || fabsf(o->y - b->y) > 6.0f)
+					continue;
+				float ex = o->x - b->x, ez = o->z - b->z, e = hypotf(ex, ez);
+				if (e < WORKER_SEE && e < wd) {
+					wd = e;
+					wi = k;
+					wdx = ex;
+					wdz = ez;
+				}
+			}
+		to_worker = wi >= 0;
+		to_keep = M->keep_on && !near_pl && !to_worker && dk < BL_GOBLIN_KEEP_SEE && fabsf(M->keep[1] - b->y) < 14.0f;
+		chase = !to_keep && !to_worker && pl_alive && d < AGGRO && fabsf(pl[1] - b->y) < 12.0f;
+		if (to_worker) {
+			want = atan2f(wdx, wdz);
+			vmax = clampf(3.0f * (wd - 0.85f), 0.0f, CHASE_SPEED);
+		} else if (to_keep) {                                                   /* the player is not near: the keep is what it came for */
+			want = atan2f(kx, kz);
+			vmax = clampf(3.0f * (dk - 1.0f), 0.0f, CHASE_SPEED);                /* it stops at the foot of it */
+		} else if (chase) {
+			want = atan2f(dx, dz);
+			vmax = clampf(3.0f * (d - 0.85f), 0.0f, CHASE_SPEED);               /* it slows down as it gets there and stops at arm's length */
+		} else {
+			b->wander_t -= dt;
+			if (b->wander_t <= 0.0f) {
+				b->widle = rf(&b->rng) < 0.4f;
+				b->wyaw = rf(&b->rng) * 6.2831853f;
+				b->wander_t = 2.0f + 3.0f * rf(&b->rng);
+			}
+			want = b->wyaw;
+			vmax = b->widle ? 0.0f : WANDER_SPEED;
 		}
-		want = b->wyaw;
-		vmax = b->widle ? 0.0f : WANDER_SPEED;
+	} else {
+		vmax = worker_think(b, w, R, &want);
 	}
 	float da = angdiff(want, b->yaw);
 	if (b->blocked > 0.1f) {                                                    /* something in the way: turn to one side until it is clear */
@@ -249,7 +478,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	b->speed = ap(b->speed, vmax, 8.0f, dt);
 
 	/* a wanderer does not walk off an edge */
-	if (!chase && b->ground && b->speed > 0.05f) {
+	if (goblin && !chase && !to_keep && !to_worker && b->ground && b->speed > 0.05f) {
 		float ax = b->x + b->ysin * 0.55f, az = b->z + b->ycos * 0.55f;
 		if (bl_box_support(w, ax, b->y, az, 0.0f, 2.2f) < -1e8f) {
 			b->wyaw += 1.7f + rf(&b->rng);
@@ -262,12 +491,11 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	b->kx *= kd;
 	b->kz *= kd;
 	float ox = b->x, oz = b->z;
-	bool bx = bl_box_move(w, &b->x, &b->y, &b->z, 0, sx, BL_GOBLIN_HW, BL_GOBLIN_H);
-	bool bz = bl_box_move(w, &b->x, &b->y, &b->z, 2, sz, BL_GOBLIN_HW, BL_GOBLIN_H);
-	if ((bx || bz) && b->ground && b->jump_cd <= 0.0f && b->speed > 0.1f) {  /* a block one high in the way is climbed, two high is a wall */
+	bool bx = bl_box_move(w, &b->x, &b->y, &b->z, 0, sx, BL_GOBLIN_HW, H);
+	bool bz = bl_box_move(w, &b->x, &b->y, &b->z, 2, sz, BL_GOBLIN_HW, H);
+	if ((bx || bz) && b->ground && b->jump_cd <= 0.0f && b->speed > 0.1f) {    /* a block one high in the way is climbed, two high is a wall */
 		float nx = b->x + b->ysin * 0.4f, nz = b->z + b->ycos * 0.4f;
-		if (bl_box_hits(w, nx, b->y, nz, BL_GOBLIN_HW, BL_GOBLIN_H) && !bl_box_hits(w, nx, b->y + 1.05f, nz, BL_GOBLIN_HW, BL_GOBLIN_H) &&
-		    !bl_box_hits(w, b->x, b->y + 1.05f, b->z, BL_GOBLIN_HW, BL_GOBLIN_H)) {
+		if (bl_box_hits(w, nx, b->y, nz, BL_GOBLIN_HW, H) && !bl_box_hits(w, nx, b->y + 1.05f, nz, BL_GOBLIN_HW, H) && !bl_box_hits(w, b->x, b->y + 1.05f, b->z, BL_GOBLIN_HW, H)) {
 			b->vy = 8.4f;
 			b->ground = false;
 			b->jump_cd = 0.5f;
@@ -279,11 +507,40 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		b->blocked += dt;
 	else
 		b->blocked = fmaxf(0.0f, b->blocked - dt);
-	if (b->blocked > 2.5f && !chase) {
-		b->wander_t = 0.0f;
-		b->blocked = 0.0f;
+	if (goblin) {
+		if (b->blocked > 2.5f && !chase) {
+			b->wander_t = 0.0f;
+			b->blocked = 0.0f;
+		}
+	} else if (b->order != BL_ORDER_IDLE) {                                     /* a worker that does not get nearer to where it is going for four seconds gives up */
+		float dd = hypotf(b->tx - b->x, b->tz - b->z);
+		if (b->work > 0.0f || b->wait > 0.0f || dd < 0.6f || dd < b->best_d - 0.25f) {
+			if (dd < b->best_d)
+				b->best_d = dd;
+			b->stuck = 0.0f;
+		} else {
+			b->stuck += dt;
+			if (b->stuck > 4.0f) {
+				b->order = BL_ORDER_IDLE;
+				b->stuck = 0.0f;
+			}
+		}
 	}
+	if (!goblin)
+		return;
 
+	/* a blow at a worker */
+	if (to_worker && b->attack_cd <= 0.0f && wd < ATTACK_REACH) {
+		b->attack_cd = ATTACK_COOLDOWN;
+		b->swing = 1.0f;
+		struct bl_mob *o = &M->mob[wi];
+		o->hp -= BL_GOBLIN_HIT;
+		o->hurt = 0.35f;
+		if (o->hp <= 0.0f) {
+			o->alive = false;
+			R->workers_lost++;
+		}
+	}
 	/* a blow at the keep */
 	if (to_keep && b->attack_cd <= 0.0f && dk < 1.45f && fabsf(M->keep[1] - b->y) < 2.6f) {
 		b->attack_cd = ATTACK_COOLDOWN;
@@ -314,7 +571,7 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 				if (M->mob[i].alive) {
 					struct bl_mob *b = &M->mob[i];
 					mob_step(M, b, w, pl, pl_alive, time_h, &R);
-					if (!b->alive)
+					if (!b->alive || b->kind != BL_MOB_GOBLIN)
 						continue;
 					float dd = hypotf(pl[0] - b->x, pl[2] - b->z);
 					if (!M->enabled || dd > DESPAWN_FAR || (bl_daylight(time_h) > 0.55f && dd > 16.0f && rf(&M->rng) < 0.5f * STEP))
@@ -330,15 +587,16 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 					if (e >= 0.55f || fabsf(p->y - q->y) > 1.2f)
 						continue;
 					float push = (0.55f - e) * 0.5f, nx = e > 0.001f ? ex / e : 1.0f, nz = e > 0.001f ? ez / e : 0.0f;
-					bl_box_move(w, &p->x, &p->y, &p->z, 0, -nx * push, BL_GOBLIN_HW, BL_GOBLIN_H);
-					bl_box_move(w, &p->x, &p->y, &p->z, 2, -nz * push, BL_GOBLIN_HW, BL_GOBLIN_H);
-					bl_box_move(w, &q->x, &q->y, &q->z, 0, nx * push, BL_GOBLIN_HW, BL_GOBLIN_H);
-					bl_box_move(w, &q->x, &q->y, &q->z, 2, nz * push, BL_GOBLIN_HW, BL_GOBLIN_H);
+					bl_box_move(w, &p->x, &p->y, &p->z, 0, -nx * push, BL_GOBLIN_HW, bl_mob_h(p->kind));
+					bl_box_move(w, &p->x, &p->y, &p->z, 2, -nz * push, BL_GOBLIN_HW, bl_mob_h(p->kind));
+					bl_box_move(w, &q->x, &q->y, &q->z, 0, nx * push, BL_GOBLIN_HW, bl_mob_h(q->kind));
+					bl_box_move(w, &q->x, &q->y, &q->z, 2, nz * push, BL_GOBLIN_HW, bl_mob_h(q->kind));
 				}
 			M->spawn_t -= STEP;
 			if (M->spawn_t <= 0.0f) {
 				M->spawn_t = 2.5f + 2.0f * rf(&M->rng);
-				if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f && bl_mobs_count(M) < (M->cap < BL_MOBS_MAX ? M->cap : BL_MOBS_MAX))
+				int cap = M->cap < BL_MOBS_MAX ? M->cap : BL_MOBS_MAX;
+				if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < cap)
 					try_spawn(M, w, pl, &R);
 			}
 		}
@@ -347,7 +605,7 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 		*out = R;
 }
 
-/* ---- the sword -------------------------------------------------------------------------------------------------------- */
+/* ---- the sword and the pointer ---------------------------------------------------------------------------------------------- */
 
 /* where a ray meets a box: the distance in, or -1 (the slab method; the ray's start inside the box counts as 0) */
 static float ray_box(const float o[3], const float d[3], const float lo[3], const float hi[3], float tmax)
@@ -375,7 +633,7 @@ static float ray_box(const float o[3], const float d[3], const float lo[3], cons
 	return t0;
 }
 
-int bl_mobs_pick(const struct bl_mobs *m, const float o[3], const float dir[3], float reach, float *t)
+static int pick_kind(const struct bl_mobs *m, int kind, const float o[3], const float dir[3], float reach, float *t)
 {
 	float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
 	if (!(len > 1e-9f))
@@ -385,9 +643,10 @@ int bl_mobs_pick(const struct bl_mobs *m, const float o[3], const float dir[3], 
 	float bt = reach;
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		const struct bl_mob *b = &m->mob[i];
-		if (!b->alive)
+		if (!b->alive || b->kind != kind)
 			continue;
-		float lo[3] = { b->x - BL_GOBLIN_HW - 0.05f, b->y, b->z - BL_GOBLIN_HW - 0.05f }, hi[3] = { b->x + BL_GOBLIN_HW + 0.05f, b->y + BL_GOBLIN_H + 0.05f, b->z + BL_GOBLIN_HW + 0.05f };
+		float h = bl_mob_h(kind);
+		float lo[3] = { b->x - BL_GOBLIN_HW - 0.05f, b->y, b->z - BL_GOBLIN_HW - 0.05f }, hi[3] = { b->x + BL_GOBLIN_HW + 0.05f, b->y + h + 0.05f, b->z + BL_GOBLIN_HW + 0.05f };
 		float tt = ray_box(o, d, lo, hi, bt);
 		if (tt >= 0.0f && tt <= bt) {
 			bt = tt;
@@ -397,6 +656,16 @@ int bl_mobs_pick(const struct bl_mobs *m, const float o[3], const float dir[3], 
 	if (best >= 0 && t)
 		*t = bt;
 	return best;
+}
+
+int bl_mobs_pick(const struct bl_mobs *m, const float o[3], const float dir[3], float reach, float *t)
+{
+	return pick_kind(m, BL_MOB_GOBLIN, o, dir, reach, t);
+}
+
+int bl_units_pick(const struct bl_mobs *m, const float o[3], const float dir[3], float reach, float *t)
+{
+	return pick_kind(m, BL_MOB_WORKER, o, dir, reach, t);
 }
 
 bool bl_mobs_hurt(struct bl_mobs *m, int i, float damage, float dx, float dz)
@@ -417,7 +686,8 @@ bool bl_mobs_hurt(struct bl_mobs *m, int i, float damage, float dx, float dz)
 	}
 	if (b->hp <= 0.0f) {
 		b->alive = false;
-		m->kills++;
+		if (b->kind == BL_MOB_GOBLIN)
+			m->kills++;
 		return true;
 	}
 	return false;
@@ -428,7 +698,7 @@ bool bl_mobs_hit_cell(const struct bl_mobs *m, int x, int y, int z)
 	float fx = (float)x, fy = (float)y, fz = (float)z;
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		const struct bl_mob *b = &m->mob[i];
-		if (b->alive && b->x + BL_GOBLIN_HW > fx && b->x - BL_GOBLIN_HW < fx + 1.0f && b->y + BL_GOBLIN_H > fy && b->y < fy + 1.0f && b->z + BL_GOBLIN_HW > fz &&
+		if (b->alive && b->x + BL_GOBLIN_HW > fx && b->x - BL_GOBLIN_HW < fx + 1.0f && b->y + bl_mob_h(b->kind) > fy && b->y < fy + 1.0f && b->z + BL_GOBLIN_HW > fz &&
 		    b->z - BL_GOBLIN_HW < fz + 1.0f)
 			return true;
 	}
@@ -440,7 +710,7 @@ bool bl_mobs_hit_cell(const struct bl_mobs *m, int x, int y, int z)
 enum { LIMB_NONE, LIMB_LEG_L, LIMB_LEG_R, LIMB_ARM_L, LIMB_ARM_R };
 
 struct bbox {
-	float x0, x1, y0, y1, z0, z1;                   /* in the goblin's own frame: x right, y up, z forward, the feet at 0 */
+	float x0, x1, y0, y1, z0, z1;                   /* in the creature's own frame: x right, y up, z forward, the feet at 0 */
 	uint32_t rgb;
 	int limb;
 	bool glow;                                      /* a light of its own: the eyes */
@@ -460,7 +730,19 @@ static const struct bbox k_goblin[] = {
 	{ -0.11f, -0.05f, 1.23f, 1.29f, 0.165f, 0.18f, 0xff2a1au, LIMB_NONE, true },
 	{ 0.05f, 0.11f, 1.23f, 1.29f, 0.165f, 0.18f, 0xff2a1au, LIMB_NONE, true },
 };
-#define N_GOBLIN ((int)(sizeof k_goblin / sizeof k_goblin[0]))
+
+/* a worker: the same build, skin the colour of a person, a blue tunic, brown trousers, a yellow cap, small dark eyes */
+static const struct bbox k_worker[] = {
+	{ -0.20f, -0.02f, 0.00f, 0.55f, -0.09f, 0.09f, 0x55402au, LIMB_LEG_L, false },
+	{ 0.02f, 0.20f, 0.00f, 0.55f, -0.09f, 0.09f, 0x55402au, LIMB_LEG_R, false },
+	{ -0.24f, 0.24f, 0.55f, 1.02f, -0.13f, 0.13f, 0x3a6ab8u, LIMB_NONE, false },
+	{ -0.38f, -0.25f, 0.60f, 1.00f, -0.07f, 0.07f, 0xd9a066u, LIMB_ARM_L, false },
+	{ 0.25f, 0.38f, 0.60f, 1.00f, -0.07f, 0.07f, 0xd9a066u, LIMB_ARM_R, false },
+	{ -0.18f, 0.18f, 1.02f, 1.38f, -0.17f, 0.17f, 0xd9a066u, LIMB_NONE, false },
+	{ -0.22f, 0.22f, 1.36f, 1.45f, -0.21f, 0.21f, 0xe0b030u, LIMB_NONE, false },
+	{ -0.11f, -0.05f, 1.20f, 1.26f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
+	{ 0.05f, 0.11f, 1.20f, 1.26f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
+};
 
 void bl_mobs_light(struct bl_mobs *m, const struct bl_world *w, float time_h)
 {
@@ -474,11 +756,9 @@ void bl_mobs_light(struct bl_mobs *m, const struct bl_world *w, float time_h)
 		float sky = open ? 0.22f + 0.78f * day : 0.20f + 0.12f * day;
 		float bl = (float)bl_light(w, x, y, z) / 15.0f;
 		bl = bl > 0.0f ? powf(bl, 0.85f) : 0.0f;
-		float k = sky > bl ? sky : bl;
 		b->lit[0] = fmaxf(sky * (open && day < 0.3f ? 0.85f : 1.0f), bl * 1.0f);
 		b->lit[1] = fmaxf(sky * (open && day < 0.3f ? 0.9f : 1.0f), bl * 0.80f);
 		b->lit[2] = fmaxf(sky * (open && day < 0.3f ? 1.15f : 1.0f), bl * 0.52f);
-		(void)k;
 	}
 }
 
@@ -505,18 +785,22 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 		const struct bl_mob *b = &m->mob[i];
 		if (!b->alive)
 			continue;
-		/* the box round the whole goblin (arms, ears and a swinging leg reach 0.55 sideways and 0.6 forward) */
-		float lo[3] = { b->x - 0.66f, b->y, b->z - 0.66f }, hi[3] = { b->x + 0.66f, b->y + 1.76f, b->z + 0.66f };
+		const bool worker = b->kind == BL_MOB_WORKER;
+		const struct bbox *tab = worker ? k_worker : k_goblin;
+		const int ntab = worker ? (int)(sizeof k_worker / sizeof k_worker[0]) : (int)(sizeof k_goblin / sizeof k_goblin[0]);
+		const float scale = worker ? WORKER_SCALE : GOBLIN_SCALE;
+		/* the box round the whole creature (arms, ears and a swinging leg reach 0.55 sideways and 0.6 forward) */
+		float lo[3] = { b->x - 0.66f, b->y, b->z - 0.66f }, hi[3] = { b->x + 0.66f, b->y + bl_mob_h(b->kind) + 0.06f, b->z + 0.66f };
 		float tb = ray_box(o, d, lo, hi, best);
 		if (tb < 0.0f)
 			continue;
-		/* into the goblin's own frame: x = right (cos, -sin), z = forward (sin, cos) */
+		/* into the creature's own frame: x = right (cos, -sin), z = forward (sin, cos) */
 		float rx = o[0] - b->x, ry = o[1] - b->y, rz = o[2] - b->z;
-		const float is = 1.0f / MODEL_SCALE;                                      /* (scaling the origin and the direction alike leaves the distance as it is) */
+		const float is = 1.0f / scale;                                           /* (scaling the origin and the direction alike leaves the distance as it is) */
 		float lo_[3] = { (rx * b->ycos - rz * b->ysin) * is, ry * is, (rx * b->ysin + rz * b->ycos) * is };
 		float ld[3] = { (d[0] * b->ycos - d[2] * b->ysin) * is, d[1] * is, (d[0] * b->ysin + d[2] * b->ycos) * is };
-		for (int k = 0; k < N_GOBLIN; k++) {
-			const struct bbox *bx = &k_goblin[k];
+		for (int k = 0; k < ntab; k++) {
+			const struct bbox *bx = &tab[k];
 			float dz, dy;
 			limb_offset(b, bx->limb, &dz, &dy);
 			float blo[3] = { bx->x0, bx->y0 + dy, bx->z0 + dz }, bhi[3] = { bx->x1, bx->y1 + dy, bx->z1 + dz };
@@ -555,20 +839,21 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 			found = true;
 			hit->t = t0;
 			hit->id = i;
-			/* the shade of the face it was hit on (in the goblin's frame: top 1, bottom 0.55, the sides 0.85 and 0.7) */
+			/* the shade of the face it was hit on (in the creature's frame: top 1, bottom 0.55, the sides 0.85 and 0.7) */
 			float shade = axis == 1 ? (ld[1] < 0.0f ? 1.0f : 0.55f) : axis == 0 ? 0.70f : 0.85f;
 			uint32_t c = bx->rgb;
 			float col[3] = { (float)((c >> 16) & 255) / 255.0f, (float)((c >> 8) & 255) / 255.0f, (float)(c & 255) / 255.0f };
 			for (int ch = 0; ch < 3; ch++) {
 				float v = bx->glow ? col[ch] : col[ch] * shade * b->lit[ch];
-				if (b->hurt > 0.0f && !bx->glow) {                  /* the red flash of a blow (and of the sun) */
+				if (b->hurt > 0.0f && !bx->glow) {                              /* the red flash of a blow (and of the sun) */
 					float f = clampf(b->hurt / 0.35f, 0.0f, 1.0f) * 0.6f;
 					v = v * (1.0f - f) + (ch == 0 ? 1.0f : 0.1f) * f;
 				}
+				if (b->selected && !bx->glow)                                   /* chosen by the player: lighter, towards a pale green */
+					v = v * 0.6f + (ch == 0 ? 0.45f : ch == 1 ? 1.0f : 0.7f) * 0.4f;
 				hit->rgb[ch] = clampf(v, 0.0f, 1.0f);
 			}
 		}
 	}
-	(void)tmax;
 	return found;
 }

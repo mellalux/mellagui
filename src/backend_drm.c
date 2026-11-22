@@ -1517,12 +1517,14 @@ static int drm_set_power(struct lm_backend *b, bool on)
         if (!prop || drmModeConnectorSetProperty(d->fd, o->conn_id, prop, on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF) < 0) {
             lm_warn("drm: cannot switch %s %s: %s", o->base.name, on ? "on" : "off", prop ? strerror(errno) : "no DPMS property");
             rc = -1;
+            continue;
         }
         o->flip_pending = false;
     }
     if (on)
         lm_timer_arm_ms(d->ready_timer, 1, 0);      /* the frame loop stood still while the picture was not shown */
-    lm_info("drm: monitors %s", on ? "on" : "in standby");
+    if (rc == 0)
+        lm_info("drm: monitors %s", on ? "on" : "in standby");
     return rc;
 }
 

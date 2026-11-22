@@ -23875,6 +23875,13 @@ class TestSaver(Base):
 
     UNIT = {'MELLAGUI_LOCK_UNIT_MS': '250'}                  # a "minute" is a quarter of a second
 
+    def test_standby_failure_retries_and_wake_cancels_the_retry(self):
+        tool = os.path.join(ROOT, 'build', 'screenoff-test')
+        self.assertTrue(os.path.exists(tool), 'screenoff-test not built (run make)')
+        r = subprocess.run([tool], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('screenoff-test ok', r.stdout)
+
     def start(self, name, *args, env=None):
         exe = os.path.join(ROOT, 'build', 'mellagui-matrix')
         if not os.path.exists(exe):

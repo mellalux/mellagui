@@ -6,13 +6,15 @@
 #include "backend.h"
 #include "loop.h"
 #include "log.h"
+#include "saver.h"
 #include "screenoff.h"
 #include "server.h"
 
 #define FADE_OUT_MS 2000
 #define STEP_MS 33
+#define POWER_RETRY_MS 1000
 
-enum phase { IDLE, FADING_OUT, OFF, FADING_IN };
+enum phase { IDLE, FADING_OUT, POWERING_OFF, OFF, FADING_IN };
 
 struct lm_screenoff {
     struct lm_server *srv;
@@ -45,16 +47,15 @@ static void timer_cb(void *data)
 {
     struct lm_screenoff *s = data;
     uint64_t now = lm_now_ms();
+    bool first_power_attempt = false;
     if (s->phase == FADING_OUT) {
         double f = (double)(now - s->t0) / (double)fade_ms();
         s->level = 1.0 - smooth(f);
         apply(s);
         if (f >= 1.0) {                                         /* black: now the monitors can go to sleep */
-            s->phase = OFF;
-            lm_timer_arm_ms(s->timer, 0, 0);
-            if (s->srv->backend)
-                lm_backend_set_power(s->srv->backend, false);
-            lm_info("screen: monitors in standby");
+            s->phase = POWERING_OFF;
+            first_power_attempt = true;
+            lm_saver_stop(s->srv->saver);                        /* no more animation while standby is being requested, including retries */
         }
     } else if (s->phase == FADING_IN) {
         int in_ms = fade_ms() / 6 < 30 ? 30 : fade_ms() / 6;
@@ -66,6 +67,17 @@ static void timer_cb(void *data)
             apply(s);
             s->phase = IDLE;
             lm_timer_arm_ms(s->timer, 0, 0);
+        }
+    }
+    if (s->phase == POWERING_OFF) {
+        if (s->srv->backend && lm_backend_set_power(s->srv->backend, false) == 0) {
+            s->phase = OFF;
+            lm_timer_arm_ms(s->timer, 0, 0);
+            lm_info("screen: monitors in standby");
+        } else {
+            if (first_power_attempt)
+                lm_warn("screen: standby failed; retrying every second");
+            lm_timer_arm_ms(s->timer, POWER_RETRY_MS, POWER_RETRY_MS);
         }
     }
 }
@@ -90,7 +102,7 @@ void lm_screenoff_destroy(struct lm_screenoff *s)
     if (!s)
         return;
     if (s->phase != IDLE && s->srv->backend) {
-        if (s->phase == OFF || s->phase == FADING_OUT)
+        if (s->phase == OFF || s->phase == FADING_OUT || s->phase == POWERING_OFF)
             lm_backend_set_power(s->srv->backend, true);
         lm_backend_set_dim(s->srv->backend, 1.0f);
     }
@@ -101,7 +113,7 @@ void lm_screenoff_destroy(struct lm_screenoff *s)
 
 void lm_screenoff_start(struct lm_screenoff *s)
 {
-    if (!s || s->phase == FADING_OUT || s->phase == OFF)
+    if (!s || lm_screenoff_active(s))
         return;
     s->phase = FADING_OUT;
     s->t0 = lm_now_ms() - (uint64_t)((1.0 - s->level) * fade_ms());         /* (from where a fade in had come to) */
@@ -113,8 +125,9 @@ bool lm_screenoff_wake(struct lm_screenoff *s)
     if (!s || s->phase == IDLE)
         return false;
     bool was_fading_in = s->phase == FADING_IN;
-    if (s->phase == OFF || s->phase == FADING_OUT) {
-        if (s->phase == OFF && s->srv->backend)
+    if (s->phase == OFF || s->phase == FADING_OUT || s->phase == POWERING_OFF) {
+        /* A failed standby request may already have switched off some outputs. */
+        if ((s->phase == OFF || s->phase == POWERING_OFF) && s->srv->backend)
             lm_backend_set_power(s->srv->backend, true);
         s->from = s->level;
         s->phase = FADING_IN;
@@ -127,7 +140,7 @@ bool lm_screenoff_wake(struct lm_screenoff *s)
 
 bool lm_screenoff_active(const struct lm_screenoff *s)
 {
-    return s && (s->phase == FADING_OUT || s->phase == OFF);
+    return s && (s->phase == FADING_OUT || s->phase == POWERING_OFF || s->phase == OFF);
 }
 
 bool lm_screenoff_off(const struct lm_screenoff *s)

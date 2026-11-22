@@ -7,6 +7,8 @@
  * the CRTC gamma tables on DRM, so it costs nothing per frame and screenshots stay bright) and only then the monitors go to standby
  * (DPMS, lm_backend_set_power). The first input wakes them (lm_screenoff_wake): the picture fades back in at once, 0.3 s, and that
  * input is swallowed by the seat, like the one that wakes a locked screen.
+ * Once the fade reaches black, the screensaver is stopped before requesting standby. A failed power request is retried once per
+ * second; it is not reported as OFF. Input cancels those retries and wakes all outputs, including a partially blanked set.
  *
  * Tests: MELLAGUI_BLANK_FADE_MS replaces the 2 s (and the 0.3 s fade in is a tenth of it, at least 30 ms).
  */
@@ -24,9 +26,9 @@ void lm_screenoff_start(struct lm_screenoff *s);
 /* Bring the screen back (cancels a fade, switches the monitors on, fades in). Returns true when it was fading or off: the input that
  * caused it is only a wake-up call and must not reach anything else. */
 bool lm_screenoff_wake(struct lm_screenoff *s);
-/* Fading out, or the monitors are off. */
+/* Fading out, waiting for standby to succeed, or the monitors are off. */
 bool lm_screenoff_active(const struct lm_screenoff *s);
-/* The monitors are off now (the fade is over). */
+/* The fade is over and the backend accepted the standby request. */
 bool lm_screenoff_off(const struct lm_screenoff *s);
 /* How bright the display is now, 0..1 (the control socket's `screenoff`). */
 double lm_screenoff_level(const struct lm_screenoff *s);

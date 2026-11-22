@@ -30552,6 +30552,29 @@ class TestDesktop(Base):
         st, items = self.state(lambda s, i: 'late.txt' in i, wait=4.0)
         self.assertIn('late.txt', items)
 
+    def test_shift_picks_a_range_and_typing_jumps_to_a_name(self):
+        c = self.start('range', files=('apple.txt', 'banana.txt', 'cherry.txt', 'date.txt'), folders=())
+        self.state(lambda s, i: len(i) == 4)
+        x, y = self.centre('apple.txt')
+        c.click(x, y)
+        c.key(KEY_LEFTSHIFT, True)
+        x, y = self.centre('cherry.txt')
+        c.click(x, y)
+        c.key(KEY_LEFTSHIFT, False)
+        st, items = self.state(lambda s, i: i['cherry.txt']['sel'] == '1')
+        self.assertEqual({k: v['sel'] for k, v in items.items()}, {'apple.txt': '1', 'banana.txt': '1', 'cherry.txt': '1', 'date.txt': '0'})
+        c.key(KEY_LEFTSHIFT, True)                                         # Shift + arrow goes on from the anchor
+        c.tap(KEY_DOWN)
+        c.key(KEY_LEFTSHIFT, False)
+        st, items = self.state(lambda s, i: i['date.txt']['sel'] == '1')
+        self.assertTrue(all(v['sel'] == '1' for v in items.values()), 'the range grew to the next icon')
+        c.tap(KEY_ESC)
+        self.state(lambda s, i: all(v['sel'] == '0' for v in i.values()))
+        c.tap(48)                                                          # b
+        c.tap(KEY_A)                                                       # a: "ba" - banana
+        st, items = self.state(lambda s, i: i['banana.txt']['sel'] == '1')
+        self.assertEqual([k for k, v in items.items() if v['sel'] == '1'], ['banana.txt'])
+
     def test_files_dragged_from_another_program_are_copied_to_the_desktop(self):
         c = self.start('drop', files=('here.txt',), folders=())
         self.state(lambda s, i: len(i) == 1)

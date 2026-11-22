@@ -112,6 +112,9 @@ struct app {
     char msg[200];
     uint32_t msg_until;
     bool dirty_scan;
+    int anchor, cur;                    /* Shift picks a range from the anchor to the item last chosen (-1: none) */
+    char ta[24];                        /* type-ahead: the letters typed lately jump to a name that starts with them */
+    uint32_t ta_ms;
 };
 
 static uint32_t now_ms(void)
@@ -486,6 +489,7 @@ static void scan(struct app *a)
     free(old);
     place_items(a);
     a->hover = -1;
+    a->anchor = a->cur = -1;
     if (a->pending_select[0]) {
         for (int i = 0; i < a->n; i++)
             a->it[i].sel = !strcmp(a->it[i].name, a->pending_select);
@@ -634,6 +638,10 @@ static void icon_dock(uint32_t *buf, int P, int kind)
         for (int x = 0; x < P; x++) {
             uint32_t p = lm_dockicon_pixel(kind, (float)((double)x + 0.5 - P / 2.0), (float)((double)y + 0.5 - P / 2.0), (float)R, 0.0f);
             uint32_t a = p >> 24;
+            if (!a)
+                continue;
+            if (!(p & 0x00ffffffu))
+                a = a * 45 / 100;                               /* the dock's shadow is too heavy over a wallpaper */
             if (!a)
                 continue;
             uint32_t r = ((p >> 16) & 255) * 255 / a, g = ((p >> 8) & 255) * 255 / a, b = (p & 255) * 255 / a;
@@ -1292,6 +1300,23 @@ static void select_only(struct app *a, int keep)
         a->it[i].sel = i == keep;
 }
 
+/* The place of an item in the reading order of the grid: column after column. */
+static int cell_rank(const struct app *a, int i)
+{
+    return a->it[i].cx < 0 ? -1 : a->it[i].cx * 1000 + a->it[i].cy;
+}
+
+/* Chooses every item between two (in the order of the grid); the others are let go unless `keep`. */
+static void select_range(struct app *a, int from, int to, bool keep)
+{
+    int r0 = LM_MIN(cell_rank(a, from), cell_rank(a, to)), r1 = LM_MAX(cell_rank(a, from), cell_rank(a, to));
+    for (int i = 0; i < a->n; i++) {
+        int r = cell_rank(a, i);
+        bool in = r >= 0 && r >= r0 && r <= r1;
+        a->it[i].sel = keep ? (a->it[i].sel || in) : in;
+    }
+}
+
 static void band_select(struct app *a)
 {
     double x0 = LM_MIN(a->down_x, a->px), x1 = LM_MAX(a->down_x, a->px), y0 = LM_MIN(a->down_y, a->py), y1 = LM_MAX(a->down_y, a->py);
@@ -1445,11 +1470,16 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             a->down_x = a->px;
             a->down_y = a->py;
             a->band_add = ctrl;
-            if (i >= 0) {
+            bool shift = (w->mods & LM_MOD_SHIFT) != 0;
+            if (i >= 0 && shift && a->anchor >= 0 && a->anchor < a->n) {
+                select_range(a, a->anchor, i, ctrl);
+                a->cur = i;
+            } else if (i >= 0) {
                 if (ctrl)
                     a->it[i].sel = !a->it[i].sel;
                 else if (!a->it[i].sel)
                     select_only(a, i);
+                a->anchor = a->cur = i;
             } else if (!ctrl) {
                 for (int k = 0; k < a->n; k++)
                     a->it[k].sel = false;
@@ -1463,8 +1493,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             } else if (a->banding) {
                 a->banding = false;
             } else if (a->down_item >= 0) {
-                bool ctrl = (w->mods & LM_MOD_CTRL) != 0;
-                if (!ctrl && a->click_item == a->down_item && t - a->click_ms < (uint32_t)lm_metrics.double_click_ms) {
+                bool ctrl = (w->mods & LM_MOD_CTRL) != 0, shift = (w->mods & LM_MOD_SHIFT) != 0;
+                if (shift) {
+                    /* a range was chosen at the press */
+                } else if (!ctrl && a->click_item == a->down_item && t - a->click_ms < (uint32_t)lm_metrics.double_click_ms) {
                     open_item(a, a->down_item);
                     a->click_item = -1;
                 } else {
@@ -1553,9 +1585,17 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             a->it[i].sel = true;
     } else if (ks == LM_KS_Right || ks == LM_KS_Left || ks == LM_KS_Down || ks == LM_KS_Up) {
         int dx = ks == LM_KS_Right ? 1 : ks == LM_KS_Left ? -1 : 0, dy = ks == LM_KS_Down ? 1 : ks == LM_KS_Up ? -1 : 0;
-        int nx = cur < 0 ? (a->n ? 0 : -1) : neighbour(a, cur, dx, dy);
-        if (nx >= 0)
-            select_only(a, nx);
+        int from = a->cur >= 0 && a->cur < a->n ? a->cur : cur;
+        int nx = from < 0 ? (a->n ? 0 : -1) : neighbour(a, from, dx, dy);
+        if (nx >= 0) {
+            if ((w->mods & LM_MOD_SHIFT) && from >= 0) {
+                select_range(a, a->anchor >= 0 && a->anchor < a->n ? a->anchor : from, nx, false);
+            } else {
+                select_only(a, nx);
+                a->anchor = nx;
+            }
+            a->cur = nx;
+        }
     } else if ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && cur >= 0) {
         for (int i = 0; i < a->n; i++)
             if (a->it[i].sel)
@@ -1567,6 +1607,25 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         trash_selected(a);
     } else if (ks == LM_KS_F1 + 4) {
         scan(a);
+    } else if (!ctrl && !(w->mods & LM_MOD_ALT) && ((ks > 0x20 && ks < 0x7f) || (ks == 0x20 && a->ta[0]))) {
+        uint32_t t = now_ms();                                  /* type-ahead: the first icon whose name starts with what was typed in the last second */
+        if (t - a->ta_ms > 1000)
+            a->ta[0] = 0;
+        a->ta_ms = t;
+        size_t l = strlen(a->ta);
+        if (l + 1 < sizeof(a->ta)) {
+            a->ta[l] = (char)ks;
+            a->ta[l + 1] = 0;
+            l++;
+        }
+        int hit = -1;
+        for (int i = 0; i < a->n && hit < 0; i++)
+            if (a->it[i].cx >= 0 && !strncasecmp(a->it[i].shown, a->ta, l))
+                hit = i;
+        if (hit >= 0) {
+            select_only(a, hit);
+            a->anchor = a->cur = hit;
+        }
     }
     w->redraw = true;
 }
@@ -1691,6 +1750,9 @@ static int selftest(void)
     for (int i = 0; i < 5; i++)
         for (int j = i + 1; j < 5; j++)
             CHECK(a.it[i].cx != a.it[j].cx || a.it[i].cy != a.it[j].cy);
+    CHECK(cell_rank(&a, 3) == 1000 && cell_rank(&a, 1) == 1);
+    select_range(&a, 0, 3, false);
+    CHECK(a.it[0].sel && a.it[1].sel && a.it[3].sel && !a.it[2].sel && !a.it[4].sel);
     CHECK(neighbour(&a, 0, 1, 0) == 3 && neighbour(&a, 0, 0, 1) == 1 && neighbour(&a, 0, -1, 0) < 0);
     free(a.it);
     /* the icon pictures: every kind has a body and see-through corners */

@@ -9,7 +9,7 @@
 
 struct lm_rect frame_outer(const struct lm_window *w)
 {
-    if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w))        /* (a gadget has no frame) */
+    if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w) || win_is_desktop(w))        /* (a gadget and the desktop have no frame) */
         return lm_rect_make(w->x, w->y, w->width, w->height);
     return lm_rect_make(w->x - LM_BORDER_WIDTH, w->y - LM_TITLEBAR_HEIGHT,
                         w->width + 2 * LM_BORDER_WIDTH,
@@ -34,7 +34,7 @@ bool win_is_gadget(const struct lm_window *w)
 
 bool win_is_aux(const struct lm_window *w)
 {
-    return win_is_calendar(w) || win_is_gadget(w);
+    return win_is_calendar(w) || win_is_gadget(w) || win_is_desktop(w);
 }
 
 bool win_is_calendar(const struct lm_window *w)
@@ -209,7 +209,7 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
     p->about_open = wm->about_open;
     p->hover_power = wm->hover_power;
     p->power_open = wm->power_open;
-    p->active_title = wm->focused ? wm->focused->title : "";
+    p->active_title = wm->focused && !win_is_desktop(wm->focused) ? wm->focused->title : "";   /* (the desktop has no title to show) */
 
     /* taskbar: windows of this workspace in creation (id) order, so raising does not reshuffle it */
     struct lm_window *tw[LM_PANEL_MAX_TASKS];
@@ -340,7 +340,7 @@ void send_configure(struct lm_wm *wm, struct lm_window *w, int32_t cw, int32_t c
 void clamp_size(const struct lm_window *w, int32_t *cw, int32_t *ch)
 {
     int32_t minw = LM_MAX(w->min_w, LM_MIN_WINDOW_WIDTH), minh = LM_MAX(w->min_h, LM_MIN_WINDOW_HEIGHT);
-    if (win_is_gadget(w)) {                                     /* a card has its own limits */
+    if (win_is_gadget(w) || win_is_desktop(w)) {                /* a card has its own limits */
         minw = LM_MAX(w->min_w, 1);
         minh = LM_MAX(w->min_h, 1);
     }
@@ -449,14 +449,14 @@ static struct lm_window *top_visible(struct lm_wm *wm, const struct lm_window *s
 {
     struct lm_window *w;
     lm_list_for_each_reverse(w, &wm->windows, link)
-        if (w != skip && win_visible(wm, w) && !win_is_gadget(w))
+        if (w != skip && win_visible(wm, w) && !win_is_gadget(w) && !win_is_desktop(w))
             return w;
     return NULL;
 }
 
 void raise_window(struct lm_wm *wm, struct lm_window *w)
 {
-    if (win_is_gadget(w) || wm->windows.prev == &w->link)             /* (a gadget stays at the bottom) */
+    if (win_is_gadget(w) || win_is_desktop(w) || wm->windows.prev == &w->link)             /* (a gadget and the desktop stay at the bottom) */
         return;
     lm_list_remove(&w->link);
     lm_list_append(&wm->windows, &w->link);
@@ -475,8 +475,8 @@ void lm_wm_switch_workspace(struct lm_wm *wm, int ws)
     wm->workspace = ws;
     struct lm_window *w;
     lm_list_for_each(w, &wm->windows, link) {
-        if (win_is_gadget(w))
-            w->workspace = ws;                                  /* the gadgets are on every workspace */
+        if (win_is_gadget(w) || win_is_desktop(w))
+            w->workspace = ws;                                  /* the gadgets and the desktop are on every workspace */
         update_outputs(wm, w);
     }
     anim_workspace(wm, dir, false);                             /* ... and the ones that arrive slide in */
@@ -646,6 +646,7 @@ void lm_wm_relayout_outputs(struct lm_wm *wm)
     lm_list_for_each(w, &wm->windows, link)
         if (w->states & (LM_WINDOW_MAXIMIZED | LM_WINDOW_FULLSCREEN))
             apply_state(wm, w);
+    desktop_fit(wm);
     gadgets_redock(wm);
     damage_all(wm);
     refresh_pointer(wm);
@@ -673,6 +674,7 @@ void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
         overview_finish(wm);                                    /* its output went away */
     else
         overview_changed(wm);
+    desktop_fit(wm);                                            /* the icons cover the output under the panel */
     gadgets_redock(wm);                                         /* the cards that nobody moved follow the output's edge */
     damage_all(wm);
 }
@@ -827,6 +829,8 @@ void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g)
             w->x = wm->grab_x + wm->grab_w - w->width;
         if (wm->grab_edges & LM_EDGE_TOP)
             w->y = wm->grab_y + wm->grab_h - w->height;
+    } else if (resized && win_is_desktop(w)) {
+        /* the wm sized it: nothing to fit */
     } else if (resized && win_is_gadget(w)) {
         if (!WIN(w)->gad_placed)
             gadgets_redock(wm);                                 /* the cards after it move to make room */
@@ -867,8 +871,13 @@ void lm_wm_window_map(struct lm_window *w)
     bool was_known = false, was_max = false;
     if (w->mapped)
         return;
+    if (win_is_desktop(w)) {
+        desktop_map(wm, w);
+        return;
+    }
     if (win_is_gadget(w)) {
         gadget_map(wm, w);
+        desktop_lower(wm);                                      /* (the desktop's icons are under the cards) */
         return;
     }
     if (!ww->placed) {
@@ -974,7 +983,7 @@ void lm_wm_window_unmap(struct lm_window *w)
 
 void lm_wm_window_request_maximize(struct lm_window *w, bool maximize)
 {
-    if (win_is_gadget(w))
+    if (win_is_gadget(w) || win_is_desktop(w))
         return;
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
@@ -1032,7 +1041,7 @@ void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
 
 void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen)
 {
-    if (win_is_gadget(w))
+    if (win_is_gadget(w) || win_is_desktop(w))
         return;
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
@@ -1053,7 +1062,7 @@ void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen)
 
 void lm_wm_window_request_minimize(struct lm_window *w)
 {
-    if (win_is_gadget(w))
+    if (win_is_gadget(w) || win_is_desktop(w))
         return;
     struct lm_wm *wm = w->wm;
     if (!w->mapped || w->minimized)
@@ -1367,7 +1376,7 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             out->sy = sy;
             return;
         }
-        if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w))
+        if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w) || win_is_desktop(w))
             continue;
         struct lm_frame_info f;
         frame_info(wm, w, &f);
@@ -1926,7 +1935,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
 static void take_screenshot(struct lm_wm *wm, bool window, bool to_file)
 {
     struct lm_rect r;
-    if (window && wm->focused && win_visible(wm, wm->focused)) {
+    if (window && wm->focused && win_visible(wm, wm->focused) && !win_is_desktop(wm->focused)) {
         r = frame_outer(wm->focused);
     } else {
         double x = 0, y = 0;

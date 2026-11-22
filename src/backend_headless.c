@@ -726,6 +726,13 @@ static void ctl_command(struct ctl_client *c, char *line)
             ctl_reply(c, "ok starting\n");
         else
             ctl_reply(c, "ok hidden\n");
+    } else if (!strcmp(cmd, "desktop")) {
+        /* desktop: the window of the desktop icons ("ok X Y W H", "ok none" while there is none) */
+        struct lm_rect r;
+        if (srv->wm && lm_wm_desktop_rect(srv->wm, &r))
+            ctl_reply(c, "ok %d %d %d %d\n", r.x, r.y, r.w, r.h);
+        else
+            ctl_reply(c, "ok none\n");
     } else if (!strcmp(cmd, "layout")) {
         if (!a1 || !srv->input) { ctl_reply(c, "err usage: layout <slot|next|prev>\n"); return; }
         if (!strcmp(a1, "next") || !strcmp(a1, "prev"))

@@ -146,6 +146,8 @@ void places_remember(struct lm_wm *wm, struct lm_window *w)
         return;
     if (win_is_gadget(w) && !WIN(w)->gad_placed)                /* a card docked by the wm has no place of its own to keep */
         return;
+    if (win_is_desktop(w))                                      /* the desktop is where the wm puts it */
+        return;
     struct wm_win *ww = WIN(w);
     struct wm_place now = { .x = w->x, .y = w->y, .w = w->width, .h = w->height };
     struct wm_place *p = place_of(w->app_id);

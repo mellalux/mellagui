@@ -29,6 +29,11 @@ struct wlclip {
     char *out;                          /* what we offer */
     uint32_t serial;
     uint32_t ptr_serial;                /* the serial of the last pointer button event (a drag starts from it); 0 = use `serial` */
+    /* files dragged over the window (wlclip_accept_drops) */
+    void (*drop)(struct wlclip *c, char **paths, int n, double x, double y, void *data);
+    void *drop_data;
+    uint32_t drop_offer;
+    double drop_x, drop_y;
     /* a drag in progress (wlclip_drag_files) */
     uint32_t drag_src, drag_surf, drag_pool, drag_buf;
     char *drag_uris, *drag_text;
@@ -50,5 +55,8 @@ uint8_t *wlclip_paste_mime(struct wlclip *c, const char *mime, size_t maxlen, si
  * Returns false when the compositor has no drag-and-drop or one is going on already. */
 bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, const char *label);
 bool wlclip_dragging(const struct wlclip *c);
+/* Take drops of files: a drag of text/uri-list over the window is accepted (copy) and, when it is let go, `drop` gets the local paths (malloc'd, `n` of them,
+ * freed by the library) and where the pointer was (surface pixels). Without a call a drag over the window is refused. Needs wlclip_attach to have worked. */
+void wlclip_accept_drops(struct wlclip *c, void (*drop)(struct wlclip *c, char **paths, int n, double x, double y, void *data), void *data);
 
 #endif

@@ -171,6 +171,7 @@ struct lm_config {
     int night_kelvin;           /* ... at this colour temperature (settings: night-temp; default 3400) */
     bool night_sun;             /* ... between sunset and sunrise of the day instead (settings: night-sun; smartsun.h; night_from / night_to when the place is unknown) */
     char night_from[8], night_to[8];   /* "HH:MM" (settings: night-from, night-to; default 21:00 and 06:30) */
+    const char *desktop_cmd;    /* the desktop icons (the folder ~/Desktop), started with the compositor ([commands] desktop, default "mellagui-desktop", "none" = off) */
     const char *status_cmd;     /* the battery / network buttons of the panel, started with the compositor ([commands] status, default "mellagui-status", "none" = off) */
     const char *quick_cmd;      /* the quick settings program, started by the first click on the panel's quick settings button ([commands] quick, default "mellagui-quick") */
     const char *calendar_cmd;   /* the calendar program, started with the compositor and shown by a click on the clock ([commands] calendar, default "mellagui-calendar") */

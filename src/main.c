@@ -737,6 +737,8 @@ int main(int argc, char **argv)
         lm_wm_gadgets_start(srv->wm, headless);                                  /* the gadgets that are switched on (tests start them with the setting) */
     if (srv->wm && !srv->config.kiosk && (!headless || getenv("MELLAGUI_CALENDAR_PRELOAD")))      /* the calendar waits hidden for a click on the clock (tests start it by that click) */
         lm_wm_calendar_start(srv->wm);
+    if (srv->wm && !srv->config.kiosk && cfg.desktop_cmd && *cfg.desktop_cmd && strcmp(cfg.desktop_cmd, "none") && (!headless || getenv("MELLAGUI_DESKTOP_PRELOAD")))
+        lm_server_spawn(srv, cfg.desktop_cmd);                             /* the icons of ~/Desktop (tests start it with MELLAGUI_DESKTOP_PRELOAD) */
     if (srv->wm && !srv->config.kiosk && cfg.status_cmd && *cfg.status_cmd && strcmp(cfg.status_cmd, "none") && (!headless || getenv("MELLAGUI_STATUS_PRELOAD")))
         lm_server_spawn(srv, cfg.status_cmd);                              /* the battery and network buttons of the panel (tests start it with MELLAGUI_STATUS_PRELOAD) */
 

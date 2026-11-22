@@ -850,6 +850,8 @@ void lm_wm_clock_changed(struct lm_wm *wm);
  * starts it (main.c, at startup); lm_wm_calendar_toggle shows / hides it, starting it first when it is not there (`clock` = where the clock is, NULL =
  * the primary output's); false when calendars are off (setting cal-enabled) or there is no command. */
 void lm_wm_calendar_start(struct lm_wm *wm);
+/* The window of the desktop icons (mellagui-desktop): its rectangle, false while it has none. */
+bool lm_wm_desktop_rect(struct lm_wm *wm, struct lm_rect *r);
 /* Quick settings (client/mellagui-quick.c, app id "mellagui.quick"): a program like the calendar - a hidden window that is shown right-aligned under the panel's
  * quick settings button (`anchor`, NULL = the primary output's button) and hides when it loses the focus. Started by the first call. False when there is no command. */
 bool lm_wm_quick_toggle(struct lm_wm *wm, const struct lm_rect *anchor);

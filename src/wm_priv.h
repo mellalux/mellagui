@@ -456,6 +456,13 @@ bool win_is_calendar(const struct lm_window *w);
  * cycling, animations) leave out: the calendar, quick settings and the gadgets. */
 bool win_is_gadget(const struct lm_window *w);
 bool win_is_aux(const struct lm_window *w);
+/* The desktop's icons (wm_desktop.c): a window of the program mellagui-desktop (app id "mellagui.desktop") that covers the output under the panel, lies at the
+ * very bottom (under the gadgets), has no frame and is on every workspace. */
+bool win_is_desktop(const struct lm_window *w);
+struct lm_window *desktop_window(struct lm_wm *wm);
+void desktop_fit(struct lm_wm *wm);
+void desktop_lower(struct lm_wm *wm);
+void desktop_map(struct lm_wm *wm, struct lm_window *w);
 void gadget_map(struct lm_wm *wm, struct lm_window *w);
 void gadgets_redock(struct lm_wm *wm);
 void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, double dy);

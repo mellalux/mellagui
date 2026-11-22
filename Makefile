@@ -11,6 +11,7 @@
 #   make mellagui-status   build/mellagui-status (client/mellagui-status.c, the battery and the network in the panel)
 #   make mellagui-gadget  build/mellagui-gadget (client/mellagui-gadget.c, the desktop gadgets: clipboard, mixer, system, smart home)
 #   make mellagui-notes    build/mellagui-notes (client/mellagui-notes.c, the history of notifications)
+#   make mellagui-desktop  build/mellagui-desktop (client/mellagui-desktop.c, the icons of the folder ~/Desktop)
 #   make mellagui-archive  build/mellagui-archive (client/mellagui-archive.c, the archiver: open, extract and make archives)
 #   make mellagui-shot     build/mellagui-shot (client/mellagui-shot.c, a screenshot of an area with marks)
 #   make mellagui-paint    build/mellagui-paint (client/mellagui-paint.c, a simple picture editor)
@@ -70,9 +71,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test $(BUILD)/screenoff-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-archive $(BUILD)/mellagui-shot $(BUILD)/mellagui-paint $(BUILD)/mellagui-solitaire $(BUILD)/mellagui-tetris $(BUILD)/mellagui-chess $(BUILD)/mellagui-blocks $(BUILD)/chess-test $(BUILD)/chessai-test $(BUILD)/blocks-test $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget $(BUILD)/fuzz-server $(BUILD)/hwprobe $(BUILD)/mellagui-greetd $(BUILD)/mellagui-greeter
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-desktop $(BUILD)/mellagui-archive $(BUILD)/mellagui-shot $(BUILD)/mellagui-paint $(BUILD)/mellagui-solitaire $(BUILD)/mellagui-tetris $(BUILD)/mellagui-chess $(BUILD)/mellagui-blocks $(BUILD)/chess-test $(BUILD)/chessai-test $(BUILD)/blocks-test $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget $(BUILD)/fuzz-server $(BUILD)/hwprobe $(BUILD)/mellagui-greetd $(BUILD)/mellagui-greeter
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-archive mellagui-shot mellagui-paint mellagui-solitaire mellagui-tetris mellagui-chess mellagui-blocks mellagui-bluetooth mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run hwprobe
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-desktop mellagui-archive mellagui-shot mellagui-paint mellagui-solitaire mellagui-tetris mellagui-chess mellagui-blocks mellagui-bluetooth mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run hwprobe
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -196,6 +197,10 @@ $(BUILD)/mellagui-archive: $(BUILD)/client/mellagui-archive.o $(BUILD)/client/ar
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
 $(BUILD)/mellagui-notes: $(BUILD)/client/mellagui-notes.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/mellagui-desktop: $(BUILD)/client/mellagui-desktop.o $(BUILD)/src/dockicon.o $(BUILD)/src/iconfind.o $(BUILD)/src/img.o $(BUILD)/src/svg.o $(BUILD)/src/webp.o $(BUILD)/src/jpeg.o $(BUILD)/client/wlclip.o $(BUILD)/client/wltext.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

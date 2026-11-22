@@ -608,6 +608,11 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
     case LM_PICK_SURFACE:
         if (pick->window && win_is_gadget(pick->window))
             return false;                                       /* a gadget is used with the pointer: the keyboard stays where it is */
+        if (pick->window && win_is_desktop(pick->window)) {     /* the desktop: it takes the keyboard (Enter, F2, Delete work on its icons) but is never raised */
+            if (wm->focused != pick->window)
+                set_focus(wm, pick->window);
+            return false;
+        }
         if (pick->window && wm->focused != pick->window)
             lm_wm_focus_window(wm, pick->window);
         else if (pick->window)

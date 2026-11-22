@@ -30420,5 +30420,187 @@ class TestArchive(Base):
         self.assertIn('Made archive.zip', extra['status'])
 
 
+class TestDesktop(Base):
+    """The icons of the desktop (mellagui-desktop): the folder ~/Desktop as a grid under every window."""
+    KEY_F2, KEY_DEL, KEY_BS = 60, 111, 14
+
+    def start(self, tag, files=('notes.txt', 'b.txt', 'c.txt'), folders=('Projects',)):
+        self.d = os.path.join(tmp, 'desktop-' + tag)
+        shutil.rmtree(self.d, ignore_errors=True)
+        self.dir = os.path.join(self.d, 'Desktop')
+        for sub in ('Desktop', 'cfg', 'data'):
+            os.makedirs(os.path.join(self.d, sub))
+        for f in folders:
+            os.mkdir(os.path.join(self.dir, f))
+        for f in files:
+            with open(os.path.join(self.dir, f), 'w') as fh:
+                fh.write('hello\n')
+        self.dump = os.path.join(self.d, 'dump.txt')
+        env = {'MELLAGUI_DESKTOP_PRELOAD': '1', 'MELLAGUI_DESKTOP_DIR': self.dir, 'MELLAGUI_DESKTOP_DUMP': self.dump,
+               'XDG_CONFIG_HOME': os.path.join(self.d, 'cfg'), 'XDG_DATA_HOME': os.path.join(self.d, 'data')}
+        self.name = 'mellagui-desk-' + tag
+        p, c, stop = self.private_compositor(self.name, '--size', '1024x600', env=env)
+        self.c = c
+        self.state()
+        return c
+
+    def read(self):
+        end = time.time() + 6
+        while time.time() < end:
+            try:
+                with open(self.dump) as f:
+                    lines = f.read().splitlines()
+                if lines and lines[0].startswith('state '):
+                    return lines
+            except OSError:
+                pass
+            time.sleep(0.05)
+        self.fail('the desktop wrote no state')
+
+    def state(self, want=None, wait=4.0):
+        """The dump as (state dict, {name: item dict}); `want(state, items)` waits until it holds."""
+        end = time.time() + wait
+        while True:
+            lines = self.read()
+            st = dict(x.split('=', 1) for x in lines[0].split()[1:] if '=' in x)
+            items = {}
+            for ln in lines[1:]:
+                if ln.startswith('item '):
+                    f = ln.split()
+                    items[f[2]] = dict(x.split('=', 1) for x in f[3:] if '=' in x)
+            if want is None or want(st, items) or time.time() > end:
+                return st, items
+            time.sleep(0.05)
+
+    def centre(self, name):
+        it = self.state()[1][name]
+        return int(it['x']) + 48, int(it['y']) + 32 + 30                  # the window lies under the 32 px panel
+
+    def test_the_icons_show_and_can_be_chosen_and_carried(self):
+        c = self.start('icons')
+        st, items = self.state(lambda s, i: len(i) == 4)
+        self.assertEqual(sorted(items), ['Projects', 'b.txt', 'c.txt', 'notes.txt'])
+        self.assertEqual(items['Projects']['kind'], '0')                   # a folder, first in the first cell
+        self.assertEqual((items['Projects']['cx'], items['Projects']['cy']), ('0', '0'))
+        c.cmd('desktop')
+        self.assertEqual(c.last, 'ok 0 32 1024 568')                       # under the panel, the whole output
+        self.assertEqual(c.windows()['windows'], [])                       # the desktop is no window of the lists
+        x, y = self.centre('notes.txt')
+        c.click(x, y)
+        self.state(lambda s, i: i['notes.txt']['sel'] == '1')
+        c.abs(900, 500)                                                    # a frame over every icon
+        c.button(BTN_LEFT, True)
+        c.abs(700, 300)
+        c.abs(5, 40)
+        c.button(BTN_LEFT, False)
+        st, items = self.state(lambda s, i: all(v['sel'] == '1' for v in i.values()))
+        self.assertTrue(all(v['sel'] == '1' for v in items.values()), 'the frame chose all')
+        c.click(800, 520)                                                  # empty space lets go
+        st, items = self.state(lambda s, i: all(v['sel'] == '0' for v in i.values()))
+        self.assertTrue(all(v['sel'] == '0' for v in items.values()))
+        x, y = self.centre('b.txt')                                        # carry b.txt to column 3, row 1
+        c.abs(x, y)
+        c.button(BTN_LEFT, True)
+        c.abs(x + 40, y + 5)
+        c.abs(14 + 96 * 3 + 40, 32 + 14 + 100 + 40)
+        c.button(BTN_LEFT, False)
+        st, items = self.state(lambda s, i: i['b.txt']['cx'] == '3')
+        self.assertEqual((items['b.txt']['cx'], items['b.txt']['cy']), ('3', '1'))
+        with open(os.path.join(self.d, 'cfg', 'mellagui', 'desktop.conf')) as f:
+            self.assertIn('b.txt\t3 1', f.read())                          # where it lies is kept
+
+    def test_keys_rename_and_the_trash_and_a_folder_takes_files(self):
+        c = self.start('keys')
+        self.state(lambda s, i: len(i) == 4)
+        x, y = self.centre('c.txt')                                        # carried onto the folder: goes into it
+        px, py = self.centre('Projects')
+        c.abs(x, y)
+        c.button(BTN_LEFT, True)
+        c.abs(x + 20, y)
+        c.abs(px, py)
+        c.button(BTN_LEFT, False)
+        end = time.time() + 4
+        while time.time() < end and not os.path.exists(os.path.join(self.dir, 'Projects', 'c.txt')):
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, 'Projects', 'c.txt')))
+        self.state(lambda s, i: 'c.txt' not in i)
+        x, y = self.centre('notes.txt')                                    # F2 renames
+        c.click(x, y)
+        c.tap(self.KEY_F2)
+        st, items = self.state(lambda s, i: s['prompt'] == '1')
+        self.assertEqual(st['prompt'], '1')
+        self.assertEqual(st['field'], 'notes.txt')
+        c.tap(self.KEY_BS)                                                 # (the name is all selected)
+        c.tap(KEY_1)
+        c.tap(KEY_2)
+        c.tap(KEY_ENTER)
+        st, items = self.state(lambda s, i: '12' in i)
+        self.assertIn('12', items)
+        self.assertNotIn('notes.txt', items)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, '12')))
+        x, y = self.centre('12')                                           # Delete: into the trash, with the info to put it back
+        c.click(x, y)
+        c.tap(self.KEY_DEL)
+        st, items = self.state(lambda s, i: '12' not in i)
+        self.assertNotIn('12', items)
+        trash = os.path.join(self.d, 'data', 'Trash')
+        self.assertTrue(os.path.exists(os.path.join(trash, 'files', '12')))
+        with open(os.path.join(trash, 'info', '12.trashinfo')) as f:
+            self.assertIn('Path=' + os.path.join(self.dir, '12'), f.read())
+        with open(os.path.join(self.dir, 'late.txt'), 'w') as f:           # a file that comes shows up by itself
+            f.write('x')
+        st, items = self.state(lambda s, i: 'late.txt' in i, wait=4.0)
+        self.assertIn('late.txt', items)
+
+    def test_files_dragged_from_another_program_are_copied_to_the_desktop(self):
+        c = self.start('drop', files=('here.txt',), folders=())
+        self.state(lambda s, i: len(i) == 1)
+        src_dir = os.path.join(self.d, 'elsewhere')
+        os.makedirs(src_dir)
+        outside = os.path.join(src_dir, 'from away.txt')                   # a name with a blank: the uri is percent-encoded
+        with open(outside, 'w') as f:
+            f.write('copied\n')
+        uri = ('file://' + outside.replace(' ', '%20') + '\r\n').encode()
+        a = Client(self.name)
+        self.clients.append(a)
+        seat = a.wl.bind('wl_seat', 5)
+        ptr = a.wl.new_id('wl_pointer')
+        a.wl.request(seat, 'get_pointer', ptr)
+        mgr = a.wl.bind('wl_data_device_manager', 3)
+        dev = a.wl.new_id('wl_data_device')
+        a.wl.request(mgr, 'get_data_device', dev, seat)
+        win = Window(a, 200, 150, title='A')
+        a.wl.roundtrip()
+        r = [w for w in c.windows()['windows'] if w['title'] == 'A'][0]
+        c.abs(r['x'] + 6, r['y'] + 6)
+        c.sync()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'enter', 2.0))
+        c.button(BTN_LEFT, True)
+        press = a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'button' and e.args[3] == 1, 2.0)
+        self.assertIsNotNone(press)
+        src = a.wl.new_id('wl_data_source')
+        a.wl.request(mgr, 'create_data_source', src)
+        a.wl.request(src, 'offer', 'text/uri-list')
+        a.wl.request(src, 'set_actions', 1)
+        a.wl.request(dev, 'start_drag', src, win.surface, 0, press.args[0])
+        a.wl.roundtrip()
+        c.abs(850, 480)                                                    # empty desktop
+        c.sync()
+        c.button(BTN_LEFT, False)
+        send = a.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 3.0)
+        self.assertIsNotNone(send, 'the desktop did not ask for the files')
+        os.write(send.fds[0], uri)
+        os.close(send.fds[0])
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'dnd_finished', 3.0))
+        end = time.time() + 4
+        copy = os.path.join(self.dir, 'from away.txt')
+        while time.time() < end and not os.path.exists(copy):
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(copy), 'the file was not copied')
+        self.assertTrue(os.path.exists(outside), 'the original is still there')
+        st, items = self.state(lambda s, i: 'from_away.txt' in i)
+        self.assertIn('from_away.txt', items)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

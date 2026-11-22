@@ -29053,6 +29053,37 @@ class TestSmart(Base):
         self.assertEqual([t for t in order if not t.startswith('#') and t not in ('mellagui-smart:',)][-4:], ['blind1', 'robot1', 'plug1', 'plug2'])
         self.assertNotIn('/commands', self.log())
 
+    def test_cards_slide_to_their_new_places(self):
+        self.cloud('slide')
+        self.env['MELLAGUI_SMART_ANIM_MS'] = '4000'
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        c = self.window('slide')
+        self.wait(self.devices_shown, 'the devices')
+        c.key(125, True)
+        c.tap(103)
+        c.key(125, False)
+        self.wait(lambda: len({x for _, x, _, _, _ in self.cards()}) == 2, 'two columns')
+        time.sleep(0.2)
+        self.wait(lambda: len({x for _, x, _, _, _ in self.cards()}) == 2 and not self.sliding(), 'the cards rest', timeout=15)
+        win = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'][0]
+        self.x0, self.y0 = win['x'], win['y']
+        before = {i: (x, y) for i, x, y, _, _ in self.cards()}
+        c.abs(self.x0 + before['plug1'][0] + 100, self.y0 + before['plug1'][1] + 6)
+        c.button(272, True)
+        c.abs(self.x0 + before['plug1'][0] + 160, self.y0 + before['plug1'][1] + 60)
+        time.sleep(0.1)
+        c.abs(self.x0 + before['robot1'][0] + 100, self.y0 + before['robot1'][1] + 6)
+        self.wait(lambda: {i: (x, y) for i, x, y, _, _ in self.cards()}['blind1'] != before['blind1'], 'blind1 starts to move')
+        mid = {i: (x, y) for i, x, y, _, _ in self.cards()}['blind1']
+        self.assertNotEqual(mid, before['plug1'])                               # on its way, not there yet
+        self.wait(lambda: {i: (x, y) for i, x, y, _, _ in self.cards()}['blind1'] == before['plug1'], 'blind1 arrives', timeout=15)
+        c.button(272, False)
+
+    def sliding(self):
+        a = self.cards()
+        time.sleep(0.15)
+        return a != self.cards()
+
     def test_the_order_of_the_cards_is_kept_for_the_next_start(self):
         self.cloud('order')
         os.makedirs(os.path.join(self.dir, 'cfg', 'mellagui'), exist_ok=True)

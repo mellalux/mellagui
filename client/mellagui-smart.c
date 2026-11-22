@@ -161,6 +161,14 @@ struct app {
     bool cmoved;
     double cdx, cdy;                    /* where it was taken */
     int cdrop;                          /* while one is carried: the place in the list it would take (the others make room for it), -1 = none */
+    /* cards that change their place slide there: what is shown, where it started, where it goes (content coordinates: scrolling is no move) */
+    struct canim {
+        char id[40];
+        double fx, fy, tx, ty;
+        uint64_t t0;
+    } canim[TUYA_MAX_DEV];
+    int ncanim;
+    bool animating;                     /* a card is still sliding: the loop wakes up every frame */
     double crx, cry;                    /* where the pointer was when the places last changed (the next change waits for 10 px) */
     struct tuya_scene scene[TUYA_MAX_SCENE];    /* the app's scenes: a row of buttons above the cards */
     struct box scene_box[TUYA_MAX_SCENE];
@@ -1309,6 +1317,84 @@ static void card_order(const struct app *a, int *perm)
     card_order_n(a->ndev, a->cmoved ? a->cdrag : -1, a->cdrop, perm);
 }
 
+static double ease_out(double t)
+{
+    t = LM_CLAMP(t, 0.0, 1.0);
+    return 1 - (1 - t) * (1 - t) * (1 - t);
+}
+
+/* A card whose place changed (another order, another column count) slides from where it was shown to the new place over a part of
+ * [windows] animation-ms. `a->card[i]` and the controls of the card were laid out at their final places; this moves them by what is left of the slide. */
+static void card_slide(struct app *a, int first_ctl)
+{
+    uint64_t now = mono_ms();
+    static int env_ms = -2;                                     /* $MELLAGUI_SMART_ANIM_MS: the slide's time for the tests */
+    if (env_ms == -2) {
+        const char *e = getenv("MELLAGUI_SMART_ANIM_MS");
+        env_ms = e ? atoi(e) : -1;
+    }
+    double dur = env_ms >= 0 ? env_ms : lm_metrics.animation_ms * 0.7;
+    a->animating = false;
+    for (int i = 0; i < a->ndev; i++) {
+        double tx = a->card[i].x, ty = a->card[i].y + a->scroll;
+        struct canim *m = NULL;
+        for (int k = 0; k < a->ncanim; k++)
+            if (!strcmp(a->canim[k].id, a->dev[i].id))
+                m = &a->canim[k];
+        if (!m) {
+            if (a->ncanim >= TUYA_MAX_DEV)
+                continue;
+            m = &a->canim[a->ncanim++];
+            snprintf(m->id, sizeof(m->id), "%s", a->dev[i].id);
+            m->fx = m->tx = tx;
+            m->fy = m->ty = ty;
+            m->t0 = 0;
+        }
+        double cx = m->tx, cy = m->ty;                          /* what is shown now */
+        if (m->t0) {
+            double e = ease_out((double)(now - m->t0) / (dur > 1 ? dur : 1));
+            cx = m->fx + (m->tx - m->fx) * e;
+            cy = m->fy + (m->ty - m->fy) * e;
+        }
+        if (fabs(tx - m->tx) > 0.5 || fabs(ty - m->ty) > 0.5) {   /* a new goal: start from where it is shown */
+            m->fx = cx;
+            m->fy = cy;
+            m->tx = tx;
+            m->ty = ty;
+            m->t0 = dur >= 1 ? now : 0;
+            if (dur < 1) {
+                m->fx = tx;
+                m->fy = ty;
+            }
+            cx = m->fx;
+            cy = m->fy;
+        }
+        if (m->t0 && now - m->t0 >= dur)
+            m->t0 = 0;
+        if (m->t0) {
+            double e = ease_out((double)(now - m->t0) / dur);
+            cx = m->fx + (m->tx - m->fx) * e;
+            cy = m->fy + (m->ty - m->fy) * e;
+            a->animating = true;
+        } else {
+            cx = tx;
+            cy = ty;
+        }
+        int dx = (int)lround(cx - tx), dy = (int)lround(cy - ty);
+        if (!dx && !dy)
+            continue;
+        a->card[i].x += dx;
+        a->card[i].y += dy;
+        for (int k = 0; k < first_ctl; k++)
+            if (a->ctl[k].dev == i) {
+                a->ctl[k].b.x += dx;
+                a->ctl[k].b.y += dy;
+            }
+    }
+    if (a->animating)
+        a->win.redraw = true;
+}
+
 /* Places every card and its controls for the window's width and the scroll position, and the open device view over them (paint and the pointer both
  * go by it). */
 static void build_layout(struct app *a)
@@ -1350,6 +1436,7 @@ static void build_layout(struct app *a)
     }
     for (int c = 0; c < cols; c++)
         y = LM_MAX(y, ybot[c]);
+    card_slide(a, a->nctl);
     a->content_h = y + a->scroll - HEAD_H;
     struct tuya_dev *d = a->modal_dev[0] ? find_dev(a, a->modal_dev) : NULL;
     if (!d) {
@@ -3157,7 +3244,7 @@ int main(int argc, char **argv)
     }
     while (a.win.running) {
         tick(&a);
-        if (!wlwin_step(&a.win, 100))
+        if (!wlwin_step(&a.win, a.animating ? 16 : 100))
             break;
     }
     wlwin_destroy(&a.win);

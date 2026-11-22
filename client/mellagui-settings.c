@@ -755,6 +755,8 @@ static void build_desktop(struct app *a, int x, int y, int w)
     const char *st = kv_get(a, "wallpaper-status");
     if (*st)
         add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, !strcmp(st, "ok") ? "Wallpaper loaded." : st);
+    y += ROW_H + 4;                                     /* (below the wallpaper, so the rows above keep their places) */
+    add_check(a, x, y, w, "Icons of the files in ~/Desktop", "desktop-icons", kv_int(a, "desktop-icons", 1) != 0);
 }
 
 static struct widget *add_radio(struct app *a, int x, int y, int w, const char *text, const char *key, const char *arg, bool on)

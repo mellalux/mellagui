@@ -176,8 +176,8 @@ static bool desk_alive(struct lm_wm *wm, int i)
     return true;
 }
 
-/* The first output's desktop is started by main.c; here the others: `mellagui-desktop --output N` for the N-th output from the left, ended again when
- * the output goes (a monitor that comes back gets a new one). */
+/* One `mellagui-desktop` for the first output and `mellagui-desktop --output N` for the N-th output from the left, ended again when the output goes (a monitor
+ * that comes back gets a new one) or the setting desktop-icons is switched off. */
 void lm_wm_desktops_sync(struct lm_wm *wm)
 {
     if (!wm)
@@ -185,19 +185,22 @@ void lm_wm_desktops_sync(struct lm_wm *wm)
     struct lm_server *srv = wm->srv;
     const char *cmd = srv->config.desktop_cmd;
     wm->desk_started = true;
-    bool off = !cmd || !*cmd || !strcmp(cmd, "none") || srv->config.kiosk ||
+    bool off = !cmd || !*cmd || !strcmp(cmd, "none") || srv->config.kiosk || !srv->config.desktop_icons ||
                (!strcmp(srv->config.backend, "headless") && !getenv("MELLAGUI_DESKTOP_PRELOAD"));
     int n = output_count(wm);
-    for (int i = 1; i < 8; i++) {
-        bool want = !off && i < n;
+    for (int i = 0; i < 8; i++) {
+        bool want = !off && i < LM_MAX(n, 1);
         if (want && !desk_alive(wm, i)) {
             char full[1100];
-            snprintf(full, sizeof(full), "%s --output %d", cmd, i);
+            if (i == 0)
+                snprintf(full, sizeof(full), "%s", cmd);
+            else
+                snprintf(full, sizeof(full), "%s --output %d", cmd, i);
             wm->desk_pid[i] = lm_server_spawn(srv, full);
             if (wm->desk_pid[i] < 0)
                 wm->desk_pid[i] = 0;
         } else if (!want && desk_alive(wm, i)) {
-            kill(wm->desk_pid[i], SIGTERM);
+            kill(-wm->desk_pid[i], SIGTERM);                    /* (the whole process group: the shell and the program) */
             wm->desk_pid[i] = 0;
         }
     }

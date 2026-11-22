@@ -852,8 +852,8 @@ void lm_wm_clock_changed(struct lm_wm *wm);
 void lm_wm_calendar_start(struct lm_wm *wm);
 /* The window of the desktop icons (mellagui-desktop): its rectangle, false while it has none. */
 bool lm_wm_desktop_rect(struct lm_wm *wm, struct lm_rect *r);
-/* Starts the desktop program of every output but the first and ends the ones whose output went away (main.c calls it once the compositor listens; the
- * output callbacks call it after that). */
+/* Starts the desktop program of every output and ends the ones whose output went away or when the setting desktop-icons is off (main.c calls it once the
+ * compositor listens; the output callbacks and the setting call it after that). */
 void lm_wm_desktops_sync(struct lm_wm *wm);
 /* Quick settings (client/mellagui-quick.c, app id "mellagui.quick"): a program like the calendar - a hidden window that is shown right-aligned under the panel's
  * quick settings button (`anchor`, NULL = the primary output's button) and hides when it loses the focus. Started by the first call. False when there is no command. */

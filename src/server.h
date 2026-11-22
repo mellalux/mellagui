@@ -179,6 +179,7 @@ struct lm_config {
     bool cal_enabled;           /* a click on the clock shows the calendar (settings: cal-enabled; default true) */
     int cal_week_start;         /* the calendar's first weekday: 1 Monday (default), 0 Sunday (settings: cal-week-start mon|sun) */
     bool cal_weeknum;           /* ... with ISO week numbers (settings: cal-weeks; default false) */
+    bool desktop_icons;         /* the icons of ~/Desktop are shown (settings: desktop-icons; default true); off ends the desktop programs */
     bool osk_avoid;             /* windows keep out of the on-screen keyboard's way (settings: osk-avoid; default true) */
     bool lock_wallpaper;        /* the lock screen shows the wallpaper, blurred and dimmed, behind the clock (settings: lock-wallpaper; default true; plain dark without a wallpaper) */
     int layout_label;           /* next to each flag in the panel: 0 nothing, 1 the short code (US), 2 the language (settings: layout-label none|code|name) */
@@ -262,6 +263,7 @@ static inline void lm_config_defaults(struct lm_config *c)
         .night_from = "21:00",
         .night_to = "06:30",
         .osk_avoid = true,
+        .desktop_icons = true,
         .lock_wallpaper = true,
         .clock = { .show_date = true },
         .cal_enabled = true,

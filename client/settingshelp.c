@@ -74,6 +74,10 @@ static const struct entry table[] = {
       "A card with the master volume and mute, the list of outputs and one slider for every program that is playing. Super+V shows or hides it." },
     { "sysinfo", NULL, "System monitor gadget",
       "A card with the CPU load (and its history), memory, swap, temperature and the name of the machine and system. Super+S shows or hides it." },
+    { "desktop-icons", NULL, "Desktop icons",
+      "Shows the files and folders of your Desktop folder (~/Desktop) as icons on the desktop, under all windows. Double-click opens one, a right click gives a menu, "
+      "you can drag the icons about, drop them on a folder, drag them into other programs, and drop files from the file manager on the desktop to copy them there. "
+      "Switching it off ends the desktop program (the files stay in the folder); the size of the icons is on the Themes page, in Sizes (desktop.icon-size)." },
     { "smart", NULL, "Smart home gadget",
       "A card with the smart home devices you pinned: a switch for a plug or a light, open / stop / close for a blind. Pin a device in the Smart home program: "
       "open its view and press \"Show it on the desktop\". Super+H shows or hides the card. The card asks the Smart home program for the state every "

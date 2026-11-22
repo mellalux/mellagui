@@ -8403,11 +8403,11 @@ esac
         self.assertEqual(settings()['sound'], '0')
         # keyboard only: the focus sits on the sound box (last clicked); Tab runs on through the mixer and system monitor boxes,
         # the wallpaper field, its four radio buttons and its three buttons (and the "?" circles on the way), wraps over the twelve page tabs (the headings are skipped)
-        # and reaches the gadget checkbox with the 33rd press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
+        # and reaches the gadget checkbox with the 35th press (the small "?" circles are stops of their own, right after what they explain); Space toggles it
         ctl.cmd('settings gadget 1')                            # (a fresh compositor starts with the card off, a later test finds it on: start from on)
         time.sleep(0.2)
         ctl.abs(x0 + 400, y0 + 300)
-        for _ in range(33):                                     # (the Smart home box and its "?" are two more stops)
+        for _ in range(35):                                     # (the Smart home box and the desktop icons box, each with its "?", are four more stops)
             ctl.tap(KEY_TAB)
         ctl.tap(KEY_SPACE)
         time.sleep(0.15)
@@ -8633,6 +8633,22 @@ esac
         ctl.tap(KEY_ESC)
         time.sleep(0.2)
         ctl.tap(KEY_ESC)
+
+    def test_panel_desktop_page_has_a_switch_for_the_desktop_icons(self):
+        self.addCleanup(lambda: ctl.cmd('settings desktop-icons 1'))
+        ctl.cmd('settings desktop-icons 1')
+        p, win = self.open_panel()
+        x0, y0 = win['x'], win['y']
+        ctl.click(x0 + 70, y0 + 12 + 2 * 32 + 14)                   # "Desktop" tab
+        time.sleep(0.2)
+        ctl.dump(os.path.join(tmp, 'desktop-page.ppm'))
+        self.assertEqual(settings()['desktop-icons'], '1')
+        ctl.click(x0 + 168, y0 + 379)                               # the last row of the page, under the wallpaper buttons
+        time.sleep(0.3)
+        self.assertEqual(settings()['desktop-icons'], '0')
+        ctl.click(x0 + 168, y0 + 379)
+        time.sleep(0.3)
+        self.assertEqual(settings()['desktop-icons'], '1')
 
     def test_panel_wallpaper_page_field_radios_and_buttons(self):
         self.addCleanup(lambda: (ctl.cmd('settings wallpaper ""'), ctl.cmd('settings wallpaper-mode fill')))
@@ -30424,7 +30440,7 @@ class TestDesktop(Base):
     """The icons of the desktop (mellagui-desktop): the folder ~/Desktop as a grid under every window."""
     KEY_F2, KEY_DEL, KEY_BS = 60, 111, 14
 
-    def start(self, tag, files=('notes.txt', 'b.txt', 'c.txt'), folders=('Projects',), places=None, conf=None, outputs=()):
+    def start(self, tag, files=('notes.txt', 'b.txt', 'c.txt'), folders=('Projects',), places=None, conf=None, outputs=(), args=()):
         self.d = os.path.join(tmp, 'desktop-' + tag)
         shutil.rmtree(self.d, ignore_errors=True)
         self.dir = os.path.join(self.d, 'Desktop')
@@ -30444,7 +30460,7 @@ class TestDesktop(Base):
         env = {'MELLAGUI_DESKTOP_PRELOAD': '1', 'MELLAGUI_DESKTOP_DIR': self.dir, 'MELLAGUI_DESKTOP_DUMP': self.dump,
                'XDG_CONFIG_HOME': os.path.join(self.d, 'cfg'), 'XDG_DATA_HOME': os.path.join(self.d, 'data')}
         self.name = 'mellagui-desk-' + tag
-        args = (['--config', conf] if conf else []) + [x for o in outputs for x in ('--output', o)]
+        args = (['--config', conf] if conf else []) + [x for o in outputs for x in ('--output', o)] + list(args)
         p, c, stop = self.private_compositor(self.name, '--size', '1024x600', *args, env=env)
         self.c = c
         self.state()
@@ -30678,6 +30694,40 @@ class TestDesktop(Base):
         c.cmd('reload')
         c.cmd('setting metrics')                                           # the compositor lists it for the panel's Sizes page
         self.assertIn('desktop.icon-size=100:32:128:48', c.last)
+
+    def test_a_setting_switches_the_icons_on_and_off(self):
+        saved = os.path.join(tmp, 'desktop-toggle-settings.conf')
+        if os.path.exists(saved):
+            os.unlink(saved)
+        c = self.start('toggle', files=('a.txt',), folders=(), args=('--settings', saved))
+        c.cmd('setting desktop-icons')
+        self.assertTrue(c.last.endswith('1'), 'on by default: ' + c.last)
+        c.cmd('desktop')
+        self.assertEqual(c.last, 'ok 0 32 1024 568')
+        c.cmd('settings desktop-icons 0')
+        end = time.time() + 5
+        while time.time() < end:
+            c.cmd('desktop')
+            if c.last == 'ok none':
+                break
+            time.sleep(0.05)
+        self.assertEqual(c.last, 'ok none', 'the desktop program ended and its window went')
+        end = time.time() + 5
+        while time.time() < end and not (os.path.exists(saved) and 'desktop-icons' in open(saved).read()):
+            time.sleep(0.1)                                                 # (the file is written a moment after the change)
+        with open(saved) as f:
+            self.assertIn('desktop-icons', f.read())                        # kept for the next start
+        os.unlink(os.path.join(self.d, 'dump.txt'))
+        c.cmd('settings desktop-icons 1')
+        end = time.time() + 6
+        while time.time() < end:
+            c.cmd('desktop')
+            if c.last == 'ok 0 32 1024 568':
+                break
+            time.sleep(0.05)
+        self.assertEqual(c.last, 'ok 0 32 1024 568', 'the desktop came back')
+        st, items = self.state(lambda s, i: len(i) == 1)
+        self.assertIn('a.txt', items)
 
     def test_every_monitor_has_its_own_desktop_showing_the_same_folder(self):
         c = self.start('two', files=('a.txt', 'b.txt'), folders=(), outputs=('800x500',))

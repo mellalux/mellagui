@@ -264,7 +264,7 @@ struct lm_wm {
     uint64_t focus_counter;
     int cascade;
     pid_t cal_pid;                      /* the calendar program we started (0 = none) */
-    pid_t desk_pid[8];                  /* the desktop programs for the other outputs (index 1..7; 0 = none): wm_desktop.c */
+    pid_t desk_pid[8];                  /* the desktop programs, one for every output from the left (0 = none): wm_desktop.c */
     bool desk_started;                  /* the first desktops_sync ran (the compositor is listening) */
     bool cal_pending;                   /* a click started it: show it when its window appears */
     uint64_t cal_pending_ms;

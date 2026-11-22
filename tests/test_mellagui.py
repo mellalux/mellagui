@@ -29044,7 +29044,8 @@ class TestSmart(Base):
         c.abs(self.x0 + x + 160, self.y0 + y + 60)
         time.sleep(0.1)
         c.abs(self.x0 + tx, self.y0 + ty)
-        time.sleep(0.1)
+        pos0 = (cards[0][1], cards[0][2])
+        self.wait(lambda: {i: (cx, cy) for i, cx, cy, _, _ in self.cards()}['blind1'] == pos0, 'the others make room while it is carried')
         c.button(272, False)
         self.wait(lambda: [i for i, *_ in self.cards()] == ['blind1', 'robot1', 'plug1', 'plug2'], 'the card took the other\'s place')
         self.assertEqual(self.view()['modal'], '-')                             # carrying a card opens nothing

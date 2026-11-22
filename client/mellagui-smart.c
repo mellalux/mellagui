@@ -160,7 +160,8 @@ struct app {
     int cdrag;                          /* a card is held (its index), -1 = none; moved once the pointer went 6 px: `cmoved` */
     bool cmoved;
     double cdx, cdy;                    /* where it was taken */
-    int cdrop;                          /* the card the pointer is over while one is carried (-1 = none) */
+    int cdrop;                          /* while one is carried: the place in the list it would take (the others make room for it), -1 = none */
+    double crx, cry;                    /* where the pointer was when the places last changed (the next change waits for 10 px) */
     struct tuya_scene scene[TUYA_MAX_SCENE];    /* the app's scenes: a row of buttons above the cards */
     struct box scene_box[TUYA_MAX_SCENE];
     int nscene;
@@ -1284,6 +1285,30 @@ static int list_cols(int bw)
     return LM_CLAMP((bw - 2 * PAD + CARD_GAP) / (CARD_MIN_W + CARD_GAP), 1, MAX_COLS);
 }
 
+/* The order the cards are laid out in: the list's, and while one is carried the carried one at the place `cdrop` (the others make room). */
+static void card_order_n(int ndev, int drag, int drop, int *perm)
+{
+    int n = 0;
+    if (drag < 0 || drop < 0 || drag >= ndev) {
+        for (int i = 0; i < ndev; i++)
+            perm[i] = i;
+        return;
+    }
+    for (int i = 0; i < ndev; i++)
+        if (i != drag) {
+            if (n == drop)
+                perm[n++] = drag;
+            perm[n++] = i;
+        }
+    if (n < ndev)
+        perm[n++] = drag;
+}
+
+static void card_order(const struct app *a, int *perm)
+{
+    card_order_n(a->ndev, a->cmoved ? a->cdrag : -1, a->cdrop, perm);
+}
+
 /* Places every card and its controls for the window's width and the scroll position, and the open device view over them (paint and the pointer both
  * go by it). */
 static void build_layout(struct app *a)
@@ -1308,8 +1333,10 @@ static void build_layout(struct app *a)
     for (int c = 0; c < cols; c++)
         ybot[c] = y;
     a->cols = cols;
-    for (int i = 0; i < a->ndev; i++) {
-        int col = 0;
+    int perm[TUYA_MAX_DEV];
+    card_order(a, perm);
+    for (int pos = 0; pos < a->ndev; pos++) {
+        int i = perm[pos], col = 0;
         for (int c = 1; c < cols; c++)
             if (ybot[c] < ybot[col])
                 col = c;
@@ -1706,6 +1733,11 @@ static void paint_devices(struct app *a)
         struct box c = a->card[i];
         if (c.y + c.h < HEAD_H || c.y > w->bh - FOOT_H)
             continue;
+        if (i == a->cdrag && a->cmoved) {                       /* the carried card's place: an empty slot in the accent colour */
+            rbox(w, (struct box){ c.x - 1, c.y - 1, c.w + 2, c.h + 2 }, 9, lm_theme.accent);
+            rbox(w, (struct box){ c.x + 1, c.y + 1, c.w - 2, c.h - 2 }, 7, lm_theme.ink);
+            continue;
+        }
         rbox(w, (struct box){ c.x - 1, c.y - 1, c.w + 2, c.h + 2 }, 9, lm_theme.border);
         rbox(w, c, 8, lm_theme.card);
         wlwin_text(w, c.x + 12, c.y + 10, d->name, 1, d->online ? lm_theme.text : lm_theme.text_dim, c.w - 172);
@@ -1717,17 +1749,10 @@ static void paint_devices(struct app *a)
     }
     for (int i = 0; i < a->nctl; i++) {
         const struct ctl *c = &a->ctl[i];
-        if (!c->modal && c->b.y + c->b.h >= HEAD_H && c->b.y <= w->bh - FOOT_H)
+        if (!c->modal && c->b.y + c->b.h >= HEAD_H && c->b.y <= w->bh - FOOT_H && !(c->dev == a->cdrag && a->cmoved))
             paint_ctl(a, c, live);
     }
-    if (a->cdrag >= 0 && a->cmoved && a->cdrag < a->ndev) {     /* a card is carried: the one it would take the place of is framed, a ghost follows the pointer */
-        if (a->cdrop >= 0) {
-            struct box t = a->card[a->cdrop];
-            wlwin_fill(w, t.x - 2, t.y - 2, t.w + 4, 3, lm_theme.accent);
-            wlwin_fill(w, t.x - 2, t.y + t.h - 1, t.w + 4, 3, lm_theme.accent);
-            wlwin_fill(w, t.x - 2, t.y - 2, 3, t.h + 4, lm_theme.accent);
-            wlwin_fill(w, t.x + t.w - 1, t.y - 2, 3, t.h + 4, lm_theme.accent);
-        }
+    if (a->cdrag >= 0 && a->cmoved && a->cdrag < a->ndev) {     /* a card is carried: its slot is empty where it would go, a ghost follows the pointer */
         struct box src = a->card[a->cdrag], g = { (int)(a->px - (a->cdx - src.x)), (int)(a->py - (a->cdy - src.y)), src.w, 44 };
         rbox(w, (struct box){ g.x - 1, g.y - 1, g.w + 2, g.h + 2 }, 9, lm_theme.accent);
         rbox(w, g, 8, lm_theme.card);
@@ -2146,25 +2171,26 @@ static int card_under(const struct app *a)
     return -1;
 }
 
-/* The held card is let go: where the pointer is over another card, it takes that place and the cards between move one on. */
+/* The held card is let go: where the cards made room for it, it stays; the new order is saved. */
 static void card_release(struct app *a)
 {
-    int from = a->cdrag, to = a->cmoved ? card_under(a) : -1;
+    int from = a->cdrag, to = a->cdrop;
+    bool moved = a->cmoved;
     a->cdrag = a->cdrop = -1;
-    if (!a->cmoved) {
+    a->cmoved = false;
+    if (!moved) {
         if (from >= 0 && from < a->ndev && in(a->px, a->py, a->card[from]))
             open_modal(a, &a->dev[from]);
         return;
     }
-    a->cmoved = false;
-    if (from < 0 || to < 0 || from == to)
+    if (from < 0 || from >= a->ndev || to < 0)
         return;
-    struct tuya_dev moved = a->dev[from];
-    if (from < to)
-        memmove(&a->dev[from], &a->dev[from + 1], (size_t)(to - from) * sizeof(*a->dev));
-    else
-        memmove(&a->dev[to + 1], &a->dev[to], (size_t)(from - to) * sizeof(*a->dev));
-    a->dev[to] = moved;
+    int perm[TUYA_MAX_DEV];
+    card_order_n(a->ndev, from, to, perm);
+    static struct tuya_dev tmp[TUYA_MAX_DEV];
+    for (int p = 0; p < a->ndev; p++)
+        tmp[p] = a->dev[perm[p]];
+    memcpy(a->dev, tmp, (size_t)a->ndev * sizeof(*a->dev));
     char ord[TUYA_MAX_DEV][FAV_ID_MAX];
     for (int i = 0; i < a->ndev; i++)
         snprintf(ord[i], FAV_ID_MAX, "%s", a->dev[i].id);
@@ -2188,9 +2214,24 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             return;
         }
         if (a->cdrag >= 0) {                                    /* a card in the hand: it has moved once the pointer went 6 px */
-            if (!a->cmoved && (fabs(a->px - a->cdx) > 6 || fabs(a->py - a->cdy) > 6))
+            if (!a->cmoved && (fabs(a->px - a->cdx) > 6 || fabs(a->py - a->cdy) > 6)) {
                 a->cmoved = true;
-            a->cdrop = a->cmoved ? card_under(a) : -1;
+                a->cdrop = a->cdrag;
+                a->crx = a->px;
+                a->cry = a->py;
+            }
+            int over = a->cmoved ? card_under(a) : -1;
+            if (over >= 0 && (fabs(a->px - a->crx) >= 10 || fabs(a->py - a->cry) >= 10)) {      /* over another card: the carried one's place moves there (a few pixels of rest between two changes) */
+                int perm[TUYA_MAX_DEV];
+                card_order(a, perm);
+                for (int p = 0; p < a->ndev; p++)
+                    if (perm[p] == over) {
+                        a->cdrop = p;
+                        a->crx = a->px;
+                        a->cry = a->py;
+                        break;
+                    }
+            }
             if (a->cmoved && a->py < HEAD_H + 24)               /* near an edge the list scrolls */
                 a->scroll -= 14;
             else if (a->cmoved && a->py > w->bh - FOOT_H - 24)

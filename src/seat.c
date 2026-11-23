@@ -371,6 +371,7 @@ static const struct lm_surface_role dnd_icon_role = {
 static void dnd_motion(struct lm_seat *seat, uint32_t time_ms, const struct lm_pick *pick);
 static void dnd_button(struct lm_seat *seat, uint32_t time_ms, uint32_t button, bool pressed);
 static void dnd_cancel(struct lm_seat *seat);
+static void dnd_update_action(struct lm_seat *seat);
 
 static void cursor_surface_destroyed(struct lm_listener *l, void *data)
 {
@@ -412,6 +413,8 @@ void lm_seat_get_cursor(const struct lm_seat *seat, struct lm_cursor *out)
         if (seat->dnd.icon && seat->dnd.icon->has_content) {
             out->shape = LM_CURSOR_SURFACE;
             out->surface = seat->dnd.icon;
+            out->hot_x = -seat->dnd.icon->attach_x;         /* the icon hangs by the offset of its attach (a negative one puts it up and left of the pointer) */
+            out->hot_y = -seat->dnd.icon->attach_y;
         }
         return;
     }
@@ -895,6 +898,8 @@ static void keyboard_set_state(struct lm_seat *seat, uint32_t dep, uint32_t lat,
     seat->mods_lock = lock;
     seat->group = group;
     keyboard_send_modifiers(seat);
+    if (seat->dnd.active)                               /* Ctrl pressed or let go during a drag: copy <-> the target's choice */
+        dnd_update_action(seat);
     if (seat->srv->wm)
         lm_wm_keyboard_state_changed(seat->srv->wm);
 }
@@ -1435,7 +1440,7 @@ static struct data_source *source_of(struct lm_resource *res)
     return res ? res->data : NULL;
 }
 
-/* The action a drop would do now: what the source allows and the target asked for (its preferred one when both allow it, else
+/* The action a drop would do now: what the source allows and the target asked for (Ctrl held = copy; else its preferred one when both allow it, else
  * copy, move, ask). Tells the target and the source when it changed. */
 static void dnd_update_action(struct lm_seat *seat)
 {
@@ -1446,7 +1451,10 @@ static void dnd_update_action(struct lm_seat *seat)
     uint32_t act = 0;
     if (o) {
         uint32_t avail = (s->dnd_actions_set ? s->dnd_actions : (uint32_t)LM_DND_ACTION_COPY) & o->actions;
-        if (o->preferred && (avail & o->preferred))
+        bool ctrl = ((seat->mods_dep | seat->mods_lat) & LM_MOD_CTRL) != 0;
+        if (ctrl && (avail & LM_DND_ACTION_COPY))               /* Ctrl held: a copy, whatever the target would rather do */
+            act = LM_DND_ACTION_COPY;
+        else if (o->preferred && (avail & o->preferred))
             act = o->preferred;
         else if (avail & LM_DND_ACTION_COPY)
             act = LM_DND_ACTION_COPY;

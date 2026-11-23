@@ -73,6 +73,7 @@ struct lm_surface {
     /* current (committed) state: READ-ONLY outside surface.c */
     struct lm_texture tex;          /* valid iff has_content */
     bool has_content;               /* last commit attached a non-NULL buffer */
+    int32_t attach_x, attach_y;     /* the sum of the x / y offsets of every committed wl_surface.attach: where the surface's origin lies from its anchor (a drag icon hangs by it) */
     /* the GL renderer's mirror of `tex` (render_gl.c owns these): the GL texture and what changed in `tex` since the last upload */
     unsigned gl_tex;
     int32_t gl_w, gl_h;

@@ -212,6 +212,12 @@ bool lm_wm_activate_surface(struct lm_wm *wm, struct lm_surface *s)
     lm_list_for_each(w, &wm->windows, link) {
         if (w->surface != root)
             continue;
+        if (win_is_desktop(w)) {                                /* the desktop: it only gets the keyboard (it stays at the bottom, on every workspace) */
+            if (!win_visible(wm, w))
+                return false;
+            set_focus(wm, w);
+            return true;
+        }
         if (win_is_aux(w))                                      /* a gadget, the calendar, quick settings ...: their own places */
             return false;
         lm_wm_focus_window(wm, w);

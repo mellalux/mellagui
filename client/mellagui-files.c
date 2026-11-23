@@ -277,6 +277,10 @@ struct app {
     char rep_where[PATH_MAX];           /* ... its destination ... */
     int rep_count;                      /* ... how many files exist there ... */
     char rep_first[NAME_MAX + 1];       /* ... and the first one's name */
+    bool rep_drop;                      /* ... it is a drop of files from another program (rep_paths into rep_target, the pane rep_pane), not a copy of the marked ones */
+    char **rep_paths;
+    int rep_npaths, rep_pane;
+    char rep_target[PATH_MAX];
     bool help;
     enum prompt prompt;
     int menu_kind;                      /* the right-click menu that is showing: 0 none / the prompt's field, 1 a file's, 2 an empty place's, 3 a Markdown page's */
@@ -287,6 +291,11 @@ struct app {
     struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu), and the drag of files out */
     bool drag_armed;                    /* a button went down on a file row: moving 6 pixels with it held starts a drag of the files ... */
     int drag_pane, drag_row, drag_x, drag_y;    /* ... of this pane's row, pressed at this place */
+    bool drag_live;                     /* our files are in a drag to another program: when it ends (they may have been MOVED there, by that program, a moment later) the folders are read again ... */
+    int64_t reread_at;                  /* ... at this time, and once more later (0 = none) */
+    int reread_n;
+    bool drop_on;                       /* files from another program (the desktop, a browser) are dragged over the window: the pane / folder row they would go to is lit */
+    int drop_pane, drop_row;            /* ... that pane, and the row of a folder in it (-1: the pane's own folder) */
     char msg[300];
     int64_t msg_until;
     int rows_visible;
@@ -3901,6 +3910,7 @@ static bool job_busy(struct app *a)
 /* Copy or move to `where` (a folder, or a new name when only one thing is moved or copied). A file that exists there is replaced only when the user
  * said so: the first pass (rep_mode REP_ASK) finds them and asks (P_REPLACE); the answer runs this again with REP_REPLACE or REP_SKIP.
  * Folders are never replaced or merged. */
+static void rep_drop_free(struct app *a);
 static void do_copy_move(struct app *a, const char *where, bool move)
 {
     char **names;
@@ -3973,6 +3983,7 @@ static void do_copy_move(struct app *a, const char *where, bool move)
     free_names(names, n);
     if (nrepl > 0) {                                                    /* some files are there already: ask before anything is done */
         job_free(j);
+        rep_drop_free(a);                                               /* (a drop that was cancelled with the card's button must not answer for this one) */
         a->rep_move = move;
         a->rep_count = nrepl;
         snprintf(a->rep_where, sizeof(a->rep_where), "%s", where);
@@ -3990,6 +4001,118 @@ static void do_copy_move(struct app *a, const char *where, bool move)
         return;
     }
     job_start(a, j);
+}
+
+static void rep_drop_free(struct app *a)
+{
+    for (int i = 0; i < a->rep_npaths; i++)
+        free(a->rep_paths[i]);
+    free(a->rep_paths);
+    a->rep_paths = NULL;
+    a->rep_npaths = 0;
+    a->rep_drop = false;
+}
+
+/* Files from another program (the desktop, a browser) are MOVED (or copied: `move` false, Ctrl held or a source that allows nothing else) into the folder `target` of pane `pane` as a job. Like do_copy_move it asks first when
+ * files exist there (rep_mode REP_ASK -> P_REPLACE with rep_drop set; Enter / S run this again with REP_REPLACE / REP_SKIP). Files already in that folder
+ * are left out, folders are never replaced. */
+static void do_drop(struct app *a, char **paths, int n, int pane, const char *target, bool move)
+{
+    struct job *j = job_new(move ? J_MOVE : J_COPY, n);
+    if (!j)
+        return;
+    j->pane = pane;
+    j->requested = n;
+    snprintf(j->target, sizeof(j->target), "%s", target);
+    int nrepl = 0;
+    char first_repl[NAME_MAX + 1] = "";
+    for (int i = 0; i < n; i++) {
+        struct job_item *it = &j->items[j->n];
+        const char *base = strrchr(paths[i], '/');
+        base = base ? base + 1 : paths[i];
+        char err[PATH_MAX + 120] = "";
+        if (!*base || paths[i][0] != '/')
+            snprintf(err, sizeof(err), "%s: not a file name", paths[i]);
+        else {
+            snprintf(it->src, sizeof(it->src), "%s", paths[i]);
+            join_path(target, base, it->dst, sizeof(it->dst));
+            if (!strcmp(it->src, it->dst))
+                snprintf(err, sizeof(err), "%s is there already", base);
+            else if (path_inside(it->dst, it->src))
+                snprintf(err, sizeof(err), "cannot put %s into itself", base);
+            else if (access(it->src, R_OK) != 0)
+                snprintf(err, sizeof(err), "%s cannot be read", base);
+            else if (exists_net_or_local(it->dst)) {
+                if (replaceable(it->src, it->dst)) {
+                    if (a->rep_mode == REP_REPLACE) {
+                        it->replace = true;
+                        j->n++;
+                        continue;
+                    }
+                    if (a->rep_mode == REP_ASK) {
+                        nrepl++;
+                        if (!first_repl[0])
+                            snprintf(first_repl, sizeof(first_repl), "%s", base);
+                    }
+                }
+                snprintf(err, sizeof(err), "%s already exists: not replaced", it->dst);
+            }
+        }
+        if (!err[0]) {
+            j->n++;
+            continue;
+        }
+        j->planned_skips++;
+        if (!j->first_skip[0])
+            snprintf(j->first_skip, sizeof(j->first_skip), "%s", err);
+    }
+    if (nrepl > 0) {                                                    /* some files are there already: ask before anything is done */
+        job_free(j);
+        rep_drop_free(a);
+        a->rep_paths = calloc((size_t)n, sizeof(*a->rep_paths));
+        if (!a->rep_paths)
+            return;
+        for (int i = 0; i < n; i++)
+            if ((a->rep_paths[a->rep_npaths] = strdup(paths[i])))
+                a->rep_npaths++;
+        a->rep_drop = true;
+        a->rep_move = move;
+        a->rep_pane = pane;
+        snprintf(a->rep_target, sizeof(a->rep_target), "%s", target);
+        a->rep_count = nrepl;
+        snprintf(a->rep_first, sizeof(a->rep_first), "%s", first_repl);
+        prompt_start(a, P_REPLACE, "");
+        wlwin_raise(&a->win);                                           /* (the files came from another window: the question needs the keyboard) */
+        return;
+    }
+    if (j->n == 0) {
+        char why[sizeof(j->first_skip)];
+        snprintf(why, sizeof(why), "%s", j->first_skip);
+        job_free(j);
+        msg(a, "%s 0 of %d: %s", move ? "Moved" : "Copied", n, why);
+        return;
+    }
+    job_start(a, j);
+}
+
+/* The answer of P_REPLACE: Enter (mode REP_REPLACE) or S (REP_SKIP) for the copy / move or the drop that was waiting. */
+static void replace_answer(struct app *a, int mode)
+{
+    a->rep_mode = mode;
+    if (a->rep_drop) {
+        char **paths = a->rep_paths;                                    /* (do_drop may ask again and make a new list: this one is ours now) */
+        int n = a->rep_npaths;
+        a->rep_paths = NULL;
+        a->rep_npaths = 0;
+        a->rep_drop = false;
+        do_drop(a, paths, n, a->rep_pane, a->rep_target, a->rep_move);
+        for (int i = 0; i < n; i++)
+            free(paths[i]);
+        free(paths);
+    } else {
+        do_copy_move(a, a->rep_where, a->rep_move);
+    }
+    a->rep_mode = REP_ASK;
 }
 
 /* Delete: into the trash, or for good when `hard` (or when the folder is the trash itself). */
@@ -4607,7 +4730,7 @@ static void prompt_accept(struct app *a)
     case P_DELETE: do_delete(a, false); return;
     case P_DELETE_HARD: do_delete(a, true); return;
     case P_EMPTY: do_empty_trash(a); return;
-    case P_REPLACE: a->rep_mode = REP_REPLACE; do_copy_move(a, a->rep_where, a->rep_move); a->rep_mode = REP_ASK; return;
+    case P_REPLACE: replace_answer(a, REP_REPLACE); return;
     case P_COPY: if (text[0]) do_copy_move(a, text, false); return;
     case P_MOVE: if (text[0]) do_copy_move(a, text, true); return;
     case P_MKDIR: if (text[0]) do_mkdir(a, text); return;
@@ -4806,11 +4929,11 @@ static void handle_key(struct app *a, uint32_t ks)
             if (a->prompt == P_NETPASS)
                 explicit_bzero(a->pbuf, sizeof(a->pbuf));
             a->prompt = P_NONE;
+            if (a->rep_drop)
+                rep_drop_free(a);
         } else if (a->prompt == P_REPLACE && (ks == 's' || ks == 'S')) {          /* S: copy / move only what does not exist yet */
             a->prompt = P_NONE;
-            a->rep_mode = REP_SKIP;
-            do_copy_move(a, a->rep_where, a->rep_move);
-            a->rep_mode = REP_ASK;
+            replace_answer(a, REP_SKIP);
         } else if (prompt_is_question(a->prompt)) {
             /* a question: only Enter and Esc answer it (and S the question of existing files) */
         } else if (ks == LM_KS_Tab) {                                   /* complete a name (not for the new folder / rename fields) */
@@ -5273,6 +5396,22 @@ static void paint_pane(struct wlwin *w, struct app *a, int idx)
         bool hot = p->sb_drag || (a->px >= right && a->px < x0 + pw && a->py >= ty && a->py < ty + th);
         wlwin_fill(w, right, list_y, sbw, w->bh - list_y - bottom_h(a), COL_BAR);
         wlwin_fill(w, right + 2, ty + 1, sbw - 4, th - 2, hot ? COL_BTN_ON : COL_BTN);
+    }
+    if (a->drop_on && a->drop_pane == idx) {                                  /* files are dragged over: the folder that would take them is framed */
+        uint32_t ac = lm_theme.accent;
+        int bt = TOOL_H, bh = w->bh - bottom_h(a) - bt;
+        if (a->drop_row >= 0 && a->drop_row >= p->top && a->drop_row - p->top < a->rows_visible) {
+            int y = list_y + (a->drop_row - p->top) * ROW_H;
+            wlwin_fill(w, x0, y, right - x0, 2, ac);
+            wlwin_fill(w, x0, y + ROW_H - 2, right - x0, 2, ac);
+            wlwin_fill(w, x0, y, 2, ROW_H, ac);
+            wlwin_fill(w, right - 2, y, 2, ROW_H, ac);
+        } else {
+            wlwin_fill(w, x0, bt, pw, 2, ac);
+            wlwin_fill(w, x0, bt + bh - 2, pw, 2, ac);
+            wlwin_fill(w, x0, bt, 2, bh, ac);
+            wlwin_fill(w, x0 + pw - 2, bt, 2, bh, ac);
+        }
     }
 }
 
@@ -6934,6 +7073,68 @@ static void start_file_drag(struct app *a)
     free(text);
 }
 
+/* Where files let go at (x, y) would land: the pane (the preview pane counts as the active one) and the row of a folder under the pointer, -1 for the pane's own
+ * folder. False when the pointer is not over a list (the tool bar, the bottom bars). */
+static bool drop_target(const struct app *a, double x, double y, int *pane, int *row)
+{
+    if (y < TOOL_H || y >= a->win.bh - bottom_h(a))
+        return false;
+    int idx = pane_at(a, (int)x);
+    if (pane_is_preview(a, idx))
+        idx = a->act;
+    *pane = idx;
+    *row = -1;
+    const struct pane *p = &a->pane[idx];
+    int px0, pw;
+    pane_rect(a, idx, &px0, &pw);
+    if (y >= list_top() && !(rows(p) > a->rows_visible && x >= px0 + pw - lm_metrics.scrollbar_width)) {
+        int r = p->top + ((int)y - list_top()) / ROW_H;
+        const struct entry *e = r < rows(p) && ((int)y - list_top()) / ROW_H < a->rows_visible ? row_entry(p, r) : NULL;
+        if (e && e->dir && !e->broken)
+            *row = r;
+    }
+    return true;
+}
+
+/* Something is dragged over the window (the desktop's icons, a browser's download): light the pane or folder that would take it. */
+static void drag_over_event(struct wlclip *c, bool inside, double x, double y, void *data)
+{
+    (void)c;
+    struct app *a = data;
+    bool on = inside && drop_target(a, x, y, &a->drop_pane, &a->drop_row);
+    if (on != a->drop_on || on)
+        a->win.redraw = true;
+    a->drop_on = on;
+}
+
+/* Files from another program were let go on the window: they are COPIED into the folder of the pane (or into the folder row under the pointer), as a
+ * job with the progress bar. What is there already is not replaced; the files that are in that folder already are left out. */
+static void drop_event(struct wlclip *c, char **paths, int n, double x, double y, void *data)
+{
+    struct app *a = data;
+    a->drop_on = false;
+    a->win.redraw = true;
+    int pane, row;
+    if (!drop_target(a, x, y, &pane, &row))
+        return;
+    if (a->prompt != P_NONE || a->help || a->job) {
+        msg(a, a->job ? "Busy: Esc cancels the running operation first" : "Finish the question first, then drop the files");
+        return;
+    }
+    struct pane *p = &a->pane[pane];
+    char target[PATH_MAX];
+    if (row >= 0)
+        join_path(p->cwd, row_entry(p, row)->name, target, sizeof(target));
+    else
+        snprintf(target, sizeof(target), "%s", p->cwd);
+    if (is_net(target) || in_trash(target)) {
+        msg(a, "Files cannot be dropped %s", is_net(target) ? "on a network place" : "into the trash");
+        return;
+    }
+    rep_drop_free(a);
+    do_drop(a, paths, n, pane, target, c->drop_action != LM_DND_ACTION_COPY);       /* (Ctrl held = the compositor says copy) */
+}
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -8014,6 +8215,8 @@ int main(int argc, char **argv)
     if (wlwin_open(&a.win, "Files", "mellagui.files", 880, 460, 640, 240) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
+    wlclip_accept_drops(&a.clip, drop_event, &a);
+    wlclip_drag_over(&a.clip, drag_over_event);
     char start[PATH_MAX], cwd[PATH_MAX];
     const char *home = getenv("HOME");
     char select_name[NAME_MAX + 1] = "";
@@ -8080,6 +8283,8 @@ int main(int argc, char **argv)
             timeout = LM_MIN(timeout, 80);
         if (a.vp.fd && (a.snd_playing || a.vp.wait_first))              /* a video plays: pictures every 33 ms */
             timeout = LM_MIN(timeout, 8);
+        if (a.reread_at)
+            timeout = (int)LM_CLAMP(a.reread_at - now_ms(), 1, timeout);
         if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
             int64_t wait = a.pv.due - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, timeout);
@@ -8101,6 +8306,19 @@ int main(int argc, char **argv)
             a.win.redraw = true;
         vp_tick(&a);
         snd_tick(&a);
+        {
+            bool live = wlclip_dragging(&a.clip);
+            if (a.drag_live && !live) {                                 /* the drag is over: the program that took the files may move them in a moment */
+                a.reread_at = now_ms() + 400;
+                a.reread_n = 0;
+            }
+            a.drag_live = live;
+            if (a.reread_at && now_ms() >= a.reread_at && !a.job) {
+                reread(&a);
+                a.win.redraw = true;
+                a.reread_at = ++a.reread_n < 3 ? now_ms() + 1200 : 0;
+            }
+        }
         if (a.job) {
             a.win.redraw = true;
             if (atomic_load(&a.job->finished))

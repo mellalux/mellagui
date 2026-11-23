@@ -62,6 +62,7 @@ struct frame_cb {
 struct sstate {
     struct lm_buffer *buffer;       /* referenced */
     bool buffer_set;                /* attach seen (buffer may still be NULL) */
+    int32_t dx, dy;                 /* the offsets of that attach (summed into lm_surface.attach_x / y when it is applied) */
     struct lm_region damage;        /* surface coordinates */
     struct lm_region damage_buf;    /* buffer coordinates */
     struct lm_region opaque;
@@ -242,8 +243,11 @@ static int state_merge(struct sstate *dst, struct sstate *src)
         lm_buffer_unref(dst->buffer);
         dst->buffer = src->buffer;
         dst->buffer_set = true;
+        dst->dx += src->dx;
+        dst->dy += src->dy;
         src->buffer = NULL;
         src->buffer_set = false;
+        src->dx = src->dy = 0;
     }
     if (region_merge(&dst->damage, &src->damage) < 0)
         rc = -1;
@@ -840,6 +844,9 @@ static void apply_state(struct lm_surface *s)
         b = st->buffer;
         st->buffer = NULL;
         st->buffer_set = false;
+        s->attach_x += st->dx;
+        s->attach_y += st->dy;
+        st->dx = st->dy = 0;
     }
     p->commit_has_buffer = b != NULL;
 
@@ -1030,7 +1037,9 @@ static void surface_req_attach(struct lm_resource *res, const union lm_arg *args
     struct lm_surface *s = res->data;
     struct surf *p = SURF(s);
     struct lm_buffer *b = args[0].r ? lm_buffer_from_resource(args[0].r) : NULL;
-    /* x/y offsets (deprecated since wl_surface v5) are accepted and ignored */
+    /* x/y offsets (deprecated since wl_surface v5): kept for the drag icon, which hangs by them; nothing else looks at them */
+    p->pending.dx = args[1].i;
+    p->pending.dy = args[2].i;
 
     if (b)
         lm_buffer_ref(b);

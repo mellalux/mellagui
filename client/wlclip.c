@@ -39,6 +39,8 @@ static void doffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm
     struct wlclip *a = data;
     if (op == LM_WL_DATA_OFFER_EVT_OFFER && id == a->offer_pending && a->n_pend_mimes < 16)
         snprintf(a->pend_mimes[a->n_pend_mimes++], sizeof(a->pend_mimes[0]), "%s", args[0].s);
+    else if (op == LM_WL_DATA_OFFER_EVT_ACTION && id == a->drop_offer)
+        a->drop_action = args[0].u;
 }
 
 static void offer_drop(struct wlc *c, uint32_t *id)
@@ -178,7 +180,8 @@ static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
                 a->offer_pending = 0;
                 a->drop_x = lm_fixed_to_double(args[2].f);
                 a->drop_y = lm_fixed_to_double(args[3].f);
-                WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_SET_ACTIONS, { .u = 3 }, { .u = 1 });
+                a->drop_action = 0;
+                WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_SET_ACTIONS, { .u = LM_DND_ACTION_COPY | LM_DND_ACTION_MOVE }, { .u = LM_DND_ACTION_MOVE });
                 WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_ACCEPT, { .u = args[0].u }, { .s = "text/uri-list" });
                 if (a->drag_over)
                     a->drag_over(a, true, a->drop_x, a->drop_y, a->drop_data);
@@ -375,6 +378,9 @@ static void drag_cleanup(struct wlclip *c)
         wlc_forget(wc, c->drag_pool);
         c->drag_pool = 0;
     }
+    free(c->drag_clean);
+    c->drag_clean = NULL;
+    c->drag_action = 0;
     if (c->drag_map) {
         munmap(c->drag_map, c->drag_map_size);
         c->drag_map = NULL;
@@ -398,6 +404,39 @@ static void write_all(int fd, const char *p, size_t left)
     }
 }
 
+/* The drag icon says what a drop would do: a green disc with a white "+" at its top right corner while it is a COPY (Ctrl held, or a target that only copies);
+ * a move (the usual) has nothing, and neither has a place where nothing can be dropped. The picture is redrawn in its shared memory and committed again. */
+static void drag_badge(struct wlclip *a, uint32_t action)
+{
+    if (!a->drag_map || !a->drag_clean || !a->drag_surf || action == a->drag_action)
+        return;
+    a->drag_action = action;
+    uint32_t *px = a->drag_map;
+    int iw = a->drag_iw, ih = a->drag_ih, k = a->drag_k;
+    memcpy(px, a->drag_clean, a->drag_map_size);
+    if (action == LM_DND_ACTION_COPY) {
+        int r = 8 * k, cx = iw - r - k, cy = r + k;
+        for (int y = LM_MAX(cy - r - 1, 0); y <= LM_MIN(cy + r + 1, ih - 1); y++)
+            for (int x = LM_MAX(cx - r - 1, 0); x <= LM_MIN(cx + r + 1, iw - 1); x++) {
+                double d = sqrt((double)((x - cx) * (x - cx) + (y - cy) * (y - cy)));
+                double cov = d <= r - 0.5 ? 1.0 : d >= r + 0.5 ? 0.0 : r + 0.5 - d;            /* (a soft edge) */
+                if (cov <= 0)
+                    continue;
+                int ax = abs(x - cx), ay = abs(y - cy);
+                bool plus = (ay <= k * 3 / 4 + 0 && ax <= r * 11 / 20) || (ax <= k * 3 / 4 + 0 && ay <= r * 11 / 20);
+                uint32_t col = plus ? 0xffffff : 0x2e9e4f;
+                uint32_t a8 = (uint32_t)(255 * cov);
+                uint32_t rr = ((col >> 16) & 255) * a8 / 255, gg = ((col >> 8) & 255) * a8 / 255, bb = (col & 255) * a8 / 255;
+                px[(size_t)y * (size_t)iw + (size_t)x] = (a8 << 24) | (rr << 16) | (gg << 8) | bb;
+            }
+    }
+    struct wlc *wc = a->win->c;
+    WLC_SEND(wc, a->drag_surf, LM_WL_SURFACE_REQ_ATTACH, { .o = a->drag_buf }, { .i = 0 }, { .i = 0 });      /* (no new offset: the icon stays where it hangs) */
+    WLC_SEND(wc, a->drag_surf, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = iw / k }, { .i = ih / k });
+    WLC_SEND0(wc, a->drag_surf, LM_WL_SURFACE_REQ_COMMIT);
+    wlc_flush(wc);
+}
+
 static void drag_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     (void)c;
@@ -409,13 +448,15 @@ static void drag_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
         if (body)
             write_all(args[1].h, body, strlen(body));
         close(args[1].h);                               /* (a handler owns the fds it is given: the reader sees the end of the data) */
+    } else if (op == LM_WL_DATA_SOURCE_EVT_ACTION) {
+        drag_badge(a, args[0].u);
     } else if (op == LM_WL_DATA_SOURCE_EVT_CANCELLED || op == LM_WL_DATA_SOURCE_EVT_DND_FINISHED) {
         drag_cleanup(a);
     }
 }
 
 /* A little icon for the drag: the label on a rounded blue chip (premultiplied ARGB; the corners are see-through). */
-static bool drag_icon(struct wlclip *c, const char *label)
+static bool drag_icon(struct wlclip *c, const char *label, const uint32_t *pic, int pw, int ph, int k)
 {
     struct wlwin *w = c->win;
     char text[64];
@@ -436,8 +477,13 @@ static bool drag_icon(struct wlclip *c, const char *label)
         snprintf(q, sizeof(text) - (size_t)(q - text), "...");
         cells = 28;
     }
-    int cw = LM_FONT_W, ch = LM_FONT_H;
-    int iw = cells * cw + 20, ih = ch + 14;
+    if (k < 1)
+        k = 1;
+    int cw = LM_FONT_W * k, ch = LM_FONT_H * k;                 /* (in buffer pixels: the surface gets buffer scale k) */
+    int chip_w = cells * cw + 20 * k, chip_h = ch + 14 * k;
+    int gap = pic ? 4 * k : 0;
+    int iw = LM_MAX(chip_w, pic ? pw : 0), ih = chip_h + (pic ? ph + gap : 0);
+    int chip_x = (iw - chip_w) / 2, chip_y = pic ? ph + gap : 0;
     size_t size = (size_t)iw * (size_t)ih * 4;
     int fd = memfd_create("mellagui-drag", MFD_CLOEXEC);
     if (fd < 0 || ftruncate(fd, (off_t)size) < 0) {
@@ -452,8 +498,18 @@ static bool drag_icon(struct wlclip *c, const char *label)
     }
     memset(px, 0, size);
     const uint32_t bg = 0x2f6fb5;
-    lm_round_fill_argb(px, iw, iw, ih, 0, 0, iw, ih, 8, bg);
-    int x = 10, len = (int)strlen(text);
+    if (pic) {                                                  /* the file's own icon (straight ARGB) above the name, made premultiplied for the surface */
+        int ox = (iw - pw) / 2;
+        for (int y = 0; y < ph; y++)
+            for (int x = 0; x < pw; x++) {
+                uint32_t v = pic[(size_t)y * (size_t)pw + (size_t)x];
+                uint32_t a8 = v >> 24;
+                uint32_t r = ((v >> 16) & 255) * a8 / 255, g = ((v >> 8) & 255) * a8 / 255, b = (v & 255) * a8 / 255;
+                px[(size_t)y * (size_t)iw + (size_t)(ox + x)] = (a8 << 24) | (r << 16) | (g << 8) | b;
+            }
+    }
+    lm_round_fill_argb(px + (size_t)chip_y * (size_t)iw + (size_t)chip_x, iw, chip_w, chip_h, 0, 0, chip_w, chip_h, 8 * k, bg);
+    int x = chip_x + 10 * k, len = (int)strlen(text);
     for (int i = 0; i < len;) {
         int used;
         uint32_t cp = lm_utf8_decode(text + i, len - i, &used);
@@ -464,13 +520,21 @@ static bool drag_icon(struct wlclip *c, const char *label)
                 for (int gx = 0; gx < cw; gx++) {
                     uint32_t cov = g[gy * cw + gx];
                     if (cov)
-                        px[(size_t)(7 + gy) * (size_t)iw + (size_t)(x + gx)] = lm_mix_rgb(bg, 0xffffff, cov / 255.0);
+                        px[(size_t)(chip_y + 7 * k + gy) * (size_t)iw + (size_t)(x + gx)] = lm_mix_rgb(bg, 0xffffff, cov / 255.0);
                 }
         x += cw;
     }
     struct wlc *wc = w->c;
     c->drag_map = px;
     c->drag_map_size = size;
+    c->drag_iw = iw;
+    c->drag_ih = ih;
+    c->drag_k = k;
+    c->drag_action = 0;
+    free(c->drag_clean);
+    c->drag_clean = malloc(size);                       /* (the badge is drawn over a copy: the action changes while the pointer moves over windows, Ctrl goes up and down) */
+    if (c->drag_clean)
+        memcpy(c->drag_clean, px, size);
     c->drag_pool = wlc_alloc(wc, &lm_wl_shm_pool_interface, NULL, NULL);
     WLC_SEND(wc, w->shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = c->drag_pool }, { .h = fd }, { .i = (int32_t)size });
     close(fd);
@@ -479,13 +543,17 @@ static bool drag_icon(struct wlclip *c, const char *label)
              { .i = iw * 4 }, { .u = LM_WL_SHM_FORMAT_ARGB8888 });
     c->drag_surf = wlc_alloc(wc, &lm_wl_surface_interface, NULL, NULL);
     WLC_SEND(wc, w->compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = c->drag_surf });
-    WLC_SEND(wc, c->drag_surf, LM_WL_SURFACE_REQ_ATTACH, { .o = c->drag_buf }, { .i = 0 }, { .i = 0 });
+    if (k > 1)
+        WLC_SEND(wc, c->drag_surf, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = k });
+    /* with the file's picture the icon is held by its middle (the offsets of the attach: the surface lies up and left of the pointer by half the icon),
+     * so what is under the pointer is what the icon is over; the name chip hangs below it */
+    WLC_SEND(wc, c->drag_surf, LM_WL_SURFACE_REQ_ATTACH, { .o = c->drag_buf }, { .i = pic ? -(iw / k) / 2 : 0 }, { .i = pic ? -(ph / k) / 2 : 0 });
     WLC_SEND(wc, c->drag_surf, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = iw }, { .i = ih });
     WLC_SEND0(wc, c->drag_surf, LM_WL_SURFACE_REQ_COMMIT);
     return true;
 }
 
-bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, const char *label)
+bool wlclip_drag_files_pic(struct wlclip *c, const char *uris, const char *text, const char *label, const uint32_t *pic, int pw, int ph, int scale)
 {
     if (!c->win || !c->ddm || !c->ddev || !uris || !*uris)
         return false;
@@ -498,15 +566,20 @@ bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, con
         drag_cleanup(c);
         return false;
     }
-    bool icon = drag_icon(c, label);
+    bool icon = drag_icon(c, label, pic && pw > 0 && ph > 0 ? pic : NULL, pw, ph, scale);
     c->drag_src = wlc_alloc(w->c, &lm_wl_data_source_interface, drag_event, c);
     WLC_SEND(w->c, c->ddm, LM_WL_DATA_DEVICE_MANAGER_REQ_CREATE_DATA_SOURCE, { .n = c->drag_src });
     WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/uri-list" });
     WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/plain;charset=utf-8" });
     WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/plain" });
-    WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_SET_ACTIONS, { .u = LM_DND_ACTION_COPY });
+    WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_SET_ACTIONS, { .u = LM_DND_ACTION_COPY | LM_DND_ACTION_MOVE });    /* (the target does the work: a move or a copy; Ctrl = copy) */
     WLC_SEND(w->c, c->ddev, LM_WL_DATA_DEVICE_REQ_START_DRAG, { .o = c->drag_src }, { .o = w->surface },
              { .o = icon ? c->drag_surf : 0 }, { .u = c->ptr_serial ? c->ptr_serial : c->serial });
     wlc_flush(w->c);
     return true;
+}
+
+bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, const char *label)
+{
+    return wlclip_drag_files_pic(c, uris, text, label, NULL, 0, 0, 1);
 }

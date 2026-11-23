@@ -5934,6 +5934,119 @@ class TestClients(Base):
         d, data = self.files_drag_out(mark=(2,))                # a.txt and blob.bin marked, the press on a.txt
         self.assertEqual(data, ('file://%s/a.txt\r\nfile://%s/blob.bin\r\n' % (d, d)).encode())
 
+    def files_drop_in(self, where, existing=None, actions=1, ctrl=False):
+        """Another program drags a file (outside the browsed folder) onto the file manager and lets go at `where(win)` (window coordinates of the files
+        window -> x, y). `existing` = (relative path, text) of a file that is there already. Returns (folder, the file's path, the files window)."""
+        p, d = self.files_start()
+        if existing:
+            with open(os.path.join(d, existing[0]), 'w') as f:
+                f.write(existing[1])
+        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.files'][0]
+        away = tempfile.mkdtemp(prefix='files-away-', dir=tmp)
+        self.addCleanup(shutil.rmtree, away, ignore_errors=True)
+        outside = os.path.join(away, 'from away.txt')                    # a name with a blank: the uri is percent-encoded
+        with open(outside, 'w') as f:
+            f.write('copied\n')
+        a = self.client()
+        seat = a.wl.bind('wl_seat', 5)
+        ptr = a.wl.new_id('wl_pointer')
+        a.wl.request(seat, 'get_pointer', ptr)
+        mgr = a.wl.bind('wl_data_device_manager', 3)
+        dev = a.wl.new_id('wl_data_device')
+        a.wl.request(mgr, 'get_data_device', dev, seat)
+        sw = Window(a, 120, 60, title='source')
+        a.wl.roundtrip()
+        sr = [w for w in ctl.windows()['windows'] if w['title'] == 'source'][0]
+        ctl.abs(sr['x'] + 6, sr['y'] + 6)
+        ctl.sync()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'enter', 2.0))
+        ctl.button(BTN_LEFT, True)
+        press = a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'button' and e.args[3] == 1, 2.0)
+        self.assertIsNotNone(press)
+        src = a.wl.new_id('wl_data_source')
+        a.wl.request(mgr, 'create_data_source', src)
+        a.wl.request(src, 'offer', 'text/uri-list')
+        a.wl.request(src, 'set_actions', actions)
+        a.wl.request(dev, 'start_drag', src, sw.surface, 0, press.args[0])
+        a.wl.roundtrip()
+        x, y = where(win)
+        self.assertFalse(sr['x'] <= x < sr['x'] + sr['w'] and sr['y'] <= y < sr['y'] + sr['h'], 'the drop point is under the source window')
+        ctl.abs(x, y)
+        ctl.sync()
+        time.sleep(0.3)
+        if ctrl:
+            ctl.key(KEY_LEFTCTRL, True)
+            time.sleep(0.2)
+        ctl.button(BTN_LEFT, False)
+        send = a.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 3.0)
+        self.assertIsNotNone(send, 'the file manager did not ask for the files')
+        os.write(send.fds[0], ('file://' + outside.replace(' ', '%20') + '\r\n').encode())
+        os.close(send.fds[0])
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'dnd_finished', 3.0))
+        if ctrl:
+            ctl.key(KEY_LEFTCTRL, False)
+        a.wl.request(sw.toplevel, 'destroy')                           # the source window goes: the keyboard is the file manager's again
+        a.wl.roundtrip()
+        time.sleep(0.4)
+        return d, outside, win
+
+    def wait_exists(self, path, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end and not os.path.exists(path):
+            time.sleep(0.05)
+        return os.path.exists(path)
+
+    def test_files_takes_files_dragged_from_another_program_into_its_folder(self):
+        # the empty part of the left pane's list: the browsed folder itself
+        d, outside, win = self.files_drop_in(lambda w: (w['x'] + 6, w['y'] + 52 + 18 * 8))
+        self.assertTrue(self.wait_exists(os.path.join(d, 'from away.txt')), 'the file was not copied into the folder')
+        self.assertTrue(os.path.exists(outside), 'the original is still there')
+
+    def test_a_dropped_file_that_exists_is_asked_about_and_replaced_on_enter(self):
+        left = lambda w: (w['x'] + 6, w['y'] + 52 + 18 * 8)
+        d, outside, win = self.files_drop_in(left, existing=('from away.txt', 'old\n'))
+        time.sleep(0.5)
+        self.assertEqual(open(os.path.join(d, 'from away.txt')).read(), 'old\n', 'nothing is replaced before the answer')
+        ctl.tap(KEY_ENTER)
+        end = time.time() + 4
+        while time.time() < end and open(os.path.join(d, 'from away.txt')).read() != 'copied\n':
+            time.sleep(0.05)
+        self.assertEqual(open(os.path.join(d, 'from away.txt')).read(), 'copied\n')
+        self.assertTrue(os.path.exists(outside))
+
+    def dropped_existing_stays(self, key):
+        d, outside, win = self.files_drop_in(lambda w: (w['x'] + 6, w['y'] + 52 + 18 * 8), existing=('from away.txt', 'old\n'))
+        time.sleep(0.4)
+        ctl.tap(key)
+        time.sleep(0.8)
+        self.assertEqual(open(os.path.join(d, 'from away.txt')).read(), 'old\n')
+        self.assertTrue(os.path.exists(outside))
+
+    def test_a_dropped_file_that_exists_is_left_alone_on_s(self):
+        self.dropped_existing_stays(31)
+
+    def test_a_dropped_file_that_exists_is_left_alone_on_esc(self):
+        self.dropped_existing_stays(KEY_ESC)
+
+    def test_files_moves_files_dragged_from_another_program_when_the_source_allows_it(self):
+        d, outside, win = self.files_drop_in(lambda w: (w['x'] + 6, w['y'] + 52 + 18 * 8), actions=3)
+        self.assertTrue(self.wait_exists(os.path.join(d, 'from away.txt')), 'the file did not arrive')
+        end = time.time() + 4
+        while time.time() < end and os.path.exists(outside):
+            time.sleep(0.05)
+        self.assertFalse(os.path.exists(outside), 'a move leaves nothing behind')
+
+    def test_files_copies_dragged_files_when_ctrl_is_held(self):
+        d, outside, win = self.files_drop_in(lambda w: (w['x'] + 6, w['y'] + 52 + 18 * 8), actions=3, ctrl=True)
+        self.assertTrue(self.wait_exists(os.path.join(d, 'from away.txt')), 'the file did not arrive')
+        time.sleep(0.5)
+        self.assertTrue(os.path.exists(outside), 'Ctrl: a copy, the original stays')
+
+    def test_files_takes_dragged_files_into_the_folder_under_the_pointer(self):
+        d, outside, win = self.files_drop_in(lambda w: (w['x'] + 6, w['y'] + 52 + 18 * 1 + 9))       # the row of sub/
+        self.assertTrue(self.wait_exists(os.path.join(d, 'sub', 'from away.txt')), 'the file did not go into sub/')
+        self.assertFalse(os.path.exists(os.path.join(d, 'from away.txt')))
+
     def test_files_register_desktop_makes_it_the_folder_program_and_keeps_a_choice(self):
         exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):
@@ -30678,6 +30791,321 @@ class TestDesktop(Base):
         self.assertEqual(st['dragging'], '0', 'the drag is over')
         self.assertEqual((items['photo.txt']['cx'], items['photo.txt']['cy']), ('5', '1'), 'the icon did not move')
 
+    def test_icons_dropped_on_the_file_manager_are_copied_and_the_drag_ends(self):
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        c = self.start('tofiles', files=('photo.txt',), folders=(), places={'photo.txt': (0, 0)})
+        self.state(lambda s, i: len(i) == 1)
+        dest = os.path.join(self.d, 'dest')
+        os.makedirs(dest)
+        env = dict(os.environ, WAYLAND_DISPLAY=self.name, MELLAGUI_FILES_RAIL='0', XDG_CONFIG_HOME=os.path.join(self.d, 'cfg'),
+                   XDG_DATA_HOME=os.path.join(self.d, 'data'), HOME=self.d)
+        p = subprocess.Popen([exe, dest], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        end = time.time() + 5
+        r = None
+        while time.time() < end and not r:
+            r = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.files']
+            time.sleep(0.1)
+        self.assertTrue(r, 'no file manager window')
+        r = r[0]
+        time.sleep(0.5)
+        it = self.state()[1]['photo.txt']
+        x, y = int(it['x']) + 10, int(it['y']) + 32 + 8                    # (the part of the cell above / left of the file manager's window)
+        c.abs(x, y)
+        c.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        c.abs(x + 20, y + 10)
+        c.abs(r['x'] + 100, r['y'] + 200)                                  # over the left pane's empty list
+        c.sync()
+        time.sleep(0.4)
+        c.button(BTN_LEFT, False)
+        self.assertTrue(self.wait_file(os.path.join(dest, 'photo.txt')), 'the file was not copied')
+        st, items = self.state(lambda s, i: s['dragging'] == '0')
+        self.assertEqual(st['dragging'], '0', 'the desktop still thinks it is dragging after the drop')
+        st, items = self.state(lambda s, i: s['down'] == '0')
+        self.assertEqual(st['down'], '0', 'the desktop still thinks the button is down (the release went to the compositor)')
+        # the pointer comes back to the desktop, away from where the button went down: that must not begin another drag (the button release went to
+        # the compositor, the desktop never saw it)
+        for pos in ((300, 50), (320, 52), (24, 54), (400, 48)):
+            c.abs(*pos)
+            c.sync()
+            time.sleep(0.3)
+            st, items = self.state()
+            self.assertEqual(st['dragging'], '0', 'moving over the desktop began a drag at %r' % (pos,))
+            c.cmd('cursor')
+            self.assertEqual(c.last, 'ok shape=1', 'the pointer is not the plain arrow at %r: %s' % (pos, c.last))
+
+    def test_the_dragged_icon_is_the_files_own_picture_drawn_over_the_windows(self):
+        c = self.start('hand', files=(), folders=('Projects',), places={'Projects': (0, 0)})
+        self.state(lambda s, i: len(i) == 1)
+        shot = os.path.join(self.d, 'shot.ppm')
+        it = self.state()[1]['Projects']
+        x, y = int(it['x']) + 40, int(it['y']) + 32 + 30
+        tx, ty = 600, 300                                                   # an empty place of the desktop
+        c.abs(tx, ty)
+        c.sync()
+        c.dump(shot)
+        before = Ppm(shot)
+        c.abs(x, y)
+        c.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        c.abs(x + 20, y + 10)
+        c.abs(tx, ty)
+        c.sync()
+        time.sleep(0.4)
+        c.dump(shot)
+        during = Ppm(shot)
+        c.button(BTN_LEFT, False)
+        # the icon is held by its middle (the pointer is in the centre of it): most of its square differs from the bare desktop, and so does the chip with the name below
+        def changed(x0, y0, x1, y1):
+            n = tot = 0
+            for yy in range(y0, y1, 2):
+                for xx in range(x0, x1, 2):
+                    tot += 1
+                    n += before.px(xx, yy) != during.px(xx, yy)
+            return n / tot
+        self.assertGreater(changed(tx - 16, ty - 16, tx + 16, ty + 16), 0.5, 'no icon under the pointer')
+        self.assertGreater(changed(tx - 20, ty + 34, tx + 20, ty + 52), 0.3, 'no name chip under the icon')
+
+    def test_a_file_dragged_onto_a_folder_icon_goes_into_it(self):
+        c = self.start('intofolder', files=('a.txt', 'b.txt'), folders=('Projects', 'Other'),
+                       places={'Projects': (0, 0), 'a.txt': (3, 0), 'b.txt': (3, 1), 'Other': (6, 0)})
+        self.state(lambda s, i: len(i) == 4)
+        shot = os.path.join(self.d, 'lit.ppm')
+        ax, ay = self.centre('a.txt')
+        px_, py_ = self.centre('Projects')
+        c.abs(ax, ay)
+        c.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        c.abs(ax - 30, ay)
+        c.abs(px_, py_)                                                    # the pointer (the middle of the icon in the hand) over the folder
+        c.sync()
+        time.sleep(0.4)
+        st, items = self.state()
+        c.dump(shot)
+        lit = Ppm(shot)
+        it = items['Projects']
+        # the folder's cell is lit (a frame in the accent colour): its corner pixel differs from a folder that nothing is over
+        o = items['Other']
+        self.assertNotEqual(lit.px(int(it['x']) + 4, int(it['y']) + 32 + 4), lit.px(int(o['x']) + 4, int(o['y']) + 32 + 4), 'the folder is not lit')
+        c.button(BTN_LEFT, False)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'Projects', 'a.txt')), 'the file did not go into the folder')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'a.txt')))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, 'b.txt')), 'only the dragged file moves')
+        st, items = self.state(lambda s, i: 'a.txt' not in i)
+        self.assertNotIn('a.txt', items)
+
+    def drop_from_elsewhere(self, c, actions=3, ctrl=False, name='from away.txt', at=(850, 480)):
+        """Another program drags a file (in a folder of its own) over `at` on the desktop and lets go; returns the path of that file."""
+        src_dir = os.path.join(self.d, 'elsewhere')
+        os.makedirs(src_dir, exist_ok=True)
+        outside = os.path.join(src_dir, name)
+        with open(outside, 'w') as f:
+            f.write('copied\n')
+        uri = ('file://' + outside.replace(' ', '%20') + '\r\n').encode()
+        a = Client(self.name)
+        self.clients.append(a)
+        seat = a.wl.bind('wl_seat', 5)
+        ptr = a.wl.new_id('wl_pointer')
+        a.wl.request(seat, 'get_pointer', ptr)
+        mgr = a.wl.bind('wl_data_device_manager', 3)
+        dev = a.wl.new_id('wl_data_device')
+        a.wl.request(mgr, 'get_data_device', dev, seat)
+        win = Window(a, 120, 60, title='A')
+        a.wl.roundtrip()
+        r = [w for w in c.windows()['windows'] if w['title'] == 'A'][0]
+        c.abs(r['x'] + 6, r['y'] + 6)
+        c.sync()
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'enter', 2.0))
+        c.button(BTN_LEFT, True)
+        press = a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'button' and e.args[3] == 1, 2.0)
+        self.assertIsNotNone(press)
+        src = a.wl.new_id('wl_data_source')
+        a.wl.request(mgr, 'create_data_source', src)
+        a.wl.request(src, 'offer', 'text/uri-list')
+        a.wl.request(src, 'set_actions', actions)
+        a.wl.request(dev, 'start_drag', src, win.surface, 0, press.args[0])
+        a.wl.roundtrip()
+        c.abs(*at)
+        c.sync()
+        time.sleep(0.3)
+        if ctrl:
+            c.key(KEY_LEFTCTRL, True)
+            time.sleep(0.2)
+        c.button(BTN_LEFT, False)
+        send = a.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 3.0)
+        self.assertIsNotNone(send, 'the desktop did not ask for the files')
+        os.write(send.fds[0], uri)
+        os.close(send.fds[0])
+        self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == src and e.name == 'dnd_finished', 3.0))
+        if ctrl:
+            c.key(KEY_LEFTCTRL, False)
+        a.wl.request(win.toplevel, 'destroy')                              # the source window goes: the keyboard is the desktop's again
+        a.wl.roundtrip()
+        time.sleep(0.3)
+        return outside
+
+    def test_files_let_go_on_the_desktop_are_moved(self):
+        c = self.start('dropmove', files=('here.txt',), folders=())
+        self.state(lambda s, i: len(i) == 1)
+        outside = self.drop_from_elsewhere(c)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'from away.txt')), 'the file did not arrive')
+        self.assertTrue(self.wait_file(outside, present=False), 'a move leaves nothing behind')
+
+    def test_files_let_go_on_the_desktop_with_ctrl_held_are_copied(self):
+        c = self.start('dropcopy', files=('here.txt',), folders=())
+        self.state(lambda s, i: len(i) == 1)
+        outside = self.drop_from_elsewhere(c, ctrl=True)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'from away.txt')), 'the file did not arrive')
+        time.sleep(0.3)
+        self.assertTrue(os.path.exists(outside), 'Ctrl: a copy, the original stays')
+
+    def test_a_file_that_exists_on_the_desktop_is_asked_about_before_it_is_replaced(self):
+        c = self.start('dropask', files=('from away.txt',), folders=())
+        self.state(lambda s, i: len(i) == 1)
+        with open(os.path.join(self.dir, 'from away.txt'), 'w') as f:
+            f.write('old\n')
+        outside = self.drop_from_elsewhere(c)
+        st, items = self.state(lambda s, i: s['prompt'] == '4')
+        self.assertEqual(st['prompt'], '4', 'no question about the file that is there')
+        time.sleep(0.4)
+        self.assertEqual(open(os.path.join(self.dir, 'from away.txt')).read(), 'old\n', 'nothing is replaced before the answer')
+        self.assertTrue(os.path.exists(outside))
+        c.tap(KEY_ENTER)                                                   # Enter: replace (a move: the original goes) - the card has the keyboard by itself
+        end = time.time() + 4
+        while time.time() < end and open(os.path.join(self.dir, 'from away.txt')).read() != 'copied\n':
+            time.sleep(0.05)
+        self.assertEqual(open(os.path.join(self.dir, 'from away.txt')).read(), 'copied\n')
+        self.assertTrue(self.wait_file(outside, present=False))
+
+    def test_a_file_that_exists_on_the_desktop_stays_on_skip_and_on_esc(self):
+        for key, name in ((31, 'skip.txt'), (KEY_ESC, 'esc.txt')):          # S, Esc
+            c = self.start('dropnot' + name[:3], files=(name,), folders=())
+            self.state(lambda s, i: len(i) == 1)
+            with open(os.path.join(self.dir, name), 'w') as f:
+                f.write('old\n')
+            outside = self.drop_from_elsewhere(c, name=name)
+            self.state(lambda s, i: s['prompt'] == '4')
+            c.tap(key)
+            st, items = self.state(lambda s, i: s['prompt'] == '0')
+            time.sleep(0.5)
+            self.assertEqual(open(os.path.join(self.dir, name)).read(), 'old\n')
+            self.assertTrue(os.path.exists(outside), 'nothing is moved when the answer is no')
+
+    def test_a_file_dragged_onto_a_folder_with_a_file_of_that_name_asks_first(self):
+        c = self.start('intoask', files=('a.txt',), folders=('Projects',), places={'Projects': (0, 0), 'a.txt': (3, 0)})
+        self.state(lambda s, i: len(i) == 2)
+        with open(os.path.join(self.dir, 'a.txt'), 'w') as f:
+            f.write('new\n')
+        with open(os.path.join(self.dir, 'Projects', 'a.txt'), 'w') as f:
+            f.write('old\n')
+        ax, ay = self.centre('a.txt')
+        px_, py_ = self.centre('Projects')
+        c.abs(ax, ay)
+        c.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        c.abs(ax - 30, ay)
+        c.abs(px_, py_)
+        c.sync()
+        time.sleep(0.4)
+        c.button(BTN_LEFT, False)
+        st, items = self.state(lambda s, i: s['prompt'] == '4')
+        self.assertEqual(st['prompt'], '4')
+        self.assertEqual(open(os.path.join(self.dir, 'Projects', 'a.txt')).read(), 'old\n')
+        c.tap(KEY_ENTER)
+        end = time.time() + 4
+        while time.time() < end and open(os.path.join(self.dir, 'Projects', 'a.txt')).read() != 'new\n':
+            time.sleep(0.05)
+        self.assertEqual(open(os.path.join(self.dir, 'Projects', 'a.txt')).read(), 'new\n')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'a.txt')))
+
+    def files_to_desktop(self, tag, ctrl):
+        """The file manager shows the desktop folder `Test`; a file is dragged from its list onto the empty desktop. Returns (the desktop folder, the file manager's process)."""
+        exe = os.path.join(ROOT, 'build', 'mellagui-files')
+        if not os.path.exists(exe):
+            self.skipTest('mellagui-files not built')
+        c = self.start(tag, files=(), folders=('Test',))
+        self.state(lambda s, i: len(i) == 1)
+        with open(os.path.join(self.dir, 'Test', 'f.txt'), 'w') as f:
+            f.write('hello\n')
+        env = dict(os.environ, WAYLAND_DISPLAY=self.name, MELLAGUI_FILES_RAIL='0', XDG_CONFIG_HOME=os.path.join(self.d, 'cfg'),
+                   XDG_DATA_HOME=os.path.join(self.d, 'data'), HOME=self.d)
+        p = subprocess.Popen([exe, os.path.join(self.dir, 'Test')], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        end = time.time() + 5
+        r = None
+        while time.time() < end and not r:
+            r = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.files']
+            time.sleep(0.1)
+        self.assertTrue(r, 'no file manager window')
+        r = r[0]
+        time.sleep(0.6)
+        row_y = r['y'] + 52 + 18 * 1 + 9                                   # the rows: .., f.txt
+        c.abs(r['x'] + 20, row_y)
+        c.sync()
+        c.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        c.abs(r['x'] + 24, row_y)
+        c.abs(r['x'] + 28, row_y)
+        time.sleep(0.4)
+        c.abs(r['x'] + r['w'] + 40, 300)                                   # the empty desktop beside the window
+        c.sync()
+        time.sleep(0.4)
+        if ctrl:
+            c.key(KEY_LEFTCTRL, True)
+            time.sleep(0.2)
+        c.button(BTN_LEFT, False)
+        if ctrl:
+            time.sleep(0.5)
+            c.key(KEY_LEFTCTRL, False)
+        return c, p
+
+    def test_a_file_dragged_from_the_file_manager_onto_the_desktop_is_moved(self):
+        c, p = self.files_to_desktop('fm2desk', ctrl=False)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'f.txt')), 'the file did not arrive on the desktop')
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'Test', 'f.txt'), present=False), 'a move: it is gone from the folder')
+
+    def test_a_file_dragged_from_the_file_manager_onto_the_desktop_with_ctrl_is_copied(self):
+        c, p = self.files_to_desktop('fm2deskc', ctrl=True)
+        self.assertTrue(self.wait_file(os.path.join(self.dir, 'f.txt')), 'the file did not arrive on the desktop')
+        time.sleep(0.5)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, 'Test', 'f.txt')), 'Ctrl: a copy, the original stays')
+
+    def test_the_drag_icon_shows_a_plus_while_the_drop_would_be_a_copy(self):
+        c = self.start('badge', files=(), folders=('Projects',), places={'Projects': (0, 0)})
+        self.state(lambda s, i: len(i) == 1)
+        shot = os.path.join(self.d, 'badge.ppm')
+        it = self.state()[1]['Projects']
+        x, y = int(it['x']) + 40, int(it['y']) + 32 + 30
+        tx, ty = 600, 300
+        c.abs(x, y)
+        c.button(BTN_LEFT, True)
+        time.sleep(0.2)
+        c.abs(x + 20, y + 10)
+        c.abs(tx, ty)
+        c.sync()
+        time.sleep(0.5)
+
+        def greens():
+            c.dump(shot)
+            ppm = Ppm(shot)
+            n = 0
+            for yy in range(ty - 30, ty - 2):                               # the badge: the icon's top right corner (the picture is as wide as the name's chip)
+                for xx in range(tx + 20, tx + 50):
+                    r, g, b = ppm.px(xx, yy)
+                    n += abs(r - 0x2e) < 24 and abs(g - 0x9e) < 24 and abs(b - 0x4f) < 24
+            return n
+        self.assertLess(greens(), 5, 'a move has no badge')
+        c.key(KEY_LEFTCTRL, True)                                           # Ctrl: a copy
+        time.sleep(0.5)
+        self.assertGreater(greens(), 40, 'no plus on the icon while Ctrl is held')
+        c.key(KEY_LEFTCTRL, False)
+        time.sleep(0.5)
+        self.assertLess(greens(), 5, 'the plus stays after Ctrl is let go')
+        c.button(BTN_LEFT, False)
+
     def test_the_icon_size_is_a_setting_and_follows_the_file(self):
         conf = os.path.join(tmp, 'desktop-size.conf')
         with open(conf, 'w') as f:
@@ -30794,6 +31222,7 @@ class TestDesktop(Base):
         a.wl.roundtrip()
         c.abs(850, 480)                                                    # empty desktop
         c.sync()
+        time.sleep(0.3)                                                    # (the desktop has to answer the offer before the button goes up)
         c.button(BTN_LEFT, False)
         send = a.wl.wait_for(lambda e: e.obj == src and e.name == 'send', 3.0)
         self.assertIsNotNone(send, 'the desktop did not ask for the files')

@@ -34,12 +34,16 @@ struct wlclip {
     void *drop_data;
     uint32_t drop_offer;
     double drop_x, drop_y;
+    uint32_t drop_action;               /* what the compositor says a drop would do (wl_data_offer.action: LM_DND_ACTION_COPY / MOVE; Ctrl held = copy), valid in the `drop` callback */
     void (*drag_over)(struct wlclip *c, bool inside, double x, double y, void *data);   /* a drag is over the window (wlclip_accept_drops) */
     /* a drag in progress (wlclip_drag_files) */
     uint32_t drag_src, drag_surf, drag_pool, drag_buf;
     char *drag_uris, *drag_text;
     void *drag_map;
     size_t drag_map_size;
+    uint32_t *drag_clean;               /* the icon as it was made (no badge), to put back when the action changes */
+    int drag_iw, drag_ih, drag_k;       /* the icon's size in buffer pixels, and the buffer scale */
+    uint32_t drag_action;               /* the action the badge shows: LM_DND_ACTION_COPY gets a green "+", anything else none */
 };
 
 void wlclip_global(struct wlclip *c, struct wlwin *w, uint32_t name, const char *iface, uint32_t ver);
@@ -55,6 +59,9 @@ uint8_t *wlclip_paste_mime(struct wlclip *c, const char *mime, size_t maxlen, si
  * `label` the words on the little icon that follows the pointer (a name, "3 files"). The drag ends with the button; a drop is a copy.
  * Returns false when the compositor has no drag-and-drop or one is going on already. */
 bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, const char *label);
+/* The same with a picture for the drag icon: `pic` is the file's icon, pw x ph pixels of straight ARGB in the buffer's own pixels (`scale` = the window's scale);
+ * the icon hangs at the pointer with the name on a chip under it, and is drawn over every window (the compositor paints the drag icon above everything). */
+bool wlclip_drag_files_pic(struct wlclip *c, const char *uris, const char *text, const char *label, const uint32_t *pic, int pw, int ph, int scale);
 bool wlclip_dragging(const struct wlclip *c);
 /* Take drops of files: a drag of text/uri-list over the window is accepted (copy) and, when it is let go, `drop` gets the local paths (malloc'd, `n` of them,
  * freed by the library) and where the pointer was (surface pixels). Without a call a drag over the window is refused. Needs wlclip_attach to have worked. */

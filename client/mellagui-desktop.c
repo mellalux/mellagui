@@ -77,7 +77,8 @@ struct item {
     bool thumb_wanted, thumb_done;      /* a picture: its small copy is made later, one at a time */
 };
 
-enum prompt { P_NONE, P_RENAME, P_NEWDIR, P_NEWFILE };
+enum prompt { P_NONE, P_RENAME, P_NEWDIR, P_NEWFILE, P_REPLACE };
+enum drop_mode { DROP_ASK, DROP_REPLACE, DROP_SKIP };     /* what drop_run does with a file that exists at the destination */
 enum menu_what { M_NONE, M_ITEM, M_EMPTY };
 
 struct app {
@@ -114,6 +115,11 @@ struct app {
     char msg[200];
     uint32_t msg_until;
     bool dirty_scan;
+    char **q_paths;                     /* P_REPLACE: the files that are waiting for the answer (moved / copied into q_target) ... */
+    int q_n, q_count;                   /* ... how many there are, and how many of them exist there already ... */
+    char q_target[PATH_MAX], q_first[NAME_MAX + 1];
+    bool q_move;
+    int drop_over;                      /* a folder icon that a drag (ours or another program's) is over: it is lit as the place the files would go, -1 none */
     bool self_drag;                     /* the carried icons are a Wayland drag (other programs can take them); the drop on this window moves them */
     int anchor, cur;                    /* Shift picks a range from the anchor to the item last chosen (-1: none) */
     char ta[24];                        /* type-ahead: the letters typed lately jump to a name that starts with them */
@@ -807,9 +813,22 @@ static int label_lines(const char *s, char out[2][170])
 
 static void paint_prompt(struct app *a, struct wlwin *w)
 {
-    static const char *const titles[] = { "", "Rename", "New folder", "New text file" };
+    static const char *const titles[] = { "", "Rename", "New folder", "New text file", "Replace files" };
     struct wlcard c = { 0, 0, 420, 168 };
     wlcard_center(w, &c);
+    if (a->prompt == P_REPLACE) {                               /* a question, no field: Cancel / Skip / Replace */
+        wlcard_frame_at(w, &c, c.x, c.y, 420, 168, titles[a->prompt], lm_theme.accent, lm_theme.bar, lm_theme.accent, false);
+        int tx = c.x + WLCARD_PAD, tw = c.w - 2 * WLCARD_PAD;
+        char l1[160], l2[NAME_MAX + 8];
+        snprintf(l1, sizeof(l1), "%d file%s of that name %s there already:", a->q_count, a->q_count == 1 ? "" : "s", a->q_count == 1 ? "is" : "are");
+        snprintf(l2, sizeof(l2), "%s%s", a->q_first, a->q_count > 1 ? ", ..." : "");
+        wlwin_text(w, tx, c.y + 52, l1, 1, lm_theme.caution, tw);
+        wlwin_text(w, tx, c.y + 72, l2, 1, lm_theme.text_bright, tw);
+        const char *labels[3] = { "Cancel", "Skip them", "Replace" };
+        uint32_t cols[3] = { lm_theme.btn_slate, lm_theme.btn_blue, lm_theme.btn_orange };
+        wlcard_buttons(w, &c, labels, 3, cols, a->hot_btn, -1, lm_theme.on_colour);
+        return;
+    }
     wlcard_frame_at(w, &c, c.x, c.y, 420, 168, titles[a->prompt], lm_theme.accent, lm_theme.bar, lm_theme.accent, false);
     int fx = c.x + WLCARD_PAD, fy = c.y + 48, fw = c.w - 2 * WLCARD_PAD;
     wlwin_round_fill(w, fx, fy, fw, 28, 14, lm_theme.background);
@@ -835,11 +854,18 @@ static void paint(struct wlwin *w)
             continue;
         int x0, y0;
         cell_rect(a, it->cx, it->cy, &x0, &y0);
-        if (a->dragging && it->sel) {
+        if (a->dragging && !a->self_drag && it->sel) {          /* (a Wayland drag has its own icon, drawn over every window: the old carried copy would be a second one) */
             x0 += (int)(a->px - a->down_x);
             y0 += (int)(a->py - a->down_y);
         }
-        if (it->sel)
+        bool ghost = a->dragging && a->self_drag && it->sel;     /* a Wayland drag has the icon in its hand: the one on the desktop only keeps the place, faint */
+        if (i == a->drop_over) {                                 /* a drag is over this folder: it would take the files */
+            fill_alpha(w, x0 + 2, y0 + 2, CW - 4, CH - 4, 8, lm_theme.accent, 0x70);
+            fill_alpha(w, x0 + 2, y0 + 2, CW - 4, 2, 1, lm_theme.accent, 0xff);
+            fill_alpha(w, x0 + 2, y0 + CH - 4, CW - 4, 2, 1, lm_theme.accent, 0xff);
+            fill_alpha(w, x0 + 2, y0 + 2, 2, CH - 4, 1, lm_theme.accent, 0xff);
+            fill_alpha(w, x0 + CW - 4, y0 + 2, 2, CH - 4, 1, lm_theme.accent, 0xff);
+        } else if (it->sel && !ghost)
             fill_alpha(w, x0 + 2, y0 + 2, CW - 4, CH - 4, 8, lm_theme.accent, 0x3a);
         else if (i == a->hover && !a->dragging)
             fill_alpha(w, x0 + 2, y0 + 2, CW - 4, CH - 4, 8, 0xffffff, 0x1c);
@@ -847,9 +873,18 @@ static void paint(struct wlwin *w)
             icon_make(a, it, P);
             it->thumb_done = false;
         }
-        if (it->img)
+        if (it->img && ghost) {
+            uint32_t *faint = malloc((size_t)P * (size_t)P * 4);
+            if (faint) {
+                for (size_t k = 0; k < (size_t)P * (size_t)P; k++)
+                    faint[k] = (((it->img[k] >> 24) * 70 / 255) << 24) | (it->img[k] & 0xffffff);          /* (straight ARGB: only the alpha goes down) */
+                wlwin_blit_px_over(w, x0 + (CW - ISZ) / 2, y0 + 6, faint, P, P, P);
+                free(faint);
+            }
+        } else if (it->img) {
             wlwin_blit_px_over(w, x0 + (CW - ISZ) / 2, y0 + 6, it->img, P, P, P);
-        if (it->kind != K_DIR && it->kind != K_LAUNCHER && it->kind != K_PROGRAM && it->ext[0] && strlen(it->ext) <= 4 && !(it->thumb_wanted && it->thumb_done)) {
+        }
+        if (!ghost && it->kind != K_DIR && it->kind != K_LAUNCHER && it->kind != K_PROGRAM && it->ext[0] && strlen(it->ext) <= 4 && !(it->thumb_wanted && it->thumb_done)) {
             int tw = lm_font_text_width(it->ext);
             wlwin_text_small(w, x0 + (CW - ISZ) / 2 + (int)(ISZ * 0.5) - (int)(tw * 0.6 / 2), y0 + 6 + (int)(ISZ * 0.585), it->ext, 0.62, 0xffffff, 0);
         }
@@ -857,6 +892,10 @@ static void paint(struct wlwin *w)
         int nl = label_lines(it->shown, lines);
         for (int l = 0; l < nl; l++) {
             int tw = lm_font_text_width(lines[l]), tx = x0 + (CW - tw) / 2, ty = y0 + 6 + ISZ + 4 + l * 15;
+            if (ghost) {
+                wlwin_text(w, tx, ty, lines[l], 1, 0x8a96a3, 0);
+                continue;
+            }
             if (it->sel)
                 fill_alpha(w, tx - 3, ty - 1, tw + 6, 16, 5, lm_theme.accent, 0xd8);
             else
@@ -892,8 +931,8 @@ static void paint(struct wlwin *w)
             int nsel = 0;
             for (int i = 0; i < a->n; i++)
                 nsel += a->it[i].sel;
-            fprintf(f, "state n=%d sel=%d cols=%d rows=%d bw=%d bh=%d scale=%d prompt=%d field=%s menu=%d dragging=%d banding=%d dir=%s\n", a->n, nsel, a->cols, a->rows, w->bw, w->bh,
-                    wlwin_scale(w), a->prompt, a->field, a->menu, a->dragging, a->banding, a->dir);
+            fprintf(f, "state n=%d sel=%d cols=%d rows=%d bw=%d bh=%d scale=%d prompt=%d field=%s menu=%d dragging=%d banding=%d down=%d dir=%s\n", a->n, nsel, a->cols, a->rows, w->bw, w->bh,
+                    wlwin_scale(w), a->prompt, a->field, a->menu, a->dragging, a->banding, a->down, a->dir);
             for (int i = 0; i < a->n; i++) {
                 int x, y;
                 char nm[NAME_MAX + 1], sh[160];                 /* (a blank is a _ in the dump: it is split at blanks) */
@@ -1224,12 +1263,143 @@ static void prompt_done(struct app *a)
     places_save(a);
 }
 
+/* ---- files let go on the desktop: moved (or copied with Ctrl), asked about when they exist ------------------------------------------------ */
+
+static void drop_forget(struct app *a)
+{
+    for (int i = 0; i < a->q_n; i++)
+        free(a->q_paths[i]);
+    free(a->q_paths);
+    a->q_paths = NULL;
+    a->q_n = 0;
+}
+
+/* Moves (`move`) or copies the files `paths` into the folder `target` in the background (mv / cp). A file that exists there is asked about first (mode
+ * DROP_ASK: nothing is done and the question P_REPLACE is shown; Enter / S run this again with DROP_REPLACE / DROP_SKIP); files that are in that folder already
+ * and folders (never replaced or merged) are left out. */
+static void drop_run(struct app *a, char **paths, int n, const char *target, bool move, int mode)
+{
+    char **plain = calloc((size_t)n + 6, sizeof(*plain)), **repl = calloc((size_t)n + 6, sizeof(*repl));
+    if (!plain || !repl) {
+        free(plain);
+        free(repl);
+        return;
+    }
+    int np = 0, nr = 0, there = 0, skipped = 0;
+    char first[NAME_MAX + 1] = "";
+    for (int i = 0; i < n; i++) {
+        const char *base = strrchr(paths[i], '/');
+        if (paths[i][0] != '/' || !base || !base[1])
+            continue;
+        base++;
+        char dir[PATH_MAX], dst[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%.*s", (int)(base - paths[i] - 1), paths[i]);
+        if (!dir[0])
+            snprintf(dir, sizeof(dir), "/");
+        snprintf(dst, sizeof(dst), "%s/%s", target, base);
+        size_t sl = strlen(paths[i]);
+        if (!strcmp(dir, target)) {                             /* (it is in that folder already) */
+            there++;
+            continue;
+        }
+        if (!strncmp(target, paths[i], sl) && (target[sl] == '/' || !target[sl])) {      /* (a folder into itself) */
+            skipped++;
+            continue;
+        }
+        struct stat ss, ds;
+        if (lstat(paths[i], &ss) < 0)
+            continue;
+        if (lstat(dst, &ds) == 0) {
+            if (S_ISDIR(ss.st_mode) || S_ISDIR(ds.st_mode)) {
+                skipped++;
+                continue;
+            }
+            repl[nr++] = paths[i];
+            if (!first[0])
+                snprintf(first, sizeof(first), "%s", base);
+            continue;
+        }
+        plain[np++] = paths[i];
+    }
+    if (nr > 0 && mode == DROP_ASK) {                           /* some are there already: nothing is done before the answer */
+        drop_forget(a);
+        a->q_paths = calloc((size_t)n, sizeof(*a->q_paths));
+        if (a->q_paths)
+            for (int i = 0; i < n; i++)
+                if ((a->q_paths[a->q_n] = strdup(paths[i])))
+                    a->q_n++;
+        a->q_move = move;
+        a->q_count = nr;
+        snprintf(a->q_target, sizeof(a->q_target), "%s", target);
+        snprintf(a->q_first, sizeof(a->q_first), "%s", first);
+        a->prompt = P_REPLACE;
+        a->hot_btn = -1;
+        a->win.redraw = true;
+        wlwin_raise(&a->win);                                   /* the question gets the keyboard (the compositor gives the desktop only that: it stays at the bottom) */
+        free(plain);
+        free(repl);
+        return;
+    }
+    int done = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        char **list = pass ? repl : plain;
+        int cnt = pass ? nr : np;
+        if (!cnt || (pass && mode != DROP_REPLACE))
+            continue;
+        char **argv = calloc((size_t)cnt + 6, sizeof(*argv));
+        if (!argv)
+            continue;
+        int k = 0;
+        argv[k++] = move ? "mv" : "cp";
+        if (!move)
+            argv[k++] = "-a";
+        argv[k++] = pass ? "-f" : "-n";
+        argv[k++] = "--";
+        for (int i = 0; i < cnt; i++)
+            argv[k++] = list[i];
+        argv[k++] = (char *)target;
+        spawn(argv, NULL);
+        free(argv);
+        done += cnt;
+    }
+    if (done)
+        say(a, "%s %d item%s", move ? "Moving" : "Copying", done, done == 1 ? "" : "s");
+    else if (there && !skipped)
+        say(a, "That is there already");
+    else if (nr && mode == DROP_SKIP)
+        say(a, "Left alone: %d file%s of that name %s there already", nr, nr == 1 ? "" : "s", nr == 1 ? "is" : "are");
+    else if (skipped)
+        say(a, "A folder is not replaced or put into itself");
+    free(plain);
+    free(repl);
+}
+
+/* The answer of the question P_REPLACE: Enter / Replace, S / Skip, Esc / Cancel (mode < 0). */
+static void drop_answer(struct app *a, int mode)
+{
+    a->prompt = P_NONE;
+    a->win.redraw = true;
+    char **paths = a->q_paths;
+    int n = a->q_n;
+    char target[PATH_MAX];
+    snprintf(target, sizeof(target), "%s", a->q_target);
+    bool move = a->q_move;
+    a->q_paths = NULL;
+    a->q_n = 0;
+    if (mode >= 0 && paths)
+        drop_run(a, paths, n, target, move, mode);
+    for (int i = 0; i < n; i++)
+        free(paths[i]);
+    free(paths);
+}
+
 /* ---- moving icons -------------------------------------------------------------------------------------------------------------------- */
 
 /* Puts what is chosen into the folder `into` (an item of kind K_DIR). */
 static void move_into(struct app *a, int into)
 {
-    int done = 0;
+    int done = 0, nconf = 0;
+    char *conf[64];
     char err[200] = "";
     for (int i = 0; i < a->n; i++) {
         if (!a->it[i].sel || i == into)
@@ -1237,8 +1407,12 @@ static void move_into(struct app *a, int into)
         char from[PATH_MAX], to[PATH_MAX];
         snprintf(from, sizeof(from), "%s/%s", a->dir, a->it[i].name);
         snprintf(to, sizeof(to), "%s/%s/%s", a->dir, a->it[into].name, a->it[i].name);
-        struct stat st;
+        struct stat st, fs;
         if (lstat(to, &st) == 0) {
+            if (!S_ISDIR(st.st_mode) && lstat(from, &fs) == 0 && !S_ISDIR(fs.st_mode) && nconf < 64) {      /* a file of that name: asked about, below */
+                conf[nconf++] = strdup(from);
+                continue;
+            }
             snprintf(err, sizeof(err), "%s is in %s already", a->it[i].name, a->it[into].name);
             continue;
         }
@@ -1250,6 +1424,13 @@ static void move_into(struct app *a, int into)
         done++;
     }
     scan(a);
+    if (nconf) {                                                /* files that exist in the folder: the question, then mv -f or nothing */
+        char target[PATH_MAX];
+        snprintf(target, sizeof(target), "%s/%s", a->dir, a->it[into].name);
+        drop_run(a, conf, nconf, target, true, DROP_ASK);
+        for (int i = 0; i < nconf; i++)
+            free(conf[i]);
+    }
     if (err[0])
         say(a, "%s", err);
     else if (done)
@@ -1430,7 +1611,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 w->redraw = true;
                 return;
             }
-            int hb = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+            int hb = wlcard_button_at(&c, a->prompt == P_REPLACE ? 3 : 2, (int)a->px, (int)a->py);
             if (hb != a->hot_btn) {
                 a->hot_btn = hb;
                 w->redraw = true;
@@ -1458,6 +1639,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             w->redraw = true;
         }
     } else if (op == LM_WL_POINTER_EVT_LEAVE) {
+        if (a->self_drag && wlclip_dragging(&a->clip))      /* the compositor took the pointer grab for our drag: the button release goes to it, never to us, so the press is
+                                                             * over - left true, the next motion over the desktop would start another drag (the icon "stuck" to the pointer) */
+            a->down = false;
         a->hover = -1;
         w->redraw = true;
     } else if (op == LM_WL_POINTER_EVT_BUTTON) {
@@ -1473,6 +1657,17 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 return;
             if (wlcard_drag_press(w, &c, a->px, a->py))
                 return;
+            if (a->prompt == P_REPLACE) {
+                int rb = wlcard_button_at(&c, 3, (int)a->px, (int)a->py);
+                if (rb == 2)
+                    drop_answer(a, DROP_REPLACE);
+                else if (rb == 1)
+                    drop_answer(a, DROP_SKIP);
+                else if (rb == 0 || !wlcard_has(&c, (int)a->px, (int)a->py))
+                    drop_answer(a, -1);
+                w->redraw = true;
+                return;
+            }
             int b = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
             if (b == 0 || !wlcard_has(&c, (int)a->px, (int)a->py))
                 a->prompt = P_NONE;
@@ -1588,6 +1783,16 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         return;
     uint32_t ks = lm_keymap_keysym(args[2].u, w->mods);
     bool ctrl = (w->mods & LM_MOD_CTRL) != 0;
+    if (a->prompt == P_REPLACE) {
+        if (ks == LM_KS_Return || ks == LM_KS_KP_Enter)
+            drop_answer(a, DROP_REPLACE);
+        else if (ks == 's' || ks == 'S')
+            drop_answer(a, DROP_SKIP);
+        else if (ks == LM_KS_Escape)
+            drop_answer(a, -1);
+        w->redraw = true;
+        return;
+    }
     if (a->prompt != P_NONE) {
         if (ks == LM_KS_Escape)
             a->prompt = P_NONE;
@@ -1820,7 +2025,12 @@ static bool drag_start(struct app *a)
     }
     if (n > 1)
         snprintf(label, sizeof(label), "%d items", n);
-    bool ok = n > 0 && wlclip_drag_files(&a->clip, uris, text, label);
+    const struct item *first = NULL;                    /* the first chosen icon is the picture in the hand */
+    for (int i = 0; i < a->n && !first; i++)
+        if (a->it[i].sel && a->it[i].img && a->it[i].img_p > 0)
+            first = &a->it[i];
+    bool ok = n > 0 && (first ? wlclip_drag_files_pic(&a->clip, uris, text, label, first->img, first->img_p, first->img_p, wlwin_scale(&a->win))
+                              : wlclip_drag_files(&a->clip, uris, text, label));
     free(uris);
     free(text);
     return ok;
@@ -1831,9 +2041,13 @@ static void on_over(struct wlclip *c, bool inside, double x, double y, void *dat
 {
     (void)c;
     struct app *a = data;
+    a->drop_over = -1;
     if (inside) {
         a->px = x;
         a->py = y;
+        int o = item_under(a, x, y);
+        if (o >= 0 && a->it[o].kind == K_DIR && !a->it[o].broken && !(a->self_drag && a->it[o].sel))
+            a->drop_over = o;
     }
     a->win.redraw = true;
 }
@@ -1842,8 +2056,8 @@ static void on_over(struct wlclip *c, bool inside, double x, double y, void *dat
  * in that folder already is left alone. cp does the work in the background: the folder is watched, the icons appear as the files do. */
 static void on_drop(struct wlclip *c, char **paths, int n, double x, double y, void *data)
 {
-    (void)c;
     struct app *a = data;
+    a->drop_over = -1;
     if (a->self_drag) {                                         /* our own icons let go on our own window: they move to the cell (or into the folder) under the pointer */
         a->self_drag = false;
         a->px = x;
@@ -1852,39 +2066,18 @@ static void on_drop(struct wlclip *c, char **paths, int n, double x, double y, v
         a->win.redraw = true;
         return;
     }
+    if (a->prompt != P_NONE) {
+        say(a, "Finish the question first, then drop the files");
+        return;
+    }
     char target[PATH_MAX];
     int over = item_under(a, x, y);
     if (over >= 0 && a->it[over].kind == K_DIR && !a->it[over].broken)
         snprintf(target, sizeof(target), "%s/%s", a->dir, a->it[over].name);
     else
         snprintf(target, sizeof(target), "%s", a->dir);
-    char **argv = calloc((size_t)n + 6, sizeof(*argv));
-    if (!argv)
-        return;
-    int k = 0, kept = 0;
-    argv[k++] = "cp";
-    argv[k++] = "-a";
-    argv[k++] = "-n";
-    argv[k++] = "--";
-    for (int i = 0; i < n; i++) {
-        char dir[PATH_MAX];
-        snprintf(dir, sizeof(dir), "%s", paths[i]);
-        char *slash = strrchr(dir, '/');
-        if (slash && slash != dir)
-            *slash = 0;
-        if (!strcmp(dir, target))
-            continue;                                           /* (it is there already) */
-        argv[k++] = paths[i];
-        kept++;
-    }
-    argv[k++] = target;
-    if (kept) {
-        spawn(argv, NULL);
-        say(a, "Copying %d item%s", kept, kept == 1 ? "" : "s");
-    } else {
-        say(a, "That is on the desktop already");
-    }
-    free(argv);
+    /* files from another program are MOVED here, or copied while Ctrl is held (the compositor says which: wl_data_offer.action) */
+    drop_run(a, paths, n, target, c->drop_action != LM_DND_ACTION_COPY, DROP_ASK);
 }
 
 /* Alt+F4 or a close shortcut with the desktop focused must not end it: nothing closes the desktop. */
@@ -2051,6 +2244,7 @@ int main(int argc, char **argv)
     if (stat(a.dir, &st) < 0)
         mkdirs(a.dir);                  /* the desktop folder is made when it is not there */
     a.hover = -1;
+    a.drop_over = -1;
     a.click_item = -1;
     a.down_item = -1;
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event, .close = keep_open };

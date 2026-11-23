@@ -6047,6 +6047,33 @@ class TestClients(Base):
         self.assertTrue(self.wait_exists(os.path.join(d, 'sub', 'from away.txt')), 'the file did not go into sub/')
         self.assertFalse(os.path.exists(os.path.join(d, 'from away.txt')))
 
+    def test_files_shows_what_other_programs_do_to_its_folders_without_being_asked(self):
+        d = tempfile.mkdtemp(prefix='files-watch-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.mkdir(os.path.join(d, 'sub'))
+        with open(os.path.join(d, 'a.txt'), 'w') as f:
+            f.write('a\n')
+        dd = tempfile.mkdtemp(prefix='files-watch-dump-', dir=tmp)                # (the state file lies outside the watched folder: it is no change)
+        self.addCleanup(shutil.rmtree, dd, ignore_errors=True)
+        dump = os.path.join(dd, 'files.dump')
+        p, win = self.files_start_preview(d, {'MELLAGUI_FILES_DUMP': dump, 'MELLAGUI_FILES_RAIL': '0'})
+        ctl.tap(61)                                                        # F3 again: the preview is off, both panes list the folder
+        counts = lambda o: tuple(int(v) for v in o[0].get('entries', '0,0').split(','))
+        head, extra = self.files_dump(dump, want=lambda o: counts(o)[0] > 0)
+        n0 = counts((head, extra))[0]
+        self.assertGreater(n0, 0, open(dump).read())
+        with open(os.path.join(d, 'new.txt'), 'w') as f:                   # another program adds a file
+            f.write('x\n')
+        head, extra = self.files_dump(dump, want=lambda o: counts(o)[0] == n0 + 1)
+        self.assertEqual(counts((head, extra))[0], n0 + 1, 'a new file does not show in the pane')
+        os.remove(os.path.join(d, 'a.txt'))                                # ... removes one
+        head, extra = self.files_dump(dump, want=lambda o: counts(o)[0] == n0)
+        self.assertEqual(counts((head, extra))[0], n0, 'a removed file is still in the pane')
+        os.mkdir(os.path.join(d, 'sub', 'inner'))                          # a change in a folder that is not shown does not matter, but one in the other pane's folder does
+        os.rename(os.path.join(d, 'new.txt'), os.path.join(d, 'sub', 'new.txt'))
+        head, extra = self.files_dump(dump, want=lambda o: counts(o)[0] == n0 - 1)
+        self.assertEqual(counts((head, extra))[0], n0 - 1, 'a file moved away is still in the pane')
+
     def test_files_register_desktop_makes_it_the_folder_program_and_keeps_a_choice(self):
         exe = os.environ.get('FILES_BIN') or os.path.join(ROOT, 'build', 'mellagui-files')
         if not os.path.exists(exe):

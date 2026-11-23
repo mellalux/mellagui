@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -291,6 +292,10 @@ struct app {
     struct wlclip clip;                 /* the clipboard of the text prompts (Ctrl+V / C / X, the right-click menu), and the drag of files out */
     bool drag_armed;                    /* a button went down on a file row: moving 6 pixels with it held starts a drag of the files ... */
     int drag_pane, drag_row, drag_x, drag_y;    /* ... of this pane's row, pressed at this place */
+    int ino_fd;                         /* inotify: the folders of the two panes are watched, so what other programs do to them shows (-1 none) ... */
+    int ino_wd[2];
+    char ino_dir[2][PATH_MAX];          /* ... the folder each watch is on ("" none) ... */
+    int64_t ino_due;                    /* ... and when the folders are read again after a change (0 = nothing waits) */
     bool drag_live;                     /* our files are in a drag to another program: when it ends (they may have been MOVED there, by that program, a moment later) the folders are read again ... */
     int64_t reread_at;                  /* ... at this time, and once more later (0 = none) */
     int reread_n;
@@ -6176,7 +6181,8 @@ static void files_dump(struct app *a)
     static const char *const names[] = { "none", "text", "hex", "image", "dir", "error", "video-wait", "video", "markdown", "audio", "table", "json", "font" };
     int body_h = a->win.bh - list_top() - bottom_h(a);
     int total, view, pos;
-    fprintf(f, "kind=%s loaded=%d top=%d body=%d split=%d want=%s\n", a->preview ? names[pv->kind] : "none", pv->loaded ? 1 : 0, pv->top, body_h, split_x(a), pv->want);
+    fprintf(f, "kind=%s loaded=%d top=%d body=%d split=%d want=%s entries=%d,%d\n", a->preview ? names[pv->kind] : "none", pv->loaded ? 1 : 0, pv->top, body_h, split_x(a),
+            pv->want, a->pane[0].n, a->pane[1].n);
     if (a->preview && pv_scrolls(a, body_h, &total, &view, &pos)) {
         for (int i = 0; i < 2; i++)
             if (pane_is_preview(a, i)) {
@@ -8058,6 +8064,101 @@ static int register_desktop(void)
     return 0;
 }
 
+/* ---- the folders are watched: files that other programs (the desktop, a terminal, a download) add, remove or change show up by themselves ----------- */
+
+static void watch_sync(struct app *a)
+{
+    if (a->ino_fd < 0)
+        return;
+    for (int i = 0; i < (a->dual ? 2 : 1); i++) {
+        const char *want = is_net(a->pane[i].cwd) ? "" : a->pane[i].cwd;
+        if (!strcmp(want, a->ino_dir[i]))
+            continue;
+        if (a->ino_wd[i] >= 0) {
+            bool shared = false;                                        /* (both panes may show the same folder: one watch) */
+            for (int k = 0; k < 2; k++)
+                shared = shared || (k != i && a->ino_wd[k] == a->ino_wd[i]);
+            if (!shared)
+                inotify_rm_watch(a->ino_fd, a->ino_wd[i]);
+            a->ino_wd[i] = -1;
+        }
+        snprintf(a->ino_dir[i], sizeof(a->ino_dir[i]), "%s", want);
+        if (want[0])
+            a->ino_wd[i] = inotify_add_watch(a->ino_fd, want, IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_ATTRIB | IN_CLOSE_WRITE | IN_MODIFY |
+                                                                  IN_DELETE_SELF | IN_MOVE_SELF);
+    }
+}
+
+/* Whether the folder of `p` lists as it did (names, kinds, sizes, times): reading it again would change nothing, and would only restart the preview. */
+static bool pane_unchanged(const struct app *a, const struct pane *p)
+{
+    struct pane tmp = { 0 };
+    tmp.sort = p->sort;
+    tmp.sort_desc = p->sort_desc;
+    char err[200];
+    if (list_dir(&tmp, p->cwd, a->show_hidden, err, sizeof(err)) < 0) {
+        free(tmp.e);
+        return false;                                                   /* (gone or unreadable: read it the usual way, which says so) */
+    }
+    bool same = tmp.n == p->n;
+    for (int i = 0; same && i < tmp.n; i++)
+        same = !strcmp(tmp.e[i].name, p->e[i].name) && tmp.e[i].dir == p->e[i].dir && tmp.e[i].broken == p->e[i].broken && tmp.e[i].size == p->e[i].size &&
+               tmp.e[i].mtime == p->e[i].mtime;
+    entries_free(&tmp);
+    free(tmp.e);
+    return same;
+}
+
+/* Called every turn of the loop: a change starts a short wait (several changes in a row make one reading), then a pane whose listing really differs is read again - not while a copy /
+ * move / delete runs (its end reads them) or while the pointer holds a scroll bar. */
+static void watch_poll(struct app *a)
+{
+    if (a->ino_fd < 0)
+        return;
+    watch_sync(a);
+    char buf[4096] __attribute__((aligned(8)));
+    ssize_t k;
+    bool any = false;
+    const char *dump = getenv("MELLAGUI_FILES_DUMP");                   /* (the tests' state file may lie in a watched folder: its own writes are no change) */
+    const char *dump_base = dump && *dump ? (strrchr(dump, '/') ? strrchr(dump, '/') + 1 : dump) : NULL;
+    size_t dl = dump_base ? strlen(dump_base) : 0;
+    while ((k = read(a->ino_fd, buf, sizeof(buf))) > 0)
+        for (char *q = buf; q < buf + k;) {
+            const struct inotify_event *ev = (const struct inotify_event *)q;
+            q += sizeof(*ev) + ev->len;
+            if (dump_base && ev->len && !strncmp(ev->name, dump_base, dl) && (!ev->name[dl] || !strcmp(ev->name + dl, ".tmp")))
+                continue;
+            any = true;
+        }
+    if (any && !a->ino_due)
+        a->ino_due = now_ms() + 200;
+    if (a->ino_due && now_ms() >= a->ino_due && !a->job) {
+        a->ino_due = 0;
+        bool held = a->pane[0].sb_drag || a->pane[1].sb_drag;
+        if (!held)
+            for (int i = 0; i < (a->dual ? 2 : 1); i++)
+                if (!pane_unchanged(a, &a->pane[i])) {
+                    /* the preview belongs to the file under the cursor: when that file is the same, what is showing (a sound that plays, a video, a scrolled page)
+                     * must not start again because something else in the folder changed */
+                    const struct entry *was = row_entry(cur(a), cur(a)->sel);
+                    char want[sizeof(a->pv.want)];
+                    snprintf(want, sizeof(want), "%s", a->pv.want);
+                    bool loaded = a->pv.loaded;
+                    off_t sz = was ? was->size : 0;
+                    time_t mt = was ? was->mtime : 0;
+                    char name[NAME_MAX + 1];
+                    snprintf(name, sizeof(name), "%s", was ? was->name : "");
+                    reread_pane(a, &a->pane[i]);
+                    const struct entry *now = row_entry(cur(a), cur(a)->sel);
+                    if (was && now && !strcmp(now->name, name) && now->size == sz && now->mtime == mt && loaded) {
+                        snprintf(a->pv.want, sizeof(a->pv.want), "%s", want);
+                        a->pv.loaded = true;
+                    }
+                    a->win.redraw = true;
+                }
+    }
+}
+
 int main(int argc, char **argv)
 {
     wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
@@ -8206,6 +8307,8 @@ int main(int argc, char **argv)
     a.cbtn_down = -1;
     wlrail_init(&a.ran[0]);
     a.dual = true;
+    a.ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    a.ino_wd[0] = a.ino_wd[1] = -1;
     struct fstate fs;
     state_load(&fs);
     a.split = fs.split;
@@ -8285,6 +8388,8 @@ int main(int argc, char **argv)
             timeout = LM_MIN(timeout, 8);
         if (a.reread_at)
             timeout = (int)LM_CLAMP(a.reread_at - now_ms(), 1, timeout);
+        if (a.ino_due)
+            timeout = (int)LM_CLAMP(a.ino_due - now_ms(), 1, timeout);
         if (a.preview && !a.pv.loaded && a.pv.want[0]) {                /* a picture waits for the cursor to rest */
             int64_t wait = a.pv.due - now_ms();
             timeout = (int)LM_CLAMP(wait, 1, timeout);
@@ -8306,6 +8411,7 @@ int main(int argc, char **argv)
             a.win.redraw = true;
         vp_tick(&a);
         snd_tick(&a);
+        watch_poll(&a);
         {
             bool live = wlclip_dragging(&a.clip);
             if (a.drag_live && !live) {                                 /* the drag is over: the program that took the files may move them in a moment */

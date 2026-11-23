@@ -119,9 +119,9 @@ static void test_world(void)
 	}
 	CHECK(bad == 0, "%d cells hold a number that is no block", bad);
 	for (int k = BL_GRASS; k < BL_COUNT; k++)
-		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && !(k >= BL_FLOW1 && k <= BL_FLOW7))
+		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && !(k >= BL_FLOW1 && k <= BL_FLOW7))
 			CHECK(count[k] > 0, "the world has no %s", bl_block_name(k));
-	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
+	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0 && count[BL_BARRACKS] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
 	long flowing = 0;
 	for (int k = BL_FLOW1; k <= BL_FLOW7; k++)
 		flowing += count[k];
@@ -2479,6 +2479,214 @@ static int work_steps(struct bl_mobs *M, struct bl_world *w, const float pl[3], 
 	return broke;
 }
 
+static void test_soldiers(void)
+{
+	const float far_pl[3] = { 50.5f, 20.0f, 95.0f };                /* (near enough to keep the goblins from despawning; the soldiers' tests say nobody is alive to hunt) */
+	const float dusk = 17.9f;                                   /* (neither spawning nor burning) */
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 21);
+	M.spawn_t = 1e9f;
+
+	CHECK(bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f) && M.mob[0].kind == BL_MOB_SOLDIER && M.mob[0].hp == BL_SOLDIER_HP && M.mob[0].tx == 50.5f, "a soldier, with fourteen hit points and a post");
+	for (int i = 1; i < BL_SOLDIER_MAX; i++)
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f + 1.5f * (float)i, 20.0f, 50.5f);
+	CHECK(bl_mobs_count_kind(&M, BL_MOB_SOLDIER) == BL_SOLDIER_MAX && !bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 54.0f), "eight at most");
+	CHECK(bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 55.0f) && bl_mobs_add(&M, w, BL_MOB_GOBLIN, 90.5f, 20.0f, 90.5f), "workers and goblins go in beside them");
+	CHECK(bl_mobs_hit_cell(&M, 50, 21, 50) && !bl_mobs_hit_cell(&M, 50, 22, 50), "a block cannot be put where a soldier stands (1.65 m)");
+	float eye[3] = { 50.5f, 21.0f, 47.0f }, look[3] = { 0, 0, 1 }, t = 0;
+	CHECK(bl_mobs_pick(&M, eye, look, BL_SWORD_REACH, &t) < 0 && bl_units_pick(&M, eye, look, 20.0f, &t) == 0, "the sword goes through a soldier, the pointer finds him");
+	bl_mobs_clear(&M);
+
+	/* it takes a goblin that comes near and stands guard again afterwards */
+	{
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 58.5f, 20.0f, 50.5f);
+		int slain = 0, in_block = 0;
+		float dead_t = 0.0f, t0 = 0.0f;
+		for (int i = 0; i < 30 * 14; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, far_pl, false, dusk, 1.0f / 30.0f, &R);
+			t0 += 1.0f / 30.0f;
+			slain += R.slain;
+			if (!dead_t && slain)
+				dead_t = t0;
+			for (int k = 0; k < BL_MOBS_MAX; k++)
+				if (M.mob[k].alive)
+					in_block += box_in_solid(w, M.mob[k].x, M.mob[k].y, M.mob[k].z, BL_GOBLIN_HW, bl_mob_h(M.mob[k].kind));
+		}
+		CHECK(slain == 1 && M.kills == 1 && bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 0, "a goblin 8 m away is killed by the soldier (%d)", slain);
+		CHECK(dead_t > 2.0f && dead_t < 10.0f, "in a few seconds - three blows and the walk (%.1f s)", dead_t);
+		CHECK(M.mob[0].alive && M.mob[0].hp > 0 && hypotf(M.mob[0].x - 50.5f, M.mob[0].z - 50.5f) < 1.6f && in_block == 0, "and it is back at its post (%.1f m), alive with %.0f hit points, never in a block", hypotf(M.mob[0].x - 50.5f, M.mob[0].z - 50.5f), M.mob[0].hp);
+	}
+	bl_mobs_clear(&M);
+
+	/* a goblin far from the post (past the leash) is left alone */
+	{
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 66.5f);
+		M.mob[1].wander_t = 1e9f;
+		M.mob[1].widle = true;
+		int slain = 0;
+		for (int i = 0; i < 30 * 8; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, far_pl, false, dusk, 1.0f / 30.0f, &R);
+			slain += R.slain;
+		}
+		CHECK(slain == 0 && M.mob[1].alive && hypotf(M.mob[0].x - 50.5f, M.mob[0].z - 50.5f) < 1.5f, "a goblin 16 m away is not seen (the soldier stays at its post)");
+	}
+	bl_mobs_clear(&M);
+
+	/* a post: ordered somewhere it walks there at about 3 m/s and stands there; stop makes the place it is at the post */
+	{
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
+		bl_mobs_order_move(&M, 0, 62.5f, 56.5f);
+		CHECK(M.mob[0].order == BL_ORDER_IDLE && M.mob[0].tx == 62.5f && M.mob[0].tz == 56.5f, "the order gives it a post");
+		float tt = 0, arrived = 0, vmax = 0;
+		for (int i = 0; i < 30 * 12; i++) {
+			float ox = M.mob[0].x, oz = M.mob[0].z;
+			bl_mobs_step(&M, w, far_pl, false, dusk, 1.0f / 30.0f, NULL);
+			tt += 1.0f / 30.0f;
+			float v = hypotf(M.mob[0].x - ox, M.mob[0].z - oz) * 30.0f;
+			vmax = v > vmax ? v : vmax;
+			if (!arrived && hypotf(M.mob[0].x - 62.5f, M.mob[0].z - 56.5f) < 1.2f)
+				arrived = tt;
+		}
+		CHECK(arrived > 2.5f && arrived < 7.0f && vmax > 2.4f && vmax < 3.3f, "it walks 13 m there in %.1f s at up to %.2f m/s", arrived, vmax);
+		bl_mobs_order_stop(&M, 0);
+		CHECK(fabsf(M.mob[0].tx - M.mob[0].x) < 1e-3f, "stop makes where it stands the post");
+		bl_mobs_order_gather(&M, w, 0, 60, 19, 60);
+		CHECK(M.mob[0].order == BL_ORDER_IDLE, "a soldier does not gather");
+	}
+	bl_mobs_clear(&M);
+
+	/* goblins go for a soldier like for a worker, and four of them kill one */
+	{
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
+		for (int i = 0; i < 4; i++)
+			bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f + (i < 2 ? -4.0f : 4.0f), 20.0f, 50.5f + (i & 1 ? 3.0f : -3.0f));
+		int lost = 0, slain = 0;
+		for (int i = 0; i < 30 * 20; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, far_pl, false, dusk, 1.0f / 30.0f, &R);
+			lost += R.soldiers_lost;
+			slain += R.slain;
+		}
+		CHECK(lost == 1 && !M.mob[0].alive, "four goblins kill the soldier (%d lost)", lost);
+		(void)slain;
+	}
+	bl_mobs_clear(&M);
+
+	/* two soldiers hold off two goblins */
+	{
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 52.0f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 44.5f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 44.5f, 20.0f, 54.5f);
+		int lost = 0;
+		for (int i = 0; i < 30 * 20; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, far_pl, false, dusk, 1.0f / 30.0f, &R);
+			lost += R.soldiers_lost;
+		}
+		CHECK(bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 0 && lost == 0, "two soldiers kill two goblins and lose nobody (%d lost, %d goblins left)", lost, bl_mobs_count_kind(&M, BL_MOB_GOBLIN));
+	}
+	bl_mobs_clear(&M);
+
+	/* the picture: a red tunic, lighter when chosen, a steel helmet */
+	{
+		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
+		struct bl_mob *b = &M.mob[0];
+		b->yaw = 0.0f;
+		b->ycos = 1.0f;
+		b->ysin = 0.0f;
+		bl_mobs_light(&M, w, 12.0f);
+		float o[3] = { 50.5f, 20.0f + 0.8f * 1.15f, 47.0f }, d[3] = { 0, 0, 1 };
+		struct bl_mob_hit hit;
+		CHECK(bl_mobs_ray(&M, o, d, 20.0f, &hit) && hit.id == 0 && hit.rgb[0] > 1.8f * hit.rgb[2], "a soldier's tunic is red (%.2f %.2f %.2f)", hit.rgb[0], hit.rgb[1], hit.rgb[2]);
+		float o2[3] = { 50.5f, 20.0f + 1.4f * 1.15f, 47.0f };
+		struct bl_mob_hit h2;
+		CHECK(bl_mobs_ray(&M, o2, d, 20.0f, &h2) && h2.rgb[0] > 0.2f && fabsf(h2.rgb[0] - h2.rgb[2]) < 0.15f, "the helmet is steel grey (%.2f %.2f %.2f)", h2.rgb[0], h2.rgb[1], h2.rgb[2]);
+		b->selected = true;
+		struct bl_mob_hit h3;
+		CHECK(bl_mobs_ray(&M, o, d, 20.0f, &h3) && h3.rgb[1] > hit.rgb[1], "chosen, it is lighter");
+	}
+	bl_mobs_clear(&M);
+
+	/* a wave: so many goblins, so many at a time, out of the ground round the keep and not round the player */
+	{
+		const float keep[3] = { 64.5f, 20.0f, 64.5f }, pl[3] = { 8.5f, 20.0f, 8.5f };
+		bl_mobs_init(&M, 5);
+		bl_mobs_set_keep(&M, true, keep[0], keep[1], keep[2]);
+		bl_mobs_start_wave(&M, 7, 3);
+		CHECK(M.wave_on && M.wave_left == 7 && M.wave_size == 7 && M.wave_cap == 3 && bl_mobs_wave_remaining(&M) == 7, "a wave of seven, three at a time");
+		float dmin = 1e9f, dmax = 0.0f;
+		int maxalive = 0, born = 0, kept_hits = 0, in_block = 0;
+		bool far_from_pl = true;
+		for (int round = 0; round < 3; round++) {
+			if (round > 0) {                                    /* two die: two more come out, and no more than three are ever there */
+				int killed = 0;
+				for (int k = 0; k < BL_MOBS_MAX && killed < 2; k++)
+					if (M.mob[k].alive && M.mob[k].kind == BL_MOB_GOBLIN) {
+						M.mob[k].alive = false;
+						killed++;
+					}
+			}
+			for (int i = 0; i < 30 * 25; i++) {
+				bool had[BL_MOBS_MAX];
+				for (int k = 0; k < BL_MOBS_MAX; k++)
+					had[k] = M.mob[k].alive;
+				struct bl_mobs_result R;
+				bl_mobs_step(&M, w, pl, true, 0.0f, 1.0f / 30.0f, &R);
+				born += R.born;
+				kept_hits += R.keep_hits;
+				for (int k = 0; k < BL_MOBS_MAX; k++) {
+					const struct bl_mob *g = &M.mob[k];
+					if (g->alive && !had[k]) {
+						float dk = hypotf(g->x - keep[0], g->z - keep[2]);
+						dmin = dk < dmin ? dk : dmin;
+						dmax = dk > dmax ? dk : dmax;
+						if (hypotf(g->x - pl[0], g->z - pl[2]) < 30.0f)
+							far_from_pl = false;
+					}
+					if (g->alive)
+						in_block += box_in_solid(w, g->x, g->y, g->z, BL_GOBLIN_HW, bl_mob_h(g->kind));
+				}
+				int n = bl_mobs_count_kind(&M, BL_MOB_GOBLIN);
+				maxalive = n > maxalive ? n : maxalive;
+			}
+			if (round == 0)
+				CHECK(born == 3 && M.wave_left == 4 && bl_mobs_wave_remaining(&M) == 7, "three came out and no more while they live (%d born, %d left)", born, M.wave_left);
+		}
+		CHECK(born == 7 && M.wave_left == 0, "two more after two died, two more after that (%d born, %d to come)", born, M.wave_left);
+		CHECK(maxalive == 3, "never more than three at a time (%d)", maxalive);
+		CHECK(dmin > 19.0f && dmax < 33.0f, "each comes 20 to 32 m from the keep (%.1f .. %.1f)", dmin, dmax);
+		CHECK(far_from_pl && in_block == 0, "nowhere near the player (%d) and never in a block (%d)", far_from_pl, in_block);
+		CHECK(kept_hits > 0, "and they go to the keep and hit it (%d blows)", kept_hits);
+	}
+	/* by day a wave does not come; a wave over leaves nobody to spawn; the goblins of one are kept alive far from the player */
+	{
+		const float keep[3] = { 64.5f, 20.0f, 64.5f }, pl[3] = { 8.5f, 20.0f, 8.5f };
+		bl_mobs_init(&M, 6);
+		bl_mobs_set_keep(&M, true, keep[0], keep[1], keep[2]);
+		bl_mobs_start_wave(&M, 5, 5);
+		for (int i = 0; i < 30 * 20; i++)
+			bl_mobs_step(&M, w, pl, true, 12.0f, 1.0f / 30.0f, NULL);
+		CHECK(bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 0 && M.wave_left == 5, "by day nobody comes");
+		bl_mobs_end_wave(&M);
+		CHECK(!M.wave_on && M.wave_left == 0 && bl_mobs_wave_remaining(&M) == 0, "end_wave");
+		bl_mobs_start_wave(&M, 0, 3);
+		CHECK(!M.wave_on, "a wave of none is no wave");
+		bl_mobs_init(&M, 7);                                    /* with no keep a wave does nothing and the old spawning goes on at night near the player */
+		bl_mobs_start_wave(&M, 5, 5);
+		const float pl2[3] = { 64.5f, 20.0f, 64.5f };
+		for (int i = 0; i < 30 * 30; i++)
+			bl_mobs_step(&M, w, pl2, true, 0.0f, 1.0f / 30.0f, NULL);
+		CHECK(bl_mobs_count_kind(&M, BL_MOB_GOBLIN) > 0 && M.wave_left == 5, "no keep: the goblins come round the player as before (%d)", bl_mobs_count_kind(&M, BL_MOB_GOBLIN));
+	}
+	bl_world_free(w);
+}
+
 static void test_workers(void)
 {
 	const float far_pl[3] = { 64.5f, 20.0f, 110.0f };
@@ -3090,6 +3298,7 @@ int main(int argc, char **argv)
 	test_keep();
 	printf("workers\n");
 	test_workers();
+	test_soldiers();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

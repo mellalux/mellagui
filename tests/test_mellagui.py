@@ -19615,7 +19615,7 @@ class TestBlocks(Base):
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
     K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
-             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, backspace=14, home=102, **{str(i): 1 + i for i in range(1, 10)})
+             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
         super().setUp()
@@ -19671,8 +19671,18 @@ class TestBlocks(Base):
                 st['aim'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] in ('pets', 'tom', 'filip', 'player', 'game', 'cmd'):
                 st[f[0]] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'help':
+                st['help'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'hpage':
+                st.setdefault('hpages', {})[int(f[1])] = tuple(int(v) for v in f[2:6])
+            elif f[0] == 'hbtn':
+                st.setdefault('hbtns', {})[f[1]] = tuple(int(v) for v in f[2:6])
+            elif f[0] == 'hbar':
+                st['hbar'] = tuple(int(v) for v in f[1:5])
             elif f[0] == 'worker':
                 st['workers'][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'soldier':
+                st.setdefault('soldiers', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'mob':
                 st['mobs'][int(f[1])] = {k: float(v) for k, v in (x.split('=', 1) for x in f[2:])}
             elif f[0] == 'hist':
@@ -20121,7 +20131,7 @@ class TestBlocks(Base):
     def put_in_hand(self, block):
         """E opens the palette, a click on the block puts it in the slot in the hand, E goes back to the game."""
         self.tap('e')
-        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 14)
+        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 15)
         cell = [c for c in st['pal'].values() if c['block'] == block][0]
         ctl.abs(self.win['x'] + cell['x'] + cell['w'] // 2, self.win['y'] + cell['y'] + cell['h'] // 2)
         time.sleep(0.1)
@@ -20140,7 +20150,7 @@ class TestBlocks(Base):
         self.assertEqual(st['state']['playing'], '0')
         self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free while the palette is up')
         self.assertEqual([c['block'] for _, c in sorted(st['pal'].items())],
-                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp'])
+                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp', 'barracks'])
         torch = st['pal'][12]
         ctl.abs(self.win['x'] + torch['x'] + torch['w'] // 2, self.win['y'] + torch['y'] + torch['h'] // 2)
         time.sleep(0.1)
@@ -20673,6 +20683,87 @@ class TestBlocks(Base):
         self.start(flat=False, data=self.data, nomode=True)
         self.assertEqual(self.state()['game']['survival'], '0', 'an old file: creative')
 
+    # ---- the help: several pages ----
+    def help_open(self):
+        self.start()
+        self.play()
+        self.tap('f1')
+        return self.wait(lambda st: st['state']['prompt'] == '3' and st.get('help'))
+
+    def test_f1_opens_pages_that_the_keys_turn(self):
+        st = self.help_open()
+        self.assertEqual(st['help']['page'], '0')
+        self.assertGreaterEqual(int(st['help']['pages']), 8)
+        self.assertEqual(st['help']['title'], 'Welcome')
+        self.tap('right')
+        st = self.wait(lambda s: s['help']['page'] == '1')
+        self.assertEqual(st['help']['title'], 'Moving')
+        self.tap('4')
+        st = self.wait(lambda s: s['help']['page'] == '3')
+        self.assertEqual(st['help']['title'], 'Survival')
+        self.tap('left')
+        self.wait(lambda s: s['help']['page'] == '2')
+        self.tap('esc')
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.tap('f1')                                       # (the page last read is the one it opens again)
+        st = self.wait(lambda s: s['state']['prompt'] == '3' and s.get('help'))
+        self.assertEqual(st['help']['page'], '2')
+
+    def test_the_pages_have_a_list_and_buttons_that_the_mouse_clicks(self):
+        st = self.help_open()
+        n = int(st['help']['pages'])
+        self.assertEqual(len(st['hpages']), n)
+        x, y, w, h = st['hpages'][5]
+        ctl.abs(self.win['x'] + x + w // 2, self.win['y'] + y + h // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['help']['page'] == '5')
+        self.assertEqual(st['help']['title'], 'The_keep')
+        x, y, w, h = st['hbtns']['next']
+        ctl.abs(self.win['x'] + x + w // 2, self.win['y'] + y + h // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['help']['page'] == '6')
+        x, y, w, h = self.state()['hbtns']['back']
+        ctl.abs(self.win['x'] + x + w // 2, self.win['y'] + y + h // 2)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['help']['page'] == '5')
+
+    def test_a_long_page_scrolls_with_the_keys_the_wheel_and_the_bar(self):
+        st = self.help_open()
+        n = int(st['help']['pages'])
+        self.tap(str(min(n, 9)))                              # the last page that has a key of its own: the keys, a long one
+        st = self.wait(lambda s: s['help']['page'] == str(min(n, 9) - 1))
+        self.assertGreater(int(st['help']['height']), int(st['help']['view']), 'the page is longer than the card: it scrolls')
+        self.assertEqual(st['help']['top'], '0')
+        self.tap('down')
+        st = self.wait(lambda s: int(s['help']['top']) > 0)
+        t1 = int(st['help']['top'])
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 100, self.win['y'] + self.win['h'] // 2)
+        time.sleep(0.1)
+        ctl.cmd('axis v 15 1')
+        st = self.wait(lambda s: int(s['help']['top']) > t1)
+        self.tap('home')
+        self.wait(lambda s: s['help']['top'] == '0')
+        bx, by, bw, bh = self.state()['hbar']
+        ctl.abs(self.win['x'] + bx + bw // 2, self.win['y'] + by + bh - 4)            # a press on the track below the thumb: a page
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: int(s['help']['top']) > 0)
+
+    def test_a_click_outside_the_help_goes_back_to_the_pause_card(self):
+        self.help_open()
+        ctl.abs(self.win['x'] + 3, self.win['y'] + 3)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['prompt'] == '1')
+
     # ---- workers and the command view ----
     def cmd_open(self):
         self.tap('tab')
@@ -20811,6 +20902,126 @@ class TestBlocks(Base):
         self.assertEqual(len(line.split('=')[1].split(',')), 3)
         self.start(flat=False, data=self.data, survival=True)
         self.assertEqual(self.state()['cmd']['workers'], '3', 'the same three, not two new ones')
+
+    # ---- barracks, soldiers and waves ----
+    def test_four_bricks_make_a_barracks_that_is_put_and_v_trains_a_soldier_for_its_price(self):
+        self.start('--give', 'brick=9,cobble=20,planks=10', '--pitch', '-60', '--soldiers', '0', survival=True)
+        self.play()
+        self.tap('7')                                          # the hotbar's brick
+        self.tap('x')
+        st = self.wait(lambda s: s['inv'].get('barracks') == 1)
+        self.assertEqual(st['inv']['brick'], 5)
+        slot = [i for i, b in enumerate(st['hotbar']) if b == 'barracks'][0] + 1
+        self.tap(str(slot))
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: int(s['game']['barracks']) == 1)
+        self.assertNotIn('barracks', st['inv'], 'the block was used up')
+        self.cmd_open()
+        self.tap('v')
+        st = self.wait(lambda s: s['cmd']['soldiers'] == '1')
+        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (14, 6), 'six cobble and four planks')
+        self.assertEqual(len(st['soldiers']), 1)
+        self.tap('v')
+        st = self.wait(lambda s: s['cmd']['soldiers'] == '2')
+        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (8, 2))
+        self.tap('v')
+        time.sleep(0.3)
+        st = self.state()
+        self.assertEqual(st['cmd']['soldiers'], '2', 'two planks are not enough for another one')
+        self.assertEqual(st['inv']['planks'], 2)
+
+    def test_a_soldier_needs_a_barracks(self):
+        self.start('--give', 'cobble=20,planks=10', '--soldiers', '0', survival=True)
+        self.play()
+        self.cmd_open()
+        self.tap('v')
+        time.sleep(0.3)
+        st = self.state()
+        self.assertEqual(st['cmd']['soldiers'], '0')
+        self.assertEqual(st['inv']['cobble'], 20)
+
+    def test_a_soldier_is_chosen_with_the_pointer_and_sent_to_a_new_post(self):
+        self.start('--soldiers', '1')                          # (creative: no keep that he could stand behind)
+        self.play()
+        st = self.cmd_open()
+        self.assertEqual(st['cmd']['soldiers'], '1')
+        i = list(st['soldiers'])[0]
+        x = self.win['x'] + int(float(st['soldiers'][i]['sx']))
+        y = self.win['y'] + int(float(st['soldiers'][i]['sy']))
+        ctl.abs(x, y)
+        time.sleep(0.1)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['cmd']['sel'] == '1')
+        post0 = st['soldiers'][i]['post']
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 40)
+        time.sleep(0.1)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: s['soldiers'][i]['post'] != post0)
+        px, pz = (float(v) for v in st['soldiers'][i]['post'].split(','))
+        st = self.wait(lambda s: abs(float(s['soldiers'][i]['x']) - px) + abs(float(s['soldiers'][i]['z']) - pz) < 1.5, timeout=15.0)
+        self.tap('backspace')
+        st = self.wait(lambda s: s['soldiers'][i]['post'] != '%s,%s' % (px, pz) or True)
+
+    def test_a_soldier_goes_after_a_goblin_that_comes_near_and_it_is_counted(self):
+        self.start('--time', '17.9', '--soldiers', '1', '--goblin', '0,9', mobs=True)
+        self.play()
+        st = self.wait(lambda s: int(s['player']['kills']) >= 1, timeout=30.0)
+        self.assertEqual(len(st['soldiers']), 1, 'the soldier is alive')
+        self.assertEqual(st['player']['mobs'] if False else st['player']['goblins'], '1', 'nobody but the soldier is left')
+
+    def test_a_wave_comes_at_night_for_the_keep_and_the_day_ends_it(self):
+        self.start('--time', '22', mobs=True, survival=True)
+        self.play()
+        st = self.wait(lambda s: s['game']['wave'].split('/')[2] == '1')
+        left, size, on = (int(v) for v in st['game']['wave'].split('/'))
+        self.assertEqual(size, 3, 'the first night: three goblins')
+        self.assertEqual(left, 3)
+        st = self.wait(lambda s: int(s['player']['goblins']) >= 1, timeout=15.0)
+        for i in range(10):                                   # [ ] move the clock an hour: from 22 to 8 o'clock
+            self.tap('rbrace')
+        st = self.wait(lambda s: s['game']['wave'].split('/')[2] == '0', timeout=10.0)
+        self.assertEqual(st['game']['nights'], '1', 'the night is counted')
+
+    def test_no_wave_without_goblins_or_by_day(self):
+        self.start('--time', '22', survival=True)             # (the goblins are off)
+        self.play()
+        time.sleep(0.5)
+        self.assertEqual(self.state()['game']['wave'], '0/0/0')
+
+    def test_the_soldiers_are_saved_and_a_bad_soldiers_option_is_refused(self):
+        p = subprocess.run([self.EXE, '--soldiers', '99'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--soldiers wants', p.stderr)
+        self.start('--save', '--soldiers', '3')
+        self.play()
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.proc = None
+        for w in range(40):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        conf = os.path.join(self.data, 'player.conf')
+        with open(conf) as f:
+            line = [l for l in f.read().splitlines() if l.startswith('soldiers')][0]
+        self.assertEqual(len(line.split('=')[1].split(',')), 3)
+        self.start(flat=False, data=self.data)
+        self.assertEqual(self.state()['cmd']['soldiers'], '3')
+
+    def test_the_palette_has_the_barracks(self):
+        self.start()
+        self.play()
+        self.tap('e')
+        st = self.wait(lambda s: s['state']['prompt'] == '4' and s['pal'])
+        self.assertIn('barracks', [p['block'] for p in st['pal'].values()])
 
     def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
         p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)

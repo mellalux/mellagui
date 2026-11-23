@@ -163,6 +163,21 @@ static void gen_face(int blk, int fk, uint32_t *px)
 				}
 				break;
 			}
+			case BL_BARRACKS: {                          /* red brick in a timber frame; on the sides a blue banner with crossed swords, on the top planks */
+				int row = y / 4;
+				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);
+				c = fk == BL_FACE_TOP ? tinted(0x8a6a40, tn(x, y / 4, 50, 8) + tn(x, y, 51, 5) - (y % 4 == 3 ? 24 : 0))
+				                      : mortar ? tinted(0x9c8f80, tn(x, y, 52, 5)) : tinted(0x8e3f2e, tn((x + (row & 1) * 4) / 8, row, 53, 12) + tn(x, y, 54, 6));
+				if (x <= 1 || x >= TEX - 2 || y <= 1 || y >= TEX - 2)
+					c = tinted(0x4a3320, tn(x, y, 55, 6));
+				if (fk == BL_FACE_SIDE && x >= 4 && x <= 11 && y >= 3 && y <= 12) {
+					c = tinted(0x2c4fa8, tn(x, y, 56, 6));
+					if (x - 4 == y - 4 || (11 - x) == y - 4 || x - 4 == y - 5 || (11 - x) == y - 5)
+						if (y >= 4 && y <= 11)
+							c = tinted(0xe8ecf4, 0);
+				}
+				break;
+			}
 			case BL_COBBLE: {
 				int off = ((y / 4) & 1) * 2;
 				int sx = (x + off) / 4, sy = y / 4;

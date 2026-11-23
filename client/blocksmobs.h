@@ -20,7 +20,7 @@
 
 #include "blocks.h"
 
-#define BL_MOBS_MAX 24                  /* goblins and workers together */
+#define BL_MOBS_MAX 40                  /* goblins, workers and soldiers together */
 #define BL_GOBLIN_HW 0.30f              /* half the width of its box, and its height */
 #define BL_GOBLIN_H 1.70f
 #define BL_GOBLIN_HP 10.0f
@@ -36,12 +36,27 @@
 #define BL_WORKER_MAX 8
 #define BL_WORKER_SPEED 2.2f
 
-enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER };
+#define BL_SOLDIER_H 1.65f              /* the soldier: a little taller than a worker, with a helmet (the model is 1.15 times its boxes) */
+#define BL_SOLDIER_HP 14.0f
+#define BL_SOLDIER_MAX 8
+#define BL_SOLDIER_SPEED 3.0f
+#define BL_SOLDIER_DAMAGE 4.0f          /* a blow of a soldier's sword: three kill a goblin, as the player's */
+#define BL_SOLDIER_REACH 1.3f
+#define BL_SOLDIER_COOLDOWN 0.8f
+#define BL_SOLDIER_SEE 12.0f            /* how far a soldier sees a goblin */
+#define BL_SOLDIER_LEASH 18.0f          /* and how far from its post it goes after one */
+
+enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER };
 enum bl_order { BL_ORDER_IDLE = 0, BL_ORDER_MOVE, BL_ORDER_GATHER };
 
 static inline float bl_mob_h(int kind)                         /* the height of a kind's box */
 {
-	return kind == BL_MOB_WORKER ? BL_WORKER_H : BL_GOBLIN_H;
+	return kind == BL_MOB_WORKER ? BL_WORKER_H : kind == BL_MOB_SOLDIER ? BL_SOLDIER_H : BL_GOBLIN_H;
+}
+
+static inline bool bl_mob_is_unit(int kind)                    /* the player's: a worker or a soldier */
+{
+	return kind == BL_MOB_WORKER || kind == BL_MOB_SOLDIER;
 }
 
 struct bl_mob {
@@ -65,7 +80,7 @@ struct bl_mob {
 	uint32_t rng;
 	/* workers: what they have been told to do */
 	int order;                      /* enum bl_order */
-	float tx, tz;                   /* MOVE: where to; GATHER: where to stand */
+	float tx, tz;                   /* MOVE: where to; GATHER: where to stand; a soldier: its post (where it goes back to) */
 	int gx, gy, gz, gblock;         /* GATHER: the block (the lowest log of a tree), and what kind of block to go on with */
 	float work;                     /* seconds spent on the block so far */
 	float wait;                     /* seconds to wait before the next block (the game takes the broken ones away meanwhile) */
@@ -83,6 +98,11 @@ struct bl_mobs {
 	uint32_t rng;
 	float spawn_t, acc;
 	int kills, spawned, burned;
+	/* a wave: the goblins of one night, coming to the keep from all round (not to the player) */
+	bool wave_on;                   /* a wave is on: while there is a keep the goblins come from round IT, `wave_left` of them in all */
+	int wave_left;                  /* goblins still to appear */
+	int wave_cap;                   /* how many may be there at a time */
+	int wave_size;                  /* how many the wave was made of */
 };
 
 /* what a call of `bl_mobs_step` did to the player */
@@ -94,6 +114,8 @@ struct bl_mobs_result {
 	float keep_damage;              /* hit points taken from the keep (BL_GOBLIN_KEEP_HIT a blow) */
 	int keep_hits;
 	int workers_lost;               /* workers the goblins killed */
+	int soldiers_lost;              /* soldiers the goblins killed */
+	int slain;                      /* goblins the soldiers killed */
 	int nbreak;                     /* blocks the workers have finished: the caller takes them away (bl_break) and keeps what they leave */
 	struct bl_break { int x, y, z; } brk[64];
 };
@@ -103,6 +125,10 @@ void bl_mobs_clear(struct bl_mobs *m);                      /* every mob gone (t
 void bl_mobs_set_keep(struct bl_mobs *m, bool on, float x, float y, float z);    /* where the keep is (the middle of its bottom), or that there is none */
 int bl_mobs_count(const struct bl_mobs *m);                 /* every kind */
 int bl_mobs_count_kind(const struct bl_mobs *m, int kind);
+/* A wave: `n` goblins in all, at most `cap` of them at a time, coming out of the ground 20 to 32 blocks from the keep while it is night (it ends by itself at dawn). */
+void bl_mobs_start_wave(struct bl_mobs *m, int n, int cap);
+void bl_mobs_end_wave(struct bl_mobs *m);
+int bl_mobs_wave_remaining(const struct bl_mobs *m);        /* goblins still to come + goblins alive */
 void bl_mobs_clear_kind(struct bl_mobs *m, int kind);       /* only that kind (the player died: the goblins go, the workers stay) */
 
 /* One step of every mob. `player` = the feet of the player; `pl_alive` false = nobody to hunt. `time_h` is the hour of the day (blocksview.h): goblins appear
@@ -120,9 +146,10 @@ bool bl_mobs_add(struct bl_mobs *m, const struct bl_world *w, int kind, float x,
 
 /* ---- workers: friendly, they do what they are told ------------------------------------------------------------------------ */
 
-/* The worker the ray hits first within `reach` (-1 = none, *t = the distance): for choosing one with the pointer. */
+/* The worker or soldier the ray hits first within `reach` (-1 = none, *t = the distance): for choosing one with the pointer. */
 int bl_units_pick(const struct bl_mobs *m, const float o[3], const float dir[3], float reach, float *t);
-/* Walk to (x, z); it is idle when it gets there or has got no nearer for 4 s (a wall in the way). */
+/* Walk to (x, z); it is idle when it gets there or has got no nearer for 4 s (a wall in the way). A soldier takes (x, z) as its post: it goes there, stands there and
+ * goes after the goblins that come near it, then back. */
 void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z);
 /* Go and break the block (bx, by, bz) and then the next of its kind within 6 blocks, as long as there is one it can reach: it stands beside the block (one it can reach
  * with its hands: about 2 blocks up or down) and takes 1.5 times the time the player would, a tree (the lowest log is taken, the whole trunk goes with it and the leaves

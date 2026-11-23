@@ -13,7 +13,7 @@ const int8_t bl_face_n[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1
 
 static const char *const k_names[BL_COUNT] = {
 	"air", "grass", "dirt", "stone", "sand", "log", "leaves", "planks", "glass", "water", "bedrock", "brick", "snow", "cobble", "torch", "lamp",
-	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep",
+	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks",
 };
 
 const char *bl_block_name(int block)
@@ -35,6 +35,7 @@ float bl_hardness(int block)
 	case BL_LOG: return 1.2f;
 	case BL_STONE: case BL_COBBLE: return 2.0f;
 	case BL_BRICK: return 2.2f;
+	case BL_BARRACKS: return 2.4f;
 	default: return 0.0f;
 	}
 }
@@ -45,7 +46,7 @@ int bl_drop(int block)
 	case BL_GRASS: return BL_DIRT;
 	case BL_STONE: return BL_COBBLE;
 	case BL_LEAVES: case BL_GLASS: return BL_AIR;
-	case BL_DIRT: case BL_SAND: case BL_LOG: case BL_PLANKS: case BL_BRICK: case BL_SNOW: case BL_COBBLE: case BL_TORCH: case BL_LAMP: return block;
+	case BL_DIRT: case BL_SAND: case BL_LOG: case BL_PLANKS: case BL_BRICK: case BL_SNOW: case BL_COBBLE: case BL_TORCH: case BL_LAMP: case BL_BARRACKS: return block;
 	default: return BL_AIR;
 	}
 }

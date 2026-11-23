@@ -49,6 +49,7 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlcard.h"
+#include "wlhelp.h"
 #include "wlwin.h"
 
 #ifndef M_PI
@@ -58,7 +59,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_PGUP = 104, K_PGDN = 109, K_V = 47,
 };
 
 #define SLOTS 9
@@ -76,6 +77,7 @@ enum {
 enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST };
 
 struct app {
+	struct wlhelp help;                                     /* the pages of F1 */
 	struct wlwin win;
 	struct bl_world *world;
 	struct bl_player pl;
@@ -160,6 +162,10 @@ struct app {
 	bool workers_saved;                                     /* player.conf had a `workers` line */
 	int nworkers_conf;
 	float worker_conf[BL_WORKER_MAX][3];
+	bool soldiers_saved;                                    /* player.conf had a `soldiers` line */
+	int nsoldiers_conf;
+	float soldier_conf[BL_SOLDIER_MAX][3];
+	bool wave_msg_done;                                     /* the message of the wave's end was given */
 
 	struct bl_hit aim;
 	bool aimed;
@@ -214,9 +220,9 @@ static bool hand_ok(int b)
 	return b > BL_AIR && b < BL_COUNT && b != BL_BEDROCK && !(b >= BL_FLOW1 && b <= BL_FLOW7);
 }
 
-#define PAL_N 14
+#define PAL_N 15
 #define PAL_COLS 7
-static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP };
+static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP, BL_BARRACKS };
 
 static int hand_block(const struct app *a)
 {
@@ -310,6 +316,23 @@ static void conf_path(const struct app *a, char *out, size_t n)
 	snprintf(out, n, "%.500s/player.conf", a->dir);
 }
 
+/* "x:y:z,x:y:z": the places of some workers or soldiers; how many were read (at most `max`) */
+static int parse_units(const char *v, float out[][3], int max)
+{
+	int n = 0;
+	for (const char *p = v; *p && n < max;) {
+		float c[3];
+		int used = 0;
+		if (sscanf(p, "%f:%f:%f%n", &c[0], &c[1], &c[2], &used) != 3 || used <= 0)
+			break;
+		p += used;
+		memcpy(out[n++], c, sizeof c);
+		while (*p == ',' || *p == ' ')
+			p++;
+	}
+	return n;
+}
+
 /* x y z yaw pitch time slot hotbar fov sens flying */
 static void conf_load(struct app *a, bool with_player)
 {
@@ -376,17 +399,10 @@ static void conf_load(struct app *a, bool with_player)
 		}
 		else if (with_player && !strcmp(k, "workers")) {
 			a->workers_saved = true;
-			a->nworkers_conf = 0;
-			for (char *p = v; *p && a->nworkers_conf < BL_WORKER_MAX;) {
-				float c[3];
-				int used = 0;
-				if (sscanf(p, "%f:%f:%f%n", &c[0], &c[1], &c[2], &used) != 3 || used <= 0)
-					break;
-				p += used;
-				memcpy(a->worker_conf[a->nworkers_conf++], c, sizeof c);
-				while (*p == ',' || *p == ' ')
-					p++;
-			}
+			a->nworkers_conf = parse_units(v, a->worker_conf, BL_WORKER_MAX);
+		} else if (with_player && !strcmp(k, "soldiers")) {
+			a->soldiers_saved = true;
+			a->nsoldiers_conf = parse_units(v, a->soldier_conf, BL_SOLDIER_MAX);
 		} else if (with_player && !strcmp(k, "pet_t") && d >= 0 && d < 1e7)
 			a->pet_t = (float)d;
 		else if (with_player && !strcmp(k, "yard_x") && d > 0 && d < 5000) {
@@ -451,6 +467,15 @@ static void conf_save(const struct app *a)
 		bool first = true;
 		for (int i = 0; i < BL_MOBS_MAX; i++)
 			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER) {
+				fprintf(f, "%s%.2f:%.2f:%.2f", first ? "" : ",", a->mobs.mob[i].x, a->mobs.mob[i].y, a->mobs.mob[i].z);
+				first = false;
+			}
+	}
+	fprintf(f, "\nsoldiers = ");
+	{
+		bool first = true;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_SOLDIER) {
 				fprintf(f, "%s%.2f:%.2f:%.2f", first ? "" : ",", a->mobs.mob[i].x, a->mobs.mob[i].y, a->mobs.mob[i].z);
 				first = false;
 			}
@@ -627,9 +652,10 @@ static void inv_add(struct app *a, int block, int n)
 /* what a block can be made into by hand: one of it gives `n_out` of the other (X) */
 struct recipe {
 	int from, to, n_out;
+	int n_in;                                               /* how many of `from` it takes (0 = one) */
 };
 static const struct recipe k_recipes[] = {
-	{ BL_LOG, BL_PLANKS, 4 }, { BL_PLANKS, BL_TORCH, 2 }, { BL_SAND, BL_GLASS, 1 }, { BL_COBBLE, BL_STONE, 1 }, { BL_STONE, BL_BRICK, 1 },
+	{ BL_LOG, BL_PLANKS, 4, 1 }, { BL_PLANKS, BL_TORCH, 2, 1 }, { BL_SAND, BL_GLASS, 1, 1 }, { BL_COBBLE, BL_STONE, 1, 1 }, { BL_STONE, BL_BRICK, 1, 1 }, { BL_BRICK, BL_BARRACKS, 1, 4 },
 };
 #define N_RECIPES ((int)(sizeof k_recipes / sizeof k_recipes[0]))
 
@@ -650,11 +676,15 @@ static bool craft_hand(struct app *a)
 		say(a, "A %s cannot be made into anything", bl_block_name(b));
 		return false;
 	}
-	if (a->inv[b] < 1) {
-		say(a, "You have no %s", bl_block_name(b));
+	int need = r->n_in > 0 ? r->n_in : 1;
+	if (a->inv[b] < need) {
+		if (a->inv[b] < 1)
+			say(a, "You have no %s", bl_block_name(b));
+		else
+			say(a, "%d %s are needed for a %s", need, bl_block_name(b), bl_block_name(r->to));
 		return false;
 	}
-	a->inv[b]--;
+	a->inv[b] -= need;
 	inv_add(a, r->to, r->n_out);
 	say(a, "Made %d %s", r->n_out, bl_block_name(r->to));
 	return true;
@@ -744,7 +774,7 @@ static bool worker_spot(const struct app *a, float cx, float cz, float r0, float
 			if (top < 1)
 				continue;
 			float y = (float)top + 1.0f;
-			if (bl_box_hits(a->world, x, y, z, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(a->world, (int)floorf(x), (int)y, (int)floorf(z))))
+			if (bl_box_hits(a->world, x, y, z, BL_GOBLIN_HW, BL_SOLDIER_H) || bl_water(bl_get(a->world, (int)floorf(x), (int)y, (int)floorf(z))))
 				continue;
 			bool crowded = false;
 			for (int i = 0; i < BL_MOBS_MAX; i++) {
@@ -817,6 +847,89 @@ static bool train_worker(struct app *a)
 	sound(a, "place");
 	say(a, "A worker joins you (%d)", nworkers(a));
 	return true;
+}
+
+/* ---- soldiers: trained at a barracks ---- */
+
+#define SOLDIER_COBBLE 6                                        /* what a soldier costs ... */
+#define SOLDIER_PLANKS 4                                        /* ... in survival */
+#define SOLDIERS_PER_BARRACKS 4
+#define BARRACKS_RANGE 40                                       /* a barracks counts when it is this near the keep (else: the hero) */
+
+static int nsoldiers(const struct app *a)
+{
+	return bl_mobs_count_kind(&a->mobs, BL_MOB_SOLDIER);
+}
+
+/* the barracks round the keep: how many, and the first one's place (the block's middle at its foot) */
+static int barracks_find(const struct app *a, float first[3])
+{
+	float cx = a->have_keep ? (float)a->keep[0] : a->pl.x, cy = a->have_keep ? (float)a->keep[1] : a->pl.y, cz = a->have_keep ? (float)a->keep[2] : a->pl.z;
+	const struct bl_world *w = a->world;
+	int x0 = (int)cx - BARRACKS_RANGE, x1 = (int)cx + BARRACKS_RANGE, z0 = (int)cz - BARRACKS_RANGE, z1 = (int)cz + BARRACKS_RANGE;
+	int y0 = (int)cy - 14, y1 = (int)cy + 14, n = 0;
+	x0 = x0 < 0 ? 0 : x0;
+	z0 = z0 < 0 ? 0 : z0;
+	y0 = y0 < 0 ? 0 : y0;
+	x1 = x1 >= w->w ? w->w - 1 : x1;
+	z1 = z1 >= w->d ? w->d - 1 : z1;
+	y1 = y1 >= w->h ? w->h - 1 : y1;
+	for (int z = z0; z <= z1; z++)
+		for (int x = x0; x <= x1; x++) {
+			if (w->hi[(size_t)z * (size_t)w->w + (size_t)x] < y0)
+				continue;
+			for (int y = y0; y <= y1; y++)
+				if (bl_get(w, x, y, z) == BL_BARRACKS) {
+					if (n == 0 && first) {
+						first[0] = (float)x + 0.5f;
+						first[1] = (float)y;
+						first[2] = (float)z + 0.5f;
+					}
+					n++;
+				}
+		}
+	return n;
+}
+
+/* a soldier: needs a barracks (four soldiers to each, eight in all), and in survival six cobble and four planks; he stands near the barracks and it is his post */
+static bool train_soldier(struct app *a)
+{
+	float where[3] = { 0, 0, 0 };
+	int nb = barracks_find(a, where);
+	if (nb == 0) {
+		sound(a, "no");
+		say(a, "A barracks is needed: X makes one of four bricks, put it near the keep");
+		return false;
+	}
+	if (nsoldiers(a) >= BL_SOLDIER_MAX || nsoldiers(a) >= nb * SOLDIERS_PER_BARRACKS) {
+		sound(a, "no");
+		say(a, nsoldiers(a) >= BL_SOLDIER_MAX ? "You cannot have more than %d soldiers" : "Each barracks takes %d soldiers: another barracks is needed", nsoldiers(a) >= BL_SOLDIER_MAX ? BL_SOLDIER_MAX : SOLDIERS_PER_BARRACKS);
+		return false;
+	}
+	if (a->survival && (a->inv[BL_COBBLE] < SOLDIER_COBBLE || a->inv[BL_PLANKS] < SOLDIER_PLANKS)) {
+		sound(a, "no");
+		say(a, "A soldier costs %d cobble and %d planks", SOLDIER_COBBLE, SOLDIER_PLANKS);
+		return false;
+	}
+	float p[3];
+	if (!worker_spot(a, where[0], where[2], 2.0f, p) || !bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, p[0], p[1], p[2])) {
+		say(a, "There is no room for a soldier by the barracks");
+		return false;
+	}
+	if (a->survival) {
+		a->inv[BL_COBBLE] -= SOLDIER_COBBLE;
+		a->inv[BL_PLANKS] -= SOLDIER_PLANKS;
+	}
+	sound(a, "place");
+	say(a, "A soldier joins you (%d)", nsoldiers(a));
+	return true;
+}
+
+/* a saved world: the soldiers where they stood (and at their posts) */
+static void soldiers_restore(struct app *a)
+{
+	for (int i = 0; a->soldiers_saved && i < a->nsoldiers_conf; i++)
+		bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, a->soldier_conf[i][0], a->soldier_conf[i][1], a->soldier_conf[i][2]);
 }
 
 /* what the workers have finished: the blocks go, what they leave goes into the pockets */
@@ -894,7 +1007,7 @@ static int cmd_selected(const struct app *a)
 {
 	int n = 0;
 	for (int i = 0; i < BL_MOBS_MAX; i++)
-		n += a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER && a->mobs.mob[i].selected;
+		n += a->mobs.mob[i].alive && bl_mob_is_unit(a->mobs.mob[i].kind) && a->mobs.mob[i].selected;
 	return n;
 }
 
@@ -938,7 +1051,7 @@ static void cmd_select_box(struct app *a, double x0, double y0, double x1, doubl
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		struct bl_mob *m = &a->mobs.mob[i];
 		float sx, sy;
-		if (m->alive && m->kind == BL_MOB_WORKER && cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy) && sx >= lx && sx <= hx && sy >= ly && sy <= hy)
+		if (m->alive && bl_mob_is_unit(m->kind) && cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy) && sx >= lx && sx <= hx && sy >= ly && sy <= hy)
 			m->selected = true;
 	}
 }
@@ -948,7 +1061,7 @@ static void cmd_order(struct app *a)
 {
 	int n = cmd_selected(a);
 	if (n == 0) {
-		say(a, "Choose workers first: the left button");
+		say(a, "Choose workers or soldiers first: the left button");
 		return;
 	}
 	struct bl_camera cam;
@@ -960,24 +1073,27 @@ static void cmd_order(struct app *a)
 		say(a, "Nothing there");
 		return;
 	}
-	int ok = 0, k = 0;
+	int ok = 0, k = 0, soldiers = 0;
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		struct bl_mob *m = &a->mobs.mob[i];
-		if (!m->alive || m->kind != BL_MOB_WORKER || !m->selected)
+		if (!m->alive || !bl_mob_is_unit(m->kind) || !m->selected)
 			continue;
-		if (a->order_mode == 1) {
+		if (a->order_mode == 1 && m->kind == BL_MOB_WORKER) {
 			ok += bl_mobs_order_gather(&a->mobs, a->world, i, h.x, h.y, h.z);
 		} else {
+			soldiers += m->kind == BL_MOB_SOLDIER;
 			float gx = (h.face == BL_PY ? (float)h.x : (float)h.px) + 0.5f, gz = (h.face == BL_PY ? (float)h.z : (float)h.pz) + 0.5f;
 			bl_mobs_order_move(&a->mobs, i, gx + (float)(k % 3 - 1) * 0.9f, gz + (float)(k / 3) * 0.9f);        /* (spread out, so they do not stand in each other) */
 			ok++;
 		}
 		k++;
 	}
-	if (a->order_mode == 1)
-		say(a, ok ? "%d worker%s: break %s" : "They cannot reach that", ok, ok == 1 ? "" : "s", bl_block_name(bl_get(a->world, h.x, h.y, h.z)));
+	if (a->order_mode == 1 && ok > soldiers)
+		say(a, "%d unit%s: break %s%s", ok - soldiers, ok - soldiers == 1 ? "" : "s", bl_block_name(bl_get(a->world, h.x, h.y, h.z)), soldiers ? " (the soldiers go and stand guard there)" : "");
+	else if (a->order_mode == 1 && ok == 0)
+		say(a, "They cannot reach that");
 	else
-		say(a, "%d worker%s: go there", ok, ok == 1 ? "" : "s");
+		say(a, "%d unit%s: %s there", ok, ok == 1 ? "" : "s", soldiers == ok ? "guard" : "go");
 	sound(a, ok ? "place" : "no");
 }
 
@@ -1353,6 +1469,14 @@ static void mobs_advance(struct app *a, float dt)
 		say(a, R.workers_lost == 1 ? "A goblin killed a worker!" : "Goblins killed workers!");
 		sound(a, "no");
 	}
+	if (R.soldiers_lost > 0) {
+		say(a, R.soldiers_lost == 1 ? "A goblin killed a soldier!" : "Goblins killed soldiers!");
+		sound(a, "no");
+	}
+	if (R.slain > 0) {
+		a->kills += R.slain;
+		sound(a, "win");
+	}
 	if (R.keep_damage > 0.0f && a->survival && a->have_keep) {
 		a->keep_hp -= R.keep_damage;
 		if (a->keep_msg_t <= 0.0f) {
@@ -1410,12 +1534,21 @@ static void survival_tick(struct app *a, float dt)
 	a->keep_msg_t = fmaxf(0.0f, a->keep_msg_t - dt);
 	float day = bl_daylight(a->time_h);
 	if (day < 0.3f) {
+		if (!a->in_night && a->have_keep && a->mobs_on) {              /* a night begins: a wave comes for the keep (the bigger the more nights are behind him) */
+			int n = 3 + 2 * a->nights > 18 ? 18 : 3 + 2 * a->nights, cap = 3 + a->nights > 10 ? 10 : 3 + a->nights;
+			bl_mobs_start_wave(&a->mobs, n, cap);
+			a->wave_msg_done = false;
+			say(a, "Night %d: a wave of %d goblins comes for the keep!", a->nights + 1, n);
+			sound(a, "no");
+		}
 		a->in_night = true;
 	} else if (day > 0.6f) {
 		if (a->in_night && a->have_keep) {
 			a->nights++;
 			say(a, "Night %d survived", a->nights);
 		}
+		if (a->mobs.wave_on)
+			bl_mobs_end_wave(&a->mobs);
 		a->in_night = false;
 		if (a->have_keep && a->keep_hp < KEEP_HP)
 			a->keep_hp = fminf(KEEP_HP, a->keep_hp + 1.5f * dt);
@@ -1612,9 +1745,13 @@ static void paint_survival(struct app *a)
 		wlwin_round_fill(w, x, y, bw, 12, 5, 0x3a2a2au);
 		if (f > 0.0f)
 			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 12, 5, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
-		char l[80];
-		snprintf(l, sizeof l, "Keep %d   Nights %d   Workers %d   (Tab: command view)", (int)ceilf(a->keep_hp), a->nights, nworkers(a));
+		char l[160];
+		snprintf(l, sizeof l, "Keep %d   Nights %d   Workers %d   Soldiers %d   (Tab: command view)", (int)ceilf(a->keep_hp), a->nights, nworkers(a), nsoldiers(a));
 		shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
+		if (a->mobs.wave_on && bl_mobs_wave_remaining(&a->mobs) > 0) {
+			snprintf(l, sizeof l, "Wave: %d goblins left", bl_mobs_wave_remaining(&a->mobs));
+			shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18 + LM_FONT_H + 2, l, 0xff9a70u);
+		}
 	}
 	if (a->dig_on) {
 		float hd = bl_hardness(bl_get(a->world, a->dig_x, a->dig_y, a->dig_z)), f = hd > 0.0f ? a->dig_t / hd : 0.0f;
@@ -1633,6 +1770,8 @@ static const char *order_text(const struct app *a, const struct bl_mob *m, char 
 		return buf;
 	}
 	(void)a;
+	if (m->kind == BL_MOB_SOLDIER)
+		return hypotf(m->tx - m->x, m->tz - m->z) > 1.2f ? "going to its post" : "on guard";
 	return m->order == BL_ORDER_MOVE ? "going" : "idle";
 }
 
@@ -1643,14 +1782,16 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		const struct bl_mob *m = &a->mobs.mob[i];
 		float sx, sy;
-		if (!m->alive || m->kind != BL_MOB_WORKER || !cmd_project(a, cam, m->x, m->y + BL_WORKER_H + 0.35f, m->z, &sx, &sy))
+		if (!m->alive || !bl_mob_is_unit(m->kind) || !cmd_project(a, cam, m->x, m->y + bl_mob_h(m->kind) + 0.35f, m->z, &sx, &sy))
 			continue;
 		int x = (int)sx, y = (int)sy;
+		const bool sol = m->kind == BL_MOB_SOLDIER;
+		const float maxhp = sol ? BL_SOLDIER_HP : BL_WORKER_HP;
 		wlwin_round_fill(w, x - 7, y - 7, 14, 14, 7, m->selected ? 0xffffffu : 0x10141cu);
-		wlwin_round_fill(w, x - 5, y - 5, 10, 10, 5, m->selected ? 0x4cd98cu : 0x4a90e0u);
-		if (m->hp < BL_WORKER_HP) {                                          /* hurt: a small bar */
+		wlwin_round_fill(w, x - 5, y - 5, 10, 10, 5, m->selected ? 0x4cd98cu : sol ? 0xe05050u : 0x4a90e0u);
+		if (m->hp < maxhp) {                                                 /* hurt: a small bar */
 			wlwin_fill(w, x - 10, y + 9, 20, 4, 0x101010u);
-			wlwin_fill(w, x - 9, y + 10, (int)(18.0f * m->hp / BL_WORKER_HP), 2, m->hp > 3.0f ? 0x4cb050u : 0xe04030u);
+			wlwin_fill(w, x - 9, y + 10, (int)(18.0f * m->hp / maxhp), 2, m->hp > maxhp * 0.5f ? 0x4cb050u : 0xe04030u);
 		}
 		if (m->selected) {
 			char buf[64];
@@ -1677,14 +1818,15 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		}
 	}
 	char l[200];
-	int y0 = a->survival ? 74 : 6;                                           /* (the keep's bar and the message are at the top in survival) */
+	int y0 = a->survival ? 88 : 6;                                           /* (the keep's bar and the message are at the top in survival) */
 	shadow_text(w, 8, y0, "COMMAND VIEW", 0xffe080u);
 	snprintf(l, sizeof l, "Left: choose (drag a box, Shift adds)   Right: %s   1 go there, 2 break blocks", a->order_mode == 1 ? "break that block and the rest of its kind" : "go there");
 	shadow_text(w, 8, y0 + LM_FONT_H + 2, l, 0xffffffu);
-	snprintf(l, sizeof l, "B: a new worker (%d planks)   WASD move, arrows turn, wheel zoom, Home back   Tab or Esc: back to him", WORKER_COST);
+	snprintf(l, sizeof l, "B: a worker (%d planks)   V: a soldier (a barracks, %d cobble, %d planks)", WORKER_COST, SOLDIER_COBBLE, SOLDIER_PLANKS);
 	shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), l, 0xffffffu);
-	snprintf(l, sizeof l, "Workers %d, chosen %d", nworkers(a), cmd_selected(a));
-	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xc8e8ffu);
+	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
+	snprintf(l, sizeof l, "Workers %d, soldiers %d, chosen %d", nworkers(a), nsoldiers(a), cmd_selected(a));
+	shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), l, 0xc8e8ffu);
 }
 
 static void paint_debug(struct app *a)
@@ -1713,22 +1855,175 @@ static void paint_debug(struct app *a)
 	shadow_text(w, 8, y, l, 0xffffffu);
 }
 
-static const char *const HELP_LINES[] = {
-	"W A S D walk, Space jumps (swims up, flies up), Shift sneaks (flies down).",
-	"Ctrl runs. F flies. The arrow keys look round.",
-	"The left button breaks a block (hold it), the right one puts the block in",
-	"your hand against the face you aim at, the middle one takes the block you aim at.",
-	"1 to 9 or the wheel choose the block in the hand, E opens the palette of every block.",
-	"Torches and lamps give light. Water put by hand is a source and flows.",
-	"[ and ] move the clock an hour, T: the clock stands, runs, follows the real sun.",
-	"P shows or hides Tom the cat and Filip the turtle (they live in a yard near where you start).",
-	"At night goblins come: the left button is the sword (three blows). Ten hearts, M switches them off.",
-	"Survival (G switches it and creative): blocks take time, what you break you have, a block put is used up,",
-	"X makes something of the block in your hand (log: planks, planks: torches). Defend the keep, the tower near the start.",
-	"Tab: the command view from above. Choose workers (left button, drag a box), right button: go there or break",
-	"that block and the rest of its kind (a tree falls whole). B trains a worker (8 planks). Tab or Esc: back.",
-	"F3 shows the numbers. Ctrl+S saves, Ctrl+N makes a new world, Esc pauses, Ctrl+Q quits.",
+/* ---- the help: pages of text with a list of topics (F1; wlhelp.h; a feature of the game needs its line here) ---- */
+static const char *const HP_WELCOME[] = {
+	"# What this is",
+	"A world made of blocks, in the first person. You walk, look, break blocks and put them back. By day it is quiet; at night goblins come out of the ground, and in survival you have a keep to defend with workers and soldiers you command from above.",
+	"# The window",
+	"- The picture is drawn at a smaller size and stretched, so it stays quick; it takes more pixels by itself when the machine has the time.",
+	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In survival the number under a block is how many you have.",
+	"- Ten hearts over the hotbar are your hit points. In survival the keep's bar is at the top.",
+	"# To start",
+	"|Click|Click in the window: the pointer is locked to it and the game goes on. Esc lets the pointer go and pauses.",
+	"|F1|These pages.",
+	"|Ctrl+S|Save the world and where you are (it also saves itself every minute and when you pause or quit).",
+	"|Ctrl+N|A new world (asks first).",
+	"|Ctrl+Q|Quit.",
+	"# A world from a seed",
+	"A world started with --seed or --flat is not saved unless you also give --save, so looking at a seed never replaces your own world.",
 };
+
+static const char *const HP_MOVING[] = {
+	"# Walking about",
+	"|W A S D|Walk forward, left, back, right. The keys count by their place, whatever the letters on them are.",
+	"|Mouse|Look round. The arrow keys look round too.",
+	"|Space|Jump. In water it swims you up; while flying it goes up.",
+	"|Shift|Sneak: slow, lower, and you do not walk off an edge. While flying it goes down.",
+	"|Ctrl|Run.",
+	"|F|Fly (double speed with Ctrl). Press it again to come down.",
+	"# Time",
+	"|[ and ]|Move the clock an hour back or on.",
+	"|T|The clock stands still, runs (a day is twenty minutes), or follows the real sun of the place the computer is in: the real sunrise is six o'clock here and the real sunset is six in the evening.",
+	"|F3|Numbers: where you are, what you aim at, how quick the picture is.",
+	"# Water and falling",
+	"Water slows you down and holds you up. A hop out of it onto the bank works with Space. A fall does not hurt.",
+};
+
+static const char *const HP_BUILDING[] = {
+	"# Breaking and putting",
+	"|Left button|Break the block you aim at (hold it). In survival a block takes time and the crosshair shows how far it is.",
+	"|Right button|Put the block in your hand against the face you aim at (hold it to go on).",
+	"|Middle button|Take the block you aim at into your hand.",
+	"|1 to 9, wheel|Choose the square of the hotbar.",
+	"|E|The palette: every block you can put. A click puts it into the square in your hand. In survival only what you have.",
+	"# The blocks",
+	"- Grass, dirt, stone, sand, snow, cobble, brick, planks, logs, leaves and glass are what you expect them to be.",
+	"- A torch gives light and stands on a block; it goes if the block under it goes. A lamp is a block that shines.",
+	"- Water you put by hand is a source and flows: down first, then out as far as seven blocks. Take the source away and the flow dries up.",
+	"- Bedrock at the bottom cannot be broken. The keep (a tower of three grey blocks) cannot be broken by hand either.",
+	"- A barracks (red brick, blue banner) is where soldiers are trained.",
+	"# Light",
+	"Torches and lamps light the blocks round them; a cave without one is dim. The light goes round corners and through glass and water, and goes when the torch does.",
+};
+
+static const char *const HP_SURVIVAL[] = {
+	"# Two modes",
+	"|G|Switch between survival and creative. A new world starts in survival; a world saved before this had survival is a creative one.",
+	"- Creative: every block, breaking at once, nothing used up.",
+	"- Survival: a block takes time, what it leaves goes into your pockets, a block you put is used up.",
+	"# How long a block takes (held)",
+	"|Leaves, torch|A moment.",
+	"|Dirt, sand, grass, snow|Half a second or so.",
+	"|Planks, logs|About one second.",
+	"|Stone, cobble, brick|Two seconds and a little.",
+	"# What a block leaves",
+	"Grass leaves dirt and stone leaves cobble; leaves and glass leave nothing; everything else leaves itself. A block that is not in the hotbar takes the place of an empty square.",
+	"# Making things",
+	"|X|Make something of the block in your hand.",
+	"|Log|Four planks.",
+	"|Planks|Two torches.",
+	"|Sand|Glass.",
+	"|Cobble|Stone.",
+	"|Stone|Brick.",
+	"|Brick (four)|A barracks.",
+};
+
+static const char *const HP_NIGHT[] = {
+	"# Goblins",
+	"At night goblins come out of the ground fourteen to twenty-six blocks from you, in the open. They walk at you, climb a block that is one high, and hit when they are near: three of your twenty hit points a blow, once a second, and they push you away.",
+	"In daylight a goblin that stands in the open burns up in about five seconds; one under a roof or in water does not. They never come by day.",
+	"# The sword",
+	"The left button is the sword when a goblin is nearer than the block you aim at: three blows kill one and no block behind it is broken. The crosshair turns red when a blow lands.",
+	"# Hit points",
+	"Hit points come back, one every three seconds, six seconds after the last blow. At nought you die: a card says so, and Respawn puts you back at the start with the world as you left it.",
+	"|M|Switch the goblins off and on (the ones there are go).",
+	"|P|Show or hide Tom the cat and Filip the turtle, who live near where you start. A solid block cannot be put into them and they cannot be hurt.",
+};
+
+static const char *const HP_KEEP[] = {
+	"# The keep",
+	"In survival a tower of three grey blocks with a red shield stands near where you start. It has sixty hit points, mends by day and cannot be broken by hand. When it falls the game is over.",
+	"Goblins that do not have you within eight blocks go for the keep, or for your workers if they see any, and hit what they find. A goblin that has you within eight blocks goes for you.",
+	"# Nights",
+	"Each night the keep stands is counted at the top. The clock has to run (T) for the nights to pass.",
+	"# Workers",
+	"Two workers come with a new survival world. They do what you tell them from the command view and can be killed (two blows).",
+	"|B|Train another worker, up to eight: eight planks (free in creative).",
+	"|V|Train a soldier (see Soldiers, waves).",
+};
+
+static const char *const HP_SOLDIERS[] = {
+	"# Barracks",
+	"A barracks is a block of red brick in a timber frame with a blue banner. It is made of four bricks (hold bricks, press X; a stone makes a brick) and put anywhere within forty blocks of the keep. A hand can take it away again.",
+	"|V|In the command view: train a soldier. He stands by the barracks. It costs six cobble and four planks (free in creative) and takes a barracks: four soldiers to each, eight in all.",
+	"# Soldiers",
+	"A soldier has fourteen hit points and a sword that does what yours does: three blows kill a goblin. He goes after a goblin that comes within twelve blocks of him (and within eighteen of his post), then goes back to his post and stands guard.",
+	"|Right button|Soldiers you have chosen walk to the place you point at and that is their new post. Mode 2 does not matter to them: only workers break blocks.",
+	"|Backspace|The soldier stops where he is and that is his post.",
+	"Goblins go for soldiers as they go for workers: four of them kill one, two soldiers can hold off two.",
+	"# Waves",
+	"When night begins and the keep stands a wave of goblins comes out of the ground twenty to thirty-two blocks from the KEEP (not from you) and walks at it. The first night it is three, each night after it two more (up to eighteen), and no more than three to ten are there at a time. The top of the window tells how many are left.",
+	"At dawn the wave is over and the keep mends. Surviving the night is counted. Soldiers are what makes the difference: put the barracks and the soldiers between the goblins and the keep.",
+};
+
+static const char *const HP_COMMAND[] = {
+	"# The command view",
+	"|Tab|Look down from above and command your workers. Tab or Esc takes you back to the hero. The goblins and the workers go on meanwhile; the hero stands still.",
+	"# Choosing",
+	"|Left button|Click a worker to choose him, or pull a box over several. Shift adds or takes one away. A click on nothing lets go.",
+	"|Ctrl+A|Choose all workers.",
+	"# Giving orders",
+	"|Right button|Send the chosen workers where the pointer is (mode 1), or have them break that block and the next of its kind (mode 2).",
+	"|1, 2|Mode 1: go there. Mode 2: break. The mode is written at the top.",
+	"|Backspace|Stop what the chosen are doing.",
+	"# Gathering",
+	"A worker stands beside the block, works for one and a half times as long as you would and then goes on to the next block of the same kind within six blocks. A tree is aimed at its lowest log: the whole trunk and the leaves of its crown go together. What he breaks goes into your pockets.",
+	"# The camera",
+	"|W A S D|Move the view.",
+	"|Arrows|Turn it.",
+	"|Wheel|Come nearer or go further.",
+	"|Home|Back to the keep.",
+};
+
+static const char *const HP_KEYS[] = {
+	"# Moving",
+	"|W A S D|Walk",
+	"|Space, Shift, Ctrl|Jump, sneak, run",
+	"|F|Fly",
+	"# Blocks",
+	"|Left, right, middle|Break, put, take",
+	"|1 to 9, wheel|Choose a square",
+	"|E|Palette",
+	"|X|Make something (survival)",
+	"# Game",
+	"|G|Survival / creative",
+	"|M|Goblins on / off",
+	"|P|Tom and Filip on / off",
+	"|Tab|Command view",
+	"|B|Train a worker (command view)",
+	"|V|Train a soldier (command view)",
+	"# Time",
+	"|[ ]|The clock an hour",
+	"|T|Stand / run / real sun",
+	"# Others",
+	"|F1|These pages",
+	"|F3|Numbers",
+	"|Esc|Pause",
+	"|Ctrl+S, Ctrl+N, Ctrl+Q|Save, new world, quit",
+};
+
+static const struct wlhelp_page BLOCKS_HELP[] = {
+	{ "Welcome", HP_WELCOME, WLHELP_N(HP_WELCOME) },
+	{ "Moving", HP_MOVING, WLHELP_N(HP_MOVING) },
+	{ "Building", HP_BUILDING, WLHELP_N(HP_BUILDING) },
+	{ "Survival", HP_SURVIVAL, WLHELP_N(HP_SURVIVAL) },
+	{ "Night, sword", HP_NIGHT, WLHELP_N(HP_NIGHT) },
+	{ "The keep", HP_KEEP, WLHELP_N(HP_KEEP) },
+	{ "Soldiers, waves", HP_SOLDIERS, WLHELP_N(HP_SOLDIERS) },
+	{ "The command view", HP_COMMAND, WLHELP_N(HP_COMMAND) },
+	{ "All the keys", HP_KEYS, WLHELP_N(HP_KEYS) },
+};
+#define BLOCKS_HELP_N WLHELP_N(BLOCKS_HELP)
 
 static int pal_cell(const struct app *a)                   /* the size of a square of the palette */
 {
@@ -1740,8 +2035,8 @@ static int pal_cell(const struct app *a)                   /* the size of a squa
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
 	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
-	int ch = a->prompt == P_HELP ? 420 : a->prompt == P_PAUSE ? 200 : (a->prompt == P_DEAD || a->prompt == P_LOST) ? 150 : 130;
-	int cw = a->prompt == P_HELP ? 600 : 470;
+	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 200 : (a->prompt == P_DEAD || a->prompt == P_LOST) ? 150 : 130;
+	int cw = a->prompt == P_HELP ? 940 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
 		cw = PAL_COLS * cell + 2 * WLCARD_PAD;
@@ -1780,7 +2075,7 @@ static void paint_card(struct app *a)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
-	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Keys" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
+	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	const char *labels[4] = { "Cancel", "OK" };
 	uint32_t cols[4] = { lm_theme.btn_grey, lm_theme.btn_blue };
@@ -1843,8 +2138,7 @@ static void paint_card(struct app *a)
 	} else {
 		labels[0] = "Close";
 		cols[0] = lm_theme.btn_blue;
-		for (size_t i = 0; i < sizeof HELP_LINES / sizeof HELP_LINES[0]; i++)
-			wlwin_text(w, tx, c.y + 40 + (int)i * (LM_FONT_H + 5), HELP_LINES[i], 1, lm_theme.text, tw);
+		wlhelp_paint(&a->help, w, &c, a->px, a->py, a->has_pointer);
 	}
 	wlcard_buttons(w, &c, labels, nb, cols, a->pc_hover, a->pc_down, lm_theme.on_colour);
 }
@@ -1884,21 +2178,21 @@ static void write_dump(struct app *a)
 			const struct bl_mob *m = &a->mobs.mob[i];
 			fprintf(f, "mob %d x=%.3f y=%.3f z=%.3f hp=%.1f yaw=%.3f hurt=%.2f dist=%.2f\n", i, m->x, m->y, m->z, m->hp, m->yaw, m->hurt, hypotf(m->x - a->pl.x, m->z - a->pl.z));
 		}
-	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
-	        a->dig_on ? a->dig_t : -1.0f);
+	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
+	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL));
 	{
 		struct bl_camera cam;
 		cmd_camera(a, &cam);
-		fprintf(f, "cmd on=%d mode=%d sel=%d workers=%d dist=%.1f yaw=%.3f focus=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f\n", a->cmd, a->order_mode, cmd_selected(a), nworkers(a), a->cam_dist, a->cam_yaw,
+		fprintf(f, "cmd on=%d mode=%d sel=%d workers=%d soldiers=%d dist=%.1f yaw=%.3f focus=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f\n", a->cmd, a->order_mode, cmd_selected(a), nworkers(a), nsoldiers(a), a->cam_dist, a->cam_yaw,
 		        a->cam_f[0], a->cam_f[1], a->cam_f[2], cam.x, cam.y, cam.z);
 		for (int i = 0; i < BL_MOBS_MAX; i++) {
 			const struct bl_mob *m = &a->mobs.mob[i];
 			float sx = -1, sy = -1;
-			if (!m->alive || m->kind != BL_MOB_WORKER)
+			if (!m->alive || !bl_mob_is_unit(m->kind))
 				continue;
 			bool vis = cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
-			fprintf(f, "worker %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d sel=%d vis=%d sx=%.1f sy=%.1f gather=%d,%d,%d\n", i, m->x, m->y, m->z, m->hp, m->order, m->selected, vis, sx, sy, m->gx, m->gy,
-			        m->gz);
+			fprintf(f, "%s %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d sel=%d vis=%d sx=%.1f sy=%.1f gather=%d,%d,%d post=%.2f,%.2f\n", m->kind == BL_MOB_SOLDIER ? "soldier" : "worker", i, m->x, m->y, m->z, m->hp, m->order, m->selected, vis, sx, sy, m->gx, m->gy,
+			        m->gz, m->tx, m->tz);
 		}
 	}
 	fprintf(f, "inv");
@@ -1938,6 +2232,8 @@ static void write_dump(struct app *a)
 			for (int i = 0; i < PAL_N; i++)
 				fprintf(f, "pal %d x=%d y=%d w=%d h=%d block=%s\n", i, gx + (i % PAL_COLS) * cell, gy + (i / PAL_COLS) * cell, cell, cell, bl_block_name(k_palette[i]));
 		}
+		if (a->prompt == P_HELP)
+			wlhelp_dump(&a->help, f, &c);
 		for (int k = 0; k < nb; k++) {
 			int x, y, bw, bh;
 			wlcard_button_rect(&c, k, nb, &x, &y, &bw, &bh);
@@ -2040,7 +2336,7 @@ static void paint(struct wlwin *w)
 	if (a->debug)
 		paint_debug(a);
 	if (a->msg[0]) {
-		shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, a->survival ? 52 : 26, a->msg, 0xffffffu);       /* (under the keep's bar in survival) */
+		shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, a->survival ? 64 : 26, a->msg, 0xffffffu);       /* (under the keep's bar in survival) */
 		if (t1 - a->msg_ms > 3000)
 			a->msg[0] = 0;
 	}
@@ -2105,9 +2401,16 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
+	if (a->prompt == P_HELP && op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
+		wlhelp_scroll(&a->help, &c, lm_fixed_to_double(args[2].f) > 0 ? WLHELP_LH * 3 : -WLHELP_LH * 3);
+		a->win.redraw = true;
+		return;
+	}
 	if (op == LM_WL_POINTER_EVT_MOTION) {
 		if (wlcard_drag_motion(&a->win, &c, a->px, a->py))
 			return;
+		if (a->prompt == P_HELP)
+			wlhelp_motion(&a->help, &c, a->px, a->py);
 		a->pc_hover = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
 		a->pal_hover = pal_cell_at(a, a->px, a->py);
 		a->win.redraw = true;
@@ -2132,6 +2435,8 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 			a->pc_down = k;
 		else if (wlcard_drag_press(&a->win, &c, a->px, a->py))
 			;
+		else if (a->prompt == P_HELP && wlhelp_press(&a->help, &c, a->px, a->py))
+			;
 		else if (a->prompt == P_PAUSE) {                     /* a click anywhere else goes on playing */
 			resume_game(a);
 			a->ignore_release = true;
@@ -2140,8 +2445,12 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		}
 	} else {
 		wlcard_drag_release(&a->win);
-		if (a->pc_down >= 0 && a->pc_down == k)
+		if (a->prompt == P_HELP && a->pc_down < 0)
+			wlhelp_release(&a->help, &c, a->px, a->py);
+		else if (a->pc_down >= 0 && a->pc_down == k)
 			card_action(a, k);
+		if (a->prompt == P_HELP)
+			a->help.grab = -1;
 		a->pc_down = -1;
 	}
 	a->win.redraw = true;
@@ -2284,6 +2593,9 @@ static bool cmd_key(struct app *a, uint32_t code)
 	case K_B:
 		train_worker(a);
 		return true;
+	case K_V:
+		train_soldier(a);
+		return true;
 	case K_1:
 		a->order_mode = 0;
 		say(a, "Right button: go there");
@@ -2294,7 +2606,7 @@ static bool cmd_key(struct app *a, uint32_t code)
 		return true;
 	case K_BACKSPACE:
 		for (int i = 0; i < BL_MOBS_MAX; i++)
-			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER && a->mobs.mob[i].selected)
+			if (a->mobs.mob[i].alive && bl_mob_is_unit(a->mobs.mob[i].kind) && a->mobs.mob[i].selected)
 				bl_mobs_order_stop(&a->mobs, i);
 		say(a, "Stopped");
 		return true;
@@ -2350,7 +2662,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	w->redraw = true;
 	if (ctrl && code == K_A && a->cmd && a->prompt == P_NONE) {
 		for (int i = 0; i < BL_MOBS_MAX; i++)
-			if (a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER)
+			if (a->mobs.mob[i].alive && bl_mob_is_unit(a->mobs.mob[i].kind))
 				a->mobs.mob[i].selected = true;
 		return;
 	}
@@ -2384,6 +2696,35 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			card_action(a, 0);
 		return;
 	}
+	if (a->prompt == P_HELP) {
+		struct wlcard hc;
+		int hnb;
+		card_rect(a, &hc, &hnb);
+		switch (code) {
+		case K_ESC: case K_ENTER: case K_F1:
+			card_action(a, 0);                                  /* back to the pause card */
+			break;
+		case K_LEFT: wlhelp_nav(&a->help, &hc, WLHELP_LEFT, 0); break;
+		case K_RIGHT: wlhelp_nav(&a->help, &hc, WLHELP_RIGHT, 0); break;
+		case K_UP: wlhelp_nav(&a->help, &hc, WLHELP_UP, 0); break;
+		case K_DOWN: wlhelp_nav(&a->help, &hc, WLHELP_DOWN, 0); break;
+		case K_PGUP: wlhelp_nav(&a->help, &hc, WLHELP_PGUP, 0); break;
+		case K_PGDN: case K_SPACE: wlhelp_nav(&a->help, &hc, WLHELP_PGDN, 0); break;
+		case K_HOME: wlhelp_nav(&a->help, &hc, WLHELP_HOME, 0); break;
+		case K_END: wlhelp_nav(&a->help, &hc, WLHELP_END, 0); break;
+		default:
+			if (code >= K_1 && code <= K_9)
+				wlhelp_nav(&a->help, &hc, WLHELP_PAGE, (int)(code - K_1));
+			break;
+		}
+		return;
+	}
+	if (a->prompt == P_PAUSE && code == K_F1) {                  /* the pages from the pause card, too */
+		a->prompt = P_HELP;
+		a->pc_hover = a->pc_down = -1;
+		wlhelp_open(&a->help);
+		return;
+	}
 	if (a->prompt != P_NONE) {
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
@@ -2413,6 +2754,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	}
 	if (code == K_F1) {
 		pause_game(a, P_HELP);
+		wlhelp_open(&a->help);
 		return;
 	}
 	if (code == K_E) {
@@ -3024,7 +3366,72 @@ static int selftest(void)
 		R.brk[0].z = 10;
 		apply_breaks(&wa, &R);
 		CHECK(bl_get(wa.world, 10, 25, 10) == BL_AIR && wa.inv[BL_LOG] == 1, "a block the workers finished is gone and in the pockets");
-		/* the workers are saved where they stand and come back */
+		/* barracks and soldiers */
+		wa.hotbar[0] = BL_BRICK;
+		wa.slot = 0;
+		wa.inv[BL_BRICK] = 3;
+		CHECK(!craft_hand(&wa) && wa.inv[BL_BARRACKS] == 0 && wa.inv[BL_BRICK] == 3, "three bricks are not enough for a barracks");
+		wa.inv[BL_BRICK] = 9;
+		CHECK(craft_hand(&wa) && wa.inv[BL_BRICK] == 5 && wa.inv[BL_BARRACKS] == 1, "four bricks make a barracks");
+		wa.inv[BL_COBBLE] = 100;
+		wa.inv[BL_PLANKS] = 100;
+		CHECK(!train_soldier(&wa) && nsoldiers(&wa) == 0 && wa.inv[BL_COBBLE] == 100, "no soldier without a barracks");
+		bl_set(wa.world, wa.keep[0] + 4, wa.keep[1], wa.keep[2], BL_BARRACKS);
+		float where[3];
+		CHECK(barracks_find(&wa, where) == 1 && (int)where[0] == wa.keep[0] + 4 && (int)where[2] == wa.keep[2], "the barracks is found near the keep");
+		wa.inv[BL_COBBLE] = 5;
+		CHECK(!train_soldier(&wa) && nsoldiers(&wa) == 0 && wa.inv[BL_COBBLE] == 5, "five cobble are not enough");
+		wa.inv[BL_COBBLE] = 100;
+		CHECK(train_soldier(&wa) && nsoldiers(&wa) == 1 && wa.inv[BL_COBBLE] == 100 - SOLDIER_COBBLE && wa.inv[BL_PLANKS] == 100 - SOLDIER_PLANKS, "a soldier costs six cobble and four planks");
+		for (int i = 0; i < 3; i++)
+			train_soldier(&wa);
+		CHECK(nsoldiers(&wa) == 4 && !train_soldier(&wa) && nsoldiers(&wa) == 4, "four to a barracks");
+		bl_set(wa.world, wa.keep[0] + 4, wa.keep[1], wa.keep[2] + 3, BL_BARRACKS);
+		for (int i = 0; i < 6; i++)
+			train_soldier(&wa);
+		CHECK(nsoldiers(&wa) == BL_SOLDIER_MAX, "eight in all with two barracks (%d)", nsoldiers(&wa));
+		wa.survival = false;
+		bl_mobs_clear_kind(&wa.mobs, BL_MOB_SOLDIER);
+		wa.inv[BL_COBBLE] = 0;
+		CHECK(train_soldier(&wa) && wa.inv[BL_COBBLE] == 0, "creative: no cost");
+		wa.survival = true;
+		/* a night brings a wave, the day ends it */
+		wa.mobs_on = true;
+		wa.mobs.enabled = true;
+		wa.nights = 0;
+		wa.in_night = false;
+		wa.time_h = 12.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(!wa.mobs.wave_on, "no wave by day");
+		wa.time_h = 0.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.mobs.wave_on && wa.mobs.wave_size == 3 && wa.mobs.wave_cap == 3 && wa.in_night, "the first night: a wave of three");
+		bl_mobs_start_wave(&wa.mobs, 99, 99);
+		int left = wa.mobs.wave_left;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.mobs.wave_left == left, "one wave a night (the night going on starts no other)");
+		wa.time_h = 12.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(!wa.mobs.wave_on && wa.nights == 1, "the day ends it and the night is counted");
+		wa.nights = 5;
+		wa.time_h = 0.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.mobs.wave_size == 13 && wa.mobs.wave_cap == 8, "after five nights thirteen goblins, eight at a time (%d, %d)", wa.mobs.wave_size, wa.mobs.wave_cap);
+		wa.time_h = 12.0f;
+		survival_tick(&wa, 0.1f);
+		wa.nights = 30;
+		wa.time_h = 0.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.mobs.wave_size == 18 && wa.mobs.wave_cap == 10, "never more than eighteen, ten at a time");
+		wa.time_h = 12.0f;
+		survival_tick(&wa, 0.1f);
+		wa.mobs_on = false;
+		wa.mobs.enabled = false;
+		bl_mobs_clear_kind(&wa.mobs, BL_MOB_SOLDIER);
+		wa.inv[BL_COBBLE] = 100;
+		train_soldier(&wa);
+		train_soldier(&wa);
+		/* the workers and the soldiers are saved where they stand and come back */
 		conf_save(&wa);
 		static struct app wb;
 		memset(&wb, 0, sizeof wb);
@@ -3034,11 +3441,42 @@ static int selftest(void)
 		memcpy(wb.hotbar, k_default_hotbar, sizeof wb.hotbar);
 		conf_load(&wb, true);
 		CHECK(wb.workers_saved && wb.nworkers_conf == BL_WORKER_MAX, "the workers are in the file (%d)", wb.nworkers_conf);
+		CHECK(wb.soldiers_saved && wb.nsoldiers_conf == 2, "and the soldiers (%d)", wb.nsoldiers_conf);
 		bl_world_free(wa.world);
 		char cmd3[600];
 		snprintf(cmd3, sizeof cmd3, "rm -rf '%s'", wa.dir);
 		if (system(cmd3) != 0)
 			fprintf(stderr, "(could not remove %s)\n", wa.dir);
+	}
+
+	/* the help's pages: every one sets out at three widths with no line wider than its room and no stray characters */
+	{
+		static struct wlhelp hp;
+		wlhelp_init(&hp, BLOCKS_HELP, BLOCKS_HELP_N);
+		CHECK(hp.npages >= 8, "the help has pages (%d)", hp.npages);
+		static const int widths[] = { 260, 480, 700 };
+		for (int p = 0; p < hp.npages; p++)
+			for (int wi = 0; wi < 3; wi++) {
+				hp.page = p;
+				hp.lpage = -1;
+				wlhelp_layout(&hp, widths[wi]);
+				CHECK(hp.h > 0 && hp.nl > 0, "help page %d at %d px has text", p, widths[wi]);
+				bool fit = true, clean = true;
+				for (int i = 0; i < hp.nl; i++) {
+					char buf[600];
+					int n = hp.L[i].len < 599 ? hp.L[i].len : 599;
+					memcpy(buf, hp.L[i].p, (size_t)n);
+					buf[n] = 0;
+					bool one_word = strchr(buf, ' ') == NULL;
+					if (hp.L[i].kind != WLHELP_DOT && !one_word && wlhelp_text_w(buf, hp.L[i].kind) + hp.L[i].x > widths[wi] + 2)
+						fit = false;
+					for (char *q = buf; *q; q++)
+						if ((unsigned char)*q < 32)
+							clean = false;
+				}
+				CHECK(fit, "help page %d (%s) at %d px: a line is too wide", p, hp.pages[p].title, widths[wi]);
+				CHECK(clean, "help page %d at %d px: a control character in the text", p, widths[wi]);
+			}
 	}
 
 	/* the hand: slots wrap round */
@@ -3064,6 +3502,7 @@ int main(int argc, char **argv)
 	signal(SIGPIPE, SIG_IGN);
 	static struct app a;
 	a.world_size = 256;
+	wlhelp_init(&a.help, BLOCKS_HELP, BLOCKS_HELP_N);
 	a.fov = 70.0f * (float)M_PI / 180.0f;
 	a.sens = 0.0025f;
 	a.time_h = 9.0f;
@@ -3076,6 +3515,7 @@ int main(int argc, char **argv)
 	int clock_cli = -1;
 	bool no_pets = false, no_mobs = false;
 	int workers_cli = -1;                                   /* --workers N */
+	int soldiers_cli = -1;                                  /* --soldiers N */
 	int mode_cli = -1;                                      /* --survival 1, --creative 0 */
 	char give[256] = "";
 	int ngob = 0;
@@ -3142,6 +3582,12 @@ int main(int argc, char **argv)
 			mode_cli = 1;
 		} else if (!strcmp(argv[i], "--creative")) {
 			mode_cli = 0;
+		} else if (!strcmp(argv[i], "--soldiers") && i + 1 < argc) {
+			soldiers_cli = atoi(argv[++i]);
+			if (soldiers_cli < 0 || soldiers_cli > BL_SOLDIER_MAX) {
+				fprintf(stderr, "mellagui-blocks: --soldiers wants 0 to %d\n", BL_SOLDIER_MAX);
+				return 2;
+			}
 		} else if (!strcmp(argv[i], "--workers") && i + 1 < argc) {
 			workers_cli = atoi(argv[++i]);
 			if (workers_cli < 0 || workers_cli > BL_WORKER_MAX) {
@@ -3183,7 +3629,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -3246,12 +3692,22 @@ int main(int argc, char **argv)
 	if (from_file) {
 		ensure_keep(&a, a.pl.x, a.pl.z);
 		workers_restore(&a);
+		soldiers_restore(&a);
 	} else {
 		survival_setup(&a, a.pl.x, a.pl.z);
 	}
 	if (workers_cli >= 0) {                                 /* --workers N: exactly that many, whatever the world had */
 		bl_mobs_clear_kind(&a.mobs, BL_MOB_WORKER);
 		workers_start(&a, workers_cli);
+	}
+	if (soldiers_cli >= 0) {                                /* --soldiers N: that many near the keep (no barracks needed: for the tests) */
+		bl_mobs_clear_kind(&a.mobs, BL_MOB_SOLDIER);
+		for (int i = 0; i < soldiers_cli; i++) {
+			float cx, cz, sp[3];
+			worker_home(&a, &cx, &cz);
+			if (worker_spot(&a, cx, cz, 3.0f, sp))
+				bl_mobs_add(&a.mobs, a.world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]);
+		}
 	}
 	for (char *tok = strtok(give, ","); tok; tok = strtok(NULL, ",")) {
 		char *eq = strchr(tok, '=');

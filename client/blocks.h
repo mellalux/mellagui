@@ -36,6 +36,7 @@ enum bl_block {
 	BL_LAMP,                /* a block that shines (light 15) */
 	BL_FLOW1, BL_FLOW2, BL_FLOW3, BL_FLOW4, BL_FLOW5, BL_FLOW6, BL_FLOW7,   /* water that flows: how far it has come from a source (1 = just left it, 7 = the last cell) */
 	BL_KEEP,                /* the keep: a tower of three of them (made by the game, never put by hand, never broken by the player): what the goblins attack */
+	BL_BARRACKS,            /* a block of brick and timber with a banner: soldiers are trained where one stands (the game counts them) */
 	BL_COUNT
 };
 

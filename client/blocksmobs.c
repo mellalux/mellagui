@@ -1,4 +1,4 @@
-/* blocksmobs.c - goblins and workers in a block world. See blocksmobs.h. */
+/* blocksmobs.c - goblins, workers and soldiers in a block world. See blocksmobs.h. */
 #include "blocksmobs.h"
 #include "blocksview.h"
 
@@ -20,6 +20,9 @@
 #define SUN_BURN 2.0f                   /* hit points a second in the sun */
 #define GOBLIN_SCALE 1.2f               /* the boxes of k_goblin are 1.42 m tall; the goblin is that times this */
 #define WORKER_SCALE 1.1f
+#define SOLDIER_SCALE 1.15f
+#define WAVE_MIN 20.0f                  /* a wave's goblins come out of the ground this far from the keep, at least ... */
+#define WAVE_MAX 32.0f                  /* ... and at most */
 #define WORKER_SEE 10.0f                /* how far a goblin sees a worker */
 #define GATHER_FACTOR 1.5f              /* a worker takes this many times the player's time */
 #define GATHER_RADIUS 6                 /* it goes on to the next block of the kind within this many blocks */
@@ -96,14 +99,36 @@ int bl_mobs_count_kind(const struct bl_mobs *m, int kind)
 	return n;
 }
 
+void bl_mobs_start_wave(struct bl_mobs *m, int n, int cap)
+{
+	m->wave_on = n > 0;
+	m->wave_left = n > 0 ? n : 0;
+	m->wave_size = m->wave_left;
+	m->wave_cap = cap < 1 ? 1 : cap > 20 ? 20 : cap;
+	m->spawn_t = 1.0f;
+}
+
+void bl_mobs_end_wave(struct bl_mobs *m)
+{
+	m->wave_on = false;
+	m->wave_left = 0;
+}
+
+int bl_mobs_wave_remaining(const struct bl_mobs *m)
+{
+	return m->wave_left + bl_mobs_count_kind(m, BL_MOB_GOBLIN);
+}
+
 /* ---- the body --------------------------------------------------------------------------------------------------------- */
 
 static bool place_mob(struct bl_mobs *M, const struct bl_world *w, int kind, float x, float y, float z)
 {
-	if ((kind != BL_MOB_GOBLIN && kind != BL_MOB_WORKER) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
+	if ((kind != BL_MOB_GOBLIN && kind != BL_MOB_WORKER && kind != BL_MOB_SOLDIER) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
 	    bl_box_hits(w, x, y, z, BL_GOBLIN_HW, bl_mob_h(kind)))
 		return false;
 	if (kind == BL_MOB_WORKER && bl_mobs_count_kind(M, BL_MOB_WORKER) >= BL_WORKER_MAX)
+		return false;
+	if (kind == BL_MOB_SOLDIER && bl_mobs_count_kind(M, BL_MOB_SOLDIER) >= BL_SOLDIER_MAX)
 		return false;
 	for (int i = 0; i < BL_MOBS_MAX; i++)
 		if (!M->mob[i].alive) {
@@ -114,7 +139,9 @@ static bool place_mob(struct bl_mobs *M, const struct bl_world *w, int kind, flo
 			b->x = x;
 			b->y = y;
 			b->z = z;
-			b->hp = kind == BL_MOB_WORKER ? BL_WORKER_HP : BL_GOBLIN_HP;
+			b->hp = kind == BL_MOB_WORKER ? BL_WORKER_HP : kind == BL_MOB_SOLDIER ? BL_SOLDIER_HP : BL_GOBLIN_HP;
+			b->tx = x;                                  /* (a soldier's post is where it stands) */
+			b->tz = z;
 			b->rng = M->rng ^ (uint32_t)(i * 7919 + 13);
 			rf(&M->rng);
 			b->yaw = rf(&b->rng) * 6.2831853f;
@@ -159,6 +186,24 @@ static void try_spawn(struct bl_mobs *M, const struct bl_world *w, const float p
 			continue;
 		if (place_mob(M, w, BL_MOB_GOBLIN, (float)x + 0.5f, y, (float)z + 0.5f)) {
 			M->spawned++;
+			R->born++;
+			return;
+		}
+	}
+}
+
+/* a goblin of a wave: out of the ground 20 to 32 blocks from the keep, in the open, anywhere round it */
+static void try_spawn_wave(struct bl_mobs *M, const struct bl_world *w, struct bl_mobs_result *R)
+{
+	for (int tries = 0; tries < 16; tries++) {
+		float a = rf(&M->rng) * 6.2831853f, d = WAVE_MIN + rf(&M->rng) * (WAVE_MAX - WAVE_MIN);
+		int x = (int)floorf(M->keep[0] + sinf(a) * d), z = (int)floorf(M->keep[2] + cosf(a) * d);
+		float y;
+		if (!surface_at(w, x, z, &y) || fabsf(y - M->keep[1]) > 14.0f || bl_water(bl_get(w, x, (int)y, z)))
+			continue;
+		if (place_mob(M, w, BL_MOB_GOBLIN, (float)x + 0.5f, y, (float)z + 0.5f)) {
+			M->spawned++;
+			M->wave_left--;
 			R->born++;
 			return;
 		}
@@ -241,9 +286,15 @@ bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, in
 
 void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z)
 {
-	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER)
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || !bl_mob_is_unit(m->mob[i].kind))
 		return;
 	struct bl_mob *b = &m->mob[i];
+	if (b->kind == BL_MOB_SOLDIER) {                    /* a soldier's post */
+		b->tx = x;
+		b->tz = z;
+		b->stuck = 0.0f;
+		return;
+	}
 	b->order = BL_ORDER_MOVE;
 	b->best_d = 1e9f;
 	b->tx = x;
@@ -254,10 +305,14 @@ void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z)
 
 void bl_mobs_order_stop(struct bl_mobs *m, int i)
 {
-	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER)
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || !bl_mob_is_unit(m->mob[i].kind))
 		return;
 	m->mob[i].order = BL_ORDER_IDLE;
 	m->mob[i].work = 0.0f;
+	if (m->mob[i].kind == BL_MOB_SOLDIER) {             /* it stands where it is */
+		m->mob[i].tx = m->mob[i].x;
+		m->mob[i].tz = m->mob[i].z;
+	}
 }
 
 /* the nearest block of the kind the worker was on within GATHER_RADIUS of it that it can reach; a log is only taken at the foot of its tree */
@@ -354,6 +409,54 @@ static float worker_think(struct bl_mob *b, const struct bl_world *w, struct bl_
 
 /* ---- one step --------------------------------------------------------------------------------------------------------- */
 
+/* a soldier: it goes after the nearest goblin that is near it and near its post, hits it when it is there, and otherwise goes back to its post and stands */
+static float soldier_think(struct bl_mobs *M, struct bl_mob *b, struct bl_mobs_result *R, float *want)
+{
+	int gi = -1;
+	float gd = 1e9f, gdx = 0.0f, gdz = 0.0f;
+	for (int k = 0; k < BL_MOBS_MAX; k++) {
+		const struct bl_mob *o = &M->mob[k];
+		if (!o->alive || o->kind != BL_MOB_GOBLIN || fabsf(o->y - b->y) > 6.0f)
+			continue;
+		float ex = o->x - b->x, ez = o->z - b->z, e = hypotf(ex, ez);
+		if (e < BL_SOLDIER_SEE && e < gd && hypotf(o->x - b->tx, o->z - b->tz) < BL_SOLDIER_LEASH) {
+			gd = e;
+			gi = k;
+			gdx = ex;
+			gdz = ez;
+		}
+	}
+	if (gi >= 0) {
+		*want = atan2f(gdx, gdz);
+		if (gd < BL_SOLDIER_REACH && b->attack_cd <= 0.0f) {
+			struct bl_mob *o = &M->mob[gi];
+			b->attack_cd = BL_SOLDIER_COOLDOWN;
+			b->swing = 1.0f;
+			o->hp -= BL_SOLDIER_DAMAGE;
+			o->hurt = 0.35f;
+			float inv = gd > 0.01f ? 1.0f / gd : 0.0f;
+			o->kx += gdx * inv * 6.0f;
+			o->kz += gdz * inv * 6.0f;
+			if (o->ground) {
+				o->vy = 4.2f;
+				o->ground = false;
+			}
+			if (o->hp <= 0.0f) {
+				o->alive = false;
+				M->kills++;
+				R->slain++;
+			}
+		}
+		return clampf(3.0f * (gd - 0.9f), 0.0f, BL_SOLDIER_SPEED);
+	}
+	float dx = b->tx - b->x, dz = b->tz - b->z, d = hypotf(dx, dz);
+	if (d > 1.0f) {
+		*want = atan2f(dx, dz);
+		return clampf(3.0f * (d - 0.5f), 0.0f, BL_SOLDIER_SPEED);
+	}
+	return 0.0f;
+}
+
 static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, const float pl[3], bool pl_alive, float time_h, struct bl_mobs_result *R)
 {
 	const float dt = STEP;
@@ -421,7 +524,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		if (!near_pl)                                                           /* a worker in sight: the nearest */
 			for (int k = 0; k < BL_MOBS_MAX; k++) {
 				const struct bl_mob *o = &M->mob[k];
-				if (!o->alive || o->kind != BL_MOB_WORKER || fabsf(o->y - b->y) > 6.0f)
+				if (!o->alive || !bl_mob_is_unit(o->kind) || fabsf(o->y - b->y) > 6.0f)
 					continue;
 				float ex = o->x - b->x, ez = o->z - b->z, e = hypotf(ex, ez);
 				if (e < WORKER_SEE && e < wd) {
@@ -453,6 +556,8 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 			want = b->wyaw;
 			vmax = b->widle ? 0.0f : WANDER_SPEED;
 		}
+	} else if (b->kind == BL_MOB_SOLDIER) {
+		vmax = soldier_think(M, b, R, &want);
 	} else {
 		vmax = worker_think(b, w, R, &want);
 	}
@@ -538,7 +643,10 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		o->hurt = 0.35f;
 		if (o->hp <= 0.0f) {
 			o->alive = false;
-			R->workers_lost++;
+			if (o->kind == BL_MOB_SOLDIER)
+				R->soldiers_lost++;
+			else
+				R->workers_lost++;
 		}
 	}
 	/* a blow at the keep */
@@ -574,6 +682,11 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 					if (!b->alive || b->kind != BL_MOB_GOBLIN)
 						continue;
 					float dd = hypotf(pl[0] - b->x, pl[2] - b->z);
+					if (M->keep_on) {                                   /* (the wave's goblins are far from the player, near the keep) */
+						float dkk = hypotf(M->keep[0] - b->x, M->keep[2] - b->z);
+						if (dkk < dd)
+							dd = dkk;
+					}
 					if (!M->enabled || dd > DESPAWN_FAR || (bl_daylight(time_h) > 0.55f && dd > 16.0f && rf(&M->rng) < 0.5f * STEP))
 						mob_kill(b);
 				}
@@ -596,8 +709,13 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 			if (M->spawn_t <= 0.0f) {
 				M->spawn_t = 2.5f + 2.0f * rf(&M->rng);
 				int cap = M->cap < BL_MOBS_MAX ? M->cap : BL_MOBS_MAX;
-				if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < cap)
+				if (M->enabled && M->wave_on && M->keep_on) {              /* a wave: round the keep, whatever the player does */
+					M->spawn_t = 1.0f + 1.5f * rf(&M->rng);
+					if (M->wave_left > 0 && bl_daylight(time_h) < 0.55f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < M->wave_cap)
+						try_spawn_wave(M, w, &R);
+				} else if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < cap) {
 					try_spawn(M, w, pl, &R);
+				}
 			}
 		}
 	}
@@ -633,7 +751,7 @@ static float ray_box(const float o[3], const float d[3], const float lo[3], cons
 	return t0;
 }
 
-static int pick_kind(const struct bl_mobs *m, int kind, const float o[3], const float dir[3], float reach, float *t)
+static int pick_kind(const struct bl_mobs *m, int kind /* -1: the player's own (workers and soldiers) */, const float o[3], const float dir[3], float reach, float *t)
 {
 	float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
 	if (!(len > 1e-9f))
@@ -643,9 +761,9 @@ static int pick_kind(const struct bl_mobs *m, int kind, const float o[3], const 
 	float bt = reach;
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		const struct bl_mob *b = &m->mob[i];
-		if (!b->alive || b->kind != kind)
+		if (!b->alive || (kind < 0 ? !bl_mob_is_unit(b->kind) : b->kind != kind))
 			continue;
-		float h = bl_mob_h(kind);
+		float h = bl_mob_h(b->kind);
 		float lo[3] = { b->x - BL_GOBLIN_HW - 0.05f, b->y, b->z - BL_GOBLIN_HW - 0.05f }, hi[3] = { b->x + BL_GOBLIN_HW + 0.05f, b->y + h + 0.05f, b->z + BL_GOBLIN_HW + 0.05f };
 		float tt = ray_box(o, d, lo, hi, bt);
 		if (tt >= 0.0f && tt <= bt) {
@@ -665,7 +783,7 @@ int bl_mobs_pick(const struct bl_mobs *m, const float o[3], const float dir[3], 
 
 int bl_units_pick(const struct bl_mobs *m, const float o[3], const float dir[3], float reach, float *t)
 {
-	return pick_kind(m, BL_MOB_WORKER, o, dir, reach, t);
+	return pick_kind(m, -1, o, dir, reach, t);
 }
 
 bool bl_mobs_hurt(struct bl_mobs *m, int i, float damage, float dx, float dz)
@@ -744,6 +862,22 @@ static const struct bbox k_worker[] = {
 	{ 0.05f, 0.11f, 1.20f, 1.26f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
 };
 
+/* a soldier: a red tunic, steel arms and legs, a helmet with a red plume, a sword in the right hand */
+static const struct bbox k_soldier[] = {
+	{ -0.20f, -0.02f, 0.00f, 0.55f, -0.09f, 0.09f, 0x6a7078u, LIMB_LEG_L, false },
+	{ 0.02f, 0.20f, 0.00f, 0.55f, -0.09f, 0.09f, 0x6a7078u, LIMB_LEG_R, false },
+	{ -0.24f, 0.24f, 0.55f, 1.02f, -0.13f, 0.13f, 0xb02a2au, LIMB_NONE, false },
+	{ -0.24f, 0.24f, 0.55f, 0.62f, -0.135f, 0.135f, 0x4a3a28u, LIMB_NONE, false },
+	{ -0.38f, -0.25f, 0.60f, 1.00f, -0.07f, 0.07f, 0x9aa2aau, LIMB_ARM_L, false },
+	{ 0.25f, 0.38f, 0.60f, 1.00f, -0.07f, 0.07f, 0x9aa2aau, LIMB_ARM_R, false },
+	{ 0.30f, 0.34f, 0.95f, 1.50f, 0.00f, 0.05f, 0xdde2e8u, LIMB_ARM_R, false },
+	{ -0.18f, 0.18f, 1.02f, 1.38f, -0.17f, 0.17f, 0xd9a066u, LIMB_NONE, false },
+	{ -0.21f, 0.21f, 1.32f, 1.47f, -0.20f, 0.20f, 0x8a929au, LIMB_NONE, false },
+	{ -0.03f, 0.03f, 1.47f, 1.60f, -0.14f, 0.12f, 0xc02020u, LIMB_NONE, false },
+	{ -0.11f, -0.05f, 1.20f, 1.26f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
+	{ 0.05f, 0.11f, 1.20f, 1.26f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
+};
+
 void bl_mobs_light(struct bl_mobs *m, const struct bl_world *w, float time_h)
 {
 	float day = bl_daylight(time_h);
@@ -785,10 +919,10 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 		const struct bl_mob *b = &m->mob[i];
 		if (!b->alive)
 			continue;
-		const bool worker = b->kind == BL_MOB_WORKER;
-		const struct bbox *tab = worker ? k_worker : k_goblin;
-		const int ntab = worker ? (int)(sizeof k_worker / sizeof k_worker[0]) : (int)(sizeof k_goblin / sizeof k_goblin[0]);
-		const float scale = worker ? WORKER_SCALE : GOBLIN_SCALE;
+		const bool worker = b->kind == BL_MOB_WORKER, soldier = b->kind == BL_MOB_SOLDIER;
+		const struct bbox *tab = soldier ? k_soldier : worker ? k_worker : k_goblin;
+		const int ntab = soldier ? (int)(sizeof k_soldier / sizeof k_soldier[0]) : worker ? (int)(sizeof k_worker / sizeof k_worker[0]) : (int)(sizeof k_goblin / sizeof k_goblin[0]);
+		const float scale = soldier ? SOLDIER_SCALE : worker ? WORKER_SCALE : GOBLIN_SCALE;
 		/* the box round the whole creature (arms, ears and a swinging leg reach 0.55 sideways and 0.6 forward) */
 		float lo[3] = { b->x - 0.66f, b->y, b->z - 0.66f }, hi[3] = { b->x + 0.66f, b->y + bl_mob_h(b->kind) + 0.06f, b->z + 0.66f };
 		float tb = ray_box(o, d, lo, hi, best);
